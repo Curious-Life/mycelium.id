@@ -1,0 +1,75 @@
+name = "mya"                               # Worker name (matches workers.dev subdomain)
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+# Custom domain (optional) — Worker accessed via workers.dev URL
+# To add a custom domain: wrangler domains attach <domain>
+
+# Workers Unbound - allows up to 15 min wall-clock time for I/O operations
+# (Claude API, Supabase, audio transcription, etc.)
+# CPU time still limited to 30s, but most time is spent waiting on I/O
+# Note: Requires a paid Workers plan for extended limits
+[limits]
+cpu_ms = 30000
+
+# Workers AI binding
+[ai]
+binding = "AI"
+
+# R2 bucket for attachments
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "mya-attachments"
+
+# KV namespace for deduplication and caching
+[[kv_namespaces]]
+binding = "KV"
+id = "72ddacd2a6da42c79732cd6a6345a166"
+
+# Queue for async Telegram message processing
+# Producer binding - allows webhook to send messages to queue
+[[queues.producers]]
+binding = "TELEGRAM_QUEUE"
+queue = "mya-telegram-messages"
+
+# Consumer binding - processes messages from queue (15-min timeout)
+[[queues.consumers]]
+queue = "mya-telegram-messages"
+max_batch_size = 1
+max_batch_timeout = 0
+max_retries = 2
+dead_letter_queue = "mya-telegram-dlq"
+
+# Scheduled triggers DISABLED — all scheduling now handled by mycelium's
+# lib/scheduler.js (PM2 process on VPS). The Worker cron was causing
+# duplicate evening messages because both systems fired independently.
+# [triggers]
+# crons = ["0 * * * *"]
+
+# D1 database (Supabase replacement)
+[[d1_databases]]
+binding = "DB"
+database_name = "mycelium-db"              # Run: npx wrangler d1 create mycelium-db
+database_id = "9eda7d7e-9161-4d3b-bfb7-b10f1965d80a"
+
+# Vectorize indexes (semantic search + clustering)
+[[vectorize]]
+binding = "VECTORS_1024"
+index_name = "mycelium-search"  # BGE-M3 1024D — semantic search
+
+[[vectorize]]
+binding = "VECTORS_256"
+index_name = "mycelium-cluster" # Nomic 256D — clustering
+
+# Environment variables (secrets set via wrangler secret put)
+[vars]
+ENVIRONMENT = "production"
+OWNER_NAME = "Martin"
+
+# Dev environment
+[env.dev]
+name = "mycelium-dev"
+[env.dev.vars]
+ENVIRONMENT = "development"

@@ -1,0 +1,66 @@
+/**
+ * Client-side API module — same-origin requests with HttpOnly cookie auth.
+ * The portal is served by the agent-server, so all API calls are same-origin.
+ */
+
+/**
+ * Make an authenticated request to the agent-server.
+ * The session cookie is sent automatically (same origin, credentials: 'same-origin').
+ * On 401, redirects to /login.
+ */
+export async function api(path: string, options: RequestInit = {}): Promise<Response> {
+	const headers = new Headers(options.headers);
+
+	// Don't set Content-Type for FormData (browser sets boundary)
+	if (!(options.body instanceof FormData) && !headers.has('Content-Type')) {
+		headers.set('Content-Type', 'application/json');
+	}
+
+	// Send browser timezone so the server can auto-detect location
+	try { headers.set('X-Timezone', Intl.DateTimeFormat().resolvedOptions().timeZone); } catch { /* */ }
+
+	const res = await fetch(path, { ...options, headers, credentials: 'same-origin' });
+
+	if (res.status === 401) {
+		window.location.href = '/login';
+		throw new Error('Session expired');
+	}
+
+	return res;
+}
+
+// --- Typed helpers ---
+
+export async function apiGet<T>(path: string, params?: Record<string, string>): Promise<T> {
+	const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+	const res = await api(`${path}${qs}`);
+	if (!res.ok) throw new Error(`GET ${path} failed (${res.status})`);
+	return res.json();
+}
+
+export async function apiPost<T>(path: string, body: unknown): Promise<T> {
+	const res = await api(path, {
+		method: 'POST',
+		body: JSON.stringify(body),
+	});
+	if (!res.ok) throw new Error(`POST ${path} failed (${res.status})`);
+	return res.json();
+}
+
+export async function apiPut<T>(path: string, body: unknown): Promise<T> {
+	const res = await api(path, {
+		method: 'PUT',
+		body: JSON.stringify(body),
+	});
+	if (!res.ok) throw new Error(`PUT ${path} failed (${res.status})`);
+	return res.json();
+}
+
+export async function apiPostForm<T>(path: string, formData: FormData): Promise<T> {
+	const res = await api(path, {
+		method: 'POST',
+		body: formData,
+	});
+	if (!res.ok) throw new Error(`POST ${path} failed (${res.status})`);
+	return res.json();
+}

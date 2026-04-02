@@ -1,0 +1,43 @@
+name: Security Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  claude-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Security review only. Check this PR for:
+            1. Command injection, code injection, unsafe eval/exec
+            2. SQL injection, missing parameterization in D1 queries
+            3. Auth bypass, missing authentication checks
+            4. Exposed secrets, API keys, tokens in code
+            5. XSS, SSRF, path traversal vulnerabilities
+            6. Unsafe deserialization, prototype pollution
+            Flag only confirmed security issues. Inline comments with severity.
+          claude_args: "--max-turns 3 --model claude-sonnet-4-5-20250929"
+
+  semgrep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: >-
+            p/javascript
+            p/typescript
+            p/owasp-top-ten
+            p/security-audit

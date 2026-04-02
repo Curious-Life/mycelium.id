@@ -1,0 +1,69 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+
+# User data exports (never commit)
+*LinkedInDataExport*
+*linkedin*export*
+*.zip.zip
+
+# Agent data directories (created at runtime)
+# These live at ~/agents/ by default, not in the repo
+
+# Google OAuth tokens and poller state (created by scripts/google-auth-setup.js)
+.google-tokens/
+.google-state/
+
+# WhatsApp auth credentials (created on first QR scan)
+.whatsapp-auth/
+
+# Portal (SvelteKit)
+portal/build/
+portal/.svelte-kit/
+portal/node_modules/
+
+# PM2
+.pm2/
+
+# Clustering cache (Nomic embeddings .npy)
+scripts/cache/
+
+# Cloudflare Wrangler cache
+.wrangler/
+
+# Worker (Cloudflare)
+worker/node_modules/
+worker/.wrangler/
+worker/src/*.js
+
+# Exports / personal data
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!worker/package.json
+!worker/package-lock.json
+!worker/tsconfig.json
+
+# Setup guide (personal, not for repo)
+START-GUIDE.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# macOS duplicates (Finder "Keep Both" creates " 2" suffix copies)
+*\ 2.*
+*\ 2/
+__pycache__/
+
+# Sites (local dev)
+sites/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

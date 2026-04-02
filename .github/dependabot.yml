@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    groups:
+      # Group minor/patch updates into a single PR to reduce noise
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    # Always get the latest for these critical packages
+    allow:
+      - dependency-name: "@anthropic-ai/sdk"
+      - dependency-name: "discord.js"
+      - dependency-name: "express"
+      - dependency-name: "cors"
+      - dependency-name: "dotenv"
+      - dependency-name: "http-proxy-middleware"
