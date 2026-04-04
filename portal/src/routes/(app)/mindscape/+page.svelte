@@ -1,8 +1,14 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { mindscapeState } from '$lib/stores/mindscape';
+	import { mindscapeState, timelineHealth } from '$lib/stores/mindscape';
 	import MindscapeDetail from '$lib/components/mindscape/MindscapeDetail.svelte';
 	import Sparkline from '$lib/components/mindscape/Sparkline.svelte';
+	import { apiGet } from '$lib/api';
+
+	// Health data for body state bar
+	interface HealthDay { date: string; sleep_duration_min: number|null; sleep_efficiency: number|null; hrv_avg: number|null; resting_hr: number|null; steps: number|null; }
+	interface HealthSummary { today: HealthDay|null; averages: Record<string, number|null>; trends: Record<string, string>; days: HealthDay[]; }
+	let healthData = $state<HealthSummary|null>(null);
 
 	// Lazy load 3D component (THREE.js is heavy)
 	let Mindscape3D: any = $state(null);
@@ -19,11 +25,17 @@
 	$effect(() => {
 		if (browser) {
 			mindscapeState.load();
+			// Load health summary
+			apiGet<HealthSummary>('/portal/health/summary', { days: '7' })
+				.then(d => { healthData = d; })
+				.catch(() => {});
 		}
 	});
 
+	const th = $derived($timelineHealth);
+
 	// Growth events
-	let viewMode: '3d' | 'growth' | 'territories' = $state('territories');
+	let viewMode: '3d' | 'growth' | 'territories' = $state('3d');
 	let growthEvents: any[] = $state([]);
 	let growthLoading = $state(false);
 
@@ -237,6 +249,88 @@
 
 	<!-- Main content area -->
 	<main class="view-panel">
+		<!-- Body State bar — shows timeline health when scrubbing, today otherwise -->
+		{#if th.active || healthData?.today}
+			<div class="health-bar">
+				{#if th.active}
+					<!-- Timeline period averages -->
+					{#if th.sleep != null}
+						{@const h = Math.floor(th.sleep / 60)}
+						{@const m = th.sleep % 60}
+						<span class="hb-metric" title="Sleep avg">
+							<span class="hb-icon" style="color: #818cf8;">&#9790;</span>
+							{h}h{m.toString().padStart(2,'0')}m
+						</span>
+					{/if}
+					{#if th.hrv != null}
+						<span class="hb-metric" title="HRV avg">
+							<span class="hb-icon" style="color: #4ade80;">&#9829;</span>
+							{th.hrv}ms
+						</span>
+					{/if}
+					{#if th.rhr != null}
+						<span class="hb-metric" title="RHR avg">
+							<span class="hb-icon" style="color: #f87171;">&#9829;</span>
+							{th.rhr}bpm
+						</span>
+					{/if}
+					{#if th.steps != null}
+						<span class="hb-metric" title="Steps avg">
+							<span class="hb-icon" style="color: #fb923c;">&#x1F6B6;</span>
+							{th.steps.toLocaleString()}
+						</span>
+					{/if}
+					{#if th.mindful != null}
+						<span class="hb-metric" title="Mindfulness avg">
+							<span class="hb-icon" style="color: #a78bfa;">&#x1F9D8;</span>
+							{th.mindful}m
+						</span>
+					{/if}
+				{:else if healthData?.today}
+					{@const t = healthData.today}
+					{#if t.sleep_duration_min != null}
+						{@const h = Math.floor(t.sleep_duration_min / 60)}
+						{@const m = Math.round(t.sleep_duration_min % 60)}
+						<span class="hb-metric" title="Sleep">
+							<span class="hb-icon" style="color: #818cf8;">&#9790;</span>
+							{h}h{m.toString().padStart(2,'0')}m
+							{#if t.sleep_efficiency != null}<span class="hb-sub">{Math.round(t.sleep_efficiency * 100)}%</span>{/if}
+						</span>
+					{/if}
+					{#if t.hrv_avg != null}
+						<span class="hb-metric" title="HRV">
+							<span class="hb-icon" style="color: #4ade80;">&#9829;</span>
+							{Math.round(t.hrv_avg)}ms
+						</span>
+					{/if}
+					{#if t.resting_hr != null}
+						<span class="hb-metric" title="Resting HR">
+							<span class="hb-icon" style="color: #f87171;">&#9829;</span>
+							{Math.round(t.resting_hr)}bpm
+						</span>
+					{/if}
+					{#if t.steps != null}
+						<span class="hb-metric" title="Steps">
+							<span class="hb-icon" style="color: #fb923c;">&#x1F6B6;</span>
+							{t.steps.toLocaleString()}
+						</span>
+					{/if}
+					{#if healthData.trends}
+						{#each Object.entries(healthData.trends) as [k, v]}
+							{#if v && v !== 'insufficient'}
+								{@const label = k === 'sleep_duration_min' ? 'Sleep' : k === 'hrv_avg' ? 'HRV' : k === 'resting_hr' ? 'RHR' : k === 'steps' ? 'Steps' : null}
+								{#if label}
+									{@const arrow = v === 'improving' ? '\u2197' : v === 'declining' ? '\u2198' : '\u2192'}
+									{@const clr = v === 'improving' ? '#4ade80' : v === 'declining' ? '#f87171' : 'var(--color-text-tertiary)'}
+									<span class="hb-trend" style="color: {clr}">{arrow}{label}</span>
+								{/if}
+							{/if}
+						{/each}
+					{/if}
+				{/if}
+			</div>
+		{/if}
+
 		<!-- View toggle -->
 		<div class="view-toggle">
 			<button class:active={viewMode === 'territories'} onclick={() => viewMode = 'territories'}>Territories</button>
@@ -466,6 +560,36 @@
 </div>
 
 <style>
+	.health-bar {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 12px;
+		padding: 6px 12px;
+		min-height: 30px;
+		background: var(--color-surface);
+		border-bottom: 1px solid var(--color-border);
+		font-size: 0.7rem;
+		color: var(--color-text-secondary);
+		flex-wrap: nowrap;
+		overflow: hidden;
+	}
+	.hb-metric {
+		display: flex;
+		align-items: center;
+		gap: 3px;
+		white-space: nowrap;
+	}
+	.hb-icon { font-size: 0.8rem; }
+	.hb-sub { font-size: 0.6rem; color: var(--color-text-tertiary); }
+	.hb-trend {
+		font-size: 0.6rem;
+		font-weight: 500;
+		padding: 1px 5px;
+		border-radius: 4px;
+		background: rgba(255,255,255,0.05);
+	}
+
 	.mindscape-layout {
 		display: flex;
 		width: 100%;
@@ -708,6 +832,7 @@
 	.realm-card:hover {
 		border-color: var(--color-accent);
 		transform: translateY(-1px);
+		box-shadow: 0 0 20px rgba(229, 184, 76, 0.1), 0 4px 12px rgba(0, 0, 0, 0.3);
 	}
 	.realm-header {
 		display: flex;
@@ -793,12 +918,15 @@
 	}
 	.territory-card:hover {
 		border-color: var(--color-border);
+		box-shadow: 0 0 16px rgba(229, 184, 76, 0.08), 0 2px 8px rgba(0, 0, 0, 0.2);
 	}
 	.territory-card.selected {
 		border-color: var(--color-accent);
+		box-shadow: 0 0 24px rgba(229, 184, 76, 0.15), 0 4px 12px rgba(0, 0, 0, 0.3);
 	}
 	.territory-card.active-today {
 		border-left: 3px solid var(--color-accent);
+		box-shadow: inset 2px 0 0 var(--color-accent), 0 0 12px rgba(229, 184, 76, 0.05);
 	}
 	.terr-header {
 		display: flex;
@@ -822,22 +950,28 @@
 		border-radius: 4px;
 		text-transform: uppercase;
 		letter-spacing: 0.5px;
+		border: 1px solid transparent;
 	}
 	.badge.surge {
-		background: rgba(229, 184, 76, 0.15);
+		background: rgba(229, 184, 76, 0.2);
 		color: var(--color-accent);
+		border-color: rgba(229, 184, 76, 0.3);
+		box-shadow: 0 0 8px rgba(229, 184, 76, 0.1);
 	}
 	.badge.quiet {
 		background: rgba(245, 158, 11, 0.15);
 		color: var(--color-warning, #f59e0b);
+		border-color: rgba(245, 158, 11, 0.25);
 	}
 	.badge.active {
 		background: rgba(16, 185, 129, 0.15);
 		color: var(--color-success, #10b981);
+		border-color: rgba(16, 185, 129, 0.25);
 	}
 	.badge.growing {
 		background: rgba(59, 130, 246, 0.15);
 		color: var(--color-info, #3b82f6);
+		border-color: rgba(59, 130, 246, 0.25);
 	}
 	.terr-essence {
 		font-size: 13px;

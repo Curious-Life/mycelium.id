@@ -1,14 +1,52 @@
 import { writable, derived } from 'svelte/store';
 import { browser } from '$app/environment';
 
-// 24-color palette for clusters (matching MYA-0.2)
-export const CLUSTER_COLORS = [
-	'#FF3B3B', '#00C49A', '#3B82F6', '#FACC15', '#E879F9', '#22D3EE',
-	'#FB923C', '#A855F7', '#4ADE80', '#F472B6', '#0EA5E9', '#F59E0B',
-	'#8B5CF6', '#10B981', '#EF4444', '#14B8A6', '#EC4899', '#84CC16',
-	'#6366F1', '#F97316', '#06B6D4', '#D946EF', '#16A34A', '#EAB308',
+// Realm-level palette — muted nebula regions, harmonious like a single gas cloud
+// Soft enough to feel natural at overview, distinct enough to tell apart
+export const REALM_COLORS = [
+	'#4A7A8F', // deep teal haze
+	'#8F6A7A', // dusty mauve
+	'#7A8A5A', // sage mist
+	'#6A6A9A', // twilight blue
+	'#9A7A5A', // amber dust
+	'#5A8A7A', // ocean deep
+	'#8A6A8A', // heather
+	'#7A8A9A', // slate fog
+	'#8A7A6A', // sandstone
+	'#6A8A6A', // moss cloud
+	'#7A6A8A', // dusk violet
+	'#8A8A6A', // pale olive
 ];
-export const NOISE_COLOR = '#4A4A4A';
+
+// Hubble-inspired palette — narrowband emission + deep field colors
+// Used at territory level (drilled into a realm) — richer, more distinct
+export const CLUSTER_COLORS = [
+	'#4DA6C9', // OIII teal — Eagle Nebula pillars
+	'#C76B85', // Hα rose — Carina emission
+	'#D9AD4D', // SII amber — Pillars of Creation gold
+	'#7359B8', // deep violet — Orion reflection nebula
+	'#3FB89A', // seafoam — Veil Nebula filaments
+	'#B84D62', // crimson — Rosette Nebula core
+	'#8DC0D9', // pale cyan — Ring Nebula halo
+	'#CC8C40', // warm gold — Lagoon Nebula
+	'#6180C7', // steel blue — Witch Head Nebula
+	'#A659A0', // mauve — Tarantula Nebula
+	'#5BA8A0', // jade — Crab Nebula filaments
+	'#D4856A', // salmon — Flame Nebula
+	'#8B7EC8', // lavender — Horsehead reflection
+	'#4EB87D', // emerald — Bubble Nebula
+	'#C9986B', // copper — Omega Nebula
+	'#6B9ED4', // cornflower — Pleiades reflection
+	'#BF6B8A', // dusty rose — Trifid emission
+	'#7DB88C', // sage — Dumbbell Nebula
+	'#9B85B8', // wisteria — Helix Nebula
+	'#D4A85B', // antique gold — Sombrero halo
+	'#5B8FB8', // cadet blue — Whirlpool arms
+	'#B87070', // terracotta — Ant Nebula
+	'#6BC4B0', // aqua — Butterfly Nebula
+	'#C4A06B', // chamois — Owl Nebula glow
+];
+export const NOISE_COLOR = '#2A2A35';
 
 // Navigation level for drilldown
 export type NavigationLevel = 'realms' | 'themes' | 'territories';
@@ -222,15 +260,40 @@ const defaultState: FullMindscapeState = {
 	// Social layer
 	contacts: [],
 	tiers: [],
-	visibleTiers: new Set(['inner', 'engaged']),
+	visibleTiers: new Set(['inner']),
 	selectedContactId: null,
 	hoveredContactId: null,
 	socialLoading: false,
 	showSocialLayer: true,
 };
 
+// Restore preferences from localStorage
+function loadPreferences(): Partial<FullMindscapeState> {
+	if (!browser) return {};
+	try {
+		const saved = localStorage.getItem('mycelium-mindscape-prefs');
+		if (!saved) return {};
+		const prefs = JSON.parse(saved);
+		return {
+			visibleTiers: new Set(prefs.visibleTiers || ['inner']),
+			showSocialLayer: prefs.showSocialLayer ?? true,
+		};
+	} catch { return {}; }
+}
+
+function savePreferences(s: FullMindscapeState) {
+	if (!browser) return;
+	try {
+		localStorage.setItem('mycelium-mindscape-prefs', JSON.stringify({
+			visibleTiers: [...s.visibleTiers],
+			showSocialLayer: s.showSocialLayer,
+		}));
+	} catch {}
+}
+
 function createMindscapeStore() {
-	const { subscribe, set, update } = writable<FullMindscapeState>(defaultState);
+	const initialState = { ...defaultState, ...loadPreferences() };
+	const { subscribe, set, update } = writable<FullMindscapeState>(initialState);
 
 	return {
 		subscribe,
@@ -365,7 +428,9 @@ function createMindscapeStore() {
 				const next = new Set(s.visibleTiers);
 				if (next.has(tier)) next.delete(tier);
 				else next.add(tier);
-				return { ...s, visibleTiers: next };
+				const newState = { ...s, visibleTiers: next };
+				savePreferences(newState);
+				return newState;
 			});
 		},
 
@@ -378,7 +443,11 @@ function createMindscapeStore() {
 		},
 
 		toggleSocialLayer() {
-			update(s => ({ ...s, showSocialLayer: !s.showSocialLayer }));
+			update(s => {
+				const newState = { ...s, showSocialLayer: !s.showSocialLayer };
+				savePreferences(newState);
+				return newState;
+			});
 		},
 	};
 }
@@ -399,6 +468,20 @@ export const selectedContact = derived(mindscapeState, s =>
 
 // Alias for MindscapeNav compatibility (MYA-0.2 uses $mindscapePoints)
 export const mindscapePoints = mindscapeState;
+
+// Timeline health — written by Mindscape3D, read by the page health bar
+export interface TimelineHealth {
+	active: boolean;
+	date: Date | null;
+	sleep: number | null;
+	hrv: number | null;
+	rhr: number | null;
+	steps: number | null;
+	mindful: number | null;
+}
+export const timelineHealth = writable<TimelineHealth>({
+	active: false, date: null, sleep: null, hrv: null, rhr: null, steps: null, mindful: null,
+});
 
 // Helper: get cluster color
 export function getClusterColor(clusterId: number | null | undefined): string {

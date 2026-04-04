@@ -6609,6 +6609,33 @@ app.get('/portal/mindscape/activations', async (req, res) => {
   }
 });
 
+// Territory co-firing connections
+app.get('/portal/mindscape/cofire', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+
+    const territoryId = parseInt(req.query.territory);
+    if (isNaN(territoryId)) return res.status(400).json({ error: 'territory param required' });
+    const scale = req.query.scale || 'daily';
+    const limit = parseInt(req.query.limit) || 10;
+
+    const connections = await db.topology.getCoFiring({
+      p_user_id: user.id,
+      p_territory_id: territoryId,
+      p_scale: scale,
+      p_min_strength: 0.05,
+      p_limit: limit,
+    });
+    res.json({ connections });
+  } catch (err) {
+    console.error('Cofire error:', err);
+    res.status(500).json({ error: 'Failed to fetch co-firing data' });
+  }
+});
+
 // Noise/unclustered point stats
 app.get('/portal/mindscape/noise-stats', async (req, res) => {
   try {
@@ -7519,12 +7546,19 @@ const PORTAL_BUILD = path.join(__dirname, 'portal', 'build');
 try {
   const stat = await fs.stat(PORTAL_BUILD);
   if (stat.isDirectory()) {
-    app.use(express.static(PORTAL_BUILD));
+    // Hashed assets are immutable (content-addressed filenames)
+    app.use('/_app/immutable', express.static(path.join(PORTAL_BUILD, '_app', 'immutable'), {
+      maxAge: '1y',
+      immutable: true,
+    }));
+    app.use(express.static(PORTAL_BUILD, { maxAge: 0 }));
     // SPA fallback — serve 200.html for non-API GET requests (client-side routing)
     // Express 5 requires named wildcard params (not bare *)
     const API_PREFIXES = ['/chat/', '/auth/', '/portal/', '/health', '/think', '/info', '/status', '/discord/', '/.well-known/', '/wake-cycles'];
     app.get('/{*path}', (req, res, next) => {
       if (API_PREFIXES.some(p => req.path.startsWith(p))) return next();
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.set('Pragma', 'no-cache');
       res.sendFile(path.join(PORTAL_BUILD, '200.html'));
     });
     console.log(`[${LOG_PREFIX} Agent] Portal: serving from ${PORTAL_BUILD}`);
