@@ -10,6 +10,8 @@
 
 The master key lives exclusively on the VPS. The Cloudflare Worker is a **pure ciphertext relay** — it stores and returns encrypted data but cannot decrypt it.
 
+> **Honest scope note:** "Swiss Vault" describes **data at rest**. The master key is on the VPS, Cloudflare's storage layers (D1, R2, Vectorize) only see ciphertext, and a Cloudflare-side breach or subpoena cannot recover plaintext. **Live portal traffic is a separate trust boundary**: customer subdomains (`handle.mycelium.id`) are proxied through Cloudflare's edge, where Cloudflare terminates TLS with their own cert and inspects HTTP requests before re-encrypting to the VPS. During an active session, Cloudflare can technically observe live messages and queries in transit. This is the same subprocessor model every Cloudflare-fronted SaaS uses. We accept this tradeoff because the alternative — DNS-only with the VPS IP exposed publicly — removes Cloudflare's edge DDoS/scanning protection from a single-tenant box. See [Live portal traffic trust boundary](#live-portal-traffic-trust-boundary) below for the full analysis.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                                                                     │
@@ -137,6 +139,76 @@ pm2 delete all && pm2 start ecosystem.config.cjs
 ```
 
 The script never puts the key in a shell variable. Verifies the key landed in tmpfs, then securely shreds the `.env` backup.
+
+---
+
+## Live portal traffic trust boundary
+
+The Swiss Vault encryption model protects **data at rest**: every value in D1, every blob in R2, every vector in Vectorize is ciphertext that Cloudflare cannot decrypt. The master key never enters Cloudflare's environment in any form. For stored data, the trust boundary is the VPS — full stop.
+
+**Live portal traffic is a different layer with a different trust model**, and we want to be explicit about it rather than wave hands.
+
+### What actually happens during a portal session
+
+Customer portals are served at `handle.mycelium.id` (e.g. `0mm.mycelium.id`). The DNS record for that subdomain is currently configured as a Cloudflare-proxied record (orange cloud). That means:
+
+```
+[Browser] ──HTTPS──► [Cloudflare edge] ──HTTPS──► [Customer VPS / Caddy] ──► [Agent on :3004]
+            ▲                  ▲                          ▲
+            │                  │                          │
+        TLS to CF          TLS terminates           TLS re-established
+        (CF cert)          at Cloudflare            (Cloudflare → VPS)
+                           edge node
+```
+
+Cloudflare's edge:
+1. Terminates the browser's TLS connection using a Cloudflare-managed certificate
+2. Decrypts the HTTP request (it has to — that's how their proxy, WAF, caching, and rate limiting work)
+3. Re-encrypts to your VPS over a separate TLS connection
+4. Streams the response back the same way
+
+During step 2, Cloudflare can technically read the plaintext HTTP request: chat messages you typed, search queries you ran, the raw body of any portal API call. They are a contractual subprocessor under their standard data processing terms — the same arrangement that covers every Cloudflare-fronted SaaS app.
+
+### Why this does not break the "Cloudflare cannot read your data" claim about stored data
+
+The claim is and remains: **stored data cannot be read by Cloudflare**.
+
+- Vault content is encrypted on the VPS *before* it ever returns from an API call, *before* it's written to D1, *before* anything hits R2 or Vectorize
+- The master key is not a Worker secret, not an environment variable, not in any request body, not in any header
+- A breach of Cloudflare's storage layer, a subpoena to Cloudflare for stored records, a rogue Cloudflare employee with full database access — none of these recover plaintext
+
+What Cloudflare *can* see is the **transient** plaintext of an active session: the request body of `POST /api/chat` while it's flowing through their edge. They cannot see your archive, your years of stored conversations, your historical documents — only what's in flight during the seconds you're actively using the portal.
+
+### Why we accept this tradeoff
+
+The clean technical fix is to switch the portal subdomain from "Proxied" to "DNS only" (gray cloud) and have Caddy on the VPS terminate TLS directly with a Let's Encrypt cert. Cloudflare would then only act as a DNS provider — returning the VPS IP from a query — and never touch HTTP traffic.
+
+We considered this and rejected it for a single-tenant personal vault, for these reasons:
+
+1. **Public IP exposure**: DNS-only puts the VPS's raw public IP on the internet for anyone to scan. Direct DDoS surface, port scanning, zero-day exposure with no edge protection.
+2. **Hetzner DDoS protection alone is thinner**: Hetzner absorbs common volumetric attacks but doesn't provide application-layer protection like Cloudflare's WAF.
+3. **IP reuse**: when a VPS is destroyed, the IP can be reassigned by the provider. If DNS isn't cleaned up promptly, the next holder of that IP gets traffic intended for the prior tenant.
+4. **The asymmetry is wrong**: removing CF eliminates a *contractual* subprocessor risk (Cloudflare's TOS, MiCA-style legal posture, audit reports) and replaces it with *raw internet exposure* on a single small VPS. For a personal vault on a CAX11, the exposure risk is the bigger one.
+
+The future direction is to shrink the live-traffic surface without exposing the VPS publicly:
+- **Client-side encryption for chat content**: encrypt message bodies in the browser with a key derived from the user's passkey, so Cloudflare's edge sees only an opaque blob
+- **End-to-end TLS via direct tunnels** (Tailscale, WireGuard, or Cloudflare Tunnel without HTTP termination) for advanced users who want to skip the edge proxy entirely
+
+Until those land, the honest answer is: **stored data is encrypted with a key Cloudflare doesn't have. Live portal traffic flows through Cloudflare's edge as plaintext during active sessions, the same as every other Cloudflare-fronted SaaS.** We disclose this on the marketing site, in this doc, and in [TRUST-MODEL.md](TRUST-MODEL.md).
+
+### What an attacker at the Cloudflare edge layer can and cannot do
+
+| Attack | Result |
+|--------|--------|
+| Read D1 / R2 / Vectorize storage | Ciphertext only |
+| Subpoena Cloudflare for stored records | Ciphertext only — we cannot produce plaintext, neither can they |
+| Compromise a Cloudflare edge node *while you're actively using the portal* | Can observe the messages and queries sent during that session |
+| Compromise a Cloudflare edge node when no one is using the portal | Sees nothing — there's no traffic to inspect |
+| Recover historical sessions from a past compromise | No — Cloudflare does not retain bodies of proxied requests at the edge by default; even if they did, only the duration of the compromise window is exposed |
+| Extract the master key from Cloudflare | Impossible — the key is not present in any Cloudflare system |
+| Extract per-user data at rest | Impossible — D1 holds ciphertext only |
+
+The remaining "live traffic visible during active sessions" surface is the same trust boundary that every Cloudflare-fronted application carries, including most banks and most "private" tools. We're not pretending it doesn't exist.
 
 ---
 

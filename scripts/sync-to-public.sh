@@ -43,6 +43,11 @@ rsync -av --delete $DRY_RUN \
   --exclude='scripts/generate-instance-keys.js' \
   --exclude='scripts/migrate-registry-to-d1.js' \
   --exclude='scripts/export-vault.js' \
+  --exclude='LICENSE' \
+  --exclude='README.md' \
+  --exclude='CLAUDE.md' \
+  --exclude='docs/GETTING-STARTED.md' \
+  --exclude='docs/mycelium-logo.svg' \
   "$SRC" "$DEST"
 
 echo ""
