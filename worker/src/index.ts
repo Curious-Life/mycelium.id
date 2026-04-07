@@ -3424,7 +3424,7 @@ async function handleAdminSendEmail(request: Request, env: Env): Promise<Respons
       method: "POST",
       headers: { "Authorization": `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        from: "Mycelium <martin@mycelium.id>",
+        from: body.from || "Martin from Mycelium <martin@mycelium.id>",
         to: body.to,
         subject: body.subject,
         text: body.text,

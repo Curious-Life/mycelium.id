@@ -79,6 +79,14 @@ fi
 echo "  ✓ tmpfs mounted at /run/mycelium (1MB, RAM-only)"
 echo ""
 
+# ── Phase 1b2: /etc/mycelium for VPS identity public keys ──
+echo "→ Phase 1b2: Creating /etc/mycelium for identity public keys..."
+mkdir -p /etc/mycelium
+chown root:claude /etc/mycelium 2>/dev/null || true
+chmod 750 /etc/mycelium
+echo "  ✓ /etc/mycelium created (public keys only)"
+echo ""
+
 # ── Phase 1c: Encrypted swap (random key per boot) ──────────
 # Random key generated at boot from /dev/urandom — never persisted.
 # After reboot, swap pages from previous boots become unreadable.

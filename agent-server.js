@@ -1011,6 +1011,20 @@ app.use((_req, res, next) => {
 app.use(csrfProtect); // CSRF validation for cookie-authenticated portal requests
 app.use(express.json({ limit: '10mb' })); // Increased for file attachments + history
 
+// SECURITY: Inter-agent authentication middleware (Finding 3)
+// Protects internal endpoints from unauthorized access by requiring a shared secret.
+// Only active when AGENT_INTERNAL_SECRET is set in .env (dev mode bypasses silently).
+const INTERNAL_ENDPOINTS = ['/delegation-callback', '/spawn-task-async', '/think', '/delegate'];
+app.use((req, res, next) => {
+  if (!INTERNAL_ENDPOINTS.includes(req.path)) return next();
+  const secret = process.env.AGENT_INTERNAL_SECRET;
+  if (!secret) return next(); // dev mode bypass — no secret configured
+  if (req.headers['x-internal-secret'] !== secret) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  next();
+});
+
 // Simple cookie parser (avoids cookie-parser dependency)
 app.use((req, _res, next) => {
   req.cookies = {};
@@ -9714,8 +9728,8 @@ app.post('/portal/export', async (req, res) => {
     try { wealthPortfolioAccess = await db.rawQuery(`SELECT * FROM wealth_portfolio_access WHERE user_id = ?`, [userId]) || []; } catch {}
 
     // ── Build ZIP archive ──
-    const AdmZip = (await import('adm-zip')).default;
-    const zip = new AdmZip();
+    const JSZip = (await import('jszip')).default;
+    const zip = new JSZip();
 
     // Download R2 attachments and add binary files to ZIP
     const workerUrl = process.env.MYA_WORKER_URL;
@@ -9732,7 +9746,7 @@ app.post('/portal/export', async (req, res) => {
         if (r2Res.ok) {
           const buf = Buffer.from(await r2Res.arrayBuffer());
           const safeName = (att.file_name || att.id).replace(/[^a-zA-Z0-9._-]/g, '_');
-          zip.addFile(`attachments/${att.id}/${safeName}`, buf);
+          zip.file(`attachments/${att.id}/${safeName}`, buf);
           att.zipPath = `attachments/${att.id}/${safeName}`;
           attachmentsFetched++;
         } else {
@@ -9760,7 +9774,7 @@ app.post('/portal/export', async (req, res) => {
           } else {
             try {
               const content = await fs.readFile(fullPath);
-              zipObj.addFile(zipPath, content);
+              zipObj.file(zipPath, content);
             } catch {}
           }
         }
@@ -9831,10 +9845,10 @@ app.post('/portal/export', async (req, res) => {
     };
 
     const jsonStr = JSON.stringify(exportData, null, 2).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
-    zip.addFile('manifest.json', Buffer.from(jsonStr, 'utf-8'));
+    zip.file('manifest.json', Buffer.from(jsonStr, 'utf-8'));
 
     // Generate ZIP buffer
-    const zipBuffer = zip.toBuffer();
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
     const filename = `mycelium-export-${new Date().toISOString().slice(0, 10)}.zip`;
     const zipSizeMB = (zipBuffer.length / 1048576).toFixed(1);
 
@@ -9966,10 +9980,10 @@ async function restoreAttachments(db, targetUserId, attachments, zip, workerUrl,
   for (const att of attachments) {
     try {
       // Upload binary from ZIP to R2
-      const zipEntry = att.zipPath ? zip.getEntry(att.zipPath) : null;
+      const zipEntry = att.zipPath ? zip.file(att.zipPath) : null;
       if (zipEntry && workerUrl && workerSecret) {
         try {
-          const buf = zipEntry.getData();
+          const buf = await zipEntry.async('nodebuffer');
           const ext = att.file_name ? path.extname(att.file_name) : '';
           const r2Key = `${targetUserId}/${att.file_type || 'file'}/${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
 
@@ -10013,14 +10027,14 @@ async function restoreAttachments(db, targetUserId, attachments, zip, workerUrl,
 async function restoreAgentFiles(zip) {
   const agentsRoot = getAgentsRoot();
   let count = 0;
-  for (const entry of zip.getEntries()) {
-    if (!entry.entryName.startsWith('agents/') || entry.isDirectory) continue;
+  for (const [name, entry] of Object.entries(zip.files)) {
+    if (!name.startsWith('agents/') || entry.dir) continue;
     try {
-      const targetPath = path.join(agentsRoot, entry.entryName.slice('agents/'.length));
+      const targetPath = path.join(agentsRoot, name.slice('agents/'.length));
       // Safety: don't write outside agents root
       if (!targetPath.startsWith(agentsRoot)) continue;
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
-      await fs.writeFile(targetPath, entry.getData());
+      await fs.writeFile(targetPath, await entry.async('nodebuffer'));
       count++;
     } catch {}
   }
@@ -10083,14 +10097,14 @@ app.post('/portal/import/vault', async (req, res) => {
     }
 
     // Parse ZIP
-    const AdmZip = (await import('adm-zip')).default;
-    const zip = new AdmZip(fileBuffer);
-    const manifestEntry = zip.getEntry('manifest.json');
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(fileBuffer);
+    const manifestEntry = zip.file('manifest.json');
     if (!manifestEntry) {
       return res.status(400).json({ error: 'Invalid vault export: missing manifest.json' });
     }
 
-    const manifest = JSON.parse(manifestEntry.getData().toString('utf-8'));
+    const manifest = JSON.parse(await manifestEntry.async('text'));
     if (manifest.format !== 'mycelium-vault-export') {
       return res.status(400).json({ error: `Unknown export format: ${manifest.format}` });
     }
@@ -10479,9 +10493,11 @@ const server = app.listen(PORT, BIND_HOST, async () => {
             ).join('\n');
 
             // Trigger agent think cycle
+            const gmailHeaders = { 'Content-Type': 'application/json' };
+            if (process.env.AGENT_INTERNAL_SECRET) gmailHeaders['x-internal-secret'] = process.env.AGENT_INTERNAL_SECRET;
             await fetch(`http://localhost:${PORT}/think`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: gmailHeaders,
               body: JSON.stringify({
                 prompt: `You have ${newEmails.length} new email${newEmails.length > 1 ? 's' : ''}:\n${summary}\n\nReview these and decide what needs your attention. Use the gmail tool to read full content.`,
                 trigger: 'gmail-incoming',
@@ -10612,9 +10628,11 @@ const server = app.listen(PORT, BIND_HOST, async () => {
             repoCwd: paths.repo,
           });
 
+          const sentryHeaders = { 'Content-Type': 'application/json' };
+          if (process.env.AGENT_INTERNAL_SECRET) sentryHeaders['x-internal-secret'] = process.env.AGENT_INTERNAL_SECRET;
           await fetch(`http://localhost:${PORT}/think`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: sentryHeaders,
             body: JSON.stringify({ prompt, trigger: 'sentry-error' }),
           });
 
@@ -10637,5 +10655,414 @@ const server = app.listen(PORT, BIND_HOST, async () => {
 server.requestTimeout = 70 * 60 * 1000;
 server.headersTimeout = 70 * 60 * 1000;
 server.timeout = 0; // no idle timeout (already the default)
+
+// ── Encrypted Portal Channel (Phase 1) ──────────────────────────────────────
+// Mounts a WebSocket server at /ws/secure that wraps all portal API calls
+// in a Noise_NK_25519_ChaChaPoly_BLAKE2s encrypted channel. Cloudflare sees
+// only encrypted binary frames — no plaintext JSON, no readable bodies.
+if (process.env.SECURE_CHANNEL_ENABLED === '1' || process.env.SECURE_CHANNEL_ENABLED === 'true') {
+  (async () => {
+    try {
+      const { loadIdentity } = await import('./lib/vps-identity.js');
+      const identity = await loadIdentity();
+      if (!identity) {
+        console.warn(`[${LOG_PREFIX}] Encrypted portal channel: DISABLED (no VPS identity keys at /run/mycelium/vps-noise.key)`);
+        return;
+      }
+
+      const { setupSecureChannel } = await import('./lib/portal-channel.js');
+
+      // ── Helper: require db or throw ──
+      function requireDb() {
+        const db = tryGetDb();
+        if (!db) throw Object.assign(new Error('Database not available'), { status: 503 });
+        return db;
+      }
+
+      // ── Helper: enrich messages with attachment data ──
+      async function enrichMessagesWithAttachments(db, messages) {
+        const ids = messages.filter(m => m.attachment_id).map(m => m.attachment_id);
+        if (ids.length === 0) return messages;
+        const map = {};
+        try {
+          const attachments = await db.attachments.getByIds(ids);
+          for (const a of attachments) {
+            const type = a.file_type || (a.r2_key?.includes('/voice/') ? 'voice'
+              : a.r2_key?.includes('/image/') ? 'image'
+              : a.r2_key?.includes('/video/') ? 'video' : 'file');
+            map[a.id] = { id: a.id, type, url: `/portal/attachment/${a.id}`,
+              filename: a.file_name || null, fileSize: a.file_size || null,
+              transcript: a.transcript || null, description: a.description || null };
+          }
+        } catch { /* attachment enrichment is optional */ }
+        return messages.map(m => m.attachment_id && map[m.attachment_id]
+          ? { ...m, attachment: map[m.attachment_id] } : m);
+      }
+
+      // ── Route map: channel message type → async (data, user) → result ──
+      const routes = {
+        // Messages
+        'messages': async (data, user) => {
+          const db = requireDb();
+          const limit = Math.min(200, Math.max(1, parseInt(data.limit, 10) || 50));
+          const messages = await db.messages.selectTimeline(user.id, { limit, before: data.before });
+          return { messages: await enrichMessagesWithAttachments(db, messages) };
+        },
+        'chat-history': async (data, user) => {
+          const db = requireDb();
+          const limit = Math.min(200, Math.max(1, parseInt(data.limit, 10) || 50));
+          const agentId = data.agentId || undefined;
+          const messages = await db.messages.selectRecent(user.id, { limit, agentId });
+          const enriched = await enrichMessagesWithAttachments(db, messages);
+          return { messages: enriched.map(m => ({
+            id: String(m.id), role: m.role, content: m.content,
+            timestamp: new Date(m.created_at).getTime(), source: m.source,
+            ...(m.attachment ? { attachment: m.attachment } : {}),
+          })).reverse() };
+        },
+
+        // Documents
+        'documents-list': async (data, user) => {
+          const db = requireDb();
+          const docs = await db.documents.list(user.id, {
+            category: data.category || null, folderId: data.folder_id || null,
+            pinnedOnly: data.pinned === '1',
+          });
+          return { documents: docs };
+        },
+        'document-detail': async (data, user) => {
+          const db = requireDb();
+          const doc = await db.documents.get(user.id, data.documentId || data.path);
+          if (!doc) throw Object.assign(new Error('Document not found'), { status: 404 });
+          return { document: doc };
+        },
+        'documents-create': async (data, user) => {
+          const db = requireDb();
+          const { path: docPath, content, title, category, folder_id } = data;
+          if (!docPath) throw Object.assign(new Error('Path required'), { status: 400 });
+          const result = await db.documents.upsert(user.id, {
+            path: docPath, content: content || '', title: title || docPath.split('/').pop(),
+            category: category || 'general', folder_id: folder_id || null,
+            created_by: AGENT_ID,
+          });
+          return { document: result };
+        },
+        'document-update': async (data, user) => {
+          const db = requireDb();
+          const { documentId, content, title } = data;
+          if (!documentId) throw Object.assign(new Error('Document ID required'), { status: 400 });
+          await db.documents.update(user.id, documentId, { content, title });
+          return { ok: true };
+        },
+
+        // Folders
+        'folders': async (_data, user) => {
+          const db = requireDb();
+          return { folders: await db.documents.listFolders(user.id) };
+        },
+
+        // Profile
+        'profile': async (_data, user) => {
+          const db = requireDb();
+          const profile = await db.users.getById(user.id);
+          return profile || {};
+        },
+        'profile-update': async (data, user) => {
+          const db = requireDb();
+          const { display_name, timezone, settings } = data;
+          await db.users.update(user.id, { display_name, timezone, settings });
+          return { ok: true };
+        },
+
+        // Activity
+        'activity-today': async (_data, user) => {
+          const db = requireDb();
+          return { activities: await db.activity.getToday(user.id) };
+        },
+        'activity-summary': async (data, user) => {
+          const db = requireDb();
+          const days = Math.min(90, Math.max(1, parseInt(data.days, 10) || 7));
+          return { summary: await db.activity.getSummary(user.id, days) };
+        },
+        'activity-range': async (data, user) => {
+          const db = requireDb();
+          return { activities: await db.activity.getRange(user.id, data.start, data.end) };
+        },
+
+        // Mindscape
+        'mindscape': async (_data, user) => {
+          const db = requireDb();
+          const [points, territories, realms] = await Promise.all([
+            db.clusteringPoints.getAll(user.id),
+            db.clusteringPoints.getTerritories(user.id),
+            db.clusteringPoints.getRealms(user.id),
+          ]);
+          return { points, territories, realms };
+        },
+        'mindscape-social': async (data, user) => {
+          const db = requireDb();
+          const tier = data.tier || null;
+          const contacts = await db.people.list(user.id, { tier });
+          return { contacts };
+        },
+        'mindscape-social-detail': async (data, user) => {
+          const db = requireDb();
+          const contact = await db.people.getById(user.id, data.contactId);
+          if (!contact) throw Object.assign(new Error('Contact not found'), { status: 404 });
+          const messages = await db.people.getMessages(user.id, data.contactId, { limit: 50 });
+          return { contact, messages };
+        },
+        'mindscape-growth': async (data, user) => {
+          const db = requireDb();
+          const events = await db.clusterEvents.getRecent(user.id, parseInt(data.limit, 10) || 100);
+          return { events };
+        },
+        'mindscape-growth-summary': async (_data, user) => {
+          const db = requireDb();
+          return { summary: await db.clusterEvents.getSummary(user.id) };
+        },
+        'mindscape-realms': async (_data, user) => {
+          const db = requireDb();
+          return { realms: await db.clusteringPoints.getRealms(user.id) };
+        },
+
+        // Wealth
+        'wealth-portfolios': async (_data, user) => {
+          const db = requireDb();
+          return { portfolios: await db.wealth.getPortfolios(user.id) };
+        },
+        'wealth-portfolio-detail': async (data, user) => {
+          const db = requireDb();
+          const p = await db.wealth.getPortfolio(user.id, data.portfolioId);
+          if (!p) throw Object.assign(new Error('Portfolio not found'), { status: 404 });
+          return { portfolio: p };
+        },
+        'wealth-positions': async (data, user) => {
+          const db = requireDb();
+          return { positions: await db.wealth.getPositions(user.id, data.portfolioId) };
+        },
+        'wealth-transactions': async (data, user) => {
+          const db = requireDb();
+          return { transactions: await db.wealth.getTransactions(user.id, data.portfolioId) };
+        },
+        'wealth-performance': async (data, user) => {
+          const db = requireDb();
+          return { performance: await db.wealth.getPerformance(user.id, data.portfolioId) };
+        },
+        'wealth-watchlist': async (_data, user) => {
+          const db = requireDb();
+          return { watchlist: await db.wealth.getWatchlist(user.id) };
+        },
+        'wealth-assets': async (_data, user) => {
+          const db = requireDb();
+          return { assets: await db.wealth.getAssets(user.id) };
+        },
+
+        // Connections
+        'connections': async (_data, user) => {
+          const db = requireDb();
+          return { connections: await db.connections.list(user.id) };
+        },
+
+        // Contexts
+        'contexts': async (_data, user) => {
+          const db = requireDb();
+          return { contexts: await db.contexts.list(user.id) };
+        },
+
+        // Attachments
+        'attachments': async (data, user) => {
+          const db = requireDb();
+          const limit = Math.min(200, Math.max(1, parseInt(data.limit, 10) || 50));
+          const type = data.type || null;
+          return { attachments: await db.attachments.list(user.id, { limit, type }) };
+        },
+      };
+
+      // ── Streaming routes: type → async (data, user, emit) → void ──
+      const streamRoutes = {
+        'chat': async (data, user, emit) => {
+          const { message, enableThinking, agentId, attachmentContext } = data;
+          if (!message) throw Object.assign(new Error('Message required'), { status: 400 });
+
+          // If targeting a different agent, proxy to that agent's /chat/stream
+          const targetAgentId = agentId;
+          if (targetAgentId && targetAgentId !== AGENT_ID && AGENT_REGISTRY[targetAgentId]) {
+            const target = AGENT_REGISTRY[targetAgentId];
+            const proxyBody = { message, userId: user.id, username: user.displayName || user.id,
+              source: 'portal', enableThinking, attachmentContext };
+            const proxyRes = await fetch(`http://localhost:${target.port}/chat/stream`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(proxyBody), signal: AbortSignal.timeout(300_000),
+            });
+            const reader = proxyRes.body?.getReader();
+            if (!reader) return;
+            const decoder = new TextDecoder();
+            let buf = '';
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buf += decoder.decode(value, { stream: true });
+              const lines = buf.split('\n');
+              buf = lines.pop() || '';
+              for (const line of lines) {
+                if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                  try { emit(JSON.parse(line.slice(6))); } catch {}
+                }
+              }
+            }
+            return;
+          }
+
+          // Local agent — build prompt and stream via Claude CLI
+          const requestTime = new Date();
+          const rawPrompt = message;
+          const prompt = attachmentContext ? `${attachmentContext}\n\n${rawPrompt}` : rawPrompt;
+          const taskType = data.taskType || 'chat';
+
+          emit({ type: 'stream_start', streamIndex: 0 });
+
+          let systemPrompt = '', context = '', heartbeat = '';
+          try {
+            systemPrompt = await loadSystemPrompt();
+            context = await fs.readFile(paths.knowledge.context, 'utf-8').catch(() => '');
+            heartbeat = await fs.readFile(path.join(paths.repo, 'HEARTBEAT.md'), 'utf-8').catch(() => '');
+          } catch {}
+
+          let assembledContext = '';
+          try {
+            assembledContext = await assembleContext(paths.root, user.id, {
+              scope: process.env.MEMORY_SCOPE || 'company', source: 'portal', agentId: AGENT_ID,
+            });
+          } catch {}
+
+          const teamDirectory = await buildTeamDirectory();
+          const fullPrompt = `${systemPrompt}\n\n---\n# Team Directory\n${teamDirectory}\n\n---\n# Your Current State (from autonomous work)\n${heartbeat || 'No heartbeat file found.'}\n\n---\n# Company Context\n${context}${assembledContext ? `\n${assembledContext}` : ''}\n${getWarRoomContext()}${getIntelContext()}\n---\n# Current Message\nFrom: ${user.displayName || 'Portal user'} (user ID: ${user.id}) in #portal\nMessage: ${prompt}\n\n## Important: Your response IS sent directly to the user.\n\nRespond naturally and conversationally.`;
+
+          const laneId = `agent:${AGENT_ID}`;
+          await enqueue(laneId, async () => {
+            incrementActiveTask();
+            try {
+              const threadKey = `portal_${user.id}`;
+              let existingSessionId = await getSessionForThread(paths.root, threadKey);
+              let promptWithContext = fullPrompt;
+              if (!existingSessionId) {
+                const ctxSummary = await getContextSummary(paths.root, threadKey);
+                if (ctxSummary) promptWithContext = `${fullPrompt}\n\n---\n# Previous Session Context\n${ctxSummary}\n---`;
+              }
+
+              await new Promise((resolve, reject) => {
+                const args = ['--print', '--output-format', 'stream-json', '--verbose',
+                  '--include-partial-messages', '--model', getModelForTask(runtime, taskType),
+                  '--max-turns', String(MAX_TURNS)];
+                if (existingSessionId) args.push('--resume', existingSessionId);
+                args.push('--dangerously-skip-permissions');
+
+                const claude = spawn(CLAUDE_BIN, args, {
+                  cwd: paths.repo,
+                  env: { ...process.env, HOME: process.env.HOME || '/home/claude' },
+                  stdio: ['pipe', 'pipe', 'pipe'],
+                });
+
+                claude.stdin.on('error', () => {});
+                claude.stdin.write(promptWithContext);
+                claude.stdin.end();
+
+                let sessionId = null, fullOutput = '', buffer = '';
+                let currentBlockType = null, currentToolName = null;
+                let inputTokens = 0, outputTokens = 0;
+                const toolsUsed = [];
+
+                const keepaliveTimer = setInterval(() => emit({ type: 'keepalive' }), 15000);
+                const timeout = getTimeout('chat');
+                const timeoutTimer = setTimeout(() => { claude.kill('SIGINT'); emit({ type: 'error', message: 'Request timed out' }); }, timeout);
+
+                claude.stdout.on('data', (chunk) => {
+                  buffer += chunk.toString();
+                  const lines = buffer.split('\n');
+                  buffer = lines.pop() || '';
+                  for (const line of lines) {
+                    if (!line.trim()) continue;
+                    try {
+                      const d = JSON.parse(line);
+                      if (d.session_id) sessionId = d.session_id;
+                      if (d.type === 'stream_event' && d.event) {
+                        const ev = d.event;
+                        if (ev.type === 'content_block_start') {
+                          if (ev.content_block?.type === 'thinking') { currentBlockType = 'thinking'; emit({ type: 'thinking_start' }); }
+                          else if (ev.content_block?.type === 'tool_use') { currentBlockType = 'tool_use'; currentToolName = ev.content_block.name; toolsUsed.push(currentToolName); emit({ type: 'tool_start', name: currentToolName, input: {} }); }
+                          else currentBlockType = 'text';
+                        } else if (ev.type === 'content_block_delta') {
+                          if (ev.delta?.type === 'text_delta') { fullOutput += ev.delta.text; emit({ type: 'text_delta', content: ev.delta.text }); }
+                          else if (ev.delta?.type === 'thinking_delta') emit({ type: 'thinking_delta', content: ev.delta.thinking });
+                        } else if (ev.type === 'content_block_stop') {
+                          if (currentBlockType === 'thinking') emit({ type: 'thinking_end', signature: '' });
+                          else if (currentBlockType === 'tool_use') emit({ type: 'tool_complete', name: currentToolName || 'unknown' });
+                          currentBlockType = null; currentToolName = null;
+                        } else if (ev.type === 'message_delta' && ev.usage) {
+                          inputTokens = ev.usage.input_tokens || inputTokens;
+                          outputTokens = ev.usage.output_tokens || outputTokens;
+                        }
+                      } else if (d.type === 'result') {
+                        sessionId = d.session_id || sessionId;
+                        if (!fullOutput && d.result) fullOutput = d.result;
+                      }
+                    } catch {}
+                  }
+                });
+
+                claude.stderr.on('data', (d) => console.error(`[${LOG_PREFIX}] WS stream stderr: ${d.toString().slice(0, 200)}`));
+
+                claude.on('close', async (code) => {
+                  clearInterval(keepaliveTimer); clearTimeout(timeoutTimer);
+                  if (code !== 0 && fullOutput.length < 50) emit({ type: 'error', message: fullOutput.trim() || 'Claude exited with error' });
+                  if (sessionId) {
+                    await updateSessionMapping(paths.root, threadKey, sessionId, {
+                      channelName: 'portal', addTokens: Math.ceil((promptWithContext.length + fullOutput.length) / 4),
+                    }).catch(() => {});
+                  }
+                  if (user.id && fullOutput.trim() && code === 0) {
+                    storeMessages(user.id, 'portal', rawPrompt, fullOutput.trim(), requestTime).catch(() => {});
+                  }
+                  if (inputTokens || outputTokens) emit({ type: 'usage', inputTokens, outputTokens, thinkingTokens: 0 });
+                  emit({ type: 'done', toolsUsed, thinkingEnabled: false });
+                  resolve({ sessionId });
+                });
+
+                claude.on('error', (err) => { clearInterval(keepaliveTimer); clearTimeout(timeoutTimer); emit({ type: 'error', message: err.message }); reject(err); });
+              });
+            } finally { decrementActiveTask(); }
+          });
+        },
+      };
+
+      // Authenticate a session token (same logic as authenticatePortalRequest but for tokens only)
+      async function authenticateSession(token) {
+        if (!token) return null;
+        if (process.env.PORTAL_APP_TOKEN && safeCompare(token, process.env.PORTAL_APP_TOKEN)) {
+          const db = tryGetDb();
+          if (!db) return null;
+          const raw = await db.users.getFirst();
+          return raw ? { id: raw.id, displayName: raw.display_name, timezone: raw.timezone } : null;
+        }
+        const auth = await getAuthModule();
+        return auth.validateSession(token);
+      }
+
+      setupSecureChannel(server, {
+        identity,
+        authenticateSession,
+        routes,
+        streamRoutes,
+      });
+
+      console.log(`[${LOG_PREFIX}] Encrypted portal channel: ENABLED (fingerprint: ${identity.fingerprint})`);
+    } catch (err) {
+      console.error(`[${LOG_PREFIX}] Encrypted portal channel: FAILED to initialize:`, err.message);
+    }
+  })();
+} else {
+  console.log(`[${LOG_PREFIX}] Encrypted portal channel: DISABLED (set SECURE_CHANNEL_ENABLED=1 to enable)`);
+}
 
 export default app;

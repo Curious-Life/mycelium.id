@@ -1043,9 +1043,11 @@ async function handleTool(name, args) {
         return 'Delegation unavailable: AGENT_URL not configured. Cannot reach local agent-server.';
       }
       try {
+        const delegateHeaders = { 'Content-Type': 'application/json' };
+        if (process.env.AGENT_INTERNAL_SECRET) delegateHeaders['x-internal-secret'] = process.env.AGENT_INTERNAL_SECRET;
         const res = await fetch(`${AGENT_URL}/delegate`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: delegateHeaders,
           body: JSON.stringify({
             agent: args.agent,
             task: args.task,

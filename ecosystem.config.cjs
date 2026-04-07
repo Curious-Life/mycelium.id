@@ -51,6 +51,8 @@ const FILTER_ENV = [
   'TELEGRAM_BOT_TOKEN',
   'DISCORD_BOT_TOKEN',
   'DISCORD_CLIENT_SECRET',
+  'VPS_NOISE_PRIV',    // defense-in-depth: should never be in env (lives in tmpfs)
+  'VPS_SIGN_PRIV',
 ];
 
 // Shared env vars for all agent servers

@@ -1,14 +1,47 @@
 /**
  * Client-side API module — same-origin requests with HttpOnly cookie auth.
  * The portal is served by the agent-server, so all API calls are same-origin.
+ *
+ * When the encrypted portal channel is configured (VITE_VPS_NOISE_PUB set),
+ * sensitive endpoints are automatically routed through the encrypted WebSocket
+ * channel instead of plain HTTPS. See secure-fetch.ts for the routing logic.
  */
+
+import { isSecureChannelConfigured } from './vps-identity';
+
+const SECURE_CHANNEL = isSecureChannelConfigured();
+
+// Lazy import to avoid loading crypto code when channel is disabled
+let _secureApi: typeof import('./secure-fetch').secureApi | null = null;
+let _isSensitivePath: typeof import('./secure-fetch').isSensitivePath | null = null;
+
+async function getSecureModules() {
+	if (!_secureApi) {
+		const mod = await import('./secure-fetch');
+		_secureApi = mod.secureApi;
+		_isSensitivePath = mod.isSensitivePath;
+	}
+	return { secureApi: _secureApi!, isSensitivePath: _isSensitivePath! };
+}
 
 /**
  * Make an authenticated request to the agent-server.
  * The session cookie is sent automatically (same origin, credentials: 'same-origin').
  * On 401, redirects to /login.
+ *
+ * If the encrypted portal channel is configured and the path is sensitive,
+ * routes through the encrypted WebSocket channel instead of plain HTTPS.
  */
 export async function api(path: string, options: RequestInit = {}): Promise<Response> {
+	// Encrypted channel routing (Phase 1) — route sensitive paths through WS
+	if (SECURE_CHANNEL) {
+		const { secureApi, isSensitivePath } = await getSecureModules();
+		if (isSensitivePath(path)) {
+			return secureApi(path, options);
+		}
+	}
+
+	// Plain HTTPS path (non-sensitive endpoints, or channel not configured)
 	const headers = new Headers(options.headers);
 
 	// Don't set Content-Type for FormData (browser sets boundary)

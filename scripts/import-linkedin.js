@@ -12,7 +12,7 @@
  */
 
 import { readFileSync } from 'fs';
-import AdmZip from 'adm-zip';
+import JSZip from 'jszip';
 
 const WORKER_URL = process.env.MYA_WORKER_URL;
 // Use ADMIN_SECRET for full-scope access (people data is personal-scope encrypted)
@@ -102,13 +102,13 @@ async function main() {
   console.log(`\nImporting LinkedIn data from: ${ZIP_PATH}`);
   console.log(`Mode: ${DRY_RUN ? 'DRY RUN' : 'LIVE'}\n`);
 
-  const zip = new AdmZip(ZIP_PATH);
+  const zip = await JSZip.loadAsync(readFileSync(ZIP_PATH));
 
   // ── Step 1: Parse connections ──
-  const connEntry = zip.getEntries().find(e => e.entryName === 'Connections.csv');
+  const connEntry = zip.file('Connections.csv');
   if (!connEntry) throw new Error('No Connections.csv found in ZIP');
 
-  let connText = connEntry.getData().toString('utf8');
+  let connText = await connEntry.async('text');
   // LinkedIn prepends a notes paragraph before the CSV header — skip it
   const headerIdx = connText.indexOf('First Name,');
   if (headerIdx > 0) connText = connText.substring(headerIdx);
@@ -117,10 +117,10 @@ async function main() {
   console.log(`Found ${connections.length} connections`);
 
   // ── Step 2: Parse messages — find conversations where the owner replied ──
-  const msgEntry = zip.getEntries().find(e => e.entryName === 'messages.csv');
+  const msgEntry = zip.file('messages.csv');
   if (!msgEntry) throw new Error('No messages.csv found in ZIP');
 
-  const messages = csvToObjects(msgEntry.getData().toString('utf8'));
+  const messages = csvToObjects(await msgEntry.async('text'));
   console.log(`Found ${messages.length} messages`);
 
   // Group by conversation, find ones where the owner sent at least one message
