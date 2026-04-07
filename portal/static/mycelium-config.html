@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>Mycelium Tree Config</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0c; color: #ccc; font-family: 'JetBrains Mono', monospace; font-size: 11px; display: flex; }
+  canvas { background: #0a0a0c; display: block; }
+  .preview { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .panel { width: 300px; height: 100vh; overflow-y: auto; background: #111; border-left: 1px solid #333; padding: 12px; }
+  .section { color: #B8860B; font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; margin: 14px 0 6px; padding-top: 8px; border-top: 1px solid #333; }
+  .section:first-child { border-top: none; margin-top: 0; }
+  label { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+  label span:first-child { min-width: 80px; }
+  label span:last-child { min-width: 40px; text-align: right; color: #666; }
+  input[type=range] { flex: 1; height: 3px; accent-color: #B8860B; }
+  input[type=number] { width: 55px; background: #1a1a1a; border: 1px solid #333; color: #ccc; border-radius: 3px; padding: 2px 4px; font: inherit; }
+  .actions { display: flex; gap: 8px; margin: 10px 0; }
+  .btn { background: #B8860B; color: #fff; border: none; border-radius: 4px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  .btn:hover { background: #d4a017; }
+  .btn-ghost { background: #222; color: #aaa; border: 1px solid #333; }
+  pre { background: #1a1a1a; padding: 8px; border-radius: 4px; font-size: 9px; color: #888; max-height: 120px; overflow: auto; margin-top: 8px; word-wrap: break-word; white-space: pre-wrap; }
+</style>
+</head><body>
+
+<div class="preview">
+  <canvas id="c" width="520" height="234"></canvas>
+</div>
+
+<div class="panel">
+  <div style="font-size:13px;font-weight:600;color:#eee;margin-bottom:8px;">Mycelium Config</div>
+  <div class="actions">
+    <button class="btn" onclick="render()">Redraw</button>
+    <button class="btn" onclick="randomSeed()">Random Seed</button>
+    <button class="btn btn-ghost" onclick="copyJSON()">Copy JSON</button>
+  </div>
+
+  <div class="section">Growth</div>
+  <label><span>Seed</span><input type="number" id="seed" value="137" onchange="render()"><span></span></label>
+  <label><span>Frames</span><input type="range" id="frames" min="200" max="2000" step="50" value="800" oninput="render()"><span id="v_frames"></span></label>
+  <label><span>Seeds</span><input type="range" id="numSeeds" min="1" max="20" value="7" oninput="render()"><span id="v_numSeeds"></span></label>
+  <label><span>Spread</span><input type="range" id="seedSpread" min="0.1" max="1" step="0.05" value="0.7" oninput="render()"><span id="v_seedSpread"></span></label>
+  <label><span>Life</span><input type="range" id="seedLife" min="50" max="500" step="10" value="200" oninput="render()"><span id="v_seedLife"></span></label>
+  <label><span>Life var</span><input type="range" id="seedLifeVar" min="0" max="300" step="10" value="100" oninput="render()"><span id="v_seedLifeVar"></span></label>
+  <label><span>Speed</span><input type="range" id="seedSpeed" min="0.1" max="1" step="0.05" value="0.4" oninput="render()"><span id="v_seedSpeed"></span></label>
+  <label><span>Speed var</span><input type="range" id="seedSpeedVar" min="0" max="0.5" step="0.05" value="0.2" oninput="render()"><span id="v_seedSpeedVar"></span></label>
+
+  <div class="section">Wandering</div>
+  <label><span>Curv jitter</span><input type="range" id="curvJitter" min="0" max="0.06" step="0.002" value="0.02" oninput="render()"><span id="v_curvJitter"></span></label>
+  <label><span>Curv decay</span><input type="range" id="curvDecay" min="0.8" max="0.99" step="0.01" value="0.92" oninput="render()"><span id="v_curvDecay"></span></label>
+  <label><span>Curv max</span><input type="range" id="curvMax" min="0.01" max="0.15" step="0.005" value="0.06" oninput="render()"><span id="v_curvMax"></span></label>
+  <label><span>Angle jitter</span><input type="range" id="angleJitter" min="0" max="0.1" step="0.005" value="0.04" oninput="render()"><span id="v_angleJitter"></span></label>
+  <label><span>Step var</span><input type="range" id="stepLenVar" min="0" max="1" step="0.05" value="0.6" oninput="render()"><span id="v_stepLenVar"></span></label>
+  <label><span>Curve wobble</span><input type="range" id="curveWobble" min="0" max="1.5" step="0.05" value="0.5" oninput="render()"><span id="v_curveWobble"></span></label>
+
+  <div class="section">Branching</div>
+  <label><span>Probability</span><input type="range" id="branchProb" min="0.005" max="0.15" step="0.005" value="0.045" oninput="render()"><span id="v_branchProb"></span></label>
+  <label><span>Min space</span><input type="range" id="branchMinSpace" min="2" max="20" value="6" oninput="render()"><span id="v_branchMinSpace"></span></label>
+  <label><span>Angle min</span><input type="range" id="branchAngleMin" min="0.1" max="0.8" step="0.05" value="0.3" oninput="render()"><span id="v_branchAngleMin"></span></label>
+  <label><span>Angle range</span><input type="range" id="branchAngleRange" min="0" max="0.8" step="0.05" value="0.3" oninput="render()"><span id="v_branchAngleRange"></span></label>
+  <label><span>Max depth</span><input type="range" id="maxDepth" min="3" max="15" value="10" oninput="render()"><span id="v_maxDepth"></span></label>
+  <label><span>Child life</span><input type="range" id="childLifeRatio" min="0.3" max="0.9" step="0.02" value="0.618" oninput="render()"><span id="v_childLifeRatio"></span></label>
+  <label><span>Child speed</span><input type="range" id="childSpeedRatio" min="0.5" max="1" step="0.02" value="0.9" oninput="render()"><span id="v_childSpeedRatio"></span></label>
+
+  <div class="section">Dichotomy</div>
+  <label><span>Probability</span><input type="range" id="dichotomyProb" min="0" max="0.3" step="0.01" value="0.08" oninput="render()"><span id="v_dichotomyProb"></span></label>
+  <label><span>Max depth</span><input type="range" id="dichotomyMaxDepth" min="1" max="8" value="4" oninput="render()"><span id="v_dichotomyMaxDepth"></span></label>
+  <label><span>Splay</span><input type="range" id="dichotomySplay" min="0.05" max="0.5" step="0.02" value="0.2" oninput="render()"><span id="v_dichotomySplay"></span></label>
+
+  <div class="section">Anastomosis</div>
+  <label><span>Probability</span><input type="range" id="anastProb" min="0" max="0.5" step="0.02" value="0.25" oninput="render()"><span id="v_anastProb"></span></label>
+  <label><span>Radius</span><input type="range" id="anastRadius" min="3" max="20" value="8" oninput="render()"><span id="v_anastRadius"></span></label>
+  <label><span>Line width</span><input type="range" id="anastLineWidth" min="0.1" max="1" step="0.05" value="0.3" oninput="render()"><span id="v_anastLineWidth"></span></label>
+  <label><span>Curve</span><input type="range" id="anastCurve" min="0" max="15" step="0.5" value="6" oninput="render()"><span id="v_anastCurve"></span></label>
+
+  <div class="section">Appearance</div>
+  <label><span>Hue</span><input type="range" id="hue" min="0" max="360" value="34" oninput="render()"><span id="v_hue"></span></label>
+  <label><span>Hue var</span><input type="range" id="hueVar" min="0" max="60" value="10" oninput="render()"><span id="v_hueVar"></span></label>
+  <label><span>Saturation</span><input type="range" id="sat" min="0" max="100" value="40" oninput="render()"><span id="v_sat"></span></label>
+  <label><span>Lightness</span><input type="range" id="light" min="10" max="80" value="44" oninput="render()"><span id="v_light"></span></label>
+  <label><span>Base width</span><input type="range" id="baseWidth" min="0.3" max="3" step="0.1" value="1.2" oninput="render()"><span id="v_baseWidth"></span></label>
+  <label><span>Width decay</span><input type="range" id="widthDecay" min="0.1" max="1" step="0.05" value="0.4" oninput="render()"><span id="v_widthDecay"></span></label>
+  <label><span>Base alpha</span><input type="range" id="baseAlpha" min="0.05" max="0.8" step="0.02" value="0.35" oninput="render()"><span id="v_baseAlpha"></span></label>
+  <label><span>Alpha decay</span><input type="range" id="alphaDecay" min="0.05" max="0.8" step="0.02" value="0.25" oninput="render()"><span id="v_alphaDecay"></span></label>
+  <label><span>Node glow</span><input type="range" id="nodeGlow" min="0" max="0.2" step="0.01" value="0.06" oninput="render()"><span id="v_nodeGlow"></span></label>
+  <label><span>Node size</span><input type="range" id="nodeSize" min="0.2" max="2" step="0.1" value="0.7" oninput="render()"><span id="v_nodeSize"></span></label>
+
+  <pre id="json-out"></pre>
+</div>
+
+<script>
+const fields = ['seed','frames','numSeeds','seedSpread','seedLife','seedLifeVar','seedSpeed','seedSpeedVar',
+  'curvJitter','curvDecay','curvMax','angleJitter','stepLenVar','curveWobble',
+  'branchProb','branchMinSpace','branchAngleMin','branchAngleRange','maxDepth','childLifeRatio','childSpeedRatio',
+  'dichotomyProb','dichotomyMaxDepth','dichotomySplay',
+  'anastProb','anastRadius','anastLineWidth','anastCurve',
+  'hue','hueVar','sat','light','baseWidth','widthDecay','baseAlpha','alphaDecay','nodeGlow','nodeSize'];
+
+function val(id) { return parseFloat(document.getElementById(id).value); }
+
+function getConfig() {
+  const cfg = {};
+  for (const f of fields) cfg[f] = val(f);
+  return cfg;
+}
+
+function randomSeed() {
+  document.getElementById('seed').value = Math.floor(Math.random() * 9999) + 1;
+  render();
+}
+
+function copyJSON() {
+  const json = JSON.stringify(getConfig(), null, 2);
+  navigator.clipboard.writeText(json);
+  document.querySelector('.btn').textContent = 'Copied!';
+  setTimeout(() => document.querySelector('.btn').textContent = 'Redraw', 1000);
+}
+
+function render() {
+  const P = getConfig();
+  // Update value displays
+  for (const f of fields) {
+    const el = document.getElementById('v_' + f);
+    if (el) el.textContent = P[f];
+  }
+  document.getElementById('json-out').textContent = JSON.stringify(P, null, 2);
+
+  const canvas = document.getElementById('c');
+  const c = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const cx = W/2, cy = H - 5;
+  const PHI_INV = 0.618;
+
+  c.clearRect(0, 0, W, H);
+
+  let seed = P.seed;
+  function rng() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
+
+  const GRID = 10;
+  const grid = {};
+  function addGrid(x, y) { const k = `${Math.floor(x/GRID)},${Math.floor(y/GRID)}`; if (!grid[k]) grid[k] = []; grid[k].push({x,y}); }
+  function findNear(x, y, r) {
+    const gx = Math.floor(x/GRID), gy = Math.floor(y/GRID), s = Math.ceil(r/GRID);
+    for (let dx=-s;dx<=s;dx++) for (let dy=-s;dy<=s;dy++) {
+      const cell = grid[`${gx+dx},${gy+dy}`];
+      if (!cell) continue;
+      for (const p of cell) { const d = Math.hypot(p.x-x,p.y-y); if (d>2&&d<r) return p; }
+    }
+    return null;
+  }
+
+  const tips = [], nodes = [];
+  function hWidth(d) { return 0.3 + Math.max(0, P.baseWidth * Math.pow(PHI_INV, d * P.widthDecay)); }
+  function hAlpha(d) { return Math.max(0.05, P.baseAlpha * Math.pow(PHI_INV, d * P.alphaDecay)); }
+  function spawn(x,y,a,sp,life,depth) { tips.push({x,y,angle:a,curv:(rng()-0.5)*0.01,speed:sp,life,maxLife:life,depth,hue:P.hue+(rng()-0.5)*P.hueVar,age:0,lastBranch:0}); }
+
+  for (let i = 0; i < P.numSeeds; i++) {
+    const a = -Math.PI*(0.5+P.seedSpread/2) + (Math.PI*P.seedSpread/Math.max(1,P.numSeeds-1))*i + (rng()-0.5)*0.1;
+    spawn(cx, cy, a, P.seedSpeed+rng()*P.seedSpeedVar, P.seedLife+rng()*P.seedLifeVar, 0);
+  }
+
+  for (let frame = 0; frame < P.frames; frame++) {
+    for (let ti = tips.length-1; ti >= 0; ti--) {
+      const t = tips[ti];
+      if (t.life <= 0) continue;
+      t.age++; t.lastBranch++; t.life--;
+
+      t.curv += (rng()-0.5)*P.curvJitter;
+      t.curv *= P.curvDecay;
+      t.curv = Math.max(-P.curvMax, Math.min(P.curvMax, t.curv));
+      t.angle += t.curv + (rng()-0.5)*P.angleJitter;
+
+      const ox=t.x, oy=t.y;
+      const sl = t.speed * (1 - P.stepLenVar/2 + rng()*P.stepLenVar);
+      t.x += Math.cos(t.angle)*sl;
+      t.y += Math.sin(t.angle)*sl;
+
+      if (t.x<2||t.x>W-2||t.y<2||t.y>H-2) { t.life=0; continue; }
+
+      const lt = t.life/t.maxLife;
+      const w = hWidth(t.depth)*(0.5+lt*0.5);
+      const alpha = hAlpha(t.depth)*(0.5+lt*0.5);
+      c.strokeStyle = `hsla(${t.hue},${P.sat}%,${P.light}%,${alpha})`;
+      c.lineWidth = w;
+      c.lineCap = 'round';
+      const cpx = (ox+t.x)/2+(rng()-0.5)*sl*P.curveWobble;
+      const cpy = (oy+t.y)/2+(rng()-0.5)*sl*P.curveWobble*0.8;
+      c.beginPath(); c.moveTo(ox,oy); c.quadraticCurveTo(cpx,cpy,t.x,t.y); c.stroke();
+
+      if (t.age%3===0) addGrid(t.x,t.y);
+
+      const ms = Math.floor(P.branchMinSpace * Math.pow(1/PHI_INV, t.depth*0.3));
+      const bp = P.branchProb * Math.pow(PHI_INV, t.depth*0.3);
+
+      if (t.lastBranch>ms && t.depth<P.maxDepth && rng()<bp) {
+        t.lastBranch=0;
+        const side = rng()>0.5?1:-1;
+        const ba = side*(P.branchAngleMin+rng()*P.branchAngleRange);
+        const cl = t.life*P.childLifeRatio*(0.8+rng()*0.4);
+        const cs = t.speed*P.childSpeedRatio*(0.95+rng()*0.1);
+        spawn(t.x,t.y,t.angle+ba,cs,cl,t.depth+1);
+        nodes.push({x:t.x,y:t.y});
+
+        if (t.depth<P.dichotomyMaxDepth && rng()<P.dichotomyProb) {
+          const sp = P.dichotomySplay*(0.7+rng()*0.6);
+          spawn(t.x,t.y,t.angle+sp,cs,cl*0.8,t.depth+1);
+          spawn(t.x,t.y,t.angle-sp,cs,cl*0.8,t.depth+1);
+          t.life=0;
+          nodes.push({x:t.x,y:t.y});
+        }
+      }
+
+      if (t.age>12 && t.age%4===0) {
+        const near = findNear(t.x,t.y,P.anastRadius);
+        if (near && rng()<P.anastProb) {
+          c.strokeStyle = `hsla(${t.hue},${P.sat}%,${P.light}%,0.1)`;
+          c.lineWidth = P.anastLineWidth;
+          const mx=(t.x+near.x)/2+(rng()-0.5)*P.anastCurve;
+          const my=(t.y+near.y)/2+(rng()-0.5)*P.anastCurve;
+          c.beginPath(); c.moveTo(t.x,t.y); c.quadraticCurveTo(mx,my,near.x,near.y); c.stroke();
+          nodes.push({x:mx,y:my});
+        }
+      }
+    }
+  }
+
+  for (const n of nodes) {
+    c.beginPath(); c.arc(n.x,n.y,P.nodeSize,0,Math.PI*2);
+    c.fillStyle = `rgba(184,134,11,${P.nodeGlow})`; c.fill();
+  }
+}
+
+render();
+</script>
+</body></html>

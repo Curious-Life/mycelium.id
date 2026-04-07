@@ -201,7 +201,25 @@ if [ -d "$WARROOM_PATH" ]; then
   fi
 fi
 
-# --- Check 5: Disk space ---
+# --- Check 5: Telegram bot liveness (409 conflict = zombie) ---
+log "Checking Telegram bot liveness..."
+TELEGRAM_BOTS=("mya-telegram-bot" "moms-telegram-bot")
+for bot_name in "${TELEGRAM_BOTS[@]}"; do
+  pm2_status=$(get_pm2_status "$bot_name")
+  if [ "$pm2_status" != "online" ]; then continue; fi
+
+  # Check recent logs for 409 errors (bot is "online" but not polling)
+  last_409=$(pm2 logs "$bot_name" --lines 20 --nostream 2>&1 | grep -c "409" || echo "0")
+  if [ "$last_409" -gt 0 ]; then
+    log "$bot_name has 409 conflict errors — restarting..."
+    pm2 restart "$bot_name" 2>/dev/null || true
+    sleep 3
+    RESTART_COUNT=$((RESTART_COUNT + 1))
+    alert "$bot_name was a **zombie** (409 conflict) — restarted"
+  fi
+done
+
+# --- Check 6: Disk space ---
 disk_pct=$(df / 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%')
 if [ "$disk_pct" -gt 90 ]; then
   alert "**Disk usage at ${disk_pct}%** — running low"
@@ -210,7 +228,7 @@ elif [ "$disk_pct" -gt 80 ]; then
   log "Disk usage at ${disk_pct}% — getting high"
 fi
 
-# --- Check 6: Crash loop detection ---
+# --- Check 7: Crash loop detection ---
 log "Checking for crash loops..."
 for proc in "${CRITICAL_PROCESSES[@]}"; do
   restarts=$(get_pm2_restarts "$proc")

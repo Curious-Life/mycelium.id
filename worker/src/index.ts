@@ -22,15 +22,37 @@ import { SupabaseService } from "./services/supabase";
 import { StreamService } from "./services/stream";
 import { WorkersAIService } from "./services/workersai";
 import { handleProxyRequest } from "./handlers/db-proxy";
-import { handleDataRequest } from "./handlers/data-api";
+// SWISS VAULT: data-api removed — VPS handles all crypto via crypto-local.js
 import { authenticateRequest } from "./middleware/agent-auth";
 import { handleGetSecrets, handlePutSecret, handleDeleteSecret } from "./handlers/secrets-api";
-import { importMasterKey, decrypt, isEncrypted, type Scope } from "./services/crypto";
+// SWISS VAULT: crypto imports removed — Worker has no master key
 import { corsHeaders as makeCorsHeaders, corsOrigin, corsPreflight } from "./utils/cors";
 import { timingSafeCompare } from "./utils/crypto";
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from "./utils/rate-limit";
+import { isValidEmail } from "./utils/validation";
 import { handleIntelRequest, handleIntelSnapshot } from "./handlers/intel-public";
+import { handlePublicProfile } from "./handlers/public-profile";
+import { handleFederationRequest } from "./handlers/federation";
+import { handleStripeWebhook } from "./handlers/stripe-webhook";
+import {
+  createCheckoutSession,
+  retrieveCheckoutSession,
+  findCustomerByEmail,
+  listCustomerCheckoutSessions,
+  createBillingPortalSession,
+  STRIPE_PRICES,
+} from "./services/stripe";
 import { requireAuth } from "./middleware/agent-auth";
+import {
+  createOrder as coingateCreateOrder,
+  isValidPlan as isValidCryptoPlan,
+  parseOrderId,
+  monthsFromAmount,
+  planFromAmount,
+  verifyWebhookHeader as verifyCoinGateWebhook,
+  CRYPTO_PRICES,
+  PLAN_MONTHS,
+} from "./services/coingate";
 
 /** Verify auth for AI endpoints — accepts worker secret, admin secret, or agent tokens */
 async function verifyAIAuth(request: Request, env: Env): Promise<{ ok: boolean; token: string }> {
@@ -70,6 +92,14 @@ export default {
 
     const intelResponse = await handleIntelRequest(request, env, url.pathname);
     if (intelResponse) return intelResponse;
+
+    // Public profile endpoint (no auth, KV cached, wildcard CORS)
+    const profileResponse = await handlePublicProfile(request, env, url.pathname);
+    if (profileResponse) return profileResponse;
+
+    // Federation endpoints (WebFinger, connect, overlap, instance-info)
+    const fedResponse = await handleFederationRequest(request, env, url);
+    if (fedResponse) return fedResponse;
 
     // =========================================
     // AI Processing Endpoints (for Discord bot)
@@ -131,13 +161,7 @@ export default {
       return corsPreflight(request);
     }
 
-    // Decrypt batch — returns decrypted message content for VPS-native enrichment
-    if (url.pathname === "/api/decrypt-batch" && request.method === "POST") {
-      return await handleDecryptBatch(request, env);
-    }
-    if (url.pathname === "/api/decrypt-batch" && request.method === "OPTIONS") {
-      return corsPreflight(request);
-    }
+    // SWISS VAULT: /api/decrypt-batch removed — VPS decrypts locally with its own key
 
     // AI text generation endpoint (for cluster descriptions)
     if (url.pathname === "/api/ai/generate" && request.method === "POST") {
@@ -147,11 +171,7 @@ export default {
       return corsPreflight(request);
     }
 
-    // Encrypted data API endpoints (store/query with scope-based encryption)
-    const dataResponse = await handleDataRequest(request, env, url.pathname);
-    if (dataResponse) return dataResponse;
-
-    // D1 + Vectorize proxy endpoints (for VPS agents — metadata only, content redacted)
+    // D1 + Vectorize proxy endpoints (for VPS agents — ciphertext passthrough)
     const proxyResponse = await handleProxyRequest(request, env, url.pathname);
     if (proxyResponse) return proxyResponse;
 
@@ -175,13 +195,83 @@ export default {
       return await handleWaitlistSignup(request, env);
     }
     if (url.pathname === "/api/waitlist" && request.method === "OPTIONS") {
-      return new Response(null, {
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-        },
-      });
+      return signupCorsPreflight(request);
+    }
+
+    // Signup verification flow
+    if (url.pathname === "/api/signup/send-code" && request.method === "POST") {
+      return await handleSendCode(request, env);
+    }
+    if (url.pathname === "/api/signup/verify-code" && request.method === "POST") {
+      return await handleVerifyCode(request, env);
+    }
+    if ((url.pathname.startsWith("/api/signup/") || url.pathname.startsWith("/api/billing/")) && request.method === "OPTIONS") {
+      return signupCorsPreflight(request);
+    }
+    if (url.pathname === "/api/signup/lookup" && request.method === "POST") {
+      return await handleSignupLookup(request, env);
+    }
+    if (url.pathname === "/api/admin/register-agent" && request.method === "POST") {
+      return await handleRegisterAgent(request, env);
+    }
+    if (url.pathname === "/api/admin/send-email" && request.method === "POST") {
+      return await handleAdminSendEmail(request, env);
+    }
+    if (url.pathname === "/api/admin/create-dns" && request.method === "POST") {
+      return await handleAdminCreateDns(request, env);
+    }
+    if (url.pathname === "/api/admin/update-job" && request.method === "POST") {
+      return await handleAdminUpdateJob(request, env);
+    }
+    if (url.pathname === "/api/admin/store-export" && request.method === "POST") {
+      return await handleStoreExport(request, env);
+    }
+    if (url.pathname.startsWith("/exports/") && request.method === "GET") {
+      return await handleServeExport(request, env, url);
+    }
+    if (url.pathname === "/api/signup/checkout" && request.method === "POST") {
+      return await handleSignupCheckout(request, env);
+    }
+    if (url.pathname === "/api/signup/checkout/verify" && request.method === "POST") {
+      return await handleSignupCheckoutVerify(request, env);
+    }
+    if (url.pathname === "/api/stripe/webhook" && request.method === "POST") {
+      return await handleStripeWebhook(request, env);
+    }
+    if (url.pathname === "/api/signup/check-handle" && request.method === "POST") {
+      return await handleCheckHandle(request, env);
+    }
+    if (url.pathname === "/api/signup/activate" && request.method === "POST") {
+      return await handleSignupActivate(request, env);
+    }
+    if (url.pathname.startsWith("/api/signup/status/") && request.method === "GET") {
+      const jobId = url.pathname.slice("/api/signup/status/".length);
+      return await handleSignupStatus(jobId, request, env);
+    }
+    if (url.pathname === "/api/signup/passkey/options" && request.method === "POST") {
+      return await handlePasskeyRegisterOptions(request, env);
+    }
+
+    // Billing portal (authenticated — requires session token)
+    if (url.pathname === "/api/billing/portal" && request.method === "POST") {
+      return await handleBillingPortal(request, env);
+    }
+    if (url.pathname === "/api/billing/portal" && request.method === "OPTIONS") {
+      return corsPreflight(request);
+    }
+
+    // Crypto payments (CoinGate)
+    if (url.pathname === "/api/crypto/invoice" && request.method === "POST") {
+      return await handleCryptoInvoice(request, env);
+    }
+    if (url.pathname === "/api/crypto/webhook" && request.method === "POST") {
+      return await handleCryptoWebhook(request, env);
+    }
+    if (url.pathname.startsWith("/api/crypto/status/") && request.method === "GET") {
+      return await handleCryptoStatus(request, env, url);
+    }
+    if (url.pathname.startsWith("/api/crypto/") && request.method === "OPTIONS") {
+      return signupCorsPreflight(request);
     }
 
     // Webhook setup endpoint (call once to configure)
@@ -2357,15 +2447,16 @@ async function handleBackfillAgentEmbeddings(request: Request, env: Env): Promis
  */
 async function handleWaitlistSignup(request: Request, env: Env): Promise<Response> {
   const corsHeaders = {
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": signupCorsOrigin(request),
     "Content-Type": "application/json",
+    "Vary": "Origin",
   };
 
   try {
     const body = await request.json() as { email?: string; source?: string };
     const email = body.email?.trim().toLowerCase();
 
-    if (!email || !email.includes("@")) {
+    if (!email || !isValidEmail(email)) {
       return new Response(JSON.stringify({ error: "Invalid email" }), {
         status: 400,
         headers: corsHeaders,
@@ -2435,6 +2526,1401 @@ async function handleWaitlistSignup(request: Request, env: Env): Promise<Respons
       status: 500,
       headers: corsHeaders,
     });
+  }
+}
+
+// ── Signup CORS ────────────────────────────────────────────────────
+// Tighter CORS for signup/billing endpoints — only mycelium.id and localhost
+
+const SIGNUP_ALLOWED_ORIGINS = new Set([
+  "https://mycelium.id",
+  "https://www.mycelium.id",
+  "http://localhost:5173",
+  "http://localhost:4173",
+  "http://localhost:3000",
+]);
+
+function signupCorsOrigin(request: Request): string {
+  const origin = request.headers.get("Origin") || "";
+  // Only reflect origin if in allow-list — no fallback for unknown origins
+  return SIGNUP_ALLOWED_ORIGINS.has(origin) ? origin : "";
+}
+
+function signupCorsHeaders(request: Request): Record<string, string> {
+  return {
+    "Access-Control-Allow-Origin": signupCorsOrigin(request),
+    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Vary": "Origin",
+    "Content-Type": "application/json",
+  };
+}
+
+function signupCorsPreflight(request: Request): Response {
+  return new Response(null, {
+    headers: {
+      ...signupCorsHeaders(request),
+      "Access-Control-Max-Age": "86400",
+    },
+  });
+}
+
+// ── Billing Portal ─────────────────────────────────────────────────
+
+/**
+ * POST /api/billing/portal
+ * AUTHENTICATED: Creates a Stripe Customer Portal session for the logged-in user.
+ * Requires session token auth (portal user).
+ */
+async function handleBillingPortal(request: Request, env: Env): Promise<Response> {
+  const ch = signupCorsHeaders(request);
+
+  // Authenticate — accepts session tokens, agent tokens, or admin secret
+  const identity = await authenticateRequest(request, env);
+  if (!identity) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: ch });
+  }
+
+  try {
+    const body = await request.json() as { returnUrl?: string; userId?: string };
+    const returnUrl = body.returnUrl || "https://mycelium.id";
+
+    // Admin callers (agent-server proxy) pass userId explicitly
+    const userId = (identity.agent === "admin" || identity.auth_type === "legacy") && body.userId
+      ? body.userId
+      : identity.user_id;
+
+    // Look up subscription
+    const sub = await env.DB.prepare(
+      "SELECT stripe_customer_id, type FROM subscriptions WHERE user_id = ?"
+    ).bind(userId).first<{ stripe_customer_id: string; type: string }>();
+
+    if (!sub) {
+      return new Response(JSON.stringify({ error: "No active subscription found" }), { status: 404, headers: ch });
+    }
+
+    if (sub.type === "lifetime") {
+      return new Response(JSON.stringify({ error: "Lifetime plans don't require billing management" }), { status: 400, headers: ch });
+    }
+
+    const url = await createBillingPortalSession(env, sub.stripe_customer_id, returnUrl);
+
+    return new Response(JSON.stringify({ url }), { headers: ch });
+  } catch (err: any) {
+    console.error("[billing/portal]", err.message);
+    return new Response(JSON.stringify({ error: "Failed to create billing portal session" }), { status: 500, headers: ch });
+  }
+}
+
+// ── Crypto Payment Endpoints ──────────────────────────────────────
+
+/**
+ * POST /api/crypto/invoice
+ * Creates a CoinGate payment invoice for a prepaid subscription block.
+ * Can be called from signup page (with email) or portal (authenticated).
+ */
+async function handleCryptoInvoice(request: Request, env: Env): Promise<Response> {
+  const ch = signupCorsHeaders(request);
+
+  try {
+    const body = await request.json() as {
+      plan?: string;
+      user_id?: string;
+      email?: string;
+      return_url?: string;
+    };
+
+    const plan = body.plan;
+    if (!plan || !isValidCryptoPlan(plan)) {
+      return new Response(JSON.stringify({ error: "Invalid plan. Must be: monthly, annual, or decade" }), { status: 400, headers: ch });
+    }
+
+    // Auth: either session token (portal) or email + user_id (signup)
+    let userId = body.user_id;
+    let email = body.email;
+
+    const identity = await authenticateRequest(request, env);
+    if (identity) {
+      userId = identity.user_id;
+      // Look up email from user
+      if (!email) {
+        const user = await env.DB!.prepare("SELECT display_name FROM users WHERE id = ?").bind(userId).first<{ display_name: string }>();
+        email = user?.display_name || undefined;
+      }
+    }
+
+    if (!userId || !email) {
+      return new Response(JSON.stringify({ error: "user_id and email required" }), { status: 400, headers: ch });
+    }
+
+    const baseUrl = body.return_url || "https://mycelium.id";
+    const successUrl = `${baseUrl}/signup/?crypto=success`;
+    const cancelUrl = `${baseUrl}/signup/?crypto=cancel`;
+
+    const order = await coingateCreateOrder(env, {
+      userId,
+      email,
+      plan,
+      successUrl,
+      cancelUrl,
+    });
+
+    // Store pending payment record
+    if (env.DB) {
+      await env.DB.prepare(
+        "INSERT INTO crypto_payments (user_id, coingate_order_id, plan, amount_eur, status) VALUES (?, ?, ?, ?, 'pending')"
+      ).bind(userId, order.orderId, plan, CRYPTO_PRICES[plan]).run();
+    }
+
+    console.log(`[crypto] Invoice created: ${order.orderId} for ${email} (${plan}, EUR ${CRYPTO_PRICES[plan]})`);
+
+    return new Response(JSON.stringify({
+      payment_url: order.paymentUrl,
+      order_id: order.orderId,
+      coingate_id: order.coingateId,
+      amount_eur: CRYPTO_PRICES[plan],
+      plan,
+    }), { headers: ch });
+  } catch (err: any) {
+    console.error("[crypto/invoice]", err.message);
+    return new Response(JSON.stringify({ error: err.message || "Failed to create invoice" }), { status: 500, headers: ch });
+  }
+}
+
+/**
+ * POST /api/crypto/webhook
+ * CoinGate callback when payment status changes.
+ * Verifies token, checks idempotency, credits subscription atomically.
+ */
+async function handleCryptoWebhook(request: Request, env: Env): Promise<Response> {
+  const ch = { "Content-Type": "application/json" };
+
+  try {
+    // Verify webhook token
+    if (!verifyCoinGateWebhook(request, env)) {
+      console.error("[crypto/webhook] Invalid callback token");
+      return new Response(JSON.stringify({ error: "Invalid token" }), { status: 401, headers: ch });
+    }
+
+    const payload = await request.json() as {
+      id: number;
+      order_id: string;
+      status: string;
+      price_amount: string;
+      price_currency: string;
+      receive_amount: string;
+      receive_currency: string;
+      pay_amount: string;
+      pay_currency: string;
+      created_at: string;
+    };
+
+    console.log(`[crypto/webhook] Received: order=${payload.order_id} status=${payload.status} coin=${payload.pay_currency}`);
+
+    // Only process 'paid' status
+    if (payload.status !== "paid") {
+      // Update status in our records for non-paid statuses
+      if (env.DB && payload.order_id) {
+        await env.DB.prepare(
+          "UPDATE crypto_payments SET status = ? WHERE coingate_order_id = ?"
+        ).bind(payload.status, payload.order_id).run();
+      }
+      return new Response(JSON.stringify({ ok: true, status: payload.status }), { headers: ch });
+    }
+
+    if (!env.DB) {
+      return new Response(JSON.stringify({ error: "Database not available" }), { status: 503, headers: ch });
+    }
+
+    // Idempotency check — prevent double-crediting on webhook retries
+    const existing = await env.DB.prepare(
+      "SELECT id FROM crypto_payments WHERE coingate_order_id = ? AND status = 'paid'"
+    ).bind(payload.order_id).first();
+
+    if (existing) {
+      console.log(`[crypto/webhook] Already processed: ${payload.order_id}`);
+      return new Response(JSON.stringify({ ok: true, already_processed: true }), { headers: ch });
+    }
+
+    // Parse order_id to extract user_id
+    const parsed = parseOrderId(payload.order_id);
+    if (!parsed) {
+      console.error(`[crypto/webhook] Cannot parse order_id: ${payload.order_id}`);
+      return new Response(JSON.stringify({ error: "Invalid order_id format" }), { status: 400, headers: ch });
+    }
+
+    const { userId } = parsed;
+    const amountEur = parseFloat(payload.price_amount);
+    const creditedMonths = monthsFromAmount(amountEur);
+    const plan = planFromAmount(amountEur);
+
+    // Update crypto_payments record
+    await env.DB.prepare(
+      "UPDATE crypto_payments SET status = 'paid', crypto_amount = ?, crypto_coin = ?, paid_at = datetime('now'), credited_months = ? WHERE coingate_order_id = ?"
+    ).bind(payload.pay_amount, payload.pay_currency, creditedMonths, payload.order_id).run();
+
+    // Atomic paid_through extension — no read-then-write race condition
+    // MAX ensures we extend from whichever is later: existing paid_through or now
+    const existingSub = await env.DB.prepare(
+      "SELECT id FROM subscriptions WHERE user_id = ?"
+    ).bind(userId).first();
+
+    if (existingSub) {
+      await env.DB.prepare(
+        `UPDATE subscriptions SET
+          payment_method = 'crypto',
+          crypto_coin = ?,
+          crypto_tx = ?,
+          coingate_order_id = ?,
+          plan = ?,
+          status = 'active',
+          paid_through = datetime(MAX(COALESCE(paid_through, datetime('now')), datetime('now')), '+${creditedMonths} months')
+        WHERE user_id = ?`
+      ).bind(payload.pay_currency, payload.order_id, payload.order_id, plan, userId).run();
+    } else {
+      // New subscription
+      await env.DB.prepare(
+        `INSERT INTO subscriptions (user_id, payment_method, crypto_coin, crypto_tx, coingate_order_id, plan, status, paid_through)
+         VALUES (?, 'crypto', ?, ?, ?, ?, 'active', datetime('now', '+${creditedMonths} months'))`
+      ).bind(userId, payload.pay_currency, payload.order_id, payload.order_id, plan).run();
+    }
+
+    console.log(`[crypto/webhook] Credited ${creditedMonths} months to user ${userId} (${payload.pay_currency} ${payload.pay_amount})`);
+
+    // Send confirmation email
+    if (env.RESEND_API_KEY) {
+      try {
+        // Look up user email
+        const user = await env.DB.prepare("SELECT display_name FROM users WHERE id = ?").bind(userId).first<{ display_name: string }>();
+        const job = await env.DB.prepare(
+          "SELECT email FROM provisioning_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 1"
+        ).bind(userId).first<{ email: string }>();
+        const email = job?.email || user?.display_name;
+
+        if (email && isValidEmail(email)) {
+          await fetch("https://api.resend.com/emails", {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              from: "Mycelium <martin@mycelium.id>",
+              to: email,
+              subject: `Payment confirmed — ${creditedMonths} months credited`,
+              text: `Your crypto payment has been confirmed.\n\nPlan: ${plan}\nAmount: EUR ${amountEur}\nPaid with: ${payload.pay_currency} ${payload.pay_amount}\nMonths credited: ${creditedMonths}\n\nThank you for using Mycelium.\n\n— Mycelium`,
+            }),
+          });
+        }
+      } catch (emailErr: any) {
+        console.error("[crypto/webhook] Confirmation email failed:", emailErr.message);
+      }
+    }
+
+    return new Response(JSON.stringify({ ok: true, credited_months: creditedMonths }), { headers: ch });
+  } catch (err: any) {
+    console.error("[crypto/webhook]", err.message);
+    return new Response(JSON.stringify({ error: "Webhook processing failed" }), { status: 500, headers: ch });
+  }
+}
+
+/**
+ * GET /api/crypto/status/:order_id
+ * Poll payment status for the checkout UI.
+ */
+async function handleCryptoStatus(request: Request, env: Env, url: URL): Promise<Response> {
+  const ch = signupCorsHeaders(request);
+
+  try {
+    const orderId = url.pathname.slice("/api/crypto/status/".length);
+    if (!orderId) {
+      return new Response(JSON.stringify({ error: "Order ID required" }), { status: 400, headers: ch });
+    }
+
+    if (!env.DB) {
+      return new Response(JSON.stringify({ error: "Database not available" }), { status: 503, headers: ch });
+    }
+
+    const payment = await env.DB.prepare(
+      "SELECT status, crypto_coin, crypto_amount, credited_months, paid_at FROM crypto_payments WHERE coingate_order_id = ?"
+    ).bind(orderId).first<{
+      status: string;
+      crypto_coin: string | null;
+      crypto_amount: string | null;
+      credited_months: number | null;
+      paid_at: string | null;
+    }>();
+
+    if (!payment) {
+      return new Response(JSON.stringify({ error: "Order not found" }), { status: 404, headers: ch });
+    }
+
+    return new Response(JSON.stringify({
+      status: payment.status,
+      coin: payment.crypto_coin,
+      amount: payment.crypto_amount,
+      credited_months: payment.credited_months,
+      paid_at: payment.paid_at,
+    }), { headers: ch });
+  } catch (err: any) {
+    console.error("[crypto/status]", err.message);
+    return new Response(JSON.stringify({ error: "Failed to check status" }), { status: 500, headers: ch });
+  }
+}
+
+// ── Signup Endpoints ───────────────────────────────────────────────
+
+/**
+ * POST /api/signup/send-code
+ * PUBLIC: Generates a 6-digit code, stores in KV (10 min TTL), emails it via Resend.
+ * Rate limited: max 3 codes per email per 15 minutes (via KV counter).
+ */
+async function handleSendCode(request: Request, env: Env): Promise<Response> {
+  const corsHeaders = { "Access-Control-Allow-Origin": signupCorsOrigin(request), "Content-Type": "application/json", "Vary": "Origin" };
+
+  try {
+    const body = await request.json() as { email?: string };
+    const email = body.email?.trim().toLowerCase();
+
+    if (!email || !isValidEmail(email)) {
+      return new Response(JSON.stringify({ error: "Invalid email" }), { status: 400, headers: corsHeaders });
+    }
+
+    // Check if email already has a vault
+    try {
+      const existingJob = await env.DB.prepare(
+        "SELECT id, status FROM provisioning_jobs WHERE email = ? AND status IN ('pending', 'provisioning', 'ready') LIMIT 1"
+      ).bind(email).first<{ id: string; status: string }>();
+
+      if (existingJob) {
+        return new Response(JSON.stringify({ error: "This email already has a vault. Log in at mycelium.id/login instead." }), { status: 409, headers: corsHeaders });
+      }
+    } catch (dbErr: any) {
+      // Table might not exist yet — log and continue
+      console.error("[signup] DB check error:", dbErr.message);
+      // Still block if the error is NOT about a missing table
+      if (!dbErr.message?.includes("no such table")) {
+        return new Response(JSON.stringify({ error: "Service error", debug: dbErr.message }), { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // Rate limit: 3 attempts per 15 min
+    const rlKey = `signup:rl:${email}`;
+    const rlCount = parseInt((await env.KV.get(rlKey)) || "0");
+    if (rlCount >= 3) {
+      return new Response(JSON.stringify({ error: "Too many attempts. Try again in a few minutes." }), { status: 429, headers: corsHeaders });
+    }
+    await env.KV.put(rlKey, String(rlCount + 1), { expirationTtl: 900 });
+
+    // Generate 6-digit code
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+
+    // Store in KV with 10-min TTL
+    await env.KV.put(`signup:code:${email}`, code, { expirationTtl: 600 });
+
+    // Send email via Resend
+    if (env.RESEND_API_KEY) {
+      const fromAddr = env.EMAIL_FROM || "Mycelium <martin@mycelium.id>";
+      try {
+        const emailRes = await fetch("https://api.resend.com/emails", {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            from: fromAddr,
+            to: email,
+            subject: `${code} — Your Mycelium verification code`,
+            text: `Your verification code is: ${code}\n\nThis code expires in 10 minutes.\n\nIf you didn't request this, you can safely ignore this email.\n\n— Mycelium`,
+            html: `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#F7F5EF;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#F7F5EF;padding:40px 20px;">
+<tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:460px;background:#FFFFFF;border-radius:16px;border:1px solid #E7E5E4;overflow:hidden;">
+
+<!-- Header -->
+<tr><td style="padding:32px 36px 24px;border-bottom:1px solid #F0EDE4;">
+  <span style="font-family:Georgia,serif;font-size:20px;color:#1C1917;letter-spacing:-0.01em;">mycelium</span><span style="font-family:Georgia,serif;font-size:20px;color:#B8860B;font-style:italic;">.id</span>
+</td></tr>
+
+<!-- Code -->
+<tr><td style="padding:36px 36px 28px;text-align:center;">
+  <div style="font-size:13px;color:#A8A29E;letter-spacing:0.1em;text-transform:uppercase;font-family:monospace;margin-bottom:16px;">Verification Code</div>
+  <div style="font-family:'Courier New',monospace;font-size:36px;font-weight:700;letter-spacing:0.3em;color:#1C1917;background:#FBF3DB;border:2px solid #E5C46B;border-radius:12px;padding:20px 24px;display:inline-block;-webkit-user-select:all;user-select:all;cursor:pointer;" title="Tap to select">${code}</div>
+  <div style="margin-top:8px;font-size:11px;color:#A8A29E;">Tap the code to select it</div>
+  <div style="margin-top:20px;font-size:14px;color:#57534E;line-height:1.6;">Enter this code to verify your email and create your encrypted vault.</div>
+</td></tr>
+
+<!-- Divider -->
+<tr><td style="padding:0 36px;"><div style="border-top:1px solid #F0EDE4;"></div></td></tr>
+
+<!-- Footer -->
+<tr><td style="padding:24px 36px 32px;">
+  <div style="font-size:12px;color:#A8A29E;line-height:1.6;">
+    This code expires in <strong style="color:#57534E;">10 minutes</strong>.<br>
+    If you didn't request this, you can safely ignore this email.
+  </div>
+</td></tr>
+
+</table>
+
+<!-- Brand footer -->
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:460px;margin-top:24px;">
+<tr><td style="text-align:center;font-size:11px;color:#A8A29E;font-family:Georgia,serif;">
+  Sovereign intelligence infrastructure
+</td></tr>
+</table>
+
+</td></tr>
+</table>
+</body></html>`,
+          }),
+        });
+        const emailBody = await emailRes.text().catch(() => "");
+        if (!emailRes.ok) {
+          console.error(`[signup] Resend failed (${emailRes.status}): ${emailBody}`);
+        } else {
+          console.log(`[signup] Email sent to ${email}: ${emailBody}`);
+        }
+      } catch (emailErr: any) {
+        console.error("[signup] Resend fetch failed:", emailErr.message);
+      }
+    } else {
+      console.error("[signup] RESEND_API_KEY not set — cannot send email");
+    }
+
+    return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders });
+  } catch (err: any) {
+    console.error("[signup/send-code]", err.message);
+    return new Response(JSON.stringify({ error: "Server error" }), { status: 500, headers: corsHeaders });
+  }
+}
+
+/**
+ * POST /api/signup/verify-code
+ * PUBLIC: Verifies the 6-digit code against KV. Deletes code on success.
+ */
+async function handleVerifyCode(request: Request, env: Env): Promise<Response> {
+  const corsHeaders = { "Access-Control-Allow-Origin": signupCorsOrigin(request), "Content-Type": "application/json", "Vary": "Origin" };
+
+  try {
+    const body = await request.json() as { email?: string; code?: string };
+    const email = body.email?.trim().toLowerCase();
+    const code = body.code?.trim();
+
+    if (!email || !code) {
+      return new Response(JSON.stringify({ error: "Email and code required" }), { status: 400, headers: corsHeaders });
+    }
+
+    const stored = await env.KV.get(`signup:code:${email}`);
+    if (!stored) {
+      return new Response(JSON.stringify({ error: "Code expired or not found. Request a new one." }), { status: 410, headers: corsHeaders });
+    }
+
+    if (stored !== code) {
+      return new Response(JSON.stringify({ error: "Invalid code" }), { status: 401, headers: corsHeaders });
+    }
+
+    // Code is valid — delete it (one-time use)
+    await env.KV.delete(`signup:code:${email}`);
+
+    // Also store in waitlist if not already
+    try {
+      await env.DB.prepare(
+        "INSERT INTO waitlist (email, source, created_at) VALUES (?, 'signup-managed-verified', datetime('now')) ON CONFLICT(email) DO UPDATE SET source = 'signup-managed-verified'"
+      ).bind(email).run();
+    } catch (_) {}
+
+    return new Response(JSON.stringify({ ok: true, verified: true }), { headers: corsHeaders });
+  } catch (err: any) {
+    console.error("[signup/verify-code]", err.message);
+    return new Response(JSON.stringify({ error: "Server error" }), { status: 500, headers: corsHeaders });
+  }
+}
+
+/**
+ * POST /api/signup/passkey/options
+ * PUBLIC: Returns WebAuthn registration options (challenge) for passkey creation.
+ */
+async function handlePasskeyRegisterOptions(request: Request, env: Env): Promise<Response> {
+  const corsHeaders = { "Access-Control-Allow-Origin": signupCorsOrigin(request), "Content-Type": "application/json", "Vary": "Origin" };
+
+  try {
+    const body = await request.json() as { email?: string };
+    const email = body.email?.trim().toLowerCase();
+    if (!email) {
+      return new Response(JSON.stringify({ error: "Email required" }), { status: 400, headers: corsHeaders });
+    }
+
+    // Generate challenge (32 random bytes, base64url)
+    const challengeBytes = new Uint8Array(32);
+    crypto.getRandomValues(challengeBytes);
+    const challenge = btoa(String.fromCharCode(...challengeBytes))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+
+    // Store challenge in KV (5 min TTL) for verification at activate time
+    await env.KV.put(`signup:challenge:${email}`, challenge, { expirationTtl: 300 });
+
+    // Generate user ID (deterministic from email for idempotency)
+    const userIdBytes = new Uint8Array(
+      await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`mycelium:user:${email}`))
+    );
+    const userId = btoa(String.fromCharCode(...new Uint8Array(userIdBytes.slice(0, 16))))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+
+    return new Response(JSON.stringify({
+      challenge,
+      rp: { name: "mycelium.id", id: "mycelium.id" },
+      user: {
+        id: userId,
+        name: email,
+        displayName: email.split('@')[0],
+      },
+      pubKeyCredParams: [
+        { type: "public-key", alg: -7 },   // ES256
+        { type: "public-key", alg: -257 },  // RS256
+      ],
+      authenticatorSelection: {
+        authenticatorAttachment: "platform",
+        residentKey: "preferred",
+        userVerification: "preferred",
+      },
+      timeout: 120000,
+      attestation: "none",
+    }), { headers: corsHeaders });
+  } catch (err: any) {
+    console.error("[signup/passkey/options]", err.message);
+    return new Response(JSON.stringify({ error: "Server error" }), { status: 500, headers: corsHeaders });
+  }
+}
+
+/**
+ * POST /api/signup/activate
+ * PUBLIC: Creates a provisioning job. Receives email, keyHash, and passkey credential.
+ * Does NOT receive the master key — only its SHA-256 hash.
+ */
+async function handleSignupActivate(request: Request, env: Env): Promise<Response> {
+  const ch = signupCorsHeaders(request);
+
+  try {
+    const body = await request.json() as {
+      email?: string;
+      keyHash?: string;
+      handle?: string;
+      passkey?: {
+        credentialId: string;
+        publicKey: string;
+        attestation?: string;
+      };
+    };
+
+    const email = body.email?.trim().toLowerCase();
+    const keyHash = body.keyHash?.trim();
+    const handle = body.handle?.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '') || null;
+
+    if (!email || !keyHash || keyHash.length !== 64) {
+      return new Response(JSON.stringify({ error: "Email and keyHash (64 hex) required" }), { status: 400, headers: ch });
+    }
+
+    // Verify this email was actually verified via code
+    const verified = await env.DB.prepare(
+      "SELECT email FROM waitlist WHERE email = ? AND source = 'signup-managed-verified'"
+    ).bind(email).first();
+
+    if (!verified) {
+      return new Response(JSON.stringify({ error: "Email not verified" }), { status: 403, headers: ch });
+    }
+
+    // Check for duplicate provisioning (ignore failed/deleted vaults — allow re-signup)
+    const existing = await env.DB.prepare(
+      "SELECT id, status FROM provisioning_jobs WHERE email = ? AND status NOT IN ('failed', 'deleted')"
+    ).bind(email).first<{ id: string; status: string }>();
+
+    if (existing) {
+      return new Response(JSON.stringify({
+        ok: true,
+        jobId: existing.id,
+        status: existing.status,
+        message: "Provisioning already in progress",
+      }), { headers: ch });
+    }
+
+    // Generate user ID (deterministic from email)
+    const userIdBytes = new Uint8Array(
+      await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`mycelium:user:${email}`))
+    );
+    const userId = Array.from(new Uint8Array(userIdBytes.slice(0, 16)))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+
+    // ── PAYMENT GATE ──────────────────────────────────────────────
+    // Check that this user has actually paid before provisioning.
+    // Three-tier check: DB subscription → KV cache → Stripe API fallback.
+    let paymentInfo: { customerId: string; subscriptionId: string | null; plan: string } | null = null;
+
+    // Tier 1: Check subscriptions table (written by webhook)
+    const sub = await env.DB.prepare(
+      "SELECT stripe_customer_id, stripe_subscription_id, plan FROM subscriptions WHERE user_id = ? AND status IN ('active', 'lifetime')"
+    ).bind(userId).first<{ stripe_customer_id: string; stripe_subscription_id: string | null; plan: string }>();
+
+    if (sub) {
+      paymentInfo = { customerId: sub.stripe_customer_id, subscriptionId: sub.stripe_subscription_id, plan: sub.plan };
+    }
+
+    // Tier 2: Check KV (set by webhook as fast cache)
+    if (!paymentInfo && env.KV) {
+      const kvData = await env.KV.get(`signup:paid:${email}`);
+      if (kvData) {
+        try {
+          const parsed = JSON.parse(kvData) as { customerId: string; subscriptionId: string | null; plan: string };
+          paymentInfo = parsed;
+        } catch {}
+      }
+    }
+
+    // Tier 3: Stripe API fallback (webhook may be delayed)
+    if (!paymentInfo) {
+      try {
+        const customerId = await findCustomerByEmail(env, email);
+        if (customerId) {
+          const sessions = await listCustomerCheckoutSessions(env, customerId);
+          const paidSession = sessions.find(s => s.payment_status === "paid");
+          if (paidSession) {
+            paymentInfo = {
+              customerId,
+              subscriptionId: paidSession.subscription || null,
+              plan: paidSession.metadata?.plan || "monthly",
+            };
+            // Backfill subscription record since webhook missed it
+            const isLifetime = paidSession.mode === "payment" || paymentInfo.plan === "decade";
+            await env.DB.prepare(`
+              INSERT INTO subscriptions (user_id, stripe_customer_id, stripe_subscription_id, plan, type, status, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+              ON CONFLICT(user_id) DO NOTHING
+            `).bind(
+              userId,
+              customerId,
+              paidSession.subscription || null,
+              paymentInfo.plan,
+              isLifetime ? "lifetime" : "recurring",
+              isLifetime ? "lifetime" : "active",
+            ).run();
+          }
+        }
+      } catch (err: any) {
+        console.error("[signup/activate] Stripe fallback check failed:", err.message);
+      }
+    }
+
+    if (!paymentInfo) {
+      return new Response(JSON.stringify({ error: "Payment required. Please complete checkout first." }), { status: 402, headers: ch });
+    }
+    // ── END PAYMENT GATE ──────────────────────────────────────────
+
+    const jobId = crypto.randomUUID();
+
+    // Create user record with handle
+    await env.DB.prepare(
+      "INSERT INTO users (id, handle, display_name, created_at) VALUES (?, ?, ?, datetime('now')) ON CONFLICT(id) DO UPDATE SET handle = excluded.handle"
+    ).bind(userId, handle, handle || email.split('@')[0]).run();
+
+    // Store provisioning job (now includes plan and stripe_customer_id)
+    await env.DB.prepare(`
+      INSERT INTO provisioning_jobs (id, user_id, email, key_hash, handle, plan, stripe_customer_id, status, passkey_credential_id, passkey_public_key, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, datetime('now'))
+    `).bind(
+      jobId,
+      userId,
+      email,
+      keyHash,
+      handle,
+      paymentInfo.plan,
+      paymentInfo.customerId,
+      body.passkey?.credentialId || null,
+      body.passkey?.publicKey || null,
+    ).run();
+
+    // Notify admin
+    if (env.RESEND_API_KEY && env.NOTIFICATION_EMAIL) {
+      try {
+        await fetch("https://api.resend.com/emails", {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            from: "Mycelium <martin@mycelium.id>",
+            to: env.NOTIFICATION_EMAIL,
+            subject: `New managed signup: ${email} (${paymentInfo.plan})`,
+            text: `${email}\n${userId}\nPlan: ${paymentInfo.plan}\nStripe: ${paymentInfo.customerId}\n${body.passkey ? 'passkey' : 'no passkey'}\n${jobId}`,
+            html: `<div style="font-family:monospace;font-size:13px;color:#1C1917;padding:16px;">
+<div style="color:#B8860B;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:12px;">New signup</div>
+<div style="margin-bottom:4px;"><strong>${email}</strong></div>
+<div style="color:#57534E;font-size:12px;">${userId} &middot; ${paymentInfo.plan} &middot; ${body.passkey ? 'passkey' : 'no passkey'} &middot; ${new Date().toISOString().slice(0,16).replace('T',' ')}</div>
+<div style="color:#A8A29E;font-size:11px;margin-top:8px;">${jobId}</div>
+</div>`,
+          }),
+        });
+      } catch (_) {}
+    }
+
+    return new Response(JSON.stringify({
+      ok: true,
+      jobId,
+      userId,
+      status: "pending",
+      plan: paymentInfo.plan,
+    }), { headers: ch });
+  } catch (err: any) {
+    console.error("[signup/activate]", err.message);
+    return new Response(JSON.stringify({ error: "Server error" }), { status: 500, headers: ch });
+  }
+}
+
+/**
+ * GET /api/signup/status/:jobId
+ * PUBLIC: Returns the provisioning status for a job.
+ */
+async function handleSignupStatus(jobId: string, request: Request, env: Env): Promise<Response> {
+  const corsHeaders = { "Access-Control-Allow-Origin": signupCorsOrigin(request), "Content-Type": "application/json", "Vary": "Origin" };
+
+  if (!jobId || jobId.length < 10) {
+    return new Response(JSON.stringify({ error: "Invalid job ID" }), { status: 400, headers: corsHeaders });
+  }
+
+  const job = await env.DB.prepare(
+    "SELECT id, status, status_step, vps_ip, portal_url, error, created_at, completed_at FROM provisioning_jobs WHERE id = ?"
+  ).bind(jobId).first<{
+    id: string; status: string; status_step: string | null; vps_ip: string | null;
+    portal_url: string | null; error: string | null;
+    created_at: string; completed_at: string | null;
+  }>();
+
+  if (!job) {
+    return new Response(JSON.stringify({ error: "Job not found" }), { status: 404, headers: corsHeaders });
+  }
+
+  return new Response(JSON.stringify({
+    jobId: job.id,
+    status: job.status,
+    step: job.status_step,
+    portalUrl: job.portal_url,
+    error: job.status === "failed" ? job.error : undefined,
+    createdAt: job.created_at,
+    completedAt: job.completed_at,
+  }), { headers: corsHeaders });
+}
+
+/**
+ * POST /api/signup/lookup
+ * PUBLIC: Looks up a customer's Portal URL by email.
+ * Used by mycelium.id/login to redirect to the right VPS.
+ */
+/**
+ * POST /api/admin/register-agent
+ * ADMIN: Register a new agent token in D1 (for managed hosting customers).
+ * Requires ADMIN_SECRET. Tokens stored as SHA-256 hashes — raw token never in D1.
+ *
+ * Body: { token, agent, name, user_id, scopes }
+ * Returns: { ok, token_hash }
+ */
+/**
+ * POST /api/admin/send-email
+ * ADMIN: Send an email via Resend. Used by provisioning script for completion emails.
+ */
+/**
+ * POST /api/admin/create-dns
+ * ADMIN: Create a DNS A record for handle.mycelium.id → VPS IP.
+ * Used by provisioning script to give each customer a subdomain.
+ */
+async function handleAdminCreateDns(request: Request, env: Env): Promise<Response> {
+  const corsHeaders = { "Access-Control-Allow-Origin": signupCorsOrigin(request), "Content-Type": "application/json", "Vary": "Origin" };
+
+  const identity = await authenticateRequest(request, env);
+  if (!identity || (identity.agent !== "admin" && identity.auth_type !== "legacy")) {
+    return new Response(JSON.stringify({ error: "Admin access required" }), { status: 403, headers: corsHeaders });
+  }
+
+  const dnsToken = (env as unknown as Record<string, string>).CF_DNS_TOKEN;
+  const zoneId = (env as unknown as Record<string, string>).CF_ZONE_ID;
+  if (!dnsToken || !zoneId) {
+    return new Response(JSON.stringify({ error: "CF_DNS_TOKEN or CF_ZONE_ID not configured" }), { status: 503, headers: corsHeaders });
+  }
+
+  try {
+    const body = await request.json() as { handle: string; ip: string };
+    if (!body.handle || !body.ip) {
+      return new Response(JSON.stringify({ error: "handle and ip required" }), { status: 400, headers: corsHeaders });
+    }
+
+    const handle = body.handle.toLowerCase().replace(/[^a-z0-9-]/g, '');
+
+    // Check if ANY record exists for this subdomain (A, AAAA, CNAME)
+    const listRes = await fetch(
+      `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?name=${handle}.mycelium.id`,
+      { headers: { "Authorization": `Bearer ${dnsToken}` } },
+    );
+    const listData = await listRes.json() as { result: Array<{ id: string; type: string; content: string }> };
+
+    // Delete any conflicting records (CNAME, wrong A records)
+    for (const record of (listData.result || [])) {
+      if (record.type === "CNAME" || (record.type === "A" && record.content !== body.ip)) {
+        await fetch(
+          `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records/${record.id}`,
+          { method: "DELETE", headers: { "Authorization": `Bearer ${dnsToken}` } },
+        );
+      }
+    }
+
+    // Find existing A record pointing to the right IP
+    const existingA = (listData.result || []).find(r => r.type === "A" && r.content === body.ip);
+
+    if (existingA) {
+      // Already correct — ensure it's proxied
+      await fetch(
+        `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records/${existingA.id}`,
+        {
+          method: "PATCH",
+          headers: { "Authorization": `Bearer ${dnsToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ proxied: true }),
+        },
+      );
+    } else {
+      // Create new A record
+      const createRes = await fetch(
+        `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records`,
+        {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${dnsToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "A", name: handle, content: body.ip, proxied: true, ttl: 1 }),
+        },
+      );
+      if (!createRes.ok) {
+        const err = await createRes.text();
+        return new Response(JSON.stringify({ error: "DNS create failed", detail: err }), { status: 502, headers: corsHeaders });
+      }
+    }
+
+    return new Response(JSON.stringify({ ok: true, domain: `${handle}.mycelium.id` }), { headers: corsHeaders });
+  } catch (err: any) {
+    return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
+  }
+}
+
+async function handleAdminSendEmail(request: Request, env: Env): Promise<Response> {
+  const corsHeaders = { "Access-Control-Allow-Origin": signupCorsOrigin(request), "Content-Type": "application/json", "Vary": "Origin" };
+
+  const identity = await authenticateRequest(request, env);
+  if (!identity || (identity.agent !== "admin" && identity.auth_type !== "legacy")) {
+    return new Response(JSON.stringify({ error: "Admin access required" }), { status: 403, headers: corsHeaders });
+  }
+
+  if (!env.RESEND_API_KEY) {
+    return new Response(JSON.stringify({ error: "RESEND_API_KEY not configured" }), { status: 503, headers: corsHeaders });
+  }
+
+  try {
+    const body = await request.json() as { to: string; subject: string; text?: string; html?: string };
+    if (!body.to || !body.subject) {
+      return new Response(JSON.stringify({ error: "to and subject required" }), { status: 400, headers: corsHeaders });
+    }
+
+    const emailRes = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: "Mycelium <martin@mycelium.id>",
+        to: body.to,
+        subject: body.subject,
+        text: body.text,
+        html: body.html,
+      }),
+    });
+
+    if (!emailRes.ok) {
+      const err = await emailRes.text().catch(() => "");
+      return new Response(JSON.stringify({ error: "Resend failed", detail: err }), { status: 502, headers: corsHeaders });
+    }
+
+    return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders });
+  } catch (err: any) {
+    return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
+  }
+}
+
+/**
+ * POST /api/admin/update-job
+ * ADMIN: Update a provisioning job's status and step. Used for live progress tracking.
+ */
+async function handleAdminUpdateJob(request: Request, env: Env): Promise<Response> {
+  const corsHeaders = { "Access-Control-Allow-Origin": signupCorsOrigin(request), "Content-Type": "application/json", "Vary": "Origin" };
+
+  const identity = await authenticateRequest(request, env);
+  if (!identity || (identity.agent !== "admin" && identity.auth_type !== "legacy")) {
+    return new Response(JSON.stringify({ error: "Admin access required" }), { status: 403, headers: corsHeaders });
+  }
+
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: "D1 not configured" }), { status: 503, headers: corsHeaders });
+  }
+
+  try {
+    const body = await request.json() as {
+      jobId: string;
+      status?: string;
+      step?: string;
+      vps_ip?: string;
+      portal_url?: string;
+      error?: string;
+    };
+
+    if (!body.jobId) {
+      return new Response(JSON.stringify({ error: "jobId required" }), { status: 400, headers: corsHeaders });
+    }
+
+    const sets: string[] = ["updated_at = datetime('now')"];
+    const params: unknown[] = [];
+
+    if (body.status) { sets.push("status = ?"); params.push(body.status); }
+    if (body.step) { sets.push("status_step = ?"); params.push(body.step); }
+    if (body.vps_ip) { sets.push("vps_ip = ?"); params.push(body.vps_ip); }
+    if (body.portal_url) { sets.push("portal_url = ?"); params.push(body.portal_url); }
+    if (body.error) { sets.push("error = ?"); params.push(body.error); }
+    if (body.status === "provisioning") { sets.push("started_at = datetime('now')"); }
+    if (body.status === "ready" || body.status === "failed") { sets.push("completed_at = datetime('now')"); }
+
+    params.push(body.jobId);
+
+    await env.DB.prepare(
+      `UPDATE provisioning_jobs SET ${sets.join(", ")} WHERE id = ?`
+    ).bind(...params).run();
+
+    return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders });
+  } catch (err: any) {
+    return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
+  }
+}
+
+/**
+ * POST /api/admin/store-export
+ * ADMIN: Store a data export JSON in R2 with a signed download URL.
+ * Returns { downloadUrl } with 1-hour HMAC-signed expiry.
+ */
+async function handleStoreExport(request: Request, env: Env): Promise<Response> {
+  const headers = { "Content-Type": "application/json" };
+
+  const identity = await authenticateRequest(request, env);
+  if (!identity || (identity.agent !== "admin" && identity.auth_type !== "legacy")) {
+    return new Response(JSON.stringify({ error: "Admin access required" }), { status: 403, headers });
+  }
+
+  try {
+    const body = await request.json() as { userId?: string; data?: string };
+    if (!body.userId || !body.data) {
+      return new Response(JSON.stringify({ error: "userId and data required" }), { status: 400, headers });
+    }
+
+    // Generate R2 key
+    const random = crypto.randomUUID().slice(0, 8);
+    const isBase64 = body.data.length > 100 && !body.data.startsWith('{');
+    const ext = isBase64 ? 'zip' : 'json';
+    const key = `exports/${body.userId}/${Date.now()}-${random}.${ext}`;
+
+    // Store in R2 (handle both raw JSON and base64-encoded ZIP)
+    const fileData = isBase64
+      ? Uint8Array.from(atob(body.data), c => c.charCodeAt(0))
+      : new TextEncoder().encode(body.data);
+    const contentType = isBase64 ? "application/zip" : "application/json";
+
+    await env.BUCKET.put(key, fileData, {
+      customMetadata: { userId: body.userId, createdAt: new Date().toISOString() },
+      httpMetadata: { contentType },
+    });
+
+    // Generate signed download URL (1-hour expiry)
+    const expires = Math.floor(Date.now() / 1000) + 3600;
+    const attachmentSecret = env.ATTACHMENT_SECRET || "";
+    const message = `export:${key}:${expires}`;
+    const encoder = new TextEncoder();
+
+    const cryptoKey = await crypto.subtle.importKey(
+      "raw", encoder.encode(attachmentSecret),
+      { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+    );
+    const mac = await crypto.subtle.sign("HMAC", cryptoKey, encoder.encode(message));
+    const sig = btoa(String.fromCharCode(...new Uint8Array(mac)))
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+    const workerUrl = new URL(request.url).origin;
+    const downloadUrl = `${workerUrl}/exports/${key}?expires=${expires}&sig=${sig}`;
+
+    // Generate 6-digit PIN and store in KV (1-hour TTL, same as link)
+    let pin: string | null = null;
+    if (env.KV) {
+      const pinBytes = new Uint8Array(3);
+      crypto.getRandomValues(pinBytes);
+      pin = String((pinBytes[0] * 65536 + pinBytes[1] * 256 + pinBytes[2]) % 1000000).padStart(6, '0');
+      await env.KV.put(`export:pin:${key}`, pin, { expirationTtl: 3600 });
+    }
+
+    return new Response(JSON.stringify({ ok: true, key, downloadUrl, pin }), { headers });
+  } catch (err: any) {
+    console.error("[store-export]", err.message);
+    return new Response(JSON.stringify({ error: "Store failed" }), { status: 500, headers });
+  }
+}
+
+/**
+ * GET /exports/{key}?expires={ts}&sig={hmac}
+ * PUBLIC: Serve a data export from R2 with HMAC-signed URL verification.
+ * Deletes the R2 object after successful download (single-use).
+ */
+function exportPinPage(actionUrl: string, error?: string): string {
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Verify Download - Mycelium</title>
+<style>
+body{margin:0;background:#0A0A0C;color:#E7E5E4;font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{background:#161618;border:1px solid #2A2A2E;border-radius:16px;padding:2.5rem;max-width:360px;width:100%;text-align:center}
+h1{font-size:1rem;font-weight:500;margin:0 0 0.5rem;color:#F5F5F4}
+p{font-size:0.8rem;color:#A8A29E;margin:0 0 1.5rem;line-height:1.5}
+.error{color:#F87171;font-size:0.75rem;margin-bottom:1rem}
+input{width:100%;box-sizing:border-box;padding:0.75rem;font-size:1.5rem;text-align:center;letter-spacing:0.5em;font-family:monospace;background:#0A0A0C;border:1px solid #2A2A2E;border-radius:8px;color:#F5F5F4;outline:none}
+input:focus{border-color:#E5B84C}
+button{width:100%;margin-top:1rem;padding:0.75rem;background:#E5B84C;color:#0A0A0C;border:none;border-radius:8px;font-size:0.85rem;font-weight:600;cursor:pointer}
+button:hover{background:#D4A63C}
+.logo{font-family:Georgia,serif;font-size:1.1rem;color:#F5F5F4;margin-bottom:1.5rem}
+.logo i{color:#E5B84C;font-style:italic}
+</style></head><body>
+<div class="card">
+<div class="logo">mycelium<i>.id</i></div>
+<h1>Verify your download</h1>
+<p>Enter the 6-digit PIN from your email to download your vault export.</p>
+${error ? `<div class="error">${error}</div>` : ''}
+<form method="GET" action="">
+<input type="text" name="pin" maxlength="6" pattern="[0-9]{6}" inputmode="numeric" autocomplete="one-time-code" autofocus required placeholder="000000">
+<input type="hidden" name="expires" value="${new URL(actionUrl).searchParams.get('expires') || ''}">
+<input type="hidden" name="sig" value="${new URL(actionUrl).searchParams.get('sig') || ''}">
+<button type="submit">Download</button>
+</form>
+</div></body></html>`;
+}
+
+async function handleServeExport(request: Request, env: Env, url: URL): Promise<Response> {
+  const key = url.pathname.slice("/exports/".length);
+  const expires = url.searchParams.get("expires");
+  const sig = url.searchParams.get("sig");
+  const pin = url.searchParams.get("pin");
+
+  if (!key || !expires || !sig) {
+    return new Response("Missing parameters", { status: 400 });
+  }
+
+  // Check expiry
+  const now = Math.floor(Date.now() / 1000);
+  if (now > parseInt(expires, 10)) {
+    return new Response("Download link expired", { status: 403 });
+  }
+
+  // Verify HMAC signature
+  const attachmentSecret = env.ATTACHMENT_SECRET || "";
+  const message = `export:${key}:${expires}`;
+  const encoder = new TextEncoder();
+
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw", encoder.encode(attachmentSecret),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+  );
+  const mac = await crypto.subtle.sign("HMAC", cryptoKey, encoder.encode(message));
+  const expectedSig = btoa(String.fromCharCode(...new Uint8Array(mac)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+  if (sig !== expectedSig) {
+    return new Response("Invalid signature", { status: 403 });
+  }
+
+  // Verify PIN (stored in KV when export was created)
+  if (env.KV) {
+    const storedPin = await env.KV.get(`export:pin:${key}`);
+    if (storedPin) {
+      if (!pin) {
+        // No PIN provided — show PIN entry page
+        return new Response(exportPinPage(url.href), {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+      if (pin !== storedPin) {
+        return new Response(exportPinPage(url.href.replace(/&pin=[^&]*/, ''), "Incorrect PIN. Check your email and try again."), {
+          status: 403,
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+      // PIN verified — delete it (single use)
+      await env.KV.delete(`export:pin:${key}`);
+    }
+  }
+
+  // Fetch from R2
+  const object = await env.BUCKET.get(key);
+  if (!object) {
+    return new Response("Export not found or already downloaded", { status: 404 });
+  }
+
+  const body = await object.arrayBuffer();
+
+  // Delete after successful retrieval (single-use download)
+  await env.BUCKET.delete(key);
+
+  const date = new Date().toISOString().slice(0, 10);
+  return new Response(body, {
+    headers: {
+      "Content-Type": key.endsWith('.zip') ? "application/zip" : "application/json; charset=utf-8",
+      "Content-Disposition": `attachment; filename="mycelium-export-${date}.${key.endsWith('.zip') ? 'zip' : 'json'}"`,
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+async function handleRegisterAgent(request: Request, env: Env): Promise<Response> {
+  const corsHeaders = { "Access-Control-Allow-Origin": signupCorsOrigin(request), "Content-Type": "application/json", "Vary": "Origin" };
+
+  // Admin only
+  const identity = await authenticateRequest(request, env);
+  if (!identity || (identity.agent !== "admin" && identity.auth_type !== "legacy")) {
+    return new Response(JSON.stringify({ error: "Admin access required" }), { status: 403, headers: corsHeaders });
+  }
+
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: "D1 not configured" }), { status: 503, headers: corsHeaders });
+  }
+
+  try {
+    const body = await request.json() as {
+      token?: string;
+      agent?: string;
+      name?: string;
+      user_id?: string;
+      scopes?: string;
+    };
+
+    if (!body.token || !body.agent || !body.user_id) {
+      return new Response(JSON.stringify({ error: "token, agent, and user_id required" }), { status: 400, headers: corsHeaders });
+    }
+
+    // Hash the token — never store raw
+    const hashBuf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body.token));
+    const tokenHash = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
+
+    const scopes = body.scopes || "org";
+    const name = body.name || body.agent;
+
+    await env.DB.prepare(`
+      INSERT INTO agent_tokens (token_hash, agent, name, user_id, scopes, created_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(token_hash) DO UPDATE SET
+        agent = excluded.agent,
+        name = excluded.name,
+        user_id = excluded.user_id,
+        scopes = excluded.scopes
+    `).bind(tokenHash, body.agent, name, body.user_id, scopes).run();
+
+    return new Response(JSON.stringify({ ok: true, token_hash: tokenHash }), { headers: corsHeaders });
+  } catch (err: any) {
+    console.error("[admin/register-agent]", err.message);
+    return new Response(JSON.stringify({ error: "Server error" }), { status: 500, headers: corsHeaders });
+  }
+}
+
+/**
+ * POST /api/signup/check-handle
+ * PUBLIC: Check if a handle is available.
+ */
+/**
+ * POST /api/signup/checkout
+ * PUBLIC: Creates a Stripe Checkout session for the Mycelium Vault.
+ * Called after key ceremony, before provisioning.
+ */
+async function handleSignupCheckout(request: Request, env: Env): Promise<Response> {
+  const ch = signupCorsHeaders(request);
+
+  try {
+    const body = await request.json() as {
+      email?: string;
+      plan?: string; // monthly | annual | decade
+      handle?: string;
+      keyHash?: string;
+    };
+
+    const email = body.email?.trim().toLowerCase();
+    const plan = (body.plan || "monthly") as "monthly" | "annual" | "decade";
+
+    if (!email || !STRIPE_PRICES[plan]) {
+      return new Response(JSON.stringify({ error: "Email and valid plan required" }), { status: 400, headers: ch });
+    }
+
+    const { sessionId, url } = await createCheckoutSession(env, {
+      email,
+      plan,
+      handle: body.handle || "",
+      keyHash: body.keyHash || "",
+      successUrl: `https://mycelium.id/signup/?paid=true&session_id={CHECKOUT_SESSION_ID}`,
+      cancelUrl: `https://mycelium.id/signup/?cancelled=true`,
+    });
+
+    // Cache checkout intent in KV for activate fallback
+    if (env.KV) {
+      await env.KV.put(`signup:intent:${sessionId}`, JSON.stringify({
+        email, handle: body.handle, keyHash: body.keyHash, plan,
+      }), { expirationTtl: 3600 });
+    }
+
+    return new Response(JSON.stringify({ sessionId, url }), { headers: ch });
+  } catch (err: any) {
+    console.error("[stripe] checkout error:", err.message);
+    return new Response(JSON.stringify({ error: "Payment setup failed" }), { status: 502, headers: ch });
+  }
+}
+
+/**
+ * POST /api/signup/checkout/verify
+ * PUBLIC: Verify a Stripe Checkout session was paid. Called by signup page after redirect.
+ * Informational only — the webhook is the source of truth for payment state.
+ */
+async function handleSignupCheckoutVerify(request: Request, env: Env): Promise<Response> {
+  const ch = signupCorsHeaders(request);
+
+  try {
+    const body = await request.json() as { sessionId?: string };
+    if (!body.sessionId) {
+      return new Response(JSON.stringify({ error: "sessionId required" }), { status: 400, headers: ch });
+    }
+
+    const session = await retrieveCheckoutSession(env, body.sessionId);
+
+    if (session.payment_status !== "paid") {
+      return new Response(JSON.stringify({ error: "Payment not completed", status: session.payment_status }), { status: 402, headers: ch });
+    }
+
+    return new Response(JSON.stringify({
+      paid: true,
+      email: session.customer_email,
+      handle: session.metadata?.handle,
+      keyHash: session.metadata?.keyHash,
+      plan: session.metadata?.plan,
+      customerId: session.customer,
+      subscriptionId: session.subscription,
+    }), { headers: ch });
+  } catch (err: any) {
+    return new Response(JSON.stringify({ error: "Verification failed" }), { status: 500, headers: ch });
+  }
+}
+
+// handleStripeWebhook is now imported from ./handlers/stripe-webhook
+
+async function handleCheckHandle(request: Request, env: Env): Promise<Response> {
+  const corsHeaders = { "Access-Control-Allow-Origin": signupCorsOrigin(request), "Content-Type": "application/json", "Vary": "Origin" };
+
+  try {
+    const body = await request.json() as { handle?: string };
+    const handle = body.handle?.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+
+    if (!handle || handle.length < 3 || handle.length > 24) {
+      return new Response(JSON.stringify({ available: false, error: "Handle must be 3-24 chars (a-z, 0-9, _, -)" }), { headers: corsHeaders });
+    }
+
+    // Reserved handles — includes DNS-sensitive subdomains
+    const reserved = [
+      'admin', 'root', 'system', 'mycelium', 'support', 'help', 'api', 'www', 'mail', 'test',
+      'login', 'signup', 'billing', 'status', 'docs', 'blog', 'app', 'portal', 'dashboard',
+      'staging', 'dev', 'cdn', 'assets', 'static', 'ns1', 'ns2', 'ftp', 'smtp', 'imap',
+      'pop', 'mx', 'autoconfig', 'autodiscover', 'mta-sts', 'dmarc',
+    ];
+    if (reserved.includes(handle)) {
+      return new Response(JSON.stringify({ available: false }), { headers: corsHeaders });
+    }
+
+    // Check if handle is actively in use:
+    // 1. User with this handle who has an active (ready/pending/provisioning) vault
+    // 2. Provisioning job that's active (not failed/deleted, not abandoned pending)
+    const [activeUser, activeJob] = await Promise.all([
+      env.DB.prepare(
+        `SELECT u.id FROM users u
+         WHERE u.handle = ?
+         AND EXISTS (SELECT 1 FROM provisioning_jobs p WHERE p.user_id = u.id AND p.status NOT IN ('failed', 'deleted'))
+         LIMIT 1`
+      ).bind(handle).first(),
+      env.DB.prepare(
+        "SELECT id FROM provisioning_jobs WHERE handle = ? AND status NOT IN ('failed', 'deleted') AND NOT (status = 'pending' AND created_at < datetime('now', '-24 hours')) LIMIT 1"
+      ).bind(handle).first(),
+    ]);
+
+    return new Response(JSON.stringify({ available: !activeUser && !activeJob }), { headers: corsHeaders });
+  } catch (err: any) {
+    return new Response(JSON.stringify({ error: "Server error" }), { status: 500, headers: corsHeaders });
+  }
+}
+
+async function handleSignupLookup(request: Request, env: Env): Promise<Response> {
+  const corsHeaders = { "Access-Control-Allow-Origin": signupCorsOrigin(request), "Content-Type": "application/json", "Vary": "Origin" };
+
+  try {
+    // Rate limit to prevent enumeration (30 lookups/hour per IP)
+    const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+    const { allowed } = await checkRateLimit(env.KV, ip, "signup-lookup", { limit: 30, windowSeconds: 3600 });
+    if (!allowed) {
+      return new Response(JSON.stringify({ error: "Too many requests" }), { status: 429, headers: { ...corsHeaders, "Retry-After": "3600" } });
+    }
+
+    const startTime = Date.now();
+
+    const body = await request.json() as { email?: string; handle?: string };
+    const email = body.email?.trim().toLowerCase();
+    const handle = body.handle?.trim().toLowerCase().replace(/^@/, '').replace(/[^a-z0-9_-]/g, '') || undefined;
+
+    if (!email && !handle) {
+      return new Response(JSON.stringify({ error: "Email or handle required" }), { status: 400, headers: corsHeaders });
+    }
+
+    let job: { id: string; status: string; portal_url: string | null } | null = null;
+    let result: Record<string, unknown> | null = null;
+
+    // Always run both lookups to keep timing uniform
+    if (handle) {
+      job = await env.DB.prepare(
+        "SELECT id, status, portal_url FROM provisioning_jobs WHERE handle = ? AND status NOT IN ('failed', 'deleted') ORDER BY created_at DESC LIMIT 1"
+      ).bind(handle).first();
+
+      if (!job) {
+        const userRow = await env.DB.prepare(
+          "SELECT id FROM users WHERE handle = ? LIMIT 1"
+        ).bind(handle).first();
+        if (userRow) {
+          result = { found: true, portalUrl: `https://${handle}.mycelium.id`, status: "ready" };
+        }
+      }
+    }
+
+    if (!job && !result && email && isValidEmail(email)) {
+      job = await env.DB.prepare(
+        "SELECT id, status, portal_url FROM provisioning_jobs WHERE email = ? AND status NOT IN ('failed', 'deleted') ORDER BY created_at DESC LIMIT 1"
+      ).bind(email).first();
+    }
+
+    if (!result) {
+      if (!job) {
+        result = { found: false };
+      } else if (job.status === "ready" && job.portal_url) {
+        result = { found: true, portalUrl: job.portal_url, status: "ready" };
+      } else {
+        // Still provisioning — only return status, not internal job ID
+        result = { found: true, status: job.status };
+      }
+    }
+
+    // Enforce minimum response time to prevent timing-based enumeration
+    const elapsed = Date.now() - startTime;
+    const minResponseMs = 200;
+    if (elapsed < minResponseMs) {
+      await new Promise(resolve => setTimeout(resolve, minResponseMs - elapsed));
+    }
+
+    return new Response(JSON.stringify(result), { headers: corsHeaders });
+  } catch (err: any) {
+    console.error("[signup/lookup]", err.message);
+    return new Response(JSON.stringify({ error: "Server error" }), { status: 500, headers: corsHeaders });
   }
 }
 
@@ -2629,16 +4115,9 @@ async function enrichMessages(
 
   const ai = new WorkersAIService(env);
 
-  // Import master key for decryption
-  const masterKeyHex = (env as unknown as Record<string, unknown>).ENCRYPTION_MASTER_KEY as string | undefined;
-  let masterKey: CryptoKey | null = null;
-  if (masterKeyHex) {
-    try {
-      masterKey = await importMasterKey(masterKeyHex);
-    } catch (e) {
-      console.error("[Enrich] Failed to import master key:", e);
-    }
-  }
+  // SWISS VAULT: Worker has no master key. Can only enrich UNENCRYPTED content
+  // (real-time best-effort for new messages before VPS encrypts them).
+  // Encrypted content is enriched by VPS enrichment daemon.
 
   // Read messages from D1
   const placeholders = messageIds.map(() => "?").join(", ");
@@ -2656,7 +4135,7 @@ async function enrichMessages(
 
   if (rows.length === 0) {
     console.warn("[Enrich] No messages found for IDs:", messageIds);
-    return;
+    return 0;
   }
 
   const vectors: Array<{ id: string; values: number[]; metadata: Record<string, string> }> = [];
@@ -2665,19 +4144,11 @@ async function enrichMessages(
   for (const row of rows) {
     if (!row.content || row.content.length < 5) continue;
 
-    // Decrypt content if encrypted
-    let plaintext = row.content;
-    if (masterKey && isEncrypted(row.content)) {
-      try {
-        // Allow all scopes for enrichment — it's a system-level operation
-        plaintext = await decrypt(row.content, ["personal", "org", "wealth", "moms"] as Scope[], masterKey);
-      } catch (e) {
-        console.error(`[Enrich] Decrypt failed for ${row.id}:`, e);
-        continue; // Skip messages we can't decrypt
-      }
-    }
+    // Skip encrypted content — VPS enrichment daemon handles it
+    if (row.content.startsWith("eyJ")) continue;
 
-    if (!plaintext || plaintext.length < 5) continue;
+    const plaintext = row.content;
+    if (plaintext.length < 5) continue;
 
     try {
       // Run tagging + embedding in parallel
@@ -2750,68 +4221,5 @@ async function enrichMessages(
   return successCount;
 }
 
-/**
- * Decrypt a batch of messages — lightweight endpoint for VPS-native enrichment.
- * Master key stays in Cloudflare. VPS gets plaintext, does AI calls directly.
- * Only accessible with ADMIN_SECRET (full scope).
- */
-async function handleDecryptBatch(
-  request: Request,
-  env: Env,
-): Promise<Response> {
-  const corsHeaders = { ...makeCorsHeaders(request), "Content-Type": "application/json" };
-
-  const identity = await authenticateRequest(request, env);
-  if (!identity || identity.auth_type !== "legacy" || identity.agent !== "admin") {
-    return new Response(JSON.stringify({ error: "Admin access required" }), {
-      status: 403, headers: corsHeaders,
-    });
-  }
-
-  const body = await request.json() as { messageIds: string[] };
-  if (!body.messageIds?.length || body.messageIds.length > 50) {
-    return new Response(JSON.stringify({ error: "messageIds required (max 50)" }), {
-      status: 400, headers: corsHeaders,
-    });
-  }
-
-  const masterKeyHex = (env as unknown as Record<string, unknown>).ENCRYPTION_MASTER_KEY as string | undefined;
-  if (!masterKeyHex) {
-    return new Response(JSON.stringify({ error: "Encryption not configured" }), {
-      status: 500, headers: corsHeaders,
-    });
-  }
-
-  const masterKey = await importMasterKey(masterKeyHex);
-
-  const placeholders = body.messageIds.map(() => "?").join(", ");
-  const result = await env.DB.prepare(
-    `SELECT id, content, user_id, agent_id, source FROM messages WHERE id IN (${placeholders})`,
-  ).bind(...body.messageIds).all();
-
-  const rows = (result.results || []) as Array<{
-    id: string; content: string; user_id: string; agent_id: string; source: string;
-  }>;
-
-  const decrypted: Array<{
-    id: string; content: string; user_id: string; agent_id: string; source: string;
-  }> = [];
-
-  for (const row of rows) {
-    if (!row.content || row.content.length < 5) continue;
-
-    let plaintext = row.content;
-    if (isEncrypted(row.content)) {
-      try {
-        plaintext = await decrypt(row.content, ["personal", "org", "wealth", "moms"] as Scope[], masterKey);
-      } catch {
-        continue; // Skip undecryptable
-      }
-    }
-
-    decrypted.push({ ...row, content: plaintext });
-  }
-
-  return new Response(JSON.stringify({ messages: decrypted }), { headers: corsHeaders });
-}
+// SWISS VAULT: handleDecryptBatch removed — VPS decrypts locally with crypto-local.js
 

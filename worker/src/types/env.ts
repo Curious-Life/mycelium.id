@@ -90,6 +90,14 @@ export interface Env {
   OWNER_NAME?: string; // Owner's display name for prompts (default: "User")
   RESEND_API_KEY?: string; // Resend API key for email notifications
   NOTIFICATION_EMAIL?: string; // Email to receive signup notifications
+  CF_DNS_TOKEN?: string; // Cloudflare API token for DNS management (Zone:DNS:Edit)
+  CF_ZONE_ID?: string; // Cloudflare Zone ID for mycelium.id
+  STRIPE_SECRET_KEY?: string; // Stripe API secret key
+  STRIPE_PUBLISHABLE_KEY?: string; // Stripe publishable key
+  STRIPE_WEBHOOK_SECRET?: string; // Stripe webhook signing secret
+  COINGATE_API_KEY?: string; // CoinGate API auth token
+  COINGATE_WEBHOOK_SECRET?: string; // CoinGate webhook callback token
+  COINGATE_ENVIRONMENT?: string; // 'sandbox' or 'live' (default: live)
 
   // Multi-Agent Configuration
   AGENT_ID?: string; // Agent identifier (mya-personal, mya-research, mya-builder, mya-company)

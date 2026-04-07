@@ -3,6 +3,7 @@ import { writable } from 'svelte/store';
 export interface User {
 	id: string;
 	displayName: string | null;
+	settings?: Record<string, unknown>;
 }
 
 interface AuthState {

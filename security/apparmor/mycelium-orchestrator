@@ -1,0 +1,63 @@
+# AppArmor profile for the Mycelium orchestrator process.
+# The orchestrator manages other agents and needs broader access than
+# individual agents, including reading .env for PM2 environment setup.
+#
+# Install: cp security/apparmor/mycelium-orchestrator /etc/apparmor.d/
+# Load:    apparmor_parser -r /etc/apparmor.d/mycelium-orchestrator
+
+#include <tunables/global>
+
+profile mycelium-orchestrator flags=(attach_disconnected) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  # ── Node.js runtime ──
+  /usr/bin/node ix,
+  /usr/local/bin/node ix,
+  /usr/bin/env ix,
+  /usr/bin/pm2 ix,
+  /usr/local/bin/pm2 ix,
+  /usr/bin/claude ix,
+  /usr/local/bin/claude ix,
+
+  # ── Application code ──
+  /home/claude/mycelium/ r,
+  /home/claude/mycelium/** r,
+  /home/claude/mycelium/node_modules/** r,
+
+  # ── Orchestrator needs .env for PM2 process spawning ──
+  /home/claude/mycelium/.env r,
+
+  # ── Agent directories ──
+  owner /home/claude/agents/** rw,
+
+  # ── Logs ──
+  /var/log/mycelium/ r,
+  /var/log/mycelium/** rw,
+
+  # ── PM2 state ──
+  owner /home/claude/.pm2/** rw,
+
+  # ── Temp ──
+  /tmp/ r,
+  /tmp/** rw,
+  owner /home/claude/.cache/** rw,
+
+  # ── DENY ──
+  deny /home/claude/.ssh/** rw,
+  deny /etc/shadow r,
+
+  # ── Network ──
+  network inet stream,
+  network inet6 stream,
+  network inet dgram,
+  network inet6 dgram,
+
+  # ── Proc/sys ──
+  /proc/sys/kernel/random/uuid r,
+  /proc/self/fd/ r,
+  /proc/self/cgroup r,
+  owner /proc/*/status r,
+  owner /proc/*/stat r,
+  /sys/fs/cgroup/** r,
+}

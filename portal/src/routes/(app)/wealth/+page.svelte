@@ -305,7 +305,15 @@
 
 	// ── Helpers ────────────────────────────────────────────────────────────
 
+	const CRYPTO_SYMBOLS: Record<string, string> = { BTC: '₿', ETH: 'Ξ', SOL: '◎' };
+
 	function formatCurrency(value: number, currency: string): string {
+		const upper = currency?.toUpperCase();
+		const cryptoSym = CRYPTO_SYMBOLS[upper];
+		if (cryptoSym) {
+			const decimals = Math.abs(value) < 1 ? 6 : Math.abs(value) < 100 ? 4 : 2;
+			return `${cryptoSym}${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals })}`;
+		}
 		try {
 			return new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
 		} catch {
@@ -319,6 +327,12 @@
 		} catch {
 			return dateStr;
 		}
+	}
+
+	const CRYPTO_COLORS: Record<string, string> = { BTC: '#F7931A', ETH: '#627EEA', SOL: '#9945FF' };
+
+	function cryptoColor(symbol: string): string | null {
+		return CRYPTO_COLORS[symbol?.toUpperCase()] || null;
 	}
 
 	function typeColor(type: string): string {
@@ -532,7 +546,7 @@
 								{#each positions as pos}
 									<tr class="border-b border-[var(--color-border)]/50 hover:bg-[var(--color-elevated)]/50 transition-colors">
 										<td class="py-3 pr-4">
-											<div class="font-medium text-[var(--color-text-primary)]">{pos.symbol}</div>
+											<div class="font-medium" style={cryptoColor(pos.symbol) ? `color: ${cryptoColor(pos.symbol)}` : 'color: var(--color-text-primary)'}>{pos.symbol}</div>
 											<div class="text-xs text-[var(--color-text-tertiary)]">{pos.asset_name}</div>
 										</td>
 										<td class="py-3 pr-4">

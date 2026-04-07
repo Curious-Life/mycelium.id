@@ -15,16 +15,33 @@ const ALLOWED_ORIGINS = getAllowedOrigins();
 
 export function corsOrigin(request: Request): string {
   const origin = request.headers.get("Origin") || "";
-  return ALLOWED_ORIGINS.has(origin) ? origin : [...ALLOWED_ORIGINS][0];
+  // Only reflect origin if it's in the allow-list. Never fall back to a default.
+  return ALLOWED_ORIGINS.has(origin) ? origin : "";
+}
+
+/** Standard security headers applied to every response. */
+export function securityHeaders(): Record<string, string> {
+  return {
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+  };
 }
 
 export function corsHeaders(request: Request): Record<string, string> {
-  return {
-    "Access-Control-Allow-Origin": corsOrigin(request),
+  const origin = corsOrigin(request);
+  const headers: Record<string, string> = {
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Session-Token",
     "Vary": "Origin",
+    ...securityHeaders(),
   };
+  // Only set Allow-Origin if origin is in the whitelist
+  if (origin) {
+    headers["Access-Control-Allow-Origin"] = origin;
+  }
+  return headers;
 }
 
 export function corsPreflight(request: Request): Response {

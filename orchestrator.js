@@ -3,6 +3,12 @@
  * Handles agent CRUD and proxies requests to individual agent servers
  */
 
+// SECURITY: Block --inspect in production.
+if (process.execArgv.some(a => a.includes('inspect'))) {
+  console.error('FATAL: --inspect detected. Node inspector is not allowed in production.');
+  process.exit(1);
+}
+
 import './lib/sentry.js';
 import 'dotenv/config';
 import { bootstrapSecrets, refreshSecrets } from './lib/bootstrap-secrets.js';

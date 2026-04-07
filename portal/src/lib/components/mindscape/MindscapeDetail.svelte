@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { marked } from 'marked';
 	import DOMPurify from 'isomorphic-dompurify';
+	import { api } from '$lib/api';
 	import {
 		mindscapeState,
 		mindscapePoints,
@@ -10,6 +11,33 @@
 		type TerritoryProfile,
 		type SemanticThemeProfile,
 	} from '$lib/stores/mindscape';
+
+	const VISIBILITY_OPTIONS = [
+		{ value: 'private', label: 'Private', icon: '🔒' },
+		{ value: 'friends', label: 'Friends', icon: '👥' },
+		{ value: 'public', label: 'Public', icon: '🌐' },
+	] as const;
+
+	let savingVisibility = $state(false);
+
+	async function setVisibility(territoryId: number, visibility: string) {
+		savingVisibility = true;
+		try {
+			const res = await api(`/portal/mindscape/territory/${territoryId}/visibility`, {
+				method: 'PUT',
+				body: JSON.stringify({ visibility }),
+			});
+			if (res.ok) {
+				// Update local state
+				const territories = $mindscapeState.territories;
+				if (territories[territoryId]) {
+					territories[territoryId].visibility = visibility as 'private' | 'friends' | 'public';
+					mindscapeState.update(s => ({ ...s, territories: { ...territories } }));
+				}
+			}
+		} catch {}
+		savingVisibility = false;
+	}
 
 	marked.use({ breaks: true, gfm: true });
 
@@ -324,7 +352,19 @@
 			<div class="detail-panel">
 				<div class="detail-header">
 					<div class="detail-color-bar" style="background-color: {getColor(msState.selectedTerritoryId!)}"></div>
-					<h2 class="detail-title">{currentTerritory.name}</h2>
+					<div class="detail-title-row">
+						<h2 class="detail-title">{currentTerritory.name}</h2>
+						<select
+							class="visibility-select"
+							value={currentTerritory.visibility || 'private'}
+							onchange={(e) => setVisibility(msState.selectedTerritoryId!, (e.target as HTMLSelectElement).value)}
+							disabled={savingVisibility}
+						>
+							{#each VISIBILITY_OPTIONS as opt}
+								<option value={opt.value}>{opt.icon} {opt.label}</option>
+							{/each}
+						</select>
+					</div>
 					{#if currentTerritory.archetypeType}
 						<span class="archetype-badge">{currentTerritory.archetypeType}</span>
 					{/if}
@@ -659,11 +699,33 @@
 		border-radius: 2px;
 		margin-bottom: 10px;
 	}
+	.detail-title-row {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
 	.detail-title {
 		font-size: 1rem;
 		font-weight: 600;
 		color: var(--color-text-primary);
 		margin: 0 0 6px;
+		flex: 1;
+	}
+	.visibility-select {
+		padding: 2px 6px;
+		font-size: 0.65rem;
+		background: var(--color-bg);
+		border: 1px solid var(--color-border);
+		border-radius: 4px;
+		color: var(--color-text-secondary);
+		cursor: pointer;
+		flex-shrink: 0;
+		margin-top: 2px;
+	}
+	.visibility-select:focus {
+		border-color: var(--color-accent-aurum);
+		outline: none;
 	}
 	.archetype-badge {
 		display: inline-block;

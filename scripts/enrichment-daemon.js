@@ -3,16 +3,21 @@
  * Enrichment Daemon — persistent PM2 process that ensures every message
  * gets tagged + embedded.
  *
- * Architecture (security-first):
+ * Architecture (Swiss Vault):
  *   - Fetches unenriched message IDs from D1 (via Worker proxy)
- *   - Sends IDs to Worker /api/decrypt-batch → gets plaintext back
- *     (master key NEVER leaves Cloudflare)
+ *   - Decrypts content locally with ENCRYPTION_MASTER_KEY (VPS-only)
  *   - Calls Workers AI REST API directly for tagging + embedding
  *     (no Worker timeout, parallel, fast)
  *   - Writes tags/entities back to D1, upserts vectors to Vectorize
  *
  * Env: MYA_WORKER_URL, ADMIN_SECRET, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_AI_TOKEN
  */
+
+// SECURITY: Block --inspect in production.
+if (process.execArgv.some(a => a.includes('inspect'))) {
+  console.error('FATAL: --inspect detected. Node inspector is not allowed in production.');
+  process.exit(1);
+}
 
 import { config } from 'dotenv';
 import { resolve, dirname } from 'path';
@@ -27,6 +32,7 @@ import { bootstrapSecrets, refreshSecrets } from '../lib/bootstrap-secrets.js';
 await bootstrapSecrets();
 
 import { WorkersAIClient } from '../lib/workers-ai-client.js';
+import { importMasterKeyFromTmpfs, decrypt, isEncrypted } from '../lib/crypto-local.js';
 
 const WORKER_URL = process.env.MYA_WORKER_URL;
 const TOKEN = process.env.ADMIN_SECRET;
@@ -61,16 +67,13 @@ async function dbQuery(sql, params = []) {
   return (await res.json()).results || [];
 }
 
-async function decryptBatch(messageIds) {
-  const res = await fetch(`${WORKER_URL}/api/decrypt-batch`, {
-    method: 'POST',
-    headers: dbHeaders,
-    body: JSON.stringify({ messageIds }),
-    signal: AbortSignal.timeout(30000),
-  });
-  if (!res.ok) throw new Error(`Decrypt batch failed: ${res.status}`);
-  const data = await res.json();
-  return data.messages || [];
+// Local decryption — master key never leaves VPS
+let masterKey = null;
+
+async function decryptContent(content) {
+  if (!masterKey) return content; // no key = passthrough
+  if (!isEncrypted(content)) return content;
+  return decrypt(content, masterKey);
 }
 
 async function vectorUpsert(vectors) {
@@ -139,9 +142,22 @@ async function processQueue() {
   );
   if (!rows.length) return 0;
 
-  // Step 2: Decrypt via Worker (master key stays in Cloudflare)
+  // Step 2: Fetch content + decrypt locally (master key on VPS only)
   const ids = rows.map(r => r.id);
-  const messages = await decryptBatch(ids);
+  const placeholders = ids.map(() => '?').join(',');
+  const rawMessages = await dbQuery(
+    `SELECT id, content, user_id, agent_id FROM messages WHERE id IN (${placeholders})`,
+    ids,
+  );
+  // Decrypt each message locally
+  const messages = [];
+  for (const msg of rawMessages) {
+    if (!msg.content) continue;
+    try {
+      msg.content = await decryptContent(msg.content);
+    } catch { continue; }
+    if (msg.content && msg.content.length >= 5) messages.push(msg);
+  }
   if (!messages.length) return 0;
 
   // Step 3: Tag + embed in parallel via direct AI API
@@ -183,7 +199,15 @@ async function processQueue() {
 }
 
 async function main() {
-  console.log('[enrichment-daemon] Started (VPS-native, key in Cloudflare)');
+  // Load master key from tmpfs (preferred) or env (fallback)
+  masterKey = await importMasterKeyFromTmpfs();
+  if (masterKey) {
+    console.log('[enrichment-daemon] Master key loaded (Swiss Vault — local decryption)');
+  } else {
+    console.warn('[enrichment-daemon] No master key (tmpfs nor env) — decryption disabled');
+  }
+
+  console.log('[enrichment-daemon] Started (Swiss Vault — key on VPS only)');
   console.log(`[enrichment-daemon] Concurrency: ${CONCURRENCY} | Poll: ${POLL_INTERVAL / 1000}s`);
 
   while (true) {

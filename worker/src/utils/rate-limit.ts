@@ -33,8 +33,9 @@ export async function checkRateLimit(
   config: RateLimitConfig
 ): Promise<{ allowed: boolean; remaining: number }> {
   if (!kv) {
-    // If KV is not available, allow the request (fail open)
-    return { allowed: true, remaining: config.limit };
+    // Fail closed — deny requests if KV is unavailable to prevent abuse
+    console.error("[rate-limit] KV unavailable — denying request (fail-closed)");
+    return { allowed: false, remaining: 0 };
   }
 
   const windowKey = Math.floor(Date.now() / 1000 / config.windowSeconds);

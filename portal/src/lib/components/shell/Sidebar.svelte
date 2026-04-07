@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
 	import { navigationState, type PrimaryView } from '$lib/stores/navigation';
@@ -11,16 +12,43 @@
 	const isOpen = $derived($navigationState.sidebarOpen);
 	const currentView = $derived($navigationState.primaryView);
 
-	const navItems: { id: PrimaryView; label: string; icon: string; href: string }[] = [
+	let pendingCount = $state(0);
+	onMount(() => {
+		if (browser) {
+			fetch('/portal/connections/count', { credentials: 'include' })
+				.then(r => r.json())
+				.then(d => { pendingCount = d.pending || 0; })
+				.catch(() => {});
+			// Refresh every 60s
+			const interval = setInterval(() => {
+				fetch('/portal/connections/count', { credentials: 'include' })
+					.then(r => r.json())
+					.then(d => { pendingCount = d.pending || 0; })
+					.catch(() => {});
+			}, 60000);
+			return () => clearInterval(interval);
+		}
+	});
+
+	type NavItem = { id: PrimaryView; label: string; icon: string; href: string };
+
+	const coreNav: NavItem[] = [
 		{ id: 'mindscape', label: 'Mindscape', icon: 'ratio',    href: '/mindscape' },
 		{ id: 'library',   label: 'Library',   icon: 'folder',   href: '/library' },
 		{ id: 'timeline',  label: 'Timeline',  icon: 'tornado',  href: '/timeline' },
-		{ id: 'wealth',    label: 'Wealth',    icon: 'wealth',   href: '/wealth' },
-		{ id: 'intel',     label: 'Intel',     icon: 'intel',    href: '/intel' },
 		{ id: 'activity',  label: 'Activity',  icon: 'activity', href: '/activity' },
 		{ id: 'agents',    label: 'Agents',    icon: 'agents',   href: '/agents' },
-		{ id: 'import',    label: 'Import',    icon: 'download', href: '/import' },
+		{ id: 'profile',   label: 'Profile',   icon: 'profile',  href: '/profile' },
+		{ id: 'connections', label: 'Connections', icon: 'connections', href: '/connections' },
+		{ id: 'contexts',    label: 'Contexts',    icon: 'contexts',    href: '/contexts' },
 	];
+
+	const moduleNav: NavItem[] = [
+		{ id: 'wealth',    label: 'Wealth',    icon: 'wealth',   href: '/wealth' },
+		{ id: 'intel',     label: 'Intel',     icon: 'intel',    href: '/intel' },
+	];
+
+	const navItems = [...coreNav, ...moduleNav];
 
 	function handleNavClick(item: typeof navItems[0]) {
 		navigationState.setPrimaryView(item.id);
@@ -31,6 +59,58 @@
 		await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' });
 		auth.logout();
 		window.location.href = '/login';
+	}
+
+	// Editable vault name
+	let vaultName = $state('');
+	let isEditingName = $state(false);
+	let nameInputRef = $state<HTMLInputElement>();
+
+	$effect(() => {
+		const settings = $auth.user?.settings as Record<string, unknown> | undefined;
+		if (settings?.vault_name && typeof settings.vault_name === 'string') {
+			vaultName = settings.vault_name;
+		} else {
+			vaultName = 'Mycelium';
+		}
+	});
+
+	function startEditingName() {
+		isEditingName = true;
+		// Focus after DOM update
+		setTimeout(() => nameInputRef?.focus(), 0);
+	}
+
+	async function saveName() {
+		isEditingName = false;
+		const trimmed = vaultName.trim() || 'Mycelium';
+		vaultName = trimmed;
+		if (trimmed === 'Mycelium') return; // Don't save the default
+		try {
+			await fetch('/portal/settings', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'same-origin',
+				body: JSON.stringify({ vault_name: trimmed }),
+			});
+			// Update local auth store settings
+			if ($auth.user) {
+				const settings = ($auth.user.settings || {}) as Record<string, unknown>;
+				settings.vault_name = trimmed;
+				auth.setUser({ ...$auth.user, settings });
+			}
+		} catch {}
+	}
+
+	function handleNameKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			saveName();
+		} else if (e.key === 'Escape') {
+			isEditingName = false;
+			const settings = $auth.user?.settings as Record<string, unknown> | undefined;
+			vaultName = (settings?.vault_name as string) || 'Mycelium';
+		}
 	}
 
 	// Resizable sidebar
@@ -81,7 +161,24 @@
 	<!-- Brand header -->
 	<div class="p-4 border-b border-[var(--color-border)]">
 		<div>
-			<h1 class="text-base font-medium text-[var(--color-text-primary)]">Mycelium</h1>
+			{#if isEditingName}
+				<input
+					bind:this={nameInputRef}
+					bind:value={vaultName}
+					onblur={saveName}
+					onkeydown={handleNameKeydown}
+					class="text-base font-medium text-[var(--color-text-primary)] bg-transparent border-b border-[var(--color-accent)] outline-none w-full"
+					maxlength="60"
+				/>
+			{:else}
+				<!-- svelte-ignore a11y_click_events_have_key_events -->
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+				<h1
+					class="text-base font-medium text-[var(--color-text-primary)] cursor-text hover:text-[var(--color-accent)] transition-colors"
+					onclick={startEditingName}
+				>{vaultName}</h1>
+			{/if}
 			<p class="text-xs text-[var(--color-text-tertiary)]">Intelligence system</p>
 		</div>
 	</div>
@@ -89,7 +186,7 @@
 	<!-- Primary navigation -->
 	<div class="py-3">
 		<nav class="flex flex-col gap-1 px-2">
-			{#each navItems as item}
+			{#each coreNav as item}
 				{@const isActive = currentView === item.id}
 				<button
 					onclick={() => handleNavClick(item)}
@@ -120,32 +217,68 @@
 							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456Z" />
 							</svg>
-						{:else if item.icon === 'wealth'}
-						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M2.25 18.75a60.07 60.07 0 0 1 15.797 2.101c.727.198 1.453-.342 1.453-1.096V18.75M3.75 4.5v.75A.75.75 0 0 1 3 6h-.75m0 0v-.375c0-.621.504-1.125 1.125-1.125H20.25M2.25 6v9m18-10.5v.75c0 .414.336.75.75.75h.75m-1.5-1.5h.375c.621 0 1.125.504 1.125 1.125v9.75c0 .621-.504 1.125-1.125 1.125h-.375m1.5-1.5H21a.75.75 0 0 0-.75.75v.75m0 0H3.75m0 0h-.375a1.125 1.125 0 0 1-1.125-1.125V15m1.5 1.5v-.75A.75.75 0 0 0 3 15h-.75M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm3 0h.008v.008H18V10.5Zm-12 0h.008v.008H6V10.5Z" />
-						</svg>
-					{:else if item.icon === 'intel'}
-						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 0 1 7.843 4.582M12 3a8.997 8.997 0 0 0-7.843 4.582m15.686 0A11.953 11.953 0 0 1 12 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0 1 21 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0 1 12 16.5a17.92 17.92 0 0 1-8.716-2.247m0 0A8.966 8.966 0 0 1 3 12c0-1.264.26-2.467.73-3.56" />
-						</svg>
-					{:else if item.icon === 'activity'}
+						{:else if item.icon === 'activity'}
 						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 							<path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
 						</svg>
-					{:else if item.icon === 'download'}
+					{:else if item.icon === 'connections'}
 							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M12 16V4m0 12l-4-4m4 4l4-4M4 20h16" />
+								<path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" />
+							</svg>
+						{:else if item.icon === 'contexts'}
+							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 0 1 6 3.75h2.25A2.25 2.25 0 0 1 10.5 6v2.25a2.25 2.25 0 0 1-2.25 2.25H6a2.25 2.25 0 0 1-2.25-2.25V6ZM3.75 15.75A2.25 2.25 0 0 1 6 13.5h2.25a2.25 2.25 0 0 1 2.25 2.25V18a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 18v-2.25ZM13.5 6a2.25 2.25 0 0 1 2.25-2.25H18A2.25 2.25 0 0 1 20.25 6v2.25A2.25 2.25 0 0 1 18 10.5h-2.25a2.25 2.25 0 0 1-2.25-2.25V6ZM13.5 15.75a2.25 2.25 0 0 1 2.25-2.25H18a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 18 20.25h-2.25A2.25 2.25 0 0 1 13.5 18v-2.25Z" />
+							</svg>
+						{:else if item.icon === 'profile'}
+							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
 							</svg>
 						{/if}
 					</div>
 					<span class="text-sm font-medium">{item.label}</span>
+						{#if item.id === 'connections' && pendingCount > 0}
+							<span class="ml-auto text-[0.6rem] font-semibold bg-[var(--color-accent-aurum)] text-[var(--color-bg)] rounded-full px-1.5 py-0.5 min-w-[18px] text-center">{pendingCount}</span>
+						{/if}
 				</button>
 			{/each}
+
+			<!-- Modules -->
+			<div class="mt-3 pt-3 border-t border-[var(--color-border)]">
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<!-- svelte-ignore a11y_click_events_have_key_events -->
+				<p class="px-3 pb-1.5 text-[0.6rem] font-semibold text-[var(--color-text-tertiary)] uppercase tracking-widest cursor-pointer hover:text-[var(--color-text-secondary)] transition-colors"
+					onclick={() => { navigationState.setPrimaryView('modules'); goto('/modules'); }}
+				>Modules</p>
+				{#each moduleNav as item}
+					{@const isActive = currentView === item.id}
+					<button
+						onclick={() => handleNavClick(item)}
+						class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 w-full
+							{isActive
+							? 'bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]'
+							: 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)]'}"
+						aria-current={isActive ? 'page' : undefined}
+					>
+						<div class="w-1.5 h-1.5 rounded-full transition-all duration-150 flex-shrink-0
+							{isActive ? 'bg-[var(--color-accent)]' : 'bg-transparent group-hover:bg-[var(--color-text-tertiary)]'}">
+						</div>
+						<div class="w-5 h-5 flex items-center justify-center flex-shrink-0">
+							{#if item.icon === 'wealth'}
+								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+									<path stroke-linecap="round" stroke-linejoin="round" d="M2.25 18.75a60.07 60.07 0 0 1 15.797 2.101c.727.198 1.453-.342 1.453-1.096V18.75M3.75 4.5v.75A.75.75 0 0 1 3 6h-.75m0 0v-.375c0-.621.504-1.125 1.125-1.125H20.25M2.25 6v9m18-10.5v.75c0 .414.336.75.75.75h.75m-1.5-1.5h.375c.621 0 1.125.504 1.125 1.125v9.75c0 .621-.504 1.125-1.125 1.125h-.375m1.5-1.5H21a.75.75 0 0 0-.75.75v.75m0 0H3.75m0 0h-.375a1.125 1.125 0 0 1-1.125-1.125V15m1.5 1.5v-.75A.75.75 0 0 0 3 15h-.75M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm3 0h.008v.008H18V10.5Zm-12 0h.008v.008H6V10.5Z" />
+								</svg>
+							{:else if item.icon === 'intel'}
+								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+									<path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 0 1 7.843 4.582M12 3a8.997 8.997 0 0 0-7.843 4.582m15.686 0A11.953 11.953 0 0 1 12 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0 1 21 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0 1 12 16.5a17.92 17.92 0 0 1-8.716-2.247m0 0A8.966 8.966 0 0 1 3 12c0-1.264.26-2.467.73-3.56" />
+								</svg>
+							{/if}
+						</div>
+						<span class="text-sm font-medium">{item.label}</span>
+					</button>
+				{/each}
+			</div>
 		</nav>
 	</div>
-
-	<!-- Divider -->
-	<div class="mx-4 border-t border-[var(--color-border)]"></div>
 
 	<!-- Contextual navigation -->
 	<div class="flex-1 overflow-y-auto py-3">

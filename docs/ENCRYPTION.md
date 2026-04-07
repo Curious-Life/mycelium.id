@@ -1,8 +1,150 @@
 # Mycelium Encryption & Security Hardening
 
 *Spec finalized Feb 28, 2026. Based on full codebase audit + threat model review.*
+*Updated Apr 4, 2026: Swiss Vault — master key moved from Worker to VPS.*
+*Updated Apr 7, 2026: Master key hardening — tmpfs storage, sodium SecureBuffer, encrypted swap, ptrace restriction, core dump disabled, --inspect blocked, PM2 dump filtering.*
 
 ---
+
+## Current Architecture: Swiss Vault (Apr 2026)
+
+The master key lives exclusively on the VPS. The Cloudflare Worker is a **pure ciphertext relay** — it stores and returns encrypted data but cannot decrypt it.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                                                                     │
+│   VPS (trusted boundary)                 CLOUDFLARE                 │
+│                                                                     │
+│   ┌──────────────────────┐               ┌──────────────────────┐  │
+│   │  AGENTS + PORTAL     │               │   MYA WORKER         │  │
+│   │                      │               │                      │  │
+│   │  lib/crypto-local.js │    HTTPS      │   Auth layer:        │  │
+│   │  ┌────────────────┐  │  ─────────►   │   validate token     │  │
+│   │  │ MASTER KEY     │  │  Bearer       │   → identity/scopes  │  │
+│   │  │ (tmpfs / RAM)  │  │  token        │                      │  │
+│   │  │                │  │               │   Passthrough:        │  │
+│   │  │ encrypt →      │  │               │   store ciphertext   │  │
+│   │  │ ciphertext out │  │               │   return ciphertext  │  │
+│   │  │                │  │               │                      │  │
+│   │  │ ciphertext in  │  │               │   NO master key      │  │
+│   │  │ → decrypt      │  │               │   NO crypto ops      │  │
+│   │  └────────────────┘  │               │                      │  │
+│   │                      │               │   ┌────────────────┐ │  │
+│   │  lib/db-d1.js        │               │   │  D1 (cipher)   │ │  │
+│   │  auto-encrypt params │               │   │  Vectorize     │ │  │
+│   │  auto-decrypt results│               │   │  R2            │ │  │
+│   │                      │               │   └────────────────┘ │  │
+│   └──────────────────────┘               └──────────────────────┘  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Key files:**
+- `lib/crypto-local.js` — AES-256-GCM encrypt/decrypt (Node.js webcrypto)
+- `lib/db-d1.js` — transparent auto-encrypt on write, auto-decrypt on read
+- `lib/bootstrap-secrets.js` — fetches ciphertext secrets from Worker, decrypts locally
+- `scripts/enrichment-daemon.js` — decrypts content locally for AI tagging/embedding
+- `scripts/seed-secret.js` — encrypts secrets locally before PUT to Worker
+
+**Worker endpoints (ciphertext passthrough):**
+- `POST /api/db/query` — execute SQL, return raw ciphertext
+- `POST /api/db/batch` — batch SQL, return raw ciphertext
+- `POST /api/search/hybrid` — FTS + Vectorize search, return raw ciphertext
+- `GET /api/secrets` — return encrypted secret values
+- `PUT /api/secrets` — store pre-encrypted secret values
+
+---
+
+## Master Key Hardening (Apr 7, 2026)
+
+The master key is the single most sensitive piece of data in the system. Even with the Swiss Vault architecture (key on VPS only), the original implementation had the key sitting in `.env` on disk — readable by Hetzner rescue mode, disk theft, file leaks, or PM2's `dump.pm2` snapshot. This section documents the hardening that closed those gaps.
+
+### 1. Key on tmpfs, not on disk
+
+The master key is stored at `/run/mycelium/master.key` on a tmpfs (RAM-only) filesystem. Auto-mounted at boot via `/etc/fstab`:
+
+```
+tmpfs /run/mycelium tmpfs size=1M,mode=0700,uid=claude,gid=claude,noexec,nosuid,nodev 0 0
+```
+
+The file is `0400` (owner read-only). On reboot, the tmpfs is empty — the key must be re-provided via `bash scripts/set-master-key.sh`. This trade-off is intentional: planned reboots require re-keying, but disk theft and rescue mode can never recover the key.
+
+### 2. sodium-native SecureBuffer
+
+When `lib/crypto-local.js` reads the key file, it uses sodium-native's `sodium_malloc()` to allocate an mlock'd, MADV_DONTDUMP buffer. The key bytes never live in a regular Node `Buffer` or V8 heap string. Hex decoding uses pure arithmetic (no `String.fromCharCode` / `parseInt` which could intern key material in V8's string table). Both intermediate buffers are zeroed immediately after the `CryptoKey` is imported.
+
+### 3. set-master-key.sh — never enters a bash variable
+
+The setup script reads the key from stdin via `head -c` and writes it directly to the tmpfs file via `tr`. The key never enters a bash variable, never appears in `~/.bash_history` (`set +o history` at top), and the temp file is created on tmpfs (`mktemp -p /run/mycelium`) so it never touches disk.
+
+### 4. Encrypted swap
+
+Swap is enabled (needed for ML model loading) but encrypted with a random key generated from `/dev/urandom` at every boot. systemd unit `encrypted-swap.service`:
+
+```
+ExecStart=/bin/bash -c 'cryptsetup open --type plain --key-file /dev/urandom --key-size 256 /swapfile swap_crypt && mkswap /dev/mapper/swap_crypt && swapon /dev/mapper/swap_crypt'
+```
+
+Swap pages from previous boots become unreadable after reboot — the encryption key is lost.
+
+### 5. PM2 dump.pm2 protection
+
+PM2's `pm2 save` writes process environment variables to `~/.pm2/dump.pm2` in plaintext JSON. `filter_env` in `ecosystem.config.cjs` strips 20 sensitive env var names from PM2's serialization. Belt-and-suspenders: hourly cron with `flock` (`/etc/cron.d/scrub-pm2-dump`) runs `jq` to scrub any pre-existing dumps.
+
+### 6. Memory protection sysctls
+
+`/etc/sysctl.d/99-mycelium-security.conf`:
+```
+kernel.core_pattern=|/bin/false      # No core dumps to disk
+fs.suid_dumpable=0                   # No suid process dumps
+kernel.yama.ptrace_scope=1           # ptrace blocked except parent process
+```
+
+`/etc/security/limits.conf`:
+```
+* hard core 0
+* soft core 0
+```
+
+This blocks `gdb -p <pid>` from another shell, prevents kernel from writing memory to disk on crash, and ensures suid binaries can't be dumped.
+
+### 7. No --inspect in production
+
+Every Node.js entry point (`agent-server.js`, `orchestrator.js`, `scripts/enrichment-service.js`, `scripts/enrichment-daemon.js`) checks `process.execArgv` at startup and exits with FATAL if `--inspect` is present. The Node.js inspector enables `v8.writeHeapSnapshot()` which would dump the entire JS heap, including any key material in flight.
+
+### What an attacker still gets
+
+| Attack | Result |
+|--------|--------|
+| Hetzner rescue mode → mount disk | tmpfs is RAM, no key on disk |
+| Disk theft / .env leak | No key in any file |
+| `cat ~/.pm2/dump.pm2` | Sensitive env vars filtered out |
+| Force crash → core dump | Core dumps disabled |
+| `gdb -p <agent_pid>` from another shell | "Operation not permitted" (ptrace_scope=1) |
+| `node --inspect agent-server.js` → DevTools | FATAL exit at startup |
+| Force swap-out → read /swapfile | Encrypted with random per-boot key |
+| `cat ~/.bash_history` after `set-master-key.sh` | Key never entered a bash variable |
+
+**Residual risk:** A root attacker on a *running* system can still read `/proc/$pid/mem` for an active process. This is the limitation that the future split-jurisdiction KMS architecture addresses — by moving the KEK to a separate server in a different jurisdiction, even root on the data VPS only sees encrypted DEKs. See [TRUST-MODEL.md](TRUST-MODEL.md) for the full threat analysis.
+
+### Migration
+
+For existing instances with the master key in `.env`:
+```bash
+sudo bash scripts/server-setup.sh    # Sets up tmpfs mount + sysctls + encrypted swap
+bash scripts/migrate-key-to-tmpfs.sh # Reads from .env, writes to tmpfs, strips .env
+pm2 delete all && pm2 start ecosystem.config.cjs
+```
+
+The script never puts the key in a shell variable. Verifies the key landed in tmpfs, then securely shreds the `.env` backup.
+
+---
+
+## Original Design (Feb–Mar 2026, superseded)
+
+> The original architecture had the master key as a Cloudflare Worker secret,
+> with the Worker handling all encryption/decryption transparently. This was
+> replaced by Swiss Vault in April 2026 to consolidate trust to the VPS.
 
 ## Problem
 
@@ -10,10 +152,10 @@ One secret (`MYA_WORKER_SECRET`) unlocks everything — every transcript, every 
 
 ## Design Principles
 
-1. **Encrypt at the gateway.** The MYA Worker is where all data passes through. Encryption/decryption happens there — agents never touch keys.
-2. **3 scopes, not 7.** Same VPS = same blast radius. Narrow scope isolation adds complexity without real security for a single-user system.
+1. **Encrypt at the boundary.** All encryption/decryption happens on the VPS via `crypto-local.js`. The Worker is a ciphertext relay.
+2. **4 scopes.** personal, org, wealth, moms — same VPS = same blast radius. Narrow scope isolation adds complexity without real security for a single-user system.
 3. **Envelope encryption.** Per-record random DEKs wrapped with scope keys. Key rotation is cheap — re-wrap DEKs, don't re-encrypt content. Scales to millions of records.
-4. **Zero changes to agent code.** Agents send plaintext, receive plaintext. The Worker handles all crypto transparently.
+4. **Zero changes to agent code.** Agents send plaintext, receive plaintext. `db-d1.js` handles all crypto transparently.
 5. **Keep FTS5.** Exact keyword search is genuinely useful. Encrypt content columns, keep a separate searchable column for metadata.
 6. **Filter at the SQL layer.** Scope filtering happens in the WHERE clause, not post-fetch. Don't pull rows you'll skip.
 
@@ -21,46 +163,11 @@ One secret (`MYA_WORKER_SECRET`) unlocks everything — every transcript, every 
 
 ## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                     │
-│   AGENTS (VPS)                          CLOUDFLARE                  │
-│                                                                     │
-│   ┌──────────┐  ┌──────────┐            ┌─────────────────────┐    │
-│   │ Mya      │  │ Com      │            │   MYA WORKER        │    │
-│   │ (personal│  │ (company)│   HTTPS    │                     │    │
-│   │  agent)  │  │          │ ────────►  │  ┌───────────────┐  │    │
-│   │          │  │          │  Bearer    │  │  AUTH LAYER   │  │    │
-│   │ tok_mya  │  │ tok_com  │  token     │  │               │  │    │
-│   └──────────┘  └──────────┘            │  │  Validate     │  │    │
-│                                         │  │  agent token  │  │    │
-│   ┌──────────┐  ┌──────────┐            │  │  → identity   │  │    │
-│   │ Ada      │  │ Rex      │            │  │  → scopes     │  │    │
-│   │(research)│  │(commerc.)│            │  └───────┬───────┘  │    │
-│   │          │  │          │            │          │           │    │
-│   │ tok_ada  │  │ tok_rex  │            │  ┌───────▼───────┐  │    │
-│   └──────────┘  └──────────┘            │  │ CRYPTO LAYER  │  │    │
-│                                         │  │               │  │    │
-│   ┌──────────┐  ┌──────────┐            │  │ Write:        │  │    │
-│   │ Rob      │  │ Noa      │            │  │  plaintext    │  │    │
-│   │ (wealth) │  │(publish.)│            │  │  → AES-256    │  │    │
-│   │          │  │          │            │  │  → ciphertext  │  │    │
-│   │ tok_rob  │  │ tok_noa  │            │  │               │  │    │
-│   └──────────┘  └──────────┘            │  │ Read:         │  │    │
-│                                         │  │  ciphertext   │  │    │
-│   ┌──────────┐                          │  │  → check scope│  │    │
-│   │ Portal   │                          │  │  → AES-256    │  │    │
-│   │ (Owner) │                          │  │  → plaintext  │  │    │
-│   │          │                          │  └───────┬───────┘  │    │
-│   │ tok_portal                          │          │           │    │
-│   └──────────┘                          │  ┌───────▼───────┐  │    │
-│                                         │  │   D1 / R2     │  │    │
-│                                         │  │  (ciphertext) │  │    │
-│                                         │  └───────────────┘  │    │
-│                                         └─────────────────────┘    │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+> See "Current Architecture: Swiss Vault" diagram at the top of this document.
+> The original diagram below is kept for historical reference.
+>
+> **Key change:** Crypto operations moved from Worker to VPS (`lib/crypto-local.js`).
+> Worker is now a ciphertext passthrough — no master key, no encrypt/decrypt.
 
 ---
 
@@ -69,7 +176,7 @@ One secret (`MYA_WORKER_SECRET`) unlocks everything — every transcript, every 
 Single master key. Three scopes. User isolation at the SQL layer (`WHERE user_id = ?`), not the crypto layer. All users share the same scope keys — this is Model A (simpler, ship first). Per-user key derivation is a V2 enhancement if needed.
 
 ```
-ENCRYPTION_MASTER_KEY  (Cloudflare Worker Secret — never leaves Worker runtime)
+ENCRYPTION_MASTER_KEY  (VPS .env.crypto — never leaves VPS; backup in 1Password)
         │
         │  HKDF-SHA256 with domain-separated info strings
         │

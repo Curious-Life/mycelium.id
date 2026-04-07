@@ -10,7 +10,10 @@
 	import { theme } from '$lib/stores/theme';
 
 	const SCENE_SCALE = 8;
-	const POINT_SIZE = 0.28;
+	const isLight = $derived($theme === 'light');
+	const POINT_SIZE_DARK = 0.28;
+	const POINT_SIZE_LIGHT = 0.38;
+	const POINT_SIZE = $derived(isLight ? POINT_SIZE_LIGHT : POINT_SIZE_DARK);
 	const CONTACT_SIZE = 0.9;
 	const CONTACT_COLOR = '#E5B84C'; // Aurum/Gold — brand color
 
@@ -171,11 +174,116 @@
 		}
 	}
 
+	// Ticker feedback — sound + haptic synced with ticks
+	let audioCtx: AudioContext | null = null;
+	let lastTickIndex = -1;
+	let lastTickTime = 0;
+	let smoothPitch = 600; // smoothed pitch for gradual transitions
+	let activeOsc: OscillatorNode | null = null;
+	let activeGain: GainNode | null = null;
+
+	function tickFeedback(volume: number, entropy: number) {
+		const now = performance.now();
+		const dt = now - lastTickTime;
+		lastTickTime = now;
+
+		// Speed factor: how fast are we scrolling? (0=slow, 1=very fast)
+		const speed = Math.min(1, 80 / Math.max(dt, 1));
+
+		// Haptic — shorter at high speed to avoid buzz
+		if (navigator.vibrate) navigator.vibrate(speed > 0.7 ? 2 : Math.round(3 + volume * 4));
+
+		if (!audioCtx) {
+			try { audioCtx = new AudioContext(); } catch { return; }
+		}
+		if (audioCtx.state === 'suspended') audioCtx.resume();
+		const ctxNow = audioCtx.currentTime;
+
+		// Target pitch from entropy — lower, fuller range
+		const targetPitch = 280 + entropy * 400;
+		// Smooth pitch transition — blend toward target (faster scroll = more smoothing)
+		const smoothing = 0.3 + speed * 0.5; // 0.3 (slow) to 0.8 (fast)
+		smoothPitch = smoothPitch * smoothing + targetPitch * (1 - smoothing);
+
+		// At high speed: merge into a continuous tone instead of discrete ticks
+		if (speed > 0.6 && activeOsc && activeGain) {
+			// Just glide the existing tone — no new oscillator
+			activeOsc.frequency.linearRampToValueAtTime(smoothPitch, ctxNow + 0.05);
+			activeGain.gain.cancelScheduledValues(ctxNow);
+			const amp = (0.02 + volume * 0.025) * (0.7 + speed * 0.3);
+			activeGain.gain.setValueAtTime(amp, ctxNow);
+			activeGain.gain.exponentialRampToValueAtTime(0.001, ctxNow + 0.12);
+			return;
+		}
+
+		// Slow/medium speed: discrete tick — fuller, more body
+		const duration = 0.06 + volume * 0.05;
+		const amp = (0.04 + volume * 0.04) * (1 - speed * 0.4);
+
+		const osc = audioCtx.createOscillator();
+		const gain = audioCtx.createGain();
+		osc.type = entropy > 0.6 ? 'triangle' : 'sine';
+
+		// Sub-bass layer for body
+		const sub = audioCtx.createOscillator();
+		const subGain = audioCtx.createGain();
+		sub.type = 'sine';
+		sub.frequency.value = smoothPitch * 0.5; // octave below
+		subGain.gain.value = amp * 0.6;
+		sub.connect(subGain);
+		subGain.connect(audioCtx.destination);
+		subGain.gain.setValueAtTime(subGain.gain.value, ctxNow);
+		subGain.gain.exponentialRampToValueAtTime(0.001, ctxNow + duration * 1.2);
+		sub.start(ctxNow);
+		sub.stop(ctxNow + duration * 1.2 + 0.01);
+		osc.frequency.value = smoothPitch;
+		gain.gain.value = amp;
+		osc.connect(gain);
+		gain.connect(audioCtx.destination);
+		gain.gain.setValueAtTime(amp, ctxNow);
+		gain.gain.exponentialRampToValueAtTime(0.001, ctxNow + duration);
+		osc.start(ctxNow);
+		osc.stop(ctxNow + duration + 0.01);
+
+		activeOsc = osc;
+		activeGain = gain;
+		osc.onended = () => { if (activeOsc === osc) { activeOsc = null; activeGain = null; } };
+
+		// Shimmer overtone — only at moderate speed
+		if (entropy > 0.4 && speed < 0.5) {
+			const osc2 = audioCtx.createOscillator();
+			const gain2 = audioCtx.createGain();
+			osc2.type = 'sine';
+			osc2.frequency.value = smoothPitch * 2.5;
+			gain2.gain.value = amp * entropy * 0.25;
+			osc2.connect(gain2);
+			gain2.connect(audioCtx.destination);
+			gain2.gain.setValueAtTime(gain2.gain.value, ctxNow);
+			gain2.gain.exponentialRampToValueAtTime(0.001, ctxNow + duration * 0.6);
+			osc2.start(ctxNow);
+			osc2.stop(ctxNow + duration * 0.6 + 0.01);
+		}
+	}
+
+	function checkTickCrossing(pos: number) {
+		if (!timelineTicks.length) return;
+		let nearest = 0;
+		let minDist = Infinity;
+		for (let i = 0; i < timelineTicks.length; i++) {
+			const d = Math.abs(timelineTicks[i].pos - pos);
+			if (d < minDist) { minDist = d; nearest = i; }
+		}
+		if (nearest !== lastTickIndex && minDist < 0.02) {
+			lastTickIndex = nearest;
+			tickFeedback(timelineTicks[nearest].height, timelineTicks[nearest].entropy);
+		}
+	}
+
 	// Timeline state
 	let timelineEnabled = $state(false);
 	let timePosition = $state(1.0); // 0..1 normalized position (1 = now)
 	let timeRange = $state({ min: 0, max: 0 }); // epoch ms
-	let timelineTicks: Array<{ pos: number; height: number; date: Date; count: number }> = $state([]);
+	let timelineTicks: Array<{ pos: number; height: number; date: Date; count: number; entropy: number }> = $state([]);
 
 	// Health data overlay for timeline
 	interface HealthDay { date: string; sleep_duration_min: number|null; hrv_avg: number|null; resting_hr: number|null; steps: number|null; mindful_minutes: number|null; }
@@ -277,16 +385,20 @@
 
 			// Saturation: activity temperature
 			// Active = richer color, dormant = dusty
-			let saturation = 0.25;
+			let saturation = isLight ? 0.45 : 0.25;
 			if (t.activity && t.activity.length > 0) {
 				const sorted = [...t.activity].sort((a, b) => b.month.localeCompare(a.month));
 				const recent = sorted.slice(0, 3).reduce((s: number, m: { count: number }) => s + m.count, 0);
 				const total = t.activity.reduce((s: number, m: { count: number }) => s + m.count, 0);
-				saturation = 0.2 + 0.45 * (total > 0 ? recent / total : 0);
+				saturation = isLight
+					? 0.45 + 0.4 * (total > 0 ? recent / total : 0)   // light: vivid
+					: 0.2 + 0.45 * (total > 0 ? recent / total : 0);  // dark: subtle glow
 			}
 
-			// Lightness: wider range for more contrast (small=dim, large=brighter)
-			const lightness = 0.15 + 0.35 * (Math.log(1 + t.count) / Math.log(1 + maxCount));
+			// Lightness: light mode needs medium (not too bright on light bg), dark mode needs low-to-mid
+			const lightness = isLight
+				? 0.35 + 0.25 * (Math.log(1 + t.count) / Math.log(1 + maxCount))  // 0.35-0.60
+				: 0.15 + 0.35 * (Math.log(1 + t.count) / Math.log(1 + maxCount)); // 0.15-0.50
 
 			const col = new THREE.Color().setHSL(hue, saturation, lightness);
 			terrColors.set(tid, '#' + col.getHexString());
@@ -326,7 +438,8 @@
 	});
 
 	function getColor(id: number): string {
-		if (id === -1 || id === null || id === undefined) return NOISE_COLOR;
+		const noiseCol = isLight ? '#C8C8D0' : NOISE_COLOR;
+		if (id === -1 || id === null || id === undefined) return noiseCol;
 		// Always use territory colors — fractal consistency across all zoom levels
 		return dataColors.territory.get(id) || NOISE_COLOR;
 	}
@@ -338,12 +451,15 @@
 	}
 
 	function getBgColor(): string {
+		if (isLight) return '#EDEDF2'; // cool light gray — more contrast for points
 		const style = getComputedStyle(document.documentElement);
 		return style.getPropertyValue('--color-bg').trim() || '#0A0A0C';
 	}
 
 	function createStarfield() {
 		if (starfield) scene.remove(starfield);
+		// No starfield in light mode
+		if (isLight) return;
 
 		// Stars (3000) + distant galaxy points (200)
 		const starCount = 3000;
@@ -514,6 +630,8 @@
 
 	function createGlowLayer() {
 		if (glowLayer) scene.remove(glowLayer);
+		// No glow halos in light mode — they don't work on light backgrounds
+		if (isLight) return;
 
 		const territories = msState.territories;
 		const tids = Object.keys(territories)
@@ -633,23 +751,25 @@
 		container.appendChild(renderer.domElement);
 
 		// Tone mapping for bloom — balanced exposure so points stay visible
-		renderer.toneMapping = THREE.ACESFilmicToneMapping;
+		renderer.toneMapping = isLight ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
 		renderer.toneMappingExposure = 1.1;
 		renderer.outputColorSpace = THREE.SRGBColorSpace;
 
 		// Setup clock for animations
 		clock = new THREE.Clock();
 
-		// Setup composer for bloom — soft nebula glow
+		// Setup composer — bloom in dark mode, plain render in light mode
 		composer = new EffectComposer(renderer);
 		composer.addPass(new RenderPass(scene, camera));
-		const bloomPass = new UnrealBloomPass(
-			new THREE.Vector2(container.clientWidth, container.clientHeight),
-			0.35, // strength — gentle nebula haze
-			0.5,  // radius — wider spread for soft halos
-			0.5   // threshold — catch glow halos, not data points
-		);
-		composer.addPass(bloomPass);
+		if (!isLight) {
+			const bloomPass = new UnrealBloomPass(
+				new THREE.Vector2(container.clientWidth, container.clientHeight),
+				0.35, // strength — gentle nebula haze
+				0.5,  // radius — wider spread for soft halos
+				0.5   // threshold — catch glow halos, not data points
+			);
+			composer.addPass(bloomPass);
+		}
 		composer.addPass(new OutputPass());
 
 		controls = new OrbitControls(camera, renderer.domElement);
@@ -831,15 +951,37 @@
 			timestamps[i] = (ts - tMin) / tSpan;
 		}
 
-		// Compute timeline ticks (monthly bins)
+		// Compute timeline ticks (monthly bins) with entropy
 		const binCounts = new Map<number, number>();
+		const binTerritories = new Map<number, Map<number, number>>(); // monthKey → {tid → count}
 		for (let i = 0; i < nodes.length; i++) {
-			if (nodes[i].data.timestamp) {
-				const d = new Date(nodes[i].data.timestamp!);
+			const p = nodes[i];
+			if (p.data.timestamp) {
+				const d = new Date(p.data.timestamp!);
 				const monthKey = d.getFullYear() * 12 + d.getMonth();
 				binCounts.set(monthKey, (binCounts.get(monthKey) || 0) + 1);
+				const tid = p.data.cluster3d ?? -1;
+				if (tid >= 0) {
+					if (!binTerritories.has(monthKey)) binTerritories.set(monthKey, new Map());
+					const tmap = binTerritories.get(monthKey)!;
+					tmap.set(tid, (tmap.get(tid) || 0) + 1);
+				}
 			}
 		}
+		// Shannon entropy per month — normalized 0..1
+		let maxEntropy = 1;
+		const binEntropy = new Map<number, number>();
+		for (const [mk, tmap] of binTerritories) {
+			const total = [...tmap.values()].reduce((a, b) => a + b, 0);
+			let h = 0;
+			for (const c of tmap.values()) {
+				const p = c / total;
+				if (p > 0) h -= p * Math.log2(p);
+			}
+			binEntropy.set(mk, h);
+			if (h > maxEntropy) maxEntropy = h;
+		}
+
 		let maxBin = 1;
 		for (const c of binCounts.values()) if (c > maxBin) maxBin = c;
 		const sortedBins = [...binCounts.entries()].sort((a, b) => a[0] - b[0]);
@@ -848,7 +990,8 @@
 			const m = mk % 12;
 			const d = new Date(y, m, 1);
 			const pos = (d.getTime() - tMin) / tSpan;
-			return { pos, height: 0.2 + 0.8 * (count / maxBin), date: d, count };
+			const entropy = (binEntropy.get(mk) || 0) / maxEntropy; // 0=single topic, 1=max diversity
+			return { pos, height: 0.2 + 0.8 * (count / maxBin), date: d, count, entropy };
 		});
 
 		const geometry = new THREE.BufferGeometry();
@@ -888,7 +1031,21 @@
 					gl_Position = projectionMatrix * mvPos;
 				}
 			`,
-			fragmentShader: `
+			fragmentShader: isLight ? `
+				varying vec3 vColor;
+				varying float vAlpha;
+
+				void main() {
+					vec2 uv = gl_PointCoord - vec2(0.5);
+					float r = length(uv);
+					if (r > 0.5) discard;
+					// Solid circle with subtle border for light mode
+					float edge = 1.0 - smoothstep(0.4, 0.5, r);
+					float border = smoothstep(0.35, 0.42, r) * 0.15;
+					vec3 col = vColor * (1.0 - border);
+					gl_FragColor = vec4(col, vAlpha * edge * 0.95);
+				}
+			` : `
 				varying vec3 vColor;
 				varying float vAlpha;
 
@@ -901,7 +1058,7 @@
 				}
 			`,
 			transparent: true,
-			depthWrite: false,
+			depthWrite: isLight,
 			depthTest: true,
 			vertexColors: true,
 		});
@@ -1651,6 +1808,7 @@
 					ev.preventDefault();
 					const dx = startX - ev.clientX;
 					timePosition = Math.max(0, Math.min(1, startPos + dx * sensitivity));
+					checkTickCrossing(timePosition);
 				};
 				const onUp = () => {
 					document.body.style.userSelect = '';
@@ -1665,6 +1823,7 @@
 				e.preventDefault();
 				timelineEnabled = true;
 				timePosition = Math.max(0, Math.min(1, timePosition + e.deltaX * 0.0008 + e.deltaY * 0.0008));
+				checkTickCrossing(timePosition);
 			}}
 			ondblclick={(e) => { e.stopPropagation(); timelineEnabled = false; timePosition = 1.0; }}
 		>

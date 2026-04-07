@@ -37,7 +37,10 @@ scripts/cache/
 worker/node_modules/
 worker/.wrangler/
 worker/src/*.js
+worker/wrangler.toml
 
+# Exports / personal data (NEVER commit — contains plaintext vault data)
+mycelium-export*.zip
 # Exports / personal data
 *.json
 !package.json

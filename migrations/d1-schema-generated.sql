@@ -1,6 +1,6 @@
 -- ============================================================================
 -- Cloudflare D1 Schema for Mycelium (complete)
--- AUTO-GENERATED on 2026-03-31 from production database.
+-- AUTO-GENERATED on 2026-04-06 from production database.
 -- Regenerate: bash scripts/generate-schema.sh
 --
 -- Fresh install:
@@ -13,7 +13,7 @@
 --   npx wrangler kv namespace create mycelium-kv
 -- ============================================================================
 
--- ── Tables (51) ─────────────────────────────────────────────────────
+-- ── Tables (62) ─────────────────────────────────────────────────────
 
 CREATE TABLE access_grants (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
@@ -75,6 +75,32 @@ CREATE TABLE agent_tasks (
   completed_at TEXT,
   reported_at TEXT
 , scope TEXT DEFAULT 'org');
+CREATE TABLE agent_tokens (
+  token_hash TEXT PRIMARY KEY,        -- SHA-256 of the token (never store raw tokens)
+  agent TEXT NOT NULL,                 -- e.g. "personal-agent"
+  name TEXT NOT NULL,                  -- human-readable label
+  user_id TEXT NOT NULL,               -- tenant isolation key
+  scopes TEXT NOT NULL DEFAULT 'org',  -- comma-separated: "personal,org,wealth"
+  created_at TEXT DEFAULT (datetime('now')),
+  last_used_at TEXT,
+  disabled INTEGER DEFAULT 0
+);
+CREATE TABLE ai_providers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  provider TEXT NOT NULL,            -- 'claude', 'openai', 'custom'
+  label TEXT,                        -- user-given name: 'Work Claude', 'Personal GPT'
+  auth_type TEXT NOT NULL,           -- 'oauth' (Claude), 'api_key' (OpenAI/custom)
+  credentials TEXT,                  -- encrypted JSON envelope (AES-256-GCM)
+  config_dir TEXT,                   -- for Claude: filesystem path to config dir
+  model_preference TEXT,             -- e.g. 'claude-sonnet-4-5', 'gpt-4o'
+  base_url TEXT,                     -- for custom providers: API endpoint
+  is_active INTEGER DEFAULT 0,      -- which one is currently used per provider type
+  status TEXT DEFAULT 'pending',     -- 'active', 'pending', 'expired', 'error'
+  last_used_at TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
 CREATE TABLE attachments (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
   user_id TEXT,
@@ -189,6 +215,18 @@ CREATE TABLE clustering_points (
   created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 , scope TEXT DEFAULT 'org', nomic_embedding BLOB);
+CREATE TABLE connections (
+  id TEXT PRIMARY KEY,
+  user_a TEXT NOT NULL,
+  user_b TEXT NOT NULL,
+  initiated_by TEXT NOT NULL,
+  status TEXT DEFAULT 'pending',
+  overlap_json TEXT,
+  overlap_computed_at TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  accepted_at TEXT,
+  UNIQUE(user_a, user_b)
+);
 CREATE TABLE contact_territories (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
   user_id TEXT NOT NULL,
@@ -199,6 +237,20 @@ CREATE TABLE contact_territories (
   first_seen TEXT,
   last_seen TEXT,
   UNIQUE(contact_id, territory_id)
+);
+CREATE TABLE crypto_payments (
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+  user_id TEXT NOT NULL,
+  coingate_order_id TEXT NOT NULL,
+  plan TEXT NOT NULL,
+  amount_eur REAL NOT NULL,
+  crypto_amount TEXT,
+  crypto_coin TEXT,
+  status TEXT DEFAULT 'pending',
+  paid_at TEXT,
+  credited_months INTEGER,
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (user_id) REFERENCES users(id)
 );
 CREATE TABLE cycle_metrics (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
@@ -218,6 +270,17 @@ CREATE TABLE cycle_metrics (
   error_message TEXT,
   metadata TEXT,                    -- JSON object
   created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE TABLE deployment_log (
+  id TEXT PRIMARY KEY,
+  user_id TEXT,
+  handle TEXT,
+  vps_ip TEXT,
+  commit_sha TEXT,
+  file_hashes TEXT,
+  status TEXT,
+  error TEXT,
+  deployed_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE document_versions (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),document_id TEXT NOT NULL,diff TEXT,changed_by TEXT,change_summary TEXT,created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),FOREIGN KEY (document_id) REFERENCES documents(id));
 CREATE TABLE documents (
@@ -250,6 +313,49 @@ CREATE TABLE folders (
   document_count INTEGER DEFAULT 0,
   parent_id TEXT,
   created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE TABLE handle_reservations (
+  handle TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  reserved_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE health_daily (
+    id TEXT PRIMARY KEY,            -- '{user_id}:{date}' deterministic key
+    user_id TEXT NOT NULL,
+    date TEXT NOT NULL,             -- 'YYYY-MM-DD'
+
+    -- Sleep (all encrypted via db-proxy)
+    sleep_duration_min TEXT,        -- Total sleep time in minutes
+    sleep_in_bed_min TEXT,          -- Total time in bed
+    sleep_efficiency TEXT,          -- 0.0-1.0 (duration / in_bed)
+    sleep_deep_min TEXT,            -- AASM stage 3
+    sleep_rem_min TEXT,             -- REM stage
+    sleep_core_min TEXT,            -- AASM stages 1 & 2 (light)
+    sleep_awake_min TEXT,           -- Awakenings during sleep
+    sleep_start TEXT,               -- ISO datetime sleep began
+    sleep_end TEXT,                 -- ISO datetime sleep ended
+
+    -- Heart (all encrypted)
+    hrv_avg TEXT,                   -- HRV SDNN daily average (ms)
+    hrv_sleep_avg TEXT,             -- HRV during sleep (ms)
+    resting_hr TEXT,                -- Resting heart rate (bpm)
+
+    -- Movement (all encrypted)
+    steps TEXT,                     -- Step count
+    active_energy_kcal TEXT,        -- Active energy burned (kcal)
+    workout_count TEXT,             -- Number of workouts
+    workout_minutes TEXT,           -- Total workout duration (min)
+    workout_types TEXT,             -- JSON array of workout type strings
+
+    -- Mindfulness (encrypted)
+    mindful_minutes TEXT,           -- Mindful session duration (min)
+
+    -- Meta (not encrypted — needed for queries)
+    source TEXT DEFAULT 'apple_health',
+    scope TEXT DEFAULT 'personal',
+    synced_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 CREATE TABLE import_jobs (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
@@ -312,6 +418,27 @@ CREATE TABLE people (
   created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 , scope TEXT DEFAULT 'personal', source TEXT DEFAULT 'manual', linkedin_url TEXT, email TEXT, phone TEXT, company TEXT, position TEXT, connected_at TEXT, last_interaction_at TEXT, interaction_count INTEGER DEFAULT 0, status TEXT DEFAULT 'active', outbound_count INTEGER DEFAULT 0);
+CREATE TABLE provisioning_jobs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  email TEXT NOT NULL,
+  key_hash TEXT NOT NULL,           -- SHA-256 of master key (never the key itself)
+  status TEXT DEFAULT 'pending',    -- pending | provisioning | ready | failed
+  hetzner_server_id TEXT,
+  hetzner_server_name TEXT,
+  vps_ip TEXT,
+  d1_database_name TEXT,
+  d1_database_id TEXT,
+  agent_tokens_json TEXT,           -- encrypted JSON of generated tokens
+  passkey_credential_id TEXT,
+  passkey_public_key TEXT,
+  error TEXT,
+  portal_url TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  started_at TEXT,
+  completed_at TEXT,
+  updated_at TEXT
+, status_step TEXT, handle TEXT, plan TEXT, stripe_customer_id TEXT);
 CREATE TABLE realm_neighbors (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
   realm_id INTEGER NOT NULL,
@@ -437,6 +564,26 @@ CREATE TABLE share_links (
   created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   expires_at TEXT
 );
+CREATE TABLE stripe_events (
+  event_id TEXT PRIMARY KEY,
+  event_type TEXT NOT NULL,
+  processed_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE subscriptions (
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+  user_id TEXT NOT NULL,
+  stripe_customer_id TEXT NOT NULL,
+  stripe_subscription_id TEXT,            -- NULL for decade/lifetime plans
+  plan TEXT NOT NULL,                     -- 'monthly', 'annual', 'decade'
+  type TEXT NOT NULL DEFAULT 'recurring', -- 'recurring' or 'lifetime'
+  status TEXT NOT NULL DEFAULT 'active',  -- active, past_due, suspended, canceled, lifetime
+  current_period_end TEXT,                -- ISO8601, NULL for lifetime
+  cancel_at_period_end INTEGER DEFAULT 0,
+  payment_failed_at TEXT,
+  suspended_at TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+, payment_method TEXT DEFAULT 'stripe', crypto_coin TEXT, crypto_tx TEXT, paid_through TEXT, coingate_order_id TEXT);
 CREATE TABLE tasks (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
   user_id TEXT NOT NULL,
@@ -507,7 +654,7 @@ CREATE TABLE territory_profiles (
   generation_model TEXT,
   generation_version TEXT,
   created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), steward_agent_id TEXT, growth_state TEXT, energy REAL, vitality REAL, velocity REAL, point_delta INTEGER, description_version TEXT, point_count_at_description INTEGER, moments_of_interest TEXT, last_described_at TEXT, activity_timeline TEXT, centroid_3d TEXT, chronicle_cursor TEXT DEFAULT NULL, chronicle TEXT DEFAULT NULL, chronicle_model TEXT DEFAULT NULL,
+  updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), steward_agent_id TEXT, growth_state TEXT, energy REAL, vitality REAL, velocity REAL, point_delta INTEGER, description_version TEXT, point_count_at_description INTEGER, moments_of_interest TEXT, last_described_at TEXT, activity_timeline TEXT, centroid_3d TEXT, chronicle_cursor TEXT DEFAULT NULL, chronicle TEXT DEFAULT NULL, chronicle_model TEXT DEFAULT NULL, dissolved_at TEXT, dissolved_version TEXT, visibility TEXT DEFAULT 'private',
   UNIQUE(user_id, territory_id)
 );
 CREATE TABLE theme_cards (
@@ -546,6 +693,22 @@ CREATE TABLE user_identities (
   UNIQUE(user_id, provider),
   UNIQUE(provider, provider_id)
 );
+CREATE TABLE user_profiles (
+  user_id TEXT PRIMARY KEY,
+  handle TEXT UNIQUE,
+  display_name TEXT,
+  signature TEXT,
+  depth_score REAL,
+  breadth_score REAL,
+  coherence_score REAL,
+  exploration_score REAL,
+  territory_count INTEGER DEFAULT 0,
+  realm_count INTEGER DEFAULT 0,
+  message_count INTEGER DEFAULT 0,
+  member_since TEXT,
+  public_realms_json TEXT,
+  updated_at TEXT DEFAULT (datetime('now'))
+);
 CREATE TABLE users (
   id TEXT PRIMARY KEY,
   display_name TEXT,
@@ -553,7 +716,7 @@ CREATE TABLE users (
   settings TEXT,                    -- JSON object
   budget_limit REAL,
   created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+, handle TEXT);
 CREATE TABLE waitlist (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), email TEXT NOT NULL UNIQUE, source TEXT DEFAULT 'landing', created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE wealth_assets (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
@@ -626,7 +789,7 @@ CREATE TABLE wealth_watchlist (
   PRIMARY KEY (user_id, asset_id)
 );
 
--- ── Indexes (94) ────────────────────────────────────────────────────
+-- ── Indexes (108) ────────────────────────────────────────────────────
 
 CREATE INDEX idx_access_grants_entity ON access_grants(entity_type, entity_id);
 CREATE INDEX idx_access_grants_user ON access_grants(user_id);
@@ -642,6 +805,9 @@ CREATE INDEX idx_agent_events_type ON agent_events(type);
 CREATE INDEX idx_agent_tasks_agent ON agent_tasks(agent_id);
 CREATE INDEX idx_agent_tasks_pending ON agent_tasks(agent_id, status, priority);
 CREATE INDEX idx_agent_tasks_status ON agent_tasks(agent_id, status);
+CREATE INDEX idx_agent_tokens_user ON agent_tokens(user_id);
+CREATE INDEX idx_ai_providers_active ON ai_providers(user_id, provider, is_active);
+CREATE INDEX idx_ai_providers_user ON ai_providers(user_id);
 CREATE INDEX idx_attachments_message ON attachments(message_id);
 CREATE INDEX idx_attachments_user ON attachments(user_id);
 CREATE INDEX idx_audit_log_agent ON audit_log(agent_id, created_at);
@@ -658,11 +824,21 @@ CREATE INDEX idx_clustering_realm ON clustering_points(realm_id);
 CREATE INDEX idx_clustering_source ON clustering_points(source_type, source_id);
 CREATE INDEX idx_clustering_territory ON clustering_points(territory_id);
 CREATE INDEX idx_clustering_theme ON clustering_points(theme_id);
+CREATE UNIQUE INDEX idx_clustering_unique
+  ON clustering_points(source_type, source_id);
 CREATE INDEX idx_clustering_user ON clustering_points(user_id);
+CREATE INDEX idx_clustering_user_realm
+  ON clustering_points(user_id, realm_id);
+CREATE INDEX idx_clustering_user_territory
+  ON clustering_points(user_id, territory_id);
 CREATE INDEX idx_cofire_a ON territory_cofire(territory_a);
 CREATE INDEX idx_cofire_b ON territory_cofire(territory_b);
 CREATE INDEX idx_cofire_session ON territory_cofire(cofire_session);
 CREATE INDEX idx_cofire_user ON territory_cofire(user_id);
+CREATE INDEX idx_connections_a ON connections(user_a, status);
+CREATE INDEX idx_connections_b ON connections(user_b, status);
+CREATE UNIQUE INDEX idx_crypto_payments_order
+  ON crypto_payments(coingate_order_id);
 CREATE INDEX idx_ct_contact ON contact_territories(contact_id);
 CREATE INDEX idx_ct_territory ON contact_territories(territory_id);
 CREATE INDEX idx_ct_user ON contact_territories(user_id);
@@ -676,6 +852,8 @@ CREATE INDEX idx_documents_unencrypted
   ON documents(id) WHERE content IS NOT NULL AND content != '' AND content NOT LIKE 'eyJ%';
 CREATE INDEX idx_documents_user_id ON documents(user_id);
 CREATE INDEX idx_folders_user ON folders(user_id);
+CREATE INDEX idx_health_daily_user_date
+    ON health_daily(user_id, date DESC);
 CREATE INDEX idx_identities_provider ON user_identities(provider, provider_id);
 CREATE INDEX idx_identities_user ON user_identities(user_id);
 CREATE INDEX idx_import_jobs_user ON import_jobs(user_id);
@@ -700,6 +878,9 @@ CREATE INDEX idx_people_linkedin ON people(linkedin_url);
 CREATE INDEX idx_people_status ON people(user_id, status);
 CREATE INDEX idx_people_user ON people(user_id);
 CREATE UNIQUE INDEX idx_people_user_name ON people(user_id, name);
+CREATE INDEX idx_provisioning_email ON provisioning_jobs(email);
+CREATE UNIQUE INDEX idx_provisioning_handle ON provisioning_jobs(handle) WHERE status != 'failed';
+CREATE INDEX idx_provisioning_status ON provisioning_jobs(status);
 CREATE INDEX idx_realm_neighbors_user ON realm_neighbors(user_id);
 CREATE INDEX idx_realms_user ON realms(user_id);
 CREATE INDEX idx_reflections_user ON reflections(user_id);
@@ -708,11 +889,19 @@ CREATE INDEX idx_secrets_lookup ON secrets(user_id, scope);
 CREATE INDEX idx_sessions_expires ON sessions(expires_at);
 CREATE INDEX idx_sessions_user ON sessions(user_id);
 CREATE INDEX idx_share_links_token ON share_links(token);
+CREATE INDEX idx_subscriptions_status ON subscriptions(status);
+CREATE UNIQUE INDEX idx_subscriptions_stripe_cust ON subscriptions(stripe_customer_id);
+CREATE INDEX idx_subscriptions_stripe_sub ON subscriptions(stripe_subscription_id)
+  WHERE stripe_subscription_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_subscriptions_user ON subscriptions(user_id);
 CREATE INDEX idx_tasks_status ON tasks(user_id, status);
 CREATE INDEX idx_tasks_user ON tasks(user_id);
+CREATE INDEX idx_territory_dissolved ON territory_profiles(dissolved_at);
 CREATE INDEX idx_territory_neighbors_tid ON territory_neighbors(territory_id);
 CREATE INDEX idx_territory_neighbors_user ON territory_neighbors(user_id);
 CREATE INDEX idx_territory_profiles_realm ON territory_profiles(realm_id);
+CREATE INDEX idx_territory_profiles_territory_user
+  ON territory_profiles(territory_id, user_id);
 CREATE INDEX idx_territory_profiles_theme ON territory_profiles(semantic_theme_id);
 CREATE INDEX idx_territory_profiles_user ON territory_profiles(user_id);
 CREATE INDEX idx_theme_cards_theme ON theme_cards(theme_id);
@@ -722,6 +911,7 @@ CREATE INDEX idx_themes_realm ON semantic_themes(realm_id);
 CREATE INDEX idx_themes_user ON semantic_themes(user_id);
 CREATE INDEX idx_tp_description_version ON territory_profiles(description_version);
 CREATE INDEX idx_tp_steward ON territory_profiles(steward_agent_id);
+CREATE UNIQUE INDEX idx_users_handle ON users(handle);
 CREATE UNIQUE INDEX idx_wa_symbol_type ON wealth_assets(symbol, type);
 CREATE INDEX idx_wpa_user ON wealth_portfolio_access(user_id);
 CREATE INDEX idx_wt_asset ON wealth_transactions(asset_id);

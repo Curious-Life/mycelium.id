@@ -3,6 +3,7 @@
 	import { browser } from '$app/environment';
 	import { apiGet } from '$lib/api';
 	import { navigationState } from '$lib/stores/navigation';
+	import * as topojson from 'topojson-client';
 
 	// ── Types ──────────────────────────────────────────────────────────────
 
@@ -348,17 +349,15 @@
 
 	async function loadLeaflet() {
 		if (leafletLoaded) return;
-		const link = document.createElement('link');
-		link.rel = 'stylesheet';
-		link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-		document.head.appendChild(link);
-		await new Promise<void>((resolve) => {
-			const script = document.createElement('script');
-			script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-			script.onload = () => resolve();
-			document.head.appendChild(script);
-		});
-		L = (window as any).L;
+		// Load CSS from local static assets (no CDN)
+		if (!document.querySelector('link[href*="leaflet.css"]')) {
+			const link = document.createElement('link');
+			link.rel = 'stylesheet';
+			link.href = '/assets/leaflet.css';
+			document.head.appendChild(link);
+		}
+		const leafletMod = await import('leaflet');
+		L = leafletMod.default;
 		leafletLoaded = true;
 	}
 
@@ -452,22 +451,9 @@
 	async function loadCountryGeoJson() {
 		if (geoJsonCache) return geoJsonCache;
 		try {
-			// Load TopoJSON + converter
-			const [topoResp] = await Promise.all([
-				fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json'),
-			]);
-			const topoData = await topoResp.json();
-
-			// Load topojson-client to convert
-			await new Promise<void>((resolve) => {
-				if ((window as any).topojson) { resolve(); return; }
-				const s = document.createElement('script');
-				s.src = 'https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js';
-				s.onload = () => resolve();
-				document.head.appendChild(s);
-			});
-
-			const topojson = (window as any).topojson;
+			// Load TopoJSON data + converter from local npm packages (no CDN)
+			const topoMod = await import('world-atlas/countries-110m.json');
+			const topoData = topoMod.default;
 			geoJsonCache = topojson.feature(topoData, topoData.objects.countries);
 
 			// Fix antimeridian crossing (Russia, Fiji, etc.)
@@ -1133,7 +1119,7 @@
 		if (!globeContainer || !warRoomState) return;
 
 		// Dynamically import globe.gl
-		const GlobeModule = await import('https://cdn.jsdelivr.net/npm/globe.gl@2/+esm');
+		const GlobeModule = await import('globe.gl');
 		const Globe = GlobeModule.default;
 
 		if (globeInstance) {
@@ -1280,11 +1266,11 @@
 			.filter(a => a.lat && a.lng && a.tier === 'major')
 			.map(a => ({ lat: a.lat, lng: a.lng, text: a.name, color: actorFillColors[a.id] || '#ccc' }));
 
-		globeInstance = Globe()(globeContainer)
+		globeInstance = new Globe(globeContainer)
 			.width(width)
 			.height(height)
 			.backgroundColor('#080810')
-			.globeImageUrl('https://unpkg.com/three-globe@2/example/img/earth-night.jpg')
+			.globeImageUrl('/assets/earth-night.jpg')
 			.atmosphereColor('#334466')
 			.atmosphereAltitude(0.2)
 			.pointOfView({ lat: 30, lng: 20, altitude: 2.2 })

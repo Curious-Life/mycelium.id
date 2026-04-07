@@ -76,7 +76,7 @@ export class SupabaseService {
         telegram_id: telegramId,
         username,
         display_name: displayName,
-        timezone: "UTC",
+        timezone: "Europe/Riga",
         settings: {},
       })
       .select()

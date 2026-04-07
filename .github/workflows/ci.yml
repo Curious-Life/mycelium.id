@@ -25,3 +25,15 @@ jobs:
 
       - name: Lint check
         run: npx --yes eslint --no-eslintrc --rule '{"no-unused-vars":"warn","no-undef":"error"}' --env node --env es2022 --parser-options=ecmaVersion:2022,sourceType:module lib/*.js mcp/*.js agent-server.js || true
+
+      - name: Security audit
+        run: npm audit --audit-level=high || true
+
+      - name: Generate SBOM
+        run: npx --yes @cyclonedx/cyclonedx-npm --output-file sbom.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json

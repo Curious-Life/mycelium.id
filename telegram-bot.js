@@ -44,7 +44,8 @@ await bootstrapSecrets();
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
-const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+// Support agent-specific bot token override (e.g. TELEGRAM_BOT_TOKEN_MOM for moms-telegram-bot)
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN_OVERRIDE || process.env.TELEGRAM_BOT_TOKEN;
 const OWNER_ID = process.env.OWNER_TELEGRAM_ID;
 const AGENT_URL = process.env.AGENT_URL || 'http://localhost:3004';
 const HTTP_PORT = parseInt(process.env.TELEGRAM_BOT_PORT || '3003');
@@ -57,16 +58,64 @@ const TTS_ENABLED = WORKER_URL && WORKER_SECRET;
 const TTS_VOICE = process.env.TTS_VOICE || 'onyx'; // OpenAI voices: alloy, ash, coral, echo, fable, nova, onyx, sage, shimmer
 const TTS_MAX_CHARS = 50000; // Max text length for TTS (generous limit, chunked at 4096)
 
+// ── Lockfile guard — prevent duplicate instances ───────────────────────────
+// Each telegram bot identifies itself by AGENT_ID (or process.title fallback)
+// to allow multiple bots (mya, moms, etc.) to coexist with separate locks.
+import { writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
+import { tmpdir } from 'os';
+
+const LOCK_NAME = process.env.AGENT_ID || process.env.npm_package_name || 'telegram-bot';
+const LOCK_PATH = `${tmpdir()}/mycelium-${LOCK_NAME}.lock`;
+
+function acquireLock() {
+  if (existsSync(LOCK_PATH)) {
+    try {
+      const existingPid = parseInt(readFileSync(LOCK_PATH, 'utf-8').trim(), 10);
+      // Check if the PID is actually alive
+      try {
+        process.kill(existingPid, 0); // signal 0 = test if alive
+        console.error(`[Telegram] Another instance is running (PID ${existingPid}). Lockfile: ${LOCK_PATH}`);
+        console.error(`[Telegram] Exiting to avoid Telegram getUpdates conflict.`);
+        process.exit(0); // exit 0 so PM2 doesn't immediately restart
+      } catch {
+        console.warn(`[Telegram] Stale lockfile (PID ${existingPid} not alive), reclaiming.`);
+        unlinkSync(LOCK_PATH);
+      }
+    } catch (e) {
+      console.warn(`[Telegram] Could not read lockfile: ${e.message}, reclaiming.`);
+      try { unlinkSync(LOCK_PATH); } catch {}
+    }
+  }
+  writeFileSync(LOCK_PATH, String(process.pid));
+  console.log(`[Telegram] Acquired lock: ${LOCK_PATH} (PID ${process.pid})`);
+}
+
+function releaseLock() {
+  try {
+    if (existsSync(LOCK_PATH)) {
+      const lockPid = parseInt(readFileSync(LOCK_PATH, 'utf-8').trim(), 10);
+      if (lockPid === process.pid) {
+        unlinkSync(LOCK_PATH);
+        console.log(`[Telegram] Released lock: ${LOCK_PATH}`);
+      }
+    }
+  } catch {}
+}
+
+acquireLock();
+
 // Initialize database for attachment records
 initDb().catch(err => console.error('[Telegram] DB init failed:', err.message));
 
 if (!TOKEN) {
   console.error('TELEGRAM_BOT_TOKEN is required');
+  releaseLock();
   process.exit(1);
 }
 
 if (!OWNER_ID) {
   console.error('OWNER_TELEGRAM_ID is required');
+  releaseLock();
   process.exit(1);
 }
 
@@ -237,9 +286,14 @@ async function chatWithAgent(message, telegramUserId) {
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
+      const headers = { 'Content-Type': 'application/json' };
+      // Auth: prefer agent token, fall back to worker secret (both bypass CSRF)
+      const botAgentToken = process.env.AGENT_TOKEN || process.env.WORKER_SECRET || process.env.MYA_WORKER_SECRET;
+      if (botAgentToken) headers['Authorization'] = `Bearer ${botAgentToken}`;
+
       const response = await longFetch(`${AGENT_URL}/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           message,
           channelId: `telegram_${telegramUserId}`,
@@ -696,16 +750,71 @@ app.listen(HTTP_PORT, '127.0.0.1', () => {
   console.log(`[Telegram] HTTP API listening on 127.0.0.1:${HTTP_PORT}`);
 });
 
-bot.start({
-  onStart: (info) => {
-    console.log(`[Telegram] Bot started: @${info.username} (owner: ${OWNER_ID})`);
-    console.log(`[Telegram] Agent URL: ${AGENT_URL}`);
-  },
+// Start bot with graceful 409 conflict handling.
+// When Telegram reports 409 (another getUpdates session active), it needs ~15-30s
+// to release the old polling slot after the previous instance exits. We retry
+// in-process with backoff instead of exiting, so PM2 doesn't crash-loop.
+async function startBot() {
+  const MAX_409_ATTEMPTS = 6;
+  const BACKOFFS_MS = [5000, 10000, 15000, 20000, 30000, 60000];
+
+  for (let attempt = 0; attempt < MAX_409_ATTEMPTS; attempt++) {
+    try {
+      // Explicitly clear any webhook to ensure polling mode
+      try { await bot.api.deleteWebhook({ drop_pending_updates: false }); } catch {}
+
+      await bot.start({
+        onStart: (info) => {
+          console.log(`[Telegram] Bot started: @${info.username} (owner: ${OWNER_ID})`);
+          console.log(`[Telegram] Agent URL: ${AGENT_URL}`);
+        },
+      });
+      return; // success
+    } catch (err) {
+      if (err?.error_code === 409) {
+        const wait = BACKOFFS_MS[attempt] || 60000;
+        console.warn(`[Telegram] 409 Conflict (attempt ${attempt + 1}/${MAX_409_ATTEMPTS}). Waiting ${wait / 1000}s for Telegram to release polling slot...`);
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+      console.error(`[Telegram] Bot start failed:`, err);
+      releaseLock();
+      process.exit(1);
+    }
+  }
+
+  console.error(`[Telegram] Failed to start after ${MAX_409_ATTEMPTS} attempts. Exiting cleanly.`);
+  releaseLock();
+  process.exit(0); // exit 0 so PM2 backs off via restart_delay
+}
+
+bot.catch((err) => {
+  const e = err.error || err;
+  if (e?.error_code === 409) {
+    console.warn(`[Telegram] 409 Conflict during polling — likely transient. Bot will reconnect.`);
+  } else {
+    console.error(`[Telegram] Bot error:`, e?.message || e);
+  }
 });
+
+startBot();
 
 // Periodic secret refresh (5 min)
 setInterval(refreshSecrets, 5 * 60 * 1000);
 
 // Graceful shutdown
-process.on('SIGINT', () => bot.stop());
-process.on('SIGTERM', () => bot.stop());
+function shutdown(signal) {
+  console.log(`[Telegram] Received ${signal}, shutting down...`);
+  releaseLock();
+  bot.stop().then(() => process.exit(0)).catch(() => process.exit(0));
+  // Force exit after 5s if graceful shutdown hangs
+  setTimeout(() => process.exit(0), 5000);
+}
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('exit', () => releaseLock());
+process.on('uncaughtException', (err) => {
+  console.error(`[Telegram] Uncaught exception:`, err);
+  releaseLock();
+  process.exit(1);
+});

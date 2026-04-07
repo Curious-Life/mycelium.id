@@ -134,6 +134,7 @@ export interface TerritoryProfile {
 	agentWouldConsult: Array<{ territory_name: string; for: string }>;
 	activity: Array<{ month: string; count: number }>;
 	centroid: { x: number; y: number; z: number } | null;
+	visibility: 'private' | 'friends' | 'public';
 }
 
 // Territories lookup: { territoryId: TerritoryProfile }

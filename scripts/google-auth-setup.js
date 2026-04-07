@@ -271,7 +271,8 @@ function waitForCallback() {
       res.end('Not found');
     });
 
-    server.listen(REDIRECT_PORT, () => {
+    // Bind to loopback only — OAuth callback is local, no need for public listening
+    server.listen(REDIRECT_PORT, '127.0.0.1', () => {
       // Server ready
     });
 

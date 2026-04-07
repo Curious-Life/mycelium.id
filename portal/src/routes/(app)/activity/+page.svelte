@@ -50,6 +50,22 @@
 	let msgWeeks = $state<MsgWeek[]>([]);
 	let totalMessages = $state(0);
 
+	// Health
+	interface HealthDay {
+		date: string; sleep_duration_min: number | null; sleep_efficiency: number | null;
+		sleep_deep_min: number | null; sleep_rem_min: number | null; sleep_core_min: number | null;
+		hrv_avg: number | null; resting_hr: number | null; steps: number | null;
+		active_energy_kcal: number | null; workout_minutes: number | null; mindful_minutes: number | null;
+	}
+	interface HealthSummary {
+		today: HealthDay | null;
+		averages: Record<string, number | null>;
+		trends: Record<string, string>;
+		anomalies: Array<{ date: string; metric: string; value: number; baseline: number }>;
+		days: HealthDay[];
+	}
+	let healthSummary = $state<HealthSummary | null>(null);
+
 	// ── Data Loading ──────────────────────────────────────────────────────
 
 	async function loadDesktopDay(date: string) {
@@ -104,8 +120,14 @@
 		} catch { msgDays = []; msgWeeks = []; }
 	}
 
+	async function loadHealth() {
+		try {
+			healthSummary = await apiGet<HealthSummary>('/portal/health/summary', { days: '14' });
+		} catch { healthSummary = null; }
+	}
+
 	onMount(async () => {
-		await Promise.all([loadDesktopDay(selectedDate), loadDesktopSummary(), loadMessages()]);
+		await Promise.all([loadDesktopDay(selectedDate), loadDesktopSummary(), loadMessages(), loadHealth()]);
 		loading = false;
 	});
 
@@ -252,6 +274,11 @@
 	function fmt(s: number) { const h = Math.floor(s/3600), m = Math.floor((s%3600)/60); return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m` : '<1m'; }
 	function fmtK(n: number) { return n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(n); }
 	function pct(v: number, t: number) { return t > 0 ? Math.round((v/t)*100) : 0; }
+
+	// Health helpers
+	const healthMetricLabel: Record<string, string> = { sleep_duration_min: 'Sleep', hrv_avg: 'HRV', resting_hr: 'RHR', steps: 'Steps', active_energy_kcal: 'Energy', mindful_minutes: 'Mindful' };
+	const trendArrow: Record<string, string> = { improving: '\u2197', declining: '\u2198', stable: '\u2192' };
+	const trendColor: Record<string, string> = { improving: 'text-green-400', declining: 'text-red-400', stable: 'text-[var(--color-text-tertiary)]' };
 </script>
 
 <div class="flex-1 overflow-y-auto p-6 lg:p-8 bg-[var(--color-bg)]">
@@ -661,5 +688,147 @@
 				No activity for this {granularity === 'day' ? 'day' : 'week'}
 			</div>
 		{/if}
+	{/if}
+
+	<!-- ── Body State (Health) ──────────────────────────────────────── -->
+	{#if healthSummary && (healthSummary.today || healthSummary.days?.length)}
+		{@const hs = healthSummary}
+		<div class="mt-8 border-t border-[var(--color-border)] pt-6">
+			<h2 class="text-sm font-semibold text-[var(--color-text-primary)] mb-4">Body State</h2>
+
+			<!-- Today stats -->
+			{#if hs.today}
+				{@const t = hs.today}
+				<div class="grid grid-cols-3 sm:grid-cols-6 gap-3 mb-4">
+					{#if t.sleep_duration_min != null}
+						{@const h = Math.floor(t.sleep_duration_min / 60)}
+						{@const m = Math.round(t.sleep_duration_min % 60)}
+						<div class="bg-[var(--color-surface)] rounded-lg p-3 text-center">
+							<div class="text-[0.6rem] text-[var(--color-text-tertiary)]">Sleep</div>
+							<div class="text-lg font-semibold text-indigo-400">{h}h{m.toString().padStart(2,'0')}m</div>
+							{#if t.sleep_efficiency != null}<div class="text-[0.55rem] text-[var(--color-text-tertiary)]">{Math.round(t.sleep_efficiency * 100)}% eff</div>{/if}
+						</div>
+					{/if}
+					{#if t.hrv_avg != null}
+						<div class="bg-[var(--color-surface)] rounded-lg p-3 text-center">
+							<div class="text-[0.6rem] text-[var(--color-text-tertiary)]">HRV</div>
+							<div class="text-lg font-semibold text-green-400">{Math.round(t.hrv_avg)}ms</div>
+						</div>
+					{/if}
+					{#if t.resting_hr != null}
+						<div class="bg-[var(--color-surface)] rounded-lg p-3 text-center">
+							<div class="text-[0.6rem] text-[var(--color-text-tertiary)]">RHR</div>
+							<div class="text-lg font-semibold text-red-400">{Math.round(t.resting_hr)}</div>
+							<div class="text-[0.55rem] text-[var(--color-text-tertiary)]">bpm</div>
+						</div>
+					{/if}
+					{#if t.steps != null}
+						<div class="bg-[var(--color-surface)] rounded-lg p-3 text-center">
+							<div class="text-[0.6rem] text-[var(--color-text-tertiary)]">Steps</div>
+							<div class="text-lg font-semibold text-orange-400">{t.steps.toLocaleString()}</div>
+						</div>
+					{/if}
+					{#if t.active_energy_kcal != null}
+						<div class="bg-[var(--color-surface)] rounded-lg p-3 text-center">
+							<div class="text-[0.6rem] text-[var(--color-text-tertiary)]">Energy</div>
+							<div class="text-lg font-semibold text-yellow-400">{Math.round(t.active_energy_kcal)}</div>
+							<div class="text-[0.55rem] text-[var(--color-text-tertiary)]">kcal</div>
+						</div>
+					{/if}
+					{#if t.mindful_minutes != null && t.mindful_minutes > 0}
+						<div class="bg-[var(--color-surface)] rounded-lg p-3 text-center">
+							<div class="text-[0.6rem] text-[var(--color-text-tertiary)]">Mindful</div>
+							<div class="text-lg font-semibold text-cyan-400">{Math.round(t.mindful_minutes)}m</div>
+						</div>
+					{/if}
+				</div>
+			{/if}
+
+			<!-- Sleep chart -->
+			{#if hs.days?.some(d => d.sleep_duration_min != null)}
+				{@const sleepDays = hs.days.filter(d => d.sleep_duration_min != null)}
+				{@const maxSleep = Math.max(...sleepDays.map(x => x.sleep_duration_min || 0))}
+				<div class="bg-[var(--color-surface)] rounded-lg p-4 mb-3">
+					<h3 class="text-xs font-medium text-[var(--color-text-tertiary)] mb-2">Sleep</h3>
+					<div class="flex items-end gap-1 h-24">
+						{#each sleepDays as d}
+							{@const barH = maxSleep > 0 ? ((d.sleep_duration_min || 0) / maxSleep) * 100 : 0}
+							{@const deep = d.sleep_deep_min || 0}
+							{@const rem = d.sleep_rem_min || 0}
+							{@const core = d.sleep_core_min || 0}
+							{@const total = deep + rem + core || 1}
+							<div class="flex-1 flex flex-col items-center gap-0.5">
+								<div class="w-full rounded-t relative" style="height: {barH}%; min-height: 2px;">
+									<div class="absolute bottom-0 w-full rounded-t bg-indigo-600" style="height: {(deep/total)*100}%"></div>
+									<div class="absolute w-full bg-purple-500/70" style="bottom: {(deep/total)*100}%; height: {(rem/total)*100}%"></div>
+									<div class="absolute w-full rounded-t bg-blue-400/50" style="bottom: {((deep+rem)/total)*100}%; height: {(core/total)*100}%"></div>
+								</div>
+								<span class="text-[0.45rem] text-[var(--color-text-tertiary)]">{d.date.slice(5)}</span>
+							</div>
+						{/each}
+					</div>
+					<div class="flex gap-3 mt-2">
+						<span class="flex items-center gap-1 text-[0.5rem] text-[var(--color-text-tertiary)]"><span class="w-2 h-2 rounded-sm bg-indigo-600"></span>Deep</span>
+						<span class="flex items-center gap-1 text-[0.5rem] text-[var(--color-text-tertiary)]"><span class="w-2 h-2 rounded-sm bg-purple-500/70"></span>REM</span>
+						<span class="flex items-center gap-1 text-[0.5rem] text-[var(--color-text-tertiary)]"><span class="w-2 h-2 rounded-sm bg-blue-400/50"></span>Core</span>
+					</div>
+				</div>
+			{/if}
+
+			<!-- HRV + RHR sparklines -->
+			{#if hs.days?.some(d => d.hrv_avg != null || d.resting_hr != null)}
+				<div class="grid grid-cols-2 gap-3 mb-3">
+					{#if hs.days.some(d => d.hrv_avg != null)}
+						{@const hrvDays = hs.days.filter(d => d.hrv_avg != null)}
+						{@const maxHrv = Math.max(...hrvDays.map(d => d.hrv_avg || 0))}
+						<div class="bg-[var(--color-surface)] rounded-lg p-4">
+							<h3 class="text-xs font-medium text-[var(--color-text-tertiary)] mb-2">HRV (ms)</h3>
+							<div class="flex items-end gap-0.5 h-16">
+								{#each hrvDays as d}
+									<div class="flex-1 bg-green-500/60 rounded-t" style="height: {maxHrv > 0 ? ((d.hrv_avg || 0) / maxHrv) * 100 : 0}%; min-height: 1px;" title="{d.date}: {Math.round(d.hrv_avg || 0)}ms"></div>
+								{/each}
+							</div>
+						</div>
+					{/if}
+					{#if hs.days.some(d => d.resting_hr != null)}
+						{@const rhrDays = hs.days.filter(d => d.resting_hr != null)}
+						{@const maxRhr = Math.max(...rhrDays.map(d => d.resting_hr || 0))}
+						<div class="bg-[var(--color-surface)] rounded-lg p-4">
+							<h3 class="text-xs font-medium text-[var(--color-text-tertiary)] mb-2">RHR (bpm)</h3>
+							<div class="flex items-end gap-0.5 h-16">
+								{#each rhrDays as d}
+									<div class="flex-1 bg-red-500/60 rounded-t" style="height: {maxRhr > 0 ? ((d.resting_hr || 0) / maxRhr) * 100 : 0}%; min-height: 1px;" title="{d.date}: {Math.round(d.resting_hr || 0)}bpm"></div>
+								{/each}
+							</div>
+						</div>
+					{/if}
+				</div>
+			{/if}
+
+			<!-- Trends -->
+			{#if hs.trends && Object.values(hs.trends).some(v => v && v !== 'insufficient')}
+				<div class="flex gap-2 flex-wrap mb-3">
+					{#each Object.entries(hs.trends) as [key, val]}
+						{#if val && val !== 'insufficient' && healthMetricLabel[key]}
+							<span class="text-[0.6rem] px-2 py-1 rounded bg-[var(--color-surface)] {trendColor[val] || ''}">
+								{trendArrow[val] || ''} {healthMetricLabel[key]} {val}
+							</span>
+						{/if}
+					{/each}
+				</div>
+			{/if}
+
+			<!-- Anomalies -->
+			{#if hs.anomalies?.length}
+				<div class="bg-[var(--color-surface)] rounded-lg p-3">
+					<h3 class="text-xs font-medium text-[var(--color-text-tertiary)] mb-1">Notable</h3>
+					{#each hs.anomalies.slice(0, 3) as a}
+						<div class="text-[0.6rem] text-[var(--color-text-secondary)]">
+							{a.date} — {healthMetricLabel[a.metric] || a.metric}: {Math.round(a.value)} (baseline {Math.round(a.baseline)})
+						</div>
+					{/each}
+				</div>
+			{/if}
+		</div>
 	{/if}
 </div>

@@ -1,0 +1,44 @@
+# Mycelium — Cursor Rules
+
+## Project
+
+Multi-agent orchestration framework. Node.js 22+, ESM modules, Express 5, Cloudflare D1/Vectorize/R2.
+
+## Code Style
+
+- ESM imports only (`import`/`export`). No `require()`.
+- Async/await with try/catch. No callbacks.
+- No TypeScript on VPS. TypeScript only in `worker/src/`.
+- Plain JS with JSDoc for type hints where helpful.
+- Svelte 5 runes in portal (`$state`, `$derived`, `$effect`). No Svelte 4 stores.
+- Tailwind CSS + CSS custom properties. Tokens in `portal/src/lib/styles/tokens.css`.
+- Geist font (sans), JetBrains Mono (mono). No serif fonts.
+
+## Architecture
+
+- `agent-server.js` is the single binary for all agents. Config in `agents/<id>.json`.
+- `lib/db-d1.js` handles all DB access. Auto-encrypts writes, auto-decrypts reads.
+- `lib/runner.js` wraps Claude CLI subprocess.
+- `lib/crypto-local.js` does AES-256-GCM. Master key on VPS only.
+- `worker/src/` is the Cloudflare Worker. Passthrough — no decryption capability.
+- `portal/` is SvelteKit static. Do not run `npm run build` — owner deploys manually.
+
+## Security
+
+- Never put encryption keys in git, Worker secrets, or client code.
+- Per-agent tokens (`tok_xxx_...`). Agents see only their scope.
+- SQL params always use `?` placeholders. Never interpolate.
+- Bots bind to 127.0.0.1, not 0.0.0.0.
+
+## Database
+
+- Cloudflare D1 (SQLite). Migrations in `migrations/`.
+- Encrypted fields: content, thinking (messages); name, email (people); etc.
+- Use `d1Query(sql, params, opts)` from `lib/db-d1.js`. Never call the Worker API directly.
+
+## Patterns
+
+- New MCP tool: follow `mcp/mya-tools.js` pattern.
+- New agent: `npm run add-agent <id>`, then configure JSON + prompt + PM2.
+- New API endpoint: add to `agent-server.js`, portal consumes via fetch.
+- New migration: `migrations/NNN_descriptive_name.sql`, run via wrangler.

@@ -15,279 +15,14 @@
 import type { Env } from "../types/env";
 import { authenticateRequest } from "../middleware/agent-auth";
 import { corsPreflight } from "../utils/cors";
-import {
-  importMasterKey,
-  decrypt,
-  encrypt,
-  isEncrypted,
-  inferScope,
-  getEncryptedFields,
-  type Scope,
-} from "../services/crypto";
 import type { AgentIdentity } from "../middleware/agent-auth";
+import { getD1ForTenant, extractTenantId } from "../services/tenant-d1";
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
-// ── Auto-decrypt support ────────────────────────────────────────────────────
-
-let masterKeyCache: CryptoKey | null = null;
-
-async function getMasterKey(env: Env): Promise<CryptoKey | null> {
-  if (masterKeyCache) return masterKeyCache;
-  const hex = (env as unknown as Record<string, unknown>).ENCRYPTION_MASTER_KEY as string | undefined;
-  if (!hex) return null;
-  masterKeyCache = await importMasterKey(hex);
-  return masterKeyCache;
-}
-
-/**
- * Transparently decrypt encrypted fields in query results.
- * Plaintext values pass through unchanged — safe during the mixed transition period.
- * Uses the caller's identity scopes to control access.
- */
-async function autoDecryptResults(
-  rows: Record<string, unknown>[],
-  allowedScopes: Scope[],
-  env: Env,
-): Promise<Record<string, unknown>[]> {
-  if (!rows.length) return rows;
-
-  // Fast check: skip if no encrypted values in any row
-  const hasEncrypted = rows.some((row) =>
-    Object.values(row).some((v) => typeof v === "string" && isEncrypted(v)),
-  );
-  if (!hasEncrypted) return rows;
-
-  const masterKey = await getMasterKey(env);
-  if (!masterKey) {
-    console.error("[db-proxy] ENCRYPTION_MASTER_KEY not available — cannot decrypt");
-    return rows;
-  }
-
-  return Promise.all(
-    rows.map(async (row) => {
-      const result = { ...row };
-      for (const [key, value] of Object.entries(result)) {
-        if (typeof value === "string" && isEncrypted(value)) {
-          try {
-            result[key] = await decrypt(value, allowedScopes, masterKey);
-          } catch (err) {
-            // Log decryption failures so we can diagnose scope mismatches
-            const preview = typeof value === "string" ? value.slice(0, 40) : "?";
-            const rowId = result.id || result.path || "unknown";
-            console.error(
-              `[db-proxy] decrypt failed: key=${key} row=${rowId} scopes=[${allowedScopes}] err=${(err as Error).message} preview=${preview}...`,
-            );
-          }
-        }
-      }
-      return result;
-    }),
-  );
-}
-
-// ── Auto-encrypt on writes ──────────────────────────────────────────────────
-
-interface ParsedInsert {
-  type: "insert";
-  table: string;
-  columns: string[];
-  encryptedColumnIndices: number[]; // which columns have encrypted fields
-}
-
-interface ParsedUpdate {
-  type: "update";
-  table: string;
-  encryptedParamIndices: number[]; // indices into SET params (not total params)
-}
-
-/**
- * Split a VALUES group content by commas, respecting nested parens.
- * e.g. "?, ?, datetime(\"now\")" → ["?", "?", "datetime(\"now\")"]
- */
-function splitValueExprs(content: string): string[] {
-  const exprs: string[] = [];
-  let depth = 0;
-  let current = "";
-  for (const ch of content) {
-    if (ch === "(") { depth++; current += ch; }
-    else if (ch === ")") { depth--; current += ch; }
-    else if (ch === "," && depth === 0) { exprs.push(current.trim()); current = ""; }
-    else { current += ch; }
-  }
-  if (current.trim()) exprs.push(current.trim());
-  return exprs;
-}
-
-/**
- * Extract the content of the first VALUES group, handling nested parens.
- * Returns the content inside (...) after VALUES, or null.
- */
-function extractFirstValuesGroup(sql: string): string | null {
-  const valuesIdx = sql.search(/VALUES\s*\(/i);
-  if (valuesIdx === -1) return null;
-  const start = sql.indexOf("(", valuesIdx);
-  if (start === -1) return null;
-  let depth = 1;
-  let pos = start + 1;
-  while (pos < sql.length && depth > 0) {
-    if (sql[pos] === "(") depth++;
-    else if (sql[pos] === ")") depth--;
-    pos++;
-  }
-  if (depth !== 0) return null;
-  return sql.slice(start + 1, pos - 1);
-}
-
-/**
- * Parse INSERT or UPDATE SQL to find which columns/params map to encrypted fields.
- * Returns null if the statement has no encrypted fields.
- */
-function parseWriteSQL(sql: string): ParsedInsert | ParsedUpdate | null {
-  const trimmed = sql.trimStart().toUpperCase();
-
-  // INSERT INTO tablename (col1, col2) VALUES (?, ?, expr) ...
-  if (trimmed.startsWith("INSERT")) {
-    const match = sql.match(/INSERT\s+(?:OR\s+(?:REPLACE|IGNORE)\s+)?INTO\s+(\w+)\s*\(([^)]+)\)/i);
-    if (!match) return null;
-    const table = match[1];
-    const columns = match[2].split(",").map((c) => c.trim());
-    const encrypted = getEncryptedFields(table);
-    if (!encrypted.length) return null;
-    const encryptedColumnIndices: number[] = [];
-    for (let i = 0; i < columns.length; i++) {
-      if (encrypted.includes(columns[i])) encryptedColumnIndices.push(i);
-    }
-    if (!encryptedColumnIndices.length) return null;
-    return { type: "insert", table, columns, encryptedColumnIndices };
-  }
-
-  // UPDATE tablename SET col = ?, col2 = ? WHERE ...
-  if (trimmed.startsWith("UPDATE")) {
-    const tableMatch = sql.match(/UPDATE\s+(\w+)\s+SET/i);
-    if (!tableMatch) return null;
-    const table = tableMatch[1];
-    const encrypted = getEncryptedFields(table);
-    if (!encrypted.length) return null;
-
-    // Extract SET clause
-    const setMatch = sql.match(/SET\s+(.+?)(?:\s+WHERE|\s+ORDER|\s+LIMIT|\s+RETURNING|;|$)/i);
-    if (!setMatch) return null;
-    const setClause = setMatch[1];
-
-    // Parse SET assignments, tracking param index
-    const assignments = setClause.split(",").map((s) => s.trim());
-    const encryptedParamIndices: number[] = [];
-    let paramIndex = 0;
-    for (const assign of assignments) {
-      const colMatch = assign.match(/^(\w+)\s*=\s*(.+)/);
-      if (!colMatch) continue;
-      const col = colMatch[1];
-      const value = colMatch[2].trim();
-      const qCount = (value.match(/\?/g) || []).length;
-      if (qCount === 1 && encrypted.includes(col)) {
-        encryptedParamIndices.push(paramIndex);
-      }
-      paramIndex += qCount;
-    }
-    if (!encryptedParamIndices.length) return null;
-    return { type: "update", table, encryptedParamIndices };
-  }
-
-  return null;
-}
-
-/**
- * Auto-encrypt sensitive params in INSERT/UPDATE statements.
- * Modifies params in-place. Also injects `scope` column for INSERTs if missing.
- * Handles SQL expressions in VALUES (e.g. datetime("now")) correctly.
- * Returns potentially modified sql (if scope column was injected).
- */
-async function autoEncryptParams(
-  sql: string,
-  params: unknown[],
-  identity: AgentIdentity,
-  env: Env,
-): Promise<string> {
-  const parsed = parseWriteSQL(sql);
-  if (!parsed) return sql;
-
-  const masterKey = await getMasterKey(env);
-  if (!masterKey) return sql;
-
-  const scope = inferScope({ table: parsed.table, agent_id: identity.agent });
-
-  if (parsed.type === "insert") {
-    const { columns, encryptedColumnIndices } = parsed;
-
-    // Parse VALUES group to map columns → param positions (handles SQL expressions)
-    const valuesContent = extractFirstValuesGroup(sql);
-    if (!valuesContent) return sql;
-    const valueExprs = splitValueExprs(valuesContent);
-
-    // Build column → param index mapping (null for SQL expressions, not ?)
-    const colToParamIdx = new Map<number, number>();
-    let pIdx = 0;
-    for (let i = 0; i < valueExprs.length; i++) {
-      if (valueExprs[i] === "?") {
-        colToParamIdx.set(i, pIdx++);
-      }
-    }
-    const paramsPerRow = pIdx;
-    const numRows = paramsPerRow > 0 ? Math.floor(params.length / paramsPerRow) : 0;
-
-    // Encrypt each matching param across all rows
-    for (let row = 0; row < numRows; row++) {
-      for (const colIdx of encryptedColumnIndices) {
-        const paramPos = colToParamIdx.get(colIdx);
-        if (paramPos === undefined) continue; // SQL expression, not a param
-        const absIdx = row * paramsPerRow + paramPos;
-        const value = params[absIdx];
-        if (typeof value === "string" && value.length > 0 && !isEncrypted(value)) {
-          params[absIdx] = await encrypt(value, scope, masterKey);
-        }
-      }
-    }
-
-    // Inject scope column if not already present
-    if (!columns.includes("scope")) {
-      // Add ", scope" to column list
-      sql = sql.replace(
-        /INSERT(\s+(?:OR\s+(?:REPLACE|IGNORE)\s+)?INTO\s+\w+\s*)\(([^)]+)\)/i,
-        (_, prefix, cols) => `INSERT${prefix}(${cols}, scope)`,
-      );
-
-      // Rebuild VALUES with original expressions preserved + appended scope ?
-      const newValueExprs = [...valueExprs, "?"];
-      const newRowTemplate = `(${newValueExprs.join(", ")})`;
-      const allTemplates = new Array(numRows).fill(newRowTemplate).join(", ");
-      sql = sql.replace(
-        /VALUES\s+.+?(?=\s+ON\s+CONFLICT|\s+RETURNING|;|$)/is,
-        `VALUES ${allTemplates}`,
-      );
-
-      // Rebuild params: original row params + scope after each row
-      const newParams: unknown[] = [];
-      for (let row = 0; row < numRows; row++) {
-        for (let i = 0; i < paramsPerRow; i++) {
-          newParams.push(params[row * paramsPerRow + i]);
-        }
-        newParams.push(scope);
-      }
-      params.length = 0;
-      params.push(...newParams);
-    }
-  } else if (parsed.type === "update") {
-    for (const paramIdx of parsed.encryptedParamIndices) {
-      const value = params[paramIdx];
-      if (typeof value === "string" && value.length > 0 && !isEncrypted(value)) {
-        params[paramIdx] = await encrypt(value, scope, masterKey);
-      }
-    }
-  }
-
-  return sql;
-}
+// SWISS VAULT: All encryption/decryption happens on VPS (crypto-local.js).
+// Worker is a pure passthrough — stores and returns ciphertext as-is.
+// No master key, no crypto operations in this file.
 
 // CORS headers are centralized in utils/cors.ts
 
@@ -301,31 +36,6 @@ const MAX_LIMIT = 100;
 
 // DDL statements that must never be executed via proxy
 const DDL_PATTERN = /^\s*(DROP|ALTER|CREATE|ATTACH|DETACH|REINDEX|VACUUM)\s/i;
-
-// Sensitive columns redacted from raw /api/db/query results.
-// Forces agents to use /api/data/query for decrypted content.
-const REDACTED_COLUMNS = new Set([
-  "content", "thinking", "transcript", "description",
-  "notes", "metadata", "context", "result", "payload",
-  "summary", "diff",
-]);
-
-/**
- * Redact sensitive columns from raw query results.
- * Gated by ENABLE_CONTENT_REDACTION env var — safe to deploy before agents
- * are migrated to /api/data/query. Activate in Phase 3.
- */
-function redactResults(rows: Record<string, unknown>[], env: Env): Record<string, unknown>[] {
-  const enabled = (env as unknown as Record<string, unknown>).ENABLE_CONTENT_REDACTION;
-  if (!enabled) return rows; // Pass-through until Phase 3
-  return rows.map((row) => {
-    const clean = { ...row };
-    for (const col of REDACTED_COLUMNS) {
-      if (col in clean) clean[col] = "[ENCRYPTED]";
-    }
-    return clean;
-  });
-}
 
 /**
  * Timing-safe comparison of two strings.
@@ -403,22 +113,53 @@ export async function handleProxyRequest(
       });
     }
 
+    let response: Response | null = null;
     switch (pathname) {
       case "/api/db/query":
-        return handleD1Query(request, env, identity);
+        response = await handleD1Query(request, env, identity);
+        break;
       case "/api/db/batch":
-        return handleD1Batch(request, env, identity);
+        response = await handleD1Batch(request, env, identity);
+        break;
       case "/api/vectors/upsert":
-        return handleVectorUpsert(request, env);
+        response = await handleVectorUpsert(request, env);
+        break;
       case "/api/vectors/query":
-        return handleVectorQuery(request, env);
+        response = await handleVectorQuery(request, env);
+        break;
       case "/api/vectors/get":
-        return handleVectorGetByIds(request, env);
+        response = await handleVectorGetByIds(request, env);
+        break;
       case "/api/search/hybrid":
-        return handleHybridSearch(request, env, identity.scopes);
+        response = await handleHybridSearch(request, env);
+        break;
       default:
         return null;
     }
+
+    // Audit log — fire-and-forget, never blocks response.
+    // Logs WHO accessed WHAT endpoint, never logs request/response bodies or PII.
+    try {
+      const db = env.DB as D1Database;
+      if (db) {
+        const ip = request.headers.get("CF-Connecting-IP") || "";
+        db.prepare(
+          `INSERT INTO audit_log (id, event_type, agent_id, user_id, ip_address, endpoint, method, scope, success, details, created_at)
+           VALUES (?, 'api_access', ?, ?, ?, ?, 'POST', ?, ?, ?, datetime('now'))`
+        ).bind(
+          crypto.randomUUID(),
+          identity.agent,
+          identity.user_id || null,
+          ip,
+          pathname,
+          identity.scopes?.join(",") || null,
+          response.status < 400 ? 1 : 0,
+          JSON.stringify({ status: response.status, auth_type: identity.auth_type }),
+        ).run().catch(() => {}); // Swallow errors — audit must never break data access
+      }
+    } catch { /* audit failure must never block data access */ }
+
+    return response;
   }
 
   return null;
@@ -432,7 +173,9 @@ export async function handleProxyRequest(
  * Returns: { results: any[], meta: { changes, duration, ... } }
  */
 async function handleD1Query(request: Request, env: Env, identity: AgentIdentity): Promise<Response> {
-  if (!env.DB) {
+  const tenantId = extractTenantId(request);
+  const db = getD1ForTenant(env, tenantId) as D1Database | null;
+  if (!db) {
     return new Response(JSON.stringify({ error: "D1 not configured" }), {
       status: 503,
       headers: JSON_HEADERS,
@@ -479,32 +222,51 @@ async function handleD1Query(request: Request, env: Env, identity: AgentIdentity
       });
     }
 
-    // Auto-encrypt sensitive fields in INSERT/UPDATE statements
-    const isWrite = trimmed.startsWith("INSERT") || trimmed.startsWith("UPDATE") || trimmed.startsWith("REPLACE");
-    if (isWrite) {
-      sql = await autoEncryptParams(sql, params, identity, env);
+    // SWISS VAULT: encryption/decryption happens on VPS, not here.
+    // Worker is a passthrough — stores and returns ciphertext as-is.
+
+    // Owner D1 safety: REJECT queries on user-data tables that lack user_id/agent_id filter.
+    // Tenant D1s are fully isolated (separate databases), so this only matters for owner D1.
+    if (!tenantId && trimmed.startsWith("SELECT")) {
+      const USER_DATA_TABLES = ["messages", "documents", "attachments", "people", "clustering_points",
+        "territory_profiles", "sessions", "passkey_credentials", "secrets", "user_profiles",
+        "health_daily", "agent_events", "agent_tasks", "contact_territories"];
+      const sqlLower = sql.toLowerCase();
+      const hasUserIdFilter = sqlLower.includes("user_id") || sqlLower.includes("agent_id");
+      const touchesUserTable = USER_DATA_TABLES.some(t => sqlLower.includes(t));
+      if (touchesUserTable && !hasUserIdFilter) {
+        // Admin/legacy auth gets a warning only (backwards compat for admin scripts)
+        if (identity?.auth_type === "legacy" || identity?.agent === "admin") {
+          console.warn(`[D1 Proxy] ⚠ Admin SELECT without user_id filter: ${sql.substring(0, 100)}`);
+        } else {
+          console.error(`[D1 Proxy] BLOCKED SELECT on user-data table without user_id filter: ${sql.substring(0, 100)}`);
+          return new Response(
+            JSON.stringify({ error: "Query on user-data table must include user_id or agent_id filter" }),
+            { status: 403, headers: JSON_HEADERS }
+          );
+        }
+      }
     }
 
-    const stmt = env.DB.prepare(sql).bind(...params);
+    const stmt = db.prepare(sql).bind(...params);
 
     // Use .all() for SELECT, .run() for write operations
     const isRead = trimmed.startsWith("SELECT") || trimmed.startsWith("PRAGMA") || trimmed.startsWith("EXPLAIN") || trimmed.startsWith("WITH");
     const result = isRead ? await stmt.all() : await stmt.run();
 
     const rawResults = ((result as any).results ?? []) as Record<string, unknown>[];
-    const decrypted = await autoDecryptResults(rawResults, identity.scopes, env);
 
     return new Response(
       JSON.stringify({
-        results: redactResults(decrypted, env),
+        results: rawResults,
         meta: result.meta,
       }),
       { headers: JSON_HEADERS },
     );
   } catch (e: any) {
-    console.error("[D1 Query]", e);
+    console.error("[D1 Query]", e?.message || e, "| tenant:", tenantId || "owner");
     return new Response(
-      JSON.stringify({ error: "D1 query failed" }),
+      JSON.stringify({ error: "D1 query failed", detail: e?.message?.slice(0, 200) }),
       { status: 500, headers: JSON_HEADERS },
     );
   }
@@ -516,7 +278,9 @@ async function handleD1Query(request: Request, env: Env, identity: AgentIdentity
  * Returns: Array<{ results: any[], meta: object }>
  */
 async function handleD1Batch(request: Request, env: Env, identity: AgentIdentity): Promise<Response> {
-  if (!env.DB) {
+  const tenantId = extractTenantId(request);
+  const db = getD1ForTenant(env, tenantId) as D1Database | null;
+  if (!db) {
     return new Response(JSON.stringify({ error: "D1 not configured" }), {
       status: 503,
       headers: JSON_HEADERS,
@@ -564,7 +328,7 @@ async function handleD1Batch(request: Request, env: Env, identity: AgentIdentity
       }
     }
 
-    // Validate and encrypt each statement
+    // SWISS VAULT: no encryption/decryption in Worker — passthrough only
     for (const s of statements) {
       const t = s.sql.trimStart().toUpperCase();
       if (t.startsWith("DELETE") && !t.includes("WHERE")) {
@@ -572,30 +336,21 @@ async function handleD1Batch(request: Request, env: Env, identity: AgentIdentity
           status: 403, headers: JSON_HEADERS,
         });
       }
-      if (t.startsWith("INSERT") || t.startsWith("UPDATE") || t.startsWith("REPLACE")) {
-        const p = s.params || [];
-        s.sql = await autoEncryptParams(s.sql, p, identity, env);
-        s.params = p;
-      }
     }
 
     const stmts = statements.map((s) =>
-      env.DB!.prepare(s.sql).bind(...(s.params || [])),
+      db.prepare(s.sql).bind(...(s.params || [])),
     );
 
-    const results = await env.DB.batch(stmts);
+    const results = await db.batch(stmts);
 
-    const decryptedBatch = await Promise.all(
-      results.map(async (r) => ({
-        results: redactResults(
-          await autoDecryptResults((r.results || []) as Record<string, unknown>[], identity.scopes, env),
-          env,
-        ),
-        meta: r.meta,
-      })),
-    );
+    // SWISS VAULT: no crypto — return ciphertext as-is
+    const batch = results.map((r) => ({
+      results: (r.results || []) as Record<string, unknown>[],
+      meta: r.meta,
+    }));
 
-    return new Response(JSON.stringify(decryptedBatch), { headers: JSON_HEADERS });
+    return new Response(JSON.stringify(batch), { headers: JSON_HEADERS });
   } catch (e: any) {
     console.error("[D1 Batch]", e);
     return new Response(
@@ -819,9 +574,10 @@ async function handleVectorGetByIds(
 async function handleHybridSearch(
   request: Request,
   env: Env,
-  scopes: Scope[],
 ): Promise<Response> {
-  if (!env.DB || !env.VECTORS_1024) {
+  const tenantId = extractTenantId(request);
+  const db = getD1ForTenant(env, tenantId) as D1Database | null;
+  if (!db || !env.VECTORS_1024) {
     return new Response(
       JSON.stringify({ error: "D1 or Vectorize not configured" }),
       { status: 503, headers: JSON_HEADERS },
@@ -889,7 +645,7 @@ async function handleHybridSearch(
     // FTS may fail on encrypted content — treat as non-fatal
     let ftsRows: any[] = [];
     try {
-      const ftsResult = await env.DB.prepare(ftsSql).bind(...ftsParams).all();
+      const ftsResult = await db.prepare(ftsSql).bind(...ftsParams).all();
       ftsRows = ftsResult.results || [];
     } catch (ftsErr) {
       console.warn("[Hybrid Search] FTS failed (encrypted content?), continuing with vector-only:", ftsErr);
@@ -927,7 +683,7 @@ async function handleHybridSearch(
         params.push(before);
       }
 
-      const rowResult = await env.DB.prepare(sql).bind(...params).all();
+      const rowResult = await db.prepare(sql).bind(...params).all();
       vectorRows = rowResult.results || [];
       } // end ids.length > 0
     }
@@ -974,10 +730,9 @@ async function handleHybridSearch(
         similarity: vectorScoreMap.get(entry.row.id) || null,
       }));
 
-    const decryptedResults = await autoDecryptResults(results, scopes, env);
-
+    // SWISS VAULT: return ciphertext as-is — VPS decrypts locally
     return new Response(
-      JSON.stringify({ results: decryptedResults }),
+      JSON.stringify({ results }),
       { headers: JSON_HEADERS },
     );
   } catch (e: any) {

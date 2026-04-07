@@ -4,14 +4,15 @@
  * Agents call GET /api/secrets at startup with their AGENT_TOKEN
  * to fetch configuration. Secrets are stored encrypted in D1.
  *
- * - GET  /api/secrets        → agent reads its secrets (any auth)
- * - PUT  /api/secrets        → admin writes a secret (admin only)
+ * SWISS VAULT: Worker is a ciphertext relay — no master key, no crypto.
+ * VPS encrypts values before PUT, decrypts values after GET using crypto-local.js.
+ *
+ * - GET  /api/secrets        → agent reads its secrets (returns ciphertext)
+ * - PUT  /api/secrets        → admin writes a secret (accepts pre-encrypted value)
  * - DELETE /api/secrets/:key → admin deletes a secret (admin only)
  */
 
 import { requireAuth, type AgentIdentity } from "../middleware/agent-auth";
-import { encrypt, decrypt, isEncrypted, type Scope } from "../services/crypto";
-import { importMasterKey } from "../services/crypto";
 import { corsHeaders } from "../utils/cors";
 import type { Env } from "../types/env";
 
@@ -31,21 +32,8 @@ export async function handleGetSecrets(
     });
   }
 
-  const masterKeyHex = (env as unknown as Record<string, string>).ENCRYPTION_MASTER_KEY;
-  if (!masterKeyHex) {
-    return new Response(JSON.stringify({ error: "Encryption not configured" }), {
-      status: 503,
-      headers: { "Content-Type": "application/json", ...corsHeaders(request) },
-    });
-  }
-
-  const masterKey = await importMasterKey(masterKeyHex);
-
   // Build scope placeholders
   const scopePlaceholders = identity.scopes.map(() => "?").join(",");
-  // Match secrets for this user's scopes. For multi-tenant (moms-agent has a
-  // different user_id), also include secrets owned by ANY user_id — the scope
-  // filter is the real access control, not user_id.
   const query = `
     SELECT key, value, scope FROM secrets
     WHERE scope IN (${scopePlaceholders})
@@ -56,18 +44,10 @@ export async function handleGetSecrets(
   const params = [...identity.scopes, identity.agent];
   const { results } = await env.DB.prepare(query).bind(...params).all();
 
-  // Decrypt all values
+  // SWISS VAULT: return raw values — VPS decrypts locally with crypto-local.js
   const secrets: Record<string, string> = {};
   for (const row of results || []) {
-    const val = row.value as string;
-    try {
-      secrets[row.key as string] = isEncrypted(val)
-        ? await decrypt(val, identity.scopes, masterKey)
-        : val;
-    } catch {
-      // Skip secrets we can't decrypt (scope mismatch shouldn't happen
-      // given the WHERE clause, but defensive)
-    }
+    secrets[row.key as string] = row.value as string;
   }
 
   return new Response(JSON.stringify({
@@ -102,18 +82,10 @@ export async function handlePutSecret(
     });
   }
 
-  const masterKeyHex = (env as unknown as Record<string, string>).ENCRYPTION_MASTER_KEY;
-  if (!masterKeyHex) {
-    return new Response(JSON.stringify({ error: "Encryption not configured" }), {
-      status: 503,
-      headers: { "Content-Type": "application/json", ...corsHeaders(request) },
-    });
-  }
-
   const body = await request.json() as {
     key: string;
     value: string;
-    scope?: Scope;
+    scope?: string;
     agent?: string | null;
     user_id?: string;
     description?: string;
@@ -128,9 +100,8 @@ export async function handlePutSecret(
 
   const scope = body.scope || "org";
   const userId = body.user_id || identity.user_id;
-  const masterKey = await importMasterKey(masterKeyHex);
-  const encryptedValue = await encrypt(body.value, scope, masterKey);
 
+  // SWISS VAULT: value is pre-encrypted by VPS — store as-is
   await env.DB.prepare(`
     INSERT INTO secrets (key, value, scope, user_id, agent, version, description, updated_at)
     VALUES (?, ?, ?, ?, ?, 1, ?, datetime('now'))
@@ -142,7 +113,7 @@ export async function handlePutSecret(
       updated_at = datetime('now')
   `).bind(
     body.key,
-    encryptedValue,
+    body.value,
     scope,
     userId,
     body.agent ?? null,
@@ -163,7 +134,6 @@ export async function handleDeleteSecret(
   if (auth instanceof Response) return auth;
 
   const identity = auth as AgentIdentity;
-  // Admin-only — compromised agents must not delete their own config
   if (identity.agent !== "admin") {
     return new Response(JSON.stringify({ error: "Admin access required" }), {
       status: 403,

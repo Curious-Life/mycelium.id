@@ -25,11 +25,24 @@ rsync -av --delete $DRY_RUN \
   --exclude='portal/.svelte-kit/' \
   --exclude='sites/' \
   --exclude='agents/moms-agent.json' \
+  --exclude='docs/NATI-README.md' \
+  --exclude='docs/MINDSCAPE-GAPS.md' \
+  --exclude='docs/BOOTSTRAP-SECRETS-PLAN.md' \
   --exclude='package-lock.json' \
   --exclude='scripts/cache/' \
   --exclude='scripts/.venv/' \
   --exclude='*.pyc' \
   --exclude='__pycache__/' \
+  --exclude='mycelium-export*.zip' \
+  --exclude='mycelium-export.zip' \
+  --exclude='worker/wrangler.toml' \
+  --exclude='scripts/provision-customer.sh' \
+  --exclude='scripts/update-customers.sh' \
+  --exclude='scripts/provisioning-daemon.js' \
+  --exclude='scripts/verify-dns.js' \
+  --exclude='scripts/generate-instance-keys.js' \
+  --exclude='scripts/migrate-registry-to-d1.js' \
+  --exclude='scripts/export-vault.js' \
   "$SRC" "$DEST"
 
 echo ""

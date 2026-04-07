@@ -1,9 +1,11 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import { goto } from '$app/navigation';
 	import { mindscapeState, timelineHealth } from '$lib/stores/mindscape';
 	import MindscapeDetail from '$lib/components/mindscape/MindscapeDetail.svelte';
 	import Sparkline from '$lib/components/mindscape/Sparkline.svelte';
-	import { apiGet } from '$lib/api';
+	import { api, apiGet, apiPut } from '$lib/api';
+	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
 
 	// Health data for body state bar
 	interface HealthDay { date: string; sleep_duration_min: number|null; sleep_efficiency: number|null; hrv_avg: number|null; resting_hr: number|null; steps: number|null; }
@@ -38,6 +40,116 @@
 	let viewMode: '3d' | 'growth' | 'territories' = $state('3d');
 	let growthEvents: any[] = $state([]);
 	let growthLoading = $state(false);
+	let expandedStep: string | null = $state(null);
+
+	// Onboarding state
+	let aiProvider: 'claude' | 'api' = $state('claude');
+	let aiSubProvider: 'anthropic' | 'openai' = $state('anthropic');
+	let aiKeyInput = $state('');
+	let aiKeySaving = $state(false);
+	let aiKeySaved = $state(false);
+	let aiKeyError = $state('');
+	let claudeAuthLoading = $state(false);
+	let claudeAuthDone = $state(false);
+	let claudeAuthError = $state('');
+	let claudeAuthUrl = $state('');
+	let claudeAuthCode = $state('');
+	let telegramTokenInput = $state('');
+	let discordTokenInput = $state('');
+	let integrationSaving = $state(false);
+	let integrationSaved: string | null = $state(null);
+
+	// Check if Claude Code is already authenticated on page load
+	$effect(() => {
+		if (browser && !claudeAuthDone) {
+			api('/portal/auth/claude/status').then(async (res) => {
+				if (res.ok) {
+					const data = await res.json();
+					if (data.authenticated) claudeAuthDone = true;
+				}
+			}).catch(() => {});
+		}
+	});
+
+	async function connectClaude() {
+		claudeAuthLoading = true;
+		claudeAuthError = '';
+		claudeAuthUrl = '';
+		try {
+			const res = await api('/portal/auth/claude', { method: 'POST' });
+			if (!res.ok) throw new Error('Failed to start auth');
+			const data = await res.json();
+			if (data.url) {
+				claudeAuthUrl = data.url;
+				window.open(data.url, '_blank');
+			} else {
+				throw new Error('No auth URL returned');
+			}
+		} catch (e: any) {
+			claudeAuthError = e.message || 'Connection failed';
+		}
+		claudeAuthLoading = false;
+	}
+
+	async function submitClaudeCode() {
+		claudeAuthLoading = true;
+		claudeAuthError = '';
+		try {
+			const res = await api('/portal/auth/claude/code', {
+				method: 'POST',
+				body: JSON.stringify({ code: claudeAuthCode.trim() }),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) {
+				throw new Error(data.error || 'Failed to authenticate');
+			}
+			claudeAuthDone = true;
+			claudeAuthUrl = '';
+			claudeAuthCode = '';
+			// Navigate to timeline to show the welcome greeting
+			if (data.greeting) {
+				setTimeout(() => goto('/timeline'), 1500);
+			}
+		} catch (e: any) {
+			claudeAuthError = e.message || 'Authentication failed';
+		}
+		claudeAuthLoading = false;
+	}
+
+	async function saveAiKey() {
+		aiKeySaving = true;
+		aiKeyError = '';
+		aiKeySaved = false;
+		try {
+			const key = aiSubProvider === 'anthropic' ? 'CLAUDE_API_KEY' : 'OPENAI_API_KEY';
+			const res = await api('/portal/settings/secret', {
+				method: 'PUT',
+				body: JSON.stringify({ key, value: aiKeyInput.trim() }),
+			});
+			if (!res.ok) throw new Error('Failed to save');
+			aiKeySaved = true;
+			setTimeout(() => { aiKeySaved = false; }, 3000);
+		} catch (e: any) {
+			aiKeyError = e.message || 'Failed to save key';
+		}
+		aiKeySaving = false;
+	}
+
+	async function saveIntegration(key: string, value: string, scope: string) {
+		integrationSaving = true;
+		integrationSaved = null;
+		try {
+			const res = await api('/portal/settings/secret', {
+				method: 'PUT',
+				body: JSON.stringify({ key, value: value.trim(), scope }),
+			});
+			if (!res.ok) throw new Error('Failed to save');
+			const tag = key.includes('TELEGRAM') ? 'telegram' : 'discord';
+			integrationSaved = tag;
+			setTimeout(() => { integrationSaved = null; }, 3000);
+		} catch {}
+		integrationSaving = false;
+	}
 
 	async function loadGrowthEvents() {
 		if (growthEvents.length > 0) return;
@@ -397,7 +509,8 @@
 					{#if selectedRealmId !== null || enrichedRealms().length === 0}
 						<div class="territory-list">
 							{#each enrichedTerritories() as t (t.territory_id)}
-								<button
+								<!-- svelte-ignore a11y_no_static_element_interactions -->
+								<div
 									class="territory-card"
 									class:active-today={t.activation}
 									class:selected={selectedTerritory?.territory_id === t.territory_id}
@@ -406,6 +519,22 @@
 									<div class="terr-header">
 										<span class="terr-name">{t.name || `Territory ${t.territory_id}`}</span>
 										<div class="terr-badges">
+											<button
+												type="button"
+												class="badge visibility-badge"
+												class:vis-public={t.visibility === 'public'}
+												class:vis-friends={t.visibility === 'friends'}
+												onclick={(e: MouseEvent) => {
+													e.stopPropagation();
+													const next = t.visibility === 'private' ? 'public' : t.visibility === 'public' ? 'friends' : 'private';
+													apiPut(`/portal/mindscape/territory/${t.territory_id}/visibility`, { visibility: next }).then(() => {
+														t.visibility = next;
+													}).catch(() => {});
+												}}
+												title={`Visibility: ${t.visibility || 'private'} (click to cycle)`}
+											>
+												{t.visibility === 'public' ? '\u{1F310}' : t.visibility === 'friends' ? '\u{1F465}' : '\u{1F512}'}
+											</button>
 											{#if t.activation}
 												{#if t.activation.surprise > 0.5}
 													<span class="badge surge">SURGE</span>
@@ -495,18 +624,31 @@
 											{/if}
 										</div>
 									{/if}
-								</button>
+								</div>
 							{/each}
 						</div>
 					{/if}
 				{/if}
 			</div>
 		{:else if viewMode === '3d'}
-			{#if Mindscape3D}
-				<Mindscape3D />
+			{#if msState.points && msState.points.length > 0}
+				{#if Mindscape3D}
+					<Mindscape3D />
+				{:else}
+					<div class="loading-3d">
+						<div class="spinner"></div>
+					</div>
+				{/if}
 			{:else}
-				<div class="loading-3d">
-					<div class="spinner"></div>
+				<!-- Onboarding: grow your mindscape -->
+				<div class="onboarding">
+					<div class="onboarding-inner">
+						<div class="onboarding-icon">&#x25C6;</div>
+						<h2 class="onboarding-title">Activate your mindscape</h2>
+						<p class="onboarding-desc">Connect your first data source and watch your knowledge come to life.</p>
+						<ConnectionsChecklist showTitle={false} />
+						<p class="onboarding-footer">Every conversation, document, and message shapes your mindscape. It grows with you.</p>
+					</div>
 				</div>
 			{/if}
 		{:else}
@@ -696,6 +838,328 @@
 		margin-bottom: 20px;
 		color: var(--color-text);
 	}
+	/* Onboarding */
+	.onboarding {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		height: 100%;
+		background: var(--color-bg);
+	}
+	.onboarding-inner {
+		max-width: 480px;
+		padding: 3rem 2.5rem;
+		text-align: center;
+	}
+	.onboarding-icon {
+		color: var(--color-accent-aurum, #B8860B);
+		font-size: 1.5rem;
+		margin-bottom: 1.5rem;
+		opacity: 0.6;
+	}
+	.onboarding-title {
+		font-size: 1.25rem;
+		font-weight: 500;
+		color: var(--color-text-primary);
+		margin-bottom: 0.5rem;
+	}
+	.onboarding-desc {
+		font-size: 0.85rem;
+		color: var(--color-text-secondary);
+		line-height: 1.6;
+		margin-bottom: 2rem;
+	}
+	.onboarding-checklist {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		text-align: left;
+		margin-bottom: 2rem;
+	}
+	.onboarding-step {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		padding: 0.75rem 1rem;
+		background: var(--color-surface);
+		border-radius: 8px;
+		transition: background 0.15s ease;
+		border: none;
+		width: 100%;
+		cursor: pointer;
+		font-family: inherit;
+		text-align: left;
+	}
+	.onboarding-step:hover {
+		background: var(--color-elevated);
+	}
+	.step-arrow {
+		color: var(--color-text-tertiary);
+		font-size: 0.7rem;
+		flex-shrink: 0;
+		margin-left: auto;
+	}
+	.step-guide {
+		padding: 0.75rem 1rem 0.75rem 3.5rem;
+		background: var(--color-elevated);
+		border-radius: 0 0 8px 8px;
+		margin-top: -2px;
+		font-size: 0.75rem;
+		color: var(--color-text-secondary);
+		line-height: 1.7;
+	}
+	.step-guide p {
+		margin: 0.25rem 0;
+	}
+	.step-guide code {
+		font-family: var(--font-mono, monospace);
+		font-size: 0.7rem;
+		background: var(--color-surface);
+		padding: 1px 5px;
+		border-radius: 3px;
+		color: var(--color-accent-aurum, #B8860B);
+	}
+	.step-guide a {
+		color: var(--color-accent-aurum, #B8860B);
+		text-decoration: none;
+	}
+	.step-guide a:hover {
+		text-decoration: underline;
+	}
+	.guide-tabs {
+		display: flex;
+		gap: 2px;
+		margin-bottom: 0.75rem;
+		background: var(--color-surface);
+		border-radius: 6px;
+		padding: 2px;
+	}
+	.guide-tabs button {
+		flex: 1;
+		padding: 0.35rem 0.5rem;
+		font-family: var(--font-mono, monospace);
+		font-size: 0.65rem;
+		font-weight: 500;
+		background: transparent;
+		border: none;
+		border-radius: 4px;
+		color: var(--color-text-tertiary);
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+	.guide-tabs button.active {
+		background: var(--color-bg);
+		color: var(--color-text-primary);
+	}
+	.guide-input-row {
+		display: flex;
+		gap: 0.5rem;
+		margin-top: 0.5rem;
+	}
+	.guide-input {
+		flex: 1;
+		padding: 0.45rem 0.6rem;
+		font-family: var(--font-mono, monospace);
+		font-size: 0.7rem;
+		background: var(--color-surface);
+		border: 1px solid var(--color-border);
+		border-radius: 5px;
+		color: var(--color-text-primary);
+		outline: none;
+	}
+	.guide-input:focus {
+		border-color: var(--color-accent-aurum, #B8860B);
+	}
+	.guide-save-btn {
+		padding: 0.45rem 0.75rem;
+		font-family: var(--font-mono, monospace);
+		font-size: 0.65rem;
+		font-weight: 500;
+		background: var(--color-accent-aurum, #B8860B);
+		color: #fff;
+		border: none;
+		border-radius: 5px;
+		cursor: pointer;
+		white-space: nowrap;
+		transition: opacity 0.15s ease;
+	}
+	.guide-save-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+	.guide-hero {
+		padding: 0.6rem 0.75rem;
+		background: rgba(184, 134, 11, 0.06);
+		border-radius: 6px;
+		margin-bottom: 0.75rem;
+	}
+	.guide-hero p {
+		margin: 0.15rem 0;
+		font-size: 0.72rem;
+		color: var(--color-text-secondary);
+	}
+	.guide-hero strong {
+		color: var(--color-accent-aurum, #B8860B);
+	}
+	.guide-steps-compact {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+		margin-bottom: 0.5rem;
+	}
+	.gsc-step {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 0.72rem;
+		color: var(--color-text-secondary);
+	}
+	.gsc-num {
+		width: 18px;
+		height: 18px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--color-surface);
+		border-radius: 50%;
+		font-size: 0.6rem;
+		font-weight: 600;
+		color: var(--color-text-tertiary);
+		flex-shrink: 0;
+	}
+	.guide-ssh-hint {
+		font-size: 0.65rem;
+		color: var(--color-text-tertiary);
+		margin-top: 0.5rem;
+	}
+	.guide-tabs-sub {
+		display: flex;
+		gap: 2px;
+		margin-bottom: 0.5rem;
+	}
+	.guide-tabs-sub button {
+		padding: 0.25rem 0.6rem;
+		font-family: var(--font-mono, monospace);
+		font-size: 0.6rem;
+		background: transparent;
+		border: 1px solid var(--color-border);
+		border-radius: 4px;
+		color: var(--color-text-tertiary);
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+	.guide-tabs-sub button.active {
+		border-color: var(--color-accent-aurum, #B8860B);
+		color: var(--color-accent-aurum, #B8860B);
+	}
+	.guide-connect-btn {
+		width: 100%;
+		padding: 0.65rem;
+		font-family: var(--font-mono, monospace);
+		font-size: 0.75rem;
+		font-weight: 500;
+		background: var(--color-accent-aurum, #B8860B);
+		color: #fff;
+		border: none;
+		border-radius: 6px;
+		cursor: pointer;
+		transition: opacity 0.15s ease;
+		margin-top: 0.5rem;
+	}
+	.guide-connect-btn:hover { opacity: 0.9; }
+	.guide-connect-btn:disabled { opacity: 0.5; cursor: wait; }
+	.guide-error {
+		color: #f87171;
+		font-size: 0.68rem;
+		margin-top: 0.35rem;
+	}
+	.data-sources {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 4px;
+	}
+	.data-source {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.5rem 0.6rem;
+		background: var(--color-surface);
+		border-radius: 6px;
+		font-size: 0.7rem;
+	}
+	.ds-icon {
+		font-size: 0.9rem;
+		flex-shrink: 0;
+	}
+	.ds-name {
+		font-weight: 500;
+		color: var(--color-text-primary);
+		white-space: nowrap;
+	}
+	.ds-desc {
+		color: var(--color-text-tertiary);
+		font-size: 0.62rem;
+		display: none;
+	}
+	.ds-format {
+		margin-left: auto;
+		font-family: var(--font-mono, monospace);
+		font-size: 0.55rem;
+		color: var(--color-text-tertiary);
+		background: var(--color-elevated);
+		padding: 1px 4px;
+		border-radius: 2px;
+		white-space: nowrap;
+	}
+	.step-icon {
+		font-size: 1.1rem;
+		width: 2rem;
+		text-align: center;
+		flex-shrink: 0;
+	}
+	.step-content {
+		flex: 1;
+		min-width: 0;
+	}
+	.step-name {
+		font-size: 0.82rem;
+		font-weight: 500;
+		color: var(--color-text-primary);
+	}
+	.step-desc {
+		font-size: 0.72rem;
+		color: var(--color-text-tertiary);
+		margin-top: 1px;
+	}
+	.step-status {
+		font-family: var(--font-mono, monospace);
+		font-size: 0.6rem;
+		font-weight: 500;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		padding: 2px 6px;
+		border-radius: 3px;
+		flex-shrink: 0;
+	}
+	.step-status.pending {
+		color: var(--color-accent-aurum, #B8860B);
+		background: rgba(184, 134, 11, 0.1);
+	}
+	.step-status.optional {
+		color: var(--color-text-tertiary);
+		background: var(--color-elevated);
+	}
+	.step-status.connected {
+		color: #4ade80;
+		background: rgba(74, 222, 128, 0.1);
+	}
+	.onboarding-footer {
+		font-size: 0.72rem;
+		color: var(--color-text-tertiary);
+		line-height: 1.5;
+		font-style: italic;
+	}
+
 	.empty-state {
 		color: var(--color-muted);
 		font-size: 14px;
@@ -972,6 +1436,24 @@
 		background: rgba(59, 130, 246, 0.15);
 		color: var(--color-info, #3b82f6);
 		border-color: rgba(59, 130, 246, 0.25);
+	}
+	.visibility-badge {
+		cursor: pointer;
+		font-size: 11px;
+		padding: 1px 4px;
+		background: transparent;
+		border: 1px solid var(--color-border);
+		opacity: 0.5;
+		transition: opacity 0.15s;
+	}
+	.visibility-badge:hover { opacity: 1; }
+	.visibility-badge.vis-public {
+		border-color: rgba(74, 222, 128, 0.3);
+		opacity: 0.8;
+	}
+	.visibility-badge.vis-friends {
+		border-color: rgba(91, 159, 232, 0.3);
+		opacity: 0.8;
 	}
 	.terr-essence {
 		font-size: 13px;

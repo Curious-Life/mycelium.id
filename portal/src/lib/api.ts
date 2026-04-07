@@ -19,6 +19,10 @@ export async function api(path: string, options: RequestInit = {}): Promise<Resp
 	// Send browser timezone so the server can auto-detect location
 	try { headers.set('X-Timezone', Intl.DateTimeFormat().resolvedOptions().timeZone); } catch { /* */ }
 
+	// CSRF double-submit: read token from cookie, send as header
+	const csrfMatch = document.cookie.match(/mycelium_csrf=([^;]+)/);
+	if (csrfMatch) headers.set('X-CSRF-Token', csrfMatch[1]);
+
 	const res = await fetch(path, { ...options, headers, credentials: 'same-origin' });
 
 	if (res.status === 401) {

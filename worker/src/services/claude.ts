@@ -230,7 +230,7 @@ export class ClaudeService {
     // Add current date/time (in Riga timezone)
     const now = new Date();
     const rigaTime = now.toLocaleString("en-GB", {
-      timeZone: env.OWNER_TIMEZONE || "UTC",
+      timeZone: "Europe/Riga",
       weekday: "long",
       year: "numeric",
       month: "long",
@@ -453,7 +453,7 @@ export class ClaudeService {
     // Add current date/time (in Riga timezone)
     const now = new Date();
     const rigaTime = now.toLocaleString("en-GB", {
-      timeZone: env.OWNER_TIMEZONE || "UTC",
+      timeZone: "Europe/Riga",
       weekday: "long",
       year: "numeric",
       month: "long",

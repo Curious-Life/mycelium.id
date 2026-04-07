@@ -20,6 +20,13 @@
  * - Claude Code execution
  */
 
+// SECURITY: Block --inspect in production. Heap snapshots via inspector
+// would expose master key material in mlock'd buffers.
+if (process.execArgv.some(a => a.includes('inspect'))) {
+  console.error('FATAL: --inspect detected. Node inspector is not allowed in production.');
+  process.exit(1);
+}
+
 import './lib/sentry.js';
 import 'dotenv/config';
 import { bootstrapSecrets, refreshSecrets } from './lib/bootstrap-secrets.js';
@@ -32,6 +39,7 @@ import cors from 'cors';
 import crypto from 'crypto';
 import { spawn, execSync, execFileSync } from 'child_process';
 import fs from 'fs/promises';
+import { existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { tryGetDb } from './lib/db.js';
@@ -41,7 +49,8 @@ import { tryGetDb } from './lib/db.js';
 const CLAUDE_BIN = process.env.CLAUDE_BIN || '/usr/bin/claude';
 
 // Import from lib modules
-import { getAgentPaths, ensureAgentStructure, readFile, writeFile } from './lib/paths.js';
+import { getAgentPaths, getAgentsRoot, ensureAgentStructure, readFile, writeFile } from './lib/paths.js';
+import os from 'os';
 import { writeMcpSettings } from './mcp/setup.js';
 import { runClaudeCode } from './lib/runner.js';
 import { fetchPrices, fetchFxRates } from './lib/price-fetcher.js';
@@ -94,11 +103,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /** Timing-safe string comparison to prevent timing attacks on secrets. */
 function safeCompare(a, b) {
-  if (!a || !b) return false;
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
   const aBuf = Buffer.from(a);
   const bBuf = Buffer.from(b);
   if (aBuf.length !== bBuf.length) {
-    crypto.timingSafeEqual(aBuf, aBuf); // burn constant time
+    // Burn constant time even on length mismatch
+    const dummy = Buffer.alloc(Math.max(aBuf.length, 1));
+    crypto.timingSafeEqual(dummy, dummy);
     return false;
   }
   return crypto.timingSafeEqual(aBuf, bBuf);
@@ -111,6 +122,7 @@ function safeError(err, fallback = 'Internal server error') {
 }
 
 const app = express();
+app.set('trust proxy', 'loopback'); // Trust X-Forwarded-For only from localhost (Caddy)
 const PORT = process.env.PORT || 3002;
 const AGENT_ID = process.env.AGENT_ID || 'company-agent';
 const MAX_TURNS = parseInt(process.env.MAX_TURNS, 10) || 30;
@@ -258,6 +270,20 @@ async function initRuntime() {
 // Get standardized paths for this agent
 const paths = getAgentPaths(AGENT_ID);
 
+// Load system prompt with fallback to default template
+const DEFAULT_PROMPT_PATH = path.join(__dirname, 'templates', 'default-system-prompt.md');
+async function loadSystemPrompt() {
+  try {
+    const prompt = await loadSystemPrompt();
+    if (prompt.trim()) return prompt;
+  } catch { /* no custom prompt */ }
+  try {
+    const fallback = await fs.readFile(DEFAULT_PROMPT_PATH, 'utf-8');
+    console.log(`[${LOG_PREFIX}] Using default system prompt template`);
+    return fallback;
+  } catch { return ''; }
+}
+
 /**
  * Store user + assistant messages in D1 for cross-channel search.
  * Called fire-and-forget after each successful chat response.
@@ -284,36 +310,23 @@ async function storeMessages(userId, source, userMessage, assistantResponse, req
 }
 
 /**
- * Fire-and-forget: call Worker /api/enrich to tag and embed messages.
- * The Worker runs Workers AI (Llama 4 Scout for tagging, BGE-M3 for embedding)
- * and updates D1 + Vectorize in the background.
+ * Fire-and-forget: send message IDs to local enrichment service for async
+ * tagging (Qwen2.5-3B via llama-server) and embedding (BGE-M3 via ONNX).
+ * Never blocks chat responses — returns immediately.
  */
 function enrichMessages(insertedRows, userId, agentId) {
-  if (!insertedRows?.length || !process.env.MYA_WORKER_URL) return;
+  if (!insertedRows?.length) return;
 
   const messageIds = insertedRows.map(r => r.id).filter(Boolean);
   if (messageIds.length === 0) return;
 
-  const headers = { 'Content-Type': 'application/json' };
-  if (process.env.AGENT_TOKEN) {
-    headers['Authorization'] = `Bearer ${process.env.AGENT_TOKEN}`;
-  } else if (process.env.MYA_WORKER_SECRET) {
-    headers['Authorization'] = `Bearer ${process.env.MYA_WORKER_SECRET}`;
-    if (AGENT_ID) headers['X-Agent-ID'] = AGENT_ID;
-  }
-
-  fetch(`${process.env.MYA_WORKER_URL}/api/enrich`, {
+  const enrichUrl = process.env.ENRICHMENT_URL || 'http://localhost:8095';
+  fetch(`${enrichUrl}/enrich`, {
     method: 'POST',
-    headers,
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ messageIds, userId, agentId }),
-    signal: AbortSignal.timeout(5000), // Don't wait — Worker does it in background
-  }).then(res => {
-    if (!res.ok) {
-      res.text().then(t => console.error(`[${LOG_PREFIX}] Enrich call failed (${res.status}):`, t.slice(0, 200)));
-    }
-  }).catch(err => {
-    console.error(`[${LOG_PREFIX}] Enrich call failed:`, err.message);
-  });
+    signal: AbortSignal.timeout(1000), // 1s — truly async, don't wait
+  }).catch(() => {}); // Swallow errors — enrichment is best-effort background task
 }
 
 /**
@@ -987,6 +1000,15 @@ const ALLOWED_ORIGINS = [
   ...(process.env.PORTAL_ORIGINS || '').split(',').filter(Boolean),
 ];
 app.use(cors({ origin: ALLOWED_ORIGINS, credentials: true }));
+// Security headers — applied to all responses
+app.use((_req, res, next) => {
+  res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+app.use(csrfProtect); // CSRF validation for cookie-authenticated portal requests
 app.use(express.json({ limit: '10mb' })); // Increased for file attachments + history
 
 // Simple cookie parser (avoids cookie-parser dependency)
@@ -1155,7 +1177,7 @@ app.get('/.well-known/agent.json', async (req, res) => {
   // Load description from system prompt if available
   let description = `${AGENT_ID} agent`;
   try {
-    const systemPrompt = await fs.readFile(paths.prompts.system, 'utf-8');
+    const systemPrompt = await loadSystemPrompt();
     // Extract first meaningful line as description
     const firstLine = systemPrompt.split('\n').find(l => l.trim() && !l.startsWith('#'));
     if (firstLine) description = firstLine.trim().slice(0, 200);
@@ -1185,14 +1207,50 @@ app.get('/.well-known/agent.json', async (req, res) => {
 
 app.get('/health', async (req, res) => {
   const state = await loadState();
+
+  // Stack checks
+  const checks = { d1: 'unknown', auth: 'unknown', encryption: 'unknown' };
+  try {
+    const db = tryGetDb();
+    if (db) {
+      await db.rawQuery('SELECT 1');
+      checks.d1 = 'ok';
+    } else {
+      checks.d1 = 'no_db';
+    }
+  } catch { checks.d1 = 'error'; }
+
+  checks.auth = process.env.AGENT_TOKEN ? 'ok' : 'missing';
+  // Encryption: tmpfs (preferred) or env var (fallback)
+  checks.encryption = (existsSync('/run/mycelium/master.key') || process.env.ENCRYPTION_MASTER_KEY) ? 'ok' : 'disabled';
+
+  const status = checks.d1 === 'ok' && checks.auth === 'ok' ? 'ok' : 'degraded';
+
+  // Unauthenticated: minimal response for uptime monitors
+  const isAuthed = requireWorkerSecretSilent(req);
+  if (!isAuthed) {
+    return res.json({ status, timestamp: new Date().toISOString() });
+  }
+
+  // Authenticated: full operational details
+  let version = null;
+  try { version = (await fs.readFile(path.join(__dirname, '.version'), 'utf-8')).trim(); } catch {}
+
   res.json({
-    status: 'ok',
+    status,
     agent: AGENT_ID,
     tier: runtime?.tier || 1,
     model: runtime?.model || 'sonnet',
     models: runtime?.models || {},
     lastModelUsed,
     account: process.env.CLAUDE_CONFIG_DIR ? 'configured' : 'default',
+    checks,
+    identity: identityCheck.verified !== undefined ? {
+      verified: identityCheck.verified,
+      mode: identityCheck.mode,
+      handle: identityCheck.handle,
+    } : undefined,
+    version,
     features: ['chat', 'think', 'discord-outbound', 'checkpoint-recovery', 'session-resume', 'wake-cycles'],
     timeouts: {
       chat: TIMEOUTS.chat / 1000 + 's',
@@ -1205,6 +1263,7 @@ app.get('/health', async (req, res) => {
       lastMessageTime: state.lastMessageTime,
       activeTasks: activeTaskCount,
     },
+    uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString()
   });
 });
@@ -1234,16 +1293,10 @@ app.get('/info', async (req, res) => {
 // ============================================
 
 app.post('/chat', async (req, res) => {
-  // Validate worker secret for external requests (Portal/Telegram via internet)
-  // Internal requests (localhost) skip this check
-  const remoteIp = req.ip || req.connection?.remoteAddress || '';
-  const isLocal = remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1';
-  if (!isLocal && MYA_WORKER_SECRET) {
-    const secret = req.headers['x-worker-secret'];
-    if (!safeCompare(secret, MYA_WORKER_SECRET)) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-  }
+  // Use socket address (not req.ip — req.ip respects X-Forwarded-For which is
+  // spoofable). Direct localhost socket connections skip auth; everything else
+  // (including proxied requests via Caddy) requires the worker secret.
+  if (!requireWorkerSecret(req, res)) return;
 
   const requestTime = new Date(); // capture arrival time for message timestamps
   const { channel, username, userId, history, channelId, messageId, taskType: requestedTaskType, sourceAgent, priority: taskPriority, context: taskContext } = req.body;
@@ -1267,7 +1320,7 @@ app.post('/chat', async (req, res) => {
   let heartbeat = '';
   const wakeCycles = await getWakeCycles();
   try {
-    systemPrompt = await fs.readFile(paths.prompts.system, 'utf-8');
+    systemPrompt = await loadSystemPrompt();
     context = await fs.readFile(paths.knowledge.context, 'utf-8').catch(() => '');
     // Load HEARTBEAT.md from repo - this is the agent's memory of autonomous work
     heartbeat = await fs.readFile(path.join(paths.repo, 'HEARTBEAT.md'), 'utf-8').catch(() => '');
@@ -1608,7 +1661,17 @@ ${sourceAgent ? `\n4. **Decline** - If this is outside your scope, poorly specif
       console.error(`[${LOG_PREFIX}] Post-chat file scan failed:`, err.message);
     });
 
-    res.json(result);
+    // Deliver response — if connection died (bot restarted), proactively send via Telegram/Discord
+    if (res.writableEnded || res.destroyed) {
+      console.warn(`[${LOG_PREFIX}] Response connection closed before delivery — attempting proactive send`);
+      if (result.response && !result.noReply) {
+        proactiveSendFallback(chatSource, result.response).catch(err => {
+          console.error(`[${LOG_PREFIX}] Proactive fallback failed:`, err.message);
+        });
+      }
+    } else {
+      res.json(result);
+    }
   } catch (error) {
     console.error(`[${LOG_PREFIX}] Chat error:`, error.message);
     eventLog.error('chat', error);
@@ -1644,14 +1707,8 @@ app.post(['/chat/stream', '/portal/chat/stream'], async (req, res) => {
     if (!req.body.username) req.body.username = user.display_name || user.id;
     if (!req.body.source) req.body.source = 'portal';
   } else {
-    const remoteIp = req.ip || req.connection?.remoteAddress || '';
-    const isLocal = remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1';
-    if (!isLocal && MYA_WORKER_SECRET) {
-      const secret = req.headers['x-worker-secret'];
-      if (!safeCompare(secret, MYA_WORKER_SECRET)) {
-        return res.status(401).json({ error: 'Unauthorized' });
-      }
-    }
+    // Use socket address (req.ip respects X-Forwarded-For which is spoofable)
+    if (!requireWorkerSecret(req, res)) return;
   }
 
   // Proxy to a different agent if requested (portal agent-switching)
@@ -1719,7 +1776,7 @@ app.post(['/chat/stream', '/portal/chat/stream'], async (req, res) => {
   let heartbeat = '';
   let wakeCycles = [];
   try {
-    systemPrompt = await fs.readFile(paths.prompts.system, 'utf-8');
+    systemPrompt = await loadSystemPrompt();
     wakeCycles = await getWakeCycles();
     context = await fs.readFile(paths.knowledge.context, 'utf-8').catch(() => '');
     heartbeat = await fs.readFile(path.join(paths.repo, 'HEARTBEAT.md'), 'utf-8').catch(() => '');
@@ -2078,6 +2135,7 @@ app.post('/research', async (req, res) => {
 });
 
 app.post('/think', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   const { prompt, maxTurns: requestedMaxTurns, async: asyncMode } = req.body;
   if (!prompt) {
     return res.status(400).json({ error: 'Prompt required' });
@@ -2110,7 +2168,7 @@ app.post('/think', async (req, res) => {
   // Load system context using standardized paths
   let systemPrompt = '';
   try {
-    systemPrompt = await fs.readFile(paths.prompts.system, 'utf-8');
+    systemPrompt = await loadSystemPrompt();
     addActivity('action', 'Loaded system prompt', { type: 'file-read', file: 'system.md' });
   } catch (e) {
     console.log(`[${LOG_PREFIX}] Could not load system prompt:`, e.message);
@@ -2249,6 +2307,7 @@ ${prompt}`;
 
 // Sync spawn — waits for result
 app.post('/spawn-task', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   if (!runtime) {
     return res.status(503).json({ error: 'Runtime not initialized' });
   }
@@ -2266,11 +2325,20 @@ app.post('/spawn-task', async (req, res) => {
 
 // Async spawn — returns immediately, POSTs result to callbackUrl
 app.post('/spawn-task-async', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   if (!runtime) {
     return res.status(503).json({ error: 'Runtime not initialized' });
   }
 
   const { callbackUrl, ...config } = req.body;
+
+  // SECURITY: callbackUrl must be a localhost URL — prevents SSRF.
+  // Spawn results may contain plaintext task output (potentially sensitive),
+  // so we only allow POSTing back to other agents on the same VPS.
+  if (callbackUrl && !isLocalhostUrl(callbackUrl)) {
+    return res.status(400).json({ error: 'callbackUrl must be a localhost URL (loopback only)' });
+  }
+
   const taskId = `ephemeral-${config.role}-pending`;
   res.json({ taskId, status: 'spawned' });
   addActivity('action', `Async spawn: ${config.role}`, { type: 'spawn-async', role: config.role });
@@ -2279,6 +2347,26 @@ app.post('/spawn-task-async', async (req, res) => {
     .then(result => callbackUrl && retryFetch(callbackUrl, result, 3))
     .catch(error => callbackUrl && retryFetch(callbackUrl, { error: error.message }, 3));
 });
+
+/**
+ * Validate that a URL points to localhost (loopback) only.
+ * Prevents SSRF: rejects external hosts, DNS-resolved hosts, IP literals
+ * pointing elsewhere, file://, gopher://, etc.
+ */
+function isLocalhostUrl(urlStr) {
+  if (typeof urlStr !== 'string' || urlStr.length === 0 || urlStr.length > 2048) return false;
+  let url;
+  try {
+    url = new URL(urlStr);
+  } catch {
+    return false;
+  }
+  // Only http/https schemes — no file://, gopher://, etc.
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+  // Hostname must be loopback. Check exact strings, not DNS resolution.
+  const host = url.hostname.toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
+}
 
 // Get spawn status
 app.get('/spawns', (req, res) => {
@@ -2289,9 +2377,14 @@ app.get('/spawns', (req, res) => {
 });
 
 /**
- * Retry a POST fetch with linear backoff
+ * Retry a POST fetch with linear backoff. Localhost-only — defense in depth
+ * against SSRF. Callers must validate the URL before calling, but we re-check.
  */
 async function retryFetch(url, body, retries) {
+  if (!isLocalhostUrl(url)) {
+    console.error(`[${LOG_PREFIX}] retryFetch refused non-localhost URL: ${String(url).substring(0, 100)}`);
+    return;
+  }
   for (let i = 0; i < retries; i++) {
     try {
       const response = await fetch(url, {
@@ -2314,6 +2407,7 @@ async function retryFetch(url, body, retries) {
 // ============================================
 
 app.post('/delegate', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   const { agent, task, context, priority } = req.body;
   if (!runtime) {
     return res.status(503).json({ error: 'Runtime not initialized' });
@@ -2341,6 +2435,7 @@ app.post('/delegate', async (req, res) => {
 // ============================================
 
 app.post('/delegation-callback', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   const { taskId, result, status, error, fromAgent } = req.body;
   if (!runtime) {
     return res.status(503).json({ error: 'Runtime not initialized' });
@@ -2467,6 +2562,7 @@ async function runThinkCycle(prompt, trigger) {
  * Routes to the correct Discord bot using resolveBotHttpUrl()
  */
 app.post('/discord/react', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   const { channelId, messageId, emoji } = req.body;
 
   if (!channelId || !messageId || !emoji) {
@@ -2510,6 +2606,7 @@ app.post('/discord/react', async (req, res) => {
  * Validates rate limits and queues the message
  */
 app.post('/discord/send', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   const { channelId, content } = req.body;
   if (!content) {
     return res.status(400).json({ error: 'Content required' });
@@ -2580,6 +2677,7 @@ app.post('/discord/send', async (req, res) => {
  * Binary files (PDFs, images, etc.) are forwarded to the bot's /discord/send-file endpoint.
  */
 app.post('/discord/send-file', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   const { channelId, filePath, base64, filename, content } = req.body;
   if (!filePath && !base64) {
     return res.status(400).json({ error: 'filePath or base64 required' });
@@ -2830,6 +2928,7 @@ async function concatOggBuffers(buffers) {
 }
 
 app.post('/discord/send-voice', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   const { channelId, text } = req.body;
   if (!text) {
     return res.status(400).json({ error: 'text required' });
@@ -2953,6 +3052,7 @@ app.post('/discord/send-voice', async (req, res) => {
 const COLLAB_CHANNEL = process.env.DISCORD_COLLAB_CHANNEL;
 
 app.post('/collab/send', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   const { targetAgent, message, filePath, base64, filename, threadId } = req.body;
 
   if (!message && !filePath && !base64) {
@@ -3023,13 +3123,69 @@ app.post('/collab/send', async (req, res) => {
 });
 
 /**
- * Send a text message to Telegram (proactive messaging from think cycles)
- * Forwards to the telegram bot's /telegram/send endpoint
+ * Proactive fallback delivery — when the original HTTP response connection died
+ * (e.g. bot restarted during agent processing), deliver the response via the
+ * appropriate bot's HTTP endpoint instead. The message is already stored in D1.
  */
 const TELEGRAM_BOT_URL = process.env.TELEGRAM_BOT_URL || 'http://localhost:3003';
 const WHATSAPP_BOT_URL = process.env.WHATSAPP_BOT_URL;
 
+async function proactiveSendFallback(source, response) {
+  if (!response || response.length < 2) return;
+
+  // Wait a few seconds for the bot to come back online after restart
+  await new Promise(r => setTimeout(r, 5000));
+
+  if (source?.startsWith('telegram')) {
+    console.log(`[${LOG_PREFIX}] Proactive fallback → Telegram (${response.length} chars)`);
+    const res = await fetch(`${TELEGRAM_BOT_URL}/telegram/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: response }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) {
+      // Bot might still be restarting — retry after 15s
+      await new Promise(r => setTimeout(r, 15000));
+      await fetch(`${TELEGRAM_BOT_URL}/telegram/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: response }),
+        signal: AbortSignal.timeout(10000),
+      });
+    }
+    console.log(`[${LOG_PREFIX}] Proactive fallback delivered to Telegram`);
+  } else if (source?.startsWith('discord')) {
+    const channelId = source.replace('discord_', '');
+    if (channelId && DISCORD_BOT_URL) {
+      console.log(`[${LOG_PREFIX}] Proactive fallback → Discord #${channelId} (${response.length} chars)`);
+      await fetch(`${DISCORD_BOT_URL}/discord/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channelId, content: response }),
+        signal: AbortSignal.timeout(10000),
+      });
+    }
+  } else if (source?.startsWith('whatsapp') && WHATSAPP_BOT_URL) {
+    console.log(`[${LOG_PREFIX}] Proactive fallback → WhatsApp (${response.length} chars)`);
+    await fetch(`${WHATSAPP_BOT_URL}/whatsapp/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: response }),
+      signal: AbortSignal.timeout(10000),
+    });
+  } else {
+    console.warn(`[${LOG_PREFIX}] Proactive fallback: unknown source '${source}', response stored but not delivered`);
+  }
+}
+
+/**
+ * Send a text message to Telegram (proactive messaging from think cycles)
+ * Forwards to the telegram bot's /telegram/send endpoint
+ */
+
 app.post('/telegram/send', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   const { chatId, text } = req.body;
   if (!text) {
     return res.status(400).json({ error: 'text required' });
@@ -3075,6 +3231,7 @@ app.post('/telegram/send', async (req, res) => {
  */
 
 app.post('/telegram/send-file', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   const { filePath, base64, filename, caption } = req.body;
   if (!filePath && !base64) {
     return res.status(400).json({ error: 'filePath or base64 required' });
@@ -3164,6 +3321,7 @@ app.post('/telegram/send-file', async (req, res) => {
  * Forwards to the WhatsApp bot's /whatsapp/send endpoint
  */
 app.post('/whatsapp/send', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   if (!WHATSAPP_BOT_URL) {
     return res.status(404).json({ error: 'WhatsApp bot not configured' });
   }
@@ -3202,6 +3360,7 @@ app.post('/whatsapp/send', async (req, res) => {
  * Forwards to the WhatsApp bot's /whatsapp/send-file endpoint
  */
 app.post('/whatsapp/send-file', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   if (!WHATSAPP_BOT_URL) {
     return res.status(404).json({ error: 'WhatsApp bot not configured' });
   }
@@ -3572,6 +3731,7 @@ app.get('/tasks/all', async (req, res) => {
 // ============================================
 
 app.post('/search', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   if (!checkRateLimit(req, res, 'search', 60)) return;
   const { query, limit = 10, after, before } = req.body;
 
@@ -3642,6 +3802,7 @@ app.post('/search', async (req, res) => {
 // ============================================
 
 app.post('/prompt', async (req, res) => {
+  if (!requireWorkerSecret(req, res)) return;
   const { prompt, channel, username } = req.body;
   if (!prompt) {
     return res.status(400).json({ error: 'Prompt required' });
@@ -3650,7 +3811,7 @@ app.post('/prompt', async (req, res) => {
   let systemPrompt = '';
   let context = '';
   try {
-    systemPrompt = await fs.readFile(paths.prompts.system, 'utf-8');
+    systemPrompt = await loadSystemPrompt();
     context = await fs.readFile(paths.knowledge.context, 'utf-8');
   } catch (e) {
     console.log(`[${LOG_PREFIX}] Could not load prompts:`, e.message);
@@ -4243,7 +4404,7 @@ async function resumeSession(checkpoint) {
     // Load system prompt
     let systemPrompt = '';
     try {
-      systemPrompt = await fs.readFile(paths.prompts.system, 'utf-8');
+      systemPrompt = await loadSystemPrompt();
     } catch (e) {
       console.log(`[${LOG_PREFIX}] Could not load system prompt for recovery:`, e.message);
     }
@@ -4781,6 +4942,39 @@ function clearSessionCookie(res) {
   res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
 }
 
+// CSRF protection via double-submit cookie pattern
+const CSRF_COOKIE = 'mycelium_csrf';
+const isProduction = process.env.NODE_ENV === 'production' || process.env.SECURE_COOKIES === '1';
+
+function setCsrfCookie(res) {
+  const csrfToken = crypto.randomBytes(32).toString('hex');
+  // Non-HttpOnly so JavaScript can read it to send as header
+  const existing = res.getHeader('Set-Cookie');
+  const cookies = Array.isArray(existing) ? existing : existing ? [existing] : [];
+  cookies.push(`${CSRF_COOKIE}=${csrfToken}; Path=/; SameSite=Strict; Max-Age=${7 * 24 * 60 * 60}${isProduction ? '; Secure' : ''}`);
+  res.setHeader('Set-Cookie', cookies);
+}
+
+/** CSRF middleware — validates double-submit cookie on state-changing requests. */
+function csrfProtect(req, res, next) {
+  // Safe methods don't need CSRF
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  // API token auth (agent-to-agent) skips CSRF
+  if (req.headers['authorization']?.startsWith('Bearer ')) return next();
+  // Worker secret auth skips CSRF
+  if (req.headers['x-worker-secret']) return next();
+  // Direct localhost (inter-process: Discord bots, orchestrator) skips CSRF
+  const socketIp = req.socket?.remoteAddress || '';
+  if (['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(socketIp) && !req.headers['x-forwarded-for']) return next();
+
+  const cookieToken = req.cookies?.[CSRF_COOKIE];
+  const headerToken = req.headers['x-csrf-token'];
+  if (!cookieToken || !headerToken || !safeCompare(cookieToken, headerToken)) {
+    return res.status(403).json({ error: 'CSRF validation failed' });
+  }
+  next();
+}
+
 // Helper: authenticate portal request (reads token from Bearer header or HttpOnly cookie)
 async function authenticatePortalRequest(req) {
   const token = extractSessionToken(req);
@@ -4816,14 +5010,25 @@ async function authenticatePortalRequest(req) {
     }
   }
 
+  // Attach user to request for audit middleware (portal access logging)
+  if (user) req._auditUser = user;
+
   return user;
 }
 
-// Helper: require worker secret for non-local requests (portal is same-origin via localhost)
+// Helper: require worker secret for non-local requests.
+// Only direct localhost socket connections (inter-process) skip auth.
+// Requests proxied through Caddy (X-Forwarded-For present) always require auth.
 function requireWorkerSecret(req, res) {
-  const remoteIp = req.ip || req.connection?.remoteAddress || '';
-  const isLocal = remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1';
-  if (!isLocal && MYA_WORKER_SECRET) {
+  const socketIp = req.socket?.remoteAddress || '';
+  const isLocalSocket = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(socketIp);
+  const isProxied = !!req.headers['x-forwarded-for'];
+
+  // Direct localhost (inter-agent/orchestrator calls) — skip auth
+  if (isLocalSocket && !isProxied) return true;
+
+  // All other requests: require worker secret
+  if (MYA_WORKER_SECRET) {
     const secret = req.headers['x-worker-secret'];
     if (!safeCompare(secret, MYA_WORKER_SECRET)) {
       res.status(401).json({ error: 'Unauthorized' });
@@ -4831,6 +5036,16 @@ function requireWorkerSecret(req, res) {
     }
   }
   return true;
+}
+
+/** Silent version — returns boolean without sending 401 response. */
+function requireWorkerSecretSilent(req) {
+  const socketIp = req.socket?.remoteAddress || '';
+  const isLocalSocket = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(socketIp);
+  const isProxied = !!req.headers['x-forwarded-for'];
+  if (isLocalSocket && !isProxied) return true;
+  if (!MYA_WORKER_SECRET) return true;
+  return safeCompare(req.headers['x-worker-secret'], MYA_WORKER_SECRET);
 }
 
 // Rate limiter for auth endpoints (per IP, 10 attempts per minute)
@@ -4856,10 +5071,111 @@ function checkAuthRateLimit(req, res) {
   }
 
   if (entry.count > maxAttempts) {
+    tryGetDb()?.audit.log({ action: 'auth.rate_limited', ip, details: { attempts: entry.count } }).catch(() => {});
     res.status(429).json({ error: 'Too many requests' });
     return false;
   }
   return true;
+}
+
+// Security email notifications (new device registered, login, export)
+async function sendSecurityEmail(event, req, details = {}) {
+  const workerUrl = process.env.MYA_WORKER_URL;
+  const adminSecret = process.env.ADMIN_SECRET;
+  if (!workerUrl || !adminSecret) return;
+
+  // Look up the user's email from provisioning_jobs
+  const userId = process.env.MYA_USER_ID;
+  if (!userId) return;
+
+  try {
+    const db = tryGetDb();
+    if (!db) return;
+    const job = await db.d1QueryAdmin(
+      'SELECT email FROM provisioning_jobs WHERE user_id = ? AND status = ? LIMIT 1',
+      [userId, 'ready']
+    );
+    const email = job?.results?.[0]?.email;
+    if (!email) return;
+
+    const ip = req?.ip || req?.headers?.['x-forwarded-for'] || 'unknown';
+    const ua = req?.headers?.['user-agent'] || 'unknown';
+    const time = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+
+    const subjects = {
+      new_device: 'New device registered on your Mycelium account',
+      login: 'New login to your Mycelium account',
+      export: 'Your data was exported from your Mycelium account',
+    };
+
+    const bodies = {
+      new_device: `A new passkey was registered on your Mycelium account.\n\nTime: ${time}\nIP: ${ip}\nDevice: ${ua}\n\nIf this wasn't you, your account may be compromised. SSH into your server and revoke all sessions immediately.\n\n— Mycelium`,
+      login: `A new login was detected on your Mycelium account.\n\nTime: ${time}\nIP: ${ip}\nDevice: ${ua}\n\nIf this wasn't you, your account may be compromised.\n\n— Mycelium`,
+      export: `A full data export was requested from your Mycelium account.\n\nTime: ${time}\nIP: ${ip}\nDevice: ${ua}${details?.messageCount ? `\nMessages exported: ${details.messageCount}` : ''}\n\nIf this wasn't you, your account may be compromised. Revoke all sessions immediately.\n\n— Mycelium`,
+    };
+
+    await fetch(`${workerUrl}/api/admin/send-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminSecret}` },
+      body: JSON.stringify({
+        to: email,
+        subject: subjects[event] || 'Security alert',
+        text: bodies[event] || 'A security event occurred on your account.',
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (e) {
+    console.warn(`[Auth] Security email failed (${event}):`, e.message);
+  }
+}
+
+async function sendConnectionEmail(toUserId, fromHandle, fromSignature) {
+  const workerUrl = process.env.MYA_WORKER_URL;
+  const adminSecret = process.env.ADMIN_SECRET;
+  if (!workerUrl || !adminSecret) return;
+
+  try {
+    const db = tryGetDb();
+    if (!db) return;
+    const job = await db.d1QueryAdmin(
+      'SELECT email FROM provisioning_jobs WHERE user_id = ? AND status = ? LIMIT 1',
+      [toUserId, 'ready']
+    );
+    const email = job?.results?.[0]?.email;
+    if (!email) return;
+
+    const sig = fromSignature ? `\n"${fromSignature}"` : '';
+    await fetch(`${workerUrl}/api/admin/send-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminSecret}` },
+      body: JSON.stringify({
+        to: email,
+        subject: `@${fromHandle} wants to connect on Mycelium`,
+        text: `@${fromHandle} sent you a connection request.${sig}\n\nLog in to your portal to accept or ignore.\n\n— Mycelium`,
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (e) {
+    console.warn('[Connections] Email notification failed:', e.message);
+  }
+}
+
+// Daily rate limiter for high-value operations (export)
+const dailyLimits = new Map();
+function checkDailyLimit(userId, operation, maxPerDay = 3) {
+  const key = `${userId}:${operation}`;
+  const now = Date.now();
+  const dayMs = 86400000;
+  let entry = dailyLimits.get(key);
+  if (!entry || now - entry.start > dayMs) {
+    entry = { start: now, count: 0 };
+    dailyLimits.set(key, entry);
+  }
+  entry.count++;
+  if (dailyLimits.size > 500) {
+    for (const [k, v] of dailyLimits) { if (now - v.start > dayMs) dailyLimits.delete(k); }
+  }
+  return entry.count <= maxPerDay;
 }
 
 // General-purpose rate limiter for resource-intensive endpoints
@@ -4893,6 +5209,13 @@ async function checkFirstRun() {
     if (!db) return;
     const count = await db.users.count();
     if (count === 0) {
+      // Managed hosting: skip setup token — users authenticate via master key
+      // Self-hosted: show setup token in logs
+      const isManaged = !!process.env.MYA_USER_ID;
+      if (isManaged) {
+        console.log(`[${LOG_PREFIX}] Managed instance — first login via master key (no setup token)`);
+        return; // setupToken stays null → login page shows master key form
+      }
       setupToken = crypto.randomUUID();
       console.log(`\n${'='.repeat(50)}`);
       console.log(`  FIRST-RUN SETUP`);
@@ -4905,8 +5228,231 @@ async function checkFirstRun() {
   }
 }
 
-app.get('/auth/setup-status', (_req, res) => {
-  res.json({ setupRequired: setupToken !== null });
+// ── Tenant Identity Verification ──────────────────────────────────────────
+
+let identityCheck = { verified: false, errors: [], warnings: [] };
+
+async function verifyTenantIdentity() {
+  const userId = process.env.MYA_USER_ID;
+  if (!userId) {
+    console.log(`[${LOG_PREFIX}] Self-hosted mode — no tenant verification`);
+    identityCheck = { verified: true, mode: 'self-hosted', errors: [], warnings: [] };
+    return;
+  }
+
+  const errors = [];
+  const warnings = [];
+  let handle = null;
+  let expectedIp = null;
+
+  // 1. Check provisioning record in owner D1
+  try {
+    const db = tryGetDb();
+    if (db) {
+      const rows = await db.rawQueryOwner(
+        'SELECT handle, vps_ip, email FROM provisioning_jobs WHERE user_id = ? AND status = ? LIMIT 1',
+        [userId, 'ready']
+      );
+      if (!rows?.length) {
+        // No provisioning record — this is the owner VPS (MYA_USER_ID set for data filtering)
+        identityCheck = { verified: true, mode: 'owner', userId: userId.substring(0, 12) + '...', errors: [], warnings: [] };
+        console.log(`[${LOG_PREFIX}] ✓ Owner instance (not in provisioning_jobs)`);
+        return;
+      } else {
+        handle = rows[0].handle;
+        expectedIp = rows[0].vps_ip;
+      }
+    }
+  } catch (e) {
+    warnings.push(`Could not check provisioning: ${e.message}`);
+  }
+
+  // 2. Verify PASSKEY_RP_ORIGIN matches handle
+  const rpOrigin = process.env.PASSKEY_RP_ORIGIN;
+  if (rpOrigin && handle) {
+    const expectedOrigin = `https://${handle}.mycelium.id`;
+    if (rpOrigin !== expectedOrigin) {
+      errors.push(`PASSKEY_RP_ORIGIN mismatch: got ${rpOrigin}, expected ${expectedOrigin}`);
+    }
+  }
+
+  // 3. Test tenant D1 routing
+  try {
+    const db = tryGetDb();
+    if (db) {
+      const rows = await db.rawQuery('SELECT 1 as ok');
+      if (!rows?.length || rows[0]?.ok !== 1) {
+        errors.push('Tenant D1 query test failed');
+      }
+    }
+  } catch (e) {
+    errors.push(`Tenant D1 unreachable: ${e.message}`);
+  }
+
+  identityCheck = {
+    verified: errors.length === 0,
+    mode: 'managed',
+    handle,
+    userId: userId.substring(0, 12) + '...',
+    rpOriginOk: !rpOrigin || !handle || rpOrigin === `https://${handle}.mycelium.id`,
+    tenantD1Ok: !errors.some(e => e.includes('D1')),
+    errors,
+    warnings,
+  };
+
+  if (errors.length > 0) {
+    console.error(`[${LOG_PREFIX}] ⚠ IDENTITY CHECK FAILED:`);
+    for (const e of errors) console.error(`[${LOG_PREFIX}]   ✗ ${e}`);
+  } else {
+    console.log(`[${LOG_PREFIX}] ✓ Identity verified: @${handle}, tenant D1 OK`);
+  }
+  for (const w of warnings) console.warn(`[${LOG_PREFIX}]   ⚠ ${w}`);
+}
+
+// Identity check endpoint
+app.get('/health/identity', async (req, res) => {
+  res.json(identityCheck);
+});
+
+// Admin: tenant overview
+app.get('/admin/tenants', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    // Only allow from owner VPS (check if this is the main instance)
+    if (process.env.MYA_USER_ID) return res.status(403).json({ error: 'Not available on tenant instances' });
+
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+
+    const tenants = await db.rawQuery(
+      "SELECT handle, email, vps_ip, user_id, status, created_at FROM provisioning_jobs ORDER BY created_at"
+    );
+
+    const deployments = await db.rawQuery(
+      "SELECT handle, commit_sha, status, deployed_at FROM deployment_log ORDER BY deployed_at DESC LIMIT 20"
+    ).catch(() => []);
+
+    res.json({ tenants, recentDeployments: deployments });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/auth/setup-status', async (req, res) => {
+  // Public: only reveal whether setup is needed (login page form selection)
+  const isManaged = !!process.env.MYA_USER_ID;
+  let hasPasskeys = false;
+  try {
+    const db = tryGetDb();
+    if (db && process.env.MYA_USER_ID) {
+      const creds = await db.passkeys.listByUser(process.env.MYA_USER_ID);
+      hasPasskeys = creds && creds.length > 0;
+    }
+  } catch {}
+
+  // Authenticated callers get full details; unauthenticated get minimal info
+  const user = await authenticatePortalRequest(req);
+  if (user) {
+    let handle = null;
+    try {
+      const db = tryGetDb();
+      const profile = await db.profiles?.get(user.id);
+      if (profile?.handle) handle = profile.handle;
+      if (!handle) {
+        const u = await db.users.getFirst();
+        if (u?.display_name) handle = u.display_name;
+      }
+    } catch {}
+    return res.json({
+      setupRequired: setupToken !== null,
+      hasPasskeys,
+      handle,
+      encryptionEnabled: existsSync('/run/mycelium/master.key') || !!process.env.ENCRYPTION_MASTER_KEY,
+    });
+  }
+
+  // Unauthenticated: minimal info only
+  res.json({ setupRequired: setupToken !== null, hasPasskeys });
+});
+
+// DEPRECATED: Master key must be set via VPS script (scripts/set-master-key.sh), never through HTTP.
+// Swiss Vault: the master key never leaves the VPS and is never transmitted over the network.
+app.post('/auth/set-master-key', async (_req, res) => {
+  return res.status(410).json({
+    error: 'This endpoint has been disabled for security. Set the master key on the VPS using: bash scripts/set-master-key.sh'
+  });
+});
+
+// First login for managed hosting: verify master key hash → create registration code
+app.post('/auth/first-login', async (req, res) => {
+  if (!checkAuthRateLimit(req, res)) return;
+
+  const { keyHash } = req.body;
+  if (!keyHash || keyHash.length !== 64) {
+    return res.status(400).json({ error: 'Master key hash required (64 hex chars)' });
+  }
+
+  try {
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+
+    const userId = process.env.MYA_USER_ID;
+    if (!userId) return res.status(503).json({ error: 'User ID not configured' });
+
+    // Check no passkeys exist yet (first login only)
+    const existingCreds = await db.passkeys.listByUser(userId);
+    if (existingCreds && existingCreds.length > 0) {
+      return res.status(409).json({ error: 'Passkeys already registered. Use normal login.' });
+    }
+
+    // Verify key hash against provisioning_jobs (owner's D1 — management data)
+    const rows = await db.rawQueryOwner(
+      'SELECT key_hash FROM provisioning_jobs WHERE user_id = ? AND status = ? LIMIT 1',
+      [userId, 'ready']
+    );
+    const storedHash = rows?.[0]?.key_hash;
+
+    if (!storedHash) {
+      return res.status(404).json({ error: 'No provisioning record found' });
+    }
+
+    // Timing-safe compare
+    const a = Buffer.from(keyHash, 'hex');
+    const b = Buffer.from(storedHash, 'hex');
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return res.status(401).json({ error: 'Invalid key' });
+    }
+
+    // Key verified — master key must already be set on VPS during provisioning.
+    // It is never transmitted from the browser (Swiss Vault: key stays on VPS).
+    if (!existsSync('/run/mycelium/master.key') && !process.env.ENCRYPTION_MASTER_KEY) {
+      console.warn(`[${LOG_PREFIX}] First login verified but master key not set. Run scripts/set-master-key.sh on VPS.`);
+    }
+
+    // Ensure user exists in tenant D1, then generate registration code
+    const existingUsers = await db.rawQuery(`SELECT id FROM users WHERE id = ?`, [userId]);
+    const existingUser = existingUsers?.[0];
+    if (!existingUser) {
+      // Look up display name from provisioning job (owner D1)
+      const jobRows = await db.rawQueryOwner(
+        'SELECT email, handle FROM provisioning_jobs WHERE user_id = ? AND status = ? LIMIT 1',
+        [userId, 'ready']
+      );
+      const displayName = jobRows?.[0]?.handle || jobRows?.[0]?.email?.split('@')[0] || 'User';
+      await db.users.create(userId, displayName);
+    }
+
+    const regCode = crypto.randomBytes(16).toString('hex');
+    await db.registrationTokens.create(regCode, userId);
+
+    console.log(`[${LOG_PREFIX}] First login verified for ${userId} — passkey registration enabled`);
+    db.audit.log({ action: 'auth.first_login', userId, ip: req.ip, resourceType: 'key_hash' }).catch(() => {});
+    res.json({ registrationCode: regCode });
+  } catch (e) {
+    console.error(`[${LOG_PREFIX}] First login failed:`, e.message);
+    res.status(500).json({ error: 'Verification failed' });
+  }
 });
 
 app.post('/auth/setup', async (req, res) => {
@@ -4961,8 +5507,14 @@ app.post('/auth/passkey/register/verify', async (req, res) => {
     const auth = await getAuthModule();
     const result = await auth.verifyReg(registrationCode, credential);
     setSessionCookie(res, result.session.token, result.session.expiresAt);
+    setCsrfCookie(res);
     res.json({ token: result.session.token, expiresAt: result.session.expiresAt, userId: result.userId });
+    // Audit: successful registration
+    tryGetDb()?.audit.log({ action: 'auth.register', userId: result.userId, ip: req.ip, resourceType: 'passkey' }).catch(() => {});
+    sendSecurityEmail('new_device', req).catch(() => {});
   } catch (e) {
+    console.error(`[Auth] Passkey registration failed:`, e.message, e.stack?.split('\n')[1]?.trim());
+    tryGetDb()?.audit.log({ action: 'auth.register_failed', ip: req.ip, resourceType: 'passkey', details: { reason: e.message?.substring(0, 100) } }).catch(() => {});
     res.status(400).json({ error: 'Registration failed' });
   }
 });
@@ -4992,10 +5544,149 @@ app.post('/auth/passkey/login/verify', async (req, res) => {
     const auth = await getAuthModule();
     const result = await auth.verifyAuth(credential);
     setSessionCookie(res, result.session.token, result.session.expiresAt);
+    setCsrfCookie(res);
     res.json({ token: result.session.token, expiresAt: result.session.expiresAt, userId: result.userId });
+    // Audit: successful login
+    tryGetDb()?.audit.log({ action: 'auth.login', userId: result.userId, ip: req.ip, resourceType: 'passkey' }).catch(() => {});
+    sendSecurityEmail('login', req).catch(() => {});
   } catch (e) {
     console.error('[Auth] Passkey verify failed:', e.message, e.stack?.split('\n')[1]?.trim());
+    // Audit: failed login attempt
+    tryGetDb()?.audit.log({ action: 'auth.login_failed', ip: req.ip, resourceType: 'passkey', details: { reason: e.message?.substring(0, 100) } }).catch(() => {});
     res.status(400).json({ error: 'Authentication failed' });
+  }
+});
+
+// -- Export: Re-authentication via passkey --
+// One-time export tokens: Map<token, { userId, createdAt }>
+const exportTokens = new Map();
+const EXPORT_TOKEN_TTL = 300_000; // 5 minutes
+
+// Cleanup expired export tokens periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of exportTokens) { if (now - v.createdAt > EXPORT_TOKEN_TTL) exportTokens.delete(k); }
+}, 60_000);
+
+app.post('/portal/export/auth', async (req, res) => {
+  if (!checkAuthRateLimit(req, res)) return;
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    // Check if passkeys exist — if not, skip re-auth
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+    const creds = await db.passkeys.listByUser(user.id);
+    if (!creds || creds.length === 0) {
+      // No passkeys — issue token directly (session-only auth fallback)
+      const token = crypto.randomBytes(32).toString('hex');
+      exportTokens.set(token, { userId: user.id, createdAt: Date.now() });
+      return res.json({ exportToken: token, reauthRequired: false });
+    }
+
+    // Check if managed (has key_hash for master key verification)
+    const userId = process.env.MYA_USER_ID;
+    let hasMasterKeyOption = false;
+    if (userId) {
+      try {
+        const rows = await db.rawQueryOwner(
+          'SELECT key_hash FROM provisioning_jobs WHERE user_id = ? AND status = ? LIMIT 1',
+          [userId, 'ready']
+        );
+        hasMasterKeyOption = !!rows?.[0]?.key_hash;
+      } catch {}
+    }
+
+    const auth = await getAuthModule();
+    const options = await auth.generateAuthOptions();
+    res.json({ options, reauthRequired: true, hasMasterKeyOption });
+  } catch (e) {
+    console.error('[Export] Auth options failed:', e.message);
+    res.status(500).json({ error: 'Re-authentication unavailable' });
+  }
+});
+
+app.post('/portal/export/verify', async (req, res) => {
+  if (!checkAuthRateLimit(req, res)) return;
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { credential, keyHash } = req.body;
+
+    // Option A: Master key hash verification (managed instances)
+    // Swiss Vault: only the hash is sent, never the raw key
+    if (keyHash) {
+      if (keyHash.length !== 64 || !/^[0-9a-f]{64}$/i.test(keyHash)) {
+        return res.status(400).json({ error: 'Invalid key hash format' });
+      }
+
+      const userId = process.env.MYA_USER_ID;
+      if (!userId) return res.status(503).json({ error: 'Not available' });
+
+      // Query owner D1 for key_hash via Worker with agent token
+      let storedHash = null;
+      const workerUrl = process.env.MYA_WORKER_URL;
+      const agentToken = process.env.AGENT_TOKEN || process.env.AGENT_TOKEN_MYA || process.env.ADMIN_SECRET;
+
+      if (workerUrl && agentToken) {
+        try {
+          const wRes = await fetch(`${workerUrl}/api/db/query`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${agentToken}` },
+            body: JSON.stringify({ sql: 'SELECT key_hash FROM provisioning_jobs WHERE user_id = ? AND status = ? LIMIT 1', params: [userId, 'ready'] }),
+            signal: AbortSignal.timeout(10000),
+          });
+          if (wRes.ok) {
+            const data = await wRes.json();
+            storedHash = data.results?.[0]?.key_hash;
+          } else {
+            console.error(`[Export] Key hash query failed: ${wRes.status} ${await wRes.text().catch(() => '')}`);
+          }
+        } catch (e) {
+          console.error(`[Export] Key hash query error:`, e.message);
+        }
+      }
+
+      if (!storedHash) {
+        return res.status(404).json({ error: 'No key hash on file' });
+      }
+
+      const a = Buffer.from(keyHash, 'hex');
+      const b = Buffer.from(storedHash, 'hex');
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        logEvent('security.reauth_failed', { userId: user.id, ip: req.ip, method: 'key_hash' });
+        return res.status(401).json({ error: 'Invalid key' });
+      }
+
+      logEvent('security.reauth_success', { userId: user.id, ip: req.ip, method: 'key_hash' });
+      const token = crypto.randomBytes(32).toString('hex');
+      exportTokens.set(token, { userId: user.id, createdAt: Date.now() });
+      return res.json({ exportToken: token });
+    }
+
+    // Option B: Passkey verification
+    if (!credential) return res.status(400).json({ error: 'Credential or key hash required' });
+
+    const auth = await getAuthModule();
+    const result = await auth.verifyAuth(credential);
+
+    if (!result.verified) {
+      logEvent('security.reauth_failed', { userId: user.id, ip: req.ip, method: 'passkey' });
+      return res.status(401).json({ error: 'Re-authentication failed' });
+    }
+
+    logEvent('security.reauth_success', { userId: user.id, ip: req.ip, method: 'passkey' });
+
+    // Issue one-time export token (don't use the new session from verifyAuth)
+    const token = crypto.randomBytes(32).toString('hex');
+    exportTokens.set(token, { userId: user.id, createdAt: Date.now() });
+    res.json({ exportToken: token });
+  } catch (e) {
+    console.error('[Export] Re-auth verify failed:', e.message);
+    logEvent('security.reauth_failed', { userId: 'unknown', ip: req.ip, reason: e.message });
+    res.status(400).json({ error: 'Re-authentication failed' });
   }
 });
 
@@ -5014,12 +5705,14 @@ app.get('/auth/session', async (req, res) => {
 app.post('/auth/logout', async (req, res) => {
   if (!requireWorkerSecret(req, res)) return;
   try {
+    const user = await authenticatePortalRequest(req);
     const token = extractSessionToken(req);
     if (token) {
       const auth = await getAuthModule();
       await auth.destroySession(token);
     }
     clearSessionCookie(res);
+    tryGetDb()?.audit.log({ action: 'auth.logout', userId: user?.id, ip: req.ip }).catch(() => {});
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: 'Logout failed' });
@@ -5829,6 +6522,7 @@ app.get('/portal/mindscape', async (req, res) => {
         agentWouldConsult: parseArr(tp.agent_would_consult),
         activity: activityArray(territoryActivity[tp.territory_id]),
         centroid,
+        visibility: tp.visibility || 'private',
       };
     }
 
@@ -6826,6 +7520,432 @@ app.post('/portal/activity/sync', async (req, res) => {
   }
 });
 
+// -- Portal: Profile (cognitive fingerprint, social sharing) --
+
+app.get('/portal/profile', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+    let profile = await db.profiles.get(user.id).catch(() => null);
+
+    // Sync handle from provisioning if missing
+    if (profile && !profile.handle) {
+      try {
+        const provRows = await db.rawQueryOwner(
+          'SELECT handle FROM provisioning_jobs WHERE user_id = ? AND status = ? LIMIT 1',
+          [user.id, 'ready']
+        );
+        const provHandle = provRows?.[0]?.handle;
+        if (provHandle) {
+          await db.profiles.upsert(user.id, { handle: provHandle });
+          profile.handle = provHandle;
+        }
+      } catch {}
+    }
+
+    if (!profile) {
+      // Try to auto-compute, but don't fail if tables are missing
+      try {
+        await db.profiles.computeFingerprint(user.id);
+        profile = await db.profiles.get(user.id);
+      } catch {
+        // Return minimal profile — fetch handle from users table
+        let handle = null;
+        try {
+          const userRow = await db.rawQuery(`SELECT handle, display_name FROM users WHERE id = ?`, [user.id]);
+          if (userRow?.[0]) { handle = userRow[0].handle; }
+        } catch {}
+        profile = {
+          user_id: user.id,
+          handle: handle,
+          display_name: user.displayName || null,
+          signature: null,
+          territory_count: 0, realm_count: 0, message_count: 0,
+          depth_score: 0, breadth_score: 0, coherence_score: 0, exploration_score: 0,
+          member_since: null, public_realms_json: null,
+        };
+      }
+    }
+    res.json({ profile });
+  } catch (err) {
+    console.error('[Profile] GET error:', err.message);
+    res.status(500).json({ error: 'Failed to load profile' });
+  }
+});
+
+app.put('/portal/profile', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+    const { handle, display_name, signature } = req.body;
+    const updates = {};
+    if (handle !== undefined) {
+      await db.profiles.setHandle(user.id, handle);
+    }
+    if (display_name !== undefined) updates.display_name = display_name;
+    if (signature !== undefined) updates.signature = signature;
+    if (Object.keys(updates).length > 0) {
+      await db.profiles.upsert(user.id, updates);
+    }
+    const profile = await db.profiles.get(user.id);
+    res.json({ profile });
+  } catch (err) {
+    console.error('[Profile] PUT error:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/portal/profile/handle/check', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const handle = (req.query.handle || '').toLowerCase().trim();
+    if (!handle || !/^[a-z0-9][a-z0-9_]{2,29}$/.test(handle)) {
+      return res.json({ available: false, reason: 'Invalid format' });
+    }
+    const reserved = ['admin', 'support', 'api', 'system', 'mycelium', 'vault', 'login', 'signup', 'profile', 'settings', 'help', 'about', 'discover', 'connections'];
+    if (reserved.includes(handle)) {
+      return res.json({ available: false, reason: 'Reserved' });
+    }
+    // Check owner D1 (all tenants)
+    const db = tryGetDb();
+    if (db) {
+      try {
+        const rows = await db.rawQueryOwner(
+          'SELECT user_id FROM provisioning_jobs WHERE handle = ? AND user_id != ? AND status = ? LIMIT 1',
+          [handle, user.id, 'ready']
+        );
+        if (rows?.length > 0) return res.json({ available: false, reason: 'Taken' });
+      } catch {}
+    }
+    res.json({ available: true });
+  } catch {
+    res.json({ available: true }); // Fail open — validation happens on save
+  }
+});
+
+app.post('/portal/profile/stats/recompute', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+    const stats = await db.profiles.computeFingerprint(user.id);
+    res.json({ stats, message: 'Recomputed' });
+  } catch (err) {
+    console.error('[Profile] Recompute error:', err.message);
+    res.status(500).json({ error: 'Failed to recompute' });
+  }
+});
+
+app.put('/portal/mindscape/territory/:id/visibility', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+    const { visibility } = req.body;
+    await db.profiles.setTerritoryVisibility(user.id, req.params.id, visibility);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Profile] Visibility error:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/portal/profile/public/:handle', async (req, res) => {
+  try {
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+    const profile = await db.profiles.getByHandle(req.params.handle);
+    if (!profile) return res.status(404).json({ error: 'Not found' });
+    // Return only public-safe fields
+    const publicRealms = profile.public_realms_json ? JSON.parse(profile.public_realms_json) : [];
+    const publicTerritories = await db.profiles.getPublicTerritories(profile.user_id);
+    res.json({
+      handle: profile.handle,
+      display_name: profile.display_name,
+      signature: profile.signature,
+      depth_score: profile.depth_score,
+      breadth_score: profile.breadth_score,
+      coherence_score: profile.coherence_score,
+      exploration_score: profile.exploration_score,
+      territory_count: profile.territory_count,
+      realm_count: profile.realm_count,
+      message_count: profile.message_count,
+      member_since: profile.member_since,
+      realms: publicRealms,
+      territories: publicTerritories.filter(t => t.visibility === 'public').map(t => ({
+        name: t.name, essence: t.essence, realm_id: t.realm_id, message_count: t.message_count,
+      })),
+    });
+  } catch (err) {
+    console.error('[Profile] Public profile error:', err.message);
+    res.status(500).json({ error: 'Failed to load profile' });
+  }
+});
+
+// -- Portal: Connections (social sharing Phase 2) --
+
+app.post('/portal/connections/request', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const { toHandle } = req.body;
+    if (!toHandle) return res.status(400).json({ error: 'toHandle required' });
+    const cleanHandle = toHandle.replace(/^@/, '');
+    const id = await db.connections.request(user.id, cleanHandle);
+
+    // Send email notification to the target user
+    const fromProfile = await db.profiles.get(user.id);
+    const toProfile = await db.profiles.getByHandle(cleanHandle);
+    if (toProfile) {
+      sendConnectionEmail(toProfile.user_id, fromProfile?.handle || 'someone', fromProfile?.signature).catch(() => {});
+    }
+
+    res.json({ id, ok: true });
+  } catch (err) {
+    console.error('[Connections] Request error:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/portal/connections/count', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const pending = await db.connections.pending(user.id);
+    res.json({ pending: pending.length });
+  } catch {
+    res.json({ pending: 0 });
+  }
+});
+
+app.get('/portal/connections/pending', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.connections) return res.json({ requests: [] });
+    const requests = await db.connections.pending(user.id);
+    res.json({ requests });
+  } catch (err) {
+    console.error('[Connections] Pending error:', err.message);
+    res.status(500).json({ error: 'Failed to load requests' });
+  }
+});
+
+app.get('/portal/connections', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.connections) return res.json({ connections: [] });
+    const connections = await db.connections.list(user.id);
+    res.json({ connections });
+  } catch (err) {
+    console.error('[Connections] List error:', err.message);
+    res.status(500).json({ error: 'Failed to load connections' });
+  }
+});
+
+app.post('/portal/connections/:id/accept', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    await db.connections.accept(user.id, req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Connections] Accept error:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/portal/connections/:id/reject', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    await db.connections.reject(user.id, req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Connections] Reject error:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/portal/connections/:id/block', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    await db.connections.block(user.id, req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Connections] Block error:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/portal/connections/:id', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    await db.connections.disconnect(user.id, req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Connections] Disconnect error:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/portal/connections/:id/overlap', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const overlap = await db.connections.computeOverlap(user.id, req.params.id);
+    res.json({ overlap });
+  } catch (err) {
+    console.error('[Connections] Overlap error:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// -- Portal: Sharing Contexts (Phase 3 — multi-faceted identity sharing) --
+
+app.get('/portal/contexts', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.contexts) return res.json({ contexts: [] });
+    const contexts = await db.contexts.list(user.id);
+    res.json({ contexts });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load contexts' });
+  }
+});
+
+app.post('/portal/contexts', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.contexts) return res.status(503).json({ error: 'Database not available' });
+    const { name, is_private } = req.body;
+    const id = await db.contexts.create(user.id, { name, is_private });
+    res.json({ id, ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put('/portal/contexts/:id', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.contexts) return res.status(503).json({ error: 'Database not available' });
+    await db.contexts.rename(user.id, req.params.id, req.body.name);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/portal/contexts/:id', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.contexts) return res.status(503).json({ error: 'Database not available' });
+    await db.contexts.remove(user.id, req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/portal/contexts/:id/territories/:tid', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.contexts) return res.status(503).json({ error: 'Database not available' });
+    await db.contexts.addTerritory(req.params.id, parseInt(req.params.tid));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/portal/contexts/:id/territories/:tid', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.contexts) return res.status(503).json({ error: 'Database not available' });
+    await db.contexts.removeTerritory(req.params.id, parseInt(req.params.tid));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/portal/contexts/:id/grant/:connId', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.contexts) return res.status(503).json({ error: 'Database not available' });
+    await db.contexts.grant(req.params.id, req.params.connId);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/portal/contexts/:id/grant/:connId', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.contexts) return res.status(503).json({ error: 'Database not available' });
+    await db.contexts.revoke(req.params.id, req.params.connId);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/portal/contexts/:id/territories', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.contexts) return res.json({ territories: [] });
+    const territories = await db.contexts.getTerritories(req.params.id);
+    res.json({ territories });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load territories' });
+  }
+});
+
+app.get('/portal/contexts/:id/connections', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.contexts) return res.json({ grants: [] });
+    const grants = await db.contexts.getGrants(req.params.id);
+    res.json({ grants });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load grants' });
+  }
+});
+
 // -- Portal: Health (Apple Health daily summaries) --
 
 app.post('/portal/health/sync', async (req, res) => {
@@ -7368,6 +8488,195 @@ if (getAgentConfig(AGENT_ID)?.servesPortal || !process.env.AGENT_ID) {
   setInterval(pushIntelSnapshot, 15 * 60 * 1000);
 }
 
+// -- Portal: Stats (data overview + integrations) --
+app.get('/portal/stats', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+    const userId = user.id;
+
+    // Run all queries in parallel — wrap rawQuery to return {results:[...]} format
+    const d1q = async (sql, params) => {
+      const rows = await db.rawQuery(sql, params);
+      return { results: rows };
+    };
+    const [msgStats, msgByAgent, msg30d, docCount, attStats, contactStats, mindscapeStats] = await Promise.all([
+      // Messages by source + date range
+      d1q(`SELECT COUNT(*) as total,
+        SUM(CASE WHEN source = 'telegram' THEN 1 ELSE 0 END) as telegram,
+        SUM(CASE WHEN source LIKE 'discord%' THEN 1 ELSE 0 END) as discord,
+        SUM(CASE WHEN source IN ('portal', 'web', 'portal_prompt') THEN 1 ELSE 0 END) as portal,
+        SUM(CASE WHEN source = 'whatsapp' THEN 1 ELSE 0 END) as whatsapp,
+        SUM(CASE WHEN source LIKE 'import%' OR source = 'linkedin' THEN 1 ELSE 0 END) as imported,
+        SUM(CASE WHEN source NOT IN ('telegram', 'whatsapp', 'portal', 'web', 'portal_prompt') AND source NOT LIKE 'discord%' AND source NOT LIKE 'import%' AND source != 'linkedin' THEN 1 ELSE 0 END) as other,
+        MIN(created_at) as first_message, MAX(created_at) as last_message
+        FROM messages WHERE user_id = ?`, [userId]),
+      // Messages by agent
+      d1q(`SELECT agent_id, COUNT(*) as count FROM messages WHERE user_id = ? GROUP BY agent_id`, [userId]),
+      // Last 30 days
+      d1q(`SELECT COUNT(*) as count FROM messages WHERE user_id = ? AND created_at > datetime('now', '-30 days')`, [userId]),
+      // Documents
+      d1q(`SELECT COUNT(*) as total FROM documents WHERE user_id = ?`, [userId]),
+      // Attachments (columns: file_type, file_size)
+      d1q(`SELECT COUNT(*) as total,
+        SUM(CASE WHEN file_type LIKE 'image%' THEN 1 ELSE 0 END) as images,
+        SUM(CASE WHEN file_type LIKE 'audio%' THEN 1 ELSE 0 END) as voice,
+        SUM(CASE WHEN file_type LIKE 'video%' THEN 1 ELSE 0 END) as video,
+        COALESCE(SUM(file_size), 0) as total_bytes
+        FROM attachments WHERE user_id = ?`, [userId]),
+      // Contacts
+      d1q(`SELECT COUNT(*) as total,
+        SUM(CASE WHEN status = 'inner' THEN 1 ELSE 0 END) as inner_count,
+        SUM(CASE WHEN status = 'engaged' THEN 1 ELSE 0 END) as engaged_count,
+        SUM(CASE WHEN status = 'acknowledged' THEN 1 ELSE 0 END) as acknowledged_count,
+        SUM(CASE WHEN status = 'connected' THEN 1 ELSE 0 END) as connected_count
+        FROM people WHERE user_id = ?`, [userId]),
+      // Mindscape
+      d1q(`SELECT
+        (SELECT COUNT(DISTINCT territory_id) FROM clustering_points WHERE user_id = ? AND territory_id IS NOT NULL AND territory_id != -1) as territories,
+        (SELECT COUNT(DISTINCT realm_id) FROM clustering_points WHERE user_id = ? AND realm_id IS NOT NULL) as realms,
+        (SELECT COUNT(*) FROM clustering_points WHERE user_id = ?) as points`, [userId, userId, userId]),
+    ]);
+
+    const msg = msgStats?.results?.[0] || {};
+    const att = attStats?.results?.[0] || {};
+    const contacts = contactStats?.results?.[0] || {};
+    const mind = mindscapeStats?.results?.[0] || {};
+
+    // Build integrations list from source data
+    const sourceMap = {
+      telegram: { name: 'Telegram', icon: 'telegram' },
+      discord: { name: 'Discord', icon: 'discord' },
+      portal: { name: 'Portal', icon: 'portal' },
+      whatsapp: { name: 'WhatsApp', icon: 'whatsapp' },
+      imported: { name: 'Imported', icon: 'import' },
+    };
+    const integrations = Object.entries(sourceMap).map(([key, meta]) => ({
+      ...meta,
+      messageCount: msg[key] || 0,
+      status: (msg[key] || 0) > 0 ? 'connected' : 'not_connected',
+    })).filter(i => i.messageCount > 0);
+
+    // Agent status from byAgent results
+    const byAgent = {};
+    for (const row of (msgByAgent?.results || [])) {
+      if (row.agent_id) byAgent[row.agent_id] = row.count;
+    }
+
+    res.json({
+      messages: {
+        total: msg.total || 0,
+        bySource: { telegram: msg.telegram || 0, discord: msg.discord || 0, portal: msg.portal || 0, whatsapp: msg.whatsapp || 0, imported: msg.imported || 0, other: msg.other || 0 },
+        byAgent,
+        dateRange: { first: msg.first_message, last: msg.last_message },
+        last30Days: msg30d?.results?.[0]?.count || 0,
+      },
+      documents: { total: docCount?.results?.[0]?.total || 0 },
+      attachments: {
+        total: att.total || 0,
+        byType: { image: att.images || 0, voice: att.voice || 0, video: att.video || 0 },
+        totalSizeMB: Math.round((att.total_bytes || 0) / 1024 / 1024),
+      },
+      contacts: {
+        total: contacts.total || 0,
+        byTier: { inner: contacts.inner_count || 0, engaged: contacts.engaged_count || 0, acknowledged: contacts.acknowledged_count || 0, connected: contacts.connected_count || 0 },
+      },
+      mindscape: { territories: mind.territories || 0, realms: mind.realms || 0, points: mind.points || 0 },
+      integrations,
+    });
+  } catch (e) {
+    console.error('[portal/stats]', e.message);
+    res.status(500).json({ error: 'Failed to load stats' });
+  }
+});
+
+// -- Portal: Audit Logging Middleware --
+// Logs all authenticated state-changing portal requests (POST/PUT/DELETE).
+// Only metadata — never request bodies or PII.
+app.use('/portal', (req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  const startTime = Date.now();
+  res.on('finish', () => {
+    const user = req._auditUser;
+    if (!user) return;
+    tryGetDb()?.audit.log({
+      action: 'portal.write',
+      userId: user.id,
+      ip: req.ip,
+      resourceType: req.path,
+      details: { method: req.method, status: res.statusCode, duration: Date.now() - startTime },
+    }).catch(() => {});
+  });
+  next();
+});
+
+// -- Portal: Audit Log Viewer --
+app.get('/portal/audit/log', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+
+    const { limit, event_type, after } = req.query;
+
+    // Query audit_log — returns only metadata, never PII
+    let sql = 'SELECT id, event_type, agent_id, ip_address, endpoint, method, success, details, created_at FROM audit_log WHERE 1=1';
+    const params = [];
+
+    if (event_type) { sql += ' AND event_type = ?'; params.push(event_type); }
+    if (after) { sql += ' AND created_at > ?'; params.push(after); }
+
+    sql += ' ORDER BY created_at DESC LIMIT ?';
+    params.push(Math.min(parseInt(limit) || 100, 500));
+
+    const rows = await db.rawQueryAdmin(sql, params);
+    res.json({ events: rows });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to query audit log' });
+  }
+});
+
+// -- Portal: Enrichment Status --
+app.get('/portal/enrichment/status', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+
+    const [total, enriched, pending, failed] = await Promise.all([
+      db.rawQuery('SELECT COUNT(*) as c FROM messages WHERE user_id = ?', [user.id]),
+      db.rawQuery('SELECT COUNT(*) as c FROM messages WHERE user_id = ? AND nlp_processed = 1', [user.id]),
+      db.rawQuery('SELECT COUNT(*) as c FROM messages WHERE user_id = ? AND (nlp_processed = 0 OR nlp_processed IS NULL)', [user.id]),
+      db.rawQuery('SELECT COUNT(*) as c FROM messages WHERE user_id = ? AND nlp_processed = -1', [user.id]),
+    ]);
+
+    // Check local enrichment service
+    let service = null;
+    try {
+      const sRes = await fetch('http://localhost:8095/status', { signal: AbortSignal.timeout(2000) });
+      if (sRes.ok) service = await sRes.json();
+    } catch { /* service unavailable */ }
+
+    res.json({
+      messages: {
+        total: total[0]?.c || 0,
+        enriched: enriched[0]?.c || 0,
+        pending: pending[0]?.c || 0,
+        failed: failed[0]?.c || 0,
+      },
+      service,
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to get enrichment status' });
+  }
+});
+
 // -- Portal: Settings --
 app.get('/portal/settings', async (req, res) => {
   try {
@@ -7379,15 +8688,564 @@ app.get('/portal/settings', async (req, res) => {
   }
 });
 
+// -- Portal: Claude Auth (one-click login flow) --
+// -- Portal: Claude Code OAuth (direct PKCE, no spawning claude CLI) --
+// ============================================
+// AI Provider Management
+// ============================================
+
+// List connected providers (no raw credentials exposed)
+app.get('/portal/providers', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.providers) return res.status(503).json({ error: 'Database not available' });
+
+    const providers = await db.providers.list(user.id);
+    // Strip credentials — only return metadata
+    const safe = providers.map(p => ({
+      id: p.id, provider: p.provider, label: p.label, auth_type: p.auth_type,
+      model_preference: p.model_preference, base_url: p.base_url,
+      is_active: p.is_active, status: p.status,
+      last_used_at: p.last_used_at, created_at: p.created_at,
+    }));
+    res.json({ providers: safe });
+  } catch (e) {
+    console.error(`[${LOG_PREFIX}] List providers error:`, e.message);
+    res.status(500).json({ error: 'Failed to list providers' });
+  }
+});
+
+// Add API key provider (OpenAI, custom)
+app.post('/portal/providers', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.providers) return res.status(503).json({ error: 'Database not available' });
+
+    const { provider, label, api_key, model_preference, base_url } = req.body;
+    if (!provider || !api_key) return res.status(400).json({ error: 'provider and api_key required' });
+    if (!['openai', 'custom'].includes(provider)) return res.status(400).json({ error: 'Use Claude OAuth for Claude accounts' });
+
+    // Encrypt the API key
+    let encryptedCreds = null;
+    try {
+      const { encrypt } = await import('./lib/crypto-local.js');
+      encryptedCreds = encrypt(JSON.stringify({ api_key }));
+    } catch {
+      // No encryption available — store as-is (not ideal, but functional)
+      encryptedCreds = JSON.stringify({ api_key });
+    }
+
+    const id = await db.providers.create(user.id, {
+      provider, label, authType: 'api_key',
+      credentials: encryptedCreds,
+      model: model_preference, baseUrl: base_url,
+    });
+
+    // Set as active if first of this provider type
+    const existing = await db.providers.list(user.id);
+    const sameType = existing.filter(p => p.provider === provider);
+    if (sameType.length <= 1) await db.providers.setActive(id, user.id);
+
+    console.log(`[${LOG_PREFIX}] Added ${provider} provider for user ${user.id}`);
+    res.json({ ok: true, id });
+  } catch (e) {
+    console.error(`[${LOG_PREFIX}] Add provider error:`, e.message);
+    res.status(500).json({ error: 'Failed to add provider' });
+  }
+});
+
+// Update provider (label, model, active)
+app.put('/portal/providers/:id', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.providers) return res.status(503).json({ error: 'Database not available' });
+
+    const { label, model_preference, base_url, is_active } = req.body;
+    const id = parseInt(req.params.id);
+
+    if (is_active) {
+      await db.providers.setActive(id, user.id);
+    }
+
+    const updates = {};
+    if (label !== undefined) updates.label = label;
+    if (model_preference !== undefined) updates.model_preference = model_preference;
+    if (base_url !== undefined) updates.base_url = base_url;
+    if (Object.keys(updates).length) await db.providers.update(id, user.id, updates);
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(`[${LOG_PREFIX}] Update provider error:`, e.message);
+    res.status(500).json({ error: 'Failed to update provider' });
+  }
+});
+
+// Delete provider
+app.delete('/portal/providers/:id', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.providers) return res.status(503).json({ error: 'Database not available' });
+
+    await db.providers.remove(parseInt(req.params.id), user.id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(`[${LOG_PREFIX}] Delete provider error:`, e.message);
+    res.status(500).json({ error: 'Failed to delete provider' });
+  }
+});
+
+// Test provider connectivity
+app.post('/portal/providers/:id/test', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const db = tryGetDb();
+    if (!db?.providers) return res.status(503).json({ error: 'Database not available' });
+
+    const providers = await db.providers.list(user.id);
+    const provider = providers.find(p => p.id === parseInt(req.params.id));
+    if (!provider) return res.status(404).json({ error: 'Provider not found' });
+
+    // For Claude: check credentials file
+    if (provider.provider === 'claude') {
+      const credDir = provider.config_dir || process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME, '.claude');
+      const credPath = path.join(credDir, '.credentials.json');
+      const raw = await fs.readFile(credPath, 'utf-8').catch(() => null);
+      if (!raw) {
+        await db.providers.update(provider.id, user.id, { status: 'error' });
+        return res.json({ ok: false, status: 'error', message: 'No credentials file found' });
+      }
+      const creds = JSON.parse(raw);
+      const expired = creds.claudeAiOauth?.expiresAt && creds.claudeAiOauth.expiresAt < Date.now();
+      const status = expired ? 'expired' : 'active';
+      await db.providers.update(provider.id, user.id, { status });
+      return res.json({ ok: !expired, status, message: expired ? 'Token expired' : 'Connected' });
+    }
+
+    // For OpenAI: try listing models
+    if (provider.provider === 'openai') {
+      // Decrypt credentials
+      let apiKey = null;
+      try {
+        const { decrypt } = await import('./lib/crypto-local.js');
+        const decrypted = JSON.parse(decrypt(provider.credentials));
+        apiKey = decrypted.api_key;
+      } catch {
+        try { apiKey = JSON.parse(provider.credentials).api_key; } catch {}
+      }
+      if (!apiKey) {
+        await db.providers.update(provider.id, user.id, { status: 'error' });
+        return res.json({ ok: false, status: 'error', message: 'Could not decrypt credentials' });
+      }
+
+      const testRes = await fetch('https://api.openai.com/v1/models', {
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+      });
+      const status = testRes.ok ? 'active' : 'error';
+      await db.providers.update(provider.id, user.id, { status });
+      return res.json({ ok: testRes.ok, status, message: testRes.ok ? 'Connected' : `API error (${testRes.status})` });
+    }
+
+    res.json({ ok: true, status: 'active', message: 'No test available for this provider type' });
+  } catch (e) {
+    console.error(`[${LOG_PREFIX}] Test provider error:`, e.message);
+    res.status(500).json({ error: 'Test failed' });
+  }
+});
+
+// ============================================
+// Claude OAuth (preserved pattern + multi-account)
+// ============================================
+
+// Stores pending PKCE verifier between /portal/auth/claude and /portal/auth/claude/code
+let pendingClaudePkce = null;
+
+const CLAUDE_OAUTH = {
+  clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
+  authorizeUrl: 'https://claude.ai/oauth/authorize',
+  tokenUrl: 'https://console.anthropic.com/v1/oauth/token',
+  redirectUri: 'https://console.anthropic.com/oauth/code/callback',
+  scopes: 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload',
+};
+
+app.post('/portal/auth/claude', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { label } = req.body || {};
+
+    // Determine config dir for this account
+    const defaultDir = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME, '.claude');
+    let configDir = defaultDir;
+
+    // If user already has Claude providers, create a new config dir
+    const db = tryGetDb();
+    if (db?.providers) {
+      const existing = await db.providers.list(user.id);
+      const claudeCount = existing.filter(p => p.provider === 'claude').length;
+      if (claudeCount > 0) {
+        configDir = `${defaultDir}-${claudeCount + 1}`;
+      }
+    }
+
+    // Generate PKCE code verifier (43-128 chars, URL-safe)
+    const verifier = crypto.randomBytes(32).toString('base64url');
+    // S256 challenge = base64url(sha256(verifier))
+    const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+    const state = crypto.randomBytes(24).toString('base64url');
+
+    pendingClaudePkce = { verifier, state, createdAt: Date.now(), configDir, label, userId: user.id };
+
+    const params = new URLSearchParams({
+      code: 'true',
+      client_id: CLAUDE_OAUTH.clientId,
+      response_type: 'code',
+      redirect_uri: CLAUDE_OAUTH.redirectUri,
+      scope: CLAUDE_OAUTH.scopes,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+      state,
+    });
+
+    const url = `${CLAUDE_OAUTH.authorizeUrl}?${params}`;
+    console.log(`[${LOG_PREFIX}] Claude OAuth URL generated (PKCE direct)`);
+    res.json({ url });
+  } catch (e) {
+    console.error(`[${LOG_PREFIX}] Claude auth failed:`, e.message);
+    res.status(500).json({ error: 'Auth flow failed' });
+  }
+});
+
+// -- Portal: Exchange OAuth code for tokens (PKCE) --
+app.post('/portal/auth/claude/code', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ error: 'Code required' });
+
+    if (!pendingClaudePkce) {
+      return res.status(400).json({ error: 'No pending auth session. Click "Connect with Claude" first.' });
+    }
+
+    // Expire after 10 minutes
+    if (Date.now() - pendingClaudePkce.createdAt > 10 * 60 * 1000) {
+      pendingClaudePkce = null;
+      return res.status(400).json({ error: 'Auth session expired. Click "Connect with Claude" again.' });
+    }
+
+    const { verifier } = pendingClaudePkce;
+
+    // Exchange code for tokens (JSON body, matching Claude Code's implementation)
+    // Clean the code: user might paste the full callback URL or include the #fragment
+    let cleanCode = code.trim();
+    // If they pasted the full callback URL, extract just the code param
+    if (cleanCode.includes('code=')) {
+      try {
+        const u = new URL(cleanCode);
+        cleanCode = u.searchParams.get('code') || cleanCode;
+      } catch {
+        const m = cleanCode.match(/[?&]code=([^&#]+)/);
+        if (m) cleanCode = m[1];
+      }
+    }
+    // Strip URL fragment if present
+    cleanCode = cleanCode.split('#')[0].trim();
+    const tokenBody = {
+      grant_type: 'authorization_code',
+      code: cleanCode,
+      redirect_uri: CLAUDE_OAUTH.redirectUri,
+      client_id: CLAUDE_OAUTH.clientId,
+      code_verifier: verifier,
+      state: pendingClaudePkce.state,
+    };
+    console.log(`[${LOG_PREFIX}] Token exchange request:`, JSON.stringify(tokenBody));
+
+    // Retry up to 3 times — Anthropic's token endpoint sometimes returns transient 500s
+    let tokenRes = null;
+    let lastErr = '';
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      tokenRes = await fetch(CLAUDE_OAUTH.tokenUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'claude-code/1.0',
+        },
+        body: JSON.stringify(tokenBody),
+      });
+      if (tokenRes.ok) break;
+      lastErr = await tokenRes.text();
+      console.error(`[${LOG_PREFIX}] Token exchange attempt ${attempt}/3 failed (${tokenRes.status}): ${lastErr.substring(0, 150)}`);
+      if (tokenRes.status < 500) break; // Don't retry client errors
+      if (attempt < 3) await new Promise(r => setTimeout(r, 2000 * attempt));
+    }
+
+    if (!tokenRes.ok) {
+      console.error(`[${LOG_PREFIX}] Token exchange failed after retries`);
+      pendingClaudePkce = null;
+      return res.status(400).json({ error: `Token exchange failed (${tokenRes.status}): ${lastErr.substring(0, 200)}` });
+    }
+
+    const tokens = await tokenRes.json();
+    console.log(`[${LOG_PREFIX}] Token exchange successful, writing credentials`);
+
+    // Write credentials in the same format as `claude auth login`
+    const credentials = {
+      claudeAiOauth: {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        expiresAt: Date.now() + (tokens.expires_in || 3600) * 1000,
+        scopes: CLAUDE_OAUTH.scopes.split(' '),
+      },
+    };
+
+    // Fetch account details using the new access token
+    try {
+      const accountRes = await fetch('https://api.claude.ai/api/auth/session', {
+        headers: { 'Authorization': `Bearer ${tokens.access_token}`, 'User-Agent': 'claude-code/1.0' },
+      });
+      if (accountRes.ok) {
+        const account = await accountRes.json();
+        if (account.email) credentials.claudeAiOauth.email = account.email;
+        if (account.subscription_type || account.subscriptionType) {
+          credentials.claudeAiOauth.subscriptionType = account.subscription_type || account.subscriptionType;
+        }
+        if (account.rate_limit_tier || account.rateLimitTier) {
+          credentials.claudeAiOauth.rateLimitTier = account.rate_limit_tier || account.rateLimitTier;
+        }
+      }
+    } catch (e) {
+      console.warn(`[${LOG_PREFIX}] Could not fetch Claude account details:`, e.message);
+    }
+
+    // Write credentials to the target config dir (preserving existing pattern)
+    const credDir = pendingClaudePkce.configDir;
+    const credLabel = pendingClaudePkce.label;
+    const authUserId = pendingClaudePkce.userId;
+    const credPath = path.join(credDir, '.credentials.json');
+
+    // Ensure dir exists
+    await fs.mkdir(credDir, { recursive: true });
+    await fs.writeFile(credPath, JSON.stringify(credentials, null, 2), { mode: 0o600 });
+
+    console.log(`[${LOG_PREFIX}] Claude Code credentials written to ${credPath}`);
+
+    // Fetch account details via CLI (reads fresh token, may return email/subscription)
+    // Short delay — CLI needs a moment to recognize the new credentials
+    await new Promise(r => setTimeout(r, 2000));
+    try {
+      const { execSync } = await import('child_process');
+      const claudeBin = process.env.CLAUDE_BIN || 'claude';
+      const env = { ...process.env, CLAUDE_CONFIG_DIR: credDir };
+      const statusOutput = execSync(`${claudeBin} auth status --json`, { encoding: 'utf-8', timeout: 10000, env }).trim();
+      const cliStatus = JSON.parse(statusOutput);
+      if (cliStatus.email) credentials.claudeAiOauth.email = cliStatus.email;
+      if (cliStatus.subscriptionType) credentials.claudeAiOauth.subscriptionType = cliStatus.subscriptionType;
+      if (cliStatus.rateLimitTier) credentials.claudeAiOauth.rateLimitTier = cliStatus.rateLimitTier;
+      // Re-write with enriched data
+      await fs.writeFile(credPath, JSON.stringify(credentials, null, 2), { mode: 0o600 });
+      console.log(`[${LOG_PREFIX}] Enriched credentials with email: ${cliStatus.email}, sub: ${cliStatus.subscriptionType}`);
+    } catch (e) {
+      console.warn(`[${LOG_PREFIX}] Could not enrich credentials via CLI:`, e.message);
+    }
+
+    // Create provider record in D1
+    const db = tryGetDb();
+    let isFirstEver = true;
+    if (db?.providers) {
+      try {
+        // Encrypt credentials for D1 storage
+        let encryptedCreds = null;
+        try {
+          const { encrypt } = await import('./lib/crypto-local.js');
+          encryptedCreds = encrypt(JSON.stringify(credentials));
+        } catch {
+          encryptedCreds = JSON.stringify(credentials);
+        }
+
+        const existing = await db.providers.list(authUserId);
+        const isFirstProvider = existing.filter(p => p.provider === 'claude').length === 0;
+
+        // Check if user has ANY messages — if so, they're not new (don't send greeting)
+        try {
+          const msgCheck = await db.rawQuery(
+            `SELECT COUNT(*) as c FROM messages WHERE user_id = ? LIMIT 1`, [authUserId]
+          );
+          if (msgCheck?.[0]?.c > 0) isFirstEver = false;
+        } catch {}
+        if (!isFirstProvider) isFirstEver = false;
+
+        // Use email from CLI status, or user-provided label, or default
+        const autoEmail = credentials.claudeAiOauth?.email;
+        const autoSub = credentials.claudeAiOauth?.subscriptionType;
+        const providerLabel = autoEmail
+          ? (autoSub ? `${autoEmail} (${autoSub})` : autoEmail)
+          : credLabel || (isFirstProvider ? 'Claude' : `Claude ${existing.filter(p => p.provider === 'claude').length + 1}`);
+
+        const providerId = await db.providers.create(authUserId, {
+          provider: 'claude', label: providerLabel,
+          authType: 'oauth', credentials: encryptedCreds,
+          configDir: credDir, model: null,
+        });
+
+        // Set as active if first Claude account
+        if (isFirstProvider && providerId) await db.providers.setActive(providerId, authUserId);
+
+        console.log(`[${LOG_PREFIX}] Claude provider record created (id=${providerId}, dir=${credDir})`);
+      } catch (err) {
+        console.error(`[${LOG_PREFIX}] Provider record failed:`, err.message);
+      }
+    }
+
+    pendingClaudePkce = null;
+
+    // Fire-and-forget: store a welcome greeting (only on first-ever provider)
+    if (isFirstEver) {
+      (async () => {
+        try {
+          if (!db) return;
+          const agentId = AGENT_ID || 'personal-agent';
+          const greeting = `Welcome to your Mycelium. I'm your personal agent — you can talk to me here, through Telegram, Discord, or any connected channel.\n\nYour AI inference is now connected. You can start a conversation, import your data, or just explore. Everything you share with me is encrypted end-to-end with your master key.\n\nWhat would you like to do first?`;
+          const now = new Date();
+          const rows = [
+            { user_id: authUserId, role: 'assistant', content: greeting, source: 'portal', agent_id: agentId, created_at: now.toISOString() },
+          ];
+          const inserted = await db.messages.insert(rows);
+          enrichMessages(inserted, authUserId, agentId);
+          console.log(`[${LOG_PREFIX}] Welcome greeting stored for user ${authUserId}`);
+        } catch (err) {
+          console.error(`[${LOG_PREFIX}] Welcome greeting failed:`, err.message);
+        }
+      })();
+    }
+
+    res.json({ ok: true, greeting: isFirstEver });
+  } catch (e) {
+    pendingClaudePkce = null;
+    console.error(`[${LOG_PREFIX}] Claude auth code failed:`, e.message);
+    res.status(500).json({ error: e.message || 'Authentication failed' });
+  }
+});
+
+// -- Portal: Check Claude auth status --
+app.get('/portal/auth/claude/status', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    // Try claude auth status --json for rich info (email, subscription)
+    try {
+      const { execSync } = await import('child_process');
+      const claudeBin = process.env.CLAUDE_BIN || 'claude';
+      const configDir = process.env.CLAUDE_CONFIG_DIR;
+      const env = configDir ? { ...process.env, CLAUDE_CONFIG_DIR: configDir } : process.env;
+      const output = execSync(`${claudeBin} auth status --json`, { encoding: 'utf-8', timeout: 5000, env }).trim();
+      const status = JSON.parse(output);
+      return res.json({
+        authenticated: status.loggedIn || false,
+        status: status.loggedIn ? 'Authenticated' : 'Not authenticated',
+        email: status.email || null,
+        subscriptionType: status.subscriptionType || null,
+        orgName: status.orgName || null,
+      });
+    } catch (cliErr) {
+      console.warn(`[${LOG_PREFIX}] claude auth status failed:`, cliErr?.message?.slice(0, 100));
+    }
+
+    // Fallback: read credentials file directly
+    const fs = await import('fs');
+    const path = await import('path');
+    const credDir = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME, '.claude');
+    const credPath = path.join(credDir, '.credentials.json');
+
+    const raw = await fs.promises.readFile(credPath, 'utf-8').catch(() => null);
+    if (!raw) return res.json({ authenticated: false, status: 'Not authenticated' });
+
+    const creds = JSON.parse(raw);
+    const oauth = creds.claudeAiOauth;
+    if (!oauth?.accessToken) return res.json({ authenticated: false, status: 'No credentials' });
+
+    const expired = oauth.expiresAt && oauth.expiresAt < Date.now();
+
+    // Try to get email from ai_providers table if not in credentials
+    let email = oauth.email || null;
+    let subscriptionType = oauth.subscriptionType || null;
+    if (!email) {
+      try {
+        const db = tryGetDb();
+        if (db?.providers) {
+          const providers = await db.providers.list(process.env.MYA_USER_ID);
+          const claudeProvider = providers.find(p => p.provider === 'claude' && p.is_active);
+          if (claudeProvider?.label) email = claudeProvider.label;
+        }
+      } catch {}
+    }
+
+    res.json({
+      authenticated: !expired,
+      status: expired ? 'Token expired' : 'Authenticated',
+      email,
+      subscriptionType,
+      hasRefreshToken: !!oauth.refreshToken,
+    });
+  } catch {
+    res.json({ authenticated: false, status: 'Not authenticated' });
+  }
+});
+
+app.post('/portal/auth/claude/disconnect', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { execSync } = await import('child_process');
+    const claudeBin = process.env.CLAUDE_BIN || 'claude';
+    const configDir = process.env.CLAUDE_CONFIG_DIR;
+    const env = configDir ? { ...process.env, CLAUDE_CONFIG_DIR: configDir } : process.env;
+    execSync(`${claudeBin} auth logout`, { encoding: 'utf-8', timeout: 5000, env });
+
+    console.log(`[${LOG_PREFIX}] Claude Code disconnected by user`);
+    res.json({ ok: true });
+  } catch (e) {
+    // Fallback: delete credentials file directly
+    try {
+      const fs = await import('fs');
+      const path = await import('path');
+      const credDir = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME, '.claude');
+      const credPath = path.join(credDir, '.credentials.json');
+      await fs.promises.unlink(credPath);
+      console.log(`[${LOG_PREFIX}] Claude credentials file removed`);
+      res.json({ ok: true });
+    } catch {
+      res.status(500).json({ error: 'Failed to disconnect' });
+    }
+  }
+});
+
 app.put('/portal/settings', async (req, res) => {
   try {
     const user = await authenticatePortalRequest(req);
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
     const db = tryGetDb();
     if (!db) return res.status(503).json({ error: 'Database not available' });
-    const { timezone } = req.body;
+    const { timezone, vault_name } = req.body;
     if (timezone && typeof timezone === 'string') {
       await db.users?.updateTimezone?.(user.id, timezone);
+    }
+    if (vault_name !== undefined && typeof vault_name === 'string') {
+      const current = await db.users.getSettings(user.id);
+      current.vault_name = vault_name.trim().substring(0, 60);
+      await db.users.updateSettings(user.id, current);
     }
     res.json({ ok: true });
   } catch (e) {
@@ -7395,64 +9253,983 @@ app.put('/portal/settings', async (req, res) => {
   }
 });
 
-// -- Portal: Export (download all user data as JSON) --
+// -- Portal: Billing (subscription status + Stripe portal) --
 
-app.get('/portal/export', async (req, res) => {
+app.get('/portal/billing', async (req, res) => {
   try {
     const user = await authenticatePortalRequest(req);
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
     const db = tryGetDb();
     if (!db) return res.status(503).json({ error: 'Database not available' });
 
-    // Fetch all messages using OFFSET pagination (cursor-based doesn't work
-    // because rowid insertion order ≠ created_at chronological order for imported data)
+    // Check if managed mode
+    if (!process.env.MYA_WORKER_URL || !process.env.ADMIN_SECRET) {
+      return res.json({ managed: false });
+    }
+
+    // Fetch subscription from D1
+    const rows = await db.rawQuery(
+      `SELECT plan, type, status, current_period_end, cancel_at_period_end, created_at, payment_method, paid_through, crypto_coin
+       FROM subscriptions WHERE user_id = ? LIMIT 1`,
+      [user.id]
+    );
+    const sub = rows?.[0];
+
+    if (!sub) {
+      return res.json({ managed: true, subscription: null });
+    }
+
+    // Fetch crypto payment history if applicable
+    let cryptoPayments = [];
+    if (sub.payment_method === 'crypto') {
+      cryptoPayments = await db.rawQuery(
+        `SELECT coingate_order_id, plan, amount_eur, crypto_amount, crypto_coin, credited_months, paid_at
+         FROM crypto_payments WHERE user_id = ? AND status = 'paid' ORDER BY paid_at DESC LIMIT 20`,
+        [user.id]
+      );
+    }
+
+    res.json({
+      managed: true,
+      subscription: {
+        plan: sub.plan,
+        type: sub.type,
+        status: sub.status,
+        currentPeriodEnd: sub.current_period_end,
+        cancelAtPeriodEnd: sub.cancel_at_period_end,
+        createdAt: sub.created_at,
+        paymentMethod: sub.payment_method || 'stripe',
+        paidThrough: sub.paid_through,
+        cryptoCoin: sub.crypto_coin,
+      },
+      cryptoPayments,
+    });
+  } catch (e) {
+    console.error('[Portal] Billing fetch failed:', e?.message);
+    res.status(500).json({ error: 'Failed to load billing info' });
+  }
+});
+
+app.post('/portal/billing/portal', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const workerUrl = process.env.MYA_WORKER_URL;
+    const adminSecret = process.env.ADMIN_SECRET;
+    if (!workerUrl || !adminSecret) {
+      return res.status(400).json({ error: 'Billing not available for self-hosted instances' });
+    }
+
+    // Proxy to Worker billing portal endpoint, passing userId for admin auth
+    const portalRes = await fetch(`${workerUrl}/api/billing/portal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminSecret}` },
+      body: JSON.stringify({
+        userId: user.id,
+        returnUrl: req.body?.returnUrl || `https://${req.headers.host}/settings`,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!portalRes.ok) {
+      const err = await portalRes.json().catch(() => ({ error: 'Unknown error' }));
+      return res.status(portalRes.status).json(err);
+    }
+
+    const data = await portalRes.json();
+    res.json(data);
+  } catch (e) {
+    console.error('[Portal] Billing portal failed:', e?.message);
+    res.status(500).json({ error: 'Failed to create billing portal session' });
+  }
+});
+
+// -- Portal: Crypto top-up (proxy to Worker) --
+app.post('/portal/billing/crypto', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const workerUrl = process.env.MYA_WORKER_URL;
+    if (!workerUrl) return res.status(400).json({ error: 'Not available' });
+
+    const { plan } = req.body;
+    const db = tryGetDb();
+    // Get user email for CoinGate
+    let email = null;
+    if (db) {
+      const rows = await db.rawQuery(
+        `SELECT email FROM provisioning_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`,
+        [user.id]
+      );
+      email = rows?.[0]?.email;
+    }
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (process.env.AGENT_TOKEN) headers['Authorization'] = `Bearer ${process.env.AGENT_TOKEN}`;
+
+    const invoiceRes = await fetch(`${workerUrl}/api/crypto/invoice`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        plan,
+        user_id: user.id,
+        email: email || user.displayName,
+        return_url: `https://${req.headers.host}`,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!invoiceRes.ok) {
+      const err = await invoiceRes.json().catch(() => ({ error: 'Unknown error' }));
+      return res.status(invoiceRes.status).json(err);
+    }
+
+    const data = await invoiceRes.json();
+    res.json(data);
+  } catch (e) {
+    console.error('[Portal] Crypto top-up failed:', e?.message);
+    res.status(500).json({ error: 'Failed to create crypto invoice' });
+  }
+});
+
+// -- Portal: Export (download all user data as JSON) --
+// Security: re-auth via passkey + daily rate limit + audit logging + email notification
+// Managed mode: upload to R2, email signed download link
+// Self-hosted: direct JSON download
+
+app.post('/portal/export', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    // Validate one-time export token
+    const { exportToken } = req.body || {};
+    if (exportToken) {
+      const entry = exportTokens.get(exportToken);
+      if (!entry) return res.status(401).json({ error: 'Invalid or expired export token' });
+      if (Date.now() - entry.createdAt > EXPORT_TOKEN_TTL) {
+        exportTokens.delete(exportToken);
+        return res.status(401).json({ error: 'Export token expired' });
+      }
+      if (entry.userId !== user.id) return res.status(401).json({ error: 'Token/user mismatch' });
+      exportTokens.delete(exportToken); // consume — single use
+    } else {
+      // No token provided — check if passkeys exist (if yes, require re-auth)
+      const db2 = tryGetDb();
+      if (db2) {
+        const creds = await db2.passkeys.listByUser(user.id);
+        if (creds && creds.length > 0) {
+          return res.status(401).json({ error: 'Re-authentication required. Call /portal/export/auth first.' });
+        }
+      }
+    }
+
+    // Daily rate limit (3/day per user)
+    if (!checkDailyLimit(user.id, 'export', 3)) {
+      logEvent('security.export_failed', { userId: user.id, ip: req.ip, reason: 'daily_limit' });
+      return res.status(429).json({ error: 'Export limit exceeded. Maximum 3 exports per day.' });
+    }
+
+    // Burst rate limit (2/min)
+    if (!checkRateLimit(req, res, 'export', 2)) {
+      logEvent('security.export_failed', { userId: user.id, ip: req.ip, reason: 'burst_limit' });
+      return;
+    }
+
+    logEvent('security.export_requested', { userId: user.id, ip: req.ip, ua: req.headers['user-agent'] });
+
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+
+    const userId = user.id;
+
+    // ── Fetch all user data in parallel where possible ──
+
+    // Messages (paginated — can be 20K+)
     const allMessages = [];
     let offset = 0;
     while (true) {
-      const batch = await db.messages.selectAll(user.id, { limit: 500, offset });
+      const batch = await db.messages.selectAll(userId, { limit: 500, offset });
       if (!batch.length) break;
       allMessages.push(...batch);
       offset += batch.length;
       if (batch.length < 500) break;
     }
 
-    // Fetch documents and folders
-    const [documents, folders] = await Promise.all([
-      db.documents.list(user.id),
-      db.folders.list(user.id),
+    // Documents (with full content) + folders
+    const [docList, folders] = await Promise.all([
+      db.documents.list(userId),
+      db.folders.list(userId),
+    ]);
+    const fullDocuments = [];
+    for (const doc of docList) {
+      try {
+        const full = await db.documents.get(userId, doc.path);
+        fullDocuments.push(full || doc);
+      } catch { fullDocuments.push(doc); }
+    }
+
+    // Attachments metadata
+    const allAttachments = [];
+    let attOffset = 0;
+    while (true) {
+      const batch = await db.attachments.listByUser(userId, { limit: 500, offset: attOffset });
+      if (!batch.length) break;
+      allAttachments.push(...batch);
+      attOffset += batch.length;
+      if (batch.length < 500) break;
+    }
+
+    // Mindscape: full tables with all columns (centroids, generation metadata, raw_response)
+    const [territories, realms, semanticThemes, themeCards] = await Promise.all([
+      db.rawQuery(`SELECT * FROM territory_profiles WHERE user_id = ? ORDER BY energy DESC NULLS LAST`, [userId]).catch(() => []),
+      db.rawQuery(`SELECT * FROM realms WHERE user_id = ?`, [userId]).catch(() => []),
+      db.rawQuery(`SELECT * FROM semantic_themes WHERE user_id = ?`, [userId]).catch(() => []),
+      db.rawQuery(`SELECT * FROM theme_cards WHERE user_id = ?`, [userId]).catch(() => []),
     ]);
 
-    // Fetch full document content
-    const fullDocuments = [];
-    for (const doc of documents) {
+    // Clustering points: all columns including embedding_model, cluster_version, coordinates
+    const clusteringPoints = [];
+    let cpOffset = 0;
+    while (true) {
+      const batch = await db.rawQuery(
+        `SELECT id, source_type, source_id, content, atom_id, territory_id, theme_id, realm_id,
+                is_liminal, landscape_x, landscape_y, landscape_z, landscape_x_2d, landscape_y_2d,
+                cluster_version, embedding_model, created_at, updated_at
+         FROM clustering_points WHERE user_id = ? ORDER BY created_at DESC LIMIT 5000 OFFSET ?`,
+        [userId, cpOffset]
+      ).catch(() => []);
+      if (!batch || !batch.length) break;
+      clusteringPoints.push(...batch);
+      cpOffset += batch.length;
+      if (batch.length < 5000) break;
+    }
+
+    // Nomic 256D embeddings (BLOBs) — stored separately as hex, critical for clustering reconstruction
+    const nomicEmbeddings = {};
+    try {
+      let neOffset = 0;
+      while (true) {
+        const batch = await db.rawQuery(
+          `SELECT id, hex(nomic_embedding) as nomic_hex FROM clustering_points
+           WHERE user_id = ? AND nomic_embedding IS NOT NULL LIMIT 5000 OFFSET ?`,
+          [userId, neOffset]
+        );
+        if (!batch || !batch.length) break;
+        for (const row of batch) { if (row.nomic_hex) nomicEmbeddings[row.id] = row.nomic_hex; }
+        neOffset += batch.length;
+        if (batch.length < 5000) break;
+      }
+    } catch {}
+
+    // Topology: co-firing, neighbor relationships, cluster events (evolution history)
+    const [clusterEvents, cofiring, territoryNeighbors] = await Promise.all([
+      db.clusterEvents.getRecent(userId, 10000).catch(() => []),
+      db.rawQuery(`SELECT * FROM territory_cofire WHERE user_id = ?`, [userId]).catch(() => []),
+      db.rawQuery(`SELECT * FROM territory_neighbors WHERE user_id = ?`, [userId]).catch(() => []),
+    ]);
+
+    // Contacts
+    const allPeople = [];
+    try {
+      const rows = await db.rawQuery(
+        `SELECT id, name, aliases, email, phone, linkedin_url, company, position, description,
+                source, tier, status, connected_at, last_interaction_at, interaction_count,
+                sent_count, received_count, metadata, created_at
+         FROM people WHERE user_id = ? ORDER BY name`,
+        [userId]
+      );
+      allPeople.push(...(rows || []));
+    } catch {}
+
+    // Contact-territory links
+    let contactTerritories = [];
+    try {
+      contactTerritories = await db.rawQuery(
+        `SELECT contact_id, territory_id, strength, mention_count, first_seen, last_seen
+         FROM contact_territories WHERE contact_id IN (SELECT id FROM people WHERE user_id = ?)`,
+        [userId]
+      );
+    } catch {}
+
+    // Health data
+    let healthData = [];
+    try {
+      healthData = await db.health.getRange(userId, '2000-01-01', '2099-12-31');
+    } catch {}
+
+    // Activity
+    let activitySessions = [];
+    let activityDaily = [];
+    try {
+      activitySessions = await db.rawQuery(
+        `SELECT id, app_bundle, app_name, window_title, url, category, productivity,
+                started_at, ended_at, duration_s, idle, date
+         FROM activity_sessions WHERE agent_id = ? ORDER BY started_at DESC LIMIT 50000`,
+        [process.env.AGENT_ID || 'personal-agent']
+      );
+    } catch {}
+    try {
+      activityDaily = await db.rawQuery(
+        `SELECT date, category, total_s, session_count, productivity_avg
+         FROM activity_daily WHERE agent_id = ? ORDER BY date DESC`,
+        [process.env.AGENT_ID || 'personal-agent']
+      );
+    } catch {}
+
+    // Wealth
+    let wealthPortfolios = [], wealthPositions = [], wealthTransactions = [], wealthSnapshots = [], wealthAssets = [], wealthWatchlist = [];
+    try {
+      wealthPortfolios = await db.wealth.listPortfolios(userId).catch(() => []);
+      wealthAssets = await db.rawQuery('SELECT * FROM wealth_assets').catch(() => []);
+      wealthWatchlist = await db.wealth.getWatchlist(userId).catch(() => []);
+      for (const p of wealthPortfolios) {
+        const [pos, txs, snaps] = await Promise.all([
+          db.wealth.getPositions(p.id).catch(() => []),
+          db.wealth.listTransactions(p.id, { limit: 50000 }).catch(() => []),
+          db.wealth.getSnapshots(p.id).catch(() => []),
+        ]);
+        wealthPositions.push(...pos.map(r => ({ ...r, portfolio_id: p.id })));
+        wealthTransactions.push(...txs);
+        wealthSnapshots.push(...snaps.map(r => ({ ...r, portfolio_id: p.id })));
+      }
+    } catch {}
+
+    // User profile + settings
+    let userProfile = null, userSettings = {};
+    try {
+      const u = await db.users.getFirst();
+      userSettings = { displayName: u?.display_name, timezone: u?.timezone, settings: u?.settings ? JSON.parse(u.settings) : {} };
+    } catch {}
+    try {
+      userProfile = await db.rawQuery(
+        `SELECT * FROM user_profiles WHERE user_id = ?`, [userId]
+      ).then(r => r?.[0] || null);
+    } catch {}
+
+    // User identities
+    let identities = [];
+    try { identities = await db.userIdentities.list(userId).catch(() => []); } catch {}
+
+    // Canvases
+    let canvases = [];
+    try { canvases = await db.canvases.list(userId).catch(() => []); } catch {}
+
+    // Agent tasks
+    let tasks = [];
+    try {
+      tasks = await db.rawQuery(
+        `SELECT id, agent_id, type, description, status, priority, result, summary, error, created_at, started_at, completed_at
+         FROM agent_tasks WHERE user_id = ? ORDER BY created_at DESC LIMIT 10000`,
+        [userId]
+      );
+    } catch {}
+
+    // Internal model items
+    let internalModel = [];
+    try {
+      internalModel = await db.rawQuery(
+        `SELECT id, section, content, reinforcement_count, status, source_cycle_id, created_at, updated_at
+         FROM internal_model_items WHERE user_id = ? ORDER BY section, created_at DESC`,
+        [userId]
+      );
+    } catch {}
+
+    // Passkey credentials (public keys only — for vault migration)
+    let passkeys = [];
+    try { passkeys = await db.passkeys.listByUser(userId).catch(() => []); } catch {}
+
+    // Document versions (edit history)
+    let documentVersions = [];
+    try {
+      documentVersions = await db.rawQuery(
+        `SELECT * FROM document_versions WHERE document_id IN (SELECT id FROM documents WHERE user_id = ?) ORDER BY created_at DESC`,
+        [userId]
+      ) || [];
+    } catch {}
+
+    // Canvas nodes + edges (visual layouts)
+    let canvasNodes = [], canvasEdges = [], canvasCollaborators = [];
+    try {
+      canvasNodes = await db.rawQuery(`SELECT * FROM canvas_nodes WHERE workspace_id IN (SELECT id FROM canvas_workspaces WHERE user_id = ?)`, [userId]) || [];
+      canvasEdges = await db.rawQuery(`SELECT * FROM canvas_edges WHERE workspace_id IN (SELECT id FROM canvas_workspaces WHERE user_id = ?)`, [userId]) || [];
+      canvasCollaborators = await db.rawQuery(`SELECT * FROM canvas_collaborators WHERE workspace_id IN (SELECT id FROM canvas_workspaces WHERE user_id = ?)`, [userId]) || [];
+    } catch {}
+
+    // Connections (user-to-user social graph)
+    let connections = [];
+    try { connections = await db.rawQuery(`SELECT * FROM connections WHERE user_a = ? OR user_b = ?`, [userId, userId]) || []; } catch {}
+
+    // Realm neighbors (topology)
+    let realmNeighbors = [];
+    try { realmNeighbors = await db.rawQuery(`SELECT * FROM realm_neighbors WHERE user_id = ?`, [userId]) || []; } catch {}
+
+    // Reflections (agent-generated insights)
+    let reflections = [];
+    try { reflections = await db.rawQuery(`SELECT * FROM reflections WHERE user_id = ? ORDER BY created_at DESC`, [userId]) || []; } catch {}
+
+    // Personal tasks (separate from agent_tasks)
+    let personalTasks = [];
+    try { personalTasks = await db.rawQuery(`SELECT * FROM tasks WHERE user_id = ? ORDER BY created_at DESC`, [userId]) || []; } catch {}
+
+    // Note links (document cross-references)
+    let noteLinks = [];
+    try { noteLinks = await db.rawQuery(`SELECT * FROM note_links WHERE user_id = ?`, [userId]) || []; } catch {}
+
+    // Share links + access grants
+    let shareLinks = [], accessGrants = [];
+    try { shareLinks = await db.rawQuery(`SELECT * FROM share_links WHERE entity_id IN (SELECT id FROM documents WHERE user_id = ?)`, [userId]) || []; } catch {}
+    try { accessGrants = await db.rawQuery(`SELECT * FROM access_grants WHERE user_id = ?`, [userId]) || []; } catch {}
+
+    // AI providers (credentials encrypted — will be decrypted by rawQuery auto-decrypt)
+    let aiProviders = [];
+    try { aiProviders = await db.rawQuery(`SELECT * FROM ai_providers WHERE user_id = ?`, [userId]) || []; } catch {}
+
+    // Scheduled events (cron jobs)
+    let scheduledEvents = [];
+    try { scheduledEvents = await db.rawQuery(`SELECT * FROM scheduled_events WHERE user_id = ?`, [userId]) || []; } catch {}
+
+    // Secrets (encrypted key-value store — decrypted by master key on VPS)
+    let secrets = [];
+    try { secrets = await db.rawQuery(`SELECT key, scope, agent, description, version, created_at, updated_at FROM secrets WHERE user_id = ?`, [userId]) || []; } catch {}
+
+    // Agent events (execution audit trail)
+    let agentEvents = [];
+    try {
+      agentEvents = await db.rawQuery(
+        `SELECT * FROM agent_events WHERE agent_id IN (SELECT agent FROM agent_tokens WHERE user_id = ?) ORDER BY created_at DESC LIMIT 50000`,
+        [userId]
+      ) || [];
+    } catch {}
+
+    // Cycle metrics (LLM cost/performance tracking)
+    let cycleMetrics = [];
+    try { cycleMetrics = await db.rawQuery(`SELECT * FROM cycle_metrics WHERE user_id = ? ORDER BY created_at DESC`, [userId]) || []; } catch {}
+
+    // Wealth wallets + portfolio access
+    let wealthWallets = [], wealthPortfolioAccess = [];
+    try { wealthWallets = await db.rawQuery(`SELECT * FROM wealth_wallets WHERE user_id = ?`, [userId]) || []; } catch {}
+    try { wealthPortfolioAccess = await db.rawQuery(`SELECT * FROM wealth_portfolio_access WHERE user_id = ?`, [userId]) || []; } catch {}
+
+    // ── Build ZIP archive ──
+    const AdmZip = (await import('adm-zip')).default;
+    const zip = new AdmZip();
+
+    // Download R2 attachments and add binary files to ZIP
+    const workerUrl = process.env.MYA_WORKER_URL;
+    const workerSecret = process.env.MYA_WORKER_SECRET || process.env.ADMIN_SECRET;
+    let attachmentsFetched = 0, attachmentsFailed = 0;
+
+    for (const att of allAttachments) {
+      if (!att.r2_key || !workerUrl) continue;
       try {
-        const full = await db.documents.get(user.id, doc.path);
-        fullDocuments.push(full || doc);
-      } catch {
-        fullDocuments.push(doc);
+        const r2Res = await fetch(`${workerUrl}/attachments/${att.r2_key}`, {
+          headers: { 'Authorization': `Bearer ${workerSecret}` },
+          signal: AbortSignal.timeout(30000),
+        });
+        if (r2Res.ok) {
+          const buf = Buffer.from(await r2Res.arrayBuffer());
+          const safeName = (att.file_name || att.id).replace(/[^a-zA-Z0-9._-]/g, '_');
+          zip.addFile(`attachments/${att.id}/${safeName}`, buf);
+          att.zipPath = `attachments/${att.id}/${safeName}`;
+          attachmentsFetched++;
+        } else {
+          att.fetchError = `HTTP ${r2Res.status}`;
+          attachmentsFailed++;
+        }
+      } catch (e) {
+        att.fetchError = e.message;
+        attachmentsFailed++;
       }
     }
 
+    // Add agent directory tree (memory, mind files, heartbeats, prompts, etc.)
+    const agentsRoot = getAgentsRoot();
+    async function addDirToZip(zipObj, dirPath, zipPrefix) {
+      try {
+        const entries = await fs.readdir(dirPath, { withFileTypes: true });
+        for (const entry of entries) {
+          const fullPath = path.join(dirPath, entry.name);
+          const zipPath = `${zipPrefix}/${entry.name}`;
+          if (entry.isDirectory()) {
+            // Skip large/irrelevant dirs
+            if (['node_modules', '.git', 'repo', 'sessions', 'logs'].includes(entry.name)) continue;
+            await addDirToZip(zipObj, fullPath, zipPath);
+          } else {
+            try {
+              const content = await fs.readFile(fullPath);
+              zipObj.addFile(zipPath, content);
+            } catch {}
+          }
+        }
+      } catch {}
+    }
+    try {
+      const agentDirs = await fs.readdir(agentsRoot).catch(() => []);
+      for (const agentDir of agentDirs) {
+        const agentPath = path.join(agentsRoot, agentDir);
+        const stat = await fs.stat(agentPath).catch(() => null);
+        if (!stat || !stat.isDirectory()) continue;
+        await addDirToZip(zip, agentPath, `agents/${agentDir}`);
+      }
+      // Also add the shared events dir
+      const sharedDir = path.join(agentsRoot, '.shared');
+      const sharedStat = await fs.stat(sharedDir).catch(() => null);
+      if (sharedStat?.isDirectory()) {
+        await addDirToZip(zip, sharedDir, 'agents/.shared');
+      }
+    } catch (e) {
+      console.warn('[Export] Agent dirs failed:', e.message);
+    }
+
+    // Build manifest JSON
     const exportData = {
       exportedAt: new Date().toISOString(),
-      version: 1,
-      totalMessages: allMessages.length,
-      messages: allMessages,
-      documents: fullDocuments,
+      version: 3,
+      format: 'mycelium-vault-export',
+      meta: {
+        embeddingModels: {
+          search: { name: 'bge-m3', dimensions: 1024, provider: 'cloudflare-workers-ai', index: 'mycelium-search' },
+          clustering: { name: 'nomic-embed-text-v1.5', dimensions: 256, provider: 'onnx-local', index: 'mycelium-cluster' },
+        },
+        hierarchy: 'realm → semantic_theme → territory → clustering_point',
+        note: 'Nomic 256D embeddings stored in nomicEmbeddings map (point_id → hex). Convert hex to Float32Array for reconstruction.',
+      },
+      user: { id: userId, ...userSettings, profile: userProfile, identities, passkeys },
+      messages: { total: allMessages.length, data: allMessages },
+      documents: { total: fullDocuments.length, data: fullDocuments },
       folders,
+      attachments: { total: allAttachments.length, fetched: attachmentsFetched, failed: attachmentsFailed, data: allAttachments },
+      mindscape: {
+        territories,
+        realms,
+        semanticThemes,
+        themeCards,
+        clusteringPoints: { total: clusteringPoints.length, data: clusteringPoints },
+        nomicEmbeddings: { total: Object.keys(nomicEmbeddings).length, note: 'hex-encoded 256D Nomic float32 vectors, keyed by clustering_point id', data: nomicEmbeddings },
+        clusterEvents,
+      },
+      contacts: { total: allPeople.length, data: allPeople, territoryLinks: contactTerritories },
+      health: healthData,
+      activity: { sessions: activitySessions, daily: activityDaily },
+      wealth: { portfolios: wealthPortfolios, assets: wealthAssets, positions: wealthPositions, transactions: wealthTransactions, snapshots: wealthSnapshots, watchlist: wealthWatchlist },
+      canvases: { workspaces: canvases, nodes: canvasNodes, edges: canvasEdges, collaborators: canvasCollaborators },
+      tasks: { agentTasks: tasks, personalTasks },
+      internalModel,
+      documents_meta: { versions: documentVersions, noteLinks, shareLinks, accessGrants },
+      connections,
+      reflections,
+      aiProviders,
+      scheduledEvents,
+      secrets: { note: 'Values excluded for security — keys and metadata only', data: secrets },
+      agentEvents: { total: agentEvents.length, data: agentEvents },
+      cycleMetrics,
+      topology: { realmNeighbors, cofiring, territoryNeighbors },
+      wealthExtra: { wallets: wealthWallets, portfolioAccess: wealthPortfolioAccess },
     };
 
-    // Sanitize U+2028/U+2029 (Line/Paragraph Separators) which break many JSON parsers and editors
-    const jsonStr = JSON.stringify(exportData, null, 2)
-      .replace(/\u2028/g, '\\u2028')
-      .replace(/\u2029/g, '\\u2029');
+    const jsonStr = JSON.stringify(exportData, null, 2).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+    zip.addFile('manifest.json', Buffer.from(jsonStr, 'utf-8'));
 
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="mycelium-export-${new Date().toISOString().slice(0, 10)}.json"`);
-    res.send(jsonStr);
+    // Generate ZIP buffer
+    const zipBuffer = zip.toBuffer();
+    const filename = `mycelium-export-${new Date().toISOString().slice(0, 10)}.zip`;
+    const zipSizeMB = (zipBuffer.length / 1048576).toFixed(1);
+
+    // Detect deployment mode: managed customers get R2 + email with PIN
+    const isManaged = !!(process.env.MYA_WORKER_URL && process.env.ADMIN_SECRET && process.env.MYA_USER_ID);
+
+    if (isManaged) {
+      try {
+        const workerUrl = process.env.MYA_WORKER_URL;
+        const adminSecret = process.env.ADMIN_SECRET;
+
+        // Upload ZIP to R2 via Worker
+        const storeRes = await fetch(`${workerUrl}/api/admin/store-export`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminSecret}` },
+          body: JSON.stringify({ userId: user.id, data: zipBuffer.toString('base64') }),
+          signal: AbortSignal.timeout(60000),
+        });
+
+        if (!storeRes.ok) throw new Error(`Store failed: ${storeRes.status}`);
+        const { downloadUrl, pin } = await storeRes.json();
+
+        // Email the download link + PIN
+        const job = await db.d1QueryAdmin(
+          'SELECT email FROM provisioning_jobs WHERE user_id = ? AND status = ? LIMIT 1',
+          [user.id, 'ready']
+        );
+        const email = job?.results?.[0]?.email;
+
+        if (email && downloadUrl) {
+          await fetch(`${workerUrl}/api/admin/send-email`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminSecret}` },
+            body: JSON.stringify({
+              to: email,
+              subject: 'Your Mycelium vault export is ready',
+              text: `Your vault export is ready (${zipSizeMB} MB).\n\nDownload link (expires in 1 hour):\n${downloadUrl}\n\nYou'll need the verification PIN shown in your portal to download. The link can only be used once.\n\n— Mycelium`,
+            }),
+            signal: AbortSignal.timeout(5000),
+          });
+
+          logEvent('security.export_completed', {
+            userId: user.id, ip: req.ip, deliveryMethod: 'email',
+            messageCount: allMessages.length, documentCount: fullDocuments.length,
+            contactCount: allPeople.length, attachmentCount: allAttachments.length,
+            attachmentsFetched, attachmentsFailed, zipSizeMB,
+          });
+          sendSecurityEmail('export', req, { messageCount: allMessages.length }).catch(() => {});
+          return res.json({ ok: true, method: 'email', pin, message: 'Download link sent to your email. Use the PIN below to verify.' });
+        }
+      } catch (e) {
+        console.error('[Portal] Managed export failed, falling back to download:', e.message);
+        // Fall through to direct download
+      }
+    }
+
+    // Self-hosted (or managed fallback): direct download
+    logEvent('security.export_completed', {
+      userId: user.id, ip: req.ip, deliveryMethod: 'download',
+      messageCount: allMessages.length, documentCount: fullDocuments.length,
+      contactCount: allPeople.length, attachmentCount: allAttachments.length,
+      attachmentsFetched, attachmentsFailed, zipSizeMB,
+    });
+    sendSecurityEmail('export', req, { messageCount: allMessages.length }).catch(() => {});
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', zipBuffer.length);
+    res.send(zipBuffer);
   } catch (e) {
     console.error('[Portal] Export failed:', e?.message || e);
+    logEvent('security.export_failed', { userId: 'unknown', ip: req.ip, reason: e?.message || 'unknown' });
     res.status(500).json({ error: 'Export failed' });
+  }
+});
+
+// -- Portal: Vault Restore (full import from v3 ZIP export) --
+// Restores ALL user data: messages, documents, attachments, mindscape, contacts, health, wealth, agents, etc.
+
+async function restoreRaw(db, targetUserId, table, rows, userIdCol = 'user_id') {
+  if (!rows || !rows.length) return 0;
+  let count = 0;
+  for (const row of rows) {
+    try {
+      if (targetUserId && row[userIdCol]) row[userIdCol] = targetUserId;
+      const cols = Object.keys(row).filter(c => row[c] !== undefined);
+      const vals = cols.map(c => row[c]);
+      const placeholders = cols.map(() => '?').join(', ');
+      await db.rawQuery(
+        `INSERT OR REPLACE INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})`,
+        vals
+      );
+      count++;
+    } catch (e) {
+      // Skip individual row failures (constraint violations, etc.)
+    }
+  }
+  return count;
+}
+
+async function restoreClusteringPoints(db, targetUserId, points, embeddings) {
+  if (!points?.length) return 0;
+  let count = 0;
+  for (const pt of points) {
+    try {
+      pt.user_id = targetUserId;
+      const hex = embeddings?.[pt.id];
+      const cols = Object.keys(pt).filter(c => pt[c] !== undefined);
+      const vals = cols.map(c => pt[c]);
+      let sql;
+      if (hex) {
+        const placeholders = cols.map(() => '?').join(', ') + `, x'${hex}'`;
+        sql = `INSERT OR REPLACE INTO clustering_points (${cols.join(', ')}, nomic_embedding) VALUES (${placeholders})`;
+      } else {
+        const placeholders = cols.map(() => '?').join(', ');
+        sql = `INSERT OR REPLACE INTO clustering_points (${cols.join(', ')}) VALUES (${placeholders})`;
+      }
+      await db.rawQuery(sql, vals);
+      count++;
+    } catch {}
+  }
+  return count;
+}
+
+async function restoreAttachments(db, targetUserId, attachments, zip, workerUrl, workerSecret) {
+  if (!attachments?.length) return { inserted: 0, uploaded: 0, failed: 0 };
+  let inserted = 0, uploaded = 0, failed = 0;
+
+  for (const att of attachments) {
+    try {
+      // Upload binary from ZIP to R2
+      const zipEntry = att.zipPath ? zip.getEntry(att.zipPath) : null;
+      if (zipEntry && workerUrl && workerSecret) {
+        try {
+          const buf = zipEntry.getData();
+          const ext = att.file_name ? path.extname(att.file_name) : '';
+          const r2Key = `${targetUserId}/${att.file_type || 'file'}/${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
+
+          const r2Res = await fetch(`${workerUrl}/api/store-attachment`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${workerSecret}`,
+              'Content-Type': att.file_type === 'image' ? 'image/jpeg' : 'application/octet-stream',
+              'X-Filename': att.file_name || 'file',
+              'X-User-Id': targetUserId,
+            },
+            body: buf,
+            signal: AbortSignal.timeout(30000),
+          });
+
+          if (r2Res.ok) {
+            const result = await r2Res.json();
+            att.r2_key = result.r2Key || r2Key;
+            uploaded++;
+          }
+        } catch (e) {
+          failed++;
+        }
+      }
+
+      // Insert attachment metadata
+      const record = { ...att };
+      record.user_id = targetUserId;
+      delete record.zipPath;
+      delete record.fetchError;
+      delete record.downloadUrl;
+      await db.attachments.insert(record);
+      inserted++;
+    } catch {
+      failed++;
+    }
+  }
+  return { inserted, uploaded, failed };
+}
+
+async function restoreAgentFiles(zip) {
+  const agentsRoot = getAgentsRoot();
+  let count = 0;
+  for (const entry of zip.getEntries()) {
+    if (!entry.entryName.startsWith('agents/') || entry.isDirectory) continue;
+    try {
+      const targetPath = path.join(agentsRoot, entry.entryName.slice('agents/'.length));
+      // Safety: don't write outside agents root
+      if (!targetPath.startsWith(agentsRoot)) continue;
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.writeFile(targetPath, entry.getData());
+      count++;
+    } catch {}
+  }
+  return count;
+}
+
+app.post('/portal/import/vault', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    // Daily rate limit
+    if (!checkDailyLimit(user.id, 'import', 3)) {
+      return res.status(429).json({ error: 'Import limit exceeded. Maximum 3 per day.' });
+    }
+    if (!checkRateLimit(req, res, 'import', 2)) return;
+
+    logEvent('security.import_requested', { userId: user.id, ip: req.ip });
+
+    // Parse multipart upload (ZIP file, up to 2GB)
+    const bb = Busboy({ headers: req.headers, limits: { fileSize: 2_000_000_000, files: 1 } });
+    let fileBuffer = null;
+
+    const parsePromise = new Promise((resolve, reject) => {
+      const chunks = [];
+      bb.on('file', (_fieldname, stream, _info) => {
+        stream.on('data', (chunk) => chunks.push(chunk));
+        stream.on('end', () => { fileBuffer = Buffer.concat(chunks); });
+      });
+      // Capture exportToken from form fields
+      let exportToken = null;
+      bb.on('field', (name, val) => { if (name === 'exportToken') exportToken = val; });
+      bb.on('close', () => resolve(exportToken));
+      bb.on('error', reject);
+    });
+
+    req.pipe(bb);
+    const exportToken = await parsePromise;
+
+    // Validate re-auth token (same as export)
+    if (exportToken) {
+      const entry = exportTokens.get(exportToken);
+      if (!entry || entry.userId !== user.id || Date.now() - entry.createdAt > EXPORT_TOKEN_TTL) {
+        exportTokens.delete(exportToken);
+        return res.status(401).json({ error: 'Invalid or expired token' });
+      }
+      exportTokens.delete(exportToken);
+    } else {
+      const db2 = tryGetDb();
+      if (db2) {
+        const creds = await db2.passkeys.listByUser(user.id);
+        if (creds?.length > 0) {
+          return res.status(401).json({ error: 'Re-authentication required' });
+        }
+      }
+    }
+
+    if (!fileBuffer || fileBuffer.length < 100) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    // Parse ZIP
+    const AdmZip = (await import('adm-zip')).default;
+    const zip = new AdmZip(fileBuffer);
+    const manifestEntry = zip.getEntry('manifest.json');
+    if (!manifestEntry) {
+      return res.status(400).json({ error: 'Invalid vault export: missing manifest.json' });
+    }
+
+    const manifest = JSON.parse(manifestEntry.getData().toString('utf-8'));
+    if (manifest.format !== 'mycelium-vault-export') {
+      return res.status(400).json({ error: `Unknown export format: ${manifest.format}` });
+    }
+
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+
+    const targetUserId = user.id;
+    const stats = {};
+
+    console.log(`[Import] Starting vault restore v${manifest.version} for ${targetUserId} (${manifest.messages?.total || 0} messages, ${manifest.attachments?.total || 0} attachments)`);
+
+    // ── Restore in dependency order ──
+
+    // 1. User settings
+    try {
+      if (manifest.user?.timezone) await db.users.updateTimezone(targetUserId, manifest.user.timezone);
+      if (manifest.user?.settings) await db.users.updateSettings(targetUserId, manifest.user.settings);
+    } catch {}
+
+    // 2. Folders
+    stats.folders = await restoreRaw(db, targetUserId, 'folders', manifest.folders);
+
+    // 3. Documents + versions + links
+    if (manifest.documents?.data) {
+      let docCount = 0;
+      for (const doc of manifest.documents.data) {
+        try {
+          await db.documents.upsert({ ...doc, user_id: targetUserId });
+          docCount++;
+        } catch {}
+      }
+      stats.documents = docCount;
+    }
+    stats.documentVersions = await restoreRaw(db, null, 'document_versions', manifest.documents_meta?.versions);
+    stats.noteLinks = await restoreRaw(db, targetUserId, 'note_links', manifest.documents_meta?.noteLinks);
+
+    // 4. Attachments (R2 binaries + metadata)
+    const workerUrl = process.env.MYA_WORKER_URL;
+    const workerSecret = process.env.MYA_WORKER_SECRET || process.env.ADMIN_SECRET;
+    stats.attachments = await restoreAttachments(db, targetUserId, manifest.attachments?.data || [], zip, workerUrl, workerSecret);
+
+    // 5. Messages
+    if (manifest.messages?.data?.length) {
+      const remapped = manifest.messages.data.map(m => ({ ...m, user_id: targetUserId }));
+      await db.messages.insertIgnore(remapped);
+      stats.messages = remapped.length;
+    }
+
+    // 6. People + contact territories
+    if (manifest.contacts?.data?.length) {
+      let pCount = 0;
+      for (const p of manifest.contacts.data) {
+        try {
+          p.user_id = targetUserId;
+          const cols = Object.keys(p).filter(c => p[c] !== undefined);
+          await db.rawQuery(
+            `INSERT OR REPLACE INTO people (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`,
+            cols.map(c => p[c])
+          );
+          pCount++;
+        } catch {}
+      }
+      stats.contacts = pCount;
+    }
+    stats.contactTerritories = await restoreRaw(db, null, 'contact_territories', manifest.contacts?.territoryLinks);
+
+    // 7. Mindscape hierarchy: realms → themes → territories → theme_cards
+    stats.realms = await restoreRaw(db, targetUserId, 'realms', manifest.mindscape?.realms);
+    stats.semanticThemes = await restoreRaw(db, targetUserId, 'semantic_themes', manifest.mindscape?.semanticThemes);
+    stats.territories = await restoreRaw(db, targetUserId, 'territory_profiles', manifest.mindscape?.territories);
+    stats.themeCards = await restoreRaw(db, targetUserId, 'theme_cards', manifest.mindscape?.themeCards);
+
+    // 8. Clustering points with nomic embeddings
+    stats.clusteringPoints = await restoreClusteringPoints(
+      db, targetUserId,
+      manifest.mindscape?.clusteringPoints?.data,
+      manifest.mindscape?.nomicEmbeddings?.data
+    );
+
+    // 9. Topology
+    stats.clusterEvents = await restoreRaw(db, null, 'cluster_events', manifest.mindscape?.clusterEvents);
+    stats.cofiring = await restoreRaw(db, targetUserId, 'territory_cofire', manifest.topology?.cofiring);
+    stats.territoryNeighbors = await restoreRaw(db, targetUserId, 'territory_neighbors', manifest.topology?.territoryNeighbors);
+    stats.realmNeighbors = await restoreRaw(db, targetUserId, 'realm_neighbors', manifest.topology?.realmNeighbors);
+
+    // 10. Health + Activity
+    stats.health = await restoreRaw(db, targetUserId, 'health_daily', manifest.health);
+    stats.activitySessions = await restoreRaw(db, null, 'activity_sessions', manifest.activity?.sessions);
+    stats.activityDaily = await restoreRaw(db, null, 'activity_daily', manifest.activity?.daily);
+
+    // 11. Wealth
+    stats.wealthAssets = await restoreRaw(db, null, 'wealth_assets', manifest.wealth?.assets);
+    stats.wealthPortfolios = await restoreRaw(db, targetUserId, 'wealth_portfolios', manifest.wealth?.portfolios);
+    stats.wealthPositions = await restoreRaw(db, null, 'wealth_positions', manifest.wealth?.positions);
+    stats.wealthTransactions = await restoreRaw(db, null, 'wealth_transactions', manifest.wealth?.transactions);
+    stats.wealthSnapshots = await restoreRaw(db, null, 'wealth_snapshots', manifest.wealth?.snapshots);
+    stats.wealthWatchlist = await restoreRaw(db, targetUserId, 'wealth_watchlist', manifest.wealth?.watchlist);
+    stats.wealthWallets = await restoreRaw(db, targetUserId, 'wealth_wallets', manifest.wealthExtra?.wallets);
+    stats.wealthPortfolioAccess = await restoreRaw(db, null, 'wealth_portfolio_access', manifest.wealthExtra?.portfolioAccess);
+
+    // 12. Canvases
+    stats.canvasWorkspaces = await restoreRaw(db, targetUserId, 'canvas_workspaces', manifest.canvases?.workspaces);
+    stats.canvasNodes = await restoreRaw(db, null, 'canvas_nodes', manifest.canvases?.nodes);
+    stats.canvasEdges = await restoreRaw(db, null, 'canvas_edges', manifest.canvases?.edges);
+    stats.canvasCollaborators = await restoreRaw(db, null, 'canvas_collaborators', manifest.canvases?.collaborators);
+
+    // 13. Tasks + model
+    stats.agentTasks = await restoreRaw(db, targetUserId, 'agent_tasks', manifest.tasks?.agentTasks);
+    stats.personalTasks = await restoreRaw(db, targetUserId, 'tasks', manifest.tasks?.personalTasks);
+    stats.internalModel = await restoreRaw(db, targetUserId, 'internal_model_items', manifest.internalModel);
+    stats.reflections = await restoreRaw(db, targetUserId, 'reflections', manifest.reflections);
+
+    // 14. Identity + config
+    if (manifest.user?.profile) {
+      await restoreRaw(db, targetUserId, 'user_profiles', [manifest.user.profile]);
+    }
+    stats.identities = await restoreRaw(db, targetUserId, 'user_identities', manifest.user?.identities);
+    stats.aiProviders = await restoreRaw(db, targetUserId, 'ai_providers', manifest.aiProviders);
+    stats.scheduledEvents = await restoreRaw(db, targetUserId, 'scheduled_events', manifest.scheduledEvents);
+
+    // 15. Social + audit
+    stats.connections = await restoreRaw(db, null, 'connections', manifest.connections);
+    stats.shareLinks = await restoreRaw(db, null, 'share_links', manifest.documents_meta?.shareLinks);
+    stats.accessGrants = await restoreRaw(db, targetUserId, 'access_grants', manifest.documents_meta?.accessGrants);
+    stats.agentEvents = await restoreRaw(db, null, 'agent_events', manifest.agentEvents?.data);
+    stats.cycleMetrics = await restoreRaw(db, targetUserId, 'cycle_metrics', manifest.cycleMetrics);
+
+    // 16. Agent filesystem (memory, mind, heartbeats, prompts)
+    stats.agentFiles = await restoreAgentFiles(zip);
+
+    console.log(`[Import] Vault restore complete:`, JSON.stringify(stats));
+    logEvent('security.import_completed', { userId: targetUserId, ip: req.ip, stats });
+
+    res.json({ ok: true, version: manifest.version, stats });
+  } catch (e) {
+    console.error('[Import] Vault restore failed:', e?.message || e);
+    logEvent('security.import_failed', { userId: 'unknown', ip: req.ip, reason: e?.message });
+    res.status(500).json({ error: 'Vault restore failed: ' + (e?.message || 'unknown error') });
   }
 });
 
@@ -7572,13 +10349,23 @@ try {
 // Start Server
 // ============================================
 
-const BIND_HOST = process.env.BIND_HOST || '127.0.0.1';
+// SECURITY: bind to loopback only. Reject 0.0.0.0 / public binding even via
+// env override in production (NODE_ENV=production). Override only allowed in
+// dev for explicit testing.
+let BIND_HOST = process.env.BIND_HOST || '127.0.0.1';
+if (process.env.NODE_ENV === 'production' && BIND_HOST !== '127.0.0.1' && BIND_HOST !== '::1' && BIND_HOST !== 'localhost') {
+  console.error(`[${LOG_PREFIX}] FATAL: BIND_HOST=${BIND_HOST} not allowed in production. Must be loopback.`);
+  process.exit(1);
+}
 const server = app.listen(PORT, BIND_HOST, async () => {
   // Initialize runtime context
   await initRuntime();
 
   // Check if this is a first-run (no users) — generate setup token
   await checkFirstRun();
+
+  // Verify tenant identity for managed instances
+  await verifyTenantIdentity();
 
   console.log(`[${LOG_PREFIX} Agent] Server running on ${BIND_HOST}:${PORT}`);
   console.log(`[${LOG_PREFIX} Agent] Agent ID: ${AGENT_ID}`);

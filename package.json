@@ -10,7 +10,9 @@
     "dev": "node --watch agent-server.js",
     "pm2": "pm2 start ecosystem.config.cjs",
     "add-agent": "./scripts/add-agent.sh",
-    "test": "node --test 'tests/**/*.test.js'"
+    "test": "node --test 'tests/**/*.test.js'",
+    "sbom": "npx @cyclonedx/cyclonedx-npm --output-file sbom.json",
+    "audit:check": "npm audit --audit-level=high"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
@@ -26,6 +28,7 @@
     "grammy": "^1.35.0",
     "http-proxy-middleware": "^3.0.5",
     "mammoth": "^1.11.0",
+    "sodium-native": "^5.1.0",
     "unpdf": "^1.4.0"
   },
   "engines": {

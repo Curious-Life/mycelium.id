@@ -1,0 +1,67 @@
+# AppArmor profile for Mycelium agent-server processes.
+# Restricts file access so compromised agents cannot read the master key
+# or other agents' data directories.
+#
+# Install: cp security/apparmor/mycelium-agent /etc/apparmor.d/
+# Load:    apparmor_parser -r /etc/apparmor.d/mycelium-agent
+# Test:    aa-complain mycelium-agent (complain mode first)
+# Enforce: aa-enforce mycelium-agent
+
+#include <tunables/global>
+
+profile mycelium-agent flags=(attach_disconnected) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  # ── Node.js runtime ──
+  /usr/bin/node ix,
+  /usr/local/bin/node ix,
+  /usr/bin/env ix,
+  /usr/bin/claude ix,
+  /usr/local/bin/claude ix,
+
+  # ── Application code (read-only) ──
+  /home/claude/mycelium/ r,
+  /home/claude/mycelium/** r,
+  /home/claude/mycelium/node_modules/** r,
+
+  # ── Agent working directories (read-write per agent) ──
+  # Each agent writes to its own repo dir under agents/
+  owner /home/claude/agents/** rw,
+
+  # ── Logs ──
+  /var/log/mycelium/ r,
+  /var/log/mycelium/** w,
+  /var/log/mycelium/** rw,
+
+  # ── Temp files ──
+  /tmp/ r,
+  /tmp/** rw,
+  owner /home/claude/.cache/** rw,
+
+  # ── DENY sensitive files ──
+  # Master key lives in .env — agents get their token via PM2 env vars,
+  # they must NOT read .env directly
+  deny /home/claude/mycelium/.env r,
+  deny /home/claude/mycelium/.env.* r,
+  deny /home/claude/.ssh/ r,
+  deny /home/claude/.ssh/** rw,
+  deny /etc/shadow r,
+  deny /etc/sudoers r,
+  deny /etc/sudoers.d/ r,
+  deny /etc/sudoers.d/** r,
+
+  # ── Network ──
+  network inet stream,
+  network inet6 stream,
+  network inet dgram,   # DNS resolution
+  network inet6 dgram,
+
+  # ── Proc/sys (Node.js needs these) ──
+  /proc/sys/kernel/random/uuid r,
+  /proc/self/fd/ r,
+  /proc/self/cgroup r,
+  owner /proc/*/status r,
+  owner /proc/*/stat r,
+  /sys/fs/cgroup/** r,
+}

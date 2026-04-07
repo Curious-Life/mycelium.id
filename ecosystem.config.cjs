@@ -26,6 +26,33 @@ function agentPorts(index) {
 // Default Claude config dir (shared across agents unless overridden)
 const DEFAULT_CLAUDE_CONFIG = process.env.CLAUDE_CONFIG_DIR || '/home/claude/.claude';
 
+// SECURITY: Sensitive env vars to strip from PM2's internal env serialization.
+// PM2 dumps process env to ~/.pm2/dump.pm2 — this prevents secrets from being
+// captured in the dump. Master key isn't in env (lives in tmpfs) but we list
+// it anyway as defense-in-depth, plus all other secrets that flow through env.
+const FILTER_ENV = [
+  'ENCRYPTION_MASTER_KEY',
+  'ADMIN_SECRET',
+  'MYA_WORKER_SECRET',
+  'CLOUDFLARE_AI_TOKEN',
+  'CLOUDFLARE_API_TOKEN',
+  'CLOUDFLARE_ACCOUNT_ID',
+  'HETZNER_API_TOKEN',
+  'CDP_API_KEY_ID',
+  'CDP_API_KEY_SECRET',
+  'CDP_WALLET_SECRET',
+  'GOOGLE_CLIENT_SECRET',
+  'GOOGLE_REFRESH_TOKEN',
+  'GITHUB_CLIENT_SECRET',
+  'POLYMARKET_API_PASSWORD',
+  'STRIPE_SECRET_KEY',
+  'RESEND_API_KEY',
+  'SENTRY_AUTH_TOKEN',
+  'TELEGRAM_BOT_TOKEN',
+  'DISCORD_BOT_TOKEN',
+  'DISCORD_CLIENT_SECRET',
+];
+
 // Shared env vars for all agent servers
 // NOTE: Secrets (API keys, tokens, passwords) come from D1 Secrets API via bootstrap-secrets.js.
 // Only non-secret config and bootstrap credentials go here.
@@ -47,10 +74,17 @@ const SHARED_AGENT_ENV = {
   POLYMARKET_API_URL: process.env.POLYMARKET_API_URL,
   POLYMARKET_API_USER: process.env.POLYMARKET_API_USER,
   WARROOM_PATH: process.env.WARROOM_PATH,
+  // Default scope: org only. Per-agent overrides below for personal/wealth/moms.
+  AGENT_SCOPES: '["org"]',
 };
 
+// Apply filter_env to every app definition without modifying each one inline.
+// PM2 reads filter_env at process spawn time and excludes those vars from the
+// process env it captures (which then gets dumped via pm2 save).
+const _withFilterEnv = (apps) => apps.map(app => ({ ...app, filter_env: FILTER_ENV }));
+
 module.exports = {
-  apps: [
+  apps: _withFilterEnv([
     // Main Orchestrator
     {
       name: 'orchestrator',
@@ -84,7 +118,7 @@ module.exports = {
         DISCORD_WEALTH_CHANNEL: process.env.DISCORD_WEALTH_CHANNEL,
 
         OWNER_TELEGRAM_ID: process.env.OWNER_TELEGRAM_ID,
-        SCHEDULER_TIMEZONE: process.env.SCHEDULER_TIMEZONE || 'UTC',
+        SCHEDULER_TIMEZONE: process.env.SCHEDULER_TIMEZONE || 'Europe/Riga',
         DISCORD_ALERTS_CHANNEL: process.env.DISCORD_ALERTS_CHANNEL,
         TELEGRAM_BOT_PORT: 3003,
 
@@ -362,6 +396,7 @@ module.exports = {
         PORT: 5014,
         AGENT_ID: 'moms-agent',
         AGENT_TIER: '2',
+        AGENT_SCOPES: '["moms","org"]',
         MEMORY_SCOPE: 'moms',
         DISCORD_CHANNEL: '',
         DISCORD_BOT_URL: '',
@@ -389,15 +424,21 @@ module.exports = {
       exec_mode: 'fork',
       watch: false,
       max_memory_restart: '256M',
+      restart_delay: 10000,
+      min_uptime: 60000,
+      max_restarts: 5,
+      kill_timeout: 8000,
       env: {
         NODE_ENV: 'production',
+        AGENT_ID: 'moms-telegram-bot',
         MYA_WORKER_URL: process.env.MYA_WORKER_URL,
         AGENT_TOKEN: process.env.AGENT_TOKEN_MOM,
         OWNER_TELEGRAM_ID: process.env.MOMS_TELEGRAM_ID,
         AGENT_URL: 'http://localhost:5014',
         TELEGRAM_BOT_PORT: 5015,
         USER_ID: process.env.MOMS_USER_ID,
-        MYA_WORKER_URL: process.env.MYA_WORKER_URL,
+        // Explicit bot token — prevents bootstrap-secrets from loading Mya's token
+        TELEGRAM_BOT_TOKEN_OVERRIDE: process.env.TELEGRAM_BOT_TOKEN_MOM,
         TTS_VOICE: 'shimmer',
         SENTRY_DSN: process.env.SENTRY_DSN,
       },
@@ -420,7 +461,7 @@ module.exports = {
         NODE_ENV: 'production',
         AGENT_URL: 'http://localhost:5014',
         WARROOM_PATH: process.env.WARROOM_PATH,
-        SCHEDULER_TIMEZONE: process.env.SCHEDULER_TIMEZONE || 'UTC',
+        SCHEDULER_TIMEZONE: 'Europe/Riga',
         MOMS_TELEGRAM_CHAT_ID: process.env.MOMS_TELEGRAM_ID,
         TELEGRAM_BOT_URL: 'http://localhost:5015',
         SENTRY_DSN: process.env.SENTRY_DSN,
@@ -542,6 +583,7 @@ module.exports = {
         PORT: 3004,
         AGENT_ID: 'personal-agent',
         AGENT_TIER: '1',
+        AGENT_SCOPES: '["personal","org"]',
         MEMORY_SCOPE: 'all',
         BIND_HOST: '127.0.0.1',
         USER_ID: process.env.MYA_USER_ID,
@@ -581,8 +623,15 @@ module.exports = {
       exec_mode: 'fork',
       watch: false,
       max_memory_restart: '512M',
+      // Crash loop protection: wait 10s between restarts, must run 60s to count as healthy,
+      // give up after 5 fast crashes, give 8s for graceful shutdown
+      restart_delay: 10000,
+      min_uptime: 60000,
+      max_restarts: 5,
+      kill_timeout: 8000,
       env: {
         NODE_ENV: 'production',
+        AGENT_ID: 'mya-telegram-bot',
         MYA_WORKER_URL: process.env.MYA_WORKER_URL,
         AGENT_TOKEN: process.env.AGENT_TOKEN_MYA,
         OWNER_TELEGRAM_ID: process.env.OWNER_TELEGRAM_ID,
@@ -704,7 +753,7 @@ module.exports = {
         NODE_ENV: 'production',
         AGENT_URL: 'http://localhost:3004',
         TELEGRAM_BOT_URL: 'http://localhost:3003',
-        SCHEDULER_TIMEZONE: process.env.SCHEDULER_TIMEZONE || 'UTC',
+        SCHEDULER_TIMEZONE: process.env.SCHEDULER_TIMEZONE || 'Europe/Riga',
         USER_ID: process.env.MYA_USER_ID,
         MYA_WORKER_URL: process.env.MYA_WORKER_URL,
         SENTRY_DSN: process.env.SENTRY_DSN,
@@ -779,11 +828,53 @@ module.exports = {
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
     },
 
-    // Enrichment Daemon — ensures every message gets tagged + embedded
-    // Catches anything missed by real-time ctx.waitUntil() enrichment
+    // llama-server — local LLM for message tagging (Qwen2.5-3B Q4_K_M)
+    // Auto-unloads model after 5min idle (--sleep-idle-seconds 300)
+    // OpenAI-compatible API on port 8090
     {
-      name: 'enrichment-daemon',
-      script: 'scripts/enrichment-daemon.js',
+      name: 'llama-server',
+      script: '/usr/local/bin/llama-server',
+      args: '--model /opt/models/qwen2.5-3b-instruct-q4_k_m.gguf --port 8090 --host 127.0.0.1 --threads 2 --ctx-size 4096 --sleep-idle-seconds 300 --log-disable',
+      cwd: __dirname,
+      instances: 1,
+      exec_mode: 'fork',
+      watch: false,
+      autorestart: true,
+      max_restarts: 5,
+      restart_delay: 10000,
+      max_memory_restart: '3G',
+      error_file: '/var/log/mycelium/llama-server-error.log',
+      out_file: '/var/log/mycelium/llama-server-out.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+    },
+
+    // BGE-M3 Embedding Service — local ONNX for 1024D search vectors
+    // Auto-unloads model after 5min idle
+    // HTTP API on port 8091
+    {
+      name: 'bge-m3-embed',
+      script: 'scripts/bge-m3-embed.py',
+      args: '--serve --port 8091',
+      interpreter: `${__dirname}/scripts/.venv/bin/python3`,
+      cwd: __dirname,
+      instances: 1,
+      exec_mode: 'fork',
+      watch: false,
+      autorestart: true,
+      max_restarts: 5,
+      restart_delay: 10000,
+      max_memory_restart: '2G',
+      error_file: '/var/log/mycelium/bge-m3-error.log',
+      out_file: '/var/log/mycelium/bge-m3-out.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+    },
+
+    // Local Enrichment Service — orchestrates tagging + embedding
+    // Replaces enrichment-daemon.js (no more Cloudflare Workers AI dependency)
+    // HTTP API on port 8095 (receives fire-and-forget from agent-server)
+    {
+      name: 'enrichment-service',
+      script: 'scripts/enrichment-service.js',
       cwd: __dirname,
       instances: 1,
       exec_mode: 'fork',
@@ -794,9 +885,10 @@ module.exports = {
       env: {
         ...SHARED_AGENT_ENV,
         AGENT_TOKEN: process.env.AGENT_TOKEN_ENRICHMENT,
+        ENRICHMENT_PORT: 8095,
       },
-      error_file: '/var/log/mycelium/enrichment-daemon-error.log',
-      out_file: '/var/log/mycelium/enrichment-daemon-out.log',
+      error_file: '/var/log/mycelium/enrichment-service-error.log',
+      out_file: '/var/log/mycelium/enrichment-service-out.log',
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
     },
 
@@ -857,6 +949,7 @@ module.exports = {
         PORT: 5010,
         AGENT_ID: 'wealth-agent',
         AGENT_TIER: '1',
+        AGENT_SCOPES: '["wealth","org"]',
         MEMORY_SCOPE: 'wealth',
         DISCORD_CHANNEL: process.env.DISCORD_WEALTH_CHANNEL,
         DISCORD_BOT_URL: 'http://localhost:5011',
@@ -890,7 +983,7 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         AGENT_URL: 'http://localhost:5010',
-        SCHEDULER_TIMEZONE: process.env.SCHEDULER_TIMEZONE || 'UTC',
+        SCHEDULER_TIMEZONE: process.env.SCHEDULER_TIMEZONE || 'Europe/Riga',
         USER_ID: process.env.MYA_USER_ID,
         MYA_WORKER_URL: process.env.MYA_WORKER_URL,
         MYA_WORKER_AUTH: process.env.MYA_WORKER_AUTH,
@@ -945,7 +1038,7 @@ module.exports = {
         ...SHARED_AGENT_ENV,
         AGENT_ID: 'ops-agent',
         PORT: 5018,
-        DISCORD_CHANNEL: process.env.DISCORD_OPS_CHANNEL,
+        DISCORD_CHANNEL: '1489203476033441862',
         DISCORD_BOT_URL: 'http://localhost:5019',
         ...(process.env.AGENT_TOKEN_OPS ? { AGENT_TOKEN: process.env.AGENT_TOKEN_OPS } : {}),
       },
@@ -969,7 +1062,7 @@ module.exports = {
         NODE_ENV: 'production',
         MYA_WORKER_URL: process.env.MYA_WORKER_URL,
         AGENT_TOKEN: process.env.AGENT_TOKEN_OPS,
-        DISCORD_ADMIN_CHANNEL: process.env.DISCORD_OPS_CHANNEL,
+        DISCORD_ADMIN_CHANNEL: '1489203476033441862',
         DISCORD_ALLOWED_SERVERS: process.env.DISCORD_ALLOWED_SERVERS,
         DISCORD_ALLOWED_USERS: process.env.DISCORD_ALLOWED_USERS,
         OPS_AGENT_URL: 'http://localhost:5018',
@@ -1004,10 +1097,33 @@ module.exports = {
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
     },
 
+    // ── Provisioning daemon (managed hosting — runs from mycelium-managed repo) ──
+    {
+      name: 'provisioning-daemon',
+      script: '../mycelium-managed/scripts/provisioning-daemon.js',
+      cwd: __dirname,
+      interpreter: 'node',
+      interpreter_args: '--experimental-modules',
+      instances: 1,
+      exec_mode: 'fork',
+      watch: false,
+      max_memory_restart: '128M',
+      env: {
+        NODE_ENV: 'production',
+        ...SHARED_AGENT_ENV,
+        AGENT_TOKEN: process.env.AGENT_TOKEN_ENRICHMENT,
+        AGENT_ID: 'provisioning-daemon',
+        MYCELIUM_HOME: __dirname,
+      },
+      error_file: '/var/log/mycelium/provisioning-error.log',
+      out_file: '/var/log/mycelium/provisioning-out.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+    },
+
     // Add more agents here using:
     //   ./scripts/add-agent.sh --id my-agent --name "My Agent" --port 5008 --bot-port 5009
     // Then add the PM2 entries it outputs to this file.
-  ],
+  ]),
 
   deploy: {
     production: {

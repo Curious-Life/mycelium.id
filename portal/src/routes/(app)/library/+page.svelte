@@ -1230,7 +1230,7 @@
 		border: 1px solid var(--color-border);
 		border-radius: 0.5rem;
 		font-size: 0.9375rem;
-		font-family: 'Vollkorn', Georgia, serif;
+		font-family: var(--font-sans);
 		line-height: 1.7;
 		color: var(--color-text-primary);
 		resize: vertical;
