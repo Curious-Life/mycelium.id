@@ -51,15 +51,19 @@ Why Noise instead of rolling our own:
 
 Avoid: rolling our own AES-GCM scheme, hand-coded ECDH. The handshake is the place crypto bugs hide.
 
-### VPS identity key
+### VPS identity keys
 
-Each VPS gets a long-term **Ed25519 identity key pair** generated once at provision time:
+Each VPS gets **two independent long-term key pairs** generated once at provision time:
 
-- Private key: `/run/mycelium/vps-identity.key` on tmpfs (same protection as master key)
-- Public key: written to `/etc/mycelium/vps-identity.pub` (world-readable, served via portal endpoint)
-- Fingerprint: `BLAKE2s-128(public key)` for human verification
+1. **Ed25519 signing key** — for identity attestation (rotation proofs, passkey binding signatures)
+   - Private key: `/run/mycelium/vps-sign.key` on tmpfs
+   - Public key: `/etc/mycelium/vps-sign.pub`
+2. **X25519 static key** — for the Noise NK handshake (ECDH)
+   - Private key: `/run/mycelium/vps-noise.key` on tmpfs
+   - Public key: `/etc/mycelium/vps-noise.pub`
+- Fingerprint: `BLAKE2s-128(sign_pub || noise_pub)` for human verification
 
-The Noise `NK` pattern uses an X25519 static key, but we want Ed25519 for identity (signing). Standard trick: derive an X25519 key from the Ed25519 key via the Curve25519 ↔ Ed25519 birational map (libsodium's `crypto_sign_ed25519_pk_to_curve25519`). One key, two uses.
+**Why two keys, not one?** The Ed25519 → X25519 birational map (`crypto_sign_ed25519_pk_to_curve25519`) is well-understood, but using the same key material for both signing and ECDH creates a cross-protocol attack surface. If we ever sign with the Ed25519 key (e.g., signing the new public key during rotation) while also using the derived X25519 key for ECDH, a subtle interaction between the two protocols could leak information. Separate keys eliminate this class of risk for 32 extra bytes of storage. (Credit: Com's review caught this.)
 
 ### Handshake flow
 
@@ -157,8 +161,8 @@ Static assets stay on plain HTTPS (CF can cache them anyway, no benefit from enc
 - `lib/portal-channel.js` — WebSocket server, handshake, frame router
 - `lib/noise-nk-server.js` — Server-side Noise NK
 - `lib/vps-identity.js` — Load identity key from tmpfs, sign/verify
-- `scripts/generate-vps-identity.js` — One-time key generation
-- `scripts/rotate-vps-identity.js` — Identity key rotation (graceful, with overlap window)
+- `scripts/generate-vps-identity.js` — One-time generation of both Ed25519 signing key and X25519 noise key
+- `scripts/rotate-vps-identity.js` — Identity key rotation (graceful, with overlap window, old signing key signs new keys)
 
 **Tests:**
 
@@ -203,6 +207,39 @@ Trust assumption for Phase 1: **trust on first build**. CF can swap the bundle i
 4. **CF compatibility test**: deploy to a test subdomain (`test-secure.mycelium.id`), verify WebSocket frames pass through CF proxy without modification (CF supports WS by default but worth confirming)
 5. **Replay test**: capture a frame, replay it, assert rejection
 6. **Downgrade test**: try to send a plaintext JSON frame after handshake, assert connection closed
+
+### Downgrade protection
+
+CF (or any network intermediary) could strip the `Upgrade: websocket` header from the initial HTTP request, preventing the encrypted channel from establishing. The browser would then fall back to plain HTTPS — and send sensitive data in the clear, silently defeating all of Phase 1.
+
+**Mitigation**: once the portal detects that `SECURE_CHANNEL_ENABLED` is true (feature flag), it **refuses to send any sensitive data over plain HTTPS**. If the WS handshake fails:
+
+1. Show an error: "Encrypted channel failed to establish. Your connection may be intercepted. Retrying..."
+2. Retry 3 times with exponential backoff
+3. If all retries fail: show a hard block — "Cannot establish secure connection. Do not send sensitive data. Check your network or try again later."
+4. **Never silently fall back to plaintext HTTPS for chat, search, contacts, or wealth endpoints**
+
+The `secureFetch()` wrapper enforces this: if the channel is down, it queues requests and retries rather than falling through to `fetch()`. Only health checks, static assets, and the initial page shell are allowed over plain HTTPS.
+
+(Credit: Com's review identified the downgrade risk.)
+
+### Session cookie isolation
+
+In Phase 1, the session cookie (set during passkey login) still travels over CF-visible HTTPS headers on every request — including the initial page load and the WebSocket upgrade request. CF can see and potentially steal this cookie, then use it to impersonate the user on regular HTTPS endpoints.
+
+**Mitigation**: after the encrypted WS channel is established, the browser performs a **channel-bound re-authentication**:
+
+1. VPS sends a fresh passkey challenge inside the encrypted channel
+2. Browser completes the passkey assertion (signature happens in authenticator, never touches CF)
+3. VPS verifies the assertion and issues a **channel-bound session token** — a random token that is only valid when presented inside the encrypted channel (the VPS checks both the token value AND that it arrived via the WS, not via HTTPS)
+4. All subsequent API calls inside the channel include this token
+5. The original HTTPS session cookie is downgraded to a **bootstrap cookie** — it can only load the page shell and establish the WS, not access any data endpoints
+
+This means: even if CF steals the HTTPS session cookie, they can only load the empty portal shell. All data access requires the channel-bound token, which CF can't extract (it's inside encrypted WS frames) and can't replay (the VPS rejects it on HTTPS).
+
+**Implementation**: add `channelSessionToken` field to the WS handshake response (encrypted). The `secureFetch()` wrapper includes it in every frame. The VPS validates it against a server-side map of `{token → userId, wsConnectionId}`.
+
+(Credit: Com's review identified the session cookie exposure.)
 
 ### Performance targets
 
@@ -511,7 +548,7 @@ All dependencies are pure JS, ~30 KB combined, no native bindings.
 
 ## Open questions
 
-1. **Per-tenant build vs runtime fetch of VPS identity key in JS bundle**: build is cleaner but means the bundle is per-VPS. Runtime fetch is more flexible but adds a TLS-protected fetch through CF for the public key (which CF could swap, but it's verified by the passkey pin in Phase 2 anyway). My lean: build, since the portal is already per-tenant.
+1. **Per-tenant build vs runtime fetch of VPS identity key in JS bundle**: **Resolved: build-time embedding.** The portal is already per-tenant (built on each customer VPS at provision time). Runtime fetch through CF creates exactly the MITM vector Phase 2 exists to close. Build-time avoids that and is simpler. (Confirmed by Com's review.)
 
 2. **Document upload streaming**: WS frames are bounded. For multi-MB uploads, do we stream as multiple encrypted frames or fall back to encrypted-then-uploaded blob via HTTPS? Lean: stream as frames for simplicity, with a 4 MiB upload limit per file in v1.
 

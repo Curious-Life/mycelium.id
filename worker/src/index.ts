@@ -1826,11 +1826,12 @@ async function deleteAttachment(request: Request, env: Env): Promise<Response> {
   const corsHeaders: Record<string, string> = makeCorsHeaders(request);
 
   // Verify authorization — accept MYA_WORKER_SECRET (primary) or ATTACHMENT_SECRET (legacy)
+  // Use timingSafeCompare to prevent timing side-channel attacks on token comparison.
   const authHeader = request.headers.get("Authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null;
-  const isAuthorized = bearerToken && (
-    (env.MYA_WORKER_SECRET && bearerToken === env.MYA_WORKER_SECRET) ||
-    (env.ATTACHMENT_SECRET && bearerToken === env.ATTACHMENT_SECRET)
+  const isAuthorized = !!bearerToken && (
+    (!!env.MYA_WORKER_SECRET && await timingSafeCompare(bearerToken, env.MYA_WORKER_SECRET)) ||
+    (!!env.ATTACHMENT_SECRET && await timingSafeCompare(bearerToken, env.ATTACHMENT_SECRET))
   );
 
   if (!isAuthorized) {
@@ -1986,11 +1987,12 @@ async function deleteStreamVideo(request: Request, env: Env): Promise<Response> 
   }
 
   // Verify authorization — accept MYA_WORKER_SECRET (primary) or ATTACHMENT_SECRET (legacy)
+  // Use timingSafeCompare to prevent timing side-channel attacks on token comparison.
   const authHeader = request.headers.get("Authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null;
-  const isAuthorized = bearerToken && (
-    (env.MYA_WORKER_SECRET && bearerToken === env.MYA_WORKER_SECRET) ||
-    (env.ATTACHMENT_SECRET && bearerToken === env.ATTACHMENT_SECRET)
+  const isAuthorized = !!bearerToken && (
+    (!!env.MYA_WORKER_SECRET && await timingSafeCompare(bearerToken, env.MYA_WORKER_SECRET)) ||
+    (!!env.ATTACHMENT_SECRET && await timingSafeCompare(bearerToken, env.ATTACHMENT_SECRET))
   );
 
   if (!isAuthorized) {
