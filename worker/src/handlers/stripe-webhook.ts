@@ -174,6 +174,27 @@ async function handleCheckoutCompleted(event: StripeEvent, env: Env): Promise<vo
     }), { expirationTtl: 3600 }); // 1 hour
   }
 
+  // Send welcome email to customer
+  if (email && env.RESEND_API_KEY) {
+    await sendEmail(env, email,
+      "Your vault is live",
+      `Your vault is live.\n\nMycelium was built to take back the right to own your data — to power agents that work for you, give you access to truthful information, and let you connect based on what actually matters.\n\nEverything is end-to-end encrypted. We can't read it. You can export and leave anytime.\n\nThree things to do next:\n\n1. Keep your encryption key safe — it's the only copy in existence.\n2. Import your data — Claude, ChatGPT, LinkedIn, Obsidian. Your mindscape grows from what you bring.\n3. Find me on Mycelium — connect with @martin and let's see what we have in common.\n\nOpen your vault: https://mycelium.id/login\n\nMartin\nFounder, Mycelium`,
+      brandedEmail(`
+  <div style="font-size:18px;color:#1C1917;font-weight:500;margin-bottom:18px;">Your vault is live.</div>
+  <div style="font-size:14px;color:#57534E;line-height:1.75;margin-bottom:14px;">Mycelium was built to take back the right to own your data &mdash; to power agents that work for <em>you</em>, give you access to truthful information, and let you connect based on what actually matters.</div>
+  <div style="font-size:14px;color:#57534E;line-height:1.75;margin-bottom:24px;">Everything is end-to-end encrypted. We can't read it. You can export and leave anytime.</div>
+  <div style="text-align:center;margin:24px 0 28px;">
+    <a href="https://mycelium.id/login" style="display:inline-block;padding:12px 32px;background:#1C1917;color:#F7F5EF;border-radius:6px;font-size:14px;font-weight:500;text-decoration:none;font-family:-apple-system,system-ui,'Segoe UI',sans-serif;">Open your vault</a>
+  </div>
+  <div style="border-top:1px solid #F0EDE4;padding-top:22px;font-size:13px;color:#57534E;line-height:1.7;">
+    <div style="margin-bottom:10px;"><strong style="color:#1C1917;">Keep your encryption key safe.</strong> It's the only copy in existence &mdash; we can't recover it if you lose it.</div>
+    <div style="margin-bottom:10px;"><strong style="color:#1C1917;">Upload your data.</strong> Import Claude, ChatGPT, LinkedIn, or Obsidian exports &mdash; your mindscape grows from what you bring.</div>
+    <div><strong style="color:#1C1917;">Find me on Mycelium.</strong> Connect with <a href="https://mycelium.id/u/?h=martin" style="color:#B8860B;text-decoration:none;border-bottom:1px solid #E5C46B;">@martin</a> and let's see what we have in common.</div>
+  </div>
+  <div style="margin-top:28px;font-size:13px;color:#1C1917;line-height:1.6;">Martin<br><span style="color:#A8A29E;font-size:12px;">Founder, Mycelium</span></div>`),
+    );
+  }
+
   console.log(`[stripe-webhook] Subscription created: ${userId} (${plan}/${type})`);
 }
 
@@ -216,6 +237,11 @@ async function handlePaymentFailed(event: StripeEvent, env: Env): Promise<void> 
     await sendEmail(env, customerEmail,
       "Action required: Payment failed for your Mycelium vault",
       `Your recent payment for Mycelium failed.\n\nPlease update your payment method within 7 days to keep your vault active.\n\nYou can manage your billing at your vault's settings page, or contact support if you need help.\n\n— Mycelium`,
+      brandedEmail(`
+  <div style="font-size:15px;color:#1C1917;font-weight:500;margin-bottom:16px;">Payment failed</div>
+  <div style="font-size:14px;color:#57534E;line-height:1.7;margin-bottom:16px;">Your recent payment for Mycelium didn't go through. Please update your payment method within <strong style="color:#1C1917;">7 days</strong> to keep your vault active.</div>
+  <div style="font-size:14px;color:#57534E;line-height:1.7;margin-bottom:20px;">You can manage your billing in your vault's settings page.</div>
+  <div style="border-top:1px solid #F0EDE4;padding-top:20px;font-size:12px;color:#A8A29E;line-height:1.6;">Need help? Reply to this email and we'll sort it out.</div>`),
     );
   }
 
@@ -354,23 +380,47 @@ async function sendEmail(
   to: string,
   subject: string,
   text: string,
+  html?: string,
 ): Promise<void> {
   if (!env.RESEND_API_KEY) return;
   try {
+    const payload: Record<string, string> = {
+      from: (env as unknown as Record<string, string>).EMAIL_FROM || "Mycelium <martin@mycelium.id>",
+      to,
+      subject,
+      text,
+    };
+    if (html) payload.html = html;
     await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${env.RESEND_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        from: (env as unknown as Record<string, string>).EMAIL_FROM || "Mycelium <martin@mycelium.id>",
-        to,
-        subject,
-        text,
-      }),
+      body: JSON.stringify(payload),
     });
   } catch (err: any) {
     console.error(`[stripe-webhook] Email to ${to} failed:`, err.message);
   }
+}
+
+function brandedEmail(body: string): string {
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#F7F5EF;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#F7F5EF;padding:40px 20px;">
+<tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:460px;background:#FFFFFF;border-radius:16px;border:1px solid #E7E5E4;overflow:hidden;">
+<tr><td style="padding:32px 36px 24px;border-bottom:1px solid #F0EDE4;">
+  <img src="https://mycelium.id/mushroom.svg" alt="" width="28" height="28" style="vertical-align:middle;margin-right:10px;border-radius:6px;">
+  <span style="font-family:-apple-system,system-ui,'Segoe UI',sans-serif;font-size:20px;color:#1C1917;letter-spacing:-0.01em;vertical-align:middle;">mycelium</span><span style="font-family:-apple-system,system-ui,'Segoe UI',sans-serif;font-size:20px;color:#B8860B;vertical-align:middle;">.id</span>
+</td></tr>
+<tr><td style="padding:36px 36px 32px;">${body}</td></tr>
+</table>
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:460px;margin-top:24px;">
+<tr><td style="text-align:center;font-size:11px;color:#A8A29E;font-family:-apple-system,system-ui,'Segoe UI',sans-serif;">Your rights preserved</td></tr>
+</table>
+</td></tr>
+</table>
+</body></html>`;
 }

@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { goto } from '$app/navigation';
 	import { mindscapeState, timelineHealth } from '$lib/stores/mindscape';
 	import MindscapeDetail from '$lib/components/mindscape/MindscapeDetail.svelte';
 	import Sparkline from '$lib/components/mindscape/Sparkline.svelte';
-	import { api, apiGet, apiPut } from '$lib/api';
+	import { apiGet, apiPut } from '$lib/api';
 	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
+	import { auth } from '$lib/stores/auth';
 
 	// Health data for body state bar
 	interface HealthDay { date: string; sleep_duration_min: number|null; sleep_efficiency: number|null; hrv_avg: number|null; resting_hr: number|null; steps: number|null; }
@@ -40,116 +40,6 @@
 	let viewMode: '3d' | 'growth' | 'territories' = $state('3d');
 	let growthEvents: any[] = $state([]);
 	let growthLoading = $state(false);
-	let expandedStep: string | null = $state(null);
-
-	// Onboarding state
-	let aiProvider: 'claude' | 'api' = $state('claude');
-	let aiSubProvider: 'anthropic' | 'openai' = $state('anthropic');
-	let aiKeyInput = $state('');
-	let aiKeySaving = $state(false);
-	let aiKeySaved = $state(false);
-	let aiKeyError = $state('');
-	let claudeAuthLoading = $state(false);
-	let claudeAuthDone = $state(false);
-	let claudeAuthError = $state('');
-	let claudeAuthUrl = $state('');
-	let claudeAuthCode = $state('');
-	let telegramTokenInput = $state('');
-	let discordTokenInput = $state('');
-	let integrationSaving = $state(false);
-	let integrationSaved: string | null = $state(null);
-
-	// Check if Claude Code is already authenticated on page load
-	$effect(() => {
-		if (browser && !claudeAuthDone) {
-			api('/portal/auth/claude/status').then(async (res) => {
-				if (res.ok) {
-					const data = await res.json();
-					if (data.authenticated) claudeAuthDone = true;
-				}
-			}).catch(() => {});
-		}
-	});
-
-	async function connectClaude() {
-		claudeAuthLoading = true;
-		claudeAuthError = '';
-		claudeAuthUrl = '';
-		try {
-			const res = await api('/portal/auth/claude', { method: 'POST' });
-			if (!res.ok) throw new Error('Failed to start auth');
-			const data = await res.json();
-			if (data.url) {
-				claudeAuthUrl = data.url;
-				window.open(data.url, '_blank');
-			} else {
-				throw new Error('No auth URL returned');
-			}
-		} catch (e: any) {
-			claudeAuthError = e.message || 'Connection failed';
-		}
-		claudeAuthLoading = false;
-	}
-
-	async function submitClaudeCode() {
-		claudeAuthLoading = true;
-		claudeAuthError = '';
-		try {
-			const res = await api('/portal/auth/claude/code', {
-				method: 'POST',
-				body: JSON.stringify({ code: claudeAuthCode.trim() }),
-			});
-			const data = await res.json().catch(() => ({}));
-			if (!res.ok) {
-				throw new Error(data.error || 'Failed to authenticate');
-			}
-			claudeAuthDone = true;
-			claudeAuthUrl = '';
-			claudeAuthCode = '';
-			// Navigate to timeline to show the welcome greeting
-			if (data.greeting) {
-				setTimeout(() => goto('/timeline'), 1500);
-			}
-		} catch (e: any) {
-			claudeAuthError = e.message || 'Authentication failed';
-		}
-		claudeAuthLoading = false;
-	}
-
-	async function saveAiKey() {
-		aiKeySaving = true;
-		aiKeyError = '';
-		aiKeySaved = false;
-		try {
-			const key = aiSubProvider === 'anthropic' ? 'CLAUDE_API_KEY' : 'OPENAI_API_KEY';
-			const res = await api('/portal/settings/secret', {
-				method: 'PUT',
-				body: JSON.stringify({ key, value: aiKeyInput.trim() }),
-			});
-			if (!res.ok) throw new Error('Failed to save');
-			aiKeySaved = true;
-			setTimeout(() => { aiKeySaved = false; }, 3000);
-		} catch (e: any) {
-			aiKeyError = e.message || 'Failed to save key';
-		}
-		aiKeySaving = false;
-	}
-
-	async function saveIntegration(key: string, value: string, scope: string) {
-		integrationSaving = true;
-		integrationSaved = null;
-		try {
-			const res = await api('/portal/settings/secret', {
-				method: 'PUT',
-				body: JSON.stringify({ key, value: value.trim(), scope }),
-			});
-			if (!res.ok) throw new Error('Failed to save');
-			const tag = key.includes('TELEGRAM') ? 'telegram' : 'discord';
-			integrationSaved = tag;
-			setTimeout(() => { integrationSaved = null; }, 3000);
-		} catch {}
-		integrationSaving = false;
-	}
 
 	async function loadGrowthEvents() {
 		if (growthEvents.length > 0) return;
@@ -640,14 +530,95 @@
 					</div>
 				{/if}
 			{:else}
-				<!-- Onboarding: grow your mindscape -->
-				<div class="onboarding">
-					<div class="onboarding-inner">
-						<div class="onboarding-icon">&#x25C6;</div>
-						<h2 class="onboarding-title">Activate your mindscape</h2>
-						<p class="onboarding-desc">Connect your first data source and watch your knowledge come to life.</p>
-						<ConnectionsChecklist showTitle={false} />
-						<p class="onboarding-footer">Every conversation, document, and message shapes your mindscape. It grows with you.</p>
+				<!-- Welcome: empty mindscape onboarding -->
+				<div class="welcome">
+					<div class="welcome-inner">
+						<!-- Decorative preview: what a mindscape looks like -->
+						<div class="welcome-preview" aria-hidden="true">
+							<svg viewBox="0 0 400 200" class="preview-svg">
+								<!-- Realm clusters -->
+								<circle cx="120" cy="90" r="45" fill="none" stroke="var(--color-accent-aurum)" stroke-width="0.5" opacity="0.25" />
+								<circle cx="260" cy="70" r="55" fill="none" stroke="var(--color-accent-amethyst)" stroke-width="0.5" opacity="0.25" />
+								<circle cx="200" cy="140" r="40" fill="none" stroke="var(--color-accent-jade)" stroke-width="0.5" opacity="0.25" />
+
+								<!-- Territory nodes -->
+								<circle cx="105" cy="75" r="4" fill="var(--color-accent-aurum)" opacity="0.6" />
+								<circle cx="135" cy="95" r="5.5" fill="var(--color-accent-aurum)" opacity="0.7" />
+								<circle cx="110" cy="108" r="3" fill="var(--color-accent-aurum)" opacity="0.4" />
+								<circle cx="140" cy="72" r="3.5" fill="var(--color-accent-aurum)" opacity="0.5" />
+
+								<circle cx="240" cy="55" r="5" fill="var(--color-accent-amethyst)" opacity="0.6" />
+								<circle cx="275" cy="80" r="6" fill="var(--color-accent-amethyst)" opacity="0.7" />
+								<circle cx="250" cy="90" r="3.5" fill="var(--color-accent-amethyst)" opacity="0.45" />
+								<circle cx="285" cy="55" r="3" fill="var(--color-accent-amethyst)" opacity="0.35" />
+
+								<circle cx="190" cy="130" r="4.5" fill="var(--color-accent-jade)" opacity="0.6" />
+								<circle cx="215" cy="150" r="5" fill="var(--color-accent-jade)" opacity="0.7" />
+								<circle cx="185" cy="155" r="3" fill="var(--color-accent-jade)" opacity="0.4" />
+
+								<!-- Connections between territories -->
+								<line x1="105" y1="75" x2="135" y2="95" stroke="var(--color-accent-aurum)" stroke-width="0.5" opacity="0.2" />
+								<line x1="135" y1="95" x2="110" y2="108" stroke="var(--color-accent-aurum)" stroke-width="0.5" opacity="0.15" />
+								<line x1="140" y1="72" x2="105" y2="75" stroke="var(--color-accent-aurum)" stroke-width="0.5" opacity="0.15" />
+								<line x1="240" y1="55" x2="275" y2="80" stroke="var(--color-accent-amethyst)" stroke-width="0.5" opacity="0.2" />
+								<line x1="250" y1="90" x2="275" y2="80" stroke="var(--color-accent-amethyst)" stroke-width="0.5" opacity="0.15" />
+								<line x1="190" y1="130" x2="215" y2="150" stroke="var(--color-accent-jade)" stroke-width="0.5" opacity="0.2" />
+
+								<!-- Cross-realm bridges -->
+								<line x1="135" y1="95" x2="250" y2="90" stroke="var(--color-text-tertiary)" stroke-width="0.3" opacity="0.12" stroke-dasharray="4 4" />
+								<line x1="110" y1="108" x2="190" y2="130" stroke="var(--color-text-tertiary)" stroke-width="0.3" opacity="0.12" stroke-dasharray="4 4" />
+								<line x1="275" y1="80" x2="215" y2="150" stroke="var(--color-text-tertiary)" stroke-width="0.3" opacity="0.12" stroke-dasharray="4 4" />
+
+								<!-- Subtle labels -->
+								<text x="120" y="50" text-anchor="middle" fill="var(--color-text-tertiary)" font-size="8" opacity="0.5">Work &amp; Strategy</text>
+								<text x="260" y="30" text-anchor="middle" fill="var(--color-text-tertiary)" font-size="8" opacity="0.5">Ideas &amp; Research</text>
+								<text x="200" y="185" text-anchor="middle" fill="var(--color-text-tertiary)" font-size="8" opacity="0.5">Relationships</text>
+							</svg>
+						</div>
+
+						<!-- Welcome text -->
+						<h2 class="welcome-title">
+							{#if $auth.user?.displayName}
+								Welcome, {$auth.user.displayName}
+							{:else}
+								Welcome to Mycelium
+							{/if}
+						</h2>
+						<p class="welcome-subtitle">This is your mindscape — a living, encrypted map of your knowledge, relationships, and interests. It grows from your conversations and documents into territories of meaning.</p>
+
+						<!-- What you'll see -->
+						<div class="welcome-outcomes">
+							<div class="outcome">
+								<span class="outcome-icon" style="color: var(--color-accent-aurum);">&#x25C9;</span>
+								<div>
+									<span class="outcome-label">Territories</span>
+									<span class="outcome-desc">Your knowledge clusters into named territories — topics, projects, and threads of thought that the system discovers and tracks over time.</span>
+								</div>
+							</div>
+							<div class="outcome">
+								<span class="outcome-icon" style="color: var(--color-accent-amethyst);">&#x25C8;</span>
+								<div>
+									<span class="outcome-label">Realms</span>
+									<span class="outcome-desc">Territories group into broader realms — the major domains of your life and work, with energy, growth, and activation patterns visible at a glance.</span>
+								</div>
+							</div>
+							<div class="outcome">
+								<span class="outcome-icon" style="color: var(--color-accent-jade);">&#x25CE;</span>
+								<div>
+									<span class="outcome-label">Chronicles</span>
+									<span class="outcome-desc">Each territory builds a narrative chronicle — how your thinking has evolved, what patterns emerge, and what threads are still open.</span>
+								</div>
+							</div>
+						</div>
+
+						<!-- Getting started -->
+						<div class="welcome-start">
+							<h3 class="start-heading">Get started</h3>
+							<p class="start-desc">Link an AI subscription so your agents can think, then import your existing conversations and documents. Your mindscape will generate automatically.</p>
+							<ConnectionsChecklist showTitle={false} compact={true} />
+						</div>
+
+						<p class="welcome-footer">Everything is encrypted end-to-end. Your data lives on your server, not ours.</p>
 					</div>
 				</div>
 			{/if}
@@ -838,328 +809,98 @@
 		margin-bottom: 20px;
 		color: var(--color-text);
 	}
-	/* Onboarding */
-	.onboarding {
+	/* Welcome / empty mindscape */
+	.welcome {
 		display: flex;
-		align-items: center;
+		align-items: flex-start;
 		justify-content: center;
 		height: 100%;
+		overflow-y: auto;
 		background: var(--color-bg);
+		padding: 2rem 1.5rem;
 	}
-	.onboarding-inner {
-		max-width: 480px;
-		padding: 3rem 2.5rem;
-		text-align: center;
-	}
-	.onboarding-icon {
-		color: var(--color-accent-aurum, #B8860B);
-		font-size: 1.5rem;
-		margin-bottom: 1.5rem;
-		opacity: 0.6;
-	}
-	.onboarding-title {
-		font-size: 1.25rem;
-		font-weight: 500;
-		color: var(--color-text-primary);
-		margin-bottom: 0.5rem;
-	}
-	.onboarding-desc {
-		font-size: 0.85rem;
-		color: var(--color-text-secondary);
-		line-height: 1.6;
-		margin-bottom: 2rem;
-	}
-	.onboarding-checklist {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		text-align: left;
-		margin-bottom: 2rem;
-	}
-	.onboarding-step {
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-		padding: 0.75rem 1rem;
-		background: var(--color-surface);
-		border-radius: 8px;
-		transition: background 0.15s ease;
-		border: none;
+	.welcome-inner {
+		max-width: 560px;
 		width: 100%;
-		cursor: pointer;
-		font-family: inherit;
-		text-align: left;
 	}
-	.onboarding-step:hover {
-		background: var(--color-elevated);
+	.welcome-preview {
+		margin-bottom: 1.75rem;
 	}
-	.step-arrow {
-		color: var(--color-text-tertiary);
-		font-size: 0.7rem;
-		flex-shrink: 0;
-		margin-left: auto;
-	}
-	.step-guide {
-		padding: 0.75rem 1rem 0.75rem 3.5rem;
-		background: var(--color-elevated);
-		border-radius: 0 0 8px 8px;
-		margin-top: -2px;
-		font-size: 0.75rem;
-		color: var(--color-text-secondary);
-		line-height: 1.7;
-	}
-	.step-guide p {
-		margin: 0.25rem 0;
-	}
-	.step-guide code {
-		font-family: var(--font-mono, monospace);
-		font-size: 0.7rem;
-		background: var(--color-surface);
-		padding: 1px 5px;
-		border-radius: 3px;
-		color: var(--color-accent-aurum, #B8860B);
-	}
-	.step-guide a {
-		color: var(--color-accent-aurum, #B8860B);
-		text-decoration: none;
-	}
-	.step-guide a:hover {
-		text-decoration: underline;
-	}
-	.guide-tabs {
-		display: flex;
-		gap: 2px;
-		margin-bottom: 0.75rem;
-		background: var(--color-surface);
-		border-radius: 6px;
-		padding: 2px;
-	}
-	.guide-tabs button {
-		flex: 1;
-		padding: 0.35rem 0.5rem;
-		font-family: var(--font-mono, monospace);
-		font-size: 0.65rem;
-		font-weight: 500;
-		background: transparent;
-		border: none;
-		border-radius: 4px;
-		color: var(--color-text-tertiary);
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-	.guide-tabs button.active {
-		background: var(--color-bg);
-		color: var(--color-text-primary);
-	}
-	.guide-input-row {
-		display: flex;
-		gap: 0.5rem;
-		margin-top: 0.5rem;
-	}
-	.guide-input {
-		flex: 1;
-		padding: 0.45rem 0.6rem;
-		font-family: var(--font-mono, monospace);
-		font-size: 0.7rem;
-		background: var(--color-surface);
-		border: 1px solid var(--color-border);
-		border-radius: 5px;
-		color: var(--color-text-primary);
-		outline: none;
-	}
-	.guide-input:focus {
-		border-color: var(--color-accent-aurum, #B8860B);
-	}
-	.guide-save-btn {
-		padding: 0.45rem 0.75rem;
-		font-family: var(--font-mono, monospace);
-		font-size: 0.65rem;
-		font-weight: 500;
-		background: var(--color-accent-aurum, #B8860B);
-		color: #fff;
-		border: none;
-		border-radius: 5px;
-		cursor: pointer;
-		white-space: nowrap;
-		transition: opacity 0.15s ease;
-	}
-	.guide-save-btn:disabled {
-		opacity: 0.4;
-		cursor: not-allowed;
-	}
-	.guide-hero {
-		padding: 0.6rem 0.75rem;
-		background: rgba(184, 134, 11, 0.06);
-		border-radius: 6px;
-		margin-bottom: 0.75rem;
-	}
-	.guide-hero p {
-		margin: 0.15rem 0;
-		font-size: 0.72rem;
-		color: var(--color-text-secondary);
-	}
-	.guide-hero strong {
-		color: var(--color-accent-aurum, #B8860B);
-	}
-	.guide-steps-compact {
-		display: flex;
-		flex-direction: column;
-		gap: 0.35rem;
-		margin-bottom: 0.5rem;
-	}
-	.gsc-step {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		font-size: 0.72rem;
-		color: var(--color-text-secondary);
-	}
-	.gsc-num {
-		width: 18px;
-		height: 18px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: var(--color-surface);
-		border-radius: 50%;
-		font-size: 0.6rem;
-		font-weight: 600;
-		color: var(--color-text-tertiary);
-		flex-shrink: 0;
-	}
-	.guide-ssh-hint {
-		font-size: 0.65rem;
-		color: var(--color-text-tertiary);
-		margin-top: 0.5rem;
-	}
-	.guide-tabs-sub {
-		display: flex;
-		gap: 2px;
-		margin-bottom: 0.5rem;
-	}
-	.guide-tabs-sub button {
-		padding: 0.25rem 0.6rem;
-		font-family: var(--font-mono, monospace);
-		font-size: 0.6rem;
-		background: transparent;
-		border: 1px solid var(--color-border);
-		border-radius: 4px;
-		color: var(--color-text-tertiary);
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-	.guide-tabs-sub button.active {
-		border-color: var(--color-accent-aurum, #B8860B);
-		color: var(--color-accent-aurum, #B8860B);
-	}
-	.guide-connect-btn {
+	.preview-svg {
 		width: 100%;
-		padding: 0.65rem;
-		font-family: var(--font-mono, monospace);
-		font-size: 0.75rem;
-		font-weight: 500;
-		background: var(--color-accent-aurum, #B8860B);
-		color: #fff;
-		border: none;
-		border-radius: 6px;
-		cursor: pointer;
-		transition: opacity 0.15s ease;
-		margin-top: 0.5rem;
+		height: auto;
+		max-height: 160px;
+		opacity: 0.85;
 	}
-	.guide-connect-btn:hover { opacity: 0.9; }
-	.guide-connect-btn:disabled { opacity: 0.5; cursor: wait; }
-	.guide-error {
-		color: #f87171;
-		font-size: 0.68rem;
-		margin-top: 0.35rem;
-	}
-	.data-sources {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 4px;
-	}
-	.data-source {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		padding: 0.5rem 0.6rem;
-		background: var(--color-surface);
-		border-radius: 6px;
-		font-size: 0.7rem;
-	}
-	.ds-icon {
-		font-size: 0.9rem;
-		flex-shrink: 0;
-	}
-	.ds-name {
+	.welcome-title {
+		font-size: 1.35rem;
 		font-weight: 500;
 		color: var(--color-text-primary);
-		white-space: nowrap;
+		margin-bottom: 0.6rem;
 	}
-	.ds-desc {
-		color: var(--color-text-tertiary);
-		font-size: 0.62rem;
-		display: none;
-	}
-	.ds-format {
-		margin-left: auto;
-		font-family: var(--font-mono, monospace);
-		font-size: 0.55rem;
-		color: var(--color-text-tertiary);
-		background: var(--color-elevated);
-		padding: 1px 4px;
-		border-radius: 2px;
-		white-space: nowrap;
-	}
-	.step-icon {
-		font-size: 1.1rem;
-		width: 2rem;
-		text-align: center;
-		flex-shrink: 0;
-	}
-	.step-content {
-		flex: 1;
-		min-width: 0;
-	}
-	.step-name {
+	.welcome-subtitle {
 		font-size: 0.82rem;
-		font-weight: 500;
-		color: var(--color-text-primary);
+		color: var(--color-text-secondary);
+		line-height: 1.65;
+		margin-bottom: 2rem;
 	}
-	.step-desc {
-		font-size: 0.72rem;
-		color: var(--color-text-tertiary);
+	.welcome-outcomes {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		margin-bottom: 2.25rem;
+	}
+	.outcome {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.75rem;
+		padding: 0.75rem 0.85rem;
+		border-radius: 8px;
+		background: var(--color-surface);
+		border: 1px solid var(--color-border);
+	}
+	.outcome-icon {
+		font-size: 1rem;
+		flex-shrink: 0;
 		margin-top: 1px;
 	}
-	.step-status {
-		font-family: var(--font-mono, monospace);
-		font-size: 0.6rem;
+	.outcome-label {
+		display: block;
+		font-size: 0.8rem;
 		font-weight: 500;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
-		padding: 2px 6px;
-		border-radius: 3px;
-		flex-shrink: 0;
+		color: var(--color-text-primary);
+		margin-bottom: 2px;
 	}
-	.step-status.pending {
-		color: var(--color-accent-aurum, #B8860B);
-		background: rgba(184, 134, 11, 0.1);
-	}
-	.step-status.optional {
-		color: var(--color-text-tertiary);
-		background: var(--color-elevated);
-	}
-	.step-status.connected {
-		color: #4ade80;
-		background: rgba(74, 222, 128, 0.1);
-	}
-	.onboarding-footer {
+	.outcome-desc {
+		display: block;
 		font-size: 0.72rem;
 		color: var(--color-text-tertiary);
-		line-height: 1.5;
-		font-style: italic;
+		line-height: 1.55;
 	}
-
+	.welcome-start {
+		margin-bottom: 2rem;
+		text-align: left;
+	}
+	.start-heading {
+		font-size: 0.85rem;
+		font-weight: 500;
+		color: var(--color-text-primary);
+		margin-bottom: 0.35rem;
+	}
+	.start-desc {
+		font-size: 0.75rem;
+		color: var(--color-text-secondary);
+		line-height: 1.55;
+		margin-bottom: 1rem;
+	}
+	.welcome-footer {
+		font-size: 0.68rem;
+		color: var(--color-text-tertiary);
+		line-height: 1.5;
+		text-align: center;
+		padding-top: 0.5rem;
+		border-top: 1px solid var(--color-border);
+	}
 	.empty-state {
 		color: var(--color-muted);
 		font-size: 14px;

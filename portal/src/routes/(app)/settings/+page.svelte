@@ -414,6 +414,127 @@
 		whatsapp: '📱',
 		import: '📥',
 	};
+
+	// ── Vault Security: Master Key Restore & Rotation ──
+
+	let mkRestoreOpen = $state(false);
+	let mkRestoreKey = $state('');
+	let mkRestoreLoading = $state(false);
+	let mkRestoreError = $state<string | null>(null);
+	let mkRestoreSuccess = $state<string | null>(null);
+
+	let mkRotateOpen = $state(false);
+	let mkRotateCurrentKey = $state('');
+	let mkRotateNewKey = $state('');
+	let mkRotateConfirmed = $state(false);
+	let mkRotateLoading = $state(false);
+	let mkRotateError = $state<string | null>(null);
+	let mkRotateProgress = $state<{ table?: string; processed?: number; total?: number; rowsRewrapped?: number; complete?: boolean }>({});
+
+	function generateNewKey() {
+		const bytes = new Uint8Array(32);
+		crypto.getRandomValues(bytes);
+		mkRotateNewKey = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+	}
+
+	async function submitRestore() {
+		mkRestoreError = null;
+		mkRestoreSuccess = null;
+		if (mkRestoreKey.length !== 64 || !/^[0-9a-fA-F]+$/.test(mkRestoreKey)) {
+			mkRestoreError = 'Master key must be 64 hex characters';
+			return;
+		}
+		mkRestoreLoading = true;
+		try {
+			const res = await api('/portal/master-key/restore', {
+				method: 'POST',
+				body: JSON.stringify({ key: mkRestoreKey }),
+			});
+			const data = await res.json();
+			if (!res.ok) throw new Error(data.error || 'Restore failed');
+			mkRestoreSuccess = data.kmsStored
+				? 'Master key restored. Stored in Swiss KMS for auto-recovery on reboot.'
+				: 'Master key restored to VPS memory.';
+			mkRestoreKey = '';
+			setTimeout(() => { mkRestoreOpen = false; mkRestoreSuccess = null; }, 3000);
+		} catch (e) {
+			mkRestoreError = e instanceof Error ? e.message : 'Restore failed';
+		} finally {
+			mkRestoreLoading = false;
+		}
+	}
+
+	async function submitRotate() {
+		mkRotateError = null;
+		mkRotateProgress = {};
+		if (mkRotateCurrentKey.length !== 64 || !/^[0-9a-fA-F]+$/.test(mkRotateCurrentKey)) {
+			mkRotateError = 'Current key must be 64 hex characters';
+			return;
+		}
+		if (mkRotateNewKey.length !== 64 || !/^[0-9a-fA-F]+$/.test(mkRotateNewKey)) {
+			mkRotateError = 'New key must be 64 hex characters';
+			return;
+		}
+		if (mkRotateCurrentKey === mkRotateNewKey) {
+			mkRotateError = 'New key must differ from current key';
+			return;
+		}
+		if (!mkRotateConfirmed) {
+			mkRotateError = 'You must confirm you have saved the new key';
+			return;
+		}
+
+		mkRotateLoading = true;
+		try {
+			const res = await fetch('/portal/master-key/rotate', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'same-origin',
+				body: JSON.stringify({ currentKey: mkRotateCurrentKey, newKey: mkRotateNewKey }),
+			});
+			if (!res.ok) {
+				const errData = await res.json().catch(() => ({}));
+				throw new Error(errData.error || `HTTP ${res.status}`);
+			}
+
+			const reader = res.body!.getReader();
+			const decoder = new TextDecoder();
+			let buffer = '';
+
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+				const lines = buffer.split('\n');
+				buffer = lines.pop() || '';
+				for (const line of lines) {
+					if (!line.startsWith('data: ')) continue;
+					const payload = line.slice(6);
+					if (payload === '[DONE]') continue;
+					try {
+						const event = JSON.parse(payload);
+						if (event.type === 'progress') {
+							mkRotateProgress = { table: event.table, processed: event.processed, total: event.total };
+						} else if (event.type === 'complete') {
+							mkRotateProgress = { complete: true, rowsRewrapped: event.rowsRewrapped, total: event.tablesProcessed };
+						} else if (event.type === 'error') {
+							throw new Error(event.message);
+						}
+					} catch (e) {
+						if (e instanceof SyntaxError) continue;
+						throw e;
+					}
+				}
+			}
+
+			// Force re-login (session is now invalid since key changed)
+			setTimeout(() => { window.location.href = '/login'; }, 3000);
+		} catch (e) {
+			mkRotateError = e instanceof Error ? e.message : 'Rotation failed';
+		} finally {
+			mkRotateLoading = false;
+		}
+	}
 </script>
 
 <svelte:head>
@@ -933,6 +1054,140 @@
 								<span>{key}: <span class="font-mono text-[var(--color-text-primary)]">{val}</span></span>
 							{/each}
 						</div>
+					</div>
+				{/if}
+			</section>
+
+			<!-- Vault Security: Master Key Restore + Rotation -->
+			<section class="card p-5">
+				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Vault Security</h2>
+
+				<!-- Restore Master Key -->
+				<div class="flex items-center justify-between">
+					<div>
+						<p class="text-sm text-[var(--color-text-primary)]">Restore Master Key</p>
+						<p class="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+							Re-enter your master key after a VPS reboot or if encryption is unavailable. No data is changed.
+						</p>
+					</div>
+					{#if !mkRestoreOpen}
+						<button
+							onclick={() => { mkRestoreOpen = true; mkRestoreError = null; }}
+							class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)]"
+						>Restore</button>
+					{/if}
+				</div>
+				{#if mkRestoreOpen}
+					<div class="mt-3 p-3 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)]">
+						<p class="text-xs text-[var(--color-text-secondary)] mb-2">Enter your existing master key (64 hex characters)</p>
+						<div class="flex gap-2">
+							<input
+								type="password"
+								bind:value={mkRestoreKey}
+								placeholder="64-character hex key"
+								class="flex-1 px-3 py-2 text-sm font-mono bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
+								maxlength="64"
+								onkeydown={(e) => { if (e.key === 'Enter') submitRestore(); }}
+							/>
+							<button
+								onclick={submitRestore}
+								disabled={mkRestoreLoading}
+								class="px-3 py-2 rounded-lg bg-aurum/20 border border-aurum/40 hover:border-aurum transition-colors text-sm text-aurum font-medium"
+							>{mkRestoreLoading ? 'Restoring...' : 'Confirm'}</button>
+							<button
+								onclick={() => { mkRestoreOpen = false; mkRestoreKey = ''; mkRestoreError = null; }}
+								class="px-3 py-2 rounded-lg text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+							>Cancel</button>
+						</div>
+						{#if mkRestoreError}
+							<p class="text-xs text-coral mt-1.5">{mkRestoreError}</p>
+						{/if}
+						{#if mkRestoreSuccess}
+							<p class="text-xs text-jade mt-1.5">{mkRestoreSuccess}</p>
+						{/if}
+					</div>
+				{/if}
+
+				<!-- Rotate Master Key -->
+				<div class="flex items-center justify-between mt-5 pt-5 border-t border-[var(--color-border)]">
+					<div>
+						<p class="text-sm text-[var(--color-text-primary)]">Rotate Master Key</p>
+						<p class="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+							Generate a new master key and re-encrypt all data. Takes 1-2 minutes. You will be logged out.
+						</p>
+					</div>
+					{#if !mkRotateOpen}
+						<button
+							onclick={() => { mkRotateOpen = true; mkRotateError = null; mkRotateConfirmed = false; }}
+							class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-coral transition-colors text-sm text-[var(--color-text-primary)]"
+						>Rotate</button>
+					{/if}
+				</div>
+				{#if mkRotateOpen}
+					<div class="mt-3 p-3 rounded-lg bg-[var(--color-elevated)] border border-coral/40">
+						<p class="text-xs font-medium text-coral mb-2">⚠️ Warning: Save the new key in a password manager immediately. If you lose it, your data is unrecoverable.</p>
+
+						<div class="space-y-2">
+							<div>
+								<label class="text-xs text-[var(--color-text-tertiary)] block mb-1">Current master key</label>
+								<input
+									type="password"
+									bind:value={mkRotateCurrentKey}
+									placeholder="64-character hex key"
+									class="w-full px-3 py-2 text-sm font-mono bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
+									maxlength="64"
+								/>
+							</div>
+							<div>
+								<label class="text-xs text-[var(--color-text-tertiary)] block mb-1">New master key</label>
+								<div class="flex gap-2">
+									<input
+										type="text"
+										bind:value={mkRotateNewKey}
+										placeholder="64-character hex key"
+										class="flex-1 px-3 py-2 text-sm font-mono bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
+										maxlength="64"
+									/>
+									<button
+										onclick={generateNewKey}
+										class="px-3 py-2 rounded-lg bg-[var(--color-bg)] border border-[var(--color-border)] hover:border-aurum text-xs text-[var(--color-text-secondary)]"
+									>Generate</button>
+								</div>
+							</div>
+							<label class="flex items-center gap-2 mt-2">
+								<input type="checkbox" bind:checked={mkRotateConfirmed} class="rounded" />
+								<span class="text-xs text-[var(--color-text-secondary)]">I have saved the new key in a secure location</span>
+							</label>
+						</div>
+
+						<div class="flex gap-2 mt-3">
+							<button
+								onclick={submitRotate}
+								disabled={mkRotateLoading || !mkRotateConfirmed}
+								class="px-3 py-2 rounded-lg bg-coral/20 border border-coral/40 hover:border-coral transition-colors text-sm text-coral font-medium disabled:opacity-50"
+							>{mkRotateLoading ? 'Rotating...' : 'Confirm Rotation'}</button>
+							<button
+								onclick={() => { mkRotateOpen = false; mkRotateCurrentKey = ''; mkRotateNewKey = ''; mkRotateError = null; }}
+								disabled={mkRotateLoading}
+								class="px-3 py-2 rounded-lg text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+							>Cancel</button>
+						</div>
+
+						{#if mkRotateError}
+							<p class="text-xs text-coral mt-2">{mkRotateError}</p>
+						{/if}
+
+						{#if mkRotateProgress.table || mkRotateProgress.complete}
+							<div class="mt-3 p-2 rounded-lg bg-[var(--color-bg)] border border-[var(--color-border)]">
+								{#if mkRotateProgress.complete}
+									<p class="text-xs text-jade">✓ Re-wrapped {mkRotateProgress.rowsRewrapped} records across {mkRotateProgress.total} tables. Logging out...</p>
+								{:else}
+									<p class="text-xs text-[var(--color-text-secondary)]">
+										{mkRotateProgress.table}: {mkRotateProgress.processed} / {mkRotateProgress.total}
+									</p>
+								{/if}
+							</div>
+						{/if}
 					</div>
 				{/if}
 			</section>

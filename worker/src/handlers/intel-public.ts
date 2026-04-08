@@ -12,6 +12,7 @@
  */
 
 import type { Env } from "../types/env";
+import { authenticateRequest } from "../middleware/agent-auth";
 
 // ── Allowed KV keys (whitelist for snapshot ingest) ──────────────────────
 
@@ -266,10 +267,13 @@ export async function handleIntelSnapshot(
     return errorResponse("Method not allowed", 405);
   }
 
-  // Authenticate with ADMIN_SECRET (timing-safe)
-  const auth = request.headers.get("Authorization") || "";
-  const token = auth.replace("Bearer ", "");
-  if (!token || !await timingSafeCompare(token, env.ADMIN_SECRET)) {
+  // Owner-only endpoint: authenticated via the standard agent token chain.
+  // Only the owner's VPS pushes intel snapshots (it's the one running warroom).
+  // We gate on identity.user_id matching env.OWNER_USER_ID — set as a Worker
+  // var so the check is not bound to any particular agent name.
+  const auth = await authenticateRequest(request, env);
+  const ownerId = (env as unknown as Record<string, string>).OWNER_USER_ID;
+  if (!auth || !ownerId || auth.user_id !== ownerId) {
     return errorResponse("Unauthorized", 401);
   }
 

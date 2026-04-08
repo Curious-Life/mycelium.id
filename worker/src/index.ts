@@ -25,6 +25,7 @@ import { handleProxyRequest } from "./handlers/db-proxy";
 // SWISS VAULT: data-api removed — VPS handles all crypto via crypto-local.js
 import { authenticateRequest } from "./middleware/agent-auth";
 import { handleGetSecrets, handlePutSecret, handleDeleteSecret } from "./handlers/secrets-api";
+import { handleNotifySelf, handleExportSelf, handleNotifyPeer } from "./handlers/self-service";
 // SWISS VAULT: crypto imports removed — Worker has no master key
 import { corsHeaders as makeCorsHeaders, corsOrigin, corsPreflight } from "./utils/cors";
 import { timingSafeCompare } from "./utils/crypto";
@@ -187,6 +188,26 @@ export default {
       return await handleDeleteSecret(request, env, key);
     }
     if (url.pathname === "/api/secrets" && request.method === "OPTIONS") {
+      return corsPreflight(request);
+    }
+
+    // Tenant self-service: replaces ADMIN_SECRET-gated endpoints for agent runtime.
+    // Uses AGENT_TOKEN; tenant scope enforced server-side from identity.user_id.
+    if (url.pathname === "/api/notify-self" && request.method === "POST") {
+      return await handleNotifySelf(request, env);
+    }
+    if (url.pathname === "/api/export-self" && request.method === "POST") {
+      return await handleExportSelf(request, env);
+    }
+    if (url.pathname === "/api/notify-peer" && request.method === "POST") {
+      return await handleNotifyPeer(request, env);
+    }
+    if (
+      (url.pathname === "/api/notify-self" ||
+        url.pathname === "/api/export-self" ||
+        url.pathname === "/api/notify-peer") &&
+      request.method === "OPTIONS"
+    ) {
       return corsPreflight(request);
     }
 
@@ -664,10 +685,24 @@ async function handleTranscribe(request: Request, env: Env): Promise<Response> {
     "Content-Type": "application/json",
   };
 
-  // Verify admin/worker secret (accept either MYA_WORKER_SECRET or ADMIN_SECRET)
+  // Auth: legacy shared secrets OR any valid agent token (transcribe is a
+  // stateless AI call, no per-tenant data — no user_id binding needed beyond
+  // proof of being a valid Mycelium agent).
   const authHeader = request.headers.get("Authorization");
   const token = authHeader?.replace("Bearer ", "");
-  if (!token || (!await timingSafeCompare(token, env.MYA_WORKER_SECRET || "") && !await timingSafeCompare(token, env.ADMIN_SECRET || ""))) {
+  let authorized = false;
+  if (token) {
+    if (
+      (env.MYA_WORKER_SECRET && await timingSafeCompare(token, env.MYA_WORKER_SECRET)) ||
+      (env.ADMIN_SECRET && await timingSafeCompare(token, env.ADMIN_SECRET))
+    ) {
+      authorized = true;
+    } else {
+      const identity = await authenticateRequest(request, env);
+      if (identity) authorized = true;
+    }
+  }
+  if (!authorized) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401,
       headers: corsHeaders,
@@ -727,10 +762,23 @@ async function handleTranscribe(request: Request, env: Env): Promise<Response> {
 async function handleTTS(request: Request, env: Env): Promise<Response> {
   const corsHeaders = makeCorsHeaders(request);
 
-  // Verify admin/worker secret
+  // Auth: legacy shared secrets OR any valid agent token (TTS is stateless,
+  // no per-tenant data — no user_id binding needed).
   const authHeader = request.headers.get("Authorization");
   const token = authHeader?.replace("Bearer ", "");
-  if (!token || (!await timingSafeCompare(token, env.MYA_WORKER_SECRET || "") && !await timingSafeCompare(token, env.ADMIN_SECRET || ""))) {
+  let authorized = false;
+  if (token) {
+    if (
+      (env.MYA_WORKER_SECRET && await timingSafeCompare(token, env.MYA_WORKER_SECRET)) ||
+      (env.ADMIN_SECRET && await timingSafeCompare(token, env.ADMIN_SECRET))
+    ) {
+      authorized = true;
+    } else {
+      const identity = await authenticateRequest(request, env);
+      if (identity) authorized = true;
+    }
+  }
+  if (!authorized) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -880,24 +928,43 @@ async function handleStoreAttachment(request: Request, env: Env): Promise<Respon
     "Content-Type": "application/json",
   };
 
-  // Verify admin/worker secret (accept either MYA_WORKER_SECRET or ADMIN_SECRET)
   const authHeader = request.headers.get("Authorization");
   const token = authHeader?.replace("Bearer ", "");
-  if (!token || (!await timingSafeCompare(token, env.MYA_WORKER_SECRET || "") && !await timingSafeCompare(token, env.ADMIN_SECRET || ""))) {
-    return new Response(JSON.stringify({ error: "Unauthorized" }), {
-      status: 401,
-      headers: corsHeaders,
-    });
+  if (!token) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: corsHeaders });
+  }
+
+  // Parse body once — needed for legacy auth check (doesn't use it) AND for
+  // agent token check (must compare body.userId to identity.user_id).
+  const body = (await request.json()) as {
+    data: string;
+    userId: string;
+    type: 'voice' | 'image' | 'video' | 'file';
+    filename?: string;
+    mimeType?: string;
+  };
+
+  // Auth: legacy shared secrets OR agent token whose tenant matches body.userId.
+  // The agent path enforces tenant isolation: an agent can only ever store
+  // attachments under its OWN customer's user_id.
+  let authorized = false;
+  if (
+    (env.MYA_WORKER_SECRET && await timingSafeCompare(token, env.MYA_WORKER_SECRET)) ||
+    (env.ADMIN_SECRET && await timingSafeCompare(token, env.ADMIN_SECRET))
+  ) {
+    authorized = true;
+  } else {
+    const identity = await authenticateRequest(request, env);
+    if (identity?.user_id && body.userId && identity.user_id === body.userId) {
+      authorized = true;
+    }
+  }
+  if (!authorized) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: corsHeaders });
   }
 
   try {
-    const body = await request.json() as {
-      data: string;
-      userId: string;
-      type: 'voice' | 'image' | 'video' | 'file';
-      filename?: string;
-      mimeType?: string;
-    };
+    // body already parsed above
 
     if (!body.data || !body.userId || !body.type) {
       return new Response(JSON.stringify({ error: "Missing required fields: data, userId, type" }), {
@@ -1707,12 +1774,32 @@ async function serveAttachment(request: Request, env: Env): Promise<Response> {
     return new Response("Not Found", { status: 404, headers: corsHeaders });
   }
 
-  // Check for Bearer token auth (server-side proxy access)
+  // Auth path 1: legacy shared MYA_WORKER_SECRET (any caller, no key check)
+  // Auth path 2: agent token, must own the key (R2 path embeds user_id)
+  // Auth path 3: signed URL with HMAC over (key, userId, expires)
   const authHeader = request.headers.get("Authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null;
-  const hasBearerAuth = bearerToken && env.MYA_WORKER_SECRET && await timingSafeCompare(bearerToken, env.MYA_WORKER_SECRET);
 
-  // Verify auth: either Bearer token or signed URL
+  let hasBearerAuth = false;
+  if (bearerToken) {
+    if (env.MYA_WORKER_SECRET && await timingSafeCompare(bearerToken, env.MYA_WORKER_SECRET)) {
+      hasBearerAuth = true;
+    } else {
+      // Agent token path: tenant must own the key. R2 keys for new attachments
+      // follow `<type>/<userId>/<file>` (e.g. `voice/abc123/...`) so we can
+      // verify by inspecting segments. Legacy keys without user_id in the
+      // path are NOT reachable via this path — they need a signed URL.
+      const identity = await authenticateRequest(request, env);
+      if (identity?.user_id) {
+        const segments = key.split("/");
+        if (segments.length >= 3 && segments[1] === identity.user_id) {
+          hasBearerAuth = true;
+        }
+      }
+    }
+  }
+
+  // Verify auth: bearer (paths 1 or 2) or signed URL (path 3)
   if (!hasBearerAuth) {
     const attachmentSecret = env.ATTACHMENT_SECRET;
     if (!attachmentSecret) {
@@ -2494,7 +2581,50 @@ async function handleWaitlistSignup(request: Request, env: Env): Promise<Respons
             from: env.EMAIL_FROM || "Mycelium <noreply@example.com>",
             to: email,
             subject: "You're on the Mycelium waitlist",
-            text: `Hey — thanks for signing up for Mycelium.\n\nWe're building an open-source agent framework that gives AI real memory, real relationships, and real autonomy. It's in active development and we're using it daily.\n\nWe'll reach out when it's ready for you. In the meantime, the code is at https://github.com/Curious-Life/mycelium.id if you want to self-host.`,
+            text: `Hey — thanks for signing up for Mycelium.\n\nWe're building personal intelligence that belongs to you — encrypted, self-hosted, open source. Your data compounds for your benefit, not as inventory for advertisers.\n\nWe'll reach out when it's ready for you. In the meantime, the code is at https://github.com/Curious-Life/mycelium.id if you want to self-host.`,
+            html: `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#F7F5EF;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#F7F5EF;padding:40px 20px;">
+<tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:460px;background:#FFFFFF;border-radius:16px;border:1px solid #E7E5E4;overflow:hidden;">
+
+<!-- Header -->
+<tr><td style="padding:32px 36px 24px;border-bottom:1px solid #F0EDE4;">
+  <img src="https://mycelium.id/mushroom.svg" alt="" width="28" height="28" style="vertical-align:middle;margin-right:10px;border-radius:6px;">
+  <span style="font-family:-apple-system,system-ui,'Segoe UI',sans-serif;font-size:20px;color:#1C1917;letter-spacing:-0.01em;vertical-align:middle;">mycelium</span><span style="font-family:-apple-system,system-ui,'Segoe UI',sans-serif;font-size:20px;color:#B8860B;vertical-align:middle;">.id</span>
+</td></tr>
+
+<!-- Body -->
+<tr><td style="padding:36px 36px 28px;">
+  <div style="font-size:15px;color:#1C1917;font-weight:500;margin-bottom:16px;">You're on the list.</div>
+  <div style="font-size:14px;color:#57534E;line-height:1.7;margin-bottom:16px;">We're building personal intelligence that belongs to you &mdash; encrypted, self-hosted, open source. Your data compounds for your benefit, not as inventory for advertisers.</div>
+  <div style="font-size:14px;color:#57534E;line-height:1.7;">We'll reach out when it's ready for you.</div>
+</td></tr>
+
+<!-- Divider -->
+<tr><td style="padding:0 36px;"><div style="border-top:1px solid #F0EDE4;"></div></td></tr>
+
+<!-- Self-host CTA -->
+<tr><td style="padding:24px 36px 32px;">
+  <div style="font-size:12px;color:#A8A29E;line-height:1.6;">
+    Can't wait? The code is open source.<br>
+    <a href="https://github.com/Curious-Life/mycelium.id" style="color:#B8860B;text-decoration:none;border-bottom:1px solid #E5C46B;">Self-host for free</a>
+  </div>
+</td></tr>
+
+</table>
+
+<!-- Brand footer -->
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:460px;margin-top:24px;">
+<tr><td style="text-align:center;font-size:11px;color:#A8A29E;font-family:-apple-system,system-ui,'Segoe UI',sans-serif;">
+  Your rights preserved
+</td></tr>
+</table>
+
+</td></tr>
+</table>
+</body></html>`,
           }),
         });
       } catch (emailErr: any) {
@@ -2939,7 +3069,7 @@ async function handleSendCode(request: Request, env: Env): Promise<Response> {
 <!-- Header -->
 <tr><td style="padding:32px 36px 24px;border-bottom:1px solid #F0EDE4;">
   <img src="https://mycelium.id/logo.svg" alt="" width="24" height="24" style="vertical-align:middle;margin-right:8px;">
-  <span style="font-family:Georgia,serif;font-size:20px;color:#1C1917;letter-spacing:-0.01em;vertical-align:middle;">mycelium</span><span style="font-family:Georgia,serif;font-size:20px;color:#B8860B;font-style:italic;vertical-align:middle;">.id</span>
+  <span style="font-family:-apple-system,system-ui,'Segoe UI',sans-serif;font-size:20px;color:#1C1917;letter-spacing:-0.01em;vertical-align:middle;">mycelium</span><span style="font-family:-apple-system,system-ui,'Segoe UI',sans-serif;font-size:20px;color:#B8860B;vertical-align:middle;">.id</span>
 </td></tr>
 
 <!-- Code -->
@@ -2965,7 +3095,7 @@ async function handleSendCode(request: Request, env: Env): Promise<Response> {
 
 <!-- Brand footer -->
 <table width="100%" cellpadding="0" cellspacing="0" style="max-width:460px;margin-top:24px;">
-<tr><td style="text-align:center;font-size:11px;color:#A8A29E;font-family:Georgia,serif;">
+<tr><td style="text-align:center;font-size:11px;color:#A8A29E;font-family:-apple-system,system-ui,'Segoe UI',sans-serif;">
   Sovereign intelligence infrastructure
 </td></tr>
 </table>
@@ -3585,11 +3715,11 @@ input{width:100%;box-sizing:border-box;padding:0.75rem;font-size:1.5rem;text-ali
 input:focus{border-color:#E5B84C}
 button{width:100%;margin-top:1rem;padding:0.75rem;background:#E5B84C;color:#0A0A0C;border:none;border-radius:8px;font-size:0.85rem;font-weight:600;cursor:pointer}
 button:hover{background:#D4A63C}
-.logo{font-family:Georgia,serif;font-size:1.1rem;color:#F5F5F4;margin-bottom:1.5rem}
-.logo i{color:#E5B84C;font-style:italic}
+.logo{font-family:-apple-system,system-ui,'Segoe UI',sans-serif;font-size:1.1rem;color:#F5F5F4;margin-bottom:1.5rem}
+.logo .accent{color:#E5B84C}
 </style></head><body>
 <div class="card">
-<div class="logo"><img src="https://mycelium.id/logo.svg" alt="" width="20" height="20" style="vertical-align:middle;margin-right:6px;">mycelium<i>.id</i></div>
+<div class="logo"><img src="https://mycelium.id/logo.svg" alt="" width="20" height="20" style="vertical-align:middle;margin-right:6px;">mycelium<span class="accent">.id</span></div>
 <h1>Verify your download</h1>
 <p>Enter the 6-digit PIN from your email to download your vault export.</p>
 ${error ? `<div class="error">${error}</div>` : ''}

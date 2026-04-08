@@ -42,13 +42,30 @@ rsync -av --delete $DRY_RUN \
   --exclude='scripts/verify-dns.js' \
   --exclude='scripts/generate-instance-keys.js' \
   --exclude='scripts/migrate-registry-to-d1.js' \
+  --exclude='scripts/migrate-to-system-key.js' \
   --exclude='scripts/export-vault.js' \
+  --exclude='infomaniak-kms/certs/*.key' \
+  --exclude='infomaniak-kms/certs/*.crt' \
+  --exclude='infomaniak-kms/certs/*.pem' \
+  --exclude='infomaniak-kms/certs/*.srl' \
+  --exclude='infomaniak-kms/certs/clients/' \
   --exclude='LICENSE' \
   --exclude='README.md' \
   --exclude='CLAUDE.md' \
   --exclude='docs/GETTING-STARTED.md' \
   --exclude='docs/mycelium-logo.svg' \
   "$SRC" "$DEST"
+
+echo ""
+echo "==> Verifying no TLS material in destination..."
+KEY_FOUND=$(find "$DEST/infomaniak-kms/certs" -type f \( -name '*.key' -o -name '*.crt' -o -name '*.pem' -o -name '*.srl' \) 2>/dev/null || true)
+if [[ -n "$KEY_FOUND" ]]; then
+  echo "    ✗ TLS MATERIAL FOUND IN PUBLIC REPO:"
+  echo "$KEY_FOUND"
+  exit 1
+else
+  echo "    ✓ No TLS material in destination"
+fi
 
 echo ""
 echo "==> Verifying no personal data..."

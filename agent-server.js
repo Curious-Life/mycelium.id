@@ -3758,8 +3758,8 @@ app.post('/search', async (req, res) => {
     return res.status(503).json({ error: 'Search not configured - database not initialized' });
   }
 
-  if (!process.env.MYA_WORKER_URL || !process.env.MYA_WORKER_SECRET) {
-    return res.status(503).json({ error: 'Search not configured - missing MYA_WORKER_URL/SECRET' });
+  if (!process.env.MYA_WORKER_URL || !process.env.AGENT_TOKEN) {
+    return res.status(503).json({ error: 'Search not configured - missing MYA_WORKER_URL/AGENT_TOKEN' });
   }
 
   addActivity('action', `Searching memory: "${query.substring(0, 50)}..."`, { type: 'search', limit });
@@ -5099,49 +5099,29 @@ function checkAuthRateLimit(req, res) {
   return true;
 }
 
-// Security email notifications (new device registered, login, export)
+// Security email notifications (new device registered, login, export).
+//
+// Two-key separation: agents NEVER have ADMIN_SECRET in their env. Instead
+// they call the tenant self-service endpoint /api/notify-self with their
+// AGENT_TOKEN. The Worker resolves the destination email from the OWNER D1's
+// provisioning_jobs table using identity.user_id — the agent has no ability
+// to send mail to anyone except the customer who owns this VPS.
 async function sendSecurityEmail(event, req, details = {}) {
   const workerUrl = process.env.MYA_WORKER_URL;
-  const adminSecret = process.env.ADMIN_SECRET;
-  if (!workerUrl || !adminSecret) return;
-
-  // Look up the user's email from provisioning_jobs
-  const userId = process.env.MYA_USER_ID;
-  if (!userId) return;
+  const agentToken = process.env.AGENT_TOKEN;
+  if (!workerUrl || !agentToken) return;
 
   try {
-    const db = tryGetDb();
-    if (!db) return;
-    const job = await db.d1QueryAdmin(
-      'SELECT email FROM provisioning_jobs WHERE user_id = ? AND status = ? LIMIT 1',
-      [userId, 'ready']
-    );
-    const email = job?.results?.[0]?.email;
-    if (!email) return;
-
-    const ip = req?.ip || req?.headers?.['x-forwarded-for'] || 'unknown';
-    const ua = req?.headers?.['user-agent'] || 'unknown';
-    const time = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
-
-    const subjects = {
-      new_device: 'New device registered on your Mycelium account',
-      login: 'New login to your Mycelium account',
-      export: 'Your data was exported from your Mycelium account',
-    };
-
-    const bodies = {
-      new_device: `A new passkey was registered on your Mycelium account.\n\nTime: ${time}\nIP: ${ip}\nDevice: ${ua}\n\nIf this wasn't you, your account may be compromised. SSH into your server and revoke all sessions immediately.\n\n— Mycelium`,
-      login: `A new login was detected on your Mycelium account.\n\nTime: ${time}\nIP: ${ip}\nDevice: ${ua}\n\nIf this wasn't you, your account may be compromised.\n\n— Mycelium`,
-      export: `A full data export was requested from your Mycelium account.\n\nTime: ${time}\nIP: ${ip}\nDevice: ${ua}${details?.messageCount ? `\nMessages exported: ${details.messageCount}` : ''}\n\nIf this wasn't you, your account may be compromised. Revoke all sessions immediately.\n\n— Mycelium`,
-    };
-
-    await fetch(`${workerUrl}/api/admin/send-email`, {
+    await fetch(`${workerUrl}/api/notify-self`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminSecret}` },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${agentToken}` },
       body: JSON.stringify({
-        to: email,
-        subject: subjects[event] || 'Security alert',
-        text: bodies[event] || 'A security event occurred on your account.',
+        event,
+        details: {
+          ip: req?.ip || req?.headers?.['x-forwarded-for'] || 'unknown',
+          ua: req?.headers?.['user-agent'] || 'unknown',
+          ...(details || {}),
+        },
       }),
       signal: AbortSignal.timeout(5000),
     });
@@ -5150,29 +5130,24 @@ async function sendSecurityEmail(event, req, details = {}) {
   }
 }
 
-async function sendConnectionEmail(toUserId, fromHandle, fromSignature) {
+// Cross-tenant connection request email — calls /api/notify-peer with the
+// agent token. The Worker resolves toHandle → user_id → email centrally
+// (handle_reservations + provisioning_jobs in owner DB), enforces a per-sender
+// rate limit (KV), and sends a templated email. The agent CANNOT supply
+// free-form text or target an arbitrary email address.
+async function sendConnectionEmail(toHandle, fromHandle, fromSignature) {
   const workerUrl = process.env.MYA_WORKER_URL;
-  const adminSecret = process.env.ADMIN_SECRET;
-  if (!workerUrl || !adminSecret) return;
+  const agentToken = process.env.AGENT_TOKEN;
+  if (!workerUrl || !agentToken) return;
 
   try {
-    const db = tryGetDb();
-    if (!db) return;
-    const job = await db.d1QueryAdmin(
-      'SELECT email FROM provisioning_jobs WHERE user_id = ? AND status = ? LIMIT 1',
-      [toUserId, 'ready']
-    );
-    const email = job?.results?.[0]?.email;
-    if (!email) return;
-
-    const sig = fromSignature ? `\n"${fromSignature}"` : '';
-    await fetch(`${workerUrl}/api/admin/send-email`, {
+    await fetch(`${workerUrl}/api/notify-peer`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminSecret}` },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${agentToken}` },
       body: JSON.stringify({
-        to: email,
-        subject: `@${fromHandle} wants to connect on Mycelium`,
-        text: `@${fromHandle} sent you a connection request.${sig}\n\nLog in to your portal to accept or ignore.\n\n— Mycelium`,
+        toHandle,
+        fromHandle,
+        signature: fromSignature || null,
       }),
       signal: AbortSignal.timeout(5000),
     });
@@ -5405,6 +5380,308 @@ app.post('/auth/set-master-key', async (_req, res) => {
   });
 });
 
+// ── Master Key Restore & Rotation (portal Settings) ──
+
+/**
+ * POST /portal/master-key/restore
+ * Restore an existing master key (after VPS reboot, key cache loss).
+ * Verifies the key hash matches D1, then writes to tmpfs.
+ * No data re-encryption — the key just becomes available again.
+ */
+app.post('/portal/master-key/restore', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { key } = req.body;
+    if (!key || typeof key !== 'string' || key.length !== 64 || !/^[0-9a-fA-F]+$/.test(key)) {
+      return res.status(400).json({ error: 'Master key must be 64 hex characters' });
+    }
+
+    // Verify hash matches provisioning_jobs.key_hash (owner D1 for managed instances,
+    // or skip verification for standalone owner VPS which has no provisioning_jobs row)
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+
+    const providedHash = crypto.createHash('sha256').update(key).digest('hex');
+
+    // Try owner D1 first (managed hosting customers)
+    let storedHash = null;
+    try {
+      const jobRows = await db.rawQueryOwner(
+        'SELECT key_hash FROM provisioning_jobs WHERE user_id = ? AND status = ? LIMIT 1',
+        [user.id, 'ready']
+      );
+      storedHash = jobRows?.[0]?.key_hash;
+    } catch (err) {
+      console.warn(`[master-key restore] owner D1 lookup failed: ${err.message}`);
+    }
+
+    // For standalone owner VPS (no provisioning_jobs), accept any valid 64-hex key
+    // as long as passkey auth succeeded (which already happened above).
+    if (!storedHash) {
+      console.log(`[master-key restore] No provisioning_jobs row — standalone mode, accepting key based on passkey auth`);
+    } else if (!safeCompare(providedHash, storedHash)) {
+      tryGetDb()?.audit.log({ action: 'master_key.restore_failed', userId: user.id, ip: req.ip }).catch(() => {});
+      return res.status(401).json({ error: 'Master key does not match' });
+    }
+
+    // Write to tmpfs (mode 0o400)
+    const tmpfsPath = '/run/mycelium/master.key';
+    try {
+      // Ensure /run/mycelium exists
+      const mkdirSync = (await import('fs')).mkdirSync;
+      try { mkdirSync('/run/mycelium', { recursive: true, mode: 0o700 }); } catch {}
+
+      const writeFileSync = (await import('fs')).writeFileSync;
+      writeFileSync(tmpfsPath, key, { mode: 0o400 });
+    } catch (err) {
+      console.error(`[master-key restore] tmpfs write failed: ${err.message}`);
+      return res.status(500).json({ error: 'Failed to write key to tmpfs' });
+    }
+
+    // Clear caches and verify the key works by loading it
+    let kmsStored = false;
+    try {
+      const { clearAllCaches, getMasterKeyFromBestSource } = await import('./lib/crypto-local.js');
+      await clearAllCaches();
+      const loadedKey = await getMasterKeyFromBestSource();
+      if (!loadedKey) throw new Error('Key load failed');
+
+      // Reset db-d1 master key cache
+      const dbMod = await import('./lib/db-d1.js');
+      if (dbMod.resetMasterKeyCache) dbMod.resetMasterKeyCache();
+
+      // If KMS configured, store in KMS too (so reboots auto-recover)
+      if (process.env.KMS_URL) {
+        try {
+          // Use admin cert from VPS to call KMS /wrap
+          // The VPS-side KMS client doesn't have admin cert by default — use raw fetch
+          const adminCertPath = process.env.KMS_ADMIN_CERT_PATH || '/etc/mycelium/kms-admin-certs';
+          const fs = await import('fs');
+          const https = (await import('https')).default;
+          const adminCert = fs.readFileSync(`${adminCertPath}/admin.crt`);
+          const adminKey = fs.readFileSync(`${adminCertPath}/admin.key`);
+          const ca = fs.readFileSync(`${adminCertPath}/ca.crt`);
+
+          const url = new URL('/wrap', process.env.KMS_URL);
+          const customerId = process.env.KMS_CUSTOMER_ID || process.env.MYA_USER_ID;
+
+          await new Promise((resolve, reject) => {
+            const options = {
+              method: 'POST', hostname: url.hostname, port: url.port || 8443,
+              path: url.pathname,
+              cert: adminCert, key: adminKey, ca,
+              rejectUnauthorized: true, minVersion: 'TLSv1.3',
+              headers: { 'Content-Type': 'application/json' },
+              timeout: 10000,
+            };
+            const r = https.request(options, (resp) => {
+              let data = '';
+              resp.on('data', c => data += c);
+              resp.on('end', () => {
+                if (resp.statusCode === 409) { kmsStored = true; resolve(); /* already exists */ }
+                else if (resp.statusCode >= 400) reject(new Error(`KMS ${resp.statusCode}: ${data}`));
+                else { kmsStored = true; resolve(); }
+              });
+            });
+            r.on('error', reject);
+            r.on('timeout', () => { r.destroy(); reject(new Error('KMS timeout')); });
+            r.write(JSON.stringify({ customerId, kek: key }));
+            r.end();
+          });
+        } catch (kmsErr) {
+          console.error(`[master-key restore] KMS wrap failed: ${kmsErr.message}`);
+          // Non-fatal — key is on tmpfs, agents can still use it
+        }
+      }
+    } catch (err) {
+      return res.status(500).json({ error: `Key written but failed to activate: ${err.message}` });
+    }
+
+    tryGetDb()?.audit.log({ action: 'master_key.restored', userId: user.id, ip: req.ip, details: { kmsStored } }).catch(() => {});
+    res.json({ ok: true, kmsStored });
+  } catch (err) {
+    console.error(`[master-key restore] error: ${err.message}`);
+    res.status(500).json({ error: 'Restore failed' });
+  }
+});
+
+/**
+ * POST /portal/master-key/rotate
+ * Rotate to a new master key. Re-wraps all encrypted records.
+ * Streams progress via SSE.
+ */
+app.post('/portal/master-key/rotate', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { currentKey, newKey } = req.body;
+    for (const [name, k] of [['currentKey', currentKey], ['newKey', newKey]]) {
+      if (!k || typeof k !== 'string' || k.length !== 64 || !/^[0-9a-fA-F]+$/.test(k)) {
+        return res.status(400).json({ error: `${name} must be 64 hex characters` });
+      }
+    }
+    if (currentKey === newKey) {
+      return res.status(400).json({ error: 'New key must be different from current key' });
+    }
+
+    // Verify current key hash matches provisioning_jobs (owner D1)
+    const db = tryGetDb();
+    if (!db) return res.status(503).json({ error: 'Database not available' });
+    const currentHash = crypto.createHash('sha256').update(currentKey).digest('hex');
+
+    let storedHash = null;
+    try {
+      const jobRows = await db.rawQueryOwner(
+        'SELECT key_hash FROM provisioning_jobs WHERE user_id = ? AND status = ? LIMIT 1',
+        [user.id, 'ready']
+      );
+      storedHash = jobRows?.[0]?.key_hash;
+    } catch (err) {
+      console.warn(`[master-key rotate] owner D1 lookup failed: ${err.message}`);
+    }
+
+    // For managed customers: verify hash matches. For standalone owner: verify by attempting to use the key.
+    if (storedHash && !safeCompare(currentHash, storedHash)) {
+      tryGetDb()?.audit.log({ action: 'master_key.rotate_failed', userId: user.id, ip: req.ip, details: { reason: 'hash mismatch' } }).catch(() => {});
+      return res.status(401).json({ error: 'Current master key does not match' });
+    }
+
+    // If no stored hash (standalone mode), verify the current key by attempting to use it
+    if (!storedHash) {
+      try {
+        const { importMasterKey, encrypt, decrypt } = await import('./lib/crypto-local.js');
+        const testKey = await importMasterKey(currentKey);
+        const testEnvelope = await encrypt('verification', 'personal', testKey);
+        await decrypt(testEnvelope, testKey);
+      } catch {
+        return res.status(401).json({ error: 'Current master key is invalid' });
+      }
+    }
+
+    // Set up SSE
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    const sendSSE = (event) => {
+      try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch {}
+    };
+
+    sendSSE({ type: 'started' });
+
+    try {
+      const { importMasterKey } = await import('./lib/crypto-local.js');
+      const oldMasterKey = await importMasterKey(currentKey);
+      const newMasterKey = await importMasterKey(newKey);
+
+      sendSSE({ type: 'rewrapping' });
+
+      const { rewrapAllRecords } = await import('./lib/db-d1.js');
+      const result = await rewrapAllRecords(oldMasterKey, newMasterKey, (progress) => {
+        sendSSE({ type: 'progress', ...progress });
+      });
+
+      sendSSE({ type: 'finalizing', ...result });
+
+      // Update provisioning_jobs.key_hash in owner D1 (if this customer has a row)
+      if (storedHash) {
+        const newHash = crypto.createHash('sha256').update(newKey).digest('hex');
+        try {
+          await db.rawQueryOwner(
+            'UPDATE provisioning_jobs SET key_hash = ? WHERE user_id = ? AND status = ?',
+            [newHash, user.id, 'ready']
+          );
+        } catch (err) {
+          console.warn(`[master-key rotate] failed to update provisioning_jobs.key_hash: ${err.message}`);
+        }
+      }
+
+      // Write new key to tmpfs
+      const fs = await import('fs');
+      try { fs.mkdirSync('/run/mycelium', { recursive: true, mode: 0o700 }); } catch {}
+      fs.writeFileSync('/run/mycelium/master.key', newKey, { mode: 0o400 });
+
+      // Clear caches
+      const { clearAllCaches } = await import('./lib/crypto-local.js');
+      await clearAllCaches();
+      const dbMod = await import('./lib/db-d1.js');
+      if (dbMod.resetMasterKeyCache) dbMod.resetMasterKeyCache();
+
+      // KMS update if configured
+      if (process.env.KMS_URL) {
+        // Same admin cert flow as restore — wrap is idempotent (overwrites)
+        sendSSE({ type: 'kms-updating' });
+        // Caller of this endpoint should call /portal/master-key/restore on the new key
+        // to update KMS, OR we can do it inline here. Inline is simpler.
+        try {
+          const adminCertPath = process.env.KMS_ADMIN_CERT_PATH || '/etc/mycelium/kms-admin-certs';
+          const adminCert = fs.readFileSync(`${adminCertPath}/admin.crt`);
+          const adminKey = fs.readFileSync(`${adminCertPath}/admin.key`);
+          const ca = fs.readFileSync(`${adminCertPath}/ca.crt`);
+          const https = (await import('https')).default;
+          const url = new URL('/wrap', process.env.KMS_URL);
+          const customerId = process.env.KMS_CUSTOMER_ID || process.env.MYA_USER_ID;
+
+          // Delete existing then re-wrap
+          await new Promise((resolve) => {
+            const r = https.request({
+              method: 'DELETE', hostname: url.hostname, port: url.port || 8443,
+              path: `/customer/${customerId}`,
+              cert: adminCert, key: adminKey, ca,
+              rejectUnauthorized: true, minVersion: 'TLSv1.3',
+              timeout: 10000,
+            }, () => resolve());
+            r.on('error', () => resolve());
+            r.end();
+          });
+
+          // Now /wrap with new key
+          await new Promise((resolve, reject) => {
+            const r = https.request({
+              method: 'POST', hostname: url.hostname, port: url.port || 8443,
+              path: url.pathname,
+              cert: adminCert, key: adminKey, ca,
+              rejectUnauthorized: true, minVersion: 'TLSv1.3',
+              headers: { 'Content-Type': 'application/json' },
+              timeout: 10000,
+            }, (resp) => {
+              let data = '';
+              resp.on('data', c => data += c);
+              resp.on('end', () => {
+                if (resp.statusCode >= 400) reject(new Error(`KMS ${resp.statusCode}: ${data}`));
+                else resolve();
+              });
+            });
+            r.on('error', reject);
+            r.write(JSON.stringify({ customerId, kek: newKey }));
+            r.end();
+          });
+        } catch (kmsErr) {
+          sendSSE({ type: 'warning', message: `KMS update failed: ${kmsErr.message}` });
+        }
+      }
+
+      tryGetDb()?.audit.log({ action: 'master_key.rotated', userId: user.id, ip: req.ip, details: result }).catch(() => {});
+
+      sendSSE({ type: 'complete', ...result });
+      res.write('data: [DONE]\n\n');
+      res.end();
+    } catch (err) {
+      sendSSE({ type: 'error', message: err.message });
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }
+  } catch (err) {
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Rotation failed' });
+    }
+  }
+});
+
 // First login for managed hosting: verify master key hash → create registration code
 app.post('/auth/first-login', async (req, res) => {
   if (!checkAuthRateLimit(req, res)) return;
@@ -5523,13 +5800,26 @@ app.post('/auth/passkey/register/verify', async (req, res) => {
   if (!requireWorkerSecret(req, res)) return;
   if (!checkAuthRateLimit(req, res)) return;
   try {
-    const { registrationCode, credential } = req.body;
+    const { registrationCode, credential, urk } = req.body;
     if (!registrationCode || !credential) return res.status(400).json({ error: 'Missing fields' });
     const auth = await getAuthModule();
-    const result = await auth.verifyReg(registrationCode, credential);
+    const result = await auth.verifyReg(registrationCode, credential, urk || null);
+
+    // If PRF supported and URK derived, migrate KMS to URK-wrapped mode
+    if (result.urk && result.credentialId && process.env.KMS_URL) {
+      try {
+        const { migrateKmsToUrk, provideUrk: provideUrkFn } = await import('./lib/kms-client.js');
+        await migrateKmsToUrk(result.urk, result.credentialId);
+        await provideUrkFn(result.urk, result.credentialId);
+        console.log(`[Auth] First passkey with PRF — KEK migrated to URK-wrapped mode`);
+      } catch (kmsErr) {
+        console.error(`[Auth] KMS URK migration failed (non-fatal): ${kmsErr.message}`);
+      }
+    }
+
     setSessionCookie(res, result.session.token, result.session.expiresAt);
     setCsrfCookie(res);
-    res.json({ token: result.session.token, expiresAt: result.session.expiresAt, userId: result.userId });
+    res.json({ token: result.session.token, expiresAt: result.session.expiresAt, userId: result.userId, urkAccepted: !!result.urk });
     // Audit: successful registration
     tryGetDb()?.audit.log({ action: 'auth.register', userId: result.userId, ip: req.ip, resourceType: 'passkey' }).catch(() => {});
     sendSecurityEmail('new_device', req).catch(() => {});
@@ -5560,13 +5850,25 @@ app.post('/auth/passkey/login/verify', async (req, res) => {
   if (!requireWorkerSecret(req, res)) return;
   if (!checkAuthRateLimit(req, res)) return;
   try {
-    const { credential } = req.body;
+    const { credential, urk } = req.body;
     if (!credential) return res.status(400).json({ error: 'Credential required' });
     const auth = await getAuthModule();
-    const result = await auth.verifyAuth(credential);
+    const result = await auth.verifyAuth(credential, urk || null);
+
+    // If URK provided, send to KMS to unwrap and cache the KEK
+    if (result.urk && result.credentialId && process.env.KMS_URL) {
+      try {
+        const { provideUrk: provideUrkFn } = await import('./lib/kms-client.js');
+        await provideUrkFn(result.urk, result.credentialId);
+        console.log(`[Auth] URK accepted — KEK cached for ${process.env.KMS_TTL_HOURS || 72}h`);
+      } catch (kmsErr) {
+        console.error(`[Auth] URK → KMS failed (non-fatal): ${kmsErr.message}`);
+      }
+    }
+
     setSessionCookie(res, result.session.token, result.session.expiresAt);
     setCsrfCookie(res);
-    res.json({ token: result.session.token, expiresAt: result.session.expiresAt, userId: result.userId });
+    res.json({ token: result.session.token, expiresAt: result.session.expiresAt, userId: result.userId, urkAccepted: !!result.urk });
     // Audit: successful login
     tryGetDb()?.audit.log({ action: 'auth.login', userId: result.userId, ip: req.ip, resourceType: 'passkey' }).catch(() => {});
     sendSecurityEmail('login', req).catch(() => {});
@@ -5649,7 +5951,7 @@ app.post('/portal/export/verify', async (req, res) => {
       // Query owner D1 for key_hash via Worker with agent token
       let storedHash = null;
       const workerUrl = process.env.MYA_WORKER_URL;
-      const agentToken = process.env.AGENT_TOKEN || process.env.AGENT_TOKEN_MYA || process.env.ADMIN_SECRET;
+      const agentToken = process.env.AGENT_TOKEN || process.env.AGENT_TOKEN_MYA;
 
       if (workerUrl && agentToken) {
         try {
@@ -7721,12 +8023,10 @@ app.post('/portal/connections/request', async (req, res) => {
     const cleanHandle = toHandle.replace(/^@/, '');
     const id = await db.connections.request(user.id, cleanHandle);
 
-    // Send email notification to the target user
+    // Send email notification to the target user via Worker self-service.
+    // The Worker resolves the handle → email centrally with rate limiting.
     const fromProfile = await db.profiles.get(user.id);
-    const toProfile = await db.profiles.getByHandle(cleanHandle);
-    if (toProfile) {
-      sendConnectionEmail(toProfile.user_id, fromProfile?.handle || 'someone', fromProfile?.signature).catch(() => {});
-    }
+    sendConnectionEmail(cleanHandle, fromProfile?.handle || 'someone', fromProfile?.signature).catch(() => {});
 
     res.json({ id, ok: true });
   } catch (err) {
@@ -8400,10 +8700,12 @@ app.get('/portal/intel/opensky', async (req, res) => {
 });
 
 // -- Intel Snapshot Push (to Worker KV for public intel page) --
+// Owner-only operation. The Worker side checks that the agent token belongs
+// to env.OWNER_USER_ID before accepting the snapshot. No ADMIN_SECRET needed.
 async function pushIntelSnapshot() {
   const workerUrl = process.env.MYA_WORKER_URL;
-  const adminSecret = process.env.ADMIN_SECRET;
-  if (!workerUrl || !adminSecret) return;
+  const agentToken = process.env.AGENT_TOKEN;
+  if (!workerUrl || !agentToken) return;
 
   const port = process.env.WARROOM_DASHBOARD_PORT || '8050';
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -8485,14 +8787,14 @@ async function pushIntelSnapshot() {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${adminSecret}`,
+        'Authorization': `Bearer ${agentToken}`,
       },
       body: JSON.stringify(snapshot),
       signal: AbortSignal.timeout(15000),
     });
     if (resp.ok) {
       const data = await resp.json();
-      console.log(`[Intel Snapshot] Pushed ${data.keys?.length || 0} keys to Worker KV`);
+      console.log(`[Intel Snapshot] Pushed ${data.accepted || 0} keys to Worker KV`);
     } else {
       console.error(`[Intel Snapshot] Worker returned ${resp.status}`);
     }
@@ -9283,8 +9585,11 @@ app.get('/portal/billing', async (req, res) => {
     const db = tryGetDb();
     if (!db) return res.status(503).json({ error: 'Database not available' });
 
-    // Check if managed mode
-    if (!process.env.MYA_WORKER_URL || !process.env.ADMIN_SECRET) {
+    // Managed-mode detection: a customer VPS is "managed" if it has a tenant
+    // identity (MYA_USER_ID) and can talk to the operator Worker. The
+    // ADMIN_SECRET sentinel was removed as part of Option 3 — agents must not
+    // hold operator credentials.
+    if (!process.env.MYA_WORKER_URL || !process.env.MYA_USER_ID) {
       return res.json({ managed: false });
     }
 
@@ -9337,17 +9642,19 @@ app.post('/portal/billing/portal', async (req, res) => {
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
     const workerUrl = process.env.MYA_WORKER_URL;
-    const adminSecret = process.env.ADMIN_SECRET;
-    if (!workerUrl || !adminSecret) {
+    const agentToken = process.env.AGENT_TOKEN;
+    if (!workerUrl || !agentToken) {
       return res.status(400).json({ error: 'Billing not available for self-hosted instances' });
     }
 
-    // Proxy to Worker billing portal endpoint, passing userId for admin auth
+    // Proxy to Worker billing portal endpoint with the agent token. The Worker
+    // resolves the user_id from identity.user_id (the agent token's tenant)
+    // — no need to pass it in the body. Agent tokens can only proxy billing
+    // for their own tenant.
     const portalRes = await fetch(`${workerUrl}/api/billing/portal`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminSecret}` },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${agentToken}` },
       body: JSON.stringify({
-        userId: user.id,
         returnUrl: req.body?.returnUrl || `https://${req.headers.host}/settings`,
       }),
       signal: AbortSignal.timeout(10000),
@@ -9738,9 +10045,12 @@ app.post('/portal/export', async (req, res) => {
     const JSZip = (await import('jszip')).default;
     const zip = new JSZip();
 
-    // Download R2 attachments and add binary files to ZIP
+    // Download R2 attachments and add binary files to ZIP. Uses the agent
+    // token — the Worker's serveAttachment path verifies the agent token's
+    // tenant matches the attachment's path prefix (user_id), so an agent
+    // can only ever fetch its own customer's attachments.
     const workerUrl = process.env.MYA_WORKER_URL;
-    const workerSecret = process.env.MYA_WORKER_SECRET || process.env.ADMIN_SECRET;
+    const workerSecret = process.env.AGENT_TOKEN;
     let attachmentsFetched = 0, attachmentsFailed = 0;
 
     for (const att of allAttachments) {
@@ -9859,43 +10169,43 @@ app.post('/portal/export', async (req, res) => {
     const filename = `mycelium-export-${new Date().toISOString().slice(0, 10)}.zip`;
     const zipSizeMB = (zipBuffer.length / 1048576).toFixed(1);
 
-    // Detect deployment mode: managed customers get R2 + email with PIN
-    const isManaged = !!(process.env.MYA_WORKER_URL && process.env.ADMIN_SECRET && process.env.MYA_USER_ID);
+    // Detect deployment mode: managed customers get R2 + email with PIN.
+    // The sentinel is MYA_USER_ID + AGENT_TOKEN — operator credentials
+    // (ADMIN_SECRET / MYA_WORKER_SECRET) no longer live in agent runtime.
+    const isManaged = !!(process.env.MYA_WORKER_URL && process.env.AGENT_TOKEN && process.env.MYA_USER_ID);
 
     if (isManaged) {
       try {
         const workerUrl = process.env.MYA_WORKER_URL;
-        const adminSecret = process.env.ADMIN_SECRET;
+        const agentToken = process.env.AGENT_TOKEN;
 
-        // Upload ZIP to R2 via Worker
-        const storeRes = await fetch(`${workerUrl}/api/admin/store-export`, {
+        // Upload ZIP via the tenant self-service export endpoint. The Worker
+        // stores at exports/<identity.user_id>/... — the agent CANNOT influence
+        // the user_id field; it's resolved server-side from the agent token.
+        const storeRes = await fetch(`${workerUrl}/api/export-self`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminSecret}` },
-          body: JSON.stringify({ userId: user.id, data: zipBuffer.toString('base64') }),
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${agentToken}` },
+          body: JSON.stringify({ data: zipBuffer.toString('base64') }),
           signal: AbortSignal.timeout(60000),
         });
 
         if (!storeRes.ok) throw new Error(`Store failed: ${storeRes.status}`);
         const { downloadUrl, pin } = await storeRes.json();
 
-        // Email the download link + PIN
-        const job = await db.d1QueryAdmin(
-          'SELECT email FROM provisioning_jobs WHERE user_id = ? AND status = ? LIMIT 1',
-          [user.id, 'ready']
-        );
-        const email = job?.results?.[0]?.email;
-
-        if (email && downloadUrl) {
-          await fetch(`${workerUrl}/api/admin/send-email`, {
+        if (downloadUrl) {
+          // Send the export-ready notification via the self-service notify
+          // endpoint. The Worker resolves the destination email from
+          // provisioning_jobs using the agent's tenant id — the agent has
+          // no ability to spoof the recipient.
+          await fetch(`${workerUrl}/api/notify-self`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminSecret}` },
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${agentToken}` },
             body: JSON.stringify({
-              to: email,
-              subject: 'Your Mycelium vault export is ready',
-              text: `Your vault export is ready (${zipSizeMB} MB).\n\nDownload link (expires in 1 hour):\n${downloadUrl}\n\nYou'll need the verification PIN shown in your portal to download. The link can only be used once.\n\n— Mycelium`,
+              event: 'export_ready',
+              details: { zipSizeMB, downloadUrl },
             }),
             signal: AbortSignal.timeout(5000),
-          });
+          }).catch((e) => console.warn('[Portal] export_ready notify failed:', e.message));
 
           logEvent('security.export_completed', {
             userId: user.id, ip: req.ip, deliveryMethod: 'email',
@@ -10149,9 +10459,12 @@ app.post('/portal/import/vault', async (req, res) => {
     stats.documentVersions = await restoreRaw(db, null, 'document_versions', manifest.documents_meta?.versions);
     stats.noteLinks = await restoreRaw(db, targetUserId, 'note_links', manifest.documents_meta?.noteLinks);
 
-    // 4. Attachments (R2 binaries + metadata)
+    // 4. Attachments (R2 binaries + metadata) — uses agent token. The Worker
+    // /api/store-attachment path verifies the agent token's tenant matches
+    // the userId field in the request body, so an agent can only restore
+    // attachments under its own customer's user_id.
     const workerUrl = process.env.MYA_WORKER_URL;
-    const workerSecret = process.env.MYA_WORKER_SECRET || process.env.ADMIN_SECRET;
+    const workerSecret = process.env.AGENT_TOKEN;
     stats.attachments = await restoreAttachments(db, targetUserId, manifest.attachments?.data || [], zip, workerUrl, workerSecret);
 
     // 5. Messages
@@ -11252,7 +11565,9 @@ if (process.env.SECURE_CHANNEL_ENABLED === '1' || process.env.SECURE_CHANNEL_ENA
                     }).catch(() => {});
                   }
                   if (user.id && fullOutput.trim() && code === 0) {
-                    storeMessages(user.id, 'portal', rawPrompt, fullOutput.trim(), requestTime).catch(() => {});
+                    storeMessages(user.id, 'portal', rawPrompt, fullOutput.trim(), requestTime).catch(err => {
+                      console.error(`[${LOG_PREFIX}] WS chat storeMessages failed: ${err.message}`);
+                    });
                   }
                   if (inputTokens || outputTokens) emit({ type: 'usage', inputTokens, outputTokens, thinkingTokens: 0 });
                   emit({ type: 'done', toolsUsed, thinkingEnabled: false });

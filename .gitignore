@@ -39,6 +39,13 @@ worker/.wrangler/
 worker/src/*.js
 worker/wrangler.toml
 
+# TLS material — NEVER commit private keys, only the cert-gen.sh script
+infomaniak-kms/certs/*.key
+infomaniak-kms/certs/*.crt
+infomaniak-kms/certs/*.pem
+infomaniak-kms/certs/*.srl
+infomaniak-kms/certs/clients/
+
 # Exports / personal data (NEVER commit — contains plaintext vault data)
 mycelium-export*.zip
 # Exports / personal data

@@ -447,17 +447,17 @@ export async function decryptFields(
   return result;
 }
 
-/** Map of table → fields that get encrypted */
+/** Map of table → fields that get encrypted. Must match lib/crypto-local.js. */
 export const ENCRYPTED_FIELDS: Record<string, string[]> = {
-  messages: ["content", "thinking", "tags", "entities", "entity_summary"],
-  documents: ["content", "summary"],
-  attachments: ["transcript"],
+  messages: ["content", "thinking", "tags", "entities", "entity_summary", "suggested_new_tag", "relations"],
+  documents: ["content", "summary", "title", "tags", "entities", "relations", "metadata"],
+  attachments: ["transcript", "file_name", "description", "metadata"],
   clustering_points: ["content"],
   agent_events: ["payload"],
-  agent_tasks: ["context", "result"],
+  agent_tasks: ["context", "result", "description", "summary", "error"],
   people: ["name", "aliases", "description", "metadata", "email", "phone", "company", "position", "linkedin_url"],
-  wealth_transactions: ["notes"],
-  wealth_positions: ["total_cost", "current_value", "unrealized_pnl", "avg_cost_basis"],
+  wealth_transactions: ["notes", "quantity", "price_per_unit", "fees", "exchange_rate"],
+  wealth_positions: ["total_cost", "current_value", "unrealized_pnl", "avg_cost_basis", "quantity"],
   wealth_snapshots: ["total_value", "total_invested", "total_pnl", "day_change"],
   health_daily: [
     "sleep_duration_min", "sleep_in_bed_min", "sleep_efficiency",
@@ -467,6 +467,15 @@ export const ENCRYPTED_FIELDS: Record<string, string[]> = {
     "steps", "active_energy_kcal", "workout_count", "workout_minutes", "workout_types",
     "mindful_minutes",
   ],
+  activity_sessions: ["window_title", "url", "app_bundle", "app_name"],
+  internal_model_items: ["content", "evidence", "source_context"],
+  reflections: ["content", "trigger"],
+  territory_profiles: ["title", "essence", "story_birth", "story_arc", "story_peak_moments", "story_current_chapter", "uncertainty_open_questions", "agent_expertise", "agent_curious_about"],
+  realms: ["name", "description"],
+  semantic_themes: ["label", "keywords", "description"],
+  user_identities: ["provider_username", "provider_id", "provider_avatar"],
+  provisioning_jobs: ["email", "stripe_customer_id", "error"],
+  secrets: ["key", "description"],
 };
 
 /**

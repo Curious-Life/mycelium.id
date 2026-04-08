@@ -69,6 +69,8 @@ export interface Env {
   SUPABASE_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
   ADMIN_SECRET: string; // For protected endpoints like webhook setup
+  OWNER_USER_ID?: string; // user_id of the owner (Martin) — gates owner-only endpoints
+  RESEND_FROM_ADDRESS?: string; // Default sender for self-service emails
   MYA_AGENT_URL?: string; // VPS agent-server URL for chat proxy
   MYA_WORKER_SECRET?: string; // Shared secret for agent server auth
   ATTACHMENT_SECRET?: string; // For signed attachment URLs

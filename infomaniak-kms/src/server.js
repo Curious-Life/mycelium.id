@@ -19,7 +19,8 @@ import express from 'express';
 import helmet from 'helmet';
 import {
   storeKek, getKek, hasKek, deleteKek, rotateKek,
-  customerCount, getKekMeta, listCustomers,
+  customerCount, getKekMeta, listCustomers, getEntry,
+  unwrapKek, migrateToUrk, addWrappedCredential, removeWrappedCredential,
 } from './key-store.js';
 import { initAudit, logAudit, queryAudit, verifyIntegrity, detectAnomalies } from './audit.js';
 
@@ -91,23 +92,22 @@ function validateCustomerId(id) {
 
 // ── Endpoints ──
 
-// POST /unwrap — Return KEK hex for the customer matching client cert CN
-app.post('/unwrap', (req, res) => {
+// POST /unwrap — Return KEK hex. URK-wrapped customers require URK + credentialId.
+app.post('/unwrap', async (req, res) => {
   const cert = getCertInfo(req);
-  const customerId = cert.cn; // Customer ID comes from client cert CN, not body
+  const customerId = cert.cn;
 
   if (!validateCustomerId(customerId)) {
     return res.status(400).json({ error: 'Invalid customer ID in certificate CN' });
   }
 
-  // Rate limit (admin exempt)
   if (!isAdmin(req) && !checkRateLimit(cert.fingerprint, RATE_LIMIT_UNWRAP)) {
     logAudit({ customerId, action: 'error', certFingerprint: cert.fingerprint, sourceIp: req.ip, details: { error: 'Rate limited' } });
     return res.status(429).json({ error: 'Rate limit exceeded' });
   }
 
-  const kekHex = getKek(customerId);
-  if (!kekHex) {
+  const entry = getEntry(customerId);
+  if (!entry) {
     logAudit({ customerId, action: 'error', certFingerprint: cert.fingerprint, sourceIp: req.ip, details: { error: 'Key not found' } });
     return res.status(404).json({ error: 'No KEK for this customer' });
   }
@@ -115,13 +115,31 @@ app.post('/unwrap', (req, res) => {
   const ttlHours = parseInt(req.body?.ttlHours, 10) || 72;
   const ttlSeconds = Math.min(Math.max(ttlHours, 1), 720) * 3600;
 
-  logAudit({ customerId, action: 'unwrap', certFingerprint: cert.fingerprint, sourceIp: req.ip });
+  if (entry.mode === 'urk-wrapped') {
+    const { urk, credentialId } = req.body;
+    if (!urk || !credentialId) {
+      return res.status(400).json({ error: 'URK and credentialId required for URK-wrapped customers', mode: 'urk-wrapped' });
+    }
+    if (urk.length !== 64 || !/^[0-9a-fA-F]+$/.test(urk)) {
+      return res.status(400).json({ error: 'URK must be 64 hex characters' });
+    }
+    try {
+      const kekHex = await unwrapKek(customerId, credentialId, Buffer.from(urk, 'hex'));
+      logAudit({ customerId, action: 'unwrap', certFingerprint: cert.fingerprint, sourceIp: req.ip, details: { mode: 'urk', credentialId: credentialId.substring(0, 20) } });
+      return res.json({ kek: kekHex, ttl: ttlSeconds, expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(), mode: 'urk-wrapped' });
+    } catch (err) {
+      logAudit({ customerId, action: 'error', certFingerprint: cert.fingerprint, sourceIp: req.ip, details: { error: 'URK unwrap failed', credentialId: credentialId.substring(0, 20) } });
+      return res.status(403).json({ error: 'Invalid URK or credential' });
+    }
+  }
 
-  res.json({
-    kek: kekHex,
-    ttl: ttlSeconds,
-    expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
-  });
+  // Plaintext mode (legacy)
+  const kekHex = getKek(customerId);
+  if (!kekHex) {
+    return res.status(500).json({ error: 'Internal error' });
+  }
+  logAudit({ customerId, action: 'unwrap', certFingerprint: cert.fingerprint, sourceIp: req.ip, details: { mode: 'plaintext' } });
+  res.json({ kek: kekHex, ttl: ttlSeconds, expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(), mode: 'plaintext' });
 });
 
 // POST /wrap — Store a new KEK for a customer (admin only)
@@ -190,6 +208,60 @@ app.delete('/customer/:id', (req, res) => {
   });
 
   res.json({ ok: true, deleted });
+});
+
+// POST /migrate-to-urk — Wrap existing plaintext KEK with URK (VPS cert, during first PRF login)
+app.post('/migrate-to-urk', async (req, res) => {
+  const cert = getCertInfo(req);
+  const customerId = cert.cn;
+
+  if (!validateCustomerId(customerId)) {
+    return res.status(400).json({ error: 'Invalid customer ID' });
+  }
+
+  const { urk, credentialId } = req.body;
+  if (!urk || urk.length !== 64 || !credentialId) {
+    return res.status(400).json({ error: 'URK (64 hex) and credentialId required' });
+  }
+
+  try {
+    await migrateToUrk(customerId, credentialId, Buffer.from(urk, 'hex'));
+    logAudit({ customerId, action: 'migrate-to-urk', certFingerprint: cert.fingerprint, sourceIp: req.ip, details: { credentialId: credentialId.substring(0, 20) } });
+    res.json({ ok: true, mode: 'urk-wrapped' });
+  } catch (err) {
+    logAudit({ customerId, action: 'error', certFingerprint: cert.fingerprint, sourceIp: req.ip, details: { error: err.message } });
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// POST /add-credential — Add another passkey's wrapped KEK (VPS cert)
+app.post('/add-credential', (req, res) => {
+  const cert = getCertInfo(req);
+  const customerId = cert.cn;
+
+  const { credentialId, wrappedKek } = req.body;
+  if (!credentialId || !wrappedKek) {
+    return res.status(400).json({ error: 'credentialId and wrappedKek (base64) required' });
+  }
+
+  try {
+    const blob = Buffer.from(wrappedKek, 'base64');
+    addWrappedCredential(customerId, credentialId, blob);
+    logAudit({ customerId, action: 'add-credential', certFingerprint: cert.fingerprint, sourceIp: req.ip, details: { credentialId: credentialId.substring(0, 20) } });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// DELETE /credential/:customerId/:credentialId — Remove a passkey's wrapped KEK (admin)
+app.delete('/credential/:customerId/:credentialId', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const { customerId, credentialId } = req.params;
+  const cert = getCertInfo(req);
+  const removed = removeWrappedCredential(customerId, credentialId);
+  logAudit({ customerId, action: 'remove-credential', certFingerprint: cert.fingerprint, sourceIp: req.ip, details: { credentialId: credentialId.substring(0, 20), removed } });
+  res.json({ ok: true, removed });
 });
 
 // GET /health — No mTLS required (for uptime monitors)

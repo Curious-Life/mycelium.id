@@ -15,6 +15,7 @@
 import { requireAuth, type AgentIdentity } from "../middleware/agent-auth";
 import { corsHeaders } from "../utils/cors";
 import type { Env } from "../types/env";
+import { getD1ForTenant, extractTenantId } from "../services/tenant-d1";
 
 export async function handleGetSecrets(
   request: Request,
@@ -25,7 +26,15 @@ export async function handleGetSecrets(
 
   const identity = auth as AgentIdentity;
 
-  if (!env.DB) {
+  // TENANT ROUTING: Each customer VPS has its own secrets in its own D1.
+  // Operator infrastructure secrets are seeded per-tenant, encrypted with
+  // that tenant's SYSTEM_KEY (which lives only on that VPS's tmpfs).
+  //
+  // Without this routing, customer agents would pull operator secrets from
+  // the owner's DB encrypted with the owner's key — which they cannot decrypt.
+  const tenantId = extractTenantId(request);
+  const db = getD1ForTenant(env, tenantId);
+  if (!db) {
     return new Response(JSON.stringify({ error: "Database not available" }), {
       status: 503,
       headers: { "Content-Type": "application/json", ...corsHeaders(request) },
@@ -35,23 +44,35 @@ export async function handleGetSecrets(
   // Build scope placeholders
   const scopePlaceholders = identity.scopes.map(() => "?").join(",");
   const query = `
-    SELECT key, value, scope FROM secrets
+    SELECT key, value, scope, key_family FROM secrets
     WHERE scope IN (${scopePlaceholders})
       AND (agent IS NULL OR agent = ?)
     ORDER BY key
   `;
 
   const params = [...identity.scopes, identity.agent];
-  const { results } = await env.DB.prepare(query).bind(...params).all();
+  const { results } = await db.prepare(query).bind(...params).all();
 
-  // SWISS VAULT: return raw values — VPS decrypts locally with crypto-local.js
+  // SWISS VAULT: return raw values — VPS decrypts locally with crypto-local.js.
+  //
+  // Backward-compatible response shape:
+  //   - `secrets`: { KEY: "ciphertext" }   (old clients read this directly)
+  //   - `key_families`: { KEY: "system"|"user" } (new clients use this hint)
+  //
+  // New VPS bootstrap-secrets.js can infer the key family from the envelope
+  // version tag anyway (v3 carries `kf` internally), so key_families is purely
+  // advisory. This keeps the migration rollout order-insensitive.
   const secrets: Record<string, string> = {};
+  const keyFamilies: Record<string, string> = {};
   for (const row of results || []) {
-    secrets[row.key as string] = row.value as string;
+    const k = row.key as string;
+    secrets[k] = row.value as string;
+    keyFamilies[k] = (row.key_family as string) || "system";
   }
 
   return new Response(JSON.stringify({
     secrets,
+    key_families: keyFamilies,
     count: Object.keys(secrets).length,
     agent: identity.agent,
     scopes: identity.scopes,
@@ -75,7 +96,11 @@ export async function handlePutSecret(
     });
   }
 
-  if (!env.DB) {
+  // TENANT ROUTING: write to the caller's tenant D1. Operator seeding
+  // scripts must send X-Tenant-ID to target a specific customer's D1.
+  const tenantId = extractTenantId(request);
+  const db = getD1ForTenant(env, tenantId);
+  if (!db) {
     return new Response(JSON.stringify({ error: "Database not available" }), {
       status: 503,
       headers: { "Content-Type": "application/json", ...corsHeaders(request) },
@@ -89,6 +114,7 @@ export async function handlePutSecret(
     agent?: string | null;
     user_id?: string;
     description?: string;
+    key_family?: "system" | "user";
   };
 
   if (!body.key || !body.value) {
@@ -100,16 +126,19 @@ export async function handlePutSecret(
 
   const scope = body.scope || "org";
   const userId = body.user_id || identity.user_id;
+  const keyFamily = body.key_family === "user" ? "user" : "system";
 
-  // SWISS VAULT: value is pre-encrypted by VPS — store as-is
-  await env.DB.prepare(`
-    INSERT INTO secrets (key, value, scope, user_id, agent, version, description, updated_at)
-    VALUES (?, ?, ?, ?, ?, 1, ?, datetime('now'))
+  // SWISS VAULT: value is pre-encrypted by VPS — store as-is.
+  // key_family tells the VPS which key decrypts it on GET.
+  await db.prepare(`
+    INSERT INTO secrets (key, value, scope, user_id, agent, version, description, key_family, updated_at)
+    VALUES (?, ?, ?, ?, ?, 1, ?, ?, datetime('now'))
     ON CONFLICT(key, user_id, agent) DO UPDATE SET
       value = excluded.value,
       scope = excluded.scope,
       version = secrets.version + 1,
       description = excluded.description,
+      key_family = excluded.key_family,
       updated_at = datetime('now')
   `).bind(
     body.key,
@@ -118,6 +147,7 @@ export async function handlePutSecret(
     userId,
     body.agent ?? null,
     body.description ?? null,
+    keyFamily,
   ).run();
 
   return new Response(JSON.stringify({ ok: true, key: body.key }), {
@@ -141,7 +171,10 @@ export async function handleDeleteSecret(
     });
   }
 
-  if (!env.DB) {
+  // TENANT ROUTING: delete from caller's tenant D1
+  const tenantId = extractTenantId(request);
+  const db = getD1ForTenant(env, tenantId);
+  if (!db) {
     return new Response(JSON.stringify({ error: "Database not available" }), {
       status: 503,
       headers: { "Content-Type": "application/json", ...corsHeaders(request) },
@@ -152,7 +185,7 @@ export async function handleDeleteSecret(
   const agent = url.searchParams.get("agent") || null;
   const userId = url.searchParams.get("user_id") || "system";
 
-  const result = await env.DB.prepare(
+  const result = await db.prepare(
     "DELETE FROM secrets WHERE key = ? AND user_id = ? AND (agent IS ? OR agent = ?)"
   ).bind(key, userId, agent, agent).run();
 

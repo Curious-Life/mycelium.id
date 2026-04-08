@@ -231,6 +231,61 @@
 		}
 	}
 
+	// ── PRF / URK helpers ──
+
+	function base64urlToBytes(b64url: string): Uint8Array {
+		const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+		const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+		const binary = atob(b64 + pad);
+		const bytes = new Uint8Array(binary.length);
+		for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+		return bytes;
+	}
+
+	function bytesToHex(bytes: Uint8Array): string {
+		return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+	}
+
+	/**
+	 * Derive URK from PRF output via HKDF-SHA-256.
+	 * Same derivation on every login — deterministic from passkey + salt.
+	 */
+	async function deriveUrk(prfOutput: ArrayBuffer): Promise<string> {
+		const prfKey = await crypto.subtle.importKey('raw', prfOutput, 'HKDF', false, ['deriveBits']);
+		const urkBits = await crypto.subtle.deriveBits(
+			{ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('mycelium:urk:v1') },
+			prfKey, 256
+		);
+		return bytesToHex(new Uint8Array(urkBits));
+	}
+
+	/**
+	 * Convert PRF extension salts from base64url strings to BufferSource.
+	 * The server sends salts as base64url; the WebAuthn API needs BufferSource.
+	 */
+	function convertPrfSalts(options: Record<string, unknown>): boolean {
+		const ext = options.extensions as Record<string, unknown> | undefined;
+		if (!ext?.prf) return false;
+
+		const prf = ext.prf as Record<string, unknown>;
+		// evalByCredential: map of credentialId → { first: base64url }
+		if (prf.evalByCredential) {
+			const ebc = prf.evalByCredential as Record<string, { first: string | Uint8Array }>;
+			for (const [credId, val] of Object.entries(ebc)) {
+				if (typeof val.first === 'string') {
+					ebc[credId] = { first: base64urlToBytes(val.first) };
+				}
+			}
+			return true;
+		}
+		// eval.first: single salt
+		if (prf.eval && typeof (prf.eval as Record<string, unknown>).first === 'string') {
+			(prf.eval as Record<string, unknown>).first = base64urlToBytes((prf.eval as Record<string, unknown>).first as string);
+			return true;
+		}
+		return false;
+	}
+
 	// Passkey login (returning user)
 	async function handlePasskeyLogin() {
 		loading = true;
@@ -245,13 +300,24 @@
 			if (!optionsRes.ok) throw new Error('Failed to get authentication options');
 
 			const options = await optionsRes.json();
+
+			// Convert PRF salts from base64url to BufferSource for WebAuthn API
+			const hasPrf = convertPrfSalts(options);
+
 			const credential = await startAuthentication(options);
+
+			// Derive URK from PRF output if available
+			let urk: string | null = null;
+			const prfResults = (credential.clientExtensionResults as Record<string, unknown>)?.prf as { results?: { first?: ArrayBuffer } } | undefined;
+			if (hasPrf && prfResults?.results?.first) {
+				urk = await deriveUrk(prfResults.results.first);
+			}
 
 			const verifyRes = await fetch('/auth/passkey/login/verify', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				credentials: 'same-origin',
-				body: JSON.stringify({ credential }),
+				body: JSON.stringify({ credential, urk }),
 			});
 			if (!verifyRes.ok) {
 				const data = await verifyRes.json().catch(() => ({}));
@@ -285,13 +351,24 @@
 			}
 
 			const options = await optionsRes.json();
+
+			// Convert PRF salt for registration
+			const hasPrf = convertPrfSalts(options);
+
 			const credential = await startRegistration(options);
+
+			// Derive URK from PRF output if authenticator supports it
+			let urk: string | null = null;
+			const prfResults = (credential.clientExtensionResults as Record<string, unknown>)?.prf as { enabled?: boolean; results?: { first?: ArrayBuffer } } | undefined;
+			if (hasPrf && prfResults?.enabled && prfResults?.results?.first) {
+				urk = await deriveUrk(prfResults.results.first);
+			}
 
 			const verifyRes = await fetch('/auth/passkey/register/verify', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				credentials: 'same-origin',
-				body: JSON.stringify({ registrationCode: code, credential }),
+				body: JSON.stringify({ registrationCode: code, credential, urk }),
 			});
 			if (!verifyRes.ok) {
 				const data = await verifyRes.json().catch(() => ({}));
@@ -406,7 +483,7 @@
 						<div>
 							<input
 								bind:value={masterKeyInput}
-								type="text"
+								type="password"
 								placeholder="Paste your 64-character master key"
 								autocomplete="off"
 								spellcheck="false"

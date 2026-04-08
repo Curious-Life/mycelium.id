@@ -230,11 +230,9 @@
 		<div class="step-guide">
 			<div class="data-sources">
 				<div class="data-source"><span class="ds-icon">&#128101;</span><span class="ds-name">LinkedIn</span><span class="ds-desc">Connections, messages</span><span class="ds-format">ZIP</span></div>
-				<div class="data-source"><span class="ds-icon">&#128172;</span><span class="ds-name">WhatsApp</span><span class="ds-desc">Chat history</span><span class="ds-format">Export</span></div>
-				<div class="data-source"><span class="ds-icon">&#9993;</span><span class="ds-name">Telegram</span><span class="ds-desc">Messages, channels</span><span class="ds-format">JSON</span></div>
-				<div class="data-source"><span class="ds-icon">&#128231;</span><span class="ds-name">Email</span><span class="ds-desc">Gmail, Outlook</span><span class="ds-format">MBOX</span></div>
-				<div class="data-source"><span class="ds-icon">&#128221;</span><span class="ds-name">Notes</span><span class="ds-desc">Obsidian, Notion</span><span class="ds-format">MD</span></div>
-				<div class="data-source"><span class="ds-icon">&#128196;</span><span class="ds-name">Documents</span><span class="ds-desc">PDFs, transcripts</span><span class="ds-format">PDF/TXT</span></div>
+				<div class="data-source"><span class="ds-icon">&#128221;</span><span class="ds-name">Obsidian</span><span class="ds-desc">Markdown vault</span><span class="ds-format">ZIP</span></div>
+				<div class="data-source"><span class="ds-icon">&#129302;</span><span class="ds-name">ChatGPT</span><span class="ds-desc">Conversation export</span><span class="ds-format">JSON</span></div>
+				<div class="data-source"><span class="ds-icon">&#10024;</span><span class="ds-name">Claude</span><span class="ds-desc">Chat history</span><span class="ds-format">JSON</span></div>
 			</div>
 			<p style="margin-top: 0.75rem;"><a href="/import" style="color: var(--color-accent);">Go to Import &rarr;</a></p>
 		</div>
