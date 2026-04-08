@@ -4,6 +4,7 @@
 	import JSZip from 'jszip';
 	import { chatMessages, connectionStatus, type ChatMessage } from '$lib/stores/chat';
 	import { apiPostForm, apiGet } from '$lib/api';
+	import { isSecureChannelConfigured } from '$lib/vps-identity';
 	import { toasts } from '$lib/stores/toast';
 	import { browser } from '$app/environment';
 
@@ -343,131 +344,143 @@
 
 		connectionStatus.setStatus('connecting');
 
+		let content = '';
+		let thinking = '';
+
 		try {
-			const res = await fetch('/portal/chat/stream', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				credentials: 'same-origin',
-				body: JSON.stringify({
-					message: userMessage,
-					enableThinking,
-					...(selectedAgentId ? { agentId: selectedAgentId } : {}),
-				}),
-				signal: abortController.signal
-			});
-
-			if (!res.ok) {
-				const text = await res.text();
-				let errorMsg = `Server error (${res.status})`;
-				try {
-					const data = JSON.parse(text);
-					errorMsg = data.error || data.message || errorMsg;
-				} catch {
-					if (text.includes('Agent not configured')) errorMsg = 'Agent not configured';
-					else if (text.includes('Session expired')) errorMsg = 'Session expired';
-					else if (text.includes('auth failed')) errorMsg = 'Agent auth failed';
-					else if (res.status === 502) errorMsg = 'Could not reach agent server';
-				}
-				throw new Error(errorMsg);
-			}
-
-			connectionStatus.setStatus('streaming');
-
-			const reader = res.body?.getReader();
-			if (!reader) throw new Error('No response body');
-
-			const decoder = new TextDecoder();
-			let buffer = '';
-			let content = '';
-			let thinking = '';
 			let toolsInProgress: string[] = [];
 			let usage: { inputTokens: number; outputTokens: number; cost: number } | undefined;
 			let thinkingTokens = 0;
 
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split('\n');
-				buffer = lines.pop() || '';
-
-				for (const line of lines) {
-					if (!line.startsWith('data: ')) continue;
-					const data = line.slice(6);
-					if (data === '[DONE]') continue;
-
-					try {
-						const event = JSON.parse(data);
-
-						switch (event.type) {
-							case 'text_delta':
-								content += event.content || event.text || '';
-								chatMessages.updateMessage(assistantMsgId, { content });
-								break;
-
-							case 'thinking_start':
-								thinking = '';
-								break;
-
-							case 'thinking_delta':
-								thinking += event.content || event.text || '';
-								chatMessages.updateMessage(assistantMsgId, { thinking });
-								break;
-
-							case 'thinking_end':
-								break;
-
-							case 'tool_start':
-								toolsInProgress = [...toolsInProgress, event.name || event.tool || 'tool'];
-								chatMessages.updateMessage(assistantMsgId, { toolsInProgress });
-								break;
-
-							case 'tool_complete':
-							case 'tool_error':
-								toolsInProgress = toolsInProgress.filter((t) => t !== (event.name || event.tool));
-								chatMessages.updateMessage(assistantMsgId, { toolsInProgress });
-								break;
-
-							case 'usage':
-								usage = {
-									inputTokens: event.inputTokens,
-									outputTokens: event.outputTokens,
-									cost: (event.inputTokens / 1_000_000) * 3 + (event.outputTokens / 1_000_000) * 15
-								};
-								thinkingTokens = event.thinkingTokens || 0;
-								break;
-
-							case 'done':
-								chatMessages.updateMessage(assistantMsgId, {
-									isStreaming: false,
-									toolsInProgress: [],
-									toolsUsed: event.toolsUsed || [],
-									tokenUsage: usage,
-									thinkingTokens: thinkingTokens > 0 ? thinkingTokens : undefined
-								});
-								break;
-
-							case 'error':
-								if (content) {
-									content += `\n\n*Error: ${event.message}*`;
-									chatMessages.updateMessage(assistantMsgId, { content });
-								} else {
-									throw new Error(event.message);
-								}
-								break;
+			const handleEvent = (event: Record<string, unknown>) => {
+				switch (event.type) {
+					case 'stream_start':
+						connectionStatus.setStatus('streaming');
+						break;
+					case 'text_delta':
+						content += (event.content as string) || (event.text as string) || '';
+						chatMessages.updateMessage(assistantMsgId, { content });
+						break;
+					case 'thinking_start':
+						thinking = '';
+						break;
+					case 'thinking_delta':
+						thinking += (event.content as string) || (event.text as string) || '';
+						chatMessages.updateMessage(assistantMsgId, { thinking });
+						break;
+					case 'thinking_end':
+						break;
+					case 'tool_start':
+						toolsInProgress = [...toolsInProgress, (event.name as string) || (event.tool as string) || 'tool'];
+						chatMessages.updateMessage(assistantMsgId, { toolsInProgress });
+						break;
+					case 'tool_complete':
+					case 'tool_error':
+						toolsInProgress = toolsInProgress.filter((t) => t !== ((event.name as string) || (event.tool as string)));
+						chatMessages.updateMessage(assistantMsgId, { toolsInProgress });
+						break;
+					case 'usage':
+						usage = {
+							inputTokens: event.inputTokens as number,
+							outputTokens: event.outputTokens as number,
+							cost: ((event.inputTokens as number) / 1_000_000) * 3 + ((event.outputTokens as number) / 1_000_000) * 15
+						};
+						thinkingTokens = (event.thinkingTokens as number) || 0;
+						break;
+					case 'done':
+						chatMessages.updateMessage(assistantMsgId, {
+							isStreaming: false,
+							toolsInProgress: [],
+							toolsUsed: (event.toolsUsed as string[]) || [],
+							tokenUsage: usage,
+							thinkingTokens: thinkingTokens > 0 ? thinkingTokens : undefined
+						});
+						break;
+					case 'error':
+						if (content) {
+							content += `\n\n*Error: ${event.message}*`;
+							chatMessages.updateMessage(assistantMsgId, { content });
+						} else {
+							throw new Error(event.message as string);
 						}
-					} catch (e) {
-						if (e instanceof SyntaxError) continue;
-						throw e;
+						break;
+					case 'keepalive':
+						break;
+				}
+			};
+
+			// Route through encrypted WS channel if configured
+			if (isSecureChannelConfigured()) {
+				const { getChannel } = await import('$lib/secure-channel');
+				const channel = getChannel();
+				connectionStatus.setStatus('streaming');
+				await channel.requestStream('chat', {
+					message: userMessage,
+					enableThinking,
+					...(selectedAgentId ? { agentId: selectedAgentId } : {}),
+				}, (chunk) => {
+					handleEvent(chunk as Record<string, unknown>);
+				});
+				// Stream complete
+				if (!usage) {
+					chatMessages.updateMessage(assistantMsgId, {
+						isStreaming: false,
+						toolsInProgress: []
+					});
+				}
+			} else {
+				// Fallback: plain HTTPS (no encrypted channel configured)
+				const csrfMatch = document.cookie.match(/mycelium_csrf=([^;]+)/);
+				const chatHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+				if (csrfMatch) chatHeaders['X-CSRF-Token'] = csrfMatch[1];
+
+				const res = await fetch('/portal/chat/stream', {
+					method: 'POST',
+					headers: chatHeaders,
+					credentials: 'same-origin',
+					body: JSON.stringify({
+						message: userMessage,
+						enableThinking,
+						...(selectedAgentId ? { agentId: selectedAgentId } : {}),
+					}),
+					signal: abortController.signal
+				});
+
+				if (!res.ok) {
+					const text = await res.text();
+					let errorMsg = `Server error (${res.status})`;
+					try {
+						const errData = JSON.parse(text);
+						errorMsg = errData.error || errData.message || errorMsg;
+					} catch {
+						if (text.includes('Agent not configured')) errorMsg = 'Agent not configured';
+						else if (res.status === 502) errorMsg = 'Could not reach agent server';
+					}
+					throw new Error(errorMsg);
+				}
+
+				connectionStatus.setStatus('streaming');
+				const reader = res.body?.getReader();
+				if (!reader) throw new Error('No response body');
+
+				const decoder = new TextDecoder();
+				let buffer = '';
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					buffer += decoder.decode(value, { stream: true });
+					const lines = buffer.split('\n');
+					buffer = lines.pop() || '';
+					for (const line of lines) {
+						if (!line.startsWith('data: ')) continue;
+						const d = line.slice(6);
+						if (d === '[DONE]') continue;
+						try { handleEvent(JSON.parse(d)); }
+						catch (e) { if (!(e instanceof SyntaxError)) throw e; }
 					}
 				}
+				chatMessages.updateMessage(assistantMsgId, { isStreaming: false, toolsInProgress: [] });
 			}
-
-			chatMessages.updateMessage(assistantMsgId, {
-				isStreaming: false,
-				toolsInProgress: []
-			});
 
 			connectionStatus.setStatus('idle');
 		} catch (e) {

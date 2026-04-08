@@ -52,14 +52,26 @@ export class SecureChannel {
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 	private reqCounter = 0;
+	private _connectReject: ((reason: Error) => void) | null = null;
 
+	/** True when the channel is authenticated and ready to send requests. */
 	get available(): boolean {
 		return this.state === 'ready';
 	}
 
 	/** Connect and perform handshake. Resolves when ready. */
 	async connect(): Promise<void> {
-		if (this.state === 'ready' || this.state === 'connecting' || this.state === 'handshaking') return;
+		if (this.state === 'ready') return;
+		if (this.state === 'connecting' || this.state === 'handshaking' || this.state === 'authenticating') {
+			// Already connecting — wait for it
+			return new Promise<void>((resolve, reject) => {
+				const timeout = setTimeout(() => { reject(new Error('Channel connect timeout')); }, 15_000);
+				const unsub = this.onStateChange((s) => {
+					if (s === 'ready') { clearTimeout(timeout); unsub(); resolve(); }
+					if (s === 'error' || s === 'disconnected') { clearTimeout(timeout); unsub(); reject(new Error('Channel failed')); }
+				});
+			});
+		}
 
 		const vpsPub = getVpsNoisePublicKey();
 		if (!vpsPub) {
@@ -70,6 +82,7 @@ export class SecureChannel {
 		this.setState('connecting');
 
 		return new Promise<void>((resolve, reject) => {
+			this._connectReject = reject;
 			const wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/secure`;
 
 			try {
@@ -77,7 +90,7 @@ export class SecureChannel {
 				this.ws.binaryType = 'arraybuffer';
 			} catch (err) {
 				this.setState('error');
-				reject(err);
+				reject(err as Error);
 				return;
 			}
 
@@ -85,7 +98,6 @@ export class SecureChannel {
 				this.setState('handshaking');
 				this.initiator = new NoiseNKInitiator(vpsPub);
 
-				// Send the initiator's first handshake message
 				const payload = new TextEncoder().encode(JSON.stringify({
 					clientNonce: crypto.getRandomValues(new Uint8Array(16)).reduce((s, b) => s + b.toString(16).padStart(2, '0'), ''),
 					version: 1,
@@ -97,18 +109,16 @@ export class SecureChannel {
 			let handshakeProcessed = false;
 
 			this.ws.onmessage = (event) => {
-				const data = new Uint8Array(event.data as ArrayBuffer);
+				const msgData = new Uint8Array(event.data as ArrayBuffer);
 
 				if (this.state === 'handshaking' && !handshakeProcessed) {
-					// Process handshake response
 					handshakeProcessed = true;
 					try {
-						const result = this.initiator!.processResponderMessage(data);
+						const result = this.initiator!.processResponderMessage(msgData);
 						this.sendCipher = result.sendCipher;
 						this.recvCipher = result.recvCipher;
 						this.setState('authenticating');
 						this.startHeartbeat();
-						// Wait for auth_success from server
 					} catch (err) {
 						this.setState('error');
 						reject(new Error('Handshake failed: ' + (err as Error).message));
@@ -117,24 +127,26 @@ export class SecureChannel {
 					return;
 				}
 
-				// All subsequent messages are encrypted
 				if (!this.recvCipher) return;
 
 				try {
-					const frameBuf = bufferFromUint8(data);
-					const plaintext = decryptFrame(this.recvCipher, frameBuf);
+					const plaintext = decryptFrame(this.recvCipher, msgData);
 					const payload = JSON.parse(new TextDecoder().decode(plaintext));
-
-					this.handlePayload(payload, resolve);
+					this.handlePayload(payload, resolve, reject);
 				} catch (err) {
 					console.error('[secure-channel] Frame decryption failed:', (err as Error).message);
 				}
 			};
 
 			this.ws.onclose = () => {
+				const wasReady = this.state === 'ready';
 				this.cleanup();
 				this.setState('disconnected');
-				this.scheduleReconnect();
+				// Only auto-reconnect if the channel was previously working
+				// Don't reconnect if we never got past auth (avoids infinite loop)
+				if (wasReady) {
+					this.scheduleReconnect();
+				}
 			};
 
 			this.ws.onerror = () => {
@@ -143,7 +155,6 @@ export class SecureChannel {
 				}
 			};
 
-			// Timeout the entire connect attempt
 			setTimeout(() => {
 				if (this.state !== 'ready') {
 					this.ws?.close();
@@ -190,7 +201,7 @@ export class SecureChannel {
 			const timeout = setTimeout(() => {
 				this.pending.delete(id);
 				reject(new Error(`Stream timeout: ${type}`));
-			}, 5 * 60_000); // 5 min for streams
+			}, 5 * 60_000);
 
 			this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timeout, onChunk });
 			this.sendFrame({ id, type, data, channelToken: this.channelToken });
@@ -204,31 +215,39 @@ export class SecureChannel {
 
 	// ── Internal ──
 
-	private handlePayload(payload: Record<string, unknown>, connectResolve?: (value?: void) => void): void {
+	private handlePayload(
+		payload: Record<string, unknown>,
+		connectResolve?: (value?: void) => void,
+		connectReject?: (reason: Error) => void
+	): void {
 		const { type, id, data } = payload as { type: string; id?: string; data?: unknown };
 
-		// Auth messages
 		if (type === 'auth_success') {
 			const authData = data as { channelToken: string; userId: string };
 			this.channelToken = authData.channelToken;
 			this.setState('ready');
 			this.reconnectAttempt = 0;
+			this._connectReject = null;
 			connectResolve?.();
 			return;
 		}
 
 		if (type === 'auth_required') {
+			// Auth failed — reject the connect() promise so callers get an error
+			// Don't schedule reconnect — the user needs to log in first
 			this.setState('error');
+			const err = new Error('Secure channel auth failed — no valid session');
+			connectReject?.(err);
+			this._connectReject = null;
+			this.ws?.close();
 			return;
 		}
 
-		// Heartbeat
 		if (type === 'ping') {
 			this.sendFrame({ type: 'pong' });
 			return;
 		}
 
-		// Rekey notification from server
 		if (type === 'rekey') {
 			this.sendCipher?.rekey();
 			this.recvCipher?.rekey();
@@ -244,7 +263,7 @@ export class SecureChannel {
 
 			if (type === 'stream-chunk' && req.onChunk) {
 				req.onChunk(data);
-				return; // don't remove — more chunks coming
+				return;
 			}
 
 			if (type === 'stream-end') {
@@ -276,7 +295,7 @@ export class SecureChannel {
 	private sendFrame(payload: Record<string, unknown>): void {
 		if (!this.sendCipher || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 		const plaintext = new TextEncoder().encode(JSON.stringify(payload));
-		const frame = encryptFrame(this.sendCipher, bufferFromUint8(plaintext));
+		const frame = encryptFrame(this.sendCipher, plaintext);
 		this.ws.send(frame);
 	}
 
@@ -306,7 +325,7 @@ export class SecureChannel {
 	private startHeartbeat(): void {
 		this.heartbeatTimer = setInterval(() => {
 			if (this.state === 'ready') {
-				this.sendFrame({ type: 'pong' }); // respond to server's pings preemptively
+				this.sendFrame({ type: 'pong' });
 			}
 		}, HEARTBEAT_INTERVAL);
 	}
@@ -318,8 +337,8 @@ export class SecureChannel {
 		this.recvCipher = null;
 		this.channelToken = null;
 		this.initiator = null;
-		// Reject all pending requests
-		for (const [id, req] of this.pending) {
+		this._connectReject = null;
+		for (const [, req] of this.pending) {
 			clearTimeout(req.timeout);
 			req.reject(new Error('Channel closed'));
 		}
@@ -330,12 +349,7 @@ export class SecureChannel {
 		const delay = RECONNECT_DELAYS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS.length - 1)];
 		this.reconnectAttempt++;
 		this.reconnectTimer = setTimeout(() => {
-			this.connect().catch(() => {}); // scheduleReconnect will be called again on failure
+			this.connect().catch(() => {});
 		}, delay);
 	}
-}
-
-/** Convert Uint8Array to a type compatible with both browser and our encryptFrame/decryptFrame. */
-function bufferFromUint8(arr: Uint8Array): Uint8Array {
-	return arr;
 }

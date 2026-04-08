@@ -449,7 +449,7 @@ export async function decryptFields(
 
 /** Map of table → fields that get encrypted */
 export const ENCRYPTED_FIELDS: Record<string, string[]> = {
-  messages: ["content", "thinking"],
+  messages: ["content", "thinking", "tags", "entities", "entity_summary"],
   documents: ["content", "summary"],
   attachments: ["transcript"],
   clustering_points: ["content"],

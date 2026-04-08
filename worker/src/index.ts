@@ -2938,7 +2938,8 @@ async function handleSendCode(request: Request, env: Env): Promise<Response> {
 
 <!-- Header -->
 <tr><td style="padding:32px 36px 24px;border-bottom:1px solid #F0EDE4;">
-  <span style="font-family:Georgia,serif;font-size:20px;color:#1C1917;letter-spacing:-0.01em;">mycelium</span><span style="font-family:Georgia,serif;font-size:20px;color:#B8860B;font-style:italic;">.id</span>
+  <img src="https://mycelium.id/logo.svg" alt="" width="24" height="24" style="vertical-align:middle;margin-right:8px;">
+  <span style="font-family:Georgia,serif;font-size:20px;color:#1C1917;letter-spacing:-0.01em;vertical-align:middle;">mycelium</span><span style="font-family:Georgia,serif;font-size:20px;color:#B8860B;font-style:italic;vertical-align:middle;">.id</span>
 </td></tr>
 
 <!-- Code -->
@@ -3588,7 +3589,7 @@ button:hover{background:#D4A63C}
 .logo i{color:#E5B84C;font-style:italic}
 </style></head><body>
 <div class="card">
-<div class="logo">mycelium<i>.id</i></div>
+<div class="logo"><img src="https://mycelium.id/logo.svg" alt="" width="20" height="20" style="vertical-align:middle;margin-right:6px;">mycelium<i>.id</i></div>
 <h1>Verify your download</h1>
 <p>Enter the 6-digit PIN from your email to download your vault export.</p>
 ${error ? `<div class="error">${error}</div>` : ''}

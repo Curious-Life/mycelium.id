@@ -1428,9 +1428,9 @@ ${sourceAgent ? `\n4. **Decline** - If this is outside your scope, poorly specif
 
 **@Mention requirement**: When your response is directed at another agent, ALWAYS @mention them so they get notified. Use \`/collab/send\` with threadId to continue in the same thread. If you post results to a different channel, @mention the requesting agent there too.`;
 
-  console.log(`[${LOG_PREFIX}] Chat from ${username} in #${channel} (${taskType}): "${prompt.substring(0, 50)}..."`);
+  console.log(`[${LOG_PREFIX}] Chat from ${username} in #${channel} (${taskType}): ${prompt.length} chars`);
   addActivity('action', `Received message from ${username} in #${channel}`, { type: 'discord-message', username, channel });
-  addActivity('thought', `Processing: "${prompt.substring(0, 150)}${prompt.length > 150 ? '...' : ''}"`, { type: 'processing' });
+  addActivity('thought', `Processing: ${prompt.length} chars`, { type: 'processing' });
 
   // Serialize through the lane queue — prevents concurrent /chat calls from racing
   const laneId = `agent:${AGENT_ID}`;
@@ -1843,7 +1843,7 @@ ${getFileSendingInstructions(req.body.source || 'portal', channelId)}${getCollab
 
 Respond naturally and conversationally.`;
 
-  console.log(`[${LOG_PREFIX}] Stream chat from ${username || 'portal'}: "${prompt.substring(0, 50)}..."`);
+  console.log(`[${LOG_PREFIX}] Stream chat from ${username || 'portal'}: ${prompt.length} chars`);
   console.log(`[${LOG_PREFIX}] Context budget: system=${systemPrompt.length}, context=${context.length}, heartbeat=${heartbeat.length}, assembled=${assembledContext.length}, teamDir=${teamDirectory.length}, prompt=${prompt.length}, total=${fullPrompt.length}`);
   addActivity('action', `Streaming chat from ${username || 'portal'}`, { type: 'stream-chat' });
 
@@ -1988,7 +1988,7 @@ Respond naturally and conversationally.`;
           claude.on('close', async (code) => {
             console.log(`[${LOG_PREFIX}] Stream Claude exited code=${code}, output=${fullOutput.length} chars, session=${sessionId || 'none'}`);
             if (code !== 0) {
-              console.error(`[${LOG_PREFIX}] Stream Claude error exit: code=${code}, output="${fullOutput.slice(0, 500)}", stderr="${(stderrBuffer || '').slice(0, 500)}"`);
+              console.error(`[${LOG_PREFIX}] Stream Claude error exit: code=${code}, output=${fullOutput.length} chars, stderr=${(stderrBuffer || '').length} chars`);
               console.error(`[${LOG_PREFIX}] Stream args were: ${args.join(' ')}`);
             }
             clearInterval(keepaliveTimer);
@@ -2175,7 +2175,7 @@ app.post('/think', async (req, res) => {
 
   eventLog.wakeStart(AGENT_ID, 'think_endpoint');
   addActivity('status', 'Autonomous awakening triggered', { type: 'think-start' });
-  addActivity('thought', `Think prompt: ${prompt.substring(0, 200)}${prompt.length > 200 ? '...' : ''}`, { type: 'think' });
+  addActivity('thought', `Think prompt: ${prompt.length} chars`, { type: 'think' });
 
   incrementActiveTask();
 
@@ -3846,7 +3846,7 @@ Respond naturally. If you have nothing valuable to add, respond with just: NO_RE
 
   console.log(`[${LOG_PREFIX}] Processing prompt from ${username} in #${channel}`);
   addActivity('action', `Prompt request from ${username}`, { channel, promptLength: prompt.length });
-  addActivity('thought', `Prompt: "${prompt.substring(0, 150)}${prompt.length > 150 ? '...' : ''}"`, { type: 'prompt-input' });
+  addActivity('thought', `Prompt: ${prompt.length} chars`, { type: 'prompt-input' });
   const promptModel = getModelForTask(runtime, 'chat');
   addActivity('action', `Spawning Claude Code process (model: ${promptModel})`, { type: 'claude-spawn', model: promptModel });
 
@@ -4965,7 +4965,7 @@ function setCsrfCookie(res) {
   // Non-HttpOnly so JavaScript can read it to send as header
   const existing = res.getHeader('Set-Cookie');
   const cookies = Array.isArray(existing) ? existing : existing ? [existing] : [];
-  cookies.push(`${CSRF_COOKIE}=${csrfToken}; Path=/; SameSite=Strict; Max-Age=${7 * 24 * 60 * 60}${isProduction ? '; Secure' : ''}`);
+  cookies.push(`${CSRF_COOKIE}=${csrfToken}; Path=/; SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}${isProduction ? '; Secure' : ''}`);
   res.setHeader('Set-Cookie', cookies);
 }
 
@@ -4973,6 +4973,13 @@ function setCsrfCookie(res) {
 function csrfProtect(req, res, next) {
   // Safe methods don't need CSRF
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  // Auth endpoints are pre-login — no CSRF cookie exists yet
+  if (req.path.startsWith('/auth/')) return next();
+  // Portal endpoints use session cookie auth + encrypted WS channel — CSRF double-submit
+  // is unreliable here (SameSite cookie issues on CF proxy). Session auth is sufficient.
+  if (req.path.startsWith('/portal/')) return next();
+  // Agent chat stream also exempt (session auth)
+  if (req.path === '/chat/stream') return next();
   // API token auth (agent-to-agent) skips CSRF
   if (req.headers['authorization']?.startsWith('Bearer ')) return next();
   // Worker secret auth skips CSRF
@@ -10826,36 +10833,57 @@ if (process.env.SECURE_CHANNEL_ENABLED === '1' || process.env.SECURE_CHANNEL_ENA
           return { realms: await db.clusteringPoints.getRealms(user.id) };
         },
 
-        // Wealth
+        // Wealth — method names match lib/db-d1.js wealth namespace
         'wealth-portfolios': async (_data, user) => {
           const db = requireDb();
-          return { portfolios: await db.wealth.getPortfolios(user.id) };
+          return { portfolios: await db.wealth.listPortfolios(user.id) };
+        },
+        'wealth-create-portfolio': async (data, user) => {
+          const db = requireDb();
+          const { name, baseCurrency, type } = data;
+          if (!name) throw Object.assign(new Error('Portfolio name required'), { status: 400 });
+          const portfolio = await db.wealth.createPortfolio(user.id, name, baseCurrency || 'EUR', type || 'personal');
+          return { portfolio };
         },
         'wealth-portfolio-detail': async (data, user) => {
           const db = requireDb();
-          const p = await db.wealth.getPortfolio(user.id, data.portfolioId);
+          const p = await db.wealth.getPortfolio(data.portfolioId, user.id);
           if (!p) throw Object.assign(new Error('Portfolio not found'), { status: 404 });
           return { portfolio: p };
         },
         'wealth-positions': async (data, user) => {
           const db = requireDb();
-          return { positions: await db.wealth.getPositions(user.id, data.portfolioId) };
+          const portfolio = await db.wealth.getPortfolio(data.portfolioId, user.id);
+          if (!portfolio) throw Object.assign(new Error('Portfolio not found'), { status: 404 });
+          return { positions: await db.wealth.getPositions(data.portfolioId) };
         },
         'wealth-transactions': async (data, user) => {
           const db = requireDb();
-          return { transactions: await db.wealth.getTransactions(user.id, data.portfolioId) };
+          const portfolio = await db.wealth.getPortfolio(data.portfolioId, user.id);
+          if (!portfolio) throw Object.assign(new Error('Portfolio not found'), { status: 404 });
+          return { transactions: await db.wealth.listTransactions(data.portfolioId, {
+            limit: parseInt(data.limit, 10) || 100,
+          }) };
         },
         'wealth-performance': async (data, user) => {
           const db = requireDb();
-          return { performance: await db.wealth.getPerformance(user.id, data.portfolioId) };
+          const portfolio = await db.wealth.getPortfolio(data.portfolioId, user.id);
+          if (!portfolio) throw Object.assign(new Error('Portfolio not found'), { status: 404 });
+          const snapshots = await db.wealth.getSnapshots(data.portfolioId, {
+            from: data.from, to: data.to,
+          });
+          return { performance: snapshots };
         },
         'wealth-watchlist': async (_data, user) => {
           const db = requireDb();
           return { watchlist: await db.wealth.getWatchlist(user.id) };
         },
-        'wealth-assets': async (_data, user) => {
+        'wealth-assets': async (data, _user) => {
           const db = requireDb();
-          return { assets: await db.wealth.getAssets(user.id) };
+          if (data.query) {
+            return { assets: await db.wealth.findAssets(data.query) };
+          }
+          return { assets: [] };
         },
 
         // Connections
@@ -10863,11 +10891,116 @@ if (process.env.SECURE_CHANNEL_ENABLED === '1' || process.env.SECURE_CHANNEL_ENA
           const db = requireDb();
           return { connections: await db.connections.list(user.id) };
         },
+        'connections-count': async (_data, user) => {
+          const db = requireDb();
+          return await db.connections.count(user.id);
+        },
+        'connections-pending': async (_data, user) => {
+          const db = requireDb();
+          return { pending: await db.connections.pending(user.id) };
+        },
+        'connection-request': async (data, user) => {
+          const db = requireDb();
+          const handle = (data.toHandle || '').replace(/^@/, '').trim();
+          if (!handle) throw Object.assign(new Error('Handle required'), { status: 400 });
+          return await db.connections.request(user.id, handle);
+        },
+        'connection-accept': async (data, user) => {
+          const db = requireDb();
+          return await db.connections.accept(user.id, data.connectionId);
+        },
+        'connection-reject': async (data, user) => {
+          const db = requireDb();
+          return await db.connections.reject(user.id, data.connectionId);
+        },
+        'connection-block': async (data, user) => {
+          const db = requireDb();
+          return await db.connections.block(user.id, data.connectionId);
+        },
+        'connection-delete': async (data, user) => {
+          const db = requireDb();
+          return await db.connections.disconnect(user.id, data.connectionId);
+        },
+        'connection-overlap': async (data, user) => {
+          const db = requireDb();
+          return await db.connections.getOverlap(user.id, data.connectionId);
+        },
 
         // Contexts
         'contexts': async (_data, user) => {
           const db = requireDb();
           return { contexts: await db.contexts.list(user.id) };
+        },
+        'context-create': async (data, user) => {
+          const db = requireDb();
+          if (!data.name) throw Object.assign(new Error('Name required'), { status: 400 });
+          return await db.contexts.create(user.id, { name: data.name, is_private: data.is_private });
+        },
+        'context-update': async (data, user) => {
+          const db = requireDb();
+          return await db.contexts.rename(user.id, data.contextId, data.name);
+        },
+        'context-delete': async (data, user) => {
+          const db = requireDb();
+          return await db.contexts.remove(user.id, data.contextId);
+        },
+        'context-add-territory': async (data, _user) => {
+          const db = requireDb();
+          return await db.contexts.addTerritory(data.contextId, parseInt(data.territoryId));
+        },
+        'context-remove-territory': async (data, _user) => {
+          const db = requireDb();
+          return await db.contexts.removeTerritory(data.contextId, parseInt(data.territoryId));
+        },
+        'context-grant-access': async (data, _user) => {
+          const db = requireDb();
+          return await db.contexts.grant(data.contextId, data.connectionId);
+        },
+        'context-revoke-access': async (data, _user) => {
+          const db = requireDb();
+          return await db.contexts.revoke(data.contextId, data.connectionId);
+        },
+        'context-territories': async (data, _user) => {
+          const db = requireDb();
+          return { territories: await db.contexts.getTerritories(data.contextId) };
+        },
+        'context-connections': async (data, _user) => {
+          const db = requireDb();
+          return { connections: await db.contexts.getConnections(data.contextId) };
+        },
+
+        // Documents — write operations
+        'documents-move': async (data, user) => {
+          const db = requireDb();
+          await db.documents.moveToFolder(user.id, data.path, data.folder_id || null);
+          return { ok: true };
+        },
+        'documents-pin': async (data, user) => {
+          const db = requireDb();
+          if (data.pinned) await db.documents.pin(user.id, data.path);
+          else await db.documents.unpin(user.id, data.path);
+          return { ok: true };
+        },
+        'document-delete': async (data, user) => {
+          const db = requireDb();
+          await db.documents.delete(user.id, data.documentId || data.path);
+          return { ok: true };
+        },
+
+        // Folders — write operations
+        'folder-create': async (data, user) => {
+          const db = requireDb();
+          if (!data.name?.trim()) throw Object.assign(new Error('Name required'), { status: 400 });
+          return await db.folders.create(user.id, data.name.trim(), data.parent_id || null);
+        },
+        'folder-update': async (data, user) => {
+          const db = requireDb();
+          if (!data.name?.trim()) throw Object.assign(new Error('Name required'), { status: 400 });
+          return await db.folders.rename(user.id, data.folderId, data.name.trim());
+        },
+        'folder-delete': async (data, user) => {
+          const db = requireDb();
+          return await db.folders.delete(user.id, data.folderId);
         },
 
         // Attachments
@@ -10876,6 +11009,103 @@ if (process.env.SECURE_CHANNEL_ENABLED === '1' || process.env.SECURE_CHANNEL_ENA
           const limit = Math.min(200, Math.max(1, parseInt(data.limit, 10) || 50));
           const type = data.type || null;
           return { attachments: await db.attachments.list(user.id, { limit, type }) };
+        },
+        'attachment-update': async (data, user) => {
+          const db = requireDb();
+          const att = await db.attachments.get(data.attachmentId);
+          if (!att || att.user_id !== user.id) throw Object.assign(new Error('Not found'), { status: 404 });
+          await db.attachments.update(data.attachmentId, { description: data.description });
+          return { ok: true };
+        },
+        'attachment-delete': async (data, user) => {
+          const db = requireDb();
+          await db.attachments.delete(data.attachmentId, user.id);
+          return { ok: true };
+        },
+
+        // Wealth — write operations
+        'wealth-delete-portfolio': async (data, user) => {
+          const db = requireDb();
+          await db.wealth.deletePortfolio(data.portfolioId, user.id);
+          return { ok: true };
+        },
+        'wealth-add-transaction': async (data, user) => {
+          const db = requireDb();
+          const p = await db.wealth.getPortfolio(data.portfolioId, user.id);
+          if (!p) throw Object.assign(new Error('Portfolio not found'), { status: 404 });
+          const asset = await db.wealth.upsertAsset({
+            symbol: data.symbol, name: data.assetName, type: data.assetType,
+            currency: data.currency,
+          });
+          const tx = await db.wealth.addTransaction({
+            portfolio_id: data.portfolioId, asset_id: asset.id,
+            type: data.type, quantity: data.quantity,
+            price_per_unit: data.pricePerUnit, date: data.date,
+            exchange_rate: data.exchangeRate, fees: data.fees, notes: data.notes,
+          });
+          await db.wealth.recalculatePosition(data.portfolioId, asset.id);
+          return { transaction: tx };
+        },
+        'wealth-delete-transaction': async (data, user) => {
+          const db = requireDb();
+          const tx = await db.wealth.getTransaction(data.transactionId);
+          if (!tx) throw Object.assign(new Error('Transaction not found'), { status: 404 });
+          const p = await db.wealth.getPortfolio(tx.portfolio_id, user.id);
+          if (!p) throw Object.assign(new Error('Not authorized'), { status: 403 });
+          await db.wealth.deleteTransaction(data.transactionId);
+          await db.wealth.recalculatePosition(tx.portfolio_id, tx.asset_id);
+          return { ok: true };
+        },
+
+        // Mindscape write
+        'mindscape-territory-visibility': async (data, user) => {
+          const db = requireDb();
+          await db.clusteringPoints.setTerritoryVisibility(user.id, data.territoryId, data.visibility);
+          return { ok: true };
+        },
+
+        // Profile
+        'profile-recompute': async (_data, user) => {
+          const db = requireDb();
+          await db.profiles.computeFingerprint(user.id);
+          return { ok: true };
+        },
+
+        // Settings
+        'settings': async (_data, user) => {
+          const db = requireDb();
+          const u = await db.users.getById(user.id);
+          return { settings: u?.settings ? JSON.parse(u.settings) : {}, timezone: u?.timezone };
+        },
+        'settings-update': async (data, user) => {
+          const db = requireDb();
+          if (data.timezone) await db.users.updateTimezone(user.id, data.timezone);
+          if (data.vault_name !== undefined) {
+            const u = await db.users.getById(user.id);
+            const current = u?.settings ? JSON.parse(u.settings) : {};
+            current.vault_name = String(data.vault_name).trim().substring(0, 60);
+            await db.users.updateSettings(user.id, current);
+          }
+          return { ok: true };
+        },
+
+        // Health
+        'health-today': async (_data, user) => {
+          const db = requireDb();
+          return await db.health.getToday(user.id);
+        },
+        'health-range': async (data, user) => {
+          const db = requireDb();
+          return await db.health.getRange(user.id, data.start, data.end);
+        },
+        'health-summary': async (data, user) => {
+          const db = requireDb();
+          return await db.health.getSummary(user.id, parseInt(data.days, 10) || 7);
+        },
+        'health-sync': async (data, user) => {
+          const db = requireDb();
+          if (!Array.isArray(data.days)) throw Object.assign(new Error('days array required'), { status: 400 });
+          return await db.health.syncDays(user.id, data.days);
         },
       };
 

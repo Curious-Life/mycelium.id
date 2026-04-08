@@ -1,6 +1,6 @@
 -- ============================================================================
 -- Cloudflare D1 Schema for Mycelium (complete)
--- AUTO-GENERATED on 2026-04-06 from production database.
+-- AUTO-GENERATED on 2026-04-08 from production database.
 -- Regenerate: bash scripts/generate-schema.sh
 --
 -- Fresh install:
@@ -13,7 +13,7 @@
 --   npx wrangler kv namespace create mycelium-kv
 -- ============================================================================
 
--- ── Tables (62) ─────────────────────────────────────────────────────
+-- ── Tables (68) ─────────────────────────────────────────────────────
 
 CREATE TABLE access_grants (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
@@ -224,7 +224,7 @@ CREATE TABLE connections (
   overlap_json TEXT,
   overlap_computed_at TEXT,
   created_at TEXT DEFAULT (datetime('now')),
-  accepted_at TEXT,
+  accepted_at TEXT, remote_instance TEXT, remote_user_handle TEXT, remote_did TEXT, deep_match_a INTEGER DEFAULT 0, deep_match_b INTEGER DEFAULT 0, deep_overlap_json TEXT, deep_overlap_computed_at TEXT,
   UNIQUE(user_a, user_b)
 );
 CREATE TABLE contact_territories (
@@ -237,6 +237,21 @@ CREATE TABLE contact_territories (
   first_seen TEXT,
   last_seen TEXT,
   UNIQUE(contact_id, territory_id)
+);
+CREATE TABLE context_grants (
+  context_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  granted_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (context_id, connection_id),
+  FOREIGN KEY (context_id) REFERENCES sharing_contexts(id) ON DELETE CASCADE,
+  FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE
+);
+CREATE TABLE context_territories (
+  context_id TEXT NOT NULL,
+  territory_id INTEGER NOT NULL,
+  added_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (context_id, territory_id),
+  FOREIGN KEY (context_id) REFERENCES sharing_contexts(id) ON DELETE CASCADE
 );
 CREATE TABLE crypto_payments (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
@@ -304,6 +319,26 @@ CREATE TABLE documents (
   created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), scope TEXT DEFAULT 'org', created_by TEXT,
   UNIQUE(user_id, path)
+);
+CREATE TABLE federation_keys (
+  instance_url TEXT PRIMARY KEY,
+  public_key TEXT NOT NULL,
+  key_id TEXT,
+  instance_name TEXT,
+  protocol_version TEXT DEFAULT '1.0',
+  capabilities_json TEXT,
+  user_count INTEGER DEFAULT 0,
+  last_seen TEXT,
+  trust_level INTEGER DEFAULT 0
+);
+CREATE TABLE federation_log (
+  id TEXT PRIMARY KEY,
+  direction TEXT NOT NULL,
+  remote_instance TEXT NOT NULL,
+  action TEXT NOT NULL,
+  status TEXT DEFAULT 'success',
+  details TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE folders (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
@@ -564,6 +599,25 @@ CREATE TABLE share_links (
   created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   expires_at TEXT
 );
+CREATE TABLE shared_spaces (
+  id TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL UNIQUE,
+  created_by TEXT NOT NULL,
+  status TEXT DEFAULT 'pending',
+  settings_json TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  accepted_at TEXT,
+  FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE
+);
+CREATE TABLE sharing_contexts (
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  is_private INTEGER DEFAULT 0,
+  is_default INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(user_id, name)
+);
 CREATE TABLE stripe_events (
   event_id TEXT PRIMARY KEY,
   event_type TEXT NOT NULL,
@@ -708,7 +762,7 @@ CREATE TABLE user_profiles (
   member_since TEXT,
   public_realms_json TEXT,
   updated_at TEXT DEFAULT (datetime('now'))
-);
+, did TEXT);
 CREATE TABLE users (
   id TEXT PRIMARY KEY,
   display_name TEXT,
@@ -789,7 +843,7 @@ CREATE TABLE wealth_watchlist (
   PRIMARY KEY (user_id, asset_id)
 );
 
--- ── Indexes (108) ────────────────────────────────────────────────────
+-- ── Indexes (112) ────────────────────────────────────────────────────
 
 CREATE INDEX idx_access_grants_entity ON access_grants(entity_type, entity_id);
 CREATE INDEX idx_access_grants_user ON access_grants(user_id);
@@ -837,6 +891,7 @@ CREATE INDEX idx_cofire_session ON territory_cofire(cofire_session);
 CREATE INDEX idx_cofire_user ON territory_cofire(user_id);
 CREATE INDEX idx_connections_a ON connections(user_a, status);
 CREATE INDEX idx_connections_b ON connections(user_b, status);
+CREATE INDEX idx_context_grants_conn ON context_grants(connection_id);
 CREATE UNIQUE INDEX idx_crypto_payments_order
   ON crypto_payments(coingate_order_id);
 CREATE INDEX idx_ct_contact ON contact_territories(contact_id);
@@ -851,6 +906,7 @@ CREATE INDEX idx_documents_scope_created ON documents(scope, updated_at);
 CREATE INDEX idx_documents_unencrypted
   ON documents(id) WHERE content IS NOT NULL AND content != '' AND content NOT LIKE 'eyJ%';
 CREATE INDEX idx_documents_user_id ON documents(user_id);
+CREATE INDEX idx_fed_log_instance ON federation_log(remote_instance, created_at);
 CREATE INDEX idx_folders_user ON folders(user_id);
 CREATE INDEX idx_health_daily_user_date
     ON health_daily(user_id, date DESC);
@@ -889,6 +945,8 @@ CREATE INDEX idx_secrets_lookup ON secrets(user_id, scope);
 CREATE INDEX idx_sessions_expires ON sessions(expires_at);
 CREATE INDEX idx_sessions_user ON sessions(user_id);
 CREATE INDEX idx_share_links_token ON share_links(token);
+CREATE INDEX idx_shared_spaces_conn ON shared_spaces(connection_id);
+CREATE INDEX idx_sharing_contexts_user ON sharing_contexts(user_id);
 CREATE INDEX idx_subscriptions_status ON subscriptions(status);
 CREATE UNIQUE INDEX idx_subscriptions_stripe_cust ON subscriptions(stripe_customer_id);
 CREATE INDEX idx_subscriptions_stripe_sub ON subscriptions(stripe_subscription_id)

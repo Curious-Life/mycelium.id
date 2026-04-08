@@ -64,25 +64,125 @@ function routeToType(method: string, path: string): string | null {
 		'GET /portal/activity/today': 'activity-today',
 		'GET /portal/activity/summary': 'activity-summary',
 		'GET /portal/wealth/portfolios': 'wealth-portfolios',
+		'POST /portal/wealth/portfolios': 'wealth-create-portfolio',
 		'GET /portal/wealth/watchlist': 'wealth-watchlist',
 		'GET /portal/wealth/assets': 'wealth-assets',
 		'GET /portal/connections': 'connections',
+		'POST /portal/connections/request': 'connection-request',
+		'GET /portal/connections/count': 'connections-count',
+		'GET /portal/connections/pending': 'connections-pending',
 		'GET /portal/contexts': 'contexts',
+		'POST /portal/contexts': 'context-create',
+		'GET /portal/folders': 'folders',
+		'POST /portal/folders': 'folder-create',
+		'GET /portal/attachments': 'attachments',
+		'GET /portal/activity/range': 'activity-range',
+		'GET /portal/activity/apps': 'activity-apps',
+		'GET /portal/activity/messages': 'activity-messages',
+		'POST /portal/activity/sync': 'activity-sync',
+		'POST /portal/documents/move': 'documents-move',
+		'POST /portal/documents/pin': 'documents-pin',
+		'GET /portal/mindscape/territories': 'mindscape-territories',
+		'GET /portal/mindscape/activations': 'mindscape-activations',
+		'GET /portal/mindscape/cofire': 'mindscape-cofire',
+		'GET /portal/mindscape/noise-stats': 'mindscape-noise-stats',
+		'GET /portal/health/today': 'health-today',
+		'GET /portal/health/range': 'health-range',
+		'GET /portal/health/summary': 'health-summary',
+		'POST /portal/health/sync': 'health-sync',
+		'GET /portal/intel/report': 'intel-report',
+		'GET /portal/intel/recommendations': 'intel-recommendations',
+		'GET /portal/intel/signals': 'intel-signals',
+		'GET /portal/intel/entities': 'intel-entities',
+		'GET /portal/settings': 'settings',
+		'PUT /portal/settings': 'settings-update',
+		'GET /portal/stats': 'stats',
+		'GET /portal/billing': 'billing',
+		'POST /portal/billing/portal': 'billing-portal',
+		'POST /portal/billing/crypto': 'billing-crypto',
+		'GET /portal/providers': 'providers',
+		'POST /portal/providers': 'provider-create',
+		'POST /portal/profile/stats/recompute': 'profile-recompute',
+		'POST /portal/export/auth': 'export-auth',
+		'POST /portal/export/verify': 'export-verify',
+		'POST /portal/export': 'export',
+		'POST /portal/import/vault': 'import-vault',
+		'POST /portal/import/messages': 'import-messages',
+		'POST /portal/import/documents': 'import-documents',
+		'POST /portal/auth/claude': 'auth-claude',
+		'POST /portal/auth/claude/code': 'auth-claude-code',
+		'GET /portal/auth/claude/status': 'auth-claude-status',
+		'POST /portal/auth/claude/disconnect': 'auth-claude-disconnect',
 	};
 
 	if (exactMap[key]) return exactMap[key];
 
 	// Prefix matches for parameterized routes
-	if (cleanPath.startsWith('/portal/wealth/portfolios/') && method === 'GET') {
+	// Wealth parameterized routes
+	if (cleanPath.startsWith('/portal/wealth/portfolios/')) {
+		if (method === 'DELETE') return 'wealth-delete-portfolio';
 		if (cleanPath.endsWith('/positions')) return 'wealth-positions';
-		if (cleanPath.endsWith('/transactions')) return 'wealth-transactions';
+		if (cleanPath.endsWith('/transactions') && method === 'GET') return 'wealth-transactions';
+		if (cleanPath.endsWith('/transactions') && method === 'POST') return 'wealth-add-transaction';
 		if (cleanPath.endsWith('/performance')) return 'wealth-performance';
 		return 'wealth-portfolio-detail';
 	}
-	if (cleanPath.startsWith('/portal/mindscape/social/') && method === 'GET') return 'mindscape-social-detail';
-	if (cleanPath.startsWith('/portal/intel/') && method === 'GET') return 'intel';
+	if (cleanPath.startsWith('/portal/wealth/transactions/') && method === 'DELETE') return 'wealth-delete-transaction';
+
+	// Documents
 	if (cleanPath.startsWith('/portal/documents/') && method === 'GET') return 'document-detail';
 	if (cleanPath.startsWith('/portal/documents/') && method === 'PUT') return 'document-update';
+	if (cleanPath.startsWith('/portal/documents/') && method === 'DELETE') return 'document-delete';
+
+	// Folders
+	if (cleanPath.startsWith('/portal/folders/') && method === 'PUT') return 'folder-update';
+	if (cleanPath.startsWith('/portal/folders/') && method === 'DELETE') return 'folder-delete';
+
+	// Attachments
+	if (cleanPath.startsWith('/portal/attachments/') && method === 'PUT') return 'attachment-update';
+	if (cleanPath.startsWith('/portal/attachments/') && method === 'DELETE') return 'attachment-delete';
+
+	// Mindscape
+	if (cleanPath.startsWith('/portal/mindscape/social/') && method === 'GET') return 'mindscape-social-detail';
+	if (cleanPath.startsWith('/portal/mindscape/territory/') && method === 'PUT') return 'mindscape-territory-visibility';
+	if (cleanPath.startsWith('/portal/mindscape/territory/')) return 'mindscape-territory-detail';
+
+	// Intel
+	if (cleanPath.startsWith('/portal/intel/market/')) return 'intel-market-detail';
+	if (cleanPath.startsWith('/portal/intel/')) return 'intel';
+
+	// Connections parameterized
+	if (cleanPath.startsWith('/portal/connections/') && cleanPath.endsWith('/accept')) return 'connection-accept';
+	if (cleanPath.startsWith('/portal/connections/') && cleanPath.endsWith('/reject')) return 'connection-reject';
+	if (cleanPath.startsWith('/portal/connections/') && cleanPath.endsWith('/block')) return 'connection-block';
+	if (cleanPath.startsWith('/portal/connections/') && cleanPath.endsWith('/overlap')) return 'connection-overlap';
+	if (cleanPath.startsWith('/portal/connections/') && method === 'DELETE') return 'connection-delete';
+
+	// Contexts parameterized
+	if (cleanPath.match(/\/portal\/contexts\/[^/]+\/territories\//)) {
+		return method === 'DELETE' ? 'context-remove-territory' : 'context-add-territory';
+	}
+	if (cleanPath.match(/\/portal\/contexts\/[^/]+\/grant\//)) {
+		return method === 'DELETE' ? 'context-revoke-access' : 'context-grant-access';
+	}
+	if (cleanPath.match(/\/portal\/contexts\/[^/]+\/territories$/)) return 'context-territories';
+	if (cleanPath.match(/\/portal\/contexts\/[^/]+\/connections$/)) return 'context-connections';
+	if (cleanPath.startsWith('/portal/contexts/') && method === 'PUT') return 'context-update';
+	if (cleanPath.startsWith('/portal/contexts/') && method === 'DELETE') return 'context-delete';
+
+	// Providers parameterized
+	if (cleanPath.startsWith('/portal/providers/') && cleanPath.endsWith('/test')) return 'provider-test';
+	if (cleanPath.startsWith('/portal/providers/') && method === 'PUT') return 'provider-update';
+	if (cleanPath.startsWith('/portal/providers/') && method === 'DELETE') return 'provider-delete';
+
+	// Fallback for sensitive paths that don't have an explicit mapping yet:
+	// derive a type from the path so it reaches the server (which may handle it).
+	// The server will return a 404 error for unknown types, which is better than
+	// throwing client-side and blocking the UI.
+	if (isSensitivePath(cleanPath)) {
+		const segments = cleanPath.replace('/portal/', '').split('/');
+		return segments.join('-');
+	}
 
 	return null;
 }

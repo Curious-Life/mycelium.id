@@ -3,6 +3,7 @@
 	import { marked } from 'marked';
 	import DOMPurify from 'isomorphic-dompurify';
 	import { chatMessages, connectionStatus, type ChatMessage } from '$lib/stores/chat';
+	import { isSecureChannelConfigured } from '$lib/vps-identity';
 
 	let messageInput = $state('');
 	let messagesContainer: HTMLDivElement;
@@ -54,104 +55,102 @@
 		connectionStatus.setStatus('connecting');
 
 		try {
-			const response = await fetch('/portal/chat/stream', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				credentials: 'same-origin',
-				body: JSON.stringify({ message: text }),
-			});
-
-			if (!response.ok) {
-				const err = await response.text().catch(() => 'Stream failed');
-				chatMessages.updateMessage(assistantId, { content: `Error: ${err}`, isStreaming: false });
-				connectionStatus.setStatus('error');
-				return;
-			}
-
-			connectionStatus.setStatus('streaming');
-
-			const reader = response.body!.getReader();
-			const decoder = new TextDecoder();
-			let buffer = '';
-
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split('\n');
-				buffer = lines.pop() || '';
-
-				for (const line of lines) {
-					if (line.startsWith('event: ')) {
-						const eventType = line.slice(7).trim();
-						continue;
+			const handleEvent = (event: Record<string, unknown>) => {
+				switch (event.type) {
+					case 'stream_start':
+						connectionStatus.setStatus('streaming');
+						break;
+					case 'text_delta':
+						chatMessages.updateMessage(assistantId, {
+							content: (messages.find(m => m.id === assistantId)?.content || '') + ((event.content as string) || (event.text as string) || ''),
+						});
+						scrollToBottom();
+						break;
+					case 'thinking_delta':
+						chatMessages.updateMessage(assistantId, {
+							thinking: (messages.find(m => m.id === assistantId)?.thinking || '') + ((event.content as string) || (event.text as string) || ''),
+						});
+						break;
+					case 'tool_start':
+						chatMessages.updateMessage(assistantId, {
+							toolsInProgress: [
+								...(messages.find(m => m.id === assistantId)?.toolsInProgress || []),
+								(event.name as string) || (event.tool as string) || 'tool',
+							],
+						});
+						break;
+					case 'tool_complete': {
+						const cur = messages.find(m => m.id === assistantId);
+						const tn = (event.name as string) || (event.tool as string) || 'tool';
+						chatMessages.updateMessage(assistantId, {
+							toolsInProgress: (cur?.toolsInProgress || []).filter(t => t !== tn),
+							toolsUsed: [...(cur?.toolsUsed || []), tn],
+						});
+						break;
 					}
+					case 'usage':
+						chatMessages.updateMessage(assistantId, {
+							tokenUsage: { inputTokens: (event.inputTokens as number) || 0, outputTokens: (event.outputTokens as number) || 0, cost: ((event.inputTokens as number || 0) / 1_000_000) * 3 + ((event.outputTokens as number || 0) / 1_000_000) * 15 },
+						});
+						break;
+					case 'done':
+						chatMessages.updateMessage(assistantId, { isStreaming: false });
+						break;
+					case 'error':
+						chatMessages.updateMessage(assistantId, {
+							content: (messages.find(m => m.id === assistantId)?.content || '') + `\n\n*Error: ${event.error || event.message}*`,
+							isStreaming: false,
+						});
+						break;
+				}
+			};
 
-					if (!line.startsWith('data: ')) continue;
+			if (isSecureChannelConfigured()) {
+				const { getChannel } = await import('$lib/secure-channel');
+				const channel = getChannel();
+				connectionStatus.setStatus('streaming');
+				await channel.requestStream('chat', { message: text }, (chunk) => {
+					handleEvent(chunk as Record<string, unknown>);
+				});
+				chatMessages.updateMessage(assistantId, { isStreaming: false });
+			} else {
+				const csrfMatch = document.cookie.match(/mycelium_csrf=([^;]+)/);
+				const chatHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+				if (csrfMatch) chatHeaders['X-CSRF-Token'] = csrfMatch[1];
 
-					try {
-						const data = JSON.parse(line.slice(6));
+				const response = await fetch('/portal/chat/stream', {
+					method: 'POST',
+					headers: chatHeaders,
+					credentials: 'same-origin',
+					body: JSON.stringify({ message: text }),
+				});
 
-						switch (data.type) {
-							case 'text_delta':
-								chatMessages.updateMessage(assistantId, {
-									content: (messages.find(m => m.id === assistantId)?.content || '') + data.text,
-								});
-								scrollToBottom();
-								break;
+				if (!response.ok) {
+					const err = await response.text().catch(() => 'Stream failed');
+					chatMessages.updateMessage(assistantId, { content: `Error: ${err}`, isStreaming: false });
+					connectionStatus.setStatus('error');
+					return;
+				}
 
-							case 'thinking_delta':
-								chatMessages.updateMessage(assistantId, {
-									thinking: (messages.find(m => m.id === assistantId)?.thinking || '') + data.text,
-								});
-								break;
-
-							case 'tool_start':
-								chatMessages.updateMessage(assistantId, {
-									toolsInProgress: [
-										...(messages.find(m => m.id === assistantId)?.toolsInProgress || []),
-										data.tool || data.name || 'tool',
-									],
-								});
-								break;
-
-							case 'tool_complete':
-								const current = messages.find(m => m.id === assistantId);
-								const toolName = data.tool || data.name || 'tool';
-								chatMessages.updateMessage(assistantId, {
-									toolsInProgress: (current?.toolsInProgress || []).filter(t => t !== toolName),
-									toolsUsed: [...(current?.toolsUsed || []), toolName],
-								});
-								break;
-
-							case 'usage':
-								chatMessages.updateMessage(assistantId, {
-									tokenUsage: {
-										inputTokens: data.inputTokens || 0,
-										outputTokens: data.outputTokens || 0,
-									},
-								});
-								break;
-
-							case 'done':
-								chatMessages.updateMessage(assistantId, { isStreaming: false });
-								break;
-
-							case 'error':
-								chatMessages.updateMessage(assistantId, {
-									content: (messages.find(m => m.id === assistantId)?.content || '') + `\n\n*Error: ${data.error || data.message}*`,
-									isStreaming: false,
-								});
-								break;
-						}
-					} catch {
-						// Skip malformed SSE data
+				connectionStatus.setStatus('streaming');
+				const reader = response.body!.getReader();
+				const decoder = new TextDecoder();
+				let buffer = '';
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					buffer += decoder.decode(value, { stream: true });
+					const lines = buffer.split('\n');
+					buffer = lines.pop() || '';
+					for (const line of lines) {
+						if (!line.startsWith('data: ')) continue;
+						try { handleEvent(JSON.parse(line.slice(6))); }
+						catch { /* skip malformed */ }
 					}
 				}
+				chatMessages.updateMessage(assistantId, { isStreaming: false });
 			}
 
-			chatMessages.updateMessage(assistantId, { isStreaming: false });
 			connectionStatus.setStatus('idle');
 		} catch (e) {
 			chatMessages.updateMessage(assistantId, {
