@@ -1,0 +1,18 @@
+{
+  "name": "@mycelium/kms",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Split-jurisdiction Key Management Service — Swiss KEK storage",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test tests/",
+    "audit": "node src/audit-query.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "express": "^5.1.0",
+    "helmet": "^8.0.0",
+    "sodium-native": "^4.3.1"
+  }
+}

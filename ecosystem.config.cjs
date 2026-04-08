@@ -76,6 +76,10 @@ const SHARED_AGENT_ENV = {
   POLYMARKET_API_URL: process.env.POLYMARKET_API_URL,
   POLYMARKET_API_USER: process.env.POLYMARKET_API_USER,
   WARROOM_PATH: process.env.WARROOM_PATH,
+  // Split-jurisdiction KMS (Swiss KEK server)
+  KMS_URL: process.env.KMS_URL || '',
+  KMS_CERT_PATH: process.env.KMS_CERT_PATH || '/etc/mycelium/kms-certs',
+  KMS_TTL_HOURS: process.env.KMS_TTL_HOURS || '72',
   // Default scope: org only. Per-agent overrides below for personal/wealth/moms.
   AGENT_SCOPES: '["org"]',
 };
