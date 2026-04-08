@@ -19,6 +19,7 @@
     "@stablelib/hmac": "^2.0.1",
     "@stablelib/x25519": "^2.0.1",
     "@sveltejs/adapter-static": "^3.0.10",
+    "echarts": "^5.6.0",
     "@sveltejs/kit": "^2.49.3",
     "globe.gl": "^2.45.3",
     "isomorphic-dompurify": "^3.0.0-rc.2",

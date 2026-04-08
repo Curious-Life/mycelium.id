@@ -72,6 +72,13 @@ __pycache__/
 # Sites (local dev)
 sites/
 
+# Spores — user-land extensions (strain-specific, not committed to main)
+spores/*/
+!spores/README.md
+!spores/_example/
+!spores/loader.js
+!spores/loader.cjs
+
 # IDE
 .vscode/
 .idea/
