@@ -4,6 +4,10 @@ Spores are user-created extensions that run on the mycelium infrastructure. Each
 
 In mycology, spores are the reproductive units released by fruiting bodies. They carry the genetic blueprint of the parent mycelium but grow independently in their own substrate. This directory is where that independent growth happens.
 
+## Opt-in by design
+
+The spores framework is **disabled unless `SPORES_ENABLED=1` is set in the environment**. This applies to both the portal route loader (in `agent-server.js`) and the PM2 process loader (in `ecosystem.config.cjs`). Rationale: spores are user code that lands as a running process on the VPS. Having the framework enabled by default would mean any directory with a valid `manifest.json` that ends up in `spores/` becomes a running process on the next deploy — that's too much implicit privilege. Operators must explicitly opt in.
+
 ## Creating a Spore
 
 1. Create a directory: `spores/my-spore/`
@@ -19,7 +23,7 @@ In mycology, spores are the reproductive units released by fruiting bodies. They
 ```
 
 3. Add your code (scripts, routes, etc.)
-4. Restart PM2 — the spore loader auto-discovers it
+4. Set `SPORES_ENABLED=1` in the PM2 env, restart PM2
 
 ## Manifest Schema
 
@@ -32,6 +36,25 @@ In mycology, spores are the reproductive units released by fruiting bodies. They
 | `routes` | string | no | Express router file to mount at `/portal/<id>/*` |
 | `pm2` | array | no | PM2 process definitions (auto-loaded by ecosystem.config.cjs) |
 | `hooks` | object | no | Hook registrations (e.g., `{ "runner.afterRun": true }`) |
+| `envAllow` | array | no | Allowlist of `SHARED_AGENT_ENV` keys the spore needs (see Security) |
+
+## Security — Environment Isolation
+
+Spore PM2 processes do NOT inherit the full `SHARED_AGENT_ENV`. The shared agent env contains secrets and operational config (`KMS_URL`, `USER_ID`, `MYA_WORKER_URL`, `AGENT_SCOPES`, `SENTRY_DSN`, etc.) that would grant a spore access to encrypted data and the Swiss KEK server.
+
+By default a spore process receives only `NODE_ENV`. If your spore needs more, declare it explicitly:
+
+```json
+{
+  "id": "my-spore",
+  "envAllow": ["MYA_WORKER_URL"],
+  "pm2": [{ "name": "my-daemon", "script": "daemon.js" }]
+}
+```
+
+This makes the privilege request auditable at review time: anyone reading the manifest can see exactly which environment values the spore touches. **Never add `KMS_URL`, `ENCRYPTION_MASTER_KEY`, or agent tokens to `envAllow`** — these are always off-limits because a spore is untrusted user code by definition, regardless of who wrote it.
+
+Spore-declared non-secret env (ports, flags) goes under `pm2[].env` as usual.
 
 ## Importing from the Mycelium
 

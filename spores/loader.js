@@ -1,11 +1,12 @@
 /**
  * Spore Loader (ESM) — discovers and loads spore extensions.
  *
- * Reads spores/*/manifest.json, mounts Express routes, registers hooks.
+ * Reads `spores/<name>/manifest.json`, mounts Express routes, registers hooks.
  * Used by agent-server.js at startup.
  *
- * Spores are opt-in: if the spores/ directory doesn't exist or has no
- * valid manifests, nothing happens. The system degrades gracefully.
+ * Spores are opt-in: the caller must guard this loader behind SPORES_ENABLED=1.
+ * If the spores/ directory doesn't exist or has no valid manifests, nothing
+ * happens. The system degrades gracefully.
  */
 
 import { readdirSync, readFileSync, existsSync } from 'fs';
@@ -15,7 +16,7 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Load all spore manifests from spores/*/manifest.json.
+ * Load all spore manifests from `spores/<name>/manifest.json`.
  * Skips directories starting with _ (templates) or . (hidden).
  */
 export function listSpores() {

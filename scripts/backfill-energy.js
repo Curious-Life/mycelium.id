@@ -3,12 +3,22 @@
  * Backfill Energy Ledger — Parse historical Claude session JSONL files
  * into the energy ledger format (agents/.shared/energy/<date>.jsonl).
  *
- * Scans all CLAUDE_CONFIG_DIR paths for session files, extracts token usage
- * from assistant messages, and writes energy records grouped by date.
+ * Discovers Claude config directories by scanning $HOME for directories matching
+ * ~/.claude or ~/.claude-*, then reads projects/**.jsonl from each. Extracts
+ * token usage from assistant messages and writes energy records grouped by date.
+ *
+ * Agent ID is inferred from the cwd embedded in the session file (if present).
+ * The regex used by the previous version was hardcoded to one strain's directory
+ * layout and will return 'unknown' for any other deployment.
+ *
+ * Security note: this script does NOT record CLAUDE_CONFIG_DIR or any
+ * subscription identifier in the output — the ledger is plaintext JSONL and
+ * leaking subscription topology on VPS compromise is an unnecessary risk.
  *
  * Usage:
  *   node scripts/backfill-energy.js
- *   node scripts/backfill-energy.js --dry-run   # show counts without writing
+ *   node scripts/backfill-energy.js --dry-run            # show counts without writing
+ *   node scripts/backfill-energy.js --config-dir=<path>  # override discovery
  */
 
 import fs from 'fs/promises';
@@ -21,11 +31,25 @@ const AGENTS_ROOT = process.env.AGENTS_ROOT || path.join(os.homedir(), 'agents')
 const ENERGY_DIR = path.join(AGENTS_ROOT, '.shared', 'energy');
 const DRY_RUN = process.argv.includes('--dry-run');
 
-// Map config dirs to agent IDs by scanning the projects directory name
-// e.g., /home/claude/.claude/projects/-home-claude-agents-alpha-repo/ → alpha
-function extractAgentFromPath(filePath) {
-  const match = filePath.match(/-agents-([a-z]+)-/);
-  return match ? match[1] : 'unknown';
+// Explicit config dirs from CLI (repeatable): --config-dir=/path
+const CLI_CONFIG_DIRS = process.argv
+  .filter(a => a.startsWith('--config-dir='))
+  .map(a => a.slice('--config-dir='.length));
+
+/**
+ * Extract the agent ID from a session file's metadata. Claude Code session
+ * JSONL files embed the cwd of the running process; the agent ID is usually
+ * the last path component (e.g. /home/claude/agents/personal-agent → personal-agent).
+ *
+ * Falls back to 'unknown' if no cwd can be determined.
+ */
+function extractAgentFromCwd(cwd) {
+  if (!cwd || typeof cwd !== 'string') return 'unknown';
+  // Prefer the immediate parent of a /repo/ or /mycelium/ suffix, else basename.
+  const parts = cwd.split(path.sep).filter(Boolean);
+  const agentsIdx = parts.lastIndexOf('agents');
+  if (agentsIdx >= 0 && parts.length > agentsIdx + 1) return parts[agentsIdx + 1];
+  return parts[parts.length - 1] || 'unknown';
 }
 
 // Map model IDs to short names
@@ -37,19 +61,32 @@ function shortModel(model) {
   return model;
 }
 
-// Config directories to scan
-const CONFIG_DIRS = [
-  path.join(os.homedir(), '.claude'),
-  path.join(os.homedir(), '.claude-alpha'),
-  path.join(os.homedir(), '.claude-beta'),
-  path.join(os.homedir(), '.claude-delta'),
-];
+/**
+ * Discover Claude Code config directories by scanning $HOME for dirs named
+ * .claude or .claude-* that contain a projects/ subdirectory. This is
+ * strain-agnostic — any CLAUDE_CONFIG_DIR the user has created will be found.
+ */
+async function discoverConfigDirs() {
+  if (CLI_CONFIG_DIRS.length > 0) return CLI_CONFIG_DIRS;
 
-// Map config dir to subscription label
-function configLabel(configDir) {
-  const base = path.basename(configDir);
-  if (base === '.claude') return 'shared';
-  return base.replace('.claude-', '');
+  const home = os.homedir();
+  const found = [];
+  let entries;
+  try {
+    entries = await fs.readdir(home, { withFileTypes: true });
+  } catch {
+    return found;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name !== '.claude' && !entry.name.startsWith('.claude-')) continue;
+    const full = path.join(home, entry.name);
+    try {
+      const stat = await fs.stat(path.join(full, 'projects'));
+      if (stat.isDirectory()) found.push(full);
+    } catch { /* no projects dir — skip */ }
+  }
+  return found;
 }
 
 async function findJsonlFiles(configDir) {
@@ -74,11 +111,7 @@ async function findJsonlFiles(configDir) {
   return files;
 }
 
-async function parseSessionFile(filePath, configDir) {
-  const records = [];
-  const agent = extractAgentFromPath(filePath);
-  const config = configLabel(configDir);
-
+async function parseSessionFile(filePath) {
   const rl = createInterface({
     input: createReadStream(filePath),
     crlfDelay: Infinity,
@@ -86,7 +119,8 @@ async function parseSessionFile(filePath, configDir) {
 
   // Accumulate usage per session (sum all assistant messages)
   let sessionId = null;
-  let sessionRecords = [];
+  let agent = 'unknown';
+  const sessionRecords = [];
 
   for await (const line of rl) {
     if (!line.trim()) continue;
@@ -95,6 +129,14 @@ async function parseSessionFile(filePath, configDir) {
 
       // Grab session ID
       if (data.session_id) sessionId = data.session_id;
+
+      // Learn the agent ID from whatever cwd metadata the session exposes.
+      // Claude Code session records embed cwd in a few different shapes
+      // across versions; we check the common ones.
+      if (agent === 'unknown') {
+        const cwd = data.cwd || data.metadata?.cwd || data.project?.cwd;
+        if (cwd) agent = extractAgentFromCwd(cwd);
+      }
 
       // Extract usage from assistant messages
       if (data.type === 'assistant' && data.message?.usage) {
@@ -114,11 +156,15 @@ async function parseSessionFile(filePath, configDir) {
           costUsd: null,
           sessionId: sessionId,
           durationMs: null,
-          configDir: config,
           trigger: 'backfill',
         });
       }
     } catch { /* skip bad lines */ }
+  }
+
+  // If we learned the agent ID mid-file, backfill earlier records with it.
+  if (agent !== 'unknown') {
+    for (const r of sessionRecords) r.agent = agent;
   }
 
   return sessionRecords;
@@ -151,10 +197,17 @@ async function main() {
   console.log(`[backfill-energy] Scanning session files...`);
   if (DRY_RUN) console.log('  (dry run — no files will be written)\n');
 
+  const configDirs = await discoverConfigDirs();
+  if (configDirs.length === 0) {
+    console.error(`[backfill-energy] No config dirs found. Pass --config-dir=<path> or create ~/.claude*.`);
+    process.exit(1);
+  }
+  console.log(`[backfill-energy] Discovered ${configDirs.length} config dir(s)`);
+
   let allRecords = [];
   let totalFiles = 0;
 
-  for (const configDir of CONFIG_DIRS) {
+  for (const configDir of configDirs) {
     const files = await findJsonlFiles(configDir);
     if (files.length === 0) continue;
 
@@ -163,7 +216,7 @@ async function main() {
 
     for (const file of files) {
       try {
-        const records = await parseSessionFile(file, configDir);
+        const records = await parseSessionFile(file);
         allRecords.push(...records);
       } catch (err) {
         // Skip files that can't be parsed
