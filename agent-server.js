@@ -2212,7 +2212,8 @@ app.post('/think', async (req, res) => {
     addActivity('error', `Context assembly failed: ${e.message}`, { type: 'context-assembly-error' });
   }
 
-  const fullPrompt = `${systemPrompt}
+  // Note: let (not const) — energy injection below may append to this prompt
+  let fullPrompt = `${systemPrompt}
 ${thinkContext ? `\n${thinkContext}\n` : ''}${getWarRoomContext()}${getIntelContext()}
 ## Autonomous Awakening
 
@@ -2251,6 +2252,25 @@ ${prompt}`;
     // Use paths.repo so Claude Code can edit the git repository
     // Think cycles get a fresh session (new perspective each awakening)
     addActivity('action', 'Starting Claude Code for autonomous thinking', { type: 'claude-start', taskType: 'think' });
+
+    // Inject energy state into autonomous prompt.
+    // Opt-in: only runs when ENERGY_ENABLED=1 to avoid silent behavior changes.
+    if (process.env.ENERGY_ENABLED === '1') {
+      try {
+        const { getEnergyState, getAgentEnergyState } = await import('./lib/energy-state.js');
+        const agentEnergy = await getAgentEnergyState(AGENT_ID);
+        const globalEnergy = await getEnergyState();
+        let energyCtx = `\n## Energy State\nYour energy level: **${agentEnergy.level}** (${agentEnergy.pctUsed}% of daily budget used, ${agentEnergy.runsToday} runs today)\n`;
+        energyCtx += `System energy: **${globalEnergy.global.level}** (burn rate: ${globalEnergy.global.burnRate} tokens/hour)\n`;
+        if (agentEnergy.level === 'low') energyCtx += `**Conservation mode**: Prefer shorter responses, skip non-essential tool calls.\n`;
+        if (agentEnergy.level === 'critical') energyCtx += `**CRITICAL**: Minimize token usage. Only essential actions.\n`;
+        if (agentEnergy.level === 'abundant') energyCtx += `Energy is abundant. You may explore deeper, spawn sub-tasks, or do proactive research.\n`;
+        fullPrompt += energyCtx;
+      } catch (err) {
+        // Log but do not fail — energy is advisory, not load-bearing.
+        console.warn(`[${LOG_PREFIX}] Energy injection skipped: ${err.message}`);
+      }
+    }
 
     // If triggered by delegation callback, resume the agent's active session
     const trigger = req.body.trigger;
@@ -6040,6 +6060,60 @@ app.post('/auth/logout', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: 'Logout failed' });
   }
+});
+
+// -- Portal: Energy (token usage tracking) --
+
+app.get('/portal/energy', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const { queryEnergy } = await import('./lib/energy.js');
+    const opts = {
+      agent: req.query.agent || undefined, model: req.query.model || undefined,
+      process: req.query.process || undefined, days: parseInt(req.query.days) || 7,
+      from: req.query.from || undefined, to: req.query.to || undefined,
+    };
+    const records = await queryEnergy(opts);
+    res.json({ records, count: records.length });
+  } catch (e) { res.status(500).json({ error: 'Failed to query energy records' }); }
+});
+
+app.get('/portal/energy/summary', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const { energySummary } = await import('./lib/energy.js');
+    const opts = {
+      agent: req.query.agent || undefined, model: req.query.model || undefined,
+      days: parseInt(req.query.days) || 7, from: req.query.from || undefined, to: req.query.to || undefined,
+    };
+    res.json(await energySummary(opts));
+  } catch (e) { res.status(500).json({ error: 'Failed to generate energy summary' }); }
+});
+
+app.get('/portal/energy/live', async (req, res) => {
+  try {
+    const user = await authenticatePortalRequest(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const { energySummary } = await import('./lib/energy.js');
+    let energyState = null;
+    try { const m = await import('./lib/energy-state.js'); energyState = await m.getEnergyState(); } catch {}
+    const todaySummary = await energySummary({ days: 1 });
+    const agentList = await Promise.all(
+      Object.entries(getAgentRegistry()).map(async ([agentId, info]) => {
+        try {
+          const c = new AbortController(); const t = setTimeout(() => c.abort(), 3000);
+          const h = await (await fetch(`http://localhost:${info.port}/health`, { signal: c.signal })).json();
+          clearTimeout(t);
+          return { id: agentId, name: info.name, role: info.role, color: info.color, status: 'online',
+            model: h.lastModelUsed || h.model, messagesThisHour: h.state?.messagesThisHour || 0,
+            messagesToday: h.state?.messagesToday || 0, activeTasks: h.state?.activeTasks || 0 };
+        } catch { return { id: agentId, name: info.name, role: info.role, color: info.color, status: 'offline' }; }
+      })
+    );
+    res.json({ timestamp: new Date().toISOString(), today: todaySummary, energyState, agents: agentList });
+  } catch (e) { res.status(500).json({ error: 'Failed to fetch live energy state' }); }
 });
 
 // -- Portal: Agents Dashboard --
@@ -10651,6 +10725,18 @@ app.post('/portal/import/documents', async (req, res) => {
 // ============================================
 // Portal: Static File Serving
 // ============================================
+
+// Load spore routes (user-land extensions from spores/).
+// Opt-in: SPORES_ENABLED=1 is required. Spores are a new attack surface
+// (arbitrary user code mounted under /portal/<spore>/*), so disabled by default.
+if (process.env.SPORES_ENABLED === '1') {
+  try {
+    const { loadSporeRoutes } = await import('./spores/loader.js');
+    await loadSporeRoutes(app);
+  } catch (err) {
+    console.warn(`[Spore-loader] Failed to load spores: ${err.message}`);
+  }
+}
 
 // Serve the portal build directory (SvelteKit adapter-static output)
 const PORTAL_BUILD = path.join(__dirname, 'portal', 'build');

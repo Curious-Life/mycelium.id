@@ -3,7 +3,7 @@ import { browser } from '$app/environment';
 
 const STORAGE_KEY = 'mycelium_navigation';
 
-export type PrimaryView = 'mindscape' | 'library' | 'media' | 'timeline' | 'wealth' | 'intel' | 'activity' | 'import' | 'agents' | 'settings' | 'profile' | 'connections' | 'contexts' | 'modules';
+export type PrimaryView = 'mindscape' | 'library' | 'media' | 'timeline' | 'wealth' | 'energy' | 'intel' | 'activity' | 'import' | 'agents' | 'settings' | 'profile' | 'connections' | 'contexts' | 'modules';
 
 export interface NavigationState {
 	primaryView: PrimaryView;

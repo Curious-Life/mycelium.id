@@ -1129,6 +1129,12 @@ module.exports = {
     // Add more agents here using:
     //   ./scripts/add-agent.sh --id my-agent --name "My Agent" --port 5008 --bot-port 5009
     // Then add the PM2 entries it outputs to this file.
+
+    // Spore PM2 entries (auto-discovered from spores/*/manifest.json)
+    ...(() => {
+      try { return require('./spores/loader.cjs').buildSporeApps(SHARED_AGENT_ENV); }
+      catch { return []; }
+    })(),
   ]),
 
   deploy: {
