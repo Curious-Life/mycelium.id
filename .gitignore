@@ -1,0 +1,64 @@
+# Node
+node_modules/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-store/
+.npmrc.local
+
+# Build artifacts
+dist/
+build/
+.svelte-kit/
+.next/
+.nuxt/
+.output/
+out/
+
+# TypeScript
+*.tsbuildinfo
+.tsbuild/
+
+# Test + coverage
+coverage/
+.nyc_output/
+
+# Cloudflare / wrangler
+.wrangler/
+wrangler.toml.local
+
+# Env + secrets — NEVER commit
+.env
+.env.*
+!.env.example
+*.secret
+*.key
+!packages/**/test/fixtures/*.key
+
+# Python pipeline
+__pycache__/
+*.py[cod]
+.venv/
+.python-version
+*.egg-info/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code per-developer state
+.claude/projects/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Local scratch
+scratch/
+.tmp/
+*.local.md
