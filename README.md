@@ -12,11 +12,17 @@
 
 ## Status
 
-**Pre-launch.** This repository is the **redesigned multi-tenant (managed-light) Mycelium codebase**, currently in design + planning. No production code lives here yet; ports begin once the design is locked.
+**Pre-launch.** This repository will hold the redesigned, encryption-native Mycelium codebase.
 
-The full living spec is in [`docs/REDESIGN-LIVING-SPEC.md`](docs/REDESIGN-LIVING-SPEC.md). It captures three rounds of sweeps against the current single-tenant production system, a verification table, a transfer/rebuild/discard matrix, a threat-model pressure test of the proposed multi-tenant model, an in-flight design-doc reconciliation, an MYA-0.2 abandonment-lessons section, and 18 operator decisions that gate Phase 1 code.
+Two specs live here:
 
-Until launch this repository is **private**. License is AGPL-3.0 (see [`LICENSE`](LICENSE)) — public release is planned to coincide with the first external users.
+- **[`docs/V1-BUILD-SPEC.md`](docs/V1-BUILD-SPEC.md)** — the **first thing we ship**: a self-hosted single-user MCP server (better-sqlite3 with a D1-compatible adapter, BIP-39 + AES-256-GCM at rest, OAuth 2.1 + Cloudflare Tunnel for remote, Ollama for local embeddings + BYOK cloud inference, 37 tools, AnalysisEngine plugin interface for the topology engine). **9–11 day build.** This is the AGPL sovereignty product.
+
+- **[`docs/REDESIGN-LIVING-SPEC.md`](docs/REDESIGN-LIVING-SPEC.md)** — the **architecture-rationale spec**: 3 sweep rounds against the canonical production system (12 parallel Explore agents, ~12.8k words evidence), verification table, transfer/rebuild/discard matrix, RLS threat-model pressure test (5 HIGH severity findings), MYA-0.2 abandonment lessons, and the 18 operator decisions that gate the eventual managed-light multi-tenant Postgres build. V1's "Phase 5: Extensions" is what this spec covers in depth.
+
+Sequencing: ship V1 first (the open-source promise), validate it with real users, then decide whether the managed-light V2 tier is worth the architectural complexity the redesign spec captures.
+
+Until launch this repository is **private**. License is AGPL-3.0 (see [`LICENSE`](LICENSE)) — public release is planned to coincide with the V1 launch.
 
 ## Where things live
 

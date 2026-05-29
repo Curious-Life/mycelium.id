@@ -2,9 +2,32 @@
 
 ## Read this first
 
-This repo is the **redesigned multi-tenant Mycelium codebase**, currently pre-implementation. The canonical living spec is [`docs/REDESIGN-LIVING-SPEC.md`](docs/REDESIGN-LIVING-SPEC.md). Read **Part 0 (Headline)** + **Part 11 (Operator pickup list)** before doing anything structural.
+This repo holds two specs:
 
-The **current production code** lives in the sibling private repo `Curious-Life/mycelium` (the dedicated-tier codebase). This repo (`mycelium.id`) will run the new managed-light Tier B when launched. They are **two different deployments of two different architectures**; do not assume code patterns from one apply to the other without checking the spec.
+1. **[`docs/V1-BUILD-SPEC.md`](docs/V1-BUILD-SPEC.md)** — **THIS is what we build first.** Self-hosted single-user MCP server, ~9-11 days, better-sqlite3 + D1 adapter, BIP-39 (12-word) + AES-256-GCM, OAuth 2.1, Cloudflare Tunnel, Ollama embeddings, 37 tools, AnalysisEngine plugin boundary. Phase 1–4 of the build plan. **Open the spec before touching code.**
+
+2. **[`docs/REDESIGN-LIVING-SPEC.md`](docs/REDESIGN-LIVING-SPEC.md)** — architecture-rationale doc for the *eventual* managed-light multi-tenant Postgres tier (V1 spec calls this "Phase 5: Extensions"). 12-agent sweep evidence, RLS threat-model pressure test, 18 operator decisions. Read **Part 0 (Headline)** + **Part 11 (Operator pickup list)** before doing any V2 work. Do NOT start V2 architecture decisions until V1 has shipped and validated with real users.
+
+The **current production code** for existing customers lives in the sibling private repo `Curious-Life/mycelium` (canonical, single-tenant per-VPS, dedicated-tier). It continues to serve those customers. V1 here is the new self-hosted product; V2 (when/if it comes) is the new managed-hosted product.
+
+## V1 vs V2 — quick reconciliation
+
+| Aspect | V1 (build now) | V2 (future, if needed) |
+|---|---|---|
+| Deployment | Single-user self-hosted | Multi-tenant managed-hosted |
+| Storage | SQLite (better-sqlite3 + D1 adapter) | Postgres + pgvector |
+| Isolation | One user per process | RLS + per-user key wrap + connection middleware |
+| BIP-39 | 12 words (128-bit) | 24 words (256-bit) per the redesign spec — reconcile to whichever is chosen |
+| Key storage | Session memory after seed-phrase unlock | WebAuthn PRF in-browser + tier-specific fallbacks |
+| Auth | OAuth 2.1 + PKCE (better-auth) | API gateway + JWT |
+| Transport | MCP stdio + Streamable HTTP + REST | + HTTPS+JWT external MCP, federation surfaces |
+| Embedding | Ollama nomic-embed-text 768D | Same model, server-side per redesign spec |
+| Inference | Local Ollama 80% + BYOK cloud 20% | Cost router (port the legacy energy-system design) |
+| Schema | All 111 D1 tables ported intact | 75-80 tables after cleanup |
+| Topology | AnalysisEngine plugin interface (Lumen plugs in) | Same boundary, multi-tenant adaptations |
+| Federation | Deferred (V1 ships sovereignty, no social layer) | `docs/legacy/SOCIAL-SHARING-SPEC-from-legacy.md` |
+
+## ⚠️ Security first — non-negotiable
 
 ## ⚠️ Security first — non-negotiable
 
