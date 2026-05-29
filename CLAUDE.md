@@ -57,6 +57,10 @@ Same as the canonical repo. When applicable, invoke the skill before writing str
 - `/handoff-discipline` — at end of any session that produced commits or decisions. `docs/<TOPIC>-HANDOFF-<YYYY-MM-DD>.md` with TL;DR + commit hashes + pickup protocol.
 - `/tenant-schema-parity` — for the canonical repo's D1 fleet; not applicable to this repo's Postgres single-DB-multi-tenant model until shipping schema changes.
 
+## Working style — run tasks to completion
+
+Keep going until the task is actually complete; don't stop and hand back early. This applies especially to multi-sweep work: when there are more sweeps still to run, launch/await them and fold their findings in rather than pausing to "hold for the next sweep." Only end the turn when the deliverable (e.g. spec + plan updated, committed, pushed) is done — or when genuinely blocked on a user decision.
+
 ## Where things will live (eventually)
 
 This is the planned monorepo structure. **Empty for now** — packages get added when porting begins (post-operator decisions).
