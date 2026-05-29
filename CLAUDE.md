@@ -4,7 +4,7 @@
 
 This repo holds two specs:
 
-1. **[`docs/V1-BUILD-SPEC.md`](docs/V1-BUILD-SPEC.md)** — **THIS is what we build first.** Self-hosted single-user MCP server, ~9-11 days, better-sqlite3 + D1 adapter, BIP-39 (12-word) + AES-256-GCM, OAuth 2.1, Cloudflare Tunnel, Ollama embeddings, 37 tools, AnalysisEngine plugin boundary. Phase 1–4 of the build plan. **Open the spec before touching code.**
+1. **[`docs/V1-BUILD-SPEC.md`](docs/V1-BUILD-SPEC.md)** — **THIS is what we build first.** Self-hosted single-user MCP server, ~18-24 days (ironed-out v1.1 estimate), better-sqlite3 + D1 adapter, **hex master key + AES-256-GCM (ported `crypto-local.js` wrapped-DEK envelope; no BIP-39)**, OAuth 2.1, Cloudflare Tunnel, **Nomic v1.5 ONNX embeddings (`embed-service.py`, not bare Ollama)**, ~36 single-user tools, **AnalysisEngine boundary shipping the open topology pipeline as default**. **Open the spec before touching code** — it carries a Verification table + 4 locked decisions (D1-D4) reconciled against `reference/` code.
 
 2. **[`docs/REDESIGN-LIVING-SPEC.md`](docs/REDESIGN-LIVING-SPEC.md)** — architecture-rationale doc for the *eventual* managed-light multi-tenant Postgres tier (V1 spec calls this "Phase 5: Extensions"). 12-agent sweep evidence, RLS threat-model pressure test, 18 operator decisions. Read **Part 0 (Headline)** + **Part 11 (Operator pickup list)** before doing any V2 work. Do NOT start V2 architecture decisions until V1 has shipped and validated with real users.
 
@@ -17,17 +17,15 @@ The **current production code** for existing customers lives in the sibling priv
 | Deployment | Single-user self-hosted | Multi-tenant managed-hosted |
 | Storage | SQLite (better-sqlite3 + D1 adapter) | Postgres + pgvector |
 | Isolation | One user per process | RLS + per-user key wrap + connection middleware |
-| BIP-39 | 12 words (128-bit) | 24 words (256-bit) per the redesign spec — reconcile to whichever is chosen |
-| Key storage | Session memory after seed-phrase unlock | WebAuthn PRF in-browser + tier-specific fallbacks |
+| Master key | **64-char hex (32 bytes), copy-paste, no BIP-39** — decision D4 (KCV guards typos) | 24-word BIP-39 / WebAuthn PRF per redesign spec — reconcile when V2 starts |
+| Key storage | Session memory after hex-key unlock | WebAuthn PRF in-browser + tier-specific fallbacks |
 | Auth | OAuth 2.1 + PKCE (better-auth) | API gateway + JWT |
 | Transport | MCP stdio + Streamable HTTP + REST | + HTTPS+JWT external MCP, federation surfaces |
-| Embedding | Ollama nomic-embed-text 768D | Same model, server-side per redesign spec |
+| Embedding | Nomic v1.5 ONNX 768D via `embed-service.py` (task prefixes) — decision D2; Ollama is inference-only | Same model, server-side per redesign spec |
 | Inference | Local Ollama 80% + BYOK cloud 20% | Cost router (port the legacy energy-system design) |
 | Schema | All 111 D1 tables ported intact | 75-80 tables after cleanup |
 | Topology | AnalysisEngine plugin interface (Lumen plugs in) | Same boundary, multi-tenant adaptations |
 | Federation | Deferred (V1 ships sovereignty, no social layer) | `docs/legacy/SOCIAL-SHARING-SPEC-from-legacy.md` |
-
-## ⚠️ Security first — non-negotiable
 
 ## ⚠️ Security first — non-negotiable
 
