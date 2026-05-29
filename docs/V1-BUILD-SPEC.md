@@ -19,6 +19,8 @@ This spec was reconciled against the actual `reference/` code (imported from the
 | D3 | **Encryption** | **Port `crypto-local.js` as-is; add a hex master key on top.** | Preserve the real wrapped-DEK envelope `{v,kf,s,iv,ct,dk}` (AES-256-GCM content + AES-KW DEK wrap), scope guardians, the USER/SYSTEM two-key family, and `rewrapEnvelope()`. The spec's original `{iv,ct,tag,scope}` envelope is **rejected** (can't decrypt a single imported row). |
 | D4 | **Master key representation** | **Single 64-char hex string (32 bytes). No BIP-39 words.** | The unlock secret is a copy-pasteable hex blob — identical in form to the existing `ENCRYPTION_MASTER_KEY`, so the current tmpfs/env load path is reused verbatim. **BIP-39 is dropped from V1** (`bip39.ts` / `scoped-keys.ts`-from-mnemonic are deleted from the plan). A **Key-Check Value** (KCV: stored ciphertext of a known constant) guards against a mistyped/truncated paste, since hex carries no checksum. |
 
+The day-by-day, file-level execution plan derived from this spec is **[`docs/V1-IMPLEMENTATION-PLAN.md`](V1-IMPLEMENTATION-PLAN.md)** (6 phases, dependency graph, per-step smoke tests, security checkpoints, first-3-commits starter).
+
 ### What this changes vs. the original draft
 
 - **Crypto (Component 4 & 10):** rewritten — port `crypto-local.js`; master key is hex; no mnemonic.
@@ -1160,6 +1162,7 @@ Every load-bearing assumption in this spec, mapped to where it was verified in `
 | R4 | **Plaintext-in-RAM search index** holds decrypted content — same accepted risk as canonical (CLAUDE.md §1.7). | n/a (accepted) | — | Document explicitly; never log index contents; single-user lowers blast radius vs the multi-tenant V2 concern. |
 | R5 | **Import re-key requires the old master key** in memory during migration. | Low | Med | One-time operator-side script; never persist old key; verify KCV post-migration. |
 | R6 | **Python pipeline as a self-hosted dependency** raises the install bar (onnxruntime, faiss, leidenalg). | Medium | Med | Ship a `setup.sh` that pins versions; the stub `AnalysisEngine` is the graceful degradation if a user can't install the pipeline. |
+| R7 | **Topology orchestrator gap** — `run-clustering.sh` calls 12 scripts but only 5 are present in `reference/pipeline/` (the other 7 — `sync-clustering-points.js`, `describe-chronicles.js`, `embed-mindscape.js`, `topology-audit.js`, `compute-vitality.js`, `compute-cognitive-fingerprint.js`, `check-milestones.js` — are absent). | High (certain) | Med | Do **not** port `run-clustering.sh` verbatim. Write a slim orchestrator around the 5 present scripts + a fresh `sync-clustering-points`. Don't budget the missing 7 as "ports." See `docs/V1-IMPLEMENTATION-PLAN.md` Phase 3. |
 
 ## Open questions deferred (out of V1 scope)
 
