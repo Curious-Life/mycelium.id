@@ -4,7 +4,7 @@
 
 This repo holds two specs:
 
-1. **[`docs/V1-BUILD-SPEC.md`](docs/V1-BUILD-SPEC.md)** — **THIS is what we build first.** Self-hosted single-user MCP server, ~18-24 days (ironed-out v1.1 estimate), better-sqlite3 + D1 adapter, **hex master key + AES-256-GCM (ported `crypto-local.js` wrapped-DEK envelope; no BIP-39)**, OAuth 2.1, Cloudflare Tunnel, **Nomic v1.5 ONNX embeddings (`embed-service.py`, not bare Ollama)**, ~36 single-user tools, **AnalysisEngine boundary shipping the open topology pipeline as default**. **Open the spec before touching code** — it carries a Verification table + 4 locked decisions (D1-D4) reconciled against `reference/` code.
+1. **[`docs/V1-BUILD-SPEC.md`](docs/V1-BUILD-SPEC.md)** — **THIS is what we build first.** Self-hosted single-user MCP server, ~18-24 days (ironed-out v1.1 estimate), better-sqlite3 + D1 adapter, **hex master key + AES-256-GCM (ported `crypto-local.js` wrapped-DEK envelope; no BIP-39)**, OAuth 2.1, Cloudflare Tunnel, **Nomic v1.5 ONNX embeddings (`embed-service.py`, not bare Ollama)**, **~34 single-user tools + a `getContext` preamble (pure tool server, no autonomous loop — D5)**, two hex keys (USER_MASTER + SYSTEM_KEY — D6), a build-new :8095 enrichment service (D7), **AnalysisEngine boundary shipping the open topology pipeline as default**. **Open the spec before touching code** — it carries a Verification table + 7 locked decisions (D1-D7) reconciled against `reference/` code.
 
 2. **[`docs/REDESIGN-LIVING-SPEC.md`](docs/REDESIGN-LIVING-SPEC.md)** — architecture-rationale doc for the *eventual* managed-light multi-tenant Postgres tier (V1 spec calls this "Phase 5: Extensions"). 12-agent sweep evidence, RLS threat-model pressure test, 18 operator decisions. Read **Part 0 (Headline)** + **Part 11 (Operator pickup list)** before doing any V2 work. Do NOT start V2 architecture decisions until V1 has shipped and validated with real users.
 
@@ -17,7 +17,7 @@ The **current production code** for existing customers lives in the sibling priv
 | Deployment | Single-user self-hosted | Multi-tenant managed-hosted |
 | Storage | SQLite (better-sqlite3 + D1 adapter) | Postgres + pgvector |
 | Isolation | One user per process | RLS + per-user key wrap + connection middleware |
-| Master key | **64-char hex (32 bytes), copy-paste, no BIP-39** — decision D4 (KCV guards typos) | 24-word BIP-39 / WebAuthn PRF per redesign spec — reconcile when V2 starts |
+| Master key | **Two 64-char hex keys (USER_MASTER + SYSTEM_KEY, 32 bytes each), copy-paste, no BIP-39** — decisions D4 + D6 (per-key KCV guards typos) | 24-word BIP-39 / WebAuthn PRF per redesign spec — reconcile when V2 starts |
 | Key storage | Session memory after hex-key unlock | WebAuthn PRF in-browser + tier-specific fallbacks |
 | Auth | OAuth 2.1 + PKCE (better-auth) | API gateway + JWT |
 | Transport | MCP stdio + Streamable HTTP + REST | + HTTPS+JWT external MCP, federation surfaces |

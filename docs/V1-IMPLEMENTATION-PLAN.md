@@ -1,7 +1,7 @@
 # Mycelium V1 — Implementation Plan
 
 **Target:** Self-hosted, single-user MCP server (TypeScript `src/` + Python `pipeline/`) per `docs/V1-BUILD-SPEC.md` v1.1.
-**Estimate:** 18–24 working days, 6 phases. Decisions D1–D4 are locked; build around them.
+**Estimate:** 18–24 working days, 6 phases — **+2–4 days for the D7 enrichment service (build-new, see Step 11b)**. Decisions D1–D7 are locked; build around them. D5 narrows V1 to a pure tool server (no scheduler/agent loop → `context-assembly` ships as a preamble tool, `schedule_task`/`list_my_schedules` dropped); D6 keeps two hex keys (USER_MASTER + SYSTEM_KEY); D7 adds the build-new :8095 enrichment service.
 **Authoring note:** Every load-bearing claim below was re-verified against `reference/` (file:line cited). Where the spec and reference disagree, reference wins — flagged inline as **[REF-WINS]**.
 
 > **Where the prompt/spec is wrong (verified):**
@@ -33,8 +33,8 @@ CRITICAL PATH: D1 adapter → crypto → db-d1+tools → MCP server → embed pa
 
 ## Phase 1 — Core Server + Data Layer (Days 1–5)
 
-**Goal:** A stdio MCP server that loads the 111-table schema, unlocks with a hex key (fail-closed + KCV), and serves ~36 tools with transparent envelope encrypt/decrypt.
-**Exit criterion (smoke):** `node src/index.ts` over stdio answers `tools/list` with ~36 tools; a `getHealthData`-class read returns a string; writing a document then reading it round-trips through encryption; pasting a wrong hex key is rejected before any vault row is touched.
+**Goal:** A stdio MCP server that loads the 111-table schema, unlocks with **two hex keys (USER_MASTER + SYSTEM_KEY, D6 — fail-closed + per-key KCV)**, and serves **~34 tools** with transparent envelope encrypt/decrypt.
+**Exit criterion (smoke):** `node src/index.ts` over stdio answers `tools/list` with ~34 tools; a `getHealthData`-class read returns a string; writing a document then reading it round-trips through encryption; pasting a wrong hex key (either slot) is rejected before any vault row is touched.
 
 ### Step 0 — R1 OAuth spike (Day 1, parallel) — **GATE**
 - **Build:** A throwaway spike (not in `src/`; a scratch branch) that stands up better-auth with the `oAuthProvider()` plugin and attempts the **full MCP remote flow** against a real client: `/.well-known/oauth-authorization-server` discovery → DCR `/register` → `/authorize` + **PKCE** (`code_challenge`/`S256`) → `/token` exchange → Bearer-authenticated `/mcp` POST.
@@ -46,7 +46,7 @@ CRITICAL PATH: D1 adapter → crypto → db-d1+tools → MCP server → embed pa
 - **Dependency:** none. **Output:** a one-paragraph decision recorded in the plan/handoff.
 
 ### Step 1 — D1 adapter + schema load (Day 1)
-- **Build:** `src/adapter/d1.ts` — better-sqlite3 wrapped to D1's `prepare().bind().run()/.all()/.first()` + `batch()`/`exec()`. Plus a `d1Query(sql, params)` and `d1Batch` shim (the real injection point for the data layer).
+- **Build:** `src/adapter/d1.ts` — better-sqlite3 wrapped to D1's `prepare().bind().run()/.all()/.first()` + `batch()`/`exec()`. Plus a `d1Query(sql, params)` and `d1Batch` shim (the real injection point for the data layer). **[REF-WINS, sweep] The whole data layer is async** (`db-d1/*` all `await d1Query(...)`, returning `{results}` + extracted via `firstRow()` — verified `users.js:21`, `documents.js:79`), but better-sqlite3 is **synchronous**. The shim must therefore present an **async signature `(sql,params)=>Promise<{results}>`** that `Promise.resolve(...)`-wraps the sync `stmt.all()/get()/run()`. This is the one mandatory impedance match; it keeps every call site unchanged.
 - **Source → target:** spec Component 1 sample → `src/adapter/d1.ts`; `reference/schema/d1-schema-generated.sql` → `migrations/0001_init.sql`.
 - **Smoke:** `sqlite3 data/mycelium.db < migrations/0001_init.sql && sqlite3 data/mycelium.db "SELECT count(*) FROM sqlite_master WHERE type='table';"` returns 111. A `d1.prepare('SELECT 1 AS x').first('x')` returns `1`.
 - **Dependency:** none.
@@ -59,22 +59,23 @@ CRITICAL PATH: D1 adapter → crypto → db-d1+tools → MCP server → embed pa
   - `encrypt`/`encryptWithSystemKey`/`decrypt`/`rewrapEnvelope` (`:960,:1034,:1069,:1146`).
   - Two key families (USER_MASTER + SYSTEM_KEY).
 - **Single-user collapse:** scopes → `personal` (+ `system` for `secrets`). Write **v1** envelopes only (drop the `userId`/v2 write path — `userId` is constant); keep `decrypt()`'s v2/v3 branches for imports.
-- **Add (D4):** `src/crypto/kcv.ts` — on first unlock, `encrypt("mycelium-kcv-v1", "personal", key)` → persist envelope to `data/kcv.json` (or a `kcv` row). On every unlock, `decrypt(storedKcv, key)`; a GCM auth-tag failure ⇒ reject the key. **Vault stays locked on KCV failure.**
+- **Add (D4+D6):** `src/crypto/kcv.ts` — **two independent KCVs, one per key.** On first unlock, `encrypt("mycelium-kcv-v1","personal",USER_MASTER)` and `encryptWithSystemKey("mycelium-kcv-v1",SYSTEM_KEY)` → persist both envelopes (`data/kcv.json` / `kcv` rows). On every unlock, decrypt each with its key; **either** GCM auth-tag failure ⇒ reject. **Vault stays locked if either KCV fails or either key slot is empty (fail-closed).**
 - **Smoke:** unit round-trip `decrypt(encrypt(p)) === p`; wrong-key decrypt throws; KCV rejects a truncated 63-char hex; `rewrapEnvelope(env, old, new)` then `decrypt(.., new)` returns plaintext and `decrypt(.., old)` throws.
 - **Security assertions:** §1.3 fail-closed (no key ⇒ refuse), §1.4 (key only in session memory/tmpfs), §4 (KCV constant is non-secret; never log the key or plaintext).
 - **Dependency:** Step 1 (KCV persistence).
 
-### Step 3 — Port db-d1 layer + wire ~36 tool factories (Day 3)
+### Step 3 — Port db-d1 layer + wire ~34 tool factories (Day 3)
 - **Build:** port `reference/core/db-d1/*` (43 files) over the injected `d1Query`/`d1Batch`/`firstRow`/`parseJson` — SQL unchanged. Each is a `createXNamespace(deps)` factory (verified `spaces.js:15`, `messages.js:48`, `oauth-states.js:15`). Assemble the `db` namespace object that tool factories expect via `getDb()` (verified `health.js:42`).
-- **Then** port `reference/mcp-tools/*` factories (`createXDomain(deps) → {tools,handlers}`, handlers `async (args)=>string`, verified `health.js:19–94`). Register their `tools` arrays into `McpServer` and route `tools/call` → `handlers[name](args)`.
-- **Single-user surface (~36):** **drop** `delegation.js` (`delegate_to_agent`,`getTeamStatus` — `delegation.js:38,56`); **skip** `spaces.js` (multi-user); `internal.js` (mind-file tools) ports but defer the mind-file preload contract to Step 11.
+- **Then** port `reference/mcp-tools/*` factories (`createXDomain(deps) → {tools,handlers}`, handlers `async (args)=>string`, verified `health.js:19–94`).
+- **Registration contract [REF-WINS, sweep]:** `reference/` has **no `@modelcontextprotocol/sdk`** — tools are plain objects `{name, description, inputSchema}` with **JSON-Schema** `inputSchema` (`type:'object'`/`properties`/`required`, verified `documents.js:202`, `tasks.js:28`), and handlers return **raw strings**, not MCP content envelopes (verified `documents.js:409`, `health.js:89`). ⇒ **Use the low-level MCP `Server` + `ListToolsRequestSchema`/`CallToolRequestSchema` handlers, *not* `McpServer.tool()` (which wants Zod).** Pass the ported `inputSchema` JSON through unchanged; in the `tools/call` handler, route `handlers[name](args)` and **wrap the returned string into `{content:[{type:'text',text:result}]}` at that single seam.** This is the only MCP glue; the 14 tool files stay verbatim.
+- **Single-user surface (~34):** **drop** `delegation.js` (`delegate_to_agent`,`getTeamStatus` — `delegation.js:38,56`); **drop `schedules.js`** (`schedule_task`,`list_my_schedules` — `schedules.js:117,134`) per **D5** — no scheduler/executor in a pure tool server; **skip** `spaces.js` (multi-user); `internal.js` (mind-file tools, incl. `flagForDiscussion`) ports but defer the mind-file preload contract to Step 11/11a.
 - **Source → target:** `reference/core/db-d1/*` → `src/db/*`; `reference/mcp-tools/*` → `src/tools/*`; registry → `src/tools/index.ts`.
 - **Smoke:** `db.messages.countByUser(userId)` returns a number against the loaded schema; a tool handler returns a markdown string.
 - **Dependency:** Steps 1, 2.
 
 ### Step 4 — MCP server, dual transport (Day 4)
-- **Build:** `src/index.ts` (stdio default, `--http` flag) + `src/server.ts` (Express, StreamableHTTP) + `src/mcp.ts` (tool registration). Use spec Components 2 samples as the skeleton.
-- **Smoke:** Claude Desktop (stdio config from spec) lists ~36 tools; `tools/call getDailyMessages` returns content.
+- **Build:** `src/index.ts` (stdio default, `--http` flag) + `src/server.ts` (Express, StreamableHTTP) + `src/mcp.ts` (tool registration — the low-level `Server` + request-handler seam from Step 3, doing JSON-Schema passthrough and string→`content` wrapping). Use spec Components 2 samples as the skeleton.
+- **Smoke:** Claude Desktop (stdio config from spec) lists ~34 tools; `tools/call getDailyMessages` returns content (string wrapped as `{content:[{type:'text',…}]}`).
 - **Dependency:** Step 3.
 
 ### Step 5 — REST API router (Day 5)
@@ -115,6 +116,21 @@ CRITICAL PATH: D1 adapter → crypto → db-d1+tools → MCP server → embed pa
 - **Build:** route `searchMindscape` tool → mind-search `tier1`; expose `/internal/v1/search/mindscape` loopback. Wire `internal.js` mind-file tools' preload contract into the session (deferred from Step 3).
 - **Smoke:** Success Criterion #4 — `searchMindscape` returns ranked results with content decrypted transparently.
 - **Dependency:** Steps 9, 10.
+
+### Step 11a — context-assembly as an on-demand preamble tool (Day 9, +) — **D5**
+- **Why:** D5 makes V1 a pure tool server (the client *is* the agent), so there's no server-side loop to inject preloaded context. Instead expose `assembleContext` as a **callable preamble** the client pulls at turn start.
+- **Build:** port `reference/core/context-assembly.js` (`assembleContext(agentRoot, userId, {scope}) → markdown string`, `:79`) → `src/context/assemble.ts`, dropping multi-agent/multi-channel branches (single-user). Surface it as **one MCP tool `getContext` *and* an MCP resource** (e.g. `mycelium://context/preamble`) returning the same markdown. It assembles mind files (internal model, **`flagged.md`**, dream fragments), pinned docs, the master doc index, and recent messages (`:79–374`) — this is what keeps **`flagForDiscussion` viable** (the flagged items surface here).
+- **Single-user simplify:** keep the TTL caches (`:34–38`) but key on the constant userId; drop the Supabase-pinned-docs path if not ported, fall back to the local doc index.
+- **Smoke:** `getContext({scope:'all'})` returns markdown containing a known flagged item written via `flagForDiscussion`; resource read returns identical text.
+- **Dependency:** Steps 3, 10, 11.
+
+### Step 11b — Enrichment service (:8095) — **D7, BUILD-NEW** *(+2–4 days; parallel-track B)*
+- **⚠️ Not in `reference/`.** Only the **contract** is: `reference/server-routes/portal-enrichment.js` (the driver router — `/enrich-all`, `/health`, loopback `notify` callback, message-state counts: total/enriched/embedded/pending/failed) and the `messages` NLP columns + work-queue index (`entities`/`relations`/`entity_summary`/`nlp_processed`/`nlp_processed_at`/`nlp_error`/`embedding_768`; `d1-schema-generated.sql:950,1832,1835`).
+- **Build:** `pipeline/enrich-service` (loopback `127.0.0.1:8095`) — a worker that pulls `nlp_processed=0` rows, runs NLP entity/tag extraction, calls the **:8091 embed-service (D2)** for `embedding_768`, writes results + flips `nlp_processed` (state machine: `0 → processing → 1` / `nlp_error` on failure, with a 60s stale-heartbeat → abandoned), and fires the loopback `notify` callback on phase transitions. Port `portal-enrichment.js` → `src/api/enrichment.ts` to drive/monitor it (status, trigger, progress + IDOR guard).
+- **Interim (until 11b lands):** write `embedding_768` inline on message create (synchronous embed) so search works; the async NLP state machine is the follow-on.
+- **Security:** §7 (embeddings = fingerprints, loopback-only, never logged), §13 (no public bind), §1.1 (encrypt entities/relations envelopes before write — they're plaintext-derived).
+- **Smoke:** seed 5 messages with `nlp_processed=0` → trigger → all reach `nlp_processed=1` with non-null `embedding_768` and tags; `/status` counts reconcile; killing mid-job marks the row recoverable, not lost.
+- **Dependency:** Steps 3, 8 (embed-service). Off the Phase-1 critical path.
 
 ---
 
@@ -171,7 +187,7 @@ CRITICAL PATH: D1 adapter → crypto → db-d1+tools → MCP server → embed pa
 **Exit criterion:** the spec's Success Criteria 1–10 all green.
 
 ### Step 18 — End-to-end connect (Day 18)
-- Claude Desktop (stdio) + mobile (HTTPS/OAuth) both list and call the ~36 tools; encryption round-trips. **Dependency:** Phases 1–4.
+- Claude Desktop (stdio) + mobile (HTTPS/OAuth) both list and call the ~34 tools + `getContext` preamble; encryption round-trips. **Dependency:** Phases 1–4.
 
 ### Step 19 — Port the test suite (Day 19) — **SECURITY CHECKPOINT C4**
 Port these PORT-tagged tests (assertions, even if rewriting the runner):
@@ -218,6 +234,8 @@ Port these PORT-tagged tests (assertions, even if rewriting the runner):
 - **R3:** mind-search port scope — port its 25-file test suite alongside (Step 9); brute-force-cosine fallback if RRF slips.
 - **NEW R7 (medium):** topology orchestrator gap — 7 `run-clustering.sh` scripts are absent; Step 12 writes a slim orchestrator + a fresh `sync-clustering-points`. Don't budget these as "ports."
 - **R6:** Python install bar (onnxruntime/faiss/leidenalg) — `setup.sh` pins versions; stub is the graceful degradation.
+- **NEW R8 (medium, D7):** enrichment service is **build-new** (Step 11b, +2–4 days) — only its contract exists in `reference/`. Risk is the NLP-tagging implementation (model choice + entity schema) and the `nlp_processed` state machine's crash-recovery. Interim inline-embed keeps search working if 11b slips.
+- **Deferred (D5), not a risk:** server-side scheduler + autonomous `/chat` loop, lanes/recovery/compaction. V1 is a pure tool server; these move to **Phase 5: Extensions** (`schedule_task`/`list_my_schedules` re-enter when an executor exists).
 
 ## Thinnest-shippable-MVP cut line
 
