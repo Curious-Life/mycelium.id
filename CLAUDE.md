@@ -61,6 +61,18 @@ Same as the canonical repo. When applicable, invoke the skill before writing str
 
 Keep going until the task is actually complete; don't stop and hand back early. This applies especially to multi-sweep work: when there are more sweeps still to run, launch/await them and fold their findings in rather than pausing to "hold for the next sweep." Only end the turn when the deliverable (e.g. spec + plan updated, committed, pushed) is done — or when genuinely blocked on a user decision.
 
+## Design rigor — verify before building (non-negotiable)
+
+The system must be built on the **best possible decisions and designs at every step** — so stress-test, verify, and (where possible) improve each step *before* anything is built on top of it. Prefer **hard evidence over paper reasoning**: a spike that runs real code, or an adversarial read against live `reference/` code, beats a confident assumption. This is the pattern that has already caught real, build-breaking bugs here — the non-existent `oAuthProvider()` API and the per-request `StreamableHTTPServerTransport`, both found by *running/reading*, not planning.
+
+For each load-bearing decision or component, run a **verification gate** before building on it:
+1. **Enumerate** the load-bearing assumptions (what must be true for this to work).
+2. **Prove or refute** each — spike it, read the real code (file:line), or write a test. Never carry an unverified assumption into a layer that depends on it.
+3. **Red-team** it — actively look for the next hidden `oAuthProvider`-class error; consider alternatives; ask whether a better design exists.
+4. **Record** the verdict (verification table / spike RESULT.md / decision log) with evidence, then build.
+
+Optimize for the best decision at each step, not the fastest path to code. A spike that surfaces a flaw early is a success, not a detour.
+
 ## Where things will live (eventually)
 
 This is the planned monorepo structure. **Empty for now** — packages get added when porting begins (post-operator decisions).
