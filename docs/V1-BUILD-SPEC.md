@@ -388,7 +388,36 @@ export function startHttpServer(server: McpServer, db: D1Adapter, port: number) 
 
 MCP clients (Claude Desktop, CLI, mobile) require the full OAuth discovery + PKCE flow. No shortcuts.
 
+> ### ⚠️ CORRECTED (Step 0 spike — VERIFIED GO) — `oAuthProvider()` does not exist
+>
+> The sample below names a plugin that isn't in better-auth. The **verified** surface (spike `spike/oauth/`, `better-auth@1.6.12`, full MCP flow passing) is the **`mcp()` plugin** + helpers. Use this shape:
+>
+> ```typescript
+> import { betterAuth } from 'better-auth';
+> import { mcp, withMcpAuth, oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata } from 'better-auth/plugins';
+> import { toNodeHandler } from 'better-auth/node';
+> import { getMigrations } from 'better-auth/db/migration';
+> import Database from 'better-sqlite3';
+>
+> export const auth = betterAuth({
+>   baseURL: BASE,
+>   database: new Database('./data/auth.db'),
+>   emailAndPassword: { enabled: true },        // single-user: one password, set in .env
+>   plugins: [ mcp({
+>     loginPage: '/login',
+>     resource: `${BASE}/mcp`,
+>     oidcConfig: { allowDynamicClientRegistration: true, requirePKCE: true, storeClientSecret: 'plain' },
+>   }) ],
+> });
+> await (await getMigrations(auth.options)).runMigrations();   // in-process schema, no CLI step
+> ```
+> - **Mount the two well-knowns at root** (`oAuthDiscoveryMetadata(auth)` → RFC 8414, `oAuthProtectedResourceMetadata(auth)` → RFC 9728); the OAuth endpoints self-advertise under `…/api/auth/mcp/*`.
+> - **Protect `/mcp` with `withMcpAuth(auth, handler)`** — emits the `401` + `WWW-Authenticate: Bearer resource_metadata=…` challenge unauthenticated; passes the session through when a valid Bearer is present.
+> - **DCR client lives in the DB; consent is skipped unless `prompt=consent`** → single-user completes the flow with no consent UI.
+> - **Gotchas:** Express-5 needs a *named* splat (`app.all('/api/auth/*splat', …)`); better-auth enforces an `Origin` header (set `trustedOrigins` for the tunnel host).
+
 ```typescript
+// ⚠️ SUPERSEDED — see CORRECTED block above. oAuthProvider() is not a real export.
 import { betterAuth } from 'better-auth';
 import { oAuthProvider } from 'better-auth/plugins';
 import Database from 'better-sqlite3';
@@ -400,13 +429,11 @@ export const auth = betterAuth({
 });
 ```
 
-Endpoints created automatically:
-- `/.well-known/oauth-authorization-server`
-- `/authorize` (shows login form)
-- `/token` (code exchange, PKCE verified)
-- `/register` (DCR — accept all for single-user)
+Endpoints (verified, advertised by the discovery doc):
+- `/.well-known/oauth-authorization-server` + `/.well-known/oauth-protected-resource` (served at root)
+- `…/api/auth/mcp/authorize` (PKCE S256 enforced) · `…/mcp/token` · `…/mcp/register` (DCR) · `…/mcp/jwks`
 
-**Single-user simplification:** No registration flow. Password set in `.env` on first run.
+**Single-user simplification:** No interactive consent. Password set in `.env` on first run.
 
 **Build estimate:** 1 day
 
@@ -1181,7 +1208,7 @@ Every load-bearing assumption in this spec, mapped to where it was verified in `
 
 | # | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|---|
-| R1 | **better-auth's OAuth provider may not satisfy the MCP discovery + DCR + PKCE flow** that Claude Desktop/mobile expect. The spec's `auth.ts` (~5 LOC) hand-waves "endpoints created automatically." Not verifiable from `reference/` (external dep). | Medium | High (blocks remote/mobile) | **Prove it on Day 14-15, not Day 17.** Spike the full discovery → register → authorize → token → bearer flow against a real MCP client before committing. Fallback: a thin hand-rolled OAuth 2.1 provider. |
+| ~~R1~~ **RESOLVED ✅ (2026-05-30)** | better-auth's OAuth provider satisfying the MCP discovery + DCR + PKCE flow. **Proven** by the Step 0 spike (`spike/oauth/`, `RESULT.md`): all four conditions pass against `better-auth@1.6.12` via the **`mcp()` plugin** (not the spec's `oAuthProvider()`). | ~~Medium~~ | ~~High~~ | **No fallback needed.** Phase 4 budgeted at 2 days. See Component 3 CORRECTED block for the verified wiring. |
 | R2 | **Embedding vector parity** — even Nomic-ONNX vs a different runtime/quantization can drift. | Low-Med | High (search/cluster recall) | Day 6 gate: embed a fixed sample, assert cosine ≥ 0.999 vs a reference vector exported from the canonical service before trusting imports. |
 | R3 | **mind-search port is bigger than budgeted** (~25 files + rehydrate adapter + scan-matchers). | Medium | Med | Port the test suite (`reference/tests/mind-search/`, 25 files) alongside; it pins expected behavior. Stage a brute-force-cosine fallback if RRF/BM25 slips. |
 | R4 | **Plaintext-in-RAM search index** holds decrypted content — same accepted risk as canonical (CLAUDE.md §1.7). | n/a (accepted) | — | Document explicitly; never log index contents; single-user lowers blast radius vs the multi-tenant V2 concern. |

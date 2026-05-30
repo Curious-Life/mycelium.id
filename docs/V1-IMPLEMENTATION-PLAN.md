@@ -36,7 +36,9 @@ CRITICAL PATH: D1 adapter → crypto → db-d1+tools → MCP server → embed pa
 **Goal:** A stdio MCP server that loads the 111-table schema, unlocks with **two hex keys (USER_MASTER + SYSTEM_KEY, D6 — fail-closed + per-key KCV)**, and serves **~34 tools** with transparent envelope encrypt/decrypt.
 **Exit criterion (smoke):** `node src/index.ts` over stdio answers `tools/list` with ~34 tools; a `getHealthData`-class read returns a string; writing a document then reading it round-trips through encryption; pasting a wrong hex key (either slot) is rejected before any vault row is touched.
 
-### Step 0 — R1 OAuth spike (Day 1, parallel) — **GATE**
+### Step 0 — R1 OAuth spike (Day 1, parallel) — **GATE → ✅ GO (RESOLVED 2026-05-30)**
+> **Decision (evidence: `spike/oauth/`, `RESULT.md`):** **GO — adopt better-auth.** A throwaway server + scripted MCP-client probe drove the full remote flow against `better-auth@1.6.12` and all four NO-GO conditions PASS: discovery (RFC 8414 AS + RFC 9728 PR metadata, `S256` advertised), DCR auto-accept (`201` + public `client_id`, `auth_method:none`), authorize+**PKCE S256** → code → token (tampered verifier→`401`, correct→`200`), and Bearer-enforced `/mcp` (`401`+`WWW-Authenticate` challenge without; `200` with). **R1 retired; Phase 4 budgeted at 2 days.** Spec correction: the API is the **`mcp()` plugin** + `withMcpAuth`/`oAuthDiscoveryMetadata`/`oAuthProtectedResourceMetadata` (NOT the spec's non-existent `oAuthProvider()`); set `oidcConfig.requirePKCE:true`; mount the two well-knowns at root; OAuth endpoints self-advertise under `…/api/auth/mcp/*`. Gotchas: Express-5 named splat (`*splat`), `Origin`/`trustedOrigins` CSRF, in-process `getMigrations().runMigrations()`.
+
 - **Build:** A throwaway spike (not in `src/`; a scratch branch) that stands up better-auth with the `oAuthProvider()` plugin and attempts the **full MCP remote flow** against a real client: `/.well-known/oauth-authorization-server` discovery → DCR `/register` → `/authorize` + **PKCE** (`code_challenge`/`S256`) → `/token` exchange → Bearer-authenticated `/mcp` POST.
 - **Test client:** `npx @modelcontextprotocol/inspector` (or Claude Desktop remote-server add) pointed at the spike URL through a local tunnel.
 - **Source:** none portable — `reference/` has **no OAuth provider** (verified: all `PKCE`/`code_challenge` hits are client-side `portal-auth-{claude,openai}.js`). `reference/core/db-d1/oauth-states.js:15` gives a reusable `oauth_states` storage namespace **if hand-rolling**.
@@ -233,7 +235,7 @@ Port these PORT-tagged tests (assertions, even if rewriting the runner):
 
 ## Open risks carried forward
 
-- **R1 (high):** OAuth provider unverified — Step 0 spike gates it; hand-rolled fallback budgeted.
+- **~~R1 (high)~~ — RESOLVED 2026-05-30 (✅ GO):** OAuth provider verified via the Step 0 spike (`spike/oauth/`) — better-auth's `mcp()` plugin passes the full MCP flow (discovery + DCR + PKCE-S256 + Bearer/`mcp`). Hand-rolled fallback not needed; Phase 4 = 2 days.
 - **R2:** embed vector parity — Step 8 gate (cosine ≥ 0.999).
 - **R3:** mind-search port scope — port its 25-file test suite alongside (Step 9); brute-force-cosine fallback if RRF slips.
 - **NEW R7 (medium):** topology orchestrator gap — 7 `run-clustering.sh` scripts are absent; Step 12 is **three deliverables** (cluster.py port + slim orchestrator + fresh `sync-clustering-points`), not one. **Budget 3 days for Step 12 alone** (Days 10–12); don't budget the missing scripts as "ports." Off the TS critical path, so it absorbs into the envelope.

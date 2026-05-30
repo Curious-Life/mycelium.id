@@ -1,0 +1,17 @@
+{
+  "name": "mycelium-oauth-spike",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "THROWAWAY — Step 0 R1 OAuth spike. Not shipped. Validates MCP OAuth flow against better-auth.",
+  "scripts": {
+    "server": "node server.mjs",
+    "probe": "node probe.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-auth": "^1.6.12",
+    "better-sqlite3": "^12.10.0",
+    "express": "^5.2.1"
+  }
+}
