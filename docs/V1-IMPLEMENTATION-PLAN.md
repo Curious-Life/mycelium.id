@@ -53,13 +53,15 @@ CRITICAL PATH: D1 adapter → crypto → db-d1+tools → MCP server → embed pa
 - **Smoke:** `sqlite3 data/mycelium.db < migrations/0001_init.sql && sqlite3 data/mycelium.db "SELECT count(*) FROM sqlite_master WHERE type='table';"` returns 111. A `d1.prepare('SELECT 1 AS x').first('x')` returns `1`.
 - **Dependency:** none.
 
-### Step 2 — Port crypto-local.js (Day 2) — **SECURITY CHECKPOINT C1**
+### Step 2 — Port crypto-local.js (Day 2) — **SECURITY CHECKPOINT C1** · **✅ VERIFIED (spike `spike/crypto/`)**
+> **Spike verdict (GO, 2026-05-30):** `crypto-local.js` runs **unmodified** under Node 22 and passes a 9-check fail-closed battery — v1/v2/v3 round-trips, KCV (wrong key → throw), `importMasterKey` rejects truncated hex, `rewrapEnvelope` re-key, **D6 two-key separation** (USER_MASTER ⊥ SYSTEM_KEY in all 3 directions), and both scope guardians. Findings folded below: **(a)** the `./guardians/index.js` import is broken in `reference/` (guardians live at `core/guardians/`) — **port them as siblings** of the crypto file; **(b)** `sodium-native` is lazy and **only** used by the *tmpfs* key reader — load keys via env/paste and V1 needs **no native sodium dep**; **(c)** wrong-key throws an untyped `OperationError` → KCV/unlock must treat **any** throw as "stay locked"; **(d)** this proves self-consistency, not production-row import — add a Step-17 pre-flight (decrypt one real exported row before the bulk re-key).
 - **Build:** `src/crypto/crypto-local.ts` — port `reference/encryption/crypto-local.js` **as-is**, preserving:
   - Envelope `{v,s,iv,ct,dk}` (+`u`/`kf` on read) — `crypto-local.js:1016–1026,1055–1062`.
   - `importMasterKey(hex)` + tmpfs/env hex load (`:561–671`); HKDF-SHA256 **zero salt**, info `mycelium:scope:<scope>:v1` (`:840`) and `mycelium:system-scope:<scope>:v1` (`:877`) — **do not change these strings**.
   - `scopeGuardian`/`scopeEncryptGuardian` run **before** unwrap (`:967,:1078`) — fail-closed.
   - `encrypt`/`encryptWithSystemKey`/`decrypt`/`rewrapEnvelope` (`:960,:1034,:1069,:1146`).
   - Two key families (USER_MASTER + SYSTEM_KEY).
+  - **Port `core/guardians/` (4 files) as a sibling of the crypto module** (`src/crypto/guardians/`) so the `./guardians/index.js` import resolves — verified self-contained, no external deps. Prefer env/paste key load (`importMasterKey(hex)`) over the tmpfs path to avoid the `sodium-native` build.
 - **Single-user collapse:** scopes → `personal` (+ `system` for `secrets`). Write **v1** envelopes only (drop the `userId`/v2 write path — `userId` is constant); keep `decrypt()`'s v2/v3 branches for imports.
 - **Add (D4+D6):** `src/crypto/kcv.ts` — **two independent KCVs, one per key.** On first unlock, `encrypt("mycelium-kcv-v1","personal",USER_MASTER)` and `encryptWithSystemKey("mycelium-kcv-v1",SYSTEM_KEY)` → persist both envelopes (`data/kcv.json` / `kcv` rows). On every unlock, decrypt each with its key; **either** GCM auth-tag failure ⇒ reject. **Vault stays locked if either KCV fails or either key slot is empty (fail-closed).**
 - **Smoke:** unit round-trip `decrypt(encrypt(p)) === p`; wrong-key decrypt throws; KCV rejects a truncated 63-char hex; `rewrapEnvelope(env, old, new)` then `decrypt(.., new)` returns plaintext and `decrypt(.., old)` throws.
@@ -179,6 +181,7 @@ CRITICAL PATH: D1 adapter → crypto → db-d1+tools → MCP server → embed pa
 - **Dependency:** Steps 4, 15.
 
 ### Step 17 — Data-import re-key milestone (Day 17) — **SECURITY CHECKPOINT C3**
+- **Pre-flight [crypto-spike finding d]:** before the bulk run, decrypt **one** real exported row with the **old** master key to prove production-import compatibility (HKDF zero-salt + `info` strings + envelope versions match real data). The spike proved self-consistency, *not* that we can read a production row — gate the bulk re-key on this single-row check passing.
 - **Build:** `scripts/import.ts` — operator-side, one-time. Load encrypted rows (wrangler export → sqlite3), then for each encrypted field run `rewrapEnvelope(env, oldMasterKey, newHexMasterKey)` (`crypto-local.js:1146`). `embedding_768` (TEXT = base64(Float32) inside an envelope) re-keys identically. Verify KCV post-migration.
 - **[REF-WINS]:** a plain `wrangler export`+`sqlite3` load leaves data **undecryptable** under the new key — re-key is mandatory (spec Data Import correction).
 - **Smoke:** import a fixture row → `decrypt(.., newKey)` succeeds; old key fails (mirrors `master-key-rotation.test.js:29–49`); imported `embedding_768` rehydrates and search finds the row.

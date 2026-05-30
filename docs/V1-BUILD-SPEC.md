@@ -1203,6 +1203,7 @@ Every load-bearing assumption in this spec, mapped to where it was verified in `
 | 20 | `schedule_task`/`list_my_schedules` have no executor in a tool server (drop, D5) | ✅ confirmed | `reference/mcp-tools/schedules.js:117,134`; no scheduler runtime ported under D5 |
 | 21 | `context-assembly` is portable as an on-demand preamble (D5) | ✅ holds | `reference/core/context-assembly.js:79` (`assembleContext()→markdown`, incl. `flagged.md`/mind files/recent messages) |
 | 22 | Enrichment service exists in `reference/` to port (D7) | ❌ service absent; only its **contract** present → **build-new** | `reference/server-routes/portal-enrichment.js` (driver router, :8095) + `messages` NLP columns/index `d1-schema-generated.sql:950,1832,1835`; no `enrich-service` in `reference/pipeline/` |
+| 23 | `crypto-local.js` (D3/D4/D6) runs under V1 runtime + fails closed | ✅ **GO — verified by spike `spike/crypto/`** | Unmodified under Node 22, 9/9 checks: v1/v2/v3 round-trips, KCV (wrong key→throw), hex-validation, `rewrapEnvelope` re-key, **D6 two-key separation** (USER_MASTER ⊥ SYSTEM_KEY), both scope guardians. Findings: guardians live at `core/guardians/` (port as siblings); `sodium-native` only for the tmpfs path (env/paste needs none); wrong-key throws untyped `OperationError`; production-row decrypt is a separate Step-17 pre-flight |
 
 ## Risks & mitigations
 
