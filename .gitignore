@@ -53,6 +53,13 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Local data (SQLite vault + KCV) — runtime artifacts, never commit
+data/
+*.db
+*.db-shm
+*.db-wal
+kcv.json
+
 # Claude Code per-developer state
 .claude/projects/
 .claude/settings.local.json
