@@ -364,7 +364,20 @@ export function startHttpServer(server: McpServer, db: D1Adapter, port: number) 
     console.log(`REST: http://localhost:${port}/api/v1/*`);
     console.log(`OAuth: http://localhost:${port}/auth/.well-known/oauth-authorization-server`);
   });
-}
+```
+
+> ### ⚠️ CORRECTED — the `/mcp` handler above is **per-request transport**; that breaks sessions
+>
+> The sample creates a **new `StreamableHTTPServerTransport` and calls `server.connect()` on every request** (`sessionIdGenerator: undefined`). That is wrong for a Streamable-HTTP MCP server: the transport is meant to **persist across requests for a session**, and connecting one `McpServer` to a fresh transport per request leaks connections and drops the `initialize`→subsequent-request continuity (notifications, `mcp-session-id` correlation). Two correct shapes:
+> - **Stateful (recommended for remote clients):** on the `initialize` request, create a transport with a real `sessionIdGenerator` (e.g. `randomUUID`), `server.connect()` it once, and store it in a `Map<sessionId, transport>`; route later requests (carrying the `mcp-session-id` header) back to the stored transport; evict on `onclose`/DELETE.
+> - **Stateless:** if you truly want no sessions, keep `sessionIdGenerator: undefined` **but** reuse a **single** long-lived transport+server (connect once at boot), not one per request.
+>
+> Build note (plan Step 4): wire the `Map`-based stateful variant — it's what Claude Desktop/mobile expect, and the OAuth `mcp-session-id` correlation rides on it.
+
+```typescript
+  // ⚠️ do NOT ship the per-request `new StreamableHTTPServerTransport()` + connect above.
+  // Use the Map<sessionId, transport> stateful variant from the CORRECTED note.
+} // startHttpServer
 ```
 
 **Build estimate:** 1 day (transport + tool registration + Express)
@@ -1031,7 +1044,7 @@ Node script that calls Worker API (`/api/db/query`) per table, handles paginatio
 Phase 1: Core Server + Data Layer (Days 1-5)
 ├── Day 1   : D1 adapter (better-sqlite3) + load d1-schema-generated.sql (111 tables, vanilla SQLite — 0 rewrites)
 ├── Day 2   : Port crypto-local.js envelope + scope guardians + two-key family; hex master key + KCV unlock
-├── Day 3   : Port reference/core/db-d1/* over a local d1Query; wire ~36 mcp-tools factories
+├── Day 3   : Port reference/core/db-d1/* over a local d1Query; wire ~34 mcp-tools factories
 ├── Day 4   : MCP server (Express + SDK + tool registration, stdio + Streamable HTTP)
 ├── Day 5   : REST API router (same handlers, HTTP routes)
 
@@ -1051,7 +1064,7 @@ Phase 4: Auth + Deployment (Days 14-17)
 ├── Day 17   : Setup scripts + data-import re-key path (rewrapEnvelope old→hex master)
 
 Phase 5: Integration + Hardening (Days 18-21)
-├── Day 18   : Connect Claude Desktop (stdio) + mobile (HTTPS/OAuth); verify the ~36 tools + encryption round-trip
+├── Day 18   : Connect Claude Desktop (stdio) + mobile (HTTPS/OAuth); verify the ~34 tools + getContext + encryption round-trip
 ├── Day 19   : Port the PORT-tagged tests (crypto/envelope, two-key, encryption-coverage, mind-search suite)
 ├── Day 20   : Edge cases, fail-closed paths, log-redaction, README
 ├── Day 21   : Soak + buffer
@@ -1088,8 +1101,8 @@ Phase 6: Extensions (later — V2 / post-launch)
 ## Success Criteria
 
 The server is done when:
-1. Martin pastes the 64-char hex master key → KCV verifies → vault unlocks → data decrypted in session (wrong/truncated key is rejected, not silently mis-unlocked)
-2. Claude Desktop connects via stdio → the ~36 single-user tools work
+1. Martin pastes both 64-char hex keys (USER_MASTER + SYSTEM_KEY, D6) → per-key KCV verifies → vault unlocks → data decrypted in session (a wrong/truncated/missing *either* key is rejected, not silently mis-unlocked)
+2. Claude Desktop connects via stdio → the ~34 single-user tools (+ `getContext` preamble) work
 3. Mobile app connects via HTTPS → OAuth login → tools work through the account tunnel
 4. `searchMindscape` returns ranked results from the in-RAM mind-search index (ANN + BM25), content decrypted transparently
 5. New messages are encrypted (wrapped-DEK envelope) before writing to SQLite

@@ -75,6 +75,7 @@ CRITICAL PATH: D1 adapter → crypto → db-d1+tools → MCP server → embed pa
 
 ### Step 4 — MCP server, dual transport (Day 4)
 - **Build:** `src/index.ts` (stdio default, `--http` flag) + `src/server.ts` (Express, StreamableHTTP) + `src/mcp.ts` (tool registration — the low-level `Server` + request-handler seam from Step 3, doing JSON-Schema passthrough and string→`content` wrapping). Use spec Components 2 samples as the skeleton.
+- **⚠️ Transport [spec CORRECTED]:** the spec's `/mcp` sample creates a **new `StreamableHTTPServerTransport` + `server.connect()` per request** — wrong for sessions. Wire the **stateful `Map<sessionId, transport>`** variant: create the transport on `initialize` with a real `sessionIdGenerator` (`randomUUID`), connect once, reuse for later requests by `mcp-session-id`, evict on `onclose`/DELETE. The OAuth `mcp-session-id` correlation (Phase 4) rides on this.
 - **Smoke:** Claude Desktop (stdio config from spec) lists ~34 tools; `tools/call getDailyMessages` returns content (string wrapped as `{content:[{type:'text',…}]}`).
 - **Dependency:** Step 3.
 
@@ -125,8 +126,10 @@ CRITICAL PATH: D1 adapter → crypto → db-d1+tools → MCP server → embed pa
 - **Dependency:** Steps 3, 10, 11.
 
 ### Step 11b — Enrichment service (:8095) — **D7, BUILD-NEW** *(+2–4 days; parallel-track B)*
-- **⚠️ Not in `reference/`.** Only the **contract** is: `reference/server-routes/portal-enrichment.js` (the driver router — `/enrich-all`, `/health`, loopback `notify` callback, message-state counts: total/enriched/embedded/pending/failed) and the `messages` NLP columns + work-queue index (`entities`/`relations`/`entity_summary`/`nlp_processed`/`nlp_processed_at`/`nlp_error`/`embedding_768`; `d1-schema-generated.sql:950,1832,1835`).
-- **Build:** `pipeline/enrich-service` (loopback `127.0.0.1:8095`) — a worker that pulls `nlp_processed=0` rows, runs NLP entity/tag extraction, calls the **:8091 embed-service (D2)** for `embedding_768`, writes results + flips `nlp_processed` (state machine: `0 → processing → 1` / `nlp_error` on failure, with a 60s stale-heartbeat → abandoned), and fires the loopback `notify` callback on phase transitions. Port `portal-enrichment.js` → `src/api/enrichment.ts` to drive/monitor it (status, trigger, progress + IDOR guard).
+- **⚠️ Not in `reference/`.** Only the **contract** is: `reference/server-routes/portal-enrichment.js` (270 LOC — the driver router: `/enrich-all`, `/health`, loopback `notify` callback, message-state counts) and the `messages` NLP columns + work-queue index (`entities`/`relations`/`entity_summary`/`nlp_processed`/`nlp_processed_at`/`nlp_error`/`embedding_768`; `d1-schema-generated.sql:950,1832,1835`).
+- **`nlp_processed` state machine [REF-WINS, verified `portal-enrichment.js:85-89`]:** the message-level states are **`0`/NULL = pending → `1` = NLP-enriched → `2` = embedded**, with **`-1` = failed** (carry `nlp_error`/`nlp_processed_at`). The transient "processing" + 60s stale-heartbeat → abandoned lives on the **job row** (the active-job record `/health` reports), *not* the message column. Build the worker to advance messages `0→1→2` and reconcile abandoned jobs back to pending.
+- **⚠️ DB-interface seam [verified `portal-enrichment.js:85`]:** the router calls **`db.rawQuery(sql, params)` via `tryGetDb()`** — a *different* interface than the injected `d1Query` the `db-d1/*` tool factories use (same difference seen at `document-store.js:417`). **Decision: normalize** — expose a thin `rawQuery(sql,params)` method on the assembled `db` namespace that delegates to the same better-sqlite3 adapter as `d1Query` (one DB path, no second connection), rather than carrying two query surfaces. Then `portal-enrichment.js` ports unchanged.
+- **Build:** `pipeline/enrich-service` (loopback `127.0.0.1:8095`) — a worker that pulls `nlp_processed=0`/NULL rows, runs NLP entity/tag extraction (→`1`), calls the **:8091 embed-service (D2)** for `embedding_768` (→`2`), writes results, sets `-1`+`nlp_error` on failure, and fires the loopback `notify` callback on phase transitions. Port `portal-enrichment.js` → `src/api/enrichment.ts` (over the normalized `rawQuery`) to drive/monitor it (status, trigger, progress + IDOR guard).
 - **Interim (until 11b lands):** write `embedding_768` inline on message create (synchronous embed) so search works; the async NLP state machine is the follow-on.
 - **Security:** §7 (embeddings = fingerprints, loopback-only, never logged), §13 (no public bind), §1.1 (encrypt entities/relations envelopes before write — they're plaintext-derived).
 - **Smoke:** seed 5 messages with `nlp_processed=0` → trigger → all reach `nlp_processed=1` with non-null `embedding_768` and tags; `/status` counts reconcile; killing mid-job marks the row recoverable, not lost.
@@ -134,23 +137,24 @@ CRITICAL PATH: D1 adapter → crypto → db-d1+tools → MCP server → embed pa
 
 ---
 
-## Phase 3 — Topology (Days 10–13) *(parallel-track B continues; off the TS critical path)*
+## Phase 3 — Topology (Days 10–14) *(parallel-track B continues; off the TS critical path)*
 
 **Goal:** A working open AnalysisEngine default producing real territories/realms/harmonics into queryable D1 tables; stub fallback when Python deps absent.
 **Exit criterion (smoke):** running the slim orchestrator on seeded messages populates `clustering_points`, `realms`, `territory_profiles`, `territory_cofire`, `cognitive_metrics_harmonic`; `exploreTerritory`/`mindscapeStructure` tools return real data; with Python uninstalled, `StubAnalysisEngine` engages cleanly.
 
-### Step 12 — Port cluster.py + write a slim orchestrator (Days 10–11)
+### Step 12 — Port cluster.py + write a slim orchestrator (Days 10–12)
+- **⚠️ Budget [R7]:** this is **three deliverables, not one** — (a) port `cluster.py`, (b) rewrite a slim orchestrator around only the 5 present scripts, (c) **write `sync-clustering-points` fresh** (absent from `reference/`). Budget **3 days** for Step 12 alone; do not treat it as a single "port." Off the TS critical path, so it overlaps Phases 1/2/4 and stays inside the overall 18–24-day envelope (Phase 5 soak/buffer absorbs the slip).
 - **Build:** port `reference/pipeline/cluster.py` (FAISS k-NN + Leiden + Ward HAC; `clustering: ` prefix + 256D matryoshka, `cluster.py:77`) → `pipeline/cluster.py`.
 - **[REF-WINS] — do NOT port `run-clustering.sh` verbatim.** It calls 7 scripts absent from `reference/` (verified). Write `pipeline/run-clustering.sh` covering only the **present** stages: sync points → `cluster.py` → `describe-clusters.js` → `compute-cofire.js` → harmonics. Replace `MINDSCAPE_OWNER_ID`/`AGENT_ID` scope plumbing (`run-clustering.sh:24–39`) with the single-user `personal` scope. The "sync new content → clustering_points" step (`sync-clustering-points.js`, missing) must be **written fresh** (small: select messages with `embedding_768`, decrypt 256D, insert into `clustering_points`).
 - **Smoke:** `python pipeline/cluster.py --user-id <id>` populates `clustering_points` + cluster assignments.
 - **Dependency:** Steps 1, 8.
 
-### Step 13 — Port harmonics + cofire + describe-clusters (Day 12)
+### Step 13 — Port harmonics + cofire + describe-clusters (Day 13)
 - **Build:** port `compute_information_harmonics.py` (H0/β/γ/α/θ/δ; keep the honesty flag), `compute-cofire.js` (4-timescale co-firing), `describe-clusters.js` (shells to **local Claude CLI** for naming — BYOK, `describe-clusters.js:74–88`; plaintext never leaves the machine).
 - **Smoke:** `cognitive_metrics_harmonic` + `territory_cofire` + named `realms`/`territory_profiles` populated.
 - **Dependency:** Step 12.
 
-### Step 14 — AnalysisEngine interface + stub fallback (Day 13)
+### Step 14 — AnalysisEngine interface + stub fallback (Day 14)
 - **Build:** `src/analysis/plugin.ts` (interface from spec Component 9). Default impl wraps the orchestrator + reads the produced D1 tables. `StubAnalysisEngine` (spec sample) engages when Python/pipeline deps are absent (detect via a capability probe).
 - **Smoke:** with venv present → real territories; with `pipeline/` deps uninstalled → stub returns empty structure and `explore()` throws the documented "no engine" message (not a crash).
 - **Dependency:** Steps 12, 13.
@@ -232,7 +236,7 @@ Port these PORT-tagged tests (assertions, even if rewriting the runner):
 - **R1 (high):** OAuth provider unverified — Step 0 spike gates it; hand-rolled fallback budgeted.
 - **R2:** embed vector parity — Step 8 gate (cosine ≥ 0.999).
 - **R3:** mind-search port scope — port its 25-file test suite alongside (Step 9); brute-force-cosine fallback if RRF slips.
-- **NEW R7 (medium):** topology orchestrator gap — 7 `run-clustering.sh` scripts are absent; Step 12 writes a slim orchestrator + a fresh `sync-clustering-points`. Don't budget these as "ports."
+- **NEW R7 (medium):** topology orchestrator gap — 7 `run-clustering.sh` scripts are absent; Step 12 is **three deliverables** (cluster.py port + slim orchestrator + fresh `sync-clustering-points`), not one. **Budget 3 days for Step 12 alone** (Days 10–12); don't budget the missing scripts as "ports." Off the TS critical path, so it absorbs into the envelope.
 - **R6:** Python install bar (onnxruntime/faiss/leidenalg) — `setup.sh` pins versions; stub is the graceful degradation.
 - **NEW R8 (medium, D7):** enrichment service is **build-new** (Step 11b, +2–4 days) — only its contract exists in `reference/`. Risk is the NLP-tagging implementation (model choice + entity schema) and the `nlp_processed` state machine's crash-recovery. Interim inline-embed keeps search working if 11b slips.
 - **Deferred (D5), not a risk:** server-side scheduler + autonomous `/chat` loop, lanes/recovery/compaction. V1 is a pure tool server; these move to **Phase 5: Extensions** (`schedule_task`/`list_my_schedules` re-enter when an executor exists).
