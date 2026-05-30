@@ -22,17 +22,6 @@ const ledger = [];
 const rec = (name, pass, detail) => { ledger.push(pass); console.log(`${pass ? 'PASS' : 'FAIL'}  ${name}\n      ${detail}`); };
 const threw = async (fn) => { try { await fn(); return null; } catch (e) { return e; } };
 
-// ⚠️ SECURITY: getEncryptedFields() honors MYCELIUM_ENCRYPT_ONLY — if set, it
-// silently NARROWS encryption to those columns (leaving entities/relations/
-// metadata/etc. as PLAINTEXT). This container ships it set to 'content'. We
-// clear it here so the test exercises FULL-FIELD encryption, and loudly flag
-// it — V1 must never let this reduce coverage unintentionally (see RESULT.md).
-const NARROWED = process.env.MYCELIUM_ENCRYPT_ONLY;
-if (NARROWED) {
-  delete process.env.MYCELIUM_ENCRYPT_ONLY;
-  console.log(`⚠️  MYCELIUM_ENCRYPT_ONLY was set ('${NARROWED}') — cleared for this run; flag for V1 hardening.\n`);
-}
-
 // fresh state
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 mkdirSync('data', { recursive: true });

@@ -34,18 +34,20 @@ export function createDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
   db.pragma('foreign_keys = ON');
 
   async function query(sql, params = []) {
-    let bound = params;
+    // CONTRACT [crypto-local.js:1318,1396,1408]: autoEncryptParams MUTATES
+    // `params` in place (encrypting values; rewriting the array when it injects
+    // a scope column) and RETURNS the possibly-rewritten SQL string. So the
+    // params we bind are `params` itself; the SQL we prepare is the return value.
+    let finalSql = sql;
     if (isWrite(sql)) {
-      // autoEncryptParams parses the table+columns itself and encrypts only
-      // the encrypted columns; no-ops on tables without encrypted fields.
-      bound = await autoEncryptParams(sql, params, scope, userKey, null);
+      finalSql = await autoEncryptParams(sql, params, scope, userKey, null, { systemKey });
     }
-    const stmt = db.prepare(sql);
-    if (isWrite(sql) && !hasReturning(sql)) {
-      const info = stmt.run(...bound);
+    const stmt = db.prepare(finalSql);
+    if (isWrite(finalSql) && !hasReturning(finalSql)) {
+      const info = stmt.run(...params);
       return { results: [], success: true, meta: { changes: info.changes, last_row_id: Number(info.lastInsertRowid) } };
     }
-    const rows = stmt.all(...bound); // SELECTs + INSERT/UPDATE … RETURNING
+    const rows = stmt.all(...params); // SELECTs + INSERT/UPDATE … RETURNING
     const results = await autoDecryptResults(rows, userKey, null, { systemKey });
     return { results, success: true };
   }
