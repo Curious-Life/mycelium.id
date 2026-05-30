@@ -17,13 +17,19 @@ export async function boot({
   userHex = process.env.USER_MASTER_KEY,
   systemHex = process.env.SYSTEM_KEY,
   userId = process.env.MYCELIUM_USER_ID || 'local-user',
+  // Optional: inject the embed-service client (Nomic v1.5, :8091) when the
+  // sibling embed-service unit (R2) is wired. Absent -> mind-search runs
+  // lexical-only (BM25). searchHelpers lets a caller fully override the
+  // mind-search wiring (used by verify with a prebuilt in-RAM index).
+  embedder = null,
+  searchHelpers = undefined,
 } = {}) {
   if (!userHex || !systemHex) {
     throw new Error('USER_MASTER_KEY and SYSTEM_KEY must be set (64-char hex each). Vault stays locked.');
   }
   const { userKey, systemKey } = await unlock({ userHex, systemHex, kcvPath });
   const { db, close } = getDb({ dbPath, userKey, systemKey });
-  const { domains, deferred } = buildDomains({ db, userId });
+  const { domains, deferred } = buildDomains({ db, userId, embedder, searchHelpers });
   const { tools, handlers } = collectTools(domains);
   const server = createMcpServer({ tools, handlers });
   return { server, db, close, tools, deferred };

@@ -16,6 +16,8 @@ import { createHealthDomain } from './tools/health.js';
 import { createTasksDomain } from './tools/tasks.js';
 import { createFisherToolsDomain } from './tools/fisher-tools.js';
 import { createMessagesDomain } from './tools/messages.js';
+import { createMindscapeDomain } from './tools/mindscape.js';
+import { createSearchHelpers } from './search/helpers.js';
 
 // Single-user defaults for the agent identity / scope deps the factories want.
 const AGENT_LABELS = { 'personal-agent': 'Assistant' };
@@ -28,22 +30,29 @@ const AGENT_LABELS = { 'personal-agent': 'Assistant' };
  * topologyHelpers) — they land with their Wave-2 units; listed here so the set
  * is explicit, never silently dropped.
  */
-export function buildDomains({ db, userId = 'local-user' }) {
+export function buildDomains({ db, userId = 'local-user', embedder = null, searchHelpers } = {}) {
+  // mind-search subsystem (Wave-2): in-RAM BM25 + ANN cosine + RRF + temporal
+  // boost behind the bulkSearch contract searchMindscape consumes. The embedder
+  // is INJECTED; the real Nomic v1.5 embed-service (:8091) ships in a sibling
+  // unit (R2). With no embedder the local tier runs lexical-only (BM25) and
+  // still serves results — semantic recall lights up when R2 lands.
+  const helpers = searchHelpers ?? createSearchHelpers({ db, embedder, userId });
+
   const domains = [
     createHealthDomain({ getDb: () => db, userId }),
     createTasksDomain({ db, userId }),
     createFisherToolsDomain({ db, userId }),
     createMessagesDomain({ db, userId, agentLabels: AGENT_LABELS, isScoped: () => false }),
+    createMindscapeDomain({ searchHelpers: helpers, userId }),
   ];
   // Deferred = domains needing a subsystem not yet built. Each lands with its
   // Wave-2 unit; listed explicitly so the surface is never silently dropped.
   //   metrics       -> @mycelium/metrics/contracts (CONTRACTS) not in reference/
   //   documents     -> mind-files (writeMindFile, mindMirrors)
   //   topology-tools-> topologyHelpers (createTopologyHelpers)
-  //   mindscape     -> mind-search (searchHelpers)
   //   internal      -> mind-files (readMindFile/writeMindFile)
   const deferred = ['metrics (CONTRACTS)', 'documents (mind-files)',
-    'topology-tools (topologyHelpers)', 'mindscape (mind-search)',
+    'topology-tools (topologyHelpers)',
     'internal (mind-files)', 'reply', 'services'];
   return { domains, deferred };
 }

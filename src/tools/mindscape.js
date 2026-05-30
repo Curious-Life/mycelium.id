@@ -20,7 +20,7 @@
  * to a Vectorize path that's been broken since the BGE shutdown.
  *
  * @typedef {object} MindscapeDeps
- * @property {{ bulkSearch: (args: object) => Promise<object>, isScoped: () => boolean }} searchHelpers
+ * @property {{ bulkSearch: (args: object) => Promise<object>, isScoped: () => boolean, structure?: () => Promise<object> }} searchHelpers
  */
 
 export function createMindscapeDomain(deps) {
@@ -48,6 +48,20 @@ export function createMindscapeDomain(deps) {
           agent:           { type: 'string',  description: 'Optional: filter message results by agent ID (e.g., research-agent, company-agent). Only applies to message scope.' },
         },
         required: ['query'],
+      },
+    },
+    {
+      // V1 addition: a structural read of the mindscape topology (clusters /
+      // territories produced by the AnalysisEngine / enrichment pipeline).
+      // Until that pipeline has run there is no topology — this returns an
+      // honest "no topology yet" rather than fabricating structure.
+      name: 'mindscapeStructure',
+      description: 'Show the structural topology of the mindscape: the clusters/territories the enrichment pipeline has discovered, ranked by size. Returns a "no topology yet" notice when the analysis pipeline has not run.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: 'Max clusters to return (default 20)' },
+        },
       },
     },
   ];
@@ -88,6 +102,24 @@ export function createMindscapeDomain(deps) {
 
       if (sections.length === 0) return `No results for: ${args.query}`;
       return sections.join('\n\n');
+    },
+
+    mindscapeStructure: async (args) => {
+      if (typeof searchHelpers.structure !== 'function') {
+        return 'Mindscape topology is not available in this build.';
+      }
+      const limit = args.limit || 20;
+      const struct = await searchHelpers.structure();
+      const clusters = Array.isArray(struct?.clusters) ? struct.clusters : [];
+      if (clusters.length === 0) {
+        return 'No topology yet — the analysis/enrichment pipeline has not produced any clusters. Capture more entries and run clustering to populate the mindscape structure.';
+      }
+      const lines = clusters.slice(0, limit).map((c, i) => {
+        const label = c.label ? ` "${c.label}"` : '';
+        const size = c.size != null ? ` (${c.size} points)` : '';
+        return `${i + 1}. Cluster ${c.id}${label}${size}`;
+      });
+      return `## Mindscape Structure (${clusters.length} clusters)\n${lines.join('\n')}`;
     },
   };
 
