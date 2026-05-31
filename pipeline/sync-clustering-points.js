@@ -24,6 +24,7 @@
  */
 
 import { getDb } from '../src/db/index.js';
+import { loadKey } from '../src/crypto/keys.js';
 import * as cryptoLocal from '../src/crypto/crypto-local.js';
 
 // Resolve the byte-decrypt primitive defensively — the canonical module has
@@ -55,20 +56,28 @@ if (!USER_MASTER || !SYSTEM_KEY) {
  * Mirrors cluster.py's derive phase: decrypt → base64-decode → float32 →
  * slice[:256] → L2-normalize. Returns null on any failure (skip the point).
  */
-function decode256(envelope, key) {
+async function decode256(envelope, key) {
   if (!decryptBytes) return null;
   try {
-    // crypto-local.decryptBytes returns the plaintext bytes. The 768D vector
-    // was stored as base64-of-float32-bytes (encodeVector), so the plaintext
-    // is base64 ASCII; decode that to the raw float buffer.
-    const pt = decryptBytes(envelope, key);
+    // crypto-local.decryptBytes is ASYNC and returns the plaintext bytes. The
+    // 768D vector was stored as base64-of-float32-bytes (encodeVector), so the
+    // plaintext is base64 ASCII; decode that to the raw float buffer.
+    const pt = await decryptBytes(envelope, key);
+    if (pt == null) return null;
     const ascii = Buffer.isBuffer(pt) ? pt.toString('latin1') : String(pt);
     const raw = Buffer.from(ascii, 'base64');
     if (raw.length < 768 * 4) return null;
-    const f32 = new Float32Array(raw.buffer, raw.byteOffset, 768);
+    // Read via DataView (little-endian) — Buffer.byteOffset is not guaranteed
+    // 4-aligned for pooled buffers, so `new Float32Array(raw.buffer, off, 768)`
+    // can throw RangeError. DataView has no alignment constraint.
+    const dv = new DataView(raw.buffer, raw.byteOffset, raw.length);
     const out = new Float32Array(NOMIC_DIM);
     let norm = 0;
-    for (let i = 0; i < NOMIC_DIM; i++) { out[i] = f32[i]; norm += f32[i] * f32[i]; }
+    for (let i = 0; i < NOMIC_DIM; i++) {
+      const v = dv.getFloat32(i * 4, true);
+      out[i] = v;
+      norm += v * v;
+    }
     norm = Math.sqrt(norm);
     if (!(norm > 1e-8) || !Number.isFinite(norm)) return null;
     for (let i = 0; i < NOMIC_DIM; i++) out[i] /= norm;
@@ -109,10 +118,13 @@ async function run() {
       return;
     }
 
+    // decryptBytes expects an imported CryptoKey, not the raw hex string.
+    const userKey = await loadKey(USER_MASTER);
+
     let inserted = 0;
     let skipped = 0;
     for (const r of rows) {
-      const vec = decode256(r.embedding_768, USER_MASTER);
+      const vec = await decode256(r.embedding_768, userKey);
       if (!vec) { skipped++; continue; }
 
       if (DRY_RUN) { inserted++; continue; }

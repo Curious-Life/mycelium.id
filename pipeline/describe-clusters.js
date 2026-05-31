@@ -95,10 +95,10 @@ async function run() {
         continue;
       }
       await query(
-        `INSERT INTO realms (id, user_id, realm_index, name, essence, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name, essence = excluded.essence, updated_at = datetime('now')`,
-        [`${USER_ID}:realm:${realm_id}`, USER_ID, realm_id, name, essence],
+        `INSERT INTO realms (user_id, realm_id, name, essence, created_at, updated_at)
+         VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+         ON CONFLICT(user_id, realm_id) DO UPDATE SET name = excluded.name, essence = excluded.essence, updated_at = datetime('now')`,
+        [USER_ID, realm_id, name, essence],
       ).catch(err => console.error(`[describe] realm ${realm_id} write failed:`, err.message));
     }
 
@@ -122,11 +122,11 @@ async function run() {
       }
       await query(
         `INSERT INTO territory_profiles
-           (id, user_id, territory_id, realm_id, name, essence, message_count, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name, essence = excluded.essence,
+           (user_id, territory_id, realm_id, name, essence, message_count, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+         ON CONFLICT(user_id, territory_id) DO UPDATE SET name = excluded.name, essence = excluded.essence,
            realm_id = excluded.realm_id, updated_at = datetime('now')`,
-        [`${USER_ID}:territory:${territory_id}`, USER_ID, territory_id, realm_id, name, essence, msgCount],
+        [USER_ID, territory_id, realm_id, name, essence, msgCount],
       ).catch(err => console.error(`[describe] territory ${territory_id} write failed:`, err.message));
     }
 
