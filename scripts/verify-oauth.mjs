@@ -318,6 +318,31 @@ async function main() {
     // ingMarker was already saved above → must show as a duplicate here
     check('POST /ingest/import (authed) idempotent', impRes.status === 200 && impBody.ok === true && /1 new, 1 duplicate/.test(impBody.result || ''), `result="${(impBody.result || '').slice(0, 50)}"`);
 
+    // 9c. Authenticated file upload — raw bytes → encrypted blob + attachments row.
+    const fileBytes = Buffer.from('PDF-LIKE upload payload — must be encrypted at rest');
+    const upRes = await fetch(`${BASE}/ingest/upload?filename=note.txt&type=text/plain&asMessage=1`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/octet-stream', origin: ORIGIN },
+      body: fileBytes,
+    });
+    const upBody = await upRes.json().catch(() => ({}));
+    const att = upBody?.result?.attachmentId;
+    check('POST /ingest/upload (authed) stores blob + attachment',
+      upRes.status === 200 && upBody.ok === true && !!att && upBody.result.size === fileBytes.length,
+      `status=${upRes.status} attachmentId=${att ? String(att).slice(0, 8) + '…' : 'none'} msg=${upBody?.result?.messageId ? 'linked' : 'none'}`);
+
+    // upload must reject unauthenticated (fail closed)
+    const upUnauth = await fetch(`${BASE}/ingest/upload?filename=x.txt`, {
+      method: 'POST', headers: { 'content-type': 'application/octet-stream', origin: ORIGIN }, body: fileBytes,
+    });
+    check('POST /ingest/upload unauth rejected (401)', upUnauth.status === 401, `status=${upUnauth.status}`);
+
+    // empty upload rejected
+    const upEmpty = await fetch(`${BASE}/ingest/upload?filename=x.txt`, {
+      method: 'POST', headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/octet-stream', origin: ORIGIN }, body: Buffer.alloc(0),
+    });
+    check('POST /ingest/upload empty body rejected (400)', upEmpty.status === 400, `status=${upEmpty.status}`);
+
     // 10. Session eviction via HTTP DELETE.
     if (sessionId) {
       const delRes = await fetch(`${BASE}/mcp`, {

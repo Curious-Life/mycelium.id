@@ -42,8 +42,9 @@ export async function boot({
   const { tools, handlers } = collectTools(domains);
   const server = createMcpServer({ tools, handlers });
   // handlers is returned so non-MCP transports (REST) can reuse the SAME
-  // tool handler map without re-implementing tool logic.
-  return { server, db, close, tools, handlers, deferred };
+  // tool handler map without re-implementing tool logic. userId is returned so
+  // HTTP ingestion routes (upload) can scope writes without re-deriving it.
+  return { server, db, close, tools, handlers, deferred, userId };
 }
 
 async function startStdio() {

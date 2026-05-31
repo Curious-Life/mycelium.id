@@ -33,6 +33,8 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 
 import { boot } from './index.js';
 import { createAuth, migrateAuth, ensureOperatorUser } from './auth.js';
+import { uploadAttachment } from './ingest/upload.js';
+import { createEnqueueEnrichment } from './ingest/enqueue.js';
 
 /**
  * Build the Express app (no listen). Returns { app, auth, baseURL, transports }.
@@ -77,6 +79,8 @@ export async function createHttpApp(opts = {}) {
   // not per request — unlike /mcp which isolates per session). Reuses the SAME
   // captureMessage/importMessages handlers as the stdio + REST surfaces.
   const ingest = await boot(opts.bootOpts);
+  // Enrichment nudge for upload-created messages (same best-effort seam as MCP).
+  ingest.enqueueEnrichment = createEnqueueEnrichment({ userId: ingest.userId });
 
   // Stateful transport registry: sessionId → { transport, close }.
   const transports = new Map();
@@ -217,6 +221,34 @@ export async function createHttpApp(opts = {}) {
       res.status(/required|must be|invalid/i.test(err.message) ? 400 : 500).json({ ok: false, error: msg });
     }
   });
+
+  // POST /ingest/upload — store a file. Raw bytes = body (dependency-free; V1
+  // uploaders are connectors/CLI/scripts, not browser forms). Query params:
+  //   ?filename=<name>&type=<mime>&asMessage=1
+  // Bytes are encrypted at rest by the blob store; row encrypted at the db layer.
+  app.post('/ingest/upload',
+    express.raw({ type: '*/*', limit: '50mb' }),
+    async (req, res) => {
+      if (!(await requireAuth(req, res))) return;
+      const bytes = req.body;
+      if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+        res.status(400).json({ ok: false, error: 'request body must be non-empty file bytes' });
+        return;
+      }
+      try {
+        const result = await uploadAttachment(ingest.db, {
+          userId: ingest.userId || 'local-user',
+          bytes,
+          fileName: req.query.filename ? String(req.query.filename) : undefined,
+          fileType: req.query.type ? String(req.query.type) : (req.headers['content-type'] || undefined),
+          asMessage: req.query.asMessage === '1' || req.query.asMessage === 'true',
+        }, ingest.enqueueEnrichment);
+        res.json({ ok: true, result });
+      } catch (err) {
+        const caller = /required|must be|invalid/i.test(err.message);
+        res.status(caller ? 400 : 500).json({ ok: false, error: caller ? err.message : 'upload failed' });
+      }
+    });
 
   // POST /ingest/import — bulk history backfill. Body = { messages: [...] }.
   app.post('/ingest/import', async (req, res) => {
