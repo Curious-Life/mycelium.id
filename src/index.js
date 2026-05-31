@@ -26,7 +26,9 @@ export async function boot({
   const { domains, deferred } = buildDomains({ db, userId });
   const { tools, handlers } = collectTools(domains);
   const server = createMcpServer({ tools, handlers });
-  return { server, db, close, tools, deferred };
+  // handlers is returned so non-MCP transports (REST) can reuse the SAME
+  // tool handler map without re-implementing tool logic.
+  return { server, db, close, tools, handlers, deferred };
 }
 
 async function main() {
