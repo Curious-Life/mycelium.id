@@ -37,6 +37,12 @@ export function stripPrefix(id) {
   return colon === -1 ? id : id.slice(colon + 1);
 }
 
+// Column verification against migrations/0001_init.sql: messages,
+// territory_profiles, realms, and semantic_themes ALL have created_at, name,
+// essence + their respective pk. (Only `dissolved_at` is territory_profiles-
+// only — used in structure(), not here.) A SELECT of a column absent on its
+// table would throw SQLITE_ERROR, which the per-source try/catch swallows,
+// silently dropping that whole layer — so every column below is confirmed.
 const SOURCES = [
   { table: 'messages', sql: 'SELECT id, content AS text, created_at FROM messages WHERE user_id = ?', kind: 'message', prefix: '' },
   { table: 'territory_profiles', sql: "SELECT CAST(territory_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM territory_profiles WHERE user_id = ?", kind: 'territory', prefix: ID_PREFIX.territory },

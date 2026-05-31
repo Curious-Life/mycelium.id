@@ -140,7 +140,15 @@ function seedRows(raw) {
   ins.run('m-forest-2', 'local-user', 'user', ROWS[1].content, 'chat', 'research-agent', '2026-05-02 10:00:00');
   ins.run('m-money-1', 'local-user', 'user', ROWS[2].content, 'chat', 'wealth-agent', '2026-05-03 10:00:00');
   const t = raw.prepare('INSERT INTO territory_profiles (territory_id, user_id, name, essence, message_count, top_entities, created_at) VALUES (?,?,?,?,?,?,?)');
-  t.run('terr-forest', 'local-user', 'Forest Ecology', 'mycelium networks and forest roots', 12, '[]', '2026-05-01 10:00:00');
+  t.run(101, 'local-user', 'Forest Ecology', 'mycelium networks and forest roots', 12, '[]', '2026-05-01 10:00:00');
+  // Seed realms + semantic_themes so the realm/theme layers of bulkSearch and
+  // structure() are exercised (not just the territory layer). Guards against a
+  // column-mismatch SELECT silently dropping a whole layer.
+  const r = raw.prepare('INSERT INTO realms (realm_id, user_id, name, essence, message_count) VALUES (?,?,?,?,?)');
+  r.run(201, 'local-user', 'Forest Realm', 'the broad forest mycelium realm', 30);
+  // semantic_themes.realm_id is NOT NULL (composite UNIQUE(user_id,realm_id,semantic_theme_id)).
+  const s = raw.prepare('INSERT INTO semantic_themes (semantic_theme_id, realm_id, user_id, name, essence, message_count) VALUES (?,?,?,?,?,?)');
+  s.run(301, 201, 'local-user', 'Forest Theme', 'mycelium forest roots theme', 8);
 }
 
 async function bulkSearchDb() {
@@ -161,8 +169,16 @@ async function bulkSearchDb() {
   rec('bulkSearch: forest message ranks above finance (finance not in top hits or below)',
     res.messages.some((m) => /forest|mycelium/.test(m)));
   rec('bulkSearch: matched territory hydrated + formatted',
-    res.territories.raw.some((t) => t.id === 'terr-forest')
+    res.territories.raw.some((t) => t.id === '101')
     && res.territories.formatted.some((f) => /Forest Ecology/.test(f)));
+  // realm + theme layers are indexed and partitioned correctly (kind-prefixed
+  // ids keep the overlapping INTEGER pk space disjoint).
+  rec('bulkSearch: realm layer indexed + returned',
+    res.realms.some((r) => /Forest Realm/.test(r)),
+    `realms=${res.realms.length}`);
+  rec('bulkSearch: theme layer indexed + returned',
+    res.themes.some((th) => /Forest Theme/.test(th)),
+    `themes=${res.themes.length}`);
 
   // agent filter
   const filtered = await sh.bulkSearch({ query: 'forest mycelium roots', limit: 5, scope: 'messages', agent: 'research-agent' });
@@ -174,6 +190,14 @@ async function bulkSearchDb() {
   const struct = await sh.structure();
   rec('structure: reads territory profiles from DB', struct.counts.territories === 1
     && struct.territories[0].name === 'Forest Ecology');
+  // realms/semantic_themes have no dissolved_at column — structure() must NOT
+  // reference it for those tables (only territory_profiles has it).
+  rec('structure: reads realms from DB (no dissolved_at filter)',
+    struct.counts.realms === 1 && struct.realms[0].name === 'Forest Realm',
+    `realms=${struct.counts.realms}`);
+  rec('structure: reads semantic themes from DB',
+    struct.counts.themes === 1 && struct.themes[0].name === 'Forest Theme',
+    `themes=${struct.counts.themes}`);
 
   close();
 }
