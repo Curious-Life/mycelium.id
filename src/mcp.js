@@ -25,6 +25,8 @@ import { createMindFiles, MIND_MIRRORS } from './mindfiles/mind-files.js';
 import { createMetricsDomain } from './tools/metrics.js';
 import { createMindscapeDomain } from './tools/mindscape.js';
 import { createSearchHelpers } from './search/index.js';
+import { createTopologyToolsDomain } from './tools/topology-tools.js';
+import { createTopologyHelpers } from './topology/helpers.js';
 
 // Single-user defaults for the agent identity / scope deps the factories want.
 const AGENT_LABELS = { 'personal-agent': 'Assistant' };
@@ -67,6 +69,10 @@ export function buildDomains({
   // when absent the backend runs BM25-only and still returns ranked results.
   const searchHelpers = createSearchHelpers({ db, embedder, userId });
 
+  // topologyHelpers (Wave-2): resolver + fetchers over the db.topology
+  // namespace. Honest-empty against an empty vault — see src/topology/helpers.js.
+  const topologyHelpers = createTopologyHelpers({ db, userId });
+
   const domains = [
     createHealthDomain({ getDb: () => db, userId }),
     createTasksDomain({ db, userId }),
@@ -89,13 +95,11 @@ export function buildDomains({
     }),
     createMetricsDomain({ db, userId }),
     createMindscapeDomain({ searchHelpers, userId }),
+    createTopologyToolsDomain({ db, userId, topologyHelpers }),
   ];
   // Deferred = domains needing a subsystem not yet built. Each lands with its
   // Wave-2 unit; listed explicitly so the surface is never silently dropped.
-  //   topology-tools-> topologyHelpers (createTopologyHelpers)
-  const deferred = [
-    'topology-tools (topologyHelpers)',
-    'reply', 'services'];
+  const deferred = ['reply', 'services'];
   return { domains, deferred };
 }
 

@@ -16,7 +16,8 @@
     "verify:metrics": "node scripts/verify-metrics.mjs",
     "verify:rest": "node scripts/verify-rest.mjs",
     "verify:search": "node scripts/verify-search.mjs",
-    "verify": "npm run verify:foundation && npm run verify:mcp && npm run verify:mindfiles && npm run verify:metrics && npm run verify:rest && npm run verify:search",
+    "verify:topology": "node scripts/verify-topology.mjs",
+    "verify": "npm run verify:foundation && npm run verify:mcp && npm run verify:mindfiles && npm run verify:metrics && npm run verify:rest && npm run verify:search && npm run verify:topology",
     "start": "node src/index.js",
     "rest": "node src/server-rest.js"
   },
