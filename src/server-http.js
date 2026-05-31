@@ -73,6 +73,11 @@ export async function createHttpApp(opts = {}) {
   // JSON parsing for the MCP route only (after the auth handler).
   app.use(express.json());
 
+  // Shared vault handle for the authenticated ingestion routes (one per app,
+  // not per request — unlike /mcp which isolates per session). Reuses the SAME
+  // captureMessage/importMessages handlers as the stdio + REST surfaces.
+  const ingest = await boot(opts.bootOpts);
+
   // Stateful transport registry: sessionId → { transport, close }.
   const transports = new Map();
 
@@ -181,7 +186,55 @@ export async function createHttpApp(opts = {}) {
 
   app.all('/mcp', mcpHandler);
 
-  return { app, auth, baseURL, transports };
+  // ── Authenticated ingestion routes (Bearer-guarded, same token as /mcp) ──
+  // "Any message that comes in should be saved." These are thin HTTP wrappers
+  // over the SAME captureMessage/importMessages handlers the MCP + REST surfaces
+  // expose; the encrypting db layer handles encryption-at-rest transparently.
+  async function requireAuth(req, res) {
+    const session = await authenticate(req);
+    if (!session) {
+      res.status(401).set('WWW-Authenticate', wwwAuthenticate)
+        .json({ ok: false, error: 'Unauthorized: Bearer token required' });
+      return null;
+    }
+    return session;
+  }
+
+  // POST /ingest/message — save one inbound message. Body = captureMessage args.
+  app.post('/ingest/message', async (req, res) => {
+    if (!(await requireAuth(req, res))) return;
+    const body = req.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      res.status(400).json({ ok: false, error: 'body must be a JSON object' });
+      return;
+    }
+    try {
+      const result = await ingest.handlers.captureMessage(body);
+      res.json({ ok: true, result });
+    } catch (err) {
+      // Distinguish caller error from internal; never leak internals/plaintext.
+      const msg = /required|must be|invalid/i.test(err.message) ? err.message : 'ingest failed';
+      res.status(/required|must be|invalid/i.test(err.message) ? 400 : 500).json({ ok: false, error: msg });
+    }
+  });
+
+  // POST /ingest/import — bulk history backfill. Body = { messages: [...] }.
+  app.post('/ingest/import', async (req, res) => {
+    if (!(await requireAuth(req, res))) return;
+    const body = req.body;
+    if (!body || typeof body !== 'object' || !Array.isArray(body.messages)) {
+      res.status(400).json({ ok: false, error: 'body must be { messages: [...] }' });
+      return;
+    }
+    try {
+      const result = await ingest.handlers.importMessages(body);
+      res.json({ ok: true, result });
+    } catch {
+      res.status(500).json({ ok: false, error: 'import failed' });
+    }
+  });
+
+  return { app, auth, baseURL, transports, close: ingest.close };
 }
 
 /** Build the app and start listening. Resolves with the http.Server. */

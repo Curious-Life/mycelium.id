@@ -291,6 +291,33 @@ async function main() {
       callText.slice(0, 50),
     );
 
+    // 9b. Authenticated ingestion routes — POST /ingest/message + /ingest/import.
+    const ingMarker = `OAUTH-INGEST-${Date.now()}`;
+    const ingRes = await fetch(`${BASE}/ingest/message`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json', origin: ORIGIN },
+      body: JSON.stringify({ content: ingMarker, source: 'oauth-verify', id: ingMarker }),
+    });
+    const ingBody = await ingRes.json().catch(() => ({}));
+    check('POST /ingest/message (authed) saves', ingRes.status === 200 && ingBody.ok === true, `status=${ingRes.status}`);
+
+    // unauthenticated ingest must be rejected (fail closed)
+    const ingUnauth = await fetch(`${BASE}/ingest/message`, {
+      method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN },
+      body: JSON.stringify({ content: 'should-reject' }),
+    });
+    check('POST /ingest/message unauth rejected (401)', ingUnauth.status === 401, `status=${ingUnauth.status}`);
+
+    // bulk import + idempotency (re-import the same id → duplicate)
+    const impBatch = { messages: [{ content: 'oauth import a', id: `${ingMarker}-a` }, { content: ingMarker, id: ingMarker }] };
+    const impRes = await fetch(`${BASE}/ingest/import`, {
+      method: 'POST', headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json', origin: ORIGIN },
+      body: JSON.stringify(impBatch),
+    });
+    const impBody = await impRes.json().catch(() => ({}));
+    // ingMarker was already saved above → must show as a duplicate here
+    check('POST /ingest/import (authed) idempotent', impRes.status === 200 && impBody.ok === true && /1 new, 1 duplicate/.test(impBody.result || ''), `result="${(impBody.result || '').slice(0, 50)}"`);
+
     // 10. Session eviction via HTTP DELETE.
     if (sessionId) {
       const delRes = await fetch(`${BASE}/mcp`, {
