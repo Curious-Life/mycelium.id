@@ -5,10 +5,13 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
-- **V1 build — Wave 1 (foundation) ~80% done; Wave 2 (fan-out) not started.** MCP server
-  boots over stdio + serves 7 tools through the encrypting db; D1–D7 locked; OAuth + crypto
-  verified by spikes. Pick up: [`docs/V1-BUILD-HANDOFF-2026-05-30.md`](docs/V1-BUILD-HANDOFF-2026-05-30.md).
-  Branch `claude/repo-overview-mC69M` @ `f7a7860`. Proof: `npm run verify` → 2× GO, EXIT 0.
+- **V1 build — Wave 1 + Wave 2 DONE.** All 7 subsystems integrated; MCP server serves **29
+  tools** over stdio + HTTP/OAuth through the encrypting db (mind-files, mind-search, metrics,
+  topology, REST, OAuth, embed-service). Only `reply`/`services` deferred (Phase-6). D1–D7
+  locked. Pick up: [`docs/V1-BUILD-HANDOFF-2026-05-30.md`](docs/V1-BUILD-HANDOFF-2026-05-30.md)
+  (read the **2026-05-31** section). Branch `claude/repo-overview-mC69M` @ `9dda2a4`.
+  Proof: `npm install --legacy-peer-deps && npm run verify` → **9× GO, EXIT 0**. Open: 2 Tier-2
+  SKIPs need a networked host (embed ONNX model, topology clustering wheels); D7 enrichment + deploy next.
 
 ## Key docs
 

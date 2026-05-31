@@ -139,3 +139,47 @@ node src/index.js                   # needs USER_MASTER_KEY + SYSTEM_KEY env (64
 - **Running spikes caught two spec-breaking errors paper review missed:** the non-existent `oAuthProvider()` API and the per-request `StreamableHTTPServerTransport` session bug. Both found by executing/reading real code, not planning.
 - **Watching the ledger to `EXIT=0` is non-negotiable:** three premature "GO" claims this session all came from not waiting for `VERDICT`. The verify-script-with-explicit-exit-code pattern is now the gate.
 - **Honest retraction over saving face:** the fabricated security finding was caught by grepping the actual mechanism and reverted in-session, with the correction recorded here so it can't propagate.
+
+---
+
+# 2026-05-31 session summary — Wave 2 fan-out integrated. START HERE.
+
+## TL;DR — Wave 2 is DONE
+All 7 Wave-2 subsystems are merged onto `claude/repo-overview-mC69M` (**HEAD `9dda2a4`**, == origin, tree clean). **`npm run verify` → 9 suites, all `VERDICT: GO`, EXIT 0.** Live MCP tool surface **7 → 29**; only `reply`/`services` deferred (Phase-6 egress, intentional). All 11 PRs resolved + closed; 16 agent worktrees pruned.
+
+| Unit | PR | Merge commit | Notes |
+|---|---|---|---|
+| mind-files (documents+internal) | #7 | `c652e8a` | first to land |
+| metrics + CONTRACTS | #4 | `b2da66e` | CONTRACTS was build-new (absent from reference/) |
+| REST API (`/api/v1/*`) | #3 | `97e5b0a` | reuses the shared handlers map |
+| mind-search (mindscape) | #8 (#5 rejected) | `3a2d2d4` | #5 imported throwaway `spike/crypto/` → rejected |
+| topology (topology-tools) | #6 | `dd1c0da` | Tier-1 GO; Tier-2 honest SKIP |
+| OAuth/HTTP transport | #9 (#10 identical dup) | `92f47d8` | express unified to ^5 |
+| embed-service (:8091) | none (branch broken) | `9dda2a4` | cherry-picked 3 files |
+
+## What was learned (read these)
+1. **The `/batch` fan-out was over-provisioned (~19 agents for 7 units).** Cause: I misread a worktree-list diagnostic, wrongly concluded the first spawn hadn't fired, and re-spawned in the same block. **No corruption** — each agent ran in an isolated locked worktree. Cost was wasted compute + duplicate PRs. Lesson: after `Agent`-spawning, confirm with `git worktree list` ONCE and trust it; never re-spawn defensively.
+2. **Worker self-reports are unreliable; validate the real head SHA.** Duplicate agents "reviewed" each other's *stale local working copies* and filed false "build-breaking" findings; the actual pushed head SHAs were often green. The discipline that worked: `git worktree add --detach /tmp/val-X <PR-head-sha>`, `npm install`, run the unit's verify to `EXIT=0`, THEN decide. This caught the two real problems below.
+3. **PR #5 (mind-search dup) imported `../../../spike/crypto/crypto-local.js`** — the throwaway spike dir, not the shipped `src/crypto/`. Rejected in favor of #8 (real path, smaller diff).
+4. **The embed-service branch was based on a pre-`src/` commit (`7c5e696`).** A raw merge showed `136 files, −26,597 lines` — it would have **deleted the entire foundation**. Fix: cherry-picked only its 3 real new files (`pipeline/embed-service.py`, `src/embed/client.js`, `tests/embed-client.test.js` + setup/notes), never merged the branch.
+5. **express 4 vs 5 dependency clash.** REST (#3) pinned express ^4; OAuth (#9) needs ^5 (Express-5 named splat `*splat`). Resolved by unifying to **^5** and re-verifying REST GO on 5. Installed with `--legacy-peer-deps` (better-auth's peerOptional better-sqlite3 ^12 vs our ^11; native binding loads fine).
+6. **Every Wave-2 PR conflicts on the same 3 files** — `src/mcp.js buildDomains()`, `src/index.js boot()`, `package.json` — because all branched off the old base. Conflicts are mechanical "keep both additions" (one import + one `domains[]` line + remove one `deferred[]` entry). A merge-then-resolve-in-isolated-worktree-first, then replicate-on-coordinator pattern worked; `sed -i '/^<<<<<<< HEAD$/d'` cleans stray markers left by no-op hunk edits.
+7. **requirements.txt collision:** extracting embed's `requirements.txt` clobbered topology's. Split into `pipeline/requirements.txt` (topology: faiss/igraph/leidenalg) + `pipeline/requirements-embed.txt` (embed: onnxruntime/tokenizers); `setup.sh` repointed.
+
+## Operator's directional calls
+- "**The structure right is more important**" → drove the careful one-unit-at-a-time integration with a verify-gate per merge, instead of a bulk merge.
+- "**go**" / "**fan out**" / "**whats best?**" → proceeded with the two-wave plan + sequential validated integration.
+
+## Pickup protocol (next session)
+1. Read this summary, then run the gate: `npm install --legacy-peer-deps && npm run verify` → expect **9× `VERDICT: GO`, EXIT 0**. If not green, STOP and diagnose — this is the contract.
+2. Confirm `git rev-parse --short HEAD` == `9dda2a4` (or later), tree clean (`data/` gitignored).
+3. Inspect live surface: boot with `USER_MASTER_KEY`/`SYSTEM_KEY` env (64-hex each) → 29 tools, deferred `reply`/`services`.
+4. **Two Tier-2 SKIPs need a networked/unsandboxed host to close** (not bugs — honest deferrals):
+   - **embed-service**: `pipeline/setup.sh` installs onnxruntime + downloads the Nomic v1.5 ONNX model (~170MB). Then `verify:embed` Tier-2 should embed a 768-dim vector. **R2 parity** (cosine≥0.999 vs production) still needs a reference vector.
+   - **topology**: `pip install -r pipeline/requirements.txt` (faiss/igraph/leidenalg), then run `pipeline/run-clustering.sh` on seeded rows to populate `clustering_points`/`realms` and exercise topology-tools against real data.
+5. Remaining V1 surface NOT yet built: `reply`/`services` (Phase-6 egress), the D7 enrichment service (:8095, build-new — plan Step 11b), the Step-17 data-import re-key pre-flight, Cloudflare Tunnel deploy.
+
+## Open decisions for the operator
+1. **Close the two Tier-2 gaps now or defer?** They need a host with network + heavy native wheels. Recommendation: defer to a deploy host; the injected-stub paths keep V1 functional meanwhile.
+2. **D7 enrichment service (:8095)** — the next build-new unit (plan Step 11b). Build now or after a deploy smoke-test of the 29-tool surface? Recommendation: deploy-smoke first (validate real MCP clients connect over OAuth), then enrichment.
+3. **Squash-merge `claude/repo-overview-mC69M` to a release branch?** The branch has many merge commits from the fan-out. Recommendation: keep history; it's an accurate record.
