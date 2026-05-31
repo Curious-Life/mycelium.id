@@ -16,6 +16,8 @@ import { createHealthDomain } from './tools/health.js';
 import { createTasksDomain } from './tools/tasks.js';
 import { createFisherToolsDomain } from './tools/fisher-tools.js';
 import { createMessagesDomain } from './tools/messages.js';
+import { createMindscapeDomain } from './tools/mindscape.js';
+import { createSearchHelpers } from './search/index.js';
 
 // Single-user defaults for the agent identity / scope deps the factories want.
 const AGENT_LABELS = { 'personal-agent': 'Assistant' };
@@ -24,26 +26,37 @@ const AGENT_LABELS = { 'personal-agent': 'Assistant' };
  * Assemble the live tool domains from the db namespace.
  *
  * Registered now = domains whose deps are satisfiable from `db` alone.
- * Deferred = domains needing subsystems not yet built (mind-files, mind-search,
+ * Deferred = domains needing subsystems not yet built (mind-files,
  * topologyHelpers) — they land with their Wave-2 units; listed here so the set
  * is explicit, never silently dropped.
+ *
+ * @param {object} args
+ * @param {object} args.db
+ * @param {string} [args.userId]
+ * @param {{ embed, health }} [args.embedder]  injected mind-search embedder.
+ *   The real one wraps embed-service (:8091, sibling unit R2). When absent the
+ *   mind-search backend runs BM25-only and still returns ranked results.
  */
-export function buildDomains({ db, userId = 'local-user' }) {
+export function buildDomains({ db, userId = 'local-user', embedder = null }) {
+  // searchHelpers wraps the mind-search subsystem (in-RAM ANN + BM25 + RRF +
+  // temporal) plus topology reads. It is the dep createMindscapeDomain needs.
+  const searchHelpers = createSearchHelpers({ db, embedder, userId });
+
   const domains = [
     createHealthDomain({ getDb: () => db, userId }),
     createTasksDomain({ db, userId }),
     createFisherToolsDomain({ db, userId }),
     createMessagesDomain({ db, userId, agentLabels: AGENT_LABELS, isScoped: () => false }),
+    createMindscapeDomain({ searchHelpers, userId }),
   ];
   // Deferred = domains needing a subsystem not yet built. Each lands with its
   // Wave-2 unit; listed explicitly so the surface is never silently dropped.
   //   metrics       -> @mycelium/metrics/contracts (CONTRACTS) not in reference/
   //   documents     -> mind-files (writeMindFile, mindMirrors)
   //   topology-tools-> topologyHelpers (createTopologyHelpers)
-  //   mindscape     -> mind-search (searchHelpers)
   //   internal      -> mind-files (readMindFile/writeMindFile)
   const deferred = ['metrics (CONTRACTS)', 'documents (mind-files)',
-    'topology-tools (topologyHelpers)', 'mindscape (mind-search)',
+    'topology-tools (topologyHelpers)',
     'internal (mind-files)', 'reply', 'services'];
   return { domains, deferred };
 }

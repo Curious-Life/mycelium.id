@@ -17,13 +17,17 @@ export async function boot({
   userHex = process.env.USER_MASTER_KEY,
   systemHex = process.env.SYSTEM_KEY,
   userId = process.env.MYCELIUM_USER_ID || 'local-user',
+  // embedder: the mind-search embed-service client (:8091, sibling unit R2).
+  // Optional — when omitted, mind-search runs BM25-only. The CLI path leaves it
+  // null until R2 wires the real client; verify scripts inject a stub.
+  embedder = null,
 } = {}) {
   if (!userHex || !systemHex) {
     throw new Error('USER_MASTER_KEY and SYSTEM_KEY must be set (64-char hex each). Vault stays locked.');
   }
   const { userKey, systemKey } = await unlock({ userHex, systemHex, kcvPath });
   const { db, close } = getDb({ dbPath, userKey, systemKey });
-  const { domains, deferred } = buildDomains({ db, userId });
+  const { domains, deferred } = buildDomains({ db, userId, embedder });
   const { tools, handlers } = collectTools(domains);
   const server = createMcpServer({ tools, handlers });
   return { server, db, close, tools, deferred };
