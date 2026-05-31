@@ -14,11 +14,14 @@
     "verify:mcp": "node scripts/verify-mcp.mjs",
     "verify:mindfiles": "node scripts/verify-mindfiles.mjs",
     "verify:metrics": "node scripts/verify-metrics.mjs",
-    "verify": "npm run verify:foundation && npm run verify:mcp && npm run verify:mindfiles && npm run verify:metrics",
-    "start": "node src/index.js"
+    "verify:rest": "node scripts/verify-rest.mjs",
+    "verify": "npm run verify:foundation && npm run verify:mcp && npm run verify:mindfiles && npm run verify:metrics && npm run verify:rest",
+    "start": "node src/index.js",
+    "rest": "node src/server-rest.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "better-sqlite3": "^11.0.0"
+    "better-sqlite3": "^11.0.0",
+    "express": "^4.21.2"
   }
 }
