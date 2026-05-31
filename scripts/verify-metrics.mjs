@@ -21,7 +21,8 @@ const DB = 'data/verify-metrics.db';
 const KCV = 'data/verify-metrics-kcv.json';
 const hex = () => crypto.randomBytes(32).toString('hex');
 
-const METRICS_TOOLS = ['getHarmonicState', 'getFlowFeatures', 'getShape', 'getMetricSeries'];
+// getFlowFeatures + getShape were folded into getHarmonicState(detail:'flow'|'shape').
+const METRICS_TOOLS = ['getHarmonicState', 'getMetricSeries'];
 
 const ledger = [];
 const rec = (name, pass, detail) => { ledger.push(pass); console.log(`${pass ? 'PASS' : 'FAIL'}  ${name}\n      ${detail}`); };
@@ -44,9 +45,9 @@ await Promise.all([server.connect(serverT), client.connect(clientT)]);
 const listed = await client.listTools();
 const names = listed.tools.map((t) => t.name);
 const present = METRICS_TOOLS.filter((n) => names.includes(n));
-rec('M1. metrics domain registered + all four tools in tools/list',
-  present.length === METRICS_TOOLS.length,
-  `saw ${present.length}/${METRICS_TOOLS.length}: ${present.join(', ')}`);
+rec('M1. metrics domain registered + tools in tools/list',
+  present.length === METRICS_TOOLS.length && !names.includes('getFlowFeatures') && !names.includes('getShape'),
+  `saw ${present.join(', ')}; folded tools absent: ${!names.includes('getFlowFeatures') && !names.includes('getShape')}`);
 
 // M2: every metrics tool has a JSON-Schema object inputSchema (not Zod)
 const metricsTools = listed.tools.filter((t) => METRICS_TOOLS.includes(t.name));
@@ -73,6 +74,20 @@ const expected = CONTRACTS.information_harmonic_amplitude.refusal_mode;
 rec('M4. empty-window text carries the CONTRACTS refusal copy',
   expected.length > 0 && text.includes(expected),
   `contains refusal_mode: ${text.includes(expected)}`);
+
+// M5: the folded detail modes ('flow'/'shape') still work (capability preserved)
+let foldOk = false, foldDetail = '';
+try {
+  const flow = await client.callTool({ name: 'getHarmonicState', arguments: { detail: 'flow' } });
+  const shape = await client.callTool({ name: 'getHarmonicState', arguments: { detail: 'shape' } });
+  const fText = flow?.content?.[0]?.text || '', sText = shape?.content?.[0]?.text || '';
+  // empty vault → both return their honest refusal copy, no crash
+  foldOk = flow?.isError !== true && shape?.isError !== true
+    && fText.includes(CONTRACTS.bigram_flow_features.refusal_mode)
+    && sText.includes(CONTRACTS.topology_persistence_entropy.refusal_mode);
+  foldDetail = `flow refusal=${fText.includes(CONTRACTS.bigram_flow_features.refusal_mode)} shape refusal=${sText.includes(CONTRACTS.topology_persistence_entropy.refusal_mode)}`;
+} catch (e) { foldDetail = `THREW: ${e.message}`; }
+rec('M5. getHarmonicState detail:flow/shape preserve the folded capabilities', foldOk, foldDetail);
 
 await client.close();
 close();

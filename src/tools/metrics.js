@@ -1,14 +1,16 @@
 /**
- * Cognitive metrics MCP tools (PR1.5 D) — four narrow tools that surface the
- * information-harmonics family (PR1 v3 §4.23 + §4.33 + §4.34) to agents.
+ * Cognitive metrics MCP tools — surfaces the information-harmonics family
+ * (PR1 v3 §4.23 + §4.33 + §4.34) to agents.
  *
  *   getHarmonicState   — "What's my cognitive rhythm right now?" (orientation
- *                        across all 41 metrics for one granularity)
- *   getFlowFeatures    — "How am I threading vs flipping?" (§4.33 within-window
- *                        continuity + reversal rate; partial answer to Mya's
- *                        2026-05-08 audit "no within-session activation order")
- *   getShape           — "What's the shape of my activity?" (§4.34 topology
- *                        persistence entropy on 256D matryoshka projection)
+ *                        across all 41 metrics for one granularity). The
+ *                        `detail` param narrows it:
+ *                          detail:'flow'  — §4.33 within-window continuity +
+ *                                           reversal rate ("threading vs flipping")
+ *                          detail:'shape' — §4.34 topology persistence entropy
+ *                                           ("how spread-out is the activity")
+ *                        (these were the former getFlowFeatures / getShape tools,
+ *                        folded in 2026-05-31 to cut surface decision-cost.)
  *   getMetricSeries    — "How has THIS metric moved over time?" (time-series
  *                        of one named metric)
  *
@@ -63,7 +65,7 @@ export function createMetricsDomain(deps) {
     {
       name: 'getHarmonicState',
       description:
-        'Your cognitive RHYTHM right now (vs getCurrentPhase, which is cognitive MOVEMENT). The latest window\'s bundle: activity energy at each timescale (raw / 10-msg / daily / weekly / monthly), how the thinking is flowing (continuity, reversals — same as getFlowFeatures), and how spread-out it is (same as getShape). One call to orient; reach for getFlowFeatures or getShape only if you want just that slice.\n\nGranularity = window grain (alpha=daily / theta=weekly / delta=monthly). Default: alpha.\n\nThese are RELATIVE within-user values — the bands are aggregation timescales, not EEG frequencies; do not compare across users.',
+        'Your cognitive RHYTHM right now (vs getCurrentPhase, which is cognitive MOVEMENT). The latest window\'s bundle: activity energy at each timescale (raw / 10-msg / daily / weekly / monthly), how the thinking is flowing (continuity = how much consecutive messages stay on theme; reversals = how often direction flips), and how spread-out it is (high = scattered across topics; low = concentrated).\n\nUse detail to narrow: omit for the full bundle, "flow" for just the flow shape, "shape" for just the spread. Granularity = window grain (alpha=daily / theta=weekly / delta=monthly), default alpha.\n\nThese are RELATIVE within-user values — the bands are aggregation timescales, not EEG frequencies; do not compare across users.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -72,35 +74,10 @@ export function createMetricsDomain(deps) {
             enum: ['alpha', 'theta', 'delta'],
             description: 'Window grain. alpha=daily (most reactive), theta=weekly (default for "how was this week"), delta=monthly (slow drift). Default: alpha.',
           },
-        },
-      },
-    },
-    {
-      name: 'getFlowFeatures',
-      description:
-        'How your thinking is flowing within a window: how much consecutive messages stay on theme (continuity), how often the direction reverses (reversals), plus variance and spectral energy, across 5 timescales. Use when the question is HOW thinking is moving, not WHAT topics are active.\n\nNote: the underlying measures were validated for clinical diagnosis; their use here for healthy journaling is exploratory, not a clinical signal.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          granularity: {
+          detail: {
             type: 'string',
-            enum: ['alpha', 'theta', 'delta'],
-            description: 'Window grain (default alpha)',
-          },
-        },
-      },
-    },
-    {
-      name: 'getShape',
-      description:
-        'How spread-out your thinking is within a window. High = activity is scattered across many distinct topics; low = concentrated in one region. (Computed as topology persistence entropy over the window\'s message embeddings.) Returns null when the window has fewer than 20 messages — too little to measure reliably.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          granularity: {
-            type: 'string',
-            enum: ['alpha', 'theta', 'delta'],
-            description: 'Window grain (default alpha)',
+            enum: ['full', 'flow', 'shape'],
+            description: 'What to return: "full" (default — energy + flow + shape), "flow" (continuity/reversals only), or "shape" (spread-out-ness only).',
           },
         },
       },
@@ -271,50 +248,35 @@ export function createMetricsDomain(deps) {
   // ── Handlers ────────────────────────────────────────────────────────────
 
   const handlers = {
+    // getHarmonicState absorbs the former getFlowFeatures / getShape tools via
+    // the `detail` param — same fetch + formatter logic, one discoverable tool.
     getHarmonicState: async (args = {}) => {
       const granularity = args.granularity || 'alpha';
       if (!VALID_GRANULARITIES.has(granularity)) {
         return `# Error\n\nInvalid granularity "${granularity}". Use one of: alpha, theta, delta.`;
       }
+      const detail = args.detail || 'full';
+
+      if (detail === 'flow') {
+        const window = await db.metrics.getCurrentWindow(userId, { granularity, requestedMetrics: BIGRAM_FLOW_COLS });
+        if (!window.window_end) {
+          return emptyWindow('Flow shape', granularity, window.era_id, CONTRACTS.bigram_flow_features.refusal_mode);
+        }
+        return formatFlowFeatures(window);
+      }
+      if (detail === 'shape') {
+        const window = await db.metrics.getCurrentWindow(userId, { granularity, requestedMetrics: ['topology_h0_persistence_entropy'] });
+        if (!window.window_end) {
+          return emptyWindow('Activity shape', granularity, window.era_id, CONTRACTS.topology_persistence_entropy.refusal_mode);
+        }
+        return formatShape(window);
+      }
+
       const window = await db.metrics.getCurrentWindow(userId, { granularity });
       if (!window.window_end) {
-        const refusal = CONTRACTS.information_harmonic_amplitude.refusal_mode;
-        return emptyWindow('Cognitive rhythm', granularity, window.era_id, refusal);
+        return emptyWindow('Cognitive rhythm', granularity, window.era_id, CONTRACTS.information_harmonic_amplitude.refusal_mode);
       }
       return formatHarmonicState(window);
-    },
-
-    getFlowFeatures: async (args = {}) => {
-      const granularity = args.granularity || 'alpha';
-      if (!VALID_GRANULARITIES.has(granularity)) {
-        return `# Error\n\nInvalid granularity "${granularity}". Use one of: alpha, theta, delta.`;
-      }
-      const cols = BIGRAM_FLOW_COLS;
-      const window = await db.metrics.getCurrentWindow(userId, {
-        granularity,
-        requestedMetrics: cols,
-      });
-      if (!window.window_end) {
-        const refusal = CONTRACTS.bigram_flow_features.refusal_mode;
-        return emptyWindow('Flow shape', granularity, window.era_id, refusal);
-      }
-      return formatFlowFeatures(window);
-    },
-
-    getShape: async (args = {}) => {
-      const granularity = args.granularity || 'alpha';
-      if (!VALID_GRANULARITIES.has(granularity)) {
-        return `# Error\n\nInvalid granularity "${granularity}". Use one of: alpha, theta, delta.`;
-      }
-      const window = await db.metrics.getCurrentWindow(userId, {
-        granularity,
-        requestedMetrics: ['topology_h0_persistence_entropy'],
-      });
-      if (!window.window_end) {
-        const refusal = CONTRACTS.topology_persistence_entropy.refusal_mode;
-        return emptyWindow('Activity shape', granularity, window.era_id, refusal);
-      }
-      return formatShape(window);
     },
 
     getMetricSeries: async (args = {}) => {

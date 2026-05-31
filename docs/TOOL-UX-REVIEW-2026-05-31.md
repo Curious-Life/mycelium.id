@@ -54,11 +54,13 @@ Documents (`save/update/get/list/publish/getShareStatus`) and mind files (`read/
 ---
 
 ## Recommendation (priority order)
-1. ✅ getContext — done.
-2. **Polish pass** (naming + de-jargon) — low-risk, do next, separate from structural changes. (Approved.)
-3. **Cluster A consolidation 8→5** — fold getFlowFeatures + getShape into getHarmonicState; hold getTopMovers pending a usage check. Medium effort, real UX win.
-4. **Add `listTasks`** — small, closes the write-only-tasks gap.
+1. ✅ getContext — **done** (`51e9b93`).
+2. ✅ **Polish pass** (de-jargon descriptions + rhythm-vs-movement distinction) — **done** (`1635881`).
+3. ✅ **Cluster A consolidation** — **done**: getFlowFeatures + getShape folded into `getHarmonicState(detail:'flow'|'shape')`, capability-preserving (verify M5). 8→6 metrics-family tools. getTopMovers held pending usage (see open Q2).
+4. ✅ **Add `listTasks`** — **done** (`7a04795`), closes the write-only-tasks gap.
 5. Leave Cluster B + C structurally as-is.
+
+**Still parked on operator input:** getTopMovers fold (needs usage data) + message-capture surface (product decision). See open questions below.
 
 ## Open questions for the operator
 1. **Cluster A fold:** collapse getFlowFeatures/getShape into getHarmonicState (sub-views via `detail` param), or keep them separate? Recommendation: fold via `detail` — one tool, discoverable, no lost capability.
