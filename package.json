@@ -21,7 +21,8 @@
     "verify:oauth": "node scripts/verify-oauth.mjs",
     "verify:context": "node scripts/verify-context.mjs",
     "verify:ingest": "node scripts/verify-ingest.mjs",
-    "verify": "npm run verify:foundation && npm run verify:mcp && npm run verify:mindfiles && npm run verify:metrics && npm run verify:rest && npm run verify:search && npm run verify:topology && npm run verify:embed && npm run verify:context && npm run verify:ingest && npm run verify:oauth",
+    "verify:blob": "node scripts/verify-blob.mjs",
+    "verify": "npm run verify:foundation && npm run verify:mcp && npm run verify:mindfiles && npm run verify:metrics && npm run verify:rest && npm run verify:search && npm run verify:topology && npm run verify:embed && npm run verify:context && npm run verify:ingest && npm run verify:blob && npm run verify:oauth",
     "start": "node src/index.js",
     "rest": "node src/server-rest.js",
     "start:http": "node src/index.js --http"
