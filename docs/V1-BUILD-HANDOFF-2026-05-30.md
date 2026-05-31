@@ -318,3 +318,35 @@ New code:
    its own marker when built.
 3. Tier-2 real-embedding parity: gated on `pipeline/setup.sh` (onnxruntime not
    installed in sandbox) — same gate as verify:embed / verify:topology tier2.
+
+---
+
+## 2026-05-31 (cont.) — D7 :8095 HTTP listener BUILT; ingestion→enrich loop CLOSED
+
+**Status: built, 14/14 suites GO. verify:enrich now 15 checks (added H1-H5).**
+
+The nudge target the ingestion choke-point fires at. Closes the loop:
+captureMessage → enqueueEnrichment (fire-and-forget POST :8095/enrich-all) →
+this listener → drainOnce → embedding_768 written.
+
+New code:
+- `src/enrich/server.js` — `startEnrichmentServer({ port=8095, host=127.0.0.1,
+  userId, embed, embedBaseUrl, ...keys })`. Boots the shared assembly + an
+  embed client (default :8091), wraps drainOnce behind:
+    GET  /health    → { ok, dim:768 }
+    POST /enrich-all { userId? } → 200 { scanned, embedded, failed }
+                                   503 locked vault · 400 bad JSON · 404 else
+  SECURITY: no auth, binds 127.0.0.1 ONLY (mirrors server-rest.js); master key
+  never crosses the wire; 503/500 paths never echo internals or content.
+  Returns { server, db, url, drainOnce, close } — same lifecycle as startRestServer.
+- `scripts/verify-enrich.mjs` Layer 2: H1 health, H2 drain-over-HTTP, H3 bad
+  JSON→400, H4 unknown→404, **H5 the full real enqueueEnrichment→:8095→embedded
+  loop** (fires the actual fire-and-forget nudge at a live server, polls the row
+  to nlp_processed=2).
+
+**Still UNBUILT for D7:**
+1. Wire `startEnrichmentServer` into the process entry / a `start:enrich` npm
+   script + the deploy (the :8095 process needs to actually run alongside the
+   MCP server). Today it's built + verified but not launched by `npm start`.
+2. NLP entity/tag extraction — the OTHER half of D7 (embed-on-write done).
+3. Tier-2 real-embedding parity — gated on pipeline/setup.sh (onnxruntime).

@@ -23,6 +23,8 @@ import { applyMigrations } from '../src/db/migrate.js';
 import { boot } from '../src/index.js';
 import { getMasterKey } from '../src/crypto/crypto-local.js';
 import { createEnrichmentService } from '../src/enrich/service.js';
+import { startEnrichmentServer } from '../src/enrich/server.js';
+import { createEnqueueEnrichment } from '../src/ingest/enqueue.js';
 import { decryptVector } from '../src/search/ann/decode.js';
 import { EMBED_DIM } from '../src/embed/client.js';
 
@@ -174,11 +176,63 @@ async function main() {
     close2();
   }
 
+  // ── Layer 2: the :8095 HTTP listener (the enqueue nudge target) ───────────
+  {
+    freshDb();
+    const { db: sdb, url, close: closeSrv } = await startEnrichmentServer({
+      dbPath: DB, kcvPath: KCV, userHex: hex(), systemHex: hex(),
+      port: 0, embed: stubEmbed, userId: USER,
+    });
+
+    // H1: health
+    const health = await fetch(`${url}/health`).then((r) => r.json());
+    rec('H1. GET /health → { ok:true, dim:768 }',
+      health.ok === true && health.dim === EMBED_DIM, JSON.stringify(health));
+
+    // H2: POST /enrich-all drains pending rows over HTTP
+    await sdb.messages.insert({ id: 'h-1', user_id: USER, role: 'user', content: 'http drain one', source: 'verify', agent_id: 'personal-agent', scope: 'org' });
+    await sdb.messages.insert({ id: 'h-2', user_id: USER, role: 'user', content: 'http drain two', source: 'verify', agent_id: 'personal-agent', scope: 'org' });
+    const drainRes = await fetch(`${url}/enrich-all`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ userId: USER }),
+    });
+    const drainBody = await drainRes.json();
+    rec('H2. POST /enrich-all → 200 { embedded:2 }',
+      drainRes.status === 200 && drainBody.embedded === 2 && drainBody.scanned === 2,
+      `status=${drainRes.status} body=${JSON.stringify(drainBody)}`);
+    rec('H2b. rows embedded over HTTP (nlp_processed 0→2)',
+      rawState('h-1').nlp_processed === 2 && rawState('h-2').nlp_processed === 2);
+
+    // H3: malformed JSON → 400 (honest reject, no crash)
+    const bad = await fetch(`${url}/enrich-all`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{not json',
+    });
+    rec('H3. malformed JSON body → 400', bad.status === 400, `status=${bad.status}`);
+
+    // H4: unknown route → 404
+    const nf = await fetch(`${url}/nope`);
+    rec('H4. unknown route → 404', nf.status === 404, `status=${nf.status}`);
+
+    // H5: the full ingestion loop — fire the REAL fire-and-forget enqueue nudge
+    // at the live :8095 server and confirm it drains the queued row.
+    await sdb.messages.insert({ id: 'h-loop', user_id: USER, role: 'user', content: 'the end to end nudge loop', source: 'verify', agent_id: 'personal-agent', scope: 'org' });
+    createEnqueueEnrichment({ userId: USER, url })('h-loop');
+    let looped = false;
+    for (let i = 0; i < 40 && !looped; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      if (rawState('h-loop').nlp_processed === 2) looped = true;
+    }
+    rec('H5. full loop: enqueueEnrichment nudge → :8095 /enrich-all → row embedded',
+      looped, `nlp_processed=${rawState('h-loop').nlp_processed}`);
+
+    closeSrv();
+  }
+
   for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 
   const allPass = ledger.every(Boolean);
   console.log('\n' + '='.repeat(64));
-  console.log(`VERDICT: ${allPass ? 'GO — D7 enrichment drains the queue, writes decryptable vector envelopes, isolates poison rows, fails closed on a locked vault' : 'NO-GO — see FAIL rows'}`);
+  console.log(`VERDICT: ${allPass ? 'GO — D7 enrichment: drainOnce writes decryptable vector envelopes + isolates poison rows + fails closed; the :8095 listener drains over HTTP and closes the ingestion→enrich loop' : 'NO-GO — see FAIL rows'}`);
   console.log('='.repeat(64));
   process.exit(allPass ? 0 : 1);
 }
