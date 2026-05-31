@@ -23,6 +23,8 @@ import { createDocumentsDomain } from './tools/documents.js';
 import { createInternalDomain } from './tools/internal.js';
 import { createMindFiles, MIND_MIRRORS } from './mindfiles/mind-files.js';
 import { createMetricsDomain } from './tools/metrics.js';
+import { createMindscapeDomain } from './tools/mindscape.js';
+import { createSearchHelpers } from './search/index.js';
 
 // Single-user defaults for the agent identity / scope deps the factories want.
 const AGENT_LABELS = { 'personal-agent': 'Assistant' };
@@ -31,15 +33,23 @@ const AGENT_LABELS = { 'personal-agent': 'Assistant' };
  * Assemble the live tool domains from the db namespace.
  *
  * Registered now = domains whose deps are satisfiable from `db` alone.
- * Deferred = domains needing subsystems not yet built (mind-files, mind-search,
+ * Deferred = domains needing subsystems not yet built (mind-files,
  * topologyHelpers) — they land with their Wave-2 units; listed here so the set
  * is explicit, never silently dropped.
+ *
+ * @param {object} args
+ * @param {object} args.db
+ * @param {string} [args.userId]
+ * @param {{ embed, health }} [args.embedder]  injected mind-search embedder.
+ *   The real one wraps embed-service (:8091, sibling unit R2). When absent the
+ *   mind-search backend runs BM25-only and still returns ranked results.
  */
 export function buildDomains({
   db,
   userId = 'local-user',
   agentId = 'personal-agent',
   agentRoot = process.env.MYCELIUM_AGENT_ROOT || 'data/mind',
+  embedder = null,
 }) {
   // Mind-files subsystem (Wave 2). createMindFiles binds fs/path + an
   // AGENT_ROOT + agent identity; its read/write helpers encrypt at rest with
@@ -50,6 +60,12 @@ export function buildDomains({
   // so mind files and vault rows share one key. The mind/ subdir is created
   // lazily on first write.
   const mindFiles = createMindFiles({ agentRoot, agentId, fs, path });
+
+  // searchHelpers wraps the mind-search subsystem (in-RAM ANN + BM25 + RRF +
+  // temporal) plus topology reads. It is the dep createMindscapeDomain needs.
+  // The embedder is injected (real one wraps embed-service :8091, sibling R2);
+  // when absent the backend runs BM25-only and still returns ranked results.
+  const searchHelpers = createSearchHelpers({ db, embedder, userId });
 
   const domains = [
     createHealthDomain({ getDb: () => db, userId }),
@@ -72,13 +88,13 @@ export function buildDomains({
       writeMindFile: (filename, content) => mindFiles.writeMindFile(filename, content),
     }),
     createMetricsDomain({ db, userId }),
+    createMindscapeDomain({ searchHelpers, userId }),
   ];
   // Deferred = domains needing a subsystem not yet built. Each lands with its
   // Wave-2 unit; listed explicitly so the surface is never silently dropped.
   //   topology-tools-> topologyHelpers (createTopologyHelpers)
-  //   mindscape     -> mind-search (searchHelpers)
   const deferred = [
-    'topology-tools (topologyHelpers)', 'mindscape (mind-search)',
+    'topology-tools (topologyHelpers)',
     'reply', 'services'];
   return { domains, deferred };
 }
