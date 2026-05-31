@@ -27,6 +27,7 @@ import { createMindscapeDomain } from './tools/mindscape.js';
 import { createSearchHelpers } from './search/index.js';
 import { createTopologyToolsDomain } from './tools/topology-tools.js';
 import { createTopologyHelpers } from './topology/helpers.js';
+import { createContextDomain } from './tools/context.js';
 
 // Single-user defaults for the agent identity / scope deps the factories want.
 const AGENT_LABELS = { 'personal-agent': 'Assistant' };
@@ -74,6 +75,12 @@ export function buildDomains({
   const topologyHelpers = createTopologyHelpers({ db, userId });
 
   const domains = [
+    // getContext: the D5 preamble — the entry point a client calls first.
+    createContextDomain({
+      getDb: () => db,
+      readMindFile: (filename) => mindFiles.readMindFile(filename),
+      userId,
+    }),
     createHealthDomain({ getDb: () => db, userId }),
     createTasksDomain({ db, userId }),
     createFisherToolsDomain({ db, userId }),
