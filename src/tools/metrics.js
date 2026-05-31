@@ -32,7 +32,7 @@
  * @property {string} userId
  */
 
-import { CONTRACTS } from '@mycelium/metrics/contracts/index.js';
+import { CONTRACTS } from '../metrics/contracts.js';
 
 const VALID_GRANULARITIES = new Set(['alpha', 'theta', 'delta']);
 const BANDS = ['gamma', 'beta', 'alpha', 'theta', 'delta'];

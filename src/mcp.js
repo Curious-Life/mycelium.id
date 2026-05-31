@@ -16,6 +16,7 @@ import { createHealthDomain } from './tools/health.js';
 import { createTasksDomain } from './tools/tasks.js';
 import { createFisherToolsDomain } from './tools/fisher-tools.js';
 import { createMessagesDomain } from './tools/messages.js';
+import { createMetricsDomain } from './tools/metrics.js';
 
 // Single-user defaults for the agent identity / scope deps the factories want.
 const AGENT_LABELS = { 'personal-agent': 'Assistant' };
@@ -34,15 +35,15 @@ export function buildDomains({ db, userId = 'local-user' }) {
     createTasksDomain({ db, userId }),
     createFisherToolsDomain({ db, userId }),
     createMessagesDomain({ db, userId, agentLabels: AGENT_LABELS, isScoped: () => false }),
+    createMetricsDomain({ db, userId }),
   ];
   // Deferred = domains needing a subsystem not yet built. Each lands with its
   // Wave-2 unit; listed explicitly so the surface is never silently dropped.
-  //   metrics       -> @mycelium/metrics/contracts (CONTRACTS) not in reference/
   //   documents     -> mind-files (writeMindFile, mindMirrors)
   //   topology-tools-> topologyHelpers (createTopologyHelpers)
   //   mindscape     -> mind-search (searchHelpers)
   //   internal      -> mind-files (readMindFile/writeMindFile)
-  const deferred = ['metrics (CONTRACTS)', 'documents (mind-files)',
+  const deferred = ['documents (mind-files)',
     'topology-tools (topologyHelpers)', 'mindscape (mind-search)',
     'internal (mind-files)', 'reply', 'services'];
   return { domains, deferred };
