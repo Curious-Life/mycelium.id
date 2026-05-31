@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { boot } from '../src/index.js';
+import { applyMigrations } from '../src/db/migrate.js';
 import { CONTRACTS } from '../src/metrics/contracts.js';
 
 const DB = 'data/verify-metrics.db';
@@ -29,7 +30,7 @@ const rec = (name, pass, detail) => { ledger.push(pass); console.log(`${pass ? '
 
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 mkdirSync('data', { recursive: true });
-new Database(DB).exec(readFileSync('migrations/0001_init.sql', 'utf8'));
+applyMigrations(new Database(DB));
 
 const userHex = hex(), systemHex = hex();
 // Fresh vault: migration creates the schema but no metrics rows are written,

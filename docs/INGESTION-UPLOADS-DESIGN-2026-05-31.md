@@ -125,8 +125,12 @@ Import + assemble `createAttachmentsNamespace({ d1Query, firstRow })` (one line;
 4. **`/ingest/message` + `/ingest/upload` HTTP routes** on server-http.js + `verify-upload.mjs` (U1/U4/U5/U6). (Network-facing, authenticated.)
 5. **`enqueueEnrichment`** hand-off (best-effort :8095 + inline fallback). (Closes the loop to D7.)
 
-## Decision criteria to proceed past this design
-Operator confirms: (a) uploads are HTTP-only (not a tool) — bytes can't flow through MCP; (b) the local encrypted blob store reusing `attachments.r2_key` as a path (no migration) is acceptable vs. adding a `local_path` column; (c) video + local extraction models are deferred.
+## Decision criteria to proceed past this design — ✅ RESOLVED (operator, 2026-05-31)
+- **(a) Transport:** ✅ uploads are **HTTP-only** on the OAuth/HTTP server (bytes can't flow through MCP); message-capture is **both** an HTTP route and a thin `captureMessage` MCP tool.
+- **(b) Storage/schema:** ✅ **add a migration** with a dedicated column (`attachments.local_path`) rather than overloading `r2_key`. Migration `0002_attachments_local_path.sql` adds the nullable column; `r2_key` stays for import compatibility. Blob bytes encrypted-at-rest on local disk (mind-files envelope).
+- **(c) Extraction:** ✅ **build extraction now** — Whisper (audio) / vision (image) / PDF text. **TIERED** (the embed/topology precedent): Tier-1 = extraction dispatch + interface + stub-verified pipeline (always); Tier-2 = real local models, **gated on a networked/unsandboxed host** (HF model download + native wheels won't run in this sandbox). No fabricated transcripts — a blob with no model yet stores `transcript=null` and queues. Video/HLS remains dropped for V1.
+
+**Scope consequence of (b)+(c):** +1 migration, +an `src/ingest/extract/` dispatcher with per-type extractors (real models Tier-2-gated). Estimate +1–2 days over the store-now-extract-later path.
 
 ## Risks + mitigations
 | # | Risk | Likelihood | Impact | Mitigation |

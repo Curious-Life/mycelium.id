@@ -13,6 +13,7 @@
 // PASS/FAIL ledger + VERDICT + EXIT=<code>; process.exit reflects pass/fail.
 
 import Database from 'better-sqlite3';
+import { applyMigrations } from '../src/db/migrate.js';
 import { readFileSync, rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -130,7 +131,7 @@ function freshDb() {
   for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
   mkdirSync('data', { recursive: true });
   const raw = new Database(DB);
-  raw.exec(readFileSync('migrations/0001_init.sql', 'utf8'));
+  applyMigrations(raw);
   return raw;
 }
 

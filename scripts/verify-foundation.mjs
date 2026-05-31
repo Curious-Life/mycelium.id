@@ -5,6 +5,7 @@
 //   document write/read round-trip -> ciphertext-at-rest -> fail-closed on
 //   a wrong key (both KCV and data-read paths).
 import Database from 'better-sqlite3';
+import { applyMigrations } from '../src/db/migrate.js';
 import { readFileSync, rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { unlock } from '../src/crypto/keys.js';
@@ -13,7 +14,6 @@ import { isEncrypted } from '../src/crypto/crypto-local.js';
 
 const DB = 'data/verify.db';
 const KCV = 'data/verify-kcv.json';
-const SCHEMA = 'migrations/0001_init.sql';
 const hex = () => crypto.randomBytes(32).toString('hex');
 const userHex = hex(), systemHex = hex(), wrongHex = hex();
 const PLAINTEXT = 'SECRET reflection: the vault must never leak this.';
@@ -29,7 +29,7 @@ mkdirSync('data', { recursive: true });
 // B1: schema loads
 {
   const db = new Database(DB);
-  db.exec(readFileSync(SCHEMA, 'utf8'));
+  applyMigrations(db);
   const n = db.prepare("SELECT count(*) AS c FROM sqlite_master WHERE type='table'").get().c;
   db.close();
   rec('B1. 111-table schema loads in better-sqlite3', n >= 111, `${n} tables`);

@@ -28,6 +28,7 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import Database from 'better-sqlite3';
+import { applyMigrations } from '../src/db/migrate.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
@@ -84,7 +85,7 @@ async function bootServer(dbPath) {
   // is needed here — the encrypting adapter (src/adapter/d1.js) decrypts
   // transparently on read and returns empty result sets for empty tables.
   const raw = new Database(dbPath);
-  raw.exec(readFileSync(join(ROOT, 'migrations', '0001_init.sql'), 'utf8'));
+  applyMigrations(raw);
   raw.close();
 
   const { db, close } = getDb({ dbPath, userKey, systemKey, scope: 'personal' });

@@ -13,6 +13,7 @@ import { readFileSync, rmSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
+import { applyMigrations } from '../src/db/migrate.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -67,7 +68,7 @@ function seedVaultDb() {
   }
   mkdirSync(join(ROOT, 'data'), { recursive: true });
   const db = new Database(VAULT_DB);
-  db.exec(readFileSync(join(ROOT, 'migrations', '0001_init.sql'), 'utf8'));
+  applyMigrations(db);
   db.close();
 }
 

@@ -9,6 +9,7 @@ import Database from 'better-sqlite3';
 import { readFileSync, rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { startRestServer } from '../src/server-rest.js';
+import { applyMigrations } from '../src/db/migrate.js';
 
 const DB = 'data/verify-rest.db';
 const KCV = 'data/verify-rest-kcv.json';
@@ -24,7 +25,7 @@ function check(name, cond) {
 
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 mkdirSync('data', { recursive: true });
-new Database(DB).exec(readFileSync('migrations/0001_init.sql', 'utf8'));
+applyMigrations(new Database(DB));
 
 let started;
 try {

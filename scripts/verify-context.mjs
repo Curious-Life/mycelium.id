@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { boot } from '../src/index.js';
+import { applyMigrations } from '../src/db/migrate.js';
 
 const DB = 'data/verify-context.db';
 const KCV = 'data/verify-context-kcv.json';
@@ -19,7 +20,7 @@ const rec = (n, pass, d) => { ledger.push(pass); console.log(`${pass ? 'PASS' : 
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 try { rmSync(MIND, { recursive: true }); } catch {}
 mkdirSync('data', { recursive: true });
-new Database(DB).exec(readFileSync('migrations/0001_init.sql', 'utf8'));
+applyMigrations(new Database(DB));
 
 const userHex = hex(), systemHex = hex();
 // Isolate mind files for this run (boot binds agentRoot at construction).
