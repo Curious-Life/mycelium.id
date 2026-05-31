@@ -10,6 +10,7 @@
     "init-db": "node scripts/init-db.mjs",
     "verify:foundation": "node scripts/verify-foundation.mjs",
     "verify:mcp": "node scripts/verify-mcp.mjs",
+    "verify:mindfiles": "node scripts/verify-mindfiles.mjs",
     "verify": "npm run verify:foundation && npm run verify:mcp",
     "start": "node src/index.js"
   },

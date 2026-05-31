@@ -45,7 +45,7 @@ import {
   saveDocument,
   resolveAgentScope,
   SaveDocumentError,
-} from '@mycelium/core/document-store.js';
+} from '../core/document-store.js';
 import {
   SearchWarmingError,
   SearchEmbedderError,
