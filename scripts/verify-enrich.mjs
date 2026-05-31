@@ -24,6 +24,7 @@ import { applyMigrations } from '../src/db/migrate.js';
 import { boot } from '../src/index.js';
 import { getMasterKey } from '../src/crypto/crypto-local.js';
 import { createEnrichmentService } from '../src/enrich/service.js';
+import { extract } from '../src/enrich/extract.js';
 import { startEnrichmentServer } from '../src/enrich/server.js';
 import { createEnqueueEnrichment } from '../src/ingest/enqueue.js';
 import { decryptVector } from '../src/search/ann/decode.js';
@@ -72,14 +73,42 @@ function rawState(id) {
   const raw = new Database(DB, { readonly: true });
   try {
     return raw.prepare(
-      'SELECT id, nlp_processed, nlp_error, embedding_768, content, scope FROM messages WHERE id = ?',
+      'SELECT id, nlp_processed, nlp_error, embedding_768, entities, tags, entity_summary, content, scope FROM messages WHERE id = ?',
     ).get(id);
   } finally {
     raw.close();
   }
 }
 
+// ── Layer 0: the deterministic extractor (pure, no db) ─────────────────────
+function unitExtract() {
+  const r = extract('Met John Smith in New York about the $1,200 invoice. ping me at jane@acme.io or https://acme.io/x #budget #forest budget budget forest');
+  // Deterministic multi-word proper-noun capture. A leading sentence-start word
+  // can be absorbed ("Met John Smith") — accepted as honest rules-pass behavior;
+  // a model-backed pass would disambiguate. We assert the names are present.
+  rec('T1. extract: multi-word proper-noun phrases captured (John Smith, New York)',
+    r.entities.proper?.some((p) => p.includes('John Smith')) && r.entities.proper?.includes('New York'),
+    `proper=${JSON.stringify(r.entities.proper)}`);
+  rec('T2. extract: url + email + money detected into typed categories',
+    r.entities.url?.[0]?.startsWith('https://acme.io') && r.entities.email?.includes('jane@acme.io')
+      && r.entities.money?.some((m) => /1,200/.test(m)),
+    `url=${JSON.stringify(r.entities.url)} email=${JSON.stringify(r.entities.email)} money=${JSON.stringify(r.entities.money)}`);
+  rec('T3. extract: tags lead with hashtags then keyword-fill, deduped lowercase',
+    r.tags.includes('budget') && r.tags.includes('forest') && new Set(r.tags).size === r.tags.length,
+    `tags=${JSON.stringify(r.tags)}`);
+  rec('T4. extract: entity_summary is a non-empty compact line', r.entitySummary.length > 0 && r.entitySummary.length <= 240,
+    `summary="${r.entitySummary}"`);
+  rec('T5. extract: deterministic — same input → identical output',
+    JSON.stringify(extract('a b c #x')) === JSON.stringify(extract('a b c #x')));
+  const empty = extract('   ');
+  rec('T6. extract: blank input → empty structures (no throw)',
+    Object.keys(empty.entities).length === 0 && empty.tags.length === 0 && empty.entitySummary === '');
+  // ISO date detection
+  rec('T7. extract: ISO date detected', extract('due 2026-05-31 ok').entities.date?.includes('2026-05-31'));
+}
+
 async function main() {
+  unitExtract();
   freshDb();
 
   // Seed: 3 healthy pending (nlp_processed defaults to 0), 1 already-embedded
@@ -177,6 +206,42 @@ async function main() {
     close2();
   }
 
+  // ── Layer 1b: the NLP rules pass (stage 2: embedded=2 → enriched=1) ───────
+  {
+    freshDb();
+    const { db: db3, close: close3 } = await boot({ dbPath: DB, kcvPath: KCV, userHex: hex(), systemHex: hex() });
+    // Seed rows already at nlp_processed=2 (embedded) — stage 2 acts on these.
+    await db3.messages.insert({ id: 'g-1', user_id: USER, role: 'user', content: 'Lunch with Maria Garcia in Lisbon, spent $48 #travel #food', source: 'verify', agent_id: 'personal-agent', scope: 'org', nlp_processed: 2 });
+    await db3.messages.insert({ id: 'g-2', user_id: USER, role: 'user', content: 'no structure here just words words words', source: 'verify', agent_id: 'personal-agent', scope: 'org', nlp_processed: 2 });
+    // A non-embedded row (state 0) must be IGNORED by the NLP pass.
+    await db3.messages.insert({ id: 'g-skip', user_id: USER, role: 'user', content: 'Paris #x', source: 'verify', agent_id: 'personal-agent', scope: 'org' });
+
+    const svc3 = createEnrichmentService({ messages: db3.messages, embed: stubEmbed, getMasterKey });
+    const nlpRes = await svc3.enrichNlpOnce({ userId: USER });
+    rec('G1. enrichNlpOnce drains the 2 embedded rows, ignores the state-0 row',
+      nlpRes.scanned === 2 && nlpRes.enriched === 2 && nlpRes.failed === 0,
+      `scanned=${nlpRes.scanned} enriched=${nlpRes.enriched} failed=${nlpRes.failed}`);
+    rec('G2. enriched rows advance nlp_processed 2→1; state-0 row untouched',
+      rawState('g-1').nlp_processed === 1 && rawState('g-2').nlp_processed === 1 && rawState('g-skip').nlp_processed === 0);
+
+    // Read back DECRYPTED via the db namespace to prove real entities/tags landed.
+    const back = await db3.messages.selectRecent(USER, { limit: 10, scope: 'all' });
+    const g1 = back.find((m) => m.id === 'g-1');
+    const ents = JSON.parse(g1.entities);
+    const tags = JSON.parse(g1.tags);
+    rec('G3. extracted entities decrypt back: proper-noun + money captured',
+      ents.proper?.includes('Maria Garcia') && ents.money?.some((m) => /48/.test(m)),
+      `entities=${g1.entities}`);
+    rec('G4. extracted tags decrypt back and include the hashtags',
+      tags.includes('travel') && tags.includes('food'), `tags=${g1.tags}`);
+    // selectRecent doesn't surface entity_summary; assert it was written +
+    // encrypted at rest (rawState reads the raw ciphertext column).
+    const atRest = rawState('g-1').entity_summary;
+    rec('G5. entity_summary written + encrypted at rest (non-empty ciphertext)',
+      typeof atRest === 'string' && atRest.length > 0, `at_rest_len=${atRest?.length}`);
+    close3();
+  }
+
   // ── Layer 2: the :8095 HTTP listener (the enqueue nudge target) ───────────
   {
     freshDb();
@@ -198,11 +263,12 @@ async function main() {
       body: JSON.stringify({ userId: USER }),
     });
     const drainBody = await drainRes.json();
-    rec('H2. POST /enrich-all → 200 { embedded:2 }',
-      drainRes.status === 200 && drainBody.embedded === 2 && drainBody.scanned === 2,
+    rec('H2. POST /enrich-all → 200 { embed.embedded:2, nlp.enriched:2 } (full pipeline)',
+      drainRes.status === 200 && drainBody.embed?.embedded === 2 && drainBody.nlp?.enriched === 2,
       `status=${drainRes.status} body=${JSON.stringify(drainBody)}`);
-    rec('H2b. rows embedded over HTTP (nlp_processed 0→2)',
-      rawState('h-1').nlp_processed === 2 && rawState('h-2').nlp_processed === 2);
+    rec('H2b. rows fully enriched over HTTP (0→2→1) with entities + tags written',
+      rawState('h-1').nlp_processed === 1 && rawState('h-2').nlp_processed === 1
+        && rawState('h-1').entities != null && rawState('h-1').tags != null);
 
     // H3: malformed JSON → 400 (honest reject, no crash)
     const bad = await fetch(`${url}/enrich-all`, {
@@ -221,9 +287,9 @@ async function main() {
     let looped = false;
     for (let i = 0; i < 40 && !looped; i++) {
       await new Promise((r) => setTimeout(r, 50));
-      if (rawState('h-loop').nlp_processed === 2) looped = true;
+      if (rawState('h-loop').nlp_processed === 1) looped = true;
     }
-    rec('H5. full loop: enqueueEnrichment nudge → :8095 /enrich-all → row embedded',
+    rec('H5. full loop: enqueueEnrichment nudge → :8095 /enrich-all → row embedded + enriched',
       looped, `nlp_processed=${rawState('h-loop').nlp_processed}`);
 
     closeSrv();

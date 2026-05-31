@@ -378,3 +378,43 @@ and drains mark rows failed (-1) — honest until Tier-2.
 2. Tier-2 real-embedding parity — gated on pipeline/setup.sh (onnxruntime).
 3. (Ops) process supervision — run the two/three processes under one supervisor
    on deploy; out of scope until there's a host.
+
+---
+
+## 2026-05-31 (cont.) — D7 NLP rules pass BUILT (stage 2: embedded → enriched)
+
+**Status: built, 14/14 suites GO. verify:enrich now 28 checks (T1-7, G1-5).**
+
+The SECOND enrichment stage. State machine is now fully realized, faithful to
+the canonical model (reference/server-routes/portal-enrichment.js:83):
+**0 unprocessed → 2 embedded → 1 enriched → -1 failed.**
+
+New code:
+- `src/enrich/extract.js` — `extract(text)` → `{ entities:{cat:[...]}, tags:[],
+  entitySummary }`. Pure, deterministic, no model/network. Categories: url,
+  email, mention, money, date, hashtag, proper (multi-word capitalized). tags =
+  hashtags + keyword-fill (reuses the search tokenizer's stopword drop). Output
+  matches the canonical aggregator's parse contract (describe-clusters.js:174:
+  tags=string[], entities={cat:string[]} via JSON). Regexes are bounded
+  (backtracking-safe). A model-backed pass can later replace extract() behind
+  this seam (the canonical describe-clusters uses local Claude CLI).
+- `src/enrich/service.js` — `enrichNlpOnce({userId})`: drains nlp_processed=2,
+  extracts, writes via updateNlp, advances 2→1. No master key needed (the
+  adapter encrypts the written ENCRYPTED_FIELDS). Poison rows isolated → -1.
+- `src/db/messages.js` — `selectPendingNlp` (state=2) + `updateNlp` (writes
+  entities/tags/entity_summary, auto-encrypted by the adapter; advances state).
+- `src/enrich/server.js` — POST /enrich-all now runs the FULL pipeline (embed
+  0→2 then nlp 2→1) and returns `{ embed:{...}, nlp:{...} }`. One nudge fully
+  enriches. embed still fails closed (503) on a locked vault.
+- `scripts/verify-enrich.mjs` — T1-7 (pure extractor: proper nouns, url/email/
+  money, tags, determinism, blank input, ISO dates), G1-5 (nlp drain: 2→1,
+  ignores state-0, entities/tags decrypt-read back, summary encrypted at rest),
+  updated H2/H2b/H5 for the two-stage /enrich-all.
+
+**Important behavior note:** the NLP rules pass acts on state=2 (embedded) rows,
+so in a deployment where the :8091 embed-service isn't running, rows stall at
+state 0 and never reach the NLP pass — this is the canonical ordering, not a
+bug. The embed-service is part of V1; both run together.
+
+**D7 remaining:** Tier-2 real-embedding parity only (onnxruntime-gated). The
+embed-on-write + NLP-rules pipeline is otherwise complete + launchable end to end.

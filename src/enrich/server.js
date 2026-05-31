@@ -106,8 +106,11 @@ export async function startEnrichmentServer({
         catch (e) { return sendJson(res, 400, { error: e.message }); }
         const uid = (body && typeof body.userId === 'string' && body.userId) || defaultUserId;
         try {
-          const result = await svc.drainOnce({ userId: uid });
-          return sendJson(res, 200, result);
+          // Full pipeline: embed (0→2) then the NLP rules pass (2→1). One nudge
+          // fully enriches a backlog. embed fails closed on a locked vault (503).
+          const embed = await svc.drainOnce({ userId: uid });
+          const nlp = await svc.enrichNlpOnce({ userId: uid });
+          return sendJson(res, 200, { embed, nlp });
         } catch (e) {
           // Locked vault / write refusal → fail closed. Never echo internals
           // or anything derived from message content (CLAUDE.md §1).

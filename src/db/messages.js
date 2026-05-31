@@ -158,6 +158,60 @@ export function createMessagesNamespace(deps) {
       return result.results || [];
     },
 
+    /**
+     * Drain query for the NLP rules pass (enrichment stage 2). Selects rows
+     * that are embedded but not yet enriched — nlp_processed = 2 — per the
+     * canonical state machine (0 unprocessed → 2 embedded → 1 enriched).
+     * content auto-decrypts on read so the extractor sees plaintext.
+     *
+     * @param {string} userId
+     * @param {{limit?: number}} opts
+     */
+    async selectPendingNlp(userId, { limit = 50 } = {}) {
+      const result = await d1Query(
+        `SELECT id, content, scope FROM messages
+           WHERE user_id = ?
+             AND nlp_processed = 2
+             AND content IS NOT NULL AND content != ''
+           ORDER BY created_at ASC
+           LIMIT ?`,
+        [userId, limit],
+      );
+      return result.results || [];
+    },
+
+    /**
+     * Write NLP extraction results + advance the state machine to enriched (1).
+     * entities/tags/entity_summary are ENCRYPTED_FIELDS — the caller passes
+     * plaintext (JSON strings for entities/tags, a line for entity_summary) and
+     * the adapter encrypts on write. userId REQUIRED in WHERE (unfiltered-UPDATE
+     * guard). On failure the caller passes nlpProcessed=-1 + nlpError.
+     *
+     * @param {string} id
+     * @param {string} userId
+     * @param {{entities?: string, tags?: string, entitySummary?: string, nlpProcessed: number, nlpError?: string|null}} fields
+     */
+    async updateNlp(id, userId, { entities, tags, entitySummary, nlpProcessed, nlpError = null } = {}) {
+      if (typeof nlpProcessed !== 'number') {
+        throw new TypeError('updateNlp: nlpProcessed (number) required');
+      }
+      const sets = [];
+      const params = [];
+      if (entities !== undefined) { sets.push('entities = ?'); params.push(entities); }
+      if (tags !== undefined) { sets.push('tags = ?'); params.push(tags); }
+      if (entitySummary !== undefined) { sets.push('entity_summary = ?'); params.push(entitySummary); }
+      sets.push('nlp_processed = ?');
+      params.push(nlpProcessed);
+      sets.push('nlp_error = ?');
+      params.push(nlpError);
+      sets.push("nlp_processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')");
+      params.push(id, userId);
+      await d1Query(
+        `UPDATE messages SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`,
+        params,
+      );
+    },
+
     /** INSERT OR IGNORE — skips duplicate IDs. Splits into D1's ~100 param limit. */
     async insertIgnore(rows) {
       const arr = Array.isArray(rows) ? rows : [rows];

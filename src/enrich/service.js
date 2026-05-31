@@ -27,15 +27,18 @@
 
 import { encryptVector } from '../search/ann/decode.js';
 import { EMBED_DIM } from '../embed/client.js';
+import { extract } from './extract.js';
 
 export function createEnrichmentService(deps) {
   if (!deps) throw new TypeError('createEnrichmentService: deps required');
   const { messages, embed, getMasterKey } = deps;
   if (!messages
       || typeof messages.selectPendingEnrichment !== 'function'
-      || typeof messages.updateEnrichment !== 'function') {
+      || typeof messages.updateEnrichment !== 'function'
+      || typeof messages.selectPendingNlp !== 'function'
+      || typeof messages.updateNlp !== 'function') {
     throw new TypeError(
-      'createEnrichmentService: messages namespace with selectPendingEnrichment + updateEnrichment required',
+      'createEnrichmentService: messages namespace with selectPendingEnrichment + updateEnrichment + selectPendingNlp + updateNlp required',
     );
   }
   if (!embed || typeof embed.embed !== 'function') {
@@ -95,7 +98,46 @@ export function createEnrichmentService(deps) {
     return { scanned: rows.length, embedded, failed };
   }
 
-  return { drainOnce };
+  /**
+   * Stage 2: the deterministic NLP rules pass. Drains embedded-but-not-enriched
+   * rows (nlp_processed=2), extracts entities/tags/summary from plaintext, and
+   * advances them to enriched (1). No master key needed here — the db adapter
+   * already holds the unlock()-derived key and encrypts the written fields. A
+   * poison row is isolated (→ -1 + nlp_error) and never stalls the batch.
+   *
+   * @param {{userId: string, batchSize?: number}} opts
+   * @returns {Promise<{scanned: number, enriched: number, failed: number}>}
+   */
+  async function enrichNlpOnce({ userId, batchSize = 50 } = {}) {
+    if (!userId) throw new TypeError('enrichNlpOnce: userId required');
+    const rows = await messages.selectPendingNlp(userId, { limit: batchSize });
+    let enriched = 0;
+    let failed = 0;
+
+    for (const row of rows) {
+      try {
+        const { entities, tags, entitySummary } = extract(row.content);
+        await messages.updateNlp(row.id, userId, {
+          entities: JSON.stringify(entities),
+          tags: JSON.stringify(tags),
+          entitySummary,
+          nlpProcessed: 1,
+        });
+        enriched++;
+      } catch (err) {
+        // Never log row.content (CLAUDE.md §1 — zero plaintext leakage).
+        await messages.updateNlp(row.id, userId, {
+          nlpProcessed: -1,
+          nlpError: String(err?.message || err).slice(0, 500),
+        });
+        failed++;
+      }
+    }
+
+    return { scanned: rows.length, enriched, failed };
+  }
+
+  return { drainOnce, enrichNlpOnce };
 }
 
 export default createEnrichmentService;
