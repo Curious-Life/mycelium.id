@@ -5,13 +5,14 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
-- **V1 build — Wave 1 + Wave 2 DONE.** All 7 subsystems integrated; MCP server serves **29
-  tools** over stdio + HTTP/OAuth through the encrypting db (mind-files, mind-search, metrics,
-  topology, REST, OAuth, embed-service). Only `reply`/`services` deferred (Phase-6). D1–D7
-  locked. Pick up: [`docs/V1-BUILD-HANDOFF-2026-05-30.md`](docs/V1-BUILD-HANDOFF-2026-05-30.md)
-  (read the **2026-05-31** section). Branch `claude/repo-overview-mC69M` @ `9dda2a4`.
-  Proof: `npm install --legacy-peer-deps && npm run verify` → **9× GO, EXIT 0**. Open: 2 Tier-2
-  SKIPs need a networked host (embed ONNX model, topology clustering wheels); D7 enrichment + deploy next.
+- **V1 build — Wave 1 + Wave 2 DONE; UX pass + ingestion design in progress.** MCP server serves
+  **29 tools** over stdio + HTTP/OAuth through the encrypting db. Added getContext (D5 entry point),
+  listTasks; folded metrics 8→6; de-jargoned descriptions. **NEXT: ingestion + uploads** — design
+  locked at [`docs/INGESTION-UPLOADS-DESIGN-2026-05-31.md`](docs/INGESTION-UPLOADS-DESIGN-2026-05-31.md)
+  (sweep-first; 11-row verification table; awaiting operator decision-gate before code). D1–D7 locked.
+  Pick up: [`docs/V1-BUILD-HANDOFF-2026-05-30.md`](docs/V1-BUILD-HANDOFF-2026-05-30.md).
+  Branch `claude/repo-overview-mC69M`. Proof: `npm install --legacy-peer-deps && npm run verify` → **10× GO, EXIT 0**.
+  Open: 2 Tier-2 SKIPs need a networked host (embed ONNX, topology wheels); D7 enrichment service still build-new.
 
 ## Key docs
 
