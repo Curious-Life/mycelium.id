@@ -54,6 +54,18 @@ try {
 }
 rec('C4. tools/call returns a wrapped text content envelope', callOk, detail);
 
+// C4b: createTask -> listTasks round-trip (tasks are no longer write-only)
+let listOk = false, listDetail = '';
+try {
+  const marker = `LIST-TASK-${Date.now()}`;
+  await client.callTool({ name: 'createTask', arguments: { content: marker } });
+  const listed = await client.callTool({ name: 'listTasks', arguments: {} });
+  const ltext = listed.content?.[0]?.text || '';
+  listOk = ltext.includes(marker);
+  listDetail = `listTasks ${listOk ? 'surfaced' : 'MISSED'} the created task; head="${ltext.slice(0, 50)}"`;
+} catch (e) { listDetail = `THREW: ${e.message}`; }
+rec('C4b. createTask -> listTasks round-trip', listOk, listDetail);
+
 // C5: unknown tool is handled (isError), not a crash
 let unknownOk = false;
 try {

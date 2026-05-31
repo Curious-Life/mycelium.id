@@ -11,7 +11,7 @@
  * db.folders.list / db.canvases.list directly).
  *
  * @typedef {object} TasksDeps
- * @property {object} db — needs tasks.create
+ * @property {object} db — needs tasks.create + tasks.list
  * @property {string} userId
  */
 
@@ -34,6 +34,17 @@ export function createTasksDomain(deps) {
           projectPath: { type: 'string', description: 'Related project document path' },
         },
         required: ['content'],
+      },
+    },
+    {
+      name: 'listTasks',
+      description: 'List captured tasks, newest first. By default shows pending tasks; pass status to filter (e.g. "completed") or "all" to include every status.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          status: { type: 'string', description: 'Filter by status: "pending" (default), "completed", or "all".' },
+          limit:  { type: 'number', description: 'Max tasks to return (default 50, max 200).' },
+        },
       },
     },
   ];
@@ -62,6 +73,22 @@ export function createTasksDomain(deps) {
         status: 'pending',
       });
       return `Task created: "${title}"${args.deadline ? ` (deadline: ${args.deadline})` : ''} priority=${priorityText}`;
+    },
+
+    listTasks: async (args = {}) => {
+      const status = (!args.status || args.status === 'all') ? undefined : args.status;
+      const rows = await db.tasks.list(userId, { status, limit: args.limit });
+      if (!rows.length) {
+        return status ? `No ${status} tasks.` : 'No tasks yet.';
+      }
+      const label = status ? `${status} tasks` : 'tasks';
+      const lines = rows.map((t) => {
+        const pri = t.priority && t.priority !== 'normal' ? ` [${t.priority}]` : '';
+        const due = t.due_date ? ` (due ${t.due_date})` : '';
+        const mark = t.status === 'completed' ? '✓' : '○';
+        return `${mark} ${t.title}${pri}${due}`;
+      });
+      return `## ${rows.length} ${label}\n\n${lines.join('\n')}`;
     },
   };
 
