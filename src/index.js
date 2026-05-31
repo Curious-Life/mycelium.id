@@ -4,8 +4,9 @@
 // -> open the encrypting db + assemble namespaces -> build tool domains ->
 // register on the low-level Server -> connect stdio.
 //
-// HTTP/StreamableHTTP transport + OAuth land in Phase 4 (the OAuth provider is
-// verified GO via spike/oauth/). This entry is stdio-only for now.
+// Default transport is stdio. Pass `--http` (or set MYCELIUM_HTTP=1) to start
+// the remote Streamable-HTTP + OAuth 2.1 server (src/server-http.js) instead.
+// Both paths call the SAME boot() below, so the tool surface is identical.
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
@@ -45,7 +46,7 @@ export async function boot({
   return { server, db, close, tools, handlers, deferred };
 }
 
-async function main() {
+async function startStdio() {
   const { server, tools, deferred } = await boot();
   // stderr only — never write non-protocol bytes to stdout on stdio transport.
   console.error(`[mycelium] ${tools.length} tools registered; ${deferred.length} deferred (${deferred.join(', ')})`);
@@ -54,7 +55,15 @@ async function main() {
   console.error('[mycelium] stdio MCP server connected.');
 }
 
-// Run only when invoked directly (not when imported by the verifier).
+async function startHttp() {
+  // Lazy import so the stdio path never loads express/better-auth.
+  const { startHttpServer } = await import('./server-http.js');
+  await startHttpServer();
+}
+
+// Run only when invoked directly (not when imported by a verifier).
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((err) => { console.error('[mycelium] fatal:', err.message); process.exit(1); });
+  const httpMode = process.argv.includes('--http') || process.env.MYCELIUM_HTTP === '1';
+  const run = httpMode ? startHttp : startStdio;
+  run().catch((err) => { console.error('[mycelium] fatal:', err.message); process.exit(1); });
 }

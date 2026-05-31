@@ -17,13 +17,16 @@
     "verify:rest": "node scripts/verify-rest.mjs",
     "verify:search": "node scripts/verify-search.mjs",
     "verify:topology": "node scripts/verify-topology.mjs",
-    "verify": "npm run verify:foundation && npm run verify:mcp && npm run verify:mindfiles && npm run verify:metrics && npm run verify:rest && npm run verify:search && npm run verify:topology",
+    "verify:oauth": "node scripts/verify-oauth.mjs",
+    "verify": "npm run verify:foundation && npm run verify:mcp && npm run verify:mindfiles && npm run verify:metrics && npm run verify:rest && npm run verify:search && npm run verify:topology && npm run verify:oauth",
     "start": "node src/index.js",
-    "rest": "node src/server-rest.js"
+    "rest": "node src/server-rest.js",
+    "start:http": "node src/index.js --http"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-auth": "^1.6.12",
     "better-sqlite3": "^11.0.0",
-    "express": "^4.21.2"
+    "express": "^5.2.1"
   }
 }
