@@ -5,7 +5,9 @@
   "type": "module",
   "description": "Mycelium V1 — self-hosted single-user MCP cognitive vault.",
   "license": "AGPL-3.0",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "init-db": "node scripts/init-db.mjs",
     "verify:foundation": "node scripts/verify-foundation.mjs",
@@ -15,6 +17,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "better-sqlite3": "^11.0.0"
+    "better-auth": "^1.6.12",
+    "better-sqlite3": "^11.0.0",
+    "express": "^5.2.1"
   }
 }
