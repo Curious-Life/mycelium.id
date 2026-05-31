@@ -29,7 +29,7 @@ export function createFisherToolsDomain(deps) {
     {
       name: 'getCurrentPhase',
       description:
-        'Where you are in cognitive movement right now. Returns the current phase (stable / cycling / exploring / transforming) along with exploration ratio (R = D/L), trajectory length L, displacement D, and velocity z-score.\n\nUse this at the start of a conversation to orient — the phase is decision-steering: when "cycling", prefer integration moves; when "transforming", support the trajectory; when "stable", hold ground; when "exploring", follow divergence.\n\nPass level="all" to get realm, theme, and territory in one call — useful when phases differ across scales (e.g., realm cycling but theme exploring suggests local growth inside a stable larger arc).',
+        'Your cognitive MOVEMENT right now (vs getHarmonicState, which is cognitive RHYTHM). Returns the current phase — stable / cycling / exploring / transforming — plus how much of the motion is outward exploration vs revisiting, how far the thinking has travelled, and whether it is speeding up or slowing down.\n\nUse at the start of a conversation to orient — the phase is decision-steering: "cycling" → prefer integration moves; "transforming" → support the trajectory; "stable" → hold ground; "exploring" → follow divergence.\n\nPass level="all" to get realm, theme, and territory in one call — useful when phases differ across scales (e.g., realm cycling but theme exploring suggests local growth inside a stable larger arc).',
       inputSchema: {
         type: 'object',
         properties: {

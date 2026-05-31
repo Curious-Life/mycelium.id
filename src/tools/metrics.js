@@ -63,7 +63,7 @@ export function createMetricsDomain(deps) {
     {
       name: 'getHarmonicState',
       description:
-        'Where you are in cognitive rhythm right now. Returns the latest window\'s information-harmonics metrics: amplitudes per temporal band (raw / 10-msg / daily / weekly / monthly), within-window flow features (continuity, reversal rate), and topology shape. Use to orient at the start of a movement or rhythm question.\n\nGranularity = which window grain (alpha=daily / theta=weekly / delta=monthly). Default: alpha.\n\nValid only as RELATIVE within-user energy — bands are temporal aggregation scales, NOT EEG frequencies in Hz. Cross-user comparisons are invalid.',
+        'Your cognitive RHYTHM right now (vs getCurrentPhase, which is cognitive MOVEMENT). The latest window\'s bundle: activity energy at each timescale (raw / 10-msg / daily / weekly / monthly), how the thinking is flowing (continuity, reversals — same as getFlowFeatures), and how spread-out it is (same as getShape). One call to orient; reach for getFlowFeatures or getShape only if you want just that slice.\n\nGranularity = window grain (alpha=daily / theta=weekly / delta=monthly). Default: alpha.\n\nThese are RELATIVE within-user values — the bands are aggregation timescales, not EEG frequencies; do not compare across users.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -78,7 +78,7 @@ export function createMetricsDomain(deps) {
     {
       name: 'getFlowFeatures',
       description:
-        'Within-window flow shape — continuity (autocorrelation_lag1: how similar consecutive messages are) + reversal rate (slope_sign_change_rate: how often the trajectory direction flips) + variance + spectral energy, across all 5 temporal bands. Use when the question is about HOW thinking is moving, not WHAT clusters are active.\n\nValidated for clinical-population diagnosis (Palominos 2024 schizophrenia); the Mycelium application to healthy journaling is methodological extrapolation, not clinical validity.',
+        'How your thinking is flowing within a window: how much consecutive messages stay on theme (continuity), how often the direction reverses (reversals), plus variance and spectral energy, across 5 timescales. Use when the question is HOW thinking is moving, not WHAT topics are active.\n\nNote: the underlying measures were validated for clinical diagnosis; their use here for healthy journaling is exploratory, not a clinical signal.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -93,7 +93,7 @@ export function createMetricsDomain(deps) {
     {
       name: 'getShape',
       description:
-        'Topology persistence entropy — H0 (connected-components entropy) of the Vietoris-Rips complex on a 256D matryoshka projection of the window\'s message embeddings. High entropy = activity is spread across diverse semantic regions; low entropy = concentrated in a single region. Returns null when N<20 messages in the window (insufficient data for stable persistence).',
+        'How spread-out your thinking is within a window. High = activity is scattered across many distinct topics; low = concentrated in one region. (Computed as topology persistence entropy over the window\'s message embeddings.) Returns null when the window has fewer than 20 messages — too little to measure reliably.',
       inputSchema: {
         type: 'object',
         properties: {
