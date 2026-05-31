@@ -28,6 +28,7 @@ import { createSearchHelpers } from './search/index.js';
 import { createTopologyToolsDomain } from './tools/topology-tools.js';
 import { createTopologyHelpers } from './topology/helpers.js';
 import { createContextDomain } from './tools/context.js';
+import { createIngestDomain } from './tools/ingest.js';
 
 // Single-user defaults for the agent identity / scope deps the factories want.
 const AGENT_LABELS = { 'personal-agent': 'Assistant' };
@@ -81,6 +82,8 @@ export function buildDomains({
       readMindFile: (filename) => mindFiles.readMindFile(filename),
       userId,
     }),
+    // captureMessage: the single choke-point — "any message that comes in is saved".
+    createIngestDomain({ db, userId }),
     createHealthDomain({ getDb: () => db, userId }),
     createTasksDomain({ db, userId }),
     createFisherToolsDomain({ db, userId }),
