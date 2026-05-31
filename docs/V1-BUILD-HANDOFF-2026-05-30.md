@@ -183,3 +183,49 @@ All 7 Wave-2 subsystems are merged onto `claude/repo-overview-mC69M` (**HEAD `9d
 1. **Close the two Tier-2 gaps now or defer?** They need a host with network + heavy native wheels. Recommendation: defer to a deploy host; the injected-stub paths keep V1 functional meanwhile.
 2. **D7 enrichment service (:8095)** — the next build-new unit (plan Step 11b). Build now or after a deploy smoke-test of the 29-tool surface? Recommendation: deploy-smoke first (validate real MCP clients connect over OAuth), then enrichment.
 3. **Squash-merge `claude/repo-overview-mC69M` to a release branch?** The branch has many merge commits from the fan-out. Recommendation: keep history; it's an accurate record.
+
+---
+
+# 2026-05-31 (late) session summary — UX pass + ingestion/uploads built. START HERE.
+
+## TL;DR
+Tool surface **31 live** (added getContext, captureMessage, importMessages, listTasks; folded metrics 8→6). **Ingestion + uploads fully built** (design `docs/INGESTION-UPLOADS-DESIGN-2026-05-31.md`, Steps 1–5 + 4b) minus Tier-2-gated extraction models. `npm run verify` → **13 suites, all VERDICT GO, EXIT 0**. Branch `claude/repo-overview-mC69M` @ `8d7a8e7`, == origin, clean.
+
+## ⚠️ Autonomous overnight loop is NOT possible in this environment
+The operator asked to "set a loop so you wake and work while I sleep." **This environment has no `ScheduleWakeup` / `CronCreate` / `Monitor` tool** (verified via ToolSearch — all absent). The agent only runs during an active turn and cannot self-schedule across turns. Maximum autonomous progress = building continuously **within one turn** until an env wall or context limit. A true overnight loop needs an external scheduler (Claude Code web scheduler or a GitHub Action) — NOT self-armable from here. Do not claim a loop is running.
+
+## What shipped this session (all verify-gated to EXIT 0)
+| Commit | What |
+|---|---|
+| `51e9b93` | getContext (D5 preamble entry point) — flagForDiscussion→getContext round-trip |
+| `1635881` | UX review doc + de-jargon polish + rhythm-vs-movement distinction |
+| `7a04795` | listTasks (closed write-only-tasks gap) |
+| `fac9a73` | folded getFlowFeatures+getShape → getHarmonicState(detail) |
+| `fc1d5a4` | docs/VISION.md (pitch + 7 V1-reality deltas) |
+| `1e530f2` | docs/CONNECTORS.md (Phase 5b, reconciled to built surface) |
+| `a5c21de` | **ingest 1:** migration runner (`applyMigrations`) + 0002 local_path + wire attachments |
+| `2c982a6` | **ingest 2:** captureMessage choke-point + MCP tool |
+| `5754c81` | **ingest 3:** encrypted local blob store |
+| `b094c3b` | importMessages bulk-import tool |
+| `ddb33b9` | **ingest 4a:** /ingest/message + /ingest/import HTTP routes (Bearer) |
+| `4cf8a4f` | **ingest 5:** enrichment hand-off seam (fire-and-forget :8095 nudge) |
+| `8d7a8e7` | **ingest 4b:** /ingest/upload encrypted file uploads (dependency-free, raw body) |
+
+## Key build facts (load-bearing)
+- **Single ingestion choke-point:** `src/ingest/capture.js` `captureMessage(db, msg, enqueueEnrichment?)`. Idempotent on `id` (insertIgnore). content/metadata auto-encrypt at the db layer. Used by the MCP tool, REST, and the HTTP routes — one audited path.
+- **Encrypted blob store:** `src/ingest/blob-store.js` putBlob/getBlob — bytes → base64 → mind-files AES envelope (MYCB magic) → `data/uploads/<user>/<uuid>.enc`. Path stored in `attachments.local_path` (migration 0002).
+- **Migration runner:** `src/db/migrate.js` `applyMigrations(db)` — runs `migrations/*.sql` in order, idempotent (ADD COLUMN guarded by PRAGMA). ALL verify scripts + init-db route through it (killed the hardcoded-0001 drift).
+- **HTTP ingestion routes** live on `src/server-http.js` (OAuth/Bearer surface): `/ingest/message`, `/ingest/import`, `/ingest/upload`. Localhost REST (`src/api.js`) also exposes captureMessage via the generic `:toolName`.
+- **Enrichment hand-off:** `src/ingest/enqueue.js` — best-effort POST :8095 /enrich-all, non-fatal when absent (row already queued at nlp_processed=0).
+
+## Remaining queue (in dependency order)
+1. **D7 enrichment service (:8095)** — BUILD-NEW worker that drains `nlp_processed=0`, calls :8091 embed-service, flips state (0→1→2 / -1). Contract in `reference/server-routes/portal-enrichment.js`. **Tier-2 for real embedding** (needs :8091 model), but the worker skeleton + state machine + a stub-embedder verify are buildable now. Also needs a `messages.updateEnrichment` db method + a Float32→envelope encoder (neither exists yet).
+2. **Extraction models** (Whisper/vision/PDF for uploads) — Tier-2-gated (no models here).
+3. **Connector bridges** (Telegram first) — buildable framework, but platform-token-gated for live test (`docs/CONNECTORS.md`).
+4. **Deploy** (Cloudflare Tunnel + real OAuth client) — env-gated.
+5. **Embed/topology Tier-2** — need a networked host (HF model + native wheels).
+
+## Pickup protocol
+1. `npm install --legacy-peer-deps && npm run verify` → expect **13× GO, EXIT 0**. HEAD == `8d7a8e7` (or later).
+2. Next buildable: the D7 enrichment service skeleton (item 1). Run `/sweep-first-design` first — it needs a new db method + encoder + a stub-verified state machine.
+3. Standing discipline: never claim green without watching the ledger reach `VERDICT … EXIT=0`; never fabricate Tier-2 (real models/deploy/tokens); commit+push each verify-gated step.

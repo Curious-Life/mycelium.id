@@ -5,14 +5,16 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
-- **V1 build — Wave 1 + Wave 2 DONE; UX pass + ingestion design in progress.** MCP server serves
-  **29 tools** over stdio + HTTP/OAuth through the encrypting db. Added getContext (D5 entry point),
-  listTasks; folded metrics 8→6; de-jargoned descriptions. **NEXT: ingestion + uploads** — design
-  locked at [`docs/INGESTION-UPLOADS-DESIGN-2026-05-31.md`](docs/INGESTION-UPLOADS-DESIGN-2026-05-31.md)
-  (sweep-first; 11-row verification table; awaiting operator decision-gate before code). D1–D7 locked.
-  Pick up: [`docs/V1-BUILD-HANDOFF-2026-05-30.md`](docs/V1-BUILD-HANDOFF-2026-05-30.md).
-  Branch `claude/repo-overview-mC69M`. Proof: `npm install --legacy-peer-deps && npm run verify` → **10× GO, EXIT 0**.
-  Open: 2 Tier-2 SKIPs need a networked host (embed ONNX, topology wheels); D7 enrichment service still build-new.
+- **V1 build — Wave 1+2 DONE; UX pass + ingestion/uploads BUILT.** MCP server serves **31 tools**
+  over stdio + HTTP/OAuth. Added getContext, captureMessage, importMessages, listTasks; folded
+  metrics 8→6. **Ingestion + uploads fully built** (capture choke-point, encrypted blob store,
+  /ingest/{message,import,upload} Bearer routes, migration runner, enrichment hand-off seam) —
+  see [`docs/INGESTION-UPLOADS-DESIGN-2026-05-31.md`](docs/INGESTION-UPLOADS-DESIGN-2026-05-31.md).
+  Pick up: [`docs/V1-BUILD-HANDOFF-2026-05-30.md`](docs/V1-BUILD-HANDOFF-2026-05-30.md) (read the
+  **2026-05-31 (late)** section). Branch `claude/repo-overview-mC69M` @ `8d7a8e7`.
+  Proof: `npm install --legacy-peer-deps && npm run verify` → **13× GO, EXIT 0**.
+  NEXT: D7 enrichment service (:8095) skeleton. ⚠️ No autonomous wake-loop in this env (no
+  ScheduleWakeup/Cron/Monitor); Tier-2 (real models/deploy/tokens) needs a networked host.
 
 ## Key docs
 
