@@ -11,6 +11,7 @@
     "verify:foundation": "node scripts/verify-foundation.mjs",
     "verify:mcp": "node scripts/verify-mcp.mjs",
     "verify": "npm run verify:foundation && npm run verify:mcp",
+    "verify:topology": "node scripts/verify-topology.mjs",
     "start": "node src/index.js"
   },
   "dependencies": {

@@ -1,0 +1,39 @@
+# Mycelium V1 topology pipeline — Python dependencies.
+#
+# Install into a local venv (the slim orchestrator prefers pipeline/.venv):
+#   python3 -m venv pipeline/.venv
+#   pipeline/.venv/bin/pip install -r pipeline/requirements.txt
+#
+# NOTE (Tier-2 caveat): these are heavy native wheels (faiss, igraph/leidenalg,
+# numpy/scipy, umap, onnxruntime). On constrained/sandboxed hosts the install
+# may fail (no build toolchain, or no prebuilt wheel for the platform). The
+# clustering + harmonics stages are gated behind a successful install; the
+# Tier-1 deliverables (topologyHelpers + topology-tools MCP domain) do NOT
+# depend on any of these.
+
+# ── Core numerics ──
+numpy>=1.26,<3
+scipy>=1.11
+
+# ── Clustering: FAISS k-NN + Leiden community detection + Ward HAC ──
+faiss-cpu>=1.7.4
+python-igraph>=0.11      # imported as `igraph`
+leidenalg>=0.10
+scikit-learn>=1.3        # MiniBatchKMeans (spherical k-means atoms)
+umap-learn>=0.5          # imported as `umap` (3D visualization coords only)
+
+# ── Embedding (ONNX path, when deriving 256D from raw text) ──
+onnxruntime>=1.16
+tokenizers>=0.15
+huggingface-hub>=0.20
+
+# ── Harmonics (compute_information_harmonics.py) ──
+# Persistence-entropy (H0) uses ripser/persim when available; the script
+# degrades gracefully (returns NULL below the N_MIN_VR floor) if absent.
+ripser>=0.6
+persim>=0.3
+
+# ── Misc ──
+httpx>=0.27              # legacy d1 client (Worker proxy) — unused in V1 single-user path
+python-dotenv>=1.0       # env loading parity with the canonical scripts
+psutil>=5.9              # optional memory reporting in cluster.py
