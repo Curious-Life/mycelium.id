@@ -12,9 +12,10 @@
     "init-db": "node scripts/init-db.mjs",
     "verify:foundation": "node scripts/verify-foundation.mjs",
     "verify:mcp": "node scripts/verify-mcp.mjs",
-    "verify": "npm run verify:foundation && npm run verify:mcp",
-    "start": "node src/index.js",
-    "verify:mindfiles": "node scripts/verify-mindfiles.mjs"
+    "verify:mindfiles": "node scripts/verify-mindfiles.mjs",
+    "verify:metrics": "node scripts/verify-metrics.mjs",
+    "verify": "npm run verify:foundation && npm run verify:mcp && npm run verify:mindfiles && npm run verify:metrics",
+    "start": "node src/index.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
