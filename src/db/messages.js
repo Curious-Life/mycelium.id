@@ -97,6 +97,67 @@ export function createMessagesNamespace(deps) {
       );
     },
 
+    /**
+     * Mark a message enriched: write its embedding envelope + advance the
+     * nlp_processed state machine. The D7 enrichment service is the only
+     * caller. States: 0 pending → 2 embedded, or -1 on a per-row failure
+     * (nlp_error records why). nlp_processed_at stamps the transition.
+     *
+     * embedding_768 is deliberately NOT in ENCRYPTED_FIELDS — the caller
+     * passes a ready wrapped-DEK vector envelope (encryptVector), so it
+     * stores raw, exactly the value the mind-search ANN read path expects.
+     * userId is REQUIRED in the WHERE clause (same unfiltered-UPDATE guard
+     * as updateMetadata).
+     *
+     * @param {string} id
+     * @param {string} userId
+     * @param {{embedding768?: string, nlpProcessed: number, nlpError?: string|null}} fields
+     */
+    async updateEnrichment(id, userId, { embedding768, nlpProcessed, nlpError = null } = {}) {
+      if (typeof nlpProcessed !== 'number') {
+        throw new TypeError('updateEnrichment: nlpProcessed (number) required');
+      }
+      const sets = [];
+      const params = [];
+      if (embedding768 !== undefined) {
+        sets.push('embedding_768 = ?');
+        params.push(embedding768);
+      }
+      sets.push('nlp_processed = ?');
+      params.push(nlpProcessed);
+      sets.push('nlp_error = ?');
+      params.push(nlpError);
+      sets.push("nlp_processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')");
+      params.push(id, userId);
+      await d1Query(
+        `UPDATE messages SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`,
+        params,
+      );
+    },
+
+    /**
+     * Drain query for the enrichment service: messages awaiting embedding.
+     * nlp_processed = 0 (or NULL legacy) AND non-empty content. content
+     * auto-decrypts to plaintext on read, so the worker embeds plaintext.
+     * Oldest-first so a backlog drains in arrival order. The state predicate
+     * runs on the (unencrypted) nlp_processed column at SQL level.
+     *
+     * @param {string} userId
+     * @param {{limit?: number}} opts
+     */
+    async selectPendingEnrichment(userId, { limit = 50 } = {}) {
+      const result = await d1Query(
+        `SELECT id, content, scope FROM messages
+           WHERE user_id = ?
+             AND (nlp_processed = 0 OR nlp_processed IS NULL)
+             AND content IS NOT NULL AND content != ''
+           ORDER BY created_at ASC
+           LIMIT ?`,
+        [userId, limit],
+      );
+      return result.results || [];
+    },
+
     /** INSERT OR IGNORE — skips duplicate IDs. Splits into D1's ~100 param limit. */
     async insertIgnore(rows) {
       const arr = Array.isArray(rows) ? rows : [rows];

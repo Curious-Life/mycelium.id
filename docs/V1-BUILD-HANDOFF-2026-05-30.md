@@ -281,3 +281,40 @@ What IS still true from that tick (verified):
   NEVER_AUTO_DECRYPT_COLUMNS (crypto-local.js:1426) so it's stored/read as a raw
   vector envelope, not auto-decrypted — correct.
 - Base still green: verify:mcp EXIT 0.
+
+---
+
+## 2026-05-31 — D7 enrichment service (embed-on-write half) BUILT + verified
+
+**Status: built, 14/14 verify suites GO (was 13). New: `npm run verify:enrich`.**
+
+The consumer side of the work queue the ingestion choke-point fills. Every
+captured message lands `nlp_processed=0`; this drains the backlog → embeds
+plaintext → writes a decryptable `embedding_768` vector envelope → flips state.
+
+New code:
+- `src/enrich/service.js` — `createEnrichmentService({ messages, embed,
+  getMasterKey })` → `drainOnce({ userId, batchSize })`. Pure/injectable, no
+  HTTP. States 0→2 (embedded) / 0→-1 (failed, isolated). Fail-closed on a
+  locked vault. **Calls `encryptVector` WITHOUT userId** — encrypt() derives a
+  per-user key when given userId, but the canonical `decryptVector` read path
+  passes none; writing with a userId would produce envelopes that never decrypt
+  (verified: N3 round-trips to maxAbsErr 3e-8 only without userId).
+- `src/db/messages.js` — `updateEnrichment(id, userId, {embedding768,
+  nlpProcessed, nlpError})` + `selectPendingEnrichment(userId,{limit})`.
+  `embedding_768` is NOT in ENCRYPTED_FIELDS → the ready envelope stores raw
+  (NEVER_AUTO_DECRYPT on read), matching the mind-search ANN path.
+- `scripts/verify-enrich.mjs` — Tier-1, deterministic 768-d stub embedder:
+  N1 drain+flip, N2 ciphertext-at-rest, N3 decrypt round-trip parity, N4 skips
+  already-embedded, N5 poison-row isolation + idempotent re-drain, N6 fail-closed.
+
+**Still UNBUILT for D7 (next):**
+1. HTTP `/enrich-all` listener (the enqueue nudge target `MYCELIUM_ENRICH_URL`
+   POSTs `{userId, messageId}`) — a thin Tier-2 wrapper over `drainOnce`, wired
+   into `server-http.js` on the :8095 enrichment port (spec D7). Today nothing
+   consumes the nudge; drainOnce is callable but unhosted.
+2. NLP entity/tag extraction — the OTHER half of D7. This skeleton does
+   embed-on-write only; `nlp_processed=2` = "embedded". Entity/tag pass advances
+   its own marker when built.
+3. Tier-2 real-embedding parity: gated on `pipeline/setup.sh` (onnxruntime not
+   installed in sandbox) — same gate as verify:embed / verify:topology tier2.
