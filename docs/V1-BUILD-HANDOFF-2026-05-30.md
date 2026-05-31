@@ -229,3 +229,34 @@ The operator asked to "set a loop so you wake and work while I sleep." **This en
 1. `npm install --legacy-peer-deps && npm run verify` → expect **13× GO, EXIT 0**. HEAD == `8d7a8e7` (or later).
 2. Next buildable: the D7 enrichment service skeleton (item 1). Run `/sweep-first-design` first — it needs a new db method + encoder + a stub-verified state machine.
 3. Standing discipline: never claim green without watching the ledger reach `VERDICT … EXIT=0`; never fabricate Tier-2 (real models/deploy/tokens); commit+push each verify-gated step.
+
+---
+
+## 2026-05-31 loop-tick finding (autonomous check)
+
+**Pre-existing bug found, NOT yet fixed** (flagged for the D7 builder, not patched blind mid-loop):
+- `src/search/ann/decode.js` `encryptVector(vec, scope, masterKey)` calls
+  `encrypt(vec, …)` on a raw **Float32Array** without `encodeVector(vec)` first.
+  `encrypt()` does `TextEncoder().encode(plaintext)` — on a typed array that
+  stringifies wrongly. It also ignores `dim`. **Currently DEAD code** (search
+  only reads vectors via `decryptVector`/`decodeVectorBytes`; nothing writes
+  `embedding_768` yet), so it has never been exercised — the mind-search 32/32
+  verify does not touch it. **The D7 enrichment worker is the first thing that
+  will call it** to encrypt + store `embedding_768`, so fix it there: encode the
+  Float32 bytes to base64 (encodeVector) before encrypt(). Verify round-trip
+  against `decryptVector`.
+
+**D7 enrichment service — recon done, build NOT started (needs its own sweep):**
+- Contract: drain `nlp_processed=0` (idx_messages_nlp_pending) → embed content
+  via the :8091 client (`src/embed/client.js` `embed(text, task)`) → encrypt the
+  768-d vector (fixed encryptVector) → write `embedding_768` + flip
+  `nlp_processed` 0→2 (embedded), -1 on error.
+- MISSING write path: `messages` has no `updateEnrichment` method — add one
+  (pattern: `updateMetadata` at messages.js:90; UPDATE … WHERE id=? AND user_id=?).
+- Tier-1 verifiable here with a STUB embedder (deterministic vector); real model
+  is Tier-2 (no :8091 in sandbox). Run `/sweep-first-design` before building.
+
+**Loop status:** this environment has NO ScheduleWakeup/Cron tool, so an
+autonomous wake-loop cannot self-arm. Maximum autonomy = continuous in-turn
+building. Stopped at a clean resting point (HEAD 7178f69, 13 suites GO) rather
+than start the D7 unit unverified at session depth.
