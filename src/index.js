@@ -62,9 +62,24 @@ async function startHttp() {
   await startHttpServer();
 }
 
+async function startEnrich() {
+  // Lazy import so stdio/http paths never load the enrichment server.
+  // MYCELIUM_ENRICH_PORT overrides the default :8095 (the port the ingestion
+  // enqueue nudge targets); leave unset in production.
+  const { startEnrichmentServer } = await import('./enrich/server.js');
+  const port = process.env.MYCELIUM_ENRICH_PORT
+    ? Number(process.env.MYCELIUM_ENRICH_PORT) : undefined;
+  const { url } = await startEnrichmentServer(port !== undefined ? { port } : {});
+  console.error(`[mycelium] enrichment service on ${url} — POST /enrich-all, GET /health`);
+}
+
 // Run only when invoked directly (not when imported by a verifier).
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const httpMode = process.argv.includes('--http') || process.env.MYCELIUM_HTTP === '1';
-  const run = httpMode ? startHttp : startStdio;
+  let run = startStdio;
+  if (process.argv.includes('--enrich') || process.env.MYCELIUM_ENRICH === '1') {
+    run = startEnrich;
+  } else if (process.argv.includes('--http') || process.env.MYCELIUM_HTTP === '1') {
+    run = startHttp;
+  }
   run().catch((err) => { console.error('[mycelium] fatal:', err.message); process.exit(1); });
 }

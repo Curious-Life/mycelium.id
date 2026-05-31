@@ -350,3 +350,31 @@ New code:
    MCP server). Today it's built + verified but not launched by `npm start`.
 2. NLP entity/tag extraction — the OTHER half of D7 (embed-on-write done).
 3. Tier-2 real-embedding parity — gated on pipeline/setup.sh (onnxruntime).
+
+---
+
+## 2026-05-31 (cont.) — D7 :8095 process LAUNCHES from the entry point
+
+**Status: built, 14/14 suites GO. verify:enrich now 16 checks (added L1).**
+
+The :8095 listener now runs as a real process, not just an in-process factory.
+
+New/changed:
+- `src/index.js` — added `startEnrich()` + a 3-way CLI dispatch: `--enrich`
+  (or MYCELIUM_ENRICH=1) → enrichment server; `--http` → MCP/OAuth; else stdio.
+  `MYCELIUM_ENRICH_PORT` overrides the default :8095 (testability; unset in prod).
+- `package.json` — `"start:enrich": "node src/index.js --enrich"`.
+- `scripts/verify-enrich.mjs` Layer 3 (L1): spawns the REAL `node src/index.js
+  --enrich` child against a temp db on a random port, polls GET /health → ok.
+  Proves the CLI dispatch + port knob wire up end-to-end (not just the factory).
+
+**Run it (prod):** `npm run start:enrich` alongside `npm start` (stdio) or
+`npm run start:http`. With the :8091 embed-service down, /health still answers
+and drains mark rows failed (-1) — honest until Tier-2.
+
+**D7 remaining (smaller now):**
+1. NLP entity/tag extraction — the OTHER half of D7 (embed-on-write is done +
+   launchable). Advances its own marker; embed path is nlp_processed=2.
+2. Tier-2 real-embedding parity — gated on pipeline/setup.sh (onnxruntime).
+3. (Ops) process supervision — run the two/three processes under one supervisor
+   on deploy; out of scope until there's a host.

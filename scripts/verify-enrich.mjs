@@ -17,6 +17,7 @@
 
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 
 import { applyMigrations } from '../src/db/migrate.js';
@@ -228,11 +229,55 @@ async function main() {
     closeSrv();
   }
 
+  // ── Layer 3: the `--enrich` entry point actually launches the listener ────
+  // Spawn the real process (npm run start:enrich path) against a temp db on a
+  // random port and confirm GET /health answers — proves the CLI dispatch +
+  // MYCELIUM_ENRICH_PORT knob wire up, not just the in-process factory.
+  {
+    const SDB = 'data/verify-enrich-smoke.db';
+    const SKCV = 'data/verify-enrich-smoke-kcv.json';
+    for (const f of [SDB, SKCV, `${SDB}-shm`, `${SDB}-wal`]) { try { rmSync(f); } catch {} }
+    const d = new Database(SDB); applyMigrations(d); d.close();
+    const SMOKE_PORT = 20000 + Math.floor(Math.random() * 15000);
+
+    let stderr = '';
+    const child = spawn(process.execPath, ['src/index.js', '--enrich'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        MYCELIUM_DB: SDB,
+        MYCELIUM_KCV: SKCV,
+        USER_MASTER_KEY: hex(),
+        SYSTEM_KEY: hex(),
+        MYCELIUM_ENRICH_PORT: String(SMOKE_PORT),
+        ENCRYPTION_MASTER_KEY: '', // force the child to use USER_MASTER_KEY, not a leaked parent key
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    child.stderr.on('data', (c) => { stderr += c.toString(); });
+
+    let up = null;
+    for (let i = 0; i < 100 && up === null; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      try {
+        const r = await fetch(`http://127.0.0.1:${SMOKE_PORT}/health`);
+        if (r.ok) up = await r.json();
+      } catch { /* not listening yet */ }
+    }
+    rec('L1. `node src/index.js --enrich` boots + GET /health → { ok, dim:768 }',
+      up && up.ok === true && up.dim === EMBED_DIM,
+      up ? JSON.stringify(up) : `no /health after 5s; stderr="${stderr.slice(0, 200)}"`);
+
+    child.kill('SIGTERM');
+    await new Promise((r) => { child.on('exit', r); setTimeout(r, 1000); });
+    for (const f of [SDB, SKCV, `${SDB}-shm`, `${SDB}-wal`]) { try { rmSync(f); } catch {} }
+  }
+
   for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 
   const allPass = ledger.every(Boolean);
   console.log('\n' + '='.repeat(64));
-  console.log(`VERDICT: ${allPass ? 'GO — D7 enrichment: drainOnce writes decryptable vector envelopes + isolates poison rows + fails closed; the :8095 listener drains over HTTP and closes the ingestion→enrich loop' : 'NO-GO — see FAIL rows'}`);
+  console.log(`VERDICT: ${allPass ? 'GO — D7 enrichment: drainOnce writes decryptable vector envelopes + isolates poison rows + fails closed; the :8095 listener drains over HTTP, closes the ingestion→enrich loop, and launches from `node src/index.js --enrich`' : 'NO-GO — see FAIL rows'}`);
   console.log('='.repeat(64));
   process.exit(allPass ? 0 : 1);
 }

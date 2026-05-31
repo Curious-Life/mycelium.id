@@ -26,6 +26,7 @@
     "start": "node src/index.js",
     "rest": "node src/server-rest.js",
     "start:http": "node src/index.js --http",
+    "start:enrich": "node src/index.js --enrich",
     "verify:enqueue": "node scripts/verify-enqueue.mjs",
     "verify:enrich": "node scripts/verify-enrich.mjs"
   },
