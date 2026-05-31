@@ -260,3 +260,24 @@ The operator asked to "set a loop so you wake and work while I sleep." **This en
 autonomous wake-loop cannot self-arm. Maximum autonomy = continuous in-turn
 building. Stopped at a clean resting point (HEAD 7178f69, 13 suites GO) rather
 than start the D7 unit unverified at session depth.
+
+---
+
+## 2026-05-31 loop-tick CORRECTION (retraction)
+
+**RETRACT the encryptVector bug claimed in commit `aa351ac`.** It was WRONG —
+based on a grep, not a read. `src/search/ann/decode.js:93` already reads
+`return encrypt(encodeVector(vec), scope, masterKey, userId)` — the encodeVector
+call is present and correct; it also type-guards Float32Array. There is NO bug.
+(Caught by reading the cited lines before building on the claim — the same
+read-before-trust rule that retracted the earlier MYCELIUM_ENCRYPT_ONLY fiction.)
+
+What IS still true from that tick (verified):
+- `encryptVector` is currently DEAD code (nothing writes embedding_768 yet) — the
+  D7 enrichment worker will be its first caller. That's fine: it's correct + ready.
+- The real D7 gap remains: `messages` has no updateEnrichment write method
+  (add one, pattern = updateMetadata at messages.js:90). embed client returns
+  number[]; convert to Float32Array before encryptVector. embedding_768 is in
+  NEVER_AUTO_DECRYPT_COLUMNS (crypto-local.js:1426) so it's stored/read as a raw
+  vector envelope, not auto-decrypted — correct.
+- Base still green: verify:mcp EXIT 0.
