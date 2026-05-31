@@ -29,6 +29,7 @@ import { createTopologyToolsDomain } from './tools/topology-tools.js';
 import { createTopologyHelpers } from './topology/helpers.js';
 import { createContextDomain } from './tools/context.js';
 import { createIngestDomain } from './tools/ingest.js';
+import { createEnqueueEnrichment } from './ingest/enqueue.js';
 
 // Single-user defaults for the agent identity / scope deps the factories want.
 const AGENT_LABELS = { 'personal-agent': 'Assistant' };
@@ -83,7 +84,9 @@ export function buildDomains({
       userId,
     }),
     // captureMessage: the single choke-point — "any message that comes in is saved".
-    createIngestDomain({ db, userId }),
+    // enqueueEnrichment nudges the :8095 service after each save (best-effort,
+    // non-fatal when the service is absent — the row is queued at nlp_processed=0).
+    createIngestDomain({ db, userId, enqueueEnrichment: createEnqueueEnrichment({ userId }) }),
     createHealthDomain({ getDb: () => db, userId }),
     createTasksDomain({ db, userId }),
     createFisherToolsDomain({ db, userId }),

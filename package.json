@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Mycelium V1 \u2014 self-hosted single-user MCP cognitive vault.",
+  "description": "Mycelium V1 — self-hosted single-user MCP cognitive vault.",
   "license": "AGPL-3.0",
   "engines": {
     "node": ">=22"
@@ -22,10 +22,11 @@
     "verify:context": "node scripts/verify-context.mjs",
     "verify:ingest": "node scripts/verify-ingest.mjs",
     "verify:blob": "node scripts/verify-blob.mjs",
-    "verify": "npm run verify:foundation && npm run verify:mcp && npm run verify:mindfiles && npm run verify:metrics && npm run verify:rest && npm run verify:search && npm run verify:topology && npm run verify:embed && npm run verify:context && npm run verify:ingest && npm run verify:blob && npm run verify:oauth",
+    "verify": "npm run verify:foundation && npm run verify:mcp && npm run verify:mindfiles && npm run verify:metrics && npm run verify:rest && npm run verify:search && npm run verify:topology && npm run verify:embed && npm run verify:context && npm run verify:ingest && npm run verify:blob && npm run verify:enqueue && npm run verify:oauth",
     "start": "node src/index.js",
     "rest": "node src/server-rest.js",
-    "start:http": "node src/index.js --http"
+    "start:http": "node src/index.js --http",
+    "verify:enqueue": "node scripts/verify-enqueue.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
