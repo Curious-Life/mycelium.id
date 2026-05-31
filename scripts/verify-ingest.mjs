@@ -78,11 +78,40 @@ rec('I4. empty content rejected', /Error|required/i.test(emptyText), `reply="${e
   rec('I5. saved message queued for enrichment (nlp_processed = 0)', np === 0, `nlp_processed=${np}`);
 }
 
+// I6: importMessages bulk-creates, idempotent ids
+const batchId = `BATCH-${Date.now()}`;
+const batch = [
+  { content: 'import one', id: `${batchId}-1`, source: 'telegram', metadata: { sender: 'A' } },
+  { content: 'import two', id: `${batchId}-2`, source: 'telegram', timestamp: '2026-01-01T00:00:00Z' },
+  { content: '', id: `${batchId}-3` }, // empty → skipped (missing content)
+];
+const imp1 = await client.callTool({ name: 'importMessages', arguments: { messages: batch } });
+const imp1text = imp1.content?.[0]?.text || '';
+{
+  const q = new Database(DB, { readonly: true });
+  const c = q.prepare("SELECT COUNT(*) c FROM messages WHERE id LIKE ?").get(`${batchId}-%`).c;
+  q.close();
+  rec('I6. importMessages bulk-creates (2 new, 1 empty skipped)',
+    c === 2 && /2 new/.test(imp1text), `rows=${c} reply="${imp1text.slice(0, 60)}"`);
+}
+
+// I7: re-importing the same batch is idempotent (0 new, all duplicates)
+const imp2 = await client.callTool({ name: 'importMessages', arguments: { messages: batch } });
+const imp2text = imp2.content?.[0]?.text || '';
+{
+  const q = new Database(DB, { readonly: true });
+  const c = q.prepare("SELECT COUNT(*) c FROM messages WHERE id LIKE ?").get(`${batchId}-%`).c;
+  q.close();
+  rec('I7. re-import is idempotent (no new rows, dupes detected)',
+    c === 2 && /0 new/.test(imp2text) && /2 duplicates/.test(imp2text),
+    `rows=${c} reply="${imp2text.slice(0, 60)}"`);
+}
+
 await client.close();
 close();
 
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
-console.log(`VERDICT: ${allPass ? 'GO — captureMessage choke-point saves, encrypts, dedupes, queues' : 'NO-GO — see FAIL rows'}`);
+console.log(`VERDICT: ${allPass ? 'GO — captureMessage + importMessages: save, encrypt, dedupe, queue, bulk-import' : 'NO-GO — see FAIL rows'}`);
 console.log('='.repeat(64));
 process.exit(allPass ? 0 : 1);

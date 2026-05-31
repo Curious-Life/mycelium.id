@@ -35,6 +35,37 @@ export function createIngestDomain(deps) {
         required: ['content'],
       },
     },
+    {
+      name: 'importMessages',
+      description:
+        'Bulk-import many messages at once (e.g. a channel history backfill from a '
+        + 'connector or an export). Each item is saved through the same path as '
+        + 'captureMessage and is idempotent on its id — re-running an import skips '
+        + 'already-saved messages. Returns counts of created vs skipped.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          messages: {
+            type: 'array',
+            description: 'Array of messages to import.',
+            items: {
+              type: 'object',
+              properties: {
+                content:        { type: 'string', description: 'The message text.' },
+                id:             { type: 'string', description: 'Stable id for dedup (e.g. "telegram-<msgId>-<chatId>"). Strongly recommended for re-runnable imports.' },
+                role:           { type: 'string', enum: ['user', 'assistant'] },
+                source:         { type: 'string', description: 'Channel/source, e.g. "telegram".' },
+                conversationId: { type: 'string' },
+                timestamp:      { type: 'string', description: 'Optional ISO 8601 original time (stored in metadata).' },
+                metadata:       { type: 'object', description: 'Platform extras (sender, chatTitle, replyTo, mediaType, …).' },
+              },
+              required: ['content'],
+            },
+          },
+        },
+        required: ['messages'],
+      },
+    },
   ];
 
   const handlers = {
@@ -52,6 +83,37 @@ export function createIngestDomain(deps) {
       return deduped
         ? `Already captured (id ${id}); no duplicate created.`
         : `Captured message ${id}.`;
+    },
+
+    importMessages: async (args = {}) => {
+      const items = Array.isArray(args.messages) ? args.messages : [];
+      if (items.length === 0) return 'Error: messages array is required (and non-empty)';
+
+      let created = 0, skipped = 0, errors = 0;
+      // Loop the verified captureMessage choke-point — each row self-dedups on
+      // its id. (Not a bulk INSERT: rows have heterogeneous optional columns, and
+      // this reuses the single audited write path.) Originating timestamp, if
+      // given, is preserved in metadata (created_at is schema-defaulted to now).
+      for (const m of items) {
+        const content = typeof m?.content === 'string' ? m.content.trim() : '';
+        if (!content && !m?.attachmentId) { errors += 1; continue; }
+        const metadata = { ...(m.metadata || {}) };
+        if (m.timestamp) metadata.original_timestamp = m.timestamp;
+        try {
+          const { deduped } = await captureMessage(db, {
+            userId,
+            content,
+            role: m.role,
+            source: m.source || 'import',
+            conversationId: m.conversationId,
+            id: m.id,
+            metadata: Object.keys(metadata).length ? metadata : undefined,
+          }, enqueueEnrichment);
+          if (deduped) skipped += 1; else created += 1;
+        } catch { errors += 1; }
+      }
+      const errNote = errors ? `, ${errors} skipped (missing content)` : '';
+      return `Imported ${items.length} messages: ${created} new, ${skipped} duplicates${errNote}.`;
     },
   };
 
