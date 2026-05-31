@@ -1,68 +1,194 @@
 <p align="center">
-  <img src="assets/mycelium-sumi-e.svg" alt="Mycelium" width="240">
+  <img src="assets/mycelium-sumi-e.svg" alt="Mycelium" width="80">
 </p>
 
 <h1 align="center">Mycelium</h1>
 
-<p align="center"><i>The data layer for your digital life.</i></p>
+<p align="center"><strong>Self-sovereign memory infrastructure for AI.</strong><br>Own your keys. Own your data. Own the intelligence.</p>
 
-<p align="center">A self-sovereign personal intelligence system. You own the keys, the data, and the intelligence.</p>
+<p align="center">
+  <a href="docs/V1-BUILD-SPEC.md">Build Spec</a> ·
+  <a href="docs/V1-IMPLEMENTATION-PLAN.md">Implementation Plan</a> ·
+  <a href="https://mycelium.id">Website</a>
+</p>
 
 ---
 
-## Status
+## What This Is
 
-**Pre-launch.** This repository will hold the redesigned, encryption-native Mycelium codebase.
+A self-hosted MCP server that gives **any AI model** complete context about your life through a standard protocol. Your data compounds across every service. You switch models freely. Nobody else can read it.
 
-Two specs live here:
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      ANY AI MODEL                            │
+│       Claude · ChatGPT · Gemini · Llama · Mistral · any     │
+└────────────────────────────┬────────────────────────────────┘
+                             │
+                      MCP Protocol
+                  (model-agnostic tool surface)
+                             │
+┌────────────────────────────▼────────────────────────────────┐
+│                                                              │
+│                      YOUR MYCELIUM                           │
+│                                                              │
+│   ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
+│   │ Encrypted│  │ Semantic │  │ Topology │  │ Agent    │  │
+│   │ Storage  │  │ Search   │  │ Engine   │  │ Context  │  │
+│   └──────────┘  └──────────┘  └──────────┘  └──────────┘  │
+│                                                              │
+│   Self-hosted · your hardware · your keys                   │
+└────────────────────────────┬────────────────────────────────┘
+                             │
+          ┌──────────┬───────┴───────┬──────────┐
+          │          │               │          │
+       Telegram   Discord      WhatsApp     Files
+       iOS app    Email        Voice        Imports
+```
 
-- **[`docs/V1-BUILD-SPEC.md`](docs/V1-BUILD-SPEC.md)** — the **first thing we ship**: a self-hosted single-user MCP server (better-sqlite3 with a D1-compatible adapter, BIP-39 + AES-256-GCM at rest, OAuth 2.1 + Cloudflare Tunnel for remote, Ollama for local embeddings + BYOK cloud inference, 37 tools, AnalysisEngine plugin interface for the topology engine). **9–11 day build.** This is the AGPL sovereignty product.
+## Architecture
 
-- **[`docs/REDESIGN-LIVING-SPEC.md`](docs/REDESIGN-LIVING-SPEC.md)** — the **architecture-rationale spec**: 3 sweep rounds against the canonical production system (12 parallel Explore agents, ~12.8k words evidence), verification table, transfer/rebuild/discard matrix, RLS threat-model pressure test (5 HIGH severity findings), MYA-0.2 abandonment lessons, and the 18 operator decisions that gate the eventual managed-light multi-tenant Postgres build. V1's "Phase 5: Extensions" is what this spec covers in depth.
+| Layer | What | Sovereignty |
+|-------|------|-------------|
+| **MCP Interface** | model-agnostic tools over stdio + Streamable HTTP | Full — runs on your machine |
+| **Encryption** | AES-256-GCM, scope-partitioned, two hex master keys | Full — keys never leave your hardware |
+| **Search** | Nomic v1.5 ONNX embeddings, ANN + BM25 + RRF fusion | Full — local inference, no API calls |
+| **Topology** | Leiden clustering, co-firing, information harmonics | Full — open source, runs locally |
+| **REST + Ingest** | `/api/v1/*` + `/ingest/*` for non-MCP clients (bots, webhooks, scripts) | Full — same tools, HTTP interface |
+| **Federation** | Node-to-node discovery via topology resonance | Open protocol — community-driven *(roadmap)* |
 
-Sequencing: ship V1 first (the open-source promise), validate it with real users, then decide whether the managed-light V2 tier is worth the architectural complexity the redesign spec captures.
+## The Measurement Layer
 
-Until launch this repository is **private**. License is AGPL-3.0 (see [`LICENSE`](LICENSE)) — public release is planned to coincide with the V1 launch.
+Storage is commodity. Everyone is building memory retrieval. We're building **measurement science** — and open-sourcing it deliberately.
 
-## Where things live
+```
+Topology        Leiden clustering → 200-400 territories
+                Hierarchical. Splits and merges as you change.
 
-| Repo | Role | Status |
-|---|---|---|
-| **[mycelium](https://github.com/Curious-Life/mycelium)** (private) | Canonical production code — single-tenant, per-VPS, dedicated-tier customers (0mm, puh, marti, admin) | Active, live |
-| **mycelium.id** (this repo, private) | Redesigned multi-tenant managed-light tier | Pre-launch, design phase |
-| **mycelium-managed** (planned, private) | Operational scripts, fleet ops, ops-only secrets | Not yet created |
+Co-firing       Which territories activate together.
+                Reveals hidden connections across time windows.
 
-The dedicated-tier code in `mycelium` continues to serve existing customers. The managed-light Tier B will run from this repo when ready.
+Harmonics       H0 (entropy) · β (autocorrelation) · γ (momentum) · α (complexity)
+                The signature of how your mind moves.
 
-## Legacy state
+What it does    Detect cognitive regime shifts before conscious awareness.
+                Measure attention dynamics — not just what, but when and how.
+                7+ distinct cognitive modes from metric signatures alone.
+```
 
-This repo had a prior life as a stale open-source mirror (Feb–April 2026). That state is preserved at two immutable git tags:
+## Why Open Source
 
-- `legacy-2026-04-mirror` — what the `main` branch held before the v2 redesign wipe
-- `legacy-energy-spores-2026-04` — the `energy-and-spores` branch (energy ledger + spore framework experiment)
+```
+Everything is copyable — by design.
 
-Documents harvested from those branches for v2 reference live under [`docs/legacy/`](docs/legacy/):
+  MCP interface spec                      → copy it
+  Vault structure (local-first SQLite)    → copy it
+  Federation protocol                     → copy it
+  Topology algorithms (Leiden, co-firing) → copy it
 
-- `ARCHITECTURE-from-legacy.md` — the biological-model framing (mycelium / forest / spores / strain)
-- `SOCIAL-SHARING-SPEC-from-legacy.md` — Phase 1–5 federation + connection-mindscape + discovery + SMPC design
-- `ENERGY-from-legacy.md` — token-budget metabolic-state cost-router design (becomes the basis for Tier B's cost router)
-- `MINDSCAPE_DESIGN-from-legacy.md` — topology UI design
-- `SPORES-FRAMEWORK-from-legacy.md` — plugin architecture (deferred until post-launch use case)
+More copies = more nodes in the federated network.
+Open source GROWS the network. Proprietary would cap it.
 
-## Build sequence
+  1 node     → personal vault (useful alone)
+  10 nodes   → topology resonance discovery begins
+  100 nodes  → cross-pollination, agent-to-agent context
+  1000 nodes → protocol becomes standard
+  10000+     → the memory layer for AI
+```
 
-Phasing in [`docs/REDESIGN-LIVING-SPEC.md` § Part 10](docs/REDESIGN-LIVING-SPEC.md):
+The **Redis / Elasticsearch / Linux** model: commoditization of the infrastructure layer funds everything above it.
 
-| Phase | What | Estimated |
-|---|---|---|
-| 0 | Pre-redesign cleanup (20 ship-before docs in canonical repo) | 3–5 wk |
-| 1 | Tier B foundation: Postgres + RLS + connection middleware + key-wrap + agent runtime | 6–9 wk |
-| 2 | Tier 2 launch: 2–5 hand-picked users | 2–3 wk |
-| 3 | Scale to 20 users | 4–8 wk |
-| 4 | Federation Phase 1 + native app | post-launch |
+## What Accumulates
 
-Realistic Tier 2 launch: Aug–Sep 2026.
+Even when the code is free, these can't be copied:
+
+1. **Your computed topology** — months/years of personal data. Algorithm is free, your history isn't.
+2. **Network position** — the reference implementation. Red Hat dynamic.
+3. **Managed convenience** — calibration, federation routing, zero-config. Code is free, not running it isn't.
+4. **Interpretation layer** — what your topology *means* and what to *do* about it. Requires lived practice.
+
+## Technical Decisions (Locked)
+
+| # | Decision | Choice |
+|---|----------|--------|
+| D1 | Topology engine | Open, behind AnalysisEngine plugin interface |
+| D2 | Embeddings | Nomic v1.5 ONNX + task prefixes (loopback :8091) |
+| D3 | Encryption | Port `crypto-local.js` — wrapped-DEK envelope, AES-256-GCM |
+| D4 | Master key | 64-char hex strings, no BIP-39 in V1 |
+| D5 | Runtime | Pure MCP tool server — no autonomous loop |
+| D6 | System key | Two independent hex keys (USER_MASTER + SYSTEM_KEY) |
+| D7 | Enrichment | Build-new NLP tagging + embed-on-write service |
+
+## Build Status
+
+**Under active development** (branch `claude/repo-overview-mC69M`). The core is built and continuously verified; remaining pieces are environment-gated — they need a networked host for ML models, deploy, and platform tokens.
+
+```
+Phase 1  Core Server + Data Layer       ✅ built   encrypting SQLite adapter, two-key vault
+Phase 2  Embeddings + Search            ◑ built*   in-RAM ANN+BM25+RRF; real embeddings gated
+Phase 3  Topology Pipeline              ◑ built*   ported pipeline + tools; clustering wheels gated
+Phase 4  OAuth + Security               ✅ built   OAuth 2.1 + PKCE, stateful Streamable HTTP
+Phase 5  Ingestion + Uploads            ✅ built   capture choke-point, encrypted blobs, /ingest/*
+Phase 6  Enrichment + Connectors        ◷ next     D7 service skeleton, messaging bridges
+```
+
+<sub>✅ verified to `EXIT 0` · ◑ built, a Tier-2 path needs a networked host · ◷ designed, not yet built</sub>
+
+**Verification:** `npm install --legacy-peer-deps && npm run verify` runs the full suite (13 verify scripts; each prints `VERDICT: GO`). A real MCP client completes OAuth and lists the live tools over HTTPS; messages and file uploads round-trip through the encrypting vault.
+
+See [`docs/V1-BUILD-SPEC.md`](docs/V1-BUILD-SPEC.md) (spec), [`docs/V1-IMPLEMENTATION-PLAN.md`](docs/V1-IMPLEMENTATION-PLAN.md) (day-by-day plan), and [`docs/V1-BUILD-HANDOFF-2026-05-30.md`](docs/V1-BUILD-HANDOFF-2026-05-30.md) (current state).
+
+## Install
+
+> **Status:** the `@mycelium/mcp` npm package is a roadmap deliverable. Today the server runs from source on the development branch.
+
+```bash
+git clone <repo> && cd mycelium.id
+npm install --legacy-peer-deps
+npm run verify          # full suite → 13× VERDICT: GO
+npm start               # stdio MCP server   (or: npm run start:http for OAuth)
+```
+
+Pure Node.js (≥22). No Docker required. Connect Claude, ChatGPT, or any MCP-compatible client.
+
+## Repo Structure
+
+```
+mycelium.id/
+├── src/                           the V1 server (built)
+│   ├── adapter/                   encrypting better-sqlite3 / D1 adapter
+│   ├── crypto/                    crypto-local.js + guardians + two-key unlock
+│   ├── db/                        43 namespaces + getDb() assembly + migration runner
+│   ├── ingest/                    capture choke-point, blob store, uploads, enqueue
+│   ├── search/                    in-RAM ANN + BM25 + RRF mind-search
+│   ├── tools/                     MCP tool domains
+│   ├── server-http.js             OAuth 2.1 + Streamable HTTP + /ingest/*
+│   └── index.js                   stdio + --http entry
+├── scripts/                       verify-*.mjs (one per subsystem) + init-db
+├── migrations/                    0001 schema (111 tables) + 0002 local_path
+├── pipeline/                      Python: embed-service, clustering, harmonics
+├── docs/                          build spec, plan, design + handoff docs
+├── reference/                     ~32K LOC from the canonical production system
+├── CLAUDE.md · LICENSE (AGPL-3.0)
+```
+
+## Competitive Position
+
+| | Mem0 | Zep | Letta | Screenpipe | **Mycelium** |
+|---|---|---|---|---|---|
+| Self-hosted | ✗ | ✗ | ✓ | ✓ | **✓** |
+| Topology | ✗ | ✗ | ✗ | ✗ | **✓** |
+| Co-firing | ✗ | ✗ | ✗ | ✗ | **✓** |
+| Harmonics | ✗ | ✗ | ✗ | ✗ | **✓** |
+| Federation | ✗ | ✗ | ✗ | ✗ | **✓** *(roadmap)* |
+| Model-agnostic | partial | partial | ✓ | ✓ | **✓** |
+| E2E encrypted | ✗ | ✗ | ✗ | ✗ | **✓** |
+
+Everyone else is building memory. We're building the **nervous system**.
 
 ## License
 
-[AGPL-3.0](LICENSE). The intent is for the full Mycelium core to be open at launch; until then, this repo is private to avoid signaling a half-finished design.
+[AGPL-3.0](LICENSE) — the full Mycelium core will be open at V1 launch. Until then, this repository is private to avoid signaling a half-finished design.
+
+---
+
+<p align="center"><sub>Built by <a href="https://curious.life">Curious Life</a></sub></p>
