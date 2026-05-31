@@ -12,10 +12,16 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+
 import { createHealthDomain } from './tools/health.js';
 import { createTasksDomain } from './tools/tasks.js';
 import { createFisherToolsDomain } from './tools/fisher-tools.js';
 import { createMessagesDomain } from './tools/messages.js';
+import { createDocumentsDomain } from './tools/documents.js';
+import { createInternalDomain } from './tools/internal.js';
+import { createMindFiles, MIND_MIRRORS } from './mindfiles/mind-files.js';
 
 // Single-user defaults for the agent identity / scope deps the factories want.
 const AGENT_LABELS = { 'personal-agent': 'Assistant' };
@@ -28,23 +34,51 @@ const AGENT_LABELS = { 'personal-agent': 'Assistant' };
  * topologyHelpers) — they land with their Wave-2 units; listed here so the set
  * is explicit, never silently dropped.
  */
-export function buildDomains({ db, userId = 'local-user' }) {
+export function buildDomains({
+  db,
+  userId = 'local-user',
+  agentId = 'personal-agent',
+  agentRoot = process.env.MYCELIUM_AGENT_ROOT || 'data/mind',
+}) {
+  // Mind-files subsystem (Wave 2). createMindFiles binds fs/path + an
+  // AGENT_ROOT + agent identity; its read/write helpers encrypt at rest with
+  // the same crypto-local AES-256-GCM envelope as the vault. mind-files calls
+  // crypto-local.getMasterKey() (tmpfs/ENCRYPTION_MASTER_KEY-pinned) rather
+  // than the unlock()-derived CryptoKey the db adapter uses — boot() bridges
+  // the two by setting ENCRYPTION_MASTER_KEY = USER_MASTER before this runs,
+  // so mind files and vault rows share one key. The mind/ subdir is created
+  // lazily on first write.
+  const mindFiles = createMindFiles({ agentRoot, agentId, fs, path });
+
   const domains = [
     createHealthDomain({ getDb: () => db, userId }),
     createTasksDomain({ db, userId }),
     createFisherToolsDomain({ db, userId }),
     createMessagesDomain({ db, userId, agentLabels: AGENT_LABELS, isScoped: () => false }),
+    // documents domain mirrors the MIND_MIRRORS paths to mind-files on
+    // saveDocument/updateDocument. No searchClient/publicRenderer in V1, so
+    // findDocuments + the publishing tools stay dormant (clean degrade).
+    createDocumentsDomain({
+      db,
+      userId,
+      agentId,
+      writeMindFile: (filename, content) => mindFiles.writeMindFile(filename, content),
+      mindMirrors: MIND_MIRRORS,
+    }),
+    // internal domain wants the two mind-file fns directly (not the bundle).
+    createInternalDomain({
+      readMindFile: (filename) => mindFiles.readMindFile(filename),
+      writeMindFile: (filename, content) => mindFiles.writeMindFile(filename, content),
+    }),
   ];
   // Deferred = domains needing a subsystem not yet built. Each lands with its
   // Wave-2 unit; listed explicitly so the surface is never silently dropped.
   //   metrics       -> @mycelium/metrics/contracts (CONTRACTS) not in reference/
-  //   documents     -> mind-files (writeMindFile, mindMirrors)
   //   topology-tools-> topologyHelpers (createTopologyHelpers)
   //   mindscape     -> mind-search (searchHelpers)
-  //   internal      -> mind-files (readMindFile/writeMindFile)
-  const deferred = ['metrics (CONTRACTS)', 'documents (mind-files)',
+  const deferred = ['metrics (CONTRACTS)',
     'topology-tools (topologyHelpers)', 'mindscape (mind-search)',
-    'internal (mind-files)', 'reply', 'services'];
+    'reply', 'services'];
   return { domains, deferred };
 }
 

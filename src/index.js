@@ -22,6 +22,16 @@ export async function boot({
     throw new Error('USER_MASTER_KEY and SYSTEM_KEY must be set (64-char hex each). Vault stays locked.');
   }
   const { userKey, systemKey } = await unlock({ userHex, systemHex, kcvPath });
+  // Bridge the vault key to the mind-files subsystem. mind-files encrypts via
+  // crypto-local.getMasterKey(), which resolves USER_MASTER from tmpfs or the
+  // ENCRYPTION_MASTER_KEY env fallback — NOT the unlock()-derived CryptoKey the
+  // db adapter holds. Pin it (authoritatively — overwrite any stale value) to
+  // the same hex so mind files and vault rows share one key and can never
+  // diverge. Without this, getMasterKey() returns null on a host without tmpfs
+  // and every mind-file write throws. getMasterKey() pins on first use, so this
+  // must run before buildDomains (the first encrypt/decrypt path). Process-local
+  // env, memory-only, never logged — consistent with the key discipline.
+  process.env.ENCRYPTION_MASTER_KEY = userHex;
   const { db, close } = getDb({ dbPath, userKey, systemKey });
   const { domains, deferred } = buildDomains({ db, userId });
   const { tools, handlers } = collectTools(domains);

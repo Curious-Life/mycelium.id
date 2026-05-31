@@ -3,15 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Mycelium V1 — self-hosted single-user MCP cognitive vault.",
+  "description": "Mycelium V1 \u2014 self-hosted single-user MCP cognitive vault.",
   "license": "AGPL-3.0",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "init-db": "node scripts/init-db.mjs",
     "verify:foundation": "node scripts/verify-foundation.mjs",
     "verify:mcp": "node scripts/verify-mcp.mjs",
     "verify": "npm run verify:foundation && npm run verify:mcp",
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "verify:mindfiles": "node scripts/verify-mindfiles.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
