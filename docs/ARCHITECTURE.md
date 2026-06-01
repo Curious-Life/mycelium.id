@@ -23,7 +23,12 @@ One Node entry point, `src/index.js`, selects a mode:
 | MCP stdio (default) | `npm start` | MCP over stdio for a local client |
 | MCP Streamable HTTP | `npm run start:http` (`--http` / `MYCELIUM_HTTP=1`) | remote MCP + OAuth |
 | REST | `npm run rest` | REST over the shared handler map |
+| Portal (UI + REST) | `npm run portal` | static SPA at `/` + REST `/api/v1/*`, localhost-only |
 | Enrichment service | `npm run start:enrich` (`--enrich`) | the `:8095` background enricher |
+
+A **native Mac shell** (`src-tauri/`, Tauri v2) wraps the portal: it spawns the
+Node server and opens a window at `http://127.0.0.1:8787`. Portal is verified
+(`verify:portal`); the Rust shell is built on the Mac (`src-tauri/BUILD-MAC.md`).
 
 Two **sidecar services** run as their own processes:
 - **`:8091` embed-service** — Nomic v1.5 ONNX embeddings (`pipeline/embed-service.py`), ⚠️ Tier-2 (needs onnxruntime/model installed).
@@ -37,6 +42,8 @@ Two **sidecar services** run as their own processes:
 | MCP server (tool registration) | `src/mcp.js` | ✅ |
 | Streamable HTTP transport | `src/server-http.js` | ✅ |
 | REST surface | `src/server-rest.js`, `src/api.js` | ✅ |
+| Local portal (single-file SPA) | `portal/index.html` (served by REST) | ✅ |
+| Native Mac shell (Tauri) | `src-tauri/**` | ◑ scaffold (build on Mac) |
 | OAuth 2.1 + PKCE (better-auth) | `src/auth.js` | ✅ |
 | D1/SQLite storage adapter | `src/adapter/d1.js` | ✅ |
 | DB namespaces (per table) | `src/db/*.js` | ✅ |
@@ -117,9 +124,9 @@ hashtag + keyword tags) behind a seam a model-backed pass can replace.
 
 ## 9. Verification
 
-`npm run verify` runs **14 GO-gated suites** (`scripts/verify-*.mjs`), each with
+`npm run verify` runs **15 GO-gated suites** (`scripts/verify-*.mjs`), each with
 a PASS/FAIL ledger + VERDICT line: foundation, mcp, mindfiles, metrics, rest,
-search, topology, embed, oauth, context, ingest, blob, enqueue, enrich. CI
+search, topology, embed, oauth, context, ingest, blob, enqueue, enrich, portal. CI
 (`.github/workflows/verify.yml`) runs them on every PR. **Tier-1** suites pass
 without the ML stack; **Tier-2** parity (real embeddings/clustering) is verified
 on a host with onnxruntime/Ollama installed.
@@ -128,10 +135,14 @@ on a host with onnxruntime/Ollama installed.
 
 ✅ **Built + verified:** D1 adapter, MCP server (stdio), HTTP + REST transports,
 OAuth 2.1, two-key vault encryption, search, topology pipeline, getContext (D5),
-ingestion + encrypted uploads, full enrichment pipeline (embed + NLP rules), 36 tools.
+ingestion + encrypted uploads, full enrichment pipeline (embed + NLP rules), 36 tools,
+local portal UI (capture/search/mindscape/tasks + tools console).
 
 ⚠️ **Built, Tier-2-gated:** real Nomic embeddings + clustering (need onnxruntime/
 Ollama on the host).
+
+◑ **Scaffolded (build on Mac):** native Tauri shell (`src-tauri/`) — wraps the
+portal into `Mycelium.app`; Rust built on the Mac per `src-tauri/BUILD-MAC.md`.
 
 ⬜ **Planned / not yet built:** inference router (Ollama + BYOK), agent templates,
 first-run key-setup ceremony, Cloudflare Tunnel deploy, real-data import. See

@@ -456,3 +456,32 @@ also removed from the inference branch so PR #12 is inference-only.
 **Note:** this branch is off main, so it does NOT include the inference router
 (PR #12). When both merge, bump SETUP/ARCHITECTURE suite count to 15 + re-add the
 inference rows.
+
+---
+
+## 2026-06-01 — Local portal UI + native Mac shell scaffold (15/15 GO)
+
+**Branch `claude/portal-app` off main.** User wants a native Mac app. Architecture:
+a Tauri shell whose webview loads a **portal served by the local server**, which
+also serves the REST API (same origin → no CORS). The portal is the substance and
+is fully verified here; the Tauri shell builds on the Mac (no Rust in CI).
+
+- `portal/index.html`: dependency-free single-file SPA (tabs: Home=getContext,
+  Capture=captureMessage, Search=searchMindscape, Mindscape=mindscapeStructure/
+  listTerritories, Tasks=listTasks/createTask, Tools=generic call any of 31 tools).
+  Calls `/api/v1/*`; tiny markdown renderer for the markdown-string results.
+  Arg names taken from live inputSchemas (captureMessage.content, searchMindscape.query, …).
+- `src/server-rest.js`: serves `portal/` statically at `/` after the API router
+  (so `/api/v1/*` wins); `npm run portal` alias. localhost-only, no auth (Phase 4).
+- `scripts/verify-portal.mjs` (`verify:portal`): P1-P6 — page served, API wired,
+  no route shadowing, live getContext, **capture→search round-trip on real data**,
+  404 on bogus paths. Full suite **15/15 GO**.
+- `src-tauri/` (Tauri v2 scaffold): `tauri.conf.json`, `Cargo.toml`, `build.rs`,
+  `src/main.rs` (spawns the Node server with MYCELIUM_KEY_SOURCE=keychain, waits for
+  the port, opens the window, kills the child on close), `BUILD-MAC.md` (rustup +
+  `cargo tauri dev`/`build` → Mycelium.app/.dmg). **Rust untested in sandbox** —
+  honestly flagged; portal is the verified part.
+
+**Next:** build the shell on the M1 (`cargo tauri dev`) to confirm/adjust main.rs;
+then bundle Node as a resource/sidecar for a self-contained .app. Portal features
+can grow (browse/day view, topology viz) against the same REST surface.
