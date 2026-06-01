@@ -1,0 +1,77 @@
+// src/inference/local.js — local Ollama backend (Component 6).
+//
+// Privacy-first: this path keeps inference ON-BOX. It POSTs to the Ollama HTTP
+// API bound on 127.0.0.1:11434 — plaintext never leaves the machine. This is
+// the default for the router and the fallback for every task.
+//
+// Fail-closed + leak-safe: a non-OK response or unreachable Ollama throws an
+// InferenceError; error messages carry status/backend only — NEVER the prompt
+// or the model's response (both are user plaintext).
+
+import { InferenceError } from "./errors.js";
+
+export const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
+export const DEFAULT_LOCAL_MODEL = "llama3.1";
+
+/**
+ * Generate text from a local Ollama model.
+ * @param {object} opts
+ * @param {string} opts.prompt                 non-empty prompt
+ * @param {number} [opts.maxTokens=1024]       maps to Ollama num_predict
+ * @param {string} [opts.model="llama3.1"]
+ * @param {string} [opts.baseUrl="http://127.0.0.1:11434"]
+ * @param {typeof fetch} [opts.fetch]          injectable (defaults to global)
+ * @param {number} [opts.timeoutMs=60000]
+ * @returns {Promise<string>}                  the generated text
+ */
+export async function localInfer({
+  prompt,
+  maxTokens = 1024,
+  model = DEFAULT_LOCAL_MODEL,
+  baseUrl = DEFAULT_OLLAMA_URL,
+  fetch = globalThis.fetch,
+  timeoutMs = 60000,
+} = {}) {
+  if (typeof fetch !== "function") {
+    throw new InferenceError("localInfer: no fetch implementation (Node >= 18 or pass opts.fetch)", { backend: "local" });
+  }
+  if (typeof prompt !== "string" || prompt.length === 0) {
+    throw new InferenceError("localInfer: prompt must be a non-empty string", { backend: "local" });
+  }
+
+  const url = `${baseUrl.replace(/\/+$/, "")}/api/generate`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, prompt, stream: false, options: { num_predict: maxTokens } }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    const reason = err?.name === "AbortError" ? `timed out after ${timeoutMs}ms` : "is Ollama running?";
+    throw new InferenceError(`localInfer: Ollama unreachable at ${url} (${reason})`, { cause: err, backend: "local" });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const text = await res.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch (err) {
+    throw new InferenceError(`localInfer: Ollama returned non-JSON (status ${res.status})`, { cause: err, status: res.status, backend: "local" });
+  }
+  // Deliberately do NOT echo the body — it can reflect the prompt.
+  if (!res.ok) {
+    throw new InferenceError(`localInfer: Ollama error (status ${res.status})`, { status: res.status, backend: "local" });
+  }
+  if (typeof data.response !== "string") {
+    throw new InferenceError("localInfer: Ollama response missing .response field", { backend: "local" });
+  }
+  return data.response;
+}
+
+export default localInfer;

@@ -43,6 +43,7 @@ Two **sidecar services** run as their own processes:
 | Migration runner | `src/db/migrate.js` + `migrations/000*.sql` | ✅ |
 | Scope-partitioned crypto (two-key vault) | `src/crypto/crypto-local.js`, `src/crypto/keys.js`, `src/crypto/guardians/*` | ✅ |
 | Embeddings client | `src/embed/client.js` (→ `:8091`) | ⚠️ Tier-2 |
+| Inference router (local Ollama + BYOK cloud) | `src/inference/{router,local,cloud,errors}.js` | ✅ (real models need Ollama/keys) |
 | Search (BM25 + vector + RRF fusion) | `src/search/**` | ✅ |
 | Topology / AnalysisEngine pipeline | `src/topology.js`, `src/topology/helpers.js`, `pipeline/` | ✅ (real run ⚠️) |
 | Ingestion choke-point + uploads | `src/ingest/{capture,upload,blob-store,enqueue}.js` | ✅ |
@@ -110,9 +111,10 @@ hashtag + keyword tags) behind a seam a model-backed pass can replace.
 
 ## 9. Verification
 
-`npm run verify` runs **14 GO-gated suites** (`scripts/verify-*.mjs`), each with
+`npm run verify` runs **15 GO-gated suites** (`scripts/verify-*.mjs`), each with
 a PASS/FAIL ledger + VERDICT line: foundation, mcp, mindfiles, metrics, rest,
-search, topology, embed, oauth, context, ingest, blob, enqueue, enrich. CI
+search, topology, embed, oauth, context, ingest, blob, enqueue, enrich,
+inference. CI
 (`.github/workflows/verify.yml`) runs them on every PR. **Tier-1** suites pass
 without the ML stack; **Tier-2** parity (real embeddings/clustering) is verified
 on a host with onnxruntime/Ollama installed.
@@ -121,11 +123,13 @@ on a host with onnxruntime/Ollama installed.
 
 ✅ **Built + verified:** D1 adapter, MCP server (stdio), HTTP + REST transports,
 OAuth 2.1, two-key vault encryption, search, topology pipeline, getContext (D5),
-ingestion + encrypted uploads, full enrichment pipeline (embed + NLP rules), 36 tools.
+ingestion + encrypted uploads, full enrichment pipeline (embed + NLP rules),
+inference router (local Ollama + BYOK cloud, opt-in egress), 36 tools.
 
 ⚠️ **Built, Tier-2-gated:** real Nomic embeddings + clustering (need onnxruntime/
-Ollama on the host).
+Ollama on the host); inference router's *cloud* path needs a BYOK key, its
+*local* path needs Ollama running.
 
-⬜ **Planned / not yet built:** inference router (Ollama + BYOK), agent templates,
-first-run key-setup ceremony, Cloudflare Tunnel deploy, real-data import. See
+⬜ **Planned / not yet built:** agent templates, first-run key-setup ceremony,
+Cloudflare Tunnel deploy, real-data import. See
 [`V1-BUILD-SPEC.md`](V1-BUILD-SPEC.md) §"What's left".
