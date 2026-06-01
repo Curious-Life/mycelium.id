@@ -65,7 +65,7 @@ npm run init-db
 Expected output (exact):
 
 ```
-init-db: 117 tables in data/mycelium.db (2 migrations: 0001_init.sql, 0002_attachments_local_path.sql)
+init-db: 117 tables in data/mycelium.db (3 migrations: 0001_init.sql, 0002_attachments_local_path.sql, 0003_documents_publish_nonce.sql)
 ```
 
 The schema *defines* 111 tables (`migrations/0001_init.sql`); the physical count

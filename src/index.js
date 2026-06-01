@@ -103,11 +103,24 @@ async function startEnrich() {
   console.error(`[mycelium] enrichment service on ${url} — POST /enrich-all, GET /health`);
 }
 
+async function startPublic() {
+  // Lazy import so other paths never load the public server. Serves ONLY
+  // explicitly published/unlisted docs (fail-closed) — point your domain/tunnel
+  // at MYCELIUM_PUBLIC_HOST:MYCELIUM_PUBLIC_PORT (default 127.0.0.1:8788).
+  const { startPublicServer } = await import('./publish/public-server.js');
+  const port = Number(process.env.MYCELIUM_PUBLIC_PORT ?? 8788);
+  const host = process.env.MYCELIUM_PUBLIC_HOST ?? '127.0.0.1';
+  const { url, identity } = await startPublicServer({ port, host });
+  console.error(`[mycelium] PUBLIC surface on ${url} — published/unlisted docs only (handle: ${identity.handle ?? 'unset'})`);
+}
+
 // Run only when invoked directly (not when imported by a verifier).
 if (import.meta.url === `file://${process.argv[1]}`) {
   let run = startStdio;
   if (process.argv.includes('--enrich') || process.env.MYCELIUM_ENRICH === '1') {
     run = startEnrich;
+  } else if (process.argv.includes('--public') || process.env.MYCELIUM_PUBLIC === '1') {
+    run = startPublic;
   } else if (process.argv.includes('--http') || process.env.MYCELIUM_HTTP === '1') {
     run = startHttp;
   }

@@ -14,6 +14,13 @@
  * @property {(result: any) => any} firstRow
  */
 
+import { randomBytes } from 'node:crypto';
+
+/** A fresh capability epoch for unlisted links (16 bytes hex = 128 bits). */
+function randomNonce() {
+  return randomBytes(16).toString('hex');
+}
+
 export function createDocumentsNamespace(deps) {
   if (!deps) throw new TypeError('createDocumentsNamespace: deps required');
   const { d1Query, firstRow } = deps;
@@ -221,33 +228,38 @@ export function createDocumentsNamespace(deps) {
     },
 
     /**
-     * Set public_slug WITHOUT touching the published flag. Used by the
-     * /share route to assign a slug for a doc that isn't being made
-     * fully public — the share-link recipient still needs the R2
-     * artifact to exist at a stable key.
+     * Share a doc as UNLISTED: assign a public_slug WITHOUT setting published=1,
+     * and ensure a `publish_nonce` (the capability epoch) exists so signed
+     * /s/<slug> links can be minted and later revoked.
      *
-     * Idempotent: COALESCE keeps the existing slug if one is already
-     * set (slugs are immutable until explicit rename, same policy as
-     * publish()).
+     * Idempotent: COALESCE keeps the existing slug AND the existing nonce if set
+     * — so re-sharing the same doc keeps its URL and keeps previously-minted
+     * links valid (slugs/nonces are immutable until explicit rename/revoke).
+     * A doc whose nonce was revoked (NULL) gets a FRESH nonce here — old links
+     * stay dead, new ones work.
+     *
+     * Returns the full row (callers need both `public_slug` and `publish_nonce`
+     * to mint a link via src/publish/links.js#mintLink).
      */
     async setPublicSlug(userId, path, slug) {
       if (typeof slug !== 'string' || slug.length === 0) {
         throw new Error('setPublicSlug: slug required');
       }
-      // RETURNING * so the afterUpsertHook receives the full row;
-      // existing route-layer callers only consume the slug string,
-      // so we keep the historic return shape (string|null).
+      const nonce = randomNonce();
+      // RETURNING * so the afterUpsertHook receives the full row and callers can
+      // read the (coalesced) public_slug + publish_nonce to mint a link.
       const result = await d1Query(
         `UPDATE documents
             SET public_slug = COALESCE(public_slug, ?),
+                publish_nonce = COALESCE(publish_nonce, ?),
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
           WHERE user_id = ? AND path = ?
         RETURNING *`,
-        [slug, userId, path],
+        [slug, nonce, userId, path],
       );
       const row = firstRow(result);
       if (row && afterUpsertHooks.length) fireHooks(afterUpsertHooks, row);
-      return row?.public_slug || null;
+      return row;
     },
 
     /**
@@ -277,14 +289,41 @@ export function createDocumentsNamespace(deps) {
     },
 
     /**
-     * Set published=0. public_slug is intentionally retained — if the
-     * doc is re-published later it keeps the same URL. The R2 artifact
-     * is deleted by the route layer's isPublic check.
+     * Take a doc back fully (make private). published=0 AND publish_nonce=NULL
+     * — the latter INSTANTLY revokes every previously-minted unlisted /s/ link
+     * (their embedded nonce no longer matches; NULL nonce is never servable).
+     * public_slug is intentionally retained so a later re-publish keeps the same
+     * URL; re-sharing as unlisted mints a FRESH nonce (old links stay dead). The
+     * R2 artifact is deleted by the route layer's isPublic check.
+     *
+     * Fail-closed: "unpublish" means the public can no longer reach it by ANY
+     * path — both the public /p/ route (published=0) and unlisted /s/ tokens.
      */
     async unpublish(userId, path) {
       const result = await d1Query(
         `UPDATE documents
             SET published = 0,
+                publish_nonce = NULL,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          WHERE user_id = ? AND path = ?
+        RETURNING *`,
+        [userId, path],
+      );
+      const row = firstRow(result);
+      if (row && afterUpsertHooks.length) fireHooks(afterUpsertHooks, row);
+      return row;
+    },
+
+    /**
+     * Revoke ONLY the unlisted links (publish_nonce=NULL) while leaving the
+     * doc's published state untouched. Use this to kill outstanding /s/ links
+     * without un-publishing a doc that is also public. Re-sharing mints a fresh
+     * nonce. Returns the updated row.
+     */
+    async revokeShareLinks(userId, path) {
+      const result = await d1Query(
+        `UPDATE documents
+            SET publish_nonce = NULL,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
           WHERE user_id = ? AND path = ?
         RETURNING *`,
