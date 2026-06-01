@@ -86,7 +86,7 @@ mycelium.id/
 ├── CLAUDE.md                            # this file
 ├── package.json                         # npm workspaces (to be added)
 ├── assets/
-│   └── mycelium-sumi-e.svg              # brand
+│   └── mushroom.svg                     # brand icon (favicon + Tauri app icon)
 ├── docs/
 │   ├── REDESIGN-LIVING-SPEC.md          # the design source of truth
 │   └── legacy/                          # harvested from legacy-* tags

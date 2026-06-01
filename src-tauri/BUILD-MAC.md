@@ -41,7 +41,7 @@ window. First compile takes a few minutes; subsequent runs are fast.
 ## 2. Generate app icons (once, before bundling)
 
 ```bash
-cargo tauri icon ../assets/mycelium-sumi-e.svg
+cargo tauri icon ../assets/mushroom.svg
 # writes src-tauri/icons/* (icon.icns, 128x128.png, …) referenced by tauri.conf.json
 ```
 
