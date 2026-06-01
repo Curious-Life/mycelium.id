@@ -77,7 +77,9 @@ export async function startRestServer({
   const { dir: portalDir, spaFallback } = resolvePortal(portalMode);
   app.use(express.static(portalDir));
   if (spaFallback) {
-    app.get(/^\/(?!api\/|ingest\/)(?:[^.]*)$/, (req, res, next) => {
+    // /api, /ingest, /portal are data paths — never shadow them with the SPA
+    // shell (so unmatched data calls 404 cleanly instead of returning HTML).
+    app.get(/^\/(?!api\/|ingest\/|portal\/)(?:[^.]*)$/, (req, res, next) => {
       if (req.method !== 'GET' || !req.accepts('html')) return next();
       res.sendFile(spaFallback);
     });
