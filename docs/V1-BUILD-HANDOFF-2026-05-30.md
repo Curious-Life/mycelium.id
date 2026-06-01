@@ -459,6 +459,36 @@ inference rows.
 
 ---
 
+## 2026-06-01 — Master-key source: macOS Keychain + 1Password (15/15 GO)
+
+**Branch `claude/key-source` off main.** User decision: hold the master key in the
+macOS Keychain and/or 1Password instead of copy-pasting two 64-char hex strings.
+KCV stays (it's a safety interlock, not a chore; fits local *more*, not less).
+
+- `src/crypto/key-source.js`: `resolveKeys({env,exec})` reads the two hex keys from
+  `MYCELIUM_KEY_SOURCE` = env (default) | keychain (`security find-generic-password`)
+  | 1password (`op read <ref>`). Shell-injection-safe (execFile arg arrays, no shell),
+  fail-closed, secret never logged/echoed/in errors.
+- `src/index.js` boot(): resolves keys via the source layer when not injected;
+  env default preserves USER_MASTER_KEY/SYSTEM_KEY behavior (all tests pass explicit
+  hex, so unchanged). The crypto/unlock/KCV are untouched — only key *acquisition* moved.
+- `scripts/set-keys.mjs` (`npm run set-keys`): generate + store both keys in the
+  login Keychain (`-U` upsert); `--show` reveals them for 1Password; prints the `op`
+  item-create command + the op:// refs to export.
+- `scripts/verify-keysource.mjs` (`npm run verify:keysource`): K1-K11 (mock exec) —
+  env/keychain/1password paths, argv correctness, fail-closed, **shell-injection-safety**,
+  **no-secret-leakage**. Full suite now **15/15 GO**.
+- Also fixed two real install blockers found by actually running it on Linux:
+  embed-service needs `--serve` (SETUP.md omitted it → printed help + exited), and
+  `requirements-embed.txt`'s own comment told you to install the wrong (heavy
+  topology) requirements file. Both corrected.
+- SETUP.md: step 4 rewritten around Keychain/1Password (Claude Desktop config now
+  carries `MYCELIUM_KEY_SOURCE=keychain` and **no keys**); embed `--serve`; 15 suites.
+
+**Security-sensitive (master-key handling) → this PR needs human review before merge.**
+
+---
+
 ## 2026-06-01 — Local portal UI + native Mac shell scaffold (15/15 GO)
 
 **Branch `claude/portal-app` off main.** User wants a native Mac app. Architecture:

@@ -49,6 +49,7 @@ Two **sidecar services** run as their own processes:
 | DB namespaces (per table) | `src/db/*.js` | ✅ |
 | Migration runner | `src/db/migrate.js` + `migrations/000*.sql` | ✅ |
 | Scope-partitioned crypto (two-key vault) | `src/crypto/crypto-local.js`, `src/crypto/keys.js`, `src/crypto/guardians/*` | ✅ |
+| Master-key source (env / macOS Keychain / 1Password) | `src/crypto/key-source.js`, `scripts/set-keys.mjs` | ✅ |
 | Embeddings client + search adapter | `src/embed/client.js` (→ `:8091`), `src/search/embedder.js` (`createServiceEmbedder`) | ✅ (real vectors ⚠️ Tier-2) |
 | Search (BM25 + vector + RRF fusion) | `src/search/**` | ✅ |
 | Topology / AnalysisEngine pipeline | `src/topology.js`, `src/topology/helpers.js`, `pipeline/` | ✅ (real run ⚠️) |
@@ -98,7 +99,13 @@ hashtag + keyword tags) behind a seam a model-backed pass can replace.
 ## 6. Security model
 
 - **Two 64-char hex keys** (decisions D4 + D6): `USER_MASTER` + `SYSTEM_KEY`
-  (32 bytes each), copy-paste, no BIP-39. Per-key KCV guards typos.
+  (32 bytes each), no BIP-39. Per-key KCV guards typos.
+- **Key source** (`src/crypto/key-source.js`, `MYCELIUM_KEY_SOURCE`): the two hex
+  keys are read at boot from `env` (default), the **macOS Keychain**, or
+  **1Password** (`op`). Keychain/1Password keep keys out of shell history and
+  config files (and out of the process env until unlock). Shell-injection-safe
+  (`execFile` arg arrays), fail-closed, never logged. `npm run set-keys` provisions.
+  KCV (above) stays as the integrity interlock regardless of source.
 - **Envelope encryption:** AES-256-GCM wrapped-DEK (`src/crypto/crypto-local.js`).
   `ENCRYPTED_FIELDS` are encrypted/decrypted transparently by the adapter on
   write/read — callers handle plaintext, storage holds ciphertext.
@@ -124,9 +131,9 @@ hashtag + keyword tags) behind a seam a model-backed pass can replace.
 
 ## 9. Verification
 
-`npm run verify` runs **15 GO-gated suites** (`scripts/verify-*.mjs`), each with
+`npm run verify` runs **16 GO-gated suites** (`scripts/verify-*.mjs`), each with
 a PASS/FAIL ledger + VERDICT line: foundation, mcp, mindfiles, metrics, rest,
-search, topology, embed, oauth, context, ingest, blob, enqueue, enrich, portal. CI
+search, topology, embed, oauth, context, ingest, blob, enqueue, enrich, keysource, portal. CI
 (`.github/workflows/verify.yml`) runs them on every PR. **Tier-1** suites pass
 without the ML stack; **Tier-2** parity (real embeddings/clustering) is verified
 on a host with onnxruntime/Ollama installed.
@@ -135,8 +142,9 @@ on a host with onnxruntime/Ollama installed.
 
 ✅ **Built + verified:** D1 adapter, MCP server (stdio), HTTP + REST transports,
 OAuth 2.1, two-key vault encryption, search, topology pipeline, getContext (D5),
-ingestion + encrypted uploads, full enrichment pipeline (embed + NLP rules), 36 tools,
-local portal UI (capture/search/mindscape/tasks + tools console).
+ingestion + encrypted uploads, full enrichment pipeline (embed + NLP rules),
+query embedder wiring, master-key source (env/Keychain/1Password + `set-keys`),
+36 tools, local portal UI (capture/search/mindscape/tasks + tools console).
 
 ⚠️ **Built, Tier-2-gated:** real Nomic embeddings + clustering (need onnxruntime/
 Ollama on the host).
@@ -144,6 +152,6 @@ Ollama on the host).
 ◑ **Scaffolded (build on Mac):** native Tauri shell (`src-tauri/`) — wraps the
 portal into `Mycelium.app`; Rust built on the Mac per `src-tauri/BUILD-MAC.md`.
 
-⬜ **Planned / not yet built:** inference router (Ollama + BYOK), agent templates,
-first-run key-setup ceremony, Cloudflare Tunnel deploy, real-data import. See
+⬜ **Planned / not yet built:** inference router (Ollama + BYOK — open as PR #12),
+agent templates, Cloudflare Tunnel deploy, real-data import. See
 [`V1-BUILD-SPEC.md`](V1-BUILD-SPEC.md) §"What's left".
