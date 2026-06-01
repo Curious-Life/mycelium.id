@@ -70,6 +70,13 @@ async function main() {
     const miss = await fetch(`${url}/does-not-exist.js`);
     rec('P6. unknown static path → 404', miss.status === 404, `status=${miss.status}`);
 
+    // P6b — the mushroom favicon is served + linked
+    const fav = await fetch(`${url}/favicon.svg`);
+    const favBody = await fav.text();
+    rec('P6b. /favicon.svg served as SVG (mushroom icon) + linked in the page',
+      fav.status === 200 && /svg/i.test(fav.headers.get('content-type') || '') && favBody.includes('<svg') && html.includes('favicon.svg'),
+      `status=${fav.status}`);
+
     // P7 — file UPLOAD via the portal route → encrypted attachment + message
     const fileBytes = Buffer.from(`portal upload ${token} ` + 'x'.repeat(2048));
     const upRes = await fetch(`${url}/api/v1/upload?filename=note.txt&type=text/plain&asMessage=1`, {

@@ -1,0 +1,27 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Mycelium">
+  <defs>
+    <linearGradient id="cap" x1="96" y1="120" x2="416" y2="316" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5B9FE8"/>
+      <stop offset="1" stop-color="#A78BFA"/>
+    </linearGradient>
+    <linearGradient id="stem" x1="222" y1="300" x2="290" y2="420" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F2F2F5"/>
+      <stop offset="1" stop-color="#C9C9D2"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded tile so it reads as an app icon / favicon -->
+  <rect width="512" height="512" rx="116" fill="#141417"/>
+
+  <!-- stem (with a slight gill flare under the cap) -->
+  <path d="M224 300 H288 L283 392 C283 410 271 421 256 421 C241 421 229 410 229 392 Z" fill="url(#stem)"/>
+
+  <!-- cap: a wide overhanging dome -->
+  <path d="M96 296 C96 182 168 122 256 122 C344 122 416 182 416 296 C416 311 403 318 386 318 H126 C109 318 96 311 96 296 Z" fill="url(#cap)"/>
+
+  <!-- spores / spots -->
+  <circle cx="206" cy="216" r="17" fill="#FFFFFF" fill-opacity="0.9"/>
+  <circle cx="292" cy="196" r="12" fill="#FFFFFF" fill-opacity="0.85"/>
+  <circle cx="330" cy="250" r="11" fill="#FFFFFF" fill-opacity="0.75"/>
+  <circle cx="246" cy="262" r="9" fill="#FFFFFF" fill-opacity="0.7"/>
+</svg>
