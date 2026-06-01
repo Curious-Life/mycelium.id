@@ -19,7 +19,8 @@ import crypto from 'node:crypto';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 
-import { boot } from '../src/index.js';
+import { boot, resolveDefaultEmbedder } from '../src/index.js';
+import { createServiceEmbedder, assertEmbedder, safeEmbed } from '../src/search/embedder.js';
 import {
   createSearchHelpers,
   createStubEmbedder,
@@ -238,6 +239,88 @@ async function mcpIntegration() {
   close();
 }
 
+// ── R2 wiring: the service-embedder adapter + boot resolver ────────────────
+// A MOCK :8091 (no real model). Proves the embed-service client is correctly
+// adapted to the search embedder contract — including the call-shape bridge
+// ({task} object → positional string) whose absence would silently disable
+// semantic search even with :8091 up.
+function makeEmbedFetch(captured = {}) {
+  const json = (o) => ({ ok: true, status: 200, text: async () => JSON.stringify(o) });
+  const fn = async (url, opts = {}) => {
+    if (url.endsWith('/health')) return json({ status: 'ok', model: 'mock', loaded: true, dim: 768 });
+    if (url.endsWith('/embed')) {
+      captured.body = JSON.parse(opts.body);
+      const vec = new Array(768).fill(0); vec[0] = 1; // unit vector
+      return json({ embedding: vec, dim: 768, model: 'mock', task: captured.body.task });
+    }
+    throw new Error(`mock embed-service: unexpected ${url}`);
+  };
+  fn.captured = captured;
+  return fn;
+}
+
+async function serviceEmbedderWiring() {
+  // E1 — the bridge: embed(text, { task }) must reach the client as a positional
+  // string and return a 768-vector. Pre-fix this threw "unknown task {…}".
+  {
+    const fetch = makeEmbedFetch();
+    const emb = createServiceEmbedder({ fetch });
+    let vec = null, threw = null;
+    try { vec = await emb.embed('hello world', { task: 'query' }); } catch (e) { threw = e; }
+    rec('E1. service embedder bridges embed(text,{task}) → 768-vector (no "unknown task")',
+      !threw && Array.isArray(vec) && vec.length === 768, threw ? `threw=${threw.message}` : `len=${vec?.length}`);
+    rec('E2. the task reaches /embed as the STRING "query" (correct wire format)',
+      fetch.captured.body?.task === 'query', `body.task=${JSON.stringify(fetch.captured.body?.task)}`);
+  }
+
+  // E3 — satisfies the { embed, health } contract + reports unit:true (L2-normalized).
+  {
+    const emb = createServiceEmbedder({ fetch: makeEmbedFetch() });
+    let ok = true; try { assertEmbedder(emb); } catch { ok = false; }
+    rec('E3. service embedder satisfies assertEmbedder + reports unit:true',
+      ok && emb.unit === true, `unit=${emb.unit}`);
+  }
+
+  // E4 — the exact backend call path: safeEmbed → Float32Array.
+  {
+    const emb = createServiceEmbedder({ fetch: makeEmbedFetch() });
+    const out = await safeEmbed(emb, 'hi', 'query');
+    rec('E4. safeEmbed(serviceEmbedder, …) returns a Float32Array (backend call path)',
+      out instanceof Float32Array && out.length === 768, `len=${out?.length}`);
+  }
+
+  // E5 — end-to-end: a search through searchHelpers with the service embedder up
+  // actually embeds the query (semantic path active, not silent BM25 fallback).
+  {
+    const fetch = makeEmbedFetch();
+    const emb = createServiceEmbedder({ fetch });
+    const sh = createSearchHelpers({ db: null, embedder: emb });
+    for (let i = 0; i < ROWS.length; i++) await sh.indexDocument({ id: ROWS[i].id, text: ROWS[i].content, ts: 1000 + i });
+    const hits = await sh.search('forest mycelium roots', { limit: 3 });
+    rec('E5. searchHelpers with the service embedder embeds the query (semantic path live)',
+      fetch.captured.body?.task === 'query' && Array.isArray(hits) && hits.length > 0,
+      `queryEmbedded=${fetch.captured.body?.task === 'query'} hits=${hits?.length}`);
+  }
+
+  // E6 — boot resolver: default wires an embedder; opt-out yields null (BM25).
+  {
+    const def = resolveDefaultEmbedder({ env: {} });
+    let ok = true; try { assertEmbedder(def); } catch { ok = false; }
+    const off = resolveDefaultEmbedder({ env: { MYCELIUM_DISABLE_EMBED: '1' } });
+    rec('E6. resolveDefaultEmbedder: default → valid embedder; MYCELIUM_DISABLE_EMBED=1 → null',
+      ok && off === null, `defaultOk=${ok} disabled=${off}`);
+  }
+
+  // E7 — health() is coerced to a boolean per the contract (and false on error).
+  {
+    const up = createServiceEmbedder({ fetch: makeEmbedFetch() });
+    const down = createServiceEmbedder({ fetch: async () => { throw new Error('refused'); } });
+    const hUp = await up.health(); const hDown = await down.health();
+    rec('E7. health() → boolean (true when up, false when :8091 unreachable)',
+      hUp === true && hDown === false, `up=${hUp} down=${hDown}`);
+  }
+}
+
 async function main() {
   console.log('— Layer 1: ported primitives —');
   unitPrimitives();
@@ -245,6 +328,8 @@ async function main() {
   await unitPipeline();
   console.log('\n— Layer 1: bulkSearch grouping against real DB —');
   await bulkSearchDb();
+  console.log('\n— Layer 1b: service-embedder wiring (mock :8091) —');
+  await serviceEmbedderWiring();
   console.log('\n— Layer 2: real MCP server integration —');
   await mcpIntegration();
 

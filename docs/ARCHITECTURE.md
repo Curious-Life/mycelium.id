@@ -42,7 +42,7 @@ Two **sidecar services** run as their own processes:
 | DB namespaces (per table) | `src/db/*.js` | ✅ |
 | Migration runner | `src/db/migrate.js` + `migrations/000*.sql` | ✅ |
 | Scope-partitioned crypto (two-key vault) | `src/crypto/crypto-local.js`, `src/crypto/keys.js`, `src/crypto/guardians/*` | ✅ |
-| Embeddings client | `src/embed/client.js` (→ `:8091`) | ⚠️ Tier-2 |
+| Embeddings client + search adapter | `src/embed/client.js` (→ `:8091`), `src/search/embedder.js` (`createServiceEmbedder`) | ✅ (real vectors ⚠️ Tier-2) |
 | Search (BM25 + vector + RRF fusion) | `src/search/**` | ✅ |
 | Topology / AnalysisEngine pipeline | `src/topology.js`, `src/topology/helpers.js`, `pipeline/` | ✅ (real run ⚠️) |
 | Ingestion choke-point + uploads | `src/ingest/{capture,upload,blob-store,enqueue}.js` | ✅ |
@@ -67,6 +67,13 @@ search (BM25 + vector, RRF fusion)  +  getContext preamble (D5)
    ▼
 back to the client as tool results
 ```
+
+**Query embedder wiring:** `boot()` (`src/index.js`) auto-wires the query-time
+embedder via `resolveDefaultEmbedder()` → `createServiceEmbedder()` (an adapter
+that bridges the embed client's positional-task signature to the search
+embedder's `{task}` contract, and reports `unit:true` since the embed-service
+L2-normalizes). The backend fail-softs to BM25 per query when `:8091` is down.
+Opt out with `MYCELIUM_DISABLE_EMBED=1`; redirect with `MYCELIUM_EMBED_URL`.
 
 Enrichment state machine (faithful to the canonical model): **`0 unprocessed →
 2 embedded → 1 enriched → -1 failed`**. The NLP pass (`src/enrich/extract.js`)

@@ -418,3 +418,41 @@ bug. The embed-service is part of V1; both run together.
 
 **D7 remaining:** Tier-2 real-embedding parity only (onnxruntime-gated). The
 embed-on-write + NLP-rules pipeline is otherwise complete + launchable end to end.
+
+---
+
+## 2026-06-01 — Local setup completed: query embedder WIRED + SETUP.md (own branch/PR)
+
+**Branch `claude/local-setup` off main. 14/14 suites GO (verify-search now 39 checks).**
+
+Two things, on a branch separate from the inference PR (#12):
+
+1. **Wired the query-time embedder (the "R2 TODO") + fixed a latent integration
+   bug.** `boot()` now auto-wires the embed-service client so semantic search is
+   live out of the box (fail-soft to BM25 when :8091 is down).
+   - **Bug found + fixed:** `safeEmbed` calls `embed(text, { task })` (object),
+     but the embed client's `embed(text, taskString)` runs `assertTask()` and
+     would reject the object → every query silently fell back to BM25 even with
+     :8091 up. New `createServiceEmbedder` (`src/search/embedder.js`) bridges the
+     call shapes and reports `unit:true` (embed-service L2-normalizes, confirmed
+     `pipeline/embed-service.py:182`), matching the backend's unit-cosine path.
+   - `src/index.js`: `resolveDefaultEmbedder()` (exported, testable) — default
+     wires the client; `MYCELIUM_DISABLE_EMBED=1` → null (BM25); `MYCELIUM_EMBED_URL`
+     redirects. `boot()`'s `embedder` default now resolves it (was hardcoded null).
+   - `scripts/verify-search.mjs`: +E1-E7 (mock :8091) — bridge, wire format,
+     contract, safeEmbed path, end-to-end semantic query, resolver, health bool.
+   - Full suite stays GO: every other suite omits `embedder` → auto-wires →
+     :8091 down → fail-soft BM25 (identical observable behavior).
+
+2. **`docs/SETUP.md`** — verified local-setup guide (macOS + Linux for a home
+   server). Corrected from the draft: repo `mycelium.id`, init-db `117 tables /
+   2 migrations`, 14 suites, boot `31 tools; 2 deferred (reply, services)`,
+   17 tool modules, `adapter/d1.js` as the encrypting adapter, and step 8 now
+   honest — semantic search IS wired (no longer "BM25 only").
+
+Docs updated per living-docs (ARCHITECTURE §3/§4, this handoff). SETUP.md was
+also removed from the inference branch so PR #12 is inference-only.
+
+**Note:** this branch is off main, so it does NOT include the inference router
+(PR #12). When both merge, bump SETUP/ARCHITECTURE suite count to 15 + re-add the
+inference rows.
