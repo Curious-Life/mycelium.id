@@ -1,6 +1,13 @@
 import express from 'express';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { boot } from './index.js';
 import { apiRouter } from './api.js';
+
+// The static portal (single-file SPA) lives at <repo>/portal, served at / from
+// the SAME origin as the API so the browser/Tauri webview calls /api/v1/* with
+// no CORS. localhost-only (see SECURITY note above).
+const PORTAL_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'portal');
 
 /**
  * startRestServer({ dbPath, port, host }) — boot the shared assembly and
@@ -38,6 +45,9 @@ export async function startRestServer({
   const app = express();
   app.disable('x-powered-by');
   app.use(apiRouter({ tools, handlers }));
+  // Portal UI after the API router (so /api/v1/* matches first). express.static
+  // serves portal/index.html at GET /.
+  app.use(express.static(PORTAL_DIR));
 
   const server = await new Promise((resolve, reject) => {
     const s = app.listen(port, host, () => resolve(s));
@@ -59,7 +69,7 @@ async function main() {
   const port = Number(process.env.MYCELIUM_REST_PORT ?? 8787);
   const host = process.env.MYCELIUM_REST_HOST ?? '127.0.0.1';
   const { url, server, close } = await startRestServer({ port, host });
-  process.stderr.write(`mycelium REST listening on ${url} (localhost-only, no auth — Phase 4)\n`);
+  process.stderr.write(`mycelium portal + REST on ${url} (open in a browser; localhost-only, no auth — Phase 4)\n`);
 
   const shutdown = () => {
     server.close(() => {
