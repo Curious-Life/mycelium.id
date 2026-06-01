@@ -14,16 +14,40 @@
 // so all storage goes through the audited, encrypting write path — the parser
 // module itself never touches the db or crypto directly.
 
-const MAX_JSON_CHARS = 400 * 1024 * 1024; // 400M chars — refuse absurd conversations.json
-const MAX_MESSAGES   = 1_000_000;          // bound the work per import
+const MAX_JSON_BYTES = Number(process.env.MYCELIUM_IMPORT_MAX_JSON_BYTES) || 400 * 1024 * 1024; // cap on conversations.json (bytes)
+const MAX_MESSAGES   = Number(process.env.MYCELIUM_IMPORT_MAX_MESSAGES) || 1_000_000;            // bound the work per import
 
-/** Read a zip text entry with a size guard. Returns null if absent/oversized. */
-async function readTextEntry(zip, name) {
+/**
+ * Read a zip text entry, hard-capping inflated bytes. Two independent layers so
+ * a decompression bomb can never exhaust memory:
+ *   1) fast reject using the entry's DECLARED uncompressed size (central
+ *      directory) before inflating — kills honest bombs for ~free; and
+ *   2) a STREAMING byte counter that aborts inflation the instant the output
+ *      passes MAX_JSON_BYTES — bounds memory even if the header lies low or a
+ *      future jszip drops the internal size field (layer 1 is then a no-op and
+ *      layer 2 still holds). Returns null if the entry is absent or oversized.
+ */
+function readTextEntry(zip, name) {
   const entry = zip.file(name);
-  if (!entry) return null;
-  const text = await entry.async('string');
-  if (typeof text !== 'string' || text.length === 0 || text.length > MAX_JSON_CHARS) return null;
-  return text;
+  if (!entry) return Promise.resolve(null);
+  const declared = entry?._data?.uncompressedSize;
+  if (typeof declared === 'number' && declared > MAX_JSON_BYTES) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let total = 0;
+    const chunks = [];
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    let stream;
+    try { stream = entry.nodeStream('nodebuffer'); } catch { return finish(null); }
+    stream.on('data', (chunk) => {
+      total += chunk.length;
+      if (total > MAX_JSON_BYTES) { try { stream.destroy(); } catch { /* noop */ } return finish(null); }
+      chunks.push(chunk);
+    });
+    stream.on('end', () => finish(total === 0 ? null : Buffer.concat(chunks).toString('utf8')));
+    stream.on('error', () => finish(null));
+    stream.on('close', () => finish(null)); // aborted/destroyed without 'end'
+  });
 }
 
 /** Tolerant JSON parse — returns fallback on any malformed input (never throws). */

@@ -32,6 +32,10 @@ export function portalUploadsRouter({ db, userId, enqueueEnrichment = null }) {
 
   const IMPORT_LIMIT = Number(process.env.MYCELIUM_IMPORT_LIMIT_BYTES) || 512 * 1024 * 1024; // 512MB
   const CHUNK_LIMIT = 64 * 1024 * 1024; // 64MB per multipart part (client chunks at 50MB)
+  // DoS bounds on the in-memory assembly buffer: a hostile caller must not be
+  // able to grow it without limit (many uploadIds, or many tiny chunks).
+  const MAX_CONCURRENT_UPLOADS = Number(process.env.MYCELIUM_IMPORT_MAX_CONCURRENT) || 32;
+  const MAX_CHUNKS = Number(process.env.MYCELIUM_IMPORT_MAX_CHUNKS) || 100_000;
   const UPLOAD_ID_RE = /^up_[a-z0-9_]{4,40}$/i;
 
   // In-memory assembly buffer: uploadId → { parts: Map<index,Buffer>, bytes, filename, ts }.
@@ -112,9 +116,23 @@ export function portalUploadsRouter({ db, userId, enqueueEnrichment = null }) {
       if (!buffer || buffer.length === 0) return fail(res, 400, 'empty chunk');
 
       let e = pending.get(uploadId);
-      if (!e) { e = { parts: new Map(), bytes: 0, filename: fields.filename || null, ts: Date.now() }; pending.set(uploadId, e); }
-      if (e.bytes + buffer.length > IMPORT_LIMIT) { pending.delete(uploadId); return fail(res, 413, 'import exceeds size limit'); }
-      if (!e.parts.has(index)) { e.parts.set(index, buffer); e.bytes += buffer.length; }
+      if (!e) {
+        // Cap concurrent in-flight uploads so a flood of unique uploadIds can't
+        // grow the assembly Map without bound (the TTL sweep alone isn't enough).
+        if (pending.size >= MAX_CONCURRENT_UPLOADS) return fail(res, 429, 'too many uploads in progress');
+        e = { parts: new Map(), bytes: 0, filename: fields.filename || null, ts: Date.now() };
+        pending.set(uploadId, e);
+      }
+      const prev = e.parts.get(index);
+      // Cap distinct chunk count so 1-byte chunks can't grow the parts Map even
+      // while staying under the byte limit.
+      if (!prev && e.parts.size >= MAX_CHUNKS) { pending.delete(uploadId); return fail(res, 413, 'too many chunks'); }
+      // Accept the LATEST data for an index (idempotent retry) instead of
+      // silently dropping a resend — adjust the byte tally by the delta.
+      const delta = buffer.length - (prev ? prev.length : 0);
+      if (e.bytes + delta > IMPORT_LIMIT) { pending.delete(uploadId); return fail(res, 413, 'import exceeds size limit'); }
+      e.parts.set(index, buffer);
+      e.bytes += delta;
       e.ts = Date.now();
       res.json({ ok: true, chunk: index, received: e.parts.size });
     } catch { fail(res, 500, 'chunk upload failed'); }
