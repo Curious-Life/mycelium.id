@@ -47,15 +47,17 @@ Principles (copied verbatim from the canonical repo's CLAUDE.md so they apply he
 12. **Every artifact persists + hooks fire + user notified exactly once.** See `docs/architecture/MESSAGE-PERSISTENCE.md` (to be ported).
 13. **No ad-hoc network servers.** Agents must never bind a port. Use the publish pipeline (`POST /portal/documents/:path/publish` → `<handle>.mycelium.id/<slug>`).
 
-## Operational disciplines (the 5-skill quartet, inherited)
+## Operational disciplines (inherited + V1-local)
 
-Same as the canonical repo. When applicable, invoke the skill before writing structural code or design docs:
+Same as the canonical repo, plus skills local to this repo. When applicable, invoke the skill before writing structural code or design docs:
 
 - `/sweep-first-design` — for any structural change. Three sweep cycles min, file:line citations, pivot when code contradicts plan.
 - `/deploy-and-verify` — for any deploy. Staged protocol, per-stage verification, [✓]/[—] ledger.
 - `/pre-deletion-caller-audit` — before any delete/replace/rename. Inventory every caller, prove migration, falsifiable criteria.
 - `/handoff-discipline` — at end of any session that produced commits or decisions. `docs/<TOPIC>-HANDOFF-<YYYY-MM-DD>.md` with TL;DR + commit hashes + pickup protocol.
 - `/tenant-schema-parity` — for the canonical repo's D1 fleet; not applicable to this repo's Postgres single-DB-multi-tenant model until shipping schema changes.
+- `/living-docs` — after any change that alters what the system *is* or what the plan *says*. Keep the three living docs current (plan = `docs/V1-BUILD-SPEC.md`, architecture = `docs/ARCHITECTURE.md`, build log = `docs/V1-BUILD-HANDOFF-*.md`), as-built with file-path evidence. Docs land in the same commit as the code.
+- `/auto-merge-on-green` — fail-closed PR merge gate: merge only when all checks pass **and** reviews pass (no changes requested, required approvals met) and the PR is mergeable + non-draft. Security-sensitive diffs always need a human approval. The autonomous routine (`docs/AUTONOMOUS-ROUTINE.md`) merges only through this gate.
 
 ## Working style — run tasks to completion
 
