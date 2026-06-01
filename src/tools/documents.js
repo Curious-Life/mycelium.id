@@ -20,9 +20,13 @@
  * Publishing surface (new — closes the "agent improvises an HTTP
  * server" failure mode of CLAUDE.md principle #13):
  *   - `publishDocument` makes a doc readable at <handle>.mycelium.id/p/<slug>.
- *   - `unpublishDocument` reverts to private, slug retained.
- *   - `shareDocument` mints a tokenised mycelium.id/share/<token> link.
  *   - `getDocumentShareStatus` reads visibility + counts before action.
+ *
+ * STAGED (foundation only, not yet wired as tools): the unlisted /s/<slug>
+ * capability-link surface — minting (setPublicSlug → mintLink) and revocation
+ * (unpublish / revokeShareLinks). The crypto + fail-closed public server exist
+ * and are verified (src/publish/*, scripts/verify-publish.mjs), but no MCP tool
+ * yet produces or revokes an unlisted link — that is the next publishing slice.
  *
  * Four canonical paths (MIND_MIRRORS) are mirrored to local files
  * so future agent sessions can preload them without a D1 round-trip.

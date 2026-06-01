@@ -24,7 +24,7 @@
     "verify:context": "node scripts/verify-context.mjs",
     "verify:ingest": "node scripts/verify-ingest.mjs",
     "verify:blob": "node scripts/verify-blob.mjs",
-    "verify": "npm run verify:foundation && npm run verify:mcp && npm run verify:mindfiles && npm run verify:metrics && npm run verify:rest && npm run verify:search && npm run verify:topology && npm run verify:embed && npm run verify:context && npm run verify:ingest && npm run verify:blob && npm run verify:enqueue && npm run verify:enrich && npm run verify:keysource && npm run verify:portal && npm run verify:inference && npm run verify:oauth",
+    "verify": "npm run verify:foundation && npm run verify:mcp && npm run verify:mindfiles && npm run verify:metrics && npm run verify:rest && npm run verify:search && npm run verify:topology && npm run verify:embed && npm run verify:context && npm run verify:ingest && npm run verify:blob && npm run verify:enqueue && npm run verify:enrich && npm run verify:keysource && npm run verify:portal && npm run verify:inference && npm run verify:publish && npm run verify:oauth",
     "start": "node src/index.js",
     "rest": "node src/server-rest.js",
     "portal": "node src/server-rest.js",
@@ -33,6 +33,8 @@
     "start:enrich": "node src/index.js --enrich",
     "verify:enqueue": "node scripts/verify-enqueue.mjs",
     "verify:enrich": "node scripts/verify-enrich.mjs",
+    "verify:publish": "node scripts/verify-publish.mjs",
+    "public": "node src/publish/public-server.js",
     "verify:inference": "node scripts/verify-inference.mjs"
   },
   "dependencies": {
