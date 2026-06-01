@@ -32,9 +32,12 @@ function freshDb() {
 
 async function main() {
   freshDb();
+  // This suite verifies the single-file fallback portal + the API flows; force
+  // 'legacy' so it's deterministic whether or not portal-app/build exists.
+  // (The canonical SvelteKit portal is verified by verify-portal-serve.mjs.)
   const { server, close, url } = await startRestServer({
     dbPath: DB, kcvPath: KCV, userHex: hex(), systemHex: hex(),
-    embedder: null, port: 0, host: '127.0.0.1',
+    embedder: null, port: 0, host: '127.0.0.1', portalMode: 'legacy',
   });
 
   try {

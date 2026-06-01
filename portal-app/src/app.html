@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<script>
+			(function() {
+				// SES/LavaMoat (MetaMask etc.) can strip Set/Map prototype methods
+				// before the app boots, crashing Svelte 5's reactivity engine.
+				// Polyfill if stripped.
+				try {
+					var s = new Set();
+					if (typeof s.add !== 'function') throw 1;
+				} catch(e) {
+					console.warn('[mycelium] SES detected — restoring Set.prototype');
+					var NativeSet = Set;
+					Set.prototype.add = function(v) { NativeSet.prototype.add.call(this, v); return this; };
+					Set.prototype.has = function(v) { return NativeSet.prototype.has.call(this, v); };
+					Set.prototype.delete = function(v) { return NativeSet.prototype.delete.call(this, v); };
+				}
+
+				var theme = localStorage.getItem('mycelium-theme');
+				if (!theme) {
+					theme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+				}
+				if (theme === 'light') {
+					document.documentElement.setAttribute('data-theme', 'light');
+				}
+			})();
+		</script>
+		<link rel="icon" href="%sveltekit.assets%/favicon.svg" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+		<meta name="theme-color" content="#0A0A0C" />
+		<link rel="preconnect" href="https://fonts.googleapis.com">
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+		<link rel="preload" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" as="style" onload="this.onload=null;this.rel='stylesheet'">
+		<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"></noscript>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

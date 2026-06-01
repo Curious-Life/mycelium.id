@@ -1,14 +1,34 @@
 import express from 'express';
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { boot } from './index.js';
 import { apiRouter } from './api.js';
+import { portalCompatRouter } from './portal-compat.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 
-// The static portal (single-file SPA) lives at <repo>/portal, served at / from
-// the SAME origin as the API so the browser/Tauri webview calls /api/v1/* with
-// no CORS. localhost-only (see SECURITY note above).
-const PORTAL_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'portal');
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const CANONICAL_BUILD = path.join(HERE, '..', 'portal-app', 'build');
+const LEGACY_PORTAL = path.join(HERE, '..', 'portal');
+
+/**
+ * Resolve which portal to serve. The canonical SvelteKit app
+ * (portal-app/build — the real UI, see portal-app/README.md) is preferred when
+ * it's been built; otherwise we serve the single-file SPA in portal/.
+ *
+ * mode: 'auto' (default) | 'canonical' | 'legacy'. Set per-call or via the
+ * MYCELIUM_PORTAL env var. Resolved at call time (not import) so tests/CLI can
+ * pick a mode deterministically. Returns { dir, spaFallback|null }.
+ */
+function resolvePortal(mode = process.env.MYCELIUM_PORTAL || 'auto') {
+  const canonicalFallback = path.join(CANONICAL_BUILD, '200.html');
+  const canonicalBuilt = existsSync(canonicalFallback);
+  const useCanonical = mode === 'canonical' || (mode !== 'legacy' && canonicalBuilt);
+  if (useCanonical && canonicalBuilt) {
+    return { dir: CANONICAL_BUILD, spaFallback: canonicalFallback };
+  }
+  return { dir: LEGACY_PORTAL, spaFallback: null };
+}
 
 /**
  * startRestServer({ dbPath, port, host }) — boot the shared assembly and
@@ -30,6 +50,7 @@ export async function startRestServer({
   userId,
   port = 0,
   host = '127.0.0.1',
+  portalMode,
 } = {}) {
   // boot() reads keys from env by default; forward overrides when given
   // (verify scripts inject ephemeral keys) so undefined doesn't clobber env.
@@ -48,10 +69,27 @@ export async function startRestServer({
   // Wire db + userId + a best-effort enrichment nudge so /api/v1/upload works
   // (file → encrypted blob → attachment → enrich), same seam as the MCP path.
   const enqueueEnrichment = createEnqueueEnrichment({ userId: bootUserId });
+  // Canonical-portal compatibility surface (/api/v1/portal/* → db). Mounted at
+  // its own prefix so its JSON body-parser is scoped to portal calls only (it
+  // must not touch the raw-bytes /api/v1/upload route). The canonical UI's
+  // api.ts rewrites /portal/* → /api/v1/portal/*.
+  app.use('/api/v1/portal', portalCompatRouter({ db, userId: bootUserId }));
   app.use(apiRouter({ tools, handlers, db, userId: bootUserId, enqueueEnrichment }));
   // Portal UI after the API router (so /api/v1/* matches first). express.static
-  // serves portal/index.html at GET /.
-  app.use(express.static(PORTAL_DIR));
+  // serves the built assets; for the canonical SPA, client-side routes
+  // (/library, /mindscape, …) have no file on disk, so fall back to 200.html
+  // for NAVIGATION requests only — GET, accepts html, not under /api|/ingest,
+  // and extensionless (so a missing asset like /x.js still 404s, no SPA shadow).
+  const { dir: portalDir, spaFallback } = resolvePortal(portalMode);
+  app.use(express.static(portalDir));
+  if (spaFallback) {
+    // /api, /ingest, /portal are data paths — never shadow them with the SPA
+    // shell (so unmatched data calls 404 cleanly instead of returning HTML).
+    app.get(/^\/(?!api\/|ingest\/|portal\/)(?:[^.]*)$/, (req, res, next) => {
+      if (req.method !== 'GET' || !req.accepts('html')) return next();
+      res.sendFile(spaFallback);
+    });
+  }
 
   const server = await new Promise((resolve, reject) => {
     const s = app.listen(port, host, () => resolve(s));

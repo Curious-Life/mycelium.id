@@ -219,11 +219,34 @@ same tool surface, same query embedder wiring.
 
 ---
 
+## 10. Optional: the web portal UI
+
+Mycelium ships a browser/desktop UI served from the same localhost origin as the
+API. The **canonical** UI is the full SvelteKit app (`portal-app/`); build it once:
+
+```bash
+npm run portal:install     # one-time: install the portal's deps
+npm run portal:build       # builds portal-app/build (a static SPA)
+MYCELIUM_KEY_SOURCE=keychain npm run portal   # serves UI + REST at http://127.0.0.1:8787
+```
+
+The server auto-serves the canonical build when present, otherwise the built-in
+single-file portal. The Tauri Mac app (`cargo tauri dev`) shows whichever the
+server serves. To iterate on the UI with hot reload: `npm run portal:dev` (:5173).
+
+> **Note:** the canonical UI builds + is served today; wiring each screen's data
+> to the local API is in progress (`portal-app/README.md`, "M2"). Until then some
+> screens render empty — capture/search/library/etc. land first.
+
+---
+
 ## Quick reference
 
 | Action | Command |
 |--------|---------|
 | Install deps | `npm install` |
+| Build the web portal | `npm run portal:install && npm run portal:build` |
+| Start portal UI + REST | `MYCELIUM_KEY_SOURCE=keychain npm run portal` |
 | Init database | `npm run init-db` |
 | Set up keys (Keychain) | `npm run set-keys` |
 | Start (stdio) | `MYCELIUM_KEY_SOURCE=keychain npm start` |
