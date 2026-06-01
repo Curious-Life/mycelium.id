@@ -33,6 +33,12 @@ async function getSecureModules() {
  * routes through the encrypted WebSocket channel instead of plain HTTPS.
  */
 export async function api(path: string, options: RequestInit = {}): Promise<Response> {
+	// Local V1: the canonical portal targets the cloud product's `/portal/*`
+	// endpoints; the self-hosted server serves equivalents under
+	// `/api/v1/portal/*` (see src/portal-compat.js). Rewrite here so individual
+	// screens need no edits. `/api/*` and `/auth/*` calls pass through unchanged.
+	if (path.startsWith('/portal/')) path = '/api/v1' + path;
+
 	// Encrypted channel routing (Phase 1) — route sensitive paths through WS
 	if (SECURE_CHANNEL) {
 		const { secureApi, isSensitivePath } = await getSecureModules();

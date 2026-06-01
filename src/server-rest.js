@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { boot } from './index.js';
 import { apiRouter } from './api.js';
+import { portalCompatRouter } from './portal-compat.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -68,6 +69,11 @@ export async function startRestServer({
   // Wire db + userId + a best-effort enrichment nudge so /api/v1/upload works
   // (file → encrypted blob → attachment → enrich), same seam as the MCP path.
   const enqueueEnrichment = createEnqueueEnrichment({ userId: bootUserId });
+  // Canonical-portal compatibility surface (/api/v1/portal/* → db). Mounted at
+  // its own prefix so its JSON body-parser is scoped to portal calls only (it
+  // must not touch the raw-bytes /api/v1/upload route). The canonical UI's
+  // api.ts rewrites /portal/* → /api/v1/portal/*.
+  app.use('/api/v1/portal', portalCompatRouter({ db, userId: bootUserId }));
   app.use(apiRouter({ tools, handlers, db, userId: bootUserId, enqueueEnrichment }));
   // Portal UI after the API router (so /api/v1/* matches first). express.static
   // serves the built assets; for the canonical SPA, client-side routes
