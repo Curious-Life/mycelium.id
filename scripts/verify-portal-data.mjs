@@ -62,6 +62,14 @@ async function main() {
     const onb = await j('/api/v1/portal/onboarding/status');
     rec('D8. onboarding/status → benign shape (steps.data.messageCount present)',
       onb.status === 200 && typeof onb.body?.steps?.data?.messageCount === 'number' && onb.body?.aiModelsReady === true);
+
+    // D9 — local auth shim: the portal's session check must succeed so the app
+    // opens instead of bouncing to /login (V1 is unlocked-at-boot, single-user).
+    const sess = await j('/auth/session');
+    rec('D9. GET /auth/session → {user} (app opens, no /login bounce)',
+      sess.status === 200 && !!sess.body?.user?.id, `status=${sess.status}`);
+    const setup = await j('/auth/setup-status');
+    rec('D10. GET /auth/setup-status → setupRequired:false', setup.status === 200 && setup.body?.setupRequired === false);
   } finally {
     srv.server.close(); try { srv.close?.(); } catch {}
   }
