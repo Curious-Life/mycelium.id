@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boot } from './index.js';
 import { apiRouter } from './api.js';
+import { createEnqueueEnrichment } from './ingest/enqueue.js';
 
 // The static portal (single-file SPA) lives at <repo>/portal, served at / from
 // the SAME origin as the API so the browser/Tauri webview calls /api/v1/* with
@@ -40,11 +41,14 @@ export async function startRestServer({
   if (userId !== undefined) bootOpts.userId = userId;
   // boot() returns the db namespace object plus a separate close() function;
   // the namespace has no .close method, so we hold close() for shutdown.
-  const { tools, handlers, db, close } = await boot(bootOpts);
+  const { tools, handlers, db, close, userId: bootUserId } = await boot(bootOpts);
 
   const app = express();
   app.disable('x-powered-by');
-  app.use(apiRouter({ tools, handlers }));
+  // Wire db + userId + a best-effort enrichment nudge so /api/v1/upload works
+  // (file → encrypted blob → attachment → enrich), same seam as the MCP path.
+  const enqueueEnrichment = createEnqueueEnrichment({ userId: bootUserId });
+  app.use(apiRouter({ tools, handlers, db, userId: bootUserId, enqueueEnrichment }));
   // Portal UI after the API router (so /api/v1/* matches first). express.static
   // serves portal/index.html at GET /.
   app.use(express.static(PORTAL_DIR));

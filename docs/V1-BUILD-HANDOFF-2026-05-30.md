@@ -553,3 +553,28 @@ is fully verified here; the Tauri shell builds on the Mac (no Rust in CI).
 **Next:** build the shell on the M1 (`cargo tauri dev`) to confirm/adjust main.rs;
 then bundle Node as a resource/sidecar for a self-contained .app. Portal features
 can grow (browse/day view, topology viz) against the same REST surface.
+
+---
+
+## 2026-06-01 — Portal ingest: file upload + high-volume bulk import (17/17 GO)
+
+**Branch `claude/portal-ingest` off main.** Wires the (already-built, verified)
+upload + enrichment engines into the portal/REST surface, and raises ingest limits
+for "a lot of data".
+
+- `src/api.js`: `apiRouter` now takes `{db, userId, enqueueEnrichment}` and mounts
+  `POST /api/v1/upload` (raw bytes via `express.raw`, no multipart dep; query:
+  filename/type/asMessage) → `uploadAttachment` (encrypted blob → attachment →
+  message → enrich nudge). JSON body limit raised 1mb → **64mb**
+  (`MYCELIUM_API_BODY_LIMIT`); uploads to **256mb** (`MYCELIUM_UPLOAD_LIMIT`);
+  413 returns a safe "import in smaller batches" envelope.
+- `src/server-rest.js`: passes db + userId + `createEnqueueEnrichment` into the router.
+- `portal/index.html`: new **Import** tab — drag/drop file upload (multi-file) +
+  bulk message import that **chunks 500/batch with progress** so huge pastes scale.
+- `scripts/verify-portal.mjs`: +P7 (upload → encrypted attachment + message),
+  +P8 (**>1MB** bulk import body accepted — old 1mb cap would 413), +P9 (bulk rows
+  persisted + searchable). Full suite **17/17 GO**.
+
+Gap closed: previously upload existed only on the HTTP-MCP server; the portal can
+now ingest files and large histories. True multi-GB streaming (vs in-memory) is a
+later increment if needed.

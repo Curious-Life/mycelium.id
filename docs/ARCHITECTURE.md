@@ -41,7 +41,7 @@ Two **sidecar services** run as their own processes:
 | Entry point / mode switch | `src/index.js` | ✅ |
 | MCP server (tool registration) | `src/mcp.js` | ✅ |
 | Streamable HTTP transport | `src/server-http.js` | ✅ |
-| REST surface | `src/server-rest.js`, `src/api.js` | ✅ |
+| REST surface + file upload | `src/server-rest.js`, `src/api.js` (`/api/v1/upload`) | ✅ |
 | Local portal (single-file SPA) | `portal/index.html` (served by REST) | ✅ |
 | Native Mac shell (Tauri) | `src-tauri/**` | ◑ scaffold (build on Mac) |
 | OAuth 2.1 + PKCE (better-auth) | `src/auth.js` | ✅ |
@@ -76,6 +76,13 @@ search (BM25 + vector, RRF fusion)  +  getContext preamble (D5)
    ▼
 back to the client as tool results
 ```
+
+**Ingest surfaces & volume:** files upload to `/api/v1/upload` (raw bytes,
+dependency-free) → encrypted blob → attachment → message → enrich. Bulk
+history imports via `importMessages`; the API JSON limit is generous
+(`MYCELIUM_API_BODY_LIMIT`, default 64mb), uploads up to `MYCELIUM_UPLOAD_LIMIT`
+(default 256mb), and the portal **Import** tab chunks large pastes (500/batch)
+so ingest scales to large datasets.
 
 **Query embedder wiring:** `boot()` (`src/index.js`) auto-wires the query-time
 embedder via `resolveDefaultEmbedder()` → `createServiceEmbedder()` (an adapter
