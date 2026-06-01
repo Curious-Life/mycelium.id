@@ -67,8 +67,16 @@ export async function startPublicServer({ dbPath, kcvPath, userHex, systemHex, u
   const app = express();
   app.disable("x-powered-by");
 
+  // Cap rendered doc size so a single huge document can't blow up memory while
+  // serving a public request. Override with MYCELIUM_PUBLIC_MAX_DOC_BYTES.
+  const MAX_DOC_BYTES = Number(process.env.MYCELIUM_PUBLIC_MAX_DOC_BYTES ?? 1_048_576); // 1 MiB
+
   const serveDoc = (res, doc) => {
-    res.status(200).type("html").send(page({ title: doc.title, body: renderMarkdown(doc.content), handle: identity.handle }));
+    let content = String(doc.content ?? "");
+    if (Buffer.byteLength(content, "utf8") > MAX_DOC_BYTES) {
+      content = content.slice(0, MAX_DOC_BYTES) + "\n\n*(truncated)*";
+    }
+    res.status(200).type("html").send(page({ title: doc.title, body: renderMarkdown(content), handle: identity.handle }));
   };
   const notFound = (res) => res.status(404).type("html").send(page({ title: "Not found", body: "<h1>404</h1><p>Nothing here.</p>" }));
 
@@ -81,13 +89,22 @@ export async function startPublicServer({ dbPath, kcvPath, userHex, systemHex, u
     notFound(res);
   });
 
-  // Unlisted: only with a valid signed capability token bound to this slug.
+  // Unlisted: serve ONLY when ALL hold (fail-closed, defense in depth):
+  //   1. the signed token is authentic, unexpired, and bound to this slug;
+  //   2. the doc exists and is CURRENTLY shareable (publish_nonce set); and
+  //   3. the token's nonce equals the doc's current publish_nonce.
+  // Rotating/clearing the nonce (unpublish / revokeShareLinks) fails (3) → the
+  // leaked link 404s immediately. This is the revocation interlock.
   app.get("/s/:slug", async (req, res) => {
     try {
-      const v = verifyLink(identity, String(req.query.t || ""), { slug: req.params.slug });
+      const t = req.query.t; // reject array/duplicate ?t and non-string params
+      if (typeof t !== "string" || t.length === 0) return notFound(res);
+      const v = verifyLink(identity, t, { slug: req.params.slug });
       if (v.valid) {
         const doc = await db.documents.getBySlug(owner, req.params.slug);
-        if (doc) return serveDoc(res, doc);
+        if (doc && doc.publish_nonce && doc.publish_nonce === v.nonce) {
+          return serveDoc(res, doc);
+        }
       }
     } catch { /* fall through */ }
     notFound(res);

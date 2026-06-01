@@ -1,0 +1,17 @@
+-- 0003 — revocable unlisted-link capability epoch.
+--
+-- An "unlisted" doc is served at /s/<slug>?t=<signed-token> (see
+-- src/publish/links.js + src/publish/public-server.js). Before this column the
+-- token carried only {slug, exp}, so a leaked link served the doc FOREVER —
+-- there was no per-doc state the public server could re-check, and unpublish()
+-- retained the slug. That is a fail-OPEN leak of private content.
+--
+-- publish_nonce is the capability epoch for a doc's unlisted links:
+--   NULL        → NOT shareable via unlisted link (private). Any token → 404.
+--   <random hex>→ currently shareable. The token embeds this exact value; the
+--                 public server serves only when token.nonce === current nonce.
+--
+-- Revocation is rotation: setting the nonce to a NEW value (or NULL) instantly
+-- invalidates every previously-minted link. unpublish() nulls it (full
+-- take-back); revokeShareLinks() nulls it (kill links, keep the doc).
+ALTER TABLE documents ADD COLUMN publish_nonce TEXT;

@@ -6,12 +6,16 @@
 //   Identity:  I1 deterministic  I2 sign/verify  I3 tamper rejected
 //              I4 verifyWithPublicKey  I5 invalid handle rejected
 //   Links:     L1 mint+verify  L2 tampered payload  L3 expired  L4 slug-mismatch
-//              L5 forged signature
+//              L5 forged signature  L6 no-nonce mint rejected  L7 nonce returned
+//              L8 non-canonical base64url rejected  L9 setPublicSlug → nonce
 //   Server:    S1 public doc served at /p/:slug         S2 unlisted NOT at /p/
 //              S3 unlisted served at /s/:slug?t=valid    S4 bad token → 404
 //              S5 no token → 404   S6 token for another slug → 404
 //              S7 private/unpublished slug → 404         S8 /, /api/v1/* → 404
 //              S9 LEAKAGE: private content never appears in ANY response
+//   Revocation: S10 old token 404 after unpublish (nonce rotated)
+//              S11 re-share mints fresh nonce  S12 new works/old dead
+//              S13 revokeShareLinks → 404  S14 array ?t → 404  S15 leakage sweep
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
 
@@ -47,15 +51,21 @@ async function main() {
   rec("I5. invalid handle rejected", badHandle && isValidHandle("martin") && !isValidHandle("a"));
 
   // ── Signed links ──────────────────────────────────────────────────────
-  const tok = mintLink(id, { slug: "forest" });
+  const tok = mintLink(id, { slug: "forest", nonce: "epoch1" });
   rec("L1. mint + verify a link for its slug", verifyLink(id, tok, { slug: "forest" }).valid === true);
-  const parts = tok.split("."); const tampered = `${Buffer.from(JSON.stringify({ slug: "evil", exp: 0 })).toString("base64url")}.${parts[1]}`;
+  const parts = tok.split("."); const tampered = `${Buffer.from(JSON.stringify({ slug: "evil", nonce: "epoch1", exp: 0 })).toString("base64url")}.${parts[1]}`;
   rec("L2. tampered payload rejected (bad signature)", verifyLink(id, tampered).valid === false);
-  const expired = mintLink(id, { slug: "forest", ttlSec: 10, now: 1000 });
+  const expired = mintLink(id, { slug: "forest", nonce: "epoch1", ttlSec: 10, now: 1000 });
   rec("L3. expired token rejected", verifyLink(id, expired, { now: 2000 }).valid === false);
   rec("L4. token for slug A rejected when slug B requested", verifyLink(id, tok, { slug: "other" }).valid === false);
   const otherId = createIdentity({ masterHex: hex() });
   rec("L5. token signed by a different key rejected", verifyLink(otherId, tok, { slug: "forest" }).valid === false);
+  let noNonce = false; try { mintLink(id, { slug: "forest" }); } catch { noNonce = true; }
+  rec("L6. mint without a nonce rejected (cannot mint an unrevocable link)", noNonce);
+  rec("L7. verify returns the embedded nonce", verifyLink(id, tok, { slug: "forest" }).nonce === "epoch1");
+  // Non-canonical base64url (extra '=' padding) must be rejected (malleability).
+  const malleable = `${parts[0]}=.${parts[1]}`;
+  rec("L8. non-canonical base64url payload rejected", verifyLink(id, malleable, { slug: "forest" }).valid === false);
 
   // ── Fail-closed public server ───────────────────────────────────────────
   for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -70,11 +80,12 @@ async function main() {
     await db.documents.upsert({ user_id: USER, path: "notes/a.md", title: "Public A", content: "PUBLIC_A_BODY about forests" });
     await db.documents.publish(USER, "notes/a.md", "a-pub");
     await db.documents.upsert({ user_id: USER, path: "notes/b.md", title: "Unlisted B", content: "UNLISTED_B_BODY hidden notes" });
-    await db.documents.setPublicSlug(USER, "notes/b.md", "b-unl");
+    const bRow = await db.documents.setPublicSlug(USER, "notes/b.md", "b-unl");
     await db.documents.upsert({ user_id: USER, path: "notes/c.md", title: "Private C", content: PRIVATE_SECRET });
-    await db.documents.setPublicSlug(USER, "notes/c.md", "c-prv");
+    const cRow = await db.documents.setPublicSlug(USER, "notes/c.md", "c-prv");
 
-    const bTok = mintLink(identity, { slug: "b-unl" });
+    rec("L9. setPublicSlug returns a publish_nonce (capability epoch)", typeof bRow.publish_nonce === "string" && bRow.publish_nonce.length >= 16);
+    const bTok = mintLink(identity, { slug: "b-unl", nonce: bRow.publish_nonce });
     const get = async (p) => { const r = await fetch(`${url}${p}`); return { status: r.status, body: await r.text() }; };
 
     const a = await get("/p/a-pub");
@@ -98,6 +109,40 @@ async function main() {
     // S9 — the headline: private content appears in NONE of the responses above.
     const all = [a, bPub, bUnl, bBad, bNo, cWithB, cPub, root, api, trav].map((r) => r.body).join("\n");
     rec("S9. LEAKAGE GUARD: private doc content never appears in any response", !all.includes(PRIVATE_SECRET));
+
+    // ── Revocation interlock (the CRITICAL that blocked this PR) ────────────
+    // A leaked unlisted link MUST stop serving the moment the owner takes the
+    // doc back. Before publish_nonce, the link below kept serving forever.
+    await db.documents.unpublish(USER, "notes/b.md");
+    const bAfterUnpub = await get(`/s/b-unl?t=${encodeURIComponent(bTok)}`);
+    rec("S10. REVOCATION: old unlisted token → 404 after unpublish (nonce rotated)",
+      bAfterUnpub.status === 404 && !bAfterUnpub.body.includes("UNLISTED_B_BODY"), `status=${bAfterUnpub.status}`);
+
+    // Re-sharing mints a FRESH nonce: a new token works, the OLD one stays dead.
+    const bRow2 = await db.documents.setPublicSlug(USER, "notes/b.md", "b-unl");
+    rec("S11. re-share mints a fresh nonce (≠ the revoked one)",
+      typeof bRow2.publish_nonce === "string" && bRow2.publish_nonce !== bRow.publish_nonce);
+    const bTok2 = mintLink(identity, { slug: "b-unl", nonce: bRow2.publish_nonce });
+    const bNew = await get(`/s/b-unl?t=${encodeURIComponent(bTok2)}`);
+    const bOldStillDead = await get(`/s/b-unl?t=${encodeURIComponent(bTok)}`);
+    rec("S12. new token serves; OLD (pre-revocation) token still → 404",
+      bNew.status === 200 && bNew.body.includes("UNLISTED_B_BODY") && bOldStillDead.status === 404,
+      `new=${bNew.status} old=${bOldStillDead.status}`);
+
+    // revokeShareLinks kills links without changing published state.
+    await db.documents.revokeShareLinks(USER, "notes/b.md");
+    const bAfterRevoke = await get(`/s/b-unl?t=${encodeURIComponent(bTok2)}`);
+    rec("S13. revokeShareLinks → all outstanding tokens → 404",
+      bAfterRevoke.status === 404 && !bAfterRevoke.body.includes("UNLISTED_B_BODY"), `status=${bAfterRevoke.status}`);
+
+    // ?t supplied multiple times (array) must not bypass the string-typed check.
+    const bArr = await get(`/s/b-unl?t=x&t=y`);
+    rec("S14. duplicate/array ?t param → 404 (no type-confusion bypass)", bArr.status === 404);
+
+    // Final leakage sweep over the revocation-phase responses too.
+    const all2 = [bAfterUnpub, bNew, bOldStillDead, bAfterRevoke, bArr].map((r) => r.body).join("\n");
+    rec("S15. LEAKAGE GUARD (revocation phase): no UNLISTED body leaks once revoked",
+      (all2.match(/UNLISTED_B_BODY/g) || []).length === 1); // only bNew (the legitimately re-shared) carries it
   } finally {
     srv.server.close(); try { srv.close?.(); } catch {}
   }
