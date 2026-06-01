@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { boot } from './index.js';
 import { apiRouter } from './api.js';
 import { portalCompatRouter } from './portal-compat.js';
+import { authShimRouter } from './auth-shim.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -74,6 +75,10 @@ export async function startRestServer({
   // must not touch the raw-bytes /api/v1/upload route). The canonical UI's
   // api.ts rewrites /portal/* → /api/v1/portal/*.
   app.use('/api/v1/portal', portalCompatRouter({ db, userId: bootUserId }));
+  // Local "always signed in" shim so the canonical portal's session check
+  // (/auth/session) succeeds and the app opens instead of bouncing to /login —
+  // V1 is single-user and unlocked at boot (keys from the server-side source).
+  app.use('/auth', authShimRouter({ userId: bootUserId }));
   app.use(apiRouter({ tools, handlers, db, userId: bootUserId, enqueueEnrichment }));
   // Portal UI after the API router (so /api/v1/* matches first). express.static
   // serves the built assets; for the canonical SPA, client-side routes
@@ -83,9 +88,9 @@ export async function startRestServer({
   const { dir: portalDir, spaFallback } = resolvePortal(portalMode);
   app.use(express.static(portalDir));
   if (spaFallback) {
-    // /api, /ingest, /portal are data paths — never shadow them with the SPA
-    // shell (so unmatched data calls 404 cleanly instead of returning HTML).
-    app.get(/^\/(?!api\/|ingest\/|portal\/)(?:[^.]*)$/, (req, res, next) => {
+    // /api, /ingest, /portal, /auth are data paths — never shadow them with the
+    // SPA shell (so unmatched data calls 404 cleanly instead of returning HTML).
+    app.get(/^\/(?!api\/|ingest\/|portal\/|auth\/)(?:[^.]*)$/, (req, res, next) => {
       if (req.method !== 'GET' || !req.accepts('html')) return next();
       res.sendFile(spaFallback);
     });
