@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/mycelium-sumi-e.svg" alt="Mycelium" width="80">
+  <img src="assets/mushroom.svg" alt="Mycelium" width="88">
 </p>
 
 <h1 align="center">Mycelium</h1>
