@@ -5,8 +5,10 @@
 #     onnx/model_quantized.onnx
 #     tokenizer.json
 #
-# Install:  python3 -m pip install -r pipeline/requirements.txt
-# CPU-only; no GPU / CUDA packages. Python >= 3.10.
+# Install:  python3 -m pip install -r pipeline/requirements-embed.txt
+# Run:      python3 pipeline/embed-service.py --serve
+# CPU-only; no GPU / CUDA packages. Python >= 3.10. (requirements.txt is the
+# separate, heavier topology-pipeline dependency set — not this one.)
 
 numpy==2.1.3
 onnxruntime==1.20.1

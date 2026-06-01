@@ -12,6 +12,7 @@ import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
 import { buildDomains, collectTools, createMcpServer } from './mcp.js';
 import { createServiceEmbedder } from './search/embedder.js';
+import { resolveKeys } from './crypto/key-source.js';
 
 /**
  * Resolve the query-time mind-search embedder for the CLI/server paths. Wires
@@ -31,8 +32,10 @@ export function resolveDefaultEmbedder({ env = process.env } = {}) {
 export async function boot({
   dbPath = process.env.MYCELIUM_DB || 'data/mycelium.db',
   kcvPath = process.env.MYCELIUM_KCV || 'data/kcv.json',
-  userHex = process.env.USER_MASTER_KEY,
-  systemHex = process.env.SYSTEM_KEY,
+  // Master keys: resolved from MYCELIUM_KEY_SOURCE (env | keychain | 1password)
+  // below when not passed explicitly. Callers/tests may inject the hex directly.
+  userHex,
+  systemHex,
   userId = process.env.MYCELIUM_USER_ID || 'local-user',
   // embedder: the query-time mind-search embedder ({ embed, health }). Defaults
   // to the embed-service client (:8091) via resolveDefaultEmbedder() so semantic
@@ -41,6 +44,15 @@ export async function boot({
   // to force BM25-only. The default param only evaluates when the arg is omitted.
   embedder = resolveDefaultEmbedder(),
 } = {}) {
+  // Acquire the two hex keys from the configured source unless injected. The
+  // source layer keeps keys out of shell history / config files on a Mac (macOS
+  // Keychain or 1Password); default 'env' preserves the USER_MASTER_KEY /
+  // SYSTEM_KEY behavior. resolveKeys() fails closed (clear error, no key value).
+  if (userHex === undefined || systemHex === undefined) {
+    const resolved = resolveKeys();
+    userHex = userHex ?? resolved.userHex;
+    systemHex = systemHex ?? resolved.systemHex;
+  }
   if (!userHex || !systemHex) {
     throw new Error('USER_MASTER_KEY and SYSTEM_KEY must be set (64-char hex each). Vault stays locked.');
   }

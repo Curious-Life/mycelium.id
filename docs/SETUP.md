@@ -74,26 +74,55 @@ column (`attachments.local_path`) — no new tables.
 
 ---
 
-## 4. Generate two encryption keys
+## 4. Set up the two encryption keys
 
-Two independent 256-bit keys (64 hex chars each):
+Mycelium uses two independent 256-bit keys (64 hex chars each): `USER_MASTER` for
+your personal data, `SYSTEM_KEY` for infrastructure data. The server reads them
+at boot from a **key source** you choose with `MYCELIUM_KEY_SOURCE`.
+
+### Recommended (Mac): macOS Keychain — no keys in shell history or config
 
 ```bash
-openssl rand -hex 32   # USER_MASTER_KEY — encrypts your personal data
-openssl rand -hex 32   # SYSTEM_KEY      — encrypts system/infrastructure data
+npm run set-keys            # generates both keys + stores them in the login Keychain
 ```
 
-⚠️ **Save BOTH in a password manager, and use the SAME pair everywhere** (boot in
-step 5 *and* the Claude Desktop config in step 7). On first boot the server
-writes `data/kcv.json` (Key Check Value) locking the DB to these exact keys. Any
-later boot with a different key → vault stays **locked** (fail-closed). Lose the
-keys = lose the vault. No recovery.
+Then everything runs with `MYCELIUM_KEY_SOURCE=keychain` (steps 5/7). The keys
+never touch your shell, env, or config files — boot reads them from the Keychain
+on demand. Add `--show` if you also want to copy them into a password manager.
+
+### Alternative: 1Password CLI
+
+Store both keys as fields on a 1Password item, then point Mycelium at them
+(`npm run set-keys --show` prints the exact `op` command):
+
+```bash
+export MYCELIUM_KEY_SOURCE=1password
+export MYCELIUM_OP_USER="op://Private/Mycelium/user_master"
+export MYCELIUM_OP_SYSTEM="op://Private/Mycelium/system_key"
+```
+
+### Alternative: plain env vars (simplest, least secure)
+
+```bash
+openssl rand -hex 32   # USER_MASTER_KEY
+openssl rand -hex 32   # SYSTEM_KEY
+```
+
+⚠️ **Whichever source you pick, back BOTH keys up offline and use the SAME pair
+everywhere.** On first boot the server writes `data/kcv.json` (Key Check Value)
+locking the DB to these keys; any later boot with a different key → vault stays
+**locked** (fail-closed). This is a safety interlock against typos/drift, not a
+secret. Lose the keys = lose the vault. No recovery.
 
 ---
 
 ## 5. Boot the MCP server (stdio)
 
 ```bash
+# Keychain (recommended on Mac):
+MYCELIUM_KEY_SOURCE=keychain npm start
+
+# …or with plain env vars:
 USER_MASTER_KEY="<64-char-hex>" SYSTEM_KEY="<64-char-hex>" npm start
 ```
 
@@ -115,10 +144,10 @@ launches the server itself (step 7).
 npm run verify
 ```
 
-**14 suites** must each print `VERDICT: GO` (exit 0): foundation, mcp, mindfiles,
+**15 suites** must each print `VERDICT: GO` (exit 0): foundation, mcp, mindfiles,
 metrics, rest, search, topology, embed, context, ingest, blob, enqueue, enrich,
-oauth. All are Tier-1 — they pass **without** Ollama/onnxruntime, so a clean
-machine with no ML stack still goes fully green.
+keysource, oauth. All are Tier-1 — they pass **without** Ollama/onnxruntime, so a
+clean machine with no ML stack still goes fully green.
 
 ---
 
@@ -135,17 +164,18 @@ or `~/.config/Claude/claude_desktop_config.json` (Linux):
       "args": ["src/index.js"],
       "cwd": "/Users/YOUR_USERNAME/mycelium.id",
       "env": {
-        "USER_MASTER_KEY": "<64-char-hex>",
-        "SYSTEM_KEY": "<64-char-hex>"
+        "MYCELIUM_KEY_SOURCE": "keychain"
       }
     }
   }
 }
 ```
 
-Replace `YOUR_USERNAME`/`cwd` and use the **same two keys from step 4**. Keys in
-the MCP config stay out of shell history. Restart Claude Desktop; the `mycelium`
-tools appear once it connects.
+Replace `YOUR_USERNAME`/`cwd`. With the **Keychain** (or **1Password**) source,
+**no keys live in this file** — the server reads them on demand at launch. (Using
+plain env vars instead? Put `USER_MASTER_KEY`/`SYSTEM_KEY` in the `env` block —
+the same pair from step 4.) Restart Claude Desktop; the `mycelium` tools appear
+once it connects.
 
 ---
 
@@ -160,15 +190,15 @@ to BM25 (keyword) per query. Two processes turn it on:
 ```bash
 cd pipeline
 python3 -m pip install -r requirements-embed.txt
-python3 embed-service.py        # first launch downloads the ONNX model
-# health check:  curl http://localhost:8091/health
+python3 embed-service.py --serve   # NOTE: --serve is required; first launch downloads the ONNX model (~170MB)
+# health check:  curl http://localhost:8091/health   → {"status":"ok","loaded":true,...}
 ```
 
 **b) Enrichment service** (`:8095`) — embeds + NLP-enriches messages as they're
 captured (the embed service alone stores nothing):
 
 ```bash
-USER_MASTER_KEY="<key>" SYSTEM_KEY="<key>" npm run start:enrich
+MYCELIUM_KEY_SOURCE=keychain npm run start:enrich   # or pass USER_MASTER_KEY/SYSTEM_KEY
 ```
 
 With both running, new messages get embedded and **search retrieves
@@ -181,7 +211,7 @@ different embed host with `MYCELIUM_EMBED_URL`.
 ## 9. Optional: HTTP transport (remote access, e.g. via Tailscale)
 
 ```bash
-USER_MASTER_KEY="<key>" SYSTEM_KEY="<key>" npm run start:http
+MYCELIUM_KEY_SOURCE=keychain npm run start:http   # or pass USER_MASTER_KEY/SYSTEM_KEY
 ```
 
 Starts the Streamable-HTTP + OAuth 2.1 server instead of stdio. Same `boot()`,
@@ -195,11 +225,12 @@ same tool surface, same query embedder wiring.
 |--------|---------|
 | Install deps | `npm install` |
 | Init database | `npm run init-db` |
-| Start (stdio) | `npm start` |
+| Set up keys (Keychain) | `npm run set-keys` |
+| Start (stdio) | `MYCELIUM_KEY_SOURCE=keychain npm start` |
 | Start (HTTP) | `npm run start:http` |
 | Start enrichment (`:8095`) | `npm run start:enrich` |
 | Run all suites | `npm run verify` |
-| Embed service (`:8091`) | `python3 pipeline/embed-service.py` |
+| Embed service (`:8091`) | `python3 pipeline/embed-service.py --serve` |
 | Force BM25-only | `MYCELIUM_DISABLE_EMBED=1` |
 | Generate a key | `openssl rand -hex 32` |
 
