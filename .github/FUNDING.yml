@@ -1,0 +1,10 @@
+# ⚠️  BEFORE LAUNCH — fill these in, then UNCOMMENT them.
+#
+# Left fully commented on purpose: an unset/placeholder handle would render a
+# BROKEN "Sponsor" button on the repo. Keeping the entries commented means no
+# button shows until the real values are in. (GitHub reads this from the default
+# branch only.) Mycelium is value-for-value: the software is free; development is
+# funded by the people who find it useful.
+#
+# github: [YOUR_GITHUB_SPONSORS_HANDLE]    # the account/org with GitHub Sponsors enabled
+# custom: ["YOUR_STRIPE_PAYMENT_LINK"]     # direct support outside GitHub (optional)

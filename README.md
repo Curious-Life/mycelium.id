@@ -185,6 +185,22 @@ mycelium.id/
 
 Everyone else is building memory. We're building the **nervous system**.
 
+## Support development
+
+<!-- ⚠️ BEFORE LAUNCH: replace YOUR_GITHUB_SPONSORS_HANDLE and YOUR_STRIPE_PAYMENT_LINK below
+     (and uncomment the entries in .github/FUNDING.yml). Tracked in docs/PRE-LAUNCH-CHECKLIST.md. -->
+
+Mycelium is free and open source — clone it, run it, fork it, own your data. That's the point.
+
+If it's useful to you, support its development. This is infrastructure built in the open, **value-for-value**: the practice is free, and the people who get value from it fund the work that keeps it growing. The Redis / Linux model — commoditize the layer, fund what's above it.
+
+- **[Sponsor on GitHub](https://github.com/sponsors/YOUR_GITHUB_SPONSORS_HANDLE)** — one-time or recurring, no platform fee.
+- **[Support via Stripe](YOUR_STRIPE_PAYMENT_LINK)** — one-time or recurring, outside GitHub.
+
+> **⚠️ Placeholders — set the Sponsors handle + Stripe link before launch.**
+
+No ads, no data sold, no strings. Just people funding the infrastructure they rely on.
+
 ## License
 
 [AGPL-3.0](LICENSE) — the full Mycelium core will be open at V1 launch. Until then, this repository is private to avoid signaling a half-finished design.
