@@ -5,6 +5,15 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
+- **UX build-out (2026-06-01).** Canonical SvelteKit portal adopted + served; **app opens with no
+  login wall** (auth-shim); **Library wired** to real local data. Merged this session: #18 publish
+  (hardened, 2nd adversarial round), #23 portal M1, #24 auth-shim, #25 funding placeholders.
+  `main @ 091e222`, `npm run verify` → **20× GO**. **NEXT: design the complete, exquisite UX**
+  (account/key ceremony, full screen keep/cut, IA) — sweeps needed first; then phases M→I→G→C→O.
+  Pick up: [`docs/UX-HANDOFF-2026-06-01.md`](docs/UX-HANDOFF-2026-06-01.md) +
+  [`docs/UX-JOURNEY-BUILDOUT-DESIGN-2026-06-01.md`](docs/UX-JOURNEY-BUILDOUT-DESIGN-2026-06-01.md).
+  ⚠️ Branch off `origin/main` (local `main` is stale legacy).
+
 - **V1 build — Wave 1+2 DONE; UX pass + ingestion/uploads BUILT.** MCP server serves **31 tools**
   over stdio + HTTP/OAuth. Added getContext, captureMessage, importMessages, listTasks; folded
   metrics 8→6. **Ingestion + uploads fully built** (capture choke-point, encrypted blob store,
