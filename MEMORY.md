@@ -13,15 +13,15 @@ detail lives in the linked docs. Newest-relevant first.
   Profile/Settings) + disabled **"Coming later"** group. **BUILD ORDER: N→M→I→G→C→(T,P,S)→K→O**
   (N=nav trim first, frontend-only, instant coherence; K=ceremony Mac-gated last). Detailed
   M/I/G/C/O shapes in [`docs/UX-JOURNEY-BUILDOUT-DESIGN-2026-06-01.md`](docs/UX-JOURNEY-BUILDOUT-DESIGN-2026-06-01.md).
-  `npm run verify` → **23× GO**. ⚠️ Branch off `origin/main` (local `main` is stale).
-  **Phases N + M + I DONE** on branch `claude/ux-complete-design`: **N** = tight 6-screen nav +
-  "Coming later" group (`verify:nav`). **M** = mindscape read — wired `db.mindscape`+`db.territoryDocs`,
-  `src/portal-mindscape.js` aggregator + panels + graceful-empty (`verify:portal-mindscape` 7/7).
-  **I** = import — wrote `src/ingest/import-parsers.js` (Claude + ChatGPT) + `src/portal-uploads.js`
-  (busboy multipart, single-shot + chunked assembly, caps, → `captureMessage` encrypt+dedup+enrich);
-  added deps `jszip`+`busboy`; `verify:import` 7/7 (incl. zero-plaintext-at-rest check).
-  **NEXT: Phase G** (generate — `src/jobs.js` in-memory job + `POST /mycelium/explore`/`generate`
-  + status; spawn `pipeline/run-clustering.sh` with key re-resolve; real Python run is Tier-2-gated).
+  `npm run verify` → **24× GO**. ⚠️ Branch off `origin/main` (local `main` is stale).
+  **Phases N+M+I+T+P+S+O DONE** on branch `claude/ux-complete-design` — **all 6 primary-nav screens
+  render real local data.** N=nav trim (`verify:nav`); M=mindscape read (`src/portal-mindscape.js`,
+  `verify:portal-mindscape`); I=import (`src/ingest/import-parsers.js`+`src/portal-uploads.js`, busboy,
+  jszip, `verify:import`); T/P/S/O=Timeline+Profile+Settings+first-run-welcome (`src/portal-compat.js`,
+  `verify:portal-tps`). Commits: `5328329`,`f0972f7`,`2158b96`,`1cffd9b` (+design `0cd40f5`).
+  **NEXT (env-gated): Phase G** (generate — `src/jobs.js` + explore/generate endpoints; job lifecycle
+  verifiable vs a dry-run, real clustering is Tier-2), then **C** (chronicles, needs LLM) and **K**
+  (Tauri key ceremony, Mac/Rust-gated). Full status: [`docs/UX-HANDOFF-2026-06-01.md`](docs/UX-HANDOFF-2026-06-01.md).
 
 - **V1 build — Wave 1+2 DONE; UX pass + ingestion/uploads BUILT.** MCP server serves **31 tools**
   over stdio + HTTP/OAuth. Added getContext, captureMessage, importMessages, listTasks; folded
