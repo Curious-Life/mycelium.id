@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { boot } from './index.js';
 import { apiRouter } from './api.js';
 import { portalCompatRouter } from './portal-compat.js';
+import { portalMindscapeRouter } from './portal-mindscape.js';
 import { authShimRouter } from './auth-shim.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 
@@ -75,6 +76,10 @@ export async function startRestServer({
   // must not touch the raw-bytes /api/v1/upload route). The canonical UI's
   // api.ts rewrites /portal/* → /api/v1/portal/*.
   app.use('/api/v1/portal', portalCompatRouter({ db, userId: bootUserId }));
+  // Mindscape read surface (3D scene aggregator + per-panel reads). Same prefix
+  // (unmatched paths fall through from the compat router above); its JSON parser
+  // is likewise scoped to /api/v1/portal so it never touches /api/v1/upload.
+  app.use('/api/v1/portal', portalMindscapeRouter({ db, userId: bootUserId }));
   // Local "always signed in" shim so the canonical portal's session check
   // (/auth/session) succeeds and the app opens instead of bouncing to /login —
   // V1 is single-user and unlocked at boot (keys from the server-side source).

@@ -24,6 +24,8 @@ import { createAuditNamespace } from './audit.js';
 import { createSpacesNamespace } from './spaces.js';
 import { createSpaceKnowledgeNamespace } from './space-knowledge.js';
 import { createPublicPresenceNamespace } from './public-presence.js';
+import { createMindscapeNamespace } from './mindscape.js';
+import { createTerritoryDocsNamespace } from './territory-docs.js';
 
 /**
  * Open the vault db and assemble the tool-facing `db` namespace object.
@@ -54,6 +56,12 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
     spaces: createSpacesNamespace({ d1Query, firstRow, parseJson }),
     spaceKnowledge: createSpaceKnowledgeNamespace({ d1Query, firstRow, randomUUID }),
     publicPresence: createPublicPresenceNamespace({ d1Query }),
+
+    // Mindscape reads (clustering points + territory/realm/theme profiles) and
+    // territory-docs (narrative read/write). Wired for the portal mindscape
+    // surface (src/portal-mindscape.js) + the Phase C chronicles writer.
+    mindscape: createMindscapeNamespace({ d1Query, parseJson }),
+    territoryDocs: createTerritoryDocsNamespace({ d1Query, parseJson }),
 
     // db.shareLinks is intentionally omitted — every call site is optional-
     // chained (tools/documents.js:102,516 `db.shareLinks?.…`), so absence
