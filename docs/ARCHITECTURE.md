@@ -23,7 +23,12 @@ One Node entry point, `src/index.js`, selects a mode:
 | MCP stdio (default) | `npm start` | MCP over stdio for a local client |
 | MCP Streamable HTTP | `npm run start:http` (`--http` / `MYCELIUM_HTTP=1`) | remote MCP + OAuth |
 | REST | `npm run rest` | REST over the shared handler map |
+| Portal (UI + REST) | `npm run portal` | static SPA at `/` + REST `/api/v1/*`, localhost-only |
 | Enrichment service | `npm run start:enrich` (`--enrich`) | the `:8095` background enricher |
+
+A **native Mac shell** (`src-tauri/`, Tauri v2) wraps the portal: it spawns the
+Node server and opens a window at `http://127.0.0.1:8787`. Portal is verified
+(`verify:portal`); the Rust shell is built on the Mac (`src-tauri/BUILD-MAC.md`).
 
 Two **sidecar services** run as their own processes:
 - **`:8091` embed-service** — Nomic v1.5 ONNX embeddings (`pipeline/embed-service.py`), ⚠️ Tier-2 (needs onnxruntime/model installed).
@@ -37,12 +42,15 @@ Two **sidecar services** run as their own processes:
 | MCP server (tool registration) | `src/mcp.js` | ✅ |
 | Streamable HTTP transport | `src/server-http.js` | ✅ |
 | REST surface | `src/server-rest.js`, `src/api.js` | ✅ |
+| Local portal (single-file SPA) | `portal/index.html` (served by REST) | ✅ |
+| Native Mac shell (Tauri) | `src-tauri/**` | ◑ scaffold (build on Mac) |
 | OAuth 2.1 + PKCE (better-auth) | `src/auth.js` | ✅ |
 | D1/SQLite storage adapter | `src/adapter/d1.js` | ✅ |
 | DB namespaces (per table) | `src/db/*.js` | ✅ |
 | Migration runner | `src/db/migrate.js` + `migrations/000*.sql` | ✅ |
 | Scope-partitioned crypto (two-key vault) | `src/crypto/crypto-local.js`, `src/crypto/keys.js`, `src/crypto/guardians/*` | ✅ |
-| Embeddings client | `src/embed/client.js` (→ `:8091`) | ⚠️ Tier-2 |
+| Master-key source (env / macOS Keychain / 1Password) | `src/crypto/key-source.js`, `scripts/set-keys.mjs` | ✅ |
+| Embeddings client + search adapter | `src/embed/client.js` (→ `:8091`), `src/search/embedder.js` (`createServiceEmbedder`) | ✅ (real vectors ⚠️ Tier-2) |
 | Inference router (local Ollama + BYOK cloud) | `src/inference/{router,local,cloud,errors}.js` | ✅ (real models need Ollama/keys) |
 | Search (BM25 + vector + RRF fusion) | `src/search/**` | ✅ |
 | Topology / AnalysisEngine pipeline | `src/topology.js`, `src/topology/helpers.js`, `pipeline/` | ✅ (real run ⚠️) |
@@ -69,6 +77,13 @@ search (BM25 + vector, RRF fusion)  +  getContext preamble (D5)
 back to the client as tool results
 ```
 
+**Query embedder wiring:** `boot()` (`src/index.js`) auto-wires the query-time
+embedder via `resolveDefaultEmbedder()` → `createServiceEmbedder()` (an adapter
+that bridges the embed client's positional-task signature to the search
+embedder's `{task}` contract, and reports `unit:true` since the embed-service
+L2-normalizes). The backend fail-softs to BM25 per query when `:8091` is down.
+Opt out with `MYCELIUM_DISABLE_EMBED=1`; redirect with `MYCELIUM_EMBED_URL`.
+
 Enrichment state machine (faithful to the canonical model): **`0 unprocessed →
 2 embedded → 1 enriched → -1 failed`**. The NLP pass (`src/enrich/extract.js`)
 is a pure deterministic rules extractor (url/email/money/date/proper-noun/
@@ -85,7 +100,13 @@ hashtag + keyword tags) behind a seam a model-backed pass can replace.
 ## 6. Security model
 
 - **Two 64-char hex keys** (decisions D4 + D6): `USER_MASTER` + `SYSTEM_KEY`
-  (32 bytes each), copy-paste, no BIP-39. Per-key KCV guards typos.
+  (32 bytes each), no BIP-39. Per-key KCV guards typos.
+- **Key source** (`src/crypto/key-source.js`, `MYCELIUM_KEY_SOURCE`): the two hex
+  keys are read at boot from `env` (default), the **macOS Keychain**, or
+  **1Password** (`op`). Keychain/1Password keep keys out of shell history and
+  config files (and out of the process env until unlock). Shell-injection-safe
+  (`execFile` arg arrays), fail-closed, never logged. `npm run set-keys` provisions.
+  KCV (above) stays as the integrity interlock regardless of source.
 - **Envelope encryption:** AES-256-GCM wrapped-DEK (`src/crypto/crypto-local.js`).
   `ENCRYPTED_FIELDS` are encrypted/decrypted transparently by the adapter on
   write/read — callers handle plaintext, storage holds ciphertext.
@@ -111,10 +132,9 @@ hashtag + keyword tags) behind a seam a model-backed pass can replace.
 
 ## 9. Verification
 
-`npm run verify` runs **15 GO-gated suites** (`scripts/verify-*.mjs`), each with
+`npm run verify` runs **17 GO-gated suites** (`scripts/verify-*.mjs`), each with
 a PASS/FAIL ledger + VERDICT line: foundation, mcp, mindfiles, metrics, rest,
-search, topology, embed, oauth, context, ingest, blob, enqueue, enrich,
-inference. CI
+search, topology, embed, oauth, context, ingest, blob, enqueue, enrich, keysource, portal, inference. CI
 (`.github/workflows/verify.yml`) runs them on every PR. **Tier-1** suites pass
 without the ML stack; **Tier-2** parity (real embeddings/clustering) is verified
 on a host with onnxruntime/Ollama installed.
@@ -124,11 +144,16 @@ on a host with onnxruntime/Ollama installed.
 ✅ **Built + verified:** D1 adapter, MCP server (stdio), HTTP + REST transports,
 OAuth 2.1, two-key vault encryption, search, topology pipeline, getContext (D5),
 ingestion + encrypted uploads, full enrichment pipeline (embed + NLP rules),
-inference router (local Ollama + BYOK cloud, opt-in egress), 36 tools.
+query embedder wiring, master-key source (env/Keychain/1Password + `set-keys`),
+inference router (local Ollama + BYOK cloud, opt-in egress), 36 tools,
+local portal UI (capture/search/mindscape/tasks + tools console).
 
 ⚠️ **Built, Tier-2-gated:** real Nomic embeddings + clustering (need onnxruntime/
 Ollama on the host); inference router's *cloud* path needs a BYOK key, its
 *local* path needs Ollama running.
+
+◑ **Scaffolded (build on Mac):** native Tauri shell (`src-tauri/`) — wraps the
+portal into `Mycelium.app`; Rust built on the Mac per `src-tauri/BUILD-MAC.md`.
 
 ⬜ **Planned / not yet built:** agent templates, first-run key-setup ceremony,
 Cloudflare Tunnel deploy, real-data import. See

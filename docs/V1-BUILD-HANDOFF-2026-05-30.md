@@ -456,3 +456,100 @@ seam (`src/enrich/extract.js`) and topology description can adopt later.
 **Next buildable-in-sandbox:** agent-templates loader (Component 8), first-run
 key-setup ceremony (Component 10). Bigger remaining work (real models, deploy) is
 environment-gated.
+
+---
+
+## 2026-06-01 — Local setup completed: query embedder WIRED + SETUP.md (own branch/PR)
+
+**Branch `claude/local-setup` off main. 14/14 suites GO (verify-search now 39 checks).**
+
+Two things, on a branch separate from the inference PR (#12):
+
+1. **Wired the query-time embedder (the "R2 TODO") + fixed a latent integration
+   bug.** `boot()` now auto-wires the embed-service client so semantic search is
+   live out of the box (fail-soft to BM25 when :8091 is down).
+   - **Bug found + fixed:** `safeEmbed` calls `embed(text, { task })` (object),
+     but the embed client's `embed(text, taskString)` runs `assertTask()` and
+     would reject the object → every query silently fell back to BM25 even with
+     :8091 up. New `createServiceEmbedder` (`src/search/embedder.js`) bridges the
+     call shapes and reports `unit:true` (embed-service L2-normalizes, confirmed
+     `pipeline/embed-service.py:182`), matching the backend's unit-cosine path.
+   - `src/index.js`: `resolveDefaultEmbedder()` (exported, testable) — default
+     wires the client; `MYCELIUM_DISABLE_EMBED=1` → null (BM25); `MYCELIUM_EMBED_URL`
+     redirects. `boot()`'s `embedder` default now resolves it (was hardcoded null).
+   - `scripts/verify-search.mjs`: +E1-E7 (mock :8091) — bridge, wire format,
+     contract, safeEmbed path, end-to-end semantic query, resolver, health bool.
+   - Full suite stays GO: every other suite omits `embedder` → auto-wires →
+     :8091 down → fail-soft BM25 (identical observable behavior).
+
+2. **`docs/SETUP.md`** — verified local-setup guide (macOS + Linux for a home
+   server). Corrected from the draft: repo `mycelium.id`, init-db `117 tables /
+   2 migrations`, 14 suites, boot `31 tools; 2 deferred (reply, services)`,
+   17 tool modules, `adapter/d1.js` as the encrypting adapter, and step 8 now
+   honest — semantic search IS wired (no longer "BM25 only").
+
+Docs updated per living-docs (ARCHITECTURE §3/§4, this handoff). SETUP.md was
+also removed from the inference branch so PR #12 is inference-only.
+
+**Note:** this branch is off main, so it does NOT include the inference router
+(PR #12). When both merge, bump SETUP/ARCHITECTURE suite count to 15 + re-add the
+inference rows.
+
+---
+
+## 2026-06-01 — Master-key source: macOS Keychain + 1Password (15/15 GO)
+
+**Branch `claude/key-source` off main.** User decision: hold the master key in the
+macOS Keychain and/or 1Password instead of copy-pasting two 64-char hex strings.
+KCV stays (it's a safety interlock, not a chore; fits local *more*, not less).
+
+- `src/crypto/key-source.js`: `resolveKeys({env,exec})` reads the two hex keys from
+  `MYCELIUM_KEY_SOURCE` = env (default) | keychain (`security find-generic-password`)
+  | 1password (`op read <ref>`). Shell-injection-safe (execFile arg arrays, no shell),
+  fail-closed, secret never logged/echoed/in errors.
+- `src/index.js` boot(): resolves keys via the source layer when not injected;
+  env default preserves USER_MASTER_KEY/SYSTEM_KEY behavior (all tests pass explicit
+  hex, so unchanged). The crypto/unlock/KCV are untouched — only key *acquisition* moved.
+- `scripts/set-keys.mjs` (`npm run set-keys`): generate + store both keys in the
+  login Keychain (`-U` upsert); `--show` reveals them for 1Password; prints the `op`
+  item-create command + the op:// refs to export.
+- `scripts/verify-keysource.mjs` (`npm run verify:keysource`): K1-K11 (mock exec) —
+  env/keychain/1password paths, argv correctness, fail-closed, **shell-injection-safety**,
+  **no-secret-leakage**. Full suite now **15/15 GO**.
+- Also fixed two real install blockers found by actually running it on Linux:
+  embed-service needs `--serve` (SETUP.md omitted it → printed help + exited), and
+  `requirements-embed.txt`'s own comment told you to install the wrong (heavy
+  topology) requirements file. Both corrected.
+- SETUP.md: step 4 rewritten around Keychain/1Password (Claude Desktop config now
+  carries `MYCELIUM_KEY_SOURCE=keychain` and **no keys**); embed `--serve`; 15 suites.
+
+**Security-sensitive (master-key handling) → this PR needs human review before merge.**
+
+---
+
+## 2026-06-01 — Local portal UI + native Mac shell scaffold (15/15 GO)
+
+**Branch `claude/portal-app` off main.** User wants a native Mac app. Architecture:
+a Tauri shell whose webview loads a **portal served by the local server**, which
+also serves the REST API (same origin → no CORS). The portal is the substance and
+is fully verified here; the Tauri shell builds on the Mac (no Rust in CI).
+
+- `portal/index.html`: dependency-free single-file SPA (tabs: Home=getContext,
+  Capture=captureMessage, Search=searchMindscape, Mindscape=mindscapeStructure/
+  listTerritories, Tasks=listTasks/createTask, Tools=generic call any of 31 tools).
+  Calls `/api/v1/*`; tiny markdown renderer for the markdown-string results.
+  Arg names taken from live inputSchemas (captureMessage.content, searchMindscape.query, …).
+- `src/server-rest.js`: serves `portal/` statically at `/` after the API router
+  (so `/api/v1/*` wins); `npm run portal` alias. localhost-only, no auth (Phase 4).
+- `scripts/verify-portal.mjs` (`verify:portal`): P1-P6 — page served, API wired,
+  no route shadowing, live getContext, **capture→search round-trip on real data**,
+  404 on bogus paths. Full suite **15/15 GO**.
+- `src-tauri/` (Tauri v2 scaffold): `tauri.conf.json`, `Cargo.toml`, `build.rs`,
+  `src/main.rs` (spawns the Node server with MYCELIUM_KEY_SOURCE=keychain, waits for
+  the port, opens the window, kills the child on close), `BUILD-MAC.md` (rustup +
+  `cargo tauri dev`/`build` → Mycelium.app/.dmg). **Rust untested in sandbox** —
+  honestly flagged; portal is the verified part.
+
+**Next:** build the shell on the M1 (`cargo tauri dev`) to confirm/adjust main.rs;
+then bundle Node as a resource/sidecar for a self-contained .app. Portal features
+can grow (browse/day view, topology viz) against the same REST surface.

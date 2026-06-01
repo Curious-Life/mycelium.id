@@ -71,3 +71,7 @@ kcv.json
 scratch/
 .tmp/
 *.local.md
+
+# Tauri (Rust) build artifacts
+src-tauri/target/
+src-tauri/gen/

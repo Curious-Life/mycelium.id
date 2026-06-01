@@ -11,18 +11,48 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
 import { buildDomains, collectTools, createMcpServer } from './mcp.js';
+import { createServiceEmbedder } from './search/embedder.js';
+import { resolveKeys } from './crypto/key-source.js';
+
+/**
+ * Resolve the query-time mind-search embedder for the CLI/server paths. Wires
+ * the embed-service client (:8091) by default so semantic search is live; the
+ * search backend fail-softs to BM25 per-query when the service is down, so this
+ * is safe to wire unconditionally. Opt out with MYCELIUM_DISABLE_EMBED=1
+ * (BM25-only); point elsewhere with MYCELIUM_EMBED_URL. Exported for testing.
+ */
+export function resolveDefaultEmbedder({ env = process.env } = {}) {
+  if (env.MYCELIUM_DISABLE_EMBED === '1') return null;
+  return createServiceEmbedder({
+    baseUrl: env.MYCELIUM_EMBED_URL || undefined,
+    timeoutMs: env.MYCELIUM_EMBED_TIMEOUT_MS ? Number(env.MYCELIUM_EMBED_TIMEOUT_MS) : 15000,
+  });
+}
 
 export async function boot({
   dbPath = process.env.MYCELIUM_DB || 'data/mycelium.db',
   kcvPath = process.env.MYCELIUM_KCV || 'data/kcv.json',
-  userHex = process.env.USER_MASTER_KEY,
-  systemHex = process.env.SYSTEM_KEY,
+  // Master keys: resolved from MYCELIUM_KEY_SOURCE (env | keychain | 1password)
+  // below when not passed explicitly. Callers/tests may inject the hex directly.
+  userHex,
+  systemHex,
   userId = process.env.MYCELIUM_USER_ID || 'local-user',
-  // embedder: the mind-search embed-service client (:8091, sibling unit R2).
-  // Optional — when omitted, mind-search runs BM25-only. The CLI path leaves it
-  // null until R2 wires the real client; verify scripts inject a stub.
-  embedder = null,
+  // embedder: the query-time mind-search embedder ({ embed, health }). Defaults
+  // to the embed-service client (:8091) via resolveDefaultEmbedder() so semantic
+  // search is live out of the box; the backend fail-softs to BM25 per-query when
+  // :8091 is down. Pass an explicit embedder (e.g. a stub) to override, or `null`
+  // to force BM25-only. The default param only evaluates when the arg is omitted.
+  embedder = resolveDefaultEmbedder(),
 } = {}) {
+  // Acquire the two hex keys from the configured source unless injected. The
+  // source layer keeps keys out of shell history / config files on a Mac (macOS
+  // Keychain or 1Password); default 'env' preserves the USER_MASTER_KEY /
+  // SYSTEM_KEY behavior. resolveKeys() fails closed (clear error, no key value).
+  if (userHex === undefined || systemHex === undefined) {
+    const resolved = resolveKeys();
+    userHex = userHex ?? resolved.userHex;
+    systemHex = systemHex ?? resolved.systemHex;
+  }
   if (!userHex || !systemHex) {
     throw new Error('USER_MASTER_KEY and SYSTEM_KEY must be set (64-char hex each). Vault stays locked.');
   }
