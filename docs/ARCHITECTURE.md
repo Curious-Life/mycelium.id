@@ -57,6 +57,8 @@ Two **sidecar services** run as their own processes:
 | Ingestion choke-point + uploads | `src/ingest/{capture,upload,blob-store,enqueue}.js` | ✅ |
 | Enrichment service (embed + NLP) | `src/enrich/{service,server,extract}.js` | ✅ |
 | MCP tools (36 across 17 domains) | `src/tools/*.js` | ✅ |
+| Box identity (ed25519 from master key) | `src/identity/identity.js` | ✅ |
+| Publishing: signed links + fail-closed public server | `src/publish/{links,public-server}.js` | ✅ (custom-domain; mycelium.id handle = central infra, planned) |
 | Mind-files subsystem | `src/mindfiles/mind-files.js` | ✅ |
 
 ## 4. Data flow — capture → searchable
@@ -139,9 +141,9 @@ hashtag + keyword tags) behind a seam a model-backed pass can replace.
 
 ## 9. Verification
 
-`npm run verify` runs **17 GO-gated suites** (`scripts/verify-*.mjs`), each with
+`npm run verify` runs **18 GO-gated suites** (`scripts/verify-*.mjs`), each with
 a PASS/FAIL ledger + VERDICT line: foundation, mcp, mindfiles, metrics, rest,
-search, topology, embed, oauth, context, ingest, blob, enqueue, enrich, keysource, portal, inference. CI
+search, topology, embed, oauth, context, ingest, blob, enqueue, enrich, keysource, portal, inference, publish. CI
 (`.github/workflows/verify.yml`) runs them on every PR. **Tier-1** suites pass
 without the ML stack; **Tier-2** parity (real embeddings/clustering) is verified
 on a host with onnxruntime/Ollama installed.

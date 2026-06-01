@@ -578,3 +578,32 @@ for "a lot of data".
 Gap closed: previously upload existed only on the HTTP-MCP server; the portal can
 now ingest files and large histories. True multi-GB streaming (vs in-memory) is a
 later increment if needed.
+
+---
+
+## 2026-06-01 — Publishing foundation: identity + signed links + fail-closed public server (18/18 GO)
+
+**Branch `claude/publish-foundation` off main.** Decisions: identity+signing designed
+once for BOTH custom-domain and (future) <tag>.mycelium.id; per-doc visibility
+public/unlisted/private; tag-ownership always signed. Custom-domain serving built first.
+
+- `src/identity/identity.js`: the box's ed25519 identity, derived DETERMINISTICALLY
+  from USER_MASTER via HKDF (no extra secret to store; reproducible; bound to the
+  vault's root of trust). sign/verify, publicKeyB64, handle validation, verifyWithPublicKey.
+  Built on Node crypto — no dep.
+- `src/publish/links.js`: signed capability tokens for "unlisted" docs —
+  base64url({slug,exp}).sig. Only the master-key holder can mint; verify checks
+  signature BEFORE trusting fields, plus expiry + slug-binding. Fail-closed.
+- `src/publish/public-server.js`: the PUBLIC surface (separate process, `--public`,
+  :8788) — `GET /p/:slug` (published only), `GET /s/:slug?t=` (valid signed token
+  only), everything else 404. On-demand render, HTML-escaped then minimal markdown.
+  NEVER serves the tool API / private portal / an unpublished doc.
+- `scripts/verify-publish.mjs`: I1-I5 identity, L1-L5 links, S1-S9 server incl. the
+  headline S9 LEAKAGE GUARD (private content appears in NO response) + traversal/API
+  404s. Full suite 18/18 GO. (I5 caught + fixed a 1-char-handle regex bug.)
+
+**Security-sensitive (public exposure surface) → needs human review before merge.**
+
+**Next:** wire the publishDocument MCP tool to a minimal publicRenderer (so publish
+is drivable from the portal/Claude); per-doc visibility UI in the portal; then the
+central `<tag>.mycelium.id` registry + edge (hosted-tier, phase 2).
