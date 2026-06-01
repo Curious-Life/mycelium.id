@@ -6,6 +6,7 @@ import { boot } from './index.js';
 import { apiRouter } from './api.js';
 import { portalCompatRouter } from './portal-compat.js';
 import { portalMindscapeRouter } from './portal-mindscape.js';
+import { portalUploadsRouter } from './portal-uploads.js';
 import { authShimRouter } from './auth-shim.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 
@@ -80,6 +81,10 @@ export async function startRestServer({
   // (unmatched paths fall through from the compat router above); its JSON parser
   // is likewise scoped to /api/v1/portal so it never touches /api/v1/upload.
   app.use('/api/v1/portal', portalMindscapeRouter({ db, userId: bootUserId }));
+  // Import surface (multipart upload + chunk assembly → parse → captureMessage).
+  // Multipart bodies pass through the JSON parsers above untouched (content-type
+  // gated); its own /upload/complete handler scopes express.json to that route.
+  app.use('/api/v1/portal', portalUploadsRouter({ db, userId: bootUserId, enqueueEnrichment }));
   // Local "always signed in" shim so the canonical portal's session check
   // (/auth/session) succeeds and the app opens instead of bouncing to /login —
   // V1 is single-user and unlocked at boot (keys from the server-side source).
