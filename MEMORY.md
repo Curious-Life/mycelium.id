@@ -13,8 +13,12 @@ detail lives in the linked docs. Newest-relevant first.
   Profile/Settings) + disabled **"Coming later"** group. **BUILD ORDER: N→M→I→G→C→(T,P,S)→K→O**
   (N=nav trim first, frontend-only, instant coherence; K=ceremony Mac-gated last). Detailed
   M/I/G/C/O shapes in [`docs/UX-JOURNEY-BUILDOUT-DESIGN-2026-06-01.md`](docs/UX-JOURNEY-BUILDOUT-DESIGN-2026-06-01.md).
-  `main @ 8ef806a`, `npm run verify` → **20× GO**. ⚠️ Branch off `origin/main` (local `main` is stale).
-  **NEXT: implement Phase N** (rewrite nav arrays in `portal-app/.../shell/{Sidebar,Header,BottomTabBar}.svelte`).
+  `npm run verify` → **21× GO**. ⚠️ Branch off `origin/main` (local `main` is stale).
+  **Phase N (nav trim) DONE** on branch `claude/ux-complete-design`: tight 6-screen primary nav
+  (Mindscape/Library/Import/Timeline/Profile + Settings) + collapsible "Coming later" disabled
+  group; dead 404 probes (`connections/count`, `fleet/gate`) removed; chat toggle hidden (deferred);
+  `verify:nav` 6/6. **NEXT: Phase M** (wire `db.mindscape`+`db.territoryDocs` in `src/db/index.js`
+  + `/api/v1/portal/mindscape/*` compat endpoints).
 
 - **V1 build — Wave 1+2 DONE; UX pass + ingestion/uploads BUILT.** MCP server serves **31 tools**
   over stdio + HTTP/OAuth. Added getContext, captureMessage, importMessages, listTasks; folded
