@@ -9,7 +9,12 @@ rust-version = "1.77"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# macos-private-api enables the transparent window the glass UI shows through.
+tauri = { version = "2", features = ["macos-private-api"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Native NSVisualEffectView vibrancy behind the transparent webview.
+window-vibrancy = "0.6"
 
 [profile.release]
 opt-level = "s"
