@@ -62,19 +62,41 @@ export async function startPublicServer({ dbPath, kcvPath, userHex, systemHex, u
   const bootOpts = {};
   for (const [k, v] of Object.entries({ dbPath, kcvPath, userHex, systemHex, userId })) if (v !== undefined) bootOpts[k] = v;
   const { db, close, userId: owner } = await boot(bootOpts);
+
+  // Fail-closed schema interlock: the revocation guarantee depends on the
+  // `publish_nonce` column (migration 0003). If the DB predates it (e.g. an
+  // imported/older vault), revocation rotation silently no-ops — refuse to
+  // serve at all rather than expose unrevocable links. (verify suites always
+  // run a freshly-migrated DB, so only a drifted prod DB trips this.)
+  try {
+    const cols = await db.rawQuery(`PRAGMA table_info(documents)`);
+    const names = (cols?.results || cols || []).map((c) => c.name);
+    if (!names.includes("publish_nonce")) {
+      throw new Error("documents.publish_nonce missing — apply migration 0003 before serving the public surface");
+    }
+  } catch (e) {
+    try { close?.(); } catch { /* ignore */ }
+    throw e;
+  }
+
   const identity = createIdentity({ masterHex: process.env.ENCRYPTION_MASTER_KEY, handle: handle ?? process.env.MYCELIUM_HANDLE ?? null });
 
   const app = express();
   app.disable("x-powered-by");
 
   // Cap rendered doc size so a single huge document can't blow up memory while
-  // serving a public request. Override with MYCELIUM_PUBLIC_MAX_DOC_BYTES.
-  const MAX_DOC_BYTES = Number(process.env.MYCELIUM_PUBLIC_MAX_DOC_BYTES ?? 1_048_576); // 1 MiB
+  // serving a public request. Override with MYCELIUM_PUBLIC_MAX_DOC_BYTES (a
+  // non-finite/invalid value falls back to the default — never disables the cap).
+  const envMax = Number(process.env.MYCELIUM_PUBLIC_MAX_DOC_BYTES);
+  const MAX_DOC_BYTES = Number.isFinite(envMax) && envMax > 0 ? envMax : 1_048_576; // 1 MiB
 
   const serveDoc = (res, doc) => {
     let content = String(doc.content ?? "");
+    // Truncate by BYTES (not UTF-16 code units) so multibyte content can't
+    // exceed the cap; subarray on a byte buffer may split a codepoint, which
+    // toString renders as U+FFFD — harmless for a truncation notice.
     if (Buffer.byteLength(content, "utf8") > MAX_DOC_BYTES) {
-      content = content.slice(0, MAX_DOC_BYTES) + "\n\n*(truncated)*";
+      content = Buffer.from(content, "utf8").subarray(0, MAX_DOC_BYTES).toString("utf8") + "\n\n*(truncated)*";
     }
     res.status(200).type("html").send(page({ title: doc.title, body: renderMarkdown(content), handle: identity.handle }));
   };
