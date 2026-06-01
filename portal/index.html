@@ -69,6 +69,7 @@ const TABS = [
   { id: 'search',    label: 'Search' },
   { id: 'mindscape', label: 'Mindscape' },
   { id: 'tasks',     label: 'Tasks' },
+  { id: 'import',    label: 'Import' },
   { id: 'tools',     label: 'Tools' },
 ];
 
@@ -172,6 +173,63 @@ const views = {
     };
     main.querySelector('#list').onclick = (e) => run(e.target, out, () => call('listTasks', {}));
     main.querySelector('#list').click();
+  },
+  import() {
+    main.innerHTML = `<h2>Import</h2><div class="sub">Bring in a lot of data — files (encrypted at rest) or bulk message history.</div>
+      <h3 style="color:var(--accent);font-weight:500;margin:8px 0">Files</h3>
+      <div id="drop" style="border:1px dashed var(--line);border-radius:8px;padding:22px;text-align:center;color:var(--muted);cursor:pointer">
+        Drop a file here, or click to choose. Stored as an encrypted blob + a message.</div>
+      <input type="file" id="file" multiple style="display:none" />
+      <h3 style="color:var(--accent);font-weight:500;margin:18px 0 8px">Bulk messages</h3>
+      <div class="hint">One message per line. Imported in batches of 500 (so very large pastes scale).</div>
+      <textarea id="bulk" placeholder="paste a chat/history export — one message per line…"></textarea>
+      <div class="row"><input id="src" placeholder="source label (e.g. telegram)" style="max-width:240px" />
+        <button class="go" id="imp">Import messages</button></div>${outBox()}`;
+    const out = main.querySelector('#out');
+    const fileInput = main.querySelector('#file'); const drop = main.querySelector('#drop');
+
+    async function sendFile(f) {
+      const qs = `?filename=${encodeURIComponent(f.name)}&type=${encodeURIComponent(f.type || '')}&asMessage=1`;
+      const r = await fetch(`/api/v1/upload${qs}`, { method: 'POST', body: f });
+      const j = await r.json().catch(() => ({ ok: false, error: 'bad response' }));
+      if (!j.ok) throw new Error(j.error || `error ${r.status}`);
+      return j.result;
+    }
+    async function uploadFiles(files) {
+      out.classList.remove('empty');
+      const list = [...files]; let done = 0; const lines = [];
+      for (const f of list) {
+        out.innerHTML = md(`Uploading **${done}/${list.length}**…`);
+        try { const r = await sendFile(f); lines.push(`- ✓ \`${f.name}\` — ${r.size} bytes (encrypted)`); }
+        catch (e) { lines.push(`- ✗ \`${f.name}\` — ${e.message}`); }
+        done++;
+      }
+      out.innerHTML = md(`Uploaded **${done}** file(s):\n${lines.join('\n')}`);
+    }
+    drop.onclick = () => fileInput.click();
+    fileInput.onchange = () => fileInput.files.length && uploadFiles(fileInput.files);
+    drop.ondragover = (e) => { e.preventDefault(); drop.style.borderColor = 'var(--accent)'; };
+    drop.ondragleave = () => { drop.style.borderColor = 'var(--line)'; };
+    drop.ondrop = (e) => { e.preventDefault(); drop.style.borderColor = 'var(--line)'; if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files); };
+
+    main.querySelector('#imp').onclick = async (e) => {
+      const msgs = main.querySelector('#bulk').value.split('\n').map(s => s.trim()).filter(Boolean);
+      if (!msgs.length) { setOut(out, 'Paste at least one line.', true); return; }
+      const source = main.querySelector('#src').value.trim() || 'import';
+      const btn = e.target; btn.disabled = true; out.classList.remove('empty');
+      const CHUNK = 500; let imported = 0;
+      try {
+        for (let i = 0; i < msgs.length; i += CHUNK) {
+          const batch = msgs.slice(i, i + CHUNK).map(content => ({ content, source }));
+          await call('importMessages', { messages: batch });
+          imported += batch.length;
+          out.innerHTML = md(`Imported **${imported} / ${msgs.length}** messages…`);
+        }
+        out.innerHTML = md(`Done — imported **${imported}** messages from \`${source}\`. They'll be embedded + enriched in the background.`);
+        main.querySelector('#bulk').value = '';
+      } catch (err) { setOut(out, err.message || String(err), true); }
+      finally { btn.disabled = false; }
+    };
   },
   async tools() {
     main.innerHTML = `<h2>Tools</h2><div class="sub">Call any of the vault's tools directly.</div>

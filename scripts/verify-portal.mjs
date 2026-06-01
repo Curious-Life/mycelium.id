@@ -69,6 +69,32 @@ async function main() {
     // P6 — bogus static path → 404 (no traversal/leak)
     const miss = await fetch(`${url}/does-not-exist.js`);
     rec('P6. unknown static path → 404', miss.status === 404, `status=${miss.status}`);
+
+    // P7 — file UPLOAD via the portal route → encrypted attachment + message
+    const fileBytes = Buffer.from(`portal upload ${token} ` + 'x'.repeat(2048));
+    const upRes = await fetch(`${url}/api/v1/upload?filename=note.txt&type=text/plain&asMessage=1`, {
+      method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: fileBytes,
+    });
+    const up = await upRes.json();
+    rec('P7. POST /api/v1/upload stores an attachment (+ linked message)',
+      up.ok === true && !!up.result?.attachmentId && !!up.result?.messageId && up.result?.size === fileBytes.length,
+      `size=${up.result?.size}`);
+
+    // P8 — HIGH-VOLUME bulk import: a body OVER 1 MB (the old express.json cap),
+    // proving the raised limit accepts "a lot of data" in one request.
+    const N = 4000;
+    const filler = 'lorem ipsum dolor sit amet '.repeat(12); // ~324 chars/msg
+    const bulk = { messages: Array.from({ length: N }, (_, i) => ({ content: `bulk ${token} row ${i} ${filler}`, source: 'import' })) };
+    const bodyStr = JSON.stringify(bulk);
+    const impRes = await fetch(`${url}/api/v1/importMessages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: bodyStr });
+    const imp = await impRes.json();
+    rec(`P8. bulk importMessages accepts a >1MB body (${(bodyStr.length / 1e6).toFixed(2)} MB, ${N} msgs — old 1mb cap would 413)`,
+      impRes.status === 200 && imp.ok === true && bodyStr.length > 1_200_000,
+      `status=${impRes.status} bytes=${bodyStr.length}`);
+
+    // P9 — the imported volume is actually persisted + searchable
+    const big = await (await fetch(`${url}/api/v1/searchMindscape`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: `bulk ${token}`, limit: 5 }) })).json();
+    rec('P9. bulk-imported messages are persisted + searchable', big.ok === true && String(big.result).includes(token));
   } finally {
     server.close(); try { close?.(); } catch {}
   }
