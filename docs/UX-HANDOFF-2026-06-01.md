@@ -48,7 +48,16 @@
 
 ---
 
-## NEXT TASK (big) — design the complete, exquisite end-to-end UX
+## ✅ DONE — complete-UX design is LOCKED → [`docs/UX-COMPLETE-DESIGN-2026-06-01.md`](UX-COMPLETE-DESIGN-2026-06-01.md)
+
+Ran `/sweep-first-design` with the 4 sweeps below (+ a security pivot: keys never
+touch HTTP). Operator decisions: **(1) key ceremony = Tauri native first-run**;
+**(2) tight 6-screen primary nav + disabled "Coming later" group.** Build order:
+**N→M→I→G→C→(T,P,S)→K→O** (N=nav trim first, frontend-only; K=Tauri ceremony,
+Mac-gated, last). **Next action: implement Phase N.** The original sweep brief is
+preserved below for the record.
+
+### (original) NEXT TASK brief — design the complete, exquisite end-to-end UX
 
 The prior design doc covered only the 5 build-out items. The operator now wants the **whole experience** designed first. **Run these sweeps before locking it** (sweep-first-design, ≥3 cycles):
 

@@ -5,14 +5,16 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
-- **UX build-out (2026-06-01).** Canonical SvelteKit portal adopted + served; **app opens with no
-  login wall** (auth-shim); **Library wired** to real local data. Merged this session: #18 publish
-  (hardened, 2nd adversarial round), #23 portal M1, #24 auth-shim, #25 funding placeholders.
-  `main @ 091e222`, `npm run verify` → **20× GO**. **NEXT: design the complete, exquisite UX**
-  (account/key ceremony, full screen keep/cut, IA) — sweeps needed first; then phases M→I→G→C→O.
-  Pick up: [`docs/UX-HANDOFF-2026-06-01.md`](docs/UX-HANDOFF-2026-06-01.md) +
-  [`docs/UX-JOURNEY-BUILDOUT-DESIGN-2026-06-01.md`](docs/UX-JOURNEY-BUILDOUT-DESIGN-2026-06-01.md).
-  ⚠️ Branch off `origin/main` (local `main` is stale legacy).
+- **Complete-UX design LOCKED (2026-06-01).** Canonical portal adopted + served, no login wall,
+  Library wired. The **whole experience is now designed** (4-sweep `/sweep-first-design`, security
+  pivot: keys never touch HTTP): [`docs/UX-COMPLETE-DESIGN-2026-06-01.md`](docs/UX-COMPLETE-DESIGN-2026-06-01.md).
+  **Operator calls:** (1) key ceremony = **Tauri native first-run** (Rust gens keys → Keychain →
+  boots Node, bundled setup view); (2) **tight 6-screen nav** (Mindscape/Library/Import/Timeline/
+  Profile/Settings) + disabled **"Coming later"** group. **BUILD ORDER: N→M→I→G→C→(T,P,S)→K→O**
+  (N=nav trim first, frontend-only, instant coherence; K=ceremony Mac-gated last). Detailed
+  M/I/G/C/O shapes in [`docs/UX-JOURNEY-BUILDOUT-DESIGN-2026-06-01.md`](docs/UX-JOURNEY-BUILDOUT-DESIGN-2026-06-01.md).
+  `main @ 8ef806a`, `npm run verify` → **20× GO**. ⚠️ Branch off `origin/main` (local `main` is stale).
+  **NEXT: implement Phase N** (rewrite nav arrays in `portal-app/.../shell/{Sidebar,Header,BottomTabBar}.svelte`).
 
 - **V1 build — Wave 1+2 DONE; UX pass + ingestion/uploads BUILT.** MCP server serves **31 tools**
   over stdio + HTTP/OAuth. Added getContext, captureMessage, importMessages, listTasks; folded
