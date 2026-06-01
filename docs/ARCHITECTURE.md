@@ -23,12 +23,24 @@ One Node entry point, `src/index.js`, selects a mode:
 | MCP stdio (default) | `npm start` | MCP over stdio for a local client |
 | MCP Streamable HTTP | `npm run start:http` (`--http` / `MYCELIUM_HTTP=1`) | remote MCP + OAuth |
 | REST | `npm run rest` | REST over the shared handler map |
-| Portal (UI + REST) | `npm run portal` | static SPA at `/` + REST `/api/v1/*`, localhost-only |
+| Portal (UI + REST) | `npm run portal` | portal at `/` + REST `/api/v1/*`, localhost-only |
 | Enrichment service | `npm run start:enrich` (`--enrich`) | the `:8095` background enricher |
 
+**Portal UI — two coexisting.** The **canonical** SvelteKit app (`portal-app/`,
+the real production UI) is served at `/` once built (`npm run portal:build` →
+`portal-app/build`, a static SPA); the Node server (`src/server-rest.js`,
+`resolvePortal()`) auto-detects it, serves it with SPA fallback to `200.html`,
+and otherwise falls back to the single-file `portal/index.html`. Override with
+`MYCELIUM_PORTAL=canonical|legacy|auto`. The canonical app's data layer
+(`portal-app/src/lib/api.ts`) still targets the cloud `/portal/*` shape — **M2**
+(retarget to `/api/v1/:tool`, screen-by-screen) is the open work, best iterated
+visually on the Mac (`npm run portal:dev`). See `portal-app/README.md`.
+
 A **native Mac shell** (`src-tauri/`, Tauri v2) wraps the portal: it spawns the
-Node server and opens a window at `http://127.0.0.1:8787`. Portal is verified
-(`verify:portal`); the Rust shell is built on the Mac (`src-tauri/BUILD-MAC.md`).
+Node server and opens a window at `http://127.0.0.1:8787` (so it shows whichever
+portal the server serves — build `portal-app` to get the canonical UI). Portals
+are verified by `verify:portal` (single-file) + `verify:portal-serve`
+(canonical serving); the Rust shell is built on the Mac (`src-tauri/BUILD-MAC.md`).
 
 Two **sidecar services** run as their own processes:
 - **`:8091` embed-service** — Nomic v1.5 ONNX embeddings (`pipeline/embed-service.py`), ⚠️ Tier-2 (needs onnxruntime/model installed).
@@ -42,7 +54,8 @@ Two **sidecar services** run as their own processes:
 | MCP server (tool registration) | `src/mcp.js` | ✅ |
 | Streamable HTTP transport | `src/server-http.js` | ✅ |
 | REST surface + file upload | `src/server-rest.js`, `src/api.js` (`/api/v1/upload`) | ✅ |
-| Local portal (single-file SPA) | `portal/index.html` (served by REST) | ✅ |
+| Canonical portal (SvelteKit) | `portal-app/` → `npm run portal:build` (served by REST) | ✅ builds + served; data-wiring (M2) pending |
+| Local portal (single-file SPA) | `portal/index.html` (REST fallback) | ✅ |
 | Native Mac shell (Tauri) | `src-tauri/**` | ◑ scaffold (build on Mac) |
 | OAuth 2.1 + PKCE (better-auth) | `src/auth.js` | ✅ |
 | D1/SQLite storage adapter | `src/adapter/d1.js` | ✅ |

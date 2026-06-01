@@ -1,0 +1,283 @@
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@import './lib/styles/tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+	html {
+		font-family: var(--font-sans);
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+	}
+
+	body {
+		background-color: var(--color-bg);
+		color: var(--color-text-primary);
+	}
+
+	h1, h2, h3, h4, h5, h6 {
+		font-family: var(--font-sans);
+		font-weight: 500;
+		color: var(--color-text-emphasis);
+	}
+
+	code, pre {
+		font-family: var(--font-mono);
+	}
+
+	::-webkit-scrollbar {
+		width: 8px;
+		height: 8px;
+	}
+
+	::-webkit-scrollbar-track {
+		background: var(--color-surface);
+	}
+
+	::-webkit-scrollbar-thumb {
+		background: var(--color-border);
+		border-radius: var(--radius-sm);
+	}
+
+	::-webkit-scrollbar-thumb:hover {
+		background: var(--color-accent);
+	}
+
+	::selection {
+		background: var(--color-accent);
+		color: var(--color-bg);
+	}
+
+	:focus-visible {
+		outline: 2px solid var(--color-focus-ring);
+		outline-offset: 2px;
+	}
+}
+
+@layer components {
+	.btn {
+		@apply px-5 py-2.5 rounded-lg font-medium inline-flex items-center justify-center gap-2;
+		transition: all var(--duration-fast) var(--ease-out);
+	}
+
+	.btn:focus-visible {
+		outline: 2px solid var(--color-focus-ring);
+		outline-offset: 2px;
+	}
+
+	.btn-primary {
+		background: var(--color-accent);
+		color: var(--color-bg);
+		box-shadow: 0 4px 12px rgba(91, 159, 232, 0.2);
+	}
+
+	.btn-primary:hover {
+		opacity: 0.9;
+		box-shadow: 0 4px 16px rgba(91, 159, 232, 0.3);
+	}
+
+	.btn-secondary {
+		background: transparent;
+		border: 1px solid var(--color-border);
+		color: var(--color-text-primary);
+	}
+
+	.btn-secondary:hover {
+		background: var(--color-elevated);
+		border-color: var(--color-text-secondary);
+	}
+
+	.btn-ghost {
+		background: transparent;
+		color: var(--color-text-secondary);
+	}
+
+	.btn-ghost:hover {
+		color: var(--color-text-primary);
+		background: var(--color-elevated);
+	}
+
+	.card {
+		background: var(--color-surface);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-lg);
+		box-shadow: var(--shadow-lg);
+	}
+
+	.card-elevated {
+		background: var(--color-elevated);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-lg);
+		box-shadow: var(--shadow-lg);
+	}
+
+	.input {
+		background: var(--color-surface);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		padding: 0.625rem 1rem;
+		color: var(--color-text-primary);
+		transition: all var(--duration-fast) var(--ease-out);
+	}
+
+	.input::placeholder {
+		color: var(--color-text-tertiary);
+	}
+
+	.input:focus {
+		outline: none;
+		border-color: var(--color-accent);
+		box-shadow: 0 0 0 3px var(--color-focus-ring);
+	}
+
+	.tag {
+		@apply px-2.5 py-1 text-xs font-medium rounded-full;
+		background: var(--color-elevated);
+		color: var(--color-text-secondary);
+	}
+
+	.tag-warm {
+		background: rgba(229, 184, 76, 0.15);
+		color: var(--color-accent-aurum);
+	}
+
+	.tag-azure {
+		background: rgba(91, 159, 232, 0.15);
+		color: var(--color-accent);
+	}
+
+	.tag-amethyst {
+		background: rgba(167, 139, 250, 0.15);
+		color: var(--color-accent-amethyst);
+	}
+
+	.tag-coral {
+		background: rgba(248, 113, 113, 0.15);
+		color: var(--color-accent-coral);
+	}
+
+	.tag-jade {
+		background: rgba(74, 222, 128, 0.15);
+		color: var(--color-accent-jade);
+	}
+
+	.overline {
+		@apply text-xs font-semibold uppercase tracking-wider;
+		color: var(--color-text-tertiary);
+	}
+
+	.heading-display {
+		font-family: var(--font-serif);
+		color: var(--color-text-primary);
+	}
+
+	.section-marker {
+		@apply flex items-center gap-4;
+		color: var(--color-accent-aurum);
+	}
+
+	.section-marker::before,
+	.section-marker::after {
+		content: '';
+		@apply flex-1 h-px;
+		background: var(--color-border);
+	}
+
+	.prose-dark {
+		--tw-prose-body: var(--color-text-primary);
+		--tw-prose-headings: var(--color-text-emphasis);
+		--tw-prose-lead: var(--color-text-secondary);
+		--tw-prose-links: var(--color-accent);
+		--tw-prose-bold: var(--color-text-emphasis);
+		--tw-prose-counters: var(--color-text-secondary);
+		--tw-prose-bullets: var(--color-accent-aurum);
+		--tw-prose-hr: var(--color-border);
+		--tw-prose-quotes: var(--color-text-primary);
+		--tw-prose-quote-borders: var(--color-accent-aurum);
+		--tw-prose-captions: var(--color-text-secondary);
+		--tw-prose-code: var(--color-text-primary);
+		--tw-prose-pre-code: var(--color-text-primary);
+		--tw-prose-pre-bg: var(--color-elevated);
+		--tw-prose-th-borders: var(--color-border);
+		--tw-prose-td-borders: var(--color-border);
+	}
+
+	.prose-dark p,
+	.prose-dark li,
+	.prose-dark blockquote {
+		font-family: var(--font-serif);
+	}
+
+	.prose-dark pre {
+		white-space: pre;
+		tab-size: 4;
+		overflow-x: auto;
+	}
+
+	.prose-dark pre code {
+		white-space: pre;
+		line-height: 1.5;
+	}
+
+	.prose-dark img {
+		max-width: 100%;
+		height: auto;
+		border-radius: 0.5rem;
+		margin: 1rem 0;
+	}
+}
+
+@layer utilities {
+	.backdrop-dark {
+		backdrop-filter: blur(12px);
+		background: rgba(10, 10, 12, 0.9);
+	}
+
+	.backdrop-surface {
+		backdrop-filter: blur(12px);
+		background: rgba(20, 20, 23, 0.9);
+	}
+}
+
+/* ========================================
+ * MOBILE — Safe areas & app chrome
+ * ======================================== */
+
+/* Bottom tab bar clearance — content must not hide behind the tab bar */
+@media (max-width: 767px) {
+	.mobile-content-area {
+		padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px));
+	}
+}
+
+/* Disable pull-to-refresh and overscroll bounce for native feel */
+html, body {
+	overscroll-behavior: none;
+}
+
+/* Tap highlight removal for iOS */
+* {
+	-webkit-tap-highlight-color: transparent;
+}
+
+/* Mobile drawer backdrop */
+.mobile-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 40;
+	background: rgba(0, 0, 0, 0.5);
+	backdrop-filter: blur(4px);
+	-webkit-backdrop-filter: blur(4px);
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity var(--duration-normal) var(--ease-out);
+}
+
+.mobile-backdrop.visible {
+	opacity: 1;
+	pointer-events: auto;
+}
+/* cache bust 1776593089 */
