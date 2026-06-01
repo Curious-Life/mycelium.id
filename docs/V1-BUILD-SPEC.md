@@ -587,6 +587,8 @@ Used for:
 
 ## Component 6: Inference Router (`src/inference/`)
 
+> ✅ **BUILT (2026-06-01)** — `src/inference/{router,local,cloud,errors}.js`, 13 checks in `scripts/verify-inference.mjs`. As-built deviates from the sketch below in three deliberate ways: (1) **no `@anthropic-ai/sdk` dependency** — cloud BYOK is implemented over the Anthropic/OpenAI REST APIs with Node's built-in `fetch` (no install, no transitively-pinned model); (2) **prompt-leak-safe + fail-closed** — non-OK/timeout throws `InferenceError` carrying status/backend only, never the prompt or response; (3) **cloud-fallback** — a cloud failure falls back to local. Cloud is an **opt-in plaintext egress** (only fires for complex tasks when a key is set); default + fallback are local/on-box. See `docs/ARCHITECTURE.md` §3.
+
 Routes inference tasks between local Ollama (free, private) and cloud APIs (powerful, costs money). User provides their own API keys.
 
 ### Router (`src/inference/router.ts`)

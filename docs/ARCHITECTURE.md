@@ -51,6 +51,7 @@ Two **sidecar services** run as their own processes:
 | Scope-partitioned crypto (two-key vault) | `src/crypto/crypto-local.js`, `src/crypto/keys.js`, `src/crypto/guardians/*` | ✅ |
 | Master-key source (env / macOS Keychain / 1Password) | `src/crypto/key-source.js`, `scripts/set-keys.mjs` | ✅ |
 | Embeddings client + search adapter | `src/embed/client.js` (→ `:8091`), `src/search/embedder.js` (`createServiceEmbedder`) | ✅ (real vectors ⚠️ Tier-2) |
+| Inference router (local Ollama + BYOK cloud) | `src/inference/{router,local,cloud,errors}.js` | ✅ (real models need Ollama/keys) |
 | Search (BM25 + vector + RRF fusion) | `src/search/**` | ✅ |
 | Topology / AnalysisEngine pipeline | `src/topology.js`, `src/topology/helpers.js`, `pipeline/` | ✅ (real run ⚠️) |
 | Ingestion choke-point + uploads | `src/ingest/{capture,upload,blob-store,enqueue}.js` | ✅ |
@@ -131,9 +132,9 @@ hashtag + keyword tags) behind a seam a model-backed pass can replace.
 
 ## 9. Verification
 
-`npm run verify` runs **16 GO-gated suites** (`scripts/verify-*.mjs`), each with
+`npm run verify` runs **17 GO-gated suites** (`scripts/verify-*.mjs`), each with
 a PASS/FAIL ledger + VERDICT line: foundation, mcp, mindfiles, metrics, rest,
-search, topology, embed, oauth, context, ingest, blob, enqueue, enrich, keysource, portal. CI
+search, topology, embed, oauth, context, ingest, blob, enqueue, enrich, keysource, portal, inference. CI
 (`.github/workflows/verify.yml`) runs them on every PR. **Tier-1** suites pass
 without the ML stack; **Tier-2** parity (real embeddings/clustering) is verified
 on a host with onnxruntime/Ollama installed.
@@ -144,14 +145,16 @@ on a host with onnxruntime/Ollama installed.
 OAuth 2.1, two-key vault encryption, search, topology pipeline, getContext (D5),
 ingestion + encrypted uploads, full enrichment pipeline (embed + NLP rules),
 query embedder wiring, master-key source (env/Keychain/1Password + `set-keys`),
-36 tools, local portal UI (capture/search/mindscape/tasks + tools console).
+inference router (local Ollama + BYOK cloud, opt-in egress), 36 tools,
+local portal UI (capture/search/mindscape/tasks + tools console).
 
 ⚠️ **Built, Tier-2-gated:** real Nomic embeddings + clustering (need onnxruntime/
-Ollama on the host).
+Ollama on the host); inference router's *cloud* path needs a BYOK key, its
+*local* path needs Ollama running.
 
 ◑ **Scaffolded (build on Mac):** native Tauri shell (`src-tauri/`) — wraps the
 portal into `Mycelium.app`; Rust built on the Mac per `src-tauri/BUILD-MAC.md`.
 
-⬜ **Planned / not yet built:** inference router (Ollama + BYOK — open as PR #12),
-agent templates, Cloudflare Tunnel deploy, real-data import. See
+⬜ **Planned / not yet built:** agent templates, first-run key-setup ceremony,
+Cloudflare Tunnel deploy, real-data import. See
 [`V1-BUILD-SPEC.md`](V1-BUILD-SPEC.md) §"What's left".

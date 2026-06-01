@@ -421,6 +421,44 @@ embed-on-write + NLP-rules pipeline is otherwise complete + launchable end to en
 
 ---
 
+## 2026-06-01 — Component 6: Inference Router BUILT (15/15 suites GO)
+
+**Status: built, verify-gated. NOT auto-merged — goes to a PR for human review
+(touches a plaintext-egress path; auto-merge-on-green gate requires sign-off).**
+
+The local/cloud inference abstraction. Task-routed per the spec's ~80/20 split:
+simple tasks (summarize/classify/extract) → local Ollama; complex (narrate/
+complex) → BYOK cloud when a key is set, else local. Cloud failure → local fallback.
+
+New code:
+- `src/inference/local.js` — Ollama backend (`POST :11434/api/generate`),
+  AbortController timeout, fail-closed, never echoes prompt/body.
+- `src/inference/cloud.js` — BYOK over **REST + built-in fetch** (no
+  `@anthropic-ai/sdk` dep). Anthropic (`x-api-key` + `anthropic-version`) and
+  OpenAI (`Bearer`) paths. ⚠️ EGRESS BOUNDARY — documented in the module header.
+  Error bodies never echoed (only the safe `error.type`). Default model
+  `claude-sonnet-4-6`, overridable via `INFERENCE_CLOUD_MODEL`.
+- `src/inference/router.js` — `createInferenceRouter()` factory; `infer({prompt,
+  task,maxTokens})`; keys redacted from `router.config`.
+- `src/inference/errors.js` — `InferenceError` (status/backend, never plaintext).
+- `scripts/verify-inference.mjs` — 13 checks (mock fetch): routing, both
+  providers' wiring, cloud→local fallback, fail-closed, **leak-safety (prompt
+  never in a thrown error)**, validation, key redaction. Wired into `npm run
+  verify` (now 15 suites).
+
+**Design deviations from the spec sketch (deliberate):** no SDK dependency
+(REST/fetch), prompt-leak-safe + fail-closed errors, cloud-fallback. Recorded in
+`V1-BUILD-SPEC.md` Component 6 + `docs/ARCHITECTURE.md`.
+
+**No internal caller yet** — this is infrastructure the model-backed enrichment
+seam (`src/enrich/extract.js`) and topology description can adopt later.
+
+**Next buildable-in-sandbox:** agent-templates loader (Component 8), first-run
+key-setup ceremony (Component 10). Bigger remaining work (real models, deploy) is
+environment-gated.
+
+---
+
 ## 2026-06-01 — Local setup completed: query embedder WIRED + SETUP.md (own branch/PR)
 
 **Branch `claude/local-setup` off main. 14/14 suites GO (verify-search now 39 checks).**
