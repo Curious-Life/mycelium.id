@@ -80,14 +80,17 @@ or `ENCRYPTED_FIELDS`, RLS/tenant scoping, egress chokepoints, or a DB migration
 These always go to a PR for a human, even at score 100.
 
 ### 7. LAND
-- **If merging to `main`** (score ≥ 85, non-sensitive):
-  - Commit on the branch with a clear message, `git push -u origin <branch>`.
-  - Fast-forward / merge the branch into `main` and push `main`. Prefer a real
-    merge or fast-forward — **never** `--force`. If `main` moved and the merge
-    isn't clean, do not force it: leave the PR open and flag it instead.
-  - Re-run `npm run verify` on `main` to confirm it's still green post-merge.
-- **If leaving for review** (score 60–84, or sensitive): push the branch, ensure
-  a PR is open against `main`, and stop there.
+The routine **never merges to `main` directly.** Every unit lands as a PR, and
+the merge to `main` happens only through the **`auto-merge-on-green` skill**,
+whose fail-closed gate requires green checks **and** passing reviews. This keeps
+one merge policy across the routine and interactive sessions.
+- Commit on the branch with a clear message, `git push -u origin <branch>`.
+- Open or update a PR against `main`.
+- **If score ≥ 85 and non-sensitive:** invoke `auto-merge-on-green` for the PR.
+  It merges the instant CI is green and reviews pass; until then it holds. The
+  routine does not force or shortcut this.
+- **If score 60–84, or security-sensitive:** push + open the PR, leave a "needs
+  review" note, and do **not** request auto-merge — a human reviews first.
 
 ### 8. LOG
 - Append a dated section to `docs/V1-BUILD-HANDOFF-2026-05-30.md`: what you built,
