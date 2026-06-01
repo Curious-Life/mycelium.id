@@ -17,23 +17,41 @@
     --aurum: #E5B84C; --good: #4ADE80; --bad: #F87171;
     --ring: rgba(91,159,232,0.5); --hover: rgba(255,255,255,0.05);
     --sm: 4px; --md: 8px; --lg: 16px;
-    --shadow-sm: 0 1px 2px rgba(0,0,0,.3); --shadow-md: 0 4px 12px rgba(0,0,0,.4);
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.3); --shadow-md: 0 8px 32px rgba(0,0,0,.45);
     --sans: 'Geist', system-ui, -apple-system, sans-serif;
     --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
     color-scheme: dark;
+    /* glass + chromatic */
+    --glass: rgba(22,22,27,0.55); --glass-2: rgba(30,30,37,0.42);
+    --glass-border: rgba(255,255,255,0.10); --glass-hi: inset 0 1px 0 rgba(255,255,255,0.08);
+    --blur: saturate(180%) blur(22px);
+    --chroma: linear-gradient(90deg, #5B9FE8, #A78BFA, #E5B84C, #4ADE80);
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--ink);
     font: 15px/1.6 var(--sans); -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+  /* Chromatic ambiance — soft coloured light the glass refracts over. */
+  body::before { content: ""; position: fixed; inset: -20%; z-index: -1; pointer-events: none;
+    background:
+      radial-gradient(38% 34% at 14% 18%, rgba(91,159,232,.24), transparent 70%),
+      radial-gradient(34% 30% at 86% 14%, rgba(167,139,250,.22), transparent 70%),
+      radial-gradient(46% 40% at 82% 84%, rgba(229,184,76,.15), transparent 70%),
+      radial-gradient(40% 40% at 10% 92%, rgba(74,222,128,.13), transparent 70%);
+    filter: blur(44px); }
+  /* "See-through Mac mode": in the Tauri vibrancy window, drop the opaque bg so
+     the desktop shows through the native blur; the glass panels float over it. */
+  html.glass-os, html.glass-os body { background: transparent; }
+  html.glass-os body::before { opacity: .45; }
   ::-webkit-scrollbar { width: 9px; height: 9px; }
   ::-webkit-scrollbar-track { background: var(--bg); }
   ::-webkit-scrollbar-thumb { background: var(--line); border-radius: var(--md); }
   ::-webkit-scrollbar-thumb:hover { background: var(--tertiary); }
 
   header { display: flex; align-items: center; gap: 12px; padding: 0 24px; height: 60px;
-    border-bottom: 1px solid var(--line); position: sticky; top: 0; background: rgba(10,10,12,.85);
-    backdrop-filter: blur(12px); z-index: 5; }
-  .mark { width: 28px; height: 28px; border-radius: 7px; flex-shrink: 0; display: block; }
+    border-bottom: 1px solid var(--glass-border); position: sticky; top: 0;
+    background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); z-index: 5; }
+  .mark { width: 28px; height: 28px; border-radius: 7px; flex-shrink: 0; display: block;
+    box-shadow: 0 2px 10px rgba(229,184,76,.25); }
   .brand { font-size: 19px; font-weight: 600; letter-spacing: -.2px; color: var(--emph); }
   .brand b { color: var(--accent); font-weight: 600; }
   .status { color: var(--tertiary); font: 12px/1 var(--mono); margin-left: auto; display: flex; align-items: center; gap: 8px; }
@@ -42,7 +60,8 @@
   .dot.bad { background: var(--bad); box-shadow: 0 0 8px rgba(248,113,113,.6); }
 
   .wrap { display: flex; min-height: calc(100vh - 60px); }
-  nav { width: 188px; border-right: 1px solid var(--line); padding: 16px 12px; flex-shrink: 0; background: var(--panel); }
+  nav { width: 188px; border-right: 1px solid var(--glass-border); padding: 16px 12px; flex-shrink: 0;
+    background: var(--glass-2); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); }
   nav button { display: flex; align-items: center; width: 100%; text-align: left; padding: 9px 14px; margin-bottom: 2px;
     background: none; border: none; color: var(--muted); font: 500 14px var(--sans); cursor: pointer;
     border-radius: var(--md); transition: background var(--md), color .15s; }
@@ -54,8 +73,9 @@
   .sub { color: var(--muted); font-size: 14px; margin-bottom: 22px; }
   h3 { color: var(--ink); font-weight: 500; }
 
-  textarea, input, select { width: 100%; background: var(--elevated); color: var(--ink);
-    border: 1px solid var(--line); border-radius: var(--md); padding: 11px 14px; font: 15px var(--sans);
+  textarea, input, select { width: 100%; background: var(--glass-2); color: var(--ink);
+    border: 1px solid var(--glass-border); border-radius: var(--md); padding: 11px 14px; font: 15px var(--sans);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
     transition: border-color .15s, box-shadow .15s; }
   textarea:focus, input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
   textarea { min-height: 120px; resize: vertical; line-height: 1.5; }
@@ -67,8 +87,13 @@
   button.go:hover { filter: brightness(1.12); }
   button.go:disabled { opacity: .45; cursor: default; filter: none; }
 
-  .out { margin-top: 20px; background: var(--panel); border: 1px solid var(--line);
-    border-radius: var(--lg); padding: 20px 22px; box-shadow: var(--shadow-sm); }
+  .out { position: relative; overflow: hidden; margin-top: 20px;
+    background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+    border: 1px solid var(--glass-border); border-radius: var(--lg); padding: 20px 22px;
+    box-shadow: var(--shadow-md), var(--glass-hi); }
+  /* chromatic hairline along the top edge of each glass card */
+  .out::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+    background: var(--chroma); opacity: .55; }
   .out.empty { color: var(--tertiary); }
   .out h1,.out h2,.out h3 { color: var(--emph); font-weight: 600; margin: 16px 0 6px; line-height: 1.3; }
   .out h1 { font-size: 19px; } .out h2 { font-size: 16px; } .out h3 { font-size: 14px; color: var(--accent); }
@@ -94,6 +119,13 @@
 </div>
 
 <script>
+// See-through Mac mode: when running inside the Tauri shell, flag the document
+// so the glass drops its opaque background and the native window vibrancy (the
+// desktop behind) shows through. In a plain browser it stays solid-dark.
+if (window.__TAURI__ || window.__TAURI_INTERNALS__ || window.__TAURI_METADATA__) {
+  document.documentElement.classList.add('glass-os');
+}
+
 const TABS = [
   { id: 'home',      label: 'Home' },
   { id: 'capture',   label: 'Capture' },

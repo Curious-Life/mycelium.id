@@ -23,7 +23,9 @@ use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
+#[cfg(target_os = "macos")]
+use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
 const PORT: u16 = 8787;
 
@@ -74,11 +76,22 @@ fn main() {
             }
 
             let url = format!("http://127.0.0.1:{PORT}");
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse().unwrap()))
+            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse().unwrap()))
                 .title("Mycelium")
                 .inner_size(1100.0, 760.0)
                 .min_inner_size(820.0, 560.0)
+                .transparent(true)        // let the glass show the desktop through
+                .title_bar_style(TitleBarStyle::Overlay) // content flows under the traffic-lights
                 .build()?;
+
+            // See-through Mac mode: native window vibrancy behind the transparent
+            // webview. (macOS only; no-op elsewhere.) The portal's CSS adds the
+            // `glass-os` class when it detects Tauri so its panels stay glassy.
+            #[cfg(target_os = "macos")]
+            {
+                let _ = apply_vibrancy(&win, NSVisualEffectMaterial::HudWindow, None, None);
+            }
+            let _ = &win;
 
             Ok(())
         })

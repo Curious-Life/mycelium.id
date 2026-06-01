@@ -69,3 +69,17 @@ self-contained app, bundle the Node project (and a Node runtime) as resources:
 
 This is the natural next increment; the dev flow (step 1) already gives you a
 working native app on your Mac today.
+
+## Glass / see-through (macOS vibrancy)
+
+The shell opens a **transparent** window with native **NSVisualEffectView vibrancy**
+(`window-vibrancy`, `apply_vibrancy(..., HudWindow)`), and the portal adds a
+`glass-os` class when it detects Tauri so its panels stay translucent and the
+desktop shows through. This needs:
+- `tauri` feature `macos-private-api` + `"macOSPrivateApi": true` (already set), and
+- the `window-vibrancy` dep (already in `Cargo.toml`).
+
+These Rust bits were authored without a Mac/Rust toolchain in CI — `cargo tauri dev`
+on your Mac is the first real compile. If `apply_vibrancy` / `TitleBarStyle` need a
+version tweak, it'll surface there. To prefer a different look, swap
+`NSVisualEffectMaterial::HudWindow` for `Sidebar` or `UnderWindowBackground`.
