@@ -53,10 +53,19 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Local data (SQLite vault + KCV + OAuth/session store) — runtime, never commit
+data/
+auth.db
+*.db
+*.db-shm
+*.db-wal
+kcv.json
+
 # Claude Code per-developer state
 .claude/projects/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+.claude/worktrees/
 
 # Local scratch
 scratch/

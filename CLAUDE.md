@@ -4,7 +4,7 @@
 
 This repo holds two specs:
 
-1. **[`docs/V1-BUILD-SPEC.md`](docs/V1-BUILD-SPEC.md)** — **THIS is what we build first.** Self-hosted single-user MCP server, ~9-11 days, better-sqlite3 + D1 adapter, BIP-39 (12-word) + AES-256-GCM, OAuth 2.1, Cloudflare Tunnel, Ollama embeddings, 37 tools, AnalysisEngine plugin boundary. Phase 1–4 of the build plan. **Open the spec before touching code.**
+1. **[`docs/V1-BUILD-SPEC.md`](docs/V1-BUILD-SPEC.md)** — **THIS is what we build first.** Self-hosted single-user MCP server, ~18-24 days (ironed-out v1.1 estimate), better-sqlite3 + D1 adapter, **hex master key + AES-256-GCM (ported `crypto-local.js` wrapped-DEK envelope; no BIP-39)**, OAuth 2.1, Cloudflare Tunnel, **Nomic v1.5 ONNX embeddings (`embed-service.py`, not bare Ollama)**, **~34 single-user tools + a `getContext` preamble (pure tool server, no autonomous loop — D5)**, two hex keys (USER_MASTER + SYSTEM_KEY — D6), a build-new :8095 enrichment service (D7), **AnalysisEngine boundary shipping the open topology pipeline as default**. **Open the spec before touching code** — it carries a Verification table + 7 locked decisions (D1-D7) reconciled against `reference/` code.
 
 2. **[`docs/REDESIGN-LIVING-SPEC.md`](docs/REDESIGN-LIVING-SPEC.md)** — architecture-rationale doc for the *eventual* managed-light multi-tenant Postgres tier (V1 spec calls this "Phase 5: Extensions"). 12-agent sweep evidence, RLS threat-model pressure test, 18 operator decisions. Read **Part 0 (Headline)** + **Part 11 (Operator pickup list)** before doing any V2 work. Do NOT start V2 architecture decisions until V1 has shipped and validated with real users.
 
@@ -17,17 +17,15 @@ The **current production code** for existing customers lives in the sibling priv
 | Deployment | Single-user self-hosted | Multi-tenant managed-hosted |
 | Storage | SQLite (better-sqlite3 + D1 adapter) | Postgres + pgvector |
 | Isolation | One user per process | RLS + per-user key wrap + connection middleware |
-| BIP-39 | 12 words (128-bit) | 24 words (256-bit) per the redesign spec — reconcile to whichever is chosen |
-| Key storage | Session memory after seed-phrase unlock | WebAuthn PRF in-browser + tier-specific fallbacks |
+| Master key | **Two 64-char hex keys (USER_MASTER + SYSTEM_KEY, 32 bytes each), copy-paste, no BIP-39** — decisions D4 + D6 (per-key KCV guards typos) | 24-word BIP-39 / WebAuthn PRF per redesign spec — reconcile when V2 starts |
+| Key storage | Session memory after hex-key unlock | WebAuthn PRF in-browser + tier-specific fallbacks |
 | Auth | OAuth 2.1 + PKCE (better-auth) | API gateway + JWT |
 | Transport | MCP stdio + Streamable HTTP + REST | + HTTPS+JWT external MCP, federation surfaces |
-| Embedding | Ollama nomic-embed-text 768D | Same model, server-side per redesign spec |
+| Embedding | Nomic v1.5 ONNX 768D via `embed-service.py` (task prefixes) — decision D2; Ollama is inference-only | Same model, server-side per redesign spec |
 | Inference | Local Ollama 80% + BYOK cloud 20% | Cost router (port the legacy energy-system design) |
 | Schema | All 111 D1 tables ported intact | 75-80 tables after cleanup |
 | Topology | AnalysisEngine plugin interface (Lumen plugs in) | Same boundary, multi-tenant adaptations |
 | Federation | Deferred (V1 ships sovereignty, no social layer) | `docs/legacy/SOCIAL-SHARING-SPEC-from-legacy.md` |
-
-## ⚠️ Security first — non-negotiable
 
 ## ⚠️ Security first — non-negotiable
 
@@ -49,15 +47,33 @@ Principles (copied verbatim from the canonical repo's CLAUDE.md so they apply he
 12. **Every artifact persists + hooks fire + user notified exactly once.** See `docs/architecture/MESSAGE-PERSISTENCE.md` (to be ported).
 13. **No ad-hoc network servers.** Agents must never bind a port. Use the publish pipeline (`POST /portal/documents/:path/publish` → `<handle>.mycelium.id/<slug>`).
 
-## Operational disciplines (the 5-skill quartet, inherited)
+## Operational disciplines (inherited + V1-local)
 
-Same as the canonical repo. When applicable, invoke the skill before writing structural code or design docs:
+Same as the canonical repo, plus skills local to this repo. When applicable, invoke the skill before writing structural code or design docs:
 
 - `/sweep-first-design` — for any structural change. Three sweep cycles min, file:line citations, pivot when code contradicts plan.
 - `/deploy-and-verify` — for any deploy. Staged protocol, per-stage verification, [✓]/[—] ledger.
 - `/pre-deletion-caller-audit` — before any delete/replace/rename. Inventory every caller, prove migration, falsifiable criteria.
 - `/handoff-discipline` — at end of any session that produced commits or decisions. `docs/<TOPIC>-HANDOFF-<YYYY-MM-DD>.md` with TL;DR + commit hashes + pickup protocol.
 - `/tenant-schema-parity` — for the canonical repo's D1 fleet; not applicable to this repo's Postgres single-DB-multi-tenant model until shipping schema changes.
+- `/living-docs` — after any change that alters what the system *is* or what the plan *says*. Keep the three living docs current (plan = `docs/V1-BUILD-SPEC.md`, architecture = `docs/ARCHITECTURE.md`, build log = `docs/V1-BUILD-HANDOFF-*.md`), as-built with file-path evidence. Docs land in the same commit as the code.
+- `/auto-merge-on-green` — fail-closed PR merge gate: merge only when all checks pass **and** reviews pass (no changes requested, required approvals met) and the PR is mergeable + non-draft. Security-sensitive diffs always need a human approval. The autonomous routine (`docs/AUTONOMOUS-ROUTINE.md`) merges only through this gate.
+
+## Working style — run tasks to completion
+
+Keep going until the task is actually complete; don't stop and hand back early. This applies especially to multi-sweep work: when there are more sweeps still to run, launch/await them and fold their findings in rather than pausing to "hold for the next sweep." Only end the turn when the deliverable (e.g. spec + plan updated, committed, pushed) is done — or when genuinely blocked on a user decision.
+
+## Design rigor — verify before building (non-negotiable)
+
+The system must be built on the **best possible decisions and designs at every step** — so stress-test, verify, and (where possible) improve each step *before* anything is built on top of it. Prefer **hard evidence over paper reasoning**: a spike that runs real code, or an adversarial read against live `reference/` code, beats a confident assumption. This is the pattern that has already caught real, build-breaking bugs here — the non-existent `oAuthProvider()` API and the per-request `StreamableHTTPServerTransport`, both found by *running/reading*, not planning.
+
+For each load-bearing decision or component, run a **verification gate** before building on it:
+1. **Enumerate** the load-bearing assumptions (what must be true for this to work).
+2. **Prove or refute** each — spike it, read the real code (file:line), or write a test. Never carry an unverified assumption into a layer that depends on it.
+3. **Red-team** it — actively look for the next hidden `oAuthProvider`-class error; consider alternatives; ask whether a better design exists.
+4. **Record** the verdict (verification table / spike RESULT.md / decision log) with evidence, then build.
+
+Optimize for the best decision at each step, not the fastest path to code. A spike that surfaces a flaw early is a success, not a detour.
 
 ## Where things will live (eventually)
 

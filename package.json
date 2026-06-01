@@ -1,0 +1,39 @@
+{
+  "name": "mycelium",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mycelium V1 — self-hosted single-user MCP cognitive vault.",
+  "license": "AGPL-3.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "init-db": "node scripts/init-db.mjs",
+    "verify:foundation": "node scripts/verify-foundation.mjs",
+    "verify:mcp": "node scripts/verify-mcp.mjs",
+    "verify:mindfiles": "node scripts/verify-mindfiles.mjs",
+    "verify:metrics": "node scripts/verify-metrics.mjs",
+    "verify:rest": "node scripts/verify-rest.mjs",
+    "verify:search": "node scripts/verify-search.mjs",
+    "verify:topology": "node scripts/verify-topology.mjs",
+    "verify:embed": "node scripts/verify-embed.mjs",
+    "verify:oauth": "node scripts/verify-oauth.mjs",
+    "verify:context": "node scripts/verify-context.mjs",
+    "verify:ingest": "node scripts/verify-ingest.mjs",
+    "verify:blob": "node scripts/verify-blob.mjs",
+    "verify": "npm run verify:foundation && npm run verify:mcp && npm run verify:mindfiles && npm run verify:metrics && npm run verify:rest && npm run verify:search && npm run verify:topology && npm run verify:embed && npm run verify:context && npm run verify:ingest && npm run verify:blob && npm run verify:enqueue && npm run verify:enrich && npm run verify:oauth",
+    "start": "node src/index.js",
+    "rest": "node src/server-rest.js",
+    "start:http": "node src/index.js --http",
+    "start:enrich": "node src/index.js --enrich",
+    "verify:enqueue": "node scripts/verify-enqueue.mjs",
+    "verify:enrich": "node scripts/verify-enrich.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-auth": "^1.6.12",
+    "better-sqlite3": "^11.0.0",
+    "express": "^5.2.1"
+  }
+}
