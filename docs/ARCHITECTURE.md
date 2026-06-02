@@ -1,10 +1,11 @@
 # Mycelium V1 — System Architecture (as built)
 
 > **As-built**, not as-designed. This doc describes what the code *currently is*.
-> The *plan* (what we're building + order) lives in [`V1-BUILD-SPEC.md`](V1-BUILD-SPEC.md);
-> the running build journal lives in the `V1-BUILD-HANDOFF-*.md` files. Kept
-> current via the `living-docs` skill. Status markers: ✅ built+verified ·
-> ◑ partial · ⚠️ Tier-2/gated · ⬜ planned.
+> For a narrative walkthrough of how it all fits together, see
+> [`HOW-IT-WORKS.md`](HOW-IT-WORKS.md). The *plan* (what we're building + order)
+> lives in [`V1-BUILD-SPEC.md`](V1-BUILD-SPEC.md); the running build journal lives
+> in the `V1-BUILD-HANDOFF-*.md` files. Kept current via the `living-docs` skill.
+> Status markers: ✅ built+verified · ◑ partial · ⚠️ Tier-2/gated · ⬜ planned.
 
 ## 1. What it is
 
@@ -32,9 +33,14 @@ the real production UI) is served at `/` once built (`npm run portal:build` →
 `resolvePortal()`) auto-detects it, serves it with SPA fallback to `200.html`,
 and otherwise falls back to the single-file `portal/index.html`. Override with
 `MYCELIUM_PORTAL=canonical|legacy|auto`. The canonical app's data layer
-(`portal-app/src/lib/api.ts`) still targets the cloud `/portal/*` shape — **M2**
-(retarget to `/api/v1/:tool`, screen-by-screen) is the open work, best iterated
-visually on the Mac (`npm run portal:dev`). See `portal-app/README.md`.
+(`portal-app/src/lib/api.ts`) calls cloud `/portal/*` paths, rewritten to
+`/api/v1/portal/*` and served by a **compatibility surface** (three routers,
+below) that returns the exact shapes the screens expect, backed by the local db.
+The primary nav is the honest V1 set (Mindscape · Library · Import · Timeline ·
+Profile · Settings) + a disabled "Coming later" group; screens with no V1 data
+source degrade to a graceful empty state. Best iterated visually on the Mac
+(`npm run portal:dev`). See `portal-app/README.md` and
+[`UX-COMPLETE-DESIGN-2026-06-01.md`](UX-COMPLETE-DESIGN-2026-06-01.md).
 
 A **native Mac shell** (`src-tauri/`, Tauri v2) wraps the portal: it spawns the
 Node server and opens a window at `http://127.0.0.1:8787` (so it shows whichever
@@ -54,7 +60,10 @@ Two **sidecar services** run as their own processes:
 | MCP server (tool registration) | `src/mcp.js` | ✅ |
 | Streamable HTTP transport | `src/server-http.js` | ✅ |
 | REST surface + file upload | `src/server-rest.js`, `src/api.js` (`/api/v1/upload`) | ✅ |
-| Canonical portal (SvelteKit) | `portal-app/` → `npm run portal:build` (served by REST) | ✅ builds + served; data-wiring (M2) pending |
+| Canonical portal (SvelteKit) | `portal-app/` → `npm run portal:build` (served by REST) | ✅ builds + served; core screens wired |
+| Portal compat surface (`/api/v1/portal/*`) | `src/portal-compat.js` (Library/Timeline/Profile/Settings/onboarding), `src/portal-mindscape.js` (3D scene + panels), `src/portal-uploads.js` (import: multipart + chunked) | ✅ |
+| Local auth-shim (no login wall) | `src/auth-shim.js` | ✅ |
+| Import parsers (Claude / ChatGPT) | `src/ingest/import-parsers.js` | ✅ (Obsidian/LinkedIn ⬜) |
 | Local portal (single-file SPA) | `portal/index.html` (REST fallback) | ✅ |
 | Native Mac shell (Tauri) | `src-tauri/**` | ◑ scaffold (build on Mac) |
 | OAuth 2.1 + PKCE (better-auth) | `src/auth.js` | ✅ |
@@ -92,12 +101,17 @@ search (BM25 + vector, RRF fusion)  +  getContext preamble (D5)
 back to the client as tool results
 ```
 
-**Ingest surfaces & volume:** files upload to `/api/v1/upload` (raw bytes,
-dependency-free) → encrypted blob → attachment → message → enrich. Bulk
-history imports via `importMessages`; the API JSON limit is generous
-(`MYCELIUM_API_BODY_LIMIT`, default 64mb), uploads up to `MYCELIUM_UPLOAD_LIMIT`
-(default 256mb), and the portal **Import** tab chunks large pastes (500/batch)
-so ingest scales to large datasets.
+**Ingest surfaces & volume:** raw files upload to `/api/v1/upload` (raw bytes,
+dependency-free) → encrypted blob → attachment → message → enrich. Bulk history
+via `importMessages`. The portal **Import** screen posts AI-export archives
+(Claude / ChatGPT `.zip`) to `/api/v1/portal/upload[/chunk|/complete]`
+(`src/portal-uploads.js`, multipart via busboy, single-shot + chunked assembly);
+they're parsed (`src/ingest/import-parsers.js`) and funneled through
+`captureMessage`. The untrusted-file path is hardened (decompression-bomb cap
+with streaming abort, bounded in-memory assembly, no archive-path writes, no
+content leakage) — see `verify:import-security`. Limits: `MYCELIUM_API_BODY_LIMIT`
+(64mb JSON), `MYCELIUM_UPLOAD_LIMIT` (256mb raw), `MYCELIUM_IMPORT_LIMIT_BYTES`
+(512mb per import).
 
 **Query embedder wiring:** `boot()` (`src/index.js`) auto-wires the query-time
 embedder via `resolveDefaultEmbedder()` → `createServiceEmbedder()` (an adapter
@@ -154,12 +168,15 @@ hashtag + keyword tags) behind a seam a model-backed pass can replace.
 
 ## 9. Verification
 
-`npm run verify` runs **18 GO-gated suites** (`scripts/verify-*.mjs`), each with
+`npm run verify` runs **26 GO-gated suites** (`scripts/verify-*.mjs`), each with
 a PASS/FAIL ledger + VERDICT line: foundation, mcp, mindfiles, metrics, rest,
-search, topology, embed, oauth, context, ingest, blob, enqueue, enrich, keysource, portal, inference, publish. CI
+search, topology, embed, oauth, context, ingest, blob, enqueue, enrich,
+keysource, portal, portal-serve, portal-data, portal-mindscape, import,
+import-security, portal-tps, integration, nav, inference, publish. CI
 (`.github/workflows/verify.yml`) runs them on every PR. **Tier-1** suites pass
 without the ML stack; **Tier-2** parity (real embeddings/clustering) is verified
-on a host with onnxruntime/Ollama installed.
+on a host with onnxruntime/Ollama installed. Portal/SPA-dependent checks SKIP
+cleanly when `portal-app/build` is absent (as in CI).
 
 ## 10. Built vs planned (vs the spec)
 
@@ -167,8 +184,11 @@ on a host with onnxruntime/Ollama installed.
 OAuth 2.1, two-key vault encryption, search, topology pipeline, getContext (D5),
 ingestion + encrypted uploads, full enrichment pipeline (embed + NLP rules),
 query embedder wiring, master-key source (env/Keychain/1Password + `set-keys`),
-inference router (local Ollama + BYOK cloud, opt-in egress), 36 tools,
-local portal UI (capture/search/mindscape/tasks + tools console).
+inference router (local Ollama + BYOK cloud, opt-in egress), 36 tools, local
+portal UI (capture/search/mindscape/tasks + tools console). **Canonical portal
+build-out:** tight nav + "Coming later"; Mindscape read surface (3D scene
+aggregator + panels); **Claude/ChatGPT import** (single-shot + chunked, hardened);
+Timeline/Profile/Settings; first-run welcome — all behind their own verify suites.
 
 ⚠️ **Built, Tier-2-gated:** real Nomic embeddings + clustering (need onnxruntime/
 Ollama on the host); inference router's *cloud* path needs a BYOK key, its
@@ -177,6 +197,8 @@ Ollama on the host); inference router's *cloud* path needs a BYOK key, its
 ◑ **Scaffolded (build on Mac):** native Tauri shell (`src-tauri/`) — wraps the
 portal into `Mycelium.app`; Rust built on the Mac per `src-tauri/BUILD-MAC.md`.
 
-⬜ **Planned / not yet built:** agent templates, first-run key-setup ceremony,
-Cloudflare Tunnel deploy, real-data import. See
+⬜ **Planned / not yet built:** agent templates, the Tauri native first-run
+key-setup ceremony (designed — `UX-COMPLETE-DESIGN` §5 — Mac/Rust build pending),
+the in-app "generate mindscape" trigger (Phase G) + territory narratives
+(Phase C), Obsidian/LinkedIn import, Cloudflare Tunnel deploy. See
 [`V1-BUILD-SPEC.md`](V1-BUILD-SPEC.md) §"What's left".

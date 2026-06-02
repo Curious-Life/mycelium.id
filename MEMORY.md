@@ -5,14 +5,23 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
-- **UX build-out (2026-06-01).** Canonical SvelteKit portal adopted + served; **app opens with no
-  login wall** (auth-shim); **Library wired** to real local data. Merged this session: #18 publish
-  (hardened, 2nd adversarial round), #23 portal M1, #24 auth-shim, #25 funding placeholders.
-  `main @ 091e222`, `npm run verify` → **20× GO**. **NEXT: design the complete, exquisite UX**
-  (account/key ceremony, full screen keep/cut, IA) — sweeps needed first; then phases M→I→G→C→O.
-  Pick up: [`docs/UX-HANDOFF-2026-06-01.md`](docs/UX-HANDOFF-2026-06-01.md) +
-  [`docs/UX-JOURNEY-BUILDOUT-DESIGN-2026-06-01.md`](docs/UX-JOURNEY-BUILDOUT-DESIGN-2026-06-01.md).
-  ⚠️ Branch off `origin/main` (local `main` is stale legacy).
+- **Complete-UX design LOCKED (2026-06-01).** Canonical portal adopted + served, no login wall,
+  Library wired. The **whole experience is now designed** (4-sweep `/sweep-first-design`, security
+  pivot: keys never touch HTTP): [`docs/UX-COMPLETE-DESIGN-2026-06-01.md`](docs/UX-COMPLETE-DESIGN-2026-06-01.md).
+  **Operator calls:** (1) key ceremony = **Tauri native first-run** (Rust gens keys → Keychain →
+  boots Node, bundled setup view); (2) **tight 6-screen nav** (Mindscape/Library/Import/Timeline/
+  Profile/Settings) + disabled **"Coming later"** group. **BUILD ORDER: N→M→I→G→C→(T,P,S)→K→O**
+  (N=nav trim first, frontend-only, instant coherence; K=ceremony Mac-gated last). Detailed
+  M/I/G/C/O shapes in [`docs/UX-JOURNEY-BUILDOUT-DESIGN-2026-06-01.md`](docs/UX-JOURNEY-BUILDOUT-DESIGN-2026-06-01.md).
+  `npm run verify` → **24× GO**. ⚠️ Branch off `origin/main` (local `main` is stale).
+  **Phases N+M+I+T+P+S+O DONE** on branch `claude/ux-complete-design` — **all 6 primary-nav screens
+  render real local data.** N=nav trim (`verify:nav`); M=mindscape read (`src/portal-mindscape.js`,
+  `verify:portal-mindscape`); I=import (`src/ingest/import-parsers.js`+`src/portal-uploads.js`, busboy,
+  jszip, `verify:import`); T/P/S/O=Timeline+Profile+Settings+first-run-welcome (`src/portal-compat.js`,
+  `verify:portal-tps`). Commits: `5328329`,`f0972f7`,`2158b96`,`1cffd9b` (+design `0cd40f5`).
+  **NEXT (env-gated): Phase G** (generate — `src/jobs.js` + explore/generate endpoints; job lifecycle
+  verifiable vs a dry-run, real clustering is Tier-2), then **C** (chronicles, needs LLM) and **K**
+  (Tauri key ceremony, Mac/Rust-gated). Full status: [`docs/UX-HANDOFF-2026-06-01.md`](docs/UX-HANDOFF-2026-06-01.md).
 
 - **V1 build — Wave 1+2 DONE; UX pass + ingestion/uploads BUILT.** MCP server serves **31 tools**
   over stdio + HTTP/OAuth. Added getContext, captureMessage, importMessages, listTasks; folded
@@ -24,6 +33,14 @@ detail lives in the linked docs. Newest-relevant first.
   Proof: `npm install --legacy-peer-deps && npm run verify` → **13× GO, EXIT 0**.
   NEXT: D7 enrichment service (:8095) skeleton. ⚠️ No autonomous wake-loop in this env (no
   ScheduleWakeup/Cron/Monitor); Tier-2 (real models/deploy/tokens) needs a networked host.
+
+## Pre-launch
+
+- **Readiness map (2026-06-01):** [`docs/PRE-LAUNCH-READINESS-2026-06-01.md`](docs/PRE-LAUNCH-READINESS-2026-06-01.md)
+  — journeys A–G, functionality × {built/verified/Tier-2/unbuilt}, test-coverage map, ranked P0/P1/P2.
+  **Core is verified (26 suites); the launch gaps are distribution (npm `private`, Tauri unbundled),
+  remote deploy (Tunnel doc-only), the in-app generate-mindscape trigger (Phase G) + clustering being
+  manual/Tier-2/unverified, and onboarding friction.** Reader doc: [`docs/HOW-IT-WORKS.md`](docs/HOW-IT-WORKS.md).
 
 ## Key docs
 

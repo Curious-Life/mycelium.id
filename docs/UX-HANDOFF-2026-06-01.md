@@ -48,7 +48,42 @@
 
 ---
 
-## NEXT TASK (big) — design the complete, exquisite end-to-end UX
+## 2026-06-01 (later) — design LOCKED + Phases N/M/I/T/P/S/O SHIPPED — start here
+
+**Branch `claude/ux-complete-design` (off `origin/main` @ `8ef806a`), `npm run verify` → 24× GO, EXIT 0.**
+The complete-UX design was written AND the build-out was largely executed. What shipped, in order:
+
+| Commit | Phase | What | Verify |
+|---|---|---|---|
+| `0cd40f5` | — | Complete-UX design doc (4 sweeps + security pivot) | — |
+| `5328329` | **N** | Nav trim → 6-screen primary nav + "Coming later" disabled group; dead 404 probes removed; chat hidden | `verify:nav` 6/6 |
+| `f0972f7` | **M** | Mindscape read: wired `db.mindscape`+`db.territoryDocs`; `src/portal-mindscape.js` (scene aggregator + panels + graceful-empty + real `/trajectory/summary`) | `verify:portal-mindscape` 7/7 |
+| `2158b96` | **I** | Import: `src/ingest/import-parsers.js` (Claude+ChatGPT) + `src/portal-uploads.js` (busboy multipart, single-shot+chunked, caps, → `captureMessage`); deps `jszip`+`busboy` | `verify:import` 7/7 |
+| `1cffd9b` | **T/P/S/O** | Timeline (`db.messages.selectTimeline`, metadata stripped) + Profile (synthesized) + Settings (timezone) + benign /stats,/agents,/identity + first-run welcome — all in `src/portal-compat.js` | `verify:portal-tps` 7/7 |
+
+**All 6 primary-nav screens now render real local data.** The journey open→import→explore→live-in-it works end-to-end (minus generate/narrative, below).
+
+**Reorder decision (rationale):** the design's build order was N→M→I→G→C→(T,P,S)→K→O. I pulled **T/P/S/O ahead of G** because (a) Phase N put Timeline/Profile/Settings in primary nav, so leaving them unbacked broke N's "nothing 404s" promise — a coherence gap to close immediately; and (b) **G/C/K are environment-gated** (G/C need the Python clustering pipeline + an LLM/embeddings = Tier-2; K needs a Rust toolchain + a Mac), whereas T/P/S/O are dep-free and fully verifiable in this container. Pull-forward = more verified-here value, gap closed.
+
+**Remaining phases (env-gated — do on a Mac / networked host):**
+- **G — Generate.** `src/jobs.js` (in-memory single-flight job, `Step N/5:` stdout parse, **key re-resolve at spawn** + env allowlist, 45-min timeout) + `POST /api/v1/portal/mindscape/explore` (+ `/mycelium/generate`) + status/report endpoints. Spawns `pipeline/run-clustering.sh`. The job lifecycle + progress parse are buildable+verifiable here against a `--dry-run`/fake script; the REAL clustering run is Tier-2 (needs onnxruntime/embeddings).
+- **C — Chronicles.** `pipeline/describe-chronicles.js` via `infer({task:'narrate'})` → `db.territoryDocs.upsertDescription` (story_*/archetype_*). Needs a local/cloud model.
+- **K — Key ceremony.** Tauri native first-run (`src-tauri/src/{main.rs,keys.rs}` + bundled setup view + `getrandom` in Cargo.toml). Mac-gated build (`cargo tauri dev`). Full design in UX-COMPLETE §5.
+
+**Pickup for next session:** `git checkout -B work origin/main` (after this branch merges) or continue on `claude/ux-complete-design`; `npm run verify` → expect 24 GO. Then either build **G** (job registry + endpoints, dry-run-verified) or **K** on the Mac. **Operator visual-check** of N/M/I/T/P/S on the Mac (`npm run portal:build && npm run portal`) before merge — this env has no browser.
+
+---
+
+## ✅ DONE — complete-UX design is LOCKED → [`docs/UX-COMPLETE-DESIGN-2026-06-01.md`](UX-COMPLETE-DESIGN-2026-06-01.md)
+
+Ran `/sweep-first-design` with the 4 sweeps below (+ a security pivot: keys never
+touch HTTP). Operator decisions: **(1) key ceremony = Tauri native first-run**;
+**(2) tight 6-screen primary nav + disabled "Coming later" group.** Build order:
+**N→M→I→G→C→(T,P,S)→K→O** (N=nav trim first, frontend-only; K=Tauri ceremony,
+Mac-gated, last). **Next action: implement Phase N.** The original sweep brief is
+preserved below for the record.
+
+### (original) NEXT TASK brief — design the complete, exquisite end-to-end UX
 
 The prior design doc covered only the 5 build-out items. The operator now wants the **whole experience** designed first. **Run these sweeps before locking it** (sweep-first-design, ≥3 cycles):
 

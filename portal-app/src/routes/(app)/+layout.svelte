@@ -54,10 +54,8 @@
 		if (!browser) return;
 		checkOnboarding();
 		function handleKeydown(e: KeyboardEvent) {
-			if ((e.metaKey || e.ctrlKey) && e.key === 'j') {
-				e.preventDefault();
-				navigationState.toggleChat();
-			}
+			// Cmd+J (chat) is disabled in V1 — chat is deferred (no in-app agent
+			// loop, D5). Re-enable when the chat surface lands.
 			if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
 				e.preventDefault();
 				navigationState.toggleSidebar();

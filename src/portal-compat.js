@@ -104,13 +104,61 @@ export function portalCompatRouter({ db, userId }) {
     } catch { ok(res, { folders: [] }); }
   });
 
+  // ── Timeline: the chronological message feed (Phase T) ─────────────────
+  // GET /messages?limit=50&before=<created_at> → { messages: [...] }
+  // Backed by db.messages.selectTimeline. `metadata` is stripped from the
+  // projection — it holds triage decisions / dedupe nonces / delivery state we
+  // must never leak past the read path (CLAUDE.md §1).
+  router.get('/messages', async (req, res) => {
+    try {
+      const raw = parseInt(req.query.limit, 10);
+      const limit = !Number.isFinite(raw) || raw <= 0 ? 50 : Math.min(raw, 200);
+      const before = typeof req.query.before === 'string' && req.query.before ? req.query.before : undefined;
+      const rows = await db.messages.selectTimeline(userId, { limit, before, scope: 'all' });
+      const messages = rows.map(({ metadata, ...m }) => m);
+      ok(res, { messages });
+    } catch { ok(res, { messages: [] }); }
+  });
+
+  // ── Profile (Phase P) — synthesized for the single-user vault ───────────
+  // GET /profile → { profile: {...} }. V1 has no user_profiles row; we surface
+  // the local identity + live counts. apiGet throws on non-200, so this must
+  // always 200. Pipeline-computed scores are null until Tier-2 runs.
+  router.get('/profile', async (_req, res) => {
+    const count = async (fn) => { try { return await fn(); } catch { return 0; } };
+    const message_count = await count(() => db.messages.countByUser(userId));
+    const territory_count = await count(async () => (await db.mindscape.getTerritoryProfiles(userId)).length);
+    const realm_count = await count(async () => (await db.mindscape.getRealms(userId)).length);
+    ok(res, { profile: {
+      display_name: 'You', handle: 'local', avatar_url: null, exlibris_url: null, signature: null,
+      depth_score: null, breadth_score: null, coherence_score: null, exploration_score: null,
+      territory_count, realm_count, message_count, member_since: null, public_realms_json: null,
+    } });
+  });
+
+  // ── Settings (Phase S) — timezone only; theme is client-side localStorage ─
+  router.get('/settings', (_req, res) => ok(res, { settings: { timezone: 'UTC' } }));
+
+  // ── Benign reads consumed by several screens (kill 404 noise; all are ────
+  // graceful on the client, but answering them keeps the console clean).
+  router.get('/stats', async (_req, res) => {
+    let total = 0; try { total = await db.messages.countByUser(userId); } catch { /* 0 */ }
+    ok(res, { messages: { total, bySource: {}, byAgent: {}, dateRange: null, last30Days: 0 },
+      documents: { total: 0 }, attachments: { total: 0, byType: {}, totalSizeMB: 0 },
+      contacts: { total: 0, byTier: {} }, mindscape: { territories: 0, realms: 0, points: 0 }, integrations: [] });
+  });
+  router.get('/agents', (_req, res) => ok(res, { agents: [] }));
+  router.get('/identity', (_req, res) => ok(res, { ownerName: 'You', ownerTelegramId: null, ownerDiscordId: null }));
+
   // ── Onboarding status (read by the app layout + mindscape on load) ──────
   // Benign shape so those screens don't error before their verticals land.
   router.get('/onboarding/status', async (_req, res) => {
     let messageCount = 0;
     try { messageCount = db.messages?.countByUser ? await db.messages.countByUser(userId) : 0; } catch { /* 0 */ }
     ok(res, {
-      showWelcome: false,
+      // Phase O — first-run welcome: an empty vault shows the welcome modal that
+      // guides the user to Import; once anything is captured it stops appearing.
+      showWelcome: messageCount === 0,
       show: false,
       aiModelsReady: true,
       steps: { data: { messageCount, enrichedCount: 0, enrichmentPending: 0 } },

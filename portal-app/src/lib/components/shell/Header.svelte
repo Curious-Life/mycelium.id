@@ -1,11 +1,30 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { browser } from '$app/environment';
 	import { navigationState } from '$lib/stores/navigation';
 	import { theme } from '$lib/stores/theme';
 	import PipelineStatusChip from './PipelineStatusChip.svelte';
 
-	const chatOpen = $derived($navigationState.chatOpen);
 	const currentView = $derived($navigationState.primaryView);
 	const currentTheme = $derived($theme);
+
+	// In the native Mac shell the window has no title bar (overlay style), so the
+	// header doubles as the drag strip. `data-tauri-drag-region` is the standard
+	// mechanism; the mousedown fallback covers the case where the server-served
+	// page (external URL) doesn't get the attribute handler wired.
+	let isTauri = $state(false);
+	onMount(() => { if (browser) isTauri = !!(window as any).__TAURI__ || !!(window as any).__TAURI_INTERNALS__; });
+
+	function startWindowDrag(e: MouseEvent) {
+		if (!isTauri || e.button !== 0) return;
+		const t = e.target as HTMLElement;
+		if (t.closest('button, a, input, select, textarea, [role="button"]')) return; // let controls work
+		try {
+			const tauri = (window as any).__TAURI__;
+			const getWin = tauri?.window?.getCurrentWindow || tauri?.webviewWindow?.getCurrentWebviewWindow;
+			getWin?.()?.startDragging?.();
+		} catch { /* not in Tauri / API shape differs — the attribute handles it */ }
+	}
 
 	const viewLabels: Record<string, string> = {
 		mindscape: 'Mycelium',
@@ -31,18 +50,23 @@
 		navigationState.toggleSidebar();
 	}
 
-	function toggleChat() {
-		navigationState.toggleChat();
-	}
-
 	function toggleTheme() {
 		theme.toggle();
 	}
 </script>
 
+<!-- The whole bar is a window-drag handle in the native shell (no native title
+     bar). Buttons/links inside are not drag regions, so they stay clickable. -->
 <header
+	data-tauri-drag-region
+	onmousedown={startWindowDrag}
 	class="h-12 md:h-14 border-b border-[var(--color-border)] flex items-center px-3 sm:px-4 gap-2 sm:gap-4 bg-[var(--color-surface)] relative z-10 overflow-hidden flex-shrink-0"
 >
+	<!-- macOS traffic-light clearance in the native shell (overlay title bar). -->
+	{#if isTauri}
+		<div class="w-[68px] shrink-0 hidden md:block" data-tauri-drag-region></div>
+	{/if}
+
 	<!-- Sidebar toggle — visible on all sizes -->
 	<button
 		onclick={handleMenuClick}
@@ -64,25 +88,8 @@
 
 	<!-- Right side actions -->
 	<div class="flex items-center gap-1 sm:gap-2 flex-shrink-0">
-		<!-- Chat toggle — desktop only (mobile uses tab bar) -->
-		<button
-			onclick={toggleChat}
-			class="hidden md:flex relative p-2 rounded-lg transition-colors
-				{chatOpen
-				? 'bg-[var(--color-accent)]/10 text-[var(--color-accent)]'
-				: 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)]'}"
-			aria-label="Toggle chat"
-			title="Chat with Mycelium (Cmd+J)"
-		>
-			<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-				<path
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					stroke-width="1.5"
-					d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
-				/>
-			</svg>
-		</button>
+		<!-- Chat is deferred in V1 (no in-app agent loop — D5); the toggle is
+		     hidden until the chat surface lands. See docs/UX-COMPLETE-DESIGN. -->
 
 		<!-- Pipeline coordinator status (Wave P4) -->
 		<PipelineStatusChip />

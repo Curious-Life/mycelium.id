@@ -1,10 +1,8 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
 	import { navigationState, type PrimaryView } from '$lib/stores/navigation';
 	import { auth } from '$lib/stores/auth';
-	import { api } from '$lib/api';
 	import TimelineNav from '$lib/components/timeline/TimelineNav.svelte';
 	import LibraryNav from '$lib/components/library/LibraryNav.svelte';
 	import AgentsNav from '$lib/components/agents/AgentsNav.svelte';
@@ -12,69 +10,28 @@
 	const isOpen = $derived($navigationState.sidebarOpen);
 	const currentView = $derived($navigationState.primaryView);
 
-	let pendingCount = $state(0);
-	// Fleet link is hidden by default; the /portal/fleet/gate probe flips
-	// this to true only for the configured owner on an operator VPS.
-	// Tenant instances + non-owner users never see the link.
-	let showFleet = $state(false);
-	onMount(() => {
-		if (browser) {
-			api('/portal/connections/count')
-				.then(r => r.json())
-				.then(d => { pendingCount = d.pending || 0; })
-				.catch(() => {});
-			// Refresh every 60s
-			const interval = setInterval(() => {
-				api('/portal/connections/count')
-					.then(r => r.json())
-					.then(d => { pendingCount = d.pending || 0; })
-					.catch(() => {});
-			}, 60000);
-			// Probe fleet gate once. The server is the source of truth
-			// for access; this is purely a UI-reveal convenience. Anyone
-			// who navigates directly to /fleet gets the same gate at the
-			// page level, and the API still rejects non-owners.
-			// NOTE: /portal/fleet/gate stays on plain HTTPS until PR1b
-			// adds /portal/fleet/ to SENSITIVE_PREFIXES + a WS handler.
-			fetch('/portal/fleet/gate', { credentials: 'include' })
-				.then((r) => { showFleet = r.ok; })
-				.catch(() => {});
-			return () => clearInterval(interval);
-		}
-	});
-
 	type NavItem = { id: PrimaryView; label: string; icon: string; href: string };
 
+	// V1 primary navigation — the honest, working surface. Screens that have a
+	// V1 backend (or gain one in the build-out: Mindscape/Import) live here;
+	// everything else is surfaced under "Coming later" below as disabled chips,
+	// so the roadmap stays visible without any dead links. (Settings is rendered
+	// separately at the bottom.) See docs/UX-COMPLETE-DESIGN-2026-06-01.md.
 	const coreNav: NavItem[] = [
-		{ id: 'mindscape', label: 'Mycelium',  icon: 'ratio',    href: '/mindscape' },
-		{ id: 'library',   label: 'Library',   icon: 'folder',   href: '/library' },
-		{ id: 'timeline',  label: 'Timeline',  icon: 'tornado',  href: '/timeline' },
-		{ id: 'cycles',    label: 'Cycles',    icon: 'cycles',  href: '/cycles' },
-		{ id: 'agents',    label: 'Agents',    icon: 'agents',   href: '/agents' },
-		{ id: 'profile',   label: 'Profile',   icon: 'profile',  href: '/profile' },
-		{ id: 'connections', label: 'Connections', icon: 'connections', href: '/connections' },
+		{ id: 'mindscape', label: 'Mycelium', icon: 'ratio',   href: '/mindscape' },
+		{ id: 'library',   label: 'Library',  icon: 'folder',  href: '/library' },
+		{ id: 'import',    label: 'Import',   icon: 'import',  href: '/import' },
+		{ id: 'timeline',  label: 'Timeline', icon: 'tornado', href: '/timeline' },
+		{ id: 'profile',   label: 'Profile',  icon: 'profile', href: '/profile' },
 	];
 
-	// Spaces is promoted to a top-level slot rendered directly under
-	// Mycelium inside the coreNav loop. It keeps the aurum accent to
-	// mark it as a distinct region of the mindscape (not another lens
-	// into the same data).
-	const spacesItem: NavItem = { id: 'spaces', label: 'Spaces', icon: 'ratio', href: '/spaces' };
-
-	const moduleNav: NavItem[] = [
-		{ id: 'wealth',    label: 'Wealth',    icon: 'wealth',     href: '/wealth' },
-		{ id: 'intel',     label: 'Intel',     icon: 'intel',      href: '/intel' },
-		{ id: 'body',      label: 'Body',      icon: 'health',     href: '/body' },
-		{ id: 'vitality', label: 'Vitality', icon: 'vitality',  href: '/vitality' },
-		{ id: 'activity',  label: 'Activity',  icon: 'activity',   href: '/activity' },
+	// Planned screens (modules · social · agents). Shown disabled, no routing —
+	// they render nothing in V1. Collapsed by default.
+	const comingLater = [
+		'Spaces', 'Connections', 'Chat', 'Agents', 'Cycles',
+		'Wealth', 'Intel', 'Body', 'Vitality', 'Activity', 'Media',
 	];
-
-	// Owner-only: appended to navItems reactively based on showFleet.
-	const fleetNav: NavItem = { id: 'fleet', label: 'Fleet', icon: 'agents', href: '/fleet' };
-
-	const navItems = $derived(
-		[...coreNav, spacesItem, ...moduleNav, ...(showFleet ? [fleetNav] : [])]
-	);
+	let comingLaterOpen = $state(false);
 
 	function handleNavClick(item: NavItem) {
 		// Don't re-navigate if already on this view — prevents 3D map remount
@@ -195,29 +152,13 @@
 							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 							</svg>
+						{:else if item.icon === 'import'}
+							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+							</svg>
 						{:else if item.icon === 'tornado'}
 							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 								<path d="M21 4H3"/><path d="M18 8H6"/><path d="M19 12H9"/><path d="M16 16h-6"/><path d="M11 20H9"/>
-							</svg>
-						{:else if item.icon === 'cycles'}
-							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182M21.015 4.356v4.992" />
-							</svg>
-						{:else if item.icon === 'agents'}
-							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456Z" />
-							</svg>
-						{:else if item.icon === 'activity'}
-						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
-						</svg>
-					{:else if item.icon === 'connections'}
-							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" />
-							</svg>
-						{:else if item.icon === 'contexts'}
-							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 0 1 6 3.75h2.25A2.25 2.25 0 0 1 10.5 6v2.25a2.25 2.25 0 0 1-2.25 2.25H6a2.25 2.25 0 0 1-2.25-2.25V6ZM3.75 15.75A2.25 2.25 0 0 1 6 13.5h2.25a2.25 2.25 0 0 1 2.25 2.25V18a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 18v-2.25ZM13.5 6a2.25 2.25 0 0 1 2.25-2.25H18A2.25 2.25 0 0 1 20.25 6v2.25A2.25 2.25 0 0 1 18 10.5h-2.25a2.25 2.25 0 0 1-2.25-2.25V6ZM13.5 15.75a2.25 2.25 0 0 1 2.25-2.25H18a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 18 20.25h-2.25A2.25 2.25 0 0 1 13.5 18v-2.25Z" />
 							</svg>
 						{:else if item.icon === 'profile'}
 							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
@@ -226,91 +167,40 @@
 						{/if}
 					</div>
 					<span class="text-sm font-medium">{item.label}</span>
-						{#if item.id === 'connections' && pendingCount > 0}
-							<span class="ml-auto text-[0.6rem] font-semibold bg-[var(--color-accent-aurum)] text-[var(--color-bg)] rounded-full px-1.5 py-0.5 min-w-[18px] text-center">{pendingCount}</span>
-						{/if}
 				</button>
-				{#if item.id === 'mindscape'}
-					{@const spacesActive = currentView === spacesItem.id}
-					<!-- Spaces: rendered inline right under Mycelium so it sits in the primary nav flow. -->
-					<button
-						onclick={() => handleNavClick(spacesItem)}
-						class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 w-full
-							{spacesActive
-							? 'bg-aurum/10 text-[var(--color-text-primary)]'
-							: 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)]'}"
-						aria-current={spacesActive ? 'page' : undefined}
-					>
-						<div class="w-1.5 h-1.5 rounded-full transition-all duration-150 flex-shrink-0
-							{spacesActive ? 'bg-aurum' : 'bg-transparent group-hover:bg-[var(--color-text-tertiary)]'}">
-						</div>
-						<div class="w-5 h-5 flex items-center justify-center flex-shrink-0">
-							<!-- Star system: central star + two tilted orbits + three
-							     planets (one inner, one large outer, one small outer).
-							     Reads as "a place with several worlds orbiting a core"
-							     — a more pluralized image than a single ringed planet. -->
-							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-								<circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/>
-								<ellipse cx="12" cy="12" rx="5.5" ry="2" transform="rotate(-20 12 12)"/>
-								<ellipse cx="12" cy="12" rx="10" ry="3.8" transform="rotate(-20 12 12)"/>
-								<circle cx="17" cy="11" r="1" fill="currentColor" stroke="none"/>
-								<circle cx="3" cy="14" r="1.3" fill="currentColor" stroke="none"/>
-								<circle cx="20" cy="8" r="0.9" fill="currentColor" stroke="none"/>
-							</svg>
-						</div>
-						<span class="text-sm font-medium">{spacesItem.label}</span>
-					</button>
-				{/if}
 			{/each}
 
-			<!-- Modules -->
+			<!-- Coming later: planned screens (modules · social · agents), shown
+			     as disabled chips so the roadmap is visible without dead links.
+			     Collapsed by default; no routing — these render nothing in V1. -->
 			<div class="mt-3 pt-3 border-t border-[var(--color-border)]">
 				<button
 					class="w-full flex items-center justify-between px-3 py-1.5 mb-1 rounded-md text-[0.65rem] font-semibold text-[var(--color-text-tertiary)] uppercase tracking-widest cursor-pointer hover:text-[var(--color-text-secondary)] hover:bg-[var(--color-elevated)] transition-colors"
-					onclick={() => { navigationState.setPrimaryView('modules'); goto('/modules'); closeMobileDrawer(); }}
+					onclick={() => (comingLaterOpen = !comingLaterOpen)}
+					aria-expanded={comingLaterOpen}
 				>
-					Modules
-					<svg class="w-3.5 h-3.5 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 0 1 6 3.75h2.25A2.25 2.25 0 0 1 10.5 6v2.25a2.25 2.25 0 0 1-2.25 2.25H6a2.25 2.25 0 0 1-2.25-2.25V6ZM3.75 15.75A2.25 2.25 0 0 1 6 13.5h2.25a2.25 2.25 0 0 1 2.25 2.25V18a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 18v-2.25ZM13.5 6a2.25 2.25 0 0 1 2.25-2.25H18A2.25 2.25 0 0 1 20.25 6v2.25A2.25 2.25 0 0 1 18 10.5h-2.25a2.25 2.25 0 0 1-2.25-2.25V6ZM13.5 15.75a2.25 2.25 0 0 1 2.25-2.25H18a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 18 20.25h-2.25a2.25 2.25 0 0 1-2.25-2.25v-2.25Z" /></svg>
+					Coming later
+					<svg class="w-3.5 h-3.5 opacity-50 transition-transform duration-150 {comingLaterOpen ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+						<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+					</svg>
 				</button>
-				{#each moduleNav as item}
-					{@const isActive = currentView === item.id}
-					<button
-						onclick={() => handleNavClick(item)}
-						class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 w-full
-							{isActive
-							? 'bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]'
-							: 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)]'}"
-						aria-current={isActive ? 'page' : undefined}
-					>
-						<div class="w-1.5 h-1.5 rounded-full transition-all duration-150 flex-shrink-0
-							{isActive ? 'bg-[var(--color-accent)]' : 'bg-transparent group-hover:bg-[var(--color-text-tertiary)]'}">
+				{#if comingLaterOpen}
+					{#each comingLater as label}
+						<div
+							class="flex items-center gap-3 px-3 py-2 rounded-lg opacity-40 cursor-default select-none"
+							title="Planned for a future release"
+						>
+							<div class="w-1.5 h-1.5 rounded-full bg-transparent flex-shrink-0"></div>
+							<div class="w-5 h-5 flex items-center justify-center flex-shrink-0">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+									<circle cx="12" cy="12" r="8.25" />
+								</svg>
+							</div>
+							<span class="text-sm font-medium">{label}</span>
+							<span class="ml-auto text-[0.5rem] uppercase tracking-wider text-[var(--color-text-tertiary)] border border-[var(--color-border)] rounded-full px-1.5 py-0.5">soon</span>
 						</div>
-						<div class="w-5 h-5 flex items-center justify-center flex-shrink-0">
-							{#if item.icon === 'wealth'}
-								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-									<path stroke-linecap="round" stroke-linejoin="round" d="M2.25 18.75a60.07 60.07 0 0 1 15.797 2.101c.727.198 1.453-.342 1.453-1.096V18.75M3.75 4.5v.75A.75.75 0 0 1 3 6h-.75m0 0v-.375c0-.621.504-1.125 1.125-1.125H20.25M2.25 6v9m18-10.5v.75c0 .414.336.75.75.75h.75m-1.5-1.5h.375c.621 0 1.125.504 1.125 1.125v9.75c0 .621-.504 1.125-1.125 1.125h-.375m1.5-1.5H21a.75.75 0 0 0-.75.75v.75m0 0H3.75m0 0h-.375a1.125 1.125 0 0 1-1.125-1.125V15m1.5 1.5v-.75A.75.75 0 0 0 3 15h-.75M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm3 0h.008v.008H18V10.5Zm-12 0h.008v.008H6V10.5Z" />
-								</svg>
-							{:else if item.icon === 'intel'}
-								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-									<path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 0 1 7.843 4.582M12 3a8.997 8.997 0 0 0-7.843 4.582m15.686 0A11.953 11.953 0 0 1 12 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0 1 21 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0 1 12 16.5a17.92 17.92 0 0 1-8.716-2.247m0 0A8.966 8.966 0 0 1 3 12c0-1.264.26-2.467.73-3.56" />
-								</svg>
-							{:else if item.icon === 'health'}
-								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-									<path stroke-linecap="round" stroke-linejoin="round" d="M21 8.25c0-2.485-2.099-4.5-4.688-4.5-1.935 0-3.597 1.126-4.312 2.733-.715-1.607-2.377-2.733-4.313-2.733C5.1 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12Z" />
-								</svg>
-							{:else if item.icon === 'vitality'}
-								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-									<path stroke-linecap="round" stroke-linejoin="round" d="M3 12h2l3-9 4 18 4-18 3 9h2" />
-								</svg>
-							{:else if item.icon === 'activity'}
-								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-									<path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
-								</svg>
-							{/if}
-						</div>
-						<span class="text-sm font-medium">{item.label}</span>
-					</button>
-				{/each}
+					{/each}
+				{/if}
 			</div>
 		</nav>
 	</div>

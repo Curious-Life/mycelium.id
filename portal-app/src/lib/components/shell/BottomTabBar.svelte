@@ -3,31 +3,23 @@
 	import { navigationState, type PrimaryView } from '$lib/stores/navigation';
 
 	const currentView = $derived($navigationState.primaryView);
-	const chatOpen = $derived($navigationState.chatOpen);
 
 	interface TabItem {
-		id: PrimaryView | 'chat';
+		id: PrimaryView;
 		label: string;
-		href?: string;
-		action?: () => void;
+		href: string;
 	}
 
 	const tabs: TabItem[] = [
 		{ id: 'mindscape', label: 'Mycelium', href: '/mindscape' },
 		{ id: 'library',   label: 'Library',  href: '/library' },
-		{ id: 'chat',      label: 'Chat',     action: () => navigationState.toggleChat() },
+		{ id: 'import',    label: 'Import',   href: '/import' },
 		{ id: 'timeline',  label: 'Timeline', href: '/timeline' },
 	];
 
 	function handleTab(tab: TabItem) {
-		if (tab.action) {
-			tab.action();
-			return;
-		}
-		// Close chat when navigating
-		if ($navigationState.chatOpen) navigationState.setChatOpen(false);
-		navigationState.setPrimaryView(tab.id as PrimaryView);
-		goto(tab.href!);
+		navigationState.setPrimaryView(tab.id);
+		goto(tab.href);
 	}
 
 	interface Props {
@@ -39,7 +31,7 @@
 
 <nav class="tab-bar md:hidden" aria-label="Main navigation">
 	{#each tabs as tab}
-		{@const isActive = tab.id === 'chat' ? chatOpen : currentView === tab.id}
+		{@const isActive = currentView === tab.id}
 		<button
 			class="tab-item"
 			class:active={isActive}
@@ -57,9 +49,9 @@
 					<svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 						<path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 					</svg>
-				{:else if tab.id === 'chat'}
+				{:else if tab.id === 'import'}
 					<svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+						<path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
 					</svg>
 				{:else if tab.id === 'timeline'}
 					<svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
