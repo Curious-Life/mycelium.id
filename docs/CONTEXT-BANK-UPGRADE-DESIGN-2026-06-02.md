@@ -28,6 +28,7 @@ This spec closes the gaps from the context-bank design review **and slims the su
 - **v1 (post-sweep) — three pivots:** (1) forget is NOT greenfield (builds on `documents.delete`+`afterDeleteHooks`, `backend.delete({ids})`, `revoked_at`); (2) the cascade is shallow (only `clustering_points`+`embedding_768` ref a message); (3) `relatedContext` is trivial reuse of `backend.query({text})`.
 - **v2 (decisions locked):** forget = **soft-redact only**; facts = **typed category/key/value**; Tier-2 = **present-but-"not ready"**; scope = **all four phases**.
 - **v3 (lean surface):** **model intents, not storage ops.** New tools collapse to **4 lean verbs** (`remember`/`forget`/`mark`/`link`); all new *reads* fold into extended `searchMindscape` + `getContext`. **AND** the existing **11 cognitive/topology readers consolidate to 3** (`cognitiveState`/`cognitiveHistory`/`mindscape`). Net surface **31 → ~27**. Consolidation is delete/rename → gated by `/pre-deletion-caller-audit`.
+- **v3.1 (pre-build implementation sweep):** verified the exact Phase-1 touch-points (§5.1). **Two build-level catches:** (a) the search loader selects messages by `user_id` only — **no content filter** (`d1-loader.js:47`) — so the forget resurrection-guard must be the new `forgotten_at` flag, *not* nulled content alone; (b) multi-column `ADD COLUMN` is unsafe under the runner (`migrate.js:31`) — one-per-file or harden the runner. Index-eviction API confirmed: `searchHelpers.backend.delete({ids})`.
 
 ---
 
@@ -183,6 +184,20 @@ Pure **tool-surface** reshape — handlers route to the **existing** `db.fisher`
 
 Handlers follow the verified contract: JSON-Schema `inputSchema`, `async (args) => string`, fail-closed throws wrapped by `mcp.js`.
 
+### 5.1 Phase 1 build map — exact touch-points (pre-build sweep, verified)
+
+**New db methods:** `messages.redact(id,userId)` + `documents.redact(userId,path)` — null every `ENCRYPTED_FIELDS` column + `embedding_768`, set `forgotten_at` (model after `messages.updateNlp`; documents has only a *hard* `delete` at `documents.js:206`, no soft path). `forget_audit` via a new `db.forgetAudit.record(...)` (egress_audit pattern). Salience: add `messages.setSalience`; documents reuse existing `pin/unpin` (`documents.js:150-176`, already exposes `is_pinned`).
+
+**Add `AND forgotten_at IS NULL` to (verified line list):** messages — `selectRecent:321`, `selectPaginated:366`, `selectTimeline:434`, `selectByAgent:411`, `selectAll:466`, `streamForRehydrate:299`, `selectPendingEnrichment:151`, `selectPendingNlp:173`, `matchMessages` hydration `:541`; documents — `get:87`, `list:122`, `getBySlug:224`.
+
+**Index eviction (verified):** `searchHelpers.backend.delete({ids:[id]})` — `backend` exposed at `search/index.js:252`; `delete` evicts `_index`+`_vectors` at `search/backend/local.js:125-133`. Wire `searchHelpers` into the forget domain via `buildDomains`.
+
+**Salience boost (verified):** search — add a `pinned` multiplier after temporal boost in backend `tier1` (`backend/local.js:82`; temporal is multiplicative at `fusion/temporal.js:58`); getContext — sort pinned-first after `selectRecent` (`context.js:86`, before reverse/render).
+
+**⚠️ Two build-level catches found here (before coding):**
+1. **Resurrection guard is NOT covered by nulling content.** The in-RAM loader selects `SELECT id, content AS text, created_at FROM messages WHERE user_id=?` — **no `content IS NOT NULL`** (verified `d1-loader.js:47`). A nulled-content row is still *added* to a rebuilt index (just non-matching). **Fix: add `AND forgotten_at IS NULL` to `d1-loader.js:47`** as the real guard. (Documents aren't in the loader yet — `search/index.js:162` — so only the messages line needs it now.)
+2. **Multi-column `ADD COLUMN` in one migration is unsafe.** `messages` needs `pinned`+`sensitive`+`forgotten_at`, but the runner guards only the *first* `ALTER…ADD COLUMN` per file (`migrate.js:31`) — a re-run on a populated vault would skip columns 2-3. **Fix: one `ADD COLUMN` per migration file, OR harden `applyMigrations` to guard *all* ADD COLUMNs (~10-LOC loop — recommended; kills a latent footgun repo-wide).**
+
 ## 6. Edge cases — explicit decisions
 
 | Case | Decision |
@@ -264,3 +279,6 @@ A phase is done when its `verify:*` is `VERDICT: GO`, the changed surface smokes
 | 16 | `messages` no delete method / no salience col; docs have pin | `src/db/messages.js`; `src/portal-compat.js:71` |
 | 17 | Migration runner "idempotent-ish" → `CREATE TABLE IF NOT EXISTS` | `src/db/migrate.js:26-39,31` |
 | 18 | Consolidated readers route to existing `db.fisher/metrics/topology/mindscape` | `src/db/index.js:34-72` (Sweep C) |
+| 19 | Search loader `SOURCES` selects messages by `user_id` only (no content/embedding filter) → forget needs a `forgotten_at` loader filter | `src/search/d1-loader.js:47` |
+| 20 | `searchHelpers` exposes raw `backend`; `backend.delete({ids})` evicts `_index`+`_vectors` | `src/search/index.js:252`; `src/search/backend/local.js:125-133` |
+| 21 | Full message/document read-path line list to filter `forgotten_at` | `src/db/messages.js` 299/321/366/411/434/466/541 + 151/173; `src/db/documents.js` 87/122/224 |
