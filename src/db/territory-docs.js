@@ -24,11 +24,16 @@ export function createTerritoryDocsNamespace(deps) {
   if (typeof parseJson !== 'function') throw new TypeError('createTerritoryDocsNamespace: parseJson required');
 
   return {
-    /** Get territories needing description (no description_version or outdated) */
+    /** Get territories needing description (no description_version or outdated).
+     * CAUTION: `description_version` is an ENCRYPTED column, so the `!= ?` SQL
+     * filter below only reliably catches NULL (never-described) rows — it cannot
+     * distinguish an *outdated* version (ciphertext compare always "differs").
+     * Callers needing true version-gating must compare the DECRYPTED value in JS
+     * (see pipeline/describe-chronicles.js getTerritoriesToNarrate). */
     async getNeedingDescription(userId, currentVersion) {
       const result = await d1Query(`
         SELECT tp.territory_id, tp.name, tp.essence, tp.story_birth, tp.story_arc,
-               tp.story_current_chapter, tp.signature_patterns, tp.open_questions,
+               tp.story_current_chapter, tp.signature_patterns, tp.uncertainty_open_questions,
                tp.description_version, tp.point_count_at_description, tp.message_count,
                tp.steward_agent_id, tp.growth_state, tp.energy, tp.coherence, tp.velocity,
                tp.moments_of_interest, tp.realm_id

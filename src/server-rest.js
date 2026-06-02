@@ -80,7 +80,7 @@ export async function startRestServer({
   // Mindscape read surface (3D scene aggregator + per-panel reads). Same prefix
   // (unmatched paths fall through from the compat router above); its JSON parser
   // is likewise scoped to /api/v1/portal so it never touches /api/v1/upload.
-  app.use('/api/v1/portal', portalMindscapeRouter({ db, userId: bootUserId }));
+  app.use('/api/v1/portal', portalMindscapeRouter({ db, userId: bootUserId, dbPath }));
   // Import surface (multipart upload + chunk assembly → parse → captureMessage).
   // Multipart bodies pass through the JSON parsers above untouched (content-type
   // gated); its own /upload/complete handler scopes express.json to that route.
@@ -100,7 +100,8 @@ export async function startRestServer({
   if (spaFallback) {
     // /api, /ingest, /portal, /auth are data paths — never shadow them with the
     // SPA shell (so unmatched data calls 404 cleanly instead of returning HTML).
-    app.get(/^\/(?!api\/|ingest\/|portal\/|auth\/)(?:[^.]*)$/, (req, res, next) => {
+    // Exclude both `/api/…` and a bare `/api` (the `(?:\/|$)` guard).
+    app.get(/^\/(?!(?:api|ingest|portal|auth)(?:\/|$))(?:[^.]*)$/, (req, res, next) => {
       if (req.method !== 'GET' || !req.accepts('html')) return next();
       res.sendFile(spaFallback);
     });
