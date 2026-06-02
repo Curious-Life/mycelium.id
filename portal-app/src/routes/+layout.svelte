@@ -15,6 +15,15 @@
 	onMount(async () => {
 		theme.initialize();
 
+		// Desktop (Tauri) WKWebView: WebKit mis-repaints content inside
+		// backdrop-filter panels when it changes — dynamic text flickers and
+		// conditionally-rendered sections (like the Generate progress) don't paint.
+		// Tag <html> so app.css can drop backdrop-filter in the app (it's invisible
+		// on the opaque window anyway). The browser build is unaffected.
+		if (typeof window !== 'undefined' && ((window as any).__TAURI__ || (window as any).__TAURI_INTERNALS__)) {
+			document.documentElement.classList.add('is-tauri');
+		}
+
 		// Local-first account gate: if the vault hasn't been created yet, send the
 		// user to the first-run setup screen. /api/v1/account/status is served even
 		// before the vault is open ("setup mode"). Don't redirect AWAY from /setup
