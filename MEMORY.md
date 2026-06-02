@@ -13,7 +13,7 @@ detail lives in the linked docs. Newest-relevant first.
   `backend.delete({ids})`, `revoked_at` tombstone); cascade is shallow (only `clustering_points` +
   `embedding_768` ref a message — aggregates self-heal per `clustering_run_id`); facts is greenfield
   (`user_profiles`≠facts store); `relatedContext`=thin reuse of `backend.query({text})`; Tier-2 gating
-  needs an async readiness probe threaded into `buildDomains` (static at boot). 4 decisions LOCKED §11 (soft-redact-only · typed facts · 'not-ready' gating · all 4 phases);
+  needs an async readiness probe threaded into `buildDomains` (static at boot). v3 LEAN surface (net **31→~27 tools**): 4 lean verbs (remember/forget/mark/link) + reads fold into searchMindscape/getContext; 11 cognitive/topology readers consolidate→3 (cognitiveState/cognitiveHistory/mindscape, behind pre-deletion-caller-audit). Decisions locked §11 (soft-redact-only · typed facts · 'not-ready' gating · lean verbs · slim existing · all phases);
   build order = Phase 1 (forget+salience) first.
 
 - **Account setup + durable data + MCP review (2026-06-02).** **#36 landed on main**

@@ -1,10 +1,10 @@
-# Context Bank Upgrade — Design Spec (v2 — decisions locked, iterating)
+# Context Bank Upgrade — Design Spec (v3 — lean surface, decisions locked)
 
-**Date:** 2026-06-02 · **Status:** DRAFT — 4 decisions LOCKED (§11), iterating before build · **Author:** sweep-first-design pass
+**Date:** 2026-06-02 · **Status:** DRAFT — decisions locked (§11), iterating before build · **Author:** sweep-first-design pass
 **Scope:** V1 self-hosted MCP server (`src/tools`, `src/db`, `migrations/`). Single-user, encrypted SQLite vault.
 **Companions:** [`MCP-OVERVIEW.md`](MCP-OVERVIEW.md) (current 31-tool surface) · [`ARCHITECTURE.md`](ARCHITECTURE.md) · [`V1-BUILD-SPEC.md`](V1-BUILD-SPEC.md).
 
-This spec closes the gaps from the context-bank design review. It is grounded in a two-cycle sweep against live code (file:line throughout). **We iterate this spec, then build.** Nothing here is built yet.
+This spec closes the gaps from the context-bank design review **and slims the surface**: net **31 → ~27 tools** while adding forget, facts, entities, proactive recall, salience, and an honest cold-start. Grounded in a two-cycle sweep against live code (file:line throughout). **We iterate this spec, then build.** Nothing here is built yet.
 
 ---
 
@@ -12,117 +12,121 @@ This spec closes the gaps from the context-bank design review. It is grounded in
 
 | # | Gap | One-line fix |
 |---|---|---|
-| G1 | **No forget/correct anywhere on the tool surface** (message stream + internal model append-only) | A **soft-redact** primitive (tombstone; no hard-delete) that cascades correctly + is audited |
-| G2 | **No high-precision facts/preferences surface** | A small encrypted `facts` store + tools + a `getContext` section |
-| G3 | **Retrieval is query-only** (no "relevant to *now*") | `relatedContext(text)` — thin reuse of the existing embed+ANN+RRF backend |
-| G4 | **Entities are convention-over-documents** | A first-class `entities` registry (promote NLP-extracted + curate) |
-| G5 | **Cold-start: ~10 Tier-2 tools return empty, training the model to stop calling them** | A readiness probe + honest "not ready, do X" responses (or gating) |
-| G6 | **5 overlapping ontologies, no common handle** | A unified `ref` addressing scheme (`{type,id}`) for pin/forget/link/relate |
-| G7 | **Salience is computed, not user-assertable** (no pin on messages) | Extend the existing document pin to messages/facts/entities + a `sensitive` flag |
+| G1 | **No forget/correct on the tool surface** (message stream + internal model append-only) | A **soft-redact** `forget(ref)` (tombstone; no hard-delete) that cascades correctly + is audited |
+| G2 | **No high-precision facts/preferences surface** | A small encrypted `facts` store, written via `remember`, surfaced in `getContext` + search |
+| G3 | **Retrieval is query-only** (no "relevant to *now*") | A `relatedTo` mode on `searchMindscape` — reuse of the embed+ANN+RRF backend |
+| G4 | **Entities are convention-over-documents** | A first-class `entities` registry (write via `remember`/`link`; read via search) |
+| G5 | **Cold-start: ~10 Tier-2 tools return empty** | A readiness probe + honest "not ready, do X" responses |
+| G6 | **5 overlapping ontologies + a bloated reader surface** | A unified `ref` handle **and** consolidate 11 readers → 3 cohesive tools |
+| G7 | **Salience is computed, not user-assertable** | `mark(ref, {pinned?, sensitive?})` across messages/facts/entities |
 
 ---
 
 ## 1. Revision history
 
-- **v0 (design review, in-chat):** claimed "no delete anywhere; forget is greenfield"; "relatedContext needs a new pipeline"; "gate Tier-2 by hiding tools."
-- **v1 (this doc, post-sweep) — three pivots:**
-  1. **Forget is NOT greenfield at the storage layer.** ~20 hardcoded `DELETE FROM` exist; `documents.delete` fires `afterDeleteHooks` (`db/documents.js:206`); the search backend has `delete({ids})` (`search/backend/local.js:125`); and there's a soft-delete precedent — `identity_channels.revoked_at` (`0001_init.sql:879-926`). Forget *composes* these; the gap is a *unified, audited, cascading* forget + missing orphan cleanup + index eviction + a `forgotten` flag.
-  2. **The forget cascade is shallow, not 10-table-deep.** Only `clustering_points` and the row's own `embedding_768` reference a message directly; the metric/fisher/topology tables are recomputed per `clustering_run_id` and self-heal. (`Sweep A`)
-  3. **`relatedContext` is trivial reuse**, not new infra — `backend.query({text})` already accepts raw text or a vector (`search/backend/local.js:58-88`).
-- **v2 (operator decisions locked, 2026-06-02):** forget = **soft-redact only** (no hard `purge`); facts = **typed `category/key/value`**; Tier-2 = **present-but-"not ready"**; scope = **build all four phases** sequentially. Consequences folded in: redact now nulls **all** sensitive columns (not just `content`) and **every read path filters `forgotten_at IS NULL`**; §3.2/§5/§6/§7/§11 updated.
+- **v0 (review):** "no delete anywhere"; "relatedContext needs new infra"; "gate Tier-2 by hiding tools."
+- **v1 (post-sweep) — three pivots:** (1) forget is NOT greenfield (builds on `documents.delete`+`afterDeleteHooks`, `backend.delete({ids})`, `revoked_at`); (2) the cascade is shallow (only `clustering_points`+`embedding_768` ref a message); (3) `relatedContext` is trivial reuse of `backend.query({text})`.
+- **v2 (decisions locked):** forget = **soft-redact only**; facts = **typed category/key/value**; Tier-2 = **present-but-"not ready"**; scope = **all four phases**.
+- **v3 (lean surface):** **model intents, not storage ops.** New tools collapse to **4 lean verbs** (`remember`/`forget`/`mark`/`link`); all new *reads* fold into extended `searchMindscape` + `getContext`. **AND** the existing **11 cognitive/topology readers consolidate to 3** (`cognitiveState`/`cognitiveHistory`/`mindscape`). Net surface **31 → ~27**. Consolidation is delete/rename → gated by `/pre-deletion-caller-audit`.
 
 ---
 
 ## 2. Sweep findings (consolidated, file:line)
 
 **Data model / forget cascade (Sweep A):**
-- `messages` row: PK `id`, encrypted `content`, and `embedding_768 TEXT` (768D Nomic envelope) — `0001_init.sql:950`.
-- `clustering_points` holds the 256D `nomic_embedding` + `territory_id`/`theme_id`/`realm_id`, linked to a message by `source_type='message' AND source_id=<id>`, **no FK** — `0001_init.sql:254`.
-- Derived tables (`territory_cofire`, `cognitive_metrics_harmonic|window|per_territory`, `fisher_trajectory|milestones`, `territory_vitality`, `topology_metrics`, …) key off `clustering_run_id` + counts/distributions, **not message ids** — they go stale, not dangling, and regenerate next pipeline run. **No `ON DELETE CASCADE` anywhere.**
+- `messages` row: PK `id`, encrypted `content`, `embedding_768 TEXT` (768D) — `0001_init.sql:950`.
+- `clustering_points` holds the 256D `nomic_embedding` + `territory_id`, linked by `source_type='message' AND source_id=<id>`, **no FK** — `0001_init.sql:254`.
+- Derived tables (`territory_cofire`, `cognitive_metrics_*`, `fisher_*`, `territory_vitality`, `topology_metrics`) key off `clustering_run_id` + counts, **not message ids** — they go stale, regenerate next run. **No `ON DELETE CASCADE`.**
 
 **Delete / encryption / audit precedent (Sweep B):**
-- Hard deletes exist per-namespace (`documents.delete` + `afterDeleteHooks` — `db/documents.js:206-212`); no unified/account-level delete.
-- `ENCRYPTED_FIELDS` (`crypto/crypto-local.js:209`) maps table→columns; `messages` encrypts `content/thinking/tags/entities/...`; `clustering_points:['content']`. New tables opt sensitive columns in here; add `scope`-bearing tables to `SCOPE_AWARE_TABLES`.
-- Embeddings/centroids are **intentionally NOT encrypted** (accepted trade-off — `crypto-local.js:204-206`) — but they ARE inversion-sensitive, so forget must *remove* them.
-- Audit: `audit_log` (plaintext, fire-and-forget, `db/audit.js:105`); `egress_audit` stores **`content_hash`+length, never plaintext** (`db/egress-audit.js:121`) — the model for a forget audit.
+- Hard deletes exist per-namespace (`documents.delete` + `afterDeleteHooks` — `db/documents.js:206-212`); no unified/account delete.
+- `ENCRYPTED_FIELDS` (`crypto/crypto-local.js:209`) maps table→columns; `messages` encrypts `content/thinking/tags/entities/...`. Embeddings/centroids **intentionally NOT encrypted** (`crypto-local.js:204-206`) — but inversion-sensitive, so forget must remove them.
+- Audit: `audit_log` (plaintext, `db/audit.js:105`); `egress_audit` stores **`content_hash`+length, never plaintext** (`db/egress-audit.js:121`) — the forget-audit model.
 - Soft-delete precedent: `identity_channels.revoked_at` — "NEVER hard-deleted; rows persist for audit; filter `revoked_at IS NULL`" (`0001_init.sql:919-920`).
 
 **Tool/namespace/getContext/gating/profiles (Sweep C):**
-- Domain factory: `createXDomain(deps) → { tools:[{name,description,inputSchema}], handlers:{name: async(args)=>string} }` (`tools/tasks.js:18-96`); added to the `domains` array in `buildDomains` (`mcp.js:79-112`).
-- `db` namespaces wired in `db/index.js:34-72` (documents, messages, health, tasks, metrics, topology, fisher, mindscape, …). **`db.profiles`/`db.users` exist but are NOT wired into the MCP `db`.** New namespace = create `db/<ns>.js` → import → wire.
-- `getContext` composes `sections[]` with `if (want(include,'x') && db?.ns) { try{}catch{} }`, joined `\n\n`; `include` enum = `['mind','messages','phase','health']` (`tools/context.js:45`); messages truncated to 500 chars; **no overall output budget.**
-- Tool registration is **static at boot**; readiness probe available: `db.mindscape.getNoiseStats(userId)` counts `clustering_points` (`db/mindscape.js:34`).
-- `user_profiles` (`0001_init.sql:1565`) = display/fingerprint profile (handle, display_name, computed scores), **not a facts KV store**; REST-only (`portal-compat.js:161`).
+- Domain factory: `createXDomain(deps) → { tools:[{name,description,inputSchema}], handlers:{name: async(args)=>string} }` (`tools/tasks.js:18-96`); domains array in `buildDomains` (`mcp.js:79-112`).
+- `db` namespaces wired in `db/index.js:34-72` (incl. `fisher`, `metrics`, `topology`, `mindscape`) — **the consolidated readers route to these unchanged.** New namespace = create `db/<ns>.js` → import → wire.
+- `getContext` composes `sections[]` with `if (want(include,'x') && db?.ns){try{}catch{}}`; `include` enum `['mind','messages','phase','health']` (`tools/context.js:45`); no overall budget.
+- Tool registration is **static at boot**; readiness probe: `db.mindscape.getNoiseStats(userId)` counts `clustering_points` (`db/mindscape.js:34`).
+- `user_profiles` (`0001_init.sql:1565`) = display/fingerprint, **not a facts store**; REST-only.
 
 **Search reuse + lifecycle (Sweep D + Cycle 2):**
-- `backend.query({ text | embedding, topK })` runs ANN+BM25+RRF; takes raw text (embeds with `task:'query'`) or a precomputed `Float32Array` (`search/backend/local.js:58-88`). `searchHelpers` exposes `bulkSearch` + the backend (`search/index.js`).
-- In-RAM index is built **once per process** (`ensureBuilt`, `built` flag, no TTL — `search/index.js:46-52`); a DB delete is **not** reflected until `backend.delete({ids})` (`search/backend/local.js:125-133`) or a `rebuild()`.
-- Enrichment selects `nlp_processed=0 AND content!=''` (`db/messages.js:148`); sync selects `embedding_768 IS NOT NULL` (`pipeline/sync-clustering-points.js`) and **never removes orphans**. ⇒ a redact that blanks `content` + nulls `embedding_768` + sets `forgotten` is safe from both re-embedding and re-sync.
-- `messages` namespace has **no delete method** (`db/messages.js`); `selectRecent` has no `forgotten` predicate (we add one).
-- Salience: `documents` have `pin/unpin` (`portal-compat.js:71`); **messages have none.**
+- `backend.query({ text | embedding, topK })` runs ANN+BM25+RRF; raw text or vector (`search/backend/local.js:58-88`). `searchHelpers` exposes `bulkSearch` + backend (`search/index.js`).
+- In-RAM index built **once per process** (`ensureBuilt`, no TTL — `search/index.js:46-52`); a DB delete needs `backend.delete({ids})` (`search/backend/local.js:125-133`) to evict.
+- Enrichment selects `nlp_processed=0 AND content!=''` (`db/messages.js:148`); sync selects `embedding_768 IS NOT NULL` and **never removes orphans** (`pipeline/sync-clustering-points.js`). ⇒ blank content + null embedding + `forgotten` flag = safe from re-embed + re-sync.
+- `messages` has **no delete method**; `selectRecent` has no `forgotten` predicate. Salience: `documents` have `pin/unpin` (`portal-compat.js:71`); **messages have none.**
 
 ---
 
 ## 3. The design
 
-### 3.1 A unified reference handle (G6)
-Introduce one addressing scheme used by forget/pin/link/relate so the model holds **one** handle across the 5 ontologies (it reduces conceptual surface without merging stores):
+### 3.0 The lean surface (the whole picture)
+
+Organize around **intents**, not storage ops. Two read primitives + four write/curate verbs, plus a one-time consolidation of the existing readers.
+
+**Reads — 2 primitives (extended, no new read tools):**
+- `getContext` — the preamble; gains **FACTS** + **PEOPLE** sections (pinned-first, capped).
+- `searchMindscape` — gains `scope: …|facts|entities` and a **`relatedTo: <text>`** mode → subsumes `relatedContext`, fact/entity listing, and entity-dossier lookup.
+
+**Write / curate — 4 lean verbs (new):**
+| Tool | Purpose | Replaces (vs the thin plan) |
+|---|---|---|
+| `remember({kind:'fact'\|'entity', ...})` | Typed durable write; can set `pinned`/`sensitive` inline | `rememberFact`, `upsertEntity` |
+| `forget(ref)` | Soft-redact any item (§3.2) | `forgetMessage/Document/Fact/Entity` |
+| `mark(ref, {pinned?, sensitive?})` | Salience on existing items | `pin`, `unpin`, `markSensitive` |
+| `link(ref, ref)` | Relate two items (entity ↔ message/doc/fact) | `linkEntity` |
+
+(`correct` is **not** a tool — it's the documented composition `forget(ref)` + `remember`/recapture; the internal model already has `editMindFile`/`writeMindFileWhole`.)
+
+**Consolidate existing readers — 11 → 3 (§3.8).**
+
+**Net: 31 − 11 + 3 + 4 = ~27 tools.**
+
+### 3.1 The unified `ref` handle (G6)
 ```
 ref := { type: 'message'|'document'|'fact'|'entity', id: string }
 ```
-(`territory`/`realm`/`theme` are computed, read-only — not forgettable, so excluded from `ref`.)
+Used by `forget`/`mark`/`link` so the model holds **one** handle, not per-type variants. (`territory`/`realm`/`theme` are computed/read-only — excluded.)
 
-### 3.2 Memory hygiene — forget / correct (G1) · DECISION: soft-redact only
-A single **soft** primitive — **no hard-delete tool** (locked #1). `forget` destroys the *meaning* (the sensitive payload + both embedding fingerprints) and keeps an empty **tombstone husk** for audit + anti-resurrection.
+### 3.2 Forget / correct (G1) · soft-redact only
+A single **soft** primitive — **no hard-delete tool**. `forget(ref)` destroys the *meaning* and keeps a tombstone husk for audit + anti-resurrection, in one logical op:
+- **Null every `ENCRYPTED_FIELDS` column** for that table (messages: `content, thinking, tags, entities, entity_summary, relations, metadata, suggested_new_tag, nlp_error`). No plaintext remains.
+- **Null `embedding_768`** + **delete the `clustering_points` row(s)** for that `source_id` (both fingerprints gone).
+- **`backend.delete({ids:[id]})`** — evict the live in-RAM index (process-cached, no auto-refresh).
+- **Set `forgotten_at`**; **every read path filters `forgotten_at IS NULL`** (`selectRecent`, search hydrate, `getDailyMessages`, `searchMindscape`, `getContext`).
+- Mark topology stale (regenerates next pipeline run). One SQLite txn; fail-closed + report on partial.
+- **Audited** via `forget_audit` (ref_type, ref_id, content_hash, length, at) — hash + length only, never plaintext.
 
-- **`forget(ref)`** — for the target row, in one logical op:
-  - **Null every sensitive/derived column** — all `ENCRYPTED_FIELDS` columns for that table (messages: `content, thinking, tags, entities, entity_summary, relations, metadata, suggested_new_tag, nlp_error`; documents: `content, summary, title, …`). No plaintext remains.
-  - **Null `embedding_768`** (768D fingerprint) and **delete the `clustering_points` row(s)** (256D fingerprint) for that `source_id`.
-  - **`backend.delete({ids:[id]})`** — evict the live in-RAM index (process-cached, no auto-refresh).
-  - **Set `forgotten_at`**; **every read path filters `forgotten_at IS NULL`** (`selectRecent`, search hydrate, `getDailyMessages`, `relatedContext`, `getContext`).
-  - Mark topology stale (regenerates next pipeline run). DB mutation is one SQLite txn; fail-closed + report on any partial (don't half-forget).
-  - **Audited** via `forget_audit` (ref_type, ref_id, content_hash, length, at) — hash + length only, never plaintext (mirrors `egress_audit`).
-  - The persisting husk = `id` + timestamps + non-sensitive enums (`role`/`source`/`scope`) + `forgotten_at`. **No hard `DELETE`.**
-- **`correct(ref, newContent)`** — supersede: `forget` the old item, capture a replacement linked by `supersedes`; for the internal model, the existing `editMindFile`/`writeMindFileWhole` already overwrite in place.
+> Right-to-forget: content + both fingerprints destroyed; a metadata husk (`id`/timestamps/enums/`forgotten_at`) persists. True hard-erasure is deferred (§12).
 
-> **Right-to-forget note:** the content + both embedding fingerprints are destroyed; only a metadata husk remains (audit + re-ingestion block). True hard-erasure (drop the husks) stays a separate, deferred concern (§12).
-
-Reuses: `backend.delete` (exists), `afterDeleteHooks` (exists), new `messages.redact` + `clustering_points` cleanup (new), `ENCRYPTED_FIELDS` (unchanged).
-
-### 3.3 Facts / preferences (G2)
-New encrypted `facts` table + namespace + a small, always-on `getContext` section.
+### 3.3 Facts (G2) — typed; written via `remember`
+New encrypted `facts` table; read via `getContext`/`searchMindscape`, not a dedicated reader.
 ```sql
 CREATE TABLE IF NOT EXISTS facts (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-  user_id TEXT NOT NULL,
-  category TEXT NOT NULL,          -- preference|dietary|relationship|biographical|logistical|...
-  key TEXT NOT NULL,               -- short stable handle, e.g. 'diet', 'partner_name'
-  value TEXT NOT NULL,             -- ENCRYPTED
-  confidence TEXT DEFAULT 'stated',-- stated|inferred
-  source TEXT DEFAULT 'user',      -- user|assistant
-  pinned INTEGER DEFAULT 0,
-  sensitive INTEGER DEFAULT 0,
-  superseded_by TEXT,
-  forgotten_at TEXT,
+  user_id TEXT NOT NULL, category TEXT NOT NULL, key TEXT NOT NULL,
+  value TEXT NOT NULL,                 -- ENCRYPTED
+  confidence TEXT DEFAULT 'stated', source TEXT DEFAULT 'user',
+  pinned INTEGER DEFAULT 0, sensitive INTEGER DEFAULT 0,
+  superseded_by TEXT, forgotten_at TEXT,
   created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(user_id, category, key)
 );
 ```
-- `ENCRYPTED_FIELDS.facts = ['value']` (key/category stay plaintext for query/dedup).
-- Tools: `rememberFact({category,key,value,confidence?,sensitive?})` (upsert, dedup on category+key, supersede prior), `listFacts({category?})` (high-precision read), `forgetFact(id)` (→ `forget`).
-- `getContext` gains a small **FACTS** section (pinned + recent, capped) — the highest-frequency need, always front-loaded.
+- `ENCRYPTED_FIELDS.facts = ['value']` (key/category plaintext for query/dedup).
+- Write: `remember({kind:'fact', category, key, value, confidence?, sensitive?})` — upsert on `(category,key)`, supersede prior.
+- Read: a **FACTS** section in `getContext` (pinned + recent, capped) + `searchMindscape({scope:'facts'})`.
 
-### 3.4 Entities (G4) — heaviest piece, Phase 3
-New `entities` + `entity_links`. Promote the NLP-extracted `messages.entities` (already populated by enrichment) into a registry, plus user/assistant curation.
+### 3.4 Entities (G4) — Phase 3
 ```sql
 CREATE TABLE IF NOT EXISTS entities (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-  user_id TEXT NOT NULL, type TEXT NOT NULL,         -- person|project|place|org
-  name TEXT NOT NULL, aliases TEXT, summary TEXT,    -- name/aliases/summary ENCRYPTED
+  user_id TEXT NOT NULL, type TEXT NOT NULL,            -- person|project|place|org
+  name TEXT NOT NULL, aliases TEXT, summary TEXT,       -- name/aliases/summary ENCRYPTED
   pinned INTEGER DEFAULT 0, sensitive INTEGER DEFAULT 0, forgotten_at TEXT,
-  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  UNIQUE(user_id, type, name)
+  created_at TEXT DEFAULT (...), UNIQUE(user_id, type, name)
 );
 CREATE TABLE IF NOT EXISTS entity_links (
   entity_id TEXT NOT NULL, ref_type TEXT NOT NULL, ref_id TEXT NOT NULL,
@@ -130,42 +134,52 @@ CREATE TABLE IF NOT EXISTS entity_links (
   UNIQUE(entity_id, ref_type, ref_id)
 );
 ```
-- Tools: `upsertEntity`, `getEntity(name|id)` (summary + linked messages/docs/facts, reuses search), `listEntities({type?})`, `linkEntity(entity, ref)`, `forgetEntity(id)`.
-- `getContext` may gain a compact **PEOPLE/PROJECTS** section (pinned entities only).
+- Write: `remember({kind:'entity', type, name, summary?})`; relate: `link(entityRef, itemRef)`.
+- Read: `searchMindscape({scope:'entities', relatedTo|query})` returns the entity + its linked items (the "dossier") — no `getEntity` tool. `getContext` gains a compact **PEOPLE/PROJECTS** section (pinned only).
+- Promote the NLP-extracted `messages.entities` (enrichment-populated) into the registry + user/assistant curation. (Curate-vs-user-only sub-decision confirmed at Phase 3.)
 
-### 3.5 Proactive retrieval (G3)
-- **`relatedContext({ text, limit?, scope? })`** — embeds `text`, runs the existing ANN+BM25+RRF, returns ranked neighbors; **excludes `forgotten_at IS NOT NULL` and `sensitive=1`** unless explicitly asked. ~30 LOC over `searchHelpers`/`backend.query`. The model passes the current conversation turn; no query craft needed.
+### 3.5 Proactive retrieval (G3) — a mode, not a tool
+`searchMindscape({ relatedTo: <text>, scope?, limit? })` embeds the text and runs the existing ANN+BM25+RRF; **excludes `forgotten_at IS NOT NULL` and `sensitive=1`** unless asked. The model passes the current turn; no query craft. ~30 LOC on the existing helper.
 
-### 3.6 Salience (G7)
-- Add `pinned INTEGER DEFAULT 0` + `sensitive INTEGER DEFAULT 0` to `messages` (docs already have pin; facts/entities include them above).
-- Tools: `pin(ref)` / `unpin(ref)` / `markSensitive(ref)` (ref-typed, one tool family across stores).
-- Effect: pinned boosted in `getContext` + search; `sensitive` excluded from `relatedContext`/publish/egress by default.
+### 3.6 Salience (G7) — `mark`
+- Add `pinned`/`sensitive` to `messages`, `facts`, `entities` (docs already have pin).
+- `mark(ref, {pinned?, sensitive?})` — one tool across stores. Pinned → boosted in `getContext` + search; `sensitive` → excluded from `relatedTo`/publish/egress by default.
 
 ### 3.7 Cold-start gating (G5)
-- Thread an **async readiness probe** into boot: `boot()` awaits `db.mindscape.getNoiseStats()` (or a `territory_profiles` count) and passes a `ready` flag to `buildDomains({..., topologyReady})`.
-- **DECISION (locked #4):** keep Tier-2 tools registered, but when `!ready` their handlers return a uniform structured message — *"Topology isn't computed yet. Import data and run clustering (see docs/SETUP.md)."* — instead of an empty result. `getContext` already omits empty sections. Preserves discoverability while being honest.
+- Thread an **async readiness probe** into boot: `boot()` awaits `db.mindscape.getNoiseStats()` and passes `topologyReady` to `buildDomains`.
+- **DECISION (locked):** keep Tier-2 tools registered; when `!ready` their handlers return a uniform *"Topology isn't computed yet — import data and run clustering (see docs/SETUP.md)."* `getContext` already omits empty sections.
+
+### 3.8 Consolidate existing readers — 11 → 3 (G6) · DECISION: slim them too
+Pure **tool-surface** reshape — handlers route to the **existing** `db.fisher`/`db.metrics`/`db.topology`/`db.mindscape` methods, **zero change to storage or computation**. Gated by `/pre-deletion-caller-audit` (callers = `verify:metrics`/`verify:topology`, REST `/api/v1/<name>` paths, `portal-app`, docs — **not** `getContext`, which uses `db.*` directly).
+
+| New tool | Folds in | Shape |
+|---|---|---|
+| `cognitiveState({level?})` | `getCurrentPhase` + `getHarmonicState` + `getActiveMilestones` | the "now": movement + rhythm + alerts |
+| `cognitiveHistory({level?, metric?, window?, range?})` | `getTrajectoryHistory` + `getMetricSeries` + `getTopMovers` | over-time series |
+| `mindscape({view:'structure'\|'territories'\|'territory'\|'explore'\|'time', territory?, ...})` | `mindscapeStructure` + `listTerritories` + `territoryDetail` + `exploreTerritory` + `timeView` | topology, by view |
 
 ---
 
 ## 4. Threat model (new surface)
 
-- **Forget must remove the *fingerprint*, not just the text.** A redact that leaves `embedding_768` or a `clustering_points` 256D vector is an **inversion risk** (CLAUDE.md §7). Therefore redact **nulls every `ENCRYPTED_FIELDS` column on the row** (not just `content`) **+ nulls `embedding_768` + deletes `clustering_points` + evicts the in-RAM vector** (`backend.delete` drops `_vectors`, `search/backend/local.js:129`). The husk that remains carries no plaintext and no fingerprint.
-- **Facts/entities are maximally sensitive** → `value`/`name`/`summary`/`aliases` go in `ENCRYPTED_FIELDS`; `sensitive=1` items are excluded from `relatedContext`, never published, never in egress.
-- **Audit without plaintext** — `forget_audit` stores `content_hash`+length+ref only (egress_audit pattern). Never log the forgotten content (CLAUDE.md §1).
-- **Fail-closed:** an unknown `ref.type`, a missing id, or a forget that can't evict the index → refuse + report, don't partially-forget silently. Forget is **all-or-nothing per item** (row + embedding + clustering_point + index in one logical op; SQLite txn for the DB part).
-- **No new network surface.** All additions are local tools over the existing vault.
+- **Forget removes the *fingerprint*, not just the text.** Redact **nulls every `ENCRYPTED_FIELDS` column** (not just `content`) + **nulls `embedding_768`** + **deletes `clustering_points`** + **evicts the in-RAM vector** (`backend.delete` drops `_vectors`, `search/backend/local.js:129`). The husk carries no plaintext, no fingerprint.
+- **Facts/entities are maximally sensitive** → `value`/`name`/`summary`/`aliases` in `ENCRYPTED_FIELDS`; `sensitive=1` excluded from `relatedTo`, never published/egressed.
+- **Audit without plaintext** — `forget_audit` = `content_hash`+length+ref only (egress_audit pattern). Never log forgotten content (CLAUDE.md §1).
+- **Fail-closed:** unknown `ref.type`, missing id, or a forget that can't evict the index → refuse + report; forget is all-or-nothing per item.
+- **Consolidation preserves behavior:** new readers call the same `db.*` methods; `/pre-deletion-caller-audit` proves every old tool's capability is covered before removal. No new network surface.
 
 ---
 
-## 5. Module shapes & LOC budget
+## 5. Phases, files, LOC budget
 
-| Unit | Files touched | New tools | LOC (±20%) |
+| Phase | Files | Tools (Δ) | LOC (±20%) |
 |---|---|---|---|
-| Phase 0 — schema | `migrations/0004_context_bank.sql`, `crypto-local.js` (ENCRYPTED_FIELDS), `db/index.js` | — | ~120 |
-| Phase 1 — forget + salience | `db/messages.js` (+`redact`), `db/forget.js` (new ns), `tools/forget.js` (new domain), read-path `forgotten_at` filters, `search` wiring, `forget_audit` | `forget`, `correct`, `pin`, `unpin`, `markSensitive` | ~360 |
-| Phase 2 — facts + relatedContext | `db/facts.js`, `tools/facts.js`, `tools/mindscape.js` (relatedContext), `tools/context.js` (FACTS section) | `rememberFact`, `listFacts`, `forgetFact`, `relatedContext` | ~340 |
-| Phase 3 — entities | `db/entities.js`, `tools/entities.js`, enrichment promote step, `tools/context.js` | `upsertEntity`, `getEntity`, `listEntities`, `linkEntity`, `forgetEntity` | ~480 |
-| Phase 4 — gating + ref | `index.js` (readiness), `mcp.js` (`buildDomains` flag), Tier-2 handlers | — | ~160 |
+| 0 — schema | `migrations/0004_context_bank.sql`, `crypto-local.js` (ENCRYPTED_FIELDS), `db/index.js` | — | ~120 |
+| 1 — forget + salience | `db/messages.js` (+`redact`), `db/forget.js`, `tools/curate.js`, read-path `forgotten_at` filters, `search` wiring, `forget_audit` | +`forget`, +`mark`, +`link` | ~360 |
+| 2 — facts + related | `db/facts.js`, `tools/facts.js` (`remember` fact-path), `tools/mindscape.js` (`relatedTo` + `facts` scope), `tools/context.js` (FACTS) | +`remember` | ~320 |
+| 3 — entities | `db/entities.js`, `remember` entity-path, `searchMindscape` entities scope, enrichment promote, `getContext` PEOPLE | — (reuses `remember`/`link`) | ~440 |
+| 4 — gating | `index.js` (readiness), `mcp.js` (`buildDomains` flag), Tier-2 handlers | — | ~140 |
+| 5 — consolidate readers (**pre-deletion-caller-audit**) | `tools/cognition.js`, `tools/mindscape.js`, remove 11 old tools, rewrite `verify:metrics`/`verify:topology`, update `MCP-OVERVIEW.md` | +3, **−11** | ~300 |
 
 Handlers follow the verified contract: JSON-Schema `inputSchema`, `async (args) => string`, fail-closed throws wrapped by `mcp.js`.
 
@@ -173,55 +187,58 @@ Handlers follow the verified contract: JSON-Schema `inputSchema`, `async (args) 
 
 | Case | Decision |
 |---|---|
-| Redact leaves searchable index | **Must** call `backend.delete({ids})` (index is process-cached, no auto-refresh — `index.js:46-52`). |
-| Redacted row re-embedded by enrichment | Prevented: blank `content` fails `content!=''` (`messages.js:148`); also set `forgotten`/null embedding. |
-| Orphan `clustering_points` after forget | Forget **explicitly deletes** them — sync never does (`sync-clustering-points.js`). |
-| Topology now stale | Acceptable: aggregates regenerate per `clustering_run_id`; mark stale, don't rewrite. |
+| Redact leaves searchable index | **Must** `backend.delete({ids})` (process-cached, no auto-refresh — `index.js:46-52`). |
+| Redacted row re-embedded | Prevented: blank `content` fails `content!=''` (`messages.js:148`) + null embedding + `forgotten`. |
+| Orphan `clustering_points` | Forget **explicitly deletes** them — sync never does (`sync-clustering-points.js`). |
+| Topology stale after forget | Acceptable: regenerates per `clustering_run_id`. |
 | `forget` on already-forgotten | Idempotent no-op. |
-| `rememberFact` duplicate | Upsert on `(category,key)`; old value `superseded_by` new. |
-| `getContext` grows unbounded | Add an overall budget guard + per-section caps (facts/entities pinned-first, capped). |
-| `relatedContext` surfaces forgotten/sensitive | Filtered out by default. |
-| forget reversibility | `forget` destroys content + both embeddings (not recoverable) and keeps a metadata husk; there is **no hard-delete**. Not an "undo." |
-| Husk still holds sensitive metadata | `forget` nulls **all** `ENCRYPTED_FIELDS` columns for the row + the embedding — not just `content`. |
-| Reads still surface forgotten rows | add `AND forgotten_at IS NULL` to every read path (`selectRecent`, search hydrate, `getDailyMessages`, `relatedContext`). |
+| Husk still holds sensitive metadata | Forget nulls **all** `ENCRYPTED_FIELDS` columns + embedding, not just `content`. |
+| Reads still surface forgotten rows | `AND forgotten_at IS NULL` on every read path. |
+| `remember` duplicate fact | Upsert on `(category,key)`; old `superseded_by` new. |
+| Consolidated tool renames break a caller | `/pre-deletion-caller-audit` inventories + migrates verify scripts/REST/portal/docs before removal. |
+| `getContext` unbounded | Overall budget guard + per-section caps. |
 
-## 7. Test strategy (verify:* gates, one per phase)
+## 7. Test strategy (verify:* gates)
 
-- **`verify:forget`** — capture → `forget(ref)` → assert: absent from `selectRecent`/`searchMindscape` (index evicted), **all sensitive columns null** + `embedding_768` null, `clustering_points` row gone, `forgotten_at` set (**husk persists — no hard delete**), `forget_audit` written (hash only, no plaintext), enrichment won't re-pick. Wrong ref → fail-closed.
-- **`verify:facts`** — `rememberFact` → `listFacts` → present in `getContext` FACTS → supersede on re-remember → `forgetFact`.
-- **`verify:related`** — `relatedContext(text)` returns ranked hits; excludes forgotten + sensitive; BM25-only when embedder down.
-- **`verify:entities`** — upsert/get/link/forget; NLP-promote backfill dedups.
-- **`verify:gating`** — fresh vault: Tier-2 tool returns the "not ready" message; with seeded topology: returns real data.
+- **`verify:forget`** — capture → `forget(ref)` → assert: absent from `selectRecent`/`searchMindscape` (index evicted), all sensitive columns + `embedding_768` null, `clustering_points` gone, `forgotten_at` set (husk persists — no hard delete), `forget_audit` written (hash only), enrichment won't re-pick. Wrong ref → fail-closed.
+- **`verify:salience`** — `mark`/`link` round-trip; pinned boosted; `sensitive` excluded from `relatedTo`.
+- **`verify:facts`** — `remember(fact)` → in `getContext` FACTS + `searchMindscape({scope:'facts'})` → supersede → `forget`.
+- **`verify:related`** — `searchMindscape({relatedTo})` ranks; excludes forgotten + sensitive; BM25-only when embedder down.
+- **`verify:entities`** — `remember(entity)`/`link` → dossier via search; NLP-promote dedups.
+- **`verify:gating`** — fresh vault: Tier-2 returns "not ready"; seeded: real data.
+- **`verify:cognition` / `verify:mindscape`** — the 3 consolidated tools return what the 11 originals did (parity assertions), proving the consolidation preserved capability.
 
-## 8. Implementation order (design all now; build in shippable slices)
+## 8. Implementation order
 
-Phase 0 (schema) → **Phase 1 (forget + salience — highest value, smallest blast radius)** → Phase 2 (facts + relatedContext) → Phase 3 (entities) → Phase 4 (gating + ref unification). Each phase: its migration is `CREATE TABLE IF NOT EXISTS` only (runner is "idempotent-ish" — `migrate.js:31`), ships with its `verify:*` gate, and updates the living docs (`MCP-OVERVIEW.md` tool count, `ARCHITECTURE.md`).
+Phase 0 (schema) → 1 (forget + salience) → 2 (facts + related) → 3 (entities) → 4 (gating) → **5 (consolidate readers — last, behind `/pre-deletion-caller-audit`, since it's the only breaking change)**. Each phase ships with its `verify:*` gate + updates `MCP-OVERVIEW.md` (tool count must match `verify:mcp`) + `ARCHITECTURE.md`. Phases 1–4 are additive; Phase 5 lands the rename once the new lean convention is established.
 
-## 9. Decision criteria to proceed phase→phase
-A phase is "done" when its `verify:*` gate is `VERDICT: GO`, the changed surface smokes against the running server, the new tool count in `MCP-OVERVIEW.md` matches `verify:mcp`, and no plaintext appears in any audit/log path.
+## 9. Decision criteria phase→phase
+A phase is done when its `verify:*` is `VERDICT: GO`, the changed surface smokes against the running server, `MCP-OVERVIEW.md`'s tool count matches `verify:mcp`, and no plaintext appears in any audit/log path. Phase 5 additionally requires the `/pre-deletion-caller-audit` ledger (every caller migrated, parity proven) before any old tool is removed.
 
 ## 10. Risks + mitigations
 
 | Risk | L | I | Mitigation |
 |---|---|---|---|
-| Redact misses an embedding copy → inversion | M | High | Forget nulls `embedding_768` + deletes `clustering_points` + `backend.delete`; `verify:forget` asserts all three. |
-| Tool-count creep re-bloats the surface | M | Med | Net new ~16 tools across 4 phases; fold via `ref` family (one `forget`/`pin`, not per-type); revisit getContext as the primary surface. |
-| Gating change to `buildDomains` breaks boot | L | High | Readiness probe is best-effort (defaults to "ready=false" on error → safe messages); covered by `verify:mcp` + `verify:gating`. |
-| Facts/entities become a second mindscape | M | Med | Keep facts *small + high-precision*; entities link to existing refs, don't duplicate content. |
-| Iteration scope balloons | M | Med | Phase 1 alone (forget+salience) closes the sharpest gap; ship it before committing to 3-4. |
+| Redact misses an embedding copy → inversion | M | High | Null embedding + delete clustering_point + `backend.delete`; `verify:forget` asserts all three. |
+| Consolidation breaks a hidden caller | M | Med | `/pre-deletion-caller-audit`; readers route to unchanged `db.*` methods; parity tests (`verify:cognition`/`mindscape`). |
+| `remember`/`searchMindscape` schemas get overloaded | M | Med | Keep `kind`/`scope`/`view` discriminators shallow + well-described; don't add a 5th mode without review. |
+| Gating change breaks boot | L | High | Readiness probe best-effort (defaults `ready=false` → safe messages); `verify:mcp`+`verify:gating`. |
+| Model trained on old tool names (post-Phase-5) | L | Low | Single-user; new tools' descriptions guide; transition note in `MCP-OVERVIEW.md`. |
 
-## 11. Open decisions (resolve during iteration)
+## 11. Decisions (locked)
 
-1. **Forget semantics:** ✅ **RESOLVED → soft-redact only** (no hard `purge`; husk persists for audit).
-2. **Facts model:** ✅ **RESOLVED → typed `category/key/value`**.
-3. **Entities:** working default **promote NLP-extracted + curate** — confirm the curate-vs-user-only sub-call when we reach Phase 3.
-4. **Tier-2 gating:** ✅ **RESOLVED → present-but-"not ready" message** (keep tools listed).
-5. **Scope/sequencing:** ✅ **RESOLVED → build all four phases, sequentially** (Phase 1 → Phase 4).
+1. **Forget:** ✅ soft-redact only (no hard purge; husk persists for audit).
+2. **Facts:** ✅ typed `category/key/value`.
+3. **Entities:** working default = promote NLP + curate — confirm curate-vs-user-only at Phase 3.
+4. **Tier-2 gating:** ✅ present-but-"not ready" (keep listed).
+5. **Scope:** ✅ build all phases (now incl. Phase 5 consolidation).
+6. **New-tool shape:** ✅ **lean verbs** (`remember`/`forget`/`mark`/`link`); reads fold into `searchMindscape`+`getContext`.
+7. **Existing surface:** ✅ **slim it** — 11 cognitive/topology readers → 3 (`cognitiveState`/`cognitiveHistory`/`mindscape`).
 
-## 12. Open questions deferred (out of scope)
-- Account-level "delete everything" (a `DELETION_CATALOG`) — related but separate from per-item forget; V2/portal concern.
-- Multi-tenant interactions (V2 only).
-- A re-clustering trigger after a large forget batch (relies on the Tier-2 pipeline; today topology self-heals on the next manual run).
+## 12. Deferred (out of scope)
+- Account-level hard-erasure (drop the husks; a `DELETION_CATALOG`) — V2/portal concern.
+- Multi-tenant interactions (V2).
+- Re-clustering trigger after a large forget batch (topology self-heals next manual run).
 
 ---
 
@@ -229,20 +246,21 @@ A phase is "done" when its `verify:*` gate is `VERDICT: GO`, the changed surface
 
 | # | Load-bearing assumption | Verified at |
 |---|---|---|
-| 1 | Tool domain factory shape `{tools,handlers}`, handler `async(args)=>string` | `src/tools/tasks.js:18-96`; wrap at `src/mcp.js:148-179` |
-| 2 | New domains added to `domains[]` in `buildDomains` (static at boot) | `src/mcp.js:79-117` |
-| 3 | `messages` row has `embedding_768`; encrypted `content`; PK `id` | `migrations/0001_init.sql:950`; `crypto-local.js:214-218` |
-| 4 | `clustering_points` links to message by `source_id`, **no FK**, holds 256D vector | `migrations/0001_init.sql:254` (Sweep A) |
-| 5 | Derived metric/fisher/topology tables key off `clustering_run_id`, not message id | Sweep A (migrations/0001_init.sql cofire/harmonic/fisher blocks) |
-| 6 | `documents.delete` exists + fires `afterDeleteHooks` (delete+hook seam) | `src/db/documents.js:206-212` |
-| 7 | Search backend `delete({ids})` evicts `_index`+`_vectors`; index built once/process | `src/search/backend/local.js:125-133`; `src/search/index.js:46-52` (Cycle 2) |
-| 8 | `ENCRYPTED_FIELDS` is the table→columns allowlist; embeddings intentionally plaintext | `src/crypto/crypto-local.js:209,204-206,214-218` |
+| 1 | Tool factory `{tools,handlers}`, handler `async(args)=>string` | `src/tools/tasks.js:18-96`; wrap `src/mcp.js:148-179` |
+| 2 | Domains added to `domains[]` in `buildDomains` (static at boot) | `src/mcp.js:79-117` |
+| 3 | `messages` has `embedding_768`, encrypted `content`, PK `id` | `migrations/0001_init.sql:950`; `crypto-local.js:214-218` |
+| 4 | `clustering_points` links by `source_id`, no FK, holds 256D vector | `migrations/0001_init.sql:254` |
+| 5 | Metric/fisher/topology tables key off `clustering_run_id`, not message id | Sweep A (0001_init.sql) |
+| 6 | `documents.delete` + `afterDeleteHooks` (delete+hook seam) | `src/db/documents.js:206-212` |
+| 7 | `backend.delete({ids})` evicts index; built once/process | `src/search/backend/local.js:125-133`; `src/search/index.js:46-52` |
+| 8 | `ENCRYPTED_FIELDS` allowlist; embeddings intentionally plaintext | `src/crypto/crypto-local.js:209,204-206,214-218` |
 | 9 | Audit-without-plaintext precedent (`content_hash`+length) | `src/db/egress-audit.js:121` |
-| 10 | Soft-delete/tombstone precedent (`revoked_at`, filter `IS NULL`) | `migrations/0001_init.sql:919-920` |
-| 11 | `getContext` section seam + `include` enum + no output budget | `src/tools/context.js:32-61` |
-| 12 | Readiness probe exists (`clustering_points` count) | `src/db/mindscape.js:34` (Sweep C) |
-| 13 | `user_profiles` is display/fingerprint, not a facts store; `db.profiles` unwired | `migrations/0001_init.sql:1565`; `src/db/index.js:34-72` (Sweep C) |
-| 14 | `backend.query({text|embedding,topK})` reuse for `relatedContext` | `src/search/backend/local.js:58-88` |
-| 15 | Enrichment skips `content=''`; sync skips null embedding (anti-resurrection) | `src/db/messages.js:148`; `pipeline/sync-clustering-points.js` (Cycle 2) |
-| 16 | `messages` has no delete method + no salience column; docs have pin | `src/db/messages.js` (grep); `src/portal-compat.js:71` (Cycle 2) |
-| 17 | Migration runner is "idempotent-ish" → new migrations must be `CREATE TABLE IF NOT EXISTS` | `src/db/migrate.js:26-39,31` |
+| 10 | Soft-delete/tombstone precedent (`revoked_at`) | `migrations/0001_init.sql:919-920` |
+| 11 | `getContext` section seam + `include` enum + no budget | `src/tools/context.js:32-61` |
+| 12 | Readiness probe (`clustering_points` count) | `src/db/mindscape.js:34` |
+| 13 | `user_profiles` is display/fingerprint, not facts | `migrations/0001_init.sql:1565`; `src/db/index.js:34-72` |
+| 14 | `backend.query({text|embedding,topK})` reuse for `relatedTo` | `src/search/backend/local.js:58-88` |
+| 15 | Enrichment skips `content=''`; sync skips null embedding | `src/db/messages.js:148`; `pipeline/sync-clustering-points.js` |
+| 16 | `messages` no delete method / no salience col; docs have pin | `src/db/messages.js`; `src/portal-compat.js:71` |
+| 17 | Migration runner "idempotent-ish" → `CREATE TABLE IF NOT EXISTS` | `src/db/migrate.js:26-39,31` |
+| 18 | Consolidated readers route to existing `db.fisher/metrics/topology/mindscape` | `src/db/index.js:34-72` (Sweep C) |
