@@ -6,11 +6,20 @@
 import express from 'express';
 import net from 'node:net';
 import path from 'node:path';
-import { readRemoteConfig, writeRemoteConfig, setOperatorPassword, operatorUserExists, setRemoteSecret } from './config.js';
+import { readRemoteConfig, writeRemoteConfig, setOperatorPassword, operatorUserExists, setRemoteSecret, isSafeHostname } from './config.js';
 import { buildClaim } from './managed-claim.js';
 import { materializeRemoteConfigs } from './runtime.js';
 import { dataDir } from '../paths.js';
 import { keychainNames } from '../account/keychain-names.js';
+
+// Untrusted-input guards for the managed-connect flow: both the control-plane URL
+// and its response flow into config files / env, so validate hard.
+function isHttpsOrLocal(u) {
+  try { const x = new URL(u); return x.protocol === 'https:' || x.hostname === 'localhost' || x.hostname === '127.0.0.1'; }
+  catch { return false; }
+}
+const isSafeCred = (v) => typeof v === 'string' && /^[\x21-\x7e]{1,512}$/.test(v) && !/["'`{}\\]/.test(v);
+const SAFE_RELAY = /^[a-z0-9.-]{1,253}(:\d{1,5})?$/i;
 
 /** Is the remote OAuth server actually listening (so the UI shows live state vs
  *  "enabled — restart to apply")? Best-effort TCP probe; never throws. */
@@ -113,8 +122,9 @@ export function remoteRouter() {
   }
 
   router.get('/managed/available', async (req, res) => {
-    const handle = String(req.query.handle || '').trim();
+    const handle = String(req.query.handle || '').trim().toLowerCase();
     const base = readRemoteConfig().controlPlaneUrl.replace(/\/$/, '');
+    if (!isHttpsOrLocal(base)) { res.status(400).json({ ok: false, error: 'control plane URL must be https' }); return; }
     try {
       const r = await cpFetch(`${base}/v1/handle/${encodeURIComponent(handle)}`);
       const data = await r.json().catch(() => ({}));
@@ -125,35 +135,83 @@ export function remoteRouter() {
   });
 
   router.post('/connect-managed', async (req, res) => {
-    const handle = String(req.body?.handle || '').trim();
-    const base = String(req.body?.controlPlaneUrl || readRemoteConfig().controlPlaneUrl).replace(/\/$/, '');
+    const handle = String(req.body?.handle || '').trim().toLowerCase();
+    // The operator password is the ONLY auth gate on the public URL — refuse to
+    // go live without it.
+    if (!operatorUserExists()) { res.status(400).json({ ok: false, error: 'set an operator password first' }); return; }
     const masterHex = process.env.ENCRYPTION_MASTER_KEY;
     if (!masterHex) { res.status(503).json({ ok: false, error: 'vault is locked — finish setup first' }); return; }
+    // Use the CONFIGURED control plane only (never a caller-supplied URL) and
+    // require https — the provision response carries the relay token + acme creds.
+    const base = readRemoteConfig().controlPlaneUrl.replace(/\/$/, '');
+    if (!isHttpsOrLocal(base)) { res.status(400).json({ ok: false, error: 'control plane URL must be https' }); return; }
+
+    let data;
     try {
       const chRes = await cpFetch(`${base}/v1/challenge`);
       if (!chRes.ok) throw new Error('challenge failed');
       const { nonce } = await chRes.json();
-      const claim = buildClaim({ handle, nonce, masterHex }); // throws on invalid handle/nonce
+      const claim = buildClaim({ action: 'provision', handle, nonce, masterHex }); // throws on invalid handle
       const pvRes = await cpFetch(`${base}/v1/provision`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(claim),
       });
-      const data = await pvRes.json().catch(() => ({}));
+      data = await pvRes.json().catch(() => ({}));
       if (!pvRes.ok) { res.status(pvRes.status === 409 ? 409 : 400).json({ ok: false, error: data.error || 'provision failed' }); return; }
-      const { host, relayAddr, relayToken, acmeDns } = data;
-      if (!host || !relayAddr || !relayToken || !acmeDns) throw new Error('incomplete control-plane response');
-      setRemoteSecret('relayToken', relayToken);
-      setRemoteSecret('acmeDns', JSON.stringify(acmeDns));
-      writeRemoteConfig({ remoteMode: 'managed', publicHost: host, relayAddr });
-      materializeRemoteConfigs({ dataDir: dataDir(), config: readRemoteConfig(), relayToken, acmeDns });
-      res.json({ ok: true, host, connectorUrl: `https://${host}/mcp`, restartRequired: true });
     } catch (err) {
       const caller = /invalid handle|nonce/i.test(String(err?.message || ''));
       res.status(caller ? 400 : 502).json({ ok: false, error: caller ? err.message : 'could not reach the control plane' });
+      return;
     }
+
+    // VALIDATE the untrusted control-plane response before it touches config/env:
+    // the host must be THIS handle's own subdomain; creds must be injection-safe.
+    const { host, relayAddr, relayToken, acmeDns } = data || {};
+    const acmeServer = acmeDns && (acmeDns.serverUrl || acmeDns.server_url);
+    if (!isSafeHostname(host) || !host.startsWith(`${handle}.`)
+      || !SAFE_RELAY.test(String(relayAddr || ''))
+      || !isSafeCred(relayToken)
+      || !acmeDns || !isSafeCred(acmeDns.username) || !isSafeCred(acmeDns.password) || !isSafeCred(acmeDns.subdomain)
+      || !isHttpsOrLocal(acmeServer)) {
+      res.status(502).json({ ok: false, error: 'control plane returned an invalid response' });
+      return;
+    }
+
+    // Persist locally. If THIS fails the handle is already provisioned (nonce
+    // consumed) — report distinctly so the user retries, not "unreachable".
+    try {
+      const creds = { username: acmeDns.username, password: acmeDns.password, subdomain: acmeDns.subdomain, serverUrl: acmeServer };
+      setRemoteSecret('relayToken', relayToken);
+      setRemoteSecret('acmeDns', JSON.stringify(creds));
+      writeRemoteConfig({ remoteMode: 'managed', publicHost: host, relayAddr });
+      materializeRemoteConfigs({ dataDir: dataDir(), config: readRemoteConfig(), relayToken, acmeDns: creds });
+    } catch {
+      res.status(500).json({ ok: false, error: 'address provisioned, but saving locally failed — restart the app and try again' });
+      return;
+    }
+    res.json({ ok: true, host, connectorUrl: `https://${host}/mcp`, restartRequired: true });
   });
 
   // Disconnect any remote mode: stop on next launch + remove sidecar configs.
-  router.post('/disconnect', (_req, res) => {
+  // For a managed handle, best-effort RELEASE it first (frees the name for
+  // everyone + tears down DNS + invalidates the relay token); local-off must
+  // succeed even if the release call fails.
+  router.post('/disconnect', async (_req, res) => {
+    try {
+      const rc = readRemoteConfig();
+      const masterHex = process.env.ENCRYPTION_MASTER_KEY;
+      const base = rc.controlPlaneUrl.replace(/\/$/, '');
+      if (rc.remoteMode === 'managed' && rc.publicHost && masterHex && isHttpsOrLocal(base)) {
+        const handle = rc.publicHost.split('.')[0];
+        try {
+          const chRes = await cpFetch(`${base}/v1/challenge`);
+          if (chRes.ok) {
+            const { nonce } = await chRes.json();
+            const claim = buildClaim({ action: 'release', handle, nonce, masterHex });
+            await cpFetch(`${base}/v1/release`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(claim) });
+          }
+        } catch { /* best-effort release — never block local disconnect */ }
+      }
+    } catch { /* never block local disconnect */ }
     try {
       writeRemoteConfig({ remoteMode: 'off', remoteEnabled: false });
       materializeRemoteConfigs({ dataDir: dataDir(), config: readRemoteConfig() });

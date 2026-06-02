@@ -14,7 +14,7 @@
 // Never logs a secret value (CLAUDE.md §1).
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
-import { rmSync, mkdirSync } from 'node:fs';
+import { rmSync, mkdirSync, statSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -156,6 +156,18 @@ const g2 = cfg.getRemoteSecret('relayToken');
 rec('RC8. remote secret store set/get/overwrite; unknown=null',
   g1 === 'tok-aaa' && g2 === 'tok-bbb' && cfg.getRemoteSecret('nope') === null,
   `g1=${g1} g2=${g2}`);
+
+// RC9 — auth.db is chmod 0600 (it holds the signing secret + operator hash + remote secrets).
+let dbMode = null;
+try { dbMode = statSync(join(DATA, 'auth.db')).mode & 0o777; } catch { /* */ }
+rec('RC9. auth.db is 0600 (not world-readable)', dbMode === 0o600, `mode=${dbMode === null ? 'n/a' : dbMode.toString(8)}`);
+
+// RC10 — publicHost validation: a safe FQDN is accepted, an injection string rejected.
+let badHostThrew = false;
+try { cfg.writeRemoteConfig({ publicHost: 'evil host\nreverse_proxy x' }); } catch { badHostThrew = true; }
+rec('RC10. isSafeHostname + writeRemoteConfig reject an injection host',
+  cfg.isSafeHostname('alice.mycelium.id') === true && cfg.isSafeHostname('evil host\nx') === false && badHostThrew === true,
+  `badHostThrew=${badHostThrew}`);
 
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));

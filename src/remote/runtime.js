@@ -113,6 +113,15 @@ export function materializeRemoteConfigs({ dataDir, config, relayToken, acmeDns,
     return { wrote, frpcPath: null, caddyPath: null };
   }
 
+  // Defense-in-depth: these values flow into TOML/Caddyfile grammar. Reject any
+  // that could break out of a string/block (the router validates the control-plane
+  // response first; this also guards against a tampered secret store).
+  const UNSAFE = /[\n\r"'`{}\\]/;
+  const guard = (label, v) => { if (typeof v === 'string' && UNSAFE.test(v)) throw new Error(`unsafe ${label} for config render`); };
+  guard('publicHost', config.publicHost);
+  guard('relayAddr', config.relayAddr);
+  if (acmeDns) for (const k of ['username', 'password', 'subdomain', 'serverUrl', 'server_url']) guard(`acmeDns.${k}`, acmeDns[k]);
+
   // Caddy terminates TLS in every non-off mode.
   write0600(caddyPath, renderCaddyfile({ publicHost: config.publicHost, dataDir, acmeDns, mode, localPort }));
   wrote.push(caddyPath);

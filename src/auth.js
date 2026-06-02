@@ -12,7 +12,7 @@
 // plaintext — only OAuth/session rows. The vault's two hex keys never touch
 // this file.
 import Database from 'better-sqlite3';
-import { mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync, existsSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { authDbPath } from './paths.js';
 import { readRemoteConfig, resolveAuthSecret } from './remote/config.js';
@@ -50,6 +50,9 @@ export function createAuth(opts = {}) {
     if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
   }
   const database = new Database(dbPath);
+  // Harden: auth.db holds the operator password hash, the signing secret, and the
+  // relay/acme-dns secrets — keep it owner-only (sqlite defaults to 0644).
+  if (dbPath !== ':memory:') { try { chmodSync(dbPath, 0o600); } catch { /* best-effort */ } }
 
   const auth = betterAuth({
     baseURL,

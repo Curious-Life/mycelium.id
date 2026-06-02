@@ -19,7 +19,7 @@
 // Never logs a secret value (CLAUDE.md §1) — only booleans/counts.
 import Database from 'better-sqlite3';
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { remoteConfigPath, authDbPath } from '../paths.js';
 
@@ -32,6 +32,22 @@ const DEFAULT_EMAIL = 'operator@mycelium.local';
 const DEFAULT_CONTROL_PLANE = 'https://connect.mycelium.id';
 const DEFAULT_ACME_DNS = 'https://acme-dns.mycelium.id';
 const REMOTE_MODES = new Set(['off', 'managed', 'own-relay', 'direct']);
+
+// A safe public hostname (FQDN): lowercase labels + dots + hyphens — NO spaces,
+// CRLF, quotes, or braces. Untrusted control-plane/host values flow into env +
+// rendered config files, so they MUST be validated before persist/render
+// (config-injection / OAuth-baseURL-poisoning defense).
+const SAFE_HOST = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,62})(\.[a-z0-9]([a-z0-9-]{0,62}))+$/i;
+export function isSafeHostname(h) { return typeof h === 'string' && SAFE_HOST.test(h); }
+const SAFE_RELAY = /^[a-z0-9.-]{1,253}(:\d{1,5})?$/i; // host[:port]
+
+// Harden auth.db: dir 0700, file 0600. It holds the better-auth signing secret,
+// the operator password hash, AND the relay/acme-dns secrets — all plaintext.
+// SQLite's default file mode is 0644 (world-readable). Best-effort.
+function hardenDbPerms(dbp) {
+  try { chmodSync(dirname(dbp), 0o700); } catch { /* */ }
+  try { chmodSync(dbp, 0o600); } catch { /* */ }
+}
 
 function readFileJson(p) {
   if (!existsSync(p)) return {};
@@ -76,12 +92,21 @@ export function writeRemoteConfig(patch = {}, { env = process.env } = {}) {
   if (typeof patch.remoteEnabled === 'boolean') next.remoteEnabled = patch.remoteEnabled;
   // Transport keys (all NON-secret — secrets go in auth.db via setRemoteSecret).
   if (typeof patch.remoteMode === 'string' && REMOTE_MODES.has(patch.remoteMode)) next.remoteMode = patch.remoteMode;
-  if (typeof patch.publicHost === 'string') next.publicHost = patch.publicHost.trim();
-  if (typeof patch.relayAddr === 'string') next.relayAddr = patch.relayAddr.trim();
+  if (typeof patch.publicHost === 'string') {
+    const h = patch.publicHost.trim();
+    if (h !== '' && !isSafeHostname(h)) throw new Error('invalid publicHost');
+    next.publicHost = h;
+  }
+  if (typeof patch.relayAddr === 'string') {
+    const a = patch.relayAddr.trim();
+    if (a !== '' && !SAFE_RELAY.test(a)) throw new Error('invalid relayAddr');
+    next.relayAddr = a;
+  }
   if (typeof patch.relayVhostPort === 'number' && Number.isFinite(patch.relayVhostPort)) next.relayVhostPort = patch.relayVhostPort;
   if (typeof patch.acmeDnsServer === 'string') next.acmeDnsServer = patch.acmeDnsServer.trim();
   if (typeof patch.controlPlaneUrl === 'string') next.controlPlaneUrl = patch.controlPlaneUrl.trim();
   mkdirSync(dirname(p), { recursive: true });
+  try { chmodSync(dirname(p), 0o700); } catch { /* */ }
   const tmp = `${p}.tmp`;
   writeFileSync(tmp, JSON.stringify(next, null, 2));
   renameSync(tmp, p); // atomic replace
@@ -102,6 +127,7 @@ export function resolveAuthSecret({ env = process.env } = {}) {
   if (dbp === ':memory:') return randomBytes(32).toString('hex');
   mkdirSync(dirname(dbp), { recursive: true });
   const db = new Database(dbp);
+  hardenDbPerms(dbp);
   try {
     db.exec(
       `CREATE TABLE IF NOT EXISTS mycelium_app_secret (
@@ -130,6 +156,7 @@ function remoteSecretDb({ env = process.env } = {}) {
   if (dbp === ':memory:') return null;
   mkdirSync(dirname(dbp), { recursive: true });
   const db = new Database(dbp);
+  hardenDbPerms(dbp);
   db.exec(
     `CREATE TABLE IF NOT EXISTS mycelium_remote_secret (
        key TEXT PRIMARY KEY,
