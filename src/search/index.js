@@ -38,7 +38,7 @@ import { setMindSearch } from './registry.js';
 const DEFAULT_USER = 'local-user';
 
 export function createSearchHelpers(deps = {}) {
-  const { db = null, embedder = null, userId = DEFAULT_USER } = deps;
+  const { db = null, embedder = null, userId = DEFAULT_USER, getMasterKey = null } = deps;
 
   const backend = createLocalBackend({ embedder, userId });
   let built = false;
@@ -46,7 +46,7 @@ export function createSearchHelpers(deps = {}) {
   async function ensureBuilt() {
     if (built) return;
     if (db && typeof db.rawQuery === 'function') {
-      try { await loadFromDb({ backend, db, userId }); } catch { /* fall through */ }
+      try { await loadFromDb({ backend, db, userId, getMasterKey }); } catch { /* fall through */ }
     }
     built = true;
   }

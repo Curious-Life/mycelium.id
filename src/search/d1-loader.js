@@ -17,6 +17,9 @@
  * counts.
  */
 
+import { decryptVector } from './ann/decode.js';
+import { EMBED_DIM } from '../embed/client.js';
+
 /**
  * Tables (with text columns) to index, in priority order.
  * Column names verified against migrations/0001_init.sql + db/search.js.
@@ -44,7 +47,7 @@ export function stripPrefix(id) {
 // table would throw SQLITE_ERROR, which the per-source try/catch swallows,
 // silently dropping that whole layer — so every column below is confirmed.
 const SOURCES = [
-  { table: 'messages', sql: 'SELECT id, content AS text, created_at FROM messages WHERE user_id = ?', kind: 'message', prefix: '' },
+  { table: 'messages', sql: 'SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ?', kind: 'message', prefix: '' },
   { table: 'territory_profiles', sql: "SELECT CAST(territory_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM territory_profiles WHERE user_id = ?", kind: 'territory', prefix: ID_PREFIX.territory },
   { table: 'realms', sql: "SELECT CAST(realm_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM realms WHERE user_id = ?", kind: 'realm', prefix: ID_PREFIX.realm },
   { table: 'semantic_themes', sql: "SELECT CAST(semantic_theme_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM semantic_themes WHERE user_id = ?", kind: 'theme', prefix: ID_PREFIX.theme },
@@ -66,14 +69,33 @@ function tsFromRow(row) {
  * @param {string} deps.userId
  * @returns {Promise<{ added:number, byKind:Record<string,number> }>}
  */
-export async function loadFromDb({ backend, db, userId = 'local-user' }) {
+export async function loadFromDb({ backend, db, userId = 'local-user', getMasterKey = null }) {
   if (!backend || typeof backend.add !== 'function') {
     throw new TypeError('loadFromDb: backend with add() required');
   }
   if (!db || typeof db.rawQuery !== 'function') {
     throw new TypeError('loadFromDb: db with rawQuery required');
   }
+  // Resolve the master key ONCE (process-pinned). With it we decrypt each row's
+  // stored embedding_768 envelope — written by enrichment via encryptVector
+  // (src/enrich/service.js) — and hand the precomputed vector to backend.add,
+  // which then SKIPS the per-row embed-service round-trip. Without a key (or on
+  // rows with no stored vector) the loader falls back to the prior behavior:
+  // text-only add, and backend.add embeds via the injected embedder if wired.
+  //
+  // This is the cold-start fix: on an enriched vault every message carries a
+  // stored vector, so the first search rehydrates from local AES-GCM decrypts
+  // (sub-second) instead of N serial :8091 calls (was ~81s, blocking the
+  // single-threaded server). allowedScopes=null = admin/backfill mode in
+  // crypto-local decrypt — a single-user rehydrate reads its own vectors
+  // regardless of per-message scope.
+  let masterKey = null;
+  if (typeof getMasterKey === 'function') {
+    try { masterKey = await getMasterKey(); } catch { masterKey = null; }
+  }
   let added = 0;
+  let vectorsLoaded = 0;
+  let vectorsFailed = 0;
   const byKind = {};
   for (const src of SOURCES) {
     let rows;
@@ -88,12 +110,25 @@ export async function loadFromDb({ backend, db, userId = 'local-user' }) {
       const rawId = row.id != null ? String(row.id) : '';
       if (!rawId) continue;
       const id = src.prefix + rawId; // kind-prefixed for profiles; bare for messages
+      // Reuse the stored vector when present so backend.add does NOT re-embed.
+      // Best-effort: a missing/garbled envelope falls through to text-only
+      // (never aborts the load; never logs vector bytes — CLAUDE.md §1).
+      let embedding;
+      if (masterKey && row.embedding_768) {
+        try {
+          embedding = await decryptVector(row.embedding_768, masterKey, null, EMBED_DIM);
+          vectorsLoaded++;
+        } catch {
+          embedding = undefined;
+          vectorsFailed++;
+        }
+      }
       try {
-        await backend.add({ id, text: row.text ?? '', ts: tsFromRow(row) });
+        await backend.add({ id, text: row.text ?? '', embedding, ts: tsFromRow(row) });
         added++;
         byKind[src.kind] = (byKind[src.kind] || 0) + 1;
       } catch { /* skip unindexable row */ }
     }
   }
-  return { added, byKind };
+  return { added, byKind, vectorsLoaded, vectorsFailed };
 }
