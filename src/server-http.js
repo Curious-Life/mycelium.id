@@ -275,7 +275,10 @@ export async function startHttpServer(opts = {}) {
   const port =
     opts.port || Number(process.env.MYCELIUM_PORT) || urlPort(baseURL) || 4711;
   return new Promise((resolve) => {
-    const httpServer = app.listen(port, () => {
+    // Bind loopback ONLY. The remote transport reaches :4711 via localhost
+    // (Caddy/frpc run on the same Mac); a 0.0.0.0 bind would expose the OAuth
+    // surface to the LAN. See docs/REMOTE-CONNECT-TRANSPORT-DESIGN (T0).
+    const httpServer = app.listen(port, '127.0.0.1', () => {
       // stderr so it never pollutes a stdio MCP stream.
       console.error(`[mycelium] HTTP+OAuth listening on ${baseURL} (port ${port})`);
       resolve(httpServer);
