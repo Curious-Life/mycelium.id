@@ -28,12 +28,20 @@
 	--color-text-tertiary: #6B6B75;
 	--color-text-emphasis: #FFFFFF;
 
-	/* Accents */
-	--color-accent: #5B9FE8;
-	--color-accent-aurum: #E5B84C;
-	--color-accent-amethyst: #A78BFA;
-	--color-accent-coral: #F87171;
-	--color-accent-jade: #4ADE80;
+	/* Accents — RGB channel triplets are the single source of truth so the
+	   Tailwind utilities (text-aurum, bg-azure/10, …) can inject alpha via
+	   rgb(<channels> / <alpha-value>). The hex-producing --color-accent* vars
+	   derive from them; per theme, override only the *-rgb channels. */
+	--color-accent-rgb: 91 159 232;
+	--color-accent-aurum-rgb: 229 184 76;
+	--color-accent-amethyst-rgb: 167 139 250;
+	--color-accent-coral-rgb: 248 113 113;
+	--color-accent-jade-rgb: 74 222 128;
+	--color-accent: rgb(var(--color-accent-rgb));
+	--color-accent-aurum: rgb(var(--color-accent-aurum-rgb));
+	--color-accent-amethyst: rgb(var(--color-accent-amethyst-rgb));
+	--color-accent-coral: rgb(var(--color-accent-coral-rgb));
+	--color-accent-jade: rgb(var(--color-accent-jade-rgb));
 
 	/* Interactive states */
 	--color-focus-ring: rgba(91, 159, 232, 0.5);
@@ -99,11 +107,13 @@
 	--color-text-tertiary: #A8A29E;
 	--color-text-emphasis: #1C1917;
 
-	--color-accent: #4A8BD4;
-	--color-accent-aurum: #C9A23A;
-	--color-accent-amethyst: #8B6FE0;
-	--color-accent-coral: #E85C5C;
-	--color-accent-jade: #38C96A;
+	/* Light accents — only the channels change; --color-accent* (hex) and the
+	   Tailwind utilities derive from these via the :root rules above. */
+	--color-accent-rgb: 74 139 212;
+	--color-accent-aurum-rgb: 201 162 58;
+	--color-accent-amethyst-rgb: 139 111 224;
+	--color-accent-coral-rgb: 232 92 92;
+	--color-accent-jade-rgb: 56 201 106;
 
 	--color-focus-ring: rgba(74, 139, 212, 0.5);
 	--color-hover: rgba(0, 0, 0, 0.03);
