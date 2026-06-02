@@ -9,6 +9,7 @@
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 	import LocalConnectSection from '$lib/components/settings/LocalConnectSection.svelte';
+	import ManagedConnectSection from '$lib/components/settings/ManagedConnectSection.svelte';
 
 	interface Settings {
 		timezone: string;
@@ -1504,8 +1505,9 @@
 			<!-- Voice / TTS — provider config + per-voice preview -->
 			<VoiceSection />
 
-			<!-- Connect — local (this Mac) + remote (phone / anywhere) (Phase 2) -->
+			<!-- Connect — local (this Mac) + managed address + remote (phone / anywhere) -->
 			<LocalConnectSection />
+			<ManagedConnectSection />
 			<RemoteAccessSection />
 
 			<!-- External Integrations — user-supplied API credentials -->

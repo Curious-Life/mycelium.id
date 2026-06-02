@@ -43,6 +43,8 @@ export function remoteRouter() {
     res.json({
       remoteEnabled: rc.remoteEnabled,
       publicBaseUrl: rc.publicBaseUrl,
+      remoteMode: rc.remoteMode,
+      publicHost: rc.publicHost,
       operatorEmail: rc.operatorEmail,
       passwordSet: operatorUserExists(),
       httpListening: await probeListening(port),
