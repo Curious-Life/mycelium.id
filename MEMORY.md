@@ -5,16 +5,18 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
-- **V1 UX build-out SHIPPED TO MAIN (2026-06-02).** `main` now carries the whole journey:
-  #27 (nav trim, Mindscape read, Claude/ChatGPT import [security-hardened], Timeline/Profile/Settings,
-  first-run welcome, window-drag on both portals + import drag-drop) + #28 (**Phase G** in-app
-  generate-mindscape trigger `src/jobs.js`; **Phase C** chronicle narration `pipeline/describe-chronicles.js`).
-  `npm run verify` → **28× GO**. A 3-sweep bug-hunt (2026-06-02) validated the code (2 false-positive
-  "CRITICAL"s; fixed bounded job map + SPA regex). **Tier-2 (real clustering/embeddings/model) + the
-  Mac/real-client tests are the operator's current pass.** Remaining: profile *editing* (needs a store),
-  `/mindscape/explore` job, Phase K (Tauri key ceremony, Mac/Rust), parser parity (canonical repo),
-  distribution (LAST). Status: [`docs/PRE-LAUNCH-READINESS-2026-06-01.md`](docs/PRE-LAUNCH-READINESS-2026-06-01.md).
-  ⚠️ Branch off `origin/main` (local `main` is stale legacy).
+- **V1 UX build-out + bug-hunt SHIPPED TO MAIN (2026-06-02).** `main @ 90dc9f0`, `npm run verify`
+  → **28× GO**. Merged #27 (nav/Mindscape-read/import[hardened]/Timeline/Profile/Settings/welcome +
+  window-drag + import-dnd) · #28 (**Phase G** generate trigger `src/jobs.js`; **Phase C** chronicles
+  `pipeline/describe-chronicles.js`) · #29 (docs) · #30 (**profile editing** `user_profiles` + **MCP
+  err.message redaction**) · #31 (**design-system channel-var accent fix** — ported from another
+  agent's `reference/portal` commit; fixed broken `bg-aurum/10`-style tints in the live `portal-app`).
+  **4 bug-hunt sweeps**: mostly false positives (ON-CONFLICT-order, jobs-race, enrichment-self-heals —
+  all disproven); real finds were the MCP leak + profile gap. **Operator is Mac-testing now (Tier-2
+  processing, real MCP client, visual).** NEXT (here-doable): rest of the design-system port (/design
+  styleguide, agent-colors), `/mindscape/explore` job. Deferred: Phase K, parser parity (canonical
+  repo), distribution (LAST). Full handoff: [`docs/HANDOFF-2026-06-02.md`](docs/HANDOFF-2026-06-02.md).
+  ⚠️ Branch off `origin/main` (local `main` is stale legacy); `reference/portal` edits ≠ live `portal-app`.
 
 - **Complete-UX design LOCKED (2026-06-01).** Canonical portal adopted + served, no login wall,
   Library wired. The **whole experience is now designed** (4-sweep `/sweep-first-design`, security
