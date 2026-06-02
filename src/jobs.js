@@ -36,6 +36,14 @@ export function startClusteringJob({ dbPath, userId } = {}) {
     return { jobId: runningJobId, status: 'already_running' };
   }
 
+  // Bound memory: evict old finished jobs (status polling only needs recent ones).
+  if (jobs.size > 50) {
+    for (const [id, j] of jobs) {
+      if (j.status !== 'running') jobs.delete(id);
+      if (jobs.size <= 25) break;
+    }
+  }
+
   // Re-resolve keys from the configured source (env / Keychain / 1Password) at
   // spawn time. Throws if unavailable — the caller maps that to a 503.
   const { userHex, systemHex } = resolveKeys();

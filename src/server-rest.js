@@ -100,7 +100,8 @@ export async function startRestServer({
   if (spaFallback) {
     // /api, /ingest, /portal, /auth are data paths — never shadow them with the
     // SPA shell (so unmatched data calls 404 cleanly instead of returning HTML).
-    app.get(/^\/(?!api\/|ingest\/|portal\/|auth\/)(?:[^.]*)$/, (req, res, next) => {
+    // Exclude both `/api/…` and a bare `/api` (the `(?:\/|$)` guard).
+    app.get(/^\/(?!(?:api|ingest|portal|auth)(?:\/|$))(?:[^.]*)$/, (req, res, next) => {
       if (req.method !== 'GET' || !req.accepts('html')) return next();
       res.sendFile(spaFallback);
     });
