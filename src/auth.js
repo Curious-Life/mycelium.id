@@ -15,6 +15,7 @@ import Database from 'better-sqlite3';
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { authDbPath } from './paths.js';
+import { readRemoteConfig, resolveAuthSecret } from './remote/config.js';
 import { betterAuth } from 'better-auth';
 import { mcp } from 'better-auth/plugins';
 import { getMigrations } from 'better-auth/db/migration';
@@ -27,14 +28,20 @@ import { getMigrations } from 'better-auth/db/migration';
  * @param {string} [opts.dbPath]   sqlite path; ':memory:' for tests
  */
 export function createAuth(opts = {}) {
+  // baseURL: explicit opt > MYCELIUM_BASE_URL > persisted remote.json > localhost
+  // (readRemoteConfig folds in the env-var precedence). For a remote connector
+  // this MUST be the public HTTPS (tunnel) URL — every OAuth metadata/resource
+  // field derives from it.
   const baseURL =
-    opts.baseURL || process.env.MYCELIUM_BASE_URL || 'http://localhost:4711';
-  const secret = opts.secret || process.env.MYCELIUM_AUTH_SECRET;
+    opts.baseURL || readRemoteConfig().publicBaseUrl || 'http://localhost:4711';
+  // Signing secret: explicit opt > MYCELIUM_AUTH_SECRET > a stable secret
+  // persisted in auth.db (generated once). resolveAuthSecret never returns empty,
+  // so the old "must set MYCELIUM_AUTH_SECRET" boot friction is gone; the guard
+  // below stays as defence in depth. A changed secret invalidates issued tokens
+  // by design (the deliberate "revoke all" action).
+  const secret = opts.secret || resolveAuthSecret();
   if (!secret) {
-    // Fail closed: a signing secret is mandatory. Refuse to boot without one.
-    throw new Error(
-      'MYCELIUM_AUTH_SECRET is required to start the OAuth server (32+ random chars).',
-    );
+    throw new Error('Could not resolve an auth signing secret.');
   }
   const dbPath = opts.dbPath || authDbPath();
 
@@ -50,7 +57,10 @@ export function createAuth(opts = {}) {
     database,
     emailAndPassword: { enabled: true },
     // better-auth rejects auth POSTs whose Origin is not trusted (CSRF guard).
-    trustedOrigins: [baseURL],
+    // Claude's connector callbacks originate from claude.ai / claude.com, so
+    // trust them alongside our own base URL (validated end-to-end in the Phase-4
+    // smoke — see docs/REMOTE-CONNECT-DESIGN-2026-06-02.md).
+    trustedOrigins: [baseURL, 'https://claude.ai', 'https://claude.com'],
     plugins: [
       mcp({
         loginPage: '/login',

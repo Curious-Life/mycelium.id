@@ -54,3 +54,6 @@ export function dbPath(opts = {})      { return under('mycelium.db', 'MYCELIUM_D
 export function kcvPath(opts = {})     { return under('kcv.json',    'MYCELIUM_KCV', opts); }
 export function authDbPath(opts = {})  { return under('auth.db',     'MYCELIUM_AUTH_DB', opts); }
 export function uploadsRoot(opts = {}) { return under('uploads',     'MYCELIUM_UPLOADS_ROOT', opts); }
+// Non-secret remote-access config (publicBaseUrl, remoteEnabled, operatorEmail).
+// Secrets do NOT live here — see src/remote/config.js.
+export function remoteConfigPath(opts = {}) { return under('remote.json', 'MYCELIUM_REMOTE_CONFIG', opts); }
