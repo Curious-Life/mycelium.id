@@ -30,6 +30,7 @@ import { createTopologyHelpers } from './topology/helpers.js';
 import { createContextDomain } from './tools/context.js';
 import { createIngestDomain } from './tools/ingest.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
+import { getMasterKey } from './crypto/crypto-local.js';
 
 // Single-user defaults for the agent identity / scope deps the factories want.
 const AGENT_LABELS = { 'personal-agent': 'Assistant' };
@@ -70,7 +71,7 @@ export function buildDomains({
   // temporal) plus topology reads. It is the dep createMindscapeDomain needs.
   // The embedder is injected (real one wraps embed-service :8091, sibling R2);
   // when absent the backend runs BM25-only and still returns ranked results.
-  const searchHelpers = createSearchHelpers({ db, embedder, userId });
+  const searchHelpers = createSearchHelpers({ db, embedder, userId, getMasterKey });
 
   // topologyHelpers (Wave-2): resolver + fetchers over the db.topology
   // namespace. Honest-empty against an empty vault — see src/topology/helpers.js.
