@@ -37,6 +37,17 @@ const userHex = hex(), systemHex = hex();
 // so every window is empty — exactly the refusal path we want to exercise.
 const { server, db, close, tools } = await boot({ dbPath: DB, kcvPath: KCV, userHex, systemHex });
 
+// Phase 4 cold-start gating: the metrics tools are Tier-2 (topology-gated). Seed
+// ONE clustered point so the readiness probe (clustering_points with landscape
+// coords) reports READY — the gate then lets getHarmonicState/getMetricSeries run
+// their real path, where an empty METRIC window still yields the honest CONTRACTS
+// refusal copy that M4/M5 assert. (Without this, the gate would short-circuit to
+// the uniform "not ready" message and M4/M5 would no longer apply.)
+await db.rawQuery(
+  `INSERT INTO clustering_points (id, user_id, source_type, source_id, content, landscape_x, landscape_y) VALUES (?,?,?,?,?,?,?)`,
+  ['cp-ready', 'local-user', 'message', 'seed', 'x', 0.1, 0.2],
+);
+
 // connect a real MCP client over an in-memory transport pair
 const [clientT, serverT] = InMemoryTransport.createLinkedPair();
 const client = new Client({ name: 'verify-metrics-client', version: '0.0.0' }, { capabilities: {} });

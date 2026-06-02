@@ -10,7 +10,7 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
-import { buildDomains, collectTools, createMcpServer } from './mcp.js';
+import { buildDomains, collectTools, createMcpServer, TIER2_TOOLS, TOPOLOGY_NOT_READY_MESSAGE } from './mcp.js';
 import { createServiceEmbedder } from './search/embedder.js';
 import { resolveKeys } from './crypto/key-source.js';
 import { dbPath as resolveDbPath, kcvPath as resolveKcvPath } from './paths.js';
@@ -72,13 +72,19 @@ export async function boot({
   // env, memory-only, never logged — consistent with the key discipline.
   process.env.ENCRYPTION_MASTER_KEY = userHex;
   const { db, close } = getDb({ dbPath, userKey, systemKey });
-  const { domains, deferred, searchHelpers } = buildDomains({ db, userId, embedder });
-  const { tools, handlers } = collectTools(domains);
+  const { domains, deferred, searchHelpers, isTopologyReady } = buildDomains({ db, userId, embedder });
+  // Cold-start gating (Phase 4): Tier-2 readers return a uniform "not ready"
+  // message until the topology pipeline has run, instead of honest-empty.
+  const { tools, handlers } = collectTools(domains, {
+    isReady: isTopologyReady,
+    gatedTools: TIER2_TOOLS,
+    message: TOPOLOGY_NOT_READY_MESSAGE,
+  });
   const server = createMcpServer({ tools, handlers });
   // handlers is returned so non-MCP transports (REST) can reuse the SAME
   // tool handler map without re-implementing tool logic. userId is returned so
   // HTTP ingestion routes (upload) can scope writes without re-deriving it.
-  return { server, db, close, tools, handlers, deferred, userId, searchHelpers };
+  return { server, db, close, tools, handlers, deferred, userId, searchHelpers, isTopologyReady };
 }
 
 async function startStdio() {
