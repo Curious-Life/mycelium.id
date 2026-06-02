@@ -67,12 +67,48 @@ async function main() {
     const one = await j(M('/messages?limit=1'));
     rec('T2. /messages?limit=1 → 1 row', one.body?.messages?.length === 1, `count=${one.body?.messages?.length}`);
 
-    // P1 — profile (must 200; apiGet throws otherwise)
+    // P1 — profile read (must 200; apiGet throws otherwise). Fresh vault: no
+    // user_profiles row yet → handle null, display_name default, live counts.
     const prof = await j(M('/profile'));
     const p = prof.body?.profile;
-    rec('P1. /profile → {profile:{message_count,handle,display_name}}',
-      prof.status === 200 && p?.message_count === 2 && p?.handle === 'local' && p?.display_name === 'You',
-      `status=${prof.status} message_count=${p?.message_count}`);
+    rec('P1. /profile read → {message_count:2, handle:null, display_name:"You"}',
+      prof.status === 200 && p?.message_count === 2 && p?.handle === null && p?.display_name === 'You',
+      `status=${prof.status} message_count=${p?.message_count} handle=${p?.handle}`);
+
+    // P2 — handle availability check
+    const okHandle = await j(M('/profile/handle/check?handle=mycelium')); // reserved
+    const freeHandle = await j(M('/profile/handle/check?handle=forest_walker'));
+    rec('P2. /profile/handle/check (reserved vs free)',
+      okHandle.body?.available === false && freeHandle.body?.available === true,
+      `reserved=${okHandle.body?.available} free=${freeHandle.body?.available}`);
+
+    // P3 — edit (PUT) persists handle + display_name + signature
+    const put = await fetch(`${url}/api/v1/portal/profile`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ handle: 'forest_walker', display_name: 'Martin', signature: 'into the trees' }),
+    });
+    const putBody = await put.json().catch(() => ({}));
+    rec('P3. PUT /profile persists handle/display_name/signature',
+      put.status === 200 && putBody.profile?.handle === 'forest_walker' && putBody.profile?.display_name === 'Martin' && putBody.profile?.signature === 'into the trees',
+      `status=${put.status} handle=${putBody.profile?.handle}`);
+
+    // P4 — read-back is persisted (round-trips through user_profiles)
+    const prof2 = await j(M('/profile'));
+    rec('P4. GET /profile reflects the saved edits',
+      prof2.body?.profile?.handle === 'forest_walker' && prof2.body?.profile?.display_name === 'Martin',
+      `handle=${prof2.body?.profile?.handle}`);
+
+    // P5 — invalid handle rejected (fail-closed)
+    const bad = await fetch(`${url}/api/v1/portal/profile`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ handle: 'No Spaces!' }),
+    });
+    rec('P5. PUT /profile rejects an invalid handle → 400', bad.status === 400, `status=${bad.status}`);
+
+    // P6 — recompute refreshes counts
+    const rc = await fetch(`${url}/api/v1/portal/profile/stats/recompute`, { method: 'POST' });
+    const rcBody = await rc.json().catch(() => ({}));
+    rec('P6. POST /profile/stats/recompute → counts refreshed',
+      rc.status === 200 && rcBody.profile?.message_count === 2, `status=${rc.status} count=${rcBody.profile?.message_count}`);
 
     // S1 — settings
     const set = await j(M('/settings'));
