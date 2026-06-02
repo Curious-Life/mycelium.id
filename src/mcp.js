@@ -112,7 +112,7 @@ export function buildDomains({
       writeMindFile: (filename, content) => mindFiles.writeMindFile(filename, content),
     }),
     createMetricsDomain({ db, userId }),
-    createMindscapeDomain({ searchHelpers, userId }),
+    createMindscapeDomain({ searchHelpers, db, userId }),
     createTopologyToolsDomain({ db, userId, topologyHelpers }),
   ];
   // Deferred = domains needing a subsystem not yet built. Each lands with its

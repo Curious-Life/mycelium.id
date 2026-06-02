@@ -42,7 +42,7 @@ export function createContextDomain(deps) {
           recentMessages: { type: 'number', description: 'How many recent messages to include (default 10, max 40).' },
           include: {
             type: 'array',
-            items: { type: 'string', enum: ['mind', 'messages', 'phase', 'health'] },
+            items: { type: 'string', enum: ['mind', 'facts', 'messages', 'phase', 'health'] },
             description: 'Limit to specific sections. Omit for all.',
           },
         },
@@ -77,6 +77,19 @@ export function createContextDomain(deps) {
         ]);
         if (model) sections.push(`---\n# YOUR INTERNAL MODEL (private — never share unless you choose to)\n\n${model.trim()}`);
         if (flagged) sections.push(`---\n# FLAGGED FOR DISCUSSION\n\n${flagged.trim()}`);
+      }
+
+      // ── facts you know (durable; pinned-first; sensitive excluded) ──
+      if (want(include, 'facts') && db?.facts) {
+        try {
+          const rows = await db.facts.forContext({ userId, limit: 30 });
+          if (rows?.length) {
+            const lines = rows
+              .map((f) => `- ${f.pinned ? '📌 ' : ''}**${f.category}/${f.key}**: ${(f.value || '').slice(0, 200)}`)
+              .join('\n');
+            sections.push(`---\n# FACTS YOU KNOW\n\n${lines}`);
+          }
+        } catch { /* non-fatal */ }
       }
 
       // ── recent messages ──

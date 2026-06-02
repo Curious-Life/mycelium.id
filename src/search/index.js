@@ -91,12 +91,18 @@ export function createSearchHelpers(deps = {}) {
   }
 
   // Message ids are bare UUID strings (no kind prefix).
-  async function hydrateMessages(ids) {
+  //
+  // forgotten_at IS NULL is UNCONDITIONAL (defense-in-depth: forget evicts the
+  // in-RAM index, but hydration is a second read path — a forgotten row must
+  // never surface here even if the index is briefly stale). `excludeSensitive`
+  // additionally drops sensitive=1 rows for proactive recall (relatedTo) — §3.6.
+  async function hydrateMessages(ids, { excludeSensitive = false } = {}) {
     const msgIds = ids.filter((id) => !id.includes(':'));
     if (msgIds.length === 0) return new Map();
     const placeholders = msgIds.map(() => '?').join(',');
+    const sensitiveClause = excludeSensitive ? ' AND sensitive = 0' : '';
     const rows = await rawRows(
-      `SELECT id, content, agent_id, created_at FROM messages WHERE user_id = ? AND id IN (${placeholders})`,
+      `SELECT id, content, agent_id, created_at FROM messages WHERE user_id = ? AND id IN (${placeholders}) AND forgotten_at IS NULL${sensitiveClause}`,
       [userId, ...msgIds],
     );
     return new Map(rows.map((r) => [String(r.id), r]));
@@ -129,6 +135,7 @@ export function createSearchHelpers(deps = {}) {
     const scope = args.scope || 'all';
     const agent = args.agent || null;
     const includeTopology = !!args.includeTopology;
+    const excludeSensitive = !!args.excludeSensitive; // proactive recall (relatedTo)
 
     const empty = {
       messages: [],
@@ -151,7 +158,7 @@ export function createSearchHelpers(deps = {}) {
     // Hydrate each layer's matching ids. The id space is shared but each row
     // exists in exactly one table, so these maps are disjoint.
     const [msgMap, terrMap, realmMap, themeMap] = await Promise.all([
-      want('messages') ? hydrateMessages(ids) : Promise.resolve(new Map()),
+      want('messages') ? hydrateMessages(ids, { excludeSensitive }) : Promise.resolve(new Map()),
       want('territories') ? hydrateProfiles('territory_profiles', 'territory_id', ID_PREFIX.territory, ids, ', message_count') : Promise.resolve(new Map()),
       want('realms') ? hydrateProfiles('realms', 'realm_id', ID_PREFIX.realm, ids, ', message_count') : Promise.resolve(new Map()),
       want('themes') ? hydrateProfiles('semantic_themes', 'semantic_theme_id', ID_PREFIX.theme, ids, ', message_count') : Promise.resolve(new Map()),

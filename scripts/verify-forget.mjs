@@ -24,7 +24,7 @@ const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAI
 const one = async (sql, params) => (await db.rawQuery(sql, params)).results?.[0] || {};
 
 const names = tools.map((t) => t.name);
-rec('F1. forget + mark registered; total tools = 33', names.includes('forget') && names.includes('mark') && tools.length === 33, `${tools.length} tools`);
+rec('F1. forget + mark registered; total tools = 34', names.includes('forget') && names.includes('mark') && tools.length === 34, `${tools.length} tools`);
 
 // Seed a message + fingerprints + clustering point, and index it (BM25, no embedder).
 const id = 'm-forget';

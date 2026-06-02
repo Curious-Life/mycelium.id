@@ -1,26 +1,53 @@
-// Curate domain — cross-cutting verbs over the context bank, addressed by a
-// {type,id} ref so the model holds one handle, not per-type variants.
+// Curate domain — the lean verbs the user uses to shape their context bank,
+// addressed by a {type,id} ref so the model holds one handle, not per-type
+// variants.
 //
-//   forget(type,id) — soft-redact a message/document: destroy content + both
-//                     embedding fingerprints, delete the clustering point, evict
-//                     the in-RAM search index, tombstone for audit. No hard
-//                     delete, no undo. Audited (hash + length only, never text).
-//   mark(type,id,…) — user-asserted salience: pinned (surfaced first) and/or
-//                     sensitive (kept out of proactive recall / never published).
+//   remember(kind,…)  — write a durable, typed memory. Phase 2: kind:'fact'
+//                       (category/key -> value), upserted on (category,key).
+//                       Phase 3 will add kind:'entity'.
+//   forget(type,id)   — soft-redact a message/document/fact: destroy content +
+//                       any embedding fingerprints, delete the clustering point,
+//                       evict the in-RAM search index, tombstone for audit. No
+//                       hard delete, no undo. Audited (hash + length, never text).
+//   mark(type,id,…)   — user-asserted salience: pinned (surfaced first) and/or
+//                       sensitive (kept out of proactive recall / never published).
 //
 // Local vault only — every call routes through the encrypting db namespaces.
 
 export function createCurateDomain({ db, userId, searchHelpers }) {
   const REF = {
-    type: { type: 'string', enum: ['message', 'document'], description: 'What kind of item.' },
-    id: { type: 'string', description: 'The message id, or the document path.' },
+    type: { type: 'string', enum: ['message', 'document', 'fact'], description: 'What kind of item.' },
+    id: { type: 'string', description: 'The message id, the document path, or the fact id.' },
   };
 
   const tools = [
     {
+      name: 'remember',
+      description:
+        'Remember a durable fact about the user so you always know it. A fact is a '
+        + 'category (e.g. identity, preferences, relationships, work, health), a key '
+        + '(e.g. name, partner, favorite_coffee), and a value. Re-remembering the same '
+        + 'category+key updates the value. Use this for stable truths worth carrying '
+        + 'across every conversation — not passing chatter (that is captured automatically). '
+        + 'Pass sensitive:true to keep it out of proactive recall, pinned:true to surface it first.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['fact'], description: "What to remember (default 'fact')." },
+          category: { type: 'string', description: 'The fact category, e.g. identity, preferences, relationships, work.' },
+          key: { type: 'string', description: 'The fact key within the category, e.g. name, partner, favorite_coffee.' },
+          value: { type: 'string', description: 'The fact value.' },
+          confidence: { type: 'string', enum: ['stated', 'inferred', 'uncertain'], description: "How sure you are (default 'stated')." },
+          sensitive: { type: 'boolean', description: 'Keep this fact out of proactive recall and never publish it.' },
+          pinned: { type: 'boolean', description: 'Surface this fact first in context.' },
+        },
+        required: ['category', 'key', 'value'],
+      },
+    },
+    {
       name: 'forget',
       description:
-        'Permanently forget a memory: soft-redact a message or document so its '
+        'Permanently forget a memory: soft-redact a message, document, or fact so its '
         + 'content and search fingerprints are destroyed and it disappears from all '
         + 'recall, leaving only an auditable tombstone. Use when the user asks to '
         + 'delete, remove, redact, or forget something. There is no undo.',
@@ -60,6 +87,45 @@ export function createCurateDomain({ db, userId, searchHelpers }) {
   }
 
   const handlers = {
+    remember: async (args = {}) => {
+      const kind = args.kind || 'fact';
+      if (kind !== 'fact') {
+        // Fail-closed: entities arrive in Phase 3.
+        throw new Error(`remember: unknown kind "${kind}" (only 'fact' is supported)`);
+      }
+      const category = (args.category || '').trim();
+      const key = (args.key || '').trim();
+      const value = (args.value || '').trim();
+      if (!category || !key || !value) {
+        throw new Error('remember: category, key, and value are required and must be non-empty');
+      }
+
+      const { id, status } = await db.facts.upsert({
+        userId,
+        category,
+        key,
+        value,
+        confidence: args.confidence || 'stated',
+        source: 'user',
+      });
+
+      // Salience is applied as a follow-up so it is honored for both new and
+      // existing facts (the upsert deliberately does not touch pinned/sensitive).
+      const flags = {};
+      if (args.pinned !== undefined) flags.pinned = args.pinned;
+      if (args.sensitive !== undefined) flags.sensitive = args.sensitive;
+      if (Object.keys(flags).length) {
+        try { await db.facts.setSalience(id, userId, flags); } catch { /* best-effort */ }
+      }
+
+      const verb = status === 'created' ? 'Remembered' : status === 'restored' ? 'Restored' : 'Updated';
+      const tags = [];
+      if (args.pinned) tags.push('pinned');
+      if (args.sensitive) tags.push('sensitive');
+      const suffix = tags.length ? ` (${tags.join(', ')})` : '';
+      return `${verb}: ${category}/${key}${suffix}.`;
+    },
+
     forget: async (args = {}) => {
       const { type, id } = args;
       if (!type || !id) throw new Error('forget: type and id are required');
@@ -84,7 +150,17 @@ export function createCurateDomain({ db, userId, searchHelpers }) {
         return `Forgotten: document ${id}. Content and embedding destroyed, removed from clustering, tombstoned for audit. This cannot be undone.`;
       }
 
-      throw new Error(`forget: unknown type "${type}" (expected message or document)`);
+      if (type === 'fact') {
+        const res = await db.facts.redact(id, userId);
+        if (!res.found) return `Nothing to forget: no fact with id ${id}.`;
+        if (res.alreadyForgotten) return `Already forgotten: fact ${id}.`;
+        // Facts aren't indexed or clustered — redact (null value + tombstone) is
+        // the whole operation.
+        await auditForget('fact', id, res);
+        return `Forgotten: fact ${id}. Value destroyed, tombstoned for audit. This cannot be undone.`;
+      }
+
+      throw new Error(`forget: unknown type "${type}" (expected message, document, or fact)`);
     },
 
     mark: async (args = {}) => {
@@ -100,7 +176,8 @@ export function createCurateDomain({ db, userId, searchHelpers }) {
       let res;
       if (type === 'message') res = await db.messages.setSalience(id, userId, flags);
       else if (type === 'document') res = await db.documents.setSalience(userId, id, flags);
-      else throw new Error(`mark: unknown type "${type}" (expected message or document)`);
+      else if (type === 'fact') res = await db.facts.setSalience(id, userId, flags);
+      else throw new Error(`mark: unknown type "${type}" (expected message, document, or fact)`);
 
       if (!res.found) return `No live ${type} found for ${id} (it may not exist, or be forgotten).`;
       const parts = [];
