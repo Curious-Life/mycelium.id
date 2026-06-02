@@ -5,6 +5,17 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
+- **V1 UX build-out SHIPPED TO MAIN (2026-06-02).** `main` now carries the whole journey:
+  #27 (nav trim, Mindscape read, Claude/ChatGPT import [security-hardened], Timeline/Profile/Settings,
+  first-run welcome, window-drag on both portals + import drag-drop) + #28 (**Phase G** in-app
+  generate-mindscape trigger `src/jobs.js`; **Phase C** chronicle narration `pipeline/describe-chronicles.js`).
+  `npm run verify` → **28× GO**. A 3-sweep bug-hunt (2026-06-02) validated the code (2 false-positive
+  "CRITICAL"s; fixed bounded job map + SPA regex). **Tier-2 (real clustering/embeddings/model) + the
+  Mac/real-client tests are the operator's current pass.** Remaining: profile *editing* (needs a store),
+  `/mindscape/explore` job, Phase K (Tauri key ceremony, Mac/Rust), parser parity (canonical repo),
+  distribution (LAST). Status: [`docs/PRE-LAUNCH-READINESS-2026-06-01.md`](docs/PRE-LAUNCH-READINESS-2026-06-01.md).
+  ⚠️ Branch off `origin/main` (local `main` is stale legacy).
+
 - **Complete-UX design LOCKED (2026-06-01).** Canonical portal adopted + served, no login wall,
   Library wired. The **whole experience is now designed** (4-sweep `/sweep-first-design`, security
   pivot: keys never touch HTTP): [`docs/UX-COMPLETE-DESIGN-2026-06-01.md`](docs/UX-COMPLETE-DESIGN-2026-06-01.md).
