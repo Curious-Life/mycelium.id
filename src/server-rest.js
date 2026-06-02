@@ -67,6 +67,14 @@ export async function startRestServer({
   // the namespace has no .close method, so we hold close() for shutdown.
   const { tools, handlers, db, close, userId: bootUserId } = await boot(bootOpts);
 
+  // The mindscape clustering job (Phase G) spawns a subprocess that opens the
+  // vault by path via MYCELIUM_DB. In the normal app launch, server-rest's own
+  // `dbPath` param is undefined (boot() applies its own default), so resolve the
+  // SAME effective path here — absolute, so the spawned child finds it
+  // regardless of its cwd — and hand it to the mindscape router. Without this,
+  // the child fell back to './data/vault.db' (empty) → "no such table: messages".
+  const effectiveDbPath = path.resolve(dbPath || process.env.MYCELIUM_DB || 'data/mycelium.db');
+
   const app = express();
   app.disable('x-powered-by');
   // Wire db + userId + a best-effort enrichment nudge so /api/v1/upload works
@@ -80,7 +88,7 @@ export async function startRestServer({
   // Mindscape read surface (3D scene aggregator + per-panel reads). Same prefix
   // (unmatched paths fall through from the compat router above); its JSON parser
   // is likewise scoped to /api/v1/portal so it never touches /api/v1/upload.
-  app.use('/api/v1/portal', portalMindscapeRouter({ db, userId: bootUserId, dbPath }));
+  app.use('/api/v1/portal', portalMindscapeRouter({ db, userId: bootUserId, dbPath: effectiveDbPath }));
   // Import surface (multipart upload + chunk assembly → parse → captureMessage).
   // Multipart bodies pass through the JSON parsers above untouched (content-type
   // gated); its own /upload/complete handler scopes express.json to that route.

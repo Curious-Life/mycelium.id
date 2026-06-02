@@ -257,9 +257,9 @@
 					ondragover={onDragOver}
 					ondragleave={onDragLeave}
 					ondrop={onDrop}
-					class="rounded-xl border-2 border-dashed p-6 text-center cursor-pointer transition-colors
+					class="rounded-xl border-2 border-dashed p-6 text-center cursor-pointer transition-all duration-150
 						{dragOver
-							? 'border-[var(--color-accent)] bg-[var(--color-accent)]/10'
+							? 'border-[var(--color-accent)] bg-[var(--color-accent)]/20 ring-2 ring-[var(--color-accent)] scale-[1.02] shadow-lg'
 							: 'border-[var(--color-border)] hover:border-[var(--color-accent)] hover:bg-[var(--color-elevated)]'}"
 				>
 					<svg class="w-7 h-7 mx-auto mb-2 text-[var(--color-text-tertiary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">

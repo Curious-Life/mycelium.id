@@ -16,6 +16,34 @@
 import crypto from 'node:crypto';
 
 /**
+ * Normalize a caller-supplied "when this message actually occurred" value into
+ * the schema's `created_at` ISO format (`%Y-%m-%dT%H:%M:%fZ`). Accepts an ISO
+ * string, a Date, or a Unix epoch (seconds — e.g. ChatGPT `create_time` — or
+ * milliseconds; disambiguated by magnitude). Returns null for absent/invalid
+ * input so the caller falls back to the DB default (insert-time = "now").
+ * @param {string|number|Date|null|undefined} v
+ * @returns {string|null}
+ */
+export function normalizeCreatedAt(v) {
+  if (v == null) return null;
+  let d;
+  if (v instanceof Date) {
+    d = v;
+  } else if (typeof v === 'number') {
+    d = new Date(v < 1e12 ? v * 1000 : v); // epoch seconds vs ms
+  } else if (typeof v === 'string') {
+    const s = v.trim();
+    if (!s) return null;
+    if (/^\d+(\.\d+)?$/.test(s)) { const n = Number(s); d = new Date(n < 1e12 ? n * 1000 : n); }
+    else d = new Date(s); // ISO-8601 (Claude `created_at`)
+  } else {
+    return null;
+  }
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString(); // e.g. 2025-08-29T07:24:00.000Z — matches the schema format
+}
+
+/**
  * Persist an inbound message. Returns { id, deduped }.
  * @param {object} db                 wired db namespace (needs messages + audit)
  * @param {object} msg
@@ -56,6 +84,12 @@ export async function captureMessage(db, msg, enqueueEnrichment) {
   if (msg.metadata != null) {
     row.metadata = typeof msg.metadata === 'string' ? msg.metadata : JSON.stringify(msg.metadata);
   }
+  // Preserve the ORIGINAL occurrence time (e.g. the create date in a Claude /
+  // ChatGPT export) instead of letting the DB default-stamp it as insert-time.
+  // created_at is plaintext (used for ordering/timeline/co-fire decay), so this
+  // is a direct column write. Invalid/absent → DB default ("now") still applies.
+  const createdAtIso = normalizeCreatedAt(msg.createdAt);
+  if (createdAtIso) row.created_at = createdAtIso;
 
   // insertIgnore → idempotent on the id PK; a webhook resend is a no-op.
   const before = await db.messages.getExistingIds(userId, [id]);

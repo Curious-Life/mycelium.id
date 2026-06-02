@@ -116,6 +116,7 @@ export async function processClaudeExport(zip, ctx) {
       try {
         const { deduped } = await ctx.capture({
           id, content, role, source: 'claude-import', conversationId: convId,
+          createdAt: m.created_at, // preserve the original message time, not import-time
           metadata: { title: conv.name, original_timestamp: m.created_at },
         });
         if (deduped) skipped += 1; else imported += 1;
@@ -160,6 +161,7 @@ export async function processOpenAIExport(conversations, ctx) {
       try {
         const { deduped } = await ctx.capture({
           id, content: m.text, role: m.role, source: 'chatgpt-import', conversationId: convId,
+          createdAt: m.create_time, // epoch seconds → preserve original message time
           metadata: { title: conv.title, original_timestamp: m.create_time },
         });
         if (deduped) skipped += 1; else imported += 1;
