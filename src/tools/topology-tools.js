@@ -1,4 +1,9 @@
 /**
+ * [Phase 5] INTERNAL — folded into the cognition domain (src/tools/cognition.js).
+ * createCognitionDomain reuses these 5 .handlers under the single mindscape({view})
+ * tool; this factory's .tools array is no longer registered. Not a standalone MCP
+ * domain anymore.
+ *
  * Topology domain — 5 MCP tools that read from the mindscape graph:
  *
  *   - exploreTerritory: co-firing partners + gaps + optional cluster walk.

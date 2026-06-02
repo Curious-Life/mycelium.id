@@ -17,15 +17,13 @@ import * as path from 'node:path';
 
 import { createHealthDomain } from './tools/health.js';
 import { createTasksDomain } from './tools/tasks.js';
-import { createFisherToolsDomain } from './tools/fisher-tools.js';
+import { createCognitionDomain } from './tools/cognition.js';
 import { createMessagesDomain } from './tools/messages.js';
 import { createDocumentsDomain } from './tools/documents.js';
 import { createInternalDomain } from './tools/internal.js';
 import { createMindFiles, MIND_MIRRORS } from './mindfiles/mind-files.js';
-import { createMetricsDomain } from './tools/metrics.js';
 import { createMindscapeDomain } from './tools/mindscape.js';
 import { createSearchHelpers } from './search/index.js';
-import { createTopologyToolsDomain } from './tools/topology-tools.js';
 import { createTopologyHelpers } from './topology/helpers.js';
 import { createContextDomain } from './tools/context.js';
 import { createIngestDomain } from './tools/ingest.js';
@@ -94,7 +92,6 @@ export function buildDomains({
     createCurateDomain({ db, userId, searchHelpers }),
     createHealthDomain({ getDb: () => db, userId }),
     createTasksDomain({ db, userId }),
-    createFisherToolsDomain({ db, userId }),
     createMessagesDomain({ db, userId, agentLabels: AGENT_LABELS, isScoped: () => false }),
     // documents domain mirrors the MIND_MIRRORS paths to mind-files on
     // saveDocument/updateDocument. No searchClient/publicRenderer in V1, so
@@ -111,9 +108,11 @@ export function buildDomains({
       readMindFile: (filename) => mindFiles.readMindFile(filename),
       writeMindFile: (filename, content) => mindFiles.writeMindFile(filename, content),
     }),
-    createMetricsDomain({ db, userId }),
     createMindscapeDomain({ searchHelpers, db, userId }),
-    createTopologyToolsDomain({ db, userId, topologyHelpers }),
+    // Phase 5: the 11 cluster/Fisher/metric/topology readers consolidated into
+    // 3 cohesive tools (cognitiveState / cognitiveHistory / mindscape). Reuses
+    // the fisher-tools/metrics/topology-tools handler logic verbatim.
+    createCognitionDomain({ db, userId, topologyHelpers }),
   ];
   // Deferred = domains needing a subsystem not yet built. Each lands with its
   // Wave-2 unit; listed explicitly so the surface is never silently dropped.
@@ -134,9 +133,7 @@ export function buildDomains({
 // forget/mark/link, facts/entities listings, documents, mind-files, BM25 search
 // + relatedTo) — those work on a fresh vault and are never gated.
 export const TIER2_TOOLS = new Set([
-  'getCurrentPhase', 'getTrajectoryHistory', 'getActiveMilestones', 'getTopMovers',
-  'getHarmonicState', 'getMetricSeries',
-  'exploreTerritory', 'mindscapeStructure', 'listTerritories', 'territoryDetail', 'timeView',
+  'cognitiveState', 'cognitiveHistory', 'mindscape',
 ]);
 
 export const TOPOLOGY_NOT_READY_MESSAGE =
