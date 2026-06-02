@@ -35,7 +35,7 @@ export function createContextDomain(deps) {
         + 'Returns a single briefing: the current date/time, your private internal model, anything '
         + 'flagged for discussion, recent messages across channels, your current cognitive phase, and '
         + 'recent body-state (sleep/HRV/steps). After this, pull more detail on demand with '
-        + 'searchMindscape, getDocument, getDailyMessages, or exploreTerritory.',
+        + 'searchMindscape, getDocument, getDailyMessages, or mindscape (topology by view).',
       inputSchema: {
         type: 'object',
         properties: {

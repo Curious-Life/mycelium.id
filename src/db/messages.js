@@ -524,7 +524,7 @@ export function createMessagesNamespace(deps) {
     },
 
     async countByUser(userId) {
-      const result = await d1Query(`SELECT COUNT(*) as count FROM messages WHERE user_id = ?`, [userId]);
+      const result = await d1Query(`SELECT COUNT(*) as count FROM messages WHERE user_id = ? AND forgotten_at IS NULL`, [userId]);
       return firstRow(result)?.count || 0;
     },
 
@@ -567,7 +567,7 @@ export function createMessagesNamespace(deps) {
            MAX(created_at)                      AS newest,
            SUM(CASE WHEN embedding_768 IS NOT NULL THEN 1 ELSE 0 END) AS embedded
          FROM messages
-         WHERE user_id = ?
+         WHERE user_id = ? AND forgotten_at IS NULL
          GROUP BY source, agent_id
          ORDER BY row_count DESC`,
         [userId],

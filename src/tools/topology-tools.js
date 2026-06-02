@@ -315,7 +315,7 @@ export function createTopologyToolsDomain(deps) {
         db.rawQuery(
           `SELECT m.content, m.role, m.created_at, m.source FROM messages m
            JOIN clustering_points cp ON cp.source_id = m.id AND cp.source_type = 'message'
-           WHERE cp.user_id = ? AND cp.territory_id = ?
+           WHERE cp.user_id = ? AND cp.territory_id = ? AND m.forgotten_at IS NULL
            ORDER BY m.created_at DESC LIMIT 3`,
           [userId, tid],
         ).catch(() => []),
