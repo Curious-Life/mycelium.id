@@ -1,0 +1,12 @@
+# Pinned SHA-256 of the bundled sidecars, per target triple. fetch-sidecars.sh
+# verifies each download against these and ABORTS on mismatch (a backdoored TLS
+# terminator must never reach the signed .app).
+#
+# Empty by default: on the first fetch the script prints the computed hash (TOFU).
+# Verify the binary's provenance, then paste the printed lines here and commit so
+# every CI run / rebuild is pinned.
+#
+# Format:  <name>-<target-triple>  <sha256>
+# Example:
+#   frpc-aarch64-apple-darwin   <64-hex>
+#   caddy-aarch64-apple-darwin  <64-hex>

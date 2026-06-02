@@ -1,0 +1,31 @@
+# frps.toml — the Mycelium relay (FRP server), TLS-PASSTHROUGH.
+#
+# frps routes inbound HTTPS by SNI to each tenant's frpc and forwards the raw TLS
+# bytes — it NEVER terminates TLS (the user's Caddy does, on their Mac). Per-tenant
+# authorization is delegated ENTIRELY to the control-plane plugin: there is NO
+# fixed shared auth.token, so a tenant can bind ONLY its own <handle>.mycelium.id,
+# and a token leaked from one tenant's config cannot impersonate another past the
+# plugin's host check. Both Login AND NewProxy are gated.
+#
+# Deploy on a host with free, always-on L3/4 DDoS scrubbing (Hetzner / OVH) and
+# apply nftables.conf. The plugin endpoint (the control-plane) MUST be private —
+# firewall /frps/handler to the relay only; it is not meant for the public.
+
+bindPort = 7000                 # frpc control connections (reverse tunnel)
+vhostHTTPSPort = 443            # public HTTPS, SNI-routed passthrough (no termination)
+
+# The frpc control channel is itself TLS; refuse plaintext.
+transport.tls.force = true
+
+# Bound per-client resource use (defence-in-depth alongside nftables).
+transport.maxPoolCount = 5
+userConnTimeout = 10
+maxPortsPerClient = 0           # tenants use vhost (SNI), never raw ports
+
+# Server plugin: the control-plane authorizes EVERY Login + NewProxy against the
+# handle registry. No [auth] block on purpose — authorization is the plugin's job.
+[[httpPlugins]]
+name = "mycelium-auth"
+addr = "127.0.0.1:8790"         # the mycelium-managed control-plane (private net / loopback)
+path = "/frps/handler"
+ops = ["Login", "NewProxy"]

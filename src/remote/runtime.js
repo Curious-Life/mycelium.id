@@ -28,8 +28,10 @@ export function parseRelayAddr(addr, defPort = 7000) {
 /**
  * FRP v1 client config (frpc.toml). type=https → frps routes by SNI and does NOT
  * terminate TLS; the local Caddy (localPort) terminates. The per-tenant token
- * rides in metadatas (validated by the relay's NewProxy hook → handle) and as
- * auth.token (the relay's Login hook accepts it).
+ * rides in `metadatas.token` ONLY — the relay's Login/NewProxy plugin validates it
+ * against the registry → handle. We set NO built-in `auth.token`: the relay
+ * configures no fixed shared token, delegating authorization entirely to the
+ * plugin (a fixed token would reject per-tenant tokens AND be a shared secret).
  */
 export function renderFrpcToml({ relayAddr, publicHost, token, localPort = CADDY_LOCAL_PORT, proxyName }) {
   const { host, port } = parseRelayAddr(relayAddr);
@@ -37,8 +39,6 @@ export function renderFrpcToml({ relayAddr, publicHost, token, localPort = CADDY
   return [
     `serverAddr = "${host}"`,
     `serverPort = ${port}`,
-    `auth.method = "token"`,
-    `auth.token = "${token}"`,
     `metadatas.token = "${token}"`,
     `loginFailExit = false`,
     ``,
