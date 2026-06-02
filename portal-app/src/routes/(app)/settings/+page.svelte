@@ -1129,6 +1129,44 @@
 			mkRotateLoading = false;
 		}
 	}
+
+	// ── Local recovery key (V1): reveal / copy / download the single key ────────
+	let rkRevealed = $state(false);
+	let rkValue = $state('');
+	let rkLoading = $state(false);
+	let rkError = $state<string | null>(null);
+	let rkCopied = $state(false);
+	const rkGrouped = $derived(rkValue ? rkValue.replace(/(.{4})/g, '$1 ').trim() : '');
+
+	async function revealRecoveryKey() {
+		rkLoading = true; rkError = null;
+		try {
+			const res = await fetch('/api/v1/account/recovery-key', { credentials: 'same-origin' });
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.message || data.error || 'Could not read the recovery key');
+			rkValue = data.recoveryKey;
+			rkRevealed = true;
+		} catch (e) {
+			rkError = e instanceof Error ? e.message : 'Could not read the recovery key';
+		} finally { rkLoading = false; }
+	}
+
+	async function copyRecoveryKey() {
+		try { await navigator.clipboard.writeText(rkValue); rkCopied = true; setTimeout(() => (rkCopied = false), 1800); } catch { /* */ }
+	}
+
+	function downloadRecoveryKey() {
+		const body =
+			'Mycelium recovery key\n\n' +
+			'Keep this secret and safe. It is the ONLY way to recover your vault on a\n' +
+			'new computer. Anyone with this key can read your vault. It cannot be reset.\n\n' +
+			`Recovery key:\n${rkValue}\n\nSaved ${new Date().toISOString()}\n`;
+		const url = URL.createObjectURL(new Blob([body], { type: 'text/plain' }));
+		const a = document.createElement('a');
+		a.href = url; a.download = 'mycelium-recovery-key.txt';
+		document.body.appendChild(a); a.click(); a.remove();
+		setTimeout(() => URL.revokeObjectURL(url), 1000);
+	}
 </script>
 
 <svelte:head>
@@ -1787,6 +1825,39 @@
 								<span>{key}: <span class="font-mono text-[var(--color-text-primary)]">{val}</span></span>
 							{/each}
 						</div>
+					</div>
+				{/if}
+			</section>
+
+			<!-- Recovery Key (V1 local) — reveal to back up the single key again -->
+			<section class="card p-5">
+				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Recovery Key</h2>
+				<div class="flex items-center justify-between">
+					<div>
+						<p class="text-sm text-[var(--color-text-primary)]">Your recovery key</p>
+						<p class="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+							The single key that unlocks this vault on a new computer. Reveal it to back it up again — keep it secret; anyone with it can read your vault.
+						</p>
+					</div>
+					{#if !rkRevealed}
+						<button
+							onclick={revealRecoveryKey}
+							disabled={rkLoading}
+							class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)] whitespace-nowrap"
+						>{rkLoading ? 'Revealing…' : 'Show recovery key'}</button>
+					{/if}
+				</div>
+				{#if rkError}
+					<p class="text-xs text-coral mt-2">{rkError}</p>
+				{/if}
+				{#if rkRevealed}
+					<div class="mt-3 p-3 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] font-mono text-sm tracking-wide break-all text-[var(--color-text-primary)] select-all">
+						{rkGrouped}
+					</div>
+					<div class="flex gap-2 mt-3">
+						<button onclick={copyRecoveryKey} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)]">{rkCopied ? 'Copied ✓' : 'Copy'}</button>
+						<button onclick={downloadRecoveryKey} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)]">Download</button>
+						<button onclick={() => { rkRevealed = false; rkValue = ''; }} class="px-3 py-2 rounded-lg text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">Hide</button>
 					</div>
 				{/if}
 			</section>

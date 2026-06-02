@@ -1,77 +1,68 @@
-// scripts/set-keys.mjs — one-time key setup for a local Mac.
+// scripts/set-keys.mjs — one-time key setup for a local Mac (CLI path).
 //
-// Generates the two 64-char hex master keys (or uses ones you provide) and
-// stores them where boot() can read them without keeping keys in shell history
-// or config files:
+// The app's first-run ceremony (src/account/router.js) is the normal way to do
+// this; this script is the headless/dev equivalent and shares the SAME code
+// (src/account/keystore.js), so both derive SYSTEM_KEY the same way.
 //
-//   node scripts/set-keys.mjs               # generate + store in macOS Keychain
-//   node scripts/set-keys.mjs --show        # also print the keys (for 1Password)
-//   node scripts/set-keys.mjs --user <hex> --system <hex>   # store specific keys
+// There is ONE secret to save: USER_MASTER (the recovery key). SYSTEM_KEY is
+// derived from it, so backing up the single key is enough.
 //
-// After running, start the server with:   MYCELIUM_KEY_SOURCE=keychain npm start
+//   node scripts/set-keys.mjs                 # generate + store in the Keychain
+//   node scripts/set-keys.mjs --user <hex>    # import an existing recovery key
+//   node scripts/set-keys.mjs --print-only    # just print (don't touch Keychain)
+//   node scripts/set-keys.mjs --force         # overwrite keys already in Keychain
 //
-// Security: keys are written to the login Keychain via `security`. Generating
-// fresh keys overwrites the in-memory values when done. We never log a key
-// unless you pass --show (so they don't linger in terminal scrollback).
-
-import { execFileSync } from 'node:child_process';
-import crypto from 'node:crypto';
+// After running:  MYCELIUM_KEY_SOURCE=keychain npm start
+import {
+  generateUserMaster, deriveSystemKey, normalizeKey, isHex64,
+  writeKeychain, keychainHasKeys, keychainAvailable,
+} from '../src/account/keystore.js';
 
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(name);
 const opt = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
 
-const ACCOUNT = process.env.MYCELIUM_KC_ACCOUNT || 'mycelium';
-const USER_SVC = process.env.MYCELIUM_KC_USER || 'mycelium-user-master';
-const SYSTEM_SVC = process.env.MYCELIUM_KC_SYSTEM || 'mycelium-system-key';
-const HEX64 = /^[0-9a-f]{64}$/i;
-
-function genOrTake(provided, label) {
-  if (provided === undefined) return crypto.randomBytes(32).toString('hex');
-  if (!HEX64.test(provided)) { console.error(`set-keys: --${label} must be 64 hex chars`); process.exit(1); }
-  return provided.toLowerCase();
-}
-
-function storeKeychain(service, value) {
-  // -U updates an existing item instead of erroring. -w <value> sets the secret.
-  execFileSync('security', ['add-generic-password', '-U', '-a', ACCOUNT, '-s', service, '-w', value], { stdio: ['ignore', 'ignore', 'inherit'] });
-}
-
 function main() {
-  const userHex = genOrTake(opt('--user'), 'user');
-  const systemHex = genOrTake(opt('--system'), 'system');
-  const isMac = process.platform === 'darwin';
+  const provided = opt('--user');
+  if (provided !== undefined && !isHex64(provided)) {
+    console.error('set-keys: --user must be a 64-character hex key');
+    process.exit(1);
+  }
+  const userHex = provided !== undefined ? normalizeKey(provided) : generateUserMaster();
+  const systemHex = deriveSystemKey(userHex);
+  const isMac = keychainAvailable();
+  const printOnly = flag('--print-only');
 
-  if (isMac && !flag('--print-only')) {
+  if (isMac && !printOnly) {
+    if (keychainHasKeys() && !flag('--force')) {
+      console.error('set-keys: keys already exist in the Keychain. Overwriting them would');
+      console.error('          lock you out of the current vault. Re-run with --force only if');
+      console.error('          you intend to replace them (e.g. restoring a different vault).');
+      process.exit(2);
+    }
     try {
-      storeKeychain(USER_SVC, userHex);
-      storeKeychain(SYSTEM_SVC, systemHex);
-      console.log('✓ Stored both keys in the macOS login Keychain:');
-      console.log(`    service "${USER_SVC}" / account "${ACCOUNT}"  (USER_MASTER)`);
-      console.log(`    service "${SYSTEM_SVC}" / account "${ACCOUNT}"  (SYSTEM_KEY)`);
-      console.log('\nStart the server reading from Keychain:');
-      console.log('    MYCELIUM_KEY_SOURCE=keychain npm start');
+      writeKeychain(userHex, systemHex);
+      console.log('✓ Stored your vault keys in the macOS login Keychain.');
+      console.log('  Start the server reading from Keychain:');
+      console.log('      MYCELIUM_KEY_SOURCE=keychain npm start');
     } catch (err) {
       console.error('set-keys: failed to write to Keychain:', err.message);
       process.exit(1);
     }
   } else if (!isMac) {
-    console.log(`set-keys: not macOS (${process.platform}) — Keychain unavailable. Keys generated below; store them yourself.`);
+    console.log('set-keys: macOS Keychain unavailable — keys printed below; store them yourself.');
   }
 
-  if (flag('--show') || flag('--print-only') || !isMac) {
-    console.log('\n⚠️  Secret keys — store in a password manager, then clear your scrollback:');
-    console.log(`USER_MASTER_KEY=${userHex}`);
-    console.log(`SYSTEM_KEY=${systemHex}`);
-  }
+  console.log('\n⚠️  YOUR RECOVERY KEY — save this in a password manager. It is the ONLY way');
+  console.log('    to recover your vault on a new machine. Lose it = lose the vault. No reset.\n');
+  console.log(`    ${userHex}\n`);
 
-  console.log('\n— 1Password (optional) — create one item with two fields, then export the refs:');
-  console.log('    op item create --category=password --title=Mycelium \\');
-  console.log('      "user_master[password]=<USER_MASTER_KEY>" "system_key[password]=<SYSTEM_KEY>"');
-  console.log('    export MYCELIUM_KEY_SOURCE=1password');
-  console.log('    export MYCELIUM_OP_USER="op://Private/Mycelium/user_master"');
-  console.log('    export MYCELIUM_OP_SYSTEM="op://Private/Mycelium/system_key"');
-  console.log('\n⚠️  Back up both keys offline. Lose them = lose the vault. No recovery.');
+  if (flag('--show') || printOnly || !isMac) {
+    console.log('— Running from env or 1Password instead of the Keychain? Both keys (SYSTEM_KEY');
+    console.log('  is derived from your recovery key, shown for convenience):');
+    console.log(`      USER_MASTER_KEY=${userHex}`);
+    console.log(`      SYSTEM_KEY=${systemHex}`);
+  }
 }
 
 main();

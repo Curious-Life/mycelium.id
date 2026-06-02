@@ -1,13 +1,18 @@
 import express from 'express';
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, cpSync, renameSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import Database from 'better-sqlite3';
 import { boot } from './index.js';
+import { dataDir, dbPath as resolveDbPath, kcvPath as resolveKcvPath } from './paths.js';
+import { resolveKeys } from './crypto/key-source.js';
+import { applyMigrations } from './db/migrate.js';
 import { apiRouter } from './api.js';
 import { portalCompatRouter } from './portal-compat.js';
 import { portalMindscapeRouter } from './portal-mindscape.js';
 import { portalUploadsRouter } from './portal-uploads.js';
 import { authShimRouter } from './auth-shim.js';
+import { accountRouter } from './account/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -34,6 +39,58 @@ function resolvePortal(mode = process.env.MYCELIUM_PORTAL || 'auto') {
 }
 
 /**
+ * One-time, NON-DESTRUCTIVE relocation of a legacy in-repo vault into the
+ * durable data dir. The vault used to live at ./data/mycelium.db inside the
+ * bundle (wiped on every app update); dataDir() now points at the OS app-data
+ * dir (see src/paths.js). If the new dir has no vault yet but a legacy
+ * ./data/mycelium.db exists, COPY the db (+ -wal/-shm), kcv.json and uploads/
+ * across, then rename the legacy db aside (.migrated-<ts>) so this never runs
+ * twice. Copy-not-move: the original bytes are preserved (just renamed). No-op
+ * in dev (active dir IS ./data) or once already relocated. Idempotent.
+ */
+export function ensureDataDir({ env = process.env } = {}) {
+  const dir = dataDir({ env });
+  mkdirSync(dir, { recursive: true });
+
+  const legacyDir = path.resolve('data');
+  if (path.resolve(dir) === legacyDir) return; // dev: nothing to relocate
+
+  const newDb = path.join(dir, 'mycelium.db');
+  const legacyDb = path.join(legacyDir, 'mycelium.db');
+  if (existsSync(newDb) || !existsSync(legacyDb)) return; // already moved, or no legacy vault
+
+  const copyIfPresent = (from, to, opts) => { if (existsSync(from) && !existsSync(to)) cpSync(from, to, opts); };
+  cpSync(legacyDb, newDb);                                   // main db
+  for (const sfx of ['-wal', '-shm']) copyIfPresent(legacyDb + sfx, newDb + sfx); // consistent snapshot
+  copyIfPresent(path.join(legacyDir, 'kcv.json'), path.join(dir, 'kcv.json'));
+  copyIfPresent(path.join(legacyDir, 'uploads'), path.join(dir, 'uploads'), { recursive: true });
+
+  renameSync(legacyDb, `${legacyDb}.migrated-${Date.now()}`); // never relocate again
+  console.error(`[mycelium] relocated legacy vault ./data → ${dir} (original db renamed aside, not deleted)`);
+}
+
+/** Create the data dir + apply all migrations to the vault db (idempotent). Lets
+ *  a fresh vault self-initialise on first boot — no separate `init-db` needed. */
+function ensureVaultSchema(dbFile) {
+  mkdirSync(path.dirname(dbFile), { recursive: true });
+  const db = new Database(dbFile);
+  try { applyMigrations(db); } finally { db.close(); }
+}
+
+/** Build the express sub-app that serves every VAULT-DEPENDENT route. Mounted
+ *  behind a guard so it only handles traffic once the vault is open; until then
+ *  data calls get a 503 and only the account ceremony + static UI are served. */
+function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment }) {
+  const v = express();
+  v.disable('x-powered-by');
+  v.use('/api/v1/portal', portalCompatRouter({ db, userId }));
+  v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath }));
+  v.use('/api/v1/portal', portalUploadsRouter({ db, userId, enqueueEnrichment }));
+  v.use(apiRouter({ tools, handlers, db, userId, enqueueEnrichment }));
+  return v;
+}
+
+/**
  * startRestServer({ dbPath, port, host }) — boot the shared assembly and
  * serve the tool handlers over REST.
  *
@@ -55,6 +112,11 @@ export async function startRestServer({
   host = '127.0.0.1',
   portalMode,
 } = {}) {
+  // Relocate a legacy in-repo vault into the durable data dir before anything
+  // opens it — only for the default location (explicit-dbPath callers, e.g.
+  // verify scripts, manage their own path).
+  if (dbPath === undefined) ensureDataDir();
+
   // boot() reads keys from env by default; forward overrides when given
   // (verify scripts inject ephemeral keys) so undefined doesn't clobber env.
   const bootOpts = {};
@@ -63,46 +125,92 @@ export async function startRestServer({
   if (userHex !== undefined) bootOpts.userHex = userHex;
   if (systemHex !== undefined) bootOpts.systemHex = systemHex;
   if (userId !== undefined) bootOpts.userId = userId;
-  // boot() returns the db namespace object plus a separate close() function;
-  // the namespace has no .close method, so we hold close() for shutdown.
-  const { tools, handlers, db, close, userId: bootUserId } = await boot(bootOpts);
 
-  // The mindscape clustering job (Phase G) spawns a subprocess that opens the
-  // vault by path via MYCELIUM_DB. In the normal app launch, server-rest's own
-  // `dbPath` param is undefined (boot() applies its own default), so resolve the
-  // SAME effective path here — absolute, so the spawned child finds it
-  // regardless of its cwd — and hand it to the mindscape router. Without this,
-  // the child fell back to './data/vault.db' (empty) → "no such table: messages".
-  const effectiveDbPath = path.resolve(dbPath || process.env.MYCELIUM_DB || 'data/mycelium.db');
+  // Absolute, canonical vault + KCV paths so boot(), the clustering child
+  // (spawned with MYCELIUM_DB) and the account/restore KCV check all agree.
+  const effectiveDbPath = dbPath ? path.resolve(dbPath) : resolveDbPath();
+  const effectiveKcvPath = kcvPath ? path.resolve(kcvPath) : resolveKcvPath();
+  bootOpts.kcvPath = effectiveKcvPath;
+
+  // ── mutable boot context ──────────────────────────────────────────────────
+  // vaultSubApp is null until the vault is open. completeBoot() opens it once
+  // (idempotent) and is also called by the account router after setup/restore.
+  let vaultSubApp = null;
+  let dbHandle = null;
+  let closeHandle = null;
+  let booting = false;
+
+  async function completeBoot(extraKeys = {}) {
+    if (vaultSubApp || booting) return;
+    booting = true;
+    try {
+      const opts = { ...bootOpts, ...extraKeys };
+      // Resolve keys up front so we NEVER create an empty vault when there are
+      // none (resolveKeys throws KeySourceError → caller stays in setup mode).
+      if (opts.userHex === undefined || opts.systemHex === undefined) {
+        const k = resolveKeys();
+        opts.userHex = k.userHex;
+        opts.systemHex = k.systemHex;
+      }
+      ensureVaultSchema(effectiveDbPath); // self-initialise a fresh vault (idempotent)
+      const { tools, handlers, db, close, userId: bootUserId } = await boot(opts);
+      dbHandle = db;
+      closeHandle = close;
+      const enqueueEnrichment = createEnqueueEnrichment({ userId: bootUserId });
+      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment });
+    } finally {
+      booting = false;
+    }
+  }
+
+  // Tests/verify inject keys → the vault MUST open (rethrow on failure). A normal
+  // app launch reads keys from the source; if they're missing or the vault won't
+  // open, fall back to SETUP MODE so the UI can create or restore it.
+  const keysInjected = userHex !== undefined && systemHex !== undefined;
+  if (keysInjected) {
+    await completeBoot();
+  } else {
+    try {
+      await completeBoot();
+    } catch (err) {
+      console.error(`[mycelium] vault not opened — entering setup mode (${err?.message || err})`);
+    }
+  }
+  const resolvedUserId = userId || process.env.MYCELIUM_USER_ID || 'local-user';
 
   const app = express();
   app.disable('x-powered-by');
-  // Wire db + userId + a best-effort enrichment nudge so /api/v1/upload works
-  // (file → encrypted blob → attachment → enrich), same seam as the MCP path.
-  const enqueueEnrichment = createEnqueueEnrichment({ userId: bootUserId });
-  // Canonical-portal compatibility surface (/api/v1/portal/* → db). Mounted at
-  // its own prefix so its JSON body-parser is scoped to portal calls only (it
-  // must not touch the raw-bytes /api/v1/upload route). The canonical UI's
-  // api.ts rewrites /portal/* → /api/v1/portal/*.
-  app.use('/api/v1/portal', portalCompatRouter({ db, userId: bootUserId }));
-  // Mindscape read surface (3D scene aggregator + per-panel reads). Same prefix
-  // (unmatched paths fall through from the compat router above); its JSON parser
-  // is likewise scoped to /api/v1/portal so it never touches /api/v1/upload.
-  app.use('/api/v1/portal', portalMindscapeRouter({ db, userId: bootUserId, dbPath: effectiveDbPath }));
-  // Import surface (multipart upload + chunk assembly → parse → captureMessage).
-  // Multipart bodies pass through the JSON parsers above untouched (content-type
-  // gated); its own /upload/complete handler scopes express.json to that route.
-  app.use('/api/v1/portal', portalUploadsRouter({ db, userId: bootUserId, enqueueEnrichment }));
+
+  // Account ceremony — ALWAYS mounted (this is what setup mode serves): create
+  // the vault, restore from a recovery key, or re-view the key. Mounted before
+  // the vault guard so /api/v1/account/* is never 503'd.
+  app.use('/api/v1/account', accountRouter({
+    isInitialized: () => Boolean(vaultSubApp),
+    completeBoot,
+    kcvPath: effectiveKcvPath,
+  }));
+
   // Local "always signed in" shim so the canonical portal's session check
-  // (/auth/session) succeeds and the app opens instead of bouncing to /login —
-  // V1 is single-user and unlocked at boot (keys from the server-side source).
-  app.use('/auth', authShimRouter({ userId: bootUserId }));
-  app.use(apiRouter({ tools, handlers, db, userId: bootUserId, enqueueEnrichment }));
-  // Portal UI after the API router (so /api/v1/* matches first). express.static
-  // serves the built assets; for the canonical SPA, client-side routes
-  // (/library, /mindscape, …) have no file on disk, so fall back to 200.html
-  // for NAVIGATION requests only — GET, accepts html, not under /api|/ingest,
-  // and extensionless (so a missing asset like /x.js still 404s, no SPA shadow).
+  // (/auth/session) succeeds and the app opens instead of bouncing to /login.
+  app.use('/auth', authShimRouter({ userId: resolvedUserId }));
+
+  // Vault-dependent routes: delegate to the sub-app once the vault is open. Until
+  // then, DATA calls get a clear 503 while the static UI still loads (so the
+  // first-run /setup screen renders). A booted sub-app that doesn't match a route
+  // calls next(), so static assets + the SPA fallback below still work.
+  const isVaultDataPath = (p) => p.startsWith('/api/') || p.startsWith('/ingest/') || p.startsWith('/portal/');
+  app.use((req, res, next) => {
+    if (vaultSubApp) return vaultSubApp(req, res, next);
+    if (isVaultDataPath(req.path)) {
+      return res.status(503).json({ error: 'vault_not_initialized', message: 'Your vault is not set up yet.' });
+    }
+    return next();
+  });
+
+  // Portal UI (static + SPA fallback) — always, so /setup and the app shell load.
+  // client-side routes (/library, /mindscape, /setup, …) have no file on disk, so
+  // fall back to 200.html for NAVIGATION requests only — GET, accepts html, not
+  // under a data prefix, extensionless (a missing asset like /x.js still 404s).
   const { dir: portalDir, spaFallback } = resolvePortal(portalMode);
   app.use(express.static(portalDir));
   if (spaFallback) {
@@ -124,7 +232,11 @@ export async function startRestServer({
   const boundPort = typeof addr === 'object' && addr ? addr.port : port;
   const url = `http://${host}:${boundPort}`;
 
-  return { app, server, db, close, url, port: boundPort, host };
+  return {
+    app, server, url, port: boundPort, host,
+    get db() { return dbHandle; },
+    close: () => closeHandle?.(),
+  };
 }
 
 /**

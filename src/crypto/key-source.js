@@ -22,6 +22,7 @@
 // environment until unlock needs it.
 
 import { execFileSync } from 'node:child_process';
+import { keychainNames } from '../account/keychain-names.js';
 
 const HEX64 = /^[0-9a-f]{64}$/i;
 
@@ -93,9 +94,9 @@ export function resolveKeys({ env = process.env, exec = defaultExec } = {}) {
     userHex = env.USER_MASTER_KEY;
     systemHex = env.SYSTEM_KEY;
   } else if (source === 'keychain') {
-    const account = env.MYCELIUM_KC_ACCOUNT || 'mycelium';
-    userHex = fromKeychain(env.MYCELIUM_KC_USER || 'mycelium-user-master', account, exec);
-    systemHex = fromKeychain(env.MYCELIUM_KC_SYSTEM || 'mycelium-system-key', account, exec);
+    const { account, userService, systemService } = keychainNames({ env });
+    userHex = fromKeychain(userService, account, exec);
+    systemHex = fromKeychain(systemService, account, exec);
   } else if (source === '1password' || source === 'op') {
     userHex = from1Password(env.MYCELIUM_OP_USER, exec);
     systemHex = from1Password(env.MYCELIUM_OP_SYSTEM, exec);
