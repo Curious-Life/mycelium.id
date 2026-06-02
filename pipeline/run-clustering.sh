@@ -59,6 +59,8 @@ echo "Step 2/5: Cluster (FAISS k-NN + Leiden + Ward HAC)"
 echo ""
 echo "Step 3/5: Describe realms + territories"
 node pipeline/describe-clusters.js $DRY_RUN
+# Chronicle narration (story / archetype / patterns). Fail-soft: skips if no model.
+node pipeline/describe-chronicles.js $DRY_RUN
 
 echo ""
 echo "Step 4/5: Compute territory co-firing"
