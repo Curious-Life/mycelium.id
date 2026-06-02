@@ -16,11 +16,21 @@ import { join } from 'node:path';
 const LOCAL_HTTP = '127.0.0.1:4711';            // the loopback --http OAuth/MCP server
 const CADDY_LOCAL_PORT = 8443;                  // relay-mode local TLS listener port
 
-/** Split "host:port" → { host, port }. Port defaults to the frps control port. */
+/** Parse "host:port", a bare host, "[ipv6]:port", or a bare IPv6 → { host, port }. */
 export function parseRelayAddr(addr, defPort = 7000) {
   const s = String(addr || '').trim();
-  const i = s.lastIndexOf(':');
-  if (i <= 0) return { host: s, port: defPort };
+  if (s.startsWith('[')) { // [ipv6] or [ipv6]:port
+    const end = s.indexOf(']');
+    if (end > 0) {
+      const host = s.slice(1, end);
+      const rest = s.slice(end + 1);
+      const port = rest.startsWith(':') ? Number(rest.slice(1)) : defPort;
+      return { host, port: Number.isFinite(port) ? port : defPort };
+    }
+  }
+  const colons = (s.match(/:/g) || []).length;
+  if (colons !== 1) return { host: s, port: defPort }; // bare host (0) or bare IPv6 (>1)
+  const i = s.indexOf(':');
   const port = Number(s.slice(i + 1));
   return { host: s.slice(0, i), port: Number.isFinite(port) ? port : defPort };
 }

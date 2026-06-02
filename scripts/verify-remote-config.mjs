@@ -137,13 +137,13 @@ try {
 
 // RC7 — transport config keys round-trip; publicBaseUrl derives from publicHost;
 // env precedence holds. (After the server tests so it can clear publicBaseUrl.)
-cfg.writeRemoteConfig({ remoteMode: 'managed', publicHost: 'alice.mycelium.id', publicBaseUrl: '', relayAddr: 'relay.example:7000', relayVhostPort: 443, acmeDnsServer: 'https://acme.test', controlPlaneUrl: 'https://cp.test' });
+cfg.writeRemoteConfig({ remoteMode: 'managed', publicHost: 'alice.mycelium.id', publicBaseUrl: '', relayAddr: 'relay.example:7000', acmeDnsServer: 'https://acme.test', controlPlaneUrl: 'https://cp.test' });
 const rc2 = cfg.readRemoteConfig();
 const rcEnv = cfg.readRemoteConfig({ env: { ...process.env, MYCELIUM_REMOTE_MODE: 'own-relay' } });
 rec('RC7. transport keys round-trip; publicBaseUrl derives from publicHost; env wins',
   rc2.remoteMode === 'managed' && rc2.publicHost === 'alice.mycelium.id'
   && rc2.publicBaseUrl === 'https://alice.mycelium.id'
-  && rc2.relayAddr === 'relay.example:7000' && rc2.relayVhostPort === 443
+  && rc2.relayAddr === 'relay.example:7000'
   && rc2.acmeDnsServer === 'https://acme.test' && rc2.controlPlaneUrl === 'https://cp.test'
   && rcEnv.remoteMode === 'own-relay',
   `mode=${rc2.remoteMode} base=${rc2.publicBaseUrl} relay=${rc2.relayAddr} envMode=${rcEnv.remoteMode}`);

@@ -28,6 +28,7 @@
 	let result = $state<{ host: string; connectorUrl: string } | null>(null);
 	let error = $state<string | null>(null);
 	let debounce: ReturnType<typeof setTimeout> | null = null;
+	let reqSeq = 0;
 
 	const connected = $derived(status?.remoteMode === 'managed' && !!status?.publicHost);
 	const connectorUrl = $derived(status?.publicBaseUrl ? status.publicBaseUrl.replace(/\/$/, '') + '/mcp' : '');
@@ -56,13 +57,15 @@
 			return;
 		}
 		availability = 'checking';
+		const seq = ++reqSeq;
 		debounce = setTimeout(async () => {
 			try {
 				const res = await api(`/api/v1/remote/managed/available?handle=${encodeURIComponent(h)}`);
 				const data = await res.json().catch(() => ({}));
+				if (seq !== reqSeq) return; // a newer keystroke superseded this response
 				availability = res.ok && data.available ? 'available' : 'taken';
 			} catch {
-				availability = 'idle';
+				if (seq === reqSeq) availability = 'idle';
 			}
 		}, 400);
 	}

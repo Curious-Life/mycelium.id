@@ -62,6 +62,15 @@ const r5 = materializeRemoteConfigs({ dataDir: TMP, config: { ...fixture, remote
 rec('RT5. materialize(off): no configs (stale removed)',
   !existsSync(join(TMP, 'frpc.toml')) && !existsSync(join(TMP, 'Caddyfile')) && r5.wrote.length === 0, '');
 
+// RT6 — parseRelayAddr: host:port, bare host, [ipv6]:port, bare ipv6.
+const pa = (s) => parseRelayAddr(s);
+rec('RT6. parseRelayAddr handles host:port, bare host, and IPv6',
+  pa('relay.x:7000').host === 'relay.x' && pa('relay.x:7000').port === 7000
+  && pa('relay.x').host === 'relay.x' && pa('relay.x').port === 7000
+  && pa('[::1]:7000').host === '::1' && pa('[::1]:7000').port === 7000
+  && pa('2001:db8::1').host === '2001:db8::1' && pa('2001:db8::1').port === 7000,
+  `v6bracket=${pa('[::1]:7000').host}:${pa('[::1]:7000').port} v6bare=${pa('2001:db8::1').host}`);
+
 rmSync(TMP, { recursive: true, force: true });
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));

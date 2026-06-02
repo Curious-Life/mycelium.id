@@ -74,7 +74,6 @@ export function readRemoteConfig({ env = process.env } = {}) {
     remoteMode: REMOTE_MODES.has(remoteMode) ? remoteMode : 'off',
     publicHost,
     relayAddr: clean(env.MYCELIUM_RELAY_ADDR) || clean(file.relayAddr) || '',
-    relayVhostPort: Number(env.MYCELIUM_RELAY_VHOST_PORT) || Number(file.relayVhostPort) || 443,
     acmeDnsServer: clean(env.MYCELIUM_ACME_DNS) || clean(file.acmeDnsServer) || DEFAULT_ACME_DNS,
     controlPlaneUrl: clean(env.MYCELIUM_CONTROL_PLANE) || clean(file.controlPlaneUrl) || DEFAULT_CONTROL_PLANE,
   };
@@ -102,7 +101,6 @@ export function writeRemoteConfig(patch = {}, { env = process.env } = {}) {
     if (a !== '' && !SAFE_RELAY.test(a)) throw new Error('invalid relayAddr');
     next.relayAddr = a;
   }
-  if (typeof patch.relayVhostPort === 'number' && Number.isFinite(patch.relayVhostPort)) next.relayVhostPort = patch.relayVhostPort;
   if (typeof patch.acmeDnsServer === 'string') next.acmeDnsServer = patch.acmeDnsServer.trim();
   if (typeof patch.controlPlaneUrl === 'string') next.controlPlaneUrl = patch.controlPlaneUrl.trim();
   mkdirSync(dirname(p), { recursive: true });
