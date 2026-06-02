@@ -1,4 +1,5 @@
 import express from 'express';
+import { startClusteringJob, getJob } from './jobs.js';
 
 /**
  * portalMindscapeRouter — the V1 read surface for the canonical portal's
@@ -23,7 +24,7 @@ import express from 'express';
  * @param {string} deps.userId  the single V1 owner
  * @returns {import('express').Router}
  */
-export function portalMindscapeRouter({ db, userId }) {
+export function portalMindscapeRouter({ db, userId, dbPath }) {
   if (!db) throw new Error('portalMindscapeRouter: db required');
   const router = express.Router();
   router.use(express.json({ limit: '8mb' }));
@@ -258,6 +259,27 @@ export function portalMindscapeRouter({ db, userId }) {
   router.get('/mindscape/time-chronicles', (_req, res) => res.json({ chronicles: [], coverage: [] }));
   router.get('/mindscape/social', (_req, res) => res.json({ contacts: [], tiers: [] }));
   router.get('/health/summary', (_req, res) => res.json({ today: null, averages: {}, trends: {}, days: [] }));
+
+  // ── Generate the mindscape (Phase G) — spawn the clustering pipeline ────────
+  // POST /mycelium/generate → { jobId, status }. Single-flight; keys re-resolved
+  // at spawn into the child env (never logged/args). The real run needs the
+  // Tier-2 Python stack on the host; the job lifecycle works regardless.
+  router.post('/mycelium/generate', (_req, res) => {
+    try {
+      const r = startClusteringJob({ dbPath, userId });
+      res.json(r);
+    } catch {
+      // resolveKeys/spawn unavailable — fail closed, no internals leaked.
+      fail(res, 503, 'mindscape generation is unavailable (key source or pipeline not ready)');
+    }
+  });
+
+  // GET /mycelium/generate/status/:id → progress for the polling UI.
+  router.get('/mycelium/generate/status/:id', (req, res) => {
+    const job = getJob(req.params.id);
+    if (!job) return fail(res, 404, 'no such job');
+    res.json(job);
+  });
 
   return router;
 }

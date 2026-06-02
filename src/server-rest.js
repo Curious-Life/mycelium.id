@@ -80,7 +80,7 @@ export async function startRestServer({
   // Mindscape read surface (3D scene aggregator + per-panel reads). Same prefix
   // (unmatched paths fall through from the compat router above); its JSON parser
   // is likewise scoped to /api/v1/portal so it never touches /api/v1/upload.
-  app.use('/api/v1/portal', portalMindscapeRouter({ db, userId: bootUserId }));
+  app.use('/api/v1/portal', portalMindscapeRouter({ db, userId: bootUserId, dbPath }));
   // Import surface (multipart upload + chunk assembly → parse → captureMessage).
   // Multipart bodies pass through the JSON parsers above untouched (content-type
   // gated); its own /upload/complete handler scopes express.json to that route.
