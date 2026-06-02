@@ -75,3 +75,6 @@ scratch/
 # Tauri (Rust) build artifacts
 src-tauri/target/
 src-tauri/gen/
+
+# Bundled sidecars — fetched by scripts/fetch-sidecars.sh, never committed
+src-tauri/binaries/

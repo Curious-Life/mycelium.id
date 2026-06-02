@@ -76,26 +76,37 @@ fn remote_enabled_legacy(cfg: &serde_json::Value) -> bool {
 }
 
 /// Resolve a bundled sidecar binary. In a packaged .app, Tauri places sidecars
-/// beside the main executable (their `-$TRIPLE` suffix stripped); in dev they may
-/// live in src-tauri/binaries or on PATH. Falls back to the bare name (PATH).
-fn resolve_sidecar(home: &Path, name: &str) -> PathBuf {
+/// beside the main executable (their `-$TRIPLE` suffix stripped). SECURITY: in a
+/// RELEASE build we resolve ONLY there and return None otherwise — we never fall
+/// back to a bare name / $PATH, because a poisoned PATH could run an attacker's
+/// `caddy`/`frpc` with the acme-dns creds + the loopback proxy target. The dev
+/// checkout paths + PATH fallback are compiled in ONLY for debug builds.
+fn resolve_sidecar(home: &Path, name: &str) -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let p = dir.join(name);
             if p.exists() {
-                return p;
+                return Some(p);
             }
         }
     }
-    for cand in [
-        home.join("src-tauri").join("binaries").join(name),
-        home.join("binaries").join(name),
-    ] {
-        if cand.exists() {
-            return cand;
+    #[cfg(debug_assertions)]
+    {
+        for cand in [
+            home.join("src-tauri").join("binaries").join(name),
+            home.join("binaries").join(name),
+        ] {
+            if cand.exists() {
+                return Some(cand);
+            }
         }
+        return Some(PathBuf::from(name)); // dev only: PATH fallback
     }
-    PathBuf::from(name) // PATH fallback (dev / system-installed)
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = home;
+        None
+    }
 }
 
 fn main() {
@@ -189,38 +200,42 @@ fn main() {
 
                     // Caddy terminates TLS for <publicHost> (managed/own-relay/direct).
                     if mode == "managed" || mode == "own-relay" || mode == "direct" {
-                        let caddy = resolve_sidecar(&home, "caddy");
-                        match Command::new(&caddy)
-                            .arg("run")
-                            .arg("--config")
-                            .arg(data_dir.join("Caddyfile"))
-                            .arg("--adapter")
-                            .arg("caddyfile")
-                            .current_dir(&data_dir)
-                            .spawn()
-                        {
-                            Ok(c) => {
-                                children.push(c);
-                                eprintln!("[mycelium] caddy (TLS terminator) started");
-                            }
-                            Err(e) => eprintln!("[mycelium] caddy did not start ({e})"),
+                        match resolve_sidecar(&home, "caddy") {
+                            Some(caddy) => match Command::new(&caddy)
+                                .arg("run")
+                                .arg("--config")
+                                .arg(data_dir.join("Caddyfile"))
+                                .arg("--adapter")
+                                .arg("caddyfile")
+                                .current_dir(&data_dir)
+                                .spawn()
+                            {
+                                Ok(c) => {
+                                    children.push(c);
+                                    eprintln!("[mycelium] caddy (TLS terminator) started");
+                                }
+                                Err(e) => eprintln!("[mycelium] caddy did not start ({e})"),
+                            },
+                            None => eprintln!("[mycelium] caddy sidecar not found beside the app — TLS will not start (run scripts/fetch-sidecars.sh + rebuild)"),
                         }
                     }
 
                     // frpc reverse tunnel (relay modes only; direct has no relay).
                     if mode == "managed" || mode == "own-relay" {
-                        let frpc = resolve_sidecar(&home, "frpc");
-                        match Command::new(&frpc)
-                            .arg("-c")
-                            .arg(data_dir.join("frpc.toml"))
-                            .current_dir(&data_dir)
-                            .spawn()
-                        {
-                            Ok(c) => {
-                                children.push(c);
-                                eprintln!("[mycelium] frpc (reverse tunnel) started");
-                            }
-                            Err(e) => eprintln!("[mycelium] frpc did not start ({e})"),
+                        match resolve_sidecar(&home, "frpc") {
+                            Some(frpc) => match Command::new(&frpc)
+                                .arg("-c")
+                                .arg(data_dir.join("frpc.toml"))
+                                .current_dir(&data_dir)
+                                .spawn()
+                            {
+                                Ok(c) => {
+                                    children.push(c);
+                                    eprintln!("[mycelium] frpc (reverse tunnel) started");
+                                }
+                                Err(e) => eprintln!("[mycelium] frpc did not start ({e})"),
+                            },
+                            None => eprintln!("[mycelium] frpc sidecar not found beside the app — tunnel will not start (run scripts/fetch-sidecars.sh + rebuild)"),
                         }
                     }
                 }
@@ -258,6 +273,11 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Reap spawned children (REST, embed, --http, caddy, frpc) on window
+            // close / Cmd-Q. KNOWN LIMITATION: a hard crash (SIGKILL) fires no
+            // Destroyed, so the sidecars can orphan — frpc/caddy are single-process
+            // and the orphaned tunnel stays gated by the operator password; a
+            // supervised watchdog is a future hardening.
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.app_handle().try_state::<Server>() {
                     if let Ok(mut guard) = state.0.lock() {
