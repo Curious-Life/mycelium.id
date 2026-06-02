@@ -12,6 +12,7 @@ import { parseHealthRow, computeHealthSummary, cofireCol } from './helpers.js';
 
 import { createDocumentsNamespace } from './documents.js';
 import { createMessagesNamespace } from './messages.js';
+import { createFactsNamespace } from './facts.js';
 import { createAttachmentsNamespace } from './attachments.js';
 import { createHealthNamespace } from './health.js';
 import { createTasksNamespace } from './tasks.js';
@@ -44,6 +45,7 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
 
     documents: createDocumentsNamespace({ d1Query, firstRow }),
     messages: createMessagesNamespace({ d1Query, d1Batch, firstRow }),
+    facts: createFactsNamespace({ d1Query, firstRow, randomUUID }),
     attachments: createAttachmentsNamespace({ d1Query, firstRow }),
     health: createHealthNamespace({ d1QueryAdmin, firstRow, parseHealthRow, computeHealthSummary, now }),
     tasks: createTasksNamespace({ d1Query, firstRow }),

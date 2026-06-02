@@ -228,6 +228,11 @@ const ENCRYPTED_FIELDS = {
     'source_path',
   ],
 
+  // Facts — typed durable truths (category/key -> value). Only `value` is
+  // sensitive; category/key stay plaintext so they remain queryable and carry
+  // the UNIQUE upsert target. See migrations/0005_facts.sql.
+  facts: ['value'],
+
   // Attachments — filenames often verbatim describe content.
   // file_type + file_size can fingerprint content via ML; accept that
   // as metadata leak for now (breaks listing UI if encrypted).
