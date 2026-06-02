@@ -6,7 +6,7 @@
 	import Sparkline from '$lib/components/mindscape/Sparkline.svelte';
 	import PulsesLens from '$lib/components/mindscape/PulsesLens.svelte';
 	import { api, apiGet, apiPut } from '$lib/api';
-	import { generate, start as startGen, resume as resumeGen, reset as resetGen, fmtSeconds } from '$lib/generate';
+	import { generate, start as startGen, resume as resumeGen, reset as resetGen, cancel as cancelGen, fmtSeconds } from '$lib/generate';
 	import { get } from 'svelte/store';
 	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
 	import { auth } from '$lib/stores/auth';
@@ -797,14 +797,23 @@
 								<p class="gen-stage">{$generate.stageLabel || 'Starting…'} &mdash; step {$generate.step} of {$generate.totalSteps}</p>
 								<div class="gen-bar"><div class="gen-fill" style="width: {Math.max(4, ($generate.step / Math.max(1, $generate.totalSteps)) * 100)}%"></div></div>
 								<p class="gen-hint">{fmtSeconds($generate.elapsedMs / 1000)} elapsed{#if $generate.etaSeconds != null} &middot; ~{fmtSeconds($generate.etaSeconds)} left{/if}</p>
+								{#if $generate.stalled}
+									<p class="gen-hint" style="color: #d9a441;">Still working on this step — it's taking longer than usual.</p>
+								{/if}
 								<p class="gen-hint">This keeps running if you navigate away.</p>
+								<button class="gen-button" style="margin-top: 12px; opacity: 0.7;" onclick={() => cancelGen()}>Cancel</button>
 							</div>
 						{:else if $generate.phase === 'embedding'}
 							<div class="gen-progress">
 								<h3 class="gen-heading">Processing your conversations…</h3>
 								<p class="gen-stage">{$generate.embedded.toLocaleString()} / {$generate.total.toLocaleString()} ready</p>
 								<div class="gen-bar"><div class="gen-fill" style="width: {$generate.total > 0 ? ($generate.embedded / $generate.total) * 100 : 0}%"></div></div>
-								<p class="gen-hint">Generation starts automatically as soon as enough is ready.</p>
+								{#if $generate.embedder?.status === 'loading'}
+									<p class="gen-hint">Warming up the embedding engine…</p>
+								{:else}
+									<p class="gen-hint">Generation starts automatically as soon as enough is ready.</p>
+								{/if}
+								<button class="gen-button" style="margin-top: 12px; opacity: 0.7;" onclick={() => cancelGen()}>Cancel</button>
 							</div>
 						{:else if $generate.phase === 'done'}
 							<div class="gen-progress">
@@ -1389,12 +1398,21 @@
 								{/each}
 							</div>
 							<p class="gen-hint">{fmtSeconds($generate.elapsedMs / 1000)} elapsed{#if $generate.etaSeconds != null} &middot; ~{fmtSeconds($generate.etaSeconds)} left{/if}</p>
+							{#if $generate.stalled}
+								<p class="gen-hint" style="color: #d9a441;">Still working on this step — it's taking longer than usual.</p>
+							{/if}
 							<p class="gen-hint">This keeps running if you navigate away.</p>
+							<button class="gen-button" style="margin-top: 12px; opacity: 0.7;" onclick={() => cancelGen()}>Cancel</button>
 						{:else if $generate.phase === 'embedding'}
 							<h2 class="welcome-title">Processing your conversations…</h2>
 							<p class="gen-stage">{$generate.embedded.toLocaleString()} / {$generate.total.toLocaleString()} ready</p>
 							<div class="gen-bar"><div class="gen-fill" style="width: {$generate.total > 0 ? ($generate.embedded / $generate.total) * 100 : 0}%"></div></div>
-							<p class="gen-hint">Generation starts automatically as soon as enough is ready.</p>
+							{#if $generate.embedder?.status === 'loading'}
+								<p class="gen-hint">Warming up the embedding engine…</p>
+							{:else}
+								<p class="gen-hint">Generation starts automatically as soon as enough is ready.</p>
+							{/if}
+							<button class="gen-button" style="margin-top: 12px; opacity: 0.7;" onclick={() => cancelGen()}>Cancel</button>
 						{:else if $generate.phase === 'done'}
 							<h2 class="welcome-title">Mycelium generated</h2>
 							<p class="gen-hint">Loading your 3D map…</p>

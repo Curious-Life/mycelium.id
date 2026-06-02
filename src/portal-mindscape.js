@@ -1,5 +1,6 @@
 import express from 'express';
-import { startClusteringJob, getJob } from './jobs.js';
+import { startClusteringJob, getJob, cancelJob } from './jobs.js';
+import { getEmbedderHealth } from './embed/supervisor.js';
 
 /**
  * portalMindscapeRouter — the V1 read surface for the canonical portal's
@@ -262,13 +263,18 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
 
   // Embedding progress — drives the "N of M ready" UI + the Generate preflight.
   router.get('/mycelium/processing-status', async (_req, res) => {
+    // `embedder` lets the UI distinguish "still embedding" from "embedder broken,
+    // here's how to fix it" — without it, a dead embedder reads as an endless
+    // "Processing 0/N" spinner. Health is best-effort; never let it 500 the count.
+    let embedder = { status: 'unknown', message: '', detail: null };
+    try { embedder = getEmbedderHealth(); } catch { /* supervisor not running */ }
     try {
       const er = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND embedding_768 IS NOT NULL', [userId]);
       const tr = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ?', [userId]);
       const embedded = Number(er?.results?.[0]?.c ?? 0);
       const total = Number(tr?.results?.[0]?.c ?? 0);
-      res.json({ embedded, total, pending: Math.max(0, total - embedded) });
-    } catch { res.json({ embedded: 0, total: 0, pending: 0 }); }
+      res.json({ embedded, total, pending: Math.max(0, total - embedded), embedder });
+    } catch { res.json({ embedded: 0, total: 0, pending: 0, embedder }); }
   });
 
   // ── Generate the mindscape (Phase G) — spawn the clustering pipeline ────────
@@ -317,6 +323,13 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
     const job = getJob(req.params.id);
     if (!job) return fail(res, 404, 'no such job');
     res.json(job);
+  });
+
+  // POST /mycelium/generate/cancel/:id → stop a running run. Lets the user escape
+  // a slow/wedged run instead of waiting out the 45-min single-flight lockout.
+  router.post('/mycelium/generate/cancel/:id', (req, res) => {
+    const ok = cancelJob(req.params.id);
+    res.json({ canceled: ok });
   });
 
   return router;

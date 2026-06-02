@@ -17,6 +17,10 @@ import { dbPath as resolveDbPath } from './paths.js';
 import { readGenerateStats, writeGenerateStats } from './generate-stats.js';
 
 const MAX_MS = Number(process.env.MYCELIUM_GEN_MAX_MS) || 45 * 60 * 1000; // 45 min hard cap
+// If the child emits NO stdout for this long, flag the job `stalled` so the UI can
+// say "still working on <stage> — taking longer than usual" + offer Cancel (instead
+// of a frozen bar). Flag only — the MAX_MS cap still backstops a true runaway.
+const STALL_MS = Number(process.env.MYCELIUM_GEN_STALL_MS) || 5 * 60 * 1000;
 const STAGE_LABELS = {
   1: 'Syncing content…',
   2: 'Clustering (FAISS + Leiden + Ward)…',
@@ -34,7 +38,11 @@ let runningJobId = null;  // single-flight: at most one clustering run at a time
  * @param {{ dbPath?: string, userId?: string }} opts
  */
 export function startClusteringJob({ dbPath, userId } = {}) {
-  if (runningJobId && jobs.get(runningJobId)?.status === 'running') {
+  // Single-flight: block while a child is still ALIVE — `running`, or `canceled`
+  // but not yet reaped (cur.child set). Prevents two clustering children racing on
+  // the same SQLite during a cancel→restart.
+  const cur = runningJobId ? jobs.get(runningJobId) : null;
+  if (cur && (cur.status === 'running' || cur.child)) {
     return { jobId: runningJobId, status: 'already_running' };
   }
 
@@ -72,6 +80,9 @@ export function startClusteringJob({ dbPath, userId } = {}) {
   const state = {
     id: jobId, status: 'running', step: 0, totalSteps: 5,
     stageLabel: 'Starting…', startedAt: Date.now(), finishedAt: null, error: null,
+    stalled: false,            // set by the inactivity watchdog; cleared on new output
+    child: null,               // live handle (internal — never returned by getJob)
+    lastOutputAt: Date.now(),  // last stdout activity (drives the stall watchdog)
     // Last successful run's wall-clock, so the UI can show an ETA from t=0.
     priorDurationMs: readGenerateStats()?.lastDurationMs ?? null,
   };
@@ -90,9 +101,12 @@ export function startClusteringJob({ dbPath, userId } = {}) {
     runningJobId = null;
     return { jobId, status: 'running' }; // job created; status will read 'error'
   }
+  state.child = child; // expose for cancelJob (never surfaced via getJob)
 
   let buf = '';
   child.stdout.on('data', (d) => {
+    state.lastOutputAt = Date.now();
+    if (state.stalled) state.stalled = false; // output resumed → no longer stalled
     buf += d.toString();
     const lines = buf.split('\n');
     buf = lines.pop() || ''; // keep the partial last line
@@ -120,34 +134,64 @@ export function startClusteringJob({ dbPath, userId } = {}) {
     setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* noop */ } }, 5000);
   }, MAX_MS);
 
+  // Inactivity watchdog: flag (don't kill) a run that's gone quiet so the UI can
+  // surface "taking longer than usual" + Cancel. Cleared when the child closes.
+  const stallTimer = setInterval(() => {
+    if (state.status === 'running' && Date.now() - state.lastOutputAt > STALL_MS) state.stalled = true;
+  }, 15000);
+  if (stallTimer.unref) stallTimer.unref();
+
+  const finish = () => { clearTimeout(timer); clearInterval(stallTimer); state.child = null; if (runningJobId === jobId) runningJobId = null; };
+
   child.on('close', (code) => {
-    clearTimeout(timer);
     state.finishedAt = Date.now();
-    if (code === 0) {
-      state.status = 'done'; state.step = state.totalSteps; state.stageLabel = 'Complete';
+    if (state.status === 'canceled') {
+      state.stageLabel = 'Canceled'; // user-initiated stop → keep, don't mark error
+    } else if (code === 0) {
+      state.status = 'done'; state.step = state.totalSteps; state.stageLabel = 'Complete'; state.stalled = false;
       writeGenerateStats({ durationMs: state.finishedAt - state.startedAt });
-    }
-    else if (state.status !== 'error') {
+    } else if (state.status !== 'error') {
       state.status = 'error';
       const detail = lastErrLine();
       state.error = detail ? `${detail} (exit ${code})` : `clustering exited with code ${code}`;
     }
-    if (runningJobId === jobId) runningJobId = null;
+    finish();
   });
   child.on('error', () => {
-    clearTimeout(timer);
-    state.status = 'error'; state.error = 'failed to start clustering'; state.finishedAt = Date.now();
-    if (runningJobId === jobId) runningJobId = null;
+    if (state.status !== 'canceled') {
+      state.status = 'error'; state.error = 'failed to start clustering';
+    }
+    state.finishedAt = Date.now();
+    finish();
   });
 
   return { jobId, status: 'running' };
 }
 
-/** Public status view for a job (no internals/secrets). */
+/** Public status view for a job (no internals/secrets — note `child` is omitted). */
 export function getJob(jobId) {
   const j = jobs.get(jobId);
   if (!j) return null;
-  return { id: j.id, status: j.status, step: j.step, totalSteps: j.totalSteps, stageLabel: j.stageLabel, error: j.error, startedAt: j.startedAt, finishedAt: j.finishedAt, priorDurationMs: j.priorDurationMs ?? null };
+  return { id: j.id, status: j.status, step: j.step, totalSteps: j.totalSteps, stageLabel: j.stageLabel, error: j.error, stalled: j.stalled ?? false, startedAt: j.startedAt, finishedAt: j.finishedAt, priorDurationMs: j.priorDurationMs ?? null };
+}
+
+/**
+ * Cancel a running job: stop the child (SIGTERM→SIGKILL) and mark it `canceled`.
+ * Lets the UI escape a slow/wedged run instead of waiting out the 45-min cap.
+ * `runningJobId` is freed by the child's close handler (once reaped) so a restart
+ * can't race the dying child on the same DB. Returns true iff a run was canceled.
+ */
+export function cancelJob(jobId) {
+  const j = jobs.get(jobId);
+  if (!j || j.status !== 'running') return false;
+  j.status = 'canceled';
+  j.stageLabel = 'Canceling…';
+  const c = j.child;
+  if (c) {
+    try { c.kill('SIGTERM'); } catch { /* noop */ }
+    setTimeout(() => { try { c.kill('SIGKILL'); } catch { /* noop */ } }, 5000);
+  }
+  return true;
 }
 
 // Test seam: reset registry state between verify runs in the same process.

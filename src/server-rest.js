@@ -15,6 +15,7 @@ import { authShimRouter } from './auth-shim.js';
 import { accountRouter } from './account/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { startEnrichDrainer } from './enrich/drainer.js';
+import { startEmbedSupervisor } from './embed/supervisor.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CANONICAL_BUILD = path.join(HERE, '..', 'portal-app', 'build');
@@ -166,8 +167,16 @@ export async function startRestServer({
       // verify script's deterministic test vault.
       const injectedKeys = userHex !== undefined && systemHex !== undefined;
       if (!injectedKeys) {
+        // Own the embed-service (:8091) lifecycle in-process: spawn/adopt, dep
+        // self-check, restart-on-crash, and expose health to /processing-status.
+        // Without a live embedder the drainer can't embed → Generate has no data.
+        const embedSup = startEmbedSupervisor({ home: process.cwd() });
         const drainer = startEnrichDrainer({ db, userId: bootUserId });
-        closeHandle = () => { try { drainer.stop(); } catch { /* */ } try { close(); } catch { /* */ } };
+        closeHandle = () => {
+          try { drainer.stop(); } catch { /* */ }
+          try { embedSup.stop(); } catch { /* */ }
+          try { close(); } catch { /* */ }
+        };
         enqueueEnrichment = (id) => { try { baseEnqueue(id); } catch { /* :8095 optional */ } drainer.nudge(); };
       }
       vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment });
