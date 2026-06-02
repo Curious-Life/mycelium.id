@@ -34,6 +34,14 @@ detail lives in the linked docs. Newest-relevant first.
   NEXT: D7 enrichment service (:8095) skeleton. ⚠️ No autonomous wake-loop in this env (no
   ScheduleWakeup/Cron/Monitor); Tier-2 (real models/deploy/tokens) needs a networked host.
 
+## Pre-launch
+
+- **Readiness map (2026-06-01):** [`docs/PRE-LAUNCH-READINESS-2026-06-01.md`](docs/PRE-LAUNCH-READINESS-2026-06-01.md)
+  — journeys A–G, functionality × {built/verified/Tier-2/unbuilt}, test-coverage map, ranked P0/P1/P2.
+  **Core is verified (26 suites); the launch gaps are distribution (npm `private`, Tauri unbundled),
+  remote deploy (Tunnel doc-only), the in-app generate-mindscape trigger (Phase G) + clustering being
+  manual/Tier-2/unverified, and onboarding friction.** Reader doc: [`docs/HOW-IT-WORKS.md`](docs/HOW-IT-WORKS.md).
+
 ## Key docs
 
 - Spec: [`docs/V1-BUILD-SPEC.md`](docs/V1-BUILD-SPEC.md) (v1.2, verification table, D1–D7)
