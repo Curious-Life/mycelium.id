@@ -5,18 +5,21 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
-- **V1 UX build-out + bug-hunt SHIPPED TO MAIN (2026-06-02).** `main @ 90dc9f0`, `npm run verify`
-  → **28× GO**. Merged #27 (nav/Mindscape-read/import[hardened]/Timeline/Profile/Settings/welcome +
-  window-drag + import-dnd) · #28 (**Phase G** generate trigger `src/jobs.js`; **Phase C** chronicles
-  `pipeline/describe-chronicles.js`) · #29 (docs) · #30 (**profile editing** `user_profiles` + **MCP
-  err.message redaction**) · #31 (**design-system channel-var accent fix** — ported from another
-  agent's `reference/portal` commit; fixed broken `bg-aurum/10`-style tints in the live `portal-app`).
+- **V1 UX build-out + bug-hunt + Mac-fixes SHIPPED TO MAIN (2026-06-02).** `main @ d3a3506`,
+  `npm run verify` → **29× GO**. Merged #27 (nav/Mindscape-read/import[hardened]/Timeline/Profile/
+  Settings/welcome + window-drag + import-dnd) · #28 (**Phase G** generate `src/jobs.js`; **Phase C**
+  chronicles `pipeline/describe-chronicles.js`) · #29 (docs) · #30 (**profile editing** `user_profiles`
+  + **MCP err.message redaction**) · #31 (**design-system channel-var accent fix** — ported from another
+  agent's `reference/portal` commit) · **#34** (Mac-test session's import fixes, integrated from #32:
+  **upload-404** [`chunked-upload.ts` bypassed the api.ts rewrite], **clustering-empty-DB**, original
+  timestamps, Mac drag-drop, batched embeds; + `verify:import-timestamps`).
   **4 bug-hunt sweeps**: mostly false positives (ON-CONFLICT-order, jobs-race, enrichment-self-heals —
-  all disproven); real finds were the MCP leak + profile gap. **Operator is Mac-testing now (Tier-2
-  processing, real MCP client, visual).** NEXT (here-doable): rest of the design-system port (/design
-  styleguide, agent-colors), `/mindscape/explore` job. Deferred: Phase K, parser parity (canonical
-  repo), distribution (LAST). Full handoff: [`docs/HANDOFF-2026-06-02.md`](docs/HANDOFF-2026-06-02.md).
-  ⚠️ Branch off `origin/main` (local `main` is stale legacy); `reference/portal` edits ≠ live `portal-app`.
+  disproven); real finds: MCP leak + profile gap. **The real Mac test caught 2 bugs Tier-1 verify
+  missed (upload path, child dbPath) — verify the seam the frontend/child uses, not just the endpoint.**
+  NEXT (here-doable): rest of the design-system port (/design styleguide, agent-colors), `/mindscape/
+  explore` job. Deferred: Phase K, parser parity (canonical repo), distribution (LAST). Full handoff:
+  [`docs/HANDOFF-2026-06-02.md`](docs/HANDOFF-2026-06-02.md). ⚠️ Branch off `origin/main` (local `main`
+  is stale legacy); `reference/portal` edits ≠ live `portal-app`.
 
 - **Complete-UX design LOCKED (2026-06-01).** Canonical portal adopted + served, no login wall,
   Library wired. The **whole experience is now designed** (4-sweep `/sweep-first-design`, security
