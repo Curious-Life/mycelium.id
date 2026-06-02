@@ -40,11 +40,32 @@ export MYCELIUM_USER_ID="${MYCELIUM_USER_ID:-local-user}"
 # (else it falls back to "most common user in clustering_points" → none → exit 1).
 export MINDSCAPE_OWNER_ID="${MINDSCAPE_OWNER_ID:-$MYCELIUM_USER_ID}"
 
-# Python interpreter for the clustering + harmonics stages. Prefer a local
-# venv if present (pipeline/.venv), else fall back to python3 on PATH.
-PYTHON="python3"
-if [ -x "pipeline/.venv/bin/python3" ]; then
-  PYTHON="pipeline/.venv/bin/python3"
+# Python interpreter for the clustering + harmonics stages. An explicit $PYTHON
+# wins (operator override + makes the deps probe below testable); otherwise prefer
+# the local venv (pipeline/.venv), else fall back to python3 on PATH. NOTE: the app
+# never sets PYTHON — jobs.js's child-env allowlist doesn't pass it — so the
+# override path only affects manual/test runs.
+if [ -z "${PYTHON:-}" ]; then
+  PYTHON="python3"
+  if [ -x "pipeline/.venv/bin/python3" ]; then
+    PYTHON="pipeline/.venv/bin/python3"
+  fi
+fi
+
+# Fail FAST + ACTIONABLE if the clustering/harmonics deps aren't installed.
+# Otherwise the run churns for minutes and dies on an opaque
+# "ModuleNotFoundError: No module named 'dotenv' (exit 1)" surfaced by jobs.js
+# (which shows only the LAST stderr line). Probe the hard imports up front:
+# module-level (numpy, dotenv, cryptography — the last pulled in unguarded by
+# Stage 5's crypto_local) + the unguarded run_clustering libs (faiss, igraph,
+# leidenalg, scipy, sklearn, umap). Deliberately excluded: ripser/psutil (guarded,
+# degrade gracefully) and httpx (not imported). Keep this list in sync with the
+# module-level imports of cluster.py / crypto_local.py / compute_information_harmonics.py.
+# The actionable line is printed LAST so jobs.js surfaces it verbatim.
+if ! "$PYTHON" -c "import numpy,dotenv,cryptography,faiss,igraph,leidenalg,scipy,sklearn,umap" 2>/dev/null; then
+  echo "[clustering] missing Python dependencies in interpreter: $PYTHON" >&2
+  echo "Generate needs the clustering dependencies — install with: bash pipeline/setup.sh  (or: ${PYTHON} -m pip install -r pipeline/requirements.txt)" >&2
+  exit 3
 fi
 
 echo "════════════════════════════════════════════════"
