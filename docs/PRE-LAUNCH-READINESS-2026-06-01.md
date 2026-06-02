@@ -1,6 +1,19 @@
 # Mycelium V1 — Pre-Launch Readiness & Test Map
 
-**Date:** 2026-06-01
+**Date:** 2026-06-01 · **Updated:** 2026-06-02
+
+> **Update 2026-06-02 — Phase G + C landed (merged to `main`, #28).** The biggest
+> product gap from §0/§4 (the in-app **generate-mindscape trigger**) is now built +
+> Tier-1 verified (`src/jobs.js` + `POST /api/v1/portal/mycelium/generate`), as is
+> **chronicle narration** (`pipeline/describe-chronicles.js`). The **real** clustering
+> + narration still need the host's ML stack / a model (Tier-2). Verify suite is now
+> **28** (added `verify:generate`, `verify:chronicles`). A 3-sweep bug-hunt (2026-06-02)
+> validated the code: the two "CRITICAL" findings were false positives; fixed a bounded
+> job map + the SPA-fallback regex; **one real gap remains — profile *editing*** (`PUT
+> /portal/profile`) isn't served (degrades gracefully to "Failed to save"; needs a
+> small profile store). The journey/matrix rows below are annotated where this changes
+> their status (look for "*(G/C done)*").
+
 **Purpose:** one systematic place that answers "where are we, what's left, and what
 needs testing before we launch and publish." Organized by **user journey** (start to
 finish), then a full **functionality × status** matrix, a **test-coverage map**, and

@@ -64,6 +64,8 @@ Two **sidecar services** run as their own processes:
 | Portal compat surface (`/api/v1/portal/*`) | `src/portal-compat.js` (Library/Timeline/Profile/Settings/onboarding), `src/portal-mindscape.js` (3D scene + panels), `src/portal-uploads.js` (import: multipart + chunked) | ✅ |
 | Local auth-shim (no login wall) | `src/auth-shim.js` | ✅ |
 | Import parsers (Claude / ChatGPT) | `src/ingest/import-parsers.js` | ✅ (Obsidian/LinkedIn ⬜) |
+| Generate-mindscape trigger (clustering job) | `src/jobs.js` + `POST /api/v1/portal/mycelium/generate` | ✅ (job lifecycle; real run ⚠️ Tier-2) |
+| Chronicle narration | `pipeline/describe-chronicles.js` (run-clustering stage) | ✅ (logic; real model ⚠️ Tier-2) |
 | Local portal (single-file SPA) | `portal/index.html` (REST fallback) | ✅ |
 | Native Mac shell (Tauri) | `src-tauri/**` | ◑ scaffold (build on Mac) |
 | OAuth 2.1 + PKCE (better-auth) | `src/auth.js` | ✅ |
@@ -168,11 +170,12 @@ hashtag + keyword tags) behind a seam a model-backed pass can replace.
 
 ## 9. Verification
 
-`npm run verify` runs **26 GO-gated suites** (`scripts/verify-*.mjs`), each with
+`npm run verify` runs **28 GO-gated suites** (`scripts/verify-*.mjs`), each with
 a PASS/FAIL ledger + VERDICT line: foundation, mcp, mindfiles, metrics, rest,
 search, topology, embed, oauth, context, ingest, blob, enqueue, enrich,
 keysource, portal, portal-serve, portal-data, portal-mindscape, import,
-import-security, portal-tps, integration, nav, inference, publish. CI
+import-security, portal-tps, generate, chronicles, integration, nav, inference,
+publish. CI
 (`.github/workflows/verify.yml`) runs them on every PR. **Tier-1** suites pass
 without the ML stack; **Tier-2** parity (real embeddings/clustering) is verified
 on a host with onnxruntime/Ollama installed. Portal/SPA-dependent checks SKIP
@@ -199,6 +202,8 @@ portal into `Mycelium.app`; Rust built on the Mac per `src-tauri/BUILD-MAC.md`.
 
 ⬜ **Planned / not yet built:** agent templates, the Tauri native first-run
 key-setup ceremony (designed — `UX-COMPLETE-DESIGN` §5 — Mac/Rust build pending),
-the in-app "generate mindscape" trigger (Phase G) + territory narratives
-(Phase C), Obsidian/LinkedIn import, Cloudflare Tunnel deploy. See
+profile *editing* (`PUT /portal/profile` — needs a profile store), the
+`/mindscape/explore` territory-description job, Obsidian/LinkedIn import,
+Cloudflare Tunnel deploy. (The in-app "generate mindscape" trigger + chronicle
+narration are now **built** — see the component table.) See
 [`V1-BUILD-SPEC.md`](V1-BUILD-SPEC.md) §"What's left".
