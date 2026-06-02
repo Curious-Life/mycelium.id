@@ -157,6 +157,16 @@ export function createMcpServer({ tools, handlers }) {
       const text = typeof result === 'string' ? result : JSON.stringify(result);
       return { content: [{ type: 'text', text }] };
     } catch (err) {
+      // Operator-only diagnostics (opt-in): the redacted client text below gives
+      // no signal when a tool misbehaves, which makes local testing painful.
+      // Gated behind MYCELIUM_DEBUG=1 and written to STDERR only — never stdout
+      // (the stdio protocol stream) and never the client-facing content. Off by
+      // default because an error can embed user content (CLAUDE.md §1); when on,
+      // stderr goes to the operator's own machine (e.g. Claude Desktop's
+      // mcp-server-mycelium.log) on their own single-user vault.
+      if (process.env.MYCELIUM_DEBUG === '1') {
+        console.error(`[mycelium] tool '${name}' threw:`, err?.stack || err?.message || err);
+      }
       // Never leak internals/plaintext: a tool handler may throw a message that
       // embeds user content. Surface a fixed safe string (mirrors src/api.js),
       // distinguishing caller-input errors from internal failures via a strict
