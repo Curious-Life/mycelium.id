@@ -25,5 +25,14 @@ export function createAcmeDnsClient({ serverUrl, mock = false, registrations = [
     if (!res.ok) throw new Error(`acme-dns register failed (${res.status})`);
     return res.json();
   }
-  return { register, registrations };
+
+  // acme-dns has NO deregistration API — accounts persist. On /release we delete
+  // the _acme-challenge CNAME (in dns.js), which orphans this subdomain: the
+  // credential can still write a TXT on the acme-dns server, but nothing points
+  // at it, so it's inert. This is a documented no-op kept for call-site symmetry.
+  async function deregister(_args = {}) {
+    return { ok: true, note: 'acme-dns has no delete API; CNAME removal orphans the subdomain' };
+  }
+
+  return { register, deregister, registrations };
 }

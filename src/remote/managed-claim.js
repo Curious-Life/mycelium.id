@@ -2,22 +2,25 @@
 // control-plane verifies (identity.verifyWithPublicKey). No password/account:
 // only the holder of the vault master key can produce the signature, and the
 // control-plane learns nothing but the public key. The signed message is
-// domain-separated + versioned so a signature can't be replayed across protocols.
+// domain-separated, versioned, AND **action-bound** (provision vs release) so a
+// captured claim for one operation can't be replayed as the other.
 import { createIdentity, isValidHandle } from '../identity/identity.js';
 
 export const CLAIM_VERSION = 'v1';
+export const CLAIM_ACTIONS = new Set(['provision', 'release']);
 
-/** The exact bytes both sides sign/verify. Domain-separated + versioned. */
-export function claimMessage(handle, nonce) {
-  return `mycelium-handle-claim:${CLAIM_VERSION}:${handle}:${nonce}`;
+/** The exact bytes both sides sign/verify. Domain-separated + versioned + action-bound. */
+export function claimMessage(action, handle, nonce) {
+  return `mycelium-handle-claim:${CLAIM_VERSION}:${action}:${handle}:${nonce}`;
 }
 
 /**
  * Build a signed handle claim from the vault master key.
- * @param {{ handle:string, nonce:string, masterHex:string }} args
- * @returns {{ v:string, handle:string, publicKey:string, nonce:string, signature:string }}
+ * @param {{ action?:'provision'|'release', handle:string, nonce:string, masterHex:string }} args
+ * @returns {{ v:string, action:string, handle:string, publicKey:string, nonce:string, signature:string }}
  */
-export function buildClaim({ handle, nonce, masterHex }) {
+export function buildClaim({ action = 'provision', handle, nonce, masterHex }) {
+  if (!CLAIM_ACTIONS.has(action)) throw new Error(`invalid action: ${action}`);
   if (!isValidHandle(handle)) {
     throw new Error('invalid handle (2-32 chars, a-z 0-9 -, no leading/trailing dash)');
   }
@@ -27,9 +30,10 @@ export function buildClaim({ handle, nonce, masterHex }) {
   const id = createIdentity({ masterHex, handle });
   return {
     v: CLAIM_VERSION,
+    action,
     handle,
     publicKey: id.publicKeyB64,
     nonce,
-    signature: id.sign(claimMessage(handle, nonce)),
+    signature: id.sign(claimMessage(action, handle, nonce)),
   };
 }

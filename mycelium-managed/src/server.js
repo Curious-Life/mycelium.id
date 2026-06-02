@@ -1,8 +1,13 @@
 // server.js — the managed control-plane API. Self-hostable; mycelium runs an
-// instance. Verifies an ed25519 handle claim (the SAME claimMessage the client
-// signs), provisions acme-dns + apex DNS + a per-tenant FRP token, records it in
-// the registry. It NEVER sees the master key or any vault data — only
-// {handle, publicKey, nonce, signature}, and verifies with the public key alone.
+// instance. Verifies an ACTION-BOUND ed25519 handle claim (the same claimMessage
+// the client signs), provisions acme-dns + apex DNS + a per-tenant FRP token,
+// records it in the registry. It NEVER sees the master key or any vault data —
+// only {action, handle, publicKey, nonce, signature}, verified with the public
+// key alone.
+//
+// Abuse-hardened: per-IP rate limit on every endpoint + a global daily NEW-handle
+// cap (stay under the CA's per-registered-domain weekly ceiling) + TOCTOU-safe
+// atomic claim BEFORE external side-effects, with rollback on failure.
 import express from 'express';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -13,25 +18,36 @@ import { createNonceStore } from './nonce.js';
 import { createDnsClient } from './dns.js';
 import { createAcmeDnsClient } from './acmedns.js';
 import { createRelayHook } from './relay-hook.js';
+import { createRateLimiter, createDailyCap } from './ratelimit.js';
 
 // Never handed out (impersonation / infra names).
 export const RESERVED = new Set(['admin', 'root', 'www', 'api', 'mcp', 'auth', 'connect', 'acme', 'acme-dns', 'relay', 'ns', 'mail', 'mycelium', 'anthropic', 'claude', 'support', 'help', 'status', 'app', 'id', 'docs']);
 
-export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone = 'mycelium.id', acmeDnsServer, bwLimit = '2MB' }) {
+export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone = 'mycelium.id', acmeDnsServer, bwLimit = '2MB', rateLimit, dailyCap }) {
   const app = express();
+  // Behind the relay / Cloudflare → derive the client IP from X-Forwarded-For
+  // (trust ONE hop). The rate limiter keys on req.ip.
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '16kb' }));
 
-  app.get('/v1/challenge', (_req, res) => {
+  const limiter = rateLimit || createRateLimiter({ capacity: 20, refillPerMin: 20 });
+  const newHandleCap = dailyCap || createDailyCap({ max: Number(process.env.MYC_MAX_NEW_HANDLES_PER_DAY) || 40 });
+  const limit = (req, res, next) => {
+    if (limiter.allow(req.ip)) return next();
+    res.status(429).json({ ok: false, error: 'rate limited' });
+  };
+
+  app.get('/v1/challenge', limit, (_req, res) => {
     res.json({ nonce: nonces.issue() });
   });
 
-  app.get('/v1/handle/:h', (req, res) => {
+  app.get('/v1/handle/:h', limit, (req, res) => {
     const h = String(req.params.h || '').toLowerCase();
     if (!isValidHandle(h)) { res.status(400).json({ ok: false, error: 'invalid handle' }); return; }
     res.json({ ok: true, handle: h, available: !(RESERVED.has(h) || !!registry.get(h)) });
   });
 
-  app.post('/v1/provision', async (req, res) => {
+  app.post('/v1/provision', limit, async (req, res) => {
     try {
       const { handle, publicKey, nonce, signature } = req.body || {};
       const h = String(handle || '').toLowerCase();
@@ -40,20 +56,37 @@ export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, 
       if (typeof publicKey !== 'string' || typeof nonce !== 'string' || typeof signature !== 'string') {
         res.status(400).json({ ok: false, error: 'malformed claim' }); return;
       }
-      // Replay protection THEN signature — both fail-closed.
+      // Replay protection THEN action-bound signature — both fail-closed.
       if (!nonces.consume(nonce)) { res.status(401).json({ ok: false, error: 'nonce invalid or expired' }); return; }
-      if (!verifyWithPublicKey(publicKey, claimMessage(h, nonce), signature)) {
+      if (!verifyWithPublicKey(publicKey, claimMessage('provision', h, nonce), signature)) {
         res.status(401).json({ ok: false, error: 'signature invalid' }); return;
       }
-      // Reject a taken handle BEFORE external side-effects (no wasted acme-dns reg).
-      const owned = registry.get(h);
-      if (owned && owned.public_key !== publicKey) { res.status(409).json({ ok: false, error: 'handle already claimed' }); return; }
 
-      const reg = await acmeDns.register();
-      await dns.createHandleRecords({ handle: h, acmeFulldomain: reg.fulldomain });
+      // ATOMIC claim BEFORE any external side-effect (TOCTOU-safe). Same key reclaims.
+      const claimed = registry.claim({ handle: h, publicKey });
+      if (!claimed.ok) { res.status(409).json({ ok: false, error: 'handle already claimed' }); return; }
+      // Self-throttle NEW handles to stay under the CA's per-domain weekly cap.
+      if (!claimed.reclaimed && !newHandleCap.tryConsume()) {
+        registry.remove({ handle: h, publicKey });
+        res.status(503).json({ ok: false, error: 'new-handle quota reached; try again later' }); return;
+      }
+
+      let reg;
+      try {
+        reg = await acmeDns.register();
+        await dns.createHandleRecords({ handle: h, acmeFulldomain: reg.fulldomain });
+      } catch {
+        // Roll back ONLY a fresh claim — never delete an existing (reclaimed) registration.
+        if (!claimed.reclaimed) {
+          try { await dns.deleteHandleRecords({ handle: h }); } catch { /* best-effort */ }
+          registry.remove({ handle: h, publicKey });
+          newHandleCap.refund();
+        }
+        res.status(502).json({ ok: false, error: 'provisioning backend failed' }); return;
+      }
+
       const frpsToken = crypto.randomBytes(24).toString('base64url');
-      const r = registry.reserve({ handle: h, publicKey, frpsToken, acmeSubdomain: reg.subdomain });
-      if (!r.ok) { res.status(409).json({ ok: false, error: 'handle already claimed' }); return; }
+      registry.finalize({ handle: h, frpsToken, acmeSubdomain: reg.subdomain });
 
       res.json({
         ok: true,
@@ -61,22 +94,29 @@ export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, 
         relayAddr,
         relayToken: frpsToken,
         acmeDns: { username: reg.username, password: reg.password, subdomain: reg.subdomain, serverUrl: acmeDnsServer },
-        reclaimed: !!r.reclaimed,
+        reclaimed: !!claimed.reclaimed,
       });
     } catch {
       res.status(500).json({ ok: false, error: 'provision failed' });
     }
   });
 
-  app.post('/v1/release', (req, res) => {
+  app.post('/v1/release', limit, async (req, res) => {
     const { handle, publicKey, nonce, signature } = req.body || {};
     const h = String(handle || '').toLowerCase();
     if (!nonces.consume(nonce)) { res.status(401).json({ ok: false, error: 'nonce invalid or expired' }); return; }
-    if (!verifyWithPublicKey(publicKey, claimMessage(h, nonce), signature)) {
+    if (!verifyWithPublicKey(publicKey, claimMessage('release', h, nonce), signature)) {
       res.status(401).json({ ok: false, error: 'signature invalid' }); return;
     }
-    const r = registry.release({ handle: h, publicKey });
-    res.status(r.ok ? 200 : 403).json(r.ok ? { ok: true } : { ok: false, error: 'not owner' });
+    const row = registry.get(h);
+    if (!row) { res.json({ ok: true }); return; }                 // already gone — idempotent
+    if (row.public_key !== publicKey) { res.status(403).json({ ok: false, error: 'not owner' }); return; }
+    // Tear down DNS (frees the name for everyone, orphans the acme-dns subdomain
+    // harmlessly), then drop the registry row (invalidating the relay token).
+    try { await dns.deleteHandleRecords({ handle: h }); } catch { /* best-effort */ }
+    try { await acmeDns.deregister({ subdomain: row.acme_subdomain }); } catch { /* no-op */ }
+    registry.release({ handle: h, publicKey });
+    res.json({ ok: true });
   });
 
   // FRP NewProxy/Login auth-hook: per-tenant hostname binding (reads the registry).
@@ -92,6 +132,7 @@ export function main() {
   const acmeDnsServer = process.env.MYC_ACME_DNS || '';
   const registry = openRegistry(process.env.MYC_REGISTRY_DB || './registry.db');
   const nonces = createNonceStore();
+  nonces.startSweeper(); // periodic expiry sweep (memory bound)
   const dns = createDnsClient({
     provider: process.env.MYC_DNS_PROVIDER || 'mock',
     token: process.env.MYC_DNS_TOKEN,
