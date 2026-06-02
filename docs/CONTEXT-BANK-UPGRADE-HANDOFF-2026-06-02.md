@@ -20,7 +20,7 @@ A 5-phase upgrade to the V1 MCP "context bank": add forget/correct, facts, proac
 | 5 — consolidate readers | `f0c673a` (tools) · `73e448a` (gates) | ✅ built+verified | 11 cognitive/topology readers → 3 (`cognitiveState`/`cognitiveHistory`/`mindscape`); 35 → **27 tools**; behind a full `/pre-deletion-caller-audit`; `verify:cognition` 7/7 + `verify:mindscape` 8/8 |
 
 - **Branch:** `claude/zealous-euler-kSPpI` · **PR:** #42 (draft) · **HEAD:** `73e448a` (+docs commit)
-- **Gate:** full `npm run verify` → **36× GO, EXIT 0** (incl. `verify:forget`/`facts`/`related`/`entities`/`gating`/`cognition`/`mindscape`). Clean tree.
+- **Gate:** full `npm run verify` → **37× GO, EXIT 0** (incl. `verify:forget`/`facts`/`related`/`entities`/`gating`/`cognition`/`mindscape`). Clean tree.
 - **Rebased onto `origin/main` (#43, `1a8f525`)** at the start of the Phase-2 session — #43 ("rehydrate stored `embedding_768`") collided with Phase 1 on `d1-loader.js:47`/`mcp.js`/`package.json`; resolved so the loader SELECT carries **both** `embedding_768` **and** `AND forgotten_at IS NULL` (a security win — a forgotten row's embedding can never be rehydrated). Force-pushed (lease-guarded).
 - Earlier this session (separate, already **merged to main**): PR #39 (skills reconciled to V1) + PR #41 (`MCP-OVERVIEW.md`).
 
@@ -56,7 +56,7 @@ A 5-phase upgrade to the V1 MCP "context bank": add forget/correct, facts, proac
 ### Pickup protocol for the next session — UPGRADE IS COMPLETE; only follow-ups remain
 1. Read this handoff cold (the **Phase 5 session summary** below is newest). The 5-phase upgrade is built + verified; there is **no Phase 6**.
 2. `git fetch origin main && git rebase origin/main` on `claude/zealous-euler-kSPpI` before any new work. Main moved twice mid-session (#44 `b622914`, #43 `1a8f525`); #43 touched the search path — a future search PR may collide on `d1-loader.js`/`mcp.js`/`package.json`.
-3. Verify current state: `npm run verify` → **36× GO, EXIT 0** (`verify:mcp` → "27 tools registered").
+3. Verify current state: `npm run verify` → **37× GO, EXIT 0** (`verify:mcp` → "27 tools registered").
 4. **Follow-ups (optional, not blocking):**
    - **Flip PR #42 out of draft** for a human security review (the diff touches the crypto boundary, forget/audit, encrypted-entity dedup) — do NOT auto-merge; security-sensitive diffs need a human approval (CLAUDE.md, `/auto-merge-on-green`).
    - **NLP-entity promotion auto-trigger:** `db.entities.promoteFromMessages` is built + verified but nothing calls it yet. Add an enrichment-service hook (call it after a drain batch) once the pipeline runs on a real host (it's Tier-2). Not blocking — user curation (`remember`/`link`) works today.
@@ -90,7 +90,7 @@ A 5-phase upgrade to the V1 MCP "context bank": add forget/correct, facts, proac
 - `grep "name: '<old>'"` outside the 3 internal factories → **0** (no old tool is registered).
 - `verify:mcp` → **27 tools**, the 11 old names absent, the 3 new present.
 - `verify:cognition` (7/7) + `verify:mindscape` (8/8) → each old capability is covered by a new tool.
-- Full `npm run verify` → **36× GO, EXIT 0**.
+- Full `npm run verify` → **37× GO, EXIT 0**.
 
 ### Operator's directional calls (this session)
 - **Build Phase 5 (finish it)** (chose via AskUserQuestion). The whole 5-phase upgrade is now shipped.
@@ -251,16 +251,20 @@ npm run verify:facts       # → VERDICT: GO EXIT=0   (17/17: encrypted-at-rest,
 npm run verify:related     # → VERDICT: GO EXIT=0   (7/7: proactive recall, sensitive-excluded, forgotten-guarded, BM25-only)
 npm run verify:entities    # → VERDICT: GO EXIT=0   (19/19: encrypted-at-rest, app-dedup, pinned-gated, link/dossier, forgotten, NLP-promote no-clobber)
 npm run verify:gating      # → VERDICT: GO EXIT=0   (8/8: Tier-2 gated on fresh vault, Tier-1 untouched, mid-session flip)
+npm run verify:leak        # → VERDICT: GO EXIT=0   (encryption-at-rest: raw-byte scan, every encrypted col, INSERT + multi-line UPDATE)
 npm run verify:cognition   # → VERDICT: GO EXIT=0   (7/7: 6 Fisher/metric readers folded into cognitiveState + cognitiveHistory)
 npm run verify:mindscape   # → VERDICT: GO EXIT=0   (8/8: 5 topology readers folded into mindscape({view}))
 npm run verify:mcp         # → "27 tools registered, 2 deferred"  + GO
-npm run verify             # → 36× GO, EXIT 0   (the gate before declaring done)
+npm run verify             # → 37× GO, EXIT 0   (the gate before declaring done)
 ```
 No fleet/deploy — "shipping" = the verify gate is green + committed + pushed (see the rewritten `/deploy-and-verify`). PR #42 carries the spec + Phases 1–3; CI runs the same chain.
 
 ---
 
 ## Gotchas + lessons (2026-06-02)
+
+- **🔴 CRITICAL (pre-merge review, fixed `c93ecd0`): a multi-line UPDATE `SET` clause silently wrote PLAINTEXT at rest.** `parseWriteSQL`'s UPDATE matcher (`crypto-local.js`) lacked `/s` (dotall), so `.+?` stopped at the first newline → a multi-line `SET` never reached `WHERE` → `setMatch` null → `parseWriteSQL` null → `autoEncryptParams` no-op'd the WHOLE statement → encrypted-column params bound as plaintext. Hit `entities.upsert` (multi-line dedup UPDATE — `summary`/`aliases`, fires on 2nd mention / every `link()` / NLP-promote) AND the dormant `people.upsert` (multi-line COALESCE UPDATE — email/phone/company PII). **Fix:** `/s` + paren-aware `splitValueExprs` (so `strftime(',')` / `COALESCE(NULLIF(?,''),col)` aren't split mid-function). **Two lessons:** (1) NEVER rely on SQL formatting for a crypto property — the parser must be formatting-independent; (2) a STATIC read of `parseWriteSQL` declared the path sound — only a **runtime raw-DB-bytes plaintext scan** (`verify:leak`, now a permanent gate) caught it. Test it, don't reason about it.
+- **`verify:leak` is the encryption-at-rest regression gate.** Plants tokens in every encrypted column across facts/entities/messages/people (INSERT + multi-line UPDATE) and scans raw db/WAL/shm bytes for any plaintext. Run it after ANY change to `crypto-local.js`, the adapter, or a `db/*.js` write path.
 
 - **Local SQLite only — no Cloudflare D1 (2026-06-02).** `d1Query`/`src/adapter/d1.js`/`d1Batch` are a **legacy API-compat shim** over better-sqlite3 with zero network. The vault is one `mycelium.db` on the home server. Never build toward D1/`wrangler`.
 - **The search loader has no content filter (`d1-loader.js:47`, 2026-06-02).** Forget's resurrection guard is the `forgotten_at` flag on the loader query — nulling content alone is insufficient (a rebuilt index would still add the row).

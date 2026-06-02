@@ -7,7 +7,7 @@ detail lives in the linked docs. Newest-relevant first.
 
 - **Context Bank Upgrade — design spec (2026-06-02, latest).** Sweep-first-design pass closing the MCP
   context-bank gaps from the design review: forget/redact, facts store, `relatedContext`, entities,
-  Tier-2 gating, user salience, unified `ref` handle. **✅ ALL 5 PHASES BUILT + verified (31→27 tools — net slimmer; forget 13/13, facts 17/17, related 7/7, entities 19/19, gating 8/8, cognition 7/7, mindscape 8/8; full `verify` 36× GO). Upgrade COMPLETE; follow-ups only:**
+  Tier-2 gating, user salience, unified `ref` handle. **✅ ALL 5 PHASES BUILT + verified (31→27 tools — net slimmer; forget 13/13, facts 17/17, related 7/7, entities 19/19, gating 8/8, cognition 7/7, mindscape 8/8; full `verify` 37× GO). Upgrade COMPLETE; follow-ups only:**
   [`docs/CONTEXT-BANK-UPGRADE-DESIGN-2026-06-02.md`](docs/CONTEXT-BANK-UPGRADE-DESIGN-2026-06-02.md). Key
   sweep pivots: forget is NOT greenfield (builds on `documents.delete`+`afterDeleteHooks`,
   `backend.delete({ids})`, `revoked_at` tombstone); cascade is shallow (only `clustering_points` +
