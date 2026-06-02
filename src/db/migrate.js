@@ -19,21 +19,44 @@ function columnSet(db, table) {
 
 /**
  * Apply every migrations/*.sql in order. CREATE TABLE IF NOT EXISTS is
- * naturally idempotent; `ALTER TABLE <t> ADD COLUMN <c>` is made idempotent by
+ * naturally idempotent. `ALTER TABLE <t> ADD COLUMN <c>` is made idempotent by
  * skipping when the column already exists (SQLite has no ADD COLUMN IF NOT
- * EXISTS). Returns the list of files applied.
+ * EXISTS). A file that adds columns is applied statement-by-statement so EVERY
+ * bare ADD COLUMN is guarded — the previous first-match-only guard silently
+ * skipped columns 2..n when re-running a multi-ADD-COLUMN file on a populated
+ * db. Returns the list of files applied.
  */
 export function applyMigrations(db, dir = MIGRATIONS_DIR) {
   const files = readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
   for (const f of files) {
     const sql = readFileSync(join(dir, f), 'utf8');
-    // Guard bare ADD COLUMN against re-run (idempotency on a populated db).
-    const addCol = sql.match(/ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)/i);
-    if (addCol) {
-      const [, table, col] = addCol;
-      if (columnSet(db, table).has(col.toLowerCase())) continue; // already applied
+    if (/ALTER TABLE\s+\w+\s+ADD COLUMN/i.test(sql)) {
+      // Per-statement so each ADD COLUMN is guarded independently. Safe for the
+      // simple ALTER/CREATE migration files (no procedural bodies / inner ';').
+      for (const stmt of splitStatements(sql)) {
+        const addCol = stmt.match(/ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)/i);
+        if (addCol) {
+          const [, table, col] = addCol;
+          if (columnSet(db, table).has(col.toLowerCase())) continue; // already applied
+        }
+        db.exec(stmt);
+      }
+    } else {
+      // No ADD COLUMN — CREATE TABLE IF NOT EXISTS files are naturally
+      // idempotent; exec whole (preserves behavior for 0001's 111 tables).
+      db.exec(sql);
     }
-    db.exec(sql);
   }
   return files;
+}
+
+/** Split simple migration SQL into statements (strips line comments). */
+function splitStatements(sql) {
+  return sql
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('--'))
+    .join('\n')
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }
