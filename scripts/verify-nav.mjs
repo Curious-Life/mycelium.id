@@ -71,6 +71,10 @@ rec("N7 Header is a window-drag region (Tauri)", /data-tauri-drag-region/.test(h
 // N8 — Import accepts drag-and-drop, not just a file picker.
 rec("N8 Import has a drag-and-drop drop zone", /ondrop=/.test(importPage) && /onDrop/.test(importPage));
 
+// N9 — the LOCAL single-file portal is also a window-drag handle in the shell.
+const localPortal = read(path.join(HERE, "..", "portal", "index.html"));
+rec("N9 local portal header is a window-drag region", /<header data-tauri-drag-region/.test(localPortal) && /startDragging/.test(localPortal));
+
 const pass = ledger.every(Boolean);
 console.log(`\nVERDICT: ${pass ? "GO" : "NO-GO"} — ${ledger.filter(Boolean).length}/${ledger.length} checks`);
 process.exit(pass ? 0 : 1);
