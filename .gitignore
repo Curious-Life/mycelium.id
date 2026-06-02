@@ -75,3 +75,7 @@ scratch/
 # Tauri (Rust) build artifacts
 src-tauri/target/
 src-tauri/gen/
+
+# Self-contained .app bundle staging (≈1 GB; rebuilt by scripts/build-app-bundle.sh)
+build-staging/
+.build-cache/

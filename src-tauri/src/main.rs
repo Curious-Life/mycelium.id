@@ -62,11 +62,46 @@ fn main() {
             let key_source =
                 std::env::var("MYCELIUM_KEY_SOURCE").unwrap_or_else(|_| "keychain".into());
 
-            let mut cmd = Command::new("node");
+            // Self-contained runtimes (Option B). A packaged .app bundles its own
+            // Node binary + a relocatable Python + the model under Resources/app/
+            // (see scripts/build-app-bundle.sh); a dev checkout has none of these,
+            // so each lookup falls back to the dev location / PATH. `bundled` gates
+            // the packaged-only wiring so dev behaviour is unchanged.
+            let bundled_py = home.join("python/bin/python3");
+            let bundled = bundled_py.exists();
+            let node_bin = {
+                let b = home.join("node");
+                if b.exists() { b.to_string_lossy().into_owned() } else { "node".to_string() }
+            };
+            let python_bin = {
+                let venv = home.join("pipeline/.venv/bin/python3");
+                if bundled { bundled_py.to_string_lossy().into_owned() }
+                else if venv.exists() { venv.to_string_lossy().into_owned() }
+                else { "python3".to_string() }
+            };
+            let hf_home = home.join("hf-cache");
+
+            let mut cmd = Command::new(&node_bin);
             cmd.arg("src/server-rest.js")
                 .current_dir(&home)
                 .env("MYCELIUM_REST_PORT", PORT.to_string())
                 .env("MYCELIUM_KEY_SOURCE", key_source);
+            if bundled {
+                // Make the bundled node + python resolvable to the clustering child
+                // (src/jobs.js → run-clustering.sh, whose JS stages call bare `node`),
+                // and hand the explicit python down via MYCELIUM_PYTHON (the
+                // run-clustering.sh $PYTHON seam from the fresh-user-provisioning work).
+                let path = std::env::var("PATH").unwrap_or_default();
+                cmd.env(
+                    "PATH",
+                    format!("{}:{}:{}", home.display(), home.join("python/bin").display(), path),
+                )
+                .env("MYCELIUM_PYTHON", &python_bin);
+            }
+            if hf_home.exists() {
+                // Offline embedding model bundled under Resources/app/hf-cache.
+                cmd.env("HF_HOME", &hf_home).env("HF_HUB_OFFLINE", "1");
+            }
 
             // Durable per-OS data dir — on macOS this is
             // ~/Library/Application Support/id.mycelium.app. Passing it as
@@ -91,20 +126,16 @@ fn main() {
             // the drainer health-checks :8091 and degrades gracefully if it never
             // comes up (the UI's preflight then says "still processing").
             if TcpStream::connect(("127.0.0.1", 8091u16)).is_err() {
-                let venv_py = home.join("pipeline/.venv/bin/python3");
-                let python = if venv_py.exists() {
-                    venv_py.to_string_lossy().into_owned()
-                } else {
-                    "python3".to_string()
-                };
-                match Command::new(python)
-                    .arg("pipeline/embed-service.py")
+                let mut ecmd = Command::new(&python_bin);
+                ecmd.arg("pipeline/embed-service.py")
                     .arg("--serve")
                     .arg("--port")
                     .arg("8091")
-                    .current_dir(&home)
-                    .spawn()
-                {
+                    .current_dir(&home);
+                if hf_home.exists() {
+                    ecmd.env("HF_HOME", &hf_home).env("HF_HUB_OFFLINE", "1");
+                }
+                match ecmd.spawn() {
                     Ok(c) => children.push(c),
                     Err(e) => eprintln!(
                         "[mycelium] embed service did not start ({e}) — imports won't embed until it's available"

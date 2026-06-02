@@ -59,6 +59,12 @@ export function startClusteringJob({ dbPath, userId } = {}) {
     SYSTEM_KEY: systemHex,
     MYCELIUM_DB: dbPath || resolveDbPath(),
     MYCELIUM_USER_ID: userId || process.env.MYCELIUM_USER_ID || 'local-user',
+    // Packaged self-contained build: use the bundled python + offline model for the
+    // clustering child. Unset in dev → run-clustering.sh's $PYTHON seam auto-picks the
+    // venv. (PATH already carries the bundled node dir, injected by main.rs.)
+    ...(process.env.MYCELIUM_PYTHON ? { PYTHON: process.env.MYCELIUM_PYTHON } : {}),
+    ...(process.env.HF_HOME ? { HF_HOME: process.env.HF_HOME } : {}),
+    ...(process.env.HF_HUB_OFFLINE ? { HF_HUB_OFFLINE: process.env.HF_HUB_OFFLINE } : {}),
   };
 
   const jobId = `gen_${crypto.randomBytes(6).toString('hex')}`;
