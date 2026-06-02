@@ -89,3 +89,4 @@ detail lives in the linked docs. Newest-relevant first.
 - Verify every step with running code before building on it; never claim green without
   watching the ledger reach `VERDICT … EXIT=0`.
 - Run tasks to completion; fold sweep findings in rather than pausing.
+- **Skill set is V1-only (6 project skills).** Removed the canonical-only `tenant-schema-parity` (V1 has one `mycelium.db`, no fleet → cross-DB drift impossible); its migration-hygiene kernel folded into `/deploy-and-verify`, which was rewritten for V1 (verify-ledger → smoke → [✓]/[—] ledger; dropped fleet/SSH/wrangler/PM2). Remaining: sweep-first-design · deploy-and-verify · pre-deletion-caller-audit · handoff-discipline · living-docs · auto-merge-on-green.
