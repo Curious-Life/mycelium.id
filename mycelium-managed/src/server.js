@@ -12,11 +12,12 @@ import { openRegistry } from './registry.js';
 import { createNonceStore } from './nonce.js';
 import { createDnsClient } from './dns.js';
 import { createAcmeDnsClient } from './acmedns.js';
+import { createRelayHook } from './relay-hook.js';
 
 // Never handed out (impersonation / infra names).
 export const RESERVED = new Set(['admin', 'root', 'www', 'api', 'mcp', 'auth', 'connect', 'acme', 'acme-dns', 'relay', 'ns', 'mail', 'mycelium', 'anthropic', 'claude', 'support', 'help', 'status', 'app', 'id', 'docs']);
 
-export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone = 'mycelium.id', acmeDnsServer }) {
+export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone = 'mycelium.id', acmeDnsServer, bwLimit = '2MB' }) {
   const app = express();
   app.use(express.json({ limit: '16kb' }));
 
@@ -78,6 +79,9 @@ export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, 
     res.status(r.ok ? 200 : 403).json(r.ok ? { ok: true } : { ok: false, error: 'not owner' });
   });
 
+  // FRP NewProxy/Login auth-hook: per-tenant hostname binding (reads the registry).
+  app.post('/frps/handler', createRelayHook(registry, { zone, bandwidthLimit: bwLimit }));
+
   return { app };
 }
 
@@ -95,7 +99,7 @@ export function main() {
     relayIp: process.env.MYC_RELAY_IP,
   });
   const acmeDns = createAcmeDnsClient({ serverUrl: acmeDnsServer, mock: process.env.MYC_ACME_DNS_MOCK === '1' });
-  const { app } = createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone, acmeDnsServer });
+  const { app } = createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone, acmeDnsServer, bwLimit: process.env.MYC_BW_LIMIT || '2MB' });
   app.listen(port, () => console.log(`[mycelium-managed] control-plane on :${port} (zone=${zone}, dns=${dns.provider})`));
 }
 
