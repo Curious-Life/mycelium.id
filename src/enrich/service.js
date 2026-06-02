@@ -71,43 +71,53 @@ export function createEnrichmentService(deps) {
     let embedded = 0;
     let failed = 0;
 
-    // Embed the WHOLE batch in one /batch call (was one HTTP round-trip per
-    // row → ~2/sec on a large backlog; batched → ~70/sec). A whole-batch embed
-    // failure (service down / bad response) is isolated: mark every scanned row
-    // failed and return — never silently advance a row with no embedding.
-    let vectors;
-    try {
-      vectors = await embed.embedBatch(rows.map((r) => r.content), 'document');
-    } catch (err) {
-      const note = String(err?.message || err).slice(0, 500);
-      for (const row of rows) {
-        try { await messages.updateEnrichment(row.id, userId, { nlpProcessed: -1, nlpError: note }); } catch { /* non-fatal */ }
-      }
-      return { scanned: rows.length, embedded: 0, failed: rows.length };
-    }
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
+    // Embed in BOUNDED CHUNKS. A whole 50-row batch of long messages takes >60s
+    // on the CPU model, but the embed client aborts at 30s → the request fails
+    // and the WHOLE batch would be marked failed (and never retried). Chunking
+    // keeps every embedBatch call well under the timeout. Each chunk falls back
+    // to per-row embed() so one poison row — or a stub embedder without
+    // embedBatch — can't sink the rest.
+    const EMBED_CHUNK = 12;
+    for (let start = 0; start < rows.length; start += EMBED_CHUNK) {
+      const chunk = rows.slice(start, start + EMBED_CHUNK);
+      let vectors;
       try {
-        const vec = vectors[i];
-        if (!Array.isArray(vec) || vec.length !== EMBED_DIM) {
-          throw new Error(
-            `embed returned ${Array.isArray(vec) ? vec.length : typeof vec} dims, expected ${EMBED_DIM}`,
-          );
+        vectors = typeof embed.embedBatch === 'function'
+          ? await embed.embedBatch(chunk.map((r) => r.content), 'document')
+          : await Promise.all(chunk.map((r) => embed.embed(r.content, 'document')));
+      } catch {
+        // Whole-chunk embed failed — retry per row so one bad/slow row can't sink
+        // the others; a row that still fails gets a null vector → marked -1 below.
+        vectors = [];
+        for (const r of chunk) {
+          try { vectors.push(await embed.embed(r.content, 'document')); }
+          catch { vectors.push(null); }
         }
-        const scope = row.scope || 'org';
-        // No userId — match the decryptVector read path's key derivation.
-        const envelope = await encryptVector(Float32Array.from(vec), scope, masterKey);
-        await messages.updateEnrichment(row.id, userId, { embedding768: envelope, nlpProcessed: 2 });
-        embedded++;
-      } catch (err) {
-        // Isolate the poison row. Never log row.content (CLAUDE.md §1 — zero
-        // plaintext leakage); the message text alone is sensitive.
-        await messages.updateEnrichment(row.id, userId, {
-          nlpProcessed: -1,
-          nlpError: String(err?.message || err).slice(0, 500),
-        });
-        failed++;
+      }
+
+      for (let i = 0; i < chunk.length; i++) {
+        const row = chunk[i];
+        try {
+          const vec = vectors[i];
+          if (!Array.isArray(vec) || vec.length !== EMBED_DIM) {
+            throw new Error(
+              `embed returned ${Array.isArray(vec) ? vec.length : typeof vec} dims, expected ${EMBED_DIM}`,
+            );
+          }
+          const scope = row.scope || 'org';
+          // No userId — match the decryptVector read path's key derivation.
+          const envelope = await encryptVector(Float32Array.from(vec), scope, masterKey);
+          await messages.updateEnrichment(row.id, userId, { embedding768: envelope, nlpProcessed: 2 });
+          embedded++;
+        } catch (err) {
+          // Isolate the poison row. Never log row.content (CLAUDE.md §1 — zero
+          // plaintext leakage); the message text alone is sensitive.
+          await messages.updateEnrichment(row.id, userId, {
+            nlpProcessed: -1,
+            nlpError: String(err?.message || err).slice(0, 500),
+          });
+          failed++;
+        }
       }
     }
 

@@ -35,6 +35,10 @@ fi
 : "${SYSTEM_KEY:?SYSTEM_KEY (64-char hex) required}"
 export MYCELIUM_DB="${MYCELIUM_DB:-./data/vault.db}"
 export MYCELIUM_USER_ID="${MYCELIUM_USER_ID:-local-user}"
+# cluster.py resolves the owner from MINDSCAPE_OWNER_ID/MYA_USER_ID (NOT
+# MYCELIUM_USER_ID); map it so it works even when clustering_points is empty
+# (else it falls back to "most common user in clustering_points" → none → exit 1).
+export MINDSCAPE_OWNER_ID="${MINDSCAPE_OWNER_ID:-$MYCELIUM_USER_ID}"
 
 # Python interpreter for the clustering + harmonics stages. Prefer a local
 # venv if present (pipeline/.venv), else fall back to python3 on PATH.

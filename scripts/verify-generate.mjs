@@ -13,7 +13,8 @@
 //   G2 single-flight   immediate 2nd POST → {status:'already_running', same jobId}
 //   G3 progress+done   poll status → step advances 1→5, stageLabel set, status 'done'
 //                      (proves keys reached the child: the script exits 3 without them)
-//   G4 error path      a failing script → status 'error' (generic, no stderr leak)
+//   G0 preflight       no embedded messages → 409 (refuse, don't spawn a doomed run)
+//   G4 error path      a failing script → status 'error' surfacing its last stderr line
 //   G5 unknown job     GET status/<bogus> → 404
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
@@ -50,7 +51,9 @@ echo "Step 5/5: Harmonics"; sleep 0.1
 exit 0
 `);
   writeFileSync(FAIL, `#!/usr/bin/env bash
-echo "Step 1/5: Sync"; exit 1
+echo "Step 1/5: Sync"
+echo "RuntimeError: clustering precondition failed" >&2
+exit 1
 `);
 
   const uHex = hex(), sHex = hex();
@@ -58,6 +61,17 @@ echo "Step 1/5: Sync"; exit 1
   process.env.MYCELIUM_KEY_SOURCE = 'env';
   process.env.USER_MASTER_KEY = uHex;
   process.env.SYSTEM_KEY = sHex;
+
+  // ── G0: the preflight refuses on an empty vault (short-lived server) ──
+  {
+    const s0 = await startRestServer({ dbPath: DB, kcvPath: KCV, userHex: uHex, systemHex: sHex, port: 0, host: '127.0.0.1', portalMode: 'legacy' });
+    const r = await fetch(`${s0.url}/api/v1/portal/mycelium/generate`, { method: 'POST' });
+    const b = await r.json().catch(() => ({}));
+    rec('G0. preflight: 0 messages → 409 (no doomed spawn)', r.status === 409 && b?.reason === 'no_messages', `status=${r.status} reason=${b?.reason}`);
+    s0.server.close(); try { s0.close?.(); } catch {}
+  }
+  // Seed ≥5 embedded messages so the real job lifecycle runs past the preflight.
+  { const s = new Database(DB); const ins = s.prepare("INSERT INTO messages (id, user_id, content, embedding_768) VALUES (?, 'local-user', 'x', 'x')"); for (let i = 0; i < 6; i++) ins.run('seed-' + i); s.close(); }
 
   const srv = await startRestServer({ dbPath: DB, kcvPath: KCV, userHex: uHex, systemHex: sHex, port: 0, host: '127.0.0.1', portalMode: 'legacy' });
   const { url } = srv;
@@ -96,8 +110,9 @@ echo "Step 1/5: Sync"; exit 1
       if (s.body?.status !== 'running') { err = s.body; break; }
       await sleep(150);
     }
-    rec('G4. failing pipeline → status:error (generic, no stderr leak)',
-      err?.status === 'error' && typeof err?.error === 'string' && !/Step|bash|\//.test(err.error),
+    rec('G4. failing pipeline → status:error surfacing the REAL reason (single line)',
+      err?.status === 'error' && typeof err?.error === 'string'
+        && err.error.includes('clustering precondition failed') && !err.error.includes('\n'),
       `status=${err?.status} error=${JSON.stringify(err?.error)}`);
 
     // ── G5 unknown job ──

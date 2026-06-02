@@ -74,7 +74,7 @@ export function startClusteringJob({ dbPath, userId } = {}) {
     child = spawn('bash', [scriptPath], {
       cwd: process.cwd(),
       env: childEnv,                       // allowlist only — no ambient secrets
-      stdio: ['ignore', 'pipe', 'inherit'], // stdout parsed; stderr to operator console (never surfaced via API)
+      stdio: ['ignore', 'pipe', 'pipe'], // stdout parsed for progress; stderr captured (bounded) to surface the REAL failure reason
     });
   } catch {
     state.status = 'error'; state.error = 'failed to start clustering'; state.finishedAt = Date.now();
@@ -97,6 +97,15 @@ export function startClusteringJob({ dbPath, userId } = {}) {
     }
   });
 
+  // Capture the child's stderr in a BOUNDED ring buffer (last ~4 KB) so a
+  // failure surfaces its real reason, not just an exit code. The pipeline never
+  // prints secrets; we still only ever surface a single trimmed line.
+  let errBuf = '';
+  child.stderr?.on('data', (d) => {
+    errBuf = (errBuf + d.toString()).slice(-4096);
+  });
+  const lastErrLine = () => errBuf.split('\n').map((l) => l.trim()).filter(Boolean).pop() || '';
+
   const timer = setTimeout(() => {
     try { child.kill('SIGTERM'); } catch { /* noop */ }
     setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* noop */ } }, 5000);
@@ -106,7 +115,11 @@ export function startClusteringJob({ dbPath, userId } = {}) {
     clearTimeout(timer);
     state.finishedAt = Date.now();
     if (code === 0) { state.status = 'done'; state.step = state.totalSteps; state.stageLabel = 'Complete'; }
-    else if (state.status !== 'error') { state.status = 'error'; state.error = `clustering exited with code ${code}`; }
+    else if (state.status !== 'error') {
+      state.status = 'error';
+      const detail = lastErrLine();
+      state.error = detail ? `${detail} (exit ${code})` : `clustering exited with code ${code}`;
+    }
     if (runningJobId === jobId) runningJobId = null;
   });
   child.on('error', () => {

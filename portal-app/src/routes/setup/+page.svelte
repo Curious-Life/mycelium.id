@@ -4,7 +4,6 @@
 	// local /api/v1/account/* surface (served even in "setup mode", before the
 	// vault is open). Mirrors the /login screen's visual language.
 	import { onMount } from 'svelte';
-	import { goto } from '$app/navigation';
 
 	type Mode = 'loading' | 'intro' | 'reveal' | 'restore';
 	let mode = $state<Mode>('loading');
@@ -15,9 +14,20 @@
 	let recoveryKey = $state('');
 	let savedConfirmed = $state(false);
 	let copied = $state(false);
+	let downloaded = $state(false);
 	let restoreInput = $state('');
+	let onePasswordAvailable = $state(false);
+	let saving = $state<'keychain' | '1password' | null>(null);
+	let savedTo = $state<string | null>(null);
+	let savedDetail = $state<string | null>(null);
 
 	const grouped = $derived(recoveryKey ? recoveryKey.replace(/(.{4})/g, '$1 ').trim() : '');
+
+	// After setup/restore the vault is open but the root layout's session check
+	// ran before that (it redirected us here), so a client-side nav would land on
+	// a stuck "Loading…". A full navigation re-runs the layout (now initialized →
+	// session established) and lands cleanly in the workspace.
+	function enterVault() { window.location.assign('/mindscape'); }
 
 	onMount(async () => {
 		try {
@@ -25,7 +35,8 @@
 			if (res.ok) {
 				const s = await res.json();
 				keychainAvailable = s.keychainAvailable !== false;
-				if (s.initialized) { goto('/mindscape'); return; }
+				onePasswordAvailable = s.onePasswordAvailable === true;
+				if (s.initialized) { enterVault(); return; }
 			}
 		} catch { /* show intro regardless */ }
 		mode = 'intro';
@@ -60,10 +71,30 @@
 			});
 			const data = await res.json().catch(() => ({}));
 			if (!res.ok) throw new Error(data.message || data.error || 'Restore failed');
-			goto('/mindscape');
+			enterVault();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Restore failed';
 		} finally { busy = false; }
+	}
+
+	async function saveToManager(target: 'keychain' | '1password') {
+		saving = target; error = null; savedTo = null; savedDetail = null;
+		try {
+			const res = await fetch('/api/v1/account/recovery-key/save', {
+				method: 'POST', credentials: 'same-origin',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ target }),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.message || data.error || 'Save failed');
+			savedTo = target === 'keychain' ? 'Keychain' : '1Password';
+			savedDetail = target === 'keychain'
+				? 'Saved as “Mycelium Recovery Key” in your login Keychain (Keychain Access → Passwords). Opening Keychain Access so you can verify it.'
+				: 'Saved as “Mycelium Recovery Key” in 1Password. Opening 1Password so you can verify it.';
+			savedConfirmed = true; // a successful save IS saving it safely
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Save failed';
+		} finally { saving = null; }
 	}
 
 	async function copyKey() {
@@ -81,6 +112,8 @@
 		a.href = url; a.download = 'mycelium-recovery-key.txt';
 		document.body.appendChild(a); a.click(); a.remove();
 		setTimeout(() => URL.revokeObjectURL(url), 1000);
+		downloaded = true; savedConfirmed = true;
+		setTimeout(() => (downloaded = false), 2500);
 	}
 </script>
 
@@ -139,15 +172,35 @@
 					<div class="p-4 rounded-lg bg-[var(--color-bg-secondary,#0001)] border border-[var(--color-border)] font-mono text-sm tracking-wide break-all text-center text-[var(--color-text-primary)] select-all">
 						{grouped}
 					</div>
-					<div class="flex gap-3">
-						<button onclick={copyKey} class="flex-1 btn py-2.5 border border-[var(--color-border)]">{copied ? 'Copied ✓' : 'Copy'}</button>
-						<button onclick={downloadKey} class="flex-1 btn py-2.5 border border-[var(--color-border)]">Download</button>
+					<div class="space-y-2">
+						<div class="flex gap-2">
+							<button onclick={() => saveToManager('keychain')} disabled={saving !== null}
+								class="flex-1 btn py-2.5 border border-[var(--color-border)] disabled:opacity-50">
+								{saving === 'keychain' ? 'Saving…' : 'Save to Keychain'}
+							</button>
+							{#if onePasswordAvailable}
+								<button onclick={() => saveToManager('1password')} disabled={saving !== null}
+									class="flex-1 btn py-2.5 border border-[var(--color-border)] disabled:opacity-50">
+									{saving === '1password' ? 'Saving…' : 'Save to 1Password'}
+								</button>
+							{/if}
+						</div>
+						<div class="flex gap-2">
+							<button onclick={copyKey} class="flex-1 btn py-2.5 border border-[var(--color-border)]">{copied ? 'Copied ✓' : 'Copy'}</button>
+							<button onclick={downloadKey} class="flex-1 btn py-2.5 border border-[var(--color-border)]">{downloaded ? 'Downloaded ✓' : 'Download'}</button>
+						</div>
+						{#if savedTo}
+							<div class="p-3 rounded-lg bg-jade/10 border border-jade/30 text-xs text-[var(--color-text-secondary)] leading-relaxed">
+								<span class="text-jade font-medium">Saved to {savedTo} ✓</span>
+								{#if savedDetail}<br />{savedDetail}{/if}
+							</div>
+						{/if}
 					</div>
 					<label class="flex items-start gap-3 text-sm text-[var(--color-text-secondary)] cursor-pointer">
 						<input type="checkbox" bind:checked={savedConfirmed} class="mt-0.5" />
 						<span>I've saved my recovery key somewhere safe.</span>
 					</label>
-					<button onclick={() => savedConfirmed && goto('/mindscape')} disabled={!savedConfirmed}
+					<button onclick={enterVault} disabled={!savedConfirmed}
 						class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed">
 						Enter my vault
 					</button>

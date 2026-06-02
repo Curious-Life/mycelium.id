@@ -24,19 +24,8 @@
  */
 
 import { getDb } from '../src/db/index.js';
-import { loadKey } from '../src/crypto/keys.js';
 import * as cryptoLocal from '../src/crypto/crypto-local.js';
-
-// Resolve the byte-decrypt primitive defensively — the canonical module has
-// exposed it as both `decryptBytes` and `decrypt_bytes` across vintages. Sync
-// is a Tier-2 step (only runs against seeded rows), so we fail-soft if the
-// primitive name drifts rather than crashing the whole pipeline import.
-const decryptBytes =
-  cryptoLocal.decryptBytes ||
-  cryptoLocal.decrypt_bytes ||
-  cryptoLocal.decryptSafe ||
-  cryptoLocal.decrypt_safe ||
-  null;
+import { decryptVector } from '../src/search/ann/decode.js';
 
 const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';
 const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
@@ -56,27 +45,22 @@ if (!USER_MASTER || !SYSTEM_KEY) {
  * Mirrors cluster.py's derive phase: decrypt → base64-decode → float32 →
  * slice[:256] → L2-normalize. Returns null on any failure (skip the point).
  */
-async function decode256(envelope, key) {
-  if (!decryptBytes) return null;
+async function decode256(envelope, masterKey) {
   try {
-    // crypto-local.decryptBytes is ASYNC and returns the plaintext bytes. The
-    // 768D vector was stored as base64-of-float32-bytes (encodeVector), so the
-    // plaintext is base64 ASCII; decode that to the raw float buffer.
-    const pt = await decryptBytes(envelope, key);
-    if (pt == null) return null;
-    const ascii = Buffer.isBuffer(pt) ? pt.toString('latin1') : String(pt);
-    const raw = Buffer.from(ascii, 'base64');
-    if (raw.length < 768 * 4) return null;
-    // Read via DataView (little-endian) — Buffer.byteOffset is not guaranteed
-    // 4-aligned for pooled buffers, so `new Float32Array(raw.buffer, off, 768)`
-    // can throw RangeError. DataView has no alignment constraint.
-    const dv = new DataView(raw.buffer, raw.byteOffset, raw.length);
+    // Decrypt the 768D vector via the CANONICAL path — the same encryptVector /
+    // decryptVector scheme enrich + mind-search use. The prior bespoke
+    // decryptBytes + base64 path could not parse the scoped-DEK envelope that
+    // encryptVector writes, so EVERY row was skipped as "undecryptable" and the
+    // clustering pipeline produced zero points. `null` allowedScopes = decrypt
+    // regardless of the envelope's scope (single-user local vault).
+    const full = await decryptVector(envelope, masterKey, null, 768);
+    if (!full || full.length < NOMIC_DIM) return null;
+    // Matryoshka-truncate 768 → 256 and L2-normalize (cluster.py's derive phase).
     const out = new Float32Array(NOMIC_DIM);
     let norm = 0;
     for (let i = 0; i < NOMIC_DIM; i++) {
-      const v = dv.getFloat32(i * 4, true);
-      out[i] = v;
-      norm += v * v;
+      out[i] = full[i];
+      norm += full[i] * full[i];
     }
     norm = Math.sqrt(norm);
     if (!(norm > 1e-8) || !Number.isFinite(norm)) return null;
@@ -118,13 +102,21 @@ async function run() {
       return;
     }
 
-    // decryptBytes expects an imported CryptoKey, not the raw hex string.
-    const userKey = await loadKey(USER_MASTER);
+    // Resolve the vector master key the same way enrich/search do. boot() wires
+    // ENCRYPTION_MASTER_KEY = USER_MASTER hex; this is a standalone process, so
+    // set it before getMasterKey() reads it. (decryptVector takes this CryptoKey.)
+    if (!process.env.ENCRYPTION_MASTER_KEY) process.env.ENCRYPTION_MASTER_KEY = USER_MASTER;
+    const masterKey = await cryptoLocal.getMasterKey();
+    if (!masterKey) {
+      console.error('[sync] Fatal: could not resolve the vector master key — cannot decrypt embeddings');
+      close();
+      process.exit(1);
+    }
 
     let inserted = 0;
     let skipped = 0;
     for (const r of rows) {
-      const vec = await decode256(r.embedding_768, userKey);
+      const vec = await decode256(r.embedding_768, masterKey);
       if (!vec) { skipped++; continue; }
 
       if (DRY_RUN) { inserted++; continue; }
