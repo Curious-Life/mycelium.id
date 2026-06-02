@@ -233,6 +233,12 @@ const ENCRYPTED_FIELDS = {
   // the UNIQUE upsert target. See migrations/0005_facts.sql.
   facts: ['value'],
 
+  // Entities — people/projects/places/orgs. name/aliases/summary are sensitive;
+  // type/source/counts stay plaintext for filtering. Dedup is app-layer (name is
+  // non-deterministically encrypted). entity_links holds only ids/enums — no
+  // encrypted columns. See migrations/0006_entities.sql.
+  entities: ['name', 'aliases', 'summary'],
+
   // Attachments — filenames often verbatim describe content.
   // file_type + file_size can fingerprint content via ML; accept that
   // as metadata leak for now (breaks listing UI if encrypted).
