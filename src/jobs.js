@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import { resolveKeys } from './crypto/key-source.js';
 import { dbPath as resolveDbPath } from './paths.js';
+import { readGenerateStats, writeGenerateStats } from './generate-stats.js';
 
 const MAX_MS = Number(process.env.MYCELIUM_GEN_MAX_MS) || 45 * 60 * 1000; // 45 min hard cap
 const STAGE_LABELS = {
@@ -71,6 +72,8 @@ export function startClusteringJob({ dbPath, userId } = {}) {
   const state = {
     id: jobId, status: 'running', step: 0, totalSteps: 5,
     stageLabel: 'Starting…', startedAt: Date.now(), finishedAt: null, error: null,
+    // Last successful run's wall-clock, so the UI can show an ETA from t=0.
+    priorDurationMs: readGenerateStats()?.lastDurationMs ?? null,
   };
   jobs.set(jobId, state);
   runningJobId = jobId;
@@ -120,7 +123,10 @@ export function startClusteringJob({ dbPath, userId } = {}) {
   child.on('close', (code) => {
     clearTimeout(timer);
     state.finishedAt = Date.now();
-    if (code === 0) { state.status = 'done'; state.step = state.totalSteps; state.stageLabel = 'Complete'; }
+    if (code === 0) {
+      state.status = 'done'; state.step = state.totalSteps; state.stageLabel = 'Complete';
+      writeGenerateStats({ durationMs: state.finishedAt - state.startedAt });
+    }
     else if (state.status !== 'error') {
       state.status = 'error';
       const detail = lastErrLine();
@@ -141,7 +147,7 @@ export function startClusteringJob({ dbPath, userId } = {}) {
 export function getJob(jobId) {
   const j = jobs.get(jobId);
   if (!j) return null;
-  return { id: j.id, status: j.status, step: j.step, totalSteps: j.totalSteps, stageLabel: j.stageLabel, error: j.error, startedAt: j.startedAt, finishedAt: j.finishedAt };
+  return { id: j.id, status: j.status, step: j.step, totalSteps: j.totalSteps, stageLabel: j.stageLabel, error: j.error, startedAt: j.startedAt, finishedAt: j.finishedAt, priorDurationMs: j.priorDurationMs ?? null };
 }
 
 // Test seam: reset registry state between verify runs in the same process.
