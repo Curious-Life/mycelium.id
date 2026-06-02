@@ -24,8 +24,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tauri::{Manager, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
-#[cfg(target_os = "macos")]
-use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
 const PORT: u16 = 8787;
 
@@ -136,7 +134,12 @@ fn main() {
                 .title("Mycelium")
                 .inner_size(1100.0, 760.0)
                 .min_inner_size(820.0, 560.0)
-                .transparent(true)        // let the glass show the desktop through
+                // OPAQUE window (was .transparent(true)). The app body is a solid
+                // #0A0A0C, so the "glass" never actually showed the desktop — but a
+                // transparent WKWebView layer FLICKERS on every repaint (it clears to
+                // transparent before the opaque content repaints → "the text reloads
+                // and flashes"). Opaque eliminates that flicker with zero visual change
+                // and removes the transparent⇄WebGL interaction that hung the webview.
                 .title_bar_style(TitleBarStyle::Overlay) // content flows under the traffic-lights
                 // Disable Tauri's native OS file-drop handler so the webview's
                 // HTML5 drag-drop (the Import drop zone) receives dropped files.
@@ -145,13 +148,6 @@ fn main() {
                 .disable_drag_drop_handler()
                 .build()?;
 
-            // See-through Mac mode: native window vibrancy behind the transparent
-            // webview. (macOS only; no-op elsewhere.) The portal's CSS adds the
-            // `glass-os` class when it detects Tauri so its panels stay glassy.
-            #[cfg(target_os = "macos")]
-            {
-                let _ = apply_vibrancy(&win, NSVisualEffectMaterial::HudWindow, None, None);
-            }
             let _ = &win;
 
             Ok(())
