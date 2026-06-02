@@ -6,17 +6,18 @@
 	import Sparkline from '$lib/components/mindscape/Sparkline.svelte';
 	import PulsesLens from '$lib/components/mindscape/PulsesLens.svelte';
 	import { api, apiGet, apiPut } from '$lib/api';
+	import { generate, start as startGen, resume as resumeGen, reset as resetGen, fmtSeconds } from '$lib/generate';
+	import { get } from 'svelte/store';
 	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
 	import { auth } from '$lib/stores/auth';
 
 	// ── Generation + enrichment state ──
-	let genJobId: string | null = $state(null);
-	let genJob: { status: string; step: number; totalSteps: number; stageLabel: string; error: string | null } | null = $state(null);
-	let genCooldownSec = $state(0);
-	let genError = $state('');
+	// Generate lifecycle (start / progress / ETA / errors) lives in the shared store
+	// `$lib/generate`: it handles the REAL server contract (esp. the 409 "still
+	// embedding" → wait + auto-start) so this page and the onboarding card never
+	// diverge or show "Failed to start" on a 409.
 	let enrichment: { total: number; enriched: number; pending: number; rate?: string } | null = $state(null);
 	let hasImportedData = $state(false);
-	let genPollTimer: ReturnType<typeof setTimeout> | null = null;
 	let enrichPollTimer: ReturnType<typeof setTimeout> | null = null;
 
 	let aiReady = $state(true);
@@ -49,7 +50,7 @@
 	}
 
 	async function pollEnrichment() {
-		if (genJobId) return;
+		if (get(generate).phase === 'running') return;
 		try {
 			const res = await api('/portal/enrichment/status');
 			if (res.ok) {
@@ -72,66 +73,19 @@
 		enrichPollTimer = null;
 	}
 
-	async function startGenerate() {
-		genError = '';
-		try {
-			const res = await api('/portal/mycelium/generate', { method: 'POST' });
-			if (res.status === 503) {
-				const data = await res.json().catch(() => ({} as any));
-				if (data.error === 'ai_not_ready') {
-					genError = 'AI models are still being set up on your server. Please try again in a few minutes.';
-					return;
-				}
-			}
-			if (res.status === 429) {
-				const data = await res.json().catch(() => ({} as any));
-				const retryAfter = data.retryAfter || 60;
-				genCooldownSec = retryAfter;
-				genError = `Please wait ${Math.ceil(retryAfter / 60)} min between runs`;
-				const tick = setInterval(() => { genCooldownSec--; if (genCooldownSec <= 0) clearInterval(tick); }, 1000);
-				return;
-			}
-			if (!res.ok) throw new Error('Failed to start');
-			const data = await res.json();
-			genJobId = data.jobId;
-			sessionStorage.setItem('mycelium_gen_job', data.jobId);
-			genJob = { status: 'running', step: 0, totalSteps: 8, stageLabel: 'Starting...', error: null };
-			if (enrichPollTimer) { clearTimeout(enrichPollTimer); enrichPollTimer = null; }
-			pollGeneration();
-		} catch {
-			genError = 'Failed to start generation';
+	// React to the shared store reporting completion: reload the map, then clear.
+	$effect(() => {
+		if ($generate.phase === 'done') {
+			territories = []; realms = [];
+			mindscapeState.load();
+			loadTerritories();
+			setTimeout(() => resetGen(), 4000);
 		}
-	}
-
-	async function pollGeneration() {
-		if (!genJobId) return;
-		try {
-			const res = await api(`/portal/mycelium/generate/status/${genJobId}`);
-			if (!res.ok) { genJobId = null; sessionStorage.removeItem('mycelium_gen_job'); return; }
-			genJob = await res.json();
-
-			if (genJob!.status === 'done') {
-				sessionStorage.removeItem('mycelium_gen_job');
-				// Reset arrays to bypass early-return guards, then reload all data
-				territories = []; realms = [];
-				mindscapeState.load();
-				loadTerritories();
-				setTimeout(() => { genJobId = null; genJob = null; }, 4000);
-				return;
-			}
-			if (genJob!.status === 'error' || genJob!.status === 'abandoned') {
-				genError = genJob!.error || 'Generation failed';
-				sessionStorage.removeItem('mycelium_gen_job');
-				return;
-			}
-		} catch { /* retry next poll */ }
-		genPollTimer = setTimeout(pollGeneration, 3000);
-	}
+	});
 
 	// Cleanup timers on unmount
 	$effect(() => {
 		return () => {
-			if (genPollTimer) clearTimeout(genPollTimer);
 			if (enrichPollTimer) clearTimeout(enrichPollTimer);
 		};
 	});
@@ -311,12 +265,11 @@
 
 		// Check generation + enrichment state
 		checkGenerationState().then(() => {
-			if (enrichment && enrichment.pending > 0 && !genJobId) pollEnrichment();
+			if (enrichment && enrichment.pending > 0 && get(generate).phase !== 'running') pollEnrichment();
 		});
 
-		// Resume polling if there's an active job from before page refresh
-		const savedJob = sessionStorage.getItem('mycelium_gen_job');
-		if (savedJob) { genJobId = savedJob; pollGeneration(); }
+		// Resume an in-flight generate job from before a page refresh.
+		resumeGen();
 
 		// Resume explore polling + SSE
 		const savedExplore = sessionStorage.getItem('mycelium_explore_job');
@@ -838,17 +791,31 @@
 					<div class="loading-3d"><div class="spinner"></div></div>
 				{:else if territories.length === 0 && realms.length === 0}
 					<div class="empty-state">
-						{#if genJob?.status === 'running'}
+						{#if $generate.phase === 'starting' || $generate.phase === 'running'}
 							<div class="gen-progress">
-								<h3 class="gen-heading">Growing your mindscape...</h3>
-								<p class="gen-stage">{genJob.stageLabel} &mdash; {genJob.step} of {genJob.totalSteps}</p>
-								<div class="gen-bar"><div class="gen-fill" style="width: {(genJob.step / genJob.totalSteps) * 100}%"></div></div>
-								<p class="gen-hint">This takes a few minutes. You can navigate away &mdash; it keeps running.</p>
+								<h3 class="gen-heading">Growing your mindscape…</h3>
+								<p class="gen-stage">{$generate.stageLabel || 'Starting…'} &mdash; step {$generate.step} of {$generate.totalSteps}</p>
+								<div class="gen-bar"><div class="gen-fill" style="width: {Math.max(4, ($generate.step / Math.max(1, $generate.totalSteps)) * 100)}%"></div></div>
+								<p class="gen-hint">{fmtSeconds($generate.elapsedMs / 1000)} elapsed{#if $generate.etaSeconds != null} &middot; ~{fmtSeconds($generate.etaSeconds)} left{/if}</p>
+								<p class="gen-hint">This keeps running if you navigate away.</p>
 							</div>
-						{:else if genJob?.status === 'done'}
+						{:else if $generate.phase === 'embedding'}
+							<div class="gen-progress">
+								<h3 class="gen-heading">Processing your conversations…</h3>
+								<p class="gen-stage">{$generate.embedded.toLocaleString()} / {$generate.total.toLocaleString()} ready</p>
+								<div class="gen-bar"><div class="gen-fill" style="width: {$generate.total > 0 ? ($generate.embedded / $generate.total) * 100 : 0}%"></div></div>
+								<p class="gen-hint">Generation starts automatically as soon as enough is ready.</p>
+							</div>
+						{:else if $generate.phase === 'done'}
 							<div class="gen-progress">
 								<h3 class="gen-heading">Mycelium generated</h3>
-								<p class="gen-hint">Loading your territories...</p>
+								<p class="gen-hint">Loading your territories…</p>
+							</div>
+						{:else if $generate.phase === 'error'}
+							<div class="gen-progress">
+								<h3 class="gen-heading">Generation hit a snag</h3>
+								<p class="gen-error">{$generate.error}</p>
+								<button class="gen-button" style="margin-top: 12px;" onclick={() => startGen()}>Try again</button>
 							</div>
 						{:else if enrichment && enrichment.pending > 0}
 							{@const pct = enrichment.total > 0 ? (enrichment.enriched / enrichment.total) * 100 : 0}
@@ -879,11 +846,8 @@
 								<p class="gen-hint">AI models are still being set up on your server. Generation will be available in a few minutes.</p>
 							{:else}
 								<p>Generate your mindscape to discover territories, realms, and semantic connections.</p>
-								<button class="gen-button" onclick={startGenerate} disabled={genCooldownSec > 0}>
-									{genCooldownSec > 0 ? `Wait ${genCooldownSec}s` : 'Generate Mycelium'}
-								</button>
+								<button class="gen-button" onclick={() => startGen()}>Generate Mycelium</button>
 							{/if}
-							{#if genError}<p class="gen-error">{genError}</p>{/if}
 						{:else}
 							<p>Import conversations first, then generate your mindscape here.</p>
 						{/if}
@@ -1414,20 +1378,30 @@
 					<canvas class="welcome-canvas" bind:this={demoCanvas}></canvas>
 
 					<div class="welcome-inner">
-						{#if genJob?.status === 'running'}
+						{#if $generate.phase === 'starting' || $generate.phase === 'running'}
 							<!-- Generation in progress — overlay on demo canvas -->
-							<h2 class="welcome-title">Growing your mindscape...</h2>
-							<p class="gen-stage">{genJob.stageLabel} &mdash; {genJob.step} of {genJob.totalSteps}</p>
-							<div class="gen-bar"><div class="gen-fill" style="width: {(genJob.step / genJob.totalSteps) * 100}%"></div></div>
+							<h2 class="welcome-title">Growing your mindscape…</h2>
+							<p class="gen-stage">{$generate.stageLabel || 'Starting…'} &mdash; step {$generate.step} of {$generate.totalSteps}</p>
+							<div class="gen-bar"><div class="gen-fill" style="width: {Math.max(4, ($generate.step / Math.max(1, $generate.totalSteps)) * 100)}%"></div></div>
 							<div class="gen-dots">
-								{#each Array(genJob.totalSteps) as _, i}
-									<span class="gen-dot" class:done={i < genJob.step} class:active={i === genJob.step}></span>
+								{#each Array($generate.totalSteps) as _, i}
+									<span class="gen-dot" class:done={i < $generate.step} class:active={i === $generate.step}></span>
 								{/each}
 							</div>
-							<p class="gen-hint">This takes a few minutes. You can navigate away &mdash; it keeps running.</p>
-						{:else if genJob?.status === 'done'}
+							<p class="gen-hint">{fmtSeconds($generate.elapsedMs / 1000)} elapsed{#if $generate.etaSeconds != null} &middot; ~{fmtSeconds($generate.etaSeconds)} left{/if}</p>
+							<p class="gen-hint">This keeps running if you navigate away.</p>
+						{:else if $generate.phase === 'embedding'}
+							<h2 class="welcome-title">Processing your conversations…</h2>
+							<p class="gen-stage">{$generate.embedded.toLocaleString()} / {$generate.total.toLocaleString()} ready</p>
+							<div class="gen-bar"><div class="gen-fill" style="width: {$generate.total > 0 ? ($generate.embedded / $generate.total) * 100 : 0}%"></div></div>
+							<p class="gen-hint">Generation starts automatically as soon as enough is ready.</p>
+						{:else if $generate.phase === 'done'}
 							<h2 class="welcome-title">Mycelium generated</h2>
-							<p class="gen-hint">Loading your 3D map...</p>
+							<p class="gen-hint">Loading your 3D map…</p>
+						{:else if $generate.phase === 'error'}
+							<h2 class="welcome-title">Generation hit a snag</h2>
+							<p class="gen-error">{$generate.error}</p>
+							<button class="gen-button" style="margin-top: 12px;" onclick={() => startGen()}>Try again</button>
 						{:else if enrichment && enrichment.pending > 0}
 							{@const mpm = enrichment.rate ? parseInt(enrichment.rate) : 0}
 							{@const rem2 = enrichment.total - enrichment.enriched}
@@ -1459,10 +1433,7 @@
 								{/if}
 							</h2>
 							<p class="welcome-subtitle">Generate your mindscape to see your thinking mapped in 3D — territories, realms, and semantic connections.</p>
-							<button class="gen-button" onclick={startGenerate} disabled={genCooldownSec > 0}>
-								{genCooldownSec > 0 ? `Wait ${genCooldownSec}s` : 'Generate Mycelium'}
-							</button>
-							{#if genError}<p class="gen-error">{genError}</p>{/if}
+							<button class="gen-button" onclick={() => startGen()}>Generate Mycelium</button>
 						{:else}
 							<!-- Welcome text -->
 							<h2 class="welcome-title">

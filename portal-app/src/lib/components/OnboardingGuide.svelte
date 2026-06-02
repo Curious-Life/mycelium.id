@@ -372,36 +372,26 @@
 		errorMsg = '';
 		try {
 			const res = await api('/portal/mycelium/generate', { method: 'POST' });
-			if (res.status === 503) {
-				const data = await res.json().catch(() => ({} as any));
-				if (data.error === 'ai_not_ready') {
-					errorMsg = 'AI models are still being set up. Please try again in a few minutes.';
-					return;
-				}
-			}
-			if (res.status === 429) {
-				const data = await res.json().catch(() => ({}));
-				const retryAfter = data.retryAfter || 60;
-				generateCooldownSec = retryAfter;
-				errorMsg = `Please wait ${Math.ceil(retryAfter / 60)} minutes between runs`;
+			if (res.ok) {
+				const data = await res.json();
+				generateJobId = data.jobId;
+				generateJob = { id: data.jobId, status: 'running', step: 0, totalSteps: 5, stageLabel: 'Starting…', error: null };
+				stopPolling();
+				startPolling();
 				return;
 			}
-			if (!res.ok) throw new Error('Failed to start');
-			const data = await res.json();
-			generateJobId = data.jobId;
-			generateJob = {
-				id: data.jobId,
-				status: 'running',
-				step: 0,
-				totalSteps: 8,
-				stageLabel: 'Starting…',
-				error: null,
-			};
-			// Bump polling cadence immediately
-			stopPolling();
-			startPolling();
+			const body = await res.json().catch(() => ({} as any));
+			if (res.status === 409) {
+				// The common "clicked too early" case: not enough embedded yet. Show the
+				// server's actionable message and AUTO-RETRY — this is NOT a failure.
+				errorMsg = body.error || 'Your conversations are still being processed — generation will start automatically.';
+				setTimeout(() => { if (!generateJobId) startGenerate(); }, 4000);
+				return;
+			}
+			// 503 / other — surface the REAL reason (keys/pipeline not ready, etc.).
+			errorMsg = body.error || 'Couldn’t start generation. Please try again in a moment.';
 		} catch (e: any) {
-			errorMsg = e.message || 'Failed to start generation';
+			errorMsg = e?.message || 'Couldn’t reach the server.';
 		}
 	}
 
