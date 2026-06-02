@@ -13,7 +13,7 @@ detail lives in the linked docs. Newest-relevant first.
   `backend.delete({ids})`, `revoked_at` tombstone); cascade is shallow (only `clustering_points` +
   `embedding_768` ref a message — aggregates self-heal per `clustering_run_id`); facts is greenfield
   (`user_profiles`≠facts store); `relatedContext`=thin reuse of `backend.query({text})`; Tier-2 gating
-  needs an async readiness probe threaded into `buildDomains` (static at boot). 5 open decisions (§11);
+  needs an async readiness probe threaded into `buildDomains` (static at boot). 4 decisions LOCKED §11 (soft-redact-only · typed facts · 'not-ready' gating · all 4 phases);
   build order = Phase 1 (forget+salience) first.
 
 - **Account setup + durable data + MCP review (2026-06-02).** **#36 landed on main**

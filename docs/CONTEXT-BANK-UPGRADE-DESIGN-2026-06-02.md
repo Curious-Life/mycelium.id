@@ -1,6 +1,6 @@
-# Context Bank Upgrade — Design Spec (v1, iterating)
+# Context Bank Upgrade — Design Spec (v2 — decisions locked, iterating)
 
-**Date:** 2026-06-02 · **Status:** DRAFT for iteration (do not build yet) · **Author:** sweep-first-design pass
+**Date:** 2026-06-02 · **Status:** DRAFT — 4 decisions LOCKED (§11), iterating before build · **Author:** sweep-first-design pass
 **Scope:** V1 self-hosted MCP server (`src/tools`, `src/db`, `migrations/`). Single-user, encrypted SQLite vault.
 **Companions:** [`MCP-OVERVIEW.md`](MCP-OVERVIEW.md) (current 31-tool surface) · [`ARCHITECTURE.md`](ARCHITECTURE.md) · [`V1-BUILD-SPEC.md`](V1-BUILD-SPEC.md).
 
@@ -12,7 +12,7 @@ This spec closes the gaps from the context-bank design review. It is grounded in
 
 | # | Gap | One-line fix |
 |---|---|---|
-| G1 | **No forget/correct anywhere on the tool surface** (message stream + internal model append-only) | A tiered `redact`/`purge` primitive that cascades correctly + is audited |
+| G1 | **No forget/correct anywhere on the tool surface** (message stream + internal model append-only) | A **soft-redact** primitive (tombstone; no hard-delete) that cascades correctly + is audited |
 | G2 | **No high-precision facts/preferences surface** | A small encrypted `facts` store + tools + a `getContext` section |
 | G3 | **Retrieval is query-only** (no "relevant to *now*") | `relatedContext(text)` — thin reuse of the existing embed+ANN+RRF backend |
 | G4 | **Entities are convention-over-documents** | A first-class `entities` registry (promote NLP-extracted + curate) |
@@ -29,6 +29,7 @@ This spec closes the gaps from the context-bank design review. It is grounded in
   1. **Forget is NOT greenfield at the storage layer.** ~20 hardcoded `DELETE FROM` exist; `documents.delete` fires `afterDeleteHooks` (`db/documents.js:206`); the search backend has `delete({ids})` (`search/backend/local.js:125`); and there's a soft-delete precedent — `identity_channels.revoked_at` (`0001_init.sql:879-926`). Forget *composes* these; the gap is a *unified, audited, cascading* forget + missing orphan cleanup + index eviction + a `forgotten` flag.
   2. **The forget cascade is shallow, not 10-table-deep.** Only `clustering_points` and the row's own `embedding_768` reference a message directly; the metric/fisher/topology tables are recomputed per `clustering_run_id` and self-heal. (`Sweep A`)
   3. **`relatedContext` is trivial reuse**, not new infra — `backend.query({text})` already accepts raw text or a vector (`search/backend/local.js:58-88`).
+- **v2 (operator decisions locked, 2026-06-02):** forget = **soft-redact only** (no hard `purge`); facts = **typed `category/key/value`**; Tier-2 = **present-but-"not ready"**; scope = **build all four phases** sequentially. Consequences folded in: redact now nulls **all** sensitive columns (not just `content`) and **every read path filters `forgotten_at IS NULL`**; §3.2/§5/§6/§7/§11 updated.
 
 ---
 
@@ -71,16 +72,22 @@ ref := { type: 'message'|'document'|'fact'|'entity', id: string }
 ```
 (`territory`/`realm`/`theme` are computed, read-only — not forgettable, so excluded from `ref`.)
 
-### 3.2 Memory hygiene — forget / correct (G1)
-A **tiered** primitive (default soft, explicit hard):
+### 3.2 Memory hygiene — forget / correct (G1) · DECISION: soft-redact only
+A single **soft** primitive — **no hard-delete tool** (locked #1). `forget` destroys the *meaning* (the sensitive payload + both embedding fingerprints) and keeps an empty **tombstone husk** for audit + anti-resurrection.
 
-- **`forget(ref, { mode })`** — `mode:'redact'` (default) | `'purge'`.
-  - **redact (soft, default):** blank the encrypted `content` (and title/summary for docs), set `forgotten_at`, **null `embedding_768`**, **delete the `clustering_points` row(s)** for that source, and **`backend.delete({ids:[id]})`** to evict the live index. Row persists (id + timestamps) for audit + anti-resurrection. Mark topology stale (a flag; next pipeline run regenerates).
-  - **purge (hard):** `DELETE` the row + its `clustering_points` + `backend.delete`. Irreversible. For true erasure.
-  - **Audited** via a new `forget_audit` (id, ref_type, ref_id, mode, content_hash, at) — **hash + length only, never plaintext** (mirrors `egress_audit`).
-- **`correct(ref, newContent)`** — supersede: redact the old item, capture a replacement linked by `supersedes` (messages/docs); for the internal model, this is the existing `editMindFile`/`writeMindFileWhole`.
+- **`forget(ref)`** — for the target row, in one logical op:
+  - **Null every sensitive/derived column** — all `ENCRYPTED_FIELDS` columns for that table (messages: `content, thinking, tags, entities, entity_summary, relations, metadata, suggested_new_tag, nlp_error`; documents: `content, summary, title, …`). No plaintext remains.
+  - **Null `embedding_768`** (768D fingerprint) and **delete the `clustering_points` row(s)** (256D fingerprint) for that `source_id`.
+  - **`backend.delete({ids:[id]})`** — evict the live in-RAM index (process-cached, no auto-refresh).
+  - **Set `forgotten_at`**; **every read path filters `forgotten_at IS NULL`** (`selectRecent`, search hydrate, `getDailyMessages`, `relatedContext`, `getContext`).
+  - Mark topology stale (regenerates next pipeline run). DB mutation is one SQLite txn; fail-closed + report on any partial (don't half-forget).
+  - **Audited** via `forget_audit` (ref_type, ref_id, content_hash, length, at) — hash + length only, never plaintext (mirrors `egress_audit`).
+  - The persisting husk = `id` + timestamps + non-sensitive enums (`role`/`source`/`scope`) + `forgotten_at`. **No hard `DELETE`.**
+- **`correct(ref, newContent)`** — supersede: `forget` the old item, capture a replacement linked by `supersedes`; for the internal model, the existing `editMindFile`/`writeMindFileWhole` already overwrite in place.
 
-Reuses: `backend.delete` (exists), `afterDeleteHooks` (exists), new `messages.redact`/`messages.purge` + `clustering_points` cleanup (new), `ENCRYPTED_FIELDS` (unchanged — content already listed).
+> **Right-to-forget note:** the content + both embedding fingerprints are destroyed; only a metadata husk remains (audit + re-ingestion block). True hard-erasure (drop the husks) stays a separate, deferred concern (§12).
+
+Reuses: `backend.delete` (exists), `afterDeleteHooks` (exists), new `messages.redact` + `clustering_points` cleanup (new), `ENCRYPTED_FIELDS` (unchanged).
 
 ### 3.3 Facts / preferences (G2)
 New encrypted `facts` table + namespace + a small, always-on `getContext` section.
@@ -136,13 +143,13 @@ CREATE TABLE IF NOT EXISTS entity_links (
 
 ### 3.7 Cold-start gating (G5)
 - Thread an **async readiness probe** into boot: `boot()` awaits `db.mindscape.getNoiseStats()` (or a `territory_profiles` count) and passes a `ready` flag to `buildDomains({..., topologyReady})`.
-- **Recommended (B):** keep Tier-2 tools registered, but when `!ready` their handlers return a uniform structured message — *"Topology isn't computed yet. Import data and run clustering (see docs/SETUP.md)."* — instead of an empty result. `getContext` already omits empty sections. This preserves discoverability while being honest. (Alternative A: omit them from `tools/list` until ready — cleaner surface, worse discoverability. **Open decision #4.**)
+- **DECISION (locked #4):** keep Tier-2 tools registered, but when `!ready` their handlers return a uniform structured message — *"Topology isn't computed yet. Import data and run clustering (see docs/SETUP.md)."* — instead of an empty result. `getContext` already omits empty sections. Preserves discoverability while being honest.
 
 ---
 
 ## 4. Threat model (new surface)
 
-- **Forget must remove the *fingerprint*, not just the text.** A redact that leaves `embedding_768` or a `clustering_points` 256D vector is an **inversion risk** (CLAUDE.md §7). Therefore redact **nulls `embedding_768` + deletes `clustering_points` + evicts the in-RAM vector** (`backend.delete` drops `_vectors`). Verified the eviction path: `search/backend/local.js:129`.
+- **Forget must remove the *fingerprint*, not just the text.** A redact that leaves `embedding_768` or a `clustering_points` 256D vector is an **inversion risk** (CLAUDE.md §7). Therefore redact **nulls every `ENCRYPTED_FIELDS` column on the row** (not just `content`) **+ nulls `embedding_768` + deletes `clustering_points` + evicts the in-RAM vector** (`backend.delete` drops `_vectors`, `search/backend/local.js:129`). The husk that remains carries no plaintext and no fingerprint.
 - **Facts/entities are maximally sensitive** → `value`/`name`/`summary`/`aliases` go in `ENCRYPTED_FIELDS`; `sensitive=1` items are excluded from `relatedContext`, never published, never in egress.
 - **Audit without plaintext** — `forget_audit` stores `content_hash`+length+ref only (egress_audit pattern). Never log the forgotten content (CLAUDE.md §1).
 - **Fail-closed:** an unknown `ref.type`, a missing id, or a forget that can't evict the index → refuse + report, don't partially-forget silently. Forget is **all-or-nothing per item** (row + embedding + clustering_point + index in one logical op; SQLite txn for the DB part).
@@ -155,7 +162,7 @@ CREATE TABLE IF NOT EXISTS entity_links (
 | Unit | Files touched | New tools | LOC (±20%) |
 |---|---|---|---|
 | Phase 0 — schema | `migrations/0004_context_bank.sql`, `crypto-local.js` (ENCRYPTED_FIELDS), `db/index.js` | — | ~120 |
-| Phase 1 — forget + salience | `db/messages.js` (+redact/purge), `db/forget.js` (new ns), `tools/forget.js` (new domain), `search` wiring, `db/audit`/`forget_audit` | `forget`, `correct`, `pin`, `unpin`, `markSensitive` | ~380 |
+| Phase 1 — forget + salience | `db/messages.js` (+`redact`), `db/forget.js` (new ns), `tools/forget.js` (new domain), read-path `forgotten_at` filters, `search` wiring, `forget_audit` | `forget`, `correct`, `pin`, `unpin`, `markSensitive` | ~360 |
 | Phase 2 — facts + relatedContext | `db/facts.js`, `tools/facts.js`, `tools/mindscape.js` (relatedContext), `tools/context.js` (FACTS section) | `rememberFact`, `listFacts`, `forgetFact`, `relatedContext` | ~340 |
 | Phase 3 — entities | `db/entities.js`, `tools/entities.js`, enrichment promote step, `tools/context.js` | `upsertEntity`, `getEntity`, `listEntities`, `linkEntity`, `forgetEntity` | ~480 |
 | Phase 4 — gating + ref | `index.js` (readiness), `mcp.js` (`buildDomains` flag), Tier-2 handlers | — | ~160 |
@@ -168,17 +175,19 @@ Handlers follow the verified contract: JSON-Schema `inputSchema`, `async (args) 
 |---|---|
 | Redact leaves searchable index | **Must** call `backend.delete({ids})` (index is process-cached, no auto-refresh — `index.js:46-52`). |
 | Redacted row re-embedded by enrichment | Prevented: blank `content` fails `content!=''` (`messages.js:148`); also set `forgotten`/null embedding. |
-| Orphan `clustering_points` after delete | Forget **explicitly deletes** them — sync never does (`sync-clustering-points.js`). |
+| Orphan `clustering_points` after forget | Forget **explicitly deletes** them — sync never does (`sync-clustering-points.js`). |
 | Topology now stale | Acceptable: aggregates regenerate per `clustering_run_id`; mark stale, don't rewrite. |
 | `forget` on already-forgotten | Idempotent no-op. |
 | `rememberFact` duplicate | Upsert on `(category,key)`; old value `superseded_by` new. |
 | `getContext` grows unbounded | Add an overall budget guard + per-section caps (facts/entities pinned-first, capped). |
 | `relatedContext` surfaces forgotten/sensitive | Filtered out by default. |
-| purge vs redact reversibility | redact keeps the tombstone row (content gone, not recoverable); purge removes the row. Neither is "undo." |
+| forget reversibility | `forget` destroys content + both embeddings (not recoverable) and keeps a metadata husk; there is **no hard-delete**. Not an "undo." |
+| Husk still holds sensitive metadata | `forget` nulls **all** `ENCRYPTED_FIELDS` columns for the row + the embedding — not just `content`. |
+| Reads still surface forgotten rows | add `AND forgotten_at IS NULL` to every read path (`selectRecent`, search hydrate, `getDailyMessages`, `relatedContext`). |
 
 ## 7. Test strategy (verify:* gates, one per phase)
 
-- **`verify:forget`** — capture → `forget(redact)` → assert: absent from `selectRecent`, absent from `searchMindscape` (index evicted), `embedding_768` null, `clustering_points` row gone, `forget_audit` row written (hash only, no plaintext), enrichment won't re-pick; `purge` → row gone. Wrong ref → fail-closed.
+- **`verify:forget`** — capture → `forget(ref)` → assert: absent from `selectRecent`/`searchMindscape` (index evicted), **all sensitive columns null** + `embedding_768` null, `clustering_points` row gone, `forgotten_at` set (**husk persists — no hard delete**), `forget_audit` written (hash only, no plaintext), enrichment won't re-pick. Wrong ref → fail-closed.
 - **`verify:facts`** — `rememberFact` → `listFacts` → present in `getContext` FACTS → supersede on re-remember → `forgetFact`.
 - **`verify:related`** — `relatedContext(text)` returns ranked hits; excludes forgotten + sensitive; BM25-only when embedder down.
 - **`verify:entities`** — upsert/get/link/forget; NLP-promote backfill dedups.
@@ -203,11 +212,11 @@ A phase is "done" when its `verify:*` gate is `VERDICT: GO`, the changed surface
 
 ## 11. Open decisions (resolve during iteration)
 
-1. **Forget semantics:** tiered `redact`(default)+`purge` *(recommended)* · hard-only · soft-only.
-2. **Facts model:** typed `category/key/value` *(recommended)* · freeform statements with embeddings.
-3. **Entities:** promote NLP-extracted + curate *(recommended)* · user-curated only · defer entirely.
-4. **Tier-2 gating:** present-but-"not ready" message *(recommended)* · hide from `tools/list` until ready.
-5. **Scope/sequencing:** design-all + build **Phase 1 first** *(recommended)* · build all four now · a different subset.
+1. **Forget semantics:** ✅ **RESOLVED → soft-redact only** (no hard `purge`; husk persists for audit).
+2. **Facts model:** ✅ **RESOLVED → typed `category/key/value`**.
+3. **Entities:** working default **promote NLP-extracted + curate** — confirm the curate-vs-user-only sub-call when we reach Phase 3.
+4. **Tier-2 gating:** ✅ **RESOLVED → present-but-"not ready" message** (keep tools listed).
+5. **Scope/sequencing:** ✅ **RESOLVED → build all four phases, sequentially** (Phase 1 → Phase 4).
 
 ## 12. Open questions deferred (out of scope)
 - Account-level "delete everything" (a `DELETION_CATALOG`) — related but separate from per-item forget; V2/portal concern.
