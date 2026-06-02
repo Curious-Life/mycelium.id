@@ -32,7 +32,7 @@ function looksEncrypted(value) {
 }
 
 const names = tools.map((t) => t.name);
-rec('FA1. remember registered; total tools = 35', names.includes('remember') && tools.length === 35, `${tools.length} tools`);
+rec('FA1. remember registered; total tools = 27', names.includes('remember') && tools.length === 27, `${tools.length} tools`);
 
 // ── remember a fact ──
 const PLAIN = 'oat flat white';
@@ -93,8 +93,8 @@ let badValue = false;
 try { await handlers.remember({ category: 'x', key: 'y', value: '   ' }); } catch { badValue = true; }
 rec('FA16. empty value fails closed', badValue, badValue ? 'threw' : 'did NOT throw');
 let badKind = false;
-try { await handlers.remember({ kind: 'entity', category: 'x', key: 'y', value: 'z' }); } catch { badKind = true; }
-rec('FA17. unknown kind fails closed (entities are Phase 3)', badKind, badKind ? 'threw' : 'did NOT throw');
+try { await handlers.remember({ kind: 'nonsense', category: 'x', key: 'y', value: 'z' }); } catch { badKind = true; }
+rec('FA17. unknown kind fails closed', badKind, badKind ? 'threw' : 'did NOT throw');
 
 rawDb.close();
 close();

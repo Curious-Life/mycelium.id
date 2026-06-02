@@ -44,18 +44,18 @@ const factsCtx = await handlers.getContext({ include: ['facts'] });
 rec('G5. remember + facts surface (Tier-1) work pre-clustering', factsCtx.includes('identity/name'), `hasFact=${factsCtx.includes('identity/name')}`);
 
 // ── G6: seeding a clustered point flips readiness MID-SESSION (no restart) ──
-const beforeFlip = await handlers.listTerritories({});
-rec('G6. listTerritories is gated BEFORE clustering', beforeFlip === NR, beforeFlip === NR ? 'not-ready' : String(beforeFlip).slice(0, 40));
+const beforeFlip = await handlers.mindscape({});
+rec('G6. mindscape is gated BEFORE clustering', beforeFlip === NR, beforeFlip === NR ? 'not-ready' : String(beforeFlip).slice(0, 40));
 await db.rawQuery(
   `INSERT INTO clustering_points (id, user_id, source_type, source_id, content, landscape_x, landscape_y) VALUES (?,?,?,?,?,?,?)`,
   ['cp1', U, 'message', 'seed', 'x', 0.1, 0.2],
 );
-const afterFlip = await handlers.listTerritories({});
+const afterFlip = await handlers.mindscape({});
 rec('G7. SAME tool runs its real path AFTER clustering lands (mid-session flip, no restart)', afterFlip !== NR && typeof afterFlip === 'string', `now → "${String(afterFlip).slice(0, 60).replace(/\n/g, ' ')}…"`);
 
 // ── G8: readiness stays flipped (cache) — another Tier-2 tool now ungated too ──
-const harmonic = await handlers.getHarmonicState({});
-rec('G8. readiness is sticky — getHarmonicState also ungated now', harmonic !== NR, `not-ready=${harmonic === NR}`);
+const state = await handlers.cognitiveState({});
+rec('G8. readiness is sticky — cognitiveState also ungated now', state !== NR, `not-ready=${state === NR}`);
 
 close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
