@@ -14,7 +14,7 @@ detail lives in the linked docs. Newest-relevant first.
   `embedding_768` ref a message — aggregates self-heal per `clustering_run_id`); facts is greenfield
   (`user_profiles`≠facts store); `relatedContext`=thin reuse of `backend.query({text})`; Tier-2 gating
   needs an async readiness probe threaded into `buildDomains` (static at boot). v3 LEAN surface (net **31→~27 tools**): 4 lean verbs (remember/forget/mark/link) + reads fold into searchMindscape/getContext; 11 cognitive/topology readers consolidate→3 (cognitiveState/cognitiveHistory/mindscape, behind pre-deletion-caller-audit). Decisions locked §11 (soft-redact-only · typed facts · 'not-ready' gating · lean verbs · slim existing · all phases);
-  build order = Phase 1 (forget+salience) DONE [Phase 0 `a200ed0` · Stage B `9cde646` · Stage C+D `22c1a75`]; next = Phase 2 (facts + relatedContext). Local SQLite only — no D1/Cloudflare.
+  build order = Phase 1 (forget+salience) DONE [Phase 0 `a200ed0` · Stage B `9cde646` · Stage C+D `22c1a75`]; next = Phase 2 (facts + relatedContext). Local SQLite only — no D1/Cloudflare. **Pickup:** [`docs/CONTEXT-BANK-UPGRADE-HANDOFF-2026-06-02.md`](docs/CONTEXT-BANK-UPGRADE-HANDOFF-2026-06-02.md).
 
 - **Account setup + durable data + MCP review (2026-06-02).** **#36 landed on main**
   (account ceremony): the vault now lives in a **durable per-OS data dir** (`src/paths.js`,
