@@ -47,7 +47,7 @@ export function stripPrefix(id) {
 // table would throw SQLITE_ERROR, which the per-source try/catch swallows,
 // silently dropping that whole layer — so every column below is confirmed.
 const SOURCES = [
-  { table: 'messages', sql: 'SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ?', kind: 'message', prefix: '' },
+  { table: 'messages', sql: 'SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ? AND forgotten_at IS NULL', kind: 'message', prefix: '' },
   { table: 'territory_profiles', sql: "SELECT CAST(territory_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM territory_profiles WHERE user_id = ?", kind: 'territory', prefix: ID_PREFIX.territory },
   { table: 'realms', sql: "SELECT CAST(realm_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM realms WHERE user_id = ?", kind: 'realm', prefix: ID_PREFIX.realm },
   { table: 'semantic_themes', sql: "SELECT CAST(semantic_theme_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM semantic_themes WHERE user_id = ?", kind: 'theme', prefix: ID_PREFIX.theme },

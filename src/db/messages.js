@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { buildAgentIdFilter, resolveAgentIds } from '../agent-id-aliases.js';
 
 /**
@@ -149,6 +150,7 @@ export function createMessagesNamespace(deps) {
       const result = await d1Query(
         `SELECT id, content, scope FROM messages
            WHERE user_id = ?
+             AND forgotten_at IS NULL
              AND (nlp_processed = 0 OR nlp_processed IS NULL)
              AND content IS NOT NULL AND content != ''
            ORDER BY created_at ASC
@@ -171,6 +173,7 @@ export function createMessagesNamespace(deps) {
       const result = await d1Query(
         `SELECT id, content, scope FROM messages
            WHERE user_id = ?
+             AND forgotten_at IS NULL
              AND nlp_processed = 2
              AND content IS NOT NULL AND content != ''
            ORDER BY created_at ASC
@@ -210,6 +213,69 @@ export function createMessagesNamespace(deps) {
         `UPDATE messages SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`,
         params,
       );
+    },
+
+    /**
+     * Soft-redact (forget): destroy a message's sensitive payload but keep an
+     * empty tombstone row (id + timestamps) for audit + anti-resurrection. Nulls
+     * every ENCRYPTED_FIELDS column + the embedding (both fingerprints), deletes
+     * the derived clustering_points row, and stamps forgotten_at. Returns the
+     * pre-redaction content hash + length for the audit ledger — NEVER the
+     * plaintext. Local SQLite; literal NULLs so the encrypt layer is a no-op.
+     *
+     * @param {string} id
+     * @param {string} userId
+     * @returns {Promise<{found:boolean, alreadyForgotten?:boolean, contentHash:string|null, length:number}>}
+     */
+    async redact(id, userId) {
+      const cur = await d1Query(
+        `SELECT content, forgotten_at FROM messages WHERE id = ? AND user_id = ?`,
+        [id, userId],
+      );
+      const row = firstRow(cur);
+      if (!row) return { found: false, contentHash: null, length: 0 };
+      if (row.forgotten_at) return { found: true, alreadyForgotten: true, contentHash: null, length: 0 };
+      const content = row.content ?? '';
+      const contentHash = createHash('sha256').update(content, 'utf8').digest('hex');
+      await d1Batch([
+        {
+          sql: `UPDATE messages SET
+                  content = NULL, thinking = NULL, tags = NULL, entities = NULL,
+                  entity_summary = NULL, relations = NULL, metadata = NULL,
+                  suggested_new_tag = NULL, nlp_error = NULL, embedding_768 = NULL,
+                  forgotten_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = ? AND user_id = ?`,
+          params: [id, userId],
+        },
+        {
+          sql: `DELETE FROM clustering_points WHERE user_id = ? AND source_type = 'message' AND source_id = ?`,
+          params: [userId, id],
+        },
+      ]);
+      return { found: true, contentHash, length: content.length };
+    },
+
+    /**
+     * Set user-asserted salience flags on a message. Forgotten rows are
+     * immutable (excluded by the WHERE). RETURNING detects a live match.
+     *
+     * @param {string} id
+     * @param {string} userId
+     * @param {{pinned?:boolean, sensitive?:boolean}} flags
+     */
+    async setSalience(id, userId, { pinned, sensitive } = {}) {
+      const sets = [];
+      const params = [];
+      if (pinned !== undefined) { sets.push('pinned = ?'); params.push(pinned ? 1 : 0); }
+      if (sensitive !== undefined) { sets.push('sensitive = ?'); params.push(sensitive ? 1 : 0); }
+      if (!sets.length) return { found: true, changed: false };
+      params.push(id, userId);
+      const res = await d1Query(
+        `UPDATE messages SET ${sets.join(', ')} WHERE id = ? AND user_id = ? AND forgotten_at IS NULL RETURNING id`,
+        params,
+      );
+      const hit = firstRow(res);
+      return { found: !!hit, changed: !!hit };
     },
 
     /** INSERT OR IGNORE — skips duplicate IDs. Splits into D1's ~100 param limit. */
@@ -297,7 +363,7 @@ export function createMessagesNamespace(deps) {
     async streamForRehydrate(userId, { batchSize = 200, cursor = '', scope } = {}) {
       let sql = `SELECT id, content, scope, created_at, embedding_768
                  FROM messages
-                 WHERE user_id = ? AND id > ? AND embedding_768 IS NOT NULL`;
+                 WHERE user_id = ? AND id > ? AND embedding_768 IS NOT NULL AND forgotten_at IS NULL`;
       const params = [userId, cursor];
       if (scope) {
         // Same scope-fan rule as selectRecent: 'personal' sees personal+org,
@@ -318,10 +384,10 @@ export function createMessagesNamespace(deps) {
     },
 
     async selectRecent(userId, { limit = 10, agentId, since, scope, includeEmbedding768 = false } = {}) {
-      const cols = `id, content, role, source, agent_id, attachment_id, tags, entities, scope, created_at${
+      const cols = `id, content, role, source, agent_id, attachment_id, tags, entities, scope, created_at, pinned${
         includeEmbedding768 ? ', embedding_768' : ''
       }`;
-      let sql = `SELECT ${cols} FROM messages WHERE user_id = ?`;
+      let sql = `SELECT ${cols} FROM messages WHERE user_id = ? AND forgotten_at IS NULL`;
       const params = [userId];
       // Alias-aware filter: personal-agent expands to (personal-agent, mya-personal).
       // Single source of truth in @mycelium/core/agent-id-aliases.js.
@@ -363,7 +429,7 @@ export function createMessagesNamespace(deps) {
     },
 
     async selectPaginated(userId, { since, until, offset = 0, limit = 30, channel, agentId, excludeAgentId } = {}) {
-      let where = `WHERE user_id = ?`;
+      let where = `WHERE user_id = ? AND forgotten_at IS NULL`;
       const params = [userId];
       if (since)   { where += ` AND created_at >= ?`; params.push(since); }
       if (until)   { where += ` AND created_at < ?`;  params.push(until); }
@@ -409,8 +475,8 @@ export function createMessagesNamespace(deps) {
       // (~38k pre-monorepo imports otherwise hidden).
       const agentFilter = buildAgentIdFilter(agentId);
       const where = agentFilter.sql
-        ? `WHERE ${agentFilter.sql} AND user_id = ?`
-        : `WHERE user_id = ?`;
+        ? `WHERE ${agentFilter.sql} AND user_id = ? AND forgotten_at IS NULL`
+        : `WHERE user_id = ? AND forgotten_at IS NULL`;
       const filterParams = [...agentFilter.params, userId];
 
       const countResult = await d1Query(
@@ -431,7 +497,7 @@ export function createMessagesNamespace(deps) {
       // JSON string here. Routes parse it before projecting to the UI so
       // we never leak triage decisions / dedupe nonces / delivery state
       // beyond the read path.
-      let sql = `SELECT id, role, content, source, agent_id, created_at, message_type, attachment_id, metadata FROM messages WHERE user_id = ?`;
+      let sql = `SELECT id, role, content, source, agent_id, created_at, message_type, attachment_id, metadata FROM messages WHERE user_id = ? AND forgotten_at IS NULL`;
       const params = [userId];
       if (before) { sql += ` AND created_at < ?`; params.push(before); }
       if (afterId) {
@@ -458,13 +524,13 @@ export function createMessagesNamespace(deps) {
     },
 
     async countByUser(userId) {
-      const result = await d1Query(`SELECT COUNT(*) as count FROM messages WHERE user_id = ?`, [userId]);
+      const result = await d1Query(`SELECT COUNT(*) as count FROM messages WHERE user_id = ? AND forgotten_at IS NULL`, [userId]);
       return firstRow(result)?.count || 0;
     },
 
     async selectAll(userId, { limit = 500, offset = 0 } = {}) {
       const result = await d1Query(
-        `SELECT id, role, content, source, agent_id, created_at, message_type, attachment_id FROM messages WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+        `SELECT id, role, content, source, agent_id, created_at, message_type, attachment_id FROM messages WHERE user_id = ? AND forgotten_at IS NULL ORDER BY created_at DESC LIMIT ? OFFSET ?`,
         [userId, limit, offset],
       );
       return result.results || [];
@@ -501,7 +567,7 @@ export function createMessagesNamespace(deps) {
            MAX(created_at)                      AS newest,
            SUM(CASE WHEN embedding_768 IS NOT NULL THEN 1 ELSE 0 END) AS embedded
          FROM messages
-         WHERE user_id = ?
+         WHERE user_id = ? AND forgotten_at IS NULL
          GROUP BY source, agent_id
          ORDER BY row_count DESC`,
         [userId],
@@ -538,7 +604,7 @@ export function createMessagesNamespace(deps) {
       const ids = matches.map((m) => m.id);
       const placeholders = ids.map(() => '?').join(', ');
       const result = await d1Query(
-        `SELECT id, content, role, source, agent_id, created_at, entity_summary FROM messages WHERE user_id = ? AND id IN (${placeholders})`,
+        `SELECT id, content, role, source, agent_id, created_at, entity_summary FROM messages WHERE user_id = ? AND id IN (${placeholders}) AND forgotten_at IS NULL`,
         [userId, ...ids],
       );
       const scoreMap = new Map(matches.map((m) => [m.id, m.score]));
@@ -560,7 +626,7 @@ export function createMessagesNamespace(deps) {
 
       const ids = matches.map((m) => m.id);
       const placeholders = ids.map(() => '?').join(', ');
-      let sql = `SELECT id, path, title, summary, content FROM documents WHERE user_id = ? AND id IN (${placeholders})`;
+      let sql = `SELECT id, path, title, summary, content FROM documents WHERE user_id = ? AND id IN (${placeholders}) AND forgotten_at IS NULL`;
       if (!includeInternal) sql += ` AND is_internal = 0`;
       const result = await d1Query(sql, [userId, ...ids]);
 

@@ -17,18 +17,17 @@ import * as path from 'node:path';
 
 import { createHealthDomain } from './tools/health.js';
 import { createTasksDomain } from './tools/tasks.js';
-import { createFisherToolsDomain } from './tools/fisher-tools.js';
+import { createCognitionDomain } from './tools/cognition.js';
 import { createMessagesDomain } from './tools/messages.js';
 import { createDocumentsDomain } from './tools/documents.js';
 import { createInternalDomain } from './tools/internal.js';
 import { createMindFiles, MIND_MIRRORS } from './mindfiles/mind-files.js';
-import { createMetricsDomain } from './tools/metrics.js';
 import { createMindscapeDomain } from './tools/mindscape.js';
 import { createSearchHelpers } from './search/index.js';
-import { createTopologyToolsDomain } from './tools/topology-tools.js';
 import { createTopologyHelpers } from './topology/helpers.js';
 import { createContextDomain } from './tools/context.js';
 import { createIngestDomain } from './tools/ingest.js';
+import { createCurateDomain } from './tools/curate.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { getMasterKey } from './crypto/crypto-local.js';
 
@@ -88,9 +87,11 @@ export function buildDomains({
     // enqueueEnrichment nudges the :8095 service after each save (best-effort,
     // non-fatal when the service is absent — the row is queued at nlp_processed=0).
     createIngestDomain({ db, userId, enqueueEnrichment: createEnqueueEnrichment({ userId }) }),
+    // forget + mark: cross-cutting curate verbs over a {type,id} ref. searchHelpers
+    // is threaded so forget() can evict the in-RAM index; db.audit logs the forget.
+    createCurateDomain({ db, userId, searchHelpers }),
     createHealthDomain({ getDb: () => db, userId }),
     createTasksDomain({ db, userId }),
-    createFisherToolsDomain({ db, userId }),
     createMessagesDomain({ db, userId, agentLabels: AGENT_LABELS, isScoped: () => false }),
     // documents domain mirrors the MIND_MIRRORS paths to mind-files on
     // saveDocument/updateDocument. No searchClient/publicRenderer in V1, so
@@ -107,31 +108,82 @@ export function buildDomains({
       readMindFile: (filename) => mindFiles.readMindFile(filename),
       writeMindFile: (filename, content) => mindFiles.writeMindFile(filename, content),
     }),
-    createMetricsDomain({ db, userId }),
-    createMindscapeDomain({ searchHelpers, userId }),
-    createTopologyToolsDomain({ db, userId, topologyHelpers }),
+    createMindscapeDomain({ searchHelpers, db, userId }),
+    // Phase 5: the 11 cluster/Fisher/metric/topology readers consolidated into
+    // 3 cohesive tools (cognitiveState / cognitiveHistory / mindscape). Reuses
+    // the fisher-tools/metrics/topology-tools handler logic verbatim.
+    createCognitionDomain({ db, userId, topologyHelpers }),
   ];
   // Deferred = domains needing a subsystem not yet built. Each lands with its
   // Wave-2 unit; listed explicitly so the surface is never silently dropped.
   const deferred = ['reply', 'services'];
-  return { domains, deferred };
+  // Cold-start readiness probe (Phase 4). The Tier-2 readers below depend on the
+  // topology pipeline having run (clustering_points with landscape coords). On a
+  // fresh vault they'd return honest-empty; gating turns that into an explicit,
+  // actionable message. The probe re-checks until ready, then caches true forever
+  // (clustering doesn't un-compute) — so a mid-session import+cluster flips it on
+  // the next call with no TTL, and zero queries once ready.
+  const isTopologyReady = makeTopologyReadiness({ db, userId });
+
+  return { domains, deferred, searchHelpers, isTopologyReady };
+}
+
+// Tier-2 tools: the cluster/Fisher/metric/topology readers that need the
+// topology pipeline. NOT the Tier-1 surface (getContext, capture, remember/
+// forget/mark/link, facts/entities listings, documents, mind-files, BM25 search
+// + relatedTo) — those work on a fresh vault and are never gated.
+export const TIER2_TOOLS = new Set([
+  'cognitiveState', 'cognitiveHistory', 'mindscape',
+]);
+
+export const TOPOLOGY_NOT_READY_MESSAGE =
+  "Your mindscape isn't computed yet. Import your conversation history and run clustering first "
+  + '(see docs/HOW-IT-WORKS.md) — then this will show your real cognitive topology. '
+  + 'Meanwhile getContext, searchMindscape (search / facts / entities / people), and capture all work now.';
+
+/**
+ * Build the topology readiness probe. ready iff clustering_points has landscape
+ * rows (db.mindscape.getNoiseStats().total > 0). Caches true once seen; while
+ * not-ready it re-queries each call (cheap COUNT) so readiness flips the moment
+ * clustering lands. A probe failure is treated as not-ready (fail-closed).
+ */
+export function makeTopologyReadiness({ db, userId }) {
+  let ready = false;
+  return async function isTopologyReady() {
+    if (ready) return true;
+    try {
+      const stats = await db?.mindscape?.getNoiseStats?.(userId);
+      if (stats && Number(stats.total) > 0) ready = true;
+    } catch { /* fail-closed: treat as not-ready */ }
+    return ready;
+  };
 }
 
 /**
  * Flatten domains into a tools array + a name->handler map, guarding against
  * duplicate tool names (a real risk when 14 files each declare tools).
  */
-export function collectTools(domains) {
+export function collectTools(domains, gate = null) {
   const tools = [];
   const handlers = Object.create(null);
   for (const d of domains) {
     for (const t of d.tools) {
       if (handlers[t.name]) throw new Error(`duplicate tool name: ${t.name}`);
       tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema });
-      handlers[t.name] = d.handlers[t.name];
-      if (typeof handlers[t.name] !== 'function') {
+      let h = d.handlers[t.name];
+      if (typeof h !== 'function') {
         throw new Error(`tool '${t.name}' has no handler`);
       }
+      // Cold-start gating (Phase 4): a Tier-2 reader returns the uniform
+      // "not ready" message until the topology pipeline has run, instead of
+      // honest-empty. Tier-1 tools are never wrapped. Readiness is re-checked
+      // per call (the probe caches once ready), so this reflects mid-session
+      // clustering with no restart.
+      if (gate && typeof gate.isReady === 'function' && gate.gatedTools?.has(t.name)) {
+        const inner = h;
+        h = async (args) => (await gate.isReady()) ? inner(args) : (gate.message || 'Not ready yet.');
+      }
+      handlers[t.name] = h;
     }
   }
   return { tools, handlers };

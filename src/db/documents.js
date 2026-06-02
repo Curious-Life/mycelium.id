@@ -14,7 +14,7 @@
  * @property {(result: any) => any} firstRow
  */
 
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 
 /** A fresh capability epoch for unlisted links (16 bytes hex = 128 bits). */
 function randomNonce() {
@@ -84,7 +84,7 @@ export function createDocumentsNamespace(deps) {
 
     async get(userId, path) {
       const result = await d1Query(
-        `SELECT * FROM documents WHERE user_id = ? AND path = ?`,
+        `SELECT * FROM documents WHERE user_id = ? AND path = ? AND forgotten_at IS NULL`,
         [userId, path],
       );
       return firstRow(result);
@@ -119,7 +119,7 @@ export function createDocumentsNamespace(deps) {
       // db-d1's read path). Cost: extra column read + one decrypt per
       // row. Acceptable for 600+ row libraries; revisit if list-view
       // perf degrades.
-      let sql = `SELECT path, title, summary, folder_id, is_pinned AS pinned, source_type, created_by, metadata, updated_at FROM documents WHERE user_id = ? AND is_internal = ?`;
+      let sql = `SELECT path, title, summary, folder_id, is_pinned AS pinned, source_type, created_by, metadata, updated_at FROM documents WHERE user_id = ? AND is_internal = ? AND forgotten_at IS NULL`;
       const params = [userId, internalOnly ? 1 : 0];
       if (category) { sql += ` AND path LIKE ?`; params.push(`${category}/%`); }
       if (folderId) { sql += ` AND folder_id = ?`; params.push(folderId); }
@@ -211,6 +211,60 @@ export function createDocumentsNamespace(deps) {
       if (afterDeleteHooks.length) fireHooks(afterDeleteHooks, { user_id: userId, path });
     },
 
+    /**
+     * Soft-redact (forget) a document: null every encrypted column + the
+     * embedding, delete the derived clustering_points row, stamp forgotten_at.
+     * Keeps the path/timestamps husk for audit. Returns the pre-redaction
+     * content hash + length for the audit ledger — never plaintext. Fires the
+     * after-delete hooks so broadcasters/publishing react. Local SQLite.
+     */
+    async redact(userId, path) {
+      const cur = await d1Query(
+        `SELECT id, content, forgotten_at FROM documents WHERE user_id = ? AND path = ?`,
+        [userId, path],
+      );
+      const row = firstRow(cur);
+      if (!row) return { found: false, contentHash: null, length: 0 };
+      if (row.forgotten_at) return { found: true, alreadyForgotten: true, contentHash: null, length: 0 };
+      const content = row.content ?? '';
+      const contentHash = createHash('sha256').update(content, 'utf8').digest('hex');
+      await d1Query(
+        `UPDATE documents SET
+           content = NULL, summary = NULL, title = NULL, tags = NULL, entities = NULL,
+           relations = NULL, metadata = NULL, entity_summary = NULL, source_path = NULL,
+           embedding_768 = NULL,
+           forgotten_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE user_id = ? AND path = ?`,
+        [userId, path],
+      );
+      await d1Query(
+        `DELETE FROM clustering_points WHERE user_id = ? AND source_type = 'document' AND source_id = ?`,
+        [userId, row.id],
+      );
+      if (afterDeleteHooks.length) fireHooks(afterDeleteHooks, { user_id: userId, path });
+      return { found: true, contentHash, length: content.length };
+    },
+
+    /**
+     * Set user-asserted salience on a document. Reuses is_pinned; adds sensitive.
+     * Forgotten docs are immutable (excluded by WHERE). Fires upsert hooks so the
+     * library list view reflects the change.
+     */
+    async setSalience(userId, path, { pinned, sensitive } = {}) {
+      const sets = ["updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"];
+      const params = [];
+      if (pinned !== undefined) { sets.push('is_pinned = ?'); params.push(pinned ? 1 : 0); }
+      if (sensitive !== undefined) { sets.push('sensitive = ?'); params.push(sensitive ? 1 : 0); }
+      params.push(userId, path);
+      const result = await d1Query(
+        `UPDATE documents SET ${sets.join(', ')} WHERE user_id = ? AND path = ? AND forgotten_at IS NULL RETURNING *`,
+        params,
+      );
+      const row = firstRow(result);
+      if (row && afterUpsertHooks.length) fireHooks(afterUpsertHooks, row);
+      return { found: !!row, changed: !!row };
+    },
+
     // ── Publishing (migration 138) ──────────────────────────────────────
 
     /**
@@ -221,7 +275,7 @@ export function createDocumentsNamespace(deps) {
      */
     async getBySlug(userId, slug) {
       const result = await d1Query(
-        `SELECT * FROM documents WHERE user_id = ? AND public_slug = ? LIMIT 1`,
+        `SELECT * FROM documents WHERE user_id = ? AND public_slug = ? AND forgotten_at IS NULL LIMIT 1`,
         [userId, slug],
       );
       return firstRow(result);

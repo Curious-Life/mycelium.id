@@ -35,14 +35,14 @@ export function createContextDomain(deps) {
         + 'Returns a single briefing: the current date/time, your private internal model, anything '
         + 'flagged for discussion, recent messages across channels, your current cognitive phase, and '
         + 'recent body-state (sleep/HRV/steps). After this, pull more detail on demand with '
-        + 'searchMindscape, getDocument, getDailyMessages, or exploreTerritory.',
+        + 'searchMindscape, getDocument, getDailyMessages, or mindscape (topology by view).',
       inputSchema: {
         type: 'object',
         properties: {
           recentMessages: { type: 'number', description: 'How many recent messages to include (default 10, max 40).' },
           include: {
             type: 'array',
-            items: { type: 'string', enum: ['mind', 'messages', 'phase', 'health'] },
+            items: { type: 'string', enum: ['mind', 'facts', 'people', 'messages', 'phase', 'health'] },
             description: 'Limit to specific sections. Omit for all.',
           },
         },
@@ -79,6 +79,32 @@ export function createContextDomain(deps) {
         if (flagged) sections.push(`---\n# FLAGGED FOR DISCUSSION\n\n${flagged.trim()}`);
       }
 
+      // ── facts you know (durable; pinned-first; sensitive excluded) ──
+      if (want(include, 'facts') && db?.facts) {
+        try {
+          const rows = await db.facts.forContext({ userId, limit: 30 });
+          if (rows?.length) {
+            const lines = rows
+              .map((f) => `- ${f.pinned ? '📌 ' : ''}**${f.category}/${f.key}**: ${(f.value || '').slice(0, 200)}`)
+              .join('\n');
+            sections.push(`---\n# FACTS YOU KNOW\n\n${lines}`);
+          }
+        } catch { /* non-fatal */ }
+      }
+
+      // ── people & projects (pinned entities only; sensitive excluded) ──
+      if (want(include, 'people') && db?.entities) {
+        try {
+          const rows = await db.entities.forContext({ userId, limit: 20 });
+          if (rows?.length) {
+            const lines = rows
+              .map((e) => `- **${e.type}: ${e.name}**${e.summary ? ` — ${(e.summary || '').slice(0, 160)}` : ''}`)
+              .join('\n');
+            sections.push(`---\n# PEOPLE & PROJECTS\n\n${lines}`);
+          }
+        } catch { /* non-fatal */ }
+      }
+
       // ── recent messages ──
       if (want(include, 'messages') && db?.messages) {
         try {
@@ -91,7 +117,7 @@ export function createContextDomain(deps) {
               .map((m) => {
                 const who = m.role === 'user' ? 'Human' : 'You';
                 const when = (m.created_at || '').replace('T', ' ').slice(0, 16);
-                return `**${who}** _${when}_: ${(m.content || '').slice(0, 500)}`;
+                return `${m.pinned ? '📌 ' : ''}**${who}** _${when}_: ${(m.content || '').slice(0, 500)}`;
               })
               .join('\n');
             sections.push(`---\n# RECENT MESSAGES (last ${rows.length})\n\n${lines}`);

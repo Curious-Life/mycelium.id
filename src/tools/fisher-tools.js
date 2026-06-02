@@ -1,4 +1,9 @@
 /**
+ * [Phase 5] INTERNAL — folded into the cognition domain (src/tools/cognition.js).
+ * createCognitionDomain reuses these .handlers verbatim under cognitiveState /
+ * cognitiveHistory; this factory's .tools array is no longer registered. Not a
+ * standalone MCP domain anymore.
+ *
  * Fisher trajectory MCP tools — four tools that surface cognitive
  * movement metrics to agents.
  *

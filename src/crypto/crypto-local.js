@@ -228,6 +228,17 @@ const ENCRYPTED_FIELDS = {
     'source_path',
   ],
 
+  // Facts — typed durable truths (category/key -> value). Only `value` is
+  // sensitive; category/key stay plaintext so they remain queryable and carry
+  // the UNIQUE upsert target. See migrations/0005_facts.sql.
+  facts: ['value'],
+
+  // Entities — people/projects/places/orgs. name/aliases/summary are sensitive;
+  // type/source/counts stay plaintext for filtering. Dedup is app-layer (name is
+  // non-deterministically encrypted). entity_links holds only ids/enums — no
+  // encrypted columns. See migrations/0006_entities.sql.
+  entities: ['name', 'aliases', 'summary'],
+
   // Attachments — filenames often verbatim describe content.
   // file_type + file_size can fingerprint content via ML; accept that
   // as metadata leak for now (breaks listing UI if encrypted).
@@ -1247,9 +1258,17 @@ function parseWriteSQL(sql) {
     const encrypted = getEncryptedFields(table);
     if (!encrypted.length) return null;
 
-    const setMatch = sql.match(/SET\s+(.+?)(?:\s+WHERE|\s+ORDER|\s+LIMIT|\s+RETURNING|;|$)/i);
+    // [Security] `/s` (dotall) is REQUIRED: without it `.` stops at the first
+    // newline, so a MULTI-LINE `SET` clause never reaches WHERE → setMatch is
+    // null → parseWriteSQL returns null → autoEncryptParams skips the whole
+    // statement → encrypted columns get written as PLAINTEXT. (Caught live: an
+    // entity `summary` leaked through the multi-line entities-upsert UPDATE.)
+    // splitValueExprs() splits on TOP-LEVEL commas only, so a value like
+    // `strftime('%Y-%m-%dT%H:%M:%fZ','now')` stays one assignment (the inner
+    // comma doesn't shift the param index of a later encrypted column).
+    const setMatch = sql.match(/SET\s+(.+?)(?:\s+WHERE|\s+ORDER|\s+LIMIT|\s+RETURNING|;|$)/is);
     if (!setMatch) return null;
-    const assignments = setMatch[1].split(',').map(s => s.trim());
+    const assignments = splitValueExprs(setMatch[1]).map(s => s.trim());
     const encryptedParamIndices = [];
     let paramIndex = 0;
     for (const assign of assignments) {

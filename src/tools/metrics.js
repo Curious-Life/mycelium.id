@@ -1,4 +1,9 @@
 /**
+ * [Phase 5] INTERNAL — folded into the cognition domain (src/tools/cognition.js).
+ * createCognitionDomain reuses these .handlers (getHarmonicState via
+ * cognitiveState, getMetricSeries via cognitiveHistory); this factory's .tools
+ * array is no longer registered. Not a standalone MCP domain anymore.
+ *
  * Cognitive metrics MCP tools — surfaces the information-harmonics family
  * (PR1 v3 §4.23 + §4.33 + §4.34) to agents.
  *

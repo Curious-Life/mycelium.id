@@ -55,7 +55,7 @@ async function main() {
     // P3 — API not shadowed by the static mount
     const tools = await (await fetch(`${url}/api/v1/tools`)).json();
     rec('P3. GET /api/v1/tools works alongside the static mount',
-      tools.ok === true && Array.isArray(tools.tools) && tools.tools.length >= 30, `count=${tools.tools?.length}`);
+      tools.ok === true && Array.isArray(tools.tools) && tools.tools.length >= 25, `count=${tools.tools?.length}`);
 
     // P4 — a real tool call (same origin the portal uses)
     const ctx = await (await fetch(`${url}/api/v1/getContext`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).json();
