@@ -18,6 +18,10 @@ serde_json = "1"
 # Native NSVisualEffectView vibrancy behind the transparent webview.
 window-vibrancy = "0.6"
 
+[target.'cfg(unix)'.dependencies]
+# Process-group kill — libc::kill(-pgid, …) reaps sidecars + grandchildren on exit.
+libc = "0.2"
+
 [profile.release]
 opt-level = "s"
 lto = true
