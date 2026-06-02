@@ -26,12 +26,18 @@ export default {
 				secondary: 'var(--color-text-secondary)',
 				tertiary: 'var(--color-text-tertiary)',
 				emphasis: 'var(--color-text-emphasis)',
-				// Accents
-				accent: 'var(--color-accent)',
-				aurum: 'var(--color-accent-aurum)',
-				amethyst: 'var(--color-accent-amethyst)',
-				coral: 'var(--color-accent-coral)',
-				jade: 'var(--color-accent-jade)',
+				// Accents — sourced from RGB channel triplets in tokens.css so the
+				// utilities support Tailwind's /opacity modifier (bg-aurum/10,
+				// from-azure/5, border-coral/30). Plain `var(--color-accent)` here
+				// breaks the modifier — rgb(<full-color> / α) is invalid CSS — which
+				// silently dropped every accent/N tint across ~15 components.
+				// (Design system from the design-system branch, ported to portal-app.)
+				accent: 'rgb(var(--color-accent-rgb) / <alpha-value>)',
+				azure: 'rgb(var(--color-accent-rgb) / <alpha-value>)',
+				aurum: 'rgb(var(--color-accent-aurum-rgb) / <alpha-value>)',
+				amethyst: 'rgb(var(--color-accent-amethyst-rgb) / <alpha-value>)',
+				coral: 'rgb(var(--color-accent-coral-rgb) / <alpha-value>)',
+				jade: 'rgb(var(--color-accent-jade-rgb) / <alpha-value>)',
 			},
 			fontFamily: {
 				sans: ['Geist', 'system-ui', 'sans-serif'],
