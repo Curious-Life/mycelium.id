@@ -55,6 +55,18 @@ fn mycelium_home(app: &tauri::App) -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
+/// Is remote access enabled? Reads <data_dir>/remote.json (written by the
+/// Settings UI via /api/v1/remote/config). Best-effort: false on any error
+/// (missing file, parse failure, key absent) — remote stays OFF unless the
+/// config explicitly says `"remoteEnabled": true`.
+fn remote_enabled(data_dir: &std::path::Path) -> bool {
+    std::fs::read_to_string(data_dir.join("remote.json"))
+        .ok()
+        .and_then(|txt| serde_json::from_str::<serde_json::Value>(&txt).ok())
+        .and_then(|v| v.get("remoteEnabled").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -66,7 +78,7 @@ fn main() {
             cmd.arg("src/server-rest.js")
                 .current_dir(&home)
                 .env("MYCELIUM_REST_PORT", PORT.to_string())
-                .env("MYCELIUM_KEY_SOURCE", key_source);
+                .env("MYCELIUM_KEY_SOURCE", &key_source);
 
             // Durable per-OS data dir — on macOS this is
             // ~/Library/Application Support/id.mycelium.app. Passing it as
@@ -109,6 +121,33 @@ fn main() {
                     Err(e) => eprintln!(
                         "[mycelium] embed service did not start ({e}) — imports won't embed until it's available"
                     ),
+                }
+            }
+
+            // Remote MCP (OAuth) server — started ONLY when the user enabled
+            // remote access (Settings → Remote access writes remoteEnabled to
+            // remote.json). Tauri OWNS this child so it dies with the app (clean
+            // teardown via the Destroyed handler below). It binds 127.0.0.1:4711;
+            // public reachability + TLS is the tunnel's job (Phase 3). The server
+            // resolves its base URL + signing secret + operator user from the
+            // persisted config (Phase 1), so no secrets are passed here.
+            if let Ok(data_dir) = app.path().app_data_dir() {
+                if remote_enabled(&data_dir) {
+                    let spawned = Command::new("node")
+                        .arg("src/index.js")
+                        .arg("--http")
+                        .current_dir(&home)
+                        .env("MYCELIUM_PORT", "4711")
+                        .env("MYCELIUM_KEY_SOURCE", &key_source)
+                        .env("MYCELIUM_DATA_DIR", &data_dir)
+                        .spawn();
+                    match spawned {
+                        Ok(c) => {
+                            children.push(c);
+                            eprintln!("[mycelium] remote MCP (OAuth) server starting on 127.0.0.1:4711");
+                        }
+                        Err(e) => eprintln!("[mycelium] remote MCP server did not start ({e})"),
+                    }
                 }
             }
 

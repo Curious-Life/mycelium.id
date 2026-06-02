@@ -7,6 +7,7 @@
 	import { preparePrfOptions } from '$lib/passkey-prf';
 	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
+	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 
 	interface Settings {
 		timezone: string;
@@ -1501,6 +1502,9 @@
 
 			<!-- Voice / TTS — provider config + per-voice preview -->
 			<VoiceSection />
+
+			<!-- Remote access — connect Claude (mobile/web) over a tunnel (Phase 2) -->
+			<RemoteAccessSection />
 
 			<!-- External Integrations — user-supplied API credentials -->
 			<section class="card p-5">

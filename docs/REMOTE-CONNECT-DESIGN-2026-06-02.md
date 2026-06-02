@@ -39,6 +39,7 @@ This design gets to a **working phone test by end of Phase 4** (Phases 1-2 backe
   - **Pivot B — secrets to Keychain, not plaintext JSON.** Sweep 5 proposed `remote.json` holding the auth secret in plaintext. `MYCELIUM_AUTH_SECRET` is a token-**signing** secret; leaking it = forgeable tokens. Pivot: secrets (auth secret, operator password) live in the **Keychain** (existing `keystore.js` pattern); `remote.json` holds only non-secret config (publicBaseUrl, remoteEnabled, operatorEmail).
   - **Pivot C — phased tunnel.** No one-click tunnel exists. Phase 3a = manual named tunnel (unblocks the phone test); 3b = bundled `cloudflared` sidecar; managed relay = Phase 5.
 - **v3 (during Phase 1 build — supersedes part of Pivot B):** the OAuth **signing secret** lives in **`auth.db`** (a `mycelium_app_secret` table), not the Keychain — it sits *with* the session tokens it already signs (no added blast radius; the vault master key stays Keychain-only) and is **CI-testable + portable** (the Keychain is neither). The **operator password** is stored by **better-auth** (hashed into `auth.db`) via `setOperatorPassword()`; we persist only the non-secret `operatorEmail` in `remote.json`. Built + green: `verify:remote-config` GO (RC1-6).
+- **v4 (during Phase 2 build):** the Settings toggle does NOT use Tauri IPC commands — `portal-app` has no `@tauri-apps/api` dependency (Sweep). Instead the panel writes `remoteEnabled` to `remote.json` via `POST /api/v1/remote/config`, and the Tauri shell **reads it at startup** (`remote_enabled()` in `main.rs`) and spawns/owns the `--http` child. Clean teardown, no IPC, fully HTTP-testable; the trade-off is a toggle applies on the **next app launch** (instant start/stop is a later polish). `cargo check` + portal build GO.
 
 ---
 
@@ -111,10 +112,11 @@ This design gets to a **working phone test by end of Phase 4** (Phases 1-2 backe
 - `scripts/verify-remote-config.mjs` (new, ~150) + `package.json` chain (before `verify:oauth`). RC1-6 GO. ✓
 - *Deferred to Phase 2:* changing an existing password (better-auth update API; `setOperatorPassword` is first-set only).
 
-### Phase 2 — Tauri launches `--http` + IPC + Settings UI · ~210 LOC
-- `src-tauri/src/main.rs` (+~60 Rust): when `remoteEnabled`, spawn a 2nd child `node src/index.js --http` with env `{ MYCELIUM_PORT=4711, MYCELIUM_KEY_SOURCE, MYCELIUM_DATA_DIR, MYCELIUM_BASE_URL, MYCELIUM_AUTH_SECRET, MYCELIUM_USER_PASSWORD, MYCELIUM_USER_EMAIL }` (read from remote-config/Keychain via a tiny node `--print-remote-env` helper, or pass-through). Add `#[tauri::command] enable_remote / disable_remote / remote_status`. Manage in the existing `Server(Mutex<Vec<Child>>)`.
-- Portal Settings (+~120 Svelte): a "Remote access" panel — set password, toggle, show status + public URL + a "Disconnect" button.
-- `GET /api/v1/.../remote/status` (+~30 node).
+### Phase 2 — Tauri launches `--http` + Settings UI · ~210 LOC — **BUILT ✓ (cargo check + portal build GO)**
+- `src-tauri/src/main.rs` (+~25 Rust) + `Cargo.toml` (`serde_json`): at startup `remote_enabled()` reads `<dataDir>/remote.json`; if true, spawn `node src/index.js --http` (env `MYCELIUM_PORT=4711` + `MYCELIUM_KEY_SOURCE` + `MYCELIUM_DATA_DIR`) into the existing `Server(Mutex<Vec<Child>>)` (clean teardown on quit). No secrets passed — resolved from persisted config (Phase 1). ✓
+- `portal-app/src/lib/components/settings/RemoteAccessSection.svelte` (new) + mounted in the settings page: set password, set public URL, enable toggle, live status badges (enabled / running :4711 / password-set), connector URL, "restart to apply". Pure HTTP via `api()`. ✓
+- `src/remote/router.js`: `GET /status` gains a live `:4711` `httpListening` probe. ✓
+- **(v4 pivot: config-reconcile at startup, NOT Tauri IPC — see revision history.)**
 
 ### Phase 3 — Tunnel · 3a ~0 code (manual) / 3b ~150 LOC + bundled binary
 - **3a (unblocks phone test):** operator runs a named `cloudflared` tunnel → a stable host; app reads `publicBaseUrl` from `remote.json`. A `scripts/tunnel.sh` helper (the one V1-SPEC §187 promised) wrapping `cloudflared tunnel create/route/run`.

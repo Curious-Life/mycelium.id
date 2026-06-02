@@ -4,7 +4,21 @@
 // trust model as account/router.js: single-user, loopback-only (defence in
 // depth — these touch the auth gate). Never returns a secret value.
 import express from 'express';
+import net from 'node:net';
 import { readRemoteConfig, writeRemoteConfig, setOperatorPassword, operatorUserExists } from './config.js';
+
+/** Is the remote OAuth server actually listening (so the UI shows live state vs
+ *  "enabled — restart to apply")? Best-effort TCP probe; never throws. */
+function probeListening(port, host = '127.0.0.1', timeoutMs = 400) {
+  return new Promise((resolve) => {
+    const sock = net.connect({ port, host });
+    const done = (v) => { try { sock.destroy(); } catch { /* */ } resolve(v); };
+    sock.setTimeout(timeoutMs);
+    sock.once('connect', () => done(true));
+    sock.once('timeout', () => done(false));
+    sock.once('error', () => done(false));
+  });
+}
 
 export function remoteRouter() {
   const router = express.Router();
@@ -18,13 +32,15 @@ export function remoteRouter() {
   });
 
   // Current remote-access state for the Settings panel. No secrets.
-  router.get('/status', (_req, res) => {
+  router.get('/status', async (_req, res) => {
     const rc = readRemoteConfig();
+    const port = Number(process.env.MYCELIUM_PORT) || 4711;
     res.json({
       remoteEnabled: rc.remoteEnabled,
       publicBaseUrl: rc.publicBaseUrl,
       operatorEmail: rc.operatorEmail,
       passwordSet: operatorUserExists(),
+      httpListening: await probeListening(port),
     });
   });
 
