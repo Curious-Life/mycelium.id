@@ -10,6 +10,7 @@ import { unlock } from '../crypto/keys.js';
 import {
   generateUserMaster, deriveSystemKey, normalizeKey,
   writeKeychain, readUserMaster, keychainAvailable,
+  onePasswordAvailable, saveRecoveryKeyToKeychain, saveRecoveryKeyTo1Password, openInStore,
 } from './keystore.js';
 
 /**
@@ -30,7 +31,11 @@ export function accountRouter({ isInitialized, completeBoot, kcvPath }) {
 
   // Does the app need a first-run setup screen? The UI gates on this.
   router.get('/status', (_req, res) => {
-    res.json({ initialized: Boolean(isInitialized()), keychainAvailable: keychainAvailable() });
+    res.json({
+      initialized: Boolean(isInitialized()),
+      keychainAvailable: keychainAvailable(),
+      onePasswordAvailable: onePasswordAvailable(),
+    });
   });
 
   // First run: generate a key, store it, open the vault, return the key ONCE.
@@ -78,6 +83,27 @@ export function accountRouter({ isInitialized, completeBoot, kcvPath }) {
     const key = readUserMaster();
     if (!key) return res.status(404).json({ error: 'no_key' });
     res.json({ recoveryKey: key });
+  });
+
+  // One-click "save my recovery key" to the Keychain or 1Password. The key is
+  // read server-side and handed to the chosen store — it never returns to the
+  // client. { target: 'keychain' | '1password' }.
+  router.post('/recovery-key/save', (req, res) => {
+    const key = readUserMaster();
+    if (!key) return res.status(404).json({ error: 'no_key' });
+    const target = req.body?.target;
+    try {
+      if (target === 'keychain') saveRecoveryKeyToKeychain(key);
+      else if (target === '1password') saveRecoveryKeyTo1Password(key);
+      else return res.status(400).json({ error: 'bad_target' });
+      openInStore(target); // best-effort: reveal it natively so the user SEES it
+      return res.json({ ok: true, opened: target, item: 'Mycelium Recovery Key' });
+    } catch (err) {
+      const msg = target === '1password'
+        ? 'Could not save to 1Password — is the `op` CLI installed and signed in?'
+        : String(err?.message || err);
+      return res.status(500).json({ error: 'save_failed', message: msg });
+    }
   });
 
   return router;
