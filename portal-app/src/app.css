@@ -280,4 +280,19 @@ html, body {
 	opacity: 1;
 	pointer-events: auto;
 }
+
+/* ── Desktop (Tauri) WKWebView repaint fix ──────────────────────────────────
+   WebKit (behind the macOS WKWebView) fails to repaint content inside a
+   `backdrop-filter` region when that content changes — dynamic text FLICKERS,
+   and conditionally-rendered sections (e.g. the Generate progress card) don't
+   paint at all. The identical page is perfect in Chromium. The desktop window is
+   OPAQUE (#0A0A0C), so the blur is visually pointless there anyway — drop ALL
+   backdrop-filter inside the app. The browser build keeps the frosted glass.
+   `is-tauri` is added to <html> in +layout.svelte when Tauri is detected. */
+html.is-tauri *,
+html.is-tauri *::before,
+html.is-tauri *::after {
+	backdrop-filter: none !important;
+	-webkit-backdrop-filter: none !important;
+}
 /* cache bust 1776593089 */
