@@ -135,6 +135,28 @@ try {
   try { srv.child.kill(); } catch { /* ignore */ }
 }
 
+// RC7 — transport config keys round-trip; publicBaseUrl derives from publicHost;
+// env precedence holds. (After the server tests so it can clear publicBaseUrl.)
+cfg.writeRemoteConfig({ remoteMode: 'managed', publicHost: 'alice.mycelium.id', publicBaseUrl: '', relayAddr: 'relay.example:7000', relayVhostPort: 443, acmeDnsServer: 'https://acme.test', controlPlaneUrl: 'https://cp.test' });
+const rc2 = cfg.readRemoteConfig();
+const rcEnv = cfg.readRemoteConfig({ env: { ...process.env, MYCELIUM_REMOTE_MODE: 'own-relay' } });
+rec('RC7. transport keys round-trip; publicBaseUrl derives from publicHost; env wins',
+  rc2.remoteMode === 'managed' && rc2.publicHost === 'alice.mycelium.id'
+  && rc2.publicBaseUrl === 'https://alice.mycelium.id'
+  && rc2.relayAddr === 'relay.example:7000' && rc2.relayVhostPort === 443
+  && rc2.acmeDnsServer === 'https://acme.test' && rc2.controlPlaneUrl === 'https://cp.test'
+  && rcEnv.remoteMode === 'own-relay',
+  `mode=${rc2.remoteMode} base=${rc2.publicBaseUrl} relay=${rc2.relayAddr} envMode=${rcEnv.remoteMode}`);
+
+// RC8 — the auth.db secret store (relay token / acme-dns creds): set/get/overwrite.
+cfg.setRemoteSecret('relayToken', 'tok-aaa');
+const g1 = cfg.getRemoteSecret('relayToken');
+cfg.setRemoteSecret('relayToken', 'tok-bbb');
+const g2 = cfg.getRemoteSecret('relayToken');
+rec('RC8. remote secret store set/get/overwrite; unknown=null',
+  g1 === 'tok-aaa' && g2 === 'tok-bbb' && cfg.getRemoteSecret('nope') === null,
+  `g1=${g1} g2=${g2}`);
+
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
 console.log(`VERDICT: ${allPass ? 'GO — OAuth server boots from persisted config; secret stable; gate enforced' : 'NO-GO — see FAIL rows'}`);

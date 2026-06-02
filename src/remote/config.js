@@ -26,6 +26,13 @@ import { remoteConfigPath, authDbPath } from '../paths.js';
 const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
 const DEFAULT_EMAIL = 'operator@mycelium.local';
 
+// Managed-endpoint defaults — mycelium operates these; a full-control user
+// overrides relayAddr/acmeDnsServer/controlPlaneUrl to a self-hosted instance.
+// "Managed" is just mycelium running the same open-source stack.
+const DEFAULT_CONTROL_PLANE = 'https://connect.mycelium.id';
+const DEFAULT_ACME_DNS = 'https://acme-dns.mycelium.id';
+const REMOTE_MODES = new Set(['off', 'managed', 'own-relay', 'direct']);
+
 function readFileJson(p) {
   if (!existsSync(p)) return {};
   try { return JSON.parse(readFileSync(p, 'utf8')) || {}; } catch { return {}; }
@@ -38,10 +45,22 @@ function readFileJson(p) {
  */
 export function readRemoteConfig({ env = process.env } = {}) {
   const file = readFileJson(remoteConfigPath({ env }));
+  const remoteMode = clean(env.MYCELIUM_REMOTE_MODE) || clean(file.remoteMode) || 'off';
+  const publicHost = clean(env.MYCELIUM_PUBLIC_HOST) || clean(file.publicHost) || '';
   return {
-    publicBaseUrl: clean(env.MYCELIUM_BASE_URL) || clean(file.publicBaseUrl) || '',
+    // publicBaseUrl derives from publicHost when not set explicitly, so the
+    // managed/own-relay flows only need to persist the host.
+    publicBaseUrl:
+      clean(env.MYCELIUM_BASE_URL) || clean(file.publicBaseUrl)
+        || (publicHost ? `https://${publicHost}` : ''),
     operatorEmail: clean(env.MYCELIUM_USER_EMAIL) || clean(file.operatorEmail) || DEFAULT_EMAIL,
     remoteEnabled: env.MYCELIUM_REMOTE_ENABLED === '1' || file.remoteEnabled === true,
+    remoteMode: REMOTE_MODES.has(remoteMode) ? remoteMode : 'off',
+    publicHost,
+    relayAddr: clean(env.MYCELIUM_RELAY_ADDR) || clean(file.relayAddr) || '',
+    relayVhostPort: Number(env.MYCELIUM_RELAY_VHOST_PORT) || Number(file.relayVhostPort) || 443,
+    acmeDnsServer: clean(env.MYCELIUM_ACME_DNS) || clean(file.acmeDnsServer) || DEFAULT_ACME_DNS,
+    controlPlaneUrl: clean(env.MYCELIUM_CONTROL_PLANE) || clean(file.controlPlaneUrl) || DEFAULT_CONTROL_PLANE,
   };
 }
 
@@ -55,6 +74,13 @@ export function writeRemoteConfig(patch = {}, { env = process.env } = {}) {
   if (typeof patch.publicBaseUrl === 'string') next.publicBaseUrl = patch.publicBaseUrl.trim();
   if (typeof patch.operatorEmail === 'string') next.operatorEmail = patch.operatorEmail.trim();
   if (typeof patch.remoteEnabled === 'boolean') next.remoteEnabled = patch.remoteEnabled;
+  // Transport keys (all NON-secret — secrets go in auth.db via setRemoteSecret).
+  if (typeof patch.remoteMode === 'string' && REMOTE_MODES.has(patch.remoteMode)) next.remoteMode = patch.remoteMode;
+  if (typeof patch.publicHost === 'string') next.publicHost = patch.publicHost.trim();
+  if (typeof patch.relayAddr === 'string') next.relayAddr = patch.relayAddr.trim();
+  if (typeof patch.relayVhostPort === 'number' && Number.isFinite(patch.relayVhostPort)) next.relayVhostPort = patch.relayVhostPort;
+  if (typeof patch.acmeDnsServer === 'string') next.acmeDnsServer = patch.acmeDnsServer.trim();
+  if (typeof patch.controlPlaneUrl === 'string') next.controlPlaneUrl = patch.controlPlaneUrl.trim();
   mkdirSync(dirname(p), { recursive: true });
   const tmp = `${p}.tmp`;
   writeFileSync(tmp, JSON.stringify(next, null, 2));
@@ -89,6 +115,52 @@ export function resolveAuthSecret({ env = process.env } = {}) {
     const secret = randomBytes(32).toString('hex');
     db.prepare('INSERT INTO mycelium_app_secret (id, secret) VALUES (1, ?)').run(secret);
     return secret;
+  } finally {
+    db.close();
+  }
+}
+
+// ── Remote-transport secret store ────────────────────────────────────────────
+// Credentials RECEIVED from a control-plane (the FRP relay token, the acme-dns
+// creds) live in auth.db — NEVER remote.json (which is plaintext, non-secret),
+// mirroring resolveAuthSecret. Never logged (CLAUDE.md §1). A :memory: auth.db
+// has no persistent store (tests pass it explicitly).
+function remoteSecretDb({ env = process.env } = {}) {
+  const dbp = authDbPath({ env });
+  if (dbp === ':memory:') return null;
+  mkdirSync(dirname(dbp), { recursive: true });
+  const db = new Database(dbp);
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS mycelium_remote_secret (
+       key TEXT PRIMARY KEY,
+       value TEXT NOT NULL,
+       created_at TEXT NOT NULL DEFAULT (datetime('now'))
+     )`,
+  );
+  return db;
+}
+
+export function setRemoteSecret(key, value, { env = process.env } = {}) {
+  if (typeof key !== 'string' || !key) throw new Error('remote secret: key required');
+  if (typeof value !== 'string' || !value) throw new Error('remote secret: value required');
+  const db = remoteSecretDb({ env });
+  if (!db) throw new Error('remote secret: auth.db is :memory: (no persistent store)');
+  try {
+    db.prepare(
+      `INSERT INTO mycelium_remote_secret (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).run(key, value);
+  } finally {
+    db.close();
+  }
+}
+
+export function getRemoteSecret(key, { env = process.env } = {}) {
+  const db = remoteSecretDb({ env });
+  if (!db) return null;
+  try {
+    const row = db.prepare('SELECT value FROM mycelium_remote_secret WHERE key = ?').get(key);
+    return row?.value ?? null;
   } finally {
     db.close();
   }
