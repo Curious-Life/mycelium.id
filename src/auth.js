@@ -14,6 +14,7 @@
 import Database from 'better-sqlite3';
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { authDbPath } from './paths.js';
 import { betterAuth } from 'better-auth';
 import { mcp } from 'better-auth/plugins';
 import { getMigrations } from 'better-auth/db/migration';
@@ -35,7 +36,7 @@ export function createAuth(opts = {}) {
       'MYCELIUM_AUTH_SECRET is required to start the OAuth server (32+ random chars).',
     );
   }
-  const dbPath = opts.dbPath || process.env.MYCELIUM_AUTH_DB || 'data/auth.db';
+  const dbPath = opts.dbPath || authDbPath();
 
   if (dbPath !== ':memory:') {
     const dir = dirname(dbPath);

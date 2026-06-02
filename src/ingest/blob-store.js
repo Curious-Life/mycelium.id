@@ -8,7 +8,7 @@
 // vector envelope).
 //
 // On-disk format:  bytes 0..3 magic "MYCB" (Mycelium Blob v1) | 4..n base64 envelope
-// Path:            <root>/<userId>/<uuid><ext>.enc   (root defaults to data/uploads/)
+// Path:            <root>/<userId>/<uuid><ext>.enc   (root defaults to uploadsRoot())
 //
 // Fail-closed: encrypt() throws if the master key is absent ⇒ no plaintext blob
 // is ever written. getMasterKey() resolves USER_MASTER from the same
@@ -17,6 +17,7 @@ import { mkdir, open, rename, readFile } from 'node:fs/promises';
 import { join, dirname, extname } from 'node:path';
 import crypto from 'node:crypto';
 import { encrypt, decrypt, getMasterKey } from '../crypto/crypto-local.js';
+import { uploadsRoot } from '../paths.js';
 
 const MAGIC = Buffer.from('MYCB', 'latin1'); // 4 bytes, blob format v1
 const SCOPE = 'personal';
@@ -33,7 +34,7 @@ function safeExt(ext) {
  * Encrypt `buffer` and write it to disk. Returns { path, size } where `path` is
  * RELATIVE to `root` (the storage key persisted to attachments.local_path).
  */
-export async function putBlob(buffer, { userId, ext = '', root = 'data/uploads' } = {}) {
+export async function putBlob(buffer, { userId, ext = '', root = uploadsRoot() } = {}) {
   if (!Buffer.isBuffer(buffer)) throw new TypeError('putBlob: buffer (Buffer) required');
   if (typeof userId !== 'string' || !userId) throw new Error('putBlob: userId required');
 
@@ -62,7 +63,7 @@ export async function putBlob(buffer, { userId, ext = '', root = 'data/uploads' 
 }
 
 /** Read + decrypt a blob by its relative storage key. Returns the original Buffer. */
-export async function getBlob(rel, { root = 'data/uploads' } = {}) {
+export async function getBlob(rel, { root = uploadsRoot() } = {}) {
   const masterKey = await getMasterKey();
   if (!masterKey) throw new Error('getBlob: master key unavailable — cannot decrypt (fail-closed)');
   const raw = await readFile(join(root, rel));

@@ -1,8 +1,9 @@
 import express from 'express';
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, cpSync, renameSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { boot } from './index.js';
+import { dataDir, dbPath as resolveDbPath } from './paths.js';
 import { apiRouter } from './api.js';
 import { portalCompatRouter } from './portal-compat.js';
 import { portalMindscapeRouter } from './portal-mindscape.js';
@@ -34,6 +35,37 @@ function resolvePortal(mode = process.env.MYCELIUM_PORTAL || 'auto') {
 }
 
 /**
+ * One-time, NON-DESTRUCTIVE relocation of a legacy in-repo vault into the
+ * durable data dir. The vault used to live at ./data/mycelium.db inside the
+ * bundle (wiped on every app update); dataDir() now points at the OS app-data
+ * dir (see src/paths.js). If the new dir has no vault yet but a legacy
+ * ./data/mycelium.db exists, COPY the db (+ -wal/-shm), kcv.json and uploads/
+ * across, then rename the legacy db aside (.migrated-<ts>) so this never runs
+ * twice. Copy-not-move: the original bytes are preserved (just renamed). No-op
+ * in dev (active dir IS ./data) or once already relocated. Idempotent.
+ */
+export function ensureDataDir({ env = process.env } = {}) {
+  const dir = dataDir({ env });
+  mkdirSync(dir, { recursive: true });
+
+  const legacyDir = path.resolve('data');
+  if (path.resolve(dir) === legacyDir) return; // dev: nothing to relocate
+
+  const newDb = path.join(dir, 'mycelium.db');
+  const legacyDb = path.join(legacyDir, 'mycelium.db');
+  if (existsSync(newDb) || !existsSync(legacyDb)) return; // already moved, or no legacy vault
+
+  const copyIfPresent = (from, to, opts) => { if (existsSync(from) && !existsSync(to)) cpSync(from, to, opts); };
+  cpSync(legacyDb, newDb);                                   // main db
+  for (const sfx of ['-wal', '-shm']) copyIfPresent(legacyDb + sfx, newDb + sfx); // consistent snapshot
+  copyIfPresent(path.join(legacyDir, 'kcv.json'), path.join(dir, 'kcv.json'));
+  copyIfPresent(path.join(legacyDir, 'uploads'), path.join(dir, 'uploads'), { recursive: true });
+
+  renameSync(legacyDb, `${legacyDb}.migrated-${Date.now()}`); // never relocate again
+  console.error(`[mycelium] relocated legacy vault ./data → ${dir} (original db renamed aside, not deleted)`);
+}
+
+/**
  * startRestServer({ dbPath, port, host }) — boot the shared assembly and
  * serve the tool handlers over REST.
  *
@@ -55,6 +87,11 @@ export async function startRestServer({
   host = '127.0.0.1',
   portalMode,
 } = {}) {
+  // Relocate a legacy in-repo vault into the durable data dir before anything
+  // opens it — only for the default location (explicit-dbPath callers, e.g.
+  // verify scripts, manage their own path).
+  if (dbPath === undefined) ensureDataDir();
+
   // boot() reads keys from env by default; forward overrides when given
   // (verify scripts inject ephemeral keys) so undefined doesn't clobber env.
   const bootOpts = {};
@@ -73,7 +110,7 @@ export async function startRestServer({
   // SAME effective path here — absolute, so the spawned child finds it
   // regardless of its cwd — and hand it to the mindscape router. Without this,
   // the child fell back to './data/vault.db' (empty) → "no such table: messages".
-  const effectiveDbPath = path.resolve(dbPath || process.env.MYCELIUM_DB || 'data/mycelium.db');
+  const effectiveDbPath = dbPath ? path.resolve(dbPath) : resolveDbPath();
 
   const app = express();
   app.disable('x-powered-by');

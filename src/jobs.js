@@ -13,6 +13,7 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import { resolveKeys } from './crypto/key-source.js';
+import { dbPath as resolveDbPath } from './paths.js';
 
 const MAX_MS = Number(process.env.MYCELIUM_GEN_MAX_MS) || 45 * 60 * 1000; // 45 min hard cap
 const STAGE_LABELS = {
@@ -56,7 +57,7 @@ export function startClusteringJob({ dbPath, userId } = {}) {
     LANG: process.env.LANG,
     USER_MASTER: userHex,
     SYSTEM_KEY: systemHex,
-    MYCELIUM_DB: dbPath || process.env.MYCELIUM_DB || './data/vault.db',
+    MYCELIUM_DB: dbPath || resolveDbPath(),
     MYCELIUM_USER_ID: userId || process.env.MYCELIUM_USER_ID || 'local-user',
   };
 

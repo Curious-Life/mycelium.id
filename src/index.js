@@ -13,6 +13,7 @@ import { getDb } from './db/index.js';
 import { buildDomains, collectTools, createMcpServer } from './mcp.js';
 import { createServiceEmbedder } from './search/embedder.js';
 import { resolveKeys } from './crypto/key-source.js';
+import { dbPath as resolveDbPath, kcvPath as resolveKcvPath } from './paths.js';
 
 /**
  * Resolve the query-time mind-search embedder for the CLI/server paths. Wires
@@ -30,8 +31,11 @@ export function resolveDefaultEmbedder({ env = process.env } = {}) {
 }
 
 export async function boot({
-  dbPath = process.env.MYCELIUM_DB || 'data/mycelium.db',
-  kcvPath = process.env.MYCELIUM_KCV || 'data/kcv.json',
+  // Defaults route through src/paths.js: an explicit MYCELIUM_DB/MYCELIUM_KCV
+  // still wins, else <dataDir>/… (the durable app-data dir in the packaged app,
+  // ./data in dev). Callers/tests may pass dbPath/kcvPath directly to override.
+  dbPath = resolveDbPath(),
+  kcvPath = resolveKcvPath(),
   // Master keys: resolved from MYCELIUM_KEY_SOURCE (env | keychain | 1password)
   // below when not passed explicitly. Callers/tests may inject the hex directly.
   userHex,

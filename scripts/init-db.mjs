@@ -3,8 +3,11 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { applyMigrations } from '../src/db/migrate.js';
+import { dbPath as resolveDbPath } from '../src/paths.js';
 
-const dbPath = process.argv[2] || 'data/mycelium.db';
+// Explicit arg wins (e.g. data/verify-*.db); else <dataDir>/mycelium.db — which
+// honours MYCELIUM_DATA_DIR/MYCELIUM_DB and falls back to ./data in dev.
+const dbPath = process.argv[2] || resolveDbPath();
 mkdirSync(dirname(dbPath), { recursive: true });
 
 const db = new Database(dbPath);

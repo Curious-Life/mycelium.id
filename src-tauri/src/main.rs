@@ -61,11 +61,22 @@ fn main() {
             let key_source =
                 std::env::var("MYCELIUM_KEY_SOURCE").unwrap_or_else(|_| "keychain".into());
 
-            let child = Command::new("node")
-                .arg("src/server-rest.js")
+            let mut cmd = Command::new("node");
+            cmd.arg("src/server-rest.js")
                 .current_dir(&home)
                 .env("MYCELIUM_REST_PORT", PORT.to_string())
-                .env("MYCELIUM_KEY_SOURCE", key_source)
+                .env("MYCELIUM_KEY_SOURCE", key_source);
+
+            // Durable per-OS data dir — on macOS this is
+            // ~/Library/Application Support/id.mycelium.app. Passing it as
+            // MYCELIUM_DATA_DIR puts the encrypted vault OUTSIDE the app bundle
+            // (see src/paths.js), so updating/replacing the .app never wipes the
+            // user's history. Falls back silently to ./data if unresolvable.
+            if let Ok(data_dir) = app.path().app_data_dir() {
+                cmd.env("MYCELIUM_DATA_DIR", &data_dir);
+            }
+
+            let child = cmd
                 .spawn()
                 .expect("failed to start the mycelium server — is `node` installed and MYCELIUM_HOME correct?");
 
