@@ -116,33 +116,15 @@ fn main() {
                 .spawn()
                 .expect("failed to start the mycelium server — is `node` installed and MYCELIUM_HOME correct?");
 
-            let mut children: Vec<Child> = vec![child];
-
-            // Embed service (:8091) — the in-process enrichment drainer needs it to
-            // turn imported messages into vectors (without it, Generate has nothing
-            // to cluster). Skip if something already serves :8091 (e.g. a manually
-            // started one); else spawn the ONNX embed service from the provisioned
-            // venv (pipeline/.venv) if present, falling back to python3. Best-effort:
-            // the drainer health-checks :8091 and degrades gracefully if it never
-            // comes up (the UI's preflight then says "still processing").
-            if TcpStream::connect(("127.0.0.1", 8091u16)).is_err() {
-                let mut ecmd = Command::new(&python_bin);
-                ecmd.arg("pipeline/embed-service.py")
-                    .arg("--serve")
-                    .arg("--port")
-                    .arg("8091")
-                    .current_dir(&home);
-                if hf_home.exists() {
-                    ecmd.env("HF_HOME", &hf_home).env("HF_HUB_OFFLINE", "1");
-                }
-                match ecmd.spawn() {
-                    Ok(c) => children.push(c),
-                    Err(e) => eprintln!(
-                        "[mycelium] embed service did not start ({e}) — imports won't embed until it's available"
-                    ),
-                }
-            }
-
+            // Embed service (:8091) is now OWNED BY THE NODE SERVER
+            // (src/embed/supervisor.js): it dep-checks, adopts-or-spawns, RESTARTS
+            // on crash, and surfaces health to the UI via /processing-status. That
+            // single owner works identically in npm-dev, Tauri-dev and the bundled
+            // app — unlike the old fire-and-forget spawn here, which never noticed a
+            // post-spawn crash and left the UI hanging at "Processing 0/N". The
+            // bundled python is handed to Node via MYCELIUM_PYTHON above; the
+            // supervisor's child inherits HF_HOME/HF_HUB_OFFLINE from this process.
+            let children: Vec<Child> = vec![child];
             app.manage(Server(Mutex::new(children)));
 
             if !wait_for_port(PORT, Duration::from_secs(25)) {
