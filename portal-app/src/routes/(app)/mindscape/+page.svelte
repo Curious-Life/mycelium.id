@@ -103,12 +103,11 @@
 	// Lazy load 3D component (THREE.js is heavy)
 	let Mindscape3D: any = $state(null);
 
-	// The desktop (Tauri) shell is a TRANSPARENT + vibrancy WKWebView; WebGL/THREE
-	// inside it HANGS the webview (frozen spinner, no input — the whole UI locks).
-	// Detect Tauri and gate every 3D/WebGL surface off there, defaulting to the
-	// fully-functional 2D Territories view. (The 3D map still works in a browser.)
+	// The desktop (Tauri) shell USED to be a transparent vibrancy WKWebView where
+	// WebGL/THREE hung the webview; the window is now OPAQUE (#52), which removes that
+	// interaction. We still default to the 2D Territories view on launch under Tauri
+	// (so a cold start never auto-mounts WebGL), but the 3D map is fully selectable.
 	const isTauriEnv = () => typeof window !== 'undefined' && (!!(window as any).__TAURI__ || !!(window as any).__TAURI_INTERNALS__);
-	let isTauri = $state(false);
 
 	// Demo mindscape canvas for welcome screen
 	let demoCanvas = $state<HTMLCanvasElement | undefined>();
@@ -116,7 +115,7 @@
 
 	// Initialize demo 3D mindscape when canvas is available
 	$effect(() => {
-		if (!browser || !demoCanvas || isTauriEnv()) return; // no WebGL under Tauri — it hangs the webview
+		if (!browser || !demoCanvas) return;
 		// Lazy import to avoid loading THREE until needed
 		(async () => {
 			const THREE = await import('three');
@@ -248,10 +247,9 @@
 	// Load everything on mount — avoids $effect async state mutation issues in Svelte 5
 	onMount(() => {
 		if (!browser) return;
-		isTauri = isTauriEnv();
 
-		// Lazy load 3D component — but NOT under Tauri (WebGL hangs the desktop webview).
-		if (!Mindscape3D && !isTauri) {
+		// Lazy load 3D component (now safe under Tauri too — the window is opaque, #52).
+		if (!Mindscape3D) {
 			import('$lib/components/mindscape/Mindscape3D.svelte').then((module) => {
 				Mindscape3D = module.default;
 			});
@@ -789,7 +787,7 @@
 			</div>
 			<div class="view-toggle">
 				<button class:active={viewMode === 'territories'} onclick={() => viewMode = 'territories'}>Territories</button>
-				<button class:active={viewMode === '3d'} disabled={isTauri} title={isTauri ? 'The 3D map runs in the browser version (open localhost:8787 in your browser)' : ''} onclick={() => { if (!isTauri) viewMode = '3d'; }}>3D Map</button>
+				<button class:active={viewMode === '3d'} onclick={() => viewMode = '3d'}>3D Map</button>
 			</div>
 		</div>
 
