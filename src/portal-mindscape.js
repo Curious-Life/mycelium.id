@@ -260,12 +260,50 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
   router.get('/mindscape/social', (_req, res) => res.json({ contacts: [], tiers: [] }));
   router.get('/health/summary', (_req, res) => res.json({ today: null, averages: {}, trends: {}, days: [] }));
 
+  // Embedding progress — drives the "N of M ready" UI + the Generate preflight.
+  router.get('/mycelium/processing-status', async (_req, res) => {
+    try {
+      const er = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND embedding_768 IS NOT NULL', [userId]);
+      const tr = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ?', [userId]);
+      const embedded = Number(er?.results?.[0]?.c ?? 0);
+      const total = Number(tr?.results?.[0]?.c ?? 0);
+      res.json({ embedded, total, pending: Math.max(0, total - embedded) });
+    } catch { res.json({ embedded: 0, total: 0, pending: 0 }); }
+  });
+
   // ── Generate the mindscape (Phase G) — spawn the clustering pipeline ────────
   // POST /mycelium/generate → { jobId, status }. Single-flight; keys re-resolved
   // at spawn into the child env (never logged/args). The real run needs the
   // Tier-2 Python stack on the host; the job lifecycle works regardless.
-  router.post('/mycelium/generate', (_req, res) => {
+  router.post('/mycelium/generate', async (_req, res) => {
     try {
+      // PREFLIGHT: clustering needs EMBEDDED messages (embedding_768). Without
+      // them the pipeline dies cryptically — cluster.py can't resolve a user from
+      // empty clustering_points and sys.exit(1)s. Count embedded vs total and
+      // refuse with a clear, actionable reason instead of spawning a doomed run.
+      const MIN_EMBEDDED = 5;
+      let embedded = 0, total = 0;
+      try {
+        const er = await db.rawQuery(
+          'SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND embedding_768 IS NOT NULL', [userId]);
+        const tr = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ?', [userId]);
+        embedded = Number(er?.results?.[0]?.c ?? 0);
+        total = Number(tr?.results?.[0]?.c ?? 0);
+      } catch { /* count failed — don't block generation on a counting error */ }
+
+      if (total === 0) {
+        return res.status(409).json({
+          error: 'Import some conversations first — there is nothing to map yet.',
+          reason: 'no_messages', embedded: 0, total: 0,
+        });
+      }
+      if (embedded < MIN_EMBEDDED) {
+        const error = embedded === 0
+          ? `Your ${total} conversations are still being processed — none are ready to map yet. This runs automatically after import; check back in a moment.`
+          : `Only ${embedded} of ${total} conversations are ready to map — a few more are needed. Try again shortly.`;
+        return res.status(409).json({ error, reason: 'not_embedded', embedded, total });
+      }
+
       const r = startClusteringJob({ dbPath, userId });
       res.json(r);
     } catch {

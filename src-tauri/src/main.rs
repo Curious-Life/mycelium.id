@@ -29,8 +29,9 @@ use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
 const PORT: u16 = 8787;
 
-/// Holds the spawned Node server so we can kill it on shutdown.
-struct Server(Mutex<Option<Child>>);
+/// Holds every spawned child process (Node server + embed service) so we can
+/// kill them all on shutdown.
+struct Server(Mutex<Vec<Child>>);
 
 fn wait_for_port(port: u16, timeout: Duration) -> bool {
     let start = Instant::now();
@@ -80,7 +81,38 @@ fn main() {
                 .spawn()
                 .expect("failed to start the mycelium server — is `node` installed and MYCELIUM_HOME correct?");
 
-            app.manage(Server(Mutex::new(Some(child))));
+            let mut children: Vec<Child> = vec![child];
+
+            // Embed service (:8091) — the in-process enrichment drainer needs it to
+            // turn imported messages into vectors (without it, Generate has nothing
+            // to cluster). Skip if something already serves :8091 (e.g. a manually
+            // started one); else spawn the ONNX embed service from the provisioned
+            // venv (pipeline/.venv) if present, falling back to python3. Best-effort:
+            // the drainer health-checks :8091 and degrades gracefully if it never
+            // comes up (the UI's preflight then says "still processing").
+            if TcpStream::connect(("127.0.0.1", 8091u16)).is_err() {
+                let venv_py = home.join("pipeline/.venv/bin/python3");
+                let python = if venv_py.exists() {
+                    venv_py.to_string_lossy().into_owned()
+                } else {
+                    "python3".to_string()
+                };
+                match Command::new(python)
+                    .arg("pipeline/embed-service.py")
+                    .arg("--serve")
+                    .arg("--port")
+                    .arg("8091")
+                    .current_dir(&home)
+                    .spawn()
+                {
+                    Ok(c) => children.push(c),
+                    Err(e) => eprintln!(
+                        "[mycelium] embed service did not start ({e}) — imports won't embed until it's available"
+                    ),
+                }
+            }
+
+            app.manage(Server(Mutex::new(children)));
 
             if !wait_for_port(PORT, Duration::from_secs(25)) {
                 eprintln!("[mycelium] server did not open port {PORT} in time");
@@ -115,7 +147,7 @@ fn main() {
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.app_handle().try_state::<Server>() {
                     if let Ok(mut guard) = state.0.lock() {
-                        if let Some(mut child) = guard.take() {
+                        for mut child in guard.drain(..) {
                             let _ = child.kill();
                         }
                     }

@@ -14,6 +14,7 @@ import { portalUploadsRouter } from './portal-uploads.js';
 import { authShimRouter } from './auth-shim.js';
 import { accountRouter } from './account/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
+import { startEnrichDrainer } from './enrich/drainer.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CANONICAL_BUILD = path.join(HERE, '..', 'portal-app', 'build');
@@ -155,8 +156,20 @@ export async function startRestServer({
       ensureVaultSchema(effectiveDbPath); // self-initialise a fresh vault (idempotent)
       const { tools, handlers, db, close, userId: bootUserId } = await boot(opts);
       dbHandle = db;
+      const baseEnqueue = createEnqueueEnrichment({ userId: bootUserId });
+      let enqueueEnrichment = baseEnqueue;
       closeHandle = close;
-      const enqueueEnrichment = createEnqueueEnrichment({ userId: bootUserId });
+      // Real app launches (NOT verify scripts injecting keys) run the in-process
+      // enrichment drainer so UI-imported messages embed against :8091 — on boot,
+      // on a timer, and nudged on import. Without it nothing embeds and Generate
+      // has no data. Gated off when keys are injected so it never mutates a
+      // verify script's deterministic test vault.
+      const injectedKeys = userHex !== undefined && systemHex !== undefined;
+      if (!injectedKeys) {
+        const drainer = startEnrichDrainer({ db, userId: bootUserId });
+        closeHandle = () => { try { drainer.stop(); } catch { /* */ } try { close(); } catch { /* */ } };
+        enqueueEnrichment = (id) => { try { baseEnqueue(id); } catch { /* :8095 optional */ } drainer.nudge(); };
+      }
       vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment });
     } finally {
       booting = false;
