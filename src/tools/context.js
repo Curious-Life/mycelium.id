@@ -42,7 +42,7 @@ export function createContextDomain(deps) {
           recentMessages: { type: 'number', description: 'How many recent messages to include (default 10, max 40).' },
           include: {
             type: 'array',
-            items: { type: 'string', enum: ['mind', 'facts', 'messages', 'phase', 'health'] },
+            items: { type: 'string', enum: ['mind', 'facts', 'people', 'messages', 'phase', 'health'] },
             description: 'Limit to specific sections. Omit for all.',
           },
         },
@@ -88,6 +88,19 @@ export function createContextDomain(deps) {
               .map((f) => `- ${f.pinned ? '📌 ' : ''}**${f.category}/${f.key}**: ${(f.value || '').slice(0, 200)}`)
               .join('\n');
             sections.push(`---\n# FACTS YOU KNOW\n\n${lines}`);
+          }
+        } catch { /* non-fatal */ }
+      }
+
+      // ── people & projects (pinned entities only; sensitive excluded) ──
+      if (want(include, 'people') && db?.entities) {
+        try {
+          const rows = await db.entities.forContext({ userId, limit: 20 });
+          if (rows?.length) {
+            const lines = rows
+              .map((e) => `- **${e.type}: ${e.name}**${e.summary ? ` — ${(e.summary || '').slice(0, 160)}` : ''}`)
+              .join('\n');
+            sections.push(`---\n# PEOPLE & PROJECTS\n\n${lines}`);
           }
         } catch { /* non-fatal */ }
       }

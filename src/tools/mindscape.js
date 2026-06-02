@@ -33,7 +33,7 @@ export function createMindscapeDomain(deps) {
   const tools = [
     {
       name: 'searchMindscape',
-      description: 'Search across the entire mindscape: conversations, documents, territories, realms, themes — and your remembered facts — all in one call. Returns results grouped by type.\n\nTwo ways to recall:\n- query: a concept, topic, question, or memory you craft.\n- relatedTo: paste the current message/turn to proactively pull what is related to it (no query craft needed). Proactive recall excludes anything you marked sensitive.\n\nScopes:\n- "all" (default): search everything\n- "messages": past conversations only\n- "facts": list your remembered facts (optionally pass query as a category filter)\n- "documents" / "territories" / "realms" / "themes": that layer only\n\nWith includeTopology: true, matched territories also show their co-firing neighbors.',
+      description: 'Search across the entire mindscape: conversations, documents, territories, realms, themes — and your remembered facts — all in one call. Returns results grouped by type.\n\nTwo ways to recall:\n- query: a concept, topic, question, or memory you craft.\n- relatedTo: paste the current message/turn to proactively pull what is related to it (no query craft needed). Proactive recall excludes anything you marked sensitive.\n\nScopes:\n- "all" (default): search everything\n- "messages": past conversations only\n- "facts": list your remembered facts (optionally pass query as a category filter)\n- "entities": list people/projects/places/orgs (pass query to filter by name; narrow matches show linked items)\n- "documents" / "territories" / "realms" / "themes": that layer only\n\nWith includeTopology: true, matched territories also show their co-firing neighbors.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -41,7 +41,7 @@ export function createMindscapeDomain(deps) {
           relatedTo: { type: 'string', description: 'Proactive recall: paste the current message/turn to pull related memories. Excludes sensitive items.' },
           scope: {
             type: 'string',
-            enum: ['all', 'messages', 'facts', 'documents', 'territories', 'realms', 'themes'],
+            enum: ['all', 'messages', 'facts', 'entities', 'documents', 'territories', 'realms', 'themes'],
             description: 'What to search (default: all)',
           },
           limit:           { type: 'number',  description: 'Max results per type (default 5)' },
@@ -66,12 +66,33 @@ export function createMindscapeDomain(deps) {
     return `## Facts (${rows.length})\n${lines}`;
   }
 
+  // scope:'entities' — list entities directly (not ANN-indexed). Narrow matches
+  // (<=3) also show the entity's linked items — the "dossier". Includes sensitive
+  // (explicit request).
+  async function listEntities(args) {
+    if (!db?.entities?.list) return 'Entities are not available.';
+    const q = (args.query || '').trim().toLowerCase();
+    let rows = await db.entities.list({ userId, limit: 200 });
+    if (q) rows = rows.filter((e) => (e.name || '').toLowerCase().includes(q));
+    if (!rows.length) return q ? `No entities matching "${args.query}".` : 'No entities yet.';
+    const showLinks = rows.length <= 3 && typeof db.entities.linksFor === 'function';
+    const lines = [];
+    for (const e of rows.slice(0, 30)) {
+      const links = showLinks ? await db.entities.linksFor({ userId, entityId: e.id }) : [];
+      const linkStr = links.length ? `\n  ↳ ${links.map((l) => `${l.ref_type}:${l.ref_id}`).join(', ')}` : '';
+      const mentions = e.mention_count ? ` (${e.mention_count} mentions)` : '';
+      lines.push(`- ${e.pinned ? '📌 ' : ''}${e.sensitive ? '🔒 ' : ''}**${e.type}: ${e.name}**${e.summary ? ` — ${(e.summary || '').slice(0, 200)}` : ''}${mentions}${linkStr}`);
+    }
+    return `## Entities (${rows.length})\n${lines.join('\n')}`;
+  }
+
   const handlers = {
     searchMindscape: async (args = {}) => {
       const scope = args.scope || 'all';
 
-      // Facts listing is a distinct path (structured, not ANN search).
+      // Facts/entities listings are distinct paths (structured, not ANN search).
       if (scope === 'facts') return listFacts(args);
+      if (scope === 'entities') return listEntities(args);
 
       // relatedTo = proactive recall: use the turn text as the query and
       // exclude sensitive items. Falls back to the crafted query otherwise.
