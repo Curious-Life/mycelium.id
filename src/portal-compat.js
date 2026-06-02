@@ -120,20 +120,91 @@ export function portalCompatRouter({ db, userId }) {
     } catch { ok(res, { messages: [] }); }
   });
 
-  // ── Profile (Phase P) — synthesized for the single-user vault ───────────
-  // GET /profile → { profile: {...} }. V1 has no user_profiles row; we surface
-  // the local identity + live counts. apiGet throws on non-200, so this must
-  // always 200. Pipeline-computed scores are null until Tier-2 runs.
+  // ── Profile (Phase P) — read + edit, backed by user_profiles ────────────
+  // user_profiles holds the public-facing fields (handle/display_name/signature
+  // — plaintext by design, not in ENCRYPTED_FIELDS). Cognitive scores
+  // (depth/breadth/coherence/exploration) are pipeline-computed (Tier-2) and stay
+  // null until clustering runs. apiGet throws on non-200, so GET must always 200.
+  const HANDLE_RE = /^[a-z0-9][a-z0-9_]{2,29}$/;
+  const RESERVED_HANDLES = new Set(['admin', 'api', 'www', 'app', 'mycelium', 'settings', 'profile', 'login', 'support', 'system', 'public', 'auth', 'id']);
+
+  const countOf = async (fn) => { try { return await fn(); } catch { return 0; } };
+  async function readProfile() {
+    let row = {};
+    try {
+      const r = await db.rawQuery(
+        `SELECT handle, display_name, signature, avatar_url, exlibris_url,
+                depth_score, breadth_score, coherence_score, exploration_score,
+                territory_count, realm_count, message_count, member_since, public_realms_json
+           FROM user_profiles WHERE user_id = ?`, [userId]);
+      row = (r.results || r || [])[0] || {};
+    } catch { /* table-less / fresh vault → defaults below */ }
+    const message_count = await countOf(() => db.messages.countByUser(userId));
+    const territory_count = await countOf(async () => (await db.mindscape.getTerritoryProfiles(userId)).length);
+    const realm_count = await countOf(async () => (await db.mindscape.getRealms(userId)).length);
+    return {
+      display_name: row.display_name || 'You',
+      handle: row.handle || null,
+      avatar_url: row.avatar_url || null,
+      exlibris_url: row.exlibris_url || null,
+      signature: row.signature || null,
+      depth_score: row.depth_score ?? null, breadth_score: row.breadth_score ?? null,
+      coherence_score: row.coherence_score ?? null, exploration_score: row.exploration_score ?? null,
+      territory_count, realm_count, message_count,
+      member_since: row.member_since || null, public_realms_json: row.public_realms_json || null,
+    };
+  }
+  // Ensure the single-user row exists before an UPDATE (PK = user_id).
+  const ensureRow = () => db.rawQuery(
+    `INSERT INTO user_profiles (user_id, member_since) VALUES (?, datetime('now')) ON CONFLICT(user_id) DO NOTHING`, [userId]);
+
   router.get('/profile', async (_req, res) => {
-    const count = async (fn) => { try { return await fn(); } catch { return 0; } };
-    const message_count = await count(() => db.messages.countByUser(userId));
-    const territory_count = await count(async () => (await db.mindscape.getTerritoryProfiles(userId)).length);
-    const realm_count = await count(async () => (await db.mindscape.getRealms(userId)).length);
-    ok(res, { profile: {
-      display_name: 'You', handle: 'local', avatar_url: null, exlibris_url: null, signature: null,
-      depth_score: null, breadth_score: null, coherence_score: null, exploration_score: null,
-      territory_count, realm_count, message_count, member_since: null, public_realms_json: null,
-    } });
+    try { ok(res, { profile: await readProfile() }); } catch { fail(res, 500, 'profile read failed'); }
+  });
+
+  // GET /profile/handle/check?handle=… → { available, reason? }
+  router.get('/profile/handle/check', async (req, res) => {
+    const h = typeof req.query.handle === 'string' ? req.query.handle.trim().toLowerCase() : '';
+    if (!HANDLE_RE.test(h)) return ok(res, { available: false, reason: '3–30 chars: a–z, 0–9, _ (start alphanumeric)' });
+    if (RESERVED_HANDLES.has(h)) return ok(res, { available: false, reason: 'reserved' });
+    try {
+      const r = await db.rawQuery(`SELECT user_id FROM user_profiles WHERE handle = ? AND user_id != ?`, [h, userId]);
+      ok(res, { available: !((r.results || r || []).length) });
+    } catch { ok(res, { available: true }); }
+  });
+
+  // PUT /profile → update handle / display_name / signature → { ok, profile }
+  router.put('/profile', async (req, res) => {
+    try {
+      const body = req.body || {};
+      const sets = [], params = [];
+      if (typeof body.handle === 'string') {
+        const h = body.handle.trim().toLowerCase();
+        if (!HANDLE_RE.test(h)) return fail(res, 400, 'invalid handle (3–30 chars: a–z, 0–9, _)');
+        if (RESERVED_HANDLES.has(h)) return fail(res, 400, 'that handle is reserved');
+        sets.push('handle = ?'); params.push(h);
+      }
+      if (typeof body.display_name === 'string') { sets.push('display_name = ?'); params.push(body.display_name.slice(0, 80)); }
+      if (typeof body.signature === 'string') { sets.push('signature = ?'); params.push(body.signature.slice(0, 500)); }
+      if (!sets.length) return fail(res, 400, 'nothing to update');
+      await ensureRow();
+      await db.rawQuery(`UPDATE user_profiles SET ${sets.join(', ')}, updated_at = datetime('now') WHERE user_id = ?`, [...params, userId]);
+      ok(res, { ok: true, profile: await readProfile() });
+    } catch { fail(res, 500, 'could not save profile'); }
+  });
+
+  // POST /profile/stats/recompute → refresh the live counts (cognitive scores
+  // need the Tier-2 pipeline, so they stay null here). → { ok, profile }
+  router.post('/profile/stats/recompute', async (_req, res) => {
+    try {
+      const message_count = await countOf(() => db.messages.countByUser(userId));
+      const territory_count = await countOf(async () => (await db.mindscape.getTerritoryProfiles(userId)).length);
+      const realm_count = await countOf(async () => (await db.mindscape.getRealms(userId)).length);
+      await ensureRow();
+      await db.rawQuery(`UPDATE user_profiles SET territory_count = ?, realm_count = ?, message_count = ?, updated_at = datetime('now') WHERE user_id = ?`,
+        [territory_count, realm_count, message_count, userId]);
+      ok(res, { ok: true, profile: await readProfile() });
+    } catch { fail(res, 500, 'recompute failed'); }
   });
 
   // ── Settings (Phase S) — timezone only; theme is client-side localStorage ─

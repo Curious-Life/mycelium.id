@@ -157,8 +157,15 @@ export function createMcpServer({ tools, handlers }) {
       const text = typeof result === 'string' ? result : JSON.stringify(result);
       return { content: [{ type: 'text', text }] };
     } catch (err) {
-      // Never leak internals; surface a safe error to the client.
-      return { content: [{ type: 'text', text: `Error in ${name}: ${err.message}` }], isError: true };
+      // Never leak internals/plaintext: a tool handler may throw a message that
+      // embeds user content. Surface a fixed safe string (mirrors src/api.js),
+      // distinguishing caller-input errors from internal failures via a strict
+      // allowlist of generic validation phrases — the text is a constant, never
+      // the raw message.
+      const msg = String(err?.message ?? '');
+      const isValidation = msg.length <= 200 && /(is required|is missing|must be|invalid|unknown)/i.test(msg);
+      const text = isValidation ? `Error in ${name}: invalid arguments` : `Error in ${name}: tool execution failed`;
+      return { content: [{ type: 'text', text }], isError: true };
     }
   });
 
