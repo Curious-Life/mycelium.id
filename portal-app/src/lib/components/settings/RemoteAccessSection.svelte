@@ -154,6 +154,9 @@
 				onchange={(e) => toggleEnabled((e.target as HTMLInputElement).checked)} class="accent-[var(--color-accent)]" />
 			Enable remote access (starts the OAuth server on next launch)
 		</label>
+		{#if status.remoteEnabled}
+			<button onclick={() => toggleEnabled(false)} disabled={cfgSaving} class="mt-2 text-xs px-3 py-1.5 rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] cursor-pointer disabled:opacity-50">Disconnect (disable remote access)</button>
+		{/if}
 		{#if !status.passwordSet || !status.publicBaseUrl}
 			<p class="text-[10px] text-[var(--color-text-tertiary)] mt-1">Set a password and a public URL first.</p>
 		{/if}

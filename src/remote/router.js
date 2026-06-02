@@ -5,7 +5,10 @@
 // depth — these touch the auth gate). Never returns a secret value.
 import express from 'express';
 import net from 'node:net';
+import path from 'node:path';
 import { readRemoteConfig, writeRemoteConfig, setOperatorPassword, operatorUserExists } from './config.js';
+import { dataDir } from '../paths.js';
+import { keychainNames } from '../account/keychain-names.js';
 
 /** Is the remote OAuth server actually listening (so the UI shows live state vs
  *  "enabled — restart to apply")? Best-effort TCP probe; never throws. */
@@ -67,6 +70,28 @@ export function remoteRouter() {
     } catch {
       res.status(500).json({ ok: false, error: 'could not write config' });
     }
+  });
+
+  // Local stdio connect params for THIS Mac — the Settings "Connect on this Mac"
+  // helper renders a ready-to-paste .mcp.json (Claude Code / Claude Desktop) from
+  // these. Surfaces the ACTUAL keychain account names + data dir THIS server uses
+  // so the pasted config opens the SAME vault — a mismatched MYCELIUM_DATA_DIR or
+  // KC account is the #1 "connected but no data" gotcha (docs/MCP-CONNECT-AND-TEST.md).
+  // No secrets — only paths + non-secret service names.
+  router.get('/local-config', (_req, res) => {
+    const home = process.env.MYCELIUM_HOME || process.cwd();
+    const kc = keychainNames();
+    const custom = kc.account !== 'mycelium'
+      || kc.userService !== 'mycelium-user-master'
+      || kc.systemService !== 'mycelium-system-key';
+    res.json({
+      command: process.execPath,
+      args: [path.join(home, 'src', 'index.js')],
+      cwd: home,
+      keySource: process.env.MYCELIUM_KEY_SOURCE || 'env',
+      dataDir: dataDir(),
+      keychain: { account: kc.account, userService: kc.userService, systemService: kc.systemService, custom },
+    });
   });
 
   return router;
