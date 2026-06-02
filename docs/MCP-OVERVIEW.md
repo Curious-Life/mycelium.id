@@ -2,7 +2,7 @@
 
 **What it is, how it connects, how it authenticates, the tools it exposes, and how to run and test it locally.**
 
-> As-built, verified against the **running** server (`npm run verify:mcp` → **31 tools, 2 deferred**) and the registration code (`src/mcp.js`), not estimated. Date: 2026-06-02.
+> As-built, verified against the **running** server (`npm run verify:mcp` → **33 tools, 2 deferred**) and the registration code (`src/mcp.js`), not estimated. Date: 2026-06-02.
 > Companions: [`SETUP.md`](SETUP.md) (install + Claude Desktop config) · [`MCP-CONNECT-AND-TEST.md`](MCP-CONNECT-AND-TEST.md) (connection code-review + test plan) · [`ARCHITECTURE.md`](ARCHITECTURE.md) (as-built system).
 
 ---
@@ -16,7 +16,7 @@ The defining property: **one `boot()` sequence, three transports.** Whether a cl
 ```
             ┌───────────────────────── boot() (src/index.js) ─────────────────────────┐
             │  load 2 hex keys → unlock + KCV (fail-closed) → open encrypting SQLite    │
-            │  → buildDomains() → 31 tools → register on low-level MCP Server           │
+            │  → buildDomains() → 33 tools → register on low-level MCP Server           │
             └──────────────────────────────────────────────────────────────────────────┘
                  │                          │                              │
           ┌──────┴──────┐          ┌────────┴────────┐            ┌────────┴────────┐
@@ -36,7 +36,7 @@ When the server starts (`src/index.js` → `boot()`):
 1. **Resolve two keys** from `MYCELIUM_KEY_SOURCE` (`env` | `keychain` | `1password`). You save **one** recovery key (`USER_MASTER`); `SYSTEM_KEY` is HKDF-derived from it. Both end up in the OS keychain.
 2. **Unlock + KCV check** — each key is verified against a key-check value. Wrong/missing key → throw → exit. **Fail-closed**: no key, no vault.
 3. **Open the encrypting SQLite adapter** — `src/adapter/d1.js` transparently AES-256-GCM-encrypts every field at the query boundary. (It mimics the Cloudflare "D1" API shape but is purely local — zero network.)
-4. **`buildDomains()`** (`src/mcp.js:79`) instantiates 11 tool domains; **`collectTools()`** flattens them into 31 tools with a duplicate-name guard.
+4. **`buildDomains()`** (`src/mcp.js:79`) instantiates 12 tool domains; **`collectTools()`** flattens them into 33 tools with a duplicate-name guard.
 5. **`createMcpServer()`** registers two handlers: `tools/list` (returns all 31 with JSON-Schema) and `tools/call` (dispatches to the named handler).
 6. Each handler returns a **string**, wrapped into the MCP `{content:[{type:'text',text}]}` envelope at one seam. Errors are **redacted** (never leak plaintext); set `MYCELIUM_DEBUG=1` to print the real stack to **stderr only**.
 
@@ -83,7 +83,7 @@ discovery (/.well-known/oauth-*) → Dynamic Client Registration (PKCE, public c
 
 ---
 
-## 5. What tools it has — 31 tools
+## 5. What tools it has — 33 tools
 
 `getContext` is the **preamble** (the "D5 entry point"): a client calls it *first* to load a one-shot briefing, then pulls detail on demand. `*` = required param.
 
@@ -104,6 +104,12 @@ discovery (/.well-known/oauth-*) → Dynamic Client Registration (PKCE, public c
 |---|---|---|
 | **createTask** | Create a task captured from conversation. | `content*`, `deadline`, `priority` (1–5), `projectPath` |
 | **listTasks** | List tasks newest-first; filter by status. | `status` (pending\|completed\|all), `limit` |
+
+### Curate — forget & salience (2, new in Phase 1)
+| Tool | What it does | Key params |
+|---|---|---|
+| **forget** | Soft-redact a message/document: destroy content + both embedding fingerprints, evict from search + clustering, tombstone for audit. No undo. | `type` (message\|document), `id` |
+| **mark** | Set salience — `pinned` (surfaced first in `getContext`, shown with 📌) and/or `sensitive` (kept out of proactive recall / never published). | `type`, `id`, `pinned`, `sensitive` |
 
 ### Documents & library (6)
 | Tool | What it does | Key params |
@@ -154,13 +160,13 @@ discovery (/.well-known/oauth-*) → Dynamic Client Registration (PKCE, public c
 |---|---|---|
 | **getHealthData** | Apple Health summaries (sleep, HRV, resting HR, steps, workouts, mindful min) with trends/anomalies. | `days`, `from`, `to` |
 
-> **Not in the 31 (you'll see the files, but they're not wired):** `src/tools/` also contains `schedules.js`, `delegation.js`, `reply.js`, `services.js`, and a dormant `findDocuments` — ported/reference code **not registered in `buildDomains()`** in V1. `reply` + `services` are the **2 deferred** domains; they land with later waves.
+> **Not in the 33 (you'll see the files, but they're not wired):** `src/tools/` also contains `schedules.js`, `delegation.js`, `reply.js`, `services.js`, and a dormant `findDocuments` — ported/reference code **not registered in `buildDomains()`** in V1. `reply` + `services` are the **2 deferred** domains; they land with later waves.
 
 ---
 
 ## 6. Data readiness (what returns real output on a fresh vault)
 
-Connecting always shows all 31 tools, but some need data first — **these "empty" responses are not bugs:**
+Connecting always shows all 33 tools, but some need data first — **these "empty" responses are not bugs:**
 
 - **Work immediately (~19):** `getContext`, `captureMessage`, `importMessages`, `createTask`, `listTasks`, `getDailyMessages`, all documents, all mind-files, the topology *reads* (honest-empty), and `searchMindscape` (BM25).
 - **"No data yet" until you import + cluster + embed (~10):** the Fisher/metrics/harmonic tools (`getCurrentPhase`, `getTrajectoryHistory`, `getActiveMilestones`, `getTopMovers`, `getHarmonicState`, `getMetricSeries`), `getHealthData`, and semantic ranking in `searchMindscape`. (Real clustering/embeddings are "Tier-2" — they need the `:8091` embed service + the Python pipeline on a capable host.)
@@ -177,7 +183,7 @@ npm install --legacy-peer-deps
 npm run set-keys          # generates your ONE recovery key (USER_MASTER); SYSTEM_KEY
                           # is HKDF-derived; both stored in the OS keychain.
 npm run verify            # expect a wall of "VERDICT: GO" (full ledger)
-npm run verify:mcp        # stdio MCP proof in isolation → "31 tools registered" + GO
+npm run verify:mcp        # stdio MCP proof in isolation → "33 tools registered" + GO
 ```
 No `init-db` needed — a fresh vault self-migrates on first boot.
 
@@ -185,7 +191,7 @@ No `init-db` needed — a fresh vault self-migrates on first boot.
 ```bash
 MYCELIUM_KEY_SOURCE=keychain npm run portal       # REST at http://127.0.0.1:8787
 # in another shell:
-curl -s localhost:8787/api/v1/tools | jq '.tools[].name'                 # → 31 names
+curl -s localhost:8787/api/v1/tools | jq '.tools[].name'                 # → 33 names
 curl -s localhost:8787/api/v1/getContext -H 'content-type: application/json' -d '{}' | jq
 curl -s localhost:8787/api/v1/captureMessage -H 'content-type: application/json' \
      -d '{"content":"first test thought","source":"curl"}' | jq
@@ -214,7 +220,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```
 > ⚠️ **`MYCELIUM_DATA_DIR` is the critical line.** Your real vault lives in the per-OS app-data dir. A hand-rolled config *without* it falls back to a *different, empty* `./data` vault — tools connect fine but `getContext`/`searchMindscape` see nothing. This is the #1 "connected but no data" gotcha.
 
-Then **fully quit and reopen** Claude Desktop. The tools icon should show **mycelium / 31 tools**. If not:
+Then **fully quit and reopen** Claude Desktop. The tools icon should show **mycelium / 33 tools**. If not:
 ```bash
 tail -f ~/Library/Logs/Claude/mcp-server-mycelium.log
 ```
@@ -256,7 +262,7 @@ Expose only via Tailscale/Tunnel.
 
 ## 9. The two proofs (your "does the wire work?" ground truth)
 
-- **`npm run verify:mcp`** — boots the real server, connects a real MCP client over an in-memory transport, drives `tools/list` + a `createTask`→`listTasks` round-trip + unknown-tool handling. (→ **31 tools, GO**.)
+- **`npm run verify:mcp`** — boots the real server, connects a real MCP client over an in-memory transport, drives `tools/list` + a `createTask`→`listTasks` round-trip + unknown-tool handling. (→ **33 tools, GO**.)
 - **`npm run verify:oauth`** — drives the full OAuth dance over HTTP to a `tools/call`.
 
 Re-run these after any change to `mcp.js`, `index.js`, or `server-http.js`.
