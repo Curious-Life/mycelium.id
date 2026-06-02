@@ -8,6 +8,7 @@
 
 <p align="center">
   <a href="docs/HOW-IT-WORKS.md">How It Works</a> ·
+  <a href="docs/MCP-OVERVIEW.md">MCP Server</a> ·
   <a href="docs/V1-BUILD-SPEC.md">Build Spec</a> ·
   <a href="docs/V1-IMPLEMENTATION-PLAN.md">Implementation Plan</a> ·
   <a href="https://mycelium.id">Website</a>
