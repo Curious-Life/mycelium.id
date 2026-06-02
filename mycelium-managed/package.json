@@ -1,0 +1,15 @@
+{
+  "name": "mycelium-managed",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mycelium managed control-plane + relay auth-hook. Open-source and self-hostable: 'managed' is just mycelium operating an instance of this. Provisions <handle>.mycelium.id, authorizes per-tenant FRP tunnels, drives acme-dns + apex DNS.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "*",
+    "express": "*"
+  }
+}
