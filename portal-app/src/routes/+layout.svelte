@@ -9,11 +9,25 @@
 	let { children } = $props();
 
 	const isLoginPage = $derived($page.url.pathname === '/login');
+	const isSetupPage = $derived($page.url.pathname === '/setup');
+	const isPublicPage = $derived(isLoginPage || isSetupPage);
 
-	onMount(() => {
+	onMount(async () => {
 		theme.initialize();
 
-		if (!isLoginPage) {
+		// Local-first account gate: if the vault hasn't been created yet, send the
+		// user to the first-run setup screen. /api/v1/account/status is served even
+		// before the vault is open ("setup mode"). Don't redirect AWAY from /setup
+		// here — the recovery-key reveal must survive the vault becoming initialised.
+		try {
+			const res = await fetch('/api/v1/account/status', { credentials: 'same-origin' });
+			if (res.ok) {
+				const s = await res.json();
+				if (!s.initialized && !isSetupPage) { goto('/setup'); return; }
+			}
+		} catch { /* server unreachable — fall through to the session check */ }
+
+		if (!isPublicPage) {
 			// Validate session via cookie (HttpOnly, sent automatically)
 			fetch('/auth/session', { credentials: 'same-origin' }).then(async (res) => {
 				if (res.ok) {
@@ -37,7 +51,7 @@
 	<title>Mycelium</title>
 </svelte:head>
 
-{#if $auth.user || isLoginPage}
+{#if $auth.user || isPublicPage}
 	{@render children()}
 {:else}
 	<!--

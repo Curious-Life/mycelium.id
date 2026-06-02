@@ -675,10 +675,10 @@
 						<!-- Fallback for new devices -->
 						<div class="pt-4 border-t border-[var(--color-border)]">
 							<button
-								onclick={() => mode = 'key'}
+								onclick={() => goto('/setup')}
 								class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors py-2"
 							>
-								New device? Use your master key instead
+								New device? Restore from your recovery key
 							</button>
 						</div>
 					</div>
