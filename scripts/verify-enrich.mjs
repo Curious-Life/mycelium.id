@@ -58,6 +58,14 @@ const stubEmbed = {
     if (text === FAIL_SENTINEL) throw new Error('stub: forced embed failure');
     return stubVec(text);
   },
+  // drainOnce now embeds the whole batch in one /batch call. Mirror the real
+  // service: a single poison text yields a BAD per-item vector (not a thrown
+  // batch) so the service's per-row validation isolates just that row → -1,
+  // while healthy rows still embed. (A true service-down throw is a separate
+  // path the service already handles by failing the whole batch.)
+  async embedBatch(texts) {
+    return texts.map((t) => (t === FAIL_SENTINEL ? null : stubVec(t)));
+  },
 };
 
 function freshDb() {
