@@ -1258,9 +1258,17 @@ function parseWriteSQL(sql) {
     const encrypted = getEncryptedFields(table);
     if (!encrypted.length) return null;
 
-    const setMatch = sql.match(/SET\s+(.+?)(?:\s+WHERE|\s+ORDER|\s+LIMIT|\s+RETURNING|;|$)/i);
+    // [Security] `/s` (dotall) is REQUIRED: without it `.` stops at the first
+    // newline, so a MULTI-LINE `SET` clause never reaches WHERE → setMatch is
+    // null → parseWriteSQL returns null → autoEncryptParams skips the whole
+    // statement → encrypted columns get written as PLAINTEXT. (Caught live: an
+    // entity `summary` leaked through the multi-line entities-upsert UPDATE.)
+    // splitValueExprs() splits on TOP-LEVEL commas only, so a value like
+    // `strftime('%Y-%m-%dT%H:%M:%fZ','now')` stays one assignment (the inner
+    // comma doesn't shift the param index of a later encrypted column).
+    const setMatch = sql.match(/SET\s+(.+?)(?:\s+WHERE|\s+ORDER|\s+LIMIT|\s+RETURNING|;|$)/is);
     if (!setMatch) return null;
-    const assignments = setMatch[1].split(',').map(s => s.trim());
+    const assignments = splitValueExprs(setMatch[1]).map(s => s.trim());
     const encryptedParamIndices = [];
     let paramIndex = 0;
     for (const assign of assignments) {
