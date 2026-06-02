@@ -7,14 +7,14 @@ detail lives in the linked docs. Newest-relevant first.
 
 - **Context Bank Upgrade — design spec (2026-06-02, latest).** Sweep-first-design pass closing the MCP
   context-bank gaps from the design review: forget/redact, facts store, `relatedContext`, entities,
-  Tier-2 gating, user salience, unified `ref` handle. **Phases 1–2 BUILT + verified (31→34 tools; `verify:forget` 13/13, `verify:facts` 17/17, `verify:related` 7/7; full `verify` 34× GO); spec status §1, Phases 3-5 pending:**
+  Tier-2 gating, user salience, unified `ref` handle. **Phases 1–3 BUILT + verified (31→35 tools; forget 13/13, facts 17/17, related 7/7, entities 19/19; full `verify` 35× GO); spec status §1, Phases 4-5 pending:**
   [`docs/CONTEXT-BANK-UPGRADE-DESIGN-2026-06-02.md`](docs/CONTEXT-BANK-UPGRADE-DESIGN-2026-06-02.md). Key
   sweep pivots: forget is NOT greenfield (builds on `documents.delete`+`afterDeleteHooks`,
   `backend.delete({ids})`, `revoked_at` tombstone); cascade is shallow (only `clustering_points` +
   `embedding_768` ref a message — aggregates self-heal per `clustering_run_id`); facts is greenfield
   (`user_profiles`≠facts store); `relatedContext`=thin reuse of `backend.query({text})`; Tier-2 gating
   needs an async readiness probe threaded into `buildDomains` (static at boot). v3 LEAN surface (net **31→~27 tools**): 4 lean verbs (remember/forget/mark/link) + reads fold into searchMindscape/getContext; 11 cognitive/topology readers consolidate→3 (cognitiveState/cognitiveHistory/mindscape, behind pre-deletion-caller-audit). Decisions locked §11 (soft-redact-only · typed facts · 'not-ready' gating · lean verbs · slim existing · all phases);
-  build order = Phase 1 (forget+salience) DONE [`a200ed0`·`9cde646`·`22c1a75`] · Phase 2 (facts + `remember` + `relatedTo`/`scope:'facts'` + getContext FACTS) DONE [db `2789f72` · tools+gates `e8d1d83`]; next = Phase 3 (entities). Rebased onto #43 (`1a8f525`). Local SQLite only — no D1/Cloudflare. Key gotcha: encrypted upserts MUST use `ON CONFLICT … DO UPDATE SET x=excluded.x` (a fresh `?` writes plaintext). **Pickup:** [`docs/CONTEXT-BANK-UPGRADE-HANDOFF-2026-06-02.md`](docs/CONTEXT-BANK-UPGRADE-HANDOFF-2026-06-02.md).
+  build order = Phase 1 (forget+salience) DONE [`a200ed0`·`9cde646`·`22c1a75`] · Phase 2 (facts + `remember` + `relatedTo`/`scope:'facts'` + getContext FACTS) DONE [`2789f72`·`e8d1d83`] · Phase 3 (entities + `link` verb + NLP-promote + getContext PEOPLE + `scope:'entities'`) DONE [db `4aa5f4c` · tools+gate `13c96ce`]; next = Phase 4 (cold-start gating). Rebased onto #43 (`1a8f525`). Local SQLite only — no D1/Cloudflare. Key gotchas: encrypted upserts MUST use `ON CONFLICT … DO UPDATE SET x=excluded.x` (a fresh `?` writes plaintext); can't UNIQUE an encrypted col (entity name dedup is app-layer). **Pickup:** [`docs/CONTEXT-BANK-UPGRADE-HANDOFF-2026-06-02.md`](docs/CONTEXT-BANK-UPGRADE-HANDOFF-2026-06-02.md).
 
 - **Account setup + durable data + MCP review (2026-06-02).** **#36 landed on main**
   (account ceremony): the vault now lives in a **durable per-OS data dir** (`src/paths.js`,

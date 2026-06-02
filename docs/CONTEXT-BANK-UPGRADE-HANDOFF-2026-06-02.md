@@ -1,10 +1,10 @@
 # Context Bank Upgrade — Handoff Doc
 
 **Date:** 2026-06-02
-**Companions:** [`CONTEXT-BANK-UPGRADE-DESIGN-2026-06-02.md`](CONTEXT-BANK-UPGRADE-DESIGN-2026-06-02.md) (the spec — read §3, §5.1, §11) · [`MCP-OVERVIEW.md`](MCP-OVERVIEW.md) (live tool surface, now 34) · [`ARCHITECTURE.md`](ARCHITECTURE.md)
+**Companions:** [`CONTEXT-BANK-UPGRADE-DESIGN-2026-06-02.md`](CONTEXT-BANK-UPGRADE-DESIGN-2026-06-02.md) (the spec — read §3, §5.1, §11) · [`MCP-OVERVIEW.md`](MCP-OVERVIEW.md) (live tool surface, now 35) · [`ARCHITECTURE.md`](ARCHITECTURE.md)
 **Audience:** the next Claude Code instance picking up this work.
 
-A 5-phase upgrade to the V1 MCP "context bank": add forget/correct, facts, proactive recall, entities, honest cold-start, user salience — **while shrinking the tool surface** (31 → ~27 after Phase 5). **Phases 1–2 are built + verified; Phases 3–5 pending.** Everything is **local SQLite on the home server — no Cloudflare D1.**
+A 5-phase upgrade to the V1 MCP "context bank": add forget/correct, facts, proactive recall, entities, honest cold-start, user salience — **while shrinking the tool surface** (31 → ~27 after Phase 5). **Phases 1–3 are built + verified; Phases 4–5 pending.** Everything is **local SQLite on the home server — no Cloudflare D1.**
 
 ---
 
@@ -15,12 +15,12 @@ A 5-phase upgrade to the V1 MCP "context bank": add forget/correct, facts, proac
 | 0 — schema | `a200ed0` | ✅ built+verified | migration runner hardened (guards *every* ADD COLUMN) + `0004` (messages.{pinned,sensitive,forgotten_at}, documents.{sensitive,forgotten_at}) |
 | 1 — forget + salience | `9cde646` (db) · `22c1a75` (tools+gate) · `7832951` (docs) | ✅ built+verified | `forget(type,id)` soft-redact + `mark(type,id,{pinned,sensitive})`; 31 → **33 tools**; `verify:forget` 13/13 |
 | 2 — facts + relatedContext | `2789f72` (db) · `e8d1d83` (tools+gates) | ✅ built+verified | `remember` (typed facts) + `getContext` FACTS section + `relatedTo` + `scope:'facts'` on `searchMindscape`; forget/mark gain `type:'fact'`; 33 → **34 tools**; `verify:facts` 17/17 + `verify:related` 7/7 |
-| 3 — entities | — | ⬜ **NEXT** | `entities`+`entity_links`; write via `remember`(kind:'entity')/`link`; read via search |
-| 4 — cold-start gating | — | ⬜ planned | async readiness probe → Tier-2 tools return "not ready" instead of empty |
+| 3 — entities | `4aa5f4c` (db) · `13c96ce` (tools+gate) | ✅ built+verified | `entities`+`entity_links` + NLP-promote; `remember`(kind:'entity') + **`link`** verb; forget/mark gain `type:'entity'`; `getContext` PEOPLE + `searchMindscape` `scope:'entities'`; 34 → **35 tools**; `verify:entities` 19/19 |
+| 4 — cold-start gating | — | ⬜ **NEXT** | async readiness probe → Tier-2 tools return "not ready" instead of empty |
 | 5 — consolidate readers | — | ⬜ planned | 11 cognitive/topology readers → 3 (`cognitiveState`/`cognitiveHistory`/`mindscape`) — **behind `/pre-deletion-caller-audit`** |
 
-- **Branch:** `claude/zealous-euler-kSPpI` · **PR:** #42 (draft) · **HEAD:** `e8d1d83` (+docs commit)
-- **Gate:** full `npm run verify` → **34× GO, EXIT 0** (incl. `verify:forget`/`verify:facts`/`verify:related`). Clean tree.
+- **Branch:** `claude/zealous-euler-kSPpI` · **PR:** #42 (draft) · **HEAD:** `13c96ce` (+docs commit)
+- **Gate:** full `npm run verify` → **35× GO, EXIT 0** (incl. `verify:forget`/`verify:facts`/`verify:related`/`verify:entities`). Clean tree.
 - **Rebased onto `origin/main` (#43, `1a8f525`)** at the start of the Phase-2 session — #43 ("rehydrate stored `embedding_768`") collided with Phase 1 on `d1-loader.js:47`/`mcp.js`/`package.json`; resolved so the loader SELECT carries **both** `embedding_768` **and** `AND forgotten_at IS NULL` (a security win — a forgotten row's embedding can never be rehydrated). Force-pushed (lease-guarded).
 - Earlier this session (separate, already **merged to main**): PR #39 (skills reconciled to V1) + PR #41 (`MCP-OVERVIEW.md`).
 
@@ -54,24 +54,61 @@ A 5-phase upgrade to the V1 MCP "context bank": add forget/correct, facts, proac
 7. **Local SQLite only** — operator flagged twice that this is *not* Cloudflare D1; the `d1Query`/`src/adapter/d1.js` names are a legacy API-compat shim over better-sqlite3 (zero network).
 
 ### Pickup protocol for the next session
-1. Read this handoff cold, then the spec §3.4 (entities), §3.8 (consolidation), §5 (phases). Read the **Phase 2 session summary** below first.
+1. Read this handoff cold, then the spec §3.7 (cold-start gating), §3.8 (consolidation), §5 (phases). Read the **Phase 3 session summary** below first.
 2. `git fetch origin main && git rebase origin/main` on `claude/zealous-euler-kSPpI`. **Always rebase before building** — main moved mid-session twice already (#44 `b622914`, then #43 `1a8f525`). #43 touched the search path (`d1-loader.js`/`mcp.js`/`package.json`); a future search PR may collide again — check those three files.
-3. Verify current state: `npm run verify` → **34× GO, EXIT 0** (or at minimum `verify:facts`+`verify:related`+`verify:mcp` → "34 tools registered").
-4. Build **Phase 3 (entities)** — additive, mirrors the Phase-2 fact pattern exactly:
-   - `migrations/0006_entities.sql`: `entities` + `entity_links` per spec §3.4. ⚠️ Same as facts: make `name`/`summary` **nullable** (redact nulls them); add `forgotten_at`, `pinned`, `sensitive`. `ENCRYPTED_FIELDS.entities = ['name','aliases','summary']`, `entity_links` has no encrypted cols. `UNIQUE(user_id, type, name)`.
-   - `src/db/entities.js` (`createEntitiesNamespace`): `upsert`/`list`/`redact`/`setSalience` (copy `db/facts.js`) + `link(entityId, refType, refId)` / `linksFor(entityId)`. **Reuse the verified upsert shape** (`ON CONFLICT … DO UPDATE SET x = excluded.x`, never a fresh `?`).
-   - `remember`: add the `'entity'` branch (extend the `kind` enum to `['fact','entity']`, drop the fail-closed throw for entity) in `src/tools/curate.js`. Add the **`link`** verb (the 4th lean verb) to the curate domain.
-   - `forget`/`mark`: extend the `REF` enum to include `'entity'` + add the dispatch branch (one line each — the pattern is in place).
-   - `searchMindscape`: add `scope:'entities'` (the "dossier" = entity + its `entity_links`, via `db.entities`). `getContext` gains a compact **PEOPLE/PROJECTS** section (pinned only) — mirror the FACTS block in `src/tools/context.js`.
-   - **Decide the open sub-decision first** (below): promote NLP-extracted `messages.entities` + curate, vs user-curated only.
-   - Add `verify:entities` (model on `scripts/verify-facts.mjs`) + chain entry; bump `verify:forget`/`verify:facts` tool-count asserts (34 → 35+ once `link`/entity tools land — check `verify:mcp` for the exact number).
-5. Run `/sweep-first-design` lightly on the enrichment-promote seam if you take the "promote NLP" path (it reads `messages.entities`, which the pipeline writes).
-6. Before "done": full `npm run verify` GO; update `MCP-OVERVIEW.md` count + this handoff + spec status. Then Phase 4 (gating), then Phase 5 (consolidation — **behind `/pre-deletion-caller-audit`**).
+3. Verify current state: `npm run verify` → **35× GO, EXIT 0** (or at minimum `verify:entities`+`verify:facts`+`verify:mcp` → "35 tools registered").
+4. Build **Phase 4 (cold-start gating)** — locked decision §11.4 = **present-but-"not ready"** (keep Tier-2 tools listed; their handlers return a uniform "topology not computed yet" message when the vault has no clustering). Additive, no schema:
+   - **Sweep the readiness seam first** (§12): the probe is the `clustering_points` count / `db.mindscape.getNoiseStats()` (`src/db/mindscape.js:34`). Verify it's cheap (a `COUNT`) and what shape it returns.
+   - **Thread readiness into `buildDomains`** (`src/mcp.js`). ⚠️ buildDomains is static at boot but readiness CHANGES mid-session (user imports + clusters). So pass an async `isTopologyReady()` getter (re-checks the count, optionally cached ~30s), **not** a boot-time boolean — a static flag would be stale after the first import. `boot()` can prime it; the getter re-checks.
+   - **The Tier-2 tools to gate** (the cluster/Fisher/metric/topology readers, which return honest-empty today): `getCurrentPhase`, `getTrajectoryHistory`, `getActiveMilestones`, `getTopMovers`, `getHarmonicState`, `getMetricSeries`, and the topology readers `exploreTerritory`/`mindscapeStructure`/`listTerritories`/`territoryDetail`/`timeView`. Wrap their handlers (or add an early `if (!await isTopologyReady()) return NOT_READY_MSG`). **Do NOT gate** the Tier-1 tools (getContext, capture, remember/forget/mark/link, facts/entities listings, documents, mind-files, BM25 search) — they work on a fresh vault.
+   - `getContext` already omits empty sections — leave it (or add a one-line "import data to unlock your mindscape" hint when not ready).
+   - Add `verify:gating` (fresh vault → Tier-2 returns "not ready"; seed clustering_points → real data). Tool count is unchanged (35) — gating is behavioral, no new tools, so `verify:mcp`/`forget`/`facts`/`entities` count asserts stay 35.
+5. Run `/sweep-first-design` on the readiness-getter seam (it's a shared boot/buildDomains abstraction touched by every Tier-2 tool).
+6. Before "done": full `npm run verify` GO; update `MCP-OVERVIEW.md` (the §6 "data readiness" table — the ~10 "no data yet" tools now say "not ready" explicitly) + this handoff + spec status. Then **Phase 5 (consolidation — the only BREAKING change, behind `/pre-deletion-caller-audit`)**.
 
 ### Open decisions for the operator
-- **Entities (Phase 3) — DECIDE BEFORE BUILDING:** promote NLP-extracted (`messages.entities`, written by enrichment) into the registry **+ curate** *(working default, spec §11.3)* vs **user-curated only** (simpler; no dependency on the Tier-2 enrichment pipeline). Recommendation: **user-curated only for the first Phase-3 cut** (entities via `remember`/`link`), add NLP-promotion as a follow-up — it keeps Phase 3 free of the unbuilt-pipeline dependency and shippable in this env.
-- **Pinned search-ranking boost — RESOLVED (deferred, evidence-based):** *not* folded into Phase 2. `pinned` isn't carried in the in-RAM index, so a ranking boost needs threading loader→`backend.add`→scorer (well beyond ~30 LOC, own gate); `getContext` already surfaces pinned (📌). Revisit only if explicit-search relevance proves insufficient.
+- **Phase 5 consolidation (11 readers → 3) is the only breaking change** — it renames/removes tools, so it MUST run behind `/pre-deletion-caller-audit` (callers = `verify:metrics`/`verify:topology`, REST `/api/v1/<name>`, `portal-app`, docs). Do it last, once the lean convention is settled. No decision needed now; flagged so it isn't done casually.
+- **Pinned search-ranking boost — RESOLVED (deferred, evidence-based):** *not* folded in. `pinned` isn't carried in the in-RAM index, so a ranking boost needs threading loader→`backend.add`→scorer (well beyond ~30 LOC, own gate); `getContext` already surfaces pinned (📌). Revisit only if explicit-search relevance proves insufficient.
+- **NLP-promote trigger — follow-up:** `db.entities.promoteFromMessages` exists + is verified, but **nothing calls it automatically yet**. Options: a `promoteEntities` tool, an enrichment hook (call it after a drain batch), or a portal/cron action. Recommendation: an enrichment-service hook once the pipeline runs on a real host (it's Tier-2). Not blocking — user curation (`remember`/`link`) works today.
 - **The `d1` legacy naming:** leave the shim as-is (it works; renaming is a repo-wide refactor) — new code uses plain `db`/"local vault". Recommendation: leave.
+
+---
+
+## 2026-06-02 PM session summary — Phase 3 (entities) — START HERE
+
+### What shipped
+| Commit | Scope | Description |
+|---|---|---|
+| `4aa5f4c` | Phase 3 Stage A (db) | `migrations/0006_entities.sql` (`entities` + `entity_links`); `ENCRYPTED_FIELDS.entities = ['name','aliases','summary']`; `src/db/entities.js` (`upsert`/`forContext`/`list`/`link`/`linksFor`/`redact`/`setSalience`/`promoteFromMessages`); wired `db.entities`. |
+| `13c96ce` | Phase 3 Stage B (tools+gate) | `remember` kind:'entity' + the `link` verb (`tools/curate.js`, 34→35); forget/mark gain `type:'entity'`; `getContext` PEOPLE section (`context.js`); `searchMindscape` `scope:'entities'` + dossier (`mindscape.js`); `verify:entities` (19) + chain; forget/facts count asserts 34→35. |
+
+### What was learned (most valuable — these die if not written)
+- **You cannot `UNIQUE`/`ON CONFLICT` on an encrypted column.** `entities.name` is encrypted with a random IV → the same name encrypts to different ciphertext each write → a `UNIQUE(user_id,type,name)` (spec §3.4) can never match, and `ON CONFLICT(name)` would never fire. **Dedup is app-layer:** scan this user's entities of the type, match the *decrypted* name case-insensitively, upsert by id. (Facts avoided this by keeping category/key plaintext; entity names can't be plaintext — they're the sensitive part.) Single-user scale makes the scan free.
+- **A dedup match must preserve the canonical display-name casing.** `verify:entities` EN6 caught this: re-remembering "alice rivera" (lowercase) was overwriting the curated "Alice Rivera". Fix: the upsert UPDATE **omits `name`** — the match is by *normalized* name, so the first-set casing persists; a casual case variant or an NLP-promoted proper noun must not downcase a curated name. (A real bug the gate caught before it shipped.)
+- **NLP-promotion is verifiable without the live pipeline.** `promoteFromMessages` reads the `messages.entities` column (enrichment writes `JSON.stringify({category:[values]})` — verified `enrich/extract.js:73-92`; the registry-relevant categories are `proper` → type 'proper' and `mention` → type 'person'). `verify:entities` seeds that column directly and asserts threshold-gating + no-clobber. No embedder/numpy needed.
+- **Promote merges, never downgrades.** An NLP hit on an existing user/assistant entity keeps `source` (no downgrade to 'nlp'), keeps the richer summary, and bumps `mention_count` (EN17).
+- **`link` find-or-creates** the entity by name+type (ergonomic — the model needn't juggle entity ids), then `INSERT OR IGNORE` the link (idempotent; `entity_links` is all-plaintext so UNIQUE works there). It does NOT validate the target item exists (records the ref; dossier rendering filters forgotten).
+
+### Operator's directional calls (this session)
+- **Entities = NLP-promote + curate** (confirmed via AskUserQuestion; locks spec §11.3). I flagged the verifiability concern (live pipeline absent) and resolved it by seeding `messages.entities` in the gate.
+
+### Pickup protocol → see "Pickup protocol for the next session" above (now Phase 4 — cold-start gating).
+
+---
+
+## Phase 3 — file-by-file
+
+| File | Change |
+|---|---|
+| `migrations/0006_entities.sql` (new) | `entities` (name/aliases/summary NULLABLE + encrypted; type/source/counts plaintext; **no UNIQUE on name**) + `entity_links` (all-plaintext, `UNIQUE(user_id,entity_id,ref_type,ref_id)`) + indexes. |
+| `src/crypto/crypto-local.js` | `ENCRYPTED_FIELDS.entities = ['name','aliases','summary']`. |
+| `src/db/entities.js` (new) | App-layer-dedup `upsert` (preserves display-name casing; no user→nlp downgrade), `forContext` (pinned-only + sensitive-excluded), `list`, `link`/`linksFor`, `redact` (literal-NULL + drop links + hash), `setSalience`, `promoteFromMessages` (proper/@mention aggregation, threshold-gated). |
+| `src/db/index.js` | wire `db.entities`. |
+| `src/tools/curate.js` | `remember` kind:'entity'; the **`link`** verb (find-or-create + link); forget/mark REF enum + dispatch gain `'entity'`. |
+| `src/tools/context.js` | getContext PEOPLE & PROJECTS section (pinned-only) + `'people'` in include enum. |
+| `src/tools/mindscape.js` | `scope:'entities'` listing + dossier (links shown for ≤3 matches). |
+| `scripts/verify-entities.mjs` (new) | 19 assertions. `verify:forget`/`verify:facts` count asserts 34→35. |
+| `package.json` | +`verify:entities` (entry + chain). |
 
 ---
 
@@ -141,10 +178,11 @@ A 5-phase upgrade to the V1 MCP "context bank": add forget/correct, facts, proac
 npm run verify:forget      # → VERDICT: GO EXIT=0   (13/13: redact, evict, tombstone, audit-no-plaintext, idempotent, mark)
 npm run verify:facts       # → VERDICT: GO EXIT=0   (17/17: encrypted-at-rest, surfaced, superseded, sensitive-gated, forgotten, fail-closed)
 npm run verify:related     # → VERDICT: GO EXIT=0   (7/7: proactive recall, sensitive-excluded, forgotten-guarded, BM25-only)
-npm run verify:mcp         # → "34 tools registered, 2 deferred"  + GO
-npm run verify             # → 34× GO, EXIT 0   (run before declaring any phase done)
+npm run verify:entities    # → VERDICT: GO EXIT=0   (19/19: encrypted-at-rest, app-dedup, pinned-gated, link/dossier, forgotten, NLP-promote no-clobber)
+npm run verify:mcp         # → "35 tools registered, 2 deferred"  + GO
+npm run verify             # → 35× GO, EXIT 0   (run before declaring any phase done)
 ```
-No fleet/deploy — "shipping" = the verify gate is green + committed + pushed (see the rewritten `/deploy-and-verify`). PR #42 carries the spec + Phases 1–2; CI runs the same chain.
+No fleet/deploy — "shipping" = the verify gate is green + committed + pushed (see the rewritten `/deploy-and-verify`). PR #42 carries the spec + Phases 1–3; CI runs the same chain.
 
 ---
 
@@ -157,7 +195,10 @@ No fleet/deploy — "shipping" = the verify gate is green + committed + pushed (
 - **`boot()` now returns `searchHelpers`** — additive to the return object; existing destructures unaffected.
 - **main moved mid-session** (`f614d4a` → `b622914`/#44 → `1a8f525`/#43). The branch was rebased each time; rebase again next session before building.
 - **⚠️ Upsert encryption footgun (`2026-06-02 PM`).** `autoEncryptParams` encrypts only the first `VALUES` group and never the `ON CONFLICT … DO UPDATE` clause. Any encrypted-column upsert MUST use `DO UPDATE SET col = excluded.col` (never a fresh `?`) or it writes **plaintext** + breaks the row-count math. Applies to facts now and **entities in Phase 3**.
-- **Sensitive columns must be NULLABLE (`2026-06-02 PM`).** Soft-redact nulls them; a `NOT NULL` constraint blocks redact. `facts.value` (and Phase-3 `entities.name`/`summary`) are nullable; the write verb validates non-empty for live rows.
+- **Sensitive columns must be NULLABLE (`2026-06-02 PM`).** Soft-redact nulls them; a `NOT NULL` constraint blocks redact. `facts.value` + `entities.name`/`summary`/`aliases` are nullable; the write verb validates non-empty for live rows.
+- **⚠️ No `UNIQUE`/`ON CONFLICT` on an encrypted column (`2026-06-02 PM`).** `entities.name` is encrypted with a random IV (non-deterministic) → a UNIQUE/`ON CONFLICT(name)` can never match. Dedup that key in the **app layer** (scan + match the decrypted value). Plaintext keys (facts' category/key, entity_links' ids) keep DB-level UNIQUE. Applies to any future encrypted-name table.
+- **Dedup-match preserves the display-name casing (`2026-06-02 PM`).** `db.entities.upsert` matches by *normalized* name and does NOT overwrite the stored `name` — a case variant or NLP proper-noun must not downcase a curated name. (`verify:entities` EN6 caught the overwrite bug.)
+- **NLP-entity promotion is built but not auto-triggered (`2026-06-02 PM`).** `db.entities.promoteFromMessages` works + is verified (seed `messages.entities`), but nothing calls it yet — needs an enrichment hook / tool / cron (see Open decisions). User curation via `remember`/`link` works today.
 - **`sensitive` ⇒ excluded from ALL proactive surfaces (`2026-06-02 PM`).** getContext FACTS (`forContext` filters `sensitive=0`) AND `relatedTo` (hydration filters). Sensitive items surface only via explicit `scope:'facts'` / explicit `query`. Defense-in-depth: `hydrateMessages` filters `forgotten_at IS NULL` unconditionally now.
 
 ---
@@ -171,4 +212,4 @@ No fleet/deploy — "shipping" = the verify gate is green + committed + pushed (
 ---
 
 ## Skills that fired this session
-`/sweep-first-design` (×3 — the spec, the Phase-1 pre-build sweep, and the Phase-2 seam sweep that caught the upsert-encryption + NOT-NULL + second-read-path footguns *before* coding) · `/deploy-and-verify` (the V1 verify-gate ship discipline, each phase) · `/handoff-discipline` (this doc). Phase 5 will require `/pre-deletion-caller-audit` (it removes 11 tools).
+`/sweep-first-design` (×4 — the spec, the Phase-1 pre-build sweep, the Phase-2 seam sweep [upsert-encryption + NOT-NULL + second-read-path], and the Phase-3 seam sweep [encrypted-name UNIQUE impossibility + `messages.entities` shape] — each caught build-breakers *before* coding) · `/deploy-and-verify` (the V1 verify-gate ship discipline, each phase) · `/handoff-discipline` (this doc). Phase 5 will require `/pre-deletion-caller-audit` (it removes 11 tools).
