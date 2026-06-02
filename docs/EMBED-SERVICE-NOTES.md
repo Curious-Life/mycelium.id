@@ -15,8 +15,9 @@ adapted for this repo's `pipeline/` layout).
 | File | Role |
 |---|---|
 | `pipeline/embed-service.py` | HTTP service, binds `127.0.0.1:8091`. |
-| `pipeline/requirements.txt` | Pinned Python deps (numpy, onnxruntime, tokenizers, huggingface-hub). |
-| `pipeline/setup.sh` | Creates `pipeline/.venv`, installs deps, optionally warms the model cache. |
+| `pipeline/requirements-embed.txt` | Pinned **embed-service** deps (numpy, onnxruntime, tokenizers, huggingface-hub). |
+| `pipeline/requirements.txt` | Pinned **clustering/topology** deps for Generate (faiss, igraph, leidenalg, scikit-learn, umap, scipy, ripser, cryptography, python-dotenv…). |
+| `pipeline/setup.sh` | Creates `pipeline/.venv` and installs **both** dep sets (embed = fatal, clustering = non-fatal), optionally warms the model cache. |
 | `src/embed/client.js` | `createEmbedClient({ baseUrl })` → `embed(text, task)` / `embedBatch(texts, task)` / `health()`. |
 | `scripts/verify-embed.mjs` | Tiered verification ledger (`npm run verify:embed`). |
 | `tests/embed-client.test.js` | Client unit tests against a mock server (`npm test`). |

@@ -206,6 +206,23 @@ semantically**. With neither, search is BM25-only and everything else works.
 Force BM25-only at any time with `MYCELIUM_DISABLE_EMBED=1`, or point at a
 different embed host with `MYCELIUM_EMBED_URL`.
 
+**c) Generate (the mindscape / topology map)** — the 5-stage clustering pipeline
+(`pipeline/run-clustering.sh`) needs a heavier Python set (faiss, leidenalg, igraph,
+scikit-learn, umap, scipy, cryptography…). The easiest path installs **both** the
+embed and clustering deps at once:
+
+```bash
+bash pipeline/setup.sh            # venv + embed deps + clustering deps + model warmup
+# or just the clustering deps into an existing venv:
+pipeline/.venv/bin/python3 -m pip install -r pipeline/requirements.txt
+```
+
+These are heavy native wheels; skip them with `PIPELINE_SKIP_CLUSTER_DEPS=1 bash
+pipeline/setup.sh` if you only want search. Without them, Generate fails fast with an
+actionable message (embedding/search are unaffected). **Note:** this is the
+dev/local-checkout workflow; a packaged `.app` does not yet bundle the pipeline
+(tracked separately).
+
 ---
 
 ## 9. Optional: HTTP transport (remote access, e.g. via Tailscale)

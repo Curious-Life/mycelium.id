@@ -177,7 +177,7 @@ function checkTier2() {
   }
   if (probe.status !== 0) {
     record('SKIP', 'T4. Tier-2 orchestrator on seeded rows',
-      'clustering deps (faiss/igraph/leidenalg/numpy) not installed — see pipeline/requirements.txt; not faking populated topology');
+      'clustering deps (faiss/igraph/leidenalg/numpy) not installed — run `bash pipeline/setup.sh` (or `pipeline/.venv/bin/python3 -m pip install -r pipeline/requirements.txt`); not faking populated topology');
     return;
   }
   // Deps present but seeding real embeddings requires the embed service /
