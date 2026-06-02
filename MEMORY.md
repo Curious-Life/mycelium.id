@@ -5,7 +5,18 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
-- **Account setup + durable data + MCP review (2026-06-02, latest).** **#36 landed on main**
+- **Context Bank Upgrade — design spec (2026-06-02, latest).** Sweep-first-design pass closing the MCP
+  context-bank gaps from the design review: forget/redact, facts store, `relatedContext`, entities,
+  Tier-2 gating, user salience, unified `ref` handle. **DRAFT spec — iterating, NOT built yet:**
+  [`docs/CONTEXT-BANK-UPGRADE-DESIGN-2026-06-02.md`](docs/CONTEXT-BANK-UPGRADE-DESIGN-2026-06-02.md). Key
+  sweep pivots: forget is NOT greenfield (builds on `documents.delete`+`afterDeleteHooks`,
+  `backend.delete({ids})`, `revoked_at` tombstone); cascade is shallow (only `clustering_points` +
+  `embedding_768` ref a message — aggregates self-heal per `clustering_run_id`); facts is greenfield
+  (`user_profiles`≠facts store); `relatedContext`=thin reuse of `backend.query({text})`; Tier-2 gating
+  needs an async readiness probe threaded into `buildDomains` (static at boot). 5 open decisions (§11);
+  build order = Phase 1 (forget+salience) first.
+
+- **Account setup + durable data + MCP review (2026-06-02).** **#36 landed on main**
   (account ceremony): the vault now lives in a **durable per-OS data dir** (`src/paths.js`,
   survives app updates; legacy `./data` non-destructively relocated; fresh vault self-migrates,
   no `init-db`); **SINGLE recovery key** — user saves only USER_MASTER, SYSTEM_KEY is
