@@ -91,7 +91,7 @@ export function createContextDomain(deps) {
               .map((m) => {
                 const who = m.role === 'user' ? 'Human' : 'You';
                 const when = (m.created_at || '').replace('T', ' ').slice(0, 16);
-                return `**${who}** _${when}_: ${(m.content || '').slice(0, 500)}`;
+                return `${m.pinned ? '📌 ' : ''}**${who}** _${when}_: ${(m.content || '').slice(0, 500)}`;
               })
               .join('\n');
             sections.push(`---\n# RECENT MESSAGES (last ${rows.length})\n\n${lines}`);

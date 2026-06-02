@@ -72,13 +72,13 @@ export async function boot({
   // env, memory-only, never logged — consistent with the key discipline.
   process.env.ENCRYPTION_MASTER_KEY = userHex;
   const { db, close } = getDb({ dbPath, userKey, systemKey });
-  const { domains, deferred } = buildDomains({ db, userId, embedder });
+  const { domains, deferred, searchHelpers } = buildDomains({ db, userId, embedder });
   const { tools, handlers } = collectTools(domains);
   const server = createMcpServer({ tools, handlers });
   // handlers is returned so non-MCP transports (REST) can reuse the SAME
   // tool handler map without re-implementing tool logic. userId is returned so
   // HTTP ingestion routes (upload) can scope writes without re-deriving it.
-  return { server, db, close, tools, handlers, deferred, userId };
+  return { server, db, close, tools, handlers, deferred, userId, searchHelpers };
 }
 
 async function startStdio() {

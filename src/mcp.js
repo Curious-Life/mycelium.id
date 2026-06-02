@@ -29,6 +29,7 @@ import { createTopologyToolsDomain } from './tools/topology-tools.js';
 import { createTopologyHelpers } from './topology/helpers.js';
 import { createContextDomain } from './tools/context.js';
 import { createIngestDomain } from './tools/ingest.js';
+import { createCurateDomain } from './tools/curate.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { getMasterKey } from './crypto/crypto-local.js';
 
@@ -88,6 +89,9 @@ export function buildDomains({
     // enqueueEnrichment nudges the :8095 service after each save (best-effort,
     // non-fatal when the service is absent — the row is queued at nlp_processed=0).
     createIngestDomain({ db, userId, enqueueEnrichment: createEnqueueEnrichment({ userId }) }),
+    // forget + mark: cross-cutting curate verbs over a {type,id} ref. searchHelpers
+    // is threaded so forget() can evict the in-RAM index; db.audit logs the forget.
+    createCurateDomain({ db, userId, searchHelpers }),
     createHealthDomain({ getDb: () => db, userId }),
     createTasksDomain({ db, userId }),
     createFisherToolsDomain({ db, userId }),
@@ -114,7 +118,7 @@ export function buildDomains({
   // Deferred = domains needing a subsystem not yet built. Each lands with its
   // Wave-2 unit; listed explicitly so the surface is never silently dropped.
   const deferred = ['reply', 'services'];
-  return { domains, deferred };
+  return { domains, deferred, searchHelpers };
 }
 
 /**
