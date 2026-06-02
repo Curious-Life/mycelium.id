@@ -19,6 +19,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -55,16 +56,46 @@ fn mycelium_home(app: &tauri::App) -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
-/// Is remote access enabled? Reads <data_dir>/remote.json (written by the
-/// Settings UI via /api/v1/remote/config). Best-effort: false on any error
-/// (missing file, parse failure, key absent) — remote stays OFF unless the
-/// config explicitly says `"remoteEnabled": true`.
-fn remote_enabled(data_dir: &std::path::Path) -> bool {
+/// Read <data_dir>/remote.json (written by the Settings UI / connect-managed).
+/// Best-effort: Null on any error (missing file, parse failure).
+fn read_remote_json(data_dir: &Path) -> serde_json::Value {
     std::fs::read_to_string(data_dir.join("remote.json"))
         .ok()
         .and_then(|txt| serde_json::from_str::<serde_json::Value>(&txt).ok())
-        .and_then(|v| v.get("remoteEnabled").and_then(|b| b.as_bool()))
-        .unwrap_or(false)
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// remoteMode: 'off' | 'managed' | 'own-relay' | 'direct' (default 'off').
+fn remote_mode(cfg: &serde_json::Value) -> String {
+    cfg.get("remoteMode").and_then(|v| v.as_str()).unwrap_or("off").to_string()
+}
+
+/// Legacy Phase-1/2 toggle: start the --http server even with remoteMode 'off'.
+fn remote_enabled_legacy(cfg: &serde_json::Value) -> bool {
+    cfg.get("remoteEnabled").and_then(|b| b.as_bool()).unwrap_or(false)
+}
+
+/// Resolve a bundled sidecar binary. In a packaged .app, Tauri places sidecars
+/// beside the main executable (their `-$TRIPLE` suffix stripped); in dev they may
+/// live in src-tauri/binaries or on PATH. Falls back to the bare name (PATH).
+fn resolve_sidecar(home: &Path, name: &str) -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join(name);
+            if p.exists() {
+                return p;
+            }
+        }
+    }
+    for cand in [
+        home.join("src-tauri").join("binaries").join(name),
+        home.join("binaries").join(name),
+    ] {
+        if cand.exists() {
+            return cand;
+        }
+    }
+    PathBuf::from(name) // PATH fallback (dev / system-installed)
 }
 
 fn main() {
@@ -132,21 +163,65 @@ fn main() {
             // resolves its base URL + signing secret + operator user from the
             // persisted config (Phase 1), so no secrets are passed here.
             if let Ok(data_dir) = app.path().app_data_dir() {
-                if remote_enabled(&data_dir) {
-                    let spawned = Command::new("node")
-                        .arg("src/index.js")
+                let cfg = read_remote_json(&data_dir);
+                let mode = remote_mode(&cfg);
+                if mode != "off" || remote_enabled_legacy(&cfg) {
+                    // --http OAuth/MCP server (loopback). Pass the public base URL so
+                    // OAuth metadata/redirects use the real hostname (empty → localhost).
+                    let public_host = cfg.get("publicHost").and_then(|v| v.as_str()).unwrap_or("");
+                    let mut http = Command::new("node");
+                    http.arg("src/index.js")
                         .arg("--http")
                         .current_dir(&home)
                         .env("MYCELIUM_PORT", "4711")
                         .env("MYCELIUM_KEY_SOURCE", &key_source)
-                        .env("MYCELIUM_DATA_DIR", &data_dir)
-                        .spawn();
-                    match spawned {
+                        .env("MYCELIUM_DATA_DIR", &data_dir);
+                    if !public_host.is_empty() {
+                        http.env("MYCELIUM_BASE_URL", format!("https://{public_host}"));
+                    }
+                    match http.spawn() {
                         Ok(c) => {
                             children.push(c);
-                            eprintln!("[mycelium] remote MCP (OAuth) server starting on 127.0.0.1:4711");
+                            eprintln!("[mycelium] remote MCP (OAuth) server on 127.0.0.1:4711");
                         }
                         Err(e) => eprintln!("[mycelium] remote MCP server did not start ({e})"),
+                    }
+
+                    // Caddy terminates TLS for <publicHost> (managed/own-relay/direct).
+                    if mode == "managed" || mode == "own-relay" || mode == "direct" {
+                        let caddy = resolve_sidecar(&home, "caddy");
+                        match Command::new(&caddy)
+                            .arg("run")
+                            .arg("--config")
+                            .arg(data_dir.join("Caddyfile"))
+                            .arg("--adapter")
+                            .arg("caddyfile")
+                            .current_dir(&data_dir)
+                            .spawn()
+                        {
+                            Ok(c) => {
+                                children.push(c);
+                                eprintln!("[mycelium] caddy (TLS terminator) started");
+                            }
+                            Err(e) => eprintln!("[mycelium] caddy did not start ({e})"),
+                        }
+                    }
+
+                    // frpc reverse tunnel (relay modes only; direct has no relay).
+                    if mode == "managed" || mode == "own-relay" {
+                        let frpc = resolve_sidecar(&home, "frpc");
+                        match Command::new(&frpc)
+                            .arg("-c")
+                            .arg(data_dir.join("frpc.toml"))
+                            .current_dir(&data_dir)
+                            .spawn()
+                        {
+                            Ok(c) => {
+                                children.push(c);
+                                eprintln!("[mycelium] frpc (reverse tunnel) started");
+                            }
+                            Err(e) => eprintln!("[mycelium] frpc did not start ({e})"),
+                        }
                     }
                 }
             }
