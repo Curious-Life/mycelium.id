@@ -74,6 +74,9 @@ Two **sidecar services** run as their own processes:
 | Migration runner | `src/db/migrate.js` + `migrations/000*.sql` | ✅ |
 | Scope-partitioned crypto (two-key vault) | `src/crypto/crypto-local.js`, `src/crypto/keys.js`, `src/crypto/guardians/*` | ✅ |
 | Master-key source (env / macOS Keychain / 1Password) | `src/crypto/key-source.js`, `scripts/set-keys.mjs` | ✅ |
+| Account keystore (single recovery key; SYSTEM_KEY HKDF-derived) | `src/account/keystore.js`, `src/account/keychain-names.js` | ✅ (#36) |
+| First-run ceremony + restore + re-view (setup-mode) | `src/account/router.js` (`/api/v1/account`), `portal-app/src/routes/setup/` | ✅ (#36) |
+| Data location (durable per-OS dir; survives updates) | `src/paths.js` (`MYCELIUM_DATA_DIR`) | ✅ (#36) |
 | Embeddings client + search adapter | `src/embed/client.js` (→ `:8091`), `src/search/embedder.js` (`createServiceEmbedder`) | ✅ (real vectors ⚠️ Tier-2) |
 | Inference router (local Ollama + BYOK cloud) | `src/inference/{router,local,cloud,errors}.js` | ✅ (real models need Ollama/keys) |
 | Search (BM25 + vector + RRF fusion) | `src/search/**` | ✅ |
@@ -134,11 +137,21 @@ hashtag + keyword tags) behind a seam a model-backed pass can replace.
 - **Schema:** all V1 tables ported in `migrations/0001_init.sql`; `0002` adds
   `attachments.local_path` for the local blob store. Applied by `src/db/migrate.js`.
 - **Blobs:** uploaded files encrypted to a local blob store (`src/ingest/blob-store.js`).
+- **Location (#36):** the vault lives in a **durable per-OS data dir** (`src/paths.js` →
+  `~/Library/Application Support/id.mycelium.app` on macOS, set by the Tauri shell as
+  `MYCELIUM_DATA_DIR`), so app updates don't wipe history. A legacy in-repo `./data` vault is
+  **non-destructively relocated** on first boot. A fresh vault **self-migrates** (no separate
+  `init-db`). ⚠️ A hand-rolled stdio MCP config (`node src/index.js`) must set
+  `MYCELIUM_DATA_DIR` to the same dir, else it opens a different, empty vault.
 
 ## 6. Security model
 
-- **Two 64-char hex keys** (decisions D4 + D6): `USER_MASTER` + `SYSTEM_KEY`
-  (32 bytes each), no BIP-39. Per-key KCV guards typos.
+- **Single recovery key** (#36, amends D4 + D6): the user saves only `USER_MASTER`
+  (64-char hex); `SYSTEM_KEY` is **HKDF-SHA256-derived** from it (`src/account/keystore.js`).
+  No BIP-39. Per-key KCV still guards typos; both keys land in the Keychain so the boot/unlock
+  path is unchanged. The keys are no longer independent (accepted: SYSTEM_KEY only encrypts the
+  normally-empty operator `secrets` table). A lost key is unrecoverable by design — so creation
+  forces a save-it gate, and the key is re-viewable in Settings / restorable by paste.
 - **Key source** (`src/crypto/key-source.js`, `MYCELIUM_KEY_SOURCE`): the two hex
   keys are read at boot from `env` (default), the **macOS Keychain**, or
   **1Password** (`op`). Keychain/1Password keep keys out of shell history and
@@ -170,12 +183,13 @@ hashtag + keyword tags) behind a seam a model-backed pass can replace.
 
 ## 9. Verification
 
-`npm run verify` runs **28 GO-gated suites** (`scripts/verify-*.mjs`), each with
+`npm run verify` runs **29 GO-gated suites** (`scripts/verify-*.mjs`), each with
 a PASS/FAIL ledger + VERDICT line: foundation, mcp, mindfiles, metrics, rest,
 search, topology, embed, oauth, context, ingest, blob, enqueue, enrich,
-keysource, portal, portal-serve, portal-data, portal-mindscape, import,
-import-security, portal-tps, generate, chronicles, integration, nav, inference,
-publish. CI
+keysource, **account** (#36 — setup/restore/recovery-key + single-key derivation;
+skips cleanly with no Keychain), portal, portal-serve, portal-data,
+portal-mindscape, import, import-timestamps, import-security, portal-tps, generate,
+chronicles, integration, nav, inference, publish. CI
 (`.github/workflows/verify.yml`) runs them on every PR. **Tier-1** suites pass
 without the ML stack; **Tier-2** parity (real embeddings/clustering) is verified
 on a host with onnxruntime/Ollama installed. Portal/SPA-dependent checks SKIP
