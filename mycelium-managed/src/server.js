@@ -131,8 +131,8 @@ export function main() {
   const relayAddr = process.env.MYC_RELAY_ADDR || '';
   const acmeDnsServer = process.env.MYC_ACME_DNS || '';
   const registry = openRegistry(process.env.MYC_REGISTRY_DB || './registry.db');
-  const nonces = createNonceStore();
-  nonces.startSweeper(); // periodic expiry sweep (memory bound)
+  const nonces = createNonceStore({ db: registry.db }); // shared store: HA + restart-survival
+  nonces.startSweeper(); // periodic expiry sweep
   const dns = createDnsClient({
     provider: process.env.MYC_DNS_PROVIDER || 'mock',
     token: process.env.MYC_DNS_TOKEN,

@@ -28,4 +28,4 @@ maxPortsPerClient = 0           # tenants use vhost (SNI), never raw ports
 name = "mycelium-auth"
 addr = "127.0.0.1:8790"         # the mycelium-managed control-plane (private net / loopback)
 path = "/frps/handler"
-ops = ["Login", "NewProxy"]
+ops = ["Login", "NewProxy", "CloseProxy", "Ping"]

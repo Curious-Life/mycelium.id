@@ -105,6 +105,16 @@ try {
   const cap = createDailyCap({ max: 1 });
   const t1 = cap.tryConsume(); const t2 = cap.tryConsume(); cap.refund(); const t3 = cap.tryConsume();
   rec('P11. daily cap: max 1 → 2nd blocked; refund restores', t1 === true && t2 === false && t3 === true, `t1=${t1} t2=${t2} t3=${t3}`);
+
+  // P12 — registry-backed nonce store: HA (a nonce issued by one instance is
+  // consumable by ANOTHER sharing the DB) + single-use across instances.
+  const ns1 = createNonceStore({ db: registry.db });
+  const ns2 = createNonceStore({ db: registry.db });
+  const hn = ns1.issue();
+  const crossConsume = ns2.consume(hn); // different instance, same DB
+  const replay = ns1.consume(hn);       // already consumed → false
+  rec('P12. registry-backed nonce: cross-instance consume once (HA), replay rejected',
+    crossConsume === true && replay === false, `cross=${crossConsume} replay=${replay}`);
 } finally {
   try { server.close(); registry.close(); rmSync(DB, { force: true }); } catch { /* */ }
 }
