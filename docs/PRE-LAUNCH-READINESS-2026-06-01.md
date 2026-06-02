@@ -77,9 +77,10 @@ The everyday "Claude has my memory" loop.
 |---|---|---|---|
 | Single capture / bulk `importMessages` (MCP/REST) | ✅ | V (`ingest`) | — |
 | Raw file upload `/api/v1/upload` → encrypted blob | ✅ | V (`blob`) | — |
-| **Portal import**: Claude/ChatGPT `.zip` (single-shot + chunked) → parse → encrypted, deduped | ✅ | V (`import`) | Parsers written from format knowledge — **need a REAL export to confirm fidelity (F).** |
+| **Portal import**: Claude/ChatGPT `.zip` (single-shot + chunked) → parse → encrypted, deduped | ✅ | V (`import`) | Parsers written fresh — **need a REAL export to confirm fidelity (F).** |
+| Drag-and-drop a file onto Import (vs. click-to-browse) | ✅ | V (`nav` N8) | Drop zone added 2026-06-01. |
+| **Parser parity with canonical** | ◑ | — | **GAP:** the canonical `@mycelium/core/import-parsers.js` was never vendored into `reference/`. Our Claude/ChatGPT parsers extract **messages/conversations only** — NOT the projects/memories/artifacts (Claude) or feedback/media/shared (ChatGPT) the UI's result panel advertises, and **Obsidian/LinkedIn are detection-only stubs**. Full parity = port from the **sibling canonical repo** (`Curious-Life/mycelium`, not in this snapshot). |
 | Import surface hardened (bomb/DoS/zip-slip/leakage) | ✅ | V (`import-security`) | — |
-| Obsidian / LinkedIn import | ⬜ | — | Returns "not supported yet"; deferred. |
 | Enrichment hand-off (embed + NLP state machine) | ✅ / ⚠️ | V (`enqueue`,`enrich`) | Hand-off verified; **real embedding is Tier-2** (`:8091`). |
 
 ### Journey D — Topology: generate & explore the mindscape

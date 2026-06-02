@@ -1,10 +1,30 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { browser } from '$app/environment';
 	import { navigationState } from '$lib/stores/navigation';
 	import { theme } from '$lib/stores/theme';
 	import PipelineStatusChip from './PipelineStatusChip.svelte';
 
 	const currentView = $derived($navigationState.primaryView);
 	const currentTheme = $derived($theme);
+
+	// In the native Mac shell the window has no title bar (overlay style), so the
+	// header doubles as the drag strip. `data-tauri-drag-region` is the standard
+	// mechanism; the mousedown fallback covers the case where the server-served
+	// page (external URL) doesn't get the attribute handler wired.
+	let isTauri = $state(false);
+	onMount(() => { if (browser) isTauri = !!(window as any).__TAURI__ || !!(window as any).__TAURI_INTERNALS__; });
+
+	function startWindowDrag(e: MouseEvent) {
+		if (!isTauri || e.button !== 0) return;
+		const t = e.target as HTMLElement;
+		if (t.closest('button, a, input, select, textarea, [role="button"]')) return; // let controls work
+		try {
+			const tauri = (window as any).__TAURI__;
+			const getWin = tauri?.window?.getCurrentWindow || tauri?.webviewWindow?.getCurrentWebviewWindow;
+			getWin?.()?.startDragging?.();
+		} catch { /* not in Tauri / API shape differs — the attribute handles it */ }
+	}
 
 	const viewLabels: Record<string, string> = {
 		mindscape: 'Mycelium',
@@ -35,9 +55,18 @@
 	}
 </script>
 
+<!-- The whole bar is a window-drag handle in the native shell (no native title
+     bar). Buttons/links inside are not drag regions, so they stay clickable. -->
 <header
+	data-tauri-drag-region
+	onmousedown={startWindowDrag}
 	class="h-12 md:h-14 border-b border-[var(--color-border)] flex items-center px-3 sm:px-4 gap-2 sm:gap-4 bg-[var(--color-surface)] relative z-10 overflow-hidden flex-shrink-0"
 >
+	<!-- macOS traffic-light clearance in the native shell (overlay title bar). -->
+	{#if isTauri}
+		<div class="w-[68px] shrink-0 hidden md:block" data-tauri-drag-region></div>
+	{/if}
+
 	<!-- Sidebar toggle — visible on all sizes -->
 	<button
 		onclick={handleMenuClick}

@@ -94,6 +94,17 @@
 
 	let uploadProgress = $state(0);
 
+	// Drag-and-drop: drop a file anywhere on the upload card instead of browsing.
+	let dragOver = $state(false);
+	function onDrop(e: DragEvent) {
+		e.preventDefault();
+		dragOver = false;
+		const dropped = e.dataTransfer?.files;
+		if (dropped && dropped.length) { files = dropped; error = null; }
+	}
+	function onDragOver(e: DragEvent) { e.preventDefault(); dragOver = true; }
+	function onDragLeave(e: DragEvent) { e.preventDefault(); dragOver = false; }
+
 	async function handleImport() {
 		if (!files?.length) return;
 		importing = true;
@@ -236,15 +247,38 @@
 					{sources.find(s => s.id === selectedSource)?.hint}
 				</p>
 
+				<!-- Drop zone: drag a file in, or click Browse. -->
+				<div
+					role="button"
+					tabindex="0"
+					aria-label="Drop a file here or browse"
+					onclick={() => fileInput?.click()}
+					onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput?.click(); } }}
+					ondragover={onDragOver}
+					ondragleave={onDragLeave}
+					ondrop={onDrop}
+					class="rounded-xl border-2 border-dashed p-6 text-center cursor-pointer transition-colors
+						{dragOver
+							? 'border-[var(--color-accent)] bg-[var(--color-accent)]/10'
+							: 'border-[var(--color-border)] hover:border-[var(--color-accent)] hover:bg-[var(--color-elevated)]'}"
+				>
+					<svg class="w-7 h-7 mx-auto mb-2 text-[var(--color-text-tertiary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+					</svg>
+					<p class="text-sm text-[var(--color-text-secondary)]">
+						{dragOver ? 'Drop to upload' : 'Drag your export here, or click to browse'}
+					</p>
+					<p class="text-xs text-[var(--color-text-tertiary)] mt-1">
+						{sources.find(s => s.id === selectedSource)?.accept} · stays on your machine
+					</p>
+				</div>
+
 				<input
 					bind:this={fileInput}
 					bind:files={files}
 					type="file"
 					accept={sources.find(s => s.id === selectedSource)?.accept}
-					class="block w-full text-sm text-[var(--color-text-secondary)]
-						file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0
-						file:text-sm file:font-medium file:bg-[var(--color-elevated)]
-						file:text-[var(--color-text-primary)] hover:file:bg-[var(--color-border)]"
+					class="sr-only"
 				/>
 
 				{#if error}

@@ -27,6 +27,7 @@ const sidebar = read(P("lib", "components", "shell", "Sidebar.svelte"));
 const tabbar = read(P("lib", "components", "shell", "BottomTabBar.svelte"));
 const header = read(P("lib", "components", "shell", "Header.svelte"));
 const layout = read(P("routes", "(app)", "+layout.svelte"));
+const importPage = read(P("routes", "(app)", "import", "+page.svelte"));
 
 // N1 — coreNav is exactly the 6-screen V1 set (5 in the array + Settings rendered
 // separately at the bottom). Extract href: values inside the coreNav literal.
@@ -63,6 +64,12 @@ rec("N5 BottomTabBar has Import, no chat tab",
 const chatHidden = !/toggleChat/.test(header) && !/Toggle chat/.test(header)
   && !/key === 'j'[\s\S]*?toggleChat/.test(layout);
 rec("N6 chat toggle hidden in V1", chatHidden);
+
+// N7 — the header is a window-drag handle in the native shell (no native title bar).
+rec("N7 Header is a window-drag region (Tauri)", /data-tauri-drag-region/.test(header) && /startWindowDrag/.test(header));
+
+// N8 — Import accepts drag-and-drop, not just a file picker.
+rec("N8 Import has a drag-and-drop drop zone", /ondrop=/.test(importPage) && /onDrop/.test(importPage));
 
 const pass = ledger.every(Boolean);
 console.log(`\nVERDICT: ${pass ? "GO" : "NO-GO"} — ${ledger.filter(Boolean).length}/${ledger.length} checks`);
