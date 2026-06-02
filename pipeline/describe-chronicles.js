@@ -105,6 +105,18 @@ function parseChronicle(raw, t, pointCount) {
   };
 }
 
+// Per-territory model timeout. Without it a hung Ollama/cloud `infer()` blocks
+// Step 3 of Generate INDEFINITELY (the loop awaits every territory) — a wedged run
+// the UI can't distinguish from progress. On timeout we fail-soft (keep the
+// existing name/essence) exactly like an unreachable model.
+const CHRONICLE_INFER_TIMEOUT_MS = Number(process.env.MYCELIUM_CHRONICLE_TIMEOUT_MS) || 60000;
+
+function withTimeout(promise, ms, label) {
+  let t;
+  const timeout = new Promise((_, reject) => { t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+}
+
 /**
  * Narrate every territory needing a chronicle. Injectable `infer` + `sample` so
  * the verify can stub the model + content. Returns counts.
@@ -118,7 +130,10 @@ export async function describeChronicles({ db, userId, infer, version = CHRONICL
     if (!samples.length) { skipped += 1; continue; }
     let raw;
     try {
-      raw = await infer({ task: 'narrate', prompt: buildPrompt(t, samples), maxTokens: 700 });
+      raw = await withTimeout(
+        infer({ task: 'narrate', prompt: buildPrompt(t, samples), maxTokens: 700 }),
+        CHRONICLE_INFER_TIMEOUT_MS, 'chronicle narration',
+      );
     } catch {
       failed += 1; // fail-soft: no model reachable → leave existing name/essence
       continue;

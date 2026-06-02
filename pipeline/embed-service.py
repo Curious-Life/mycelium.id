@@ -45,11 +45,26 @@ import argparse
 import gc
 import json
 import os
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-import numpy as np
+# Fail FAST + ACTIONABLE if the embed deps aren't installed for THIS interpreter.
+# Otherwise the process dies at module load with a bare ModuleNotFoundError that
+# nobody sees (it's spawned in the background) → the embedded count never moves →
+# Generate's preflight 409s forever → the UI hangs at "Processing 0/N". The Node
+# embed-supervisor also dep-checks before spawning, but this guard covers manual
+# `python embed-service.py` runs too. Exit 3 = the agreed "deps missing" code.
+try:
+    import numpy as np
+except ModuleNotFoundError as _e:  # noqa: N816
+    sys.stderr.write(
+        f"[embed-service] missing Python dependency: {_e.name}\n"
+        "The embedding engine needs its dependencies — install with:\n"
+        "  bash pipeline/setup.sh   (or: python -m pip install -r pipeline/requirements.txt)\n"
+    )
+    sys.exit(3)
 
 # -- Config ------------------------------------------------------------------
 

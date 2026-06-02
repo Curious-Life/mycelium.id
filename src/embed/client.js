@@ -15,7 +15,9 @@
 
 export const EMBED_DIM = 768;
 export const VALID_TASKS = Object.freeze(["query", "document"]);
-const DEFAULT_BASE_URL = "http://127.0.0.1:8091";
+// Single source of truth for the embed-service location. MYCELIUM_EMBED_PORT
+// relocates the whole app (supervisor spawn, drainer, search) consistently.
+const DEFAULT_BASE_URL = `http://127.0.0.1:${Number(process.env.MYCELIUM_EMBED_PORT) || 8091}`;
 
 export class EmbedServiceError extends Error {
   constructor(message, { cause, status } = {}) {

@@ -27,6 +27,9 @@ import { api } from './api';
 
 export type GenPhase = 'idle' | 'embedding' | 'starting' | 'running' | 'done' | 'error';
 
+/** Embedder health as reported by /processing-status (see src/embed/supervisor.js). */
+export interface EmbedderHealth { status: string; message: string; detail?: string | null }
+
 export interface GenState {
   phase: GenPhase;
   jobId: string | null;
@@ -40,21 +43,29 @@ export interface GenState {
   etaSeconds: number | null; // null = unknown yet
   message: string; // info (e.g. "processing 12/132 ready")
   error: string; // set iff phase === 'error'
+  embedder: EmbedderHealth | null; // embed-engine health (drives the actionable embedding error)
+  stalled: boolean; // server flagged the run as quiet too long ("taking longer than usual")
 }
 
 const SS_KEY = 'mycelium_gen_job';
 const MIN_EMBEDDED = 5;
 const POLL_MS = 1500;
+// If the embedded count hasn't moved for this long we stop the "Processing 0/N"
+// spinner and surface an actionable error. Can't false-positive on a big import:
+// ANY increase resets the clock, so only a true plateau trips it.
+const EMBED_STALL_MS = 75_000;
 
 const initial: GenState = {
   phase: 'idle', jobId: null, step: 0, totalSteps: 5, stageLabel: '',
   embedded: 0, total: 0, startedAt: null, elapsedMs: 0, etaSeconds: null, message: '', error: '',
+  embedder: null, stalled: false,
 };
 
 export const generate = writable<GenState>({ ...initial });
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let priorDurationMs: number | null = null;
+let embedStallSince = 0; // epoch ms of the last embedded-count change (stall clock)
 
 const patch = (p: Partial<GenState>) => generate.update((s) => ({ ...s, ...p }));
 const ss = (fn: (s: Storage) => void) => { try { if (typeof sessionStorage !== 'undefined') fn(sessionStorage); } catch { /* */ } };
@@ -94,6 +105,7 @@ async function pollStatus() {
     patch({ phase: 'done', step: j.totalSteps ?? s.totalSteps, totalSteps: j.totalSteps ?? s.totalSteps, stageLabel: 'Complete', startedAt, elapsedMs: (j.finishedAt ?? Date.now()) - startedAt, etaSeconds: 0 });
     return;
   }
+  if (j.status === 'canceled') { reset(); return; } // user stopped it → back to idle, no error
   if (j.status === 'error' || j.status === 'abandoned') {
     stop(); ss((x) => x.removeItem(SS_KEY));
     patch({ phase: 'error', error: j.error || 'Generation failed', startedAt });
@@ -104,7 +116,8 @@ async function pollStatus() {
     totalSteps: j.totalSteps ?? 5, stageLabel: j.stageLabel || s.stageLabel || 'Starting…',
     startedAt, elapsedMs: Date.now() - startedAt,
   };
-  patch({ ...next, etaSeconds: computeEta(next) });
+  // `stalled` is authoritative from the server's inactivity watchdog (survives reloads).
+  patch({ ...next, stalled: !!j.stalled, etaSeconds: computeEta(next) });
 }
 
 async function pollEmbedding() {
@@ -114,9 +127,39 @@ async function pollEmbedding() {
   const p: any = await res.json().catch(() => ({}));
   const embedded = Number(p.embedded ?? 0);
   const total = Number(p.total ?? 0);
-  if (total === 0) { stop(); patch({ phase: 'error', error: 'Import some conversations first — there is nothing to map yet.' }); return; }
-  patch({ embedded, total, message: `Processing your conversations… ${embedded} / ${total} ready` });
-  if (embedded >= MIN_EMBEDDED) { stop(); void start(); } // enough embedded → go
+  const embedder: EmbedderHealth | null = p.embedder ?? null;
+  const es = embedder?.status;
+
+  if (total === 0) { stop(); patch({ phase: 'error', embedder, error: 'Import some conversations first — there is nothing to map yet.' }); return; }
+
+  // The embedder is broken (deps missing / keeps crashing / model failed). Don't
+  // spin at "0/N" forever — surface its actionable message + offer Retry.
+  if (es === 'deps_missing' || es === 'down' || es === 'error') {
+    stop();
+    patch({ phase: 'error', embedder, error: embedder?.message || 'The embedding engine isn’t running. Restart the app and try again.' });
+    return;
+  }
+
+  // Reset the stall clock on ANY forward progress so a big import can't false-trip.
+  const prev = get(generate).embedded;
+  const now = Date.now();
+  if (embedStallSince === 0 || embedded > prev) embedStallSince = now;
+
+  patch({ embedded, total, embedder, message: `Processing your conversations… ${embedded.toLocaleString()} / ${total.toLocaleString()} ready` });
+
+  if (embedded >= MIN_EMBEDDED) { stop(); void start(); return; } // enough embedded → go
+
+  // Plateaued too long while not actively embedding/loading → actionable stall.
+  if (now - embedStallSince > EMBED_STALL_MS && es !== 'loading') {
+    stop();
+    patch({
+      phase: 'error', embedder,
+      error: embedder?.message
+        || (embedded > 0
+          ? `Only ${embedded} of ${total} are ready and embedding has stalled. Restart the app and try again.`
+          : 'Embedding hasn’t started. The embedding engine may not be running — restart the app and try again.'),
+    });
+  }
 }
 
 /** Trigger a run (button click). Idempotent-ish: server single-flights concurrent starts. */
@@ -138,7 +181,8 @@ export async function start() {
   const body: any = await res.json().catch(() => ({}));
   if (res.status === 409) {
     // Preflight: not enough embedded yet → WAIT and auto-start. Not an error.
-    patch({ phase: 'embedding', embedded: Number(body.embedded ?? 0), total: Number(body.total ?? 0), message: body.error || 'Still processing your conversations…', error: '' });
+    embedStallSince = Date.now(); // start the stall clock for this embedding wait
+    patch({ phase: 'embedding', embedded: Number(body.embedded ?? 0), total: Number(body.total ?? 0), message: body.error || 'Still processing your conversations…', error: '', stalled: false });
     run();
     return;
   }
@@ -157,8 +201,22 @@ export function resume() {
 /** Clear state (e.g. dismiss a finished/errored run). */
 export function reset() {
   stop();
+  embedStallSince = 0;
   ss((x) => x.removeItem(SS_KEY));
   generate.set({ ...initial });
+}
+
+/**
+ * Cancel the current run and return to idle. In `running` it asks the server to
+ * stop the pipeline child; in `embedding` (no job yet) it just stops waiting.
+ * Either way the UI is freed immediately — no 45-min lockout.
+ */
+export async function cancel() {
+  const s = get(generate);
+  if (s.jobId) {
+    try { await api(`/portal/mycelium/generate/cancel/${s.jobId}`, { method: 'POST' }); } catch { /* best-effort */ }
+  }
+  reset();
 }
 
 /** "12s" / "3m 5s" — for elapsed + ETA display. */

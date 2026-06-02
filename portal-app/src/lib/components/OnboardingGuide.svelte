@@ -368,7 +368,9 @@
 	});
 
 	// --- Step 4: Generate Mycelium ---
-	async function startGenerate() {
+	let genRetries = 0; // bounds the 409 auto-retry so a dead embedder can't loop forever
+	async function startGenerate(auto = false) {
+		if (!auto) genRetries = 0; // a manual click resets the retry budget
 		errorMsg = '';
 		try {
 			const res = await api('/portal/mycelium/generate', { method: 'POST' });
@@ -376,6 +378,7 @@
 				const data = await res.json();
 				generateJobId = data.jobId;
 				generateJob = { id: data.jobId, status: 'running', step: 0, totalSteps: 5, stageLabel: 'Starting…', error: null };
+				genRetries = 0;
 				stopPolling();
 				startPolling();
 				return;
@@ -383,9 +386,23 @@
 			const body = await res.json().catch(() => ({} as any));
 			if (res.status === 409) {
 				// The common "clicked too early" case: not enough embedded yet. Show the
-				// server's actionable message and AUTO-RETRY — this is NOT a failure.
+				// server's actionable message and AUTO-RETRY — but CAP it (~3 min) so a
+				// broken embedder surfaces an actionable error instead of looping forever.
+				genRetries += 1;
+				if (genRetries > 45) {
+					let hint = 'Embedding has stalled — your conversations aren’t being processed. Restart the app and try again.';
+					try {
+						const ps = await api('/portal/mycelium/processing-status');
+						if (ps.ok) {
+							const pd = await ps.json().catch(() => ({} as any));
+							if (pd?.embedder?.message && pd.embedder.status !== 'ok' && pd.embedder.status !== 'loading') hint = pd.embedder.message;
+						}
+					} catch { /* keep the generic hint */ }
+					errorMsg = hint;
+					return;
+				}
 				errorMsg = body.error || 'Your conversations are still being processed — generation will start automatically.';
-				setTimeout(() => { if (!generateJobId) startGenerate(); }, 4000);
+				setTimeout(() => { if (!generateJobId) startGenerate(true); }, 4000);
 				return;
 			}
 			// 503 / other — surface the REAL reason (keys/pipeline not ready, etc.).
