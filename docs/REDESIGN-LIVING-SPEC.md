@@ -93,7 +93,7 @@ The VPS-per-user model **is the current model and is operationally alive**, with
 - **Deletion:** `DELETION_CATALOG` with 12 entry types (D1, R2, DNS, Worker binding, KMS, Hetzner VPS, Stripe sub, Telegram webhook, Claude OAuth, operator local) — Phases 0–5 shipped, commits `dad95f5..bb8fe84`
 - **Fleet ops:** `scripts/update-customers.sh`, `scripts/verify-deploy.sh` (9 checks), `scripts/sign-cert.sh` (SSH cert via 1Password), `scripts/deploy-ca-trust.sh`
 - **Watchdog:** `fleet-tls-watchdog` PM2 cron, Discord webhook alerts
-- **Tenant schema parity:** explicit skill (`.claude/skills/tenant-schema-parity/`) because no automated runner yet (FLEET-MIGRATIONS-PLAN.md F2 unbuilt)
+- **Tenant schema parity:** manual discipline (the canonical repo's `tenant-schema-parity` skill) because no automated runner yet (FLEET-MIGRATIONS-PLAN.md F2 unbuilt) — a V2 multi-tenant concern; the V1 self-hosted repo removed its carried-over copy (single-vault V1 has no fleet to drift)
 - **Hardening:** Phase 2 (2026-05-06) hardened tenant routing to **fail-closed** — silent cross-tenant landing is no longer possible (`packages/worker/src/services/tenant-d1.ts:69-76`)
 
 **This does not mean the spec's conclusion is wrong** — VPS-per-user genuinely does not scale to hundreds of users, and the cost is real. But it means:
