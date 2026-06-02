@@ -5,6 +5,25 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
+- **Account setup + durable data + MCP review (2026-06-02, latest).** **#36 landed on main**
+  (account ceremony): the vault now lives in a **durable per-OS data dir** (`src/paths.js`,
+  survives app updates; legacy `./data` non-destructively relocated; fresh vault self-migrates,
+  no `init-db`); **SINGLE recovery key** — user saves only USER_MASTER, SYSTEM_KEY is
+  HKDF-derived (`src/account/keystore.js`) — **amends D4+D6's "two independent keys"**; the REST
+  server boots in **setup mode** (`/setup` ceremony, `/api/v1/account`, vault routes 503-guarded,
+  completes boot in-process) so a new user needs no terminal; recovery key re-viewable in Settings
+  + restorable by paste (KCV-verified). Docs reconciled to this reality (CLAUDE.md, V1-BUILD-SPEC
+  D4/D6, ARCHITECTURE §3/§5/§6/§9). **⚠️ SUPERSEDES** the earlier "key ceremony = Tauri native /
+  keys never touch HTTP" call: setup is **web-based** (server boots keyless in setup mode) and the
+  recovery key DOES traverse a **localhost** HTTP response (`GET /api/v1/account/recovery-key`,
+  loopback-guarded) — a deliberate, conscious relaxation of CLAUDE.md §4 for a single-user local
+  vault. **PR #37 open** (MCP: opt-in `MYCELIUM_DEBUG=1` tool-failure diagnostics +
+  [`docs/MCP-CONNECT-AND-TEST.md`](docs/MCP-CONNECT-AND-TEST.md)) — flags that a hand-rolled stdio
+  Claude Desktop config must set `MYCELIUM_DATA_DIR` or it opens a *different, empty* vault.
+  Discarded (superseded/colliding): a key-ceremony design doc (#36 built it differently) + a
+  pipeline-adjacent enrichment job (other agent owns the pipeline rebuild). Branch hygiene: pruned
+  the squash-merged #27–#35 branches. ⚠️ Branch off `origin/main`.
+
 - **V1 UX build-out + bug-hunt + Mac-fixes SHIPPED TO MAIN (2026-06-02).** `main @ d3a3506`,
   `npm run verify` → **29× GO**. Merged #27 (nav/Mindscape-read/import[hardened]/Timeline/Profile/
   Settings/welcome + window-drag + import-dnd) · #28 (**Phase G** generate `src/jobs.js`; **Phase C**
