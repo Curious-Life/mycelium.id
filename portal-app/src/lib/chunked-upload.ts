@@ -32,7 +32,7 @@ async function uploadChunkWithRetry(blob: Blob, uploadId: string, index: number,
 			const controller = new AbortController();
 			const timeout = setTimeout(() => controller.abort(), 120_000); // 2 min per chunk
 
-			const res = await fetch('/portal/upload/chunk', {
+			const res = await fetch('/api/v1/portal/upload/chunk', {
 				method: 'POST', body: formData, credentials: 'same-origin', headers,
 				signal: controller.signal,
 			});
@@ -73,7 +73,7 @@ export async function uploadFile(
 		// Small file: single request with XHR progress
 		return new Promise((resolve, reject) => {
 			const xhr = new XMLHttpRequest();
-			xhr.open('POST', '/portal/upload');
+			xhr.open('POST', '/api/v1/portal/upload');
 			xhr.withCredentials = true;
 			const csrf = getCsrfToken();
 			if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf);
@@ -126,7 +126,7 @@ export async function uploadFile(
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), 600_000); // 10 min for processing
 
-	const res = await fetch('/portal/upload/complete', {
+	const res = await fetch('/api/v1/portal/upload/complete', {
 		method: 'POST', credentials: 'same-origin', headers,
 		body: JSON.stringify({ uploadId, filename: file.name, totalChunks, fileSize: total }),
 		signal: controller.signal,

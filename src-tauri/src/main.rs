@@ -82,6 +82,11 @@ fn main() {
                 .min_inner_size(820.0, 560.0)
                 .transparent(true)        // let the glass show the desktop through
                 .title_bar_style(TitleBarStyle::Overlay) // content flows under the traffic-lights
+                // Disable Tauri's native OS file-drop handler so the webview's
+                // HTML5 drag-drop (the Import drop zone) receives dropped files.
+                // Without this, WKWebView swallows the drop and dataTransfer.files
+                // is empty — "drag an export in" silently does nothing.
+                .disable_drag_drop_handler()
                 .build()?;
 
             // See-through Mac mode: native window vibrancy behind the transparent
