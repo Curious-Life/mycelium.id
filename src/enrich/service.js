@@ -71,9 +71,25 @@ export function createEnrichmentService(deps) {
     let embedded = 0;
     let failed = 0;
 
-    for (const row of rows) {
+    // Embed the WHOLE batch in one /batch call (was one HTTP round-trip per
+    // row → ~2/sec on a large backlog; batched → ~70/sec). A whole-batch embed
+    // failure (service down / bad response) is isolated: mark every scanned row
+    // failed and return — never silently advance a row with no embedding.
+    let vectors;
+    try {
+      vectors = await embed.embedBatch(rows.map((r) => r.content), 'document');
+    } catch (err) {
+      const note = String(err?.message || err).slice(0, 500);
+      for (const row of rows) {
+        try { await messages.updateEnrichment(row.id, userId, { nlpProcessed: -1, nlpError: note }); } catch { /* non-fatal */ }
+      }
+      return { scanned: rows.length, embedded: 0, failed: rows.length };
+    }
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
       try {
-        const vec = await embed.embed(row.content, 'document');
+        const vec = vectors[i];
         if (!Array.isArray(vec) || vec.length !== EMBED_DIM) {
           throw new Error(
             `embed returned ${Array.isArray(vec) ? vec.length : typeof vec} dims, expected ${EMBED_DIM}`,
