@@ -2,7 +2,7 @@
 
 **What it is, how it connects, how it authenticates, the tools it exposes, and how to run and test it locally.**
 
-> As-built, verified against the **running** server (`npm run verify:mcp` → **35 tools, 2 deferred**) and the registration code (`src/mcp.js`), not estimated. Date: 2026-06-02.
+> As-built, verified against the **running** server (`npm run verify:mcp` → **27 tools, 2 deferred**) and the registration code (`src/mcp.js`), not estimated. Date: 2026-06-02.
 > Companions: [`SETUP.md`](SETUP.md) (install + Claude Desktop config) · [`MCP-CONNECT-AND-TEST.md`](MCP-CONNECT-AND-TEST.md) (connection code-review + test plan) · [`ARCHITECTURE.md`](ARCHITECTURE.md) (as-built system).
 
 ---
@@ -16,7 +16,7 @@ The defining property: **one `boot()` sequence, three transports.** Whether a cl
 ```
             ┌───────────────────────── boot() (src/index.js) ─────────────────────────┐
             │  load 2 hex keys → unlock + KCV (fail-closed) → open encrypting SQLite    │
-            │  → buildDomains() → 35 tools → register on low-level MCP Server           │
+            │  → buildDomains() → 27 tools → register on low-level MCP Server           │
             └──────────────────────────────────────────────────────────────────────────┘
                  │                          │                              │
           ┌──────┴──────┐          ┌────────┴────────┐            ┌────────┴────────┐
@@ -36,7 +36,7 @@ When the server starts (`src/index.js` → `boot()`):
 1. **Resolve two keys** from `MYCELIUM_KEY_SOURCE` (`env` | `keychain` | `1password`). You save **one** recovery key (`USER_MASTER`); `SYSTEM_KEY` is HKDF-derived from it. Both end up in the OS keychain.
 2. **Unlock + KCV check** — each key is verified against a key-check value. Wrong/missing key → throw → exit. **Fail-closed**: no key, no vault.
 3. **Open the encrypting SQLite adapter** — `src/adapter/d1.js` transparently AES-256-GCM-encrypts every field at the query boundary. (It mimics the Cloudflare "D1" API shape but is purely local — zero network.)
-4. **`buildDomains()`** (`src/mcp.js:79`) instantiates 12 tool domains; **`collectTools()`** flattens them into 35 tools with a duplicate-name guard.
+4. **`buildDomains()`** (`src/mcp.js:79`) instantiates 10 tool domains; **`collectTools()`** flattens them into 27 tools with a duplicate-name guard (and applies cold-start gating to the Tier-2 readers — §6).
 5. **`createMcpServer()`** registers two handlers: `tools/list` (returns all 31 with JSON-Schema) and `tools/call` (dispatches to the named handler).
 6. Each handler returns a **string**, wrapped into the MCP `{content:[{type:'text',text}]}` envelope at one seam. Errors are **redacted** (never leak plaintext); set `MYCELIUM_DEBUG=1` to print the real stack to **stderr only**.
 
@@ -83,7 +83,7 @@ discovery (/.well-known/oauth-*) → Dynamic Client Registration (PKCE, public c
 
 ---
 
-## 5. What tools it has — 35 tools
+## 5. What tools it has — 27 tools
 
 `getContext` is the **preamble** (the "D5 entry point"): a client calls it *first* to load a one-shot briefing, then pulls detail on demand. `*` = required param.
 
@@ -139,40 +139,29 @@ remember/forget/mark/link, addressed by a unified `{type,id}` ref (`type` = mess
 |---|---|---|
 | **searchMindscape** | One-call search across conversations, documents, territories, realms, themes; grouped results. Semantic when the embedder (:8091) is up, **BM25 fallback** otherwise. Two recall modes: `query` (crafted) or **`relatedTo`** (paste the current turn → proactive recall; excludes sensitive). `scope:'facts'` lists facts; `scope:'entities'` lists people/projects (narrow matches show linked items). | `query`, `relatedTo`, `scope` (all\|messages\|facts\|entities\|documents\|territories\|realms\|themes), `limit`, `includeTopology`, `agent` |
 
-### Mindscape topology (5)
+### Cognition & topology — 3 consolidated readers (Phase 5; was 11)
+All Tier-2 (need clustering — see §6). The 11 Fisher/metric/topology readers folded into these 3 cohesive tools (capability preserved — same underlying compute).
 | Tool | What it does | Key params |
 |---|---|---|
-| **mindscapeStructure** | Structural overview: phase distribution, topology health (entropy, Gini), orphan/bridge territories. | `orphans`, `bridges`, `scale` |
-| **listTerritories** | List/filter territories by phase/realm/activity. | `phase`, `realm`, `minMessages`, `sortBy`, `limit` |
-| **exploreTerritory** | A territory's co-firing neighborhood + unexplored gaps. | `territory*`, `includeCoFiring`, `includeGaps`, `depth`, `scale` |
-| **territoryDetail** | Deep view of one territory (essence, story, vitality, timeline, samples). | `territory*` |
-| **timeView** | Temporal lens on a territory or whole mindscape (peaks, dormancy, trend). | `territory`, `range` (7d\|30d\|90d\|all) |
-
-### Cognitive metrics — movement & rhythm (6)
-| Tool | What it does | Key params |
-|---|---|---|
-| **getCurrentPhase** | Cognitive **movement** now (stable/cycling/exploring/transforming), velocity, exploration ratio. | `level` |
-| **getTrajectoryHistory** | Trajectory over time (phase, velocity, displacement). | `level`, `windowType`, `period`, `from`, `to`, `limit` |
-| **getActiveMilestones** | Undismissed milestone alerts (phase shifts, cycling, velocity outliers). | `includeDismissed`, `limit` |
-| **getTopMovers** | Territories that drove the last week's movement. | `level`, `windowEnd` |
-| **getHarmonicState** | Cognitive **rhythm** now (energy per timescale, flow shape, spread). | `granularity`, `detail` |
-| **getMetricSeries** | Time-series of one named metric across windows. | `metric*`, `granularity`, `from`, `to`, `limit` |
+| **cognitiveState** | The "now" in one call: **movement** (phase — stable/cycling/exploring/transforming, velocity, exploration), **rhythm** (energy per timescale, flow, spread), and active **alerts** (phase shifts, cycling). *(folds getCurrentPhase + getHarmonicState + getActiveMilestones)* | `level`, `granularity`, `detail` |
+| **cognitiveHistory** | Cognition **over time**: trajectory (phase/velocity/displacement per window) + the territories that drove recent movement; optional named-metric series. *(folds getTrajectoryHistory + getTopMovers + getMetricSeries)* | `level`, `period`, `windowType`, `metric`, `granularity`, `from`, `to`, `limit`, `windowEnd` |
+| **mindscape** | The topology graph **by view**: `structure` (vitality/health/orphans/bridges) · `territories` (filterable list) · `territory` (deep view) · `explore` (co-firing + gaps) · `time` (activity timeline). *(folds mindscapeStructure + listTerritories + territoryDetail + exploreTerritory + timeView)* | `view`, `territory`, `scale`, `range`, `phase`, `realm`, `minMessages`, `sortBy`, `limit`, `depth`, … |
 
 ### Body state (1)
 | Tool | What it does | Key params |
 |---|---|---|
 | **getHealthData** | Apple Health summaries (sleep, HRV, resting HR, steps, workouts, mindful min) with trends/anomalies. | `days`, `from`, `to` |
 
-> **Not in the 33 (you'll see the files, but they're not wired):** `src/tools/` also contains `schedules.js`, `delegation.js`, `reply.js`, `services.js`, and a dormant `findDocuments` — ported/reference code **not registered in `buildDomains()`** in V1. `reply` + `services` are the **2 deferred** domains; they land with later waves.
+> **Not in the 27 (you'll see the files, but they're not wired):** `src/tools/` also contains `schedules.js`, `delegation.js`, `reply.js`, `services.js`, and a dormant `findDocuments` — ported/reference code **not registered in `buildDomains()`** in V1. Also `fisher-tools.js`, `metrics.js`, `topology-tools.js` are now **internal** (their handlers are reused by the `cognition` domain under cognitiveState/cognitiveHistory/mindscape; their own tool names aren't registered). `reply` + `services` are the **2 deferred** domains; they land with later waves.
 
 ---
 
 ## 6. Data readiness (what returns real output on a fresh vault)
 
-Connecting always shows all 35 tools, but some need data first — **these "empty" responses are not bugs:**
+Connecting always shows all 27 tools, but some need data first — **these "empty" responses are not bugs:**
 
 - **Work immediately (~23):** `getContext`, `captureMessage`, `importMessages`, `remember`/`link`/`forget`/`mark` (facts + entities + curation), `createTask`, `listTasks`, `getDailyMessages`, all documents, all mind-files, and `searchMindscape` (BM25, incl. `relatedTo` + `scope:'facts'`/`'entities'`).
-- **Gated until you import + cluster — return an explicit "not ready" message (Phase 4, not silent-empty), 11 tools:** the Fisher/metrics tools (`getCurrentPhase`, `getTrajectoryHistory`, `getActiveMilestones`, `getTopMovers`, `getHarmonicState`, `getMetricSeries`) + the topology readers (`exploreTerritory`, `mindscapeStructure`, `listTerritories`, `territoryDetail`, `timeView`). They tell you to import + cluster, and flip to real data the moment clustering lands (mid-session, no restart). Real clustering/embeddings are "Tier-2" — they need the `:8091` embed service + the Python pipeline on a capable host.
+- **Gated until you import + cluster — return an explicit "not ready" message (Phase 4, not silent-empty), 3 tools:** `cognitiveState`, `cognitiveHistory`, `mindscape` (the consolidated cluster/Fisher/metric/topology readers). They tell you to import + cluster, and flip to real data the moment clustering lands (mid-session, no restart). Real clustering/embeddings are "Tier-2" — they need the `:8091` embed service + the Python pipeline on a capable host.
 - **`getHealthData`** — honest-empty until you sync Apple Health (a separate data source, not topology-gated). Semantic ranking in `searchMindscape` likewise sharpens once embeddings exist (BM25 works meanwhile).
 - **Needs the public server:** `publishDocument` (run `npm run public`).
 
@@ -187,7 +176,7 @@ npm install --legacy-peer-deps
 npm run set-keys          # generates your ONE recovery key (USER_MASTER); SYSTEM_KEY
                           # is HKDF-derived; both stored in the OS keychain.
 npm run verify            # expect a wall of "VERDICT: GO" (full ledger)
-npm run verify:mcp        # stdio MCP proof in isolation → "35 tools registered" + GO
+npm run verify:mcp        # stdio MCP proof in isolation → "27 tools registered" + GO
 ```
 No `init-db` needed — a fresh vault self-migrates on first boot.
 
@@ -224,7 +213,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```
 > ⚠️ **`MYCELIUM_DATA_DIR` is the critical line.** Your real vault lives in the per-OS app-data dir. A hand-rolled config *without* it falls back to a *different, empty* `./data` vault — tools connect fine but `getContext`/`searchMindscape` see nothing. This is the #1 "connected but no data" gotcha.
 
-Then **fully quit and reopen** Claude Desktop. The tools icon should show **mycelium / 35 tools**. If not:
+Then **fully quit and reopen** Claude Desktop. The tools icon should show **mycelium / 27 tools**. If not:
 ```bash
 tail -f ~/Library/Logs/Claude/mcp-server-mycelium.log
 ```
@@ -237,7 +226,7 @@ tail -f ~/Library/Logs/Claude/mcp-server-mycelium.log
 | "Make a task: buy milk." → "List my tasks." | `createTask`→`listTasks` | the task appears |
 | "Search my mind for *milk*." | `searchMindscape` | BM25 hit on the saved message |
 | "Write a doc at notes/test = 'hello'." → "Read notes/test." | `saveDocument`→`getDocument` | round-trips |
-| "What's my current cognitive phase?" | `getCurrentPhase` | an explicit "mindscape isn't computed yet — import + cluster" message (Phase 4 gating) — **expected, not an error** |
+| "What's my current cognitive phase?" | `cognitiveState` | an explicit "mindscape isn't computed yet — import + cluster" message (Phase 4 gating) — **expected, not an error** |
 
 ### Stage 4 — (optional) HTTP + OAuth
 ```bash
@@ -266,7 +255,7 @@ Expose only via Tailscale/Tunnel.
 
 ## 9. The two proofs (your "does the wire work?" ground truth)
 
-- **`npm run verify:mcp`** — boots the real server, connects a real MCP client over an in-memory transport, drives `tools/list` + a `createTask`→`listTasks` round-trip + unknown-tool handling. (→ **35 tools, GO**.)
+- **`npm run verify:mcp`** — boots the real server, connects a real MCP client over an in-memory transport, drives `tools/list` + a `createTask`→`listTasks` round-trip + unknown-tool handling. (→ **27 tools, GO**.)
 - **`npm run verify:oauth`** — drives the full OAuth dance over HTTP to a `tools/call`.
 
 Re-run these after any change to `mcp.js`, `index.js`, or `server-http.js`.
