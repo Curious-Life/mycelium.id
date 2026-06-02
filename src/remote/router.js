@@ -6,7 +6,9 @@
 import express from 'express';
 import net from 'node:net';
 import path from 'node:path';
-import { readRemoteConfig, writeRemoteConfig, setOperatorPassword, operatorUserExists } from './config.js';
+import { readRemoteConfig, writeRemoteConfig, setOperatorPassword, operatorUserExists, setRemoteSecret } from './config.js';
+import { buildClaim } from './managed-claim.js';
+import { materializeRemoteConfigs } from './runtime.js';
 import { dataDir } from '../paths.js';
 import { keychainNames } from '../account/keychain-names.js';
 
@@ -92,6 +94,71 @@ export function remoteRouter() {
       dataDir: dataDir(),
       keychain: { account: kc.account, userService: kc.userService, systemService: kc.systemService, custom },
     });
+  });
+
+  // ── Managed connect: claim <handle>.mycelium.id via the control-plane ──
+  // Signs an ed25519 handle claim with the in-process master key (boot() set
+  // ENCRYPTION_MASTER_KEY), provisions via the control plane, stores the relay
+  // token + acme-dns creds as SECRETS (auth.db), writes the non-secret coords to
+  // remote.json, and materializes frpc.toml + Caddyfile. The tunnel + Caddy start
+  // on the next app launch (Tauri reconcile). The control plane only ever sees
+  // {handle, publicKey, nonce, signature} — never the master key or vault data.
+  async function cpFetch(url, opts, ms = 15000) {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), ms);
+    try { return await fetch(url, { ...opts, signal: ac.signal }); }
+    finally { clearTimeout(t); }
+  }
+
+  router.get('/managed/available', async (req, res) => {
+    const handle = String(req.query.handle || '').trim();
+    const base = readRemoteConfig().controlPlaneUrl.replace(/\/$/, '');
+    try {
+      const r = await cpFetch(`${base}/v1/handle/${encodeURIComponent(handle)}`);
+      const data = await r.json().catch(() => ({}));
+      res.status(r.ok ? 200 : r.status).json(data);
+    } catch {
+      res.status(502).json({ ok: false, error: 'control plane unreachable' });
+    }
+  });
+
+  router.post('/connect-managed', async (req, res) => {
+    const handle = String(req.body?.handle || '').trim();
+    const base = String(req.body?.controlPlaneUrl || readRemoteConfig().controlPlaneUrl).replace(/\/$/, '');
+    const masterHex = process.env.ENCRYPTION_MASTER_KEY;
+    if (!masterHex) { res.status(503).json({ ok: false, error: 'vault is locked — finish setup first' }); return; }
+    try {
+      const chRes = await cpFetch(`${base}/v1/challenge`);
+      if (!chRes.ok) throw new Error('challenge failed');
+      const { nonce } = await chRes.json();
+      const claim = buildClaim({ handle, nonce, masterHex }); // throws on invalid handle/nonce
+      const pvRes = await cpFetch(`${base}/v1/provision`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(claim),
+      });
+      const data = await pvRes.json().catch(() => ({}));
+      if (!pvRes.ok) { res.status(pvRes.status === 409 ? 409 : 400).json({ ok: false, error: data.error || 'provision failed' }); return; }
+      const { host, relayAddr, relayToken, acmeDns } = data;
+      if (!host || !relayAddr || !relayToken || !acmeDns) throw new Error('incomplete control-plane response');
+      setRemoteSecret('relayToken', relayToken);
+      setRemoteSecret('acmeDns', JSON.stringify(acmeDns));
+      writeRemoteConfig({ remoteMode: 'managed', publicHost: host, relayAddr });
+      materializeRemoteConfigs({ dataDir: dataDir(), config: readRemoteConfig(), relayToken, acmeDns });
+      res.json({ ok: true, host, connectorUrl: `https://${host}/mcp`, restartRequired: true });
+    } catch (err) {
+      const caller = /invalid handle|nonce/i.test(String(err?.message || ''));
+      res.status(caller ? 400 : 502).json({ ok: false, error: caller ? err.message : 'could not reach the control plane' });
+    }
+  });
+
+  // Disconnect any remote mode: stop on next launch + remove sidecar configs.
+  router.post('/disconnect', (_req, res) => {
+    try {
+      writeRemoteConfig({ remoteMode: 'off', remoteEnabled: false });
+      materializeRemoteConfigs({ dataDir: dataDir(), config: readRemoteConfig() });
+      res.json({ ok: true });
+    } catch {
+      res.status(500).json({ ok: false, error: 'could not disconnect' });
+    }
   });
 
   return router;
