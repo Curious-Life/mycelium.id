@@ -25,6 +25,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 
 import { getDb } from '../src/db/index.js';
+import { loadKey } from '../src/crypto/keys.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -71,7 +72,10 @@ async function describeWithClaude(kind, samples) {
 }
 
 async function run() {
-  const { db, close } = getDb({ dbPath: DB_PATH, userKey: USER_MASTER, systemKey: SYSTEM_KEY, scope: 'personal' });
+  // The encrypting adapter needs imported HKDF CryptoKeys (not raw hex) — writing
+  // an ENCRYPTED_FIELDS column (name/essence) otherwise throws deriveBits.
+  const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
+  const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal' });
   const query = (sql, params = []) => db.rawQuery(sql, params).then(r => (Array.isArray(r) ? r : r.results || []));
 
   try {

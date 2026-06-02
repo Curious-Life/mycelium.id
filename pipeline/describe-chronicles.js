@@ -22,6 +22,7 @@
  */
 
 import { getDb } from '../src/db/index.js';
+import { loadKey } from '../src/crypto/keys.js';
 import { createInferenceRouter } from '../src/inference/router.js';
 
 export const CHRONICLE_VERSION = process.env.MYCELIUM_CHRONICLE_VERSION || 'chronicle-v1';
@@ -143,7 +144,10 @@ if (isMain) {
   const SYSTEM_KEY = process.env.SYSTEM_KEY;
   if (!USER_MASTER || !SYSTEM_KEY) { console.error('[chronicles] Missing USER_MASTER and SYSTEM_KEY'); process.exit(1); }
 
-  const { db, close } = getDb({ dbPath: DB_PATH, userKey: USER_MASTER, systemKey: SYSTEM_KEY, scope: 'personal' });
+  // getDb needs IMPORTED HKDF CryptoKeys, not raw hex — raw hex throws
+  // "deriveBits 2nd argument is not of type CryptoKey" on every content decrypt.
+  const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
+  const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal' });
   const router = createInferenceRouter();
   console.log(`[chronicles] narrating territories (model: ${router.config.anthropicConfigured || router.config.openaiConfigured ? 'cloud BYOK' : 'local Ollama'})${DRY_RUN ? ' (dry-run)' : ''}`);
   try {

@@ -18,9 +18,10 @@ Usage:
     python3 scripts/cluster.py --dry-run
     python3 scripts/cluster.py --min-points 100
 
-Env vars (loaded from .env files):
-    MYA_WORKER_URL     — Cloudflare Worker URL
-    AGENT_TOKEN_MYA    — Auth token (or ADMIN_SECRET)
+Env vars:
+    MYCELIUM_DB        — path to the local encrypted SQLite vault (required)
+    USER_MASTER, SYSTEM_KEY — 64-char hex vault keys (for encrypted writes)
+    MYCELIUM_USER_ID   — owner id (default 'local-user')
 """
 
 import os
@@ -28,14 +29,14 @@ import sys
 import gc
 import json
 import argparse
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import Counter, defaultdict
 
 import numpy as np
-import httpx
 from dotenv import dotenv_values
+
+import local_db  # V1 local vault data layer (replaces the Worker proxy)
 
 # Load env from all .env files (same as ecosystem.config.cjs)
 root = Path(__file__).resolve().parent.parent
@@ -46,28 +47,15 @@ for f in ['.env', '.env.discord', '.env.database', '.env.crypto', '.env.agents',
             if v is not None:
                 os.environ.setdefault(k, v)
 
-WORKER_URL = os.environ.get('MYA_WORKER_URL') or os.environ.get('WORKER_URL', '')
-TOKEN = os.environ.get('AGENT_TOKEN_MYA') or os.environ.get('ADMIN_SECRET') or os.environ.get('AGENT_TOKEN', '')
+# Owner user_id scoping every clustering_points SELECT (single-user → local-user).
+USER_ID = os.environ.get('MINDSCAPE_OWNER_ID') or os.environ.get('MYA_USER_ID') or os.environ.get('MYCELIUM_USER_ID') or 'local-user'
 
-# Owner/tenant user_id used to scope every clustering_points SELECT.
-# Worker rejects unfiltered SELECTs on user-data tables with 403 unless
-# X-Tenant-ID routes to a per-tenant D1; since not all tenants have
-# dedicated bindings yet (fallback to owner DB), we always filter.
-USER_ID = os.environ.get('MINDSCAPE_OWNER_ID') or os.environ.get('MYA_USER_ID', '')
-
-if not WORKER_URL or not TOKEN:
-    print("Missing MYA_WORKER_URL or auth token")
+# V1 single-user: all reads/writes go straight to the local encrypted SQLite
+# vault via local_db — there is NO Cloudflare Worker proxy. MYCELIUM_DB must
+# point at the vault file.
+if not os.environ.get('MYCELIUM_DB'):
+    print("Missing MYCELIUM_DB (path to the local vault)")
     sys.exit(1)
-
-HEADERS = {
-    'Content-Type': 'application/json',
-    'Authorization': f'Bearer {TOKEN}',
-}
-# Tenant routing: customer VPSes set X-Tenant-ID so the Worker queries
-# the customer's D1 instead of the owner's.
-_TENANT_ID = os.environ.get('MYA_USER_ID')
-if _TENANT_ID:
-    HEADERS['X-Tenant-ID'] = _TENANT_ID
 
 # ── Clustering Parameters ──────────────────────────────────────────
 
@@ -113,91 +101,26 @@ JACCARD_THRESHOLD = 0.3  # minimum overlap to consider a match
 
 # ── API Helpers ────────────────────────────────────────────────────
 
-client = httpx.Client(timeout=60.0, headers=HEADERS)
-
+# ── Data layer (V1 single-user) ───────────────────────────────────
+# Thin wrappers over local_db so the existing d1_* call-sites stay unchanged.
+# There is NO Cloudflare Worker proxy: every read/write hits the local vault.
 
 def d1_query(sql: str, params: list = None) -> list:
-    """Execute a D1 SQL query via Worker proxy."""
-    r = client.post(f"{WORKER_URL}/api/db/query", json={"sql": sql, "params": params or []})
-    r.raise_for_status()
-    data = r.json()
-    return data.get("results", [])
+    """SELECT → list[dict]; a write issued via query (UPDATE/DELETE) → []."""
+    return local_db.query(sql, params)
 
 
 def d1_batch(statements: list) -> list:
-    """Execute a batch of D1 SQL statements.
-
-    PLAINTEXT WRITE PATH — only use for columns NOT in ENCRYPTED_FIELDS
-    (centroid_3d, centroid_256, is_catchall, energy, coherence, etc.).
-    For writes that touch ENCRYPTED_FIELDS columns (activity_timeline,
-    name, essence, etc.), use d1_batch_encrypted() so the Node bridge
-    routes through the canonical autoEncryptParams chokepoint.
-    """
-    r = client.post(f"{WORKER_URL}/api/db/batch", json={"statements": statements})
-    r.raise_for_status()
-    return r.json()
-
-
-# Resolved at import: /home/claude/mycelium/scripts/d1-write-bridge.js
-_BRIDGE_PATH = Path(__file__).parent / "d1-write-bridge.js"
+    """Batch of PLAINTEXT statements (columns NOT in ENCRYPTED_FIELDS)."""
+    local_db.batch(statements)
+    return [{"ok": True, "count": len(statements or [])}]
 
 
 def d1_batch_encrypted(statements: list) -> dict:
-    """Execute a batch of D1 SQL statements through the canonical JS
-    encryption chokepoint (`packages/core/db-d1.js:339` d1Batch → d1Query
-    → autoEncryptParams).
-
-    Required for writes to columns in `ENCRYPTED_FIELDS`. The Python
-    `d1_batch()` helper bypasses encryption — calling it with an
-    activity_timeline payload, for example, lands plaintext JSON in D1
-    and violates CLAUDE.md §1 (zero-plaintext-leakage).
-
-    Shells out to scripts/d1-write-bridge.js (the Python→Node bridge),
-    which inherits this process's env (AGENT_ID, AGENT_TOKEN, MYA_USER_ID,
-    AGENT_SCOPES) and the master key on tmpfs. Spawn cost amortizes across
-    the batch — keep the batch large (50 statements) for low overhead.
-
-    Raises RuntimeError on bridge failure; caller treats it the same as
-    a regular d1_batch network failure.
-    """
-    if not statements:
-        return {"ok": True, "written": 0}
-    payload = json.dumps({"statements": statements})
-    try:
-        proc = subprocess.run(
-            ["node", str(_BRIDGE_PATH)],
-            input=payload.encode("utf-8"),
-            capture_output=True,
-            timeout=120,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"d1-write-bridge timed out after {e.timeout}s") from e
-    except FileNotFoundError as e:
-        raise RuntimeError(f"d1-write-bridge: node not on PATH ({e})") from e
-    stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-    stdout = proc.stdout.decode("utf-8", errors="replace").strip()
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"d1-write-bridge exit {proc.returncode}: {stderr or stdout or 'no output'}"
-        )
-    try:
-        result = json.loads(stdout.splitlines()[-1]) if stdout else {}
-    except (json.JSONDecodeError, IndexError) as e:
-        raise RuntimeError(f"d1-write-bridge: bad JSON on stdout: {stdout!r}") from e
-    if not result.get("ok"):
-        raise RuntimeError(f"d1-write-bridge error: {result.get('error', 'unknown')}")
-    return result
-
-
-def vectorize_query(vector: list, top_k: int = 20, filter_meta: dict = None) -> list:
-    """Query Vectorize for nearest neighbors."""
-    body = {"index": "search", "vector": vector, "topK": top_k}
-    if filter_meta:
-        body["filter"] = filter_meta
-    r = client.post(f"{WORKER_URL}/api/vectors/query", json=body)
-    r.raise_for_status()
-    return r.json().get("matches", [])
+    """Batch write for ENCRYPTED_FIELDS columns (e.g. activity_timeline) — routed
+    through the local Node encryption bridge so the values are encrypted at rest
+    (the canonical autoEncryptParams chokepoint), never written as plaintext."""
+    return local_db.batch_encrypted(statements)
 
 
 # ── Nomic Embedding (local, cached) ───────────────────────────────
@@ -1729,7 +1652,7 @@ def main():
     print('╔══════════════════════════════════════════════╗')
     print('║  Mycelium Semantic Clustering Pipeline        ║')
     print('╚══════════════════════════════════════════════╝')
-    print(f'  Worker: {WORKER_URL}')
+    print(f'  Vault: {os.environ.get("MYCELIUM_DB", "(unset)")}')
     print(f'  Dry run: {args.dry_run}')
 
     version = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
