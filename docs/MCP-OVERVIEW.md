@@ -171,8 +171,9 @@ remember/forget/mark/link, addressed by a unified `{type,id}` ref (`type` = mess
 
 Connecting always shows all 35 tools, but some need data first — **these "empty" responses are not bugs:**
 
-- **Work immediately (~24):** `getContext`, `captureMessage`, `importMessages`, `remember`/`link`/`forget`/`mark` (facts + entities + curation), `createTask`, `listTasks`, `getDailyMessages`, all documents, all mind-files, the topology *reads* (honest-empty), and `searchMindscape` (BM25, incl. `relatedTo` + `scope:'facts'`/`'entities'`).
-- **"No data yet" until you import + cluster + embed (~10):** the Fisher/metrics/harmonic tools (`getCurrentPhase`, `getTrajectoryHistory`, `getActiveMilestones`, `getTopMovers`, `getHarmonicState`, `getMetricSeries`), `getHealthData`, and semantic ranking in `searchMindscape`. (Real clustering/embeddings are "Tier-2" — they need the `:8091` embed service + the Python pipeline on a capable host.)
+- **Work immediately (~23):** `getContext`, `captureMessage`, `importMessages`, `remember`/`link`/`forget`/`mark` (facts + entities + curation), `createTask`, `listTasks`, `getDailyMessages`, all documents, all mind-files, and `searchMindscape` (BM25, incl. `relatedTo` + `scope:'facts'`/`'entities'`).
+- **Gated until you import + cluster — return an explicit "not ready" message (Phase 4, not silent-empty), 11 tools:** the Fisher/metrics tools (`getCurrentPhase`, `getTrajectoryHistory`, `getActiveMilestones`, `getTopMovers`, `getHarmonicState`, `getMetricSeries`) + the topology readers (`exploreTerritory`, `mindscapeStructure`, `listTerritories`, `territoryDetail`, `timeView`). They tell you to import + cluster, and flip to real data the moment clustering lands (mid-session, no restart). Real clustering/embeddings are "Tier-2" — they need the `:8091` embed service + the Python pipeline on a capable host.
+- **`getHealthData`** — honest-empty until you sync Apple Health (a separate data source, not topology-gated). Semantic ranking in `searchMindscape` likewise sharpens once embeddings exist (BM25 works meanwhile).
 - **Needs the public server:** `publishDocument` (run `npm run public`).
 
 ---
@@ -236,7 +237,7 @@ tail -f ~/Library/Logs/Claude/mcp-server-mycelium.log
 | "Make a task: buy milk." → "List my tasks." | `createTask`→`listTasks` | the task appears |
 | "Search my mind for *milk*." | `searchMindscape` | BM25 hit on the saved message |
 | "Write a doc at notes/test = 'hello'." → "Read notes/test." | `saveDocument`→`getDocument` | round-trips |
-| "What's my current cognitive phase?" | `getCurrentPhase` | "no data yet" (Tier-2) — **expected, not an error** |
+| "What's my current cognitive phase?" | `getCurrentPhase` | an explicit "mindscape isn't computed yet — import + cluster" message (Phase 4 gating) — **expected, not an error** |
 
 ### Stage 4 — (optional) HTTP + OAuth
 ```bash

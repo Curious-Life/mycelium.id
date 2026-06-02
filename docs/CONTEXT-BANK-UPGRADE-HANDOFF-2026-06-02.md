@@ -4,7 +4,7 @@
 **Companions:** [`CONTEXT-BANK-UPGRADE-DESIGN-2026-06-02.md`](CONTEXT-BANK-UPGRADE-DESIGN-2026-06-02.md) (the spec — read §3, §5.1, §11) · [`MCP-OVERVIEW.md`](MCP-OVERVIEW.md) (live tool surface, now 35) · [`ARCHITECTURE.md`](ARCHITECTURE.md)
 **Audience:** the next Claude Code instance picking up this work.
 
-A 5-phase upgrade to the V1 MCP "context bank": add forget/correct, facts, proactive recall, entities, honest cold-start, user salience — **while shrinking the tool surface** (31 → ~27 after Phase 5). **Phases 1–3 are built + verified; Phases 4–5 pending.** Everything is **local SQLite on the home server — no Cloudflare D1.**
+A 5-phase upgrade to the V1 MCP "context bank": add forget/correct, facts, proactive recall, entities, honest cold-start, user salience — **while shrinking the tool surface** (31 → ~27 after Phase 5). **Phases 1–4 are built + verified; Phase 5 (consolidation — the only breaking change) pending.** Everything is **local SQLite on the home server — no Cloudflare D1.**
 
 ---
 
@@ -16,11 +16,11 @@ A 5-phase upgrade to the V1 MCP "context bank": add forget/correct, facts, proac
 | 1 — forget + salience | `9cde646` (db) · `22c1a75` (tools+gate) · `7832951` (docs) | ✅ built+verified | `forget(type,id)` soft-redact + `mark(type,id,{pinned,sensitive})`; 31 → **33 tools**; `verify:forget` 13/13 |
 | 2 — facts + relatedContext | `2789f72` (db) · `e8d1d83` (tools+gates) | ✅ built+verified | `remember` (typed facts) + `getContext` FACTS section + `relatedTo` + `scope:'facts'` on `searchMindscape`; forget/mark gain `type:'fact'`; 33 → **34 tools**; `verify:facts` 17/17 + `verify:related` 7/7 |
 | 3 — entities | `4aa5f4c` (db) · `13c96ce` (tools+gate) | ✅ built+verified | `entities`+`entity_links` + NLP-promote; `remember`(kind:'entity') + **`link`** verb; forget/mark gain `type:'entity'`; `getContext` PEOPLE + `searchMindscape` `scope:'entities'`; 34 → **35 tools**; `verify:entities` 19/19 |
-| 4 — cold-start gating | — | ⬜ **NEXT** | async readiness probe → Tier-2 tools return "not ready" instead of empty |
-| 5 — consolidate readers | — | ⬜ planned | 11 cognitive/topology readers → 3 (`cognitiveState`/`cognitiveHistory`/`mindscape`) — **behind `/pre-deletion-caller-audit`** |
+| 4 — cold-start gating | `1022a92` | ✅ built+verified | 11 Tier-2 readers return a uniform "not ready" message until clustering runs (mid-session flip); Tier-1 untouched; **no new tools (35)**; `verify:gating` 8/8 |
+| 5 — consolidate readers | — | ⬜ **NEXT** | 11 cognitive/topology readers → 3 (`cognitiveState`/`cognitiveHistory`/`mindscape`) — **behind `/pre-deletion-caller-audit`** (the only breaking change) |
 
-- **Branch:** `claude/zealous-euler-kSPpI` · **PR:** #42 (draft) · **HEAD:** `13c96ce` (+docs commit)
-- **Gate:** full `npm run verify` → **35× GO, EXIT 0** (incl. `verify:forget`/`verify:facts`/`verify:related`/`verify:entities`). Clean tree.
+- **Branch:** `claude/zealous-euler-kSPpI` · **PR:** #42 (draft) · **HEAD:** `1022a92` (+docs commit)
+- **Gate:** full `npm run verify` → **36× GO, EXIT 0** (incl. `verify:forget`/`facts`/`related`/`entities`/`gating`). Clean tree.
 - **Rebased onto `origin/main` (#43, `1a8f525`)** at the start of the Phase-2 session — #43 ("rehydrate stored `embedding_768`") collided with Phase 1 on `d1-loader.js:47`/`mcp.js`/`package.json`; resolved so the loader SELECT carries **both** `embedding_768` **and** `AND forgotten_at IS NULL` (a security win — a forgotten row's embedding can never be rehydrated). Force-pushed (lease-guarded).
 - Earlier this session (separate, already **merged to main**): PR #39 (skills reconciled to V1) + PR #41 (`MCP-OVERVIEW.md`).
 
@@ -54,27 +54,66 @@ A 5-phase upgrade to the V1 MCP "context bank": add forget/correct, facts, proac
 7. **Local SQLite only** — operator flagged twice that this is *not* Cloudflare D1; the `d1Query`/`src/adapter/d1.js` names are a legacy API-compat shim over better-sqlite3 (zero network).
 
 ### Pickup protocol for the next session
-1. Read this handoff cold, then the spec §3.7 (cold-start gating), §3.8 (consolidation), §5 (phases). Read the **Phase 3 session summary** below first.
+1. Read this handoff cold, then the spec §3.8 (consolidation), §5 (phases), §6 (the consolidated-tool-renames-break-a-caller edge case). Read the **Phase 4 session summary** below first. **Run `/pre-deletion-caller-audit` — Phase 5 is the ONLY breaking change in the whole upgrade.**
 2. `git fetch origin main && git rebase origin/main` on `claude/zealous-euler-kSPpI`. **Always rebase before building** — main moved mid-session twice already (#44 `b622914`, then #43 `1a8f525`). #43 touched the search path (`d1-loader.js`/`mcp.js`/`package.json`); a future search PR may collide again — check those three files.
-3. Verify current state: `npm run verify` → **35× GO, EXIT 0** (or at minimum `verify:entities`+`verify:facts`+`verify:mcp` → "35 tools registered").
-4. Build **Phase 4 (cold-start gating)** — locked decision §11.4 = **present-but-"not ready"** (keep Tier-2 tools listed; their handlers return a uniform "topology not computed yet" message when the vault has no clustering). Additive, no schema:
-   - **Sweep the readiness seam first** (§12): the probe is the `clustering_points` count / `db.mindscape.getNoiseStats()` (`src/db/mindscape.js:34`). Verify it's cheap (a `COUNT`) and what shape it returns.
-   - **Thread readiness into `buildDomains`** (`src/mcp.js`). ⚠️ buildDomains is static at boot but readiness CHANGES mid-session (user imports + clusters). So pass an async `isTopologyReady()` getter (re-checks the count, optionally cached ~30s), **not** a boot-time boolean — a static flag would be stale after the first import. `boot()` can prime it; the getter re-checks.
-   - **The Tier-2 tools to gate** (the cluster/Fisher/metric/topology readers, which return honest-empty today): `getCurrentPhase`, `getTrajectoryHistory`, `getActiveMilestones`, `getTopMovers`, `getHarmonicState`, `getMetricSeries`, and the topology readers `exploreTerritory`/`mindscapeStructure`/`listTerritories`/`territoryDetail`/`timeView`. Wrap their handlers (or add an early `if (!await isTopologyReady()) return NOT_READY_MSG`). **Do NOT gate** the Tier-1 tools (getContext, capture, remember/forget/mark/link, facts/entities listings, documents, mind-files, BM25 search) — they work on a fresh vault.
-   - `getContext` already omits empty sections — leave it (or add a one-line "import data to unlock your mindscape" hint when not ready).
-   - Add `verify:gating` (fresh vault → Tier-2 returns "not ready"; seed clustering_points → real data). Tool count is unchanged (35) — gating is behavioral, no new tools, so `verify:mcp`/`forget`/`facts`/`entities` count asserts stay 35.
-5. Run `/sweep-first-design` on the readiness-getter seam (it's a shared boot/buildDomains abstraction touched by every Tier-2 tool).
-6. Before "done": full `npm run verify` GO; update `MCP-OVERVIEW.md` (the §6 "data readiness" table — the ~10 "no data yet" tools now say "not ready" explicitly) + this handoff + spec status. Then **Phase 5 (consolidation — the only BREAKING change, behind `/pre-deletion-caller-audit`)**.
+3. Verify current state: `npm run verify` → **36× GO, EXIT 0** (or at minimum `verify:gating`+`verify:entities`+`verify:mcp` → "35 tools registered").
+4. Build **Phase 5 (consolidate 11 readers → 3)** — the ONLY breaking change; **gate it behind `/pre-deletion-caller-audit`.** Pure tool-surface reshape: the 3 new handlers route to the SAME `db.fisher`/`db.metrics`/`db.topology`/`db.mindscape` methods — **zero change to storage or computation** (§3.8). Target shape:
+   - `cognitiveState({level?})` ← folds `getCurrentPhase` + `getHarmonicState` + `getActiveMilestones` (the "now": movement + rhythm + alerts).
+   - `cognitiveHistory({level?, metric?, window?, range?})` ← folds `getTrajectoryHistory` + `getMetricSeries` + `getTopMovers` (over-time series).
+   - `mindscape({view:'structure'|'territories'|'territory'|'explore'|'time', territory?, …})` ← folds `mindscapeStructure` + `listTerritories` + `territoryDetail` + `exploreTerritory` + `timeView`.
+   - **CALLER AUDIT (do this FIRST — inventory every caller of the 11 old tools, prove each capability is covered by a new tool before removing):**
+     - `verify:metrics` (calls `getHarmonicState`/`getMetricSeries`) + `verify:topology` (calls the 5 topology readers) — rewrite to the new tool names. Both also seed/expect the gated behavior — keep that.
+     - **⚠️ Phase-4 coupling: `TIER2_TOOLS` in `src/mcp.js` lists the 11 OLD names.** When you rename to the 3 new tools, **update `TIER2_TOOLS` to the 3 new names** or gating silently stops applying. Gate the 3 new tools.
+     - REST surface: any `/api/v1/<toolName>` paths (`src/server-rest.js` / `src/api.js`) that map to the old names.
+     - `portal-app` (the SvelteKit UI) — does it call any of the 11 by name?
+     - Docs: `MCP-OVERVIEW.md` (the topology/metrics tables + counts), `ARCHITECTURE.md`.
+     - **NOT a caller:** `getContext` (uses `db.fisher.getCurrentPhase` directly, not the tool) — unaffected.
+   - Net surface **35 → 27** (−11 +3). Update every `tools.length === 35` assertion (`verify:forget`/`facts`/`entities`/`gating` if it counts) to 27 — check `verify:mcp` for the exact number after the reshape.
+   - Add `verify:cognition` + `verify:mindscape` (parity assertions: the 3 new tools return what the 11 originals did) per spec §7.
+5. Run `/sweep-first-design` on the consolidation shape (it's a 5-into-1 `mindscape` view-router — get the `view` enum + param passthrough right) AND `/pre-deletion-caller-audit` before removing any old tool.
+6. Before "done": full `npm run verify` GO; update `MCP-OVERVIEW.md` (rewrite the topology/metrics sections + the count) + this handoff + spec status. **That completes the 5-phase upgrade** — write the final "upgrade complete" handoff entry + flip PR #42 out of draft for human review (security-sensitive).
 
 ### Open decisions for the operator
-- **Phase 5 consolidation (11 readers → 3) is the only breaking change** — it renames/removes tools, so it MUST run behind `/pre-deletion-caller-audit` (callers = `verify:metrics`/`verify:topology`, REST `/api/v1/<name>`, `portal-app`, docs). Do it last, once the lean convention is settled. No decision needed now; flagged so it isn't done casually.
+- **Phase 5 is the only breaking change** — runs behind `/pre-deletion-caller-audit`. The caller set is inventoried in the pickup protocol above (the key trap: Phase-4's `TIER2_TOOLS` gating set references the 11 old names and must be updated to the 3 new ones). No decision needed; flagged so it isn't done casually.
 - **Pinned search-ranking boost — RESOLVED (deferred, evidence-based):** *not* folded in. `pinned` isn't carried in the in-RAM index, so a ranking boost needs threading loader→`backend.add`→scorer (well beyond ~30 LOC, own gate); `getContext` already surfaces pinned (📌). Revisit only if explicit-search relevance proves insufficient.
 - **NLP-promote trigger — follow-up:** `db.entities.promoteFromMessages` exists + is verified, but **nothing calls it automatically yet**. Options: a `promoteEntities` tool, an enrichment hook (call it after a drain batch), or a portal/cron action. Recommendation: an enrichment-service hook once the pipeline runs on a real host (it's Tier-2). Not blocking — user curation (`remember`/`link`) works today.
 - **The `d1` legacy naming:** leave the shim as-is (it works; renaming is a repo-wide refactor) — new code uses plain `db`/"local vault". Recommendation: leave.
 
 ---
 
-## 2026-06-02 PM session summary — Phase 3 (entities) — START HERE
+## 2026-06-02 PM session summary — Phase 4 (cold-start gating) — START HERE
+
+### What shipped
+| Commit | Scope | Description |
+|---|---|---|
+| `1022a92` | Phase 4 (gating) | `src/mcp.js`: `TIER2_TOOLS` (the 11 readers), `TOPOLOGY_NOT_READY_MESSAGE`, `makeTopologyReadiness({db,userId})`, `collectTools(domains, gate)` wrap. `src/index.js`: `boot()` threads the gate + returns `isTopologyReady`. `scripts/verify-gating.mjs` (8 assertions). `scripts/verify-metrics.mjs`: seed a clustered point (caller-audit fix). |
+
+### What was learned (most valuable — these die if not written)
+- **Readiness must be a getter, not a boot-time boolean.** `buildDomains` runs once at boot, but a user imports + clusters mid-session. A static flag would be stale forever. The fix: `makeTopologyReadiness` returns an async `isReady()` that **caches `true` once seen but re-queries while `false`** — so it flips the moment clustering lands (verified by `verify:gating` G7, same booted server, no restart) with zero queries once ready. No TTL needed (clustering doesn't un-compute).
+- **`collectTools(domains, gate)` is the right chokepoint.** Gating one place (wrap the handler iff `name ∈ TIER2_TOOLS`) beats touching 3 domain factories. The wrap short-circuits BEFORE the inner handler, so gated tools need no args when not-ready.
+- **Caller-audit catch (the `/pre-deletion-caller-audit` instinct paid off again).** Before gating, I swept *who calls the 11 tools*: only `verify:metrics` + `verify:topology`. `verify:metrics` M4/M5 assert the metric-domain refusal copy on an empty vault — gating would have replaced it with the not-ready message and broken them. Fix: `verify:metrics` seeds one `clustering_points` row (readiness=true), so M4/M5 now test the refusal copy on the correct "ready vault, empty metric window" path. `verify:topology` T3 only checks non-crash text → the not-ready message satisfies it, no change. **Changing shared behavior (here, ~10 tools' empty-state output) demands a caller sweep first.**
+- **⚠️ Phase-4 → Phase-5 coupling.** `TIER2_TOOLS` lists the 11 OLD tool names. Phase 5 renames them to 3 — it MUST update `TIER2_TOOLS` to the 3 new names (and gate the new tools) or gating silently stops applying. Flagged in the Phase 5 pickup.
+
+### Operator's directional calls (this session)
+- **Build Phase 4 only** (chose "Build Phase 4 (gating)" via AskUserQuestion — not Phase 4+5). Phase 5 (the breaking consolidation) is the explicit checkpoint.
+
+### Pickup protocol → see "Pickup protocol for the next session" above (now Phase 5 — consolidate 11 readers → 3, behind `/pre-deletion-caller-audit`).
+
+---
+
+## Phase 4 — file-by-file
+
+| File | Change |
+|---|---|
+| `src/mcp.js` | `TIER2_TOOLS` set (11 readers) + `TOPOLOGY_NOT_READY_MESSAGE` + `makeTopologyReadiness` (probe: `getNoiseStats().total > 0`, cache-once-ready, fail-closed) + `collectTools(domains, gate)` wraps only gated tools; `buildDomains` returns `isTopologyReady`. |
+| `src/index.js` | `boot()` threads the gate into `collectTools`; returns `isTopologyReady`. |
+| `scripts/verify-gating.mjs` (new) | 8 assertions: all 11 gated on fresh vault, message actionable, Tier-1 untouched (getContext/searchMindscape/remember), mid-session flip on clustering, sticky readiness. |
+| `scripts/verify-metrics.mjs` | seed one `clustering_points` row so readiness=true (caller-audit fix: M4/M5 keep testing the refusal copy on the ready-vault path). |
+| `package.json` | +`verify:gating` (entry + chain). Tool count unchanged (35). |
+
+---
+
+## 2026-06-02 PM session summary — Phase 3 (entities)
 
 ### What shipped
 | Commit | Scope | Description |
@@ -179,8 +218,9 @@ npm run verify:forget      # → VERDICT: GO EXIT=0   (13/13: redact, evict, tom
 npm run verify:facts       # → VERDICT: GO EXIT=0   (17/17: encrypted-at-rest, surfaced, superseded, sensitive-gated, forgotten, fail-closed)
 npm run verify:related     # → VERDICT: GO EXIT=0   (7/7: proactive recall, sensitive-excluded, forgotten-guarded, BM25-only)
 npm run verify:entities    # → VERDICT: GO EXIT=0   (19/19: encrypted-at-rest, app-dedup, pinned-gated, link/dossier, forgotten, NLP-promote no-clobber)
-npm run verify:mcp         # → "35 tools registered, 2 deferred"  + GO
-npm run verify             # → 35× GO, EXIT 0   (run before declaring any phase done)
+npm run verify:gating      # → VERDICT: GO EXIT=0   (8/8: 11 Tier-2 gated on fresh vault, Tier-1 untouched, mid-session flip)
+npm run verify:mcp         # → "35 tools registered, 2 deferred"  + GO   (gating is behavioral — no tool-count change)
+npm run verify             # → 36× GO, EXIT 0   (run before declaring any phase done)
 ```
 No fleet/deploy — "shipping" = the verify gate is green + committed + pushed (see the rewritten `/deploy-and-verify`). PR #42 carries the spec + Phases 1–3; CI runs the same chain.
 
@@ -199,6 +239,8 @@ No fleet/deploy — "shipping" = the verify gate is green + committed + pushed (
 - **⚠️ No `UNIQUE`/`ON CONFLICT` on an encrypted column (`2026-06-02 PM`).** `entities.name` is encrypted with a random IV (non-deterministic) → a UNIQUE/`ON CONFLICT(name)` can never match. Dedup that key in the **app layer** (scan + match the decrypted value). Plaintext keys (facts' category/key, entity_links' ids) keep DB-level UNIQUE. Applies to any future encrypted-name table.
 - **Dedup-match preserves the display-name casing (`2026-06-02 PM`).** `db.entities.upsert` matches by *normalized* name and does NOT overwrite the stored `name` — a case variant or NLP proper-noun must not downcase a curated name. (`verify:entities` EN6 caught the overwrite bug.)
 - **NLP-entity promotion is built but not auto-triggered (`2026-06-02 PM`).** `db.entities.promoteFromMessages` works + is verified (seed `messages.entities`), but nothing calls it yet — needs an enrichment hook / tool / cron (see Open decisions). User curation via `remember`/`link` works today.
+- **Cold-start readiness is a cache-once getter, not a boot flag (`2026-06-02 PM`).** `makeTopologyReadiness` re-queries `getNoiseStats().total` while not-ready and caches `true` once seen → flips mid-session on import+cluster, no restart. `TIER2_TOOLS` (`src/mcp.js`) is the gated set; gating is injected at the `collectTools(domains, gate)` chokepoint.
+- **⚠️ Phase-4→5 coupling (`2026-06-02 PM`).** `TIER2_TOOLS` lists the 11 OLD reader names. Phase 5 renames them to 3 — it MUST update `TIER2_TOOLS` to the new names (and gate the new tools) or cold-start gating silently stops applying.
 - **`sensitive` ⇒ excluded from ALL proactive surfaces (`2026-06-02 PM`).** getContext FACTS (`forContext` filters `sensitive=0`) AND `relatedTo` (hydration filters). Sensitive items surface only via explicit `scope:'facts'` / explicit `query`. Defense-in-depth: `hydrateMessages` filters `forgotten_at IS NULL` unconditionally now.
 
 ---
@@ -212,4 +254,4 @@ No fleet/deploy — "shipping" = the verify gate is green + committed + pushed (
 ---
 
 ## Skills that fired this session
-`/sweep-first-design` (×4 — the spec, the Phase-1 pre-build sweep, the Phase-2 seam sweep [upsert-encryption + NOT-NULL + second-read-path], and the Phase-3 seam sweep [encrypted-name UNIQUE impossibility + `messages.entities` shape] — each caught build-breakers *before* coding) · `/deploy-and-verify` (the V1 verify-gate ship discipline, each phase) · `/handoff-discipline` (this doc). Phase 5 will require `/pre-deletion-caller-audit` (it removes 11 tools).
+`/sweep-first-design` (×5 — the spec, then a pre-build seam sweep each phase: P1 [loader + migration footguns], P2 [upsert-encryption + NOT-NULL + second-read-path], P3 [encrypted-name UNIQUE impossibility + `messages.entities` shape], P4 [readiness seam] — each caught build-breakers *before* coding) · `/pre-deletion-caller-audit` (Phase 4's gating changed shared empty-state behavior — swept the 11 tools' callers first, caught `verify:metrics` M4/M5) · `/deploy-and-verify` (the V1 verify-gate ship discipline, each phase) · `/handoff-discipline` (this doc). **Phase 5 will require a full `/pre-deletion-caller-audit`** (it removes 11 tools).
