@@ -3,9 +3,8 @@
 	import { onMount } from 'svelte';
 	import { mindscapeState, timelineHealth } from '$lib/stores/mindscape';
 	import MindscapeDetail from '$lib/components/mindscape/MindscapeDetail.svelte';
-	import Sparkline from '$lib/components/mindscape/Sparkline.svelte';
 	import PulsesLens from '$lib/components/mindscape/PulsesLens.svelte';
-	import { api, apiGet, apiPut } from '$lib/api';
+	import { api, apiGet } from '$lib/api';
 	import { generate, start as startGen, resume as resumeGen, reset as resetGen, cancel as cancelGen, fmtSeconds } from '$lib/generate';
 	import { get } from 'svelte/store';
 	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
@@ -77,6 +76,7 @@
 	$effect(() => {
 		if ($generate.phase === 'done') {
 			territories = []; realms = [];
+			territoriesLoaded = false; // allow the reload below to fetch the freshly-generated territories
 			mindscapeState.load();
 			loadTerritories();
 			setTimeout(() => resetGen(), 4000);
@@ -103,11 +103,6 @@
 	// Lazy load 3D component (THREE.js is heavy)
 	let Mindscape3D: any = $state(null);
 
-	// The desktop (Tauri) shell USED to be a transparent vibrancy WKWebView where
-	// WebGL/THREE hung the webview; the window is now OPAQUE (#52), which removes that
-	// interaction. We still default to the 2D Territories view on launch under Tauri
-	// (so a cold start never auto-mounts WebGL), but the 3D map is fully selectable.
-	const isTauriEnv = () => typeof window !== 'undefined' && (!!(window as any).__TAURI__ || !!(window as any).__TAURI_INTERNALS__);
 
 	// Demo mindscape canvas for welcome screen
 	let demoCanvas = $state<HTMLCanvasElement | undefined>();
@@ -255,8 +250,11 @@
 			});
 		}
 
-		// Load mindscape data
+		// Load mindscape data (3D nodes) + the territory/realm data the 3D map's
+		// realm-filter dropdown + lens panels read. (The old 2D-view effect used to
+		// trigger loadTerritories; with 3D-only we call it directly on mount.)
 		mindscapeState.load();
+		loadTerritories();
 
 		// Load health summary
 		apiGet<HealthSummary>('/portal/health/summary', { days: '7' })
@@ -290,15 +288,17 @@
 
 	const th = $derived($timelineHealth);
 
-	let viewMode: '3d' | 'territories' = $state(isTauriEnv() ? 'territories' : '3d');
-
-	// Territory profiles + activations + realms
+	// Territory + realm data. `realms` powers the 3D map's exploration realm-filter;
+	// the rest feed the generate/explore lifecycle below.
 	let territories: any[] = $state([]);
 	let realms: any[] = $state([]);
 	let activations: any = $state(null);
 	let territoriesLoading = $state(false);
-	let selectedTerritory: any = $state(null);
-	let selectedRealmId: number | null = $state(null);
+	// Guard for loadTerritories. MUST be a boolean flag, NOT `territories.length`:
+	// loadTerritories reassigns `territories = []` (a NEW ref) when a vault has 0
+	// territories — guarding on territories.length would re-trigger any reader effect
+	// → reload → reassign → INFINITE LOOP. A flag stays stable.
+	let territoriesLoaded = $state(false);
 
 	let noiseStats: { total: number; noise: number; noisePct: string } | null = $state(null);
 	let fingerprint: { depth_score: number; breadth_score: number; coherence_score: number; exploration_score: number } | null = $state(null);
@@ -466,7 +466,7 @@
 	}
 
 	async function loadTerritories() {
-		if (territories.length > 0) return;
+		if (territoriesLoaded) return; // flag-guarded — see territoriesLoaded decl (NOT territories.length)
 		territoriesLoading = true;
 		try {
 			const [terrRes, actRes, realmRes, noiseRes, fpRes, cxRes] = await Promise.all([
@@ -504,108 +504,9 @@
 			console.error('Failed to load territories:', e);
 		}
 		territoriesLoading = false;
+		territoriesLoaded = true; // mark loaded EVEN IF empty, so an empty result can't re-trigger the load effect
 	}
 
-	// Merge activation + complexity data into territory profiles
-	const enrichedTerritories = $derived(() => {
-		if (!territories.length) return [];
-		const actMap = new Map<number, any>();
-		if (activations?.active) {
-			for (const a of activations.active) {
-				actMap.set(a.territory_id, a);
-			}
-		}
-		const cxMap = new Map<number, number>();
-		if (complexity?.territories) {
-			for (const c of complexity.territories) {
-				cxMap.set(c.id, c.complexity);
-			}
-		}
-		let filtered = territories.map(t => ({
-			...t,
-			activation: actMap.get(t.territory_id) || null,
-			lz_complexity: cxMap.get(t.territory_id) ?? null,
-		}));
-
-		// Filter by selected realm if drilled in
-		if (selectedRealmId !== null) {
-			filtered = filtered.filter(t => t.realm_id === selectedRealmId);
-		}
-
-		const seen = new Set<number>();
-		return filtered.filter(t => { if (seen.has(t.territory_id)) return false; seen.add(t.territory_id); return true; })
-			.sort((a, b) => {
-				const aAct = a.activation ? 1000 + Math.abs(a.activation.surprise) : (a.energy || 0);
-				const bAct = b.activation ? 1000 + Math.abs(b.activation.surprise) : (b.energy || 0);
-				return bAct - aAct;
-			});
-	});
-
-	// Derive activity status from timeline
-	function activityStatus(timeline: any[]): 'active' | 'steady' | 'dormant' {
-		if (!timeline || timeline.length < 2) return 'steady';
-		const last = timeline[timeline.length - 1]?.count || 0;
-		const prev = timeline[timeline.length - 2]?.count || 0;
-		const avg = timeline.reduce((s: number, d: any) => s + (d.count || 0), 0) / timeline.length;
-		if (last === 0 && prev === 0) return 'dormant';
-		if (last > avg * 1.2) return 'active';
-		return 'steady';
-	}
-
-	// Enrich realms with territory counts, activation data, complexity, and activity status
-	const enrichedRealms = $derived(() => {
-		if (!realms.length) return [];
-		const realmTerritoryCount = new Map<number, number>();
-		const realmMessageCount = new Map<number, number>();
-		const realmTodayCount = new Map<number, number>();
-		const realmComplexity = new Map<number, number>();
-		if (complexity?.realms) {
-			for (const c of complexity.realms) realmComplexity.set(c.id, c.complexity);
-		}
-		for (const t of territories) {
-			if (t.realm_id != null) {
-				realmTerritoryCount.set(t.realm_id, (realmTerritoryCount.get(t.realm_id) || 0) + 1);
-				realmMessageCount.set(t.realm_id, (realmMessageCount.get(t.realm_id) || 0) + (t.message_count || 0));
-			}
-		}
-		// Aggregate today's activations by realm
-		if (activations?.active) {
-			for (const a of activations.active) {
-				if (a.realm_id != null) {
-					realmTodayCount.set(a.realm_id, (realmTodayCount.get(a.realm_id) || 0) + (a.today_count || 0));
-				}
-			}
-		}
-		const seen = new Set<number>();
-		return realms.map(r => ({
-			...r,
-			territory_count: r.territory_count || realmTerritoryCount.get(r.realm_id) || 0,
-			total_messages: r.total_messages || realmMessageCount.get(r.realm_id) || 0,
-			today_count: realmTodayCount.get(r.realm_id) || 0,
-			status: activityStatus(r.activity_timeline),
-			lz_complexity: realmComplexity.get(r.realm_id) ?? null,
-		})).filter(r => { if (seen.has(r.realm_id)) return false; seen.add(r.realm_id); return true; })
-		  .sort((a, b) => (b.total_messages || 0) - (a.total_messages || 0));
-	});
-
-	function drillIntoRealm(realmId: number) {
-		selectedRealmId = realmId;
-		selectedTerritory = null;
-	}
-
-	function goBackToRealms() {
-		selectedRealmId = null;
-		selectedTerritory = null;
-	}
-
-	const selectedRealmName = $derived(() => {
-		if (selectedRealmId === null) return '';
-		return realms.find(r => r.realm_id === selectedRealmId)?.name || `Realm ${selectedRealmId}`;
-	});
-
-	$effect(() => {
-		if (viewMode === 'territories' && browser) loadTerritories();
-	});
 
 	const msState = $derived($mindscapeState);
 
@@ -671,7 +572,7 @@
 {:else}
 <div class="mindscape-layout" class:resizing={isResizing} bind:this={containerRef}>
 	<!-- Navigation + detail panel (always visible) -->
-	<aside class="nav-panel" class:hidden-panel={viewMode === 'territories'} style="width: {panelWidth}px;">
+	<aside class="nav-panel" style="width: {panelWidth}px;">
 		<MindscapeDetail />
 		<!-- Resize handle -->
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -785,483 +686,8 @@
 					</a>
 				{/if}
 			</div>
-			<div class="view-toggle">
-				<button class:active={viewMode === 'territories'} onclick={() => viewMode = 'territories'}>Territories</button>
-				<button class:active={viewMode === '3d'} onclick={() => viewMode = '3d'}>3D Map</button>
-			</div>
 		</div>
 
-		{#if viewMode === 'territories'}
-			<div class="territories-view">
-				{#if territoriesLoading}
-					<div class="loading-3d"><div class="spinner"></div></div>
-				{:else if territories.length === 0 && realms.length === 0}
-					<div class="empty-state">
-						{#if $generate.phase === 'starting' || $generate.phase === 'running'}
-							<div class="gen-progress">
-								<h3 class="gen-heading">Growing your mindscape…</h3>
-								<p class="gen-stage">{$generate.stageLabel || 'Starting…'} &mdash; step {$generate.step} of {$generate.totalSteps}</p>
-								<div class="gen-bar"><div class="gen-fill" style="width: {Math.max(4, ($generate.step / Math.max(1, $generate.totalSteps)) * 100)}%"></div></div>
-								<p class="gen-hint">{fmtSeconds($generate.elapsedMs / 1000)} elapsed{#if $generate.etaSeconds != null} &middot; ~{fmtSeconds($generate.etaSeconds)} left{/if}</p>
-								{#if $generate.stalled}
-									<p class="gen-hint" style="color: #d9a441;">Still working on this step — it's taking longer than usual.</p>
-								{/if}
-								<p class="gen-hint">This keeps running if you navigate away.</p>
-								<button class="gen-button" style="margin-top: 12px; opacity: 0.7;" onclick={() => cancelGen()}>Cancel</button>
-							</div>
-						{:else if $generate.phase === 'embedding'}
-							<div class="gen-progress">
-								<h3 class="gen-heading">Processing your conversations…</h3>
-								<p class="gen-stage">{$generate.embedded.toLocaleString()} / {$generate.total.toLocaleString()} ready</p>
-								<div class="gen-bar"><div class="gen-fill" style="width: {$generate.total > 0 ? ($generate.embedded / $generate.total) * 100 : 0}%"></div></div>
-								{#if $generate.embedder?.status === 'loading'}
-									<p class="gen-hint">Warming up the embedding engine…</p>
-								{:else}
-									<p class="gen-hint">Generation starts automatically as soon as enough is ready.</p>
-								{/if}
-								<button class="gen-button" style="margin-top: 12px; opacity: 0.7;" onclick={() => cancelGen()}>Cancel</button>
-							</div>
-						{:else if $generate.phase === 'done'}
-							<div class="gen-progress">
-								<h3 class="gen-heading">Mycelium generated</h3>
-								<p class="gen-hint">Loading your territories…</p>
-							</div>
-						{:else if $generate.phase === 'error'}
-							<div class="gen-progress">
-								<h3 class="gen-heading">Generation hit a snag</h3>
-								<p class="gen-error">{$generate.error}</p>
-								<button class="gen-button" style="margin-top: 12px;" onclick={() => startGen()}>Try again</button>
-							</div>
-						{:else if enrichment && enrichment.pending > 0}
-							{@const pct = enrichment.total > 0 ? (enrichment.enriched / enrichment.total) * 100 : 0}
-							{@const msgPerMin = enrichment.rate ? parseInt(enrichment.rate) : 0}
-							{@const remaining = enrichment.total - enrichment.enriched}
-							{@const etaMin = msgPerMin > 0 ? Math.round(remaining / msgPerMin) : 0}
-							<div class="gen-progress">
-								<h3 class="gen-heading">Preparing your data...</h3>
-								<p class="gen-stage">{enrichment.enriched.toLocaleString()} / {enrichment.total.toLocaleString()} messages embedded</p>
-								<div class="gen-bar"><div class="gen-fill" style="width: {pct}%"></div></div>
-								{#if enrichment.enriched === 0 && !enrichTriggering}
-									<button class="gen-button" onclick={triggerEnrichment} disabled={enrichTriggering} style="margin-top: 12px;">
-										Start Processing
-									</button>
-								{:else if msgPerMin > 0}
-									<p class="gen-hint" style="margin-top: 6px;">
-										{msgPerMin} msg/min
-										{#if etaMin > 0}
-											&middot; ~{etaMin < 60 ? `${etaMin} min` : `${Math.floor(etaMin / 60)}h ${etaMin % 60}m`} remaining
-										{/if}
-									</p>
-								{/if}
-								<p class="gen-hint">Once embedding completes, you can generate your Mycelium.</p>
-							</div>
-						{:else if hasImportedData}
-							<h3 class="gen-heading">Your data is ready</h3>
-							{#if !aiReady}
-								<p class="gen-hint">AI models are still being set up on your server. Generation will be available in a few minutes.</p>
-							{:else}
-								<p>Generate your mindscape to discover territories, realms, and semantic connections.</p>
-								<button class="gen-button" onclick={() => startGen()}>Generate Mycelium</button>
-							{/if}
-						{:else}
-							<p>Import conversations first, then generate your mindscape here.</p>
-						{/if}
-					</div>
-				{:else}
-					<!-- Breadcrumb -->
-					{#if selectedRealmId !== null}
-						<div class="breadcrumb">
-							<button class="breadcrumb-link" onclick={goBackToRealms}>Mycelium</button>
-							<span class="breadcrumb-sep">/</span>
-							<span class="breadcrumb-current">{selectedRealmName()}</span>
-						</div>
-					{/if}
-
-					<div class="activation-summary">
-						{#if activations?.total_messages}
-							<span class="act-stat">{activations.total_messages} messages today</span>
-							<span class="act-stat">{activations.active?.length || 0} territories active</span>
-							{#if activations.silent?.length}
-								<span class="act-stat silent">{activations.silent.length} usually-active silent</span>
-							{/if}
-						{/if}
-						{#if noiseStats}
-							<span class="act-stat">{noiseStats.total.toLocaleString()} points</span>
-							{#if noiseStats.noise > 0}
-								<span class="act-stat unclustered">{noiseStats.noise.toLocaleString()} unclustered ({noiseStats.noisePct}%)</span>
-							{/if}
-						{/if}
-					</div>
-
-					<!-- Cognitive fingerprint + global complexity -->
-					{#if selectedRealmId === null && (fingerprint || complexity?.global_complexity != null)}
-						<div class="fingerprint-bar">
-							{#if fingerprint}
-								{#each [
-									{ label: 'Depth', value: fingerprint.depth_score, color: '#818cf8' },
-									{ label: 'Breadth', value: fingerprint.breadth_score, color: '#5B9FE8' },
-									{ label: 'Coherence', value: fingerprint.coherence_score, color: '#E5B84C' },
-									{ label: 'Exploration', value: fingerprint.exploration_score, color: '#4ADE80' },
-								] as s}
-									<div class="fp-score" title="{s.label}: {((s.value || 0) * 100).toFixed(0)}%">
-										<span class="fp-label">{s.label}</span>
-										<div class="fp-track">
-											<div class="fp-fill" style="width: {(s.value || 0) * 100}%; background: {s.color};"></div>
-										</div>
-										<span class="fp-value" style="color: {s.color}">{((s.value || 0) * 100).toFixed(0)}</span>
-									</div>
-								{/each}
-							{/if}
-							{#if complexity?.global_complexity != null}
-								<div class="fp-score" title="Compression complexity: {((complexity.global_complexity) * 100).toFixed(0)}% — higher = more novel thinking">
-									<span class="fp-label">Novelty</span>
-									<div class="fp-track">
-										<div class="fp-fill" style="width: {complexity.global_complexity * 100}%; background: #f472b6;"></div>
-									</div>
-									<span class="fp-value" style="color: #f472b6">{(complexity.global_complexity * 100).toFixed(0)}</span>
-								</div>
-							{/if}
-						</div>
-					{/if}
-
-					<!-- Exploration panel -->
-					{#if (explorationStatus || exploreReport) && selectedRealmId === null}
-						<div class="exploration-overview">
-							{#if exploreReport}
-								<div class="explore-report-header">
-									<span class="explore-detail">
-										{exploreReport.territories.length} explored{#if exploreReport.finishedAt && exploreReport.startedAt} &middot; {Math.round((new Date(exploreReport.finishedAt).getTime() - new Date(exploreReport.startedAt).getTime()) / 60000)}m{/if}
-									</span>
-									<button class="explore-dismiss" onclick={dismissExploreReport}>&times;</button>
-								</div>
-								<div class="explore-report-list">
-									{#each exploreReport.territories as t}
-										<details class="explore-report-item">
-											<summary class="explore-report-summary">
-												<span class="report-name">{t.name}</span>
-												<span class="report-meta">{t.coverage?.toFixed(0)}%</span>
-											</summary>
-											<div class="explore-report-body">
-												<p class="report-notes">{t.notes}</p>
-												{#if t.keyEntities?.length}
-													<div class="report-entities">{#each t.keyEntities as e}<span class="entity-pill-sm">{e}</span>{/each}</div>
-												{/if}
-											</div>
-										</details>
-									{/each}
-								</div>
-								<button class="explore-button" onclick={dismissExploreReport} style="margin-top: 6px; width: 100%;">Done</button>
-
-							{:else if exploreJob?.status === 'running'}
-								{@const doneCount = exploreEvents.filter(e => e.type === 'territory_done').length}
-								{@const skipCount = exploreEvents.filter(e => e.type === 'territory_skip').length}
-								{@const currentEvent = [...exploreEvents].reverse().find(e => e.type === 'territory_start' || e.type === 'synthesis_start')}
-								{@const lastDone = [...exploreEvents].reverse().find(e => e.type === 'territory_done')}
-								<div class="gen-bar"><div class="gen-fill" style="width: {(exploreJob.step / exploreJob.totalSteps) * 100}%; background: var(--color-accent-jade);"></div></div>
-								<div class="explore-live-status">
-									<span class="explore-live-count">{doneCount} done{#if skipCount > 0} &middot; {skipCount} skipped{/if} &middot; {exploreJob.totalSteps} total</span>
-								</div>
-								{#if currentEvent}
-									<div class="explore-live-current">
-										<span class="log-icon spin" style="color: var(--color-accent);">&#9679;</span>
-										<span>{currentEvent.type === 'synthesis_start' ? `Synthesizing from ${currentEvent.passes} passes` : `Sampling ${currentEvent.unseen} points`}...</span>
-									</div>
-								{/if}
-								{#if lastDone}
-									<div class="explore-live-last">
-										<span class="log-icon" style="color: var(--color-accent-jade);">&#10003;</span>
-										<span>{lastDone.name || `T${lastDone.id}`}{#if lastDone.result === 'pass'} &rarr; {lastDone.coverage}%{/if}</span>
-										{#if lastDone.entities?.length}<span class="log-entities">{lastDone.entities.slice(0, 3).join(', ')}</span>{/if}
-									</div>
-								{/if}
-
-							{:else if explorationStatus}
-								<div class="explore-stats-row">
-									<div class="explore-bar-section">
-										<div class="explore-bar-track"><div class="explore-bar-fill" style="width: {explorationStatus.globalExploredPercent}%"></div></div>
-										<span class="explore-pct">{explorationStatus.globalExploredPercent.toFixed(0)}% explored</span>
-									</div>
-									{#if exploreShowOptions}
-										<div class="explore-controls">
-											<select bind:value={exploreLimit} class="explore-select">
-												<option value={10}>10</option>
-												<option value={20}>20</option>
-												<option value={50}>50</option>
-												<option value={100}>100</option>
-											</select>
-											<button class="explore-button" onclick={() => { exploreShowOptions = false; startExplore(); }} disabled={exploreCooldownSec > 0}>
-												{exploreCooldownSec > 0 ? `${exploreCooldownSec}s` : 'Go'}
-											</button>
-										</div>
-									{:else}
-										<button class="explore-button" onclick={() => exploreShowOptions = true} disabled={exploreCooldownSec > 0}>
-											{exploreCooldownSec > 0 ? `${exploreCooldownSec}s` : 'Explore'}
-										</button>
-									{/if}
-								</div>
-								<p class="explore-detail">
-									{explorationStatus.territoriesWithChronicles} / {explorationStatus.totalTerritories} described
-									{#if explorationStatus.lastRunAt}&middot; last {relativeTime(explorationStatus.lastRunAt)}{/if}
-								</p>
-								{#if exploreError}<p class="explore-error">{exploreError}</p>{/if}
-							{/if}
-						</div>
-					{/if}
-
-					<!-- Realm cards (top level) -->
-					{#if selectedRealmId === null && enrichedRealms().length > 0}
-						<div class="realm-list">
-							{#each enrichedRealms() as r (r.realm_id)}
-								<button class="realm-card" onclick={() => drillIntoRealm(r.realm_id)}>
-									<div class="realm-header">
-										<span class="realm-name">{r.name || `Realm ${r.realm_id}`}</span>
-										<div class="realm-badges">
-											{#if r.archetype_type}
-												<span class="badge archetype">{r.archetype_type}</span>
-											{/if}
-											{#if r.status === 'active'}
-												<span class="badge active">Active</span>
-											{:else if r.status === 'dormant'}
-												<span class="badge dormant">Dormant</span>
-											{/if}
-											{#if r.today_count > 0}
-												<span class="badge today-badge">{r.today_count} today</span>
-											{/if}
-										</div>
-									</div>
-									<span class="realm-count">{r.point_count?.toLocaleString() || 0} points · {r.territory_count} territories</span>
-									{#if r.essence}
-										<p class="realm-essence">{r.essence}</p>
-									{/if}
-									{#if r.story_current_chapter}
-										<p class="realm-chapter">{r.story_current_chapter}</p>
-									{/if}
-									{#if r.top_entities?.length}
-										<div class="realm-entities">
-											{#each (Array.isArray(r.top_entities) ? r.top_entities : []).slice(0, 4) as entity}
-												<span class="entity-pill-sm">{typeof entity === 'string' ? entity : entity.text || entity.name || entity}</span>
-											{/each}
-										</div>
-									{/if}
-									<div class="realm-footer">
-										<span class="realm-msgs">{(r.total_messages || 0).toLocaleString()} msgs</span>
-										{#if r.explored_percent > 0}
-											<span class="realm-explored" title="Percentage of content analyzed by Claude">
-												<span class="cx-bar-track realm-cx-track">
-													<span class="cx-bar-fill" style="width: {r.explored_percent}%; background: var(--color-accent-jade);"></span>
-												</span>
-												<span class="explored-value">{r.explored_percent.toFixed(0)}%</span>
-											</span>
-										{/if}
-										{#if r.lz_complexity != null}
-											<span class="realm-complexity" title="LZ compression complexity — higher = more novel thinking patterns">
-												<span class="cx-label">novelty</span>
-												<span class="cx-bar-track realm-cx-track">
-													<span class="cx-bar-fill" style="width: {r.lz_complexity * 100}%"></span>
-												</span>
-												<span class="cx-value">{(r.lz_complexity * 100).toFixed(0)}</span>
-											</span>
-										{/if}
-										{#if r.activity_timeline?.length}
-											<Sparkline data={r.activity_timeline} width={120} height={24} />
-										{/if}
-									</div>
-								</button>
-							{/each}
-						</div>
-					{/if}
-
-					<!-- Territory list (within a realm or flat if no realms) -->
-					{#if selectedRealmId !== null || enrichedRealms().length === 0}
-						<div class="territory-list">
-							{#each enrichedTerritories() as t (t.territory_id)}
-								<!-- svelte-ignore a11y_no_static_element_interactions -->
-								<div
-									class="territory-card"
-									class:active-today={t.activation}
-									class:selected={selectedTerritory?.territory_id === t.territory_id}
-									onclick={() => selectedTerritory = selectedTerritory?.territory_id === t.territory_id ? null : t}
-								>
-									<div class="terr-header">
-										<span class="terr-name">{t.name || `Territory ${t.territory_id}`}</span>
-										<div class="terr-badges">
-											<button
-												type="button"
-												class="badge visibility-badge"
-												class:vis-public={t.visibility === 'public'}
-												class:vis-friends={t.visibility === 'friends'}
-												onclick={(e: MouseEvent) => {
-													e.stopPropagation();
-													const next = t.visibility === 'private' ? 'public' : t.visibility === 'public' ? 'friends' : 'private';
-													apiPut(`/portal/mindscape/territory/${t.territory_id}/visibility`, { visibility: next }).then(() => {
-														t.visibility = next;
-													}).catch(() => {});
-												}}
-												title={`Visibility: ${t.visibility || 'private'} (click to cycle)`}
-											>
-												{t.visibility === 'public' ? '\u{1F310}' : t.visibility === 'friends' ? '\u{1F465}' : '\u{1F512}'}
-											</button>
-											{#if t.archetype_type}
-												<span class="badge archetype">{t.archetype_type}</span>
-											{/if}
-											{#if t.activation}
-												{#if t.activation.surprise > 0.5}
-													<span class="badge surge">SURGE</span>
-												{:else if t.activation.surprise < -0.3}
-													<span class="badge quiet">QUIET</span>
-												{:else}
-													<span class="badge active">ACTIVE</span>
-												{/if}
-											{:else if t.activity_timeline?.length >= 2 && (t.activity_timeline[t.activity_timeline.length - 1]?.count || 0) === 0 && (t.activity_timeline[t.activity_timeline.length - 2]?.count || 0) === 0}
-												<span class="badge dormant">Dormant</span>
-											{/if}
-											{#if t.growth_state === 'growing'}
-												<span class="badge growing">growing</span>
-											{/if}
-										</div>
-									</div>
-
-									{#if t.essence}
-										<p class="terr-essence">{t.essence}</p>
-									{/if}
-
-									<div class="terr-metrics">
-										<span class="metric">
-											<span class="metric-label">msgs</span>
-											<span class="metric-value">{(t.message_count || 0).toLocaleString()}</span>
-										</span>
-										<span class="metric">
-											<span class="metric-label">energy</span>
-											<span class="metric-value">{((t.energy || 0) * 100).toFixed(1)}%</span>
-										</span>
-										<span class="metric cx-metric" title="{t.explored_count || 0} of {t.message_count || 0} messages explored">
-											<span class="metric-label">explored</span>
-											<span class="cx-bar-track territory-cx-track">
-												<span class="cx-bar-fill" style="width: {t.explored_percent || 0}%; background: var(--color-accent-jade);"></span>
-											</span>
-											<span class="metric-value" style="color: var(--color-accent-jade)">{(t.explored_percent || 0).toFixed(0)}</span>
-										</span>
-										{#if t.lz_complexity != null}
-											<span class="metric cx-metric" title="LZ compression complexity — higher = more novel thinking patterns">
-												<span class="metric-label">novelty</span>
-												<span class="cx-bar-track">
-													<span class="cx-bar-fill" style="width: {t.lz_complexity * 100}%"></span>
-												</span>
-												<span class="metric-value" style="color: #f472b6">{(t.lz_complexity * 100).toFixed(0)}</span>
-											</span>
-										{/if}
-										{#if t.activation}
-											<span class="metric today">
-												<span class="metric-label">today</span>
-												<span class="metric-value">{t.activation.today_count}</span>
-											</span>
-										{/if}
-										{#if t.activity_timeline?.length}
-											<Sparkline data={t.activity_timeline} />
-										{/if}
-									</div>
-									{#if t.top_entities?.length}
-										<div class="terr-entities">
-											{#each (t.top_entities || []).slice(0, 3) as entity}
-												<span class="entity-pill-sm">{typeof entity === 'string' ? entity : entity.text || entity.name || entity}</span>
-											{/each}
-										</div>
-									{/if}
-
-									{#if selectedTerritory?.territory_id === t.territory_id}
-										<div class="terr-detail">
-											{#if t.chronicle}
-												<div class="detail-section">
-													<h4>Chronicle</h4>
-													<p class="chronicle-text">{t.chronicle}</p>
-												</div>
-											{:else if t.story_arc}
-												<div class="detail-section">
-													<h4>Story</h4>
-													<p>{t.story_arc}</p>
-												</div>
-											{/if}
-											{#if t.story_current_chapter}
-												<div class="detail-section">
-													<h4>Current Chapter</h4>
-													<p>{t.story_current_chapter}</p>
-												</div>
-											{/if}
-
-											<!-- Activity timeline (larger version) -->
-											{#if t.activity_timeline?.length > 2}
-												<div class="detail-section">
-													<h4>Activity</h4>
-													<div class="detail-timeline">
-														<Sparkline data={t.activity_timeline} width={200} height={32} />
-													</div>
-												</div>
-											{/if}
-
-											<!-- Key entities -->
-											{#if t.top_entities?.length}
-												<div class="detail-section">
-													<h4>Key Entities</h4>
-													<div class="entity-pills">
-														{#each t.top_entities.slice(0, 10) as entity}
-															<span class="entity-pill">{typeof entity === 'string' ? entity : entity.name || entity}</span>
-														{/each}
-													</div>
-												</div>
-											{/if}
-
-											<!-- Connected regions -->
-											{#if t.uncertainty_edges}
-												<div class="detail-section">
-													<h4>Connected Regions</h4>
-													<p class="connected-regions">{t.uncertainty_edges}</p>
-												</div>
-											{/if}
-											{#if t.agent_would_consult?.length}
-												<div class="detail-section">
-													<h4>Cross-References</h4>
-													<div class="cross-refs">
-														{#each t.agent_would_consult as ref}
-															<span class="cross-ref-pill">
-																{typeof ref === 'string' ? ref : ref.territory_name || ref.for || JSON.stringify(ref)}
-															</span>
-														{/each}
-													</div>
-												</div>
-											{/if}
-
-											{#if t.signature_patterns?.length}
-												<div class="detail-section">
-													<h4>Patterns</h4>
-													<ul>{#each t.signature_patterns as p}<li>{p}</li>{/each}</ul>
-												</div>
-											{/if}
-											{#if t.uncertainty_open_questions?.length}
-												<div class="detail-section">
-													<h4>Open Threads</h4>
-													<ul>{#each t.uncertainty_open_questions as q}<li>{q}</li>{/each}</ul>
-												</div>
-											{/if}
-											{#if t.activation?.agents?.length}
-												<div class="detail-section">
-													<h4>Active Agents Today</h4>
-													<p>{t.activation.agents.join(', ')}</p>
-												</div>
-											{/if}
-											{#if t.explored_percent}
-												<div class="detail-section explored-note">
-													<span>{t.explored_count || 0} of {t.message_count || 0} messages analyzed ({t.explored_percent}%)</span>
-												</div>
-											{/if}
-										</div>
-									{/if}
-								</div>
-							{/each}
-						</div>
-					{/if}
-				{/if}
-			</div>
-		{:else if viewMode === '3d'}
 			{#if msState.loading}
 				<div class="loading-3d">
 					<div class="spinner"></div>
@@ -1456,7 +882,7 @@
 									Your data is ready
 								{/if}
 							</h2>
-							<p class="welcome-subtitle">Generate your mindscape to see your thinking mapped in 3D — territories, realms, and semantic connections.</p>
+							<p class="welcome-subtitle">Map your thinking in 3D.</p>
 							<button class="gen-button" onclick={() => startGen()}>Generate Mycelium</button>
 						{:else}
 							<!-- Welcome text -->
@@ -1467,55 +893,16 @@
 									Welcome to Mycelium
 								{/if}
 							</h2>
-							<p class="welcome-subtitle">Your personal intelligence system. Encrypted end-to-end, living on your server, growing with every conversation.</p>
+							<p class="welcome-subtitle">Bring your conversations to life as a living 3D map of your thinking.</p>
 
-							<!-- What Mycelium does -->
-							<div class="welcome-outcomes">
-								<div class="outcome">
-									<span class="outcome-icon" style="color: var(--color-accent-aurum);">&#x25C9;</span>
-									<div>
-										<span class="outcome-label">Living knowledge</span>
-										<span class="outcome-desc">Every conversation, document, and note feeds a 3D map of your thinking. Territories form, chronicles evolve, patterns surface. Your data compounds for you.</span>
-									</div>
-								</div>
-								<div class="outcome">
-									<span class="outcome-icon" style="color: var(--color-accent-amethyst);">&#x25C8;</span>
-									<div>
-										<span class="outcome-label">Real connections</span>
-										<span class="outcome-desc">Find people with overlapping interests and thinking. Connect based on genuine intellectual resonance, not followers and likes. Privacy-preserving by design.</span>
-									</div>
-								</div>
-								<div class="outcome">
-									<span class="outcome-icon" style="color: var(--color-accent-jade);">&#x25CE;</span>
-									<div>
-										<span class="outcome-label">Intelligence on your terms</span>
-										<span class="outcome-desc">Define your own information streams. Geopolitical briefings, prediction markets, OSINT feeds. Scored with probabilities, not filtered by an algorithm.</span>
-									</div>
-								</div>
-							</div>
-
-							<!-- Modules -->
-							<div class="welcome-modules">
-								<span class="module-pill">Wealth tracking</span>
-								<span class="module-pill">Voice &amp; transcription</span>
-								<span class="module-pill">Publishing</span>
-								<span class="module-pill">Research</span>
-								<span class="module-pill">Activity &amp; health</span>
-							</div>
-
-							<!-- Getting started -->
+							<!-- Getting started — the import / connect path -->
 							<div class="welcome-start">
-								<h3 class="start-heading">Plant the first threads</h3>
-								<p class="start-desc">Provide substrate &mdash; connect an AI, bring your conversations. Spawn your agents. Watch your Mycelium come to life.</p>
 								<ConnectionsChecklist showTitle={false} compact={true} />
 							</div>
-
-							<p class="welcome-footer">Everything is encrypted end-to-end. Your data lives on your server, not ours.</p>
 						{/if}
 					</div>
 				</div>
 			{/if}
-		{/if}
 	</main>
 </div>
 {/if}
@@ -1608,19 +995,11 @@
 		background: var(--color-surface);
 		z-index: 10;
 		position: relative;
-	}
-
-	/* Hide nav-panel in territories view (full-width territory cards) */
-	.nav-panel.hidden-panel {
-		display: none;
-	}
-
-	/* Mobile: hide the left detail panel, show content full-width */
+	}/* Hide nav-panel in territories view (full-width territory cards) *//* Mobile: hide the left detail panel, show content full-width */
 	@media (max-width: 767px) {
 		.nav-panel {
 			display: none;
-		}
-	}
+		}}
 
 	.view-panel {
 		flex: 1;
@@ -1669,34 +1048,7 @@
 
 	@keyframes spin {
 		to { transform: rotate(360deg); }
-	}
-
-	.view-toggle {
-		display: flex;
-		gap: 2px;
-		background: var(--color-elevated);
-		border: 1px solid var(--color-border);
-		border-radius: 8px;
-		padding: 2px;
-		flex-shrink: 0;
-	}
-	.view-toggle button {
-		padding: 6px 14px;
-		border: none;
-		background: transparent;
-		color: var(--color-muted);
-		font-size: 12px;
-		font-weight: 500;
-		border-radius: 6px;
-		cursor: pointer;
-		transition: all 0.15s;
-	}
-	.view-toggle button.active {
-		background: var(--color-accent);
-		color: var(--color-bg);
-	}
-
-	/* Welcome / empty mindscape */
+	}/* Welcome / empty mindscape */
 	.welcome {
 		position: relative;
 		display: flex;
@@ -1741,385 +1093,10 @@
 		line-height: 1.65;
 		margin-bottom: 2rem;
 	}
-	.welcome-outcomes {
-		display: flex;
-		flex-direction: column;
-		gap: 0.75rem;
-		margin-bottom: 2.25rem;
-	}
-	.outcome {
-		display: flex;
-		align-items: flex-start;
-		gap: 0.75rem;
-		padding: 0.75rem 0.85rem;
-		border-radius: 8px;
-		background: var(--color-surface);
-		border: 1px solid var(--color-border);
-	}
-	.outcome-icon {
-		font-size: 1rem;
-		flex-shrink: 0;
-		margin-top: 1px;
-	}
-	.outcome-label {
-		display: block;
-		font-size: 0.8rem;
-		font-weight: 500;
-		color: var(--color-text-primary);
-		margin-bottom: 2px;
-	}
-	.outcome-desc {
-		display: block;
-		font-size: 0.72rem;
-		color: var(--color-text-tertiary);
-		line-height: 1.55;
-	}
-	.welcome-modules {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.4rem;
-		margin-top: -0.5rem;
-		margin-bottom: 1.75rem;
-	}
-	.module-pill {
-		font-size: 0.65rem;
-		font-weight: 500;
-		padding: 0.25rem 0.65rem;
-		border-radius: 100px;
-		background: var(--color-bg);
-		border: 1px solid var(--color-border);
-		color: var(--color-text-secondary);
-		white-space: nowrap;
-	}
 	.welcome-start {
 		margin-bottom: 2rem;
 		text-align: left;
-	}
-	.start-heading {
-		font-size: 0.85rem;
-		font-weight: 500;
-		color: var(--color-text-primary);
-		margin-bottom: 0.35rem;
-	}
-	.start-desc {
-		font-size: 0.75rem;
-		color: var(--color-text-secondary);
-		line-height: 1.55;
-		margin-bottom: 1rem;
-	}
-	.welcome-footer {
-		font-size: 0.68rem;
-		color: var(--color-text-tertiary);
-		line-height: 1.5;
-		text-align: center;
-		padding-top: 0.5rem;
-		border-top: 1px solid var(--color-border);
-	}
-	.empty-state {
-		color: var(--color-muted);
-		font-size: 14px;
-		text-align: center;
-		padding: 48px 24px;
-	}
-	/* Breadcrumb */
-	.breadcrumb {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		margin-bottom: 12px;
-		font-size: 13px;
-	}
-	.breadcrumb-link {
-		color: var(--color-accent);
-		background: none;
-		border: none;
-		cursor: pointer;
-		font-size: 13px;
-		font-family: inherit;
-		padding: 0;
-	}
-	.breadcrumb-link:hover {
-		text-decoration: underline;
-	}
-	.breadcrumb-sep {
-		color: var(--color-muted);
-	}
-	.breadcrumb-current {
-		color: var(--color-text);
-		font-weight: 600;
-	}
-
-	/* Realm cards */
-	.realm-list {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-		gap: 8px;
-		margin-bottom: 16px;
-	}
-	.realm-card {
-		display: block;
-		width: 100%;
-		text-align: left;
-		padding: 16px;
-		background: var(--color-surface);
-		border: 1px solid transparent;
-		border-radius: 10px;
-		cursor: pointer;
-		transition: all 0.15s;
-		font-family: inherit;
-		font-size: inherit;
-		color: inherit;
-	}
-	.realm-card:hover {
-		border-color: var(--color-accent);
-		transform: translateY(-1px);
-		box-shadow: 0 0 20px rgba(229, 184, 76, 0.1), 0 4px 12px rgba(0, 0, 0, 0.3);
-	}
-	.realm-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: 8px;
-		margin-bottom: 4px;
-	}
-	.realm-badges {
-		display: flex;
-		gap: 4px;
-		flex-wrap: wrap;
-		flex-shrink: 0;
-	}
-	.realm-name {
-		font-weight: 600;
-		font-size: 15px;
-		color: var(--color-text);
-	}
-	.realm-count {
-		font-size: 11px;
-		color: var(--color-muted);
-		margin-bottom: 4px;
-	}
-	.realm-essence {
-		font-size: 13px;
-		color: var(--color-muted);
-		line-height: 1.4;
-		margin: 0 0 4px;
-	}
-	.realm-chapter {
-		font-size: 12px;
-		color: var(--color-accent-aurum);
-		font-style: italic;
-		line-height: 1.4;
-		margin: 0 0 6px;
-		display: -webkit-box;
-		-webkit-line-clamp: 2;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-	}
-	.realm-entities {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 3px;
-		margin-bottom: 8px;
-	}
-	.fingerprint-bar {
-		display: flex;
-		gap: 16px;
-		padding: 12px 16px;
-		background: var(--color-surface);
-		border-radius: 8px;
-		margin-bottom: 16px;
-	}
-	.fp-score {
-		flex: 1;
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		min-width: 0;
-	}
-	.fp-label {
-		font-size: 11px;
-		color: var(--color-text-tertiary);
-		white-space: nowrap;
-		width: 70px;
-		flex-shrink: 0;
-	}
-	.fp-track {
-		flex: 1;
-		height: 4px;
-		background: var(--color-elevated);
-		border-radius: 2px;
-		overflow: hidden;
-		min-width: 40px;
-	}
-	.fp-fill {
-		height: 100%;
-		border-radius: 2px;
-		transition: width 0.4s ease-out;
-	}
-	.fp-value {
-		font-size: 11px;
-		font-family: var(--font-mono);
-		font-weight: 600;
-		width: 24px;
-		text-align: right;
-		flex-shrink: 0;
-	}
-	@media (max-width: 767px) {
-		.fingerprint-bar {
-			flex-direction: column;
-			gap: 8px;
-		}
-	}
-	.entity-pill-sm {
-		font-size: 10px;
-		padding: 1px 6px;
-		border-radius: 3px;
-		background: rgba(91, 159, 232, 0.1);
-		color: var(--color-accent);
-		white-space: nowrap;
-	}
-	.realm-footer {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 8px;
-	}
-	.realm-msgs {
-		font-size: 12px;
-		color: var(--color-muted);
-		font-family: var(--font-mono);
-	}
-	.realm-complexity {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		font-size: 11px;
-	}
-	.cx-label {
-		color: var(--color-text-tertiary);
-	}
-	.cx-value {
-		color: #f472b6;
-		font-family: var(--font-mono);
-		font-weight: 500;
-	}
-	/* Exploration overview */
-	.exploration-overview {
-		padding: 14px 16px;
-		background: var(--color-surface);
-		border-radius: 8px;
-		margin-bottom: 16px;
-	}
-	.explore-stats-row {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-	}
-	.explore-bar-section {
-		flex: 1;
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-	.explore-bar-track {
-		flex: 1;
-		height: 6px;
-		background: var(--color-elevated);
-		border-radius: 3px;
-		overflow: hidden;
-	}
-	.explore-bar-fill {
-		height: 100%;
-		background: var(--color-accent-jade);
-		border-radius: 3px;
-		transition: width 0.6s ease-out;
-	}
-	.explore-pct {
-		font-size: 13px;
-		font-weight: 600;
-		color: var(--color-accent-jade);
-		white-space: nowrap;
-		min-width: 90px;
-	}
-	.explore-detail {
-		font-size: 11px;
-		color: var(--color-text-tertiary);
-		margin-top: 6px;
-	}
-	.explore-hint {
-		font-size: 12px;
-		color: var(--color-text-secondary);
-		margin-top: 8px;
-		line-height: 1.4;
-	}
-	.explore-error {
-		font-size: 12px;
-		color: var(--color-accent-coral);
-		margin-top: 4px;
-	}
-	.explore-button {
-		padding: 6px 16px;
-		border: 1px solid var(--color-accent-jade);
-		color: var(--color-accent-jade);
-		background: transparent;
-		border-radius: 6px;
-		font-size: 13px;
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 0.15s;
-		white-space: nowrap;
-		flex-shrink: 0;
-	}
-	.explore-button:hover:not(:disabled) {
-		background: rgba(74, 222, 128, 0.1);
-	}
-	.explore-button:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-	.explore-live-status {
-		margin-top: 4px;
-	}
-	.explore-live-count {
-		font-size: 11px;
-		color: var(--color-text-tertiary);
-	}
-	.explore-live-current {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		font-size: 12px;
-		color: var(--color-text-secondary);
-		margin-top: 6px;
-	}
-	.explore-live-last {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		font-size: 12px;
-		color: var(--color-text-primary);
-		margin-top: 4px;
-	}
-	.explore-controls {
-		display: flex;
-		gap: 6px;
-		align-items: center;
-		flex-shrink: 0;
-	}
-	.explore-select {
-		padding: 4px 8px;
-		border: 1px solid var(--color-border);
-		border-radius: 4px;
-		background: var(--color-elevated);
-		color: var(--color-text-primary);
-		font-size: 12px;
-		cursor: pointer;
-	}
-	/* Live exploration log */
-	.explore-live {
-		max-height: 300px;
-		overflow-y: auto;
-	}
+	}/* Breadcrumb *//* Realm cards *//* Exploration overview *//* Live exploration log */
 	.explore-log {
 		display: flex;
 		flex-direction: column;
@@ -2140,8 +1117,6 @@
 	}
 	.log-item.done .log-icon { color: var(--color-accent-jade); }
 	.log-item.active .log-icon { color: var(--color-accent); }
-	.log-item.skip .log-icon { color: var(--color-text-tertiary); }
-	.log-item.error .log-icon { color: var(--color-accent-coral); }
 	.log-icon.spin { animation: spin 1s linear infinite; }
 	.log-text {
 		color: var(--color-text-secondary);
@@ -2168,105 +1143,14 @@
 		color: var(--color-text-tertiary);
 		margin-left: auto;
 		white-space: nowrap;
-	}
-	/* Session report */
-	.explore-report-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-	}
-	.explore-dismiss {
-		background: none;
-		border: none;
-		color: var(--color-text-tertiary);
-		font-size: 18px;
-		cursor: pointer;
-		padding: 4px;
-		line-height: 1;
-	}
-	.explore-dismiss:hover { color: var(--color-text-primary); }
-	.explore-report-list {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		margin-top: 8px;
-		max-height: 350px;
-		overflow-y: auto;
-	}
-	.explore-report-item {
-		border: 1px solid var(--color-border);
-		border-radius: 6px;
-		overflow: hidden;
-	}
-	.explore-report-summary {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding: 8px 10px;
-		cursor: pointer;
-		font-size: 12px;
-		user-select: none;
-	}
-	.explore-report-summary:hover {
-		background: var(--color-elevated);
-	}
-	.report-name {
-		font-weight: 500;
-		color: var(--color-text-primary);
-	}
-	.report-meta {
-		font-size: 11px;
-		color: var(--color-text-tertiary);
-		white-space: nowrap;
-		margin-left: 8px;
-	}
-	.explore-report-body {
-		padding: 8px 10px;
-		border-top: 1px solid var(--color-border);
-		background: var(--color-bg);
-	}
-	.report-notes {
-		font-size: 12px;
-		color: var(--color-text-secondary);
-		line-height: 1.5;
-		margin-bottom: 6px;
-		white-space: pre-wrap;
-	}
-	.report-entities {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 3px;
-		margin-bottom: 4px;
-	}
-	.report-patterns {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 3px;
-		margin-bottom: 4px;
-	}
-	.pattern-pill {
-		font-size: 10px;
-		padding: 2px 6px;
-		border-radius: 3px;
-		background: rgba(167, 139, 250, 0.12);
-		color: var(--color-accent-amethyst);
-	}
-	.report-time {
-		font-size: 10px;
-		color: var(--color-text-tertiary);
-	}
-	.territory-cx-track {
-		width: 50px;
-	}
-	/* 3D map exploration overlay */
+	}/* Session report *//* 3D map exploration overlay */
 	.map-container {
 		position: relative;
 		width: 100%;
 		flex: 1;
 		min-height: 0;
 		overflow: hidden;
-	}
-	/* Lens bar — compact floating chips top-right of 3D */
+	}/* Lens bar — compact floating chips top-right of 3D */
 	.lens-bar {
 		position: absolute;
 		top: 12px;
@@ -2332,8 +1216,7 @@
 	@keyframes lens-pulse-anim {
 		0%, 100% { opacity: 1; }
 		50% { opacity: 0.5; }
-	}
-	/* Lens panel — expanded detail from chip */
+	}/* Lens panel — expanded detail from chip */
 	.lens-panel {
 		position: absolute;
 		top: 48px;
@@ -2442,310 +1325,7 @@
 			right: 8px;
 			left: 8px;
 			width: auto;
-		}
-	}
-	.realm-explored {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		font-size: 11px;
-	}
-	.explored-value {
-		color: var(--color-accent-jade);
-		font-family: var(--font-mono);
-		font-weight: 500;
-	}
-	.cx-bar-track {
-		width: 40px;
-		height: 4px;
-		background: var(--color-elevated);
-		border-radius: 2px;
-		overflow: hidden;
-		display: inline-block;
-		vertical-align: middle;
-	}
-	.realm-cx-track {
-		width: 50px;
-	}
-	.cx-bar-fill {
-		display: block;
-		height: 100%;
-		background: #f472b6;
-		border-radius: 2px;
-		transition: width 0.4s ease-out;
-	}
-	.cx-metric {
-		align-items: center;
-		gap: 4px !important;
-	}
-
-	/* Territories view */
-	.territories-view {
-		padding: 16px 24px 24px;
-		flex: 1;
-		min-height: 0;
-		overflow-y: auto;
-		background: var(--color-bg);
-	}
-	.activation-summary {
-		display: flex;
-		gap: 16px;
-		padding: 12px 16px;
-		background: var(--color-surface);
-		border-radius: 8px;
-		margin-bottom: 16px;
-		font-size: 13px;
-	}
-	.act-stat {
-		color: var(--color-text);
-		font-weight: 500;
-	}
-	.act-stat.silent {
-		color: var(--color-warning, #f59e0b);
-	}
-	.act-stat.unclustered {
-		color: var(--color-muted);
-		font-style: italic;
-	}
-	.territory-list {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-	.territory-card {
-		display: block;
-		width: 100%;
-		text-align: left;
-		padding: 14px 16px;
-		background: var(--color-surface);
-		border: 1px solid transparent;
-		border-radius: 10px;
-		cursor: pointer;
-		transition: all 0.15s;
-		font-family: inherit;
-		font-size: inherit;
-		color: inherit;
-	}
-	.territory-card:hover {
-		border-color: var(--color-border);
-		box-shadow: 0 0 16px rgba(229, 184, 76, 0.08), 0 2px 8px rgba(0, 0, 0, 0.2);
-	}
-	.territory-card.selected {
-		border-color: var(--color-accent);
-		box-shadow: 0 0 24px rgba(229, 184, 76, 0.15), 0 4px 12px rgba(0, 0, 0, 0.3);
-	}
-	.territory-card.active-today {
-		border-left: 3px solid var(--color-accent);
-		box-shadow: inset 2px 0 0 var(--color-accent), 0 0 12px rgba(229, 184, 76, 0.05);
-	}
-	.terr-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		gap: 8px;
-	}
-	.terr-name {
-		font-weight: 600;
-		font-size: 14px;
-		color: var(--color-text);
-	}
-	.terr-badges {
-		display: flex;
-		gap: 4px;
-	}
-	.badge {
-		font-size: 10px;
-		font-weight: 600;
-		padding: 2px 6px;
-		border-radius: 4px;
-		text-transform: uppercase;
-		letter-spacing: 0.5px;
-		border: 1px solid transparent;
-	}
-	.badge.surge {
-		background: rgba(229, 184, 76, 0.2);
-		color: var(--color-accent);
-		border-color: rgba(229, 184, 76, 0.3);
-		box-shadow: 0 0 8px rgba(229, 184, 76, 0.1);
-	}
-	.badge.quiet {
-		background: rgba(245, 158, 11, 0.15);
-		color: var(--color-warning, #f59e0b);
-		border-color: rgba(245, 158, 11, 0.25);
-	}
-	.badge.active {
-		background: rgba(16, 185, 129, 0.15);
-		color: var(--color-success, #10b981);
-		border-color: rgba(16, 185, 129, 0.25);
-	}
-	.badge.growing {
-		background: rgba(59, 130, 246, 0.15);
-		color: var(--color-info, #3b82f6);
-		border-color: rgba(59, 130, 246, 0.25);
-	}
-	.badge.dormant {
-		background: rgba(107, 107, 117, 0.15);
-		color: var(--color-text-tertiary);
-		border-color: rgba(107, 107, 117, 0.2);
-	}
-	.badge.archetype {
-		background: rgba(167, 139, 250, 0.12);
-		color: var(--color-accent-amethyst);
-		border-color: rgba(167, 139, 250, 0.2);
-		text-transform: none;
-		font-weight: 500;
-	}
-	.badge.today-badge {
-		background: rgba(74, 222, 128, 0.12);
-		color: var(--color-accent-jade);
-		border-color: rgba(74, 222, 128, 0.2);
-	}
-	.visibility-badge {
-		cursor: pointer;
-		font-size: 11px;
-		padding: 1px 4px;
-		background: transparent;
-		border: 1px solid var(--color-border);
-		opacity: 0.5;
-		transition: opacity 0.15s;
-	}
-	.visibility-badge:hover { opacity: 1; }
-	.visibility-badge.vis-public {
-		border-color: rgba(74, 222, 128, 0.3);
-		opacity: 0.8;
-	}
-	.visibility-badge.vis-friends {
-		border-color: rgba(91, 159, 232, 0.3);
-		opacity: 0.8;
-	}
-	.terr-essence {
-		font-size: 13px;
-		color: var(--color-muted);
-		margin: 6px 0 0;
-		line-height: 1.4;
-	}
-	.terr-entities {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 3px;
-		margin-top: 6px;
-	}
-	.terr-metrics {
-		display: flex;
-		gap: 14px;
-		margin-top: 8px;
-	}
-	.metric {
-		display: flex;
-		gap: 4px;
-		align-items: baseline;
-		font-size: 12px;
-	}
-	.metric-label {
-		color: var(--color-muted);
-		font-size: 11px;
-	}
-	.metric-value {
-		color: var(--color-text);
-		font-family: var(--font-mono);
-		font-weight: 500;
-	}
-	.metric.today .metric-value {
-		color: var(--color-accent);
-	}
-	.terr-detail {
-		margin-top: 12px;
-		padding-top: 12px;
-		border-top: 1px solid var(--color-border);
-	}
-	.detail-section {
-		margin-bottom: 10px;
-	}
-	.detail-section h4 {
-		font-size: 11px;
-		font-weight: 600;
-		color: var(--color-muted);
-		text-transform: uppercase;
-		letter-spacing: 0.5px;
-		margin-bottom: 4px;
-	}
-	.detail-section p {
-		font-size: 13px;
-		color: var(--color-text);
-		line-height: 1.5;
-	}
-	.detail-section ul {
-		list-style: none;
-		padding: 0;
-		margin: 0;
-	}
-	.detail-section li {
-		font-size: 13px;
-		color: var(--color-text);
-		padding: 2px 0;
-	}
-	.detail-section li::before {
-		content: '- ';
-		color: var(--color-muted);
-	}
-	.chronicle-text {
-		white-space: pre-wrap;
-		line-height: 1.5;
-	}
-	.explored-note {
-		font-size: 12px;
-		color: var(--color-muted);
-		border-top: 1px solid rgba(255,255,255,0.05);
-		padding-top: 8px;
-		margin-top: 4px;
-	}
-	.detail-timeline {
-		padding: 4px 0;
-	}
-	.entity-pills {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 4px;
-	}
-	.entity-pill {
-		font-size: 11px;
-		padding: 2px 8px;
-		border-radius: 4px;
-		background: var(--color-accent);
-		background: rgba(91, 159, 232, 0.12);
-		color: var(--color-accent);
-		white-space: nowrap;
-	}
-	.connected-regions {
-		font-size: 12px;
-		color: var(--color-text-secondary);
-		line-height: 1.5;
-	}
-	.cross-refs {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 4px;
-	}
-	.cross-ref-pill {
-		font-size: 11px;
-		padding: 2px 8px;
-		border-radius: 4px;
-		background: rgba(229, 184, 76, 0.12);
-		color: var(--color-accent-aurum);
-		white-space: nowrap;
-	}
-
-	/* Generation + enrichment progress */
-	.gen-progress {
-		max-width: 400px;
-		margin: 0 auto;
-	}
-	.gen-heading {
-		font-size: 16px;
-		font-weight: 600;
-		color: var(--color-text);
-		margin-bottom: 8px;
-	}
+		}}/* Territories view *//* Generation + enrichment progress */
 	.gen-stage {
 		font-size: 13px;
 		color: var(--color-text-secondary);
