@@ -33,11 +33,14 @@ rec('RT1. frpc.toml: serverAddr/Port parsed, type=https, customDomains, token in
 
 // RT2
 const caddy = renderCaddyfile({ publicHost: fixture.publicHost, dataDir: TMP, acmeDns, mode: 'managed' });
-rec('RT2. Caddyfile: site host:8443, bind loopback, acme-dns creds, reverse_proxy :4711, storage',
+rec('RT2. Caddyfile: site host:8443, bind loopback, acme-dns creds, reverse_proxy :4711, storage, no :80 redirect',
   caddy.includes('https://alice.mycelium.id:8443') && caddy.includes('bind 127.0.0.1')
   && caddy.includes('dns acmedns') && caddy.includes('username u1') && caddy.includes('subdomain sub1')
   && caddy.includes('server_url https://acme-dns.mycelium.id')
-  && caddy.includes('reverse_proxy 127.0.0.1:4711') && caddy.includes(`storage file_system ${join(TMP, 'caddy')}`),
+  && caddy.includes('reverse_proxy 127.0.0.1:4711') && caddy.includes(`storage file_system ${join(TMP, 'caddy')}`)
+  // Regression guard (found by the 2026-06-03 local smoke): without this, Caddy
+  // binds :80 for HTTP→HTTPS redirects, which the non-root Tauri app can't → fails to start.
+  && caddy.includes('auto_https disable_redirects'),
   '');
 
 // RT3 — managed writes both at 0600
