@@ -9,17 +9,22 @@ import { existsSync } from 'node:fs';
 import { unlock } from '../crypto/keys.js';
 import {
   generateUserMaster, deriveSystemKey, normalizeKey,
-  writeKeychain, readUserMaster, keychainAvailable,
+  writeKeychain, readUserMaster, deleteKeychain, keychainAvailable,
   onePasswordAvailable, saveRecoveryKeyToKeychain, saveRecoveryKeyTo1Password, openInStore,
 } from './keystore.js';
+import {
+  sealKeys, unsealKeys, lockExists, readLock, writeLock, removeLock, MIN_PASSPHRASE_LENGTH,
+} from './passphrase-lock.js';
+import { getSessionKeys } from './session-keys.js';
 
 /**
  * @param {object} deps
  * @param {() => boolean} deps.isInitialized   is the vault open (booted) yet?
  * @param {(keys:{userHex:string,systemHex:string}) => Promise<void>} deps.completeBoot
  * @param {string} deps.kcvPath  path to the vault's KCV (to verify a restore key)
+ * @param {string} [deps.lockFile]  path to the passphrase seal (co-located w/ KCV)
  */
-export function accountRouter({ isInitialized, completeBoot, kcvPath }) {
+export function accountRouter({ isInitialized, completeBoot, kcvPath, lockFile }) {
   const router = express.Router();
   router.use(express.json({ limit: '64kb' }));
 
@@ -29,10 +34,17 @@ export function accountRouter({ isInitialized, completeBoot, kcvPath }) {
     return res.status(403).json({ error: 'forbidden' });
   });
 
-  // Does the app need a first-run setup screen? The UI gates on this.
+  // The UI gates on this: needsSetup → /setup, locked → /unlock, else the app.
   router.get('/status', (_req, res) => {
+    const open = Boolean(isInitialized());
+    const vaultExists = existsSync(kcvPath);
+    const passphraseEnabled = lockExists(lockFile);
     res.json({
-      initialized: Boolean(isInitialized()),
+      open,
+      initialized: open,            // back-compat alias (the only field pre-Phase-3)
+      needsSetup: !vaultExists,     // no vault has ever been created on this machine
+      locked: !open && vaultExists && passphraseEnabled,
+      passphraseEnabled,
       keychainAvailable: keychainAvailable(),
       onePasswordAvailable: onePasswordAvailable(),
     });
@@ -71,6 +83,7 @@ export function accountRouter({ isInitialized, completeBoot, kcvPath }) {
     }
     try {
       writeKeychain(userHex, systemHex);
+      removeLock(lockFile); // a recovery-key restore turns OFF any passphrase lock
       await completeBoot({ userHex, systemHex });
       return res.json({ ok: true });
     } catch (err) {
@@ -103,6 +116,88 @@ export function accountRouter({ isInitialized, completeBoot, kcvPath }) {
         ? 'Could not save to 1Password — is the `op` CLI installed and signed in?'
         : String(err?.message || err);
       return res.status(500).json({ error: 'save_failed', message: msg });
+    }
+  });
+
+  // ── Optional passphrase lock ────────────────────────────────────────────────
+  // Per-IP attempt limiter for /unlock. scrypt already costs ~100ms each; this
+  // just caps a runaway script. Single-user localhost → an in-memory map is fine.
+  const unlockHits = new Map(); // ip -> { n, resetAt }
+  const UNLOCK_MAX = 10, UNLOCK_WINDOW_MS = 60_000;
+  function unlockRateLimited(ip) {
+    const now = Date.now();
+    const rec = unlockHits.get(ip || '');
+    if (!rec || now > rec.resetAt) { unlockHits.set(ip || '', { n: 1, resetAt: now + UNLOCK_WINDOW_MS }); return false; }
+    rec.n += 1;
+    return rec.n > UNLOCK_MAX;
+  }
+
+  // POST /unlock { passphrase } — open a passphrase-locked vault for this session.
+  // Mirrors /restore: unseal the keys, then completeBoot(). The keys are NOT
+  // written back to the Keychain (that would defeat the lock) — they live in the
+  // process memory (session-keys) for this run only.
+  router.post('/unlock', async (req, res) => {
+    if (isInitialized()) return res.status(409).json({ error: 'already_open' });
+    if (!lockExists(lockFile)) return res.status(400).json({ error: 'not_locked' });
+    if (unlockRateLimited(req.ip)) return res.status(429).json({ error: 'too_many_attempts', message: 'Too many attempts — wait a minute and try again.' });
+    const passphrase = req.body?.passphrase;
+    if (typeof passphrase !== 'string' || !passphrase) return res.status(400).json({ error: 'missing_passphrase' });
+    let keys;
+    try { keys = await unsealKeys(readLock(lockFile), passphrase); }
+    catch { return res.status(400).json({ error: 'wrong_passphrase', message: 'That passphrase is incorrect.' }); }
+    try {
+      await completeBoot({ userHex: keys.userHex, systemHex: keys.systemHex });
+      return res.json({ ok: true });
+    } catch (err) {
+      return res.status(500).json({ error: 'unlock_failed', message: String(err?.message || err) });
+    }
+  });
+
+  // POST /passphrase/enable { passphrase } — turn ON the lock. The vault must be
+  // OPEN (we seal the in-memory session keys, which works for legacy two-key
+  // vaults too). ORDER MATTERS: write + verify the seal BEFORE removing the
+  // Keychain keys, so a failure can never strip the only copy.
+  router.post('/passphrase/enable', async (req, res) => {
+    if (!isInitialized()) return res.status(409).json({ error: 'vault_not_open' });
+    if (lockExists(lockFile)) return res.status(409).json({ error: 'already_enabled' });
+    const passphrase = req.body?.passphrase;
+    if (typeof passphrase !== 'string' || passphrase.length < MIN_PASSPHRASE_LENGTH) {
+      return res.status(400).json({ error: 'weak_passphrase', message: `Use at least ${MIN_PASSPHRASE_LENGTH} characters.` });
+    }
+    const sk = getSessionKeys();
+    if (!sk) return res.status(409).json({ error: 'keys_unavailable' });
+    try {
+      writeLock(await sealKeys(sk.userHex, sk.systemHex, passphrase), lockFile);
+      // Verify the seal round-trips to the SAME keys before stripping the Keychain.
+      const back = await unsealKeys(readLock(lockFile), passphrase);
+      if (back.userHex !== sk.userHex.toLowerCase() || back.systemHex !== sk.systemHex.toLowerCase()) {
+        removeLock(lockFile);
+        return res.status(500).json({ error: 'seal_verify_failed' });
+      }
+      deleteKeychain(); // plaintext keys leave the Keychain — the lock is now real
+      return res.json({ ok: true });
+    } catch (err) {
+      removeLock(lockFile);
+      return res.status(500).json({ error: 'enable_failed', message: String(err?.message || err) });
+    }
+  });
+
+  // POST /passphrase/disable { passphrase } — turn OFF the lock: verify the
+  // passphrase, put the keys back in the Keychain, remove the seal.
+  router.post('/passphrase/disable', async (req, res) => {
+    if (!isInitialized()) return res.status(409).json({ error: 'vault_not_open' });
+    if (!lockExists(lockFile)) return res.status(409).json({ error: 'not_enabled' });
+    const passphrase = req.body?.passphrase;
+    if (typeof passphrase !== 'string' || !passphrase) return res.status(400).json({ error: 'missing_passphrase' });
+    let keys;
+    try { keys = await unsealKeys(readLock(lockFile), passphrase); }
+    catch { return res.status(400).json({ error: 'wrong_passphrase', message: 'That passphrase is incorrect.' }); }
+    try {
+      writeKeychain(keys.userHex, keys.systemHex);
+      removeLock(lockFile);
+      return res.json({ ok: true });
+    } catch (err) {
+      return res.status(500).json({ error: 'disable_failed', message: String(err?.message || err) });
     }
   });
 

@@ -47,6 +47,7 @@
 				keychainAvailable = s.keychainAvailable !== false;
 				onePasswordAvailable = s.onePasswordAvailable === true;
 				if (s.initialized) { enterVault(); return; }
+				if (s.locked) { window.location.assign('/unlock'); return; }
 			}
 		} catch { /* show intro regardless */ }
 		mode = 'intro';

@@ -54,3 +54,7 @@ export function dbPath(opts = {})      { return under('mycelium.db', 'MYCELIUM_D
 export function kcvPath(opts = {})     { return under('kcv.json',    'MYCELIUM_KCV', opts); }
 export function authDbPath(opts = {})  { return under('auth.db',     'MYCELIUM_AUTH_DB', opts); }
 export function uploadsRoot(opts = {}) { return under('uploads',     'MYCELIUM_UPLOADS_ROOT', opts); }
+// Optional passphrase-lock seal (src/account/passphrase-lock.js). Present ONLY
+// when the user enables an app passphrase; its presence means the vault is
+// passphrase-locked and the plaintext keys have been removed from the Keychain.
+export function lockPath(opts = {})    { return under('vault-lock.json', 'MYCELIUM_VAULT_LOCK', opts); }

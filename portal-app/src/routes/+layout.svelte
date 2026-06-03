@@ -10,7 +10,8 @@
 
 	const isLoginPage = $derived($page.url.pathname === '/login');
 	const isSetupPage = $derived($page.url.pathname === '/setup');
-	const isPublicPage = $derived(isLoginPage || isSetupPage);
+	const isUnlockPage = $derived($page.url.pathname === '/unlock');
+	const isPublicPage = $derived(isLoginPage || isSetupPage || isUnlockPage);
 
 	onMount(async () => {
 		theme.initialize();
@@ -32,7 +33,10 @@
 			const res = await fetch('/api/v1/account/status', { credentials: 'same-origin' });
 			if (res.ok) {
 				const s = await res.json();
-				if (!s.initialized && !isSetupPage) { goto('/setup'); return; }
+				// Passphrase-locked (created, not yet unlocked this launch) → /unlock.
+				if (s.locked && !isUnlockPage) { goto('/unlock'); return; }
+				// Not created (or keys lost, no passphrase) → first-run /setup.
+				if (!(s.open ?? s.initialized) && !s.locked && !isSetupPage) { goto('/setup'); return; }
 			}
 		} catch { /* server unreachable — fall through to the session check */ }
 
