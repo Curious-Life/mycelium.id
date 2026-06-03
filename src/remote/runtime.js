@@ -74,7 +74,7 @@ export function renderCaddyfile({ publicHost, dataDir, acmeDns, mode = 'managed'
   const a = acmeDns || {};
   const lines = [
     `{`,
-    `\tstorage file_system ${caddyData}`,
+    `\tstorage file_system "${caddyData}"`,
     // No HTTP→HTTPS redirect vhost. Caddy otherwise binds http_port (:80) for
     // redirects, which the non-root Tauri app cannot — Caddy would fail to start
     // and remote-connect would silently break. We issue via DNS-01 (no :80/:443
