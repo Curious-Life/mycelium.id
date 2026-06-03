@@ -18,7 +18,8 @@ The remote-connect transport is **fully built, adversarially hardened, and resid
 | **Adversarial hardening** (6-agent red-team → fixes) | `27f939e` `2a6f3df` `d19182b` `7c3f27f` `9d51ba9` | ✅ C1–C5 + H1–H7 |
 | **Residual fixes** (sweep-first) | `a2be9bf` `05f0312` `e173071` `9d36446` | ✅ R-A…R-E |
 | **Verify gate** | — | ✅ **8/8 remote verifies GO** + `cargo check` GO + portal build GO |
-| **Live-infra smoke** | — | ⬜ **NEXT** (needs a relay/DNS/CA/phone — can't be CI'd) |
+| **Local e2e smoke** (real frpc/frps/caddy, localhost) | `948e5f5` | ✅ **transport PROVEN** — `HTTP 200` end-to-end; TLS terminates at Caddy (relay sees only ciphertext); SNI routing enforced; **found + fixed a real `:80`-bind startup bug** |
+| **Live-infra smoke** (real relay/DNS/CA/phone) | — | ⬜ NEXT — now **narrower**: transport mechanics de-risked; remaining = public CA via DNS-01, frps NewProxy plugin auth against a real frps, real phone client |
 | Managed relay FLEET (HA/DDoS/multi-instance) | — | ⬜ config shipped (`mycelium-managed/relay/`), not deployed |
 | Own-relay / Direct **connect UI** (T4) | — | ⬜ backend supports via config; no UI yet |
 
@@ -59,6 +60,7 @@ cd /tmp/myc-phase2 && for v in loopback remote-config remote-runtime managed-cla
 | `05f0312` | **R-B** `verify:dns` (CF/deSEC shapes) + **R-E** CT-monitor + CAA |
 | `e173071` | **R-C** crash-safe sidecar reaping (process-group + `RunEvent::Exit` + pidfile reaper) |
 | `9d36446` | wire `verify:dns` + `verify:ct-monitor` into the gate |
+| `948e5f5` | **fix** Caddy `auto_https disable_redirects` (no privileged `:80` bind) + RT2 regression guard — found by the local e2e smoke |
 
 ### What was LEARNED (the load-bearing lines — read these)
 - **cloudflared is OUT.** It terminates TLS at CF's edge → violates "the tunnel must not see plaintext." Replaced by **FRP `type=https`** which is genuine SNI **passthrough** (frps does NOT decrypt — verified in gofrp source) + **Caddy on the Mac** terminates with a cert whose key never leaves the Mac (ACME DNS-01 via acme-dns).
@@ -70,6 +72,7 @@ cd /tmp/myc-phase2 && for v in loopback remote-config remote-runtime managed-cla
 - **CAA + CT monitoring are DETECTION + bar-raising, NOT prevention** — a DNS-controlling attacker can rewrite CAA and pass DNS-01. The cryptographic MITM defense is **own-domain** (the user controls DNS). Stated in code + docs; don't oversell it.
 - **`auth.db` was world-readable (0644)** — it holds the signing secret + operator password hash + relay/acme-dns secrets. Now `chmod 0600` + dir `0700` on every open.
 - **Anthropic egress is a stable `160.79.104.0/21`**, BUT `/authorize` comes from the user's **browser**, not Anthropic — so a relay IP-allowlist would break login (the relay sees SNI only, not paths). No naive allowlist; rely on host-scrubbing + per-tenant caps + the password gate.
+- **The local e2e smoke (2026-06-03) found a real startup bug.** The rendered Caddyfile let Caddy stand up an HTTP→HTTPS redirect vhost on `:80`; the non-root Tauri app can't bind a privileged port → Caddy aborts at launch → remote-connect silently broken on every real Mac. Fixed: `auto_https disable_redirects` (`948e5f5`). The smoke also **proved the privacy thesis**: the leaf cert is issued by Caddy's local CA (TLS terminates on the Mac), so the relay only ever forwards ciphertext; and an unknown SNI is refused at the relay. **STILL OPEN (deferred — direct mode only):** direct mode renders a bare-host site → Caddy binds `:443`, also privileged. Managed + own-relay are unaffected (Caddy on `127.0.0.1:8443`). Direct mode (T4, no UI yet) needs a high local port + the user forwarding `:443`, or elevation — fold this into the T4 direct-mode design.
 
 ### Operator's directional calls (this session)
 - **Network is hostile → tunnel must never see plaintext.** Drove the whole cloudflared→passthrough pivot.
@@ -97,6 +100,7 @@ cd /tmp/myc-phase2 && for v in loopback remote-config remote-runtime managed-cla
 - **`libc` was already in the dep tree** (tauri transitive) → adding it as a direct dep for the group-kill needed no network fetch. (2026-06-03)
 - **Dependabot** flags 1 low vuln on the default branch (unrelated to this work). (2026-06-03)
 - Vault re-key ~19:21 — restore via the app's setup screen with the recovery key; **never paste the key into chat/logs.** (carried)
+- **Local e2e smoke recipe** (reproducible, no infra): fetch `caddy` + the FRP tarball (`frpc` **and** `frps`) per `scripts/fetch-sidecars.sh`; render `frpc.toml`/`Caddyfile` via the real `runtime.js` and swap only the Caddy `tls { dns acmedns … }` block → `tls internal`; run loopback `:4711`, `caddy :8443`, `frps` (control + `vhostHTTPSPort`), `frpc`; then `curl -k --resolve <host>:<vhostport>:127.0.0.1 https://<host>:<vhostport>/`. Asserts: `HTTP 200`, issuer `Caddy Local Authority` (TLS on the Mac), unknown-SNI refused. **macOS owns `:7000`** (Control Center / AirPlay) — use a different frps control port locally (the smoke used `:7010`); a Linux relay VPS is fine on `7000`. (2026-06-03)
 
 ---
 
