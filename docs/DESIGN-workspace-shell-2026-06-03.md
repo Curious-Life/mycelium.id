@@ -1,6 +1,8 @@
 # DESIGN — Workspace shell: tabbed, resizable, multi-pane layout (2026-06-03)
 
-Status: **design for review.** Sweep-first-design (5 parallel Explore sweeps + 6 first-hand reads). No code yet — this is the "design it properly first" artifact.
+Status: **Phase A SHIPPED (PR #60, 8ac4b69; rebuilt + installed; verified on the real vault); Phase B/C planned.** Pick-up + ready-to-build B/C plans + build/install procedure + gotchas are in **`docs/HANDOFF-workspace-shell-2026-06-03.md`**. Sweep-first-design (5 parallel Explore sweeps + 6 first-hand reads).
+
+**Learned in Phase A (v1 → v2):** only the 7 sidebar sections were de-routed into views; the other ~16 `(app)` routes still render in the hidden `children` slot if navigated to (harmless today — all behind the *disabled* "Coming soon" — but Phase B migrates the reachable ones, esp. `spaces/[id]`, and should add an unknown-viewId fallback tab as cheap insurance).
 
 Goal: replace the current **fixed sidebar + one-view-at-a-time** shell with an **IDE-style workspace** — resizable split panes, each with closable/switchable **tabs**, defaulting to the **Mindscape**, all inside the single desktop window. Inspired by the Claude Code layout the user shared.
 
