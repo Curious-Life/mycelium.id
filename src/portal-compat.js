@@ -223,17 +223,43 @@ export function portalCompatRouter({ db, userId }) {
 
   // ── Onboarding status (read by the app layout + mindscape on load) ──────
   // Benign shape so those screens don't error before their verticals land.
+  //
+  // Has the user already seen the first-run welcome? Persisted on the users row
+  // (welcome_shown_at) so the modal shows ONCE — without this it re-popped on
+  // every reload of a not-yet-populated vault. A fresh local vault has no users
+  // row, so a missing row / table reads as "not seen yet" and the POST upserts.
+  async function welcomeSeen() {
+    try {
+      const r = await db.rawQuery(`SELECT welcome_shown_at FROM users WHERE id = ?`, [userId]);
+      return Boolean((r.results || r || [])[0]?.welcome_shown_at);
+    } catch { return false; }
+  }
+
   router.get('/onboarding/status', async (_req, res) => {
     let messageCount = 0;
     try { messageCount = db.messages?.countByUser ? await db.messages.countByUser(userId) : 0; } catch { /* 0 */ }
+    const seen = await welcomeSeen();
     ok(res, {
-      // Phase O — first-run welcome: an empty vault shows the welcome modal that
-      // guides the user to Import; once anything is captured it stops appearing.
-      showWelcome: messageCount === 0,
+      // First-run welcome: show on an empty vault UNTIL it's been seen once (or
+      // anything is captured), then never again — so it never re-pops jarringly.
+      showWelcome: !seen && messageCount === 0,
       show: false,
       aiModelsReady: true,
       steps: { data: { messageCount, enrichedCount: 0, enrichmentPending: 0 } },
     });
+  });
+
+  // Mark the first-run welcome as seen (idempotent — keeps the first timestamp).
+  // The WelcomeModal already posts here on finish/skip; the endpoint was missing,
+  // so the dismissal never stuck. Upserts because a fresh vault has no users row.
+  router.post('/onboarding/welcome-seen', async (_req, res) => {
+    try {
+      await db.rawQuery(
+        `INSERT INTO users (id, welcome_shown_at) VALUES (?, datetime('now'))
+           ON CONFLICT(id) DO UPDATE SET welcome_shown_at = COALESCE(users.welcome_shown_at, datetime('now'))`,
+        [userId]);
+    } catch { /* best-effort — never block the UI on a write */ }
+    ok(res, { ok: true });
   });
 
   return router;
