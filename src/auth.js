@@ -17,7 +17,7 @@ import { dirname } from 'node:path';
 import { authDbPath } from './paths.js';
 import { readRemoteConfig, resolveAuthSecret } from './remote/config.js';
 import { betterAuth } from 'better-auth';
-import { mcp } from 'better-auth/plugins';
+import { mcp, jwt } from 'better-auth/plugins';
 import { getMigrations } from 'better-auth/db/migration';
 
 /**
@@ -65,6 +65,11 @@ export function createAuth(opts = {}) {
     // smoke — see docs/REMOTE-CONNECT-DESIGN-2026-06-02.md).
     trustedOrigins: [baseURL, 'https://claude.ai', 'https://claude.com'],
     plugins: [
+      // The mcp() plugin's discovery hardcodes jwks_uri = <baseURL>/api/auth/mcp/jwks
+      // and (with useJWTPlugin) signs tokens RS256. Without the jwt plugin that URL
+      // 404s and clients (Claude) can't validate the token → "Authorization failed".
+      // Serve the JWKS at the EXACT advertised path so discovery resolves.
+      jwt({ jwks: { jwksPath: '/mcp/jwks' } }),
       mcp({
         loginPage: '/login',
         resource: `${baseURL}/mcp`,
@@ -72,6 +77,7 @@ export function createAuth(opts = {}) {
           allowDynamicClientRegistration: true,
           requirePKCE: true,
           storeClientSecret: 'plain',
+          useJWTPlugin: true,
         },
       }),
     ],
