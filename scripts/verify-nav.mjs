@@ -27,7 +27,9 @@ const sidebar = read(P("lib", "components", "shell", "Sidebar.svelte"));
 const tabbar = read(P("lib", "components", "shell", "BottomTabBar.svelte"));
 const header = read(P("lib", "components", "shell", "Header.svelte"));
 const layout = read(P("routes", "(app)", "+layout.svelte"));
-const importPage = read(P("routes", "(app)", "import", "+page.svelte"));
+// The Import UI was de-routed into the workspace (the route page is now a thin
+// "open the tab" intent); the drop zone lives in the view component.
+const importView = read(P("lib", "views", "ImportView.svelte"));
 
 // N1 — coreNav is exactly the 6-screen V1 set (5 in the array + Settings rendered
 // separately at the bottom). Extract href: values inside the coreNav literal.
@@ -68,8 +70,8 @@ rec("N6 chat toggle hidden in V1", chatHidden);
 // N7 — the header is a window-drag handle in the native shell (no native title bar).
 rec("N7 Header is a window-drag region (Tauri)", /data-tauri-drag-region/.test(header) && /startWindowDrag/.test(header));
 
-// N8 — Import accepts drag-and-drop, not just a file picker.
-rec("N8 Import has a drag-and-drop drop zone", /ondrop=/.test(importPage) && /onDrop/.test(importPage));
+// N8 — Import accepts drag-and-drop, not just a file picker (in the ImportView).
+rec("N8 Import has a drag-and-drop drop zone", /ondrop=/.test(importView) && /onDrop/.test(importView));
 
 // N9 — the LOCAL single-file portal is also a window-drag handle in the shell.
 const localPortal = read(path.join(HERE, "..", "portal", "index.html"));
