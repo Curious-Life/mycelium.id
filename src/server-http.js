@@ -70,7 +70,12 @@ export async function createHttpApp(opts = {}) {
 
   // better-auth owns everything under /api/auth/* (Express 5 NAMED splat).
   // Mounted BEFORE express.json() so better-auth parses its own bodies.
-  app.all('/api/auth/*splat', toNodeHandler(auth));
+  const authHandler = toNodeHandler(auth);
+  app.all('/api/auth/*splat', (req, res) => {
+    const p = req.url.split('?')[0];
+    res.on('finish', () => { if (/(authorize|token|register|jwks|sign-in)/.test(p)) console.error('[myc-oauth]', req.method, p, '→', res.statusCode); });
+    return authHandler(req, res);
+  });
 
   // ── /login: the OAuth authorize login page ─────────────────────────────────
   // better-auth's mcp() plugin redirects an UNauthenticated /authorize to
@@ -131,12 +136,18 @@ export async function createHttpApp(opts = {}) {
   // Validate the Bearer access token → better-auth MCP session, or null.
   async function authenticate(req) {
     const authHeader = req.headers['authorization'];
-    if (!authHeader || !/^Bearer\s+/i.test(authHeader)) return null;
+    if (!authHeader || !/^Bearer\s+/i.test(authHeader)) {
+      console.error('[myc-auth]', req.method, '/mcp — no/non-bearer header:', authHeader ? authHeader.slice(0, 14) : '(none)');
+      return null;
+    }
     const headers = new Headers({ authorization: authHeader });
     const request = new Request(`${baseURL}/mcp`, { method: 'POST', headers });
     try {
-      return await auth.api.getMcpSession({ request, headers });
-    } catch {
+      const s = await auth.api.getMcpSession({ request, headers });
+      console.error('[myc-auth]', req.method, '/mcp — getMcpSession:', s ? `OK (user=${s.userId || s.user?.id || '?'})` : 'NULL — token rejected', `tok=${authHeader.slice(7, 19)}…`);
+      return s;
+    } catch (e) {
+      console.error('[myc-auth]', req.method, '/mcp — getMcpSession threw:', e?.message);
       return null;
     }
   }
