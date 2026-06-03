@@ -7,6 +7,7 @@
 	import BottomTabBar from '$lib/components/shell/BottomTabBar.svelte';
 	import Toast from '$lib/components/shell/Toast.svelte';
 	import ImportDropZone from '$lib/components/shell/ImportDropZone.svelte';
+	import WorkspaceRoot from '$lib/components/workspace/WorkspaceRoot.svelte';
 	import WelcomeModal from '$lib/components/WelcomeModal.svelte';
 	import OnboardingGuide from '$lib/components/OnboardingGuide.svelte';
 	import { api } from '$lib/api';
@@ -82,11 +83,16 @@
 					class="flex-1 min-h-0 overflow-hidden flex flex-col"
 					class:mobile-content-area={isMobile}
 				>
-					{@render children()}
+					<WorkspaceRoot />
 				</div>
 			</main>
 		</div>
 	</div>
+
+	<!-- Route intents: each (app)/<view>/+page.svelte mounts, opens/focuses its
+	     workspace tab, then renders nothing. Hidden so route changes drive tabs
+	     (and every existing goto('/x') keeps working) without showing page UI. -->
+	<div style="display: none" aria-hidden="true">{@render children()}</div>
 
 	{#if !(isMobile && chatOpen)}
 		<BottomTabBar onMoreTap={openMobileDrawer} />

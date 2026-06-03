@@ -11,6 +11,10 @@
 	import { phaseColorAt, hexToRgbNormalized, type PhaseSample } from '$lib/mindscape/phase-color';
 	import { api } from '$lib/api';
 
+	// false when this Mindscape tab is backgrounded (workspace keep-alive): the
+	// rAF loop stays alive for instant resume, but the expensive render is skipped.
+	let { active = true } = $props();
+
 	const SCENE_SCALE = 8;
 	const isLight = $derived($theme === 'light');
 	const POINT_SIZE_DARK = 0.28;
@@ -2083,7 +2087,9 @@
 
 	function renderLoop() {
 		animationId = requestAnimationFrame(renderLoop);
-		if (!controls) return;
+		// Background tab (workspace keep-alive): keep the loop scheduled for instant
+		// resume, but skip controls/uniforms/render so a hidden map doesn't burn GPU.
+		if (!active || !controls) return;
 		controls.update();
 
 		// Update shader uniforms with elapsed time
