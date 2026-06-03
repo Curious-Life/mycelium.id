@@ -190,6 +190,18 @@ POST /api/auth/mcp/token     → 200   (token ISSUED)
 
 A client that requests `openid` (it's in `scopes_supported`) and validates the `id_token` against the advertised RS256 / the EdDSA JWKS **cannot verify an HS256-ephemeral token → "authorization failed" before `/mcp`** — server-side, and identical across accounts/IPs (matches "fresh account on VPN = same error"). The metadata **chain itself is correct** (verified: `/mcp` 401 → `WWW-Authenticate` → protected-resource `resource=…/mcp` + `authorization_servers=[…]` → AS metadata with S256). So the bug is the token/`id_token` signing — a **better-auth@1.6.12 MCP-plugin limitation (our side)**. It does NOT rule out an *additional* Anthropic beta-gate (see below). **Temporary `[myc-oauth]`/`[myc-auth]` logging is live in `src/server-http.js` — remove before merge.**
 
+### UPDATE 2026-06-03 — SERVER PROVEN FUNCTIONAL; the failure is CLAUDE-SIDE (decisive test)
+Ran a scripted **reference OAuth 2.1 + DCR + PKCE MCP client** (`/tmp/myc-phase2/_oauth-probe.mjs`) against the LIVE `https://0m.mycelium.id`:
+```
+register 201 → sign-in 200 → authorize 302 → token 200 → POST /mcp initialize 200
+  result: { protocolVersion 2025-06-18, capabilities.tools, serverInfo: mycelium 0.1.0 }   getMcpSession: OK
+```
+**Works WITH and WITHOUT `openid`.** ⇒ our cert, relay, OAuth, DCR, PKCE, and resource-server token validation are all correct end-to-end — a standards client connects and gets a live MCP session. The earlier "signing inconsistency breaks it" theory is **also wrong** (a background research agent confirmed: MCP 2025-06-18 is pure OAuth 2.1 — no OIDC, no id_token, Claude never validates the access token; opaque token + DB-lookup RS validation is spec-correct).
+
+Claude does register/authorize/token (all 200) then **never sends the Bearer to `/mcp`** (log shows only unauth `/mcp` probes). Since a compliant client succeeds with the identical token, **Claude obtaining the token and not using it is Claude-side** (beta-gate / Claude bug). **The operator's "it's on Anthropic's side" read is SUPPORTED by this test.**
+
+**The ONE residual our-side lever:** better-auth advertises `openid` (`node_modules/better-auth/dist/plugins/mcp/index.mjs:39` hardcoded in protected-resource meta; `:79` overridable via `oidcConfig.metadata.scopes_supported`; `:124` `defaultScope:"openid"`) and emits the unverifiable HS256 `id_token` ONLY when `openid` is requested (`:511`). Spec says Claude ignores it — UNVERIFIED for Claude's real client. **To settle + maybe fix:** (1) enhance `[myc-oauth]` to log the `authorize` query so Claude's actual `scope` is visible; (2) drop `openid` from `scopes_supported` + `defaultScope`; then ONE clean Claude attempt — calls `/mcp` ⇒ it was the id_token (our-side, fixed); still bails ⇒ **pure Anthropic gate → contact support with this proof.** Repro: re-run `_setpw.mjs` to set a known operator pw, then `_oauth-probe.mjs <pw>`.
+
 ### Whose side is it? (honest read — after TWO corrected wrong guesses)
 The operator believes Anthropic is deliberately blocking/targeting them. Synthesis after investigating (and being wrong twice — don't be over-confident here):
 - **Most likely cause = OUR token signing** (see the blocker above): a better-auth@1.6.12 MCP-plugin defect. Provable, server-side, fixable. This is the lead to chase first.
