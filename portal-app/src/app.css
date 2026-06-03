@@ -296,13 +296,8 @@ html.is-tauri *::after {
 	-webkit-backdrop-filter: none !important;
 }
 
-/* macOS traffic-light clearance for the header in the native (Tauri) shell.
-   The window uses an OVERLAY title bar (main.rs → TitleBarStyle::Overlay), so the
-   close/min/max buttons sit OVER the top-left of the webview. Reserve space so the
-   hamburger + "Mycelium" wordmark sit cleanly to their right. `is-tauri` is tagged
-   pre-paint (app.html), so this is applied from the first frame — no layout shift,
-   no hamburger flashing under the traffic lights. Browser build is unaffected. */
-html.is-tauri .app-header {
-	padding-left: 80px;
-}
-/* cache bust 1776640000 */
+/* (No header traffic-light clearance: the native shell now uses a STANDARD title
+   bar — main.rs TitleBarStyle::Visible — so the window buttons get their own strip
+   and the header sits below it at normal padding, aligned with the sidebar. The
+   `is-tauri` class is still used above to drop backdrop-filter.) */
+/* cache bust 1776650000 */

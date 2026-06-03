@@ -140,12 +140,15 @@ fn main() {
                 // transparent before the opaque content repaints → "the text reloads
                 // and flashes"). Opaque eliminates that flicker with zero visual change
                 // and removes the transparent⇄WebGL interaction that hung the webview.
-                .title_bar_style(TitleBarStyle::Overlay) // content flows under the traffic-lights
-                // Hide the macOS window-TITLE text. With the overlay title bar, macOS
-                // otherwise paints "Mycelium" up in the title-bar strip — directly over
-                // the traffic-lights and the in-app header — so it reads as a SECOND,
-                // mis-placed "Mycelium" crowding the hamburger. The brand lives in the
-                // header wordmark; the OS title text is redundant here.
+                // Standard title bar (was Overlay). The macOS window buttons get their
+                // own slim strip at the very top; the in-app header then sits BELOW it,
+                // full-width at normal padding, so the hamburger + "Mycelium" line up
+                // with the sidebar and never collide with the close/min/max controls.
+                // (Overlay flowed content UNDER the buttons, forcing a left-clearance
+                // that pushed the header right and out of line with the sidebar.)
+                // `hidden_title` drops the redundant title TEXT — the brand is the
+                // in-app wordmark. The window stays opaque (the #52 flicker fix).
+                .title_bar_style(TitleBarStyle::Visible)
                 .hidden_title(true)
                 // Disable Tauri's native OS file-drop handler so the webview's
                 // HTML5 drag-drop (the Import drop zone) receives dropped files.
