@@ -139,3 +139,66 @@ cd /tmp/myc-phase2 && for v in loopback remote-config remote-runtime managed-cla
 - **the claim** — an ed25519 signature (`identity.js`, derived from the master key) over `mycelium-handle-claim:v1:<action>:<handle>:<nonce>`; proves master-key ownership with no account. The control-plane verifies with the **public key alone** (`verifyWithPublicKey`).
 - **single-active-proxy** — the relay hook lets ONE tunnel (`run_id`) bind a handle at a time; a stolen token can't run a concurrent tunnel.
 - **acme-dns** — a tiny DNS server we self-host; a one-time CNAME per handle lets the Mac's Caddy answer DNS-01 with a scoped credential (key stays on the Mac).
+
+---
+
+## 2026-06-03 PM — LIVE DEPLOY on real `mycelium.id` + Claude-connect debugging — **START HERE**
+
+We stood the managed stack up **live on the real `mycelium.id`** (operator = Martina, Cloudflare DNS) and drove a real Claude→vault connect. **Transport, cert, relay, control-plane, and the full OAuth handshake all work live.** ONE blocker remains — a JWT **audience** detail. The operator suspects Anthropic is blocking them; the evidence says otherwise (see *Not Anthropic*).
+
+### Live stack (UP this session)
+- **Hetzner cpx22 `77.42.122.15`** (hel1), cloud-init-hardened (`ops` user, key-only SSH, nftables, fail2ban).
+- **frps** relay — `:443` SNI passthrough + `:7000` control (systemd, plugin-gated, no fixed token).
+- **acme-dns** — docker, **postgres** (`joohoi/acme-dns:latest` lacks the sqlite3 driver) + **`--network host`** (dodges both the nftables `forward` drop AND systemd-resolved on `:53`); API loopback `:8081`.
+- **control-plane** — `node /opt/mycelium/mycelium-managed/src/server.js` (systemd), `MYC_BIND_HOST=127.0.0.1`, Cloudflare token (IP-restricted to the box, Edit-zone-DNS), `MYC_ZONE=mycelium.id`.
+- **Caddy edge** — `connect.mycelium.id:8443` → control-plane `/v1/*`; `acme.mycelium.id:8443` → acme-dns `/update`; DNS-01 via `caddy-dns/cloudflare`. (frps owns `:443` → edge on `:8443`.)
+- **DNS** (Cloudflare, all grey): `connect`, `acme`, `ns.auth` A → box; `auth` NS → `ns.auth`; per-handle records auto-created by the control-plane.
+- **First handle `0m.mycelium.id` provisioned** — real LE cert via DNS-01; `https://0m.mycelium.id/mcp` reachable, valid cert, `401`-gated.
+- Deploy kit committed: `mycelium-managed/relay/deploy/`.
+
+### The Mac (client)
+- Feature is **only on `feat/remote-connect-phase2`** (PR #46), behind `main`. The branch `.app` is **NOT self-contained** (no bundled Node backend — only `main` has resource-bundling), so it runs via:
+  `MYCELIUM_HOME=/tmp/myc-phase2 /tmp/myc-phase2/src-tauri/target/release/bundle/macos/Mycelium.app/Contents/MacOS/mycelium`
+- **3 `Mycelium.app` copies share bundle id `id.mycelium.app`** → single-instance fights. Installed copies PARKED: `/Applications/Mycelium.app → /tmp/Mycelium-main-parked.app`, and `~/mycelium.id/.../Mycelium.app → ….parked`. **RESTORE these when done.**
+- Vault = **throwaway** `id.mycelium.app` (real vault backed up at `…/id.mycelium.app.lockedrealvault-bak…`). `remote.json` has `controlPlaneUrl: https://connect.mycelium.id:8443` (set by hand — the UI has no field for it).
+
+### Commits this session (all bugs found by running for real)
+| Commit | Fix |
+|---|---|
+| `948e5f5` | Caddy `auto_https disable_redirects` — non-root app can't bind `:80` |
+| `81ed240` | `fetch-sidecars.sh` `set -e`/TOFU first-run abort (grep→awk) + pin frpc |
+| `2874a24` | Hetzner deploy kit + `MYC_BIND_HOST` + acme-dns register/update split |
+| `ce737cf` | auto-refuse handles colliding with a live Cloudflare record |
+| `6740dee` | quote Caddy `storage` path — macOS `Application Support` has a space |
+| `12e276b` | serve the OAuth **`/login`** page (better-auth `mcp` `loginPage` configured but unbuilt → fresh clients 404'd) |
+| `ed7004b` | serve **JWKS** (`jwt()` plugin + `useJWTPlugin`) — advertised `/api/auth/mcp/jwks` was 404 |
+
+### THE CURRENT BLOCKER — token audience (the last 5%)
+The OAuth handshake **completes server-side** — from the live log, latest attempt:
+```
+GET  /api/auth/mcp/jwks      → 200   (Claude fetches the key → JWKS fix works)
+POST /api/auth/mcp/register  → 201   (DCR)
+GET  /api/auth/mcp/authorize → 302   (after /login as operator@mycelium.local)
+POST /api/auth/mcp/token     → 200   (token ISSUED)
+```
+…but **no token-bearing `/mcp` request follows** (only an unauth probe). So **Claude gets the token and rejects it before calling `/mcp`** — almost certainly a **JWT claim mismatch**: the access token's `aud` is likely the `client_id` (OIDC default), but an MCP client validates `aud` against the **resource** (`https://0m.mycelium.id/mcp`, RFC 8707). NEXT: decode a freshly-issued token, check `aud`/`iss`, and make better-auth bind the access-token audience to the MCP `resource` (`auth.js` sets `mcp({ resource })` but the token may not honor it). **Temporary `[myc-oauth]`/`[myc-auth]` logging is live in `src/server-http.js` — remove before merge.**
+
+### Not Anthropic (the operator's hypothesis, handled honestly)
+The operator is convinced Anthropic coordinated an IP block. The evidence contradicts it:
+- A **fresh Claude account on a VPN got the IDENTICAL error** → account- and IP-independent → server-side, not targeted.
+- The live log shows Claude completing **every** server step (register/authorize/token/jwks all 2xx) → not blocked; a token-claim detail on OUR side.
+- **"Connectors page won't load / VPN fixes it"** is a *separate* thing: our **relay `nftables` per-source rate-limit/conn-cap** on `:443` throttling the home IP after dozens of attempts (VPN = fresh IP = not limited). **Loosen/disable it** for testing (`mycelium-managed/relay/nftables.conf`: `limit rate 30/second` + `ct count over 128`).
+
+### Pickup protocol (next session)
+1. Confirm live: `curl -s -o/dev/null -w '%{http_code}\n' https://0m.mycelium.id/api/auth/mcp/jwks` (200), `…/mcp` (401), `…/login?x=1` (200). Run the Mac app via the `MYCELIUM_HOME=…` command above (kill other copies first: `pkill -f 'Mycelium.app/Contents/MacOS/mycelium'`).
+2. **Fix the token audience** (THE blocker) — decode the `/token` JWT, set `aud` = the MCP resource; re-test with a **fresh Claude account on VPN** and watch `/tmp/myc-branch-app.log` for a token-bearing `/mcp` → `getMcpSession: OK`.
+3. **Loosen the relay rate-limit** so the operator's home IP isn't throttled.
+4. Polish bucket, then merge: login identity = **handle** (not `operator@mycelium.local`); **user-facing password reset** (the UI set-password is a no-op for an existing user — this session reset via `/tmp/myc-phase2/_reset-operator.mjs` + `_clean-oauth.mjs` on `auth.db`); fix `jwks_uri` cleanly; **remove the temp logging**; **restore the parked apps**.
+5. **Merge `feat/remote-connect-phase2` → main** (self-contained app, real vault, permanent handle; no `MYCELIUM_HOME`/parked-copy juggling). Resolve conflicts vs `main`'s #54/#57-59.
+
+### Gotchas (2026-06-03)
+- macOS `pgrep -a` ≠ Linux; kill app copies by PID or `pkill -f 'Mycelium.app/Contents/MacOS/mycelium'`.
+- `node -e` with `"table"` in SQL → SQLite reads it as an identifier; use single quotes or a `.mjs` file.
+- Running the branch `.app` binary can also launch the installed `/Applications` copy (shared bundle id) which grabs `:8787` with its non-remote backend → park the other copies.
+- Operator password lives in `auth.db` (scrypt), never `remote.json`; `passwordSet` in `/api/v1/remote/status` reflects it.
+- Temp helper scripts in `/tmp/myc-phase2` (untracked): `_reset-operator.mjs`, `_clean-oauth.mjs`, `_rematerialize.mjs` — delete or formalize.
