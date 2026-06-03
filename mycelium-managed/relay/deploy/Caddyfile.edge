@@ -1,0 +1,45 @@
+# Caddy edge for the control-plane host. Two public HTTPS endpoints on :8443
+# (frps owns :443), each exposing the MINIMUM surface. Certs via DNS-01 (no :80/:443
+# challenge listener needed → no conflict with frps). Build caddy WITH the matching
+# DNS plugin, e.g.:
+#   caddy (linux/amd64, +caddy-dns/desec):
+#   https://caddyserver.com/api/download?os=linux&arch=amd64&p=github.com/caddy-dns/desec
+# Run with the DNS token in the env: DESEC_TOKEN=...  caddy run --config Caddyfile.edge
+# (for Cloudflare swap the plugin + `dns cloudflare {env.CF_TOKEN}`).
+
+{
+	email you@yourdomain.com
+	# No HTTP→HTTPS redirect vhost (would bind :80; unneeded with DNS-01).
+	auto_https disable_redirects
+}
+
+# Control-plane API — expose ONLY /v1/* (provision/challenge/handle/release).
+# /frps/handler and everything else → 404, so the tunnel-auth oracle is never public.
+connect.yourdomain.com:8443 {
+	@v1 path /v1/*
+	handle @v1 {
+		reverse_proxy 127.0.0.1:8790
+	}
+	handle {
+		respond 404
+	}
+	tls {
+		dns desec {env.DESEC_TOKEN}
+	}
+}
+
+# acme-dns API — expose ONLY /update (the Mac's Caddy pushes its DNS-01 TXT here).
+# /register is NOT proxied → it stays loopback-only (the control-plane uses
+# http://127.0.0.1:8081 directly), so no one on the internet can mint subdomains.
+acme.yourdomain.com:8443 {
+	@update path /update
+	handle @update {
+		reverse_proxy 127.0.0.1:8081
+	}
+	handle {
+		respond 404
+	}
+	tls {
+		dns desec {env.DESEC_TOKEN}
+	}
+}

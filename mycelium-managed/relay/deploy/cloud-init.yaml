@@ -1,0 +1,155 @@
+#cloud-config
+# Mycelium relay — secure base for a Hetzner Cloud box (Ubuntu 24.04, amd64/cpx).
+# Paste into the Hetzner "Cloud config" field at create time. It:
+#   - creates a non-root sudo user `ops` and copies your SSH key to it
+#   - hardens sshd (no root login, key-only)
+#   - installs a host nftables firewall (defence-in-depth under the Hetzner FW)
+#   - enables unattended security upgrades + fail2ban
+#   - installs Node 22 (for the control-plane) + frps as an unprivileged service
+#
+# SECURITY: never put a secret (DNS token, etc.) in cloud-config — the provider
+# stores it. Secrets go in /etc/mycelium/control-plane.env AFTER boot (see README).
+# NOTE: for an ARM box (CAX*) change frp_..._linux_amd64 → linux_arm64 below.
+
+package_update: true
+package_upgrade: true
+packages:
+  - nftables
+  - fail2ban
+  - unattended-upgrades
+  - curl
+  - ca-certificates
+  - build-essential
+  - python3
+
+users:
+  - default
+  - name: ops
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-mycelium.conf
+    permissions: "0644"
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      X11Forwarding no
+      MaxAuthTries 3
+      AllowUsers ops
+
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+  # Host firewall. The Hetzner Cloud Firewall is the edge layer; this is the
+  # second. Open ONLY what the single-box stack needs. 8790 (control-plane) and
+  # 8081 (acme-dns register API) are loopback-bound and NEVER opened here.
+  - path: /etc/nftables.conf
+    permissions: "0755"
+    content: |
+      #!/usr/sbin/nft -f
+      flush ruleset
+      table inet mycelium {
+        chain input {
+          type filter hook input priority filter; policy drop;
+          ct state established,related accept
+          ct state invalid drop
+          iif "lo" accept
+          meta l4proto { icmp, ipv6-icmp } accept
+          # SSH — also restrict the source to YOUR IP in the Hetzner Cloud Firewall.
+          tcp dport 22 ct state new accept
+          # acme-dns: authoritative public DNS for auth.<domain>.
+          tcp dport 53 accept
+          udp dport 53 accept
+          # Control-plane API edge (Caddy → /v1/* only).
+          tcp dport 8443 ct state new accept
+          # frps: tenant SNI passthrough (443) + frpc control (7000), with a
+          # per-source NEW-connection rate limit + concurrent-connection cap so one
+          # source can't exhaust the relay's FDs (per-tenant DoS defence).
+          tcp dport { 443, 7000 } ct state new meter rate4 { ip  saddr limit rate 30/second burst 60 packets } accept
+          tcp dport { 443, 7000 } ct state new meter rate6 { ip6 saddr limit rate 30/second burst 60 packets } accept
+          tcp dport { 443, 7000 } meter conn4 { ip  saddr ct count over 128 } drop
+          tcp dport { 443, 7000 } meter conn6 { ip6 saddr ct count over 128 } drop
+          tcp dport { 443, 7000 } accept
+        }
+        chain forward { type filter hook forward priority filter; policy drop; }
+        chain output  { type filter hook output  priority filter; policy accept; }
+      }
+
+  # frps server config (no secret). SNI passthrough; NO fixed auth.token — the
+  # control-plane plugin is the only gate. Mirrors mycelium-managed/relay/frps.toml.
+  - path: /etc/frp/frps.toml
+    permissions: "0644"
+    content: |
+      bindPort = 7000
+      vhostHTTPSPort = 443
+      transport.tls.force = true
+      transport.maxPoolCount = 5
+      maxPortsPerClient = 0
+      [[httpPlugins]]
+      name = "mycelium-auth"
+      addr = "127.0.0.1:8790"
+      path = "/frps/handler"
+      ops = ["Login", "NewProxy", "CloseProxy", "Ping"]
+
+  - path: /etc/systemd/system/frps.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Mycelium relay (frps, TLS passthrough)
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      User=frp
+      Group=frp
+      AmbientCapabilities=CAP_NET_BIND_SERVICE
+      CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+      ExecStart=/usr/local/bin/frps -c /etc/frp/frps.toml
+      Restart=on-failure
+      RestartSec=2
+      NoNewPrivileges=true
+      ProtectSystem=strict
+      ProtectHome=true
+      PrivateTmp=true
+      PrivateDevices=true
+      ProtectKernelTunables=true
+      ProtectKernelModules=true
+      ProtectControlGroups=true
+      RestrictAddressFamilies=AF_INET AF_INET6
+      RestrictNamespaces=true
+      LockPersonality=true
+      MemoryDenyWriteExecute=true
+      SystemCallFilter=@system-service
+      SystemCallErrorNumber=EPERM
+      ReadOnlyPaths=/etc/frp
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # propagate the Hetzner-injected SSH key from root → ops, then lock sshd down
+  - install -d -m 700 -o ops -g ops /home/ops/.ssh
+  - sh -c 'cp /root/.ssh/authorized_keys /home/ops/.ssh/authorized_keys 2>/dev/null || true'
+  - chown ops:ops /home/ops/.ssh/authorized_keys
+  - chmod 600 /home/ops/.ssh/authorized_keys
+  - systemctl enable nftables && nft -f /etc/nftables.conf
+  - systemctl restart ssh
+  - systemctl enable --now fail2ban
+  # Node 22 (control-plane runtime; better-sqlite3 needs build-essential/python3)
+  - sh -c 'curl -fsSL https://deb.nodesource.com/setup_22.x | bash -'
+  - apt-get install -y nodejs
+  # frps as an unprivileged service
+  - useradd --system --no-create-home --shell /usr/sbin/nologin frp || true
+  - sh -c 'curl -fsSL https://github.com/fatedier/frp/releases/download/v0.61.1/frp_0.61.1_linux_amd64.tar.gz -o /tmp/frp.tgz'
+  - tar -xzf /tmp/frp.tgz -C /tmp
+  - install -m 0755 /tmp/frp_0.61.1_linux_amd64/frps /usr/local/bin/frps
+  - rm -rf /tmp/frp*
+  - systemctl daemon-reload
+  - systemctl enable --now frps
+
+final_message: "Mycelium relay base ready + frps running. SSH in as ops@<ip> and follow mycelium-managed/relay/deploy/README.md (control-plane + acme-dns + edge + DNS)."

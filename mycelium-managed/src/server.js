@@ -139,9 +139,19 @@ export function main() {
     zone,
     relayIp: process.env.MYC_RELAY_IP,
   });
-  const acmeDns = createAcmeDnsClient({ serverUrl: acmeDnsServer, mock: process.env.MYC_ACME_DNS_MOCK === '1' });
+  // The register URL can differ from the public URL handed to clients: in a
+  // hardened deploy acme-dns /register is loopback-only
+  // (MYC_ACME_DNS_REGISTER=http://127.0.0.1:8081) while the Mac's Caddy reaches
+  // /update at the public MYC_ACME_DNS. Defaults to the public URL (back-compat).
+  const acmeDnsRegister = process.env.MYC_ACME_DNS_REGISTER || acmeDnsServer;
+  const acmeDns = createAcmeDnsClient({ serverUrl: acmeDnsRegister, mock: process.env.MYC_ACME_DNS_MOCK === '1' });
   const { app } = createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone, acmeDnsServer, bwLimit: process.env.MYC_BW_LIMIT || '2MB' });
-  app.listen(port, () => console.log(`[mycelium-managed] control-plane on :${port} (zone=${zone}, dns=${dns.provider})`));
+  // Bind host: default all-interfaces (back-compat), but a deployment SHOULD set
+  // MYC_BIND_HOST=127.0.0.1 so the control-plane — including the /frps/handler token
+  // oracle — is loopback-only, reachable by the co-located frps + Caddy edge but
+  // NEVER the public internet. Defence-in-depth alongside the host/cloud firewall.
+  const bindHost = process.env.MYC_BIND_HOST || '0.0.0.0';
+  app.listen(port, bindHost, () => console.log(`[mycelium-managed] control-plane on ${bindHost}:${port} (zone=${zone}, dns=${dns.provider})`));
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) main();
