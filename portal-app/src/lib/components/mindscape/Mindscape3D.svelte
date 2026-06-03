@@ -2330,17 +2330,25 @@
 
 	onDestroy(() => {
 		if (animationId) cancelAnimationFrame(animationId);
-		if (renderer) {
-			renderer.domElement.removeEventListener('mousemove', handleMouseMove);
-			renderer.domElement.removeEventListener('mousedown', handleMouseDown);
-			renderer.domElement.removeEventListener('click', handleClick);
-			renderer.dispose();
-		}
 		if (composer) composer.dispose();
 		clearCofire();
 		clearPhaseHalos();
 		clearPulses();
 		if (resizeObserver) resizeObserver.disconnect();
+		if (renderer) {
+			renderer.domElement.removeEventListener('mousemove', handleMouseMove);
+			renderer.domElement.removeEventListener('mousedown', handleMouseDown);
+			renderer.domElement.removeEventListener('click', handleClick);
+			renderer.dispose();
+			// CRITICAL for WKWebView (the desktop shell): dispose() alone does NOT
+			// release the WebGL/GPU context in WebKit. Without forceContextLoss the
+			// context leaks on every unmount, and leaving the 3D map (e.g. → Profile)
+			// eventually wedges the whole webview — so the next page's onMount/timers
+			// never fire and it "doesn't load". Force the loss + detach the canvas.
+			try { renderer.forceContextLoss(); } catch { /* backend may not support it */ }
+			renderer.domElement?.parentNode?.removeChild(renderer.domElement);
+			renderer = undefined as unknown as THREE.WebGLRenderer;
+		}
 	});
 </script>
 

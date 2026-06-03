@@ -472,7 +472,7 @@
 						<span class="data-label">last 30d</span>
 					</div>
 				</div>
-				{#if stats.messages.dateRange.first}
+				{#if stats.messages.dateRange?.first}
 					<p class="date-range">
 						{formatDate(stats.messages.dateRange.first)} — {formatDate(stats.messages.dateRange.last)}
 					</p>

@@ -141,6 +141,12 @@ fn main() {
                 // and flashes"). Opaque eliminates that flicker with zero visual change
                 // and removes the transparent⇄WebGL interaction that hung the webview.
                 .title_bar_style(TitleBarStyle::Overlay) // content flows under the traffic-lights
+                // Hide the macOS window-TITLE text. With the overlay title bar, macOS
+                // otherwise paints "Mycelium" up in the title-bar strip — directly over
+                // the traffic-lights and the in-app header — so it reads as a SECOND,
+                // mis-placed "Mycelium" crowding the hamburger. The brand lives in the
+                // header wordmark; the OS title text is redundant here.
+                .hidden_title(true)
                 // Disable Tauri's native OS file-drop handler so the webview's
                 // HTML5 drag-drop (the Import drop zone) receives dropped files.
                 // Without this, WKWebView swallows the drop and dataTransfer.files
