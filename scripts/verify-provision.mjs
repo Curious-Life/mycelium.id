@@ -115,6 +115,18 @@ try {
   const replay = ns1.consume(hn);       // already consumed → false
   rec('P12. registry-backed nonce: cross-instance consume once (HA), replay rejected',
     crossConsume === true && replay === false, `cross=${crossConsume} replay=${replay}`);
+
+  // P13 — a name already present in the zone (legacy site / infra) is refused even
+  // though it's not in the registry or RESERVED: auto-collision via live DNS. The
+  // claim is rolled back and NO new records are created.
+  dnsRecords.push({ type: 'A', name: 'legacy.mycelium.id', content: '198.51.100.9' });
+  const avLegacy = await getJson(`${BASE}/v1/handle/legacy`);
+  const ch13 = await getJson(`${BASE}/v1/challenge`);
+  const p13 = await postJson(`${BASE}/v1/provision`, buildClaim({ action: 'provision', handle: 'legacy', nonce: ch13.nonce, masterHex: masterB }));
+  const legacyRecs = dnsRecords.filter((r) => r.name.includes('legacy')).length;
+  rec('P13. pre-existing zone record → unavailable + provision refused (claim rolled back, no new records)',
+    avLegacy.available === false && p13.status === 409 && !registry.get('legacy') && legacyRecs === 1,
+    `avail=${avLegacy.available} status=${p13.status} row=${!!registry.get('legacy')} recs=${legacyRecs}`);
 } finally {
   try { server.close(); registry.close(); rmSync(DB, { force: true }); } catch { /* */ }
 }

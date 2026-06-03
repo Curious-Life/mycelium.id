@@ -67,5 +67,24 @@ export function createDnsClient({ provider = 'mock', token, zone = 'mycelium.id'
     throw new Error(`unknown DNS provider: ${provider}`);
   }
 
-  return { provider, records, createHandleRecords, deleteHandleRecords };
+  // Does ANY record already exist at <handle>.<zone>? Lets the control-plane refuse
+  // a handle that collides with a pre-existing record (legacy site, infra, another
+  // tenant) WITHOUT a hand-maintained list: a name auto-frees the moment its record
+  // is removed, and any new record is auto-protected. Throws on API error → the
+  // caller fails closed (never create a second, conflicting record).
+  async function recordExists({ handle }) {
+    const name = `${handle}.${zone}`;
+    if (provider === 'mock') return records.some((r) => r.name === name);
+    if (provider === 'cloudflare') {
+      const data = await cfRequest('GET', `/dns_records?name=${encodeURIComponent(name)}`);
+      return Array.isArray(data.result) && data.result.length > 0;
+    }
+    if (provider === 'desec') {
+      const data = await desecRequest('GET', `/rrsets/?subname=${encodeURIComponent(handle)}`);
+      return Array.isArray(data) && data.length > 0;
+    }
+    throw new Error(`unknown DNS provider: ${provider}`);
+  }
+
+  return { provider, records, createHandleRecords, deleteHandleRecords, recordExists };
 }

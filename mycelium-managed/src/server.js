@@ -41,10 +41,14 @@ export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, 
     res.json({ nonce: nonces.issue() });
   });
 
-  app.get('/v1/handle/:h', limit, (req, res) => {
+  app.get('/v1/handle/:h', limit, async (req, res) => {
     const h = String(req.params.h || '').toLowerCase();
     if (!isValidHandle(h)) { res.status(400).json({ ok: false, error: 'invalid handle' }); return; }
-    res.json({ ok: true, handle: h, available: !(RESERVED.has(h) || !!registry.get(h)) });
+    // Also reflect a pre-existing zone record (legacy/infra). Advisory + fail-open
+    // here (a DNS hiccup shouldn't block the UI); provision re-checks fail-closed.
+    let dnsTaken = false;
+    try { dnsTaken = await dns.recordExists({ handle: h }); } catch { dnsTaken = false; }
+    res.json({ ok: true, handle: h, available: !(RESERVED.has(h) || !!registry.get(h) || dnsTaken) });
   });
 
   app.post('/v1/provision', limit, async (req, res) => {
@@ -65,6 +69,15 @@ export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, 
       // ATOMIC claim BEFORE any external side-effect (TOCTOU-safe). Same key reclaims.
       const claimed = registry.claim({ handle: h, publicKey });
       if (!claimed.ok) { res.status(409).json({ ok: false, error: 'handle already claimed' }); return; }
+      // Refuse a name that already exists in the zone (legacy site / infra / other) —
+      // never create a second, conflicting record. A reclaim by the same key keeps its
+      // own record, so only gate NEW claims. Fail CLOSED if we can't verify.
+      if (!claimed.reclaimed) {
+        let exists;
+        try { exists = await dns.recordExists({ handle: h }); }
+        catch { registry.remove({ handle: h, publicKey }); res.status(503).json({ ok: false, error: 'could not verify name availability' }); return; }
+        if (exists) { registry.remove({ handle: h, publicKey }); res.status(409).json({ ok: false, error: 'handle unavailable' }); return; }
+      }
       // Self-throttle NEW handles to stay under the CA's per-domain weekly cap.
       if (!claimed.reclaimed && !newHandleCap.tryConsume()) {
         registry.remove({ handle: h, publicKey });

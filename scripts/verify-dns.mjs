@@ -11,7 +11,11 @@ let calls = [];
 const orig = globalThis.fetch;
 globalThis.fetch = async (url, opts = {}) => {
   calls.push({ url: String(url), method: opts.method || 'GET', body: opts.body ? JSON.parse(opts.body) : null, auth: (opts.headers || {}).authorization });
-  return { ok: true, status: 200, json: async () => ({ result: [{ id: 'rec-1' }] }) };
+  // deSEC's rrset-list returns a bare array; Cloudflare returns { result: [...] }.
+  const json = String(url).includes('/rrsets/?subname=')
+    ? async () => [{ subname: 'x', type: 'A' }]
+    : async () => ({ result: [{ id: 'rec-1' }] });
+  return { ok: true, status: 200, json };
 };
 
 try {
@@ -65,6 +69,21 @@ try {
     dd.length === 2
     && dd.some((c) => c.url.includes('/rrsets/bob/A/')) && dd.some((c) => c.url.includes('/rrsets/_acme-challenge.bob/CNAME/')),
     `dels=${dd.length}`);
+
+  // ── recordExists (the live-DNS collision check) ──
+  calls = [];
+  const cfExists = await cf.recordExists({ handle: 'alice' });
+  const cfGet = calls.find((c) => c.method === 'GET');
+  rec('DNS5. CF recordExists: GET dns_records?name=<fqdn>, true when present',
+    cfExists === true && cfGet?.url.includes('/zones/zone123/dns_records') && cfGet.url.includes('name=alice.mycelium.id'),
+    `exists=${cfExists}`);
+
+  calls = [];
+  const deExists = await de.recordExists({ handle: 'bob' });
+  const deGet = calls.find((c) => c.method === 'GET');
+  rec('DNS6. deSEC recordExists: GET rrsets/?subname=<handle>, true when present',
+    deExists === true && deGet?.url.includes('/domains/mycelium.id/rrsets/?subname=bob'),
+    `exists=${deExists}`);
 } finally {
   globalThis.fetch = orig;
 }
