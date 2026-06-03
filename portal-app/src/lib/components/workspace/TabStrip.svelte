@@ -3,12 +3,13 @@
 	import { REGISTRY } from '$lib/workspace/registry';
 	import type { Tab as TabT } from '$lib/workspace/types';
 
-	let { tabs, activeTabId, onfocus, onclose, onopen }: {
+	let { tabs, activeTabId, onfocus, onclose, onopen, onsplit }: {
 		tabs: TabT[];
 		activeTabId: string | null;
 		onfocus: (id: string) => void;
 		onclose: (id: string) => void;
 		onopen: (viewId: string) => void;
+		onsplit?: () => void;
 	} = $props();
 
 	let menuOpen = $state(false);
@@ -32,16 +33,24 @@
 		{/each}
 	</div>
 
-	<div class="new-wrap">
-		<button class="tab-new" title="Open a view" aria-label="Open a view" aria-haspopup="menu" aria-expanded={menuOpen} onclick={() => (menuOpen = !menuOpen)}>+</button>
-		{#if menuOpen}
-			<!-- click-away backdrop -->
-			<button class="menu-backdrop" tabindex="-1" aria-label="Close menu" onclick={() => (menuOpen = false)}></button>
-			<div class="menu" role="menu">
-				{#each sections as s}
-					<button class="menu-item" role="menuitem" onclick={() => pick(s.id)}>{s.title}</button>
-				{/each}
-			</div>
+	<div class="actions">
+		<div class="new-wrap">
+			<button class="strip-btn" title="Open a view" aria-label="Open a view" aria-haspopup="menu" aria-expanded={menuOpen} onclick={() => (menuOpen = !menuOpen)}>+</button>
+			{#if menuOpen}
+				<button class="menu-backdrop" tabindex="-1" aria-label="Close menu" onclick={() => (menuOpen = false)}></button>
+				<div class="menu" role="menu">
+					{#each sections as s}
+						<button class="menu-item" role="menuitem" onclick={() => pick(s.id)}>{s.title}</button>
+					{/each}
+				</div>
+			{/if}
+		</div>
+		{#if onsplit}
+			<button class="strip-btn split" title="Split this pane" aria-label="Split this pane" onclick={onsplit}>
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<rect x="3" y="4" width="18" height="16" rx="1.5" /><line x1="12" y1="4" x2="12" y2="20" />
+				</svg>
+			</button>
 		{/if}
 	</div>
 </div>
@@ -51,14 +60,17 @@
 		display: flex; align-items: stretch; height: 36px; min-height: 36px;
 		background: var(--color-surface); border-bottom: 1px solid var(--color-border);
 	}
-	.tabs { display: flex; overflow-x: auto; scrollbar-width: none; }
+	.tabs { display: flex; overflow-x: auto; scrollbar-width: none; flex: 1; min-width: 0; }
 	.tabs::-webkit-scrollbar { display: none; }
+	.actions { display: flex; align-items: stretch; flex-shrink: 0; }
 	.new-wrap { position: relative; display: flex; align-items: stretch; }
-	.tab-new {
+	.strip-btn {
 		flex-shrink: 0; width: 34px; border: none; background: none; cursor: pointer;
 		color: var(--color-text-tertiary); font-size: 1.15rem; line-height: 1;
+		display: flex; align-items: center; justify-content: center;
 	}
-	.tab-new:hover { color: var(--color-text-primary); background: var(--color-elevated); }
+	.strip-btn.split { font-size: 1rem; }
+	.strip-btn:hover { color: var(--color-text-primary); background: var(--color-elevated); }
 	.menu-backdrop { position: fixed; inset: 0; z-index: 40; background: transparent; border: none; cursor: default; }
 	.menu {
 		position: absolute; top: 38px; right: 4px; z-index: 50; min-width: 160px;

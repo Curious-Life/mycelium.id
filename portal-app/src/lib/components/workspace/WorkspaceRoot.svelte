@@ -1,12 +1,11 @@
 <script lang="ts">
-	// The workspace content area. Phase A: a single pane. Phase B widens this to
-	// recursively render a pane tree (leaf → Pane, split → SplitPane).
-	import Pane from './Pane.svelte';
+	// The workspace content area — renders the pane tree (Phase B).
+	import WorkspaceNode from './WorkspaceNode.svelte';
 	import { workspace } from '$lib/workspace/store';
 </script>
 
 <div class="workspace">
-	<Pane pane={$workspace.root} />
+	<WorkspaceNode node={$workspace.root} />
 </div>
 
 <style>

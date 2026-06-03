@@ -40,7 +40,7 @@ export interface RecentItem {
 }
 
 export interface WorkspaceState {
-	root: LeafPane;                       // Phase A: single pane; Phase B: widen to WsNode
-	focusedPaneId: string;
+	root: WsNode;                         // a tree of split nodes + leaf panes (Phase B)
+	focusedPaneId: string;                // the leaf that new tabs open into
 	recents: RecentItem[];
 }
