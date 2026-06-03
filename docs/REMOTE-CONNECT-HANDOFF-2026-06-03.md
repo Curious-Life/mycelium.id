@@ -173,7 +173,7 @@ We stood the managed stack up **live on the real `mycelium.id`** (operator = Mar
 | `12e276b` | serve the OAuth **`/login`** page (better-auth `mcp` `loginPage` configured but unbuilt → fresh clients 404'd) |
 | `ed7004b` | serve **JWKS** (`jwt()` plugin + `useJWTPlugin`) — advertised `/api/auth/mcp/jwks` was 404 |
 
-### THE CURRENT BLOCKER — token audience (the last 5%)
+### THE CURRENT BLOCKER — better-auth MCP token signing (CORRECTED 2026-06-03 — NOT the audience)
 The OAuth handshake **completes server-side** — from the live log, latest attempt:
 ```
 GET  /api/auth/mcp/jwks      → 200   (Claude fetches the key → JWKS fix works)
@@ -181,18 +181,26 @@ POST /api/auth/mcp/register  → 201   (DCR)
 GET  /api/auth/mcp/authorize → 302   (after /login as operator@mycelium.local)
 POST /api/auth/mcp/token     → 200   (token ISSUED)
 ```
-…but **no token-bearing `/mcp` request follows** (only an unauth probe). So **Claude gets the token and rejects it before calling `/mcp`** — almost certainly a **JWT claim mismatch**: the access token's `aud` is likely the `client_id` (OIDC default), but an MCP client validates `aud` against the **resource** (`https://0m.mycelium.id/mcp`, RFC 8707). NEXT: decode a freshly-issued token, check `aud`/`iss`, and make better-auth bind the access-token audience to the MCP `resource` (`auth.js` sets `mcp({ resource })` but the token may not honor it). **Temporary `[myc-oauth]`/`[myc-auth]` logging is live in `src/server-http.js` — remove before merge.**
+…but **no token-bearing `/mcp` request follows** (only an unauth `GET /mcp` probe). So **Claude gets the token and stops before `/mcp`.**
 
-### Not Anthropic (the operator's hypothesis, handled honestly)
-The operator is convinced Anthropic coordinated an IP block. The evidence contradicts it:
-- A **fresh Claude account on a VPN got the IDENTICAL error** → account- and IP-independent → server-side, not targeted.
-- The live log shows Claude completing **every** server step (register/authorize/token/jwks all 2xx) → not blocked; a token-claim detail on OUR side.
-- **"Connectors page won't load / VPN fixes it"** is a *separate* thing: our **relay `nftables` per-source rate-limit/conn-cap** on `:443` throttling the home IP after dozens of attempts (VPN = fresh IP = not limited). **Loosen/disable it** for testing (`mycelium-managed/relay/nftables.conf`: `limit rate 30/second` + `ct count over 128`).
+**CORRECTION (2026-06-03 — supersedes the earlier "wrong `aud`" diagnosis; do NOT chase it):** the access token is **opaque**, not a JWT — `node_modules/better-auth/dist/plugins/mcp/index.mjs:449` returns `generateRandomString(32,…)`; `useJWTPlugin` isn't even referenced in the mcp token path. There is no `aud` claim to fix. What IS broken is the plugin's **internally inconsistent token signing** (all verified live):
+- both well-knowns advertise `id_token_signing_alg_values_supported: ["RS256"]` / `resource_signing_alg_values_supported: ["RS256"]`,
+- the JWKS serves an **EdDSA** key,
+- the `id_token` is signed with an **ephemeral HS256** key (`mcp/index.mjs:472-504`) that is never published.
+
+A client that requests `openid` (it's in `scopes_supported`) and validates the `id_token` against the advertised RS256 / the EdDSA JWKS **cannot verify an HS256-ephemeral token → "authorization failed" before `/mcp`** — server-side, and identical across accounts/IPs (matches "fresh account on VPN = same error"). The metadata **chain itself is correct** (verified: `/mcp` 401 → `WWW-Authenticate` → protected-resource `resource=…/mcp` + `authorization_servers=[…]` → AS metadata with S256). So the bug is the token/`id_token` signing — a **better-auth@1.6.12 MCP-plugin limitation (our side)**. It does NOT rule out an *additional* Anthropic beta-gate (see below). **Temporary `[myc-oauth]`/`[myc-auth]` logging is live in `src/server-http.js` — remove before merge.**
+
+### Whose side is it? (honest read — after TWO corrected wrong guesses)
+The operator believes Anthropic is deliberately blocking/targeting them. Synthesis after investigating (and being wrong twice — don't be over-confident here):
+- **Most likely cause = OUR token signing** (see the blocker above): a better-auth@1.6.12 MCP-plugin defect. Provable, server-side, fixable. This is the lead to chase first.
+- **The "connectors page won't load / VPN fixes it" is plausibly Anthropic-side** (custom connectors are in beta; could be a geo/beta gate) OR the operator's own network — it is **NOT** our relay. *(Corrected: an earlier version of this doc wrongly blamed our relay's nftables rate-limit. That page is served by claude.ai; our relay only ever serves `0m.mycelium.id`.)*
+- **Deliberate IP-targeting is contradicted by the operator's own observation:** a *fresh account on a VPN* (different account, different IP) got the **identical** error. A block targeting them would have let that through. Same-error-everywhere ⇒ either our bug or a **blanket** gate — neither is "coordinated against *you*."
+- **An Anthropic beta-gate on custom connectors is NOT ruled out** (the error says "contact support"). The way to actually know: the **reference-client test** in the blocker section. If a standards MCP client connects but Claude won't, *that* is the evidence it's Anthropic-side — and at that point "contact support" is the correct next move, not a workaround.
 
 ### Pickup protocol (next session)
 1. Confirm live: `curl -s -o/dev/null -w '%{http_code}\n' https://0m.mycelium.id/api/auth/mcp/jwks` (200), `…/mcp` (401), `…/login?x=1` (200). Run the Mac app via the `MYCELIUM_HOME=…` command above (kill other copies first: `pkill -f 'Mycelium.app/Contents/MacOS/mycelium'`).
-2. **Fix the token audience** (THE blocker) — decode the `/token` JWT, set `aud` = the MCP resource; re-test with a **fresh Claude account on VPN** and watch `/tmp/myc-branch-app.log` for a token-bearing `/mcp` → `getMcpSession: OK`.
-3. **Loosen the relay rate-limit** so the operator's home IP isn't throttled.
+2. **Make the token signing self-consistent** (THE blocker — NOT the audience): pick ONE alg across discovery + JWKS + `id_token`, OR stop advertising/issuing the `openid` `id_token`, OR try a newer better-auth where MCP token signing is fixed. **Decisive test that needs neither Claude nor the operator's IP:** point a reference MCP client (MCP Inspector / `mcp-remote`) at `https://0m.mycelium.id/mcp` — connects ⇒ our server is fine and Claude is the outlier (Anthropic-side); fails the same way ⇒ it's ours. Watch `/tmp/myc-branch-app.log` for a token-bearing `/mcp` → `getMcpSession: OK`.
+3. **Relay nftables**: the connectors *page* not loading is NOT the relay (claude.ai serves it) — but still confirm the home IP isn't throttled on `:443` if `/authorize` (browser→relay) ever stalls (`mycelium-managed/relay/nftables.conf`: `limit rate 30/second` + `ct count over 128`).
 4. Polish bucket, then merge: login identity = **handle** (not `operator@mycelium.local`); **user-facing password reset** (the UI set-password is a no-op for an existing user — this session reset via `/tmp/myc-phase2/_reset-operator.mjs` + `_clean-oauth.mjs` on `auth.db`); fix `jwks_uri` cleanly; **remove the temp logging**; **restore the parked apps**.
 5. **Merge `feat/remote-connect-phase2` → main** (self-contained app, real vault, permanent handle; no `MYCELIUM_HOME`/parked-copy juggling). Resolve conflicts vs `main`'s #54/#57-59.
 
