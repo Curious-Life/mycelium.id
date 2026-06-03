@@ -10,3 +10,15 @@
 # Example:
 #   frpc-aarch64-apple-darwin   <64-hex>
 #   caddy-aarch64-apple-darwin  <64-hex>
+#
+# === pinned ===
+# frpc: immutable GitHub release asset (fatedier/frp v0.61.1) — reproducible, pinned.
+frpc-aarch64-apple-darwin   52d258200fdabfdf69cc2217cec651b597d79c3defdb4724caa6544764ce7f31
+#
+# caddy: built ON DEMAND by caddyserver.com (caddy + caddy-dns/acmedns). Those builds
+# are NOT guaranteed byte-reproducible across caddyserver infra, so a committed pin can
+# false-positive ("CHECKSUM MISMATCH aborts") on a legitimate operator fetch. Left as
+# documented-TOFU on purpose. For true integrity of the TLS terminator (it sees
+# plaintext — the most sensitive sidecar), build caddy via xcaddy with pinned
+# caddy+plugin module versions (M-4 hardening) and pin THAT output instead.
+# Observed 2026-06-03 (darwin/arm64): 808abda8a9961fc12bea57bddc2c036e79f37896ac6f0da2b282c8fc5dffef52

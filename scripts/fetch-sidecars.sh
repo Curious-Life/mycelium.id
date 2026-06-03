@@ -24,7 +24,11 @@ sha256_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk
 verify_or_pin() {
   local file="$1" key="$2" got expected
   got="$(sha256_of "$file")"
-  expected="$(grep -E "^${key}[[:space:]]" "$MANIFEST" 2>/dev/null | awk '{print $2}')"
+  # Tolerate no-match / missing manifest under `set -o pipefail`: grep returns 1 on
+  # no-match, which (with set -e) aborts the script on the FIRST (unpinned/TOFU) run —
+  # the very run meant to print the hash to pin. awk exits 0 on no-match; `|| true`
+  # additionally covers a missing manifest file.
+  expected="$(awk -v k="$key" '$1==k{print $2}' "$MANIFEST" 2>/dev/null || true)"
   if [ -n "$expected" ]; then
     if [ "$got" != "$expected" ]; then echo "✗ CHECKSUM MISMATCH for $key — got $got, expected $expected (aborting)" >&2; rm -f "$file"; exit 1; fi
     echo "  ✓ checksum verified ($key)"
