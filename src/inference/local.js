@@ -19,6 +19,8 @@ export const DEFAULT_LOCAL_MODEL = "llama3.1";
  * @param {string} opts.prompt                 non-empty prompt
  * @param {number} [opts.maxTokens=1024]       maps to Ollama num_predict
  * @param {string} [opts.model="llama3.1"]
+ * @param {string[]} [opts.images]             base64 image(s) for a VISION model
+ *                                             (Ollama's native multimodal input).
  * @param {string} [opts.baseUrl="http://127.0.0.1:11434"]
  * @param {typeof fetch} [opts.fetch]          injectable (defaults to global)
  * @param {number} [opts.timeoutMs=60000]
@@ -28,6 +30,7 @@ export async function localInfer({
   prompt,
   maxTokens = 1024,
   model = DEFAULT_LOCAL_MODEL,
+  images,
   baseUrl = DEFAULT_OLLAMA_URL,
   fetch = globalThis.fetch,
   timeoutMs = 60000,
@@ -40,6 +43,11 @@ export async function localInfer({
   }
 
   const url = `${baseUrl.replace(/\/+$/, "")}/api/generate`;
+  // Ollama accepts `images: [base64, …]` on /api/generate when the model is
+  // multimodal (llava / llama3.2-vision / moondream / …). Omit the key entirely
+  // for text models so behaviour is unchanged.
+  const body = { model, prompt, stream: false, options: { num_predict: maxTokens } };
+  if (Array.isArray(images) && images.length) body.images = images;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res;
@@ -47,7 +55,7 @@ export async function localInfer({
     res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, prompt, stream: false, options: { num_predict: maxTokens } }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
   } catch (err) {

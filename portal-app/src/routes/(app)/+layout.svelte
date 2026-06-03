@@ -6,6 +6,7 @@
 	import ChatFloat from '$lib/components/chat/ChatFloat.svelte';
 	import BottomTabBar from '$lib/components/shell/BottomTabBar.svelte';
 	import Toast from '$lib/components/shell/Toast.svelte';
+	import ImportDropZone from '$lib/components/shell/ImportDropZone.svelte';
 	import WelcomeModal from '$lib/components/WelcomeModal.svelte';
 	import OnboardingGuide from '$lib/components/OnboardingGuide.svelte';
 	import { api } from '$lib/api';
@@ -93,6 +94,7 @@
 
 	<ChatFloat visible={chatOpen} />
 	<Toast />
+	<ImportDropZone />
 
 	<WelcomeModal bind:open={welcomeOpen} onComplete={() => { showGuide = true; }} />
 	{#if showGuide}

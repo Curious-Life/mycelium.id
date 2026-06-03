@@ -964,6 +964,12 @@
 	// Window-level drag listeners for full-page drop zone
 	$effect(() => {
 		if (!browser) return;
+		// Only own the window-level file drop while the chat is actually OPEN. In V1
+		// the chat is deferred (never open), so the global vault-import drop zone
+		// (ImportDropZone, mounted in the app layout) handles drops instead — without
+		// this guard BOTH would fire on a single drop (double upload + two overlays).
+		// Reading `visible` re-runs this effect to attach/detach as chat opens/closes.
+		if (!visible) return;
 
 		function onDragEnter(e: DragEvent) {
 			e.preventDefault();

@@ -3,6 +3,8 @@ import Busboy from 'busboy';
 import JSZip from 'jszip';
 import { captureMessage } from './ingest/capture.js';
 import { detectExportType, processClaudeExport, processOpenAIExport } from './ingest/import-parsers.js';
+import { uploadAttachment } from './ingest/upload.js';
+import { describeImage } from './enrich/describe-image.js';
 
 /**
  * portalUploadsRouter — the V1 Import surface for the canonical portal. Mounted
@@ -47,23 +49,41 @@ export function portalUploadsRouter({ db, userId, enqueueEnrichment = null }) {
 
   const fail = (res, code, error) => res.status(code).json({ ok: false, error });
 
+  // Attachment uploads (images / docs) — separate, generous cap from the import path.
+  const MAX_ATTACHMENT_BYTES = Number(process.env.MYCELIUM_ATTACHMENT_LIMIT_BYTES) || 25 * 1024 * 1024; // 25MB
+  const isImageType = (t) => typeof t === 'string' && t.toLowerCase().startsWith('image/');
+  const EXT_MIME = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+    heic: 'image/heic', heif: 'image/heif', bmp: 'image/bmp', svg: 'image/svg+xml', tif: 'image/tiff',
+    tiff: 'image/tiff', avif: 'image/avif', pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown',
+  };
+  const mimeFromName = (name) => {
+    const m = String(name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+    return (m && EXT_MIME[m[1]]) || 'application/octet-stream';
+  };
+  const humanizeFilename = (name) => {
+    const base = String(name || '').replace(/\.[a-z0-9]+$/i, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return base || null;
+  };
+
   // Collect a single multipart `file`/`chunk` field into a capped Buffer + fields.
   const readMultipart = (req, fileField, maxBytes) => new Promise((resolve, reject) => {
     let bb;
     try { bb = Busboy({ headers: req.headers, limits: { files: 1, fileSize: maxBytes } }); }
     catch { return reject(new Error('bad multipart request')); }
     const fields = {};
-    let buf = null, truncated = false, filename = null;
+    let buf = null, truncated = false, filename = null, mimeType = null;
     bb.on('field', (name, val) => { if (typeof val === 'string' && val.length <= 1024) fields[name] = val; });
     bb.on('file', (name, stream, info) => {
       if (name !== fileField) { stream.resume(); return; }
       filename = info?.filename || null;
+      mimeType = info?.mimeType || null;
       const chunks = [];
       stream.on('data', (d) => chunks.push(d));
       stream.on('limit', () => { truncated = true; });
       stream.on('end', () => { buf = Buffer.concat(chunks); });
     });
-    bb.on('close', () => resolve({ fields, buffer: buf, truncated, filename }));
+    bb.on('close', () => resolve({ fields, buffer: buf, truncated, filename, mimeType }));
     bb.on('error', () => reject(new Error('multipart parse failed')));
     req.pipe(bb);
   });
@@ -161,6 +181,50 @@ export function portalUploadsRouter({ db, userId, enqueueEnrichment = null }) {
       if (out.error) return fail(res, 400, out.error);
       res.json(out);
     } catch { fail(res, 500, 'finalize failed'); }
+  });
+
+  // ── POST /upload/file — store ONE non-archive file (image, doc, …) as an
+  // encrypted attachment + a linked message, so it enters the embed → mindscape
+  // pipeline. Images get a best-effort caption from a LOCAL vision model (Ollama,
+  // src/enrich/describe-image.js); with no vision model the caption falls back to
+  // the filename. A real file is NEVER rejected — this is the PNG-rejection fix
+  // (the /upload route only understands Claude/ChatGPT export ZIPs).
+  router.post('/upload/file', async (req, res) => {
+    try {
+      const { buffer, truncated, filename, mimeType } = await readMultipart(req, 'file', MAX_ATTACHMENT_BYTES);
+      if (truncated) return fail(res, 413, 'file too large (max 25MB)');
+      if (!buffer || buffer.length === 0) return fail(res, 400, 'no file received');
+
+      const fileType = mimeType && mimeType !== 'application/octet-stream' ? mimeType : mimeFromName(filename);
+      const isImage = isImageType(fileType);
+
+      // 1) Encrypted blob + attachments row (no message yet).
+      const { attachmentId } = await uploadAttachment(db, {
+        userId, bytes: buffer, fileName: filename, fileType, asMessage: false,
+      });
+
+      // 2) Best-effort on-box caption for images (fail-soft → null, never blocks).
+      let caption = null;
+      if (isImage) {
+        try { caption = await describeImage({ bytes: buffer }); } catch { caption = null; }
+      }
+
+      // 3) Linked message with the best available text → auto-encrypted by
+      //    captureMessage, queued at nlp_processed=0 → embedded by the drainer.
+      const label = humanizeFilename(filename);
+      const content = caption
+        || (isImage ? (label ? `Image: ${label}` : 'Uploaded image')
+                    : (label ? `File: ${label}` : 'Uploaded file'));
+      const msg = await captureMessage(db, {
+        userId, content, source: 'upload', attachmentId,
+        metadata: { kind: isImage ? 'image' : 'file', fileName: filename, fileType, captioned: Boolean(caption) },
+      }, enqueueEnrichment);
+
+      res.json({
+        ok: true, attachmentId, messageId: msg?.id || null, filename: filename || null,
+        type: isImage ? 'image' : 'file', captioned: Boolean(caption),
+      });
+    } catch { fail(res, 500, 'file upload failed'); }
   });
 
   return router;
