@@ -25,6 +25,15 @@
 				if (theme === 'light') {
 					document.documentElement.setAttribute('data-theme', 'light');
 				}
+
+				// Pre-paint Tauri detection. Tauri injects __TAURI_INTERNALS__ before
+				// page scripts, so tagging <html> here (rather than in an onMount) makes
+				// the native shell's chrome deterministic from frame 0: the header
+				// reserves macOS traffic-light clearance with NO post-mount layout shift,
+				// and app.css drops backdrop-filter (which WKWebView mis-repaints).
+				if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
+					document.documentElement.classList.add('is-tauri');
+				}
 			})();
 		</script>
 		<link rel="icon" href="%sveltekit.assets%/favicon.svg" />

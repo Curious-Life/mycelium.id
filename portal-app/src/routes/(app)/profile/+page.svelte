@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { browser } from '$app/environment';
-	import { api, apiGet, apiPut } from '$lib/api';
+	import { onMount } from 'svelte';
+	import { api, apiGet, apiPost, apiPut } from '$lib/api';
 
 	interface Profile {
 		handle: string | null;
@@ -155,11 +155,17 @@
 	let copied = $state(false);
 
 
-	$effect(() => {
-		if (browser) {
-			loadProfile();
-			loadStats();
-		}
+	// Load on MOUNT — a lifecycle hook, not a reactive `$effect`. The `$effect`
+	// variant provably ran and fetched /profile + /stats (both 200) yet left
+	// `loading` stuck true in the built app, so the page hung on "Loading…".
+	// onMount runs once on the client, outside the reactive-effect scheduler.
+	// The safety timeout is a hard guarantee the page can NEVER hang on load
+	// (the "no silent hangs" principle), even if a fetch wedges.
+	onMount(() => {
+		loadProfile();
+		loadStats();
+		const safety = setTimeout(() => { loading = false; }, 6000);
+		return () => clearTimeout(safety);
 	});
 
 

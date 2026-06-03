@@ -33,6 +33,7 @@
 		activity: 'Activity',
 		agents: 'Agents',
 		profile: 'Profile',
+		'curious-life': 'Curious Life',
 		connections: 'Connections',
 		contexts: 'Spaces',
 		wealth: 'Wealth',
@@ -60,14 +61,12 @@
 <header
 	data-tauri-drag-region
 	onmousedown={startWindowDrag}
-	class="h-12 md:h-14 border-b border-[var(--color-border)] flex items-center px-3 sm:px-4 gap-2 sm:gap-4 bg-[var(--color-surface)] relative z-10 overflow-hidden flex-shrink-0"
+	class="app-header h-12 md:h-14 border-b border-[var(--color-border)] flex items-center px-3 sm:px-4 gap-2 sm:gap-3 bg-[var(--color-surface)] relative z-10 overflow-hidden flex-shrink-0"
 >
-	<!-- macOS traffic-light clearance in the native shell (overlay title bar). -->
-	{#if isTauri}
-		<div class="w-[68px] shrink-0 hidden md:block" data-tauri-drag-region></div>
-	{/if}
-
-	<!-- Sidebar toggle — visible on all sizes -->
+	<!-- Sidebar toggle. macOS traffic-light clearance in the native shell is a
+	     DETERMINISTIC CSS padding on `.app-header` under `html.is-tauri` (tagged
+	     pre-paint in app.html) — not a post-mount spacer — so the hamburger never
+	     flashes under the traffic lights nor lands mis-positioned. -->
 	<button
 		onclick={handleMenuClick}
 		class="p-2 hover:bg-[var(--color-elevated)] rounded-lg transition-colors text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] flex-shrink-0 hidden md:flex"
@@ -77,6 +76,13 @@
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 12h16M4 18h16" />
 		</svg>
 	</button>
+
+	<!-- App wordmark (desktop) — one intentional brand anchor, left-aligned next
+	     to the menu. Not interactive, so it stays part of the drag strip. -->
+	<span
+		class="hidden md:block text-sm font-semibold tracking-tight text-[var(--color-text-emphasis)] select-none"
+		data-tauri-drag-region
+	>Mycelium</span>
 
 	<!-- Mobile: page title -->
 	<h2 class="md:hidden text-sm font-medium text-[var(--color-text-primary)] truncate">

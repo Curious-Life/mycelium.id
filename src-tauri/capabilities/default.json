@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Mycelium webview permissions. The window loads the local Node server (http://127.0.0.1:8787) as a REMOTE origin, so window IPC (notably start-dragging, used to make the header a window-drag strip) must be granted to that origin explicitly — without this, Tauri v2 denies the IPC by default and the drag does nothing.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:8787/*", "http://localhost:8787/*"]
+  },
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging"
+  ]
+}
