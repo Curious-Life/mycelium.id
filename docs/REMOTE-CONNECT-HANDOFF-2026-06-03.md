@@ -1,7 +1,7 @@
 # Remote Connect — Handoff Doc (2026-06-03)
 
 **Date:** 2026-06-03
-**Companions:** [REMOTE-CONNECT-TRANSPORT-DESIGN](REMOTE-CONNECT-TRANSPORT-DESIGN-2026-06-02.md) · [REMOTE-CONNECT-MANAGED-DESIGN](REMOTE-CONNECT-MANAGED-DESIGN-2026-06-02.md) · [REMOTE-CONNECT-RESIDUALS-DESIGN](REMOTE-CONNECT-RESIDUALS-DESIGN-2026-06-03.md) · predecessor [REMOTE-CONNECT-HANDOFF-2026-06-02](REMOTE-CONNECT-HANDOFF-2026-06-02.md) (design-era) · [MCP-OVERVIEW](MCP-OVERVIEW.md)
+**Companions:** [REMOTE-CONNECT-TRANSPORT-DESIGN](REMOTE-CONNECT-TRANSPORT-DESIGN-2026-06-02.md) · [REMOTE-CONNECT-MANAGED-DESIGN](REMOTE-CONNECT-MANAGED-DESIGN-2026-06-02.md) · [REMOTE-CONNECT-RESIDUALS-DESIGN](REMOTE-CONNECT-RESIDUALS-DESIGN-2026-06-03.md) · **[DEPLOY-RUNBOOK](REMOTE-CONNECT-DEPLOY-RUNBOOK.md)** (live-infra, exact commands) · predecessor [REMOTE-CONNECT-HANDOFF-2026-06-02](REMOTE-CONNECT-HANDOFF-2026-06-02.md) (design-era) · [MCP-OVERVIEW](MCP-OVERVIEW.md)
 **Audience:** the next Claude Code instance picking up remote-connect.
 **Branch:** `feat/remote-connect-phase2` (PR **#46**, stacked on #45). All work below is committed + pushed there.
 
@@ -122,7 +122,7 @@ cd /tmp/myc-phase2 && for v in loopback remote-config remote-runtime managed-cla
 1. **Read this handoff cold**, then the 3 design docs (TRANSPORT, MANAGED, RESIDUALS). The code is done; you're picking up DEPLOYMENT, not architecture.
 2. **Re-check git**: `gh api .../pulls` (REST); last CODE commit `9d36446` (+ docs-only handoff on top). Before any op in the Documents clone, re-check its branch.
 3. **Confirm green**: run the 8 remote verifies + `cargo check` (create `src-tauri/binaries/{frpc,caddy}-<triple>` stubs first). All should pass with zero code changes.
-4. **Live-infra smoke (the actual remaining work):**
+4. **Live-infra smoke** — follow **[REMOTE-CONNECT-DEPLOY-RUNBOOK.md](REMOTE-CONNECT-DEPLOY-RUNBOOK.md)** (exact commands, verify ledger, security checklist). The actual remaining work, now all operator-run; the high-level shape:
    a. `bash scripts/fetch-sidecars.sh` (network) → pin the printed SHA-256s in `scripts/sidecar-checksums.txt` → `cargo tauri build` (the `.app`).
    b. Deploy the managed stack from `mycelium-managed/`: a relay VPS (Hetzner/OVH) running `frps` (`relay/frps.toml`) + `nftables.conf`; a self-hosted **acme-dns** (`disable_registration=true`); **apex DNS** (deSEC or Cloudflare DNS-only); the **control-plane** (`PORT=8790`, `MYC_DNS_PROVIDER`, `MYC_RELAY_ADDR`, `MYC_ACME_DNS`, etc.). Keep `/frps/handler` private (it's an unauthenticated token oracle — network-isolate it).
    c. Set **CAA** on `mycelium.id` (use `ct-monitor.js` `caaRecords()`); point **CT-monitor** at Cert Spotter.
