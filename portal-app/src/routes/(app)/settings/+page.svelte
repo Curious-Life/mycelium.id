@@ -1167,6 +1167,65 @@
 		document.body.appendChild(a); a.click(); a.remove();
 		setTimeout(() => URL.revokeObjectURL(url), 1000);
 	}
+
+	// ── App passphrase lock (V1, optional) — encrypts the master keys at rest so
+	// the vault won't auto-open from the Keychain alone. The recovery key still
+	// works if the passphrase is forgotten (it's a lock, not a second secret).
+	let lockEnabled = $state(false);
+	let lockBusy = $state(false);
+	let lockError = $state<string | null>(null);
+	let lockMsg = $state<string | null>(null);
+	let showLockForm = $state<null | 'enable' | 'disable'>(null);
+	let lockPass1 = $state('');
+	let lockPass2 = $state('');
+	let lockPassCurrent = $state('');
+
+	async function refreshLockStatus() {
+		try {
+			const res = await fetch('/api/v1/account/status', { credentials: 'same-origin' });
+			if (res.ok) { const s = await res.json(); lockEnabled = s.passphraseEnabled === true; }
+		} catch { /* leave as-is */ }
+	}
+	refreshLockStatus();
+
+	function resetLockForm() { showLockForm = null; lockPass1 = ''; lockPass2 = ''; lockPassCurrent = ''; lockError = null; }
+
+	async function enablePassphrase() {
+		lockError = null; lockMsg = null;
+		if (lockPass1.length < 8) { lockError = 'Use at least 8 characters.'; return; }
+		if (lockPass1 !== lockPass2) { lockError = 'The passphrases don’t match.'; return; }
+		lockBusy = true;
+		try {
+			const res = await fetch('/api/v1/account/passphrase/enable', {
+				method: 'POST', credentials: 'same-origin',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ passphrase: lockPass1 }),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.message || data.error || 'Could not enable the passphrase');
+			lockEnabled = true; resetLockForm();
+			lockMsg = 'Passphrase set. Your keys are no longer in the Keychain — the app will ask for this passphrase on every launch.';
+		} catch (e) { lockError = e instanceof Error ? e.message : 'Could not enable the passphrase'; }
+		finally { lockBusy = false; }
+	}
+
+	async function disablePassphrase() {
+		lockError = null; lockMsg = null;
+		if (!lockPassCurrent) { lockError = 'Enter your passphrase.'; return; }
+		lockBusy = true;
+		try {
+			const res = await fetch('/api/v1/account/passphrase/disable', {
+				method: 'POST', credentials: 'same-origin',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ passphrase: lockPassCurrent }),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.message || data.error || 'Could not turn off the passphrase');
+			lockEnabled = false; resetLockForm();
+			lockMsg = 'Passphrase removed. Your keys are back in the Keychain and the vault opens automatically.';
+		} catch (e) { lockError = e instanceof Error ? e.message : 'Could not turn off the passphrase'; }
+		finally { lockBusy = false; }
+	}
 </script>
 
 <svelte:head>
@@ -1858,6 +1917,62 @@
 						<button onclick={copyRecoveryKey} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)]">{rkCopied ? 'Copied ✓' : 'Copy'}</button>
 						<button onclick={downloadRecoveryKey} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)]">Download</button>
 						<button onclick={() => { rkRevealed = false; rkValue = ''; }} class="px-3 py-2 rounded-lg text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">Hide</button>
+					</div>
+				{/if}
+			</section>
+
+			<!-- App passphrase lock (V1, optional) — encrypt the keys at rest -->
+			<section class="card p-5">
+				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">App Passphrase</h2>
+				<div class="flex items-center justify-between gap-4">
+					<div>
+						<p class="text-sm text-[var(--color-text-primary)]">
+							{lockEnabled ? 'Passphrase lock is on' : 'Lock the app with a passphrase'}
+						</p>
+						<p class="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+							{#if lockEnabled}
+								Your keys are encrypted at rest — the app asks for this passphrase on every launch. Your recovery key still works if you forget it.
+							{:else}
+								Optional. Encrypts your keys at rest so the vault won’t open from the Keychain alone. You’ll enter it each launch; your recovery key remains the backup.
+							{/if}
+						</p>
+					</div>
+					{#if showLockForm === null}
+						<button
+							onclick={() => { resetLockForm(); showLockForm = lockEnabled ? 'disable' : 'enable'; }}
+							class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)] whitespace-nowrap"
+						>{lockEnabled ? 'Turn off' : 'Set passphrase'}</button>
+					{/if}
+				</div>
+
+				{#if lockError}<p class="text-xs text-coral mt-2">{lockError}</p>{/if}
+				{#if lockMsg}<p class="text-xs text-jade mt-2">{lockMsg}</p>{/if}
+
+				{#if showLockForm === 'enable'}
+					<div class="mt-3 space-y-2">
+						<input bind:value={lockPass1} type="password" autocomplete="new-password" placeholder="New passphrase (min 8 characters)"
+							class="input w-full text-sm" />
+						<input bind:value={lockPass2} type="password" autocomplete="new-password" placeholder="Confirm passphrase"
+							onkeydown={(e) => { if (e.key === 'Enter') enablePassphrase(); }}
+							class="input w-full text-sm" />
+						<div class="flex gap-2">
+							<button onclick={enablePassphrase} disabled={lockBusy}
+								class="px-3 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-bg)] text-sm font-medium disabled:opacity-50">
+								{lockBusy ? 'Saving…' : 'Enable lock'}</button>
+							<button onclick={resetLockForm} class="px-3 py-2 rounded-lg text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">Cancel</button>
+						</div>
+					</div>
+				{:else if showLockForm === 'disable'}
+					<div class="mt-3 space-y-2">
+						<input bind:value={lockPassCurrent} type="password" autocomplete="current-password" placeholder="Current passphrase"
+							onkeydown={(e) => { if (e.key === 'Enter') disablePassphrase(); }}
+							class="input w-full text-sm" />
+						<div class="flex gap-2">
+							<button onclick={disablePassphrase} disabled={lockBusy}
+								class="px-3 py-2 rounded-lg bg-coral/15 border border-coral/30 text-sm text-[var(--color-text-primary)] disabled:opacity-50">
+								{lockBusy ? 'Removing…' : 'Turn off lock'}</button>
+							<button onclick={resetLockForm} class="px-3 py-2 rounded-lg text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">Cancel</button>
+						</div>
 					</div>
 				{/if}
 			</section>

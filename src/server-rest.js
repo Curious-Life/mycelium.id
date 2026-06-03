@@ -16,6 +16,7 @@ import { accountRouter } from './account/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { startEnrichDrainer } from './enrich/drainer.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
+import { setSessionKeys } from './account/session-keys.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CANONICAL_BUILD = path.join(HERE, '..', 'portal-app', 'build');
@@ -132,6 +133,9 @@ export async function startRestServer({
   // (spawned with MYCELIUM_DB) and the account/restore KCV check all agree.
   const effectiveDbPath = dbPath ? path.resolve(dbPath) : resolveDbPath();
   const effectiveKcvPath = kcvPath ? path.resolve(kcvPath) : resolveKcvPath();
+  // The optional passphrase seal lives NEXT TO the KCV (same dir) in every mode,
+  // so it's isolated in tests and sits durably beside the vault in the packaged app.
+  const effectiveLockPath = path.join(path.dirname(effectiveKcvPath), 'vault-lock.json');
   bootOpts.kcvPath = effectiveKcvPath;
 
   // ── mutable boot context ──────────────────────────────────────────────────
@@ -157,6 +161,9 @@ export async function startRestServer({
       ensureVaultSchema(effectiveDbPath); // self-initialise a fresh vault (idempotent)
       const { tools, handlers, db, close, userId: bootUserId } = await boot(opts);
       dbHandle = db;
+      // Pin both keys in memory so the clustering child (src/jobs.js) can obtain
+      // them in passphrase-lock mode, where they are NOT in the Keychain.
+      setSessionKeys({ userHex: opts.userHex, systemHex: opts.systemHex });
       const baseEnqueue = createEnqueueEnrichment({ userId: bootUserId });
       let enqueueEnrichment = baseEnqueue;
       closeHandle = close;
@@ -210,6 +217,7 @@ export async function startRestServer({
     isInitialized: () => Boolean(vaultSubApp),
     completeBoot,
     kcvPath: effectiveKcvPath,
+    lockFile: effectiveLockPath,
   }));
 
   // Local "always signed in" shim so the canonical portal's session check

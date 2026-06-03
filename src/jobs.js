@@ -13,6 +13,7 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import { resolveKeys } from './crypto/key-source.js';
+import { getSessionKeys } from './account/session-keys.js';
 import { dbPath as resolveDbPath } from './paths.js';
 import { readGenerateStats, writeGenerateStats } from './generate-stats.js';
 
@@ -54,9 +55,11 @@ export function startClusteringJob({ dbPath, userId } = {}) {
     }
   }
 
-  // Re-resolve keys from the configured source (env / Keychain / 1Password) at
-  // spawn time. Throws if unavailable — the caller maps that to a 503.
-  const { userHex, systemHex } = resolveKeys();
+  // Resolve both master keys at spawn time to hand to the child via env. In
+  // passphrase-lock mode the keys aren't in the Keychain, so prefer the in-memory
+  // session keys (pinned at boot); otherwise re-resolve from the key source.
+  // Throws if unavailable — the caller maps that to a 503.
+  const { userHex, systemHex } = getSessionKeys() ?? resolveKeys();
 
   const scriptPath = process.env.MYCELIUM_CLUSTER_SCRIPT || 'pipeline/run-clustering.sh';
   const childEnv = {
