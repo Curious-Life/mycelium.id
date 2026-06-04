@@ -85,6 +85,18 @@ await del(`/providers/${id1}`);
 r = await J(await get('/providers'));
 rec('P11. DELETE removes the provider', !r.body.providers.some((p) => p.id === id1), `remaining=${r.body.providers.map((p) => p.id).join(',')}`);
 
+// P12 — §4g "smart routing" toggle persists (the cascade preference the gateway reads).
+try { await db.users.create(U, 'Verify'); } catch { /* row may already exist */ }
+let rt = await J(await get('/providers/routing'));
+const routingDefault = rt.body.ok && rt.body.cascade === false;
+await put('/providers/routing', { cascade: true });
+rt = await J(await get('/providers/routing'));
+const routingOn = rt.body.cascade === true;
+await put('/providers/routing', { cascade: false });
+rt = await J(await get('/providers/routing'));
+const routingOff = rt.body.cascade === false;
+rec('P12. routing toggle persists (default off → on → off)', routingDefault && routingOn && routingOff, `default=${routingDefault} on=${routingOn} off=${routingOff}`);
+
 server.close(); close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 const allPass = ledger.every(Boolean);

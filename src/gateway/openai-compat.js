@@ -39,9 +39,17 @@ import { resolveChatUrl } from '../inference/cloud.js';
 import { createEgressAuditSink } from '../inference/egress.js';
 import { inferWithCascade } from '../inference/cascade.js';
 
-// §4g cascade is opt-in (MYCELIUM_INFER_CASCADE). Default OFF → the single active
-// provider preserves v1 behavior; ON → try EU→frontier→local until one succeeds.
-const cascadeEnabled = (env = process.env) => /^(1|true|yes)$/i.test(String(env.MYCELIUM_INFER_CASCADE || '').trim());
+// §4g cascade (opt-in). Default OFF → the single active provider preserves v1
+// behavior; ON → try EU→frontier→local until one succeeds. The preference is a
+// persisted user setting (the Settings → Intelligence "smart routing" toggle);
+// MYCELIUM_INFER_CASCADE is the env fallback used only when no setting is saved.
+export async function isCascadeEnabled(db, userId, env = process.env) {
+  try {
+    const s = await db?.users?.getSettings?.(userId);
+    if (s && typeof s.inferCascade === 'boolean') return s.inferCascade;
+  } catch { /* fall through to env */ }
+  return /^(1|true|yes)$/i.test(String(env.MYCELIUM_INFER_CASCADE || '').trim());
+}
 
 export const CANONICAL_MODEL = 'mycelium-auto';
 const MAX_OUTPUT_TOKENS = 8192;
@@ -304,7 +312,7 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
       // §4g cascade (opt-in): try EU→frontier→local until one succeeds; a
       // sensitive request skips US providers. Default OFF → the single active
       // provider (router). Streaming above is single-provider by design.
-      const text = cascadeEnabled()
+      const text = (await isCascadeEnabled(db, userId))
         ? await inferWithCascade({ chain: await resolveProviderChain(db, userId, { sensitive }), prompt, task: 'complex', maxTokens, sensitive, onEgress, fetch })
         : await router.infer({ prompt, task: 'complex', maxTokens, sensitive });
       const completion = buildCompletion({ model, prompt, text });

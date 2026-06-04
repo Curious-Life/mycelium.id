@@ -18,7 +18,7 @@ import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
-import { createGatewayHandlers, flattenMessages, CANONICAL_MODEL } from '../src/gateway/openai-compat.js';
+import { createGatewayHandlers, flattenMessages, CANONICAL_MODEL, isCascadeEnabled } from '../src/gateway/openai-compat.js';
 import { matchStaticBearer, MIN_BEARER_LEN } from '../src/gateway/static-bearer.js';
 
 const DB = 'data/verify-gateway.db', KCV = 'data/verify-gateway-kcv.json';
@@ -136,6 +136,16 @@ r = await J(await post('/v1/chat/completions', { messages: [] }));
 rec('G10a. empty messages → 400 invalid_request_error', r.status === 400 && r.body.error?.type === 'invalid_request_error', JSON.stringify(r.body));
 r = await J(await post('/v1/chat/completions', { messages: 'nope' }));
 rec('G10b. messages not an array → 400', r.status === 400, JSON.stringify(r.body));
+
+// G11 — cascade toggle: a saved user setting is DB-first; env is only the fallback; default off.
+try { await db.users.create(U, 'Verify'); } catch { /* row may already exist */ }
+await db.users.updateSettings(U, { inferCascade: true });
+const ccDbOn = await isCascadeEnabled(db, U, {});
+await db.users.updateSettings(U, { inferCascade: false });
+const ccDbOff = await isCascadeEnabled(db, U, { MYCELIUM_INFER_CASCADE: '1' }); // saved false beats env
+const ccEnv = await isCascadeEnabled({}, U, { MYCELIUM_INFER_CASCADE: '1' });    // no db → env fallback
+const ccDefault = await isCascadeEnabled({}, U, {});                             // nothing set → off
+rec('G11. cascade toggle: DB-first + env fallback + default off', ccDbOn === true && ccDbOff === false && ccEnv === true && ccDefault === false, `dbOn=${ccDbOn} dbOff=${ccDbOff} env=${ccEnv} default=${ccDefault}`);
 
 server.close(); close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
