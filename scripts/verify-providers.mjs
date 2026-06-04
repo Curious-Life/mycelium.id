@@ -74,9 +74,16 @@ rec('P8. /auth/claude subscription OAuth fails closed (ToS)', r.status === 400 &
 r = await J(await get('/auth/claude/status'));
 rec('P9. /auth/claude/status → not authenticated (key-only)', r.body.ok && r.body.authenticated === false, JSON.stringify(r.body));
 
+r = await J(await get('/providers/presets'));
+rec('P10. GET /providers/presets serves the catalog (EU-sovereign + local options)',
+  r.body.ok && Array.isArray(r.body.presets) && r.body.presets.length >= 6
+  && r.body.presets.some((p) => p.id === 'regolo' && p.jurisdiction === 'eu-zdr')
+  && r.body.presets.some((p) => p.jurisdiction === 'local'),
+  `count=${r.body.presets?.length}`);
+
 await del(`/providers/${id1}`);
 r = await J(await get('/providers'));
-rec('P10. DELETE removes the provider', !r.body.providers.some((p) => p.id === id1), `remaining=${r.body.providers.map((p) => p.id).join(',')}`);
+rec('P11. DELETE removes the provider', !r.body.providers.some((p) => p.id === id1), `remaining=${r.body.providers.map((p) => p.id).join(',')}`);
 
 server.close(); close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }

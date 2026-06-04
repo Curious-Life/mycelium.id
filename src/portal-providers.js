@@ -17,6 +17,7 @@
 //   - The probe reports a category only — never the key, never the body.
 import express from 'express';
 import { probeProvider } from './inference/probe.js';
+import { PROVIDER_PRESETS } from './inference/presets.js';
 
 const ok = (res, body = {}) => res.json({ ok: true, ...body });
 const bad = (res, code, error) => res.status(code).json({ ok: false, error });
@@ -60,6 +61,11 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   // Per-agent assignments — V1 is single-agent, so intentionally empty (the
   // multi-agent assignment reconciler is deferred; see the design doc).
   router.get('/providers/assignments', (_req, res) => ok(res, { assignments: [] }));
+
+  // The curated catalog of connectable providers — the "Intelligence" options the
+  // UI offers (label, kind, base_url, jurisdiction, default model). Static data;
+  // the UI prefills the add-provider form from a chosen preset. No secrets.
+  router.get('/providers/presets', (_req, res) => ok(res, { presets: PROVIDER_PRESETS }));
 
   // Create a provider (BYOK API key). Body: { provider, label?, api_key, model_preference?, base_url? }.
   router.post('/providers', async (req, res) => {
