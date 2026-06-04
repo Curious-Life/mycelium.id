@@ -7,6 +7,7 @@
 	import { preparePrfOptions } from '$lib/passkey-prf';
 	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
+	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 
 	interface Settings {
 		timezone: string;
@@ -1241,6 +1242,9 @@
 		<div class="text-[var(--color-text-tertiary)] text-sm animate-pulse">Loading...</div>
 	{:else}
 		<div class="space-y-6">
+
+			<!-- Remote Access — connect Claude / any MCP client over the internet (operator password, status, connector URL) -->
+			<RemoteAccessSection />
 
 			<!-- AI Subscriptions -->
 			<section class="card p-5">
