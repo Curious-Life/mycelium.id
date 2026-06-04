@@ -30,6 +30,7 @@ import { createPublicPresenceNamespace } from './public-presence.js';
 import { createMindscapeNamespace } from './mindscape.js';
 import { createTerritoryDocsNamespace } from './territory-docs.js';
 import { createProvidersNamespace } from './providers.js';
+import { createConnectorsNamespace } from './connectors.js';
 
 /**
  * Open the vault db and assemble the tool-facing `db` namespace object.
@@ -68,6 +69,12 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
     // /portal/providers backend). `credentials` is encrypted at rest
     // (ENCRYPTED_FIELDS.ai_providers); list() returns metadata only.
     providers: createProvidersNamespace({ d1Query }),
+
+    // Connectors (data-connection operational state for the sync scheduler +
+    // /portal/connectors). account_label/last_error/recent_runs are encrypted at
+    // rest (ENCRYPTED_FIELDS.connectors); list() returns metadata only. OAuth
+    // tokens stay in the `secrets` table (src/connectors/store.js).
+    connectors: createConnectorsNamespace({ d1Query }),
 
     // Mindscape reads (clustering points + territory/realm/theme profiles) and
     // territory-docs (narrative read/write). Wired for the portal mindscape

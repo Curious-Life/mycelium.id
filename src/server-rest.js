@@ -204,6 +204,11 @@ export async function startRestServer({
       // (injected keys) never sync a connector against a deterministic test vault.
       registerBuiltinAdapters();
       const connectorRunner = createConnectorRunner({ db, userId: bootUserId, enqueueEnrichment });
+      // One-time migration of pre-2b `connector:<id>:state` secret blobs into the
+      // dedicated connectors table (migration 0008). Idempotent; safe every boot.
+      await connectorRunner.store.backfillLegacyState().catch((e) => {
+        console.warn('[connectors] legacy state backfill skipped:', e?.message || e);
+      });
       if (!injectedKeys) {
         connectorScheduler = startConnectorScheduler({ runner: connectorRunner });
       }
