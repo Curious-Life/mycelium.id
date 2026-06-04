@@ -50,6 +50,12 @@ export function createAuth(opts = {}) {
     if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
   }
   const database = new Database(dbPath);
+  // Enforce foreign keys (better-sqlite3 defaults them OFF). The OAuth tables use
+  // `on delete cascade`; without enforcement, deleting a user ORPHANS its oauth
+  // token rows (userId → dead row), and the next token INSERT/refresh then fails
+  // the FK constraint → `POST /token` 500 → the client never gets a token. (This
+  // is exactly the breakage manual FK-OFF reset scripts caused — 2026-06-04.)
+  database.pragma('foreign_keys = ON');
   // Harden: auth.db holds the operator password hash, the signing secret, and the
   // relay/acme-dns secrets — keep it owner-only (sqlite defaults to 0644).
   if (dbPath !== ':memory:') { try { chmodSync(dbPath, 0o600); } catch { /* best-effort */ } }
@@ -73,6 +79,14 @@ export function createAuth(opts = {}) {
       mcp({
         loginPage: '/login',
         resource: `${baseURL}/mcp`,
+        // Top-level `metadata` overrides the authorization-server discovery
+        // document (better-auth mcp/index.mjs:69 spreads `...options?.metadata`
+        // over the defaults at :39). Drop `openid` so Claude won't request an
+        // id_token — Claude requests only advertised scopes, and better-auth
+        // emits an unverifiable HS256 id_token only when `openid` is requested
+        // (a known connector choke point). The hand-built PRM (server-http.js)
+        // is likewise openid-free; Sentry/Linear/Notion/GitHub advertise none.
+        metadata: { scopes_supported: ['profile', 'email', 'offline_access'] },
         oidcConfig: {
           allowDynamicClientRegistration: true,
           requirePKCE: true,

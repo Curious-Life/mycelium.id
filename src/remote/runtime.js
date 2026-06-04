@@ -87,6 +87,13 @@ export function renderCaddyfile({ publicHost, dataDir, acmeDns, mode = 'managed'
   ];
   if (!direct) lines.push(`\tbind 127.0.0.1`);
   lines.push(
+    // Access log → stderr (captured in the app log) so a Claude connect attempt
+    // is traceable at the EDGE — we can see what reaches the Mac vs only what
+    // reaches the Node app, distinguishing an edge drop from an app-level result.
+    `\tlog {`,
+    `\t\toutput stderr`,
+    `\t\tformat console`,
+    `\t}`,
     `\treverse_proxy ${upstream}`,
     `\ttls {`,
     `\t\tdns acmedns {`,

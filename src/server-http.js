@@ -24,10 +24,7 @@
 import { randomUUID } from 'node:crypto';
 import express from 'express';
 import { toNodeHandler } from 'better-auth/node';
-import {
-  oAuthDiscoveryMetadata,
-  oAuthProtectedResourceMetadata,
-} from 'better-auth/plugins';
+import { oAuthDiscoveryMetadata } from 'better-auth/plugins';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 
@@ -58,15 +55,36 @@ export async function createHttpApp(opts = {}) {
 
   const app = express();
 
-  // Two well-knowns at ROOT (MCP clients probe here first).
+  // Authorization-server metadata (RFC 8414) — better-auth's helper is correct.
   app.get(
     '/.well-known/oauth-authorization-server',
     toNodeHandler(oAuthDiscoveryMetadata(auth)),
   );
-  app.get(
-    '/.well-known/oauth-protected-resource',
-    toNodeHandler(oAuthProtectedResourceMetadata(auth)),
-  );
+
+  // Protected-resource metadata (RFC 9728). We serve a MINIMAL body (matching
+  // production servers Sentry/Linear/Notion/GitHub) at BOTH the root AND the
+  // path-suffixed `/.well-known/oauth-protected-resource/mcp`. The suffixed
+  // location (well-known prefix inserted before the resource's `/mcp` path) is
+  // what Claude probes FIRST (RFC 9728 §3.1; mandatory in MCP spec 2025-11-25).
+  // better-auth serves only the root and bakes in openid/RS256 fields working
+  // servers omit, so we hand-build it. CORS is required — Claude's web client
+  // fetches this cross-origin (every working server returns it + answers OPTIONS).
+  const protectedResourceMetadata = {
+    resource: `${baseURL}/mcp`,
+    authorization_servers: [baseURL],
+    bearer_methods_supported: ['header'],
+  };
+  const sendPrm = (req, res) => {
+    console.error('[myc-prm]', req.method, req.path, 'ip=', req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '?', 'ua=', (req.headers['user-agent'] || '').slice(0, 48)); // TEMP — remove pre-merge
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Authorization, *');
+    res.set('Cache-Control', 'no-store');
+    if (req.method === 'OPTIONS') { res.status(204).end(); return; }
+    res.json(protectedResourceMetadata);
+  };
+  app.options(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], sendPrm);
+  app.get(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], sendPrm);
 
   // better-auth owns everything under /api/auth/* (Express 5 NAMED splat).
   // Mounted BEFORE express.json() so better-auth parses its own bodies.
@@ -131,7 +149,8 @@ export async function createHttpApp(opts = {}) {
   }
 
   const wwwAuthenticate =
-    `Bearer resource_metadata="${baseURL}/.well-known/oauth-protected-resource"`;
+    `Bearer error="invalid_token", error_description="Authentication required", ` +
+    `resource_metadata="${baseURL}/.well-known/oauth-protected-resource/mcp"`;
 
   // Validate the Bearer access token → better-auth MCP session, or null.
   async function authenticate(req) {
@@ -153,6 +172,15 @@ export async function createHttpApp(opts = {}) {
   }
 
   const mcpHandler = async (req, res) => {
+    // CORS: expose the MCP headers Claude's client must read; answer preflight
+    // BEFORE auth (a preflight carries no credentials).
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Accept');
+    res.set('Access-Control-Expose-Headers', 'WWW-Authenticate, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-Id');
+    if (req.method === 'OPTIONS') { res.status(204).end(); return; }
+    console.error('[myc-mcp]', req.method, 'bearer=', /^Bearer\s/i.test(req.headers['authorization'] || '') ? 'yes' : 'no', 'sid=', req.headers['mcp-session-id'] || '-', 'ip=', req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '?'); // TEMP — remove pre-merge
+
     // Fail closed: every /mcp request must carry a valid Bearer token.
     const session = await authenticate(req);
     if (!session) {
