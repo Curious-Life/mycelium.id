@@ -31,6 +31,8 @@
 	let dragStartX = 0;
 	let started = false;
 	let justDragged = false;
+	let dragEl: HTMLElement | null = null;
+	let dragPointerId = -1;
 
 	function onPointerDown(e: PointerEvent) {
 		if (e.button !== 0) return;
@@ -41,8 +43,15 @@
 		draggingId = el.dataset.tabId ?? null;
 		dragStartX = e.clientX;
 		started = false;
+		// Claim the pointer so the horizontally-scrollable strip / WKWebView can't
+		// reinterpret the drag as a scroll. (The SplitPane divider drag is reliable
+		// because its target owns the gesture; this delegated drag needs the capture.)
+		dragEl = el;
+		dragPointerId = e.pointerId;
+		try { el.setPointerCapture(e.pointerId); } catch { /* unsupported */ }
 		window.addEventListener('pointermove', onPointerMove);
 		window.addEventListener('pointerup', onPointerUp);
+		window.addEventListener('pointercancel', onPointerUp);
 	}
 	function onPointerMove(e: PointerEvent) {
 		if (draggingId == null || !tabsEl) return;
@@ -67,6 +76,10 @@
 	function onPointerUp() {
 		window.removeEventListener('pointermove', onPointerMove);
 		window.removeEventListener('pointerup', onPointerUp);
+		window.removeEventListener('pointercancel', onPointerUp);
+		if (dragEl && dragPointerId >= 0) { try { dragEl.releasePointerCapture(dragPointerId); } catch { /* already released */ } }
+		dragEl = null;
+		dragPointerId = -1;
 		if (started) {
 			document.body.style.userSelect = '';
 			document.body.style.cursor = '';
