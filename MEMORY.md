@@ -5,7 +5,10 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
-- **AI Interface Layer — OUTBOUND BUILD STARTED (2026-06-04, latest).** Lane deconflicted (don't compete):
+- **AI Interface Layer — OUTBOUND MERGED TO MAIN (2026-06-04, latest).** ✅ PR #64 merged → `main @ 01d4e27` (S0 encrypt creds ·
+  S1 `/portal/providers` · S2 router↔store · S3a base_url widening+jurisdiction · S3b sensitive hard-block+egress audit ·
+  Intelligence Settings UI). **NEXT = S8 gateway** (`/v1/chat/completions` on :4711). **HANDOFF — build S8 from here, zero
+  re-discovery:** [`docs/AI-INTERFACE-OUTBOUND-HANDOFF-2026-06-04.md`](docs/AI-INTERFACE-OUTBOUND-HANDOFF-2026-06-04.md). Lane deconflicted (don't compete):
   **relay/remote-MCP** = other session (PRs #45/#46 — `src/remote/*`, `auth.js`, `server-http.js` incl. the `:4711`
   loopback bind fix `server-http.js:324`, CT-monitor, tunnel/frpc); **import-connectors + encrypted `secrets` API** =
   other session (#67/#69/#70 — `src/connectors/*`, `src/db/secrets.js`, `src/portal-{settings,connectors,import}.js`).
