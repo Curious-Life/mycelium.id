@@ -239,3 +239,43 @@ The operator believes Anthropic is deliberately blocking/targeting them. Synthes
 - Running the branch `.app` binary can also launch the installed `/Applications` copy (shared bundle id) which grabs `:8787` with its non-remote backend → park the other copies.
 - Operator password lives in `auth.db` (scrypt), never `remote.json`; `passwordSet` in `/api/v1/remote/status` reflects it.
 - Temp helper scripts in `/tmp/myc-phase2` (untracked): `_reset-operator.mjs`, `_clean-oauth.mjs`, `_rematerialize.mjs` — delete or formalize.
+
+---
+
+## 2026-06-04 PM session summary — browser-MCP CORS + Claude Desktop connect — START HERE
+
+**Shipped:** **PR #83** `fix(remote): CORS for browser-based MCP clients (MCP Inspector OAuth)` — merged, in current `origin/main` ancestry. This section is docs-only.
+
+**TL;DR.** The claude.ai custom connector still fails ("Authorization with the MCP server failed", `ofid_…`) — **Anthropic support CONFIRMED it is an Anthropic-side bug** (claude.ai connector auth-state / session-caching). The server is exhaustively proven correct. **Mycelium is now connected to Claude via Claude DESKTOP** (`mcp-remote` stdio bridge), which bypasses the buggy claude.ai path — live tool round-trip (`listDocuments`) confirmed.
+
+### What shipped
+| Change | What |
+|---|---|
+| **PR #83** | 3 stacked **browser-only** CORS gaps in `src/server-http.js` fixed. CI green. |
+| App rebuild from `main` | `cargo tauri build` → reinstalled `/Applications/Mycelium.app`. Also closed a real auth-bypass the prior installed build had: it lacked the `getMcpSession({…, asResponse:false})` fix → public `/mcp` accepted ANY bearer. New build: bogus bearer→401, valid→200. |
+| Claude Desktop connector | Added `mcpServers.mycelium = npx -y mcp-remote https://0m.mycelium.id/mcp` to `~/Library/Application Support/Claude/claude_desktop_config.json` (backup made). Live + verified. |
+
+### What was LEARNED (the important part)
+The Claude debug dragged for sessions because **server-side clients don't enforce CORS** — Claude's backend (`python-httpx`), `curl`, OAuth probe scripts, even the MCP Inspector **CLI** all passed, while the **browser** OAuth flow failed. The real bug was **three stacked, browser-only CORS gaps** in `src/server-http.js`:
+1. `OPTIONS` preflight on `/api/auth/*` → 404 (better-auth registers no OPTIONS route for `/mcp/*`) → DCR blocked. Fix: answer preflight before better-auth, reflecting origin (+credentials).
+2. `.well-known/*` 404s (`oauth-authorization-server/mcp`, `openid-configuration[/mcp]`) had no CORS → WebKit `TypeError: Load failed` before the SDK could fall back to root metadata. Fix: blanket CORS middleware on all `.well-known` responses incl. 404s.
+3. `POST /api/auth/mcp/token` emitted **no** CORS (the `mcp()` plugin owns its CORS — `*` on `/register`, none on `/token`; `trustedOrigins` does NOT govern it) → the credentialed token exchange was blocked. Fix: reflect origin + `Access-Control-Allow-Credentials` on `/token` only (PKCE-protected; `/authorize` deliberately untouched — top-level nav, never a CORS fetch; widening it would leak an auth code via the operator session).
+
+**Method (now an operational principle — see the `deploy-and-verify` skill + auto-memory `verify-remote-mcp-against-inspector.md`):** `curl` ≠ browser (curl gives FALSE GREEN — I shipped a curl-verified fix and it still failed in Safari). Reproduce in a real browser engine — **WebKit** (Safari) — driving the actual **MCP Inspector**, and capture the FULL network trace (the bug was layered). WebKit harness left in `/tmp/cors-test/`: `run.mjs` (fetch-probe each discovery URL), `drive3.mjs` (full UI OAuth, Direct mode), `drive4.mjs` (network trace). Before/after verified: Inspector `Connected: true`, 27 tools.
+
+### Claude-side (NOT a server bug)
+Claude gets a valid token (`POST /token → 200`) then **never calls `/mcp`** — the identical token works for the official Inspector + reference clients. Support agreed it's Anthropic-side. `ofid_` refs: `740086aabba50af3`, `76e7a5182a0196f5`, `8f5a2ad91fbd0aa3`, `adb423c5bcdc7570`. Report drafted in `docs/CLAUDE-CONNECTOR-ISSUE-2026-06-04.md`. **Production workaround: Claude DESKTOP via `mcp-remote`** (different connection architecture).
+
+### Forensic audit (server is clean)
+Token response Claude receives is textbook OAuth 2.1 (`token_type: Bearer`, `expires_in`, `refresh_token`, correct `scope`, no stray `id_token`, `application/json`). PRM + AS metadata correct. One COSMETIC inconsistency: AS metadata advertises `id_token_signing_alg: ["RS256"]` but JWKS is `EdDSA` — irrelevant to Claude (no `openid` → no id_token → Claude never fetches JWKS). Not fixed; if ever needed, override `id_token_signing_alg_values_supported` via `mcp({metadata})` in `src/auth.js`.
+
+### Gotchas (2026-06-04)
+- **`/Applications/Mycelium.app` can lag `main`.** The installed build was older and missing the `getMcpSession` security fix (public `/mcp` accepted any bearer). Always rebuild from current `origin/main` + reinstall, not just hot-patch the running artifact. Build in a worktree at `origin/main`: sidecars in `src-tauri/binaries/`, `npm i` root + `portal-app`, `cargo tauri build`. The **DMG** step (`bundle_dmg.sh`) may fail — fine, the `.app` is bundled first. Swap: `osascript -e 'quit app "Mycelium"'` → wait `:8787`/`:4711` free → `rm -rf` + `cp -R` → `xattr -dr com.apple.quarantine` → `open --stdout/--stderr /tmp/myc-connect.log`.
+- **TEMP `[myc-*]` request logging** (incl. a `ua=` field added this session) is still in `main`'s `src/server-http.js` + the running app — strip when the connector saga fully closes.
+- `mcp-remote` reuses the browser's existing Safari session cookie, so its OAuth is seamless after an Inspector sign-in; it authenticates on startup then waits for the stdio client (Claude Desktop) to drive `/mcp`.
+
+### Pickup protocol
+1. Read this section + `docs/CLAUDE-CONNECTOR-ISSUE-2026-06-04.md`.
+2. Mycelium is connected in Claude Desktop (config above). Re-verify: restart Claude Desktop, call any `mcp__mycelium__*` tool (e.g. `listDocuments`).
+3. For ANY remote-MCP / OAuth change: verify against the MCP Inspector **in a real browser** until it connects (`deploy-and-verify` skill; `/tmp/cors-test` harness). curl/CLI ≠ browser.
+4. Open items: strip the temp logging; (optional) fix the RS256/EdDSA metadata cosmetic; the claude.ai connector itself remains blocked on Anthropic.
