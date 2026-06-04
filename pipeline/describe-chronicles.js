@@ -24,6 +24,8 @@
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { createInferenceRouter } from '../src/inference/router.js';
+import { resolveInferenceConfig } from '../src/inference/resolve.js';
+import { createEgressAuditSink } from '../src/inference/egress.js';
 
 export const CHRONICLE_VERSION = process.env.MYCELIUM_CHRONICLE_VERSION || 'chronicle-v1';
 
@@ -163,7 +165,12 @@ if (isMain) {
   // "deriveBits 2nd argument is not of type CryptoKey" on every content decrypt.
   const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
   const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal' });
-  const router = createInferenceRouter();
+  // Prefer the provider the user configured in Settings (ai_providers); fall back
+  // to env (BYOK power users), else local Ollama. (S2: the store → router seam.)
+  const router = createInferenceRouter({
+    ...(await resolveInferenceConfig(db, USER_ID)),
+    onEgress: createEgressAuditSink(db, USER_ID), // §4e: audit every cloud egress (hash-only)
+  });
   console.log(`[chronicles] narrating territories (model: ${router.config.anthropicConfigured || router.config.openaiConfigured ? 'cloud BYOK' : 'local Ollama'})${DRY_RUN ? ' (dry-run)' : ''}`);
   try {
     if (DRY_RUN) {

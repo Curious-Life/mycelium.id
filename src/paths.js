@@ -58,3 +58,6 @@ export function uploadsRoot(opts = {}) { return under('uploads',     'MYCELIUM_U
 // when the user enables an app passphrase; its presence means the vault is
 // passphrase-locked and the plaintext keys have been removed from the Keychain.
 export function lockPath(opts = {})    { return under('vault-lock.json', 'MYCELIUM_VAULT_LOCK', opts); }
+// Non-secret remote-access config (publicBaseUrl, remoteEnabled, operatorEmail).
+// Secrets do NOT live here — see src/remote/config.js.
+export function remoteConfigPath(opts = {}) { return under('remote.json', 'MYCELIUM_REMOTE_CONFIG', opts); }

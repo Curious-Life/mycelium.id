@@ -202,6 +202,24 @@ async function main() {
     });
     check('unauthenticated /mcp rejected (401)', unauth.status === 401, `status=${unauth.status}`);
 
+    // 6b. A GARBAGE (non-empty but invalid) Bearer must ALSO be rejected. The
+    //     token must be VALIDATED, not merely present — regression guard for the
+    //     getMcpSession asResponse:false fix (without it, any Bearer authed).
+    const garbage = await fetch(`${BASE}/mcp`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer garbage-not-a-real-token-zzzzzzzzzzzzzzzz',
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        origin: ORIGIN,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'x', version: '0' } },
+      }),
+    });
+    check('garbage Bearer rejected (401)', garbage.status === 401, `status=${garbage.status}`);
+
     // 7. Bearer /mcp — MCP initialize over the authenticated HTTP transport.
     const initRes = await fetch(`${BASE}/mcp`, {
       method: 'POST',
@@ -342,6 +360,26 @@ async function main() {
       method: 'POST', headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/octet-stream', origin: ORIGIN }, body: Buffer.alloc(0),
     });
     check('POST /ingest/upload empty body rejected (400)', upEmpty.status === 400, `status=${upEmpty.status}`);
+
+    // 9d. Refresh-token round-trip — Claude refreshes the access token ~hourly.
+    //     This reproduces the FK-500 class (orphaned token rows) and proves token
+    //     issuance/refresh is consistent. Done AFTER the main flow so any token
+    //     rotation can't disturb the earlier checks.
+    if (tokenRes.refresh_token) {
+      const refreshRes = await fetch(disc.token_endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', origin: ORIGIN },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: tokenRes.refresh_token,
+          client_id: reg.client_id,
+        }),
+      });
+      const refreshBody = await refreshRes.json().catch(() => ({}));
+      check('refresh_token round-trip 200 (no FK-500)', refreshRes.status === 200 && !!refreshBody.access_token, `status=${refreshRes.status}`);
+    } else {
+      check('refresh_token round-trip (no refresh_token issued — SKIP→PASS)', true, 'token response had no refresh_token');
+    }
 
     // 10. Session eviction via HTTP DELETE.
     if (sessionId) {

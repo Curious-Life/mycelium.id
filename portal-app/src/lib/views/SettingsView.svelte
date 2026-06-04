@@ -7,6 +7,9 @@
 	import { preparePrfOptions } from '$lib/passkey-prf';
 	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
+	import IntelligenceSection from '$lib/components/settings/IntelligenceSection.svelte';
+	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
+	import ConnectYourAISection from '$lib/components/settings/ConnectYourAISection.svelte';
 
 	interface Settings {
 		timezone: string;
@@ -1242,6 +1245,12 @@
 	{:else}
 		<div class="space-y-6">
 
+			<!-- Remote Access — connect Claude / any MCP client over the internet (operator password, status, connector URL) -->
+			<RemoteAccessSection />
+
+			<!-- Connect your AI — the local/remote MCP + model-gateway endpoints + static-bearer how-to (S5) -->
+			<ConnectYourAISection />
+
 			<!-- AI Subscriptions -->
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">AI Subscriptions</h2>
@@ -1557,6 +1566,9 @@
 					{/if}
 				</section>
 			{/if}
+
+			<!-- Intelligence — connect Mycelium's outbound AI to any provider -->
+			<IntelligenceSection />
 
 			<!-- Voice / TTS — provider config + per-voice preview -->
 			<VoiceSection />

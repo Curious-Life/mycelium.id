@@ -11,10 +11,16 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # macos-private-api enables the transparent window the glass UI shows through.
 tauri = { version = "2", features = ["macos-private-api"] }
+# Read remote.json (the remote-access toggle) at startup.
+serde_json = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Native NSVisualEffectView vibrancy behind the transparent webview.
 window-vibrancy = "0.6"
+
+[target.'cfg(unix)'.dependencies]
+# Process-group kill — libc::kill(-pgid, …) reaps sidecars + grandchildren on exit.
+libc = "0.2"
 
 [profile.release]
 opt-level = "s"

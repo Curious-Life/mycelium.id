@@ -207,6 +207,21 @@ function setAuditCallback(fn) { _auditCallback = fn; }
 //   - enums for WHERE/filter: status, visibility, scope, role, source, type
 //
 const ENCRYPTED_FIELDS = {
+  // AI providers — the BYOK credential blob (API keys for Anthropic / OpenAI /
+  // custom-base_url providers). MUST be encrypted at rest: a leaked key here is
+  // a leaked paid account + an egress identity. Stored as a JSON envelope in the
+  // `credentials` column; providers.list() never selects it (metadata-only).
+  ai_providers: ['credentials'],
+
+  // Connectors — operational state for a data connection (gmail/linear/…). The
+  // queryable structural columns (id/provider/status/cursor/counts/timestamps)
+  // stay plaintext so the scheduler can enumerate + filter without decrypting;
+  // the user-describing columns are encrypted. account_label is the connected
+  // account identity (PII); last_error can carry provider detail; recent_runs is
+  // a JSON run log that may embed error strings. USER_MASTER_KEY (NOT a
+  // SYSTEM_KEY table — this is the user's own data). Tokens live in `secrets`.
+  connectors: ['account_label', 'last_error', 'recent_runs'],
+
   // Messages — content + all AI-derived metadata
   // metadata column (arbitrary JSON) added: can contain sensitive
   // structured data from agents. nlp_error can reveal failure patterns
@@ -361,7 +376,13 @@ const ENCRYPTED_FIELDS = {
   provisioning_jobs: ['email', 'stripe_customer_id', 'error'],
 
   // Secrets — key names reveal what's stored
-  secrets: ['key', 'description'],
+  // `value` holds tokens (OAuth access/refresh, API keys) → MUST be encrypted
+  // at rest. Routed through SYSTEM_KEY (SYSTEM_KEY_TABLES). Non-deterministic
+  // AES-GCM means encrypted columns can't be queried by equality — the secrets
+  // namespace (src/db/secrets.js) selects-all + filters on the decrypted key,
+  // mirroring the Worker's secrets-api.ts. Worker parity: mirror there if the
+  // Worker ever stores secret values (local-first V1 does not run the Worker).
+  secrets: ['key', 'value', 'description'],
 
   // Time chronicles — narrative about temporal periods
   time_chronicles: [

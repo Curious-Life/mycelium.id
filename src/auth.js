@@ -12,11 +12,12 @@
 // plaintext — only OAuth/session rows. The vault's two hex keys never touch
 // this file.
 import Database from 'better-sqlite3';
-import { mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync, existsSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { authDbPath } from './paths.js';
+import { readRemoteConfig, resolveAuthSecret } from './remote/config.js';
 import { betterAuth } from 'better-auth';
-import { mcp } from 'better-auth/plugins';
+import { mcp, jwt } from 'better-auth/plugins';
 import { getMigrations } from 'better-auth/db/migration';
 
 /**
@@ -27,14 +28,20 @@ import { getMigrations } from 'better-auth/db/migration';
  * @param {string} [opts.dbPath]   sqlite path; ':memory:' for tests
  */
 export function createAuth(opts = {}) {
+  // baseURL: explicit opt > MYCELIUM_BASE_URL > persisted remote.json > localhost
+  // (readRemoteConfig folds in the env-var precedence). For a remote connector
+  // this MUST be the public HTTPS (tunnel) URL — every OAuth metadata/resource
+  // field derives from it.
   const baseURL =
-    opts.baseURL || process.env.MYCELIUM_BASE_URL || 'http://localhost:4711';
-  const secret = opts.secret || process.env.MYCELIUM_AUTH_SECRET;
+    opts.baseURL || readRemoteConfig().publicBaseUrl || 'http://localhost:4711';
+  // Signing secret: explicit opt > MYCELIUM_AUTH_SECRET > a stable secret
+  // persisted in auth.db (generated once). resolveAuthSecret never returns empty,
+  // so the old "must set MYCELIUM_AUTH_SECRET" boot friction is gone; the guard
+  // below stays as defence in depth. A changed secret invalidates issued tokens
+  // by design (the deliberate "revoke all" action).
+  const secret = opts.secret || resolveAuthSecret();
   if (!secret) {
-    // Fail closed: a signing secret is mandatory. Refuse to boot without one.
-    throw new Error(
-      'MYCELIUM_AUTH_SECRET is required to start the OAuth server (32+ random chars).',
-    );
+    throw new Error('Could not resolve an auth signing secret.');
   }
   const dbPath = opts.dbPath || authDbPath();
 
@@ -43,6 +50,15 @@ export function createAuth(opts = {}) {
     if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
   }
   const database = new Database(dbPath);
+  // Enforce foreign keys (better-sqlite3 defaults them OFF). The OAuth tables use
+  // `on delete cascade`; without enforcement, deleting a user ORPHANS its oauth
+  // token rows (userId → dead row), and the next token INSERT/refresh then fails
+  // the FK constraint → `POST /token` 500 → the client never gets a token. (This
+  // is exactly the breakage manual FK-OFF reset scripts caused — 2026-06-04.)
+  database.pragma('foreign_keys = ON');
+  // Harden: auth.db holds the operator password hash, the signing secret, and the
+  // relay/acme-dns secrets — keep it owner-only (sqlite defaults to 0644).
+  if (dbPath !== ':memory:') { try { chmodSync(dbPath, 0o600); } catch { /* best-effort */ } }
 
   const auth = betterAuth({
     baseURL,
@@ -50,15 +66,32 @@ export function createAuth(opts = {}) {
     database,
     emailAndPassword: { enabled: true },
     // better-auth rejects auth POSTs whose Origin is not trusted (CSRF guard).
-    trustedOrigins: [baseURL],
+    // Claude's connector callbacks originate from claude.ai / claude.com, so
+    // trust them alongside our own base URL (validated end-to-end in the Phase-4
+    // smoke — see docs/REMOTE-CONNECT-DESIGN-2026-06-02.md).
+    trustedOrigins: [baseURL, 'https://claude.ai', 'https://claude.com'],
     plugins: [
+      // The mcp() plugin's discovery hardcodes jwks_uri = <baseURL>/api/auth/mcp/jwks
+      // and (with useJWTPlugin) signs tokens RS256. Without the jwt plugin that URL
+      // 404s and clients (Claude) can't validate the token → "Authorization failed".
+      // Serve the JWKS at the EXACT advertised path so discovery resolves.
+      jwt({ jwks: { jwksPath: '/mcp/jwks' } }),
       mcp({
         loginPage: '/login',
         resource: `${baseURL}/mcp`,
+        // Top-level `metadata` overrides the authorization-server discovery
+        // document (better-auth mcp/index.mjs:69 spreads `...options?.metadata`
+        // over the defaults at :39). Drop `openid` so Claude won't request an
+        // id_token — Claude requests only advertised scopes, and better-auth
+        // emits an unverifiable HS256 id_token only when `openid` is requested
+        // (a known connector choke point). The hand-built PRM (server-http.js)
+        // is likewise openid-free; Sentry/Linear/Notion/GitHub advertise none.
+        metadata: { scopes_supported: ['profile', 'email', 'offline_access'] },
         oidcConfig: {
           allowDynamicClientRegistration: true,
           requirePKCE: true,
           storeClientSecret: 'plain',
+          useJWTPlugin: true,
         },
       }),
     ],

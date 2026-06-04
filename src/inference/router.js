@@ -16,8 +16,9 @@
 // reads from process.env. No internal caller yet — this is infrastructure the
 // model-backed enrichment seam and topology description can adopt.
 
-import { localInfer, DEFAULT_OLLAMA_URL, DEFAULT_LOCAL_MODEL } from "./local.js";
-import { cloudInfer } from "./cloud.js";
+import { createHash } from "node:crypto";
+import { localInfer, localStream, DEFAULT_OLLAMA_URL, DEFAULT_LOCAL_MODEL } from "./local.js";
+import { cloudInfer, cloudStream } from "./cloud.js";
 import { InferenceError } from "./errors.js";
 
 export const LOCAL_TASKS = Object.freeze(["summarize", "classify", "extract"]);
@@ -43,6 +44,10 @@ export function createInferenceRouter({
   anthropicApiKey,
   openaiApiKey,
   cloudModel,
+  baseUrl,
+  jurisdiction,
+  onEgress,
+  cloudFallbackToLocal = true,
   timeoutMs = 60000,
   env = process.env,
 } = {}) {
@@ -53,10 +58,14 @@ export function createInferenceRouter({
     anthropicApiKey: anthropicApiKey ?? env.ANTHROPIC_API_KEY,
     openaiApiKey: openaiApiKey ?? env.OPENAI_API_KEY,
     cloudModel: cloudModel || env.INFERENCE_CLOUD_MODEL, // undefined → backend default
+    baseUrl: baseUrl ?? env.INFERENCE_BASE_URL, // OpenAI-compatible endpoint (Regolo/OpenRouter/Ollama/…)
+    jurisdiction, // 'local'|'eu-zdr'|'us-zdr'|'us-standard' — tag for the egress policy (§4g)
     timeoutMs,
   };
 
-  const hasCloud = () => Boolean(cfg.anthropicApiKey || cfg.openaiApiKey);
+  // Cloud is "available" when a key OR an OpenAI-compatible base_url is set (some
+  // local/self-hosted base_url servers are keyless).
+  const hasCloud = () => Boolean(cfg.anthropicApiKey || cfg.openaiApiKey || cfg.baseUrl);
 
   function runLocal({ prompt, maxTokens }) {
     return localInfer({ prompt, maxTokens, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs });
@@ -67,10 +76,54 @@ export function createInferenceRouter({
       prompt, maxTokens,
       anthropicApiKey: cfg.anthropicApiKey,
       openaiApiKey: cfg.openaiApiKey,
+      baseUrl: cfg.baseUrl,
       model: cfg.cloudModel,
       fetch: cfg.fetch,
       timeoutMs: cfg.timeoutMs,
     });
+  }
+
+  function runLocalStream({ prompt, maxTokens }) {
+    return localStream({ prompt, maxTokens, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs });
+  }
+
+  function runCloudStream({ prompt, maxTokens }) {
+    return cloudStream({
+      prompt, maxTokens,
+      anthropicApiKey: cfg.anthropicApiKey,
+      openaiApiKey: cfg.openaiApiKey,
+      baseUrl: cfg.baseUrl,
+      model: cfg.cloudModel,
+      fetch: cfg.fetch,
+      timeoutMs: cfg.timeoutMs,
+    });
+  }
+
+  // The active provider's effective jurisdiction (the privacy-relevant fact),
+  // set by the resolver (resolve.js); default us-standard (fail-safe).
+  const cloudJurisdiction = () => cfg.jurisdiction || "us-standard";
+
+  function providerLabel() {
+    if (cfg.anthropicApiKey) return "anthropic";
+    if (cfg.baseUrl) { try { return new URL(cfg.baseUrl).hostname; } catch { return "custom"; } }
+    return "openai";
+  }
+
+  // §4e egress audit — fire-and-forget; sha256 hash + length ONLY, NEVER the
+  // prompt. An onEgress/audit failure must never break or block inference.
+  function emitEgress(prompt, decision, reason) {
+    if (typeof onEgress !== "function") return;
+    try {
+      onEgress({
+        provider: providerLabel(),
+        jurisdiction: cloudJurisdiction(),
+        model: cfg.cloudModel,
+        contentHash: createHash("sha256").update(String(prompt)).digest("hex"),
+        contentLength: String(prompt).length,
+        decision,
+        reason,
+      });
+    } catch { /* audit must never break inference */ }
   }
 
   /**
@@ -79,9 +132,11 @@ export function createInferenceRouter({
    * @param {string} req.prompt
    * @param {'summarize'|'classify'|'extract'|'narrate'|'complex'} [req.task='summarize']
    * @param {number} [req.maxTokens]
+   * @param {boolean} [req.sensitive=false]  §4g hard-block: sensitive content
+   *   NEVER egresses to a US provider — it falls back to on-box local instead.
    * @returns {Promise<string>}
    */
-  async function infer({ prompt, task = "summarize", maxTokens } = {}) {
+  async function infer({ prompt, task = "summarize", maxTokens, sensitive = false } = {}) {
     if (typeof prompt !== "string" || prompt.trim() === "") {
       throw new InferenceError("infer: prompt must be a non-empty string");
     }
@@ -90,10 +145,20 @@ export function createInferenceRouter({
     }
 
     if (CLOUD_TASKS.includes(task) && hasCloud()) {
+      // §4g sensitive hard-block: sensitive content must not leave to a US
+      // provider. Fail closed to on-box local (the private path) + audit the
+      // denial. eu-zdr / local providers are unaffected.
+      if (sensitive && /^us/.test(cloudJurisdiction())) {
+        emitEgress(prompt, "denied", "sensitive_us_block");
+        return runLocal({ prompt, maxTokens });
+      }
       try {
+        emitEgress(prompt, "allowed");
         return await runCloud({ prompt, maxTokens });
       } catch (cloudErr) {
-        // Resilience: a cloud failure falls back to on-box local.
+        // cloudFallbackToLocal:false (cascade mode) propagates the error so the
+        // caller can try the NEXT provider; otherwise resilience → on-box local.
+        if (!cloudFallbackToLocal) throw cloudErr;
         try {
           return await runLocal({ prompt, maxTokens });
         } catch (localErr) {
@@ -102,12 +167,52 @@ export function createInferenceRouter({
       }
     }
 
-    // Simple tasks, or complex with no cloud key → local.
+    // Simple tasks, or complex with no cloud configured → local.
     return runLocal({ prompt, maxTokens });
+  }
+
+  /**
+   * Streaming variant of infer — yields text deltas. SAME routing + §4g sensitive
+   * hard-block + egress-audit semantics as infer(): audits the egress ONCE before
+   * the cloud attempt, falls back to local on a PRE-token cloud failure, and
+   * (since a provider can't be swapped mid-stream) rethrows a post-token failure.
+   * @param {object} req  same shape as infer()
+   * @returns {AsyncGenerator<string>}
+   */
+  async function* inferStream({ prompt, task = "summarize", maxTokens, sensitive = false } = {}) {
+    if (typeof prompt !== "string" || prompt.trim() === "") {
+      throw new InferenceError("inferStream: prompt must be a non-empty string");
+    }
+    if (!TASKS.includes(task)) {
+      throw new InferenceError(`inferStream: unknown task ${JSON.stringify(task)} (valid: ${TASKS.join(", ")})`);
+    }
+
+    if (CLOUD_TASKS.includes(task) && hasCloud()) {
+      if (sensitive && /^us/.test(cloudJurisdiction())) {
+        emitEgress(prompt, "denied", "sensitive_us_block");
+        yield* runLocalStream({ prompt, maxTokens });
+        return;
+      }
+      emitEgress(prompt, "allowed");
+      let started = false;
+      try {
+        for await (const delta of runCloudStream({ prompt, maxTokens })) {
+          started = true;
+          yield delta;
+        }
+        return;
+      } catch (cloudErr) {
+        if (!started && cloudFallbackToLocal) { yield* runLocalStream({ prompt, maxTokens }); return; }
+        throw cloudErr;
+      }
+    }
+
+    yield* runLocalStream({ prompt, maxTokens });
   }
 
   return {
     infer,
+    inferStream,
     runLocal,
     runCloud,
     hasCloud,
@@ -119,6 +224,8 @@ export function createInferenceRouter({
       timeoutMs: cfg.timeoutMs,
       anthropicConfigured: Boolean(cfg.anthropicApiKey),
       openaiConfigured: Boolean(cfg.openaiApiKey),
+      baseUrl: cfg.baseUrl,
+      jurisdiction: cfg.jurisdiction,
     },
   };
 }

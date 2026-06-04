@@ -12,8 +12,15 @@ import { portalCompatRouter } from './portal-compat.js';
 import { portalMindscapeRouter } from './portal-mindscape.js';
 import { portalMeasurementRouter } from './portal-measurement.js';
 import { portalUploadsRouter } from './portal-uploads.js';
+import { portalProvidersRouter } from './portal-providers.js';
+import { portalHardwareRouter } from './portal-hardware.js';
+import { portalImportRouter } from './portal-import.js';
+import { portalSettingsRouter } from './portal-settings.js';
+import { portalConnectorsRouter } from './portal-connectors.js';
+import { registerBuiltinAdapters, createConnectorRunner, startConnectorScheduler } from './connectors/index.js';
 import { authShimRouter } from './auth-shim.js';
 import { accountRouter } from './account/router.js';
+import { remoteRouter } from './remote/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { startEnrichDrainer } from './enrich/drainer.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
@@ -84,7 +91,7 @@ function ensureVaultSchema(dbFile) {
 /** Build the express sub-app that serves every VAULT-DEPENDENT route. Mounted
  *  behind a guard so it only handles traffic once the vault is open; until then
  *  data calls get a 503 and only the account ceremony + static UI are served. */
-function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment }) {
+function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner }) {
   const v = express();
   v.disable('x-powered-by');
   v.use('/api/v1/portal', portalCompatRouter({ db, userId }));
@@ -110,6 +117,11 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   }));
   v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath }));
   v.use('/api/v1/portal', portalUploadsRouter({ db, userId, enqueueEnrichment }));
+  v.use('/api/v1/portal', portalProvidersRouter({ db, userId }));
+  v.use('/api/v1/portal', portalHardwareRouter());
+  v.use('/api/v1/portal', portalImportRouter({ db, userId, enqueueEnrichment }));
+  v.use('/api/v1/portal', portalSettingsRouter({ db, userId }));
+  if (connectorRunner) v.use('/api/v1/portal', portalConnectorsRouter({ runner: connectorRunner }));
   v.use(apiRouter({ tools, handlers, db, userId, enqueueEnrichment }));
   return v;
 }
@@ -194,20 +206,36 @@ export async function startRestServer({
       // has no data. Gated off when keys are injected so it never mutates a
       // verify script's deterministic test vault.
       const injectedKeys = userHex !== undefined && systemHex !== undefined;
+      let connectorScheduler = null;
       if (!injectedKeys) {
         // Own the embed-service (:8091) lifecycle in-process: spawn/adopt, dep
         // self-check, restart-on-crash, and expose health to /processing-status.
         // Without a live embedder the drainer can't embed → Generate has no data.
         const embedSup = startEmbedSupervisor({ home: process.cwd() });
         const drainer = startEnrichDrainer({ db, userId: bootUserId });
+        enqueueEnrichment = (id) => { try { baseEnqueue(id); } catch { /* :8095 optional */ } drainer.nudge(); };
         closeHandle = () => {
+          try { connectorScheduler?.stop(); } catch { /* */ }
           try { drainer.stop(); } catch { /* */ }
           try { embedSup.stop(); } catch { /* */ }
           try { close(); } catch { /* */ }
         };
-        enqueueEnrichment = (id) => { try { baseEnqueue(id); } catch { /* :8095 optional */ } drainer.nudge(); };
       }
-      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment });
+      // Connector framework: register adapters once, build the runner (always —
+      // the HTTP routes need it), and start the periodic sync scheduler only in
+      // the real app. The scheduler is gated like the drainer so verify scripts
+      // (injected keys) never sync a connector against a deterministic test vault.
+      registerBuiltinAdapters();
+      const connectorRunner = createConnectorRunner({ db, userId: bootUserId, enqueueEnrichment });
+      // One-time migration of pre-2b `connector:<id>:state` secret blobs into the
+      // dedicated connectors table (migration 0008). Idempotent; safe every boot.
+      await connectorRunner.store.backfillLegacyState().catch((e) => {
+        console.warn('[connectors] legacy state backfill skipped:', e?.message || e);
+      });
+      if (!injectedKeys) {
+        connectorScheduler = startConnectorScheduler({ runner: connectorRunner });
+      }
+      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner });
     } finally {
       booting = false;
     }
@@ -240,6 +268,11 @@ export async function startRestServer({
     kcvPath: effectiveKcvPath,
     lockFile: effectiveLockPath,
   }));
+
+  // Remote-access control surface (loopback-only): set the operator password
+  // (the OAuth gate) + read/patch the non-secret remote config. Mounted before
+  // the vault guard so it works in setup mode AND post-boot.
+  app.use('/api/v1/remote', remoteRouter());
 
   // Local "always signed in" shim so the canonical portal's session check
   // (/auth/session) succeeds and the app opens instead of bouncing to /login.

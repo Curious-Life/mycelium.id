@@ -15,6 +15,7 @@ import { createMessagesNamespace } from './messages.js';
 import { createFactsNamespace } from './facts.js';
 import { createEntitiesNamespace } from './entities.js';
 import { createAttachmentsNamespace } from './attachments.js';
+import { createSecretsNamespace } from './secrets.js';
 import { createHealthNamespace } from './health.js';
 import { createTasksNamespace } from './tasks.js';
 import { createMetricsNamespace } from './metrics.js';
@@ -28,6 +29,9 @@ import { createSpaceKnowledgeNamespace } from './space-knowledge.js';
 import { createPublicPresenceNamespace } from './public-presence.js';
 import { createMindscapeNamespace } from './mindscape.js';
 import { createTerritoryDocsNamespace } from './territory-docs.js';
+import { createProvidersNamespace } from './providers.js';
+import { createConnectorsNamespace } from './connectors.js';
+import { createUsersNamespace } from './users.js';
 
 /**
  * Open the vault db and assemble the tool-facing `db` namespace object.
@@ -49,6 +53,7 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
     facts: createFactsNamespace({ d1Query, firstRow, randomUUID }),
     entities: createEntitiesNamespace({ d1Query, firstRow, randomUUID }),
     attachments: createAttachmentsNamespace({ d1Query, firstRow }),
+    secrets: createSecretsNamespace({ d1Query, firstRow }),
     health: createHealthNamespace({ d1QueryAdmin, firstRow, parseHealthRow, computeHealthSummary, now }),
     tasks: createTasksNamespace({ d1Query, firstRow }),
     metrics: createMetricsNamespace({ d1Query, firstRow }),
@@ -61,11 +66,28 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
     spaceKnowledge: createSpaceKnowledgeNamespace({ d1Query, firstRow, randomUUID }),
     publicPresence: createPublicPresenceNamespace({ d1Query }),
 
+    // AI providers (BYOK credentials for the outbound inference router + the
+    // /portal/providers backend). `credentials` is encrypted at rest
+    // (ENCRYPTED_FIELDS.ai_providers); list() returns metadata only.
+    providers: createProvidersNamespace({ d1Query }),
+
+    // Connectors (data-connection operational state for the sync scheduler +
+    // /portal/connectors). account_label/last_error/recent_runs are encrypted at
+    // rest (ENCRYPTED_FIELDS.connectors); list() returns metadata only. OAuth
+    // tokens stay in the `secrets` table (src/connectors/store.js).
+    connectors: createConnectorsNamespace({ d1Query }),
+
     // Mindscape reads (clustering points + territory/realm/theme profiles) and
     // territory-docs (narrative read/write). Wired for the portal mindscape
     // surface (src/portal-mindscape.js) + the Phase C chronicles writer.
     mindscape: createMindscapeNamespace({ d1Query, parseJson }),
     territoryDocs: createTerritoryDocsNamespace({ d1Query, parseJson }),
+
+    // Core user row: timezone (read by getContext — tools/context.js:63, which
+    // already optional-chains db.users) + a `settings` JSON blob that backs the
+    // §4g "smart routing" toggle (the cascade preference the gateway reads
+    // DB-first, src/gateway/openai-compat.js).
+    users: createUsersNamespace({ d1Query, firstRow }),
 
     // db.shareLinks is intentionally omitted — every call site is optional-
     // chained (tools/documents.js:102,516 `db.shareLinks?.…`), so absence

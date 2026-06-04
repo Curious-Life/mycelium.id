@@ -879,6 +879,8 @@ export function recoverKeys(mnemonic: string): Buffer {
 
 ## Component 11: Cloudflare Tunnel
 
+> ⚠️ **SUPERSEDED (2026-06-02) by the TLS-passthrough transport.** Cloudflare Tunnel terminates TLS at CF's edge (CF sees plaintext), which violates "the tunnel must not see plaintext." The remote path is now an **FRP passthrough relay + Caddy-on-Mac** (the cert key never leaves the Mac), with three modes (managed / own-relay / direct) and the open-source `mycelium-managed/` control-plane. See **`REMOTE-CONNECT-TRANSPORT-DESIGN-2026-06-02`** + **`REMOTE-CONNECT-MANAGED-DESIGN-2026-06-02`** (built + verified: T0 loopback, config, runtime, client seam, control-plane, NewProxy hook, Tauri sidecars). The notes below are retained for historical context only.
+
 Exposes the local Express server to the internet. Required for mobile/remote access.
 
 **Must use an account tunnel** (NOT a quick tunnel — quick tunnels don't support SSE).

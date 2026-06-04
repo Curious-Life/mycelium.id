@@ -1,6 +1,8 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import JSZip from 'jszip';
 	import { uploadFile as chunkedUpload } from '$lib/chunked-upload';
+	import { api } from '$lib/api';
 
 
 	type ImportSource = 'obsidian' | 'chatgpt' | 'claude' | 'linkedin';
@@ -11,6 +13,7 @@
 		projects?: number;
 		project_docs?: number;
 		memories?: number;
+		folders?: number;
 		skipped_duplicates?: number;
 		artifacts_kept?: number;
 		artifacts_deduplicated?: number;
@@ -42,10 +45,107 @@
 	let error = $state<string | null>(null);
 	let result = $state<ImportResult | null>(null);
 
+	// Obsidian folder import — native picker in the desktop app, <input
+	// webkitdirectory> in the browser. Both POST to /portal/import/obsidian.
+	let folderInput: HTMLInputElement;
+	let isTauri = $state(false);
+	onMount(() => {
+		isTauri = typeof window !== 'undefined'
+			&& !!((window as any).__TAURI__ || (window as any).__TAURI_INTERNALS__);
+		loadConnectors();
+	});
+
+	// ── Live connectors (Gmail, Linear, …) ──
+	interface ConnectorRun {
+		at: string; ok: boolean; pulled?: number; created?: number; updated?: number; deduped?: number; skipped?: string; error?: string; durationMs?: number;
+	}
+	interface ConnectorStatus {
+		id: string; label: string; provider: string; oauth: boolean; status: string;
+		connectedAt: string | null; lastSyncAt: string | null; lastError: string | null; itemsLastSync: number | null;
+		lastOkAt?: string | null; lastErrorAt?: string | null; idleStreak?: number;
+		itemsCreated?: number | null; itemsUpdated?: number | null; itemsDeduped?: number | null;
+		budgetDate?: string | null; itemsToday?: number; dailyItemLimit?: number;
+		lastRun?: ConnectorRun | null; recentRuns?: ConnectorRun[];
+	}
+	let connectors = $state<ConnectorStatus[]>([]);
+	let connectorMsg = $state<string | null>(null);
+	let connectorBusy = $state<string | null>(null);
+
+	// Relative time for connector freshness (e.g. "3h ago"). Empty for missing/invalid.
+	function fmtAgo(iso: string | null | undefined): string {
+		if (!iso) return '';
+		const ms = Date.now() - new Date(iso).getTime();
+		if (!Number.isFinite(ms) || ms < 0) return '';
+		const m = Math.floor(ms / 60000);
+		if (m < 1) return 'just now';
+		if (m < 60) return `${m}m ago`;
+		const h = Math.floor(m / 60);
+		if (h < 24) return `${h}h ago`;
+		return `${Math.floor(h / 24)}d ago`;
+	}
+	let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+	async function loadConnectors() {
+		try {
+			const res = await api('/portal/connectors');
+			const d = await res.json();
+			connectors = d.connectors || [];
+		} catch { /* connectors are optional */ }
+	}
+
+	function pollConnectors() {
+		if (pollTimer) clearInterval(pollTimer);
+		let n = 0;
+		pollTimer = setInterval(async () => {
+			n += 1;
+			await loadConnectors();
+			if (n > 30 || connectors.some((c) => c.status === 'connected')) { clearInterval(pollTimer!); pollTimer = null; }
+		}, 2000);
+	}
+
+	async function connectConnector(c: ConnectorStatus) {
+		connectorBusy = c.id; connectorMsg = null;
+		try {
+			const res = await api(`/portal/connectors/${c.id}/connect`, { method: 'POST', body: '{}' });
+			const d = await res.json().catch(() => ({}));
+			if (d.authUrl) {
+				window.open(d.authUrl, '_blank', 'width=520,height=680');
+				connectorMsg = `Authorize ${c.label} in the window that opened, then return here.`;
+				pollConnectors();
+			} else if (d.ok) {
+				await loadConnectors();
+			} else if (d.error === 'oauth_not_configured') {
+				connectorMsg = `${c.label} isn't configured yet — its OAuth credentials haven't been set up.`;
+			} else {
+				connectorMsg = `Couldn't connect ${c.label}: ${d.error || 'unknown error'}`;
+			}
+		} catch (e) {
+			connectorMsg = e instanceof Error ? e.message : 'Connect failed';
+		} finally { connectorBusy = null; }
+	}
+
+	async function syncConnector(c: ConnectorStatus) {
+		connectorBusy = c.id; connectorMsg = null;
+		try {
+			const res = await api(`/portal/connectors/${c.id}/sync`, { method: 'POST', body: '{}' });
+			const d = await res.json().catch(() => ({}));
+			if (d.ok) { connectorMsg = `${c.label}: ${d.created} new, ${d.updated || 0} updated, ${d.deduped} unchanged.`; await loadConnectors(); }
+			else connectorMsg = `Sync failed: ${d.error || 'unknown error'}`;
+		} catch (e) {
+			connectorMsg = e instanceof Error ? e.message : 'Sync failed';
+		} finally { connectorBusy = null; }
+	}
+
+	async function disconnectConnector(c: ConnectorStatus) {
+		connectorBusy = c.id; connectorMsg = null;
+		try { await api(`/portal/connectors/${c.id}/disconnect`, { method: 'POST', body: '{}' }); await loadConnectors(); }
+		catch { /* */ } finally { connectorBusy = null; }
+	}
+
 	const sources: { id: ImportSource; name: string; description: string; accept: string; hint: string }[] = [
 		{ id: 'claude', name: 'Claude', description: 'Import Claude conversation export', accept: '.zip,.json', hint: 'Conversations, projects, memories, and artifacts with automatic deduplication' },
 		{ id: 'chatgpt', name: 'ChatGPT', description: 'Import OpenAI conversation export', accept: '.zip,.json', hint: 'Conversation trees flattened to canonical path with deduplication' },
-		{ id: 'obsidian', name: 'Obsidian', description: 'Import your Obsidian vault', accept: '.zip', hint: 'Markdown notes imported as documents' },
+		{ id: 'obsidian', name: 'Obsidian', description: 'Open your Obsidian vault folder', accept: '.md', hint: 'Pick the folder — every .md note becomes a document + a mindscape memory. No export needed.' },
 		{ id: 'linkedin', name: 'LinkedIn', description: 'Import your LinkedIn data export', accept: '.zip', hint: 'Connections, messages, and professional network — auto-encrypted and deduplicated' },
 	];
 
@@ -143,6 +243,66 @@
 		}
 	}
 
+	interface ObsidianSummary {
+		scanned: number; documentsUpserted: number; memoriesCreated: number;
+		memoriesDeduped: number; memoriesUpdated?: number; folders: number; skipped: number; truncated?: boolean;
+	}
+
+	async function importObsidian(payload: { folderPath?: string; files?: { relPath: string; content: string; mtime?: string }[]; vaultName?: string }) {
+		importing = true; error = null; result = null; statusMsg = 'Importing notes…';
+		try {
+			const res = await api('/portal/import/obsidian', { method: 'POST', body: JSON.stringify(payload) });
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok || !data.ok) throw new Error(data.error || `Import failed (${res.status})`);
+			const s = data as ObsidianSummary;
+			result = {
+				type: 'obsidian',
+				imported: s.documentsUpserted,
+				skipped: s.skipped,
+				stats: { imported: s.documentsUpserted, skipped: s.skipped, memories: s.memoriesCreated + (s.memoriesUpdated || 0), folders: s.folders },
+			};
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Import failed';
+		} finally {
+			importing = false; statusMsg = null;
+		}
+	}
+
+	async function pickVaultFolder() {
+		error = null;
+		// A folder <input webkitdirectory> opens the OS folder chooser in both the
+		// browser and the Tauri WKWebView, yielding the .md File objects directly.
+		// (A native path-based picker for large-vault re-sync arrives with connectors.)
+		folderInput?.click();
+	}
+
+	async function onFolderChosen() {
+		const list = folderInput?.files;
+		if (!list || !list.length) return;
+		importing = true; error = null; statusMsg = 'Reading vault…';
+		try {
+			const mdFiles = Array.from(list).filter((f) => /\.md$/i.test(f.name));
+			if (!mdFiles.length) { error = 'No .md notes found in that folder.'; return; }
+			// webkitRelativePath = "<pickedDir>/sub/note.md" — the picked dir is the
+			// vault; send it as vaultName and strip it so relPaths are vault-relative.
+			const vaultName = (((mdFiles[0] as any).webkitRelativePath as string) || '').split('/')[0] || undefined;
+			const prefix = vaultName ? `${vaultName}/` : '';
+			const files = await Promise.all(mdFiles.map(async (f) => {
+				const rel = ((f as any).webkitRelativePath as string) || f.name;
+				return {
+					relPath: prefix && rel.startsWith(prefix) ? rel.slice(prefix.length) : rel,
+					content: await f.text(),
+					mtime: new Date(f.lastModified).toISOString(),
+				};
+			}));
+			await importObsidian({ files, vaultName });
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Could not read the folder';
+		} finally {
+			if (importing && !result) { importing = false; statusMsg = null; }
+		}
+	}
+
 	function formatResult(r: ImportResult): string[] {
 		const lines: string[] = [];
 		const s = r.stats;
@@ -173,7 +333,8 @@
 			if (s.contacts_with_messages) lines.push(`${s.contacts_with_messages} contacts with message history`);
 			if (s.skipped_duplicates) lines.push(`${s.skipped_duplicates} duplicate messages skipped`);
 		} else if (r.type === 'obsidian') {
-			lines.push(`${s.imported || r.imported} notes imported`);
+			lines.push(`${s.imported ?? r.imported} notes imported as documents${s.folders ? ` across ${s.folders} folders` : ''}`);
+			if (s.memories) lines.push(`${s.memories} new memories queued for the mindscape`);
 			if (s.skipped || r.skipped) lines.push(`${s.skipped || r.skipped} skipped`);
 		}
 
@@ -196,6 +357,10 @@
 	<title>Import - Mycelium</title>
 </svelte:head>
 
+<!-- The workspace pane clips its content (.pane-body overflow:hidden), so each
+	 view must own its scroll — like SettingsView's `h-full overflow-y-auto` root.
+	 Without this the Import page can't scroll and content below the fold is lost. -->
+<div class="h-full overflow-y-auto">
 <div class="max-w-2xl mx-auto px-8 py-8">
 	<h1 class="text-xl font-medium text-[var(--color-text-emphasis)] mb-2">Import Data</h1>
 	<p class="text-sm text-[var(--color-text-secondary)] mb-8">
@@ -212,11 +377,15 @@
 					<p class="text-sm text-[var(--color-text-secondary)]">{line}</p>
 				{/each}
 			</div>
-			{#if result.enrichmentJobId}
-				<p class="text-xs text-[var(--color-accent-aurum)] mt-4">Processing started — your messages are being embedded for search and clustering.</p>
+			{#if result.enrichmentJobId || result.type === 'obsidian'}
+				<p class="text-xs text-[var(--color-accent-aurum)] mt-4">
+					{result.type === 'obsidian'
+						? 'Your notes are saved and queued — run Generate to weave them into the Mindscape.'
+						: 'Processing started — your messages are being embedded for search and clustering.'}
+				</p>
 				<a href="/mindscape" class="btn btn-primary mt-3">Go to Mindscape</a>
 			{/if}
-			<button onclick={reset} class="btn btn-secondary mt-{result.enrichmentJobId ? '2' : '6'}">Import More</button>
+			<button onclick={reset} class="btn btn-secondary mt-{(result.enrichmentJobId || result.type === 'obsidian') ? '2' : '6'}">Import More</button>
 		</div>
 	{:else if !selectedSource}
 		<!-- Source selection -->
@@ -232,6 +401,37 @@
 				</button>
 			{/each}
 		</div>
+
+		{#if connectors.length}
+			<div class="mt-10">
+				<h2 class="text-sm font-medium text-[var(--color-text-emphasis)] mb-1">Live connections</h2>
+				<p class="text-xs text-[var(--color-text-secondary)] mb-4">Continuously sync from your accounts — items become memories in your mindscape.</p>
+				<div class="grid gap-3">
+					{#each connectors as c}
+						<div class="card p-4 flex items-center justify-between gap-3">
+							<div class="min-w-0">
+								<div class="flex items-center gap-2">
+									<h3 class="text-sm font-medium text-[var(--color-text-emphasis)]">{c.label}</h3>
+									<span class="text-[10px] px-1.5 py-0.5 rounded-full {c.status === 'connected' ? 'bg-jade/15 text-jade' : c.status === 'error' ? 'bg-coral/15 text-coral' : (c.status === 'syncing' || c.status === 'connecting') ? 'bg-[var(--color-accent)]/15 text-[var(--color-accent)]' : 'bg-[var(--color-elevated)] text-[var(--color-text-tertiary)]'}">{c.status}</span>
+								</div>
+								<p class="text-xs text-[var(--color-text-tertiary)] mt-0.5 truncate">
+									{#if c.status === 'error' && c.lastError}<span class="text-coral">Needs reconnect — {c.lastError}</span>{:else if c.lastSyncAt}Last sync {fmtAgo(c.lastSyncAt)}{c.itemsLastSync != null ? ` · ${c.itemsLastSync} items` : ''}{#if c.lastRun && ((c.lastRun.created ?? 0) > 0 || (c.lastRun.updated ?? 0) > 0)} · {c.lastRun.created ?? 0} new, {c.lastRun.updated ?? 0} updated{/if}{#if (c.idleStreak ?? 0) >= 2} · checking less often (no new items){/if}{:else}Not synced yet{/if}{#if (c.itemsToday ?? 0) > 0 && c.dailyItemLimit} · {c.itemsToday}/{c.dailyItemLimit} today{(c.itemsToday ?? 0) >= (c.dailyItemLimit ?? 0) ? ' — budget reached' : ''}{/if}
+								</p>
+							</div>
+							<div class="flex items-center gap-2 shrink-0">
+								{#if c.status === 'disconnected'}
+									<button onclick={() => connectConnector(c)} disabled={connectorBusy === c.id} class="btn btn-secondary text-xs">{connectorBusy === c.id ? 'Connecting…' : 'Connect'}</button>
+								{:else}
+									<button onclick={() => (c.status === 'error' ? connectConnector(c) : syncConnector(c))} disabled={connectorBusy === c.id} class="btn-ghost text-xs">{c.status === 'error' ? (connectorBusy === c.id ? 'Reconnecting…' : 'Reconnect') : 'Sync now'}</button>
+									<button onclick={() => disconnectConnector(c)} disabled={connectorBusy === c.id} class="btn-ghost text-xs text-coral">Disconnect</button>
+								{/if}
+							</div>
+						</div>
+					{/each}
+				</div>
+				{#if connectorMsg}<p class="text-xs text-[var(--color-text-tertiary)] mt-3">{connectorMsg}</p>{/if}
+			</div>
+		{/if}
 	{:else}
 		<!-- File upload -->
 		<div class="space-y-6">
@@ -241,13 +441,27 @@
 
 			<div class="card p-6">
 				<h3 class="text-sm font-medium text-[var(--color-text-emphasis)] mb-2">
-					Upload {sources.find(s => s.id === selectedSource)?.name} export
+					{#if selectedSource === 'obsidian'}Open your Obsidian vault{:else}Upload {sources.find(s => s.id === selectedSource)?.name} export{/if}
 				</h3>
 				<p class="text-xs text-[var(--color-text-tertiary)] mb-4">
 					{sources.find(s => s.id === selectedSource)?.hint}
 				</p>
 
-				<!-- Drop zone: drag a file in, or click Browse. -->
+				{#if selectedSource === 'obsidian'}
+						<button onclick={pickVaultFolder} disabled={importing} class="btn btn-primary w-full">
+							{#if importing}
+								<span class="inline-block animate-spin mr-2">&#9696;</span>
+								{statusMsg || 'Importing…'}
+							{:else}
+								Open vault folder
+							{/if}
+						</button>
+						<input bind:this={folderInput} type="file" webkitdirectory multiple class="sr-only" onchange={onFolderChosen} />
+						{#if !isTauri}
+							<p class="mt-3 text-xs text-[var(--color-text-tertiary)]">Pick your vault folder — its .md notes import directly. (In the desktop app this opens a native folder picker.)</p>
+						{/if}
+					{:else}
+					<!-- Drop zone: drag a file in, or click Browse. -->
 				<div
 					role="button"
 					tabindex="0"
@@ -281,13 +495,15 @@
 					class="sr-only"
 				/>
 
-				{#if error}
+				{/if}
+
+					{#if error}
 					<div class="mt-4 p-4 bg-coral/10 border border-coral/20 rounded-lg">
 						<p class="text-sm text-coral">{error}</p>
 					</div>
 				{/if}
 
-				{#if statusMsg}
+				{#if statusMsg && selectedSource !== 'obsidian'}
 					<p class="mt-3 text-xs text-[var(--color-text-tertiary)]">{statusMsg}</p>
 				{/if}
 
@@ -311,4 +527,5 @@
 			</div>
 		</div>
 	{/if}
+</div>
 </div>

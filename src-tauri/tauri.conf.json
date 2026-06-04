@@ -15,6 +15,7 @@
   },
   "bundle": {
     "active": true,
+    "externalBin": ["binaries/frpc", "binaries/caddy"],
     "targets": ["app", "dmg"],
     "category": "Productivity",
     "shortDescription": "Your private cognitive vault",

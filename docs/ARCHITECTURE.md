@@ -22,7 +22,7 @@ One Node entry point, `src/index.js`, selects a mode:
 | Mode | Command | Surface |
 |---|---|---|
 | MCP stdio (default) | `npm start` | MCP over stdio for a local client |
-| MCP Streamable HTTP | `npm run start:http` (`--http` / `MYCELIUM_HTTP=1`) | remote MCP + OAuth |
+| MCP Streamable HTTP | `npm run start:http` (`--http` / `MYCELIUM_HTTP=1`) | remote MCP + OAuth — **binds 127.0.0.1 only**; reached over the internet via the TLS-passthrough relay (Caddy terminates TLS on this Mac) |
 | REST | `npm run rest` | REST over the shared handler map |
 | Portal (UI + REST) | `npm run portal` | portal at `/` + REST `/api/v1/*`, localhost-only |
 | Enrichment service | `npm run start:enrich` (`--enrich`) | the `:8095` background enricher |
@@ -217,7 +217,11 @@ portal into `Mycelium.app`; Rust built on the Mac per `src-tauri/BUILD-MAC.md`.
 ⬜ **Planned / not yet built:** agent templates, the Tauri native first-run
 key-setup ceremony (designed — `UX-COMPLETE-DESIGN` §5 — Mac/Rust build pending),
 profile *editing* (`PUT /portal/profile` — needs a profile store), the
-`/mindscape/explore` territory-description job, Obsidian/LinkedIn import,
-Cloudflare Tunnel deploy. (The in-app "generate mindscape" trigger + chronicle
-narration are now **built** — see the component table.) See
+`/mindscape/explore` territory-description job, Obsidian/LinkedIn import.
+**Remote-connect transport is now built** (TLS-passthrough: bundled `frpc`+`caddy`,
+key-on-Mac ACME via acme-dns, loopback `--http`, + the open-source `mycelium-managed/`
+control-plane — see `REMOTE-CONNECT-TRANSPORT-DESIGN` + `REMOTE-CONNECT-MANAGED-DESIGN`;
+standing up the live relay/DNS/acme-dns/LE infra is the operator's deploy). (The in-app
+"generate mindscape" trigger + chronicle narration are also **built** — see the
+component table.) See
 [`V1-BUILD-SPEC.md`](V1-BUILD-SPEC.md) §"What's left".

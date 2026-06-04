@@ -83,3 +83,69 @@ export async function localInfer({
 }
 
 export default localInfer;
+
+/**
+ * Streaming variant of localInfer — yields text deltas as Ollama produces them.
+ * Ollama's /api/generate with stream:true emits NDJSON: one JSON object per line,
+ * each `{ response, done }`. Fail-closed + leak-safe like localInfer.
+ * @param {object} opts  same shape as localInfer
+ * @returns {AsyncGenerator<string>}  successive text fragments
+ */
+export async function* localStream({
+  prompt,
+  maxTokens = 1024,
+  model = DEFAULT_LOCAL_MODEL,
+  images,
+  baseUrl = DEFAULT_OLLAMA_URL,
+  fetch = globalThis.fetch,
+  timeoutMs = 60000,
+} = {}) {
+  if (typeof fetch !== "function") {
+    throw new InferenceError("localStream: no fetch implementation", { backend: "local" });
+  }
+  if (typeof prompt !== "string" || prompt.length === 0) {
+    throw new InferenceError("localStream: prompt must be a non-empty string", { backend: "local" });
+  }
+  const url = `${baseUrl.replace(/\/+$/, "")}/api/generate`;
+  const body = { model, prompt, stream: true, options: { num_predict: maxTokens } };
+  if (Array.isArray(images) && images.length) body.images = images;
+
+  // Timeout guards time-to-first-byte (the connection), not the whole stream —
+  // a long generation must not be aborted mid-flight.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: controller.signal });
+  } catch (err) {
+    clearTimeout(timer);
+    const reason = err?.name === "AbortError" ? `timed out after ${timeoutMs}ms` : "is Ollama running?";
+    throw new InferenceError(`localStream: Ollama unreachable at ${url} (${reason})`, { cause: err, backend: "local" });
+  }
+  clearTimeout(timer);
+  if (!res.ok) {
+    throw new InferenceError(`localStream: Ollama error (status ${res.status})`, { status: res.status, backend: "local" });
+  }
+  if (!res.body) {
+    throw new InferenceError("localStream: Ollama returned no stream body", { backend: "local" });
+  }
+
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let ev;
+      try { ev = JSON.parse(line); } catch { continue; } // skip a partial/garbled line
+      if (typeof ev.response === "string" && ev.response) yield ev.response;
+      if (ev.done) return;
+    }
+  }
+}
