@@ -25,6 +25,7 @@ import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { createInferenceRouter } from '../src/inference/router.js';
 import { resolveInferenceConfig } from '../src/inference/resolve.js';
+import { createEgressAuditSink } from '../src/inference/egress.js';
 
 export const CHRONICLE_VERSION = process.env.MYCELIUM_CHRONICLE_VERSION || 'chronicle-v1';
 
@@ -166,7 +167,10 @@ if (isMain) {
   const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal' });
   // Prefer the provider the user configured in Settings (ai_providers); fall back
   // to env (BYOK power users), else local Ollama. (S2: the store → router seam.)
-  const router = createInferenceRouter(await resolveInferenceConfig(db, USER_ID));
+  const router = createInferenceRouter({
+    ...(await resolveInferenceConfig(db, USER_ID)),
+    onEgress: createEgressAuditSink(db, USER_ID), // §4e: audit every cloud egress (hash-only)
+  });
   console.log(`[chronicles] narrating territories (model: ${router.config.anthropicConfigured || router.config.openaiConfigured ? 'cloud BYOK' : 'local Ollama'})${DRY_RUN ? ' (dry-run)' : ''}`);
   try {
     if (DRY_RUN) {

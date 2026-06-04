@@ -28,11 +28,16 @@ detail lives in the linked docs. Newest-relevant first.
   (`openaiCompatibleInfer`+`resolveChatUrl`, key-optional; covers OpenAI/OpenRouter/Together/Groq/**Regolo+Scaleway EU**/Ollama/
   LM Studio), `baseUrl`/`jurisdiction` threaded through `router.js`, `resolve.js` maps any base_url provider + tags `jurisdiction`
   via new `src/inference/presets.js` (regolo/scaleway→eu-zdr, localhost→local, unknown→us-standard fail-safe). `verify:resolve`
-  extended GO; inference/chronicles no-regression GO. **NEXT: S3b** — `recordEgress` at the cloud seam + `sensitive` hard-block
-  (§4e/§4g). **Decision: use the general `db.audit` table** for inference egress (`action:'inference-egress'`, details:
-  {provider,jurisdiction,contentHash,contentLength,decision}) — the `egress_audit` table is channel-shaped (telegram/discord) +
-  CHECK-constrained, a poor fit; `db.audit.log` is already wired + general. Then S8 gateway (`/v1/chat/completions` on :4711,
-  reuse `requireAuth`; relay makes it remote-reachable), S6 HW recommender. ⚠️ Do NOT edit `src/remote/*`, `src/connectors/*`,
+  extended GO; inference/chronicles no-regression GO. ✅ **S3b BUILT** — egress boundary at the router seam: `infer({…,sensitive})`
+  HARD-BLOCKS sensitive content from a `us-*` provider (falls back to local; eu-zdr/local fine — §4g); `onEgress` audits EVERY
+  cloud call (allowed/denied) with provider+jurisdiction+**sha256 hash+length only, never the prompt** (§4e) via new
+  `src/inference/egress.js` `createEgressAuditSink(db,userId)` → general `db.audit` table (NOT the channel-shaped `egress_audit`).
+  `verify:egress` GO. ✅ **"Intelligence" Settings UI BUILT** (separate brick) — `GET /portal/providers/presets` + new
+  `portal-app/.../settings/IntelligenceSection.svelte` (presets grouped EU-sovereign/Local/US + jurisdiction badges,
+  connect/use/test/remove), mounted in SettingsView; **portal build GO** (`npm --prefix portal-app run build` works in this env —
+  install ~10s + build ~30s). **OUTBOUND LANE COMPLETE through S3 + UI.** **NEXT: S8 gateway** (`/v1/chat/completions` on :4711,
+  reuse `requireAuth`; relay makes it remote-reachable; wire `createEgressAuditSink` + pass `sensitive`; v1 non-streaming) + **S6 HW
+  recommender** (§4h). ⚠️ Do NOT edit `src/remote/*`, `src/connectors/*`,
   `src/db/secrets.js`. Design + Part 8 build status:
   [`docs/DESIGN-ai-interface-layer-2026-06-04.md`](docs/DESIGN-ai-interface-layer-2026-06-04.md).
 
