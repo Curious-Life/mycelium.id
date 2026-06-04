@@ -39,7 +39,7 @@ The "AI interface layer" is **two membranes around the context bank**, and the c
 
 3. **Two landmines surfaced.** (a) 🚩 `ai_providers.credentials` is **not** in `ENCRYPTED_FIELDS` (`src/crypto/crypto-local.js`) → BYOK keys would store **in plaintext**. (b) 🚩 The latent "use your Claude subscription via a Claude Code OAuth token" path (the `auth_type:'oauth'` + `config_dir` design in `providers.js`) became an **Anthropic ToS violation on 2026-02-19**. Both must be addressed before any provider key is written.
 
-**Recommended spine:** ship the **South membrane wiring** first (it unlocks local-first inference for enrichment/generate and is fully in our control), then the **North membrane reachability + onboarding** (it unlocks "use Mycelium as the memory for ChatGPT/Gemini/your-own-agent"). Bring-your-own-harness falls out of North (MCP client) + optional South (point the harness's model calls at our gateway).
+**Recommended spine:** ship the **South membrane wiring** first (it unlocks privacy-first inference (EU-sovereign + local) for enrichment/generate and is fully in our control), then the **North membrane reachability + onboarding** (it unlocks "use Mycelium as the memory for ChatGPT/Gemini/your-own-agent"). Bring-your-own-harness falls out of North (MCP client) + optional South (point the harness's model calls at our gateway).
 
 ---
 
@@ -219,7 +219,12 @@ The schema already has `base_url`. Generalize `cloud.js` from "Anthropic | OpenA
 // openaiCompatibleInfer({ baseUrl, apiKey, model, ... })   // generalizes openaiInfer; baseUrl defaults to api.openai.com
 ```
 
-**Presets (data, not code):** Anthropic (native), OpenAI, OpenRouter, Groq, Together, **Regolo.ai (EU, zero-retention)**, **Scaleway (EU)**, **Ollama**, **LM Studio**, Custom. EU-sovereign + local are first-class because they're the privacy story.
+**Presets (data, not code) — ordered by the operator routing priority (§4g), each tagged with a jurisdiction:**
+1. **EU-sovereign ZDR** *(`eu-zdr`)* — **Regolo.ai**, **Scaleway**, **Exoscale**, Nebius (EU). *The default workhorse — capable + privacy-preserving, no US Cloud Act exposure.*
+2. **Frontier labs** *(`us`)* — **Anthropic** (native `/v1/messages`), **OpenAI**, **Google/Gemini**. *Doubly valuable: these are the same providers whose apps/APIs connect **into** Mycelium as MCP clients (North) — so each one earns its keep on both membranes.*
+3. **US inference APIs** *(`us`)* — Together, Groq, Fireworks, DeepInfra, OpenRouter — non-sensitive overflow.
+4. **Local runtime** *(`local`)* — **Ollama**, **LM Studio**, MLX. *A **test tier** in V1 (not yet good enough to be primary on typical hardware) + the safest path for `sensitive` content; promotes toward primary as local quality climbs.*
+5. **Custom** — the `base_url` escape hatch for anything else (incl. a self-deployed model on RunPod/Lambda/Vast, which becomes a normal `eu-zdr`/`us` row once running).
 
 ### 4c. Mount the backend the frontend already calls
 
@@ -250,11 +255,24 @@ Adding more outbound providers multiplies plaintext egress. Wire the **dormant `
 
 - In `cloudInfer` (or the resolver wrapper), call `recordEgress({ provenance:'inference', provider, model, content_hash, content_length, decision })` — **hash + length only**, never the prompt (`src/db/egress-audit.js` already enforces this).
 - A per-provider **consent flag** (`ai_providers.status` or a `consented_at`): the first time a provider would receive plaintext, the user has explicitly added+activated it — that *is* the consent. Local Ollama needs none (on-box).
-- Keep **local-first default**: `getActive` returning nothing → router stays on Ollama. This preserves the §1-§4 posture: cloud egress is opt-in, now also **audited**.
+- **Zero-config fallback stays local** (§4g): `getActive` returning nothing → router runs on-box Ollama (needs no key), so a fresh vault works offline. Cloud egress is opt-in + **audited** + **jurisdiction-gated** (§4g). This preserves the §1-§4 posture.
 
 ### 4f. Node client library choice
 
 Keep the **hand-rolled `fetch` adapters** (current `cloud.js`/`local.js`) for V1 — zero new dependency, full control of the egress seam, already leak-safe. Reassess **Vercel AI SDK** only if/when we need streaming + unified tool-calling across providers for an in-app agent (a later "Mycelium calls models *with* tools" feature). Document the tripwire so we don't reach for a dep prematurely.
+
+### 4g. Routing policy & jurisdiction (operator decision, 2026-06-04)
+
+The operator set the default routing priority, and it deliberately **inverts the codebase's shipped "local-first"** default — because local models aren't yet good enough to be primary on typical hardware (M1/16 GB ≠ Sonnet-class for ~2-3 yrs, per the compute-landscape research), while EU-sovereign ZDR gives capability *with* privacy.
+
+**Default cascade (when a capable model is needed):** `EU-sovereign ZDR → frontier (Anthropic / OpenAI / Google) → local (test tier)`.
+
+- **Each provider row carries a `jurisdiction` tag** (`local | eu-zdr | us-zdr | us-standard`), shown in the UI. The router prefers the lowest-exposure tier that can do the task: EU-sovereign first; frontier only for what EU-sovereign can't handle (and because those three double as North MCP clients, §4b); local as the opt-in test path.
+- **Sensitivity is a hard boundary, not a knob (fail-closed default).** Content carrying the existing `sensitive` flag is **never sent to a `us-*` provider** — only `eu-zdr` or `local`. Enforced at the egress seam (§4e) alongside `recordEgress`; a blocked send **fails closed** (drops to local, or returns "can't fulfil this privately" — never silently egresses). *(Operator may relax to advisory later; default is hard-block.)*
+- **Zero-config fallback stays local.** No provider configured → the router still runs on-box Ollama (no key needed). So "local-first" survives as the *fallback floor*; "EU-sovereign-first" is the *configured preference*.
+- **Tracks cost/quality too.** The cascade also happens to map quality-per-privacy: EU-ZDR as the ~80% workhorse, frontier for the hard ~20%, local for the experimental edge — the same shape as the legacy cost-router intent (CLAUDE.md "Note on the cost router"); fold per-user budget in when that lands.
+
+Net: §4e and §4g are the two halves of the egress boundary — **§4e records every egress; §4g decides whether it's allowed at all.** A new `jurisdiction` column on `ai_providers` (or a static per-preset map) + the sensitivity check is ~40 LOC at the resolver/seam; add `verify:routing` (asserts a `sensitive` payload + a `us` provider → blocked).
 
 ---
 

@@ -23,7 +23,7 @@ detail lives in the linked docs. Newest-relevant first.
   the cloud seam → S4 North ergonomics (`MYCELIUM_HTTP_HOST` fix for the `0.0.0.0` bind at `server-http.js:278` + opt-in static
   bearer + server `instructions` preamble) → S5 onboarding docs. ~1,020 LOC, no new deps (keep `fetch` adapters; Vercel AI SDK
   deferred). Operator forks: remote reachability (Tailscale-now vs relay vs stdio-only), cred storage shape, audience (self vs
-  product). **NOT YET BUILT — design only.** ⚠️ Branch off this branch's base; CLAUDE.md "empty packages" claim is STALE
+  product). **Routing priority locked 2026-06-04 (§4g):** EU-sovereign ZDR (Regolo/Scaleway) → frontier (Anthropic/OpenAI/Google — also doubly-valuable as North MCP clients) → local (test tier) — **inverts shipped local-first**; `sensitive` hard-blocked from US providers (fail-closed); per-provider `jurisdiction` tag. **NOT YET BUILT — design only.** ⚠️ Branch off this branch's base; CLAUDE.md "empty packages" claim is STALE
   (full `src/` exists).
 
 - **Context Bank Upgrade — design spec (2026-06-02, latest).** Sweep-first-design pass closing the MCP
