@@ -19,6 +19,13 @@
 
 	marked.use({ gfm: true, breaks: true });
 
+	// Phase C: the workspace passes the open doc (deep-link / reload restore) + a
+	// callback to record selection. Replaces this view's old native pushState/popstate.
+	let { doc = null, setParams }: {
+		doc?: string | null;
+		setParams?: (patch: Record<string, unknown>) => void;
+	} = $props();
+
 	// PR 5.10: per-upload sender + channel attribution.
 	interface SourceProvenance {
 		platform?: string;
@@ -126,25 +133,11 @@
 		loading = false;
 		prevFolderId = activeFolderId;
 
-		// Handle browser back/forward
-		function handlePopState(e: PopStateEvent) {
-			if (e.state?.docPath) {
-				const doc = documents.find(d => d.path === e.state.docPath);
-				if (doc) {
-					selectDoc(doc, false);
-				}
-			} else {
-				selectedDoc = null;
-				editing = false;
-			}
-		}
-
 		// Reload after drag-and-drop move
 		function handleDocMoved() {
 			loadDocuments();
 		}
 
-		window.addEventListener('popstate', handlePopState);
 		window.addEventListener('doc-moved', handleDocMoved);
 
 		// Subscribe to the list channel so new agent / importer / bot
@@ -162,7 +155,6 @@
 		});
 
 		return () => {
-			window.removeEventListener('popstate', handlePopState);
 			window.removeEventListener('doc-moved', handleDocMoved);
 			subList.dispose();
 		};
@@ -333,13 +325,13 @@
 		return docs;
 	});
 
-	async function selectDoc(doc: DocListItem, pushHistory = true) {
+	async function selectDoc(doc: DocListItem, updateParams = true) {
 		loadingDoc = true;
 		editing = false;
 		selectedDoc = { ...doc, content: '' };
-		if (browser && pushHistory) {
-			history.pushState({ docPath: doc.path }, '', `/library?doc=${encodeURIComponent(doc.path)}`);
-		}
+		// Phase C: the workspace owns the URL — record the open doc in this tab's
+		// params; the store mirrors it to /library?doc=… and restores it on reload.
+		if (updateParams) setParams?.({ doc: doc.path });
 		try {
 			const res = await api(`/portal/documents/${doc.path}`);
 			if (res.ok) {
@@ -349,6 +341,15 @@
 		} catch {}
 		loadingDoc = false;
 	}
+
+	// Phase C deep-link / reload restore: when this tab's `doc` param names a
+	// document, open it. Guarded against looping with selectDoc's own setParams.
+	$effect(() => {
+		if (doc && doc !== selectedDoc?.path) {
+			const d = documents.find((x) => x.path === doc);
+			if (d) selectDoc(d, false);
+		}
+	});
 
 	function startEditing() {
 		if (!selectedDoc) return;
@@ -1073,7 +1074,7 @@
 			<div class="flex items-start justify-between gap-3">
 				<div class="flex items-start gap-2 sm:gap-3 min-w-0 flex-1">
 					<button
-						onclick={() => { if (browser) { history.back(); } else { selectedDoc = null; editing = false; } }}
+						onclick={() => { selectedDoc = null; editing = false; setParams?.({ doc: null }); }}
 						class="p-1.5 -ml-1.5 mt-0.5 rounded-lg text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)] transition-colors flex-shrink-0"
 						aria-label="Back to library"
 						title="Back to library"

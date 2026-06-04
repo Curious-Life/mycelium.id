@@ -39,10 +39,12 @@
 	<TabStrip
 		tabs={pane.tabs}
 		activeTabId={pane.activeTabId}
+		paneId={pane.id}
 		onfocus={(id) => workspace.focusTab(id)}
 		onclose={(id) => workspace.closeTab(id)}
 		onopen={(viewId) => workspace.openInPane(pane.id, viewId)}
 		onsplit={() => workspace.splitPane(pane.id, 'h')}
+		onreorder={(tabId, toIndex) => workspace.moveTabWithinPane(pane.id, tabId, toIndex)}
 	/>
 	<div class="pane-body">
 		{#if pane.tabs.length === 0}
@@ -64,7 +66,7 @@
 				{@const isActive = tab.id === pane.activeTabId}
 				<div class="tab-host" class:active={isActive} aria-hidden={!isActive}>
 					{#if Comp}
-						<Comp active={isActive} {...tab.params} />
+						<Comp {...tab.params} active={isActive} setParams={(p) => workspace.setTabParams(tab.id, p)} />
 					{:else}
 						<div class="tab-loading"><div class="spinner"></div></div>
 					{/if}

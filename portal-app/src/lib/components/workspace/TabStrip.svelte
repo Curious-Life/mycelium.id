@@ -3,13 +3,15 @@
 	import { REGISTRY } from '$lib/workspace/registry';
 	import type { Tab as TabT } from '$lib/workspace/types';
 
-	let { tabs, activeTabId, onfocus, onclose, onopen, onsplit }: {
+	let { tabs, activeTabId, paneId, onfocus, onclose, onopen, onsplit, onreorder }: {
 		tabs: TabT[];
 		activeTabId: string | null;
+		paneId: string;
 		onfocus: (id: string) => void;
 		onclose: (id: string) => void;
 		onopen: (viewId: string) => void;
 		onsplit?: () => void;
+		onreorder: (tabId: string, toIndex: number) => void;
 	} = $props();
 
 	let menuOpen = $state(false);
@@ -19,14 +21,73 @@
 		menuOpen = false;
 		onopen(id);
 	}
+
+	// ── Drag-to-reorder (pointer-based; the app has no HTML5 DnD / shared drag
+	// util). Move the dragged tab one slot whenever the pointer crosses a
+	// neighbour's midpoint. <5px travel = a click (focus); past it = a drag, whose
+	// trailing click we swallow so it doesn't also focus.
+	let tabsEl = $state<HTMLDivElement | null>(null);
+	let draggingId = $state<string | null>(null);
+	let dragStartX = 0;
+	let started = false;
+	let justDragged = false;
+
+	function onPointerDown(e: PointerEvent) {
+		if (e.button !== 0) return;
+		const target = e.target as HTMLElement;
+		if (target.closest('.tab-close')) return;            // closing, not dragging
+		const el = target.closest('[data-tab-id]') as HTMLElement | null;
+		if (!el) return;
+		draggingId = el.dataset.tabId ?? null;
+		dragStartX = e.clientX;
+		started = false;
+		window.addEventListener('pointermove', onPointerMove);
+		window.addEventListener('pointerup', onPointerUp);
+	}
+	function onPointerMove(e: PointerEvent) {
+		if (draggingId == null || !tabsEl) return;
+		if (!started) {
+			if (Math.abs(e.clientX - dragStartX) < 5) return;
+			started = true;
+			document.body.style.userSelect = 'none';
+			document.body.style.cursor = 'grabbing';
+		}
+		const els = Array.from(tabsEl.querySelectorAll<HTMLElement>('[data-tab-id]'));
+		const from = els.findIndex((x) => x.dataset.tabId === draggingId);
+		if (from < 0) return;
+		if (from < els.length - 1) {
+			const r = els[from + 1].getBoundingClientRect();
+			if (e.clientX > r.left + r.width / 2) return onreorder(draggingId, from + 1);
+		}
+		if (from > 0) {
+			const r = els[from - 1].getBoundingClientRect();
+			if (e.clientX < r.left + r.width / 2) return onreorder(draggingId, from - 1);
+		}
+	}
+	function onPointerUp() {
+		window.removeEventListener('pointermove', onPointerMove);
+		window.removeEventListener('pointerup', onPointerUp);
+		if (started) {
+			document.body.style.userSelect = '';
+			document.body.style.cursor = '';
+			justDragged = true;                              // swallow the trailing click
+			setTimeout(() => (justDragged = false), 0);
+		}
+		draggingId = null;
+		started = false;
+	}
+	function onClickCapture(e: MouseEvent) {
+		if (justDragged) { e.preventDefault(); e.stopPropagation(); }
+	}
 </script>
 
 <div class="tab-strip" role="tablist">
-	<div class="tabs">
+	<div class="tabs" bind:this={tabsEl} onpointerdown={onPointerDown} onclickcapture={onClickCapture}>
 		{#each tabs as tab (tab.id)}
 			<Tab
 				{tab}
 				active={tab.id === activeTabId}
+				dragging={tab.id === draggingId}
 				onfocus={() => onfocus(tab.id)}
 				onclose={() => onclose(tab.id)}
 			/>
