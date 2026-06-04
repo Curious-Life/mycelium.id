@@ -52,7 +52,75 @@
 	onMount(() => {
 		isTauri = typeof window !== 'undefined'
 			&& !!((window as any).__TAURI__ || (window as any).__TAURI_INTERNALS__);
+		loadConnectors();
 	});
+
+	// ── Live connectors (Gmail, Linear, …) ──
+	interface ConnectorStatus {
+		id: string; label: string; provider: string; oauth: boolean; status: string;
+		connectedAt: string | null; lastSyncAt: string | null; lastError: string | null; itemsLastSync: number | null;
+	}
+	let connectors = $state<ConnectorStatus[]>([]);
+	let connectorMsg = $state<string | null>(null);
+	let connectorBusy = $state<string | null>(null);
+	let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+	async function loadConnectors() {
+		try {
+			const res = await api('/portal/connectors');
+			const d = await res.json();
+			connectors = d.connectors || [];
+		} catch { /* connectors are optional */ }
+	}
+
+	function pollConnectors() {
+		if (pollTimer) clearInterval(pollTimer);
+		let n = 0;
+		pollTimer = setInterval(async () => {
+			n += 1;
+			await loadConnectors();
+			if (n > 30 || connectors.some((c) => c.status === 'connected')) { clearInterval(pollTimer!); pollTimer = null; }
+		}, 2000);
+	}
+
+	async function connectConnector(c: ConnectorStatus) {
+		connectorBusy = c.id; connectorMsg = null;
+		try {
+			const res = await api(`/portal/connectors/${c.id}/connect`, { method: 'POST', body: '{}' });
+			const d = await res.json().catch(() => ({}));
+			if (d.authUrl) {
+				window.open(d.authUrl, '_blank', 'width=520,height=680');
+				connectorMsg = `Authorize ${c.label} in the window that opened, then return here.`;
+				pollConnectors();
+			} else if (d.ok) {
+				await loadConnectors();
+			} else if (d.error === 'oauth_not_configured') {
+				connectorMsg = `${c.label} isn't configured yet — its OAuth credentials haven't been set up.`;
+			} else {
+				connectorMsg = `Couldn't connect ${c.label}: ${d.error || 'unknown error'}`;
+			}
+		} catch (e) {
+			connectorMsg = e instanceof Error ? e.message : 'Connect failed';
+		} finally { connectorBusy = null; }
+	}
+
+	async function syncConnector(c: ConnectorStatus) {
+		connectorBusy = c.id; connectorMsg = null;
+		try {
+			const res = await api(`/portal/connectors/${c.id}/sync`, { method: 'POST', body: '{}' });
+			const d = await res.json().catch(() => ({}));
+			if (d.ok) { connectorMsg = `${c.label}: ${d.created} new, ${d.deduped} already saved.`; await loadConnectors(); }
+			else connectorMsg = `Sync failed: ${d.error || 'unknown error'}`;
+		} catch (e) {
+			connectorMsg = e instanceof Error ? e.message : 'Sync failed';
+		} finally { connectorBusy = null; }
+	}
+
+	async function disconnectConnector(c: ConnectorStatus) {
+		connectorBusy = c.id; connectorMsg = null;
+		try { await api(`/portal/connectors/${c.id}/disconnect`, { method: 'POST', body: '{}' }); await loadConnectors(); }
+		catch { /* */ } finally { connectorBusy = null; }
+	}
 
 	const sources: { id: ImportSource; name: string; description: string; accept: string; hint: string }[] = [
 		{ id: 'claude', name: 'Claude', description: 'Import Claude conversation export', accept: '.zip,.json', hint: 'Conversations, projects, memories, and artifacts with automatic deduplication' },
@@ -309,6 +377,37 @@
 				</button>
 			{/each}
 		</div>
+
+		{#if connectors.length}
+			<div class="mt-10">
+				<h2 class="text-sm font-medium text-[var(--color-text-emphasis)] mb-1">Live connections</h2>
+				<p class="text-xs text-[var(--color-text-secondary)] mb-4">Continuously sync from your accounts — items become memories in your mindscape.</p>
+				<div class="grid gap-3">
+					{#each connectors as c}
+						<div class="card p-4 flex items-center justify-between gap-3">
+							<div class="min-w-0">
+								<div class="flex items-center gap-2">
+									<h3 class="text-sm font-medium text-[var(--color-text-emphasis)]">{c.label}</h3>
+									<span class="text-[10px] px-1.5 py-0.5 rounded-full {c.status === 'connected' ? 'bg-jade/15 text-jade' : c.status === 'error' ? 'bg-coral/15 text-coral' : (c.status === 'syncing' || c.status === 'connecting') ? 'bg-[var(--color-accent)]/15 text-[var(--color-accent)]' : 'bg-[var(--color-elevated)] text-[var(--color-text-tertiary)]'}">{c.status}</span>
+								</div>
+								<p class="text-xs text-[var(--color-text-tertiary)] mt-0.5 truncate">
+									{#if c.lastError}{c.lastError}{:else if c.lastSyncAt}Last sync {new Date(c.lastSyncAt).toLocaleString()}{c.itemsLastSync != null ? ` · ${c.itemsLastSync} items` : ''}{:else}Not synced yet{/if}
+								</p>
+							</div>
+							<div class="flex items-center gap-2 shrink-0">
+								{#if c.status === 'disconnected'}
+									<button onclick={() => connectConnector(c)} disabled={connectorBusy === c.id} class="btn btn-secondary text-xs">{connectorBusy === c.id ? 'Connecting…' : 'Connect'}</button>
+								{:else}
+									<button onclick={() => syncConnector(c)} disabled={connectorBusy === c.id} class="btn-ghost text-xs">Sync now</button>
+									<button onclick={() => disconnectConnector(c)} disabled={connectorBusy === c.id} class="btn-ghost text-xs text-coral">Disconnect</button>
+								{/if}
+							</div>
+						</div>
+					{/each}
+				</div>
+				{#if connectorMsg}<p class="text-xs text-[var(--color-text-tertiary)] mt-3">{connectorMsg}</p>{/if}
+			</div>
+		{/if}
 	{:else}
 		<!-- File upload -->
 		<div class="space-y-6">

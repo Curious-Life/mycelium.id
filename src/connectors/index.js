@@ -6,18 +6,22 @@
 
 import { registerAdapter } from './registry.js';
 import { mockAdapter } from './adapters/mock.js';
+import { gmailAdapter } from './adapters/gmail.js';
+import { linearAdapter } from './adapters/linear.js';
 
 let _registered = false;
 
 /**
- * Register built-in adapters exactly once. The mock adapter is only registered
- * when MYCELIUM_CONNECTORS_MOCK=1 (dev/preview) so it never appears in a real
- * vault. Real adapters (gmail, linear) will be registered unconditionally here
- * in Phase 3.
+ * Register built-in adapters exactly once. Gmail + Linear are always available
+ * (they surface as "disconnected" until creds are configured). The mock adapter
+ * is only registered when MYCELIUM_CONNECTORS_MOCK=1 (dev/preview/CI) so it
+ * never appears in a real vault.
  */
 export function registerBuiltinAdapters({ includeMock = process.env.MYCELIUM_CONNECTORS_MOCK === '1' } = {}) {
   if (_registered) return;
   _registered = true;
+  registerAdapter(gmailAdapter);
+  registerAdapter(linearAdapter);
   if (includeMock) registerAdapter(mockAdapter);
 }
 
