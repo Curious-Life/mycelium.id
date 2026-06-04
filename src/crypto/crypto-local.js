@@ -332,6 +332,18 @@ const ENCRYPTED_FIELDS = {
     'raw_response', 'moments_of_interest', 'activity_timeline',
     'chronicle', 'chronicle_cursor', 'anchored_reason',
     'description', 'description_version',
+    // Semantic fingerprints: 256D Nomic centroid + 3D viz centroid. Embeddings
+    // are sensitive (README §7); not SQL-queried (JS cosine only) so encryptable.
+    // cluster.py writes these via d1_batch_encrypted; JS readers decrypt via the
+    // adapter (NOT in NEVER_AUTO_DECRYPT — they're JSON envelopes, not raw bytes).
+    'centroid_256', 'centroid_3d',
+    // Derived cognitive scalars (SEC-3) — the per-territory measurement signal.
+    // cluster.py writes energy/coherence/velocity/point_delta via d1_batch_encrypted;
+    // the (un-ported) vitality stage writes current_vitality. Topology/chronicle
+    // readers sort/filter these in JS over decrypted values. message_count stays
+    // PLAINTEXT (a count + the primary search/ranking key — structural, not content);
+    // current_phase/growth_state are enum labels, also plaintext.
+    'energy', 'coherence', 'velocity', 'current_vitality', 'point_delta',
   ],
 
   // Realms — high-level mind organization. Expanding from just
@@ -487,6 +499,25 @@ const ENCRYPTED_FIELDS = {
     'notes',
   ],
 
+  // cognitive_events — discrete cognitive events (§4.27 phase-lock, regime
+  // shifts, flickering). magnitude (the effect size), detail (per-event JSON:
+  // per-level z-scores / contributing territory IDs) and the human headline are
+  // all ENCRYPTED (numeric magnitude encrypted via the type-agnostic adapter).
+  // event_type/level/severity (enums) + era_id/window_*/timestamps stay
+  // plaintext for WHERE/ORDER; the read path Number()s the decrypted magnitude.
+  cognitive_events: ['magnitude', 'detail', 'headline'],
+
+  // territory_cofire — co-activation strengths reveal cognitive structure (which
+  // themes fire together, how strongly). Pair keys (territory_a/b) + timestamps
+  // stay plaintext for joins; the 4 strength scales are ENCRYPTED. The topology
+  // queries filter/sort/aggregate these in JS (src/db/topology.js) because
+  // non-deterministic ciphertext can't be SQL-compared.
+  territory_cofire: ['cofire_immediate', 'cofire_session', 'cofire_daily', 'cofire_weekly'],
+
+  // territory_neighbors — semantic-neighbor distance reveals structure. Keys +
+  // connection_type stay plaintext; distance (+ shared_entities) ENCRYPTED.
+  territory_neighbors: ['distance', 'shared_entities'],
+
   // topology_metrics — graph-level cognitive shape per era. Each
   // scalar describes the user's mindscape topology; leak reveals
   // structural cognitive state.
@@ -495,6 +526,82 @@ const ENCRYPTED_FIELDS = {
     'max_degree', 'mean_degree',
     'orphan_count', 'bridge_count', 'catchall_count',
     'total_territories', 'total_connections',
+  ],
+
+  // ── T1: topology-graph measurement stages (port from canonical) ──────
+  //
+  // territory_vitality — per-territory behavioral-phase scores written by
+  // pipeline/compute-vitality.js. Every column is a derived cognitive
+  // signal (how much a territory bridges / grows / engages); a leak
+  // fingerprints the shape of the user's mind. ENCRYPT all six metric
+  // scalars. Structural columns stay plaintext: id/user_id/territory_id
+  // (keys), clustering_run_id (era key), computed_at/created_at (time keys),
+  // phase (low-cardinality enum: sparse/active/anchor — used for WHERE/group
+  // in JS). The vitality stage never SQL-filters/sorts on the encrypted
+  // metric columns; topology-tools already reads territory_vitality.* via the
+  // auto-decrypting adapter and Number()-coerces (the read is per-territory by
+  // key, no SQL aggregate over these columns).
+  territory_vitality: [
+    'entropy_diversification', 'connection_growth_rate', 'reach',
+    'cofire_partner_diversity', 'engagement_depth_normalized', 'vitality',
+  ],
+
+  // complexity_snapshots — Lempel-Ziv compressibility of thinking patterns
+  // (pipeline/compute-complexity.js). T1 FIX: level_name was PLAINTEXT in the
+  // canonical (it's a territory/realm NAME — verbatim content) → ENCRYPT it,
+  // matching V1's zero-plaintext-for-content rule (territory_profiles.name is
+  // encrypted too). The metric scalars (normalized + raw LZ, sequence/alphabet
+  // sizes, point_count) are derived cognitive signals → ENCRYPT. Structural
+  // columns stay plaintext: id/user_id/level_id (keys), level (enum:
+  // territory/realm/global), window_start/window_end/computed_at (time keys),
+  // language (enum). The UPSERT conflict target (user_id, level, level_id,
+  // window_end) touches no encrypted column, so the dedup still works.
+  complexity_snapshots: [
+    'level_name',
+    'lz_complexity', 'raw_complexity', 'sequence_length', 'alphabet_size',
+    'point_count',
+  ],
+
+  // frequency_snapshots — windowed cognitive metrics (pipeline/
+  // compute-frequency.py, Python caller-encrypt). The 5 core metrics +
+  // 3 context counts are derived signals → ENCRYPT. Structural columns stay
+  // plaintext: id/user_id (keys), window_start/window_end/computed_at (time
+  // keys), granularity + language (enums). UPSERT conflict (user_id,
+  // window_end, granularity) is all-plaintext. NOTE: this writer is Python —
+  // crypto_local.encrypt_str supplies the envelopes (the JS adapter does NOT
+  // touch Python writes); the JS adapter AUTO-DECRYPTS them on any JS read
+  // (they're not in NEVER_AUTO_DECRYPT). Numbers are stored via repr(float(x))
+  // so JS Number() / Python float() round-trip cleanly.
+  frequency_snapshots: [
+    'coherence', 'entropy', 'compression', 'learning_rate', 'gradient_signal',
+    'point_count', 'territory_count', 'message_count',
+  ],
+
+  // topology_audit_snapshots — graph-health snapshot (pipeline/
+  // topology-audit.js). Mirrors topology_metrics' classification: every
+  // graph-shape scalar is sensitive → ENCRYPT (incl. m2_trend, a categorical
+  // contracting/stable/expanding label derived from the user's data). Keys +
+  // time stay plaintext: id/user_id (keys), run_at/created_at (time),
+  // cluster_version (era-ish tag). The "previous snapshot" read SELECTs
+  // m2_entropy ordered by run_at (plaintext) — the value decrypts via the
+  // adapter and the stage Number()-coerces it before delta math.
+  topology_audit_snapshots: [
+    'total_territories', 'total_connections', 'catchall_count',
+    'orphan_count', 'bridge_count', 'max_degree', 'mean_degree',
+    'degree_gini', 'm2_entropy', 'm2_delta', 'm2_trend',
+  ],
+
+  // topology_audit_findings — per-territory health findings. explanation is a
+  // human sentence about the territory (content) → ENCRYPT; coherence /
+  // bridge_quality / the three counts are derived signals → ENCRYPT.
+  // Structural columns stay plaintext: id/snapshot_id/user_id/territory_id
+  // (keys), finding_type + severity (enums for WHERE/grouping), created_at.
+  // GOTCHA addressed in src/db/topology.js getAuditFindings: it used to
+  // `ORDER BY ... message_count DESC` — message_count is now ciphertext, so
+  // that ORDER BY is removed and the sort moves to JS over decrypted values.
+  topology_audit_findings: [
+    'message_count', 'connection_count', 'connected_realms',
+    'coherence', 'bridge_quality', 'explanation',
   ],
 };
 
@@ -1221,12 +1328,32 @@ async function rewrapEnvelope(encoded, oldMasterKey, newMasterKey) {
 
 // ── Batch field helpers ──
 
+/**
+ * For an ENCRYPTED_FIELDS column, return the plaintext STRING to encrypt, or
+ * null to leave the param untouched. Honors "encrypt everything sensitive" for
+ * ALL value types — not just strings: numbers/bigints are encrypted via their
+ * string repr (they decrypt back to a string; numeric readers Number()-coerce
+ * them — the pattern the Python-encrypted metric scalars already use, and
+ * parseHealthRow does for health_daily). Skips null/undefined, booleans, empty
+ * strings, and values that are already envelopes (idempotent re-writes).
+ *
+ * Before this, the adapter encrypted only strings — so numbers written to an
+ * encrypted column (health_daily metrics, wealth_* amounts, cognitive_events
+ * magnitude) were silently stored PLAINTEXT despite being declared encrypted.
+ */
+function encryptablePlaintext(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') return (value.length > 0 && !isEncrypted(value)) ? value : null;
+  if (typeof value === 'number' || typeof value === 'bigint') return String(value);
+  return null;
+}
+
 async function encryptFields(record, fields, scope, masterKey) {
   const result = { ...record };
   for (const field of fields) {
-    const value = result[field];
-    if (typeof value === 'string' && value.length > 0 && !isEncrypted(value)) {
-      result[field] = await encrypt(value, scope, masterKey);
+    const plain = encryptablePlaintext(result[field]);
+    if (plain !== null) {
+      result[field] = await encrypt(plain, scope, masterKey);
     }
   }
   return result;
@@ -1400,9 +1527,9 @@ async function autoEncryptParams(sql, params, scope, masterKey, userId = null, o
         const paramPos = colToParamIdx.get(colIdx);
         if (paramPos === undefined) continue;
         const absIdx = row * paramsPerRow + paramPos;
-        const value = params[absIdx];
-        if (typeof value === 'string' && value.length > 0 && !isEncrypted(value)) {
-          params[absIdx] = await encryptValue(value);
+        const plain = encryptablePlaintext(params[absIdx]);
+        if (plain !== null) {
+          params[absIdx] = await encryptValue(plain);
         }
       }
     }
@@ -1438,9 +1565,9 @@ async function autoEncryptParams(sql, params, scope, masterKey, userId = null, o
     }
   } else if (parsed.type === 'update') {
     for (const paramIdx of parsed.encryptedParamIndices) {
-      const value = params[paramIdx];
-      if (typeof value === 'string' && value.length > 0 && !isEncrypted(value)) {
-        params[paramIdx] = await encryptValue(value);
+      const plain = encryptablePlaintext(params[paramIdx]);
+      if (plain !== null) {
+        params[paramIdx] = await encryptValue(plain);
       }
     }
   }
@@ -1466,7 +1593,14 @@ async function autoEncryptParams(sql, params, scope, masterKey, userId = null, o
 const NEVER_AUTO_DECRYPT_COLUMNS = new Set([
   'embedding_768',     // mind-search vector envelopes (messages, documents,
                        // territory_profiles, realms, semantic_themes)
-  'nomic_embedding',   // clustering_points 256D blobs (raw bytes, not envelopes)
+  'nomic_embedding',   // clustering_points 256D vector envelopes (SEC-4) —
+                       // caller-encrypted like embedding_768; the typed consumer
+                       // (cluster.py decrypt_vector) decrypts, never the adapter
+  'anchor_vector',     // cognitive_anchor_vectors mean anchor vector envelopes
+                       // (E1, migration 0010) — caller-encrypted float32 vector
+                       // (crypto_local.encrypt_vector); the typed consumer
+                       // (compute-anchors.py decrypt_vector) decrypts, never the
+                       // adapter (double-decrypt-then-JSON-parse would throw)
 ]);
 
 async function autoDecryptResults(rows, masterKey, allowedScopes = null, opts = {}) {

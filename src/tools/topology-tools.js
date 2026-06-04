@@ -175,18 +175,13 @@ export function createTopologyToolsDomain(deps) {
       const fetches = {};
       if (showOrphans) fetches.orphans = fetchOrphans({ scale });
       if (showBridges) fetches.bridges = fetchBridges({ scale });
-      fetches.vitalityMap = db.rawQuery(
-        `SELECT current_phase, COUNT(*) as count, ROUND(AVG(current_vitality), 3) as avg_freq
-         FROM territory_profiles WHERE user_id = ? AND message_count > 0 AND current_vitality IS NOT NULL
-           AND dissolved_at IS NULL
-         GROUP BY current_phase ORDER BY avg_freq DESC`,
-        [userId],
-      ).catch(() => []);
-      fetches.topTerritories = db.rawQuery(
+      // current_vitality is ENCRYPTED (SEC-3) — can't AVG/ORDER BY in SQL. Fetch
+      // the rows (message_count>0 / IS NOT NULL stay valid on plaintext/NULL) and
+      // derive the phase map + top-15 in JS over decrypted values (below).
+      fetches.vitalityRows = db.rawQuery(
         `SELECT territory_id, name, current_vitality, current_phase, message_count, realm_id
-         FROM territory_profiles WHERE user_id = ? AND message_count > 0 AND current_vitality IS NOT NULL
-           AND dissolved_at IS NULL
-         ORDER BY current_vitality DESC LIMIT 15`,
+         FROM territory_profiles
+         WHERE user_id = ? AND message_count > 0 AND current_vitality IS NOT NULL AND dissolved_at IS NULL`,
         [userId],
       ).catch(() => []);
       fetches.audit = db.rawQuery(
@@ -199,6 +194,25 @@ export function createTopologyToolsDomain(deps) {
       const results = await Promise.all(Object.values(fetches));
       const data = {};
       keys.forEach((k, i) => { data[k] = results[i]; });
+
+      // Derive vitality distribution + top territories in JS (current_vitality decrypted).
+      {
+        const vrows = (Array.isArray(data.vitalityRows) ? data.vitalityRows : (data.vitalityRows?.results || []))
+          .map((r) => ({ ...r, current_vitality: Number(r.current_vitality) }))
+          .filter((r) => Number.isFinite(r.current_vitality));
+        const byPhase = new Map();
+        for (const r of vrows) {
+          const g = byPhase.get(r.current_phase) || { current_phase: r.current_phase, count: 0, sum: 0 };
+          g.count += 1; g.sum += r.current_vitality; byPhase.set(r.current_phase, g);
+        }
+        data.vitalityMap = [...byPhase.values()]
+          .map((g) => ({ current_phase: g.current_phase, count: g.count, avg_freq: Math.round((g.sum / g.count) * 1000) / 1000 }))
+          .sort((a, b) => b.avg_freq - a.avg_freq);
+        data.topTerritories = vrows
+          .map((r) => ({ ...r, current_vitality: Math.round(r.current_vitality * 1000) / 1000 }))
+          .sort((a, b) => b.current_vitality - a.current_vitality)
+          .slice(0, 15);
+      }
 
       const sections = ['# Mindscape Structure'];
 
@@ -227,7 +241,14 @@ export function createTopologyToolsDomain(deps) {
       const auditArr = Array.isArray(data.audit) ? data.audit : (data.audit?.results || []);
       const audit = auditArr[0];
       if (audit) {
-        sections.push(`## Topology Health\nM2 entropy: ${audit.m2_entropy} (${audit.m2_trend}) · Gini: ${audit.degree_gini} · ${audit.catchall_count} catch-all · ${audit.orphan_count} orphan`);
+        // T1: topology_audit_snapshots metric columns are ENCRYPTED at rest; the
+        // adapter auto-decrypts them to STRINGS, so Number()-coerce the numerics
+        // for display (m2_trend stays a categorical string). Mirrors SEC-3's
+        // current_vitality handling above.
+        const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+        const m2 = num(audit.m2_entropy), gini = num(audit.degree_gini);
+        const cat = num(audit.catchall_count), orph = num(audit.orphan_count);
+        sections.push(`## Topology Health\nM2 entropy: ${m2 != null ? m2.toFixed(3) : '?'} (${audit.m2_trend}) · Gini: ${gini != null ? gini.toFixed(3) : '?'} · ${cat ?? '?'} catch-all · ${orph ?? '?'} orphan`);
       }
 
       if (data.orphans !== undefined) {
@@ -349,7 +370,10 @@ export function createTopologyToolsDomain(deps) {
       }
 
       if (f) {
-        sections.push(`## Vitality Breakdown\nScore: ${(p.current_vitality || 0).toFixed(3)} (${p.current_phase})\n  entropy_diversification: ${f.entropy_diversification}\n  connection_growth_rate: ${f.connection_growth_rate}\n  reach: ${f.reach}\n  cofire_partner_diversity: ${f.cofire_partner_diversity}`);
+        // T1: territory_vitality metric columns are ENCRYPTED at rest → the
+        // adapter decrypts them to STRINGS. Coerce for display (round to 3dp).
+        const fnum = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.round(n * 1000) / 1000 : v; };
+        sections.push(`## Vitality Breakdown\nScore: ${(p.current_vitality || 0).toFixed(3)} (${p.current_phase})\n  entropy_diversification: ${fnum(f.entropy_diversification)}\n  connection_growth_rate: ${fnum(f.connection_growth_rate)}\n  reach: ${fnum(f.reach)}\n  cofire_partner_diversity: ${fnum(f.cofire_partner_diversity)}`);
       }
 
       if (p.activity_timeline) {

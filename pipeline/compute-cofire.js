@@ -19,7 +19,7 @@
  *   USER_MASTER=<hex> SYSTEM_KEY=<hex> MYCELIUM_DB=./data/vault.db node pipeline/compute-cofire.js
  */
 
-import { getDb } from '../src/db/index.js';
+import { boot } from '../src/index.js';
 
 const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';
 const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
@@ -55,7 +55,11 @@ function decay(daysAgo, halfLife) {
 }
 
 async function run() {
-  const { db, close } = getDb({ dbPath: DB_PATH, userKey: USER_MASTER, systemKey: SYSTEM_KEY, scope: 'personal' });
+  // boot() (NOT getDb-with-hex): unlock() turns the hex keys into CryptoKeys so the
+  // adapter can auto-ENCRYPT the cofire_* columns (SEC-2). getDb-with-hex throws
+  // "argument is not of type CryptoKey" on every encrypted write and the per-row
+  // catch swallows it → territory_cofire silently empty in the spawned-CLI path.
+  const { db, close } = await boot({ dbPath: DB_PATH, userHex: USER_MASTER, systemHex: SYSTEM_KEY, userId: USER_ID, embedder: null });
   const query = (sql, params = []) => db.rawQuery(sql, params).then(r => (Array.isArray(r) ? r : r.results || []));
 
   try {

@@ -11,12 +11,29 @@
 // `handles` (profiles federation) is intentionally omitted from the V1 tool surface.
 import { createHash } from 'node:crypto';
 
-/** Parse a raw health_daily row: decode workout_types JSON; pass numerics through. */
+/** Numeric health_daily columns (all in ENCRYPTED_FIELDS). Now that numeric
+ *  encrypted columns are actually encrypted, decrypt returns them as STRINGS, so
+ *  coerce back to numbers (computeHealthSummary filters on typeof==='number').
+ *  Old plaintext rows (real numbers) pass through Number() unchanged. */
+const HEALTH_NUMERIC = [
+  'sleep_duration_min', 'sleep_in_bed_min', 'sleep_efficiency',
+  'sleep_deep_min', 'sleep_rem_min', 'sleep_core_min', 'sleep_awake_min',
+  'hrv_avg', 'hrv_sleep_avg', 'resting_hr',
+  'steps', 'active_energy_kcal', 'workout_count', 'workout_minutes', 'mindful_minutes',
+];
+
+/** Parse a raw health_daily row: decode workout_types JSON; coerce numeric
+ *  fields to numbers (sleep_start/sleep_end stay strings). */
 export function parseHealthRow(row) {
   if (!row) return null;
   const out = { ...row };
   if (typeof out.workout_types === 'string' && out.workout_types) {
     try { out.workout_types = JSON.parse(out.workout_types); } catch { /* leave string */ }
+  }
+  for (const f of HEALTH_NUMERIC) {
+    if (out[f] === null || out[f] === undefined || out[f] === '') { out[f] = null; continue; }
+    const n = Number(out[f]);
+    out[f] = Number.isFinite(n) ? n : null;
   }
   return out;
 }

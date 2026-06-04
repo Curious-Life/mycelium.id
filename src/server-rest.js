@@ -10,6 +10,7 @@ import { applyMigrations } from './db/migrate.js';
 import { apiRouter } from './api.js';
 import { portalCompatRouter } from './portal-compat.js';
 import { portalMindscapeRouter } from './portal-mindscape.js';
+import { portalMeasurementRouter } from './portal-measurement.js';
 import { portalUploadsRouter } from './portal-uploads.js';
 import { portalProvidersRouter } from './portal-providers.js';
 import { portalHardwareRouter } from './portal-hardware.js';
@@ -94,6 +95,26 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   const v = express();
   v.disable('x-powered-by');
   v.use('/api/v1/portal', portalCompatRouter({ db, userId }));
+  // S1 measurement REST bridge — auth-GATED, fail-closed (the rest of the V1
+  // surface is unauthenticated/localhost-only; this surface decrypts the
+  // sensitive measurement plane, so it resolves the owner ONLY for a genuine
+  // local request and rejects anything proxied from a network. Pattern-B
+  // loopback check (mirrors src/internal-metrics.js precedent): a request is
+  // the owner iff its immediate socket peer is loopback AND no x-forwarded-for
+  // header is present (genuine same-host requests never carry one).
+  // Mounted BEFORE portalMindscapeRouter so the bridge's richer /trajectory/summary
+  // (full headline numbers the vitality page reads) takes precedence over the
+  // mindscape router's lightweight {phase,exploration_ratio} stub — the bridge
+  // response is a superset, so MindscapeView's summary.phase read still works.
+  v.use('/api/v1/portal', portalMeasurementRouter({
+    db, userId,
+    authenticatePortalRequest: (req) => {
+      const ip = req.socket?.remoteAddress || '';
+      const loopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+      if (!loopback || req.headers['x-forwarded-for']) return null;
+      return { id: userId };
+    },
+  }));
   v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath }));
   v.use('/api/v1/portal', portalUploadsRouter({ db, userId, enqueueEnrichment }));
   v.use('/api/v1/portal', portalProvidersRouter({ db, userId }));

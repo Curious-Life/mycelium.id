@@ -13,6 +13,15 @@ this module does not introspect or expand them.
 
 Surface accessed by compute_information_harmonics.py:
     - emit(stage, event, **fields) -> None
+
+Canonical-vs-V1 contract (de-risks the K1/T1 ports): the canonical event_emit
+composes ONE field as f'{stage}_{suffix}'; V1 keeps `stage` and `event` as
+SEPARATE fields. Both have the same 2-positional arity, so a ported canonical
+stage that calls emit('fisher', 'run_start') works unchanged under V1
+(-> {stage:'fisher', event:'run_start'}). V1 has NO stage-template coordinator
+scanning stdout for a composed terminal-event name, so ported stages may keep
+their emit() calls as-is or drop them — neither breaks anything. No functional
+change is needed here; this note records why.
 """
 
 from __future__ import annotations

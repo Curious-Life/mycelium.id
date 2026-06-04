@@ -1,0 +1,55 @@
+{
+  "_metadata": {
+    "generator": "scripts/tests/generate_primitives_fixture.py",
+    "spec": "docs/MEASUREMENT-LAYER-BUILDOUT-PLAN-2026-06-04.md (F1)",
+    "tolerance": 1e-12,
+    "generated_at": "2026-05-06T09:34:45+00:00",
+    "python_version": "3.12.6",
+    "numpy_version": "2.1.1",
+    "note": "Ported verbatim from canonical @mycelium/metrics/test/primitives_fixture.json. Python-reference values; JS primitives must match within tolerance. Regenerate via scripts/tests/generate_primitives_fixture.py after any change to either side."
+  },
+  "entropy": [
+    { "name": "uniform_binary", "p": [0.5, 0.5], "entropyNats": 0.6931471805599453, "entropyBits": 1.0, "entropyNormalized": 1.0 },
+    { "name": "point_mass_binary", "p": [1.0, 0.0], "entropyNats": -0.0, "entropyBits": -0.0, "entropyNormalized": -0.0 },
+    { "name": "uniform_3", "p": [0.3333333333333333, 0.3333333333333333, 0.3333333333333333], "entropyNats": 1.0986122886681096, "entropyBits": 1.584962500721156, "entropyNormalized": 0.9999999999999998 },
+    { "name": "uniform_5", "p": [0.2, 0.2, 0.2, 0.2, 0.2], "entropyNats": 1.6094379124341005, "entropyBits": 2.3219280948873626, "entropyNormalized": 1.0000000000000002 },
+    { "name": "near_uniform_5", "p": [0.18, 0.22, 0.2, 0.21, 0.19], "entropyNats": 1.6069343571536117, "entropyBits": 2.31831622809961, "entropyNormalized": 0.9984444536436312 },
+    { "name": "peaked_5", "p": [0.6, 0.1, 0.1, 0.1, 0.1], "entropyNats": 1.2275294114572126, "entropyBits": 1.7709505944546686, "entropyNormalized": 0.7627069065377661 },
+    { "name": "sparse_with_zero", "p": [0.7, 0.0, 0.3, 0.0], "entropyNats": 0.6108643020548935, "entropyBits": 0.8812908992306927, "entropyNormalized": 0.44064544961534635 },
+    { "name": "almost_point_mass", "p": [0.99, 0.01], "entropyNats": 0.056001534354847345, "entropyBits": 0.08079313589591118, "entropyNormalized": 0.08079313589591118 },
+    { "name": "uniform_10", "p": [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1], "entropyNats": 2.3025850929940455, "entropyBits": 3.321928094887362, "entropyNormalized": 0.9999999999999998 },
+    { "name": "dirichlet_like_8", "p": [0.05, 0.1, 0.15, 0.2, 0.2, 0.15, 0.1, 0.05], "entropyNats": 1.9730014063936128, "entropyBits": 2.8464393446710154, "entropyNormalized": 0.9488131148903386 },
+    { "name": "counts_passed_as_p", "p": [3.0, 5.0, 2.0], "entropyNats": -12.729320789294722, "entropyBits": -18.364527976600282, "entropyNormalized": -11.58672711073255 }
+  ],
+  "l2Normalize": [
+    { "name": "integer_3d", "v": [3.0, 4.0, 0.0], "expected": [0.6, 0.8, 0.0] },
+    { "name": "unit_2d", "v": [1.0, 0.0], "expected": [1.0, 0.0] },
+    { "name": "zero_3d", "v": [0.0, 0.0, 0.0], "expected": [0.0, 0.0, 0.0] },
+    { "name": "negative_2d", "v": [-3.0, 4.0], "expected": [-0.6, 0.8] },
+    { "name": "large_values", "v": [1000.0, 2000.0, 3000.0], "expected": [0.2672612419124244, 0.5345224838248488, 0.8017837257372732] },
+    { "name": "tiny_values", "v": [1e-10, 2e-10, 3e-10], "expected": [0.2672612419124244, 0.5345224838248488, 0.8017837257372731] },
+    { "name": "singleton_5", "v": [5.0], "expected": [1.0] }
+  ],
+  "cosineSim": [
+    { "name": "identical_2d", "a": [1.0, 2.0], "b": [1.0, 2.0], "expected": 1.0 },
+    { "name": "orthogonal_2d", "a": [1.0, 0.0], "b": [0.0, 1.0], "expected": 0.0 },
+    { "name": "antiparallel_2d", "a": [1.0, 0.0], "b": [-1.0, 0.0], "expected": -1.0 },
+    { "name": "typical_3d", "a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0], "expected": 0.9746318461970762 },
+    { "name": "scaled_identical", "a": [2.0, 4.0], "b": [1.0, 2.0], "expected": 1.0 },
+    { "name": "zero_norm_first", "a": [0.0, 0.0], "b": [1.0, 1.0], "expected": 0.0 },
+    { "name": "zero_norm_second", "a": [1.0, 1.0], "b": [0.0, 0.0], "expected": 0.0 },
+    { "name": "both_zero", "a": [0.0, 0.0], "b": [0.0, 0.0], "expected": 0.0 },
+    { "name": "length_mismatch", "a": [1.0, 2.0], "b": [1.0, 2.0, 3.0], "expected": 0.0 },
+    { "name": "high_dim_correlated", "a": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], "b": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], "expected": 1.0 }
+  ],
+  "gini": [
+    { "name": "equal_4", "values": [5.0, 5.0, 5.0, 5.0], "expected": 0.0 },
+    { "name": "equal_with_zeros", "values": [0.0, 0.0, 0.0, 0.0], "expected": 0.0 },
+    { "name": "two_bin_extreme", "values": [0.0, 1.0], "expected": 0.5 },
+    { "name": "typical_unequal", "values": [1.0, 2.0, 3.0, 4.0, 5.0], "expected": 0.26666666666666666 },
+    { "name": "highly_skewed", "values": [0.0, 0.0, 0.0, 0.0, 100.0], "expected": 0.8 },
+    { "name": "realistic_degree_dist", "values": [1, 1, 2, 2, 2, 3, 5, 8, 12, 25], "expected": 0.5459016393442623 },
+    { "name": "empty", "values": [], "expected": 0.0 },
+    { "name": "single_value", "values": [42.0], "expected": 0.0 }
+  ]
+}

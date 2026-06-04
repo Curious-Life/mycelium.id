@@ -30,5 +30,30 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The measurement-layer verify gates (fisher, harmonics, criticality,
+      # coherence, behavioral, anchors, cross-scale-coupling, the *-encryption
+      # gates, …) spawn pipeline/.venv/bin/python3. They are still Tier-1 — they
+      # exercise the AES-GCM crypto + the metric math, NOT the ML clustering
+      # stack. Required deps: numpy/scipy/cryptography (core), python-dotenv
+      # (cluster.py top-level import, reached by the nomic-embedding gate), and
+      # ripser/persim/PyWavelets (the harmonics + §4.24 cross-scale gates seed
+      # enough data to actually exercise the persistence-entropy / Haar-wavelet
+      # paths, so the otherwise-lazy imports DO execute). NOT needed and
+      # deliberately excluded (Tier-2, heavy native wheels, lazy in cluster.py):
+      # faiss-cpu / python-igraph / leidenalg / umap-learn / onnxruntime /
+      # tokenizers / huggingface-hub. Python 3.12 matches the host-verify env.
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Provision pipeline venv (Tier-1 crypto + metrics deps only)
+        run: |
+          python3 -m venv pipeline/.venv
+          pipeline/.venv/bin/python3 -m pip install --upgrade pip
+          pipeline/.venv/bin/python3 -m pip install \
+            'numpy>=1.26,<3' 'scipy>=1.11' 'cryptography>=42' \
+            'python-dotenv>=1.0' 'ripser>=0.6' 'persim>=0.3' 'PyWavelets>=1.6'
+
       - name: Run verify suite
         run: npm run verify

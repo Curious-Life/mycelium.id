@@ -1,12 +1,29 @@
-"""crypto_local.py — local envelope decryption for the V1 single-user vault.
+"""crypto_local.py — local envelope crypto for the V1 single-user vault.
 
-Python port of the decrypt path in ``src/crypto/crypto-local.js`` (itself a
-port of the Cloudflare Worker crypto). Only the read side is implemented —
-the V1 pipeline never *writes* encrypted columns from Python.
+A self-contained, reusable Python codec for the wrapped-DEK envelope used by
+Mycelium. It is a faithful port of BOTH the read and write paths in
+``src/crypto/crypto-local.js`` (itself a port of the Cloudflare Worker crypto),
+so any Python service can encrypt/decrypt vault columns and the result is
+byte-compatible with the JS adapter (envelopes written here decrypt in Node and
+vice-versa).
+
+Public surface:
+    Keys:    load_master_key() · load_system_key()
+    Decrypt: decrypt_bytes() · decrypt_str() · decrypt_safe() · decrypt_vector()
+    Encrypt: encrypt_bytes() · encrypt_str() · encrypt_vector()
+    Util:    is_encrypted()
 
 Envelope format (base64(JSON)):
     { "v": 1|2|3, "s": <scope>, "iv": b64(12B), "ct": b64, "dk": b64,
       optional "u": <userId> (v2/v3), optional "kf": "user"|"system" (v3) }
+
+Crypto invariants (must match the JS side byte-for-byte):
+    - AES-256-GCM, 12-byte random IV, 128-bit tag appended to ciphertext
+      (exactly what WebCrypto's subtle.encrypt produces).
+    - DEK = random 32 bytes, wrapped with AES-KW (RFC 3394, default IV).
+    - HKDF-SHA256, salt = 32 zero bytes, for every key derivation.
+    - Float32 vectors are base64-encoded BEFORE encryption (see encrypt_vector /
+      the JS encodeVector) so the plaintext is base64-ASCII. Little-endian.
 
 Key hierarchy (HKDF-SHA256, salt = 32 zero bytes):
     masterKey
@@ -37,9 +54,16 @@ from typing import Optional
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.keywrap import aes_key_unwrap
+from cryptography.hazmat.primitives.keywrap import aes_key_unwrap, aes_key_wrap
 
 _HKDF_SALT = b"\x00" * 32
+
+# Envelope constants — mirror src/crypto/crypto-local.js (IV_BYTES / DEK_BITS /
+# TAG_LENGTH / ENVELOPE_VERSION). Changing any of these breaks cross-language
+# compatibility, so they live next to the salt as load-bearing constants.
+_ENVELOPE_VERSION = 1   # v1 = scope key derived straight from master (no userId)
+_IV_BYTES = 12          # AES-GCM nonce
+_DEK_BYTES = 32         # 256-bit data-encryption key
 
 # tmpfs path used on the VPS (kept as a fallback for parity with the JS side).
 _TMPFS_KEY_PATH = "/run/mycelium/master.key"
@@ -178,3 +202,184 @@ def decrypt_str(envelope_str: str, master_key: bytes,
                 system_key: Optional[bytes] = None) -> str:
     """Decrypt an envelope whose plaintext is UTF-8 text → str."""
     return decrypt_bytes(envelope_str, master_key, system_key).decode("utf-8")
+
+
+def decrypt_safe(envelope_str, master_key: bytes,
+                 system_key: Optional[bytes] = None) -> Optional[str]:
+    """Best-effort decrypt → str, or ``None`` on ANY failure (wrong key, not an
+    envelope, corrupt ciphertext, non-UTF-8 plaintext).
+
+    Never raises — for bulk reads that tolerate per-row skips (e.g. content
+    encrypted under a rotated key). Callers branch on ``None``.
+    """
+    try:
+        return decrypt_str(envelope_str, master_key, system_key)
+    except Exception:
+        return None
+
+
+def decrypt_vector(envelope_str: str, master_key: bytes, dim: Optional[int] = None,
+                   system_key: Optional[bytes] = None):
+    """Decrypt a vector envelope → contiguous numpy float32 array.
+
+    Inverse of :func:`encrypt_vector`. The envelope plaintext is base64-ASCII of
+    the float32 buffer (see the module docstring), so we decrypt → base64-decode
+    → ``np.frombuffer`` as little-endian float32. If ``dim`` is given the result
+    is truncated to the matryoshka prefix (and validated to be long enough).
+
+    numpy is imported lazily so the rest of the module stays dependency-light for
+    services that only need bytes/str crypto.
+    """
+    import numpy as np
+    raw = base64.b64decode(decrypt_bytes(envelope_str, master_key, system_key))
+    arr = np.frombuffer(raw, dtype="<f4")
+    if dim is not None:
+        if arr.size < dim:
+            raise ValueError(f"vector envelope too short: {arr.size} floats < dim={dim}")
+        arr = arr[:dim]
+    return np.ascontiguousarray(arr, dtype=np.float32)
+
+
+# ── Encrypt (write path) ───────────────────────────────────────────
+#
+# Byte-compatible with ``src/crypto/crypto-local.js``::encrypt /
+# encryptWithSystemKey. Three key-family routings, selected by arguments:
+#   user_id=None, system_key=None  → v1 (scope key ← master_key)            [DEFAULT]
+#   user_id set                    → v2 (scope key ← per-user key ← master) [customer data]
+#   system_key set                 → v3 kf='system' (scope key ← system key)[infra secrets]
+# The pipeline writes vault data (v1, like enrich's encryptVector-without-userId),
+# but the full surface is provided so any service can reuse this module.
+
+
+def _b64(b: bytes) -> str:
+    return base64.b64encode(b).decode("ascii")
+
+
+def encrypt_bytes(plaintext, scope: str, master_key: bytes,
+                  user_id: Optional[str] = None, *,
+                  system_key: Optional[bytes] = None) -> str:
+    """Encrypt bytes/str → base64(JSON) wrapped-DEK envelope (str).
+
+    The output decrypts cleanly in Node via ``crypto-local.js::decrypt`` and here
+    via :func:`decrypt_bytes`. AES-256-GCM with a random DEK + 12-byte IV; the
+    DEK is AES-KW-wrapped under the HKDF-derived scope key.
+    """
+    if isinstance(plaintext, str):
+        plaintext = plaintext.encode("utf-8")
+    elif isinstance(plaintext, (bytearray, memoryview)):
+        plaintext = bytes(plaintext)
+    elif not isinstance(plaintext, bytes):
+        raise TypeError("encrypt_bytes: plaintext must be bytes or str")
+    if not scope:
+        raise ValueError("encrypt_bytes: scope is required")
+    if system_key is None and not master_key:
+        raise ValueError("encrypt_bytes: master_key is required")
+
+    if system_key is not None:
+        scope_key = _derive_system_scope_key(system_key, scope)
+        version, key_family, user = 3, "system", None
+    elif user_id:
+        scope_key = _derive_scope_key(_derive_user_key(master_key, user_id), scope)
+        version, key_family, user = 2, "user", user_id
+    else:
+        scope_key = _derive_scope_key(master_key, scope)
+        version, key_family, user = _ENVELOPE_VERSION, "user", None
+
+    dek = os.urandom(_DEK_BYTES)
+    iv = os.urandom(_IV_BYTES)
+    # AESGCM.encrypt returns ciphertext || 16-byte tag — identical layout to
+    # WebCrypto subtle.encrypt({name:'AES-GCM', tagLength:128}).
+    ct = AESGCM(dek).encrypt(iv, plaintext, None)
+    wrapped_dek = aes_key_wrap(scope_key, dek)
+
+    env = {"v": version, "s": scope, "iv": _b64(iv), "ct": _b64(ct), "dk": _b64(wrapped_dek)}
+    if version == 3:
+        env["kf"] = key_family
+    if user:
+        env["u"] = user
+    # Compact JSON (no spaces) like JSON.stringify; key order is irrelevant since
+    # the reader JSON-parses it back to an object.
+    return base64.b64encode(
+        json.dumps(env, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+
+
+def encrypt_str(text: str, scope: str, master_key: bytes,
+                user_id: Optional[str] = None, *,
+                system_key: Optional[bytes] = None) -> str:
+    """Encrypt a UTF-8 string → envelope (thin alias over :func:`encrypt_bytes`)."""
+    return encrypt_bytes(text, scope, master_key, user_id, system_key=system_key)
+
+
+def _vector_to_f32_bytes(vec) -> bytes:
+    """Coerce a vector (numpy array, bytes-like float32 buffer, or float sequence)
+    to a little-endian float32 byte buffer — matching the JS encodeVector layout
+    (Buffer of Float32Array, LE)."""
+    if isinstance(vec, (bytes, bytearray, memoryview)):
+        return bytes(vec)
+    astype = getattr(vec, "astype", None)
+    if astype is not None:  # numpy array (or array-like with astype/tobytes)
+        return astype("<f4").tobytes()
+    import array
+    return array.array("f", vec).tobytes()  # native endianness == LE on x86/arm
+
+
+def encrypt_vector(vec, scope: str, master_key: bytes,
+                   user_id: Optional[str] = None, *,
+                   system_key: Optional[bytes] = None) -> str:
+    """Encrypt a float32 vector → wrapped-DEK envelope, byte-compatible with the
+    JS ``encryptVector`` (``src/search/ann/decode.js``).
+
+    The float32 buffer is base64-encoded BEFORE encryption (so the envelope
+    plaintext is base64-ASCII), exactly as the JS encodeVector does. Accepts a
+    numpy array, a bytes-like float32 buffer, or any sequence of floats.
+    """
+    b64 = base64.b64encode(_vector_to_f32_bytes(vec)).decode("ascii")
+    return encrypt_str(b64, scope, master_key, user_id, system_key=system_key)
+
+
+# ── Self-test ──────────────────────────────────────────────────────
+# `python3 crypto_local.py` exercises every encrypt/decrypt path round-trip so
+# any reusing service can sanity-check the module standalone (no vault needed).
+if __name__ == "__main__":
+    import sys
+
+    mk = os.urandom(32)
+    sk = os.urandom(32)
+    ok = True
+
+    def _check(name, cond):
+        global ok
+        ok = ok and cond
+        print(f"{'PASS' if cond else 'FAIL'}  {name}")
+
+    # bytes / str round-trips across all three key families.
+    blob = os.urandom(200)
+    _check("v1 bytes round-trip", decrypt_bytes(encrypt_bytes(blob, "personal", mk), mk) == blob)
+    _check("v1 str round-trip", decrypt_str(encrypt_str("héllo 🌱", "personal", mk), mk) == "héllo 🌱")
+    _check("v2 (per-user) round-trip",
+           decrypt_str(encrypt_str("user-scoped", "personal", mk, user_id="u-42"), mk) == "user-scoped")
+    _check("v3 (system-key) round-trip",
+           decrypt_str(encrypt_str("infra-secret", "secrets", mk, system_key=sk), mk, system_key=sk) == "infra-secret")
+    _check("is_encrypted(envelope) is True", is_encrypted(encrypt_str("x", "personal", mk)))
+    _check("is_encrypted(plaintext) is False", not is_encrypted("just a plain string"))
+    _check("decrypt_safe(garbage) → None", decrypt_safe("not-an-envelope", mk) is None)
+
+    # Vector round-trip (numpy + list + bytes inputs).
+    try:
+        import numpy as _np
+        v = (_np.arange(256, dtype=_np.float32) * 0.013) - 1.5
+        env = encrypt_vector(v, "personal", mk)
+        out = decrypt_vector(env, mk, dim=256)
+        _check("vector round-trip (numpy, ≤1e-6)", bool(_np.max(_np.abs(out - v)) <= 1e-6))
+        _check("vector round-trip (list input)",
+               bool(_np.max(_np.abs(decrypt_vector(encrypt_vector(v.tolist(), "personal", mk), mk, dim=256) - v)) <= 1e-6))
+        raw = v.tobytes()
+        _check("vector round-trip (bytes input)",
+               bool(_np.max(_np.abs(decrypt_vector(encrypt_vector(raw, "personal", mk), mk, dim=256) - v)) <= 1e-6))
+    except ImportError:
+        print("SKIP  vector round-trips (numpy not installed)")
+
+    print("=" * 56)
+    print(f"VERDICT: {'GO — crypto_local read+write round-trips clean' if ok else 'NO-GO — see FAIL rows'}")
+    sys.exit(0 if ok else 1)

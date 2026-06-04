@@ -66,6 +66,56 @@ export const CONTRACTS = {
       + 'threshold. Until a window is recorded and clears that threshold, the '
       + 'shape cannot be read.',
   },
+
+  // ── Tier-1 embedding-anchor family (E1, spec §4.5/4.11/4.12/4.13) ───────────
+  // These metrics EXIST and are computed, but they are Tier-1 embedding-geometry
+  // metrics that have NOT cleared the mandatory Construct Validity Protocol (spec
+  // §2.3) — real CVP needs operator human-labeled held-out data, which is not
+  // available. Every row carries cvp_status='pending' + low_confidence=1. The
+  // presentation-contract validator (src/metrics/cvp.js) REFUSES to surface these
+  // as validated while pending; the refusal_mode below is the honest copy.
+  insight_embedding_proximity: {
+    family: '§4.5 insight embedding proximity (Tier-1, CVP-pending)',
+    tier: 1,
+    cvp_status: 'pending',
+    preferred_vocab: 'proximity / resonance (NOT "insight detected")',
+    refusal_mode:
+      'This is a Tier-1 embedding-anchor metric that has NOT been validated. It '
+      + 'measures geometric proximity of your messages to an "insight" seed-phrase '
+      + 'anchor — a heuristic, not a measured construct. It has not cleared the '
+      + 'Construct Validity Protocol (no operator-labeled data), so it is reported '
+      + 'as cvp_status=pending and MUST NOT be presented as detecting insight.',
+  },
+  reflective_embedding_density: {
+    family: '§4.12 reflective embedding density (Tier-1, CVP-pending)',
+    tier: 1,
+    cvp_status: 'pending',
+    preferred_vocab: 'proximity / leaning (NOT "reflection measured")',
+    refusal_mode:
+      'Tier-1 embedding-anchor metric, NOT validated. Fraction of messages near a '
+      + '"reflection" anchor above a PROVISIONAL (un-calibrated) threshold. CVP '
+      + 'pending (no operator labels) → not surfaced as a validated construct.',
+  },
+  inner_territory_presence: {
+    family: '§4.11 inner territory presence (Tier-1, CVP-pending)',
+    tier: 1,
+    cvp_status: 'pending',
+    preferred_vocab: 'proximity / leaning',
+    refusal_mode:
+      'Tier-1 embedding-anchor metric, NOT validated. Mean proximity to the '
+      + 'reflection anchor. CVP pending → not surfaced as a validated construct.',
+  },
+  affective_volatility_within_window: {
+    family: '§4.13 affective volatility within window (Tier-1, CVP-pending)',
+    tier: 1,
+    cvp_status: 'pending',
+    preferred_vocab: 'variation / spread (NOT "mood swings", NOT clinical affect)',
+    refusal_mode:
+      'Tier-1 embedding-anchor metric, NOT validated. Spread of an embedding-based '
+      + 'positive-minus-negative affect proxy across a window. CVP pending (no '
+      + 'operator labels) → not surfaced as a validated construct, and never as a '
+      + 'clinical or diagnostic affect measure.',
+  },
 };
 
 export default CONTRACTS;

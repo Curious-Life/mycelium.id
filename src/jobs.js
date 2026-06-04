@@ -24,10 +24,21 @@ const MAX_MS = Number(process.env.MYCELIUM_GEN_MAX_MS) || 45 * 60 * 1000; // 45 
 const STALL_MS = Number(process.env.MYCELIUM_GEN_STALL_MS) || 5 * 60 * 1000;
 const STAGE_LABELS = {
   1: 'Syncing content…',
-  2: 'Clustering (FAISS + Leiden + Ward)…',
+  2: 'Clustering (k-means + Ward HAC)…',
   3: 'Describing realms + territories…',
   4: 'Computing co-firing…',
-  5: 'Computing information harmonics…',
+  5: 'Mapping semantic neighbors…',
+  6: 'Computing information harmonics…',
+  7: 'Computing Fisher trajectory (movement)…',
+  8: 'Auditing mindscape topology (health)…',
+  9: 'Scoring territory vitality (phases)…',
+  10: 'Measuring thinking complexity…',
+  11: 'Computing frequency metrics…',
+  12: 'Computing cross-scale coupling (rhythms)…',
+  13: 'Detecting criticality (early-warning signals)…',
+  14: 'Computing semantic coherence…',
+  15: 'Computing behavioral-temporal patterns…',
+  16: 'Computing embedding-anchor metrics (Tier-1, CVP-pending)…',
 };
 
 const jobs = new Map();   // jobId → state (kept for status polling)

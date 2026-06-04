@@ -17,6 +17,22 @@
  * @property {(val: any) => any} parseJson — tolerant JSON parse
  */
 
+// Derived cognitive scalars on territory_profiles are ENCRYPTED (SEC-3) — they
+// decrypt to STRINGS, so coerce them back to numbers for any reader that
+// sorts/maths them (chronicles, portal). Parallel to parseHealthRow.
+const TERRITORY_SCALARS = ['energy', 'coherence', 'velocity', 'current_vitality', 'point_delta'];
+function coerceScalars(row) {
+  if (!row) return row;
+  for (const k of TERRITORY_SCALARS) {
+    const v = row[k];
+    if (v !== null && v !== undefined && v !== '') {
+      const n = Number(v);
+      if (Number.isFinite(n)) row[k] = n;
+    }
+  }
+  return row;
+}
+
 export function createTerritoryDocsNamespace(deps) {
   if (!deps) throw new TypeError('createTerritoryDocsNamespace: deps required');
   const { d1Query, parseJson } = deps;
@@ -42,7 +58,7 @@ export function createTerritoryDocsNamespace(deps) {
           AND (tp.description_version IS NULL OR tp.description_version != ?)
         ORDER BY tp.message_count DESC
       `, [userId, currentVersion]);
-      return (result.results || []).map(row => ({
+      return (result.results || []).map(row => coerceScalars({
         ...row,
         signature_patterns: parseJson(row.signature_patterns),
         moments_of_interest: parseJson(row.moments_of_interest),
@@ -65,9 +81,9 @@ export function createTerritoryDocsNamespace(deps) {
                chronicle, chronicle_cursor,
                temporal_saliency, first_active, last_active, days_active
         FROM territory_profiles WHERE user_id = ?
-        ORDER BY energy DESC NULLS LAST
       `, [userId]);
-      return (result.results || []).map(row => ({
+      // energy is ENCRYPTED (SEC-3) → sort in JS (was ORDER BY energy DESC).
+      return (result.results || []).map(row => coerceScalars({
         ...row,
         top_entities: parseJson(row.top_entities),
         signature_patterns: parseJson(row.signature_patterns),
@@ -78,7 +94,7 @@ export function createTerritoryDocsNamespace(deps) {
         moments_of_interest: parseJson(row.moments_of_interest),
         activity_timeline: parseJson(row.activity_timeline),
         centroid_3d: parseJson(row.centroid_3d),
-      }));
+      })).sort((a, b) => (b.energy ?? -Infinity) - (a.energy ?? -Infinity));
     },
 
     /** Get a single territory profile by territory_id */
@@ -89,7 +105,7 @@ export function createTerritoryDocsNamespace(deps) {
       `, [userId, territoryId]);
       const row = (result.results || [])[0];
       if (!row) return null;
-      return {
+      return coerceScalars({
         ...row,
         top_entities: parseJson(row.top_entities),
         signature_patterns: parseJson(row.signature_patterns),
@@ -98,7 +114,7 @@ export function createTerritoryDocsNamespace(deps) {
         agent_can_help_with: parseJson(row.agent_can_help_with),
         agent_would_consult: parseJson(row.agent_would_consult),
         moments_of_interest: parseJson(row.moments_of_interest),
-      };
+      });
     },
 
     /** Upsert dynamics (computed fields, not LLM-generated) */
@@ -256,11 +272,16 @@ export function createTerritoryDocsNamespace(deps) {
       const silentResult = await d1Query(`
         SELECT territory_id, name, essence, energy, growth_state, message_count
         FROM territory_profiles
-        WHERE user_id = ? AND energy > 0.02 AND territory_id NOT IN (${placeholders})
-        ORDER BY energy DESC LIMIT 10
+        WHERE user_id = ? AND territory_id NOT IN (${placeholders})
       `, [userId, ...activeTerritoryIds]);
 
-      const silent = (silentResult.results || []).map(s => ({
+      // energy is ENCRYPTED (SEC-3) → filter (>0.02) + sort + top-10 in JS.
+      const silent = (silentResult.results || [])
+        .map(s => coerceScalars({ ...s }))
+        .filter(s => (s.energy ?? 0) > 0.02)
+        .sort((a, b) => (b.energy ?? 0) - (a.energy ?? 0))
+        .slice(0, 10)
+        .map(s => ({
         territory_id: s.territory_id,
         name: s.name || `Territory ${s.territory_id}`,
         essence: s.essence,

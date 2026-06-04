@@ -32,6 +32,9 @@ huggingface-hub>=0.20
 # degrades gracefully (returns NULL below the N_MIN_VR floor) if absent.
 ripser>=0.6
 persim>=0.3
+# §4.24 cross-scale coupling: Haar wavelet decomposition (harmonics.haar_decompose).
+# Lazy-imported; the wavelet path degrades gracefully if absent.
+PyWavelets>=1.6
 
 # ── Misc ──
 httpx>=0.27              # legacy d1 client (Worker proxy) — unused in V1 single-user path

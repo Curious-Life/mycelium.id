@@ -3,12 +3,20 @@
 Mycelium Semantic Clustering Pipeline
 
 Generates Nomic v1.5 256D embeddings (optimized for clustering),
-runs UMAP + HDBSCAN to assign hierarchical clusters
-(realms → themes → territories → atoms), stabilizes IDs across
-rebuilds via Jaccard matching, detects growth events,
-and writes results back to D1.
+then builds the hierarchy (realms → themes → territories → atoms) with
+spherical k-means (atoms) + Ward agglomerative HAC on child centroids
+(territories/themes/realms). A FAISS k-NN graph is built for NOISE
+DETECTION only; UMAP produces the 3D landscape coords for the render and
+is decoupled from clustering. NOTE: Leiden/leidenalg is imported and
+parameterized (leiden_for_k) but is NOT used in the live hierarchy — it
+was rejected for pathologically imbalanced CPM output (see the Stage 2/3
+comments below). The "UMAP + HDBSCAN" of the original design is gone.
+Stabilizes IDs across rebuilds via Jaccard matching, detects growth
+events, and writes results back to the local encrypted SQLite vault.
 
-Nomic 256D embeddings cached locally as .npy files for fast incremental runs.
+Nomic 256D embeddings cached locally for fast incremental runs — the on-disk
+cache is ENCRYPTED at rest (wrapped-DEK envelope via crypto_local, SEC-4), so no
+plaintext embedding bytes ever touch the disk.
 Search-side 768D embeddings (also Nomic v1.5, derived from the same source)
 live in D1 `embedding_768` columns and are served by mind-search in-process —
 no Vectorize, no Cloudflare AI dependency.
@@ -27,6 +35,7 @@ Env vars:
 import os
 import sys
 import gc
+import io
 import json
 import argparse
 from datetime import datetime, timezone
@@ -71,8 +80,12 @@ CACHE_DIR = Path(__file__).resolve().parent / "cache"
 CACHE_EMBEDDINGS = CACHE_DIR / "nomic_embeddings.npy"
 CACHE_POINT_IDS = CACHE_DIR / "nomic_point_ids.json"
 
-# FAISS + Leiden (replaced UMAP→HDBSCAN — Ada research 2026-04-02)
-KNN_K = 20                       # k-NN graph neighbors
+# Clustering algo (replaced UMAP→HDBSCAN — Ada research 2026-04-02):
+# spherical k-means (atoms) + Ward HAC (territories/themes/realms).
+# The FAISS k-NN graph below feeds NOISE DETECTION only. Leiden/leidenalg
+# is imported + parameterized (leiden_for_k) but NOT called in the live
+# hierarchy (rejected: imbalanced CPM output) — kept for reference/noise.
+KNN_K = 20                       # k-NN graph neighbors (noise detection)
 LEIDEN_SEED = 42                  # fixed seed for determinism
 # Default targets (for ~45K points). Auto-scaled by dataset size in main().
 TARGET_ATOMS = 1500
@@ -125,28 +138,72 @@ def d1_batch_encrypted(statements: list) -> dict:
 
 # ── Nomic Embedding (local, cached) ───────────────────────────────
 
-def _load_cache() -> tuple[list[str], np.ndarray | None]:
-    """Load cached Nomic embeddings from disk."""
-    if CACHE_EMBEDDINGS.exists() and CACHE_POINT_IDS.exists():
+def _clear_cache() -> None:
+    """Remove the on-disk cache files (best-effort; never raises)."""
+    for p in (CACHE_EMBEDDINGS, CACHE_POINT_IDS):
         try:
-            ids = json.loads(CACHE_POINT_IDS.read_text())
-            embs = np.load(str(CACHE_EMBEDDINGS))
-            if len(ids) == len(embs):
-                return ids, embs
-            print("  Warning: cache ID/embedding count mismatch — rebuilding")
-        except Exception as e:
-            print(f"  Warning: cache load failed ({e}) — rebuilding")
+            p.unlink()
+        except (FileNotFoundError, OSError):
+            pass
+
+
+def _load_cache() -> tuple[list[str], np.ndarray | None]:
+    """Decrypt-on-read the local Nomic embedding cache from disk.
+
+    SEC-4 residual: the cache is ENCRYPTED at rest (wrapped-DEK envelope via
+    crypto_local, same ``_NOMIC_SCOPE`` as the clustering_points.nomic_embedding
+    column) — embeddings are sensitive, so no plaintext float bytes touch disk.
+    Both files hold base64(JSON) envelope TEXT, not raw .npy / JSON. A legacy
+    plaintext cache (pre-encryption) or one written under a different key fails to
+    decrypt; we treat that as a miss AND delete the files so stale plaintext never
+    lingers — the run then rebuilds and re-writes them encrypted via _save_cache.
+    """
+    if not (CACHE_EMBEDDINGS.exists() and CACHE_POINT_IDS.exists()):
+        return [], None
+    try:
+        from crypto_local import decrypt_bytes, decrypt_str
+        master_key = _get_master_key()
+        ids = json.loads(decrypt_str(CACHE_POINT_IDS.read_text(), master_key))
+        embs = np.load(io.BytesIO(decrypt_bytes(CACHE_EMBEDDINGS.read_text(), master_key)))
+        if len(ids) == len(embs):
+            return ids, embs
+        print("  Warning: cache ID/embedding count mismatch — rebuilding")
+    except Exception as e:
+        print(f"  Warning: cache load failed ({e}) — rebuilding")
+    # Decrypt/parse failure or mismatch → drop the files (never leave plaintext or
+    # a stale envelope around) and rebuild from the encrypted DB column.
+    _clear_cache()
     return [], None
 
 
 def _save_cache(ids: list[str], embs: np.ndarray) -> None:
-    """Save Nomic embeddings to disk cache."""
+    """Encrypt-on-write the local Nomic embedding cache to disk (see _load_cache).
+
+    The float32 matrix is serialized with np.save *into memory*, then the raw .npy
+    buffer is wrapped in a crypto_local envelope before it touches the disk; the
+    point-id list is likewise encrypted. If the master key is unavailable we skip
+    caching entirely rather than fall back to writing plaintext.
+    """
+    try:
+        from crypto_local import encrypt_bytes, encrypt_str
+        master_key = _get_master_key()
+    except Exception as e:
+        print(f"  Warning: cache save skipped (master key unavailable: {e})")
+        return
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    np.save(str(CACHE_EMBEDDINGS), embs)
-    CACHE_POINT_IDS.write_text(json.dumps(ids))
+    buf = io.BytesIO()
+    np.save(buf, embs)
+    CACHE_EMBEDDINGS.write_text(encrypt_bytes(buf.getvalue(), _NOMIC_SCOPE, master_key))
+    CACHE_POINT_IDS.write_text(encrypt_str(json.dumps(ids), _NOMIC_SCOPE, master_key))
 
 
 _MASTER_KEY_CACHE = None
+
+# Scope tag for clustering_points.nomic_embedding envelopes. Must match the JS
+# writer (pipeline/sync-clustering-points.js NOMIC_SCOPE). decrypt is
+# scope-agnostic, so this only affects key derivation symmetry between the two
+# writers (JS sync + this ONNX-fallback path).
+_NOMIC_SCOPE = "personal"
 
 def _get_master_key():
     """Lazy-load master key from tmpfs (avoids loading when not embedding)."""
@@ -155,6 +212,41 @@ def _get_master_key():
         from crypto_local import load_master_key
         _MASTER_KEY_CACHE = load_master_key()
     return _MASTER_KEY_CACHE
+
+
+def _decode_nomic_embedding(value, master_key):
+    """clustering_points.nomic_embedding → np.float32[NOMIC_DIM] or None.
+
+    SEC-4: new rows store an ENCRYPTED wrapped-DEK envelope (base64 str, written
+    by sync-clustering-points.js / _write_embeddings_to_d1 via encrypt_vector).
+    Legacy rows stored a raw float32 BLOB (native bytes / JSON int list / hex
+    str). Both are handled so a re-cluster across the migration boundary doesn't
+    drop pre-existing points.
+    """
+    if value is None:
+        return None
+    # Encrypted-envelope path (str that parses as our base64(JSON) envelope).
+    if isinstance(value, str):
+        from crypto_local import is_encrypted, decrypt_vector
+        if is_encrypted(value):
+            try:
+                return decrypt_vector(value, master_key, dim=NOMIC_DIM)
+            except Exception:
+                return None
+    # Legacy raw float32 blob (pre-SEC-4). D1/sqlite can hand it back as bytes,
+    # a JSON list of byte ints, or a hex string.
+    blob = value
+    if isinstance(blob, list):
+        blob = bytes(blob)
+    elif isinstance(blob, str):
+        import binascii
+        try:
+            blob = binascii.unhexlify(blob)
+        except Exception:
+            blob = bytes(blob, "latin-1")
+    if isinstance(blob, (bytes, bytearray)) and len(blob) >= NOMIC_DIM * 4:
+        return np.frombuffer(bytes(blob)[:NOMIC_DIM * 4], dtype=np.float32)
+    return None
 
 
 def _fetch_content_for_points(point_ids: list[str], batch_size: int = 50) -> dict[str, str]:
@@ -350,10 +442,19 @@ def _embed_batch(point_ids: list[str], batch_size: int = 50) -> tuple[list[str],
 def _write_embeddings_to_d1(
     point_ids: list[str], embeddings: np.ndarray, dry_run: bool = False,
 ) -> None:
-    """Write Nomic 256D embeddings back to D1 as hex-encoded BLOBs."""
+    """Write Nomic 256D embeddings back to D1 as ENCRYPTED wrapped-DEK envelopes.
+
+    SEC-4: each vector is encrypted via crypto_local.encrypt_vector (byte-compatible
+    with the JS encryptVector) and bound as a TEXT param — NOT the old raw X'<hex>'
+    BLOB. Decrypted on read by _decode_nomic_embedding. Encryption is mandatory
+    (master key is required); there is no plaintext-vector fallback.
+    """
     if dry_run:
         print(f"  (dry run) Would write {len(point_ids)} embeddings to D1")
         return
+
+    from crypto_local import encrypt_vector
+    master_key = _get_master_key()
 
     BATCH = 50
     written = 0
@@ -362,16 +463,17 @@ def _write_embeddings_to_d1(
         statements = []
         for j, pid in enumerate(batch_ids):
             idx = i + j
-            emb_hex = embeddings[idx].astype(np.float32).tobytes().hex()
+            envelope = encrypt_vector(
+                embeddings[idx].astype(np.float32), _NOMIC_SCOPE, master_key)
             # user_id required by the SQL guardian (USER_DATA_TABLES rule):
             # writes to clustering_points must filter by user_id even when
             # the row's `id` is globally unique. Defense in depth against
             # cross-tenant writes; the agent token used by pipeline-health
             # is non-admin so the guardian's admin-bypass doesn't apply.
             statements.append({
-                "sql": f"UPDATE clustering_points SET nomic_embedding = X'{emb_hex}', "
-                       f"embedding_model = 'nomic-v1.5-256d' WHERE id = ? AND user_id = ?",
-                "params": [pid, USER_ID],
+                "sql": "UPDATE clustering_points SET nomic_embedding = ?, "
+                       "embedding_model = 'nomic-v1.5-256d' WHERE id = ? AND user_id = ?",
+                "params": [envelope, pid, USER_ID],
             })
         d1_batch(statements)
         written += len(batch_ids)
@@ -437,6 +539,7 @@ def fetch_all_embeddings(batch_size: int = 100, dry_run: bool = False) -> tuple[
     d1_load = [pid for pid in has_emb if pid not in emb_map]
     if d1_load:
         print(f"  Loading {len(d1_load)} existing embeddings from D1...")
+        master_key = _get_master_key()  # SEC-4: needed to decrypt nomic envelopes
         emb_ids = list(d1_load)
         # D1 caps bound variables per statement at ~100. Keep the batch under
         # that ceiling — 200 used to work on older D1 but now returns 500
@@ -449,24 +552,12 @@ def fetch_all_embeddings(batch_size: int = 100, dry_run: bool = False) -> tuple[
                 batch,
             )
             for r in blob_rows:
-                blob = r.get('nomic_embedding')
-                if not blob:
-                    continue
-                # D1 can return BLOB columns in three shapes depending on
-                # serialization vintage:
-                #   - str:  hex-encoded
-                #   - list: JSON array of byte ints (current Worker behavior)
-                #   - bytes: native (rare, but supported)
-                if isinstance(blob, list):
-                    blob = bytes(blob)
-                elif isinstance(blob, str):
-                    import binascii
-                    try:
-                        blob = binascii.unhexlify(blob)
-                    except Exception:
-                        blob = bytes(blob, 'latin-1')
-                if len(blob) >= NOMIC_DIM * 4:
-                    emb_map[r['id']] = np.frombuffer(blob[:NOMIC_DIM*4], dtype=np.float32)
+                # SEC-4: nomic_embedding is now an encrypted envelope (str) for
+                # new rows, or a legacy raw float32 BLOB for pre-migration rows.
+                # _decode_nomic_embedding handles both and returns float32 or None.
+                vec = _decode_nomic_embedding(r.get('nomic_embedding'), master_key)
+                if vec is not None:
+                    emb_map[r['id']] = vec
             pct = min(100, int((i + len(batch)) / len(emb_ids) * 100))
             print(f"\r  Loading embeddings from D1: {pct}%", end="", flush=True)
         print(f"\r  Loaded {len(emb_map)} embeddings from D1        ")
@@ -1297,7 +1388,7 @@ def compute_and_store_centroids(
         })
 
     for i in range(0, len(statements), 50):
-        d1_batch(statements[i:i+50])
+        d1_batch_encrypted(statements[i:i+50])  # centroid_3d ∈ ENCRYPTED_FIELDS
 
     print(f"  Wrote 3D centroids for {len(statements)} territories")
 
@@ -1335,7 +1426,7 @@ def compute_and_store_centroids_256d(
         })
 
     for i in range(0, len(statements), 50):
-        d1_batch(statements[i:i+50])
+        d1_batch_encrypted(statements[i:i+50])  # centroid_256 ∈ ENCRYPTED_FIELDS
 
     print(f"  Wrote 256D centroids for {len(statements)} territories")
 
@@ -1429,7 +1520,9 @@ def compute_dynamics(
       - energy: attention share (point_count / total)
       - velocity: centroid movement in embedding space vs previous cycle
       - coherence: mean pairwise cosine similarity within territory
-      - growth_state: from growth events (growing/steady/stuck)
+      - growth_state: from growth events (growing/steady). NOTE: 'stuck'
+        is reserved but NOT currently assigned — only formed/grew → growing
+        and stable/dissolved → steady are emitted (see below).
     """
     print("\n  Computing territory dynamics...")
 
@@ -1534,9 +1627,11 @@ def compute_dynamics(
             print(f"    T{p[1]}: energy={p[2]:.4f} coherence={p[3]:.4f} velocity={p[4]:.4f} state={p[5]} pts={p[6]}")
         return
 
-    # Write in batches
+    # Write in batches. energy/coherence/velocity/point_delta ∈ ENCRYPTED_FIELDS
+    # (SEC-3) → route through the Node bridge so they're encrypted; growth_state /
+    # message_count / realm_id in the same UPSERT stay plaintext (not in the set).
     for i in range(0, len(statements), 50):
-        d1_batch(statements[i:i+50])
+        d1_batch_encrypted(statements[i:i+50])
 
     print(f"  Wrote dynamics for {len(statements)} territories")
 

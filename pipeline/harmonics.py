@@ -18,9 +18,15 @@ defensive so it is safe to call directly in tests.
 
 from __future__ import annotations
 
+import math
+import sys
 from typing import Optional
 
 import numpy as np
+from scipy.signal import coherence as scipy_coherence
+from scipy.signal import hilbert as scipy_hilbert
+
+EPS = 1e-12
 
 
 # ── §4.23 information_harmonic_amplitude ──────────────────────────────────
@@ -250,3 +256,148 @@ def persistence_entropy_h0(points) -> Optional[float]:
     # p > 0 guaranteed by the lifetimes>0 filter, so log is finite.
     entropy = float(-np.sum(p * np.log(p)))
     return entropy
+
+
+# ── §4.24 cross_scale_coupling — Hilbert / PAC / PLV / coherence / wavelets ──
+# Library primitives for the cross-scale-coupling family (wired by H1). Pure
+# functions, no I/O. scipy.signal is a hard dep; PyWavelets (haar_decompose) is
+# lazy-imported so this module stays importable on hosts without it (the §4.24
+# wavelet path degrades, mirroring ripser in persistence_entropy_h0). Ported
+# from the canonical scripts/harmonics.py: Tort 2010 PAC, PLV, Welch coherence,
+# Haar DWT. Bands here are temporal aggregation scales, NOT EEG Hz.
+
+def _safe_hilbert(signal) -> np.ndarray:
+    """Analytic signal via Hilbert transform; zeros on empty/constant input.
+
+    scipy.signal.hilbert raises on empty input and is numerically unreliable on
+    zero-variance signals; both are normalized to explicit zeros here.
+    """
+    arr = np.asarray(signal, dtype=np.float64).ravel()
+    if arr.size == 0:
+        return np.zeros(0, dtype=np.complex128)
+    if float(np.std(arr)) < EPS:
+        return np.zeros_like(arr, dtype=np.complex128)
+    return scipy_hilbert(arr)
+
+
+def hilbert_phase(signal) -> np.ndarray:
+    """Instantaneous phase (radians in (-pi, pi]); zeros for constant signals."""
+    analytic = _safe_hilbert(signal)
+    if analytic.size == 0:
+        return np.zeros(0, dtype=np.float64)
+    return np.angle(analytic).astype(np.float64)
+
+
+def hilbert_amplitude(signal) -> np.ndarray:
+    """Instantaneous amplitude (envelope); nonnegative; zeros for constant signals."""
+    analytic = _safe_hilbert(signal)
+    if analytic.size == 0:
+        return np.zeros(0, dtype=np.float64)
+    return np.abs(analytic).astype(np.float64)
+
+
+def pac_tort_2010(low, high, n_bins: int = 18) -> float:
+    """Tort 2010 modulation index for phase-amplitude coupling, in [0, 1].
+
+    phi_low = hilbert_phase(low); A_high = hilbert_amplitude(high); bin A_high by
+    phi_low into n_bins equal-width phase bins; normalize to P; MI = D_KL(P||U) /
+    log(n_bins). 0 = no coupling, 1 = perfect (Tort et al. 2010 J Neurophysiol).
+
+    Length mismatch -> ValueError; n < 2*n_bins -> 0.0 (+stderr note);
+    constant low -> 0.0.
+    """
+    if low is None or high is None:
+        raise ValueError("low and high must not be None")
+    low = np.asarray(low, dtype=np.float64).ravel()
+    high = np.asarray(high, dtype=np.float64).ravel()
+    if low.shape[0] != high.shape[0]:
+        raise ValueError(f"low and high length mismatch: {low.shape[0]} vs {high.shape[0]}")
+    if not isinstance(n_bins, int) or n_bins < 2:
+        raise ValueError(f"n_bins must be int >= 2, got {n_bins!r}")
+    n = low.shape[0]
+    if n < 2 * n_bins:
+        print(f"[harmonics] pac_tort_2010: n={n} < 2*n_bins={2 * n_bins}; returning 0.0", file=sys.stderr)
+        return 0.0
+    if float(np.std(low)) < EPS:
+        return 0.0
+
+    phase = hilbert_phase(low)
+    amp = hilbert_amplitude(high)
+    edges = np.linspace(-math.pi, math.pi, n_bins + 1)
+    bin_idx = np.clip(np.digitize(phase, edges), 1, n_bins) - 1
+
+    mean_amp = np.zeros(n_bins, dtype=np.float64)
+    for b in range(n_bins):
+        mask = bin_idx == b
+        if mask.any():
+            mean_amp[b] = float(amp[mask].mean())
+    total = float(mean_amp.sum())
+    if total < EPS:
+        return 0.0
+    P = mean_amp / total
+    P_clipped = np.where(P > 0, P, EPS)
+    kl = float(np.sum(P * (np.log(P_clipped) - math.log(1.0 / n_bins))))
+    mi = kl / math.log(n_bins)
+    return float(max(0.0, min(1.0, mi)))
+
+
+def phase_locking_value(low, high) -> float:
+    """PLV = |<exp(i*delta_phi)>|, delta_phi = phi_high - phi_low. In [0, 1].
+
+    Length mismatch -> ValueError; empty or constant -> 0.0.
+    """
+    if low is None or high is None:
+        raise ValueError("low and high must not be None")
+    low = np.asarray(low, dtype=np.float64).ravel()
+    high = np.asarray(high, dtype=np.float64).ravel()
+    if low.shape[0] != high.shape[0]:
+        raise ValueError(f"low and high length mismatch: {low.shape[0]} vs {high.shape[0]}")
+    if low.size == 0:
+        return 0.0
+    if float(np.std(low)) < EPS or float(np.std(high)) < EPS:
+        return 0.0
+    delta = hilbert_phase(high) - hilbert_phase(low)
+    return float(max(0.0, min(1.0, float(np.abs(np.mean(np.exp(1j * delta)))))))
+
+
+def spectral_coherence(x, y, fs: float, nperseg: Optional[int] = None):
+    """Magnitude-squared coherence C_xy(f) via Welch's method.
+
+    Returns (frequencies, coherence). Thin wrapper over scipy.signal.coherence.
+    Length mismatch -> ValueError; fs <= 0 -> ValueError.
+    """
+    if x is None or y is None:
+        raise ValueError("x and y must not be None")
+    x = np.asarray(x, dtype=np.float64).ravel()
+    y = np.asarray(y, dtype=np.float64).ravel()
+    if x.shape[0] != y.shape[0]:
+        raise ValueError(f"x and y length mismatch: {x.shape[0]} vs {y.shape[0]}")
+    if fs <= 0:
+        raise ValueError(f"fs must be positive, got {fs}")
+    f, cxy = scipy_coherence(x, y, fs=fs, nperseg=nperseg)
+    return f.astype(np.float64), cxy.astype(np.float64)
+
+
+def haar_decompose(signal, levels: int) -> list:
+    """Multilevel Haar wavelet decomposition (DWT) via PyWavelets.
+
+    Returns [cA_n, cD_n, ..., cD_1] (pywt.wavedec convention). Used for §4.24
+    non-stationarity mitigation. PyWavelets is imported lazily so this module
+    stays importable without it (mirrors ripser in persistence_entropy_h0); the
+    wavelet path then degrades on hosts lacking the wheel.
+
+    levels < 1 -> ValueError; signal too short for the level -> pywt's error.
+    """
+    if signal is None:
+        raise ValueError("signal must not be None")
+    signal = np.asarray(signal, dtype=np.float64).ravel()
+    if not isinstance(levels, int) or levels < 1:
+        raise ValueError(f"levels must be int >= 1, got {levels!r}")
+    try:
+        import pywt
+    except ImportError as e:
+        raise ImportError(
+            "haar_decompose requires PyWavelets (pip install PyWavelets); see pipeline/requirements.txt"
+        ) from e
+    coeffs = pywt.wavedec(signal, "haar", level=levels)
+    return [np.asarray(c, dtype=np.float64) for c in coeffs]
