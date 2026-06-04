@@ -7,6 +7,7 @@
 	import { preparePrfOptions } from '$lib/passkey-prf';
 	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
+	import IntelligenceSection from '$lib/components/settings/IntelligenceSection.svelte';
 
 	interface Settings {
 		timezone: string;
@@ -1557,6 +1558,9 @@
 					{/if}
 				</section>
 			{/if}
+
+			<!-- Intelligence — connect Mycelium's outbound AI to any provider -->
+			<IntelligenceSection />
 
 			<!-- Voice / TTS — provider config + per-voice preview -->
 			<VoiceSection />

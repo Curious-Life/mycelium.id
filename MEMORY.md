@@ -5,6 +5,75 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
+- **AI Interface Layer — OUTBOUND BUILD STARTED (2026-06-04, latest).** Lane deconflicted (don't compete):
+  **relay/remote-MCP** = other session (PRs #45/#46 — `src/remote/*`, `auth.js`, `server-http.js` incl. the `:4711`
+  loopback bind fix `server-http.js:324`, CT-monitor, tunnel/frpc); **import-connectors + encrypted `secrets` API** =
+  other session (#67/#69/#70 — `src/connectors/*`, `src/db/secrets.js`, `src/portal-{settings,connectors,import}.js`).
+  **This branch owns OUTBOUND-LLM only.** ✅ **S0+S1 BUILT + verified:** `ai_providers.credentials` encrypted at rest
+  (`crypto-local.js` ENCRYPTED_FIELDS `ai_providers:['credentials']`), `db.providers` wired (`src/db/index.js` + a new
+  `get(id,userId)` in `src/db/providers.js`), **`src/portal-providers.js`** (`/portal/providers` CRUD + setActive + `/test`
+  via new **`src/inference/probe.js`**) mounted in `server-rest.js`. Claude-subscription-OAuth DROPPED (ToS 2026-02-19);
+  `/auth/{claude,openai}` stubs report not-connected. Gates: **`verify:providers-leak` + `verify:providers` GO**;
+  no-regression GO on foundation/leak/mcp/rest. Cred storage = **encrypt-in-place** (NOT #69's `secrets` table — self-contained,
+  avoids coupling to an unmerged PR; migrate later if wanted). ✅ **S2 BUILT** — `src/inference/resolve.js`
+  `resolveInferenceConfig(db,userId)` maps the active provider → router opts (anthropic/openai), **authoritative over env**
+  (returns `''` for the non-chosen vendor); `custom`/`base_url` deferred to S3; none→`{}` (env→local). Live caller
+  `pipeline/describe-chronicles.js:166` resolves DB-first. `verify:resolve` GO; inference/chronicles no-regression GO.
+  **RELAY MERGED TO MAIN** (`a03e9de`, PRs #45/#46) — merged into this branch (`91bac5b`); only collisions were `server-rest.js`
+  (auto-merged: my providers mount + their remoteRouter coexist) + `package.json` verify chain (resolved: both gate sets). Relay
+  is at `/api/v1/remote/*` — **no collision** with `/portal/providers` or a future `/v1/chat/completions`; `requireAuth()` in
+  `server-http.js` is reusable for the S8 gateway. Connectors/secrets-API did NOT merge (still PR #69) → encrypt-in-place stands.
+  ⚠️ Merge dragged in root debug debris (`_*.mjs` — `_reset-operator`, `_setpw`, `_decode-token`…) from a TEMP commit; left as-is
+  (not my lane), flagged for cleanup on main. ✅ **S3a BUILT** — OpenAI-compatible `base_url` adapter in `src/inference/cloud.js`
+  (`openaiCompatibleInfer`+`resolveChatUrl`, key-optional; covers OpenAI/OpenRouter/Together/Groq/**Regolo+Scaleway EU**/Ollama/
+  LM Studio), `baseUrl`/`jurisdiction` threaded through `router.js`, `resolve.js` maps any base_url provider + tags `jurisdiction`
+  via new `src/inference/presets.js` (regolo/scaleway→eu-zdr, localhost→local, unknown→us-standard fail-safe). `verify:resolve`
+  extended GO; inference/chronicles no-regression GO. ✅ **S3b BUILT** — egress boundary at the router seam: `infer({…,sensitive})`
+  HARD-BLOCKS sensitive content from a `us-*` provider (falls back to local; eu-zdr/local fine — §4g); `onEgress` audits EVERY
+  cloud call (allowed/denied) with provider+jurisdiction+**sha256 hash+length only, never the prompt** (§4e) via new
+  `src/inference/egress.js` `createEgressAuditSink(db,userId)` → general `db.audit` table (NOT the channel-shaped `egress_audit`).
+  `verify:egress` GO. ✅ **"Intelligence" Settings UI BUILT** (separate brick) — `GET /portal/providers/presets` + new
+  `portal-app/.../settings/IntelligenceSection.svelte` (presets grouped EU-sovereign/Local/US + jurisdiction badges,
+  connect/use/test/remove), mounted in SettingsView; **portal build GO** (`npm --prefix portal-app run build` works in this env —
+  install ~10s + build ~30s). **OUTBOUND LANE COMPLETE through S3 + UI.** **NEXT: S8 gateway** (`/v1/chat/completions` on :4711,
+  reuse `requireAuth`; relay makes it remote-reachable; wire `createEgressAuditSink` + pass `sensitive`; v1 non-streaming) + **S6 HW
+  recommender** (§4h). ⚠️ Do NOT edit `src/remote/*`, `src/connectors/*`,
+  `src/db/secrets.js`. Design + Part 8 build status:
+  [`docs/DESIGN-ai-interface-layer-2026-06-04.md`](docs/DESIGN-ai-interface-layer-2026-06-04.md).
+
+- **AI Interface Layer — design spec (2026-06-04, latest).** `/sweep-first-design` (3 cycles + web research + own-eyes
+  reads) designing how Mycelium connects to "other AI providers" both directions + bring-your-own-harness
+  (opencode/odysseus/openclaw — all real OSS MCP+BYO-model). Spec:
+  [`docs/DESIGN-ai-interface-layer-2026-06-04.md`](docs/DESIGN-ai-interface-layer-2026-06-04.md). **Reframe (pivot):** not a
+  greenfield build — it's **two existing-but-disconnected membranes**. NORTH (inbound MCP server) is already generic +
+  spec-compliant (`src/server-http.js` StreamableHTTP+OAuth2.1/DCR/RFC9728, no Claude-specific code) — gap is REACHABILITY
+  (tunnel/relay doc-only) + ONBOARDING, not protocol. SOUTH (outbound `src/inference/*` router → Ollama/BYOK) is built but
+  **DORMANT + DISCONNECTED**: router reads `process.env` not the `ai_providers` table (`src/db/providers.js`); 1 live caller
+  (`pipeline/describe-chronicles.js:166`); the **provider frontend UI already exists** (`portal-app/.../SettingsView.svelte`,
+  `OnboardingGuide.svelte`) but live backend never mounts `/portal/providers*` (port-source: `reference/server-routes/portal-providers.js`).
+  **🚩 Two landmines (blocking):** (1) `ai_providers.credentials` is ABSENT from `ENCRYPTED_FIELDS` (`src/crypto/crypto-local.js`) →
+  BYOK keys store PLAINTEXT (fix: add `ai_providers:['credentials']`, or route via encrypted `secrets` table); (2) the latent
+  Claude-subscription-OAuth path (`auth_type:'oauth'`+`config_dir`) is an Anthropic **ToS violation since 2026-02-19** → drop it,
+  BYOK API key only. **Plan:** S0 encrypt creds → S1 mount providers backend → S2 wire router↔creds → S3 widen via
+  OpenAI-compatible `base_url` (covers OpenAI/OpenRouter/Together/Groq/**Regolo+Scaleway EU**/Ollama/LMStudio) + egress-audit
+  the cloud seam → S4 North ergonomics (`MYCELIUM_HTTP_HOST` fix for the `0.0.0.0` bind at `server-http.js:278` + opt-in static
+  bearer + server `instructions` preamble) → S5 onboarding docs → **S6 hardware-aware local-model recommender** (§4h: `detectHardware`
+  via Tauri-Rust `sysinfo`+Node fallback + dated `models-catalog.json` + `recommendModels` under a RAM headroom budget + one-click
+  `ollama pull`→`local` provider row; native "Cookbook", verified greenfield — no hw-detect/catalog code exists today). **LiteLLM =
+  optional upstream only** (point Mycelium at it as one `custom` base_url); NOT embedded — egress boundary (§4e audit + §4g gate) must
+  stay our code; Open WebUI/AnythingLLM skipped (Mycelium IS the UI+vault). ~1,020 LOC, no new deps (keep `fetch` adapters; Vercel AI SDK
+  deferred). Operator forks: remote reachability (Tailscale-now vs relay vs stdio-only), cred storage shape, audience (self vs
+  product). **Routing priority locked 2026-06-04 (§4g):** EU-sovereign ZDR (Regolo/Scaleway) → frontier (Anthropic/OpenAI/Google — also doubly-valuable as North MCP clients) → local (test tier) — **inverts shipped local-first**; `sensitive` hard-blocked from US providers (fail-closed); per-provider `jurisdiction` tag. **Remote reachability fork resolved → RELAY** (operator 2026-06-04). **Relay + Gateway now fully designed:**
+  [`docs/DESIGN-relay-and-gateway-2026-06-04.md`](docs/DESIGN-relay-and-gateway-2026-06-04.md) (sweep-first, verification table). Relay = TLS-passthrough
+  (TLS terminates on Mac via Caddy/ACME-DNS-01; relay = dumb SNI pipe) — **needs NO OAuth code change** (`MYCELIUM_BASE_URL` already
+  drives discovery `auth.js:30-31`), just Caddy/tunnel config + `MYCELIUM_HTTP_HOST` bind fix (`server-http.js:278` binds 0.0.0.0) +
+  CT-monitor; reuses the existing `<handle>.mycelium.id` publish subdomain, Caddy path-routes `/mcp,/v1,/.well-known,/api/auth`→:4711 and
+  `/p,/s`→:8788. Gateway = `POST /v1/chat/completions` (Bearer-guarded, on :4711, relay-reachable) fronting the South router → harness points
+  BOTH memory(MCP) + model(/v1) at Mycelium ("Mycelium IS the gateway, not LiteLLM"); **v1 NON-streaming** (router single-shot, no SSE in repo;
+  streaming+tools fast-follow); can't enforce `sensitive` hard-block on opaque gateway input (jurisdiction+audit instead). New phases **S7
+  (relay) + S8 (gateway)**, ~400 LOC repo + relay VPS infra. **NOT YET BUILT — design only; next = build (S0 first).** ⚠️ Branch off this branch's base; CLAUDE.md "empty packages" claim is STALE
+  (full `src/` exists).
+
 - **Context Bank Upgrade — design spec (2026-06-02, latest).** Sweep-first-design pass closing the MCP
   context-bank gaps from the design review: forget/redact, facts store, `relatedContext`, entities,
   Tier-2 gating, user salience, unified `ref` handle. **✅ ALL 5 PHASES BUILT + verified (31→27 tools — net slimmer; forget 13/13, facts 17/17, related 7/7, entities 19/19, gating 8/8, cognition 7/7, mindscape 8/8; full `verify` 37× GO). Upgrade COMPLETE; follow-ups only:**
