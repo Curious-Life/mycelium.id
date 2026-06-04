@@ -5,10 +5,18 @@ The fixed sidebar + one-view-at-a-time shell is becoming an **IDE-style workspac
 
 - **Design:** `docs/DESIGN-workspace-shell-2026-06-03.md` (sweep-first: 5 Explore
   sweeps + 6 first-hand reads + 13-row verification table).
-- **Phase A: SHIPPED → main as PR #60 (8ac4b69)**, rebuilt + installed to
-  `/Applications/Mycelium.app`, verified on the **real vault** (132 msgs / 7
-  realms / 11 territories) — tabs render with the live 3D map, zero errors.
-- **Phase B + C: NOT started.** Detailed build plans below.
+- **Phase A: SHIPPED → main as PR #60 (8ac4b69).**
+- **Phase B: SHIPPED → main as PR #62 (fa0dfa7)** — split panes + resizable
+  divider + Recents + empty-pane launcher + focus ring. Rebuilt + installed to
+  `/Applications/Mycelium.app`; verified on the **real vault**: 3D Mindscape |
+  Library side-by-side, **ONE** WebGL context, zero errors.
+- **Phase C: NOT started** — the only remaining workspace phase (§6 plan stands).
+- **LESSON (caused a hidden regression):** running the gate as `npm run verify |
+  tail` MASKS the npm exit code (the pipe returns tail's 0). Phase A silently
+  broke `verify:nav` N8 on main (it asserted the Import *route* had a drop zone,
+  but de-routing moved that UI into `lib/views/ImportView.svelte`); only a
+  non-piped run surfaced it. Fixed in #62. Always capture the real exit:
+  `npm run verify > /tmp/v.log 2>&1; echo $?`.
 
 User-locked decisions: **split panes in ONE window** (no separate OS windows);
 **hybrid sidebar** (sections open tabs + recents + keep "Coming soon").
@@ -122,10 +130,25 @@ not errors). Backend `npm run verify` is unaffected by portal-only changes.
 
 ---
 
-## 5. Phase B — split panes + resize + recents (the plan)
+## 5. Phase B — split panes + resize + recents (SHIPPED, #62)
 
-Goal: the side-by-side layout from the screenshot (e.g. Mindscape | a document),
-a draggable divider, and the Recents list. ~450 LOC.
+**What shipped** (built per the plan below, kept for reference): the state widened
+to a pane TREE (`WorkspaceState.root: WsNode`); `lib/components/workspace/` gained
+`WorkspaceNode.svelte` (recursive: leaf→Pane, split→SplitPane, children passed as
+snippets to dodge a circular import) and `SplitPane.svelte` (draggable divider,
+**imperative** resize like ChatFloat — mutate `flex-basis` during drag, commit
+`sizes` on pointerup, clamp 15–85%). `store.ts` gained tree helpers
+(`findLeaf`/`allLeaves`/`updateLeaf`/`updateSplit`/`replaceLeaf`/`removeLeaf`) +
+`splitPane`/`resizeSplit`/`closePane`/`openInPane`/`focusPane`; `closeTab` now
+**collapses an emptied split** (sibling absorbs) and never empties the whole
+workspace. `Pane.svelte` got a focus ring (multi-pane only) + an **empty-pane
+launcher** (a fresh split shows a section grid). `TabStrip.svelte` got the **⊞
+split** button. The **Recents** region was added to `Sidebar.svelte` (between
+Curious Life and Coming soon; `workspace.recents` is filled on `closeTab`). Cap =
+**4 panes**. **B4 (de-route `spaces/[id]` + Library doc-state) was DEFERRED** —
+not done; those + the other un-migrated routes still render hidden (see §2.3).
+
+Original plan (B1–B5), for reference:
 
 **B1 · Generalize the tree (store + types).**
 - `types.ts`: widen `WorkspaceState.root: LeafPane` → `WsNode` (`LeafPane |
@@ -196,15 +219,31 @@ Own PR.
 
 ## 7. Quick-start for the next session
 
+Workspace **A + B are done + installed**. Two threads remain:
+
+**(a) Workspace Phase C** (the last workspace phase — §6 plan):
 1. Read this handoff + `docs/DESIGN-workspace-shell-2026-06-03.md` (§ the
    tree/SplitPane decisions + the verification table).
-2. `git checkout main && git pull` (Phase A = #60 is in).
-3. Branch `feat/workspace-shell-phase-b`. Start at **B1** (widen the tree).
+2. `git checkout main && git pull` (A=#60, B=#62 are in).
+3. Branch `feat/workspace-shell-phase-c`. Pick the highest-value item first — the
+   **tab↔URL sync** (fixes the close+reload-reopens quirk, §2.2) and **drag-to-
+   reorder/split** are the most visible. Also fold in the deferred **B4**
+   (de-route `spaces/[id]` + Library doc-state) + an **unknown-viewId fallback
+   tab** for the un-migrated routes (§2.3).
 4. Build/verify with the isolated `:8796` preview (the real vault is
    `~/Library/Application Support/id.mycelium.app`; testing must NOT touch its
-   Keychain — use temp `MYCELIUM_KC_*`).
-5. PR per phase (squash-merge after `npm run verify` GO + a preview check), then
-   rebuild + install the `.app` (§3) for the user to feel it.
+   Keychain — use temp `MYCELIUM_KC_*`). **Run verify WITHOUT a `| tail`** (top
+   LESSON) so the exit code is real.
+5. PR (squash-merge after `npm run verify` GO + a preview check), then rebuild +
+   install the `.app` (§3 — WAIT for `:8787` to free before relaunch) for the user.
+
+**(b) Import/connectors revamp** (user-flagged; spawn-task chip created): make
+importing quick — (1) open an **Obsidian vault folder** directly (Tauri fs /
+folder picker → walk `*.md` → ingest), and (2) a **live-connectors framework**
+(OAuth: Gmail, Linear, … that continuously sync, not one-time uploads). Current
+import = `src/portal-uploads.js` (`/upload` ZIP, `/upload/file`) +
+`lib/views/ImportView.svelte` + `ConnectionsChecklist.svelte`; tokens → encrypted
+`secrets` table. Its own effort; sweep-first-design when picked up.
 
 **Adjacent context:** first-run hardening (key-backup / welcome-persist / optional
 passphrase-lock) shipped this session as #57/#58/#59 — see
