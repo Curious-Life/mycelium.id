@@ -246,6 +246,23 @@ hardcodes `clustering_run_id` (canonical-158 tables use `era_id`) → parameteri
 **Sequence:** F1→F5 (foundation) → K1 (keystone) → T1 + H1 → (S1 in parallel) → E1, C1, X1.
 Tasks tracked in the session task list (F1…X1).
 
+- **2026-06-04 v1.9** — **T1 SHIPPED (topology-graph stages) + GREEN.** Ported all 4 from canonical
+  → `pipeline/{compute-vitality.js, compute-complexity.js, topology-audit.js, compute-frequency.py}`
+  (zero schema delta — all 5 target tables already in 0001). Flagged fixes done: vitality
+  magic-constants → vault-derived denominators (realm/theme counts, p90 partner/intra/messages);
+  complexity `level_name` encrypted; frequency decrypts `messages.content` BEFORE gzip; audit stripped
+  of Worker/auth. Encryption: JS stages (vitality/complexity/audit) via ENCRYPTED_FIELDS auto-encrypt;
+  Python frequency via caller-encrypt — every sensitive metric/distribution/explanation encrypted,
+  structural keys/enums/counts plaintext; reworked `src/db/topology.js` getAuditFindings (moved the
+  encrypted message_count ORDER BY to JS) + Number()-coercion in topology-tools.js. Wired Steps 8–11
+  in run-clustering.sh + jobs.js labels 8–11 + 4 verify gates. **Found+fixed a real production bug
+  the encryption sweep introduced:** `compute-cofire.js` + `compute-territory-neighbors.js` opened the
+  vault via `getDb({userKey:<hex>})`, which CANNOT encrypt (subtle.deriveBits needs a CryptoKey) — so
+  once SEC-2 encrypted cofire_*/distance, every CLI-spawned write threw and was swallowed →
+  `territory_cofire`/`territory_neighbors` came out EMPTY in production (the in-process verify gates
+  booted, so they missed it). Fixed both to `boot()`; added `verify:pipeline-cli-encryption`
+  (reproduces the spawned-CLI path). Security-reviewed (adversarial subagent → SHIP). **Full
+  `npm run verify` = 55 GO / 0 NO-GO, exit 0.**
 - **2026-06-04 v1.8** — **K1a SHIPPED (Fisher keystone compute) + GREEN.** Ported the canonical
   Fisher stack → `pipeline/{fisher.py, extract_activations.py, compute-fisher.py}` with the audit
   fixes: **sha256 window-seed** (canonical seeded the null-model RNG with Python's per-process-salted

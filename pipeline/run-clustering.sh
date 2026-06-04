@@ -1,26 +1,27 @@
 #!/bin/bash
 # Mycelium V1 Clustering Cycle — SLIM orchestrator.
 #
-# Runs ONLY the pipeline stages that are present in this repo. The canonical
-# run-clustering.sh referenced 12 scripts; 6 of them (embed-mindscape,
-# topology-audit, compute-vitality, compute-cognitive-fingerprint,
-# compute-frequency, check-milestones) are NOT ported into V1 and are
-# deliberately omitted here rather than referenced as missing files.
+# Runs the pipeline stages present in this repo. The Fisher keystone (Step 7,
+# fisher_trajectory + fisher_milestones) and the T1 topology-graph family
+# (Steps 8–11: topology-audit, vitality, complexity, frequency) are NOW ported,
+# so the tables they write are populated. Stages NOT ported: embed-mindscape,
+# compute-cognitive-fingerprint, check-milestones (milestones come from Step 7).
 # (describe-chronicles WAS ported — it runs in Step 3 below, fail-soft.)
-# Consequence: the tables those 6 stages would write (territory_vitality,
-# topology_audit_*, fisher_trajectory, fisher_milestones,
-# current_vitality/current_phase) stay EMPTY — their read paths return empty.
-# (territory_neighbors NOW has a writer — Step 5 below — so "gaps" works.)
 # See docs/MEASUREMENT-LAYER-STATE-2026-06-04.md for the full as-built map.
 #
 # Present stages, in dependency order:
-#   1. sync     — messages w/ embedding_768 → clustering_points (256D)
-#   2. cluster  — spherical k-means + Ward HAC → realm/theme/territory/atom
-#                 (FAISS k-NN graph = noise detection only; Leiden imported but unused)
-#   3. describe — realm + territory names/essences (local Claude CLI)
-#   4. cofire   — territory co-firing edges (4 timescales, time-decayed)
-#   5. neighbors— territory SEMANTIC neighbors (centroid cosine) → territory_neighbors (gaps)
-#   6. harmonics— information-harmonic / bigram-flow / H0-persistence metrics
+#   1. sync       — messages w/ embedding_768 → clustering_points (256D)
+#   2. cluster    — spherical k-means + Ward HAC → realm/theme/territory/atom
+#                   (FAISS k-NN graph = noise detection only; Leiden imported but unused)
+#   3. describe   — realm + territory names/essences (local Claude CLI)
+#   4. cofire     — territory co-firing edges (4 timescales, time-decayed)
+#   5. neighbors  — territory SEMANTIC neighbors (centroid cosine) → territory_neighbors (gaps)
+#   6. harmonics  — information-harmonic / bigram-flow / H0-persistence metrics
+#   7. fisher     — information-geometry trajectory + milestones (movement pillar)
+#   8. audit      — topology graph health → topology_audit_snapshots + findings
+#   9. vitality   — per-territory behavioral phase → territory_vitality + profile cache
+#  10. complexity — Lempel-Ziv compressibility → complexity_snapshots
+#  11. frequency  — windowed coherence/entropy/compression/learning → frequency_snapshots
 #
 # Single-user: no MINDSCAPE_OWNER_ID / AGENT_ID scope plumbing. Scope is always
 # 'personal'. The vault is the local encrypted SQLite db; the JS stages talk to
@@ -82,37 +83,66 @@ echo "  DB: ${MYCELIUM_DB}  user: ${MYCELIUM_USER_ID}"
 echo "════════════════════════════════════════════════"
 
 echo ""
-echo "Step 1/7: Sync content → clustering_points"
+echo "Step 1/11: Sync content → clustering_points"
 node pipeline/sync-clustering-points.js $DRY_RUN
 
 echo ""
-echo "Step 2/7: Cluster (spherical k-means + Ward HAC; FAISS k-NN = noise only)"
+echo "Step 2/11: Cluster (spherical k-means + Ward HAC; FAISS k-NN = noise only)"
 "$PYTHON" pipeline/cluster.py $DRY_RUN
 
 echo ""
-echo "Step 3/7: Describe realms + territories"
+echo "Step 3/11: Describe realms + territories"
 node pipeline/describe-clusters.js $DRY_RUN
 # Chronicle narration (story / archetype / patterns). Fail-soft: skips if no model.
 node pipeline/describe-chronicles.js $DRY_RUN
 
 echo ""
-echo "Step 4/7: Compute territory co-firing"
+echo "Step 4/11: Compute territory co-firing"
 node pipeline/compute-cofire.js
 
 echo ""
-echo "Step 5/7: Map semantic neighbors (territory gaps)"
+echo "Step 5/11: Map semantic neighbors (territory gaps)"
 node pipeline/compute-territory-neighbors.js
 
 echo ""
-echo "Step 6/7: Compute information harmonics"
+echo "Step 6/11: Compute information harmonics"
 "$PYTHON" pipeline/compute_information_harmonics.py
 
 echo ""
-echo "Step 7/7: Compute Fisher trajectory (information-geometry / movement pillar)"
+echo "Step 7/11: Compute Fisher trajectory (information-geometry / movement pillar)"
 # The keystone: activation distributions → Fisher-Rao geodesic trajectory +
 # milestones. Reads clustering_points + territory_profiles (written by Step 2);
 # uses CLUSTERING_RUN_ID as the era anchor. Skip-existing within an era.
 "$PYTHON" pipeline/compute-fisher.py
+
+# ── T1: topology-graph measurement stages ───────────────────────────────────
+# All four depend on cluster.py output (territories/points written by Step 2) +
+# the co-firing graph (Step 4), so they run AFTER Fisher. Vitality/complexity/
+# audit are JS (in-process src/db adapter); frequency is Python (caller-encrypt
+# via crypto_local, decrypts messages.content before gzip). All write encrypted
+# columns at rest (see ENCRYPTED_FIELDS in src/crypto/crypto-local.js).
+
+echo ""
+echo "Step 8/11: Compute topology audit (graph health: gini / orphans / bridges / M2)"
+# Read-only over the topology graph; writes topology_audit_snapshots + findings.
+# Runs before vitality so vitality could consume audit signal in future (parity
+# with the canonical ordering).
+node pipeline/topology-audit.js
+
+echo ""
+echo "Step 9/11: Compute territory vitality (behavioral phase: sparse/active/anchor)"
+# Combines coherence/energy + co-fire momentum + bridge health into a per-
+# territory vitality score; caches current_vitality/current_phase on profiles.
+node pipeline/compute-vitality.js
+
+echo ""
+echo "Step 10/11: Compute Lempel-Ziv complexity (compressibility of thinking)"
+node pipeline/compute-complexity.js
+
+echo ""
+echo "Step 11/11: Compute frequency metrics (coherence/entropy/compression/learning)"
+# Python: decrypts messages.content before gzip; caller-encrypts the metrics.
+"$PYTHON" pipeline/compute-frequency.py
 
 echo ""
 echo "════════════════════════════════════════════════"

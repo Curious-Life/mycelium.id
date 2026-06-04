@@ -36,7 +36,7 @@
  */
 
 import { pathToFileURL } from 'node:url';
-import { getDb } from '../src/db/index.js';
+import { boot } from '../src/index.js';
 import { cosineSim } from '../src/metrics/primitives.js';
 
 const DEFAULT_TOP_K = 12;
@@ -147,7 +147,11 @@ async function runCli() {
   const minSim = process.env.MYCELIUM_NEIGHBOR_MIN_SIM ? Number(process.env.MYCELIUM_NEIGHBOR_MIN_SIM) : DEFAULT_MIN_SIM;
   const dryRun = process.argv.includes('--dry-run');
 
-  const { db, close } = getDb({ dbPath: DB_PATH, userKey: USER_MASTER, systemKey: SYSTEM_KEY, scope: 'personal' });
+  // boot() (NOT getDb-with-hex): unlock() turns the hex keys into CryptoKeys so the
+  // adapter can auto-ENCRYPT territory_neighbors.distance (SEC-2). getDb-with-hex
+  // throws "not of type CryptoKey" on the encrypted write → neighbors silently
+  // empty in the spawned-CLI path (the in-process verify gate boots, so it passed).
+  const { db, close } = await boot({ dbPath: DB_PATH, userHex: USER_MASTER, systemHex: SYSTEM_KEY, userId: USER_ID, embedder: null });
   try {
     await computeTerritoryNeighbors({ db, userId: USER_ID, topK, minSim, dryRun });
   } finally {

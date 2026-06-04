@@ -30,6 +30,10 @@ const STAGE_LABELS = {
   5: 'Mapping semantic neighbors…',
   6: 'Computing information harmonics…',
   7: 'Computing Fisher trajectory (movement)…',
+  8: 'Auditing mindscape topology (health)…',
+  9: 'Scoring territory vitality (phases)…',
+  10: 'Measuring thinking complexity…',
+  11: 'Computing frequency metrics…',
 };
 
 const jobs = new Map();   // jobId → state (kept for status polling)

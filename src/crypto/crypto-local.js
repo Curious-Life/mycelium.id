@@ -506,6 +506,82 @@ const ENCRYPTED_FIELDS = {
     'orphan_count', 'bridge_count', 'catchall_count',
     'total_territories', 'total_connections',
   ],
+
+  // ── T1: topology-graph measurement stages (port from canonical) ──────
+  //
+  // territory_vitality — per-territory behavioral-phase scores written by
+  // pipeline/compute-vitality.js. Every column is a derived cognitive
+  // signal (how much a territory bridges / grows / engages); a leak
+  // fingerprints the shape of the user's mind. ENCRYPT all six metric
+  // scalars. Structural columns stay plaintext: id/user_id/territory_id
+  // (keys), clustering_run_id (era key), computed_at/created_at (time keys),
+  // phase (low-cardinality enum: sparse/active/anchor — used for WHERE/group
+  // in JS). The vitality stage never SQL-filters/sorts on the encrypted
+  // metric columns; topology-tools already reads territory_vitality.* via the
+  // auto-decrypting adapter and Number()-coerces (the read is per-territory by
+  // key, no SQL aggregate over these columns).
+  territory_vitality: [
+    'entropy_diversification', 'connection_growth_rate', 'reach',
+    'cofire_partner_diversity', 'engagement_depth_normalized', 'vitality',
+  ],
+
+  // complexity_snapshots — Lempel-Ziv compressibility of thinking patterns
+  // (pipeline/compute-complexity.js). T1 FIX: level_name was PLAINTEXT in the
+  // canonical (it's a territory/realm NAME — verbatim content) → ENCRYPT it,
+  // matching V1's zero-plaintext-for-content rule (territory_profiles.name is
+  // encrypted too). The metric scalars (normalized + raw LZ, sequence/alphabet
+  // sizes, point_count) are derived cognitive signals → ENCRYPT. Structural
+  // columns stay plaintext: id/user_id/level_id (keys), level (enum:
+  // territory/realm/global), window_start/window_end/computed_at (time keys),
+  // language (enum). The UPSERT conflict target (user_id, level, level_id,
+  // window_end) touches no encrypted column, so the dedup still works.
+  complexity_snapshots: [
+    'level_name',
+    'lz_complexity', 'raw_complexity', 'sequence_length', 'alphabet_size',
+    'point_count',
+  ],
+
+  // frequency_snapshots — windowed cognitive metrics (pipeline/
+  // compute-frequency.py, Python caller-encrypt). The 5 core metrics +
+  // 3 context counts are derived signals → ENCRYPT. Structural columns stay
+  // plaintext: id/user_id (keys), window_start/window_end/computed_at (time
+  // keys), granularity + language (enums). UPSERT conflict (user_id,
+  // window_end, granularity) is all-plaintext. NOTE: this writer is Python —
+  // crypto_local.encrypt_str supplies the envelopes (the JS adapter does NOT
+  // touch Python writes); the JS adapter AUTO-DECRYPTS them on any JS read
+  // (they're not in NEVER_AUTO_DECRYPT). Numbers are stored via repr(float(x))
+  // so JS Number() / Python float() round-trip cleanly.
+  frequency_snapshots: [
+    'coherence', 'entropy', 'compression', 'learning_rate', 'gradient_signal',
+    'point_count', 'territory_count', 'message_count',
+  ],
+
+  // topology_audit_snapshots — graph-health snapshot (pipeline/
+  // topology-audit.js). Mirrors topology_metrics' classification: every
+  // graph-shape scalar is sensitive → ENCRYPT (incl. m2_trend, a categorical
+  // contracting/stable/expanding label derived from the user's data). Keys +
+  // time stay plaintext: id/user_id (keys), run_at/created_at (time),
+  // cluster_version (era-ish tag). The "previous snapshot" read SELECTs
+  // m2_entropy ordered by run_at (plaintext) — the value decrypts via the
+  // adapter and the stage Number()-coerces it before delta math.
+  topology_audit_snapshots: [
+    'total_territories', 'total_connections', 'catchall_count',
+    'orphan_count', 'bridge_count', 'max_degree', 'mean_degree',
+    'degree_gini', 'm2_entropy', 'm2_delta', 'm2_trend',
+  ],
+
+  // topology_audit_findings — per-territory health findings. explanation is a
+  // human sentence about the territory (content) → ENCRYPT; coherence /
+  // bridge_quality / the three counts are derived signals → ENCRYPT.
+  // Structural columns stay plaintext: id/snapshot_id/user_id/territory_id
+  // (keys), finding_type + severity (enums for WHERE/grouping), created_at.
+  // GOTCHA addressed in src/db/topology.js getAuditFindings: it used to
+  // `ORDER BY ... message_count DESC` — message_count is now ciphertext, so
+  // that ORDER BY is removed and the sort moves to JS over decrypted values.
+  topology_audit_findings: [
+    'message_count', 'connection_count', 'connected_realms',
+    'coherence', 'bridge_quality', 'explanation',
+  ],
 };
 
 // Tables that DO have a 'scope' column — autoEncryptParams will inject

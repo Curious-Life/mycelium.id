@@ -41,6 +41,34 @@ function scaleKey(scale) { return SCALES.has(scale) ? scale : 'weekly'; }
 function numOr0(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
 function rowsOf(r) { return (r && Array.isArray(r.results)) ? r.results : (Array.isArray(r) ? r : []); }
 
+// T1: topology_audit_snapshots / topology_audit_findings have ENCRYPTED metric
+// columns (added to ENCRYPTED_FIELDS); the adapter auto-decrypts them to STRINGS
+// on read, so coerce the numerics back to numbers (NULL/undefined preserved,
+// non-numeric enums like m2_trend/finding_type left untouched). Mirrors
+// src/db/fisher.js coerceNums.
+const AUDIT_SNAPSHOT_NUMERIC = [
+  'total_territories', 'total_connections', 'catchall_count', 'orphan_count',
+  'bridge_count', 'max_degree', 'mean_degree', 'degree_gini',
+  'm2_entropy', 'm2_delta',
+];
+const AUDIT_FINDING_NUMERIC = [
+  'message_count', 'connection_count', 'connected_realms', 'coherence',
+  'bridge_quality',
+];
+function coerceCols(row, fields) {
+  if (!row) return row;
+  for (const f of fields) {
+    const v = row[f];
+    if (v !== null && v !== undefined && typeof v !== 'number') {
+      const n = Number(v);
+      if (!Number.isNaN(n)) row[f] = n;
+    }
+  }
+  return row;
+}
+function coerceAuditNums(row) { return coerceCols(row, AUDIT_SNAPSHOT_NUMERIC); }
+function coerceFindingNums(row) { return coerceCols(row, AUDIT_FINDING_NUMERIC); }
+
 export function createTopologyNamespace(deps) {
   if (!deps) throw new TypeError('createTopologyNamespace: deps required');
   const { d1Query, firstRow, cofireCol } = deps;
@@ -352,7 +380,12 @@ export function createTopologyNamespace(deps) {
          ORDER BY s.run_at DESC LIMIT 1`,
         [params.p_user_id],
       );
-      return firstRow(result);
+      // T1: the snapshot's metric columns are ENCRYPTED at rest; the adapter
+      // auto-decrypts them to STRINGS. Coerce the numerics back to numbers so
+      // downstream consumers (REST/portal) get usable values. m2_trend stays a
+      // string (categorical). critical_count/warning_count come from the
+      // COUNT(*) subqueries (plaintext integers) and need no coercion.
+      return coerceAuditNums(firstRow(result));
     },
 
     async getAuditHistory(params) {
@@ -366,21 +399,31 @@ export function createTopologyNamespace(deps) {
          LIMIT ?`,
         [params.p_user_id, params.p_limit || 30],
       );
-      return result.results || [];
+      // T1: ORDER BY run_at is plaintext (fine); the SELECTed metric columns
+      // decrypt to strings → coerce each row's numerics.
+      return (result.results || []).map(coerceAuditNums);
     },
 
     async getAuditFindings(params) {
+      // T1: message_count is now ENCRYPTED → it cannot be a SQL ORDER BY key
+      // (non-deterministic ciphertext). Sort by the plaintext severity rank in
+      // SQL, then break ties by the DECRYPTED message_count in JS (the adapter
+      // auto-decrypts on read). LIMIT is applied AFTER the JS sort so the top-N
+      // reflects the real (decrypted) ordering.
       const result = await d1Query(
         `SELECT f.*
          FROM topology_audit_findings f
          WHERE f.user_id = ? AND f.snapshot_id = ?
          ORDER BY
-           CASE f.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
-           f.message_count DESC
-         LIMIT ?`,
-        [params.p_user_id, params.p_snapshot_id, params.p_limit || 50],
+           CASE f.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END`,
+        [params.p_user_id, params.p_snapshot_id],
       );
-      return result.results || [];
+      const limit = params.p_limit || 50;
+      const sevRank = (s) => (s === 'critical' ? 0 : s === 'warning' ? 1 : 2);
+      const rows = (result.results || []).map(coerceFindingNums);
+      rows.sort((a, b) => (sevRank(a.severity) - sevRank(b.severity))
+        || ((b.message_count || 0) - (a.message_count || 0)));
+      return rows.slice(0, limit);
     },
 
     async getBridgesWithHealth(params) {

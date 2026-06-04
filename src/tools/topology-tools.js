@@ -241,7 +241,14 @@ export function createTopologyToolsDomain(deps) {
       const auditArr = Array.isArray(data.audit) ? data.audit : (data.audit?.results || []);
       const audit = auditArr[0];
       if (audit) {
-        sections.push(`## Topology Health\nM2 entropy: ${audit.m2_entropy} (${audit.m2_trend}) · Gini: ${audit.degree_gini} · ${audit.catchall_count} catch-all · ${audit.orphan_count} orphan`);
+        // T1: topology_audit_snapshots metric columns are ENCRYPTED at rest; the
+        // adapter auto-decrypts them to STRINGS, so Number()-coerce the numerics
+        // for display (m2_trend stays a categorical string). Mirrors SEC-3's
+        // current_vitality handling above.
+        const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+        const m2 = num(audit.m2_entropy), gini = num(audit.degree_gini);
+        const cat = num(audit.catchall_count), orph = num(audit.orphan_count);
+        sections.push(`## Topology Health\nM2 entropy: ${m2 != null ? m2.toFixed(3) : '?'} (${audit.m2_trend}) · Gini: ${gini != null ? gini.toFixed(3) : '?'} · ${cat ?? '?'} catch-all · ${orph ?? '?'} orphan`);
       }
 
       if (data.orphans !== undefined) {
@@ -363,7 +370,10 @@ export function createTopologyToolsDomain(deps) {
       }
 
       if (f) {
-        sections.push(`## Vitality Breakdown\nScore: ${(p.current_vitality || 0).toFixed(3)} (${p.current_phase})\n  entropy_diversification: ${f.entropy_diversification}\n  connection_growth_rate: ${f.connection_growth_rate}\n  reach: ${f.reach}\n  cofire_partner_diversity: ${f.cofire_partner_diversity}`);
+        // T1: territory_vitality metric columns are ENCRYPTED at rest → the
+        // adapter decrypts them to STRINGS. Coerce for display (round to 3dp).
+        const fnum = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.round(n * 1000) / 1000 : v; };
+        sections.push(`## Vitality Breakdown\nScore: ${(p.current_vitality || 0).toFixed(3)} (${p.current_phase})\n  entropy_diversification: ${fnum(f.entropy_diversification)}\n  connection_growth_rate: ${fnum(f.connection_growth_rate)}\n  reach: ${fnum(f.reach)}\n  cofire_partner_diversity: ${fnum(f.cofire_partner_diversity)}`);
       }
 
       if (p.activity_timeline) {
