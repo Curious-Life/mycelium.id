@@ -58,6 +58,7 @@ import era_skip
 import event_emit
 import d1_client
 import crypto_local
+import stage_crypto
 
 stage_base.load_dotenv(_REPO_ROOT)
 
@@ -469,33 +470,46 @@ def upsert_row(user_id: str, row: dict, querier=None) -> None:
     """Side-effecting: UPSERT one cognitive_metrics_harmonic row.
 
     Querier-injection per compute-fisher.py:380, 411 precedent for testability.
+
+    ENCRYPTION (SEC, 2026-06-04): the §4.23 harmonic-amplitude scalars, the
+    §4.33 bigram-flow scalars, the §4.34 persistence-entropy scalar, and the
+    `notes` string are SENSITIVE → caller-encrypted via stage_crypto.enc (scope
+    'personal', wrapped-DEK envelope; numpy repr(float()) poison-proof). This is
+    the exact pattern compute-cross-scale-coupling.py already uses for the §4.24
+    columns on this same table — a mixed envelope/legacy-plaintext row still
+    loads because the JS read path (autoDecryptResults) passes plaintext through
+    and decrypts envelopes. STRUCTURAL columns stay PLAINTEXT for indexed
+    lookups / WHERE / ORDER BY: user_id, window_end, granularity, language,
+    clustering_run_id, message_count, low_confidence. None → None (NULL stays
+    NULL — no envelope for missing values).
     """
     querier = querier or d1_client.query
+    e = stage_crypto.enc
     params = [
         user_id, row['window_end'], row['granularity'], row['language'], row['clustering_run_id'],
-        # §4.23 (15)
-        row.get('harmonic_amplitude_gamma_k1'), row.get('harmonic_amplitude_gamma_k2'), row.get('harmonic_amplitude_gamma_k3'),
-        row.get('harmonic_amplitude_beta_k1'),  row.get('harmonic_amplitude_beta_k2'),  row.get('harmonic_amplitude_beta_k3'),
-        row.get('harmonic_amplitude_alpha_k1'), row.get('harmonic_amplitude_alpha_k2'), row.get('harmonic_amplitude_alpha_k3'),
-        row.get('harmonic_amplitude_theta_k1'), row.get('harmonic_amplitude_theta_k2'), row.get('harmonic_amplitude_theta_k3'),
-        row.get('harmonic_amplitude_delta_k1'), row.get('harmonic_amplitude_delta_k2'), row.get('harmonic_amplitude_delta_k3'),
-        # §4.33 (25)
-        row.get('mean_crossing_rate_gamma'), row.get('mean_crossing_rate_beta'), row.get('mean_crossing_rate_alpha'),
-        row.get('mean_crossing_rate_theta'), row.get('mean_crossing_rate_delta'),
-        row.get('slope_sign_change_rate_gamma'), row.get('slope_sign_change_rate_beta'), row.get('slope_sign_change_rate_alpha'),
-        row.get('slope_sign_change_rate_theta'), row.get('slope_sign_change_rate_delta'),
-        row.get('autocorrelation_lag1_gamma'), row.get('autocorrelation_lag1_beta'), row.get('autocorrelation_lag1_alpha'),
-        row.get('autocorrelation_lag1_theta'), row.get('autocorrelation_lag1_delta'),
-        row.get('variance_gamma'), row.get('variance_beta'), row.get('variance_alpha'),
-        row.get('variance_theta'), row.get('variance_delta'),
-        row.get('total_spectral_energy_gamma'), row.get('total_spectral_energy_beta'), row.get('total_spectral_energy_alpha'),
-        row.get('total_spectral_energy_theta'), row.get('total_spectral_energy_delta'),
-        # §4.34 (1)
-        row.get('topology_h0_persistence_entropy'),
-        # honesty (3)
+        # §4.23 (15) — ENCRYPTED
+        e(row.get('harmonic_amplitude_gamma_k1')), e(row.get('harmonic_amplitude_gamma_k2')), e(row.get('harmonic_amplitude_gamma_k3')),
+        e(row.get('harmonic_amplitude_beta_k1')),  e(row.get('harmonic_amplitude_beta_k2')),  e(row.get('harmonic_amplitude_beta_k3')),
+        e(row.get('harmonic_amplitude_alpha_k1')), e(row.get('harmonic_amplitude_alpha_k2')), e(row.get('harmonic_amplitude_alpha_k3')),
+        e(row.get('harmonic_amplitude_theta_k1')), e(row.get('harmonic_amplitude_theta_k2')), e(row.get('harmonic_amplitude_theta_k3')),
+        e(row.get('harmonic_amplitude_delta_k1')), e(row.get('harmonic_amplitude_delta_k2')), e(row.get('harmonic_amplitude_delta_k3')),
+        # §4.33 (25) — ENCRYPTED
+        e(row.get('mean_crossing_rate_gamma')), e(row.get('mean_crossing_rate_beta')), e(row.get('mean_crossing_rate_alpha')),
+        e(row.get('mean_crossing_rate_theta')), e(row.get('mean_crossing_rate_delta')),
+        e(row.get('slope_sign_change_rate_gamma')), e(row.get('slope_sign_change_rate_beta')), e(row.get('slope_sign_change_rate_alpha')),
+        e(row.get('slope_sign_change_rate_theta')), e(row.get('slope_sign_change_rate_delta')),
+        e(row.get('autocorrelation_lag1_gamma')), e(row.get('autocorrelation_lag1_beta')), e(row.get('autocorrelation_lag1_alpha')),
+        e(row.get('autocorrelation_lag1_theta')), e(row.get('autocorrelation_lag1_delta')),
+        e(row.get('variance_gamma')), e(row.get('variance_beta')), e(row.get('variance_alpha')),
+        e(row.get('variance_theta')), e(row.get('variance_delta')),
+        e(row.get('total_spectral_energy_gamma')), e(row.get('total_spectral_energy_beta')), e(row.get('total_spectral_energy_alpha')),
+        e(row.get('total_spectral_energy_theta')), e(row.get('total_spectral_energy_delta')),
+        # §4.34 (1) — ENCRYPTED
+        e(row.get('topology_h0_persistence_entropy')),
+        # honesty: message_count / low_confidence stay PLAINTEXT; notes ENCRYPTED
         row.get('message_count', 0),
         1 if row.get('low_confidence') else 0,
-        row.get('notes'),
+        e(row.get('notes')),
     ]
     querier(HARMONIC_UPSERT_SQL, params)
 

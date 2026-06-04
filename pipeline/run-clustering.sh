@@ -87,33 +87,33 @@ echo "  DB: ${MYCELIUM_DB}  user: ${MYCELIUM_USER_ID}"
 echo "════════════════════════════════════════════════"
 
 echo ""
-echo "Step 1/15: Sync content → clustering_points"
+echo "Step 1/16: Sync content → clustering_points"
 node pipeline/sync-clustering-points.js $DRY_RUN
 
 echo ""
-echo "Step 2/15: Cluster (spherical k-means + Ward HAC; FAISS k-NN = noise only)"
+echo "Step 2/16: Cluster (spherical k-means + Ward HAC; FAISS k-NN = noise only)"
 "$PYTHON" pipeline/cluster.py $DRY_RUN
 
 echo ""
-echo "Step 3/15: Describe realms + territories"
+echo "Step 3/16: Describe realms + territories"
 node pipeline/describe-clusters.js $DRY_RUN
 # Chronicle narration (story / archetype / patterns). Fail-soft: skips if no model.
 node pipeline/describe-chronicles.js $DRY_RUN
 
 echo ""
-echo "Step 4/15: Compute territory co-firing"
+echo "Step 4/16: Compute territory co-firing"
 node pipeline/compute-cofire.js
 
 echo ""
-echo "Step 5/15: Map semantic neighbors (territory gaps)"
+echo "Step 5/16: Map semantic neighbors (territory gaps)"
 node pipeline/compute-territory-neighbors.js
 
 echo ""
-echo "Step 6/15: Compute information harmonics"
+echo "Step 6/16: Compute information harmonics"
 "$PYTHON" pipeline/compute_information_harmonics.py
 
 echo ""
-echo "Step 7/15: Compute Fisher trajectory (information-geometry / movement pillar)"
+echo "Step 7/16: Compute Fisher trajectory (information-geometry / movement pillar)"
 # The keystone: activation distributions → Fisher-Rao geodesic trajectory +
 # milestones. Reads clustering_points + territory_profiles (written by Step 2);
 # uses CLUSTERING_RUN_ID as the era anchor. Skip-existing within an era.
@@ -127,24 +127,24 @@ echo "Step 7/15: Compute Fisher trajectory (information-geometry / movement pill
 # columns at rest (see ENCRYPTED_FIELDS in src/crypto/crypto-local.js).
 
 echo ""
-echo "Step 8/15: Compute topology audit (graph health: gini / orphans / bridges / M2)"
+echo "Step 8/16: Compute topology audit (graph health: gini / orphans / bridges / M2)"
 # Read-only over the topology graph; writes topology_audit_snapshots + findings.
 # Runs before vitality so vitality could consume audit signal in future (parity
 # with the canonical ordering).
 node pipeline/topology-audit.js
 
 echo ""
-echo "Step 9/15: Compute territory vitality (behavioral phase: sparse/active/anchor)"
+echo "Step 9/16: Compute territory vitality (behavioral phase: sparse/active/anchor)"
 # Combines coherence/energy + co-fire momentum + bridge health into a per-
 # territory vitality score; caches current_vitality/current_phase on profiles.
 node pipeline/compute-vitality.js
 
 echo ""
-echo "Step 10/15: Compute Lempel-Ziv complexity (compressibility of thinking)"
+echo "Step 10/16: Compute Lempel-Ziv complexity (compressibility of thinking)"
 node pipeline/compute-complexity.js
 
 echo ""
-echo "Step 11/15: Compute frequency metrics (coherence/entropy/compression/learning)"
+echo "Step 11/16: Compute frequency metrics (coherence/entropy/compression/learning)"
 # Python: decrypts messages.content before gzip; caller-encrypts the metrics.
 "$PYTHON" pipeline/compute-frequency.py
 
@@ -157,20 +157,30 @@ echo "Step 11/15: Compute frequency metrics (coherence/entropy/compression/learn
 # fisher (Step 7) because it reads the trajectory series.
 
 echo ""
-echo "Step 12/15: Compute cross-scale coupling (§4.24 PAC/PLV/coherence + Wasserstein)"
+echo "Step 12/16: Compute cross-scale coupling (§4.24 PAC/PLV/coherence + Wasserstein)"
 "$PYTHON" pipeline/compute-cross-scale-coupling.py
 
 echo ""
-echo "Step 13/15: Compute criticality (CSD early-warning + phase-lock + flickering events)"
+echo "Step 13/16: Compute criticality (CSD early-warning + phase-lock + flickering events)"
 "$PYTHON" pipeline/compute-criticality.py
 
 echo ""
-echo "Step 14/15: Compute coherence (semantic/discourse consecutive-pair cosine)"
+echo "Step 14/16: Compute coherence (semantic/discourse consecutive-pair cosine)"
 "$PYTHON" pipeline/compute-coherence.py
 
 echo ""
-echo "Step 15/15: Compute behavioral-temporal (diurnal pattern + session cadence)"
+echo "Step 15/16: Compute behavioral-temporal (diurnal pattern + session cadence)"
 "$PYTHON" pipeline/compute-behavioral.py
+
+# ── Embedding-anchor family (E1, Tier-1) ─────────────────────────────────────
+# Embeds the versioned construct seed sets via the embed-service (the SAME Nomic
+# service that produced messages.embedding_768), stores the mean anchor vectors
+# ENCRYPTED, then computes the §4.5/4.11/4.12/4.13 cosine-proximity metrics per
+# window. CVP (spec §2.3) is NOT calibrated (needs operator labels) → every row
+# is cvp_status='pending' + low_confidence=1 and is NOT surfaced as validated.
+echo ""
+echo "Step 16/16: Compute embedding-anchor metrics (§4.5/4.11/4.12/4.13; Tier-1, CVP-pending)"
+ANCHOR_EMBEDDER="${ANCHOR_EMBEDDER:-http}" "$PYTHON" pipeline/compute-anchors.py
 
 echo ""
 echo "════════════════════════════════════════════════"

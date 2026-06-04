@@ -25,3 +25,19 @@ export {
 } from './primitives.js';
 
 export { CONTRACTS, default as contracts } from './contracts.js';
+
+export {
+  runCVP,
+  pearson,
+  residualize,
+  validatePresentation,
+  assertNotSurfacedUnlessValidated,
+  CVP_THRESHOLDS,
+  TIER1_EMBEDDING_FAMILIES,
+} from './cvp.js';
+
+// Wire the contracts registry into the CVP validator (avoids an import cycle:
+// cvp.js holds an optional ref instead of importing contracts.js directly).
+import { CONTRACTS as _CONTRACTS } from './contracts.js';
+import { _setContractsRef } from './cvp.js';
+_setContractsRef(_CONTRACTS);

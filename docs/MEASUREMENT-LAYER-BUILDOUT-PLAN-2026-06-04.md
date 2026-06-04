@@ -246,6 +246,25 @@ hardcodes `clustering_run_id` (canonical-158 tables use `era_id`) → parameteri
 **Sequence:** F1→F5 (foundation) → K1 (keystone) → T1 + H1 → (S1 in parallel) → E1, C1, X1.
 Tasks tracked in the session task list (F1…X1).
 
+- **2026-06-04 v2.2** — **E1 + X1 SHIPPED + legacy-harmonics plaintext gap CLOSED + GREEN. Buildout
+  complete (modulo operator-data CVP calibration).** (A) Legacy harmonics writer
+  (compute_information_harmonics.py §4.23/4.33/4.34, 41 scalars + notes) now caller-encrypted via
+  stage_crypto.enc — closes the last plaintext-at-rest gap; verify:harmonics-encryption (2932 values
+  envelopes at rest). (B) **E1 embedding-anchor family** (Tier-1, greenfield): versioned seed-phrase
+  anchor definitions (pipeline/anchors/definitions.py), pluggable embedder (HttpEmbedder→Nomic :8091
+  prod / deterministic StubEmbedder for CI), anchor vectors stored ENCRYPTED (crypto_local.encrypt_vector,
+  added to NEVER_AUTO_DECRYPT) in cognitive_anchor_vectors, per-window cosine-to-anchor metrics
+  (§4.5/4.11/4.12/4.13) → cognitive_metrics_anchor. **CVP-GATED: every anchor metric stored
+  cvp_status='pending' + low_confidence=1 and NOT surfaced via the S1 bridge** (the spec's mandatory
+  Construct Validity gate needs operator human-labeled data → honest pending state, nothing faked).
+  (C) **X1 CVP harness** (src/metrics/cvp.js: discriminant/incremental/confound-neutralization per spec
+  §2.3; returns 'pending' not a fabricated 'pass' when labels absent) + presentation-contract validator
+  (assertNotSurfacedUnlessValidated refuses any Tier-1 metric lacking a contract OR cvp_status==='pass';
+  contracts added for the 4 anchor families). migrations/0010; wired Step 16 + jobs.js + 3 verify gates.
+  Security-reviewed (adversarial subagent → SHIP, no findings): no un-CVP'd Tier-1 metric can reach the
+  human; anchor_vector/embedding_768 cannot leak plaintext. **Full `npm run verify` = 63 GO / 0 NO-GO,
+  exit 0.** REMAINING (operator-gated, by design): CVP calibration of the anchor metrics needs your
+  labeled held-out data; production anchor embedding needs the Nomic embed-service running.
 - **2026-06-04 v2.1** — **H1 + C1 + coherence + behavioral-temporal SHIPPED (compute-only families) + GREEN.**
   Built to the recovered spec, all over EXISTING data (no embedder/LLM/new dep): **H1** §4.24 cross-scale
   coupling (PAC/PLV/spectral-coherence on 4 adjacent embedding-distance band pairs, reusing the F2

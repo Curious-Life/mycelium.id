@@ -1575,6 +1575,11 @@ const NEVER_AUTO_DECRYPT_COLUMNS = new Set([
   'nomic_embedding',   // clustering_points 256D vector envelopes (SEC-4) —
                        // caller-encrypted like embedding_768; the typed consumer
                        // (cluster.py decrypt_vector) decrypts, never the adapter
+  'anchor_vector',     // cognitive_anchor_vectors mean anchor vector envelopes
+                       // (E1, migration 0010) — caller-encrypted float32 vector
+                       // (crypto_local.encrypt_vector); the typed consumer
+                       // (compute-anchors.py decrypt_vector) decrypts, never the
+                       // adapter (double-decrypt-then-JSON-parse would throw)
 ]);
 
 async function autoDecryptResults(rows, masterKey, allowedScopes = null, opts = {}) {

@@ -38,6 +38,7 @@ const STAGE_LABELS = {
   13: 'Detecting criticality (early-warning signals)…',
   14: 'Computing semantic coherence…',
   15: 'Computing behavioral-temporal patterns…',
+  16: 'Computing embedding-anchor metrics (Tier-1, CVP-pending)…',
 };
 
 const jobs = new Map();   // jobId → state (kept for status polling)
