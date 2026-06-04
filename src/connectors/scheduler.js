@@ -17,7 +17,15 @@ import { createPkce, createState, buildAuthUrl, exchangeCode } from './oauth.js'
 const MAX_ITEMS_PER_SYNC = 500;
 const MAX_RECENT_RUNS = 10;   // per-connector run log kept in :state (audit-lite)
 const MAX_BACKOFF_SHIFT = 4;  // a persistently-idle connector backs off to base × 2^4 = 16×
+const DEFAULT_DAILY_ITEM_LIMIT = 2000; // cost backstop per connector per UTC day (beyond the per-pass cap)
 const nowIso = () => new Date().toISOString();
+const todayUtc = () => nowIso().slice(0, 10);
+
+/** Per-connection daily item budget (env-overridable; non-positive/invalid → default). */
+export function dailyItemLimit() {
+  const n = Number(process.env.MYCELIUM_CONNECTOR_DAILY_ITEMS);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_DAILY_ITEM_LIMIT;
+}
 
 /**
  * When a connector is next due for a periodic sync. A connector whose recent
@@ -53,6 +61,9 @@ export function createConnectorRunner({ db, userId, enqueueEnrichment }) {
         itemsUpdated: st.itemsUpdated ?? null,
         itemsDeduped: st.itemsDeduped ?? null,
         idleStreak: st.idleStreak ?? 0,
+        budgetDate: st.budgetDate || null,
+        itemsToday: st.budgetDate === todayUtc() ? (st.itemsToday ?? 0) : 0,
+        dailyItemLimit: dailyItemLimit(),
         lastRun: st.lastRun || null,
         recentRuns: Array.isArray(st.recentRuns) ? st.recentRuns : [],
       });
@@ -130,6 +141,23 @@ export function createConnectorRunner({ db, userId, enqueueEnrichment }) {
     running.add(id);
     const startedMs = Date.now();
     try {
+      // Daily-budget rollover + gate — a cost backstop for big backfills, on top
+      // of the per-pass MAX_ITEMS_PER_SYNC. itemsToday resets on a UTC date change.
+      const today = todayUtc();
+      const limit = dailyItemLimit();
+      let itemsToday = state.budgetDate === today ? (Number(state.itemsToday) || 0) : 0;
+      if (itemsToday >= limit) {
+        // Spent for today → skip the pull entirely and back off; resume tomorrow.
+        const at = nowIso();
+        const run = { at, ok: true, skipped: 'daily_budget', pulled: 0, durationMs: Date.now() - startedMs };
+        const recentRuns = [run, ...(Array.isArray(state.recentRuns) ? state.recentRuns : [])].slice(0, MAX_RECENT_RUNS);
+        await store.patchState(id, {
+          status: 'connected', lastError: null, budgetDate: today, itemsToday,
+          idleStreak: (Number(state.idleStreak) || 0) + 1, lastRun: run, recentRuns,
+        });
+        return { ok: true, pulled: 0, created: 0, updated: 0, deduped: 0, skipped: 'daily_budget' };
+      }
+
       await store.patchState(id, { status: 'syncing', lastError: null });
       let tokens = await store.getTokens(id);
       if (adapter.ensureFreshToken && tokens) {
@@ -145,6 +173,7 @@ export function createConnectorRunner({ db, userId, enqueueEnrichment }) {
       if (items.length > MAX_ITEMS_PER_SYNC) {
         console.warn(`[connectors] ${id}: pulled ${items.length} items, capped at ${MAX_ITEMS_PER_SYNC} this pass`);
       }
+      itemsToday += items.length; // count toward today's budget (provider-fetch cost)
       const finishedAt = nowIso();
       const run = { at: finishedAt, ok: true, pulled: items.length, created, updated, deduped, durationMs: Date.now() - startedMs };
       const recentRuns = [run, ...(Array.isArray(state.recentRuns) ? state.recentRuns : [])].slice(0, MAX_RECENT_RUNS);
@@ -158,6 +187,7 @@ export function createConnectorRunner({ db, userId, enqueueEnrichment }) {
         status: 'connected', lastSyncAt: finishedAt, lastOkAt: finishedAt, lastError: null, lastErrorAt: null,
         cursor: nextCursor ?? state.cursor,
         itemsLastSync: items.length, itemsCreated: created, itemsUpdated: updated, itemsDeduped: deduped,
+        budgetDate: today, itemsToday,
         idleStreak, lastRun: run, recentRuns,
       };
       await store.patchState(id, patch);

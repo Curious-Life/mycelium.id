@@ -56,13 +56,33 @@
 	});
 
 	// ── Live connectors (Gmail, Linear, …) ──
+	interface ConnectorRun {
+		at: string; ok: boolean; pulled?: number; created?: number; updated?: number; deduped?: number; skipped?: string; error?: string; durationMs?: number;
+	}
 	interface ConnectorStatus {
 		id: string; label: string; provider: string; oauth: boolean; status: string;
 		connectedAt: string | null; lastSyncAt: string | null; lastError: string | null; itemsLastSync: number | null;
+		lastOkAt?: string | null; lastErrorAt?: string | null; idleStreak?: number;
+		itemsCreated?: number | null; itemsUpdated?: number | null; itemsDeduped?: number | null;
+		budgetDate?: string | null; itemsToday?: number; dailyItemLimit?: number;
+		lastRun?: ConnectorRun | null; recentRuns?: ConnectorRun[];
 	}
 	let connectors = $state<ConnectorStatus[]>([]);
 	let connectorMsg = $state<string | null>(null);
 	let connectorBusy = $state<string | null>(null);
+
+	// Relative time for connector freshness (e.g. "3h ago"). Empty for missing/invalid.
+	function fmtAgo(iso: string | null | undefined): string {
+		if (!iso) return '';
+		const ms = Date.now() - new Date(iso).getTime();
+		if (!Number.isFinite(ms) || ms < 0) return '';
+		const m = Math.floor(ms / 60000);
+		if (m < 1) return 'just now';
+		if (m < 60) return `${m}m ago`;
+		const h = Math.floor(m / 60);
+		if (h < 24) return `${h}h ago`;
+		return `${Math.floor(h / 24)}d ago`;
+	}
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 	async function loadConnectors() {
@@ -391,14 +411,14 @@
 									<span class="text-[10px] px-1.5 py-0.5 rounded-full {c.status === 'connected' ? 'bg-jade/15 text-jade' : c.status === 'error' ? 'bg-coral/15 text-coral' : (c.status === 'syncing' || c.status === 'connecting') ? 'bg-[var(--color-accent)]/15 text-[var(--color-accent)]' : 'bg-[var(--color-elevated)] text-[var(--color-text-tertiary)]'}">{c.status}</span>
 								</div>
 								<p class="text-xs text-[var(--color-text-tertiary)] mt-0.5 truncate">
-									{#if c.lastError}{c.lastError}{:else if c.lastSyncAt}Last sync {new Date(c.lastSyncAt).toLocaleString()}{c.itemsLastSync != null ? ` · ${c.itemsLastSync} items` : ''}{:else}Not synced yet{/if}
+									{#if c.status === 'error' && c.lastError}<span class="text-coral">Needs reconnect — {c.lastError}</span>{:else if c.lastSyncAt}Last sync {fmtAgo(c.lastSyncAt)}{c.itemsLastSync != null ? ` · ${c.itemsLastSync} items` : ''}{#if c.lastRun && ((c.lastRun.created ?? 0) > 0 || (c.lastRun.updated ?? 0) > 0)} · {c.lastRun.created ?? 0} new, {c.lastRun.updated ?? 0} updated{/if}{#if (c.idleStreak ?? 0) >= 2} · checking less often (no new items){/if}{:else}Not synced yet{/if}{#if (c.itemsToday ?? 0) > 0 && c.dailyItemLimit} · {c.itemsToday}/{c.dailyItemLimit} today{(c.itemsToday ?? 0) >= (c.dailyItemLimit ?? 0) ? ' — budget reached' : ''}{/if}
 								</p>
 							</div>
 							<div class="flex items-center gap-2 shrink-0">
 								{#if c.status === 'disconnected'}
 									<button onclick={() => connectConnector(c)} disabled={connectorBusy === c.id} class="btn btn-secondary text-xs">{connectorBusy === c.id ? 'Connecting…' : 'Connect'}</button>
 								{:else}
-									<button onclick={() => syncConnector(c)} disabled={connectorBusy === c.id} class="btn-ghost text-xs">Sync now</button>
+									<button onclick={() => (c.status === 'error' ? connectConnector(c) : syncConnector(c))} disabled={connectorBusy === c.id} class="btn-ghost text-xs">{c.status === 'error' ? (connectorBusy === c.id ? 'Reconnecting…' : 'Reconnect') : 'Sync now'}</button>
 									<button onclick={() => disconnectConnector(c)} disabled={connectorBusy === c.id} class="btn-ghost text-xs text-coral">Disconnect</button>
 								{/if}
 							</div>
