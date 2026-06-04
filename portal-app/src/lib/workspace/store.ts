@@ -9,6 +9,7 @@
 // keeps working.
 import { writable, get } from 'svelte/store';
 import { browser } from '$app/environment';
+import { replaceState } from '$app/navigation';
 import { getView, viewExists, tabKey } from './registry';
 import { navigationState, type PrimaryView } from '$lib/stores/navigation';
 import type { Tab, LeafPane, SplitNode, WsNode, RecentItem, WorkspaceState } from './types';
@@ -129,12 +130,26 @@ function sameParams(a: Record<string, unknown>, b: Record<string, unknown>) {
 	return JSON.stringify(a ?? {}) === JSON.stringify(b ?? {});
 }
 
+// Phase C: the canonical URL for a tab (route folders == viewIds; Library adds
+// ?doc). The workspace is the SINGLE URL author — never emits a public route.
+function canonicalUrl(tab: Tab): string {
+	if (tab.viewId === 'library') {
+		const doc = tab.params.doc;
+		if (typeof doc === 'string' && doc) return `/library?doc=${encodeURIComponent(doc)}`;
+	}
+	return `/${tab.viewId}`;
+}
+
+// Headless 3D snapshot mode bypasses the shell; never rewrite its ?capture URL.
+const captureMode = () => browser && new URLSearchParams(location.search).has('capture');
+
 function createWorkspace() {
 	const store = writable<WorkspaceState>(loadInitial());
 	const { subscribe, set, update } = store;
 
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
 	let lastPrimary: string | null = null;
+	let urlSyncEnabled = false;   // flipped by the (app) layout once the router is up
 
 	subscribe((s) => {
 		if (!browser) return;
@@ -146,6 +161,16 @@ function createWorkspace() {
 		if (active && active.viewId !== lastPrimary) {
 			lastPrimary = active.viewId;
 			navigationState.setPrimaryView(active.viewId as PrimaryView);
+		}
+		// Keep the URL in step with the focused tab so reload is coherent (fixes
+		// the close-then-reload-reopens quirk). replaceState (not goto) → no
+		// remount, no intent re-fire, no per-switch history entry. Gated until
+		// the router is up; never in capture mode.
+		if (urlSyncEnabled && active && !captureMode()) {
+			const url = canonicalUrl(active);
+			if (url !== location.pathname + location.search) {
+				try { replaceState(url, {}); } catch { /* router not ready yet */ }
+			}
 		}
 	});
 
@@ -161,8 +186,10 @@ function createWorkspace() {
 		for (const l of allLeaves(s.root)) {
 			const ex = l.tabs.find((t) => tabKey(t.viewId, t.params) === key);
 			if (ex) {
-				ex.params = params;
-				return { ...s, root: updateLeaf(s.root, l.id, (lf) => ({ ...lf, activeTabId: ex.id, tabs: [...lf.tabs] })), focusedPaneId: l.id };
+				// Merge params (don't clobber): a deep-link {doc} applies; a plain
+				// sidebar open {} keeps the current selection.
+				const merged = { ...ex.params, ...params };
+				return { ...s, root: updateLeaf(s.root, l.id, (lf) => ({ ...lf, activeTabId: ex.id, tabs: lf.tabs.map((t) => (t.id === ex.id ? { ...t, params: merged } : t)) })), focusedPaneId: l.id };
 			}
 		}
 		const target = findLeaf(s.root, paneId) ?? findLeaf(s.root, s.focusedPaneId) ?? firstLeaf(s.root);
@@ -194,6 +221,17 @@ function createWorkspace() {
 		},
 		focusPane(paneId: string) {
 			update((s) => (s.focusedPaneId === paneId ? s : { ...s, focusedPaneId: paneId }));
+		},
+
+		/** Merge a patch into a tab's params (pass a key as null to clear it). A
+		 *  view uses this to record its own sub-state (e.g. Library's open doc),
+		 *  which the store mirrors to the URL. */
+		setTabParams(tabId: string, patch: Record<string, unknown>) {
+			update((s) => {
+				const l = leafWithTab(s.root, tabId);
+				if (!l) return s;
+				return { ...s, root: updateLeaf(s.root, l.id, (lf) => ({ ...lf, tabs: lf.tabs.map((t) => (t.id === tabId ? { ...t, params: { ...t.params, ...patch } } : t)) })) };
+			});
 		},
 
 		closeTab(tabId: string) {
@@ -230,6 +268,19 @@ function createWorkspace() {
 		resizeSplit(splitId: string, sizes: [number, number]) {
 			update((s) => ({ ...s, root: updateSplit(s.root, splitId, (sp) => ({ ...sp, sizes })) }));
 		},
+		/** Reorder a tab within its pane (drag-to-reorder). */
+		moveTabWithinPane(paneId: string, tabId: string, toIndex: number) {
+			update((s) => {
+				const l = findLeaf(s.root, paneId);
+				if (!l) return s;
+				const from = l.tabs.findIndex((t) => t.id === tabId);
+				if (from < 0 || toIndex < 0 || toIndex >= l.tabs.length || from === toIndex) return s;
+				const tabs = [...l.tabs];
+				const [moved] = tabs.splice(from, 1);
+				tabs.splice(toIndex, 0, moved);
+				return { ...s, root: updateLeaf(s.root, l.id, (lf) => ({ ...lf, tabs })) };
+			});
+		},
 		/** Close an empty launcher pane without opening anything. */
 		closePane(paneId: string) {
 			update((s) => {
@@ -238,6 +289,11 @@ function createWorkspace() {
 				if (!newRoot) return s;
 				return { ...s, root: newRoot, focusedPaneId: firstLeaf(newRoot).id };
 			});
+		},
+
+		/** Called once by the (app) layout onMount, after the router is up. */
+		enableUrlSync() {
+			urlSyncEnabled = true;
 		},
 
 		getState(): WorkspaceState {
