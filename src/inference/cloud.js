@@ -142,4 +142,87 @@ async function openaiCompatibleInfer({ prompt, maxTokens, apiKey, baseUrl, model
   return out;
 }
 
+// ── Streaming variants ───────────────────────────────────────────────────────
+// Same egress boundary as cloudInfer (prompt → user's chosen provider over TLS,
+// never logged), but tokens are yielded as they arrive. The router decides WHEN
+// to stream + audits the egress; these functions just speak the wire protocol.
+
+/** Open a streaming POST. Times out the connection (TTFB), not the whole stream. */
+async function openStream(url, headers, body, fetch, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body), signal: controller.signal });
+  } catch (err) {
+    clearTimeout(timer);
+    const reason = err?.name === "AbortError" ? `timed out after ${timeoutMs}ms` : "network error";
+    throw new InferenceError(`cloudStream: ${url} unreachable (${reason})`, { cause: err, backend: "cloud" });
+  }
+  clearTimeout(timer);
+  if (!res.ok) {
+    // Surface only the provider's error *type* (a safe category), never the body.
+    let type = "";
+    try { const t = await res.text(); const d = t ? JSON.parse(t) : {}; type = d?.error?.type ? ` (${d.error.type})` : ""; } catch { /* non-JSON error body */ }
+    throw new InferenceError(`cloudStream: provider error ${res.status}${type}`, { status: res.status, backend: "cloud" });
+  }
+  if (!res.body) throw new InferenceError("cloudStream: provider returned no stream body", { backend: "cloud" });
+  return res;
+}
+
+/** Yield each SSE `data:` payload string from a Response body (skips `[DONE]`). */
+async function* ssePayloads(res) {
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (payload === "[DONE]") return;
+      if (payload) yield payload;
+    }
+  }
+}
+
+async function* openaiCompatibleStream({ prompt, maxTokens, apiKey, baseUrl, model, fetch, timeoutMs }) {
+  const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+  const res = await openStream(resolveChatUrl(baseUrl), headers, { model, max_tokens: maxTokens, stream: true, messages: [{ role: "user", content: prompt }] }, fetch, timeoutMs);
+  for await (const payload of ssePayloads(res)) {
+    let ev; try { ev = JSON.parse(payload); } catch { continue; }
+    const delta = ev?.choices?.[0]?.delta?.content;
+    if (typeof delta === "string" && delta) yield delta;
+  }
+}
+
+async function* anthropicStream({ prompt, maxTokens, apiKey, model, fetch, timeoutMs }) {
+  const res = await openStream(ANTHROPIC_URL, { "x-api-key": apiKey, "anthropic-version": ANTHROPIC_VERSION }, { model, max_tokens: maxTokens, stream: true, messages: [{ role: "user", content: prompt }] }, fetch, timeoutMs);
+  for await (const payload of ssePayloads(res)) {
+    let ev; try { ev = JSON.parse(payload); } catch { continue; }
+    if (ev?.type === "content_block_delta" && ev.delta?.type === "text_delta" && typeof ev.delta.text === "string" && ev.delta.text) yield ev.delta.text;
+  }
+}
+
+/**
+ * Stream text from a BYOK cloud provider (Anthropic preferred when both keys are
+ * present; otherwise any OpenAI-compatible base_url). Throws if none configured.
+ * @returns {AsyncGenerator<string>}
+ */
+export async function* cloudStream({
+  prompt, maxTokens = 1024, anthropicApiKey, openaiApiKey, baseUrl, model,
+  fetch = globalThis.fetch, timeoutMs = 60000,
+} = {}) {
+  if (typeof fetch !== "function") throw new InferenceError("cloudStream: no fetch implementation", { backend: "cloud" });
+  if (typeof prompt !== "string" || prompt.length === 0) throw new InferenceError("cloudStream: prompt must be a non-empty string", { backend: "cloud" });
+  if (anthropicApiKey) { yield* anthropicStream({ prompt, maxTokens, apiKey: anthropicApiKey, model: model || DEFAULT_ANTHROPIC_MODEL, fetch, timeoutMs }); return; }
+  if (openaiApiKey || baseUrl) { yield* openaiCompatibleStream({ prompt, maxTokens, apiKey: openaiApiKey, baseUrl, model: model || DEFAULT_OPENAI_MODEL, fetch, timeoutMs }); return; }
+  throw new InferenceError("cloudStream: no cloud provider configured (set a key or a base_url)", { backend: "cloud" });
+}
+
 export default cloudInfer;

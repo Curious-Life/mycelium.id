@@ -291,7 +291,8 @@ Slices A, D-backend **and D-routes/UI** are built in **this** session (S6 is end
 
 - **Slice A** ✅ — S4a (`server-http.js`), S4b (`mcp.js`), `/v1/embeddings` (`src/gateway/embeddings.js`). Gates: `verify:embeddings-gateway` (6) GO.
 - **Slice D (S6) — backend + routes + UI** ✅ — `src/hardware/{fit,catalog,detect,recommend,ollama}.js` (`verify:hardware`, 17) + `src/portal-hardware.js` routes mounted in `server-rest.js` (`verify:hardware-routes`, 5) + the "Recommended for your hardware" panel in `IntelligenceSection.svelte` (detect → ranked fit badges → one-click streaming pull → auto-register the local provider). **S6 is end-to-end usable.** Portal build GO.
-- **Remaining (locked above, ready):** Slice B (true streaming) and Slice C (cascade + tools, flag-gated). File:line module shapes + LOC budgets + gates are in Part 3.
+- **Slice B — true token streaming** ✅ — `inferStream` (async generator) on the router (`router.js`) with the SAME routing + §4g sensitive gate + audit-once semantics as `infer`; `cloudStream` (OpenAI SSE + Anthropic `content_block_delta`) in `cloud.js`; `localStream` (Ollama NDJSON) in `local.js`; the gateway pipes real deltas (`openai-compat.js` `streamCompletion`, shim kept as fallback). Pre-token cloud failure → local fallback; post-token failure → clean SSE close (never echoes err). Gates: `verify:gateway-stream` (7) GO + `verify:gateway` G6 now drives the real path.
+- **Remaining (locked above, ready):** Slice C (§4g cascade + tools pass-through, flag-gated). File:line module shapes + LOC budgets + gates are in Part 3.
 
 ## Part 9 — Open questions
 

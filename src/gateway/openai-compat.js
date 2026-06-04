@@ -136,6 +136,43 @@ function sendStreamShim(res, { id, created, model, text }) {
   res.end();
 }
 
+// Real token streaming: pipe router.inferStream deltas as OpenAI chunk frames,
+// then a terminal stop chunk + [DONE]. A failure BEFORE the first token becomes a
+// normal JSON error envelope (headers not yet sent); a failure AFTER tokens have
+// streamed ends the SSE with a terminal stop frame. We NEVER echo err.message
+// (§1 zero-leak) — provider/plaintext detail can ride along on it.
+async function streamCompletion(res, { router, model, prompt, maxTokens, sensitive }) {
+  const id = `chatcmpl-${randomUUID().replace(/-/g, '')}`;
+  const created = Math.floor(Date.now() / 1000);
+  const base = { id, object: 'chat.completion.chunk', created, model };
+  let opened = false;
+  const open = () => {
+    if (opened) return;
+    res.set('Content-Type', 'text/event-stream; charset=utf-8');
+    res.set('Cache-Control', 'no-store');
+    res.set('Connection', 'keep-alive');
+    res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+    opened = true;
+  };
+  try {
+    for await (const delta of router.inferStream({ prompt, task: 'complex', maxTokens, sensitive })) {
+      open();
+      res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] })}\n\n`);
+    }
+    open(); // a zero-token stream still emits the role frame for client compat
+    res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
+  } catch (err) {
+    if (!opened) { sendError(res, err); return; } // nothing sent yet → normal envelope
+    try {
+      res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    } catch { try { res.end(); } catch { /* ignore */ } }
+  }
+}
+
 function sendError(res, err) {
   if (res.headersSent) { try { res.end(); } catch { /* ignore */ } return; }
   if (err instanceof GatewayError) {
@@ -188,8 +225,14 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
       // Gateway calls are treated as cloud-capable (the harness wants a capable
       // model) → task:'complex'. The internal simple→local split is for
       // Mycelium's OWN enrichment, not pass-through harness calls (Part B.4).
-      const text = await router.infer({ prompt, task: 'complex', maxTokens, sensitive });
 
+      // Real token streaming when the router supports it; else the v1 shim.
+      if (stream && typeof router.inferStream === 'function') {
+        await streamCompletion(res, { router, model, prompt, maxTokens, sensitive });
+        return;
+      }
+
+      const text = await router.infer({ prompt, task: 'complex', maxTokens, sensitive });
       const completion = buildCompletion({ model, prompt, text });
       if (stream) {
         sendStreamShim(res, { id: completion.id, created: completion.created, model, text });
