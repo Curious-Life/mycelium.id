@@ -12,10 +12,14 @@
 	import OnboardingGuide from '$lib/components/OnboardingGuide.svelte';
 	import { api } from '$lib/api';
 	import { navigationState } from '$lib/stores/navigation';
+	import { workspace } from '$lib/workspace/store';
+	import CommandPalette from '$lib/components/workspace/CommandPalette.svelte';
 
 	const captureMode = browser && new URLSearchParams(window.location.search).has('capture');
 
 	let { children } = $props();
+
+	let paletteOpen = $state(false);   // ⌘K command palette
 
 	const chatOpen = $derived($navigationState.chatOpen);
 
@@ -55,12 +59,18 @@
 	onMount(() => {
 		if (!browser) return;
 		checkOnboarding();
+		// Phase C: router is up — let the workspace mirror the focused tab → URL.
+		workspace.enableUrlSync();
 		function handleKeydown(e: KeyboardEvent) {
 			// Cmd+J (chat) is disabled in V1 — chat is deferred (no in-app agent
 			// loop, D5). Re-enable when the chat surface lands.
 			if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
 				e.preventDefault();
 				navigationState.toggleSidebar();
+			}
+			if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+				e.preventDefault();
+				paletteOpen = !paletteOpen;
 			}
 		}
 		window.addEventListener('keydown', handleKeydown);
@@ -101,6 +111,7 @@
 	<ChatFloat visible={chatOpen} />
 	<Toast />
 	<ImportDropZone />
+	<CommandPalette bind:open={paletteOpen} />
 
 	<WelcomeModal bind:open={welcomeOpen} onComplete={() => { showGuide = true; }} />
 	{#if showGuide}

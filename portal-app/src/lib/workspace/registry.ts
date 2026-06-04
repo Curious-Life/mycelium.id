@@ -21,8 +21,10 @@ export const REGISTRY: Record<string, ViewDef> = {
 		load: () => import('$lib/views/MindscapeView.svelte'),
 	},
 	library: {
-		title: 'Library', icon: 'folder',
-		key: (p) => (p.doc ? `library:${p.doc}` : 'library'),
+		// Singleton (Phase C): one Library tab; its open doc rides in params.doc
+		// (mirrored to /library?doc=…). Per-doc multi-tabs were never realized and
+		// would mismatch keys when params mutate — see the Phase C design doc.
+		title: 'Library', icon: 'folder', singleton: true,
 		load: () => import('$lib/views/LibraryView.svelte'),
 	},
 	import: {

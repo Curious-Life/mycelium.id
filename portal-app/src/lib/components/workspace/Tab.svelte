@@ -1,9 +1,10 @@
 <script lang="ts">
 	import type { Tab } from '$lib/workspace/types';
 
-	let { tab, active, onfocus, onclose }: {
+	let { tab, active, dragging = false, onfocus, onclose }: {
 		tab: Tab;
 		active: boolean;
+		dragging?: boolean;
 		onfocus: () => void;
 		onclose: () => void;
 	} = $props();
@@ -12,6 +13,8 @@
 <div
 	class="tab"
 	class:active
+	class:dragging
+	data-tab-id={tab.id}
 	role="tab"
 	aria-selected={active}
 	tabindex="0"
@@ -44,6 +47,7 @@
 		background: var(--color-bg); color: var(--color-text-primary);
 		box-shadow: inset 0 -2px 0 var(--color-accent);
 	}
+	.tab.dragging { opacity: 0.45; }
 	.tab-title { overflow: hidden; text-overflow: ellipsis; }
 	.tab-close {
 		opacity: 0; border: none; background: none; color: inherit; cursor: pointer;
