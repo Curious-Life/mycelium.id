@@ -42,6 +42,7 @@ __pycache__/
 .venv/
 .python-version
 *.egg-info/
+pipeline/cache/
 
 # IDE / editor
 .vscode/

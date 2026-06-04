@@ -5,9 +5,12 @@
  * Selects messages that carry a search-side 768D Nomic embedding
  * (`embedding_768`, an encrypted envelope), decrypts + base64-decodes it,
  * slices the matryoshka 256D prefix, L2-normalizes, and upserts a
- * clustering_points row carrying the 256D vector as a hex BLOB in
- * `nomic_embedding` — exactly the shape cluster.py's fetch_all_embeddings()
- * expects (NOMIC_DIM*4 = 1024 bytes, model 'nomic-v1.5-256d').
+ * clustering_points row carrying the 256D vector as an ENCRYPTED wrapped-DEK
+ * envelope in `nomic_embedding` (the same caller-encrypts scheme embedding_768
+ * uses — see decode.js encryptVector). cluster.py's fetch_all_embeddings()
+ * decrypts it via crypto_local.decrypt_vector (model 'nomic-v1.5-256d',
+ * NOMIC_DIM=256 floats). nomic_embedding is in NEVER_AUTO_DECRYPT (not
+ * ENCRYPTED_FIELDS), so the db adapter passes the envelope through verbatim.
  *
  * This is the fresh, small "Step 1" the slim orchestrator owns: it does NOT
  * recompute embeddings, it derives the 256D clustering vector from the 768D
@@ -25,7 +28,7 @@
 
 import { getDb } from '../src/db/index.js';
 import * as cryptoLocal from '../src/crypto/crypto-local.js';
-import { decryptVector } from '../src/search/ann/decode.js';
+import { decryptVector, encryptVector } from '../src/search/ann/decode.js';
 
 const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';
 const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
@@ -34,6 +37,10 @@ const SYSTEM_KEY = process.env.SYSTEM_KEY;
 const DRY_RUN = process.argv.includes('--dry-run');
 
 const NOMIC_DIM = 256; // matryoshka truncation 768 → 256
+// Scope tag for the nomic_embedding envelope. Single-user vault → fixed scope;
+// decrypt is scope-agnostic (allowedScopes=null), so this only needs to match
+// what cluster.py's ONNX-fallback writer uses (it does — crypto_local default).
+const NOMIC_SCOPE = 'personal';
 
 if (!USER_MASTER || !SYSTEM_KEY) {
   console.error('Missing: USER_MASTER and SYSTEM_KEY (64-char hex each)');
@@ -69,10 +76,6 @@ async function decode256(envelope, masterKey) {
   } catch {
     return null;
   }
-}
-
-function toHexBlob(f32) {
-  return Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength).toString('hex');
 }
 
 async function run() {
@@ -123,15 +126,19 @@ async function run() {
 
       const id = `${USER_ID}:cp:message:${r.source_id}`;
       try {
+        // Encrypt the 256D clustering vector at rest. Bound as a TEXT param (the
+        // envelope is base64 ASCII) — NOT the old raw X'<hex>' BLOB. Stored in a
+        // BLOB-affinity column; SQLite keeps the value's own (TEXT) type.
+        const envelope = await encryptVector(vec, NOMIC_SCOPE, masterKey);
         await query(
           `INSERT INTO clustering_points
              (id, user_id, source_type, source_id, nomic_embedding, embedding_model, created_at, updated_at)
-           VALUES (?, ?, 'message', ?, X'${toHexBlob(vec)}', 'nomic-v1.5-256d', ?, datetime('now'))
+           VALUES (?, ?, 'message', ?, ?, 'nomic-v1.5-256d', ?, datetime('now'))
            ON CONFLICT(id) DO UPDATE SET
              nomic_embedding = excluded.nomic_embedding,
              embedding_model = excluded.embedding_model,
              updated_at = datetime('now')`,
-          [id, USER_ID, r.source_id, r.created_at],
+          [id, USER_ID, r.source_id, envelope, r.created_at],
         );
         inserted++;
       } catch (err) {

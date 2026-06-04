@@ -2,17 +2,25 @@
 # Mycelium V1 Clustering Cycle — SLIM orchestrator.
 #
 # Runs ONLY the pipeline stages that are present in this repo. The canonical
-# run-clustering.sh referenced 12 scripts; 7 of them (describe-chronicles,
-# embed-mindscape, topology-audit, compute-vitality, compute-cognitive-
-# fingerprint, compute-frequency, check-milestones) were NOT ported into V1 and
-# are deliberately omitted here rather than referenced as missing files.
+# run-clustering.sh referenced 12 scripts; 6 of them (embed-mindscape,
+# topology-audit, compute-vitality, compute-cognitive-fingerprint,
+# compute-frequency, check-milestones) are NOT ported into V1 and are
+# deliberately omitted here rather than referenced as missing files.
+# (describe-chronicles WAS ported — it runs in Step 3 below, fail-soft.)
+# Consequence: the tables those 6 stages would write (territory_vitality,
+# topology_audit_*, fisher_trajectory, fisher_milestones,
+# current_vitality/current_phase) stay EMPTY — their read paths return empty.
+# (territory_neighbors NOW has a writer — Step 5 below — so "gaps" works.)
+# See docs/MEASUREMENT-LAYER-STATE-2026-06-04.md for the full as-built map.
 #
 # Present stages, in dependency order:
 #   1. sync     — messages w/ embedding_768 → clustering_points (256D)
-#   2. cluster  — FAISS k-NN + Leiden + Ward HAC → realm/theme/territory/atom
+#   2. cluster  — spherical k-means + Ward HAC → realm/theme/territory/atom
+#                 (FAISS k-NN graph = noise detection only; Leiden imported but unused)
 #   3. describe — realm + territory names/essences (local Claude CLI)
 #   4. cofire   — territory co-firing edges (4 timescales, time-decayed)
-#   5. harmonics— information-harmonic / bigram-flow / H0-persistence metrics
+#   5. neighbors— territory SEMANTIC neighbors (centroid cosine) → territory_neighbors (gaps)
+#   6. harmonics— information-harmonic / bigram-flow / H0-persistence metrics
 #
 # Single-user: no MINDSCAPE_OWNER_ID / AGENT_ID scope plumbing. Scope is always
 # 'personal'. The vault is the local encrypted SQLite db; the JS stages talk to
@@ -74,26 +82,37 @@ echo "  DB: ${MYCELIUM_DB}  user: ${MYCELIUM_USER_ID}"
 echo "════════════════════════════════════════════════"
 
 echo ""
-echo "Step 1/5: Sync content → clustering_points"
+echo "Step 1/7: Sync content → clustering_points"
 node pipeline/sync-clustering-points.js $DRY_RUN
 
 echo ""
-echo "Step 2/5: Cluster (FAISS k-NN + Leiden + Ward HAC)"
+echo "Step 2/7: Cluster (spherical k-means + Ward HAC; FAISS k-NN = noise only)"
 "$PYTHON" pipeline/cluster.py $DRY_RUN
 
 echo ""
-echo "Step 3/5: Describe realms + territories"
+echo "Step 3/7: Describe realms + territories"
 node pipeline/describe-clusters.js $DRY_RUN
 # Chronicle narration (story / archetype / patterns). Fail-soft: skips if no model.
 node pipeline/describe-chronicles.js $DRY_RUN
 
 echo ""
-echo "Step 4/5: Compute territory co-firing"
+echo "Step 4/7: Compute territory co-firing"
 node pipeline/compute-cofire.js
 
 echo ""
-echo "Step 5/5: Compute information harmonics"
+echo "Step 5/7: Map semantic neighbors (territory gaps)"
+node pipeline/compute-territory-neighbors.js
+
+echo ""
+echo "Step 6/7: Compute information harmonics"
 "$PYTHON" pipeline/compute_information_harmonics.py
+
+echo ""
+echo "Step 7/7: Compute Fisher trajectory (information-geometry / movement pillar)"
+# The keystone: activation distributions → Fisher-Rao geodesic trajectory +
+# milestones. Reads clustering_points + territory_profiles (written by Step 2);
+# uses CLUSTERING_RUN_ID as the era anchor. Skip-existing within an era.
+"$PYTHON" pipeline/compute-fisher.py
 
 echo ""
 echo "════════════════════════════════════════════════"

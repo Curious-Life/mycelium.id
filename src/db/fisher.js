@@ -53,6 +53,29 @@ function parseJsonSafe(s, fallback) {
   }
 }
 
+// K1b: the sensitive fisher metric columns are encrypted at rest; the adapter
+// auto-decrypts them to STRINGS on read, so coerce them back to numbers here
+// (centralized so every consumer — tools, portal, context — gets numbers).
+// NULL columns stay null. Structural columns (phase/level/window_*/counts) are
+// plaintext and untouched.
+const TRAJ_NUMERIC = [
+  'fisher_velocity', 'fisher_velocity_z', 'fisher_displacement',
+  'fisher_trajectory_length', 'exploration_ratio', 'R_recent', 'activation_entropy',
+];
+const MILESTONE_NUMERIC = ['velocity_z', 'displacement'];
+
+function coerceNums(row, fields) {
+  if (!row) return row;
+  for (const f of fields) {
+    const v = row[f];
+    if (v !== null && v !== undefined && typeof v !== 'number') {
+      const n = Number(v);
+      if (!Number.isNaN(n)) row[f] = n;
+    }
+  }
+  return row;
+}
+
 export function createFisherNamespace(deps) {
   if (!deps) throw new TypeError('createFisherNamespace: deps required');
   const { d1Query, firstRow } = deps;
@@ -113,7 +136,7 @@ export function createFisherNamespace(deps) {
       const row = firstRow(result);
       if (!row) return null;
       return {
-        ...row,
+        ...coerceNums(row, TRAJ_NUMERIC),
         low_confidence: !!row.low_confidence,
         top_contributors: parseJsonSafe(row.top_contributors, []),
       };
@@ -152,7 +175,7 @@ export function createFisherNamespace(deps) {
       const result = await d1Query(sql, params);
       const rows = result.results || result || [];
       return rows.map((r) => ({
-        ...r,
+        ...coerceNums(r, TRAJ_NUMERIC),
         low_confidence: !!r.low_confidence,
         top_contributors: parseJsonSafe(r.top_contributors, []),
       }));
@@ -181,7 +204,7 @@ export function createFisherNamespace(deps) {
       const result = await d1Query(sql, params);
       const rows = result.results || result || [];
       return rows.map((r) => ({
-        ...r,
+        ...coerceNums(r, MILESTONE_NUMERIC),
         detail: parseJsonSafe(r.detail, {}),
       }));
     },

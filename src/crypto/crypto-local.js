@@ -317,6 +317,18 @@ const ENCRYPTED_FIELDS = {
     'raw_response', 'moments_of_interest', 'activity_timeline',
     'chronicle', 'chronicle_cursor', 'anchored_reason',
     'description', 'description_version',
+    // Semantic fingerprints: 256D Nomic centroid + 3D viz centroid. Embeddings
+    // are sensitive (README §7); not SQL-queried (JS cosine only) so encryptable.
+    // cluster.py writes these via d1_batch_encrypted; JS readers decrypt via the
+    // adapter (NOT in NEVER_AUTO_DECRYPT — they're JSON envelopes, not raw bytes).
+    'centroid_256', 'centroid_3d',
+    // Derived cognitive scalars (SEC-3) — the per-territory measurement signal.
+    // cluster.py writes energy/coherence/velocity/point_delta via d1_batch_encrypted;
+    // the (un-ported) vitality stage writes current_vitality. Topology/chronicle
+    // readers sort/filter these in JS over decrypted values. message_count stays
+    // PLAINTEXT (a count + the primary search/ranking key — structural, not content);
+    // current_phase/growth_state are enum labels, also plaintext.
+    'energy', 'coherence', 'velocity', 'current_vitality', 'point_delta',
   ],
 
   // Realms — high-level mind organization. Expanding from just
@@ -465,6 +477,25 @@ const ENCRYPTED_FIELDS = {
     'recurrence_interval', 'recurrence_interval_baseline_90d',
     'notes',
   ],
+
+  // cognitive_events — discrete cognitive events (§4.27 phase-lock, regime
+  // shifts, flickering). magnitude (the effect size), detail (per-event JSON:
+  // per-level z-scores / contributing territory IDs) and the human headline are
+  // all ENCRYPTED (numeric magnitude encrypted via the type-agnostic adapter).
+  // event_type/level/severity (enums) + era_id/window_*/timestamps stay
+  // plaintext for WHERE/ORDER; the read path Number()s the decrypted magnitude.
+  cognitive_events: ['magnitude', 'detail', 'headline'],
+
+  // territory_cofire — co-activation strengths reveal cognitive structure (which
+  // themes fire together, how strongly). Pair keys (territory_a/b) + timestamps
+  // stay plaintext for joins; the 4 strength scales are ENCRYPTED. The topology
+  // queries filter/sort/aggregate these in JS (src/db/topology.js) because
+  // non-deterministic ciphertext can't be SQL-compared.
+  territory_cofire: ['cofire_immediate', 'cofire_session', 'cofire_daily', 'cofire_weekly'],
+
+  // territory_neighbors — semantic-neighbor distance reveals structure. Keys +
+  // connection_type stay plaintext; distance (+ shared_entities) ENCRYPTED.
+  territory_neighbors: ['distance', 'shared_entities'],
 
   // topology_metrics — graph-level cognitive shape per era. Each
   // scalar describes the user's mindscape topology; leak reveals
@@ -1200,12 +1231,32 @@ async function rewrapEnvelope(encoded, oldMasterKey, newMasterKey) {
 
 // ── Batch field helpers ──
 
+/**
+ * For an ENCRYPTED_FIELDS column, return the plaintext STRING to encrypt, or
+ * null to leave the param untouched. Honors "encrypt everything sensitive" for
+ * ALL value types — not just strings: numbers/bigints are encrypted via their
+ * string repr (they decrypt back to a string; numeric readers Number()-coerce
+ * them — the pattern the Python-encrypted metric scalars already use, and
+ * parseHealthRow does for health_daily). Skips null/undefined, booleans, empty
+ * strings, and values that are already envelopes (idempotent re-writes).
+ *
+ * Before this, the adapter encrypted only strings — so numbers written to an
+ * encrypted column (health_daily metrics, wealth_* amounts, cognitive_events
+ * magnitude) were silently stored PLAINTEXT despite being declared encrypted.
+ */
+function encryptablePlaintext(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') return (value.length > 0 && !isEncrypted(value)) ? value : null;
+  if (typeof value === 'number' || typeof value === 'bigint') return String(value);
+  return null;
+}
+
 async function encryptFields(record, fields, scope, masterKey) {
   const result = { ...record };
   for (const field of fields) {
-    const value = result[field];
-    if (typeof value === 'string' && value.length > 0 && !isEncrypted(value)) {
-      result[field] = await encrypt(value, scope, masterKey);
+    const plain = encryptablePlaintext(result[field]);
+    if (plain !== null) {
+      result[field] = await encrypt(plain, scope, masterKey);
     }
   }
   return result;
@@ -1379,9 +1430,9 @@ async function autoEncryptParams(sql, params, scope, masterKey, userId = null, o
         const paramPos = colToParamIdx.get(colIdx);
         if (paramPos === undefined) continue;
         const absIdx = row * paramsPerRow + paramPos;
-        const value = params[absIdx];
-        if (typeof value === 'string' && value.length > 0 && !isEncrypted(value)) {
-          params[absIdx] = await encryptValue(value);
+        const plain = encryptablePlaintext(params[absIdx]);
+        if (plain !== null) {
+          params[absIdx] = await encryptValue(plain);
         }
       }
     }
@@ -1417,9 +1468,9 @@ async function autoEncryptParams(sql, params, scope, masterKey, userId = null, o
     }
   } else if (parsed.type === 'update') {
     for (const paramIdx of parsed.encryptedParamIndices) {
-      const value = params[paramIdx];
-      if (typeof value === 'string' && value.length > 0 && !isEncrypted(value)) {
-        params[paramIdx] = await encryptValue(value);
+      const plain = encryptablePlaintext(params[paramIdx]);
+      if (plain !== null) {
+        params[paramIdx] = await encryptValue(plain);
       }
     }
   }
@@ -1445,7 +1496,9 @@ async function autoEncryptParams(sql, params, scope, masterKey, userId = null, o
 const NEVER_AUTO_DECRYPT_COLUMNS = new Set([
   'embedding_768',     // mind-search vector envelopes (messages, documents,
                        // territory_profiles, realms, semantic_themes)
-  'nomic_embedding',   // clustering_points 256D blobs (raw bytes, not envelopes)
+  'nomic_embedding',   // clustering_points 256D vector envelopes (SEC-4) —
+                       // caller-encrypted like embedding_768; the typed consumer
+                       // (cluster.py decrypt_vector) decrypts, never the adapter
 ]);
 
 async function autoDecryptResults(rows, masterKey, allowedScopes = null, opts = {}) {

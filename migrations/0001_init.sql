@@ -1319,10 +1319,14 @@ CREATE TABLE IF NOT EXISTS territory_cofire (
   user_id TEXT NOT NULL,
   territory_a INTEGER NOT NULL,
   territory_b INTEGER NOT NULL,
-  cofire_immediate REAL DEFAULT 0,  -- half-life 1h
-  cofire_session REAL DEFAULT 0,    -- half-life 4h
-  cofire_daily REAL DEFAULT 0,      -- half-life 24h
-  cofire_weekly REAL DEFAULT 0,     -- half-life 7d
+  -- value = time-decayed co-occurrence strength. The name encodes the
+  -- co-occurrence WINDOW BUCKET (not the decay rate). Earlier comments here
+  -- read "half-life 1h/4h/24h/7d" — that conflated bucket with half-life.
+  -- Actual decay half-lives live in pipeline/compute-cofire.js (revisit in redesign).
+  cofire_immediate REAL DEFAULT 0,  -- bucket: same hour;      decay half-life 7d
+  cofire_session REAL DEFAULT 0,    -- bucket: same 4h block;  decay half-life 14d
+  cofire_daily REAL DEFAULT 0,      -- bucket: same day;       decay half-life 30d
+  cofire_weekly REAL DEFAULT 0,     -- bucket: same ISO week;  decay half-life 90d
   last_cofire_at TEXT,
   last_computed TEXT,
   UNIQUE(user_id, territory_a, territory_b),
