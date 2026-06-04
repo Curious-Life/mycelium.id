@@ -15,10 +15,19 @@ detail lives in the linked docs. Newest-relevant first.
   via new **`src/inference/probe.js`**) mounted in `server-rest.js`. Claude-subscription-OAuth DROPPED (ToS 2026-02-19);
   `/auth/{claude,openai}` stubs report not-connected. Gates: **`verify:providers-leak` + `verify:providers` GO**;
   no-regression GO on foundation/leak/mcp/rest. Cred storage = **encrypt-in-place** (NOT #69's `secrets` table — self-contained,
-  avoids coupling to an unmerged PR; migrate later if wanted). **NEXT: S2** wire `src/inference/router.js` →
-  `db.providers.getActive()` (+ decrypt key) instead of env-only (1 live caller `pipeline/describe-chronicles.js:166`); then
-  S3 OpenAI-compat `base_url` widening + §4g jurisdiction routing + egress-audit; then S8 gateway, S6 HW recommender. ⚠️ Do
-  NOT edit `src/remote/*`, `src/connectors/*`, `src/db/secrets.js`. Design + Part 8 build status:
+  avoids coupling to an unmerged PR; migrate later if wanted). ✅ **S2 BUILT** — `src/inference/resolve.js`
+  `resolveInferenceConfig(db,userId)` maps the active provider → router opts (anthropic/openai), **authoritative over env**
+  (returns `''` for the non-chosen vendor); `custom`/`base_url` deferred to S3; none→`{}` (env→local). Live caller
+  `pipeline/describe-chronicles.js:166` resolves DB-first. `verify:resolve` GO; inference/chronicles no-regression GO.
+  **RELAY MERGED TO MAIN** (`a03e9de`, PRs #45/#46) — merged into this branch (`91bac5b`); only collisions were `server-rest.js`
+  (auto-merged: my providers mount + their remoteRouter coexist) + `package.json` verify chain (resolved: both gate sets). Relay
+  is at `/api/v1/remote/*` — **no collision** with `/portal/providers` or a future `/v1/chat/completions`; `requireAuth()` in
+  `server-http.js` is reusable for the S8 gateway. Connectors/secrets-API did NOT merge (still PR #69) → encrypt-in-place stands.
+  ⚠️ Merge dragged in root debug debris (`_*.mjs` — `_reset-operator`, `_setpw`, `_decode-token`…) from a TEMP commit; left as-is
+  (not my lane), flagged for cleanup on main. **NEXT: S3** — OpenAI-compatible `base_url` adapter in `src/inference/cloud.js`
+  (covers OpenAI/OpenRouter/Together/Groq/**Regolo+Scaleway EU**/Ollama/LM Studio) + extend `resolveInferenceConfig` to map
+  `custom`/base_url providers + the `jurisdiction` tag + `recordEgress` at the cloud seam (§4g/§4e); then S8 gateway, S6 HW
+  recommender. ⚠️ Do NOT edit `src/remote/*`, `src/connectors/*`, `src/db/secrets.js`. Design + Part 8 build status:
   [`docs/DESIGN-ai-interface-layer-2026-06-04.md`](docs/DESIGN-ai-interface-layer-2026-06-04.md).
 
 - **AI Interface Layer — design spec (2026-06-04, latest).** `/sweep-first-design` (3 cycles + web research + own-eyes
