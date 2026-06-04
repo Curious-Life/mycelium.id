@@ -33,6 +33,56 @@ Design-doc commits (also on main): `90ec677` (interface design), `803303b` (harn
 
 ---
 
+## 2026-06-04 (PM) — MERGE PICKUP — START HERE (your job: checks → merge when ready)
+
+**The build is DONE.** S8 + the security fix + a relay-lane flaky-test fix are committed and pushed to **PR #79** (branch `claude/elegant-ritchie-034Ub`, base `main`, **draft**). **Your job is NOT to build — it is to get #79 green and MERGE it through the gate once the operator approves.**
+
+### PR #79 — exact state
+- Head: **`0284a2c`** (latest). Base: `main @ 5779e29` (main was merged into the branch — up to date).
+- Commits added this session (all pushed):
+  - **`39a038b`** — feat(gateway): S8 `/v1` gateway + §3b static bearer + **the 🔴 auth-bypass fix** (the security-sensitive diff).
+  - **`3ce39f3`** — ci: empty re-trigger commit (documents the flake; harmless no-op).
+  - **`0284a2c`** — test(managed-claim): make MC2 signature tamper deterministic (**fixes the ~5% flake**).
+- Files in the diff: `src/gateway/openai-compat.js` (new), `src/gateway/static-bearer.js` (new), `src/server-http.js` (gateway mount + static bearer + auth fix), `scripts/verify-gateway.mjs` (new), `scripts/verify-oauth.mjs` (garbage→401 guard), `scripts/verify-managed-claim.mjs` (flaky-fix), `package.json` (verify:gateway wired), + docs/MEMORY.
+- **All local gates GO:** full `npm run verify` chain GO (~60 gates, exit 0) + `verify:gateway` (14 checks) + a real-server end-to-end smoke GO.
+
+### ⛔ MERGE GATE — fail-closed (`/auto-merge-on-green`). Do NOT merge unless ALL hold:
+1. **Every CI check completed = success** (the `verify` check on `0284a2c`). Pending/missing/failed → HOLD.
+2. PR is **mergeable** (no conflicts) **and NOT a draft** (it's draft now — the operator marks it ready, or tells you to).
+3. **🔴 Explicit human approval of the security-sensitive diff is MANDATORY** — this PR changes auth (`getMcpSession` validation) and adds a static-bearer auth path. CI-green alone is NOT sufficient. Per `/auto-merge-on-green`, security diffs always need a human approve. **Never self-merge this on green.**
+
+### Pickup protocol (execute in order)
+1. Read this section + the 🔴 security note in the TL;DR above. Then skim the PR #79 body (it leads with the security fix).
+2. **Check CI:** `pull_request_read get_check_runs` on #79. The `verify` check should be `success` on `0284a2c`.
+   - If it **failed on `verify:managed-claim` MC2 again** — that flake is FIXED in `0284a2c`; a recurrence would mean something else. Re-read the log.
+   - If it failed on a **different** gate — diagnose (it would be a real regression; the full chain was GO locally, so suspect environment first). Re-kick by pushing, or investigate.
+   - If `success` → go to step 3.
+3. **Confirm with the operator** that they've reviewed/approved the security diff (the auth fix + static bearer). If not yet → HOLD and ask. This is the one human gate.
+4. When green **and** approved **and** not-draft: **merge** (the prior outbound PR #64 used **merge** method; match that unless told otherwise). Then:
+   - Verify `main` head moved + the lane files are present (`git fetch origin main` → `git cat-file -e origin/main:src/gateway/openai-compat.js`).
+   - Update this handoff (flip S8 row → ✅ **MERGED @ <hash>**) + the MEMORY.md "In Progress" pointer.
+5. **Unsubscribe** from #79 once MERGED (or keep watching per operator preference).
+
+### What was learned this session (the durable lines — these are why the PR is what it is)
+- 🔴 **`getMcpSession` without `asResponse:false` returns a truthy `{}` for ANY input** — valid token, garbage, even no token (proven in isolation). So the shipped `authenticate()` authenticated **any non-empty Bearer** on `/mcp` + `/ingest/*`. `verify:oauth` missed it because it only tested *no-token* (short-circuits before the call) and *valid-token* — never a *garbage* token. **Fix:** `asResponse:false` + a fail-closed expiry check. **Lesson:** an auth gate's test MUST include a garbage-credential case, not just present/absent.
+- **`verify:managed-claim` MC2 was ~5% flaky** (not 1/256): the tamper `sig.slice(0,-2)+"AA"` zeroes the 64th signature byte, but ed25519's `S` scalar is `< 2^252` so that byte is always `< 16` → already `0x00` ~1/16 of runs → tamper = no-op (proven 255/5000, matching last-byte==0x00 exactly). Fixed by flipping a *decoded* byte (deterministic: 0/5000, 15/15 GO).
+- **The portal builds in this container** and the **end-to-end smoke is achievable** (spawn `src/index.js --http` + a mock-OpenAI upstream via `INFERENCE_BASE_URL`) — the smoke is what caught the auth bug. Always smoke the real server, not just the handler-with-stub-guard.
+
+### Operator's directional calls (this session)
+- Both S8 open decisions were **deferred to my judgment** ("what's best?") → built the **§3b static bearer** (fail-closed, off unless `MYCELIUM_MCP_BEARER` set) + honored **`X-Mycelium-Sensitive`** (additive, default off).
+- Operator **approved the cross-lane flaky-test fix** (`verify-managed-claim.mjs` is the relay session's file; edited with explicit OK). ⚠️ **Flag for the relay session** so they don't double-fix.
+- Operator wants **a fresh session to run the checks + merge** (this handoff) — they will review/approve the security diff.
+
+### Gotchas (2026-06-04)
+- The static bearer is **fail-closed**: it does nothing unless `MYCELIUM_MCP_BEARER` is set (≥24 chars). Default posture is unchanged OAuth-only. Don't "test" it by expecting it on by default.
+- `mergeable_state`: **`dirty`** = real conflicts (re-merge main); **`unstable`** = mergeable, CI just pending. **`blocked`** = a required review/approval is missing (expected here until the operator approves).
+- Gateway is **non-streaming v1** (single terminal SSE chunk) and **drops `tools`** — by design (router is single-shot, prompt-only). Don't file these as bugs; they're named fast-follows.
+
+### v1 limits (named, deferred — NOT this PR)
+True token-streaming · tool pass-through · the §4g multi-provider cascade (v1 uses the single active provider) · `/v1/embeddings` · the S4 remainder (`MYCELIUM_HTTP_HOST` default-loopback, server `instructions`) · S6 hardware recommender.
+
+---
+
 ## 2026-06-04 session summary — start here
 
 ### What shipped (merged to main, PR #64 → `01d4e27`)
