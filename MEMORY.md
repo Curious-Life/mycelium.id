@@ -27,7 +27,15 @@ detail lives in the linked docs. Newest-relevant first.
   optional upstream only** (point Mycelium at it as one `custom` base_url); NOT embedded — egress boundary (§4e audit + §4g gate) must
   stay our code; Open WebUI/AnythingLLM skipped (Mycelium IS the UI+vault). ~1,020 LOC, no new deps (keep `fetch` adapters; Vercel AI SDK
   deferred). Operator forks: remote reachability (Tailscale-now vs relay vs stdio-only), cred storage shape, audience (self vs
-  product). **Routing priority locked 2026-06-04 (§4g):** EU-sovereign ZDR (Regolo/Scaleway) → frontier (Anthropic/OpenAI/Google — also doubly-valuable as North MCP clients) → local (test tier) — **inverts shipped local-first**; `sensitive` hard-blocked from US providers (fail-closed); per-provider `jurisdiction` tag. **NOT YET BUILT — design only.** ⚠️ Branch off this branch's base; CLAUDE.md "empty packages" claim is STALE
+  product). **Routing priority locked 2026-06-04 (§4g):** EU-sovereign ZDR (Regolo/Scaleway) → frontier (Anthropic/OpenAI/Google — also doubly-valuable as North MCP clients) → local (test tier) — **inverts shipped local-first**; `sensitive` hard-blocked from US providers (fail-closed); per-provider `jurisdiction` tag. **Remote reachability fork resolved → RELAY** (operator 2026-06-04). **Relay + Gateway now fully designed:**
+  [`docs/DESIGN-relay-and-gateway-2026-06-04.md`](docs/DESIGN-relay-and-gateway-2026-06-04.md) (sweep-first, verification table). Relay = TLS-passthrough
+  (TLS terminates on Mac via Caddy/ACME-DNS-01; relay = dumb SNI pipe) — **needs NO OAuth code change** (`MYCELIUM_BASE_URL` already
+  drives discovery `auth.js:30-31`), just Caddy/tunnel config + `MYCELIUM_HTTP_HOST` bind fix (`server-http.js:278` binds 0.0.0.0) +
+  CT-monitor; reuses the existing `<handle>.mycelium.id` publish subdomain, Caddy path-routes `/mcp,/v1,/.well-known,/api/auth`→:4711 and
+  `/p,/s`→:8788. Gateway = `POST /v1/chat/completions` (Bearer-guarded, on :4711, relay-reachable) fronting the South router → harness points
+  BOTH memory(MCP) + model(/v1) at Mycelium ("Mycelium IS the gateway, not LiteLLM"); **v1 NON-streaming** (router single-shot, no SSE in repo;
+  streaming+tools fast-follow); can't enforce `sensitive` hard-block on opaque gateway input (jurisdiction+audit instead). New phases **S7
+  (relay) + S8 (gateway)**, ~400 LOC repo + relay VPS infra. **NOT YET BUILT — design only; next = build (S0 first).** ⚠️ Branch off this branch's base; CLAUDE.md "empty packages" claim is STALE
   (full `src/` exists).
 
 - **Context Bank Upgrade — design spec (2026-06-02, latest).** Sweep-first-design pass closing the MCP
