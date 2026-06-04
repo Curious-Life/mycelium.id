@@ -34,11 +34,30 @@ const MARK = 'PROMPT_MARKER_42';
 
 let cloudCalls = 0, localCalls = 0, lastCloudBody = null;
 const mkRes = (obj, status = 200) => { const t = JSON.stringify(obj); return { ok: status >= 200 && status < 300, status, async text() { return t; }, async json() { return obj; } }; };
+const enc = new TextEncoder();
+const streamRes = (chunks) => ({ ok: true, status: 200, body: new ReadableStream({ start(c) { for (const ch of chunks) c.enqueue(enc.encode(ch)); c.close(); } }) });
 const mockFetch = async (url, opts) => {
   const u = String(url);
   const body = opts?.body ? JSON.parse(opts.body) : {};
-  if (u.includes('/chat/completions')) { cloudCalls++; lastCloudBody = body; return mkRes({ choices: [{ message: { content: CLOUD_TEXT } }] }); }
-  if (u.includes('/api/generate')) { localCalls++; return mkRes({ response: LOCAL_TEXT }); }
+  if (u.includes('/chat/completions')) {
+    cloudCalls++; lastCloudBody = body;
+    if (body.stream) return streamRes([
+      `data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant' } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: { content: CLOUD_TEXT.slice(0, 5) } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: { content: CLOUD_TEXT.slice(5) } }] })}\n\n`,
+      'data: [DONE]\n\n',
+    ]);
+    return mkRes({ choices: [{ message: { content: CLOUD_TEXT } }] });
+  }
+  if (u.includes('/api/generate')) {
+    localCalls++;
+    if (body.stream) return streamRes([
+      JSON.stringify({ response: LOCAL_TEXT.slice(0, 5), done: false }) + '\n',
+      JSON.stringify({ response: LOCAL_TEXT.slice(5), done: false }) + '\n',
+      JSON.stringify({ response: '', done: true }) + '\n',
+    ]);
+    return mkRes({ response: LOCAL_TEXT });
+  }
   return mkRes({ error: { type: 'not_found' } }, 404);
 };
 
@@ -122,6 +141,6 @@ server.close(); close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
-console.log(`VERDICT: ${allPass ? 'GO — /v1 gateway: messages→prompt · OpenAI envelope · Bearer-guard · hash-only egress audit · sensitive hard-block · stream shim · static bearer' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
+console.log(`VERDICT: ${allPass ? 'GO — /v1 gateway: messages→prompt · OpenAI envelope · Bearer-guard · hash-only egress audit · sensitive hard-block · real token streaming · static bearer' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
 console.log('='.repeat(64));
 process.exit(allPass ? 0 : 1);

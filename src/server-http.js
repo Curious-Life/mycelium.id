@@ -33,6 +33,7 @@ import { createAuth, migrateAuth, ensureOperatorUser } from './auth.js';
 import { uploadAttachment } from './ingest/upload.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { createGatewayHandlers } from './gateway/openai-compat.js';
+import { createEmbeddingsHandler } from './gateway/embeddings.js';
 import { matchStaticBearer } from './gateway/static-bearer.js';
 
 /**
@@ -425,16 +426,24 @@ export async function createHttpApp(opts = {}) {
   // own BYOK keys (no provider key of its own). Uses the SAME shared `ingest`
   // vault handle (db + userId) as the ingest routes; NEVER on the no-auth :8787.
   const gateway = createGatewayHandlers({ db: ingest.db, userId: ingest.userId, fetch: globalThis.fetch });
+  // /v1/embeddings — fronts the LOCAL Nomic embed-service ONLY (never cloud); see
+  // src/gateway/embeddings.js for the §7 rationale (vectors are sensitive).
+  const embeddings = createEmbeddingsHandler();
   const setGatewayCors = (res) => {
     res.set('Access-Control-Allow-Origin', '*');
     res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Mycelium-Sensitive');
+    res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Mycelium-Sensitive, X-Mycelium-Embed-Task');
   };
   app.options('/v1/*splat', (req, res) => { setGatewayCors(res); res.status(204).end(); });
   app.post('/v1/chat/completions', async (req, res) => {
     setGatewayCors(res);
     if (!(await requireAuth(req, res))) return;
     return gateway.chatCompletions(req, res);
+  });
+  app.post('/v1/embeddings', async (req, res) => {
+    setGatewayCors(res);
+    if (!(await requireAuth(req, res))) return;
+    return embeddings.embeddings(req, res);
   });
   app.get('/v1/models', async (req, res) => {
     setGatewayCors(res);
@@ -445,18 +454,31 @@ export async function createHttpApp(opts = {}) {
   return { app, auth, baseURL, transports, close: ingest.close };
 }
 
+// Hosts that keep :4711 private to the box. Anything else is a deliberate
+// (and loudly warned) exposure of the OAuth/MCP/gateway surface.
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
 /** Build the app and start listening. Resolves with the http.Server. */
 export async function startHttpServer(opts = {}) {
   const { app, baseURL } = await createHttpApp(opts);
   const port =
     opts.port || Number(process.env.MYCELIUM_PORT) || urlPort(baseURL) || 4711;
+  // Bind loopback by DEFAULT. The remote transport reaches :4711 via localhost
+  // (Caddy/frpc run on the same box); a 0.0.0.0 bind would expose the OAuth +
+  // gateway surface to the LAN. MYCELIUM_HTTP_HOST is an explicit opt-out for an
+  // operator who fronts :4711 with their own TLS proxy — mirrors the
+  // MYCELIUM_REST_HOST / MYCELIUM_PUBLIC_HOST knobs on the other servers.
+  const host = opts.host || process.env.MYCELIUM_HTTP_HOST || '127.0.0.1';
+  if (!LOOPBACK_HOSTS.has(host)) {
+    console.error(
+      `[mycelium] ⚠️ HTTP+OAuth+gateway binding to ${host} (non-loopback) — this exposes the OAuth/MCP/gateway surface beyond localhost. ` +
+      `Only do this behind a TLS reverse proxy + firewall; the relay reaches :4711 via loopback and does NOT need this.`,
+    );
+  }
   return new Promise((resolve) => {
-    // Bind loopback ONLY. The remote transport reaches :4711 via localhost
-    // (Caddy/frpc run on the same Mac); a 0.0.0.0 bind would expose the OAuth
-    // surface to the LAN. See docs/REMOTE-CONNECT-TRANSPORT-DESIGN (T0).
-    const httpServer = app.listen(port, '127.0.0.1', () => {
+    const httpServer = app.listen(port, host, () => {
       // stderr so it never pollutes a stdio MCP stream.
-      console.error(`[mycelium] HTTP+OAuth listening on ${baseURL} (port ${port})`);
+      console.error(`[mycelium] HTTP+OAuth listening on ${baseURL} (port ${port}, host ${host})`);
       resolve(httpServer);
     });
   });
