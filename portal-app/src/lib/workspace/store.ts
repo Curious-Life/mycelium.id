@@ -18,6 +18,11 @@ const STORAGE_KEY = 'mycelium-workspace';
 const MAX_RECENTS = 12;
 const DEFAULT_VIEW = 'mindscape';
 
+// Transient tab-drag state (NOT persisted) — drives the drop-zone overlay while a
+// tab is dragged across panes. Cleared on drop.
+export type DropEdge = 'left' | 'right' | 'top' | 'bottom' | 'center';
+export const tabDrag = writable<{ tabId: string; fromPaneId: string; overPaneId: string | null; edge: DropEdge | null } | null>(null);
+
 const uid = () =>
 	browser && typeof crypto !== 'undefined' && crypto.randomUUID
 		? crypto.randomUUID()
@@ -279,6 +284,45 @@ function createWorkspace() {
 				const [moved] = tabs.splice(from, 1);
 				tabs.splice(toIndex, 0, moved);
 				return { ...s, root: updateLeaf(s.root, l.id, (lf) => ({ ...lf, tabs })) };
+			});
+		},
+		/** Drag a tab onto another pane's edge → split there (VS Code style); onto its
+		 *  center → merge into that pane. Collapses an emptied source pane. Cap 4 panes. */
+		moveTabToEdge(tabId: string, targetPaneId: string, edge: DropEdge) {
+			update((s) => {
+				const src = leafWithTab(s.root, tabId);
+				const tgt = findLeaf(s.root, targetPaneId);
+				if (!src || !tgt) return s;
+				const tab = src.tabs.find((t) => t.id === tabId);
+				if (!tab) return s;
+				const without = (l: LeafPane) => {
+					const tabs = l.tabs.filter((t) => t.id !== tabId);
+					return { ...l, tabs, activeTabId: l.activeTabId === tabId ? (tabs[tabs.length - 1]?.id ?? null) : l.activeTabId };
+				};
+				if (edge === 'center') {
+					if (src.id === targetPaneId) return s;
+					let root = updateLeaf(s.root, src.id, without);
+					root = updateLeaf(root, targetPaneId, (l) => ({ ...l, tabs: [...l.tabs, tab], activeTabId: tab.id }));
+					const srcNow = findLeaf(root, src.id);
+					if (srcNow && srcNow.tabs.length === 0) root = removeLeaf(root, src.id) ?? root;
+					return { ...s, root, focusedPaneId: targetPaneId };
+				}
+				if (src.id === targetPaneId && src.tabs.length === 1) return s; // already alone here
+				const willCollapse = src.id !== targetPaneId && src.tabs.length === 1;
+				if (allLeaves(s.root).length + (willCollapse ? 0 : 1) > 4) return s; // cap 4 panes
+				const dir: 'h' | 'v' = edge === 'left' || edge === 'right' ? 'h' : 'v';
+				const fresh = leaf([tab], tab.id);
+				let root = updateLeaf(s.root, src.id, without);
+				const tgtNow = findLeaf(root, targetPaneId);
+				if (!tgtNow) return s;
+				const before = edge === 'left' || edge === 'top';
+				const split: SplitNode = { kind: 'split', id: uid(), dir, children: before ? [fresh, tgtNow] : [tgtNow, fresh], sizes: [50, 50] };
+				root = replaceLeaf(root, targetPaneId, split);
+				if (src.id !== targetPaneId) {
+					const srcNow = findLeaf(root, src.id);
+					if (srcNow && srcNow.tabs.length === 0) root = removeLeaf(root, src.id) ?? root;
+				}
+				return { ...s, root, focusedPaneId: fresh.id };
 			});
 		},
 		/** Close an empty launcher pane without opening anything. */
