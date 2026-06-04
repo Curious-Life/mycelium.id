@@ -120,7 +120,12 @@ export function createConnectorRunner({ db, userId, enqueueEnrichment }) {
     if (!adapter) return { ok: false, error: 'unknown_adapter' };
     const state = await store.getState(id);
     if (!state || state.status === 'disconnected') return { ok: false, error: 'not_connected' };
-    if (running.has(id) && !force) return { ok: false, error: 'already_running' };
+    // Single-flight is UNCONDITIONAL — even a manual/force sync must not run a
+    // second concurrent pass for the same connector (it would race the cursor and
+    // clobber state via patchState's read-merge-write). `force` only means
+    // "ignore idle-backoff", which is a cycle() concern, not a runSync one.
+    void force;
+    if (running.has(id)) return { ok: false, error: 'already_running' };
 
     running.add(id);
     const startedMs = Date.now();
@@ -143,9 +148,12 @@ export function createConnectorRunner({ db, userId, enqueueEnrichment }) {
       const finishedAt = nowIso();
       const run = { at: finishedAt, ok: true, pulled: items.length, created, updated, deduped, durationMs: Date.now() - startedMs };
       const recentRuns = [run, ...(Array.isArray(state.recentRuns) ? state.recentRuns : [])].slice(0, MAX_RECENT_RUNS);
-      // Idle-backoff input: a fully-empty pull bumps idleStreak so the scheduler
-      // polls this connector progressively less often (see connectorDueAt).
-      const idleStreak = items.length === 0 ? (Number(state.idleStreak) || 0) + 1 : 0;
+      // Idle-backoff input: back off when a pull yields NO NET-NEW info (empty OR
+      // all-deduped) — many adapters re-return the same recent window every pull,
+      // so keying on items.length would never back off. A real create/update
+      // resets the streak. See connectorDueAt.
+      const idle = created === 0 && updated === 0;
+      const idleStreak = idle ? (Number(state.idleStreak) || 0) + 1 : 0;
       const patch = {
         status: 'connected', lastSyncAt: finishedAt, lastOkAt: finishedAt, lastError: null, lastErrorAt: null,
         cursor: nextCursor ?? state.cursor,

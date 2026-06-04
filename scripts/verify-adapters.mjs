@@ -56,8 +56,8 @@ async function main() {
 
   // ── A4 linear.normalize ──
   const ln = linearNormalize({ id: 'iss1', identifier: 'ENG-1', title: 'Fix the bug', description: 'steps to repro', updatedAt: '2026-01-02T00:00:00.000Z', url: 'https://linear.app/x/ENG-1', state: { name: 'In Progress' } });
-  rec('A4. linear.normalize → captureMessage args',
-    ln.source === 'linear' && ln.id === 'linear:iss1:2026-01-02T00:00:00.000Z'
+  rec('A4. linear.normalize → captureMessage args (stable id, no updatedAt)',
+    ln.source === 'linear' && ln.id === 'linear:iss1'
       && ln.content.includes('Fix the bug') && ln.metadata.identifier === 'ENG-1' && ln.metadata.state === 'In Progress',
     `id=${ln.id} ident=${ln.metadata.identifier}`);
 

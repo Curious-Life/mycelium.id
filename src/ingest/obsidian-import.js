@@ -21,7 +21,10 @@
 // is a no-op; an edited note UPDATES the same memory in place + re-enriches (the
 // new content re-flows to the mindscape, no orphaned duplicate). The document
 // upserts on path; the folder tree is idempotent (ensureSubFolder find-or-create).
+// Pre-0007 vaults keyed memories by content hash (obsidian:<sha256>); for an
+// unchanged note that legacy row is redacted here so it stops orphaning a point.
 
+import crypto from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { captureMessage } from './capture.js';
@@ -31,6 +34,10 @@ import { parseMarkdownNote } from './markdown.js';
 const MAX_FILE_BYTES = 2 * 1024 * 1024; // 2MB per note
 const MAX_FILES = 20000;                // total vault cap (logged if hit)
 const SKIP_DIRS = new Set(['.obsidian', '.trash', '.git', 'node_modules', '.smart-env']);
+
+// Legacy (pre-0007) memory id was the content hash. Used only to converge old
+// vaults — see the memory block below. NOT used to mint new ids (those are path-stable).
+const sha256 = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 
 /** Recursively collect *.md under root. Skips dotdirs, system dirs, symlinks. */
 async function walkMarkdown(root, { maxFiles = MAX_FILES } = {}) {
@@ -58,7 +65,7 @@ async function walkMarkdown(root, { maxFiles = MAX_FILES } = {}) {
 
 /**
  * Import an Obsidian vault.
- * @returns {Promise<{ scanned, documentsUpserted, memoriesCreated, memoriesDeduped, folders, skipped, truncated, errors }>}
+ * @returns {Promise<{ scanned, documentsUpserted, memoriesCreated, memoriesDeduped, memoriesUpdated, memoriesMigrated, folders, skipped, truncated, errors }>}
  */
 export async function importObsidianVault(db, { userId, folderPath, files, vaultName, enqueueEnrichment } = {}) {
   if (!db?.messages || !db?.documents) throw new TypeError('importObsidianVault: db.messages + db.documents required');
@@ -67,7 +74,7 @@ export async function importObsidianVault(db, { userId, folderPath, files, vault
 
   const summary = {
     scanned: 0, documentsUpserted: 0, memoriesCreated: 0, memoriesDeduped: 0,
-    memoriesUpdated: 0, folders: 0, skipped: 0, truncated: false, errors: [],
+    memoriesUpdated: 0, memoriesMigrated: 0, folders: 0, skipped: 0, truncated: false, errors: [],
   };
 
   // ── Build the raw note list + resolve the vault name ──
@@ -190,21 +197,35 @@ export async function importObsidianVault(db, { userId, folderPath, files, vault
       // Memory — reaches the mindscape via captureMessage. Path-stable id (NOT
       // content-addressed) so an edited note UPDATES the same memory in place via
       // content_hash change-detection, instead of orphaning a duplicate. Mirrors
-      // the document's upsert-on-path; the id carries the vault (collision-safe).
+      // the document's upsert-on-path; the id carries the vault name.
       const memContent = parsed.title ? `# ${parsed.title}\n\n${parsed.body}` : parsed.body;
       if (memContent.trim()) {
+        const memId = `obsidian:${vault}/${cleanRel}`;
         const { deduped, updated } = await captureMessage(db, {
           userId,
           content: memContent,
           source: 'obsidian',
           messageType: 'note',
-          id: `obsidian:${vault}/${cleanRel}`,
+          id: memId,
           metadata: { vault, relPath: note.vaultRel, title: parsed.title, tags: parsed.tags },
           createdAt: note.mtime,
         }, enqueueEnrichment);
         if (updated) summary.memoriesUpdated += 1;
         else if (deduped) summary.memoriesDeduped += 1;
         else summary.memoriesCreated += 1;
+
+        // One-time convergence for pre-0007 vaults: those imports keyed the memory
+        // by content hash (obsidian:<sha256(content)>). For an UNCHANGED note that
+        // legacy row duplicates the new path-stable memory and orphans a stale
+        // mindscape point — redact it. (A note edited since the legacy import can't
+        // be matched by content and is left as-is.)
+        const legacyId = `obsidian:${sha256(memContent)}`;
+        if (legacyId !== memId && typeof db.messages.redact === 'function') {
+          try {
+            const r = await db.messages.redact(legacyId, userId);
+            if (r?.found && !r.alreadyForgotten) summary.memoriesMigrated += 1;
+          } catch { /* best-effort convergence */ }
+        }
       }
     } catch (e) {
       summary.errors.push({ relPath: note.vaultRel, error: String(e?.message || e).slice(0, 200) });

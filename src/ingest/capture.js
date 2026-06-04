@@ -130,7 +130,8 @@ export async function captureMessage(db, msg, enqueueEnrichment) {
   }
 
   // Content changed upstream → update in place + re-enrich (re-embed + re-cluster).
-  const { changed } = await db.messages.updateContent(userId, id, { content, contentHash, metadata: row.metadata ?? null });
+  // Pass metadata only when this capture carried it (undefined → preserve prior).
+  const { changed } = await db.messages.updateContent(userId, id, { content, contentHash, metadata: row.metadata });
   if (!changed) return { id, deduped: true, updated: false };
   try { await db.audit?.log?.({ action: 'message_updated', userId, resourceType: 'message', resourceId: id, details: { source: row.source } }); } catch { /* non-fatal */ }
   if (typeof enqueueEnrichment === 'function') { try { enqueueEnrichment(id); } catch { /* non-fatal */ } }

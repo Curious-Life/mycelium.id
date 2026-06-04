@@ -64,8 +64,21 @@ The new path issues `UPDATE messages SET content=?, content_hash=?, metadata=?, 
 - Isolated `:8796` preview (random injected keys, never the Keychain): connect mock, sync, mutate fixture, re-sync → updated.
 
 ## 6. Rollout / safety
-- `ALTER TABLE ADD COLUMN` is additive; existing rows get `content_hash = NULL`. Capture treats NULL as "derive from decrypted content" → a pre-existing row updates **only if content truly differs**; identical content silently backfills the hash with **no** re-enrich (avoids churn on legacy rows). Current vault is throwaway, so transitional cost is moot regardless.
+- `ALTER TABLE ADD COLUMN` is additive; existing rows get `content_hash = NULL`. Capture treats NULL as "derive from decrypted content" → a pre-existing row updates **only if content truly differs**; identical content silently backfills the hash with **no** re-enrich (avoids churn on legacy rows).
+- **Obsidian legacy convergence:** pre-0007 imports keyed memories by content hash (`obsidian:<sha256>`). Switching to a path-stable id would otherwise duplicate + orphan those on the next import. `importObsidianVault` now redacts the legacy content-hash row for an **unchanged** note (drops its mindscape point). A note edited since the legacy import can't be matched by content — documented residual; acceptable one-time.
 - No change to encryption keys, token storage, OAuth, or the localhost trust model.
 
 ## 7. Deferred (Tier 2, separate design)
 Dedicated `connectors` table (NB: `connections` is the social graph — do not reuse), multi-account, per-connection daily budget, richer health UI. Webhooks/push remain out (see benchmark §6 — needs a hosted relay; not local-first).
+
+## 8. Security review (4 parallel adversarial audits) — applied fixes
+Crypto / migration / schema-compat / core three-way branch were verified **CLEAN by execution**. Review-driven fixes applied in this changeset:
+- **Linear stable id** (`adapters/linear.js`): was `linear:<id>:<updatedAt>` (append-only → the upsert never fired for Linear and every edit orphaned a point). Now `linear:<id>` so edits UPDATE in place like Gmail; `updatedAt` stays the cursor. content = title+description (stable) ⇒ no re-enrich churn.
+- **metadata never wiped** (`messages.js updateContent`): metadata is written **only when provided** (conditional SET, mirroring document-store) — an update that omits it preserves the prior value.
+- **Unconditional single-flight** (`scheduler.js`): a manual/`force` sync no longer bypasses the per-connector in-flight guard (closes a cursor race + the catch-path lost-update).
+- **Idle-backoff on net-new** (`scheduler.js`): back off when a pull yields no created/updated (empty **or all-deduped**), not just empty — so the common "re-returns the same window" adapter actually backs off.
+- **UX**: ImportView surfaces `memoriesUpdated` + connector `updated` (an edit-only sync no longer reports "0 memories").
+
+**Adapter content-stability contract (documented):** `normalize()` MUST return **stable content** for an unchanged upstream item — `content_hash` is the change signal, so volatile fields (relative timestamps, rotating tracking URLs) in `content` would re-enrich every poll. Gmail (immutable bodies) and Linear (title+desc) comply.
+
+**Deferred to Tier 2:** per-item change-rate circuit breaker (defense-in-depth if a future adapter violates the contract); HMAC-keyed `content_hash` (defeats offline known-corpus confirmation of short bodies); `vaultName` `/`-sanitization for the Obsidian id (LOW, single-user, self-inflicted).

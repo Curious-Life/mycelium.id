@@ -109,7 +109,7 @@
 		try {
 			const res = await api(`/portal/connectors/${c.id}/sync`, { method: 'POST', body: '{}' });
 			const d = await res.json().catch(() => ({}));
-			if (d.ok) { connectorMsg = `${c.label}: ${d.created} new, ${d.deduped} already saved.`; await loadConnectors(); }
+			if (d.ok) { connectorMsg = `${c.label}: ${d.created} new, ${d.updated || 0} updated, ${d.deduped} unchanged.`; await loadConnectors(); }
 			else connectorMsg = `Sync failed: ${d.error || 'unknown error'}`;
 		} catch (e) {
 			connectorMsg = e instanceof Error ? e.message : 'Sync failed';
@@ -225,7 +225,7 @@
 
 	interface ObsidianSummary {
 		scanned: number; documentsUpserted: number; memoriesCreated: number;
-		memoriesDeduped: number; folders: number; skipped: number; truncated?: boolean;
+		memoriesDeduped: number; memoriesUpdated?: number; folders: number; skipped: number; truncated?: boolean;
 	}
 
 	async function importObsidian(payload: { folderPath?: string; files?: { relPath: string; content: string; mtime?: string }[]; vaultName?: string }) {
@@ -239,7 +239,7 @@
 				type: 'obsidian',
 				imported: s.documentsUpserted,
 				skipped: s.skipped,
-				stats: { imported: s.documentsUpserted, skipped: s.skipped, memories: s.memoriesCreated, folders: s.folders },
+				stats: { imported: s.documentsUpserted, skipped: s.skipped, memories: s.memoriesCreated + (s.memoriesUpdated || 0), folders: s.folders },
 			};
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Import failed';

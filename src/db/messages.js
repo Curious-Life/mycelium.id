@@ -368,16 +368,25 @@ export function createMessagesNamespace(deps) {
      * stays plaintext (crypto-local.js parseWriteSQL UPDATE branch). Returns
      * { changed } — false if no live row matched (forgotten / missing).
      */
-    async updateContent(userId, id, { content, contentHash, metadata = null }) {
+    async updateContent(userId, id, { content, contentHash, metadata }) {
+      // metadata is written ONLY when the caller provides it (mirrors
+      // document-store): an update that omits metadata must not wipe the prior
+      // value. content + (optional) metadata auto-encrypt; content_hash stays
+      // plaintext. parseWriteSQL maps the encrypted params by SET position, so
+      // a dynamic SET clause stays correct.
+      const sets = ['content = ?', 'content_hash = ?'];
+      const params = [content, contentHash];
+      if (metadata !== undefined) { sets.push('metadata = ?'); params.push(metadata); }
+      // Re-enrich: clear AI-derived columns so the drainer re-embeds + re-clusters.
+      sets.push(
+        'nlp_processed = 0', 'nlp_processed_at = NULL', 'nlp_error = NULL',
+        'thinking = NULL', 'tags = NULL', 'entities = NULL', 'entity_summary = NULL',
+        'relations = NULL', 'suggested_new_tag = NULL', 'embedding_768 = NULL',
+      );
+      params.push(id, userId);
       const res = await d1Query(
-        `UPDATE messages SET
-           content = ?, content_hash = ?, metadata = ?,
-           nlp_processed = 0, nlp_processed_at = NULL, nlp_error = NULL,
-           thinking = NULL, tags = NULL, entities = NULL, entity_summary = NULL,
-           relations = NULL, suggested_new_tag = NULL, embedding_768 = NULL
-         WHERE id = ? AND user_id = ? AND forgotten_at IS NULL
-         RETURNING id`,
-        [content, contentHash, metadata, id, userId],
+        `UPDATE messages SET ${sets.join(', ')} WHERE id = ? AND user_id = ? AND forgotten_at IS NULL RETURNING id`,
+        params,
       );
       const changed = Boolean(firstRow(res));
       if (changed) {
