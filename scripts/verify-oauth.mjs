@@ -202,6 +202,24 @@ async function main() {
     });
     check('unauthenticated /mcp rejected (401)', unauth.status === 401, `status=${unauth.status}`);
 
+    // 6b. A GARBAGE (non-empty but invalid) Bearer must ALSO be rejected. The
+    //     token must be VALIDATED, not merely present — regression guard for the
+    //     getMcpSession asResponse:false fix (without it, any Bearer authed).
+    const garbage = await fetch(`${BASE}/mcp`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer garbage-not-a-real-token-zzzzzzzzzzzzzzzz',
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        origin: ORIGIN,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'x', version: '0' } },
+      }),
+    });
+    check('garbage Bearer rejected (401)', garbage.status === 401, `status=${garbage.status}`);
+
     // 7. Bearer /mcp — MCP initialize over the authenticated HTTP transport.
     const initRes = await fetch(`${BASE}/mcp`, {
       method: 'POST',

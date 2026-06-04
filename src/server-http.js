@@ -32,6 +32,8 @@ import { boot } from './index.js';
 import { createAuth, migrateAuth, ensureOperatorUser } from './auth.js';
 import { uploadAttachment } from './ingest/upload.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
+import { createGatewayHandlers } from './gateway/openai-compat.js';
+import { matchStaticBearer } from './gateway/static-bearer.js';
 
 /**
  * Build the Express app (no listen). Returns { app, auth, baseURL, transports }.
@@ -159,11 +161,36 @@ export async function createHttpApp(opts = {}) {
       console.error('[myc-auth]', req.method, '/mcp — no/non-bearer header:', authHeader ? authHeader.slice(0, 14) : '(none)');
       return null;
     }
+    // §3b opt-in static bearer (fail-closed: only when MYCELIUM_MCP_BEARER is set,
+    // length-floored, constant-time compared — see gateway/static-bearer.js).
+    // Accepted IN ADDITION to OAuth so a local harness / 2.0-only client connects
+    // with a copy-paste token. Covers /mcp AND the /v1 gateway (both authenticate
+    // through here). The token itself is never logged.
+    if (matchStaticBearer(authHeader)) {
+      console.error('[myc-auth]', req.method, '— static bearer accepted (MYCELIUM_MCP_BEARER)');
+      return { userId: ingest.userId || 'local-user', static: true };
+    }
     const headers = new Headers({ authorization: authHeader });
     const request = new Request(`${baseURL}/mcp`, { method: 'POST', headers });
     try {
-      const s = await auth.api.getMcpSession({ request, headers });
-      console.error('[myc-auth]', req.method, '/mcp — getMcpSession:', s ? `OK (user=${s.userId || s.user?.id || '?'})` : 'NULL — token rejected', `tok=${authHeader.slice(7, 19)}…`);
+      // CRITICAL: pass asResponse:false. Without it, getMcpSession returns a
+      // truthy Response-shaped {} for EVERY input — valid token, invalid token,
+      // even no token — so ANY Bearer header would authenticate (verified
+      // 2026-06-04). With asResponse:false it returns the access-token ROW for a
+      // valid token, or null for an unknown one — mirroring better-auth's own
+      // withMcpAuth (node_modules/better-auth/dist/plugins/mcp/index.mjs:709).
+      const s = await auth.api.getMcpSession({ request, headers, asResponse: false });
+      if (!s) {
+        console.error('[myc-auth]', req.method, '/mcp — token rejected (no session)');
+        return null;
+      }
+      // Fail closed on expiry: the library's token lookup does NOT check the
+      // access token's expiry, so enforce accessTokenExpiresAt here.
+      if (s.accessTokenExpiresAt && new Date(s.accessTokenExpiresAt).getTime() < Date.now()) {
+        console.error('[myc-auth]', req.method, '/mcp — access token expired');
+        return null;
+      }
+      console.error('[myc-auth]', req.method, '/mcp — getMcpSession OK', `user=${s.userId || s.user?.id || '?'}`);
       return s;
     } catch (e) {
       console.error('[myc-auth]', req.method, '/mcp — getMcpSession threw:', e?.message);
@@ -335,6 +362,29 @@ export async function createHttpApp(opts = {}) {
     } catch {
       res.status(500).json({ ok: false, error: 'import failed' });
     }
+  });
+
+  // ── OpenAI-compatible outbound gateway (S8), Bearer-guarded like /ingest/* ──
+  // A user's harness points its model base-URL at <handle>.mycelium.id/v1 → it
+  // gets sovereign, jurisdiction-gated, AUDITED inference through the operator's
+  // own BYOK keys (no provider key of its own). Uses the SAME shared `ingest`
+  // vault handle (db + userId) as the ingest routes; NEVER on the no-auth :8787.
+  const gateway = createGatewayHandlers({ db: ingest.db, userId: ingest.userId, fetch: globalThis.fetch });
+  const setGatewayCors = (res) => {
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Mycelium-Sensitive');
+  };
+  app.options('/v1/*splat', (req, res) => { setGatewayCors(res); res.status(204).end(); });
+  app.post('/v1/chat/completions', async (req, res) => {
+    setGatewayCors(res);
+    if (!(await requireAuth(req, res))) return;
+    return gateway.chatCompletions(req, res);
+  });
+  app.get('/v1/models', async (req, res) => {
+    setGatewayCors(res);
+    if (!(await requireAuth(req, res))) return;
+    return gateway.listModels(req, res);
   });
 
   return { app, auth, baseURL, transports, close: ingest.close };

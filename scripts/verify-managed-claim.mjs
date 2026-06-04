@@ -24,7 +24,13 @@ rec('MC1. buildClaim(provision) → verifyWithPublicKey accepts', ok1 === true &
 // MC2 — tamper
 const tH = verifyWithPublicKey(c.publicKey, claimMessage('provision', 'bob', c.nonce), c.signature);
 const tN = verifyWithPublicKey(c.publicKey, claimMessage('provision', c.handle, 'other-nonce'), c.signature);
-const tS = verifyWithPublicKey(c.publicKey, claimMessage('provision', c.handle, c.nonce), `${c.signature.slice(0, -2)}AA`);
+// Deterministic signature tamper: flip a byte of the DECODED signature. The old
+// `slice(0,-2)+"AA"` only zeroed the 64th signature byte, which for ed25519 (the
+// S scalar is < 2^252, so its top byte is < 16) is ALREADY 0x00 ~1/16 of the
+// time — making the tamper a no-op ~5% of runs, so MC2 flaked in CI. Flipping a
+// decoded byte always invalidates the signature.
+const tamperedSig = Buffer.from(c.signature, 'base64url'); tamperedSig[0] ^= 0xff;
+const tS = verifyWithPublicKey(c.publicKey, claimMessage('provision', c.handle, c.nonce), tamperedSig.toString('base64url'));
 rec('MC2. tampered handle/nonce/signature rejected', tH === false && tN === false && tS === false, `h=${tH} n=${tN} s=${tS}`);
 
 // MC3 — different master key
