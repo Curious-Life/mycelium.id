@@ -34,6 +34,10 @@ const STAGE_LABELS = {
   9: 'Scoring territory vitality (phases)…',
   10: 'Measuring thinking complexity…',
   11: 'Computing frequency metrics…',
+  12: 'Computing cross-scale coupling (rhythms)…',
+  13: 'Detecting criticality (early-warning signals)…',
+  14: 'Computing semantic coherence…',
+  15: 'Computing behavioral-temporal patterns…',
 };
 
 const jobs = new Map();   // jobId → state (kept for status polling)

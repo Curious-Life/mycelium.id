@@ -22,6 +22,10 @@
 #   9. vitality   — per-territory behavioral phase → territory_vitality + profile cache
 #  10. complexity — Lempel-Ziv compressibility → complexity_snapshots
 #  11. frequency  — windowed coherence/entropy/compression/learning → frequency_snapshots
+#  12. coupling   — §4.24 cross-scale PAC/PLV/coherence + Wasserstein → enriches cognitive_metrics_harmonic
+#  13. criticality— CSD early-warning + phase-lock/flickering → cognitive_metrics_criticality + cognitive_events
+#  14. coherence  — semantic/discourse consecutive-pair cosine → cognitive_metrics_coherence
+#  15. behavioral — diurnal pattern + session cadence (timestamps only) → cognitive_metrics_behavioral
 #
 # Single-user: no MINDSCAPE_OWNER_ID / AGENT_ID scope plumbing. Scope is always
 # 'personal'. The vault is the local encrypted SQLite db; the JS stages talk to
@@ -83,33 +87,33 @@ echo "  DB: ${MYCELIUM_DB}  user: ${MYCELIUM_USER_ID}"
 echo "════════════════════════════════════════════════"
 
 echo ""
-echo "Step 1/11: Sync content → clustering_points"
+echo "Step 1/15: Sync content → clustering_points"
 node pipeline/sync-clustering-points.js $DRY_RUN
 
 echo ""
-echo "Step 2/11: Cluster (spherical k-means + Ward HAC; FAISS k-NN = noise only)"
+echo "Step 2/15: Cluster (spherical k-means + Ward HAC; FAISS k-NN = noise only)"
 "$PYTHON" pipeline/cluster.py $DRY_RUN
 
 echo ""
-echo "Step 3/11: Describe realms + territories"
+echo "Step 3/15: Describe realms + territories"
 node pipeline/describe-clusters.js $DRY_RUN
 # Chronicle narration (story / archetype / patterns). Fail-soft: skips if no model.
 node pipeline/describe-chronicles.js $DRY_RUN
 
 echo ""
-echo "Step 4/11: Compute territory co-firing"
+echo "Step 4/15: Compute territory co-firing"
 node pipeline/compute-cofire.js
 
 echo ""
-echo "Step 5/11: Map semantic neighbors (territory gaps)"
+echo "Step 5/15: Map semantic neighbors (territory gaps)"
 node pipeline/compute-territory-neighbors.js
 
 echo ""
-echo "Step 6/11: Compute information harmonics"
+echo "Step 6/15: Compute information harmonics"
 "$PYTHON" pipeline/compute_information_harmonics.py
 
 echo ""
-echo "Step 7/11: Compute Fisher trajectory (information-geometry / movement pillar)"
+echo "Step 7/15: Compute Fisher trajectory (information-geometry / movement pillar)"
 # The keystone: activation distributions → Fisher-Rao geodesic trajectory +
 # milestones. Reads clustering_points + territory_profiles (written by Step 2);
 # uses CLUSTERING_RUN_ID as the era anchor. Skip-existing within an era.
@@ -123,26 +127,50 @@ echo "Step 7/11: Compute Fisher trajectory (information-geometry / movement pill
 # columns at rest (see ENCRYPTED_FIELDS in src/crypto/crypto-local.js).
 
 echo ""
-echo "Step 8/11: Compute topology audit (graph health: gini / orphans / bridges / M2)"
+echo "Step 8/15: Compute topology audit (graph health: gini / orphans / bridges / M2)"
 # Read-only over the topology graph; writes topology_audit_snapshots + findings.
 # Runs before vitality so vitality could consume audit signal in future (parity
 # with the canonical ordering).
 node pipeline/topology-audit.js
 
 echo ""
-echo "Step 9/11: Compute territory vitality (behavioral phase: sparse/active/anchor)"
+echo "Step 9/15: Compute territory vitality (behavioral phase: sparse/active/anchor)"
 # Combines coherence/energy + co-fire momentum + bridge health into a per-
 # territory vitality score; caches current_vitality/current_phase on profiles.
 node pipeline/compute-vitality.js
 
 echo ""
-echo "Step 10/11: Compute Lempel-Ziv complexity (compressibility of thinking)"
+echo "Step 10/15: Compute Lempel-Ziv complexity (compressibility of thinking)"
 node pipeline/compute-complexity.js
 
 echo ""
-echo "Step 11/11: Compute frequency metrics (coherence/entropy/compression/learning)"
+echo "Step 11/15: Compute frequency metrics (coherence/entropy/compression/learning)"
 # Python: decrypts messages.content before gzip; caller-encrypts the metrics.
 "$PYTHON" pipeline/compute-frequency.py
+
+# ── Compute-only families (H1/C1/coherence/behavioral) ───────────────────────
+# Time-series statistics over data already in the vault (harmonic rows from
+# Step 6, fisher_trajectory from Step 7, messages.embedding_768/timestamps). No
+# embedder, no LLM, no new dependency. All caller-encrypt sensitive values via
+# crypto_local (the JS read path auto-decrypts). cross-scale-coupling runs AFTER
+# harmonics (Step 6) because it ENRICHES those rows; criticality runs AFTER
+# fisher (Step 7) because it reads the trajectory series.
+
+echo ""
+echo "Step 12/15: Compute cross-scale coupling (§4.24 PAC/PLV/coherence + Wasserstein)"
+"$PYTHON" pipeline/compute-cross-scale-coupling.py
+
+echo ""
+echo "Step 13/15: Compute criticality (CSD early-warning + phase-lock + flickering events)"
+"$PYTHON" pipeline/compute-criticality.py
+
+echo ""
+echo "Step 14/15: Compute coherence (semantic/discourse consecutive-pair cosine)"
+"$PYTHON" pipeline/compute-coherence.py
+
+echo ""
+echo "Step 15/15: Compute behavioral-temporal (diurnal pattern + session cadence)"
+"$PYTHON" pipeline/compute-behavioral.py
 
 echo ""
 echo "════════════════════════════════════════════════"

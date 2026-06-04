@@ -246,6 +246,23 @@ hardcodes `clustering_run_id` (canonical-158 tables use `era_id`) → parameteri
 **Sequence:** F1→F5 (foundation) → K1 (keystone) → T1 + H1 → (S1 in parallel) → E1, C1, X1.
 Tasks tracked in the session task list (F1…X1).
 
+- **2026-06-04 v2.1** — **H1 + C1 + coherence + behavioral-temporal SHIPPED (compute-only families) + GREEN.**
+  Built to the recovered spec, all over EXISTING data (no embedder/LLM/new dep): **H1** §4.24 cross-scale
+  coupling (PAC/PLV/spectral-coherence on 4 adjacent embedding-distance band pairs, reusing the F2
+  harmonics primitives) + §4.34 H0-persistence Wasserstein (persim) → ALTER cognitive_metrics_harmonic;
+  **C1** criticality (§4.25 AR(1), §4.26 rolling-variance + joint EWS, §4.27 phase-lock, flickering) over
+  fisher_trajectory → new cognitive_metrics_criticality + cognitive_events (ml_transition_detector = honest
+  NULL stub, no trained model); **coherence-universal** §4.31 adjacent + discourse_coherence_embedding (mean
+  pairwise cosine of consecutive embedding_768) → new cognitive_metrics_coherence (entity_grid = Tier-2 NULL
+  stub); **behavioral-temporal** diurnal + session-cadence over message timestamps → new
+  cognitive_metrics_behavioral. All sensitive values caller-encrypted (new shared pipeline/stage_crypto.py;
+  adapter auto-decrypts on read — no ENCRYPTED_FIELDS edit needed, mirrors fisher). Honesty per spec:
+  forced low_confidence + caveat notes on criticality (32.9% sensitivity) + coherence (Bedi-2015 overclaim);
+  rigor labels. migrations/0009; wired Steps 12–15 in run-clustering.sh + jobs.js + 4 verify gates.
+  Security-reviewed (adversarial subagent → SHIP-WITH-NITS; fixed the LOW nit: behavioral no longer logs
+  the sensitive session_count). **Full `npm run verify` = 60 GO / 0 NO-GO, exit 0.** KNOWN RESIDUAL
+  (MEDIUM, pre-existing): the LEGACY harmonics writer (compute_information_harmonics.py §4.23/4.33/4.34)
+  still stores its metrics PLAINTEXT at rest → next focused fix.
 - **2026-06-04 v2.0** — **S1 SHIPPED (surface-to-human REST bridge) + GREEN; research spec recovered.**
   Ported the measurement REST bridge from reference/server-routes/{portal-metrics, portal-vitality,
   portal-trajectory, internal-metrics, portal-metric-freshness}.js → `src/portal-measurement.js`,
