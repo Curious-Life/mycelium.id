@@ -87,6 +87,17 @@ export function createProvidersNamespace(deps) {
       );
     },
 
+    /** Full row (incl. decrypted credentials) by id — for the connectivity probe. */
+    async get(id, userId) {
+      const result = await d1Query(
+        `SELECT id, provider, label, auth_type, credentials, config_dir,
+                model_preference, base_url, status, is_active
+         FROM ai_providers WHERE id = ? AND user_id = ?`,
+        [id, userId],
+      );
+      return result.results?.[0] || null;
+    },
+
     async getActive(userId, providerType) {
       if (providerType) {
         const result = await d1Query(

@@ -207,6 +207,12 @@ function setAuditCallback(fn) { _auditCallback = fn; }
 //   - enums for WHERE/filter: status, visibility, scope, role, source, type
 //
 const ENCRYPTED_FIELDS = {
+  // AI providers — the BYOK credential blob (API keys for Anthropic / OpenAI /
+  // custom-base_url providers). MUST be encrypted at rest: a leaked key here is
+  // a leaked paid account + an egress identity. Stored as a JSON envelope in the
+  // `credentials` column; providers.list() never selects it (metadata-only).
+  ai_providers: ['credentials'],
+
   // Messages — content + all AI-derived metadata
   // metadata column (arbitrary JSON) added: can contain sensitive
   // structured data from agents. nlp_error can reveal failure patterns

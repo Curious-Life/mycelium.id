@@ -5,6 +5,22 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
+- **AI Interface Layer — OUTBOUND BUILD STARTED (2026-06-04, latest).** Lane deconflicted (don't compete):
+  **relay/remote-MCP** = other session (PRs #45/#46 — `src/remote/*`, `auth.js`, `server-http.js` incl. the `:4711`
+  loopback bind fix `server-http.js:324`, CT-monitor, tunnel/frpc); **import-connectors + encrypted `secrets` API** =
+  other session (#67/#69/#70 — `src/connectors/*`, `src/db/secrets.js`, `src/portal-{settings,connectors,import}.js`).
+  **This branch owns OUTBOUND-LLM only.** ✅ **S0+S1 BUILT + verified:** `ai_providers.credentials` encrypted at rest
+  (`crypto-local.js` ENCRYPTED_FIELDS `ai_providers:['credentials']`), `db.providers` wired (`src/db/index.js` + a new
+  `get(id,userId)` in `src/db/providers.js`), **`src/portal-providers.js`** (`/portal/providers` CRUD + setActive + `/test`
+  via new **`src/inference/probe.js`**) mounted in `server-rest.js`. Claude-subscription-OAuth DROPPED (ToS 2026-02-19);
+  `/auth/{claude,openai}` stubs report not-connected. Gates: **`verify:providers-leak` + `verify:providers` GO**;
+  no-regression GO on foundation/leak/mcp/rest. Cred storage = **encrypt-in-place** (NOT #69's `secrets` table — self-contained,
+  avoids coupling to an unmerged PR; migrate later if wanted). **NEXT: S2** wire `src/inference/router.js` →
+  `db.providers.getActive()` (+ decrypt key) instead of env-only (1 live caller `pipeline/describe-chronicles.js:166`); then
+  S3 OpenAI-compat `base_url` widening + §4g jurisdiction routing + egress-audit; then S8 gateway, S6 HW recommender. ⚠️ Do
+  NOT edit `src/remote/*`, `src/connectors/*`, `src/db/secrets.js`. Design + Part 8 build status:
+  [`docs/DESIGN-ai-interface-layer-2026-06-04.md`](docs/DESIGN-ai-interface-layer-2026-06-04.md).
+
 - **AI Interface Layer — design spec (2026-06-04, latest).** `/sweep-first-design` (3 cycles + web research + own-eyes
   reads) designing how Mycelium connects to "other AI providers" both directions + bring-your-own-harness
   (opencode/odysseus/openclaw — all real OSS MCP+BYO-model). Spec:

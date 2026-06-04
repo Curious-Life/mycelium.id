@@ -28,6 +28,7 @@ import { createSpaceKnowledgeNamespace } from './space-knowledge.js';
 import { createPublicPresenceNamespace } from './public-presence.js';
 import { createMindscapeNamespace } from './mindscape.js';
 import { createTerritoryDocsNamespace } from './territory-docs.js';
+import { createProvidersNamespace } from './providers.js';
 
 /**
  * Open the vault db and assemble the tool-facing `db` namespace object.
@@ -60,6 +61,11 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
     spaces: createSpacesNamespace({ d1Query, firstRow, parseJson }),
     spaceKnowledge: createSpaceKnowledgeNamespace({ d1Query, firstRow, randomUUID }),
     publicPresence: createPublicPresenceNamespace({ d1Query }),
+
+    // AI providers (BYOK credentials for the outbound inference router + the
+    // /portal/providers backend). `credentials` is encrypted at rest
+    // (ENCRYPTED_FIELDS.ai_providers); list() returns metadata only.
+    providers: createProvidersNamespace({ d1Query }),
 
     // Mindscape reads (clustering points + territory/realm/theme profiles) and
     // territory-docs (narrative read/write). Wired for the portal mindscape
