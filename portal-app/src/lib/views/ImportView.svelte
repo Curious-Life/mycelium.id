@@ -1,6 +1,8 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import JSZip from 'jszip';
 	import { uploadFile as chunkedUpload } from '$lib/chunked-upload';
+	import { api } from '$lib/api';
 
 
 	type ImportSource = 'obsidian' | 'chatgpt' | 'claude' | 'linkedin';
@@ -11,6 +13,7 @@
 		projects?: number;
 		project_docs?: number;
 		memories?: number;
+		folders?: number;
 		skipped_duplicates?: number;
 		artifacts_kept?: number;
 		artifacts_deduplicated?: number;
@@ -42,10 +45,19 @@
 	let error = $state<string | null>(null);
 	let result = $state<ImportResult | null>(null);
 
+	// Obsidian folder import — native picker in the desktop app, <input
+	// webkitdirectory> in the browser. Both POST to /portal/import/obsidian.
+	let folderInput: HTMLInputElement;
+	let isTauri = $state(false);
+	onMount(() => {
+		isTauri = typeof window !== 'undefined'
+			&& !!((window as any).__TAURI__ || (window as any).__TAURI_INTERNALS__);
+	});
+
 	const sources: { id: ImportSource; name: string; description: string; accept: string; hint: string }[] = [
 		{ id: 'claude', name: 'Claude', description: 'Import Claude conversation export', accept: '.zip,.json', hint: 'Conversations, projects, memories, and artifacts with automatic deduplication' },
 		{ id: 'chatgpt', name: 'ChatGPT', description: 'Import OpenAI conversation export', accept: '.zip,.json', hint: 'Conversation trees flattened to canonical path with deduplication' },
-		{ id: 'obsidian', name: 'Obsidian', description: 'Import your Obsidian vault', accept: '.zip', hint: 'Markdown notes imported as documents' },
+		{ id: 'obsidian', name: 'Obsidian', description: 'Open your Obsidian vault folder', accept: '.md', hint: 'Pick the folder — every .md note becomes a document + a mindscape memory. No export needed.' },
 		{ id: 'linkedin', name: 'LinkedIn', description: 'Import your LinkedIn data export', accept: '.zip', hint: 'Connections, messages, and professional network — auto-encrypted and deduplicated' },
 	];
 
@@ -143,6 +155,66 @@
 		}
 	}
 
+	interface ObsidianSummary {
+		scanned: number; documentsUpserted: number; memoriesCreated: number;
+		memoriesDeduped: number; folders: number; skipped: number; truncated?: boolean;
+	}
+
+	async function importObsidian(payload: { folderPath?: string; files?: { relPath: string; content: string; mtime?: string }[]; vaultName?: string }) {
+		importing = true; error = null; result = null; statusMsg = 'Importing notes…';
+		try {
+			const res = await api('/portal/import/obsidian', { method: 'POST', body: JSON.stringify(payload) });
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok || !data.ok) throw new Error(data.error || `Import failed (${res.status})`);
+			const s = data as ObsidianSummary;
+			result = {
+				type: 'obsidian',
+				imported: s.documentsUpserted,
+				skipped: s.skipped,
+				stats: { imported: s.documentsUpserted, skipped: s.skipped, memories: s.memoriesCreated, folders: s.folders },
+			};
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Import failed';
+		} finally {
+			importing = false; statusMsg = null;
+		}
+	}
+
+	async function pickVaultFolder() {
+		error = null;
+		// A folder <input webkitdirectory> opens the OS folder chooser in both the
+		// browser and the Tauri WKWebView, yielding the .md File objects directly.
+		// (A native path-based picker for large-vault re-sync arrives with connectors.)
+		folderInput?.click();
+	}
+
+	async function onFolderChosen() {
+		const list = folderInput?.files;
+		if (!list || !list.length) return;
+		importing = true; error = null; statusMsg = 'Reading vault…';
+		try {
+			const mdFiles = Array.from(list).filter((f) => /\.md$/i.test(f.name));
+			if (!mdFiles.length) { error = 'No .md notes found in that folder.'; return; }
+			// webkitRelativePath = "<pickedDir>/sub/note.md" — the picked dir is the
+			// vault; send it as vaultName and strip it so relPaths are vault-relative.
+			const vaultName = (((mdFiles[0] as any).webkitRelativePath as string) || '').split('/')[0] || undefined;
+			const prefix = vaultName ? `${vaultName}/` : '';
+			const files = await Promise.all(mdFiles.map(async (f) => {
+				const rel = ((f as any).webkitRelativePath as string) || f.name;
+				return {
+					relPath: prefix && rel.startsWith(prefix) ? rel.slice(prefix.length) : rel,
+					content: await f.text(),
+					mtime: new Date(f.lastModified).toISOString(),
+				};
+			}));
+			await importObsidian({ files, vaultName });
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Could not read the folder';
+		} finally {
+			if (importing && !result) { importing = false; statusMsg = null; }
+		}
+	}
+
 	function formatResult(r: ImportResult): string[] {
 		const lines: string[] = [];
 		const s = r.stats;
@@ -173,7 +245,8 @@
 			if (s.contacts_with_messages) lines.push(`${s.contacts_with_messages} contacts with message history`);
 			if (s.skipped_duplicates) lines.push(`${s.skipped_duplicates} duplicate messages skipped`);
 		} else if (r.type === 'obsidian') {
-			lines.push(`${s.imported || r.imported} notes imported`);
+			lines.push(`${s.imported ?? r.imported} notes imported as documents${s.folders ? ` across ${s.folders} folders` : ''}`);
+			if (s.memories) lines.push(`${s.memories} new memories queued for the mindscape`);
 			if (s.skipped || r.skipped) lines.push(`${s.skipped || r.skipped} skipped`);
 		}
 
@@ -212,11 +285,15 @@
 					<p class="text-sm text-[var(--color-text-secondary)]">{line}</p>
 				{/each}
 			</div>
-			{#if result.enrichmentJobId}
-				<p class="text-xs text-[var(--color-accent-aurum)] mt-4">Processing started — your messages are being embedded for search and clustering.</p>
+			{#if result.enrichmentJobId || result.type === 'obsidian'}
+				<p class="text-xs text-[var(--color-accent-aurum)] mt-4">
+					{result.type === 'obsidian'
+						? 'Your notes are saved and queued — run Generate to weave them into the Mindscape.'
+						: 'Processing started — your messages are being embedded for search and clustering.'}
+				</p>
 				<a href="/mindscape" class="btn btn-primary mt-3">Go to Mindscape</a>
 			{/if}
-			<button onclick={reset} class="btn btn-secondary mt-{result.enrichmentJobId ? '2' : '6'}">Import More</button>
+			<button onclick={reset} class="btn btn-secondary mt-{(result.enrichmentJobId || result.type === 'obsidian') ? '2' : '6'}">Import More</button>
 		</div>
 	{:else if !selectedSource}
 		<!-- Source selection -->
@@ -241,13 +318,27 @@
 
 			<div class="card p-6">
 				<h3 class="text-sm font-medium text-[var(--color-text-emphasis)] mb-2">
-					Upload {sources.find(s => s.id === selectedSource)?.name} export
+					{#if selectedSource === 'obsidian'}Open your Obsidian vault{:else}Upload {sources.find(s => s.id === selectedSource)?.name} export{/if}
 				</h3>
 				<p class="text-xs text-[var(--color-text-tertiary)] mb-4">
 					{sources.find(s => s.id === selectedSource)?.hint}
 				</p>
 
-				<!-- Drop zone: drag a file in, or click Browse. -->
+				{#if selectedSource === 'obsidian'}
+						<button onclick={pickVaultFolder} disabled={importing} class="btn btn-primary w-full">
+							{#if importing}
+								<span class="inline-block animate-spin mr-2">&#9696;</span>
+								{statusMsg || 'Importing…'}
+							{:else}
+								Open vault folder
+							{/if}
+						</button>
+						<input bind:this={folderInput} type="file" webkitdirectory multiple class="sr-only" onchange={onFolderChosen} />
+						{#if !isTauri}
+							<p class="mt-3 text-xs text-[var(--color-text-tertiary)]">Pick your vault folder — its .md notes import directly. (In the desktop app this opens a native folder picker.)</p>
+						{/if}
+					{:else}
+					<!-- Drop zone: drag a file in, or click Browse. -->
 				<div
 					role="button"
 					tabindex="0"
@@ -281,13 +372,15 @@
 					class="sr-only"
 				/>
 
-				{#if error}
+				{/if}
+
+					{#if error}
 					<div class="mt-4 p-4 bg-coral/10 border border-coral/20 rounded-lg">
 						<p class="text-sm text-coral">{error}</p>
 					</div>
 				{/if}
 
-				{#if statusMsg}
+				{#if statusMsg && selectedSource !== 'obsidian'}
 					<p class="mt-3 text-xs text-[var(--color-text-tertiary)]">{statusMsg}</p>
 				{/if}
 
