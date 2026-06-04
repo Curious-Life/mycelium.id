@@ -221,6 +221,21 @@ The public server fail-closed-checks `documents.publish_nonce` at boot — a cle
 boot confirms migration 0003 is applied. Smoke a publish → fetch the unlisted URL →
 confirm revocation (nonce rotation) actually 404s the old link.
 
+### Remote MCP / OAuth (`src/server-http.js` auth+CORS, `src/auth.js`, discovery, `/mcp`)
+**A change here is NOT shipped until the official MCP Inspector connects and lists tools — verified in a REAL BROWSER (WebKit, the way Safari runs it), not `curl`/CLI.** Server-side clients (Claude's connector backend, `curl`, the Inspector **CLI**) do not enforce CORS, so they give a FALSE GREEN while the browser OAuth flow fails. (2026-06-04: three stacked browser-only CORS gaps — `OPTIONS`-preflight 404 on `/api/auth/*`, `.well-known/*` 404s with no CORS, and credentialed `/token` with no CORS — each invisible to curl; all fixed in PR #83. The claude.ai connector still fails *separately* — an Anthropic-side bug, support-confirmed; production runs via Claude Desktop + `mcp-remote`.)
+```bash
+# 1. CLI smoke (necessary, NOT sufficient): official Inspector reaches /mcp with a token
+npx -y @modelcontextprotocol/inspector --cli https://<host>/mcp \
+  --transport http --method tools/list --header "Authorization: Bearer <token>"
+# 2. THE ACTUAL GATE — drive the Inspector UI in WebKit until Connected:true + tools listed.
+#    Capture the FULL network trace (the bug is usually layered). Playwright-webkit harness
+#    pattern (left in /tmp/cors-test 2026-06-04):
+#      run.mjs    = fetch-probe each .well-known/discovery URL (a throw == Safari "Load failed")
+#      drive3.mjs = full UI OAuth, Connection Type = Direct (avoids the Inspector's proxy)
+#      drive4.mjs = log every request to the server (status, origin, cookie, ACAO/ACAC)
+```
+Gotchas: for the credentialed `/token` (and the preflight) **reflect the Origin + set `Access-Control-Allow-Credentials: true`** — browsers reject `*` for credentialed requests; do NOT widen `/authorize` (top-level navigation, never a CORS fetch — widening leaks an auth code via the operator session). `curl` ≠ browser. Cross-account record: `docs/REMOTE-CONNECT-HANDOFF-2026-06-03.md` (2026-06-04 section) + auto-memory `verify-remote-mcp-against-inspector.md`.
+
 ## When distribution / remote DO land (verify-then, not now)
 
 - **Tauri bundle** (`src-tauri/`): when real, verify the bundle **boots the Node
