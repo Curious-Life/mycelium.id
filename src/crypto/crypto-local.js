@@ -213,6 +213,15 @@ const ENCRYPTED_FIELDS = {
   // `credentials` column; providers.list() never selects it (metadata-only).
   ai_providers: ['credentials'],
 
+  // Connectors — operational state for a data connection (gmail/linear/…). The
+  // queryable structural columns (id/provider/status/cursor/counts/timestamps)
+  // stay plaintext so the scheduler can enumerate + filter without decrypting;
+  // the user-describing columns are encrypted. account_label is the connected
+  // account identity (PII); last_error can carry provider detail; recent_runs is
+  // a JSON run log that may embed error strings. USER_MASTER_KEY (NOT a
+  // SYSTEM_KEY table — this is the user's own data). Tokens live in `secrets`.
+  connectors: ['account_label', 'last_error', 'recent_runs'],
+
   // Messages — content + all AI-derived metadata
   // metadata column (arbitrary JSON) added: can contain sensitive
   // structured data from agents. nlp_error can reveal failure patterns

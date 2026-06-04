@@ -68,13 +68,23 @@ The benchmark framed Tier 2 as "dedicated `connectors` table → multi-account, 
 - Migration 0008 + `ENCRYPTED_FIELDS` + `db/connectors.js` + wiring; move STATE off `:state` secret → table (tokens stay in secrets); one-time backfill of any existing `connector:<id>:state` → row; scheduler iterates table rows.
 - Verify: `verify-connectors-store` (at-rest: `account_label`/`last_error` encrypted, plaintext id/provider queryable; CRUD; backfill; perf). **Verify GO + preview + PR.**
 
-**Phase 2c — Multi-account (HIGH risk; own design doc).** The inversion.
-- Pending-auth-by-nonce OAuth (pivot 1); `connectionId` decoupled from provider; `status()` connection-shaped (pivot 2); routes `:connectionId` + "connect another account"; tokens `connector:<connectionId>:tokens`; ImportView N-cards-per-provider.
-- Verify: two concurrent Gmail connects don't collide; per-account tokens/state isolated; callback resolves by state. **Verify GO + preview + PR.**
+> **Phase 2b — SHIPPED 2026-06-04.** Migration `0008_connectors.sql` + `ENCRYPTED_FIELDS.connectors=['account_label','last_error','recent_runs']` (USER key) + `src/db/connectors.js` (wired in `db/index.js`) + `src/connectors/store.js` re-pointed (state→table; tokens + transient `oauthState`/`pkceVerifier`→`secrets`) + boot backfill of legacy `connector:<id>:state` + `scripts/verify-connectors-store.mjs` (S1–S7, GO). `scheduler.js` UNCHANGED — the store's public API (`getState/setState/patchState/listIds/remove`) is byte-identical; `getState` merges the transient OAuth fields back from the `:oauth` secret, `setState` splits them out. Regression guards `verify:connectors`/`verify:connector-upsert`/`verify:adapters` all GO.
+> **Two encryption-layer gotchas that shaped the code (verified in `crypto-local.js`):** (1) the auto-encrypt INSERT parser encrypts only the `VALUES` group, **NOT** a `DO UPDATE SET` clause — so `db.connectors.put` does an explicit `SELECT → INSERT|UPDATE` (the `ai_providers` pattern), never `ON CONFLICT DO UPDATE`, or the PII params would write as plaintext. (2) `extractFirstValuesGroup`'s non-greedy `VALUES\s*\((.+?)\)` truncates at the first `)`, so a `datetime('now')` literal in INSERT VALUES corrupts param alignment — `created_at`/`updated_at` use column DEFAULTs and are omitted from INSERT; UPDATE sets `updated_at = datetime('now')` in SET (the UPDATE parser splits paren-aware → safe).
+> **Deviation from §3 column list:** no separate `last_run` column — `lastRun` is derived as `recentRuns[0]` in `getState` (they are always set together in the runner, so this is behavior-preserving and avoids a redundant encrypted column). `provider` is resolved from the adapter registry at write time (fallback to id).
+
+**Phase 2c — Multi-account — DROPPED 2026-06-04 (product decision).** The user
+confirmed **no multi-account connections** for this single-user vault: one
+account per provider is sufficient. The inversion (pending-auth-by-nonce OAuth,
+connection-shaped `status()`, N-cards-per-provider) is NOT being built. The 2b
+table already carries `id`/`provider`/`account_label` so a future reversal would
+not require a schema change, but there is no planned work here.
+~~Pending-auth-by-nonce OAuth (pivot 1); `connectionId` decoupled from provider;
+`status()` connection-shaped (pivot 2); routes `:connectionId`; ImportView
+N-cards-per-provider.~~
 
 ## 5. Unchanged invariants
 On-device token custody; **tokens stay AES-256-GCM in `secrets` (SYSTEM key), fail-closed**; localhost trust model; the single `captureMessage` ingestion choke-point; the Tier-1 content-aware upsert. No OAuth **broker** (rejected in the benchmark — would move tokens off-device).
 
-## 6. Open decisions (for approval)
-1. **Scope/order:** 2a only now? 2a+2b? or all the way to 2c? (Recommend **2a now** — highest value-per-risk, mostly frontend — then 2b, then 2c as a separate reviewed PR.)
-2. **Is multi-account actually wanted** for this single-user vault, or is the table+health+budget (2a/2b) enough? (Multi-account is the heavy/risky part; worth confirming the product need before 2c.)
+## 6. Decisions (RESOLVED)
+1. **Scope/order:** ✅ Shipped 2a → 2b as stacked PRs. 2a = #81 (merged). 2b = #84.
+2. **Is multi-account wanted?** ✅ **No** — user confirmed single-account per provider is enough. 2c dropped (see Phase 2c above). The connectors table + health + budget (2a/2b) is the final shape for connectors.
