@@ -246,6 +246,22 @@ hardcodes `clustering_run_id` (canonical-158 tables use `era_id`) → parameteri
 **Sequence:** F1→F5 (foundation) → K1 (keystone) → T1 + H1 → (S1 in parallel) → E1, C1, X1.
 Tasks tracked in the session task list (F1…X1).
 
+- **2026-06-04 v2.0** — **S1 SHIPPED (surface-to-human REST bridge) + GREEN; research spec recovered.**
+  Ported the measurement REST bridge from reference/server-routes/{portal-metrics, portal-vitality,
+  portal-trajectory, internal-metrics, portal-metric-freshness}.js → `src/portal-measurement.js`,
+  mounted in server-rest.js under `/api/v1/portal` (relative route strings — avoids the double-prefix
+  404 gotcha). Endpoints: /metrics/window+series+contracts, /vitality/snapshot+audit, /trajectory
+  (+current/summary/milestones, dismiss POST), /metric-freshness — all reading the auto-decrypting db
+  namespaces (db.fisher/db.topology/db.metrics) so the now-populated Fisher/T1/harmonics data renders
+  in the shipped portal pages. **Auth = fail-closed loopback gate** anchored on the unspoofable
+  `req.socket.remoteAddress` (socket peer, NOT a forwarded header) — runs before any DB read/decrypt
+  on every route; mirrors the internal-metrics precedent. Security-reviewed (adversarial subagent →
+  SHIP: gate not bypassable, zero plaintext/ciphertext leakage, SQLi closed via metric/level/window
+  allowlists + bound params, limits bounded). `verify:metrics-rest` (15 checks incl. real fail-closed
+  auth + ciphertext-leak scan) wired. **Full `npm run verify` = 56 GO / 0 NO-GO, exit 0.**
+  ALSO: recovered the operator's research-synthesis source-of-truth verbatim from the session
+  transcript → `docs/COGNITIVE-MEASUREMENT-SPEC-2026-06-04.md` (952 lines) — unblocks the remaining
+  spec-driven families H1/E1/C1/X1.
 - **2026-06-04 v1.9** — **T1 SHIPPED (topology-graph stages) + GREEN.** Ported all 4 from canonical
   → `pipeline/{compute-vitality.js, compute-complexity.js, topology-audit.js, compute-frequency.py}`
   (zero schema delta — all 5 target tables already in 0001). Flagged fixes done: vitality
