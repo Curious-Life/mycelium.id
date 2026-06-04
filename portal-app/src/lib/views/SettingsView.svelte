@@ -9,6 +9,7 @@
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
 	import IntelligenceSection from '$lib/components/settings/IntelligenceSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
+	import ConnectYourAISection from '$lib/components/settings/ConnectYourAISection.svelte';
 
 	interface Settings {
 		timezone: string;
@@ -1246,6 +1247,9 @@
 
 			<!-- Remote Access — connect Claude / any MCP client over the internet (operator password, status, connector URL) -->
 			<RemoteAccessSection />
+
+			<!-- Connect your AI — the local/remote MCP + model-gateway endpoints + static-bearer how-to (S5) -->
+			<ConnectYourAISection />
 
 			<!-- AI Subscriptions -->
 			<section class="card p-5">
