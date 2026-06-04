@@ -1,6 +1,6 @@
 <script lang="ts">
 	import TabStrip from './TabStrip.svelte';
-	import { workspace } from '$lib/workspace/store';
+	import { workspace, tabDrag } from '$lib/workspace/store';
 	import { getView, REGISTRY } from '$lib/workspace/registry';
 	import type { LeafPane, WsNode } from '$lib/workspace/types';
 	import type { Component } from 'svelte';
@@ -35,7 +35,7 @@
 	const sections = Object.entries(REGISTRY).map(([id, v]) => ({ id, title: v.title }));
 </script>
 
-<div class="pane" class:focused={focused && multiPane} onpointerdowncapture={() => workspace.focusPane(pane.id)}>
+<div class="pane" class:focused={focused && multiPane} data-pane-id={pane.id} onpointerdowncapture={() => workspace.focusPane(pane.id)}>
 	<TabStrip
 		tabs={pane.tabs}
 		activeTabId={pane.activeTabId}
@@ -74,12 +74,24 @@
 			{/each}
 		{/if}
 	</div>
+
+	{#if $tabDrag && $tabDrag.overPaneId === pane.id && $tabDrag.edge}
+		<!-- Drop-zone preview: where the dragged tab will land (split or merge). -->
+		<div class="drop-indicator {$tabDrag.edge}" aria-hidden="true"></div>
+	{/if}
 </div>
 
 <style>
 	.pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; position: relative; }
 	/* Focus ring only matters when there's more than one pane. */
 	.pane.focused { box-shadow: inset 0 0 0 1px var(--color-accent); }
+	/* Drop-zone preview while a tab is dragged onto this pane (VS Code / Obsidian style). */
+	.drop-indicator { position: absolute; z-index: 30; pointer-events: none; background: var(--color-accent); opacity: 0.22; border-radius: 4px; transition: all 0.07s ease; }
+	.drop-indicator.left { left: 0; top: 0; width: 50%; height: 100%; }
+	.drop-indicator.right { right: 0; top: 0; width: 50%; height: 100%; }
+	.drop-indicator.top { left: 0; top: 0; width: 100%; height: 50%; }
+	.drop-indicator.bottom { left: 0; bottom: 0; width: 100%; height: 50%; }
+	.drop-indicator.center { inset: 6px; }
 	.pane-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 	.tab-host { position: absolute; inset: 0; display: none; }
 	.tab-host.active { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
