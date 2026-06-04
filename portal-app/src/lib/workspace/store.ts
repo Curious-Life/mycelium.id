@@ -104,6 +104,7 @@ function sanitizeNode(node: any): WsNode | null {
 			const v = getView(t.viewId)!;
 			return { id: String(t.id || uid()), viewId: t.viewId, params: t.params || {}, title: v.title, icon: v.icon, closable: true };
 		});
+	if (!tabs.length) return null; // drop empty panes (legacy ⊞-split leftovers) → the split collapses
 	const activeTabId = tabs.some((t) => t.id === node.activeTabId) ? node.activeTabId : tabs[0]?.id ?? null;
 	return { kind: 'leaf', id: String(node.id || uid()), tabs, activeTabId };
 }

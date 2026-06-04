@@ -5,14 +5,13 @@
 	import { workspace, tabDrag, type DropEdge } from '$lib/workspace/store';
 	import type { Tab as TabT } from '$lib/workspace/types';
 
-	let { tabs, activeTabId, paneId, onfocus, onclose, onopen, onsplit, onreorder }: {
+	let { tabs, activeTabId, paneId, onfocus, onclose, onopen, onreorder }: {
 		tabs: TabT[];
 		activeTabId: string | null;
 		paneId: string;
 		onfocus: (id: string) => void;
 		onclose: (id: string) => void;
 		onopen: (viewId: string) => void;
-		onsplit?: () => void;
 		onreorder: (tabId: string, toIndex: number) => void;
 	} = $props();
 
@@ -148,13 +147,6 @@
 				</div>
 			{/if}
 		</div>
-		{#if onsplit}
-			<button class="strip-btn split" title="Split this pane" aria-label="Split this pane" onclick={onsplit}>
-				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-					<rect x="3" y="4" width="18" height="16" rx="1.5" /><line x1="12" y1="4" x2="12" y2="20" />
-				</svg>
-			</button>
-		{/if}
 	</div>
 </div>
 
@@ -172,7 +164,6 @@
 		color: var(--color-text-tertiary); font-size: 1.15rem; line-height: 1;
 		display: flex; align-items: center; justify-content: center;
 	}
-	.strip-btn.split { font-size: 1rem; }
 	.strip-btn:hover { color: var(--color-text-primary); background: var(--color-elevated); }
 	.menu-backdrop { position: fixed; inset: 0; z-index: 40; background: transparent; border: none; cursor: default; }
 	.menu {

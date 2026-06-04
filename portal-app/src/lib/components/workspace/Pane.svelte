@@ -1,7 +1,7 @@
 <script lang="ts">
 	import TabStrip from './TabStrip.svelte';
 	import { workspace, tabDrag } from '$lib/workspace/store';
-	import { getView, REGISTRY } from '$lib/workspace/registry';
+	import { getView } from '$lib/workspace/registry';
 	import type { LeafPane, WsNode } from '$lib/workspace/types';
 	import type { Component } from 'svelte';
 
@@ -31,8 +31,6 @@
 		}
 	}
 	$effect(() => { for (const t of pane.tabs) ensureLoaded(t.viewId); });
-
-	const sections = Object.entries(REGISTRY).map(([id, v]) => ({ id, title: v.title }));
 </script>
 
 <div class="pane" class:focused={focused && multiPane} data-pane-id={pane.id} onpointerdowncapture={() => workspace.focusPane(pane.id)}>
@@ -43,36 +41,20 @@
 		onfocus={(id) => workspace.focusTab(id)}
 		onclose={(id) => workspace.closeTab(id)}
 		onopen={(viewId) => workspace.openInPane(pane.id, viewId)}
-		onsplit={() => workspace.splitPane(pane.id, 'h')}
 		onreorder={(tabId, toIndex) => workspace.moveTabWithinPane(pane.id, tabId, toIndex)}
 	/>
 	<div class="pane-body">
-		{#if pane.tabs.length === 0}
-			<!-- Empty leaf from a fresh split: a launcher. -->
-			<div class="pane-launcher">
-				<p class="hint">Open a view in this pane</p>
-				<div class="launcher-grid">
-					{#each sections as s}
-						<button class="launcher-item" onclick={() => workspace.openInPane(pane.id, s.id)}>{s.title}</button>
-					{/each}
-				</div>
-				{#if multiPane}
-					<button class="launcher-close" onclick={() => workspace.closePane(pane.id)}>Close this pane</button>
+		{#each pane.tabs as tab (tab.id)}
+			{@const Comp = comps[tab.viewId]}
+			{@const isActive = tab.id === pane.activeTabId}
+			<div class="tab-host" class:active={isActive} aria-hidden={!isActive}>
+				{#if Comp}
+					<Comp {...tab.params} active={isActive} setParams={(p) => workspace.setTabParams(tab.id, p)} />
+				{:else}
+					<div class="tab-loading"><div class="spinner"></div></div>
 				{/if}
 			</div>
-		{:else}
-			{#each pane.tabs as tab (tab.id)}
-				{@const Comp = comps[tab.viewId]}
-				{@const isActive = tab.id === pane.activeTabId}
-				<div class="tab-host" class:active={isActive} aria-hidden={!isActive}>
-					{#if Comp}
-						<Comp {...tab.params} active={isActive} setParams={(p) => workspace.setTabParams(tab.id, p)} />
-					{:else}
-						<div class="tab-loading"><div class="spinner"></div></div>
-					{/if}
-				</div>
-			{/each}
-		{/if}
+		{/each}
 	</div>
 
 	{#if $tabDrag && $tabDrag.overPaneId === pane.id && $tabDrag.edge}
@@ -98,12 +80,4 @@
 	.tab-loading { flex: 1; display: flex; align-items: center; justify-content: center; }
 	.spinner { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--color-border); border-top-color: var(--color-accent); animation: spin 0.8s linear infinite; }
 	@keyframes spin { to { transform: rotate(360deg); } }
-
-	.pane-launcher { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; }
-	.hint { font-size: 0.8rem; color: var(--color-text-tertiary); }
-	.launcher-grid { display: grid; grid-template-columns: repeat(2, minmax(120px, 1fr)); gap: 8px; max-width: 320px; }
-	.launcher-item { padding: 10px 12px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-surface); color: var(--color-text-primary); font-size: 0.82rem; cursor: pointer; transition: border-color 0.15s ease; }
-	.launcher-item:hover { border-color: var(--color-accent); }
-	.launcher-close { margin-top: 4px; font-size: 0.72rem; color: var(--color-text-tertiary); background: none; border: none; cursor: pointer; }
-	.launcher-close:hover { color: var(--color-text-primary); }
 </style>
