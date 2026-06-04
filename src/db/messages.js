@@ -240,7 +240,7 @@ export function createMessagesNamespace(deps) {
       await d1Batch([
         {
           sql: `UPDATE messages SET
-                  content = NULL, thinking = NULL, tags = NULL, entities = NULL,
+                  content = NULL, content_hash = NULL, thinking = NULL, tags = NULL, entities = NULL,
                   entity_summary = NULL, relations = NULL, metadata = NULL,
                   suggested_new_tag = NULL, nlp_error = NULL, embedding_768 = NULL,
                   forgotten_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -334,6 +334,67 @@ export function createMessagesNamespace(deps) {
         for (const row of result.results || []) existing.add(row.id);
       }
       return existing;
+    },
+
+    /**
+     * Change-detection metadata for one message id — drives captureMessage's
+     * insert / no-op / update branch. content_hash is PLAINTEXT (0007) so it
+     * compares without decrypting; content is decrypted by the adapter on read
+     * so a legacy NULL hash can still be derived. `forgotten` is surfaced so the
+     * caller never resurrects a redacted message.
+     */
+    async getContentMeta(userId, id) {
+      const res = await d1Query(
+        `SELECT content_hash, content, forgotten_at FROM messages WHERE id = ? AND user_id = ?`,
+        [id, userId],
+      );
+      const row = firstRow(res);
+      if (!row) return { exists: false, contentHash: null, content: null, forgotten: false };
+      return {
+        exists: true,
+        contentHash: row.content_hash ?? null,
+        content: row.content ?? null,
+        forgotten: Boolean(row.forgotten_at),
+      };
+    },
+
+    /**
+     * Content changed upstream — overwrite body + hash and RE-ENRICH: reset
+     * nlp_processed=0 (the drainer re-embeds), null the embedding + every
+     * AI-derived column, and drop the stale mindscape point so the cluster sync
+     * re-adds it with the new embedding. Mirrors redact()'s reset minus the
+     * tombstone, and is gated `forgotten_at IS NULL` so a redacted message is
+     * never resurrected. content + metadata auto-encrypt on write; content_hash
+     * stays plaintext (crypto-local.js parseWriteSQL UPDATE branch). Returns
+     * { changed } — false if no live row matched (forgotten / missing).
+     */
+    async updateContent(userId, id, { content, contentHash, metadata = null }) {
+      const res = await d1Query(
+        `UPDATE messages SET
+           content = ?, content_hash = ?, metadata = ?,
+           nlp_processed = 0, nlp_processed_at = NULL, nlp_error = NULL,
+           thinking = NULL, tags = NULL, entities = NULL, entity_summary = NULL,
+           relations = NULL, suggested_new_tag = NULL, embedding_768 = NULL
+         WHERE id = ? AND user_id = ? AND forgotten_at IS NULL
+         RETURNING id`,
+        [content, contentHash, metadata, id, userId],
+      );
+      const changed = Boolean(firstRow(res));
+      if (changed) {
+        await d1Query(
+          `DELETE FROM clustering_points WHERE user_id = ? AND source_type = 'message' AND source_id = ?`,
+          [userId, id],
+        );
+      }
+      return { changed };
+    },
+
+    /** Backfill content_hash on a legacy (pre-0007) row whose content is unchanged — no re-enrich. */
+    async backfillContentHash(userId, id, contentHash) {
+      await d1Query(
+        `UPDATE messages SET content_hash = ? WHERE id = ? AND user_id = ? AND content_hash IS NULL`,
+        [contentHash, id, userId],
+      );
     },
 
     async getExistingConversationIds(userId, source) {

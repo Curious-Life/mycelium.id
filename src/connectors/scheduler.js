@@ -15,7 +15,21 @@ import { createConnectorStore } from './store.js';
 import { createPkce, createState, buildAuthUrl, exchangeCode } from './oauth.js';
 
 const MAX_ITEMS_PER_SYNC = 500;
+const MAX_RECENT_RUNS = 10;   // per-connector run log kept in :state (audit-lite)
+const MAX_BACKOFF_SHIFT = 4;  // a persistently-idle connector backs off to base × 2^4 = 16×
 const nowIso = () => new Date().toISOString();
+
+/**
+ * When a connector is next due for a periodic sync. A connector whose recent
+ * pulls came back empty (idleStreak) backs off from the base interval up to 16×
+ * so the scheduler stops hammering sources that never have anything new. Pure +
+ * exported for the verify. idleStreak 0 ⇒ due at base cadence.
+ */
+export function connectorDueAt(state, baseMs) {
+  const last = state?.lastSyncAt ? Date.parse(state.lastSyncAt) : 0;
+  const shift = Math.min(Math.max(Number(state?.idleStreak) || 0, 0), MAX_BACKOFF_SHIFT);
+  return last + baseMs * (2 ** shift);
+}
 
 export function createConnectorRunner({ db, userId, enqueueEnrichment }) {
   const store = createConnectorStore({ db, userId });
@@ -31,8 +45,16 @@ export function createConnectorRunner({ db, userId, enqueueEnrichment }) {
         status: st.status || 'disconnected',
         connectedAt: st.connectedAt || null,
         lastSyncAt: st.lastSyncAt || null,
+        lastOkAt: st.lastOkAt || null,
         lastError: st.lastError || null,
+        lastErrorAt: st.lastErrorAt || null,
         itemsLastSync: st.itemsLastSync ?? null,
+        itemsCreated: st.itemsCreated ?? null,
+        itemsUpdated: st.itemsUpdated ?? null,
+        itemsDeduped: st.itemsDeduped ?? null,
+        idleStreak: st.idleStreak ?? 0,
+        lastRun: st.lastRun || null,
+        recentRuns: Array.isArray(st.recentRuns) ? st.recentRuns : [],
       });
     }
     return out;
@@ -101,6 +123,7 @@ export function createConnectorRunner({ db, userId, enqueueEnrichment }) {
     if (running.has(id) && !force) return { ok: false, error: 'already_running' };
 
     running.add(id);
+    const startedMs = Date.now();
     try {
       await store.patchState(id, { status: 'syncing', lastError: null });
       let tokens = await store.getTokens(id);
@@ -109,23 +132,36 @@ export function createConnectorRunner({ db, userId, enqueueEnrichment }) {
         if (fresh && fresh.access_token !== tokens.access_token) { await store.setTokens(id, fresh); tokens = fresh; }
       }
       const { items = [], nextCursor } = await adapter.pull({ db, userId, tokens, store }, { cursor: state.cursor });
-      let created = 0; let deduped = 0;
+      let created = 0; let updated = 0; let deduped = 0;
       for (const item of items.slice(0, MAX_ITEMS_PER_SYNC)) {
-        const { deduped: d } = await captureMessage(db, { userId, role: 'user', ...item }, enqueueEnrichment);
-        if (d) deduped += 1; else created += 1;
+        const r = await captureMessage(db, { userId, role: 'user', ...item }, enqueueEnrichment);
+        if (r.updated) updated += 1; else if (r.deduped) deduped += 1; else created += 1;
       }
       if (items.length > MAX_ITEMS_PER_SYNC) {
         console.warn(`[connectors] ${id}: pulled ${items.length} items, capped at ${MAX_ITEMS_PER_SYNC} this pass`);
       }
+      const finishedAt = nowIso();
+      const run = { at: finishedAt, ok: true, pulled: items.length, created, updated, deduped, durationMs: Date.now() - startedMs };
+      const recentRuns = [run, ...(Array.isArray(state.recentRuns) ? state.recentRuns : [])].slice(0, MAX_RECENT_RUNS);
+      // Idle-backoff input: a fully-empty pull bumps idleStreak so the scheduler
+      // polls this connector progressively less often (see connectorDueAt).
+      const idleStreak = items.length === 0 ? (Number(state.idleStreak) || 0) + 1 : 0;
       const patch = {
-        status: 'connected', lastSyncAt: nowIso(), lastError: null,
-        cursor: nextCursor ?? state.cursor, itemsLastSync: items.length,
+        status: 'connected', lastSyncAt: finishedAt, lastOkAt: finishedAt, lastError: null, lastErrorAt: null,
+        cursor: nextCursor ?? state.cursor,
+        itemsLastSync: items.length, itemsCreated: created, itemsUpdated: updated, itemsDeduped: deduped,
+        idleStreak, lastRun: run, recentRuns,
       };
       await store.patchState(id, patch);
-      return { ok: true, pulled: items.length, created, deduped, cursor: patch.cursor };
+      return { ok: true, pulled: items.length, created, updated, deduped, cursor: patch.cursor };
     } catch (e) {
-      await store.patchState(id, { status: 'error', lastError: String(e?.message || e).slice(0, 200) });
-      return { ok: false, error: String(e?.message || e) };
+      const message = String(e?.message || e).slice(0, 200);
+      const at = nowIso();
+      const cur = (await store.getState(id)) || {};
+      const run = { at, ok: false, error: message, durationMs: Date.now() - startedMs };
+      const recentRuns = [run, ...(Array.isArray(cur.recentRuns) ? cur.recentRuns : [])].slice(0, MAX_RECENT_RUNS);
+      await store.patchState(id, { status: 'error', lastError: message, lastErrorAt: at, lastRun: run, recentRuns });
+      return { ok: false, error: message };
     } finally {
       running.delete(id);
     }
@@ -151,6 +187,10 @@ export function startConnectorScheduler({ runner, intervalMs = 5 * 60 * 1000 }) 
       for (const id of ids) {
         const st = await runner.store.getState(id);
         if (!st || st.status === 'disconnected' || st.status === 'connecting') continue;
+        // Idle-backoff: skip a connector whose recent pulls were empty until its
+        // widened interval elapses. idleStreak 0 ⇒ always due (base cadence);
+        // errored connectors are always retried.
+        if (st.status === 'connected' && (Number(st.idleStreak) || 0) >= 1 && Date.now() < connectorDueAt(st, intervalMs)) continue;
         await runner.runSync(id).catch(() => { /* runSync already records lastError */ });
       }
     } catch { /* never throw out of the timer */ }

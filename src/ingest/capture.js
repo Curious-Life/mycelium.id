@@ -44,7 +44,8 @@ export function normalizeCreatedAt(v) {
 }
 
 /**
- * Persist an inbound message. Returns { id, deduped }.
+ * Persist an inbound message. Returns { id, deduped, updated }: `updated` is
+ * true when an existing message's content changed and was re-enriched in place.
  * @param {object} db                 wired db namespace (needs messages + audit)
  * @param {object} msg
  * @param {string} msg.userId         required
@@ -91,17 +92,47 @@ export async function captureMessage(db, msg, enqueueEnrichment) {
   const createdAtIso = normalizeCreatedAt(msg.createdAt);
   if (createdAtIso) row.created_at = createdAtIso;
 
-  // insertIgnore → idempotent on the id PK; a webhook resend is a no-op.
-  const before = await db.messages.getExistingIds(userId, [id]);
-  const deduped = before.has(id);
-  if (!deduped) {
+  // Content-aware dedup (migrations/0007). content_hash = plaintext SHA-256 of
+  // the body (null for attachment-only messages). Three outcomes:
+  //   • new id            → insert
+  //   • seen, same hash   → no-op (deduped): webhook resend / unchanged re-sync
+  //   • seen, hash differ → UPDATE in place + re-enrich, so the edit re-flows to
+  //                         the mindscape. Forgotten (redacted) rows are immutable.
+  const contentHash = content ? crypto.createHash('sha256').update(content, 'utf8').digest('hex') : null;
+  if (contentHash) row.content_hash = contentHash;
+
+  const meta = await db.messages.getContentMeta(userId, id);
+
+  // New → insert. INSERT OR IGNORE still guards a concurrent double-insert.
+  if (!meta.exists) {
     await db.messages.insertIgnore([row]);
     // Best-effort audit (cross-boundary traceability, §8). Never blocks the write.
     try { await db.audit?.log?.({ action: 'message_captured', userId, resourceType: 'message', resourceId: id, details: { source: row.source } }); } catch { /* non-fatal */ }
     // Fire-and-forget enrichment hand-off (row already durably queued at nlp_processed=0).
-    if (typeof enqueueEnrichment === 'function') {
-      try { enqueueEnrichment(id); } catch { /* non-fatal */ }
-    }
+    if (typeof enqueueEnrichment === 'function') { try { enqueueEnrichment(id); } catch { /* non-fatal */ } }
+    return { id, deduped: false, updated: false };
   }
-  return { id, deduped };
+
+  // Redacted rows are immutable — never resurrect a forgotten message.
+  if (meta.forgotten) return { id, deduped: true, updated: false };
+
+  // No body to compare (attachment-only) → existence-only dedup (prior behavior).
+  if (!contentHash) return { id, deduped: true, updated: false };
+
+  // Compare to the stored hash; for legacy (pre-0007) NULL-hash rows derive it
+  // from the decrypted content so an unchanged legacy row only backfills its hash.
+  const oldHash = meta.contentHash
+    ?? (meta.content ? crypto.createHash('sha256').update(meta.content, 'utf8').digest('hex') : null);
+
+  if (oldHash === contentHash) {
+    if (meta.contentHash == null) { try { await db.messages.backfillContentHash(userId, id, contentHash); } catch { /* non-fatal */ } }
+    return { id, deduped: true, updated: false };
+  }
+
+  // Content changed upstream → update in place + re-enrich (re-embed + re-cluster).
+  const { changed } = await db.messages.updateContent(userId, id, { content, contentHash, metadata: row.metadata ?? null });
+  if (!changed) return { id, deduped: true, updated: false };
+  try { await db.audit?.log?.({ action: 'message_updated', userId, resourceType: 'message', resourceId: id, details: { source: row.source } }); } catch { /* non-fatal */ }
+  if (typeof enqueueEnrichment === 'function') { try { enqueueEnrichment(id); } catch { /* non-fatal */ } }
+  return { id, deduped: false, updated: true };
 }
