@@ -57,6 +57,24 @@ export async function createHttpApp(opts = {}) {
 
   const app = express();
 
+  // CORS for ALL discovery endpoints. Browser-based MCP clients (e.g. the MCP
+  // Inspector UI) probe several .well-known URLs during OAuth discovery — the
+  // path-aware RFC 8414 variant (`/.well-known/oauth-authorization-server/mcp`)
+  // and OpenID Connect (`/.well-known/openid-configuration[/mcp]`). Any that 404
+  // WITHOUT CORS headers are rejected by Safari/WebKit as "TypeError: Load failed"
+  // BEFORE the SDK can fall back to the working root document — which is exactly why
+  // the browser flow died while server-side clients (Claude, the Inspector CLI)
+  // sailed through (they don't enforce CORS). Blanket every .well-known response
+  // (including 404s) with CORS and answer the OPTIONS preflight, so the browser can
+  // always read the response and the SDK falls back to the root metadata.
+  app.use('/.well-known', (req, res, next) => {
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.set('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || 'Authorization, Content-Type');
+    if (req.method === 'OPTIONS') { res.status(204).end(); return; }
+    next();
+  });
+
   // Authorization-server metadata (RFC 8414) — better-auth's helper is correct.
   app.get(
     '/.well-known/oauth-authorization-server',
@@ -93,6 +111,43 @@ export async function createHttpApp(opts = {}) {
   const authHandler = toNodeHandler(auth);
   app.all('/api/auth/*splat', (req, res) => {
     const p = req.url.split('?')[0];
+    const origin = req.headers.origin;
+    // CORS preflight: browser-based MCP clients (e.g. the MCP Inspector UI) send an
+    // OPTIONS preflight before the cross-origin DCR POST (Content-Type: application/json)
+    // and token exchange. better-auth registers no OPTIONS route for its /mcp/* endpoints,
+    // so the preflight 404s → the browser blocks the real request ("TypeError: Load failed").
+    // Answer the preflight here, before better-auth. We REFLECT the origin (+ credentials)
+    // rather than "*", because the SDK's token exchange is a credentialed request and
+    // browsers reject "*" for those. (Server-side clients — Claude's backend, the Inspector
+    // CLI — skip preflight entirely, which is why they already connect.)
+    if (req.method === 'OPTIONS') {
+      res.set('Access-Control-Allow-Origin', origin || '*');
+      if (origin) { res.set('Access-Control-Allow-Credentials', 'true'); res.set('Vary', 'Origin'); }
+      res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.set('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || 'Authorization, Content-Type');
+      res.set('Access-Control-Max-Age', '86400');
+      res.status(204).end();
+      return;
+    }
+    // The mcp() plugin emits ACAO:* on /register (public DCR) but NO CORS on /token —
+    // and better-auth's trustedOrigins doesn't govern these plugin endpoints. So a browser
+    // MCP client's cross-origin token exchange is blocked ("Origin ... not allowed by
+    // Access-Control-Allow-Origin"). Reflect the caller's origin (+ credentials) for the
+    // token endpoint. It is PKCE-protected and carries no ambient-cookie authority (the grant
+    // needs the code + verifier), so reflecting is safe; we deliberately do NOT touch
+    // /authorize (a top-level navigation, never a CORS fetch). Force the headers through
+    // res.writeHead so they survive better-auth's response writing.
+    if (origin && p.endsWith('/mcp/token')) {
+      const writeHead = res.writeHead.bind(res);
+      res.writeHead = (...args) => {
+        try {
+          res.setHeader('Access-Control-Allow-Origin', origin);
+          res.setHeader('Access-Control-Allow-Credentials', 'true');
+          res.setHeader('Vary', 'Origin');
+        } catch { /* headers already sent */ }
+        return writeHead(...args);
+      };
+    }
     res.on('finish', () => { if (/(authorize|token|register|jwks|sign-in)/.test(p)) console.error('[myc-oauth]', req.method, p, '→', res.statusCode); });
     return authHandler(req, res);
   });
