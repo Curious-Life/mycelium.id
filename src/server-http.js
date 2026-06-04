@@ -24,10 +24,7 @@
 import { randomUUID } from 'node:crypto';
 import express from 'express';
 import { toNodeHandler } from 'better-auth/node';
-import {
-  oAuthDiscoveryMetadata,
-  oAuthProtectedResourceMetadata,
-} from 'better-auth/plugins';
+import { oAuthDiscoveryMetadata } from 'better-auth/plugins';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 
@@ -58,19 +55,77 @@ export async function createHttpApp(opts = {}) {
 
   const app = express();
 
-  // Two well-knowns at ROOT (MCP clients probe here first).
+  // Authorization-server metadata (RFC 8414) — better-auth's helper is correct.
   app.get(
     '/.well-known/oauth-authorization-server',
     toNodeHandler(oAuthDiscoveryMetadata(auth)),
   );
-  app.get(
-    '/.well-known/oauth-protected-resource',
-    toNodeHandler(oAuthProtectedResourceMetadata(auth)),
-  );
+
+  // Protected-resource metadata (RFC 9728). We serve a MINIMAL body (matching
+  // production servers Sentry/Linear/Notion/GitHub) at BOTH the root AND the
+  // path-suffixed `/.well-known/oauth-protected-resource/mcp`. The suffixed
+  // location (well-known prefix inserted before the resource's `/mcp` path) is
+  // what Claude probes FIRST (RFC 9728 §3.1; mandatory in MCP spec 2025-11-25).
+  // better-auth serves only the root and bakes in openid/RS256 fields working
+  // servers omit, so we hand-build it. CORS is required — Claude's web client
+  // fetches this cross-origin (every working server returns it + answers OPTIONS).
+  const protectedResourceMetadata = {
+    resource: `${baseURL}/mcp`,
+    authorization_servers: [baseURL],
+    bearer_methods_supported: ['header'],
+  };
+  const sendPrm = (req, res) => {
+    console.error('[myc-prm]', req.method, req.path, 'ip=', req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '?', 'ua=', (req.headers['user-agent'] || '').slice(0, 48)); // TEMP — remove pre-merge
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Authorization, *');
+    res.set('Cache-Control', 'no-store');
+    if (req.method === 'OPTIONS') { res.status(204).end(); return; }
+    res.json(protectedResourceMetadata);
+  };
+  app.options(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], sendPrm);
+  app.get(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], sendPrm);
 
   // better-auth owns everything under /api/auth/* (Express 5 NAMED splat).
   // Mounted BEFORE express.json() so better-auth parses its own bodies.
-  app.all('/api/auth/*splat', toNodeHandler(auth));
+  const authHandler = toNodeHandler(auth);
+  app.all('/api/auth/*splat', (req, res) => {
+    const p = req.url.split('?')[0];
+    res.on('finish', () => { if (/(authorize|token|register|jwks|sign-in)/.test(p)) console.error('[myc-oauth]', req.method, p, '→', res.statusCode); });
+    return authHandler(req, res);
+  });
+
+  // ── /login: the OAuth authorize login page ─────────────────────────────────
+  // better-auth's mcp() plugin redirects an UNauthenticated /authorize to
+  // `loginPage?<original query>` (loginPage:'/login' in auth.js). We host it: a
+  // minimal form that signs the operator in, then bounces back to
+  // /api/auth/mcp/authorize with the SAME params — now with a session, so the
+  // authorization code is issued. Without this a fresh MCP client (Claude) gets a
+  // 404 at /login (the spike pre-authenticated its session, so it never hit this).
+  // sign-in is called SERVER-SIDE (auth.api), which bypasses better-auth's
+  // HTTP-layer Origin/CSRF check; we forward its Set-Cookie to the browser.
+  const escHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const loginPage = (qs, err) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mycelium — Sign in</title><style>body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0c;color:#eaeaea;display:grid;place-items:center;min-height:100vh;margin:0}form{background:#15151a;padding:2rem;border-radius:14px;width:320px;border:1px solid #26262e}h1{font-size:1.05rem;margin:0 0 1.2rem;color:#c9a227;font-weight:600}input{width:100%;box-sizing:border-box;margin:.35rem 0;padding:.65rem;background:#0a0a0c;border:1px solid #26262e;border-radius:8px;color:#eaeaea}button{width:100%;margin-top:1rem;padding:.7rem;background:#c9a227;color:#0a0a0c;border:0;border-radius:8px;font-weight:700;cursor:pointer}.e{color:#f87171;font-size:.85rem;margin:.3rem 0}.s{color:#8a8a99;font-size:.72rem;margin-top:1rem;text-align:center}</style></head><body><form method="POST" action="/login?${escHtml(qs)}"><h1>Connect to your vault</h1>${err ? `<div class="e">${escHtml(err)}</div>` : ''}<input name="email" type="email" placeholder="email" value="operator@mycelium.local" autocomplete="username"><input name="password" type="password" placeholder="password" autocomplete="current-password" autofocus required><button type="submit">Sign in</button><div class="s">Authorizing an MCP client to reach this vault.</div></form></body></html>`;
+
+  app.get('/login', (req, res) => {
+    const qs = req.originalUrl.split('?').slice(1).join('?') || '';
+    res.type('html').send(loginPage(qs, null));
+  });
+  app.post('/login', express.urlencoded({ extended: false }), async (req, res) => {
+    const qs = req.originalUrl.split('?').slice(1).join('?') || '';
+    const email = String(req.body?.email || '').trim();
+    const password = String(req.body?.password || '');
+    if (!email || !password) { res.status(400).type('html').send(loginPage(qs, 'Email and password required')); return; }
+    try {
+      const r = await auth.api.signInEmail({ body: { email, password }, asResponse: true });
+      if (!r.ok) { res.status(401).type('html').send(loginPage(qs, 'Invalid email or password')); return; }
+      const cookies = typeof r.headers.getSetCookie === 'function' ? r.headers.getSetCookie() : [r.headers.get('set-cookie')].filter(Boolean);
+      if (cookies.length) res.setHeader('set-cookie', cookies);
+      res.redirect(302, `/api/auth/mcp/authorize?${qs}`);
+    } catch {
+      res.status(401).type('html').send(loginPage(qs, 'Invalid email or password'));
+    }
+  });
 
   // JSON parsing for the MCP route only (after the auth handler).
   app.use(express.json());
@@ -94,22 +149,38 @@ export async function createHttpApp(opts = {}) {
   }
 
   const wwwAuthenticate =
-    `Bearer resource_metadata="${baseURL}/.well-known/oauth-protected-resource"`;
+    `Bearer error="invalid_token", error_description="Authentication required", ` +
+    `resource_metadata="${baseURL}/.well-known/oauth-protected-resource/mcp"`;
 
   // Validate the Bearer access token → better-auth MCP session, or null.
   async function authenticate(req) {
     const authHeader = req.headers['authorization'];
-    if (!authHeader || !/^Bearer\s+/i.test(authHeader)) return null;
+    if (!authHeader || !/^Bearer\s+/i.test(authHeader)) {
+      console.error('[myc-auth]', req.method, '/mcp — no/non-bearer header:', authHeader ? authHeader.slice(0, 14) : '(none)');
+      return null;
+    }
     const headers = new Headers({ authorization: authHeader });
     const request = new Request(`${baseURL}/mcp`, { method: 'POST', headers });
     try {
-      return await auth.api.getMcpSession({ request, headers });
-    } catch {
+      const s = await auth.api.getMcpSession({ request, headers });
+      console.error('[myc-auth]', req.method, '/mcp — getMcpSession:', s ? `OK (user=${s.userId || s.user?.id || '?'})` : 'NULL — token rejected', `tok=${authHeader.slice(7, 19)}…`);
+      return s;
+    } catch (e) {
+      console.error('[myc-auth]', req.method, '/mcp — getMcpSession threw:', e?.message);
       return null;
     }
   }
 
   const mcpHandler = async (req, res) => {
+    // CORS: expose the MCP headers Claude's client must read; answer preflight
+    // BEFORE auth (a preflight carries no credentials).
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Accept');
+    res.set('Access-Control-Expose-Headers', 'WWW-Authenticate, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-Id');
+    if (req.method === 'OPTIONS') { res.status(204).end(); return; }
+    console.error('[myc-mcp]', req.method, 'bearer=', /^Bearer\s/i.test(req.headers['authorization'] || '') ? 'yes' : 'no', 'sid=', req.headers['mcp-session-id'] || '-', 'ip=', req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '?'); // TEMP — remove pre-merge
+
     // Fail closed: every /mcp request must carry a valid Bearer token.
     const session = await authenticate(req);
     if (!session) {
@@ -275,7 +346,10 @@ export async function startHttpServer(opts = {}) {
   const port =
     opts.port || Number(process.env.MYCELIUM_PORT) || urlPort(baseURL) || 4711;
   return new Promise((resolve) => {
-    const httpServer = app.listen(port, () => {
+    // Bind loopback ONLY. The remote transport reaches :4711 via localhost
+    // (Caddy/frpc run on the same Mac); a 0.0.0.0 bind would expose the OAuth
+    // surface to the LAN. See docs/REMOTE-CONNECT-TRANSPORT-DESIGN (T0).
+    const httpServer = app.listen(port, '127.0.0.1', () => {
       // stderr so it never pollutes a stdio MCP stream.
       console.error(`[mycelium] HTTP+OAuth listening on ${baseURL} (port ${port})`);
       resolve(httpServer);

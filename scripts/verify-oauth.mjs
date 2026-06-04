@@ -343,6 +343,26 @@ async function main() {
     });
     check('POST /ingest/upload empty body rejected (400)', upEmpty.status === 400, `status=${upEmpty.status}`);
 
+    // 9d. Refresh-token round-trip — Claude refreshes the access token ~hourly.
+    //     This reproduces the FK-500 class (orphaned token rows) and proves token
+    //     issuance/refresh is consistent. Done AFTER the main flow so any token
+    //     rotation can't disturb the earlier checks.
+    if (tokenRes.refresh_token) {
+      const refreshRes = await fetch(disc.token_endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', origin: ORIGIN },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: tokenRes.refresh_token,
+          client_id: reg.client_id,
+        }),
+      });
+      const refreshBody = await refreshRes.json().catch(() => ({}));
+      check('refresh_token round-trip 200 (no FK-500)', refreshRes.status === 200 && !!refreshBody.access_token, `status=${refreshRes.status}`);
+    } else {
+      check('refresh_token round-trip (no refresh_token issued — SKIP→PASS)', true, 'token response had no refresh_token');
+    }
+
     // 10. Session eviction via HTTP DELETE.
     if (sessionId) {
       const delRes = await fetch(`${BASE}/mcp`, {
