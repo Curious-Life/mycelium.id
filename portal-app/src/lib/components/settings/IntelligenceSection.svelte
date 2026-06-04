@@ -31,6 +31,20 @@
 	let saveErr = $state<string | null>(null);
 	let testMsg = $state<Record<number, string>>({});
 
+	// S6 — hardware-aware local model recommender ("Cookbook").
+	type Rec = { name: string; paramsB: number; estimatedGb: number; fitScore: number; fitLevel: string; blurb: string; installed: boolean };
+	let hwRec = $state<{ hardware: any; available: number; backend: string; recommendations: Rec[]; note: string | null; ollamaUp: boolean } | null>(null);
+	let hwLoading = $state(false);
+	let hwErr = $state<string | null>(null);
+	let pulling = $state<Record<string, { pct: number; status: string; err?: string }>>({});
+
+	const FIT: Record<string, { label: string; cls: string }> = {
+		perfect: { label: 'great fit', cls: 'bg-green-500/15 text-green-400' },
+		good: { label: 'good fit', cls: 'bg-sky-500/15 text-sky-400' },
+		marginal: { label: 'tight', cls: 'bg-amber-500/15 text-amber-400' },
+		too_tight: { label: "won't fit", cls: 'bg-red-500/15 text-red-400' }
+	};
+
 	const JURISDICTION: Record<string, { label: string; cls: string }> = {
 		'eu-zdr': { label: 'EU · zero-retention', cls: 'bg-green-500/15 text-green-400' },
 		'us-standard': { label: 'US · Cloud-Act', cls: 'bg-amber-500/15 text-amber-400' },
@@ -113,6 +127,65 @@
 		await load();
 	}
 
+	async function loadRecommend() {
+		hwLoading = true; hwErr = null;
+		try {
+			const data = await api('/portal/hardware/recommend').then((r) => r.json());
+			if (!data.ok) throw new Error(data.error || 'detection failed');
+			hwRec = data;
+		} catch (e: any) {
+			hwErr = e?.message || 'Hardware detection failed';
+		} finally {
+			hwLoading = false;
+		}
+	}
+
+	// Pull (if needed) the chosen local model with streaming progress, then register
+	// it as a local Ollama provider via the existing /portal/providers route + activate.
+	async function pullAndUse(m: Rec) {
+		pulling = { ...pulling, [m.name]: { pct: m.installed ? 100 : 0, status: m.installed ? 'installed' : 'starting…' } };
+		try {
+			if (!m.installed) {
+				const res = await api('/portal/hardware/pull', { method: 'POST', body: JSON.stringify({ name: m.name }) });
+				if (!res.body) throw new Error('no progress stream');
+				const reader = res.body.getReader();
+				const dec = new TextDecoder();
+				let buf = '';
+				let ok = false;
+				for (;;) {
+					const { value, done } = await reader.read();
+					if (done) break;
+					buf += dec.decode(value, { stream: true });
+					let nl: number;
+					while ((nl = buf.indexOf('\n')) >= 0) {
+						const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+						if (!line.startsWith('data: ')) continue;
+						const payload = line.slice(6);
+						if (payload === '[DONE]') continue;
+						let ev: any; try { ev = JSON.parse(payload); } catch { continue; }
+						if (ev.done) { ok = !!ev.ok; if (!ev.ok) throw new Error(ev.error || 'pull failed'); }
+						else if (ev.total) {
+							const pct = Math.min(100, Math.round((ev.completed / ev.total) * 100));
+							pulling = { ...pulling, [m.name]: { pct, status: ev.status || 'downloading…' } };
+						} else if (ev.status) {
+							pulling = { ...pulling, [m.name]: { pct: pulling[m.name]?.pct ?? 0, status: ev.status } };
+						}
+					}
+				}
+				if (!ok) throw new Error('pull did not complete');
+			}
+			const body = { provider: 'custom', label: `Ollama — ${m.name}`, base_url: 'http://127.0.0.1:11434/v1', model_preference: m.name };
+			const cr = await api('/portal/providers', { method: 'POST', body: JSON.stringify(body) });
+			const cd = await cr.json().catch(() => ({}));
+			if (cr.ok && cd.id) await setActive(cd.id);
+			pulling = { ...pulling, [m.name]: { pct: 100, status: 'ready' } };
+			await load();
+			await loadRecommend();
+		} catch (e: any) {
+			pulling = { ...pulling, [m.name]: { pct: 0, status: 'failed', err: e?.message || 'failed' } };
+		}
+	}
+
 	const inputCls = 'w-full px-3 py-2 text-xs font-mono bg-[var(--color-bg)] border border-[var(--color-border)] rounded text-[var(--color-text-primary)] focus:border-aurum outline-none';
 	const btnCls = 'text-xs px-3 py-1.5 rounded bg-[var(--color-accent)] text-[var(--color-bg)] cursor-pointer disabled:opacity-50';
 </script>
@@ -146,6 +219,53 @@
 				{/each}
 			</div>
 		{/if}
+
+		<!-- S6 — hardware-aware local model recommender ("Cookbook") -->
+		<div class="mb-5">
+			{#if !hwRec && !hwLoading}
+				<button onclick={loadRecommend} class="text-xs px-3 py-1.5 rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-aurum cursor-pointer">✨ Recommend a local model for my hardware</button>
+			{:else if hwLoading}
+				<div class="text-xs text-[var(--color-text-tertiary)] animate-pulse">Detecting hardware…</div>
+			{:else if hwErr}
+				<div class="text-xs text-red-400 p-2 rounded bg-red-500/10">{hwErr}</div>
+			{:else if hwRec}
+				<div class="p-3 rounded border border-[var(--color-border)] space-y-2">
+					<div class="flex items-center gap-2 text-xs">
+						<span class="font-medium text-[var(--color-text-primary)]">Recommended for your hardware</span>
+						<span class="text-[10px] text-[var(--color-text-tertiary)]">
+							{hwRec.hardware.hasGpu ? `${hwRec.hardware.gpuName} · ${hwRec.hardware.gpuVramGb}GB` : `${hwRec.hardware.cpuCores}-core CPU`} · {hwRec.hardware.totalRamGb}GB RAM · ~{hwRec.available}GB usable
+						</span>
+						<button onclick={loadRecommend} title="Re-detect" class="ml-auto text-[10px] text-[var(--color-text-tertiary)] cursor-pointer">↻</button>
+					</div>
+					{#if !hwRec.ollamaUp}
+						<p class="text-[10px] text-amber-400">Ollama isn't running — start it (<span class="font-mono">ollama serve</span>) to pull a model.</p>
+					{/if}
+					{#if hwRec.note}<p class="text-[10px] text-amber-400">{hwRec.note}</p>{/if}
+					{#each hwRec.recommendations as m (m.name)}
+						<div class="flex items-center gap-2 text-xs p-2 rounded bg-[var(--color-elevated)]">
+							<span class="font-mono text-[var(--color-text-primary)]">{m.name}</span>
+							<span class="px-1.5 py-0.5 rounded text-[10px] {FIT[m.fitLevel]?.cls ?? ''}">{FIT[m.fitLevel]?.label ?? m.fitLevel}</span>
+							<span class="text-[10px] text-[var(--color-text-tertiary)] truncate">~{m.estimatedGb}GB · {m.blurb}</span>
+							<span class="ml-auto shrink-0">
+								{#if pulling[m.name]}
+									{#if pulling[m.name].err}
+										<span class="text-[10px] text-red-400">{pulling[m.name].err}</span>
+									{:else if pulling[m.name].status === 'ready'}
+										<span class="text-[10px] text-green-400">✓ ready</span>
+									{:else}
+										<span class="text-[10px] text-[var(--color-text-tertiary)]">{pulling[m.name].status}{pulling[m.name].pct ? ` ${pulling[m.name].pct}%` : ''}</span>
+									{/if}
+								{:else if m.installed}
+									<button onclick={() => pullAndUse(m)} class="text-[10px] text-aurum cursor-pointer">Use</button>
+								{:else}
+									<button onclick={() => pullAndUse(m)} disabled={!hwRec.ollamaUp} class="text-[10px] text-aurum cursor-pointer disabled:opacity-40">Pull &amp; use</button>
+								{/if}
+							</span>
+						</div>
+					{/each}
+				</div>
+			{/if}
+		</div>
 
 		{#if chosen}
 			<form onsubmit={connect} class="mb-5 space-y-2 p-3 rounded border border-[var(--color-border)]">

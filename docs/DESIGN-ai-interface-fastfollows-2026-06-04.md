@@ -257,7 +257,7 @@ Each gate joins the `npm run verify` chain (alphabetical-ish, near its siblings)
 4. **Slice B** (streaming) — biggest; isolated to inference + gateway. One PR.
 5. **Slice C1 + C2** (cascade + tools) — routing-policy changes; ship behind flags, default off. One PR.
 
-Slices A and D-backend are built in **this** session (see Part 8). The rest are locked + ready.
+Slices A, D-backend **and D-routes/UI** are built in **this** session (S6 is end-to-end; see Part 8). Slices B and C are locked + ready.
 
 ---
 
@@ -289,7 +289,9 @@ Slices A and D-backend are built in **this** session (see Part 8). The rest are 
 
 ## Part 8 — Build status (this session)
 
-- **Slice A + Slice D-backend** built here (see the companion handoff). The rest (D-routes/UI, B streaming, C cascade+tools) are locked above with file:line module shapes + LOC budgets + gates, ready to pick up in the listed order.
+- **Slice A** ✅ — S4a (`server-http.js`), S4b (`mcp.js`), `/v1/embeddings` (`src/gateway/embeddings.js`). Gates: `verify:embeddings-gateway` (6) GO.
+- **Slice D (S6) — backend + routes + UI** ✅ — `src/hardware/{fit,catalog,detect,recommend,ollama}.js` (`verify:hardware`, 17) + `src/portal-hardware.js` routes mounted in `server-rest.js` (`verify:hardware-routes`, 5) + the "Recommended for your hardware" panel in `IntelligenceSection.svelte` (detect → ranked fit badges → one-click streaming pull → auto-register the local provider). **S6 is end-to-end usable.** Portal build GO.
+- **Remaining (locked above, ready):** Slice B (true streaming) and Slice C (cascade + tools, flag-gated). File:line module shapes + LOC budgets + gates are in Part 3.
 
 ## Part 9 — Open questions
 
