@@ -15,6 +15,7 @@ import { createMessagesNamespace } from './messages.js';
 import { createFactsNamespace } from './facts.js';
 import { createEntitiesNamespace } from './entities.js';
 import { createAttachmentsNamespace } from './attachments.js';
+import { createSecretsNamespace } from './secrets.js';
 import { createHealthNamespace } from './health.js';
 import { createTasksNamespace } from './tasks.js';
 import { createMetricsNamespace } from './metrics.js';
@@ -50,6 +51,7 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
     facts: createFactsNamespace({ d1Query, firstRow, randomUUID }),
     entities: createEntitiesNamespace({ d1Query, firstRow, randomUUID }),
     attachments: createAttachmentsNamespace({ d1Query, firstRow }),
+    secrets: createSecretsNamespace({ d1Query, firstRow }),
     health: createHealthNamespace({ d1QueryAdmin, firstRow, parseHealthRow, computeHealthSummary, now }),
     tasks: createTasksNamespace({ d1Query, firstRow }),
     metrics: createMetricsNamespace({ d1Query, firstRow }),

@@ -355,7 +355,13 @@ const ENCRYPTED_FIELDS = {
   provisioning_jobs: ['email', 'stripe_customer_id', 'error'],
 
   // Secrets — key names reveal what's stored
-  secrets: ['key', 'description'],
+  // `value` holds tokens (OAuth access/refresh, API keys) → MUST be encrypted
+  // at rest. Routed through SYSTEM_KEY (SYSTEM_KEY_TABLES). Non-deterministic
+  // AES-GCM means encrypted columns can't be queried by equality — the secrets
+  // namespace (src/db/secrets.js) selects-all + filters on the decrypted key,
+  // mirroring the Worker's secrets-api.ts. Worker parity: mirror there if the
+  // Worker ever stores secret values (local-first V1 does not run the Worker).
+  secrets: ['key', 'value', 'description'],
 
   // Time chronicles — narrative about temporal periods
   time_chronicles: [
