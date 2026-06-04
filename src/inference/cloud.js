@@ -115,7 +115,7 @@ async function anthropicInfer({ prompt, maxTokens, apiKey, model, fetch, timeout
 }
 
 /** base_url → the chat-completions URL. Accepts a host, a `…/v1`, or a full URL. */
-function resolveChatUrl(baseUrl) {
+export function resolveChatUrl(baseUrl) {
   if (!baseUrl) return OPENAI_URL;
   const b = String(baseUrl).replace(/\/+$/, "");
   if (/\/chat\/completions$/.test(b)) return b;

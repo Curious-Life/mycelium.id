@@ -32,10 +32,16 @@
 //     cascade (EU→frontier→local on failure) is a later refinement; the `model`
 //     field is advisory in v1 (`mycelium-auto` is the canonical id).
 
-import { randomUUID } from 'node:crypto';
-import { resolveInferenceConfig } from '../inference/resolve.js';
+import { randomUUID, createHash } from 'node:crypto';
+import { resolveInferenceConfig, resolveProviderChain } from '../inference/resolve.js';
 import { createInferenceRouter } from '../inference/router.js';
+import { resolveChatUrl } from '../inference/cloud.js';
 import { createEgressAuditSink } from '../inference/egress.js';
+import { inferWithCascade } from '../inference/cascade.js';
+
+// §4g cascade is opt-in (MYCELIUM_INFER_CASCADE). Default OFF → the single active
+// provider preserves v1 behavior; ON → try EU→frontier→local until one succeeds.
+const cascadeEnabled = (env = process.env) => /^(1|true|yes)$/i.test(String(env.MYCELIUM_INFER_CASCADE || '').trim());
 
 export const CANONICAL_MODEL = 'mycelium-auto';
 const MAX_OUTPUT_TOKENS = 8192;
@@ -207,6 +213,61 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
     return createInferenceRouter({ ...cfg, onEgress, fetch });
   }
 
+  // Tools pass-through: a request carrying `tools` is transparently proxied to an
+  // OpenAI-compatible provider so tool_calls round-trip (the prompt-only router
+  // would otherwise flatten the tool contract away). Returns true if handled;
+  // false when the active provider is NOT OpenAI-compatible (native Anthropic /
+  // local-env) → the caller flattens (dropping tools) as graceful degradation.
+  async function toolsPassthrough(req, res, { body, sensitive }) {
+    const cfg = await resolveInferenceConfig(db, userId);
+    if (!(cfg.baseUrl || cfg.openaiApiKey)) return false;
+
+    const jurisdiction = cfg.jurisdiction || 'us-standard';
+    // §4g: a tool call cannot be downgraded to on-box local, so a sensitive
+    // request to a US provider fails closed rather than egressing.
+    if (sensitive && /^us/.test(jurisdiction)) {
+      throw new GatewayError('a sensitive request cannot use a US provider for tool calls', 400, 'sensitive_blocked');
+    }
+    // Egress audit — sha256 of the serialized messages + length only (§4e); the
+    // messages themselves (and the tool schema) are NEVER logged.
+    try {
+      const msgText = JSON.stringify(body.messages || []);
+      let provider = 'openai';
+      if (cfg.baseUrl) { try { provider = new URL(cfg.baseUrl).hostname; } catch { provider = 'custom'; } }
+      onEgress?.({ provider, jurisdiction, model: cfg.cloudModel || body.model, contentHash: createHash('sha256').update(msgText).digest('hex'), contentLength: msgText.length, decision: 'allowed', reason: 'tools_passthrough' });
+    } catch { /* audit must never break the call */ }
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (cfg.openaiApiKey) headers.Authorization = `Bearer ${cfg.openaiApiKey}`;
+    // mycelium-auto / absent → the provider's configured model; else pass through.
+    const model = (typeof body.model === 'string' && body.model && body.model !== CANONICAL_MODEL) ? body.model : (cfg.cloudModel || body.model || undefined);
+
+    let upstream;
+    try {
+      upstream = await fetch(resolveChatUrl(cfg.baseUrl), { method: 'POST', headers, body: JSON.stringify({ ...body, model }) });
+    } catch {
+      throw new GatewayError('inference failed: provider unreachable', 502, 'upstream_error');
+    }
+
+    // Stream → pipe the provider's SSE through verbatim (tool_call deltas included).
+    if (body.stream === true && upstream.body) {
+      res.set('Content-Type', 'text/event-stream; charset=utf-8');
+      res.set('Cache-Control', 'no-store');
+      res.set('Connection', 'keep-alive');
+      const reader = upstream.body.getReader();
+      try { for (;;) { const { value, done } = await reader.read(); if (done) break; if (value) res.write(Buffer.from(value)); } }
+      catch { /* provider/client dropped mid-stream */ }
+      try { res.end(); } catch { /* ignore */ }
+      return true;
+    }
+
+    const txt = await upstream.text();
+    // A provider error body can reflect request content → never forward it raw.
+    if (!upstream.ok) throw new GatewayError('inference failed: provider error', 502, 'upstream_error');
+    res.status(200).set('Content-Type', 'application/json').send(txt);
+    return true;
+  }
+
   async function chatCompletions(req, res) {
     try {
       const body = req.body;
@@ -216,10 +277,18 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
       const model = typeof body.model === 'string' && body.model ? body.model : CANONICAL_MODEL;
       const stream = body.stream === true;
       const maxTokens = clampMaxTokens(body.max_tokens);
-      const prompt = flattenMessages(body.messages);
       // §4g opt-in: a harness can mark a request sensitive → router hard-blocks
       // egress to a US provider (falls to on-box local + audits the denial).
       const sensitive = headerTrue(req.headers['x-mycelium-sensitive']);
+
+      // Tools pass-through: a request carrying `tools` is proxied raw to an
+      // OpenAI-compatible provider so tool_calls round-trip; a non-compatible
+      // active provider falls through to the flatten path (tools dropped).
+      if (Array.isArray(body.tools) && body.tools.length > 0) {
+        if (await toolsPassthrough(req, res, { body, sensitive })) return;
+      }
+
+      const prompt = flattenMessages(body.messages);
 
       const router = await buildRouter();
       // Gateway calls are treated as cloud-capable (the harness wants a capable
@@ -232,7 +301,12 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
         return;
       }
 
-      const text = await router.infer({ prompt, task: 'complex', maxTokens, sensitive });
+      // §4g cascade (opt-in): try EU→frontier→local until one succeeds; a
+      // sensitive request skips US providers. Default OFF → the single active
+      // provider (router). Streaming above is single-provider by design.
+      const text = cascadeEnabled()
+        ? await inferWithCascade({ chain: await resolveProviderChain(db, userId, { sensitive }), prompt, task: 'complex', maxTokens, sensitive, onEgress, fetch })
+        : await router.infer({ prompt, task: 'complex', maxTokens, sensitive });
       const completion = buildCompletion({ model, prompt, text });
       if (stream) {
         sendStreamShim(res, { id: completion.id, created: completion.created, model, text });

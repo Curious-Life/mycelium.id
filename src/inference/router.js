@@ -47,6 +47,7 @@ export function createInferenceRouter({
   baseUrl,
   jurisdiction,
   onEgress,
+  cloudFallbackToLocal = true,
   timeoutMs = 60000,
   env = process.env,
 } = {}) {
@@ -155,7 +156,9 @@ export function createInferenceRouter({
         emitEgress(prompt, "allowed");
         return await runCloud({ prompt, maxTokens });
       } catch (cloudErr) {
-        // Resilience: a cloud failure falls back to on-box local.
+        // cloudFallbackToLocal:false (cascade mode) propagates the error so the
+        // caller can try the NEXT provider; otherwise resilience → on-box local.
+        if (!cloudFallbackToLocal) throw cloudErr;
         try {
           return await runLocal({ prompt, maxTokens });
         } catch (localErr) {
@@ -199,7 +202,7 @@ export function createInferenceRouter({
         }
         return;
       } catch (cloudErr) {
-        if (!started) { yield* runLocalStream({ prompt, maxTokens }); return; }
+        if (!started && cloudFallbackToLocal) { yield* runLocalStream({ prompt, maxTokens }); return; }
         throw cloudErr;
       }
     }

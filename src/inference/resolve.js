@@ -34,32 +34,61 @@ function parseApiKey(credentials) {
  *   Router opts. Empty object → the router falls back to env, else local Ollama.
  *   Never includes the raw credentials blob.
  */
+/** Map one `ai_providers` row → router opts, or null if it can't be a cloud provider. */
+function mapRowToConfig(row) {
+  const key = parseApiKey(row.credentials);
+  const model = row.model_preference || undefined;
+  const provider = String(row.provider || '').toLowerCase();
+  const baseUrl = row.base_url || undefined;
+  // Native Anthropic (no base_url).
+  if (key && !baseUrl && (provider === 'anthropic' || provider === 'claude')) {
+    return { anthropicApiKey: key, openaiApiKey: '', cloudModel: model, jurisdiction: jurisdictionForBaseUrl(undefined, provider) };
+  }
+  // OpenAI-compatible: native OpenAI, or ANY base_url provider.
+  if (baseUrl || (key && provider === 'openai')) {
+    return { anthropicApiKey: '', openaiApiKey: key || '', baseUrl: baseUrl || undefined, cloudModel: model, jurisdiction: jurisdictionForBaseUrl(baseUrl, provider) };
+  }
+  return null;
+}
+
 export async function resolveInferenceConfig(db, userId) {
   try {
     const active = await db?.providers?.getActive?.(userId); // most-recently-used active row, or null
-    if (active) {
-      const key = parseApiKey(active.credentials);
-      const model = active.model_preference || undefined;
-      const provider = String(active.provider || '').toLowerCase();
-      const baseUrl = active.base_url || undefined;
-
-      // Native Anthropic (no base_url).
-      if (key && !baseUrl && (provider === 'anthropic' || provider === 'claude')) {
-        return { anthropicApiKey: key, openaiApiKey: '', cloudModel: model, jurisdiction: jurisdictionForBaseUrl(undefined, provider) };
-      }
-      // OpenAI-compatible: native OpenAI, or ANY base_url provider.
-      if (baseUrl || (key && provider === 'openai')) {
-        return {
-          anthropicApiKey: '',
-          openaiApiKey: key || '',
-          baseUrl: baseUrl || undefined,
-          cloudModel: model,
-          jurisdiction: jurisdictionForBaseUrl(baseUrl, provider),
-        };
-      }
-    }
+    if (active) { const cfg = mapRowToConfig(active); if (cfg) return cfg; }
   } catch { /* fail-soft: fall back to env/local */ }
   return {}; // router reads env (ANTHROPIC_API_KEY / OPENAI_API_KEY) when unset
+}
+
+// §4g cascade priority (operator decision): EU-sovereign ZDR → frontier (US) →
+// local. Sensitive requests drop US providers entirely.
+const JURISDICTION_RANK = (j) => (j === 'eu-zdr' ? 0 : j === 'local' ? 2 : 1);
+
+/**
+ * Resolve ALL configured providers into an ORDERED cascade of router opts:
+ * eu-zdr → us-* (frontier) → local, with an on-box local fallback ALWAYS last.
+ * A `sensitive` request omits every us-* provider (§4g hard-block). Each element
+ * is the same shape resolveInferenceConfig returns; the trailing `{}`-like local
+ * element makes the router fall through to on-box Ollama as the guaranteed floor.
+ * @param {object} db
+ * @param {string} userId
+ * @param {{sensitive?:boolean}} [opts]
+ * @returns {Promise<Array<object>>}
+ */
+export async function resolveProviderChain(db, userId, { sensitive = false } = {}) {
+  const cloud = [];
+  try {
+    const rows = (await db?.providers?.list?.(userId)) || []; // list() omits credentials…
+    for (const r of rows) {
+      const full = await db.providers.get(r.id, userId); // …so fetch the full row for the key
+      const cfg = full ? mapRowToConfig(full) : null;
+      if (!cfg) continue;
+      if (sensitive && /^us/.test(cfg.jurisdiction || 'us-standard')) continue; // §4g: never cascade sensitive → US
+      cloud.push(cfg);
+    }
+    cloud.sort((a, b) => JURISDICTION_RANK(a.jurisdiction) - JURISDICTION_RANK(b.jurisdiction));
+  } catch { /* fail-soft */ }
+  // Guaranteed final fallback: on-box local Ollama (empty cloud cfg → router goes local).
+  return [...cloud, { jurisdiction: 'local', localFallback: true }];
 }
 
 export default resolveInferenceConfig;
