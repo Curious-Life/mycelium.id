@@ -21,7 +21,11 @@ detail lives in the linked docs. Newest-relevant first.
   BYOK API key only. **Plan:** S0 encrypt creds → S1 mount providers backend → S2 wire router↔creds → S3 widen via
   OpenAI-compatible `base_url` (covers OpenAI/OpenRouter/Together/Groq/**Regolo+Scaleway EU**/Ollama/LMStudio) + egress-audit
   the cloud seam → S4 North ergonomics (`MYCELIUM_HTTP_HOST` fix for the `0.0.0.0` bind at `server-http.js:278` + opt-in static
-  bearer + server `instructions` preamble) → S5 onboarding docs. ~1,020 LOC, no new deps (keep `fetch` adapters; Vercel AI SDK
+  bearer + server `instructions` preamble) → S5 onboarding docs → **S6 hardware-aware local-model recommender** (§4h: `detectHardware`
+  via Tauri-Rust `sysinfo`+Node fallback + dated `models-catalog.json` + `recommendModels` under a RAM headroom budget + one-click
+  `ollama pull`→`local` provider row; native "Cookbook", verified greenfield — no hw-detect/catalog code exists today). **LiteLLM =
+  optional upstream only** (point Mycelium at it as one `custom` base_url); NOT embedded — egress boundary (§4e audit + §4g gate) must
+  stay our code; Open WebUI/AnythingLLM skipped (Mycelium IS the UI+vault). ~1,020 LOC, no new deps (keep `fetch` adapters; Vercel AI SDK
   deferred). Operator forks: remote reachability (Tailscale-now vs relay vs stdio-only), cred storage shape, audience (self vs
   product). **Routing priority locked 2026-06-04 (§4g):** EU-sovereign ZDR (Regolo/Scaleway) → frontier (Anthropic/OpenAI/Google — also doubly-valuable as North MCP clients) → local (test tier) — **inverts shipped local-first**; `sensitive` hard-blocked from US providers (fail-closed); per-provider `jurisdiction` tag. **NOT YET BUILT — design only.** ⚠️ Branch off this branch's base; CLAUDE.md "empty packages" claim is STALE
   (full `src/` exists).

@@ -261,6 +261,8 @@ Adding more outbound providers multiplies plaintext egress. Wire the **dormant `
 
 Keep the **hand-rolled `fetch` adapters** (current `cloud.js`/`local.js`) for V1 — zero new dependency, full control of the egress seam, already leak-safe. Reassess **Vercel AI SDK** only if/when we need streaming + unified tool-calling across providers for an in-app agent (a later "Mycelium calls models *with* tools" feature). Document the tripwire so we don't reach for a dep prematurely.
 
+**On LiteLLM (the local-LLM research's recommended "glue") — optional upstream, never a required middlebox.** That research puts LiteLLM as *the* gateway between agents and providers. We deliberately don't embed it, for one reason: **the egress boundary must be our code.** §4e (audit) + §4g (jurisdiction + `sensitive` hard-block) are *security controls* — if LiteLLM owned routing they'd live in its config and we'd lose the single seam that enforces "sensitive never leaves to a US provider." Mycelium's in-process South router *is* the LiteLLM-equivalent for our curated, jurisdiction-tagged scope (and LiteLLM is Python-only — a sidecar proxy). We don't fight it, though: a power user already running LiteLLM points Mycelium at it as **one `custom` provider** (`base_url: http://localhost:4000`) — they keep its 140-provider reach; we still audit + gate at our own seam (we just see one base_url). The mirror image is the deferred §5.2 item — Mycelium *becoming* the OpenAI-compatible gateway for the user's *harnesses* — so in the BYO-agent story **Mycelium is the gateway, not LiteLLM.** Same logic for Open WebUI / AnythingLLM (they're chat/RAG UIs): Mycelium *is* the UI + vault, so we reuse the converged runtime (Ollama) + our on-box embeddings and skip the UI layer.
+
 ### 4g. Routing policy & jurisdiction (operator decision, 2026-06-04)
 
 The operator set the default routing priority, and it deliberately **inverts the codebase's shipped "local-first"** default — because local models aren't yet good enough to be primary on typical hardware (M1/16 GB ≠ Sonnet-class for ~2-3 yrs, per the compute-landscape research), while EU-sovereign ZDR gives capability *with* privacy.
@@ -273,6 +275,22 @@ The operator set the default routing priority, and it deliberately **inverts the
 - **Tracks cost/quality too.** The cascade also happens to map quality-per-privacy: EU-ZDR as the ~80% workhorse, frontier for the hard ~20%, local for the experimental edge — the same shape as the legacy cost-router intent (CLAUDE.md "Note on the cost router"); fold per-user budget in when that lands.
 
 Net: §4e and §4g are the two halves of the egress boundary — **§4e records every egress; §4g decides whether it's allowed at all.** A new `jurisdiction` column on `ai_providers` (or a static per-preset map) + the sensitivity check is ~40 LOC at the resolver/seam; add `verify:routing` (asserts a `sensitive` payload + a `us` provider → blocked).
+
+### 4h. Local tier + hardware-aware model recommender ("Cookbook")
+
+Two halves: connecting local runtimes (easy) and **telling the user which model to run — the valuable part.** A native equivalent of Odysseus's Cookbook, tied to our routing + vault.
+
+**Connecting local runtimes.** Ollama is already wired (`src/inference/local.js`, native `/api/generate`, vision via `images`). LM Studio / llama.cpp-server / vLLM / Rapid-MLX all speak OpenAI-compatible → just the §4b adapter + a loopback `base_url`. Presets: `ollama` (loopback, jurisdiction `local`, no key) + `local-openai` (LM Studio/vLLM). Embeddings stay on the existing on-box Nomic service (:8091) — the recommender covers **chat/generation** models only, never re-picks the embedder.
+
+**The recommender:**
+1. **`detectHardware()` → `{ platform, arch, chip, ramGB, gpuVramGB|null, freeDiskGB }`.** Floor via Node `os` (`totalmem`/`cpus`/`arch`/`platform`); Apple-Silicon detail via `sysctl` (`hw.memsize`, `machdep.cpu.brand_string`, `hw.model` — unified memory = the usable budget); discrete NVIDIA via `nvidia-smi` when present. Best home is the **Tauri Rust side** (`sysinfo` crate; we already ship the desktop app) exposing a command, with a Node fallback for headless/CLI. Hardware facts are non-secret → free to cross loopback. *(Verified greenfield: no `totalmem`/`sysctl`/`sysinfo`/model-catalog code exists anywhere in the repo today.)*
+2. **Static, dated `models-catalog.json`** (data, not code): ~12-15 curated entries `{ id, runtime, pull, params, quant, minRamGB, contextK, role: general|coding|vision, notes }`, seeded from the compute research (Gemma 4 E4B @ ~12.5 GB = the 16 GB general pick; Phi-4-mini @ ~4.2 GB = the 8 GB pick; Qwen2.5-Coder-14B = coding; Llama 3.3 8B). 🚩 **Staleness is the real risk** (models churn monthly) → catalog ships **in-repo, dated, refreshed per release**, never phones home (air-gap-safe); if a `pull` id 404s on Ollama's registry, fall back to a known-good default. Later: read Ollama `/api/tags` to surface already-pulled models.
+3. **`recommendModels(hw, catalog, { reserveGB })`** — best fit per role under a **headroom budget**: usable = `ramGB − reserve` (OS + vault process + the ~1-2 GB embed service), so a 16 GB Mac gets a model that fits *alongside* Mycelium, not one that eats all 16 GB. Returns a ranked shortlist + the fit reason (*"Gemma 4 E4B — fits your 16 GB with the vault + embedder running"*).
+4. **One-click adopt** — "Download & use" → `ollama pull <id>` (stream progress) → auto-create the `ai_providers` row (`ollama`, loopback `base_url`, model, jurisdiction `local`). Wires straight into §4g (local = test tier + the `sensitive`-safe path).
+
+**Where:** the onboarding "Connect your AI" step (§3d) + Settings → AI Providers → "Run a local model." *"We detected an M2 / 16 GB → recommended **Gemma 4 E4B**. [Download & use]."* Turns "which model?" paralysis into one click.
+
+**LOC ~310** (detect ~60 Rust+Node · catalog data · recommend ~50 · pull+register ~80 · UI ~120, mostly exists). New phase **S6** (after S1; can land with S3). *Smoke:* on this machine `detectHardware` returns sane RAM; `recommendModels` picks a model with `minRamGB ≤ usable`; adopt creates a `local`-jurisdiction provider row.
 
 ---
 
@@ -332,8 +350,9 @@ Relay (3a-D) and the OpenAI-compatible *server* endpoint (5.2) are **out of this
 4. **S3 — Widen providers + egress audit** (4b,4e). OpenAI-compatible adapter + presets; `recordEgress` at the seam. *Smoke:* a `custom` Regolo/Ollama-remote base_url completes; an audit row appears (hash only).
 5. **S4 — North ergonomics** (3a fix, 3b, 3c). `MYCELIUM_HTTP_HOST`; opt-in static bearer; server `instructions`. *Smoke:* `--http` binds loopback by default; a `curl` with the bearer reaches `/mcp`; `initialize` returns the preamble.
 6. **S5 — Onboarding + docs** (3d, 4c UI). "Connect Mycelium to your AI" panel + `docs/CONNECT-YOUR-AI.md` (stdio + remote per client). *Smoke:* follow the doc to attach Mycelium to a second MCP client end-to-end.
+7. **S6 — Local tier + hardware-aware recommender** (4h). `detectHardware` (Tauri Rust + Node fallback) + dated `models-catalog.json` + `recommendModels` + one-click `ollama pull`→provider row. *Smoke:* on this machine it detects RAM and recommends a model that fits the headroom budget, then registers it as a `local` provider. (After S1; can land with S3.)
 
-S0→S3 = South (Mycelium calls models); S4→S5 = North (models call Mycelium). Ship South first.
+S0→S3 = South (Mycelium calls models); S4→S5 = North (models call Mycelium); S6 = the local-tier UX. Ship South first.
 
 ---
 
