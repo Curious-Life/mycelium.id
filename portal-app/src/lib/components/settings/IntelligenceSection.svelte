@@ -45,6 +45,18 @@
 		too_tight: { label: "won't fit", cls: 'bg-red-500/15 text-red-400' }
 	};
 
+	// §4g smart routing (multi-provider cascade) preference.
+	let cascade = $state(false);
+	let cascadeBusy = $state(false);
+	async function loadRouting() {
+		try { const r = await api('/portal/providers/routing'); if (r.ok) cascade = (await r.json()).cascade === true; } catch { /* default off */ }
+	}
+	async function setCascade(v: boolean) {
+		cascadeBusy = true;
+		try { const r = await api('/portal/providers/routing', { method: 'PUT', body: JSON.stringify({ cascade: v }) }); if (r.ok) cascade = (await r.json()).cascade === true; }
+		catch { /* leave as-is */ } finally { cascadeBusy = false; }
+	}
+
 	const JURISDICTION: Record<string, { label: string; cls: string }> = {
 		'eu-zdr': { label: 'EU · zero-retention', cls: 'bg-green-500/15 text-green-400' },
 		'us-standard': { label: 'US · Cloud-Act', cls: 'bg-amber-500/15 text-amber-400' },
@@ -73,7 +85,7 @@
 			loading = false;
 		}
 	}
-	onMount(load);
+	onMount(() => { load(); loadRouting(); });
 
 	function choose(p: Preset) {
 		chosen = p; apiKey = ''; model = p.defaultModel || ''; saveErr = null;
@@ -219,6 +231,24 @@
 				{/each}
 			</div>
 		{/if}
+
+		<!-- §4g smart routing (multi-provider cascade) -->
+		<div class="mb-5 flex items-start gap-3 p-3 rounded border border-[var(--color-border)]">
+			<button
+				onclick={() => setCascade(!cascade)}
+				disabled={cascadeBusy}
+				role="switch"
+				aria-checked={cascade}
+				aria-label="Smart routing"
+				class="mt-0.5 shrink-0 w-9 h-5 rounded-full relative cursor-pointer disabled:opacity-50 transition-colors {cascade ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'}"
+			>
+				<span class="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all {cascade ? 'left-4' : 'left-0.5'}"></span>
+			</button>
+			<div class="text-xs">
+				<div class="text-[var(--color-text-primary)] font-medium">Smart routing</div>
+				<div class="text-[10px] text-[var(--color-text-tertiary)] mt-0.5">Try your providers in priority order — EU-sovereign → frontier → on-box local — falling back automatically if one is unreachable. Off: use only the active provider. Sensitive requests always skip US providers.</div>
+			</div>
+		</div>
 
 		<!-- S6 — hardware-aware local model recommender ("Cookbook") -->
 		<div class="mb-5">

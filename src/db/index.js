@@ -31,6 +31,7 @@ import { createMindscapeNamespace } from './mindscape.js';
 import { createTerritoryDocsNamespace } from './territory-docs.js';
 import { createProvidersNamespace } from './providers.js';
 import { createConnectorsNamespace } from './connectors.js';
+import { createUsersNamespace } from './users.js';
 
 /**
  * Open the vault db and assemble the tool-facing `db` namespace object.
@@ -81,6 +82,12 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
     // surface (src/portal-mindscape.js) + the Phase C chronicles writer.
     mindscape: createMindscapeNamespace({ d1Query, parseJson }),
     territoryDocs: createTerritoryDocsNamespace({ d1Query, parseJson }),
+
+    // Core user row: timezone (read by getContext — tools/context.js:63, which
+    // already optional-chains db.users) + a `settings` JSON blob that backs the
+    // §4g "smart routing" toggle (the cascade preference the gateway reads
+    // DB-first, src/gateway/openai-compat.js).
+    users: createUsersNamespace({ d1Query, firstRow }),
 
     // db.shareLinks is intentionally omitted — every call site is optional-
     // chained (tools/documents.js:102,516 `db.shareLinks?.…`), so absence

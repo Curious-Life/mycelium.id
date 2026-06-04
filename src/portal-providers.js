@@ -67,6 +67,27 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   // the UI prefills the add-provider form from a chosen preset. No secrets.
   router.get('/providers/presets', (_req, res) => ok(res, { presets: PROVIDER_PRESETS }));
 
+  // §4g "smart routing" (multi-provider cascade) preference — persisted in the
+  // user settings blob; the gateway reads it DB-first (env MYCELIUM_INFER_CASCADE
+  // is only the fallback when unset). A non-secret boolean, so plain settings.
+  router.get('/providers/routing', async (_req, res) => {
+    try {
+      const s = await db.users.getSettings(userId);
+      ok(res, { cascade: s?.inferCascade === true });
+    } catch { bad(res, 500, 'failed to read routing preference'); }
+  });
+  router.put('/providers/routing', async (req, res) => {
+    try {
+      const cascade = req.body?.cascade === true;
+      // A fresh single-user vault may have no `users` row yet; updateSettings is
+      // an UPDATE (no-op without a row), so ensure one exists before persisting.
+      try { await db.users.create(userId, userId); } catch { /* row already exists */ }
+      const s = await db.users.getSettings(userId);
+      await db.users.updateSettings(userId, { ...s, inferCascade: cascade });
+      ok(res, { cascade });
+    } catch { bad(res, 500, 'failed to update routing preference'); }
+  });
+
   // Create a provider (BYOK API key). Body: { provider, label?, api_key, model_preference?, base_url? }.
   router.post('/providers', async (req, res) => {
     const b = req.body || {};
