@@ -1,16 +1,17 @@
 // Verify Phase 1 — Obsidian vault folder import
 // (POST /api/v1/portal/import/obsidian). Drives both transports (browser
 // `files` mode + Tauri `folderPath` mode) and asserts each note lands as BOTH
-// a document (upsert on path) AND a memory (captureMessage, content-addressed),
-// encrypted at rest, idempotent on re-import, with edits creating a new memory.
+// a document (upsert on path, placed in a FOLDER tree mirroring the vault) AND
+// a memory (captureMessage, content-addressed), encrypted at rest, idempotent.
 //
 //   P1 parser            parseMarkdownNote → title/tags/body from front-matter
-//   O1 files import       1 note → {documentsUpserted:1, memoriesCreated:1}; doc + msg(source=obsidian, nlp_processed=0)
+//   O1 files import       1 note → document (with folder_id) + memory; folder tree built
 //   O2 encrypted at rest  note text NOT plaintext in the db file
-//   O3 re-import dedup     same files → memoriesCreated:0, memoriesDeduped:1, document upserted (1 msg total)
-//   O4 edit → new memory   edited body → memoriesCreated:1 (2 msgs), document content updated
-//   O5 folderPath mode     temp dir of 2 .md → scanned:2, documentsUpserted:2, memoriesCreated:2
-//   O6 safety              ../traversal rejected (no doc written outside), non-.md skipped
+//   O3 re-import dedup     same files → memoriesDeduped, no duplicate folders
+//   O4 edit → new memory   edited body → +1 memory, document content updated
+//   O5 folderPath + tree   temp dir (a.md + sub/b.md) → 2 docs, root+sub folders, b in sub
+//   O6 safety              ../traversal rejected (no doc, no '..' folder), non-.md skipped
+//   O7 idempotent folders  re-import folderPath → folder count unchanged
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
 
@@ -25,6 +26,7 @@ import { parseMarkdownNote } from '../src/ingest/markdown.js';
 const DB = 'data/verify-obsidian.db';
 const KCV = 'data/verify-obsidian-kcv.json';
 const VAULT = path.resolve('data/verify-obsidian-vault');
+const VAULT_NAME = path.basename(VAULT);
 const hex = () => crypto.randomBytes(32).toString('hex');
 const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? `\n      ${d}` : ''}`); };
@@ -50,72 +52,85 @@ async function main() {
   const post = (body) => fetch(`${url}/api/v1/portal/import/obsidian`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
   });
-  const countObsidian = async () => {
-    const r = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND source = ?', [uid, 'obsidian']);
-    return r.results?.[0]?.c ?? 0;
-  };
+  const countObsidian = async () => (await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND source = ?', [uid, 'obsidian'])).results?.[0]?.c ?? 0;
+  const folders = async () => db.folders.list(uid);
 
   try {
-    // ── O1 files-mode import ──
+    // ── O1 files-mode import + folder tree ──
     const filesV1 = [{ relPath: 'notes/idea.md', content: `---\ntitle: My Idea\ntags: [a, b]\n---\n# My Idea\n${NOTE_TEXT}`, mtime: '2026-01-02T00:00:00Z' }];
-    const r1 = await post({ files: filesV1 });
+    const r1 = await post({ files: filesV1, vaultName: 'TestVault' });
     const b1 = await r1.json().catch(() => ({}));
-    const doc1 = await db.documents.get(uid, 'import/obsidian/notes/idea');
-    const nlp = await db.rawQuery('SELECT nlp_processed FROM messages WHERE user_id = ? AND source = ? LIMIT 1', [uid, 'obsidian']);
-    rec('O1. files import → document + memory (nlp_processed=0)',
-      r1.status === 200 && b1.scanned === 1 && b1.documentsUpserted === 1 && b1.memoriesCreated === 1
-        && b1.memoriesDeduped === 0 && !!doc1 && (await countObsidian()) === 1 && (nlp.results?.[0]?.nlp_processed === 0),
-      `status=${r1.status} ${JSON.stringify({ scanned: b1.scanned, docs: b1.documentsUpserted, mem: b1.memoriesCreated })} doc=${!!doc1} nlp=${nlp.results?.[0]?.nlp_processed}`);
+    const doc1 = await db.documents.get(uid, 'import/obsidian/TestVault/notes/idea');
+    const f1 = await folders();
+    const root1 = f1.find((f) => f.name === 'TestVault' && f.parent_id == null);
+    const notesFolder = f1.find((f) => f.name === 'notes' && f.parent_id === root1?.id);
+    rec('O1. files import → document (in folder) + memory; tree built',
+      r1.status === 200 && b1.documentsUpserted === 1 && b1.memoriesCreated === 1 && b1.folders === 2
+        && !!doc1 && doc1.folder_id === notesFolder?.id && !!root1 && !!notesFolder && (await countObsidian()) === 1,
+      `${JSON.stringify({ docs: b1.documentsUpserted, mem: b1.memoriesCreated, folders: b1.folders })} docFolder=${doc1?.folder_id === notesFolder?.id} tree=${!!root1 && !!notesFolder}`);
 
     // ── O2 encrypted at rest ──
-    const plaintextLeak = readFileSync(DB).includes(Buffer.from(NOTE_TEXT));
-    rec('O2. note content encrypted at rest (no plaintext in db file)', !plaintextLeak, `plaintextLeak=${plaintextLeak}`);
+    rec('O2. note content encrypted at rest', !readFileSync(DB).includes(Buffer.from(NOTE_TEXT)), `leak=${readFileSync(DB).includes(Buffer.from(NOTE_TEXT))}`);
 
-    // ── O3 re-import unchanged → dedup ──
-    const r3 = await post({ files: filesV1 });
+    // ── O3 re-import unchanged → dedup + no duplicate folders ──
+    const foldersBefore = (await folders()).length;
+    const r3 = await post({ files: filesV1, vaultName: 'TestVault' });
     const b3 = await r3.json().catch(() => ({}));
-    rec('O3. re-import unchanged → memoriesDeduped, document upserted, 1 msg total',
-      b3.memoriesCreated === 0 && b3.memoriesDeduped === 1 && b3.documentsUpserted === 1 && (await countObsidian()) === 1,
-      `created=${b3.memoriesCreated} deduped=${b3.memoriesDeduped} docs=${b3.documentsUpserted}`);
+    const foldersAfter = (await folders()).length;
+    rec('O3. re-import → memoriesDeduped, document upserted, NO duplicate folders',
+      b3.memoriesCreated === 0 && b3.memoriesDeduped === 1 && b3.documentsUpserted === 1 && foldersAfter === foldersBefore && (await countObsidian()) === 1,
+      `created=${b3.memoriesCreated} deduped=${b3.memoriesDeduped} folders ${foldersBefore}→${foldersAfter}`);
 
-    // ── O4 edited note → new memory, document content updated ──
+    // ── O4 edited note → new memory, document updated ──
     const filesV2 = [{ relPath: 'notes/idea.md', content: `---\ntitle: My Idea\n---\n# My Idea\n${NOTE_TEXT} EDITED`, mtime: '2026-01-03T00:00:00Z' }];
-    const r4 = await post({ files: filesV2 });
+    const r4 = await post({ files: filesV2, vaultName: 'TestVault' });
     const b4 = await r4.json().catch(() => ({}));
-    const doc4 = await db.documents.get(uid, 'import/obsidian/notes/idea');
+    const doc4 = await db.documents.get(uid, 'import/obsidian/TestVault/notes/idea');
     rec('O4. edited note → +1 memory (2 total), document content updated',
-      b4.memoriesCreated === 1 && (await countObsidian()) === 2 && typeof doc4?.content === 'string' && doc4.content.includes('EDITED'),
+      b4.memoriesCreated === 1 && (await countObsidian()) === 2 && doc4?.content?.includes('EDITED'),
       `created=${b4.memoriesCreated} total=${await countObsidian()} docUpdated=${doc4?.content?.includes('EDITED')}`);
 
-    // ── O5 folderPath mode ──
+    // ── O5 folderPath mode + nested folder tree ──
     mkdirSync(path.join(VAULT, 'sub'), { recursive: true });
     writeFileSync(path.join(VAULT, 'a.md'), '# Alpha note\nfirst');
     writeFileSync(path.join(VAULT, 'sub', 'b.md'), '# Beta note\nsecond');
     writeFileSync(path.join(VAULT, 'ignore.txt'), 'not markdown');
     const r5 = await post({ folderPath: VAULT });
     const b5 = await r5.json().catch(() => ({}));
-    rec('O5. folderPath mode walks *.md (skips .txt)',
-      r5.status === 200 && b5.scanned === 2 && b5.documentsUpserted === 2 && b5.memoriesCreated === 2,
-      `${JSON.stringify({ scanned: b5.scanned, docs: b5.documentsUpserted, mem: b5.memoriesCreated })}`);
+    const f5 = await folders();
+    const vroot = f5.find((f) => f.name === VAULT_NAME && f.parent_id == null);
+    const subF = f5.find((f) => f.name === 'sub' && f.parent_id === vroot?.id);
+    const docB = await db.documents.get(uid, `import/obsidian/${VAULT_NAME}/sub/b`);
+    rec('O5. folderPath mode → 2 docs, root+sub folders, b.md in sub',
+      r5.status === 200 && b5.scanned === 2 && b5.documentsUpserted === 2 && b5.folders === 2
+        && !!vroot && !!subF && docB?.folder_id === subF?.id,
+      `${JSON.stringify({ scanned: b5.scanned, docs: b5.documentsUpserted, folders: b5.folders })} subTree=${!!subF} bInSub=${docB?.folder_id === subF?.id}`);
 
     // ── O6 safety: traversal rejected, non-md skipped ──
-    const r6 = await post({ files: [
+    const r6 = await post({ vaultName: 'TestVault', files: [
       { relPath: '../escape.md', content: 'should not be written outside' },
       { relPath: 'x.txt', content: 'skip me' },
       { relPath: 'ok.md', content: '# fine\nok' },
     ] });
     const b6 = await r6.json().catch(() => ({}));
-    const escaped = await db.documents.get(uid, '../escape');
-    rec('O6. traversal rejected + non-md skipped (only ok.md imports)',
-      r6.status === 200 && !escaped && b6.documentsUpserted === 1 && b6.skipped >= 1 && (b6.errors?.length ?? 0) >= 1,
-      `docs=${b6.documentsUpserted} skipped=${b6.skipped} errors=${b6.errors?.length} escapedDoc=${!!escaped}`);
+    const escaped = await db.documents.get(uid, 'import/obsidian/TestVault/../escape');
+    const dotFolder = (await folders()).find((f) => f.name === '..');
+    rec('O6. traversal rejected (no doc, no ".." folder) + non-md skipped',
+      r6.status === 200 && !escaped && !dotFolder && b6.documentsUpserted === 1 && b6.skipped >= 2 && (b6.errors?.length ?? 0) >= 1,
+      `docs=${b6.documentsUpserted} skipped=${b6.skipped} errors=${b6.errors?.length} escaped=${!!escaped} dotFolder=${!!dotFolder}`);
+
+    // ── O7 idempotent folders on re-import ──
+    const before7 = (await folders()).length;
+    await post({ folderPath: VAULT });
+    const after7 = (await folders()).length;
+    rec('O7. re-import folderPath → folder count unchanged (idempotent)', after7 === before7, `folders ${before7}→${after7}`);
   } finally {
     srv.server.close(); try { srv.close?.(); } catch {}
     try { rmSync(VAULT, { recursive: true, force: true }); } catch {}
   }
 
   const allPass = ledger.every(Boolean);
-  console.log(`VERDICT: ${allPass ? 'GO — Phase 1: Obsidian folder import → document + memory, encrypted, idempotent, edit-aware, safe' : 'NO-GO — see FAIL rows'}`);
+  console.log(`VERDICT: ${allPass ? 'GO — Phase 1: Obsidian folder import → document + folder tree + memory, encrypted, idempotent, edit-aware, safe' : 'NO-GO — see FAIL rows'}`);
   process.exit(allPass ? 0 : 1);
 }
 

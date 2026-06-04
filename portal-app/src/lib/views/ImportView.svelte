@@ -13,6 +13,7 @@
 		projects?: number;
 		project_docs?: number;
 		memories?: number;
+		folders?: number;
 		skipped_duplicates?: number;
 		artifacts_kept?: number;
 		artifacts_deduplicated?: number;
@@ -156,10 +157,10 @@
 
 	interface ObsidianSummary {
 		scanned: number; documentsUpserted: number; memoriesCreated: number;
-		memoriesDeduped: number; skipped: number; truncated?: boolean;
+		memoriesDeduped: number; folders: number; skipped: number; truncated?: boolean;
 	}
 
-	async function importObsidian(payload: { folderPath?: string; files?: { relPath: string; content: string; mtime?: string }[] }) {
+	async function importObsidian(payload: { folderPath?: string; files?: { relPath: string; content: string; mtime?: string }[]; vaultName?: string }) {
 		importing = true; error = null; result = null; statusMsg = 'Importing notes…';
 		try {
 			const res = await api('/portal/import/obsidian', { method: 'POST', body: JSON.stringify(payload) });
@@ -170,7 +171,7 @@
 				type: 'obsidian',
 				imported: s.documentsUpserted,
 				skipped: s.skipped,
-				stats: { imported: s.documentsUpserted, skipped: s.skipped, memories: s.memoriesCreated },
+				stats: { imported: s.documentsUpserted, skipped: s.skipped, memories: s.memoriesCreated, folders: s.folders },
 			};
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Import failed';
@@ -194,12 +195,19 @@
 		try {
 			const mdFiles = Array.from(list).filter((f) => /\.md$/i.test(f.name));
 			if (!mdFiles.length) { error = 'No .md notes found in that folder.'; return; }
-			const files = await Promise.all(mdFiles.map(async (f) => ({
-				relPath: (f as any).webkitRelativePath || f.name,
-				content: await f.text(),
-				mtime: new Date(f.lastModified).toISOString(),
-			})));
-			await importObsidian({ files });
+			// webkitRelativePath = "<pickedDir>/sub/note.md" — the picked dir is the
+			// vault; send it as vaultName and strip it so relPaths are vault-relative.
+			const vaultName = (((mdFiles[0] as any).webkitRelativePath as string) || '').split('/')[0] || undefined;
+			const prefix = vaultName ? `${vaultName}/` : '';
+			const files = await Promise.all(mdFiles.map(async (f) => {
+				const rel = ((f as any).webkitRelativePath as string) || f.name;
+				return {
+					relPath: prefix && rel.startsWith(prefix) ? rel.slice(prefix.length) : rel,
+					content: await f.text(),
+					mtime: new Date(f.lastModified).toISOString(),
+				};
+			}));
+			await importObsidian({ files, vaultName });
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Could not read the folder';
 		} finally {
@@ -237,7 +245,7 @@
 			if (s.contacts_with_messages) lines.push(`${s.contacts_with_messages} contacts with message history`);
 			if (s.skipped_duplicates) lines.push(`${s.skipped_duplicates} duplicate messages skipped`);
 		} else if (r.type === 'obsidian') {
-			lines.push(`${s.imported ?? r.imported} notes imported as documents`);
+			lines.push(`${s.imported ?? r.imported} notes imported as documents${s.folders ? ` across ${s.folders} folders` : ''}`);
 			if (s.memories) lines.push(`${s.memories} new memories queued for the mindscape`);
 			if (s.skipped || r.skipped) lines.push(`${s.skipped || r.skipped} skipped`);
 		}
