@@ -5,6 +5,27 @@ detail lives in the linked docs. Newest-relevant first.
 
 ## In Progress
 
+- **AI Interface Layer — design spec (2026-06-04, latest).** `/sweep-first-design` (3 cycles + web research + own-eyes
+  reads) designing how Mycelium connects to "other AI providers" both directions + bring-your-own-harness
+  (opencode/odysseus/openclaw — all real OSS MCP+BYO-model). Spec:
+  [`docs/DESIGN-ai-interface-layer-2026-06-04.md`](docs/DESIGN-ai-interface-layer-2026-06-04.md). **Reframe (pivot):** not a
+  greenfield build — it's **two existing-but-disconnected membranes**. NORTH (inbound MCP server) is already generic +
+  spec-compliant (`src/server-http.js` StreamableHTTP+OAuth2.1/DCR/RFC9728, no Claude-specific code) — gap is REACHABILITY
+  (tunnel/relay doc-only) + ONBOARDING, not protocol. SOUTH (outbound `src/inference/*` router → Ollama/BYOK) is built but
+  **DORMANT + DISCONNECTED**: router reads `process.env` not the `ai_providers` table (`src/db/providers.js`); 1 live caller
+  (`pipeline/describe-chronicles.js:166`); the **provider frontend UI already exists** (`portal-app/.../SettingsView.svelte`,
+  `OnboardingGuide.svelte`) but live backend never mounts `/portal/providers*` (port-source: `reference/server-routes/portal-providers.js`).
+  **🚩 Two landmines (blocking):** (1) `ai_providers.credentials` is ABSENT from `ENCRYPTED_FIELDS` (`src/crypto/crypto-local.js`) →
+  BYOK keys store PLAINTEXT (fix: add `ai_providers:['credentials']`, or route via encrypted `secrets` table); (2) the latent
+  Claude-subscription-OAuth path (`auth_type:'oauth'`+`config_dir`) is an Anthropic **ToS violation since 2026-02-19** → drop it,
+  BYOK API key only. **Plan:** S0 encrypt creds → S1 mount providers backend → S2 wire router↔creds → S3 widen via
+  OpenAI-compatible `base_url` (covers OpenAI/OpenRouter/Together/Groq/**Regolo+Scaleway EU**/Ollama/LMStudio) + egress-audit
+  the cloud seam → S4 North ergonomics (`MYCELIUM_HTTP_HOST` fix for the `0.0.0.0` bind at `server-http.js:278` + opt-in static
+  bearer + server `instructions` preamble) → S5 onboarding docs. ~1,020 LOC, no new deps (keep `fetch` adapters; Vercel AI SDK
+  deferred). Operator forks: remote reachability (Tailscale-now vs relay vs stdio-only), cred storage shape, audience (self vs
+  product). **NOT YET BUILT — design only.** ⚠️ Branch off this branch's base; CLAUDE.md "empty packages" claim is STALE
+  (full `src/` exists).
+
 - **Context Bank Upgrade — design spec (2026-06-02, latest).** Sweep-first-design pass closing the MCP
   context-bank gaps from the design review: forget/redact, facts store, `relatedContext`, entities,
   Tier-2 gating, user salience, unified `ref` handle. **✅ ALL 5 PHASES BUILT + verified (31→27 tools — net slimmer; forget 13/13, facts 17/17, related 7/7, entities 19/19, gating 8/8, cognition 7/7, mindscape 8/8; full `verify` 37× GO). Upgrade COMPLETE; follow-ups only:**
