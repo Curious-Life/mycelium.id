@@ -11,7 +11,7 @@
 
 ## TL;DR — current state (all MERGED TO MAIN)
 
-PR **#64** merged → `main @ 01d4e27`. The **outbound-LLM lane** is built through S3 + the Intelligence UI. **S8 (the gateway) is now BUILT too** (this branch / PR #79) — see the S8 row + the 🔴 security note below.
+PR **#64** merged → `main @ 01d4e27`. The **outbound-LLM lane** is built through S3 + the Intelligence UI. **S8 (the gateway) is now MERGED too** (`main @ 4fabe1a` / PR #79) — see the S8 row + the 🔴 security note below.
 
 > 🔴 **Security fix shipped with S8 (2026-06-04).** The gateway's end-to-end smoke surfaced a **pre-existing auth-bypass** on every Bearer-guarded surface (`/mcp`, `/ingest/*`, `/v1`): `authenticate()` called `auth.api.getMcpSession({request,headers})` **without `asResponse:false`**, which returns a truthy `{}` for *any* input (valid token, garbage token, even no token) — so **any non-empty `Bearer` header authenticated**. Fixed in `src/server-http.js` (`asResponse:false` → real token row / `null`, mirroring better-auth's `withMcpAuth`; **+ fail-closed `accessTokenExpiresAt` check**). Regression guard: **garbage-Bearer→401** added to `verify:oauth` (the missing case — it had only tested *no-token* and *valid-token*). Verified: wrong/expired/garbage → 401, valid → 200, full chain GO.
 
@@ -23,8 +23,8 @@ PR **#64** merged → `main @ 01d4e27`. The **outbound-LLM lane** is built throu
 | S3a — base_url widening + jurisdiction | `64195c0` | ✅ merged | OpenAI-compatible adapter → EU-sovereign/OpenRouter/Ollama/LM Studio; jurisdiction tags |
 | Intelligence Settings UI | `d0c8f55` | ✅ merged | `IntelligenceSection.svelte` — connect any provider, grouped by jurisdiction |
 | S3b — egress boundary | `3e03a98` | ✅ merged | `sensitive` hard-block from US providers + egress audit (hash-only, via `db.audit`) |
-| **S8 — `/v1/chat/completions` gateway** | this branch (#79) | ✅ **BUILT** | `src/gateway/openai-compat.js` (`/v1/chat/completions` + `/v1/models`) on :4711, composing the S2/S3 seams; **§3b static bearer** `src/gateway/static-bearer.js`; `X-Mycelium-Sensitive` opt-in; `verify:gateway` GO (14 checks) + smoke GO |
-| **🔴 Auth-bypass fix** | this branch (#79) | ✅ **FIXED** | `getMcpSession` `asResponse:false` + expiry guard in `authenticate()`; garbage-Bearer→401 regression in `verify:oauth` |
+| **S8 — `/v1/chat/completions` gateway** | `main @ 4fabe1a` (#79) | ✅ **MERGED** | `src/gateway/openai-compat.js` (`/v1/chat/completions` + `/v1/models`) on :4711, composing the S2/S3 seams; **§3b static bearer** `src/gateway/static-bearer.js`; `X-Mycelium-Sensitive` opt-in; `verify:gateway` GO (14 checks) + smoke GO |
+| **🔴 Auth-bypass fix** | `main @ 4fabe1a` (#79) | ✅ **MERGED** | `getMcpSession` `asResponse:false` + expiry guard in `authenticate()`; garbage-Bearer→401 regression in `verify:oauth`; dropped a token fragment from the reject-path log (§1) |
 | S6 — hardware "Cookbook" recommender | — | deferred | §4h — detect HW → recommend a local model → one-click `ollama pull`→provider row |
 
 Design-doc commits (also on main): `90ec677` (interface design), `803303b` (harness research), `3de6113` (routing policy §4g), `e2f10c0` (§4h recommender), `90ef512` (relay+gateway design).
@@ -33,9 +33,11 @@ Design-doc commits (also on main): `90ec677` (interface design), `803303b` (harn
 
 ---
 
-## 2026-06-04 (PM) — MERGE PICKUP — START HERE (your job: checks → merge when ready)
+## 2026-06-04 (PM) — MERGE PICKUP — ✅ CLOSED (merged @ `4fabe1a`)
 
-**The build is DONE.** S8 + the security fix + a relay-lane flaky-test fix are committed and pushed to **PR #79** (branch `claude/elegant-ritchie-034Ub`, base `main`, **draft**). **Your job is NOT to build — it is to get #79 green and MERGE it through the gate once the operator approves.**
+> ✅ **DONE — PR #79 merged to `main @ 4fabe1a` on 2026-06-04** (merge method). The fail-closed gate was satisfied in full: **CI `verify` green on head `9ed7739`** + **local full `npm run verify` chain GO** (59× VERDICT GO, exit 0) + `verify:gateway` (14 checks) + real-server smoke; **operator explicitly approved** the security-sensitive diff; PR `clean` + non-draft. Mid-flight the connectors lane (PR #80) advanced `main` to `e76eb00`, turning #79 `dirty` — the **only** conflict was the `package.json` verify chain, resolved **additively** (kept both `verify:gateway` and `verify:connector-upsert`) in merge commit `9ed7739`; `e76eb00` is an ancestor of merged `main` (no lane regression). One extra security tightening folded into the merge commit: dropped a 12-char Bearer-token fragment from the `/mcp` reject-path log (§1 zero-leak). Session auto-unsubscribed from #79 on merge. **The detail below is retained as the historical pickup record.**
+
+**The build was DONE; the merge is now DONE too.** S8 + the security fix + a relay-lane flaky-test fix landed in **PR #79** (branch `claude/elegant-ritchie-034Ub`, base `main`).
 
 ### PR #79 — exact state
 - Head: **`0284a2c`** (latest). Base: `main @ 5779e29` (main was merged into the branch — up to date).
