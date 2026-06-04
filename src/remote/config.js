@@ -198,8 +198,11 @@ export function getRemoteSecret(key, { env = process.env } = {}) {
  * non-secret operatorEmail to remote.json. Enforces a ≥12-char floor (it is the
  * ONLY gate between a reachable URL and the vault's tools).
  *
- * NOTE: changing an EXISTING password is deferred to Phase 2 (needs better-auth's
- * update API; signUpEmail is idempotent-no-op on an existing user).
+ * Changing an EXISTING password works via delete-then-recreate (better-auth's
+ * signUpEmail is a no-op on an existing user). foreign_keys = ON so the delete
+ * CASCADES to the user's oauth tokens/clients/consents/sessions — no orphans.
+ * Rotating the operator password intentionally invalidates existing connector
+ * grants; clients re-authorize on the next connect.
  *
  * @param {{ email?:string, password:string, env?:object }} args
  */
@@ -211,8 +214,17 @@ export async function setOperatorPassword({ email, password, env = process.env }
   // Dynamic import breaks the auth.js <-> config.js cycle (auth.js imports
   // resolveAuthSecret/readRemoteConfig from here at load time).
   const { createAuth, migrateAuth, ensureOperatorUser } = await import('../auth.js');
-  const { auth } = createAuth({});
+  const { auth, database } = createAuth({});
   await migrateAuth(auth);
+  // signUpEmail is a no-op for an EXISTING user, so a password change = delete
+  // then recreate. foreign_keys = ON makes the delete CASCADE to the user's
+  // oauth tokens/clients/consents/sessions (a FK-OFF delete would orphan them and
+  // later break token issuance). Rotating the password invalidates existing
+  // connector grants by design — clients re-authorize on the next connect.
+  try {
+    database.pragma('foreign_keys = ON');
+    database.prepare('DELETE FROM user WHERE email = ?').run(e);
+  } catch { /* user table not migrated yet on first run — ensureOperatorUser creates it */ }
   await ensureOperatorUser(auth, { email: e, password });
   writeRemoteConfig({ operatorEmail: e }, { env });
   return { email: e };
