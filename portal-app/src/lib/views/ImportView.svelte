@@ -357,6 +357,10 @@
 	<title>Import - Mycelium</title>
 </svelte:head>
 
+<!-- The workspace pane clips its content (.pane-body overflow:hidden), so each
+	 view must own its scroll — like SettingsView's `h-full overflow-y-auto` root.
+	 Without this the Import page can't scroll and content below the fold is lost. -->
+<div class="h-full overflow-y-auto">
 <div class="max-w-2xl mx-auto px-8 py-8">
 	<h1 class="text-xl font-medium text-[var(--color-text-emphasis)] mb-2">Import Data</h1>
 	<p class="text-sm text-[var(--color-text-secondary)] mb-8">
@@ -523,4 +527,5 @@
 			</div>
 		</div>
 	{/if}
+</div>
 </div>
