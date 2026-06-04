@@ -11,6 +11,7 @@ import { apiRouter } from './api.js';
 import { portalCompatRouter } from './portal-compat.js';
 import { portalMindscapeRouter } from './portal-mindscape.js';
 import { portalUploadsRouter } from './portal-uploads.js';
+import { portalImportRouter } from './portal-import.js';
 import { authShimRouter } from './auth-shim.js';
 import { accountRouter } from './account/router.js';
 import { remoteRouter } from './remote/router.js';
@@ -90,6 +91,7 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   v.use('/api/v1/portal', portalCompatRouter({ db, userId }));
   v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath }));
   v.use('/api/v1/portal', portalUploadsRouter({ db, userId, enqueueEnrichment }));
+  v.use('/api/v1/portal', portalImportRouter({ db, userId, enqueueEnrichment }));
   v.use(apiRouter({ tools, handlers, db, userId, enqueueEnrichment }));
   return v;
 }
