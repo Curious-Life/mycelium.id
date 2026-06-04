@@ -14,6 +14,7 @@ import { portalUploadsRouter } from './portal-uploads.js';
 import { portalProvidersRouter } from './portal-providers.js';
 import { authShimRouter } from './auth-shim.js';
 import { accountRouter } from './account/router.js';
+import { remoteRouter } from './remote/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { startEnrichDrainer } from './enrich/drainer.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
@@ -221,6 +222,11 @@ export async function startRestServer({
     kcvPath: effectiveKcvPath,
     lockFile: effectiveLockPath,
   }));
+
+  // Remote-access control surface (loopback-only): set the operator password
+  // (the OAuth gate) + read/patch the non-secret remote config. Mounted before
+  // the vault guard so it works in setup mode AND post-boot.
+  app.use('/api/v1/remote', remoteRouter());
 
   // Local "always signed in" shim so the canonical portal's session check
   // (/auth/session) succeeds and the app opens instead of bouncing to /login.

@@ -110,21 +110,21 @@ function sanitizeNode(node: any): WsNode | null {
 }
 
 function loadInitial(): WorkspaceState {
-	if (!browser) return defaultState();
+	// Always start with a SINGLE screen (the default Mindscape tab). The workspace
+	// is intentionally NOT restored across launches — the app loads /mindscape, so
+	// one tab opens; restoring extra tabs/splits would show a second tab at start.
+	// Recents (a sidebar list, not open tabs) ARE kept.
+	const base = defaultState();
+	if (!browser) return base;
 	try {
 		const raw = localStorage.getItem(STORAGE_KEY);
 		if (raw) {
 			const parsed = JSON.parse(raw);
-			const root = sanitizeNode(parsed.root);
-			if (root && allLeaves(root).some((l) => l.tabs.length)) {
-				const leaves = allLeaves(root);
-				const focusedPaneId = leaves.some((l) => l.id === parsed.focusedPaneId) ? parsed.focusedPaneId : firstLeaf(root).id;
-				const recents: RecentItem[] = (parsed.recents || []).filter((r: any) => r && viewExists(r.viewId)).slice(0, MAX_RECENTS);
-				return { root, focusedPaneId, recents };
-			}
+			const recents: RecentItem[] = (parsed.recents || []).filter((r: any) => r && viewExists(r.viewId)).slice(0, MAX_RECENTS);
+			return { ...base, recents };
 		}
 	} catch { /* fall through */ }
-	return defaultState();
+	return base;
 }
 
 function activeTabOf(s: WorkspaceState): Tab | undefined {
