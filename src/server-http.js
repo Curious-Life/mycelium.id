@@ -181,7 +181,7 @@ export async function createHttpApp(opts = {}) {
       // withMcpAuth (node_modules/better-auth/dist/plugins/mcp/index.mjs:709).
       const s = await auth.api.getMcpSession({ request, headers, asResponse: false });
       if (!s) {
-        console.error('[myc-auth]', req.method, '/mcp — token rejected (no session)', `tok=${authHeader.slice(7, 19)}…`);
+        console.error('[myc-auth]', req.method, '/mcp — token rejected (no session)');
         return null;
       }
       // Fail closed on expiry: the library's token lookup does NOT check the

@@ -2,13 +2,13 @@
 // (POST /api/v1/portal/import/obsidian). Drives both transports (browser
 // `files` mode + Tauri `folderPath` mode) and asserts each note lands as BOTH
 // a document (upsert on path, placed in a FOLDER tree mirroring the vault) AND
-// a memory (captureMessage, content-addressed), encrypted at rest, idempotent.
+// a memory (captureMessage, path-stable id), encrypted at rest, idempotent.
 //
 //   P1 parser            parseMarkdownNote → title/tags/body from front-matter
 //   O1 files import       1 note → document (with folder_id) + memory; folder tree built
 //   O2 encrypted at rest  note text NOT plaintext in the db file
 //   O3 re-import dedup     same files → memoriesDeduped, no duplicate folders
-//   O4 edit → new memory   edited body → +1 memory, document content updated
+//   O4 edit → update       edited body → memory UPDATED in place (1 total), content reflects edit
 //   O5 folderPath + tree   temp dir (a.md + sub/b.md) → 2 docs, root+sub folders, b in sub
 //   O6 safety              ../traversal rejected (no doc, no '..' folder), non-.md skipped
 //   O7 idempotent folders  re-import folderPath → folder count unchanged
@@ -81,14 +81,16 @@ async function main() {
       b3.memoriesCreated === 0 && b3.memoriesDeduped === 1 && b3.documentsUpserted === 1 && foldersAfter === foldersBefore && (await countObsidian()) === 1,
       `created=${b3.memoriesCreated} deduped=${b3.memoriesDeduped} folders ${foldersBefore}→${foldersAfter}`);
 
-    // ── O4 edited note → new memory, document updated ──
+    // ── O4 edited note → UPDATE the same memory in place (path-stable id) ──
     const filesV2 = [{ relPath: 'notes/idea.md', content: `---\ntitle: My Idea\n---\n# My Idea\n${NOTE_TEXT} EDITED`, mtime: '2026-01-03T00:00:00Z' }];
     const r4 = await post({ files: filesV2, vaultName: 'TestVault' });
     const b4 = await r4.json().catch(() => ({}));
     const doc4 = await db.documents.get(uid, 'import/obsidian/TestVault/notes/idea');
-    rec('O4. edited note → +1 memory (2 total), document content updated',
-      b4.memoriesCreated === 1 && (await countObsidian()) === 2 && doc4?.content?.includes('EDITED'),
-      `created=${b4.memoriesCreated} total=${await countObsidian()} docUpdated=${doc4?.content?.includes('EDITED')}`);
+    const mem4 = (await db.rawQuery('SELECT content FROM messages WHERE user_id = ? AND id = ?', [uid, 'obsidian:TestVault/notes/idea'])).results?.[0] ?? null;
+    rec('O4. edited note → memory UPDATED in place (still 1 total), content reflects edit',
+      b4.memoriesUpdated === 1 && b4.memoriesCreated === 0 && (await countObsidian()) === 1
+        && doc4?.content?.includes('EDITED') && mem4?.content?.includes('EDITED'),
+      `updated=${b4.memoriesUpdated} created=${b4.memoriesCreated} total=${await countObsidian()} docEdited=${doc4?.content?.includes('EDITED')} memEdited=${mem4?.content?.includes('EDITED')}`);
 
     // ── O5 folderPath mode + nested folder tree ──
     mkdirSync(path.join(VAULT, 'sub'), { recursive: true });

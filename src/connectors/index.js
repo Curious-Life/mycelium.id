@@ -25,6 +25,6 @@ export function registerBuiltinAdapters({ includeMock = process.env.MYCELIUM_CON
   if (includeMock) registerAdapter(mockAdapter);
 }
 
-export { createConnectorRunner, startConnectorScheduler } from './scheduler.js';
+export { createConnectorRunner, startConnectorScheduler, connectorDueAt } from './scheduler.js';
 export { registerAdapter, getAdapter, listAdapters, _resetRegistry } from './registry.js';
 export { createConnectorStore } from './store.js';

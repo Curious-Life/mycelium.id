@@ -16,9 +16,11 @@ export function normalize(issue) {
   return {
     content: `# ${title}\n\n${desc}`.trim(),
     source: 'linear',
-    // id includes updatedAt so an edited issue re-syncs as a new memory
-    // (append-only), matching the Obsidian + Gmail dedupe model.
-    id: `linear:${issue.id}:${issue.updatedAt}`,
+    // Stable id (issue id only) so an edited issue re-syncs as an UPDATE in place
+    // via content_hash change-detection (captureMessage), matching Gmail. updatedAt
+    // drives the incremental cursor, NOT the id. content is title+description —
+    // stable for unchanged issues (no volatile fields) so there is no re-enrich churn.
+    id: `linear:${issue.id}`,
     messageType: 'issue',
     createdAt: issue.updatedAt,
     metadata: { connector: 'linear', identifier: issue.identifier, url: issue.url, state: issue.state?.name || null, title },
