@@ -157,12 +157,30 @@ async function main() {
     rec('U7. obsidian legacy content-hash memory converged (redacted + point dropped) on re-import',
       L2.memoriesMigrated === 1 && legacyRow?.content === null && legacyRow?.forgotten_at !== null && legacyCp?.c === 0,
       `migrated=${L2.memoriesMigrated} legacyForgotten=${!!legacyRow?.forgotten_at} legacyPoints=${legacyCp?.c}`);
+
+    // ── U8 per-connection daily budget gates the pull once spent + status surfaces it ──
+    process.env.MYCELIUM_CONNECTOR_DAILY_ITEMS = '2';
+    registerAdapter({
+      id: 'budget-test', label: 'Budget Test', provider: 'test', oauth: null,
+      async pull() { return { items: [{ id: 'budget-test:a', source: 'budget-test', content: '# B\n\nbudget body', messageType: 'connector' }], nextCursor: 'x' }; },
+    });
+    await runner.connect('budget-test', {});
+    const ba = await runner.runSync('budget-test'); // pulled 1 → itemsToday 1
+    const bb = await runner.runSync('budget-test'); // pulled 1 (deduped) → itemsToday 2
+    const bc = await runner.runSync('budget-test'); // 2 >= 2 → skipped, pulled 0
+    const stb = await runner.store.getState('budget-test');
+    const bstat = (await runner.status()).find((x) => x.id === 'budget-test');
+    delete process.env.MYCELIUM_CONNECTOR_DAILY_ITEMS;
+    rec('U8. daily budget gates the pull once spent + status surfaces it',
+      ba.pulled === 1 && bb.pulled === 1 && bc.skipped === 'daily_budget' && bc.pulled === 0
+      && stb?.itemsToday === 2 && bstat?.itemsToday === 2 && bstat?.dailyItemLimit === 2,
+      `a=${ba.pulled} b=${bb.pulled} c.skipped=${bc.skipped} itemsToday=${stb?.itemsToday} limit=${bstat?.dailyItemLimit}`);
   } finally {
     srv.server.close(); try { srv.close?.(); } catch {}
   }
 
   const allPass = ledger.every(Boolean);
-  console.log(`VERDICT: ${allPass ? 'GO — content-aware upsert: created/deduped/updated + re-enrich, encrypted-at-rest + plaintext hash, forgotten-safe, obsidian path-stable edit, scheduler tally + idle-backoff' : 'NO-GO — see FAIL rows'}`);
+  console.log(`VERDICT: ${allPass ? 'GO — content-aware upsert: created/deduped/updated + re-enrich, encrypted-at-rest + plaintext hash, forgotten-safe, obsidian path-stable edit, scheduler tally + idle-backoff + daily budget' : 'NO-GO — see FAIL rows'}`);
   process.exit(allPass ? 0 : 1);
 }
 
