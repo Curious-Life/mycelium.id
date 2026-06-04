@@ -209,7 +209,8 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
       const list = (await db?.providers?.list?.(userId)) || [];
       extra = list.map(modelIdForProvider).filter(Boolean);
     } catch { /* fail-soft: the canonical alias is always available */ }
-    const ids = [CANONICAL_MODEL, ...new Set(extra)];
+    // The local Nomic embedding model is always available via /v1/embeddings.
+    const ids = [CANONICAL_MODEL, ...new Set(extra), 'nomic-embed-text-v1.5'];
     const created = Math.floor(Date.now() / 1000);
     res.json({ object: 'list', data: ids.map((id) => ({ id, object: 'model', created, owned_by: 'mycelium' })) });
   }

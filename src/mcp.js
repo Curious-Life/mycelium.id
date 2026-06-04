@@ -189,11 +189,23 @@ export function collectTools(domains, gate = null) {
   return { tools, handlers };
 }
 
+// The MCP `instructions` string — surfaced in every `initialize` response (SDK
+// >=1.x emits it), so a fresh client (Claude Desktop/web, opencode, …) is
+// oriented before its first tool call. Deliberately SHORT + static: it points
+// at the getContext preamble (D5) rather than duplicating its dynamic content.
+export const MYCELIUM_INSTRUCTIONS =
+  "Mycelium is the user's private cognitive vault — their notes, thoughts, people, " +
+  "tasks and reflections, encrypted on their own machine. Call `getContext` FIRST to " +
+  "orient (current time, what is on their mind, recent activity, system health). Prefer " +
+  "recalling from this memory (the search / list / getFact tools) before answering from " +
+  "general knowledge, and capture what the user shares. Everything here is sensitive and " +
+  "personal; do not repeat vault contents outside this conversation.";
+
 /** Create a configured low-level MCP Server over the given tools/handlers. */
 export function createMcpServer({ tools, handlers }) {
   const server = new Server(
     { name: 'mycelium', version: '0.1.0' },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, instructions: MYCELIUM_INSTRUCTIONS },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
