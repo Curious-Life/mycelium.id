@@ -1,5 +1,38 @@
 # Measurement Layer — Session Handoff — 2026-06-04
 
+## ⭐ FINALIZATION (2026-06-04, latest) — the whole buildout plan is DONE
+
+**Branch `feat/measurement-foundation-encryption-fisher` — 5 commits off clean `main` (`b90fa2a`), NOT
+merged/pushed. Full `npm run verify` = 63 GO / 0 NO-GO, exit 0.** Every task F1–F5, G, SEC + SEC-1..4,
+K1(+K1b), T1, S1, H1, C1, E1, X1 is COMPLETE. Each landed as: subagent build → my review → adversarial
+security-review subagent (all SHIP / SHIP-WITH-NITS, nits fixed) → full verify → commit.
+
+Commits (oldest→newest):
+1. `6b36e7d` foundation (F1–F5) + gaps + encryption sweep (SEC-1..4 + K1b) + Fisher keystone (K1)
+2. `b96468b` T1 topology-graph stages (vitality/audit/complexity/frequency) + the cofire/neighbors CLI
+   encryption production-bug fix (getDb-hex → boot()) + verify:pipeline-cli-encryption guard
+3. `514a9f4` S1 surface-to-human REST bridge (src/portal-measurement.js, loopback fail-closed auth) +
+   recovered the operator research spec → docs/COGNITIVE-MEASUREMENT-SPEC-2026-06-04.md (952 lines)
+4. `cdd3043` compute-only families: H1 (§4.24/§4.34), C1 (criticality), coherence, behavioral-temporal
+5. `958b653` E1 embedding-anchor (Tier-1, **CVP-pending**) + X1 CVP harness + presentation-contract
+   validator + closed the legacy-harmonics plaintext-at-rest gap
+
+**The Fisher "movement" pillar is no longer hollow.** All 4 measurement pillars + the 13-family battery
+are computed, encrypted at rest, surfaced to the human (except CVP-gated Tier-1 anchor metrics), and
+each behind a `verify:*` gate.
+
+**OPERATOR-GATED RESIDUALS (by design, not unfinished work):**
+- **CVP calibration** — the embedding-anchor Tier-1 metrics (E1) are computed but stored
+  `cvp_status='pending'` and NOT surfaced, because the spec (§2.3) mandates a Construct Validity
+  Protocol pass on YOUR human-labeled held-out data before shipping. Provide labels → run the X1 CVP
+  harness (src/metrics/cvp.js) → flip to `pass` → they surface. Nothing is faked.
+- **Host-verified residual** — a real Generate run on a populated vault confirms the Python-bridge
+  end-to-end (centroids/dynamics/cofire/fisher/anchors); production anchor embedding needs the Nomic
+  embed-service (:8091) running. All verify gates use random keys + stub embedder (no keychain/network).
+- **Next step**: open a PR / merge the branch (run `git log --oneline main..HEAD` for the 5 commits).
+
+---
+
 ## TL;DR
 Reviewed the codebase + measurement system, **marked the honest state**, then with the
 operator built the **foundation** for bringing the measurement layer out, fixed the
