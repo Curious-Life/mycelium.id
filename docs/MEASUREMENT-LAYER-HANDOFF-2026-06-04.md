@@ -2,10 +2,11 @@
 
 ## ⭐ FINALIZATION (2026-06-04, latest) — the whole buildout plan is DONE
 
-**Branch `feat/measurement-foundation-encryption-fisher` — 5 commits off clean `main` (`b90fa2a`), NOT
-merged/pushed. Full `npm run verify` = 63 GO / 0 NO-GO, exit 0.** Every task F1–F5, G, SEC + SEC-1..4,
-K1(+K1b), T1, S1, H1, C1, E1, X1 is COMPLETE. Each landed as: subagent build → my review → adversarial
-security-review subagent (all SHIP / SHIP-WITH-NITS, nits fixed) → full verify → commit.
+**STATUS: buildout COMPLETE. PR OPEN, awaiting review/merge → https://github.com/Curious-Life/mycelium.id/pull/90**
+Branch `feat/measurement-foundation-encryption-fisher` — **6 commits**, pushed to `origin`, off clean
+`main` (`b90fa2a`, untouched). **Full `npm run verify` = 63 GO / 0 NO-GO, exit 0.** Every task F1–F5, G,
+SEC + SEC-1..4, K1(+K1b), T1, S1, H1, C1, E1, X1 is COMPLETE. Each landed as: subagent build → my review
+→ adversarial security-review subagent (all SHIP / SHIP-WITH-NITS, nits fixed) → full verify → commit.
 
 Commits (oldest→newest):
 1. `6b36e7d` foundation (F1–F5) + gaps + encryption sweep (SEC-1..4 + K1b) + Fisher keystone (K1)
@@ -16,6 +17,7 @@ Commits (oldest→newest):
 4. `cdd3043` compute-only families: H1 (§4.24/§4.34), C1 (criticality), coherence, behavioral-temporal
 5. `958b653` E1 embedding-anchor (Tier-1, **CVP-pending**) + X1 CVP harness + presentation-contract
    validator + closed the legacy-harmonics plaintext-at-rest gap
+6. `55459a6` final handoff doc
 
 **The Fisher "movement" pillar is no longer hollow.** All 4 measurement pillars + the 13-family battery
 are computed, encrypted at rest, surfaced to the human (except CVP-gated Tier-1 anchor metrics), and
@@ -24,12 +26,80 @@ each behind a `verify:*` gate.
 **OPERATOR-GATED RESIDUALS (by design, not unfinished work):**
 - **CVP calibration** — the embedding-anchor Tier-1 metrics (E1) are computed but stored
   `cvp_status='pending'` and NOT surfaced, because the spec (§2.3) mandates a Construct Validity
-  Protocol pass on YOUR human-labeled held-out data before shipping. Provide labels → run the X1 CVP
-  harness (src/metrics/cvp.js) → flip to `pass` → they surface. Nothing is faked.
+  Protocol pass on YOUR human-labeled held-out data before shipping. Nothing is faked.
 - **Host-verified residual** — a real Generate run on a populated vault confirms the Python-bridge
   end-to-end (centroids/dynamics/cofire/fisher/anchors); production anchor embedding needs the Nomic
   embed-service (:8091) running. All verify gates use random keys + stub embedder (no keychain/network).
-- **Next step**: open a PR / merge the branch (run `git log --oneline main..HEAD` for the 5 commits).
+
+---
+
+## ▶ NEXT-SESSION PICKUP PROTOCOL (do this, in order)
+
+**0. Orient (2 min).**
+```bash
+cd ~/mycelium.id && git fetch origin
+git checkout feat/measurement-foundation-encryption-fisher   # the work branch
+git log --oneline main..HEAD          # the 6 commits above
+gh pr view 90                          # PR status / review state
+npm run verify > /tmp/v.log 2>&1; echo $?   # expect 0 (NEVER pipe to | tail — masks npm's exit)
+```
+Read this doc's FINALIZATION block (above) + `docs/MEASUREMENT-LAYER-BUILDOUT-PLAN-2026-06-04.md`
+changelog (bottom, newest first: v2.2 → v1.0) for the full per-task story.
+
+**1. Land the PR (#90).** It's reviewed (per-batch adversarial security reviews, all SHIP) + green.
+Address any human review comments, then merge. After merge, the live checkout `~/mycelium.id` may be on
+stale `main` — `git checkout main && git pull` to run the merged app. (Per memory: the live stack runs
+from `~/mycelium.id`; PRs are GitHub PRs via `gh`.)
+
+**2. Host-verify on a real vault (the one thing CI can't do).** With a populated vault + keys unlocked +
+the Nomic embed-service on :8091, click **Generate** (or run `pipeline/run-clustering.sh` with
+USER_MASTER/SYSTEM_KEY/MYCELIUM_DB set). It now runs **16 steps** (1 sync … 7 fisher … 8–11 topology …
+12–15 cognitive families … 16 anchors). Confirm: no stage errors; `fisher_trajectory`/`territory_cofire`/
+`territory_neighbors`/`cognitive_metrics_*`/`cognitive_anchor_vectors` populate; the portal Vitality/
+trajectory pages render real numbers via the S1 bridge (`/api/v1/portal/...`). This closes the
+"verified-by-pattern" residual into "verified-on-host".
+
+**3. CVP-calibrate the embedding-anchor metrics (when you have labels).** This is the ONLY thing blocking
+the E1 Tier-1 metrics from surfacing. The harness is built + tested (`src/metrics/cvp.js`,
+`verify:cvp`). Steps: (a) gather operator human-labeled examples per construct (insight / reflective-
+depth / affect / inner-state) — see seed phrases in `pipeline/anchors/definitions.py`; (b) run
+`runCVP(values, labels)` (discriminant / incremental / confound-neutralization per spec §2.3); (c) on
+pass, set the family's `cvp_status='pass'` (in `src/metrics/contracts.js` + the stored rows) — the
+presentation-contract validator (`assertNotSurfacedUnlessValidated`) then lets them through the human
+surface. Until then they correctly stay `pending` + `low_confidence=1`, never served as validated.
+
+**4. Optional follow-ups (not blocking):** behavioral-temporal uses UTC hours (per-user TZ deferred);
+`ml_transition_detector` (criticality) + `entity_grid_coherence` are honest NULL stubs awaiting a trained
+model / NER; the §4.24 cross-scale "bands" are flagged `experimental` (text-band validity unproven) — all
+documented in the buildout plan v2.1/v2.2. Baseline calibration (90-day, the `low_confidence`-off rule)
+is Phase 6 and also needs accumulated real data.
+
+## MOST-FRAGILE KNOWLEDGE (read before touching the measurement code)
+1. **`npm run verify` real exit** — always `> log 2>&1; echo $?`; `| tail` masks npm's exit code (this
+   bug bit a prior session). ~20 measurement gates are in the chain now (63 GO total).
+2. **Encryption by writer language.** JS pipeline stages encrypt via `ENCRYPTED_FIELDS` (adapter
+   auto-encrypt) **and MUST open the vault with `boot()`, NOT `getDb({userKey:hex})`** — getDb-with-hex
+   can't make a CryptoKey, so encrypted writes throw "not of type CryptoKey" and get swallowed (this was
+   the real cofire/neighbors prod bug; `verify:pipeline-cli-encryption` guards it). Python stages
+   caller-encrypt via `pipeline/stage_crypto.py` `enc()` / `crypto_local.encrypt_*`.
+3. **Decrypted values read back as STRINGS** → coerce with `Number()` (JS: `coerceNums` in fisher.js /
+   topology.js) or `float()` (Python: `stage_crypto.dec_float`). **numpy 2.x `repr(np.float64(x))` ==
+   `'np.float64(x)'`** (not `'x'`) → `enc()` coerces `repr(float(x))` first or the value is poisoned.
+4. **Never SQL-filter/sort/aggregate an encrypted column** (AES-GCM non-deterministic) — do it in JS over
+   decrypted values, joining only on the plaintext structural skeleton (keys/time/enums/counts).
+5. **Caller-encrypt columns auto-decrypt on JS read** without being in `ENCRYPTED_FIELDS` (they just
+   look encrypted) — that's how fisher/criticality/coherence/behavioral/anchor metrics round-trip. The
+   exception is raw typed-vector columns (`embedding_768`, `nomic_embedding`, `anchor_vector`) which are
+   in `NEVER_AUTO_DECRYPT_COLUMNS` and decrypted only by their typed consumer.
+6. **CVP gate is load-bearing honesty** — `assertNotSurfacedUnlessValidated` refuses any Tier-1 metric
+   lacking a contract OR `cvp_status==='pass'`; `runCVP` returns `'pending'`, never a fabricated `'pass'`,
+   when labels are absent. Don't "temporarily" surface anchor metrics by bypassing it.
+7. **Canonical source = `~/Documents/GitHub/mycelium`** (READ-ONLY); **spec = `docs/COGNITIVE-MEASUREMENT-
+   SPEC-2026-06-04.md`** (the operator's research synthesis, recovered verbatim — source of truth for the
+   families). The as-built map is `docs/MEASUREMENT-LAYER-STATE-2026-06-04.md`; the per-task log is the
+   BUILDOUT-PLAN changelog; encryption design is `docs/MEASUREMENT-ENCRYPTION-DESIGN-2026-06-04.md`.
+8. **Don't commit the pre-existing untracked noise** — `.claude/launch.json`,
+   `assets/mycelium-icon-square.svg`, `src-tauri/{Cargo.lock,icons/**}` — none of it is this work.
 
 ---
 
