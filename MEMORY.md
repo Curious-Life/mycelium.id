@@ -24,10 +24,16 @@ detail lives in the linked docs. Newest-relevant first.
   is at `/api/v1/remote/*` — **no collision** with `/portal/providers` or a future `/v1/chat/completions`; `requireAuth()` in
   `server-http.js` is reusable for the S8 gateway. Connectors/secrets-API did NOT merge (still PR #69) → encrypt-in-place stands.
   ⚠️ Merge dragged in root debug debris (`_*.mjs` — `_reset-operator`, `_setpw`, `_decode-token`…) from a TEMP commit; left as-is
-  (not my lane), flagged for cleanup on main. **NEXT: S3** — OpenAI-compatible `base_url` adapter in `src/inference/cloud.js`
-  (covers OpenAI/OpenRouter/Together/Groq/**Regolo+Scaleway EU**/Ollama/LM Studio) + extend `resolveInferenceConfig` to map
-  `custom`/base_url providers + the `jurisdiction` tag + `recordEgress` at the cloud seam (§4g/§4e); then S8 gateway, S6 HW
-  recommender. ⚠️ Do NOT edit `src/remote/*`, `src/connectors/*`, `src/db/secrets.js`. Design + Part 8 build status:
+  (not my lane), flagged for cleanup on main. ✅ **S3a BUILT** — OpenAI-compatible `base_url` adapter in `src/inference/cloud.js`
+  (`openaiCompatibleInfer`+`resolveChatUrl`, key-optional; covers OpenAI/OpenRouter/Together/Groq/**Regolo+Scaleway EU**/Ollama/
+  LM Studio), `baseUrl`/`jurisdiction` threaded through `router.js`, `resolve.js` maps any base_url provider + tags `jurisdiction`
+  via new `src/inference/presets.js` (regolo/scaleway→eu-zdr, localhost→local, unknown→us-standard fail-safe). `verify:resolve`
+  extended GO; inference/chronicles no-regression GO. **NEXT: S3b** — `recordEgress` at the cloud seam + `sensitive` hard-block
+  (§4e/§4g). **Decision: use the general `db.audit` table** for inference egress (`action:'inference-egress'`, details:
+  {provider,jurisdiction,contentHash,contentLength,decision}) — the `egress_audit` table is channel-shaped (telegram/discord) +
+  CHECK-constrained, a poor fit; `db.audit.log` is already wired + general. Then S8 gateway (`/v1/chat/completions` on :4711,
+  reuse `requireAuth`; relay makes it remote-reachable), S6 HW recommender. ⚠️ Do NOT edit `src/remote/*`, `src/connectors/*`,
+  `src/db/secrets.js`. Design + Part 8 build status:
   [`docs/DESIGN-ai-interface-layer-2026-06-04.md`](docs/DESIGN-ai-interface-layer-2026-06-04.md).
 
 - **AI Interface Layer — design spec (2026-06-04, latest).** `/sweep-first-design` (3 cycles + web research + own-eyes

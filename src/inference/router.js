@@ -43,6 +43,8 @@ export function createInferenceRouter({
   anthropicApiKey,
   openaiApiKey,
   cloudModel,
+  baseUrl,
+  jurisdiction,
   timeoutMs = 60000,
   env = process.env,
 } = {}) {
@@ -53,10 +55,14 @@ export function createInferenceRouter({
     anthropicApiKey: anthropicApiKey ?? env.ANTHROPIC_API_KEY,
     openaiApiKey: openaiApiKey ?? env.OPENAI_API_KEY,
     cloudModel: cloudModel || env.INFERENCE_CLOUD_MODEL, // undefined → backend default
+    baseUrl: baseUrl ?? env.INFERENCE_BASE_URL, // OpenAI-compatible endpoint (Regolo/OpenRouter/Ollama/…)
+    jurisdiction, // 'local'|'eu-zdr'|'us-zdr'|'us-standard' — tag for the egress policy (§4g)
     timeoutMs,
   };
 
-  const hasCloud = () => Boolean(cfg.anthropicApiKey || cfg.openaiApiKey);
+  // Cloud is "available" when a key OR an OpenAI-compatible base_url is set (some
+  // local/self-hosted base_url servers are keyless).
+  const hasCloud = () => Boolean(cfg.anthropicApiKey || cfg.openaiApiKey || cfg.baseUrl);
 
   function runLocal({ prompt, maxTokens }) {
     return localInfer({ prompt, maxTokens, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs });
@@ -67,6 +73,7 @@ export function createInferenceRouter({
       prompt, maxTokens,
       anthropicApiKey: cfg.anthropicApiKey,
       openaiApiKey: cfg.openaiApiKey,
+      baseUrl: cfg.baseUrl,
       model: cfg.cloudModel,
       fetch: cfg.fetch,
       timeoutMs: cfg.timeoutMs,
@@ -119,6 +126,8 @@ export function createInferenceRouter({
       timeoutMs: cfg.timeoutMs,
       anthropicConfigured: Boolean(cfg.anthropicApiKey),
       openaiConfigured: Boolean(cfg.openaiApiKey),
+      baseUrl: cfg.baseUrl,
+      jurisdiction: cfg.jurisdiction,
     },
   };
 }

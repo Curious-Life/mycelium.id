@@ -1,19 +1,24 @@
-// src/inference/resolve.js — the credential-store → inference-router seam (S2).
+// src/inference/resolve.js — the credential-store → inference-router seam (S2/S3).
 //
 // Connects the BYOK provider store (the /portal/providers UI writes `ai_providers`)
-// to the outbound inference router, replacing the env-only path. The active
-// provider the user chose in Settings becomes authoritative: when one is
-// configured we return BOTH cloud-key fields (the chosen vendor's key + an empty
-// string for the other) so a stray `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` in the
-// environment can't override the user's explicit choice (createInferenceRouter
-// only falls back to env when a field is `undefined`, not when it's '').
+// to the outbound inference router, replacing the env-only path, and tags the
+// chosen provider with a jurisdiction (§4g) for the egress policy.
 //
-// S2 scope: maps the active provider when the cloud backend supports it TODAY —
-// native Anthropic (`anthropic`|`claude`) or native OpenAI (`openai`, no base_url).
-// A `custom`/base_url provider is NOT mapped here (it would mis-route to
-// api.openai.com); the OpenAI-compatible base_url widening (S3) wires those.
-// Until then it falls through to env/local — fail-soft (the router defaults to
-// on-box Ollama).
+// The active provider the user chose in Settings is authoritative over env: when
+// one is configured we return BOTH cloud-key fields (the chosen vendor's key + ''
+// for the other) so a stray env key can't override the explicit choice
+// (createInferenceRouter only falls back to env when a field is `undefined`, not
+// when it is '').
+//
+// Mapping:
+//   - native Anthropic (`anthropic`|`claude`, no base_url) → anthropicApiKey
+//   - native OpenAI (`openai`, no base_url)               → openaiApiKey
+//   - ANY base_url provider (`custom` / EU-sovereign / OpenRouter / Ollama / … or
+//     an `openai` row carrying a base_url) → openaiApiKey + baseUrl, via the cloud
+//     backend's OpenAI-compatible path. Key optional (local servers are keyless).
+// Each result carries `jurisdiction` (local|eu-zdr|us-zdr|us-standard).
+
+import { jurisdictionForBaseUrl } from './presets.js';
 
 function parseApiKey(credentials) {
   if (typeof credentials !== 'string' || credentials.length === 0) return null;
@@ -25,22 +30,32 @@ function parseApiKey(credentials) {
  * Resolve the active provider into inference-router options.
  * @param {object} db        the assembled vault db (needs db.providers)
  * @param {string} userId
- * @returns {Promise<{anthropicApiKey?:string, openaiApiKey?:string, cloudModel?:string}>}
+ * @returns {Promise<{anthropicApiKey?:string, openaiApiKey?:string, baseUrl?:string, cloudModel?:string, jurisdiction?:string}>}
  *   Router opts. Empty object → the router falls back to env, else local Ollama.
  *   Never includes the raw credentials blob.
  */
 export async function resolveInferenceConfig(db, userId) {
   try {
     const active = await db?.providers?.getActive?.(userId); // most-recently-used active row, or null
-    if (active && !active.base_url) {
+    if (active) {
       const key = parseApiKey(active.credentials);
       const model = active.model_preference || undefined;
       const provider = String(active.provider || '').toLowerCase();
-      if (key && (provider === 'anthropic' || provider === 'claude')) {
-        return { anthropicApiKey: key, openaiApiKey: '', cloudModel: model };
+      const baseUrl = active.base_url || undefined;
+
+      // Native Anthropic (no base_url).
+      if (key && !baseUrl && (provider === 'anthropic' || provider === 'claude')) {
+        return { anthropicApiKey: key, openaiApiKey: '', cloudModel: model, jurisdiction: jurisdictionForBaseUrl(undefined, provider) };
       }
-      if (key && provider === 'openai') {
-        return { anthropicApiKey: '', openaiApiKey: key, cloudModel: model };
+      // OpenAI-compatible: native OpenAI, or ANY base_url provider.
+      if (baseUrl || (key && provider === 'openai')) {
+        return {
+          anthropicApiKey: '',
+          openaiApiKey: key || '',
+          baseUrl: baseUrl || undefined,
+          cloudModel: model,
+          jurisdiction: jurisdictionForBaseUrl(baseUrl, provider),
+        };
       }
     }
   } catch { /* fail-soft: fall back to env/local */ }
