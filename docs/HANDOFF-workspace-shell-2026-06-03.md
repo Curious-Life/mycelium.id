@@ -10,7 +10,17 @@ The fixed sidebar + one-view-at-a-time shell is becoming an **IDE-style workspac
   divider + Recents + empty-pane launcher + focus ring. Rebuilt + installed to
   `/Applications/Mycelium.app`; verified on the **real vault**: 3D Mindscape |
   Library side-by-side, **ONE** WebGL context, zero errors.
-- **Phase C: NOT started** — the only remaining workspace phase (§6 plan stands).
+- **Phase C (part 1): SHIPPED → main as PR #65 (10822a4)** — tab↔URL sync
+  (fixes the §2.2 close+reload-reopens quirk), **Library doc-state → tab params**
+  (B4; the workspace is now the single URL author; `library` is a singleton tab
+  carrying `params.doc`; deep-links now auto-select), **⌘K command palette**, and
+  **drag-to-reorder tabs**. Sweep-first design:
+  `docs/DESIGN-workspace-shell-phase-c-2026-06-04.md`. Verified live on the
+  isolated `:8796` preview (URL sync, the quirk fix, multi-pane URL, palette,
+  reorder, split regression) + full `npm run verify` GO (real exit, no `| tail`).
+  **Phase C-part-2 DEFERRED** with rationale in that design doc: drag-to-edge
+  split, LRU eviction (premature), mobile single-pane (desktop app), `spaces/[id]`
+  de-route + unknown-viewId fallback (un-migrated routes are unreachable).
 - **LESSON (caused a hidden regression):** running the gate as `npm run verify |
   tail` MASKS the npm exit code (the pipe returns tail's 0). Phase A silently
   broke `verify:nav` N8 on main (it asserted the Import *route* had a drop zone,
@@ -197,45 +207,55 @@ Own PR.
 
 ---
 
-## 6. Phase C — drag/reorder, URL sync, LRU, palette (the plan)
+## 6. Phase C — drag/reorder, URL sync, LRU, palette
 
-~450 LOC. Each independently shippable; pick the highest-value first.
+**Part 1 SHIPPED (#65, 10822a4)** — design
+`docs/DESIGN-workspace-shell-phase-c-2026-06-04.md`. ✅ = done; ⏳ = **Phase
+C-part-2** (deferred, full rationale in that doc's scope table + "Decision criteria").
 
-- **Drag-to-reorder tabs** within a strip (pointer-based; reuse imperative drag;
-  reorder `pane.tabs`).
-- **Drag a tab to a pane edge → split** (drop-zone overlay on hover near an edge →
-  `splitPane` + `moveTab`).
-- **tab↔URL sync:** on focused-tab change, `replaceState` to the tab's canonical
-  URL (guard against the intent re-firing `openOrFocus` — compare current state /
-  a flag). Fixes the "close + reload reopens" quirk (§2.2).
-- **LRU eviction:** cap simultaneously-mounted heavy tabs; evict least-recently-
-  active (full teardown incl. `forceContextLoss`). `log`/toast what was dropped.
-- **Command palette** (⌘P): fuzzy over registry sections + recents (+ documents
-  later) → open as a tab. Replaces/augments the "+" menu.
-- **Narrow viewport:** `WorkspaceRoot` renders only the focused pane's active tab
-  full-screen (no splits/resizers); `BottomTabBar` still drives sections.
+- ✅ **Drag-to-reorder tabs** within a strip — pointer-based (`TabStrip` +
+  `moveTabWithinPane`; <5px = click → focus, past it = drag → trailing click
+  swallowed). No HTML5 DnD (the app has none).
+- ⏳ **Drag a tab to a pane edge → split** — needs cross-pane `moveTab` + a
+  drop-zone overlay; reorder delivers most of the drag value first.
+- ✅ **tab↔URL sync** — on focused-tab change, SvelteKit `replaceState` to the
+  tab's canonical URL; gated by `enableUrlSync()` (set in the `(app)` layout
+  `onMount`), skipped in `?capture`. Fixed the §2.2 quirk. **Coupled with B4**
+  (Library doc-state → `params.doc`; `registry.library` is now `singleton`; the
+  workspace is the SINGLE URL author; `openIn` merges params on focus; deep-link
+  auto-selects). Verified only `/login|/setup|/unlock` react to `$page.url`, so
+  syncing `(app)` URLs can't loop.
+- ⏳ **LRU eviction** — premature: Mindscape is a 1-WebGL-context singleton, other
+  views are light DOM, and eviction would regress keep-alive (lost scroll/edit).
+- ✅ **Command palette (⌘K)** — substring over registry sections + param'd recents
+  → `openOrFocus`; `CommandPalette.svelte` (WelcomeModal shape; Escape/backdrop).
+  (⌘K, not ⌘P; no fuzzy dep.)
+- ⏳ **Narrow viewport / mobile single-pane** — this is a desktop app; `<768px`
+  isn't a V1 target (`BottomTabBar` already drives sections on narrow).
+- ⏳ **`spaces/[id]` de-route + unknown-viewId fallback tab** — un-migrated routes
+  are unreachable (disabled "Coming later", no href); removed-view tabs already
+  dropped by `sanitizeNode` (`store.ts`). Untestable dead code today.
 
 ---
 
 ## 7. Quick-start for the next session
 
-Workspace **A + B are done + installed**. Two threads remain:
+Workspace **A + B + C-part-1 are done + installed**. Two threads remain:
 
-**(a) Workspace Phase C** (the last workspace phase — §6 plan):
-1. Read this handoff + `docs/DESIGN-workspace-shell-2026-06-03.md` (§ the
-   tree/SplitPane decisions + the verification table).
-2. `git checkout main && git pull` (A=#60, B=#62 are in).
-3. Branch `feat/workspace-shell-phase-c`. Pick the highest-value item first — the
-   **tab↔URL sync** (fixes the close+reload-reopens quirk, §2.2) and **drag-to-
-   reorder/split** are the most visible. Also fold in the deferred **B4**
-   (de-route `spaces/[id]` + Library doc-state) + an **unknown-viewId fallback
-   tab** for the un-migrated routes (§2.3).
-4. Build/verify with the isolated `:8796` preview (the real vault is
-   `~/Library/Application Support/id.mycelium.app`; testing must NOT touch its
-   Keychain — use temp `MYCELIUM_KC_*`). **Run verify WITHOUT a `| tail`** (top
-   LESSON) so the exit code is real.
-5. PR (squash-merge after `npm run verify` GO + a preview check), then rebuild +
-   install the `.app` (§3 — WAIT for `:8787` to free before relaunch) for the user.
+**(a) Workspace Phase C-part-2** (optional polish — the ⏳ items in §6): drag-to-
+edge split, LRU eviction, mobile single-pane, `spaces/[id]` de-route +
+unknown-viewId fallback. ALL deferred *with rationale* in
+`docs/DESIGN-workspace-shell-phase-c-2026-06-04.md` (see its scope table +
+"Decision criteria for Phase C-part-2") — pull each only when its real trigger
+appears (edge-split when a user wants to "drag a tab out"; LRU when >1 heavy
+WebGL/video view can be open at once; mobile when a non-desktop target is
+committed; `spaces` when it leaves "Coming later"). Same workflow: branch off
+main → build/verify on the isolated `:8796` preview (real vault is
+`~/Library/Application Support/id.mycelium.app`; use temp `MYCELIUM_KC_*`, NEVER
+its Keychain — the throwaway injects random keys via `startRestServer({userHex,
+systemHex,…, portalMode:'auto'})` + `applyMigrations`, serving the fresh build) →
+**`npm run verify` WITHOUT `| tail`** (top LESSON) → squash PR → rebuild + install
+the `.app` (§3 — WAIT for `:8787` to free before relaunch).
 
 **(b) Import/connectors revamp** (user-flagged; spawn-task chip created): make
 importing quick — (1) open an **Obsidian vault folder** directly (Tauri fs /
