@@ -8,6 +8,7 @@
 	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
 	import IntelligenceSection from '$lib/components/settings/IntelligenceSection.svelte';
+	import ManagedConnectSection from '$lib/components/settings/ManagedConnectSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 	import ConnectYourAISection from '$lib/components/settings/ConnectYourAISection.svelte';
 
@@ -1244,6 +1245,9 @@
 		<div class="text-[var(--color-text-tertiary)] text-sm animate-pulse">Loading...</div>
 	{:else}
 		<div class="space-y-6">
+
+			<!-- Get your address — claim a free <handle>.mycelium.id over the managed relay (handle availability + one-click connect). Placed above RemoteAccessSection: it's the recommended path and its copy refers to the operator-password field "below". -->
+			<ManagedConnectSection />
 
 			<!-- Remote Access — connect Claude / any MCP client over the internet (operator password, status, connector URL) -->
 			<RemoteAccessSection />

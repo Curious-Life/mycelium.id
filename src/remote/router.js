@@ -136,6 +136,10 @@ export function remoteRouter() {
 
   router.post('/connect-managed', async (req, res) => {
     const handle = String(req.body?.handle || '').trim().toLowerCase();
+    // Optional Cloudflare Turnstile token from the app's widget — forwarded to
+    // the control-plane's bot-gated /v1/challenge. Omitted when the control-plane
+    // runs with Turnstile off (self-hosted / dev). Never persisted here.
+    const turnstileToken = typeof req.body?.turnstileToken === 'string' ? req.body.turnstileToken : '';
     // The operator password is the ONLY auth gate on the public URL — refuse to
     // go live without it.
     if (!operatorUserExists()) { res.status(400).json({ ok: false, error: 'set an operator password first' }); return; }
@@ -148,8 +152,9 @@ export function remoteRouter() {
 
     let data;
     try {
-      const chRes = await cpFetch(`${base}/v1/challenge`);
-      if (!chRes.ok) throw new Error('challenge failed');
+      const chUrl = turnstileToken ? `${base}/v1/challenge?cf_turnstile=${encodeURIComponent(turnstileToken)}` : `${base}/v1/challenge`;
+      const chRes = await cpFetch(chUrl);
+      if (!chRes.ok) throw new Error(chRes.status === 403 ? 'bot check failed' : 'challenge failed');
       const { nonce } = await chRes.json();
       const claim = buildClaim({ action: 'provision', handle, nonce, masterHex }); // throws on invalid handle
       const pvRes = await cpFetch(`${base}/v1/provision`, {

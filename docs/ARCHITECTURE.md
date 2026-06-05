@@ -221,7 +221,11 @@ profile *editing* (`PUT /portal/profile` — needs a profile store), the
 **Remote-connect transport is now built** (TLS-passthrough: bundled `frpc`+`caddy`,
 key-on-Mac ACME via acme-dns, loopback `--http`, + the open-source `mycelium-managed/`
 control-plane — see `REMOTE-CONNECT-TRANSPORT-DESIGN` + `REMOTE-CONNECT-MANAGED-DESIGN`;
-standing up the live relay/DNS/acme-dns/LE infra is the operator's deploy). (The in-app
+standing up the live relay/DNS/acme-dns/LE infra is the operator's deploy). The control-plane
+now carries the onboarding/relay-billing layer (`DESIGN-onboarding-and-relay-billing-2026-06-05`):
+a `public_key`-keyed entitlement table (O3) and an **opt-in, fail-closed Turnstile bot-gate**
+on `/v1/challenge` (O2, `mycelium-managed/src/turnstile.js`; secret env-only, single-side
+verification — the nonce carries the proof to provision; `verify:turnstile` GO). (The in-app
 "generate mindscape" trigger + chronicle narration are also **built** — see the
 component table.) See
 [`V1-BUILD-SPEC.md`](V1-BUILD-SPEC.md) §"What's left".
