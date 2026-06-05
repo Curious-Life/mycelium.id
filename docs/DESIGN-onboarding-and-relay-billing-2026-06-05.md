@@ -78,6 +78,12 @@ working AI connection, with three clearly-priced reachability choices:
     throwaway key, so rate is the real control" (`mycelium-managed/src/ratelimit.js:2-3`).
     So bot-filtering must be a *new* layer; the design adds Turnstile at challenge
     and gates the expensive provisioning side-effects behind entitlement.
+  - **Pivot D — entitlement is a separate table keyed by `public_key`, not columns
+    on `handles` (found building O3).** The sketch (§4.3 v1) put `paid_until` on the
+    `handles` row, but `release()` deletes that row — losing the sub on
+    release+reclaim/rename, which the design explicitly forbids ("keyed by
+    publicKey… without losing their sub"). Pivoted to an `entitlements(public_key
+    PK …)` table that survives handle release. `verify:entitlement` E4 is the proof.
   - **Pivot C — charge the relay, not provisioning-in-general.** Free modes
     (`own-relay`/`direct`) never reach the control-plane (`src/remote/runtime.js:153`
     only renders frpc for relay modes; `direct` is Caddy-only on public :443), so
@@ -218,22 +224,34 @@ relay-hook authorizeNewProxy: token→row, host==handle, AND paid_until>now → 
                                                          └── NEW: lapsed → reject
 ```
 
-### 4.3 Schema delta (control-plane registry)
+### 4.3 Schema delta (control-plane registry) — **as built (O3)**
 
-Add to `mycelium-managed/src/registry.js` `handles` table (idempotent
-`ALTER TABLE ADD COLUMN`, mirroring the existing active-proxy migration at
-`registry.js:23-25`):
+**Pivot from the v1 sketch (see revision history Pivot D):** entitlement is a
+**separate `entitlements` table keyed by `public_key`**, NOT columns on `handles`.
+`release()` deletes the `handles` row, so storing `paid_until` there would lose the
+subscription on release+reclaim/rename — contradicting the "keyed by publicKey,
+survives release" requirement. Stripe binds customer→subscription independent of
+any name; we mirror that.
 
+```sql
+CREATE TABLE entitlements (          -- keyed by the tenant's stable identity
+  public_key         TEXT PRIMARY KEY,
+  stripe_customer_id TEXT,           -- null until first checkout; retained on lapse
+  paid_until         INTEGER,        -- epoch ms; tunnel allowed while now < paid_until (+grace)
+  updated_at         TEXT
+);
+ALTER TABLE handles ADD COLUMN hold_expires_at INTEGER;  -- reservation sweep deadline (handle-scoped)
 ```
-stripe_customer_id  TEXT      -- Stripe Customer (1:1 with publicKey); null until first checkout
-paid_until          INTEGER   -- epoch ms; tunnel allowed while now < paid_until (+ grace)
-hold_expires_at     INTEGER   -- placeholder sweep deadline for an unpaid reserved handle
-```
 
-New registry methods: `setEntitlement(publicKey,{customerId,paidUntil})`,
-`getEntitlementByHandle(h)`, `isEntitled(handle, now, graceMs)`,
-`sweepExpiredHolds(now)`. Entitlement is keyed by **publicKey** (a user may
-re-provision the same handle, or release+reclaim, without losing their sub).
+Registry methods (`mycelium-managed/src/registry.js`): `setEntitlement({publicKey,
+stripeCustomerId,paidUntil})` (upsert, COALESCEs a null customer id so a webhook
+that only moves the date can't wipe it), `getEntitlement(publicKey)`,
+`clearEntitlement(publicKey)` (zeros `paid_until`, keeps the customer id for
+one-click re-sub), `isEntitled(handle, now, graceMs)` (joins
+`handles.public_key → entitlements`, **fail-closed**), `setHold(handle, ts)` (marks
+a placeholder only), `sweepExpiredHolds(now)` (deletes expired UNPAID placeholders —
+`frps_token=''` — never a live handle). `finalize()` now clears the hold.
+Verified: `verify:entitlement` E1–E7 GO.
 
 ### 4.4 Where the relay denies a lapsed tenant
 
@@ -282,7 +300,7 @@ proposed coherent journey:
 |---|-----|------|
 | O1 | ✅ **DONE (2026-06-05)** — wired `ManagedConnectSection` into `SettingsView` (above `RemoteAccessSection`). `LocalConnectSection` intentionally **not** wired: `ConnectYourAISection` already covers the local-connect story; a second surface would confuse. `verify:remote-config` + `verify:portal-serve` GO, portal build clean. | S |
 | O2 | **Turnstile** widget in the app + verify on `/v1/challenge`+`/v1/provision` | M |
-| O3 | **Registry entitlement columns + methods** (§4.3) + hold-sweeper | S–M |
+| O3 | ✅ **DONE (2026-06-05)** — `entitlements` table keyed by `public_key` (Pivot D) + `hold_expires_at` + `setEntitlement`/`getEntitlement`/`clearEntitlement`/`isEntitled`/`setHold`/`sweepExpiredHolds`; `finalize()` clears holds. `verify:entitlement` GO (E1–E7); `verify:provision` + `verify:newproxy-auth` regressions GO. | S–M |
 | O4 | **Stripe Checkout + webhook** on the control-plane (€1/mo product, `client_reference_id=publicKey`) | M |
 | O5 | **`/v1/provision` 402 + checkoutUrl** branch; app handles 402 → open browser → poll/re-provision | M |
 | O6 | **relay-hook entitlement gate** + grace window (§4.4) | S |
