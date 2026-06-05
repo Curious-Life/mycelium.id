@@ -280,7 +280,7 @@ proposed coherent journey:
 
 | # | Gap | Size |
 |---|-----|------|
-| O1 | **Wire `ManagedConnectSection` + `LocalConnectSection` into `SettingsView`** (orphaned today) | S |
+| O1 | ✅ **DONE (2026-06-05)** — wired `ManagedConnectSection` into `SettingsView` (above `RemoteAccessSection`). `LocalConnectSection` intentionally **not** wired: `ConnectYourAISection` already covers the local-connect story; a second surface would confuse. `verify:remote-config` + `verify:portal-serve` GO, portal build clean. | S |
 | O2 | **Turnstile** widget in the app + verify on `/v1/challenge`+`/v1/provision` | M |
 | O3 | **Registry entitlement columns + methods** (§4.3) + hold-sweeper | S–M |
 | O4 | **Stripe Checkout + webhook** on the control-plane (€1/mo product, `client_reference_id=publicKey`) | M |
