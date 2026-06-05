@@ -145,10 +145,12 @@ runcmd:
   - apt-get install -y nodejs
   # frps as an unprivileged service
   - useradd --system --no-create-home --shell /usr/sbin/nologin frp || true
-  - sh -c 'curl -fsSL https://github.com/fatedier/frp/releases/download/v0.61.1/frp_0.61.1_linux_amd64.tar.gz -o /tmp/frp.tgz'
-  - tar -xzf /tmp/frp.tgz -C /tmp
-  - install -m 0755 /tmp/frp_0.61.1_linux_amd64/frps /usr/local/bin/frps
-  - rm -rf /tmp/frp*
+  # frps binary — version-pinned AND SHA256-verified, fail-closed: a tampered or
+  # MITM'd tarball makes `sha256sum -c` fail under `set -e`, aborting the install so
+  # frps.service can't start an unverified binary (vs. silently running it). SHA is
+  # the frp_${v}_linux_amd64.tar.gz line from the release's official
+  # frp_sha256_checksums.txt — bump BOTH the version and the hash together.
+  - sh -c 'set -eu; v=0.68.1; sha=4a4e88987d39561e1b3b3b23d0ede48a457eebf76a87231999957e870f5f02b6; curl -fsSL "https://github.com/fatedier/frp/releases/download/v${v}/frp_${v}_linux_amd64.tar.gz" -o /tmp/frp.tgz; echo "${sha}  /tmp/frp.tgz" | sha256sum -c -; tar -xzf /tmp/frp.tgz -C /tmp; install -m 0755 "/tmp/frp_${v}_linux_amd64/frps" /usr/local/bin/frps; rm -rf /tmp/frp*'
   - systemctl daemon-reload
   - systemctl enable --now frps
 

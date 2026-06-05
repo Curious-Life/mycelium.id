@@ -111,6 +111,13 @@ Per `../../../docs/REMOTE-CONNECT-DEPLOY-RUNBOOK.md` §6–8: validate a cert on
 - [ ] No Cloudflare orange-cloud on any record.
 - [ ] CAA set (`accounturi` + `dns-01`); CT monitoring wired (`ct-monitor.js`).
 - [ ] `frps.toml` has **no** `auth.token` (the plugin is the gate).
+- [ ] cloud-init installed frps via the **SHA256-verified** step (a checksum mismatch aborts install → `frps.service` fails rather than running an unverified binary).
+
+## Dependency pinning & supply chain
+Third-party binaries the box pulls, and how each is trusted:
+- **frps** — version-pinned **and** SHA256-verified in `cloud-init.yaml` (fail-closed: `set -e` + `sha256sum -c`). **To bump:** set `v=` to the new frp version and `sha=` to that release's `frp_${v}_linux_amd64.tar.gz` line from its official `frp_sha256_checksums.txt` (`https://github.com/fatedier/frp/releases`). Change both together. Bump deliberately when a new frp security release lands; the relay uses **TLS/SNI passthrough**, so HTTP-vhost advisories (e.g. `routeByHTTPUser` auth bypass) don't apply to this config.
+- **Caddy** — fetched from the official `caddyserver.com` download API over HTTPS, but that API serves **latest only** (no version pin, no published checksum for the custom desec-plugin build). For reproducibility/verification, prefer building a **pinned** binary with `xcaddy` (pinned Caddy + plugin versions) and recording its `sha256`, or at minimum run `caddy version` after install and re-pull only on a deliberate upgrade.
+- **Node 22** — installed via the official NodeSource `setup_22.x` repo; tracks the 22.x LTS line (gets upstream security patches via `apt`). `unattended-upgrades` is enabled for OS packages.
 
 ## Threat notes
 - The relay sees SNI + timing + volume, never plaintext (Caddy terminates on the Mac). Disclosed metadata residual; own-domain + own-relay removes the operator from the picture entirely.
