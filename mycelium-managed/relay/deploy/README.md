@@ -88,13 +88,23 @@ sudo systemctl enable --now control-plane
 ✅ `curl -s localhost:8790/v1/challenge` → `{"nonce":…}`. `frps` log now authorizes (plugin reachable).
 
 ## 5. Caddy edge (TLS for the two public APIs)
+Build Caddy + the deSEC DNS plugin **pinned and reproducible** via `xcaddy` — the
+`caddyserver.com/api/download` API serves *latest only* with no published checksum
+for a custom-plugin build, so it's unversioned + unverifiable. Record the built
+binary's `sha256` once and re-verify it on every upgrade.
 ```sh
-# caddy + the deSEC DNS plugin (Cloudflare: swap p=github.com/caddy-dns/cloudflare):
-curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64&p=github.com/caddy-dns/desec" -o /usr/local/bin/caddy && sudo chmod +x /usr/local/bin/caddy
+# needs Go (apt-get install -y golang-go). Cloudflare: swap caddy-dns/desec → caddy-dns/cloudflare.
+go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.5
+~/go/bin/xcaddy build v2.11.2 --with github.com/caddy-dns/desec@v1.1.0 --output /tmp/caddy
+/tmp/caddy version                       # → v2.11.2
+sha256sum /tmp/caddy | tee /etc/caddy/caddy.sha256   # record; re-verify with `sha256sum -c` on upgrades
+sudo install -m 0755 /tmp/caddy /usr/local/bin/caddy
 sudo cp Caddyfile.edge /etc/caddy/Caddyfile.edge   # edit yourdomain.com
 # run it with the DNS token in env (systemd unit or):
 sudo DESEC_TOKEN=<token> /usr/local/bin/caddy run --config /etc/caddy/Caddyfile.edge --adapter caddyfile
 ```
+> Quick path (dev only, **unverified/unpinned** — don't use in production):
+> `curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64&p=github.com/caddy-dns/desec" -o /usr/local/bin/caddy`
 ✅ `curl -s https://connect.yourdomain.com:8443/v1/challenge` → nonce; `curl -s -X POST https://connect.yourdomain.com:8443/frps/handler` → **404** (the auth oracle is private); `curl -s https://acme.yourdomain.com:8443/register -X POST` → **404** (register is private).
 
 ---
@@ -112,11 +122,12 @@ Per `../../../docs/REMOTE-CONNECT-DEPLOY-RUNBOOK.md` §6–8: validate a cert on
 - [ ] CAA set (`accounturi` + `dns-01`); CT monitoring wired (`ct-monitor.js`).
 - [ ] `frps.toml` has **no** `auth.token` (the plugin is the gate).
 - [ ] cloud-init installed frps via the **SHA256-verified** step (a checksum mismatch aborts install → `frps.service` fails rather than running an unverified binary).
+- [ ] Caddy was built **pinned** via `xcaddy` (not the unverified download API); `caddy version` → `v2.11.2` and its `sha256` is recorded in `/etc/caddy/caddy.sha256`.
 
 ## Dependency pinning & supply chain
 Third-party binaries the box pulls, and how each is trusted:
 - **frps** — version-pinned **and** SHA256-verified in `cloud-init.yaml` (fail-closed: `set -e` + `sha256sum -c`). **To bump:** set `v=` to the new frp version and `sha=` to that release's `frp_${v}_linux_amd64.tar.gz` line from its official `frp_sha256_checksums.txt` (`https://github.com/fatedier/frp/releases`). Change both together. Bump deliberately when a new frp security release lands; the relay uses **TLS/SNI passthrough**, so HTTP-vhost advisories (e.g. `routeByHTTPUser` auth bypass) don't apply to this config.
-- **Caddy** — fetched from the official `caddyserver.com` download API over HTTPS, but that API serves **latest only** (no version pin, no published checksum for the custom desec-plugin build). For reproducibility/verification, prefer building a **pinned** binary with `xcaddy` (pinned Caddy + plugin versions) and recording its `sha256`, or at minimum run `caddy version` after install and re-pull only on a deliberate upgrade.
+- **Caddy** — built **pinned + reproducible** with `xcaddy` (Caddy `v2.11.2` + `caddy-dns/desec@v1.1.0`, see §5), with the binary's `sha256` recorded to `/etc/caddy/caddy.sha256` and re-verified on upgrades. **To bump:** change the `xcaddy build <caddy-ver> --with …@<plugin-ver>` pins in §5, rebuild, and re-record the hash. The `caddyserver.com/api/download` one-liner is dev-only (latest, unverified). Go builds are deterministic for a fixed Go + module set, so the recorded hash is reproducible.
 - **Node 22** — installed via the official NodeSource `setup_22.x` repo; tracks the 22.x LTS line (gets upstream security patches via `apt`). `unattended-upgrades` is enabled for OS packages.
 
 ## Threat notes
