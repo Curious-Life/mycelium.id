@@ -23,7 +23,22 @@ cargo install tauri-cli --version "^2.0"
 
 # Tauri system deps on macOS are just the Xcode CLI tools (already installed
 # for better-sqlite3). No extra Homebrew packages needed on Apple Silicon.
+
+# Fetch the bundled sidecars (REQUIRED before any `cargo tauri build`):
+bash scripts/fetch-sidecars.sh
 ```
+
+`tauri.conf.json` declares `bundle.externalBin: ["binaries/frpc", "binaries/caddy"]`,
+so the build **fails** (`resource path binaries/frpc-aarch64-apple-darwin doesn't exist`)
+unless these are present first. `scripts/fetch-sidecars.sh` downloads them per target
+triple into `src-tauri/binaries/` (which is gitignored, so a clean checkout won't have
+them):
+- **frpc** (FRP reverse-tunnel client) — pinned to a SHA-256 in
+  `scripts/sidecar-checksums.txt` and verified on every fetch; a mismatch aborts.
+- **caddy** (TLS terminator, built with the `caddy-dns/acmedns` plugin via Caddy's
+  download API) — documented-TOFU (the observed hash is recorded in
+  `scripts/sidecar-checksums.txt`; on-demand Caddy builds aren't byte-reproducible, so
+  it isn't enforced as a hard pin — see the note there).
 
 ## 1. Dev run (fastest — see the app window immediately)
 
@@ -51,10 +66,24 @@ Run from the **repo root** (the `beforeBuildCommand` hook stages the bundled
 runtimes — see below — so build from where `scripts/` resolves):
 
 ```bash
+bash scripts/fetch-sidecars.sh   # REQUIRED first — see §0; skip it and the build aborts
 cargo tauri build
 # →  src-tauri/target/release/bundle/macos/Mycelium.app   (~1 GB; fully self-contained)
 #    src-tauri/target/release/bundle/dmg/Mycelium_0.1.0_aarch64.dmg
 ```
+
+> **DMG step in headless/automation sessions:** Tauri's `create-dmg` step
+> (`bundle_dmg.sh`) drives Finder via AppleScript to lay out the disk image, which
+> fails when there's no interactive GUI session (e.g. SSH/automation/CI). The `.app`
+> itself still builds fine — the failure is only the `dmg` target. To produce a working
+> DMG directly, stage the `.app` plus an `/Applications` symlink in a folder and run:
+>
+> ```bash
+> STAGE="$(mktemp -d)"
+> cp -R src-tauri/target/release/bundle/macos/Mycelium.app "$STAGE/"
+> ln -s /Applications "$STAGE/Applications"
+> hdiutil create -volname Mycelium -srcfolder "$STAGE" -format UDZO Mycelium_0.1.0_aarch64.dmg
+> ```
 
 Drag `Mycelium.app` to /Applications. It needs **nothing** installed — no Node, no
 Python, no model download. First launch creates the encrypted vault under
