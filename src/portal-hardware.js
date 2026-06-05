@@ -14,6 +14,7 @@ import express from 'express';
 import { detectHardware } from './hardware/detect.js';
 import { recommendModels } from './hardware/recommend.js';
 import { createOllamaClient, isValidModelName } from './hardware/ollama.js';
+import { createOllamaDaemon } from './hardware/ollama-daemon.js';
 import { CATALOG } from './hardware/catalog.js';
 
 const CATALOG_NAMES = new Set(CATALOG.map((m) => m.name));
@@ -23,10 +24,13 @@ const CATALOG_NAMES = new Set(CATALOG.map((m) => m.name));
  * @param {string} [deps.ollamaUrl]   default http://127.0.0.1:11434
  * @param {typeof fetch} [deps.fetch] injectable (tests)
  * @param {Function} [deps.detect]    injectable detectHardware (tests)
+ * @param {object} [deps.daemon]      injectable ollama-daemon (tests); default
+ *                                    is a lazy adopt-or-spawn controller.
  */
-export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, detect = detectHardware } = {}) {
+export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, detect = detectHardware, daemon } = {}) {
   const router = express.Router();
   const ollama = createOllamaClient({ baseUrl: ollamaUrl, fetch });
+  const ollamaDaemon = daemon || createOllamaDaemon({ baseUrl: ollamaUrl, fetch });
 
   // GET /hardware — detected specs + whether the local Ollama daemon is up.
   router.get('/hardware', async (_req, res) => {
@@ -52,8 +56,19 @@ export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, dete
         ...rec,
         recommendations: rec.recommendations.map((m) => ({ ...m, installed: have.has(m.name) })),
         ollamaUp,
+        // Distinguishes "installed but stopped" (we auto-start) from "not
+        // installed" (UI shows a guided-install link instead of a dead button).
+        ollamaInstalled: ollamaDaemon.isInstalled(),
       });
     } catch { res.status(500).json({ ok: false, error: 'recommendation failed' }); }
+  });
+
+  // POST /hardware/start — lazily bring the local Ollama daemon up (adopt if a
+  // daemon is already running; otherwise spawn `ollama serve`). Returns the
+  // outcome so the UI can show "started" / "install Ollama" / "couldn't start".
+  router.post('/hardware/start', async (_req, res) => {
+    try { res.json({ ...(await ollamaDaemon.ensureUp()) }); }
+    catch { res.status(500).json({ ok: false, error: 'start failed' }); }
   });
 
   // POST /hardware/pull { name } — stream Ollama pull progress as SSE. The name
@@ -68,8 +83,19 @@ export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, dete
     res.set('Connection', 'keep-alive');
     const send = (ev) => { try { res.write(`data: ${JSON.stringify(ev)}\n\n`); } catch { /* client gone */ } };
     try {
-      await ollama.pullModel(name, (ev) => send({ status: ev.status, completed: ev.completed, total: ev.total }));
-      send({ done: true, ok: true });
+      // Auto-start the daemon first: adopt if running, else spawn `ollama serve`,
+      // DOWNLOADING the Ollama runtime first if it isn't installed. Download
+      // progress is streamed as a status line. If it can't come up, surface WHY
+      // (not_installed / checksum_mismatch / unsupported_platform / start_timeout)
+      // and stop — never attempt a pull against a dead daemon.
+      send({ status: 'starting ollama…' });
+      const up = await ollamaDaemon.ensureUp((pct) => send({ status: 'downloading Ollama…', completed: pct, total: 100 }));
+      if (!up.ok) {
+        send({ done: true, ok: false, error: up.reason || 'ollama_unavailable' });
+      } else {
+        await ollama.pullModel(name, (ev) => send({ status: ev.status, completed: ev.completed, total: ev.total }));
+        send({ done: true, ok: true });
+      }
     } catch {
       send({ done: true, ok: false, error: 'pull failed' });
     }
