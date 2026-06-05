@@ -134,6 +134,25 @@ export function remoteRouter() {
     }
   });
 
+  // Public Turnstile SITEKEY for the connect widget — proxied from the control
+  // plane's /v1/config so the app never bakes in a key. NON-SECRET (the secret
+  // stays in the control-plane env). Best-effort + fail-open to null: a sitekey
+  // we can't fetch just means "no widget"; the /v1/challenge gate is the real
+  // boundary, so a missing widget degrades to a clear 'bot check failed', never
+  // to a bypass.
+  router.get('/managed/turnstile', async (_req, res) => {
+    const base = readRemoteConfig().controlPlaneUrl.replace(/\/$/, '');
+    if (!isHttpsOrLocal(base)) { res.json({ sitekey: null }); return; }
+    try {
+      const r = await cpFetch(`${base}/v1/config`);
+      const data = await r.json().catch(() => ({}));
+      const sitekey = typeof data?.turnstileSitekey === 'string' && data.turnstileSitekey ? data.turnstileSitekey : null;
+      res.json({ sitekey });
+    } catch {
+      res.json({ sitekey: null });
+    }
+  });
+
   router.post('/connect-managed', async (req, res) => {
     const handle = String(req.body?.handle || '').trim().toLowerCase();
     // Optional Cloudflare Turnstile token from the app's widget — forwarded to

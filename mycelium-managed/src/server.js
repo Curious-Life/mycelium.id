@@ -24,7 +24,7 @@ import { createTurnstileVerifier } from './turnstile.js';
 // Never handed out (impersonation / infra names).
 export const RESERVED = new Set(['admin', 'root', 'www', 'api', 'mcp', 'auth', 'connect', 'acme', 'acme-dns', 'relay', 'ns', 'mail', 'mycelium', 'anthropic', 'claude', 'support', 'help', 'status', 'app', 'id', 'docs']);
 
-export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone = 'mycelium.id', acmeDnsServer, bwLimit = '2MB', rateLimit, dailyCap, turnstile }) {
+export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone = 'mycelium.id', acmeDnsServer, bwLimit = '2MB', rateLimit, dailyCap, turnstile, turnstileSitekey }) {
   const app = express();
   // Behind the relay / Cloudflare → derive the client IP from X-Forwarded-For
   // (trust ONE hop). The rate limiter keys on req.ip.
@@ -40,6 +40,15 @@ export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, 
     if (limiter.allow(req.ip)) return next();
     res.status(429).json({ ok: false, error: 'rate limited' });
   };
+
+  // Public, non-secret bootstrap config for the app's connect UI. Carries ONLY
+  // the Turnstile SITEKEY (public by design — the SECRET stays in env, never
+  // here) so the widget can render without baking the key into the app build; a
+  // null sitekey means the gate is off and the app shows no widget (the
+  // /v1/challenge gate is the actual security boundary either way).
+  app.get('/v1/config', limit, (_req, res) => {
+    res.json({ turnstileSitekey: turnstileSitekey || null });
+  });
 
   app.get('/v1/challenge', limit, async (req, res) => {
     // Bot-gate the nonce: a bot can't provision without a nonce, and can't get a
@@ -171,7 +180,9 @@ export function main() {
   const acmeDns = createAcmeDnsClient({ serverUrl: acmeDnsRegister, mock: process.env.MYC_ACME_DNS_MOCK === '1' });
   // Bot-gate: secret is env-only (never logged); mock for staging. Off if neither set.
   const turnstile = createTurnstileVerifier({ secret: process.env.MYC_TURNSTILE_SECRET, mock: process.env.MYC_TURNSTILE_MOCK === '1' });
-  const { app } = createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone, acmeDnsServer, bwLimit: process.env.MYC_BW_LIMIT || '2MB', turnstile });
+  // Public sitekey for the app widget (non-secret; pairs with the secret above).
+  const turnstileSitekey = process.env.MYC_TURNSTILE_SITEKEY || null;
+  const { app } = createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone, acmeDnsServer, bwLimit: process.env.MYC_BW_LIMIT || '2MB', turnstile, turnstileSitekey });
   // Bind host: default all-interfaces (back-compat), but a deployment SHOULD set
   // MYC_BIND_HOST=127.0.0.1 so the control-plane — including the /frps/handler token
   // oracle — is loopback-only, reachable by the co-located frps + Caddy edge but
