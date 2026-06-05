@@ -265,7 +265,10 @@ callback:function(t){send({token:t})},
   });
 
   // FRP NewProxy/Login auth-hook: per-tenant hostname binding (reads the registry).
-  app.post('/frps/handler', createRelayHook(registry, { zone, bandwidthLimit: bwLimit }));
+  // When billing is on, also deny a lapsed tenant a new tunnel (O6) — read locally
+  // from the registry, so a Stripe outage never drops live tunnels (only new ones
+  // pause). Off → no entitlement gate (free self-hosted relay).
+  app.post('/frps/handler', createRelayHook(registry, { zone, bandwidthLimit: bwLimit, requireEntitlement: pay.enabled, graceMs: GRACE_MS }));
 
   return { app };
 }
