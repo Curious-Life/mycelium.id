@@ -1,25 +1,47 @@
-// src/hardware/catalog.js — the curated set of Ollama-pullable local models the
-// S6 recommender ranks against the detected hardware.
+// src/hardware/catalog.js — the local-model catalog the S6 recommender ranks
+// against the detected hardware.
 //
-// Deliberately STATIC + reviewed-in-repo (not fetched from Ollama's library at
-// runtime): the names are exact Ollama pull tags, the param counts are public
-// facts, and a curated list keeps the recommender's behaviour auditable and the
-// pull surface constrained to known-good names. A spread of sizes from "runs on
-// a laptop" to "needs a serious GPU" so every machine gets a real suggestion.
+// GENERATED + COMMITTED, not hand-typed: the data lives in catalog.json, built
+// from the Ollama library by scripts/generate-ollama-catalog.mjs (scrape the
+// library + registry for real sizes/params, filter to companion-relevant chat
+// models, score companion-quality). Committing the JSON keeps it:
+//   • the FULL (filtered) catalog — hundreds of models, not a hand-list,
+//   • the reviewed PULL ALLOWLIST — every entry shows up in PR diffs (an
+//     unverified/dangerous tag can't enter it silently), AND
+//   • offline-safe — the app reads the bundled file, never scrapes at runtime.
+// To refresh: `npm run catalog:refresh` (network), review the diff, commit.
+// Validate tags resolve with `npm run verify:catalog-tags`.
 //
-// paramsB = total parameters in billions. kvParamsB (optional) = active params
-// for the KV-cache term (only differs for MoE; omitted = dense = paramsB).
+// `quality` = COMPANION-suitability (warmth/EQ for personal growth — NOT generic
+// capability), from the curated family-prior in catalog-meta.js. See
+// docs/DYNAMIC-CATALOG-DESIGN-2026-06-05.md.
 
-export const CATALOG = Object.freeze([
-  { name: 'qwen2.5:1.5b',  paramsB: 1.5,  defaultQuant: 'Q4_K_M', ctx: 8192, blurb: 'Tiny + fast — runs on almost anything (≈2 GB).' },
-  { name: 'llama3.2:3b',   paramsB: 3.2,  defaultQuant: 'Q4_K_M', ctx: 8192, blurb: 'Small, capable everyday model (≈3 GB).' },
-  { name: 'qwen2.5:7b',    paramsB: 7.6,  defaultQuant: 'Q4_K_M', ctx: 8192, blurb: 'Strong 7B all-rounder (≈5 GB).' },
-  { name: 'llama3.1:8b',   paramsB: 8.0,  defaultQuant: 'Q4_K_M', ctx: 8192, blurb: 'The popular 8B baseline (≈5–6 GB).' },
-  { name: 'gemma2:9b',     paramsB: 9.2,  defaultQuant: 'Q4_K_M', ctx: 8192, blurb: 'Google Gemma 2, sharp for its size (≈6 GB).' },
-  { name: 'qwen2.5:14b',   paramsB: 14.8, defaultQuant: 'Q4_K_M', ctx: 8192, blurb: 'Mid-size, noticeably more capable (≈9 GB).' },
-  { name: 'gemma2:27b',    paramsB: 27.2, defaultQuant: 'Q4_K_M', ctx: 8192, blurb: 'Large, near-frontier quality (≈16 GB).' },
-  { name: 'qwen2.5:32b',   paramsB: 32.8, defaultQuant: 'Q4_K_M', ctx: 8192, blurb: 'Heavyweight reasoning (≈20 GB).' },
-  { name: 'llama3.3:70b',  paramsB: 70.6, defaultQuant: 'Q4_K_M', ctx: 8192, blurb: 'Frontier-class local model — needs a serious GPU (≈40 GB).' },
-]);
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const data = JSON.parse(readFileSync(new URL('./catalog.json', import.meta.url), 'utf8'));
+
+// Map the generated shape to the per-item shape consumers expect. `defaultQuant`
+// mirrors the JSON `quant`; `sizeGb`/`family`/`namespace`/`pulls` are new and
+// additive (recommend.js uses the real `sizeGb` for fit when present).
+export const CATALOG = Object.freeze(
+  (data.models || []).map((m) => Object.freeze({
+    name: m.name,
+    paramsB: m.paramsB,
+    ...(m.kvParamsB ? { kvParamsB: m.kvParamsB } : {}),
+    defaultQuant: m.quant || 'Q4_K_M',
+    ctx: m.ctx || 8192,
+    sizeGb: m.sizeGb || 0,
+    quality: m.quality,
+    bestFor: m.bestFor,
+    family: m.family,
+    namespace: m.namespace || 'library',
+    pulls: m.pulls || 0,
+    blurb: m.blurb || `${m.family} · ${m.bestFor} (≈${m.sizeGb}GB).`,
+  })),
+);
+
+// Catalog provenance, for the UI / diagnostics.
+export const CATALOG_META = Object.freeze({ generatedAt: data.generatedAt || 'unknown', source: data.source || '', count: CATALOG.length });
 
 export default CATALOG;
