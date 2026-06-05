@@ -7,9 +7,21 @@
 // TOCTOU-safe provisioning: claim() inserts an atomic PLACEHOLDER before any
 // external side-effect, finalize() fills the token+subdomain, remove() rolls back.
 import Database from 'better-sqlite3';
+import { chmodSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 export function openRegistry(path) {
   const db = new Database(path);
+  // Harden the registry at rest (defense-in-depth, mirrors the Mac auth.db's
+  // hardenDbPerms in src/remote/config.js): this DB holds every tenant's live
+  // frps_token (a bearer credential) AND the Stripe linkage — SQLite's default
+  // 0644 is world-readable. Best-effort: dir 0700, file 0600. A :memory: DB or a
+  // path whose dir we can't chmod just no-ops. The operator's 0600 systemd env +
+  // full-disk encryption remain the outer layers; this is the floor, not ceiling.
+  if (path && path !== ':memory:') {
+    try { chmodSync(dirname(path), 0o700); } catch { /* */ }
+    try { chmodSync(path, 0o600); } catch { /* */ }
+  }
   db.exec(`CREATE TABLE IF NOT EXISTS handles (
      handle         TEXT PRIMARY KEY,
      public_key     TEXT NOT NULL,

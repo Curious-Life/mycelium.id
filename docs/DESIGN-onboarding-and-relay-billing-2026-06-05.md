@@ -1,7 +1,9 @@
 # Design — Onboarding, Account Creation & Relay Billing (2026-06-05)
 
-> **Status:** DESIGN (sweep-first, pre-implementation). 2 sweep cycles + own-eyes
-> verification of every load-bearing claim. **No code yet — build after this is accepted.**
+> **Status:** DESIGN + IN-BUILD (sweep-first). **3 sweep cycles** + own-eyes
+> verification of every load-bearing claim. **Landed so far:** O1 (managed-connect
+> UI wired), O3 (entitlement layer), SEC-1 (registry.db at-rest hardening). The
+> data-storage & security model is **§15** (the dedicated security sweep).
 > **Question it answers:** how does a user create a handle, connect a custom
 > domain / their own relay, and *when do we charge* — given that we want to
 > **filter bots and charge €1/$1 per month for our managed relay, free if they
@@ -78,6 +80,11 @@ working AI connection, with three clearly-priced reachability choices:
     throwaway key, so rate is the real control" (`mycelium-managed/src/ratelimit.js:2-3`).
     So bot-filtering must be a *new* layer; the design adds Turnstile at challenge
     and gates the expensive provisioning side-effects behind entitlement.
+  - **SEC-1 (security sweep, cycle 3) — registry.db hardened at rest in code.** The
+    control-plane registry.db holds every tenant's `frps_token` (a bearer credential)
+    AND the Stripe linkage, but had **no** `chmod` (default 0644), while the Mac's
+    equivalent auth.db hardens to 0600. Mirrored `hardenDbPerms` into `openRegistry`
+    (0600/0700). Full data-storage & security model in **§15**.
   - **Pivot D — entitlement is a separate table keyed by `public_key`, not columns
     on `handles` (found building O3).** The sketch (§4.3 v1) put `paid_until` on the
     `handles` row, but `release()` deletes that row — losing the sub on
@@ -492,3 +499,120 @@ Client (`src/` + `portal-app/`):
   single-instance (noted in `ratelimit.js`); shared-store HA is a separate ops task.
 - **Multi-device under one sub** — single-active-proxy already enforces one tunnel;
   "team"/multi-handle plans are a future product question.
+
+---
+
+## 15. Data storage & security model (sweep cycle 3 — the data layer)
+
+> Added after a dedicated 3-agent security sweep (storage topology · control-plane
+> PII/de-anon · reference-billing patterns). Every claim below was read against
+> source. This is the load-bearing security design for everything billing touches.
+
+### 15.1 The storage map — every store the system writes
+
+| Store | Location | Encryption at rest | File perms | What sensitive data | Verified |
+|---|---|---|---|---|---|
+| **Vault DB** | `<dataDir>/mycelium.db` (Mac) | **AES-256-GCM** envelope per `ENCRYPTED_FIELDS` (two-key) | ⚠️ **default 0644** (file itself unhardened; ciphertext only) | all user content/PII/health/wealth/topology — **encrypted** | `src/paths.js:53`, `src/crypto/crypto-local.js` |
+| **auth.db** | `<dataDir>/auth.db` (Mac) | none (plaintext SQLite) | **0600 file / 0700 dir** (`hardenDbPerms`) | better-auth signing secret; **relay frps token + acme-dns creds** | `src/remote/config.js:47-50,128,157` |
+| **remote.json** | `<dataDir>/remote.json` (Mac) | none — **non-secret by contract** | 0700 dir (best-effort) | none (publicHost/relayAddr/mode/email only) | `src/remote/config.js:86-112` |
+| **macOS Keychain** | OS keystore (Mac) | OS-native | OS-managed | **USER_MASTER + SYSTEM_KEY**; data-loss guard | `src/account/keystore.js`, `key-source.js` |
+| **registry.db** | `MYC_REGISTRY_DB` (control-plane VPS) | none (plaintext SQLite) | **0600 file / 0700 dir — NOW hardened (SEC-1)** | every tenant's **frps_token** (bearer cred) + acme_subdomain + **stripe_customer_id + paid_until** | `mycelium-managed/src/registry.js:11-30` |
+| **nonces** | registry.db / in-memory | none (ephemeral) | inherits registry.db | single-use challenge values, 5-min TTL | `mycelium-managed/src/nonce.js` |
+| **control-plane.env** | `/etc/mycelium/` (VPS) | none | **0600, owner `mycelium`** | `MYC_DNS_TOKEN` (+ future `STRIPE_*`, `TURNSTILE_SECRET`) | `relay/deploy/README.md:83-84,119,135` |
+| **Stripe (external)** | Stripe | Stripe-managed | n/a | **email, card/PAN, name, address** — the real identity lives HERE, not with us | — |
+
+**Key invariant:** the *real* customer identity (email, card) lives **only at
+Stripe**. We never store, log, or transit it. Confirmed against the reference:
+its `subscriptions` table holds `stripe_customer_id`/`status`/`current_period_end`
+only — **no PAN** (`reference/server-routes/portal-billing.js:77`), i.e. PCI **SAQ A**
+via hosted Checkout.
+
+### 15.2 Secret-handling rules (which secret lives where, never crosses what)
+
+| Secret | Lives in | Never touches |
+|---|---|---|
+| `USER_MASTER` / `SYSTEM_KEY` (vault) | Mac Keychain, memory after unlock | the wire, env, DB, logs, the control-plane |
+| `frps_token`, acme-dns creds (per tenant) | Mac auth.db (0600) + control-plane registry.db (0600) | logs; the browser; remote.json |
+| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `TURNSTILE_SECRET` | **control-plane only**, in `control-plane.env` (0600, env-only — the `MYC_DNS_TOKEN` pattern) | **the Mac/app (it only opens a browser checkout URL)**; registry.db; logs |
+| Turnstile **sitekey** (public) | the Mac app UI (it's public by design) | — |
+| `stripe_customer_id`, `paid_until` | control-plane registry.db (0600) | the Mac (the app caches only a boolean "entitled" for UI, never the customer id) |
+
+**Decision (Stripe placement).** The reference keeps Stripe creds off the
+per-tenant box and in a central Worker (`portal-billing.js:134-141` proxies to a
+Worker; this repo has **no** Stripe/webhook code). Our relay has no Worker — **the
+control-plane *is* the central operator service**, so it is the correct Stripe
+holder. The Mac never sees a Stripe secret: it requests provisioning via the signed
+flow, gets a `402 + checkoutUrl`, and opens it in the browser. The Stripe secret and
+webhook secret stay in `control-plane.env`.
+
+### 15.3 The de-anonymization model (the honest core)
+
+Today managed provisioning is **anonymous**: only `{publicKey, handle, nonce,
+signature}` crosses the wire; the IP is used for an **in-memory** rate-bucket and is
+**never persisted or logged**; the only `console.log` in the whole control-plane is
+the bind address (`server.js` `main()`). Verified: no IP↔handle association in any
+store, logging clean across `mycelium-managed/src/**`.
+
+**Payment necessarily ends anonymity for the managed path.** The `entitlements` row
+adds exactly one new identity bit — `stripe_customer_id` — which makes
+`publicKey → handle → <handle>.mycelium.id (a public URL) → stripe_customer_id`
+linkable **inside registry.db**. Via Stripe (breach/subpoena) that chains to a real
+person. Design response:
+1. **Minimize.** Store only `stripe_customer_id` + `paid_until`. **No email, name,
+   card, or address** in registry.db (confirmed: those are the only entitlement
+   columns). Stripe holds the rest.
+2. **Harden the linkage at rest (SEC-1, shipped).** registry.db is now `0600`/`0700`
+   in code (mirrors auth.db). Operator layers: `control-plane.env` 0600, loopback
+   bind, **VPS full-disk encryption + split-box** (SEC-2, deploy doc).
+3. **Disclose, don't pretend (O11, mandatory).** Onboarding copy must state: *the
+   managed relay is a paid, identifiable service; for an anonymous setup, use your
+   own domain/relay (free, no control-plane contact).* The free paths never reach
+   us — anonymity is preserved there by construction (`src/remote/runtime.js:122-156`).
+
+### 15.4 Webhook security (new public surface — must be fail-closed)
+
+`POST /v1/stripe/webhook` is the **one public, unauthenticated-by-OAuth** billing
+endpoint (Stripe POSTs to it). There is **no existing webhook/`constructEvent`/
+`whsec` code in this repo** to lean on (verified zero hits) — build it to these rules:
+- **Verify the `Stripe-Signature` against `STRIPE_WEBHOOK_SECRET` on the raw body,
+  fail-closed** (bad/absent signature → 400, no state change). Mirror the
+  fail-closed `try/catch → bool` discipline of `verifyWithPublicKey`
+  (`src/identity/identity.js:82-89`).
+- **Idempotent on Stripe `event.id`** — a `processed_events(event_id PK, seen_at)`
+  table, insert-or-ignore; a replay is a 200 no-op. Mirrors the nonce single-use
+  (`DELETE … RETURNING`) + `captureMessage` content-hash dedup precedents.
+- **Order-safe** — guard against out-of-order delivery (a stale
+  `subscription.deleted` after a fresh `invoice.paid`): only move `paid_until`
+  forward from `invoice.paid`/`current_period_end`; honor cancel only when the
+  event's period matches/supersedes the stored one.
+- **Rate-limit + 16kb body cap** already apply (`express.json({limit:'16kb'})`,
+  per-IP bucket). Keep the webhook on the public edge; `/frps/handler` stays
+  loopback-only (`relay/deploy/README.md`).
+- **No PII in the response or logs** — ack with `{received:true}`; never echo event
+  contents.
+
+### 15.5 Hardening ledger
+
+| ID | Item | State |
+|---|---|---|
+| **SEC-1** | registry.db at-rest perms `0600`/`0700` in code (it holds every tenant's frps_token + the Stripe linkage; default was 0644) | ✅ **DONE (2026-06-05)** — `verify:entitlement` + `verify:provision` GO; tmp registry.db observed `600` |
+| **SEC-2** | Deploy doc: require **VPS full-disk encryption** + reaffirm split-box (registry.db is now a PII-linkage store, not just infra metadata) | ⬜ doc edit (O-deploy) |
+| **SEC-3** | Webhook: signature verify (fail-closed) + `processed_events` idempotency + order-guard | ⬜ part of O4 |
+| **SEC-4** | Turnstile secret → `control-plane.env` (env-only, never Mac/DB/logs); sitekey in app | ⬜ part of O2 |
+| **SEC-5** | `processed_events` + entitlement writes confined to the webhook path; `verify:billing` leak-scans registry.db (+`-wal`/`-shm`) for any email/PAN sentinel | ⬜ part of O4 |
+| **SEC-6** | *(out of billing scope, flagged)* Vault DB file is default **0644** (ciphertext, single-user Mac → low sev, but DiD says harden) — chmod `mycelium.db` 0600 at open | ⬜ deferred, separate from billing |
+
+### 15.6 Security verification table (read myself)
+
+| Assumption | Verified at |
+|---|---|
+| registry.db had **no** chmod hardening (default 0644) before SEC-1; auth.db does (`hardenDbPerms` 0600/0700) | `grep chmod mycelium-managed/src` → none (pre-fix); `src/remote/config.js:47-50` |
+| registry.db now hardened in code; observed `600` | `mycelium-managed/src/registry.js:11-24` (read); runtime `mode: 600` |
+| Control-plane stores only `{public_key, stripe_customer_id, paid_until}` for billing — no email/PAN | `mycelium-managed/src/registry.js` entitlements DDL (read) |
+| Provisioning is anonymous; IP never persisted/logged; one benign `console.log` | `mycelium-managed/src/server.js` (challenge/provision/release + `main()`); `ratelimit.js` (in-memory Map) |
+| Operator secrets are env-only, file-backed 0600, never DB/logs (the `STRIPE_*` precedent) | `relay/deploy/README.md:83-84,119,135`; `server.js main()` |
+| Reference billing stores Stripe ids + status only (no PAN) → PCI SAQ A; proxies Stripe via a Worker (no keys on the box) | `reference/server-routes/portal-billing.js:77,134-141` |
+| No Stripe webhook / signature-verify code exists in this repo (build fresh) | repo-wide grep `stripe-signature|constructEvent|whsec` → zero |
+| Fail-closed verify precedent to mirror for the webhook | `src/identity/identity.js:82-89` |
+| Idempotency precedents (nonce single-use; capture content-hash) | `mycelium-managed/src/nonce.js`; `src/ingest/capture.js` |
+| Free paths never contact the control-plane (anonymity preserved there) | `src/remote/runtime.js:122-156` |
