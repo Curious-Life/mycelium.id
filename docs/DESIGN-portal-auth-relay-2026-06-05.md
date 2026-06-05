@@ -36,6 +36,21 @@ localhost-only by design**.
     control surfaces are defeated by a reverse proxy and would leak the recovery key once
     `:8787` is exposed. The fix is part of this design.
 
+- **v3 (2nd sweep cycle — refines v2's gate mechanism):** the session-validation step changes
+  from "a *second* better-auth instance over the shared `auth.db`" to **`server-rest` forwards the
+  request's `Cookie` to `:4711`'s standard better-auth `/api/auth/get-session` over loopback** (the
+  codebase's canonical cross-process pattern). Why: (a) deps aren't installable in this container, so
+  the in-process `auth.api.getSession` API couldn't be confirmed — but the **HTTP** endpoint is
+  better-auth's documented, version-stable surface; (b) it keeps `:4711` the *single* auth authority
+  and **removes the two-processes-one-SQLite concurrency risk** entirely; (c) the 2nd cycle confirmed
+  `:4711` is running exactly when it's needed (Tauri starts it whenever remote is on — `main.rs:268-289`),
+  and **both processes already share `MYCELIUM_DATA_DIR`** (`main.rs` portal `cmd` + `http` cmd both set
+  it), so the auth authority and the gate agree on identity. When remote is *off*, `:4711` isn't up — but
+  then every request is loopback and bypasses the gate, so the dependency is present exactly when required.
+  Also confirmed: **Tauri already supervises both Node servers + Caddy + frpc** (`main.rs:225-338`) and
+  launches Caddy with the Node-written Caddyfile, so the path-routed Caddyfile lands with **no Tauri
+  change** — the v2 "process supervision spike" is effectively already solved.
+
 ## TL;DR
 
 - **Architecture: one public host, Caddy path-routes to two local processes.** The browser
@@ -145,11 +160,13 @@ layer adds a Face-ID *app-lock*; it does not hold vault keys.
    `export function isTrustedLoopback(req): boolean` = socket peer ∈ {127.0.0.1, ::1,
    ::ffff:127.0.0.1} **AND** `!req.headers['x-forwarded-for']`. Replaces the three inlined copies
    (measurement bridge, account, remote).
-2. **`src/server-rest.js`** *(~55 LOC)* — (a) `const { auth } = createAuth()` once at boot
-   (same `auth.db`); (b) `async function resolveRequester(req): {id}|null` = `isTrustedLoopback`
-   → `{id:userId}`; else try `auth.api.getSession({ headers: toWebHeaders(req) })` →
-   `{id:session.user.id}`; else `matchStaticBearer`/`getMcpSession` (Bearer) → `{id}`; else
-   `null`. (c) Insert `requireVaultAuth` middleware **before** the `:298` delegation: for
+2. **`src/server-rest.js`** *(~55 LOC)* — (a) **(v3)** no local better-auth instance; instead
+   `async function resolveRequester(req): {id}|null` = `isTrustedLoopback(req)` → `{id:userId}`;
+   else **forward `Cookie` to `http://127.0.0.1:${MYCELIUM_PORT||4711}/api/auth/get-session`**
+   (fail-closed: non-200/empty/`:4711`-down → null) → `{id:user.id}`; else `matchStaticBearer`
+   locally (env secret, shared) for the future Bearer client → `{id}`; else `null`. (Optionally
+   memoize a valid session for a few seconds keyed on the cookie to avoid a round-trip per asset.)
+   (c) Insert `requireVaultAuth` middleware **before** the `:298` delegation: for
    `/api/v1/*`,`/ingest/*`,`/portal/*`, if `resolveRequester(req)` is null → `401`; for unsafe
    methods on a cookie-authed request, require `X-CSRF-Token` matching the `mycelium_csrf` cookie
    → else `403`. (d) Set `mycelium_csrf` cookie on first GET if absent.
@@ -224,7 +241,9 @@ edge in the same run.
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | V-1 ships unfixed / regresses | low | critical (recovery-key leak) | Step 1 first + standing `verify:control-loopback`; security review required |
-| `getSession` over shared `auth.db` from a 2nd process mis-validates | med | high (false allow/deny) | Spike `auth.api.getSession` against a cookie minted by `:4711` in `verify:portal-auth` before wiring the gate |
+| ~~`getSession` over shared `auth.db`~~ **(v3: removed)** — replaced by loopback-forward to `:4711` | — | — | No 2nd instance, no shared-SQLite writes; `:4711` is the sole authority. New residual: `:4711` reachability (below) |
+| Cookie-validation mechanism unconfirmed (deps not installable in this container) | med | high | **Spike #1 on a real host:** `npm install` then verify `GET :4711/api/auth/get-session` with a cookie minted by `signInEmail` returns `{user}`; only then wire the gate. Build step 2 is blocked on this spike. |
+| `:4711` down while the gate forwards to it | low | med (portal 401s) | Fail-closed by design (deny). `:4711` runs whenever remote is on (`main.rs:268`); when off, requests are loopback and bypass. Surface a clear "vault auth service unavailable" 503 vs 401. |
 | Express `trust proxy` / `req.ip` surprises flip the loopback check | med | high | Don't use `req.ip`; use `socket.remoteAddress` + XFF-absence explicitly in `isTrustedLoopback`; assert in tests |
 | Only `:4711` runs in remote mode; `:8787` not supervised | med | med (portal 502) | Step 4 spike resolves who supervises both before the Caddy split lands |
 | App Store rejects a thin webview (mobile §8) | med | med | Handled in the mobile doc, not here |

@@ -172,6 +172,12 @@ This is the bulk of the engineering. The Capacitor shell (§6) is small by compa
 - **Responsiveness:** audit the SPA's screens for small-viewport layout; the workspace
   shell (`portal-app/src/lib/workspace/`) and nav likely need a mobile breakpoint pass.
 
+> **Sequenced build plan:** [`MOBILE-DEVELOPMENT-PLAN-2026-06-05.md`](MOBILE-DEVELOPMENT-PLAN-2026-06-05.md)
+> — per-task files/LOC/verify/smoke/dependencies across tracks B/W/N/O, critical path, and the
+> host-only spikes. The 2nd sweep cycle confirmed Tauri already supervises both Node servers + Caddy +
+> frpc (`main.rs:225-338`), so Phase 1 lands with no Rust change; onboarding stays desktop-only
+> (mobile is a log-into-existing-vault client); the gate forwards the cookie to `:4711` (v3).
+
 ## 7. Phasing
 
 | Phase | Deliverable | Notes |
