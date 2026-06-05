@@ -50,3 +50,22 @@ export async function unlock({ userHex, systemHex, kcvPath }) {
 
   return { userKey, systemKey };
 }
+
+/**
+ * NON-MUTATING KCV check: does this key pair open the vault at kcvPath?
+ *   - returns null  if no KCV exists there (no vault to protect — caller is free)
+ *   - returns true  if both KCVs decrypt to the constant (keys match this vault)
+ *   - returns false if they do NOT (writing these keys would orphan the data)
+ * Never creates or modifies the KCV; safe to call before deciding to write keys.
+ */
+export async function kcvMatches({ userHex, systemHex, kcvPath }) {
+  if (!existsSync(kcvPath)) return null;
+  try {
+    const kcv = JSON.parse(readFileSync(kcvPath, 'utf8'));
+    const userKey = await loadKey(userHex);
+    const systemKey = await loadKey(systemHex);
+    const u = await decrypt(kcv.user, userKey);
+    const s = await decrypt(kcv.system, null, null, { systemKey });
+    return u === KCV_CONST && s === KCV_CONST;
+  } catch { return false; }
+}

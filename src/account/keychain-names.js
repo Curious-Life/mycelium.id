@@ -13,4 +13,18 @@ export function keychainNames({ env = process.env } = {}) {
   };
 }
 
+/**
+ * Is this the REAL (default) Keychain namespace — i.e. the one that protects a
+ * user's actual vault? True only when NONE of the three overrides is set. Tests
+ * and dev ceremonies MUST set the overrides (MYCELIUM_KC_ACCOUNT/USER/SYSTEM) to
+ * an ephemeral namespace; the keystore refuses a destructive overwrite of the
+ * default namespace without an explicit force, so a stray test run that forgets
+ * the overrides is blocked rather than silently clobbering the production key.
+ */
+export function isDefaultNamespace({ env = process.env } = {}) {
+  return !clean(env.MYCELIUM_KC_ACCOUNT)
+    && !clean(env.MYCELIUM_KC_USER)
+    && !clean(env.MYCELIUM_KC_SYSTEM);
+}
+
 export default keychainNames;
