@@ -7,7 +7,9 @@
 import { createIdentity, isValidHandle } from '../identity/identity.js';
 
 export const CLAIM_VERSION = 'v1';
-export const CLAIM_ACTIONS = new Set(['provision', 'release']);
+// Action-bound: a claim signed for one action can't be replayed as another
+// (provision/release touch DNS+certs; billing opens the Stripe portal — O7).
+export const CLAIM_ACTIONS = new Set(['provision', 'release', 'billing']);
 
 /** The exact bytes both sides sign/verify. Domain-separated + versioned + action-bound. */
 export function claimMessage(action, handle, nonce) {

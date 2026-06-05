@@ -166,6 +166,26 @@
 		}
 	}
 
+	// Manage billing (O7): open the Stripe Customer Portal for this managed address
+	// (cancel / update card / see paid_until). Only meaningful once a subscription
+	// exists; a 404 means "no subscription on file yet".
+	let billingBusy = $state(false);
+	async function manageBilling() {
+		billingBusy = true;
+		error = null;
+		try {
+			const res = await api('/api/v1/remote/managed/billing-portal');
+			const data = await res.json().catch(() => ({}));
+			if (res.status === 404) { error = 'No subscription on file yet.'; return; }
+			if (!res.ok || !data.url) throw new Error(data.error || 'Could not open billing');
+			window.open(data.url, '_blank', 'noopener,noreferrer');
+		} catch (e: any) {
+			error = e?.message || 'Could not open billing';
+		} finally {
+			billingBusy = false;
+		}
+	}
+
 	const inputCls =
 		'flex-1 px-3 py-2 text-sm bg-[var(--color-bg)] border border-[var(--color-border)] rounded text-[var(--color-text-primary)] focus:border-aurum outline-none';
 	const btnCls =
@@ -190,7 +210,10 @@
 			{#if status && !status.httpListening}
 				<div class="text-xs text-amber-400 mt-2 p-2 rounded bg-amber-500/10">Restart the app to start the tunnel.</div>
 			{/if}
-			<button onclick={disconnect} disabled={connecting} class="mt-3 text-xs px-3 py-1.5 rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] cursor-pointer disabled:opacity-50">Disconnect</button>
+			<div class="mt-3 flex gap-2">
+				<button onclick={disconnect} disabled={connecting} class="text-xs px-3 py-1.5 rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] cursor-pointer disabled:opacity-50">Disconnect</button>
+				<button onclick={manageBilling} disabled={billingBusy} class="text-xs px-3 py-1.5 rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] cursor-pointer disabled:opacity-50">{billingBusy ? 'Opening…' : 'Manage billing'}</button>
+			</div>
 		{:else}
 			{#if !status?.passwordSet}
 				<div class="text-xs text-amber-400 mb-3 p-2 rounded bg-amber-500/10">Set an operator password (below) first — it's the gate Claude authenticates against.</div>

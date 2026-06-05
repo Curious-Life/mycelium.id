@@ -47,6 +47,12 @@ export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, 
   // Billing (O4): disabled by default (no Stripe secret) → /v1/provision skips the
   // paywall, so self-hosters + the hermetic tests provision for free.
   const pay = billing || createBilling({});
+  // O7: billing-portal nonces live in their OWN in-memory store, NOT the shared
+  // provision/release one. That lets /v1/billing/nonce issue without the Turnstile
+  // gate (billing is signature-gated by the master key, and an unentitled key just
+  // 404s) WITHOUT handing bots a nonce usable for provision — a billing nonce
+  // isn't in the provision store, so it can't be replayed there.
+  const billingNonces = createNonceStore();
   const newHandleCap = dailyCap || createDailyCap({ max: Number(process.env.MYC_MAX_NEW_HANDLES_PER_DAY) || 40 });
   const limit = (req, res, next) => {
     if (limiter.allow(req.ip)) return next();
@@ -262,6 +268,36 @@ callback:function(t){send({token:t})},
     try { await acmeDns.deregister({ subdomain: row.acme_subdomain }); } catch { /* no-op */ }
     registry.release({ handle: h, publicKey });
     res.json({ ok: true });
+  });
+
+  // Nonce for a billing-portal claim — NOT Turnstile-gated (see billingNonces).
+  app.get('/v1/billing/nonce', limit, (_req, res) => { res.json({ nonce: billingNonces.issue() }); });
+
+  // Stripe Customer Portal link (O7) — cancel / update card / see paid_until.
+  // Auth is the SAME action-bound ed25519 claim as provision/release: only the
+  // vault master-key holder can produce a 'billing'-action signature, so a leaked
+  // provision claim can't open the portal. We map the claim's publicKey → its
+  // stripe_customer_id and ask Stripe for a portal session. Fail-closed: no
+  // billing, no/used nonce, bad signature, or no customer on file → refuse.
+  app.post('/v1/billing/portal', limit, async (req, res) => {
+    try {
+      const { handle, publicKey, nonce, signature } = req.body || {};
+      const h = String(handle || '').toLowerCase();
+      if (!pay.enabled) { res.status(400).json({ ok: false, error: 'billing not enabled' }); return; }
+      if (typeof publicKey !== 'string' || typeof nonce !== 'string' || typeof signature !== 'string') {
+        res.status(400).json({ ok: false, error: 'malformed claim' }); return;
+      }
+      if (!billingNonces.consume(nonce)) { res.status(401).json({ ok: false, error: 'nonce invalid or expired' }); return; }
+      if (!verifyWithPublicKey(publicKey, claimMessage('billing', h, nonce), signature)) {
+        res.status(401).json({ ok: false, error: 'signature invalid' }); return;
+      }
+      const ent = registry.getEntitlement(publicKey);
+      if (!ent?.stripe_customer_id) { res.status(404).json({ ok: false, error: 'no subscription on file' }); return; }
+      const { url } = await pay.customerPortalSession(ent.stripe_customer_id);
+      res.json({ ok: true, url });
+    } catch {
+      res.status(502).json({ ok: false, error: 'could not open billing portal' });
+    }
   });
 
   // FRP NewProxy/Login auth-hook: per-tenant hostname binding (reads the registry).

@@ -149,6 +149,7 @@ try {
     returnUrl: 'https://connect.mycelium.id/billing/return',
     fetch: async (url) => {
       if (url.endsWith('/checkout/sessions')) { checkoutCalls++; return { ok: true, json: async () => ({ url: 'https://checkout.stripe.com/c/pay/cs_1', id: 'cs_1' }) }; }
+      if (url.endsWith('/billing_portal/sessions')) return { ok: true, json: async () => ({ url: 'https://billing.stripe.com/p/session_1' }) };
       return { ok: true, json: async () => ({}) };
     },
   });
@@ -201,6 +202,30 @@ try {
     // P17 — a forged webhook signature changes nothing (fail-closed at the boundary).
     const forged = await fetch(`${B2}/v1/stripe/webhook`, { method: 'POST', headers: { 'content-type': 'application/json', 'stripe-signature': `t=${ts},v1=${'0'.repeat(64)}` }, body: evt });
     rec('P17. forged webhook signature → 400, no entitlement mutation', forged.status === 400, `status=${forged.status}`);
+
+    // ── P18–P21 — billing portal (O7): action-bound 'billing' claim + nonce decoupling ──
+    // dave is now entitled with stripe_customer_id 'cus_dave' (set by the P15 webhook).
+    const bn1 = await getJson(`${B2}/v1/billing/nonce`);
+    const p18 = await postJson(`${B2}/v1/billing/portal`, buildClaim({ action: 'billing', handle: 'dave', nonce: bn1.nonce, masterHex: masterD }));
+    rec('P18. signed billing claim → Stripe Customer Portal url',
+      p18.status === 200 && typeof p18.data.url === 'string' && p18.data.url.startsWith('https://billing.stripe.com/'), `status=${p18.status}`);
+
+    // P19 — ACTION CONFUSION: a provision-signed claim POSTed to /v1/billing/portal → 401.
+    const bn2 = await getJson(`${B2}/v1/billing/nonce`);
+    const p19 = await postJson(`${B2}/v1/billing/portal`, buildClaim({ action: 'provision', handle: 'dave', nonce: bn2.nonce, masterHex: masterD }));
+    rec('P19. provision claim replayed to /billing/portal → 401 (action-bound)', p19.status === 401, `status=${p19.status}`);
+
+    // P20 — a key with NO subscription on file → 404 (fail-closed, no portal).
+    const masterX = crypto.randomBytes(32).toString('hex');
+    const bn3 = await getJson(`${B2}/v1/billing/nonce`);
+    const p20 = await postJson(`${B2}/v1/billing/portal`, buildClaim({ action: 'billing', handle: 'dave', nonce: bn3.nonce, masterHex: masterX }));
+    rec('P20. billing claim from a key with no subscription → 404', p20.status === 404, `status=${p20.status}`);
+
+    // P21 — SECURITY: a billing nonce is NOT valid for /v1/provision (separate store),
+    // so the ungated billing-nonce path can't be used to bypass the provision bot-gate.
+    const bn4 = await getJson(`${B2}/v1/billing/nonce`);
+    const p21 = await postJson(`${B2}/v1/provision`, buildClaim({ action: 'provision', handle: 'eve', nonce: bn4.nonce, masterHex: masterD }));
+    rec('P21. a billing nonce is rejected by /v1/provision (decoupled stores) → 401', p21.status === 401, `status=${p21.status}`);
   } finally {
     try { server2.close(); reg2.close(); rmSync(DB2, { force: true }); } catch { /* */ }
   }
