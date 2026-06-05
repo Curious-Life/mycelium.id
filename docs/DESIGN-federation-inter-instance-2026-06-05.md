@@ -5,6 +5,10 @@
 **Scope:** how two or more Mycelium boxes talk to each other. Near-term drivers (set by the operator): **(1) real-time direct agent↔agent and human↔agent chat**, and **(2) shared context pools** (mutual-opt-in shared spaces). Resonance/discovery is **explicitly deferred** to a later tier.
 **Companion to** `docs/legacy/SOCIAL-SHARING-SPEC-from-legacy.md` (the authoritative social *content* design, Phases 1–5), `docs/REDESIGN-LIVING-SPEC.md` §2.7 (federation surface inventory), and `docs/DESIGN-relay-and-gateway-2026-06-04.md` (the `<handle>.mycelium.id` reachability this rides on).
 
+**Revision history:**
+- **v1 (2026-06-05)** — initial tiered design from the repo sweep.
+- **v2 (2026-06-05)** — after the **Tier-0 spike** (`spike/federation-tier0/`, **GO 10/10**) and four verification sweeps read back against live code. Two pivots: **(P1)** corrected the Caddy routing claim — the built Caddyfile is a single `reverse_proxy → :4711`, **no** `/{p,s}`→`:8788` path-split, so federation routes need no Caddy change (§2.2); **(P2)** the dormant `connections.js` connect-request is sent **UNSIGNED** (`connections.js:154-166` defers signing to a non-existent Worker tier) — Tier-0 must add the sign-and-verify-via-`did:web` layer, which the spike prototyped and proved (§2.5, A3.5). Added the verification table (§8).
+
 ---
 
 ## TL;DR
@@ -41,8 +45,8 @@ A sweep of `src/` shows the federation substrate is **much further along than `R
 - `src/identity/identity.js:28-89` — one Ed25519 keypair, HKDF-derived from `USER_MASTER` (`info = "mycelium-identity-v1"`), memory-only, reproducible. `sign()`/`verify()`/`verifyWithPublicKey()` and `publicIdentity() → {handle, publicKey, algo:'ed25519'}`.
 - `src/remote/managed-claim.js` — already signs handle claims to the control-plane with this identity (proof-of-master-key without revealing it). The verification pattern is the same one federation peers would use.
 
-### 2.2 Reachability (live)
-- `src/remote/*` + `docs/DESIGN-relay-and-gateway-2026-06-04.md` — `<handle>.mycelium.id` resolves to the user's Mac via **SNI-passthrough relay → Caddy on the Mac** (TLS key born local, never on the relay). Caddy path-routes `/{mcp,v1,.well-known,api/auth}` → `:4711`, `/{p,s}` → `:8788` (`renderCaddyfile`, `src/remote/runtime.js:66-111`). **Adding a `.well-known/did.json` + `.well-known/webfinger` + `/federation/*` route is a route on `:4711` and a Caddy path entry — no new infra.**
+### 2.2 Reachability (live) — *corrected in v2 (P1)*
+- `src/remote/*` + `docs/DESIGN-relay-and-gateway-2026-06-04.md` — `<handle>.mycelium.id` resolves to the user's Mac via **SNI-passthrough relay → Caddy on the Mac** (TLS key born local, never on the relay). **Correction:** the *built* Caddyfile is a **single `reverse_proxy 127.0.0.1:4711`** (`renderCaddyfile`, `src/remote/runtime.js:97`) — there is **no** `/{p,s}`→`:8788` path-split (that was the relay-and-gateway design's *intended* split, not what ships). So **everything** already routes to `:4711`. **Adding `.well-known/did.json` + `.well-known/webfinger` + `/federation/*` is purely a route on the `:4711` Express app (`src/server-http.js`, after line 108) — no Caddy change, no new infra.** The existing `/.well-known` CORS middleware (`server-http.js:71-77`) covers the new well-knowns automatically, and `'well-known'` is already a reserved handle (`src/db/profiles.js:54`) so nothing can shadow it.
 
 ### 2.3 Federation content layer (ported, DORMANT — not wired to tools)
 - `src/db/connections.js` — the social graph **with cross-instance connect already implemented**: `@handle@domain` → WebFinger at `https://<domain>/.well-known/webfinger?resource=acct:...` (`:106`) → POST a `social.mycelium.connect-request.v1` payload to the discovered `federation` link (`:135-163`). SSRF defenses are real and documented (`:21-29`: domain regex, HTTPS-only, `redirect:'manual'`, abort timeouts). `computeOverlap()` (`:334-445`) does territory-label matching + shape classification (Twin Minds / Deep Collaborators / …).
@@ -53,11 +57,13 @@ A sweep of `src/` shows the federation substrate is **much further along than `R
 ### 2.4 Lexicon naming already in use
 The code already types its federation payloads as `social.mycelium.*` lexicons (`connections.js:135`). So "adopt AT-Proto custom lexicons" is **partially already the convention** — we formalize it, we don't invent it.
 
-### 2.5 What's genuinely missing
-1. **Serving** `.well-known/webfinger` + `.well-known/did.json` from the box (today only OAuth's `oauth-protected-resource` well-knowns are served — `src/server-http.js:71-108`). The dormant `connections.js` *consumes* a `federation` rel nothing yet *serves*.
-2. **The real-time channel** — there is no synchronous transport at all. Matrix fills this.
-3. **An inbound `/federation/*` handler** to receive the `connect-request` the outbound side already sends, with **per-request Ed25519 signature verification** (the worker-tier comment at `connections.js:154-155` notes "JWT signing happens at the Worker level" — in the single-user box that signing/verifying has to live locally).
-4. **Egress chokepoint + vault persistence** for the new channel (the `/matrix/send` analogue; received-message persistence + single notification).
+### 2.5 What's genuinely missing — *Tier-0 items spike-validated in v2*
+1. **Serving** `.well-known/webfinger` + `.well-known/did.json` from the box (today only OAuth's `oauth-protected-resource` well-knowns are served — `src/server-http.js:71-108`). The dormant `connections.js` *consumes* a `federation` rel nothing yet *serves*. **Spike: proven (A3.1/A3.3) — did.json built from the real identity round-trips its ed25519 key through `publicKeyMultibase`, and a `rel`-includes-`federation` WebFinger link is exactly what `connections.js:115` finds.**
+2. **The real-time channel** — there is no synchronous transport at all. Matrix fills this. *(Tier-1; NOT spiked yet — assumption A1 is the next, heavier spike.)*
+3. **An inbound `/federation/connect` handler with signature verification.** **GAP confirmed by spike (P2):** the outbound `requestRemote` (`connections.js:154-166`) sends the connect-request **UNSIGNED** — its comment defers signing to "the Worker level," which does not exist in the single-user box. **Tier-0 must add a local sign-and-verify layer: the sender signs the canonical request with the box identity; the receiver resolves the sender's `did:web` and verifies.** The spike prototyped exactly this and it holds: valid→accept, **tampered body→401, forged sender (wrong key)→401** (A3.5/b/c, fail closed).
+4. **Egress chokepoint + vault persistence** for the new channel (the `/matrix/send` analogue; received-message persistence + single notification). *(Tier-1.)*
+
+> **Tier-0 spike: `spike/federation-tier0/` — VERDICT GO (10/10).** Exercises the **real** `src/identity/identity.js` + `src/db/connections.js requestRemote` (fake in-memory `d1Query`, loopback fetch-shim) across two `node:http` boxes. See `spike/federation-tier0/RESULT.md`.
 
 ---
 
@@ -114,8 +120,8 @@ Per `CLAUDE.md` ("hard evidence over paper reasoning"), nothing above gets built
 |---|---|---|---|
 | **A1** | A headless Matrix **bot can send/receive E2EE (Megolm)** messages reliably. | Spike: matrix-rust-sdk (or matrix-nio w/ store) bot, two boxes, encrypted DM round-trip + restart-and-still-decrypt. | **Highest.** Appservices historically do **not** do E2EE without a crypto helper; if bot E2EE is too brittle, Tier 1's whole premise wobbles. **Prove this first.** |
 | **A2** | Conduwuit's real footprint + federation cost fit a bundled sidecar on a user's Mac. | Spike: run Conduwuit, measure RAM/CPU idle + under a small room, confirm S2S federation works through the relay (`:8448`/well-known delegation). | Medium. May need `.well-known/matrix/server` delegation through Caddy; may be heavier than 50–100 MB under load. |
-| **A3** | `did:web` + WebFinger serve cleanly over the SNI-passthrough relay, and the dormant `connections.js` connect flow completes box→box. | Spike: serve both well-knowns on `:4711`, add the Caddy path, run `connect('@bob@bob.mycelium.id')` against a second local box, verify signature. | Low (mostly wiring) — but it's the foundation, so prove it explicitly. |
-| **A4** | The `connect-request.profile.signature` field is **safe to transmit** (not a raw invertible embedding). | Read the producer of `user_profiles.signature`; classify per §4.1. | High if false — silent plaintext-fingerprint leak. **Block Tier 0 on this.** |
+| **A3** | `did:web` + WebFinger serve cleanly, and the dormant `connections.js` connect flow completes box→box and verifies. | ✅ **PROVEN — `spike/federation-tier0/` GO (10/10).** Real `connections.js` did WebFinger discovery + POST to a second box; the prototyped sign/verify-via-`did:web` layer accepts valid and rejects tampered/forged (401). No Caddy change needed (P1). | Resolved. Residual: real-vault persistence is a build step, not a risk. |
+| **A4** | The `connect-request.profile.signature` field is **safe to transmit** (not a raw invertible embedding). | ✅ **PROVEN.** Code-read: `src/db/profiles.js` never writes `signature` (grep: 0 matches; `computeFingerprint` sets only scores+realm names); it's user bio ≤500 chars (`src/portal-compat.js:188`). Spike A4: live payload has no `centroid_256`/`embedding_768`/vector field. | Resolved (recommend a post-launch one-sample audit). |
 | **A5** | Matrix's per-event Ed25519 attribution + a DID-published MXID claim is enough sovereign attribution (or we need body-level Mycelium signatures). | Design review + spike: forge-attempt a message as another handle. | Medium — determines whether we add body-level signing. |
 
 ---
@@ -141,3 +147,29 @@ Per `CLAUDE.md` ("hard evidence over paper reasoning"), nothing above gets built
 4. Keep this doc + `docs/REDESIGN-LIVING-SPEC.md` §2.7 in sync as the spikes land (update the "current state" inventory — §2.7's "Matrix: 0 / AT-Protocol: 0" is already stale given `connections.js`'s lexicon usage).
 
 *Reminder: federation is gated until V1 ships + validates with real users. This is the plan and the de-risking spikes — not a green light to bundle a homeserver into the shipping app today.*
+
+---
+
+## 8. Verification table (sweep-first; each row read back against live code)
+
+| Load-bearing assumption | Verified at (read myself) |
+|---|---|
+| Box identity is one ed25519 keypair from the master key, verifiable by public key alone; `publicIdentity()` is "safe to publish in WebFinger/DID" | `src/identity/identity.js:28-89` (esp. 74-77, 82-89) |
+| The connect-request payload is `social.mycelium.*` lexicon-typed and built from `{handle, signature, depth/breadth, public_realms_json}` | `src/db/connections.js:122-144` |
+| Outbound `requestRemote` does WebFinger lookup then POSTs to the `federation` rel's `href + /connect` — and sends it **UNSIGNED** (signing deferred to a non-existent Worker tier) | `src/db/connections.js:106-166` (gap: `:154-166`) |
+| `connect-request.profile.signature` is **not** an embedding — `profiles.js` never writes it; it's user bio (≤500 chars) | `src/db/profiles.js` (grep `signature` → 0 matches; `computeFingerprint`/`upsert` set only scores); `src/portal-compat.js:188` |
+| `user_profiles`, `connections`, `territory_profiles` tables exist in the V1 schema (the dormant code can run) | `migrations/0001_init.sql:540-551, 1376-1410, 1569-1584` |
+| `territory_profiles.essence`/`.name` are LLM-generated plaintext descriptors, not vectors; embeddings live in separate columns not sent over the wire | `src/db/territory-docs.js:138-182`; `migrations/0001_init.sql:1402,1408` |
+| New `.well-known` GET routes mount on the `:4711` Express app and inherit the existing CORS middleware (public, no auth gate) | `src/server-http.js:71-77` (middleware), `:80-108` (route pattern) |
+| Caddy forwards **everything** to `:4711` (single `reverse_proxy`) — no path-split, no Caddy change for federation routes | `src/remote/runtime.js:97` (`reverse_proxy ${upstream}`, `upstream = 127.0.0.1:4711` at `:16`) |
+| The handle/`publicHost` is `null` until remote is configured → DID/WebFinger must fail closed | `src/remote/config.js:62-79` (`publicHost` resolution); spike A3.2 |
+| Master key is pinned to `process.env.ENCRYPTION_MASTER_KEY` at boot, available to any route handler | `src/index.js:73`; mirrored use at `src/remote/router.js:142`, `src/publish/public-server.js:82` |
+| The dormant code imports only `node:crypto` (no DB/native dep needed to exercise it) | `src/db/connections.js:53`, `src/identity/identity.js:17` |
+| End-to-end: did:web doc + WebFinger + signed connect verify; tamper/forge rejected | `spike/federation-tier0/probe.mjs` + `RESULT.md` (GO 10/10) |
+
+## 9. Next steps (updated after Tier-0 spike)
+
+1. ✅ **Tier-0 spike — DONE, GO.** `spike/federation-tier0/`.
+2. **Decide the gate:** Tier-0 (did:web + WebFinger + signed `/federation/connect`, wiring the dormant `connections.js`) is now de-risked and could be the first *built* federation increment **once the ship-and-validate gate opens** — it is read-mostly, adds no homeserver, and leaks nothing. Write its build plan (wire `connections` into `getDb`/a tool, add the three routes + the sign/verify layer, persist+notify on inbound).
+3. **Spike A1 next (Tier-1, heavier):** headless Matrix bot E2EE round-trip — the highest remaining risk, and the gate for any Conduwuit work. Do **not** start homeserver bundling before A1 returns GO.
+4. Keep `docs/REDESIGN-LIVING-SPEC.md` §2.7 in sync (its "Matrix: 0 / AT-Protocol: 0" line is stale given `connections.js`'s lexicon usage + this spike).
