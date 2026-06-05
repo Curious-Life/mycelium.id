@@ -40,6 +40,11 @@ import {
   formatCoFiring, formatGaps, formatCluster, formatOrphans, formatBridges,
 } from '../topology.js';
 
+// SEC-3 scalars (current_vitality / coherence / energy …) decrypt to STRINGS,
+// so .toFixed() throws on them ("not a function"). Coerce before formatting;
+// a missing/non-finite value renders '?' (honest) rather than a fake 0.00.
+const vf = (v, d = 2) => { const n = Number(v); return Number.isFinite(n) ? n.toFixed(d) : '?'; };
+
 export function createTopologyToolsDomain(deps) {
   if (!deps) throw new TypeError('createTopologyToolsDomain: deps required');
   const { db, userId, topologyHelpers } = deps;
@@ -148,7 +153,7 @@ export function createTopologyToolsDomain(deps) {
       const label = resolvedName || `Territory ${territoryId}`;
       const freqArr = Array.isArray(data.vitality) ? data.vitality : (data.vitality?.results || []);
       const freq = freqArr[0];
-      const freqLabel = freq?.current_phase ? ` [${freq.current_phase} · ${(freq.current_vitality || 0).toFixed(2)}]` : '';
+      const freqLabel = freq?.current_phase ? ` [${freq.current_phase} · ${vf(freq.current_vitality)}]` : '';
       sections.push(`# ${label} (ID: ${territoryId})${freqLabel}`);
 
       if (data.coFiring) {
@@ -297,7 +302,7 @@ export function createTopologyToolsDomain(deps) {
       if (!list.length) return 'No territories match those filters.';
 
       const lines = list.map(t => {
-        const freq = t.current_vitality != null ? t.current_vitality.toFixed(2) : '?';
+        const freq = vf(t.current_vitality);
         const phase = t.current_phase || '?';
         const active = t.last_active ? ` · last ${new Date(t.last_active).toLocaleDateString()}` : '';
         return `**${t.name}** (T${t.territory_id}) · ${phase} ${freq} · ${t.message_count} msgs · realm ${t.realm_id}${active}`;
@@ -350,10 +355,10 @@ export function createTopologyToolsDomain(deps) {
       const samples =  Array.isArray(samplePts) ? samplePts : samplePts?.results || [];
 
       const sections = [];
-      const stateLabel = p.current_phase ? ` [${p.current_phase} · ${(p.current_vitality || 0).toFixed(2)}]` : '';
+      const stateLabel = p.current_phase ? ` [${p.current_phase} · ${vf(p.current_vitality)}]` : '';
       sections.push(`# ${p.name} (T${p.territory_id})${stateLabel}`);
 
-      sections.push(`## Identity\nRealm: ${p.realm_id} · Messages: ${p.message_count} · Explored: ${p.explored_percent || 0}%\nFirst: ${p.first_active || '?'} · Last: ${p.last_active || '?'}\nVitality: ${(p.coherence || 0).toFixed(3)} · Energy: ${(p.energy || 0).toFixed(4)}${p.archetype_type ? `\nArchetype: ${p.archetype_type}${p.archetype_character ? ' — ' + p.archetype_character : ''}` : ''}${theme ? `\nTheme: ${theme.name}` : ''}`);
+      sections.push(`## Identity\nRealm: ${p.realm_id} · Messages: ${p.message_count} · Explored: ${p.explored_percent || 0}%\nFirst: ${p.first_active || '?'} · Last: ${p.last_active || '?'}\nVitality: ${vf(p.coherence, 3)} · Energy: ${vf(p.energy, 4)}${p.archetype_type ? `\nArchetype: ${p.archetype_type}${p.archetype_character ? ' — ' + p.archetype_character : ''}` : ''}${theme ? `\nTheme: ${theme.name}` : ''}`);
 
       if (p.essence) sections.push(`## Essence\n${p.essence}`);
 
@@ -373,7 +378,7 @@ export function createTopologyToolsDomain(deps) {
         // T1: territory_vitality metric columns are ENCRYPTED at rest → the
         // adapter decrypts them to STRINGS. Coerce for display (round to 3dp).
         const fnum = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.round(n * 1000) / 1000 : v; };
-        sections.push(`## Vitality Breakdown\nScore: ${(p.current_vitality || 0).toFixed(3)} (${p.current_phase})\n  entropy_diversification: ${fnum(f.entropy_diversification)}\n  connection_growth_rate: ${fnum(f.connection_growth_rate)}\n  reach: ${fnum(f.reach)}\n  cofire_partner_diversity: ${fnum(f.cofire_partner_diversity)}`);
+        sections.push(`## Vitality Breakdown\nScore: ${vf(p.current_vitality, 3)} (${p.current_phase})\n  entropy_diversification: ${fnum(f.entropy_diversification)}\n  connection_growth_rate: ${fnum(f.connection_growth_rate)}\n  reach: ${fnum(f.reach)}\n  cofire_partner_diversity: ${fnum(f.cofire_partner_diversity)}`);
       }
 
       if (p.activity_timeline) {
@@ -419,7 +424,7 @@ export function createTopologyToolsDomain(deps) {
         if (!p) return `Territory ${tid} not found.`;
 
         const sections = [`# Timeline: ${p.name} (T${tid})`];
-        sections.push(`Range: last ${range}\nTotal messages: ${p.message_count}\nFirst: ${p.first_active || '?'} · Last: ${p.last_active || '?'}\nState: ${p.current_phase} (${(p.current_vitality || 0).toFixed(2)})`);
+        sections.push(`Range: last ${range}\nTotal messages: ${p.message_count}\nFirst: ${p.first_active || '?'} · Last: ${p.last_active || '?'}\nState: ${p.current_phase} (${vf(p.current_vitality)})`);
 
         if (p.activity_timeline) {
           const timeline = typeof p.activity_timeline === 'string' ? JSON.parse(p.activity_timeline) : p.activity_timeline;
@@ -501,7 +506,7 @@ export function createTopologyToolsDomain(deps) {
 
       if (active.length) {
         const lines = active.slice(0, 10).map(r =>
-          `- **${r.name}** (T${r.territory_id}) · ${r.rangeCount} msgs in range · ${r.current_phase || '?'} (${(r.current_vitality || 0).toFixed(2)}) · last ${r.lastMonth || '?'}`,
+          `- **${r.name}** (T${r.territory_id}) · ${r.rangeCount} msgs in range · ${r.current_phase || '?'} (${vf(r.current_vitality)}) · last ${r.lastMonth || '?'}`,
         );
         sections.push(`## Most Active Territories\n${lines.join('\n')}`);
       }
