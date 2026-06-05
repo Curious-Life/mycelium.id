@@ -185,6 +185,15 @@ export function remoteRouter() {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(claim),
       });
       data = await pvRes.json().catch(() => ({}));
+      // Reserve-then-pay (O5): the control plane held the handle and wants payment.
+      // Surface the Stripe Checkout URL so the UI can open the browser; after paying,
+      // the app re-calls connect-managed (now entitled). Validate it's https (the
+      // response is untrusted — never open a non-https URL we were handed).
+      if (pvRes.status === 402) {
+        const checkoutUrl = typeof data?.checkoutUrl === 'string' ? data.checkoutUrl : '';
+        if (!/^https:\/\//i.test(checkoutUrl)) { res.status(502).json({ ok: false, error: 'control plane returned an invalid checkout URL' }); return; }
+        res.status(402).json({ ok: false, error: 'subscription required', checkoutUrl }); return;
+      }
       if (!pvRes.ok) { res.status(pvRes.status === 409 ? 409 : 400).json({ ok: false, error: data.error || 'provision failed' }); return; }
     } catch (err) {
       const caller = /invalid handle|nonce/i.test(String(err?.message || ''));

@@ -27,6 +27,7 @@
 	let connecting = $state(false);
 	let result = $state<{ host: string; connectorUrl: string } | null>(null);
 	let error = $state<string | null>(null);
+	let checkoutUrl = $state<string | null>(null); // set on a 402 (reserve-then-pay)
 	let debounce: ReturnType<typeof setTimeout> | null = null;
 	let reqSeq = 0;
 
@@ -99,6 +100,7 @@
 		availability = 'idle';
 		result = null;
 		error = null;
+		checkoutUrl = null;
 		if (debounce) clearTimeout(debounce);
 		const h = handle.trim().toLowerCase();
 		if (!/^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/.test(h)) {
@@ -123,6 +125,7 @@
 		connecting = true;
 		error = null;
 		result = null;
+		checkoutUrl = null;
 		try {
 			const body: { handle: string; turnstileToken?: string } = { handle: handle.trim().toLowerCase() };
 			if (tsRequired && tsToken) body.turnstileToken = tsToken;
@@ -131,6 +134,13 @@
 				body: JSON.stringify(body),
 			});
 			const data = await res.json().catch(() => ({}));
+			// Reserve-then-pay (O5): the handle is held; open Stripe Checkout. After
+			// paying, the user re-solves the bot check and clicks Connect again
+			// (now entitled). The control plane already validated the URL is https.
+			if (res.status === 402 && data.checkoutUrl) {
+				checkoutUrl = data.checkoutUrl;
+				return;
+			}
 			if (!res.ok || !data.ok) throw new Error(data.error || 'Could not connect');
 			result = { host: data.host, connectorUrl: data.connectorUrl };
 			await load();
@@ -205,6 +215,13 @@
 			{/if}
 		{/if}
 
+		{#if checkoutUrl}
+			<div class="text-xs mt-3 p-2 rounded bg-aurum/10 text-[var(--color-text-secondary)]">
+				<span class="font-mono">{handle.trim().toLowerCase()}.mycelium.id</span> is reserved. The managed relay is <strong>€1/mo</strong> (free if you bring your own domain or relay).
+				<a href={checkoutUrl} target="_blank" rel="noopener noreferrer" class="inline-block mt-2 text-xs px-3 py-1.5 rounded bg-[var(--color-accent)] text-[var(--color-bg)] no-underline">Pay €1/mo →</a>
+				<p class="text-[10px] text-[var(--color-text-tertiary)] mt-1">After paying, complete the bot check again and click Connect to finish.</p>
+			</div>
+		{/if}
 		{#if result}
 			<div class="text-xs text-green-400 mt-3 p-2 rounded bg-green-500/10">Address ready: <span class="font-mono">{result.connectorUrl}</span> — restart the app to go live.</div>
 		{/if}
