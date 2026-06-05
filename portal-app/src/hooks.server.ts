@@ -16,6 +16,12 @@ export const handle: Handle = async ({ event, resolve }) => {
 		"img-src 'self' data: blob: https://*.basemaps.cartocdn.com",
 		"connect-src 'self'",
 		"worker-src 'self' blob:",
+		// The managed-connect Turnstile widget is a CROSS-ORIGIN iframe to the
+		// control plane (Cloudflare's script runs THERE, never in this origin), so
+		// we only allow framing it — no script-src/connect-src for Cloudflare here.
+		// Default control plane; self-hosters on a custom control plane adjust this
+		// (dev only — the Tauri app + static server set no CSP). See O2 widget.
+		"frame-src https://connect.mycelium.id",
 		"frame-ancestors 'none'",
 	].join('; '));
 

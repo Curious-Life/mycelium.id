@@ -142,14 +142,19 @@ export function remoteRouter() {
   // to a bypass.
   router.get('/managed/turnstile', async (_req, res) => {
     const base = readRemoteConfig().controlPlaneUrl.replace(/\/$/, '');
-    if (!isHttpsOrLocal(base)) { res.json({ sitekey: null }); return; }
+    if (!isHttpsOrLocal(base)) { res.json({ sitekey: null, origin: null }); return; }
+    // The widget embeds <origin>/turnstile in a cross-origin iframe and accepts a
+    // token only from this exact origin — so hand back both the sitekey and the
+    // control-plane origin it must validate against.
+    let origin = null;
+    try { origin = new URL(base).origin; } catch { origin = null; }
     try {
       const r = await cpFetch(`${base}/v1/config`);
       const data = await r.json().catch(() => ({}));
       const sitekey = typeof data?.turnstileSitekey === 'string' && data.turnstileSitekey ? data.turnstileSitekey : null;
-      res.json({ sitekey });
+      res.json({ sitekey, origin: sitekey ? origin : null });
     } catch {
-      res.json({ sitekey: null });
+      res.json({ sitekey: null, origin: null });
     }
   });
 

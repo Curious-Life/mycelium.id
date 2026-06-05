@@ -50,6 +50,38 @@ export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, 
     res.json({ turnstileSitekey: turnstileSitekey || null });
   });
 
+  // Sandboxed Turnstile widget page (O2). The app embeds THIS in a cross-origin
+  // <iframe>, so Cloudflare's third-party script runs in the control-plane origin
+  // — NEVER in the vault portal origin (no access to its DOM / CSRF cookie). On
+  // solve it postMessages ONLY the token string up to the parent; the parent
+  // validates event.origin === this origin (the real check). The token is a
+  // single-use human-proof, useless without the master-key provision flow, so we
+  // don't lock frame-ancestors here (a harvested token buys nothing); that
+  // hardening can follow once the live parent origin is confirmed in a browser.
+  app.get('/turnstile', limit, (req, res) => {
+    // The parent (loopback portal) passes its origin in ?o= so we can scope the
+    // postMessage target. Untrusted: validate to a bounded localhost/tauri shape
+    // or fall back to '*' (the parent's origin check is what enforces trust).
+    const raw = typeof req.query?.o === 'string' ? req.query.o : '';
+    const okOrigin = /^(https?|tauri):\/\/(localhost|127\.0\.0\.1|tauri\.localhost)(:\d{1,5})?$/.test(raw);
+    const target = okOrigin ? raw : '*';
+    // Inject as JS string literals, hardened against </script> / U+2028/9 breakout.
+    const js = (v) => JSON.stringify(String(v)).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+    res.type('html').send(`<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>html,body{margin:0;padding:0;background:transparent;overflow:hidden}</style>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onTs&render=explicit" async defer></script>
+</head><body><div id="w"></div><script>
+var SITEKEY=${js(turnstileSitekey || '')},TARGET=${js(target)};
+function send(m){try{window.parent.postMessage(Object.assign({source:'mycelium-turnstile'},m),TARGET)}catch(e){}}
+if(!SITEKEY){send({error:'not-configured'})}
+window.onTs=function(){if(!SITEKEY)return;turnstile.render('#w',{sitekey:SITEKEY,
+callback:function(t){send({token:t})},
+'error-callback':function(){send({error:'challenge-error'})},
+'expired-callback':function(){send({error:'expired'})}})};
+</script></body></html>`);
+  });
+
   app.get('/v1/challenge', limit, async (req, res) => {
     // Bot-gate the nonce: a bot can't provision without a nonce, and can't get a
     // nonce without solving Turnstile. The token rides in ?cf_turnstile=… (the

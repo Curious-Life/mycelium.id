@@ -149,6 +149,30 @@ try {
   const j14 = JSON.parse(cfg14.text);
   rec('T14. /v1/config → null sitekey when gate off (no widget; back-compat)',
     cfg14.status === 200 && j14.turnstileSitekey === null, `sitekey=${j14.turnstileSitekey}`);
+
+  // T15 — the sandboxed /turnstile page: CF script lives HERE, sitekey injected,
+  // a valid loopback parent origin is honored as the postMessage target.
+  const w15 = await getRaw(`${ON}/turnstile?o=${encodeURIComponent('http://localhost:4711')}`);
+  const isHtml = /^<!doctype html>/i.test(w15.text);
+  rec('T15. /turnstile → HTML w/ CF script + sitekey + scoped postMessage target',
+    w15.status === 200 && isHtml
+      && w15.text.includes('challenges.cloudflare.com/turnstile/v0/api.js')
+      && w15.text.includes('PUBLIC-SITEKEY-0x1234')
+      && w15.text.includes("'mycelium-turnstile'")
+      && w15.text.includes('"http://localhost:4711"'),
+    `status=${w15.status} html=${isHtml}`);
+
+  // T16 — a hostile/foreign ?o= is NOT reflected; target falls back to '*'.
+  const w16 = await getRaw(`${ON}/turnstile?o=${encodeURIComponent('https://evil.example.com')}`);
+  rec('T16. /turnstile rejects a foreign parent origin → target "*", no reflection',
+    !w16.text.includes('evil.example.com') && /TARGET=("\*"|'\*')/.test(w16.text),
+    `reflected=${w16.text.includes('evil.example.com')}`);
+
+  // T17 — gate off → the page declares not-configured (no widget rendered).
+  const w17 = await getRaw(`${OFF}/turnstile`);
+  rec('T17. /turnstile with gate off → not-configured (empty sitekey)',
+    w17.status === 200 && w17.text.includes('not-configured') && w17.text.includes('SITEKEY=""'),
+    `status=${w17.status}`);
 } finally {
   try { offServer.close(); onServer.close(); registry.close(); rmSync(DB, { force: true }); } catch { /* */ }
 }
