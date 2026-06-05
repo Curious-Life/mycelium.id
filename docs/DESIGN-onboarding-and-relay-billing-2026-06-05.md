@@ -306,7 +306,7 @@ proposed coherent journey:
 | # | Gap | Size |
 |---|-----|------|
 | O1 | ✅ **DONE (2026-06-05)** — wired `ManagedConnectSection` into `SettingsView` (above `RemoteAccessSection`). `LocalConnectSection` intentionally **not** wired: `ConnectYourAISection` already covers the local-connect story; a second surface would confuse. `verify:remote-config` + `verify:portal-serve` GO, portal build clean. | S |
-| O2 | **Turnstile** widget in the app + verify on `/v1/challenge`+`/v1/provision` | M |
+| O2 | 🟡 **BACKEND DONE (2026-06-05)** — bot-gate landed + verified. `src/turnstile.js` (new): `createTurnstileVerifier({secret,mock})` → `verify(token,ip)`, **opt-in** (disabled with no secret/mock so self-hosters + hermetic CI don't need Cloudflare) + **fail-closed** (missing/bad/unverifiable token → reject; never throws). `server.js` gates `GET /v1/challenge` on the token (`?cf_turnstile=…`) → 403 `'bot check failed'`, no nonce leaked. **As-built decision: verification is SINGLE-SIDE on `/v1/challenge` only** (not also `/v1/provision`) — the nonce is single-use and carries the human-proof forward to provision, so we never double-verify a single-use token. Secret is env-only (`MYC_TURNSTILE_SECRET`, the `MYC_DNS_TOKEN` pattern; mock via `MYC_TURNSTILE_MOCK=1`). `router.js` `/connect-managed` forwards an optional `turnstileToken` to the gated challenge. `verify:turnstile` GO (T1–T12); `verify:provision`/`entitlement`/`newproxy-auth`/`managed-claim`/`remote-config` regressions GO. **REMAINING: the in-app widget** — renders the Cloudflare Turnstile widget (public sitekey) in `ManagedConnectSection` and passes its token to `/connect-managed`. Deferred as its own slice because it loads an external CF script into the portal (CSP) and per CLAUDE.md remote-MCP discipline must be smoked in a **real browser (WebKit)**, not `curl`/CLI. | M |
 | O3 | ✅ **DONE (2026-06-05)** — `entitlements` table keyed by `public_key` (Pivot D) + `hold_expires_at` + `setEntitlement`/`getEntitlement`/`clearEntitlement`/`isEntitled`/`setHold`/`sweepExpiredHolds`; `finalize()` clears holds. `verify:entitlement` GO (E1–E7); `verify:provision` + `verify:newproxy-auth` regressions GO. | S–M |
 | O4 | **Stripe Checkout + webhook** on the control-plane (€1/mo product, `client_reference_id=publicKey`) | M |
 | O5 | **`/v1/provision` 402 + checkoutUrl** branch; app handles 402 → open browser → poll/re-provision | M |
@@ -440,7 +440,9 @@ Client (`src/` + `portal-app/`):
    connect works as a free dev path behind `MYC_TURNSTILE_MOCK`/no-Stripe). Smoke:
    click Connect → handle provisions on a mock control-plane.
 2. **O3 — registry entitlement columns + methods + sweeper.** Smoke: `verify:provision`.
-3. **O2 — Turnstile** (challenge + provision + widget). Smoke: `verify:turnstile`.
+3. **O2 — Turnstile** (challenge gate + token forwarding). Smoke: `verify:turnstile` ✅ GO.
+   Single-side on `/v1/challenge` (nonce carries the proof to provision). Widget = its
+   own browser-verified slice (loads the CF script into the portal — WebKit smoke).
 4. **O4/O5 — Stripe Checkout + webhook + 402 branch.** Smoke: `verify:billing`,
    end-to-end on Stripe test mode (€1 test card → webhook → `paid_until`).
 5. **O6 — relay-hook gate + grace.** Smoke: `verify:newproxy-auth`.
@@ -598,7 +600,7 @@ endpoint (Stripe POSTs to it). There is **no existing webhook/`constructEvent`/
 | **SEC-1** | registry.db at-rest perms `0600`/`0700` in code (it holds every tenant's frps_token + the Stripe linkage; default was 0644) | ✅ **DONE (2026-06-05)** — `verify:entitlement` + `verify:provision` GO; tmp registry.db observed `600` |
 | **SEC-2** | Deploy doc: require **VPS full-disk encryption** + reaffirm split-box (registry.db is now a PII-linkage store, not just infra metadata) | ⬜ doc edit (O-deploy) |
 | **SEC-3** | Webhook: signature verify (fail-closed) + `processed_events` idempotency + order-guard | ⬜ part of O4 |
-| **SEC-4** | Turnstile secret → `control-plane.env` (env-only, never Mac/DB/logs); sitekey in app | ⬜ part of O2 |
+| **SEC-4** | Turnstile secret → `control-plane.env` (env-only, never Mac/DB/logs); sitekey in app | 🟡 backend done — secret is `MYC_TURNSTILE_SECRET` env-only, sent in the siteverify POST body (never URL/log), absent from all responses (`verify:turnstile` T12). Sitekey-in-app lands with the widget slice. |
 | **SEC-5** | `processed_events` + entitlement writes confined to the webhook path; `verify:billing` leak-scans registry.db (+`-wal`/`-shm`) for any email/PAN sentinel | ⬜ part of O4 |
 | **SEC-6** | *(out of billing scope, flagged)* Vault DB file is default **0644** (ciphertext, single-user Mac → low sev, but DiD says harden) — chmod `mycelium.db` 0600 at open | ⬜ deferred, separate from billing |
 
