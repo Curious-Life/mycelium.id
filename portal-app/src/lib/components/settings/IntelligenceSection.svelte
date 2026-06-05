@@ -32,8 +32,10 @@
 	let testMsg = $state<Record<number, string>>({});
 
 	// S6 — hardware-aware local model recommender ("Cookbook").
-	type Rec = { name: string; paramsB: number; estimatedGb: number; fitScore: number; fitLevel: string; blurb: string; installed: boolean };
-	let hwRec = $state<{ hardware: any; available: number; backend: string; recommendations: Rec[]; note: string | null; ollamaUp: boolean } | null>(null);
+	// `quality` = companion-suitability (warmth/EQ for personal growth), NOT generic
+	// capability; `bestFor` = what it's good for. Ranked descending by compat×quality.
+	type Rec = { name: string; paramsB: number; quality: number; bestFor: string; estimatedGb: number; fitScore: number; fitLevel: string; rankScore?: number; blurb: string; installed: boolean };
+	let hwRec = $state<{ hardware: any; available: number; backend: string; recommendations: Rec[]; note: string | null; ollamaUp: boolean; ollamaInstalled: boolean } | null>(null);
 	let hwLoading = $state(false);
 	let hwErr = $state<string | null>(null);
 	let pulling = $state<Record<string, { pct: number; status: string; err?: string }>>({});
@@ -152,8 +154,24 @@
 		}
 	}
 
+	// Friendly text for the daemon-start error reasons the pull stream can return.
+	const PULL_ERR: Record<string, string> = {
+		not_installed: 'Ollama isn’t installed',
+		checksum_mismatch: 'Ollama download failed verification',
+		download_failed: 'Ollama download failed — check your connection',
+		unsupported_platform: 'auto-install unavailable on this OS — install Ollama manually',
+		start_timeout: "Ollama didn’t start — try again",
+		spawn_failed: "couldn’t start Ollama",
+		ollama_unavailable: 'Ollama unavailable'
+	};
+
+	// The local Ollama base URL we register providers against (dedup key).
+	const OLLAMA_BASE = 'http://127.0.0.1:11434/v1';
+
 	// Pull (if needed) the chosen local model with streaming progress, then register
 	// it as a local Ollama provider via the existing /portal/providers route + activate.
+	// The pull route AUTO-STARTS the Ollama daemon first (adopt-or-spawn) — no need
+	// to ask the user to run `ollama serve`.
 	async function pullAndUse(m: Rec) {
 		pulling = { ...pulling, [m.name]: { pct: m.installed ? 100 : 0, status: m.installed ? 'installed' : 'starting…' } };
 		try {
@@ -175,7 +193,7 @@
 						const payload = line.slice(6);
 						if (payload === '[DONE]') continue;
 						let ev: any; try { ev = JSON.parse(payload); } catch { continue; }
-						if (ev.done) { ok = !!ev.ok; if (!ev.ok) throw new Error(ev.error || 'pull failed'); }
+						if (ev.done) { ok = !!ev.ok; if (!ev.ok) throw new Error(PULL_ERR[ev.error] || ev.error || 'pull failed'); }
 						else if (ev.total) {
 							const pct = Math.min(100, Math.round((ev.completed / ev.total) * 100));
 							pulling = { ...pulling, [m.name]: { pct, status: ev.status || 'downloading…' } };
@@ -186,10 +204,17 @@
 				}
 				if (!ok) throw new Error('pull did not complete');
 			}
-			const body = { provider: 'custom', label: `Ollama — ${m.name}`, base_url: 'http://127.0.0.1:11434/v1', model_preference: m.name };
-			const cr = await api('/portal/providers', { method: 'POST', body: JSON.stringify(body) });
-			const cd = await cr.json().catch(() => ({}));
-			if (cr.ok && cd.id) await setActive(cd.id);
+			// Dedup: reuse an existing Ollama provider row for this model instead of
+			// piling up identical `custom` rows on every click (no server-side dedup).
+			const existing = providers.find((p) => p.base_url === OLLAMA_BASE && p.model_preference === m.name);
+			if (existing) {
+				await setActive(existing.id);
+			} else {
+				const body = { provider: 'custom', label: `Ollama — ${m.name}`, base_url: OLLAMA_BASE, model_preference: m.name };
+				const cr = await api('/portal/providers', { method: 'POST', body: JSON.stringify(body) });
+				const cd = await cr.json().catch(() => ({}));
+				if (cr.ok && cd.id) await setActive(cd.id);
+			}
 			pulling = { ...pulling, [m.name]: { pct: 100, status: 'ready' } };
 			await load();
 			await loadRecommend();
@@ -267,32 +292,38 @@
 						</span>
 						<button onclick={loadRecommend} title="Re-detect" class="ml-auto text-[10px] text-[var(--color-text-tertiary)] cursor-pointer">↻</button>
 					</div>
-					{#if !hwRec.ollamaUp}
-						<p class="text-[10px] text-amber-400">Ollama isn't running — start it (<span class="font-mono">ollama serve</span>) to pull a model.</p>
+					{#if !hwRec.ollamaInstalled}
+						<p class="text-[10px] text-[var(--color-text-tertiary)]">Ollama will be downloaded &amp; started automatically when you pick a model (or <a href="https://ollama.com/download" target="_blank" rel="noreferrer" class="text-aurum underline">install it yourself</a>).</p>
+					{:else if !hwRec.ollamaUp}
+						<p class="text-[10px] text-[var(--color-text-tertiary)]">Ollama will start automatically when you pick a model.</p>
 					{/if}
 					{#if hwRec.note}<p class="text-[10px] text-amber-400">{hwRec.note}</p>{/if}
-					{#each hwRec.recommendations as m (m.name)}
-						<div class="flex items-center gap-2 text-xs p-2 rounded bg-[var(--color-elevated)]">
-							<span class="font-mono text-[var(--color-text-primary)]">{m.name}</span>
-							<span class="px-1.5 py-0.5 rounded text-[10px] {FIT[m.fitLevel]?.cls ?? ''}">{FIT[m.fitLevel]?.label ?? m.fitLevel}</span>
-							<span class="text-[10px] text-[var(--color-text-tertiary)] truncate">~{m.estimatedGb}GB · {m.blurb}</span>
-							<span class="ml-auto shrink-0">
-								{#if pulling[m.name]}
-									{#if pulling[m.name].err}
-										<span class="text-[10px] text-red-400">{pulling[m.name].err}</span>
-									{:else if pulling[m.name].status === 'ready'}
-										<span class="text-[10px] text-green-400">✓ ready</span>
+					<p class="text-[10px] text-[var(--color-text-tertiary)]">Ranked for a warm personal companion &amp; self-development — best for your Mac on top.</p>
+					<div class="max-h-72 overflow-y-auto space-y-1.5 pr-1">
+						{#each hwRec.recommendations as m (m.name)}
+							<div class="flex items-center gap-2 text-xs p-2 rounded bg-[var(--color-elevated)] {m.fitScore === 0 ? 'opacity-50' : ''}">
+								<span class="font-mono text-[var(--color-text-primary)] shrink-0">{m.name}</span>
+								<span class="px-1.5 py-0.5 rounded text-[10px] shrink-0 {FIT[m.fitLevel]?.cls ?? ''}">{FIT[m.fitLevel]?.label ?? m.fitLevel}</span>
+								<span class="px-1.5 py-0.5 rounded text-[10px] shrink-0 bg-[var(--color-border)] text-[var(--color-text-secondary)]">{m.bestFor}</span>
+								<span class="text-[10px] text-[var(--color-text-tertiary)] truncate">~{m.estimatedGb}GB · {m.blurb}</span>
+								<span class="ml-auto shrink-0">
+									{#if pulling[m.name]}
+										{#if pulling[m.name].err}
+											<span class="text-[10px] text-red-400">{pulling[m.name].err}</span>
+										{:else if pulling[m.name].status === 'ready'}
+											<span class="text-[10px] text-green-400">✓ ready</span>
+										{:else}
+											<span class="text-[10px] text-[var(--color-text-tertiary)]">{pulling[m.name].status}{pulling[m.name].pct ? ` ${pulling[m.name].pct}%` : ''}</span>
+										{/if}
+									{:else if m.installed}
+										<button onclick={() => pullAndUse(m)} class="text-[10px] text-aurum cursor-pointer">Use</button>
 									{:else}
-										<span class="text-[10px] text-[var(--color-text-tertiary)]">{pulling[m.name].status}{pulling[m.name].pct ? ` ${pulling[m.name].pct}%` : ''}</span>
+										<button onclick={() => pullAndUse(m)} title={hwRec.ollamaInstalled ? '' : 'Downloads Ollama first, then the model'} class="text-[10px] text-aurum cursor-pointer">Pull &amp; use</button>
 									{/if}
-								{:else if m.installed}
-									<button onclick={() => pullAndUse(m)} class="text-[10px] text-aurum cursor-pointer">Use</button>
-								{:else}
-									<button onclick={() => pullAndUse(m)} disabled={!hwRec.ollamaUp} class="text-[10px] text-aurum cursor-pointer disabled:opacity-40">Pull &amp; use</button>
-								{/if}
-							</span>
-						</div>
-					{/each}
+								</span>
+							</div>
+						{/each}
+					</div>
 				</div>
 			{/if}
 		</div>

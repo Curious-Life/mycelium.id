@@ -14,6 +14,7 @@ import { portalMeasurementRouter } from './portal-measurement.js';
 import { portalUploadsRouter } from './portal-uploads.js';
 import { portalProvidersRouter } from './portal-providers.js';
 import { portalHardwareRouter } from './portal-hardware.js';
+import { createOllamaDaemon } from './hardware/ollama-daemon.js';
 import { portalImportRouter } from './portal-import.js';
 import { portalSettingsRouter } from './portal-settings.js';
 import { portalConnectorsRouter } from './portal-connectors.js';
@@ -118,7 +119,17 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath }));
   v.use('/api/v1/portal', portalUploadsRouter({ db, userId, enqueueEnrichment }));
   v.use('/api/v1/portal', portalProvidersRouter({ db, userId }));
-  v.use('/api/v1/portal', portalHardwareRouter());
+  // One lazy Ollama daemon controller, shared by the hardware routes; stopped in
+  // closeHandle. dataDir = where we download the runtime + store its models (app-
+  // private, survives .app replacement). Lazy: nothing fetches until a Pull & use.
+  // (A daemon we spawn is also in our process group, so app exit reaps it
+  // regardless — stop() is the graceful SIGTERM path.) Auto-download opt-out via
+  // MYCELIUM_AUTO_OLLAMA=0.
+  const hwOllamaDaemon = createOllamaDaemon({
+    dataDir: dataDir(),
+    autoInstall: process.env.MYCELIUM_AUTO_OLLAMA !== '0',
+  });
+  v.use('/api/v1/portal', portalHardwareRouter({ daemon: hwOllamaDaemon }));
   v.use('/api/v1/portal', portalImportRouter({ db, userId, enqueueEnrichment }));
   v.use('/api/v1/portal', portalSettingsRouter({ db, userId }));
   if (connectorRunner) v.use('/api/v1/portal', portalConnectorsRouter({ runner: connectorRunner }));
@@ -218,6 +229,7 @@ export async function startRestServer({
           try { connectorScheduler?.stop(); } catch { /* */ }
           try { drainer.stop(); } catch { /* */ }
           try { embedSup.stop(); } catch { /* */ }
+          try { hwOllamaDaemon.stop(); } catch { /* */ }
           try { close(); } catch { /* */ }
         };
       }
