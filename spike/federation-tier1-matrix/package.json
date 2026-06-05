@@ -1,0 +1,1 @@
+{"name":"mycelium-tier1-matrix-spike","private":true,"type":"module","version":"0.0.0","dependencies":{"@matrix-org/matrix-sdk-crypto-wasm":"^18.3.1"}}

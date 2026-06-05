@@ -8,6 +8,7 @@
 **Revision history:**
 - **v1 (2026-06-05)** — initial tiered design from the repo sweep.
 - **v2 (2026-06-05)** — after the **Tier-0 spike** (`spike/federation-tier0/`, **GO 10/10**) and four verification sweeps read back against live code. Two pivots: **(P1)** corrected the Caddy routing claim — the built Caddyfile is a single `reverse_proxy → :4711`, **no** `/{p,s}`→`:8788` path-split, so federation routes need no Caddy change (§2.2); **(P2)** the dormant `connections.js` connect-request is sent **UNSIGNED** (`connections.js:154-166` defers signing to a non-existent Worker tier) — Tier-0 must add the sign-and-verify-via-`did:web` layer, which the spike prototyped and proved (§2.5, A3.5). Added the verification table (§8).
+- **v3 (2026-06-05)** — after the **Tier-1/A1 spike** (`spike/federation-tier1-matrix/`, **GO 9/9**). One pivot: **(P3) Conduwuit is archived (read-only since 2026-01-19)** → switch Tier-1 to its official community successor **Continuwuity** (Rust, lightweight, actively released). A1's crux is proven: the modern crypto helper (`@matrix-org/matrix-sdk-crypto-wasm`, vodozemac — **no libolm**) runs the full Megolm lifecycle headlessly in our Node runtime, decrypts on an unverified device, and recovers room keys across a restart. Residual Tier-1 risk narrowed to *homeserver integration* (sync loop + persistent store + S2S federation). Updated §3 Tier-1, §5 (A1/A2), §6, §8, §9.
 
 ---
 
@@ -80,7 +81,9 @@ Serve the existing identity as discovery documents over the relay:
 **Why first:** it's ~90% present (identity + relay + the consuming code), it leaks nothing (a public key and a handle are already public by design), and it's the single primitive both Matrix and lexicon-records consume. **Decision D-FED-1 (locked): the box's sovereign Ed25519 identity is the root; `did:web` is its published form; everything else maps onto it.**
 
 ### Tier 1 — Real-time E2EE messaging via Matrix (near-term primary)
-Run **Conduwuit** (Rust homeserver, ~50–100 MB, single binary, SQLite — per the research input; to be verified in the spike) as an **optional sidecar**, alongside the frpc/Caddy/embed/enrich sidecars the box already manages.
+Run **Continuwuity** (Rust homeserver, lightweight single binary, SQLite/RocksDB — the official community successor to **Conduwuit, which was archived read-only 2026-01-19**; footprint to be confirmed in the A2 spike) as an **optional sidecar**, alongside the frpc/Caddy/embed/enrich sidecars the box already manages.
+
+> **Tier-1/A1 spike: `spike/federation-tier1-matrix/` — VERDICT GO (9/9).** The crypto-lifecycle crux is proven: `@matrix-org/matrix-sdk-crypto-wasm` (vodozemac, **no libolm**) loads headless in Node v22 and runs the full Olm→Megolm round-trip between two bot devices with **no human verification**; it decrypts on an **unverified** device (verification is a trust *shield*, not a gate) and **recovers room keys across a restart** via key export/import. The crypto helper a headless bot needs **exists and works in our runtime.** Residual (next spike, before bundling): real homeserver sync loop + persistent store backend + S2S federation. See `RESULT.md`.
 
 - **Addressing:** the box registers/controls one Matrix user; its MXID is stored as `identity_channels` `kind='matrix'` (`src/db/identity-channels.js`). The box's `did.json` advertises the MXID as a service endpoint, so a peer resolves `@handle@…` → DID → MXID.
 - **Identity reconciliation (the impedance mismatch):** Matrix has its *own* identity (device keys, cross-signing) that is **not** the Mycelium root key. We do **not** try to make Matrix device keys *be* the sovereign identity. Instead: the Mycelium identity is bound to the MXID by a **signed claim published in `did.json`** ("`did:web:alice…` asserts control of `@alice:…`", signed by the box key). Peers trust the MXID because the DID vouches for it. Optionally, message *bodies* carry a detached Mycelium-key signature for belt-and-suspenders sovereign attribution on top of Matrix's per-event Ed25519.
@@ -118,8 +121,9 @@ Per `CLAUDE.md` ("hard evidence over paper reasoning"), nothing above gets built
 
 | # | Assumption | How to prove | Risk if false |
 |---|---|---|---|
-| **A1** | A headless Matrix **bot can send/receive E2EE (Megolm)** messages reliably. | Spike: matrix-rust-sdk (or matrix-nio w/ store) bot, two boxes, encrypted DM round-trip + restart-and-still-decrypt. | **Highest.** Appservices historically do **not** do E2EE without a crypto helper; if bot E2EE is too brittle, Tier 1's whole premise wobbles. **Prove this first.** |
-| **A2** | Conduwuit's real footprint + federation cost fit a bundled sidecar on a user's Mac. | Spike: run Conduwuit, measure RAM/CPU idle + under a small room, confirm S2S federation works through the relay (`:8448`/well-known delegation). | Medium. May need `.well-known/matrix/server` delegation through Caddy; may be heavier than 50–100 MB under load. |
+| **A1** | A headless Matrix **bot can send/receive E2EE (Megolm)** messages reliably. | ✅ **CRUX PROVEN — `spike/federation-tier1-matrix/` GO (9/9).** `matrix-sdk-crypto-wasm` (vodozemac, **no libolm**) runs the full Megolm lifecycle headlessly in Node v22; decrypts on an unverified device; recovers room keys across a restart via export/import. | Largely retired — the crypto helper exists and works in our runtime. **Residual → A1b.** |
+| **A1b** *(new, v3)* | The proven crypto core works **end-to-end against a real homeserver** (sync loop, bot login, client-vs-appservice) and over **S2S federation** between two boxes. | Spike: run **Continuwuity** + `matrix-js-sdk` (rust-crypto, on npm), reproduce the round-trip over HTTP; then two federating homeservers. | Medium — integration on a proven crypto core ("known engineering"). **Do before bundling a homeserver.** |
+| **A2** | **Continuwuity's** real footprint + federation cost fit a bundled sidecar on a user's Mac. *(Conduwuit is archived — P3.)* | Spike: run Continuwuity, measure RAM/CPU idle + under a small room, confirm S2S federation works through the relay (`:8448`/`.well-known/matrix/server` delegation). | Medium. May need well-known delegation through Caddy. |
 | **A3** | `did:web` + WebFinger serve cleanly, and the dormant `connections.js` connect flow completes box→box and verifies. | ✅ **PROVEN — `spike/federation-tier0/` GO (10/10).** Real `connections.js` did WebFinger discovery + POST to a second box; the prototyped sign/verify-via-`did:web` layer accepts valid and rejects tampered/forged (401). No Caddy change needed (P1). | Resolved. Residual: real-vault persistence is a build step, not a risk. |
 | **A4** | The `connect-request.profile.signature` field is **safe to transmit** (not a raw invertible embedding). | ✅ **PROVEN.** Code-read: `src/db/profiles.js` never writes `signature` (grep: 0 matches; `computeFingerprint` sets only scores+realm names); it's user bio ≤500 chars (`src/portal-compat.js:188`). Spike A4: live payload has no `centroid_256`/`embedding_768`/vector field. | Resolved (recommend a post-launch one-sample audit). |
 | **A5** | Matrix's per-event Ed25519 attribution + a DID-published MXID claim is enough sovereign attribution (or we need body-level Mycelium signatures). | Design review + spike: forge-attempt a message as another handle. | Medium — determines whether we add body-level signing. |
@@ -134,6 +138,7 @@ Per `CLAUDE.md` ("hard evidence over paper reasoning"), nothing above gets built
 | D-FED-2 | Shared spaces = Matrix room (live surface) + lexicon-record mirror into each box's vault (durability/sovereignty). No second atproto PDS. | **Proposed** — confirm in A1/A2 spike |
 | D-FED-3 | AT-Proto contributes identity (`did:web`) + lexicon *schemas* only; not a running PDS/firehose/MST. | **Proposed** |
 | D-FED-4 | Matrix is optional, never the identity root, never the discovery transport. | **Locked** |
+| D-FED-7 | Tier-1 homeserver = **Continuwuity** (Conduwuit archived 2026-01-19); crypto helper = `@matrix-org/matrix-sdk-crypto-wasm` (vodozemac, no libolm). Bot needs a persistent crypto store backend. | **Locked** (A1 spike + P3) |
 | D-FED-5 | Discovery/resonance deferred; stays on signed-HTTP + LSH/DP/SMPC, not Matrix/firehose. | **Locked** |
 | D-FED-6 | Every cross-instance send via an explicit egress chokepoint; every inbound artifact persists+notifies once. | **Locked** (inherits `CLAUDE.md` §11/§12) |
 
@@ -166,10 +171,13 @@ Per `CLAUDE.md` ("hard evidence over paper reasoning"), nothing above gets built
 | Master key is pinned to `process.env.ENCRYPTION_MASTER_KEY` at boot, available to any route handler | `src/index.js:73`; mirrored use at `src/remote/router.js:142`, `src/publish/public-server.js:82` |
 | The dormant code imports only `node:crypto` (no DB/native dep needed to exercise it) | `src/db/connections.js:53`, `src/identity/identity.js:17` |
 | End-to-end: did:web doc + WebFinger + signed connect verify; tamper/forge rejected | `spike/federation-tier0/probe.mjs` + `RESULT.md` (GO 10/10) |
+| Headless Megolm E2EE works in our Node runtime (no libolm, no human verify, restart-recovers) | `spike/federation-tier1-matrix/probe.mjs` + `RESULT.md` (GO 9/9) |
+| Conduwuit archived → Continuwuity is the live successor; `matrix-sdk-crypto-wasm@18` installs from npm | spike install log; WebSearch (continuwuity.org, github.com/continuwuity) |
 
-## 9. Next steps (updated after Tier-0 spike)
+## 9. Next steps (updated after Tier-0 + Tier-1/A1 spikes)
 
 1. ✅ **Tier-0 spike — DONE, GO.** `spike/federation-tier0/`.
-2. **Decide the gate:** Tier-0 (did:web + WebFinger + signed `/federation/connect`, wiring the dormant `connections.js`) is now de-risked and could be the first *built* federation increment **once the ship-and-validate gate opens** — it is read-mostly, adds no homeserver, and leaks nothing. Write its build plan (wire `connections` into `getDb`/a tool, add the three routes + the sign/verify layer, persist+notify on inbound).
-3. **Spike A1 next (Tier-1, heavier):** headless Matrix bot E2EE round-trip — the highest remaining risk, and the gate for any Conduwuit work. Do **not** start homeserver bundling before A1 returns GO.
-4. Keep `docs/REDESIGN-LIVING-SPEC.md` §2.7 in sync (its "Matrix: 0 / AT-Protocol: 0" line is stale given `connections.js`'s lexicon usage + this spike).
+2. ✅ **Tier-1 / A1 spike — DONE, GO.** `spike/federation-tier1-matrix/` — headless Megolm E2EE crux proven.
+3. **Decide the gate:** Tier-0 (did:web + WebFinger + signed `/federation/connect`, wiring the dormant `connections.js`) is the lowest-risk first *built* federation increment **once the ship-and-validate gate opens** — read-mostly, no homeserver, leaks nothing. Write its build plan (wire `connections` into `getDb`/a tool, add the three routes + the sign/verify layer, persist+notify on inbound).
+4. **Spike A1b next (the remaining Tier-1 unknown):** stand up **Continuwuity** + `matrix-js-sdk` (rust-crypto) and reproduce the A1 round-trip **end-to-end over a real homeserver** (sync loop, bot login, persistent store), then **two federating homeservers** (S2S through the relay). Do **not** bundle a homeserver before A1b returns GO.
+5. Keep `docs/REDESIGN-LIVING-SPEC.md` §2.7 in sync (its "Matrix: 0 / AT-Protocol: 0" line is stale) and note the **Conduwuit→Continuwuity** correction wherever Conduwuit is referenced.
