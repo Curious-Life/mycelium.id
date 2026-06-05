@@ -82,7 +82,10 @@ export function accountRouter({ isInitialized, completeBoot, kcvPath, lockFile }
       catch { return res.status(400).json({ error: 'wrong_key', message: 'That key does not match this vault.' }); }
     }
     try {
-      writeKeychain(userHex, systemHex);
+      // force: the user explicitly pasted a recovery key to (re)open THIS vault.
+      // When a vault exists it was KCV-verified just above; any prior Keychain
+      // value is backed up by kcWrite before being replaced.
+      writeKeychain(userHex, systemHex, { force: true });
       removeLock(lockFile); // a recovery-key restore turns OFF any passphrase lock
       await completeBoot({ userHex, systemHex });
       return res.json({ ok: true });
@@ -193,7 +196,10 @@ export function accountRouter({ isInitialized, completeBoot, kcvPath, lockFile }
     try { keys = await unsealKeys(readLock(lockFile), passphrase); }
     catch { return res.status(400).json({ error: 'wrong_passphrase', message: 'That passphrase is incorrect.' }); }
     try {
-      writeKeychain(keys.userHex, keys.systemHex);
+      // force: these are the vault's own keys, just unsealed from the verified
+      // passphrase seal — they are authoritative. The Keychain was emptied when
+      // the lock was enabled, so normally there is nothing to overwrite.
+      writeKeychain(keys.userHex, keys.systemHex, { force: true });
       removeLock(lockFile);
       return res.json({ ok: true });
     } catch (err) {

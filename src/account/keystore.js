@@ -12,9 +12,21 @@
 // Security discipline (mirrors key-source.js): we shell out with execFile + an
 // argv array (never a shell string); secrets arrive on the child's stdout and
 // are never logged. Keychain writes use `add-generic-password -U`.
+//
+// DATA-LOSS GUARD (added 2026-06-05 after a fresh-key ceremony clobbered a real
+// `mycelium-user-master` item in place — `-U` keeps no version history, so the
+// 81MB vault encrypted under the old key became permanently undecryptable):
+//   1. BACKUP-BEFORE-OVERWRITE — kcWrite() never overwrites a DIFFERENT existing
+//      value without first copying the prior secret to a timestamped companion
+//      item (`<service>.bak.<ts>`). Any overwrite is therefore recoverable.
+//   2. REFUSE-IN-DEFAULT-NAMESPACE — writeKeychain() refuses to overwrite an
+//      existing key in the real (default) namespace with a DIFFERENT value
+//      unless { force:true } is passed. Tests/ceremonies that namespace away via
+//      MYCELIUM_KC_* are unaffected; a run that FORGETS to namespace is blocked.
+// Both layers are independent (CLAUDE.md §2 defense-in-depth) and fail closed.
 import crypto from 'node:crypto';
 import { execFileSync, execFile } from 'node:child_process';
-import { keychainNames } from './keychain-names.js';
+import { keychainNames, isDefaultNamespace } from './keychain-names.js';
 
 const HEX64 = /^[0-9a-f]{64}$/i;
 // HKDF domain-separation label for SYSTEM_KEY. This is a PERMANENT part of the
@@ -50,52 +62,119 @@ export function keychainAvailable() {
   catch { return false; }
 }
 
-function kcRead(service, env) {
-  const { account } = keychainNames({ env });
+/** Thrown when writeKeychain refuses a destructive overwrite (no force). The
+ *  message NEVER contains a key value — only service names + remediation. */
+export class KeyOverwriteError extends Error {
+  constructor(message) { super(message); this.name = 'KeyOverwriteError'; }
+}
+
+/** Default executor: run `security` with an argv array, return trimmed stdout.
+ *  Injectable so the verify gate can mock the Keychain with zero risk to the real
+ *  one. stderr is SUPPRESSED (not inherited): the read-probes routinely "fail" on
+ *  a missing item and `security` would otherwise spam "could not be found"; write
+ *  failures are surfaced via the thrown Error's message, never raw stderr. stdout
+ *  (which may carry a secret) is captured and never logged. */
+function defaultExec(cmd, args) {
+  return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+}
+
+function kcRead(service, account, exec) {
   try {
-    return execFileSync('security', ['find-generic-password', '-a', account, '-s', service, '-w'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return exec('security', ['find-generic-password', '-a', account, '-s', service, '-w']);
   } catch { return null; } // not found → null (never throws / never logs)
 }
 
-function kcWrite(service, value, env) {
-  const { account } = keychainNames({ env });
-  // -U updates an existing item in place; -w sets the secret. argv array, no shell.
-  execFileSync('security', ['add-generic-password', '-U', '-a', account, '-s', service, '-w', value],
-    { stdio: ['ignore', 'ignore', 'inherit'] });
+// Monotonic, collision-resistant suffix for backup companion items, so two
+// writes in the same millisecond can't clobber each other's backup.
+let _bakSeq = 0;
+function backupSuffix() {
+  // 20260605T164326123Z.<seq> — compact UTC matching the Keychain mdat style.
+  const compact = new Date().toISOString().replace(/[-:]/g, '').replace('.', '');
+  return `${compact}.${(_bakSeq++).toString(36)}`;
 }
 
-function kcDelete(service, env) {
-  const { account } = keychainNames({ env });
-  try { execFileSync('security', ['delete-generic-password', '-a', account, '-s', service], { stdio: 'ignore' }); }
+/** Copy the PRIOR secret to a timestamped companion item before it is overwritten.
+ *  The value is the old key (kept encrypted in the Keychain, never logged); the
+ *  `-j` comment carries only guidance. Returns the backup service name. */
+function kcBackup(service, account, priorValue, exec) {
+  const bakService = `${service}.bak.${backupSuffix()}`;
+  exec('security', ['add-generic-password', '-U', '-a', account, '-s', bakService,
+    '-j', 'Mycelium key backup — saved automatically before an overwrite. Safe to delete once you have confirmed the vault still opens.',
+    '-w', priorValue]);
+  return bakService;
+}
+
+function kcWrite(service, value, account, exec) {
+  const prior = kcRead(service, account, exec);
+  // Never lose a key silently: back up any DIFFERENT existing value first.
+  if (prior !== null && prior !== value) kcBackup(service, account, prior, exec);
+  // -U updates an existing item in place; -w sets the secret. argv array, no shell.
+  exec('security', ['add-generic-password', '-U', '-a', account, '-s', service, '-w', value]);
+}
+
+function kcDelete(service, account, exec) {
+  try { exec('security', ['delete-generic-password', '-a', account, '-s', service]); }
   catch { /* absent — fine */ }
 }
 
-/** Write both keys to the Keychain (USER_MASTER + its derived SYSTEM_KEY). */
-export function writeKeychain(userHex, systemHex, { env = process.env } = {}) {
-  const { userService, systemService } = keychainNames({ env });
-  kcWrite(userService, normalizeKey(userHex), env);
-  kcWrite(systemService, normalizeKey(systemHex), env);
+/**
+ * Write both keys to the Keychain (USER_MASTER + its derived SYSTEM_KEY).
+ *
+ * In the REAL (default) namespace, refuses to overwrite an existing key with a
+ * DIFFERENT value unless { force:true } — this is the guard that would have
+ * stopped the 2026-06-05 data loss. Writing the SAME value is always idempotent
+ * (so /restore re-pinning a verified key and /passphrase/disable restoring the
+ * vault's own keys need no force). On a genuine forced replacement, the prior
+ * key is backed up first (see kcWrite).
+ *
+ * @param {object} [opts]
+ * @param {object} [opts.env=process.env]
+ * @param {boolean} [opts.force=false]  allow a different-value overwrite of the real namespace
+ * @param {(cmd:string,args:string[])=>string} [opts.exec]  injectable (tests)
+ */
+export function writeKeychain(userHex, systemHex, { env = process.env, force = false, exec = defaultExec } = {}) {
+  const { account, userService, systemService } = keychainNames({ env });
+  const items = [[userService, normalizeKey(userHex)], [systemService, normalizeKey(systemHex)]];
+
+  if (isDefaultNamespace({ env }) && !force) {
+    for (const [service, value] of items) {
+      const prior = kcRead(service, account, exec);
+      if (prior !== null && prior !== value) {
+        // No secret in the message — only the service name + remediation.
+        throw new KeyOverwriteError(
+          `refusing to overwrite the existing key "${service}" with a different value: ` +
+          `this would lock you out of the current vault (the data encrypted under the old ` +
+          `key would become unrecoverable). Re-run with force ONLY if you intend to replace ` +
+          `it — the previous key is backed up to "${service}.bak.<timestamp>" first.`);
+      }
+    }
+  }
+
+  // Pre-check passed (or force/ephemeral): write, backing up any prior value.
+  kcWrite(userService, items[0][1], account, exec);
+  kcWrite(systemService, items[1][1], account, exec);
 }
 
-/** Remove both key items (test cleanup / explicit reset). */
-export function deleteKeychain({ env = process.env } = {}) {
-  const { userService, systemService } = keychainNames({ env });
-  kcDelete(userService, env);
-  kcDelete(systemService, env);
+/** Remove both key items (test cleanup / explicit reset). Backup companions are
+ *  intentionally left in place — they are recovery artifacts the user removes by
+ *  hand once the vault is confirmed open. */
+export function deleteKeychain({ env = process.env, exec = defaultExec } = {}) {
+  const { account, userService, systemService } = keychainNames({ env });
+  kcDelete(userService, account, exec);
+  kcDelete(systemService, account, exec);
 }
 
 /** Read USER_MASTER (the recovery key) back from the Keychain, or null. */
-export function readUserMaster({ env = process.env } = {}) {
-  const { userService } = keychainNames({ env });
-  const v = kcRead(userService, env);
+export function readUserMaster({ env = process.env, exec = defaultExec } = {}) {
+  const { account, userService } = keychainNames({ env });
+  const v = kcRead(userService, account, exec);
   return v && HEX64.test(v) ? v.toLowerCase() : null;
 }
 
 /** Are BOTH key items present in the Keychain? */
-export function keychainHasKeys({ env = process.env } = {}) {
-  const { userService, systemService } = keychainNames({ env });
-  return Boolean(kcRead(userService, env)) && Boolean(kcRead(systemService, env));
+export function keychainHasKeys({ env = process.env, exec = defaultExec } = {}) {
+  const { account, userService, systemService } = keychainNames({ env });
+  return Boolean(kcRead(userService, account, exec)) && Boolean(kcRead(systemService, account, exec));
 }
 
 // ── one-click "save my recovery key" targets (ceremony convenience) ──────────
