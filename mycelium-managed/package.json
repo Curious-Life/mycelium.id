@@ -10,6 +10,6 @@
   },
   "dependencies": {
     "better-sqlite3": "*",
-    "express": "*"
+    "express": "4.22.2"
   }
 }
