@@ -101,6 +101,19 @@ from that one difference.
 
 ## 5. Critical path — the portal/REST surface must be authenticated + relay-exposed
 
+> **Now designed in full:** [`DESIGN-portal-auth-relay-2026-06-05.md`](DESIGN-portal-auth-relay-2026-06-05.md)
+> (sweep-first, 5 sweeps + verification table). That pass **pivoted** this section in three ways
+> and **found a latent vulnerability** the exposure would activate — read it before building:
+> (1) the auth system is on a *different process* (`:4711`), so `server-rest` must gain a real
+> gate backed by a 2nd better-auth instance over the shared `auth.db` — not a middleware tweak;
+> (2) there is **no server-side Noise channel** in V1, so "sensitive reads ride the Noise channel"
+> is dropped — TLS-on-the-Mac is the confidentiality boundary; (3) better-auth has **no passkey**
+> plugin, so V1 mobile login = operator password + native biometric *app-lock* (passkey deferred).
+> **V-1 (latent):** `/api/v1/account` (returns the recovery key) and `/api/v1/remote/password`
+> gate on loopback-**IP** only — defeated by the reverse proxy — so they would leak the moment
+> `:8787` is relay-exposed; the fix (shared `isTrustedLoopback` = loopback **and** no XFF, plus a
+> Caddy 404 at the edge) is part of that design.
+
 This is the real work and the gate for everything else. Two coupled problems:
 
 **5a. No auth on the data surface.** `server-rest.js` (the portal + `/api/v1/portal/*`
