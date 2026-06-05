@@ -75,7 +75,13 @@ try {
 
   const ch6 = await getJson(`${BASE}/v1/challenge`);
   const claimC = buildClaim({ action: 'provision', handle: 'carol', nonce: ch6.nonce, masterHex: masterB });
-  const p6 = await postJson(`${BASE}/v1/provision`, { ...claimC, signature: `${claimC.signature.slice(0, -2)}AA` });
+  // Tamper DETERMINISTICALLY: flip the FIRST base64url char (full 6-bit entropy →
+  // always changes signature byte 0 → ed25519 always rejects). The old
+  // slice(0,-2)+'AA' tamper was a silent no-op ~6% of the time — a 64-byte sig's
+  // LAST char has only 4 valid values, so it often already ended in 'A', leaving
+  // the (still-valid) signature unchanged and flaking P6 to a false 200.
+  const tampered = (claimC.signature[0] === 'A' ? 'B' : 'A') + claimC.signature.slice(1);
+  const p6 = await postJson(`${BASE}/v1/provision`, { ...claimC, signature: tampered });
   rec('P6. tampered signature → 401', p6.status === 401, `status=${p6.status}`);
 
   const a1 = await getJson(`${BASE}/v1/handle/alice`);
