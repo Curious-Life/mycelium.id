@@ -1,7 +1,7 @@
 # Build Plan — Federation Tier-0 (did:web + WebFinger + signed connect)
 
 **Date:** 2026-06-05
-**Status:** ✅ **BUILT (2026-06-05)** — steps 1-5 implemented on `claude/affectionate-faraday-9aM4c`; `verify:federation` **GO 7/7**, 32 federation unit tests green, all changed files syntax-clean, no existing caller broken. Step 6 (browser smoke through the relay + a live external peer) remains — needs a running packaged app, deferred to a deploy session. Converts `docs/DESIGN-federation-inter-instance-2026-06-05.md` Tier-0 (design, spike GO 10/10) into shippable steps.
+**Status:** ✅ **BUILT + LOCAL-VERIFIED (2026-06-05)** — steps 1-5 implemented on `claude/affectionate-faraday-9aM4c`. Proven against the **real stack** (deps installed): `verify:federation` **GO 7/7**; 36 federation tests green incl. a real-boot+express+sqlite integration test; `verify:mcp` **GO** (stdio boot lists all 3 federation tools, 30 total); `verify:oauth` **GO** (the `--http` path that mounts the federation router boots with no regression). No existing caller broken. Only Step 6's *deploy* leg remains (relay tunnel + a live external peer) — needs a running packaged app on a host with a public handle. Converts `docs/DESIGN-federation-inter-instance-2026-06-05.md` Tier-0 (design, spike GO 10/10) into shippable steps.
 
 ### As-built ledger
 | Step | Artifact | Status |
@@ -11,7 +11,12 @@
 | 3 | `src/federation/handlers.js` (+`router.js` express wrapper) + `tests/federation-handlers.test.js` | ✅ 10/10 |
 | 4 | wiring: `src/index.js` (identity in boot), `db/index.js` (connections), `mcp.js` + `tools/federation.js` (the 3 tools), `server-http.js` (router mount) | ✅ syntax-clean, callers checked |
 | 5 | `scripts/verify-federation.mjs` + `package.json` (`verify:federation`, appended to `verify`) | ✅ GO 7/7 |
-| 6 | browser smoke via relay + one live external peer | ⏳ deferred to deploy session |
+| 5b | `tests/federation-integration.test.js` — real `boot()` + express + sqlite, signed connect persists to the actual vault; skips when deps absent | ✅ 4/4 |
+| — | regression: `verify:mcp` GO (30 tools incl. the 3 new), `verify:oauth` GO (`--http` + router mount) | ✅ |
+| 6 | **local build/run** — `npm ci` ✓, real boot ✓; **deploy leg** (relay tunnel + one live external peer) | ⏳ deploy session |
+
+### Run locally
+`npm ci` → `npm run verify:federation` (GO) → `MYCELIUM_PUBLIC_HOST=<handle>.mycelium.id node src/index.js --http` then `curl -s localhost:4711/.well-known/did.json`. With remote unset, the federation surface fails closed (did.json 404).
 
 **As-built deltas from the plan:** (a) identity is created once in `boot()` and threaded via `federationDeps` to `getDb` + returned for the router (cleaner than creating it in `server-http`); (b) `did:web` uses the full `publicHost` (custom-domain-correct), not `handle+".mycelium.id"`; (c) inbound verifies over `canonicalize(parsedBody)` rather than raw bytes (express.json runs first) — deterministic re-serialization reproduces the signed bytes; (d) no migration needed (columns pre-existed); (e) `profiles` namespace left unwired (not required).
 **Companion:** the design doc (architecture + threat model + verification table) and `spike/federation-tier0/` (the proven prototype this productionizes).
