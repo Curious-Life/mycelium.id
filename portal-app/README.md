@@ -39,10 +39,14 @@ app calls ~150 cloud `/portal/*` endpoints; V1 exposes `POST /api/v1/:toolName`
 (+ `/api/v1/upload`, `/ingest/*`). The single seam to retarget is
 `src/lib/api.ts` (and a per-screen path→tool translation). Plan:
 
-1. **Local auth bypass** — `src/routes/(app)/+layout` currently redirects to
-   `/login` (Telegram/passkey cloud ceremony). For single-user local, treat the
-   session as always-authenticated (or a trivial local unlock) so the app opens
-   straight to the home screen.
+1. **Local auth bypass — ✅ DONE (server-side).** The root layout validates the
+   session via `/auth/session`; on V1 that's served by `authShimRouter`
+   (`src/auth-shim.js`, mounted `src/server-rest.js:306`), which returns the owner
+   user for **trusted loopback** (`isTrustedLoopback` → `require-vault-auth.js:80`).
+   So on `127.0.0.1` the app opens straight to the workspace — no `/login`. First
+   run goes to `/setup` and a passphrase-locked vault to `/unlock`
+   (`routes/+layout.svelte`, gated on `/api/v1/account/status`). Networked clients
+   (over the relay) still get `/login`. **No client change needed.**
 2. **Light up V1-backed screens first** — library/documents, search, mindscape,
    import, settings, profile, chat — translating their `/portal/*` calls to the
    matching `/api/v1/:tool` (e.g. list/get/upsert documents, search, capture).
