@@ -91,8 +91,8 @@ authenticated `/api/v1/portal/library` over an actual relayed `<handle>.mycelium
 
 | Step | Task | Files | ~LOC | Verify / smoke |
 |---|---|---|---|---|
-| 2.1 | Add an **email+password** login branch (operator) posting to `/api/auth/sign-in/email` (same-origin via Caddy); on success `auth.setUser`, route to `/` | `portal-app/src/routes/login/+page.svelte`, `lib/stores/auth.ts` | ~60 | real-browser: login → Library loads over relay |
-| 2.2 | Make `/auth/session` failure → this login (not the dead passkey/setup branches) on networked clients; keep `SECURE_CHANNEL` off | `+layout.svelte`, `login/+page.svelte` | ~20 | 401 bounces to operator login, not a dead branch |
+| 2.1 | ✅ **DONE (2026-06-06):** `operator` login mode → POST `/api/auth/sign-in/email`; default when `hasPasskeys===false` (self-hosted); on success reload into the app | `portal-app/src/routes/login/+page.svelte` | portal build GO; real better-auth HTTP: sign-in→200+cookie, get-session→200+user.id, wrong-pw→401. Commit `f9bd853` |
+| 2.2 | ✅ **DONE:** `/auth/session` already 401s networked-unauthed (step 1.2) → bounces to the operator login (no longer the dead `key` branch); `SECURE_CHANNEL` stays off | `auth-shim.js` (1.2), `login/+page.svelte` | covered by `verify:portal-auth` F2 + the mode default | — | Live over relay = host smoke |
 
 ## Phase 3 — Mobile-responsive pass *(Track W; parallel, pure web)*
 
@@ -105,9 +105,9 @@ authenticated `/api/v1/portal/library` over an actual relayed `<handle>.mycelium
 
 | Step | Task | Files | Notes |
 |---|---|---|---|
-| 4.1 | New `mobile/` Capacitor project; webview `server.url` (or in-app nav) → the paired box URL; iOS target | `mobile/**`, `capacitor.config.ts` | one config → iOS + Android later |
-| 4.2 | **Pairing**: tiny bundled landing — enter handle **or** scan a QR from desktop (`mycelium://pair?handle=…`); persist resolved URL in Keychain | `mobile/src/pair/*`; desktop "show pairing QR" (small Tauri add) | the *only* bundled web asset |
-| 4.3 | **Biometric app-lock**: Face ID gate before revealing the webview on cold start/resume (native plugin). Note: app-lock UX only — holds no vault keys | Capacitor Biometric plugin | distinct from the server-side operator-password auth |
+| 4.1 | ✅ **SCAFFOLDED (2026-06-06):** `mobile/` Capacitor project; `allowNavigation` → `*.mycelium.id`; no hardcoded url; `check-config` gate 9/9 GO + path-gated CI. Native build = host (commit `098ca30`) | `mobile/**`, `capacitor.config.ts`, `.github/workflows/mobile.yml` | one project → iOS + Android |
+| 4.2 | ✅ **SCAFFOLDED:** bundled pairing landing (enter handle → persist handle only → navigate to box). QR/deep-link `mycelium://pair` = ⬜ TODO | `mobile/www/{index.html,pair.js}` | the only bundled asset |
+| 4.3 | ◑ **HOOK in place:** Face ID/fingerprint app-lock called defensively in `pair.js` (no-op if plugin absent). Add `@aparajita/capacitor-biometric-auth` + `cap sync` to enable | `mobile/www/pair.js` | app-lock only — holds no vault keys |
 | 4.4 | Native niceties: status bar/splash, deep links, share-sheet → existing `/api/v1/portal/upload` import | Capacitor plugins | keeps it App-Store-real (guideline 4.2) |
 | 4.5 | iOS build + **TestFlight** | Xcode, Apple dev acct (Track O) | device smoke: pair → biometric → login → Library |
 
