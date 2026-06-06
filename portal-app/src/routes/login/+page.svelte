@@ -6,10 +6,12 @@
 	import { api } from '$lib/api';
 	import { base64urlToBytes, preparePrfOptions } from '$lib/passkey-prf';
 
-	let mode: 'loading' | 'setup' | 'passkey' | 'key' = $state('loading');
+	let mode: 'loading' | 'setup' | 'passkey' | 'key' | 'operator' = $state('loading');
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 	let masterKeyInput = $state('');
+	let emailInput = $state('operator@mycelium.local');
+	let passwordInput = $state('');
 	let setupTokenInput = $state('');
 	let displayNameInput = $state('');
 	let userHandle = $state<string | null>(null);
@@ -25,7 +27,11 @@
 				if (data.setupRequired) {
 					mode = 'setup';
 				} else if (data.hasPasskeys === false) {
-					mode = 'key';
+					// V1 self-hosted: no server-side passkey. A networked client (over
+					// the relay) signs in with the operator password; loopback never
+					// reaches /login (the shim authorizes it). The master-key 'key' flow
+					// is cloud-era and unreachable here.
+					mode = 'operator';
 				} else {
 					mode = 'passkey';
 				}
@@ -240,6 +246,36 @@
 
 
 	// Master key verification → passkey registration → logged in
+	// Operator-password sign-in (V1 self-hosted, reached over the relay). POSTs to
+	// better-auth's /api/auth/sign-in/email — same-origin to this webview, routed
+	// to the :4711 server by the relay Caddy. On success better-auth sets the
+	// HttpOnly session cookie; the app's /auth/session check then passes, so we
+	// reload into the app (which re-runs that check, now authenticated).
+	async function handleOperatorLogin() {
+		const email = emailInput.trim();
+		const password = passwordInput;
+		if (!email || !password) { error = 'Enter your email and operator password'; return; }
+		loading = true;
+		error = null;
+		try {
+			const res = await fetch('/api/auth/sign-in/email', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'same-origin',
+				body: JSON.stringify({ email, password }),
+			});
+			if (!res.ok) {
+				const data = await res.json().catch(() => ({}));
+				throw new Error(data?.message || data?.error?.message || 'Sign-in failed — check your password');
+			}
+			window.location.assign('/');
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Sign-in failed';
+		} finally {
+			loading = false;
+		}
+	}
+
 	async function handleKeyLogin() {
 		const key = masterKeyInput.trim().replace(/\s/g, '');
 		if (!key || key.length !== 64) {
@@ -514,6 +550,52 @@
 
 			{#if mode === 'loading'}
 				<div class="h-48"></div>
+
+			{:else if mode === 'operator'}
+				<!-- V1 self-hosted: operator-password sign-in (over the relay). The
+				     shared error block above renders any failure. -->
+				<div class="card-elevated p-8">
+					<div class="space-y-6">
+						<div class="text-center">
+							{#if userHandle}
+								<p class="text-lg font-medium text-[var(--color-text-primary)]">@{userHandle}</p>
+							{/if}
+							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Sign in to your vault</h2>
+							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
+								Enter your operator password to reach your vault on this device.
+							</p>
+						</div>
+
+						<form class="space-y-3" onsubmit={(e) => { e.preventDefault(); handleOperatorLogin(); }}>
+							<input
+								bind:value={emailInput}
+								type="email"
+								placeholder="email"
+								autocomplete="username"
+								class="input w-full text-sm"
+							/>
+							<input
+								bind:value={passwordInput}
+								type="password"
+								placeholder="operator password"
+								autocomplete="current-password"
+								class="input w-full text-sm"
+							/>
+							<button
+								type="submit"
+								disabled={loading || !passwordInput}
+								class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed"
+							>
+								{#if loading}
+									<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+									<span>Signing in…</span>
+								{:else}
+									<span>Sign in</span>
+								{/if}
+							</button>
+						</form>
+					</div>
+				</div>
 
 			{:else if mode === 'key'}
 				<!-- First login: verify master key → create passkey -->
