@@ -19,25 +19,142 @@ import { createDnsClient } from './dns.js';
 import { createAcmeDnsClient } from './acmedns.js';
 import { createRelayHook } from './relay-hook.js';
 import { createRateLimiter, createDailyCap } from './ratelimit.js';
+import { createTurnstileVerifier } from './turnstile.js';
+import { createBilling } from './billing.js';
+
+// Reserve-then-pay tunables (O5). Config values, not structural — the design's
+// still-open decision #4. A claimed-but-unpaid placeholder is swept after HOLD_TTL;
+// GRACE absorbs Stripe dunning before a lapsed tenant is treated as unentitled.
+const HOLD_TTL_MS = Number(process.env.MYC_HOLD_TTL_MS) || 30 * 60 * 1000;        // 30 min
+const GRACE_MS = Number(process.env.MYC_GRACE_MS) || 3 * 24 * 60 * 60 * 1000;     // 3 days
+// Immediate-access floor set at checkout.session.completed; invoice.paid refines
+// paid_until to the real period end moments later.
+const PROVISIONAL_MS = 34 * 24 * 60 * 60 * 1000;
 
 // Never handed out (impersonation / infra names).
 export const RESERVED = new Set(['admin', 'root', 'www', 'api', 'mcp', 'auth', 'connect', 'acme', 'acme-dns', 'relay', 'ns', 'mail', 'mycelium', 'anthropic', 'claude', 'support', 'help', 'status', 'app', 'id', 'docs']);
 
-export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone = 'mycelium.id', acmeDnsServer, bwLimit = '2MB', rateLimit, dailyCap }) {
+export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone = 'mycelium.id', acmeDnsServer, bwLimit = '2MB', rateLimit, dailyCap, turnstile, turnstileSitekey, billing }) {
   const app = express();
   // Behind the relay / Cloudflare → derive the client IP from X-Forwarded-For
   // (trust ONE hop). The rate limiter keys on req.ip.
   app.set('trust proxy', 1);
-  app.use(express.json({ limit: '16kb' }));
 
   const limiter = rateLimit || createRateLimiter({ capacity: 20, refillPerMin: 20 });
+  // Bot-gate (O2): disabled by default (opt-in), so self-hosters + tests run
+  // without Cloudflare. When enabled, verify() fails closed on a missing/bad token.
+  const botGate = turnstile || createTurnstileVerifier({});
+  // Billing (O4): disabled by default (no Stripe secret) → /v1/provision skips the
+  // paywall, so self-hosters + the hermetic tests provision for free.
+  const pay = billing || createBilling({});
+  // O7: billing-portal nonces live in their OWN in-memory store, NOT the shared
+  // provision/release one. That lets /v1/billing/nonce issue without the Turnstile
+  // gate (billing is signature-gated by the master key, and an unentitled key just
+  // 404s) WITHOUT handing bots a nonce usable for provision — a billing nonce
+  // isn't in the provision store, so it can't be replayed there.
+  const billingNonces = createNonceStore();
   const newHandleCap = dailyCap || createDailyCap({ max: Number(process.env.MYC_MAX_NEW_HANDLES_PER_DAY) || 40 });
   const limit = (req, res, next) => {
     if (limiter.allow(req.ip)) return next();
     res.status(429).json({ ok: false, error: 'rate limited' });
   };
 
-  app.get('/v1/challenge', limit, (_req, res) => {
+  // Stripe webhook — registered BEFORE express.json so it gets the RAW bytes the
+  // signature is computed over (re-serializing would change them and break verify).
+  // FAIL-CLOSED: an unverifiable signature → 400, no entitlement change. The event
+  // binds to a tenant by client_reference_id / subscription metadata (set at
+  // checkout), falling back to the customer→publicKey reverse lookup.
+  app.post('/v1/stripe/webhook', limit, express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
+    const event = pay.verifyWebhook(req.body, req.headers['stripe-signature']);
+    if (!event) { res.status(400).json({ ok: false, error: 'bad signature' }); return; }
+    try {
+      const obj = event.data?.object || {};
+      const customerId = typeof obj.customer === 'string' ? obj.customer : null;
+      const pkFrom = (o) =>
+        o.client_reference_id
+        || o.metadata?.public_key
+        || o.subscription_details?.metadata?.public_key
+        || (Array.isArray(o.lines?.data) && o.lines.data[0]?.metadata?.public_key)
+        || null;
+      let publicKey = pkFrom(obj);
+      if (!publicKey && customerId) publicKey = registry.getEntitlementByCustomer(customerId)?.public_key || null;
+
+      switch (event.type) {
+        case 'checkout.session.completed':
+          // Binds customer↔publicKey + grants immediate access; invoice.paid refines.
+          if (publicKey) registry.setEntitlement({ publicKey, stripeCustomerId: customerId, paidUntil: Date.now() + PROVISIONAL_MS });
+          break;
+        case 'invoice.paid':
+        case 'invoice.payment_succeeded': {
+          const periodEnd = obj.lines?.data?.[0]?.period?.end;
+          const paidUntil = periodEnd ? Number(periodEnd) * 1000 : Date.now() + PROVISIONAL_MS;
+          if (publicKey) registry.setEntitlement({ publicKey, stripeCustomerId: customerId, paidUntil });
+          break;
+        }
+        case 'invoice.payment_failed':
+        case 'customer.subscription.deleted':
+          if (publicKey) registry.clearEntitlement(publicKey);
+          break;
+        default: break; // unknown types → idempotent ack
+      }
+      res.json({ ok: true, received: true });
+    } catch {
+      // The signature was authentic but processing threw — let Stripe retry.
+      res.status(500).json({ ok: false, error: 'webhook processing failed' });
+    }
+  });
+
+  app.use(express.json({ limit: '16kb' }));
+
+  // Public, non-secret bootstrap config for the app's connect UI. Carries ONLY
+  // the Turnstile SITEKEY (public by design — the SECRET stays in env, never
+  // here) so the widget can render without baking the key into the app build; a
+  // null sitekey means the gate is off and the app shows no widget (the
+  // /v1/challenge gate is the actual security boundary either way).
+  app.get('/v1/config', limit, (_req, res) => {
+    res.json({ turnstileSitekey: turnstileSitekey || null });
+  });
+
+  // Sandboxed Turnstile widget page (O2). The app embeds THIS in a cross-origin
+  // <iframe>, so Cloudflare's third-party script runs in the control-plane origin
+  // — NEVER in the vault portal origin (no access to its DOM / CSRF cookie). On
+  // solve it postMessages ONLY the token string up to the parent; the parent
+  // validates event.origin === this origin (the real check). The token is a
+  // single-use human-proof, useless without the master-key provision flow, so we
+  // don't lock frame-ancestors here (a harvested token buys nothing); that
+  // hardening can follow once the live parent origin is confirmed in a browser.
+  app.get('/turnstile', limit, (req, res) => {
+    // The parent (loopback portal) passes its origin in ?o= so we can scope the
+    // postMessage target. Untrusted: validate to a bounded localhost/tauri shape
+    // or fall back to '*' (the parent's origin check is what enforces trust).
+    const raw = typeof req.query?.o === 'string' ? req.query.o : '';
+    const okOrigin = /^(https?|tauri):\/\/(localhost|127\.0\.0\.1|tauri\.localhost)(:\d{1,5})?$/.test(raw);
+    const target = okOrigin ? raw : '*';
+    // Inject as JS string literals, hardened against </script> / U+2028/9 breakout.
+    const js = (v) => JSON.stringify(String(v)).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+    res.type('html').send(`<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>html,body{margin:0;padding:0;background:transparent;overflow:hidden}</style>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onTs&render=explicit" async defer></script>
+</head><body><div id="w"></div><script>
+var SITEKEY=${js(turnstileSitekey || '')},TARGET=${js(target)};
+function send(m){try{window.parent.postMessage(Object.assign({source:'mycelium-turnstile'},m),TARGET)}catch(e){}}
+if(!SITEKEY){send({error:'not-configured'})}
+window.onTs=function(){if(!SITEKEY)return;turnstile.render('#w',{sitekey:SITEKEY,
+callback:function(t){send({token:t})},
+'error-callback':function(){send({error:'challenge-error'})},
+'expired-callback':function(){send({error:'expired'})}})};
+</script></body></html>`);
+  });
+
+  app.get('/v1/challenge', limit, async (req, res) => {
+    // Bot-gate the nonce: a bot can't provision without a nonce, and can't get a
+    // nonce without solving Turnstile. The token rides in ?cf_turnstile=… (the
+    // app's widget supplies it). When the gate is disabled, verify() returns true.
+    const token = req.query?.cf_turnstile;
+    if (!(await botGate.verify(typeof token === 'string' ? token : '', req.ip))) {
+      res.status(403).json({ ok: false, error: 'bot check failed' }); return;
+    }
     res.json({ nonce: nonces.issue() });
   });
 
@@ -78,6 +195,27 @@ export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, 
         catch { registry.remove({ handle: h, publicKey }); res.status(503).json({ ok: false, error: 'could not verify name availability' }); return; }
         if (exists) { registry.remove({ handle: h, publicKey }); res.status(409).json({ ok: false, error: 'handle unavailable' }); return; }
       }
+
+      // ENTITLEMENT GATE (O5) — "reserve, then pay": the cert-consuming side-effects
+      // below (acme-dns + DNS + frps token) run ONLY for a paid tenant. When billing
+      // is enabled and this publicKey isn't entitled (within grace), we KEEP the
+      // placeholder under a hold and hand back a Checkout URL — no free side-effects,
+      // no daily-cap spend. Billing off (self-hosted / dev) → this whole block is
+      // skipped and provisioning is free, exactly as before.
+      if (pay.enabled && !registry.isEntitled(h, Date.now(), GRACE_MS)) {
+        registry.setHold(h, Date.now() + HOLD_TTL_MS);
+        let checkoutUrl;
+        try {
+          ({ url: checkoutUrl } = await pay.createCheckoutSession({ publicKey, handle: h }));
+        } catch {
+          // Don't strand a fresh claim with no way to pay — roll it back (a reclaim
+          // of a live handle is left intact; its hold is a no-op on a finalized row).
+          if (!claimed.reclaimed) registry.remove({ handle: h, publicKey });
+          res.status(502).json({ ok: false, error: 'could not start checkout' }); return;
+        }
+        res.status(402).json({ ok: false, error: 'subscription required', checkoutUrl }); return;
+      }
+
       // Self-throttle NEW handles to stay under the CA's per-domain weekly cap.
       if (!claimed.reclaimed && !newHandleCap.tryConsume()) {
         registry.remove({ handle: h, publicKey });
@@ -132,8 +270,41 @@ export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, 
     res.json({ ok: true });
   });
 
+  // Nonce for a billing-portal claim — NOT Turnstile-gated (see billingNonces).
+  app.get('/v1/billing/nonce', limit, (_req, res) => { res.json({ nonce: billingNonces.issue() }); });
+
+  // Stripe Customer Portal link (O7) — cancel / update card / see paid_until.
+  // Auth is the SAME action-bound ed25519 claim as provision/release: only the
+  // vault master-key holder can produce a 'billing'-action signature, so a leaked
+  // provision claim can't open the portal. We map the claim's publicKey → its
+  // stripe_customer_id and ask Stripe for a portal session. Fail-closed: no
+  // billing, no/used nonce, bad signature, or no customer on file → refuse.
+  app.post('/v1/billing/portal', limit, async (req, res) => {
+    try {
+      const { handle, publicKey, nonce, signature } = req.body || {};
+      const h = String(handle || '').toLowerCase();
+      if (!pay.enabled) { res.status(400).json({ ok: false, error: 'billing not enabled' }); return; }
+      if (typeof publicKey !== 'string' || typeof nonce !== 'string' || typeof signature !== 'string') {
+        res.status(400).json({ ok: false, error: 'malformed claim' }); return;
+      }
+      if (!billingNonces.consume(nonce)) { res.status(401).json({ ok: false, error: 'nonce invalid or expired' }); return; }
+      if (!verifyWithPublicKey(publicKey, claimMessage('billing', h, nonce), signature)) {
+        res.status(401).json({ ok: false, error: 'signature invalid' }); return;
+      }
+      const ent = registry.getEntitlement(publicKey);
+      if (!ent?.stripe_customer_id) { res.status(404).json({ ok: false, error: 'no subscription on file' }); return; }
+      const { url } = await pay.customerPortalSession(ent.stripe_customer_id);
+      res.json({ ok: true, url });
+    } catch {
+      res.status(502).json({ ok: false, error: 'could not open billing portal' });
+    }
+  });
+
   // FRP NewProxy/Login auth-hook: per-tenant hostname binding (reads the registry).
-  app.post('/frps/handler', createRelayHook(registry, { zone, bandwidthLimit: bwLimit }));
+  // When billing is on, also deny a lapsed tenant a new tunnel (O6) — read locally
+  // from the registry, so a Stripe outage never drops live tunnels (only new ones
+  // pause). Off → no entitlement gate (free self-hosted relay).
+  app.post('/frps/handler', createRelayHook(registry, { zone, bandwidthLimit: bwLimit, requireEntitlement: pay.enabled, graceMs: GRACE_MS }));
 
   return { app };
 }
@@ -158,7 +329,20 @@ export function main() {
   // /update at the public MYC_ACME_DNS. Defaults to the public URL (back-compat).
   const acmeDnsRegister = process.env.MYC_ACME_DNS_REGISTER || acmeDnsServer;
   const acmeDns = createAcmeDnsClient({ serverUrl: acmeDnsRegister, mock: process.env.MYC_ACME_DNS_MOCK === '1' });
-  const { app } = createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone, acmeDnsServer, bwLimit: process.env.MYC_BW_LIMIT || '2MB' });
+  // Bot-gate: secret is env-only (never logged); mock for staging. Off if neither set.
+  const turnstile = createTurnstileVerifier({ secret: process.env.MYC_TURNSTILE_SECRET, mock: process.env.MYC_TURNSTILE_MOCK === '1' });
+  // Public sitekey for the app widget (non-secret; pairs with the secret above).
+  const turnstileSitekey = process.env.MYC_TURNSTILE_SITEKEY || null;
+  // Billing (O4): secrets env-only, never logged/persisted. Off when MYC_STRIPE_SECRET
+  // is unset (free provisioning). €1/mo + annual Price IDs from env (decision 8.1.2).
+  const billing = createBilling({
+    secret: process.env.MYC_STRIPE_SECRET,
+    webhookSecret: process.env.MYC_STRIPE_WEBHOOK_SECRET,
+    priceMonthly: process.env.MYC_STRIPE_PRICE_MONTHLY,
+    priceAnnual: process.env.MYC_STRIPE_PRICE_ANNUAL,
+    returnUrl: process.env.MYC_APP_RETURN_URL,
+  });
+  const { app } = createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone, acmeDnsServer, bwLimit: process.env.MYC_BW_LIMIT || '2MB', turnstile, turnstileSitekey, billing });
   // Bind host: default all-interfaces (back-compat), but a deployment SHOULD set
   // MYC_BIND_HOST=127.0.0.1 so the control-plane — including the /frps/handler token
   // oracle — is loopback-only, reachable by the co-located frps + Caddy edge but

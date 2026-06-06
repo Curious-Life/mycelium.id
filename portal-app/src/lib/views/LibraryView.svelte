@@ -128,10 +128,14 @@
 	// the open doc); list-channel disconnect is silent recovery.
 	let listConnectionState = $state<LiveConnectionState>('connecting');
 
-	onMount(async () => {
-		await Promise.all([loadDocuments(), loadFolders()]);
-		loading = false;
-		prevFolderId = activeFolderId;
+	onMount(() => {
+		// Initial load is fire-and-forget — the listeners below don't depend on
+		// it, so they attach synchronously (onMount must return its cleanup
+		// synchronously; an async callback can't).
+		void Promise.all([loadDocuments(), loadFolders()]).then(() => {
+			loading = false;
+			prevFolderId = activeFolderId;
+		});
 
 		// Reload after drag-and-drop move
 		function handleDocMoved() {
@@ -1311,6 +1315,7 @@
 			<!-- New document input -->
 			{#if showNewDocInput}
 				<div class="flex items-center gap-2 mt-3">
+					<!-- svelte-ignore a11y_autofocus -->
 					<input
 						bind:value={newDocTitle}
 						type="text"
@@ -1847,13 +1852,7 @@
 	.line-clamp-2 {
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-	}
-
-	.line-clamp-6 {
-		display: -webkit-box;
-		-webkit-line-clamp: 6;
+		line-clamp: 2;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 	}

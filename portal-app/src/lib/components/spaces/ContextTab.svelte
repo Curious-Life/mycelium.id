@@ -681,14 +681,19 @@
 							<DocThumbnail path={doc.path} title={doc.title || meta.name} ariaLabel={doc.title || doc.path} />
 						</div>
 						{#if canEdit}
-							<button
+							<!-- A real <button> can't nest in the card <button>; a
+							     span with role/keyboard handlers is the SSR-safe form. -->
+							<span
+								role="button"
+								tabindex="0"
 								onclick={(e) => { e.preventDefault(); e.stopPropagation(); removeDoc(doc); }}
-								class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 rounded text-[var(--color-text-tertiary)] hover:text-coral hover:bg-black/40 transition-all backdrop-blur-sm"
+								onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); removeDoc(doc); } }}
+								class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 rounded text-[var(--color-text-tertiary)] hover:text-coral hover:bg-black/40 transition-all backdrop-blur-sm cursor-pointer"
 								title="Remove from this space (doc stays in your library)"
 								aria-label="Remove from this space"
 							>
 								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-							</button>
+							</span>
 						{/if}
 					</button>
 				{/each}

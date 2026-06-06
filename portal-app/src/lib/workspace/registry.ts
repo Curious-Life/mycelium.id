@@ -12,7 +12,10 @@ export interface ViewDef {
 	icon: string;
 	singleton?: boolean;
 	key?: (params: Record<string, unknown>) => string;
-	load: () => Promise<{ default: Component<Record<string, unknown>> }>;
+	// Heterogeneous registry of prop-less view components. svelte2tsx types each
+	// view's default export as `Component<Record<string, never>>`, which is not
+	// assignable to a fixed prop shape — `Component<any>` accepts any view here.
+	load: () => Promise<{ default: Component<any> }>;
 }
 
 export const REGISTRY: Record<string, ViewDef> = {

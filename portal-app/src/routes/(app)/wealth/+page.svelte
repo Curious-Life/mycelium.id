@@ -818,7 +818,7 @@
 			<div class="flex flex-col gap-4">
 				<!-- Transaction type -->
 				<div>
-					<label class="block text-sm text-[var(--color-text-secondary)] mb-1">Type</label>
+					<span class="block text-sm text-[var(--color-text-secondary)] mb-1">Type</span>
 					<div class="flex flex-wrap gap-1">
 						{#each ['buy', 'sell', 'dividend', 'staking_reward', 'transfer_in', 'transfer_out'] as t}
 							<button

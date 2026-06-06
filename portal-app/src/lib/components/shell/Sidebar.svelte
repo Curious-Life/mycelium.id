@@ -7,7 +7,6 @@
 	import { auth } from '$lib/stores/auth';
 	import TimelineNav from '$lib/components/timeline/TimelineNav.svelte';
 	import LibraryNav from '$lib/components/library/LibraryNav.svelte';
-	import AgentsNav from '$lib/components/agents/AgentsNav.svelte';
 
 	const isOpen = $derived($navigationState.sidebarOpen);
 	const currentView = $derived($navigationState.primaryView);
@@ -291,8 +290,6 @@
 		{:else if currentView === 'library' || currentView === 'media'}
 			<LibraryNav />
 		<!-- /agents: no contextual sidebar — the page itself is the agent list. -->
-		{:else if currentView === 'agents-disabled'}
-			<AgentsNav />
 		{/if}
 	</div>
 
