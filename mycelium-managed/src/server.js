@@ -19,11 +19,12 @@ import { createDnsClient } from './dns.js';
 import { createAcmeDnsClient } from './acmedns.js';
 import { createRelayHook } from './relay-hook.js';
 import { createRateLimiter, createDailyCap } from './ratelimit.js';
+import { createTurnstileVerifier } from './turnstile.js';
 
 // Never handed out (impersonation / infra names).
 export const RESERVED = new Set(['admin', 'root', 'www', 'api', 'mcp', 'auth', 'connect', 'acme', 'acme-dns', 'relay', 'ns', 'mail', 'mycelium', 'anthropic', 'claude', 'support', 'help', 'status', 'app', 'id', 'docs']);
 
-export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone = 'mycelium.id', acmeDnsServer, bwLimit = '2MB', rateLimit, dailyCap }) {
+export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone = 'mycelium.id', acmeDnsServer, bwLimit = '2MB', rateLimit, dailyCap, turnstile }) {
   const app = express();
   // Behind the relay / Cloudflare → derive the client IP from X-Forwarded-For
   // (trust ONE hop). The rate limiter keys on req.ip.
@@ -31,13 +32,23 @@ export function createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, 
   app.use(express.json({ limit: '16kb' }));
 
   const limiter = rateLimit || createRateLimiter({ capacity: 20, refillPerMin: 20 });
+  // Bot-gate (O2): disabled by default (opt-in), so self-hosters + tests run
+  // without Cloudflare. When enabled, verify() fails closed on a missing/bad token.
+  const botGate = turnstile || createTurnstileVerifier({});
   const newHandleCap = dailyCap || createDailyCap({ max: Number(process.env.MYC_MAX_NEW_HANDLES_PER_DAY) || 40 });
   const limit = (req, res, next) => {
     if (limiter.allow(req.ip)) return next();
     res.status(429).json({ ok: false, error: 'rate limited' });
   };
 
-  app.get('/v1/challenge', limit, (_req, res) => {
+  app.get('/v1/challenge', limit, async (req, res) => {
+    // Bot-gate the nonce: a bot can't provision without a nonce, and can't get a
+    // nonce without solving Turnstile. The token rides in ?cf_turnstile=… (the
+    // app's widget supplies it). When the gate is disabled, verify() returns true.
+    const token = req.query?.cf_turnstile;
+    if (!(await botGate.verify(typeof token === 'string' ? token : '', req.ip))) {
+      res.status(403).json({ ok: false, error: 'bot check failed' }); return;
+    }
     res.json({ nonce: nonces.issue() });
   });
 
@@ -158,7 +169,9 @@ export function main() {
   // /update at the public MYC_ACME_DNS. Defaults to the public URL (back-compat).
   const acmeDnsRegister = process.env.MYC_ACME_DNS_REGISTER || acmeDnsServer;
   const acmeDns = createAcmeDnsClient({ serverUrl: acmeDnsRegister, mock: process.env.MYC_ACME_DNS_MOCK === '1' });
-  const { app } = createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone, acmeDnsServer, bwLimit: process.env.MYC_BW_LIMIT || '2MB' });
+  // Bot-gate: secret is env-only (never logged); mock for staging. Off if neither set.
+  const turnstile = createTurnstileVerifier({ secret: process.env.MYC_TURNSTILE_SECRET, mock: process.env.MYC_TURNSTILE_MOCK === '1' });
+  const { app } = createControlPlane({ registry, dns, acmeDns, nonces, relayAddr, zone, acmeDnsServer, bwLimit: process.env.MYC_BW_LIMIT || '2MB', turnstile });
   // Bind host: default all-interfaces (back-compat), but a deployment SHOULD set
   // MYC_BIND_HOST=127.0.0.1 so the control-plane — including the /frps/handler token
   // oracle — is loopback-only, reachable by the co-located frps + Caddy edge but
