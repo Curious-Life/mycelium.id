@@ -313,7 +313,18 @@ now fully config-implied: Anthropic key → cloud SDK; else an Ollama model (`CH
 cloud egress); else null (capture-only). The loop (`runOllamaTurn`) is exported pure + unit-verified
 (`verify:channel-agent` OL1–OL4 with fake Ollama + fake MCP); a real Ollama + vault MCP is host-verified.
 
-Deferred: WhatsApp (same spine), `auto` local/cloud router, voice-inbound transcription.
+### Auto local/cloud router — ✅ BUILT (2026-06-06)
+Per-turn routing between the two agent runtimes (NOT the single-shot inference router — pivot: it can't run the MCP
+tool loop). `agent/classify.js` (pure heuristic: sensitive markers → local HARD; complex → cloud; else local) +
+`agent/backends/auto.js` (cloud → audit hash-only + run, **fall back to local on failure**; local → run, sensitive
+records a `denied/kept-local` trail; sensitive + cloud-only config → refuse cloud, return no-reply). `selectRuntime`
+is now: Anthropic key + Ollama model → **auto** (local-first, escalate complex→cloud); one → that one; neither →
+null. `MYCELIUM_CHANNEL_ROUTER=cloud|local|auto` overrides. Cloud-routed turns are audited via a new loopback
+`POST /api/v1/internal/inference-egress` that **reuses** the inference `createEgressAuditSink` (`db.audit.log`,
+hash-only — the daemon hashes; the endpoint 400s on plaintext). Verified `verify:channel-agent` CL1–CL5 + AU1–AU8 +
+`verify:channel-settings` CS21–CS22.
+
+Deferred: WhatsApp (same spine), voice-inbound transcription.
 
 ---
 

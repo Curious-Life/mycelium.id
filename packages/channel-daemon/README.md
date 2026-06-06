@@ -57,8 +57,13 @@ Ollama `/api/chat` + an MCP client to the vault tools, **no cloud egress**.
 Local-model tool-calling is weaker than frontier models — this is the sovereign
 option, not the default.
 
+Auto router (built): set BOTH an Anthropic key and `CHANNEL_OLLAMA_MODEL` → each
+turn routes local-first, escalating complex turns to cloud and keeping sensitive
+turns on-box (cloud egress audited hash-only). `MYCELIUM_CHANNEL_ROUTER=cloud|local|auto`
+overrides; `CHANNEL_SENSITIVE_PATTERNS` (comma regexes) extends the keep-local markers.
+
 Not yet built:
-- WhatsApp transport (same spine); an `auto` local/cloud router.
+- WhatsApp transport (same spine); voice-inbound transcription.
 
 ### Enabling two-way replies
 

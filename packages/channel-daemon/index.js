@@ -49,7 +49,9 @@ export function buildDaemon(cfg, { runTurn } = {}) {
   let effectiveRunTurn = runTurn;
   let lane = null;
   if (!effectiveRunTurn) {
-    const runtime = selectRuntime(cfg);
+    // auto router records cloud-routing decisions hash-only via the vault.
+    const auditEgress = (e) => { vault.recordInferenceEgress(e); };
+    const runtime = selectRuntime(cfg, { auditEgress });
     if (runtime) {
       lane = createLane({ runtime });
       if (cfg.coalesceWindowMs > 0) {

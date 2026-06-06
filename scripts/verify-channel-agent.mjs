@@ -12,6 +12,9 @@ import { selectRuntime } from '../packages/channel-daemon/agent/runtime.js';
 import { buildReplySystemPrompt } from '../packages/channel-daemon/agent/prompt.js';
 import { createReplyTracker } from '../packages/channel-daemon/agent/backends/claude-sdk.js';
 import { runOllamaTurn } from '../packages/channel-daemon/agent/backends/ollama.js';
+import { classifyTurn } from '../packages/channel-daemon/agent/classify.js';
+import { createAutoRuntime } from '../packages/channel-daemon/agent/backends/auto.js';
+import crypto from 'node:crypto';
 import { getActiveTurn, _resetForTests } from '../packages/channel-daemon/inbound-context.js';
 
 const ledger = [];
@@ -172,6 +175,54 @@ const msg = (t) => ({ content: t });
   t.observe({ type: 'result', subtype: 'success' });
   const r = t.result();
   rec('S4. no reply tool → used=false, delivered=false', r.usedReplyTool === false && r.delivered === false, JSON.stringify(r));
+}
+
+// ── classifier (auto router) ─────────────────────────────────────────────────
+{
+  rec('CL1. sensitive marker → local (hard)', classifyTurn({ userMessage: 'whats my bank account password again' }).locus === 'local' && classifyTurn({ userMessage: 'my therapy medication' }).sensitive === true);
+  rec('CL2. complexity marker → cloud', classifyTurn({ userMessage: 'explain how this works' }).locus === 'cloud');
+  rec('CL3. long message → cloud', classifyTurn({ userMessage: 'x'.repeat(300) }).locus === 'cloud');
+  rec('CL4. short greeting → local (simple)', classifyTurn({ userMessage: 'hey there, all good?' }).locus === 'local');
+  rec('CL5. sensitive + complex → local (sensitive wins)', classifyTurn({ userMessage: 'explain my therapy plan in detail' }).locus === 'local');
+}
+
+// ── auto runtime (fake local/cloud + audit capture) ──────────────────────────
+function mkAuto({ cloudFails = false } = {}) {
+  const calls = [];
+  const audits = [];
+  const local = { label: 'local', runTurn: async () => { calls.push('local'); return { delivered: true, usedReplyTool: true }; } };
+  const cloud = { label: 'cloud', runTurn: async () => { calls.push('cloud'); if (cloudFails) throw new Error('cloud boom'); return { delivered: true, usedReplyTool: true }; } };
+  const auto = createAutoRuntime({ local, cloud, auditEgress: (e) => audits.push(e) });
+  return { auto, calls, audits };
+}
+{
+  const { auto, calls, audits } = mkAuto();
+  await auto.runTurn({ userMessage: 'explain the thing in detail', turnCtx: {} });
+  rec('AU1. complex → cloud.runTurn + audit allowed/jurisdiction cloud', calls.join() === 'cloud' && audits[0]?.decision === 'allowed' && audits[0]?.jurisdiction === 'cloud');
+  rec('AU2. audit is hash-only (no plaintext)', audits[0]?.contentHash === crypto.createHash('sha256').update('explain the thing in detail').digest('hex') && !JSON.stringify(audits[0]).includes('explain the thing'));
+}
+{
+  const { auto, calls, audits } = mkAuto();
+  await auto.runTurn({ userMessage: 'hi ok thanks', turnCtx: {} });
+  rec('AU3. simple → local.runTurn, no cloud, no allowed-cloud audit', calls.join() === 'local' && !audits.some((a) => a.jurisdiction === 'cloud'));
+}
+{
+  const { auto, calls, audits } = mkAuto();
+  await auto.runTurn({ userMessage: 'my bank password is leaking, help', turnCtx: {} });
+  rec('AU4. sensitive → local + denied/kept-local audit', calls.join() === 'local' && audits.some((a) => a.decision === 'denied' && /sensitive/.test(a.reason)));
+}
+{
+  const { auto, calls } = mkAuto({ cloudFails: true });
+  const r = await auto.runTurn({ userMessage: 'explain in detail why', turnCtx: {} });
+  rec('AU5. cloud failure → falls back to local', calls.join() === 'cloud,local' && r.delivered === true);
+}
+
+// ── selectRuntime: auto + overrides ──────────────────────────────────────────
+{
+  const both = selectRuntime({ anthropicApiKey: 'k', ollamaModel: 'llama3.1', mcpUrl: 'http://x/mcp' });
+  rec('AU6. both configured → auto runtime', /^auto\(/.test(both.label), `label=${both?.label}`);
+  rec('AU7. router=cloud forces cloud', /claude-agent-sdk/.test(selectRuntime({ anthropicApiKey: 'k', ollamaModel: 'llama3.1', channelRouter: 'cloud', mcpUrl: 'http://x/mcp' }).label));
+  rec('AU8. router=local forces ollama', /ollama/.test(selectRuntime({ anthropicApiKey: 'k', ollamaModel: 'llama3.1', channelRouter: 'local', mcpUrl: 'http://x/mcp' }).label));
 }
 
 const passed = ledger.filter(Boolean).length;

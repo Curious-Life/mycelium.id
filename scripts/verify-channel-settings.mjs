@@ -96,6 +96,12 @@ try {
   rec('CS19. GET /portal/channels exposes discordChannels', (await get('/api/v1/portal/channels')).json.discordChannels.some((c) => String(c.id) === DCH));
   await vc.setDiscordChannel({ id: DCH, name: 'general', on: false });
   rec('CS20. disallow → authority denied again', (await vc.checkChannelAuthority({ kind: 'discord', id: DCH })).allowed === false);
+
+  // ── auto-router inference-egress audit (hash-only, reuses inference sink) ──
+  const okRec = await vc.recordInferenceEgress({ decision: 'allowed', reason: 'auto:complex→cloud', contentHash: 'abc123', contentLength: 42, jurisdiction: 'cloud' });
+  rec('CS21. inference-egress audit accepts hash-only record', okRec.ok === true);
+  const leak = await fetch(`${u}/api/v1/internal/inference-egress`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: 'allowed', contentHash: 'x', contentLength: 1, content: 'PLAINTEXT' }) });
+  rec('CS22. inference-egress rejects a payload carrying plaintext', leak.status === 400);
 } catch (err) {
   allPass = false;
   ledger.push(`FAIL  fatal: ${String(err?.stack || err?.message || err)}`);

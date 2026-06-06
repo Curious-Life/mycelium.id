@@ -33,6 +33,10 @@ export function loadConfig(env = process.env) {
   // model name turns on the local runtime; no cloud egress.
   const ollamaModel = env.CHANNEL_OLLAMA_MODEL || '';
   const ollamaUrl = env.OLLAMA_URL || 'http://127.0.0.1:11434';
+  // Auto router (when BOTH cloud + local are configured): 'auto' (default) routes
+  // per-turn (local-first, complex→cloud, sensitive→local); 'cloud'/'local' force.
+  const channelRouter = env.MYCELIUM_CHANNEL_ROUTER || '';
+  const sensitivePatterns = env.CHANNEL_SENSITIVE_PATTERNS || '';
 
   // ── Phase 3 hardening ──────────────────────────────────────────────────────
   const coalesceWindowMs = Number(env.CHANNEL_COALESCE_MS || 1500); // 0 disables
@@ -42,7 +46,7 @@ export function loadConfig(env = process.env) {
   return {
     botToken, ownerTelegramId, discordBotToken, ownerDiscordId, vaultBaseUrl, host, port, agentId, selfUrl,
     anthropicApiKey, mcpMode, mcpUrl, mcpBearer, mcpStdioEntry, model,
-    ollamaModel, ollamaUrl,
+    ollamaModel, ollamaUrl, channelRouter, sensitivePatterns,
     coalesceWindowMs, rateLimitMax, rateLimitWindowMs,
   };
 }

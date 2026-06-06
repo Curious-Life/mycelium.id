@@ -46,6 +46,12 @@ export function createVaultClient({ baseUrl, fetch: fetchImpl = globalThis.fetch
       return post('/api/v1/captureMessage', args);
     },
 
+    /** Record an auto-router inference-egress decision (hash-only). Soft-fail. */
+    async recordInferenceEgress(entry) {
+      try { await post('/api/v1/internal/inference-egress', entry); return { ok: true }; }
+      catch (e) { console.error('[channel-daemon] inference-egress audit failed:', e.message); return { ok: false }; }
+    },
+
     /** Fire-and-forget egress audit. Soft-fail: returns {ok:false} instead of throwing. */
     async recordEgress(entry) {
       try {

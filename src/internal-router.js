@@ -11,6 +11,7 @@
 // The egress-audit endpoint accepts ONLY a content HASH + length, never the
 // message body (CLAUDE.md §1) — the daemon hashes before it calls.
 import express from 'express';
+import { createEgressAuditSink } from './inference/egress.js';
 
 /**
  * @param {object} deps
@@ -113,6 +114,26 @@ export function internalRouter({ db, userId }) {
       console.error('[internal-router] telegram-groups list failed:', err.message);
       res.status(500).json({ groups: [] });
     }
+  });
+
+  // ── Inference-egress audit for the channel auto-router (loopback) ─────────
+  // When the daemon routes a turn to cloud, it records the egress HASH-ONLY here.
+  // Reuses the inference egress sink (db.audit.log, never plaintext). The daemon
+  // hashes before calling — this endpoint rejects any plaintext body.
+  const inferenceEgressSink = createEgressAuditSink(db, userId);
+  router.post('/api/v1/internal/inference-egress', json, async (req, res) => {
+    const e = req.body || {};
+    if ('content' in e || 'prompt' in e) return res.status(400).json({ ok: false, error: 'must not carry plaintext' });
+    if (!e.contentHash || typeof e.contentLength !== 'number' || !e.decision) {
+      return res.status(400).json({ ok: false, error: 'contentHash, contentLength, decision required' });
+    }
+    if (!inferenceEgressSink) return res.status(503).json({ ok: false, error: 'audit unavailable' });
+    inferenceEgressSink({
+      provider: 'channel-auto-router', jurisdiction: e.jurisdiction || 'unknown',
+      decision: e.decision, reason: e.reason || null,
+      contentHash: e.contentHash, contentLength: e.contentLength,
+    });
+    res.json({ ok: true });
   });
 
   // ── Discord channel allowlist (identity_channels, kind 'discord') ─────────
