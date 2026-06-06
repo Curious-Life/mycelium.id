@@ -4,6 +4,29 @@
 **Status:** Design (sweep-verified, file:line). Turns the recorded local grants (space_access shares, context_grants, cluster cards) into LIVE E2EE delivery over Matrix.
 **Rests on:** #103 (Tier-0/0b + Phase A, merged) · `spike/federation-a1b-matrix/` (A1b PROVEN: headless matrix-js-sdk rust-crypto E2EE over a real homeserver, 7/7) · D-SPACE-1/2/3 (Matrix/Megolm E2EE, local-first) · D-FED decisions.
 
+## ✅ AS-BUILT (2026-06-06) — sandbox core B1–B10 mock-complete
+
+The entire Phase B data model + orchestration is **built and unit-green behind the `MockMatrixClient` seam**. Only **B11** (live homeserver / S2S / persistent crypto store / Continuwuity) remains — it needs a real host and is captured in `docs/DEPLOY-federation-phaseB-B11-HANDOFF-2026-06-06.md`.
+
+| Step | As-built | Lands in |
+|---|---|---|
+| B1 client seam + `MockMatrixClient` | `src/federation/matrix-client.js` | #113→#114 |
+| B2 lexicon validators (+ §7 tripwire) | `src/federation/lexicon.js` | #113 |
+| B3 MXID binding wired | `src/db/index.js` (`identityChannels`) | #113 |
+| B4 space⇄room model | `migrations/0011_space_matrix_rooms.sql` + `src/db/space-matrix-rooms.js` | #113 |
+| B5 did:web `#matrix` advertise/resolve | `src/federation/did.js` (`buildDidDocument` + `resolveMatrixService`) | #113 |
+| B6 membership sync (grant→invite/revoke→kick, lazy room, per-space lock) | `src/federation/space-sync.js` | #114 |
+| B7 egress chokepoint (allowlist + encryption gates, sha256-only audit) | `src/federation/matrix-egress.js` | #117 |
+| B8 mirror knowledge → room (via egress) | `space-sync.mirrorKnowledge` | #116→#117 |
+| B9 inbound validate→map→persist-once (durable dedup, self-echo filter) | `space-sync.handleInbound` | #116 |
+| B10 encrypted-at-rest | already in `crypto-local.js:425` (`space_knowledge: ['content','domain_tags']`) — no migration needed | — |
+
+**Verification (every PR):** federation test suite (79 tests as of #117) · `verify:spaces` GO 32/32 · `verify:federation` GO 9/9 · `verify:mcp` GO. A dedicated bug-hunt over the inbound path (#116) fixed an echo loop, unsafe/non-durable dedup, and a room-create race before they could bite live.
+
+**Note on B10 scope column:** the per-connection scope column was NOT added — inbound content persists at `visibility='all'` (the existing model) and is encrypted at rest via the existing `space_knowledge` field map. Per-connection scoping is a future refinement, not a Phase B blocker.
+
+
+
 ## Substrate state (sweep)
 
 | Piece | State | Evidence |

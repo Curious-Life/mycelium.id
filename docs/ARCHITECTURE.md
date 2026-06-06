@@ -185,8 +185,21 @@ hashtag + keyword tags) behind a seam a model-backed pass can replace.
   (`src/tools/federation.js`) and the **Connections page** (`portal-app/.../connections`,
   promoted to a live nav item with a pending-request badge) backed by
   `/portal/connections/*` (`src/portal-compat.js`). Fails closed with no public
-  host (did.json 404, connect 503). Real-time (Matrix) + shared pools are later
-  tiers — see `docs/DESIGN-federation-inter-instance-2026-06-05.md`.
+  host (did.json 404, connect 503).
+
+- **Phase B (Matrix/Megolm shared spaces)** — the live cross-node E2EE delivery
+  layer, **built mock-complete (B1–B10), live wiring (B11) deferred to a deploy
+  session** (`docs/DEPLOY-federation-phaseB-B11-HANDOFF-2026-06-06.md`). One shared
+  space ⇄ one Megolm room (`space_matrix_rooms`, `migrations/0011`). A share grant
+  drives room membership (`src/federation/space-sync.js`: lazy room create →
+  invite; revoke → kick), local knowledge mirrors out through the **egress
+  chokepoint** (`src/federation/matrix-egress.js`: allowlist + encryption-required
+  gates, sha256-only audit — §11), and inbound records are validated
+  (`src/federation/lexicon.js`, + §7 vector tripwire) and persisted once. All of it
+  sits behind an injectable `MatrixClient` seam (`src/federation/matrix-client.js`)
+  so it's unit-tested without a homeserver; the deploy session swaps in the real
+  matrix-js-sdk client (A1b-proven, 7/7). See
+  `docs/DESIGN-federation-phaseB-BUILD-PLAN-2026-06-06.md`.
 
 ## 8. Ports
 
