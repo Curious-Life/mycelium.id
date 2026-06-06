@@ -15,6 +15,7 @@ import { applyMigrations } from '../src/db/migrate.js';
 import { runDiscovery } from '../pipeline/discover-claims.mjs';
 import { previousCompleteWindow } from '../src/claims/windows.js';
 import { createContextDomain } from '../src/tools/context.js';
+import { createClaimsToolsDomain } from '../src/tools/claims.js';
 
 const DB = 'data/verify-claims-discovery.db', KCV = 'data/verify-claims-discovery-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -66,6 +67,19 @@ try {
     rec('D3b. getContext({include:[claims]}) renders the claim section',
       /WHAT YOU'VE LEARNED ABOUT THEM/.test(brief) && /\[Claim\].*outdoors/.test(brief),
       brief.split('\n').find((l) => /\[Claim\]/.test(l)) || 'no claim line');
+  }
+
+  // ── D3c. personaClaims MCP tool: list + series ──────────────────────────────
+  {
+    const { handlers } = createClaimsToolsDomain({ db, userId: U });
+    const list = await handlers.personaClaims({ mode: 'list' });
+    rec('D3c. personaClaims list returns the claim with a confidence + id',
+      /Claims about the user/.test(list) && /outdoors/.test(list) && /confidence 0\.\d\d/.test(list),
+      list.split('\n').find((l) => /outdoors/.test(l))?.slice(0, 80) || 'no claim line');
+    const id = (await db.claims.listActive(U, { limit: 1 }))[0].id;
+    const series = await handlers.personaClaims({ mode: 'series', claimId: id, granularity: 'day' });
+    rec('D3d. personaClaims series returns the day trajectory',
+      /trajectory/.test(series) && /new/.test(series), series.split('\n').find((l) => /new/.test(l)) || series.slice(0, 80));
   }
 
   // ── D4. the real CHILD process is FAIL-SOFT without a model (exit 0) ─────────

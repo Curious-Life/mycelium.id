@@ -23,6 +23,7 @@ import { createDocumentsDomain } from './tools/documents.js';
 import { createInternalDomain } from './tools/internal.js';
 import { createMindFiles, MIND_MIRRORS } from './mindfiles/mind-files.js';
 import { createMindscapeDomain } from './tools/mindscape.js';
+import { createClaimsToolsDomain } from './tools/claims.js';
 import { createSearchHelpers } from './search/index.js';
 import { createTopologyHelpers } from './topology/helpers.js';
 import { createContextDomain } from './tools/context.js';
@@ -109,6 +110,10 @@ export function buildDomains({
       writeMindFile: (filename, content) => mindFiles.writeMindFile(filename, content),
     }),
     createMindscapeDomain({ searchHelpers, db, userId }),
+    // Persona-Claims read tool (PersonaTree adoption): list active claims +
+    // chart one claim's confidence trajectory over time. Tier-1 (works on any
+    // vault; honest-empty until discovery has run).
+    createClaimsToolsDomain({ db, userId }),
     // Phase 5: the 11 cluster/Fisher/metric/topology readers consolidated into
     // 3 cohesive tools (cognitiveState / cognitiveHistory / mindscape). Reuses
     // the fisher-tools/metrics/topology-tools handler logic verbatim.
