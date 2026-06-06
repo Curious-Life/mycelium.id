@@ -64,5 +64,56 @@ export function internalRouter({ db, userId }) {
     }
   });
 
+  // ── Telegram group authorization (channel-daemon group binding) ───────────
+  // GET ?id=<groupId> → { authorized, active, title, spaceId }
+  router.get('/api/v1/internal/telegram-group', async (req, res) => {
+    const id = String(req.query.id || '');
+    if (!id) return res.status(400).json({ authorized: false, reason: 'id-required' });
+    if (!db?.telegramGroups?.get) return res.status(503).json({ authorized: false, reason: 'unavailable' });
+    try {
+      const row = await db.telegramGroups.get(id);
+      if (!row) return res.json({ authorized: false });
+      return res.json({ authorized: true, active: row.active === 1, title: row.title || null, spaceId: row.space_id || null });
+    } catch (err) {
+      console.error('[internal-router] telegram-group get failed:', err.message);
+      return res.status(500).json({ authorized: false, reason: 'error' });
+    }
+  });
+
+  // POST { id, title } → authorize the group for this operator.
+  router.post('/api/v1/internal/telegram-group', json, async (req, res) => {
+    const { id, title } = req.body || {};
+    if (!id) return res.status(400).json({ ok: false, error: 'id required' });
+    if (!db?.telegramGroups?.authorize) return res.status(503).json({ ok: false, error: 'unavailable' });
+    try {
+      await db.telegramGroups.authorize(String(id), title || null, null, userId);
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('[internal-router] telegram-group authorize failed:', err.message);
+      res.status(500).json({ ok: false, error: 'authorize-failed' });
+    }
+  });
+
+  // DELETE ?id= → soft-revoke (active=0).
+  router.delete('/api/v1/internal/telegram-group', async (req, res) => {
+    const id = String(req.query.id || '');
+    if (!id) return res.status(400).json({ ok: false, error: 'id required' });
+    if (!db?.telegramGroups?.revoke) return res.status(503).json({ ok: false, error: 'unavailable' });
+    try { await db.telegramGroups.revoke(id); res.json({ ok: true }); }
+    catch (err) { console.error('[internal-router] telegram-group revoke failed:', err.message); res.status(500).json({ ok: false, error: 'revoke-failed' }); }
+  });
+
+  // GET list of authorized groups for the operator.
+  router.get('/api/v1/internal/telegram-groups', async (_req, res) => {
+    if (!db?.telegramGroups?.list) return res.status(503).json({ groups: [] });
+    try {
+      const rows = await db.telegramGroups.list(userId);
+      res.json({ groups: rows.map((r) => ({ id: r.id, title: r.title || null })) });
+    } catch (err) {
+      console.error('[internal-router] telegram-groups list failed:', err.message);
+      res.status(500).json({ groups: [] });
+    }
+  });
+
   return router;
 }

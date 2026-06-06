@@ -21,6 +21,8 @@ import { selectRuntime } from './agent/runtime.js';
 import { createLane } from './agent/lane.js';
 import { createCoalescer } from './transport/coalescer.js';
 import { createRateLimiter } from './ratelimit.js';
+import { createVoicePipeline } from './voice-pipeline.js';
+import { createCommandHandler } from './commands.js';
 import { getActiveTurn } from './inbound-context.js';
 
 /**
@@ -50,10 +52,18 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     if (cfg.ownerTelegramId && String(id) === String(cfg.ownerTelegramId)) {
       return { allowed: true, reason: 'owner-bootstrap' };
     }
+    if (kind === 'telegram-group') {
+      const g = await vault.getTelegramGroup(id);
+      if (g.authorized && g.active !== false) return { allowed: true, reason: 'group-authorized' };
+      return { allowed: false, reason: 'group-not-authorized' };
+    }
     return vault.checkChannelAuthority({ kind, id });
   }
 
   const rateLimit = createRateLimiter({ maxPerWindow: cfg.rateLimitMax, windowMs: cfg.rateLimitWindowMs });
+  // Voice (TTS) — harvested tts/ module + multipart sendVoice. Fail-soft: enabled
+  // only when a TTS provider is configured (OPENAI_API_KEY / ELEVENLABS_*).
+  const voicePipeline = createVoicePipeline({ sendVoice: (a) => telegram.sendVoice(a), agentId: cfg.agentId });
 
   const telegramSendHandler = createTelegramChokepoint({
     sendToTelegram: (a) => telegram.sendMessage(a),
@@ -62,6 +72,7 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     checkAuthority,
     dedup,
     rateLimit,
+    voicePipeline,
     getActiveTurn,
     agentId: cfg.agentId,
   });
@@ -91,8 +102,22 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     }
   }
 
-  // Phase 1: inbound long-poll → capture → runTurn.
-  const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn });
+  // Operator commands (/allow, /disallow, /channels) + group authorization.
+  // Command acks go back through this daemon's own chokepoint as trusted
+  // (system-template) sends, so they're audited + bypass the authority gate.
+  const sendReply = async ({ chatId, text, replyToMessageId }) => {
+    try {
+      await fetch(`${cfg.selfUrl}/telegram/send`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatId, text, replyToMessageId, trusted: true }),
+      });
+    } catch (e) { console.error('[channel-daemon] command reply failed:', e.message); }
+  };
+  const commands = createCommandHandler({ vault, sendReply, ownerTelegramId: cfg.ownerTelegramId });
+  const isGroupAuthorized = async (gid) => { const g = await vault.getTelegramGroup(gid); return !!g.authorized && g.active !== false; };
+
+  // Phase 1: inbound long-poll → (commands) → capture → runTurn.
+  const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized });
   const poller = createTelegramPoller({ telegram, handleInbound });
 
   return { app, poller, telegram, lane };

@@ -9,6 +9,7 @@
  * The bot token is a secret: it is never logged, and it only ever appears in the
  * request URL to api.telegram.org over TLS.
  */
+import { readFile } from 'node:fs/promises';
 
 const TELEGRAM_MAX_LEN = 4096; // Telegram hard cap per message.
 
@@ -118,6 +119,32 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
         sent++;
       }
       return { sent, total: chunks.length, httpStatus: lastStatus || 200 };
+    },
+
+    /**
+     * Send a voice note (OGG/OPUS). Multipart upload over fetch — no Grammy.
+     * @param {object} a
+     * @param {string|number} a.chatId
+     * @param {string} a.filePath        path to the remuxed .ogg (from the TTS module)
+     * @param {string|number} [a.replyToMessageId]
+     */
+    async sendVoice({ chatId, filePath, replyToMessageId }) {
+      const bytes = await readFile(filePath);
+      const form = new FormData();
+      form.append('chat_id', String(chatId));
+      form.append('voice', new Blob([bytes], { type: 'audio/ogg' }), 'voice.ogg');
+      if (replyToMessageId != null) form.append('reply_to_message_id', String(Number(replyToMessageId)));
+      const res = await fetchImpl(`${base}/sendVoice`, {
+        method: 'POST',
+        body: form,
+        signal: AbortSignal.timeout(timeoutMs * 3), // uploads run longer than text
+      });
+      if (!res.ok) {
+        const err = new Error(`telegram sendVoice http ${res.status}`);
+        err.httpStatus = res.status;
+        throw err;
+      }
+      return { httpStatus: res.status };
     },
   };
 }

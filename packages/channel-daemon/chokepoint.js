@@ -58,7 +58,7 @@ function preview(text) {
 export function createTelegramChokepoint(deps) {
   const {
     sendToTelegram, recordEgress, persistOutbound, checkAuthority, dedup,
-    rateLimit, getActiveTurn, agentId = 'personal-agent', logPrefix = 'channel-daemon',
+    rateLimit, voicePipeline, getActiveTurn, agentId = 'personal-agent', logPrefix = 'channel-daemon',
   } = deps || {};
   if (typeof sendToTelegram !== 'function') throw new TypeError('chokepoint: sendToTelegram required');
   if (typeof checkAuthority !== 'function') throw new TypeError('chokepoint: checkAuthority required');
@@ -71,7 +71,7 @@ export function createTelegramChokepoint(deps) {
   return async function telegramSendHandler(req, res) {
     const body = req.body || {};
     const text = typeof body.text === 'string' ? body.text : '';
-    const { chatId, replyToMessageId, sourceKind, sourceId, trusted, crossChannelReason } = body;
+    const { chatId, replyToMessageId, sourceKind, sourceId, trusted, crossChannelReason, voice } = body;
 
     // 1. content present
     if (!text) return res.status(400).json({ ok: false, error: 'text required' });
@@ -160,7 +160,21 @@ export function createTelegramChokepoint(deps) {
         metadata: { channelId: String(chatId), origin: 'explicit-send', provenanceKind, ...(replyToMessageId != null ? { inReplyTo: String(replyToMessageId) } : {}) },
       });
 
-      return res.json({ ok: true, delivered: true, sent: result.sent, total: result.total });
+      // Voice (TTS) — fail-soft, AFTER text is delivered. A synthesis/upload
+      // failure never fails the response: the text reply already landed.
+      let voiceResult = null;
+      if (voice && voicePipeline) {
+        try {
+          voiceResult = await voicePipeline.deliver({ chatId, text, replyToMessageId });
+        } catch (e) {
+          console.error(`[${logPrefix}] voice pipeline threw (text delivered): ${e.message}`);
+        }
+      }
+
+      return res.json({
+        ok: true, delivered: true, sent: result.sent, total: result.total,
+        ...(voiceResult ? { voiceSent: voiceResult.voiceSent, voiceTotal: voiceResult.voiceTotal } : {}),
+      });
     } catch (err) {
       const httpStatus = err?.httpStatus ?? 502;
       const partial = !!err?.partial;

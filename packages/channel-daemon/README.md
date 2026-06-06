@@ -30,9 +30,18 @@ Phase 3 hardening (platform-agnostic — Discord reuses these):
   (`CHANNEL_COALESCE_MS`, 0 disables). **Rate-limit** (`ratelimit.js`) —
   per-target fixed-window cap, chokepoint gate
   (`CHANNEL_RATELIMIT_MAX`/`_WINDOW_MS`). Poller backoff jitter.
+- **Voice (TTS) replies** — the canonical hardened TTS module harvested verbatim
+  into `tts/` (openai + elevenlabs, markdown strip, chunking, ffmpeg remux to
+  Telegram opus, per-chunk errors, timeouts, cleanup). `voice-pipeline.js` +
+  multipart `sendVoice`; fail-soft after the text send. Enabled when a provider
+  key is set (`OPENAI_API_KEY` / `ELEVENLABS_API_KEY`+`ELEVENLABS_VOICE_ID`).
+  **Requires `ffmpeg` on PATH.**
+- **Group binding** — `/allow` · `/disallow` · `/channels` (owner-only,
+  `commands.js`); groups respond only after `/allow` (fail-closed); vault
+  `telegram_groups` via the internal router.
 
 Not yet built:
-- Voice/TTS, group binding + group inbound auth, Discord + WhatsApp transports.
+- Discord + WhatsApp transports (reuse the chokepoint/lane/runtime/voice spine).
   The local **ollama** runtime backend is a declared slot (selectRuntime returns
   null until it lands).
 
@@ -72,6 +81,9 @@ The daemon binds `127.0.0.1:3010` by default (`CHANNEL_DAEMON_PORT`). Point the
 | `MYCELIUM_API_URL` | no | `http://127.0.0.1:8787` | Vault REST base (no trailing `/api/v1`). |
 | `CHANNEL_DAEMON_HOST` / `CHANNEL_DAEMON_PORT` | no | `127.0.0.1` / `3010` | Where this daemon listens. |
 | `CHANNEL_AGENT_ID` | no | `personal-agent` | agent_id stamped on egress_audit rows. |
+| `OPENAI_API_KEY` *or* `ELEVENLABS_API_KEY`+`ELEVENLABS_VOICE_ID` | no | — | Enables voice (TTS) replies. Needs `ffmpeg` on PATH. Voice per-agent override: `TTS_VOICE_<AGENT_ID>`. |
+| `CHANNEL_COALESCE_MS` | no | `1500` | Inbound coalesce window (0 disables). |
+| `CHANNEL_RATELIMIT_MAX` / `_WINDOW_MS` | no | `20` / `60000` | Outbound per-target send cap. |
 
 ## Verify
 
@@ -80,6 +92,8 @@ npm run verify:channel-egress       # chokepoint gates, DI fakes (19 checks)
 npm run verify:channel-inbound      # inbound transport + capture, DI fakes (18 checks)
 npm run verify:channel-agent        # lane lifecycle + runtime selection, DI fakes (12 checks)
 npm run verify:channel-coalesce     # inbound coalescer, virtual clock (7 checks)
+npm run verify:channel-tts          # TTS pure parts: markdown/chunk/config/errors (13 checks)
+npm run verify:channel-groups       # commands + group binding, DI + real vault (14 checks)
 npm run verify:channel-egress-e2e   # real vault + real daemon + fake Telegram (14 checks, incl. inbound)
 npm run verify:channel-agent-e2e    # the WHOLE two-way loop, only the LLM faked (8 checks)
 ```

@@ -57,6 +57,41 @@ export function createVaultClient({ baseUrl, fetch: fetchImpl = globalThis.fetch
       }
     },
 
+    /** Is this Telegram group authorized (active)? Fail-closed on error. */
+    async getTelegramGroup(id) {
+      try {
+        const res = await fetchImpl(`${root}/api/v1/internal/telegram-group?id=${encodeURIComponent(String(id))}`, { signal: AbortSignal.timeout(timeoutMs) });
+        if (!res.ok) return { authorized: false };
+        return await res.json();
+      } catch (e) {
+        console.error('[channel-daemon] telegram-group lookup failed:', e.message);
+        return { authorized: false };
+      }
+    },
+
+    /** Authorize a Telegram group for delivery + inbound. */
+    async authorizeTelegramGroup({ id, title }) {
+      try { await post('/api/v1/internal/telegram-group', { id, title }); return { ok: true }; }
+      catch (e) { console.error('[channel-daemon] authorize group failed:', e.message); return { ok: false }; }
+    },
+
+    /** Revoke a Telegram group. */
+    async revokeTelegramGroup(id) {
+      try {
+        const res = await fetchImpl(`${root}/api/v1/internal/telegram-group?id=${encodeURIComponent(String(id))}`, { method: 'DELETE', signal: AbortSignal.timeout(timeoutMs) });
+        return { ok: res.ok };
+      } catch (e) { console.error('[channel-daemon] revoke group failed:', e.message); return { ok: false }; }
+    },
+
+    /** List authorized groups. */
+    async listTelegramGroups() {
+      try {
+        const res = await fetchImpl(`${root}/api/v1/internal/telegram-groups`, { signal: AbortSignal.timeout(timeoutMs) });
+        if (!res.ok) return [];
+        return (await res.json()).groups || [];
+      } catch (e) { console.error('[channel-daemon] list groups failed:', e.message); return []; }
+    },
+
     /**
      * Channel-authority check. Returns { allowed, reason, ownerUserId? }.
      * Fail-closed: any error → { allowed:false, reason:'authority-unavailable' }.

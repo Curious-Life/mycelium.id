@@ -26,7 +26,7 @@ const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? ` — ${d}` : ''}`); };
 
 /** Build a fresh daemon app + capture buffers + a knob for authority/telegram. */
-function makeApp({ authorityAllowed = true, telegram = 'ok', rateLimit = null } = {}) {
+function makeApp({ authorityAllowed = true, telegram = 'ok', rateLimit = null, voicePipeline = null } = {}) {
   const audits = [];
   const sends = [];
   const persists = [];
@@ -46,6 +46,7 @@ function makeApp({ authorityAllowed = true, telegram = 'ok', rateLimit = null } 
     checkAuthority: async () => ({ allowed: authorityAllowed, reason: authorityAllowed ? 'registry' : 'not-bound' }),
     dedup,
     rateLimit,
+    voicePipeline,
     getActiveTurn,
     agentId: 'personal-agent',
   });
@@ -205,6 +206,35 @@ const HASH = crypto.createHash('sha256').update(TEXT, 'utf8').digest('hex');
   rec('C13. first two sends allowed (within window cap)', r1.json?.delivered === true && r2.json?.delivered === true && sends.length === 2, `sends=${sends.length}`);
   rec('C14. third send → 429 rate-limited (not delivered)', r3.status === 429 && r3.json?.error === 'rate-limited' && sends.length === 2, `status=${r3.status} sends=${sends.length}`);
   rec('C15. rate-limited send audited decision=denied reason=rate-limited', (audits[audits.length - 1] || {}).decision === 'denied' && (audits[audits.length - 1] || {}).reason === 'rate-limited');
+  await close(server);
+}
+
+// ── voice (TTS) wiring — runs after text, fail-soft ─────────────────────────
+{
+  _resetForTests();
+  const calls = [];
+  const voicePipeline = { deliver: async (a) => { calls.push(a); return { voiceSent: 1, voiceTotal: 1 }; } };
+  const { server, sends } = makeApp({ authorityAllowed: true, voicePipeline });
+  const port = await listen(server);
+  const r = await req(port, 'POST', '/telegram/send', { body: { chatId: OWNER, text: TEXT, voice: true } });
+  rec('C16. voice:true → text sent + voice pipeline invoked with same text', r.json?.delivered === true && sends.length === 1 && calls.length === 1 && calls[0].text === TEXT && r.json?.voiceSent === 1, `voiceSent=${r.json?.voiceSent}`);
+  await close(server);
+}
+{
+  _resetForTests();
+  const calls = [];
+  const { server } = makeApp({ authorityAllowed: true, voicePipeline: { deliver: async (a) => { calls.push(a); return { voiceSent: 0 }; } } });
+  const port = await listen(server);
+  const r = await req(port, 'POST', '/telegram/send', { body: { chatId: OWNER, text: TEXT, voice: false } });
+  rec('C17. voice:false → voice pipeline NOT invoked', r.json?.delivered === true && calls.length === 0);
+  await close(server);
+}
+{
+  _resetForTests();
+  const { server, sends } = makeApp({ authorityAllowed: true, voicePipeline: { deliver: async () => { throw new Error('tts boom'); } } });
+  const port = await listen(server);
+  const r = await req(port, 'POST', '/telegram/send', { body: { chatId: OWNER, text: TEXT, voice: true } });
+  rec('C18. voice failure is fail-soft (text still 200 delivered)', r.status === 200 && r.json?.delivered === true && sends.length === 1, `status=${r.status}`);
   await close(server);
 }
 

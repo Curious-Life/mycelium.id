@@ -3,9 +3,10 @@
  * arrives. The poller calls this once per message.
  *
  * Pipeline:
- *   1. authorize — owner DM only in Phase 1 (groups land with the binding flow,
- *      Phase 3). Fail-closed: anything not from the operator's own chat is
- *      dropped (logged, not delivered, not captured).
+ *   0. commands — an owner `/command` (e.g. /allow) is handled as control-plane
+ *      and never captured or turned. Non-owner commands are swallowed.
+ *   1. authorize — owner DM, or an authorized group (Phase 3 group binding).
+ *      Fail-closed: anything else is dropped (logged, not delivered, not captured).
  *   2. captureMessage — funnel the inbound through the vault's built choke-point
  *      over REST (auto-encrypted at rest, id-deduped). id = tg-<msgId>-<chatId>
  *      so a getUpdates replay is idempotent.
@@ -30,24 +31,41 @@ function preview(text) {
  * @param {{captureMessage:(args:object)=>Promise<any>}} deps.vault
  * @param {string} deps.ownerTelegramId
  * @param {(turnCtx:object, msg:object)=>Promise<void>|void} deps.runTurn
+ * @param {{isCommand:(c:string)=>boolean, handle:(msg:object)=>Promise<boolean>}} [deps.commands]
+ * @param {(groupId:string)=>Promise<boolean>} [deps.isGroupAuthorized]  group binding lookup
  * @param {string} [deps.logPrefix]
  */
-export function createInboundHandler({ vault, ownerTelegramId, runTurn, logPrefix = 'channel-daemon' }) {
+export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands, isGroupAuthorized, logPrefix = 'channel-daemon' }) {
   if (!vault?.captureMessage) throw new TypeError('createInboundHandler: vault.captureMessage required');
   if (typeof runTurn !== 'function') throw new TypeError('createInboundHandler: runTurn required');
 
-  /** Phase 1 authorization: owner DM only. */
-  function isAuthorized(msg) {
-    if (msg.channelKind === 'telegram-group') return false; // groups: Phase 3 binding flow
+  /** Owner DM authorization. */
+  function isOwnerDM(msg) {
+    if (msg.channelKind === 'telegram-group') return false;
     if (!ownerTelegramId) return false;                      // fail-closed: no owner configured
     // In a DM the chat.id equals the user id; accept either the chat or the sender.
     return String(msg.chatId) === String(ownerTelegramId) || String(msg.fromId) === String(ownerTelegramId);
   }
 
+  async function isAuthorized(msg) {
+    if (msg.channelKind === 'telegram-group') {
+      // Groups: authorized iff bound via /allow (telegram_groups, fail-closed).
+      if (typeof isGroupAuthorized !== 'function') return false;
+      try { return await isGroupAuthorized(msg.chatId); } catch { return false; }
+    }
+    return isOwnerDM(msg);
+  }
+
   return async function handleInbound(msg) {
     if (!msg) return;
 
-    if (!isAuthorized(msg)) {
+    // 0. owner control-plane commands (/allow, /disallow, …) — handled, never
+    //    captured or turned. Non-owner commands are swallowed inside handle().
+    if (commands && msg.content && commands.isCommand(msg.content)) {
+      try { if (await commands.handle(msg)) return; } catch (e) { console.error(`[${logPrefix}] command failed: ${e.message}`); return; }
+    }
+
+    if (!(await isAuthorized(msg))) {
       console.warn(`[${logPrefix}] inbound dropped (unauthorized ${msg.channelKind} chat=${msg.chatId}) ${preview(msg.content)}`);
       return;
     }

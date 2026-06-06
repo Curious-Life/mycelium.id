@@ -34,6 +34,7 @@ import { createConnectorsNamespace } from './connectors.js';
 import { createUsersNamespace } from './users.js';
 import { createEgressAuditNamespace } from './egress-audit.js';
 import { createIdentityChannelsNamespace } from './identity-channels.js';
+import { createTelegramGroupsNamespace } from './telegram-groups.js';
 
 /**
  * Open the vault db and assemble the tool-facing `db` namespace object.
@@ -98,6 +99,7 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
     // them, so wiring them is additive — it changes no existing tool behavior.
     egressAudit: createEgressAuditNamespace({ d1Query }),
     identityChannels: createIdentityChannelsNamespace({ d1Query, firstRow }),
+    telegramGroups: createTelegramGroupsNamespace({ d1Query }),
 
     // db.shareLinks is intentionally omitted — every call site is optional-
     // chained (tools/documents.js:102,516 `db.shareLinks?.…`), so absence

@@ -262,11 +262,24 @@ Built (all platform-agnostic, so Discord reuses them unchanged):
   `rate-limited`, no retry). `CHANNEL_RATELIMIT_MAX`/`_WINDOW_MS`. Verified `verify:channel-egress` C13–C15 (now 22/22).
 - **Poller backoff jitter** (±30%) so repeated failures don't hammer the API in lockstep.
 
-Deferred (more Telegram-specific; pick up before/with Discord):
-- Voice (TTS) reply — needs an external TTS service; the chokepoint already carries `voice` through.
-- Group binding flow + group inbound authorization (`telegram_groups` + `channel-auth` portal routes) — groups are
-  currently dropped at inbound.
-- Then: Discord transport + egress on the same chokepoint/lane/runtime spine (the planned reuse), → WhatsApp.
+Also built (2026-06-06, second hardening pass):
+- **Voice (TTS) replies** — the canonical `packages/core/tts/` module **harvested verbatim** into
+  `packages/channel-daemon/tts/` (openai + elevenlabs providers, markdown strip, sentence chunking, **ffmpeg remux to
+  Telegram mono/48k/32k opus**, per-chunk error codes, 120s provider + 30s remux timeouts, temp-dir cleanup,
+  partial-success). `voice-pipeline.js` bridges it to a no-Grammy multipart `sendVoice` (`telegram-api.js`); wired
+  into the chokepoint AFTER the text send, strictly fail-soft (synthesis/upload failure never fails the text reply).
+  Config-implied: enabled only when `OPENAI_API_KEY` / `ELEVENLABS_*` is set. Verified `verify:channel-tts` (13/13,
+  pure parts) + `verify:channel-egress` C16–C18 (voice wiring + fail-soft). ffmpeg + provider HTTP are host-verified.
+- **Group binding** — `commands.js` (`/allow` · `/disallow` · `/channels`, owner-only, acks via the chokepoint as
+  trusted system-template). `telegramGroups` wired into `getDb`; internal router gains
+  `GET/POST/DELETE /api/v1/internal/telegram-group` + list. Inbound routes a group message through binding
+  (fail-closed: unauthorized groups dropped; owner `/allow` works in an unbound group and is never captured/turned);
+  outbound authority for groups consults `telegram_groups`. Verified `verify:channel-groups` (14/14: commands DI +
+  inbound routing + real-vault endpoint round-trip).
+
+Deferred → Discord (the planned reuse): Discord transport + egress on the SAME chokepoint/lane/runtime/dedup/
+coalescer/ratelimit/voice spine (extract the chokepoint gate-sequence into a platform-agnostic core + thin adapter,
+canonical send-handler shape) → then WhatsApp. Local **ollama** runtime backend still a declared slot.
 
 ---
 
