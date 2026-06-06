@@ -73,7 +73,7 @@ export function createDiscordInboundHandler({ vault, ownerDiscordId, runTurn, co
         metadata: {
           channelId: msg.chatId,
           sender: msg.fromName || msg.username || msg.fromId,
-          senderRole: 'owner',
+          senderRole: isOwner(msg) ? 'owner' : 'other',
           ...(msg.username ? { username: msg.username } : {}),
           ...(msg.chatTitle ? { chatTitle: msg.chatTitle } : {}),
           ...(msg.guildId ? { guildId: msg.guildId } : {}),
