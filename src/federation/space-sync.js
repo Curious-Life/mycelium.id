@@ -24,7 +24,7 @@ import { validateLexicon } from './lexicon.js';
  * @param {string} [deps.selfMxid]  the box's own MXID — inbound events from it
  *   are our own echoes and must be ignored (we already persisted them locally).
  */
-export function createSpaceSync({ db, matrixClient = null, resolveMxid, selfMxid = null, logger = console }) {
+export function createSpaceSync({ db, matrixClient = null, matrixEgress = null, resolveMxid, selfMxid = null, logger = console }) {
   if (!db) throw new TypeError('createSpaceSync: db required');
   // Per-space in-flight room-creation locks: prevents two concurrent first-grants
   // from minting two rooms for one space.
@@ -81,7 +81,7 @@ export function createSpaceSync({ db, matrixClient = null, resolveMxid, selfMxid
      * Validated through the lexicon (incl. §7 tripwire) before it leaves the box.
      */
     async mirrorKnowledge(spaceId, entry) {
-      if (!matrixClient) return { skipped: 'matrix-not-configured' };
+      if (!matrixEgress) return { skipped: 'matrix-not-configured' };
       const binding = await db.spaceMatrixRooms.get(spaceId);
       if (!binding) return { skipped: 'no-room' }; // nothing shared cross-node yet
       const record = {
@@ -93,8 +93,10 @@ export function createSpaceSync({ db, matrixClient = null, resolveMxid, selfMxid
       };
       const v = validateLexicon(record);
       if (!v.ok) { logger.warn?.(`[space-sync] refusing to mirror invalid record: ${v.error}`); return { skipped: 'invalid', error: v.error }; }
-      const eventId = await matrixClient.send(binding.room_id, record.$type, record);
-      return { roomId: binding.room_id, eventId, mirrored: true };
+      // §11: content leaves ONLY through the egress chokepoint (gates + audit)
+      const r = await matrixEgress.send(binding.room_id, record.$type, record);
+      if (!r.delivered) return { skipped: r.reason };
+      return { roomId: binding.room_id, eventId: r.eventId, mirrored: true };
     },
 
     /**
