@@ -24,6 +24,8 @@ import { accountRouter } from './account/router.js';
 import { remoteRouter } from './remote/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { startEnrichDrainer } from './enrich/drainer.js';
+import { startClaimHeartbeat } from './claims/heartbeat.js';
+import { startClaimDiscoveryJob, isClusteringRunning } from './jobs.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
 import { setSessionKeys } from './account/session-keys.js';
 
@@ -225,9 +227,18 @@ export async function startRestServer({
         const embedSup = startEmbedSupervisor({ home: process.cwd() });
         const drainer = startEnrichDrainer({ db, userId: bootUserId });
         enqueueEnrichment = (id) => { try { baseEnqueue(id); } catch { /* :8095 optional */ } drainer.nudge(); };
+        // Persona-Claims cadence trigger: a zero-LLM hourly heartbeat that spawns
+        // the discovery child when a day/week/month/quarter window rolls over (and
+        // no clustering run is in flight). The child is Tier-3 fail-soft (no local
+        // model → no-op). Gated with the drainer so verify scripts never run it.
+        const claimsHeartbeat = startClaimHeartbeat({
+          db, userId: bootUserId, isJobRunning: isClusteringRunning,
+          spawn: (cadence) => startClaimDiscoveryJob({ dbPath: effectiveDbPath, userId: bootUserId, cadence }),
+        });
         closeHandle = () => {
           try { connectorScheduler?.stop(); } catch { /* */ }
           try { drainer.stop(); } catch { /* */ }
+          try { claimsHeartbeat.stop(); } catch { /* */ }
           try { embedSup.stop(); } catch { /* */ }
           try { hwOllamaDaemon.stop(); } catch { /* */ }
           try { close(); } catch { /* */ }

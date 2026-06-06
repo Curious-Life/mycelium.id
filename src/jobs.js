@@ -210,3 +210,43 @@ export function cancelJob(jobId) {
 
 // Test seam: reset registry state between verify runs in the same process.
 export function _resetJobs() { jobs.clear(); runningJobId = null; }
+
+/** True while a clustering child is alive — the claim heartbeat checks this so
+ *  discovery never piles onto a heavy Generate run. */
+export function isClusteringRunning() {
+  const cur = runningJobId ? jobs.get(runningJobId) : null;
+  return !!(cur && (cur.status === 'running' || cur.child));
+}
+
+/**
+ * Spawn the Persona-Claims discovery child for one cadence (heartbeat-driven).
+ * Lean fire-and-forget: resolves master keys at spawn time (same source as the
+ * clustering job), hands them to the child via an allowlisted env, logs the
+ * outcome. The child is FAIL-SOFT (no model → no-op, exit 0).
+ * @returns {{ pid: number|null }}
+ */
+export function startClaimDiscoveryJob({ dbPath, userId, cadence } = {}) {
+  const { userHex, systemHex } = getSessionKeys() ?? resolveKeys();
+  const childEnv = {
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
+    USER_MASTER: userHex,
+    SYSTEM_KEY: systemHex,
+    MYCELIUM_DB: dbPath || resolveDbPath(),
+    MYCELIUM_USER_ID: userId || process.env.MYCELIUM_USER_ID || 'local-user',
+  };
+  const args = ['pipeline/discover-claims.mjs'];
+  if (cadence) args.push(`--cadence=${cadence}`);
+  let child;
+  try {
+    child = spawn('node', args, { cwd: process.cwd(), env: childEnv, stdio: ['ignore', 'ignore', 'pipe'] });
+  } catch {
+    return { pid: null };
+  }
+  let err = '';
+  child.stderr.on('data', (d) => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
+  child.on('close', (code) => {
+    if (code !== 0) process.stderr.write(`[claims] discovery(${cadence}) exited ${code}: ${err.slice(-300)}\n`);
+  });
+  return { pid: child.pid ?? null };
+}

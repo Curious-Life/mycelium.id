@@ -10,6 +10,7 @@
 //     ← this is what makes flagForDiscussion actually surface
 //   - recent messages across channels
 //   - current cognitive phase (Fisher) + 7-day body state (Apple Health)
+//   - persona claims (PersonaTree adoption — durable person-level claims)
 // Each section is best-effort: a missing subsystem or empty file is skipped,
 // never fatal. Plaintext is decrypted transparently by the injected helpers.
 //
@@ -17,6 +18,9 @@
 // @property {() => any} getDb           lazy db namespace getter
 // @property {(f: string) => Promise<string|null>} readMindFile  mind-files reader
 // @property {string} userId
+
+import { renderClaimsBlock } from '../claims/support-path.js';
+import { toConfidence } from '../claims/confidence.js';
 
 const DAY = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -42,7 +46,7 @@ export function createContextDomain(deps) {
           recentMessages: { type: 'number', description: 'How many recent messages to include (default 10, max 40).' },
           include: {
             type: 'array',
-            items: { type: 'string', enum: ['mind', 'facts', 'people', 'messages', 'phase', 'health'] },
+            items: { type: 'string', enum: ['mind', 'facts', 'people', 'messages', 'phase', 'health', 'claims'] },
             description: 'Limit to specific sections. Omit for all.',
           },
         },
@@ -148,6 +152,21 @@ export function createContextDomain(deps) {
             if (a.steps != null) parts.push(`~${Math.round(a.steps).toLocaleString()} steps/day`);
             if (parts.length) sections.push(`---\n# BODY STATE (7-day average)\n\n${parts.join(' · ')}`);
           }
+        } catch { /* non-fatal */ }
+      }
+
+      // ── persona claims (durable person-level claims, highest confidence first) ──
+      // Rendered as support paths at depth 0 under a token budget (PersonaTree
+      // §3.6); the budget scopes THIS section only, never the rest of the brief.
+      if (want(include, 'claims') && db?.claims) {
+        try {
+          const rows = await db.claims.listActive(userId, { limit: 12 });
+          const claims = rows.map((c) => ({
+            id: c.id, claimType: c.claimType, content: c.content,
+            confidence: c.confidenceLogodds == null ? undefined : toConfidence(c.confidenceLogodds),
+          }));
+          const block = renderClaimsBlock(claims, { depth: 0, budgetTokens: 600 });
+          if (block) sections.push(`---\n# WHAT YOU'VE LEARNED ABOUT THEM (claims — grounded in evidence over time)\n\n${block}`);
         } catch { /* non-fatal */ }
       }
 
