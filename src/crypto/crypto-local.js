@@ -213,6 +213,12 @@ const ENCRYPTED_FIELDS = {
   // `credentials` column; providers.list() never selects it (metadata-only).
   ai_providers: ['credentials'],
 
+  // Channel access policy — the per-channel allowlist of platform sender ids is a
+  // slice of the operator's social graph (CLAUDE.md §7 spirit) → encrypted at
+  // rest (USER_MASTER). mode + the (kind,value) PK stay plaintext so the policy
+  // is resolvable without decrypting on lookup. See migrations/0011_channel_access.
+  channel_access: ['allowed_senders_json'],
+
   // Connectors — operational state for a data connection (gmail/linear/…). The
   // queryable structural columns (id/provider/status/cursor/counts/timestamps)
   // stay plaintext so the scheduler can enumerate + filter without decrypting;

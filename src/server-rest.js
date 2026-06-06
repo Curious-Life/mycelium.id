@@ -8,6 +8,7 @@ import { dataDir, dbPath as resolveDbPath, kcvPath as resolveKcvPath } from './p
 import { resolveKeys } from './crypto/key-source.js';
 import { applyMigrations } from './db/migrate.js';
 import { apiRouter } from './api.js';
+import { internalRouter } from './internal-router.js';
 import { portalCompatRouter } from './portal-compat.js';
 import { portalMindscapeRouter } from './portal-mindscape.js';
 import { portalMeasurementRouter } from './portal-measurement.js';
@@ -17,6 +18,7 @@ import { portalHardwareRouter } from './portal-hardware.js';
 import { createOllamaDaemon } from './hardware/ollama-daemon.js';
 import { portalImportRouter } from './portal-import.js';
 import { portalSettingsRouter } from './portal-settings.js';
+import { portalChannelsRouter } from './portal-channels.js';
 import { portalConnectorsRouter } from './portal-connectors.js';
 import { registerBuiltinAdapters, createConnectorRunner, startConnectorScheduler } from './connectors/index.js';
 import { authShimRouter } from './auth-shim.js';
@@ -135,7 +137,12 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   v.use('/api/v1/portal', portalHardwareRouter({ daemon: hwOllamaDaemon }));
   v.use('/api/v1/portal', portalImportRouter({ db, userId, enqueueEnrichment }));
   v.use('/api/v1/portal', portalSettingsRouter({ db, userId }));
+  v.use('/api/v1/portal', portalChannelsRouter({ db, userId }));
   if (connectorRunner) v.use('/api/v1/portal', portalConnectorsRouter({ runner: connectorRunner }));
+  // Internal support endpoints for the channel-daemon egress chokepoint
+  // (egress-audit sink + channel-authority resolver). Loopback-only, same
+  // trust boundary as the tool routes below.
+  v.use(internalRouter({ db, userId }));
   v.use(apiRouter({ tools, handlers, db, userId, enqueueEnrichment }));
   return v;
 }

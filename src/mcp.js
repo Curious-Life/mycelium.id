@@ -28,6 +28,7 @@ import { createTopologyHelpers } from './topology/helpers.js';
 import { createContextDomain } from './tools/context.js';
 import { createIngestDomain } from './tools/ingest.js';
 import { createCurateDomain } from './tools/curate.js';
+import { createReplyDomain } from './tools/reply.js';
 import { createFederationDomain } from './tools/federation.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { getMasterKey } from './crypto/crypto-local.js';
@@ -120,9 +121,21 @@ export function buildDomains({
     // federation router; this is the user-facing verb surface.
     createFederationDomain({ db, userId }),
   ];
+
+  // reply (agent-explicit egress): wired ONLY when AGENT_URL is set — i.e. when
+  // this MCP server is run by the channel-daemon (which sets AGENT_URL to its own
+  // loopback chokepoint). Absent AGENT_URL (Claude Desktop, CI, plain stdio) the
+  // tool surface is unchanged. The tool soft-fails ('no-active-turn') outside a
+  // channel turn, so its mere presence is safe. See packages/channel-daemon.
+  const agentUrl = process.env.AGENT_URL;
+  if (agentUrl) {
+    domains.push(createReplyDomain({ agentUrl }));
+  }
+
   // Deferred = domains needing a subsystem not yet built. Each lands with its
   // Wave-2 unit; listed explicitly so the surface is never silently dropped.
-  const deferred = ['reply', 'services'];
+  // `reply` is no longer deferred — it's wired above when AGENT_URL is present.
+  const deferred = ['services'];
   // Cold-start readiness probe (Phase 4). The Tier-2 readers below depend on the
   // topology pipeline having run (clustering_points with landscape coords). On a
   // fresh vault they'd return honest-empty; gating turns that into an explicit,

@@ -32,13 +32,16 @@ import { createTerritoryDocsNamespace } from './territory-docs.js';
 import { createProvidersNamespace } from './providers.js';
 import { createConnectorsNamespace } from './connectors.js';
 import { createUsersNamespace } from './users.js';
+import { createEgressAuditNamespace } from './egress-audit.js';
+import { createIdentityChannelsNamespace } from './identity-channels.js';
+import { createTelegramGroupsNamespace } from './telegram-groups.js';
+import { createChannelAccessNamespace } from './channel-access.js';
 import { createConnectionsNamespace } from './connections.js';
 import { createSpaceAccessNamespace } from './space-access.js';
 import { createSpaceRoomsNamespace } from './space-rooms.js';
 import { createSpaceRoomDocumentsNamespace } from './space-room-documents.js';
 import { createSpaceConversationsNamespace } from './space-conversations.js';
 import { createContextsNamespace } from './contexts.js';
-import { createIdentityChannelsNamespace } from './identity-channels.js';
 import { createSpaceMatrixRoomsNamespace } from './space-matrix-rooms.js';
 
 /**
@@ -116,6 +119,15 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // §4g "smart routing" toggle (the cascade preference the gateway reads
     // DB-first, src/gateway/openai-compat.js).
     users: createUsersNamespace({ d1Query, firstRow }),
+
+    // Channel egress — the channel-daemon's loopback chokepoint records every
+    // outbound send here (hash only, never plaintext — egress-audit.js) and
+    // resolves channel-authority from identity_channels. Both are read/written
+    // ONLY via the internal router (src/internal-router.js); no MCP tool calls
+    // them, so wiring them is additive — it changes no existing tool behavior.
+    egressAudit: createEgressAuditNamespace({ d1Query }),
+    telegramGroups: createTelegramGroupsNamespace({ d1Query }),
+    channelAccess: createChannelAccessNamespace({ d1Query, firstRow }),
 
     // db.shareLinks is intentionally omitted — every call site is optional-
     // chained (tools/documents.js:102,516 `db.shareLinks?.…`), so absence
