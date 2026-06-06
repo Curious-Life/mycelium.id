@@ -160,6 +160,19 @@
 	let loading = $state(true);
 	let saving = $state(false);
 	let saved = $state(false);
+
+	// Settings is grouped into categories (Apple-style) instead of one long scroll;
+	// the nav switches which group is shown. Order matches the markup top-to-bottom.
+	const TABS = [
+		{ id: 'connection', label: 'Connection' },
+		{ id: 'intelligence', label: 'Intelligence' },
+		{ id: 'integrations', label: 'Integrations' },
+		{ id: 'billing', label: 'Billing' },
+		{ id: 'general', label: 'General' },
+		{ id: 'security', label: 'Security' },
+		{ id: 'account', label: 'Account' },
+	] as const;
+	let activeTab = $state<(typeof TABS)[number]['id']>('connection');
 	let exporting = $state(false);
 	let exportError = $state<string | null>(null);
 	let exportSuccess = $state<string | null>(null);
@@ -1239,13 +1252,28 @@
 <div class="h-full overflow-y-auto">
 <div class="max-w-2xl mx-auto px-8 py-8">
 	<h1 class="text-xl font-medium text-[var(--color-text-emphasis)] mb-2">Settings</h1>
-	<p class="text-sm text-[var(--color-text-secondary)] mb-8">Your Mycelium instance at a glance</p>
+	<p class="text-sm text-[var(--color-text-secondary)] mb-6">Your Mycelium instance at a glance</p>
+
+	<!-- Category nav — groups settings into panes (Apple-style) instead of one long scroll. -->
+	<nav class="sticky top-0 z-10 -mx-8 px-8 py-3 mb-6 bg-[var(--color-bg)]/85 backdrop-blur border-b border-[var(--color-border)]">
+		<div class="flex flex-wrap gap-1.5">
+			{#each TABS as tab}
+				<button
+					onclick={() => (activeTab = tab.id)}
+					class="text-xs px-3 py-1.5 rounded-full transition-colors cursor-pointer {activeTab === tab.id
+						? 'bg-[var(--color-accent)] text-[var(--color-bg)] font-medium'
+						: 'text-[var(--color-text-secondary)] hover:bg-[var(--color-border)]/40'}"
+				>{tab.label}</button>
+			{/each}
+		</div>
+	</nav>
 
 	{#if loading}
 		<div class="text-[var(--color-text-tertiary)] text-sm animate-pulse">Loading...</div>
 	{:else}
 		<div class="space-y-6">
 
+			{#if activeTab === 'connection'}
 			<!-- Get your address — claim a free <handle>.mycelium.id over the managed relay (handle availability + one-click connect). Placed above RemoteAccessSection: it's the recommended path and its copy refers to the operator-password field "below". -->
 			<ManagedConnectSection />
 
@@ -1255,6 +1283,9 @@
 			<!-- Connect your AI — the local/remote MCP + model-gateway endpoints + static-bearer how-to (S5) -->
 			<ConnectYourAISection />
 
+			{/if}
+
+			{#if activeTab === 'intelligence'}
 			<!-- AI Subscriptions -->
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">AI Subscriptions</h2>
@@ -1577,6 +1608,9 @@
 			<!-- Voice / TTS — provider config + per-voice preview -->
 			<VoiceSection />
 
+			{/if}
+
+			{#if activeTab === 'integrations'}
 			<!-- External Integrations — user-supplied API credentials -->
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">External Integrations</h2>
@@ -1658,6 +1692,9 @@
 				</div>
 			</section>
 
+			{/if}
+
+			{#if activeTab === 'billing'}
 			<!-- Billing -->
 			{#if billing?.managed && billing.subscription}
 				<section class="card p-5">
@@ -1748,6 +1785,9 @@
 				</section>
 			{/if}
 
+			{/if}
+
+			{#if activeTab === 'general'}
 			<!-- Appearance -->
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Appearance</h2>
@@ -1904,6 +1944,9 @@
 				{/if}
 			</section>
 
+			{/if}
+
+			{#if activeTab === 'security'}
 			<!-- Recovery Key (V1 local) — reveal to back up the single key again -->
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Recovery Key</h2>
@@ -2220,6 +2263,9 @@
 				{/if}
 			</section>
 
+			{/if}
+
+			{#if activeTab === 'account'}
 			<!-- Account -->
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Account</h2>
@@ -2412,6 +2458,7 @@
 				{/if}
 			</section>
 
+			{/if}
 			<!-- Save -->
 			<div class="flex items-center gap-3">
 				<button onclick={saveSettings} disabled={saving} class="btn btn-primary">

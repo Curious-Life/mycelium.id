@@ -21,12 +21,15 @@ import { createDnsClient } from '../mycelium-managed/src/dns.js';
 import { createAcmeDnsClient } from '../mycelium-managed/src/acmedns.js';
 import { createControlPlane } from '../mycelium-managed/src/server.js';
 import { createRateLimiter, createDailyCap } from '../mycelium-managed/src/ratelimit.js';
+import { createBilling } from '../mycelium-managed/src/billing.js';
 import { buildClaim } from '../src/remote/managed-claim.js';
 
 const ledger = [];
 const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${d ? '\n      ' + d : ''}`); };
 const DB = join(os.tmpdir(), `myc-reg-${process.pid}.db`);
+const DB2 = join(os.tmpdir(), `myc-reg-pay-${process.pid}.db`);
 rmSync(DB, { force: true });
+rmSync(DB2, { force: true });
 
 const registry = openRegistry(DB);
 const nonces = createNonceStore();
@@ -133,6 +136,99 @@ try {
   rec('P13. pre-existing zone record → unavailable + provision refused (claim rolled back, no new records)',
     avLegacy.available === false && p13.status === 409 && !registry.get('legacy') && legacyRecs === 1,
     `avail=${avLegacy.available} status=${p13.status} row=${!!registry.get('legacy')} recs=${legacyRecs}`);
+
+  // ── P14–P16 — reserve-then-pay (O4/O5) on a SECOND, billing-ENABLED plane ──
+  // (The plane above has billing off → P1–P13 provision for free, unchanged.)
+  const reg2 = openRegistry(DB2);
+  const recs2 = [];
+  const dns2 = createDnsClient({ provider: 'mock', zone: 'mycelium.id', relayIp: '203.0.113.7', records: recs2 });
+  const WH2 = 'whsec_test_secret';
+  let checkoutCalls = 0;
+  const billing = createBilling({
+    secret: 'sk_test', webhookSecret: WH2, priceMonthly: 'price_m',
+    returnUrl: 'https://connect.mycelium.id/billing/return',
+    fetch: async (url) => {
+      if (url.endsWith('/checkout/sessions')) { checkoutCalls++; return { ok: true, json: async () => ({ url: 'https://checkout.stripe.com/c/pay/cs_1', id: 'cs_1' }) }; }
+      if (url.endsWith('/billing_portal/sessions')) return { ok: true, json: async () => ({ url: 'https://billing.stripe.com/p/session_1' }) };
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+  const { app: app2 } = createControlPlane({
+    registry: reg2, dns: dns2, acmeDns, nonces: createNonceStore(), relayAddr: 'relay.mycelium.id:7000',
+    zone: 'mycelium.id', acmeDnsServer: 'https://acme-dns.mycelium.id',
+    rateLimit: createRateLimiter({ capacity: 1000, refillPerMin: 1000 }), dailyCap: createDailyCap({ max: 1000 }), billing,
+  });
+  const server2 = await new Promise((r) => { const s = app2.listen(0, '127.0.0.1', () => r(s)); });
+  const B2 = `http://127.0.0.1:${server2.address().port}`;
+  const daveRecs = () => recs2.filter((r) => r.name.includes('dave'));
+  try {
+    const masterD = crypto.randomBytes(32).toString('hex');
+    const claimSpec = (nonce) => buildClaim({ action: 'provision', handle: 'dave', nonce, masterHex: masterD });
+
+    // P14 — unpaid → 402 + checkoutUrl; placeholder HELD (no token, hold set); no DNS, no cap spend.
+    const cN1 = await getJson(`${B2}/v1/challenge`);
+    const claimD = claimSpec(cN1.nonce);
+    const pkDave = claimD.publicKey;
+    const p14 = await postJson(`${B2}/v1/provision`, claimD);
+    const row14 = reg2.get('dave');
+    rec('P14. billing on + unpaid → 402 checkoutUrl; placeholder held; no side-effects',
+      p14.status === 402 && typeof p14.data.checkoutUrl === 'string' && p14.data.checkoutUrl.startsWith('https://checkout.stripe.com/')
+      && checkoutCalls === 1 && !!row14 && row14.frps_token === '' && row14.hold_expires_at != null && daveRecs().length === 0,
+      `status=${p14.status} held=${row14?.hold_expires_at != null} recs=${daveRecs().length} calls=${checkoutCalls}`);
+
+    // P15 — a SIGNED Stripe webhook entitles the key; re-provision now completes (no 2nd checkout).
+    const evt = JSON.stringify({ id: 'evt_1', type: 'checkout.session.completed', data: { object: { client_reference_id: pkDave, customer: 'cus_dave' } } });
+    const ts = Math.floor(Date.now() / 1000);
+    const sig = crypto.createHmac('sha256', WH2).update(`${ts}.${evt}`).digest('hex');
+    const whRes = await fetch(`${B2}/v1/stripe/webhook`, { method: 'POST', headers: { 'content-type': 'application/json', 'stripe-signature': `t=${ts},v1=${sig}` }, body: evt });
+    const entitledNow = reg2.getEntitlement(pkDave);
+    const cN2 = await getJson(`${B2}/v1/challenge`);
+    const p15 = await postJson(`${B2}/v1/provision`, claimSpec(cN2.nonce));
+    const row15 = reg2.get('dave');
+    rec('P15. signed webhook → entitled; re-provision → 200 finalized; no 2nd checkout',
+      whRes.status === 200 && !!entitledNow && Number(entitledNow.paid_until) > Date.now()
+      && p15.status === 200 && p15.data.host === 'dave.mycelium.id' && !!row15.frps_token && row15.hold_expires_at == null
+      && daveRecs().length === 2 && checkoutCalls === 1,
+      `wh=${whRes.status} prov=${p15.status} token=${!!row15.frps_token} recs=${daveRecs().length} calls=${checkoutCalls}`);
+
+    // P16 — an entitled reclaim rotates the token WITHOUT a new Checkout (no double-charge).
+    const cN3 = await getJson(`${B2}/v1/challenge`);
+    const before = reg2.get('dave').frps_token;
+    const p16 = await postJson(`${B2}/v1/provision`, claimSpec(cN3.nonce));
+    rec('P16. entitled reclaim → 200, token rotated, NO new checkout (no double-charge)',
+      p16.status === 200 && p16.data.reclaimed === true && reg2.get('dave').frps_token !== before && checkoutCalls === 1,
+      `status=${p16.status} calls=${checkoutCalls}`);
+
+    // P17 — a forged webhook signature changes nothing (fail-closed at the boundary).
+    const forged = await fetch(`${B2}/v1/stripe/webhook`, { method: 'POST', headers: { 'content-type': 'application/json', 'stripe-signature': `t=${ts},v1=${'0'.repeat(64)}` }, body: evt });
+    rec('P17. forged webhook signature → 400, no entitlement mutation', forged.status === 400, `status=${forged.status}`);
+
+    // ── P18–P21 — billing portal (O7): action-bound 'billing' claim + nonce decoupling ──
+    // dave is now entitled with stripe_customer_id 'cus_dave' (set by the P15 webhook).
+    const bn1 = await getJson(`${B2}/v1/billing/nonce`);
+    const p18 = await postJson(`${B2}/v1/billing/portal`, buildClaim({ action: 'billing', handle: 'dave', nonce: bn1.nonce, masterHex: masterD }));
+    rec('P18. signed billing claim → Stripe Customer Portal url',
+      p18.status === 200 && typeof p18.data.url === 'string' && p18.data.url.startsWith('https://billing.stripe.com/'), `status=${p18.status}`);
+
+    // P19 — ACTION CONFUSION: a provision-signed claim POSTed to /v1/billing/portal → 401.
+    const bn2 = await getJson(`${B2}/v1/billing/nonce`);
+    const p19 = await postJson(`${B2}/v1/billing/portal`, buildClaim({ action: 'provision', handle: 'dave', nonce: bn2.nonce, masterHex: masterD }));
+    rec('P19. provision claim replayed to /billing/portal → 401 (action-bound)', p19.status === 401, `status=${p19.status}`);
+
+    // P20 — a key with NO subscription on file → 404 (fail-closed, no portal).
+    const masterX = crypto.randomBytes(32).toString('hex');
+    const bn3 = await getJson(`${B2}/v1/billing/nonce`);
+    const p20 = await postJson(`${B2}/v1/billing/portal`, buildClaim({ action: 'billing', handle: 'dave', nonce: bn3.nonce, masterHex: masterX }));
+    rec('P20. billing claim from a key with no subscription → 404', p20.status === 404, `status=${p20.status}`);
+
+    // P21 — SECURITY: a billing nonce is NOT valid for /v1/provision (separate store),
+    // so the ungated billing-nonce path can't be used to bypass the provision bot-gate.
+    const bn4 = await getJson(`${B2}/v1/billing/nonce`);
+    const p21 = await postJson(`${B2}/v1/provision`, buildClaim({ action: 'provision', handle: 'eve', nonce: bn4.nonce, masterHex: masterD }));
+    rec('P21. a billing nonce is rejected by /v1/provision (decoupled stores) → 401', p21.status === 401, `status=${p21.status}`);
+  } finally {
+    try { server2.close(); reg2.close(); rmSync(DB2, { force: true }); } catch { /* */ }
+  }
 } finally {
   try { server.close(); registry.close(); rmSync(DB, { force: true }); } catch { /* */ }
 }

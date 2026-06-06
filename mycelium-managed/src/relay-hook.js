@@ -21,12 +21,22 @@ export function authorizeLogin(registry, content) {
 }
 
 /** NewProxy: allow ONLY the tenant's own host, and only if no OTHER run_id is active. */
-export function authorizeNewProxy(registry, content, { zone = 'mycelium.id', bandwidthLimit = '2MB', now = () => Date.now(), activeTtlMs = DEFAULT_TTL_MS } = {}) {
+export function authorizeNewProxy(registry, content, { zone = 'mycelium.id', bandwidthLimit = '2MB', now = () => Date.now(), activeTtlMs = DEFAULT_TTL_MS, requireEntitlement = false, graceMs = 0 } = {}) {
   const token = content?.user?.metas?.token;
   const runId = content?.user?.run_id;
   if (!token) return { reject: true, reject_reason: 'missing tenant token' };
   const row = registry.getByToken(token);
   if (!row) return { reject: true, reject_reason: 'unknown tenant token' };
+
+  // Lapsed-subscription gate (O6). ONLY when billing is on (requireEntitlement) —
+  // a free self-hosted relay has no entitlements and must not be gated. isEntitled
+  // is fail-closed, so a paid tenant past paid_until (+grace, which absorbs Stripe
+  // dunning) is denied a NEW tunnel; an established tunnel drops when its TTL slot
+  // stops being refreshed. Login stays open so the user gets a legible NewProxy
+  // rejection here, not a confusing auth failure.
+  if (requireEntitlement && !registry.isEntitled(row.handle, now(), graceMs)) {
+    return { reject: true, reject_reason: 'subscription required' };
+  }
 
   if (content.proxy_type && content.proxy_type !== 'https') {
     return { reject: true, reject_reason: 'only https (passthrough) proxies allowed' };

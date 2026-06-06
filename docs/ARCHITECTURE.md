@@ -225,7 +225,14 @@ standing up the live relay/DNS/acme-dns/LE infra is the operator's deploy). The 
 now carries the onboarding/relay-billing layer (`DESIGN-onboarding-and-relay-billing-2026-06-05`):
 a `public_key`-keyed entitlement table (O3) and an **opt-in, fail-closed Turnstile bot-gate**
 on `/v1/challenge` (O2, `mycelium-managed/src/turnstile.js`; secret env-only, single-side
-verification — the nonce carries the proof to provision; `verify:turnstile` GO). (The in-app
+verification — the nonce carries the proof to provision; `verify:turnstile` GO). The app's
+connect widget renders Turnstile in a **cross-origin iframe** served by the control-plane
+(`GET /turnstile`), so Cloudflare's script runs in the control-plane origin and never in the
+vault portal — only the solved token `postMessage`s back (browser smoke pending). Billing
+(O4/O5, `mycelium-managed/src/billing.js` — no SDK, REST + `node:crypto`) adds a **reserve-then-pay**
+gate: an unentitled `/v1/provision` holds the handle and returns `402 {checkoutUrl}` before any
+cert side-effect; a fail-closed `POST /v1/stripe/webhook` (raw-body HMAC verify) flips
+`paid_until`. Opt-in (off without `MYC_STRIPE_SECRET` → free); `verify:billing` + `verify:provision` GO. (The in-app
 "generate mindscape" trigger + chronicle narration are also **built** — see the
 component table.) See
 [`V1-BUILD-SPEC.md`](V1-BUILD-SPEC.md) §"What's left".
