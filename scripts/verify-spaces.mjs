@@ -82,6 +82,9 @@ async function main() {
   rec('sharing with a NON-connection is rejected (defense-in-depth)', (await call(owner.port, 'POST', `/portal/spaces/${sid}/shares`, { granteeId: 'stranger', role: 'member' })).status === 400);
   rec('owner grants bob (an accepted connection) member access', (await call(owner.port, 'POST', `/portal/spaces/${sid}/shares`, { granteeId: 'bob', role: 'member' })).status === 200);
   rec('bob appears in members', (await call(owner.port, 'GET', `/portal/spaces/${sid}/members`)).json.members.some((m) => m.user_id === 'bob'));
+  // management hub: the shared-with-connection view surfaces this grant
+  const sw = await call(owner.port, 'GET', `/portal/connections/conn-ob/shared`);
+  rec('management: /connections/:id/shared lists the space shared with bob', sw.json.peer_id === 'bob' && sw.json.spaces.some((s) => s.id === sid));
   rec('granted bob can now read the space', (await call(bob.port, 'GET', `/portal/spaces/${sid}`)).status === 200);
   rec('member bob CANNOT delete the space (needs creator) → 404', (await call(bob.port, 'DELETE', `/portal/spaces/${sid}`)).status === 404);
   rec('intruder STILL 404 after the grant to bob', (await call(intruder.port, 'GET', `/portal/spaces/${sid}`)).status === 404);
