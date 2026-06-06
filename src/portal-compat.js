@@ -311,6 +311,28 @@ export function portalCompatRouter({ db, userId }) {
       ok(res, { territories: (terr || []).map((t) => ({ id: String(t.territory_id ?? t.id), name: t.name, essence: t.essence, message_count: t.message_count ?? 0 })) });
     } catch { ok(res, { territories: [] }); }
   });
+  // The mindscape cluster hierarchy (Realm → Theme → Territory) for the
+  // "share a whole cluster at a level" picker.
+  router.get('/spaces/cluster-hierarchy', async (_req, res) => {
+    try {
+      const [realms, themes, territories] = await Promise.all([
+        db.mindscape.getRealms(userId).catch(() => []),
+        db.mindscape.getSemanticThemes(userId).catch(() => []),
+        db.mindscape.getTerritoryProfiles(userId).catch(() => []),
+      ]);
+      const byRealm = new Map();
+      for (const t of themes || []) {
+        const k = String(t.realm_id);
+        if (!byRealm.has(k)) byRealm.set(k, []);
+        byRealm.get(k).push({ semantic_theme_id: t.semantic_theme_id, name: t.name, essence: t.essence, territory_count: t.territory_count ?? 0 });
+      }
+      const out = (realms || []).map((r) => ({
+        realm_id: r.realm_id, name: r.name, essence: r.essence, territory_count: r.territory_count ?? 0,
+        themes: byRealm.get(String(r.realm_id)) || [],
+      }));
+      ok(res, { realms: out, territory_count: (territories || []).length });
+    } catch { ok(res, { realms: [], territory_count: 0 }); }
+  });
   router.get('/spaces/:id', async (req, res) => {
     const id = decodePath(req.params.id);
     if (!(await guardSpace(res, id, 'member'))) return;
@@ -368,6 +390,45 @@ export function portalCompatRouter({ db, userId }) {
       }
       ok(res, { ok: true, seeded: ids.length });
     } catch { fail(res, 500, 'could not seed space'); }
+  });
+  // Share a whole CLUSTER at a chosen level (realm / theme / territory) — one
+  // traceable knowledge card synthesizing the cluster's essence + members.
+  // source_ref ('realm:N' / 'theme:N:M' / 'territory:K') keeps it re-resolvable
+  // (the Phase-B Megolm mirror can re-expand it). Never sends embeddings.
+  router.post('/spaces/:id/seed-cluster', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try {
+      const level = req.body?.level;
+      const realmId = req.body?.realm_id, themeId = req.body?.semantic_theme_id, terrId = req.body?.territory_id;
+      const [realms, themes, territories] = await Promise.all([
+        db.mindscape.getRealms(userId).catch(() => []),
+        db.mindscape.getSemanticThemes(userId).catch(() => []),
+        db.mindscape.getTerritoryProfiles(userId).catch(() => []),
+      ]);
+      let label, name, essence, members = [], sourceRef, srcTerr = null;
+      if (level === 'territory') {
+        const t = (territories || []).find((x) => String(x.territory_id) === String(terrId));
+        if (!t) return fail(res, 404, 'territory not found');
+        label = 'Territory'; name = t.name; essence = t.essence; sourceRef = `territory:${terrId}`; srcTerr = String(terrId);
+      } else if (level === 'theme') {
+        const th = (themes || []).find((x) => String(x.realm_id) === String(realmId) && String(x.semantic_theme_id) === String(themeId));
+        if (!th) return fail(res, 404, 'theme not found');
+        label = 'Theme'; name = th.name; essence = th.essence; sourceRef = `theme:${realmId}:${themeId}`;
+        members = (territories || []).filter((t) => String(t.realm_id) === String(realmId) && String(t.semantic_theme_id) === String(themeId));
+      } else if (level === 'realm') {
+        const r = (realms || []).find((x) => String(x.realm_id) === String(realmId));
+        if (!r) return fail(res, 404, 'realm not found');
+        label = 'Realm'; name = r.name; essence = r.essence; sourceRef = `realm:${realmId}`;
+        members = (territories || []).filter((t) => String(t.realm_id) === String(realmId));
+      } else {
+        return fail(res, 400, 'level must be realm, theme, or territory');
+      }
+      const memberLines = members.slice(0, 50).map((m) => `• ${m.name}${m.essence ? ` — ${m.essence}` : ''}`).join('\n');
+      const content = [`${label}: ${name || '(unnamed)'}`, essence, memberLines].filter(Boolean).join('\n\n');
+      const entryId = await db.spaceKnowledge.add(id, content, userId, srcTerr, level, 'all', null, sourceRef);
+      ok(res, { ok: true, id: entryId, level, members: members.length });
+    } catch (e) { fail(res, 500, e.message || 'could not share cluster'); }
   });
 
   // members + sharing (grant a connection access; default-deny)

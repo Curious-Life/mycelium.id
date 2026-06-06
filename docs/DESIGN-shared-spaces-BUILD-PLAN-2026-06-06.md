@@ -1,7 +1,7 @@
 # Build Plan — Shared Spaces: default-private folders + fine-grained access (Phase A), Matrix-federated sharing (Phase B)
 
 **Date:** 2026-06-06
-**Status:** ✅ **Phase A SHIPPED** (spaces-as-folders + default-private access + sharing UI + the contexts "Work Self" territory-sharing model, all de-routed into live workspace views; `verify:spaces` GO 21/21). Phase B (cross-node delivery) is gated on Tier-1 Matrix. Build plan + decisions below.
+**Status:** ✅ **Phase A SHIPPED** (spaces-as-folders + default-private access + sharing UI + contexts "Work Self" territory-sharing + **share a whole cluster at a level (realm/theme/territory) or documents into a space**, all de-routed into live workspace views; `verify:spaces` GO 28/28). Phase B (cross-node delivery) is gated on Tier-1 Matrix (A1b homeserver integration proven; S2S + persistent store residual). Build plan + decisions below.
 **Companion:** `docs/DESIGN-federation-inter-instance-2026-06-05.md` (Tier-2 shared pools, D-FED-2), `docs/legacy/SOCIAL-SHARING-SPEC-from-legacy.md` (Phase 3 context grants + Phase 5 shared spaces + the "NEVER shared" invariant).
 
 ## Operator decisions (locked)

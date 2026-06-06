@@ -47,6 +47,11 @@ async function main() {
 
   // Seed bob as a real local user so the members JOIN renders a name.
   await db._base.d1Query(`INSERT INTO users (id, display_name, type) VALUES ('bob', 'Bob', 'human')`, []);
+  // Seed a tiny mindscape cluster hierarchy (Realm → Theme → Territory) for the
+  // cluster-sharing checks.
+  await db._base.d1Query(`INSERT INTO realms (id, realm_id, user_id, name, essence, territory_count) VALUES ('r1', 1, 'owner', 'Systems', 'how things connect', 2)`, []);
+  await db._base.d1Query(`INSERT INTO semantic_themes (id, realm_id, semantic_theme_id, user_id, name, essence, territory_count) VALUES ('th1', 1, 10, 'owner', 'Distributed', 'spread out', 1)`, []);
+  await db._base.d1Query(`INSERT INTO territory_profiles (territory_id, user_id, realm_id, semantic_theme_id, name, essence) VALUES (100, 'owner', 1, 10, 'Consensus', 'agreement protocols')`, []);
 
   const owner = await mountAs(db, 'owner');
   const bob = await mountAs(db, 'bob');
@@ -91,6 +96,17 @@ async function main() {
   rec('contexts: territory appears', (await call(owner.port, 'GET', `/portal/contexts/${cid}/territories`)).json.territories.some((t) => String(t.territory_id) === '42'));
   rec('contexts: intruder cannot mutate someone else’s context → 404 (ownership guard)', (await call(intruder.port, 'POST', `/portal/contexts/${cid}/territories/99`)).status === 404);
   rec('contexts: owner deletes the context', (await call(owner.port, 'DELETE', `/portal/contexts/${cid}`)).status === 200);
+
+  // ── share a cluster at a level (realm / theme / territory) or documents ──
+  const hier = await call(owner.port, 'GET', '/portal/spaces/cluster-hierarchy');
+  rec('cluster: hierarchy returns Realm→Theme', hier.json.realms?.[0]?.name === 'Systems' && hier.json.realms[0].themes?.[0]?.name === 'Distributed');
+  rec('cluster: share a whole REALM into the space', (await call(owner.port, 'POST', `/portal/spaces/${sid}/seed-cluster`, { level: 'realm', realm_id: 1 })).json?.members >= 1);
+  rec('cluster: share a THEME', (await call(owner.port, 'POST', `/portal/spaces/${sid}/seed-cluster`, { level: 'theme', realm_id: 1, semantic_theme_id: 10 })).status === 200);
+  rec('cluster: share a single TERRITORY', (await call(owner.port, 'POST', `/portal/spaces/${sid}/seed-cluster`, { level: 'territory', territory_id: 100 })).status === 200);
+  rec('cluster: invalid level → 400', (await call(owner.port, 'POST', `/portal/spaces/${sid}/seed-cluster`, { level: 'galaxy' })).status === 400);
+  rec('cluster: a non-member cannot share into the space → 404', (await call(intruder.port, 'POST', `/portal/spaces/${sid}/seed-cluster`, { level: 'realm', realm_id: 1 })).status === 404);
+  const kn = await call(owner.port, 'GET', `/portal/spaces/${sid}/knowledge`);
+  rec('cluster: shared clusters appear as knowledge entries', kn.json.entries.some((e) => e.source_type === 'realm') && kn.json.entries.some((e) => e.source_type === 'theme'));
 
   owner.server.close(); bob.server.close(); intruder.server.close(); close?.();
   rmSync(dir, { recursive: true, force: true });

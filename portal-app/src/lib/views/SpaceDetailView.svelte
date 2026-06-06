@@ -85,6 +85,11 @@
 	let pickerSeeding = $state(false);
 	let pickerSearch = $state('');
 	let pickerError = $state<string | null>(null);
+	// Cluster sharing: pick a level (territory / theme / realm) and share a whole
+	// cluster at that level, not just individual territories.
+	let pickerLevel = $state<'territory' | 'theme' | 'realm'>('territory');
+	let pickerHierarchy = $state<Array<{ realm_id: number; name: string; essence?: string; territory_count: number; themes: Array<{ semantic_theme_id: number; name: string; essence?: string; territory_count: number }> }>>([]);
+	let clusterAdding = $state('');
 
 	async function loadSpace() {
 		try {
@@ -437,6 +442,31 @@
 				pickerLoading = false;
 			}
 		}
+		// Load the cluster hierarchy (Realm → Theme) for the higher-level options.
+		if (pickerHierarchy.length === 0) {
+			try {
+				const res = await api(`/portal/spaces/cluster-hierarchy`);
+				if (res.ok) pickerHierarchy = (await res.json()).realms || [];
+			} catch {}
+		}
+	}
+
+	async function refreshKnowledge() {
+		const k = await api(`/portal/spaces/${spaceId}/knowledge`);
+		if (k.ok) knowledge = (await k.json()).entries || [];
+	}
+
+	// Share a whole cluster (realm or theme) at the chosen level.
+	async function addCluster(payload: { level: string; realm_id?: number; semantic_theme_id?: number }, key: string) {
+		clusterAdding = key;
+		pickerError = null;
+		try {
+			const res = await api(`/portal/spaces/${spaceId}/seed-cluster`, {
+				method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+			});
+			if (res.ok) { pickerOpen = false; await refreshKnowledge(); }
+			else { const e = await res.json().catch(() => ({})); pickerError = e.error || 'Failed to add cluster'; }
+		} catch { pickerError = 'Network error — try again.'; } finally { clusterAdding = ''; }
 	}
 
 	function togglePick(id: string) {
@@ -998,13 +1028,23 @@
 					tabindex={-1}
 				>
 					<div class="px-6 pt-6 pb-4 shrink-0">
-						<h2 id="picker-title" class="text-lg font-medium text-[var(--color-text-emphasis)] mb-1">Seed from territories</h2>
-						<p class="text-xs text-[var(--color-text-tertiary)] mb-4">
-							Choose one or more of your own territories. Each becomes a knowledge entry the space can draw on.
+						<h2 id="picker-title" class="text-lg font-medium text-[var(--color-text-emphasis)] mb-1">Share from your mindscape</h2>
+						<p class="text-xs text-[var(--color-text-tertiary)] mb-3">
+							Share a whole cluster at a level, or individual territories. Each becomes a knowledge entry the space can draw on.
 						</p>
 
-						<!-- Depth radio -->
-						<div class="flex items-center gap-3 mb-4">
+						<!-- Level selector -->
+						<div class="inline-flex rounded-lg border border-[var(--color-border)] overflow-hidden mb-4 text-xs">
+							{#each [['territory', 'Territories'], ['theme', 'Themes'], ['realm', 'Realms']] as [lvl, lbl]}
+								<button
+									onclick={() => { pickerLevel = lvl as any; pickerError = null; }}
+									class="px-3 py-1.5 transition-colors {pickerLevel === lvl ? 'bg-aurum text-[var(--color-bg)] font-medium' : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-elevated)]'}"
+								>{lbl}</button>
+							{/each}
+						</div>
+
+						<!-- Depth radio (territory level only) -->
+						<div class="flex items-center gap-3 mb-4" class:hidden={pickerLevel !== 'territory'}>
 							<span class="text-[11px] font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider">Depth</span>
 							<label class="flex items-center gap-1.5 cursor-pointer">
 								<input
@@ -1026,23 +1066,60 @@
 							</label>
 						</div>
 
-						<!-- Search -->
+						<!-- Search (territory level only) -->
 						<input
 							type="text"
 							bind:value={pickerSearch}
 							placeholder="Filter territories…"
+							class:hidden={pickerLevel !== 'territory'}
 							class="w-full px-3 py-2 rounded-lg bg-[var(--color-bg)] text-sm text-[var(--color-text-primary)] border border-[var(--color-border)] focus:outline-none focus:border-[var(--color-accent)]"
 						/>
 					</div>
 
-					<!-- Scrollable territory list -->
+					<!-- Scrollable body -->
 					<div class="flex-1 overflow-y-auto px-6 min-h-[200px]">
-						{#if pickerLoading}
+						{#if pickerError}
+							<p class="text-xs text-coral py-4">{pickerError}</p>
+						{/if}
+						{#if pickerLevel === 'realm'}
+							{#if pickerHierarchy.length === 0}
+								<p class="text-xs text-[var(--color-text-tertiary)] py-4 text-center">No realms yet — your mindscape needs to cluster first.</p>
+							{:else}
+								<ul class="space-y-1 py-2">
+									{#each pickerHierarchy as r (r.realm_id)}
+										<li class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-[var(--color-elevated)]">
+											<div class="min-w-0 flex-1">
+												<div class="text-sm text-[var(--color-text-primary)] font-medium truncate">{r.name || 'Unnamed realm'}</div>
+												{#if r.essence}<p class="text-xs text-[var(--color-text-secondary)] mt-0.5 line-clamp-2">{r.essence}</p>{/if}
+												<span class="text-[10px] font-mono text-[var(--color-text-tertiary)] mt-0.5 block">{r.territory_count} territories · {r.themes.length} themes</span>
+											</div>
+											<button onclick={() => addCluster({ level: 'realm', realm_id: r.realm_id }, `realm:${r.realm_id}`)} disabled={!!clusterAdding} class="shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg bg-aurum text-[var(--color-bg)] disabled:opacity-50">{clusterAdding === `realm:${r.realm_id}` ? 'Adding…' : 'Add realm'}</button>
+										</li>
+									{/each}
+								</ul>
+							{/if}
+						{:else if pickerLevel === 'theme'}
+							{@const themes = pickerHierarchy.flatMap((r) => r.themes.map((t) => ({ ...t, realm_id: r.realm_id, realm_name: r.name })))}
+							{#if themes.length === 0}
+								<p class="text-xs text-[var(--color-text-tertiary)] py-4 text-center">No themes yet.</p>
+							{:else}
+								<ul class="space-y-1 py-2">
+									{#each themes as t (t.realm_id + ':' + t.semantic_theme_id)}
+										<li class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-[var(--color-elevated)]">
+											<div class="min-w-0 flex-1">
+												<div class="text-sm text-[var(--color-text-primary)] font-medium truncate">{t.name || 'Unnamed theme'}</div>
+												{#if t.essence}<p class="text-xs text-[var(--color-text-secondary)] mt-0.5 line-clamp-2">{t.essence}</p>{/if}
+												<span class="text-[10px] font-mono text-[var(--color-text-tertiary)] mt-0.5 block">in {t.realm_name || 'realm'} · {t.territory_count} territories</span>
+											</div>
+											<button onclick={() => addCluster({ level: 'theme', realm_id: t.realm_id, semantic_theme_id: t.semantic_theme_id }, `theme:${t.realm_id}:${t.semantic_theme_id}`)} disabled={!!clusterAdding} class="shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg bg-aurum text-[var(--color-bg)] disabled:opacity-50">{clusterAdding === `theme:${t.realm_id}:${t.semantic_theme_id}` ? 'Adding…' : 'Add theme'}</button>
+										</li>
+									{/each}
+								</ul>
+							{/if}
+						{:else if pickerLoading}
 							<div class="flex items-center justify-center py-10">
 								<div class="w-6 h-6 border-2 border-[var(--color-border)] border-t-[var(--color-accent)] rounded-full animate-spin"></div>
 							</div>
-						{:else if pickerError}
-							<p class="text-xs text-coral py-4">{pickerError}</p>
 						{:else if pickerTerritories.length === 0}
 							<p class="text-xs text-[var(--color-text-tertiary)] py-4 text-center">No territories to seed from yet.</p>
 						{:else}
@@ -1085,20 +1162,22 @@
 					<!-- Footer -->
 					<div class="px-6 py-4 border-t border-[var(--color-border)] flex items-center justify-between gap-3 shrink-0">
 						<span class="text-xs text-[var(--color-text-tertiary)]">
-							{pickerSelected.size} selected
+							{#if pickerLevel === 'territory'}{pickerSelected.size} selected{:else}Click Add to share a cluster{/if}
 						</span>
 						<div class="flex items-center gap-2">
 							<button
 								onclick={() => { pickerOpen = false; }}
 								class="px-4 py-2 rounded-lg text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
-							>Cancel</button>
-							<button
-								onclick={submitPicker}
-								disabled={pickerSelected.size === 0 || pickerSeeding}
-								class="px-4 py-2 rounded-lg text-sm font-medium bg-aurum text-[var(--color-bg)] hover:opacity-90 transition-opacity disabled:opacity-40"
-							>
-								{pickerSeeding ? 'Seeding…' : `Seed ${pickerSelected.size || ''}`.trim()}
-							</button>
+							>{pickerLevel === 'territory' ? 'Cancel' : 'Done'}</button>
+							{#if pickerLevel === 'territory'}
+								<button
+									onclick={submitPicker}
+									disabled={pickerSelected.size === 0 || pickerSeeding}
+									class="px-4 py-2 rounded-lg text-sm font-medium bg-aurum text-[var(--color-bg)] hover:opacity-90 transition-opacity disabled:opacity-40"
+								>
+									{pickerSeeding ? 'Seeding…' : `Seed ${pickerSelected.size || ''}`.trim()}
+								</button>
+							{/if}
 						</div>
 					</div>
 				</div>
