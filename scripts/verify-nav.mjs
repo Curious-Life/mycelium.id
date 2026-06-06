@@ -3,9 +3,9 @@
 // shell components expose exactly the honest V1 primary surface and make no
 // calls to endpoints that 404 in V1. Proves:
 //
-//   N1 coreNav = the 6-screen V1 set   /mindscape /library /import /timeline /profile
+//   N1 coreNav = the as-shipped V1 set  /mindscape /library /import /timeline /spaces /connections /contexts /profile
 //   N2 deferred screens gone from nav   no moduleNav / spacesItem / fleetNav
-//   N3 zero dead probes                 no /portal/connections/count, no /portal/fleet/gate
+//   N3 zero dead probes                 no /portal/fleet/gate (connections/count now served)
 //   N4 "Coming later" group present     comingLater[] with the planned screens
 //   N5 Import reachable on mobile        BottomTabBar tabs include /import, no chat tab
 //   N6 chat toggle hidden (deferred)     Header has no toggleChat; layout Cmd+J disabled
@@ -31,12 +31,13 @@ const layout = read(P("routes", "(app)", "+layout.svelte"));
 // "open the tab" intent); the drop zone lives in the view component.
 const importView = read(P("lib", "views", "ImportView.svelte"));
 
-// N1 — coreNav is exactly the 6-screen V1 set (5 in the array + Settings rendered
-// separately at the bottom). Extract href: values inside the coreNav literal.
+// N1 — coreNav is exactly the as-shipped V1 set. Federation Phase B added Spaces;
+// the connections-hub PR added Connections; Sharing (contexts) + Profile round it
+// out. Extract href: values inside the coreNav literal.
 const coreBlock = (sidebar.match(/const coreNav[^[]*\[([\s\S]*?)\];/) || [])[1] || "";
 const hrefs = [...coreBlock.matchAll(/href:\s*'([^']+)'/g)].map((m) => m[1]);
-const want = ["/mindscape", "/library", "/import", "/timeline", "/profile"];
-rec("N1 coreNav = the 6-screen V1 set", JSON.stringify(hrefs) === JSON.stringify(want),
+const want = ["/mindscape", "/library", "/import", "/timeline", "/spaces", "/connections", "/contexts", "/profile"];
+rec("N1 coreNav = the as-shipped V1 set", JSON.stringify(hrefs) === JSON.stringify(want),
   `got ${JSON.stringify(hrefs)}`);
 
 // N2 — the deferred module/social/fleet nav arrays are gone.
@@ -44,8 +45,9 @@ const leftovers = ["moduleNav", "spacesItem", "fleetNav"].filter((s) => sidebar.
 rec("N2 deferred nav arrays removed", leftovers.length === 0,
   leftovers.length ? `still present: ${leftovers.join(", ")}` : "");
 
-// N3 — no dead probes that 404 in V1.
-const probes = ["/portal/connections/count", "/portal/fleet/gate"].filter((s) => sidebar.includes(s));
+// N3 — no dead probes that 404 in V1. /portal/connections/count is now served
+// (src/portal-compat.js) by the connections-hub PR, so it is a legitimate probe.
+const probes = ["/portal/fleet/gate"].filter((s) => sidebar.includes(s));
 rec("N3 zero dead 404 probes in Sidebar", probes.length === 0,
   probes.length ? `still calls: ${probes.join(", ")}` : "");
 
