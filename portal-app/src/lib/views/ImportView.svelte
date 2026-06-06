@@ -38,7 +38,7 @@
 	}
 
 	let selectedSource = $state<ImportSource | null>(null);
-	let fileInput: HTMLInputElement;
+	let fileInput = $state<HTMLInputElement>();
 	let files = $state<FileList | null>(null);
 	let importing = $state(false);
 	let statusMsg = $state<string | null>(null);
@@ -47,7 +47,7 @@
 
 	// Obsidian folder import — native picker in the desktop app, <input
 	// webkitdirectory> in the browser. Both POST to /portal/import/obsidian.
-	let folderInput: HTMLInputElement;
+	let folderInput = $state<HTMLInputElement>();
 	let isTauri = $state(false);
 	onMount(() => {
 		isTauri = typeof window !== 'undefined'

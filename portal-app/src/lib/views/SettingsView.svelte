@@ -2111,8 +2111,9 @@
 
 						<div class="space-y-2">
 							<div>
-								<label class="text-xs text-[var(--color-text-tertiary)] block mb-1">Current master key</label>
+								<label for="mk-rotate-current" class="text-xs text-[var(--color-text-tertiary)] block mb-1">Current master key</label>
 								<input
+									id="mk-rotate-current"
 									type="password"
 									bind:value={mkRotateCurrentKey}
 									placeholder="64-character hex key"
@@ -2121,9 +2122,10 @@
 								/>
 							</div>
 							<div>
-								<label class="text-xs text-[var(--color-text-tertiary)] block mb-1">New master key</label>
+								<label for="mk-rotate-new" class="text-xs text-[var(--color-text-tertiary)] block mb-1">New master key</label>
 								<div class="flex gap-2">
 									<input
+										id="mk-rotate-new"
 										type="text"
 										bind:value={mkRotateNewKey}
 										placeholder="64-character hex key"
@@ -2334,10 +2336,11 @@
 							re-authenticate with your passkey or master key.
 						</p>
 						<div>
-							<label class="text-[0.65rem] text-[var(--color-text-tertiary)] uppercase tracking-wider block mb-1">
+							<label for="delete-confirm-phrase" class="text-[0.65rem] text-[var(--color-text-tertiary)] uppercase tracking-wider block mb-1">
 								Type: <span class="font-mono text-coral">{DELETE_CONFIRM_PHRASE}</span>
 							</label>
 							<input
+								id="delete-confirm-phrase"
 								type="text"
 								bind:value={deletePhrase}
 								autocomplete="off"
@@ -2383,11 +2386,12 @@
 						</div>
 						{#if deleteHasMasterKey}
 							<div class="pt-2 border-t border-[var(--color-border)]">
-								<label class="text-[0.65rem] text-[var(--color-text-tertiary)] uppercase tracking-wider block mb-1">
+								<label for="delete-master-key" class="text-[0.65rem] text-[var(--color-text-tertiary)] uppercase tracking-wider block mb-1">
 									Or enter your master key
 								</label>
 								<div class="flex gap-2">
 									<input
+										id="delete-master-key"
 										type="password"
 										bind:value={deleteMasterKeyInput}
 										placeholder="64-character hex key"

@@ -1315,6 +1315,7 @@
 			<!-- New document input -->
 			{#if showNewDocInput}
 				<div class="flex items-center gap-2 mt-3">
+					<!-- svelte-ignore a11y_autofocus -->
 					<input
 						bind:value={newDocTitle}
 						type="text"
@@ -1851,13 +1852,7 @@
 	.line-clamp-2 {
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-	}
-
-	.line-clamp-6 {
-		display: -webkit-box;
-		-webkit-line-clamp: 6;
+		line-clamp: 2;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 	}

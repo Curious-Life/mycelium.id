@@ -157,7 +157,7 @@
 
 		<!-- Provider picker -->
 		<div class="mb-5">
-			<label class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-2">Provider</label>
+			<span class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-2">Provider</span>
 			<div class="flex gap-4">
 				{#each [
 					{ id: '',           label: 'Off' },
@@ -176,13 +176,14 @@
 		{#if formProvider === 'openai'}
 			<div class="mb-5 space-y-4">
 				<div>
-					<label class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">
+					<label for="tts-openai-key" class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">
 						OpenAI API key
 						{#if tts.openai.hasKey}
 							<span class="ml-2 text-[var(--color-accent)]">configured ✓</span>
 						{/if}
 					</label>
 					<input
+						id="tts-openai-key"
 						type="password"
 						bind:value={formOpenaiKey}
 						placeholder={tts.openai.hasKey ? '••••••••• (leave blank to keep)' : 'sk-…'}
@@ -193,7 +194,7 @@
 				</div>
 
 				<div>
-					<label class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-2">Voice</label>
+					<span class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-2">Voice</span>
 					<div class="space-y-1.5">
 						{#each tts.openai.voices as v (v.id)}
 							<label class="flex items-center gap-3 p-2 rounded-lg border border-[var(--color-border)] hover:border-[var(--color-accent)]/50 cursor-pointer transition-colors"
@@ -220,8 +221,9 @@
 				</div>
 
 				<div>
-					<label class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">Model</label>
+					<label for="tts-openai-model" class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">Model</label>
 					<select
+						id="tts-openai-model"
 						bind:value={formOpenaiModel}
 						class="w-full px-3 py-1.5 text-sm bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)]"
 					>
@@ -237,13 +239,14 @@
 		{#if formProvider === 'elevenlabs'}
 			<div class="mb-5 space-y-4">
 				<div>
-					<label class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">
+					<label for="tts-eleven-key" class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">
 						ElevenLabs API key
 						{#if tts.elevenlabs.hasKey}
 							<span class="ml-2 text-[var(--color-accent)]">configured ✓</span>
 						{/if}
 					</label>
 					<input
+						id="tts-eleven-key"
 						type="password"
 						bind:value={formElevenKey}
 						placeholder={tts.elevenlabs.hasKey ? '••••••••• (leave blank to keep)' : 'paste your ElevenLabs API key'}
@@ -254,11 +257,12 @@
 				</div>
 
 				<div>
-					<label class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">
+					<label for="tts-eleven-voice-id" class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">
 						Voice ID
 						<a href="https://elevenlabs.io/app/voice-library" target="_blank" rel="noopener" class="ml-2 text-[0.62rem] text-[var(--color-accent)] hover:underline">find yours →</a>
 					</label>
 					<input
+						id="tts-eleven-voice-id"
 						type="text"
 						bind:value={formElevenVoiceId}
 						placeholder="e.g. 21m00Tcm4TlvDq8ikWAM"
@@ -269,8 +273,9 @@
 				</div>
 
 				<div>
-					<label class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">Model</label>
+					<label for="tts-eleven-model" class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">Model</label>
 					<select
+						id="tts-eleven-model"
 						bind:value={formElevenModel}
 						class="w-full px-3 py-1.5 text-sm bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)]"
 					>

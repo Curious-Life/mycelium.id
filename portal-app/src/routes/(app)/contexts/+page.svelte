@@ -169,7 +169,7 @@
 						</span>
 					</div>
 					{#if !ctx.is_default && !ctx.is_private}
-						<button class="space-delete" onclick={(e) => { e.stopPropagation(); deleteContext(ctx.id); }} title="Delete">&times;</button>
+						<span class="space-delete" role="button" tabindex="0" onclick={(e) => { e.stopPropagation(); deleteContext(ctx.id); }} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); deleteContext(ctx.id); } }} title="Delete">&times;</span>
 					{/if}
 				</button>
 			{/each}

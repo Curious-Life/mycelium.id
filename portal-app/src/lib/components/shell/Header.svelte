@@ -57,7 +57,11 @@
 </script>
 
 <!-- The whole bar is a window-drag handle in the native shell (no native title
-     bar). Buttons/links inside are not drag regions, so they stay clickable. -->
+     bar). Buttons/links inside are not drag regions, so they stay clickable.
+     The mousedown only initiates an OS window-drag — there is no keyboard
+     equivalent and no fitting ARIA role, so the static-interaction rule is
+     intentionally ignored here. -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <header
 	data-tauri-drag-region
 	onmousedown={startWindowDrag}
