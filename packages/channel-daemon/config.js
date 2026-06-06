@@ -15,8 +15,23 @@ export function loadConfig(env = process.env) {
   const host = env.CHANNEL_DAEMON_HOST || '127.0.0.1';
   const port = Number(env.CHANNEL_DAEMON_PORT || 3010);
   const agentId = env.CHANNEL_AGENT_ID || 'personal-agent';
+  const selfUrl = `http://${host}:${port}`;
 
-  return { botToken, ownerTelegramId, vaultBaseUrl, host, port, agentId };
+  // ── Phase 2: the agent turn ────────────────────────────────────────────────
+  // Inference locus is IMPLIED BY CONFIG (design §2): an Anthropic BYOK key ⇒
+  // cloud Claude Agent SDK (the default). No key ⇒ runtime is null ⇒ two-way
+  // replies are OFF and the daemon runs capture-only.
+  const anthropicApiKey = env.ANTHROPIC_API_KEY || '';
+  const mcpMode = env.CHANNEL_MCP_MODE || 'http'; // 'http' (running vault) | 'stdio' (spawn)
+  const mcpUrl = env.MYCELIUM_MCP_URL || 'http://127.0.0.1:4711/mcp';
+  const mcpBearer = env.MYCELIUM_MCP_BEARER || '';
+  const mcpStdioEntry = env.CHANNEL_MCP_STDIO_ENTRY || 'src/index.js';
+  const model = env.CHANNEL_AGENT_MODEL || ''; // backend default applies when empty
+
+  return {
+    botToken, ownerTelegramId, vaultBaseUrl, host, port, agentId, selfUrl,
+    anthropicApiKey, mcpMode, mcpUrl, mcpBearer, mcpStdioEntry, model,
+  };
 }
 
 /** Throw a clear error if a required secret is missing (fail-closed boot). */

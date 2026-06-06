@@ -231,15 +231,26 @@ host-verified against the live Bot API (token-gated), not CI.
 - **Not yet host-verified (token-gated):** a real `getUpdates` poll against a live bot. Voice transcription, group
   binding, and text coalescing/debounce are deferred (Phase 2/3).
 
-### Phase 2 — The agent turn (two-way closes)
-- Implement the chosen runtime (§6): on inbound, run one turn with V1's MCP tools attached, system prompt =
-  vault persona + `getContext` preamble; agent uses `reply` to answer.
-- Single-user **lane**: a 1-deep serialized queue per chat (coalesce rapid messages; at most one active turn) —
-  ~30 LOC, replacing canonical `lanes.js`.
-- Optional **triage** gate for group chats (REPLY/NO_REPLY) to honour "no side-channel leak" — port the lightweight
-  `/chat/triage` idea, default REPLY in DMs.
-- **Verify:** full round-trip — Telegram message in → agent searches the vault → contextual reply out; transcript
-  persisted (inbound + outbound); `egress_audit` classifies `agent-explicit-via-tool`; chat-fallback never fires.
+### Phase 2 — The agent turn (two-way closes) — ✅ BUILT (2026-06-06)
+- `agent/runtime.js` — `selectRuntime(cfg)` config-implied locus (BYOK key → Claude Agent SDK; none → null =
+  capture-only). `agent/backends/claude-sdk.js` — the default runtime, **lazy-imports** the optional
+  `@anthropic-ai/claude-agent-sdk` (declared in `optionalDependencies`), attaches the vault MCP (http to the running
+  vault, or stdio-spawn), runs one `query()` turn with `getContext`/`searchMindscape`/`reply`, reports
+  delivered/usedReplyTool. `agent/prompt.js` — the reply system prompt with the mandatory delivery contract.
+- `agent/lane.js` — the single-user lane: **serializes** turns (the active-turn registry is one global; overlap
+  would corrupt it), enqueue-and-return so polling continues, `setActiveTurn → runtime.runTurn → clearActiveTurn`
+  in `finally`, per-turn AbortController timeout.
+- `reply` **un-deferred** in `src/mcp.js`, gated on `AGENT_URL` (set by the daemon) — the default tool surface
+  (Claude Desktop / CI) is unchanged; the tool soft-fails outside a channel turn.
+- `index.js` wires runtime→lane→runTurn (null runtime → capture-only fallback).
+- **Verified:** `npm run verify:channel-agent` (12/12 GO — lane set-during/clear-after, no-overlap serialization,
+  error isolation, timeout abort, config-implied selection, prompt contract) + `npm run verify:channel-agent-e2e`
+  (8/8 GO — the WHOLE loop with only the LLM faked: REAL vault + REAL daemon inbound→lane→chokepoint, fake agent
+  behaving exactly like the reply tool: inbound user row + outbound assistant row both real, agent sees the active
+  turn, delivery audited `agent-explicit-via-tool`, active turn cleared, zero-plaintext). Regressions GO.
+- **Not yet host-verified (token-gated):** a real Claude Agent SDK turn (needs the SDK installed + `ANTHROPIC_API_KEY`
+  + a running vault MCP with `AGENT_URL` set). The SDK message-shape sniffing in `claude-sdk.js` (usedReplyTool /
+  delivered detection) is the one part exercised only on the host.
 
 ### Phase 3 — Hardening + 2nd/3rd platform
 - Voice (TTS) reply for Telegram (harvest the canonical voice post-send hook) — optional.

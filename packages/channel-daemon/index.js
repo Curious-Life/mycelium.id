@@ -17,20 +17,25 @@ import { createTelegramChokepoint } from './chokepoint.js';
 import { createDaemonApp } from './server.js';
 import { createInboundHandler } from './inbound.js';
 import { createTelegramPoller } from './transport/telegram-poller.js';
-import { getActiveTurn, setActiveTurn } from './inbound-context.js';
+import { selectRuntime } from './agent/runtime.js';
+import { createLane } from './agent/lane.js';
+import { getActiveTurn } from './inbound-context.js';
 
 /**
- * Phase 1 turn stub: register the active turn so a human can exercise the egress
- * chokepoint (and the reply tool) against a live inbound message. Phase 2
- * replaces this with the real single-user lane: setActiveTurn → agent turn
- * (which calls the reply tool) → clearActiveTurn in finally.
+ * Capture-only fallback when no runtime is configured (no BYOK key, no local
+ * model): the inbound is still captured (in inbound.js, before runTurn) — this
+ * just logs that no reply will be sent. Two-way is OFF, ingestion stays ON.
  */
-function phase1RunTurn(turnCtx) {
-  setActiveTurn(turnCtx);
-  console.log(`[channel-daemon] active turn set for chat=${turnCtx.channelId} (Phase 1: no agent reply yet)`);
+function captureOnlyRunTurn(turnCtx) {
+  console.log(`[channel-daemon] captured chat=${turnCtx.channelId}; two-way replies OFF (no inference configured)`);
 }
 
-export function buildDaemon(cfg, { runTurn = phase1RunTurn } = {}) {
+/**
+ * @param {object} cfg
+ * @param {object} [opts]
+ * @param {Function} [opts.runTurn]  override the turn handler (tests inject a fake)
+ */
+export function buildDaemon(cfg, { runTurn } = {}) {
   const telegram = createTelegramApi({ botToken: cfg.botToken });
   const vault = createVaultClient({ baseUrl: cfg.vaultBaseUrl });
   const dedup = createEnvelopeDedup();
@@ -58,11 +63,27 @@ export function buildDaemon(cfg, { runTurn = phase1RunTurn } = {}) {
 
   const app = createDaemonApp({ telegramSendHandler, getActiveTurn });
 
+  // Phase 2: resolve the turn handler. A test may inject `runTurn`; otherwise
+  // select a runtime from config (BYOK key → Claude Agent SDK lane; none →
+  // capture-only). The lane serializes turns + owns the active-turn lifecycle.
+  let effectiveRunTurn = runTurn;
+  let lane = null;
+  if (!effectiveRunTurn) {
+    const runtime = selectRuntime(cfg);
+    if (runtime) {
+      lane = createLane({ runtime });
+      effectiveRunTurn = lane.runTurn;
+      console.log(`[channel-daemon] two-way replies ON via ${lane.label}`);
+    } else {
+      effectiveRunTurn = captureOnlyRunTurn;
+    }
+  }
+
   // Phase 1: inbound long-poll → capture → runTurn.
-  const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn });
+  const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn });
   const poller = createTelegramPoller({ telegram, handleInbound });
 
-  return { app, poller, telegram };
+  return { app, poller, telegram, lane };
 }
 
 async function main() {

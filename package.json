@@ -114,6 +114,8 @@
     "verify:channel-egress": "node scripts/verify-channel-egress.mjs",
     "verify:channel-egress-e2e": "node scripts/verify-channel-egress-e2e.mjs",
     "verify:channel-inbound": "node scripts/verify-channel-inbound.mjs",
+    "verify:channel-agent": "node scripts/verify-channel-agent.mjs",
+    "verify:channel-agent-e2e": "node scripts/verify-channel-agent-e2e.mjs",
     "verify:enqueue": "node scripts/verify-enqueue.mjs",
     "verify:enrich": "node scripts/verify-enrich.mjs",
     "verify:publish": "node scripts/verify-publish.mjs",
@@ -128,5 +130,8 @@
     "busboy": "^1.6.0",
     "express": "^5.2.1",
     "jszip": "^3.10.1"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0"
   }
 }

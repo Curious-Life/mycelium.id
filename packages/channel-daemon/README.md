@@ -8,7 +8,7 @@ key-holder. This daemon is the host the deferred `reply` MCP tool
 
 See the design: [`docs/CHANNEL-INTEGRATIONS-DESIGN-2026-06-06.md`](../../docs/CHANNEL-INTEGRATIONS-DESIGN-2026-06-06.md).
 
-## Status — Phase 0 + Phase 1 (egress chokepoint + inbound capture)
+## Status — Phase 0–2 (egress + inbound + the agent turn = two-way works)
 
 Built:
 - `POST /telegram/send` — the egress chokepoint. Gate order: content present →
@@ -19,12 +19,31 @@ Built:
   tool reads (404 when empty → tool returns `no-active-turn`).
 - **Inbound long-poll** (`getUpdates` over raw fetch, no Grammy) → normalize →
   fail-closed owner-DM auth → `captureMessage` over REST (idempotent
-  `tg-<msgId>-<chatId>`) → `runTurn` (Phase 1 stub sets the active turn).
+  `tg-<msgId>-<chatId>`) → the lane.
+- **The agent turn** — `AgentRuntime` interface (`agent/runtime.js`), default
+  Claude Agent SDK backend (`agent/backends/claude-sdk.js`, optional dep,
+  lazy-imported), single-user serialized lane (`agent/lane.js`,
+  set→run→clear). `reply` is un-deferred in the vault MCP when `AGENT_URL` is set.
 
-Not yet built (later phases):
-- The agent turn (Claude Agent SDK behind the `AgentRuntime` interface) — Phase 2.
+Not yet built (Phase 3):
 - Voice/TTS, group binding, text coalescing, rate-limit/backoff, Discord +
-  WhatsApp — Phase 3.
+  WhatsApp. The local **ollama** runtime backend is a declared slot (selectRuntime
+  returns null until it lands).
+
+### Enabling two-way replies
+
+Two-way is **config-implied** (design §2). Provide an Anthropic BYOK key and the
+SDK; without them the daemon runs **capture-only** (ingestion still works):
+
+```bash
+npm i @anthropic-ai/claude-agent-sdk          # optional dep, only for two-way
+ANTHROPIC_API_KEY=sk-ant-…                     # → cloud Claude Agent SDK (default)
+```
+
+The vault MCP server must be reachable (default `MYCELIUM_MCP_URL=…:4711/mcp`)
+**and booted with `AGENT_URL` pointing at this daemon** so its `reply` tool calls
+the egress chokepoint back here. (Or set `CHANNEL_MCP_MODE=stdio` to have the SDK
+spawn its own MCP server — then the daemon env must carry the vault keys.)
 
 ## Run
 
@@ -53,7 +72,9 @@ The daemon binds `127.0.0.1:3010` by default (`CHANNEL_DAEMON_PORT`). Point the
 ```bash
 npm run verify:channel-egress       # chokepoint gates, DI fakes (19 checks)
 npm run verify:channel-inbound      # inbound transport + capture, DI fakes (18 checks)
+npm run verify:channel-agent        # lane lifecycle + runtime selection, DI fakes (12 checks)
 npm run verify:channel-egress-e2e   # real vault + real daemon + fake Telegram (14 checks, incl. inbound)
+npm run verify:channel-agent-e2e    # the WHOLE two-way loop, only the LLM faked (8 checks)
 ```
 
 ## Security
