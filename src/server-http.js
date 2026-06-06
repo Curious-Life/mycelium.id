@@ -108,6 +108,19 @@ export async function createHttpApp(opts = {}) {
   app.options(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], sendPrm);
   app.get(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], sendPrm);
 
+  // CRITICAL (security audit): block the relay-exposed HTTP sign-up. This is a
+  // single-user vault — the operator account is seeded server-side at provisioning
+  // (ensureOperatorUser, an in-process call that does NOT traverse this guard).
+  // Left open, /api/auth/sign-up/* lets ANYONE on the relay mint a better-auth
+  // account + session, which would pass the portal gate AND MCP authorize and
+  // reach the owner's vault. 404 (do not reveal the route).
+  app.use((req, res, next) => {
+    if (req.method === 'POST' && req.path.toLowerCase().startsWith('/api/auth/sign-up')) {
+      return res.status(404).json({ error: 'not_found' });
+    }
+    return next();
+  });
+
   // Brute-force throttle on the relay-exposed operator sign-in (gap review): a
   // GLOBAL bucket (un-evadable by header spoofing) — see src/http/rate-limit.js.
   // Mounted BEFORE the auth handler so a 429 short-circuits before better-auth.

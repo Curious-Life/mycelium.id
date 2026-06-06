@@ -24,7 +24,8 @@ const authStub = http.createServer((req, res) => {
   if (req.url.startsWith('/api/auth/get-session')) {
     const cookie = req.headers.cookie || '';
     res.setHeader('content-type', 'application/json');
-    if (cookie.includes('session_token=GOOD')) res.end(JSON.stringify({ user: { id: 'owner-1' } }));
+    // Real better-auth get-session returns the user email; the gate owner-pins on it.
+    if (cookie.includes('session_token=GOOD')) res.end(JSON.stringify({ user: { id: 'owner-1', email: 'operator@mycelium.local' } }));
     else res.end('null');
     return;
   }

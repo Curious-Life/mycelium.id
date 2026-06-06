@@ -12,6 +12,7 @@ import { toNodeHandler } from 'better-auth/node';
 import { createAuth, migrateAuth, ensureOperatorUser } from '../src/auth.js';
 import { authShimRouter } from '../src/auth-shim.js';
 import { createPathThrottle } from '../src/http/rate-limit.js';
+import { resolveRequester } from '../src/http/require-vault-auth.js';
 
 let pass = 0, fail = 0;
 const ok = (c, label, extra = '') => { if (c) { pass++; console.log(`PASS  ${label}${extra ? '  ' + extra : ''}`); } else { fail++; console.log(`FAIL  ${label}${extra ? '  ' + extra : ''}`); } };
@@ -19,6 +20,7 @@ const ok = (c, label, extra = '') => { if (c) { pass++; console.log(`PASS  ${lab
 // 0. the throttle is actually wired into the real server (not just this test)
 const srvHttp = readFileSync(new URL('../src/server-http.js', import.meta.url), 'utf8');
 ok(/createPathThrottle\([^)]*\/api\/auth\/sign-in\/email/.test(srvHttp), '0. sign-in throttle mounted in server-http.js');
+ok(/startsWith\('\/api\/auth\/sign-up'\)/.test(srvHttp) && /res\.status\(404\)/.test(srvHttp), '0b. relay HTTP sign-up BLOCKED in server-http.js (audit)');
 
 process.env.MYCELIUM_AUTH_SECRET = 'auth-hardening-secret-'.padEnd(48, 'x');
 const app = express();
@@ -34,8 +36,27 @@ try {
   const { auth } = createAuth({ baseURL: base, dbPath: ':memory:' });
   await migrateAuth(auth);
   await ensureOperatorUser(auth, { email, password });
+  // mirror server-http.js: block relay HTTP sign-up
+  app.use((req, res, next) => {
+    if (req.method === 'POST' && req.path.toLowerCase().startsWith('/api/auth/sign-up')) return res.status(404).json({ error: 'not_found' });
+    return next();
+  });
   app.all('/api/auth/*splat', toNodeHandler(auth));
   app.use('/auth', authShimRouter({ userId: 'operator' }));
+
+  // ── C. CRITICAL audit fixes: no open sign-up + owner-pinned gate ──
+  const su = await fetch(`${base}/api/auth/sign-in/email`.replace('/sign-in/', '/sign-up/'), { method: 'POST', headers: { 'content-type': 'application/json', origin: base }, body: JSON.stringify({ email: 'attacker@evil.com', password: 'attacker-pw-123', name: 'M' }) });
+  ok(su.status === 404, 'C1. relay HTTP /sign-up/email BLOCKED → 404 (attacker cannot mint an account)', `(${su.status})`);
+  // Simulate a non-owner session existing anyway (created via the INTERNAL api,
+  // which provisioning uses): the owner-pinned gate must still reject it.
+  await auth.api.signUpEmail({ body: { email: 'attacker@evil.com', password: 'attacker-pw-123', name: 'M' } });
+  const evil = await fetch(`${base}/api/auth/sign-in/email`, { method: 'POST', headers: { 'content-type': 'application/json', origin: base }, body: JSON.stringify({ email: 'attacker@evil.com', password: 'attacker-pw-123' }) });
+  const evilCookie = (evil.headers.get('set-cookie') || '').split(';')[0];
+  const evilReq = { socket: { remoteAddress: '203.0.113.5' }, headers: { cookie: evilCookie } };
+  ok(await resolveRequester(evilReq, { userId: 'operator' }) === null, 'C2. owner-pin: a valid NON-OWNER session is rejected by the gate');
+  const ownerSi = await fetch(`${base}/api/auth/sign-in/email`, { method: 'POST', headers: { 'content-type': 'application/json', origin: base }, body: JSON.stringify({ email, password }) });
+  const ownerReq = { socket: { remoteAddress: '203.0.113.5' }, headers: { cookie: (ownerSi.headers.get('set-cookie') || '').split(';')[0] } };
+  ok((await resolveRequester(ownerReq, { userId: 'operator' }))?.via === 'cookie', 'C3. owner-pin: the owner session is still accepted');
 
   const signIn = (pw) => fetch(`${base}/api/auth/sign-in/email`, { method: 'POST', headers: { 'content-type': 'application/json', origin: base }, body: JSON.stringify({ email, password: pw }) });
   const getSession = (cookie) => fetch(`${base}/api/auth/get-session`, { headers: { cookie } });

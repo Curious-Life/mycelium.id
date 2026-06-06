@@ -49,12 +49,19 @@ export function defaultValidateSession(cookieHeader) {
   // fail closed (→ 401) rather than hang.
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), VALIDATE_TIMEOUT_MS);
+  // Defence in depth (audit): pin the session to the SINGLE vault owner. Even if
+  // some path ever minted a non-owner better-auth account, its session must NOT
+  // authorize into the owner's vault. The owner email is the one ensureOperatorUser
+  // seeds (MYCELIUM_USER_EMAIL or the default); both processes read the same env.
+  const ownerEmail = (process.env.MYCELIUM_USER_EMAIL || 'operator@mycelium.local').toLowerCase();
   return fetch(`${base}/api/auth/get-session`, { headers: { cookie: cookieHeader }, signal: ctrl.signal })
     .then(async (r) => {
       if (!r.ok) return null;
       const body = await r.json().catch(() => null);
       const id = body?.user?.id || body?.session?.userId || null;
-      return id ? String(id) : null;
+      const email = body?.user?.email ? String(body.user.email).toLowerCase() : null;
+      if (!id || email !== ownerEmail) return null; // not the owner → deny
+      return String(id);
     })
     .catch(() => null)
     .finally(() => clearTimeout(timer));
