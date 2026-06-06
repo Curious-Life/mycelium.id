@@ -119,6 +119,8 @@
     "verify:channel-coalesce": "node scripts/verify-channel-coalesce.mjs",
     "verify:channel-tts": "node scripts/verify-channel-tts.mjs",
     "verify:channel-groups": "node scripts/verify-channel-groups.mjs",
+    "smoke:telegram-live": "node scripts/smoke-telegram-live.mjs",
+    "smoke:agent-live": "node scripts/smoke-agent-live.mjs",
     "verify:enqueue": "node scripts/verify-enqueue.mjs",
     "verify:enrich": "node scripts/verify-enrich.mjs",
     "verify:publish": "node scripts/verify-publish.mjs",

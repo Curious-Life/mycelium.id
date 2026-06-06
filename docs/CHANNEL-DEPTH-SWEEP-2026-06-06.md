@@ -91,9 +91,11 @@ advertising `reply` (the http-mode wiring gap). Everything else swept **confirme
 
 | Assumption (load-bearing) | Verified at |
 |---|---|
-| `query()` is an AsyncGenerator; options `mcpServers` dict / `allowedTools` / `bypassPermissions` / `abortController` real | web: `@anthropic-ai/claude-agent-sdk@0.3.x` `sdk.d.ts` (sweep A) |
-| tool_use on `type:'assistant'`.message.content; tool_result on `type:'user'`.message.content, keyed by `tool_use_id` | `agent/backends/claude-sdk.js` `createReplyTracker`; `scripts/verify-channel-agent.mjs` S1–S4 |
-| SDK `env` is forwarded to a CLI subprocess (spread process.env) | `agent/backends/claude-sdk.js:96` |
+| `query` is a named export returning `Query extends AsyncGenerator<SDKMessage, void>` | **REAL pkg v0.3.167 installed + run**: `typeof query==='function'`; `sdk.d.ts:2198` |
+| options `mcpServers` is `Record<string,McpServerConfig>`; `permissionMode:'bypassPermissions'` valid; `env?:Record<string,string>` | **REAL pkg v0.3.167**: `sdk.d.ts:1637`, `:2011`, `:1406` |
+| MCP http `{type:'http',url,headers}` + stdio `{command,args,env}` configs | **REAL pkg v0.3.167**: `sdk.d.ts:1011`, `:1137-1140` |
+| tool_use on `SDKAssistantMessage{type:'assistant', message:BetaMessage}`.content; tool_result on `SDKUserMessage{type:'user', message:MessageParam}`.content, keyed by `tool_use_id` | **REAL pkg v0.3.167**: `sdk.d.ts:2643`, SDKUserMessage + `tool_use_id` (`:1999+`); `createReplyTracker`; `verify:channel-agent` S1–S4 |
+| SDK `env` is forwarded to the bundled CLI subprocess (spread process.env) | `agent/backends/claude-sdk.js:96` |
 | Telegram current reply field is `reply_parameters:{message_id}` | core.telegram.org Bot API 7.0 (sweep B); `telegram-api.js` sendMessage + sendVoice |
 | `getUpdates` offset/allowed_updates + `sendVoice` multipart shapes correct | sweep B; `telegram-api.js` |
 | reply buildSendBody fields == chokepoint destructure == setActiveTurn fields | `src/tools/reply.js:69-78`, `packages/channel-daemon/chokepoint.js`, `inbound-context.js` (sweep C) |
@@ -118,7 +120,12 @@ advertising `reply` (the http-mode wiring gap). Everything else swept **confirme
 - Single-instance lockfile (canonical pattern).
 - Per-second burst rate-limit (current is per-window).
 - Voice-inbound transcription (voice-only inbound is currently skipped → no `voiceMode`-driven voice replies).
-- Real host smoke: live Telegram poll/send/voice (token + ffmpeg), real Claude SDK turn (`npm i` SDK + key).
+- Real host smoke (secret-gated — one command each, shipped):
+  - `npm run smoke:telegram-live` (TELEGRAM_BOT_TOKEN + OWNER_TELEGRAM_ID [+ `--voice` w/ ffmpeg + provider key]).
+  - `npm run smoke:agent-live` (ANTHROPIC_API_KEY + a vault on :4711 with MYCELIUM_MCP_BEARER) — isolates the
+    SDK↔vault-MCP leg (read-only getContext turn). Full two-way loop smoke = run the daemon + send a real message.
+  - **SDK API shape is already closed** (real pkg v0.3.167 installed + types checked — see table); these smokes
+    cover the remaining *behavioral* legs (billed turn, live platform, ffmpeg).
 
 ## Discord plan (the reuse — next phase)
 Reuse **unchanged**: `inbound-context`, `dedup`, `ratelimit`, `coalescer`, `lane`, all of `agent/*`,

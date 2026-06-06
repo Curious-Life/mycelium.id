@@ -113,6 +113,17 @@ npm run verify:channel-egress-e2e   # real vault + real daemon + fake Telegram (
 npm run verify:channel-agent-e2e    # the WHOLE two-way loop, only the LLM faked (8 checks)
 ```
 
+Host smokes (need real secrets — not CI):
+
+```bash
+TELEGRAM_BOT_TOKEN=… OWNER_TELEGRAM_ID=… npm run smoke:telegram-live   # + --voice
+ANTHROPIC_API_KEY=… MYCELIUM_MCP_BEARER=… npm run smoke:agent-live     # SDK↔vault leg
+```
+
+(The Claude Agent SDK API shape is verified against the real installed package
+v0.3.167 — see docs/CHANNEL-DEPTH-SWEEP-2026-06-06.md; the smokes cover the
+remaining billed-turn / live-platform / ffmpeg behavior.)
+
 ## Security
 
 - **Explicit-send only** (CLAUDE.md §11): this chokepoint is the only path agent
