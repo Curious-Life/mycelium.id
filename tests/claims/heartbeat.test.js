@@ -42,29 +42,31 @@ function fakeDb(lastByCadence = {}) {
   return { claims: { lastSnapshotWindow: async (_u, g) => lastByCadence[g] ?? null } };
 }
 
-test('heartbeat spawns each cadence whose window has rolled over', async () => {
+test('heartbeat spawns ONE child for all due cadences (no concurrent contention)', async () => {
   const calls = [];
   const hb = startClaimHeartbeat({
     db: fakeDb({}), userId: 'u', now: () => NOW,
-    spawn: (cadence, w) => { calls.push({ cadence, end: w.windowEnd }); },
+    spawn: (cadences) => { calls.push(cadences); },
     intervalMs: 1e9, runOnBoot: false,
   });
   await hb.tick();
   hb.stop();
-  assert.deepEqual(calls.map((c) => c.cadence).sort(), [...CADENCES].sort());
+  assert.equal(calls.length, 1, 'exactly one spawn');
+  assert.deepEqual([...calls[0]].sort(), [...CADENCES].sort());
 });
 
-test('heartbeat skips a cadence already discovered for this window', async () => {
+test('heartbeat omits a cadence already discovered for this window', async () => {
   const calls = [];
   const last = { day: previousCompleteWindow(NOW, 'day').windowEnd }; // day already done
   const hb = startClaimHeartbeat({
     db: fakeDb(last), userId: 'u', now: () => NOW,
-    spawn: (cadence) => calls.push(cadence), intervalMs: 1e9, runOnBoot: false,
+    spawn: (cadences) => calls.push(cadences), intervalMs: 1e9, runOnBoot: false,
   });
   await hb.tick();
   hb.stop();
-  assert.ok(!calls.includes('day'), 'day should be skipped (already snapshotted)');
-  assert.ok(calls.includes('week'), 'week still due');
+  assert.equal(calls.length, 1);
+  assert.ok(!calls[0].includes('day'), 'day skipped (already snapshotted)');
+  assert.ok(calls[0].includes('week'), 'week still due');
 });
 
 test('heartbeat does not pile onto an in-flight job', async () => {
@@ -76,6 +78,18 @@ test('heartbeat does not pile onto an in-flight job', async () => {
   await hb.tick();
   hb.stop();
   assert.equal(calls.length, 0, 'no spawns while a job runs');
+});
+
+test('heartbeat does not spawn when nothing is due', async () => {
+  const calls = [];
+  const allDone = Object.fromEntries(CADENCES.map((c) => [c, previousCompleteWindow(NOW, c).windowEnd]));
+  const hb = startClaimHeartbeat({
+    db: fakeDb(allDone), userId: 'u', now: () => NOW,
+    spawn: (c) => calls.push(c), intervalMs: 1e9, runOnBoot: false,
+  });
+  await hb.tick();
+  hb.stop();
+  assert.equal(calls.length, 0, 'all cadences current → no spawn');
 });
 
 test('startClaimHeartbeat validates deps', () => {

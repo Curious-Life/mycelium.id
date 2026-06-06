@@ -6,7 +6,7 @@
 //
 // Deps are injected so this is unit-testable without a model, a child, or a clock:
 //   db          — for db.claims.lastSnapshotWindow
-//   spawn(cadence, window) — starts the discovery child for one cadence
+//   spawn(cadences[]) — starts ONE discovery child for all due cadences
 //   isJobRunning() — true if a clustering/discovery child is already alive
 //   now() — current ms (default Date.now)
 //
@@ -34,19 +34,25 @@ export function startClaimHeartbeat({
     if (running) return; // single-flight; a slow tick must not overlap the next
     running = true;
     try {
+      if (isJobRunning()) return; // don't pile onto a live clustering/discovery child
+      // Collect every cadence whose window has rolled over since its last
+      // snapshot, then spawn ONE child for all of them — the child runs them
+      // sequentially so concurrent children never contend for the local model.
+      const due = [];
       for (const cadence of cadences) {
-        if (isJobRunning()) return; // don't pile onto a live clustering/discovery child
         const w = previousCompleteWindow(now(), cadence);
         let last = null;
         try { last = await db.claims.lastSnapshotWindow(userId, cadence); }
         catch { continue; } // db hiccup → try this cadence again next tick
         if (last && last >= w.windowEnd) continue; // already discovered this window
-        try {
-          await spawn(cadence, w);
-          log(`[claims] spawned discovery for ${cadence} window ending ${w.windowEnd}`);
-        } catch (e) {
-          log(`[claims] spawn failed for ${cadence}: ${String(e?.message || e)}`);
-        }
+        due.push(cadence);
+      }
+      if (!due.length) return;
+      try {
+        await spawn(due);
+        log(`[claims] spawned discovery for: ${due.join(', ')}`);
+      } catch (e) {
+        log(`[claims] spawn failed for ${due.join(',')}: ${String(e?.message || e)}`);
       }
     } finally {
       running = false;

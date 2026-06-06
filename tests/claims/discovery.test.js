@@ -43,6 +43,24 @@ test('pure helpers: contentHash stable, similarity, parseProposals', () => {
   assert.equal(parseProposals('[{"type":"value","content":"x","support":["m1"]}]').length, 1);
 });
 
+test('parseProposals salvages complete objects from a TRUNCATED reply (the num_ctx bug fallback)', () => {
+  // model reply cut off mid-object (what a too-small num_ctx produces)
+  const truncated = '[\n {"type":"value","content":"loves the outdoors","support":["m1"]},\n'
+    + ' {"type":"boundary","content":"peanut allergy","support":["m2"]},\n'
+    + ' {"type":"identity","content":"endur';
+  const p = parseProposals(truncated);
+  assert.equal(p.length, 2, 'recovers the two complete claims, drops the cut-off one');
+  assert.equal(p[0].content, 'loves the outdoors');
+  assert.equal(p[1].type, 'boundary');
+});
+
+test('parseProposals salvage is string-aware (braces/brackets inside content do not break it)', () => {
+  const t = '[{"type":"value","content":"likes {curly} and [square] punctuation","support":["m1"]}, {"type":"bo';
+  const p = parseProposals(t);
+  assert.equal(p.length, 1);
+  assert.match(p[0].content, /curly/);
+});
+
 test('no evidence → no-op, no snapshot (honest gap)', async () => {
   const r = await discoverWindow({ db, userId: U, infer: inferOnce([]), validate: support, evidence: [], ...W });
   assert.deepEqual(r, { created: 0, updated: 0, skipped: 0, claims: [] });

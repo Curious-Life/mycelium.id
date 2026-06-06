@@ -16,6 +16,7 @@
 import { createHash } from 'node:crypto';
 import { update as updateConfidence, fromConfidence, toConfidence } from './confidence.js';
 import { cosine } from '../search/ann/cosine.js';
+import { approxTokens } from './support-path.js';
 
 // claim_type → decay_class (how fast the confidence fades without re-evidence).
 const TYPE_DECAY = Object.freeze({
@@ -27,6 +28,15 @@ const TYPE_DECAY = Object.freeze({
 });
 const CLAIM_TYPES = ['personality', 'value', 'principle', 'identity', 'boundary'];
 const L_NEW = fromConfidence(0.6); // a fresh single-window claim starts modestly confident
+
+// Token budgeting for the LOCAL model. Ollama's default context (~4096) is far
+// too small: a big evidence prompt crowds out generation so the JSON reply gets
+// truncated → 0 claims. We bound the evidence we feed (filling up to a budget,
+// not a fixed message count), reserve room for the reply, and size num_ctx to
+// hold BOTH. All tunable via env. See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md.
+const INPUT_TOKEN_BUDGET = Number(process.env.MYCELIUM_CLAIMS_INPUT_TOKENS || 6000); // evidence prompt
+const PROPOSAL_OUTPUT_TOKENS = Number(process.env.MYCELIUM_CLAIMS_OUTPUT_TOKENS || 1500); // reply room
+const CTX_MAX = Number(process.env.MYCELIUM_CLAIMS_CTX_MAX || 16384); // upper bound on num_ctx
 
 export function normalizeText(s) {
   return (s ?? '').toString().toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -44,21 +54,50 @@ export function similarity(a, b) {
   return inter / (ta.size + tb.size - inter);
 }
 
-/** Parse the model's proposal output into typed claim candidates. */
+const normProposal = (c) => (c && typeof c.content === 'string' && c.content.trim()
+  ? {
+    type: CLAIM_TYPES.includes(c.type) ? c.type : 'personality',
+    content: c.content.trim(),
+    support: Array.isArray(c.support) ? c.support.filter((x) => typeof x === 'string') : [],
+  }
+  : null);
+
+/**
+ * Salvage every COMPLETE top-level `{…}` object from a string by brace-matching
+ * (string-aware). Recovers all complete claims even when the enclosing array is
+ * TRUNCATED (the model's reply got cut mid-object) — we keep what parsed instead
+ * of losing the whole batch.
+ */
+function salvageObjects(text) {
+  const out = [];
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') { if (depth === 0) start = i; depth++; }
+    else if (ch === '}') { depth--; if (depth === 0 && start >= 0) { try { out.push(JSON.parse(text.slice(start, i + 1))); } catch { /* skip */ } start = -1; } }
+  }
+  return out;
+}
+
+/** Parse the model's proposal output into typed claim candidates. Robust to a
+ *  truncated reply: tries the whole array first, else salvages complete objects. */
 export function parseProposals(text) {
   if (typeof text !== 'string') return [];
-  const m = text.match(/\[[\s\S]*\]/);
-  if (!m) return [];
-  let arr;
-  try { arr = JSON.parse(m[0]); } catch { return []; }
-  if (!Array.isArray(arr)) return [];
-  return arr
-    .filter((c) => c && typeof c.content === 'string' && c.content.trim())
-    .map((c) => ({
-      type: CLAIM_TYPES.includes(c.type) ? c.type : 'personality',
-      content: c.content.trim(),
-      support: Array.isArray(c.support) ? c.support.filter((x) => typeof x === 'string') : [],
-    }));
+  let result = [];
+  const m = text.match(/\[[\s\S]*\]/); // a bare or fenced JSON array
+  if (m) { try { const a = JSON.parse(m[0]); if (Array.isArray(a)) result = a.map(normProposal).filter(Boolean); } catch { /* fall through */ } }
+  // Fall back to object-salvage when the array path yields nothing: covers a
+  // TRUNCATED array, a single bare object, or a {"claims":[…]}-style wrapper
+  // (format:"json" sometimes wraps or returns one object).
+  if (!result.length) result = salvageObjects(text).map(normProposal).filter(Boolean);
+  return result;
 }
 
 function buildProposalPrompt(evidence) {
@@ -91,6 +130,23 @@ function deltaFor(isNew, omega) {
 }
 
 /**
+ * Fill the evidence prompt up to a token budget (the user's "feed the full data
+ * up to the token limit"). Includes whole messages in order until the next one
+ * would overflow `budgetTokens` (+ ~8 tokens/line for the `[id] ` wrapper).
+ * @returns {{ kept: Array, dropped: number, tokens: number }}
+ */
+function budgetEvidence(evidence, budgetTokens) {
+  const kept = [];
+  let tokens = 0;
+  for (const e of evidence) {
+    const t = approxTokens(e.content) + approxTokens(String(e.id || '')) + 8;
+    if (kept.length && tokens + t > budgetTokens) break; // always keep at least one
+    kept.push(e); tokens += t;
+  }
+  return { kept, dropped: evidence.length - kept.length, tokens };
+}
+
+/**
  * Discover/reconcile claims for one window.
  * @param {object} p
  * @param {object} p.db                 the db namespace (uses db.claims)
@@ -111,13 +167,21 @@ function deltaFor(isNew, omega) {
  * @param {number} [p.simThreshold=0.6]      lexical-fallback cutoff
  * @returns {Promise<{created:number, updated:number, skipped:number, claims:string[]}>}
  */
-export async function discoverWindow({ db, userId, infer, validate, evidence, windowStart, windowEnd, granularity, embed, cosineThreshold = 0.62, simThreshold = 0.6 }) {
+export async function discoverWindow({ db, userId, infer, validate, evidence, windowStart, windowEnd, granularity, embed, cosineThreshold = 0.62, simThreshold = 0.6, log = () => {} }) {
   const out = { created: 0, updated: 0, skipped: 0, claims: [] };
   if (!Array.isArray(evidence) || evidence.length === 0) return out; // no evidence → no snapshot (honest gap)
 
+  // Feed evidence up to the input token budget; size num_ctx to hold the full
+  // prompt PLUS the reply (else Ollama's small default context truncates the
+  // JSON → 0 claims). No silent caps: log what was dropped.
+  const { kept, dropped } = budgetEvidence(evidence, INPUT_TOKEN_BUDGET);
+  if (dropped > 0) log(`[claims] ${granularity}: evidence budget ${INPUT_TOKEN_BUDGET}tok kept ${kept.length}/${evidence.length} (dropped ${dropped} oldest)`);
+  const prompt = buildProposalPrompt(kept);
+  const numCtx = Math.min(CTX_MAX, Math.max(4096, Math.ceil((approxTokens(prompt) + PROPOSAL_OUTPUT_TOKENS + 512) / 1024) * 1024));
+
   let raw;
   try {
-    raw = await infer({ prompt: buildProposalPrompt(evidence), task: 'narrate', sensitive: true, maxTokens: 700 });
+    raw = await infer({ prompt, task: 'narrate', sensitive: true, maxTokens: PROPOSAL_OUTPUT_TOKENS, numCtx, format: 'json' });
   } catch {
     return out; // Tier-3 fail-open: no local model → no claims, not an error
   }

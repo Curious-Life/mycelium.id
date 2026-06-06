@@ -243,7 +243,7 @@ export async function startRestServer({
         // model → no-op). Gated with the drainer so verify scripts never run it.
         const claimsHeartbeat = startClaimHeartbeat({
           db, userId: bootUserId, isJobRunning: isClusteringRunning,
-          spawn: (cadence) => startClaimDiscoveryJob({ dbPath: effectiveDbPath, userId: bootUserId, cadence }),
+          spawn: (cadences) => startClaimDiscoveryJob({ dbPath: effectiveDbPath, userId: bootUserId, cadence: cadences.join(',') }),
         });
         closeHandle = () => {
           try { connectorScheduler?.stop(); } catch { /* */ }
