@@ -95,20 +95,51 @@ export function fromMultibase(mb) {
  * Build the instance did:web document for `host`.
  * @param {string} host  the public host (e.g. "alice.mycelium.id")
  * @param {string} publicKeyB64  identity.publicKeyB64
+ * @param {string} [matrixId]  the box's Matrix MXID (e.g. "@alice:hs") — when
+ *   present, advertised as a `#matrix` service so peers can discover where to
+ *   invite this box for Phase-B shared-space rooms.
  * @returns {object|null}  null when host is missing/invalid (fail closed)
  */
-export function buildDidDocument(host, publicKeyB64) {
+export function buildDidDocument(host, publicKeyB64, matrixId) {
   if (!host || !HOST_RE.test(host) || !publicKeyB64) return null;
   const did = `did:web:${host}`;
   const vm = `${did}#key-1`;
+  const service = [{ id: `${did}#federation`, type: 'MyceliumFederation', serviceEndpoint: `https://${host}/federation` }];
+  if (matrixId && /^@[^:\s]+:[^\s]+$/.test(matrixId)) {
+    service.push({ id: `${did}#matrix`, type: 'MatrixHomeserver', serviceEndpoint: `matrix:u/${matrixId.slice(1)}` });
+  }
   return {
     '@context': ['https://www.w3.org/ns/did/v1', 'https://w3id.org/security/multikey/v1'],
     id: did,
     verificationMethod: [{ id: vm, type: 'Multikey', controller: did, publicKeyMultibase: toMultibase(publicKeyB64) }],
     authentication: [vm],
     assertionMethod: [vm],
-    service: [{ id: `${did}#federation`, type: 'MyceliumFederation', serviceEndpoint: `https://${host}/federation` }],
+    service,
   };
+}
+
+/**
+ * Resolve a peer's Matrix MXID from their did:web document's `#matrix` service
+ * (the Phase-B invite anchor). SSRF-guarded like resolveDidKey. Returns the MXID
+ * (e.g. "@bob:hs") or null when the peer advertises none.
+ * @param {string} did  a did:web identifier
+ * @param {object} [opts] @returns {Promise<string|null>}
+ */
+export async function resolveMatrixService(did, { fetch = globalThis.fetch, timeoutMs = RESOLVE_TIMEOUT_MS, lookup } = {}) {
+  const m = DID_WEB_RE.exec(String(did || ''));
+  if (!m) return null;
+  const host = m[1];
+  if (!isPublicHost(host)) return null;
+  await assertResolvesPublic(host, { lookup });
+  const res = await fetch(`https://${host}/.well-known/did.json`, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
+  if (!res.ok) return null;
+  const doc = await res.json();
+  if (doc.id !== did) return null; // no key confusion
+  const svc = (doc.service || []).find((s) => s.id === `${did}#matrix` || s.type === 'MatrixHomeserver');
+  const ep = svc?.serviceEndpoint;
+  if (typeof ep !== 'string') return null;
+  const mx = ep.replace(/^matrix:u\//, '@'); // "matrix:u/bob:hs" → "@bob:hs"
+  return /^@[^:\s]+:[^\s]+$/.test(mx) ? mx : null;
 }
 
 /**

@@ -45,6 +45,7 @@ async function main() {
   const systemKey = await importMasterKey(crypto.randomBytes(32).toString('hex'));
   const { db, close } = getDb({ dbPath: join(dir, 'v.db'), userKey, systemKey });
 
+  await db._base.d1Query(`INSERT INTO users (id, display_name, type) VALUES ('owner', 'Owner', 'human')`, []);
   // Seed bob as a real local user + profile + an ACCEPTED connection to owner,
   // so the share grant (which now requires an accepted connection) succeeds.
   await db._base.d1Query(`INSERT INTO users (id, display_name, type) VALUES ('bob', 'Bob', 'human')`, []);
@@ -114,6 +115,13 @@ async function main() {
   rec('cluster: a non-member cannot share into the space → 404', (await call(intruder.port, 'POST', `/portal/spaces/${sid}/seed-cluster`, { level: 'realm', realm_id: 1 })).status === 404);
   const kn = await call(owner.port, 'GET', `/portal/spaces/${sid}/knowledge`);
   rec('cluster: shared clusters appear as knowledge entries', kn.json.entries.some((e) => e.source_type === 'realm') && kn.json.entries.some((e) => e.source_type === 'theme'));
+
+  // ── Phase B foundation: real-sqlite round-trips of the new substrate ─────
+  await db.spaceMatrixRooms.bind(sid, '!room:hs.example', 'owner');
+  rec('phase-b: space⇄Megolm-room binding round-trips', (await db.spaceMatrixRooms.get(sid))?.room_id === '!room:hs.example');
+  await db.identityChannels.upsert({ channel_kind: 'matrix', channel_value: '@owner:hs.example', owner_user_id: 'owner' });
+  await db.identityChannels.bindToUser('matrix', '@owner:hs.example', 'owner');
+  rec('phase-b: MXID binds via identity_channels', (await db.identityChannels.getByChannel('matrix', '@owner:hs.example'))?.owner_user_id === 'owner');
 
   owner.server.close(); bob.server.close(); intruder.server.close(); close?.();
   rmSync(dir, { recursive: true, force: true });

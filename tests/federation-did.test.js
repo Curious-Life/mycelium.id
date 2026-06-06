@@ -31,6 +31,38 @@ describe('buildDidDocument', () => {
     assert.equal(buildDidDocument('has_underscore', id.publicKeyB64), null);
     assert.equal(buildDidDocument(HOST, ''), null);
   });
+  it('advertises a #matrix service only when an MXID is given', () => {
+    assert.equal((buildDidDocument(HOST, id.publicKeyB64).service.find((s) => s.type === 'MatrixHomeserver')), undefined);
+    const doc = buildDidDocument(HOST, id.publicKeyB64, '@alice:hs.example');
+    const mx = doc.service.find((s) => s.type === 'MatrixHomeserver');
+    assert.equal(mx.id, `did:web:${HOST}#matrix`);
+    assert.equal(mx.serviceEndpoint, 'matrix:u/alice:hs.example');
+    // a malformed MXID is not advertised
+    assert.equal(buildDidDocument(HOST, id.publicKeyB64, 'not-an-mxid').service.find((s) => s.type === 'MatrixHomeserver'), undefined);
+  });
+});
+
+describe('resolveMatrixService', () => {
+  const did = `did:web:${HOST}`;
+  const fetchDoc = (doc) => async () => ({ ok: true, status: 200, async json() { return doc; } });
+  const noLookup = async () => []; // resolves "public" (empty → no private addr)
+  it('reads the peer MXID from their #matrix service', async () => {
+    const { resolveMatrixService } = await import('../src/federation/did.js');
+    const doc = buildDidDocument(HOST, id.publicKeyB64, '@bob:hs.example');
+    const mx = await resolveMatrixService(did, { fetch: fetchDoc(doc), lookup: noLookup });
+    assert.equal(mx, '@bob:hs.example');
+  });
+  it('returns null when no #matrix service is advertised', async () => {
+    const { resolveMatrixService } = await import('../src/federation/did.js');
+    const doc = buildDidDocument(HOST, id.publicKeyB64); // no MXID
+    assert.equal(await resolveMatrixService(did, { fetch: fetchDoc(doc), lookup: noLookup }), null);
+  });
+  it('returns null on did-document id mismatch (no key confusion)', async () => {
+    const { resolveMatrixService } = await import('../src/federation/did.js');
+    const doc = buildDidDocument(HOST, id.publicKeyB64, '@bob:hs.example');
+    doc.id = 'did:web:evil.example';
+    assert.equal(await resolveMatrixService(did, { fetch: fetchDoc(doc), lookup: noLookup }), null);
+  });
 });
 
 describe('buildWebfinger', () => {
