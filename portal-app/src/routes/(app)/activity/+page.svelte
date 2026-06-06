@@ -284,13 +284,13 @@
 	<!-- Date navigator (day/week mode) -->
 	{#if granularity !== 'all'}
 		<div class="flex items-center justify-center gap-4 mb-6">
-			<button onclick={() => navigate(-1)} class="p-2 rounded-lg hover:bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors">
+			<button onclick={() => navigate(-1)} aria-label="Previous period" class="p-2 rounded-lg hover:bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" /></svg>
 			</button>
 			<button onclick={goToday} class="text-sm font-medium text-[var(--color-text-primary)] hover:text-[var(--color-accent)] transition-colors min-w-48 text-center">
 				{periodLabel}
 			</button>
-			<button onclick={() => navigate(1)} class="p-2 rounded-lg hover:bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors" disabled={isToday && granularity === 'day'}>
+			<button onclick={() => navigate(1)} aria-label="Next period" class="p-2 rounded-lg hover:bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors" disabled={isToday && granularity === 'day'}>
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" /></svg>
 			</button>
 		</div>
@@ -602,7 +602,10 @@
 						{@const barH = (week.total / maxAllWeek) * 100}
 						{@const liveR = week.total > 0 ? (week.live / week.total) * 100 : 0}
 						<div class="flex-1 min-w-0 relative group cursor-pointer" style="height: 100%;"
+							role="button"
+							tabindex="0"
 							onclick={() => { selectedDate = week.weekStart; granularity = 'week'; loadDesktopDay(week.weekStart); }}
+							onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectedDate = week.weekStart; granularity = 'week'; loadDesktopDay(week.weekStart); } }}
 						>
 							<div class="absolute bottom-0 w-full" style="height: {Math.max(barH, 0.5)}%;">
 								<div class="absolute bottom-0 w-full rounded-t" style="height: 100%; background: #E5B84C; opacity: 0.2;"></div>
