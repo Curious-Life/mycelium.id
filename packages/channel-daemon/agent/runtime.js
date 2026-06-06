@@ -19,6 +19,7 @@
  *                                       (inbound capture still works)
  */
 import { createClaudeSdkRuntime } from './backends/claude-sdk.js';
+import { createOllamaRuntime } from './backends/ollama.js';
 
 /**
  * Select the runtime from config. Returns null when nothing is configured —
@@ -30,10 +31,11 @@ import { createClaudeSdkRuntime } from './backends/claude-sdk.js';
  */
 export function selectRuntime(cfg) {
   if (cfg.anthropicApiKey) {
-    return createClaudeSdkRuntime(cfg);
+    return createClaudeSdkRuntime(cfg); // cloud BYOK (default)
   }
-  // Local-only (ollama) backend is a declared future slot — when it lands it
-  // returns here. Until then, an ollama-only config still yields null so the
-  // daemon is honest about two-way being off rather than half-wired.
+  if (cfg.ollamaModel) {
+    return createOllamaRuntime(cfg); // sovereign local — no cloud egress
+  }
+  // Neither configured → null → two-way OFF, capture-only (honest, fail-closed).
   return null;
 }

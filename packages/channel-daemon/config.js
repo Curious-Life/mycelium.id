@@ -29,6 +29,10 @@ export function loadConfig(env = process.env) {
   const mcpBearer = env.MYCELIUM_MCP_BEARER || '';
   const mcpStdioEntry = env.CHANNEL_MCP_STDIO_ENTRY || 'src/index.js';
   const model = env.CHANNEL_AGENT_MODEL || ''; // backend default applies when empty
+  // Sovereign local backend (config-implied when no Anthropic key): an Ollama
+  // model name turns on the local runtime; no cloud egress.
+  const ollamaModel = env.CHANNEL_OLLAMA_MODEL || '';
+  const ollamaUrl = env.OLLAMA_URL || 'http://127.0.0.1:11434';
 
   // ── Phase 3 hardening ──────────────────────────────────────────────────────
   const coalesceWindowMs = Number(env.CHANNEL_COALESCE_MS || 1500); // 0 disables
@@ -38,6 +42,7 @@ export function loadConfig(env = process.env) {
   return {
     botToken, ownerTelegramId, discordBotToken, ownerDiscordId, vaultBaseUrl, host, port, agentId, selfUrl,
     anthropicApiKey, mcpMode, mcpUrl, mcpBearer, mcpStdioEntry, model,
+    ollamaModel, ollamaUrl,
     coalesceWindowMs, rateLimitMax, rateLimitWindowMs,
   };
 }

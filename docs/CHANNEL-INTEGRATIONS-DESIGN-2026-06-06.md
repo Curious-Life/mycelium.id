@@ -299,7 +299,21 @@ The chokepoint refactor + a second platform, proving the spine generalizes:
   auth) + `verify:channel-settings` extended + full suite (12 gates) + `portal:build` GO. Host-verified only: live
   Discord gateway (needs discord.js + token + MESSAGE_CONTENT enabled) + real voice upload.
 
-Deferred: WhatsApp (same spine), Discord channel allowlist + threads, local **ollama** runtime backend.
+### Discord allowlist + threads — ✅ BUILT (2026-06-06)
+Reuses the generic `identity_channels` registry (kind `discord`) + the existing channel-authority resolver — no new
+table. `/allow`·`/disallow`·`/channels` (owner-only, `commands-discord.js`); inbound responds to the operator
+anywhere OR anyone in an authorized channel (fail-closed otherwise); threads tagged `discord-thread` (normalize +
+`reply` tool mapping). Settings list + revoke in the Channels pane. Verified `verify:channel-discord` (26) +
+`verify:channel-settings` (20).
+
+### Local Ollama runtime — ✅ BUILT (2026-06-06, sovereign)
+`agent/backends/ollama.js` behind the `AgentRuntime` interface: a hand-rolled tool-use loop over Ollama `/api/chat`
+(tools) + an **MCP client** (`@modelcontextprotocol/sdk` — no new dep) to the vault's own tools. `selectRuntime` is
+now fully config-implied: Anthropic key → cloud SDK; else an Ollama model (`CHANNEL_OLLAMA_MODEL`) → local Ollama (no
+cloud egress); else null (capture-only). The loop (`runOllamaTurn`) is exported pure + unit-verified
+(`verify:channel-agent` OL1–OL4 with fake Ollama + fake MCP); a real Ollama + vault MCP is host-verified.
+
+Deferred: WhatsApp (same spine), `auto` local/cloud router, voice-inbound transcription.
 
 ---
 

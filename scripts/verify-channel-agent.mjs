@@ -11,6 +11,7 @@ import { createLane } from '../packages/channel-daemon/agent/lane.js';
 import { selectRuntime } from '../packages/channel-daemon/agent/runtime.js';
 import { buildReplySystemPrompt } from '../packages/channel-daemon/agent/prompt.js';
 import { createReplyTracker } from '../packages/channel-daemon/agent/backends/claude-sdk.js';
+import { runOllamaTurn } from '../packages/channel-daemon/agent/backends/ollama.js';
 import { getActiveTurn, _resetForTests } from '../packages/channel-daemon/inbound-context.js';
 
 const ledger = [];
@@ -90,9 +91,43 @@ const msg = (t) => ({ content: t });
 // ── runtime selection: config-implied locus ──────────────────────────────────
 {
   const withKey = selectRuntime({ anthropicApiKey: 'sk-ant-test', mcpMode: 'http' });
-  rec('R1. BYOK key → a runtime (claude-agent-sdk)', !!withKey && /claude-agent-sdk/.test(withKey.label), `label=${withKey?.label}`);
-  const none = selectRuntime({ anthropicApiKey: '' });
-  rec('R2. no key → null (two-way disabled, capture-only)', none === null);
+  rec('R1. BYOK key → claude-agent-sdk runtime', !!withKey && /claude-agent-sdk/.test(withKey.label), `label=${withKey?.label}`);
+  const local = selectRuntime({ anthropicApiKey: '', ollamaModel: 'llama3.1', ollamaUrl: 'http://127.0.0.1:11434', mcpUrl: 'http://x/mcp' });
+  rec('R2. no key + ollama model → ollama runtime (sovereign)', !!local && /ollama/.test(local.label), `label=${local?.label}`);
+  const none = selectRuntime({ anthropicApiKey: '', ollamaModel: '' });
+  rec('R3. neither → null (two-way disabled, capture-only)', none === null);
+}
+
+// ── ollama tool-use loop (pure, fake ollama + fake mcp) ──────────────────────
+{
+  const calls = [];
+  const mcpClient = {
+    listTools: async () => ({ tools: [{ name: 'searchMindscape', description: 's', inputSchema: { type: 'object' } }, { name: 'reply', description: 'r', inputSchema: { type: 'object' } }] }),
+    callTool: async ({ name, arguments: args }) => { calls.push({ name, args }); return { content: [{ type: 'text', text: name === 'reply' ? '{"delivered":true}' : 'search results here' }] }; },
+  };
+  // scripted ollama: turn 1 calls searchMindscape, turn 2 calls reply, then done.
+  const script = [
+    { message: { content: '', tool_calls: [{ function: { name: 'searchMindscape', arguments: { q: 'x' } } }] } },
+    { message: { content: '', tool_calls: [{ function: { name: 'reply', arguments: { text: 'here you go' } } }] } },
+  ];
+  let n = 0;
+  const ollamaChat = async () => script[n++];
+  const r = await runOllamaTurn({ ollamaChat, mcpClient, systemPrompt: 'sys', userMessage: 'hi' });
+  rec('OL1. loop: read tool then reply tool, mcp.callTool invoked for both', calls.length === 2 && calls[0].name === 'searchMindscape' && calls[1].name === 'reply');
+  rec('OL2. reply delivered detected from tool result', r.usedReplyTool === true && r.delivered === true && r.reason === 'delivered');
+}
+{
+  // no tool calls → no reply
+  const mcpClient = { listTools: async () => ({ tools: [] }), callTool: async () => ({ content: [] }) };
+  const r = await runOllamaTurn({ ollamaChat: async () => ({ message: { content: 'just chatting' } }), mcpClient, systemPrompt: 's', userMessage: 'hi' });
+  rec('OL3. no tool_calls → usedReplyTool false', r.usedReplyTool === false && r.delivered === false);
+}
+{
+  // reply returns delivered:false (e.g. rate-limited)
+  const mcpClient = { listTools: async () => ({ tools: [{ name: 'reply', inputSchema: {} }] }), callTool: async () => ({ content: [{ type: 'text', text: '{"delivered":false,"errorCode":"rate-limited"}' }] }) };
+  let n = 0; const script = [{ message: { tool_calls: [{ function: { name: 'reply', arguments: { text: 'x' } } }] } }, { message: { content: 'done' } }];
+  const r = await runOllamaTurn({ ollamaChat: async () => script[n++], mcpClient, systemPrompt: 's', userMessage: 'hi' });
+  rec('OL4. reply used but not delivered', r.usedReplyTool === true && r.delivered === false);
 }
 
 // ── reply prompt: the delivery contract is present ───────────────────────────

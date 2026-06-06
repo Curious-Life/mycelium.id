@@ -47,10 +47,18 @@ dep, lazy — `npm i discord.js`; enable the privileged MESSAGE_CONTENT intent).
 Set `DISCORD_BOT_TOKEN` + `OWNER_DISCORD_ID` in Settings → Channels. At least one
 platform (Telegram or Discord) must be configured.
 
+Discord allowlist + threads (built): `/allow` · `/disallow` · `/channels` authorize
+channels (identity_channels kind `discord`); the bot responds to the operator
+anywhere or anyone in an authorized channel; threads tagged `discord-thread`.
+
+Local Ollama runtime (built, sovereign): set `CHANNEL_OLLAMA_MODEL` (+ optional
+`OLLAMA_URL`) and leave the Anthropic key unset → the agent turn runs on-box via
+Ollama `/api/chat` + an MCP client to the vault tools, **no cloud egress**.
+Local-model tool-calling is weaker than frontier models — this is the sovereign
+option, not the default.
+
 Not yet built:
-- WhatsApp transport (same spine), Discord channel allowlist + threads. The local
-  **ollama** runtime backend is a declared slot (selectRuntime returns null until
-  it lands).
+- WhatsApp transport (same spine); an `auto` local/cloud router.
 
 ### Enabling two-way replies
 
