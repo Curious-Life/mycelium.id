@@ -57,6 +57,22 @@ export function createVaultClient({ baseUrl, fetch: fetchImpl = globalThis.fetch
       }
     },
 
+    /**
+     * Fetch the daemon's vault-managed config (decrypted, loopback). null on
+     * error so the daemon falls back to its own env. See the vault's
+     * /api/v1/internal/channel-config.
+     */
+    async getChannelConfig() {
+      try {
+        const res = await fetchImpl(`${root}/api/v1/internal/channel-config`, { signal: AbortSignal.timeout(timeoutMs) });
+        if (!res.ok) return null;
+        return await res.json();
+      } catch (e) {
+        console.error('[channel-daemon] channel-config fetch failed (using env):', e.message);
+        return null;
+      }
+    },
+
     /** Tool names the vault MCP currently advertises (REST mirror). null on error. */
     async listToolNames() {
       try {

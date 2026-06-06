@@ -40,6 +40,30 @@ export function loadConfig(env = process.env) {
   };
 }
 
+/**
+ * Hydrate process.env from vault-managed channel config (the UI is authoritative).
+ * Vault values OVERRIDE env when present, so editing in the portal takes effect on
+ * the next daemon start; an unset vault field leaves any existing env var intact.
+ * The TTS module + loadConfig both read process.env, so this is the single bridge.
+ * @param {object|null} cc  output of vaultClient.getChannelConfig()
+ * @param {object} [env]
+ */
+export function applyChannelConfigToEnv(cc, env = process.env) {
+  if (!cc) return;
+  const put = (k, v) => { if (v != null && v !== '') env[k] = String(v); };
+  put('TELEGRAM_BOT_TOKEN', cc.telegram?.botToken);
+  put('OWNER_TELEGRAM_ID', cc.telegram?.ownerId);
+  put('ANTHROPIC_API_KEY', cc.agent?.anthropicApiKey);
+  put('CHANNEL_AGENT_MODEL', cc.agent?.model);
+  put('TTS_PROVIDER', cc.tts?.provider);
+  put('OPENAI_API_KEY', cc.tts?.openaiApiKey);
+  put('OPENAI_TTS_VOICE', cc.tts?.openaiVoice);
+  put('OPENAI_TTS_MODEL', cc.tts?.openaiModel);
+  put('ELEVENLABS_API_KEY', cc.tts?.elevenApiKey);
+  put('ELEVENLABS_VOICE_ID', cc.tts?.elevenVoiceId);
+  put('ELEVENLABS_MODEL_ID', cc.tts?.elevenModel);
+}
+
 /** Throw a clear error if a required secret is missing (fail-closed boot). */
 export function assertEgressConfig(cfg) {
   if (!cfg.botToken) {

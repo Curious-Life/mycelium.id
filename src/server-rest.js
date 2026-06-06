@@ -18,6 +18,7 @@ import { portalHardwareRouter } from './portal-hardware.js';
 import { createOllamaDaemon } from './hardware/ollama-daemon.js';
 import { portalImportRouter } from './portal-import.js';
 import { portalSettingsRouter } from './portal-settings.js';
+import { portalChannelsRouter } from './portal-channels.js';
 import { portalConnectorsRouter } from './portal-connectors.js';
 import { registerBuiltinAdapters, createConnectorRunner, startConnectorScheduler } from './connectors/index.js';
 import { authShimRouter } from './auth-shim.js';
@@ -133,6 +134,7 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   v.use('/api/v1/portal', portalHardwareRouter({ daemon: hwOllamaDaemon }));
   v.use('/api/v1/portal', portalImportRouter({ db, userId, enqueueEnrichment }));
   v.use('/api/v1/portal', portalSettingsRouter({ db, userId }));
+  v.use('/api/v1/portal', portalChannelsRouter({ db, userId }));
   if (connectorRunner) v.use('/api/v1/portal', portalConnectorsRouter({ runner: connectorRunner }));
   // Internal support endpoints for the channel-daemon egress chokepoint
   // (egress-audit sink + channel-authority resolver). Loopback-only, same

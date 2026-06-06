@@ -331,6 +331,27 @@ Already present here (no harvest needed): `captureMessage`, `importMessages`, `r
 
 ---
 
+## 7b. Settings UI + the config bridge — ✅ BUILT (2026-06-06)
+
+Closed the UI↔daemon mismatch found in the depth pass (the daemon read `process.env`; the portal wrote the
+encrypted vault — they talked past each other). Now the **portal is authoritative** and the daemon hydrates from it:
+
+- **Vault**: `/portal/settings/tts` GET/PUT (the VoiceSection backend — was never ported; now wired, secrets-backed)
+  in `src/portal-settings.js`; new `src/portal-channels.js` (`/portal/channels` GET/PUT + `/channels/groups/:id`
+  DELETE) for Telegram token/owner, the assistant (Anthropic) key, and the authorized-groups list. All values live in
+  the encrypted `secrets` table under the same key names the daemon reads; **GET is zero-leak** (hasX booleans only).
+- **Bridge**: `GET /api/v1/internal/channel-config` (loopback, in `src/internal-router.js`) returns those settings
+  **decrypted** so the keyless daemon can use vault-managed config — the same same-machine trust model as
+  captureMessage (the one place a plaintext key crosses loopback; never expose the REST surface to a network).
+- **Daemon**: `vault-client.getChannelConfig()` + `applyChannelConfigToEnv()` hydrate `process.env` at startup
+  (vault overrides env; env is the fallback) — the TTS module + `loadConfig` then read env unchanged.
+- **UI**: `portal-app/.../settings/ChannelsSection.svelte` (Telegram token [write-only], owner id, two-way assistant
+  key, model, authorized-groups list + revoke) mounted in `SettingsView`; `VoiceSection` now has a working backend.
+- **Verified:** `verify:channel-settings` (16/16 — round-trips, zero-leak, decrypted bridge, env hydration, group
+  authorize/list/revoke) + `npm run portal:build` GO. Regressions `verify:rest`/`verify:mcp` GO.
+- **Deferred:** TTS `/preview` (returns 501 — synthesis needs the key in-process + ffmpeg; the daemon owns voice);
+  per-setting live push (daemon picks up changes on next start, not hot-reload).
+
 ## 8. Next action
 
 Runtime + locus are resolved (§6). **Execute Phase 0** — the egress chokepoint + inbound-context — which is

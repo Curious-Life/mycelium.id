@@ -70,10 +70,12 @@ at startup (it checks the vault's tool list). Set `MYCELIUM_MCP_URL` +
 the SDK spawns its own MCP server with `AGENT_URL` wired automatically; then the
 daemon env must carry the vault keys.)
 
-**Voice keys (sweep finding):** the daemon is keyless and the TTS module reads
-`process.env` — so put `OPENAI_API_KEY` / `ELEVENLABS_API_KEY` in the **daemon's**
-env (the vault's encrypted BYOK store is not reachable from the daemon; a loopback
-`tts-credentials` endpoint is planned). Voice needs `ffmpeg` on PATH.
+**Config is portal-managed (recommended).** Set the bot token, owner id, assistant
+(Anthropic) key, and TTS provider/key in **Settings → Channels + Voice** in the
+portal. They're stored encrypted in the vault; on startup the daemon fetches them
+over loopback (`GET /api/v1/internal/channel-config`) and hydrates its own env —
+so you don't hand-manage secrets in the daemon env. Env vars still work as an
+override/fallback when the vault is unreachable. Voice needs `ffmpeg` on PATH.
 
 ## Run
 

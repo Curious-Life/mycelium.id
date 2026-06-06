@@ -9,7 +9,7 @@
  *
  * Run: TELEGRAM_BOT_TOKEN=… OWNER_TELEGRAM_ID=… node packages/channel-daemon/index.js
  */
-import { loadConfig, assertEgressConfig } from './config.js';
+import { loadConfig, assertEgressConfig, applyChannelConfigToEnv } from './config.js';
 import { createTelegramApi } from './telegram-api.js';
 import { createVaultClient } from './vault-client.js';
 import { createEnvelopeDedup } from './dedup.js';
@@ -124,7 +124,15 @@ export function buildDaemon(cfg, { runTurn } = {}) {
 }
 
 async function main() {
-  const cfg = loadConfig();
+  // Hydrate from vault-managed config (portal is authoritative) BEFORE loading
+  // cfg, so a token/key set in the UI takes effect without touching the env.
+  // Best-effort: if the vault is unreachable we fall back to the daemon's own env.
+  let cfg = loadConfig();
+  try {
+    const cc = await createVaultClient({ baseUrl: cfg.vaultBaseUrl }).getChannelConfig();
+    if (cc) { applyChannelConfigToEnv(cc); cfg = loadConfig(); console.log('[channel-daemon] config hydrated from vault.'); }
+  } catch (e) { console.error('[channel-daemon] vault config hydrate skipped:', e.message); }
+
   assertEgressConfig(cfg);
   const { app, poller, telegram, lane, vault } = buildDaemon(cfg);
 

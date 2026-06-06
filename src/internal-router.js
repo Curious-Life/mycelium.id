@@ -115,5 +115,36 @@ export function internalRouter({ db, userId }) {
     }
   });
 
+  // ── Channel-daemon config (loopback) ──────────────────────────────────────
+  // Returns the daemon's settings DECRYPTED over loopback so the keyless daemon
+  // can use vault-managed config (Telegram token, owner, assistant key, TTS
+  // keys) instead of duplicating them in its own env. This is the ONE place a
+  // plaintext key crosses the loopback boundary — same same-machine trust model
+  // as captureMessage; it must NEVER be exposed to a network (move behind
+  // OAuth-HTTP + TLS if the REST surface ever leaves localhost).
+  router.get('/api/v1/internal/channel-config', async (_req, res) => {
+    if (!db?.secrets?.get) return res.status(503).json({ error: 'secrets unavailable' });
+    try {
+      const g = (k) => db.secrets.get(userId, k);
+      res.json({
+        enabled: (await g('CHANNEL_ENABLED')) === '1',
+        telegram: { botToken: (await g('TELEGRAM_BOT_TOKEN')) || null, ownerId: (await g('OWNER_TELEGRAM_ID')) || null },
+        agent: { anthropicApiKey: (await g('ANTHROPIC_API_KEY')) || null, model: (await g('CHANNEL_AGENT_MODEL')) || null },
+        tts: {
+          provider: (await g('TTS_PROVIDER')) || null,
+          openaiApiKey: (await g('OPENAI_API_KEY')) || null,
+          openaiVoice: (await g('OPENAI_TTS_VOICE')) || null,
+          openaiModel: (await g('OPENAI_TTS_MODEL')) || null,
+          elevenApiKey: (await g('ELEVENLABS_API_KEY')) || null,
+          elevenVoiceId: (await g('ELEVENLABS_VOICE_ID')) || null,
+          elevenModel: (await g('ELEVENLABS_MODEL_ID')) || null,
+        },
+      });
+    } catch (err) {
+      console.error('[internal-router] channel-config failed:', err.message);
+      res.status(500).json({ error: 'channel-config-error' });
+    }
+  });
+
   return router;
 }

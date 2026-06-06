@@ -7,6 +7,7 @@
 	import { preparePrfOptions } from '$lib/passkey-prf';
 	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
+	import ChannelsSection from '$lib/components/settings/ChannelsSection.svelte';
 	import IntelligenceSection from '$lib/components/settings/IntelligenceSection.svelte';
 	import ManagedConnectSection from '$lib/components/settings/ManagedConnectSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
@@ -1576,6 +1577,9 @@
 
 			<!-- Voice / TTS — provider config + per-voice preview -->
 			<VoiceSection />
+
+			<!-- Channels — Telegram bot token/owner, two-way assistant key, authorized groups -->
+			<ChannelsSection />
 
 			<!-- External Integrations — user-supplied API credentials -->
 			<section class="card p-5">
