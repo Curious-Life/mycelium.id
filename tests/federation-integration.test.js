@@ -103,6 +103,33 @@ describe('federation integration (real boot + express + sqlite)', { skip: !HAVE_
     assert.equal(prof.results?.[0]?.display_name, `bob@${BOB_HOST}`);
   });
 
+  it('completes the handshake: a signed connect-response flips a pending sent row to accepted', async () => {
+    // simulate that we (alice) earlier requested bob → a local pending "sent" row
+    const cid = crypto.randomUUID();
+    await booted.db.rawQuery(
+      `INSERT INTO connections (id, user_a, user_b, initiated_by, status, remote_instance, remote_user_handle, created_at)
+       VALUES (?, ?, ?, ?, 'pending', ?, ?, datetime('now'))`,
+      [cid, booted.userId, `bob@${BOB_HOST}`, booted.userId, BOB_HOST, 'bob'],
+    );
+    const payload = {
+      $type: 'social.mycelium.connect-response.v1',
+      from_handle: 'bob', from_instance: BOB_HOST, from_did: `did:web:${BOB_HOST}`,
+      to_handle: 'alice', action: 'accept', nonce: crypto.randomUUID(), ts: Date.now(),
+      profile: { signature: 'thinks in graphs' },
+    };
+    const body = canonicalize(payload);
+    const r = await fetch(`http://127.0.0.1:${port}/federation/connect-response`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-myc-did': `did:web:${BOB_HOST}`, 'x-myc-sig': BOB.sign(body) },
+      body,
+    });
+    assert.equal(r.status, 202);
+    const row = await booted.db.rawQuery(`SELECT status FROM connections WHERE id = ?`, [cid]);
+    assert.equal(row.results[0].status, 'accepted');
+    const list = await booted.db.connections.list(booted.userId);
+    assert.ok(list.some((c) => c.id === cid), 'now appears in connections list');
+  });
+
   it('rejects a tampered connect end-to-end (fail closed, 401)', async () => {
     const payload = { $type: 'social.mycelium.connect-request.v1', from_handle: 'bob', from_instance: BOB_HOST, from_did: `did:web:${BOB_HOST}`, to_handle: 'alice', nonce: crypto.randomUUID(), ts: Date.now(), profile: {} };
     const sig = BOB.sign(canonicalize(payload));

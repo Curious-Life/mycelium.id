@@ -207,6 +207,78 @@ export function portalCompatRouter({ db, userId }) {
     } catch { fail(res, 500, 'recompute failed'); }
   });
 
+  // ── Connections (federation Tier-0) — backs the Connections page ─────────
+  // db.connections is wired in getDb. Remote peers cache handle=NULL (the local
+  // user owns the UNIQUE handle), so coalesce the display handle from the
+  // connection row's remote_user_handle. GETs degrade to empty on error.
+  const connId = (req) => decodePath(req.params.id || '');
+  const mapConn = (c) => ({ ...c, other_handle: c.other_handle || c.remote_user_handle || null });
+  const mapPending = (r) => ({
+    id: r.id,
+    handle: r.handle || r.remote_user_handle || null,
+    display_name: r.display_name || null,
+    signature: r.signature || null,
+    avatar_url: r.avatar_url || null,
+    territory_count: r.territory_count ?? 0,
+    realm_count: r.realm_count ?? 0,
+    public_realms_json: r.public_realms_json || null,
+  });
+  const mapSent = (s) => ({
+    id: s.id, status: s.status, created_at: s.created_at,
+    to_handle: s.to_handle || s.remote_user_handle || null,
+    to_display_name: s.to_display_name || null,
+    to_avatar_url: s.to_avatar_url || null,
+  });
+
+  router.get('/connections', async (_req, res) => {
+    try { ok(res, { connections: (await db.connections.list(userId)).map(mapConn) }); }
+    catch { ok(res, { connections: [] }); }
+  });
+  // count of pending INBOUND requests — feeds the nav badge.
+  router.get('/connections/count', async (_req, res) => {
+    try { ok(res, { count: (await db.connections.pending(userId)).length }); }
+    catch { ok(res, { count: 0 }); }
+  });
+  router.get('/connections/pending', async (_req, res) => {
+    try { ok(res, { requests: (await db.connections.pending(userId)).map(mapPending) }); }
+    catch { ok(res, { requests: [] }); }
+  });
+  router.get('/connections/sent', async (_req, res) => {
+    try { ok(res, { sent: (await db.connections.sent(userId)).map(mapSent) }); }
+    catch { ok(res, { sent: [] }); }
+  });
+  // POST /connections/request { toHandle, message? } — message stored client-side only for now.
+  router.post('/connections/request', async (req, res) => {
+    try {
+      const toHandle = String(req.body?.toHandle || '').trim().replace(/^@/, '');
+      if (!toHandle) return fail(res, 400, 'handle required');
+      const id = await db.connections.request(userId, toHandle);
+      ok(res, { ok: true, id });
+    } catch (e) { fail(res, 400, e.message || 'could not send request'); }
+  });
+  // accept/reject route through respondRemote so an accept fires the signed
+  // connect-response callback that completes the peer's side of the handshake.
+  router.post('/connections/:id/accept', async (req, res) => {
+    try { await db.connections.respondRemote(userId, connId(req), 'accept'); ok(res, { ok: true }); }
+    catch (e) { fail(res, 400, e.message || 'could not accept'); }
+  });
+  router.post('/connections/:id/reject', async (req, res) => {
+    try { await db.connections.respondRemote(userId, connId(req), 'reject'); ok(res, { ok: true }); }
+    catch (e) { fail(res, 400, e.message || 'could not reject'); }
+  });
+  router.post('/connections/:id/block', async (req, res) => {
+    try { await db.connections.block(userId, connId(req)); ok(res, { ok: true }); }
+    catch (e) { fail(res, 400, e.message || 'could not block'); }
+  });
+  router.delete('/connections/:id', async (req, res) => {
+    try { await db.connections.disconnect(userId, connId(req)); ok(res, { ok: true }); }
+    catch (e) { fail(res, 400, e.message || 'could not disconnect'); }
+  });
+  router.get('/connections/:id/overlap', async (req, res) => {
+    try { ok(res, { overlap: await db.connections.computeOverlap(userId, connId(req)) }); }
+    catch (e) { fail(res, 400, e.message || 'could not compute overlap'); }
+  });
+
   // ── Settings (Phase S) — timezone only; theme is client-side localStorage ─
   router.get('/settings', (_req, res) => ok(res, { settings: { timezone: 'UTC' } }));
 

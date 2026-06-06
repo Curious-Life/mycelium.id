@@ -53,12 +53,13 @@ function startBox(handle, host, { withConnections } = {}) {
     const send = (r) => { res.writeHead(r.status, { 'content-type': 'application/json' }); res.end(JSON.stringify(r.body)); };
     if (req.method === 'GET' && u.pathname === '/.well-known/did.json') return send(h.didJson());
     if (req.method === 'GET' && u.pathname === '/.well-known/webfinger') return send(h.webfinger(u.searchParams.get('resource')));
-    if (req.method === 'POST' && u.pathname === '/federation/connect') {
+    if (req.method === 'POST' && (u.pathname === '/federation/connect' || u.pathname === '/federation/connect-response')) {
       let raw = ''; req.on('data', (c) => (raw += c));
       req.on('end', async () => {
         let payload; try { payload = JSON.parse(raw); } catch { return send({ status: 400, body: { error: 'bad json' } }); }
         const headers = { 'x-myc-did': req.headers['x-myc-did'], 'x-myc-sig': req.headers['x-myc-sig'] };
-        send(await h.connect({ payload, headers, ip: req.socket.remoteAddress }));
+        const fn = u.pathname.endsWith('-response') ? h.connectResponse : h.connect;
+        send(await fn({ payload, headers, ip: req.socket.remoteAddress }));
       });
       return;
     }
@@ -95,6 +96,12 @@ async function main() {
   const replay = mkBody(); const rsig = bob.identity.sign(canonicalize(replay));
   await post(replay, rsig);
   rec('replayed nonce rejected (401)', (await post(replay, rsig)).status === 401);
+
+  // signed connect-response (the accept callback) verifies the same way
+  const resp = { $type: 'social.mycelium.connect-response.v1', from_handle: 'bob', from_instance: 'bob.mycelium.id', from_did: 'did:web:bob.mycelium.id', to_handle: 'alice', action: 'accept', nonce: crypto.randomUUID(), ts: Date.now(), profile: { signature: 'graphs' } };
+  const postResp = (body, sig) => shimFetch('https://alice.mycelium.id/federation/connect-response', { method: 'POST', headers: { 'content-type': 'application/json', 'x-myc-did': 'did:web:bob.mycelium.id', 'x-myc-sig': sig }, body: canonicalize(body) });
+  rec('signed connect-response verifies (202)', (await postResp(resp, bob.identity.sign(canonicalize(resp)))).status === 202);
+  rec('unsigned connect-response rejected (401)', (await postResp(resp, '')).status === 401);
 
   // fail-closed no-handle box
   const nohandle = await startBox('nohandle', '', {});

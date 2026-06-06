@@ -28,11 +28,16 @@ export function createFederationRouter(deps) {
     res.status(r.status).type('application/jrd+json').send(JSON.stringify(r.body));
   });
 
+  const ipOf = (req) => req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress;
+  const hdrs = (req) => ({ 'x-myc-did': req.get('x-myc-did'), 'x-myc-sig': req.get('x-myc-sig') });
+
   router.post('/federation/connect', async (req, res) => {
-    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress;
-    // lowercase header lookup (express normalizes, but be explicit for the handler)
-    const headers = { 'x-myc-did': req.get('x-myc-did'), 'x-myc-sig': req.get('x-myc-sig') };
-    const r = await h.connect({ payload: req.body, headers, ip });
+    const r = await h.connect({ payload: req.body, headers: hdrs(req), ip: ipOf(req) });
+    res.status(r.status).json(r.body);
+  });
+
+  router.post('/federation/connect-response', async (req, res) => {
+    const r = await h.connectResponse({ payload: req.body, headers: hdrs(req), ip: ipOf(req) });
     res.status(r.status).json(r.body);
   });
 

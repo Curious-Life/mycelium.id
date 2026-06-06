@@ -113,22 +113,39 @@ export function createConnectionsNamespace(deps) {
     return result.results?.[0]?.c || 0;
   }
 
-  async function requestRemote(fromUserId, remoteHandle, remoteDomain) {
+  // Resolve a remote instance's federation endpoint via WebFinger (SSRF-guarded:
+  // HTTPS-only, no redirect, abort timeout). Shared by request + response.
+  async function resolveFederationEndpoint(remoteDomain, remoteHandle) {
     if (!DOMAIN_RE.test(remoteDomain)) throw new Error('Invalid domain');
-
-    // WebFinger lookup — HTTPS only, no redirect following.
     const webfingerUrl = `https://${remoteDomain}/.well-known/webfinger?resource=acct:${remoteHandle}@${remoteDomain}`;
+    const wfRes = await fetchImpl(webfingerUrl, { signal: AbortSignal.timeout(WEBFINGER_TIMEOUT_MS), redirect: 'manual' });
+    if (!wfRes.ok) throw new Error(`WebFinger failed: ${wfRes.status}`);
+    const wf = await wfRes.json();
+    const fedLink = wf.links?.find((l) => l.rel?.includes('federation'));
+    if (!fedLink?.href) throw new Error('No federation endpoint');
+    return fedLink.href;
+  }
+
+  // Sign (when sign+did are wired) and POST a federation envelope to
+  // <endpoint>/<subpath>. Signs EXACTLY the canonical bytes it sends.
+  async function signedFederationPost(endpoint, subpath, body) {
+    const url = `${endpoint.replace(/\/$/, '')}/${subpath}`;
+    const headers = { 'Content-Type': 'application/json' };
+    let bodyStr;
+    if (sign && did) {
+      bodyStr = canonicalize(body);
+      headers['X-Myc-Did'] = did();
+      headers['X-Myc-Sig'] = sign(bodyStr);
+    } else {
+      bodyStr = JSON.stringify(body);
+    }
+    await fetchImpl(url, { method: 'POST', headers, body: bodyStr, signal: AbortSignal.timeout(FEDERATION_POST_TIMEOUT_MS) });
+  }
+
+  async function requestRemote(fromUserId, remoteHandle, remoteDomain) {
     let federationEndpoint;
     try {
-      const wfRes = await fetchImpl(webfingerUrl, {
-        signal: AbortSignal.timeout(WEBFINGER_TIMEOUT_MS),
-        redirect: 'manual', // SSRF: refuse to follow a remote's redirect
-      });
-      if (!wfRes.ok) throw new Error(`WebFinger failed: ${wfRes.status}`);
-      const wf = await wfRes.json();
-      const fedLink = wf.links?.find(l => l.rel?.includes('federation'));
-      if (!fedLink?.href) throw new Error('No federation endpoint');
-      federationEndpoint = fedLink.href;
+      federationEndpoint = await resolveFederationEndpoint(remoteDomain, remoteHandle);
     } catch (e) {
       throw new Error(`Instance not reachable: ${e.message}`);
     }
@@ -170,25 +187,9 @@ export function createConnectionsNamespace(deps) {
       [id, fromUserId, `${remoteHandle}@${remoteDomain}`, fromUserId, remoteDomain, remoteHandle],
     );
 
-    // Fire-and-forget federation POST. JWT signing happens at the Worker level
-    // when proxying these requests; failures here are handled by reconciliation.
+    // Fire-and-forget signed federation POST; failures are handled by reconciliation.
     try {
-      const connectUrl = `${federationEndpoint.replace(/\/$/, '')}/connect`;
-      const headers = { 'Content-Type': 'application/json' };
-      let bodyStr;
-      if (sign && did) {
-        bodyStr = canonicalize(requestBody); // sign EXACTLY the bytes we send
-        headers['X-Myc-Did'] = did();
-        headers['X-Myc-Sig'] = sign(bodyStr);
-      } else {
-        bodyStr = JSON.stringify(requestBody);
-      }
-      await fetchImpl(connectUrl, {
-        method: 'POST',
-        headers,
-        body: bodyStr,
-        signal: AbortSignal.timeout(FEDERATION_POST_TIMEOUT_MS),
-      });
+      await signedFederationPost(federationEndpoint, 'connect', requestBody);
     } catch (e) {
       console.warn(`[federation] Remote connect POST failed (will retry): ${e.message}`);
     }
@@ -307,6 +308,82 @@ export function createConnectionsNamespace(deps) {
       return id;
     },
 
+    /**
+     * Tier-0b OUTBOUND: respond to a pending inbound request and, when it came
+     * from a remote instance, send the peer a SIGNED connect-response so their
+     * side completes the handshake (their "Sent" → "Connected"). Does the local
+     * status flip first (auth-checked), then best-effort fires the callback.
+     * @param {string} userId @param {string} connectionId @param {'accept'|'reject'} action
+     */
+    async respondRemote(userId, connectionId, action) {
+      const row = await loadConnection(connectionId, { requireStatus: 'pending' });
+      if (!row) throw new Error('Connection not found');
+      assertMember(row, userId);
+      if (action === 'accept' && row.initiated_by === userId) throw new Error('Cannot accept your own request');
+
+      const status = action === 'accept' ? 'accepted' : 'rejected';
+      await d1Query(
+        `UPDATE connections SET status = ?, accepted_at = ${action === 'accept' ? "datetime('now')" : 'accepted_at'} WHERE id = ?`,
+        [status, connectionId],
+      );
+
+      // Only accept is propagated to the peer in Tier-0b (reject stays local-silent,
+      // matching the re-request-permitted semantics). Local-only rows have no remote.
+      if (action === 'accept' && row.remote_instance && row.remote_user_handle && sign && did) {
+        try {
+          const endpoint = await resolveFederationEndpoint(row.remote_instance, row.remote_user_handle);
+          // include our own public bio so the peer can render us in their list
+          const me = (await d1Query(`SELECT handle, signature FROM user_profiles WHERE user_id = ?`, [userId])).results?.[0] || {};
+          await signedFederationPost(endpoint, 'connect-response', {
+            $type: 'social.mycelium.connect-response.v1',
+            from_handle: me.handle || userId,
+            from_instance: (selfInstance && selfInstance()) || '',
+            from_did: did(),
+            to_handle: row.remote_user_handle,
+            action: 'accept',
+            nonce: randomUUID(),
+            ts: Date.now(),
+            profile: { signature: me.signature ?? null },
+          });
+        } catch (e) {
+          console.warn(`[federation] connect-response POST failed: ${e.message}`);
+        }
+      }
+      return connectionId;
+    },
+
+    /**
+     * Tier-0b INBOUND: the peer we requested has accepted (verified upstream by
+     * the federation router against their did:web key). Flip our matching "sent"
+     * row to accepted and cache their bio. Idempotent; ignores unknown refs.
+     * @param {{fromHandle:string, fromInstance:string, fromDid?:string, profile?:object, action:string, toUserId:string}} p
+     */
+    async receiveResponse({ fromHandle, fromInstance, fromDid, profile = {}, action, toUserId }) {
+      if (!fromHandle || !fromInstance || !toUserId) throw new Error('receiveResponse: fromHandle, fromInstance, toUserId required');
+      if (action !== 'accept') return null; // only accept advances state in Tier-0b
+      const found = await d1Query(
+        `SELECT id, user_a, user_b FROM connections
+         WHERE initiated_by = ? AND remote_instance = ? AND remote_user_handle = ? AND status = 'pending'
+         LIMIT 1`,
+        [toUserId, fromInstance, fromHandle],
+      );
+      const row = found.results?.[0];
+      if (!row) return null; // unknown/duplicate → ignore
+      const peerId = row.user_a === toUserId ? row.user_b : row.user_a;
+      // cache the peer's bio so list() renders them (keyed by the synthetic peer id)
+      await d1Query(
+        `INSERT INTO user_profiles (user_id, display_name, signature, did, member_since)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(user_id) DO UPDATE SET display_name = excluded.display_name, signature = excluded.signature, did = excluded.did`,
+        [peerId, `${fromHandle}@${fromInstance}`, profile.signature ?? null, fromDid ?? null],
+      );
+      await d1Query(
+        `UPDATE connections SET status = 'accepted', accepted_at = datetime('now'), remote_did = COALESCE(remote_did, ?) WHERE id = ?`,
+        [fromDid ?? null, row.id],
+      );
+      return row.id;
+    },
+
     async pending(userId) {
       const result = await d1Query(
         `SELECT c.*, up.handle, up.display_name, up.signature, up.avatar_url,
@@ -322,7 +399,7 @@ export function createConnectionsNamespace(deps) {
 
     async sent(userId) {
       const result = await d1Query(
-        `SELECT c.id, c.status, c.created_at,
+        `SELECT c.id, c.status, c.created_at, c.remote_user_handle, c.remote_instance,
                 CASE WHEN c.user_a = ? THEN ub.handle ELSE ua.handle END as to_handle,
                 CASE WHEN c.user_a = ? THEN ub.display_name ELSE ua.display_name END as to_display_name,
                 CASE WHEN c.user_a = ? THEN ub.avatar_url ELSE ua.avatar_url END as to_avatar_url

@@ -23,13 +23,17 @@ const fetchSenderDid = async (url, init) => {
 
 function makeHandlers({ host = 'alice.mycelium.id', handle = 'alice', now } = {}) {
   const received = [];
-  const db = { connections: { async receiveRemote(p) { received.push(p); return 'cid'; } } };
+  const responses = [];
+  const db = { connections: {
+    async receiveRemote(p) { received.push(p); return 'cid'; },
+    async receiveResponse(p) { responses.push(p); return 'sid'; },
+  } };
   const h = createFederationHandlers({
     db, userId: 'me', identity: LOCAL,
     getHost: () => host, getHandle: () => handle,
     fetch: fetchSenderDid, now,
   });
-  return { h, received };
+  return { h, received, responses };
 }
 
 function signedPayload(now = Date.now(), over = {}) {
@@ -113,5 +117,26 @@ describe('connect', () => {
       last = (await h.connect({ payload, headers, ip: '9.9.9.9' })).status;
     }
     assert.equal(last, 429);
+  });
+});
+
+describe('connectResponse (the accept callback)', () => {
+  function signedResponse(now = Date.now()) {
+    const payload = { $type: 'social.mycelium.connect-response.v1', from_handle: 'bob', from_instance: SENDER_HOST, from_did: SENDER_DID, to_handle: 'alice', action: 'accept', nonce: 'rn-' + Math.random(), ts: now, profile: { signature: 'graphs' } };
+    return { payload, headers: { 'x-myc-did': SENDER_DID, 'x-myc-sig': SENDER.sign(canonicalize(payload)) } };
+  }
+  it('202 for a valid signed response and dispatches to receiveResponse', async () => {
+    const { h, responses } = makeHandlers();
+    const { payload, headers } = signedResponse();
+    const r = await h.connectResponse({ payload, headers, ip: '1.1.1.1' });
+    assert.equal(r.status, 202);
+    assert.equal(responses.length, 1);
+    assert.equal(responses[0].action, 'accept');
+    assert.equal(responses[0].toUserId, 'me');
+  });
+  it('401 unsigned response', async () => {
+    const { h } = makeHandlers();
+    const { payload } = signedResponse();
+    assert.equal((await h.connectResponse({ payload, headers: {}, ip: '1.1.1.1' })).status, 401);
   });
 });

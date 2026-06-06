@@ -45,6 +45,35 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
     for (const [k, exp] of seenNonces) if (exp < t) seenNonces.delete(k);
   }
 
+  // Verify a signed inbound federation envelope. Returns { ok:true, did } when
+  // valid, or { ok:false, status, body }. Marks the nonce on success. Shared by
+  // /connect and /connect-response (identical trust model).
+  async function verify({ payload, headers = {}, ip }) {
+    if (!getHost() || !identity?.publicKeyB64) return { ok: false, status: 503, body: { error: 'federation not configured' } };
+    if (rateLimited(ip)) return { ok: false, status: 429, body: { error: 'rate limited' } };
+    if (!payload || typeof payload !== 'object') return { ok: false, status: 400, body: { error: 'invalid body' } };
+
+    const did = headers['x-myc-did'];
+    const sig = headers['x-myc-sig'];
+    if (!did || !sig) return { ok: false, status: 401, body: { error: 'unsigned request' } };
+
+    const canonical = canonicalize(payload);
+    if (canonical.length > MAX_CANONICAL_BYTES) return { ok: false, status: 400, body: { error: 'body too large' } };
+
+    const ts = Number(payload.ts);
+    if (!Number.isFinite(ts) || Math.abs(now() - ts) > TS_WINDOW_MS) return { ok: false, status: 401, body: { error: 'stale or missing timestamp' } };
+    noncePrune();
+    if (!payload.nonce || seenNonces.has(payload.nonce)) return { ok: false, status: 401, body: { error: 'replay or missing nonce' } };
+    if (payload.from_did && payload.from_did !== did) return { ok: false, status: 401, body: { error: 'did mismatch' } };
+
+    let pub;
+    try { pub = await resolveDidKey(did, { fetch }); } catch { return { ok: false, status: 401, body: { error: 'unresolvable did' } }; }
+    if (!verifyDetached(pub, canonical, sig)) return { ok: false, status: 401, body: { error: 'signature verification failed' } };
+
+    seenNonces.set(payload.nonce, now() + TS_WINDOW_MS);
+    return { ok: true, did };
+  }
+
   return {
     didJson() {
       const doc = buildDidDocument(getHost(), identity?.publicKeyB64);
@@ -56,39 +85,35 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
       return wf ? { status: 200, body: wf } : { status: 404, body: { error: 'not found' } };
     },
 
-    /** Inbound connect. @param {{payload:object, headers:object, ip?:string}} */
+    /** Inbound connect request. @param {{payload:object, headers:object, ip?:string}} */
     async connect({ payload, headers = {}, ip } = {}) {
-      if (!getHost() || !identity?.publicKeyB64) return { status: 503, body: { error: 'federation not configured' } };
-      if (rateLimited(ip)) return { status: 429, body: { error: 'rate limited' } };
-      if (!payload || typeof payload !== 'object') return { status: 400, body: { error: 'invalid body' } };
-
-      const did = headers['x-myc-did'];
-      const sig = headers['x-myc-sig'];
-      if (!did || !sig) return { status: 401, body: { error: 'unsigned request' } };
-
-      const canonical = canonicalize(payload);
-      if (canonical.length > MAX_CANONICAL_BYTES) return { status: 400, body: { error: 'body too large' } };
-
-      // Freshness + replay (before the network hop to resolve the key).
-      const ts = Number(payload.ts);
-      if (!Number.isFinite(ts) || Math.abs(now() - ts) > TS_WINDOW_MS) return { status: 401, body: { error: 'stale or missing timestamp' } };
-      noncePrune();
-      if (!payload.nonce || seenNonces.has(payload.nonce)) return { status: 401, body: { error: 'replay or missing nonce' } };
-
-      // The header did must match the payload's claimed sender (no key confusion).
-      if (payload.from_did && payload.from_did !== did) return { status: 401, body: { error: 'did mismatch' } };
-
-      let pub;
-      try { pub = await resolveDidKey(did, { fetch }); } catch { return { status: 401, body: { error: 'unresolvable did' } }; }
-      if (!verifyDetached(pub, canonical, sig)) return { status: 401, body: { error: 'signature verification failed' } };
-
-      seenNonces.set(payload.nonce, now() + TS_WINDOW_MS);
+      const v = await verify({ payload, headers, ip });
+      if (!v.ok) return { status: v.status, body: v.body };
       try {
         await db.connections.receiveRemote({
           fromHandle: payload.from_handle,
           fromInstance: payload.from_instance,
-          fromDid: payload.from_did || did,
+          fromDid: payload.from_did || v.did,
           profile: payload.profile || {},
+          toUserId: userId,
+        });
+      } catch (e) {
+        return { status: 400, body: { error: e.message } };
+      }
+      return { status: 202, body: { accepted: true, verified: true } };
+    },
+
+    /** Inbound connect RESPONSE (the peer accepted our request). Same trust model. */
+    async connectResponse({ payload, headers = {}, ip } = {}) {
+      const v = await verify({ payload, headers, ip });
+      if (!v.ok) return { status: v.status, body: v.body };
+      try {
+        await db.connections.receiveResponse({
+          fromHandle: payload.from_handle,
+          fromInstance: payload.from_instance,
+          fromDid: payload.from_did || v.did,
+          profile: payload.profile || {},
+          action: payload.action,
           toUserId: userId,
         });
       } catch (e) {

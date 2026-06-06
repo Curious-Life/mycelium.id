@@ -110,3 +110,67 @@ describe('connections — receiveRemote (inbound)', () => {
     await assert.rejects(() => ns.receiveRemote({ fromHandle: 'bob', toUserId: 'me' }), /required/);
   });
 });
+
+describe('connections — Tier-0b accept handshake', () => {
+  // mock d1 modelling one inbound-pending row that Bob (the accepter) sees
+  function acceptDb() {
+    const updates = [];
+    const row = { id: 'c1', user_a: 'me', user_b: 'did:web:alice.mycelium.id', initiated_by: 'did:web:alice.mycelium.id', status: 'pending', remote_instance: 'alice.mycelium.id', remote_user_handle: 'alice' };
+    const d1Query = async (sql, params) => {
+      if (/SELECT \* FROM connections WHERE id/.test(sql)) return { results: [row] };
+      if (/SELECT handle, signature FROM user_profiles/.test(sql)) return { results: [{ handle: 'bob', signature: 'me bio' }] };
+      if (/UPDATE connections SET status/.test(sql)) { updates.push(params); return { results: [] }; }
+      return { results: [] };
+    };
+    return { d1Query, updates };
+  }
+
+  it('respondRemote(accept) flips locally AND fires a signed connect-response to the requester', async () => {
+    const { d1Query } = acceptDb();
+    let posted = null;
+    const fetchImpl = async (url, init) => {
+      if (url.includes('/.well-known/webfinger')) return { ok: true, status: 200, async json() { return { links: [{ rel: 'x.federation', href: 'https://alice.mycelium.id/federation' }] }; } };
+      if (url.endsWith('/connect-response')) { posted = { url, init }; return { ok: true, status: 202, async json() { return {}; } }; }
+      return { ok: false, status: 404, async json() { return {}; } };
+    };
+    const ns = createConnectionsNamespace({ d1Query, fetch: fetchImpl, sign: (b) => id.sign(b), did: () => 'did:web:bob.mycelium.id', selfInstance: () => 'bob.mycelium.id' });
+    await ns.respondRemote('me', 'c1', 'accept');
+    assert.ok(posted, 'connect-response POST fired');
+    assert.equal(posted.url, 'https://alice.mycelium.id/federation/connect-response');
+    const body = JSON.parse(posted.init.body);
+    assert.equal(body.$type, 'social.mycelium.connect-response.v1');
+    assert.equal(body.action, 'accept');
+    assert.equal(verifyDetached(id.publicKeyB64, posted.init.body, posted.init.headers['X-Myc-Sig']), true);
+  });
+
+  it('respondRemote(reject) flips locally and does NOT call back the peer', async () => {
+    const { d1Query } = acceptDb();
+    let called = false;
+    const ns = createConnectionsNamespace({ d1Query, fetch: async () => { called = true; return { ok: true, status: 200, async json() { return {}; } }; }, sign: (b) => id.sign(b), did: () => 'did:web:bob.mycelium.id', selfInstance: () => 'bob.mycelium.id' });
+    await ns.respondRemote('me', 'c1', 'reject');
+    assert.equal(called, false);
+  });
+
+  it('receiveResponse(accept) finds the matching sent row and flips it to accepted', async () => {
+    const updates = [];
+    const sentRow = { id: 's1', user_a: 'me', user_b: 'bob@bob.mycelium.id' };
+    const d1Query = async (sql, params) => {
+      if (/SELECT id, user_a, user_b FROM connections/.test(sql)) return { results: [sentRow] };
+      if (/INSERT INTO user_profiles/.test(sql)) { updates.push({ kind: 'profile', params }); return { results: [] }; }
+      if (/UPDATE connections SET status = 'accepted'/.test(sql)) { updates.push({ kind: 'accept', params }); return { results: [] }; }
+      return { results: [] };
+    };
+    const ns = createConnectionsNamespace({ d1Query });
+    const cid = await ns.receiveResponse({ fromHandle: 'bob', fromInstance: 'bob.mycelium.id', fromDid: 'did:web:bob.mycelium.id', profile: { signature: 'graphs' }, action: 'accept', toUserId: 'me' });
+    assert.equal(cid, 's1');
+    assert.ok(updates.find((u) => u.kind === 'accept'));
+    assert.equal(updates.find((u) => u.kind === 'profile').params[0], 'bob@bob.mycelium.id'); // cached under the peer id
+  });
+
+  it('receiveResponse ignores an unknown ref and non-accept actions', async () => {
+    const d1Query = async (sql) => ({ results: [] });
+    const ns = createConnectionsNamespace({ d1Query });
+    assert.equal(await ns.receiveResponse({ fromHandle: 'x', fromInstance: 'y', action: 'accept', toUserId: 'me' }), null);
+    assert.equal(await ns.receiveResponse({ fromHandle: 'x', fromInstance: 'y', action: 'reject', toUserId: 'me' }), null);
+  });
+});
