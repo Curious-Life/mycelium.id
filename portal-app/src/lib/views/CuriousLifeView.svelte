@@ -16,6 +16,7 @@
 	import { apiGet } from '$lib/api';
 	import Ring from '$lib/curious/Ring.svelte';
 	import Spark from '$lib/curious/Spark.svelte';
+	import TimeSeries from '$lib/curious/TimeSeries.svelte';
 
 	type Any = Record<string, any>;
 
@@ -35,6 +36,19 @@
 	let freshness = $state<Any | null>(null);
 
 	let gran = $state<'alpha' | 'theta' | 'delta'>('theta');
+
+	// Temporal series
+	let freqSeries = $state<Any[]>([]);
+	let rhythmSeries = $state<Any | null>(null); // { metric, series }
+	let rhythmMetric = $state('total_spectral_energy_gamma');
+	let freqMetric = $state('coherence');
+	let moveMetric = $state<'fisher_velocity' | 'fisher_trajectory_length' | 'activation_entropy' | 'fisher_displacement'>('fisher_velocity');
+
+	const apiBase = '/portal';
+	async function loadRhythmSeries() {
+		const r = await apiGet<Any>(`${apiBase}/metrics/series?metric=${rhythmMetric}&granularity=${gran}&limit=120`).catch(() => null);
+		rhythmSeries = r ?? null;
+	}
 
 	const fmt = (v: any, d = 2) => (v == null || Number.isNaN(Number(v)) ? '—' : Number(v).toFixed(d));
 	const pct = (v: any) => (v == null || Number.isNaN(Number(v)) ? '—' : `${Math.round(Number(v) * 100)}%`);
@@ -70,7 +84,41 @@
 		frequency = fq?.snapshot ?? null;
 		freshness = fr ?? null;
 		loading = false;
+		// Temporal series (non-blocking; charts fill in once back).
+		const fs = await g(`/portal/frequency/series?granularity=${frequency?.granularity ?? 'day'}`);
+		freqSeries = fs?.series ?? [];
+		await loadRhythmSeries();
 	});
+
+	// Build a labelled series from the weekly_step trajectory rows.
+	const moveSeries = $derived(trajectory.map((r) => {
+		const v = r[moveMetric];
+		return v == null || Number.isNaN(Number(v)) ? null : Number(v);
+	}));
+	const moveLabels = $derived(trajectory.map((r) => (r.window_end ?? '').slice(0, 10)));
+	const moveMetricOpts = [
+		{ key: 'fisher_velocity', label: 'velocity' },
+		{ key: 'fisher_trajectory_length', label: 'path length' },
+		{ key: 'activation_entropy', label: 'activation entropy' },
+		{ key: 'fisher_displacement', label: 'displacement' },
+	];
+	const rhythmSeriesVals = $derived((rhythmSeries?.series ?? []).map((p: Any) => {
+		const v = p.value;
+		return v == null || Number.isNaN(Number(v)) ? null : Number(v);
+	}));
+	const rhythmSeriesLabels = $derived(
+		(rhythmSeries?.series ?? []).map((p: Any) => (p.window_end ?? p.window_start ?? '').slice(0, 10)),
+	);
+	// The 41 metric keys, grouped for the selector.
+	const HARMONIC_METRICS = [
+		...['gamma', 'beta', 'alpha', 'theta', 'delta'].flatMap((b) => [1, 2, 3].map((k) => `harmonic_amplitude_${b}_k${k}`)),
+		...['mean_crossing_rate', 'slope_sign_change_rate', 'autocorrelation_lag1', 'variance', 'total_spectral_energy'].flatMap((f) => ['gamma', 'beta', 'alpha', 'theta', 'delta'].map((b) => `${f}_${b}`)),
+		'topology_h0_persistence_entropy',
+	];
+	function freqCol(key: string): (number | null)[] {
+		return freqSeries.map((r) => (r[key] == null || Number.isNaN(Number(r[key])) ? null : Number(r[key])));
+	}
+	const freqLabels = $derived(freqSeries.map((r) => (r.window_end ?? '').slice(0, 10)));
 
 	// ── Derived headlines ────────────────────────────────────────────────────
 	const vSummary = $derived(vitality?.summary ?? null);
@@ -432,8 +480,16 @@
 							<div><div class="phase-badge lg" style="--rgb:{accentRgb.azure}">{cap(curRealm?.phase)}</div>{#if curRealm?.phase_recent && curRealm.phase_recent !== curRealm.phase}<span class="muted sm">recently {curRealm.phase_recent}</span>{/if}</div>
 							{#if moveLowConf}<span class="lc">early signal · advisory</span>{/if}
 						</div>
-						<div class="big-spark"><Spark points={velocities} color={accentVar.azure} width={680} height={120} /></div>
-						<p class="muted sm">Movement velocity across {trajectory.length} weekly windows — how far your attention's center of mass travelled each week.</p>
+						<div class="row-between" style="margin:0.4rem 0 0.2rem">
+							<span class="muted sm">Over {trajectory.length} weekly windows</span>
+							<div class="seg-toggle az">
+								{#each moveMetricOpts as o}
+									<button class:on={moveMetric === o.key} onclick={() => (moveMetric = o.key as any)}>{o.label}</button>
+								{/each}
+							</div>
+						</div>
+						<div class="big-spark"><TimeSeries points={moveSeries} labels={moveLabels} color={accentVar.azure} height={150} /></div>
+						<p class="muted sm">How your {moveMetricOpts.find((o) => o.key === moveMetric)?.label} changed week by week — drawn from your full history. Flat-zero stretches are weeks with little activity.</p>
 					</div>
 					<div class="stat-row">
 						<div class="stat"><span class="s-v">{fmt(movement?.exploration_ratio, 2)}</span><span class="s-l">exploration ratio</span></div>
@@ -466,7 +522,7 @@
 						<h3>Harmonic signature</h3>
 						<div class="seg-toggle">
 							{#each ['alpha', 'theta', 'delta'] as gk}
-								<button class:on={gran === gk} onclick={() => (gran = gk as any)}>{gk}</button>
+								<button class:on={gran === gk} onclick={() => { gran = gk as any; loadRhythmSeries(); }}>{gk}</button>
 							{/each}
 						</div>
 					</div>
@@ -499,6 +555,21 @@
 							<h3>No {gran} window yet</h3>
 							<p class="muted">The harmonic signature reads the cadence of your thinking across timescales. This granularity needs a denser stretch of activity to resolve — try another, or keep capturing.</p>
 						</div>
+					{/if}
+				</div>
+
+				<div class="panel">
+					<div class="row-between">
+						<h3>One metric over time</h3>
+						<select class="m-select" bind:value={rhythmMetric} onchange={loadRhythmSeries}>
+							{#each HARMONIC_METRICS as mk}<option value={mk}>{mk.replace(/_/g, ' ')}</option>{/each}
+						</select>
+					</div>
+					{#if rhythmSeriesVals.some((v) => v != null)}
+						<TimeSeries points={rhythmSeriesVals} labels={rhythmSeriesLabels} color={accentVar.amethyst} height={150} />
+						<p class="muted sm">{rhythmMetric.replace(/_/g, ' ')} across {rhythmSeriesLabels.length} {gran} windows. Gaps are windows it couldn't be computed for.</p>
+					{:else}
+						<p class="muted sm">No time series for this metric at {gran} granularity yet — try another metric or granularity.</p>
 					{/if}
 				</div>
 
@@ -551,6 +622,20 @@
 						</div>
 						<p class="muted sm">Over a window of {freq.message_count ?? '—'} messages across {freq.territory_count ?? '—'} territories ({freq.granularity ?? ''}). Coherence + spread describe the present; learning-rate + drift describe change.</p>
 					</div>
+					{#if freqSeries.length > 1}
+						<div class="panel">
+							<div class="row-between">
+								<h3>Over time</h3>
+								<div class="seg-toggle rose">
+									{#each freqStats as s}
+										<button class:on={freqMetric === s.key} onclick={() => (freqMetric = s.key)}>{s.label}</button>
+									{/each}
+								</div>
+							</div>
+							<TimeSeries points={freqCol(freqMetric)} labels={freqLabels} color={accentVar.rose} height={150} yMin={0} yMax={1} unit="" />
+							<p class="muted sm">{freqStats.find((s) => s.key === freqMetric)?.label} across {freqSeries.length} {freqSeries[0]?.granularity ?? ''} windows — {freqStats.find((s) => s.key === freqMetric)?.hint}.</p>
+						</div>
+					{/if}
 				{:else}
 					<div class="panel"><div class="empty-lg"><h3>Growth is still forming</h3><p class="muted">These windowed metrics — coherence, spread, compressibility, learning-rate and drift — need a few windows of activity to resolve.</p></div></div>
 				{/if}
@@ -743,6 +828,9 @@
 	.seg-toggle { display: inline-flex; border: 1px solid var(--color-border); border-radius: var(--radius-full); overflow: hidden; }
 	.seg-toggle button { padding: 0.3rem 0.8rem; font-size: 0.74rem; background: transparent; color: var(--color-text-tertiary); border: none; cursor: pointer; text-transform: capitalize; transition: background var(--duration-fast), color var(--duration-fast); }
 	.seg-toggle button.on { background: rgb(var(--color-accent-amethyst-rgb) / 0.18); color: var(--color-text-emphasis); }
+	.seg-toggle.az button.on { background: rgb(var(--color-accent-rgb) / 0.18); }
+	.seg-toggle.rose button.on { background: rgb(var(--color-accent-rose-rgb) / 0.18); }
+	.m-select { font-size: 0.74rem; background: var(--color-surface); color: var(--color-text-secondary); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 0.3rem 0.5rem; max-width: 16rem; cursor: pointer; }
 
 	/* harmonic metric grid */
 	.metric-grid { display: flex; flex-direction: column; gap: 3px; margin-bottom: 1rem; overflow-x: auto; }

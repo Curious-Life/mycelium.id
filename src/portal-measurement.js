@@ -407,6 +407,29 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
     } catch { fail(res, 500, 'Failed to load frequency'); }
   });
 
+  // GET /frequency/series — frequency_snapshots over time for one granularity,
+  // so the page can chart coherence/entropy/learning-rate/drift across windows.
+  router.get('/frequency/series', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const granularity = String(req.query.granularity || 'day');
+      const limit = Math.min(Number(req.query.limit) || 180, 400);
+      const rows = (await db.rawQuery(
+        `SELECT window_start, window_end, granularity, coherence, entropy, compression,
+                learning_rate, gradient_signal, point_count, territory_count, message_count, computed_at
+           FROM frequency_snapshots WHERE user_id = ? AND granularity = ?
+           ORDER BY window_end ASC LIMIT ?`, [u.id, granularity, limit])).results || [];
+      const series = rows.map((r) => ({
+        window_end: r.window_end, window_start: r.window_start,
+        coherence: num(r.coherence), entropy: num(r.entropy), compression: num(r.compression),
+        learning_rate: num(r.learning_rate), gradient_signal: num(r.gradient_signal),
+        message_count: num(r.message_count), territory_count: num(r.territory_count),
+      }));
+      res.set('Cache-Control', 'no-store');
+      res.json({ granularity, series });
+    } catch { fail(res, 500, 'Failed to load frequency series'); }
+  });
+
   // ──────────────────────────────────────────────────────────────────────────
   // METRIC FRESHNESS — per-table staleness map (no decrypted values, just
   // MAX(timestamp) / pipeline_state probes). All timestamp/state columns are
