@@ -104,6 +104,10 @@ function routeToType(method: string, path: string): string | null {
 		'POST /portal/connections/request': 'connection-request',
 		'GET /portal/connections/count': 'connections-count',
 		'GET /portal/connections/pending': 'connections-pending',
+		'GET /portal/connections/sent': 'connections-sent',
+		'GET /portal/spaces': 'spaces',
+		'POST /portal/spaces': 'space-create',
+		'GET /portal/spaces/territories': 'spaces-territories',
 		'GET /portal/contexts': 'contexts',
 		'POST /portal/contexts': 'context-create',
 		'GET /portal/folders': 'folders',
@@ -220,6 +224,10 @@ function routeToType(method: string, path: string): string | null {
 	if (cleanPath.startsWith('/portal/connections/') && cleanPath.endsWith('/block')) return 'connection-block';
 	if (cleanPath.startsWith('/portal/connections/') && cleanPath.endsWith('/overlap')) return 'connection-overlap';
 	if (cleanPath.startsWith('/portal/connections/') && method === 'DELETE') return 'connection-delete';
+
+	// Spaces parameterized — any /portal/spaces/* reaches the server, which
+	// enforces access fail-closed. A coarse per-method type is enough.
+	if (cleanPath.startsWith('/portal/spaces/')) return `space-${method.toLowerCase()}`;
 
 	// Contexts parameterized
 	if (cleanPath.match(/\/portal\/contexts\/[^/]+\/territories\//)) {

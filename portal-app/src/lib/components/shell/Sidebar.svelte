@@ -39,6 +39,7 @@
 		{ id: 'library',   label: 'Library',  icon: 'folder',  href: '/library' },
 		{ id: 'import',    label: 'Import',   icon: 'import',  href: '/import' },
 		{ id: 'timeline',  label: 'Timeline', icon: 'tornado', href: '/timeline' },
+		{ id: 'spaces',    label: 'Spaces',   icon: 'spaces', href: '/spaces' },
 		{ id: 'connections', label: 'Connections', icon: 'connections', href: '/connections' },
 		{ id: 'profile',   label: 'Profile',  icon: 'profile', href: '/profile' },
 	];
@@ -51,7 +52,7 @@
 	// Planned screens (modules · social · agents). Shown disabled, no routing —
 	// they render nothing in V1. Collapsed by default.
 	const comingLater = [
-		'Spaces', 'Chat', 'Agents', 'Cycles',
+		'Chat', 'Agents', 'Cycles',
 		'Wealth', 'Intel', 'Body', 'Vitality', 'Activity', 'Media',
 	];
 	let comingLaterOpen = $state(false);
@@ -191,6 +192,10 @@
 							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 								<circle cx="6" cy="6" r="2.25" /><circle cx="18" cy="18" r="2.25" /><circle cx="18" cy="6" r="2.25" />
 								<path stroke-linecap="round" stroke-linejoin="round" d="M8 7.5l8 9M16 6.2A6 6 0 0 0 7 15" />
+							</svg>
+						{:else if item.icon === 'spaces'}
+							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 9.75h16.5M3.75 9.75V6a2.25 2.25 0 0 1 2.25-2.25h3l2 2.25h7.5a2.25 2.25 0 0 1 2.25 2.25v9.75A2.25 2.25 0 0 1 18.75 20.25H5.25A2.25 2.25 0 0 1 3 18V9.75z" />
 							</svg>
 						{/if}
 					</div>

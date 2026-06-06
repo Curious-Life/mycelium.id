@@ -43,6 +43,15 @@ export const REGISTRY: Record<string, ViewDef> = {
 		title: 'Connections', icon: 'connections', singleton: true,
 		load: () => import('$lib/views/ConnectionsView.svelte'),
 	},
+	spaces: {
+		title: 'Spaces', icon: 'spaces', singleton: true,
+		load: () => import('$lib/views/SpacesView.svelte'),
+	},
+	space: {
+		// One tab per space (keyed by id); the detail view reads params.id.
+		title: 'Space', icon: 'spaces', key: (p) => `space:${p.id}`,
+		load: () => import('$lib/views/SpaceDetailView.svelte'),
+	},
 	'curious-life': {
 		title: 'Curious Life', icon: 'compass', singleton: true,
 		load: () => import('$lib/views/CuriousLifeView.svelte'),
