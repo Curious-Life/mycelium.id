@@ -17,14 +17,31 @@ export function createSpaceAccessNamespace(deps) {
 
   return {
     async list(spaceId) {
+      // LEFT JOIN both: local members live in `users`; remote-connection grantees
+      // are cached in `user_profiles` (handle NULL, display_name = "handle@host").
       const result = await d1Query(
-        `SELECT sa.*, u.display_name FROM space_access sa
-         JOIN users u ON u.id = sa.user_id
+        `SELECT sa.*, COALESCE(u.display_name, up.display_name) AS display_name
+         FROM space_access sa
+         LEFT JOIN users u ON u.id = sa.user_id
+         LEFT JOIN user_profiles up ON up.user_id = sa.user_id
          WHERE sa.space_id = ? AND sa.revoked_at IS NULL
          ORDER BY sa.created_at`,
         [spaceId],
       );
       return result.results || [];
+    },
+
+    /**
+     * Grant (or re-grant) a user/connection access to a space. Idempotent on
+     * (space_id, user_id): re-granting un-revokes and updates the role.
+     */
+    async grant(spaceId, userId, role = 'member', invitedBy = null) {
+      await d1Query(
+        `INSERT INTO space_access (id, space_id, user_id, role, invited_by, accepted_at, created_at)
+         VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, datetime('now'), datetime('now'))
+         ON CONFLICT(space_id, user_id) DO UPDATE SET role = excluded.role, revoked_at = NULL, accepted_at = datetime('now')`,
+        [spaceId, userId, role, invitedBy],
+      );
     },
 
     async revoke(spaceId, userId) {

@@ -279,6 +279,189 @@ export function portalCompatRouter({ db, userId }) {
     catch (e) { fail(res, 400, e.message || 'could not compute overlap'); }
   });
 
+  // ── Spaces (default-private shareable folders, Phase A) ──────────────────
+  // Every read/write is gated by space_access via db.spaces.requireRole, which
+  // is fail-closed (no grant → throws). Non-members get 404 (indistinguishable
+  // from a missing space), so a space reveals nothing by default. randomUUID is
+  // on the base adapter (db._base.randomUUID).
+  const newId = () => db._base.randomUUID();
+  // Run `fn` only if the caller holds at least `minRole` on the space; otherwise
+  // 404 (never leak existence). Returns true when allowed.
+  async function guardSpace(res, spaceId, minRole) {
+    try { await db.spaces.requireRole(spaceId, userId, minRole); return true; }
+    catch { fail(res, 404, 'not found'); return false; }
+  }
+
+  router.get('/spaces', async (_req, res) => {
+    try { ok(res, { spaces: await db.spaces.listForUser(userId) }); }
+    catch { ok(res, { spaces: [] }); }
+  });
+  router.post('/spaces', async (req, res) => {
+    try {
+      const name = String(req.body?.name || '').trim();
+      if (!name) return fail(res, 400, 'name required');
+      const id = newId();
+      await db.spaces.create(id, name, req.body?.essence ?? null, req.body?.voice ?? null, userId);
+      ok(res, { id, ...(await db.spaces.get(id)), role: 'creator' });
+    } catch { fail(res, 500, 'could not create space'); }
+  });
+  router.get('/spaces/territories', async (_req, res) => {
+    try {
+      const terr = await db.mindscape.getTerritoryProfiles(userId);
+      ok(res, { territories: (terr || []).map((t) => ({ id: String(t.territory_id ?? t.id), name: t.name, essence: t.essence, message_count: t.message_count ?? 0 })) });
+    } catch { ok(res, { territories: [] }); }
+  });
+  router.get('/spaces/:id', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'member'))) return;
+    try { ok(res, { ...(await db.spaces.get(id)), role: await db.spaces.getRole(id, userId) }); }
+    catch { fail(res, 500, 'could not load space'); }
+  });
+  router.put('/spaces/:id', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'creator'))) return;
+    try {
+      const b = req.body || {};
+      await db.spaces.update(id, { name: b.name, essence: b.essence, voice: b.voice, coverDocPath: b.coverDocPath });
+      ok(res, { ok: true, ...(await db.spaces.get(id)) });
+    } catch { fail(res, 500, 'could not update space'); }
+  });
+  router.delete('/spaces/:id', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'creator'))) return;
+    try { await db.spaces.delete(id); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not delete space'); }
+  });
+
+  // knowledge
+  router.get('/spaces/:id/knowledge', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'member'))) return;
+    try { ok(res, { entries: await db.spaceKnowledge.list(id) }); } catch { ok(res, { entries: [] }); }
+  });
+  router.post('/spaces/:id/knowledge', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try {
+      const content = String(req.body?.content || '').trim();
+      if (!content) return fail(res, 400, 'content required');
+      const entryId = await db.spaceKnowledge.add(id, content, userId, null, 'direct', 'all', req.body?.domain_tags ?? null);
+      ok(res, { ok: true, id: entryId });
+    } catch { fail(res, 500, 'could not add knowledge'); }
+  });
+  router.delete('/spaces/:id/knowledge/:entryId', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try { await db.spaceKnowledge.revoke(decodePath(req.params.entryId), id); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not remove knowledge'); }
+  });
+  router.post('/spaces/:id/seed', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try {
+      const ids = Array.isArray(req.body?.territory_ids) ? req.body.territory_ids : [];
+      const terr = await db.mindscape.getTerritoryProfiles(userId).catch(() => []);
+      const byId = new Map((terr || []).map((t) => [String(t.territory_id ?? t.id), t]));
+      for (const tid of ids) {
+        const t = byId.get(String(tid));
+        if (t) await db.spaceKnowledge.add(id, t.essence || t.name || '', userId, String(tid), 'territory', 'all', null);
+      }
+      ok(res, { ok: true, seeded: ids.length });
+    } catch { fail(res, 500, 'could not seed space'); }
+  });
+
+  // members + sharing (grant a connection access; default-deny)
+  router.get('/spaces/:id/members', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'member'))) return;
+    try { ok(res, { members: await db.spaceAccess.list(id) }); } catch { ok(res, { members: [] }); }
+  });
+  router.get('/spaces/:id/shares', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'creator'))) return;
+    try {
+      const [members, connections] = await Promise.all([db.spaceAccess.list(id), db.connections.list(userId)]);
+      ok(res, { members, connections });
+    } catch { ok(res, { members: [], connections: [] }); }
+  });
+  router.post('/spaces/:id/shares', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'creator'))) return;
+    try {
+      const granteeId = String(req.body?.granteeId || '').trim();
+      const role = ['member', 'contributor'].includes(req.body?.role) ? req.body.role : 'member';
+      if (!granteeId) return fail(res, 400, 'granteeId required');
+      if (granteeId === userId) return fail(res, 400, 'cannot share with yourself');
+      await db.spaceAccess.grant(id, granteeId, role, userId);
+      ok(res, { ok: true });
+    } catch { fail(res, 500, 'could not share space'); }
+  });
+  router.delete('/spaces/:id/shares/:granteeId', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'creator'))) return;
+    try { await db.spaceAccess.revoke(id, decodePath(req.params.granteeId)); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not revoke share'); }
+  });
+
+  // rooms (nested folders) + documents
+  const roomsList = async (req, res, parentId) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'member'))) return;
+    try { ok(res, { rooms: await db.spaceRooms.listChildren(id, parentId) }); } catch { ok(res, { rooms: [] }); }
+  };
+  router.get('/spaces/:id/rooms', async (req, res) => {
+    const parent = typeof req.query.parent === 'string' && req.query.parent ? req.query.parent : null;
+    await roomsList(req, res, parent);
+  });
+  router.get('/spaces/:id/rooms/:roomId/children', (req, res) => roomsList(req, res, decodePath(req.params.roomId)));
+  router.post('/spaces/:id/rooms', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try {
+      const name = String(req.body?.name || '').trim();
+      if (!name) return fail(res, 400, 'name required');
+      const room = await db.spaceRooms.create({ spaceId: id, parentId: req.body?.parentId ?? null, name, essence: req.body?.essence ?? null, createdBy: userId });
+      ok(res, { ok: true, id: room?.id ?? room });
+    } catch { fail(res, 500, 'could not create folder'); }
+  });
+  router.delete('/spaces/:id/rooms/:roomId', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try { await db.spaceRooms.delete(decodePath(req.params.roomId), id); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not delete folder'); }
+  });
+  // contents: at space root or within a room
+  const contentsList = async (req, res, roomId) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'member'))) return;
+    try {
+      const documents = roomId ? await db.spaceRoomDocuments.listByRoom(roomId, userId) : await db.spaceRoomDocuments.listAtRoot(id, userId);
+      ok(res, { documents });
+    } catch { ok(res, { documents: [] }); }
+  };
+  router.get('/spaces/:id/contents', (req, res) => contentsList(req, res, null));
+  router.get('/spaces/:id/rooms/:roomId/contents', (req, res) => contentsList(req, res, decodePath(req.params.roomId)));
+  const seedDoc = async (req, res, roomId) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try {
+      const documentPath = String(req.body?.documentPath || '').trim();
+      if (!documentPath) return fail(res, 400, 'documentPath required');
+      const row = await db.spaceRoomDocuments.add({ spaceId: id, roomId, documentPath, createdBy: userId });
+      ok(res, { ok: true, id: row?.id ?? row });
+    } catch { fail(res, 500, 'could not add document'); }
+  };
+  router.post('/spaces/:id/seed-doc', (req, res) => seedDoc(req, res, null));
+  router.post('/spaces/:id/rooms/:roomId/seed-doc', (req, res) => seedDoc(req, res, decodePath(req.params.roomId)));
+  const removeContent = async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try { await db.spaceRoomDocuments.remove(decodePath(req.params.docId), id); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not remove document'); }
+  };
+  router.delete('/spaces/:id/contents/:docId', removeContent);
+  router.delete('/spaces/:id/rooms/:roomId/contents/:docId', removeContent);
+
   // ── Settings (Phase S) — timezone only; theme is client-side localStorage ─
   router.get('/settings', (_req, res) => ok(res, { settings: { timezone: 'UTC' } }));
 
