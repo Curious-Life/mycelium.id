@@ -16,6 +16,7 @@ import { runDiscovery } from '../pipeline/discover-claims.mjs';
 import { previousCompleteWindow } from '../src/claims/windows.js';
 import { createContextDomain } from '../src/tools/context.js';
 import { createClaimsToolsDomain } from '../src/tools/claims.js';
+import { createMindscapeDomain } from '../src/tools/mindscape.js';
 
 const DB = 'data/verify-claims-discovery.db', KCV = 'data/verify-claims-discovery-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -80,6 +81,20 @@ try {
     const series = await handlers.personaClaims({ mode: 'series', claimId: id, granularity: 'day' });
     rec('D3d. personaClaims series returns the day trajectory',
       /trajectory/.test(series) && /new/.test(series), series.split('\n').find((l) => /new/.test(l)) || series.slice(0, 80));
+  }
+
+  // ── D3e. searchMindscape routes a person-level query to claim support-paths ──
+  {
+    const emptyLayers = { messages: [], documents: [], territories: { formatted: [], raw: [] }, realms: [], themes: [] };
+    const stubHelpers = { bulkSearch: async () => emptyLayers };
+    const { handlers } = createMindscapeDomain({ searchHelpers: stubHelpers, db, userId: U });
+    const personQ = await handlers.searchMindscape({ query: 'what do I value about being outdoors?' });
+    rec('D3e. a claim-level query prepends the "Claims about you" support-path section',
+      /Claims about you/.test(personQ) && /outdoors/.test(personQ),
+      personQ.split('\n').find((l) => /\[Claim\]/.test(l))?.slice(0, 70) || personQ.slice(0, 70));
+    const eventQ = await handlers.searchMindscape({ query: 'what did I do last tuesday' });
+    rec('D3f. a non-claim (event) query does NOT inject claims (no noise)',
+      !/Claims about you/.test(eventQ), eventQ.slice(0, 50));
   }
 
   // ── D4. the real CHILD process is FAIL-SOFT without a model (exit 0) ─────────
