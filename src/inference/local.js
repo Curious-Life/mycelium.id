@@ -34,6 +34,8 @@ export async function localInfer({
   baseUrl = DEFAULT_OLLAMA_URL,
   fetch = globalThis.fetch,
   timeoutMs = 60000,
+  numCtx,
+  format,
 } = {}) {
   if (typeof fetch !== "function") {
     throw new InferenceError("localInfer: no fetch implementation (Node >= 18 or pass opts.fetch)", { backend: "local" });
@@ -46,7 +48,17 @@ export async function localInfer({
   // Ollama accepts `images: [base64, …]` on /api/generate when the model is
   // multimodal (llava / llama3.2-vision / moondream / …). Omit the key entirely
   // for text models so behaviour is unchanged.
-  const body = { model, prompt, stream: false, options: { num_predict: maxTokens } };
+  // num_ctx: Ollama defaults to a SMALL context (~4096). A big prompt then
+  // crowds out generation (prompt+output must fit num_ctx), silently truncating
+  // the model's reply. Callers that send large prompts MUST size num_ctx to
+  // hold the full prompt PLUS num_predict, or the JSON tail gets cut off.
+  const options = { num_predict: maxTokens };
+  if (Number.isFinite(numCtx) && numCtx > 0) options.num_ctx = Math.round(numCtx);
+  const body = { model, prompt, stream: false, options };
+  // format:"json" makes Ollama constrain decoding to syntactically valid JSON —
+  // no prose preamble, no ``` fences, no half-formatted replies. Essential for
+  // structured callers (claim discovery) where a non-JSON reply = a lost run.
+  if (format) body.format = format;
   if (Array.isArray(images) && images.length) body.images = images;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

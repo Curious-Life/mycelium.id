@@ -23,11 +23,43 @@
  * @property {{ bulkSearch: (args: object) => Promise<object>, isScoped: () => boolean }} searchHelpers
  */
 
+import { routeLevel } from '../claims/route.js';
+import { renderClaimsBlock } from '../claims/support-path.js';
+import { toConfidence } from '../claims/confidence.js';
+
 export function createMindscapeDomain(deps) {
   if (!deps) throw new TypeError('createMindscapeDomain: deps required');
   const { searchHelpers, db = null, userId = 'local-user' } = deps;
   if (!searchHelpers || typeof searchHelpers.bulkSearch !== 'function') {
     throw new TypeError('createMindscapeDomain: searchHelpers.bulkSearch required');
+  }
+
+  // Query-conditioned routing (PersonaTree §3.6): when a query is about the
+  // PERSON (why / values / boundaries / personality), surface the durable
+  // claims as support paths so the answer is grounded in the user model — not
+  // just raw message hits. Ordinary topic/event searches are left untouched
+  // (no claims noise). Claims are ranked by query overlap, then confidence.
+  async function claimsForQuery(text) {
+    if (!db?.claims?.listActive) return '';
+    if (routeLevel(text).level !== 'claim') return '';
+    let claims;
+    try { claims = await db.claims.listActive(userId, { limit: 50 }); } catch { return ''; }
+    if (!claims.length) return '';
+    const qt = new Set(text.toLowerCase().split(/\W+/).filter((w) => w.length > 3));
+    const scored = claims.map((c) => {
+      const ct = (c.content || '').toLowerCase();
+      let overlap = 0; for (const t of qt) if (ct.includes(t)) overlap++;
+      return { id: c.id, claimType: c.claimType, content: c.content,
+        confidence: c.confidenceLogodds == null ? 0.5 : toConfidence(c.confidenceLogodds), overlap };
+    });
+    // Prefer claims the query actually touches; if none overlap, still surface the
+    // top self-model claims by confidence (a person-level query deserves them).
+    const relevant = scored.filter((c) => c.overlap > 0);
+    const pick = (relevant.length ? relevant : scored)
+      .sort((a, b) => (b.overlap - a.overlap) || (b.confidence - a.confidence))
+      .slice(0, 4);
+    const block = renderClaimsBlock(pick, { depth: 0, budgetTokens: 400 });
+    return block ? `## Claims about you (${pick.length})\n${block}` : '';
   }
 
   const tools = [
@@ -132,6 +164,10 @@ export function createMindscapeDomain(deps) {
 
       if (result.realms.length) sections.push(`## Realms (${result.realms.length})\n${result.realms.join('\n\n')}`);
       if (result.themes.length) sections.push(`## Themes (${result.themes.length})\n${result.themes.join('\n\n')}`);
+
+      // Query-conditioned: a person-level query leads with the relevant claims.
+      const claimsSection = scope === 'all' ? await claimsForQuery(text) : '';
+      if (claimsSection) sections.unshift(claimsSection);
 
       if (sections.length === 0) {
         return proactive ? 'No related context found.' : `No results for: ${text}`;

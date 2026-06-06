@@ -12,6 +12,7 @@ import { internalRouter } from './internal-router.js';
 import { portalCompatRouter } from './portal-compat.js';
 import { portalMindscapeRouter } from './portal-mindscape.js';
 import { portalMeasurementRouter } from './portal-measurement.js';
+import { portalClaimsRouter } from './portal-claims.js';
 import { portalUploadsRouter } from './portal-uploads.js';
 import { portalProvidersRouter } from './portal-providers.js';
 import { portalHardwareRouter } from './portal-hardware.js';
@@ -26,6 +27,8 @@ import { accountRouter } from './account/router.js';
 import { remoteRouter } from './remote/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { startEnrichDrainer } from './enrich/drainer.js';
+import { startClaimHeartbeat } from './claims/heartbeat.js';
+import { startClaimDiscoveryJob, isClusteringRunning } from './jobs.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
 import { setSessionKeys } from './account/session-keys.js';
 import { isTrustedLoopback } from './http/loopback.js';
@@ -120,6 +123,15 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   v.use('/api/v1/portal', portalMeasurementRouter({
     db, userId,
     authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
+  }));
+  v.use('/api/v1/portal', portalClaimsRouter({
+    db, userId,
+    authenticatePortalRequest: (req) => {
+      const ip = req.socket?.remoteAddress || '';
+      const loopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+      if (!loopback || req.headers['x-forwarded-for']) return null;
+      return { id: userId };
+    },
   }));
   v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath }));
   v.use('/api/v1/portal', portalUploadsRouter({ db, userId, enqueueEnrichment }));
@@ -235,9 +247,18 @@ export async function startRestServer({
         const embedSup = startEmbedSupervisor({ home: process.cwd() });
         const drainer = startEnrichDrainer({ db, userId: bootUserId });
         enqueueEnrichment = (id) => { try { baseEnqueue(id); } catch { /* :8095 optional */ } drainer.nudge(); };
+        // Persona-Claims cadence trigger: a zero-LLM hourly heartbeat that spawns
+        // the discovery child when a day/week/month/quarter window rolls over (and
+        // no clustering run is in flight). The child is Tier-3 fail-soft (no local
+        // model → no-op). Gated with the drainer so verify scripts never run it.
+        const claimsHeartbeat = startClaimHeartbeat({
+          db, userId: bootUserId, isJobRunning: isClusteringRunning,
+          spawn: (cadences) => startClaimDiscoveryJob({ dbPath: effectiveDbPath, userId: bootUserId, cadence: cadences.join(',') }),
+        });
         closeHandle = () => {
           try { connectorScheduler?.stop(); } catch { /* */ }
           try { drainer.stop(); } catch { /* */ }
+          try { claimsHeartbeat.stop(); } catch { /* */ }
           try { embedSup.stop(); } catch { /* */ }
           try { hwOllamaDaemon.stop(); } catch { /* */ }
           try { close(); } catch { /* */ }

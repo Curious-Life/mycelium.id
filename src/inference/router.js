@@ -67,8 +67,8 @@ export function createInferenceRouter({
   // local/self-hosted base_url servers are keyless).
   const hasCloud = () => Boolean(cfg.anthropicApiKey || cfg.openaiApiKey || cfg.baseUrl);
 
-  function runLocal({ prompt, maxTokens }) {
-    return localInfer({ prompt, maxTokens, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs });
+  function runLocal({ prompt, maxTokens, numCtx, format }) {
+    return localInfer({ prompt, maxTokens, numCtx, format, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs });
   }
 
   function runCloud({ prompt, maxTokens }) {
@@ -136,7 +136,7 @@ export function createInferenceRouter({
    *   NEVER egresses to a US provider — it falls back to on-box local instead.
    * @returns {Promise<string>}
    */
-  async function infer({ prompt, task = "summarize", maxTokens, sensitive = false } = {}) {
+  async function infer({ prompt, task = "summarize", maxTokens, sensitive = false, numCtx, format } = {}) {
     if (typeof prompt !== "string" || prompt.trim() === "") {
       throw new InferenceError("infer: prompt must be a non-empty string");
     }
@@ -150,17 +150,17 @@ export function createInferenceRouter({
       // denial. eu-zdr / local providers are unaffected.
       if (sensitive && /^us/.test(cloudJurisdiction())) {
         emitEgress(prompt, "denied", "sensitive_us_block");
-        return runLocal({ prompt, maxTokens });
+        return runLocal({ prompt, maxTokens, numCtx, format });
       }
       try {
         emitEgress(prompt, "allowed");
-        return await runCloud({ prompt, maxTokens });
+        return await runCloud({ prompt, maxTokens }); // cloud models carry large context; numCtx is local-only
       } catch (cloudErr) {
         // cloudFallbackToLocal:false (cascade mode) propagates the error so the
         // caller can try the NEXT provider; otherwise resilience → on-box local.
         if (!cloudFallbackToLocal) throw cloudErr;
         try {
-          return await runLocal({ prompt, maxTokens });
+          return await runLocal({ prompt, maxTokens, numCtx, format });
         } catch (localErr) {
           throw new InferenceError("infer: cloud failed and local fallback failed", { cause: localErr, backend: "both" });
         }
@@ -168,7 +168,7 @@ export function createInferenceRouter({
     }
 
     // Simple tasks, or complex with no cloud configured → local.
-    return runLocal({ prompt, maxTokens });
+    return runLocal({ prompt, maxTokens, numCtx, format });
   }
 
   /**

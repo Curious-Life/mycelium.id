@@ -130,12 +130,41 @@ Enrichment state machine (faithful to the canonical model): **`0 unprocessed →
 is a pure deterministic rules extractor (url/email/money/date/proper-noun/
 hashtag + keyword tags) behind a seam a model-backed pass can replace.
 
+## 4b. Persona-Claims (PersonaTree adoption — Tier-3)
+
+A lifecycle layer that turns interaction history into durable, evidence-grounded
+**person-level claims** (values, principles, identity, personality, hard
+boundaries) and tracks how confidence in each claim moves over time. Design:
+`docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md`.
+
+```
+cadence heartbeat (src/claims/heartbeat.js, REST, zero-LLM)
+   │  on a day/week/month/quarter window roll-over (and no clustering job live)
+   ▼  spawns
+pipeline/discover-claims.mjs (child, builds the local-first inference router)
+   │  gather window evidence (messages) ─► propose claims (infer, sensitive:true)
+   │  ─► identity-match (embedding cosine ≥0.62, content_hash; lexical fallback)
+   │  ─► validate support/conflict (sensitive:true) ─► log-odds confidence update
+   ▼
+person_claims (current) + person_claim_snapshots (per-window trajectory)
+   ▼  surfaced by
+getContext "## WHAT YOU'VE LEARNED ABOUT THEM" · searchMindscape (routed to
+claim level) · personaClaims MCP tool · portal /claims (ClaimsView + TimeSeries)
+```
+
+- **Modules:** `src/claims/{confidence,validator,support-path,route,discovery,windows,heartbeat}.js`, `src/db/claims.js` (`db.claims`), `pipeline/discover-claims.mjs`, `src/portal-claims.js`, `src/tools/claims.js`, `portal-app/.../ClaimsView.svelte`.
+- **Confidence:** log-odds with type-specific decay (boundary λ=0 — allergies/trauma never fade; mood τ≈1wk). Identity-match uses embedding cosine (Nomic, threshold 0.62 calibrated live) so paraphrases across cadences merge into one row; rejected claims are tombstoned (never resurrected).
+- **Security:** every discovery/validator model call is `sensitive:true` → router hard-blocks US-cloud egress, runs on-box. All claim content/confidence/type/snapshots encrypted at rest. **Tier-3:** no local model → discovery is a logged no-op (fail-open).
+- **Verification:** `verify:claims`, `verify:claims-discovery`, `verify:claims-rest` + 53 unit tests; Tier-3 live-validated against Ollama+Nomic; portal live-rendered.
+
 ## 5. Storage & schema
 
 - **Engine:** better-sqlite3 with a D1-compatible adapter (`src/adapter/d1.js`),
   so the same code runs on Cloudflare D1 later.
-- **Schema:** all V1 tables ported in `migrations/0001_init.sql`; `0002` adds
-  `attachments.local_path` for the local blob store. Applied by `src/db/migrate.js`.
+- **Schema:** all V1 tables ported in `migrations/0001_init.sql`; later numbered
+  migrations add columns/tables (e.g. `0002` `attachments.local_path`; `0011`
+  `person_claims` + `person_claim_snapshots` for Persona-Claims). Applied in
+  lexical order every boot by `src/db/migrate.js` (idempotent).
 - **Blobs:** uploaded files encrypted to a local blob store (`src/ingest/blob-store.js`).
 - **Location (#36):** the vault lives in a **durable per-OS data dir** (`src/paths.js` →
   `~/Library/Application Support/id.mycelium.app` on macOS, set by the Tauri shell as

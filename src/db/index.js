@@ -32,6 +32,7 @@ import { createTerritoryDocsNamespace } from './territory-docs.js';
 import { createProvidersNamespace } from './providers.js';
 import { createConnectorsNamespace } from './connectors.js';
 import { createUsersNamespace } from './users.js';
+import { createClaimsNamespace } from './claims.js';
 import { createEgressAuditNamespace } from './egress-audit.js';
 import { createIdentityChannelsNamespace } from './identity-channels.js';
 import { createTelegramGroupsNamespace } from './telegram-groups.js';
@@ -113,6 +114,12 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // surface (src/portal-mindscape.js) + the Phase C chronicles writer.
     mindscape: createMindscapeNamespace({ d1Query, parseJson }),
     territoryDocs: createTerritoryDocsNamespace({ d1Query, parseJson }),
+
+    // Persona-Claims (PersonaTree adoption): current person-level claims +
+    // per-window snapshots for temporal evolution. Sensitive cols encrypted at
+    // rest (ENCRYPTED_FIELDS.person_claims / .person_claim_snapshots).
+    // @see migrations/0011_persona_claims.sql, src/claims/.
+    claims: createClaimsNamespace({ d1Query, firstRow, randomUUID }),
 
     // Core user row: timezone (read by getContext — tools/context.js:63, which
     // already optional-chains db.users) + a `settings` JSON blob that backs the
