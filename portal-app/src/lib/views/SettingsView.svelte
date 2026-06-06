@@ -11,6 +11,7 @@
 	import ManagedConnectSection from '$lib/components/settings/ManagedConnectSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 	import ConnectYourAISection from '$lib/components/settings/ConnectYourAISection.svelte';
+	import HarnessPickerSection from '$lib/components/settings/HarnessPickerSection.svelte';
 
 	interface Settings {
 		timezone: string;
@@ -1279,6 +1280,9 @@
 
 			<!-- Remote Access — connect Claude / any MCP client over the internet (operator password, status, connector URL) -->
 			<RemoteAccessSection />
+
+			<!-- Pick your harness — curated card menu over the two doors; links to docs/HARNESS-RECIPES.md -->
+			<HarnessPickerSection />
 
 			<!-- Connect your AI — the local/remote MCP + model-gateway endpoints + static-bearer how-to (S5) -->
 			<ConnectYourAISection />

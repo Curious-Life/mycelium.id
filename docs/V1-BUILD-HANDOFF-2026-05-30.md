@@ -607,3 +607,39 @@ public/unlisted/private; tag-ownership always signed. Custom-domain serving buil
 **Next:** wire the publishDocument MCP tool to a minimal publicRenderer (so publish
 is drivable from the portal/Claude); per-doc visibility UI in the portal; then the
 central `<tag>.mycelium.id` registry + edge (hosted-tier, phase 2).
+
+---
+
+## 2026-06-06 — Harness Connect: "pick your harness" surface (UI + docs)
+
+**Branch `feat/harness-connect` off `origin/main` (a63a9d6).** Buildable, non-env-gated unit.
+
+**Built** a curated harness picker over the already-shipped two doors (North memory
+`:4711/mcp`, South model `:4711/v1`) so both UI users and devs connect *any* harness:
+- `docs/DESIGN-harness-connect-2026-06-06.md` — sweep-first design. Key finding: the
+  earlier "blockers" are already resolved (creds encrypted `ai_providers:[credentials]`
+  crypto-local.js:214; static bearer built static-bearer.js; both doors live S8). Gap was
+  *curation*, not protocol — no menu, openclaw/hermes undocumented.
+- `docs/HARNESS-RECIPES.md` — per-harness recipes (Mycelium-native · Claude Desktop/Code ·
+  opencode · openclaw · hermes-agent · custom), both doors. Config keys verified against
+  each project's live docs (opencode `type:remote`+`oauth:false`; openclaw `transport:
+  streamable-http`; hermes `mcp_servers` YAML). openclaw scam-safety note included.
+- `portal-app/.../settings/HarnessPickerSection.svelte` — card menu, mounted above
+  `ConnectYourAISection` in `SettingsView.svelte` (kept as the raw-endpoints reference).
+  Reuses the endpoint/bearer/copy patterns. **No new backend, no auth change.**
+- `scripts/verify-harness-connect.mjs` — H1-H8 (harness coverage, scam note, local-only
+  banner, both doors, picker parity, mount, doc link). **8/8 GO.**
+
+**Verified:** `verify:harness-connect` GO (8/8); `svelte-check` — new component compiles
+clean (the 33 project errors are pre-existing, untouched files); production `vite build`
+succeeds (11.3s, adapter-static). Wired into `npm run verify` chain after
+`verify:embeddings-gateway`. **Env-gated (not run here):** live portal visual + real
+opencode connect smoke need a running vault (`:8787` + unlocked keys).
+
+**Confidence: 88/100** — isolated blast radius (one new Svelte card + 2 new docs + 1 doc
+link + verify script), no security surface touched (CLAUDE.md: not crypto/auth/migration).
+Non-sensitive → eligible for `auto-merge-on-green` once CI + a human glance pass. Per-harness
+config keys are the one thing to re-confirm if a third-party harness changes its schema.
+
+**Next:** optional follow-ups — a backend "bearer configured?" status helper; per-harness
+logos/screenshots; flip remote rows live when the relay ships.

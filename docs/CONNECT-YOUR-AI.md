@@ -9,6 +9,8 @@ Everything below runs **on your machine** by default (loopback only). Remote acc
 
 > **Model id:** when a harness needs a model name, use **`mycelium-auto`** — Mycelium routes it to whichever provider you set active in **Settings → Intelligence**.
 
+> **Just want your harness's recipe?** Per-harness copy-paste setup (Mycelium-native · Claude Desktop/Code · opencode · openclaw · hermes-agent · any custom client) lives in **[HARNESS-RECIPES.md](HARNESS-RECIPES.md)**. This page is the conceptual overview behind it.
+
 ---
 
 ## 1. Run Mycelium
