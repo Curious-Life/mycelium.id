@@ -32,6 +32,8 @@ ok(isTrustedLoopback(mk('127.0.0.1', { 'x-forwarded-for': '1.2.3.4' })) === fals
 ok(isTrustedLoopback(mk('127.0.0.1', { 'x-forwarded-for': '' })) === false, 'A5. loopback + EMPTY XFF (presence, not truthiness) → NOT trusted');
 ok(isTrustedLoopback(mk('203.0.113.9')) === false, 'A6. public peer, no XFF → NOT trusted');
 ok(isTrustedLoopback({ headers: {} }) === false, 'A7. missing socket → NOT trusted (fail closed)');
+ok(isTrustedLoopback(mk('127.0.0.1', { 'x-real-ip': '1.2.3.4' })) === false, 'A8. loopback + X-Real-IP → NOT trusted (defence in depth)');
+ok(isTrustedLoopback(mk('127.0.0.1', { 'forwarded': 'for=1.2.3.4' })) === false, 'A9. loopback + Forwarded → NOT trusted (defence in depth)');
 
 // ── B. INTEGRATION — control surfaces over a (simulated) proxy ──────────────
 const SUF = `ctl-${process.pid}-${Date.now()}`;

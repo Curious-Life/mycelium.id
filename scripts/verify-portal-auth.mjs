@@ -94,6 +94,12 @@ try {
   // H. SPA navigation (non-data path) is NOT gated even when networked
   const h = await call(NONDATA, { xff: NET });
   ok(h !== 401 && h !== 403, 'H. networked GET /library (SPA nav) → not gated', `(${h})`);
+
+  // I. normalization safety: a networked, no-cookie request to a double-slashed
+  //    data path must NEVER return data ungated (gate+router agree via Express
+  //    /api mount). Acceptable: 401 (gated) or 404 (no match) — never 200.
+  const i = await call('//api/v1/portal/onboarding/status', { xff: NET });
+  ok(i !== 200, 'I. networked //api/... (no cookie) → never 200 (no normalization bypass)', `(${i})`);
 } catch (err) {
   ok(false, `boot/integration failed: ${String(err?.message || err).slice(0, 160)}`);
 } finally {

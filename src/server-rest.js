@@ -97,10 +97,12 @@ function ensureVaultSchema(dbFile) {
 function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth }) {
   const v = express();
   v.disable('x-powered-by');
-  // Fail-closed auth gate FIRST: loopback (desktop) bypasses; every networked
-  // request to a vault-data path needs a valid session/Bearer (step 1.2). Only
-  // enforces on data paths, so SPA navigation still falls through to static.
-  if (vaultAuth) v.use(vaultAuth);
+  // Fail-closed auth gate FIRST, mounted at `/api` — ALL vault data the sub-app
+  // serves is under /api/* (portal routers at /api/v1/portal, apiRouter at
+  // /api/v1/*), so Express's own routing decides what's gated (no hand-rolled
+  // path check that could diverge from the routers). Loopback (desktop) bypasses;
+  // SPA navigation isn't under /api so it falls through to static (step 1.2).
+  if (vaultAuth) v.use('/api', vaultAuth);
   v.use('/api/v1/portal', portalCompatRouter({ db, userId }));
   // S1 measurement REST bridge — auth-GATED, fail-closed (the rest of the V1
   // surface is unauthenticated/localhost-only; this surface decrypts the

@@ -25,6 +25,14 @@
 
 const LOOPBACK_PEERS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
+// Any of these present ⇒ the request traversed a proxy ⇒ NOT a genuine local
+// request. Caddy (our relay edge) sets X-Forwarded-For; the others are included
+// for defence in depth so the trust does not hinge on a single header / a
+// specific proxy. Presence — not truthiness — counts (an empty value still
+// signals a hop). A remote attacker can ADD these but never REMOVE the one the
+// proxy injects, so the check cannot be cleared from outside.
+const FORWARD_HEADERS = ['x-forwarded-for', 'forwarded', 'x-real-ip', 'x-forwarded-host'];
+
 /**
  * @param {import('express').Request} req
  * @returns {boolean} true iff this is a genuine same-host (owner) request.
@@ -32,8 +40,9 @@ const LOOPBACK_PEERS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 export function isTrustedLoopback(req) {
   const peer = req?.socket?.remoteAddress || '';
   if (!LOOPBACK_PEERS.has(peer)) return false;
-  // Presence check (not truthiness): any X-Forwarded-For — even empty — means the
-  // request traversed a proxy, so it is not a genuine local request.
-  if (req?.headers?.['x-forwarded-for'] !== undefined) return false;
+  const headers = req?.headers || {};
+  for (const name of FORWARD_HEADERS) {
+    if (headers[name] !== undefined) return false;
+  }
   return true;
 }

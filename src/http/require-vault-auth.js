@@ -21,12 +21,7 @@ import { matchStaticBearer } from '../gateway/static-bearer.js';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const CSRF_COOKIE = 'mycelium_csrf';
-
-// The vault-data surface this gate protects (everything the vault sub-app serves
-// EXCEPT SPA navigation, which flows through the sub-app then falls to static).
-export function isVaultDataPath(p) {
-  return p.startsWith('/api/') || p.startsWith('/ingest/') || p.startsWith('/portal/');
-}
+const VALIDATE_TIMEOUT_MS = 5000;
 
 export function parseCookies(req) {
   const out = {};
@@ -50,14 +45,19 @@ export function defaultValidateSession(cookieHeader) {
   if (!cookieHeader) return Promise.resolve(null);
   const base = process.env.MYCELIUM_AUTH_URL
     || `http://127.0.0.1:${process.env.MYCELIUM_PORT || 4711}`;
-  return fetch(`${base}/api/auth/get-session`, { headers: { cookie: cookieHeader } })
+  // Bounded: a hung/slow :4711 must not stall every networked request — abort and
+  // fail closed (→ 401) rather than hang.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), VALIDATE_TIMEOUT_MS);
+  return fetch(`${base}/api/auth/get-session`, { headers: { cookie: cookieHeader }, signal: ctrl.signal })
     .then(async (r) => {
       if (!r.ok) return null;
       const body = await r.json().catch(() => null);
       const id = body?.user?.id || body?.session?.userId || null;
       return id ? String(id) : null;
     })
-    .catch(() => null);
+    .catch(() => null)
+    .finally(() => clearTimeout(timer));
 }
 
 /**
@@ -114,8 +114,12 @@ export function csrfCookieMiddleware(req, res, next) {
  * @param {{ userId: string, validateSession?: (cookie:string)=>Promise<string|null> }} opts
  */
 export function createVaultAuthMiddleware({ userId, validateSession = defaultValidateSession }) {
+  // NB: mounted at `/api` in the vault sub-app (see server-rest.js), so Express's
+  // own route matching — the SAME matcher the data routers use — decides what is
+  // gated. This avoids any divergence between a hand-rolled path check and the
+  // router (encoding / `//` normalization bypasses). SPA navigation is not under
+  // `/api`, so it never reaches this gate.
   return async (req, res, next) => {
-    if (!isVaultDataPath(req.path)) return next();      // SPA nav / non-data → through
     try {
       const who = await resolveRequester(req, { userId, validateSession });
       if (!who) return res.status(401).json({ error: 'unauthorized' });
