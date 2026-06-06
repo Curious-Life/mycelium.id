@@ -24,8 +24,11 @@ import express from 'express';
  * @param {string} deps.userId   the single V1 owner
  * @returns {import('express').Router}
  */
-export function portalCompatRouter({ db, userId }) {
+export function portalCompatRouter({ db, userId, spaceSync = null }) {
   if (!db) throw new Error('portalCompatRouter: db required');
+  // spaceSync (Phase B, optional): when a Matrix client is wired, a share grant/
+  // revoke also syncs the peer into/out of the space's Megolm room. Null until a
+  // homeserver is configured → the grant is recorded locally regardless.
   const router = express.Router();
   router.use(express.json({ limit: process.env.MYCELIUM_API_BODY_LIMIT || '64mb' }));
 
@@ -488,14 +491,20 @@ export function portalCompatRouter({ db, userId }) {
       const conns = await db.connections.list(userId);
       if (!conns.some((c) => c.other_user_id === granteeId)) return fail(res, 400, 'grantee must be an accepted connection');
       await db.spaceAccess.grant(id, granteeId, role, userId);
+      // best-effort Megolm-room invite (no-op until Matrix is configured)
+      spaceSync?.syncGrant(id, granteeId, userId).catch(() => {});
       ok(res, { ok: true });
     } catch { fail(res, 500, 'could not share space'); }
   });
   router.delete('/spaces/:id/shares/:granteeId', async (req, res) => {
     const id = decodePath(req.params.id);
     if (!(await guardSpace(res, id, 'creator'))) return;
-    try { await db.spaceAccess.revoke(id, decodePath(req.params.granteeId)); ok(res, { ok: true }); }
-    catch { fail(res, 500, 'could not revoke share'); }
+    try {
+      const granteeId = decodePath(req.params.granteeId);
+      await db.spaceAccess.revoke(id, granteeId);
+      spaceSync?.syncRevoke(id, granteeId).catch(() => {});
+      ok(res, { ok: true });
+    } catch { fail(res, 500, 'could not revoke share'); }
   });
 
   // rooms (nested folders) + documents
