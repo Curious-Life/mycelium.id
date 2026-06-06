@@ -462,6 +462,82 @@ export function portalCompatRouter({ db, userId }) {
   router.delete('/spaces/:id/contents/:docId', removeContent);
   router.delete('/spaces/:id/rooms/:roomId/contents/:docId', removeContent);
 
+  // ── Contexts (the "Work Self / Private Self" granular model) ─────────────
+  // A context is a named bucket of territories shared with chosen connections —
+  // "what facet of yourself they see". Default-private: a territory is invisible
+  // to a connection unless it's in a non-private context granted to them
+  // (db.contexts.canSeeTerritory is the fail-closed gate). Cross-node visibility
+  // activates with federation; the model is recorded + enforced locally now.
+  async function ownsContext(id) {
+    try {
+      const r = await db._base.d1Query(`SELECT 1 FROM sharing_contexts WHERE id = ? AND user_id = ?`, [id, userId]);
+      return (r.results || []).length > 0;
+    } catch { return false; }
+  }
+  async function guardContext(res, id) {
+    if (await ownsContext(id)) return true;
+    fail(res, 404, 'not found'); return false;
+  }
+
+  router.get('/contexts', async (_req, res) => {
+    try { await db.contexts.ensureDefaults(userId); ok(res, { contexts: await db.contexts.list(userId) }); }
+    catch { ok(res, { contexts: [] }); }
+  });
+  router.post('/contexts', async (req, res) => {
+    try {
+      const name = String(req.body?.name || '').trim();
+      if (!name) return fail(res, 400, 'name required');
+      const id = await db.contexts.create(userId, { name, is_private: !!req.body?.is_private });
+      ok(res, { ok: true, id });
+    } catch (e) { fail(res, 400, e.message || 'could not create context'); }
+  });
+  router.put('/contexts/:id', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { await db.contexts.rename(userId, id, String(req.body?.name || '').trim()); ok(res, { ok: true }); }
+    catch (e) { fail(res, 400, e.message || 'could not rename'); }
+  });
+  router.delete('/contexts/:id', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { await db.contexts.remove(userId, id); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not delete context'); }
+  });
+  router.get('/contexts/:id/territories', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { ok(res, { territories: await db.contexts.getTerritories(id) }); } catch { ok(res, { territories: [] }); }
+  });
+  router.post('/contexts/:id/territories/:territoryId', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { await db.contexts.addTerritory(id, decodePath(req.params.territoryId)); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not add territory'); }
+  });
+  router.delete('/contexts/:id/territories/:territoryId', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { await db.contexts.removeTerritory(id, decodePath(req.params.territoryId)); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not remove territory'); }
+  });
+  router.get('/contexts/:id/connections', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { ok(res, { grants: await db.contexts.getGrants(id) }); } catch { ok(res, { grants: [] }); }
+  });
+  router.post('/contexts/:id/grant/:connId', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { await db.contexts.grant(id, decodePath(req.params.connId)); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not grant'); }
+  });
+  router.delete('/contexts/:id/grant/:connId', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { await db.contexts.revoke(id, decodePath(req.params.connId)); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not revoke'); }
+  });
+
   // ── Settings (Phase S) — timezone only; theme is client-side localStorage ─
   router.get('/settings', (_req, res) => ok(res, { settings: { timezone: 'UTC' } }));
 

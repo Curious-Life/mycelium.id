@@ -81,6 +81,17 @@ async function main() {
   rec('owner revokes bob', (await call(owner.port, 'DELETE', `/portal/spaces/${sid}/shares/bob`)).status === 200);
   rec('revoked bob → 404 again (fail closed)', (await call(bob.port, 'GET', `/portal/spaces/${sid}`)).status === 404);
 
+  // ── contexts (the "Work Self" granular territory-sharing model) ──────────
+  const ctxList = await call(owner.port, 'GET', '/portal/contexts');
+  rec('contexts: GET seeds the 4 defaults (incl. a private one)', ctxList.json.contexts.length >= 4 && ctxList.json.contexts.some((c) => c.is_private));
+  const ctx = await call(owner.port, 'POST', '/portal/contexts', { name: 'Research Self' });
+  const cid = ctx.json?.id;
+  rec('contexts: owner creates a context', ctx.status === 200 && !!cid);
+  rec('contexts: add a territory to it', (await call(owner.port, 'POST', `/portal/contexts/${cid}/territories/42`)).status === 200);
+  rec('contexts: territory appears', (await call(owner.port, 'GET', `/portal/contexts/${cid}/territories`)).json.territories.some((t) => String(t.territory_id) === '42'));
+  rec('contexts: intruder cannot mutate someone else’s context → 404 (ownership guard)', (await call(intruder.port, 'POST', `/portal/contexts/${cid}/territories/99`)).status === 404);
+  rec('contexts: owner deletes the context', (await call(owner.port, 'DELETE', `/portal/contexts/${cid}`)).status === 200);
+
   owner.server.close(); bob.server.close(); intruder.server.close(); close?.();
   rmSync(dir, { recursive: true, force: true });
 

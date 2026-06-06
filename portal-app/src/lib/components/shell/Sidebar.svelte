@@ -41,6 +41,7 @@
 		{ id: 'timeline',  label: 'Timeline', icon: 'tornado', href: '/timeline' },
 		{ id: 'spaces',    label: 'Spaces',   icon: 'spaces', href: '/spaces' },
 		{ id: 'connections', label: 'Connections', icon: 'connections', href: '/connections' },
+		{ id: 'contexts',  label: 'Sharing',  icon: 'contexts', href: '/contexts' },
 		{ id: 'profile',   label: 'Profile',  icon: 'profile', href: '/profile' },
 	];
 
@@ -196,6 +197,11 @@
 						{:else if item.icon === 'spaces'}
 							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 9.75h16.5M3.75 9.75V6a2.25 2.25 0 0 1 2.25-2.25h3l2 2.25h7.5a2.25 2.25 0 0 1 2.25 2.25v9.75A2.25 2.25 0 0 1 18.75 20.25H5.25A2.25 2.25 0 0 1 3 18V9.75z" />
+							</svg>
+						{:else if item.icon === 'contexts'}
+							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
+								<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 12c0 .35-.03.69-.08 1.02l1.86 1.46-1.5 2.6-2.2-.9a7.5 7.5 0 0 1-1.77 1.02l-.33 2.34h-3l-.33-2.34a7.5 7.5 0 0 1-1.77-1.02l-2.2.9-1.5-2.6 1.86-1.46A7.6 7.6 0 0 1 4.5 12c0-.35.03-.69.08-1.02L2.72 9.52l1.5-2.6 2.2.9A7.5 7.5 0 0 1 8.19 6.8l.33-2.34h3l.33 2.34c.63.25 1.22.59 1.77 1.02l2.2-.9 1.5 2.6-1.86 1.46c.05.33.08.67.08 1.02Z" opacity="0.4" />
 							</svg>
 						{/if}
 					</div>

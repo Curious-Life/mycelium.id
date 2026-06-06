@@ -52,6 +52,10 @@ export const REGISTRY: Record<string, ViewDef> = {
 		title: 'Space', icon: 'spaces', key: (p) => `space:${p.id}`,
 		load: () => import('$lib/views/SpaceDetailView.svelte'),
 	},
+	contexts: {
+		title: 'Sharing', icon: 'contexts', singleton: true,
+		load: () => import('$lib/views/ContextsView.svelte'),
+	},
 	'curious-life': {
 		title: 'Curious Life', icon: 'compass', singleton: true,
 		load: () => import('$lib/views/CuriousLifeView.svelte'),
