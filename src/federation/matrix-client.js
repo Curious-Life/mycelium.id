@@ -14,6 +14,7 @@
  * @property {(roomId:string, mxid:string) => Promise<void>} invite
  * @property {(roomId:string, mxid:string) => Promise<void>} kick
  * @property {(roomId:string) => Promise<string[]>} roomMembers
+ * @property {(roomId:string) => Promise<boolean>} isRoomEncrypted
  * @property {(roomId:string, eventType:string, content:object) => Promise<string>} send  → event id
  * @property {(handler:(e:{roomId:string,eventType:string,content:object,senderMxid:string,eventId:string})=>void) => void} onTimelineEvent
  */
@@ -47,6 +48,9 @@ export function createMockMatrixClient() {
     },
     async roomMembers(roomId) {
       return [...(rooms.get(roomId)?.members || [])];
+    },
+    async isRoomEncrypted(roomId) {
+      return rooms.get(roomId)?.encrypted === true;
     },
     async send(roomId, eventType, content) {
       if (!rooms.has(roomId)) throw new Error(`send: unknown room ${roomId}`);

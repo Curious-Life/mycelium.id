@@ -1,12 +1,14 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMockMatrixClient } from '../src/federation/matrix-client.js';
+import { createMatrixEgress } from '../src/federation/matrix-egress.js';
 import { createSpaceSync } from '../src/federation/space-sync.js';
 
 // A tiny in-memory db with just the namespaces space-sync touches.
 function fakeDb() {
   const bindings = new Map();
   const knowledge = [];
+  const audits = [];
   return {
     spaces: { async get(id) { return { id, name: `Space ${id}` }; } },
     spaceMatrixRooms: {
@@ -18,9 +20,16 @@ function fakeDb() {
       async add(spaceId, content, src, tid, type, vis, tags, ref) { knowledge.push({ spaceId, content, src, type, ref }); return `k${knowledge.length}`; },
       async existsBySourceRef(spaceId, ref) { return !!ref && knowledge.some((k) => k.spaceId === spaceId && k.ref === ref); },
     },
+    egressAudit: { async record(e) { audits.push(e); } },
     _bindings: bindings,
     _knowledge: knowledge,
+    _audits: audits,
   };
+}
+
+// Wire a space-sync with both the membership client + the content egress over one mock.
+function wired(db, mx, opts = {}) {
+  return createSpaceSync({ db, matrixClient: mx, matrixEgress: createMatrixEgress({ matrixClient: mx, db }), resolveMxid: async () => '@bob:hs', ...opts });
 }
 
 describe('space-sync (Phase B membership orchestration)', () => {
@@ -79,10 +88,10 @@ describe('space-sync (Phase B membership orchestration)', () => {
   });
 
   // ── B8 mirror ──
-  test('mirrorKnowledge emits a valid knowledge.v1 to the space room', async () => {
+  test('mirrorKnowledge emits a valid knowledge.v1 through the egress chokepoint (gated + audited)', async () => {
     const db = fakeDb();
     const mx = createMockMatrixClient();
-    const sync = createSpaceSync({ db, matrixClient: mx, resolveMxid: async () => '@bob:hs' });
+    const sync = wired(db, mx);
     await sync.syncGrant('space1', 'bob@x', 'owner'); // creates the room
     const r = await sync.mirrorKnowledge('space1', { content: 'an insight', source_type: 'direct' });
     assert.equal(r.mirrored, true);
@@ -90,11 +99,16 @@ describe('space-sync (Phase B membership orchestration)', () => {
     assert.equal(send[2], 'social.mycelium.knowledge.v1');
     assert.equal(send[3].space_ref, 'space1');
     assert.equal(send[3].content, 'an insight');
+    // §11 audit: an 'allowed' row with a hash (never plaintext)
+    const a = db._audits.at(-1);
+    assert.equal(a.decision, 'allowed');
+    assert.match(a.contentHash, /^[0-9a-f]{64}$/);
+    assert.ok(!JSON.stringify(a).includes('an insight'));
   });
   test('mirrorKnowledge skips when the space has no room yet', async () => {
     const db = fakeDb();
     const mx = createMockMatrixClient();
-    const sync = createSpaceSync({ db, matrixClient: mx, resolveMxid: async () => '@bob:hs' });
+    const sync = wired(db, mx);
     assert.equal((await sync.mirrorKnowledge('space1', { content: 'x' })).skipped, 'no-room');
     assert.equal(mx.calls.length, 0);
   });
