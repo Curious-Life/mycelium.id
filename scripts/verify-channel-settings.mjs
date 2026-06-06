@@ -14,6 +14,7 @@ import crypto from 'node:crypto';
 import { startRestServer } from '../src/server-rest.js';
 import { applyMigrations } from '../src/db/migrate.js';
 import { applyChannelConfigToEnv } from '../packages/channel-daemon/config.js';
+import { createVaultClient } from '../packages/channel-daemon/vault-client.js';
 
 const DB = 'data/verify-channel-settings.db';
 const KCV = 'data/verify-channel-settings-kcv.json';
@@ -38,6 +39,7 @@ let vault;
 try {
   vault = await startRestServer({ dbPath: DB, kcvPath: KCV, userHex: hex(), systemHex: hex(), port: 0, host: '127.0.0.1' });
   const u = vault.url;
+  const vc = createVaultClient({ baseUrl: u });
   const get = async (p) => { const r = await fetch(`${u}${p}`); return { status: r.status, json: await r.json().catch(() => null) }; };
   const send = async (p, method, body) => { const r = await fetch(`${u}${p}`, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }); return { status: r.status, json: await r.json().catch(() => null) }; };
 
@@ -85,6 +87,15 @@ try {
   r = await send('/api/v1/portal/channels', 'PUT', { enabled: false, telegram: { ownerId: '' } });
   r = await get('/api/v1/portal/channels');
   rec('CS16. clearing ownerId (empty) removes it; enabled toggled off', r.json.telegram.ownerId === null && r.json.enabled === false && r.json.telegram.hasToken === true);
+
+  // ── discord channel allowlist (identity_channels kind discord) ────────────
+  const DCH = '5551234';
+  rec('CS17. unauthorized discord channel → authority denied', (await vc.checkChannelAuthority({ kind: 'discord', id: DCH })).allowed === false);
+  await vc.setDiscordChannel({ id: DCH, name: 'general', on: true });
+  rec('CS18. authorize → authority allowed + listed', (await vc.checkChannelAuthority({ kind: 'discord', id: DCH })).allowed === true && (await vc.listDiscordChannels()).some((c) => String(c.id) === DCH && c.name === 'general'));
+  rec('CS19. GET /portal/channels exposes discordChannels', (await get('/api/v1/portal/channels')).json.discordChannels.some((c) => String(c.id) === DCH));
+  await vc.setDiscordChannel({ id: DCH, name: 'general', on: false });
+  rec('CS20. disallow → authority denied again', (await vc.checkChannelAuthority({ kind: 'discord', id: DCH })).allowed === false);
 } catch (err) {
   allPass = false;
   ledger.push(`FAIL  fatal: ${String(err?.stack || err?.message || err)}`);

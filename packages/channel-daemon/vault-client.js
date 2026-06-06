@@ -109,6 +109,21 @@ export function createVaultClient({ baseUrl, fetch: fetchImpl = globalThis.fetch
       } catch (e) { console.error('[channel-daemon] revoke group failed:', e.message); return { ok: false }; }
     },
 
+    /** Authorize (on=true) or disallow (on=false) a Discord channel. */
+    async setDiscordChannel({ id, name, on }) {
+      try { await post('/api/v1/internal/discord-channel', { id, name, on }); return { ok: true }; }
+      catch (e) { console.error('[channel-daemon] discord-channel set failed:', e.message); return { ok: false }; }
+    },
+
+    /** List authorized Discord channels. */
+    async listDiscordChannels() {
+      try {
+        const res = await fetchImpl(`${root}/api/v1/internal/discord-channels`, { signal: AbortSignal.timeout(timeoutMs) });
+        if (!res.ok) return [];
+        return (await res.json()).channels || [];
+      } catch (e) { console.error('[channel-daemon] list discord-channels failed:', e.message); return []; }
+    },
+
     /** List authorized groups. */
     async listTelegramGroups() {
       try {

@@ -28,6 +28,7 @@ export function portalChannelsRouter({ db, userId }) {
         discord: { hasToken: await hasS('DISCORD_BOT_TOKEN'), ownerId: (await getS('OWNER_DISCORD_ID')) || null },
         agent: { hasKey: await hasS('ANTHROPIC_API_KEY'), model: (await getS('CHANNEL_AGENT_MODEL')) || null },
         groups: (await db.telegramGroups.list(userId)).map((g) => ({ id: g.id, title: g.title || null })),
+        discordChannels: db.identityChannels?.listByKind ? (await db.identityChannels.listByKind('discord')).map((c) => ({ id: c.channel_value, name: c.display_name || null })) : [],
       });
     } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
   });
@@ -63,10 +64,18 @@ export function portalChannelsRouter({ db, userId }) {
     } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
   });
 
-  // DELETE /channels/groups/:id — revoke an authorized group (soft delete).
+  // DELETE /channels/groups/:id — revoke an authorized telegram group (soft delete).
   router.delete('/channels/groups/:id', async (req, res) => {
     try {
       await db.telegramGroups.revoke(String(req.params.id));
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
+  });
+
+  // DELETE /channels/discord/:id — disallow a discord channel (delivery off).
+  router.delete('/channels/discord/:id', async (req, res) => {
+    try {
+      await db.identityChannels.setFlag('discord', String(req.params.id), 'delivery_enabled', false);
       res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
   });

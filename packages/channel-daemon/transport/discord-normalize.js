@@ -11,12 +11,16 @@
 export function normalizeDiscordMessage(m) {
   if (!m || m.channelId == null) return null;
   const author = m.author || {};
+  // Threads have their own channelId; tag the kind for audit/source fidelity.
+  // Egress treats a thread channelId like any channel.
+  const isThread = !!(m.channel && typeof m.channel.isThread === 'function' && m.channel.isThread()) || m.isThread === true;
+  const kind = isThread ? 'discord-thread' : 'discord';
   return {
     messageId: String(m.id),
     chatId: String(m.channelId),
     chatType: m.guildId ? 'guild' : 'dm',
-    source: 'discord',
-    channelKind: 'discord',
+    source: kind,
+    channelKind: kind,
     content: typeof m.content === 'string' ? m.content : '',
     voiceMode: false, // inbound discord voice notes: not transcribed (Phase later)
     fromId: author.id != null ? String(author.id) : null,

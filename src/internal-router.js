@@ -115,6 +115,34 @@ export function internalRouter({ db, userId }) {
     }
   });
 
+  // ── Discord channel allowlist (identity_channels, kind 'discord') ─────────
+  // Reuses the generic registry + the channel-authority resolver above. Authorize
+  // = upsert + delivery_enabled on; disallow = delivery_enabled off.
+  router.post('/api/v1/internal/discord-channel', json, async (req, res) => {
+    const { id, name, on = true } = req.body || {};
+    if (!id) return res.status(400).json({ ok: false, error: 'id required' });
+    if (!db?.identityChannels?.upsert) return res.status(503).json({ ok: false, error: 'unavailable' });
+    try {
+      await db.identityChannels.upsert({ channel_kind: 'discord', channel_value: String(id), display_name: name || null });
+      await db.identityChannels.setFlag('discord', String(id), 'delivery_enabled', !!on);
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('[internal-router] discord-channel authorize failed:', err.message);
+      res.status(500).json({ ok: false, error: 'authorize-failed' });
+    }
+  });
+
+  router.get('/api/v1/internal/discord-channels', async (_req, res) => {
+    if (!db?.identityChannels?.listByKind) return res.status(503).json({ channels: [] });
+    try {
+      const rows = await db.identityChannels.listByKind('discord');
+      res.json({ channels: rows.map((r) => ({ id: r.channel_value, name: r.display_name || null })) });
+    } catch (err) {
+      console.error('[internal-router] discord-channels list failed:', err.message);
+      res.status(500).json({ channels: [] });
+    }
+  });
+
   // ── Channel-daemon config (loopback) ──────────────────────────────────────
   // Returns the daemon's settings DECRYPTED over loopback so the keyless daemon
   // can use vault-managed config (Telegram token, owner, assistant key, TTS

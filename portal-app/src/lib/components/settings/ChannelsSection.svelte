@@ -18,6 +18,7 @@
 		discord: { hasToken: boolean; ownerId: string | null };
 		agent: { hasKey: boolean; model: string | null };
 		groups: Group[];
+		discordChannels: { id: string; name: string | null }[];
 	};
 
 	let state = $state<ChannelsState | null>(null);
@@ -88,6 +89,14 @@
 			if (!res.ok) throw new Error(`Failed (${res.status})`);
 			await load();
 		} catch (e: any) { error = e?.message || 'Failed to revoke group'; }
+	}
+
+	async function revokeDiscordChannel(id: string) {
+		try {
+			const res = await api(`/portal/channels/discord/${encodeURIComponent(id)}`, { method: 'DELETE' });
+			if (!res.ok) throw new Error(`Failed (${res.status})`);
+			await load();
+		} catch (e: any) { error = e?.message || 'Failed to revoke channel'; }
 	}
 </script>
 
@@ -182,6 +191,26 @@
 				</div>
 			{/if}
 		</div>
+
+		<!-- authorized discord channels -->
+		{#if state.discord.hasToken}
+			<div class="mb-5">
+				<label class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-2">Authorized Discord channels</label>
+				{#if state.discordChannels.length === 0}
+					<div class="text-[0.65rem] text-[var(--color-text-tertiary)]">None yet. In a channel, send <code>/allow</code>.</div>
+				{:else}
+					<div class="space-y-1.5">
+						{#each state.discordChannels as c (c.id)}
+							<div class="flex items-center justify-between gap-3 p-2 rounded-lg border border-[var(--color-border)]">
+								<span class="text-sm text-[var(--color-text-primary)] truncate">{c.name || c.id}</span>
+								<button type="button" onclick={() => revokeDiscordChannel(c.id)}
+									class="text-[0.65rem] px-2 py-1 text-[var(--color-text-tertiary)] hover:text-red-400 cursor-pointer">revoke</button>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		{/if}
 
 		<div class="flex items-center gap-3">
 			<button onclick={save} disabled={saving}

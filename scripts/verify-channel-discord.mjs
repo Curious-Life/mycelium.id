@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import { createDiscordApi } from '../packages/channel-daemon/discord-api.js';
 import { createDiscordChokepoint } from '../packages/channel-daemon/discord-chokepoint.js';
 import { createDiscordInboundHandler } from '../packages/channel-daemon/discord-inbound.js';
+import { createDiscordCommandHandler } from '../packages/channel-daemon/commands-discord.js';
 import { normalizeDiscordMessage } from '../packages/channel-daemon/transport/discord-normalize.js';
 import { createEnvelopeDedup } from '../packages/channel-daemon/dedup.js';
 import { createDaemonApp } from '../packages/channel-daemon/server.js';
@@ -24,6 +25,8 @@ const TEXT = 'A real Discord reply body that should never appear in any audit ro
   rec('DN2. bot message flagged isBot', bot.isBot === true);
   rec('DN3. dm (no guild) → chatType dm', normalizeDiscordMessage({ id: '3', channelId: CH, author: { id: '42' }, content: 'yo' }).chatType === 'dm');
   rec('DN4. no channelId → null', normalizeDiscordMessage({ id: '4', author: {} }) === null);
+  const thread = normalizeDiscordMessage({ id: '5', channelId: 'T1', guildId: 'g', author: { id: '42' }, content: 'in thread', channel: { isThread: () => true } });
+  rec('DN5. thread message → source/kind discord-thread', thread.source === 'discord-thread' && thread.channelKind === 'discord-thread');
 }
 
 // ── REST api (injected fetch) ────────────────────────────────────────────────
@@ -108,6 +111,39 @@ const post = async (port, body, headers) => { const r = await fetch(`http://127.
   rec('DI2. non-owner dropped', captured.length === 1 && turns.length === 1);
   await handle(normalizeDiscordMessage({ id: '102', channelId: CH, author: { id: '7', bot: true }, content: 'beep' }));
   rec('DI3. bot message dropped', captured.length === 1);
+}
+
+// ── inbound: channel allowlist + commands ────────────────────────────────────
+{
+  const captured = [], turns = [], cmdHandled = [];
+  let authorized = false;
+  const commands = { isCommand: (c) => c.trim().startsWith('/'), handle: async (m) => { cmdHandled.push(m.content); authorized = true; return true; } };
+  const handle = createDiscordInboundHandler({
+    vault: { captureMessage: async (x) => captured.push(x) }, ownerDiscordId: '42',
+    runTurn: (ctx) => turns.push(ctx), commands, isChannelAuthorized: async () => authorized,
+  });
+  // non-owner in UNauthorized channel → dropped
+  await handle(normalizeDiscordMessage({ id: '200', channelId: CH, author: { id: '500' }, content: 'hi all' }));
+  rec('DI4. non-owner in unauthorized channel dropped', captured.length === 0 && turns.length === 0);
+  // owner /allow → command handled (authorizes), not captured
+  await handle(normalizeDiscordMessage({ id: '201', channelId: CH, author: { id: '42' }, content: '/allow' }));
+  rec('DI5. owner /allow handled as command (not captured)', cmdHandled.length === 1 && authorized === true && captured.length === 0);
+  // now non-owner in the authorized channel → captured + turned
+  await handle(normalizeDiscordMessage({ id: '202', channelId: CH, author: { id: '500', username: 'mate' }, content: 'hey bot' }));
+  rec('DI6. non-owner in authorized channel captured + turned', captured.length === 1 && turns.length === 1);
+}
+
+// ── discord command handler ──────────────────────────────────────────────────
+{
+  const calls = { set: [], list: 0, replies: [] };
+  const vault = { setDiscordChannel: async (a) => calls.set.push(a), listDiscordChannels: async () => { calls.list++; return [{ id: CH, name: 'general' }]; } };
+  const cmd = createDiscordCommandHandler({ vault, sendReply: async (a) => calls.replies.push(a), ownerDiscordId: '42' });
+  const m = (content, fromId = '42') => ({ chatId: CH, messageId: '1', chatTitle: 'general', fromId, content });
+  rec('DCMD1. /allow authorizes channel on', await cmd.handle(m('/allow')) === true && calls.set[0]?.on === true && String(calls.set[0]?.id) === CH);
+  rec('DCMD2. /disallow turns it off', await cmd.handle(m('/disallow')) === true && calls.set[1]?.on === false);
+  rec('DCMD3. /channels lists', await cmd.handle(m('/channels')) === true && calls.list === 1 && /general/.test(calls.replies.at(-1).content));
+  const before = calls.set.length;
+  rec('DCMD4. non-owner command swallowed (no side effects)', await cmd.handle(m('/allow', '999')) === true && calls.set.length === before);
 }
 
 const passed = ledger.filter(Boolean).length;

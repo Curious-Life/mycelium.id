@@ -28,6 +28,7 @@ import { createDiscordApi } from './discord-api.js';
 import { createDiscordChokepoint } from './discord-chokepoint.js';
 import { createDiscordVoicePipeline } from './discord-voice.js';
 import { createDiscordInboundHandler } from './discord-inbound.js';
+import { createDiscordCommandHandler } from './commands-discord.js';
 import { createDiscordGateway } from './transport/discord-gateway.js';
 
 function captureOnlyRunTurn(turnCtx) {
@@ -103,12 +104,17 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     discord = createDiscordApi({ botToken: cfg.discordBotToken });
     const discordVoice = createDiscordVoicePipeline({ sendVoice: (a) => discord.sendVoice(a), agentId: cfg.agentId });
 
-    // Discord authority: allow replying to the channel of the active inbound turn
-    // (the reply path); cross-channel sends are fail-closed (allowlist deferred).
-    async function checkDiscordAuthority({ id }) {
+    // Discord authority: allow replying to the active inbound turn's channel
+    // (reply path) OR any channel the operator authorized via /allow
+    // (identity_channels kind 'discord'). Cross-channel to an unauthorized
+    // channel is fail-closed.
+    async function checkDiscordAuthority({ kind, id }) {
       const turn = getActiveTurn();
-      if (turn && turn.source === 'discord' && String(turn.channelId) === String(id)) return { allowed: true, reason: 'reply-to-inbound' };
-      return { allowed: false, reason: 'discord-channel-not-authorized' };
+      if (turn && String(turn.channelId) === String(id) && (turn.source === 'discord' || turn.source === 'discord-thread')) {
+        return { allowed: true, reason: 'reply-to-inbound' };
+      }
+      const a = await vault.checkChannelAuthority({ kind: 'discord', id });
+      return a?.allowed ? { allowed: true, reason: 'registry' } : { allowed: false, reason: 'discord-channel-not-authorized' };
     }
 
     discordSendHandler = createDiscordChokepoint({
@@ -116,7 +122,13 @@ export function buildDaemon(cfg, { runTurn } = {}) {
       checkAuthority: checkDiscordAuthority, dedup, rateLimit, voicePipeline: discordVoice, getActiveTurn, agentId: cfg.agentId,
     });
 
-    const handleDiscordInbound = createDiscordInboundHandler({ vault, ownerDiscordId: cfg.ownerDiscordId, runTurn: effectiveRunTurn });
+    const discordSendReply = async ({ channelId, content, replyToMessageId }) => {
+      try { await fetch(`${cfg.selfUrl}/discord/send`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channelId, content, replyToMessageId, trusted: true }) }); }
+      catch (e) { console.error('[channel-daemon] discord command reply failed:', e.message); }
+    };
+    const discordCommands = createDiscordCommandHandler({ vault, sendReply: discordSendReply, ownerDiscordId: cfg.ownerDiscordId });
+    const isChannelAuthorized = async (id) => { const a = await vault.checkChannelAuthority({ kind: 'discord', id }); return !!a?.allowed; };
+    const handleDiscordInbound = createDiscordInboundHandler({ vault, ownerDiscordId: cfg.ownerDiscordId, runTurn: effectiveRunTurn, commands: discordCommands, isChannelAuthorized });
     gateway = createDiscordGateway({ botToken: cfg.discordBotToken, handleInbound: handleDiscordInbound });
   }
 

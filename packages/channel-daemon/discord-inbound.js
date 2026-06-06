@@ -4,9 +4,10 @@
  * shared work (capture choke-point, runTurn/lane, the egress chokepoint) is
  * reused unchanged.
  *
- * Phase-1-equivalent authorization: respond ONLY to the operator
- * (fromId === OWNER_DISCORD_ID), in DMs or guild channels. Bot messages are
- * dropped upstream (gateway). A broader channel allowlist is a later refinement.
+ * Authorization: respond to the operator (fromId === OWNER_DISCORD_ID) anywhere,
+ * OR to anyone in an authorized channel (the operator opts a channel in with
+ * /allow → identity_channels). Bot messages are dropped upstream (gateway).
+ * Owner /commands are control-plane (handled, never captured/turned).
  */
 function preview(text) {
   const s = String(text || '');
@@ -18,21 +19,35 @@ function preview(text) {
  * @param {{captureMessage:(args:object)=>Promise<any>}} deps.vault
  * @param {string} deps.ownerDiscordId
  * @param {(turnCtx:object, msg:object)=>Promise<void>|void} deps.runTurn
+ * @param {{isCommand:Function, handle:Function}} [deps.commands]
+ * @param {(channelId:string)=>Promise<boolean>} [deps.isChannelAuthorized]
  * @param {string} [deps.logPrefix]
  */
-export function createDiscordInboundHandler({ vault, ownerDiscordId, runTurn, logPrefix = 'channel-daemon' }) {
+export function createDiscordInboundHandler({ vault, ownerDiscordId, runTurn, commands, isChannelAuthorized, logPrefix = 'channel-daemon' }) {
   if (!vault?.captureMessage) throw new TypeError('createDiscordInboundHandler: vault.captureMessage required');
   if (typeof runTurn !== 'function') throw new TypeError('createDiscordInboundHandler: runTurn required');
 
-  function isAuthorized(msg) {
+  const isOwner = (msg) => !!ownerDiscordId && String(msg.fromId) === String(ownerDiscordId);
+
+  async function isAuthorized(msg) {
     if (msg.isBot) return false;
-    if (!ownerDiscordId) return false; // fail-closed: no owner configured
-    return String(msg.fromId) === String(ownerDiscordId);
+    if (isOwner(msg)) return true;                       // operator anywhere
+    if (typeof isChannelAuthorized === 'function') {      // anyone in an allowed channel
+      try { return await isChannelAuthorized(msg.chatId); } catch { return false; }
+    }
+    return false;                                         // fail-closed
   }
 
   return async function handleDiscordInbound(msg) {
     if (!msg) return;
-    if (!isAuthorized(msg)) {
+
+    // owner control-plane commands — handled, never captured/turned.
+    if (commands && msg.content && commands.isCommand(msg.content)) {
+      if (isOwner(msg)) { try { if (await commands.handle(msg)) return; } catch (e) { console.error(`[${logPrefix}] discord command failed: ${e.message}`); return; } }
+      else return; // non-owner command: swallow
+    }
+
+    if (!(await isAuthorized(msg))) {
       console.warn(`[${logPrefix}] discord inbound dropped (unauthorized author=${msg.fromId} chan=${msg.chatId}) ${preview(msg.content)}`);
       return;
     }
@@ -46,7 +61,7 @@ export function createDiscordInboundHandler({ vault, ownerDiscordId, runTurn, lo
         id: `dc-${msg.messageId}-${msg.chatId}`,
         content: msg.content,
         role: 'user',
-        source: 'discord',
+        source: msg.source || 'discord', // 'discord' | 'discord-thread'
         conversationId: msg.chatId,
         ...(msg.dateEpoch != null ? { createdAt: msg.dateEpoch } : {}),
         metadata: {
@@ -64,8 +79,8 @@ export function createDiscordInboundHandler({ vault, ownerDiscordId, runTurn, lo
     }
 
     const turnCtx = {
-      source: 'discord',
-      channelKind: 'discord',
+      source: msg.source || 'discord',
+      channelKind: msg.channelKind || 'discord',
       channelId: msg.chatId,
       inboundMessageId: msg.messageId,
       username: msg.username || undefined,
