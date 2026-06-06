@@ -18,6 +18,7 @@
 import crypto from 'node:crypto';
 import { isTrustedLoopback } from './loopback.js';
 import { matchStaticBearer } from '../gateway/static-bearer.js';
+import { readRemoteConfig } from '../remote/config.js';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const CSRF_COOKIE = 'mycelium_csrf';
@@ -51,9 +52,14 @@ export function defaultValidateSession(cookieHeader) {
   const timer = setTimeout(() => ctrl.abort(), VALIDATE_TIMEOUT_MS);
   // Defence in depth (audit): pin the session to the SINGLE vault owner. Even if
   // some path ever minted a non-owner better-auth account, its session must NOT
-  // authorize into the owner's vault. The owner email is the one ensureOperatorUser
-  // seeds (MYCELIUM_USER_EMAIL or the default); both processes read the same env.
-  const ownerEmail = (process.env.MYCELIUM_USER_EMAIL || 'operator@mycelium.local').toLowerCase();
+  // authorize into the owner's vault. The owner email is the CANONICAL one the
+  // operator account was created with — readRemoteConfig().operatorEmail folds in
+  // MYCELIUM_USER_EMAIL → remote.json operatorEmail → default, the exact same chain
+  // setOperatorPassword/ensureOperatorUser use — so a custom-email operator is NOT
+  // locked out. (Falls back to the default if remote.json can't be read.)
+  let ownerEmail = 'operator@mycelium.local';
+  try { ownerEmail = (readRemoteConfig().operatorEmail || ownerEmail); } catch { /* default */ }
+  ownerEmail = ownerEmail.toLowerCase();
   return fetch(`${base}/api/auth/get-session`, { headers: { cookie: cookieHeader }, signal: ctrl.signal })
     .then(async (r) => {
       if (!r.ok) return null;

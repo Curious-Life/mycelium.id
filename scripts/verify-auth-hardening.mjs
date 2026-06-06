@@ -23,6 +23,7 @@ ok(/createPathThrottle\([^)]*\/api\/auth\/sign-in\/email/.test(srvHttp), '0. sig
 ok(/startsWith\('\/api\/auth\/sign-up'\)/.test(srvHttp) && /res\.status\(404\)/.test(srvHttp), '0b. relay HTTP sign-up BLOCKED in server-http.js (audit)');
 
 process.env.MYCELIUM_AUTH_SECRET = 'auth-hardening-secret-'.padEnd(48, 'x');
+process.env.MYCELIUM_USER_EMAIL = 'operator@mycelium.local'; // deterministic owner email for the pin
 const app = express();
 // SAME throttle config as server-http.js (max 5 / 60s on sign-in)
 app.use(createPathThrottle({ method: 'POST', path: '/api/auth/sign-in/email', max: 5, windowMs: 60_000 }));

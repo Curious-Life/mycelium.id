@@ -34,6 +34,7 @@ const authStub = http.createServer((req, res) => {
 await new Promise((r) => authStub.listen(0, '127.0.0.1', r));
 const STUB_PORT = authStub.address().port;
 
+process.env.MYCELIUM_USER_EMAIL = 'operator@mycelium.local'; // deterministic owner email for the gate's owner-pin
 const STATIC_BEARER = crypto.randomBytes(24).toString('hex');
 process.env.MYCELIUM_DISABLE_EMBED = '1';
 process.env.MYCELIUM_AUTH_URL = `http://127.0.0.1:${STUB_PORT}`;
