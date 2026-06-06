@@ -16,6 +16,7 @@ import {
   sealKeys, unsealKeys, lockExists, readLock, writeLock, removeLock, MIN_PASSPHRASE_LENGTH,
 } from './passphrase-lock.js';
 import { getSessionKeys } from './session-keys.js';
+import { isTrustedLoopback } from '../http/loopback.js';
 
 /**
  * @param {object} deps
@@ -28,9 +29,12 @@ export function accountRouter({ isInitialized, completeBoot, kcvPath, lockFile }
   const router = express.Router();
   router.use(express.json({ limit: '64kb' }));
 
+  // Defence in depth (these routes mint/return the master key): reject anything
+  // that did not arrive as a genuine loopback request. isTrustedLoopback also
+  // rejects reverse-proxied (X-Forwarded-For-bearing) requests — so this surface
+  // stays unreachable even if it is ever path-routed through the relay (V-1).
   router.use((req, res, next) => {
-    const ip = req.ip || req.socket?.remoteAddress || '';
-    if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return next();
+    if (isTrustedLoopback(req)) return next();
     return res.status(403).json({ error: 'forbidden' });
   });
 

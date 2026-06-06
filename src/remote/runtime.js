@@ -14,7 +14,60 @@ import { writeFileSync, chmodSync, rmSync, existsSync, mkdirSync } from 'node:fs
 import { join } from 'node:path';
 
 const LOCAL_HTTP = '127.0.0.1:4711';            // the loopback --http OAuth/MCP server
+const PORTAL_HTTP = '127.0.0.1:8787';           // the loopback portal + REST server
 const CADDY_LOCAL_PORT = 8443;                  // relay-mode local TLS listener port
+
+/**
+ * Edge routing table — the SINGLE SOURCE OF TRUTH for how the on-Mac Caddy fans
+ * the one public host out to the two local servers, used both by renderCaddyfile
+ * and by verify:relay-portal. First match wins (Caddy `handle` blocks are
+ * mutually exclusive and evaluated in written order).
+ *
+ *   control → 404 at the EDGE: /api/v1/account (mints/returns the recovery key)
+ *             and /api/v1/remote (sets the operator password) must NEVER be
+ *             reachable off-box. Defence-in-depth layer (a) for V-1 — the routers
+ *             themselves also reject proxied requests (layer b).
+ *   oauth   → :4711  (MCP, OAuth/better-auth, the OpenAI-compat gateway, ingest)
+ *   portal  → :8787  (the portal UI + /api/v1/portal data + the /auth shim) — the
+ *             catch-all; safe to expose now that the portal surface is
+ *             authenticated (the requireVaultAuth gate, step 1.2).
+ */
+export function edgeRoutes({ upstream = LOCAL_HTTP, portalUpstream = PORTAL_HTTP } = {}) {
+  return [
+    { name: 'control', match: ['/api/v1/account', '/api/v1/account/*', '/api/v1/remote', '/api/v1/remote/*'], action: { type: 'deny' } },
+    { name: 'oauth', match: ['/mcp', '/mcp/*', '/v1/*', '/.well-known/*', '/api/auth/*', '/login', '/login/*', '/ingest/*'], action: { type: 'proxy', upstream } },
+    { name: 'portal', match: ['/*'], action: { type: 'proxy', upstream: portalUpstream } },
+  ];
+}
+
+/** Caddy `path` matcher semantics: `/x/*` matches /x and below; `/x` is exact. */
+export function caddyMatch(pattern, p) {
+  if (pattern === '/*') return true;
+  if (pattern.endsWith('/*')) { const pre = pattern.slice(0, -2); return p === pre || p.startsWith(pre + '/'); }
+  return p === pattern;
+}
+
+/** First-match-wins classification of a path against the edge routing table. */
+export function edgeRouteFor(p, routes = edgeRoutes()) {
+  for (const r of routes) if (r.match.some((m) => caddyMatch(m, p))) return r;
+  return null;
+}
+
+/** Render the Caddy `handle` blocks for the edge routing table. */
+function renderEdgeHandles(routes) {
+  const out = [];
+  for (const r of routes) {
+    if (r.name === 'portal') { // catch-all, no matcher
+      out.push(`\thandle {`, `\t\treverse_proxy ${r.action.upstream}`, `\t}`);
+      continue;
+    }
+    out.push(`\t@${r.name} path ${r.match.join(' ')}`, `\thandle @${r.name} {`);
+    if (r.action.type === 'deny') out.push(`\t\trespond 404`);
+    else out.push(`\t\treverse_proxy ${r.action.upstream}`);
+    out.push(`\t}`);
+  }
+  return out;
+}
 
 /** Parse "host:port", a bare host, "[ipv6]:port", or a bare IPv6 → { host, port }. */
 export function parseRelayAddr(addr, defPort = 7000) {
@@ -64,10 +117,12 @@ export function renderFrpcToml({ relayAddr, publicHost, token, localPort = CADDY
 
 /**
  * Caddyfile: terminate TLS for publicHost via ACME DNS-01 (caddy-dns/acmedns),
- * reverse-proxy to the loopback --http server. Relay mode listens on
+ * then PATH-ROUTE the one public host to the two local servers per edgeRoutes()
+ * (control surfaces 404 at the edge; oauth/gateway → :4711; everything else,
+ * incl. the authenticated portal, → :8787). Relay mode listens on
  * 127.0.0.1:<localPort> (frpc forwards here); direct mode listens on public :443.
  */
-export function renderCaddyfile({ publicHost, dataDir, acmeDns, mode = 'managed', localPort = CADDY_LOCAL_PORT, upstream = LOCAL_HTTP }) {
+export function renderCaddyfile({ publicHost, dataDir, acmeDns, mode = 'managed', localPort = CADDY_LOCAL_PORT, upstream = LOCAL_HTTP, portalUpstream = PORTAL_HTTP }) {
   const caddyData = join(dataDir, 'caddy');
   const direct = mode === 'direct';
   const site = direct ? publicHost : `https://${publicHost}:${localPort}`;
@@ -94,7 +149,7 @@ export function renderCaddyfile({ publicHost, dataDir, acmeDns, mode = 'managed'
     `\t\toutput stderr`,
     `\t\tformat console`,
     `\t}`,
-    `\treverse_proxy ${upstream}`,
+    ...renderEdgeHandles(edgeRoutes({ upstream, portalUpstream })),
     `\ttls {`,
     `\t\tdns acmedns {`,
     `\t\t\tusername ${a.username || ''}`,
