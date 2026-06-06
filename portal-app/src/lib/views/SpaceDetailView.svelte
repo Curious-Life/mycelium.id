@@ -54,6 +54,14 @@
 	let knowledge = $state<KnowledgeEntry[]>([]);
 	let members = $state<Member[]>([]);
 	let loading = $state(true);
+	// Sharing (Phase A): grant a connection access to this space (default-deny).
+	// Cross-node delivery activates with the real-time channel (Matrix); the grant
+	// is recorded + enforced locally now.
+	let connections = $state<Array<{ other_user_id: string; other_handle: string | null; other_display_name: string | null }>>([]);
+	let shareSel = $state('');
+	let shareRole = $state<'member' | 'contributor'>('member');
+	let sharing = $state(false);
+	let shareError = $state<string | null>(null);
 	// The in-page Chat tab was removed — chat now lives in ChatFloat, scoped
 	// to this space via navigationState.spaceScope. Default landing tab is
 	// now Knowledge (the space's actual content).
@@ -95,6 +103,7 @@
 				const data = await membersRes.json();
 				members = data.members || [];
 			}
+			loadConnections();
 
 			// Scope the floating chat to this space. Intentionally NOT cleared
 			// on page unmount — navigating away keeps the scope so the user can
@@ -116,6 +125,37 @@
 	function openScopedChat() {
 		if (space) navigationState.setSpaceScope({ id: space.id, name: space.name });
 		navigationState.setChatOpen(true);
+	}
+
+	// ── Sharing ──────────────────────────────────────────────────────────
+	async function loadConnections() {
+		if (space?.role !== 'creator') return;
+		try {
+			const res = await api('/portal/connections');
+			if (res.ok) connections = (await res.json()).connections || [];
+		} catch {}
+	}
+	const grantedIds = $derived(new Set(members.map((m) => m.user_id)));
+	const shareable = $derived(connections.filter((c) => !grantedIds.has(c.other_user_id)));
+	async function shareWith() {
+		if (!shareSel) return;
+		sharing = true; shareError = null;
+		try {
+			const res = await api(`/portal/spaces/${spaceId}/shares`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ granteeId: shareSel, role: shareRole }),
+			});
+			if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed to share');
+			shareSel = '';
+			await loadSpace();
+		} catch (e: any) { shareError = e.message; } finally { sharing = false; }
+	}
+	async function revokeShare(granteeId: string) {
+		try {
+			const res = await api(`/portal/spaces/${spaceId}/shares/${encodeURIComponent(granteeId)}`, { method: 'DELETE' });
+			if (res.ok) await loadSpace();
+		} catch {}
 	}
 
 	// Cover HTML content. null = not loaded / no cover set; '' = fetched
@@ -836,17 +876,34 @@
 					<!-- ── Members ── -->
 					<section>
 						<header class="mb-5">
-							<h2 class="text-base font-medium text-[var(--color-text-emphasis)]">Members</h2>
+							<h2 class="text-base font-medium text-[var(--color-text-emphasis)]">Members &amp; sharing</h2>
 							<p class="text-xs text-[var(--color-text-tertiary)] mt-0.5">
-								People with access to this space.
+								Private by default. Share with a connection to grant access.
 							</p>
 						</header>
+
+						<!-- Share with a connection -->
+						<div class="flex items-end gap-2 mb-4 flex-wrap">
+							<select bind:value={shareSel} class="px-2.5 py-1.5 text-xs rounded-lg bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-primary)] min-w-[180px]">
+								<option value="">{shareable.length ? 'Choose a connection…' : 'No connections to share with'}</option>
+								{#each shareable as c}
+									<option value={c.other_user_id}>@{c.other_handle || c.other_display_name || c.other_user_id}</option>
+								{/each}
+							</select>
+							<select bind:value={shareRole} class="px-2.5 py-1.5 text-xs rounded-lg bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-primary)]">
+								<option value="member">can view</option>
+								<option value="contributor">can add</option>
+							</select>
+							<button onclick={shareWith} disabled={!shareSel || sharing} class="px-3 py-1.5 text-xs font-medium rounded-lg bg-aurum text-[var(--color-bg)] disabled:opacity-50">
+								{sharing ? 'Sharing…' : 'Share'}
+							</button>
+						</div>
+						{#if shareError}<p class="text-xs text-coral mb-3">{shareError}</p>{/if}
+						<p class="text-[10px] text-[var(--color-text-tertiary)] mb-4">Cross-instance delivery activates once your real-time channel is set up.</p>
 
 						<div class="space-y-2">
 							{#each members as m (m.user_id)}
 								<div class="flex items-center gap-3 py-2.5">
-									<!-- Initials avatar — first letter (or two) on a tinted bg
-									     keyed off the role for at-a-glance hierarchy. -->
 									<div class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-medium {m.role === 'creator' ? 'bg-aurum/15 text-aurum' : m.role === 'contributor' ? 'bg-amethyst/15 text-amethyst' : 'bg-[var(--color-elevated)] text-[var(--color-text-secondary)]'}">
 										{(m.display_name || '?').slice(0, 1).toUpperCase()}
 									</div>
@@ -858,6 +915,9 @@
 											<span class="font-mono">{m.last_active_at ? formatDate(m.last_active_at) : 'never active'}</span>
 										</div>
 									</div>
+									{#if m.role !== 'creator'}
+										<button onclick={() => revokeShare(m.user_id)} class="text-[10px] text-[var(--color-text-tertiary)] hover:text-coral transition-colors flex-shrink-0">Remove</button>
+									{/if}
 								</div>
 							{/each}
 						</div>
