@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
+	import { apiGet } from '$lib/api';
 	import { navigationState, type PrimaryView } from '$lib/stores/navigation';
 	import { workspace } from '$lib/workspace/store';
 	import { auth } from '$lib/stores/auth';
@@ -10,6 +11,21 @@
 
 	const isOpen = $derived($navigationState.sidebarOpen);
 	const currentView = $derived($navigationState.primaryView);
+
+	// Pending inbound connection requests — feeds the Connections nav badge.
+	// Polls the lightweight count endpoint; degrades silently when federation
+	// is off (count stays 0).
+	let pendingConnections = $state(0);
+	$effect(() => {
+		if (!browser) return;
+		let alive = true;
+		const load = async () => {
+			try { const d = await apiGet<{ count: number }>('/portal/connections/count'); if (alive) pendingConnections = d.count ?? 0; } catch {}
+		};
+		load();
+		const t = setInterval(load, 60000);
+		return () => { alive = false; clearInterval(t); };
+	});
 
 	type NavItem = { id: PrimaryView; label: string; icon: string; href: string };
 
@@ -23,6 +39,7 @@
 		{ id: 'library',   label: 'Library',  icon: 'folder',  href: '/library' },
 		{ id: 'import',    label: 'Import',   icon: 'import',  href: '/import' },
 		{ id: 'timeline',  label: 'Timeline', icon: 'tornado', href: '/timeline' },
+		{ id: 'connections', label: 'Connections', icon: 'connections', href: '/connections' },
 		{ id: 'profile',   label: 'Profile',  icon: 'profile', href: '/profile' },
 	];
 
@@ -34,7 +51,7 @@
 	// Planned screens (modules · social · agents). Shown disabled, no routing —
 	// they render nothing in V1. Collapsed by default.
 	const comingLater = [
-		'Spaces', 'Connections', 'Chat', 'Agents', 'Cycles',
+		'Spaces', 'Chat', 'Agents', 'Cycles',
 		'Wealth', 'Intel', 'Body', 'Vitality', 'Activity', 'Media',
 	];
 	let comingLaterOpen = $state(false);
@@ -170,9 +187,17 @@
 							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
 							</svg>
+						{:else if item.icon === 'connections'}
+							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+								<circle cx="6" cy="6" r="2.25" /><circle cx="18" cy="18" r="2.25" /><circle cx="18" cy="6" r="2.25" />
+								<path stroke-linecap="round" stroke-linejoin="round" d="M8 7.5l8 9M16 6.2A6 6 0 0 0 7 15" />
+							</svg>
 						{/if}
 					</div>
 					<span class="text-sm font-medium">{item.label}</span>
+					{#if item.id === 'connections' && pendingConnections > 0}
+						<span class="conn-badge" aria-label="{pendingConnections} pending requests">{pendingConnections}</span>
+					{/if}
 				</button>
 			{/each}
 
@@ -325,6 +350,23 @@
 <style>
 	.sidebar {
 		transition: width 0.2s ease-out, opacity 0.2s ease-out;
+	}
+
+	/* Pending-request badge on the Connections nav item. */
+	.conn-badge {
+		margin-left: auto;
+		min-width: 1.1rem;
+		height: 1.1rem;
+		padding: 0 0.35rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 0.65rem;
+		font-weight: 600;
+		line-height: 1;
+		color: var(--color-bg);
+		background: var(--color-accent-aurum);
+		border-radius: 9999px;
 	}
 
 	.sidebar.closed {

@@ -39,6 +39,10 @@ export const REGISTRY: Record<string, ViewDef> = {
 		title: 'Profile', icon: 'profile', singleton: true,
 		load: () => import('$lib/views/ProfileView.svelte'),
 	},
+	connections: {
+		title: 'Connections', icon: 'connections', singleton: true,
+		load: () => import('$lib/views/ConnectionsView.svelte'),
+	},
 	'curious-life': {
 		title: 'Curious Life', icon: 'compass', singleton: true,
 		load: () => import('$lib/views/CuriousLifeView.svelte'),
