@@ -12,7 +12,10 @@ export interface ViewDef {
 	icon: string;
 	singleton?: boolean;
 	key?: (params: Record<string, unknown>) => string;
-	load: () => Promise<{ default: Component<Record<string, unknown>> }>;
+	// Heterogeneous registry of prop-less view components. svelte2tsx types each
+	// view's default export as `Component<Record<string, never>>`, which is not
+	// assignable to a fixed prop shape — `Component<any>` accepts any view here.
+	load: () => Promise<{ default: Component<any> }>;
 }
 
 export const REGISTRY: Record<string, ViewDef> = {
@@ -38,6 +41,23 @@ export const REGISTRY: Record<string, ViewDef> = {
 	profile: {
 		title: 'Profile', icon: 'profile', singleton: true,
 		load: () => import('$lib/views/ProfileView.svelte'),
+	},
+	connections: {
+		title: 'Connections', icon: 'connections', singleton: true,
+		load: () => import('$lib/views/ConnectionsView.svelte'),
+	},
+	spaces: {
+		title: 'Spaces', icon: 'spaces', singleton: true,
+		load: () => import('$lib/views/SpacesView.svelte'),
+	},
+	space: {
+		// One tab per space (keyed by id); the detail view reads params.id.
+		title: 'Space', icon: 'spaces', key: (p) => `space:${p.id}`,
+		load: () => import('$lib/views/SpaceDetailView.svelte'),
+	},
+	contexts: {
+		title: 'Sharing', icon: 'contexts', singleton: true,
+		load: () => import('$lib/views/ContextsView.svelte'),
 	},
 	'curious-life': {
 		title: 'Curious Life', icon: 'compass', singleton: true,

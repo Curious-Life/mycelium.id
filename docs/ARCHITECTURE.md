@@ -201,6 +201,34 @@ claim level) · personaClaims MCP tool · portal /claims (ClaimsView + TimeSerie
   **REST** surface (`src/server-rest.js`) all dispatch through one shared handler
   map, so a tool is written once.
 - **OAuth 2.1 + PKCE** via better-auth (`src/auth.js`) guards the HTTP surfaces.
+- **Federation (Tier-0 + 0b)** — inter-instance connect, gated by signature not OAuth:
+  the box ed25519 identity (`src/identity/identity.js`) is published as
+  `GET /.well-known/did.json` (`did:web:<publicHost>`) + `GET /.well-known/webfinger`.
+  `POST /federation/connect` accepts a signed connect-request → pending connection;
+  `POST /federation/connect-response` carries the accepter's signed callback that
+  flips the requester's "Sent" → "Connected" (the **bilateral handshake**). Both
+  verify the sender's `did:web` key + freshness + nonce-replay. Protocol lives in
+  `src/federation/{sign,did,handlers,router}.js`; the social graph +
+  signed-outbound + `receiveRemote`/`respondRemote`/`receiveResponse` live in
+  `src/db/connections.js` (wired in `getDb`). User surfaces: the 3 MCP tools
+  (`src/tools/federation.js`) and the **Connections page** (`portal-app/.../connections`,
+  promoted to a live nav item with a pending-request badge) backed by
+  `/portal/connections/*` (`src/portal-compat.js`). Fails closed with no public
+  host (did.json 404, connect 503).
+
+- **Phase B (Matrix/Megolm shared spaces)** — the live cross-node E2EE delivery
+  layer, **built mock-complete (B1–B10), live wiring (B11) deferred to a deploy
+  session** (`docs/DEPLOY-federation-phaseB-B11-HANDOFF-2026-06-06.md`). One shared
+  space ⇄ one Megolm room (`space_matrix_rooms`, `migrations/0011`). A share grant
+  drives room membership (`src/federation/space-sync.js`: lazy room create →
+  invite; revoke → kick), local knowledge mirrors out through the **egress
+  chokepoint** (`src/federation/matrix-egress.js`: allowlist + encryption-required
+  gates, sha256-only audit — §11), and inbound records are validated
+  (`src/federation/lexicon.js`, + §7 vector tripwire) and persisted once. All of it
+  sits behind an injectable `MatrixClient` seam (`src/federation/matrix-client.js`)
+  so it's unit-tested without a homeserver; the deploy session swaps in the real
+  matrix-js-sdk client (A1b-proven, 7/7). See
+  `docs/DESIGN-federation-phaseB-BUILD-PLAN-2026-06-06.md`.
 
 ## 8. Ports
 
@@ -265,3 +293,13 @@ cert side-effect; a fail-closed `POST /v1/stripe/webhook` (raw-body HMAC verify)
 "generate mindscape" trigger + chronicle narration are also **built** — see the
 component table.) See
 [`V1-BUILD-SPEC.md`](V1-BUILD-SPEC.md) §"What's left".
+
+**Harness Connect — "pick your harness" surface** (`DESIGN-harness-connect-2026-06-06`):
+a curated card menu over the two doors (North memory `:4711/mcp`, South model `:4711/v1`)
+so both UI users (click) and devs (copy) can connect *any* agent harness. As-built:
+`portal-app/.../settings/HarnessPickerSection.svelte` (Settings card, above
+`ConnectYourAISection`) + per-harness recipes in `docs/HARNESS-RECIPES.md` (Mycelium-native ·
+Claude Desktop/Code · opencode · openclaw · hermes-agent · custom), config keys verified
+against each project's docs. openclaw carries the scam-safety note. **UI + docs only — no
+new backend, no auth change** (reuses the shipped static-bearer + OAuth + `:4711/v1` gateway);
+remote stays "coming soon" until the relay is live. `verify:harness-connect` GO (8 checks).

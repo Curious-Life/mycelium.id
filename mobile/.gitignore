@@ -1,0 +1,11 @@
+# Capacitor-generated native projects (regenerated via `npx cap add ios|android`)
+/ios/
+/android/
+
+# deps + build
+/node_modules/
+/dist/
+
+# Xcode / build noise
+*.xcuserstate
+DerivedData/

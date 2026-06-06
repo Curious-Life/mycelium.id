@@ -97,6 +97,18 @@ export function createIdentityChannelsNamespace(deps) {
       );
     },
 
+    /** All non-revoked, delivery-enabled channels of a kind (e.g. authorized discord channels). */
+    async listByKind(channel_kind) {
+      const result = await d1Query(
+        `SELECT channel_kind, channel_value, display_name, verified_at, last_seen_at, delivery_enabled
+         FROM identity_channels
+         WHERE channel_kind = ? AND revoked_at IS NULL AND delivery_enabled = 1
+         ORDER BY verified_at DESC`,
+        [channel_kind],
+      );
+      return result.results || [];
+    },
+
     /** All non-revoked channels owned by a user. Used by Settings → Channels (Phase 7). */
     async listByOwner(user_id) {
       const result = await d1Query(

@@ -400,6 +400,7 @@
 
 			<!-- Panel -->
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 			<aside
 				class="detail-panel {isFullscreen ? 'fullscreen' : ''}"
 				style="--panel-w: {panelWidth}px;"
@@ -408,6 +409,7 @@
 			>
 				<!-- Resize handle (desktop only, not in fullscreen) -->
 				{#if !isFullscreen}
+					<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 					<div
 						class="hidden md:block absolute -left-1 top-0 bottom-0 w-2.5 cursor-ew-resize group z-10"
 						onmousedown={startResize}
@@ -722,6 +724,7 @@
 	.line-clamp-3 {
 		display: -webkit-box;
 		-webkit-line-clamp: 3;
+		line-clamp: 3;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 	}

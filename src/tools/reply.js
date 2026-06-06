@@ -60,7 +60,7 @@ const REPLY_TOOL_SCHEMA = {
 
 function platformFromSource(source) {
   if (!source) return null;
-  if (source === 'discord') return 'discord';
+  if (source === 'discord' || source === 'discord-thread') return 'discord';
   if (source === 'telegram' || source === 'telegram-group') return 'telegram';
   if (source === 'whatsapp') return 'whatsapp';
   return null;

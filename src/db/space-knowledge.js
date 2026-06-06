@@ -44,6 +44,17 @@ export function createSpaceKnowledgeNamespace(deps) {
       return id;
     },
 
+    /** Durable dedup for inbound mirror events: has a row with this source_ref
+     *  already been persisted for the space? (survives process restart). */
+    async existsBySourceRef(spaceId, sourceRef) {
+      if (!sourceRef) return false;
+      const r = await d1Query(
+        `SELECT 1 FROM space_knowledge WHERE space_id = ? AND source_ref = ? LIMIT 1`,
+        [spaceId, sourceRef],
+      );
+      return (r.results?.length || 0) > 0;
+    },
+
     async list(spaceId, { status = 'active', sourceType, visibility, limit = 100 } = {}) {
       let sql = 'SELECT * FROM space_knowledge WHERE space_id = ?';
       const params = [spaceId];

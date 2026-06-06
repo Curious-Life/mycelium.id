@@ -51,6 +51,15 @@
  */
 
 import { randomUUID as nodeRandomUUID } from 'node:crypto';
+import { canonicalize } from '../federation/sign.js';
+import { assertResolvesPublic } from '../federation/ssrf.js';
+
+// Recursive key tripwire (CLAUDE.md §7): never let an embedding/vector field
+// leave the box, even via a future regression that adds one to the profile.
+function hasVectorKey(o) {
+  return o && typeof o === 'object'
+    && Object.keys(o).some((k) => /centroid|embedding|vector/i.test(k) || hasVectorKey(o[k]));
+}
 
 const HANDLE_LOCAL_PART_RE = /^([a-z0-9][a-z0-9_]{2,29})@(.+)$/i;
 const DOMAIN_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
@@ -64,13 +73,19 @@ const OVERLAP_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 export function createConnectionsNamespace(deps) {
   if (!deps) throw new TypeError('createConnectionsNamespace: deps required');
   const {
-    d1Query, workerUrl, workerAuth,
+    d1Query,
+    // Multi-tenant Worker deps — OPTIONAL in single-user V1. When absent, the
+    // cross-tenant local-handle resolve is skipped (only the @handle@domain
+    // federation path is live), and from_instance falls back to selfInstance().
+    workerUrl, workerAuth,
+    // Federation (Tier-0) deps — OPTIONAL. When sign+did are present the outbound
+    // connect-request is signed (X-Myc-Did/X-Myc-Sig over the canonical body);
+    // selfInstance() is our own public host for the request's from_instance.
+    sign, did, selfInstance,
     randomUUID = nodeRandomUUID,
     fetch: fetchImpl = globalThis.fetch,
   } = deps;
-  if (typeof d1Query !== 'function')    throw new TypeError('createConnectionsNamespace: d1Query required');
-  if (typeof workerUrl !== 'function')  throw new TypeError('createConnectionsNamespace: workerUrl required');
-  if (typeof workerAuth !== 'function') throw new TypeError('createConnectionsNamespace: workerAuth required');
+  if (typeof d1Query !== 'function') throw new TypeError('createConnectionsNamespace: d1Query required');
 
   function canonical(a, b) {
     return a < b ? { user_a: a, user_b: b } : { user_a: b, user_b: a };
@@ -99,22 +114,65 @@ export function createConnectionsNamespace(deps) {
     return result.results?.[0]?.c || 0;
   }
 
-  async function requestRemote(fromUserId, remoteHandle, remoteDomain) {
+  // Resolve a remote instance's federation endpoint via WebFinger (SSRF-guarded:
+  // HTTPS-only, no redirect, abort timeout). Shared by request + response.
+  async function resolveFederationEndpoint(remoteDomain, remoteHandle) {
     if (!DOMAIN_RE.test(remoteDomain)) throw new Error('Invalid domain');
-
-    // WebFinger lookup — HTTPS only, no redirect following.
+    await assertResolvesPublic(remoteDomain); // SSRF: no DNS-rebinding to a private IP
     const webfingerUrl = `https://${remoteDomain}/.well-known/webfinger?resource=acct:${remoteHandle}@${remoteDomain}`;
+    const wfRes = await fetchImpl(webfingerUrl, { signal: AbortSignal.timeout(WEBFINGER_TIMEOUT_MS), redirect: 'manual' });
+    if (!wfRes.ok) throw new Error(`WebFinger failed: ${wfRes.status}`);
+    const wf = await wfRes.json();
+    const fedLink = wf.links?.find((l) => l.rel?.includes('federation'));
+    if (!fedLink?.href) throw new Error('No federation endpoint');
+    // Bind the endpoint to the WebFinger domain: a peer must not be able to point
+    // our SIGNED POST at an unrelated host (confused-deputy SSRF). https-only,
+    // host must equal the domain or be a subdomain of it.
+    let u;
+    try { u = new URL(fedLink.href); } catch { throw new Error('Invalid federation endpoint'); }
+    if (u.protocol !== 'https:') throw new Error('federation endpoint must be https');
+    if (u.hostname !== remoteDomain && !u.hostname.endsWith(`.${remoteDomain}`)) {
+      throw new Error('federation endpoint host does not match the instance domain');
+    }
+    return fedLink.href;
+  }
+
+  // Sign (when sign+did are wired) and POST a federation envelope to
+  // <endpoint>/<subpath>. Signs EXACTLY the canonical bytes it sends.
+  async function signedFederationPost(endpoint, subpath, body) {
+    const url = `${endpoint.replace(/\/$/, '')}/${subpath}`;
+    const headers = { 'Content-Type': 'application/json' };
+    let bodyStr;
+    if (sign && did) {
+      bodyStr = canonicalize(body);
+      headers['X-Myc-Did'] = did();
+      headers['X-Myc-Sig'] = sign(bodyStr);
+    } else {
+      bodyStr = JSON.stringify(body);
+    }
+    await fetchImpl(url, { method: 'POST', headers, body: bodyStr, redirect: 'manual', signal: AbortSignal.timeout(FEDERATION_POST_TIMEOUT_MS) });
+  }
+
+  async function requestRemote(fromUserId, remoteHandle, remoteDomain) {
+    // Existing-connection handling (mirrors the local request() path) — without
+    // this a re-request hits the UNIQUE(user_a,user_b) constraint and surfaces a
+    // raw SQL error. Resolve BEFORE any network work.
+    const remoteId = `${remoteHandle}@${remoteDomain}`;
+    const existing = await d1Query(
+      `SELECT id, status FROM connections WHERE user_a = ? AND user_b = ?`,
+      [fromUserId, remoteId],
+    );
+    const ex = existing.results?.[0];
+    if (ex) {
+      if (ex.status === 'accepted') throw new Error('Already connected to this handle');
+      if (ex.status === 'pending') return ex.id; // idempotent — request already pending
+      if (ex.status === 'blocked') throw new Error('This peer is blocked');
+      if (ex.status === 'rejected') await d1Query(`DELETE FROM connections WHERE id = ?`, [ex.id]); // allow re-request
+    }
+
     let federationEndpoint;
     try {
-      const wfRes = await fetchImpl(webfingerUrl, {
-        signal: AbortSignal.timeout(WEBFINGER_TIMEOUT_MS),
-        redirect: 'manual', // SSRF: refuse to follow a remote's redirect
-      });
-      if (!wfRes.ok) throw new Error(`WebFinger failed: ${wfRes.status}`);
-      const wf = await wfRes.json();
-      const fedLink = wf.links?.find(l => l.rel?.includes('federation'));
-      if (!fedLink?.href) throw new Error('No federation endpoint');
-      federationEndpoint = fedLink.href;
+      federationEndpoint = await resolveFederationEndpoint(remoteDomain, remoteHandle);
     } catch (e) {
       throw new Error(`Instance not reachable: ${e.message}`);
     }
@@ -130,17 +188,22 @@ export function createConnectionsNamespace(deps) {
       throw new Error(`Too many pending requests (max ${PENDING_LIMIT})`);
     }
 
-    const wUrl = workerUrl();
+    const selfHost = (selfInstance && selfInstance()) || (workerUrl ? new URL(workerUrl()).hostname : '');
+    const profile = {
+      signature: fp.signature ?? null,
+      stats: { depth_score: fp.depth_score, breadth_score: fp.breadth_score },
+      realms: fp.public_realms_json ? JSON.parse(fp.public_realms_json) : [],
+    };
+    if (hasVectorKey(profile)) throw new Error('refusing to federate a vector/embedding field (CLAUDE.md §7)');
     const requestBody = {
       $type: 'social.mycelium.connect-request.v1',
       from_handle: fp.handle || fromUserId,
-      from_instance: new URL(wUrl).hostname,
+      from_instance: selfHost,
+      from_did: did ? did() : null,
       to_handle: remoteHandle,
-      profile: {
-        signature: fp.signature,
-        stats: { depth_score: fp.depth_score, breadth_score: fp.breadth_score },
-        realms: fp.public_realms_json ? JSON.parse(fp.public_realms_json) : [],
-      },
+      nonce: randomUUID(),
+      ts: Date.now(),
+      profile,
     };
 
     // Store outbound connection locally first so reconciliation has something to retry against.
@@ -148,19 +211,12 @@ export function createConnectionsNamespace(deps) {
     await d1Query(
       `INSERT INTO connections (id, user_a, user_b, initiated_by, status, remote_instance, remote_user_handle, created_at)
        VALUES (?, ?, ?, ?, 'pending', ?, ?, datetime('now'))`,
-      [id, fromUserId, `${remoteHandle}@${remoteDomain}`, fromUserId, remoteDomain, remoteHandle],
+      [id, fromUserId, remoteId, fromUserId, remoteDomain, remoteHandle],
     );
 
-    // Fire-and-forget federation POST. JWT signing happens at the Worker level
-    // when proxying these requests; failures here are handled by reconciliation.
+    // Fire-and-forget signed federation POST; failures are handled by reconciliation.
     try {
-      const connectUrl = `${federationEndpoint.replace(/\/$/, '')}/connect`;
-      await fetchImpl(connectUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-        signal: AbortSignal.timeout(FEDERATION_POST_TIMEOUT_MS),
-      });
+      await signedFederationPost(federationEndpoint, 'connect', requestBody);
     } catch (e) {
       console.warn(`[federation] Remote connect POST failed (will retry): ${e.message}`);
     }
@@ -185,7 +241,7 @@ export function createConnectionsNamespace(deps) {
         [toHandle],
       );
       let toUserId = target.results?.[0]?.user_id;
-      if (!toUserId) {
+      if (!toUserId && typeof workerUrl === 'function' && typeof workerAuth === 'function') {
         try {
           const res = await fetchImpl(
             `${workerUrl()}/api/resolve-handle?handle=${encodeURIComponent(toHandle)}`,
@@ -237,6 +293,141 @@ export function createConnectionsNamespace(deps) {
       return id;
     },
 
+    /**
+     * Inbound federation: a remote instance asked to connect (verified upstream
+     * by the federation router against the sender's did:web key). Caches the
+     * peer's public profile (keyed by their did so it never collides with the
+     * local handle's UNIQUE constraint) and writes a PENDING connection that
+     * surfaces via pending(). Idempotent per (peer, local user).
+     * SECURITY: `verifiedHost` is the host of the cryptographically verified
+     * signer did:web (the federation handler derives it). The displayed instance
+     * (remote_instance / "handle@instance") is bound to it — NOT the payload's
+     * claimed from_instance — so a signed peer can't make their request appear
+     * to come from an instance they don't control (impersonation in the UI).
+     * @param {{fromHandle:string, verifiedHost:string, fromDid?:string, profile?:object, toUserId:string}} p
+     * @returns {Promise<string>} the connection id
+     */
+    async receiveRemote({ fromHandle, verifiedHost, fromDid, profile = {}, toUserId }) {
+      if (!fromHandle || !verifiedHost || !toUserId) {
+        throw new Error('receiveRemote: fromHandle, verifiedHost, toUserId required');
+      }
+      const remoteId = fromDid || `${fromHandle}@${verifiedHost}`;
+      if (remoteId === toUserId) throw new Error('cannot connect to yourself');
+      // Cache the peer's public profile. handle stays NULL (only the local user
+      // owns the UNIQUE handle); display_name carries "handle@<verified host>".
+      await d1Query(
+        `INSERT INTO user_profiles (user_id, display_name, signature, did, member_since)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(user_id) DO UPDATE SET
+           display_name = excluded.display_name,
+           signature    = excluded.signature,
+           did          = excluded.did`,
+        [remoteId, `${fromHandle}@${verifiedHost}`, profile.signature ?? null, fromDid ?? null],
+      );
+      const { user_a, user_b } = canonical(toUserId, remoteId);
+      const existing = await d1Query(
+        `SELECT id, status FROM connections WHERE user_a = ? AND user_b = ?`,
+        [user_a, user_b],
+      );
+      const row = existing.results?.[0];
+      if (row) return row.id; // idempotent (incl. silently-blocked peers)
+      const id = randomUUID();
+      await d1Query(
+        `INSERT INTO connections (id, user_a, user_b, initiated_by, status, remote_instance, remote_user_handle, remote_did, created_at)
+         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, datetime('now'))`,
+        [id, user_a, user_b, remoteId, verifiedHost, fromHandle, fromDid ?? null],
+      );
+      return id;
+    },
+
+    /**
+     * Tier-0b OUTBOUND: respond to a pending inbound request and, when it came
+     * from a remote instance, send the peer a SIGNED connect-response so their
+     * side completes the handshake (their "Sent" → "Connected"). Does the local
+     * status flip first (auth-checked), then best-effort fires the callback.
+     * @param {string} userId @param {string} connectionId @param {'accept'|'reject'} action
+     */
+    async respondRemote(userId, connectionId, action) {
+      const row = await loadConnection(connectionId, { requireStatus: 'pending' });
+      if (!row) throw new Error('Connection not found');
+      assertMember(row, userId);
+      if (action === 'accept' && row.initiated_by === userId) throw new Error('Cannot accept your own request');
+
+      const status = action === 'accept' ? 'accepted' : 'rejected';
+      await d1Query(
+        `UPDATE connections SET status = ?, accepted_at = ${action === 'accept' ? "datetime('now')" : 'accepted_at'} WHERE id = ?`,
+        [status, connectionId],
+      );
+
+      // Only accept is propagated to the peer in Tier-0b (reject stays local-silent,
+      // matching the re-request-permitted semantics). Local-only rows have no remote.
+      if (action === 'accept' && row.remote_instance && row.remote_user_handle && sign && did) {
+        try {
+          const endpoint = await resolveFederationEndpoint(row.remote_instance, row.remote_user_handle);
+          // include our own public bio so the peer can render us in their list
+          const me = (await d1Query(`SELECT handle, signature FROM user_profiles WHERE user_id = ?`, [userId])).results?.[0] || {};
+          const respProfile = { signature: me.signature ?? null };
+          // §7 tripwire on THIS outbound path too (parity with requestRemote) —
+          // never federate a vector/embedding field, even via a future regression.
+          if (hasVectorKey(respProfile)) throw new Error('refusing to federate a vector/embedding field (CLAUDE.md §7)');
+          await signedFederationPost(endpoint, 'connect-response', {
+            $type: 'social.mycelium.connect-response.v1',
+            from_handle: me.handle || userId,
+            from_instance: (selfInstance && selfInstance()) || '',
+            from_did: did(),
+            to_handle: row.remote_user_handle,
+            action: 'accept',
+            nonce: randomUUID(),
+            ts: Date.now(),
+            profile: respProfile,
+          });
+        } catch (e) {
+          console.warn(`[federation] connect-response POST failed: ${e.message}`);
+        }
+      }
+      return connectionId;
+    },
+
+    /**
+     * Tier-0b INBOUND: the peer we requested has accepted (verified upstream by
+     * the federation router against their did:web key). Flip our matching "sent"
+     * row to accepted and cache their bio. Idempotent; ignores unknown refs.
+     *
+     * SECURITY: the row is matched on `verifiedHost` — the host of the
+     * cryptographically VERIFIED signer did:web (passed by the federation
+     * handler) — NOT the payload's claimed from_instance. Otherwise any peer
+     * with a valid signature could accept on another instance's behalf, forging
+     * a connection the real peer never agreed to.
+     * @param {{fromHandle:string, verifiedHost:string, fromDid?:string, profile?:object, action:string, toUserId:string}} p
+     */
+    async receiveResponse({ fromHandle, verifiedHost, fromDid, profile = {}, action, toUserId }) {
+      if (!fromHandle || !verifiedHost || !toUserId) throw new Error('receiveResponse: fromHandle, verifiedHost, toUserId required');
+      if (action !== 'accept') return null; // only accept advances state in Tier-0b
+      // remote_instance must equal the verified signer's host: a connect-response
+      // is only honored from the very instance the request was sent to.
+      const found = await d1Query(
+        `SELECT id, user_a, user_b FROM connections
+         WHERE initiated_by = ? AND remote_instance = ? AND remote_user_handle = ? AND status = 'pending'
+         LIMIT 1`,
+        [toUserId, verifiedHost, fromHandle],
+      );
+      const row = found.results?.[0];
+      if (!row) return null; // no pending row from this verified peer → ignore
+      const peerId = row.user_a === toUserId ? row.user_b : row.user_a;
+      // cache the peer's bio so list() renders them (keyed by the synthetic peer id)
+      await d1Query(
+        `INSERT INTO user_profiles (user_id, display_name, signature, did, member_since)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(user_id) DO UPDATE SET display_name = excluded.display_name, signature = excluded.signature, did = excluded.did`,
+        [peerId, `${fromHandle}@${verifiedHost}`, profile.signature ?? null, fromDid ?? null],
+      );
+      await d1Query(
+        `UPDATE connections SET status = 'accepted', accepted_at = datetime('now'), remote_did = COALESCE(remote_did, ?) WHERE id = ?`,
+        [fromDid ?? null, row.id],
+      );
+      return row.id;
+    },
+
     async pending(userId) {
       const result = await d1Query(
         `SELECT c.*, up.handle, up.display_name, up.signature, up.avatar_url,
@@ -252,7 +443,7 @@ export function createConnectionsNamespace(deps) {
 
     async sent(userId) {
       const result = await d1Query(
-        `SELECT c.id, c.status, c.created_at,
+        `SELECT c.id, c.status, c.created_at, c.remote_user_handle, c.remote_instance,
                 CASE WHEN c.user_a = ? THEN ub.handle ELSE ua.handle END as to_handle,
                 CASE WHEN c.user_a = ? THEN ub.display_name ELSE ua.display_name END as to_display_name,
                 CASE WHEN c.user_a = ? THEN ub.avatar_url ELSE ua.avatar_url END as to_avatar_url

@@ -6,10 +6,12 @@
 	import { api } from '$lib/api';
 	import { base64urlToBytes, preparePrfOptions } from '$lib/passkey-prf';
 
-	let mode: 'loading' | 'setup' | 'passkey' | 'key' = $state('loading');
+	let mode: 'loading' | 'setup' | 'passkey' | 'key' | 'operator' | 'enroll' = $state('loading');
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 	let masterKeyInput = $state('');
+	let emailInput = $state('operator@mycelium.local');
+	let passwordInput = $state('');
 	let setupTokenInput = $state('');
 	let displayNameInput = $state('');
 	let userHandle = $state<string | null>(null);
@@ -25,7 +27,11 @@
 				if (data.setupRequired) {
 					mode = 'setup';
 				} else if (data.hasPasskeys === false) {
-					mode = 'key';
+					// V1 self-hosted: no server-side passkey. A networked client (over
+					// the relay) signs in with the operator password; loopback never
+					// reaches /login (the shim authorizes it). The master-key 'key' flow
+					// is cloud-era and unreachable here.
+					mode = 'operator';
 				} else {
 					mode = 'passkey';
 				}
@@ -240,6 +246,89 @@
 
 
 	// Master key verification → passkey registration → logged in
+	// Operator-password sign-in (V1 self-hosted, reached over the relay). POSTs to
+	// better-auth's /api/auth/sign-in/email — same-origin to this webview, routed
+	// to the :4711 server by the relay Caddy. On success better-auth sets the
+	// HttpOnly session cookie; the app's /auth/session check then passes, so we
+	// reload into the app (which re-runs that check, now authenticated).
+	async function handleOperatorLogin() {
+		const email = emailInput.trim();
+		const password = passwordInput;
+		if (!email || !password) { error = 'Enter your email and operator password'; return; }
+		loading = true;
+		error = null;
+		try {
+			const res = await fetch('/api/auth/sign-in/email', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'same-origin',
+				body: JSON.stringify({ email, password }),
+			});
+			if (!res.ok) {
+				const data = await res.json().catch(() => ({}));
+				throw new Error(data?.message || data?.error?.message || 'Sign-in failed — check your password');
+			}
+			// Signed in. Offer Face ID enrolment for next time (skippable).
+			mode = 'enroll';
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Sign-in failed';
+		} finally {
+			loading = false;
+		}
+	}
+
+	// V1 passkey LOGIN via @better-auth/passkey. GET options → Face ID →
+	// POST verify. The challenge round-trips in the better-auth cookie, so
+	// credentials:'same-origin' is required. Auth-only (no PRF — V1 keys are
+	// server-side). Endpoints are relay-routed to :4711 (step 1.3).
+	async function handleV1PasskeyLogin() {
+		loading = true;
+		error = null;
+		try {
+			const optRes = await fetch('/api/auth/passkey/generate-authenticate-options', { credentials: 'same-origin' });
+			if (!optRes.ok) throw new Error('No passkey is set up on this vault yet — use your password.');
+			const options = await optRes.json();
+			const credential = await startAuthentication({ optionsJSON: options });
+			const response: Record<string, unknown> = { ...(credential as unknown as Record<string, unknown>) };
+			delete response.clientExtensionResults;
+			const verRes = await fetch('/api/auth/passkey/verify-authentication', {
+				method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+				body: JSON.stringify({ response }),
+			});
+			if (!verRes.ok) throw new Error('Passkey sign-in failed');
+			window.location.assign('/');
+		} catch (e) {
+			error = (e instanceof Error && e.name === 'NotAllowedError') ? 'Passkey sign-in cancelled' : (e instanceof Error ? e.message : 'Passkey sign-in failed');
+		} finally {
+			loading = false;
+		}
+	}
+
+	// V1 passkey ENROLLMENT — offered after operator-password login (needs the
+	// session). GET options (authed) → Face ID → POST verify → into the app.
+	async function handleV1PasskeyEnroll() {
+		loading = true;
+		error = null;
+		try {
+			const optRes = await fetch('/api/auth/passkey/generate-register-options', { credentials: 'same-origin' });
+			if (!optRes.ok) throw new Error('Could not start passkey setup');
+			const options = await optRes.json();
+			const credential = await startRegistration({ optionsJSON: options });
+			const response: Record<string, unknown> = { ...(credential as unknown as Record<string, unknown>) };
+			delete response.clientExtensionResults;
+			const verRes = await fetch('/api/auth/passkey/verify-registration', {
+				method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+				body: JSON.stringify({ response, name: 'This device' }),
+			});
+			if (!verRes.ok) throw new Error('Passkey setup failed');
+			window.location.assign('/');
+		} catch (e) {
+			error = (e instanceof Error && e.name === 'NotAllowedError') ? 'Passkey setup cancelled' : (e instanceof Error ? e.message : 'Passkey setup failed');
+		} finally {
+			loading = false;
+		}
+	}
+
 	async function handleKeyLogin() {
 		const key = masterKeyInput.trim().replace(/\s/g, '');
 		if (!key || key.length !== 64) {
@@ -514,6 +603,97 @@
 
 			{#if mode === 'loading'}
 				<div class="h-48"></div>
+
+			{:else if mode === 'operator'}
+				<!-- V1 self-hosted: operator-password sign-in (over the relay). The
+				     shared error block above renders any failure. -->
+				<div class="card-elevated p-8">
+					<div class="space-y-6">
+						<div class="text-center">
+							{#if userHandle}
+								<p class="text-lg font-medium text-[var(--color-text-primary)]">@{userHandle}</p>
+							{/if}
+							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Sign in to your vault</h2>
+							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
+								Enter your operator password to reach your vault on this device.
+							</p>
+						</div>
+
+						<form class="space-y-3" onsubmit={(e) => { e.preventDefault(); handleOperatorLogin(); }}>
+							<input
+								bind:value={emailInput}
+								type="email"
+								placeholder="email"
+								autocomplete="username"
+								class="input w-full text-sm"
+							/>
+							<input
+								bind:value={passwordInput}
+								type="password"
+								placeholder="operator password"
+								autocomplete="current-password"
+								class="input w-full text-sm"
+							/>
+							<button
+								type="submit"
+								disabled={loading || !passwordInput}
+								class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed"
+							>
+								{#if loading}
+									<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+									<span>Signing in…</span>
+								{:else}
+									<span>Sign in</span>
+								{/if}
+							</button>
+						</form>
+
+						<!-- Passkey / Face ID — for returning users who enrolled one. If
+						     none exists the call fails gracefully → use the password. -->
+						<div class="pt-4 border-t border-[var(--color-border)]">
+							<button
+								onclick={handleV1PasskeyLogin}
+								disabled={loading}
+								class="w-full btn py-3 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 border border-[var(--color-border)] hover:border-[var(--color-accent)] transition-colors"
+							>
+								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A13.916 13.916 0 008 11a4 4 0 118 0c0 1.017-.07 2.019-.203 3m-2.118 6.844A21.88 21.88 0 0015.171 17m3.839 1.132c.645-2.266.99-4.659.99-7.132A8 8 0 008 4.07M3 15.364c.64-1.319 1-2.8 1-4.364 0-1.457.39-2.823 1.07-4" /></svg>
+								<span>Sign in with passkey</span>
+							</button>
+						</div>
+					</div>
+				</div>
+
+			{:else if mode === 'enroll'}
+				<!-- Post-login: offer Face ID / passkey enrolment for next time. -->
+				<div class="card-elevated p-8">
+					<div class="space-y-6">
+						<div class="text-center">
+							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Enable Face ID?</h2>
+							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
+								Sign in faster next time with a passkey (Face ID / fingerprint) on this device. Your password still works as a backup.
+							</p>
+						</div>
+						<button
+							onclick={handleV1PasskeyEnroll}
+							disabled={loading}
+							class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed"
+						>
+							{#if loading}
+								<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+								<span>Setting up…</span>
+							{:else}
+								<span>Enable Face ID</span>
+							{/if}
+						</button>
+						<button
+							onclick={() => window.location.assign('/')}
+							disabled={loading}
+							class="w-full btn py-2.5 text-sm text-[var(--color-text-secondary)] disabled:opacity-50"
+						>
+							Not now
+						</button>
+					</div>
+				</div>
 
 			{:else if mode === 'key'}
 				<!-- First login: verify master key → create passkey -->

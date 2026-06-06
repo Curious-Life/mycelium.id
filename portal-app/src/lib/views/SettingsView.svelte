@@ -7,10 +7,12 @@
 	import { preparePrfOptions } from '$lib/passkey-prf';
 	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
+	import ChannelsSection from '$lib/components/settings/ChannelsSection.svelte';
 	import IntelligenceSection from '$lib/components/settings/IntelligenceSection.svelte';
 	import ManagedConnectSection from '$lib/components/settings/ManagedConnectSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 	import ConnectYourAISection from '$lib/components/settings/ConnectYourAISection.svelte';
+	import HarnessPickerSection from '$lib/components/settings/HarnessPickerSection.svelte';
 
 	interface Settings {
 		timezone: string;
@@ -1280,6 +1282,9 @@
 			<!-- Remote Access — connect Claude / any MCP client over the internet (operator password, status, connector URL) -->
 			<RemoteAccessSection />
 
+			<!-- Pick your harness — curated card menu over the two doors; links to docs/HARNESS-RECIPES.md -->
+			<HarnessPickerSection />
+
 			<!-- Connect your AI — the local/remote MCP + model-gateway endpoints + static-bearer how-to (S5) -->
 			<ConnectYourAISection />
 
@@ -1608,6 +1613,8 @@
 			<!-- Voice / TTS — provider config + per-voice preview -->
 			<VoiceSection />
 
+			<!-- Channels — Telegram + Discord bot token/owner, two-way assistant key, authorized groups -->
+			<ChannelsSection />
 			{/if}
 
 			{#if activeTab === 'integrations'}
@@ -2107,8 +2114,9 @@
 
 						<div class="space-y-2">
 							<div>
-								<label class="text-xs text-[var(--color-text-tertiary)] block mb-1">Current master key</label>
+								<label for="mk-rotate-current" class="text-xs text-[var(--color-text-tertiary)] block mb-1">Current master key</label>
 								<input
+									id="mk-rotate-current"
 									type="password"
 									bind:value={mkRotateCurrentKey}
 									placeholder="64-character hex key"
@@ -2117,9 +2125,10 @@
 								/>
 							</div>
 							<div>
-								<label class="text-xs text-[var(--color-text-tertiary)] block mb-1">New master key</label>
+								<label for="mk-rotate-new" class="text-xs text-[var(--color-text-tertiary)] block mb-1">New master key</label>
 								<div class="flex gap-2">
 									<input
+										id="mk-rotate-new"
 										type="text"
 										bind:value={mkRotateNewKey}
 										placeholder="64-character hex key"
@@ -2330,10 +2339,11 @@
 							re-authenticate with your passkey or master key.
 						</p>
 						<div>
-							<label class="text-[0.65rem] text-[var(--color-text-tertiary)] uppercase tracking-wider block mb-1">
+							<label for="delete-confirm-phrase" class="text-[0.65rem] text-[var(--color-text-tertiary)] uppercase tracking-wider block mb-1">
 								Type: <span class="font-mono text-coral">{DELETE_CONFIRM_PHRASE}</span>
 							</label>
 							<input
+								id="delete-confirm-phrase"
 								type="text"
 								bind:value={deletePhrase}
 								autocomplete="off"
@@ -2379,11 +2389,12 @@
 						</div>
 						{#if deleteHasMasterKey}
 							<div class="pt-2 border-t border-[var(--color-border)]">
-								<label class="text-[0.65rem] text-[var(--color-text-tertiary)] uppercase tracking-wider block mb-1">
+								<label for="delete-master-key" class="text-[0.65rem] text-[var(--color-text-tertiary)] uppercase tracking-wider block mb-1">
 									Or enter your master key
 								</label>
 								<div class="flex gap-2">
 									<input
+										id="delete-master-key"
 										type="password"
 										bind:value={deleteMasterKeyInput}
 										placeholder="64-character hex key"

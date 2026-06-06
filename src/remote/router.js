@@ -11,6 +11,7 @@ import { buildClaim } from './managed-claim.js';
 import { materializeRemoteConfigs } from './runtime.js';
 import { dataDir } from '../paths.js';
 import { keychainNames } from '../account/keychain-names.js';
+import { isTrustedLoopback } from '../http/loopback.js';
 
 // Untrusted-input guards for the managed-connect flow: both the control-plane URL
 // and its response flow into config files / env, so validate hard.
@@ -38,10 +39,11 @@ export function remoteRouter() {
   const router = express.Router();
   router.use(express.json({ limit: '16kb' }));
 
-  // Loopback-only (mirrors account/router.js).
+  // Loopback-only (mirrors account/router.js). isTrustedLoopback also rejects
+  // reverse-proxied (X-Forwarded-For) requests, so the operator-password setter
+  // stays unreachable over the relay even if path-routed there (V-1).
   router.use((req, res, next) => {
-    const ip = req.ip || req.socket?.remoteAddress || '';
-    if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return next();
+    if (isTrustedLoopback(req)) return next();
     return res.status(403).json({ error: 'forbidden' });
   });
 

@@ -32,7 +32,7 @@ function looksEncrypted(value) {
 }
 
 const names = tools.map((t) => t.name);
-rec('FA1. remember registered; total tools = 28', names.includes('remember') && tools.length === 28, `${tools.length} tools`);
+rec('FA1. remember registered; total tools = 31', names.includes('remember') && tools.length === 31, `${tools.length} tools`);
 
 // ── remember a fact ──
 const PLAIN = 'oat flat white';

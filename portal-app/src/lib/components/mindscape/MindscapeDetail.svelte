@@ -512,6 +512,7 @@
 										class="activity-bar"
 										class:selected={selectedActivity?.month === item.month}
 										style="height: {(item.count / maxCount) * 100}%"
+										aria-label="{item.month}: {item.count}"
 										onmouseenter={() => hoveredActivity = item}
 										onclick={() => selectActivityBar(item)}
 									></button>
@@ -911,6 +912,7 @@
 		line-height: 1.4;
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
+		line-clamp: 2;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 	}

@@ -8,6 +8,7 @@ import { dataDir, dbPath as resolveDbPath, kcvPath as resolveKcvPath } from './p
 import { resolveKeys } from './crypto/key-source.js';
 import { applyMigrations } from './db/migrate.js';
 import { apiRouter } from './api.js';
+import { internalRouter } from './internal-router.js';
 import { portalCompatRouter } from './portal-compat.js';
 import { portalMindscapeRouter } from './portal-mindscape.js';
 import { portalMeasurementRouter } from './portal-measurement.js';
@@ -18,6 +19,7 @@ import { portalHardwareRouter } from './portal-hardware.js';
 import { createOllamaDaemon } from './hardware/ollama-daemon.js';
 import { portalImportRouter } from './portal-import.js';
 import { portalSettingsRouter } from './portal-settings.js';
+import { portalChannelsRouter } from './portal-channels.js';
 import { portalConnectorsRouter } from './portal-connectors.js';
 import { registerBuiltinAdapters, createConnectorRunner, startConnectorScheduler } from './connectors/index.js';
 import { authShimRouter } from './auth-shim.js';
@@ -29,6 +31,8 @@ import { startClaimHeartbeat } from './claims/heartbeat.js';
 import { startClaimDiscoveryJob, isClusteringRunning } from './jobs.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
 import { setSessionKeys } from './account/session-keys.js';
+import { isTrustedLoopback } from './http/loopback.js';
+import { createVaultAuthMiddleware, csrfCookieMiddleware, isAuthorized } from './http/require-vault-auth.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CANONICAL_BUILD = path.join(HERE, '..', 'portal-app', 'build');
@@ -95,29 +99,30 @@ function ensureVaultSchema(dbFile) {
 /** Build the express sub-app that serves every VAULT-DEPENDENT route. Mounted
  *  behind a guard so it only handles traffic once the vault is open; until then
  *  data calls get a 503 and only the account ceremony + static UI are served. */
-function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner }) {
+function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth }) {
   const v = express();
   v.disable('x-powered-by');
+  // Fail-closed auth gate FIRST, mounted at `/api` — ALL vault data the sub-app
+  // serves is under /api/* (portal routers at /api/v1/portal, apiRouter at
+  // /api/v1/*), so Express's own routing decides what's gated (no hand-rolled
+  // path check that could diverge from the routers). Loopback (desktop) bypasses;
+  // SPA navigation isn't under /api so it falls through to static (step 1.2).
+  if (vaultAuth) v.use('/api', vaultAuth);
   v.use('/api/v1/portal', portalCompatRouter({ db, userId }));
   // S1 measurement REST bridge — auth-GATED, fail-closed (the rest of the V1
   // surface is unauthenticated/localhost-only; this surface decrypts the
   // sensitive measurement plane, so it resolves the owner ONLY for a genuine
-  // local request and rejects anything proxied from a network. Pattern-B
-  // loopback check (mirrors src/internal-metrics.js precedent): a request is
-  // the owner iff its immediate socket peer is loopback AND no x-forwarded-for
-  // header is present (genuine same-host requests never carry one).
+  // local request and rejects anything proxied from a network). The owner test
+  // is the shared isTrustedLoopback (src/http/loopback.js): socket peer loopback
+  // AND no X-Forwarded-For — the same boundary the /api/v1/account + remote
+  // control surfaces use, so all three stay consistent (V-1).
   // Mounted BEFORE portalMindscapeRouter so the bridge's richer /trajectory/summary
   // (full headline numbers the vitality page reads) takes precedence over the
   // mindscape router's lightweight {phase,exploration_ratio} stub — the bridge
   // response is a superset, so MindscapeView's summary.phase read still works.
   v.use('/api/v1/portal', portalMeasurementRouter({
     db, userId,
-    authenticatePortalRequest: (req) => {
-      const ip = req.socket?.remoteAddress || '';
-      const loopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
-      if (!loopback || req.headers['x-forwarded-for']) return null;
-      return { id: userId };
-    },
+    authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
   }));
   v.use('/api/v1/portal', portalClaimsRouter({
     db, userId,
@@ -144,7 +149,12 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   v.use('/api/v1/portal', portalHardwareRouter({ daemon: hwOllamaDaemon }));
   v.use('/api/v1/portal', portalImportRouter({ db, userId, enqueueEnrichment }));
   v.use('/api/v1/portal', portalSettingsRouter({ db, userId }));
+  v.use('/api/v1/portal', portalChannelsRouter({ db, userId }));
   if (connectorRunner) v.use('/api/v1/portal', portalConnectorsRouter({ runner: connectorRunner }));
+  // Internal support endpoints for the channel-daemon egress chokepoint
+  // (egress-audit sink + channel-authority resolver). Loopback-only, same
+  // trust boundary as the tool routes below.
+  v.use(internalRouter({ db, userId }));
   v.use(apiRouter({ tools, handlers, db, userId, enqueueEnrichment }));
   return v;
 }
@@ -268,7 +278,7 @@ export async function startRestServer({
       if (!injectedKeys) {
         connectorScheduler = startConnectorScheduler({ runner: connectorRunner });
       }
-      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner });
+      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId }) });
     } finally {
       booting = false;
     }
@@ -292,6 +302,11 @@ export async function startRestServer({
   const app = express();
   app.disable('x-powered-by');
 
+  // Issue the double-submit CSRF cookie early so it rides the SPA document load,
+  // /auth/session, and every subsequent request. Loopback (desktop) ignores it
+  // (the gate bypasses CSRF for loopback); harmless there.
+  app.use(csrfCookieMiddleware);
+
   // Account ceremony — ALWAYS mounted (this is what setup mode serves): create
   // the vault, restore from a recovery key, or re-view the key. Mounted before
   // the vault guard so /api/v1/account/* is never 503'd.
@@ -309,7 +324,13 @@ export async function startRestServer({
 
   // Local "always signed in" shim so the canonical portal's session check
   // (/auth/session) succeeds and the app opens instead of bouncing to /login.
-  app.use('/auth', authShimRouter({ userId: resolvedUserId }));
+  app.use('/auth', authShimRouter({
+    userId: resolvedUserId,
+    // Networked clients (over the relay) must present a valid session; loopback
+    // (desktop) stays "always signed in". So /auth/session 401s an unauthed
+    // networked browser → the SPA bounces it to /login (operator password).
+    resolveAuthorized: (req) => isAuthorized(req, { userId: resolvedUserId }),
+  }));
 
   // Vault-dependent routes: delegate to the sub-app once the vault is open. Until
   // then, DATA calls get a clear 503 while the static UI still loads (so the

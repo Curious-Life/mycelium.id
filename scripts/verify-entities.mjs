@@ -32,7 +32,7 @@ function looksEncrypted(value) {
 }
 
 const names = tools.map((t) => t.name);
-rec('EN1. remember + link registered; total tools = 28', names.includes('remember') && names.includes('link') && tools.length === 28, `${tools.length} tools`);
+rec('EN1. remember + link registered; total tools = 31', names.includes('remember') && names.includes('link') && tools.length === 31, `${tools.length} tools`);
 
 // ── remember an entity ──
 const out1 = await handlers.remember({ kind: 'entity', entityType: 'person', name: 'Alice Rivera', summary: 'my sister in Berlin', pinned: true });
