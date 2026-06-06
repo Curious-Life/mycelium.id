@@ -63,14 +63,21 @@ export function parseProposals(text) {
 function buildProposalPrompt(evidence) {
   const lines = evidence.map((e, i) => `[${e.id || i}] ${e.content}`).join('\n');
   return [
-    'You are a psychological profiler. From the interaction evidence below, state the durable, well-supported claims about this person.',
-    'Only claim what the evidence supports. Each claim cites the evidence ids it rests on.',
+    'You are a careful psychological profiler. From the interaction evidence below, state only the DURABLE, WELL-SUPPORTED claims about this person. Quality over quantity — a few solid claims beat many speculative ones.',
+    '',
+    'Rules:',
+    '- Every claim must cite the evidence ids that directly support it. Prefer claims backed by MORE THAN ONE observation.',
+    '- Do NOT over-infer from a single ambiguous act (e.g. declining one loud party does NOT make someone introverted, especially if other evidence shows them seeking out people).',
+    '- Weigh the WHOLE evidence set together; do not let one message contradict the pattern in the others.',
+    '- SAFETY-CRITICAL facts — allergies, intolerances, medical limits, hard prohibitions, trauma triggers — are ALWAYS type "boundary" (never "principle" or "personality"). State the specific constraint (e.g. the food).',
+    '',
+    'Types: "boundary" (hard limits / safety constraints, incl. allergies), "value" (what they care about), "principle" (a rule they live by), "identity" (a durable role/self-description), "personality" (a stable trait).',
     '',
     'EVIDENCE:',
     lines,
     '',
-    'Reply with ONLY a JSON array, no prose:',
-    '[{"type": one of ["personality","value","principle","identity","boundary"], "content": "<calm third-person sentence>", "support": ["<evidence id>", ...]}]',
+    'Reply with ONLY a JSON array, no prose. Use calm third-person sentences:',
+    '[{"type": "...", "content": "...", "support": ["<evidence id>", ...]}]',
   ].join('\n');
 }
 
