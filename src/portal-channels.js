@@ -19,16 +19,33 @@ export function portalChannelsRouter({ db, userId }) {
   const setS = (k, v) => db.secrets.set(userId, { key: k, value: v, scope: 'personal', description: 'channel setting' });
   const delS = (k) => db.secrets.delete(userId, k);
 
-  // GET /channels — current state (hasX only) + authorized groups.
+  // Per-channel access policy (mode + allowlist), default open.
+  const accessOf = async (kind, id) => (db.channelAccess ? (await db.channelAccess.get(kind, String(id))) : null) || { mode: 'open', allowedSenders: [] };
+
+  // GET /channels — current state (hasX only) + authorized groups/channels (each
+  // with its access policy) + the routing/tuning knobs (non-secret config).
   router.get('/channels', async (_req, res) => {
     try {
+      const groups = await Promise.all((await db.telegramGroups.list(userId)).map(async (g) => ({ id: g.id, title: g.title || null, access: await accessOf('telegram-group', g.id) })));
+      const discordChannels = db.identityChannels?.listByKind
+        ? await Promise.all((await db.identityChannels.listByKind('discord')).map(async (c) => ({ id: c.channel_value, name: c.display_name || null, access: await accessOf('discord', c.channel_value) })))
+        : [];
       res.json({
         enabled: (await getS('CHANNEL_ENABLED')) === '1',
         telegram: { hasToken: await hasS('TELEGRAM_BOT_TOKEN'), ownerId: (await getS('OWNER_TELEGRAM_ID')) || null },
         discord: { hasToken: await hasS('DISCORD_BOT_TOKEN'), ownerId: (await getS('OWNER_DISCORD_ID')) || null },
         agent: { hasKey: await hasS('ANTHROPIC_API_KEY'), model: (await getS('CHANNEL_AGENT_MODEL')) || null },
-        groups: (await db.telegramGroups.list(userId)).map((g) => ({ id: g.id, title: g.title || null })),
-        discordChannels: db.identityChannels?.listByKind ? (await db.identityChannels.listByKind('discord')).map((c) => ({ id: c.channel_value, name: c.display_name || null })) : [],
+        routing: {
+          router: (await getS('CHANNEL_ROUTER')) || '',
+          ollamaModel: (await getS('CHANNEL_OLLAMA_MODEL')) || '',
+          ollamaUrl: (await getS('OLLAMA_URL')) || '',
+          coalesceMs: (await getS('CHANNEL_COALESCE_MS')) || '',
+          rateLimitMax: (await getS('CHANNEL_RATELIMIT_MAX')) || '',
+          rateLimitWindowMs: (await getS('CHANNEL_RATELIMIT_WINDOW_MS')) || '',
+          sensitivePatterns: (await getS('CHANNEL_SENSITIVE_PATTERNS')) || '',
+        },
+        groups,
+        discordChannels,
       });
     } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
   });
@@ -60,8 +77,33 @@ export function portalChannelsRouter({ db, userId }) {
           if (v) await setS('CHANNEL_AGENT_MODEL', v); else await delS('CHANNEL_AGENT_MODEL');
         }
       }
+      // Routing & tuning knobs (Track A). Empty string clears a field.
+      const routing = req.body?.routing;
+      if (routing && typeof routing === 'object') {
+        const map = {
+          router: 'CHANNEL_ROUTER', ollamaModel: 'CHANNEL_OLLAMA_MODEL', ollamaUrl: 'OLLAMA_URL',
+          coalesceMs: 'CHANNEL_COALESCE_MS', rateLimitMax: 'CHANNEL_RATELIMIT_MAX',
+          rateLimitWindowMs: 'CHANNEL_RATELIMIT_WINDOW_MS', sensitivePatterns: 'CHANNEL_SENSITIVE_PATTERNS',
+        };
+        for (const [field, key] of Object.entries(map)) {
+          if (routing[field] === undefined) continue;
+          const v = String(routing[field]).trim();
+          if (v) await setS(key, v); else await delS(key);
+        }
+      }
       res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
+  });
+
+  // PUT /channels/access — set a channel's access policy (mode + allowlist).
+  router.put('/channels/access', async (req, res) => {
+    try {
+      const { kind, id, mode, allowedSenders } = req.body || {};
+      if (!kind || !id) return res.status(400).json({ error: 'kind and id required' });
+      if (!db?.channelAccess?.set) return res.status(503).json({ error: 'channel-access unavailable' });
+      await db.channelAccess.set(String(kind), String(id), { mode, allowedSenders });
+      res.json({ ok: true });
+    } catch (e) { res.status(400).json({ error: String(e?.message || e).slice(0, 200) }); }
   });
 
   // DELETE /channels/groups/:id — revoke an authorized telegram group (soft delete).

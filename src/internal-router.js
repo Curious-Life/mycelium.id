@@ -116,6 +116,27 @@ export function internalRouter({ db, userId }) {
     }
   });
 
+  // ── Per-channel access decision (loopback) ────────────────────────────────
+  // Resolves WHO within an authorized channel the bot responds to. The allowlist
+  // + owner id stay in the vault; the daemon sends only the inbound sender id and
+  // gets a boolean. Owner (from secrets) is implicitly allowed in every mode.
+  router.get('/api/v1/internal/channel-access', async (req, res) => {
+    const kind = String(req.query.kind || '');
+    const id = String(req.query.id || '');
+    const sender = req.query.sender != null ? String(req.query.sender) : null;
+    if (!kind || !id) return res.status(400).json({ respond: false, reason: 'kind-and-id-required' });
+    if (!db?.channelAccess?.decide) return res.status(503).json({ respond: false, reason: 'unavailable' });
+    try {
+      const ownerKey = /^telegram/.test(kind) ? 'OWNER_TELEGRAM_ID' : /^discord/.test(kind) ? 'OWNER_DISCORD_ID' : null;
+      const ownerId = ownerKey ? await db.secrets.get(userId, ownerKey) : null;
+      const decision = await db.channelAccess.decide(kind, id, sender, ownerId);
+      res.json(decision);
+    } catch (err) {
+      console.error('[internal-router] channel-access decide failed:', err.message);
+      res.status(500).json({ respond: false, reason: 'access-error' }); // fail-closed
+    }
+  });
+
   // ── Inference-egress audit for the channel auto-router (loopback) ─────────
   // When the daemon routes a turn to cloud, it records the egress HASH-ONLY here.
   // Reuses the inference egress sink (db.audit.log, never plaintext). The daemon
@@ -180,6 +201,15 @@ export function internalRouter({ db, userId }) {
         telegram: { botToken: (await g('TELEGRAM_BOT_TOKEN')) || null, ownerId: (await g('OWNER_TELEGRAM_ID')) || null },
         discord: { botToken: (await g('DISCORD_BOT_TOKEN')) || null, ownerId: (await g('OWNER_DISCORD_ID')) || null },
         agent: { anthropicApiKey: (await g('ANTHROPIC_API_KEY')) || null, model: (await g('CHANNEL_AGENT_MODEL')) || null },
+        routing: {
+          router: (await g('CHANNEL_ROUTER')) || null,
+          ollamaModel: (await g('CHANNEL_OLLAMA_MODEL')) || null,
+          ollamaUrl: (await g('OLLAMA_URL')) || null,
+          coalesceMs: (await g('CHANNEL_COALESCE_MS')) || null,
+          rateLimitMax: (await g('CHANNEL_RATELIMIT_MAX')) || null,
+          rateLimitWindowMs: (await g('CHANNEL_RATELIMIT_WINDOW_MS')) || null,
+          sensitivePatterns: (await g('CHANNEL_SENSITIVE_PATTERNS')) || null,
+        },
         tts: {
           provider: (await g('TTS_PROVIDER')) || null,
           openaiApiKey: (await g('OPENAI_API_KEY')) || null,

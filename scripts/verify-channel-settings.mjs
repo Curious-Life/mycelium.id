@@ -102,6 +102,23 @@ try {
   rec('CS21. inference-egress audit accepts hash-only record', okRec.ok === true);
   const leak = await fetch(`${u}/api/v1/internal/inference-egress`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: 'allowed', contentHash: 'x', contentLength: 1, content: 'PLAINTEXT' }) });
   rec('CS22. inference-egress rejects a payload carrying plaintext', leak.status === 400);
+
+  // ── per-channel access policy via the portal (B3) ─────────────────────────
+  await vault.db.telegramGroups.authorize('-200', 'Fam', null, USER);
+  let rA = await send('/api/v1/portal/channels/access', 'PUT', { kind: 'telegram-group', id: '-200', mode: 'allowlist', allowedSenders: ['222', '333'] });
+  rec('CS23. PUT /channels/access → ok', rA.status === 200 && rA.json.ok === true);
+  rA = await get('/api/v1/portal/channels');
+  const grp = (rA.json.groups || []).find((g) => String(g.id) === '-200');
+  rec('CS24. GET /channels exposes per-channel access (mode+allowlist)', grp?.access?.mode === 'allowlist' && grp.access.allowedSenders.includes('222'), JSON.stringify(grp?.access));
+
+  // ── routing/tuning knobs round-trip (A) ───────────────────────────────────
+  await send('/api/v1/portal/channels', 'PUT', { routing: { router: 'auto', ollamaModel: 'llama3.1', coalesceMs: '2000', sensitivePatterns: '\\bfoo\\b' } });
+  const rg = (await get('/api/v1/portal/channels')).json.routing;
+  rec('CS25. GET /channels.routing reflects saved knobs', rg.router === 'auto' && rg.ollamaModel === 'llama3.1' && rg.coalesceMs === '2000');
+  const cc2 = (await get('/api/v1/internal/channel-config')).json;
+  rec('CS26. channel-config carries the routing block', cc2.routing.router === 'auto' && cc2.routing.ollamaModel === 'llama3.1');
+  const env2 = {}; applyChannelConfigToEnv(cc2, env2);
+  rec('CS27. applyChannelConfigToEnv maps routing → env', env2.MYCELIUM_CHANNEL_ROUTER === 'auto' && env2.CHANNEL_OLLAMA_MODEL === 'llama3.1' && env2.CHANNEL_COALESCE_MS === '2000' && env2.CHANNEL_SENSITIVE_PATTERNS === '\\bfoo\\b');
 } catch (err) {
   allPass = false;
   ledger.push(`FAIL  fatal: ${String(err?.stack || err?.message || err)}`);

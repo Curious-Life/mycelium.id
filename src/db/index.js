@@ -35,6 +35,7 @@ import { createUsersNamespace } from './users.js';
 import { createEgressAuditNamespace } from './egress-audit.js';
 import { createIdentityChannelsNamespace } from './identity-channels.js';
 import { createTelegramGroupsNamespace } from './telegram-groups.js';
+import { createChannelAccessNamespace } from './channel-access.js';
 import { createConnectionsNamespace } from './connections.js';
 import { createSpaceAccessNamespace } from './space-access.js';
 import { createSpaceRoomsNamespace } from './space-rooms.js';
@@ -123,6 +124,7 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     egressAudit: createEgressAuditNamespace({ d1Query }),
     identityChannels: createIdentityChannelsNamespace({ d1Query, firstRow }),
     telegramGroups: createTelegramGroupsNamespace({ d1Query }),
+    channelAccess: createChannelAccessNamespace({ d1Query, firstRow }),
 
     // db.shareLinks is intentionally omitted — every call site is optional-
     // chained (tools/documents.js:102,516 `db.shareLinks?.…`), so absence

@@ -97,7 +97,8 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     };
     const commands = createCommandHandler({ vault, sendReply, ownerTelegramId: cfg.ownerTelegramId });
     const isGroupAuthorized = async (gid) => { const g = await vault.getTelegramGroup(gid); return !!g.authorized && g.active !== false; };
-    const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized });
+    const checkChannelAccess = (kind, id, sender) => vault.checkChannelAccess({ kind, id, sender });
+    const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized, checkChannelAccess });
     poller = createTelegramPoller({ telegram, handleInbound });
   }
 
@@ -130,7 +131,8 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     };
     const discordCommands = createDiscordCommandHandler({ vault, sendReply: discordSendReply, ownerDiscordId: cfg.ownerDiscordId });
     const isChannelAuthorized = async (id) => { const a = await vault.checkChannelAuthority({ kind: 'discord', id }); return !!a?.allowed; };
-    const handleDiscordInbound = createDiscordInboundHandler({ vault, ownerDiscordId: cfg.ownerDiscordId, runTurn: effectiveRunTurn, commands: discordCommands, isChannelAuthorized });
+    const checkDiscordAccess = (kind, id, sender) => vault.checkChannelAccess({ kind, id, sender });
+    const handleDiscordInbound = createDiscordInboundHandler({ vault, ownerDiscordId: cfg.ownerDiscordId, runTurn: effectiveRunTurn, commands: discordCommands, isChannelAuthorized, checkChannelAccess: checkDiscordAccess });
     gateway = createDiscordGateway({ botToken: cfg.discordBotToken, handleInbound: handleDiscordInbound });
   }
 

@@ -4,6 +4,17 @@
 > **(A)** bring the four env-only knobs into the vault config bridge + Channels UI;
 > **(B)** a per-channel **access policy** (owner-only · allowlist of specific senders · open) — the real capability gap.
 > Companion to `CHANNEL-INTEGRATIONS-DESIGN-2026-06-06.md` + `CHANNEL-DEPTH-SWEEP-2026-06-06.md`.
+>
+> **✅ AS-BUILT (2026-06-06):** all phases implemented as designed. B1 `migrations/0011_channel_access.sql` +
+> `ENCRYPTED_FIELDS.channel_access` + `src/db/channel-access.js` (get/set/decide). B2
+> `GET /api/v1/internal/channel-access` (owner from secrets + `decide`; fail-closed) + `vault-client.checkChannelAccess`
+> + sender-policy step in `inbound.js`/`discord-inbound.js` (owner bypasses on discord; telegram lets `decide` allow
+> owner). B3 `PUT /portal/channels/access` + per-channel access in GET + `ChannelsSection` mode-select + allowlist
+> editor. A: routing knobs through `portal-channels` PUT/GET → `channel-config.routing` → `applyChannelConfigToEnv` +
+> a "Routing & tuning" UI subsection. Verified: `verify:channel-access` (22 — decide truth table, real-vault
+> set/get/decide, **allowlist encrypted at rest**, endpoint decision, daemon sender filter) + `verify:channel-settings`
+> (27 — access round-trip + routing round-trip through the full bridge) + full channel suite + `portal:build` GO.
+> Default mode kept **open** (preserves prior behavior; tighten via the UI mode select).
 
 ## TL;DR
 

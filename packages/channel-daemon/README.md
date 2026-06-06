@@ -62,6 +62,16 @@ turn routes local-first, escalating complex turns to cloud and keeping sensitive
 turns on-box (cloud egress audited hash-only). `MYCELIUM_CHANNEL_ROUTER=cloud|local|auto`
 overrides; `CHANNEL_SENSITIVE_PATTERNS` (comma regexes) extends the keep-local markers.
 
+Per-channel access policy (built): each authorized group/channel has a mode —
+**owner** (operator only) · **allowlist** (operator + specific sender ids) ·
+**open** (anyone; default). Set it in Settings → Channels (mode select + allowlist
+editor). The allowlist is encrypted at rest and resolved in the vault (the daemon
+sends a sender id, gets a boolean). Owner is always allowed.
+
+All knobs are UI-managed: tokens/owner/keys, the **router mode** (auto/cloud/local),
+Ollama model/url, coalesce + rate-limit windows, and sensitive patterns — under
+Settings → Channels (env still works as a fallback).
+
 Not yet built:
 - WhatsApp transport (same spine); voice-inbound transcription.
 

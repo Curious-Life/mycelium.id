@@ -75,6 +75,14 @@ export function applyChannelConfigToEnv(cc, env = process.env) {
   put('ELEVENLABS_API_KEY', cc.tts?.elevenApiKey);
   put('ELEVENLABS_VOICE_ID', cc.tts?.elevenVoiceId);
   put('ELEVENLABS_MODEL_ID', cc.tts?.elevenModel);
+  // Routing & tuning (Track A) — vault-managed knobs override env.
+  put('MYCELIUM_CHANNEL_ROUTER', cc.routing?.router);
+  put('CHANNEL_OLLAMA_MODEL', cc.routing?.ollamaModel);
+  put('OLLAMA_URL', cc.routing?.ollamaUrl);
+  put('CHANNEL_COALESCE_MS', cc.routing?.coalesceMs);
+  put('CHANNEL_RATELIMIT_MAX', cc.routing?.rateLimitMax);
+  put('CHANNEL_RATELIMIT_WINDOW_MS', cc.routing?.rateLimitWindowMs);
+  put('CHANNEL_SENSITIVE_PATTERNS', cc.routing?.sensitivePatterns);
 }
 
 /** Throw a clear error if no platform is configured (fail-closed boot). */

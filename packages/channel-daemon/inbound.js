@@ -35,7 +35,7 @@ function preview(text) {
  * @param {(groupId:string)=>Promise<boolean>} [deps.isGroupAuthorized]  group binding lookup
  * @param {string} [deps.logPrefix]
  */
-export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands, isGroupAuthorized, logPrefix = 'channel-daemon' }) {
+export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands, isGroupAuthorized, checkChannelAccess, logPrefix = 'channel-daemon' }) {
   if (!vault?.captureMessage) throw new TypeError('createInboundHandler: vault.captureMessage required');
   if (typeof runTurn !== 'function') throw new TypeError('createInboundHandler: runTurn required');
 
@@ -49,9 +49,15 @@ export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands
 
   async function isAuthorized(msg) {
     if (msg.channelKind === 'telegram-group') {
-      // Groups: authorized iff bound via /allow (telegram_groups, fail-closed).
+      // Groups: authorized iff bound via /allow (telegram_groups, fail-closed)…
       if (typeof isGroupAuthorized !== 'function') return false;
-      try { return await isGroupAuthorized(msg.chatId); } catch { return false; }
+      let authorized; try { authorized = await isGroupAuthorized(msg.chatId); } catch { return false; }
+      if (!authorized) return false;
+      // …AND the sender passes the channel's access policy (owner|allowlist|open).
+      if (typeof checkChannelAccess === 'function') {
+        try { return !!(await checkChannelAccess(msg.channelKind, msg.chatId, msg.fromId)).respond; } catch { return false; }
+      }
+      return true; // no policy resolver wired → behave as before (open)
     }
     return isOwnerDM(msg);
   }

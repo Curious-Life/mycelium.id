@@ -115,6 +115,22 @@ export function createVaultClient({ baseUrl, fetch: fetchImpl = globalThis.fetch
       } catch (e) { console.error('[channel-daemon] revoke group failed:', e.message); return { ok: false }; }
     },
 
+    /**
+     * Per-channel sender access decision. Returns { respond, mode, reason }.
+     * Fail-closed: any error → { respond:false }.
+     */
+    async checkChannelAccess({ kind, id, sender }) {
+      try {
+        const qs = new URLSearchParams({ kind: String(kind), id: String(id), ...(sender != null ? { sender: String(sender) } : {}) });
+        const res = await fetchImpl(`${root}/api/v1/internal/channel-access?${qs}`, { signal: AbortSignal.timeout(timeoutMs) });
+        if (!res.ok) return { respond: false, reason: `access-http-${res.status}` };
+        return await res.json();
+      } catch (e) {
+        console.error('[channel-daemon] channel-access check failed:', e.message);
+        return { respond: false, reason: 'access-unavailable' };
+      }
+    },
+
     /** Authorize (on=true) or disallow (on=false) a Discord channel. */
     async setDiscordChannel({ id, name, on }) {
       try { await post('/api/v1/internal/discord-channel', { id, name, on }); return { ok: true }; }

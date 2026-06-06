@@ -23,7 +23,7 @@ function preview(text) {
  * @param {(channelId:string)=>Promise<boolean>} [deps.isChannelAuthorized]
  * @param {string} [deps.logPrefix]
  */
-export function createDiscordInboundHandler({ vault, ownerDiscordId, runTurn, commands, isChannelAuthorized, logPrefix = 'channel-daemon' }) {
+export function createDiscordInboundHandler({ vault, ownerDiscordId, runTurn, commands, isChannelAuthorized, checkChannelAccess, logPrefix = 'channel-daemon' }) {
   if (!vault?.captureMessage) throw new TypeError('createDiscordInboundHandler: vault.captureMessage required');
   if (typeof runTurn !== 'function') throw new TypeError('createDiscordInboundHandler: runTurn required');
 
@@ -31,9 +31,15 @@ export function createDiscordInboundHandler({ vault, ownerDiscordId, runTurn, co
 
   async function isAuthorized(msg) {
     if (msg.isBot) return false;
-    if (isOwner(msg)) return true;                       // operator anywhere
-    if (typeof isChannelAuthorized === 'function') {      // anyone in an allowed channel
-      try { return await isChannelAuthorized(msg.chatId); } catch { return false; }
+    if (isOwner(msg)) return true;                       // operator anywhere (bypasses policy)
+    if (typeof isChannelAuthorized === 'function') {      // anyone in an allowed channel…
+      let authorized; try { authorized = await isChannelAuthorized(msg.chatId); } catch { return false; }
+      if (!authorized) return false;
+      // …subject to the channel's access policy (owner|allowlist|open).
+      if (typeof checkChannelAccess === 'function') {
+        try { return !!(await checkChannelAccess(msg.channelKind, msg.chatId, msg.fromId)).respond; } catch { return false; }
+      }
+      return true; // no policy resolver wired → open
     }
     return false;                                         // fail-closed
   }
