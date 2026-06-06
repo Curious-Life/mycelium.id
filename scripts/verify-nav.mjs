@@ -47,7 +47,9 @@ rec("N2 deferred nav arrays removed", leftovers.length === 0,
   leftovers.length ? `still present: ${leftovers.join(", ")}` : "");
 
 // N3 — no dead probes that 404 in V1.
-const probes = ["/portal/connections/count", "/portal/fleet/gate"].filter((s) => sidebar.includes(s));
+// /portal/connections/count is now a LIVE endpoint (src/portal-compat.js — main
+// shipped Connections), so it is no longer a dead probe. /portal/fleet/gate stays.
+const probes = ["/portal/fleet/gate"].filter((s) => sidebar.includes(s));
 rec("N3 zero dead 404 probes in Sidebar", probes.length === 0,
   probes.length ? `still calls: ${probes.join(", ")}` : "");
 
