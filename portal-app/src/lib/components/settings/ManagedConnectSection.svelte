@@ -198,8 +198,12 @@
 	{#if loading}
 		<div class="text-sm text-[var(--color-text-tertiary)] animate-pulse">Loading…</div>
 	{:else}
-		<p class="text-xs text-[var(--color-text-tertiary)] mb-4">
-			Claim a free <span class="font-mono">handle.mycelium.id</span> and connect Claude (mobile/web) in one step. Your data stays encrypted on this Mac — the relay only forwards ciphertext, and we never hold your keys or your cert.
+		<p class="text-xs text-[var(--color-text-tertiary)] mb-2">
+			Claim a <span class="font-mono">handle.mycelium.id</span> and connect Claude (mobile/web) in one step. The managed relay is <strong>€1/mo</strong>.
+		</p>
+		<!-- Sovereignty disclosure (O11) -->
+		<p class="text-[10px] text-[var(--color-text-tertiary)] mb-4 leading-relaxed">
+			Your data stays encrypted on this Mac and <strong>TLS terminates here</strong> — the relay only ever forwards ciphertext. Paying rents a name + a passthrough pipe; it does not give us your data, keys, or cert. Bring your own domain or relay (below) to pay nothing.
 		</p>
 
 		{#if connected}
@@ -214,6 +218,10 @@
 				<button onclick={disconnect} disabled={connecting} class="text-xs px-3 py-1.5 rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] cursor-pointer disabled:opacity-50">Disconnect</button>
 				<button onclick={manageBilling} disabled={billingBusy} class="text-xs px-3 py-1.5 rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] cursor-pointer disabled:opacity-50">{billingBusy ? 'Opening…' : 'Manage billing'}</button>
 			</div>
+			<!-- Lapse/release lifecycle (O10) -->
+			<p class="text-[10px] text-[var(--color-text-tertiary)] mt-2 leading-relaxed">
+				If a payment lapses, your tunnel keeps running through a short grace period, then stops at the next reconnect. Your handle is held for a while before the name is freed — re-subscribe any time to keep it.
+			</p>
 		{:else}
 			{#if !status?.passwordSet}
 				<div class="text-xs text-amber-400 mb-3 p-2 rounded bg-amber-500/10">Set an operator password (below) first — it's the gate Claude authenticates against.</div>

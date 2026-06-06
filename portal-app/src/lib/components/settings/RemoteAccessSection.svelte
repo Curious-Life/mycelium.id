@@ -21,11 +21,21 @@
 		operatorEmail: string;
 		passwordSet: boolean;
 		httpListening: boolean;
+		remoteMode?: string;
+		controlPlaneUrl?: string;
+		relayAddr?: string;
 	};
 
 	let status = $state<RemoteStatus | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+
+	// Own-relay (advanced, O9): point the managed-connect flow at a self-hosted
+	// control plane + relay instead of mycelium.id. Non-secret coords via /config.
+	let showOwnRelay = $state(false);
+	let cpUrl = $state('');
+	let relayAddr = $state('');
+	let ownRelayMsg = $state<string | null>(null);
 
 	// Password form (the OAuth gate). Plaintext leaves the browser once; the
 	// server hands it to better-auth, which stores only a hash.
@@ -49,6 +59,9 @@
 			if (!res.ok) throw new Error(`Failed to load (${res.status})`);
 			status = (await res.json()) as RemoteStatus;
 			baseUrl = status.publicBaseUrl ?? '';
+			cpUrl = status.controlPlaneUrl ?? '';
+			relayAddr = status.relayAddr ?? '';
+			if (status.remoteMode === 'own-relay') showOwnRelay = true;
 		} catch (e: any) {
 			error = e?.message || 'Failed to load remote-access status';
 		} finally {
@@ -95,6 +108,15 @@
 	const saveBaseUrl = () => saveConfig({ publicBaseUrl: baseUrl.trim() });
 	const toggleEnabled = (on: boolean) => saveConfig({ remoteEnabled: on });
 
+	// O9 — own-relay: persist the self-hosted control-plane + relay coords and mark
+	// the mode. The managed-connect flow above then provisions against THIS control
+	// plane (run it with billing off → free). Takes effect on next launch.
+	async function saveOwnRelay() {
+		ownRelayMsg = null;
+		await saveConfig({ remoteMode: 'own-relay', controlPlaneUrl: cpUrl.trim(), relayAddr: relayAddr.trim() });
+		if (!cfgErr) ownRelayMsg = 'Saved. Claim a handle above against your control plane, then restart.';
+	}
+
 	const inputCls =
 		'w-full px-3 py-2 text-xs font-mono bg-[var(--color-bg)] border border-[var(--color-border)] rounded text-[var(--color-text-primary)] focus:border-aurum outline-none';
 	const btnCls =
@@ -109,8 +131,12 @@
 	{:else if error}
 		<div class="text-xs text-red-400 mb-3 p-2 rounded bg-red-500/10">{error}</div>
 	{:else if status}
-		<p class="text-xs text-[var(--color-text-tertiary)] mb-4">
-			Connect Claude (or any MCP client) to this vault over the internet. Your data stays encrypted on this Mac — the client reaches in through a password-gated, TLS tunnel. The app must be running and awake.
+		<p class="text-xs text-[var(--color-text-tertiary)] mb-3">
+			Connect Claude (or any MCP client) to this vault over the internet, on <strong>your own domain</strong>. The client reaches in through a password-gated TLS tunnel; the app must be running and awake. (For a free <span class="font-mono">handle.mycelium.id</span> instead, use “Get your address” above.)
+		</p>
+		<!-- Sovereignty disclosure (O11) -->
+		<p class="text-[10px] text-[var(--color-text-tertiary)] mb-4 leading-relaxed">
+			Your data stays encrypted on this Mac and <strong>TLS terminates here</strong>, so a relay only ever forwards ciphertext — it never sees your data or holds your keys or cert. Bring your own domain or relay and you pay nothing.
 		</p>
 
 		<!-- Live state -->
@@ -161,5 +187,25 @@
 			<p class="text-[10px] text-[var(--color-text-tertiary)] mt-1">Set a password and a public URL first.</p>
 		{/if}
 		{#if cfgErr}<div class="text-xs text-red-400 mt-2">{cfgErr}</div>{/if}
+
+		<!-- Advanced: your own relay (O9) -->
+		<div class="mt-5 pt-4 border-t border-[var(--color-border)]">
+			<button onclick={() => (showOwnRelay = !showOwnRelay)} class="text-[10px] uppercase tracking-wider text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] cursor-pointer">
+				{showOwnRelay ? '▾' : '▸'} Advanced — your own relay
+			</button>
+			{#if showOwnRelay}
+				<p class="text-[10px] text-[var(--color-text-tertiary)] mt-2 mb-3 leading-relaxed">
+					Run the open-source <span class="font-mono">mycelium-managed</span> control plane + an FRP relay yourself, then claim a handle (in “Get your address” above) against <em>your</em> control plane. No mycelium.id round-trip, no fee.
+				</p>
+				<div class="space-y-2">
+					<label class="block text-[10px] uppercase tracking-wider text-[var(--color-text-tertiary)]" for="cp-url">Control plane URL</label>
+					<input id="cp-url" type="url" bind:value={cpUrl} placeholder="https://connect.yourdomain.com" class={inputCls} />
+					<label class="block text-[10px] uppercase tracking-wider text-[var(--color-text-tertiary)]" for="relay-addr">Relay address (host:port)</label>
+					<input id="relay-addr" type="text" bind:value={relayAddr} placeholder="relay.yourdomain.com:7000" class={inputCls} />
+					<button onclick={saveOwnRelay} disabled={cfgSaving} class={btnCls}>{cfgSaving ? 'Saving…' : 'Save own-relay'}</button>
+					{#if ownRelayMsg}<div class="text-xs text-green-400">{ownRelayMsg}</div>{/if}
+				</div>
+			{/if}
+		</div>
 	{/if}
 </section>

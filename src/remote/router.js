@@ -57,6 +57,9 @@ export function remoteRouter() {
       operatorEmail: rc.operatorEmail,
       passwordSet: operatorUserExists(),
       httpListening: await probeListening(port),
+      // Non-secret transport coords for the own-relay / own-domain UI (O9).
+      controlPlaneUrl: rc.controlPlaneUrl || '',
+      relayAddr: rc.relayAddr || '',
     });
   });
 
