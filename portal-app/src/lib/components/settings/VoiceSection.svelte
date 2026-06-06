@@ -24,13 +24,13 @@
 		elevenlabs: { hasKey: boolean; voiceId: string | null; model: string; models: ModelCatalog[] };
 	};
 
-	let state = $state<TtsState | null>(null);
+	let tts = $state<TtsState | null>(null);
 	let loading = $state(true);
 	let saving = $state(false);
 	let error = $state<string | null>(null);
 
-	// Form state — separate from `state` so unsaved edits don't pollute the
-	// canonical view. `Save` flushes form → server → state.
+	// Form fields — separate from the canonical `tts` so unsaved edits don't
+	// pollute the canonical view. `Save` flushes form → server → tts.
 	let formProvider = $state<'openai' | 'elevenlabs' | ''>('');
 	let formOpenaiKey = $state('');
 	let formOpenaiVoice = $state('onyx');
@@ -50,12 +50,12 @@
 		try {
 			const res = await api('/portal/settings/tts');
 			if (!res.ok) throw new Error(`Failed to load (${res.status})`);
-			state = (await res.json()) as TtsState;
-			formProvider = (state.provider as 'openai' | 'elevenlabs' | '' | null) ?? '';
-			formOpenaiVoice = state.openai.voice;
-			formOpenaiModel = state.openai.model;
-			formElevenVoiceId = state.elevenlabs.voiceId ?? '';
-			formElevenModel = state.elevenlabs.model;
+			tts = (await res.json()) as TtsState;
+			formProvider = (tts.provider as 'openai' | 'elevenlabs' | '' | null) ?? '';
+			formOpenaiVoice = tts.openai.voice;
+			formOpenaiModel = tts.openai.model;
+			formElevenVoiceId = tts.elevenlabs.voiceId ?? '';
+			formElevenModel = tts.elevenlabs.model;
 		} catch (e: any) {
 			error = e?.message || 'Failed to load voice settings';
 		} finally {
@@ -66,23 +66,23 @@
 	onMount(loadState);
 
 	async function save() {
-		if (!state) return;
+		if (!tts) return;
 		saving = true;
 		error = null;
 		try {
 			const body: Record<string, unknown> = { provider: formProvider };
 			const openai: Record<string, string> = {};
 			if (formOpenaiKey.trim().length > 0) openai.apiKey = formOpenaiKey.trim();
-			if (formOpenaiVoice !== state.openai.voice) openai.voice = formOpenaiVoice;
-			if (formOpenaiModel !== state.openai.model) openai.model = formOpenaiModel;
+			if (formOpenaiVoice !== tts.openai.voice) openai.voice = formOpenaiVoice;
+			if (formOpenaiModel !== tts.openai.model) openai.model = formOpenaiModel;
 			if (Object.keys(openai).length > 0) body.openai = openai;
 
 			const elevenlabs: Record<string, string> = {};
 			if (formElevenKey.trim().length > 0) elevenlabs.apiKey = formElevenKey.trim();
-			if (formElevenVoiceId.trim() !== (state.elevenlabs.voiceId ?? '')) {
+			if (formElevenVoiceId.trim() !== (tts.elevenlabs.voiceId ?? '')) {
 				elevenlabs.voiceId = formElevenVoiceId.trim();
 			}
-			if (formElevenModel !== state.elevenlabs.model) elevenlabs.model = formElevenModel;
+			if (formElevenModel !== tts.elevenlabs.model) elevenlabs.model = formElevenModel;
 			if (Object.keys(elevenlabs).length > 0) body.elevenlabs = elevenlabs;
 
 			const res = await api('/portal/settings/tts', {
@@ -143,7 +143,7 @@
 
 	{#if loading}
 		<div class="text-[0.7rem] text-[var(--color-text-tertiary)]">Loading…</div>
-	{:else if !state}
+	{:else if !tts}
 		<div class="text-[0.7rem] text-red-400">{error || 'Failed to load'}</div>
 	{:else}
 		<p class="text-[0.7rem] text-[var(--color-text-tertiary)] mb-4">
@@ -178,14 +178,14 @@
 				<div>
 					<label class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">
 						OpenAI API key
-						{#if state.openai.hasKey}
+						{#if tts.openai.hasKey}
 							<span class="ml-2 text-[var(--color-accent)]">configured ✓</span>
 						{/if}
 					</label>
 					<input
 						type="password"
 						bind:value={formOpenaiKey}
-						placeholder={state.openai.hasKey ? '••••••••• (leave blank to keep)' : 'sk-…'}
+						placeholder={tts.openai.hasKey ? '••••••••• (leave blank to keep)' : 'sk-…'}
 						autocomplete="off"
 						data-1p-ignore
 						class="w-full px-3 py-1.5 text-sm bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)]"
@@ -195,7 +195,7 @@
 				<div>
 					<label class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-2">Voice</label>
 					<div class="space-y-1.5">
-						{#each state.openai.voices as v (v.id)}
+						{#each tts.openai.voices as v (v.id)}
 							<label class="flex items-center gap-3 p-2 rounded-lg border border-[var(--color-border)] hover:border-[var(--color-accent)]/50 cursor-pointer transition-colors"
 								style:border-color={formOpenaiVoice === v.id ? 'var(--color-accent)' : ''}>
 								<input type="radio" bind:group={formOpenaiVoice} value={v.id} class="accent-[var(--color-accent)]" />
@@ -203,7 +203,7 @@
 									<div class="text-sm text-[var(--color-text-primary)]">{v.label}</div>
 									<div class="text-[0.62rem] text-[var(--color-text-tertiary)]">{v.description}</div>
 								</div>
-								{#if state.openai.hasKey && state.provider === 'openai'}
+								{#if tts.openai.hasKey && tts.provider === 'openai'}
 									<button
 										type="button"
 										onclick={(e) => { e.preventDefault(); preview(v.id); }}
@@ -225,7 +225,7 @@
 						bind:value={formOpenaiModel}
 						class="w-full px-3 py-1.5 text-sm bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)]"
 					>
-						{#each state.openai.models as m (m.id)}
+						{#each tts.openai.models as m (m.id)}
 							<option value={m.id}>{m.label} — {m.description}</option>
 						{/each}
 					</select>
@@ -239,14 +239,14 @@
 				<div>
 					<label class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">
 						ElevenLabs API key
-						{#if state.elevenlabs.hasKey}
+						{#if tts.elevenlabs.hasKey}
 							<span class="ml-2 text-[var(--color-accent)]">configured ✓</span>
 						{/if}
 					</label>
 					<input
 						type="password"
 						bind:value={formElevenKey}
-						placeholder={state.elevenlabs.hasKey ? '••••••••• (leave blank to keep)' : 'paste your ElevenLabs API key'}
+						placeholder={tts.elevenlabs.hasKey ? '••••••••• (leave blank to keep)' : 'paste your ElevenLabs API key'}
 						autocomplete="off"
 						data-1p-ignore
 						class="w-full px-3 py-1.5 text-sm bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)]"
@@ -274,17 +274,17 @@
 						bind:value={formElevenModel}
 						class="w-full px-3 py-1.5 text-sm bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)]"
 					>
-						{#each state.elevenlabs.models as m (m.id)}
+						{#each tts.elevenlabs.models as m (m.id)}
 							<option value={m.id}>{m.label} — {m.description}</option>
 						{/each}
 					</select>
 				</div>
 
-				{#if state.elevenlabs.hasKey && state.provider === 'elevenlabs' && state.elevenlabs.voiceId}
+				{#if tts.elevenlabs.hasKey && tts.provider === 'elevenlabs' && tts.elevenlabs.voiceId}
 					<div>
 						<button
 							type="button"
-							onclick={(e) => { e.preventDefault(); preview(state!.elevenlabs.voiceId!); }}
+							onclick={(e) => { e.preventDefault(); preview(tts!.elevenlabs.voiceId!); }}
 							disabled={previewLoadingId !== null}
 							class="text-[0.7rem] px-3 py-1.5 border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40 cursor-pointer"
 						>
@@ -308,8 +308,8 @@
 				{saving ? 'Saving…' : 'Save'}
 			</button>
 			<span class="text-[0.62rem] text-[var(--color-text-tertiary)]">
-				{#if state.enabled}
-					TTS active — provider: <span class="text-[var(--color-accent)]">{state.provider}</span>
+				{#if tts.enabled}
+					TTS active — provider: <span class="text-[var(--color-accent)]">{tts.provider}</span>
 				{:else}
 					TTS not active — pick a provider and add an API key
 				{/if}

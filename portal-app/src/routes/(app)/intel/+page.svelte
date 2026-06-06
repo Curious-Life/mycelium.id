@@ -453,7 +453,9 @@
 		try {
 			// Load TopoJSON data + converter from local npm packages (no CDN)
 			const topoMod = await import('world-atlas/countries-110m.json');
-			const topoData = topoMod.default;
+			// world-atlas ships untyped TopoJSON; cast to escape the JSON-module's
+			// widened `type: string` (topojson expects the literal "Topology").
+			const topoData = topoMod.default as any;
 			geoJsonCache = topojson.feature(topoData, topoData.objects.countries);
 
 			// Fix antimeridian crossing (Russia, Fiji, etc.)

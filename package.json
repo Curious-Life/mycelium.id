@@ -108,6 +108,7 @@
     "verify:nav": "node scripts/verify-nav.mjs",
     "portal:install": "npm --prefix portal-app install",
     "portal:build": "npm --prefix portal-app run build",
+    "portal:check": "npm --prefix portal-app run check",
     "portal:dev": "npm --prefix portal-app run dev",
     "start:http": "node src/index.js --http",
     "start:enrich": "node src/index.js --enrich",
