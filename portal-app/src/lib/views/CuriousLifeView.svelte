@@ -565,7 +565,7 @@
 							{#each HARMONIC_METRICS as mk}<option value={mk}>{mk.replace(/_/g, ' ')}</option>{/each}
 						</select>
 					</div>
-					{#if rhythmSeriesVals.some((v) => v != null)}
+					{#if rhythmSeriesVals.some((v: unknown) => v != null)}
 						<TimeSeries points={rhythmSeriesVals} labels={rhythmSeriesLabels} color={accentVar.amethyst} height={150} />
 						<p class="muted sm">{rhythmMetric.replace(/_/g, ' ')} across {rhythmSeriesLabels.length} {gran} windows. Gaps are windows it couldn't be computed for.</p>
 					{:else}

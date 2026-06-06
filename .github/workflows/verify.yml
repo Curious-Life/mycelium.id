@@ -57,3 +57,13 @@ jobs:
 
       - name: Run verify suite
         run: npm run verify
+
+      # Type-check the SvelteKit portal (svelte-check). Not part of `npm run
+      # verify` (that's the backend suite) and previously ungated — which let
+      # frontend type errors accumulate. svelte-check exits non-zero on errors
+      # only (a11y warnings don't fail the gate).
+      - name: Install portal-app dependencies
+        run: npm --prefix portal-app ci
+
+      - name: Type-check portal-app
+        run: npm run portal:check

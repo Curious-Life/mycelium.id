@@ -128,10 +128,14 @@
 	// the open doc); list-channel disconnect is silent recovery.
 	let listConnectionState = $state<LiveConnectionState>('connecting');
 
-	onMount(async () => {
-		await Promise.all([loadDocuments(), loadFolders()]);
-		loading = false;
-		prevFolderId = activeFolderId;
+	onMount(() => {
+		// Initial load is fire-and-forget — the listeners below don't depend on
+		// it, so they attach synchronously (onMount must return its cleanup
+		// synchronously; an async callback can't).
+		void Promise.all([loadDocuments(), loadFolders()]).then(() => {
+			loading = false;
+			prevFolderId = activeFolderId;
+		});
 
 		// Reload after drag-and-drop move
 		function handleDocMoved() {

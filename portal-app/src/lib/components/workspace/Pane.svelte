@@ -49,7 +49,7 @@
 			{@const isActive = tab.id === pane.activeTabId}
 			<div class="tab-host" class:active={isActive} aria-hidden={!isActive}>
 				{#if Comp}
-					<Comp {...tab.params} active={isActive} setParams={(p) => workspace.setTabParams(tab.id, p)} />
+					<Comp {...tab.params} active={isActive} setParams={(p: Record<string, unknown>) => workspace.setTabParams(tab.id, p)} />
 				{:else}
 					<div class="tab-loading"><div class="spinner"></div></div>
 				{/if}
