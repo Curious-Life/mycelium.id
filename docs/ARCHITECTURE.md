@@ -236,3 +236,13 @@ cert side-effect; a fail-closed `POST /v1/stripe/webhook` (raw-body HMAC verify)
 "generate mindscape" trigger + chronicle narration are also **built** — see the
 component table.) See
 [`V1-BUILD-SPEC.md`](V1-BUILD-SPEC.md) §"What's left".
+
+**Harness Connect — "pick your harness" surface** (`DESIGN-harness-connect-2026-06-06`):
+a curated card menu over the two doors (North memory `:4711/mcp`, South model `:4711/v1`)
+so both UI users (click) and devs (copy) can connect *any* agent harness. As-built:
+`portal-app/.../settings/HarnessPickerSection.svelte` (Settings card, above
+`ConnectYourAISection`) + per-harness recipes in `docs/HARNESS-RECIPES.md` (Mycelium-native ·
+Claude Desktop/Code · opencode · openclaw · hermes-agent · custom), config keys verified
+against each project's docs. openclaw carries the scam-safety note. **UI + docs only — no
+new backend, no auth change** (reuses the shipped static-bearer + OAuth + `:4711/v1` gateway);
+remote stays "coming soon" until the relay is live. `verify:harness-connect` GO (8 checks).
