@@ -123,6 +123,15 @@ export function createConnectionsNamespace(deps) {
     const wf = await wfRes.json();
     const fedLink = wf.links?.find((l) => l.rel?.includes('federation'));
     if (!fedLink?.href) throw new Error('No federation endpoint');
+    // Bind the endpoint to the WebFinger domain: a peer must not be able to point
+    // our SIGNED POST at an unrelated host (confused-deputy SSRF). https-only,
+    // host must equal the domain or be a subdomain of it.
+    let u;
+    try { u = new URL(fedLink.href); } catch { throw new Error('Invalid federation endpoint'); }
+    if (u.protocol !== 'https:') throw new Error('federation endpoint must be https');
+    if (u.hostname !== remoteDomain && !u.hostname.endsWith(`.${remoteDomain}`)) {
+      throw new Error('federation endpoint host does not match the instance domain');
+    }
     return fedLink.href;
   }
 
@@ -355,6 +364,10 @@ export function createConnectionsNamespace(deps) {
           const endpoint = await resolveFederationEndpoint(row.remote_instance, row.remote_user_handle);
           // include our own public bio so the peer can render us in their list
           const me = (await d1Query(`SELECT handle, signature FROM user_profiles WHERE user_id = ?`, [userId])).results?.[0] || {};
+          const respProfile = { signature: me.signature ?? null };
+          // §7 tripwire on THIS outbound path too (parity with requestRemote) —
+          // never federate a vector/embedding field, even via a future regression.
+          if (hasVectorKey(respProfile)) throw new Error('refusing to federate a vector/embedding field (CLAUDE.md §7)');
           await signedFederationPost(endpoint, 'connect-response', {
             $type: 'social.mycelium.connect-response.v1',
             from_handle: me.handle || userId,
@@ -364,7 +377,7 @@ export function createConnectionsNamespace(deps) {
             action: 'accept',
             nonce: randomUUID(),
             ts: Date.now(),
-            profile: { signature: me.signature ?? null },
+            profile: respProfile,
           });
         } catch (e) {
           console.warn(`[federation] connect-response POST failed: ${e.message}`);

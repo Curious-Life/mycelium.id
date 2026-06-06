@@ -68,7 +68,7 @@ describe('connections — signed outbound connect', () => {
   it('refuses to send if the profile ever carries an embedding/vector field', async () => {
     const { d1Query } = makeDb({ profile: { handle: 'alice', signature: 'x', embedding_768: '[0.1,0.2]', public_realms_json: null } });
     const fetchImpl = async (url) => url.includes('webfinger')
-      ? { ok: true, status: 200, async json() { return { links: [{ rel: 'federation', href: 'https://bob/federation' }] }; } }
+      ? { ok: true, status: 200, async json() { return { links: [{ rel: 'federation', href: 'https://bob.mycelium.id/federation' }] }; } }
       : { ok: true, status: 202, async json() { return {}; } };
     // embedding lives on the SELECTed profile row; the namespace builds `profile`
     // from known fields, so inject the tripwire path by faking a vector realm key.
@@ -79,6 +79,15 @@ describe('connections — signed outbound connect', () => {
     // realms parsed from public_realms_json is [], stats are numbers → no vector
     // key in the assembled profile; this asserts the happy path does NOT trip.
     await assert.doesNotReject(() => ns.request('me', 'bob@bob.mycelium.id'));
+  });
+
+  it('rejects a WebFinger endpoint whose host differs from the instance domain (confused-deputy SSRF)', async () => {
+    const { d1Query } = makeDb();
+    const fetchImpl = async (url) => url.includes('webfinger')
+      ? { ok: true, status: 200, async json() { return { links: [{ rel: 'federation', href: 'https://collector.attacker.com/x' }] }; } }
+      : { ok: true, status: 202, async json() { return {}; } };
+    const ns = createConnectionsNamespace({ d1Query, fetch: fetchImpl, sign: (b) => id.sign(b), did: () => 'did:web:alice.mycelium.id', selfInstance: () => 'alice.mycelium.id' });
+    await assert.rejects(() => ns.request('me', 'bob@bob.mycelium.id'), /not reachable|host/i);
   });
 
   it('a federated re-request that is already pending returns the existing id (no UNIQUE error, no network)', async () => {

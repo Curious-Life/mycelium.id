@@ -453,6 +453,11 @@ export function portalCompatRouter({ db, userId }) {
       const role = ['member', 'contributor'].includes(req.body?.role) ? req.body.role : 'member';
       if (!granteeId) return fail(res, 400, 'granteeId required');
       if (granteeId === userId) return fail(res, 400, 'cannot share with yourself');
+      // Grantee must be an ACCEPTED connection — don't let an arbitrary id be
+      // wired into a space's access list (defense-in-depth; the UI already only
+      // offers connections).
+      const conns = await db.connections.list(userId);
+      if (!conns.some((c) => c.other_user_id === granteeId)) return fail(res, 400, 'grantee must be an accepted connection');
       await db.spaceAccess.grant(id, granteeId, role, userId);
       ok(res, { ok: true });
     } catch { fail(res, 500, 'could not share space'); }

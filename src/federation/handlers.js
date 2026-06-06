@@ -89,6 +89,7 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
     async connect({ payload, headers = {}, ip } = {}) {
       const v = await verify({ payload, headers, ip });
       if (!v.ok) return { status: v.status, body: v.body };
+      if (payload.$type !== 'social.mycelium.connect-request.v1') return { status: 400, body: { error: 'unexpected $type' } };
       try {
         await db.connections.receiveRemote({
           fromHandle: payload.from_handle,
@@ -108,6 +109,7 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
     async connectResponse({ payload, headers = {}, ip } = {}) {
       const v = await verify({ payload, headers, ip });
       if (!v.ok) return { status: v.status, body: v.body };
+      if (payload.$type !== 'social.mycelium.connect-response.v1') return { status: 400, body: { error: 'unexpected $type' } };
       try {
         await db.connections.receiveResponse({
           fromHandle: payload.from_handle,

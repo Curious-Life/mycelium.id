@@ -45,8 +45,11 @@ async function main() {
   const systemKey = await importMasterKey(crypto.randomBytes(32).toString('hex'));
   const { db, close } = getDb({ dbPath: join(dir, 'v.db'), userKey, systemKey });
 
-  // Seed bob as a real local user so the members JOIN renders a name.
+  // Seed bob as a real local user + profile + an ACCEPTED connection to owner,
+  // so the share grant (which now requires an accepted connection) succeeds.
   await db._base.d1Query(`INSERT INTO users (id, display_name, type) VALUES ('bob', 'Bob', 'human')`, []);
+  await db._base.d1Query(`INSERT INTO user_profiles (user_id, handle, display_name, member_since) VALUES ('bob', 'bob', 'Bob', datetime('now'))`, []);
+  await db._base.d1Query(`INSERT INTO connections (id, user_a, user_b, initiated_by, status, accepted_at, created_at) VALUES ('conn-ob', 'bob', 'owner', 'bob', 'accepted', datetime('now'), datetime('now'))`, []);
   // Seed a tiny mindscape cluster hierarchy (Realm → Theme → Territory) for the
   // cluster-sharing checks.
   await db._base.d1Query(`INSERT INTO realms (id, realm_id, user_id, name, essence, territory_count) VALUES ('r1', 1, 'owner', 'Systems', 'how things connect', 2)`, []);
@@ -76,7 +79,8 @@ async function main() {
   rec('owner adds + lists knowledge', (await call(owner.port, 'GET', `/portal/spaces/${sid}/knowledge`)).json.entries.length === 1);
 
   // share with bob (grant)
-  rec('owner grants bob member access', (await call(owner.port, 'POST', `/portal/spaces/${sid}/shares`, { granteeId: 'bob', role: 'member' })).status === 200);
+  rec('sharing with a NON-connection is rejected (defense-in-depth)', (await call(owner.port, 'POST', `/portal/spaces/${sid}/shares`, { granteeId: 'stranger', role: 'member' })).status === 400);
+  rec('owner grants bob (an accepted connection) member access', (await call(owner.port, 'POST', `/portal/spaces/${sid}/shares`, { granteeId: 'bob', role: 'member' })).status === 200);
   rec('bob appears in members', (await call(owner.port, 'GET', `/portal/spaces/${sid}/members`)).json.members.some((m) => m.user_id === 'bob'));
   rec('granted bob can now read the space', (await call(bob.port, 'GET', `/portal/spaces/${sid}`)).status === 200);
   rec('member bob CANNOT delete the space (needs creator) → 404', (await call(bob.port, 'DELETE', `/portal/spaces/${sid}`)).status === 404);
