@@ -18,6 +18,7 @@ import { authDbPath } from './paths.js';
 import { readRemoteConfig, resolveAuthSecret } from './remote/config.js';
 import { betterAuth } from 'better-auth';
 import { mcp, jwt } from 'better-auth/plugins';
+import { passkey } from '@better-auth/passkey';
 import { getMigrations } from 'better-auth/db/migration';
 
 /**
@@ -76,6 +77,18 @@ export function createAuth(opts = {}) {
       // 404s and clients (Claude) can't validate the token → "Authorization failed".
       // Serve the JWKS at the EXACT advertised path so discovery resolves.
       jwt({ jwks: { jwksPath: '/mcp/jwks' } }),
+      // Passkey (WebAuthn) authentication — Phase 5.3. The OFFICIAL @better-auth
+      // plugin (separate package, not in core better-auth). It issues NATIVE
+      // better-auth sessions, so the portal auth gate (require-vault-auth.js)
+      // accepts passkey logins with no change. rpID/origin are PER-BOX: in relay
+      // mode baseURL is https://<handle>.mycelium.id, so a credential is bound to
+      // that subdomain. Auth-only — V1 vault keys live server-side, so NO PRF/URK.
+      // Enrollment requires an existing session (operator-password login first).
+      passkey({
+        rpID: (() => { try { return new URL(baseURL).hostname; } catch { return 'localhost'; } })(),
+        rpName: 'Mycelium',
+        origin: baseURL,
+      }),
       mcp({
         loginPage: '/login',
         resource: `${baseURL}/mcp`,
