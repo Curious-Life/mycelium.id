@@ -16,12 +16,15 @@ import express from 'express';
 /**
  * @param {object} deps
  * @param {(req,res)=>any} deps.telegramSendHandler   from createTelegramChokepoint
+ * @param {(req,res)=>any} [deps.discordSendHandler]  from createDiscordChokepoint
  * @param {()=>object|null} deps.getActiveTurn
  * @param {string} [deps.jsonLimit]
  */
-export function createDaemonApp({ telegramSendHandler, getActiveTurn, jsonLimit = '1mb' }) {
-  if (typeof telegramSendHandler !== 'function') throw new TypeError('createDaemonApp: telegramSendHandler required');
+export function createDaemonApp({ telegramSendHandler, discordSendHandler, getActiveTurn, jsonLimit = '1mb' }) {
   if (typeof getActiveTurn !== 'function') throw new TypeError('createDaemonApp: getActiveTurn required');
+  if (typeof telegramSendHandler !== 'function' && typeof discordSendHandler !== 'function') {
+    throw new TypeError('createDaemonApp: at least one of telegramSendHandler / discordSendHandler required');
+  }
 
   const app = express();
   app.use(express.json({ limit: jsonLimit }));
@@ -34,7 +37,9 @@ export function createDaemonApp({ telegramSendHandler, getActiveTurn, jsonLimit 
     res.json(turn);
   });
 
-  app.post('/telegram/send', telegramSendHandler);
+  // The reply tool POSTs /{platform}/send based on the inbound turn's source.
+  if (typeof telegramSendHandler === 'function') app.post('/telegram/send', telegramSendHandler);
+  if (typeof discordSendHandler === 'function') app.post('/discord/send', discordSendHandler);
 
   // Liveness — never reveals config.
   app.get('/healthz', (_req, res) => res.json({ ok: true, service: 'channel-daemon' }));

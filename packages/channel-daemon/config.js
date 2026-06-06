@@ -9,6 +9,8 @@
 export function loadConfig(env = process.env) {
   const botToken = env.TELEGRAM_BOT_TOKEN || '';
   const ownerTelegramId = env.OWNER_TELEGRAM_ID || '';
+  const discordBotToken = env.DISCORD_BOT_TOKEN || '';
+  const ownerDiscordId = env.OWNER_DISCORD_ID || '';
   const vaultBaseUrl =
     env.MYCELIUM_API_URL
     || `http://${env.MYCELIUM_REST_HOST || '127.0.0.1'}:${env.MYCELIUM_REST_PORT || 8787}`;
@@ -34,7 +36,7 @@ export function loadConfig(env = process.env) {
   const rateLimitWindowMs = Number(env.CHANNEL_RATELIMIT_WINDOW_MS || 60000);
 
   return {
-    botToken, ownerTelegramId, vaultBaseUrl, host, port, agentId, selfUrl,
+    botToken, ownerTelegramId, discordBotToken, ownerDiscordId, vaultBaseUrl, host, port, agentId, selfUrl,
     anthropicApiKey, mcpMode, mcpUrl, mcpBearer, mcpStdioEntry, model,
     coalesceWindowMs, rateLimitMax, rateLimitWindowMs,
   };
@@ -53,6 +55,8 @@ export function applyChannelConfigToEnv(cc, env = process.env) {
   const put = (k, v) => { if (v != null && v !== '') env[k] = String(v); };
   put('TELEGRAM_BOT_TOKEN', cc.telegram?.botToken);
   put('OWNER_TELEGRAM_ID', cc.telegram?.ownerId);
+  put('DISCORD_BOT_TOKEN', cc.discord?.botToken);
+  put('OWNER_DISCORD_ID', cc.discord?.ownerId);
   put('ANTHROPIC_API_KEY', cc.agent?.anthropicApiKey);
   put('CHANNEL_AGENT_MODEL', cc.agent?.model);
   put('TTS_PROVIDER', cc.tts?.provider);
@@ -64,12 +68,13 @@ export function applyChannelConfigToEnv(cc, env = process.env) {
   put('ELEVENLABS_MODEL_ID', cc.tts?.elevenModel);
 }
 
-/** Throw a clear error if a required secret is missing (fail-closed boot). */
+/** Throw a clear error if no platform is configured (fail-closed boot). */
 export function assertEgressConfig(cfg) {
-  if (!cfg.botToken) {
-    throw new Error('channel-daemon: TELEGRAM_BOT_TOKEN is required for outbound egress');
+  const telegramReady = cfg.botToken && cfg.ownerTelegramId;
+  const discordReady = cfg.discordBotToken && cfg.ownerDiscordId;
+  if (!telegramReady && !discordReady) {
+    throw new Error('channel-daemon: configure at least one platform — TELEGRAM_BOT_TOKEN + OWNER_TELEGRAM_ID, or DISCORD_BOT_TOKEN + OWNER_DISCORD_ID (set them in Settings → Channels).');
   }
-  if (!cfg.ownerTelegramId) {
-    throw new Error('channel-daemon: OWNER_TELEGRAM_ID is required (the operator chat authorized for delivery in Phase 0)');
-  }
+  if (cfg.botToken && !cfg.ownerTelegramId) throw new Error('channel-daemon: OWNER_TELEGRAM_ID required when TELEGRAM_BOT_TOKEN is set');
+  if (cfg.discordBotToken && !cfg.ownerDiscordId) throw new Error('channel-daemon: OWNER_DISCORD_ID required when DISCORD_BOT_TOKEN is set');
 }

@@ -25,6 +25,7 @@ export function portalChannelsRouter({ db, userId }) {
       res.json({
         enabled: (await getS('CHANNEL_ENABLED')) === '1',
         telegram: { hasToken: await hasS('TELEGRAM_BOT_TOKEN'), ownerId: (await getS('OWNER_TELEGRAM_ID')) || null },
+        discord: { hasToken: await hasS('DISCORD_BOT_TOKEN'), ownerId: (await getS('OWNER_DISCORD_ID')) || null },
         agent: { hasKey: await hasS('ANTHROPIC_API_KEY'), model: (await getS('CHANNEL_AGENT_MODEL')) || null },
         groups: (await db.telegramGroups.list(userId)).map((g) => ({ id: g.id, title: g.title || null })),
       });
@@ -35,13 +36,20 @@ export function portalChannelsRouter({ db, userId }) {
   // the body but empty are removed; absent keys are left untouched.
   router.put('/channels', async (req, res) => {
     try {
-      const { enabled, telegram, agent } = req.body || {};
+      const { enabled, telegram, discord, agent } = req.body || {};
       if (enabled !== undefined) await setS('CHANNEL_ENABLED', enabled ? '1' : '0');
       if (telegram && typeof telegram === 'object') {
         if (telegram.token) await setS('TELEGRAM_BOT_TOKEN', String(telegram.token));
         if (telegram.ownerId !== undefined) {
           const v = String(telegram.ownerId).trim();
           if (v) await setS('OWNER_TELEGRAM_ID', v); else await delS('OWNER_TELEGRAM_ID');
+        }
+      }
+      if (discord && typeof discord === 'object') {
+        if (discord.token) await setS('DISCORD_BOT_TOKEN', String(discord.token));
+        if (discord.ownerId !== undefined) {
+          const v = String(discord.ownerId).trim();
+          if (v) await setS('OWNER_DISCORD_ID', v); else await delS('OWNER_DISCORD_ID');
         }
       }
       if (agent && typeof agent === 'object') {

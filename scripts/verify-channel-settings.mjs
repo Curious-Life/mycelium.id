@@ -22,6 +22,7 @@ const USER = 'verify-user';
 const TOKEN = '7654321:FAKE-bot-token-value-should-never-leak';
 const AKEY = 'sk-ant-FAKE-assistant-key-never-leak';
 const OKEY = 'sk-FAKE-openai-tts-key-never-leak';
+const DTOKEN = 'FAKE.discord.bot.token-never-leak';
 const GROUP = '-100424242';
 process.env.MYCELIUM_USER_ID = USER;
 
@@ -45,11 +46,11 @@ try {
   rec('CS1. GET /portal/channels initial → empty/disabled', r.status === 200 && r.json.enabled === false && r.json.telegram.hasToken === false && Array.isArray(r.json.groups) && r.json.groups.length === 0, `status=${r.status}`);
 
   // ── channels: PUT then GET ────────────────────────────────────────────────
-  r = await send('/api/v1/portal/channels', 'PUT', { enabled: true, telegram: { token: TOKEN, ownerId: '555' }, agent: { apiKey: AKEY, model: 'claude-sonnet-4-6' } });
+  r = await send('/api/v1/portal/channels', 'PUT', { enabled: true, telegram: { token: TOKEN, ownerId: '555' }, discord: { token: DTOKEN, ownerId: '777' }, agent: { apiKey: AKEY, model: 'claude-sonnet-4-6' } });
   rec('CS2. PUT /portal/channels → ok', r.status === 200 && r.json.ok === true);
   r = await get('/api/v1/portal/channels');
-  rec('CS3. GET reflects saved state (hasToken, ownerId, hasKey, model)', r.json.enabled === true && r.json.telegram.hasToken === true && r.json.telegram.ownerId === '555' && r.json.agent.hasKey === true && r.json.agent.model === 'claude-sonnet-4-6');
-  rec('CS4. ZERO-LEAK — channels GET never returns token/key values', !JSON.stringify(r.json).includes(TOKEN) && !JSON.stringify(r.json).includes(AKEY));
+  rec('CS3. GET reflects saved state (telegram + discord + agent)', r.json.enabled === true && r.json.telegram.hasToken === true && r.json.telegram.ownerId === '555' && r.json.discord.hasToken === true && r.json.discord.ownerId === '777' && r.json.agent.hasKey === true && r.json.agent.model === 'claude-sonnet-4-6');
+  rec('CS4. ZERO-LEAK — channels GET never returns token/key values', !JSON.stringify(r.json).includes(TOKEN) && !JSON.stringify(r.json).includes(DTOKEN) && !JSON.stringify(r.json).includes(AKEY));
 
   // ── tts: PUT then GET ─────────────────────────────────────────────────────
   r = await send('/api/v1/portal/settings/tts', 'PUT', { provider: 'openai', openai: { apiKey: OKEY, voice: 'sage', model: 'tts-1-hd' } });
@@ -62,14 +63,14 @@ try {
   // ── internal channel-config: DECRYPTED for the daemon ─────────────────────
   r = await get('/api/v1/internal/channel-config');
   const cc = r.json;
-  rec('CS9. channel-config returns decrypted telegram token + owner', cc.telegram.botToken === TOKEN && cc.telegram.ownerId === '555', `tokMatch=${cc?.telegram?.botToken === TOKEN}`);
+  rec('CS9. channel-config returns decrypted telegram + discord tokens', cc.telegram.botToken === TOKEN && cc.telegram.ownerId === '555' && cc.discord.botToken === DTOKEN && cc.discord.ownerId === '777', `tg=${cc?.telegram?.botToken === TOKEN} dc=${cc?.discord?.botToken === DTOKEN}`);
   rec('CS10. channel-config returns decrypted agent key + tts key', cc.agent.anthropicApiKey === AKEY && cc.tts.openaiApiKey === OKEY && cc.tts.provider === 'openai' && cc.tts.openaiVoice === 'sage');
   rec('CS11. channel-config enabled flag', cc.enabled === true);
 
   // ── daemon hydration ──────────────────────────────────────────────────────
   const env = {};
   applyChannelConfigToEnv(cc, env);
-  rec('CS12. applyChannelConfigToEnv hydrates env exactly', env.TELEGRAM_BOT_TOKEN === TOKEN && env.OWNER_TELEGRAM_ID === '555' && env.ANTHROPIC_API_KEY === AKEY && env.OPENAI_API_KEY === OKEY && env.TTS_PROVIDER === 'openai' && env.OPENAI_TTS_VOICE === 'sage');
+  rec('CS12. applyChannelConfigToEnv hydrates env exactly (telegram+discord+tts)', env.TELEGRAM_BOT_TOKEN === TOKEN && env.OWNER_TELEGRAM_ID === '555' && env.DISCORD_BOT_TOKEN === DTOKEN && env.OWNER_DISCORD_ID === '777' && env.ANTHROPIC_API_KEY === AKEY && env.OPENAI_API_KEY === OKEY && env.TTS_PROVIDER === 'openai' && env.OPENAI_TTS_VOICE === 'sage');
 
   // ── groups: authorize → list → revoke ─────────────────────────────────────
   await vault.db.telegramGroups.authorize(GROUP, 'Team', null, USER);

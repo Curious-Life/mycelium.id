@@ -20,7 +20,7 @@ export function createVoicePipeline({ sendVoice, agentId, logPrefix = 'channel-d
     isEnabled: () => tts.isEnabled(),
 
     /** Synthesize + upload voice notes for `text`. Never throws. */
-    async deliver({ chatId, text, replyToMessageId }) {
+    async deliver({ target, text, replyToMessageId }) {
       if (!tts.isEnabled()) return { enabled: false, voiceSent: 0, voiceTotal: 0 };
       let voiceSent = 0;
       let voiceTotal = 0;
@@ -33,7 +33,7 @@ export function createVoicePipeline({ sendVoice, agentId, logPrefix = 'channel-d
           }
           try {
             // reply-to only on the first voice note (matches the text path)
-            await sendVoice({ chatId, filePath: chunk.path, replyToMessageId: chunk.index === 0 ? replyToMessageId : undefined });
+            await sendVoice({ target, filePath: chunk.path, replyToMessageId: chunk.index === 0 ? replyToMessageId : undefined });
             voiceSent++;
           } catch (e) {
             console.error(`[${logPrefix}] voice upload failed (chunk ${chunk.index + 1}/${chunk.total}): ${e.message}`);

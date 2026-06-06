@@ -40,10 +40,17 @@ Phase 3 hardening (platform-agnostic — Discord reuses these):
   `commands.js`); groups respond only after `/allow` (fail-closed); vault
   `telegram_groups` via the internal router.
 
+Discord (the reuse — built): egress over the shared `egress/send-handler.js` core
+(`discord-api.js` REST + `discord-chokepoint.js` adapter), voice via REST
+multipart (`synthesizeForDiscord`), inbound gateway via **discord.js** (optional
+dep, lazy — `npm i discord.js`; enable the privileged MESSAGE_CONTENT intent).
+Set `DISCORD_BOT_TOKEN` + `OWNER_DISCORD_ID` in Settings → Channels. At least one
+platform (Telegram or Discord) must be configured.
+
 Not yet built:
-- Discord + WhatsApp transports (reuse the chokepoint/lane/runtime/voice spine).
-  The local **ollama** runtime backend is a declared slot (selectRuntime returns
-  null until it lands).
+- WhatsApp transport (same spine), Discord channel allowlist + threads. The local
+  **ollama** runtime backend is a declared slot (selectRuntime returns null until
+  it lands).
 
 ### Enabling two-way replies
 

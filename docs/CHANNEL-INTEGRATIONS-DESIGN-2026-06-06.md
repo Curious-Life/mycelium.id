@@ -277,9 +277,29 @@ Also built (2026-06-06, second hardening pass):
   outbound authority for groups consults `telegram_groups`. Verified `verify:channel-groups` (14/14: commands DI +
   inbound routing + real-vault endpoint round-trip).
 
-Deferred → Discord (the planned reuse): Discord transport + egress on the SAME chokepoint/lane/runtime/dedup/
-coalescer/ratelimit/voice spine (extract the chokepoint gate-sequence into a platform-agnostic core + thin adapter,
-canonical send-handler shape) → then WhatsApp. Local **ollama** runtime backend still a declared slot.
+### Discord — ✅ BUILT (2026-06-06, the planned reuse)
+The chokepoint refactor + a second platform, proving the spine generalizes:
+- **Refactor:** extracted the gate sequence into `egress/send-handler.js` (platform-agnostic core, canonical
+  send-handler shape) driven by a per-platform **adapter** `{platform, contentField, targetField, sourceModule,
+  inferKind, send}`. `chokepoint.js` (Telegram) + `discord-chokepoint.js` are now ~15-line adapters over it.
+  Behaviour-preserving — all 8 prior Telegram gates stayed GO through the refactor.
+- **Egress (raw fetch, CI-testable):** `discord-api.js` — `POST /channels/{id}/messages` (Bot token,
+  `message_reference` for replies, 2000-char chunking) + voice via REST multipart (`flags: 8192` IS_VOICE_MESSAGE +
+  waveform/duration_secs — the proven canonical path; the web sweep's "not feasible" was wrong). `discord-voice.js`
+  uses `synthesizeForDiscord` (single buffer).
+- **Inbound (gateway):** `transport/discord-gateway.js` lazy-imports **discord.js** (optional dep — only the
+  stateful WS gateway uses it; egress stays raw fetch). Intents: Guilds + GuildMessages + **MessageContent**
+  (privileged) + DirectMessages. `transport/discord-normalize.js` + `discord-inbound.js` (owner-only auth,
+  `dc-<msg>-<chan>` capture, bot-loop guard). Reused unchanged: lane, runtime, dedup, coalescer, ratelimit,
+  vault-client, inbound-context, and the `reply` tool (it platform-switches on `turn.source`).
+- **Authority:** Discord sends are allowed to the active inbound turn's channel (reply path); cross-channel is
+  fail-closed (allowlist deferred). **Settings:** Channels pane + `channel-config` + hydration extended for
+  `DISCORD_BOT_TOKEN`/`OWNER_DISCORD_ID`; `assertEgressConfig` now needs ≥1 platform.
+- **Verified:** `verify:channel-discord` (18/18 — normalize, REST shapes, egress gates via the shared core, inbound
+  auth) + `verify:channel-settings` extended + full suite (12 gates) + `portal:build` GO. Host-verified only: live
+  Discord gateway (needs discord.js + token + MESSAGE_CONTENT enabled) + real voice upload.
+
+Deferred: WhatsApp (same spine), Discord channel allowlist + threads, local **ollama** runtime backend.
 
 ---
 

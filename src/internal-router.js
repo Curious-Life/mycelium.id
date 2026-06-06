@@ -129,6 +129,7 @@ export function internalRouter({ db, userId }) {
       res.json({
         enabled: (await g('CHANNEL_ENABLED')) === '1',
         telegram: { botToken: (await g('TELEGRAM_BOT_TOKEN')) || null, ownerId: (await g('OWNER_TELEGRAM_ID')) || null },
+        discord: { botToken: (await g('DISCORD_BOT_TOKEN')) || null, ownerId: (await g('OWNER_DISCORD_ID')) || null },
         agent: { anthropicApiKey: (await g('ANTHROPIC_API_KEY')) || null, model: (await g('CHANNEL_AGENT_MODEL')) || null },
         tts: {
           provider: (await g('TTS_PROVIDER')) || null,

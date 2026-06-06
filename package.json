@@ -120,6 +120,7 @@
     "verify:channel-tts": "node scripts/verify-channel-tts.mjs",
     "verify:channel-groups": "node scripts/verify-channel-groups.mjs",
     "verify:channel-settings": "node scripts/verify-channel-settings.mjs",
+    "verify:channel-discord": "node scripts/verify-channel-discord.mjs",
     "smoke:telegram-live": "node scripts/smoke-telegram-live.mjs",
     "smoke:agent-live": "node scripts/smoke-agent-live.mjs",
     "verify:enqueue": "node scripts/verify-enqueue.mjs",
@@ -138,6 +139,7 @@
     "jszip": "^3.10.1"
   },
   "optionalDependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.1.0"
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "discord.js": "^14.16.0"
   }
 }

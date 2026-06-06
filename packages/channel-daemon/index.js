@@ -1,37 +1,37 @@
 /**
- * Channel-daemon entrypoint (Phase 0) — wires the real Telegram Bot API + the
- * vault HTTP client into the egress chokepoint and starts the loopback server.
+ * Channel-daemon entrypoint — wires the configured platforms (Telegram and/or
+ * Discord) into the shared egress chokepoint + agent turn pipeline and starts the
+ * loopback server. Each platform is built only when its token is configured; both
+ * share one runtime/lane/dedup/rate-limit and the active-turn registry.
  *
- * Phase 0 is OUTBOUND only: it stands up the `/telegram/send` chokepoint and the
- * `/internal/inbound-context/current` endpoint so the deferred `reply` MCP tool
- * resolves end-to-end. The inbound poll/webhook listener + the agent turn land
- * in Phase 1 / Phase 2.
- *
- * Run: TELEGRAM_BOT_TOKEN=… OWNER_TELEGRAM_ID=… node packages/channel-daemon/index.js
+ * Config comes from the vault (portal Settings → Channels, hydrated over loopback)
+ * with env as the fallback. Run: node packages/channel-daemon/index.js
  */
 import { loadConfig, assertEgressConfig, applyChannelConfigToEnv } from './config.js';
-import { createTelegramApi } from './telegram-api.js';
 import { createVaultClient } from './vault-client.js';
 import { createEnvelopeDedup } from './dedup.js';
-import { createTelegramChokepoint } from './chokepoint.js';
+import { createRateLimiter } from './ratelimit.js';
 import { createDaemonApp } from './server.js';
-import { createInboundHandler } from './inbound.js';
-import { createTelegramPoller } from './transport/telegram-poller.js';
 import { selectRuntime } from './agent/runtime.js';
 import { createLane } from './agent/lane.js';
 import { createCoalescer } from './transport/coalescer.js';
-import { createRateLimiter } from './ratelimit.js';
-import { createVoicePipeline } from './voice-pipeline.js';
-import { createCommandHandler } from './commands.js';
 import { getActiveTurn } from './inbound-context.js';
+// telegram
+import { createTelegramApi } from './telegram-api.js';
+import { createTelegramChokepoint } from './chokepoint.js';
+import { createVoicePipeline } from './voice-pipeline.js';
+import { createInboundHandler } from './inbound.js';
+import { createTelegramPoller } from './transport/telegram-poller.js';
+import { createCommandHandler } from './commands.js';
+// discord
+import { createDiscordApi } from './discord-api.js';
+import { createDiscordChokepoint } from './discord-chokepoint.js';
+import { createDiscordVoicePipeline } from './discord-voice.js';
+import { createDiscordInboundHandler } from './discord-inbound.js';
+import { createDiscordGateway } from './transport/discord-gateway.js';
 
-/**
- * Capture-only fallback when no runtime is configured (no BYOK key, no local
- * model): the inbound is still captured (in inbound.js, before runTurn) — this
- * just logs that no reply will be sent. Two-way is OFF, ingestion stays ON.
- */
 function captureOnlyRunTurn(turnCtx) {
-  console.log(`[channel-daemon] captured chat=${turnCtx.channelId}; two-way replies OFF (no inference configured)`);
+  console.log(`[channel-daemon] captured ${turnCtx.source} chat=${turnCtx.channelId}; two-way replies OFF (no inference configured)`);
 }
 
 /**
@@ -40,56 +40,17 @@ function captureOnlyRunTurn(turnCtx) {
  * @param {Function} [opts.runTurn]  override the turn handler (tests inject a fake)
  */
 export function buildDaemon(cfg, { runTurn } = {}) {
-  const telegram = createTelegramApi({ botToken: cfg.botToken });
   const vault = createVaultClient({ baseUrl: cfg.vaultBaseUrl });
   const dedup = createEnvelopeDedup();
-
-  // Phase 0 authority: the operator's own DM is deliverable via owner-bootstrap
-  // (the Phase 3 binding flow will register other chats). Any other target must
-  // have a delivery-enabled identity_channels row — checked in the vault,
-  // fail-closed.
-  async function checkAuthority({ kind, id }) {
-    if (cfg.ownerTelegramId && String(id) === String(cfg.ownerTelegramId)) {
-      return { allowed: true, reason: 'owner-bootstrap' };
-    }
-    if (kind === 'telegram-group') {
-      const g = await vault.getTelegramGroup(id);
-      if (g.authorized && g.active !== false) return { allowed: true, reason: 'group-authorized' };
-      return { allowed: false, reason: 'group-not-authorized' };
-    }
-    return vault.checkChannelAuthority({ kind, id });
-  }
-
   const rateLimit = createRateLimiter({ maxPerWindow: cfg.rateLimitMax, windowMs: cfg.rateLimitWindowMs });
-  // Voice (TTS) — harvested tts/ module + multipart sendVoice. Fail-soft: enabled
-  // only when a TTS provider is configured (OPENAI_API_KEY / ELEVENLABS_*).
-  const voicePipeline = createVoicePipeline({ sendVoice: (a) => telegram.sendVoice(a), agentId: cfg.agentId });
 
-  const telegramSendHandler = createTelegramChokepoint({
-    sendToTelegram: (a) => telegram.sendMessage(a),
-    recordEgress: (entry) => { vault.recordEgress(entry); },        // fire-and-forget
-    persistOutbound: (args) => { vault.captureMessage(args).catch((e) => console.error('[channel-daemon] outbound persist failed:', e.message)); },
-    checkAuthority,
-    dedup,
-    rateLimit,
-    voicePipeline,
-    getActiveTurn,
-    agentId: cfg.agentId,
-  });
-
-  const app = createDaemonApp({ telegramSendHandler, getActiveTurn });
-
-  // Phase 2: resolve the turn handler. A test may inject `runTurn`; otherwise
-  // select a runtime from config (BYOK key → Claude Agent SDK lane; none →
-  // capture-only). The lane serializes turns + owns the active-turn lifecycle.
+  // ── shared agent-turn pipeline (one runtime/lane for all platforms) ────────
   let effectiveRunTurn = runTurn;
   let lane = null;
   if (!effectiveRunTurn) {
     const runtime = selectRuntime(cfg);
     if (runtime) {
       lane = createLane({ runtime });
-      // Coalesce rapid inbound fragments into one turn (each fragment is still
-      // captured per-message upstream). 0 disables → one turn per message.
       if (cfg.coalesceWindowMs > 0) {
         const coalescer = createCoalescer({ windowMs: cfg.coalesceWindowMs, flush: (turnCtx, merged) => lane.runTurn(turnCtx, merged) });
         effectiveRunTurn = (turnCtx, msg) => { coalescer.push(turnCtx, msg); };
@@ -102,31 +63,69 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     }
   }
 
-  // Operator commands (/allow, /disallow, /channels) + group authorization.
-  // Command acks go back through this daemon's own chokepoint as trusted
-  // (system-template) sends, so they're audited + bypass the authority gate.
-  const sendReply = async ({ chatId, text, replyToMessageId }) => {
-    try {
-      await fetch(`${cfg.selfUrl}/telegram/send`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chatId, text, replyToMessageId, trusted: true }),
-      });
-    } catch (e) { console.error('[channel-daemon] command reply failed:', e.message); }
-  };
-  const commands = createCommandHandler({ vault, sendReply, ownerTelegramId: cfg.ownerTelegramId });
-  const isGroupAuthorized = async (gid) => { const g = await vault.getTelegramGroup(gid); return !!g.authorized && g.active !== false; };
+  const recordEgress = (entry) => { vault.recordEgress(entry); };
+  const persistOutbound = (args) => { vault.captureMessage(args).catch((e) => console.error('[channel-daemon] outbound persist failed:', e.message)); };
 
-  // Phase 1: inbound long-poll → (commands) → capture → runTurn.
-  const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized });
-  const poller = createTelegramPoller({ telegram, handleInbound });
+  let telegram = null, poller = null, telegramSendHandler;
+  let discord = null, gateway = null, discordSendHandler;
 
-  return { app, poller, telegram, lane, vault };
+  // ── Telegram ───────────────────────────────────────────────────────────────
+  if (cfg.botToken) {
+    telegram = createTelegramApi({ botToken: cfg.botToken });
+    const voicePipeline = createVoicePipeline({ sendVoice: ({ target, filePath, replyToMessageId }) => telegram.sendVoice({ chatId: target, filePath, replyToMessageId }), agentId: cfg.agentId });
+
+    async function checkTelegramAuthority({ kind, id }) {
+      if (cfg.ownerTelegramId && String(id) === String(cfg.ownerTelegramId)) return { allowed: true, reason: 'owner-bootstrap' };
+      if (kind === 'telegram-group') {
+        const g = await vault.getTelegramGroup(id);
+        return g.authorized && g.active !== false ? { allowed: true, reason: 'group-authorized' } : { allowed: false, reason: 'group-not-authorized' };
+      }
+      return vault.checkChannelAuthority({ kind, id });
+    }
+
+    telegramSendHandler = createTelegramChokepoint({
+      sendToTelegram: (a) => telegram.sendMessage(a), recordEgress, persistOutbound,
+      checkAuthority: checkTelegramAuthority, dedup, rateLimit, voicePipeline, getActiveTurn, agentId: cfg.agentId,
+    });
+
+    const sendReply = async ({ chatId, text, replyToMessageId }) => {
+      try { await fetch(`${cfg.selfUrl}/telegram/send`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chatId, text, replyToMessageId, trusted: true }) }); }
+      catch (e) { console.error('[channel-daemon] command reply failed:', e.message); }
+    };
+    const commands = createCommandHandler({ vault, sendReply, ownerTelegramId: cfg.ownerTelegramId });
+    const isGroupAuthorized = async (gid) => { const g = await vault.getTelegramGroup(gid); return !!g.authorized && g.active !== false; };
+    const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized });
+    poller = createTelegramPoller({ telegram, handleInbound });
+  }
+
+  // ── Discord ──────────────────────────────────────────────────────────────
+  if (cfg.discordBotToken) {
+    discord = createDiscordApi({ botToken: cfg.discordBotToken });
+    const discordVoice = createDiscordVoicePipeline({ sendVoice: (a) => discord.sendVoice(a), agentId: cfg.agentId });
+
+    // Discord authority: allow replying to the channel of the active inbound turn
+    // (the reply path); cross-channel sends are fail-closed (allowlist deferred).
+    async function checkDiscordAuthority({ id }) {
+      const turn = getActiveTurn();
+      if (turn && turn.source === 'discord' && String(turn.channelId) === String(id)) return { allowed: true, reason: 'reply-to-inbound' };
+      return { allowed: false, reason: 'discord-channel-not-authorized' };
+    }
+
+    discordSendHandler = createDiscordChokepoint({
+      sendToDiscord: (a) => discord.sendMessage(a), recordEgress, persistOutbound,
+      checkAuthority: checkDiscordAuthority, dedup, rateLimit, voicePipeline: discordVoice, getActiveTurn, agentId: cfg.agentId,
+    });
+
+    const handleDiscordInbound = createDiscordInboundHandler({ vault, ownerDiscordId: cfg.ownerDiscordId, runTurn: effectiveRunTurn });
+    gateway = createDiscordGateway({ botToken: cfg.discordBotToken, handleInbound: handleDiscordInbound });
+  }
+
+  const app = createDaemonApp({ telegramSendHandler, discordSendHandler, getActiveTurn });
+  return { app, poller, gateway, telegram, discord, lane, vault };
 }
 
 async function main() {
-  // Hydrate from vault-managed config (portal is authoritative) BEFORE loading
-  // cfg, so a token/key set in the UI takes effect without touching the env.
-  // Best-effort: if the vault is unreachable we fall back to the daemon's own env.
+  // Hydrate from vault-managed config (portal is authoritative) BEFORE loading cfg.
   let cfg = loadConfig();
   try {
     const cc = await createVaultClient({ baseUrl: cfg.vaultBaseUrl }).getChannelConfig();
@@ -134,39 +133,39 @@ async function main() {
   } catch (e) { console.error('[channel-daemon] vault config hydrate skipped:', e.message); }
 
   assertEgressConfig(cfg);
-  const { app, poller, telegram, lane, vault } = buildDaemon(cfg);
+  const { app, poller, gateway, telegram, discord, lane, vault } = buildDaemon(cfg);
 
-  // Validate the token up front so a bad token fails loud, not silently mid-poll.
-  try {
-    const me = await telegram.getMe();
-    console.log(`[channel-daemon] telegram bot @${me.username} (id ${me.id})`);
-  } catch (e) {
-    console.error(`[channel-daemon] telegram getMe failed — check TELEGRAM_BOT_TOKEN: ${e.message}`);
-    process.exit(1);
+  // Validate tokens up front so a bad token fails loud, not silently mid-run.
+  if (telegram) {
+    try { const me = await telegram.getMe(); console.log(`[channel-daemon] telegram bot @${me.username} (id ${me.id})`); }
+    catch (e) { console.error(`[channel-daemon] telegram getMe failed — check TELEGRAM_BOT_TOKEN: ${e.message}`); process.exit(1); }
+  }
+  if (discord) {
+    try { const me = await discord.getMe(); console.log(`[channel-daemon] discord bot ${me.username} (id ${me.id})`); }
+    catch (e) { console.error(`[channel-daemon] discord users/@me failed — check DISCORD_BOT_TOKEN: ${e.message}`); process.exit(1); }
   }
 
-  // Preflight (http mode): two-way replies need the vault MCP to advertise the
-  // `reply` tool, which only happens when the vault was booted with AGENT_URL set
-  // to THIS daemon. If it's missing, replies silently won't deliver — warn loudly
-  // rather than fail at the first inbound. (stdio mode wires AGENT_URL itself.)
+  // Preflight (http mode): two-way replies need the vault MCP to advertise `reply`.
   if (lane && cfg.mcpMode !== 'stdio') {
     const tools = await vault.listToolNames();
     if (tools && !tools.includes('reply')) {
-      console.error(`[channel-daemon] ⚠ vault MCP does NOT advertise the 'reply' tool — two-way replies will NOT deliver. Boot the vault with AGENT_URL=${cfg.selfUrl} (and MYCELIUM_MCP_BEARER) so the reply tool registers + the SDK can attach.`);
+      console.error(`[channel-daemon] ⚠ vault MCP does NOT advertise the 'reply' tool — two-way replies will NOT deliver. Boot the vault with AGENT_URL=${cfg.selfUrl} (and MYCELIUM_MCP_BEARER).`);
     } else if (tools) {
       console.log('[channel-daemon] preflight OK — vault advertises the reply tool.');
-    } // tools null = vault unreachable now; the poller/turns will surface it later.
+    }
   }
 
   const server = app.listen(cfg.port, cfg.host, () => {
     console.log(`[channel-daemon] listening on http://${cfg.host}:${cfg.port} (vault: ${cfg.vaultBaseUrl})`);
-    console.log('[channel-daemon] Phase 0+1: inbound capture + outbound egress. reply tool agentUrl → this server.');
+    console.log(`[channel-daemon] platforms: ${[telegram && 'telegram', discord && 'discord'].filter(Boolean).join(' + ') || 'none'}`);
   });
 
-  poller.start(); // runs until stop()
+  if (poller) poller.start();
+  if (gateway) { gateway.start().catch((e) => console.error('[channel-daemon] discord gateway failed to start:', e.message)); }
 
   const shutdown = () => {
-    poller.stop();
+    if (poller) poller.stop();
+    if (gateway) gateway.stop();
     server.close(() => process.exit(0));
   };
   process.on('SIGINT', shutdown);

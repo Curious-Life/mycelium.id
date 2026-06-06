@@ -15,6 +15,7 @@
 	type ChannelsState = {
 		enabled: boolean;
 		telegram: { hasToken: boolean; ownerId: string | null };
+		discord: { hasToken: boolean; ownerId: string | null };
 		agent: { hasKey: boolean; model: string | null };
 		groups: Group[];
 	};
@@ -28,6 +29,8 @@
 	let formEnabled = $state(false);
 	let formToken = $state('');
 	let formOwnerId = $state('');
+	let formDiscordToken = $state('');
+	let formDiscordOwnerId = $state('');
 	let formAgentKey = $state('');
 	let formModel = $state('');
 
@@ -39,6 +42,7 @@
 			state = (await res.json()) as ChannelsState;
 			formEnabled = state.enabled;
 			formOwnerId = state.telegram.ownerId ?? '';
+			formDiscordOwnerId = state.discord.ownerId ?? '';
 			formModel = state.agent.model ?? '';
 		} catch (e: any) {
 			error = e?.message || 'Failed to load channel settings';
@@ -55,6 +59,10 @@
 			if (formToken.trim()) telegram.token = formToken.trim();
 			if (formOwnerId.trim() !== (state.telegram.ownerId ?? '')) telegram.ownerId = formOwnerId.trim();
 			if (Object.keys(telegram).length) body.telegram = telegram;
+			const discord: Record<string, string> = {};
+			if (formDiscordToken.trim()) discord.token = formDiscordToken.trim();
+			if (formDiscordOwnerId.trim() !== (state.discord.ownerId ?? '')) discord.ownerId = formDiscordOwnerId.trim();
+			if (Object.keys(discord).length) body.discord = discord;
 			const agent: Record<string, string> = {};
 			if (formAgentKey.trim()) agent.apiKey = formAgentKey.trim();
 			if (formModel.trim() !== (state.agent.model ?? '')) agent.model = formModel.trim();
@@ -67,7 +75,7 @@
 			});
 			const json = await res.json().catch(() => ({}));
 			if (!res.ok) throw new Error(json?.error || 'Save failed');
-			formToken = ''; formAgentKey = ''; // wipe pasted secrets
+			formToken = ''; formDiscordToken = ''; formAgentKey = ''; // wipe pasted secrets
 			await load();
 		} catch (e: any) {
 			error = e?.message || 'Save failed';
@@ -123,6 +131,24 @@
 				<a href="https://t.me/userinfobot" target="_blank" rel="noopener" class="ml-2 text-[0.62rem] text-[var(--color-accent)] hover:underline">find yours →</a>
 			</label>
 			<input type="text" bind:value={formOwnerId} autocomplete="off" data-1p-ignore placeholder="e.g. 123456789"
+				class="w-full px-3 py-1.5 text-sm bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)]" />
+		</div>
+
+		<!-- discord token -->
+		<div class="mb-4">
+			<label class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">
+				Discord bot token
+				{#if state.discord.hasToken}<span class="ml-2 text-[var(--color-accent)]">configured ✓</span>{/if}
+			</label>
+			<input type="password" bind:value={formDiscordToken} autocomplete="off" data-1p-ignore
+				placeholder={state.discord.hasToken ? '••••••••• (leave blank to keep)' : 'from the Discord developer portal (enable MESSAGE CONTENT intent)'}
+				class="w-full px-3 py-1.5 text-sm bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)]" />
+		</div>
+
+		<!-- discord owner id -->
+		<div class="mb-4">
+			<label class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">Your Discord user id</label>
+			<input type="text" bind:value={formDiscordOwnerId} autocomplete="off" data-1p-ignore placeholder="e.g. 209384756019384756"
 				class="w-full px-3 py-1.5 text-sm bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)]" />
 		</div>
 
