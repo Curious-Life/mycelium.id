@@ -14,6 +14,8 @@
  * @property {(roomId:string, mxid:string) => Promise<void>} invite
  * @property {(roomId:string, mxid:string) => Promise<void>} kick
  * @property {(roomId:string) => Promise<string[]>} roomMembers
+ * @property {(roomId:string, eventType:string, content:object) => Promise<string>} send  → event id
+ * @property {(handler:(e:{roomId:string,eventType:string,content:object,senderMxid:string,eventId:string})=>void) => void} onTimelineEvent
  */
 
 /**
@@ -46,5 +48,14 @@ export function createMockMatrixClient() {
     async roomMembers(roomId) {
       return [...(rooms.get(roomId)?.members || [])];
     },
+    async send(roomId, eventType, content) {
+      if (!rooms.has(roomId)) throw new Error(`send: unknown room ${roomId}`);
+      const eventId = `$evt${++n}:local`;
+      calls.push(['send', roomId, eventType, content, eventId]);
+      return eventId;
+    },
+    onTimelineEvent(handler) { this._handler = handler; },
+    /** test helper: simulate an inbound timeline event reaching this client */
+    _emit(e) { return this._handler?.(e); },
   };
 }
