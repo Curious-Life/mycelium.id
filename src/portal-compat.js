@@ -400,6 +400,7 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       const content = String(req.body?.content || '').trim();
       if (!content) return fail(res, 400, 'content required');
       const entryId = await db.spaceKnowledge.add(id, content, userId, null, 'direct', 'all', req.body?.domain_tags ?? null);
+      spaceSync?.mirrorKnowledge(id, { content, source_type: 'direct' }).catch(() => {});
       ok(res, { ok: true, id: entryId });
     } catch { fail(res, 500, 'could not add knowledge'); }
   });
@@ -459,6 +460,7 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       const memberLines = members.slice(0, 50).map((m) => `• ${m.name}${m.essence ? ` — ${m.essence}` : ''}`).join('\n');
       const content = [`${label}: ${name || '(unnamed)'}`, essence, memberLines].filter(Boolean).join('\n\n');
       const entryId = await db.spaceKnowledge.add(id, content, userId, srcTerr, level, 'all', null, sourceRef);
+      spaceSync?.mirrorKnowledge(id, { content, source_type: level, source_ref: sourceRef }).catch(() => {});
       ok(res, { ok: true, id: entryId, level, members: members.length });
     } catch (e) { fail(res, 500, e.message || 'could not share cluster'); }
   });

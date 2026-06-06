@@ -21,6 +21,13 @@ export function createSpaceMatrixRoomsNamespace(deps) {
         [spaceId],
       ));
     },
+    /** The space bound to a room (reverse lookup for inbound events), or null. */
+    async getByRoom(roomId) {
+      return one(await d1Query(
+        `SELECT space_id, room_id, created_by, created_at FROM space_matrix_rooms WHERE room_id = ?`,
+        [roomId],
+      ));
+    },
     /** Bind (idempotent on space_id) — first grant creates the room then records it. */
     async bind(spaceId, roomId, createdBy) {
       await d1Query(
