@@ -23,6 +23,7 @@ import { createEgressAuditSink } from '../src/inference/egress.js';
 import { createValidator } from '../src/claims/validator.js';
 import { discoverWindow } from '../src/claims/discovery.js';
 import { CADENCES, previousCompleteWindow } from '../src/claims/windows.js';
+import { createEmbedClient } from '../src/embed/client.js';
 
 const EVIDENCE_CAP = Number(process.env.MYCELIUM_CLAIMS_EVIDENCE_CAP || 120);
 
@@ -44,12 +45,12 @@ async function gatherEvidence(db, userId, windowStart, windowEnd, cap = EVIDENCE
  * unit/smoke-testable without a live model.
  * @returns {Promise<Record<string, {created:number, updated:number, skipped:number}>>}
  */
-export async function runDiscovery({ db, userId, infer, validate, now = () => Date.now(), cadences = CADENCES, log = () => {} }) {
+export async function runDiscovery({ db, userId, infer, validate, embed, now = () => Date.now(), cadences = CADENCES, log = () => {} }) {
   const summary = {};
   for (const cadence of cadences) {
     const w = previousCompleteWindow(now(), cadence);
     const evidence = await gatherEvidence(db, userId, w.windowStart, w.windowEnd);
-    const res = await discoverWindow({ db, userId, infer, validate, evidence, ...w, granularity: cadence });
+    const res = await discoverWindow({ db, userId, infer, validate, embed, evidence, ...w, granularity: cadence });
     summary[cadence] = { created: res.created, updated: res.updated, skipped: res.skipped };
     log(`[claims] ${cadence} ${w.windowStart.slice(0, 10)}..${w.windowEnd.slice(0, 10)}: ${evidence.length} evidence → +${res.created} ~${res.updated} -${res.skipped}`);
   }
@@ -77,6 +78,10 @@ if (isMain) {
   // sensitive:true is enforced inside discovery/validator — claims never egress.
   const infer = router.infer;
   const { validate } = createValidator({ infer });
+  // Semantic claim-matching embedder (:8091). Same task ('query') both sides;
+  // if the service is down, discoverWindow falls back to lexical matching.
+  const embedClient = createEmbedClient();
+  const embed = (texts) => embedClient.embedBatch(texts, 'query');
 
   try {
     if (DRY_RUN) {
@@ -86,7 +91,7 @@ if (isMain) {
         console.log(`[claims] (dry) ${c}: ${ev.length} evidence in ${w.windowStart.slice(0, 10)}..${w.windowEnd.slice(0, 10)}`);
       }
     } else {
-      const summary = await runDiscovery({ db, userId: USER_ID, infer, validate, cadences, log: console.error });
+      const summary = await runDiscovery({ db, userId: USER_ID, infer, validate, embed, cadences, log: console.error });
       const totals = Object.values(summary).reduce((a, s) => ({ created: a.created + s.created, updated: a.updated + s.updated }), { created: 0, updated: 0 });
       console.log(`[claims] done: +${totals.created} new, ~${totals.updated} updated across ${cadences.join('/')}`);
     }

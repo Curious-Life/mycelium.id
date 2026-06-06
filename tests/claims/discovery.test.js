@@ -102,6 +102,45 @@ test('proposal with no support is skipped (never write an unsupported claim)', a
   assert.equal(r.created, 0);
 });
 
+test('semantic embed matching merges a PARAPHRASED claim across windows (no duplicate row)', async () => {
+  const U2 = 'sem-user';
+  // Toy embedder: concept vector by keyword. Paraphrases of the same concept →
+  // identical vector → cosine 1.0; different concepts → orthogonal → cosine 0.
+  const embed = async (texts) => texts.map((t) => {
+    const s = t.toLowerCase();
+    return [
+      /outdoor|outside|nature|hiking|cycling/.test(s) ? 1 : 0,
+      /allerg|peanut/.test(s) ? 1 : 0,
+      /learn|workshop|lecture/.test(s) ? 1 : 0,
+    ];
+  });
+  // window 1: create an outdoor claim.
+  await discoverWindow({ db, userId: U2, validate: support, evidence: EV, embed, ...W,
+    infer: inferOnce([{ type: 'value', content: 'The user values outdoor activity with friends.', support: ['m1'] }]) });
+  // window 2: a paraphrase with almost NO lexical overlap (Jaccard would miss it).
+  const r = await discoverWindow({ db, userId: U2, validate: support, evidence: EV, embed,
+    windowStart: '2026-06-08T00:00:00Z', windowEnd: '2026-06-14T00:00:00Z', granularity: 'week',
+    infer: inferOnce([{ type: 'value', content: 'Being immersed in nature matters deeply to them.', support: ['m2'] }]) });
+  assert.equal(r.updated, 1, 'paraphrase should MERGE into the existing claim');
+  assert.equal(r.created, 0, 'must not fork a duplicate row');
+  assert.equal((await db.claims.listActive(U2, { limit: 10 })).length, 1, 'exactly one claim row');
+});
+
+test('semantic matching does NOT over-merge distinct concepts', async () => {
+  const U3 = 'sem-user-2';
+  const embed = async (texts) => texts.map((t) => {
+    const s = t.toLowerCase();
+    return [/outdoor|outside|nature/.test(s) ? 1 : 0, /allerg|peanut/.test(s) ? 1 : 0];
+  });
+  await discoverWindow({ db, userId: U3, validate: support, evidence: EV, embed, ...W,
+    infer: inferOnce([{ type: 'value', content: 'Loves the outdoors.', support: ['m1'] }]) });
+  const r = await discoverWindow({ db, userId: U3, validate: support, evidence: EV, embed,
+    windowStart: '2026-06-08T00:00:00Z', windowEnd: '2026-06-14T00:00:00Z', granularity: 'week',
+    infer: inferOnce([{ type: 'boundary', content: 'Has a peanut allergy.', support: ['m2'] }]) });
+  assert.equal(r.created, 1, 'a distinct concept must create its own claim');
+  assert.equal((await db.claims.listActive(U3, { limit: 10 })).length, 2);
+});
+
 test('infer throwing → fail-open no-op (Tier-3: no local model)', async () => {
   const r = await discoverWindow({
     db, userId: U, validate: support, evidence: EV, ...W,

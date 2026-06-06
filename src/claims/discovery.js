@@ -15,6 +15,7 @@
 // embedding_768 is reserved for retrieval. See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §3.5.
 import { createHash } from 'node:crypto';
 import { update as updateConfidence, fromConfidence, toConfidence } from './confidence.js';
+import { cosine } from '../search/ann/cosine.js';
 
 // claim_type → decay_class (how fast the confidence fades without re-evidence).
 const TYPE_DECAY = Object.freeze({
@@ -100,10 +101,17 @@ function deltaFor(isNew, omega) {
  * @param {string} p.windowStart
  * @param {string} p.windowEnd          also the snapshot key + decay reference time
  * @param {'day'|'week'|'month'|'quarter'} p.granularity
- * @param {number} [p.simThreshold=0.6]
+ * @param {(texts:string[])=>Promise<number[][]>} [p.embed]  batch embedder for
+ *   SEMANTIC claim matching (so paraphrases of one claim across windows/cadences
+ *   merge into ONE row). Omit → lexical Jaccard fallback (Tier-1).
+ * @param {number} [p.cosineThreshold=0.62]  semantic-match cutoff. Calibrated
+ *   against Nomic v1.5 on short claim fragments (2026-06-06): same-concept
+ *   paraphrases scored 0.68–0.78, distinct concepts 0.38–0.49 — 0.62 sits in
+ *   the gap (catches paraphrases, never merges distinct claims).
+ * @param {number} [p.simThreshold=0.6]      lexical-fallback cutoff
  * @returns {Promise<{created:number, updated:number, skipped:number, claims:string[]}>}
  */
-export async function discoverWindow({ db, userId, infer, validate, evidence, windowStart, windowEnd, granularity, simThreshold = 0.6 }) {
+export async function discoverWindow({ db, userId, infer, validate, evidence, windowStart, windowEnd, granularity, embed, cosineThreshold = 0.62, simThreshold = 0.6 }) {
   const out = { created: 0, updated: 0, skipped: 0, claims: [] };
   if (!Array.isArray(evidence) || evidence.length === 0) return out; // no evidence → no snapshot (honest gap)
 
@@ -116,23 +124,48 @@ export async function discoverWindow({ db, userId, infer, validate, evidence, wi
   const proposals = parseProposals(raw);
   if (!proposals.length) return out;
 
-  const existing = await db.claims.listForMatch(userId);
+  // The match POOL = existing active/rejected claims, GROWING as this window
+  // creates new ones — so a paraphrase later in the same window (or in a later
+  // cadence of the same run) merges into the claim made earlier instead of
+  // forking a duplicate row.
+  const pool = (await db.claims.listForMatch(userId)).map((c) => ({ ...c }));
   const endMs = Date.parse(windowEnd) || Date.now();
 
-  for (const p of proposals) {
+  // Embed proposals + pool contents once (task 'query' on BOTH sides → symmetric
+  // Nomic prefix) for SEMANTIC matching. Any failure → vectors stay null and we
+  // fall back to lexical Jaccard (Tier-1, no embedder).
+  let propVecs = null;
+  if (typeof embed === 'function') {
+    try {
+      const texts = [...proposals.map((p) => p.content), ...pool.map((c) => c.content)];
+      const vecs = texts.length ? await embed(texts) : [];
+      if (Array.isArray(vecs) && vecs.length === texts.length) {
+        propVecs = vecs.slice(0, proposals.length);
+        pool.forEach((c, i) => { c.vec = vecs[proposals.length + i]; });
+      }
+    } catch { /* embedder hiccup → lexical fallback */ }
+  }
+
+  // Find the existing claim a proposal refers to: exact content hash, else the
+  // nearest by cosine (when embedded) or token-Jaccard (fallback). null = new.
+  const findMatch = (p, hash, vec) => {
+    const exact = pool.find((c) => c.contentHash === hash);
+    if (exact) return exact;
+    let best = null, bestSim = 0;
+    if (vec) {
+      for (const c of pool) { if (!c.vec) continue; const s = cosine(vec, c.vec); if (s > bestSim) { bestSim = s; best = c; } }
+      return best && bestSim >= cosineThreshold ? best : null;
+    }
+    for (const c of pool) { const s = similarity(p.content, c.content); if (s > bestSim) { bestSim = s; best = c; } }
+    return best && bestSim >= simThreshold ? best : null;
+  };
+
+  for (let pi = 0; pi < proposals.length; pi++) {
+    const p = proposals[pi];
     if (!p.support.length) { out.skipped++; continue; } // never write a claim with no support
     const hash = contentHash(p.content);
-
-    // Identity-match: exact hash, else best lexical match over decrypted content.
-    let match = existing.find((c) => c.contentHash === hash);
-    if (!match) {
-      let best = null, bestSim = 0;
-      for (const c of existing) {
-        const s = similarity(p.content, c.content);
-        if (s > bestSim) { bestSim = s; best = c; }
-      }
-      if (best && bestSim >= simThreshold) match = best;
-    }
+    const vec = propVecs ? propVecs[pi] : null;
+    const match = findMatch(p, hash, vec);
 
     // Tombstone: a rejected claim must NOT be resurrected.
     if (match && match.status === 'rejected') { out.skipped++; continue; }
@@ -147,13 +180,15 @@ export async function discoverWindow({ db, userId, infer, validate, evidence, wi
       const dt = Math.max(0, (endMs - (Date.parse(match.lastEvidenceAt) || endMs)) / 1000);
       const prevL = match.confidenceLogodds != null ? match.confidenceLogodds : L_NEW;
       ({ L } = updateConfidence({ L: prevL, dtSeconds: dt, decayClass, omega }));
+      const support = mergeSupport(match.support, p.support);
       await db.claims.upsert({
         id: match.id, userId, subject: 'self', claimType: p.type, content: p.content,
-        confidenceLogodds: L, decayClass, support: mergeSupport(match.support, p.support),
-        contentHash: hash, status: 'active', lastEvidenceAt: windowEnd,
+        confidenceLogodds: L, decayClass, support, contentHash: hash, status: 'active', lastEvidenceAt: windowEnd,
       });
       claimId = match.id;
       omegaForDelta = omega;
+      // Refresh the pool entry so a later paraphrase in this run matches the merged claim.
+      Object.assign(match, { content: p.content, contentHash: hash, confidenceLogodds: L, lastEvidenceAt: windowEnd, support, vec: vec ?? match.vec });
       out.updated++;
     } else {
       L = L_NEW;
@@ -163,6 +198,9 @@ export async function discoverWindow({ db, userId, infer, validate, evidence, wi
         contentHash: hash, status: 'active', lastEvidenceAt: windowEnd,
       });
       claimId = res.id;
+      // Add to the pool so a later paraphrase in the same run merges into it.
+      pool.push({ id: claimId, content: p.content, contentHash: hash, status: 'active',
+        confidenceLogodds: L, lastEvidenceAt: windowEnd, support: { messages: p.support, territories: [] }, vec });
       out.created++;
     }
 

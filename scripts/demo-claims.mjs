@@ -19,6 +19,7 @@ import { createValidator } from '../src/claims/validator.js';
 import { runDiscovery } from '../pipeline/discover-claims.mjs';
 import { previousCompleteWindow } from '../src/claims/windows.js';
 import { toConfidence } from '../src/claims/confidence.js';
+import { createEmbedClient } from '../src/embed/client.js';
 
 const DB = 'data/claims-demo.db', KCV = 'data/claims-demo-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -64,9 +65,16 @@ console.log(`Windows → day ${dayWin.windowStart.slice(0,10)}..${dayWin.windowE
 const router = createInferenceRouter(await resolveInferenceConfig(db, U));
 const { validate } = createValidator({ infer: router.infer });
 
+// Semantic claim-matching via the embed service (:8091) if it's up — this is
+// what merges paraphrased day/week claims into one row. Falls back to lexical.
+const embedClient = createEmbedClient();
+let embed;
+try { await embedClient.health(); embed = (texts) => embedClient.embedBatch(texts, 'query'); console.log('Embed service up → semantic claim-matching ON.\n'); }
+catch { console.log('Embed service down → lexical claim-matching (fallback).\n'); }
+
 console.log('Running discovery (day + week) against the live model…\n');
 const summary = await runDiscovery({
-  db, userId: U, infer: router.infer, validate,
+  db, userId: U, infer: router.infer, validate, embed,
   cadences: ['day', 'week'], log: (m) => console.log('  ' + m),
 });
 console.log('\nSummary:', JSON.stringify(summary));
