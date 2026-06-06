@@ -63,6 +63,9 @@
 	let selectedConnection = $state<Connection | null>(null);
 	let overlap = $state<Overlap | null>(null);
 	let overlapLoading = $state(false);
+	// What you've shared WITH the selected connection (the management hub).
+	let shared = $state<{ peer_id: string | null; spaces: Array<{ id: string; name: string; role: string }>; contexts: Array<{ id: string; name: string; is_private: number }> }>({ peer_id: null, spaces: [], contexts: [] });
+	let sharedLoading = $state(false);
 
 	$effect(() => {
 		if (browser) {
@@ -140,12 +143,37 @@
 		selectedConnection = conn;
 		overlapLoading = true;
 		overlap = null;
+		loadShared(conn.id);
 		try {
 			const data = await apiGet<{ overlap: Overlap }>(`/portal/connections/${conn.id}/overlap`);
 			overlap = data.overlap;
 		} catch (e: any) {
 			error = e.message || 'Failed to compute overlap';
 		} finally { overlapLoading = false; }
+	}
+
+	async function loadShared(connId: string) {
+		sharedLoading = true;
+		shared = { peer_id: null, spaces: [], contexts: [] };
+		try { shared = await apiGet(`/portal/connections/${connId}/shared`); }
+		catch { /* leave empty */ }
+		finally { sharedLoading = false; }
+	}
+	async function revokeSpaceShare(spaceId: string) {
+		if (!shared.peer_id) return;
+		try {
+			await api(`/portal/spaces/${spaceId}/shares/${encodeURIComponent(shared.peer_id)}`, { method: 'DELETE' });
+			if (selectedConnection) await loadShared(selectedConnection.id);
+			showSuccess('Space access revoked');
+		} catch (e: any) { error = e.message || 'Failed to revoke'; }
+	}
+	async function revokeContextGrant(contextId: string) {
+		if (!selectedConnection) return;
+		try {
+			await api(`/portal/contexts/${contextId}/grant/${encodeURIComponent(selectedConnection.id)}`, { method: 'DELETE' });
+			await loadShared(selectedConnection.id);
+			showSuccess('Sharing revoked');
+		} catch (e: any) { error = e.message || 'Failed to revoke'; }
 	}
 
 	function showSuccess(msg: string) {
@@ -346,6 +374,39 @@
 					</div>
 				{/if}
 			{/if}
+
+			<!-- What you've shared WITH this connection — manage it here -->
+			<div class="overlap-section shared-mgmt">
+				<h3>Shared with @{selectedConnection.other_handle}</h3>
+				{#if sharedLoading}
+					<div class="loading">Loading…</div>
+				{:else if shared.spaces.length === 0 && shared.contexts.length === 0}
+					<p class="shared-empty">Nothing shared yet. Share a space (Spaces → a space → Members) or a mindscape facet (Sharing) with this connection.</p>
+				{:else}
+					{#if shared.spaces.length > 0}
+						<div class="shared-group">
+							<span class="shared-kind">Spaces</span>
+							{#each shared.spaces as s (s.id)}
+								<div class="shared-row">
+									<span class="shared-label">{s.name} <span class="shared-role">({s.role === 'contributor' ? 'can add' : 'can view'})</span></span>
+									<button class="btn-revoke" onclick={() => revokeSpaceShare(s.id)}>Revoke</button>
+								</div>
+							{/each}
+						</div>
+					{/if}
+					{#if shared.contexts.length > 0}
+						<div class="shared-group">
+							<span class="shared-kind">Mindscape facets</span>
+							{#each shared.contexts as c (c.id)}
+								<div class="shared-row">
+									<span class="shared-label">{c.name}</span>
+									<button class="btn-revoke" onclick={() => revokeContextGrant(c.id)}>Revoke</button>
+								</div>
+							{/each}
+						</div>
+					{/if}
+				{/if}
+			</div>
 		</div>
 	{/if}
 
@@ -498,6 +559,15 @@
 		border: 1px solid var(--color-border);
 		border-radius: 12px;
 	}
+	.shared-mgmt { border-top: 1px solid var(--color-border); margin-top: 1rem; padding-top: 1rem; }
+	.shared-empty { font-size: 0.8rem; color: var(--color-text-tertiary); }
+	.shared-group { margin-bottom: 0.75rem; }
+	.shared-kind { display: block; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--color-text-tertiary); margin-bottom: 0.35rem; }
+	.shared-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.35rem 0; }
+	.shared-label { font-size: 0.85rem; color: var(--color-text-primary); }
+	.shared-role { color: var(--color-text-tertiary); font-size: 0.75rem; }
+	.btn-revoke { font-size: 0.7rem; color: var(--color-text-tertiary); background: none; border: none; cursor: pointer; flex-shrink: 0; }
+	.btn-revoke:hover { color: var(--color-coral, #e5736a); }
 	.overlap-header {
 		display: flex;
 		align-items: center;

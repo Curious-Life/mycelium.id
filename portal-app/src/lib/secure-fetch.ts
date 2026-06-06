@@ -223,6 +223,7 @@ function routeToType(method: string, path: string): string | null {
 	if (cleanPath.startsWith('/portal/connections/') && cleanPath.endsWith('/reject')) return 'connection-reject';
 	if (cleanPath.startsWith('/portal/connections/') && cleanPath.endsWith('/block')) return 'connection-block';
 	if (cleanPath.startsWith('/portal/connections/') && cleanPath.endsWith('/overlap')) return 'connection-overlap';
+	if (cleanPath.startsWith('/portal/connections/') && cleanPath.endsWith('/shared')) return 'connection-shared';
 	if (cleanPath.startsWith('/portal/connections/') && method === 'DELETE') return 'connection-delete';
 
 	// Spaces parameterized — any /portal/spaces/* reaches the server, which

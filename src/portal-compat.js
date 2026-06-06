@@ -278,6 +278,35 @@ export function portalCompatRouter({ db, userId }) {
     try { ok(res, { overlap: await db.connections.computeOverlap(userId, connId(req)) }); }
     catch (e) { fail(res, 400, e.message || 'could not compute overlap'); }
   });
+  // Everything shared WITH this connection — the management hub: spaces granted
+  // to the peer + contexts (territory facets) granted to the connection.
+  router.get('/connections/:id/shared', async (req, res) => {
+    try {
+      const cid = connId(req);
+      const cr = await db._base.d1Query(
+        `SELECT user_a, user_b FROM connections WHERE id = ? AND (user_a = ? OR user_b = ?) AND status = 'accepted'`,
+        [cid, userId, userId],
+      );
+      const row = cr.results?.[0];
+      if (!row) return ok(res, { peer_id: null, spaces: [], contexts: [] });
+      const peerId = row.user_a === userId ? row.user_b : row.user_a;
+      const spaces = (await db._base.d1Query(
+        `SELECT u.id, u.display_name AS name, sa.role
+         FROM space_access sa JOIN users u ON u.id = sa.space_id
+         WHERE sa.user_id = ? AND sa.revoked_at IS NULL AND u.type = 'space'
+         ORDER BY u.display_name`,
+        [peerId],
+      )).results || [];
+      const contexts = (await db._base.d1Query(
+        `SELECT sc.id, sc.name, sc.is_private
+         FROM context_grants cg JOIN sharing_contexts sc ON sc.id = cg.context_id
+         WHERE cg.connection_id = ? AND sc.user_id = ?
+         ORDER BY sc.name`,
+        [cid, userId],
+      )).results || [];
+      ok(res, { peer_id: peerId, spaces, contexts });
+    } catch { ok(res, { peer_id: null, spaces: [], contexts: [] }); }
+  });
 
   // ── Spaces (default-private shareable folders, Phase A) ──────────────────
   // Every read/write is gated by space_access via db.spaces.requireRole, which

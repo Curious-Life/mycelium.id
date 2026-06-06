@@ -15,6 +15,8 @@
 // Pure protocol — no storage. Network only via the injected/global fetch in
 // resolveDidKey().
 
+import { assertResolvesPublic } from './ssrf.js';
+
 const HOST_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/; // DNS host: no scheme, port, or underscore
 const DID_WEB_RE = /^did:web:([a-z0-9]([a-z0-9.-]*[a-z0-9])?)$/;
 const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
@@ -141,11 +143,12 @@ export function buildWebfinger(host, handle, resource) {
  * @returns {Promise<string>}  the base64url public key
  * @throws on unresolvable / malformed / unsafe input
  */
-export async function resolveDidKey(did, { fetch = globalThis.fetch, timeoutMs = RESOLVE_TIMEOUT_MS } = {}) {
+export async function resolveDidKey(did, { fetch = globalThis.fetch, timeoutMs = RESOLVE_TIMEOUT_MS, lookup } = {}) {
   const m = DID_WEB_RE.exec(String(did || ''));
   if (!m) throw new Error('unsupported or malformed did:web');
   const host = m[1];
   if (!isPublicHost(host)) throw new Error('did:web host is not a public domain'); // SSRF: no IP-literal / loopback
+  await assertResolvesPublic(host, { lookup }); // SSRF: no DNS-rebinding to a private IP
   const res = await fetch(`https://${host}/.well-known/did.json`, {
     redirect: 'manual', // SSRF: never follow a peer's redirect to an internal address
     signal: AbortSignal.timeout(timeoutMs),
