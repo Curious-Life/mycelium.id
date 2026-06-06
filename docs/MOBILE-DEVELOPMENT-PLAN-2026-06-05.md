@@ -117,7 +117,7 @@ authenticated `/api/v1/portal/library` over an actual relayed `<handle>.mycelium
 |---|---|---|
 | 5.1 | Android target from the same Capacitor project; Play internal testing | build target, not a rewrite |
 | 5.2 | **Push notifications** | needs a server-side notify hook + APNs/FCM — own design |
-| 5.3 | **Real passkey unlock** | enable better-auth passkey plugin + wire the SPA's (currently dead) passkey UI → cryptographic Face ID unlock; own design |
+| 5.3 | **Real passkey unlock** — ◑ **DESIGNED (2026-06-06):** [`DESIGN-passkey-unlock-2026-06-06.md`](DESIGN-passkey-unlock-2026-06-06.md). Pivot: not a `better-auth` plugin (none in 1.6.13) and not a reference port (incomplete + custom sessions) → the **official separate package `@better-auth/passkey@1.6.14`** (native better-auth sessions → the gate accepts them). Gating spikes: S1 the `better-auth` patch bump must not regress MCP/OAuth; S2 WebAuthn-in-WKWebView (device) | rpID = per-box relay subdomain; auth-only (no PRF); enroll after operator-password login |
 | 5.4 | **Bundled-SPA + Bearer** client (the "mature target") | uses the Bearer branch the gate already accepts + runtime Noise-key pairing if Noise is ever built |
 
 ---
