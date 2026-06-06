@@ -35,8 +35,10 @@ const importView = read(P("lib", "views", "ImportView.svelte"));
 // separately at the bottom). Extract href: values inside the coreNav literal.
 const coreBlock = (sidebar.match(/const coreNav[^[]*\[([\s\S]*?)\];/) || [])[1] || "";
 const hrefs = [...coreBlock.matchAll(/href:\s*'([^']+)'/g)].map((m) => m[1]);
-const want = ["/mindscape", "/library", "/import", "/timeline", "/profile"];
-rec("N1 coreNav = the 6-screen V1 set", JSON.stringify(hrefs) === JSON.stringify(want),
+// Updated for the shipped Spaces / Connections / Sharing(contexts) screens that
+// main wired into coreNav (the original "V1 trim" was 5).
+const want = ["/mindscape", "/library", "/import", "/timeline", "/spaces", "/connections", "/contexts", "/profile"];
+rec("N1 coreNav = the current nav set", JSON.stringify(hrefs) === JSON.stringify(want),
   `got ${JSON.stringify(hrefs)}`);
 
 // N2 — the deferred module/social/fleet nav arrays are gone.
