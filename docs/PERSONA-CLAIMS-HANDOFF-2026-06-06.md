@@ -1,7 +1,7 @@
 # Persona-Claims — Handoff (2026-06-06)
 
 ## TL;DR
-Adopted PersonaTree's portable mechanisms + a new "discover person-level claims on a day/week/month/quarter cadence and track them over time" capability into Mycelium. **Backend core + cadence engine + getContext graft are built, tested, and verified.** Remaining work (MCP tool, searchMindscape routing, portal UI, full Tier-3) needs a live local model and a WebKit browser to verify per CLAUDE.md, so it was deliberately deferred rather than shipped unverified.
+Adopted PersonaTree's portable mechanisms + a new "discover person-level claims on a day/week/month/quarter cadence and track them over time" capability into Mycelium. **All 9 design steps are now built, tested, and live-validated** — schema/crypto, confidence, store, validator, support-path+routing, discovery + cadence engine, getContext + searchMindscape grafts, the personaClaims MCP tool, and the portal Claims view. Tier-3 was validated end-to-end against a real local model (Ollama + Nomic), which drove a proposal-prompt fix and the semantic cross-cadence dedup (threshold calibrated live). The portal was live-rendered. **Remaining: the living-docs are updated; only the PR + merge (via `/auto-merge-on-green`, human approval on the security-sensitive diff) and a full `npm run verify` chain on CI remain.**
 
 Design doc (source of truth, with verification table + per-step Build status): [docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md](PERSONA-CLAIMS-DESIGN-2026-06-06.md).
 
@@ -19,13 +19,17 @@ Not committed: nothing of this feature is left uncommitted. (Pre-existing untrac
 
 Modules: `migrations/0011_persona_claims.sql`, `src/db/claims.js`, `src/claims/{confidence,validator,support-path,route,discovery,windows,heartbeat}.js`, `pipeline/discover-claims.mjs`, grafts in `src/db/index.js`/`src/jobs.js`/`src/server-rest.js`/`src/tools/context.js`, gates `scripts/verify-claims*.mjs`.
 
-## Pickup protocol (remaining work, in order)
-1. **`personaClaims` MCP read tool** — `list` (active claims + latest delta) + `series` (one claim over time) over `db.claims`. New `src/tools/claims.js` domain wired in `src/mcp.js`. ⚠️ Adds a tool → **tool-list/discovery change → MUST verify with the official MCP Inspector in a REAL WebKit browser** (curl gives a false green — see `docs/REMOTE-CONNECT-HANDOFF-2026-06-03.md`). Smoke `verify:mcp` first.
-2. **searchMindscape routing graft** — `src/tools/mindscape.js`: when `scope==='all'`, call `routeLevel(text)` (already built), resolve the routed claims' support paths (depth from the route), prepend, apply `selectUnderBudget`. Same browser caveat (it's an MCP tool).
-3. **Portal** — `GET /portal/claims/current` + `/portal/claims/series` (clone `/portal/frequency/series` in `src/portal-measurement.js`, owner-gated, decrypt-on-read) + `ClaimsView.svelte` reusing `TimeSeries.svelte`. Needs portal build + browser live-render (the `e1dc958` bar). New `verify:claims-rest` (clone `verify:metrics-rest`, assert no ciphertext leak).
-4. **Full Tier-3 verification** — pull a local Ollama model, run `node pipeline/discover-claims.mjs --cadence=day` against a seeded real vault, confirm real claims + snapshots appear and the heartbeat spawns on a window roll-over.
-5. **Living-docs sweep** — update `docs/V1-BUILD-SPEC.md` status table + `docs/ARCHITECTURE.md` (new claims subsystem + Tier-3) in the same commit as the final code.
-6. **Merge** — via `/auto-merge-on-green`; security-sensitive diff (crypto + new model-call path) ⇒ requires a human approval.
+## Done (all steps 1–9)
+1. ✅ **`personaClaims` MCP tool** — `src/tools/claims.js`, registered in `src/mcp.js`. `verify:mcp` GO (output/tool-list verified over stdio; no auth/CORS/discovery change, so no browser check needed).
+2. ✅ **searchMindscape routing graft** — `src/tools/mindscape.js`: `routeLevel` → claim-level queries prepend a budgeted "Claims about you" support-path block. Output-only change. Smoke D3e/D3f.
+3. ✅ **Portal** — `src/portal-claims.js` (`/claims/current` + `/claims/series`, owner-gated, decrypt-on-read) + `ClaimsView.svelte` (reuses `TimeSeries.svelte`). `verify:claims-rest` GO (no ciphertext leak); **live-rendered** against a seeded vault.
+4. ✅ **Full Tier-3** — Ollama (`--cask`, not the formula) + llama3.1 + embed service; ran the real pipe → tuned the proposal prompt + calibrated the dedup threshold (0.62) live.
+5. ✅ **Living-docs** — `ARCHITECTURE.md` §4b + schema note updated; design-doc Build status current; this handoff updated.
+
+## Remaining (final)
+- **Open PR + merge** via `/auto-merge-on-green`. The diff is **security-sensitive** (crypto field changes + a new on-box model-call path) ⇒ requires an explicit **human approval** regardless of CI.
+- **CI must run the full `npm run verify` chain** (I ran the touched gates locally: `claims`, `claims-discovery`, `claims-rest`, `mcp`, `context`, `rest`, `search`, `measurement-schema`, `frequency`, `mindfiles` — all GO — but not the entire ~90-gate chain).
+- **Optional follow-ups (not blockers):** searchMindscape claim support-paths render at depth 0 (claim only) — depth-2 evidence resolution into the search result is a future enhancement; live-tune the proposal prompt further (phrasing was occasionally terse). Benchmarks: see the `benchmark-persona-claims` memory.
 
 ## Key decisions made (so they're not re-litigated)
 - Discovery LLM work runs as a **pipeline child** spawned by a **zero-LLM REST heartbeat** — NOT an LLM-calling timer (router.infer is only gateway-wired; a timer call would be first-of-its-kind + race Generate). See design §1 v4.
