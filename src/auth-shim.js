@@ -1,4 +1,5 @@
 import express from 'express';
+import { isTrustedLoopback } from './http/loopback.js';
 
 /**
  * authShimRouter — local "always signed in" auth surface for V1.
@@ -57,9 +58,32 @@ export function authShimRouter({ userId, handle = 'local', resolveAuthorized }) 
   router.get('/setup-status', (_req, res) =>
     res.json({ setupRequired: false, hasPasskeys: false, handle }));
 
-  // Logout is a no-op locally (there's no session to end); report success so
-  // the UI doesn't error. The next page load re-establishes "signed in".
-  router.post('/logout', (_req, res) => res.json({ ok: true }));
+  // Logout. Loopback (desktop) is "always signed in" — nothing to revoke; no-op.
+  // A NETWORKED client (over the relay) holds a REAL better-auth session, so a
+  // no-op would be a FALSE logout (the cookie stays valid). Forward to :4711's
+  // better-auth /api/auth/sign-out to actually revoke the session, and relay its
+  // Set-Cookie so the browser cookie is cleared too. Best-effort + fail-safe:
+  // always report ok so the UI completes the logout UX.
+  router.post('/logout', async (req, res) => {
+    if (!isTrustedLoopback(req) && req.headers.cookie) {
+      const base = process.env.MYCELIUM_AUTH_URL || `http://127.0.0.1:${process.env.MYCELIUM_PORT || 4711}`;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 5000);
+      try {
+        // Forward the browser's Origin too — better-auth's CSRF guard rejects a
+        // POST whose Origin is not trusted, so without it sign-out would no-op.
+        const headers = { cookie: req.headers.cookie };
+        if (req.headers.origin) headers.origin = req.headers.origin;
+        const r = await fetch(`${base}/api/auth/sign-out`, {
+          method: 'POST', headers, signal: ctrl.signal,
+        });
+        const setCookie = r.headers.get('set-cookie');
+        if (setCookie) res.setHeader('Set-Cookie', setCookie); // clear the session cookie
+      } catch { /* revoke is best-effort; still report ok */ }
+      finally { clearTimeout(timer); }
+    }
+    res.json({ ok: true });
+  });
 
   return router;
 }

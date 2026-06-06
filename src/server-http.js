@@ -35,6 +35,7 @@ import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { createGatewayHandlers } from './gateway/openai-compat.js';
 import { createEmbeddingsHandler } from './gateway/embeddings.js';
 import { matchStaticBearer } from './gateway/static-bearer.js';
+import { createPathThrottle } from './http/rate-limit.js';
 
 /**
  * Build the Express app (no listen). Returns { app, auth, baseURL, transports }.
@@ -106,6 +107,12 @@ export async function createHttpApp(opts = {}) {
   };
   app.options(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], sendPrm);
   app.get(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], sendPrm);
+
+  // Brute-force throttle on the relay-exposed operator sign-in (gap review): a
+  // GLOBAL bucket (un-evadable by header spoofing) — see src/http/rate-limit.js.
+  // Mounted BEFORE the auth handler so a 429 short-circuits before better-auth.
+  app.use(createPathThrottle({ method: 'POST', path: '/api/auth/sign-in/email', max: 5, windowMs: 60_000 }));
+  app.use(createPathThrottle({ method: 'POST', path: '/api/auth/passkey/verify-authentication', max: 10, windowMs: 60_000 }));
 
   // better-auth owns everything under /api/auth/* (Express 5 NAMED splat).
   // Mounted BEFORE express.json() so better-auth parses its own bodies.
