@@ -58,7 +58,7 @@ At boot there is **no Matrix client** wired (B11 unbuilt), so `spaceSync` is nul
 
 ### Screen wiring map (audited 2026-06-06)
 
-Every view's `/portal/*` calls cross-referenced against what the V1 server actually mounts at `/api/v1/portal` (`api.ts:40` rewrites the prefix). **All portal routers are mounted; auth-redirect (M2 #1) is the only thing between you and these screens.**
+Every view's `/portal/*` calls cross-referenced against what the V1 server actually mounts at `/api/v1/portal` (`api.ts:40` rewrites the prefix). **All portal routers are mounted, and the app opens straight to the workspace on loopback — no login wall.** (The root layout's `/auth/session` check is satisfied for `127.0.0.1` by `authShimRouter`; first run → `/setup`, locked vault → `/unlock`. The portal README's old "redirects to /login (M2 #1)" note was stale — corrected.)
 
 🟢 **Live-wired (V1 backend served — exercise these first):**
 - **ConnectionsView** — incl. the #112 "Shared with @X" panel (`/connections/:id/shared`) + inline revoke. Fully served.
