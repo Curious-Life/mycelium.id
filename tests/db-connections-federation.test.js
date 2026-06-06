@@ -80,6 +80,21 @@ describe('connections — signed outbound connect', () => {
     // key in the assembled profile; this asserts the happy path does NOT trip.
     await assert.doesNotReject(() => ns.request('me', 'bob@bob.mycelium.id'));
   });
+
+  it('a federated re-request that is already pending returns the existing id (no UNIQUE error, no network)', async () => {
+    const { d1Query } = makeDb({ existingConn: { id: 'pending-1', status: 'pending' } });
+    let fetched = false;
+    const fetchImpl = async () => { fetched = true; return { ok: true, status: 202, async json() { return {}; } }; };
+    const ns = createConnectionsNamespace({ d1Query, fetch: fetchImpl, sign: (b) => id.sign(b), did: () => 'did:web:alice.mycelium.id', selfInstance: () => 'alice.mycelium.id' });
+    assert.equal(await ns.request('me', 'bob@bob.mycelium.id'), 'pending-1');
+    assert.equal(fetched, false, 'no WebFinger/POST for an already-pending re-request');
+  });
+
+  it('a federated re-request to an already-accepted handle throws a friendly error (not raw SQL)', async () => {
+    const { d1Query } = makeDb({ existingConn: { id: 'acc-1', status: 'accepted' } });
+    const ns = createConnectionsNamespace({ d1Query, fetch: async () => ({ ok: true, status: 202, async json() { return {}; } }), sign: (b) => id.sign(b), did: () => 'did:web:alice.mycelium.id', selfInstance: () => 'alice.mycelium.id' });
+    await assert.rejects(() => ns.request('me', 'bob@bob.mycelium.id'), /Already connected/);
+  });
 });
 
 describe('connections — receiveRemote (inbound)', () => {

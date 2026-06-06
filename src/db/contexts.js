@@ -118,11 +118,18 @@ export function createContextsNamespace(deps) {
     },
 
     async getGrants(contextId) {
+      // One row per grant, carrying the PEER's identity (the side of the
+      // connection that is NOT the context owner). The old OR-join matched both
+      // sides → two rows per grant, one with the owner's own handle.
       const result = await d1Query(
-        `SELECT cg.connection_id, c.user_a, c.user_b, up.handle
+        `SELECT cg.connection_id,
+                CASE WHEN c.user_a = sc.user_id THEN c.user_b ELSE c.user_a END AS peer_id,
+                up.handle, up.display_name
          FROM context_grants cg
          JOIN connections c ON c.id = cg.connection_id
-         LEFT JOIN user_profiles up ON up.user_id = c.user_a OR up.user_id = c.user_b
+         JOIN sharing_contexts sc ON sc.id = cg.context_id
+         LEFT JOIN user_profiles up
+           ON up.user_id = (CASE WHEN c.user_a = sc.user_id THEN c.user_b ELSE c.user_a END)
          WHERE cg.context_id = ?`,
         [contextId],
       );

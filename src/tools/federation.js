@@ -83,7 +83,9 @@ export function createFederationDomain(deps) {
       const action = String(args?.action || '').trim();
       if (!id) return 'Provide the connection request id.';
       try {
-        if (action === 'accept') { await db.connections.accept(userId, id); return 'Connection accepted.'; }
+        // respondRemote (not accept) so a federated accept fires the signed
+        // connect-response that completes the peer's side of the handshake.
+        if (action === 'accept') { await db.connections.respondRemote(userId, id, 'accept'); return 'Connection accepted.'; }
         if (action === 'reject') { await db.connections.reject(userId, id); return 'Connection request rejected.'; }
         if (action === 'block') { await db.connections.block(userId, id); return 'Peer blocked.'; }
         return 'Unknown action — use accept, reject, or block.';

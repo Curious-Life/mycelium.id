@@ -139,10 +139,26 @@ export function createConnectionsNamespace(deps) {
     } else {
       bodyStr = JSON.stringify(body);
     }
-    await fetchImpl(url, { method: 'POST', headers, body: bodyStr, signal: AbortSignal.timeout(FEDERATION_POST_TIMEOUT_MS) });
+    await fetchImpl(url, { method: 'POST', headers, body: bodyStr, redirect: 'manual', signal: AbortSignal.timeout(FEDERATION_POST_TIMEOUT_MS) });
   }
 
   async function requestRemote(fromUserId, remoteHandle, remoteDomain) {
+    // Existing-connection handling (mirrors the local request() path) — without
+    // this a re-request hits the UNIQUE(user_a,user_b) constraint and surfaces a
+    // raw SQL error. Resolve BEFORE any network work.
+    const remoteId = `${remoteHandle}@${remoteDomain}`;
+    const existing = await d1Query(
+      `SELECT id, status FROM connections WHERE user_a = ? AND user_b = ?`,
+      [fromUserId, remoteId],
+    );
+    const ex = existing.results?.[0];
+    if (ex) {
+      if (ex.status === 'accepted') throw new Error('Already connected to this handle');
+      if (ex.status === 'pending') return ex.id; // idempotent — request already pending
+      if (ex.status === 'blocked') throw new Error('This peer is blocked');
+      if (ex.status === 'rejected') await d1Query(`DELETE FROM connections WHERE id = ?`, [ex.id]); // allow re-request
+    }
+
     let federationEndpoint;
     try {
       federationEndpoint = await resolveFederationEndpoint(remoteDomain, remoteHandle);
@@ -184,7 +200,7 @@ export function createConnectionsNamespace(deps) {
     await d1Query(
       `INSERT INTO connections (id, user_a, user_b, initiated_by, status, remote_instance, remote_user_handle, created_at)
        VALUES (?, ?, ?, ?, 'pending', ?, ?, datetime('now'))`,
-      [id, fromUserId, `${remoteHandle}@${remoteDomain}`, fromUserId, remoteDomain, remoteHandle],
+      [id, fromUserId, remoteId, fromUserId, remoteDomain, remoteHandle],
     );
 
     // Fire-and-forget signed federation POST; failures are handled by reconciliation.
