@@ -234,7 +234,8 @@ host-verified against the live Bot API (token-gated), not CI.
 ### Phase 2 — The agent turn (two-way closes) — ✅ BUILT (2026-06-06)
 - `agent/runtime.js` — `selectRuntime(cfg)` config-implied locus (BYOK key → Claude Agent SDK; none → null =
   capture-only). `agent/backends/claude-sdk.js` — the default runtime, **lazy-imports** the optional
-  `@anthropic-ai/claude-agent-sdk` (declared in `optionalDependencies`), attaches the vault MCP (http to the running
+  `@anthropic-ai/claude-agent-sdk` (NOT a declared dep — install-to-enable, lazy-imported, to keep the vault's
+  supply-chain surface minimal; absent ⇒ clear error), attaches the vault MCP (http to the running
   vault, or stdio-spawn), runs one `query()` turn with `getContext`/`searchMindscape`/`reply`, reports
   delivered/usedReplyTool. `agent/prompt.js` — the reply system prompt with the mandatory delivery contract.
 - `agent/lane.js` — the single-user lane: **serializes** turns (the active-turn registry is one global; overlap
