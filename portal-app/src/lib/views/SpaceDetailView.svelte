@@ -780,8 +780,9 @@
 
 						<div class="space-y-4">
 							<div>
-								<label class="block text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)] mb-1.5">Name</label>
+								<label for="sp-name" class="block text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)] mb-1.5">Name</label>
 								<input
+									id="sp-name"
 									type="text"
 									bind:value={editName}
 									maxlength="80"
@@ -789,8 +790,9 @@
 								/>
 							</div>
 							<div>
-								<label class="block text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)] mb-1.5">Essence</label>
+								<label for="sp-essence" class="block text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)] mb-1.5">Essence</label>
 								<textarea
+									id="sp-essence"
 									bind:value={editEssence}
 									rows="3"
 									maxlength="500"
@@ -799,8 +801,9 @@
 								></textarea>
 							</div>
 							<div>
-								<label class="block text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)] mb-1.5">Voice</label>
+								<label for="sp-voice" class="block text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)] mb-1.5">Voice</label>
 								<input
+									id="sp-voice"
 									type="text"
 									bind:value={editVoice}
 									maxlength="60"
@@ -976,10 +979,11 @@
 									longer accessible through the UI.
 								</p>
 							</header>
-							<label class="block text-[11px] text-[var(--color-text-tertiary)] mb-1.5">
+							<label for="sp-delete-confirm" class="block text-[11px] text-[var(--color-text-tertiary)] mb-1.5">
 								Type <span class="font-mono text-[var(--color-text-primary)]">{space.name}</span> to confirm
 							</label>
 							<input
+								id="sp-delete-confirm"
 								type="text"
 								bind:value={deleteConfirmInput}
 								placeholder={space.name}
