@@ -56,6 +56,30 @@ Test the **federation/spaces work from this session**:
 ### What "Matrix inert" means locally (expected, not a bug)
 At boot there is **no Matrix client** wired (B11 unbuilt), so `spaceSync` is null. Per the safe-degrade design: **share grants/revokes and knowledge adds all succeed and persist locally**, but no peer is invited and nothing mirrors to a room. This is correct behavior for the current build — do **not** file it as a defect. Live delivery is Part C.
 
+### Screen wiring map (audited 2026-06-06)
+
+Every view's `/portal/*` calls cross-referenced against what the V1 server actually mounts at `/api/v1/portal` (`api.ts:40` rewrites the prefix). **All portal routers are mounted; auth-redirect (M2 #1) is the only thing between you and these screens.**
+
+🟢 **Live-wired (V1 backend served — exercise these first):**
+- **ConnectionsView** — incl. the #112 "Shared with @X" panel (`/connections/:id/shared`) + inline revoke. Fully served.
+- **ContextsView** — contexts list/create/grant/territory, all served.
+- **SpacesView / SpaceDetailView** — list/create/knowledge/members/shares/seed/seed-cluster/cluster-hierarchy + the doc cover fetch (`GET /documents/(.+)` regex). Fully served.
+- **TimelineView** (`/agents`,`/identity`,`/messages`), **LibraryView** (list/open/delete/move/pin/folders — only `POST /documents/export` is missing), **agents/+page**, **body/+page** (`/health/summary`).
+
+🟡 **Partial (screen loads; specific sub-features 404):**
+- **MindscapeView** — reads served (realms, territories, fingerprint, activations, complexity, noise-stats, exploration-status). **NOT served:** `/enrichment/status`, `/enrichment/trigger`, and the explore job flow (`/mindscape/explore`, `/explore/status/:id`, `/explore/report/:id`).
+- **SettingsView** — providers/AI-connect, `/settings`, `/channels`, `/stats` served. **NOT served:** `/passkeys`, `/billing`, `/delete-account*`, `/export*`, `/integrations/linear`, `/master-key/restore`, `/channels/global` (cloud-product features).
+- **ProfileView** — handle-check/stats/recompute served; `/avatar`, `/exlibris` not.
+- **vitality/+page** — `/trajectory*` + `/vitality/snapshot` served; `/vitality/arc`, `/vitality/chronicle/by-window` not.
+- **ImportView** — `/import/obsidian` served; `/connectors*` only when a connector runner is configured (conditional mount, `server-rest.js:141`).
+- **agents/_AgentRow** — assignments/secret served; `POST /agents/:id/customize` not.
+
+🔴 **No V1 backend (whole screen — must render graceful-empty, else it throws):**
+- **cycles/+page** (`/cycles*`), **fleet/+page** (`/fleet/*`), **wealth/+page** (`/wealth/*`), **media/+page** (`/attachments*`, `/stream-token/*`).
+
+**Implication for the device session:** the federation/spaces/connections work (this session's deliverable) is **fully live-wired** — test it directly once the app opens. The 🔴 screens are cloud-only features with no V1 backend; confirm they show an empty state rather than crash (M2 #3), and don't chase them as bugs.
+
+
 ## Part C — (Advanced/optional) Take Phase B live on your device
 
 Your machine *can* run a homeserver, so it's a fine place to implement + test **B11**. This is a build task, not just a test task — follow `docs/DEPLOY-federation-phaseB-B11-HANDOFF-2026-06-06.md`:
