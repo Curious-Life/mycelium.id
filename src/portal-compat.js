@@ -207,6 +207,432 @@ export function portalCompatRouter({ db, userId }) {
     } catch { fail(res, 500, 'recompute failed'); }
   });
 
+  // ── Connections (federation Tier-0) — backs the Connections page ─────────
+  // db.connections is wired in getDb. Remote peers cache handle=NULL (the local
+  // user owns the UNIQUE handle), so coalesce the display handle from the
+  // connection row's remote_user_handle. GETs degrade to empty on error.
+  const connId = (req) => decodePath(req.params.id || '');
+  const mapConn = (c) => ({ ...c, other_handle: c.other_handle || c.remote_user_handle || null });
+  const mapPending = (r) => ({
+    id: r.id,
+    handle: r.handle || r.remote_user_handle || null,
+    display_name: r.display_name || null,
+    signature: r.signature || null,
+    avatar_url: r.avatar_url || null,
+    territory_count: r.territory_count ?? 0,
+    realm_count: r.realm_count ?? 0,
+    public_realms_json: r.public_realms_json || null,
+  });
+  const mapSent = (s) => ({
+    id: s.id, status: s.status, created_at: s.created_at,
+    to_handle: s.to_handle || s.remote_user_handle || null,
+    to_display_name: s.to_display_name || null,
+    to_avatar_url: s.to_avatar_url || null,
+  });
+
+  router.get('/connections', async (_req, res) => {
+    try { ok(res, { connections: (await db.connections.list(userId)).map(mapConn) }); }
+    catch { ok(res, { connections: [] }); }
+  });
+  // count of pending INBOUND requests — feeds the nav badge.
+  router.get('/connections/count', async (_req, res) => {
+    try { ok(res, { count: (await db.connections.pending(userId)).length }); }
+    catch { ok(res, { count: 0 }); }
+  });
+  router.get('/connections/pending', async (_req, res) => {
+    try { ok(res, { requests: (await db.connections.pending(userId)).map(mapPending) }); }
+    catch { ok(res, { requests: [] }); }
+  });
+  router.get('/connections/sent', async (_req, res) => {
+    try { ok(res, { sent: (await db.connections.sent(userId)).map(mapSent) }); }
+    catch { ok(res, { sent: [] }); }
+  });
+  // POST /connections/request { toHandle, message? } — message stored client-side only for now.
+  router.post('/connections/request', async (req, res) => {
+    try {
+      const toHandle = String(req.body?.toHandle || '').trim().replace(/^@/, '');
+      if (!toHandle) return fail(res, 400, 'handle required');
+      const id = await db.connections.request(userId, toHandle);
+      ok(res, { ok: true, id });
+    } catch (e) { fail(res, 400, e.message || 'could not send request'); }
+  });
+  // accept/reject route through respondRemote so an accept fires the signed
+  // connect-response callback that completes the peer's side of the handshake.
+  router.post('/connections/:id/accept', async (req, res) => {
+    try { await db.connections.respondRemote(userId, connId(req), 'accept'); ok(res, { ok: true }); }
+    catch (e) { fail(res, 400, e.message || 'could not accept'); }
+  });
+  router.post('/connections/:id/reject', async (req, res) => {
+    try { await db.connections.respondRemote(userId, connId(req), 'reject'); ok(res, { ok: true }); }
+    catch (e) { fail(res, 400, e.message || 'could not reject'); }
+  });
+  router.post('/connections/:id/block', async (req, res) => {
+    try { await db.connections.block(userId, connId(req)); ok(res, { ok: true }); }
+    catch (e) { fail(res, 400, e.message || 'could not block'); }
+  });
+  router.delete('/connections/:id', async (req, res) => {
+    try { await db.connections.disconnect(userId, connId(req)); ok(res, { ok: true }); }
+    catch (e) { fail(res, 400, e.message || 'could not disconnect'); }
+  });
+  router.get('/connections/:id/overlap', async (req, res) => {
+    try { ok(res, { overlap: await db.connections.computeOverlap(userId, connId(req)) }); }
+    catch (e) { fail(res, 400, e.message || 'could not compute overlap'); }
+  });
+  // Everything shared WITH this connection — the management hub: spaces granted
+  // to the peer + contexts (territory facets) granted to the connection.
+  router.get('/connections/:id/shared', async (req, res) => {
+    try {
+      const cid = connId(req);
+      const cr = await db._base.d1Query(
+        `SELECT user_a, user_b FROM connections WHERE id = ? AND (user_a = ? OR user_b = ?) AND status = 'accepted'`,
+        [cid, userId, userId],
+      );
+      const row = cr.results?.[0];
+      if (!row) return ok(res, { peer_id: null, spaces: [], contexts: [] });
+      const peerId = row.user_a === userId ? row.user_b : row.user_a;
+      const spaces = (await db._base.d1Query(
+        `SELECT u.id, u.display_name AS name, sa.role
+         FROM space_access sa JOIN users u ON u.id = sa.space_id
+         WHERE sa.user_id = ? AND sa.revoked_at IS NULL AND u.type = 'space'
+         ORDER BY u.display_name`,
+        [peerId],
+      )).results || [];
+      const contexts = (await db._base.d1Query(
+        `SELECT sc.id, sc.name, sc.is_private
+         FROM context_grants cg JOIN sharing_contexts sc ON sc.id = cg.context_id
+         WHERE cg.connection_id = ? AND sc.user_id = ?
+         ORDER BY sc.name`,
+        [cid, userId],
+      )).results || [];
+      ok(res, { peer_id: peerId, spaces, contexts });
+    } catch { ok(res, { peer_id: null, spaces: [], contexts: [] }); }
+  });
+
+  // ── Spaces (default-private shareable folders, Phase A) ──────────────────
+  // Every read/write is gated by space_access via db.spaces.requireRole, which
+  // is fail-closed (no grant → throws). Non-members get 404 (indistinguishable
+  // from a missing space), so a space reveals nothing by default. randomUUID is
+  // on the base adapter (db._base.randomUUID).
+  const newId = () => db._base.randomUUID();
+  // Run `fn` only if the caller holds at least `minRole` on the space; otherwise
+  // 404 (never leak existence). Returns true when allowed.
+  async function guardSpace(res, spaceId, minRole) {
+    try { await db.spaces.requireRole(spaceId, userId, minRole); return true; }
+    catch { fail(res, 404, 'not found'); return false; }
+  }
+
+  router.get('/spaces', async (_req, res) => {
+    try { ok(res, { spaces: await db.spaces.listForUser(userId) }); }
+    catch { ok(res, { spaces: [] }); }
+  });
+  router.post('/spaces', async (req, res) => {
+    try {
+      const name = String(req.body?.name || '').trim();
+      if (!name) return fail(res, 400, 'name required');
+      const id = newId();
+      await db.spaces.create(id, name, req.body?.essence ?? null, req.body?.voice ?? null, userId);
+      ok(res, { id, ...(await db.spaces.get(id)), role: 'creator' });
+    } catch { fail(res, 500, 'could not create space'); }
+  });
+  router.get('/spaces/territories', async (_req, res) => {
+    try {
+      const terr = await db.mindscape.getTerritoryProfiles(userId);
+      ok(res, { territories: (terr || []).map((t) => ({ id: String(t.territory_id ?? t.id), name: t.name, essence: t.essence, message_count: t.message_count ?? 0 })) });
+    } catch { ok(res, { territories: [] }); }
+  });
+  // The mindscape cluster hierarchy (Realm → Theme → Territory) for the
+  // "share a whole cluster at a level" picker.
+  router.get('/spaces/cluster-hierarchy', async (_req, res) => {
+    try {
+      const [realms, themes, territories] = await Promise.all([
+        db.mindscape.getRealms(userId).catch(() => []),
+        db.mindscape.getSemanticThemes(userId).catch(() => []),
+        db.mindscape.getTerritoryProfiles(userId).catch(() => []),
+      ]);
+      const byRealm = new Map();
+      for (const t of themes || []) {
+        const k = String(t.realm_id);
+        if (!byRealm.has(k)) byRealm.set(k, []);
+        byRealm.get(k).push({ semantic_theme_id: t.semantic_theme_id, name: t.name, essence: t.essence, territory_count: t.territory_count ?? 0 });
+      }
+      const out = (realms || []).map((r) => ({
+        realm_id: r.realm_id, name: r.name, essence: r.essence, territory_count: r.territory_count ?? 0,
+        themes: byRealm.get(String(r.realm_id)) || [],
+      }));
+      ok(res, { realms: out, territory_count: (territories || []).length });
+    } catch { ok(res, { realms: [], territory_count: 0 }); }
+  });
+  router.get('/spaces/:id', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'member'))) return;
+    try { ok(res, { ...(await db.spaces.get(id)), role: await db.spaces.getRole(id, userId) }); }
+    catch { fail(res, 500, 'could not load space'); }
+  });
+  router.put('/spaces/:id', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'creator'))) return;
+    try {
+      const b = req.body || {};
+      await db.spaces.update(id, { name: b.name, essence: b.essence, voice: b.voice, coverDocPath: b.coverDocPath });
+      ok(res, { ok: true, ...(await db.spaces.get(id)) });
+    } catch { fail(res, 500, 'could not update space'); }
+  });
+  router.delete('/spaces/:id', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'creator'))) return;
+    try { await db.spaces.delete(id); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not delete space'); }
+  });
+
+  // knowledge
+  router.get('/spaces/:id/knowledge', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'member'))) return;
+    try { ok(res, { entries: await db.spaceKnowledge.list(id) }); } catch { ok(res, { entries: [] }); }
+  });
+  router.post('/spaces/:id/knowledge', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try {
+      const content = String(req.body?.content || '').trim();
+      if (!content) return fail(res, 400, 'content required');
+      const entryId = await db.spaceKnowledge.add(id, content, userId, null, 'direct', 'all', req.body?.domain_tags ?? null);
+      ok(res, { ok: true, id: entryId });
+    } catch { fail(res, 500, 'could not add knowledge'); }
+  });
+  router.delete('/spaces/:id/knowledge/:entryId', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try { await db.spaceKnowledge.revoke(decodePath(req.params.entryId), id); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not remove knowledge'); }
+  });
+  router.post('/spaces/:id/seed', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try {
+      const ids = Array.isArray(req.body?.territory_ids) ? req.body.territory_ids : [];
+      const terr = await db.mindscape.getTerritoryProfiles(userId).catch(() => []);
+      const byId = new Map((terr || []).map((t) => [String(t.territory_id ?? t.id), t]));
+      for (const tid of ids) {
+        const t = byId.get(String(tid));
+        if (t) await db.spaceKnowledge.add(id, t.essence || t.name || '', userId, String(tid), 'territory', 'all', null);
+      }
+      ok(res, { ok: true, seeded: ids.length });
+    } catch { fail(res, 500, 'could not seed space'); }
+  });
+  // Share a whole CLUSTER at a chosen level (realm / theme / territory) — one
+  // traceable knowledge card synthesizing the cluster's essence + members.
+  // source_ref ('realm:N' / 'theme:N:M' / 'territory:K') keeps it re-resolvable
+  // (the Phase-B Megolm mirror can re-expand it). Never sends embeddings.
+  router.post('/spaces/:id/seed-cluster', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try {
+      const level = req.body?.level;
+      const realmId = req.body?.realm_id, themeId = req.body?.semantic_theme_id, terrId = req.body?.territory_id;
+      const [realms, themes, territories] = await Promise.all([
+        db.mindscape.getRealms(userId).catch(() => []),
+        db.mindscape.getSemanticThemes(userId).catch(() => []),
+        db.mindscape.getTerritoryProfiles(userId).catch(() => []),
+      ]);
+      let label, name, essence, members = [], sourceRef, srcTerr = null;
+      if (level === 'territory') {
+        const t = (territories || []).find((x) => String(x.territory_id) === String(terrId));
+        if (!t) return fail(res, 404, 'territory not found');
+        label = 'Territory'; name = t.name; essence = t.essence; sourceRef = `territory:${terrId}`; srcTerr = String(terrId);
+      } else if (level === 'theme') {
+        const th = (themes || []).find((x) => String(x.realm_id) === String(realmId) && String(x.semantic_theme_id) === String(themeId));
+        if (!th) return fail(res, 404, 'theme not found');
+        label = 'Theme'; name = th.name; essence = th.essence; sourceRef = `theme:${realmId}:${themeId}`;
+        members = (territories || []).filter((t) => String(t.realm_id) === String(realmId) && String(t.semantic_theme_id) === String(themeId));
+      } else if (level === 'realm') {
+        const r = (realms || []).find((x) => String(x.realm_id) === String(realmId));
+        if (!r) return fail(res, 404, 'realm not found');
+        label = 'Realm'; name = r.name; essence = r.essence; sourceRef = `realm:${realmId}`;
+        members = (territories || []).filter((t) => String(t.realm_id) === String(realmId));
+      } else {
+        return fail(res, 400, 'level must be realm, theme, or territory');
+      }
+      const memberLines = members.slice(0, 50).map((m) => `• ${m.name}${m.essence ? ` — ${m.essence}` : ''}`).join('\n');
+      const content = [`${label}: ${name || '(unnamed)'}`, essence, memberLines].filter(Boolean).join('\n\n');
+      const entryId = await db.spaceKnowledge.add(id, content, userId, srcTerr, level, 'all', null, sourceRef);
+      ok(res, { ok: true, id: entryId, level, members: members.length });
+    } catch (e) { fail(res, 500, e.message || 'could not share cluster'); }
+  });
+
+  // members + sharing (grant a connection access; default-deny)
+  router.get('/spaces/:id/members', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'member'))) return;
+    try { ok(res, { members: await db.spaceAccess.list(id) }); } catch { ok(res, { members: [] }); }
+  });
+  router.get('/spaces/:id/shares', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'creator'))) return;
+    try {
+      const [members, connections] = await Promise.all([db.spaceAccess.list(id), db.connections.list(userId)]);
+      ok(res, { members, connections });
+    } catch { ok(res, { members: [], connections: [] }); }
+  });
+  router.post('/spaces/:id/shares', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'creator'))) return;
+    try {
+      const granteeId = String(req.body?.granteeId || '').trim();
+      const role = ['member', 'contributor'].includes(req.body?.role) ? req.body.role : 'member';
+      if (!granteeId) return fail(res, 400, 'granteeId required');
+      if (granteeId === userId) return fail(res, 400, 'cannot share with yourself');
+      // Grantee must be an ACCEPTED connection — don't let an arbitrary id be
+      // wired into a space's access list (defense-in-depth; the UI already only
+      // offers connections).
+      const conns = await db.connections.list(userId);
+      if (!conns.some((c) => c.other_user_id === granteeId)) return fail(res, 400, 'grantee must be an accepted connection');
+      await db.spaceAccess.grant(id, granteeId, role, userId);
+      ok(res, { ok: true });
+    } catch { fail(res, 500, 'could not share space'); }
+  });
+  router.delete('/spaces/:id/shares/:granteeId', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'creator'))) return;
+    try { await db.spaceAccess.revoke(id, decodePath(req.params.granteeId)); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not revoke share'); }
+  });
+
+  // rooms (nested folders) + documents
+  const roomsList = async (req, res, parentId) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'member'))) return;
+    try { ok(res, { rooms: await db.spaceRooms.listChildren(id, parentId) }); } catch { ok(res, { rooms: [] }); }
+  };
+  router.get('/spaces/:id/rooms', async (req, res) => {
+    const parent = typeof req.query.parent === 'string' && req.query.parent ? req.query.parent : null;
+    await roomsList(req, res, parent);
+  });
+  router.get('/spaces/:id/rooms/:roomId/children', (req, res) => roomsList(req, res, decodePath(req.params.roomId)));
+  router.post('/spaces/:id/rooms', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try {
+      const name = String(req.body?.name || '').trim();
+      if (!name) return fail(res, 400, 'name required');
+      const room = await db.spaceRooms.create({ spaceId: id, parentId: req.body?.parentId ?? null, name, essence: req.body?.essence ?? null, createdBy: userId });
+      ok(res, { ok: true, id: room?.id ?? room });
+    } catch { fail(res, 500, 'could not create folder'); }
+  });
+  router.delete('/spaces/:id/rooms/:roomId', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try { await db.spaceRooms.delete(decodePath(req.params.roomId), id); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not delete folder'); }
+  });
+  // contents: at space root or within a room
+  const contentsList = async (req, res, roomId) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'member'))) return;
+    try {
+      const documents = roomId ? await db.spaceRoomDocuments.listByRoom(roomId, userId) : await db.spaceRoomDocuments.listAtRoot(id, userId);
+      ok(res, { documents });
+    } catch { ok(res, { documents: [] }); }
+  };
+  router.get('/spaces/:id/contents', (req, res) => contentsList(req, res, null));
+  router.get('/spaces/:id/rooms/:roomId/contents', (req, res) => contentsList(req, res, decodePath(req.params.roomId)));
+  const seedDoc = async (req, res, roomId) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try {
+      const documentPath = String(req.body?.documentPath || '').trim();
+      if (!documentPath) return fail(res, 400, 'documentPath required');
+      const row = await db.spaceRoomDocuments.add({ spaceId: id, roomId, documentPath, createdBy: userId });
+      ok(res, { ok: true, id: row?.id ?? row });
+    } catch { fail(res, 500, 'could not add document'); }
+  };
+  router.post('/spaces/:id/seed-doc', (req, res) => seedDoc(req, res, null));
+  router.post('/spaces/:id/rooms/:roomId/seed-doc', (req, res) => seedDoc(req, res, decodePath(req.params.roomId)));
+  const removeContent = async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardSpace(res, id, 'contributor'))) return;
+    try { await db.spaceRoomDocuments.remove(decodePath(req.params.docId), id); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not remove document'); }
+  };
+  router.delete('/spaces/:id/contents/:docId', removeContent);
+  router.delete('/spaces/:id/rooms/:roomId/contents/:docId', removeContent);
+
+  // ── Contexts (the "Work Self / Private Self" granular model) ─────────────
+  // A context is a named bucket of territories shared with chosen connections —
+  // "what facet of yourself they see". Default-private: a territory is invisible
+  // to a connection unless it's in a non-private context granted to them
+  // (db.contexts.canSeeTerritory is the fail-closed gate). Cross-node visibility
+  // activates with federation; the model is recorded + enforced locally now.
+  async function ownsContext(id) {
+    try {
+      const r = await db._base.d1Query(`SELECT 1 FROM sharing_contexts WHERE id = ? AND user_id = ?`, [id, userId]);
+      return (r.results || []).length > 0;
+    } catch { return false; }
+  }
+  async function guardContext(res, id) {
+    if (await ownsContext(id)) return true;
+    fail(res, 404, 'not found'); return false;
+  }
+
+  router.get('/contexts', async (_req, res) => {
+    try { await db.contexts.ensureDefaults(userId); ok(res, { contexts: await db.contexts.list(userId) }); }
+    catch { ok(res, { contexts: [] }); }
+  });
+  router.post('/contexts', async (req, res) => {
+    try {
+      const name = String(req.body?.name || '').trim();
+      if (!name) return fail(res, 400, 'name required');
+      const id = await db.contexts.create(userId, { name, is_private: !!req.body?.is_private });
+      ok(res, { ok: true, id });
+    } catch (e) { fail(res, 400, e.message || 'could not create context'); }
+  });
+  router.put('/contexts/:id', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { await db.contexts.rename(userId, id, String(req.body?.name || '').trim()); ok(res, { ok: true }); }
+    catch (e) { fail(res, 400, e.message || 'could not rename'); }
+  });
+  router.delete('/contexts/:id', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { await db.contexts.remove(userId, id); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not delete context'); }
+  });
+  router.get('/contexts/:id/territories', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { ok(res, { territories: await db.contexts.getTerritories(id) }); } catch { ok(res, { territories: [] }); }
+  });
+  router.post('/contexts/:id/territories/:territoryId', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { await db.contexts.addTerritory(id, decodePath(req.params.territoryId)); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not add territory'); }
+  });
+  router.delete('/contexts/:id/territories/:territoryId', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { await db.contexts.removeTerritory(id, decodePath(req.params.territoryId)); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not remove territory'); }
+  });
+  router.get('/contexts/:id/connections', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { ok(res, { grants: await db.contexts.getGrants(id) }); } catch { ok(res, { grants: [] }); }
+  });
+  router.post('/contexts/:id/grant/:connId', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { await db.contexts.grant(id, decodePath(req.params.connId)); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not grant'); }
+  });
+  router.delete('/contexts/:id/grant/:connId', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { await db.contexts.revoke(id, decodePath(req.params.connId)); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not revoke'); }
+  });
+
   // ── Settings (Phase S) — timezone only; theme is client-side localStorage ─
   router.get('/settings', (_req, res) => ok(res, { settings: { timezone: 'UTC' } }));
 

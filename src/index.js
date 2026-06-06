@@ -10,6 +10,8 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
+import { createIdentity, isValidHandle } from './identity/identity.js';
+import { readRemoteConfig } from './remote/config.js';
 import { buildDomains, collectTools, createMcpServer, TIER2_TOOLS, TOPOLOGY_NOT_READY_MESSAGE } from './mcp.js';
 import { createServiceEmbedder } from './search/embedder.js';
 import { resolveKeys } from './crypto/key-source.js';
@@ -71,8 +73,24 @@ export async function boot({
   // must run before buildDomains (the first encrypt/decrypt path). Process-local
   // env, memory-only, never logged — consistent with the key discipline.
   process.env.ENCRYPTION_MASTER_KEY = userHex;
-  const { db, close } = getDb({ dbPath, userKey, systemKey });
-  const { domains, deferred, searchHelpers, isTopologyReady } = buildDomains({ db, userId, embedder });
+
+  // Box identity (Tier-0 federation): one ed25519 identity from the master key,
+  // bound to the public host when remote access is configured. publicHost is the
+  // full did:web host (e.g. alice.mycelium.id, incl. custom domains); handle is
+  // its first label, validated. When remote is off both are null → the
+  // federation surfaces fail closed (did.json 404, /federation/connect 503).
+  const publicHost = readRemoteConfig().publicHost || '';
+  const handleCandidate = publicHost ? publicHost.split('.')[0] : null;
+  const handle = handleCandidate && isValidHandle(handleCandidate) ? handleCandidate : null;
+  const identity = createIdentity({ masterHex: userHex, handle });
+  const federationDeps = {
+    sign: handle ? (canonical) => identity.sign(canonical) : undefined,
+    did: publicHost ? () => `did:web:${publicHost}` : undefined,
+    selfInstance: () => publicHost,
+  };
+
+  const { db, close } = getDb({ dbPath, userKey, systemKey, federationDeps });
+  const { domains, deferred, searchHelpers, isTopologyReady } = buildDomains({ db, userId, embedder, identity });
   // Cold-start gating (Phase 4): Tier-2 readers return a uniform "not ready"
   // message until the topology pipeline has run, instead of honest-empty.
   const { tools, handlers } = collectTools(domains, {
@@ -84,7 +102,7 @@ export async function boot({
   // handlers is returned so non-MCP transports (REST) can reuse the SAME
   // tool handler map without re-implementing tool logic. userId is returned so
   // HTTP ingestion routes (upload) can scope writes without re-deriving it.
-  return { server, db, close, tools, handlers, deferred, userId, searchHelpers, isTopologyReady };
+  return { server, db, close, tools, handlers, deferred, userId, identity, publicHost, handle, searchHelpers, isTopologyReady };
 }
 
 async function startStdio() {

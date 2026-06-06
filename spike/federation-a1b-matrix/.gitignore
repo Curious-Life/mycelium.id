@@ -1,0 +1,9 @@
+node_modules/
+.venv/
+*.db
+*.db-*
+homeserver.yaml
+*.signing.key
+*.log
+*.log.config
+media_store/

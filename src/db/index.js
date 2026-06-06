@@ -32,12 +32,18 @@ import { createTerritoryDocsNamespace } from './territory-docs.js';
 import { createProvidersNamespace } from './providers.js';
 import { createConnectorsNamespace } from './connectors.js';
 import { createUsersNamespace } from './users.js';
+import { createConnectionsNamespace } from './connections.js';
+import { createSpaceAccessNamespace } from './space-access.js';
+import { createSpaceRoomsNamespace } from './space-rooms.js';
+import { createSpaceRoomDocumentsNamespace } from './space-room-documents.js';
+import { createSpaceConversationsNamespace } from './space-conversations.js';
+import { createContextsNamespace } from './contexts.js';
 
 /**
  * Open the vault db and assemble the tool-facing `db` namespace object.
  * @returns {{ db: object, close: () => void, adapter: object }}
  */
-export function getDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
+export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federationDeps = {} }) {
   const adapter = createDb({ dbPath, userKey, systemKey, scope });
   const { d1Query, d1QueryAdmin, d1Batch, firstRow, parseJson, randomUUID, now } = adapter;
 
@@ -63,6 +69,23 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
     canvases: createCanvasesNamespace({ d1Query, firstRow }),
     audit: createAuditNamespace({ d1QueryAdmin, randomUUID }),
     spaces: createSpacesNamespace({ d1Query, firstRow, parseJson }),
+    // Shared spaces as default-private folders (Phase A). space_access is the
+    // grant primitive (fail-closed: no grant = invisible); rooms + room-documents
+    // are the nested-folder model; contexts is the per-connection territory model.
+    spaceAccess: createSpaceAccessNamespace({ d1Query }),
+    spaceRooms: createSpaceRoomsNamespace({ d1Query, firstRow, randomUUID }),
+    spaceRoomDocuments: createSpaceRoomDocumentsNamespace({ d1Query, randomUUID }),
+    spaceConversations: createSpaceConversationsNamespace({ d1Query, firstRow, randomUUID }),
+    contexts: createContextsNamespace({ d1Query, randomUUID }),
+    // Federation (Tier-0): the social graph + cross-instance connect. sign/did/
+    // selfInstance come from boot() (derived from the box identity + publicHost);
+    // absent when remote is off → outbound stays unsigned-disabled, cleanly.
+    connections: createConnectionsNamespace({
+      d1Query,
+      sign: federationDeps.sign,
+      did: federationDeps.did,
+      selfInstance: federationDeps.selfInstance,
+    }),
     spaceKnowledge: createSpaceKnowledgeNamespace({ d1Query, firstRow, randomUUID }),
     publicPresence: createPublicPresenceNamespace({ d1Query }),
 

@@ -36,6 +36,8 @@ import { createGatewayHandlers } from './gateway/openai-compat.js';
 import { createEmbeddingsHandler } from './gateway/embeddings.js';
 import { matchStaticBearer } from './gateway/static-bearer.js';
 import { createPathThrottle } from './http/rate-limit.js';
+import { createFederationRouter } from './federation/router.js';
+import { readRemoteConfig } from './remote/config.js';
 
 /**
  * Build the Express app (no listen). Returns { app, auth, baseURL, transports }.
@@ -217,6 +219,23 @@ export async function createHttpApp(opts = {}) {
   const ingest = await boot(opts.bootOpts);
   // Enrichment nudge for upload-created messages (same best-effort seam as MCP).
   ingest.enqueueEnrichment = createEnqueueEnrichment({ userId: ingest.userId });
+
+  // Federation (Tier-0): did:web + WebFinger + signed inbound /federation/connect.
+  // Mounted AFTER express.json() so the connect handler sees the parsed payload
+  // (it verifies over canonicalize(payload), not raw bytes). The /.well-known
+  // GETs inherit the CORS middleware above and are public by design. getHost/
+  // getHandle re-read remote config per request so a handle claimed after boot
+  // is picked up without a restart. Fail closed when no public host is set.
+  app.use(createFederationRouter({
+    db: ingest.db,
+    userId: ingest.userId,
+    identity: ingest.identity,
+    getHost: () => readRemoteConfig().publicHost || '',
+    getHandle: () => {
+      const h = (readRemoteConfig().publicHost || '').split('.')[0];
+      return h || null;
+    },
+  }));
 
   // Stateful transport registry: sessionId → { transport, close }.
   const transports = new Map();
