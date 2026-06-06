@@ -113,6 +113,9 @@ export async function createHttpApp(opts = {}) {
   // Mounted BEFORE the auth handler so a 429 short-circuits before better-auth.
   app.use(createPathThrottle({ method: 'POST', path: '/api/auth/sign-in/email', max: 5, windowMs: 60_000 }));
   app.use(createPathThrottle({ method: 'POST', path: '/api/auth/passkey/verify-authentication', max: 10, windowMs: 60_000 }));
+  // /login is the OAuth-authorize login form — it ALSO checks the operator
+  // password (signInEmail) and is relay-exposed, so throttle it too.
+  app.use(createPathThrottle({ method: 'POST', path: '/login', max: 5, windowMs: 60_000 }));
 
   // better-auth owns everything under /api/auth/* (Express 5 NAMED splat).
   // Mounted BEFORE express.json() so better-auth parses its own bodies.
