@@ -42,7 +42,6 @@ import { createSpaceRoomsNamespace } from './space-rooms.js';
 import { createSpaceRoomDocumentsNamespace } from './space-room-documents.js';
 import { createSpaceConversationsNamespace } from './space-conversations.js';
 import { createContextsNamespace } from './contexts.js';
-import { createIdentityChannelsNamespace } from './identity-channels.js';
 import { createSpaceMatrixRoomsNamespace } from './space-matrix-rooms.js';
 
 /**
@@ -127,7 +126,6 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // ONLY via the internal router (src/internal-router.js); no MCP tool calls
     // them, so wiring them is additive — it changes no existing tool behavior.
     egressAudit: createEgressAuditNamespace({ d1Query }),
-    identityChannels: createIdentityChannelsNamespace({ d1Query, firstRow }),
     telegramGroups: createTelegramGroupsNamespace({ d1Query }),
     channelAccess: createChannelAccessNamespace({ d1Query, firstRow }),
 
