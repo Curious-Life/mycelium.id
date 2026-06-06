@@ -32,6 +32,8 @@ import { createTerritoryDocsNamespace } from './territory-docs.js';
 import { createProvidersNamespace } from './providers.js';
 import { createConnectorsNamespace } from './connectors.js';
 import { createUsersNamespace } from './users.js';
+import { createEgressAuditNamespace } from './egress-audit.js';
+import { createIdentityChannelsNamespace } from './identity-channels.js';
 
 /**
  * Open the vault db and assemble the tool-facing `db` namespace object.
@@ -88,6 +90,14 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
     // §4g "smart routing" toggle (the cascade preference the gateway reads
     // DB-first, src/gateway/openai-compat.js).
     users: createUsersNamespace({ d1Query, firstRow }),
+
+    // Channel egress — the channel-daemon's loopback chokepoint records every
+    // outbound send here (hash only, never plaintext — egress-audit.js) and
+    // resolves channel-authority from identity_channels. Both are read/written
+    // ONLY via the internal router (src/internal-router.js); no MCP tool calls
+    // them, so wiring them is additive — it changes no existing tool behavior.
+    egressAudit: createEgressAuditNamespace({ d1Query }),
+    identityChannels: createIdentityChannelsNamespace({ d1Query, firstRow }),
 
     // db.shareLinks is intentionally omitted — every call site is optional-
     // chained (tools/documents.js:102,516 `db.shareLinks?.…`), so absence
