@@ -27,6 +27,7 @@ import { startEnrichDrainer } from './enrich/drainer.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
 import { setSessionKeys } from './account/session-keys.js';
 import { isTrustedLoopback } from './http/loopback.js';
+import { createVaultAuthMiddleware, csrfCookieMiddleware, isAuthorized } from './http/require-vault-auth.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CANONICAL_BUILD = path.join(HERE, '..', 'portal-app', 'build');
@@ -93,9 +94,13 @@ function ensureVaultSchema(dbFile) {
 /** Build the express sub-app that serves every VAULT-DEPENDENT route. Mounted
  *  behind a guard so it only handles traffic once the vault is open; until then
  *  data calls get a 503 and only the account ceremony + static UI are served. */
-function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner }) {
+function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth }) {
   const v = express();
   v.disable('x-powered-by');
+  // Fail-closed auth gate FIRST: loopback (desktop) bypasses; every networked
+  // request to a vault-data path needs a valid session/Bearer (step 1.2). Only
+  // enforces on data paths, so SPA navigation still falls through to static.
+  if (vaultAuth) v.use(vaultAuth);
   v.use('/api/v1/portal', portalCompatRouter({ db, userId }));
   // S1 measurement REST bridge — auth-GATED, fail-closed (the rest of the V1
   // surface is unauthenticated/localhost-only; this surface decrypts the
@@ -243,7 +248,7 @@ export async function startRestServer({
       if (!injectedKeys) {
         connectorScheduler = startConnectorScheduler({ runner: connectorRunner });
       }
-      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner });
+      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId }) });
     } finally {
       booting = false;
     }
@@ -267,6 +272,11 @@ export async function startRestServer({
   const app = express();
   app.disable('x-powered-by');
 
+  // Issue the double-submit CSRF cookie early so it rides the SPA document load,
+  // /auth/session, and every subsequent request. Loopback (desktop) ignores it
+  // (the gate bypasses CSRF for loopback); harmless there.
+  app.use(csrfCookieMiddleware);
+
   // Account ceremony — ALWAYS mounted (this is what setup mode serves): create
   // the vault, restore from a recovery key, or re-view the key. Mounted before
   // the vault guard so /api/v1/account/* is never 503'd.
@@ -284,7 +294,13 @@ export async function startRestServer({
 
   // Local "always signed in" shim so the canonical portal's session check
   // (/auth/session) succeeds and the app opens instead of bouncing to /login.
-  app.use('/auth', authShimRouter({ userId: resolvedUserId }));
+  app.use('/auth', authShimRouter({
+    userId: resolvedUserId,
+    // Networked clients (over the relay) must present a valid session; loopback
+    // (desktop) stays "always signed in". So /auth/session 401s an unauthed
+    // networked browser → the SPA bounces it to /login (operator password).
+    resolveAuthorized: (req) => isAuthorized(req, { userId: resolvedUserId }),
+  }));
 
   // Vault-dependent routes: delegate to the sub-app once the vault is open. Until
   // then, DATA calls get a clear 503 while the static UI still loads (so the
