@@ -19,6 +19,9 @@
     "targets": ["app", "dmg"],
     "category": "Productivity",
     "shortDescription": "Your private cognitive vault",
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "resources": {
       "../build-staging/": "app"
     },

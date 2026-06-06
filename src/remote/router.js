@@ -59,6 +59,9 @@ export function remoteRouter() {
       operatorEmail: rc.operatorEmail,
       passwordSet: operatorUserExists(),
       httpListening: await probeListening(port),
+      // Non-secret transport coords for the own-relay / own-domain UI (O9).
+      controlPlaneUrl: rc.controlPlaneUrl || '',
+      relayAddr: rc.relayAddr || '',
     });
   });
 
@@ -136,6 +139,30 @@ export function remoteRouter() {
     }
   });
 
+  // Public Turnstile SITEKEY for the connect widget — proxied from the control
+  // plane's /v1/config so the app never bakes in a key. NON-SECRET (the secret
+  // stays in the control-plane env). Best-effort + fail-open to null: a sitekey
+  // we can't fetch just means "no widget"; the /v1/challenge gate is the real
+  // boundary, so a missing widget degrades to a clear 'bot check failed', never
+  // to a bypass.
+  router.get('/managed/turnstile', async (_req, res) => {
+    const base = readRemoteConfig().controlPlaneUrl.replace(/\/$/, '');
+    if (!isHttpsOrLocal(base)) { res.json({ sitekey: null, origin: null }); return; }
+    // The widget embeds <origin>/turnstile in a cross-origin iframe and accepts a
+    // token only from this exact origin — so hand back both the sitekey and the
+    // control-plane origin it must validate against.
+    let origin = null;
+    try { origin = new URL(base).origin; } catch { origin = null; }
+    try {
+      const r = await cpFetch(`${base}/v1/config`);
+      const data = await r.json().catch(() => ({}));
+      const sitekey = typeof data?.turnstileSitekey === 'string' && data.turnstileSitekey ? data.turnstileSitekey : null;
+      res.json({ sitekey, origin: sitekey ? origin : null });
+    } catch {
+      res.json({ sitekey: null, origin: null });
+    }
+  });
+
   router.post('/connect-managed', async (req, res) => {
     const handle = String(req.body?.handle || '').trim().toLowerCase();
     // Optional Cloudflare Turnstile token from the app's widget — forwarded to
@@ -163,6 +190,15 @@ export function remoteRouter() {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(claim),
       });
       data = await pvRes.json().catch(() => ({}));
+      // Reserve-then-pay (O5): the control plane held the handle and wants payment.
+      // Surface the Stripe Checkout URL so the UI can open the browser; after paying,
+      // the app re-calls connect-managed (now entitled). Validate it's https (the
+      // response is untrusted — never open a non-https URL we were handed).
+      if (pvRes.status === 402) {
+        const checkoutUrl = typeof data?.checkoutUrl === 'string' ? data.checkoutUrl : '';
+        if (!/^https:\/\//i.test(checkoutUrl)) { res.status(502).json({ ok: false, error: 'control plane returned an invalid checkout URL' }); return; }
+        res.status(402).json({ ok: false, error: 'subscription required', checkoutUrl }); return;
+      }
       if (!pvRes.ok) { res.status(pvRes.status === 409 ? 409 : 400).json({ ok: false, error: data.error || 'provision failed' }); return; }
     } catch (err) {
       const caller = /invalid handle|nonce/i.test(String(err?.message || ''));
@@ -196,6 +232,37 @@ export function remoteRouter() {
       return;
     }
     res.json({ ok: true, host, connectorUrl: `https://${host}/mcp`, restartRequired: true });
+  });
+
+  // Manage billing (O7): sign a 'billing' claim with the master key and exchange
+  // it at the control plane for a one-time Stripe Customer Portal URL (cancel /
+  // update card / see paid_until). The UI opens the returned https URL. Only a
+  // managed tenant with the vault key can do this; the URL is validated https.
+  router.get('/managed/billing-portal', async (_req, res) => {
+    const rc = readRemoteConfig();
+    const masterHex = process.env.ENCRYPTION_MASTER_KEY;
+    if (rc.remoteMode !== 'managed' || !rc.publicHost) { res.status(400).json({ ok: false, error: 'not on a managed address' }); return; }
+    if (!masterHex) { res.status(503).json({ ok: false, error: 'vault is locked — finish setup first' }); return; }
+    const base = rc.controlPlaneUrl.replace(/\/$/, '');
+    if (!isHttpsOrLocal(base)) { res.status(400).json({ ok: false, error: 'control plane URL must be https' }); return; }
+    const handle = rc.publicHost.split('.')[0];
+    try {
+      const nRes = await cpFetch(`${base}/v1/billing/nonce`);
+      if (!nRes.ok) throw new Error('nonce failed');
+      const { nonce } = await nRes.json();
+      const claim = buildClaim({ action: 'billing', handle, nonce, masterHex });
+      const pRes = await cpFetch(`${base}/v1/billing/portal`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(claim),
+      });
+      const data = await pRes.json().catch(() => ({}));
+      if (pRes.status === 404) { res.status(404).json({ ok: false, error: 'no subscription on file' }); return; }
+      if (!pRes.ok || typeof data.url !== 'string' || !/^https:\/\//i.test(data.url)) {
+        res.status(502).json({ ok: false, error: 'could not open billing portal' }); return;
+      }
+      res.json({ ok: true, url: data.url });
+    } catch {
+      res.status(502).json({ ok: false, error: 'could not reach the control plane' });
+    }
   });
 
   // Disconnect any remote mode: stop on next launch + remove sidecar configs.

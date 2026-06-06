@@ -280,7 +280,7 @@
 		<div class="overlap-panel">
 			<div class="overlap-header">
 				<h2>You & @{selectedConnection.other_handle}</h2>
-				<button onclick={() => disconnectConnection(selectedConnection.id)} class="btn-sm btn-ghost btn-danger">Disconnect</button>
+				<button onclick={() => selectedConnection && disconnectConnection(selectedConnection.id)} class="btn-sm btn-ghost btn-danger">Disconnect</button>
 			</div>
 
 			{#if overlapLoading}

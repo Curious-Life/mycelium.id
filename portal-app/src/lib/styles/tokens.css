@@ -37,11 +37,15 @@
 	--color-accent-amethyst-rgb: 167 139 250;
 	--color-accent-coral-rgb: 248 113 113;
 	--color-accent-jade-rgb: 74 222 128;
+	--color-accent-teal-rgb: 45 212 191;
+	--color-accent-rose-rgb: 244 114 182;
 	--color-accent: rgb(var(--color-accent-rgb));
 	--color-accent-aurum: rgb(var(--color-accent-aurum-rgb));
 	--color-accent-amethyst: rgb(var(--color-accent-amethyst-rgb));
 	--color-accent-coral: rgb(var(--color-accent-coral-rgb));
 	--color-accent-jade: rgb(var(--color-accent-jade-rgb));
+	--color-accent-teal: rgb(var(--color-accent-teal-rgb));
+	--color-accent-rose: rgb(var(--color-accent-rose-rgb));
 
 	/* Interactive states */
 	--color-focus-ring: rgba(91, 159, 232, 0.5);
@@ -114,6 +118,8 @@
 	--color-accent-amethyst-rgb: 139 111 224;
 	--color-accent-coral-rgb: 232 92 92;
 	--color-accent-jade-rgb: 56 201 106;
+	--color-accent-teal-rgb: 13 148 136;
+	--color-accent-rose-rgb: 219 80 140;
 
 	--color-focus-ring: rgba(74, 139, 212, 0.5);
 	--color-hover: rgba(0, 0, 0, 0.03);

@@ -798,7 +798,7 @@
 						{:else if showGenerateButton && status?.aiModelsReady === false}
 							<p class="generate-hint" style="color: var(--color-text-secondary);">AI models are downloading on your server. Generation will be available shortly.</p>
 						{:else if showGenerateButton}
-							<button class="btn-grow" onclick={startGenerate} disabled={generateCooldownSec > 0}>
+							<button class="btn-grow" onclick={() => startGenerate()} disabled={generateCooldownSec > 0}>
 								{#if generateCooldownSec > 0}
 									Wait {Math.ceil(generateCooldownSec / 60)} min
 								{:else}

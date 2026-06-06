@@ -78,7 +78,7 @@ rmSync(DB, { force: true });
 const registry = openRegistry(DB);
 const dnsRecords = [];
 
-function mkPlane(turnstile) {
+function mkPlane(turnstile, turnstileSitekey) {
   const nonces = createNonceStore();
   const dns = createDnsClient({ provider: 'mock', zone: 'mycelium.id', relayIp: '203.0.113.7', records: dnsRecords });
   const acmeDns = createAcmeDnsClient({ mock: true });
@@ -86,7 +86,7 @@ function mkPlane(turnstile) {
     registry, dns, acmeDns, nonces, relayAddr: 'relay.mycelium.id:7000', zone: 'mycelium.id',
     acmeDnsServer: 'https://acme-dns.mycelium.id',
     rateLimit: createRateLimiter({ capacity: 1000, refillPerMin: 1000 }), dailyCap: createDailyCap({ max: 1000 }),
-    turnstile,
+    turnstile, turnstileSitekey,
   });
   return app;
 }
@@ -95,7 +95,7 @@ const getRaw = async (u) => { const r = await fetch(u); return { status: r.statu
 const postJson = async (u, body) => { const r = await fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); return { status: r.status, data: await r.json().catch(() => ({})) }; };
 
 const offServer = await listen(mkPlane(createTurnstileVerifier({})));
-const onServer = await listen(mkPlane(createTurnstileVerifier({ secret: 'GATE-SECRET-DO-NOT-LEAK', fetch: okFetch })));
+const onServer = await listen(mkPlane(createTurnstileVerifier({ secret: 'GATE-SECRET-DO-NOT-LEAK', fetch: okFetch }), 'PUBLIC-SITEKEY-0x1234'));
 const OFF = `http://127.0.0.1:${offServer.address().port}`;
 const ON = `http://127.0.0.1:${onServer.address().port}`;
 
@@ -133,9 +133,46 @@ try {
     `chStatus=${c11.status} provStatus=${prov.status} host=${prov.data.host}`);
 
   // T12 — the secret never appears in any response body.
-  const bodies = [c8.text, c9.text, c10.text, c11.text, JSON.stringify(prov.data)].join('\n');
-  rec('T12. LEAK: the Turnstile secret never appears in any response body',
+  const cfg13 = await getRaw(`${ON}/v1/config`);
+  const cfg14 = await getRaw(`${OFF}/v1/config`);
+  const bodies = [c8.text, c9.text, c10.text, c11.text, cfg13.text, JSON.stringify(prov.data)].join('\n');
+  rec('T12. LEAK: the Turnstile secret never appears in any response body (incl. /v1/config)',
     !bodies.includes('GATE-SECRET-DO-NOT-LEAK') && !bodies.includes('top-secret'), '');
+
+  // T13 — /v1/config exposes the PUBLIC sitekey (and only that) when the gate is on.
+  const j13 = JSON.parse(cfg13.text);
+  rec('T13. /v1/config → public sitekey when configured; secret absent',
+    cfg13.status === 200 && j13.turnstileSitekey === 'PUBLIC-SITEKEY-0x1234' && !cfg13.text.includes('GATE-SECRET'),
+    `sitekey=${j13.turnstileSitekey}`);
+
+  // T14 — gate off → sitekey null (app shows no widget; degrades to current behavior).
+  const j14 = JSON.parse(cfg14.text);
+  rec('T14. /v1/config → null sitekey when gate off (no widget; back-compat)',
+    cfg14.status === 200 && j14.turnstileSitekey === null, `sitekey=${j14.turnstileSitekey}`);
+
+  // T15 — the sandboxed /turnstile page: CF script lives HERE, sitekey injected,
+  // a valid loopback parent origin is honored as the postMessage target.
+  const w15 = await getRaw(`${ON}/turnstile?o=${encodeURIComponent('http://localhost:4711')}`);
+  const isHtml = /^<!doctype html>/i.test(w15.text);
+  rec('T15. /turnstile → HTML w/ CF script + sitekey + scoped postMessage target',
+    w15.status === 200 && isHtml
+      && w15.text.includes('challenges.cloudflare.com/turnstile/v0/api.js')
+      && w15.text.includes('PUBLIC-SITEKEY-0x1234')
+      && w15.text.includes("'mycelium-turnstile'")
+      && w15.text.includes('"http://localhost:4711"'),
+    `status=${w15.status} html=${isHtml}`);
+
+  // T16 — a hostile/foreign ?o= is NOT reflected; target falls back to '*'.
+  const w16 = await getRaw(`${ON}/turnstile?o=${encodeURIComponent('https://evil.example.com')}`);
+  rec('T16. /turnstile rejects a foreign parent origin → target "*", no reflection',
+    !w16.text.includes('evil.example.com') && /TARGET=("\*"|'\*')/.test(w16.text),
+    `reflected=${w16.text.includes('evil.example.com')}`);
+
+  // T17 — gate off → the page declares not-configured (no widget rendered).
+  const w17 = await getRaw(`${OFF}/turnstile`);
+  rec('T17. /turnstile with gate off → not-configured (empty sitekey)',
+    w17.status === 200 && w17.text.includes('not-configured') && w17.text.includes('SITEKEY=""'),
+    `status=${w17.status}`);
 } finally {
   try { offServer.close(); onServer.close(); registry.close(); rmSync(DB, { force: true }); } catch { /* */ }
 }

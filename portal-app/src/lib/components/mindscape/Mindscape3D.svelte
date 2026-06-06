@@ -38,7 +38,7 @@
 	let pointCloudMaterial: THREE.ShaderMaterial;
 	let contactCloud: THREE.Points;
 	let contactEdges: THREE.LineSegments;
-	let contactLabels: THREE.Group;
+	let contactLabels!: THREE.Group;
 	let raycaster: THREE.Raycaster;
 	let mouse = new THREE.Vector2();
 	let animationId: number;
