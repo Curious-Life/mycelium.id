@@ -172,6 +172,21 @@ hashtag + keyword tags) behind a seam a model-backed pass can replace.
   **REST** surface (`src/server-rest.js`) all dispatch through one shared handler
   map, so a tool is written once.
 - **OAuth 2.1 + PKCE** via better-auth (`src/auth.js`) guards the HTTP surfaces.
+- **Federation (Tier-0 + 0b)** — inter-instance connect, gated by signature not OAuth:
+  the box ed25519 identity (`src/identity/identity.js`) is published as
+  `GET /.well-known/did.json` (`did:web:<publicHost>`) + `GET /.well-known/webfinger`.
+  `POST /federation/connect` accepts a signed connect-request → pending connection;
+  `POST /federation/connect-response` carries the accepter's signed callback that
+  flips the requester's "Sent" → "Connected" (the **bilateral handshake**). Both
+  verify the sender's `did:web` key + freshness + nonce-replay. Protocol lives in
+  `src/federation/{sign,did,handlers,router}.js`; the social graph +
+  signed-outbound + `receiveRemote`/`respondRemote`/`receiveResponse` live in
+  `src/db/connections.js` (wired in `getDb`). User surfaces: the 3 MCP tools
+  (`src/tools/federation.js`) and the **Connections page** (`portal-app/.../connections`,
+  promoted to a live nav item with a pending-request badge) backed by
+  `/portal/connections/*` (`src/portal-compat.js`). Fails closed with no public
+  host (did.json 404, connect 503). Real-time (Matrix) + shared pools are later
+  tiers — see `docs/DESIGN-federation-inter-instance-2026-06-05.md`.
 
 ## 8. Ports
 

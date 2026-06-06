@@ -28,6 +28,7 @@ import { createTopologyHelpers } from './topology/helpers.js';
 import { createContextDomain } from './tools/context.js';
 import { createIngestDomain } from './tools/ingest.js';
 import { createCurateDomain } from './tools/curate.js';
+import { createFederationDomain } from './tools/federation.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { getMasterKey } from './crypto/crypto-local.js';
 
@@ -55,6 +56,7 @@ export function buildDomains({
   agentId = 'personal-agent',
   agentRoot = process.env.MYCELIUM_AGENT_ROOT || 'data/mind',
   embedder = null,
+  identity = null,
 }) {
   // Mind-files subsystem (Wave 2). createMindFiles binds fs/path + an
   // AGENT_ROOT + agent identity; its read/write helpers encrypt at rest with
@@ -113,6 +115,10 @@ export function buildDomains({
     // 3 cohesive tools (cognitiveState / cognitiveHistory / mindscape). Reuses
     // the fisher-tools/metrics/topology-tools handler logic verbatim.
     createCognitionDomain({ db, userId, topologyHelpers }),
+    // Federation (Tier-0): request/manage cross-instance connections. The crypto
+    // (signing outbound, verifying inbound) lives in db.connections + the
+    // federation router; this is the user-facing verb surface.
+    createFederationDomain({ db, userId }),
   ];
   // Deferred = domains needing a subsystem not yet built. Each lands with its
   // Wave-2 unit; listed explicitly so the surface is never silently dropped.
