@@ -1,0 +1,100 @@
+// src/federation/handlers.js — framework-agnostic Tier-0 federation handlers.
+//
+// Pure logic (no express): each handler returns { status, body }. The thin
+// express wrapper (router.js) and the verify gate both call these, so the
+// protocol is unit-tested independently of the web framework.
+//
+// Signature model: the sender signs canonicalize(requestBody) and sends those
+// exact bytes. By the time express.json() has parsed the POST the raw bytes are
+// gone — so we verify over canonicalize(parsedPayload), which deterministically
+// reproduces the signed bytes (canonicalize sorts keys recursively). Key
+// reordering in transit still verifies (same logical message); any value change
+// breaks the signature. Fail closed throughout.
+
+import { buildDidDocument, buildWebfinger, resolveDidKey } from './did.js';
+import { canonicalize, verifyDetached } from './sign.js';
+
+const MAX_CANONICAL_BYTES = 8 * 1024;     // body cap (DoS)
+const TS_WINDOW_MS = 5 * 60 * 1000;       // ±5 min freshness window
+const RATE_MAX = 30;                       // inbound connects per IP per window
+const RATE_WINDOW_MS = 60 * 1000;
+
+/**
+ * @param {object} deps
+ * @param {object} deps.db                 the live db (uses db.connections.receiveRemote)
+ * @param {string} deps.userId             the local vault user (connection recipient)
+ * @param {object} deps.identity           the box identity (publicKeyB64)
+ * @param {()=>string} deps.getHost        current public host ("" when unset → fail closed)
+ * @param {()=>(string|null)} deps.getHandle current handle (null when unset)
+ * @param {Function} [deps.fetch]          injected for did resolution / tests
+ * @param {()=>number} [deps.now]          injectable clock for tests
+ */
+export function createFederationHandlers({ db, userId = 'local-user', identity, getHost, getHandle, fetch = globalThis.fetch, now = () => Date.now() }) {
+  const seenNonces = new Map(); // nonce -> expiry ms
+  const rate = new Map();       // ip -> { n, resetAt }
+
+  function rateLimited(ip) {
+    const key = ip || '?';
+    const rec = rate.get(key);
+    if (!rec || now() > rec.resetAt) { rate.set(key, { n: 1, resetAt: now() + RATE_WINDOW_MS }); return false; }
+    rec.n += 1;
+    return rec.n > RATE_MAX;
+  }
+  function noncePrune() {
+    const t = now();
+    for (const [k, exp] of seenNonces) if (exp < t) seenNonces.delete(k);
+  }
+
+  return {
+    didJson() {
+      const doc = buildDidDocument(getHost(), identity?.publicKeyB64);
+      return doc ? { status: 200, body: doc } : { status: 404, body: { error: 'no public identity' } };
+    },
+
+    webfinger(resource) {
+      const wf = buildWebfinger(getHost(), getHandle(), resource);
+      return wf ? { status: 200, body: wf } : { status: 404, body: { error: 'not found' } };
+    },
+
+    /** Inbound connect. @param {{payload:object, headers:object, ip?:string}} */
+    async connect({ payload, headers = {}, ip } = {}) {
+      if (!getHost() || !identity?.publicKeyB64) return { status: 503, body: { error: 'federation not configured' } };
+      if (rateLimited(ip)) return { status: 429, body: { error: 'rate limited' } };
+      if (!payload || typeof payload !== 'object') return { status: 400, body: { error: 'invalid body' } };
+
+      const did = headers['x-myc-did'];
+      const sig = headers['x-myc-sig'];
+      if (!did || !sig) return { status: 401, body: { error: 'unsigned request' } };
+
+      const canonical = canonicalize(payload);
+      if (canonical.length > MAX_CANONICAL_BYTES) return { status: 400, body: { error: 'body too large' } };
+
+      // Freshness + replay (before the network hop to resolve the key).
+      const ts = Number(payload.ts);
+      if (!Number.isFinite(ts) || Math.abs(now() - ts) > TS_WINDOW_MS) return { status: 401, body: { error: 'stale or missing timestamp' } };
+      noncePrune();
+      if (!payload.nonce || seenNonces.has(payload.nonce)) return { status: 401, body: { error: 'replay or missing nonce' } };
+
+      // The header did must match the payload's claimed sender (no key confusion).
+      if (payload.from_did && payload.from_did !== did) return { status: 401, body: { error: 'did mismatch' } };
+
+      let pub;
+      try { pub = await resolveDidKey(did, { fetch }); } catch { return { status: 401, body: { error: 'unresolvable did' } }; }
+      if (!verifyDetached(pub, canonical, sig)) return { status: 401, body: { error: 'signature verification failed' } };
+
+      seenNonces.set(payload.nonce, now() + TS_WINDOW_MS);
+      try {
+        await db.connections.receiveRemote({
+          fromHandle: payload.from_handle,
+          fromInstance: payload.from_instance,
+          fromDid: payload.from_did || did,
+          profile: payload.profile || {},
+          toUserId: userId,
+        });
+      } catch (e) {
+        return { status: 400, body: { error: e.message } };
+      }
+      return { status: 202, body: { accepted: true, verified: true } };
+    },
+  };
+}

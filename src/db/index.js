@@ -32,12 +32,13 @@ import { createTerritoryDocsNamespace } from './territory-docs.js';
 import { createProvidersNamespace } from './providers.js';
 import { createConnectorsNamespace } from './connectors.js';
 import { createUsersNamespace } from './users.js';
+import { createConnectionsNamespace } from './connections.js';
 
 /**
  * Open the vault db and assemble the tool-facing `db` namespace object.
  * @returns {{ db: object, close: () => void, adapter: object }}
  */
-export function getDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
+export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federationDeps = {} }) {
   const adapter = createDb({ dbPath, userKey, systemKey, scope });
   const { d1Query, d1QueryAdmin, d1Batch, firstRow, parseJson, randomUUID, now } = adapter;
 
@@ -63,6 +64,15 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
     canvases: createCanvasesNamespace({ d1Query, firstRow }),
     audit: createAuditNamespace({ d1QueryAdmin, randomUUID }),
     spaces: createSpacesNamespace({ d1Query, firstRow, parseJson }),
+    // Federation (Tier-0): the social graph + cross-instance connect. sign/did/
+    // selfInstance come from boot() (derived from the box identity + publicHost);
+    // absent when remote is off → outbound stays unsigned-disabled, cleanly.
+    connections: createConnectionsNamespace({
+      d1Query,
+      sign: federationDeps.sign,
+      did: federationDeps.did,
+      selfInstance: federationDeps.selfInstance,
+    }),
     spaceKnowledge: createSpaceKnowledgeNamespace({ d1Query, firstRow, randomUUID }),
     publicPresence: createPublicPresenceNamespace({ d1Query }),
 

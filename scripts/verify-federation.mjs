@@ -1,0 +1,109 @@
+// scripts/verify-federation.mjs — Tier-0 federation verify gate.
+//
+// Drives the PRODUCTION handlers (src/federation/handlers.js) + the REAL
+// connections.receiveRemote (src/db/connections.js, mock d1Query) end-to-end over
+// loopback node:http: two boxes (alice = subject, bob = remote sender), with a
+// fetch-shim mapping https://<host> → 127.0.0.1:<port> so did:web resolution and
+// the signed connect are exercised for real. The express wrapper (router.js) is a
+// thin pass-through over these same handlers (syntax-checked separately).
+//
+// Prints a [✓]/[✗] ledger and `VERDICT: GO` / exit 0 when all pass.
+
+import http from 'node:http';
+import crypto from 'node:crypto';
+import { createIdentity } from '../src/identity/identity.js';
+import { createFederationHandlers } from '../src/federation/handlers.js';
+import { createConnectionsNamespace } from '../src/db/connections.js';
+import { canonicalize } from '../src/federation/sign.js';
+
+const ledger = [];
+const rec = (name, pass, detail = '') => { ledger.push(pass); console.log(`${pass ? '[✓]' : '[✗]'} ${name}${detail ? ` — ${detail}` : ''}`); };
+
+const HOST_PORT = {};
+function shimFetch(urlStr, init = {}) {
+  const u = new URL(urlStr);
+  const port = HOST_PORT[u.hostname];
+  if (u.protocol !== 'https:' || !port) return Promise.reject(new Error(`shim: bad target ${urlStr}`));
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, method: init.method || 'GET', path: u.pathname + u.search, headers: init.headers || {} }, (res) => {
+      let d = ''; res.on('data', (c) => (d += c));
+      res.on('end', () => resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, async json() { return JSON.parse(d); }, async text() { return d; } }));
+    });
+    req.on('error', reject);
+    if (init.body) req.write(init.body);
+    req.end();
+  });
+}
+
+// Mount a box's federation handlers behind a tiny node:http server.
+function startBox(handle, host, { withConnections } = {}) {
+  const inserts = [];
+  const fakeD1 = async (sql, params) => {
+    if (/FROM user_profiles WHERE user_id/.test(sql)) return { results: [{ handle, signature: null }] };
+    if (/SELECT id, status FROM connections/.test(sql)) return { results: [] };
+    if (/INSERT INTO/.test(sql)) { inserts.push({ sql, params }); return { results: [] }; }
+    return { results: [] };
+  };
+  const db = withConnections ? { connections: createConnectionsNamespace({ d1Query: fakeD1 }) } : {};
+  const identity = createIdentity({ masterHex: BOX_KEYS[handle], handle });
+  const h = createFederationHandlers({ db, userId: `${handle}-user`, identity, getHost: () => host, getHandle: () => handle, fetch: shimFetch });
+
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    const send = (r) => { res.writeHead(r.status, { 'content-type': 'application/json' }); res.end(JSON.stringify(r.body)); };
+    if (req.method === 'GET' && u.pathname === '/.well-known/did.json') return send(h.didJson());
+    if (req.method === 'GET' && u.pathname === '/.well-known/webfinger') return send(h.webfinger(u.searchParams.get('resource')));
+    if (req.method === 'POST' && u.pathname === '/federation/connect') {
+      let raw = ''; req.on('data', (c) => (raw += c));
+      req.on('end', async () => {
+        let payload; try { payload = JSON.parse(raw); } catch { return send({ status: 400, body: { error: 'bad json' } }); }
+        const headers = { 'x-myc-did': req.headers['x-myc-did'], 'x-myc-sig': req.headers['x-myc-sig'] };
+        send(await h.connect({ payload, headers, ip: req.socket.remoteAddress }));
+      });
+      return;
+    }
+    send({ status: 404, body: { error: 'not found' } });
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => { HOST_PORT[host] = server.address().port; resolve({ server, identity, inserts, host }); }));
+}
+
+const BOX_KEYS = { alice: crypto.randomBytes(32).toString('hex'), bob: crypto.randomBytes(32).toString('hex'), nohandle: crypto.randomBytes(32).toString('hex') };
+
+async function main() {
+  console.log('\n=== verify:federation — Tier-0 did:web + WebFinger + signed connect ===\n');
+  const alice = await startBox('alice', 'alice.mycelium.id', { withConnections: true });
+  const bob = await startBox('bob', 'bob.mycelium.id');
+
+  // did.json + webfinger
+  const did = await (await shimFetch('https://alice.mycelium.id/.well-known/did.json')).json();
+  rec('did.json served with did:web id + multibase key', did.id === 'did:web:alice.mycelium.id' && !!did.verificationMethod?.[0]?.publicKeyMultibase);
+  const wf = await (await shimFetch('https://alice.mycelium.id/.well-known/webfinger?resource=acct:alice@alice.mycelium.id')).json();
+  rec('webfinger exposes a rel-includes-"federation" link', !!wf.links?.find((l) => l.rel.includes('federation')));
+  const foreign = await shimFetch('https://alice.mycelium.id/.well-known/webfinger?resource=acct:eve@alice.mycelium.id');
+  rec('webfinger fails closed for a foreign acct (404)', foreign.status === 404);
+
+  // signed connect bob → alice
+  const mkBody = () => ({ $type: 'social.mycelium.connect-request.v1', from_handle: 'bob', from_instance: 'bob.mycelium.id', from_did: 'did:web:bob.mycelium.id', to_handle: 'alice', nonce: crypto.randomUUID(), ts: Date.now(), profile: { signature: 'thinks in graphs' } });
+  const post = (body, sig) => shimFetch('https://alice.mycelium.id/federation/connect', { method: 'POST', headers: { 'content-type': 'application/json', 'x-myc-did': 'did:web:bob.mycelium.id', 'x-myc-sig': sig }, body: canonicalize(body) });
+
+  const good = mkBody(); const goodRes = await post(good, bob.identity.sign(canonicalize(good)));
+  rec('valid signed connect verifies via did:web → 202 + persisted', goodRes.status === 202 && alice.inserts.some((i) => /INSERT INTO connections/.test(i.sql)));
+
+  const tam = mkBody(); const sig = bob.identity.sign(canonicalize(tam)); tam.to_handle = 'mallory';
+  rec('tampered body rejected (401)', (await post(tam, sig)).status === 401);
+
+  const replay = mkBody(); const rsig = bob.identity.sign(canonicalize(replay));
+  await post(replay, rsig);
+  rec('replayed nonce rejected (401)', (await post(replay, rsig)).status === 401);
+
+  // fail-closed no-handle box
+  const nohandle = await startBox('nohandle', '', {});
+  const r404 = await new Promise((res) => http.request({ host: '127.0.0.1', port: nohandle.server.address().port, path: '/.well-known/did.json' }, (rs) => res(rs.statusCode)).end());
+  rec('no-handle box fails closed on did.json (404)', r404 === 404);
+
+  alice.server.close(); bob.server.close(); nohandle.server.close();
+  const pass = ledger.every(Boolean);
+  console.log(`\n${'='.repeat(64)}\nVERDICT: ${pass ? 'GO' : 'NO-GO'} — ${ledger.filter(Boolean).length}/${ledger.length} checks passed\n${'='.repeat(64)}\n`);
+  process.exit(pass ? 0 : 1);
+}
+main().catch((e) => { console.error('verify:federation crashed:', e); process.exit(2); });

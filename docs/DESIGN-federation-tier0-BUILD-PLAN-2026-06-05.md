@@ -1,7 +1,19 @@
 # Build Plan — Federation Tier-0 (did:web + WebFinger + signed connect)
 
 **Date:** 2026-06-05
-**Status:** Build plan (sweep-verified; gate confirmed OPEN by operator). Converts `docs/DESIGN-federation-inter-instance-2026-06-05.md` Tier-0 (design, **spike GO 10/10**) into shippable steps. **Code follows this; this doc has no code.**
+**Status:** ✅ **BUILT (2026-06-05)** — steps 1-5 implemented on `claude/affectionate-faraday-9aM4c`; `verify:federation` **GO 7/7**, 32 federation unit tests green, all changed files syntax-clean, no existing caller broken. Step 6 (browser smoke through the relay + a live external peer) remains — needs a running packaged app, deferred to a deploy session. Converts `docs/DESIGN-federation-inter-instance-2026-06-05.md` Tier-0 (design, spike GO 10/10) into shippable steps.
+
+### As-built ledger
+| Step | Artifact | Status |
+|---|---|---|
+| 1 | `src/federation/sign.js`, `did.js` + `tests/federation-{sign,did}.test.js` | ✅ 15/15 |
+| 2 | `src/db/connections.js` (+signed outbound, +`receiveRemote`, optional Worker deps, embedding tripwire) + `tests/db-connections-federation.test.js` | ✅ 7/7 |
+| 3 | `src/federation/handlers.js` (+`router.js` express wrapper) + `tests/federation-handlers.test.js` | ✅ 10/10 |
+| 4 | wiring: `src/index.js` (identity in boot), `db/index.js` (connections), `mcp.js` + `tools/federation.js` (the 3 tools), `server-http.js` (router mount) | ✅ syntax-clean, callers checked |
+| 5 | `scripts/verify-federation.mjs` + `package.json` (`verify:federation`, appended to `verify`) | ✅ GO 7/7 |
+| 6 | browser smoke via relay + one live external peer | ⏳ deferred to deploy session |
+
+**As-built deltas from the plan:** (a) identity is created once in `boot()` and threaded via `federationDeps` to `getDb` + returned for the router (cleaner than creating it in `server-http`); (b) `did:web` uses the full `publicHost` (custom-domain-correct), not `handle+".mycelium.id"`; (c) inbound verifies over `canonicalize(parsedBody)` rather than raw bytes (express.json runs first) — deterministic re-serialization reproduces the signed bytes; (d) no migration needed (columns pre-existed); (e) `profiles` namespace left unwired (not required).
 **Companion:** the design doc (architecture + threat model + verification table) and `spike/federation-tier0/` (the proven prototype this productionizes).
 **Verify gate:** a new `verify:federation` (`scripts/verify-federation.mjs`) must print `VERDICT: GO` / exit 0 before "done"; then smoke the `:4711` surface in a real browser path per `deploy-and-verify` (remote MCP recipe).
 
