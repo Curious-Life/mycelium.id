@@ -36,6 +36,27 @@ The architecture is settled and most of the scary unknowns turned out to already
 a real host (Mac with `npm install`). The cookie-validation mechanism is **Spike #1** (blocks Phase 1
 step 2).
 
+---
+
+## Repo & licensing
+
+**Repo: same repo.** Phase 1/2/3 are edits to existing `src/`, `src/remote/`, `portal-app/` — they
+must live here. The native shell goes in a new **`mobile/`** subtree (sibling to `src-tauri/`, the
+established in-repo native-shell pattern). Add a path-gated **`.github/workflows/mobile.yml`**
+(`mobile/**`, macOS runner) so the iOS/Android build never entangles the Node `verify` chain.
+
+**🚨 Licensing gate (blocks Phase 4 — App Store / TestFlight):** the repo is **AGPL-3.0**, and
+distributing (A)GPL apps on Apple's App Store conflicts with Apple's ToS (VLC/GNU precedent).
+**Intent: server+portal stay AGPL (open); the mobile shell ships closed-source.** Assessment (not
+legal advice): **likely viable** because the remote-webview shell bundles **no** AGPL code (arm's-
+length HTTP client = separate work) and Curious-Life owns the copyright. **Conditions:** the shell
+must never bundle the AGPL SPA (⇒ the deferred "bundled-SPA" variant is incompatible with a
+closed-source shell — a real constraint on §5.4); the shell's own deps must be permissive; `mobile/`
+gets its own `LICENSE`. **Required before Phase 4:** legal sign-off + pick the shell license + add an
+App-Store exception to any app-side AGPL code. Tracked in `MEMORY.md`.
+
+---
+
 ## Build tracks (run partly in parallel)
 
 | Track | What | Skills needed |
@@ -129,7 +150,8 @@ Spike#1 ─▶ 1.2 ─┐
 - **→ Phase 5.1 (Android):** iOS TestFlight build passes the device smoke (pair → Face ID → operator
   login → Library read) on ≥1 physical iPhone.
 - **→ ship to App Store:** TestFlight smoke green + a security review of the Phase-1 diff signed off
-  (per CLAUDE.md, security-sensitive).
+  (per CLAUDE.md, security-sensitive) + **the licensing gate cleared** (legal sign-off on AGPL-server /
+  closed-shell split + shell `LICENSE` chosen — see *Repo & licensing*).
 
 ## Risks (plan-level; per-step risks in the Phase-1 design)
 
