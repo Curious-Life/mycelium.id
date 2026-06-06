@@ -25,10 +25,16 @@ Built:
   lazy-imported), single-user serialized lane (`agent/lane.js`,
   set→run→clear). `reply` is un-deferred in the vault MCP when `AGENT_URL` is set.
 
-Not yet built (Phase 3):
-- Voice/TTS, group binding, text coalescing, rate-limit/backoff, Discord +
-  WhatsApp. The local **ollama** runtime backend is a declared slot (selectRuntime
-  returns null until it lands).
+Phase 3 hardening (platform-agnostic — Discord reuses these):
+- **Coalescing** (`transport/coalescer.js`) — rapid fragments → one turn
+  (`CHANNEL_COALESCE_MS`, 0 disables). **Rate-limit** (`ratelimit.js`) —
+  per-target fixed-window cap, chokepoint gate
+  (`CHANNEL_RATELIMIT_MAX`/`_WINDOW_MS`). Poller backoff jitter.
+
+Not yet built:
+- Voice/TTS, group binding + group inbound auth, Discord + WhatsApp transports.
+  The local **ollama** runtime backend is a declared slot (selectRuntime returns
+  null until it lands).
 
 ### Enabling two-way replies
 
@@ -73,6 +79,7 @@ The daemon binds `127.0.0.1:3010` by default (`CHANNEL_DAEMON_PORT`). Point the
 npm run verify:channel-egress       # chokepoint gates, DI fakes (19 checks)
 npm run verify:channel-inbound      # inbound transport + capture, DI fakes (18 checks)
 npm run verify:channel-agent        # lane lifecycle + runtime selection, DI fakes (12 checks)
+npm run verify:channel-coalesce     # inbound coalescer, virtual clock (7 checks)
 npm run verify:channel-egress-e2e   # real vault + real daemon + fake Telegram (14 checks, incl. inbound)
 npm run verify:channel-agent-e2e    # the WHOLE two-way loop, only the LLM faked (8 checks)
 ```

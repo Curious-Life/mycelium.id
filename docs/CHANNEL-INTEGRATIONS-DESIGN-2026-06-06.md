@@ -252,11 +252,21 @@ host-verified against the live Bot API (token-gated), not CI.
   + a running vault MCP with `AGENT_URL` set). The SDK message-shape sniffing in `claude-sdk.js` (usedReplyTool /
   delivered detection) is the one part exercised only on the host.
 
-### Phase 3 — Hardening + 2nd/3rd platform
-- Voice (TTS) reply for Telegram (harvest the canonical voice post-send hook) — optional.
-- Rate-limit + backpressure, reconnect/retry resilience (harvest `longFetch`/backoff patterns).
-- Discord transport (Phase 2 spine reused) → WhatsApp transport.
-- `channel-auth` portal routes (bind/verify a chat to the operator) harvested from canonical.
+### Phase 3 — Hardening + 2nd/3rd platform — ◑ IN PROGRESS (2026-06-06)
+Built (all platform-agnostic, so Discord reuses them unchanged):
+- **Inbound coalescing** (`transport/coalescer.js`) — rapid fragments per chat merge into ONE turn after a quiet
+  window (debounce); every fragment is still captured per-message. Wired ahead of the lane in `index.js`
+  (`CHANNEL_COALESCE_MS`, 0 disables). Verified `verify:channel-coalesce` (7/7).
+- **Outbound rate-limit** (`ratelimit.js`) — fixed-window per-target cap, wired as a chokepoint gate after dedup
+  (deduped resends don't consume budget); over-limit → audit `denied`/`rate-limited` + 429 (reply tool surfaces
+  `rate-limited`, no retry). `CHANNEL_RATELIMIT_MAX`/`_WINDOW_MS`. Verified `verify:channel-egress` C13–C15 (now 22/22).
+- **Poller backoff jitter** (±30%) so repeated failures don't hammer the API in lockstep.
+
+Deferred (more Telegram-specific; pick up before/with Discord):
+- Voice (TTS) reply — needs an external TTS service; the chokepoint already carries `voice` through.
+- Group binding flow + group inbound authorization (`telegram_groups` + `channel-auth` portal routes) — groups are
+  currently dropped at inbound.
+- Then: Discord transport + egress on the same chokepoint/lane/runtime spine (the planned reuse), → WhatsApp.
 
 ---
 

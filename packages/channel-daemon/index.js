@@ -19,6 +19,8 @@ import { createInboundHandler } from './inbound.js';
 import { createTelegramPoller } from './transport/telegram-poller.js';
 import { selectRuntime } from './agent/runtime.js';
 import { createLane } from './agent/lane.js';
+import { createCoalescer } from './transport/coalescer.js';
+import { createRateLimiter } from './ratelimit.js';
 import { getActiveTurn } from './inbound-context.js';
 
 /**
@@ -51,12 +53,15 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     return vault.checkChannelAuthority({ kind, id });
   }
 
+  const rateLimit = createRateLimiter({ maxPerWindow: cfg.rateLimitMax, windowMs: cfg.rateLimitWindowMs });
+
   const telegramSendHandler = createTelegramChokepoint({
     sendToTelegram: (a) => telegram.sendMessage(a),
     recordEgress: (entry) => { vault.recordEgress(entry); },        // fire-and-forget
     persistOutbound: (args) => { vault.captureMessage(args).catch((e) => console.error('[channel-daemon] outbound persist failed:', e.message)); },
     checkAuthority,
     dedup,
+    rateLimit,
     getActiveTurn,
     agentId: cfg.agentId,
   });
@@ -72,8 +77,15 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     const runtime = selectRuntime(cfg);
     if (runtime) {
       lane = createLane({ runtime });
-      effectiveRunTurn = lane.runTurn;
-      console.log(`[channel-daemon] two-way replies ON via ${lane.label}`);
+      // Coalesce rapid inbound fragments into one turn (each fragment is still
+      // captured per-message upstream). 0 disables → one turn per message.
+      if (cfg.coalesceWindowMs > 0) {
+        const coalescer = createCoalescer({ windowMs: cfg.coalesceWindowMs, flush: (turnCtx, merged) => lane.runTurn(turnCtx, merged) });
+        effectiveRunTurn = (turnCtx, msg) => { coalescer.push(turnCtx, msg); };
+      } else {
+        effectiveRunTurn = lane.runTurn;
+      }
+      console.log(`[channel-daemon] two-way replies ON via ${lane.label}${cfg.coalesceWindowMs > 0 ? ` (coalesce ${cfg.coalesceWindowMs}ms)` : ''}`);
     } else {
       effectiveRunTurn = captureOnlyRunTurn;
     }

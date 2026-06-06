@@ -58,7 +58,7 @@ function preview(text) {
 export function createTelegramChokepoint(deps) {
   const {
     sendToTelegram, recordEgress, persistOutbound, checkAuthority, dedup,
-    getActiveTurn, agentId = 'personal-agent', logPrefix = 'channel-daemon',
+    rateLimit, getActiveTurn, agentId = 'personal-agent', logPrefix = 'channel-daemon',
   } = deps || {};
   if (typeof sendToTelegram !== 'function') throw new TypeError('chokepoint: sendToTelegram required');
   if (typeof checkAuthority !== 'function') throw new TypeError('chokepoint: checkAuthority required');
@@ -131,6 +131,18 @@ export function createTelegramChokepoint(deps) {
       console.log(`[${logPrefix}] telegram send deduped (identical within window) → ${preview(text)}`);
       audit({ ...baseAudit, decision: 'allowed', reason: 'envelope-dedup', delivered: false });
       return res.json({ ok: true, deduped: true });
+    }
+
+    // 6b. rate limit — fixed-window per-target backstop (Discord reuses this).
+    //     Runs AFTER dedup so a collapsed resend never consumes budget. `trusted`
+    //     (ops/recovery) bypasses.
+    if (rateLimit && !trusted) {
+      const rl = rateLimit.take(chatId);
+      if (!rl.allowed) {
+        console.warn(`[${logPrefix}] telegram send rate-limited (retry ${rl.retryAfterMs}ms) → ${preview(text)}`);
+        audit({ ...baseAudit, decision: 'denied', reason: 'rate-limited' });
+        return res.status(429).json({ ok: false, error: 'rate-limited', retryAfterMs: rl.retryAfterMs });
+      }
     }
 
     // 7. + 8. send → audit + persist

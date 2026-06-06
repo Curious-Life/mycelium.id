@@ -28,9 +28,15 @@ export function loadConfig(env = process.env) {
   const mcpStdioEntry = env.CHANNEL_MCP_STDIO_ENTRY || 'src/index.js';
   const model = env.CHANNEL_AGENT_MODEL || ''; // backend default applies when empty
 
+  // ── Phase 3 hardening ──────────────────────────────────────────────────────
+  const coalesceWindowMs = Number(env.CHANNEL_COALESCE_MS || 1500); // 0 disables
+  const rateLimitMax = Number(env.CHANNEL_RATELIMIT_MAX || 20);     // sends per window per target
+  const rateLimitWindowMs = Number(env.CHANNEL_RATELIMIT_WINDOW_MS || 60000);
+
   return {
     botToken, ownerTelegramId, vaultBaseUrl, host, port, agentId, selfUrl,
     anthropicApiKey, mcpMode, mcpUrl, mcpBearer, mcpStdioEntry, model,
+    coalesceWindowMs, rateLimitMax, rateLimitWindowMs,
   };
 }
 

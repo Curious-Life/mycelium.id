@@ -60,8 +60,10 @@ export function createTelegramPoller({ telegram, handleInbound, pollTimeout = 30
           backoff = BACKOFF_START_MS; // healthy poll resets backoff
         } catch (e) {
           if (!running) break;
-          console.error(`[${logPrefix}] getUpdates error (backoff ${backoff}ms): ${e.message}`);
-          await wait(backoff);
+          // ±30% jitter so repeated failures don't hammer the API in lockstep.
+          const jittered = Math.round(backoff * (0.85 + Math.random() * 0.3));
+          console.error(`[${logPrefix}] getUpdates error (backoff ~${jittered}ms): ${e.message}`);
+          await wait(jittered);
           backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
         }
       }

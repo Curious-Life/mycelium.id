@@ -116,6 +116,7 @@
     "verify:channel-inbound": "node scripts/verify-channel-inbound.mjs",
     "verify:channel-agent": "node scripts/verify-channel-agent.mjs",
     "verify:channel-agent-e2e": "node scripts/verify-channel-agent-e2e.mjs",
+    "verify:channel-coalesce": "node scripts/verify-channel-coalesce.mjs",
     "verify:enqueue": "node scripts/verify-enqueue.mjs",
     "verify:enrich": "node scripts/verify-enrich.mjs",
     "verify:publish": "node scripts/verify-publish.mjs",
