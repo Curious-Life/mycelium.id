@@ -26,6 +26,7 @@ import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { startEnrichDrainer } from './enrich/drainer.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
 import { setSessionKeys } from './account/session-keys.js';
+import { isTrustedLoopback } from './http/loopback.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CANONICAL_BUILD = path.join(HERE, '..', 'portal-app', 'build');
@@ -99,22 +100,17 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // S1 measurement REST bridge — auth-GATED, fail-closed (the rest of the V1
   // surface is unauthenticated/localhost-only; this surface decrypts the
   // sensitive measurement plane, so it resolves the owner ONLY for a genuine
-  // local request and rejects anything proxied from a network. Pattern-B
-  // loopback check (mirrors src/internal-metrics.js precedent): a request is
-  // the owner iff its immediate socket peer is loopback AND no x-forwarded-for
-  // header is present (genuine same-host requests never carry one).
+  // local request and rejects anything proxied from a network). The owner test
+  // is the shared isTrustedLoopback (src/http/loopback.js): socket peer loopback
+  // AND no X-Forwarded-For — the same boundary the /api/v1/account + remote
+  // control surfaces use, so all three stay consistent (V-1).
   // Mounted BEFORE portalMindscapeRouter so the bridge's richer /trajectory/summary
   // (full headline numbers the vitality page reads) takes precedence over the
   // mindscape router's lightweight {phase,exploration_ratio} stub — the bridge
   // response is a superset, so MindscapeView's summary.phase read still works.
   v.use('/api/v1/portal', portalMeasurementRouter({
     db, userId,
-    authenticatePortalRequest: (req) => {
-      const ip = req.socket?.remoteAddress || '';
-      const loopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
-      if (!loopback || req.headers['x-forwarded-for']) return null;
-      return { id: userId };
-    },
+    authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
   }));
   v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath }));
   v.use('/api/v1/portal', portalUploadsRouter({ db, userId, enqueueEnrichment }));
