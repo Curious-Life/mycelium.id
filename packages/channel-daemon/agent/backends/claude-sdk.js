@@ -73,9 +73,6 @@ export function createClaudeSdkRuntime(cfg) {
       const query = await loadQuery();
       const systemPrompt = buildReplySystemPrompt({ turnCtx, persona: cfg.persona });
 
-      let usedReplyTool = false;
-      let delivered = false;
-
       const iterator = query({
         prompt: userMessage,
         options: {
@@ -91,30 +88,66 @@ export function createClaudeSdkRuntime(cfg) {
           ],
           permissionMode: 'bypassPermissions', // headless; the chokepoint is the real gate
           maxTurns: cfg.maxTurns || 12,
-          ...(cfg.anthropicApiKey ? { env: { ANTHROPIC_API_KEY: cfg.anthropicApiKey } } : {}),
+          // env is passed wholesale to the bundled Claude Code CLI subprocess —
+          // spread process.env so PATH etc. survive, then pin the API key.
+          ...(cfg.anthropicApiKey ? { env: { ...process.env, ANTHROPIC_API_KEY: cfg.anthropicApiKey } } : {}),
           ...(signal ? { abortController: toAbortController(signal) } : {}),
         },
       });
 
-      for await (const msg of iterator) {
-        // Detect the reply tool firing + its delivered verdict. Message shapes
-        // vary across SDK versions; we sniff defensively rather than assert one.
-        const blocks = msg?.message?.content || msg?.content;
-        if (Array.isArray(blocks)) {
-          for (const b of blocks) {
-            if (b?.type === 'tool_use' && typeof b.name === 'string' && b.name.endsWith(REPLY_TOOL_SUFFIX)) {
-              usedReplyTool = true;
-            }
-            if (b?.type === 'tool_result') {
-              const text = extractText(b);
-              if (text && /"delivered"\s*:\s*true/.test(text)) delivered = true;
-            }
-          }
-        }
-      }
+      const tracker = createReplyTracker();
+      for await (const msg of iterator) tracker.observe(msg);
+      const { usedReplyTool, delivered } = tracker.result();
 
       return { delivered, usedReplyTool, reason: usedReplyTool ? (delivered ? 'delivered' : 'reply-not-delivered') : 'no-reply' };
     },
+  };
+}
+
+/**
+ * Interpret the Claude Agent SDK message stream to decide (a) whether the
+ * `reply` tool was called and (b) whether it reported delivered:true.
+ *
+ * Verified against @anthropic-ai/claude-agent-sdk v0.3.x message shapes (depth
+ * sweep 2026-06-06): tool USE blocks ride an `type:'assistant'` SDKMessage at
+ * `msg.message.content[]` ({type:'tool_use', name, id}); the tool RESULT comes
+ * back on a LATER `type:'user'` SDKMessage at `msg.message.content[]`
+ * ({type:'tool_result', tool_use_id, content}) — NOT in the same assistant
+ * message. We correlate by tool_use_id so a non-reply tool's result can't be
+ * mistaken for the reply's. Exported pure so it's unit-testable without the SDK.
+ */
+export function createReplyTracker() {
+  const replyToolUseIds = new Set();
+  let usedReplyTool = false;
+  let delivered = false;
+
+  function blocksOf(msg) {
+    const c = msg?.message?.content ?? msg?.content;
+    return Array.isArray(c) ? c : [];
+  }
+
+  return {
+    observe(msg) {
+      const type = msg?.type;
+      if (type === 'assistant') {
+        for (const b of blocksOf(msg)) {
+          if (b?.type === 'tool_use' && typeof b.name === 'string' && b.name.endsWith(REPLY_TOOL_SUFFIX)) {
+            usedReplyTool = true;
+            if (b.id) replyToolUseIds.add(b.id);
+          }
+        }
+      } else if (type === 'user') {
+        for (const b of blocksOf(msg)) {
+          if (b?.type !== 'tool_result') continue;
+          // Only trust a result that correlates to a reply tool_use (or, if the
+          // SDK omitted ids, fall back to content sniffing on any tool_result).
+          const correlated = b.tool_use_id ? replyToolUseIds.has(b.tool_use_id) : usedReplyTool;
+          if (!correlated) continue;
+          if (/"delivered"\s*:\s*true/.test(extractText(b))) delivered = true;
+        }
+      }
+    },
+    result() { return { usedReplyTool, delivered }; },
   };
 }
 

@@ -10,6 +10,7 @@
 import { createLane } from '../packages/channel-daemon/agent/lane.js';
 import { selectRuntime } from '../packages/channel-daemon/agent/runtime.js';
 import { buildReplySystemPrompt } from '../packages/channel-daemon/agent/prompt.js';
+import { createReplyTracker } from '../packages/channel-daemon/agent/backends/claude-sdk.js';
 import { getActiveTurn, _resetForTests } from '../packages/channel-daemon/inbound-context.js';
 
 const ledger = [];
@@ -100,6 +101,42 @@ const msg = (t) => ({ content: t });
   rec('P1. prompt names the reply tool as the only delivery path', /`reply` tool/.test(dm) && /NOT delivered/.test(dm));
   const grp = buildReplySystemPrompt({ turnCtx: { channelKind: 'telegram-group', channelId: '-1' } });
   rec('P2. surface wording differs DM vs group', /direct message/.test(dm) && /Telegram group/.test(grp));
+}
+
+// ── SDK message interpretation (createReplyTracker) — verified shapes ─────────
+// Claude Agent SDK v0.3.x: tool_use rides a type:'assistant' SDKMessage at
+// msg.message.content[]; the tool_result comes on a LATER type:'user' message.
+{
+  // happy: reply tool_use (assistant) → tool_result delivered:true (user)
+  const t = createReplyTracker();
+  t.observe({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__mycelium__reply', id: 'tu_1', input: { text: 'hi' } }] } });
+  t.observe({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: '{"delivered":true}' }] } });
+  const r = t.result();
+  rec('S1. reply tool_use(assistant)+tool_result(user) → used+delivered', r.usedReplyTool === true && r.delivered === true, JSON.stringify(r));
+}
+{
+  // a non-reply tool result must NOT mark delivered
+  const t = createReplyTracker();
+  t.observe({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__mycelium__searchMindscape', id: 'tu_x' }] } });
+  t.observe({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu_x', content: '{"delivered":true}' }] } });
+  const r = t.result();
+  rec('S2. non-reply tool result does NOT count as delivered', r.usedReplyTool === false && r.delivered === false, JSON.stringify(r));
+}
+{
+  // reply called but delivered:false
+  const t = createReplyTracker();
+  t.observe({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__mycelium__reply', id: 'tu_2' }] } });
+  t.observe({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu_2', content: '{"delivered":false,"errorCode":"rate-limited"}' }] } });
+  const r = t.result();
+  rec('S3. reply used but not delivered → used=true, delivered=false', r.usedReplyTool === true && r.delivered === false, JSON.stringify(r));
+}
+{
+  // no reply tool at all
+  const t = createReplyTracker();
+  t.observe({ type: 'assistant', message: { content: [{ type: 'text', text: 'thinking' }] } });
+  t.observe({ type: 'result', subtype: 'success' });
+  const r = t.result();
+  rec('S4. no reply tool → used=false, delivered=false', r.usedReplyTool === false && r.delivered === false, JSON.stringify(r));
 }
 
 const passed = ledger.filter(Boolean).length;

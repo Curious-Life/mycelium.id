@@ -120,13 +120,13 @@ export function buildDaemon(cfg, { runTurn } = {}) {
   const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized });
   const poller = createTelegramPoller({ telegram, handleInbound });
 
-  return { app, poller, telegram, lane };
+  return { app, poller, telegram, lane, vault };
 }
 
 async function main() {
   const cfg = loadConfig();
   assertEgressConfig(cfg);
-  const { app, poller, telegram } = buildDaemon(cfg);
+  const { app, poller, telegram, lane, vault } = buildDaemon(cfg);
 
   // Validate the token up front so a bad token fails loud, not silently mid-poll.
   try {
@@ -135,6 +135,19 @@ async function main() {
   } catch (e) {
     console.error(`[channel-daemon] telegram getMe failed — check TELEGRAM_BOT_TOKEN: ${e.message}`);
     process.exit(1);
+  }
+
+  // Preflight (http mode): two-way replies need the vault MCP to advertise the
+  // `reply` tool, which only happens when the vault was booted with AGENT_URL set
+  // to THIS daemon. If it's missing, replies silently won't deliver — warn loudly
+  // rather than fail at the first inbound. (stdio mode wires AGENT_URL itself.)
+  if (lane && cfg.mcpMode !== 'stdio') {
+    const tools = await vault.listToolNames();
+    if (tools && !tools.includes('reply')) {
+      console.error(`[channel-daemon] ⚠ vault MCP does NOT advertise the 'reply' tool — two-way replies will NOT deliver. Boot the vault with AGENT_URL=${cfg.selfUrl} (and MYCELIUM_MCP_BEARER) so the reply tool registers + the SDK can attach.`);
+    } else if (tools) {
+      console.log('[channel-daemon] preflight OK — vault advertises the reply tool.');
+    } // tools null = vault unreachable now; the poller/turns will surface it later.
   }
 
   const server = app.listen(cfg.port, cfg.host, () => {

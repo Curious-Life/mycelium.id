@@ -94,8 +94,9 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
         const body = {
           chat_id: chatId,
           text: chunks[i],
-          // reply-to only on the first chunk, and only in groups/threads
-          ...(replyToMessageId != null && i === 0 ? { reply_to_message_id: Number(replyToMessageId) } : {}),
+          // reply-to only on the first chunk. `reply_parameters` is the current
+          // API (Bot API 7.0+); `reply_to_message_id` is deprecated.
+          ...(replyToMessageId != null && i === 0 ? { reply_parameters: { message_id: Number(replyToMessageId) } } : {}),
         };
         let res;
         try {
@@ -133,7 +134,8 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
       const form = new FormData();
       form.append('chat_id', String(chatId));
       form.append('voice', new Blob([bytes], { type: 'audio/ogg' }), 'voice.ogg');
-      if (replyToMessageId != null) form.append('reply_to_message_id', String(Number(replyToMessageId)));
+      // reply_parameters (current API) as a JSON-encoded multipart field.
+      if (replyToMessageId != null) form.append('reply_parameters', JSON.stringify({ message_id: Number(replyToMessageId) }));
       const res = await fetchImpl(`${base}/sendVoice`, {
         method: 'POST',
         body: form,

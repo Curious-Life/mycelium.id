@@ -57,6 +57,16 @@ export function createVaultClient({ baseUrl, fetch: fetchImpl = globalThis.fetch
       }
     },
 
+    /** Tool names the vault MCP currently advertises (REST mirror). null on error. */
+    async listToolNames() {
+      try {
+        const res = await fetchImpl(`${root}/api/v1/tools`, { signal: AbortSignal.timeout(timeoutMs) });
+        if (!res.ok) return null;
+        const j = await res.json();
+        return Array.isArray(j.tools) ? j.tools.map((t) => t.name) : null;
+      } catch { return null; }
+    },
+
     /** Is this Telegram group authorized (active)? Fail-closed on error. */
     async getTelegramGroup(id) {
       try {

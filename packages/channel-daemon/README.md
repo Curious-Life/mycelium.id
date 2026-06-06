@@ -55,10 +55,25 @@ npm i @anthropic-ai/claude-agent-sdk          # optional dep, only for two-way
 ANTHROPIC_API_KEY=sk-ant-…                     # → cloud Claude Agent SDK (default)
 ```
 
-The vault MCP server must be reachable (default `MYCELIUM_MCP_URL=…:4711/mcp`)
-**and booted with `AGENT_URL` pointing at this daemon** so its `reply` tool calls
-the egress chokepoint back here. (Or set `CHANNEL_MCP_MODE=stdio` to have the SDK
-spawn its own MCP server — then the daemon env must carry the vault keys.)
+**http mode (default) — the vault must be booted with BOTH:**
+
+```bash
+AGENT_URL=http://127.0.0.1:3010   # → this daemon, so the vault registers the `reply` tool
+MYCELIUM_MCP_BEARER=$(openssl rand -hex 32)   # so the Agent SDK can attach to /mcp
+npm run start:http                 # vault on :4711
+```
+
+If `AGENT_URL` is unset on the vault, the `reply` tool is NOT registered and
+replies silently won't deliver — the daemon prints a loud **preflight warning**
+at startup (it checks the vault's tool list). Set `MYCELIUM_MCP_URL` +
+`MYCELIUM_MCP_BEARER` on the daemon to match. (Or `CHANNEL_MCP_MODE=stdio` →
+the SDK spawns its own MCP server with `AGENT_URL` wired automatically; then the
+daemon env must carry the vault keys.)
+
+**Voice keys (sweep finding):** the daemon is keyless and the TTS module reads
+`process.env` — so put `OPENAI_API_KEY` / `ELEVENLABS_API_KEY` in the **daemon's**
+env (the vault's encrypted BYOK store is not reachable from the daemon; a loopback
+`tts-credentials` endpoint is planned). Voice needs `ffmpeg` on PATH.
 
 ## Run
 
