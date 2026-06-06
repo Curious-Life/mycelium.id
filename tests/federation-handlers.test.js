@@ -125,14 +125,19 @@ describe('connectResponse (the accept callback)', () => {
     const payload = { $type: 'social.mycelium.connect-response.v1', from_handle: 'bob', from_instance: SENDER_HOST, from_did: SENDER_DID, to_handle: 'alice', action: 'accept', nonce: 'rn-' + Math.random(), ts: now, profile: { signature: 'graphs' } };
     return { payload, headers: { 'x-myc-did': SENDER_DID, 'x-myc-sig': SENDER.sign(canonicalize(payload)) } };
   }
-  it('202 for a valid signed response and dispatches to receiveResponse', async () => {
+  it('202 for a valid signed response; binds to the VERIFIED host, not the payload', async () => {
     const { h, responses } = makeHandlers();
-    const { payload, headers } = signedResponse();
+    // A validly-SIGNED payload that nonetheless spoofs from_instance: the handler
+    // must derive the host from the verified did (SENDER_HOST), not from_instance.
+    const payload = { $type: 'social.mycelium.connect-response.v1', from_handle: 'bob', from_instance: 'evil.example', from_did: SENDER_DID, to_handle: 'alice', action: 'accept', nonce: 'rn-' + Math.random(), ts: Date.now(), profile: { signature: 'graphs' } };
+    const headers = { 'x-myc-did': SENDER_DID, 'x-myc-sig': SENDER.sign(canonicalize(payload)) };
     const r = await h.connectResponse({ payload, headers, ip: '1.1.1.1' });
-    assert.equal(r.status, 202);
+    assert.equal(r.status, 202); // signature valid over the (spoofed) payload
     assert.equal(responses.length, 1);
     assert.equal(responses[0].action, 'accept');
     assert.equal(responses[0].toUserId, 'me');
+    assert.equal(responses[0].verifiedHost, SENDER_HOST, 'host comes from the verified did, not from_instance');
+    assert.equal(responses[0].fromDid, SENDER_DID);
   });
   it('401 unsigned response', async () => {
     const { h } = makeHandlers();

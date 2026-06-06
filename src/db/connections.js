@@ -272,17 +272,22 @@ export function createConnectionsNamespace(deps) {
      * peer's public profile (keyed by their did so it never collides with the
      * local handle's UNIQUE constraint) and writes a PENDING connection that
      * surfaces via pending(). Idempotent per (peer, local user).
-     * @param {{fromHandle:string, fromInstance:string, fromDid?:string, profile?:object, toUserId:string}} p
+     * SECURITY: `verifiedHost` is the host of the cryptographically verified
+     * signer did:web (the federation handler derives it). The displayed instance
+     * (remote_instance / "handle@instance") is bound to it — NOT the payload's
+     * claimed from_instance — so a signed peer can't make their request appear
+     * to come from an instance they don't control (impersonation in the UI).
+     * @param {{fromHandle:string, verifiedHost:string, fromDid?:string, profile?:object, toUserId:string}} p
      * @returns {Promise<string>} the connection id
      */
-    async receiveRemote({ fromHandle, fromInstance, fromDid, profile = {}, toUserId }) {
-      if (!fromHandle || !fromInstance || !toUserId) {
-        throw new Error('receiveRemote: fromHandle, fromInstance, toUserId required');
+    async receiveRemote({ fromHandle, verifiedHost, fromDid, profile = {}, toUserId }) {
+      if (!fromHandle || !verifiedHost || !toUserId) {
+        throw new Error('receiveRemote: fromHandle, verifiedHost, toUserId required');
       }
-      const remoteId = fromDid || `${fromHandle}@${fromInstance}`;
+      const remoteId = fromDid || `${fromHandle}@${verifiedHost}`;
       if (remoteId === toUserId) throw new Error('cannot connect to yourself');
       // Cache the peer's public profile. handle stays NULL (only the local user
-      // owns the UNIQUE handle); display_name carries "handle@instance".
+      // owns the UNIQUE handle); display_name carries "handle@<verified host>".
       await d1Query(
         `INSERT INTO user_profiles (user_id, display_name, signature, did, member_since)
          VALUES (?, ?, ?, ?, datetime('now'))
@@ -290,7 +295,7 @@ export function createConnectionsNamespace(deps) {
            display_name = excluded.display_name,
            signature    = excluded.signature,
            did          = excluded.did`,
-        [remoteId, `${fromHandle}@${fromInstance}`, profile.signature ?? null, fromDid ?? null],
+        [remoteId, `${fromHandle}@${verifiedHost}`, profile.signature ?? null, fromDid ?? null],
       );
       const { user_a, user_b } = canonical(toUserId, remoteId);
       const existing = await d1Query(
@@ -303,7 +308,7 @@ export function createConnectionsNamespace(deps) {
       await d1Query(
         `INSERT INTO connections (id, user_a, user_b, initiated_by, status, remote_instance, remote_user_handle, remote_did, created_at)
          VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, datetime('now'))`,
-        [id, user_a, user_b, remoteId, fromInstance, fromHandle, fromDid ?? null],
+        [id, user_a, user_b, remoteId, verifiedHost, fromHandle, fromDid ?? null],
       );
       return id;
     },
@@ -356,26 +361,34 @@ export function createConnectionsNamespace(deps) {
      * Tier-0b INBOUND: the peer we requested has accepted (verified upstream by
      * the federation router against their did:web key). Flip our matching "sent"
      * row to accepted and cache their bio. Idempotent; ignores unknown refs.
-     * @param {{fromHandle:string, fromInstance:string, fromDid?:string, profile?:object, action:string, toUserId:string}} p
+     *
+     * SECURITY: the row is matched on `verifiedHost` — the host of the
+     * cryptographically VERIFIED signer did:web (passed by the federation
+     * handler) — NOT the payload's claimed from_instance. Otherwise any peer
+     * with a valid signature could accept on another instance's behalf, forging
+     * a connection the real peer never agreed to.
+     * @param {{fromHandle:string, verifiedHost:string, fromDid?:string, profile?:object, action:string, toUserId:string}} p
      */
-    async receiveResponse({ fromHandle, fromInstance, fromDid, profile = {}, action, toUserId }) {
-      if (!fromHandle || !fromInstance || !toUserId) throw new Error('receiveResponse: fromHandle, fromInstance, toUserId required');
+    async receiveResponse({ fromHandle, verifiedHost, fromDid, profile = {}, action, toUserId }) {
+      if (!fromHandle || !verifiedHost || !toUserId) throw new Error('receiveResponse: fromHandle, verifiedHost, toUserId required');
       if (action !== 'accept') return null; // only accept advances state in Tier-0b
+      // remote_instance must equal the verified signer's host: a connect-response
+      // is only honored from the very instance the request was sent to.
       const found = await d1Query(
         `SELECT id, user_a, user_b FROM connections
          WHERE initiated_by = ? AND remote_instance = ? AND remote_user_handle = ? AND status = 'pending'
          LIMIT 1`,
-        [toUserId, fromInstance, fromHandle],
+        [toUserId, verifiedHost, fromHandle],
       );
       const row = found.results?.[0];
-      if (!row) return null; // unknown/duplicate → ignore
+      if (!row) return null; // no pending row from this verified peer → ignore
       const peerId = row.user_a === toUserId ? row.user_b : row.user_a;
       // cache the peer's bio so list() renders them (keyed by the synthetic peer id)
       await d1Query(
         `INSERT INTO user_profiles (user_id, display_name, signature, did, member_since)
          VALUES (?, ?, ?, ?, datetime('now'))
          ON CONFLICT(user_id) DO UPDATE SET display_name = excluded.display_name, signature = excluded.signature, did = excluded.did`,
-        [peerId, `${fromHandle}@${fromInstance}`, profile.signature ?? null, fromDid ?? null],
+        [peerId, `${fromHandle}@${verifiedHost}`, profile.signature ?? null, fromDid ?? null],
       );
       await d1Query(
         `UPDATE connections SET status = 'accepted', accepted_at = datetime('now'), remote_did = COALESCE(remote_did, ?) WHERE id = ?`,

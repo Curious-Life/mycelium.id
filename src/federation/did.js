@@ -15,9 +15,30 @@
 // Pure protocol — no storage. Network only via the injected/global fetch in
 // resolveDidKey().
 
-const HOST_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/; // DNS host: no scheme, port, IP-literal, or underscore
+const HOST_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/; // DNS host: no scheme, port, or underscore
 const DID_WEB_RE = /^did:web:([a-z0-9]([a-z0-9.-]*[a-z0-9])?)$/;
+const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
 const RESOLVE_TIMEOUT_MS = 5000;
+
+/**
+ * Is `host` a public registrable domain we'll make an outbound request to?
+ * Rejects IPv4 literals and loopback/internal names so an attacker-controlled
+ * did:web (the X-Myc-Did header) can't drive SSRF probes of internal addresses.
+ * (Public-name → private-IP rebinding is out of scope; HTTPS-only + no-redirect
+ * already bound the surface.)
+ */
+export function isPublicHost(host) {
+  if (!host || !HOST_RE.test(host)) return false;
+  if (IPV4_RE.test(host)) return false;
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return false;
+  return true;
+}
+
+/** Extract the host of a `did:web:<host>` identifier, or null. */
+export function didWebHost(did) {
+  const m = DID_WEB_RE.exec(String(did || ''));
+  return m ? m[1] : null;
+}
 
 // ── base58btc + multibase (multicodec ed25519-pub = 0xed 0x01) ───────────────
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -124,6 +145,7 @@ export async function resolveDidKey(did, { fetch = globalThis.fetch, timeoutMs =
   const m = DID_WEB_RE.exec(String(did || ''));
   if (!m) throw new Error('unsupported or malformed did:web');
   const host = m[1];
+  if (!isPublicHost(host)) throw new Error('did:web host is not a public domain'); // SSRF: no IP-literal / loopback
   const res = await fetch(`https://${host}/.well-known/did.json`, {
     redirect: 'manual', // SSRF: never follow a peer's redirect to an internal address
     signal: AbortSignal.timeout(timeoutMs),

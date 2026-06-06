@@ -11,7 +11,7 @@
 // reordering in transit still verifies (same logical message); any value change
 // breaks the signature. Fail closed throughout.
 
-import { buildDidDocument, buildWebfinger, resolveDidKey } from './did.js';
+import { buildDidDocument, buildWebfinger, resolveDidKey, didWebHost } from './did.js';
 import { canonicalize, verifyDetached } from './sign.js';
 
 const MAX_CANONICAL_BYTES = 8 * 1024;     // body cap (DoS)
@@ -92,8 +92,9 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
       try {
         await db.connections.receiveRemote({
           fromHandle: payload.from_handle,
-          fromInstance: payload.from_instance,
-          fromDid: payload.from_did || v.did,
+          // displayed instance bound to the verified signer host, not the claim
+          verifiedHost: didWebHost(v.did),
+          fromDid: v.did,
           profile: payload.profile || {},
           toUserId: userId,
         });
@@ -110,8 +111,11 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
       try {
         await db.connections.receiveResponse({
           fromHandle: payload.from_handle,
-          fromInstance: payload.from_instance,
-          fromDid: payload.from_did || v.did,
+          // The acceptance is bound to the VERIFIED signer's did:web host — not
+          // the payload's claimed from_instance — so a signed-but-unrelated peer
+          // can't flip another instance's pending row to accepted.
+          verifiedHost: didWebHost(v.did),
+          fromDid: v.did,
           profile: payload.profile || {},
           action: payload.action,
           toUserId: userId,

@@ -86,27 +86,27 @@ describe('connections — receiveRemote (inbound)', () => {
   it('caches the peer profile and writes a pending connection', async () => {
     const { d1Query, writes } = makeDb();
     const ns = createConnectionsNamespace({ d1Query });
-    const cid = await ns.receiveRemote({ fromHandle: 'bob', fromInstance: 'bob.mycelium.id', fromDid: 'did:web:bob.mycelium.id', profile: { signature: 'thinks in graphs' }, toUserId: 'me' });
+    const cid = await ns.receiveRemote({ fromHandle: 'bob', verifiedHost: 'bob.mycelium.id', fromDid: 'did:web:bob.mycelium.id', profile: { signature: 'thinks in graphs' }, toUserId: 'me' });
     assert.ok(cid);
     const prof = writes.find((w) => w.kind === 'profile');
     const conn = writes.find((w) => w.kind === 'connection');
     assert.ok(prof && conn);
     assert.equal(prof.params[0], 'did:web:bob.mycelium.id');       // keyed by did
-    assert.equal(prof.params[1], 'bob@bob.mycelium.id');           // display_name
+    assert.equal(prof.params[1], 'bob@bob.mycelium.id');           // display_name (verified host)
     assert.match(conn.sql, /'pending'/);
     assert.equal(conn.params.includes('did:web:bob.mycelium.id'), true);
   });
   it('is idempotent when the connection already exists', async () => {
     const { d1Query, writes } = makeDb({ existingConn: { id: 'existing', status: 'pending' } });
     const ns = createConnectionsNamespace({ d1Query });
-    const cid = await ns.receiveRemote({ fromHandle: 'bob', fromInstance: 'bob.mycelium.id', toUserId: 'me' });
+    const cid = await ns.receiveRemote({ fromHandle: 'bob', verifiedHost: 'bob.mycelium.id', toUserId: 'me' });
     assert.equal(cid, 'existing');
     assert.equal(writes.filter((w) => w.kind === 'connection').length, 0); // no new insert
   });
   it('rejects self-connect and missing fields', async () => {
     const { d1Query } = makeDb();
     const ns = createConnectionsNamespace({ d1Query });
-    await assert.rejects(() => ns.receiveRemote({ fromHandle: 'me', fromInstance: 'x', fromDid: 'me', toUserId: 'me' }), /yourself/);
+    await assert.rejects(() => ns.receiveRemote({ fromHandle: 'me', verifiedHost: 'x.example', fromDid: 'me', toUserId: 'me' }), /yourself/);
     await assert.rejects(() => ns.receiveRemote({ fromHandle: 'bob', toUserId: 'me' }), /required/);
   });
 });
@@ -151,26 +151,45 @@ describe('connections — Tier-0b accept handshake', () => {
     assert.equal(called, false);
   });
 
-  it('receiveResponse(accept) finds the matching sent row and flips it to accepted', async () => {
+  // The SELECT only returns the pending row when its remote_instance param ==
+  // the caller-supplied host — modelling the WHERE remote_instance = ? binding.
+  function responseDb() {
     const updates = [];
-    const sentRow = { id: 's1', user_a: 'me', user_b: 'bob@bob.mycelium.id' };
+    const sentRow = { id: 's1', user_a: 'me', user_b: 'bob@bob.mycelium.id', remote_instance: 'bob.mycelium.id' };
     const d1Query = async (sql, params) => {
-      if (/SELECT id, user_a, user_b FROM connections/.test(sql)) return { results: [sentRow] };
+      if (/SELECT id, user_a, user_b FROM connections/.test(sql)) {
+        return { results: params[1] === sentRow.remote_instance && params[2] === 'bob' ? [sentRow] : [] };
+      }
       if (/INSERT INTO user_profiles/.test(sql)) { updates.push({ kind: 'profile', params }); return { results: [] }; }
       if (/UPDATE connections SET status = 'accepted'/.test(sql)) { updates.push({ kind: 'accept', params }); return { results: [] }; }
       return { results: [] };
     };
+    return { d1Query, updates };
+  }
+
+  it('receiveResponse(accept) flips the row matched on the VERIFIED host', async () => {
+    const { d1Query, updates } = responseDb();
     const ns = createConnectionsNamespace({ d1Query });
-    const cid = await ns.receiveResponse({ fromHandle: 'bob', fromInstance: 'bob.mycelium.id', fromDid: 'did:web:bob.mycelium.id', profile: { signature: 'graphs' }, action: 'accept', toUserId: 'me' });
+    const cid = await ns.receiveResponse({ fromHandle: 'bob', verifiedHost: 'bob.mycelium.id', fromDid: 'did:web:bob.mycelium.id', profile: { signature: 'graphs' }, action: 'accept', toUserId: 'me' });
     assert.equal(cid, 's1');
     assert.ok(updates.find((u) => u.kind === 'accept'));
-    assert.equal(updates.find((u) => u.kind === 'profile').params[0], 'bob@bob.mycelium.id'); // cached under the peer id
+    assert.equal(updates.find((u) => u.kind === 'profile').params[0], 'bob@bob.mycelium.id'); // cached under the verified peer id
+  });
+
+  it('receiveResponse REJECTS a forged accept from a different verified signer (the HIGH fix)', async () => {
+    const { d1Query, updates } = responseDb();
+    const ns = createConnectionsNamespace({ d1Query });
+    // Mallory signs validly (verifiedHost=evil.example) but claims to be bob's
+    // instance via fromHandle. The host binding means no pending row matches.
+    const cid = await ns.receiveResponse({ fromHandle: 'bob', verifiedHost: 'evil.example', action: 'accept', toUserId: 'me' });
+    assert.equal(cid, null);
+    assert.equal(updates.length, 0, 'no row flipped, nothing cached');
   });
 
   it('receiveResponse ignores an unknown ref and non-accept actions', async () => {
     const d1Query = async (sql) => ({ results: [] });
     const ns = createConnectionsNamespace({ d1Query });
-    assert.equal(await ns.receiveResponse({ fromHandle: 'x', fromInstance: 'y', action: 'accept', toUserId: 'me' }), null);
-    assert.equal(await ns.receiveResponse({ fromHandle: 'x', fromInstance: 'y', action: 'reject', toUserId: 'me' }), null);
+    assert.equal(await ns.receiveResponse({ fromHandle: 'x', verifiedHost: 'y.example', action: 'accept', toUserId: 'me' }), null);
+    assert.equal(await ns.receiveResponse({ fromHandle: 'x', verifiedHost: 'y.example', action: 'reject', toUserId: 'me' }), null);
   });
 });
