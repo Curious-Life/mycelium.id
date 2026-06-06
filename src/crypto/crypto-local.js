@@ -300,8 +300,21 @@ const ENCRYPTED_FIELDS = {
   // Activity tracking — behavioral surveillance data
   activity_sessions: ['window_title', 'url', 'app_bundle', 'app_name'],
 
-  // Internal model — user's private reasoning
-  internal_model_items: ['content', 'evidence', 'source_context'],
+  // Internal model — user's private reasoning. (Was ['content','evidence',
+  // 'source_context'] — but evidence/source_context are PHANTOM: no such columns
+  // exist in the table, only content + metadata. Corrected to the real sensitive
+  // columns. See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §1 v2.)
+  internal_model_items: ['content', 'metadata'],
+
+  // Persona-Claims — the most sensitive abstractions in the vault (values,
+  // boundaries, identity). claim_type/decay_class/delta_kind are ENCRYPTED too:
+  // a plaintext 'boundary' enum would leak the existence of a hard boundary
+  // (precedent: topology_audit_snapshots encrypts categorical m2_trend). support
+  // is a JSON id-set. content_hash/status/scope stay plaintext for SQL filtering;
+  // embedding_768 is in NEVER_AUTO_DECRYPT (vector envelope). Both tables are
+  // SCOPE_AWARE. See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md.
+  person_claims: ['claim_type', 'content', 'confidence_logodds', 'decay_class', 'support'],
+  person_claim_snapshots: ['confidence_logodds', 'content', 'evidence_count', 'delta_kind'],
 
   // Reflections — journal entries
   reflections: ['content', 'trigger', 'metadata'],
@@ -644,6 +657,9 @@ export const SCOPE_AWARE_TABLES = new Set([
   'wealth_transactions',
   'wealth_positions',
   'wealth_snapshots',
+  // Persona-Claims — current claims + their per-window snapshots.
+  'person_claims',
+  'person_claim_snapshots',
 ]);
 
 // ── Base64 helpers ──
