@@ -130,7 +130,7 @@
 		expandedIds = new Set(expandedIds);
 	}
 
-	function toggleExpand(id: string, e: MouseEvent) {
+	function toggleExpand(id: string, e: MouseEvent | KeyboardEvent) {
 		e.stopPropagation();
 		if (expandedIds.has(id)) {
 			expandedIds.delete(id);
@@ -314,6 +314,7 @@
 			<svg class="w-4 h-4 text-[var(--color-text-tertiary)] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 				<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>
 			</svg>
+			<!-- svelte-ignore a11y_autofocus -->
 			<input
 				bind:value={renameValue}
 				type="text"
@@ -343,7 +344,10 @@
 				<span
 					class="w-4 h-4 flex items-center justify-center flex-shrink-0 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-transform duration-150"
 					class:rotate-90={isExpanded}
+					role="button"
+					tabindex="0"
 					onclick={(e) => toggleExpand(folder.id, e)}
+					onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(folder.id, e); } }}
 				>
 					<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
 						<path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
@@ -384,6 +388,7 @@
 			<svg class="w-4 h-4 text-[var(--color-text-tertiary)] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 				<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>
 			</svg>
+			<!-- svelte-ignore a11y_autofocus -->
 			<input
 				bind:value={newSubfolderName}
 				type="text"
@@ -495,6 +500,7 @@
 					<svg class="w-4 h-4 text-[var(--color-text-tertiary)] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 						<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>
 					</svg>
+					<!-- svelte-ignore a11y_autofocus -->
 					<input
 						bind:value={newFolderName}
 						type="text"

@@ -123,7 +123,7 @@
 </script>
 
 <div class="tab-strip" role="tablist">
-	<div class="tabs" bind:this={tabsEl} onpointerdown={onPointerDown} onclickcapture={onClickCapture}>
+	<div class="tabs" role="group" bind:this={tabsEl} onpointerdown={onPointerDown} onclickcapture={onClickCapture}>
 		{#each tabs as tab (tab.id)}
 			<Tab
 				{tab}

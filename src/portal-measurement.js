@@ -325,6 +325,112 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
   });
 
   // ──────────────────────────────────────────────────────────────────────────
+  // COMPLEXITY (LZ76) — complexity_snapshots. Numeric cols are encrypted, so
+  // db.rawQuery auto-decrypts → coerce; "latest per (level, level_id)" in JS.
+  // ──────────────────────────────────────────────────────────────────────────
+  router.get('/complexity', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const rows = (await db.rawQuery(
+        `SELECT level, level_id, level_name, lz_complexity, raw_complexity, sequence_length,
+                alphabet_size, point_count, window_start, window_end, computed_at
+           FROM complexity_snapshots WHERE user_id = ?
+           ORDER BY computed_at DESC LIMIT 400`, [u.id])).results || [];
+      const seen = new Set(); const latest = [];
+      for (const r of rows) {
+        const k = `${r.level}:${r.level_id ?? ''}`;
+        if (seen.has(k)) continue; seen.add(k);
+        latest.push({
+          level: r.level, level_id: r.level_id, level_name: r.level_name,
+          lz_complexity: num(r.lz_complexity), raw_complexity: num(r.raw_complexity),
+          sequence_length: num(r.sequence_length), alphabet_size: num(r.alphabet_size),
+          point_count: num(r.point_count),
+          window_start: r.window_start, window_end: r.window_end, computed_at: r.computed_at,
+        });
+      }
+      const global = latest.find((r) => r.level === 'global') || null;
+      const territories = latest.filter((r) => r.level === 'territory');
+      let avg = null;
+      const tv = territories.map((t) => t.lz_complexity).filter((v) => v != null);
+      if (tv.length) avg = tv.reduce((a, b) => a + b, 0) / tv.length;
+      res.set('Cache-Control', 'no-store');
+      res.json({ global, territories, realms: latest.filter((r) => r.level === 'realm'), avg_territory_lz: avg });
+    } catch { fail(res, 500, 'Failed to load complexity'); }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // CO-FIRING graph — territory_cofire. cofire_* strengths are encrypted, so we
+  // load (decrypt-on-read), then filter/sort by strength in JS (not SQL).
+  // ──────────────────────────────────────────────────────────────────────────
+  router.get('/cofire', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const limit = Math.min(Number(req.query.limit) || 24, 200);
+      const rows = (await db.rawQuery(
+        `SELECT territory_a, territory_b, cofire_immediate, cofire_session,
+                cofire_daily, cofire_weekly, last_cofire_at, last_computed
+           FROM territory_cofire WHERE user_id = ?`, [u.id])).results || [];
+      const edges = rows.map((r) => ({
+        a: r.territory_a, b: r.territory_b,
+        immediate: num(r.cofire_immediate), session: num(r.cofire_session),
+        daily: num(r.cofire_daily), weekly: num(r.cofire_weekly),
+        last_cofire_at: r.last_cofire_at,
+      })).filter((e) => ['immediate', 'session', 'daily', 'weekly'].some((s) => (e[s] ?? 0) > 0));
+      edges.sort((x, y) => (y.weekly ?? 0) - (x.weekly ?? 0) || (y.daily ?? 0) - (x.daily ?? 0));
+      res.set('Cache-Control', 'no-store');
+      res.json({ edges: edges.slice(0, limit), total_edges: edges.length, scales: ['immediate', 'session', 'daily', 'weekly'] });
+    } catch { fail(res, 500, 'Failed to load co-firing'); }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // FREQUENCY — frequency_snapshots (latest window). Numeric cols encrypted →
+  // coerce. coherence · entropy · compression · learning_rate · gradient_signal.
+  // ──────────────────────────────────────────────────────────────────────────
+  router.get('/frequency', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const rows = (await db.rawQuery(
+        `SELECT window_start, window_end, granularity, coherence, entropy, compression,
+                learning_rate, gradient_signal, point_count, territory_count, message_count, computed_at
+           FROM frequency_snapshots WHERE user_id = ?
+           ORDER BY computed_at DESC LIMIT 1`, [u.id])).results || [];
+      const r = rows[0];
+      if (!r) return res.json({ snapshot: null });
+      res.set('Cache-Control', 'no-store');
+      res.json({ snapshot: {
+        window_start: r.window_start, window_end: r.window_end, granularity: r.granularity,
+        coherence: num(r.coherence), entropy: num(r.entropy), compression: num(r.compression),
+        learning_rate: num(r.learning_rate), gradient_signal: num(r.gradient_signal),
+        point_count: num(r.point_count), territory_count: num(r.territory_count),
+        message_count: num(r.message_count), computed_at: r.computed_at,
+      } });
+    } catch { fail(res, 500, 'Failed to load frequency'); }
+  });
+
+  // GET /frequency/series — frequency_snapshots over time for one granularity,
+  // so the page can chart coherence/entropy/learning-rate/drift across windows.
+  router.get('/frequency/series', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const granularity = String(req.query.granularity || 'day');
+      const limit = Math.min(Number(req.query.limit) || 180, 400);
+      const rows = (await db.rawQuery(
+        `SELECT window_start, window_end, granularity, coherence, entropy, compression,
+                learning_rate, gradient_signal, point_count, territory_count, message_count, computed_at
+           FROM frequency_snapshots WHERE user_id = ? AND granularity = ?
+           ORDER BY window_end ASC LIMIT ?`, [u.id, granularity, limit])).results || [];
+      const series = rows.map((r) => ({
+        window_end: r.window_end, window_start: r.window_start,
+        coherence: num(r.coherence), entropy: num(r.entropy), compression: num(r.compression),
+        learning_rate: num(r.learning_rate), gradient_signal: num(r.gradient_signal),
+        message_count: num(r.message_count), territory_count: num(r.territory_count),
+      }));
+      res.set('Cache-Control', 'no-store');
+      res.json({ granularity, series });
+    } catch { fail(res, 500, 'Failed to load frequency series'); }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
   // METRIC FRESHNESS — per-table staleness map (no decrypted values, just
   // MAX(timestamp) / pipeline_state probes). All timestamp/state columns are
   // plaintext, so nothing here can leak ciphertext.

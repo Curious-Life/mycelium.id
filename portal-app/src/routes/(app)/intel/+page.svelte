@@ -453,7 +453,9 @@
 		try {
 			// Load TopoJSON data + converter from local npm packages (no CDN)
 			const topoMod = await import('world-atlas/countries-110m.json');
-			const topoData = topoMod.default;
+			// world-atlas ships untyped TopoJSON; cast to escape the JSON-module's
+			// widened `type: string` (topojson expects the literal "Topology").
+			const topoData = topoMod.default as any;
 			geoJsonCache = topojson.feature(topoData, topoData.objects.countries);
 
 			// Fix antimeridian crossing (Russia, Fiji, etc.)
@@ -2173,12 +2175,15 @@
 			<div
 				class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-6"
 				onclick={() => selectedMarket = null}
+				onkeydown={(e) => { if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectedMarket = null; } }}
 				role="dialog"
+				tabindex="-1"
 			>
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<div
 					class="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-2xl max-w-3xl w-full max-h-[80vh] overflow-y-auto p-6"
 					onclick={(e) => e.stopPropagation()}
+					onkeydown={(e) => e.stopPropagation()}
 				>
 					<div class="flex items-start justify-between mb-4">
 						<div>

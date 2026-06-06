@@ -70,7 +70,7 @@
 	// Local state
 	let message = $state('');
 	let isLoading = $state(false);
-	let inputRef: HTMLTextAreaElement;
+	let inputRef = $state<HTMLTextAreaElement>();
 	let messagesContainerRef = $state<HTMLDivElement | null>(null);
 	let abortController = $state<AbortController | null>(null);
 	let enableThinking = $state(true);
@@ -1169,12 +1169,18 @@
 
 {#snippet attachmentBlock(attachment: import('$lib/stores/chat').Attachment)}
 	{#if attachment.type === 'image'}
-		<img
-			src={attachment.url}
-			alt={attachment.description || 'Image'}
-			class="max-w-[240px] max-h-[200px] rounded-lg cursor-pointer object-cover"
+		<button
+			type="button"
+			aria-label={attachment.description ? `Open image: ${attachment.description}` : 'Open image in new tab'}
 			onclick={() => window.open(attachment.url, '_blank')}
-		/>
+			class="block p-0 border-0 bg-transparent cursor-pointer"
+		>
+			<img
+				src={attachment.url}
+				alt={attachment.description || 'Image'}
+				class="max-w-[240px] max-h-[200px] rounded-lg object-cover"
+			/>
+		</button>
 	{:else if attachment.type === 'voice'}
 		<div class="flex items-center gap-2">
 			<audio controls preload="none" class="w-full max-w-[240px] h-8">
@@ -2120,7 +2126,7 @@
 	.messages-header-draggable:active {
 		cursor: grabbing;
 	}
-	.messages-header-draggable :where(button, a, [role="button"], [role="menu"]) {
+	.messages-header-draggable :where(button, a) {
 		cursor: pointer;
 	}
 
@@ -2195,15 +2201,10 @@
 		word-break: break-word;
 	}
 
-	.user-bubble p {
-		color: var(--color-text-primary);
-		word-break: break-word;
-		overflow-wrap: break-word;
-	}
-
 	.user-message-text.truncated {
 		display: -webkit-box;
 		-webkit-line-clamp: 4;
+		line-clamp: 4;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 		white-space: pre-wrap;

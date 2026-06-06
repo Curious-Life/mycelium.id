@@ -119,6 +119,13 @@ export function openRegistry(path) {
       if (!publicKey) return undefined;
       return db.prepare('SELECT * FROM entitlements WHERE public_key = ?').get(publicKey);
     },
+    // Reverse lookup for webhook events that carry only the Stripe customer id
+    // (invoice.payment_failed / customer.subscription.deleted): map customer →
+    // the tenant publicKey we bound at checkout. Returns undefined if unbound.
+    getEntitlementByCustomer(stripeCustomerId) {
+      if (!stripeCustomerId) return undefined;
+      return db.prepare('SELECT * FROM entitlements WHERE stripe_customer_id = ?').get(stripeCustomerId);
+    },
     // Lapse a subscription: zero the paid-through but KEEP stripe_customer_id so
     // re-subscribe is one click (no new Stripe customer).
     clearEntitlement(publicKey) {

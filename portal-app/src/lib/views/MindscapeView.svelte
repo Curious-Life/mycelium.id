@@ -517,7 +517,7 @@
 	// Resizable panel state
 	let panelWidth = $state(320);
 	let isResizing = $state(false);
-	let containerRef: HTMLElement;
+	let containerRef = $state<HTMLElement>();
 
 	// Load saved width from localStorage
 	$effect(() => {
@@ -1139,6 +1139,7 @@
 		line-height: 1.3;
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
+		line-clamp: 2;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 	}

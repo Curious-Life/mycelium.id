@@ -620,13 +620,6 @@
 		border-top: 1px solid var(--color-border);
 	}
 
-	/* Drop zone */
-	.drop-zone {
-		border-style: dashed;
-		text-align: center;
-		transition: border-color 0.2s, background 0.2s;
-		cursor: default;
-	}
 	/* Data grid */
 	.data-grid {
 		display: grid;
