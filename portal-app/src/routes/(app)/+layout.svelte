@@ -83,7 +83,7 @@
 		{@render children()}
 	</div>
 {:else}
-	<div class="h-screen flex flex-col bg-[var(--color-bg)] overflow-hidden">
+	<div class="app-shell flex flex-col bg-[var(--color-bg)] overflow-hidden">
 		<Header />
 
 		<div class="flex-1 flex overflow-hidden">
@@ -120,9 +120,18 @@
 {/if}
 
 <style>
+	/* Dynamic viewport height: plain 100vh on iOS Safari/WKWebView is the LARGE
+	   viewport (excludes the dynamic toolbar), so the bottom of the app is clipped
+	   behind the browser chrome. 100dvh tracks the visible viewport; the preceding
+	   100vh line is the fallback for engines without dvh. */
+	.app-shell {
+		height: 100vh;
+		height: 100dvh;
+	}
 	.capture-viewport {
 		width: 100vw;
 		height: 100vh;
+		height: 100dvh;
 		overflow: hidden;
 		background: #0A0A0C;
 	}

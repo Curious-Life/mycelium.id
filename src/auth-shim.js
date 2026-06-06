@@ -1,4 +1,5 @@
 import express from 'express';
+import { isTrustedLoopback } from './http/loopback.js';
 
 /**
  * authShimRouter — local "always signed in" auth surface for V1.
@@ -25,9 +26,13 @@ import express from 'express';
  * @param {object} deps
  * @param {string} deps.userId  the single V1 owner id
  * @param {string} [deps.handle]
+ * @param {(req: import('express').Request) => boolean | Promise<boolean>} [deps.resolveAuthorized]
+ *   Optional gate for `/session`: when provided, a request that is NOT authorized
+ *   gets 401 (so a networked browser bounces to /login). Default (loopback-only
+ *   V1) is "always authorized" — desktop behavior is unchanged.
  * @returns {import('express').Router}
  */
-export function authShimRouter({ userId, handle = 'local' }) {
+export function authShimRouter({ userId, handle = 'local', resolveAuthorized }) {
   const router = express.Router();
   router.use(express.json({ limit: '256kb' }));
 
@@ -38,16 +43,47 @@ export function authShimRouter({ userId, handle = 'local' }) {
   // raw-bytes /api/v1/upload route).
 
   // The root layout calls this on every page; returning a user keeps the app
-  // out of the /login redirect.
-  router.get('/session', (_req, res) => res.json({ user }));
+  // out of the /login redirect. For a networked client (over the relay) we gate
+  // on resolveAuthorized so an unauthenticated browser gets 401 → /login.
+  router.get('/session', async (req, res) => {
+    if (resolveAuthorized) {
+      try {
+        if (!(await resolveAuthorized(req))) return res.status(401).json({ error: 'unauthorized' });
+      } catch { return res.status(401).json({ error: 'unauthorized' }); }
+    }
+    res.json({ user });
+  });
 
   // The /login page (not normally reached) reads this to decide its flow.
   router.get('/setup-status', (_req, res) =>
     res.json({ setupRequired: false, hasPasskeys: false, handle }));
 
-  // Logout is a no-op locally (there's no session to end); report success so
-  // the UI doesn't error. The next page load re-establishes "signed in".
-  router.post('/logout', (_req, res) => res.json({ ok: true }));
+  // Logout. Loopback (desktop) is "always signed in" — nothing to revoke; no-op.
+  // A NETWORKED client (over the relay) holds a REAL better-auth session, so a
+  // no-op would be a FALSE logout (the cookie stays valid). Forward to :4711's
+  // better-auth /api/auth/sign-out to actually revoke the session, and relay its
+  // Set-Cookie so the browser cookie is cleared too. Best-effort + fail-safe:
+  // always report ok so the UI completes the logout UX.
+  router.post('/logout', async (req, res) => {
+    if (!isTrustedLoopback(req) && req.headers.cookie) {
+      const base = process.env.MYCELIUM_AUTH_URL || `http://127.0.0.1:${process.env.MYCELIUM_PORT || 4711}`;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 5000);
+      try {
+        // Forward the browser's Origin too — better-auth's CSRF guard rejects a
+        // POST whose Origin is not trusted, so without it sign-out would no-op.
+        const headers = { cookie: req.headers.cookie };
+        if (req.headers.origin) headers.origin = req.headers.origin;
+        const r = await fetch(`${base}/api/auth/sign-out`, {
+          method: 'POST', headers, signal: ctrl.signal,
+        });
+        const setCookie = r.headers.get('set-cookie');
+        if (setCookie) res.setHeader('Set-Cookie', setCookie); // clear the session cookie
+      } catch { /* revoke is best-effort; still report ok */ }
+      finally { clearTimeout(timer); }
+    }
+    res.json({ ok: true });
+  });
 
   return router;
 }

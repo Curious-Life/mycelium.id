@@ -253,6 +253,19 @@
 	}
 }
 
+/* Header clears the iOS status bar / notch. Mobile-only so the desktop + native
+   title-bar layout is untouched. Relies on viewport-fit=cover (app.html) for the
+   inset to resolve non-zero; on Android / non-notched devices the inset is 0 and
+   this is just min-height:3rem (= the prior h-12). height:auto + min-height lets
+   the bar grow BY the inset instead of squeezing its content under the notch. */
+@media (max-width: 767px) {
+	.app-header {
+		height: auto;
+		min-height: 3rem;
+		padding-top: env(safe-area-inset-top, 0px);
+	}
+}
+
 /* Disable pull-to-refresh and overscroll bounce for native feel */
 html, body {
 	overscroll-behavior: none;

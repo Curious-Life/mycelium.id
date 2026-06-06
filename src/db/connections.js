@@ -52,6 +52,7 @@
 
 import { randomUUID as nodeRandomUUID } from 'node:crypto';
 import { canonicalize } from '../federation/sign.js';
+import { assertResolvesPublic } from '../federation/ssrf.js';
 
 // Recursive key tripwire (CLAUDE.md §7): never let an embedding/vector field
 // leave the box, even via a future regression that adds one to the profile.
@@ -117,6 +118,7 @@ export function createConnectionsNamespace(deps) {
   // HTTPS-only, no redirect, abort timeout). Shared by request + response.
   async function resolveFederationEndpoint(remoteDomain, remoteHandle) {
     if (!DOMAIN_RE.test(remoteDomain)) throw new Error('Invalid domain');
+    await assertResolvesPublic(remoteDomain); // SSRF: no DNS-rebinding to a private IP
     const webfingerUrl = `https://${remoteDomain}/.well-known/webfinger?resource=acct:${remoteHandle}@${remoteDomain}`;
     const wfRes = await fetchImpl(webfingerUrl, { signal: AbortSignal.timeout(WEBFINGER_TIMEOUT_MS), redirect: 'manual' });
     if (!wfRes.ok) throw new Error(`WebFinger failed: ${wfRes.status}`);

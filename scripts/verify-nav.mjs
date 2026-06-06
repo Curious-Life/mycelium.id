@@ -35,8 +35,10 @@ const importView = read(P("lib", "views", "ImportView.svelte"));
 // separately at the bottom). Extract href: values inside the coreNav literal.
 const coreBlock = (sidebar.match(/const coreNav[^[]*\[([\s\S]*?)\];/) || [])[1] || "";
 const hrefs = [...coreBlock.matchAll(/href:\s*'([^']+)'/g)].map((m) => m[1]);
-const want = ["/mindscape", "/library", "/import", "/timeline", "/profile"];
-rec("N1 coreNav = the 6-screen V1 set", JSON.stringify(hrefs) === JSON.stringify(want),
+// Updated for the shipped Spaces / Connections / Sharing(contexts) screens that
+// main wired into coreNav (the original "V1 trim" was 5).
+const want = ["/mindscape", "/library", "/import", "/timeline", "/spaces", "/connections", "/contexts", "/profile"];
+rec("N1 coreNav = the current nav set", JSON.stringify(hrefs) === JSON.stringify(want),
   `got ${JSON.stringify(hrefs)}`);
 
 // N2 — the deferred module/social/fleet nav arrays are gone.
@@ -45,7 +47,9 @@ rec("N2 deferred nav arrays removed", leftovers.length === 0,
   leftovers.length ? `still present: ${leftovers.join(", ")}` : "");
 
 // N3 — no dead probes that 404 in V1.
-const probes = ["/portal/connections/count", "/portal/fleet/gate"].filter((s) => sidebar.includes(s));
+// /portal/connections/count is now a LIVE endpoint (src/portal-compat.js — main
+// shipped Connections), so it is no longer a dead probe. /portal/fleet/gate stays.
+const probes = ["/portal/fleet/gate"].filter((s) => sidebar.includes(s));
 rec("N3 zero dead 404 probes in Sidebar", probes.length === 0,
   probes.length ? `still calls: ${probes.join(", ")}` : "");
 

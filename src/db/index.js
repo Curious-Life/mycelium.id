@@ -42,6 +42,8 @@ import { createSpaceRoomsNamespace } from './space-rooms.js';
 import { createSpaceRoomDocumentsNamespace } from './space-room-documents.js';
 import { createSpaceConversationsNamespace } from './space-conversations.js';
 import { createContextsNamespace } from './contexts.js';
+import { createIdentityChannelsNamespace } from './identity-channels.js';
+import { createSpaceMatrixRoomsNamespace } from './space-matrix-rooms.js';
 
 /**
  * Open the vault db and assemble the tool-facing `db` namespace object.
@@ -81,6 +83,9 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     spaceRoomDocuments: createSpaceRoomDocumentsNamespace({ d1Query, randomUUID }),
     spaceConversations: createSpaceConversationsNamespace({ d1Query, firstRow, randomUUID }),
     contexts: createContextsNamespace({ d1Query, randomUUID }),
+    // Per-user channel bindings (Phase B: the box's Matrix MXID under kind='matrix').
+    identityChannels: createIdentityChannelsNamespace({ d1Query, firstRow }),
+    spaceMatrixRooms: createSpaceMatrixRoomsNamespace({ d1Query, firstRow }),
     // Federation (Tier-0): the social graph + cross-instance connect. sign/did/
     // selfInstance come from boot() (derived from the box identity + publicHost);
     // absent when remote is off → outbound stays unsigned-disabled, cleanly.

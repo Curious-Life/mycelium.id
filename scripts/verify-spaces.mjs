@@ -45,6 +45,7 @@ async function main() {
   const systemKey = await importMasterKey(crypto.randomBytes(32).toString('hex'));
   const { db, close } = getDb({ dbPath: join(dir, 'v.db'), userKey, systemKey });
 
+  await db._base.d1Query(`INSERT INTO users (id, display_name, type) VALUES ('owner', 'Owner', 'human')`, []);
   // Seed bob as a real local user + profile + an ACCEPTED connection to owner,
   // so the share grant (which now requires an accepted connection) succeeds.
   await db._base.d1Query(`INSERT INTO users (id, display_name, type) VALUES ('bob', 'Bob', 'human')`, []);
@@ -82,6 +83,9 @@ async function main() {
   rec('sharing with a NON-connection is rejected (defense-in-depth)', (await call(owner.port, 'POST', `/portal/spaces/${sid}/shares`, { granteeId: 'stranger', role: 'member' })).status === 400);
   rec('owner grants bob (an accepted connection) member access', (await call(owner.port, 'POST', `/portal/spaces/${sid}/shares`, { granteeId: 'bob', role: 'member' })).status === 200);
   rec('bob appears in members', (await call(owner.port, 'GET', `/portal/spaces/${sid}/members`)).json.members.some((m) => m.user_id === 'bob'));
+  // management hub: the shared-with-connection view surfaces this grant
+  const sw = await call(owner.port, 'GET', `/portal/connections/conn-ob/shared`);
+  rec('management: /connections/:id/shared lists the space shared with bob', sw.json.peer_id === 'bob' && sw.json.spaces.some((s) => s.id === sid));
   rec('granted bob can now read the space', (await call(bob.port, 'GET', `/portal/spaces/${sid}`)).status === 200);
   rec('member bob CANNOT delete the space (needs creator) → 404', (await call(bob.port, 'DELETE', `/portal/spaces/${sid}`)).status === 404);
   rec('intruder STILL 404 after the grant to bob', (await call(intruder.port, 'GET', `/portal/spaces/${sid}`)).status === 404);
@@ -111,6 +115,13 @@ async function main() {
   rec('cluster: a non-member cannot share into the space → 404', (await call(intruder.port, 'POST', `/portal/spaces/${sid}/seed-cluster`, { level: 'realm', realm_id: 1 })).status === 404);
   const kn = await call(owner.port, 'GET', `/portal/spaces/${sid}/knowledge`);
   rec('cluster: shared clusters appear as knowledge entries', kn.json.entries.some((e) => e.source_type === 'realm') && kn.json.entries.some((e) => e.source_type === 'theme'));
+
+  // ── Phase B foundation: real-sqlite round-trips of the new substrate ─────
+  await db.spaceMatrixRooms.bind(sid, '!room:hs.example', 'owner');
+  rec('phase-b: space⇄Megolm-room binding round-trips', (await db.spaceMatrixRooms.get(sid))?.room_id === '!room:hs.example');
+  await db.identityChannels.upsert({ channel_kind: 'matrix', channel_value: '@owner:hs.example', owner_user_id: 'owner' });
+  await db.identityChannels.bindToUser('matrix', '@owner:hs.example', 'owner');
+  rec('phase-b: MXID binds via identity_channels', (await db.identityChannels.getByChannel('matrix', '@owner:hs.example'))?.owner_user_id === 'owner');
 
   owner.server.close(); bob.server.close(); intruder.server.close(); close?.();
   rmSync(dir, { recursive: true, force: true });

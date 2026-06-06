@@ -113,6 +113,14 @@ The privacy-preserving "find kindred instances" layer. Stays on the **lighter si
 5. **SSRF stays closed.** Keep `connections.js`'s existing defenses (HTTPS-only, no-redirect, domain allowlist regex, timeouts) on every new outbound fetch.
 6. **Scope isolation.** Federated data lives under dedicated scopes (`matrix`, `space:<id>`) so the existing crypto scope guardian (`src/crypto/crypto-local.js`) contains a federation bug to the federation scope.
 
+### 4.1 Post-audit residuals (adversarial audit, 2026-06-06 — disposition)
+
+The Tier-0/0b + Phase-A merge (#103) had a focused security review **and** a red-team/adversarial audit. No internet-reachable HIGH. Findings and disposition:
+
+- **FIXED in #103:** connect-response forgery → bound to the verified `did:web` signer host (regression test); confused-deputy SSRF (unconstrained WebFinger `fedLink.href`) → https + host-must-match-domain; did:web IP-literal/loopback hosts rejected; `$type` validation + §7 vector tripwire on the connect-response path; `/spaces/:id/shares` requires an accepted connection.
+- **3b — DNS-rebinding SSRF — FIXED (this branch):** `src/federation/ssrf.js` `assertResolvesPublic()` resolves the host and refuses private/loopback/link-local/ULA/CGNAT addresses before the outbound did.json/WebFinger fetch (wired in `resolveDidKey` + `resolveFederationEndpoint`). **Residual:** a TOCTOU window remains without full IP pinning (resolve→fetch re-resolves); acceptable for V1 (https-only + GET + no-redirect + 5s timeout + no body reflection bound it). Follow-up for a hardened build: pin the resolved IP for the fetch (custom `lookup`/agent).
+- **1b — single-identity-per-host acceptance — NO V1 FIX (by design); V2 item.** Acceptance binds to a host's `did:web` key, which signs for *all* handles at that host. A host *operator* could therefore forge acceptances among handles **at their own host**. This is inherent to `did:web` (one key per host) and has **no V1 exposure** — V1 is one identity per box (one handle per host), so there are no sibling handles to confuse. The fix belongs in **V2 multi-tenant**: per-user signing keys (not host-level `did:web`), at which point acceptance must match the per-user key. Documented here so it is not silently assumed solved.
+
 ---
 
 ## 5. Verification gate — load-bearing assumptions to prove BEFORE building

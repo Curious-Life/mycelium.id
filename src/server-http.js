@@ -35,6 +35,7 @@ import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { createGatewayHandlers } from './gateway/openai-compat.js';
 import { createEmbeddingsHandler } from './gateway/embeddings.js';
 import { matchStaticBearer } from './gateway/static-bearer.js';
+import { createPathThrottle } from './http/rate-limit.js';
 import { createFederationRouter } from './federation/router.js';
 import { readRemoteConfig } from './remote/config.js';
 
@@ -108,6 +109,28 @@ export async function createHttpApp(opts = {}) {
   };
   app.options(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], sendPrm);
   app.get(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], sendPrm);
+
+  // CRITICAL (security audit): block the relay-exposed HTTP sign-up. This is a
+  // single-user vault — the operator account is seeded server-side at provisioning
+  // (ensureOperatorUser, an in-process call that does NOT traverse this guard).
+  // Left open, /api/auth/sign-up/* lets ANYONE on the relay mint a better-auth
+  // account + session, which would pass the portal gate AND MCP authorize and
+  // reach the owner's vault. 404 (do not reveal the route).
+  app.use((req, res, next) => {
+    if (req.method === 'POST' && req.path.toLowerCase().startsWith('/api/auth/sign-up')) {
+      return res.status(404).json({ error: 'not_found' });
+    }
+    return next();
+  });
+
+  // Brute-force throttle on the relay-exposed operator sign-in (gap review): a
+  // GLOBAL bucket (un-evadable by header spoofing) — see src/http/rate-limit.js.
+  // Mounted BEFORE the auth handler so a 429 short-circuits before better-auth.
+  app.use(createPathThrottle({ method: 'POST', path: '/api/auth/sign-in/email', max: 5, windowMs: 60_000 }));
+  app.use(createPathThrottle({ method: 'POST', path: '/api/auth/passkey/verify-authentication', max: 10, windowMs: 60_000 }));
+  // /login is the OAuth-authorize login form — it ALSO checks the operator
+  // password (signInEmail) and is relay-exposed, so throttle it too.
+  app.use(createPathThrottle({ method: 'POST', path: '/login', max: 5, windowMs: 60_000 }));
 
   // better-auth owns everything under /api/auth/* (Express 5 NAMED splat).
   // Mounted BEFORE express.json() so better-auth parses its own bodies.

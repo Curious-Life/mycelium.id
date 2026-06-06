@@ -24,8 +24,11 @@ import express from 'express';
  * @param {string} deps.userId   the single V1 owner
  * @returns {import('express').Router}
  */
-export function portalCompatRouter({ db, userId }) {
+export function portalCompatRouter({ db, userId, spaceSync = null }) {
   if (!db) throw new Error('portalCompatRouter: db required');
+  // spaceSync (Phase B, optional): when a Matrix client is wired, a share grant/
+  // revoke also syncs the peer into/out of the space's Megolm room. Null until a
+  // homeserver is configured → the grant is recorded locally regardless.
   const router = express.Router();
   router.use(express.json({ limit: process.env.MYCELIUM_API_BODY_LIMIT || '64mb' }));
 
@@ -278,6 +281,35 @@ export function portalCompatRouter({ db, userId }) {
     try { ok(res, { overlap: await db.connections.computeOverlap(userId, connId(req)) }); }
     catch (e) { fail(res, 400, e.message || 'could not compute overlap'); }
   });
+  // Everything shared WITH this connection — the management hub: spaces granted
+  // to the peer + contexts (territory facets) granted to the connection.
+  router.get('/connections/:id/shared', async (req, res) => {
+    try {
+      const cid = connId(req);
+      const cr = await db._base.d1Query(
+        `SELECT user_a, user_b FROM connections WHERE id = ? AND (user_a = ? OR user_b = ?) AND status = 'accepted'`,
+        [cid, userId, userId],
+      );
+      const row = cr.results?.[0];
+      if (!row) return ok(res, { peer_id: null, spaces: [], contexts: [] });
+      const peerId = row.user_a === userId ? row.user_b : row.user_a;
+      const spaces = (await db._base.d1Query(
+        `SELECT u.id, u.display_name AS name, sa.role
+         FROM space_access sa JOIN users u ON u.id = sa.space_id
+         WHERE sa.user_id = ? AND sa.revoked_at IS NULL AND u.type = 'space'
+         ORDER BY u.display_name`,
+        [peerId],
+      )).results || [];
+      const contexts = (await db._base.d1Query(
+        `SELECT sc.id, sc.name, sc.is_private
+         FROM context_grants cg JOIN sharing_contexts sc ON sc.id = cg.context_id
+         WHERE cg.connection_id = ? AND sc.user_id = ?
+         ORDER BY sc.name`,
+        [cid, userId],
+      )).results || [];
+      ok(res, { peer_id: peerId, spaces, contexts });
+    } catch { ok(res, { peer_id: null, spaces: [], contexts: [] }); }
+  });
 
   // ── Spaces (default-private shareable folders, Phase A) ──────────────────
   // Every read/write is gated by space_access via db.spaces.requireRole, which
@@ -459,14 +491,20 @@ export function portalCompatRouter({ db, userId }) {
       const conns = await db.connections.list(userId);
       if (!conns.some((c) => c.other_user_id === granteeId)) return fail(res, 400, 'grantee must be an accepted connection');
       await db.spaceAccess.grant(id, granteeId, role, userId);
+      // best-effort Megolm-room invite (no-op until Matrix is configured)
+      spaceSync?.syncGrant(id, granteeId, userId).catch(() => {});
       ok(res, { ok: true });
     } catch { fail(res, 500, 'could not share space'); }
   });
   router.delete('/spaces/:id/shares/:granteeId', async (req, res) => {
     const id = decodePath(req.params.id);
     if (!(await guardSpace(res, id, 'creator'))) return;
-    try { await db.spaceAccess.revoke(id, decodePath(req.params.granteeId)); ok(res, { ok: true }); }
-    catch { fail(res, 500, 'could not revoke share'); }
+    try {
+      const granteeId = decodePath(req.params.granteeId);
+      await db.spaceAccess.revoke(id, granteeId);
+      spaceSync?.syncRevoke(id, granteeId).catch(() => {});
+      ok(res, { ok: true });
+    } catch { fail(res, 500, 'could not revoke share'); }
   });
 
   // rooms (nested folders) + documents
