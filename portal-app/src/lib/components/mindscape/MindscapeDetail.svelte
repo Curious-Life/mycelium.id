@@ -495,6 +495,12 @@
 						<h4>Chronicle</h4>
 						<div class="chronicle-text">{currentTerritory.chronicle}</div>
 					</div>
+				{:else if !currentTerritory.essence}
+					<!-- Undescribed territory (narration runs async after clustering): show a
+					     clear pending state instead of a blank, broken-looking panel. -->
+					<div class="detail-block">
+						<div class="chronicle-text" style="opacity:0.6;font-style:italic">Still describing this territory — its essence and chronicle are being written. This runs automatically after generation; check back in a moment.</div>
+					</div>
 				{/if}
 
 				{#if currentTerritory.activity && currentTerritory.activity.length > 0}
