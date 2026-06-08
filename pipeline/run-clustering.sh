@@ -97,8 +97,15 @@ echo "Step 2/16: Cluster (spherical k-means + Ward HAC; FAISS k-NN = noise only)
 echo ""
 echo "Step 3/16: Describe realms + territories"
 node pipeline/describe-clusters.js $DRY_RUN
-# Chronicle narration (story / archetype / patterns). Fail-soft: skips if no model.
-node pipeline/describe-chronicles.js $DRY_RUN
+# Chronicle narration (story / archetype / patterns) is now an ASYNC BACKGROUND
+# pass: the server spawns pipeline/describe-chronicles.js (startChronicleNarrationJob
+# in src/jobs.js) AFTER Generate completes, with a generous per-territory timeout.
+# This keeps the foreground run fast and never stalls Step 3 on slow local-LLM
+# narration (the 60s default timed out on the cold model-load and cascaded).
+# Set MYCELIUM_RUN_CHRONICLES=1 to run it inline (tests / CLI). Fail-soft either way.
+if [ "${MYCELIUM_RUN_CHRONICLES:-}" = "1" ]; then
+  node pipeline/describe-chronicles.js $DRY_RUN
+fi
 
 echo ""
 echo "Step 4/16: Compute territory co-firing"

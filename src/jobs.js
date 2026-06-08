@@ -164,6 +164,10 @@ export function startClusteringJob({ dbPath, userId } = {}) {
     } else if (code === 0) {
       state.status = 'done'; state.step = state.totalSteps; state.stageLabel = 'Complete'; state.stalled = false;
       writeGenerateStats({ durationMs: state.finishedAt - state.startedAt });
+      // Chronicle narration runs ASYNC, after the foreground Generate is done, so a
+      // slow local-LLM never stalls the run. Fire-and-forget; territories fill in
+      // their chronicles as the background pass writes them (the UI polls). Fail-soft.
+      try { startChronicleNarrationJob({ dbPath, userId }); } catch { /* never block completion */ }
     } else if (state.status !== 'error') {
       state.status = 'error';
       const detail = lastErrLine();
@@ -247,6 +251,51 @@ export function startClaimDiscoveryJob({ dbPath, userId, cadence } = {}) {
   child.stderr.on('data', (d) => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
   child.on('close', (code) => {
     if (code !== 0) process.stderr.write(`[claims] discovery(${cadence}) exited ${code}: ${err.slice(-300)}\n`);
+  });
+  return { pid: child.pid ?? null };
+}
+
+/**
+ * Spawn the chronicle-narration child as an ASYNC BACKGROUND pass (post-Generate).
+ * Mirrors startClaimDiscoveryJob: re-resolves the master keys at spawn, hands them
+ * to the child via an allowlisted env (never args/logs), fire-and-forget, fail-soft.
+ *
+ * WHY ASYNC: narration calls a per-territory LLM (local Ollama by default). Run
+ * inline in Generate's Step 3 it stalled the bar for minutes and the first call's
+ * cold model-load blew past the 60s default timeout, cascading to empty chronicles.
+ * Off the critical path we give it a GENEROUS timeout (default 180s, env-tunable)
+ * that absorbs the cold load; Ollama's keep_alive holds the model warm across the
+ * loop. The child (pipeline/describe-chronicles.js) is fail-soft (no model → no-op).
+ * @returns {{ pid: number|null }}
+ */
+export function startChronicleNarrationJob({ dbPath, userId } = {}) {
+  const { userHex, systemHex } = getSessionKeys() ?? resolveKeys();
+  const childEnv = {
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
+    USER: process.env.USER,
+    LANG: process.env.LANG,
+    USER_MASTER: userHex,
+    SYSTEM_KEY: systemHex,
+    MYCELIUM_DB: dbPath || resolveDbPath(),
+    MYCELIUM_USER_ID: userId || process.env.MYCELIUM_USER_ID || 'local-user',
+    // Generous per-territory timeout (background → no UI bar to freeze): absorbs the
+    // first call's cold model-load. Env override wins so tests can shrink it.
+    MYCELIUM_CHRONICLE_TIMEOUT_MS: process.env.MYCELIUM_CHRONICLE_TIMEOUT_MS || '180000',
+    // Inherit the bundled-runtime envs (packaged app) like the clustering job.
+    ...(process.env.HF_HOME ? { HF_HOME: process.env.HF_HOME } : {}),
+    ...(process.env.HF_HUB_OFFLINE ? { HF_HUB_OFFLINE: process.env.HF_HUB_OFFLINE } : {}),
+  };
+  let child;
+  try {
+    child = spawn('node', ['pipeline/describe-chronicles.js'], { cwd: process.cwd(), env: childEnv, stdio: ['ignore', 'ignore', 'pipe'] });
+  } catch {
+    return { pid: null };
+  }
+  let err = '';
+  child.stderr.on('data', (d) => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
+  child.on('close', (code) => {
+    if (code !== 0) process.stderr.write(`[chronicles] narration exited ${code}: ${err.slice(-300)}\n`);
   });
   return { pid: child.pid ?? null };
 }
