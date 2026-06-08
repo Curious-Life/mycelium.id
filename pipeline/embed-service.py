@@ -72,9 +72,13 @@ MODEL_ID = "nomic-ai/nomic-embed-text-v1.5"
 ONNX_FILE = "onnx/model_quantized.onnx"   # int8 quantized (~170MB on disk)
 MODEL_NAME = "nomic-v1.5"                  # short label returned by API
 OUTPUT_DIM = 768
-MAX_LENGTH = 512                           # Nomic v1.5 token cap
-MAX_CHARS = 8000                           # bound payload before tokenization
-BATCH_SIZE = 16
+MAX_LENGTH = 512                           # per-window token cap (model context window)
+MAX_TOTAL_TOKENS = 8192                    # Nomic v1.5's real cap — we CHUNK long text
+                                           # into <=MAX_LENGTH windows up to this total
+                                           # and weight-pool, so the WHOLE message is
+                                           # embedded (not just its first 512 tokens).
+MAX_CHARS = 40000                          # bound payload before tokenization (~8k tokens)
+BATCH_SIZE = 16                            # windows per inference batch
 
 # Nomic v1.5 task prefixes — exact strings from the model card.
 # Trailing space is intentional. Order: query/document for retrieval.
@@ -127,8 +131,11 @@ def _load_model():
 
             tokenizer_path = hf_hub_download(MODEL_ID, "tokenizer.json")
             _tokenizer = Tokenizer.from_file(tokenizer_path)
-            _tokenizer.enable_truncation(max_length=MAX_LENGTH)
-            _tokenizer.enable_padding()
+            # Chunking owns length: cap the FULL tokenization at MAX_TOTAL_TOKENS (a
+            # safety bound), and DON'T pad here — embed_texts slices into <=MAX_LENGTH
+            # windows and pads each inference batch itself.
+            _tokenizer.enable_truncation(max_length=MAX_TOTAL_TOKENS)
+            _tokenizer.no_padding()
 
             elapsed_ms = (time.time() - t0) * 1000
             print(
@@ -174,35 +181,58 @@ def embed_texts(texts, task):
         for t in texts
     ]
 
-    out = []
-    for i in range(0, len(prefixed), BATCH_SIZE):
-        batch = prefixed[i : i + BATCH_SIZE]
-        enc = tokenizer.encode_batch(batch)
-        input_ids = np.array([e.ids for e in enc], dtype=np.int64)
-        attention_mask = np.array([e.attention_mask for e in enc], dtype=np.int64)
+    # 1) Tokenize each (prefixed) text in full (capped at MAX_TOTAL_TOKENS) and slice
+    #    into <=MAX_LENGTH-token WINDOWS so the WHOLE message is embedded, not just its
+    #    first 512 tokens. A short text yields exactly ONE window whose masked mean-pool
+    #    is byte-identical to the pre-chunking behavior — so existing vectors are stable.
+    encs = tokenizer.encode_batch(prefixed)
+    windows = []      # token-id lists, each length <= MAX_LENGTH
+    owner = []        # window index -> text index
+    weights = []      # window index -> real token count (pooling weight)
+    for ti, enc in enumerate(encs):
+        ids = enc.ids if enc.ids else [0]   # never produce zero windows
+        for j in range(0, len(ids), MAX_LENGTH):
+            w = ids[j : j + MAX_LENGTH]
+            windows.append(w)
+            owner.append(ti)
+            weights.append(len(w))
+
+    # 2) Inference over windows, batched + right-padded to the batch's longest window
+    #    (padding is masked out of the pool, so it never affects the result).
+    pooled_per_window = np.zeros((len(windows), OUTPUT_DIM), dtype=np.float32)
+    for i in range(0, len(windows), BATCH_SIZE):
+        batch = windows[i : i + BATCH_SIZE]
+        maxlen = max(len(w) for w in batch)
+        input_ids = np.zeros((len(batch), maxlen), dtype=np.int64)
+        attention_mask = np.zeros((len(batch), maxlen), dtype=np.int64)
+        for k, w in enumerate(batch):
+            input_ids[k, : len(w)] = w
+            attention_mask[k, : len(w)] = 1
         feed = {"input_ids": input_ids, "attention_mask": attention_mask}
         if "token_type_ids" in expected_inputs:
-            feed["token_type_ids"] = np.array(
-                [e.type_ids for e in enc], dtype=np.int64
-            )
+            feed["token_type_ids"] = np.zeros((len(batch), maxlen), dtype=np.int64)
 
         outputs = session.run(None, feed)
         token_embs = outputs[0]  # (batch, seq_len, 768)
-
-        # Mean-pool with attention mask
         mask = attention_mask[:, :, np.newaxis].astype(np.float32)
         pooled = (token_embs * mask).sum(axis=1) / mask.sum(axis=1).clip(min=1)
-        embs = pooled[:, :OUTPUT_DIM].astype(np.float32)
-
-        # L2 normalize (cosine search expects unit vectors)
-        norms = np.linalg.norm(embs, axis=1, keepdims=True).clip(min=1e-8)
-        embs = embs / norms
-
-        out.append(embs)
-        del enc, input_ids, attention_mask, outputs, token_embs, mask, pooled
+        pooled_per_window[i : i + len(batch)] = pooled[:, :OUTPUT_DIM].astype(np.float32)
+        del outputs, token_embs, mask, pooled, input_ids, attention_mask
         gc.collect()
 
-    return np.vstack(out)
+    # 3) Per-text: token-count-weighted mean of its windows, then L2-normalize (cosine
+    #    search expects unit vectors). One window -> the window itself, unchanged.
+    out = np.zeros((len(texts), OUTPUT_DIM), dtype=np.float32)
+    w_arr = np.asarray(weights, dtype=np.float32)
+    owner_arr = np.asarray(owner)
+    for ti in range(len(texts)):
+        sel = owner_arr == ti
+        wsum = float(w_arr[sel].sum())
+        if wsum <= 0:
+            continue
+        out[ti] = (pooled_per_window[sel] * w_arr[sel, None]).sum(axis=0) / wsum
+    norms = np.linalg.norm(out, axis=1, keepdims=True).clip(min=1e-8)
+    return (out / norms).astype(np.float32)
 
 
 # -- HTTP server -------------------------------------------------------------

@@ -198,7 +198,18 @@ async function tier2Attempt() {
     if (vec.length !== EMBED_DIM) {
       return { ok: false, detail: `real embed returned ${vec.length} dims (expected ${EMBED_DIM})` };
     }
-    return { ok: true, detail: `real service embedded "hello world" (task=query) -> ${vec.length}-dim` };
+    // Chunking fidelity: a long document (> the 512-token window) must embed
+    // DIFFERENTLY than just its head — i.e. content past the first window is
+    // captured (pre-chunking, both truncated to 512 → nearly identical vectors).
+    const head = "Topic A: distributed systems and the Raft consensus protocol in production. ".repeat(40); // ~560 tok → fills window 1
+    const tail = "Topic B: marine biology, coral reefs, and the seasonal migration of whales. ".repeat(60);  // ~800 tok → further windows
+    const vHead = await client.embed(head, "document");
+    const vFull = await client.embed(head + " " + tail, "document");
+    const cos = vHead.reduce((s, x, i) => s + x * vFull[i], 0);
+    if (!(cos < 0.99)) {
+      return { ok: false, detail: `chunking ineffective — long-doc vector ≈ its head (cos=${cos.toFixed(4)}); content beyond 512 tokens is being dropped` };
+    }
+    return { ok: true, detail: `real service embedded 768-dim + chunking captures long content (cos(head, head+tail)=${cos.toFixed(3)} < 0.99)` };
   } catch (err) {
     // Network/model-download failures are an acceptable SKIP, not a hard fail.
     return { ok: null, detail: `SKIP (could not exercise real service: ${err?.message ?? String(err)})` };
