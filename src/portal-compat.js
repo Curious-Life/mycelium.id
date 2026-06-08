@@ -656,7 +656,7 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       documents: { total: 0 }, attachments: { total: 0, byType: {}, totalSizeMB: 0 },
       contacts: { total: 0, byTier: {} }, mindscape: { territories: 0, realms: 0, points: 0 }, integrations: [] });
   });
-  router.get('/agents', (_req, res) => ok(res, { agents: [] }));
+  // (/agents now served by portalChatRouter — the real single-agent endpoint.)
   router.get('/identity', (_req, res) => ok(res, { ownerName: 'You', ownerTelegramId: null, ownerDiscordId: null }));
 
   // ── Onboarding status (read by the app layout + mindscape on load) ──────

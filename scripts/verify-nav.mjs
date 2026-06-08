@@ -65,11 +65,11 @@ rec("N5 BottomTabBar has Import, no chat tab",
   tabHrefs.includes("/import") && !tabbar.includes("'chat'") && !/toggleChat/.test(tabbar),
   `tabs ${JSON.stringify(tabHrefs)}`);
 
-// N6 — chat toggle is hidden (deferred): Header has no toggleChat, and the
-// layout's Cmd+J handler no longer toggles chat.
-const chatHidden = !/toggleChat/.test(header) && !/Toggle chat/.test(header)
-  && !/key === 'j'[\s\S]*?toggleChat/.test(layout);
-rec("N6 chat toggle hidden in V1", chatHidden);
+// N6 — chat is LIVE: the in-app tool-using agent shipped (src/portal-chat.js),
+// so the Header has a toggleChat launcher and the layout's Cmd/Ctrl+J toggles it.
+const chatWired = /toggleChat/.test(header) && /Toggle chat/.test(header)
+  && /key === 'j'[\s\S]*?toggleChat/.test(layout);
+rec("N6 chat toggle wired (in-app agent live)", chatWired);
 
 // N7 — the header is a window-drag handle in the native shell (no native title bar).
 rec("N7 Header is a window-drag region (Tauri)", /data-tauri-drag-region/.test(header) && /startWindowDrag/.test(header));

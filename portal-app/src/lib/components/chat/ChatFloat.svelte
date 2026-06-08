@@ -663,7 +663,10 @@
 				const messageWithContext = scopedDoc
 					? `${userMessage}\n\n[Re: viewing document "${scopedDoc.title}" at ${scopedDoc.path}]`
 					: userMessage;
-				const res = await fetch('/portal/chat/stream', {
+				// Self-hosted V1 serves portal routes under /api/v1/portal (the api()
+				// helper rewrites /portal/* there; this raw fetch must do it too, or it
+				// 404s — bare /portal/* is unrouted on the REST server).
+				const res = await fetch('/api/v1/portal/chat/stream', {
 					method: 'POST',
 					headers: chatHeaders,
 					credentials: 'same-origin',

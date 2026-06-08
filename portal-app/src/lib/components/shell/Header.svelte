@@ -6,6 +6,7 @@
 	import PipelineStatusChip from './PipelineStatusChip.svelte';
 
 	const currentView = $derived($navigationState.primaryView);
+	const chatOpen = $derived($navigationState.chatOpen);
 	const currentTheme = $derived($theme);
 
 	// In the native Mac shell the window has no title bar (overlay style), so the
@@ -29,13 +30,15 @@
 	const viewLabels: Record<string, string> = {
 		mindscape: 'Mycelium',
 		library: 'Library',
-		timeline: 'Timeline',
+		streams: 'Streams',
+		timeline: 'Streams',
+		people: 'People',
 		activity: 'Activity',
 		agents: 'Agents',
 		profile: 'Profile',
 		'curious-life': 'Curious Life',
 		connections: 'Connections',
-		contexts: 'Spaces',
+		contexts: 'Sharing',
 		wealth: 'Wealth',
 		intel: 'Intel',
 		settings: 'Settings',
@@ -98,8 +101,20 @@
 
 	<!-- Right side actions -->
 	<div class="flex items-center gap-1 sm:gap-2 flex-shrink-0">
-		<!-- Chat is deferred in V1 (no in-app agent loop — D5); the toggle is
-		     hidden until the chat surface lands. See docs/UX-COMPLETE-DESIGN. -->
+		<!-- Chat agent toggle (Cmd/Ctrl+J) — opens the floating tool-using agent. -->
+		<button
+			onclick={() => navigationState.toggleChat()}
+			class="w-8 h-8 rounded-full border flex items-center justify-center transition-all duration-150 {chatOpen
+				? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-white'
+				: 'border-[var(--color-border)] bg-[var(--color-elevated)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface)] hover:border-[var(--color-accent)]'}"
+			title="Chat with your vault (⌘J)"
+			aria-label="Toggle chat"
+			aria-pressed={chatOpen}
+		>
+			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+				<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+			</svg>
+		</button>
 
 		<!-- Pipeline coordinator status (Wave P4) -->
 		<PipelineStatusChip />

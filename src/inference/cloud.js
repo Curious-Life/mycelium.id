@@ -65,8 +65,10 @@ export async function cloudInfer({
   throw new InferenceError("cloudInfer: no cloud provider configured (set a key or a base_url)", { backend: "cloud" });
 }
 
-/** POST JSON with timeout; parse + fail-closed. Never echoes the response body. */
-async function postJson(url, headers, body, fetch, timeoutMs) {
+/** POST JSON with timeout; parse + fail-closed. Never echoes the response body.
+ *  Exported so the agent harness (src/agent/harness.js) can speak the same wire
+ *  protocol + share the same fail-closed/no-echo discipline. */
+export async function postJson(url, headers, body, fetch, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res;
@@ -147,8 +149,9 @@ async function openaiCompatibleInfer({ prompt, maxTokens, apiKey, baseUrl, model
 // never logged), but tokens are yielded as they arrive. The router decides WHEN
 // to stream + audits the egress; these functions just speak the wire protocol.
 
-/** Open a streaming POST. Times out the connection (TTFB), not the whole stream. */
-async function openStream(url, headers, body, fetch, timeoutMs) {
+/** Open a streaming POST. Times out the connection (TTFB), not the whole stream.
+ *  Exported for the agent harness (see postJson note). */
+export async function openStream(url, headers, body, fetch, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res;
@@ -170,8 +173,9 @@ async function openStream(url, headers, body, fetch, timeoutMs) {
   return res;
 }
 
-/** Yield each SSE `data:` payload string from a Response body (skips `[DONE]`). */
-async function* ssePayloads(res) {
+/** Yield each SSE `data:` payload string from a Response body (skips `[DONE]`).
+ *  Exported for the agent harness (see postJson note). */
+export async function* ssePayloads(res) {
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
