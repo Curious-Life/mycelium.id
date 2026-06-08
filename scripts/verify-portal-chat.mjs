@@ -100,6 +100,10 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
   const text = evs.filter((e) => e.type === 'text_delta').map((e) => e.content).join('');
   rec('C2 SSE: stream_start … text_delta … done', types[0] === 'stream_start' && types.includes('text_delta') && types[types.length - 1] === 'done');
   rec('C2 streamed the model answer', text === ANSWER, JSON.stringify(text));
+  // Active model is surfaced to the UI BEFORE any token (operator directive: show the model).
+  const mi = types.indexOf('model'); const ti = types.indexOf('text_delta'); const mev = evs.find((e) => e.type === 'model');
+  rec('C2 emits a `model` event (label+model) before text', mi >= 0 && mi < ti && mev?.label === 'Claude' && typeof mev?.model === 'string' && mev.model.length > 0, JSON.stringify(mev));
+  rec('C2 `model` event carries NO secret (only label/model/jurisdiction)', mev && !JSON.stringify(mev).includes('KEY') && !('apiKey' in mev) && !('credentials' in mev));
   // Persistence is fire-and-forget — poll selectRecent for the two portal-chat rows.
   let rows = [];
   for (let i = 0; i < 60; i++) { rows = ((await db.messages.selectRecent(U, { limit: 50 })) || []).filter((x) => x.source === 'portal-chat'); if (rows.length >= 2) break; await new Promise((r2) => setTimeout(r2, 50)); }
@@ -164,6 +168,19 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
   delete process.env.MYCELIUM_CHAT_IDLE_MS;
   rec('C7 retried the turn (>1 model connection attempt)', fetchCount > 1, `fetchCount=${fetchCount}`);
   rec('C7 ends in a graceful error after retries', evs.some((e) => e.type === 'error') && evs.some((e) => e.type === 'done'));
+}
+
+// ── C8 NO provider connected → explicit no_model refusal (NO silent Ollama) ──
+{
+  mode = 'ok';
+  await db.providers.remove(pid, U);   // remove the only provider → none active
+  const r = await fetch(`${base}/chat/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'hello with no model' }) });
+  const evs = await readSSE(r);
+  const types = evs.map((e) => e.type);
+  const nm = evs.find((e) => e.type === 'no_model');
+  rec('C8 no provider → `no_model` event (not a silent stream)', !!nm && typeof nm.message === 'string' && nm.message.length > 0, JSON.stringify(types));
+  rec('C8 no_model → NO text_delta (did not silently fall back to Ollama)', !types.includes('text_delta'));
+  rec('C8 no_model → ends with done', types[types.length - 1] === 'done');
 }
 
 server.close(); await close?.();

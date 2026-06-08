@@ -75,3 +75,13 @@ function createConnectionStore() {
 
 export const chatMessages = createChatStore();
 export const connectionStatus = createConnectionStore();
+
+// The provider+model actually answering this conversation (from the backend's
+// `model` SSE event) — shown as a chip so the active intelligence is always visible.
+export interface ActiveModel { label: string; model: string; jurisdiction?: string; local?: boolean; }
+export const activeModel = writable<ActiveModel | null>(null);
+
+// Non-null = no AI model is connected; the value is the actionable message from the
+// backend's `no_model` event. Chat shows a "Connect a model" state instead of a
+// silent failure / 90s hang.
+export const noModelMessage = writable<string | null>(null);

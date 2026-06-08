@@ -14,7 +14,7 @@
 // the same captureMessage funnel as every other message (encrypted at rest).
 
 import express from 'express';
-import { createAgentHarness } from './agent/harness.js';
+import { createAgentHarness, describeProvider } from './agent/harness.js';
 import { toolsForDomains, normalizePolicy, defaultPolicy, DOMAINS } from './agent/tool-domains.js';
 import { resolveInferenceConfig } from './inference/resolve.js';
 import { createEgressAuditSink } from './inference/egress.js';
@@ -132,10 +132,21 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       send({ type: 'stream_start', streamIndex: 0 });
 
       const provider = await resolveInferenceConfig(db, userId);
+      // NO silent fallback (operator directive): if no model is connected, refuse
+      // with an actionable state instead of quietly attempting local Ollama and
+      // hanging for 90s. describeProvider() returns null iff nothing is configured.
+      const info = describeProvider(provider);
+      if (!info) {
+        send({ type: 'no_model', message: 'No AI model is connected. Open Settings → Connect AI to add a cloud key or pull a local model.' });
+        send({ type: 'done', toolsUsed: [] });
+        return;
+      }
+      // Tell the UI exactly which provider + model is answering (carries no secrets).
+      send({ type: 'model', label: info.label, model: info.model, jurisdiction: info.jurisdiction, local: info.local });
       // Size the preamble to the model: a small/local model (8B Ollama) chokes on
       // a full-vault briefing — it gets slow or silently truncates. A capable
       // cloud model takes the full context. (jurisdiction:'local' = on-box.)
-      const isLocal = (provider.jurisdiction || '') === 'local' || (!provider.anthropicApiKey && !provider.openaiApiKey && !provider.baseUrl);
+      const isLocal = info.local;
       const recentN = isLocal ? 5 : 12;
       const sysCap = isLocal ? 5000 : 28000;
 
