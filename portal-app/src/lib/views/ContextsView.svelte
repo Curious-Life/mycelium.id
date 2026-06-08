@@ -65,7 +65,7 @@
 			await apiPost('/portal/contexts', { name: newName.trim() });
 			newName = '';
 			await loadContexts();
-			showSuccess('Space created');
+			showSuccess('Sharing scope created');
 		} catch (e: any) { error = e.message; } finally { creating = false; }
 	}
 

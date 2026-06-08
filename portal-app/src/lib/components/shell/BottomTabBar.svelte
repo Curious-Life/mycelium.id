@@ -13,9 +13,15 @@
 	const tabs: TabItem[] = [
 		{ id: 'mindscape', label: 'Mycelium', href: '/mindscape' },
 		{ id: 'library',   label: 'Library',  href: '/library' },
-		{ id: 'import',    label: 'Import',   href: '/import' },
-		{ id: 'timeline',  label: 'Timeline', href: '/timeline' },
+		{ id: 'streams',   label: 'Streams',  href: '/streams' },
+		{ id: 'people',    label: 'People',   href: '/connections' },
 	];
+
+	// People is active across its whole cluster (its entry routes to Connections).
+	const peopleCluster = new Set<string>(['people', 'connections', 'spaces', 'contexts']);
+	function tabActive(id: PrimaryView): boolean {
+		return id === 'people' ? peopleCluster.has(currentView) : currentView === id;
+	}
 
 	function handleTab(tab: TabItem) {
 		navigationState.setPrimaryView(tab.id);
@@ -31,7 +37,7 @@
 
 <nav class="tab-bar md:hidden" aria-label="Main navigation">
 	{#each tabs as tab}
-		{@const isActive = currentView === tab.id}
+		{@const isActive = tabActive(tab.id)}
 		<button
 			class="tab-item"
 			class:active={isActive}
@@ -49,13 +55,18 @@
 					<svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 						<path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 					</svg>
-				{:else if tab.id === 'import'}
-					<svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+				{:else if tab.id === 'streams'}
+					<svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+						<path d="M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5c2.6 0 2.4 2 5 2 1.3 0 1.9-.5 2.5-1"/>
+						<path d="M2 12c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 1.3 0 1.9-.5 2.5-1"/>
+						<path d="M2 18c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 1.3 0 1.9-.5 2.5-1"/>
 					</svg>
-				{:else if tab.id === 'timeline'}
-					<svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-						<path d="M21 4H3"/><path d="M18 8H6"/><path d="M19 12H9"/><path d="M16 16h-6"/><path d="M11 20H9"/>
+				{:else if tab.id === 'people'}
+					<svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+						<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+						<circle cx="9" cy="7" r="4"/>
+						<path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
+						<path d="M16 3.13a4 4 0 0 1 0 7.75"/>
 					</svg>
 				{/if}
 			</div>

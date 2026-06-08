@@ -5,7 +5,7 @@
 	import { navigationState, type PrimaryView } from '$lib/stores/navigation';
 	import { workspace } from '$lib/workspace/store';
 	import { auth } from '$lib/stores/auth';
-	import TimelineNav from '$lib/components/timeline/TimelineNav.svelte';
+	import PeopleNav from '$lib/components/people/PeopleNav.svelte';
 	import LibraryNav from '$lib/components/library/LibraryNav.svelte';
 
 	const isOpen = $derived($navigationState.sidebarOpen);
@@ -28,21 +28,24 @@
 
 	type NavItem = { id: PrimaryView; label: string; icon: string; href: string };
 
-	// V1 primary navigation — the honest, working surface. Screens that have a
-	// V1 backend (or gain one in the build-out: Mindscape/Import) live here;
-	// everything else is surfaced under "Coming later" below as disabled chips,
-	// so the roadmap stays visible without any dead links. (Settings is rendered
-	// separately at the bottom.) See docs/UX-COMPLETE-DESIGN-2026-06-01.md.
+	// Launch primary navigation — 5 destinations (NAV-IA-LOCK-2026-06-08):
+	//   Mycelium · Library · Streams (Import+Timeline) · People (Connections/Spaces/
+	//   Sharing cluster) · Curious Life. Profile + Settings are pinned at the bottom;
+	//   not-yet-shipped surfaces live under "Coming later" below as disabled chips,
+	//   so the roadmap stays visible without dead links.
 	const coreNav: NavItem[] = [
 		{ id: 'mindscape', label: 'Mycelium', icon: 'ratio',   href: '/mindscape' },
 		{ id: 'library',   label: 'Library',  icon: 'folder',  href: '/library' },
-		{ id: 'import',    label: 'Import',   icon: 'import',  href: '/import' },
-		{ id: 'timeline',  label: 'Timeline', icon: 'tornado', href: '/timeline' },
-		{ id: 'spaces',    label: 'Spaces',   icon: 'spaces', href: '/spaces' },
-		{ id: 'connections', label: 'Connections', icon: 'connections', href: '/connections' },
-		{ id: 'contexts',  label: 'Sharing',  icon: 'contexts', href: '/contexts' },
-		{ id: 'profile',   label: 'Profile',  icon: 'profile', href: '/profile' },
+		{ id: 'streams',   label: 'Streams',  icon: 'streams', href: '/streams' },
+		{ id: 'people',    label: 'People',   icon: 'people',  href: '/connections' },
 	];
+
+	// The People item is active across its whole cluster (its sub-nav — Connections /
+	// Spaces / Sharing — renders in the contextual region below), not just one view.
+	const peopleCluster = new Set<string>(['people', 'connections', 'spaces', 'contexts']);
+	function navActive(id: PrimaryView): boolean {
+		return id === 'people' ? peopleCluster.has(currentView) : currentView === id;
+	}
 
 	// Curious Life — the one aspirational surface, set apart from the working
 	// tabs above and the roadmap below: traverse from where your paths have led
@@ -147,6 +150,11 @@
 	class:mobile-drawer={isMobile}
 	style={isMobile ? '' : `width: ${isOpen ? sidebarWidth + 'px' : '0'};`}
 >
+	<!-- Scrollable nav region: primary nav + contextual nav scroll together so a
+	     tall list (core + Curious Life + Recents + an expanded "Coming later") can
+	     never push Settings / the user footer off-screen. Settings + footer are
+	     pinned below as flex-shrink-0 siblings. -->
+	<div class="flex-1 min-h-0 overflow-y-auto">
 	<!-- Spacer top -->
 	<div class="pt-2"></div>
 
@@ -154,7 +162,7 @@
 	<div class="py-3">
 		<nav class="flex flex-col gap-1 px-2">
 			{#each coreNav as item}
-				{@const isActive = currentView === item.id}
+				{@const isActive = navActive(item.id)}
 				<button
 					onclick={() => handleNavClick(item)}
 					class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150
@@ -176,13 +184,18 @@
 							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 							</svg>
-						{:else if item.icon === 'import'}
-							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+						{:else if item.icon === 'streams'}
+							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5c2.6 0 2.4 2 5 2 1.3 0 1.9-.5 2.5-1"/>
+								<path d="M2 12c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 1.3 0 1.9-.5 2.5-1"/>
+								<path d="M2 18c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 1.3 0 1.9-.5 2.5-1"/>
 							</svg>
-						{:else if item.icon === 'tornado'}
-							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-								<path d="M21 4H3"/><path d="M18 8H6"/><path d="M19 12H9"/><path d="M16 16h-6"/><path d="M11 20H9"/>
+						{:else if item.icon === 'people'}
+							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+								<circle cx="9" cy="7" r="4"/>
+								<path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
+								<path d="M16 3.13a4 4 0 0 1 0 7.75"/>
 							</svg>
 						{:else if item.icon === 'profile'}
 							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
@@ -205,7 +218,7 @@
 						{/if}
 					</div>
 					<span class="text-sm font-medium">{item.label}</span>
-					{#if item.id === 'connections' && pendingConnections > 0}
+					{#if item.id === 'people' && pendingConnections > 0}
 						<span class="conn-badge" aria-label="{pendingConnections} pending requests">{pendingConnections}</span>
 					{/if}
 				</button>
@@ -284,17 +297,34 @@
 	</div>
 
 	<!-- Contextual navigation -->
-	<div class="flex-1 overflow-y-auto py-3">
-		{#if currentView === 'timeline'}
-			<TimelineNav />
-		{:else if currentView === 'library' || currentView === 'media'}
+	<div class="py-3">
+		{#if currentView === 'library' || currentView === 'media'}
 			<LibraryNav />
-		<!-- /agents: no contextual sidebar — the page itself is the agent list. -->
+		{:else if peopleCluster.has(currentView)}
+			<PeopleNav />
 		{/if}
 	</div>
+	</div><!-- /scrollable nav region -->
 
-	<!-- Settings link -->
-	<div class="px-2 py-2 border-t border-[var(--color-border)]">
+	<!-- Profile + Settings (pinned) -->
+	<div class="px-2 py-2 border-t border-[var(--color-border)] flex-shrink-0 flex flex-col gap-1">
+		<button
+			onclick={() => { navigationState.setPrimaryView('profile'); goto('/profile'); closeMobileDrawer(); }}
+			class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 w-full
+				{currentView === 'profile'
+				? 'bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]'
+				: 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)]'}"
+		>
+			<div class="w-1.5 h-1.5 rounded-full flex-shrink-0
+				{currentView === 'profile' ? 'bg-[var(--color-accent)]' : 'bg-transparent group-hover:bg-[var(--color-text-tertiary)]'}">
+			</div>
+			<div class="w-5 h-5 flex items-center justify-center flex-shrink-0">
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
+				</svg>
+			</div>
+			<span class="text-sm font-medium">Profile</span>
+		</button>
 		<button
 			onclick={() => { navigationState.setPrimaryView('settings'); goto('/settings'); closeMobileDrawer(); }}
 			class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 w-full
@@ -316,7 +346,7 @@
 	</div>
 
 	<!-- User footer -->
-	<div class="p-3 border-t border-[var(--color-border)]">
+	<div class="p-3 border-t border-[var(--color-border)] flex-shrink-0">
 		{#if $auth.user}
 			<div class="flex items-center justify-between">
 				<div class="flex items-center gap-3 min-w-0">

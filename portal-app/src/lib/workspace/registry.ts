@@ -30,13 +30,13 @@ export const REGISTRY: Record<string, ViewDef> = {
 		title: 'Library', icon: 'folder', singleton: true,
 		load: () => import('$lib/views/LibraryView.svelte'),
 	},
-	import: {
-		title: 'Import', icon: 'import', singleton: true,
-		load: () => import('$lib/views/ImportView.svelte'),
-	},
-	timeline: {
-		title: 'Timeline', icon: 'tornado', singleton: true,
-		load: () => import('$lib/views/TimelineView.svelte'),
+	streams: {
+		// The merged data surface (NAV-IA-LOCK-2026-06-08): Import + Timeline behind
+		// one tab. params.facet ('stream' | 'sources') selects the in-view panel and
+		// is mirrored to /streams?facet=… . Singleton — /timeline and /import deep-links
+		// both focus this one tab and just switch the facet.
+		title: 'Streams', icon: 'streams', singleton: true,
+		load: () => import('$lib/views/StreamsView.svelte'),
 	},
 	profile: {
 		title: 'Profile', icon: 'profile', singleton: true,

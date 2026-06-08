@@ -1,0 +1,75 @@
+<script lang="ts">
+	// Streams — the merged data surface (NAV-IA-LOCK-2026-06-08). Two facets behind
+	// one tab:
+	//   • Stream  — the live incoming feed (TimelineView: telegram/discord/whatsapp/portal)
+	//   • Sources — manage inputs/connectors + run imports (ImportView)
+	// The workspace passes `facet` in tab params (mirrored to /streams?facet=…); the
+	// segmented control switches between them. Facets lazy-mount on first visit, then
+	// stay alive (display-toggled) so switching never refetches.
+	import TimelineView from './TimelineView.svelte';
+	import ImportView from './ImportView.svelte';
+
+	let { facet = 'stream', setParams }: {
+		facet?: 'stream' | 'sources';
+		setParams?: (patch: Record<string, unknown>) => void;
+	} = $props();
+
+	// The tab param is the single source of truth (mirrored to /streams?facet=…), so
+	// the active facet is derived — a click just writes the param back via setParams.
+	const current = $derived(facet === 'sources' ? 'sources' : 'stream');
+
+	// Lazy-mount + keep-alive: a facet mounts on first visit, then stays mounted
+	// (display-toggled) so switching never refetches.
+	let visited = $state<Record<string, boolean>>({});
+	$effect(() => { if (!visited[current]) visited = { ...visited, [current]: true }; });
+
+	function select(f: 'stream' | 'sources') {
+		setParams?.({ facet: f });
+	}
+
+	const facets = [
+		{ id: 'stream', label: 'Stream' },
+		{ id: 'sources', label: 'Sources' },
+	] as const;
+</script>
+
+<div class="streams">
+	<div class="seg" role="tablist" aria-label="Streams view">
+		{#each facets as f}
+			<button
+				class="seg-btn"
+				class:active={current === f.id}
+				role="tab"
+				aria-selected={current === f.id}
+				onclick={() => select(f.id)}
+			>{f.label}</button>
+		{/each}
+	</div>
+
+	<div class="facet-body">
+		{#if visited.stream}
+			<div class="facet" class:hidden={current !== 'stream'}><TimelineView /></div>
+		{/if}
+		{#if visited.sources}
+			<div class="facet" class:hidden={current !== 'sources'}><ImportView /></div>
+		{/if}
+	</div>
+</div>
+
+<style>
+	.streams { display: flex; flex-direction: column; min-width: 0; min-height: 0; flex: 1; overflow: hidden; }
+	.seg {
+		display: flex; gap: 4px; padding: 8px 12px; flex-shrink: 0;
+		border-bottom: 1px solid var(--color-border); background: var(--color-surface);
+	}
+	.seg-btn {
+		padding: 5px 14px; font-size: 0.8rem; font-weight: 500; border-radius: var(--radius-md, 8px);
+		border: none; cursor: pointer; background: none; color: var(--color-text-secondary);
+		transition: background var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out);
+	}
+	.seg-btn:hover { color: var(--color-text-primary); background: var(--color-elevated); }
+	.seg-btn.active { color: var(--color-text-primary); background: rgb(var(--color-accent-rgb) / 0.12); }
+	.facet-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+	.facet { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+	.facet.hidden { display: none; }
+</style>
