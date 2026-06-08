@@ -97,6 +97,11 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     const apiKey = typeof b.api_key === 'string' ? b.api_key.trim() : '';
     if (!apiKey && provider !== 'custom') return bad(res, 400, 'api_key is required');
     try {
+      // Auto-activate the FIRST provider so onboarding's "Connect AI" step lands
+      // the user on a usable model with no extra click — but never steal `active`
+      // from a provider the user already chose (checked BEFORE create).
+      let hadActive = false;
+      try { hadActive = (await db.providers.list(userId)).some((r) => r.is_active); } catch { /* fresh vault → none */ }
       const id = await db.providers.create(userId, {
         provider,
         label: b.label || null,
@@ -106,7 +111,11 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
         model: b.model_preference || null,
         baseUrl: b.base_url || null,
       });
-      ok(res, { id });
+      let activated = false;
+      if (!hadActive) {
+        try { await db.providers.setActive(id, userId); activated = true; } catch { /* non-fatal: provider still created */ }
+      }
+      ok(res, { id, activated });
     } catch { bad(res, 500, 'failed to create provider'); }
   });
 

@@ -45,6 +45,15 @@ let r = await J(await post('/providers', { provider: 'openai', label: 'GPT', api
 rec('P1. POST /providers creates (200 + id)', r.status === 200 && r.body.ok && r.body.id > 0, JSON.stringify(r.body));
 const id1 = r.body.id;
 
+// P13 — the FIRST provider on a fresh vault auto-activates (onboarding lands on a
+// usable model with no extra click). Response flags activated; listing shows it.
+rec('P13. first provider auto-activates (activated:true + is_active)', r.body.activated === true, `activated=${r.body.activated}`);
+{
+  const lr = await J(await get('/providers'));
+  const a = lr.body.providers?.find((p) => p.id === id1);
+  rec('P13b. listing confirms the first provider is active', !!a && !!a.is_active, `is_active=${a?.is_active}`);
+}
+
 r = await J(await get('/providers'));
 const row = r.body.providers?.[0];
 rec('P2. GET /providers lists it', r.body.ok && r.body.providers.length === 1 && row.provider === 'openai', JSON.stringify(row));

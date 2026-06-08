@@ -63,6 +63,15 @@ async function main() {
     rec('D8. onboarding/status → benign shape (steps.data.messageCount present)',
       onb.status === 200 && typeof onb.body?.steps?.data?.messageCount === 'number' && onb.body?.aiModelsReady === true);
 
+    // D8b — /import/preview ("See your mind" card): aggregate, leak-safe shape.
+    // Empty vault → messageCount 0, dateRange present (null years), sources [].
+    const prev = await j('/api/v1/portal/import/preview');
+    rec('D8b. import/preview → {messageCount, dateRange, sources[], peopleCount}',
+      prev.status === 200 && typeof prev.body?.messageCount === 'number'
+      && !!prev.body?.dateRange && Array.isArray(prev.body?.sources)
+      && typeof prev.body?.peopleCount === 'number' && typeof prev.body?.conversationCount === 'number',
+      `status=${prev.status} keys=${Object.keys(prev.body || {}).join(',')}`);
+
     // D9 — local auth shim: the portal's session check must succeed so the app
     // opens instead of bouncing to /login (V1 is unlocked-at-boot, single-user).
     const sess = await j('/auth/session');
