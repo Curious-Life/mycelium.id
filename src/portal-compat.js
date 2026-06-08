@@ -739,6 +739,50 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
     });
   });
 
+  // ── Import preview — the onboarding "See your mind" evidence card ───────────
+  // A leak-safe AGGREGATE summary of what's in the vault: counts, date range,
+  // sources, people. Reads ONLY plaintext columns (created_at, source,
+  // conversation_id are NOT in ENCRYPTED_FIELDS.messages) + COUNT(*); it never
+  // touches the encrypted `content`, so nothing sensitive is decrypted or logged.
+  // Drives Step 3's "847 messages · 2019–2024 · 3 sources" proof-of-perception.
+  router.get('/import/preview', async (_req, res) => {
+    try {
+      const { total, embedded, pending } = await embedCounts();
+      const one = (r) => (r?.results || r || [])[0] || {};
+      const rows = (r) => r?.results || r || [];
+
+      const range = one(await db.rawQuery(
+        'SELECT MIN(created_at) AS earliest, MAX(created_at) AS latest FROM messages WHERE user_id = ?', [userId]));
+      const srcRows = rows(await db.rawQuery(
+        `SELECT source, COUNT(*) AS c FROM messages WHERE user_id = ? AND source IS NOT NULL
+           GROUP BY source ORDER BY c DESC LIMIT 12`, [userId]));
+      const convRow = one(await db.rawQuery(
+        `SELECT COUNT(DISTINCT conversation_id) AS c FROM messages
+           WHERE user_id = ? AND conversation_id IS NOT NULL`, [userId]));
+      let peopleCount = 0;
+      try {
+        peopleCount = Number(one(await db.rawQuery(
+          'SELECT COUNT(*) AS c FROM people WHERE user_id = ?', [userId])).c ?? 0);
+      } catch { /* people table empty/absent → 0 */ }
+
+      const yearOf = (ts) => { const y = String(ts || '').slice(0, 4); return /^\d{4}$/.test(y) ? Number(y) : null; };
+      ok(res, {
+        messageCount: total,
+        embedded, pending,
+        dateRange: {
+          earliest: range.earliest || null,
+          latest: range.latest || null,
+          yearStart: yearOf(range.earliest),
+          yearEnd: yearOf(range.latest),
+        },
+        sources: srcRows.map((r) => ({ source: r.source, count: Number(r.c || 0) })),
+        sourceCount: srcRows.length,
+        conversationCount: Number(convRow.c || 0),
+        peopleCount,
+      });
+    } catch { fail(res, 500, 'failed to summarize import'); }
+  });
+
   // Mark the onboarding guide dismissed (persisted on the users row so it stays
   // dismissed across reloads). Mirrors the welcome-seen upsert; set fresh each time.
   router.post('/onboarding/dismiss', async (_req, res) => {
