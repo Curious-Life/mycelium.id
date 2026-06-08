@@ -9,7 +9,10 @@
 	let expandedStep: string | null = $state(null);
 
 	// AI state
-	let aiProvider: 'claude' | 'api' = $state('claude');
+	// Default to the API-key path: it's the one that actually powers portal
+	// inference (writes ai_providers, read by the inference router). The "Claude
+	// Code" subscription-OAuth path is not supported in V1 (server refuses it).
+	let aiProvider: 'claude' | 'api' = $state('api');
 	let aiSubProvider: 'anthropic' | 'openai' = $state('anthropic');
 	let aiKeyInput = $state('');
 	let aiKeySaving = $state(false);
@@ -99,10 +102,12 @@
 		aiKeyError = '';
 		aiKeySaved = false;
 		try {
-			const key = aiSubProvider === 'anthropic' ? 'CLAUDE_API_KEY' : 'OPENAI_API_KEY';
-			const res = await api('/portal/settings/secret', {
-				method: 'PUT',
-				body: JSON.stringify({ key, value: aiKeyInput.trim() }),
+			// Write to ai_providers (the inference router reads this via getActive) —
+			// NOT /portal/settings/secret, whose keys never reach the portal router.
+			const provider = aiSubProvider === 'anthropic' ? 'anthropic' : 'openai';
+			const res = await api('/portal/providers', {
+				method: 'POST',
+				body: JSON.stringify({ provider, api_key: aiKeyInput.trim() }),
 			});
 			if (!res.ok) throw new Error('Failed to save');
 			aiKeySaved = true;

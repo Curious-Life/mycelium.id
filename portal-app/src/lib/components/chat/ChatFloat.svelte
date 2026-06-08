@@ -663,7 +663,10 @@
 				const messageWithContext = scopedDoc
 					? `${userMessage}\n\n[Re: viewing document "${scopedDoc.title}" at ${scopedDoc.path}]`
 					: userMessage;
-				const res = await fetch('/portal/chat/stream', {
+				// Self-hosted V1 serves portal routes under /api/v1/portal (the api()
+				// helper rewrites /portal/* there; this raw fetch must do it too, or it
+				// 404s — bare /portal/* is unrouted on the REST server).
+				const res = await fetch('/api/v1/portal/chat/stream', {
 					method: 'POST',
 					headers: chatHeaders,
 					credentials: 'same-origin',
@@ -1803,28 +1806,22 @@
 {/if}
 
 <style>
-	/* Glass effect */
+	/* Solid panel. The Tauri webview (WKWebView) does not composite backdrop-filter
+	   blur over app content, so a translucent "glass" background just reads as
+	   see-through ("passthrough"). We use a fully OPAQUE, theme-matched surface so
+	   the chat is a clean solid panel, with a border + shadow to lift it off the
+	   page. (No backdrop-filter — it does nothing useful here and an opaque bg has
+	   nothing to blur through anyway.) */
 	.glass-box {
-		background: rgba(20, 20, 23, 0.75);
-		backdrop-filter: blur(10px);
-		-webkit-backdrop-filter: blur(10px);
-		border: 1px solid rgba(255, 255, 255, 0.15);
-		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+		background: #16161b;
+		border: 1px solid rgba(255, 255, 255, 0.10);
+		box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
 	}
 
 	:global([data-theme='light']) .glass-box {
-		background: rgba(255, 255, 255, 0.75);
-		border-color: rgba(0, 0, 0, 0.1);
-		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-	}
-
-	@supports not (backdrop-filter: blur(10px)) {
-		.glass-box {
-			background: rgba(20, 20, 23, 0.95);
-		}
-		:global([data-theme='light']) .glass-box {
-			background: rgba(255, 255, 255, 0.95);
-		}
+		background: #ffffff;
+		border-color: rgba(0, 0, 0, 0.08);
+		box-shadow: 0 16px 48px rgba(0, 0, 0, 0.16);
 	}
 
 	/* Mobile full-screen mode */

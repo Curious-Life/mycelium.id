@@ -19,6 +19,7 @@ import { portalHardwareRouter } from './portal-hardware.js';
 import { createOllamaDaemon } from './hardware/ollama-daemon.js';
 import { portalImportRouter } from './portal-import.js';
 import { portalSettingsRouter } from './portal-settings.js';
+import { portalChatRouter } from './portal-chat.js';
 import { portalChannelsRouter } from './portal-channels.js';
 import { portalConnectorsRouter } from './portal-connectors.js';
 import { registerBuiltinAdapters, createConnectorRunner, startConnectorScheduler } from './connectors/index.js';
@@ -149,6 +150,13 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   v.use('/api/v1/portal', portalHardwareRouter({ daemon: hwOllamaDaemon }));
   v.use('/api/v1/portal', portalImportRouter({ db, userId, enqueueEnrichment }));
   v.use('/api/v1/portal', portalSettingsRouter({ db, userId }));
+  // In-app chat agent (web + Tauri) — runs a bounded, user-driven tool-use loop
+  // over the SAME tool handlers, gated by the user's "AI Access" policy. Auth is
+  // loopback-trusted (decrypts vault plaintext), same boundary as measurement/claims.
+  v.use('/api/v1/portal', portalChatRouter({
+    db, userId, tools, handlers, enqueueEnrichment,
+    authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
+  }));
   v.use('/api/v1/portal', portalChannelsRouter({ db, userId }));
   if (connectorRunner) v.use('/api/v1/portal', portalConnectorsRouter({ runner: connectorRunner }));
   // Internal support endpoints for the channel-daemon egress chokepoint
@@ -215,8 +223,14 @@ export async function startRestServer({
   async function completeBoot(extraKeys = {}) {
     if (vaultSubApp || booting) return;
     booting = true;
+    // Audit tag for the account ceremony that opened the vault ('setup'|'restore'
+    // |'unlock'). The audit_log lives INSIDE the encrypted vault, so it can only
+    // be written AFTER boot() — a ceremony FAILURE (wrong key) leaves the vault
+    // closed and is intentionally not auditable. Not a boot option → kept aside.
+    const reason = extraKeys.reason;
     try {
       const opts = { ...bootOpts, ...extraKeys };
+      delete opts.reason;
       // Resolve keys up front so we NEVER create an empty vault when there are
       // none (resolveKeys throws KeySourceError → caller stays in setup mode).
       if (opts.userHex === undefined || opts.systemHex === undefined) {
@@ -227,6 +241,12 @@ export async function startRestServer({
       ensureVaultSchema(effectiveDbPath); // self-initialise a fresh vault (idempotent)
       const { tools, handlers, db, close, userId: bootUserId } = await boot(opts);
       dbHandle = db;
+      // Record the ceremony success now that the vault (and audit_log) is open.
+      // Fire-and-forget — audit failure must never block a successful boot.
+      if (reason && db?.audit?.log) {
+        try { await db.audit.log({ action: `vault_${reason}`, userId: bootUserId, resourceType: 'account', resourceId: bootUserId }); }
+        catch { /* fire-and-forget */ }
+      }
       // Pin both keys in memory so the clustering child (src/jobs.js) can obtain
       // them in passphrase-lock mode, where they are NOT in the Keychain.
       setSessionKeys({ userHex: opts.userHex, systemHex: opts.systemHex });

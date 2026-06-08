@@ -62,8 +62,13 @@
 		// Phase C: router is up — let the workspace mirror the focused tab → URL.
 		workspace.enableUrlSync();
 		function handleKeydown(e: KeyboardEvent) {
-			// Cmd+J (chat) is disabled in V1 — chat is deferred (no in-app agent
-			// loop, D5). Re-enable when the chat surface lands.
+			// Cmd/Ctrl+J toggles the floating chat agent (the in-app tool-using
+			// agent over the vault — src/portal-chat.js).
+			if ((e.metaKey || e.ctrlKey) && (e.key === 'j' || e.key === 'J')) {
+				e.preventDefault();
+				navigationState.toggleChat();
+			}
+			// Cmd/Ctrl+\ toggles the sidebar. — chat is deferred (no in-app agent
 			if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
 				e.preventDefault();
 				navigationState.toggleSidebar();

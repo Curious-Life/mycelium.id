@@ -1,4 +1,5 @@
 import express from 'express';
+import { nudgeEnrichDrainer } from './enrich/drainer.js';
 
 /**
  * portalCompatRouter — a thin compatibility surface that lets the CANONICAL
@@ -655,7 +656,7 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       documents: { total: 0 }, attachments: { total: 0, byType: {}, totalSizeMB: 0 },
       contacts: { total: 0, byTier: {} }, mindscape: { territories: 0, realms: 0, points: 0 }, integrations: [] });
   });
-  router.get('/agents', (_req, res) => ok(res, { agents: [] }));
+  // (/agents now served by portalChatRouter — the real single-agent endpoint.)
   router.get('/identity', (_req, res) => ok(res, { ownerName: 'You', ownerTelegramId: null, ownerDiscordId: null }));
 
   // ── Onboarding status (read by the app layout + mindscape on load) ──────
@@ -672,18 +673,82 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
     } catch { return false; }
   }
 
+  // Embedding backlog counts — total / embedded / pending. Mirrors the query in
+  // portal-mindscape's /mycelium/processing-status; `embedded` rows have a
+  // non-NULL embedding_768. Best-effort: any error reads as all-zero.
+  async function embedCounts() {
+    try {
+      const tr = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ?', [userId]);
+      const er = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND embedding_768 IS NOT NULL', [userId]);
+      const total = Number((tr?.results || tr || [])[0]?.c ?? 0);
+      const embedded = Number((er?.results || er || [])[0]?.c ?? 0);
+      return { total, embedded, pending: Math.max(0, total - embedded) };
+    } catch { return { total: 0, embedded: 0, pending: 0 }; }
+  }
+
   router.get('/onboarding/status', async (_req, res) => {
-    let messageCount = 0;
-    try { messageCount = db.messages?.countByUser ? await db.messages.countByUser(userId) : 0; } catch { /* 0 */ }
+    const { total, embedded, pending } = await embedCounts();
     const seen = await welcomeSeen();
+    let dismissed = false;
+    try {
+      const r = await db.rawQuery(`SELECT onboarding_dismissed_at FROM users WHERE id = ?`, [userId]);
+      dismissed = Boolean((r.results || r || [])[0]?.onboarding_dismissed_at);
+    } catch { /* not dismissed */ }
     ok(res, {
       // First-run welcome: show on an empty vault UNTIL it's been seen once (or
       // anything is captured), then never again — so it never re-pops jarringly.
-      showWelcome: !seen && messageCount === 0,
+      showWelcome: !seen && total === 0,
       show: false,
+      dismissed,
       aiModelsReady: true,
-      steps: { data: { messageCount, enrichedCount: 0, enrichmentPending: 0 } },
+      // enrichedCount/enrichmentPending are REAL now (embedded vs pending) — the
+      // MindscapeView "data ready → Generate" gate + the guide's import progress
+      // read these. messageCount drives hasImportedData.
+      steps: { data: { messageCount: total, enrichedCount: embedded, enrichmentPending: pending } },
     });
+  });
+
+  // ── Enrichment (embedding backlog) status/trigger/progress ──────────────────
+  // The OnboardingGuide + MindscapeView poll these to show "embedding N/M" and to
+  // kick a drain. Thin wrappers over the in-process drainer (no separate pipeline)
+  // — the drainer already embeds on a timer; trigger just nudges it now.
+  router.get('/enrichment/status', async (_req, res) => {
+    const { total, embedded, pending } = await embedCounts();
+    ok(res, {
+      messages: { total, enriched: embedded, embedded, pending },
+      service: { rate: '0' }, // per-second throughput not measured in V1
+      activeJob: pending > 0 ? { id: 'enrich', status: 'running' } : null,
+    });
+  });
+
+  router.post('/enrichment/trigger', async (_req, res) => {
+    nudgeEnrichDrainer(); // kick a drain cycle now; no-op if the drainer isn't up
+    ok(res, { jobId: 'enrich' });
+  });
+
+  router.get('/enrichment/progress/:jobId', async (_req, res) => {
+    const { total, embedded, pending } = await embedCounts();
+    ok(res, {
+      id: 'enrich',
+      status: pending > 0 ? 'running' : 'done',
+      step: embedded,
+      totalSteps: total,
+      // UI parses "(\d[\d,]*)\s*/\s*(\d[\d,]*)" out of stageLabel for the bar.
+      stageLabel: `Embedding: ${embedded.toLocaleString()} / ${total.toLocaleString()}`,
+      error: null,
+    });
+  });
+
+  // Mark the onboarding guide dismissed (persisted on the users row so it stays
+  // dismissed across reloads). Mirrors the welcome-seen upsert; set fresh each time.
+  router.post('/onboarding/dismiss', async (_req, res) => {
+    try {
+      await db.rawQuery(
+        `INSERT INTO users (id, onboarding_dismissed_at) VALUES (?, datetime('now'))
+           ON CONFLICT(id) DO UPDATE SET onboarding_dismissed_at = datetime('now')`,
+        [userId]);
+    } catch { /* best-effort — never block the UI on a write */ }
+    ok(res, { ok: true });
   });
 
   // Mark the first-run welcome as seen (idempotent — keeps the first timestamp).

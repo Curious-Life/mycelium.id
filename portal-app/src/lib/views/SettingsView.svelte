@@ -9,6 +9,7 @@
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
 	import ChannelsSection from '$lib/components/settings/ChannelsSection.svelte';
 	import IntelligenceSection from '$lib/components/settings/IntelligenceSection.svelte';
+	import AIAccessSection from '$lib/components/settings/AIAccessSection.svelte';
 	import ManagedConnectSection from '$lib/components/settings/ManagedConnectSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 	import ConnectYourAISection from '$lib/components/settings/ConnectYourAISection.svelte';
@@ -1609,6 +1610,9 @@
 
 			<!-- Intelligence — connect Mycelium's outbound AI to any provider -->
 			<IntelligenceSection />
+
+			<!-- AI Access — which vault areas the in-app chat agent may use -->
+			<AIAccessSection />
 
 			<!-- Voice / TTS — provider config + per-voice preview -->
 			<VoiceSection />

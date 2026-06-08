@@ -143,6 +143,9 @@ function canonicalUrl(tab: Tab): string {
 		const doc = tab.params.doc;
 		if (typeof doc === 'string' && doc) return `/library?doc=${encodeURIComponent(doc)}`;
 	}
+	if (tab.viewId === 'streams') {
+		return tab.params.facet === 'sources' ? '/streams?facet=sources' : '/streams';
+	}
 	return `/${tab.viewId}`;
 }
 

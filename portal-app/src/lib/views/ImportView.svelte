@@ -35,6 +35,7 @@
 		skipped: number;
 		stats?: ImportStats;
 		enrichmentJobId?: string;
+		note?: string;
 	}
 
 	let selectedSource = $state<ImportSource | null>(null);
@@ -377,15 +378,22 @@
 					<p class="text-sm text-[var(--color-text-secondary)]">{line}</p>
 				{/each}
 			</div>
-			{#if result.enrichmentJobId || result.type === 'obsidian'}
+			{#if (result.type === 'claude' || result.type === 'chatgpt' || result.type === 'obsidian') && !result.note}
 				<p class="text-xs text-[var(--color-accent-aurum)] mt-4">
 					{result.type === 'obsidian'
 						? 'Your notes are saved and queued — run Generate to weave them into the Mindscape.'
-						: 'Processing started — your messages are being embedded for search and clustering.'}
+						: 'Your conversations are saved and embedding now. View them in Timeline, then Generate your Mindscape.'}
 				</p>
-				<a href="/mindscape" class="btn btn-primary mt-3">Go to Mindscape</a>
+				<div class="flex gap-2 justify-center mt-3">
+					<a href="/mindscape" class="btn btn-primary">Go to Mindscape</a>
+					{#if result.type !== 'obsidian'}
+						<a href="/timeline" class="btn btn-secondary">View in Timeline</a>
+					{/if}
+				</div>
+				<button onclick={reset} class="btn btn-secondary mt-2">Import More</button>
+			{:else}
+				<button onclick={reset} class="btn btn-secondary mt-6">Import More</button>
 			{/if}
-			<button onclick={reset} class="btn btn-secondary mt-{(result.enrichmentJobId || result.type === 'obsidian') ? '2' : '6'}">Import More</button>
 		</div>
 	{:else if !selectedSource}
 		<!-- Source selection -->

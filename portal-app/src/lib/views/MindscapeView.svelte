@@ -287,7 +287,33 @@
 		loadExplorationStatus();
 		// Re-check every 30s to pick up externally triggered explorations
 		const statusInterval = setInterval(loadExplorationStatus, 30000);
-		return () => clearInterval(statusInterval);
+
+		// Poll for data imported AFTER mount. The tabbed workspace keeps this view
+		// alive, so the one-shot onMount check missed conversations imported on the
+		// Import screen — the page kept showing "Welcome" until a manual reload. Poll
+		// until data is detected (then the "Generate" CTA renders on its own).
+		let dataPoll: ReturnType<typeof setInterval> | null = null;
+		if (!hasImportedData) {
+			dataPoll = setInterval(() => {
+				if (hasImportedData) { if (dataPoll) { clearInterval(dataPoll); dataPoll = null; } return; }
+				if (get(generate).phase === 'running') return; // generate progress drives its own UI
+				checkGenerationState();
+			}, 5000);
+		}
+		// Re-check on refocus: catches returning to the app/tab immediately, and
+		// refreshes territories so background-narrated chronicles appear.
+		const onVisible = () => {
+			if (document.visibilityState !== 'visible') return;
+			checkGenerationState();
+			if (territoriesLoaded) { territoriesLoaded = false; loadTerritories(); }
+		};
+		document.addEventListener('visibilitychange', onVisible);
+
+		return () => {
+			clearInterval(statusInterval);
+			if (dataPoll) clearInterval(dataPoll);
+			document.removeEventListener('visibilitychange', onVisible);
+		};
 	});
 
 	const th = $derived($timelineHealth);

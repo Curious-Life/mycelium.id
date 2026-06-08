@@ -99,7 +99,6 @@ export async function createHttpApp(opts = {}) {
     bearer_methods_supported: ['header'],
   };
   const sendPrm = (req, res) => {
-    console.error('[myc-prm]', req.method, req.path, 'ip=', req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '?', 'ua=', (req.headers['user-agent'] || '').slice(0, 48)); // TEMP — remove pre-merge
     res.set('Access-Control-Allow-Origin', '*');
     res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.set('Access-Control-Allow-Headers', 'Authorization, *');
@@ -304,7 +303,6 @@ export async function createHttpApp(opts = {}) {
     res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Accept');
     res.set('Access-Control-Expose-Headers', 'WWW-Authenticate, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-Id');
     if (req.method === 'OPTIONS') { res.status(204).end(); return; }
-    console.error('[myc-mcp]', req.method, 'bearer=', /^Bearer\s/i.test(req.headers['authorization'] || '') ? 'yes' : 'no', 'sid=', req.headers['mcp-session-id'] || '-', 'ip=', req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '?'); // TEMP — remove pre-merge
 
     // Fail closed: every /mcp request must carry a valid Bearer token.
     const session = await authenticate(req);

@@ -14,6 +14,15 @@ import { createEmbedClient } from '../embed/client.js';
 import { getMasterKey } from '../crypto/crypto-local.js';
 import { createEnrichmentService } from './service.js';
 
+// The live drainer for the booted vault. Set by startEnrichDrainer so a portal
+// route (POST /portal/enrichment/trigger) can kick a drain WITHOUT threading the
+// drainer handle through buildVaultSubApp — the drainer is created deep in
+// completeBoot. Single-user / single-vault, so one module-level handle is exact.
+let _current = null;
+
+/** Kick the live enrichment drainer if one is running (no-op otherwise). */
+export function nudgeEnrichDrainer() { try { _current?.nudge(); } catch { /* best-effort */ } return Boolean(_current); }
+
 export function startEnrichDrainer({
   db,
   userId,
@@ -73,10 +82,12 @@ export function startEnrichDrainer({
   timer = setInterval(cycle, intervalMs);
   if (timer.unref) timer.unref();                // never keep the process alive for the timer
 
-  return {
+  const handle = {
     nudge: () => { cycle(); },
-    stop: () => { if (timer) clearInterval(timer); timer = null; },
+    stop: () => { if (timer) clearInterval(timer); timer = null; if (_current === handle) _current = null; },
   };
+  _current = handle; // expose to nudgeEnrichDrainer() for the portal trigger route
+  return handle;
 }
 
 export default startEnrichDrainer;
