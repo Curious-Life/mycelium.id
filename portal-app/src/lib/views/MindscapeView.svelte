@@ -5,6 +5,7 @@
 	import MindscapeDetail from '$lib/components/mindscape/MindscapeDetail.svelte';
 	import MindscapeBackground from '$lib/components/mindscape/MindscapeBackground.svelte';
 	import MindscapeInvite from '$lib/components/mindscape/MindscapeInvite.svelte';
+	import MindscapeActivityChip from '$lib/components/mindscape/MindscapeActivityChip.svelte';
 	import PulsesLens from '$lib/components/mindscape/PulsesLens.svelte';
 	import { api, apiGet } from '$lib/api';
 	import { generate, start as startGen, resume as resumeGen, reset as resetGen, cancel as cancelGen, fmtSeconds } from '$lib/generate';
@@ -72,6 +73,18 @@
 		} catch { /* silent */ }
 		enrichPollTimer = null;
 	}
+
+	// Auto-generate: the moment there's imported data and nothing is running, kick
+	// the run automatically — start() self-drives embed-wait → cluster → done, so
+	// the user never has to click "Generate". Guarded to fire once; an error leaves
+	// phase !== 'idle' so it won't loop (the error state offers a manual retry).
+	let autoGenTried = $state(false);
+	$effect(() => {
+		if (hasImportedData && $generate.phase === 'idle' && !autoGenTried) {
+			autoGenTried = true;
+			startGen();
+		}
+	});
 
 	// React to the shared store reporting completion: reload the map, then clear.
 	$effect(() => {
@@ -852,76 +865,14 @@
 					<!-- The living 3D mindscape (Goethe model) breathing behind the glass -->
 					<MindscapeBackground />
 
+					<!-- Pipeline progress floats to a glassy top-right chip (non-blocking) -->
+					<MindscapeActivityChip />
+
+					<!-- The invitation persists through embedding/mapping so Connect-AI &
+					     the other steps stay reachable while the pipeline runs in the
+					     background. Generation auto-starts (the auto-gen effect above). -->
 					<div class="welcome-inner">
-						{#if $generate.phase === 'starting' || $generate.phase === 'running'}
-							<!-- Generation in progress — overlay on demo canvas -->
-							<h2 class="welcome-title">Growing your mindscape…</h2>
-							<p class="gen-stage">{$generate.stageLabel || 'Starting…'} &mdash; step {$generate.step} of {$generate.totalSteps}</p>
-							<div class="gen-bar"><div class="gen-fill" style="width: {Math.max(4, ($generate.step / Math.max(1, $generate.totalSteps)) * 100)}%"></div></div>
-							<div class="gen-dots">
-								{#each Array($generate.totalSteps) as _, i}
-									<span class="gen-dot" class:done={i < $generate.step} class:active={i === $generate.step}></span>
-								{/each}
-							</div>
-							<p class="gen-hint">{fmtSeconds($generate.elapsedMs / 1000)} elapsed{#if $generate.etaSeconds != null} &middot; ~{fmtSeconds($generate.etaSeconds)} left{/if}</p>
-							{#if $generate.stalled}
-								<p class="gen-hint" style="color: #d9a441;">Still working on this step — it's taking longer than usual.</p>
-							{/if}
-							<p class="gen-hint">This keeps running if you navigate away.</p>
-							<button class="gen-button" style="margin-top: 12px; opacity: 0.7;" onclick={() => cancelGen()}>Cancel</button>
-						{:else if $generate.phase === 'embedding'}
-							<h2 class="welcome-title">Processing your conversations…</h2>
-							<p class="gen-stage">{$generate.embedded.toLocaleString()} / {$generate.total.toLocaleString()} ready</p>
-							<div class="gen-bar"><div class="gen-fill" style="width: {$generate.total > 0 ? ($generate.embedded / $generate.total) * 100 : 0}%"></div></div>
-							{#if $generate.embedder?.status === 'loading'}
-								<p class="gen-hint">Warming up the embedding engine…</p>
-							{:else}
-								<p class="gen-hint">Generation starts automatically as soon as enough is ready.</p>
-							{/if}
-							<button class="gen-button" style="margin-top: 12px; opacity: 0.7;" onclick={() => cancelGen()}>Cancel</button>
-						{:else if $generate.phase === 'done'}
-							<h2 class="welcome-title">Mycelium generated</h2>
-							<p class="gen-hint">Loading your 3D map…</p>
-						{:else if $generate.phase === 'error'}
-							<h2 class="welcome-title">Generation hit a snag</h2>
-							<p class="gen-error">{$generate.error}</p>
-							<button class="gen-button" style="margin-top: 12px;" onclick={() => startGen()}>Try again</button>
-						{:else if enrichment && enrichment.pending > 0}
-							{@const mpm = enrichment.rate ? parseInt(enrichment.rate) : 0}
-							{@const rem2 = enrichment.total - enrichment.enriched}
-							{@const eta2 = mpm > 0 ? Math.round(rem2 / mpm) : 0}
-							<!-- Enrichment running — show progress over demo canvas -->
-							<h2 class="welcome-title">Preparing your data...</h2>
-							<p class="gen-stage">{enrichment.enriched.toLocaleString()} / {enrichment.total.toLocaleString()} messages embedded</p>
-							<div class="gen-bar"><div class="gen-fill" style="width: {enrichment.total > 0 ? (enrichment.enriched / enrichment.total) * 100 : 0}%"></div></div>
-							{#if enrichment.enriched === 0 && !enrichTriggering}
-								<button class="gen-button" onclick={triggerEnrichment} disabled={enrichTriggering} style="margin-top: 12px;">
-									Start Processing
-								</button>
-							{:else if mpm > 0}
-								<p class="gen-hint" style="margin-top: 6px;">
-									{mpm} msg/min
-									{#if eta2 > 0}
-										&middot; ~{eta2 < 60 ? `${eta2} min` : `${Math.floor(eta2 / 60)}h ${eta2 % 60}m`} remaining
-									{/if}
-								</p>
-							{/if}
-							<p class="gen-hint">Once embedding completes, you can generate your Mycelium.</p>
-						{:else if hasImportedData}
-							<!-- Data ready, show generate CTA over demo canvas -->
-							<h2 class="welcome-title">
-								{#if $auth.user?.displayName}
-									{$auth.user.displayName}, your data is ready
-								{:else}
-									Your data is ready
-								{/if}
-							</h2>
-							<p class="welcome-subtitle">Map your thinking in 3D.</p>
-							<button class="gen-button" onclick={() => startGen()}>Generate my map</button>
-						{:else}
-							<!-- Empty vault: the in-window invitation + onboarding wizard. -->
-							<MindscapeInvite displayName={$auth.user?.displayName ?? null} onImported={checkGenerationState} />
-						{/if}
+						<MindscapeInvite displayName={$auth.user?.displayName ?? null} onImported={checkGenerationState} />
 					</div>
 				</div>
 			{/if}
@@ -1095,18 +1046,6 @@
 	}
 	:global([data-theme="light"]) .welcome-inner {
 		background: rgba(250, 248, 245, 0.78);
-	}
-	.welcome-title {
-		font-size: 1.35rem;
-		font-weight: 500;
-		color: var(--color-text-primary);
-		margin-bottom: 0.6rem;
-	}
-	.welcome-subtitle {
-		font-size: 0.82rem;
-		color: var(--color-text-secondary);
-		line-height: 1.65;
-		margin-bottom: 2rem;
 	}
 	/* Breadcrumb *//* Realm cards *//* Exploration overview *//* Live exploration log */
 	.explore-log {
@@ -1339,11 +1278,6 @@
 			left: 8px;
 			width: auto;
 		}}/* Territories view *//* Generation + enrichment progress */
-	.gen-stage {
-		font-size: 13px;
-		color: var(--color-text-secondary);
-		margin-bottom: 12px;
-	}
 	.gen-bar {
 		height: 6px;
 		background: var(--color-surface);
@@ -1356,56 +1290,5 @@
 		background: linear-gradient(90deg, #E5B84C, #D4A23C);
 		border-radius: 3px;
 		transition: width 0.5s ease;
-	}
-	.gen-dots {
-		display: flex;
-		justify-content: center;
-		gap: 8px;
-		margin-bottom: 12px;
-	}
-	.gen-dot {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		background: var(--color-border);
-		transition: all 0.3s;
-	}
-	.gen-dot.done {
-		background: #E5B84C;
-	}
-	.gen-dot.active {
-		background: #E5B84C;
-		box-shadow: 0 0 8px rgba(229, 184, 76, 0.5);
-	}
-	.gen-hint {
-		font-size: 12px;
-		color: var(--color-text-tertiary);
-		margin-top: 8px;
-	}
-	.gen-button {
-		display: inline-block;
-		margin-top: 16px;
-		padding: 10px 28px;
-		background: linear-gradient(135deg, #E5B84C, #D4A23C);
-		color: #0A0A0C;
-		border: none;
-		border-radius: 8px;
-		font-size: 14px;
-		font-weight: 600;
-		cursor: pointer;
-		transition: all 0.15s;
-	}
-	.gen-button:hover:not(:disabled) {
-		transform: translateY(-1px);
-		box-shadow: 0 0 20px rgba(229, 184, 76, 0.3);
-	}
-	.gen-button:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-	.gen-error {
-		color: var(--color-error, #ef4444);
-		font-size: 13px;
-		margin-top: 8px;
 	}
 </style>
