@@ -113,6 +113,44 @@ can be tuned later without orphaning an existing lock.
 > better — scrypt makes each guess expensive). FileVault remains your first line
 > of defense at rest.
 
+## Backing up your vault (and restoring it)
+
+The recovery key only **decrypts data that already exists on this Mac** — it is
+**not** a cloud restore. If the Mac is lost or wiped, the key alone cannot bring
+your vault back. So Mycelium lets you save an **encrypted backup file** to storage
+you control:
+
+- **Back up:** Settings → Security → **Vault Backup → Back up now** (also offered
+  as a deliberate prompt right after first-run setup). This downloads a
+  `mycelium-vault-<date>.myvault` file — a consistent snapshot of your encrypted
+  database, key-check file, and uploaded attachments. It is **ciphertext**: useless
+  to anyone without your recovery key. Keep it on an external drive or your own
+  cloud storage.
+- **Restore on a new device:** on the first-run screen choose **Restore from a
+  backup**, pick your `.myvault` file, then **paste your recovery key**. The key is
+  verified against the restored vault before anything opens.
+
+What's in the backup: `mycelium.db` (snapshot), `kcv.json` (key-check verifier),
+`uploads/` (encrypted attachments), and `remote.json` (non-secret config). What's
+**excluded**: `auth.db` (holds the operator password hash + OAuth signing secret —
+never shipped off-device; regenerated on restore) and the optional passphrase seal
+(a recovery-key restore turns the passphrase lock off).
+
+> **Disaster recovery is yours.** Mycelium is sovereign and zero-knowledge — no
+> server ever holds your plaintext, so no one can restore your vault for you. A
+> backup file + your recovery key is the only recovery path. Keep both, separately.
+
+**Footgun fixed (2026-06-08):** pasting the recovery key on a device with *no*
+vault used to silently create a fresh **empty** vault and report success. `/restore`
+now fails closed (`409 no_vault`) when no vault is present — restore a backup (or
+copy your data dir) first, then paste the key.
+
+**Accessing a vault served on another machine** (e.g. an always-on Mac or a future
+managed host) is a *different* capability — the client talks to a remote Mycelium
+*server* over the relay (a ciphertext passthrough), with the key resident only on
+the serving machine. See
+[`VAULT-BACKUP-AND-REMOTE-ACCESS-DESIGN-2026-06-08.md`](VAULT-BACKUP-AND-REMOTE-ACCESS-DESIGN-2026-06-08.md) §8.
+
 ## For maintainers
 
 - `src/paths.js` — single source of truth for the data dir + file paths.
@@ -127,6 +165,11 @@ can be tuned later without orphaning an existing lock.
 - `scripts/verify-account.mjs` (`npm run verify:account`) + `scripts/verify-passphrase-lock.mjs`
   (`npm run verify:passphrase-lock`) — isolated end-to-end checks (ephemeral data
   dir + Keychain names; the seal co-locates in the temp dir).
+- `src/account/backup.js` — snapshot (better-sqlite3 online backup) + `.myvault`
+  archive build/validate/restore (jszip, STORE); `GET /backup` + `POST /restore-backup`
+  in `src/account/router.js`. `scripts/verify-backup.mjs` (`npm run verify:backup`)
+  proves the zero-knowledge archive, restore-lands-real-data, and the no-empty-vault
+  guard. Design: [`VAULT-BACKUP-AND-REMOTE-ACCESS-DESIGN-2026-06-08.md`](VAULT-BACKUP-AND-REMOTE-ACCESS-DESIGN-2026-06-08.md).
 
 **Existing two-independent-key vaults.** A vault created before this scheme keeps
 working (both keys remain in the Keychain). To converge it to the single-key

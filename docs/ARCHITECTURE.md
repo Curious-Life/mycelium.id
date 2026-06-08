@@ -78,6 +78,8 @@ The **channel daemon** (`:3010`, `packages/channel-daemon/`, Telegram/Discord br
 | Master-key source (env / macOS Keychain / 1Password) | `src/crypto/key-source.js`, `scripts/set-keys.mjs` | ✅ |
 | Account keystore (single recovery key; SYSTEM_KEY HKDF-derived) | `src/account/keystore.js`, `src/account/keychain-names.js` | ✅ (#36) |
 | First-run ceremony + restore + re-view (setup-mode) | `src/account/router.js` (`/api/v1/account`), `portal-app/src/routes/setup/` | ✅ (#36) |
+| Vault backup (encrypted `.myvault` snapshot) + restore-from-backup; `/restore` hardened (no silent empty vault); `needsRecoveryKey` state | `src/account/backup.js`, `src/account/router.js` (`GET /backup`, `POST /restore-backup`), `portal-app/src/routes/setup/` + `SettingsView.svelte` · `verify:backup` | ✅ ([design](VAULT-BACKUP-AND-REMOTE-ACCESS-DESIGN-2026-06-08.md)) |
+| Externally-served vault (client opens a vault on another machine over the relay) | design only — relay = ciphertext passthrough; key never leaves the serving machine; couples to `src/remote/` + `mycelium-managed/` | 📐 design (V2-adjacent) |
 | Data location (durable per-OS dir; survives updates) | `src/paths.js` (`MYCELIUM_DATA_DIR`) | ✅ (#36) |
 | Embeddings client + search adapter | `src/embed/client.js` (→ `:8091`), `src/search/embedder.js` (`createServiceEmbedder`) | ✅ (real vectors ⚠️ Tier-2) |
 | Inference router (local Ollama + BYOK cloud) | `src/inference/{router,local,cloud,errors}.js` | ✅ (real models need Ollama/keys) |
