@@ -20,6 +20,7 @@
 	import { goto } from '$app/navigation';
 	import { api } from '$lib/api';
 	import { navigationState } from '$lib/stores/navigation';
+	import MyceliumCanvas from './MyceliumCanvas.svelte';
 
 	type StepKey = 'import' | 'connect-ai' | 'generate';
 
@@ -247,8 +248,9 @@
 
 {#if welcomeOpen}
 	<div class="backdrop" role="dialog" aria-modal="true" aria-labelledby="onb-welcome-title">
+		<!-- The hero mycelium animation grows across the whole backdrop, behind the glass. -->
+		<MyceliumCanvas />
 		<div class="welcome">
-			<div class="mindscape-bg" aria-hidden="true"></div>
 			<div class="welcome-body">
 				<div class="eyebrow">Welcome</div>
 				<h1 id="onb-welcome-title" class="title">See your mind take shape</h1>
@@ -369,9 +371,7 @@
 		position: fixed;
 		inset: 0;
 		z-index: 1000;
-		background: rgba(10, 10, 12, 0.8);
-		backdrop-filter: blur(8px);
-		-webkit-backdrop-filter: blur(8px);
+		background: #0a0a0c; /* the mycelium canvas fills this; card floats over it */
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -380,24 +380,18 @@
 	}
 	.welcome {
 		position: relative;
-		max-width: 500px;
+		z-index: 1;
+		max-width: 480px;
 		width: 100%;
-		background: var(--color-elevated);
-		border: 1px solid var(--color-border);
+		/* Glass — the living mycelium breathes through the panel + around its edges. */
+		background: rgba(12, 12, 16, 0.55);
+		backdrop-filter: blur(22px) saturate(140%);
+		-webkit-backdrop-filter: blur(22px) saturate(140%);
+		border: 1px solid rgba(255, 255, 255, 0.08);
 		border-radius: 16px;
 		overflow: hidden;
 		box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(229, 184, 76, 0.06);
 		animation: slideUp 0.45s cubic-bezier(0.16, 1, 0.3, 1);
-	}
-	/* Placeholder for the mycelium.id 3D Goethe mindscape model (asset TODO) —
-	   a living gradient stands in so the layout + motion are correct now. */
-	.mindscape-bg {
-		height: 150px;
-		background:
-			radial-gradient(120% 120% at 30% 20%, rgba(229, 184, 76, 0.22), transparent 60%),
-			radial-gradient(100% 100% at 80% 60%, rgba(120, 90, 200, 0.22), transparent 55%),
-			linear-gradient(180deg, rgba(20, 20, 26, 0.2), var(--color-elevated));
-		animation: drift 12s ease-in-out infinite alternate;
 	}
 	.welcome-body {
 		padding: 1.5rem 2.25rem 1.75rem;
@@ -654,10 +648,6 @@
 	@keyframes slideUp {
 		from { opacity: 0; transform: translateY(18px) scale(0.98); }
 		to { opacity: 1; transform: translateY(0) scale(1); }
-	}
-	@keyframes drift {
-		from { transform: scale(1) translateY(0); }
-		to { transform: scale(1.08) translateY(-6px); }
 	}
 	@keyframes indeterminate {
 		0% { transform: translateX(-100%); }
