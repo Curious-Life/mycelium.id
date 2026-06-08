@@ -8,9 +8,7 @@
 	import Toast from '$lib/components/shell/Toast.svelte';
 	import ImportDropZone from '$lib/components/shell/ImportDropZone.svelte';
 	import WorkspaceRoot from '$lib/components/workspace/WorkspaceRoot.svelte';
-	import WelcomeModal from '$lib/components/WelcomeModal.svelte';
-	import OnboardingGuide from '$lib/components/OnboardingGuide.svelte';
-	import { api } from '$lib/api';
+	import OnboardingFlow from '$lib/components/onboarding/OnboardingFlow.svelte';
 	import { navigationState } from '$lib/stores/navigation';
 	import { workspace } from '$lib/workspace/store';
 	import CommandPalette from '$lib/components/workspace/CommandPalette.svelte';
@@ -34,22 +32,9 @@
 		return () => mq.removeEventListener('change', handler);
 	});
 
-	// Onboarding: fetch status once to decide whether to show welcome + guide
-	// The OnboardingGuide component does its own polling after this initial check.
-	let welcomeOpen = $state(false);
-	let showGuide = $state(false);
-
-	async function checkOnboarding() {
-		try {
-			const res = await api('/portal/onboarding/status');
-			if (!res.ok) return;
-			const data = await res.json();
-			welcomeOpen = !!data.showWelcome;
-			showGuide = !!data.show;
-		} catch {
-			// Silent — user is probably not logged in or transient error
-		}
-	}
+	// Onboarding is fully owned by OnboardingFlow (the unified v2 controller —
+	// state machine over /portal/onboarding/status + providers + mindscape). The
+	// layout just mounts it; it self-gates (welcome → import → connect → generate).
 
 	function openMobileDrawer() {
 		navigationState.setSidebarOpen(true);
@@ -58,7 +43,6 @@
 	// Keyboard shortcuts
 	onMount(() => {
 		if (!browser) return;
-		checkOnboarding();
 		// Phase C: router is up — let the workspace mirror the focused tab → URL.
 		workspace.enableUrlSync();
 		function handleKeydown(e: KeyboardEvent) {
@@ -118,10 +102,7 @@
 	<ImportDropZone />
 	<CommandPalette bind:open={paletteOpen} />
 
-	<WelcomeModal bind:open={welcomeOpen} onComplete={() => { showGuide = true; }} />
-	{#if showGuide}
-		<OnboardingGuide onDismiss={() => { showGuide = false; }} />
-	{/if}
+	<OnboardingFlow />
 {/if}
 
 <style>
