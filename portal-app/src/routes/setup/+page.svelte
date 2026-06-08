@@ -5,7 +5,7 @@
 	// vault is open). Mirrors the /login screen's visual language.
 	import { onMount } from 'svelte';
 
-	type Mode = 'loading' | 'intro' | 'reveal' | 'backup-prompt' | 'restore-backup' | 'restore';
+	type Mode = 'loading' | 'intro' | 'reveal' | 'restore-backup' | 'restore';
 	let mode = $state<Mode>('loading');
 	let busy = $state(false);
 	let error = $state<string | null>(null);
@@ -18,9 +18,8 @@
 	// "this Mac" / "this computer" — device-aware reassurance copy.
 	let deviceLabel = $state('this device');
 
-	// Vault backup (download .myvault) + restore-from-backup (upload .myvault).
-	let backingUp = $state(false);
-	let backedUp = $state(false);
+	// Restore-from-backup (upload .myvault). Backing UP a vault lives in Settings →
+	// Security, not in first-run onboarding (premature there — no data yet).
 	let backupFile = $state<File | null>(null);
 	let uploadingBackup = $state(false);
 
@@ -97,28 +96,6 @@
 		} finally { busy = false; }
 	}
 
-	// Download the encrypted vault snapshot (.myvault) to the user's own storage.
-	// The vault is open at this point (setup just booted it), so /backup streams.
-	async function downloadBackup() {
-		backingUp = true; error = null;
-		try {
-			const res = await fetch('/api/v1/account/backup', { credentials: 'same-origin' });
-			if (!res.ok) {
-				const d = await res.json().catch(() => ({}));
-				throw new Error(d.message || d.error || 'Backup failed');
-			}
-			const blob = await res.blob();
-			const stamp = new Date().toISOString().slice(0, 10);
-			const url = URL.createObjectURL(blob);
-			const a = document.createElement('a');
-			a.href = url; a.download = `mycelium-vault-${stamp}.myvault`;
-			document.body.appendChild(a); a.click(); a.remove();
-			setTimeout(() => URL.revokeObjectURL(url), 1000);
-			backedUp = true;
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Backup failed';
-		} finally { backingUp = false; }
-	}
 
 	function onPickBackup(e: Event) {
 		const input = e.target as HTMLInputElement;
@@ -249,7 +226,7 @@
 							bind:value={verifyInput}
 							type="text" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true"
 							placeholder="Paste or type your recovery key"
-							onkeydown={(e) => { if (e.key === 'Enter' && verifyMatches) mode = 'backup-prompt'; }}
+							onkeydown={(e) => { if (e.key === 'Enter' && verifyMatches) enterVault(); }}
 							class="input w-full text-sm font-mono tracking-wide" />
 						<div class="h-4 text-center text-xs">
 							{#if normalizedVerify.length === 0}
@@ -262,47 +239,13 @@
 								<span class="text-[var(--color-text-tertiary)]">{normalizedVerify.length}/64 characters</span>
 							{/if}
 						</div>
-						<button onclick={() => { if (verifyMatches) mode = 'backup-prompt'; }} disabled={!verifyMatches}
+						<button onclick={() => { if (verifyMatches) enterVault(); }} disabled={!verifyMatches}
 							class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed">
-							Continue
+							Enter my vault
 						</button>
 						<button onclick={() => { revealStep = 'show'; }}
 							class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors py-2">
 							← Show my key again
-						</button>
-					{/if}
-				</div>
-
-			{:else if mode === 'backup-prompt'}
-				<div class="card-elevated p-8 space-y-6">
-					<div class="text-center">
-						<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Back up your vault</h2>
-						<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
-							Your recovery key only unlocks data that exists on <strong>this Mac</strong>.
-							If this computer is lost or wiped, your vault is gone — even with the key —
-							unless you also keep a <strong>backup file</strong>. The backup is encrypted;
-							it's useless to anyone without your recovery key.
-						</p>
-					</div>
-					<div class="p-3 rounded-lg bg-azure/10 border border-azure/30 text-xs text-[var(--color-text-secondary)] leading-relaxed">
-						Save the <code>.myvault</code> file somewhere you control — an external drive,
-						or your own cloud storage. To recover later: restore this file, then paste your
-						recovery key.
-					</div>
-					<button onclick={downloadBackup} disabled={backingUp}
-						class="w-full btn btn-primary py-3.5 disabled:opacity-50">
-						{backingUp ? 'Preparing backup…' : backedUp ? 'Download again' : 'Back up my vault'}
-					</button>
-					{#if backedUp}
-						<div class="p-3 rounded-lg bg-jade/10 border border-jade/30 text-xs text-[var(--color-text-secondary)]">
-							<span class="text-jade font-medium">Backup downloaded ✓</span> Keep it somewhere safe.
-							You can make a fresh backup any time from Settings → Security.
-						</div>
-						<button onclick={enterVault} class="w-full btn btn-primary py-3.5">Enter my vault</button>
-					{:else}
-						<button onclick={enterVault}
-							class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors py-2">
-							I'll do this later → Enter my vault
 						</button>
 					{/if}
 				</div>
