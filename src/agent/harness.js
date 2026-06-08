@@ -195,6 +195,33 @@ function normalizeProvider(cfg = {}) {
 }
 
 /**
+ * Describe a resolved provider config for DISPLAY (the chat "active model" chip)
+ * and for the no-model preflight. Single source of truth for "what model is this
+ * config", using the SAME defaults streamTurn() would pick — so the chip never
+ * lies about what's actually running. Returns null when NO provider is configured
+ * (empty {}), which is how chat refuses instead of silently falling back to local
+ * Ollama. Carries no secrets — only the label/model name/jurisdiction.
+ * @param {object} [cfg]  resolveInferenceConfig() result
+ * @returns {{kind:string,label:string,model:string,jurisdiction:string,local:boolean}|null}
+ */
+export function describeProvider(cfg = {}) {
+  if (cfg.anthropicApiKey) {
+    return { kind: 'anthropic', label: 'Claude', model: cfg.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard', local: false };
+  }
+  if (cfg.openaiApiKey || cfg.baseUrl) {
+    const isLocal = cfg.jurisdiction === 'local' || /(?:\/\/)?(?:127\.0\.0\.1|localhost|0\.0\.0\.0)/.test(cfg.baseUrl || '');
+    return {
+      kind: isLocal ? 'local' : 'openai',
+      label: isLocal ? 'Local model' : (cfg.openaiApiKey ? 'OpenAI' : 'Custom'),
+      model: cfg.cloudModel || (isLocal ? DEFAULT_LOCAL_MODEL : DEFAULT_OPENAI_CHAT_MODEL),
+      jurisdiction: cfg.jurisdiction || (isLocal ? 'local' : 'us-standard'),
+      local: isLocal,
+    };
+  }
+  return null; // no provider configured → chat refuses (no silent fallback)
+}
+
+/**
  * Create the agent harness.
  * @param {object} opts
  * @param {(e:object)=>void} [opts.onEgress]  audit sink (createEgressAuditSink) — hash+len only

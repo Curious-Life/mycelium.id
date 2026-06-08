@@ -2,7 +2,7 @@
 	import { marked } from 'marked';
 	import DOMPurify from 'isomorphic-dompurify';
 	import JSZip from 'jszip';
-	import { chatMessages, connectionStatus, type ChatMessage } from '$lib/stores/chat';
+	import { chatMessages, connectionStatus, activeModel, noModelMessage, type ChatMessage } from '$lib/stores/chat';
 	import { navigationState, spaceScope, docScope } from '$lib/stores/navigation';
 	import { apiPostForm, apiGet } from '$lib/api';
 	// Timeline-style helpers — strip the bracket-prefixed group/reply
@@ -572,6 +572,16 @@
 				switch (event.type) {
 					case 'stream_start':
 						connectionStatus.setStatus('streaming');
+						break;
+					case 'model':
+						// The active provider+model answering this turn — show it as a chip.
+						activeModel.set({ label: event.label as string, model: event.model as string, jurisdiction: event.jurisdiction as string, local: event.local as boolean });
+						noModelMessage.set(null);
+						break;
+					case 'no_model':
+						// No AI connected — surface a clear, actionable state (no silent hang).
+						noModelMessage.set((event.message as string) || 'No AI model is connected.');
+						chatMessages.updateMessage(assistantMsgId, { content: (event.message as string) || 'No AI model is connected. Open Settings → Connect AI to add one.', isStreaming: false, toolsInProgress: [] });
 						break;
 					case 'text_delta':
 						content += (event.content as string) || (event.text as string) || '';
@@ -1335,6 +1345,15 @@
 						{/if}
 					</div>
 
+					<!-- Active model chip: always show which provider + model is answering. -->
+					{#if $activeModel}
+						<div class="flex items-center gap-1.5 px-2 py-1 rounded-lg text-[10px]" title={$activeModel.local ? 'Local model — runs on your device' : ($activeModel.jurisdiction || 'cloud')}>
+							<div class="w-1.5 h-1.5 rounded-full {$activeModel.local ? 'bg-emerald-500' : 'bg-[var(--color-accent)]'}"></div>
+							<span class="text-[var(--color-text-secondary)] font-medium">{$activeModel.label}</span>
+							<span class="hidden sm:inline text-[var(--color-text-tertiary)]">{$activeModel.model}</span>
+						</div>
+					{/if}
+
 					<!-- Space scope chip: shown when chat is scoped to a Shared Space.
 					     Closing the × returns chat to global scope. Navigating between
 					     spaces auto-switches the chip's content. -->
@@ -1439,27 +1458,23 @@
 				<!-- Messages area -->
 				<div bind:this={messagesContainerRef} class="messages-scroll-area" onscroll={handleMessagesScroll}>
 					<div class="messages-wrapper">
-					{#if $chatMessages.length === 0 && !isLoadingHistory}
-						<button
-							onclick={async () => {
-								isLoadingHistory = true;
-								try {
-									await chatMessages.loadHistory(false, selectedAgentId || undefined);
-								} catch { /* ignore */ } finally {
-									isLoadingHistory = false;
-								}
-							}}
-							class="load-history-btn"
-						>
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-							</svg>
-							Load chat history
-						</button>
-					{:else if isLoadingHistory}
+					{#if isLoadingHistory}
 						<div class="load-history-btn loading">
 							<div class="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
 							Loading history...
+						</div>
+					{:else if $noModelMessage && $chatMessages.length === 0}
+						<!-- No AI connected: a clear, actionable state (replaces the silent hang). -->
+						<div class="flex flex-col items-center justify-center text-center gap-2 py-10 px-6">
+							<div class="text-sm font-medium text-[var(--color-text-primary)]">Connect an AI to start chatting</div>
+							<div class="text-xs text-[var(--color-text-tertiary)] max-w-xs">{$noModelMessage}</div>
+							<a href="/settings" class="mt-1 text-xs px-3 py-1.5 rounded-full bg-[var(--color-accent)]/15 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25 transition-colors">Open Settings → Connect AI</a>
+						</div>
+					{:else if $chatMessages.length === 0}
+						<!-- Genuine empty state: a welcome, not a dead "load history" button (#27). -->
+						<div class="flex flex-col items-center justify-center text-center gap-1.5 py-10 px-6">
+							<div class="text-sm font-medium text-[var(--color-text-primary)]">Ask your vault anything</div>
+							<div class="text-xs text-[var(--color-text-tertiary)] max-w-xs">Your conversations, notes, and memory — searchable and reasoned over. Type a question below to begin.</div>
 						</div>
 					{/if}
 
