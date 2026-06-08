@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { marked } from 'marked';
 	import DOMPurify from 'isomorphic-dompurify';
+	import { goto } from '$app/navigation';
 	import { api } from '$lib/api';
 	import Sparkline from '$lib/components/mindscape/Sparkline.svelte';
 	import {
@@ -87,6 +88,12 @@
 			.filter(r => (r.pointCount || 0) >= 3)
 			.sort((a, b) => (b.pointCount || 0) - (a.pointCount || 0));
 	});
+	// AI-generated chronicles give realms real names. Until an AI is connected they
+	// fall back to "Realm N" — meaningless. We detect that and (a) label them as
+	// warm "Area N" and (b) surface a "Spawn intelligence" prompt to connect an AI,
+	// which then names + describes each area.
+	const realmsNamed = $derived(sortedRealms.some((r: any) => typeof r.name === 'string' && r.name.trim().length > 0));
+	function connectIntelligence() { goto('/settings'); }
 
 	// Helper: normalize entity to display name (handles both string and {name/text} formats)
 	function entityName(e: any): string {
@@ -252,8 +259,21 @@
 	<div class="nav-content">
 		{#if navLevel === 'realms'}
 			<!-- ═══ REALM LIST ═══ -->
+			{#if !realmsNamed && sortedRealms.length > 0}
+				<!-- No AI yet → the areas are unnamed. Invite the user to spawn one. -->
+				<button class="spawn-intelligence" onclick={connectIntelligence}>
+					<span class="spawn-icon">
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+					</span>
+					<span class="spawn-body">
+						<span class="spawn-title">Spawn intelligence</span>
+						<span class="spawn-sub">{sortedRealms.length} {sortedRealms.length === 1 ? 'area' : 'areas'} are forming. Connect an AI to name &amp; explore them.</span>
+					</span>
+					<span class="spawn-arrow">→</span>
+				</button>
+			{/if}
 			<div class="nav-list">
-				{#each sortedRealms as realm (realm.id)}
+				{#each sortedRealms as realm, i (realm.id)}
 					<button
 						class="nav-item realm-item"
 						onclick={() => mindscapeState.drillIntoRealm(realm.id)}
@@ -262,8 +282,8 @@
 					>
 						<span class="nav-dot" style="background: {getColor(realm.id)}"></span>
 						<div class="nav-item-content">
-							<span class="nav-item-name">{realm.name || `Realm ${realm.id}`}</span>
-							<span class="nav-item-stats">{realm.pointCount?.toLocaleString()} points · {realm.territoryCount} territories</span>
+							<span class="nav-item-name">{realm.name || `Area ${i + 1}`}</span>
+							<span class="nav-item-stats">{realm.pointCount?.toLocaleString()} points · {realm.territoryCount} {realm.territoryCount === 1 ? 'territory' : 'territories'}</span>
 							{#if realm.essence}
 								<span class="nav-item-essence">{realm.essence}</span>
 							{/if}
@@ -273,7 +293,7 @@
 			</div>
 			{#if totalMessages > 0}
 				<div class="nav-footer">
-					{totalMessages.toLocaleString()} messages across {totalRealms} realms
+					{totalMessages.toLocaleString()} messages · {totalRealms} {totalRealms === 1 ? 'area' : 'areas'}
 				</div>
 			{/if}
 
@@ -865,29 +885,66 @@
 	.nav-list {
 		display: flex;
 		flex-direction: column;
+		gap: 6px;
+		padding: 8px 10px;
 	}
 	.nav-item {
 		display: flex;
 		align-items: flex-start;
-		gap: 8px;
-		padding: 10px 14px;
-		border: none;
-		background: transparent;
+		gap: 9px;
+		padding: 10px 12px;
+		border: 1px solid rgba(255, 255, 255, 0.06);
+		border-radius: 11px;
+		background: rgba(255, 255, 255, 0.025);
 		text-align: left;
 		cursor: pointer;
 		font-family: inherit;
 		font-size: inherit;
 		color: inherit;
-		border-bottom: 1px solid rgba(255,255,255,0.03);
-		transition: background 0.12s;
+		transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
 	}
 	.nav-item:hover {
-		background: rgba(255,255,255,0.03);
+		transform: translateY(-1px);
+		background: rgba(229, 184, 76, 0.05);
+		border-color: rgba(229, 184, 76, 0.28);
 	}
 	.nav-item.selected {
-		background: rgba(229, 184, 76, 0.08);
-		border-left: 2px solid var(--color-accent);
+		background: rgba(229, 184, 76, 0.09);
+		border-color: rgba(229, 184, 76, 0.4);
 	}
+
+	/* "Spawn intelligence" — the connect-AI prompt, in the onboarding glass style. */
+	.spawn-intelligence {
+		display: flex;
+		align-items: center;
+		gap: 0.65rem;
+		width: calc(100% - 20px);
+		margin: 10px;
+		padding: 0.75rem 0.85rem;
+		background: rgba(229, 184, 76, 0.06);
+		border: 1px solid rgba(229, 184, 76, 0.28);
+		border-radius: 12px;
+		cursor: pointer;
+		text-align: left;
+		font-family: inherit;
+		color: var(--color-text-primary);
+		transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+	}
+	.spawn-intelligence:hover {
+		transform: translateY(-1px);
+		background: rgba(229, 184, 76, 0.1);
+		border-color: rgba(229, 184, 76, 0.5);
+	}
+	.spawn-icon {
+		display: flex;
+		flex-shrink: 0;
+		color: var(--color-accent-aurum, #e5b84c);
+	}
+	.spawn-icon svg { width: 20px; height: 20px; }
+	.spawn-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+	.spawn-title { font-size: 0.82rem; font-weight: 600; }
+	.spawn-sub { font-size: 0.68rem; color: var(--color-text-secondary); line-height: 1.4; }
+	.spawn-arrow { margin-left: auto; color: var(--color-accent-aurum, #e5b84c); font-size: 0.9rem; flex-shrink: 0; }
 	.nav-dot {
 		width: 8px;
 		height: 8px;
