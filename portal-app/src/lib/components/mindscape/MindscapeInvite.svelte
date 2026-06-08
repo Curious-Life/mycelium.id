@@ -188,7 +188,7 @@
 	.invite-title { font-size: 1.5rem; font-weight: 400; letter-spacing: -0.01em; margin-bottom: 0.6rem; }
 	/* Subtitle styled here (component-scoped) + a generous gap below so the cards
 	   sit proportionally above the panel's bottom padding. */
-	.invite-subtitle { font-size: 0.85rem; color: var(--color-text-secondary); line-height: 1.6; margin: 0 0 2rem; }
+	.invite-subtitle { font-size: 0.85rem; color: var(--color-text-secondary); line-height: 1.6; margin: 0 0 1.25rem; }
 	.invite-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; margin-top: 0; }
 	.invite-card {
 		display: flex; flex-direction: column; align-items: center; gap: 0.4rem;

@@ -106,36 +106,53 @@
 				camera.lookAt(cx, cy, cz);
 
 				const baseColors = new Float32Array(colors);
-				let pulseTime = 0, pulseFrame = 0;
-				const pulseSpeed = 0.4, pulseWidth = 8, pulseInterval = 180;
-				let pulseOrigin = [cx, cy, cz];
-				pulse = () => {
-					pulseFrame++; pulseTime += pulseSpeed;
-					if (pulseFrame % pulseInterval === 0) {
-						const idx = Math.floor(Math.random() * count);
-						pulseOrigin = [positions[idx * 3], positions[idx * 3 + 1], positions[idx * 3 + 2]];
-						pulseTime = 0;
+				// Neuron-like firing: instead of one synchronized wave, many points fire
+				// at random times and fade on their own decay timers — sparse, organic,
+				// asynchronous (brain activity, not a strobe). Only active firings are
+				// touched each frame (cheap), and each restores to its base colour as it
+				// dies, so the cloud never drifts brighter over time.
+				type Firing = { i: number; age: number; tau: number; peak: number };
+				const firings: Firing[] = [];
+				const MAX_FIRINGS = 110;
+				const setHot = (cols: Float32Array, i: number, b: number) => {
+					const o = i * 3;
+					if (dark) {
+						cols[o] = baseColors[o] + (1.0 - baseColors[o]) * b;
+						cols[o + 1] = baseColors[o + 1] + (0.9 - baseColors[o + 1]) * b;
+						cols[o + 2] = baseColors[o + 2] + (0.5 - baseColors[o + 2]) * b * 0.6;
+					} else {
+						cols[o] = baseColors[o] * (1 - b * 0.3) + 0.72 * b;
+						cols[o + 1] = baseColors[o + 1] * (1 - b * 0.4) + 0.52 * b;
+						cols[o + 2] = baseColors[o + 2] * (1 - b * 0.5) + 0.04 * b;
 					}
+				};
+				const restore = (cols: Float32Array, i: number) => {
+					const o = i * 3; cols[o] = baseColors[o]; cols[o + 1] = baseColors[o + 1]; cols[o + 2] = baseColors[o + 2];
+				};
+				pulse = () => {
 					const colAttr = geo.getAttribute('color') as any;
 					const cols = colAttr.array as Float32Array;
-					for (let i = 0; i < count; i++) {
-						const dx = positions[i * 3] - pulseOrigin[0];
-						const dy = positions[i * 3 + 1] - pulseOrigin[1];
-						const dz = positions[i * 3 + 2] - pulseOrigin[2];
-						const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-						const diff = Math.abs(dist - pulseTime);
-						const intensity = diff < pulseWidth ? Math.exp(-(diff * diff) / (pulseWidth * 1.5)) * 0.6 : 0;
-						if (dark) {
-							cols[i * 3] = baseColors[i * 3] + (1.0 - baseColors[i * 3]) * intensity;
-							cols[i * 3 + 1] = baseColors[i * 3 + 1] + (0.85 - baseColors[i * 3 + 1]) * intensity;
-							cols[i * 3 + 2] = baseColors[i * 3 + 2] + (0.3 - baseColors[i * 3 + 2]) * intensity * 0.5;
-						} else {
-							cols[i * 3] = baseColors[i * 3] * (1 - intensity * 0.3) + 0.72 * intensity;
-							cols[i * 3 + 1] = baseColors[i * 3 + 1] * (1 - intensity * 0.4) + 0.52 * intensity;
-							cols[i * 3 + 2] = baseColors[i * 3 + 2] * (1 - intensity * 0.5) + 0.04 * intensity;
+					// Spawn: most frames ignite a small local "bloom" (a seed point + a few
+					// nearby indices), each with a randomized decay so they desync quickly.
+					if (Math.random() < 0.55 && firings.length < MAX_FIRINGS) {
+						const seed = Math.floor(Math.random() * count);
+						const burst = 2 + Math.floor(Math.random() * 4);
+						for (let b = 0; b < burst && firings.length < MAX_FIRINGS; b++) {
+							const i = Math.min(count - 1, Math.max(0, seed + Math.floor((Math.random() - 0.5) * 16)));
+							firings.push({ i, age: -Math.floor(Math.random() * 6), tau: 22 + Math.random() * 55, peak: 0.55 + Math.random() * 0.45 });
 						}
 					}
-					colAttr.needsUpdate = true;
+					let changed = false;
+					for (let k = firings.length - 1; k >= 0; k--) {
+						const f = firings[k];
+						f.age++;
+						if (f.age <= 0) continue; // brief random stagger before it lights
+						const b = f.peak * Math.exp(-f.age / f.tau);
+						if (b < 0.03) { restore(cols, f.i); firings.splice(k, 1); changed = true; continue; }
+						setHot(cols, f.i, b);
+						changed = true;
+					}
+					if (changed) colAttr.needsUpdate = true;
 				};
 			} catch { /* no data file → still render the starfield/empty scene */ }
 
