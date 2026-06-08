@@ -73,6 +73,18 @@
 		enrichPollTimer = null;
 	}
 
+	// Auto-generate: the moment there's imported data and nothing is running, kick
+	// the run automatically — start() self-drives embed-wait → cluster → done, so
+	// the user never has to click "Generate". Guarded to fire once; an error leaves
+	// phase !== 'idle' so it won't loop (the error state offers a manual retry).
+	let autoGenTried = $state(false);
+	$effect(() => {
+		if (hasImportedData && $generate.phase === 'idle' && !autoGenTried) {
+			autoGenTried = true;
+			startGen();
+		}
+	});
+
 	// React to the shared store reporting completion: reload the map, then clear.
 	$effect(() => {
 		if ($generate.phase === 'done') {
@@ -908,7 +920,8 @@
 							{/if}
 							<p class="gen-hint">Once embedding completes, you can generate your Mycelium.</p>
 						{:else if hasImportedData}
-							<!-- Data ready, show generate CTA over demo canvas -->
+							<!-- Data ready — generation auto-starts (see the auto-gen effect),
+							     so this is just a brief passive beat, never a manual click. -->
 							<h2 class="welcome-title">
 								{#if $auth.user?.displayName}
 									{$auth.user.displayName}, your data is ready
@@ -916,8 +929,8 @@
 									Your data is ready
 								{/if}
 							</h2>
-							<p class="welcome-subtitle">Map your thinking in 3D.</p>
-							<button class="gen-button" onclick={() => startGen()}>Generate my map</button>
+							<p class="welcome-subtitle">Mapping your mind…</p>
+							<div class="gen-bar"><div class="gen-fill" style="width: 8%"></div></div>
 						{:else}
 							<!-- Empty vault: the in-window invitation + onboarding wizard. -->
 							<MindscapeInvite displayName={$auth.user?.displayName ?? null} onImported={checkGenerationState} />
