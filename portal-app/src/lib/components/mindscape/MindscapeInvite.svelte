@@ -108,7 +108,7 @@
 {#if step === 'home'}
 	<p class="invite-eyebrow">{#if displayName}Welcome, {displayName}{:else}Welcome{/if}</p>
 	<h2 class="welcome-title invite-title">Grow your mycelium</h2>
-	<p class="welcome-subtitle">Three small steps to begin.</p>
+	<p class="welcome-subtitle invite-subtitle">Three steps to begin.</p>
 	<div class="invite-actions">
 		<button class="invite-card" class:done={dataDone} onclick={() => (step = 'data')}>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -185,8 +185,11 @@
 		font-size: 0.62rem; letter-spacing: 0.18em; text-transform: uppercase;
 		color: var(--color-accent-aurum, #e5b84c); margin-bottom: 0.7rem;
 	}
-	.invite-title { font-size: 1.5rem; font-weight: 400; letter-spacing: -0.01em; }
-	.invite-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; margin-top: 0.5rem; }
+	.invite-title { font-size: 1.5rem; font-weight: 400; letter-spacing: -0.01em; margin-bottom: 0.6rem; }
+	/* Subtitle styled here (component-scoped) + a generous gap below so the cards
+	   sit proportionally above the panel's bottom padding. */
+	.invite-subtitle { font-size: 0.85rem; color: var(--color-text-secondary); line-height: 1.6; margin: 0 0 2rem; }
+	.invite-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; margin-top: 0; }
 	.invite-card {
 		display: flex; flex-direction: column; align-items: center; gap: 0.4rem;
 		padding: 1.1rem 0.75rem; background: rgba(255, 255, 255, 0.03);
