@@ -127,4 +127,12 @@ cp "$RT/node" "$STAGE/node"; chmod +x "$STAGE/node"
 rsync -a "$RT/python/"   "$STAGE/python/"
 rsync -a "$RT/hf-cache/" "$STAGE/hf-cache/"
 
+# Strip extended attributes (com.apple.provenance / quarantine / resource forks)
+# from the staged tree. macOS adds these to files written by npm/curl/etc., and
+# `codesign` rejects them with "resource fork, Finder information, or similar
+# detritus not allowed" — which fails the WHOLE build at the signing step. This
+# keeps the bundle reliably signable on any machine.
+log "stripping xattrs from staging (codesign hygiene)…"
+xattr -cr "$STAGE" 2>/dev/null || true
+
 log "done. staging size: $(du -sh "$STAGE" | cut -f1)"
