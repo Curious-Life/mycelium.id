@@ -74,6 +74,36 @@
 	let openaiError = $state('');
 	let openaiPollTimer: ReturnType<typeof setTimeout> | null = null;
 
+	// API-key connect (the path that actually powers portal inference: writes
+	// ai_providers via POST /portal/providers). Subscription OAuth is unsupported.
+	let aiKeyProvider = $state<'anthropic' | 'openai'>('anthropic');
+	let aiKeyInput = $state('');
+	let aiKeySaving = $state(false);
+	let aiKeySaved = $state(false);
+	let aiKeyError = $state('');
+
+	async function saveProviderKey() {
+		aiKeySaving = true;
+		aiKeyError = '';
+		try {
+			const res = await api('/portal/providers', {
+				method: 'POST',
+				body: JSON.stringify({ provider: aiKeyProvider, api_key: aiKeyInput.trim() }),
+			});
+			if (!res.ok) {
+				const d = await res.json().catch(() => ({}));
+				throw new Error(d.error || 'Failed to save key');
+			}
+			aiKeySaved = true;
+			aiKeyInput = '';
+			await fetchStatus(); // flip Step 1 to done
+			setTimeout(() => { aiKeySaved = false; }, 3000);
+		} catch (e: any) {
+			aiKeyError = e.message || 'Failed to save key';
+		}
+		aiKeySaving = false;
+	}
+
 	// Messaging sub-state
 	let telegramTokenInput = $state('');
 	let telegramIdInput = $state('');
@@ -572,16 +602,37 @@
 									</button>
 								</div>
 							{:else}
-								<p class="expand-hint">Connect your AI subscription to power your agents.</p>
-								<div class="ai-options">
-									<button class="btn-primary-inline" disabled={claudeAuthLoading} onclick={connectClaude}>
-										{claudeAuthLoading ? 'Starting…' : 'Connect with Claude'}
-									</button>
-									<button class="btn-primary-inline openai" disabled={openaiLoading} onclick={connectOpenAI}>
-										{openaiLoading ? 'Starting…' : 'Connect with ChatGPT'}
+								<p class="expand-hint">Add an API key to power your agents &mdash; or run a local model with Ollama (no key needed).</p>
+								<div class="input-row">
+									<select
+										bind:value={aiKeyProvider}
+										style="background: var(--color-surface); color: var(--color-text-primary); border: 1px solid var(--color-border); border-radius: 6px; padding: 0.4rem 0.5rem; font-size: 0.75rem;"
+									>
+										<option value="anthropic">Anthropic</option>
+										<option value="openai">OpenAI</option>
+									</select>
+									<input
+										type="text"
+										bind:value={aiKeyInput}
+										placeholder={aiKeyProvider === 'anthropic' ? 'sk-ant-…' : 'sk-…'}
+										autocomplete="off"
+										data-1p-ignore
+									/>
+									<button class="btn-save" disabled={!aiKeyInput || aiKeySaving} onclick={saveProviderKey}>
+										{aiKeySaving ? '…' : aiKeySaved ? '✓' : 'Save'}
 									</button>
 								</div>
-								<p class="expand-hint subtle">ChatGPT requires <a href="https://chatgpt.com/settings/security" target="_blank" rel="noopener">device code auth</a> enabled in your account settings.</p>
+								<p class="expand-hint subtle">
+									Get a key from
+									<a
+										href={aiKeyProvider === 'anthropic' ? 'https://console.anthropic.com/settings/keys' : 'https://platform.openai.com/api-keys'}
+										target="_blank"
+										rel="noopener"
+									>{aiKeyProvider === 'anthropic' ? 'console.anthropic.com' : 'platform.openai.com'}</a>.
+								</p>
+								{#if aiKeyError}
+									<p class="expand-error">{aiKeyError}</p>
+								{/if}
 							{/if}
 							{#if claudeAuthError}
 								<p class="expand-error">{claudeAuthError}</p>
@@ -1102,20 +1153,6 @@
 	}
 	.btn-primary-inline {
 		margin-top: 0.2rem;
-	}
-	.btn-primary-inline.openai {
-		background: rgba(255, 255, 255, 0.08);
-		color: var(--color-text-primary);
-		border: 1px solid var(--color-border);
-	}
-	.btn-primary-inline.openai:hover {
-		background: rgba(255, 255, 255, 0.12);
-		border-color: var(--color-text-secondary);
-	}
-	.ai-options {
-		display: flex;
-		gap: 0.5rem;
-		flex-wrap: wrap;
 	}
 	.expand-hint.subtle {
 		font-size: 0.62rem;

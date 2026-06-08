@@ -10,9 +10,9 @@
 		onComplete?: () => void;
 	} = $props();
 
-	// 3-step progressive reveal
+	// 4-step progressive reveal (last step = optional handle claim)
 	let step = $state(0);
-	const totalSteps = 3;
+	const totalSteps = 4;
 
 	const steps = [
 		{
@@ -33,9 +33,48 @@
 			body: 'Connect an AI (your mind\u2019s voice). Bring your past conversations (your mind\u2019s memory). Link a messenger (so your agent can reach you).',
 			follow: 'We\u2019ll walk you through each. When you\u2019re ready, your Mycelium starts growing.',
 		},
+		{
+			eyebrow: 'Your handle',
+			title: 'Claim your handle',
+			body: 'Pick a short handle for your profile \u2014 letters, numbers, underscore. You can change it later in Profile, or skip for now.',
+			follow: '',
+		},
 	];
 
 	const current = $derived(steps[step]);
+	const isHandleStep = $derived(step === totalSteps - 1);
+
+	// \u2500\u2500 Optional handle claim (last step) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+	const HANDLE_RE = /^[a-z0-9][a-z0-9_]{2,29}$/;
+	let handleInput = $state('');
+	let handleState = $state<'idle' | 'checking' | 'available' | 'taken' | 'invalid'>('idle');
+	let handleReason = $state('');
+	let handleCheckTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function onHandleInput() {
+		const h = handleInput.trim().toLowerCase();
+		handleReason = '';
+		if (handleCheckTimer) clearTimeout(handleCheckTimer);
+		if (!h) { handleState = 'idle'; return; }
+		if (!HANDLE_RE.test(h)) { handleState = 'invalid'; handleReason = '3\u201330 chars: a\u2013z, 0\u20139, _ (start alphanumeric)'; return; }
+		handleState = 'checking';
+		handleCheckTimer = setTimeout(async () => {
+			try {
+				const res = await api(`/portal/profile/handle/check?handle=${encodeURIComponent(h)}`);
+				const d = await res.json().catch(() => ({}));
+				if (d.available) { handleState = 'available'; }
+				else { handleState = 'taken'; handleReason = d.reason || 'that handle is taken'; }
+			} catch { handleState = 'idle'; }
+		}, 400);
+	}
+
+	async function saveHandleIfAny() {
+		const h = handleInput.trim().toLowerCase();
+		if (!h || handleState !== 'available') return; // optional; only save a confirmed-available handle
+		try {
+			await api('/portal/profile', { method: 'PUT', body: JSON.stringify({ handle: h }) });
+		} catch { /* non-blocking \u2014 they can set it later in Profile */ }
+	}
 
 	async function next() {
 		if (step < totalSteps - 1) {
@@ -50,6 +89,7 @@
 	}
 
 	async function finish() {
+		await saveHandleIfAny(); // optional — no-op unless a confirmed-available handle was entered
 		// Mark as seen server-side — idempotent
 		if (browser) {
 			try {
@@ -63,18 +103,21 @@
 	// Keyboard: Esc to dismiss (also marks as seen), Enter/Space to advance
 	function handleKeydown(e: KeyboardEvent) {
 		if (!open) return;
+		const tag = (e.target as HTMLElement)?.tagName;
+		const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
 		if (e.key === 'Escape') {
 			e.preventDefault();
 			finish();
 		} else if (e.key === 'Enter' || e.key === ' ') {
-			if ((e.target as HTMLElement)?.tagName !== 'BUTTON') {
+			// Don't hijack typing (esp. the handle input) — only advance from non-field focus.
+			if (!inField && tag !== 'BUTTON') {
 				e.preventDefault();
 				next();
 			}
-		} else if (e.key === 'ArrowRight') {
+		} else if (e.key === 'ArrowRight' && !inField) {
 			e.preventDefault();
 			next();
-		} else if (e.key === 'ArrowLeft') {
+		} else if (e.key === 'ArrowLeft' && !inField) {
 			e.preventDefault();
 			back();
 		}
@@ -108,7 +151,28 @@
 				<div class="eyebrow">{current.eyebrow}</div>
 				<h1 id="welcome-title" class="title">{current.title}</h1>
 				<p class="body">{current.body}</p>
-				<p class="follow">{current.follow}</p>
+				{#if current.follow}<p class="follow">{current.follow}</p>{/if}
+				{#if isHandleStep}
+					<div class="handle-row">
+						<span class="handle-at">@</span>
+						<input
+							class="handle-input"
+							type="text"
+							bind:value={handleInput}
+							oninput={onHandleInput}
+							placeholder="yourhandle"
+							autocomplete="off"
+							data-1p-ignore
+							maxlength="30"
+						/>
+					</div>
+					<p class="handle-status" class:ok={handleState === 'available'} class:bad={handleState === 'taken' || handleState === 'invalid'}>
+						{#if handleState === 'checking'}Checking…
+						{:else if handleState === 'available'}&#10003; available
+						{:else if handleState === 'taken' || handleState === 'invalid'}{handleReason}
+						{:else}&nbsp;{/if}
+					</p>
+				{/if}
 			</div>
 
 			<div class="actions">
@@ -219,6 +283,39 @@
 		font-style: italic;
 		opacity: 0.85;
 	}
+
+	.handle-row {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		margin-top: 0.5rem;
+		background: var(--color-surface);
+		border: 1px solid var(--color-border);
+		border-radius: 8px;
+		padding: 0.55rem 0.75rem;
+	}
+	.handle-at {
+		color: var(--color-text-secondary, #9898A3);
+		font-family: var(--font-mono, 'JetBrains Mono', monospace);
+		font-size: 0.9rem;
+	}
+	.handle-input {
+		flex: 1;
+		background: transparent;
+		border: none;
+		outline: none;
+		color: var(--color-text-primary);
+		font-family: var(--font-mono, 'JetBrains Mono', monospace);
+		font-size: 0.9rem;
+	}
+	.handle-status {
+		font-size: 0.72rem;
+		margin: 0.4rem 0 0;
+		min-height: 1em;
+		color: var(--color-text-secondary, #9898A3);
+	}
+	.handle-status.ok { color: #4ade80; }
+	.handle-status.bad { color: #f87171; }
 
 	.actions {
 		display: flex;
