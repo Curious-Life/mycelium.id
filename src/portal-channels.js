@@ -10,7 +10,7 @@
 // same posture as portal-settings.js.
 import express from 'express';
 
-export function portalChannelsRouter({ db, userId }) {
+export function portalChannelsRouter({ db, userId, channelSup }) {
   const router = express.Router();
   router.use(express.json({ limit: '256kb' }));
 
@@ -46,6 +46,9 @@ export function portalChannelsRouter({ db, userId }) {
         },
         groups,
         discordChannels,
+        // Live daemon state so the UI shows whether the bridge is actually running
+        // (not just whether a token is stored). { status, message, detail }.
+        daemon: channelSup ? channelSup.getHealth() : { status: 'unknown', message: null, detail: null },
       });
     } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
   });
@@ -91,6 +94,10 @@ export function portalChannelsRouter({ db, userId }) {
           if (v) await setS(key, v); else await delS(key);
         }
       }
+      // Apply the change to the running daemon WITHOUT an app restart: (re)start
+      // it if now enabled + tokened, stop it if disabled, restart to pick up a new
+      // token/model (the daemon reads its config from the vault only at boot).
+      try { channelSup?.reload(); } catch { /* supervisor optional (e.g. tests) */ }
       res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
   });

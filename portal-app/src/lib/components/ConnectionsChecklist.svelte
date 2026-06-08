@@ -273,6 +273,9 @@
 					try {
 						await api('/portal/settings/secret', { method: 'PUT', body: JSON.stringify({ key: 'OWNER_TELEGRAM_ID', value: telegramIdInput.trim(), scope: 'personal' }) });
 						await saveIntegration('TELEGRAM_BOT_TOKEN', telegramTokenInput, 'personal');
+						// Enable channels + start the bridge now (the app supervises the daemon;
+						// this sets CHANNEL_ENABLED + triggers an immediate start over loopback).
+						await api('/portal/channels', { method: 'PUT', body: JSON.stringify({ enabled: true }) });
 						integrationSaved = 'telegram';
 						telegramTokenInput = '';
 						telegramIdInput = '';
@@ -283,6 +286,7 @@
 					{integrationSaving ? 'Saving...' : integrationSaved === 'telegram' ? '\u2713 Saved' : 'Save'}
 				</button>
 			</div>
+			<p style="margin-top: 0.5rem; opacity: 0.7;">The bot captures + searches your messages right away. For it to <em>reply</em>, configure an assistant \u2014 pull a local model in Hardware, or add a cloud key in Settings \u2192 Channels.</p>
 		</div>
 	{/if}
 

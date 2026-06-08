@@ -52,6 +52,8 @@ Two **sidecar services** run as their own processes:
 - **`:8091` embed-service** — Nomic v1.5 ONNX embeddings (`pipeline/embed-service.py`), ⚠️ Tier-2 (needs onnxruntime/model installed).
 - **`:8095` enrichment** — embed-on-write + NLP drain (`src/enrich/server.js`). ✅
 
+The **channel daemon** (`:3010`, `packages/channel-daemon/`, Telegram/Discord bridge) is a third supervised process — owned by `src/channels/supervisor.js` (mirrors the embed supervisor: adopt-or-spawn, backoff-restart, health) and started only when `CHANNEL_ENABLED` + a bot token is set. It is **keyless**: it reaches vault plaintext only over loopback — the vault REST (`:8787`) for config/context and a **loopback-only MCP endpoint** (`:8787/internal/mcp`, `src/mcp-loopback.js`, strict-loopback `403`-gated, never public) for the agent turn's tools incl. the `reply` egress tool (wired when `AGENT_URL` is set). Its reply still flows agent → `AGENT_URL` → the daemon's loopback egress chokepoint → Telegram. `packages/` is staged into the app bundle (`scripts/build-app-bundle.sh`), so this all works in the packaged app with no manual steps. ✅
+
 ## 3. Components
 
 | Component | Path | Status |
@@ -236,6 +238,8 @@ claim level) · personaClaims MCP tool · portal /claims (ClaimsView + TimeSerie
 |---|---|---|
 | `:8091` | Nomic embed-service (Python) | ⚠️ Tier-2 |
 | `:8095` | enrichment service (Node) | ✅ |
+| `:3010` | channel daemon (Telegram/Discord bridge, loopback) — supervised, keyless | ✅ |
+| `:8787/internal/mcp` | loopback-only MCP for the channel daemon's agent turn (incl. `reply`) | ✅ |
 | HTTP/REST | configurable (MCP HTTP + REST) | ✅ |
 
 ## 9. Verification

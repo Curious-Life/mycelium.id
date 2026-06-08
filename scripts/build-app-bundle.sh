@@ -88,6 +88,25 @@ ensure_model
 log "building portal…"
 npm --prefix "$REPO/portal-app" run build >/dev/null
 
+# ── 4b. Deps-completeness preflight ───────────────────────────────────────────
+# Fail LOUD if any declared dependency is missing from node_modules. Catches the
+# class of bug where a dep is in package.json + lockfile but never actually
+# installed (e.g. @better-auth/passkey), which would ship a bundle that crashes
+# on boot for the code path that imports it. Cheap insurance before a ~1GB stage.
+log "checking node_modules completeness…"
+node -e '
+  const fs = require("fs"), path = require("path");
+  const repo = process.argv[1];
+  const pkg = JSON.parse(fs.readFileSync(path.join(repo, "package.json"), "utf8"));
+  const deps = Object.keys(pkg.dependencies || {});
+  const missing = deps.filter((d) => !fs.existsSync(path.join(repo, "node_modules", d, "package.json")));
+  if (missing.length) {
+    console.error("[build-app-bundle] FATAL — declared deps missing from node_modules: " + missing.join(", "));
+    console.error("[build-app-bundle] run: npm install   (then rebuild)");
+    process.exit(1);
+  }
+' "$REPO"
+
 # ── 5. Assemble staging (code fresh each run; runtime bits from cache) ─────────
 log "assembling $STAGE…"
 rm -rf "$STAGE"; mkdir -p "$STAGE/pipeline"
@@ -96,10 +115,24 @@ rsync -a "$REPO/migrations/"        "$STAGE/migrations/" 2>/dev/null || true
 rsync -a "$REPO/package.json"       "$STAGE/"
 rsync -a "$REPO/portal-app/build/"  "$STAGE/portal-app/build/"
 rsync -a "$REPO/node_modules/"      "$STAGE/node_modules/"
+# Channel daemon (Telegram/Discord bridge) + any other workspace packages. The
+# app supervises packages/channel-daemon/index.js (src/channels/supervisor.js);
+# without this it isn't in the bundle and channels can never run. Exclude any
+# nested node_modules (deps resolve from the top-level node_modules above).
+rsync -a --exclude 'node_modules' --exclude '__tests__' --exclude '*.test.js' \
+         "$REPO/packages/"          "$STAGE/packages/"
 rsync -a --exclude '.venv' --exclude 'cache' --exclude '__pycache__' --exclude '*.pyc' \
          "$REPO/pipeline/"          "$STAGE/pipeline/"
 cp "$RT/node" "$STAGE/node"; chmod +x "$STAGE/node"
 rsync -a "$RT/python/"   "$STAGE/python/"
 rsync -a "$RT/hf-cache/" "$STAGE/hf-cache/"
+
+# Strip extended attributes (com.apple.provenance / quarantine / resource forks)
+# from the staged tree. macOS adds these to files written by npm/curl/etc., and
+# `codesign` rejects them with "resource fork, Finder information, or similar
+# detritus not allowed" — which fails the WHOLE build at the signing step. This
+# keeps the bundle reliably signable on any machine.
+log "stripping xattrs from staging (codesign hygiene)…"
+xattr -cr "$STAGE" 2>/dev/null || true
 
 log "done. staging size: $(du -sh "$STAGE" | cut -f1)"

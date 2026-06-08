@@ -133,6 +133,7 @@
     "verify:channel-tts": "node scripts/verify-channel-tts.mjs",
     "verify:channel-groups": "node scripts/verify-channel-groups.mjs",
     "verify:channel-settings": "node scripts/verify-channel-settings.mjs",
+    "verify:channel-supervisor": "node scripts/verify-channel-supervisor.mjs",
     "verify:channel-discord": "node scripts/verify-channel-discord.mjs",
     "verify:channel-access": "node scripts/verify-channel-access.mjs",
     "smoke:telegram-live": "node scripts/smoke-telegram-live.mjs",
