@@ -25,6 +25,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';
 import { startRestServer } from '../src/server-rest.js';
+import { shouldAutoGenerate } from '../src/jobs.js';
 
 const DB = 'data/verify-generate.db';
 const KCV = 'data/verify-generate-kcv.json';
@@ -118,6 +119,12 @@ exit 1
     // ── G5 unknown job ──
     const g5 = await get('/mycelium/generate/status/gen_does_not_exist');
     rec('G5. unknown job → 404', g5.status === 404);
+
+    // ── G6 first-run auto-continue gate (shouldAutoGenerate truth table) ──
+    rec('G6a. fires: enough embedded + no topology + not running', shouldAutoGenerate({ embedded: 30, points: 0, clusteringRunning: false, min: 25 }) === true);
+    rec('G6b. holds: below the data floor (trivial-cluster guard)', shouldAutoGenerate({ embedded: 10, points: 0, clusteringRunning: false, min: 25 }) === false);
+    rec('G6c. holds: topology already built (re-gen stays manual)', shouldAutoGenerate({ embedded: 100, points: 500, clusteringRunning: false, min: 25 }) === false);
+    rec('G6d. holds: clustering already running (single-flight)', shouldAutoGenerate({ embedded: 100, points: 0, clusteringRunning: true, min: 25 }) === false);
   } finally {
     srv.server.close(); try { srv.close?.(); } catch {}
     for (const f of [OK, FAIL]) { try { rmSync(f); } catch {} }

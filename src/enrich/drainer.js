@@ -29,6 +29,7 @@ export function startEnrichDrainer({
   intervalMs = 15000,
   embed = createEmbedClient(),
   log = (m) => process.stderr.write(`${m}\n`),
+  onSettled,
 } = {}) {
   const svc = createEnrichmentService({ messages: db.messages, embed, getMasterKey });
   let running = false;
@@ -69,6 +70,10 @@ export function startEnrichDrainer({
       if (embedded > 0) {
         await svc.enrichNlpOnce({ userId });     // advance embedded → enriched
         log(`[enrich] embedded ${embedded} message(s) in-process`);
+        // Backlog drained this cycle → let the owner decide whether to kick off the
+        // topology pipeline (first-run auto-generate). Decoupled: the drainer never
+        // imports jobs.js; server-rest wires the gate (single-flight + topology-empty).
+        try { await onSettled?.({ embedded }); } catch { /* non-fatal */ }
       }
     } catch (err) {
       log(`[enrich] drain cycle error: ${String(err?.message || err)}`);

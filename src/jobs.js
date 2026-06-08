@@ -223,6 +223,20 @@ export function isClusteringRunning() {
 }
 
 /**
+ * Pure gate for FIRST-RUN auto-generation (the enrich drainer's onSettled hook
+ * uses this via server-rest). Fire the topology pipeline automatically only when:
+ *   - no clustering child is already running (single-flight),
+ *   - enough messages are embedded (data floor — avoids a trivial 1-cluster map;
+ *     manual Generate's MIN_EMBEDDED=5 still works below this), and
+ *   - NO topology exists yet (clustering_points empty) — so it fires once on the
+ *     first generation; re-generation stays a manual, user-driven action.
+ * @returns {boolean}
+ */
+export function shouldAutoGenerate({ embedded, points, clusteringRunning, min = 25 } = {}) {
+  return !clusteringRunning && Number(embedded) >= Number(min) && Number(points) === 0;
+}
+
+/**
  * Spawn the Persona-Claims discovery child for one cadence (heartbeat-driven).
  * Lean fire-and-forget: resolves master keys at spawn time (same source as the
  * clustering job), hands them to the child via an allowlisted env, logs the

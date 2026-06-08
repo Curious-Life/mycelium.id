@@ -29,7 +29,7 @@ import { remoteRouter } from './remote/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { startEnrichDrainer } from './enrich/drainer.js';
 import { startClaimHeartbeat } from './claims/heartbeat.js';
-import { startClaimDiscoveryJob, isClusteringRunning } from './jobs.js';
+import { startClaimDiscoveryJob, isClusteringRunning, startClusteringJob, shouldAutoGenerate } from './jobs.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
 import { startChannelSupervisor } from './channels/supervisor.js';
 import { mcpLoopbackRouter } from './mcp-loopback.js';
@@ -283,7 +283,26 @@ export async function startRestServer({
         // self-check, restart-on-crash, and expose health to /processing-status.
         // Without a live embedder the drainer can't embed → Generate has no data.
         const embedSup = startEmbedSupervisor({ home: process.cwd() });
-        const drainer = startEnrichDrainer({ db, userId: bootUserId });
+        // First-run auto-continue: once the import backlog has embedded and there is
+        // NO topology yet, kick the Generate pipeline automatically so the user isn't
+        // stranded after import (the #1 "it embedded but nothing happened" report).
+        // Gated, fail-soft: only when not already clustering, clustering_points is
+        // empty (fires once on first generation — re-generation stays manual), and
+        // past a data floor so we never build a trivial 1-cluster map. Manual Generate
+        // (MIN_EMBEDDED=5) is unchanged for small/test vaults below the floor.
+        const AUTO_GEN_MIN = Number(process.env.MYCELIUM_AUTO_GEN_MIN) || 25;
+        const maybeAutoGenerate = async () => {
+          try {
+            const er = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND embedding_768 IS NOT NULL', [bootUserId]);
+            const pr = await db.rawQuery('SELECT COUNT(*) AS c FROM clustering_points WHERE user_id = ?', [bootUserId]);
+            const embedded = Number(er?.results?.[0]?.c ?? 0);
+            const points = Number(pr?.results?.[0]?.c ?? 0);
+            if (!shouldAutoGenerate({ embedded, points, clusteringRunning: isClusteringRunning(), min: AUTO_GEN_MIN })) return;
+            console.error('[mycelium] auto-generating first topology — embedding settled');
+            startClusteringJob({ dbPath: effectiveDbPath, userId: bootUserId });
+          } catch { /* non-fatal; manual Generate still works */ }
+        };
+        const drainer = startEnrichDrainer({ db, userId: bootUserId, onSettled: maybeAutoGenerate });
         enqueueEnrichment = (id) => { try { baseEnqueue(id); } catch { /* :8095 optional */ } drainer.nudge(); };
         // Persona-Claims cadence trigger: a zero-LLM hourly heartbeat that spawns
         // the discovery child when a day/week/month/quarter window rolls over (and
