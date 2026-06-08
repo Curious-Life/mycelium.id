@@ -31,6 +31,8 @@ import { startEnrichDrainer } from './enrich/drainer.js';
 import { startClaimHeartbeat } from './claims/heartbeat.js';
 import { startClaimDiscoveryJob, isClusteringRunning } from './jobs.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
+import { startChannelSupervisor } from './channels/supervisor.js';
+import { mcpLoopbackRouter } from './mcp-loopback.js';
 import { setSessionKeys } from './account/session-keys.js';
 import { isTrustedLoopback } from './http/loopback.js';
 import { createVaultAuthMiddleware, csrfCookieMiddleware, isAuthorized } from './http/require-vault-auth.js';
@@ -100,7 +102,7 @@ function ensureVaultSchema(dbFile) {
 /** Build the express sub-app that serves every VAULT-DEPENDENT route. Mounted
  *  behind a guard so it only handles traffic once the vault is open; until then
  *  data calls get a 503 and only the account ceremony + static UI are served. */
-function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth }) {
+function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth, channelSup }) {
   const v = express();
   v.disable('x-powered-by');
   // Fail-closed auth gate FIRST, mounted at `/api` — ALL vault data the sub-app
@@ -157,12 +159,16 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
     db, userId, tools, handlers, enqueueEnrichment,
     authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
   }));
-  v.use('/api/v1/portal', portalChannelsRouter({ db, userId }));
+  v.use('/api/v1/portal', portalChannelsRouter({ db, userId, channelSup }));
   if (connectorRunner) v.use('/api/v1/portal', portalConnectorsRouter({ runner: connectorRunner }));
   // Internal support endpoints for the channel-daemon egress chokepoint
   // (egress-audit sink + channel-authority resolver). Loopback-only, same
   // trust boundary as the tool routes below.
   v.use(internalRouter({ db, userId }));
+  // Loopback-only MCP endpoint over the SAME open-vault tools, so the co-managed
+  // channel daemon can run its agent turn (incl. the `reply` egress tool) without
+  // a second vault process or OAuth. Strict-loopback gated; never binds publicly.
+  v.use(mcpLoopbackRouter({ tools, handlers }));
   v.use(apiRouter({ tools, handlers, db, userId, enqueueEnrichment }));
   return v;
 }
@@ -193,6 +199,17 @@ export async function startRestServer({
   // opens it — only for the default location (explicit-dbPath callers, e.g.
   // verify scripts, manage their own path).
   if (dbPath === undefined) ensureDataDir();
+
+  // Wire the `reply` egress tool (src/mcp.js gates it on AGENT_URL) to the
+  // co-managed channel daemon's fixed loopback chokepoint port, so the daemon's
+  // agent turn can deliver replies. ONLY on real app launches — verify scripts
+  // inject keys and assert exact tool counts, so they must NOT gain `reply`.
+  // The tool soft-fails ('no-active-turn') outside a channel turn, so its mere
+  // presence is inert everywhere else.
+  const keysInjectedAtStart = userHex !== undefined && systemHex !== undefined;
+  if (!keysInjectedAtStart && !process.env.AGENT_URL) {
+    process.env.AGENT_URL = `http://127.0.0.1:${Number(process.env.CHANNEL_DAEMON_PORT) || 3010}`;
+  }
 
   // boot() reads keys from env by default; forward overrides when given
   // (verify scripts inject ephemeral keys) so undefined doesn't clobber env.
@@ -260,6 +277,7 @@ export async function startRestServer({
       // verify script's deterministic test vault.
       const injectedKeys = userHex !== undefined && systemHex !== undefined;
       let connectorScheduler = null;
+      let channelSup = null;
       if (!injectedKeys) {
         // Own the embed-service (:8091) lifecycle in-process: spawn/adopt, dep
         // self-check, restart-on-crash, and expose health to /processing-status.
@@ -275,11 +293,18 @@ export async function startRestServer({
           db, userId: bootUserId, isJobRunning: isClusteringRunning,
           spawn: (cadences) => startClaimDiscoveryJob({ dbPath: effectiveDbPath, userId: bootUserId, cadence: cadences.join(',') }),
         });
+        // Co-manage the channel daemon (Telegram/Discord bridge): spawn it when the
+        // user enabled channels + configured a bot token, adopt an existing one,
+        // restart on crash, and stop on shutdown. Keyless — it reaches the vault
+        // only over loopback (vault-client + /internal/mcp). Reaped via the Rust
+        // shell's process-group kill on app exit regardless.
+        channelSup = startChannelSupervisor({ home: process.cwd(), db, userId: bootUserId, restPort: port });
         closeHandle = () => {
           try { connectorScheduler?.stop(); } catch { /* */ }
           try { drainer.stop(); } catch { /* */ }
           try { claimsHeartbeat.stop(); } catch { /* */ }
           try { embedSup.stop(); } catch { /* */ }
+          try { channelSup?.stop(); } catch { /* */ }
           try { hwOllamaDaemon.stop(); } catch { /* */ }
           try { close(); } catch { /* */ }
         };
@@ -298,7 +323,7 @@ export async function startRestServer({
       if (!injectedKeys) {
         connectorScheduler = startConnectorScheduler({ runner: connectorRunner });
       }
-      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId }) });
+      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId }), channelSup });
     } finally {
       booting = false;
     }
