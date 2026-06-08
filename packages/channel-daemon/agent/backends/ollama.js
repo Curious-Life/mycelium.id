@@ -26,7 +26,7 @@ function extractText(result) {
 /**
  * Pure tool-use loop. Deps are injected so this is testable with fakes.
  * @param {object} a
- * @param {(req:{messages:any[],tools:any[]})=>Promise<{message:{content?:string,tool_calls?:any[]}}>} a.ollamaChat
+ * @param {(req:{messages:any[],tools:any[],tool_choice?:any})=>Promise<{message:{content?:string,tool_calls?:any[]}}>} a.ollamaChat
  * @param {{listTools:()=>Promise<{tools:any[]}>, callTool:(c:{name:string,arguments:any})=>Promise<any>}} a.mcpClient
  * @param {string} a.systemPrompt
  * @param {string} a.userMessage
@@ -38,10 +38,25 @@ export async function runOllamaTurn({ ollamaChat, mcpClient, systemPrompt, userM
     type: 'function',
     function: { name: t.name, description: t.description || '', parameters: t.inputSchema || { type: 'object', properties: {} } },
   }));
+  // The single egress tool (its MCP name may be prefixed, e.g. `mcp__…__reply`).
+  const replyTool = tools.find((t) => t.function?.name?.endsWith(REPLY_TOOL_SUFFIX)) || null;
 
   const messages = [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMessage }];
   let usedReplyTool = false;
   let delivered = false;
+  let forced = false;
+
+  // Deliver a reply tool call against the chokepoint; sets usedReplyTool/delivered.
+  async function runReplyCall(tc) {
+    let args = tc.function.arguments;
+    if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
+    usedReplyTool = true;
+    try {
+      const result = await mcpClient.callTool({ name: tc.function.name, arguments: args || {} });
+      if (/"delivered"\s*:\s*true/.test(extractText(result))) delivered = true;
+      return extractText(result);
+    } catch (e) { return `tool error: ${e.message}`; }
+  }
 
   for (let i = 0; i < maxTurns; i++) {
     const resp = await ollamaChat({ messages, tools });
@@ -53,24 +68,44 @@ export async function runOllamaTurn({ ollamaChat, mcpClient, systemPrompt, userM
     for (const tc of calls) {
       const name = tc?.function?.name;
       if (!name) continue;
-      let args = tc.function.arguments;
-      if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
-      const isReply = name.endsWith(REPLY_TOOL_SUFFIX);
-      if (isReply) usedReplyTool = true;
-      let resultText = '';
-      try {
-        const result = await mcpClient.callTool({ name, arguments: args || {} });
-        resultText = extractText(result);
-        if (isReply && /"delivered"\s*:\s*true/.test(resultText)) delivered = true;
-      } catch (e) {
-        resultText = `tool error: ${e.message}`;
+      let resultText;
+      if (name.endsWith(REPLY_TOOL_SUFFIX)) {
+        resultText = await runReplyCall(tc);
+      } else {
+        let args = tc.function.arguments;
+        if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
+        try { resultText = extractText(await mcpClient.callTool({ name, arguments: args || {} })); }
+        catch (e) { resultText = `tool error: ${e.message}`; }
       }
       messages.push({ role: 'tool', content: resultText });
     }
     if (usedReplyTool && delivered) break; // delivered — stop early
   }
 
-  return { delivered, usedReplyTool, reason: usedReplyTool ? (delivered ? 'delivered' : 'reply-not-delivered') : 'no-reply' };
+  // GUARANTEED DELIVERY (weak-local-model safety net). Local models frequently end
+  // a turn with free-form text instead of calling `reply` — which the chokepoint
+  // never delivers (CLAUDE.md #11, by design). So if nothing was delivered, make a
+  // FINAL call that FORCES the reply tool via `tool_choice` (Ollama ≥0.30 honors it;
+  // older versions ignore it → no worse than before). This is NOT a model/provider
+  // fallback — it's the SAME configured model, compelled to emit its answer through
+  // the one egress tool. Explicit-send is preserved: the model still calls `reply`.
+  if (!delivered && replyTool) {
+    forced = true;
+    messages.push({ role: 'user', content: 'Reply to the user now: call the reply tool with your message text. Do not output anything else.' });
+    try {
+      const resp = await ollamaChat({ messages, tools: [replyTool], tool_choice: { type: 'function', function: { name: replyTool.function.name } } });
+      for (const tc of (resp?.message?.tool_calls || [])) {
+        if (tc?.function?.name?.endsWith(REPLY_TOOL_SUFFIX)) await runReplyCall(tc);
+      }
+    } catch { /* forced call failed (e.g. pre-0.30 Ollama) — honest reason below */ }
+  }
+
+  return {
+    delivered,
+    usedReplyTool,
+    forced,
+    reason: delivered ? (forced ? 'delivered-forced' : 'delivered') : (usedReplyTool ? 'reply-not-delivered' : 'no-reply'),
+  };
 }
 
 async function connectMcp(cfg) {
@@ -89,11 +124,13 @@ export function createOllamaRuntime(cfg) {
   const base = (cfg.ollamaUrl || 'http://127.0.0.1:11434').replace(/\/+$/, '');
   const fetchImpl = cfg.fetch || globalThis.fetch;
 
-  async function ollamaChat({ messages, tools }) {
+  async function ollamaChat({ messages, tools, tool_choice }) {
+    const body = { model, messages, tools, stream: false };
+    if (tool_choice) body.tool_choice = tool_choice; // forced reply (Ollama ≥0.30)
     const res = await fetchImpl(`${base}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, tools, stream: false }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(cfg.ollamaTimeoutMs || 120_000),
     });
     if (!res.ok) throw new Error(`ollama /api/chat http ${res.status}`);
