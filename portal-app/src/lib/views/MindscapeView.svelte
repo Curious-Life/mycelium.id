@@ -1,13 +1,14 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { mindscapeState, timelineHealth } from '$lib/stores/mindscape';
 	import MindscapeDetail from '$lib/components/mindscape/MindscapeDetail.svelte';
+	import MindscapeBackground from '$lib/components/mindscape/MindscapeBackground.svelte';
 	import PulsesLens from '$lib/components/mindscape/PulsesLens.svelte';
 	import { api, apiGet } from '$lib/api';
 	import { generate, start as startGen, resume as resumeGen, reset as resetGen, cancel as cancelGen, fmtSeconds } from '$lib/generate';
 	import { get } from 'svelte/store';
-	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
 	import { auth } from '$lib/stores/auth';
 
 	// ── Generation + enrichment state ──
@@ -601,7 +602,9 @@
 	</div>
 {:else}
 <div class="mindscape-layout" class:resizing={isResizing} bind:this={containerRef}>
-	<!-- Navigation + detail panel (always visible) -->
+	<!-- Navigation + detail panel — only once there's a mindscape to navigate.
+	     On an empty vault it would be a blank rail, so we hide it entirely. -->
+	{#if msState.points && msState.points.length > 0}
 	<aside class="nav-panel" style="width: {panelWidth}px;">
 		<MindscapeDetail />
 		<!-- Resize handle -->
@@ -612,6 +615,7 @@
 			onmousedown={startResize}
 		></div>
 	</aside>
+	{/if}
 
 	<!-- Main content area -->
 	<main class="view-panel">
@@ -845,8 +849,8 @@
 			{:else}
 				<!-- Welcome: empty mindscape onboarding -->
 				<div class="welcome">
-					<!-- 3D demo mindscape background -->
-					<canvas class="welcome-canvas" bind:this={demoCanvas}></canvas>
+					<!-- The living 3D mindscape (Goethe model) breathing behind the glass -->
+					<MindscapeBackground />
 
 					<div class="welcome-inner">
 						{#if $generate.phase === 'starting' || $generate.phase === 'running'}
@@ -913,21 +917,31 @@
 								{/if}
 							</h2>
 							<p class="welcome-subtitle">Map your thinking in 3D.</p>
-							<button class="gen-button" onclick={() => startGen()}>Generate Mycelium</button>
+							<button class="gen-button" onclick={() => startGen()}>Generate my map</button>
 						{:else}
-							<!-- Welcome text -->
-							<h2 class="welcome-title">
-								{#if $auth.user?.displayName}
-									Welcome, {$auth.user.displayName}
-								{:else}
-									Welcome to Mycelium
-								{/if}
-							</h2>
-							<p class="welcome-subtitle">Bring your conversations to life as a living 3D map of your thinking.</p>
+							<!-- Empty vault: the invitation. Three quiet ways to begin. -->
+							<p class="invite-eyebrow">
+								{#if $auth.user?.displayName}Welcome, {$auth.user.displayName}{:else}Welcome{/if}
+							</p>
+							<h2 class="welcome-title invite-title">See your mind take shape</h2>
+							<p class="welcome-subtitle">Three steps grow a living map of your thinking.</p>
 
-							<!-- Getting started — the import / connect path -->
-							<div class="welcome-start">
-								<ConnectionsChecklist showTitle={false} compact={true} />
+							<div class="invite-actions">
+								<button class="invite-card" onclick={() => goto('/import')}>
+									<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+									<span class="invite-name">Data</span>
+									<span class="invite-hint">Bring your conversations in</span>
+								</button>
+								<button class="invite-card" onclick={() => goto('/settings')}>
+									<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+									<span class="invite-name">Intelligence</span>
+									<span class="invite-hint">Connect an AI</span>
+								</button>
+								<button class="invite-card" onclick={() => goto('/settings')}>
+									<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v12H5.2L4 17.2z"/></svg>
+									<span class="invite-name">Connect</span>
+									<span class="invite-hint">Link a messenger</span>
+								</button>
 							</div>
 						{/if}
 					</div>
@@ -1088,13 +1102,6 @@
 		overflow-y: auto;
 		padding: 0;
 	}
-	.welcome-canvas {
-		position: absolute;
-		inset: 0;
-		width: 100%;
-		height: 100%;
-		z-index: 0;
-	}
 	.welcome-inner {
 		position: relative;
 		z-index: 1;
@@ -1123,10 +1130,64 @@
 		line-height: 1.65;
 		margin-bottom: 2rem;
 	}
-	.welcome-start {
-		margin-bottom: 2rem;
-		text-align: left;
-	}/* Breadcrumb *//* Realm cards *//* Exploration overview *//* Live exploration log */
+	/* Empty-vault invitation — three ethereal ways to begin, over the 3D map. */
+	.invite-eyebrow {
+		font-family: var(--font-mono, 'JetBrains Mono', monospace);
+		font-size: 0.62rem;
+		letter-spacing: 0.18em;
+		text-transform: uppercase;
+		color: var(--color-accent-aurum, #e5b84c);
+		margin-bottom: 0.7rem;
+	}
+	.invite-title {
+		font-size: 1.55rem;
+		font-weight: 400;
+		letter-spacing: -0.01em;
+	}
+	.invite-actions {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 0.75rem;
+		margin-top: 0.5rem;
+	}
+	.invite-card {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 1.1rem 0.75rem;
+		background: rgba(255, 255, 255, 0.03);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		border-radius: 12px;
+		color: var(--color-text-primary);
+		cursor: pointer;
+		text-align: center;
+		transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+	}
+	.invite-card:hover {
+		transform: translateY(-2px);
+		border-color: rgba(229, 184, 76, 0.4);
+		background: rgba(229, 184, 76, 0.06);
+	}
+	.invite-card svg {
+		width: 22px;
+		height: 22px;
+		color: var(--color-accent-aurum, #e5b84c);
+		opacity: 0.9;
+	}
+	.invite-name {
+		font-size: 0.86rem;
+		font-weight: 500;
+	}
+	.invite-hint {
+		font-size: 0.7rem;
+		color: var(--color-text-secondary);
+		line-height: 1.35;
+	}
+	@media (max-width: 520px) {
+		.invite-actions { grid-template-columns: 1fr; }
+	}
+	/* Breadcrumb *//* Realm cards *//* Exploration overview *//* Live exploration log */
 	.explore-log {
 		display: flex;
 		flex-direction: column;

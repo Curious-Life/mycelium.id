@@ -62,8 +62,10 @@
 	const activeStep = $derived<StepKey>(
 		messageCount === 0 ? 'import' : !hasProvider ? 'connect-ai' : 'generate'
 	);
-	// Show the rail only when there's real work left and the user hasn't opted out.
-	const railVisible = $derived(!loading && !dismissed && welcomeSeen && !generated);
+	// Show the rail only once there's data to act on — the EMPTY vault is owned by
+	// the mindscape invitation (3 ethereal actions), so the rail would just clutter
+	// it. After import it returns to nudge Connect-AI → Generate.
+	const railVisible = $derived(!loading && !dismissed && welcomeSeen && !generated && messageCount > 0);
 
 	async function getJSON(path: string): Promise<any | null> {
 		try {
@@ -128,8 +130,10 @@
 		} catch {
 			/* non-blocking */
 		}
-		// Land them on Import — the upload-first commitment beat.
-		goto('/import');
+		// Land on the mindscape — the empty-state invitation (Data · Intelligence ·
+		// Connect) is the first thing they should see, not an abrupt jump elsewhere.
+		navigationState.setPrimaryView('mindscape');
+		goto('/mindscape');
 	}
 
 	function goImport() {

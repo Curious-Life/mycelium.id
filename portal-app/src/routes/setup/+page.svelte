@@ -15,16 +15,14 @@
 	let copied = $state(false);
 	let downloaded = $state(false);
 	let restoreInput = $state('');
+	// "this Mac" / "this computer" — device-aware reassurance copy.
+	let deviceLabel = $state('this device');
 
 	// Vault backup (download .myvault) + restore-from-backup (upload .myvault).
 	let backingUp = $state(false);
 	let backedUp = $state(false);
 	let backupFile = $state<File | null>(null);
 	let uploadingBackup = $state(false);
-	let onePasswordAvailable = $state(false);
-	let saving = $state<'keychain' | '1password' | null>(null);
-	let savedTo = $state<string | null>(null);
-	let savedDetail = $state<string | null>(null);
 
 	// Reveal sub-step. 'show' = key visible + save options; 'verify' = key HIDDEN,
 	// re-enter it to prove it's really saved. The ONLY ways into the vault: a real
@@ -46,12 +44,12 @@
 	function enterVault() { window.location.assign('/mindscape'); }
 
 	onMount(async () => {
+		try { deviceLabel = /Mac/i.test(navigator.userAgent) ? 'this Mac' : 'this computer'; } catch { /* keep default */ }
 		try {
 			const res = await fetch('/api/v1/account/status', { credentials: 'same-origin' });
 			if (res.ok) {
 				const s = await res.json();
 				keychainAvailable = s.keychainAvailable !== false;
-				onePasswordAvailable = s.onePasswordAvailable === true;
 				if (s.initialized) { enterVault(); return; }
 				if (s.locked) { window.location.assign('/unlock'); return; }
 				// Vault files are present but the Keychain can't open them (a hand-copied
@@ -148,26 +146,6 @@
 		} finally { uploadingBackup = false; }
 	}
 
-	async function saveToManager(target: 'keychain' | '1password') {
-		saving = target; error = null; savedTo = null; savedDetail = null;
-		try {
-			const res = await fetch('/api/v1/account/recovery-key/save', {
-				method: 'POST', credentials: 'same-origin',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ target }),
-			});
-			const data = await res.json().catch(() => ({}));
-			if (!res.ok) throw new Error(data.message || data.error || 'Save failed');
-			savedTo = target === 'keychain' ? 'Keychain' : '1Password';
-			savedDetail = target === 'keychain'
-				? 'Saved as “Mycelium Recovery Key” in your login Keychain (Keychain Access → Passwords). Opening Keychain Access so you can verify it.'
-				: 'Saved as “Mycelium Recovery Key” in 1Password. Opening 1Password so you can verify it.';
-			// savedTo is now set ⇒ a real manager save IS proof enough to enter.
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Save failed';
-		} finally { saving = null; }
-	}
-
 	async function copyKey() {
 		try { await navigator.clipboard.writeText(recoveryKey); copied = true; setTimeout(() => (copied = false), 1800); } catch { /* */ }
 	}
@@ -211,9 +189,7 @@
 					<div class="text-center">
 						<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Create your vault</h2>
 						<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
-							Your data is encrypted on this Mac. Setup generates a single
-							<strong>recovery key</strong> — the only way to restore your vault on
-							another computer. You'll save it in the next step.
+							Your data is encrypted on {deviceLabel} — only you can read it.
 						</p>
 					</div>
 					{#if !keychainAvailable}
@@ -248,45 +224,18 @@
 						<div class="p-4 rounded-lg bg-[var(--color-bg-secondary,#0001)] border border-[var(--color-border)] font-mono text-sm tracking-wide break-all text-center text-[var(--color-text-primary)] select-all">
 							{grouped}
 						</div>
-						<div class="space-y-2">
-							<div class="flex gap-2">
-								<button onclick={() => saveToManager('keychain')} disabled={saving !== null}
-									class="flex-1 btn py-2.5 border border-[var(--color-border)] disabled:opacity-50">
-									{saving === 'keychain' ? 'Saving…' : 'Save to Keychain'}
-								</button>
-								{#if onePasswordAvailable}
-									<button onclick={() => saveToManager('1password')} disabled={saving !== null}
-										class="flex-1 btn py-2.5 border border-[var(--color-border)] disabled:opacity-50">
-										{saving === '1password' ? 'Saving…' : 'Save to 1Password'}
-									</button>
-								{/if}
-							</div>
-							<div class="flex gap-2">
-								<button onclick={copyKey} class="flex-1 btn py-2.5 border border-[var(--color-border)]">{copied ? 'Copied ✓' : 'Copy'}</button>
-								<button onclick={downloadKey} class="flex-1 btn py-2.5 border border-[var(--color-border)]">{downloaded ? 'Downloaded ✓' : 'Download'}</button>
-							</div>
-							{#if savedTo}
-								<div class="p-3 rounded-lg bg-jade/10 border border-jade/30 text-xs text-[var(--color-text-secondary)] leading-relaxed">
-									<span class="text-jade font-medium">Saved to {savedTo} ✓</span>
-									{#if savedDetail}<br />{savedDetail}{/if}
-								</div>
-							{/if}
+						<div class="flex gap-2">
+							<button onclick={copyKey} class="flex-1 btn py-2.5 border border-[var(--color-border)]">{copied ? 'Copied ✓' : 'Copy'}</button>
+							<button onclick={downloadKey} class="flex-1 btn py-2.5 border border-[var(--color-border)]">{downloaded ? 'Downloaded ✓' : 'Download'}</button>
 						</div>
-						{#if savedTo}
-							<!-- A real password-manager save IS proof — on to the backup prompt. -->
-							<button onclick={() => { mode = 'backup-prompt'; }} class="w-full btn btn-primary py-3.5">
-								Continue
-							</button>
-						{:else}
-							<!-- No manager save → must prove they actually kept the key. -->
-							<button onclick={() => { verifyInput = ''; revealStep = 'verify'; }}
-								class="w-full btn btn-primary py-3.5">
-								I've saved it — continue
-							</button>
-							<p class="text-center text-xs text-[var(--color-text-tertiary)]">
-								Next: re-enter the key to confirm you can get back in.
-							</p>
-						{/if}
+						<!-- The one irreversible thing — prove the key was really saved. -->
+						<button onclick={() => { verifyInput = ''; revealStep = 'verify'; }}
+							class="w-full btn btn-primary py-3.5">
+							I've saved it — continue
+						</button>
+						<p class="text-center text-xs text-[var(--color-text-tertiary)]">
+							Next: re-enter the key to confirm you can get back in.
+						</p>
 
 					{:else}
 						<div class="text-center">
