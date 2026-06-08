@@ -5,8 +5,10 @@
 // localhost. As defence in depth (these routes mint/return the master key) we
 // also refuse any non-loopback caller.
 import express from 'express';
+import Busboy from 'busboy';
 import { existsSync } from 'node:fs';
 import { unlock } from '../crypto/keys.js';
+import { buildVaultArchive, restoreVaultArchive, ARCHIVE_EXT, BACKUP_SOFT_LIMIT_BYTES } from './backup.js';
 import {
   generateUserMaster, deriveSystemKey, normalizeKey,
   writeKeychain, readUserMaster, deleteKeychain, keychainAvailable,
@@ -24,8 +26,11 @@ import { isTrustedLoopback } from '../http/loopback.js';
  * @param {(keys:{userHex:string,systemHex:string}) => Promise<void>} deps.completeBoot
  * @param {string} deps.kcvPath  path to the vault's KCV (to verify a restore key)
  * @param {string} [deps.lockFile]  path to the passphrase seal (co-located w/ KCV)
+ * @param {string} [deps.dbPath]  path to mycelium.db (for backup/restore-backup)
+ * @param {string} [deps.uploadsRoot]  uploads dir (for backup/restore-backup)
+ * @param {string} [deps.remoteConfigPath]  remote.json (optional, non-secret, in backup)
  */
-export function accountRouter({ isInitialized, completeBoot, kcvPath, lockFile }) {
+export function accountRouter({ isInitialized, completeBoot, kcvPath, lockFile, dbPath, uploadsRoot, remoteConfigPath }) {
   const router = express.Router();
   router.use(express.json({ limit: '64kb' }));
 
@@ -48,6 +53,11 @@ export function accountRouter({ isInitialized, completeBoot, kcvPath, lockFile }
       initialized: open,            // back-compat alias (the only field pre-Phase-3)
       needsSetup: !vaultExists,     // no vault has ever been created on this machine
       locked: !open && vaultExists && passphraseEnabled,
+      // Vault FILES are present but the Keychain can't open them (a hand-copied
+      // data dir, or the moment right after a restore-from-backup lands the files):
+      // the user must paste their recovery key. The boot path auto-opens when the
+      // Keychain holds matching keys, so open=false + files + no passphrase ⇒ key.
+      needsRecoveryKey: !open && vaultExists && !passphraseEnabled,
       passphraseEnabled,
       keychainAvailable: keychainAvailable(),
       onePasswordAvailable: onePasswordAvailable(),
@@ -64,7 +74,7 @@ export function accountRouter({ isInitialized, completeBoot, kcvPath, lockFile }
       const userHex = generateUserMaster();
       const systemHex = deriveSystemKey(userHex);
       writeKeychain(userHex, systemHex);     // persist BEFORE boot so a restart re-opens it
-      await completeBoot({ userHex, systemHex });
+      await completeBoot({ userHex, systemHex, reason: 'setup' });
       return res.json({ recoveryKey: userHex });
     } catch (err) {
       return res.status(500).json({ error: 'setup_failed', message: String(err?.message || err) });
@@ -75,23 +85,34 @@ export function accountRouter({ isInitialized, completeBoot, kcvPath, lockFile }
   router.post('/restore', async (req, res) => {
     if (isInitialized()) return res.status(409).json({ error: 'already_initialized' });
     if (!keychainAvailable()) return res.status(400).json({ error: 'keychain_unavailable' });
+    // FAIL CLOSED (data-loss guard): the recovery key only DECRYPTS data that is
+    // already on this device — it is not a cloud restore. With no vault file, a
+    // key paste used to silently create a fresh EMPTY vault and report success
+    // (completeBoot → ensureVaultSchema), so device loss = total data loss even
+    // with the key. Require the vault to be present first: restore a .myvault
+    // backup (POST /restore-backup) — or hand-copy the data dir — THEN paste the
+    // key. See docs/VAULT-BACKUP-AND-REMOTE-ACCESS-DESIGN-2026-06-08.md §4.
+    if (!existsSync(kcvPath)) {
+      return res.status(409).json({
+        error: 'no_vault',
+        message: 'There is no vault on this device yet. Restore a backup first, or create a new vault.',
+      });
+    }
     let userHex;
     try { userHex = normalizeKey(req.body?.recoveryKey); }
     catch { return res.status(400).json({ error: 'invalid_key', message: 'Enter your 64-character recovery key.' }); }
     const systemHex = deriveSystemKey(userHex);
-    // If a vault already exists here, verify the key against its KCV BEFORE
-    // writing anything — a wrong key is rejected (unlock throws), never stored.
-    if (existsSync(kcvPath)) {
-      try { await unlock({ userHex, systemHex, kcvPath }); }
-      catch { return res.status(400).json({ error: 'wrong_key', message: 'That key does not match this vault.' }); }
-    }
+    // Verify the key against the existing KCV BEFORE writing anything — a wrong
+    // key is rejected (unlock throws), never stored.
+    try { await unlock({ userHex, systemHex, kcvPath }); }
+    catch { return res.status(400).json({ error: 'wrong_key', message: 'That key does not match this vault.' }); }
     try {
       // force: the user explicitly pasted a recovery key to (re)open THIS vault.
       // When a vault exists it was KCV-verified just above; any prior Keychain
       // value is backed up by kcWrite before being replaced.
       writeKeychain(userHex, systemHex, { force: true });
       removeLock(lockFile); // a recovery-key restore turns OFF any passphrase lock
-      await completeBoot({ userHex, systemHex });
+      await completeBoot({ userHex, systemHex, reason: 'restore' });
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: 'restore_failed', message: String(err?.message || err) });
@@ -126,6 +147,69 @@ export function accountRouter({ isInitialized, completeBoot, kcvPath, lockFile }
     }
   });
 
+  // ── Vault backup / restore-from-backup ──────────────────────────────────────
+  // GET /backup — stream a ZERO-KNOWLEDGE snapshot of the vault (a `.myvault`
+  // zip: ciphertext mycelium.db snapshot + kcv.json verifier + encrypted uploads
+  // + non-secret remote.json; auth.db is excluded). Loopback-only (inherited gate
+  // above). The output is ciphertext — useless without the recovery key — but we
+  // still require the vault to be OPEN so a fresh/locked device can't be drained.
+  router.get('/backup', async (_req, res) => {
+    if (!isInitialized()) return res.status(409).json({ error: 'vault_not_open' });
+    if (!dbPath || !existsSync(kcvPath)) return res.status(400).json({ error: 'no_vault' });
+    try {
+      const { buffer, manifest } = await buildVaultArchive({ dbPath, kcvPath, uploadsRoot, remoteConfigPath });
+      if (buffer.length > BACKUP_SOFT_LIMIT_BYTES) {
+        console.warn(`[backup] large vault snapshot: ${buffer.length} bytes (> soft limit) — buffered in memory`);
+      }
+      const stamp = new Date().toISOString().slice(0, 10);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="mycelium-vault-${stamp}${ARCHIVE_EXT}"`);
+      res.setHeader('Content-Length', buffer.length);
+      res.setHeader('X-Vault-Manifest', JSON.stringify({ v: manifest.v, createdAt: manifest.createdAt, uploadCount: manifest.uploadCount }));
+      return res.end(buffer);
+    } catch (err) {
+      return res.status(500).json({ error: 'backup_failed', message: String(err?.message || err) });
+    }
+  });
+
+  // POST /restore-backup (multipart `file`) — land a `.myvault` archive on disk so
+  // the existing /restore key paste can open the REAL data. Refuses to clobber an
+  // existing vault unless field overwrite=true (then the prior db/kcv/uploads are
+  // moved aside, never destroyed). Does NOT open the vault — that's /restore.
+  router.post('/restore-backup', async (req, res) => {
+    if (isInitialized()) return res.status(409).json({ error: 'already_initialized' });
+    if (!dbPath) return res.status(500).json({ error: 'misconfigured', message: 'backup paths not wired' });
+
+    let bb;
+    try { bb = Busboy({ headers: req.headers, limits: { files: 1, fileSize: 5 * BACKUP_SOFT_LIMIT_BYTES } }); }
+    catch { return res.status(400).json({ error: 'bad_request', message: 'expected a multipart upload.' }); }
+    const fields = {};
+    let buf = null, truncated = false;
+    bb.on('field', (name, val) => { if (typeof val === 'string' && val.length <= 64) fields[name] = val; });
+    bb.on('file', (name, stream) => {
+      if (name !== 'file') { stream.resume(); return; }
+      const chunks = [];
+      stream.on('data', (d) => chunks.push(d));
+      stream.on('limit', () => { truncated = true; });
+      stream.on('end', () => { buf = Buffer.concat(chunks); });
+    });
+    bb.on('error', () => { if (!res.headersSent) res.status(400).json({ error: 'upload_failed' }); });
+    bb.on('close', async () => {
+      if (truncated) return res.status(413).json({ error: 'too_large', message: 'That backup file is too large to upload.' });
+      if (!buf || !buf.length) return res.status(400).json({ error: 'no_file', message: 'Choose a .myvault backup file.' });
+      const overwrite = fields.overwrite === 'true' || fields.overwrite === '1';
+      try {
+        const { manifest, movedAside } = await restoreVaultArchive({ buffer: buf, dbPath, kcvPath, uploadsRoot, overwrite });
+        return res.json({ ok: true, needsKey: true, manifest: { createdAt: manifest.createdAt, uploadCount: manifest.uploadCount }, replaced: movedAside.length > 0 });
+      } catch (err) {
+        if (err?.code === 'vault_exists') return res.status(409).json({ error: 'vault_exists', message: 'A vault already exists on this device. Confirm to replace it.' });
+        if (err?.code === 'invalid_archive') return res.status(400).json({ error: 'invalid_archive', message: String(err.message) });
+        return res.status(500).json({ error: 'restore_backup_failed', message: String(err?.message || err) });
+      }
+    });
+    req.pipe(bb);
+  });
+
   // ── Optional passphrase lock ────────────────────────────────────────────────
   // Per-IP attempt limiter for /unlock. scrypt already costs ~100ms each; this
   // just caps a runaway script. Single-user localhost → an in-memory map is fine.
@@ -153,7 +237,7 @@ export function accountRouter({ isInitialized, completeBoot, kcvPath, lockFile }
     try { keys = await unsealKeys(readLock(lockFile), passphrase); }
     catch { return res.status(400).json({ error: 'wrong_passphrase', message: 'That passphrase is incorrect.' }); }
     try {
-      await completeBoot({ userHex: keys.userHex, systemHex: keys.systemHex });
+      await completeBoot({ userHex: keys.userHex, systemHex: keys.systemHex, reason: 'unlock' });
       return res.json({ ok: true });
     } catch (err) {
       return res.status(500).json({ error: 'unlock_failed', message: String(err?.message || err) });

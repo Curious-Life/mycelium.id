@@ -5,7 +5,7 @@
 	// vault is open). Mirrors the /login screen's visual language.
 	import { onMount } from 'svelte';
 
-	type Mode = 'loading' | 'intro' | 'reveal' | 'restore';
+	type Mode = 'loading' | 'intro' | 'reveal' | 'backup-prompt' | 'restore-backup' | 'restore';
 	let mode = $state<Mode>('loading');
 	let busy = $state(false);
 	let error = $state<string | null>(null);
@@ -15,6 +15,12 @@
 	let copied = $state(false);
 	let downloaded = $state(false);
 	let restoreInput = $state('');
+
+	// Vault backup (download .myvault) + restore-from-backup (upload .myvault).
+	let backingUp = $state(false);
+	let backedUp = $state(false);
+	let backupFile = $state<File | null>(null);
+	let uploadingBackup = $state(false);
 	let onePasswordAvailable = $state(false);
 	let saving = $state<'keychain' | '1password' | null>(null);
 	let savedTo = $state<string | null>(null);
@@ -48,6 +54,10 @@
 				onePasswordAvailable = s.onePasswordAvailable === true;
 				if (s.initialized) { enterVault(); return; }
 				if (s.locked) { window.location.assign('/unlock'); return; }
+				// Vault files are present but the Keychain can't open them (a hand-copied
+				// data dir, or right after a restore-from-backup): go straight to the
+				// recovery-key paste, which now succeeds because kcv.json is on disk.
+				if (s.needsRecoveryKey) { mode = 'restore'; return; }
 			}
 		} catch { /* show intro regardless */ }
 		mode = 'intro';
@@ -87,6 +97,55 @@
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Restore failed';
 		} finally { busy = false; }
+	}
+
+	// Download the encrypted vault snapshot (.myvault) to the user's own storage.
+	// The vault is open at this point (setup just booted it), so /backup streams.
+	async function downloadBackup() {
+		backingUp = true; error = null;
+		try {
+			const res = await fetch('/api/v1/account/backup', { credentials: 'same-origin' });
+			if (!res.ok) {
+				const d = await res.json().catch(() => ({}));
+				throw new Error(d.message || d.error || 'Backup failed');
+			}
+			const blob = await res.blob();
+			const stamp = new Date().toISOString().slice(0, 10);
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url; a.download = `mycelium-vault-${stamp}.myvault`;
+			document.body.appendChild(a); a.click(); a.remove();
+			setTimeout(() => URL.revokeObjectURL(url), 1000);
+			backedUp = true;
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Backup failed';
+		} finally { backingUp = false; }
+	}
+
+	function onPickBackup(e: Event) {
+		const input = e.target as HTMLInputElement;
+		backupFile = input.files && input.files[0] ? input.files[0] : null;
+		error = null;
+	}
+
+	// Upload a .myvault archive → lands db + kcv on disk, then the recovery-key
+	// paste (restore mode) opens the REAL data.
+	async function uploadBackup(overwrite = false) {
+		if (!backupFile) { error = 'Choose a .myvault backup file.'; return; }
+		uploadingBackup = true; error = null;
+		try {
+			const fd = new FormData();
+			fd.append('file', backupFile);
+			if (overwrite) fd.append('overwrite', 'true');
+			const res = await fetch('/api/v1/account/restore-backup', {
+				method: 'POST', credentials: 'same-origin', body: fd,
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.message || data.error || 'Could not read that backup');
+			mode = 'restore'; // files are on disk — now paste the recovery key
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Could not read that backup';
+		} finally { uploadingBackup = false; }
 	}
 
 	async function saveToManager(target: 'keychain' | '1password') {
@@ -166,9 +225,13 @@
 						class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed">
 						{busy ? 'Creating…' : 'Create my vault'}
 					</button>
-					<button onclick={() => { error = null; mode = 'restore'; }}
+					<button onclick={() => { error = null; backupFile = null; mode = 'restore-backup'; }}
 						class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors py-2">
-						I already have a recovery key → Restore
+						Restore from a backup
+					</button>
+					<button onclick={() => { error = null; mode = 'restore'; }}
+						class="w-full text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors">
+						I've already copied my vault files here → enter recovery key
 					</button>
 				</div>
 
@@ -210,9 +273,9 @@
 							{/if}
 						</div>
 						{#if savedTo}
-							<!-- A real password-manager save IS proof — straight in. -->
-							<button onclick={enterVault} class="w-full btn btn-primary py-3.5">
-								Enter my vault
+							<!-- A real password-manager save IS proof — on to the backup prompt. -->
+							<button onclick={() => { mode = 'backup-prompt'; }} class="w-full btn btn-primary py-3.5">
+								Continue
 							</button>
 						{:else}
 							<!-- No manager save → must prove they actually kept the key. -->
@@ -237,7 +300,7 @@
 							bind:value={verifyInput}
 							type="text" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true"
 							placeholder="Paste or type your recovery key"
-							onkeydown={(e) => { if (e.key === 'Enter' && verifyMatches) enterVault(); }}
+							onkeydown={(e) => { if (e.key === 'Enter' && verifyMatches) mode = 'backup-prompt'; }}
 							class="input w-full text-sm font-mono tracking-wide" />
 						<div class="h-4 text-center text-xs">
 							{#if normalizedVerify.length === 0}
@@ -250,15 +313,70 @@
 								<span class="text-[var(--color-text-tertiary)]">{normalizedVerify.length}/64 characters</span>
 							{/if}
 						</div>
-						<button onclick={enterVault} disabled={!verifyMatches}
+						<button onclick={() => { if (verifyMatches) mode = 'backup-prompt'; }} disabled={!verifyMatches}
 							class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed">
-							Enter my vault
+							Continue
 						</button>
 						<button onclick={() => { revealStep = 'show'; }}
 							class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors py-2">
 							← Show my key again
 						</button>
 					{/if}
+				</div>
+
+			{:else if mode === 'backup-prompt'}
+				<div class="card-elevated p-8 space-y-6">
+					<div class="text-center">
+						<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Back up your vault</h2>
+						<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
+							Your recovery key only unlocks data that exists on <strong>this Mac</strong>.
+							If this computer is lost or wiped, your vault is gone — even with the key —
+							unless you also keep a <strong>backup file</strong>. The backup is encrypted;
+							it's useless to anyone without your recovery key.
+						</p>
+					</div>
+					<div class="p-3 rounded-lg bg-azure/10 border border-azure/30 text-xs text-[var(--color-text-secondary)] leading-relaxed">
+						Save the <code>.myvault</code> file somewhere you control — an external drive,
+						or your own cloud storage. To recover later: restore this file, then paste your
+						recovery key.
+					</div>
+					<button onclick={downloadBackup} disabled={backingUp}
+						class="w-full btn btn-primary py-3.5 disabled:opacity-50">
+						{backingUp ? 'Preparing backup…' : backedUp ? 'Download again' : 'Back up my vault'}
+					</button>
+					{#if backedUp}
+						<div class="p-3 rounded-lg bg-jade/10 border border-jade/30 text-xs text-[var(--color-text-secondary)]">
+							<span class="text-jade font-medium">Backup downloaded ✓</span> Keep it somewhere safe.
+							You can make a fresh backup any time from Settings → Security.
+						</div>
+						<button onclick={enterVault} class="w-full btn btn-primary py-3.5">Enter my vault</button>
+					{:else}
+						<button onclick={enterVault}
+							class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors py-2">
+							I'll do this later → Enter my vault
+						</button>
+					{/if}
+				</div>
+
+			{:else if mode === 'restore-backup'}
+				<div class="card-elevated p-8 space-y-6">
+					<div class="text-center">
+						<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Restore from a backup</h2>
+						<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
+							Choose the <code>.myvault</code> backup file you saved. Next you'll paste your
+							recovery key to unlock it.
+						</p>
+					</div>
+					<input type="file" accept=".myvault,application/octet-stream" onchange={onPickBackup}
+						class="block w-full text-sm text-[var(--color-text-secondary)] file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border file:border-[var(--color-border)] file:bg-transparent file:text-[var(--color-text-primary)]" />
+					<button onclick={() => uploadBackup(false)} disabled={uploadingBackup || !backupFile}
+						class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed">
+						{uploadingBackup ? 'Reading backup…' : 'Continue'}
+					</button>
+					<button onclick={() => { error = null; mode = 'intro'; }}
+						class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors py-2">
+						← Back
+					</button>
 				</div>
 
 			{:else if mode === 'restore'}

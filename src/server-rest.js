@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, cpSync, renameSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { boot } from './index.js';
-import { dataDir, dbPath as resolveDbPath, kcvPath as resolveKcvPath } from './paths.js';
+import { dataDir, dbPath as resolveDbPath, kcvPath as resolveKcvPath, uploadsRoot as resolveUploadsRoot, remoteConfigPath as resolveRemoteConfigPath } from './paths.js';
 import { resolveKeys } from './crypto/key-source.js';
 import { applyMigrations } from './db/migrate.js';
 import { apiRouter } from './api.js';
@@ -227,6 +227,11 @@ export async function startRestServer({
   // The optional passphrase seal lives NEXT TO the KCV (same dir) in every mode,
   // so it's isolated in tests and sits durably beside the vault in the packaged app.
   const effectiveLockPath = path.join(path.dirname(effectiveKcvPath), 'vault-lock.json');
+  // Backup/restore sources: co-located with the effective vault when paths are
+  // injected (verify scripts), else env-aware (the real app). uploads/ + remote.json
+  // sit in the data dir alongside mycelium.db/kcv.json (src/paths.js).
+  const effectiveUploadsRoot = dbPath ? path.join(path.dirname(effectiveDbPath), 'uploads') : resolveUploadsRoot();
+  const effectiveRemoteConfigPath = kcvPath ? path.join(path.dirname(effectiveKcvPath), 'remote.json') : resolveRemoteConfigPath();
   bootOpts.kcvPath = effectiveKcvPath;
 
   // ── mutable boot context ──────────────────────────────────────────────────
@@ -379,6 +384,9 @@ export async function startRestServer({
     completeBoot,
     kcvPath: effectiveKcvPath,
     lockFile: effectiveLockPath,
+    dbPath: effectiveDbPath,
+    uploadsRoot: effectiveUploadsRoot,
+    remoteConfigPath: effectiveRemoteConfigPath,
   }));
 
   // Remote-access control surface (loopback-only): set the operator password

@@ -1188,6 +1188,35 @@
 		setTimeout(() => URL.revokeObjectURL(url), 1000);
 	}
 
+	// ── Vault backup (V1): download an encrypted .myvault snapshot to the user's
+	// own storage. The recovery key only decrypts data on THIS device — a backup
+	// file is what makes device loss recoverable. The file is ciphertext; useless
+	// without the recovery key.
+	let vbBusy = $state(false);
+	let vbError = $state<string | null>(null);
+	let vbDone = $state(false);
+
+	async function backupVault() {
+		vbBusy = true; vbError = null; vbDone = false;
+		try {
+			const res = await fetch('/api/v1/account/backup', { credentials: 'same-origin' });
+			if (!res.ok) {
+				const d = await res.json().catch(() => ({}));
+				throw new Error(d.message || d.error || 'Backup failed');
+			}
+			const blob = await res.blob();
+			const stamp = new Date().toISOString().slice(0, 10);
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url; a.download = `mycelium-vault-${stamp}.myvault`;
+			document.body.appendChild(a); a.click(); a.remove();
+			setTimeout(() => URL.revokeObjectURL(url), 1000);
+			vbDone = true;
+		} catch (e) {
+			vbError = e instanceof Error ? e.message : 'Backup failed';
+		} finally { vbBusy = false; }
+	}
+
 	// ── App passphrase lock (V1, optional) — encrypts the master keys at rest so
 	// the vault won't auto-open from the Keychain alone. The recovery key still
 	// works if the passphrase is forgotten (it's a lock, not a second secret).
@@ -1988,6 +2017,33 @@
 						<button onclick={downloadRecoveryKey} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)]">Download</button>
 						<button onclick={() => { rkRevealed = false; rkValue = ''; }} class="px-3 py-2 rounded-lg text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">Hide</button>
 					</div>
+				{/if}
+			</section>
+
+			<!-- Vault Backup (V1) — encrypted .myvault snapshot to user-controlled storage -->
+			<section class="card p-5">
+				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Vault Backup</h2>
+				<div class="flex items-center justify-between gap-4">
+					<div>
+						<p class="text-sm text-[var(--color-text-primary)]">Back up your vault</p>
+						<p class="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+							Your recovery key only unlocks data on <strong>this Mac</strong>. Download an
+							encrypted backup file and keep it somewhere you control — it's the only way
+							to recover your vault if this computer is lost. To restore: on a new device,
+							choose “Restore from a backup”, then paste your recovery key.
+						</p>
+					</div>
+					<button
+						onclick={backupVault}
+						disabled={vbBusy}
+						class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)] whitespace-nowrap disabled:opacity-50"
+					>{vbBusy ? 'Preparing…' : 'Back up now'}</button>
+				</div>
+				{#if vbError}
+					<p class="text-xs text-coral mt-2">{vbError}</p>
+				{/if}
+				{#if vbDone}
+					<p class="text-xs text-jade mt-2">Backup downloaded ✓ — store the .myvault file safely.</p>
 				{/if}
 			</section>
 
