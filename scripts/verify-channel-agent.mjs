@@ -132,11 +132,42 @@ const msg = (t) => ({ content: t });
   const r = await runOllamaTurn({ ollamaChat: async () => script[n++], mcpClient, systemPrompt: 's', userMessage: 'hi' });
   rec('OL4. reply used but not delivered', r.usedReplyTool === true && r.delivered === false);
 }
+{
+  // GUARANTEED DELIVERY: a wandering local model calls a read tool then ends with
+  // FREE-FORM TEXT (no reply) → the forced-reply safety net fires and delivers.
+  const calls = [];
+  const mcpClient = {
+    listTools: async () => ({ tools: [{ name: 'search', inputSchema: {} }, { name: 'reply', inputSchema: {} }] }),
+    callTool: async ({ name }) => { calls.push(name); return { content: [{ type: 'text', text: name === 'reply' ? '{"delivered":true}' : 'results' }] }; },
+  };
+  let sawForcedToolChoice = false; let forcedTools = null;
+  const script = [
+    { message: { tool_calls: [{ function: { name: 'search', arguments: { q: 'x' } } }] } }, // turn 1: read tool
+    { message: { content: 'here is my answer as free text' } },                              // turn 2: free text, NO reply → loop ends undelivered
+    { message: { tool_calls: [{ function: { name: 'reply', arguments: { text: 'forced answer' } } }] } }, // forced call result
+  ];
+  let n = 0;
+  const ollamaChat = async (req) => { if (req.tool_choice) { sawForcedToolChoice = true; forcedTools = req.tools; } return script[n++]; };
+  const r = await runOllamaTurn({ ollamaChat, mcpClient, systemPrompt: 's', userMessage: 'hi' });
+  rec('OL5. wandering model → forced reply call made WITH tool_choice', sawForcedToolChoice === true && r.forced === true);
+  rec('OL6. forced reply delivers; reason=delivered-forced', r.delivered === true && r.reason === 'delivered-forced' && calls.includes('reply'));
+  rec('OL7. forced call constrains tools to the reply tool only', Array.isArray(forcedTools) && forcedTools.length === 1 && forcedTools[0].function.name === 'reply');
+}
+{
+  // Model delivers naturally on the first pass → the forced net does NOT fire.
+  const mcpClient = { listTools: async () => ({ tools: [{ name: 'reply', inputSchema: {} }] }), callTool: async () => ({ content: [{ type: 'text', text: '{"delivered":true}' }] }) };
+  let forcedFired = false;
+  const script = [{ message: { tool_calls: [{ function: { name: 'reply', arguments: { text: 'hi' } } }] } }];
+  let n = 0;
+  const ollamaChat = async (req) => { if (req.tool_choice) forcedFired = true; return script[n++] || { message: { content: '' } }; };
+  const r = await runOllamaTurn({ ollamaChat, mcpClient, systemPrompt: 's', userMessage: 'hi' });
+  rec('OL8. natural reply → forced net NOT used (forced=false, reason=delivered)', r.delivered === true && r.forced === false && r.reason === 'delivered' && forcedFired === false);
+}
 
 // ── reply prompt: the delivery contract is present ───────────────────────────
 {
   const dm = buildReplySystemPrompt({ turnCtx: turn('1') });
-  rec('P1. prompt names the reply tool as the only delivery path', /`reply` tool/.test(dm) && /NOT delivered/.test(dm));
+  rec('P1. prompt names the reply tool as the only delivery path', /`reply` tool/.test(dm) && /(NOT|NEVER) delivered/.test(dm));
   const grp = buildReplySystemPrompt({ turnCtx: { channelKind: 'telegram-group', channelId: '-1' } });
   rec('P2. surface wording differs DM vs group', /direct message/.test(dm) && /Telegram group/.test(grp));
 }
