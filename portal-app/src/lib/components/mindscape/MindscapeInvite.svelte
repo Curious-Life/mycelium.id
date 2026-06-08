@@ -107,8 +107,8 @@
 
 {#if step === 'home'}
 	<p class="invite-eyebrow">{#if displayName}Welcome, {displayName}{:else}Welcome{/if}</p>
-	<h2 class="welcome-title invite-title">See your mind take shape</h2>
-	<p class="welcome-subtitle">Three steps grow your living map.</p>
+	<h2 class="welcome-title invite-title">Grow your mycelium</h2>
+	<p class="welcome-subtitle">Three small steps to begin.</p>
 	<div class="invite-actions">
 		<button class="invite-card" class:done={dataDone} onclick={() => (step = 'data')}>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>

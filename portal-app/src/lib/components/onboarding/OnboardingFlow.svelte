@@ -56,7 +56,18 @@
 	let justGenerated = $state(false);
 	let probedOllama = $state(false);
 
-	let welcomeOpen = $state(false);
+	// Decide synchronously from a localStorage hint so the opaque Welcome backdrop
+	// is painted on the FIRST frame (no flash of the app behind it). The async
+	// /status check below corrects this for the rare edge cases. Returning users
+	// (hint set) never see a flicker.
+	const WELCOME_SEEN_KEY = 'myc-welcome-seen';
+	let welcomeOpen = $state(browser ? !localStorage.getItem(WELCOME_SEEN_KEY) : false);
+	function markWelcomeSeen() {
+		welcomeSeen = true;
+		welcomeOpen = false;
+		try { localStorage.setItem(WELCOME_SEEN_KEY, '1'); } catch { /* private mode */ }
+		api('/portal/onboarding/welcome-seen', { method: 'POST' }).catch(() => {});
+	}
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 	// The first incomplete step drives the rail's emphasis + auto-advance.
@@ -123,14 +134,8 @@
 	}
 
 	// ── Welcome (Step 2): one breath, then into the flow ───────────────────────
-	async function beginFlow() {
-		welcomeOpen = false;
-		welcomeSeen = true;
-		try {
-			await api('/portal/onboarding/welcome-seen', { method: 'POST' });
-		} catch {
-			/* non-blocking */
-		}
+	function beginFlow() {
+		markWelcomeSeen();
 		// Land on the mindscape — the empty-state invitation (Data · Intelligence ·
 		// Connect) is the first thing they should see, not an abrupt jump elsewhere.
 		navigationState.setPrimaryView('mindscape');
@@ -232,8 +237,10 @@
 	onMount(async () => {
 		if (!browser) return;
 		await refresh();
-		// Open the welcome only for a genuinely fresh, unseen, undismissed vault.
-		if (!welcomeSeen && !dismissed) welcomeOpen = true;
+		// Reconcile the optimistic (localStorage) decision with the server truth:
+		// open only for a genuinely fresh, unseen, undismissed vault; otherwise close.
+		welcomeOpen = !welcomeSeen && !dismissed;
+		if (welcomeSeen) { try { localStorage.setItem(WELCOME_SEEN_KEY, '1'); } catch { /* */ } }
 		// Light polling keeps the rail honest as embedding/generation progress.
 		pollTimer = setInterval(() => {
 			if (generating) pollGenerate();
@@ -264,7 +271,7 @@
 					<li><span class="n">3</span> Watch your mind take shape</li>
 				</ol>
 				<div class="welcome-actions">
-					<button class="btn-skip" onclick={() => { welcomeOpen = false; welcomeSeen = true; api('/portal/onboarding/welcome-seen', { method: 'POST' }).catch(() => {}); }}>
+					<button class="btn-skip" onclick={markWelcomeSeen}>
 						Later
 					</button>
 					<button class="btn-primary" onclick={beginFlow}>
