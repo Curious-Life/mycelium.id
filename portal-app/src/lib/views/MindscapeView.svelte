@@ -3,11 +3,12 @@
 	import { onMount } from 'svelte';
 	import { mindscapeState, timelineHealth } from '$lib/stores/mindscape';
 	import MindscapeDetail from '$lib/components/mindscape/MindscapeDetail.svelte';
+	import MindscapeBackground from '$lib/components/mindscape/MindscapeBackground.svelte';
+	import MindscapeInvite from '$lib/components/mindscape/MindscapeInvite.svelte';
 	import PulsesLens from '$lib/components/mindscape/PulsesLens.svelte';
 	import { api, apiGet } from '$lib/api';
 	import { generate, start as startGen, resume as resumeGen, reset as resetGen, cancel as cancelGen, fmtSeconds } from '$lib/generate';
 	import { get } from 'svelte/store';
-	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
 	import { auth } from '$lib/stores/auth';
 
 	// ── Generation + enrichment state ──
@@ -601,7 +602,9 @@
 	</div>
 {:else}
 <div class="mindscape-layout" class:resizing={isResizing} bind:this={containerRef}>
-	<!-- Navigation + detail panel (always visible) -->
+	<!-- Navigation + detail panel — only once there's a mindscape to navigate.
+	     On an empty vault it would be a blank rail, so we hide it entirely. -->
+	{#if msState.points && msState.points.length > 0}
 	<aside class="nav-panel" style="width: {panelWidth}px;">
 		<MindscapeDetail />
 		<!-- Resize handle -->
@@ -612,6 +615,7 @@
 			onmousedown={startResize}
 		></div>
 	</aside>
+	{/if}
 
 	<!-- Main content area -->
 	<main class="view-panel">
@@ -845,8 +849,8 @@
 			{:else}
 				<!-- Welcome: empty mindscape onboarding -->
 				<div class="welcome">
-					<!-- 3D demo mindscape background -->
-					<canvas class="welcome-canvas" bind:this={demoCanvas}></canvas>
+					<!-- The living 3D mindscape (Goethe model) breathing behind the glass -->
+					<MindscapeBackground />
 
 					<div class="welcome-inner">
 						{#if $generate.phase === 'starting' || $generate.phase === 'running'}
@@ -913,22 +917,10 @@
 								{/if}
 							</h2>
 							<p class="welcome-subtitle">Map your thinking in 3D.</p>
-							<button class="gen-button" onclick={() => startGen()}>Generate Mycelium</button>
+							<button class="gen-button" onclick={() => startGen()}>Generate my map</button>
 						{:else}
-							<!-- Welcome text -->
-							<h2 class="welcome-title">
-								{#if $auth.user?.displayName}
-									Welcome, {$auth.user.displayName}
-								{:else}
-									Welcome to Mycelium
-								{/if}
-							</h2>
-							<p class="welcome-subtitle">Bring your conversations to life as a living 3D map of your thinking.</p>
-
-							<!-- Getting started — the import / connect path -->
-							<div class="welcome-start">
-								<ConnectionsChecklist showTitle={false} compact={true} />
-							</div>
+							<!-- Empty vault: the in-window invitation + onboarding wizard. -->
+							<MindscapeInvite displayName={$auth.user?.displayName ?? null} onImported={checkGenerationState} />
 						{/if}
 					</div>
 				</div>
@@ -1088,13 +1080,6 @@
 		overflow-y: auto;
 		padding: 0;
 	}
-	.welcome-canvas {
-		position: absolute;
-		inset: 0;
-		width: 100%;
-		height: 100%;
-		z-index: 0;
-	}
 	.welcome-inner {
 		position: relative;
 		z-index: 1;
@@ -1123,10 +1108,7 @@
 		line-height: 1.65;
 		margin-bottom: 2rem;
 	}
-	.welcome-start {
-		margin-bottom: 2rem;
-		text-align: left;
-	}/* Breadcrumb *//* Realm cards *//* Exploration overview *//* Live exploration log */
+	/* Breadcrumb *//* Realm cards *//* Exploration overview *//* Live exploration log */
 	.explore-log {
 		display: flex;
 		flex-direction: column;
