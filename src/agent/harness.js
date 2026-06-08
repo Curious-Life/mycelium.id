@@ -34,6 +34,33 @@ export const DEFAULT_ANTHROPIC_CHAT_MODEL = 'claude-opus-4-8';
 export const DEFAULT_OPENAI_CHAT_MODEL = 'gpt-4o';
 
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Retry the connection on TRANSIENT pre-token failures (network blip, provider
+// 5xx). A 4xx (bad request / tools unsupported) won't change on retry, and a
+// TTFB timeout would just time out again — neither is retried. Retries happen
+// BEFORE any token streams, so there's nothing to un-stream. Aborts immediately
+// if the turn's signal fires.
+function isRetryable(err) {
+  const st = err?.status;
+  if (st) return st >= 500;
+  if (err?.cause?.name === 'AbortError') return false; // timeout
+  return true; // network-level error
+}
+async function openStreamRetry(args, { retries = 2, signal, logger } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (signal?.aborted) throw new InferenceError('harness: aborted', { backend: 'cloud' });
+    try { return await openStream(...args, signal); }
+    catch (err) {
+      lastErr = err;
+      if (!isRetryable(err) || attempt === retries) throw err;
+      logger?.(`stream connect attempt ${attempt + 1} failed (${err?.status || err?.message || 'error'}); retrying`);
+      await delay(800 * (attempt + 1));
+    }
+  }
+  throw lastErr;
+}
 
 // ── Adapters ─────────────────────────────────────────────────────────────────
 // Each adapter owns: its provider tool format, its native message shape, and
@@ -55,33 +82,37 @@ const anthropicAdapter = {
   toolResult: (tc, out, isError) => ({ type: 'tool_result', tool_use_id: tc.id, content: String(out), ...(isError ? { is_error: true } : {}) }),
   pushToolResults(messages, results) { messages.push({ role: 'user', content: results }); },
 
-  async streamOnce({ cfg, system, messages, toolDefs, model, maxTokens, send, signal, fetch, timeoutMs }) {
+  async streamOnce({ cfg, system, messages, toolDefs, model, maxTokens, send, signal, fetch, timeoutMs, logger }) {
     const body = { model, max_tokens: maxTokens, system, messages, stream: true };
     if (toolDefs && toolDefs.length) { body.tools = toolDefs; body.tool_choice = { type: 'auto' }; }
-    const res = await openStream(ANTHROPIC_URL, { 'x-api-key': cfg.anthropicApiKey, 'anthropic-version': ANTHROPIC_VERSION }, body, fetch, timeoutMs);
+    const res = await openStreamRetry([ANTHROPIC_URL, { 'x-api-key': cfg.anthropicApiKey, 'anthropic-version': ANTHROPIC_VERSION }, body, fetch, timeoutMs], { retries: 2, signal, logger });
     let text = '';
     const blocks = new Map();        // index → { type, id, name, json }
     let stopReason = null;
     const usage = { inputTokens: 0, outputTokens: 0 };
-    for await (const payload of ssePayloads(res)) {
-      if (signal?.aborted) throw new InferenceError('harness: aborted', { backend: 'cloud' });
-      let ev; try { ev = JSON.parse(payload); } catch { continue; }
-      switch (ev.type) {
-        case 'message_start': usage.inputTokens = ev.message?.usage?.input_tokens || 0; break;
-        case 'content_block_start': {
-          const cb = ev.content_block || {};
-          blocks.set(ev.index, { type: cb.type, id: cb.id, name: cb.name, json: '' });
-          break;
+    try {
+      for await (const payload of ssePayloads(res)) {
+        if (signal?.aborted) break;
+        let ev; try { ev = JSON.parse(payload); } catch { continue; }
+        switch (ev.type) {
+          case 'message_start': usage.inputTokens = ev.message?.usage?.input_tokens || 0; break;
+          case 'content_block_start': {
+            const cb = ev.content_block || {};
+            blocks.set(ev.index, { type: cb.type, id: cb.id, name: cb.name, json: '' });
+            break;
+          }
+          case 'content_block_delta': {
+            const d = ev.delta || {};
+            if (d.type === 'text_delta' && d.text) { text += d.text; send({ type: 'text_delta', content: d.text }); }
+            else if (d.type === 'input_json_delta') { const b = blocks.get(ev.index); if (b) b.json += d.partial_json || ''; }
+            break;
+          }
+          case 'message_delta': if (ev.delta?.stop_reason) stopReason = ev.delta.stop_reason; if (ev.usage?.output_tokens) usage.outputTokens = ev.usage.output_tokens; break;
+          default: break;
         }
-        case 'content_block_delta': {
-          const d = ev.delta || {};
-          if (d.type === 'text_delta' && d.text) { text += d.text; send({ type: 'text_delta', content: d.text }); }
-          else if (d.type === 'input_json_delta') { const b = blocks.get(ev.index); if (b) b.json += d.partial_json || ''; }
-          break;
-        }
-        case 'message_delta': if (ev.delta?.stop_reason) stopReason = ev.delta.stop_reason; if (ev.usage?.output_tokens) usage.outputTokens = ev.usage.output_tokens; break;
-        default: break;
       }
+    } catch (err) {
+      if (!signal?.aborted) throw err;   // genuine stream error → propagate; abort (stall/disconnect) → keep partial
     }
     const toolCalls = [];
     for (const b of blocks.values()) {
@@ -89,7 +120,7 @@ const anthropicAdapter = {
       let args = {}; try { args = b.json ? JSON.parse(b.json) : {}; } catch { args = {}; }
       toolCalls.push({ id: b.id, name: b.name, args });
     }
-    return { text, toolCalls, stopReason, usage, isTool: stopReason === 'tool_use' };
+    return { text, toolCalls, stopReason, usage, isTool: stopReason === 'tool_use', aborted: !!signal?.aborted };
   },
 };
 
@@ -108,38 +139,42 @@ const openaiAdapter = {
   toolResult: (tc, out) => ({ role: 'tool', tool_call_id: tc.id, content: String(out) }),
   pushToolResults(messages, results) { for (const r of results) messages.push(r); },
 
-  async streamOnce({ cfg, system, messages, toolDefs, model, maxTokens, send, signal, fetch, timeoutMs }) {
+  async streamOnce({ cfg, system, messages, toolDefs, model, maxTokens, send, signal, fetch, timeoutMs, logger }) {
     const body = { model, max_tokens: maxTokens, stream: true, stream_options: { include_usage: true }, messages: [{ role: 'system', content: system }, ...messages] };
     if (toolDefs && toolDefs.length) { body.tools = toolDefs; body.tool_choice = 'auto'; }
     const headers = cfg.openaiApiKey ? { Authorization: `Bearer ${cfg.openaiApiKey}` } : {};
-    const res = await openStream(resolveChatUrl(cfg.baseUrl), headers, body, fetch, timeoutMs);
+    const res = await openStreamRetry([resolveChatUrl(cfg.baseUrl), headers, body, fetch, timeoutMs], { retries: 2, signal, logger });
     let text = '';
     let stopReason = null;
     const usage = { inputTokens: 0, outputTokens: 0 };
     const partial = new Map();       // index → { id, name, args }
-    for await (const payload of ssePayloads(res)) {
-      if (signal?.aborted) throw new InferenceError('harness: aborted', { backend: 'cloud' });
-      let ev; try { ev = JSON.parse(payload); } catch { continue; }
-      if (ev.usage) { usage.inputTokens = ev.usage.prompt_tokens || usage.inputTokens; usage.outputTokens = ev.usage.completion_tokens || usage.outputTokens; }
-      const choice = ev.choices?.[0];
-      if (!choice) continue;
-      if (choice.finish_reason) stopReason = choice.finish_reason;
-      const d = choice.delta || {};
-      if (typeof d.content === 'string' && d.content) { text += d.content; send({ type: 'text_delta', content: d.content }); }
-      for (const tc of d.tool_calls || []) {
-        const slot = partial.get(tc.index) || { id: '', name: '', args: '' };
-        if (tc.id) slot.id = tc.id;
-        if (tc.function?.name) slot.name = tc.function.name;
-        if (tc.function?.arguments) slot.args += tc.function.arguments;
-        partial.set(tc.index, slot);
+    try {
+      for await (const payload of ssePayloads(res)) {
+        if (signal?.aborted) break;
+        let ev; try { ev = JSON.parse(payload); } catch { continue; }
+        if (ev.usage) { usage.inputTokens = ev.usage.prompt_tokens || usage.inputTokens; usage.outputTokens = ev.usage.completion_tokens || usage.outputTokens; }
+        const choice = ev.choices?.[0];
+        if (!choice) continue;
+        if (choice.finish_reason) stopReason = choice.finish_reason;
+        const d = choice.delta || {};
+        if (typeof d.content === 'string' && d.content) { text += d.content; send({ type: 'text_delta', content: d.content }); }
+        for (const tc of d.tool_calls || []) {
+          const slot = partial.get(tc.index) || { id: '', name: '', args: '' };
+          if (tc.id) slot.id = tc.id;
+          if (tc.function?.name) slot.name = tc.function.name;
+          if (tc.function?.arguments) slot.args += tc.function.arguments;
+          partial.set(tc.index, slot);
+        }
       }
+    } catch (err) {
+      if (!signal?.aborted) throw err;   // genuine stream error → propagate; abort → keep partial
     }
     const toolCalls = [];
     for (const slot of partial.values()) {
       let args = {}; try { args = slot.args ? JSON.parse(slot.args) : {}; } catch { args = {}; }
       toolCalls.push({ id: slot.id, name: slot.name, args });
     }
-    return { text, toolCalls, stopReason, usage, isTool: stopReason === 'tool_calls' };
+    return { text, toolCalls, stopReason, usage, isTool: stopReason === 'tool_calls', aborted: !!signal?.aborted };
   },
 };
 
@@ -195,7 +230,7 @@ export function createAgentHarness({ onEgress, fetch = globalThis.fetch, timeout
       } catch { /* audit must never break the turn */ }
     };
 
-    const once = (defs, first) => adapter.streamOnce({ cfg, system, messages, toolDefs: defs, model, maxTokens, send, signal, fetch, timeoutMs }).catch((err) => {
+    const once = (defs, first) => adapter.streamOnce({ cfg, system, messages, toolDefs: defs, model, maxTokens, send, signal, fetch, timeoutMs, logger }).catch((err) => {
       // No-tool model (common with small local models): retry the very first call
       // without tools → degrade to a plain context-grounded answer (the relay floor).
       if (first && defs && defs.length) { logger(`harness: provider rejected tools (${err?.status || '?'}); falling back to text-only`); toolDefs = []; return null; }
@@ -207,6 +242,7 @@ export function createAgentHarness({ onEgress, fetch = globalThis.fetch, timeout
       audit();
       let r = await once(toolDefs, i === 0);
       if (r === null) r = await once([], false);   // tool-fallback retry, no tools
+      if (r.aborted) return { toolsUsed, aborted: true };   // stall/disconnect — partial text already streamed
       adapter.pushAssistant(messages, r.text, r.toolCalls);
       if (!r.isTool || !r.toolCalls.length) { if (r.usage) send({ type: 'usage', inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens }); return { toolsUsed, local: !!local }; }
 
@@ -227,7 +263,7 @@ export function createAgentHarness({ onEgress, fetch = globalThis.fetch, timeout
     // not a silent stop. Logged (no silent caps).
     logger(`harness: hit maxIterations=${maxIterations}; final answer pass without tools`);
     audit();
-    const fin = await adapter.streamOnce({ cfg, system, messages, toolDefs: null, model, maxTokens, send, signal, fetch, timeoutMs });
+    const fin = await adapter.streamOnce({ cfg, system, messages, toolDefs: null, model, maxTokens, send, signal, fetch, timeoutMs, logger });
     if (fin.usage) send({ type: 'usage', inputTokens: fin.usage.inputTokens, outputTokens: fin.usage.outputTokens });
     return { toolsUsed, capped: true };
   }

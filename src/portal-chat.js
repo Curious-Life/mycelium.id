@@ -106,26 +106,49 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     res.set('Cache-Control', 'no-store');
     res.set('Connection', 'keep-alive');
     const send = (ev) => { try { res.write(`data: ${JSON.stringify(ev)}\n\n`); } catch { /* client gone */ } };
-    const ctrl = new AbortController();
-    req.on('close', () => ctrl.abort());
     const keepalive = setInterval(() => send({ type: 'keepalive' }), 15000);
 
+    // Reliability model: NO hard overall cap (a productive long turn must not be
+    // cut off). Instead an INACTIVITY watchdog — if the model emits no token for
+    // IDLE_MS, the stream is considered stalled and force-aborted. A stall that
+    // already produced text finalizes gracefully (keep the partial answer); a
+    // stall/error that produced NOTHING auto-retries the whole turn.
+    const IDLE_MS = Number(process.env.MYCELIUM_CHAT_IDLE_MS) || 90000;
+    const MAX_RETRIES = 2;
     let assistantText = '';
-    const captureText = (ev) => { if (ev.type === 'text_delta' && ev.content) assistantText += ev.content; send(ev); };
+    let lastActivity = Date.now();
+    let clientGone = false;
+    let ctrl = new AbortController();                 // re-created per attempt
+    req.on('close', () => { clientGone = true; ctrl.abort(); });
+    const captureText = (ev) => {
+      if (ev.type === 'text_delta' || ev.type === 'tool_start' || ev.type === 'tool_complete' || ev.type === 'thinking_delta') lastActivity = Date.now();
+      if (ev.type === 'text_delta' && ev.content) assistantText += ev.content;
+      send(ev);
+    };
+    const watchTick = Math.max(500, Math.min(5000, Math.floor(IDLE_MS / 3)));
+    const watchdog = setInterval(() => { if (Date.now() - lastActivity > IDLE_MS) ctrl.abort(); }, watchTick);
 
     try {
       send({ type: 'stream_start', streamIndex: 0 });
 
-      // System = orientation + getContext briefing + (best-effort) memory retrieval.
+      const provider = await resolveInferenceConfig(db, userId);
+      // Size the preamble to the model: a small/local model (8B Ollama) chokes on
+      // a full-vault briefing — it gets slow or silently truncates. A capable
+      // cloud model takes the full context. (jurisdiction:'local' = on-box.)
+      const isLocal = (provider.jurisdiction || '') === 'local' || (!provider.anthropicApiKey && !provider.openaiApiKey && !provider.baseUrl);
+      const recentN = isLocal ? 5 : 12;
+      const sysCap = isLocal ? 5000 : 28000;
+
+      // System = orientation + getContext briefing + (cloud only) memory retrieval.
       let system = CHAT_SYSTEM;
-      try { const ctx = await handlers.getContext?.({ recentMessages: 10 }); if (typeof ctx === 'string' && ctx) system += `\n\n${ctx}`; } catch { /* honest-empty */ }
-      if (policy.domains.includes('search') && typeof handlers.searchMindscape === 'function') {
-        send({ type: 'tool_start', name: 'searchMemory' });
+      try { const ctx = await handlers.getContext?.({ recentMessages: recentN }); if (typeof ctx === 'string' && ctx) system += `\n\n${ctx}`; } catch { /* honest-empty */ }
+      if (!isLocal && policy.domains.includes('search') && typeof handlers.searchMindscape === 'function') {
+        send({ type: 'tool_start', name: 'searchMemory' }); lastActivity = Date.now();
         try { const hits = await handlers.searchMindscape({ query: message, limit: 5 }); if (typeof hits === 'string' && hits) system += `\n\n## Possibly relevant to this question\n${hits}`; } catch { /* skip */ }
         send({ type: 'tool_complete', name: 'searchMemory' });
       }
+      if (system.length > sysCap) system = system.slice(0, sysCap) + '\n\n[context truncated for this model]';
 
-      const provider = await resolveInferenceConfig(db, userId);
       const grantedNames = new Set(grantedTools.map((t) => t.name));
       const call = async (name, args) => {
         if (!grantedNames.has(name)) return `Tool '${name}' is not enabled for this conversation.`;
@@ -135,18 +158,29 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
         return typeof out === 'string' ? out : JSON.stringify(out);
       };
 
-      const result = await harness.streamTurn({ provider, system, userMessage: message, tools: grantedTools, call, send: captureText, signal: ctrl.signal });
+      // Attempt loop: retry the whole turn while it produced NOTHING (stalled or
+      // errored before any token). Once any text streams, we keep it — no retry
+      // (re-streaming would duplicate into the same bubble).
+      let result = null;
+      for (let attempt = 0; ; attempt++) {
+        if (clientGone) break;
+        if (attempt > 0) { ctrl = new AbortController(); lastActivity = Date.now(); console.error(`[chat] empty/stalled — retrying turn (${attempt}/${MAX_RETRIES})`); }
+        try { result = await harness.streamTurn({ provider, system, userMessage: message, tools: grantedTools, call, send: captureText, signal: ctrl.signal }); }
+        catch (e) { console.error('[chat] attempt failed:', e?.message); }
+        if (clientGone || assistantText.trim() || attempt >= MAX_RETRIES) break;
+      }
 
-      send({ type: 'done', toolsUsed: result.toolsUsed || [] });
-      res.write('data: [DONE]\n\n');
-
-      // Persist both turns (success only, non-empty) — encrypted + enriched like
-      // any other message. Fire-and-forget; never blocks the response.
-      if (!result.aborted && assistantText.trim()) {
-        const cap = (role, content) => captureMessage(db, { userId, role, content, source: CHAT_SOURCE, messageType: 'chat' }, enqueueEnrichment);
-        // Sequential (user → assistant) so created_at orders the turn deterministically;
-        // still off the response path (fire-and-forget chain).
-        cap('user', message).then(() => cap('assistant', assistantText.trim())).catch((e) => console.error('[chat] persist failed:', e?.message));
+      if (!clientGone) {
+        if (assistantText.trim()) {
+          // Completed OR gracefully cut off mid-stream — keep the (possibly partial) answer.
+          send({ type: 'done', toolsUsed: result?.toolsUsed || [] });
+          res.write('data: [DONE]\n\n');
+          const cap = (role, content) => captureMessage(db, { userId, role, content, source: CHAT_SOURCE, messageType: 'chat' }, enqueueEnrichment);
+          cap('user', message).then(() => cap('assistant', assistantText.trim())).catch((e) => console.error('[chat] persist failed:', e?.message));
+        } else {
+          send({ type: 'error', message: 'The model didn’t respond after several tries. Try another model in Settings → Intelligence.' });
+          send({ type: 'done', toolsUsed: [] });
+        }
       }
     } catch (err) {
       console.error('[chat] turn failed:', err?.message);
@@ -155,6 +189,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       send({ type: 'done', toolsUsed: [] });
     } finally {
       clearInterval(keepalive);
+      clearInterval(watchdog);
       try { res.end(); } catch { /* already closed */ }
     }
   });

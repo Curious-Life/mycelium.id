@@ -40,17 +40,37 @@ const okStream = streamRes(sse([
   '[DONE]',
 ]));
 
+// A stream that emits `chunks` then STALLS (never closes); honoring the abort
+// signal the way real fetch does (the body reader rejects when aborted).
+const stallRes = (chunks, signal) => ({ ok: true, status: 200, body: new ReadableStream({
+  start(c) {
+    for (const x of chunks) c.enqueue(enc.encode(x));
+    if (signal) signal.addEventListener('abort', () => { try { c.error(new DOMException('aborted', 'AbortError')); } catch {} }, { once: true });
+  },
+}) });
+
 let mode = 'ok';
-const mockFetch = async (url) => {
+let fetchCount = 0;
+const mockFetch = async (url, opts) => {
   const u = String(url);
-  if (u.includes('api.anthropic.com')) return mode === 'err' ? errRes(400) : streamRes(sse([
-    { type: 'message_start', message: { usage: { input_tokens: 9 } } },
-    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
-    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ANSWER } },
-    { type: 'content_block_stop', index: 0 },
-    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 7 } },
-    '[DONE]',
-  ]));
+  fetchCount++;
+  if (u.includes('api.anthropic.com')) {
+    if (mode === 'err') return errRes(400);
+    if (mode === 'stall') return stallRes(sse([   // partial text, then stall (no stop, no [DONE])
+      { type: 'message_start', message: { usage: { input_tokens: 9 } } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial answer' } },
+    ]), opts?.signal);
+    if (mode === 'stallempty') return stallRes([], opts?.signal);   // 200 but no tokens, then stall
+    return streamRes(sse([
+      { type: 'message_start', message: { usage: { input_tokens: 9 } } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ANSWER } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 7 } },
+      '[DONE]',
+    ]));
+  }
   return errRes(404);
 };
 
@@ -110,14 +130,40 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
   await fetch(`${base}/ai-access`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domains: undefined }) });
 }
 
-// ── C5 provider error mid-stream → error event, no crash, no leak ──
+// ── C5 provider error every attempt → graceful error event, no crash, no leak ──
 {
   mode = 'err';
   const r = await fetch(`${base}/chat/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'trigger error' }) });
   const evs = await readSSE(r);
   mode = 'ok';
-  rec('C5 emits an error event (graceful)', evs.some((e) => e.type === 'error' && e.message === 'Chat failed'));
+  const err = evs.find((e) => e.type === 'error');
+  rec('C5 emits a graceful error event (after retries, no output)', !!err && /didn’t respond|Chat failed/.test(err.message || ''), JSON.stringify(err));
   rec('C5 never leaks provider error detail', !JSON.stringify(evs).includes('invalid_request_error'));
+}
+
+// ── C6 stall AFTER partial output → keep the partial answer, no error ──
+{
+  process.env.MYCELIUM_CHAT_IDLE_MS = '1200';
+  mode = 'stall';
+  const r = await fetch(`${base}/chat/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'stall after text' }) });
+  const evs = await readSSE(r);
+  mode = 'ok';
+  const text = evs.filter((e) => e.type === 'text_delta').map((e) => e.content).join('');
+  rec('C6 keeps partial text on a mid-stream stall', text === 'partial answer', JSON.stringify(text));
+  rec('C6 finalizes (done) with NO error over a partial answer', evs.some((e) => e.type === 'done') && !evs.some((e) => e.type === 'error'));
+}
+
+// ── C7 stall with NO output → auto-retry the turn, then a graceful error ──
+{
+  process.env.MYCELIUM_CHAT_IDLE_MS = '1000';
+  mode = 'stallempty';
+  fetchCount = 0;
+  const r = await fetch(`${base}/chat/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'empty stall' }) });
+  const evs = await readSSE(r);
+  mode = 'ok';
+  delete process.env.MYCELIUM_CHAT_IDLE_MS;
+  rec('C7 retried the turn (>1 model connection attempt)', fetchCount > 1, `fetchCount=${fetchCount}`);
+  rec('C7 ends in a graceful error after retries', evs.some((e) => e.type === 'error') && evs.some((e) => e.type === 'done'));
 }
 
 server.close(); await close?.();

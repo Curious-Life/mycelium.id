@@ -151,9 +151,16 @@ async function openaiCompatibleInfer({ prompt, maxTokens, apiKey, baseUrl, model
 
 /** Open a streaming POST. Times out the connection (TTFB), not the whole stream.
  *  Exported for the agent harness (see postJson note). */
-export async function openStream(url, headers, body, fetch, timeoutMs) {
+export async function openStream(url, headers, body, fetch, timeoutMs, extraSignal) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // An external signal (turn abort / inactivity watchdog / client disconnect) must
+  // be able to force-close the connection — including AFTER headers arrive, while
+  // the body is streaming. The listener stays bound for the life of the response.
+  if (extraSignal) {
+    if (extraSignal.aborted) controller.abort();
+    else extraSignal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
   let res;
   try {
     res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body), signal: controller.signal });
