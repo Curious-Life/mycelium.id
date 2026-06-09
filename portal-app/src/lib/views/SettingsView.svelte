@@ -8,7 +8,7 @@
 	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
 	import ChannelsSection from '$lib/components/settings/ChannelsSection.svelte';
-	import IntelligenceSection from '$lib/components/settings/IntelligenceSection.svelte';
+	import AISettings from '$lib/components/settings/AISettings.svelte';
 	import AIAccessSection from '$lib/components/settings/AIAccessSection.svelte';
 	import ManagedConnectSection from '$lib/components/settings/ManagedConnectSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
@@ -658,6 +658,13 @@
 	}
 
 	onMount(async () => {
+		// Deep-link: ?tab=<id> preselects a tab (e.g. "Connect AI"/"Spawn
+		// intelligence" → /settings?tab=intelligence).
+		try {
+			const t = new URLSearchParams(window.location.search).get('tab');
+			if (t && TABS.some((x) => x.id === t)) activeTab = t as typeof activeTab;
+		} catch { /* no-op */ }
+
 		const [settingsRes, statsRes, billingRes] = await Promise.all([
 			api('/portal/settings').catch(() => null),
 			api('/portal/stats').catch(() => null),
@@ -1321,7 +1328,10 @@
 			{/if}
 
 			{#if activeTab === 'intelligence'}
-			<!-- AI Subscriptions -->
+			<!-- The model that powers Mycelium — active-model hero + Local/Cloud lanes -->
+			<AISettings />
+
+			<!-- AI Subscriptions (legacy Claude-account OAuth path) -->
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">AI Subscriptions</h2>
 
@@ -1636,9 +1646,6 @@
 					{/if}
 				</section>
 			{/if}
-
-			<!-- Intelligence — connect Mycelium's outbound AI to any provider -->
-			<IntelligenceSection />
 
 			<!-- AI Access — which vault areas the in-app chat agent may use -->
 			<AIAccessSection />
