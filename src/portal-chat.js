@@ -109,24 +109,41 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     const keepalive = setInterval(() => send({ type: 'keepalive' }), 15000);
 
     // Reliability model: NO hard overall cap (a productive long turn must not be
-    // cut off). Instead an INACTIVITY watchdog — if the model emits no token for
-    // IDLE_MS, the stream is considered stalled and force-aborted. A stall that
-    // already produced text finalizes gracefully (keep the partial answer); a
-    // stall/error that produced NOTHING auto-retries the whole turn.
-    const IDLE_MS = Number(process.env.MYCELIUM_CHAT_IDLE_MS) || 90000;
+    // cut off). Two distinct watchdogs instead of one blunt 90s timer:
+    //   • TTFB_MS  — time-to-first-token: how long we wait for the model to START
+    //     responding (any token — thinking OR content). A cold local model load +
+    //     reasoning warrants more slack than mid-stream, but far less than 90s.
+    //   • IDLE_MS  — inter-token: once it's streaming, the gap we tolerate between
+    //     tokens before declaring a stall.
+    // The moment the FIRST token arrives we (a) flip to the looser IDLE budget and
+    // (b) emit `responding` so the UI switches "connecting…" → live immediately.
+    // An empty/stalled attempt retries with EXPONENTIAL BACKOFF.
+    const TTFB_MS = Number(process.env.MYCELIUM_CHAT_TTFB_MS) || 45000;
+    const IDLE_MS = Number(process.env.MYCELIUM_CHAT_IDLE_MS) || 60000;
     const MAX_RETRIES = 2;
+    const BACKOFF_BASE_MS = 1000;                     // 1s, 2s, … between retries
     let assistantText = '';
     let lastActivity = Date.now();
+    let streaming = false;                            // flipped on the first token
     let clientGone = false;
     let ctrl = new AbortController();                 // re-created per attempt
     req.on('close', () => { clientGone = true; ctrl.abort(); });
     const captureText = (ev) => {
-      if (ev.type === 'text_delta' || ev.type === 'tool_start' || ev.type === 'tool_complete' || ev.type === 'thinking_delta') lastActivity = Date.now();
+      if (ev.type === 'text_delta' || ev.type === 'tool_start' || ev.type === 'tool_complete' || ev.type === 'thinking_delta') {
+        lastActivity = Date.now();
+        if (!streaming && (ev.type === 'text_delta' || ev.type === 'thinking_delta')) {
+          streaming = true;
+          send({ type: 'responding' });               // "the model started responding"
+        }
+      }
       if (ev.type === 'text_delta' && ev.content) assistantText += ev.content;
       send(ev);
     };
-    const watchTick = Math.max(500, Math.min(5000, Math.floor(IDLE_MS / 3)));
-    const watchdog = setInterval(() => { if (Date.now() - lastActivity > IDLE_MS) ctrl.abort(); }, watchTick);
+    const watchTick = Math.max(500, Math.min(4000, Math.floor(TTFB_MS / 4)));
+    const watchdog = setInterval(() => {
+      const limit = streaming ? IDLE_MS : TTFB_MS;    // first-token wait vs inter-token gap
+      if (Date.now() - lastActivity > limit) ctrl.abort();
+    }, watchTick);
 
     try {
       send({ type: 'stream_start', streamIndex: 0 });
@@ -149,6 +166,11 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       const isLocal = info.local;
       const recentN = isLocal ? 5 : 12;
       const sysCap = isLocal ? 5000 : 28000;
+      // Local models (small on-box Ollama) are VERY slow to first token when tools
+      // are attached — Ollama constrains generation to the tool grammar, which on a
+      // 12B reasoning model pushes time-to-first-token to 30s+ (measured). They also
+      // use tools poorly. So give local a fast, context-grounded turn (no tools — the
+      // briefing is already in the system preamble); cloud keeps the full tool set.
 
       // System = orientation + getContext briefing + (cloud only) memory retrieval.
       let system = CHAT_SYSTEM;
@@ -173,11 +195,20 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       // errored before any token). Once any text streams, we keep it — no retry
       // (re-streaming would duplicate into the same bubble).
       let result = null;
+      let lastErr = null;
       for (let attempt = 0; ; attempt++) {
         if (clientGone) break;
-        if (attempt > 0) { ctrl = new AbortController(); lastActivity = Date.now(); console.error(`[chat] empty/stalled — retrying turn (${attempt}/${MAX_RETRIES})`); }
-        try { result = await harness.streamTurn({ provider, system, userMessage: message, tools: grantedTools, call, send: captureText, signal: ctrl.signal }); }
-        catch (e) { console.error('[chat] attempt failed:', e?.message); }
+        if (attempt > 0) {
+          // Exponential backoff before re-attempting a turn that produced nothing.
+          const backoff = BACKOFF_BASE_MS * 2 ** (attempt - 1);   // 1s, 2s, …
+          await new Promise((r) => setTimeout(r, backoff));
+          if (clientGone) break;
+          ctrl = new AbortController(); lastActivity = Date.now(); streaming = false;
+          send({ type: 'retry', attempt });
+          console.error(`[chat] empty/stalled — retry ${attempt}/${MAX_RETRIES} after ${backoff}ms`);
+        }
+        try { result = await harness.streamTurn({ provider, system, userMessage: message, tools: isLocal ? [] : grantedTools, call, send: captureText, signal: ctrl.signal }); lastErr = null; }
+        catch (e) { lastErr = e; console.error('[chat] attempt failed:', e?.status || '', e?.message); }
         if (clientGone || assistantText.trim() || attempt >= MAX_RETRIES) break;
       }
 
@@ -189,7 +220,17 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
           const cap = (role, content) => captureMessage(db, { userId, role, content, source: CHAT_SOURCE, messageType: 'chat' }, enqueueEnrichment);
           cap('user', message).then(() => cap('assistant', assistantText.trim())).catch((e) => console.error('[chat] persist failed:', e?.message));
         } else {
-          send({ type: 'error', message: 'The model didn’t respond after several tries. Try another model in Settings → Intelligence.' });
+          // Surface an ACTIONABLE reason from the upstream status (safe: status
+          // codes + the provider label/model carry no secrets, per §1). A bare
+          // "didn't respond" hides config problems like a wrong model name or key.
+          const st = lastErr?.status;
+          const who = info.label || 'The model';
+          let msg = `${who} didn’t respond after several tries. Try another model in Settings → Intelligence.`;
+          if (st === 401 || st === 403) msg = `${who} rejected the request — the API key looks invalid. Update it in Settings → Intelligence.`;
+          else if (st === 404 || st === 400) msg = `${who} didn’t recognise the model “${info.model}”. Pick a valid model in Settings → Intelligence.`;
+          else if (st === 429) msg = `${who} is rate-limited right now. Wait a moment or switch model in Settings → Intelligence.`;
+          else if (st >= 500) msg = `${who} had a server error. Try again, or switch model in Settings → Intelligence.`;
+          send({ type: 'error', message: msg });
           send({ type: 'done', toolsUsed: [] });
         }
       }

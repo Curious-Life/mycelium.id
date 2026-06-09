@@ -157,6 +157,15 @@ const openaiAdapter = {
         if (!choice) continue;
         if (choice.finish_reason) stopReason = choice.finish_reason;
         const d = choice.delta || {};
+        // Reasoning models (Ollama gemma3/4 + qwen3, DeepSeek-R1, etc.) stream
+        // their thinking in delta.reasoning / delta.reasoning_content while
+        // content stays "". Surface it as thinking_delta so (a) the UI shows
+        // progress instead of a frozen "loading" and (b) the chat inactivity
+        // watchdog sees activity — otherwise a thinking model looks stalled and
+        // gets aborted before the real answer lands in `content`.
+        const reasoning = (typeof d.reasoning === 'string' && d.reasoning) ? d.reasoning
+          : (typeof d.reasoning_content === 'string' && d.reasoning_content) ? d.reasoning_content : '';
+        if (reasoning) send({ type: 'thinking_delta', content: reasoning });
         if (typeof d.content === 'string' && d.content) { text += d.content; send({ type: 'text_delta', content: d.content }); }
         for (const tc of d.tool_calls || []) {
           const slot = partial.get(tc.index) || { id: '', name: '', args: '' };
@@ -210,9 +219,14 @@ export function describeProvider(cfg = {}) {
   }
   if (cfg.openaiApiKey || cfg.baseUrl) {
     const isLocal = cfg.jurisdiction === 'local' || /(?:\/\/)?(?:127\.0\.0\.1|localhost|0\.0\.0\.0)/.test(cfg.baseUrl || '');
+    // Prefer the provider row's own label (e.g. "Regolo.ai (EU…)") — only fall
+    // back to a generic name when none was stored. Native OpenAI (key, no
+    // base_url) is the one case that's genuinely "OpenAI".
+    const isNativeOpenAI = !!cfg.openaiApiKey && !cfg.baseUrl;
+    const fallbackLabel = isLocal ? 'Local model' : (isNativeOpenAI ? 'OpenAI' : 'Custom');
     return {
-      kind: isLocal ? 'local' : 'openai',
-      label: isLocal ? 'Local model' : (cfg.openaiApiKey ? 'OpenAI' : 'Custom'),
+      kind: isLocal ? 'local' : (isNativeOpenAI ? 'openai' : 'custom'),
+      label: cfg.label || fallbackLabel,
       model: cfg.cloudModel || (isLocal ? DEFAULT_LOCAL_MODEL : DEFAULT_OPENAI_CHAT_MODEL),
       jurisdiction: cfg.jurisdiction || (isLocal ? 'local' : 'us-standard'),
       local: isLocal,

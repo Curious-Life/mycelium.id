@@ -3,7 +3,6 @@
 	import { browser } from '$app/environment';
 	import { navigationState } from '$lib/stores/navigation';
 	import { theme } from '$lib/stores/theme';
-	import PipelineStatusChip from './PipelineStatusChip.svelte';
 
 	const currentView = $derived($navigationState.primaryView);
 	const chatOpen = $derived($navigationState.chatOpen);
@@ -84,12 +83,10 @@
 		</svg>
 	</button>
 
-	<!-- App wordmark (desktop) — one intentional brand anchor, left-aligned next
-	     to the menu. Not interactive, so it stays part of the drag strip. -->
-	<span
-		class="hidden md:block text-sm font-semibold tracking-tight text-[var(--color-text-emphasis)] select-none"
-		data-tauri-drag-region
-	>Mycelium</span>
+	<!-- Brand wordmark removed: the app IS Mycelium and the mindscape page already
+	     carries the name — a second "Mycelium" up here was pure duplication. The
+	     menu + this empty strip stay draggable so the title bar still moves. -->
+	<span class="hidden md:block w-2 select-none" data-tauri-drag-region></span>
 
 	<!-- Mobile: page title -->
 	<h2 class="md:hidden text-sm font-medium text-[var(--color-text-primary)] truncate">
@@ -115,9 +112,6 @@
 				<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
 			</svg>
 		</button>
-
-		<!-- Pipeline coordinator status (Wave P4) -->
-		<PipelineStatusChip />
 
 		<!-- Theme toggle -->
 		<button

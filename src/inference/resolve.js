@@ -40,13 +40,16 @@ function mapRowToConfig(row) {
   const model = row.model_preference || undefined;
   const provider = String(row.provider || '').toLowerCase();
   const baseUrl = row.base_url || undefined;
+  // Carry the row's own label so the chat chip names the REAL provider (e.g.
+  // "Regolo.ai") instead of guessing "OpenAI" from the presence of a key.
+  const label = (typeof row.label === 'string' && row.label.trim()) ? row.label.trim() : undefined;
   // Native Anthropic (no base_url).
   if (key && !baseUrl && (provider === 'anthropic' || provider === 'claude')) {
-    return { anthropicApiKey: key, openaiApiKey: '', cloudModel: model, jurisdiction: jurisdictionForBaseUrl(undefined, provider) };
+    return { anthropicApiKey: key, openaiApiKey: '', cloudModel: model, jurisdiction: jurisdictionForBaseUrl(undefined, provider), label, providerName: provider };
   }
   // OpenAI-compatible: native OpenAI, or ANY base_url provider.
   if (baseUrl || (key && provider === 'openai')) {
-    return { anthropicApiKey: '', openaiApiKey: key || '', baseUrl: baseUrl || undefined, cloudModel: model, jurisdiction: jurisdictionForBaseUrl(baseUrl, provider) };
+    return { anthropicApiKey: '', openaiApiKey: key || '', baseUrl: baseUrl || undefined, cloudModel: model, jurisdiction: jurisdictionForBaseUrl(baseUrl, provider), label, providerName: provider };
   }
   return null;
 }
