@@ -197,19 +197,54 @@
 </svelte:head>
 
 <div class="connections-page">
-	<!-- Header + connect form -->
-	<div class="header">
-		<h1>Connections</h1>
-		<form class="connect-form" onsubmit={(e) => { e.preventDefault(); sendRequest(); }}>
-			<div class="connect-fields">
-				<input type="text" bind:value={connectHandle} placeholder="@handle" class="connect-input" />
-				<input type="text" bind:value={connectMessage} placeholder="Add a message (optional)" maxlength="200" class="connect-input connect-message" />
-			</div>
-			<button type="submit" disabled={connecting || !connectHandle.trim()} class="btn-sm btn-primary">
-				{connecting ? 'Sending...' : 'Connect'}
-			</button>
-		</form>
+	<!-- Intro -->
+	<div class="intro">
+		<p class="eyebrow">Connections</p>
+		<h1 class="intro-title">Where your mind meets others'</h1>
+		<p class="intro-lede">
+			Link with anyone on Mycelium to see where your minds overlap — shared territories,
+			kindred realms — and selectively share a space or a facet. Private by default:
+			nothing leaves your vault until you choose it.
+		</p>
 	</div>
+
+	<!-- How it works -->
+	<div class="how glass">
+		<div class="how-step">
+			<span class="how-n">1</span>
+			<div class="how-body">
+				<span class="how-t">Send a request</span>
+				<span class="how-d">By handle here, or <code>name@their-server.org</code> to reach any machine running Mycelium.</span>
+			</div>
+		</div>
+		<div class="how-step">
+			<span class="how-n">2</span>
+			<div class="how-body">
+				<span class="how-t">They accept</span>
+				<span class="how-d">A private, signed link forms between your vaults — revocable anytime.</span>
+			</div>
+		</div>
+		<div class="how-step">
+			<span class="how-n">3</span>
+			<div class="how-body">
+				<span class="how-t">Compare &amp; share</span>
+				<span class="how-d">See your overlap, then grant a space or a mindscape facet — only what you pick.</span>
+			</div>
+		</div>
+	</div>
+
+	<!-- Connect form -->
+	<form class="connect glass" onsubmit={(e) => { e.preventDefault(); sendRequest(); }}>
+		<label class="connect-label" for="connect-handle">Connect to someone</label>
+		<div class="connect-fields">
+			<input id="connect-handle" type="text" bind:value={connectHandle} placeholder="name  ·  or  name@their-server.org" class="connect-input" autocomplete="off" />
+			<input type="text" bind:value={connectMessage} placeholder="Add a message (optional)" maxlength="200" class="connect-input connect-message" />
+			<button type="submit" disabled={connecting || !connectHandle.trim()} class="btn-sm btn-primary">
+				{connecting ? 'Sending…' : 'Connect'}
+			</button>
+		</div>
+		<p class="connect-hint">A bare handle finds someone on this instance; <code>name@server</code> reaches any Mycelium, anywhere. <span class="soon">Matrix addresses (@you:homeserver) coming soon.</span></p>
+	</form>
 
 	<!-- Pending requests -->
 	{#if pending.length > 0}
@@ -427,46 +462,61 @@
 		overflow-y: auto;
 	}
 
-	.header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 1rem;
-		margin-bottom: 2rem;
-		flex-wrap: wrap;
+	/* Intro */
+	.intro { margin-bottom: 1.25rem; }
+	.eyebrow {
+		font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.16em;
+		text-transform: uppercase; color: var(--color-accent-aurum); margin-bottom: 0.5rem;
 	}
-	.header h1 {
-		font-size: 1.3rem;
-		font-weight: 600;
-		color: var(--color-text-emphasis);
+	.intro-title { font-size: 1.5rem; font-weight: 400; letter-spacing: -0.01em; color: var(--color-text-primary); margin-bottom: 0.5rem; }
+	.intro-lede { font-size: 0.86rem; line-height: 1.6; color: var(--color-text-secondary); max-width: 60ch; }
+
+	/* Shared glass surface — the onboarding/mindscape taste. */
+	.glass {
+		background: var(--glass-card-bg);
+		border: 1px solid var(--glass-border);
+		border-radius: 14px;
+		backdrop-filter: blur(12px) saturate(130%);
+		-webkit-backdrop-filter: blur(12px) saturate(130%);
 	}
 
-	.connect-form {
-		display: flex;
-		gap: 0.5rem;
-		align-items: flex-end;
+	/* How it works */
+	.how { display: flex; flex-direction: column; gap: 0.85rem; padding: 1.1rem 1.25rem; margin-bottom: 1rem; }
+	.how-step { display: flex; align-items: flex-start; gap: 0.75rem; }
+	.how-n {
+		flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+		width: 1.5rem; height: 1.5rem; border-radius: 50%; font-family: var(--font-mono); font-size: 0.7rem;
+		background: rgba(229, 184, 76, 0.14); color: var(--color-accent-aurum);
 	}
-	.connect-fields {
-		display: flex;
-		flex-direction: column;
-		gap: 0.35rem;
+	.how-body { display: flex; flex-direction: column; gap: 0.15rem; }
+	.how-t { font-size: 0.82rem; font-weight: 600; color: var(--color-text-primary); }
+	.how-d { font-size: 0.76rem; line-height: 1.5; color: var(--color-text-secondary); }
+	.how-d code, .connect-hint code {
+		font-family: var(--font-mono); font-size: 0.92em; color: var(--color-text-primary);
+		background: var(--glass-input-bg); padding: 0.5px 5px; border-radius: 4px;
 	}
+
+	/* Connect form */
+	.connect { padding: 1.1rem 1.25rem; margin-bottom: 2rem; }
+	.connect-label { display: block; font-size: 0.78rem; font-weight: 600; color: var(--color-text-primary); margin-bottom: 0.6rem; }
+	.connect-fields { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
 	.connect-input {
-		padding: 0.4rem 0.75rem;
+		padding: 0.5rem 0.75rem;
 		font-family: var(--font-mono);
 		font-size: 0.8rem;
-		background: var(--color-bg);
-		border: 1px solid var(--color-border);
-		border-radius: 6px;
+		background: var(--glass-input-bg);
+		border: 1px solid var(--glass-input-border);
+		border-radius: 8px;
 		color: var(--color-text-primary);
 		outline: none;
-		width: 160px;
+		flex: 1;
+		min-width: 220px;
 	}
-	.connect-message {
-		width: 240px;
-		font-family: var(--font-sans);
-	}
+	.connect-input::placeholder { color: var(--color-text-tertiary); }
+	.connect-message { font-family: var(--font-sans); flex: 1; min-width: 150px; }
 	.connect-input:focus { border-color: var(--color-accent-aurum); }
+	.connect-hint { font-size: 0.7rem; color: var(--color-text-tertiary); margin-top: 0.6rem; line-height: 1.5; }
+	.connect-hint .soon { opacity: 0.7; }
 
 	.section { margin-bottom: 2rem; }
 	.section-label {
@@ -486,8 +536,8 @@
 		gap: 1rem;
 		padding: 1rem;
 		background: var(--color-surface);
-		border: 1px solid var(--color-border);
-		border-radius: 10px;
+		border: 1px solid var(--glass-border);
+		border-radius: 12px;
 		margin-bottom: 0.5rem;
 	}
 	.request-info { display: flex; flex-direction: column; gap: 0.2rem; flex: 1; min-width: 0; }
@@ -534,8 +584,8 @@
 		text-align: left;
 		padding: 0.85rem 1rem;
 		background: var(--color-surface);
-		border: 1px solid var(--color-border);
-		border-radius: 10px;
+		border: 1px solid var(--glass-border);
+		border-radius: 12px;
 		margin-bottom: 0.4rem;
 		cursor: pointer;
 		transition: all 0.15s;
@@ -556,8 +606,8 @@
 		margin-top: 1.5rem;
 		padding: 1.5rem;
 		background: var(--color-surface);
-		border: 1px solid var(--color-border);
-		border-radius: 12px;
+		border: 1px solid var(--glass-border);
+		border-radius: 14px;
 	}
 	.shared-mgmt { border-top: 1px solid var(--color-border); margin-top: 1rem; padding-top: 1rem; }
 	.shared-empty { font-size: 0.8rem; color: var(--color-text-tertiary); }
