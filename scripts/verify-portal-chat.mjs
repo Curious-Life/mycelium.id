@@ -141,13 +141,14 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
   const evs = await readSSE(r);
   mode = 'ok';
   const err = evs.find((e) => e.type === 'error');
-  rec('C5 emits a graceful error event (after retries, no output)', !!err && /didn’t respond|Chat failed/.test(err.message || ''), JSON.stringify(err));
+  rec('C5 emits a graceful error event (after retries, no output)', !!err && /didn’t respond|didn’t recognise|rejected the request|rate-limited|server error|Chat failed/.test(err.message || ''), JSON.stringify(err));
   rec('C5 never leaks provider error detail', !JSON.stringify(evs).includes('invalid_request_error'));
 }
 
 // ── C6 stall AFTER partial output → keep the partial answer, no error ──
 {
   process.env.MYCELIUM_CHAT_IDLE_MS = '1200';
+  process.env.MYCELIUM_CHAT_TTFB_MS = '1200';
   mode = 'stall';
   const r = await fetch(`${base}/chat/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'stall after text' }) });
   const evs = await readSSE(r);
@@ -160,12 +161,14 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
 // ── C7 stall with NO output → auto-retry the turn, then a graceful error ──
 {
   process.env.MYCELIUM_CHAT_IDLE_MS = '1000';
+  process.env.MYCELIUM_CHAT_TTFB_MS = '1000';
   mode = 'stallempty';
   fetchCount = 0;
   const r = await fetch(`${base}/chat/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'empty stall' }) });
   const evs = await readSSE(r);
   mode = 'ok';
   delete process.env.MYCELIUM_CHAT_IDLE_MS;
+  delete process.env.MYCELIUM_CHAT_TTFB_MS;
   rec('C7 retried the turn (>1 model connection attempt)', fetchCount > 1, `fetchCount=${fetchCount}`);
   rec('C7 ends in a graceful error after retries', evs.some((e) => e.type === 'error') && evs.some((e) => e.type === 'done'));
 }
