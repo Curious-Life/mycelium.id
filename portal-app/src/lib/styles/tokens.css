@@ -51,6 +51,16 @@
 	--color-focus-ring: rgba(91, 159, 232, 0.5);
 	--color-hover: rgba(255, 255, 255, 0.05);
 
+	/* Glass — frosted surfaces that float over the living backdrops. Theme-aware
+	   so light mode reads as a light frosted panel (dark text stays legible) and
+	   dark mode as a dark frosted panel. Use with backdrop-filter: blur(). */
+	--glass-card-bg: rgba(255, 255, 255, 0.04);
+	--glass-card-hover: rgba(229, 184, 76, 0.06);
+	--glass-border: rgba(255, 255, 255, 0.09);
+	--glass-panel-bg: rgba(12, 12, 16, 0.62);
+	--glass-input-bg: rgba(0, 0, 0, 0.25);
+	--glass-input-border: rgba(255, 255, 255, 0.10);
+
 	/* Shadows */
 	--shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
 	--shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
@@ -123,6 +133,15 @@
 
 	--color-focus-ring: rgba(74, 139, 212, 0.5);
 	--color-hover: rgba(0, 0, 0, 0.03);
+
+	/* Light glass — dark-on-light tints + frosted near-opaque white panels so the
+	   (now dark) text tokens stay legible even over a dark animated backdrop. */
+	--glass-card-bg: rgba(0, 0, 0, 0.035);
+	--glass-card-hover: rgba(201, 162, 58, 0.12);
+	--glass-border: rgba(0, 0, 0, 0.10);
+	--glass-panel-bg: rgba(250, 248, 245, 0.82);
+	--glass-input-bg: rgba(255, 255, 255, 0.75);
+	--glass-input-border: rgba(0, 0, 0, 0.14);
 
 	--shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
 	--shadow-md: 0 4px 12px rgba(0, 0, 0, 0.1);

@@ -378,7 +378,7 @@
 		position: fixed;
 		inset: 0;
 		z-index: 1000;
-		background: #0a0a0c; /* the mycelium canvas fills this; card floats over it */
+		background: var(--color-bg); /* the mycelium canvas fills this; card floats over it */
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -391,10 +391,10 @@
 		max-width: 480px;
 		width: 100%;
 		/* Glass — the living mycelium breathes through the panel + around its edges. */
-		background: rgba(12, 12, 16, 0.55);
+		background: var(--glass-panel-bg);
 		backdrop-filter: blur(22px) saturate(140%);
 		-webkit-backdrop-filter: blur(22px) saturate(140%);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--glass-border);
 		border-radius: 16px;
 		overflow: hidden;
 		box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(229, 184, 76, 0.06);
