@@ -605,6 +605,16 @@
 					case 'stream_start':
 						connectionStatus.setStatus('streaming');
 						break;
+					case 'responding':
+						// First token arrived — the model is actively responding now.
+						connectionStatus.setStatus('streaming');
+						break;
+					case 'retry':
+						// A stalled attempt is being retried — drop any partial thinking
+						// from the failed attempt so the new one starts clean.
+						thinking = '';
+						chatMessages.updateMessage(assistantMsgId, { thinking: '' });
+						break;
 					case 'model':
 						// The active provider+model answering this turn — show it as a chip.
 						activeModel.set({ label: event.label as string, model: event.model as string, jurisdiction: event.jurisdiction as string, local: event.local as boolean });
