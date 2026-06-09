@@ -77,6 +77,15 @@
 	]);
 	const needsKey = $derived(!!chosen && chosen.jurisdiction !== 'local');
 
+	// Only surface fresh models (≤ 6 months old per the catalog's "updated"), and
+	// keep the list CONTAINED — show the top few, expand for the rest — so the
+	// Cloud options stay in view rather than being pushed down a long scroll.
+	const MAX_AGE_MONTHS = 6;
+	const COLLAPSED_COUNT = 3;
+	let showAllLocal = $state(false);
+	const recentRecs = $derived(((hwRec?.recommendations ?? []) as Rec[]).filter((m: any) => m.ageMonths == null || m.ageMonths <= MAX_AGE_MONTHS));
+	const visibleRecs = $derived(showAllLocal ? recentRecs : recentRecs.slice(0, COLLAPSED_COUNT));
+
 	$effect(() => {
 		if (step === 'intelligence') {
 			if (hwRec === null && !hwLoading) loadRecommend();
@@ -228,7 +237,7 @@
 					{hwRec.hardware?.hasGpu ? `${hwRec.hardware.gpuName} · ${hwRec.hardware.gpuVramGb}GB` : `${hwRec.hardware?.cpuCores ?? ''}-core CPU`} · {hwRec.hardware?.totalRamGb}GB RAM{#if !hwRec.ollamaInstalled} · Ollama auto-installs on first pick{/if}
 				</p>
 				<div class="rec-list">
-					{#each hwRec.recommendations as m (m.name)}
+					{#each visibleRecs as m (m.name)}
 						<div class="rec-row" class:dim={m.fitScore === 0}>
 							<span class="rec-name">{m.name}</span>
 							<span class="lane-pill {FIT[m.fitLevel]?.cls ?? ''}">{FIT[m.fitLevel]?.label ?? m.fitLevel}</span>
@@ -245,6 +254,11 @@
 						</div>
 					{/each}
 				</div>
+				{#if recentRecs.length > COLLAPSED_COUNT}
+					<button class="rec-more" onclick={() => (showAllLocal = !showAllLocal)}>
+						{showAllLocal ? 'Show fewer' : `Show ${recentRecs.length - COLLAPSED_COUNT} more`}
+					</button>
+				{/if}
 			{/if}
 		</div>
 
@@ -362,6 +376,11 @@
 	}
 	.rec-btn:hover { background: var(--glass-card-hover); }
 	.rec-ready { font-size: 0.66rem; color: var(--color-accent-jade); }
+	.rec-more {
+		margin-top: 5px; background: none; border: none; cursor: pointer; font-family: inherit;
+		font-size: 0.66rem; color: var(--color-accent-aurum); padding: 2px 0;
+	}
+	.rec-more:hover { text-decoration: underline; }
 	.preset-group { margin-bottom: 0.55rem; }
 	.group-title { display: block; font-size: 0.62rem; color: var(--color-text-tertiary); margin-bottom: 0.3rem; }
 	.chips-row { display: flex; flex-wrap: wrap; gap: 5px; }

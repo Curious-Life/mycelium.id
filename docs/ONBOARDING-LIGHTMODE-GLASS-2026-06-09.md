@@ -63,6 +63,23 @@ Panel/border/progress-track → glass tokens; keep aurum/coral/jade accents.
 | Invite inputs/cards hardcoded dark | `MindscapeInvite.svelte:195,213,220,227` |
 | Chip hardcoded dark glass | `MindscapeActivityChip.svelte:57,60,91` |
 
+## Follow-up additions (same PR #135)
+- **Onboarding panel glass:** `MindscapeView.welcome-inner` now uses `--glass-panel-bg` +
+  `--glass-border` + blur (was a near-opaque hardcoded panel) → frosted in both modes.
+- **Recency filter + contained list:** `catalog.js` keeps each model's `updated`;
+  `recommend.js` emits `ageMonths = monthsSince(updated)`. The onboarding Local lane shows
+  only models **≤ 6 months old** (`MAX_AGE_MONTHS`), **collapsed to the top 3** with a
+  "Show N more" expander so the Cloud lane stays in view.
+
+## ⚠️ Dev-workflow gotcha (discovered this session)
+`cargo tauri dev` has **no `beforeDevCommand`** — it spawns node with `current_dir(home)`
+where `home` falls back to the **stale bundled copy** at `src-tauri/target/debug/app/`
+(refreshed only by `scripts/build-app-bundle.sh` on `tauri build`). So plain `cargo tauri
+dev` runs OLD `src/` **and** old `portal-app/build`. **Always launch the dev app as
+`MYCELIUM_HOME="$(pwd)" cargo tauri dev`** so node runs the working tree. (The throwaway
+`node src/server-rest.js` launched from the repo root is always fresh.) Verified:
+`main.rs:46-54` (`mycelium_home`), `tauri.conf.json:8` (only `beforeBuildCommand`).
+
 ## Out of scope
 Extracting a shared `<ModelPicker>` to de-dupe AISettings ↔ onboarding (noted follow-up —
 inline port now to avoid destabilizing the just-merged AISettings); reacting to live theme

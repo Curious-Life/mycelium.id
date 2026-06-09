@@ -37,6 +37,7 @@ export const CATALOG = Object.freeze(
     family: m.family,
     namespace: m.namespace || 'library',
     pulls: m.pulls || 0,
+    updated: m.updated || '',
     blurb: m.blurb || `${m.family} · ${m.bestFor} (≈${m.sizeGb}GB).`,
   })),
 );
