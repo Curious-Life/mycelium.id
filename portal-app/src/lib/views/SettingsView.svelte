@@ -75,19 +75,6 @@
 		cryptoPayments?: CryptoPayment[];
 	}
 
-	interface Provider {
-		id: number;
-		provider: string;
-		label: string | null;
-		auth_type: string;
-		model_preference: string | null;
-		base_url: string | null;
-		config_dir: string | null;
-		is_active: number;
-		status: string;
-		last_used_at: string | null;
-		created_at: string;
-	}
 
 	let settings = $state<Settings>({ timezone: 'UTC' });
 	let stats = $state<Stats | null>(null);
@@ -119,47 +106,6 @@
 	let renamingId = $state<string | null>(null);
 	let renameValue = $state('');
 	let billing = $state<BillingInfo | null>(null);
-	let providers = $state<Provider[]>([]);
-	// Runtime state: which CLAUDE_CONFIG_DIR each peer agent is currently
-	// using. Loaded from /portal/providers/runtime-state. Used to show
-	// "current vs preferred" badges per provider row — a row whose
-	// config_dir matches any agent's runtime configDir is "running"; a
-	// row that's marked is_active=1 but isn't running anywhere is
-	// "preferred — restart required" (PR 2 will remove the restart bit).
-	interface RuntimeAgent {
-		slug: string;
-		name: string;
-		port: number;
-		configDir?: string | null;
-		configDirHash?: string | null;
-		ok: boolean;
-		source?: string;
-		error?: string;
-	}
-	let runtimeAgents = $state<RuntimeAgent[]>([]);
-
-	// Per-agent assignments (PR 2b). Reconciler converges these into the
-	// tmpfs cache that every Claude CLI spawn reads. `desired_state` is one
-	// of 'pending' | 'applied' | 'failed'; routes return whatever is in the
-	// table now, and the row transitions through pending → applied (or
-	// → failed with last_error) within ~1s of the SIGUSR2 fired by POST.
-	interface Assignment {
-		id: number;
-		user_id: string;
-		agent_id: string;        // literal agent slug, 'scope:<x>', or '*'
-		provider_id: number;
-		desired_state: string;
-		applied_at: string | null;
-		last_error: string | null;
-		created_at: string;
-		updated_at: string;
-	}
-	let assignments = $state<Assignment[]>([]);
-
-	let claudeStatus = $state<{ authenticated: boolean; email?: string; subscriptionType?: string; orgName?: string } | null>(null);
-	let claudeAuthUrl = $state('');
-	let claudeAuthCode = $state('');
-	let claudeAuthLoading = $state(false);
 	let loading = $state(true);
 	let saving = $state(false);
 	let saved = $state(false);
@@ -210,39 +156,6 @@
 	let deleteStats = $state<Record<string, unknown> | null>(null);
 	let deletionRecordId = $state<string | null>(null);  // Phase 5 receipt
 
-	// Provider management state
-	let showAddOpenAI = $state(false);
-	let showAddCustom = $state(false);
-	let newApiKey = $state('');
-	let newLabel = $state('');
-	let newModel = $state('');
-	let newBaseUrl = $state('');
-	let providerSaving = $state(false);
-	let providerError = $state<string | null>(null);
-
-	// OpenAI connection state
-	let openaiStatus = $state<{ authenticated: boolean; status?: string; label?: string } | null>(null);
-
-	async function loadOpenAIStatus() {
-		try {
-			const res = await api('/portal/auth/openai/status');
-			if (res.ok) openaiStatus = await res.json();
-		} catch { /* silent */ }
-	}
-
-	// Codex OAuth flow removed — auth.openai.com is Cloudflare-challenged
-	// (TLS fingerprinting blocks all non-browser clients including Workers,
-	// Node.js, and even OpenAI's own Codex CLI as of Apr 2026).
-	// OpenAI connection uses API key paste via the provider system instead.
-
-	async function disconnectOpenAI() {
-		try {
-			await api('/portal/auth/openai/disconnect', { method: 'POST' });
-			openaiStatus = null;
-			await loadProviders();
-		} catch { /* silent */ }
-	}
-
 	// Linear integration state
 	interface LinearStatus {
 		connected: boolean;
@@ -275,13 +188,6 @@
 	function formatDate(d: string | null): string {
 		if (!d) return '—';
 		return new Date(d).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-	}
-
-	async function loadClaudeStatus() {
-		try {
-			const res = await api('/portal/auth/claude/status');
-			if (res.ok) claudeStatus = await res.json();
-		} catch {}
 	}
 
 	async function loadLinearStatus() {
@@ -329,184 +235,6 @@
 		} catch (err: any) {
 			linearError = err.message || 'Failed to disconnect';
 		}
-	}
-
-	async function loadProviders() {
-		try {
-			const res = await api('/portal/providers');
-			if (res.ok) {
-				const data = await res.json();
-				providers = data.providers || [];
-			}
-		} catch {}
-	}
-
-	async function loadRuntimeState() {
-		try {
-			const res = await api('/portal/providers/runtime-state');
-			if (res.ok) {
-				const data = await res.json();
-				runtimeAgents = data.agents || [];
-			}
-		} catch {}
-	}
-
-	async function loadAssignments() {
-		try {
-			const res = await api('/portal/providers/assignments');
-			if (res.ok) {
-				const data = await res.json();
-				assignments = data.assignments || [];
-			}
-		} catch {}
-	}
-
-	// Effective provider for an agent at runtime, walking the same lookup
-	// chain the helper at packages/core/claude-config.js uses on every CLI
-	// spawn: literal agent-id assignment → wildcard '*' assignment →
-	// fallback to whatever configDir the agent's /health reports (which is
-	// process.env.CLAUDE_CONFIG_DIR — the inherited PM2 env).
-	//
-	// Returns the matching Provider row, or null if nothing matches the
-	// runtime configDir among the user's known providers (rare — happens
-	// when the env points at a dir that isn't tracked in the providers DB).
-	function effectiveProviderForAgent(agent: RuntimeAgent): Provider | null {
-		const literal = assignments.find(a => a.agent_id === agent.slug);
-		if (literal) return providers.find(p => p.id === literal.provider_id) || null;
-		const wildcard = assignments.find(a => a.agent_id === '*');
-		if (wildcard) return providers.find(p => p.id === wildcard.provider_id) || null;
-		// Fall back to matching against the agent's runtime configDir (env).
-		if (agent.configDir) {
-			return providers.find(p => p.config_dir === agent.configDir) || null;
-		}
-		return null;
-	}
-
-	function isProviderQuarantined(p: Provider): boolean {
-		return p.status === 'quarantined' || p.auth_type === 'setup_token';
-	}
-
-	// "Running" = at least one agent is effectively using this provider,
-	// resolved via the assignment chain (literal → wildcard → env fallback).
-	// Pre-PR-2b this checked configDir-vs-env equality, which lied when a
-	// cache override was active. Now we use effectiveProviderForAgent so a
-	// row with a wildcard assignment shows "Running" even though no agent's
-	// PM2 env points at it (the cache routes the per-spawn env there).
-	function isProviderRunning(p: Provider): boolean {
-		return runtimeAgents.some(a => effectiveProviderForAgent(a)?.id === p.id);
-	}
-
-	async function startClaudeAuth(label?: string) {
-		providerError = null;
-		claudeAuthLoading = true;
-		claudeAuthUrl = '';
-		claudeAuthCode = '';
-		try {
-			const res = await api('/portal/auth/claude', {
-				method: 'POST',
-				body: JSON.stringify({ label }),
-			});
-			if (!res.ok) throw new Error('Failed to start auth');
-			const { url } = await res.json();
-			claudeAuthUrl = url;
-			window.open(url, '_blank', 'width=600,height=700');
-		} catch (e) {
-			providerError = e instanceof Error ? e.message : 'Auth failed';
-		}
-		claudeAuthLoading = false;
-	}
-
-	async function submitClaudeCode() {
-		if (!claudeAuthCode.trim()) return;
-		claudeAuthLoading = true;
-		providerError = null;
-		try {
-			const res = await api('/portal/auth/claude/code', {
-				method: 'POST',
-				body: JSON.stringify({ code: claudeAuthCode.trim() }),
-			});
-			const data = await res.json().catch(() => ({}));
-			if (!res.ok) throw new Error(data.error || 'Failed to authenticate');
-			claudeAuthUrl = '';
-			claudeAuthCode = '';
-			await loadClaudeStatus();
-			await loadProviders();
-		} catch (e) {
-			providerError = e instanceof Error ? e.message : 'Auth failed';
-		}
-		claudeAuthLoading = false;
-	}
-
-	async function addApiKeyProvider(provider: string) {
-		if (!newApiKey.trim()) return;
-		providerSaving = true;
-		providerError = null;
-		try {
-			const res = await api('/portal/providers', {
-				method: 'POST',
-				body: JSON.stringify({
-					provider,
-					label: newLabel.trim() || undefined,
-					api_key: newApiKey.trim(),
-					model_preference: newModel.trim() || undefined,
-					base_url: newBaseUrl.trim() || undefined,
-				}),
-			});
-			if (!res.ok) { const d = await res.json(); throw new Error(d.error || 'Failed'); }
-			newApiKey = ''; newLabel = ''; newModel = ''; newBaseUrl = '';
-			showAddOpenAI = false; showAddCustom = false;
-			await loadProviders();
-		} catch (e) {
-			providerError = e instanceof Error ? e.message : 'Failed to add provider';
-		}
-		providerSaving = false;
-	}
-
-	async function setProviderActive(id: number) {
-		providerError = null;
-		const res = await api(`/portal/providers/${id}`, { method: 'PUT', body: JSON.stringify({ is_active: true }) });
-		if (!res.ok) {
-			let msg = 'Failed to mark preferred';
-			try {
-				const data = await res.json();
-				if (data?.error === 'quarantined_provider') {
-					msg = data.message || 'This provider is quarantined and cannot be used.';
-				} else if (data?.error || data?.message) {
-					msg = data.message || data.error;
-				}
-			} catch {}
-			providerError = msg;
-			return;
-		}
-		// PR 2b: server-side shim writes a '*' assignment when this fires for
-		// a Claude row, so the reconciler picks it up via SIGUSR2 within ~1s.
-		// Reload providers (status flag), runtime state (configDirs), and
-		// assignments (the new wildcard row).
-		await new Promise(r => setTimeout(r, 1500));
-		await Promise.all([loadProviders(), loadRuntimeState(), loadAssignments()]);
-	}
-
-	async function disconnectClaudeCli() {
-		if (!confirm('Disconnect the Claude CLI session? You can sign in again from here.')) return;
-		try {
-			await api('/portal/auth/claude/disconnect', { method: 'POST' });
-			claudeStatus = null;
-		} catch {
-			/* the server log captures the real reason; surface a generic
-			   recovery path in the UI */
-			providerError = 'Disconnect failed — refresh and retry';
-		}
-	}
-
-	async function removeProvider(id: number) {
-		if (!confirm('Remove this provider?')) return;
-		await api(`/portal/providers/${id}`, { method: 'DELETE' });
-		await loadProviders();
-	}
-
-	async function testProvider(id: number) {
-		const res = await api(`/portal/providers/${id}/test`, { method: 'POST' });
-		if (res.ok) await loadProviders();
 	}
 
 	// ── Channel Authority Registry helpers ─────────────────────────────
@@ -669,13 +397,6 @@
 			api('/portal/settings').catch(() => null),
 			api('/portal/stats').catch(() => null),
 			api('/portal/billing').catch(() => null),
-			loadProviders(),
-			// runtimeAgents + assignments still feed isProviderRunning() badges in the
-			// providers list, even though the per-agent assignment grid moved to /agents.
-			loadRuntimeState(),
-			loadAssignments(),
-			loadClaudeStatus(),
-			loadOpenAIStatus(),
 			loadPasskeys(),
 			loadLinearStatus(),
 			loadChannelAuthority(),
@@ -1319,240 +1040,17 @@
 			<!-- Remote Access — connect Claude / any MCP client over the internet (operator password, status, connector URL) -->
 			<RemoteAccessSection />
 
-			<!-- Pick your harness — curated card menu over the two doors; links to docs/HARNESS-RECIPES.md -->
-			<HarnessPickerSection />
-
-			<!-- Connect your AI — the local/remote MCP + model-gateway endpoints + static-bearer how-to (S5) -->
-			<ConnectYourAISection />
-
 			{/if}
 
 			{#if activeTab === 'intelligence'}
 			<!-- The model that powers Mycelium — active-model hero + Local/Cloud lanes -->
 			<AISettings />
 
-			<!-- AI Subscriptions (legacy Claude-account OAuth path) -->
-			<section class="card p-5">
-				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">AI Subscriptions</h2>
-
-				{#if providerError}
-					<div class="text-xs text-red-400 mb-3 p-2 rounded bg-red-500/10">{providerError}</div>
-				{/if}
-
-				<!-- Claude accounts -->
-				<div class="mb-4">
-					<div class="flex items-center justify-between mb-2">
-						<span class="text-sm font-medium text-[var(--color-text-primary)]">Claude</span>
-						<button onclick={() => startClaudeAuth()} class="text-[0.7rem] text-[var(--color-accent)] hover:underline cursor-pointer">{claudeAuthUrl ? 'Cancel' : '+ Add account'}</button>
-					</div>
-
-					<!-- Live Claude status (from CLI). Only labeled "Active" if no
-					     DB-stored provider has is_active=1, otherwise this is just
-					     a legacy CLI session that can be disconnected. -->
-					{#if claudeStatus?.authenticated}
-						{@const cliIsActive = !providers.some(p => p.provider === 'claude' && p.is_active)}
-						<div class="flex items-center gap-3 p-3 rounded-lg border border-[var(--color-accent)]/30 mb-2 bg-[var(--color-surface)]">
-							<span class="w-2 h-2 rounded-full flex-shrink-0 bg-green-400"></span>
-							<div class="flex-1 min-w-0">
-								<div class="text-sm text-[var(--color-text-primary)]">{claudeStatus.email || 'Claude'}</div>
-								<div class="text-[0.65rem] text-[var(--color-text-tertiary)]">
-									{#if claudeStatus.subscriptionType}
-										<span class="text-[var(--color-accent)] font-medium uppercase">{claudeStatus.subscriptionType}</span> plan ·
-									{/if}
-									Signed in via CLI
-									{#if claudeStatus.orgName} · {claudeStatus.orgName}{/if}
-								</div>
-							</div>
-							<div class="flex items-center gap-2">
-								{#if cliIsActive}
-									<span class="text-[0.6rem] text-[var(--color-accent)] font-medium">Active</span>
-								{/if}
-								<button onclick={disconnectClaudeCli} class="text-[0.6rem] text-[var(--color-text-tertiary)] hover:text-red-400 cursor-pointer" title="Disconnect CLI session">Disconnect</button>
-							</div>
-						</div>
-					{/if}
-
-					<!-- Additional Claude accounts from providers DB.
-					     Per-row visual state machine:
-					       - quarantined / setup_token: red border, dot, badge; "Mark
-					         preferred" disabled with explanatory tooltip.
-					       - is_active=1 AND running on at least one peer agent:
-					         green dot, "Active" badge.
-					       - is_active=1 AND not running anywhere: yellow dot,
-					         "Preferred · restart required" (PR 2 will close this gap
-					         by making the cascade automatic).
-					       - is_active=0 AND running: small grey "Running" badge plus
-					         a "Mark preferred" button to flip the active flag.
-					       - is_active=0 AND not running: just "Mark preferred". -->
-					{#each providers.filter(p => p.provider === 'claude') as p (p.id)}
-						{@const quarantined = isProviderQuarantined(p)}
-						{@const running = isProviderRunning(p)}
-						{@const dotColor = quarantined ? '#ef4444'
-							: p.status === 'expired' ? '#fbbf24'
-							: p.is_active && !running ? '#fbbf24'
-							: running || p.status === 'active' ? '#4ade80'
-							: '#ef4444'}
-						{@const borderColor = quarantined ? '#ef4444'
-							: p.is_active ? 'var(--color-accent)'
-							: ''}
-						<div class="flex items-center gap-3 p-3 rounded-lg border border-[var(--color-border)] mb-2 transition-colors" style:border-color={borderColor}>
-							<span class="w-2 h-2 rounded-full flex-shrink-0" style="background: {dotColor}"></span>
-							<div class="flex-1 min-w-0">
-								<div class="text-sm text-[var(--color-text-primary)]">{p.label || 'Claude'}</div>
-								<div class="text-[0.65rem] text-[var(--color-text-tertiary)]">
-									{#if quarantined}
-										<span class="text-red-400">Quarantined — `claude setup-token` artifact, no `user:inference` scope. Cannot be used as a chat subscription.</span>
-									{:else if p.status === 'expired'}
-										Token expired
-									{:else if p.is_active && !running}
-										Preferred · restart required
-									{:else if running}
-										Running
-									{:else if p.status === 'active'}
-										Connected
-									{:else}
-										{p.status}
-									{/if}
-									{#if p.last_used_at} · Last used {new Date(p.last_used_at).toLocaleDateString()}{/if}
-								</div>
-							</div>
-							<div class="flex items-center gap-2">
-								{#if quarantined}
-									<span class="text-[0.6rem] text-red-400 font-medium" title="Re-authenticate from a Claude subscription account (not setup-token).">Quarantined</span>
-								{:else if p.is_active}
-									<span class="text-[0.6rem] text-[var(--color-accent)] font-medium">{running ? 'Active' : 'Preferred'}</span>
-								{:else}
-									{#if running}
-										<span class="text-[0.6rem] text-[var(--color-text-tertiary)]" title="An agent is currently using this subscription">Running</span>
-									{/if}
-									<button onclick={() => setProviderActive(p.id)} class="text-[0.6rem] text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)] cursor-pointer">Mark preferred</button>
-								{/if}
-								<button onclick={() => testProvider(p.id)} class="text-[0.6rem] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] cursor-pointer" title="Test connection">&#x21bb;</button>
-								<button onclick={() => removeProvider(p.id)} class="text-[0.6rem] text-[var(--color-text-tertiary)] hover:text-red-400 cursor-pointer" title="Remove">&times;</button>
-							</div>
-						</div>
-					{/each}
-
-					{#if !claudeStatus?.authenticated && providers.filter(p => p.provider === 'claude').length === 0 && !claudeAuthUrl}
-						<div class="text-[0.7rem] text-[var(--color-text-tertiary)] p-3 rounded-lg border border-dashed border-[var(--color-border)]">
-							No Claude account connected. <button onclick={() => startClaudeAuth()} class="text-[var(--color-accent)] hover:underline cursor-pointer">Connect with Claude</button>
-						</div>
-					{/if}
-
-					{#if claudeAuthUrl}
-						<div class="p-3 rounded-lg border border-[var(--color-accent)]/30 bg-[var(--color-surface)] space-y-2">
-							<div class="text-xs text-[var(--color-text-secondary)]">
-								<p>1. Sign in on the page that opened</p>
-								<p>2. Copy the code shown after signing in</p>
-								<p>3. Paste it below</p>
-							</div>
-							<div class="flex gap-2">
-								<input type="text" bind:value={claudeAuthCode} placeholder="Paste the code here" autocomplete="off" data-1p-ignore
-									class="flex-1 px-3 py-1.5 text-sm bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)]" />
-								<button onclick={submitClaudeCode} disabled={!claudeAuthCode.trim() || claudeAuthLoading}
-									class="px-3 py-1.5 text-sm font-medium bg-[var(--color-accent)] text-[var(--color-bg)] rounded-lg hover:opacity-90 disabled:opacity-40">
-									{claudeAuthLoading ? '...' : 'Connect'}
-								</button>
-							</div>
-							<p class="text-[0.62rem] text-[var(--color-text-tertiary)]">
-								Window didn't open? <a href={claudeAuthUrl} target="_blank" rel="noopener" class="text-[var(--color-accent)] hover:underline">Click here</a>
-							</p>
-						</div>
-					{/if}
-				</div>
-
-				<!-- OpenAI accounts -->
-				<div class="mb-4">
-					<div class="flex items-center justify-between mb-2">
-						<span class="text-sm font-medium text-[var(--color-text-primary)]">OpenAI</span>
-						<button onclick={() => showAddOpenAI = !showAddOpenAI} class="text-[0.7rem] text-[var(--color-text-tertiary)] hover:underline cursor-pointer">+ API key</button>
-					</div>
-
-					{#if openaiStatus?.authenticated}
-						<div class="flex items-center gap-3 p-3 rounded-lg border border-[var(--color-accent)] mb-2">
-							<span class="w-2 h-2 rounded-full flex-shrink-0 bg-green-400"></span>
-							<div class="flex-1 min-w-0">
-								<div class="text-sm text-[var(--color-text-primary)]">{openaiStatus.label || 'ChatGPT subscription'}</div>
-								<div class="text-[0.65rem] text-[var(--color-text-tertiary)]">Connected via Codex OAuth</div>
-							</div>
-							<button onclick={disconnectOpenAI} class="text-[0.6rem] text-[var(--color-text-tertiary)] hover:text-red-400 cursor-pointer">Disconnect</button>
-						</div>
-					{:else if providers.filter(p => p.provider === 'openai').length === 0}
-						<button onclick={() => showAddOpenAI = true} class="w-full p-3 rounded-lg border border-dashed border-[var(--color-border)] mb-2 text-sm text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-text-primary)] transition-colors cursor-pointer text-left">
-							Connect with API key
-							<span class="block text-[0.62rem] text-[var(--color-text-tertiary)] mt-0.5">Paste your OpenAI API key. Get one at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" class="text-[var(--color-accent)] hover:underline" onclick={(e) => e.stopPropagation()}>platform.openai.com/api-keys</a></span>
-						</button>
-					{/if}
-					{#each providers.filter(p => p.provider === 'openai') as p (p.id)}
-						<div class="flex items-center gap-3 p-3 rounded-lg border border-[var(--color-border)] mb-2 transition-colors" style:border-color={p.is_active ? 'var(--color-accent)' : ''}>
-							<span class="w-2 h-2 rounded-full flex-shrink-0" style="background: {p.status === 'active' ? '#4ade80' : '#ef4444'}"></span>
-							<div class="flex-1 min-w-0">
-								<div class="text-sm text-[var(--color-text-primary)]">{p.label || 'OpenAI'}</div>
-								<div class="text-[0.65rem] text-[var(--color-text-tertiary)]">
-									{p.model_preference || 'Default model'} · {p.status}
-									{#if p.last_used_at} · Last used {new Date(p.last_used_at).toLocaleDateString()}{/if}
-								</div>
-							</div>
-							<div class="flex items-center gap-2">
-								{#if p.is_active}
-									<span class="text-[0.6rem] text-[var(--color-accent)] font-medium">Active</span>
-								{:else}
-									<button onclick={() => setProviderActive(p.id)} class="text-[0.6rem] text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)] cursor-pointer">Set active</button>
-								{/if}
-								<button onclick={() => testProvider(p.id)} class="text-[0.6rem] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] cursor-pointer" title="Test">&#x21bb;</button>
-								<button onclick={() => removeProvider(p.id)} class="text-[0.6rem] text-[var(--color-text-tertiary)] hover:text-red-400 cursor-pointer" title="Remove">&times;</button>
-							</div>
-						</div>
-					{/each}
-					{#if showAddOpenAI}
-						<div class="p-3 rounded-lg border border-[var(--color-border)] space-y-2">
-							<input type="text" bind:value={newLabel} placeholder="Label (optional)" class="w-full text-sm p-2 rounded bg-[var(--color-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)]">
-							<input type="password" bind:value={newApiKey} placeholder="sk-..." class="w-full text-sm p-2 rounded bg-[var(--color-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] font-mono">
-							<input type="text" bind:value={newModel} placeholder="Model (e.g. gpt-4o)" class="w-full text-sm p-2 rounded bg-[var(--color-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)]">
-							<div class="flex gap-2">
-								<button onclick={() => addApiKeyProvider('openai')} disabled={providerSaving} class="text-xs px-3 py-1.5 rounded bg-[var(--color-accent)] text-[var(--color-bg)] cursor-pointer disabled:opacity-50">
-									{providerSaving ? 'Adding...' : 'Add OpenAI'}
-								</button>
-								<button onclick={() => { showAddOpenAI = false; newApiKey = ''; }} class="text-xs px-3 py-1.5 rounded text-[var(--color-text-tertiary)] cursor-pointer">Cancel</button>
-							</div>
-						</div>
-					{/if}
-				</div>
-
-				<!-- Custom providers -->
-				<div>
-					<div class="flex items-center justify-between mb-2">
-						<span class="text-sm font-medium text-[var(--color-text-primary)]">Custom</span>
-						<button onclick={() => showAddCustom = !showAddCustom} class="text-[0.7rem] text-[var(--color-accent)] hover:underline cursor-pointer">+ Add provider</button>
-					</div>
-					{#each providers.filter(p => p.provider === 'custom') as p (p.id)}
-						<div class="flex items-center gap-3 p-3 rounded-lg border border-[var(--color-border)] mb-2">
-							<span class="w-2 h-2 rounded-full flex-shrink-0" style="background: {p.status === 'active' ? '#4ade80' : '#ef4444'}"></span>
-							<div class="flex-1 min-w-0">
-								<div class="text-sm text-[var(--color-text-primary)]">{p.label || 'Custom'}</div>
-								<div class="text-[0.65rem] text-[var(--color-text-tertiary)]">{p.base_url || 'No endpoint'} · {p.status}</div>
-							</div>
-							<div class="flex items-center gap-2">
-								<button onclick={() => removeProvider(p.id)} class="text-[0.6rem] text-[var(--color-text-tertiary)] hover:text-red-400 cursor-pointer">&times;</button>
-							</div>
-						</div>
-					{/each}
-					{#if showAddCustom}
-						<div class="p-3 rounded-lg border border-[var(--color-border)] space-y-2">
-							<input type="text" bind:value={newLabel} placeholder="Provider name" class="w-full text-sm p-2 rounded bg-[var(--color-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)]">
-							<input type="text" bind:value={newBaseUrl} placeholder="API base URL" class="w-full text-sm p-2 rounded bg-[var(--color-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] font-mono">
-							<input type="password" bind:value={newApiKey} placeholder="API key" class="w-full text-sm p-2 rounded bg-[var(--color-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] font-mono">
-							<input type="text" bind:value={newModel} placeholder="Model name (optional)" class="w-full text-sm p-2 rounded bg-[var(--color-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)]">
-							<div class="flex gap-2">
-								<button onclick={() => addApiKeyProvider('custom')} disabled={providerSaving} class="text-xs px-3 py-1.5 rounded bg-[var(--color-accent)] text-[var(--color-bg)] cursor-pointer disabled:opacity-50">
-									{providerSaving ? 'Adding...' : 'Add Provider'}
-								</button>
-								<button onclick={() => { showAddCustom = false; newApiKey = ''; }} class="text-xs px-3 py-1.5 rounded text-[var(--color-text-tertiary)] cursor-pointer">Cancel</button>
-							</div>
-						</div>
-					{/if}
-				</div>
-			</section>
+			<!-- Use Mycelium in another app — Mycelium as the memory (MCP) +
+			     model (gateway) for an external AI app. Folded here from the old
+			     Connection tab so every AI surface lives on one page. -->
+			<HarnessPickerSection />
+			<ConnectYourAISection />
 
 			<!-- Per-agent management moved to /agents on 2026-05-06.
 			     Settings is operator-account only now. -->

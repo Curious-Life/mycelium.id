@@ -81,7 +81,7 @@
 	{/if}
 
 	<div class="text-[11px] text-[var(--color-text-tertiary)] space-y-1.5 p-3 rounded border border-[var(--color-border)]">
-		<p>Any harness needs three things: the <span class="text-[var(--color-text-secondary)]">base URL</span> above, the model <span class="font-mono text-[var(--color-text-primary)]">{MODEL}</span> (routes to your active provider in <span class="text-aurum">Intelligence</span>), and an API key.</p>
+		<p>Any AI app needs three things: the <span class="text-[var(--color-text-secondary)]">base URL</span> above, the model <span class="font-mono text-[var(--color-text-primary)]">{MODEL}</span> (routes to your active provider in <span class="text-aurum">Intelligence</span>), and an API key.</p>
 		<p>For a local tool, set a copy-paste token, then restart the gateway:</p>
 		<pre class="font-mono text-[10px] bg-[var(--color-bg)] p-2 rounded overflow-x-auto">export MYCELIUM_MCP_BEARER="$(openssl rand -hex 32)"
 npm run start:http</pre>
