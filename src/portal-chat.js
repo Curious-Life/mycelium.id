@@ -173,11 +173,12 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       // errored before any token). Once any text streams, we keep it — no retry
       // (re-streaming would duplicate into the same bubble).
       let result = null;
+      let lastErr = null;
       for (let attempt = 0; ; attempt++) {
         if (clientGone) break;
         if (attempt > 0) { ctrl = new AbortController(); lastActivity = Date.now(); console.error(`[chat] empty/stalled — retrying turn (${attempt}/${MAX_RETRIES})`); }
-        try { result = await harness.streamTurn({ provider, system, userMessage: message, tools: grantedTools, call, send: captureText, signal: ctrl.signal }); }
-        catch (e) { console.error('[chat] attempt failed:', e?.message); }
+        try { result = await harness.streamTurn({ provider, system, userMessage: message, tools: grantedTools, call, send: captureText, signal: ctrl.signal }); lastErr = null; }
+        catch (e) { lastErr = e; console.error('[chat] attempt failed:', e?.status || '', e?.message); }
         if (clientGone || assistantText.trim() || attempt >= MAX_RETRIES) break;
       }
 
@@ -189,7 +190,17 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
           const cap = (role, content) => captureMessage(db, { userId, role, content, source: CHAT_SOURCE, messageType: 'chat' }, enqueueEnrichment);
           cap('user', message).then(() => cap('assistant', assistantText.trim())).catch((e) => console.error('[chat] persist failed:', e?.message));
         } else {
-          send({ type: 'error', message: 'The model didn’t respond after several tries. Try another model in Settings → Intelligence.' });
+          // Surface an ACTIONABLE reason from the upstream status (safe: status
+          // codes + the provider label/model carry no secrets, per §1). A bare
+          // "didn't respond" hides config problems like a wrong model name or key.
+          const st = lastErr?.status;
+          const who = info.label || 'The model';
+          let msg = `${who} didn’t respond after several tries. Try another model in Settings → Intelligence.`;
+          if (st === 401 || st === 403) msg = `${who} rejected the request — the API key looks invalid. Update it in Settings → Intelligence.`;
+          else if (st === 404 || st === 400) msg = `${who} didn’t recognise the model “${info.model}”. Pick a valid model in Settings → Intelligence.`;
+          else if (st === 429) msg = `${who} is rate-limited right now. Wait a moment or switch model in Settings → Intelligence.`;
+          else if (st >= 500) msg = `${who} had a server error. Try again, or switch model in Settings → Intelligence.`;
+          send({ type: 'error', message: msg });
           send({ type: 'done', toolsUsed: [] });
         }
       }

@@ -4,7 +4,7 @@
 	import JSZip from 'jszip';
 	import { chatMessages, connectionStatus, activeModel, noModelMessage, type ChatMessage } from '$lib/stores/chat';
 	import { navigationState, spaceScope, docScope } from '$lib/stores/navigation';
-	import { apiPostForm, apiGet } from '$lib/api';
+	import { apiPostForm, apiGet, api } from '$lib/api';
 	// Timeline-style helpers — strip the bracket-prefixed group/reply
 	// context that telegram-bot.js prepends for the agent prompt, and
 	// pick a brand glyph for the source. Reused so chat ↔ timeline
@@ -37,6 +37,38 @@
 	let { visible = true }: Props = $props();
 
 	const connectionStatusValue = $derived($connectionStatus);
+
+	// ── Switch AI provider from the chat ──────────────────────────────────────
+	// Clicking the active-model chip opens a menu of configured providers; picking
+	// one flips is_active on the server (PUT /portal/providers/:id) — which is the
+	// per-user active provider every chat with this agent then uses. Optimistic
+	// chip update; the next turn's `model` event confirms it.
+	let providerMenuOpen = $state(false);
+	let chatProviders = $state<any[]>([]);
+	let switchingId = $state<number | null>(null);
+	const isLocalBase = (u?: string) => !!u && /(?:127\.0\.0\.1|localhost|0\.0\.0\.0)/.test(u);
+	async function loadChatProviders() {
+		try { const r = await apiGet<{ providers: any[] }>('/portal/providers'); chatProviders = r.providers || []; }
+		catch { chatProviders = []; }
+	}
+	function toggleProviderMenu() {
+		providerMenuOpen = !providerMenuOpen;
+		if (providerMenuOpen) loadChatProviders();
+	}
+	async function switchProvider(p: any) {
+		if (p.is_active) { providerMenuOpen = false; return; }
+		switchingId = p.id;
+		try {
+			const res = await api(`/portal/providers/${p.id}`, { method: 'PUT', body: JSON.stringify({ is_active: true }) });
+			if (res.ok) {
+				const local = isLocalBase(p.base_url);
+				activeModel.set({ label: p.label || p.provider, model: p.model_preference || '', jurisdiction: local ? 'local' : '', local });
+				chatProviders = chatProviders.map((x) => ({ ...x, is_active: x.id === p.id }));
+				providerMenuOpen = false;
+			}
+		} catch { /* leave menu open so the user can retry */ }
+		finally { switchingId = null; }
+	}
 
 	// Agent selection
 	let agents = $state<AgentInfo[]>([]);
@@ -1345,12 +1377,41 @@
 						{/if}
 					</div>
 
-					<!-- Active model chip: always show which provider + model is answering. -->
+					<!-- Active model chip → click to switch provider (saved for all chats). -->
 					{#if $activeModel}
-						<div class="flex items-center gap-1.5 px-2 py-1 rounded-lg text-[10px]" title={$activeModel.local ? 'Local model — runs on your device' : ($activeModel.jurisdiction || 'cloud')}>
-							<div class="w-1.5 h-1.5 rounded-full {$activeModel.local ? 'bg-emerald-500' : 'bg-[var(--color-accent)]'}"></div>
-							<span class="text-[var(--color-text-secondary)] font-medium">{$activeModel.label}</span>
-							<span class="hidden sm:inline text-[var(--color-text-tertiary)]">{$activeModel.model}</span>
+						<div class="relative">
+							<button
+								class="flex items-center gap-1.5 px-2 py-1 rounded-lg text-[10px] hover:bg-[var(--color-elevated)] cursor-pointer transition-colors"
+								onclick={toggleProviderMenu}
+								title="Switch AI model — saved for all chats with this agent"
+								aria-haspopup="menu"
+								aria-expanded={providerMenuOpen}
+							>
+								<div class="w-1.5 h-1.5 rounded-full {$activeModel.local ? 'bg-emerald-500' : 'bg-[var(--color-accent)]'}"></div>
+								<span class="text-[var(--color-text-secondary)] font-medium">{$activeModel.label}</span>
+								<span class="hidden sm:inline text-[var(--color-text-tertiary)]">{$activeModel.model}</span>
+								<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-[var(--color-text-tertiary)]"><path d="M6 9l6 6 6-6" /></svg>
+							</button>
+							{#if providerMenuOpen}
+								<div class="absolute right-0 top-full mt-1 z-50 min-w-[230px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1 shadow-lg" style="backdrop-filter: blur(12px) saturate(140%); -webkit-backdrop-filter: blur(12px) saturate(140%);">
+									<div class="px-2.5 py-1.5 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Switch model · saved for all chats</div>
+									{#each chatProviders as p (p.id)}
+										<button
+											class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-[11px] hover:bg-[var(--color-elevated)] {p.is_active ? 'bg-[var(--color-elevated)]' : ''}"
+											onclick={() => switchProvider(p)}
+											disabled={switchingId === p.id}
+										>
+											<div class="w-1.5 h-1.5 rounded-full flex-shrink-0 {isLocalBase(p.base_url) ? 'bg-emerald-500' : 'bg-[var(--color-accent)]'}"></div>
+											<span class="text-[var(--color-text-primary)] font-medium truncate">{p.label || p.provider}</span>
+											<span class="hidden sm:inline text-[var(--color-text-tertiary)] truncate">{p.model_preference || ''}</span>
+											<span class="ml-auto flex-shrink-0 text-[9px] text-[var(--color-accent)]">{p.is_active ? '✓' : (switchingId === p.id ? '…' : '')}</span>
+										</button>
+									{:else}
+										<div class="px-2.5 py-2 text-[10px] text-[var(--color-text-tertiary)]">No models yet — add one in Settings → Intelligence.</div>
+									{/each}
+									<a class="block px-2.5 py-1.5 mt-0.5 text-[10px] text-[var(--color-accent)] hover:underline" href="/settings?tab=intelligence">Manage in Settings →</a>
+								</div>
+							{/if}
 						</div>
 					{/if}
 
