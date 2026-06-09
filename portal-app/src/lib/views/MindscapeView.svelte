@@ -615,6 +615,11 @@
 	</div>
 {:else}
 <div class="mindscape-layout" class:resizing={isResizing} bind:this={containerRef}>
+	<!-- Pipeline progress — a glassy top-right chip driven by the generate poller.
+	     Mounted at the layout root so it's visible in BOTH the empty-state AND the
+	     populated mindscape (e.g. when "Illuminate" runs from the realm sidebar). -->
+	<MindscapeActivityChip />
+
 	<!-- Navigation + detail panel — only once there's a mindscape to navigate.
 	     On an empty vault it would be a blank rail, so we hide it entirely. -->
 	{#if msState.points && msState.points.length > 0}
@@ -865,9 +870,6 @@
 					<!-- The living 3D mindscape (Goethe model) breathing behind the glass -->
 					<MindscapeBackground />
 
-					<!-- Pipeline progress floats to a glassy top-right chip (non-blocking) -->
-					<MindscapeActivityChip />
-
 					<!-- The invitation persists through embedding/mapping so Connect-AI &
 					     the other steps stay reachable while the pipeline runs in the
 					     background. Generation auto-starts (the auto-gen effect above). -->
@@ -1038,14 +1040,14 @@
 		width: 100%;
 		margin: 2rem 1.5rem;
 		padding: 2.25rem 2rem 2rem;
-		background: rgba(10, 10, 12, 0.72);
-		backdrop-filter: blur(20px) saturate(140%);
-		-webkit-backdrop-filter: blur(20px) saturate(140%);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		/* Frosted glass — theme-aware token so light mode is a light frosted panel,
+		   the living map drifting through the blur in both modes. */
+		background: var(--glass-panel-bg);
+		backdrop-filter: blur(22px) saturate(150%);
+		-webkit-backdrop-filter: blur(22px) saturate(150%);
+		border: 1px solid var(--glass-border);
 		border-radius: 16px;
-	}
-	:global([data-theme="light"]) .welcome-inner {
-		background: rgba(250, 248, 245, 0.78);
+		box-shadow: var(--shadow-lg);
 	}
 	/* Breadcrumb *//* Realm cards *//* Exploration overview *//* Live exploration log */
 	.explore-log {

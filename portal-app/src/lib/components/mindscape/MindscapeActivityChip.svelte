@@ -54,12 +54,12 @@
 		min-width: 220px;
 		max-width: 300px;
 		padding: 0.6rem 0.8rem 0.7rem;
-		background: rgba(12, 12, 16, 0.55);
+		background: var(--glass-panel-bg);
 		backdrop-filter: blur(20px) saturate(140%);
 		-webkit-backdrop-filter: blur(20px) saturate(140%);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--glass-border);
 		border-radius: 12px;
-		box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
+		box-shadow: var(--shadow-md);
 		/* Float in organically — drift up + in from the corner, settle gently. */
 		animation: floatIn 0.55s cubic-bezier(0.16, 1, 0.3, 1);
 	}
@@ -88,7 +88,7 @@
 		font-size: 0.66rem; padding: 2px 8px; border-radius: 6px; cursor: pointer; font-family: inherit;
 	}
 	.retry:hover { background: rgba(248, 113, 113, 0.1); }
-	.bar { height: 3px; border-radius: 2px; background: rgba(255, 255, 255, 0.1); overflow: hidden; margin: 0.5rem 0 0 1rem; }
+	.bar { height: 3px; border-radius: 2px; background: var(--glass-input-border); overflow: hidden; margin: 0.5rem 0 0 1rem; }
 	.fill { height: 100%; background: var(--color-accent-aurum, #e5b84c); border-radius: 2px; transition: width 0.6s ease; }
 	.chip.done .fill { background: #4ade80; }
 

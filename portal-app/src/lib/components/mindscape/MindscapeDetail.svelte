@@ -321,7 +321,7 @@
 						</span>
 						<span class="cta-body">
 							<span class="cta-title">{genActive ? 'Illuminating…' : 'Illuminate'}</span>
-							<span class="cta-sub">{genActive ? 'Naming &amp; describing your areas.' : 'Let your AI name &amp; describe these areas.'}</span>
+							<span class="cta-sub">{genActive ? 'Naming & describing your areas.' : 'Let your AI name & describe these areas.'}</span>
 						</span>
 					</button>
 				{:else}

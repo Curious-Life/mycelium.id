@@ -16,6 +16,7 @@
 
 import { CATALOG } from './catalog.js';
 import { estimateMemoryGb, fitScore, fitLevel } from './fit.js';
+import { monthsSince } from './catalog-meta.js';
 
 /**
  * The memory budget a model may use: discrete GPU VRAM when present, otherwise a
@@ -81,6 +82,8 @@ export function recommendModels(hw, { ctx = 8192, limit } = {}) {
       fitScore: score,
       fitLevel: fitLevel(estimatedGb, available),
       rankScore: rankScore(m.quality, score),
+      updated: m.updated || '',
+      ageMonths: monthsSince(m.updated),
       blurb: m.blurb,
     };
   });

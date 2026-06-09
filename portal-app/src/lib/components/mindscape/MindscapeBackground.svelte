@@ -26,7 +26,10 @@
 			if (disposed || !canvas) return;
 
 			const parent = canvas.parentElement!;
-			const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+			// Follow the APP theme ([data-theme]) not the OS scheme, so the cloud
+			// matches a manually-toggled light/dark app.
+			const themeAttr = document.documentElement.getAttribute('data-theme');
+			const dark = themeAttr ? themeAttr === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
 
 			const scene = new THREE.Scene();
 			let w = parent.clientWidth || 1;

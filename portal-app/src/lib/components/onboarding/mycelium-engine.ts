@@ -176,7 +176,10 @@ class Engine {
 		this.dpr = window.devicePixelRatio || 1;
 		this.persist = document.createElement('canvas');
 		this.drawCtx = this.persist.getContext('2d')!;
-		this.isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+		// Follow the APP theme ([data-theme] toggle), not the OS scheme — else a
+		// user on light-app/dark-OS gets a dark canvas behind a light panel.
+		const themeAttr = document.documentElement.getAttribute('data-theme');
+		this.isDark = themeAttr ? themeAttr === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
 		this.bg = this.isDark ? '#0A0A0C' : '#F7F5EF';
 	}
 	gridKey(x: number, y: number) { return `${Math.floor(x / GRID_SIZE)},${Math.floor(y / GRID_SIZE)}`; }
