@@ -1,8 +1,10 @@
 <script lang="ts">
 	import { marked } from 'marked';
 	import DOMPurify from 'isomorphic-dompurify';
+	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { api } from '$lib/api';
+	import { generate, start as startGenerate } from '$lib/generate';
 	import Sparkline from '$lib/components/mindscape/Sparkline.svelte';
 	import {
 		mindscapeState,
@@ -88,12 +90,37 @@
 			.filter(r => (r.pointCount || 0) >= 3)
 			.sort((a, b) => (b.pointCount || 0) - (a.pointCount || 0));
 	});
-	// AI-generated chronicles give realms real names. Until an AI is connected they
-	// fall back to "Realm N" — meaningless. We detect that and (a) label them as
-	// warm "Area N" and (b) surface a "Spawn intelligence" prompt to connect an AI,
-	// which then names + describes each area.
-	const realmsNamed = $derived(sortedRealms.some((r: any) => typeof r.name === 'string' && r.name.trim().length > 0));
+	// A realm is "described" only once an AI has chronicled it. Until then the
+	// pipeline stores a literal placeholder name ("Realm 0") + empty essence — so
+	// presence-of-name is NOT a signal. We detect the placeholder and (a) label such
+	// realms as warm, greyed "Area N" and (b) surface a bottom CTA: "Spawn
+	// intelligence" (connect an AI) when none is connected, or "Illuminate" (run the
+	// describe pass) when one is.
+	function isPlaceholderName(name: string | null | undefined): boolean {
+		return !name || /^realm\s+\d+$/i.test(String(name).trim());
+	}
+	function isRealmDescribed(r: any): boolean {
+		return !isPlaceholderName(r?.name) || (typeof r?.essence === 'string' && r.essence.trim().length > 0);
+	}
+	function realmLabel(r: any, idx: number): string {
+		return isRealmDescribed(r) ? r.name : `Area ${idx + 1}`;
+	}
+	const anyUndescribed = $derived(sortedRealms.some((r: any) => !isRealmDescribed(r)));
+	const currentRealmIdx = $derived(sortedRealms.findIndex((r: any) => r.id === msState.selectedRealmId));
+
+	// Is an AI connected? (any active provider — status may still be erroring, but a
+	// configured provider means "Spawn" is done, so we offer "Illuminate" instead.)
+	let aiConnected = $state(false);
+	onMount(async () => {
+		try {
+			const res = await api('/portal/providers');
+			if (res.ok) { const d = await res.json(); aiConnected = (d.providers || []).some((p: any) => p.is_active); }
+		} catch { /* leave false — fall back to Spawn intelligence */ }
+	});
+
+	const genActive = $derived(['embedding', 'starting', 'running'].includes($generate.phase));
 	function connectIntelligence() { goto('/settings?tab=intelligence'); }
+	function illuminateRealms() { void startGenerate(); }
 
 	// Helper: normalize entity to display name (handles both string and {name/text} formats)
 	function entityName(e: any): string {
@@ -225,10 +252,12 @@
 </script>
 
 <div class="mindscape-nav">
-	<!-- Breadcrumb -->
+	<!-- Breadcrumb — hidden at the realms root (a lone "Mycelium" there just
+	     duplicates the page). Shown only once drilled in, as a back-path. -->
+	{#if navLevel !== 'realms'}
 	<div class="breadcrumb">
-		<button class="breadcrumb-link" class:active={navLevel === 'realms'} onclick={() => mindscapeState.resetNavigation()}>
-			Mycelium
+		<button class="breadcrumb-link" onclick={() => mindscapeState.resetNavigation()}>
+			Areas
 		</button>
 		{#if msState.selectedRealmId !== null}
 			<span class="breadcrumb-sep">/</span>
@@ -237,7 +266,7 @@
 				class:active={navLevel === 'themes'}
 				onclick={() => mindscapeState.drillIntoRealm(msState.selectedRealmId!)}
 			>
-				{currentRealm?.name || `Realm ${msState.selectedRealmId}`}
+				{currentRealm && isRealmDescribed(currentRealm) ? currentRealm.name : `Area ${currentRealmIdx + 1}`}
 			</button>
 		{/if}
 		{#if msState.selectedSemanticThemeId !== null && currentTheme}
@@ -255,42 +284,60 @@
 			<span class="breadcrumb-current">{currentTerritory.name || `T${msState.selectedTerritoryId}`}</span>
 		{/if}
 	</div>
+	{/if}
 
 	<div class="nav-content">
 		{#if navLevel === 'realms'}
 			<!-- ═══ REALM LIST ═══ -->
-			{#if !realmsNamed && sortedRealms.length > 0}
-				<!-- No AI yet → the areas are unnamed. Invite the user to spawn one. -->
-				<button class="spawn-intelligence" onclick={connectIntelligence}>
-					<span class="spawn-icon">
-						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
-					</span>
-					<span class="spawn-body">
-						<span class="spawn-title">Spawn intelligence</span>
-						<span class="spawn-sub">{sortedRealms.length} {sortedRealms.length === 1 ? 'area' : 'areas'} are forming. Connect an AI to name &amp; explore them.</span>
-					</span>
-					<span class="spawn-arrow">→</span>
-				</button>
-			{/if}
 			<div class="nav-list">
 				{#each sortedRealms as realm, i (realm.id)}
+					{@const described = isRealmDescribed(realm)}
 					<button
 						class="nav-item realm-item"
+						class:undescribed={!described}
 						onclick={() => mindscapeState.drillIntoRealm(realm.id)}
 						onmouseenter={() => mindscapeState.setHovered('realm', realm.id)}
 						onmouseleave={() => mindscapeState.setHovered('realm', null)}
 					>
-						<span class="nav-dot" style="background: {getColor(realm.id)}"></span>
+						<span class="nav-dot" class:muted={!described} style={described ? `background: ${getColor(realm.id)}` : ''}></span>
 						<div class="nav-item-content">
-							<span class="nav-item-name">{realm.name || `Area ${i + 1}`}</span>
+							<span class="nav-item-name">{realmLabel(realm, i)}</span>
 							<span class="nav-item-stats">{realm.pointCount?.toLocaleString()} points · {realm.territoryCount} {realm.territoryCount === 1 ? 'territory' : 'territories'}</span>
-							{#if realm.essence}
+							{#if described && realm.essence}
 								<span class="nav-item-essence">{realm.essence}</span>
 							{/if}
 						</div>
 					</button>
 				{/each}
 			</div>
+
+			{#if anyUndescribed && sortedRealms.length > 0}
+				<!-- Bottom CTA: describe the unnamed areas. Illuminate if an AI is
+				     connected (runs the describe pass), else invite connecting one. -->
+				{#if aiConnected}
+					<button class="realm-cta illuminate" onclick={illuminateRealms} disabled={genActive}>
+						<span class="cta-icon">
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+						</span>
+						<span class="cta-body">
+							<span class="cta-title">{genActive ? 'Illuminating…' : 'Illuminate'}</span>
+							<span class="cta-sub">{genActive ? 'Naming &amp; describing your areas.' : 'Let your AI name &amp; describe these areas.'}</span>
+						</span>
+					</button>
+				{:else}
+					<button class="realm-cta spawn" onclick={connectIntelligence}>
+						<span class="cta-icon">
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+						</span>
+						<span class="cta-body">
+							<span class="cta-title">Spawn intelligence</span>
+							<span class="cta-sub">Connect an AI to name &amp; explore your areas.</span>
+						</span>
+						<span class="cta-arrow">→</span>
+					</button>
+				{/if}
+			{/if}
+
 			{#if totalMessages > 0}
 				<div class="nav-footer">
 					{totalMessages.toLocaleString()} messages · {totalRealms} {totalRealms === 1 ? 'area' : 'areas'}
@@ -913,44 +960,62 @@
 		border-color: rgba(229, 184, 76, 0.4);
 	}
 
-	/* "Spawn intelligence" — the connect-AI prompt, in the onboarding glass style. */
-	.spawn-intelligence {
+	/* Bottom CTA — describe the unnamed areas. Illuminate (AI connected) is a calm
+	   glass card; Spawn intelligence keeps the warm gold invite. */
+	.realm-cta {
 		display: flex;
 		align-items: center;
 		gap: 0.65rem;
 		width: calc(100% - 20px);
-		margin: 10px;
-		padding: 0.75rem 0.85rem;
-		background: rgba(229, 184, 76, 0.06);
-		border: 1px solid rgba(229, 184, 76, 0.28);
+		margin: 4px 10px 10px;
+		padding: 0.7rem 0.8rem;
 		border-radius: 12px;
 		cursor: pointer;
 		text-align: left;
 		font-family: inherit;
 		color: var(--color-text-primary);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: rgba(255, 255, 255, 0.03);
 		transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
 	}
-	.spawn-intelligence:hover {
-		transform: translateY(-1px);
+	.realm-cta:hover:not(:disabled) { transform: translateY(-1px); }
+	.realm-cta:disabled { cursor: default; opacity: 0.7; }
+	.realm-cta.illuminate:hover:not(:disabled) {
+		background: rgba(229, 184, 76, 0.05);
+		border-color: rgba(229, 184, 76, 0.3);
+	}
+	.realm-cta.spawn {
+		background: rgba(229, 184, 76, 0.06);
+		border-color: rgba(229, 184, 76, 0.26);
+	}
+	.realm-cta.spawn:hover {
 		background: rgba(229, 184, 76, 0.1);
-		border-color: rgba(229, 184, 76, 0.5);
+		border-color: rgba(229, 184, 76, 0.45);
 	}
-	.spawn-icon {
-		display: flex;
-		flex-shrink: 0;
-		color: var(--color-accent-aurum, #e5b84c);
-	}
-	.spawn-icon svg { width: 20px; height: 20px; }
-	.spawn-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-	.spawn-title { font-size: 0.82rem; font-weight: 600; }
-	.spawn-sub { font-size: 0.68rem; color: var(--color-text-secondary); line-height: 1.4; }
-	.spawn-arrow { margin-left: auto; color: var(--color-accent-aurum, #e5b84c); font-size: 0.9rem; flex-shrink: 0; }
+	.cta-icon { display: flex; flex-shrink: 0; color: var(--color-accent-aurum, #e5b84c); }
+	.cta-icon svg { width: 19px; height: 19px; }
+	.cta-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+	.cta-title { font-size: 0.82rem; font-weight: 600; }
+	.cta-sub { font-size: 0.68rem; color: var(--color-text-secondary); line-height: 1.4; }
+	.cta-arrow { margin-left: auto; color: var(--color-accent-aurum, #e5b84c); font-size: 0.9rem; flex-shrink: 0; }
 	.nav-dot {
-		width: 8px;
-		height: 8px;
+		width: 7px;
+		height: 7px;
 		border-radius: 50%;
 		flex-shrink: 0;
-		margin-top: 4px;
+		margin-top: 5px;
+		opacity: 0.7;
+	}
+	.nav-dot.muted {
+		background: var(--color-text-tertiary);
+		opacity: 0.3;
+	}
+	/* Undescribed realms — greyed until an AI chronicles them. */
+	.realm-item.undescribed { opacity: 0.5; }
+	.realm-item.undescribed:hover { opacity: 0.78; }
+	.realm-item.undescribed .nav-item-name {
+		color: var(--color-text-secondary);
+		font-weight: 500;
 	}
 	.nav-item-content {
 		flex: 1;
