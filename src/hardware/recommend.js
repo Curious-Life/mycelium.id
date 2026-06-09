@@ -95,6 +95,20 @@ export function recommendModels(hw, { ctx = 8192, limit } = {}) {
     .filter((m) => m.fitScore === 0)
     .sort((a, b) => a.paramsB - b.paramsB);
 
+  // "Recommended from us" — our top picks for a personal companion on THIS box:
+  // the highest-ranked models that both fit comfortably and are recent (≤ a year),
+  // so we never headline a stale model. rankScore already blends companion-quality
+  // (warmth/EQ prior + EQ-Bench) with hardware fit. Top 3 get the badge.
+  const RECOMMENDED_COUNT = 3;
+  const RECOMMENDED_MAX_AGE_MONTHS = 12;
+  const topPicks = new Set(
+    bandA
+      .filter((m) => m.ageMonths == null || m.ageMonths <= RECOMMENDED_MAX_AGE_MONTHS)
+      .slice(0, RECOMMENDED_COUNT)
+      .map((m) => m.name),
+  );
+  for (const m of scored) m.recommended = topPicks.has(m.name);
+
   let recommendations = [...bandA, ...bandB];
   if (Number.isInteger(limit) && limit > 0) recommendations = recommendations.slice(0, limit);
 

@@ -53,7 +53,7 @@
 	// Mirrors the Settings AI page (the "cookbook"): a Local lane driven by the
 	// hardware recommender (most-capable/most-suitable models per machine, one-tap
 	// Pull&use) + a Cloud lane with every preset incl. the EU-sovereign options.
-	type Rec = { name: string; installed: boolean; fitLevel: string; bestFor: string; estimatedGb: number; fitScore?: number };
+	type Rec = { name: string; installed: boolean; fitLevel: string; bestFor: string; estimatedGb: number; fitScore?: number; recommended?: boolean; ageMonths?: number | null };
 	type Preset = { id: string; label: string; kind: string; baseUrl: string; jurisdiction: string; defaultModel: string };
 	const OLLAMA_BASE = 'http://127.0.0.1:11434/v1';
 	const FIT: Record<string, { label: string; cls: string }> = {
@@ -91,8 +91,17 @@
 	const MAX_AGE_MONTHS = 6;
 	const COLLAPSED_COUNT = 3;
 	let showAllLocal = $state(false);
+	let modelQuery = $state('');
+	// Recent models only (≤6mo); our top picks (recommended) sort first. A search
+	// box filters the full recent set; with no query we collapse to the top few so
+	// the Cloud lane stays in view.
 	const recentRecs = $derived(((hwRec?.recommendations ?? []) as Rec[]).filter((m: any) => m.ageMonths == null || m.ageMonths <= MAX_AGE_MONTHS));
-	const visibleRecs = $derived(showAllLocal ? recentRecs : recentRecs.slice(0, COLLAPSED_COUNT));
+	const matchedRecs = $derived.by(() => {
+		const q = modelQuery.trim().toLowerCase();
+		if (!q) return recentRecs;
+		return recentRecs.filter((m: any) => m.name.toLowerCase().includes(q) || (m.bestFor || '').toLowerCase().includes(q));
+	});
+	const visibleRecs = $derived((showAllLocal || modelQuery.trim()) ? matchedRecs : matchedRecs.slice(0, COLLAPSED_COUNT));
 
 	$effect(() => {
 		if (step === 'intelligence') {
@@ -262,10 +271,12 @@
 				<p class="lane-hw">
 					{hwRec.hardware?.hasGpu ? `${hwRec.hardware.gpuName} · ${hwRec.hardware.gpuVramGb}GB` : `${hwRec.hardware?.cpuCores ?? ''}-core CPU`} · {hwRec.hardware?.totalRamGb}GB RAM{#if !hwRec.ollamaInstalled} · Ollama auto-installs on first pick{/if}
 				</p>
+				<input class="rec-search" type="text" bind:value={modelQuery} placeholder="Search models…" autocomplete="off" />
 				<div class="rec-list">
 					{#each visibleRecs as m (m.name)}
-						<div class="rec-row" class:dim={m.fitScore === 0}>
+						<div class="rec-row" class:dim={m.fitScore === 0} class:rec-top={m.recommended}>
 							<span class="rec-name">{m.name}</span>
+							{#if m.recommended}<span class="lane-pill rec-pick">★ recommended</span>{/if}
 							<span class="lane-pill {FIT[m.fitLevel]?.cls ?? ''}">{FIT[m.fitLevel]?.label ?? m.fitLevel}</span>
 							<span class="rec-blurb">{m.bestFor} · ~{m.estimatedGb}GB</span>
 							<span class="rec-act">
@@ -278,11 +289,13 @@
 								{/if}
 							</span>
 						</div>
+					{:else}
+						<p class="invite-or sm">No models match “{modelQuery}”.</p>
 					{/each}
 				</div>
-				{#if recentRecs.length > COLLAPSED_COUNT}
+				{#if !modelQuery.trim() && matchedRecs.length > COLLAPSED_COUNT}
 					<button class="rec-more" onclick={() => (showAllLocal = !showAllLocal)}>
-						{showAllLocal ? 'Show fewer' : `Show ${recentRecs.length - COLLAPSED_COUNT} more`}
+						{showAllLocal ? 'Show fewer' : `Show ${matchedRecs.length - COLLAPSED_COUNT} more`}
 					</button>
 				{/if}
 			{/if}
@@ -409,15 +422,24 @@
 	.fit-red { color: var(--color-accent-coral); background: rgba(248, 113, 113, 0.12); }
 	.lane-hw { font-size: 0.66rem; color: var(--color-text-tertiary); margin: 0 0 0.4rem; line-height: 1.4; }
 	.rec-list { display: flex; flex-direction: column; gap: 4px; }
+	.rec-search {
+		width: 100%; margin-bottom: 0.45rem; padding: 0.4rem 0.6rem; border-radius: 8px;
+		font-size: 0.74rem; font-family: inherit;
+		border: 1px solid var(--glass-input-border); background: var(--glass-input-bg); color: var(--color-text-primary);
+	}
+	.rec-search::placeholder { color: var(--color-text-tertiary); }
+	.rec-search:focus { outline: none; border-color: var(--color-accent-aurum); }
 	.rec-row {
-		display: grid; grid-template-columns: auto auto 1fr auto; align-items: center; gap: 0.5rem;
+		display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem 0.5rem;
 		padding: 0.45rem 0.6rem; border: 1px solid var(--glass-border);
 		background: var(--glass-card-bg); border-radius: 9px;
 	}
 	.rec-row.dim { opacity: 0.5; }
+	.rec-row.rec-top { border-color: rgba(229, 184, 76, 0.35); background: rgba(229, 184, 76, 0.05); }
 	.rec-name { font-family: var(--font-mono, monospace); font-size: 0.73rem; color: var(--color-text-primary); }
-	.rec-blurb { font-size: 0.64rem; color: var(--color-text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.rec-act { justify-self: end; }
+	.rec-pick { color: var(--color-bg); background: var(--color-accent-aurum); }
+	.rec-blurb { flex: 1; min-width: 0; font-size: 0.64rem; color: var(--color-text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.rec-act { margin-left: auto; flex-shrink: 0; }
 	.rec-btn {
 		background: none; border: 1px solid rgba(229, 184, 76, 0.35); color: var(--color-accent-aurum);
 		font-size: 0.66rem; padding: 3px 10px; border-radius: 7px; cursor: pointer; font-family: inherit; white-space: nowrap;

@@ -24,9 +24,19 @@
 	let saveErr = $state<string | null>(null);
 	let testMsg = $state<Record<number, string>>({});
 
-	type Rec = { name: string; bestFor: string; estimatedGb: number; fitScore: number; fitLevel: string; blurb: string; installed: boolean };
+	type Rec = { name: string; bestFor: string; estimatedGb: number; fitScore: number; fitLevel: string; blurb: string; installed: boolean; recommended?: boolean; ageMonths?: number | null };
 	let hwRec = $state<{ hardware: any; available: number; recommendations: Rec[]; note: string | null; ollamaUp: boolean; ollamaInstalled: boolean } | null>(null);
 	let hwLoading = $state(false);
+	// Curate the list: by default show our recommended picks + recent models only
+	// (the catalog has 300+, most stale). A search box reaches the full set.
+	let modelQuery = $state('');
+	const RECENCY_MONTHS = 12;
+	const visibleModels = $derived.by(() => {
+		const all = hwRec?.recommendations ?? [];
+		const q = modelQuery.trim().toLowerCase();
+		if (q) return all.filter((m: any) => m.name.toLowerCase().includes(q) || (m.bestFor || '').toLowerCase().includes(q));
+		return all.filter((m: any) => m.recommended || m.ageMonths == null || m.ageMonths <= RECENCY_MONTHS);
+	});
 	let hwErr = $state<string | null>(null);
 	let pulling = $state<Record<string, { pct: number; status: string; err?: string }>>({});
 
@@ -226,10 +236,12 @@
 					{#if !hwRec.ollamaInstalled}· Ollama auto-installs on first pick{/if}
 				</p>
 				{#if hwRec.note}<p class="note-amber">{hwRec.note}</p>{/if}
+				<input class="model-search" type="text" bind:value={modelQuery} placeholder="Search all models…" autocomplete="off" />
 				<div class="rec-list">
-					{#each hwRec.recommendations as m (m.name)}
-						<div class="row" class:dim={m.fitScore === 0}>
+					{#each visibleModels as m (m.name)}
+						<div class="row" class:dim={m.fitScore === 0} class:rec-top={m.recommended}>
 							<span class="mono">{m.name}</span>
+							{#if m.recommended}<span class="chip rec-pick">★ recommended</span>{/if}
 							<span class="chip {FIT[m.fitLevel]?.cls ?? ''}">{FIT[m.fitLevel]?.label ?? m.fitLevel}</span>
 							<span class="row-blurb">{m.bestFor} · ~{m.estimatedGb}GB</span>
 							<span class="row-action">
@@ -242,6 +254,8 @@
 								{/if}
 							</span>
 						</div>
+					{:else}
+						<p class="muted-xs">No models match “{modelQuery}”.</p>
 					{/each}
 				</div>
 			{/if}
@@ -346,9 +360,17 @@
 	.fit-red { background: rgba(248,113,113,0.14); color: #f87171; }
 
 	/* Rows */
+	.model-search {
+		width: 100%; margin-top: 0.5rem; padding: 0.4rem 0.6rem; border-radius: 8px; font-size: 0.76rem; font-family: inherit;
+		border: 1px solid var(--glass-input-border); background: var(--glass-input-bg); color: var(--color-text-primary);
+	}
+	.model-search::placeholder { color: var(--color-text-tertiary); }
+	.model-search:focus { outline: none; border-color: var(--color-accent-aurum); }
 	.rec-list { display: flex; flex-direction: column; gap: 5px; max-height: 18rem; overflow-y: auto; margin-top: 0.5rem; }
 	.row { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.6rem; border-radius: 9px; background: rgba(255,255,255,0.03); font-size: 0.78rem; }
 	.row.dim { opacity: 0.5; }
+	.row.rec-top { background: rgba(229,184,76,0.06); border: 1px solid rgba(229,184,76,0.3); }
+	.chip.rec-pick { background: var(--color-accent-aurum); color: var(--color-bg); }
 	.row-blurb { color: var(--color-text-tertiary); font-size: 0.68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.row-action { margin-left: auto; display: flex; align-items: center; gap: 0.6rem; flex-shrink: 0; }
 	.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-border); flex-shrink: 0; }
