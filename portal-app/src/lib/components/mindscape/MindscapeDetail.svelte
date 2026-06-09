@@ -93,7 +93,7 @@
 	// warm "Area N" and (b) surface a "Spawn intelligence" prompt to connect an AI,
 	// which then names + describes each area.
 	const realmsNamed = $derived(sortedRealms.some((r: any) => typeof r.name === 'string' && r.name.trim().length > 0));
-	function connectIntelligence() { goto('/settings'); }
+	function connectIntelligence() { goto('/settings?tab=intelligence'); }
 
 	// Helper: normalize entity to display name (handles both string and {name/text} formats)
 	function entityName(e: any): string {

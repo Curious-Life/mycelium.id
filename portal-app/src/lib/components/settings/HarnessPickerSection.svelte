@@ -44,7 +44,7 @@
 	const harnesses: Harness[] = [
 		{
 			id: 'mycelium', name: 'Mycelium-native', doors: [],
-			blurb: 'No external harness — talk to your vault directly in the portal. Sovereign and local.',
+			blurb: 'No external app — talk to your vault directly in the portal. Sovereign and local.',
 			recipe: null, docId: 'mycelium-native'
 		},
 		{
@@ -55,7 +55,7 @@
 		},
 		{
 			id: 'opencode', name: 'opencode', doors: ['memory', 'model'],
-			blurb: 'The coding harness (the Claude Code mirror). Uses both doors — memory over MCP, model over the gateway.',
+			blurb: 'The coding app (the Claude Code mirror). Uses both doors — memory over MCP, model over the gateway.',
 			recipe: `// opencode.json
 {
   "mcp": {
@@ -90,7 +90,7 @@ mcp_servers:
 		},
 		{
 			id: 'custom', name: 'Custom — any MCP / OpenAI client', doors: ['memory', 'model'],
-			blurb: 'Goose, Cline, Continue, Codex, OpenHands, Cursor… any spec-compliant harness. Use the raw endpoints below.',
+			blurb: 'Goose, Cline, Continue, Codex, OpenHands, Cursor… any spec-compliant MCP/OpenAI app. Use the raw endpoints below.',
 			recipe: `Memory (MCP)   : ${MCP}     (OAuth 2.1 or Bearer <MYCELIUM_MCP_BEARER>)
 Model base URL : ${LOCAL}/v1      (API key = the bearer)
 Model id       : ${MODEL}`,
@@ -105,9 +105,9 @@ Model id       : ${MODEL}`,
 </script>
 
 <section class="card p-5">
-	<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Pick your harness</h2>
+	<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Use Mycelium in another app</h2>
 	<p class="text-xs text-[var(--color-text-tertiary)] mb-4">
-		Choose the agent you use — Mycelium becomes its <span class="text-[var(--color-text-secondary)]">memory</span> (over MCP) and, optionally, its <span class="text-[var(--color-text-secondary)]">model</span> (over the gateway). Full per-harness setup: <span class="font-mono">{RECIPES_DOC}</span>.
+		Choose the AI app you use — Mycelium becomes its <span class="text-[var(--color-text-secondary)]">memory</span> (over MCP) and, optionally, its <span class="text-[var(--color-text-secondary)]">model</span> (over the gateway). Full per-app setup: <span class="font-mono">{RECIPES_DOC}</span>.
 	</p>
 
 	{#if !publicBaseUrl}

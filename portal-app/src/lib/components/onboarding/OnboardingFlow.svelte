@@ -148,7 +148,7 @@
 
 	function goConnectAI() {
 		navigationState.setPrimaryView('settings');
-		goto('/settings');
+		goto('/settings?tab=intelligence');
 	}
 
 	// One-tap: add the local Ollama provider and auto-activate (backend sets the
