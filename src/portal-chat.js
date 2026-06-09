@@ -166,6 +166,11 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       const isLocal = info.local;
       const recentN = isLocal ? 5 : 12;
       const sysCap = isLocal ? 5000 : 28000;
+      // Local models (small on-box Ollama) are VERY slow to first token when tools
+      // are attached — Ollama constrains generation to the tool grammar, which on a
+      // 12B reasoning model pushes time-to-first-token to 30s+ (measured). They also
+      // use tools poorly. So give local a fast, context-grounded turn (no tools — the
+      // briefing is already in the system preamble); cloud keeps the full tool set.
 
       // System = orientation + getContext briefing + (cloud only) memory retrieval.
       let system = CHAT_SYSTEM;
@@ -202,7 +207,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
           send({ type: 'retry', attempt });
           console.error(`[chat] empty/stalled — retry ${attempt}/${MAX_RETRIES} after ${backoff}ms`);
         }
-        try { result = await harness.streamTurn({ provider, system, userMessage: message, tools: grantedTools, call, send: captureText, signal: ctrl.signal }); lastErr = null; }
+        try { result = await harness.streamTurn({ provider, system, userMessage: message, tools: isLocal ? [] : grantedTools, call, send: captureText, signal: ctrl.signal }); lastErr = null; }
         catch (e) { lastErr = e; console.error('[chat] attempt failed:', e?.status || '', e?.message); }
         if (clientGone || assistantText.trim() || attempt >= MAX_RETRIES) break;
       }
