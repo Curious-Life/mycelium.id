@@ -2225,6 +2225,62 @@
 
 	let prevPointCount = 0;
 	let prevNavKey = '';
+	// Rebuilding the point cloud + social/glow/halo layers is heavy (O(points ·
+	// territories) CPU + new typed arrays + GPU upload). During load the store
+	// streams points in incrementally, so the effect below fires many times — and
+	// rebuilding on every tick is what makes the scene jitter/lag. We coalesce:
+	// data-driven rebuilds are DEBOUNCED (one rebuild once the stream settles),
+	// while user navigation rebuilds promptly. Flags OR-accumulate across the
+	// debounce window so nothing is dropped.
+	let rebuildTimer: ReturnType<typeof setTimeout> | null = null;
+	let pendingData = false;
+	let pendingNav = false;
+	let introPlayed = false;
+
+	function flushRebuild() {
+		rebuildTimer = null;
+		if (!scene) return;
+		const dataChanged = pendingData;
+		const isNavChange = pendingNav;
+		pendingData = false;
+		pendingNav = false;
+		// create* functions read the reactive stores internally — untrack so this
+		// rebuild never re-subscribes the effect (would infinite-loop).
+		untrack(() => {
+			createPointCloud();
+			const isCapture = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('capture');
+			if (dataChanged && !isCapture) {
+				createSocialLayer();
+				createGlowLayer();
+			}
+			if (dataChanged && isCapture) {
+				createGlowLayer();
+			}
+			if (dataChanged && !introPlayed && visiblePoints.length > 0) {
+				introPlayed = true;
+				setTimeout(() => animateIntro(), 100);
+			} else if (isNavChange) {
+				setTimeout(() => animateCameraToVisiblePoints(800), 50);
+			}
+			const territory = msState.selectedTerritoryId;
+			if (territory !== null) {
+				loadCofire(territory).then(() => createCofireVisuals());
+			} else {
+				clearCofire();
+			}
+			// Phase halos (Mindscape Pulses M1) + firing sequence (M3) — rebuild on
+			// any data change so new/dissolved territories stay in sync.
+			if (dataChanged) {
+				if (phaseHistories.size === 0) {
+					loadPhaseHistory();
+				} else {
+					createPhaseHalos();
+				}
+				loadFiringSequence();
+				pulseGeometryValid = false;
+			}
+		});
+	}
 
 	$effect(() => {
 		const pts = visiblePoints;
@@ -2240,47 +2296,14 @@
 		const dataChanged = pts.length !== prevPointCount;
 
 		if (isNavChange || dataChanged) {
-			// untrack: create* functions read reactive stores internally;
-			// subscribing this effect to them would cause infinite loops
-			untrack(() => {
-				createPointCloud();
-				const isCapture = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('capture');
-				if (dataChanged && !isCapture) {
-					createSocialLayer();
-					createGlowLayer();
-				}
-				if (dataChanged && isCapture) {
-					createGlowLayer();
-				}
-				if (dataChanged && prevPointCount === 0 && pts.length > 0) {
-					setTimeout(() => animateIntro(), 100);
-				} else if (isNavChange) {
-					setTimeout(() => animateCameraToVisiblePoints(800), 50);
-				}
-				if (territory !== null) {
-					loadCofire(territory).then(() => createCofireVisuals());
-				} else {
-					clearCofire();
-				}
-				// Phase halos (Mindscape Pulses M1). Kick off the history
-				// fetch once the scene has real data; the loader itself
-				// calls createPhaseHalos when it resolves. Rebuild halos
-				// on any data change so new/dissolved territories stay in
-				// sync with the point cloud.
-				if (dataChanged) {
-					if (phaseHistories.size === 0) {
-						loadPhaseHistory();
-					} else {
-						createPhaseHalos();
-					}
-					// Firing pulses M3: re-index the sorted sequence from
-					// the current point cloud. One-shot, ~46k entries on
-					// the binary search on extract keeps
-					// per-frame cost low.
-					loadFiringSequence();
-					pulseGeometryValid = false;
-				}
-			});
+			pendingData = pendingData || dataChanged;
+			pendingNav = pendingNav || isNavChange;
+			// Nav is user-driven → respond on the next tick. Data is streaming in
+			// during load → debounce so a burst of length changes coalesces into a
+			// single rebuild instead of one-per-tick (the jitter fix).
+			const delay = isNavChange ? 0 : 180;
+			if (rebuildTimer) clearTimeout(rebuildTimer);
+			rebuildTimer = setTimeout(flushRebuild, delay);
 		}
 
 		prevPointCount = pts.length;
