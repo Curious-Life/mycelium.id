@@ -195,17 +195,17 @@
 	<div class="invite-actions">
 		<button class="invite-card" class:done={dataDone} onclick={() => (step = 'data')}>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-			<span class="invite-name">Data{#if dataDone} ✓{/if}</span>
+			<span class="invite-name">Data{#if dataDone}<span class="invite-check">✓</span>{/if}</span>
 			<span class="invite-hint">Bring your world in</span>
 		</button>
 		<button class="invite-card" class:done={aiDone} onclick={() => (step = 'intelligence')}>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
-			<span class="invite-name">Intelligence{#if aiDone} ✓{/if}</span>
+			<span class="invite-name">Intelligence{#if aiDone}<span class="invite-check">✓</span>{/if}</span>
 			<span class="invite-hint">Connect an AI</span>
 		</button>
 		<button class="invite-card" class:done={connectDone} onclick={() => (step = 'connect')}>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v12H5.2L4 17.2z"/></svg>
-			<span class="invite-name">Connect{#if connectDone} ✓{/if}</span>
+			<span class="invite-name">Connect{#if connectDone}<span class="invite-check">✓</span>{/if}</span>
 			<span class="invite-hint">Link a messenger</span>
 		</button>
 	</div>
@@ -333,6 +333,7 @@
 	.invite-card.done { border-color: rgba(74, 222, 128, 0.4); }
 	.invite-card svg { width: 22px; height: 22px; color: var(--color-accent-aurum, #e5b84c); opacity: 0.9; }
 	.invite-name { font-size: 0.86rem; font-weight: 500; }
+	.invite-check { margin-left: 0.4rem; color: var(--color-accent-jade); font-weight: 600; }
 	.invite-hint { font-size: 0.7rem; color: var(--color-text-secondary); line-height: 1.35; }
 
 	.invite-back {
