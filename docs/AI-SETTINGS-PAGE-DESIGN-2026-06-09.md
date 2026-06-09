@@ -58,5 +58,14 @@ Reuses IntelligenceSection's proven script (endpoints, connect, pullAndUse, setA
 | SettingsView tab system (`activeTab`, TABS, `{#if activeTab===}`) | `SettingsView.svelte:169-178,1292-1323` |
 | `intelligence` tab mounts IntelligenceSection + AIAccessSection | `SettingsView.svelte:1641-1644` |
 
-## Out of scope (follow-ups)
-Merging the external-client/harness fully into this tab (kept in `connection`, linked); clustering-skew rebalance; deleting legacy onboarding components.
+## Update (2026-06-09, commit `0dc1bff`) — follow-ups folded in
+The "out of scope" items below were folded into this same PR (#133) at the operator's request:
+- **External-client/"harness" folded in**: `HarnessPickerSection` + `ConnectYourAISection` moved out of the `connection` tab onto the AI page under **"Use Mycelium in another app"** (the Connection tab is now `ManagedConnect` + `RemoteAccess` only).
+- **Legacy "AI Subscriptions" block retired**: the Claude-account OAuth path (ToS-refused) + its entire provider-management script tail in `SettingsView` removed (507 lines) — all superseded by `AISettings` (owns `/portal/providers`). Audited: zero remaining template consumers.
+- **Orphaned `IntelligenceSection.svelte` deleted** (zero importers — pre-deletion-caller-audit clean).
+- **"harness" → "your AI app"** user-facing rename (code identifiers `Harness`/`harnesses`/`HARNESS-RECIPES.md` preserved).
+
+`portal:check` 0 errors; production build clean.
+
+## Out of scope (remaining follow-ups)
+Clustering-skew rebalance; deleting legacy onboarding components (`WelcomeModal`, `OnboardingGuide`, `ConnectionsChecklist`).
