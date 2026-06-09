@@ -615,6 +615,11 @@
 	</div>
 {:else}
 <div class="mindscape-layout" class:resizing={isResizing} bind:this={containerRef}>
+	<!-- Pipeline progress — a glassy top-right chip driven by the generate poller.
+	     Mounted at the layout root so it's visible in BOTH the empty-state AND the
+	     populated mindscape (e.g. when "Illuminate" runs from the realm sidebar). -->
+	<MindscapeActivityChip />
+
 	<!-- Navigation + detail panel — only once there's a mindscape to navigate.
 	     On an empty vault it would be a blank rail, so we hide it entirely. -->
 	{#if msState.points && msState.points.length > 0}
@@ -864,9 +869,6 @@
 				<div class="welcome">
 					<!-- The living 3D mindscape (Goethe model) breathing behind the glass -->
 					<MindscapeBackground />
-
-					<!-- Pipeline progress floats to a glassy top-right chip (non-blocking) -->
-					<MindscapeActivityChip />
 
 					<!-- The invitation persists through embedding/mapping so Connect-AI &
 					     the other steps stay reachable while the pipeline runs in the

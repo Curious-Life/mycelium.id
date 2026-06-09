@@ -15,6 +15,14 @@
 	let aiDone = $state(false);
 	let connectDone = $state(false);
 
+	// Compact progress stepper (Data · Intelligence · Connect), shown above every
+	// step so completed + remaining are always legible at a glance.
+	const progressSteps = $derived([
+		{ key: 'data' as Step, label: 'Data', done: dataDone },
+		{ key: 'intelligence' as Step, label: 'Intelligence', done: aiDone },
+		{ key: 'connect' as Step, label: 'Connect', done: connectDone },
+	]);
+
 	// ── Data ───────────────────────────────────────────────────────────────────
 	let importing = $state(false);
 	let importMsg = $state('');
@@ -188,6 +196,24 @@
 	}
 </script>
 
+<!-- Progress: Data · Intelligence · Connect — completed (✓) vs remaining. -->
+<div class="onb-steps" aria-label="Onboarding progress">
+	{#each progressSteps as s, i (s.key)}
+		<button
+			class="onb-step"
+			class:done={s.done}
+			class:current={step === s.key}
+			onclick={() => (step = s.key)}
+		>
+			<span class="onb-bubble">{#if s.done}✓{:else}{i + 1}{/if}</span>
+			<span class="onb-step-label">{s.label}</span>
+		</button>
+		{#if i < progressSteps.length - 1}
+			<span class="onb-connector" class:done={s.done}></span>
+		{/if}
+	{/each}
+</div>
+
 {#if step === 'home'}
 	<p class="invite-eyebrow">{#if displayName}Welcome, {displayName}{:else}Welcome{/if}</p>
 	<h2 class="welcome-title invite-title">Grow your mycelium</h2>
@@ -312,6 +338,27 @@
 {/if}
 
 <style>
+	/* ── Progress stepper ───────────────────────────────────────────────────── */
+	.onb-steps { display: flex; align-items: center; gap: 0; margin-bottom: 1.5rem; }
+	.onb-step {
+		display: inline-flex; align-items: center; gap: 0.4rem; flex-shrink: 0;
+		background: none; border: none; padding: 0; cursor: pointer; font-family: inherit;
+	}
+	.onb-bubble {
+		display: inline-flex; align-items: center; justify-content: center;
+		width: 1.4rem; height: 1.4rem; border-radius: 50%;
+		font-size: 0.64rem; font-family: var(--font-mono, monospace);
+		border: 1px solid var(--glass-border); background: var(--glass-card-bg);
+		color: var(--color-text-tertiary); transition: all 0.2s ease;
+	}
+	.onb-step.done .onb-bubble { background: var(--color-accent-jade); color: var(--color-bg); border-color: transparent; }
+	.onb-step.current .onb-bubble { border-color: var(--color-accent-aurum); color: var(--color-accent-aurum); }
+	.onb-step-label { font-size: 0.68rem; color: var(--color-text-tertiary); transition: color 0.2s ease; }
+	.onb-step.done .onb-step-label { color: var(--color-text-secondary); }
+	.onb-step.current .onb-step-label { color: var(--color-text-primary); }
+	.onb-connector { flex: 1; min-width: 0.85rem; height: 1px; margin: 0 0.5rem; background: var(--glass-border); }
+	.onb-connector.done { background: var(--color-accent-jade); opacity: 0.45; }
+
 	.invite-eyebrow {
 		font-family: var(--font-mono, 'JetBrains Mono', monospace);
 		font-size: 0.62rem; letter-spacing: 0.18em; text-transform: uppercase;
