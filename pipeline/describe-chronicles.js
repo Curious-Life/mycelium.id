@@ -122,9 +122,10 @@ function withTimeout(promise, ms, label) {
  * the verify can stub the model + content. Returns counts.
  * @param {{ db: object, userId: string, infer: Function, version?: string, sample?: Function, log?: Function }} opts
  */
-export async function describeChronicles({ db, userId, infer, version = CHRONICLE_VERSION, sample, log = () => {} }) {
+export async function describeChronicles({ db, userId, infer, version = CHRONICLE_VERSION, sample, log = () => {}, onProgress }) {
   const targets = await getTerritoriesToNarrate(db, userId, version);
   let described = 0, skipped = 0, failed = 0;
+  try { await onProgress?.(0, targets.length); } catch { /* */ }
   for (const t of targets) {
     const samples = await (sample ? sample(t) : sampleTerritoryContent(db, userId, t.territory_id));
     if (!samples.length) { skipped += 1; continue; }
@@ -145,6 +146,7 @@ export async function describeChronicles({ db, userId, infer, version = CHRONICL
     } catch (e) {
       failed += 1; log(`chronicle write failed for territory ${t.territory_id}: ${e.message}`);
     }
+    try { await onProgress?.(described + skipped + failed, targets.length); } catch { /* */ }
   }
   return { total: targets.length, described, skipped, failed };
 }
@@ -174,7 +176,18 @@ if (isMain) {
       const targets = await getTerritoriesToNarrate(db, USER_ID, CHRONICLE_VERSION);
       console.log(`[chronicles] (dry) ${targets.length} territories would be narrated`);
     } else {
-      const res = await describeChronicles({ db, userId: USER_ID, infer: ({ prompt, maxTokens }) => narrator.infer(prompt, { maxTokens }), log: console.error });
+      // Surface live progress to the unified activity feed (content-free).
+      let feedId = null, hbTimer = null;
+      try { feedId = await db.activityFeed.begin({ userId: USER_ID, kind: 'describe:chronicle', stageLabel: 'Describing your areas' }); } catch { /* */ }
+      if (feedId) { hbTimer = setInterval(() => { db.activityFeed.heartbeat(feedId, {}).catch(() => {}); }, 10_000); hbTimer.unref?.(); }
+      const onProgress = feedId ? (done, total) => db.activityFeed.heartbeat(feedId, { step: done, totalSteps: total }).catch(() => {}) : undefined;
+      let res;
+      try {
+        res = await describeChronicles({ db, userId: USER_ID, infer: ({ prompt, maxTokens }) => narrator.infer(prompt, { maxTokens }), log: console.error, onProgress });
+      } finally {
+        if (hbTimer) clearInterval(hbTimer);
+        if (feedId) { try { await db.activityFeed.finish(feedId, { status: 'done' }); } catch { /* */ } }
+      }
       console.log(`[chronicles] ${res.described} narrated, ${res.skipped} skipped (no content), ${res.failed} failed (no model / write)`);
     }
   } catch (e) {
