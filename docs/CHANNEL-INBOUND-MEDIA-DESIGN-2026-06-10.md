@@ -1,6 +1,6 @@
 # Channel Inbound Media Pipeline — Design (2026-06-10)
 
-**Status:** DESIGN LOCKED (sweep-first protocol, 3 cycles + 2 live spikes)
+**Status:** BUILT (steps 1–5) — gates GO: verify:ingest I8-I10, verify:model-caps 9/9, verify:attachment-context 11/11, verify:channel-inbound 33/33; live smoke = step 6 ledger in the PR
 **Scope:** Telegram first. Photos, documents (txt/md/csv/json now; pdf/docx step 5), voice notes, audio files — downloaded from Telegram, encrypted-at-rest in the vault blob store, described/transcribed **locally** via the user's own multimodal model, linked to captured messages, and visible to the channel agent turn.
 **Elevation over canonical:** canonical (`reference/core/attachments.js`) needed cloud (R2 storage, Workers AI vision, Workers AI Whisper). V1 does all three on-box: encrypted local blobs, local vision, local audio transcription — zero new egress.
 
