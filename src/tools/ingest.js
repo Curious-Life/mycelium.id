@@ -31,6 +31,9 @@ export function createIngestDomain(deps) {
           source:         { type: 'string', description: 'Where it came from, e.g. "note", "telegram", "email" (default "mcp").' },
           conversationId: { type: 'string', description: 'Optional thread/conversation id.' },
           id:             { type: 'string', description: 'Optional caller-supplied id for idempotency (a resend with the same id is a no-op).' },
+          metadata:       { type: 'object', description: 'Platform extras (sender, chatTitle, replyTo, …) — stored encrypted.' },
+          createdAt:      { type: ['string', 'number'], description: 'Original message time (ISO 8601 or unix epoch) when relaying.' },
+          attachmentId:   { type: 'string', description: 'Link to an attachments row (uploaded file) this message describes.' },
         },
         required: ['content'],
       },
@@ -79,6 +82,13 @@ export function createIngestDomain(deps) {
         source: args.source || 'mcp',
         conversationId: args.conversationId,
         id: args.id,
+        // Relay extras — capture.js validates/normalizes each (metadata is an
+        // ENCRYPTED_FIELDS.messages column; createdAt accepts ISO or epoch).
+        // Without this passthrough every channel message loses its sender/
+        // chatTitle/replyTo context (live bug found 2026-06-10: metadata NULL).
+        metadata: args.metadata,
+        createdAt: args.createdAt,
+        attachmentId: typeof args.attachmentId === 'string' ? args.attachmentId : undefined,
       }, enqueueEnrichment);
       return deduped
         ? `Already captured (id ${id}); no duplicate created.`

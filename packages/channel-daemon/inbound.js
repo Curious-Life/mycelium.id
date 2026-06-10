@@ -33,9 +33,11 @@ function preview(text) {
  * @param {(turnCtx:object, msg:object)=>Promise<void>|void} deps.runTurn
  * @param {{isCommand:(c:string)=>boolean, handle:(msg:object)=>Promise<boolean>}} [deps.commands]
  * @param {(groupId:string)=>Promise<boolean>} [deps.isGroupAuthorized]  group binding lookup
+ * @param {(msg:object)=>Promise<{attachmentId:string|null, contextLine:string}>} [deps.contextualizeMedia]
+ *        media stage (media.js) — wired only when the platform supports downloads
  * @param {string} [deps.logPrefix]
  */
-export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands, isGroupAuthorized, checkChannelAccess, logPrefix = 'channel-daemon' }) {
+export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands, isGroupAuthorized, checkChannelAccess, contextualizeMedia, logPrefix = 'channel-daemon' }) {
   if (!vault?.captureMessage) throw new TypeError('createInboundHandler: vault.captureMessage required');
   if (typeof runTurn !== 'function') throw new TypeError('createInboundHandler: runTurn required');
 
@@ -75,15 +77,27 @@ export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands
       console.warn(`[${logPrefix}] inbound dropped (unauthorized ${msg.channelKind} chat=${msg.chatId}) ${preview(msg.content)}`);
       return;
     }
-    if (!msg.content) {
-      // voice-only / sticker / media without caption — Phase 1 skips (no transcription yet).
+    const hasMedia = Boolean(msg.media && typeof contextualizeMedia === 'function');
+    if (!msg.content && !hasMedia) {
+      // sticker / unsupported media without caption — skip (no placeholder noise).
       console.log(`[${logPrefix}] inbound skipped (no text${msg.voiceMode ? '; voice note' : ''}) chat=${msg.chatId}`);
       return;
     }
 
+    // 1a. media stage — AFTER authorization (unauthorized media is never
+    //     downloaded), BEFORE capture/turn so the derived text rides
+    //     msg.content (the only coalescer-safe carrier). Fail-soft by
+    //     contract: contextualizeMedia never throws.
+    let attachmentId = null;
+    if (hasMedia) {
+      const r = await contextualizeMedia(msg);
+      attachmentId = r?.attachmentId || null;
+      if (r?.contextLine) msg.content = msg.content ? `${msg.content}\n${r.contextLine}` : r.contextLine;
+    }
+
     const senderRole = String(msg.fromId) === String(ownerTelegramId) ? 'owner' : 'other';
 
-    // 1. capture the inbound (idempotent on id; auto-encrypted at rest).
+    // 1b. capture the inbound (idempotent on id; auto-encrypted at rest).
     try {
       await vault.captureMessage({
         id: `tg-${msg.messageId}-${msg.chatId}`,
@@ -92,6 +106,7 @@ export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands
         source: msg.source,
         conversationId: msg.chatId,
         ...(msg.dateEpoch != null ? { createdAt: msg.dateEpoch } : {}),
+        ...(attachmentId ? { attachmentId } : {}),
         metadata: {
           channelId: msg.chatId,
           sender: msg.fromName || msg.username || msg.fromId,
@@ -99,6 +114,7 @@ export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands
           ...(msg.username ? { username: msg.username } : {}),
           ...(msg.chatTitle ? { chatTitle: msg.chatTitle } : {}),
           ...(msg.replyToMessageId ? { replyTo: msg.replyToMessageId } : {}),
+          ...(msg.media ? { mediaKind: msg.media.kind, ...(msg.media.fileUniqueId ? { fileUniqueId: msg.media.fileUniqueId } : {}) } : {}),
         },
       });
     } catch (e) {

@@ -127,6 +127,8 @@
     "start:http": "node src/index.js --http",
     "start:enrich": "node src/index.js --enrich",
     "channel:telegram": "node packages/channel-daemon/index.js",
+    "verify:model-caps": "node scripts/verify-model-caps.mjs",
+    "verify:attachment-context": "node scripts/verify-attachment-context.mjs",
     "verify:channel-egress": "node scripts/verify-channel-egress.mjs",
     "verify:channel-egress-e2e": "node scripts/verify-channel-egress-e2e.mjs",
     "verify:channel-inbound": "node scripts/verify-channel-inbound.mjs",
@@ -158,6 +160,8 @@
     "better-sqlite3": "^11.0.0",
     "busboy": "^1.6.0",
     "express": "^5.2.1",
-    "jszip": "^3.10.1"
+    "jszip": "^3.10.1",
+    "mammoth": "^1.12.0",
+    "unpdf": "^1.6.2"
   }
 }

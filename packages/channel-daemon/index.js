@@ -21,6 +21,7 @@ import { createTelegramApi } from './telegram-api.js';
 import { createTelegramChokepoint } from './chokepoint.js';
 import { createVoicePipeline } from './voice-pipeline.js';
 import { createInboundHandler } from './inbound.js';
+import { contextualizeMedia } from './media.js';
 import { createTelegramPoller } from './transport/telegram-poller.js';
 import { createCommandHandler } from './commands.js';
 // discord
@@ -104,7 +105,12 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     const commands = createCommandHandler({ vault, sendReply, ownerTelegramId: cfg.ownerTelegramId });
     const isGroupAuthorized = async (gid) => { const g = await vault.getTelegramGroup(gid); return !!g.authorized && g.active !== false; };
     const checkChannelAccess = (kind, id, sender) => vault.checkChannelAccess({ kind, id, sender });
-    const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized, checkChannelAccess });
+    // Inbound media: download (memory-only) → encrypted vault blob → local
+    // vision/transcription context. Fail-soft end to end (media.js contract).
+    const mediaStage = cfg.mediaEnabled
+      ? (msg) => contextualizeMedia(msg, { telegram, vault, maxBytes: cfg.mediaMaxBytes })
+      : undefined;
+    const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized, checkChannelAccess, contextualizeMedia: mediaStage });
     poller = createTelegramPoller({ telegram, handleInbound });
   }
 

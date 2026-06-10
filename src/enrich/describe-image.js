@@ -12,6 +12,7 @@
 // are never logged (CLAUDE.md §1 — the image is user plaintext).
 
 import { localInfer, DEFAULT_OLLAMA_URL } from "../inference/local.js";
+import { pickModelWithCapability } from "./model-caps.js";
 
 // Known multimodal Ollama tags, best-first. Override with MYCELIUM_VISION_MODEL.
 const VISION_CANDIDATES = [
@@ -34,15 +35,23 @@ const CAPTION_PROMPT =
 /**
  * Probe Ollama for a usable vision model. Returns a model tag or null.
  * Fast + fail-soft: a missing/old Ollama (no /api/tags, connection refused) → null.
+ *
+ * Order: env override → capabilities probe (/api/show, catches gemma4-class
+ * models the name list can't know about) → legacy name-list match (covers old
+ * Ollama builds whose /api/show has no `capabilities` field).
  */
 export async function pickVisionModel({
   baseUrl = DEFAULT_OLLAMA_URL,
   fetch = globalThis.fetch,
   timeoutMs = 2500,
+  prefer,
 } = {}) {
   const override = process.env.MYCELIUM_VISION_MODEL;
   if (override) return override;
   if (typeof fetch !== "function") return null;
+
+  const byCapability = await pickModelWithCapability("vision", { prefer, baseUrl, fetch, timeoutMs });
+  if (byCapability) return byCapability;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

@@ -1912,19 +1912,33 @@ def main():
             )
             now = datetime.now(timezone.utc)
 
-            def _num(v):
-                # SQLite/local_db can hand numeric columns back as strings —
-                # '0.42' > 0.6 raises and used to silently disable ALL anchoring.
+            def _dec_num(v):
+                """Decrypt-and-coerce a SEC-3 numeric column. coherence /
+                engagement_depth_normalized are ENCRYPTED envelopes at rest
+                (ENCRYPTED_FIELDS, src/crypto/crypto-local.js) and the Python
+                read path returns raw ciphertext — so a bare float() compare
+                silently disabled metric anchoring. Mirrors compute-fisher.py
+                _dec_float. Legacy plaintext rows fall back to direct float;
+                unreadable → None → rule skipped (fail-closed, never anchor
+                on data we can't read)."""
+                if v is None:
+                    return None
                 try:
-                    return float(v)
-                except (TypeError, ValueError):
-                    return 0.0
+                    from crypto_local import decrypt_bytes
+                    return float(decrypt_bytes(v, _get_master_key()).decode())
+                except Exception:
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return None
 
             for row in anchor_rows:
                 tid = row['territory_id']
                 if row.get('is_anchored') in (1, '1', True):
                     anchored_ids.add(tid); continue
-                if _num(row.get('coherence')) > 0.6 and _num(row.get('eng')) > 0.7:
+                coh = _dec_num(row.get('coherence'))
+                eng = _dec_num(row.get('eng'))
+                if coh is not None and eng is not None and coh > 0.6 and eng > 0.7:
                     anchored_ids.add(tid); continue
                 if row.get('last_active'):
                     try:
@@ -1985,6 +1999,27 @@ def main():
                 [version, version, e['cluster_id'], user_id],
             )
 
+    # Prune stale realm rows. Territories get dissolved_at because lineage /
+    # identity-inheritance reads the dissolved rows; realms have neither, and a
+    # ghost row (realm_id with no live clustering_points) leaks into the search
+    # corpus, /mindscape/realms, realm_count and the public realm-name list.
+    # Same wipe-vs-live-set shape as realm_neighbors above. Fail closed: never
+    # prune on a dry run or when this run produced no live realms.
+    live_realm_ids = sorted({int(r) for r in results['realm_ids'] if int(r) >= 0})
+    if live_realm_ids and not args.dry_run:
+        placeholders = ','.join('?' for _ in live_realm_ids)
+        stale_rows = d1_query(
+            f"SELECT realm_id FROM realms WHERE user_id = ? AND realm_id NOT IN ({placeholders})",
+            [user_id, *live_realm_ids],
+        )
+        if stale_rows:
+            print(f"  Pruning {len(stale_rows)} stale realm rows (no live points): "
+                  f"{sorted(int(r['realm_id']) for r in stale_rows)}")
+            d1_query(
+                f"DELETE FROM realms WHERE user_id = ? AND realm_id NOT IN ({placeholders})",
+                [user_id, *live_realm_ids],
+            )
+
     # Write lineage and inherit identity to dominant successors
     if terr_lineage and not args.dry_run:
         print(f"  Recording {len(terr_lineage)} lineage relationships...")
@@ -2042,6 +2077,21 @@ def main():
                 "UPDATE territory_profiles SET is_anchored = 1, anchored_reason = 'computed' WHERE territory_id = ? AND user_id = ?",
                 [tid, user_id],
             )
+
+    # Refresh last_active from live membership. Plaintext timestamp class
+    # (same as created_at/updated_at — recency is already derivable from
+    # plaintext clustering_points.created_at). The anchor query above reads
+    # the PREVIOUS run's value by design; before 2026-06-10 nothing wrote
+    # this column at all, so the 30-day recency anchor rule could never fire.
+    if not args.dry_run:
+        d1_query(
+            """UPDATE territory_profiles SET last_active = (
+                 SELECT MAX(cp.created_at) FROM clustering_points cp
+                 WHERE cp.territory_id = territory_profiles.territory_id
+                   AND cp.user_id = territory_profiles.user_id)
+               WHERE user_id = ? AND dissolved_at IS NULL""",
+            [user_id],
+        )
 
     # Compute and write territory dynamics (energy, coherence, velocity)
     compute_dynamics(

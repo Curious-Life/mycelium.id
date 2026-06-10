@@ -46,6 +46,60 @@ export function createVaultClient({ baseUrl, fetch: fetchImpl = globalThis.fetch
       return post('/api/v1/captureMessage', args);
     },
 
+    /**
+     * Store raw file bytes as an ENCRYPTED attachment (vault-side blob store +
+     * attachments row). Returns { attachmentId } or null on failure (caller
+     * falls back to a placeholder — media must never block the text turn).
+     * @param {Buffer} bytes
+     * @param {{fileName?:string, fileType?:string, timeoutMs?:number}} [opts]
+     */
+    async uploadAttachment(bytes, { fileName, fileType, timeoutMs: uploadTimeoutMs } = {}) {
+      try {
+        const qs = new URLSearchParams({
+          ...(fileName ? { filename: fileName } : {}),
+          ...(fileType ? { type: fileType } : {}),
+        });
+        const res = await fetchImpl(`${root}/api/v1/upload?${qs}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: bytes,
+          // a 20MB body + encrypt + fsync needs more than the JSON default
+          signal: AbortSignal.timeout(uploadTimeoutMs || Math.max(timeoutMs, 60_000)),
+        });
+        if (!res.ok) return null;
+        const j = await res.json().catch(() => null);
+        const attachmentId = j?.result?.attachmentId || null;
+        return attachmentId ? { attachmentId } : null;
+      } catch (e) {
+        console.error('[channel-daemon] attachment upload failed:', e.message);
+        return null;
+      }
+    },
+
+    /**
+     * Derive turn-visible text from a stored attachment (vault-side LOCAL
+     * vision/transcription/decode — src/internal-router.js attachment-context).
+     * Returns the contextText string or null (fail-soft; extraction on a cold
+     * local model can take minutes, hence the generous budget).
+     * @param {{attachmentId:string, kind?:string, timeoutMs?:number}} a
+     */
+    async attachmentContext({ attachmentId, kind, timeoutMs: ctxTimeoutMs }) {
+      try {
+        const res = await fetchImpl(`${root}/api/v1/internal/attachment-context`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ attachmentId, ...(kind ? { kind } : {}) }),
+          signal: AbortSignal.timeout(ctxTimeoutMs || 240_000),
+        });
+        if (!res.ok) return null;
+        const j = await res.json().catch(() => null);
+        return typeof j?.contextText === 'string' && j.contextText ? j.contextText : null;
+      } catch (e) {
+        console.error('[channel-daemon] attachment-context failed:', e.message);
+        return null;
+      }
+    },
+
     /** Record an auto-router inference-egress decision (hash-only). Soft-fail. */
     async recordInferenceEgress(entry) {
       try { await post('/api/v1/internal/inference-egress', entry); return { ok: true }; }
