@@ -164,6 +164,53 @@ const msg = (t) => ({ content: t });
   rec('OL8. natural reply → forced net NOT used (forced=false, reason=delivered)', r.delivered === true && r.forced === false && r.reason === 'delivered' && forcedFired === false);
 }
 
+{
+  // TRIMMED TOOL SURFACE (local models): allowTools filters what the model sees;
+  // MCP-prefixed names suffix-match; the reply tool is ALWAYS kept even when the
+  // allowlist forgets it. (2026-06-10: full 32-tool schemas overflow a local ctx.)
+  const mcpClient = {
+    listTools: async () => ({ tools: [
+      { name: 'mcp__v__getContext', inputSchema: {} },
+      { name: 'mcp__v__searchMindscape', inputSchema: {} },
+      { name: 'mcp__v__saveDocument', inputSchema: {} },
+      { name: 'mcp__v__reply', inputSchema: {} },
+    ] }),
+    callTool: async () => ({ content: [{ type: 'text', text: '{"delivered":true}' }] }),
+  };
+  let seenTools = null;
+  const ollamaChat = async (req) => { if (!seenTools) seenTools = req.tools.map((t) => t.function.name); return { message: { tool_calls: [{ function: { name: 'mcp__v__reply', arguments: { text: 'hi' } } }] } }; };
+  const r = await runOllamaTurn({ ollamaChat, mcpClient, systemPrompt: 's', userMessage: 'hi', allowTools: ['getContext', 'searchMindscape'] });
+  rec('OL9. allowTools trims the surface (prefixed names suffix-match)', seenTools?.length === 3 && seenTools.includes('mcp__v__getContext') && seenTools.includes('mcp__v__searchMindscape') && !seenTools.includes('mcp__v__saveDocument'), seenTools?.join(','));
+  rec('OL10. reply tool ALWAYS kept (not in allowlist) and still delivers', seenTools?.includes('mcp__v__reply') && r.delivered === true);
+}
+{
+  // The lane's whole-turn abort signal is threaded into every chat call.
+  const mcpClient = { listTools: async () => ({ tools: [{ name: 'reply', inputSchema: {} }] }), callTool: async () => ({ content: [{ type: 'text', text: '{"delivered":true}' }] }) };
+  const ac = new AbortController();
+  let sawSignal = false;
+  const ollamaChat = async (req) => { sawSignal = req.signal === ac.signal; return { message: { tool_calls: [{ function: { name: 'reply', arguments: { text: 'x' } } }] } }; };
+  await runOllamaTurn({ ollamaChat, mcpClient, systemPrompt: 's', userMessage: 'hi', signal: ac.signal });
+  rec('OL11. abort signal threaded to chat calls', sawSignal === true);
+}
+
+// ── lane: lastTurn outcome surface (healthz forensics) ───────────────────────
+{
+  _resetForTests();
+  const ok = { label: 'f', runTurn: async () => ({ delivered: true, usedReplyTool: true, reason: 'delivered' }) };
+  const lane = createLane({ runtime: ok });
+  rec('L9. lastTurn null before any turn', lane.lastTurn() === null);
+  lane.runTurn(turn('A'), msg('a'));
+  await lane.idle();
+  const lt = lane.lastTurn();
+  rec('L10. lastTurn records verdict after a delivered turn', lt?.verdict === 'delivered' && lt?.chatId === 'A' && !!lt?.at, JSON.stringify(lt));
+  const bad = { label: 'f', runTurn: async () => { throw new Error('ollama /api/chat http 500'); } };
+  const lane2 = createLane({ runtime: bad });
+  lane2.runTurn(turn('B'), msg('b'));
+  await lane2.idle();
+  const lt2 = lane2.lastTurn();
+  rec('L11. lastTurn records error verdict + message on a throwing turn', lt2?.verdict === 'error' && /http 500/.test(lt2?.error || ''), JSON.stringify(lt2));
+}
+
 // ── reply prompt: the delivery contract is present ───────────────────────────
 {
   const dm = buildReplySystemPrompt({ turnCtx: turn('1') });

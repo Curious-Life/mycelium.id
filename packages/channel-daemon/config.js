@@ -44,6 +44,22 @@ export function loadConfig(env = process.env) {
   const channelRouter = env.MYCELIUM_CHANNEL_ROUTER || '';
   const sensitivePatterns = env.CHANNEL_SENSITIVE_PATTERNS || '';
 
+  // ── local-turn tuning (2026-06-10 silent-no-reply incident) ───────────────
+  // A COLD local model (load + prompt ingest on a 7–12B) routinely exceeds the
+  // old 120s fetch timeout, killing the turn with no user-visible trace.
+  const ollamaTimeoutMs = Number(env.CHANNEL_OLLAMA_TIMEOUT_MS || 300_000);
+  // Ollama serves models at a 4096 ctx by default — too small for tool schemas
+  // + system prompt; a truncated prompt makes the model return EMPTY (no tool
+  // calls, no text). Request a workable window explicitly.
+  const ollamaNumCtx = Number(env.CHANNEL_OLLAMA_NUM_CTX || 8192);
+  // Local models get a TRIMMED tool surface: the full vault schema set is ~7.7k
+  // tokens of prompt — past the ctx and minutes of ingest per round on a 12B.
+  // csv override; `reply` (the egress tool) is ALWAYS kept regardless.
+  const localTools = (env.CHANNEL_LOCAL_TOOLS || 'getContext,searchMindscape,remember,reply')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  // Lane-level whole-turn budget (multi-round tool loop on a local model).
+  const turnTimeoutMs = Number(env.CHANNEL_TURN_TIMEOUT_MS || 600_000);
+
   // ── Phase 3 hardening ──────────────────────────────────────────────────────
   const coalesceWindowMs = Number(env.CHANNEL_COALESCE_MS || 1500); // 0 disables
   const rateLimitMax = Number(env.CHANNEL_RATELIMIT_MAX || 20);     // sends per window per target
@@ -53,6 +69,7 @@ export function loadConfig(env = process.env) {
     botToken, ownerTelegramId, discordBotToken, ownerDiscordId, vaultBaseUrl, host, port, agentId, selfUrl,
     anthropicApiKey, mcpMode, mcpUrl, mcpBearer, mcpStdioEntry, model,
     ollamaModel, ollamaUrl, openaiBaseUrl, openaiApiKey, openaiModel, channelRouter, sensitivePatterns,
+    ollamaTimeoutMs, ollamaNumCtx, localTools, turnTimeoutMs,
     coalesceWindowMs, rateLimitMax, rateLimitWindowMs,
   };
 }

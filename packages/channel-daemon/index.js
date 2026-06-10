@@ -53,7 +53,7 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     const auditEgress = (e) => { vault.recordInferenceEgress(e); };
     const runtime = selectRuntime(cfg, { auditEgress });
     if (runtime) {
-      lane = createLane({ runtime });
+      lane = createLane({ runtime, ...(cfg.turnTimeoutMs ? { turnTimeoutMs: cfg.turnTimeoutMs } : {}) });
       if (cfg.coalesceWindowMs > 0) {
         const coalescer = createCoalescer({ windowMs: cfg.coalesceWindowMs, flush: (turnCtx, merged) => lane.runTurn(turnCtx, merged) });
         effectiveRunTurn = (turnCtx, msg) => { coalescer.push(turnCtx, msg); };
@@ -142,7 +142,7 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     gateway = createDiscordGateway({ botToken: cfg.discordBotToken, handleInbound: handleDiscordInbound });
   }
 
-  const app = createDaemonApp({ telegramSendHandler, discordSendHandler, getActiveTurn, replies });
+  const app = createDaemonApp({ telegramSendHandler, discordSendHandler, getActiveTurn, replies, getLastTurn: lane ? lane.lastTurn : undefined });
   return { app, poller, gateway, telegram, discord, lane, vault, replies };
 }
 
