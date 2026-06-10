@@ -33,6 +33,12 @@ export function loadConfig(env = process.env) {
   // model name turns on the local runtime; no cloud egress.
   const ollamaModel = env.CHANNEL_OLLAMA_MODEL || '';
   const ollamaUrl = env.OLLAMA_URL || 'http://127.0.0.1:11434';
+  // Generic OpenAI-compatible backend (cloud BYOK or self-hosted, e.g. Regolo /
+  // OpenRouter / llama.cpp). Set when the user's selected app provider is an
+  // OpenAI-compatible one that ISN'T native Ollama. baseUrl turns it on.
+  const openaiBaseUrl = env.CHANNEL_OPENAI_BASE_URL || '';
+  const openaiApiKey = env.CHANNEL_OPENAI_API_KEY || '';
+  const openaiModel = env.CHANNEL_OPENAI_MODEL || '';
   // Auto router (when BOTH cloud + local are configured): 'auto' (default) routes
   // per-turn (local-first, complex→cloud, sensitive→local); 'cloud'/'local' force.
   const channelRouter = env.MYCELIUM_CHANNEL_ROUTER || '';
@@ -46,7 +52,7 @@ export function loadConfig(env = process.env) {
   return {
     botToken, ownerTelegramId, discordBotToken, ownerDiscordId, vaultBaseUrl, host, port, agentId, selfUrl,
     anthropicApiKey, mcpMode, mcpUrl, mcpBearer, mcpStdioEntry, model,
-    ollamaModel, ollamaUrl, channelRouter, sensitivePatterns,
+    ollamaModel, ollamaUrl, openaiBaseUrl, openaiApiKey, openaiModel, channelRouter, sensitivePatterns,
     coalesceWindowMs, rateLimitMax, rateLimitWindowMs,
   };
 }
@@ -68,6 +74,11 @@ export function applyChannelConfigToEnv(cc, env = process.env) {
   put('OWNER_DISCORD_ID', cc.discord?.ownerId);
   put('ANTHROPIC_API_KEY', cc.agent?.anthropicApiKey);
   put('CHANNEL_AGENT_MODEL', cc.agent?.model);
+  // OpenAI-compatible backend (set by the active-provider bridge for non-Anthropic,
+  // non-native-Ollama providers). baseUrl is the on/off switch.
+  put('CHANNEL_OPENAI_BASE_URL', cc.agent?.openai?.baseUrl);
+  put('CHANNEL_OPENAI_API_KEY', cc.agent?.openai?.apiKey);
+  put('CHANNEL_OPENAI_MODEL', cc.agent?.openai?.model);
   put('TTS_PROVIDER', cc.tts?.provider);
   put('OPENAI_API_KEY', cc.tts?.openaiApiKey);
   put('OPENAI_TTS_VOICE', cc.tts?.openaiVoice);

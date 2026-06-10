@@ -13,6 +13,51 @@
 import express from 'express';
 import { createEgressAuditSink } from './inference/egress.js';
 
+/** Parse the decrypted `{ "apiKey": "…" }` credentials envelope → key string|null. */
+function parseProviderApiKey(credentials) {
+  if (typeof credentials !== 'string' || !credentials) return null;
+  try { const o = JSON.parse(credentials); return (typeof o?.apiKey === 'string' && o.apiKey) ? o.apiKey : null; }
+  catch { return null; }
+}
+
+/**
+ * Derive the channel-daemon agent backend from the user's SELECTED app provider
+ * (the active `ai_providers` row), so the channel agent uses WHATEVER model the
+ * user chose in Settings → AI — no separate channel-model config to keep in sync.
+ *
+ * Mirrors src/inference/resolve.js' mapRowToConfig classification:
+ *   - Anthropic/Claude (api key, no base_url) → cloud (claude-agent-sdk)
+ *   - native Ollama base_url (:11434)         → local (native /api/chat backend)
+ *   - any other OpenAI-compatible base_url    → openai-compat (/v1/chat/completions)
+ * Returns an overlay `{ agent?, routing? }` for the channel-config response, or
+ * null when no usable active provider exists (→ daemon stays capture-only, honest).
+ */
+async function deriveAgentFromActiveProvider(db, userId) {
+  try {
+    const row = await db?.providers?.getActive?.(userId);
+    if (!row) return null;
+    const provider = String(row.provider || '').toLowerCase();
+    const baseUrl = row.base_url || '';
+    const model = row.model_preference || null;
+    const key = parseProviderApiKey(row.credentials);
+
+    // Native Anthropic (no base_url) → cloud Claude Agent SDK.
+    if (key && !baseUrl && (provider === 'anthropic' || provider === 'claude')) {
+      return { agent: { anthropicApiKey: key, model }, routing: { router: 'cloud' } };
+    }
+    // Native Ollama (default port) → the daemon's proven /api/chat backend.
+    if (baseUrl.includes(':11434')) {
+      const ollamaUrl = baseUrl.replace(/\/v\d+\/?$/, ''); // strip trailing /v1
+      return { routing: { router: 'local', ollamaModel: model, ollamaUrl } };
+    }
+    // Any other OpenAI-compatible provider (Regolo/OpenRouter/self-hosted/…).
+    if (baseUrl || (key && provider === 'openai')) {
+      return { agent: { openai: { baseUrl: baseUrl || null, apiKey: key, model } }, routing: { router: 'openai' } };
+    }
+  } catch { /* fail-soft: no overlay → daemon falls back to manual config / capture-only */ }
+  return null;
+}
+
 /**
  * @param {object} deps
  * @param {object} deps.db        wired vault db (needs db.egressAudit + db.identityChannels)
@@ -196,15 +241,34 @@ export function internalRouter({ db, userId }) {
     if (!db?.secrets?.get) return res.status(503).json({ error: 'secrets unavailable' });
     try {
       const g = (k) => db.secrets.get(userId, k);
+      // Manual channel backend secrets (Settings → Channels). These ALWAYS win.
+      const anthropicApiKey = (await g('ANTHROPIC_API_KEY')) || null;
+      const channelModel = (await g('CHANNEL_AGENT_MODEL')) || null;
+      const channelRouter = (await g('CHANNEL_ROUTER')) || null;
+      const ollamaModel = (await g('CHANNEL_OLLAMA_MODEL')) || null;
+      const openaiBaseUrl = (await g('CHANNEL_OPENAI_BASE_URL')) || null;
+
+      // If the operator pinned no channel-specific backend, follow whatever model
+      // they selected in the app (the active ai_providers row). This makes the
+      // Telegram/Discord agent track the in-app choice with zero duplicate config.
+      const hasManualBackend = !!(anthropicApiKey || channelModel || channelRouter || ollamaModel || openaiBaseUrl);
+      const derived = hasManualBackend ? null : await deriveAgentFromActiveProvider(db, userId);
+
       res.json({
         enabled: (await g('CHANNEL_ENABLED')) === '1',
         telegram: { botToken: (await g('TELEGRAM_BOT_TOKEN')) || null, ownerId: (await g('OWNER_TELEGRAM_ID')) || null },
         discord: { botToken: (await g('DISCORD_BOT_TOKEN')) || null, ownerId: (await g('OWNER_DISCORD_ID')) || null },
-        agent: { anthropicApiKey: (await g('ANTHROPIC_API_KEY')) || null, model: (await g('CHANNEL_AGENT_MODEL')) || null },
+        agent: {
+          anthropicApiKey: anthropicApiKey ?? derived?.agent?.anthropicApiKey ?? null,
+          model: channelModel ?? derived?.agent?.model ?? null,
+          openai: derived?.agent?.openai
+            ? { baseUrl: derived.agent.openai.baseUrl || null, apiKey: derived.agent.openai.apiKey || null, model: derived.agent.openai.model || null }
+            : (openaiBaseUrl ? { baseUrl: openaiBaseUrl, apiKey: (await g('CHANNEL_OPENAI_API_KEY')) || null, model: (await g('CHANNEL_OPENAI_MODEL')) || null } : null),
+        },
         routing: {
-          router: (await g('CHANNEL_ROUTER')) || null,
-          ollamaModel: (await g('CHANNEL_OLLAMA_MODEL')) || null,
-          ollamaUrl: (await g('OLLAMA_URL')) || null,
+          router: channelRouter ?? derived?.routing?.router ?? null,
+          ollamaModel: ollamaModel ?? derived?.routing?.ollamaModel ?? null,
+          ollamaUrl: (await g('OLLAMA_URL')) ?? derived?.routing?.ollamaUrl ?? null,
           coalesceMs: (await g('CHANNEL_COALESCE_MS')) || null,
           rateLimitMax: (await g('CHANNEL_RATELIMIT_MAX')) || null,
           rateLimitWindowMs: (await g('CHANNEL_RATELIMIT_WINDOW_MS')) || null,

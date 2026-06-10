@@ -18,9 +18,10 @@ import express from 'express';
  * @param {(req,res)=>any} deps.telegramSendHandler   from createTelegramChokepoint
  * @param {(req,res)=>any} [deps.discordSendHandler]  from createDiscordChokepoint
  * @param {()=>object|null} deps.getActiveTurn
+ * @param {{mode:'on'|'capture-only',backend:string|null}} [deps.replies]  two-way reply state
  * @param {string} [deps.jsonLimit]
  */
-export function createDaemonApp({ telegramSendHandler, discordSendHandler, getActiveTurn, jsonLimit = '1mb' }) {
+export function createDaemonApp({ telegramSendHandler, discordSendHandler, getActiveTurn, replies, jsonLimit = '1mb' }) {
   if (typeof getActiveTurn !== 'function') throw new TypeError('createDaemonApp: getActiveTurn required');
   if (typeof telegramSendHandler !== 'function' && typeof discordSendHandler !== 'function') {
     throw new TypeError('createDaemonApp: at least one of telegramSendHandler / discordSendHandler required');
@@ -41,8 +42,16 @@ export function createDaemonApp({ telegramSendHandler, discordSendHandler, getAc
   if (typeof telegramSendHandler === 'function') app.post('/telegram/send', telegramSendHandler);
   if (typeof discordSendHandler === 'function') app.post('/discord/send', discordSendHandler);
 
-  // Liveness — never reveals config.
-  app.get('/healthz', (_req, res) => res.json({ ok: true, service: 'channel-daemon' }));
+  // Liveness — never reveals secrets. `replies` is non-secret state (whether a
+  // model is wired + its backend label) so the Channels UI can warn when the
+  // bridge is up but receiving-only. `backend` is a label like "ollama(gemma…)",
+  // never a key/url.
+  app.get('/healthz', (_req, res) => res.json({
+    ok: true,
+    service: 'channel-daemon',
+    replies: replies?.mode || 'unknown',
+    backend: replies?.backend || null,
+  }));
 
   return app;
 }

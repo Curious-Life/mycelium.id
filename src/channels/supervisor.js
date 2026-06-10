@@ -30,7 +30,7 @@ const MAX_BACKOFF_MS = 30000;
 const DOWN_AFTER = 5;            // consecutive crashes → report 'down' (likely a bad token)
 const PROBE_TIMEOUT_MS = 1500;
 
-let _health = { status: 'unknown', message: 'Channels not started.', detail: null };
+let _health = { status: 'unknown', message: 'Channels not started.', detail: null, replies: null, backend: null };
 let _instance = null;
 
 /**
@@ -80,7 +80,7 @@ export function startChannelSupervisor({
   let errBuf = '';
   let tickTimer = null;
 
-  const setHealth = (status, message, detail = null) => { _health = { status, message, detail }; };
+  const setHealth = (status, message, detail = null, extra = {}) => { _health = { status, message, detail, replies: null, backend: null, ...extra }; };
   const lastErrLine = () => errBuf.split('\n').map((l) => l.trim()).filter(Boolean).pop() || '';
   const backoff = () => { nextStartAt = Date.now() + Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(failures, 5)); };
 
@@ -106,12 +106,14 @@ export function startChannelSupervisor({
     } catch { return false; }
   }
 
-  // True if :3010 /healthz answers (an existing daemon is up).
+  // Parsed /healthz body if :3010 answers (an existing daemon is up), else null.
+  // Carries the non-secret replies state ({ replies:'on'|'capture-only', backend }).
   async function probe() {
     try {
       const res = await fetchImpl(healthzUrl, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
-      return res.ok;
-    } catch { return false; }
+      if (!res.ok) return null;
+      try { return await res.json(); } catch { return { ok: true }; }
+    } catch { return null; }
   }
 
   function killChild() {
@@ -157,7 +159,18 @@ export function startChannelSupervisor({
       failures = 0;
       return;
     }
-    if (await probe()) { setHealth('ok', 'Channel bridge is running.'); failures = 0; return; }
+    const up = await probe();
+    if (up) {
+      const captureOnly = up.replies === 'capture-only';
+      setHealth(
+        'ok',
+        captureOnly ? 'Bridge running — receiving, but not replying (no AI model connected).' : 'Channel bridge is running.',
+        captureOnly ? 'Select an AI model in Settings → AI (or add a channel assistant key) to enable replies.' : null,
+        { replies: up.replies || null, backend: up.backend || null },
+      );
+      failures = 0;
+      return;
+    }
     if (child) return;                 // our child is still binding; exit handler covers crashes
     if (Date.now() < nextStartAt) return;
     spawnDaemon();

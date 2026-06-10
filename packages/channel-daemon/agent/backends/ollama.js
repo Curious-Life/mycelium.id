@@ -77,7 +77,9 @@ export async function runOllamaTurn({ ollamaChat, mcpClient, systemPrompt, userM
         try { resultText = extractText(await mcpClient.callTool({ name, arguments: args || {} })); }
         catch (e) { resultText = `tool error: ${e.message}`; }
       }
-      messages.push({ role: 'tool', content: resultText });
+      // `tool_call_id`/`name` are required by strict OpenAI-compatible servers (the
+      // openai-compat backend reuses this loop); native Ollama ignores the extras.
+      messages.push({ role: 'tool', content: resultText, ...(tc.id ? { tool_call_id: tc.id } : {}), ...(name ? { name } : {}) });
     }
     if (usedReplyTool && delivered) break; // delivered — stop early
   }
