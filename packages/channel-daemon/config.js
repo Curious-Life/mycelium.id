@@ -60,6 +60,11 @@ export function loadConfig(env = process.env) {
   // Lane-level whole-turn budget (multi-round tool loop on a local model).
   const turnTimeoutMs = Number(env.CHANNEL_TURN_TIMEOUT_MS || 600_000);
 
+  // ── inbound media (photos / documents / voice notes) ──────────────────────
+  // 20MB = the Bot API getFile hard cap; telegram-api re-checks server-side.
+  const mediaEnabled = env.CHANNEL_MEDIA_ENABLED !== '0';
+  const mediaMaxBytes = Number(env.CHANNEL_MEDIA_MAX_BYTES || 20 * 1024 * 1024);
+
   // ── Phase 3 hardening ──────────────────────────────────────────────────────
   const coalesceWindowMs = Number(env.CHANNEL_COALESCE_MS || 1500); // 0 disables
   const rateLimitMax = Number(env.CHANNEL_RATELIMIT_MAX || 20);     // sends per window per target
@@ -70,6 +75,7 @@ export function loadConfig(env = process.env) {
     anthropicApiKey, mcpMode, mcpUrl, mcpBearer, mcpStdioEntry, model,
     ollamaModel, ollamaUrl, openaiBaseUrl, openaiApiKey, openaiModel, channelRouter, sensitivePatterns,
     ollamaTimeoutMs, ollamaNumCtx, localTools, turnTimeoutMs,
+    mediaEnabled, mediaMaxBytes,
     coalesceWindowMs, rateLimitMax, rateLimitWindowMs,
   };
 }

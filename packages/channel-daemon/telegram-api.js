@@ -78,6 +78,46 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
     },
 
     /**
+     * Download an inbound file's bytes (Bot API caps getFile at 20MB).
+     * Two-step per the API: getFile(file_id) → file_path, then GET the binary
+     * from the file endpoint. Returns a Buffer (MEMORY ONLY — the daemon never
+     * writes media to disk; bytes go straight to the vault over loopback).
+     * `maxBytes` re-checks the size the server reports (the descriptor's
+     * file_size is advisory) and guards the actual body length too.
+     * @param {object} a
+     * @param {string} a.fileId
+     * @param {number} [a.maxBytes]
+     */
+    async getFile({ fileId, maxBytes = 20 * 1024 * 1024 }) {
+      const res = await fetchImpl(`${base}/getFile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_id: fileId }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) throw new Error(`telegram getFile http ${res.status}`);
+      const body = await res.json();
+      if (!body.ok || !body.result?.file_path) throw new Error('telegram getFile not ok');
+      const size = body.result.file_size;
+      if (typeof size === 'number' && size > maxBytes) {
+        const err = new Error('telegram file exceeds maxBytes');
+        err.code = 'FILE_TOO_LARGE';
+        throw err;
+      }
+      const dl = await fetchImpl(`https://api.telegram.org/file/bot${botToken}/${body.result.file_path}`, {
+        signal: AbortSignal.timeout(timeoutMs * 6), // a 20MB body needs longer than a JSON call
+      });
+      if (!dl.ok) throw new Error(`telegram file download http ${dl.status}`);
+      const buf = Buffer.from(await dl.arrayBuffer());
+      if (buf.length > maxBytes) {
+        const err = new Error('telegram file exceeds maxBytes');
+        err.code = 'FILE_TOO_LARGE';
+        throw err;
+      }
+      return buf;
+    },
+
+    /**
      * Send a text message. Chunks bodies over 4096 chars. Resolves
      * { sent, total, httpStatus } on full or partial success; throws an Error
      * carrying { httpStatus, partial, sent } when delivery fails.
