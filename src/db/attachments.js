@@ -55,7 +55,7 @@ export function createAttachmentsNamespace(deps) {
 
     async getById(id) {
       const result = await d1Query(
-        `SELECT id, user_id, r2_key, stream_uid, file_name, file_type, file_size, transcript, description, created_at FROM attachments WHERE id = ?`,
+        `SELECT id, user_id, r2_key, local_path, stream_uid, file_name, file_type, file_size, transcript, description, metadata, created_at FROM attachments WHERE id = ?`,
         [id],
       );
       return firstRow(result);

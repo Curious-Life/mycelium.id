@@ -128,6 +128,7 @@
     "start:enrich": "node src/index.js --enrich",
     "channel:telegram": "node packages/channel-daemon/index.js",
     "verify:model-caps": "node scripts/verify-model-caps.mjs",
+    "verify:attachment-context": "node scripts/verify-attachment-context.mjs",
     "verify:channel-egress": "node scripts/verify-channel-egress.mjs",
     "verify:channel-egress-e2e": "node scripts/verify-channel-egress-e2e.mjs",
     "verify:channel-inbound": "node scripts/verify-channel-inbound.mjs",

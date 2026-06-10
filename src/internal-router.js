@@ -12,6 +12,9 @@
 // message body (CLAUDE.md §1) — the daemon hashes before it calls.
 import express from 'express';
 import { createEgressAuditSink } from './inference/egress.js';
+import { getBlob as realGetBlob } from './ingest/blob-store.js';
+import { describeImage as realDescribeImage } from './enrich/describe-image.js';
+import { transcribeAudio as realTranscribeAudio } from './enrich/transcribe-audio.js';
 
 /** Parse the decrypted `{ "apiKey": "…" }` credentials envelope → key string|null. */
 function parseProviderApiKey(credentials) {
@@ -62,8 +65,12 @@ async function deriveAgentFromActiveProvider(db, userId) {
  * @param {object} deps
  * @param {object} deps.db        wired vault db (needs db.egressAudit + db.identityChannels)
  * @param {string} deps.userId
+ * @param {object} [deps.enrich]  test seam: { getBlob, describeImage, transcribeAudio }
  */
-export function internalRouter({ db, userId }) {
+export function internalRouter({ db, userId, enrich = {} }) {
+  const getBlob = enrich.getBlob || realGetBlob;
+  const describeImage = enrich.describeImage || realDescribeImage;
+  const transcribeAudio = enrich.transcribeAudio || realTranscribeAudio;
   const router = express.Router();
   // JSON parsing is scoped to the POST route ONLY — installing it router-wide
   // would parse (and reject malformed) bodies for every request that flows
@@ -287,6 +294,61 @@ export function internalRouter({ db, userId }) {
     } catch (err) {
       console.error('[internal-router] channel-config failed:', err.message);
       res.status(500).json({ error: 'channel-config-error' });
+    }
+  });
+
+  // POST /api/v1/internal/attachment-context { attachmentId, kind? } —
+  // derive searchable/turn-visible text from an ALREADY-STORED encrypted blob:
+  //   image       → local vision caption  → attachments.description
+  //   voice/audio → local transcription   → attachments.transcript
+  //   text family → utf-8 decode + clamp  (nothing stored; content IS the text)
+  // The channel daemon calls this right after POST /api/v1/upload, then folds
+  // the returned contextText into the captured message content (the only field
+  // that survives the coalescer). Accepts only an id — bytes never transit this
+  // route; extraction is LOCAL ONLY (fail-soft null when no capable model).
+  // Derived text lands in ENCRYPTED_FIELDS.attachments columns.
+  const TEXT_MIME = /^(text\/|application\/(json|xml|x-yaml|toml|csv))/i;
+  const TEXT_EXT = /\.(txt|md|markdown|csv|json|xml|ya?ml|toml|log|ini|conf)$/i;
+  const MAX_INLINE_TEXT = 6000; // chars of file text folded into the message
+  router.post('/api/v1/internal/attachment-context', json, async (req, res) => {
+    const attachmentId = String(req.body?.attachmentId || '');
+    if (!attachmentId) return res.status(400).json({ ok: false, error: 'attachmentId required' });
+    if (!db?.attachments?.getById) return res.status(503).json({ ok: false, error: 'attachments unavailable' });
+    try {
+      const row = await db.attachments.getById(attachmentId);
+      // 404 on missing AND on cross-user rows alike — don't leak existence.
+      if (!row || row.user_id !== userId) return res.status(404).json({ ok: false, error: 'not-found' });
+      if (!row.local_path) return res.json({ ok: true, contextText: null, reason: 'no-local-blob' });
+
+      const fileType = String(row.file_type || '');
+      const fileName = String(row.file_name || '');
+      const kind = String(req.body?.kind || '')
+        || (fileType.startsWith('image/') ? 'image'
+          : fileType.startsWith('audio/') ? 'audio'
+          : (TEXT_MIME.test(fileType) || TEXT_EXT.test(fileName)) ? 'text'
+          : 'file');
+
+      const bytes = await getBlob(row.local_path);
+      let contextText = null;
+
+      if (kind === 'image') {
+        contextText = await describeImage({ bytes });
+        if (contextText) await db.attachments.update(attachmentId, { description: contextText });
+      } else if (kind === 'audio' || kind === 'voice') {
+        contextText = await transcribeAudio({ bytes, mimeType: fileType, fileName });
+        if (contextText) await db.attachments.update(attachmentId, { transcript: contextText });
+      } else if (kind === 'text') {
+        const text = bytes.toString('utf8').replace(/\u0000/g, '').trim();
+        contextText = text ? (text.length > MAX_INLINE_TEXT ? `${text.slice(0, MAX_INLINE_TEXT)}\n[… truncated]` : text) : null;
+      }
+      // 'file' (pdf/docx/binary): extraction lands in a later step — honest null.
+
+      return res.json({ ok: true, contextText, kind });
+    } catch (err) {
+      // Fail soft for the daemon (it falls back to a placeholder) — but never
+      // leak details; the blob may be missing or the key absent (locked vault).
+      console.error('[internal-router] attachment-context failed:', err.message);
+      return res.status(200).json({ ok: true, contextText: null, reason: 'extraction-error' });
     }
   });
 
