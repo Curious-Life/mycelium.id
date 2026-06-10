@@ -57,9 +57,19 @@ function safeParse(text, fallback) {
 
 /**
  * Inspect a loaded JSZip and decide which export it is.
- * @returns {Promise<{ type: 'claude'|'chatgpt'|'obsidian'|'linkedin'|'unknown', conversations?: any[] }>}
+ * @returns {Promise<{ type: 'mycelium'|'claude'|'chatgpt'|'obsidian'|'linkedin'|'unknown', conversations?: any[], manifest?: object }>}
  */
 export async function detectExportType(zip) {
+  // Canonical-Mycelium vault export: one manifest.json carrying the whole vault
+  // (format marker per reference/server-routes/portal-export-import.js:997).
+  // Checked first — it's the only format with a manifest.json, and the parsed
+  // manifest rides along so the importer never re-reads/re-parses the entry.
+  const manifestText = await readTextEntry(zip, 'manifest.json');
+  if (manifestText) {
+    const man = safeParse(manifestText, null);
+    if (man && man.format === 'mycelium-vault-export') return { type: 'mycelium', manifest: man };
+    // A manifest.json that isn't ours — fall through to the other detectors.
+  }
   // Both Claude and ChatGPT ship a top-level conversations.json; the element
   // shape disambiguates: ChatGPT nodes carry a `mapping` tree, Claude carries
   // `chat_messages`.
