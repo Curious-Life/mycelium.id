@@ -1,13 +1,23 @@
 <script lang="ts">
 	// MindscapeActivityChip — a glassy, minimal status indicator that floats in the
-	// top-right while the pipeline works (embedding → mapping), so the empty-state
-	// never blocks. Reads the shared generate store; offers a quiet retry on error.
+	// top-right while the pipeline works (embedding → mapping → describing), so the
+	// empty-state never blocks. Reads the shared generate store AND the unified
+	// activity feed (per-item background jobs like AI describe/chronicle, with a live
+	// ETA). A live background job takes the chip — it's the most granular signal.
+	import { onMount } from 'svelte';
 	import { generate, start as startGen, fmtSeconds } from '$lib/generate';
+	import { activity, startActivityPolling, fmtEta } from '$lib/stores/activity';
+
+	onMount(() => startActivityPolling());
 
 	const phase = $derived($generate.phase);
-	const visible = $derived(phase === 'embedding' || phase === 'starting' || phase === 'running' || phase === 'error' || phase === 'done');
+	const job = $derived($activity.active[0] ?? null); // lead background job (e.g. describe)
+	const showJob = $derived(!!job && phase !== 'error');
+	const genVisible = $derived(phase === 'embedding' || phase === 'starting' || phase === 'running' || phase === 'error' || phase === 'done');
+	const visible = $derived(genVisible || !!job);
 
 	const pct = $derived.by(() => {
+		if (showJob && job) return job.total > 0 ? Math.round((job.done / job.total) * 100) : 6;
 		const g = $generate;
 		if (phase === 'embedding') return g.total > 0 ? Math.round((g.embedded / g.total) * 100) : 4;
 		if (phase === 'running') return Math.round((g.step / Math.max(1, g.totalSteps)) * 100);
@@ -16,6 +26,7 @@
 	});
 
 	const label = $derived.by(() => {
+		if (showJob && job) return job.total > 0 ? `${job.stage} · ${job.done}/${job.total}` : job.stage;
 		const g = $generate;
 		switch (phase) {
 			case 'embedding': return `Reading your world · ${g.embedded.toLocaleString()}/${g.total.toLocaleString()}`;
@@ -26,20 +37,26 @@
 			default: return '';
 		}
 	});
+
+	const sub = $derived.by(() => {
+		if (showJob && job) return fmtEta(job.etaSeconds) ? `${fmtEta(job.etaSeconds)} left` : '';
+		if (phase === 'running' && $generate.etaSeconds != null) return `~${fmtSeconds($generate.etaSeconds)} left`;
+		return '';
+	});
 </script>
 
 {#if visible}
-	<div class="chip" class:error={phase === 'error'} class:done={phase === 'done'} role="status" aria-live="polite">
-		<span class="dot" class:spin={phase !== 'error' && phase !== 'done'}></span>
+	<div class="chip" class:error={phase === 'error' && !showJob} class:done={phase === 'done' && !showJob} role="status" aria-live="polite">
+		<span class="dot" class:spin={showJob || (phase !== 'error' && phase !== 'done')}></span>
 		<div class="body">
 			<span class="label">{label}</span>
-			{#if phase === 'error'}
+			{#if phase === 'error' && !showJob}
 				<button class="retry" onclick={() => startGen()}>Retry</button>
-			{:else if phase === 'running' && $generate.etaSeconds != null}
-				<span class="sub">~{fmtSeconds($generate.etaSeconds)} left</span>
+			{:else if sub}
+				<span class="sub">{sub}</span>
 			{/if}
 		</div>
-		{#if phase !== 'error'}
+		{#if !(phase === 'error' && !showJob)}
 			<div class="bar"><div class="fill" style="width: {Math.max(4, pct)}%"></div></div>
 		{/if}
 	</div>
