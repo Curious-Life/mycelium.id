@@ -20,6 +20,7 @@ import { createOllamaDaemon } from './hardware/ollama-daemon.js';
 import { portalImportRouter } from './portal-import.js';
 import { portalSettingsRouter } from './portal-settings.js';
 import { portalChatRouter } from './portal-chat.js';
+import { portalActivityRouter } from './portal-activity.js';
 import { portalChannelsRouter } from './portal-channels.js';
 import { portalConnectorsRouter } from './portal-connectors.js';
 import { registerBuiltinAdapters, createConnectorRunner, startConnectorScheduler } from './connectors/index.js';
@@ -137,6 +138,11 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
     },
   }));
   v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath }));
+  // Unified activity feed (background_jobs) — header stream indicator + mindscape chip.
+  v.use('/api/v1/portal', portalActivityRouter({
+    db, userId,
+    authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
+  }));
   v.use('/api/v1/portal', portalUploadsRouter({ db, userId, enqueueEnrichment }));
   v.use('/api/v1/portal', portalProvidersRouter({ db, userId }));
   // One lazy Ollama daemon controller, shared by the hardware routes; stopped in
