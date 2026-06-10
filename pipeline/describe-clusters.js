@@ -107,15 +107,24 @@ async function run() {
       if (described) namedRealms += 1;
       const name = described?.name || `Realm ${realm_id}`;
       const essence = described?.essence || '';
+      // Real counts from live points — no other stage maintains these, and the
+      // search corpus ranks realms by message_count (zeros = arbitrary order).
+      const [counts = {}] = await query(
+        `SELECT COUNT(*) AS mc,
+                COUNT(DISTINCT CASE WHEN territory_id >= 0 THEN territory_id END) AS tc
+         FROM clustering_points WHERE user_id = ? AND realm_id = ?`,
+        [USER_ID, realm_id],
+      ).catch(() => []);
       if (DRY_RUN) {
         console.log(`[describe] (dry) realm ${realm_id} → "${name}"`);
         continue;
       }
       await query(
-        `INSERT INTO realms (user_id, realm_id, name, essence, created_at, updated_at)
-         VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
-         ON CONFLICT(user_id, realm_id) DO UPDATE SET name = excluded.name, essence = excluded.essence, updated_at = datetime('now')`,
-        [USER_ID, realm_id, name, essence],
+        `INSERT INTO realms (user_id, realm_id, name, essence, territory_count, message_count, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+         ON CONFLICT(user_id, realm_id) DO UPDATE SET name = excluded.name, essence = excluded.essence,
+           territory_count = excluded.territory_count, message_count = excluded.message_count, updated_at = datetime('now')`,
+        [USER_ID, realm_id, name, essence, counts.tc ?? 0, counts.mc ?? 0],
       ).catch(err => console.error(`[describe] realm ${realm_id} write failed:`, err.message));
       await tick(total);
     }

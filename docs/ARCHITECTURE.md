@@ -181,6 +181,14 @@ claim level) · personaClaims MCP tool · portal /claims (ClaimsView + TimeSerie
   `person_claims` + `person_claim_snapshots` for Persona-Claims). Applied in
   lexical order every boot by `src/db/migrate.js` (idempotent).
 - **Blobs:** uploaded files encrypted to a local blob store (`src/ingest/blob-store.js`).
+- **Realms lifecycle:** territories dissolve (`dissolved_at`, lineage preserved);
+  realms have no lineage, so re-cluster **prunes** realm rows with no live
+  `clustering_points` (`pipeline/cluster.py`) and the Describe pass maintains
+  `realms.territory_count`/`message_count` from live points
+  (`pipeline/describe-clusters.js`; plaintext ranking keys). `cognitive_metrics_per_territory`
+  + `topology_metrics` are 0-row by design until a canonical v4 import or the
+  spec'd topology-graph family lands — kept as restore targets, NOT vestiges
+  (audit: `docs/MEASUREMENT-DEADWEIGHT-AUDIT-2026-06-10.md`, gate `verify:realm-prune`).
 - **Location (#36):** the vault lives in a **durable per-OS data dir** (`src/paths.js` →
   `~/Library/Application Support/id.mycelium.app` on macOS, set by the Tauri shell as
   `MYCELIUM_DATA_DIR`), so app updates don't wipe history. A legacy in-repo `./data` vault is
