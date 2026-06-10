@@ -19,12 +19,18 @@
 // the local drainer re-embeds the whole backlog, then Generate evolves the
 // (restored) mindscape natively.
 //
-// WHAT'S SKIPPED (reported, never silent): the `agents/` filesystem (V1 is a
-// pure tool server — D5), passkeys + secrets (different auth; values excluded
-// from the export anyway), ai_providers (credentials don't ride along — re-add
-// keys in Settings), connections (federation identity is per-instance),
-// internal_model_items (dead schema).
-import { extname } from 'node:path';
+// WHAT'S SKIPPED (reported, never silent): passkeys (WebAuthn credentials are
+// origin-bound — meaningless on a new substrate) and secrets (the exporter
+// excludes the values; key-only stubs would shadow real secret reads).
+// Everything else crosses: user identity meta (display name / timezone /
+// settings → the V1 users row), internal_model_items (the agent's model of the
+// user), connections (canonical-uid remapped to the V1 user), ai_providers
+// (the canonical export decrypts, so credentials may ride along — re-encrypted
+// here by the adapter), and the `agents/` filesystem's text files (mind files,
+// memory, prompts — V1 has no agent runtime FS, so they land as documents under
+// `agents/...`, deterministic ids ⇒ idempotent).
+import { extname, basename } from 'node:path';
+import crypto from 'node:crypto';
 import { putBlob } from './blob-store.js';
 import { getMasterKey } from '../crypto/crypto-local.js';
 import { encryptVector } from '../search/ann/decode.js';
@@ -69,6 +75,12 @@ async function restoreTable(db, table, rows, { userId, overrides = {} }) {
     try {
       const r = { ...row, ...overrides };
       if (cols.has('user_id')) r.user_id = userId;
+      // Row↔envelope scope consistency: the adapter seals every imported value
+      // under its fixed 'personal' scope, so the plaintext scope COLUMN must
+      // say the same — a canonical 'org' label over a 'personal' envelope would
+      // trip scope-filtered readers (SQL-level AGENT_SCOPES filtering and the
+      // decrypt-time scope guardian both key off it).
+      if (cols.has('scope')) r.scope = 'personal';
       const keys = Object.keys(r).filter((k) => cols.has(k) && r[k] !== undefined);
       if (keys.length === 0) { out.failed++; continue; }
       const res = await db.rawQuery(
@@ -151,7 +163,13 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   await run('people', m.contacts);
   await run('contact_territories', m.contacts?.territoryLinks);
 
-  await run('health_daily', m.health?.daily ?? m.health);
+  // health arrives in the namespace's getRange shape (parsed rows, numbers,
+  // possibly no id) — synthesize the documented deterministic key when absent.
+  {
+    const healthRows = asArray(m.health?.daily ?? m.health).map((h) =>
+      (h && typeof h === 'object' && !h.id && h.date) ? { ...h, id: `${userId}:${h.date}` } : h);
+    stats.health_daily = await restoreTable(db, 'health_daily', healthRows, { userId });
+  }
   await run('activity_sessions', m.activity?.sessions);
   await run('activity_daily', m.activity?.daily);
 
@@ -176,8 +194,51 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   await run('scheduled_events', m.scheduledEvents);
   await run('agent_events', m.agentEvents);
 
+  // The agent's internal model of the user — "model internals" are continuity-
+  // critical even though new writes go to persona-claims; preserve the history.
+  await run('internal_model_items', m.internalModel);
+
+  // AI providers: the canonical export reads through its decrypting proxy, so
+  // credentials MAY ride along as plaintext — the adapter re-encrypts them here
+  // (ENCRYPTED_FIELDS.ai_providers). Absent credentials just mean re-keying.
+  await run('ai_providers', m.aiProviders);
+
+  // Connections: V1 carries the same user_a/user_b schema. Remap the canonical
+  // user id to the V1 user on every side it appears; the counterpart stays as
+  // recorded (it's another instance's identity — historical, not actionable).
+  {
+    const canonicalUid = m.user?.id;
+    const remap = (v) => (canonicalUid && v === canonicalUid ? userId : v);
+    const conns = asArray(m.connections).map((c) => (c && typeof c === 'object'
+      ? { ...c, user_a: remap(c.user_a), user_b: remap(c.user_b), initiated_by: remap(c.initiated_by) }
+      : c));
+    stats.connections = await restoreTable(db, 'connections', conns, { userId });
+  }
+
   await run('user_profiles', m.user?.profile ? [m.user.profile] : []);
   await run('user_identities', m.user?.identities);
+
+  // User identity meta → the V1 users row (UPDATE, never a second row keyed by
+  // the canonical id): display name, timezone, settings carry the person over.
+  {
+    const u = m.user || {};
+    const sets = [];
+    const params = [];
+    if (typeof u.displayName === 'string' && u.displayName) { sets.push('display_name = ?'); params.push(u.displayName); }
+    if (typeof u.timezone === 'string' && u.timezone) { sets.push('timezone = ?'); params.push(u.timezone); }
+    if (u.settings && typeof u.settings === 'object' && Object.keys(u.settings).length) { sets.push('settings = ?'); params.push(JSON.stringify(u.settings)); }
+    let updated = 0;
+    if (sets.length) {
+      try {
+        await db.rawQuery('INSERT OR IGNORE INTO users (id) VALUES (?)', [userId]);
+        const res = await db.rawQuery(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`, [...params, userId]);
+        updated = res?.meta?.changes ?? 0;
+      } catch { /* fail-soft like every family */ }
+    }
+    // `updated`, not `inserted`: an UPDATE re-applies on every run (SQLite
+    // counts matched rows), so it must not break re-import ⇒ imported:0.
+    stats.user_meta = { inserted: 0, deduped: 0, failed: 0, updated };
+  }
 
   // Mindscape — restored, not regenerated: territory narratives/names/lineage
   // are user history that cannot be recreated identically. Nomic hex vectors are
@@ -242,6 +303,39 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   await run('cognitive_metrics_per_territory', m.cognitiveMetrics?.perTerritory);
   await run('topology_metrics', m.cognitiveMetrics?.topology);
 
+  // The agents/ filesystem — mind files, memory, prompts, .shared/ notes. V1 is
+  // a pure tool server (no agent runtime FS), so the TEXT files land as
+  // documents under their original `agents/...` path. Deterministic ids
+  // (sha256 of the path) make re-imports no-ops; binaries and oversized files
+  // are counted, never silently dropped.
+  {
+    const TEXT_EXT = new Set(['.md', '.txt', '.json', '.yaml', '.yml', '.csv']);
+    const MAX_AGENT_FILE_BYTES = 5 * 1024 * 1024;
+    const agentStats = { inserted: 0, deduped: 0, failed: 0, skippedBinary: 0, skippedOversize: 0 };
+    const entries = Object.values(zip.files).filter((f) => !f.dir && f.name.startsWith('agents/'));
+    for (const entry of entries) {
+      const ext = extname(entry.name).toLowerCase();
+      if (!TEXT_EXT.has(ext)) { agentStats.skippedBinary++; continue; }
+      const declared = entry?._data?.uncompressedSize;
+      if (typeof declared === 'number' && declared > MAX_AGENT_FILE_BYTES) { agentStats.skippedOversize++; continue; }
+      try {
+        const buf = await entry.async('nodebuffer');
+        if (buf.length === 0 || buf.length > MAX_AGENT_FILE_BYTES) { agentStats.skippedOversize++; continue; }
+        const id = crypto.createHash('sha256').update(`vault-import:agents:${entry.name}`).digest('hex').slice(0, 32);
+        const r = await restoreTable(db, 'documents', [{
+          id,
+          path: entry.name,
+          title: basename(entry.name),
+          content: buf.toString('utf8'),
+          created_by: 'vault-import',
+          embedding_768: null,
+        }], { userId });
+        agentStats.inserted += r.inserted; agentStats.deduped += r.deduped; agentStats.failed += r.failed;
+      } catch { agentStats.failed++; }
+    }
+    stats.agent_files = agentStats;
+  }
+
   // One nudge wakes the drainer; it scans the whole nlp_processed=0 backlog.
   const firstMsg = asArray(m.messages)[0];
   if (firstMsg?.id && typeof enqueueEnrichment === 'function') {
@@ -253,7 +347,10 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   return {
     imported, skipped, failed,
     stats,
-    skippedFamilies: ['agents filesystem', 'ai_providers (re-add keys in Settings)', 'connections', 'passkeys', 'secrets', 'internal_model_items'],
+    skippedFamilies: [
+      'passkeys (WebAuthn is origin-bound — re-enroll on this device)',
+      'secrets (values excluded by the exporter — re-add in Settings)',
+    ],
     exportVersion: m.version ?? null,
     exportedAt: m.exportedAt ?? null,
   };

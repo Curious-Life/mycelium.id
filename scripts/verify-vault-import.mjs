@@ -44,13 +44,16 @@ const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAI
 const MARKER = 'unmistakable-vault-plaintext-marker';
 const ATT_BYTES = Buffer.from('attachment-plaintext-binary-marker-0123456789');
 const BACKDATE = '2024-03-15T10:20:30.000Z';
+const PROVIDER_KEY = 'sk-canonical-plaintext-api-key-marker';
+const AGENT_FILE_TEXT = 'agent memory file — continuity marker text';
+const CANON_UID = 'canonical-user-1';
 
 function manifest() {
   return {
     exportedAt: '2026-06-01T00:00:00.000Z',
     version: 4,
     format: 'mycelium-vault-export',
-    user: { id: 'canonical-user-1', profile: { id: 'prof1', display_name: 'Altus' }, identities: [] },
+    user: { id: CANON_UID, displayName: 'Altus', timezone: 'Europe/Amsterdam', settings: { theme: 'dark' }, profile: { id: 'prof1', display_name: 'Altus' }, identities: [], passkeys: [{ id: 'pk1', credential_id: 'must-not-import' }] },
     messages: { total: 2, data: [
       { id: 'vm1', role: 'user', content: MARKER, source: 'telegram', message_type: 'chat', created_at: BACKDATE, conversation_id: 'conv1', nlp_processed: 1, embedding_768: 'stale-canonical-vector' },
       { id: 'vm2', role: 'assistant', content: 'a canonical reply', source: 'telegram', created_at: BACKDATE, conversation_id: 'conv1', attachment_id: 'att1' },
@@ -61,7 +64,11 @@ function manifest() {
       { id: 'att1', file_name: 'note.txt', file_type: 'text/plain', file_size: ATT_BYTES.length, zipPath: 'attachments/att1/note.txt', created_at: BACKDATE },
     ] },
     contacts: { total: 1, data: [{ id: 'p1', name: 'Ada Lovelace', email: 'ada@example.com' }], territoryLinks: [] },
-    health: [{ id: 'canonical-user-1:2024-03-15', date: '2024-03-15', sleep_duration_min: '440' }],
+    // getRange shape: parsed rows, numeric values, NO id (synthesis under test)
+    health: [{ date: '2024-03-15', sleep_duration_min: 440, workout_types: ['run'] }],
+    internalModel: [{ id: 'imi1', section: 'observations', content: 'an internal model item', created_at: BACKDATE }],
+    connections: [{ id: 'conn1', user_a: CANON_UID, user_b: 'other-user-9', initiated_by: CANON_UID, status: 'accepted' }],
+    aiProviders: [{ id: 7, provider: 'anthropic', auth_type: 'api_key', credentials: PROVIDER_KEY, created_at: BACKDATE }],
     activity: { sessions: [], daily: [] },
     wealth: { portfolios: [{ id: 'wp1', name: 'Main' }], assets: [], positions: [], transactions: [], snapshots: [], watchlist: [] },
     wealthExtra: { wallets: [], portfolioAccess: [] },
@@ -90,7 +97,8 @@ async function vaultZip(man = manifest()) {
   const zip = new JSZip();
   zip.file('manifest.json', JSON.stringify(man));
   zip.file('attachments/att1/note.txt', ATT_BYTES);
-  zip.file('agents/personal/note.md', 'agent fs — must be skipped');
+  zip.file('agents/personal/memory/note.md', AGENT_FILE_TEXT);
+  zip.file('agents/personal/blob.bin', Buffer.from([0, 1, 2, 3]));
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
@@ -174,6 +182,45 @@ async function main() {
     const notRaw = typeof cp?.nomic_embedding === 'string' && !cp.nomic_embedding.toUpperCase().includes(NOMIC_HEX.slice(0, 32));
     rec('V5b nomic vector re-encrypted under the V1 key (decryptVector round-trip)', vecOk && notRaw, `roundtrip=${vecOk}`);
 
+    // ── continuity families (full-export parity) ────────────────────────────
+    const userRow = raw.prepare('SELECT display_name, timezone, settings FROM users WHERE id = ?').get('local-user');
+    rec('C1 user identity meta lands on the V1 users row (not a second row)',
+      userRow?.display_name === 'Altus' && userRow?.timezone === 'Europe/Amsterdam' && String(userRow?.settings || '').includes('dark')
+      && !raw.prepare('SELECT COUNT(*) c FROM users WHERE id = ?').get(CANON_UID)?.c,
+      `display_name=${userRow?.display_name} tz=${userRow?.timezone}`);
+
+    const imi = raw.prepare('SELECT COUNT(*) c FROM internal_model_items WHERE id = ?').get('imi1')?.c;
+    rec('C2 internal_model_items (model internals) imported', imi === 1);
+
+    const conn = raw.prepare('SELECT user_a, user_b, status FROM connections WHERE id = ?').get('conn1');
+    rec('C3 connections imported with canonical uid remapped to the V1 user',
+      conn?.user_a === 'local-user' && conn?.user_b === 'other-user-9' && conn?.status === 'accepted',
+      `user_a=${conn?.user_a}`);
+
+    const prov = raw.prepare('SELECT credentials FROM ai_providers WHERE id = ?').get(7);
+    const provEncrypted = Boolean(prov?.credentials) && !String(prov.credentials).includes(PROVIDER_KEY);
+    let provRoundtrip = false;
+    try { provRoundtrip = (await decrypt(String(prov.credentials), await importMasterKey(USER_HEX))) === PROVIDER_KEY; } catch { /* */ }
+    rec('C4 provider credentials re-encrypted at rest + decrypt back', provEncrypted && provRoundtrip
+      && !dbBytes.includes(Buffer.from(PROVIDER_KEY)), `encrypted=${provEncrypted} roundtrip=${provRoundtrip}`);
+
+    const agentDoc = raw.prepare("SELECT id, content, title FROM documents WHERE path = 'agents/personal/memory/note.md'").get();
+    let agentDocPlain = null;
+    try { agentDocPlain = await decrypt(String(agentDoc?.content || ''), await importMasterKey(USER_HEX)); } catch { /* */ }
+    rec('C5 agents/ text file lands as an encrypted document (binary skipped, counted)',
+      Boolean(agentDoc) && agentDocPlain === AGENT_FILE_TEXT && ir?.stats?.agent_files?.skippedBinary === 1
+      && !dbBytes.includes(Buffer.from(AGENT_FILE_TEXT)),
+      `doc=${Boolean(agentDoc)} binarySkipped=${ir?.stats?.agent_files?.skippedBinary}`);
+
+    const hd = raw.prepare("SELECT id FROM health_daily WHERE date = '2024-03-15'").get();
+    rec('C6 health id synthesized ({userId}:{date}) from getRange-shaped rows', hd?.id === 'local-user:2024-03-15', `id=${hd?.id}`);
+
+    const msgScope = raw.prepare('SELECT scope FROM messages WHERE id = ?').get('vm1')?.scope;
+    rec('C7 row scope aligned with the sealed envelope scope (personal)', msgScope === 'personal', `scope=${msgScope}`);
+
+    const pk = raw.prepare("SELECT COUNT(*) c FROM passkey_credentials").get()?.c ?? 0;
+    rec('C8 passkeys NOT imported (origin-bound)', pk === 0);
+
     // ── V6: idempotent re-import ────────────────────────────────────────────
     const before = raw.prepare('SELECT COUNT(*) c FROM messages').get()?.c;
     const r2 = await postFile(await vaultZip());
@@ -186,9 +233,10 @@ async function main() {
     const r3 = await postFile(await badZip.generateAsync({ type: 'nodebuffer' }));
     rec('V7 wrong manifest format → 400, no leak', r3.status === 400 && !JSON.stringify(r3.body || {}).includes(MARKER), `status=${r3.status}`);
 
-    // ── V8: honest skip reporting ───────────────────────────────────────────
-    rec('V8 skippedFamilies reported (agents fs, ai_providers, connections…)',
-      Array.isArray(ir?.skippedFamilies) && ir.skippedFamilies.length >= 4 && ir.skippedFamilies.some((s) => /agents/.test(s)));
+    // ── V8: honest skip reporting — ONLY passkeys + secrets remain skipped ──
+    rec('V8 skippedFamilies = exactly passkeys + secrets (everything else crosses)',
+      Array.isArray(ir?.skippedFamilies) && ir.skippedFamilies.length === 2
+      && ir.skippedFamilies.some((s) => /passkeys/.test(s)) && ir.skippedFamilies.some((s) => /secrets/.test(s)));
 
     raw.close();
   } finally {

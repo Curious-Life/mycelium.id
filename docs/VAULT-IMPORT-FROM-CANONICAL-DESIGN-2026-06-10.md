@@ -45,11 +45,12 @@ cross-link so users coming from canonical aren't stranded.
 | `user_profiles`, `user_identities`, users.timezone/settings | generic restore (user_id forced) | " |
 | mindscape: `realms`, `semantic_themes`, `territory_profiles`, `theme_cards`, `clustering_points` (+nomic hex), `cluster_events`, `territory_cofire`, `territory_neighbors`, `realm_neighbors` | generic restore | territory narratives/names/lineage are **user-meaningful history that cannot be regenerated identically**; nomic 256D vectors are the same model family (Nomic v1.5); next Generate evolves rather than recreates. Hex vectors auto-encrypt on insert (ENCRYPTED_FIELDS) |
 | `cognitive_metrics_*`, `topology_metrics` (v4) | generic restore | historical metrics; v3 bundles simply lack the key (no-op) |
-| `agents/` filesystem | **skip** (counted + reported) | V1 is a pure tool server — no agent runtime FS (D5) |
-| `passkeys`, `secrets` | **skip** | different auth system; secret *values* are excluded from the export anyway (reference:846) |
-| `ai_providers` | **skip** (reported) | credentials don't ride along — user re-adds keys in Settings → AI |
-| `connections` | **skip** (reported) | federation identity is per-instance; canonical DIDs aren't this box's |
-| `internal_model_items` | **skip** | dead schema (persona-claims pivot) |
+| `user.displayName/timezone/settings` | **UPDATE the V1 users row** (never a second row keyed by the canonical id) | identity meta carries the person over (reference:182) |
+| `internalModel` → `internal_model_items` | generic restore | the agent's model of the user is continuity-critical history (new writes go to persona-claims, but the past is preserved) |
+| `connections` | generic restore + **uid remap** (`user_a/user_b/initiated_by`: canonical uid → V1 user) | V1 carries the same schema; the counterpart side stays as recorded (historical) |
+| `ai_providers` | generic restore | the canonical export reads through its decrypting proxy, so credentials MAY ride along — re-encrypted by the adapter (`ENCRYPTED_FIELDS.ai_providers`); absent creds = just re-key |
+| `agents/` filesystem (text: .md/.txt/.json/.yaml/.csv, ≤5MB) | imported as **documents** under their original `agents/...` path, deterministic sha256(path) ids ⇒ idempotent | mind files / memory / prompts are content; V1 has no agent runtime FS (D5) — binaries counted, reported |
+| `passkeys`, `secrets` | **skip** (the ONLY remaining skips) | WebAuthn creds are origin-bound (re-enroll); secret *values* are excluded by the exporter (reference:846) |
 
 ## 3. The generic restore (the engine)
 
@@ -81,9 +82,15 @@ drainer scans the whole `nlp_processed=0` backlog (`src/enrich/drainer.js:66-76`
 
 ## 5. Limits (documented, not silent)
 
-- Upload: existing 512MB single-shot / chunked path (`MYCELIUM_IMPORT_LIMIT_BYTES`).
-  Canonical caps its own restore at 2GB; vaults near that need the env raised. Reported, not capped silently.
+- Upload: **2GB default** (`MYCELIUM_IMPORT_LIMIT_BYTES`) — parity with the
+  canonical restore cap, so a media-heavy archive isn't refused.
 - `manifest.json` inflation cap: `MAX_JSON_BYTES` (400MB default, env-tunable).
+  A manifest over the cap now returns a **typed, actionable error** naming the
+  env var — never the generic "unrecognized export".
+- Scope alignment: every imported row with a `scope` column is set `'personal'`
+  to match the scope the adapter seals envelopes under — a canonical `'org'`
+  label over a `'personal'` envelope would trip scope-filtered readers
+  (SQL-level AGENT_SCOPES + the decrypt-time scope guardian).
 
 ## 6. Verification table
 
@@ -121,3 +128,12 @@ rejected without leakage.
   narratives/names/lineage are unregenerable user history; reference import
   restores them and the nomic vectors are model-compatible. Restore mindscape,
   let Generate evolve it.
+- v3 (full-continuity audit, same day — receiver re-audited line-by-line against
+  the exporter before the user's real full export): v2 silently under-imported.
+  Closed: users-row identity meta (was dropped), `internal_model_items` (was
+  "dead schema" — but the data is history, the *schema* pivot only governs new
+  writes), `connections` (same schema in V1; uid remap), `ai_providers` (the
+  exporter DECRYPTS — credentials may ride along; v2's "no creds" rationale was
+  wrong), `agents/` text files as documents, health getRange-shape id synthesis,
+  row↔envelope scope alignment, 2GB upload parity, typed oversized-manifest
+  error. Skips narrowed to exactly passkeys + secrets. Gate grew 9 → 17 checks.
