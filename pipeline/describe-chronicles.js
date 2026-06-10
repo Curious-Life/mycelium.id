@@ -23,9 +23,7 @@
 
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
-import { createInferenceRouter } from '../src/inference/router.js';
-import { resolveInferenceConfig } from '../src/inference/resolve.js';
-import { createEgressAuditSink } from '../src/inference/egress.js';
+import { createNarrator } from './lib/narrate-infer.js';
 
 export const CHRONICLE_VERSION = process.env.MYCELIUM_CHRONICLE_VERSION || 'chronicle-v1';
 
@@ -165,19 +163,18 @@ if (isMain) {
   // "deriveBits 2nd argument is not of type CryptoKey" on every content decrypt.
   const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
   const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal' });
-  // Prefer the provider the user configured in Settings (ai_providers); fall back
-  // to env (BYOK power users), else local Ollama. (S2: the store → router seam.)
-  const router = createInferenceRouter({
-    ...(await resolveInferenceConfig(db, USER_ID)),
-    onEgress: createEgressAuditSink(db, USER_ID), // §4e: audit every cloud egress (hash-only)
-  });
-  console.log(`[chronicles] narrating territories (model: ${router.config.anthropicConfigured || router.config.openaiConfigured ? 'cloud BYOK' : 'local Ollama'})${DRY_RUN ? ' (dry-run)' : ''}`);
+  // The user's ACTIVE provider names + chronicles (same seam describe-clusters uses).
+  // Local Ollama is reached over native /api/chat with think:false (fast); cloud goes
+  // through the audited router. The narrator's infer(prompt, {maxTokens}) is adapted
+  // to describeChronicles' infer({prompt,maxTokens}) call shape.
+  const narrator = await createNarrator({ db, userId: USER_ID });
+  console.log(`[chronicles] narrating territories via ${narrator.label}${narrator.local ? ' (local)' : ''}${DRY_RUN ? ' (dry-run)' : ''}`);
   try {
     if (DRY_RUN) {
       const targets = await getTerritoriesToNarrate(db, USER_ID, CHRONICLE_VERSION);
       console.log(`[chronicles] (dry) ${targets.length} territories would be narrated`);
     } else {
-      const res = await describeChronicles({ db, userId: USER_ID, infer: router.infer, log: console.error });
+      const res = await describeChronicles({ db, userId: USER_ID, infer: ({ prompt, maxTokens }) => narrator.infer(prompt, { maxTokens }), log: console.error });
       console.log(`[chronicles] ${res.described} narrated, ${res.skipped} skipped (no content), ${res.failed} failed (no model / write)`);
     }
   } catch (e) {

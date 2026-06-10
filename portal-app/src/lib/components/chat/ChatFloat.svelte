@@ -2079,7 +2079,9 @@
 		max-width: 100%;
 		background: transparent;
 		color: var(--color-text-primary);
-		font-size: 1rem;
+		/* Match the chat message body (text-sm / prose-sm = 0.875rem) so typing
+		   reads at the same size as the conversation. */
+		font-size: 0.875rem;
 		line-height: 1.5;
 		min-height: 1.5rem;
 		/* Auto-grow caps at 4 lines (handleInput); manual drag of the
