@@ -107,6 +107,37 @@ const imp2text = imp2.content?.[0]?.text || '';
     `rows=${c} reply="${imp2text.slice(0, 60)}"`);
 }
 
+// I8-I10: channel-relay passthrough — metadata, createdAt, attachmentId reach the
+// row (2026-06-10 live bug: the handler dropped them; every telegram message had
+// metadata NULL and sender/chatTitle/replyTo context was silently lost).
+const relayId = `RELAY-${Date.now()}`;
+await client.callTool({ name: 'captureMessage', arguments: {
+  content: 'relay passthrough test', id: relayId, source: 'telegram',
+  metadata: { sender: 'Marius', senderRole: 'owner', chatTitle: 'Shared Group' },
+  createdAt: 1781000000, // epoch seconds → normalized ISO
+  attachmentId: 'att-relay-1',
+} });
+{
+  // db.rawQuery rides d1Query → ENCRYPTED_FIELDS auto-decrypt on SELECT.
+  const sel = await db.rawQuery('SELECT metadata FROM messages WHERE id = ?', [relayId]);
+  const decrypted = sel?.results?.[0]?.metadata ?? sel?.[0]?.metadata ?? null;
+  let meta = null;
+  try { meta = typeof decrypted === 'string' ? JSON.parse(decrypted) : decrypted; } catch { /* */ }
+  rec('I8. metadata passthrough — sender/chatTitle survive to the (encrypted) row',
+    meta?.sender === 'Marius' && meta?.chatTitle === 'Shared Group',
+    `metadata=${JSON.stringify(meta || null).slice(0, 60)}`);
+
+  const q = new Database(DB, { readonly: true });
+  const raw = q.prepare('SELECT created_at, attachment_id, metadata FROM messages WHERE id = ?').get(relayId);
+  q.close();
+  rec('I9. createdAt passthrough — epoch seconds land as the original ISO time',
+    String(raw?.created_at || '') === new Date(1781000000 * 1000).toISOString(),
+    `created_at=${raw?.created_at}`);
+  rec('I10. attachmentId passthrough + raw metadata column is ciphertext',
+    raw?.attachment_id === 'att-relay-1' && isEncrypted(raw?.metadata),
+    `attachment_id=${raw?.attachment_id} metaEncrypted=${isEncrypted(raw?.metadata)}`);
+}
+
 await client.close();
 close();
 
