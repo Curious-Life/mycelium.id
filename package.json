@@ -129,6 +129,7 @@
     "channel:telegram": "node packages/channel-daemon/index.js",
     "verify:model-caps": "node scripts/verify-model-caps.mjs",
     "verify:attachment-context": "node scripts/verify-attachment-context.mjs",
+    "verify:ogg-opus": "node scripts/verify-ogg-opus.mjs",
     "verify:channel-egress": "node scripts/verify-channel-egress.mjs",
     "verify:channel-egress-e2e": "node scripts/verify-channel-egress-e2e.mjs",
     "verify:channel-inbound": "node scripts/verify-channel-inbound.mjs",
@@ -162,6 +163,8 @@
     "express": "^5.2.1",
     "jszip": "^3.10.1",
     "mammoth": "^1.12.0",
+    "opusscript": "^0.1.1",
+    "prism-media": "^1.3.5",
     "unpdf": "^1.6.2"
   }
 }
