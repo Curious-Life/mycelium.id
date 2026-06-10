@@ -23,7 +23,7 @@
 		routing: Routing;
 		groups: Group[];
 		discordChannels: DChan[];
-		daemon?: { status: string; message: string | null; detail: string | null };
+		daemon?: { status: string; message: string | null; detail: string | null; replies?: string | null; backend?: string | null };
 	};
 
 	let cs: ChannelsState | null = $state(null);
@@ -126,13 +126,16 @@
 		</p>
 		{#if cs.daemon && cs.daemon.status && cs.daemon.status !== 'unknown'}
 			{@const st = cs.daemon.status}
+			{@const captureOnly = st === 'ok' && cs.daemon.replies === 'capture-only'}
 			<div class="text-[0.7rem] mb-3 flex items-center gap-2">
-				<span class="inline-block w-2 h-2 rounded-full {st === 'ok' ? 'bg-green-500' : st === 'down' ? 'bg-red-500' : st === 'disabled' ? 'bg-[var(--color-text-tertiary)]' : 'bg-amber-400'}"></span>
+				<span class="inline-block w-2 h-2 rounded-full {st === 'ok' && !captureOnly ? 'bg-green-500' : st === 'down' ? 'bg-red-500' : st === 'disabled' ? 'bg-[var(--color-text-tertiary)]' : 'bg-amber-400'}"></span>
 				<span class="text-[var(--color-text-secondary)]">
-					{st === 'ok' ? 'Bridge running' : st === 'down' ? 'Bridge stopped — check the bot token' : st === 'disabled' ? 'Bridge off' : 'Bridge starting…'}
+					{#if st === 'ok'}{captureOnly ? 'Receiving — but not replying' : 'Bridge running — replying'}{:else if st === 'down'}Bridge stopped — check the bot token{:else if st === 'disabled'}Bridge off{:else}Bridge starting…{/if}
 				</span>
-				{#if !cs.agent.hasKey && !cs.routing.ollamaModel}
-					<span class="text-[var(--color-text-tertiary)]">· replies need an assistant (pull a local model in Hardware, or add a cloud key below)</span>
+				{#if captureOnly}
+					<span class="text-[var(--color-text-tertiary)]">· no AI model connected — pick one in Settings → AI, or add a key below</span>
+				{:else if st === 'ok' && cs.daemon.backend}
+					<span class="text-[var(--color-text-tertiary)]">· via {cs.daemon.backend}</span>
 				{/if}
 			</div>
 		{/if}

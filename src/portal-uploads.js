@@ -3,6 +3,7 @@ import Busboy from 'busboy';
 import JSZip from 'jszip';
 import { captureMessage } from './ingest/capture.js';
 import { detectExportType, processClaudeExport, processOpenAIExport } from './ingest/import-parsers.js';
+import { importMyceliumVault } from './ingest/vault-import.js';
 import { uploadAttachment } from './ingest/upload.js';
 import { describeImage } from './enrich/describe-image.js';
 
@@ -92,11 +93,19 @@ export function portalUploadsRouter({ db, userId, enqueueEnrichment = null }) {
   async function processArchive(buffer, filename) {
     let zip;
     try { zip = await JSZip.loadAsync(buffer); }
-    catch { return { error: 'unrecognized file — upload a Claude or ChatGPT export .zip' }; }
+    catch { return { error: 'unrecognized file — upload a Mycelium vault export, or a Claude/ChatGPT export .zip' }; }
 
     const detected = await detectExportType(zip);
     const capture = (msg) => captureMessage(db, { userId, ...msg }, enqueueEnrichment);
 
+    if (detected.type === 'mycelium') {
+      // Canonical-Mycelium vault export — the bring-your-vault-home path. All
+      // rows land through the auto-encrypting adapter; messages are reset to
+      // nlp_processed=0 so the local pipeline re-embeds (the export carries no
+      // search vectors). See docs/VAULT-IMPORT-FROM-CANONICAL-DESIGN-2026-06-10.md.
+      const r = await importMyceliumVault(zip, detected.manifest, { db, userId, enqueueEnrichment });
+      return { importResult: { type: 'mycelium', ...r } };
+    }
     if (detected.type === 'claude') {
       const r = await processClaudeExport(zip, { capture, conversations: detected.conversations });
       return { importResult: { type: 'claude', ...r } };
@@ -108,7 +117,7 @@ export function portalUploadsRouter({ db, userId, enqueueEnrichment = null }) {
     if (detected.type === 'obsidian' || detected.type === 'linkedin') {
       return { importResult: { type: detected.type, imported: 0, skipped: 0, stats: {}, note: `${detected.type} import is not supported yet` } };
     }
-    return { error: 'unrecognized export — no Claude or ChatGPT conversations.json found' };
+    return { error: 'unrecognized export — expected a Mycelium vault export, or a Claude/ChatGPT conversations.json' };
   }
 
   // ── POST /upload — single-shot multipart `file` ────────────────────────────

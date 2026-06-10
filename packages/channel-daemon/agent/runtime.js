@@ -6,16 +6,19 @@
  *   runtime.runTurn({ turnCtx, userMessage, signal })
  *     -> Promise<{ delivered: boolean, usedReplyTool: boolean, reason?: string }>
  *
- * Backends: claude-agent-sdk (cloud BYOK) · ollama (local sovereign) · auto
- * (per-turn router over both). Locus is IMPLIED BY CONFIGURATION:
+ * Backends: claude-agent-sdk (cloud BYOK) · ollama (local sovereign) · openai-compat
+ * (any OpenAI-compatible provider — the in-app selection bridge uses this) · auto
+ * (per-turn router over cloud+local). Locus is IMPLIED BY CONFIGURATION:
  *   - Anthropic key + Ollama model  -> auto (local-first, escalate complex→cloud)
+ *   - OpenAI-compatible base_url     -> openai-compat
  *   - Anthropic key only            -> cloud
  *   - Ollama model only             -> local
  *   - neither                       -> null (capture-only)
- * `MYCELIUM_CHANNEL_ROUTER` (cfg.channelRouter) = 'cloud'|'local'|'auto' overrides.
+ * `MYCELIUM_CHANNEL_ROUTER` (cfg.channelRouter) = 'cloud'|'local'|'openai'|'auto' overrides.
  */
 import { createClaudeSdkRuntime } from './backends/claude-sdk.js';
 import { createOllamaRuntime } from './backends/ollama.js';
+import { createOpenAiCompatRuntime } from './backends/openai-compat.js';
 import { createAutoRuntime } from './backends/auto.js';
 import { parseSensitivePatterns } from './classify.js';
 
@@ -28,14 +31,17 @@ import { parseSensitivePatterns } from './classify.js';
 export function selectRuntime(cfg, { auditEgress } = {}) {
   const hasCloud = !!cfg.anthropicApiKey;
   const hasLocal = !!cfg.ollamaModel;
-  const forced = cfg.channelRouter; // 'cloud' | 'local' | 'auto' | undefined
+  const hasOpenai = !!cfg.openaiBaseUrl; // generic OpenAI-compatible (Regolo/OpenRouter/…)
+  const forced = cfg.channelRouter; // 'cloud' | 'local' | 'openai' | 'auto' | undefined
 
   const cloud = () => createClaudeSdkRuntime(cfg);
   const local = () => createOllamaRuntime(cfg);
+  const openai = () => createOpenAiCompatRuntime(cfg);
 
-  // Explicit override.
+  // Explicit override (the active-provider bridge sets this to pin one backend).
   if (forced === 'cloud') return hasCloud ? cloud() : null;
   if (forced === 'local') return hasLocal ? local() : null;
+  if (forced === 'openai') return hasOpenai ? openai() : null;
   if (forced === 'auto' || (hasCloud && hasLocal)) {
     if (hasCloud && hasLocal) {
       return createAutoRuntime({
@@ -50,7 +56,8 @@ export function selectRuntime(cfg, { auditEgress } = {}) {
     return null;
   }
 
-  if (hasCloud) return cloud();   // cloud BYOK
+  if (hasOpenai) return openai(); // OpenAI-compatible BYOK (selected app provider)
+  if (hasCloud) return cloud();   // cloud BYOK (Anthropic)
   if (hasLocal) return local();   // sovereign local
   return null;                    // capture-only (fail-closed, honest)
 }

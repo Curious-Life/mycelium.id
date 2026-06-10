@@ -31,10 +31,19 @@ function extractText(result) {
  * @param {string} a.systemPrompt
  * @param {string} a.userMessage
  * @param {number} [a.maxTurns]
+ * @param {string[]} [a.allowTools]  trim the tool surface to these names (suffix-
+ *   matched so MCP prefixes like `mcp__x__name` work); the reply tool is ALWAYS
+ *   kept. Local models need this: the full schema set overflows their context.
+ * @param {AbortSignal} [a.signal]  lane-level whole-turn abort, threaded to chat calls
  */
-export async function runOllamaTurn({ ollamaChat, mcpClient, systemPrompt, userMessage, maxTurns = 8 }) {
+export async function runOllamaTurn({ ollamaChat, mcpClient, systemPrompt, userMessage, maxTurns = 8, allowTools, signal }) {
   const { tools: mcpTools } = await mcpClient.listTools();
-  const tools = (mcpTools || []).map((t) => ({
+  const kept = (allowTools && allowTools.length)
+    ? (mcpTools || []).filter((t) =>
+        t.name.endsWith(REPLY_TOOL_SUFFIX)
+        || allowTools.some((k) => t.name === k || t.name.endsWith(`__${k}`)))
+    : (mcpTools || []);
+  const tools = kept.map((t) => ({
     type: 'function',
     function: { name: t.name, description: t.description || '', parameters: t.inputSchema || { type: 'object', properties: {} } },
   }));
@@ -59,7 +68,7 @@ export async function runOllamaTurn({ ollamaChat, mcpClient, systemPrompt, userM
   }
 
   for (let i = 0; i < maxTurns; i++) {
-    const resp = await ollamaChat({ messages, tools });
+    const resp = await ollamaChat({ messages, tools, signal });
     const m = resp?.message || {};
     messages.push({ role: 'assistant', content: m.content || '', ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}) });
     const calls = m.tool_calls || [];
@@ -77,7 +86,9 @@ export async function runOllamaTurn({ ollamaChat, mcpClient, systemPrompt, userM
         try { resultText = extractText(await mcpClient.callTool({ name, arguments: args || {} })); }
         catch (e) { resultText = `tool error: ${e.message}`; }
       }
-      messages.push({ role: 'tool', content: resultText });
+      // `tool_call_id`/`name` are required by strict OpenAI-compatible servers (the
+      // openai-compat backend reuses this loop); native Ollama ignores the extras.
+      messages.push({ role: 'tool', content: resultText, ...(tc.id ? { tool_call_id: tc.id } : {}), ...(name ? { name } : {}) });
     }
     if (usedReplyTool && delivered) break; // delivered — stop early
   }
@@ -93,7 +104,7 @@ export async function runOllamaTurn({ ollamaChat, mcpClient, systemPrompt, userM
     forced = true;
     messages.push({ role: 'user', content: 'Reply to the user now: call the reply tool with your message text. Do not output anything else.' });
     try {
-      const resp = await ollamaChat({ messages, tools: [replyTool], tool_choice: { type: 'function', function: { name: replyTool.function.name } } });
+      const resp = await ollamaChat({ messages, tools: [replyTool], tool_choice: { type: 'function', function: { name: replyTool.function.name } }, signal });
       for (const tc of (resp?.message?.tool_calls || [])) {
         if (tc?.function?.name?.endsWith(REPLY_TOOL_SUFFIX)) await runReplyCall(tc);
       }
@@ -124,14 +135,19 @@ export function createOllamaRuntime(cfg) {
   const base = (cfg.ollamaUrl || 'http://127.0.0.1:11434').replace(/\/+$/, '');
   const fetchImpl = cfg.fetch || globalThis.fetch;
 
-  async function ollamaChat({ messages, tools, tool_choice }) {
+  async function ollamaChat({ messages, tools, tool_choice, signal }) {
     const body = { model, messages, tools, stream: false };
+    // Without an explicit num_ctx Ollama serves the model's default (often 4096),
+    // which silently truncates the prompt → empty responses, no tool calls.
+    body.options = { num_ctx: cfg.ollamaNumCtx || 8192 };
     if (tool_choice) body.tool_choice = tool_choice; // forced reply (Ollama ≥0.30)
+    // 300s default: a COLD load + prompt ingest on a 7–12B exceeds 120s.
+    const timeout = AbortSignal.timeout(cfg.ollamaTimeoutMs || 300_000);
     const res = await fetchImpl(`${base}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(cfg.ollamaTimeoutMs || 120_000),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });
     if (!res.ok) throw new Error(`ollama /api/chat http ${res.status}`);
     return res.json();
@@ -139,13 +155,14 @@ export function createOllamaRuntime(cfg) {
 
   return {
     label: `ollama(${model}, mcp:http)`,
-    async runTurn({ turnCtx, userMessage }) {
+    async runTurn({ turnCtx, userMessage, signal }) {
       const mcpClient = await connectMcp(cfg);
       try {
         return await runOllamaTurn({
           ollamaChat, mcpClient,
           systemPrompt: buildReplySystemPrompt({ turnCtx, persona: cfg.persona }),
           userMessage, maxTurns: cfg.maxTurns || 8,
+          allowTools: cfg.localTools, signal,
         });
       } finally {
         try { await mcpClient.close?.(); } catch { /* */ }

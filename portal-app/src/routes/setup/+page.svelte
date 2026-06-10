@@ -261,6 +261,11 @@
 					</div>
 					<input type="file" accept=".myvault,application/octet-stream" onchange={onPickBackup}
 						class="block w-full text-sm text-[var(--color-text-secondary)] file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border file:border-[var(--color-border)] file:bg-transparent file:text-[var(--color-text-primary)]" />
+					<p class="text-xs text-[var(--color-text-tertiary)] leading-relaxed">
+						Coming from the hosted Mycelium? That export (a <code>.zip</code>) is imported
+						<em>after</em> setup — create a new vault first, then drop the export into
+						Import inside the app.
+					</p>
 					<button onclick={() => uploadBackup(false)} disabled={uploadingBackup || !backupFile}
 						class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed">
 						{uploadingBackup ? 'Reading backup…' : 'Continue'}

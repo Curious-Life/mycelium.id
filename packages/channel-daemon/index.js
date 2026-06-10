@@ -53,7 +53,7 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     const auditEgress = (e) => { vault.recordInferenceEgress(e); };
     const runtime = selectRuntime(cfg, { auditEgress });
     if (runtime) {
-      lane = createLane({ runtime });
+      lane = createLane({ runtime, ...(cfg.turnTimeoutMs ? { turnTimeoutMs: cfg.turnTimeoutMs } : {}) });
       if (cfg.coalesceWindowMs > 0) {
         const coalescer = createCoalescer({ windowMs: cfg.coalesceWindowMs, flush: (turnCtx, merged) => lane.runTurn(turnCtx, merged) });
         effectiveRunTurn = (turnCtx, msg) => { coalescer.push(turnCtx, msg); };
@@ -65,6 +65,12 @@ export function buildDaemon(cfg, { runTurn } = {}) {
       effectiveRunTurn = captureOnlyRunTurn;
     }
   }
+
+  // Honest replies state for /healthz → the Channels UI (so "receiving but not
+  // replying — no model connected" is never a silent green again).
+  const replies = effectiveRunTurn === captureOnlyRunTurn
+    ? { mode: 'capture-only', backend: null }
+    : { mode: 'on', backend: lane?.label || 'custom' };
 
   const recordEgress = (entry) => { vault.recordEgress(entry); };
   const persistOutbound = (args) => { vault.captureMessage(args).catch((e) => console.error('[channel-daemon] outbound persist failed:', e.message)); };
@@ -136,8 +142,8 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     gateway = createDiscordGateway({ botToken: cfg.discordBotToken, handleInbound: handleDiscordInbound });
   }
 
-  const app = createDaemonApp({ telegramSendHandler, discordSendHandler, getActiveTurn });
-  return { app, poller, gateway, telegram, discord, lane, vault };
+  const app = createDaemonApp({ telegramSendHandler, discordSendHandler, getActiveTurn, replies, getLastTurn: lane ? lane.lastTurn : undefined });
+  return { app, poller, gateway, telegram, discord, lane, vault, replies };
 }
 
 async function main() {

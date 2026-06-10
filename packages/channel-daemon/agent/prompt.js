@@ -32,7 +32,7 @@ export function buildReplySystemPrompt({ turnCtx, persona } = {}) {
     'You also have read tools over the operator’s private vault — use them FIRST to',
     'ground your reply, then call `reply`:',
     '- `getContext` for the current state-of-mind preamble,',
-    '- `search` / `relatedTo` to recall relevant memories, facts, people, and past',
+    '- `searchMindscape` to recall relevant memories, facts, people, and past',
     '  messages. Prefer recalled context over guessing.',
     '',
     'Style: answer in your own voice — concise and warm, as in a chat. Do not paste',

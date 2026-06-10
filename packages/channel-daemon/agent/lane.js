@@ -24,11 +24,12 @@ import { setActiveTurn, clearActiveTurn } from '../inbound-context.js';
  * @param {number} [deps.turnTimeoutMs]
  * @param {string} [deps.logPrefix]
  */
-export function createLane({ runtime, turnTimeoutMs = 120_000, logPrefix = 'channel-daemon' }) {
+export function createLane({ runtime, turnTimeoutMs = 600_000, logPrefix = 'channel-daemon' }) {
   if (!runtime?.runTurn) throw new TypeError('createLane: runtime.runTurn required');
 
   let tail = Promise.resolve(); // serial chain; the worker is "whatever tail resolves to"
   let active = 0;               // 0 or 1 — guards the no-overlap invariant
+  let lastTurn = null;          // honest last-outcome for /healthz (incident forensics)
 
   async function execute(turnCtx, msg) {
     active++;
@@ -39,9 +40,11 @@ export function createLane({ runtime, turnTimeoutMs = 120_000, logPrefix = 'chan
     try {
       const r = await runtime.runTurn({ turnCtx, userMessage: msg.content, signal: ac.signal });
       const verdict = r?.delivered ? 'delivered' : (r?.usedReplyTool ? 'reply-undelivered' : 'no-reply');
+      lastTurn = { at: new Date().toISOString(), chatId: String(turnCtx.channelId), verdict, ...(r?.reason ? { reason: r.reason } : {}) };
       console.log(`[${logPrefix}] turn done for chat=${turnCtx.channelId}: ${verdict}`);
       return r;
     } catch (e) {
+      lastTurn = { at: new Date().toISOString(), chatId: String(turnCtx.channelId), verdict: 'error', error: String(e.message || e).slice(0, 200) };
       console.error(`[${logPrefix}] turn error for chat=${turnCtx.channelId}: ${e.message}`);
     } finally {
       clearTimeout(timer);
@@ -63,5 +66,8 @@ export function createLane({ runtime, turnTimeoutMs = 120_000, logPrefix = 'chan
 
     /** Await a full drain — graceful stop + test seam. */
     idle() { return tail; },
+
+    /** Outcome of the most recent turn ({at, chatId, verdict, reason?|error?}) — /healthz. */
+    lastTurn() { return lastTurn; },
   };
 }

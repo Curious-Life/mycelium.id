@@ -116,7 +116,16 @@ via `importMessages`. The portal **Import** screen posts AI-export archives
 (Claude / ChatGPT `.zip`) to `/api/v1/portal/upload[/chunk|/complete]`
 (`src/portal-uploads.js`, multipart via busboy, single-shot + chunked assembly);
 they're parsed (`src/ingest/import-parsers.js`) and funneled through
-`captureMessage`. The untrusted-file path is hardened (decompression-bomb cap
+`captureMessage`. The same surface also accepts a **canonical-Mycelium vault
+export** (`manifest.json` `format:'mycelium-vault-export'`, v3/v4 — the
+bring-your-vault-home path): `src/ingest/vault-import.js` restores ~40 table
+families through the auto-encrypting adapter (`db.rawQuery`), re-encrypts
+attachment binaries via `putBlob`, re-encrypts nomic clustering vectors under
+the V1 key (`encryptVector`; foreign-key ciphertext is dropped + reported),
+resets messages to `nlp_processed=0` for local re-embedding, and reports skipped
+families (agents fs, ai_providers, connections, passkeys, secrets) — design
+`docs/VAULT-IMPORT-FROM-CANONICAL-DESIGN-2026-06-10.md`, gate `verify:vault-import`.
+The untrusted-file path is hardened (decompression-bomb cap
 with streaming abort, bounded in-memory assembly, no archive-path writes, no
 content leakage) — see `verify:import-security`. Limits: `MYCELIUM_API_BODY_LIMIT`
 (64mb JSON), `MYCELIUM_UPLOAD_LIMIT` (256mb raw), `MYCELIUM_IMPORT_LIMIT_BYTES`

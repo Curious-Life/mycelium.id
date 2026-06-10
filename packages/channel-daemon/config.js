@@ -33,10 +33,32 @@ export function loadConfig(env = process.env) {
   // model name turns on the local runtime; no cloud egress.
   const ollamaModel = env.CHANNEL_OLLAMA_MODEL || '';
   const ollamaUrl = env.OLLAMA_URL || 'http://127.0.0.1:11434';
+  // Generic OpenAI-compatible backend (cloud BYOK or self-hosted, e.g. Regolo /
+  // OpenRouter / llama.cpp). Set when the user's selected app provider is an
+  // OpenAI-compatible one that ISN'T native Ollama. baseUrl turns it on.
+  const openaiBaseUrl = env.CHANNEL_OPENAI_BASE_URL || '';
+  const openaiApiKey = env.CHANNEL_OPENAI_API_KEY || '';
+  const openaiModel = env.CHANNEL_OPENAI_MODEL || '';
   // Auto router (when BOTH cloud + local are configured): 'auto' (default) routes
   // per-turn (local-first, complex→cloud, sensitive→local); 'cloud'/'local' force.
   const channelRouter = env.MYCELIUM_CHANNEL_ROUTER || '';
   const sensitivePatterns = env.CHANNEL_SENSITIVE_PATTERNS || '';
+
+  // ── local-turn tuning (2026-06-10 silent-no-reply incident) ───────────────
+  // A COLD local model (load + prompt ingest on a 7–12B) routinely exceeds the
+  // old 120s fetch timeout, killing the turn with no user-visible trace.
+  const ollamaTimeoutMs = Number(env.CHANNEL_OLLAMA_TIMEOUT_MS || 300_000);
+  // Ollama serves models at a 4096 ctx by default — too small for tool schemas
+  // + system prompt; a truncated prompt makes the model return EMPTY (no tool
+  // calls, no text). Request a workable window explicitly.
+  const ollamaNumCtx = Number(env.CHANNEL_OLLAMA_NUM_CTX || 8192);
+  // Local models get a TRIMMED tool surface: the full vault schema set is ~7.7k
+  // tokens of prompt — past the ctx and minutes of ingest per round on a 12B.
+  // csv override; `reply` (the egress tool) is ALWAYS kept regardless.
+  const localTools = (env.CHANNEL_LOCAL_TOOLS || 'getContext,searchMindscape,remember,reply')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  // Lane-level whole-turn budget (multi-round tool loop on a local model).
+  const turnTimeoutMs = Number(env.CHANNEL_TURN_TIMEOUT_MS || 600_000);
 
   // ── Phase 3 hardening ──────────────────────────────────────────────────────
   const coalesceWindowMs = Number(env.CHANNEL_COALESCE_MS || 1500); // 0 disables
@@ -46,7 +68,8 @@ export function loadConfig(env = process.env) {
   return {
     botToken, ownerTelegramId, discordBotToken, ownerDiscordId, vaultBaseUrl, host, port, agentId, selfUrl,
     anthropicApiKey, mcpMode, mcpUrl, mcpBearer, mcpStdioEntry, model,
-    ollamaModel, ollamaUrl, channelRouter, sensitivePatterns,
+    ollamaModel, ollamaUrl, openaiBaseUrl, openaiApiKey, openaiModel, channelRouter, sensitivePatterns,
+    ollamaTimeoutMs, ollamaNumCtx, localTools, turnTimeoutMs,
     coalesceWindowMs, rateLimitMax, rateLimitWindowMs,
   };
 }
@@ -68,6 +91,11 @@ export function applyChannelConfigToEnv(cc, env = process.env) {
   put('OWNER_DISCORD_ID', cc.discord?.ownerId);
   put('ANTHROPIC_API_KEY', cc.agent?.anthropicApiKey);
   put('CHANNEL_AGENT_MODEL', cc.agent?.model);
+  // OpenAI-compatible backend (set by the active-provider bridge for non-Anthropic,
+  // non-native-Ollama providers). baseUrl is the on/off switch.
+  put('CHANNEL_OPENAI_BASE_URL', cc.agent?.openai?.baseUrl);
+  put('CHANNEL_OPENAI_API_KEY', cc.agent?.openai?.apiKey);
+  put('CHANNEL_OPENAI_MODEL', cc.agent?.openai?.model);
   put('TTS_PROVIDER', cc.tts?.provider);
   put('OPENAI_API_KEY', cc.tts?.openaiApiKey);
   put('OPENAI_TTS_VOICE', cc.tts?.openaiVoice);
