@@ -15,6 +15,7 @@ import { createEgressAuditSink } from './inference/egress.js';
 import { getBlob as realGetBlob } from './ingest/blob-store.js';
 import { describeImage as realDescribeImage } from './enrich/describe-image.js';
 import { transcribeAudio as realTranscribeAudio } from './enrich/transcribe-audio.js';
+import { extractDocumentText as realExtractDocumentText, documentKindOf } from './enrich/extract-document.js';
 
 /** Parse the decrypted `{ "apiKey": "…" }` credentials envelope → key string|null. */
 function parseProviderApiKey(credentials) {
@@ -71,6 +72,7 @@ export function internalRouter({ db, userId, enrich = {} }) {
   const getBlob = enrich.getBlob || realGetBlob;
   const describeImage = enrich.describeImage || realDescribeImage;
   const transcribeAudio = enrich.transcribeAudio || realTranscribeAudio;
+  const extractDocumentText = enrich.extractDocumentText || realExtractDocumentText;
   const router = express.Router();
   // JSON parsing is scoped to the POST route ONLY — installing it router-wide
   // would parse (and reject malformed) bodies for every request that flows
@@ -340,8 +342,12 @@ export function internalRouter({ db, userId, enrich = {} }) {
       } else if (kind === 'text') {
         const text = bytes.toString('utf8').replace(/\u0000/g, '').trim();
         contextText = text ? (text.length > MAX_INLINE_TEXT ? `${text.slice(0, MAX_INLINE_TEXT)}\n[… truncated]` : text) : null;
+      } else if (kind === 'file' && documentKindOf(fileType, fileName)) {
+        // pdf/docx → unpdf/mammoth (pure-JS, fail-soft null on corrupt/scanned).
+        contextText = await extractDocumentText({ bytes, mimeType: fileType, fileName });
+        if (contextText) await db.attachments.update(attachmentId, { description: contextText });
       }
-      // 'file' (pdf/docx/binary): extraction lands in a later step — honest null.
+      // other binaries: honest null (stored + linked, no derived text).
 
       return res.json({ ok: true, contextText, kind });
     } catch (err) {

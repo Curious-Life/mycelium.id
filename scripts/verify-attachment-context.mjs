@@ -120,12 +120,56 @@ const rawCol = (id, col) => {
   captionResult = 'a red square on white';
 }
 
-// A7: binary file (pdf) → honest null (extraction is step-5 scope)
+// A7: corrupt pdf → fail-soft null (unpdf cannot parse 8 junk bytes)
 {
   const { attachmentId } = await uploadAttachment(db, { userId, bytes: Buffer.from('%PDF-1.4'), fileName: 'doc.pdf', fileType: 'application/pdf' });
   const r = await call({ attachmentId });
-  rec('A7. pdf (binary) → ok:true contextText:null kind=file',
+  rec('A7. corrupt pdf → ok:true contextText:null (fail-soft, kind=file)',
     r.status === 200 && r.body?.contextText === null && r.body?.kind === 'file', `kind=${r.body?.kind}`);
+}
+
+// A9: REAL pdf → text extracted via unpdf + stored encrypted in description
+{
+  // assemble a minimal valid PDF with correct xref offsets
+  const mk = () => {
+    const objs = [
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+      null, // content stream, built below
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    ];
+    const stream = 'BT /F1 24 Tf 72 700 Td (Hello vault PDF) Tj ET';
+    objs[3] = `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
+    let out = '%PDF-1.4\n';
+    const offsets = [];
+    objs.forEach((o, i) => { offsets.push(out.length); out += `${i + 1} 0 obj\n${o}\nendobj\n`; });
+    const xref = out.length;
+    out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}`;
+    out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+    return Buffer.from(out, 'latin1');
+  };
+  const { attachmentId } = await uploadAttachment(db, { userId, bytes: mk(), fileName: 'hello.pdf', fileType: 'application/pdf' });
+  const r = await call({ attachmentId });
+  const raw = rawCol(attachmentId, 'description');
+  rec('A9. real pdf → text extracted (unpdf) + stored encrypted',
+    r.status === 200 && /Hello vault PDF/.test(r.body?.contextText || '') && isEncrypted(raw),
+    `ctx="${(r.body?.contextText || '').slice(0, 40)}" enc=${isEncrypted(raw)}`);
+}
+
+// A10: REAL docx (minimal OOXML zip) → text extracted via mammoth
+{
+  const { default: JSZip } = await import('jszip');
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+  zip.file('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  zip.file('word/document.xml', '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Water the docx plants</w:t></w:r></w:p></w:body></w:document>');
+  const docxBytes = await zip.generateAsync({ type: 'nodebuffer' });
+  const { attachmentId } = await uploadAttachment(db, { userId, bytes: docxBytes, fileName: 'todo.docx', fileType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+  const r = await call({ attachmentId });
+  rec('A10. real docx → text extracted (mammoth)',
+    r.status === 200 && /Water the docx plants/.test(r.body?.contextText || ''),
+    `ctx="${(r.body?.contextText || '').slice(0, 40)}"`);
 }
 
 // A8: blob read failure → fail-soft 200 (daemon falls back to placeholder)
