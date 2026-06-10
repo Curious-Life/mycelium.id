@@ -81,6 +81,10 @@ async function restoreTable(db, table, rows, { userId, overrides = {} }) {
       // trip scope-filtered readers (SQL-level AGENT_SCOPES filtering and the
       // decrypt-time scope guardian both key off it).
       if (cols.has('scope')) r.scope = 'personal';
+      // embedding_768 is NEVER_AUTO_DECRYPT: the canonical exporter's SELECT *
+      // ships it as a CANONICAL-KEY envelope (territory_profiles, realms,
+      // semantic_themes…), undecryptable here. Null it everywhere — V1 re-embeds.
+      if (cols.has('embedding_768')) r.embedding_768 = null;
       const keys = Object.keys(r).filter((k) => cols.has(k) && r[k] !== undefined);
       if (keys.length === 0) { out.failed++; continue; }
       const res = await db.rawQuery(
@@ -296,6 +300,13 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   await run('territory_cofire', m.topology?.cofiring);
   await run('territory_neighbors', m.topology?.territoryNeighbors);
   await run('realm_neighbors', m.topology?.realmNeighbors);
+
+  // Temporal Chronicles — period narratives + the current arc. The canonical
+  // exporter does not ship these yet (exporter-side gap, flagged 2026-06-10);
+  // the receiver is ready for the manifest keys the exporter patch adds, and
+  // tolerates singular/plural. Absent keys → no-op, like every family.
+  await run('time_chronicles', m.timeChronicles);
+  await run('current_arc_chronicles', m.currentArcChronicles ?? (m.currentArcChronicle ? [m.currentArcChronicle].flat() : undefined));
 
   // v4 historical metrics (v3 bundles simply lack these keys → no-op).
   await run('cognitive_metrics_window', m.cognitiveMetrics?.window);

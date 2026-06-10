@@ -82,13 +82,15 @@ function manifest() {
     mindscape: {
       realms: [{ id: 'rm1', realm_id: 1, name: 'Realm One' }],
       semanticThemes: [],
-      territories: [{ id: 'tp1', territory_id: 7, realm_id: 1, name: 'Imported Territory', essence: 'a narrative essence' }],
+      territories: [{ id: 'tp1', territory_id: 7, realm_id: 1, name: 'Imported Territory', essence: 'a narrative essence', chronicle: 'territory chronicle marker text', embedding_768: '{"v":1,"s":"personal","iv":"FOREIGN","ct":"FOREIGN-KEY-ENVELOPE","dk":"x"}' }],
       themeCards: [],
       clusteringPoints: { total: 1, data: [{ id: 'cp1', source_type: 'message', source_id: 'vm1', territory_id: 7, landscape_x: 0.1, landscape_y: 0.2 }] },
       nomicEmbeddings: { total: 1, note: 'hex-encoded 256D Nomic float32 vectors, keyed by clustering_point id', data: { cp1: NOMIC_HEX } },
       clusterEvents: [],
     },
     topology: { realmNeighbors: [], cofiring: [], territoryNeighbors: [] },
+    timeChronicles: [{ id: 'tc1', granularity: 'month', period_key: '2024-03', period_start: '2024-03-01', period_end: '2024-03-31', theme: 'a period theme', narrative: 'time chronicle narrative marker' }],
+    currentArcChronicle: { theme: 'the current arc theme', narrative: 'current arc narrative marker', phase: 'emergence' },
     cognitiveMetrics: undefined, // v3-style absence for one family → must no-op
   };
 }
@@ -220,6 +222,26 @@ async function main() {
 
     const pk = raw.prepare("SELECT COUNT(*) c FROM passkey_credentials").get()?.c ?? 0;
     rec('C8 passkeys NOT imported (origin-bound)', pk === 0);
+
+    // territory chronicle crosses (encrypted, decrypts back); the canonical-key
+    // embedding_768 envelope is NULLED, never copied as undecryptable junk.
+    const tp = raw.prepare('SELECT chronicle, embedding_768 FROM territory_profiles WHERE id = ?').get('tp1');
+    let chronPlain = null;
+    try { chronPlain = await decrypt(String(tp?.chronicle || ''), await importMasterKey(USER_HEX)); } catch { /* */ }
+    rec('C9 territory chronicle re-encrypted + decrypts; foreign embedding_768 nulled',
+      chronPlain === 'territory chronicle marker text' && tp?.embedding_768 === null
+      && !dbBytes.includes(Buffer.from('territory chronicle marker text')),
+      `chronicle=${chronPlain === 'territory chronicle marker text'} emb=${tp?.embedding_768}`);
+
+    // temporal chronicles (receiver-side readiness for the exporter patch)
+    const tc = raw.prepare("SELECT narrative FROM time_chronicles WHERE period_key = '2024-03'").get();
+    const arc = raw.prepare("SELECT narrative, phase FROM current_arc_chronicles WHERE user_id = 'local-user'").get();
+    let tcPlain = null, arcPlain = null;
+    try { tcPlain = await decrypt(String(tc?.narrative || ''), await importMasterKey(USER_HEX)); } catch { /* */ }
+    try { arcPlain = await decrypt(String(arc?.narrative || ''), await importMasterKey(USER_HEX)); } catch { /* */ }
+    rec('C10 time_chronicles + current_arc imported, encrypted, decrypt back',
+      tcPlain === 'time chronicle narrative marker' && arcPlain === 'current arc narrative marker' && arc?.phase === 'emergence',
+      `tc=${tcPlain === 'time chronicle narrative marker'} arc=${arcPlain === 'current arc narrative marker'}`);
 
     // ── V6: idempotent re-import ────────────────────────────────────────────
     const before = raw.prepare('SELECT COUNT(*) c FROM messages').get()?.c;
