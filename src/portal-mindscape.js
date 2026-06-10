@@ -310,7 +310,7 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
         return res.status(409).json({ error, reason: 'not_embedded', embedded, total });
       }
 
-      const r = startClusteringJob({ dbPath, userId });
+      const r = startClusteringJob({ dbPath, userId, db });
       res.json(r);
     } catch {
       // resolveKeys/spawn unavailable — fail closed, no internals leaked.

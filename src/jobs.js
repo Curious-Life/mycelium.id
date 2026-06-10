@@ -49,7 +49,7 @@ let runningJobId = null;  // single-flight: at most one clustering run at a time
  * returns the in-flight job. Returns { jobId, status: 'running' | 'already_running' }.
  * @param {{ dbPath?: string, userId?: string }} opts
  */
-export function startClusteringJob({ dbPath, userId } = {}) {
+export function startClusteringJob({ dbPath, userId, db } = {}) {
   // Single-flight: block while a child is still ALIVE — `running`, or `canceled`
   // but not yet reaped (cur.child set). Prevents two clustering children racing on
   // the same SQLite during a cancel→restart.
@@ -102,6 +102,8 @@ export function startClusteringJob({ dbPath, userId } = {}) {
   };
   jobs.set(jobId, state);
   runningJobId = jobId;
+  // Mirror into the unified activity feed (header dot + chip) — content-free.
+  if (db?.activityFeed) db.activityFeed.begin({ userId, kind: 'mycelium_generate', id: jobId, totalSteps: 16, stageLabel: 'Mapping your mind' }).catch(() => {});
 
   let child;
   try {
@@ -130,6 +132,7 @@ export function startClusteringJob({ dbPath, userId } = {}) {
         state.step = parseInt(m[1], 10);
         state.totalSteps = parseInt(m[2], 10);
         state.stageLabel = STAGE_LABELS[state.step] || m[3].trim();
+        if (db?.activityFeed) db.activityFeed.heartbeat(jobId, { step: state.step, totalSteps: state.totalSteps, stageLabel: 'Mapping your mind' }).catch(() => {});
       }
     }
   });
@@ -173,6 +176,7 @@ export function startClusteringJob({ dbPath, userId } = {}) {
       const detail = lastErrLine();
       state.error = detail ? `${detail} (exit ${code})` : `clustering exited with code ${code}`;
     }
+    if (db?.activityFeed) db.activityFeed.finish(jobId, { status: state.status === 'done' ? 'done' : state.status === 'canceled' ? 'abandoned' : 'error' }).catch(() => {});
     finish();
   });
   child.on('error', () => {
