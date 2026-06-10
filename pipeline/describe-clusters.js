@@ -70,9 +70,20 @@ async function run() {
   const query = (sql, params = []) => db.rawQuery(sql, params).then(r => (Array.isArray(r) ? r : r.results || []));
   const narrator = await createNarrator({ db, userId: USER_ID });
   let namedRealms = 0, namedTerr = 0;
+  // Surface live progress to the unified activity feed (header + mindscape chip).
+  // Content-free: only a constant stage label + done/total — never a realm name.
+  let feedId = null, done = 0, hbTimer = null;
+  const tick = async (total) => { try { await db.activityFeed.heartbeat(feedId, { step: ++done, totalSteps: total }); } catch { /* */ } };
 
   try {
     console.log(`[describe] Naming realms + territories for user=${USER_ID} via ${narrator.label}${narrator.local ? ' (local)' : ''}${DRY_RUN ? ' (dry-run)' : ''}`);
+    if (!DRY_RUN) {
+      try { feedId = await db.activityFeed.begin({ userId: USER_ID, kind: 'describe:name', stageLabel: 'Naming areas' }); } catch { /* */ }
+      // Refresh liveness every 10s regardless of per-item progress — a cold first
+      // model call can exceed the reaper's stale window, which would falsely abandon
+      // the row mid-run. The heartbeat (no step change) keeps it 'running'.
+      if (feedId) { hbTimer = setInterval(() => { db.activityFeed.heartbeat(feedId, {}).catch(() => {}); }, 10_000); hbTimer.unref?.(); }
+    }
 
     // ── Realms ──────────────────────────────────────────────────────
     const realmIds = await query(
@@ -80,7 +91,15 @@ async function run() {
        WHERE user_id = ? AND realm_id IS NOT NULL`,
       [USER_ID],
     );
-    console.log(`[describe] ${realmIds.length} realms`);
+    // Fetch both sets up front so the activity feed has a stable total (queued).
+    const terrIds = await query(
+      `SELECT DISTINCT territory_id, realm_id FROM clustering_points
+       WHERE user_id = ? AND territory_id IS NOT NULL`,
+      [USER_ID],
+    );
+    const total = realmIds.length + terrIds.length;
+    console.log(`[describe] ${realmIds.length} realms · ${terrIds.length} territories`);
+    if (feedId) { try { await db.activityFeed.heartbeat(feedId, { totalSteps: total }); } catch { /* */ } }
 
     for (const { realm_id } of realmIds) {
       const samples = await sampleContent(query, 'realm_id', realm_id);
@@ -98,16 +117,10 @@ async function run() {
          ON CONFLICT(user_id, realm_id) DO UPDATE SET name = excluded.name, essence = excluded.essence, updated_at = datetime('now')`,
         [USER_ID, realm_id, name, essence],
       ).catch(err => console.error(`[describe] realm ${realm_id} write failed:`, err.message));
+      await tick(total);
     }
 
     // ── Territories ─────────────────────────────────────────────────
-    const terrIds = await query(
-      `SELECT DISTINCT territory_id, realm_id FROM clustering_points
-       WHERE user_id = ? AND territory_id IS NOT NULL`,
-      [USER_ID],
-    );
-    console.log(`[describe] ${terrIds.length} territories`);
-
     for (const { territory_id, realm_id } of terrIds) {
       const samples = await sampleContent(query, 'territory_id', territory_id);
       const msgCount = samples.length;
@@ -127,13 +140,17 @@ async function run() {
            realm_id = excluded.realm_id, updated_at = datetime('now')`,
         [USER_ID, territory_id, realm_id, name, essence, msgCount],
       ).catch(err => console.error(`[describe] territory ${territory_id} write failed:`, err.message));
+      await tick(total);
     }
 
     console.log(`[describe] Done — named ${namedRealms}/${realmIds.length} realms · ${namedTerr}/${terrIds.length} territories via ${narrator.label}`);
-    if (namedRealms === 0 && realmIds.length > 0) {
+    const failedAll = namedRealms === 0 && realmIds.length > 0;
+    if (failedAll) {
       console.error(`[describe] WARNING: named 0 realms — the model (${narrator.label}) returned nothing usable. Check Settings → Intelligence.`);
     }
+    if (feedId) { try { await db.activityFeed.finish(feedId, { status: failedAll ? 'error' : 'done' }); } catch { /* */ } }
   } finally {
+    if (hbTimer) clearInterval(hbTimer);
     close();
   }
 }
