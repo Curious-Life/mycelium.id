@@ -21,19 +21,14 @@
  *     node pipeline/describe-clusters.js [--dry-run]
  */
 
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
-
-const execFileAsync = promisify(execFile);
+import { createNarrator } from './lib/narrate-infer.js';
 
 const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';
 const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
 const USER_MASTER = process.env.USER_MASTER;
 const SYSTEM_KEY = process.env.SYSTEM_KEY;
-const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const DRY_RUN = process.argv.includes('--dry-run');
 
 if (!USER_MASTER || !SYSTEM_KEY) {
@@ -42,31 +37,27 @@ if (!USER_MASTER || !SYSTEM_KEY) {
 }
 
 /**
- * Ask the local Claude CLI to produce a short name + essence for a cluster,
- * given a few representative member snippets. Returns null on any failure so
- * the caller can fall back to a deterministic placeholder.
+ * Name + summarize a cluster with the user's ACTIVE provider (the model selected in
+ * Settings → Intelligence). Returns null on any failure so the caller can fall back
+ * to a deterministic placeholder (fail-soft: a describe miss never blocks Generate).
  */
-async function describeWithClaude(kind, samples) {
+async function describe(narrator, kind, samples) {
   const prompt = [
     `You are naming a ${kind} in a personal knowledge graph.`,
     `Below are representative snippets that belong to this ${kind}.`,
-    `Reply with EXACTLY one line of JSON: {"name": "<2-4 word title>", "essence": "<one sentence>"}.`,
+    `Reply with EXACTLY one line of minified JSON: {"name": "<2-4 word title>", "essence": "<one sentence>"}.`,
     '',
     ...samples.map((s, i) => `(${i + 1}) ${s.slice(0, 300)}`),
   ].join('\n');
-
   try {
-    const { stdout } = await execFileAsync(CLAUDE_BIN, ['-p', prompt], {
-      timeout: 60000,
-      maxBuffer: 1024 * 1024,
-    });
-    const line = stdout.trim().split('\n').filter(Boolean).pop() || '';
-    const parsed = JSON.parse(line);
-    if (parsed && typeof parsed.name === 'string') {
-      return { name: parsed.name.slice(0, 80), essence: (parsed.essence || '').slice(0, 500) };
+    const raw = await narrator.infer(prompt, { maxTokens: 300 });
+    const m = String(raw).match(/\{[\s\S]*\}/);
+    const parsed = m ? JSON.parse(m[0]) : null;
+    if (parsed && typeof parsed.name === 'string' && parsed.name.trim()) {
+      return { name: parsed.name.trim().slice(0, 80), essence: (parsed.essence || '').slice(0, 500) };
     }
-  } catch {
-    // fall through to placeholder
+  } catch (err) {
+    console.error(`[describe] ${kind} narration failed: ${err?.message || err}`);
   }
   return null;
 }
@@ -77,9 +68,11 @@ async function run() {
   const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
   const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal' });
   const query = (sql, params = []) => db.rawQuery(sql, params).then(r => (Array.isArray(r) ? r : r.results || []));
+  const narrator = await createNarrator({ db, userId: USER_ID });
+  let namedRealms = 0, namedTerr = 0;
 
   try {
-    console.log(`[describe] Naming realms + territories for user=${USER_ID}${DRY_RUN ? ' (dry-run)' : ''}`);
+    console.log(`[describe] Naming realms + territories for user=${USER_ID} via ${narrator.label}${narrator.local ? ' (local)' : ''}${DRY_RUN ? ' (dry-run)' : ''}`);
 
     // ── Realms ──────────────────────────────────────────────────────
     const realmIds = await query(
@@ -91,7 +84,8 @@ async function run() {
 
     for (const { realm_id } of realmIds) {
       const samples = await sampleContent(query, 'realm_id', realm_id);
-      const described = samples.length ? await describeWithClaude('realm', samples) : null;
+      const described = samples.length ? await describe(narrator, 'realm', samples) : null;
+      if (described) namedRealms += 1;
       const name = described?.name || `Realm ${realm_id}`;
       const essence = described?.essence || '';
       if (DRY_RUN) {
@@ -117,7 +111,8 @@ async function run() {
     for (const { territory_id, realm_id } of terrIds) {
       const samples = await sampleContent(query, 'territory_id', territory_id);
       const msgCount = samples.length;
-      const described = samples.length ? await describeWithClaude('territory', samples) : null;
+      const described = samples.length ? await describe(narrator, 'territory', samples) : null;
+      if (described) namedTerr += 1;
       const name = described?.name || `Territory ${territory_id}`;
       const essence = described?.essence || '';
       if (DRY_RUN) {
@@ -134,7 +129,10 @@ async function run() {
       ).catch(err => console.error(`[describe] territory ${territory_id} write failed:`, err.message));
     }
 
-    console.log('[describe] Done');
+    console.log(`[describe] Done — named ${namedRealms}/${realmIds.length} realms · ${namedTerr}/${terrIds.length} territories via ${narrator.label}`);
+    if (namedRealms === 0 && realmIds.length > 0) {
+      console.error(`[describe] WARNING: named 0 realms — the model (${narrator.label}) returned nothing usable. Check Settings → Intelligence.`);
+    }
   } finally {
     close();
   }
