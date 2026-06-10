@@ -59,8 +59,21 @@ export async function transcribeAudio({
   fetch: fetchImpl = globalThis.fetch,
   timeoutMs = Number(process.env.MYCELIUM_TRANSCRIBE_TIMEOUT_MS) || 180000,
 } = {}) {
-  const b64 = base64 || (Buffer.isBuffer(bytes) ? bytes.toString("base64") : null);
-  if (!b64 || typeof fetchImpl !== "function") return null;
+  let buf = Buffer.isBuffer(bytes) ? bytes : (base64 ? Buffer.from(base64, "base64") : null);
+  if (!buf || typeof fetchImpl !== "function") return null;
+
+  // llama.cpp's audio loader rejects Ogg containers outright (live-verified
+  // 2026-06-10) and Telegram voice notes are always OGG/Opus — transcode to
+  // WAV in-process (pure JS, src/enrich/ogg-opus.js). Fail-soft: if the
+  // transcode returns null we still try the original bytes (a future decoder
+  // may accept them) and otherwise fall back via the normal null path.
+  let format = audioFormatFor(mimeType, fileName);
+  if (format === "ogg") {
+    const { oggOpusToWav } = await import("./ogg-opus.js");
+    const wav = await oggOpusToWav(buf);
+    if (wav) { buf = wav; format = "wav"; }
+  }
+  const b64 = buf.toString("base64");
 
   const chosen = model
     || process.env.MYCELIUM_AUDIO_MODEL
@@ -81,7 +94,7 @@ export async function transcribeAudio({
           role: "user",
           content: [
             { type: "text", text: TRANSCRIBE_PROMPT },
-            { type: "input_audio", input_audio: { data: b64, format: audioFormatFor(mimeType, fileName) } },
+            { type: "input_audio", input_audio: { data: b64, format } },
           ],
         }],
       }),
