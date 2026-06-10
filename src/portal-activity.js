@@ -7,14 +7,46 @@
 // construction (stage labels are constants, never names/text — §1).
 
 import express from 'express';
+import { getEmbedderHealth } from './embed/supervisor.js';
 
 // Friendly constant labels per job kind (NEVER includes user content).
 const KIND_LABELS = {
   'describe:name': 'Naming your areas',
   'describe:chronicle': 'Describing your areas',
   mycelium_generate: 'Mapping your mind',
-  enrich: 'Reading your world',
+  embed: 'Reading your world',
 };
+
+// Embedding/enrichment are CONTINUOUS (a drainer embeds the backlog on a timer),
+// not discrete jobs — so they're projected at READ time from the message counts
+// rather than written as background_jobs rows. One synthetic row while a backlog
+// exists. (Embedding == enrichment in V1: both = messages with embedding_768.)
+async function embedProjection(db, userId) {
+  try {
+    const er = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND embedding_768 IS NOT NULL', [userId]);
+    const tr = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ?', [userId]);
+    const embedded = Number(er?.results?.[0]?.c ?? 0);
+    const total = Number(tr?.results?.[0]?.c ?? 0);
+    const pending = Math.max(0, total - embedded);
+    if (pending <= 0) return null;                       // nothing to do → not active
+    let health = 'unknown';
+    try { health = getEmbedderHealth()?.status ?? 'unknown'; } catch { /* supervisor down */ }
+    return {
+      id: 'embed',
+      kind: 'embed',
+      stage: health === 'error' ? 'Embedder needs attention' : KIND_LABELS.embed,
+      done: embedded,
+      total,
+      remaining: pending,
+      etaSeconds: null,                                  // continuous; per-second rate not measured in V1
+      status: 'running',
+      startedAt: null,
+      finishedAt: null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function parseSqliteTs(ts) {
   if (!ts) return NaN;
@@ -62,7 +94,9 @@ export function portalActivityRouter({ db, userId, authenticatePortalRequest }) 
     const now = Date.now();
     try {
       await db.activityFeed.reap(userId);               // flip dead 'running' rows → abandoned
-      const active = (await db.activityFeed.active(userId)).map((r) => shape(r, now));
+      const rows = (await db.activityFeed.active(userId)).map((r) => shape(r, now));
+      const embed = await embedProjection(db, userId);  // continuous embedding/enrichment (projected)
+      const active = embed ? [embed, ...rows] : rows;
       const recent = (await db.activityFeed.recent(userId, 8)).map((r) => shape(r, now));
       res.json({ active, recent });
     } catch {
@@ -76,7 +110,9 @@ export function portalActivityRouter({ db, userId, authenticatePortalRequest }) 
     const now = Date.now();
     try {
       await db.activityFeed.reap(userId);
-      const active = (await db.activityFeed.active(userId)).map((r) => shape(r, now));
+      const rows = (await db.activityFeed.active(userId)).map((r) => shape(r, now));
+      const embed = await embedProjection(db, userId);
+      const active = embed ? [embed, ...rows] : rows;
       const lead = active[0] || null;
       res.json({
         state: active.length ? 'running' : 'idle',
