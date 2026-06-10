@@ -91,18 +91,29 @@ LEIDEN_SEED = 42                  # fixed seed for determinism
 TARGET_ATOMS = 1500
 TARGET_TERRITORIES = 300
 TARGET_THEMES = 35
-TARGET_REALMS_MIN = 5
+TARGET_REALMS_MIN = 2
 TARGET_REALMS_MAX = 10
 
 def scale_targets(n_points):
-    """Scale clustering targets proportionally to dataset size."""
+    """Scale clustering targets to dataset size (sqrt schedule).
+
+    The old linear-with-floors schedule (territories = max(30, n//300),
+    themes = max(8, n//1000)) was calibrated for ~45K points and is degenerate
+    below N≈600: at N=152 the floors forced 30 territories over 152 points
+    (~5 pts each). The sqrt schedule bridges smoothly — N=152 → 17/4,
+    N=600 → 34/9 (≈ the old floors), N=45k → 297/50 (≈ the old targets).
+    See docs/CLUSTERING-REBALANCE-DESIGN-2026-06-10.md.
+    """
     global TARGET_ATOMS, TARGET_TERRITORIES, TARGET_THEMES
     TARGET_ATOMS = max(300, min(2000, n_points // 15))
-    TARGET_TERRITORIES = max(30, min(300, n_points // 300))
-    TARGET_THEMES = max(8, min(50, n_points // 1000))
+    TARGET_TERRITORIES = int(max(2, min(300, round(1.4 * (n_points ** 0.5)))))
+    TARGET_THEMES = int(max(2, min(50, round(0.35 * (n_points ** 0.5)))))
+    if n_points < 600:
+        print(f"  NOTE: {n_points} points is small for the 4-level hierarchy — targets auto-shrunk")
     print(f"  Scaled targets for {n_points} points: atoms={TARGET_ATOMS}, territories={TARGET_TERRITORIES}, themes={TARGET_THEMES}")
 NOISE_MEMBERSHIP_THRESHOLD = 0.3
 NOISE_KNN_SIGMA = 2.0
+NOISE_MAX_SHARE = 0.15  # hard cap on the liminal share (percentile-bounding, research brief §1)
 
 # UMAP (visualization ONLY — decoupled from clustering)
 UMAP_N_COMPONENTS_VIZ = 3
@@ -819,15 +830,71 @@ def enforce_nesting(child_labels, parent_labels):
     return np.array([child_to_parent.get(child_labels[i], parent_labels[i]) for i in range(len(child_labels))])
 
 
-def centroids_to_groups(child_labels, embeddings, n_groups, embed_dim=None):
-    """Hierarchically group child clusters via Ward HAC on their centroids.
+def _weighted_ward_groups(centroids, masses, n_groups):
+    """Exact mass-weighted Ward agglomeration over (centroid, mass) pairs.
 
-    Guarantees nesting by construction: each child cluster is treated as a single
-    point (its centroid), then Ward HAC merges them into n_groups parent clusters.
-    Every child belongs to exactly one parent.
+    Ward's between-cluster distance has the closed form
+        d(A,B) = (W_A·W_B / (W_A+W_B)) · ||c_A − c_B||²
+    so maintaining merged centroids + masses and recomputing distances IS
+    weighted Ward — no Lance-Williams bookkeeping needed. scipy/sklearn have
+    no weighted Ward (sklearn #27557), hence this custom O(k²) agglomeration
+    (k ≤ TARGET_ATOMS=2000; measured ~seconds).
+
+    Returns: group label per input centroid, in [0, n_groups).
+    """
+    cents = centroids.astype(np.float64).copy()
+    w = masses.astype(np.float64).copy()
+    k = len(cents)
+    alive = np.ones(k, dtype=bool)
+    groups = {i: [i] for i in range(k)}
+
+    def ward_row(i):
+        d2 = ((cents - cents[i]) ** 2).sum(axis=1)
+        coef = (w * w[i]) / (w + w[i])
+        row = coef * d2
+        row[i] = np.inf
+        row[~alive] = np.inf
+        return row
+
+    D = np.full((k, k), np.inf)
+    for i in range(k):
+        D[i] = ward_row(i)
+
+    n_alive = k
+    while n_alive > n_groups:
+        i, j = np.unravel_index(np.argmin(D), D.shape)
+        wi, wj = w[i], w[j]
+        cents[i] = (wi * cents[i] + wj * cents[j]) / (wi + wj)
+        w[i] = wi + wj
+        groups[i].extend(groups.pop(j))
+        alive[j] = False
+        D[j, :] = np.inf
+        D[:, j] = np.inf
+        D[i, :] = ward_row(i)
+        D[:, i] = D[i, :]
+        n_alive -= 1
+
+    out = np.zeros(k, dtype=int)
+    for gid, (_, members) in enumerate(sorted(groups.items())):
+        for m in members:
+            out[m] = gid
+    return out
+
+
+def centroids_to_groups(child_labels, embeddings, n_groups, embed_dim=None):
+    """Hierarchically group child clusters via MASS-WEIGHTED Ward HAC on centroids.
+
+    Guarantees nesting by construction: each child cluster is one (centroid,
+    mass) pair; weighted Ward merges them into n_groups parent clusters. Every
+    child belongs to exactly one parent.
+
+    Mass-weighting is the 2026-06-10 rebalance: the old unweighted variant let
+    a 27-point child and a 1-point child weigh the same, which produced
+    one-giant-parent output at every scale (89.6% of points in one realm at
+    N=15k in the lab). See docs/CLUSTERING-REBALANCE-DESIGN-2026-06-10.md.
 
     Returns: parent_labels array of same length as child_labels, where each point's
-    parent = the HAC group of its child cluster's centroid.
+    parent = the group of its child cluster's centroid.
     """
     unique_children = sorted(set(int(c) for c in child_labels) - {-1})
     if len(unique_children) <= 1:
@@ -837,37 +904,66 @@ def centroids_to_groups(child_labels, embeddings, n_groups, embed_dim=None):
         child_to_group = {c: i for i, c in enumerate(unique_children)}
         return np.array([child_to_group.get(int(child_labels[i]), 0) for i in range(len(child_labels))])
 
-    # Compute centroid per child cluster
+    # Centroid + mass per child cluster
     centroids = np.array([
         embeddings[child_labels == c].mean(axis=0) for c in unique_children
     ])
     norms = np.linalg.norm(centroids, axis=1, keepdims=True)
     norms[norms == 0] = 1
     centroids = centroids / norms
+    masses = np.array([(child_labels == c).sum() for c in unique_children], dtype=np.float64)
 
-    # Ward HAC on centroids
-    from scipy.cluster.hierarchy import linkage, fcluster
-    Z = linkage(centroids, method='ward', metric='euclidean')
-    group_of_child = fcluster(Z, t=min(n_groups, len(unique_children)), criterion='maxclust') - 1
+    group_of_child = _weighted_ward_groups(centroids, masses, min(n_groups, len(unique_children)))
     child_to_group = {unique_children[i]: int(group_of_child[i]) for i in range(len(unique_children))}
     return np.array([child_to_group.get(int(child_labels[i]), 0) for i in range(len(child_labels))])
 
 
 def detect_noise(graph, labels, knn_sims):
-    """Dual noise detection: weak community membership + k-NN distance outlier."""
+    """Noise detection: k-NN distance outliers always; the weak-membership rule
+    only when clusters are large enough to satisfy it; total capped at 15%.
+
+    The membership rule requires ≥ NOISE_MEMBERSHIP_THRESHOLD·k same-cluster
+    neighbors — mathematically unsatisfiable when the median cluster is smaller
+    than that (it flagged 57% of a real 152-point vault as noise, and the
+    resulting liminal bucket rendered as the user's biggest "territory"). Gate
+    it on median cluster size ≥ k_nn; at the calibrated scale (45k pts,
+    ~150-pt territories) the gate is always open, so legacy behavior is kept.
+    Percentile-bounding the noise share is standard practice (research brief
+    §1); the cap keeps the weakest points by mean k-NN similarity.
+    """
     n = len(labels)
     noise = np.zeros(n, dtype=bool)
-    for node in range(graph.vcount()):
-        nbs = graph.neighbors(node)
-        if not nbs:
-            noise[node] = True
-            continue
-        same = sum(1 for nb in nbs if labels[nb] == labels[node])
-        if same / len(nbs) < NOISE_MEMBERSHIP_THRESHOLD:
-            noise[node] = True
     mean_sims = knn_sims[:, 1:].mean(axis=1)
+    k_nn = max(1, knn_sims.shape[1] - 1)
+    sizes = Counter(int(v) for v in labels)
+    median_size = float(np.median([sizes[int(v)] for v in labels])) if n else 0.0
+
+    if median_size >= k_nn:
+        for node in range(graph.vcount()):
+            nbs = graph.neighbors(node)
+            if not nbs:
+                noise[node] = True
+                continue
+            same = sum(1 for nb in nbs if labels[nb] == labels[node])
+            if same / len(nbs) < NOISE_MEMBERSHIP_THRESHOLD:
+                noise[node] = True
+    else:
+        print(f"    (membership noise rule skipped: median cluster size {median_size:.0f} < k={k_nn})")
+
     threshold = mean_sims.mean() - NOISE_KNN_SIGMA * mean_sims.std()
     noise |= (mean_sims < threshold)
+
+    if n > 0 and noise.mean() > NOISE_MAX_SHARE:
+        budget = max(1, int(n * NOISE_MAX_SHARE))
+        capped = np.zeros(n, dtype=bool)
+        for idx in np.argsort(mean_sims):          # weakest first
+            if noise[idx]:
+                capped[idx] = True
+                budget -= 1
+                if budget <= 0:
+                    break
+        print(f"    (noise capped: {int(noise.sum())} flagged → {int(capped.sum())} kept, ≤{NOISE_MAX_SHARE:.0%})")
+        noise = capped
     return noise
 
 
@@ -920,29 +1016,31 @@ def run_clustering(embeddings: np.ndarray) -> dict:
     n_themes = len(set(int(t) for t in theme_labels) - {-1})
     print(f"    → {n_themes} themes")
 
-    # ── Stage 5: Realms via Ward HAC on theme centroids (guaranteed nesting) ──
-    print("  HAC: themes → realms (auto-detect via elbow)...")
+    # ── Stage 5: Realms via mass-weighted Ward + silhouette-selected k ──
+    # The old elbow heuristic (largest gap in Ward merge distances) was clamped
+    # to [5, 10]: the floor of 5 forced singleton realms whenever the data had
+    # fewer natural groups (live vault: realms of 146/2/2/1/1 points). Now k is
+    # chosen in [TARGET_REALMS_MIN=2, TARGET_REALMS_MAX] by maximizing the
+    # point-level cosine silhouette (sampled at scale) — the most stable
+    # selector in the lab (design doc 2026-06-10).
+    print(f"  HAC: themes → realms (k by silhouette, {TARGET_REALMS_MIN}..{TARGET_REALMS_MAX})...")
     unique_themes = sorted(set(int(t) for t in theme_labels))
     if len(unique_themes) > 1:
-        theme_centroids = np.array([
-            embeddings[theme_labels == t].mean(axis=0) for t in unique_themes
-        ])
-        norms = np.linalg.norm(theme_centroids, axis=1, keepdims=True)
-        norms[norms == 0] = 1
-        theme_centroids = theme_centroids / norms
-
-        Z = linkage(theme_centroids, method='ward', metric='euclidean')
-        merge_dists = Z[:, 2]
-        if len(merge_dists) > 1:
-            gaps = np.diff(merge_dists)
-            n_realms = len(theme_centroids) - np.argmax(gaps) - 1
-            n_realms = max(TARGET_REALMS_MIN, min(TARGET_REALMS_MAX, n_realms))
-        else:
-            n_realms = TARGET_REALMS_MIN
-
-        realm_of_theme = fcluster(Z, t=n_realms, criterion='maxclust') - 1
-        theme_to_realm = {unique_themes[i]: int(realm_of_theme[i]) for i in range(len(unique_themes))}
-        realm_labels = np.array([theme_to_realm.get(int(theme_labels[i]), 0) for i in range(n_points)])
+        from sklearn.metrics import silhouette_score
+        best_k, best_s, best_labels = 1, -2.0, np.zeros(n_points, dtype=int)
+        sil_kwargs = {'sample_size': 4000, 'random_state': 42} if n_points > 4000 else {}
+        for k in range(max(2, TARGET_REALMS_MIN), min(TARGET_REALMS_MAX, len(unique_themes)) + 1):
+            cand = centroids_to_groups(theme_labels, embeddings, k)
+            if len(set(int(v) for v in cand)) < 2:
+                continue
+            try:
+                s = float(silhouette_score(embeddings, cand, metric='cosine', **sil_kwargs))
+            except Exception:
+                continue
+            if s > best_s:
+                best_k, best_s, best_labels = k, s, cand
+        realm_labels, n_realms = best_labels, best_k
+        print(f"    silhouette-selected k={n_realms} (score={best_s:.3f})")
     else:
         realm_labels = np.zeros(n_points, dtype=int)
         n_realms = 1
@@ -1813,11 +1911,20 @@ def main():
                 [user_id],
             )
             now = datetime.now(timezone.utc)
+
+            def _num(v):
+                # SQLite/local_db can hand numeric columns back as strings —
+                # '0.42' > 0.6 raises and used to silently disable ALL anchoring.
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return 0.0
+
             for row in anchor_rows:
                 tid = row['territory_id']
-                if row.get('is_anchored') == 1:
+                if row.get('is_anchored') in (1, '1', True):
                     anchored_ids.add(tid); continue
-                if (row.get('coherence') or 0) > 0.6 and (row.get('eng') or 0) > 0.7:
+                if _num(row.get('coherence')) > 0.6 and _num(row.get('eng')) > 0.7:
                     anchored_ids.add(tid); continue
                 if row.get('last_active'):
                     try:
