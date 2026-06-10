@@ -69,6 +69,11 @@ export async function detectExportType(zip) {
     const man = safeParse(manifestText, null);
     if (man && man.format === 'mycelium-vault-export') return { type: 'mycelium', manifest: man };
     // A manifest.json that isn't ours — fall through to the other detectors.
+  } else if (zip.file('manifest.json')) {
+    // The entry EXISTS but the capped reader refused it — almost certainly a
+    // big vault whose manifest outgrew MAX_JSON_BYTES. Say so, actionably,
+    // instead of the misleading generic "unrecognized export".
+    return { type: 'mycelium-oversized', limitBytes: MAX_JSON_BYTES };
   }
   // Both Claude and ChatGPT ship a top-level conversations.json; the element
   // shape disambiguates: ChatGPT nodes carry a `mapping` tree, Claude carries

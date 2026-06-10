@@ -33,7 +33,9 @@ export function portalUploadsRouter({ db, userId, enqueueEnrichment = null }) {
   if (!db) throw new Error('portalUploadsRouter: db required');
   const router = express.Router();
 
-  const IMPORT_LIMIT = Number(process.env.MYCELIUM_IMPORT_LIMIT_BYTES) || 512 * 1024 * 1024; // 512MB
+  // 2GB default — parity with the canonical vault export/restore cap, so a
+  // media-heavy bring-your-vault-home archive is not refused (env-tunable).
+  const IMPORT_LIMIT = Number(process.env.MYCELIUM_IMPORT_LIMIT_BYTES) || 2_000_000_000;
   const CHUNK_LIMIT = 64 * 1024 * 1024; // 64MB per multipart part (client chunks at 50MB)
   // DoS bounds on the in-memory assembly buffer: a hostile caller must not be
   // able to grow it without limit (many uploadIds, or many tiny chunks).
@@ -98,6 +100,9 @@ export function portalUploadsRouter({ db, userId, enqueueEnrichment = null }) {
     const detected = await detectExportType(zip);
     const capture = (msg) => captureMessage(db, { userId, ...msg }, enqueueEnrichment);
 
+    if (detected.type === 'mycelium-oversized') {
+      return { error: `this Mycelium export's manifest exceeds the inflation cap (${Math.round(detected.limitBytes / 1024 / 1024)}MB) — relaunch with MYCELIUM_IMPORT_MAX_JSON_BYTES raised, then retry` };
+    }
     if (detected.type === 'mycelium') {
       // Canonical-Mycelium vault export — the bring-your-vault-home path. All
       // rows land through the auto-encrypting adapter; messages are reset to
