@@ -310,7 +310,7 @@ export async function startRestServer({
             const points = Number(pr?.results?.[0]?.c ?? 0);
             if (!shouldAutoGenerate({ embedded, points, clusteringRunning: isClusteringRunning(), min: AUTO_GEN_MIN })) return;
             console.error('[mycelium] auto-generating first topology — embedding settled');
-            startClusteringJob({ dbPath: effectiveDbPath, userId: bootUserId });
+            startClusteringJob({ dbPath: effectiveDbPath, userId: bootUserId, db });
           } catch { /* non-fatal; manual Generate still works */ }
         };
         const drainer = startEnrichDrainer({ db, userId: bootUserId, onSettled: maybeAutoGenerate });

@@ -3,6 +3,9 @@
 	import { browser } from '$app/environment';
 	import { navigationState } from '$lib/stores/navigation';
 	import { theme } from '$lib/stores/theme';
+	import { activity, startActivityPolling, fmtEta } from '$lib/stores/activity';
+
+	let activityOpen = $state(false);
 
 	const currentView = $derived($navigationState.primaryView);
 	const chatOpen = $derived($navigationState.chatOpen);
@@ -14,6 +17,8 @@
 	// page (external URL) doesn't get the attribute handler wired.
 	let isTauri = $state(false);
 	onMount(() => { if (browser) isTauri = !!(window as any).__TAURI__ || !!(window as any).__TAURI_INTERNALS__; });
+	// Poll the unified activity feed so the stream dot is live on every page.
+	onMount(() => startActivityPolling());
 
 	function startWindowDrag(e: MouseEvent) {
 		if (!isTauri || e.button !== 0) return;
@@ -98,6 +103,39 @@
 
 	<!-- Right side actions -->
 	<div class="flex items-center gap-1 sm:gap-2 flex-shrink-0">
+		<!-- Activity stream dot — pulses while background/inference jobs run; click
+		     for the live list (stage · done/total · ETA). Reads the unified feed. -->
+		{#if $activity.active.length > 0}
+			<div class="relative">
+				<button
+					onclick={() => (activityOpen = !activityOpen)}
+					class="h-8 px-2 rounded-full border border-[var(--color-border)] bg-[var(--color-elevated)] flex items-center gap-1.5 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent)] transition-all"
+					title="Background activity"
+					aria-label={`Background activity (${$activity.active.length})`}
+					aria-expanded={activityOpen}
+				>
+					<span class="relative flex h-2 w-2">
+						<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--color-accent)] opacity-60"></span>
+						<span class="relative inline-flex rounded-full h-2 w-2 bg-[var(--color-accent)]"></span>
+					</span>
+					<span class="text-[11px] font-medium">{$activity.active.length}</span>
+				</button>
+				{#if activityOpen}
+					<div class="absolute right-0 top-full mt-1.5 z-50 min-w-[240px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 shadow-lg" style="backdrop-filter: blur(12px) saturate(140%); -webkit-backdrop-filter: blur(12px) saturate(140%);">
+						<div class="px-2.5 py-1 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Active</div>
+						{#each $activity.active as j (j.id)}
+							<div class="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
+								<span class="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] flex-shrink-0"></span>
+								<span class="text-[var(--color-text-primary)] truncate">{j.stage}</span>
+								{#if j.total > 0}<span class="text-[var(--color-text-tertiary)] flex-shrink-0">{j.done}/{j.total}</span>{/if}
+								{#if fmtEta(j.etaSeconds)}<span class="ml-auto text-[var(--color-accent)] flex-shrink-0">{fmtEta(j.etaSeconds)} left</span>{/if}
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		{/if}
+
 		<!-- Chat agent toggle (Cmd/Ctrl+J) — opens the floating tool-using agent. -->
 		<button
 			onclick={() => navigationState.toggleChat()}
