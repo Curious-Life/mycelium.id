@@ -112,6 +112,9 @@ export async function describeImage({
       fetch,
       timeoutMs,
       maxTokens: 220,
+      // Thinking models (gemma4-class) spend the whole token budget on hidden
+      // reasoning on /api/generate → empty response. We want the caption.
+      think: false,
     });
     const caption = String(text || "").trim().replace(/\s+/g, " ");
     return caption.length ? caption.slice(0, 600) : null;
