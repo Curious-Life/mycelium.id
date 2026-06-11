@@ -35,9 +35,14 @@ function preview(text) {
  * @param {(groupId:string)=>Promise<boolean>} [deps.isGroupAuthorized]  group binding lookup
  * @param {(msg:object)=>Promise<{attachmentId:string|null, contextLine:string}>} [deps.contextualizeMedia]
  *        media stage (media.js) — wired only when the platform supports downloads
+ * @param {{start:(turnCtx:object)=>(()=>void)|null}} [deps.presence]
+ *        typing indicator (presence.js) — covers the PRE-TURN phases (media
+ *        download/vision/transcription + coalesce window), which for images and
+ *        voice notes are the longest part; the lane's own presence covers the
+ *        model turn itself. Only wired when two-way replies are on.
  * @param {string} [deps.logPrefix]
  */
-export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands, isGroupAuthorized, checkChannelAccess, contextualizeMedia, logPrefix = 'channel-daemon' }) {
+export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands, isGroupAuthorized, checkChannelAccess, contextualizeMedia, presence, logPrefix = 'channel-daemon' }) {
   if (!vault?.captureMessage) throw new TypeError('createInboundHandler: vault.captureMessage required');
   if (typeof runTurn !== 'function') throw new TypeError('createInboundHandler: runTurn required');
 
@@ -84,6 +89,17 @@ export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands
       return;
     }
 
+    // Typing presence for the PRE-TURN phases (DM-gated inside presence.js):
+    // for an image / voice note the media stage below can run for minutes —
+    // the user should see "typing…" from the moment we accepted the message,
+    // not only once the model turn starts. Stopped in the finally below; the
+    // lane starts its own presence when the turn actually executes.
+    let stopPresence = null;
+    try {
+      stopPresence = presence?.start?.({ channelKind: msg.channelKind, channelId: msg.chatId }) || null;
+    } catch { /* presence must never affect inbound handling */ }
+
+    try {
     // 1a. media stage — AFTER authorization (unauthorized media is never
     //     downloaded), BEFORE capture/turn so the derived text rides
     //     msg.content (the only coalescer-safe carrier). Fail-soft by
@@ -137,6 +153,11 @@ export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands
       await runTurn(turnCtx, msg);
     } catch (e) {
       console.error(`[${logPrefix}] inbound turn failed (chat=${msg.chatId}): ${e.message}`);
+    }
+    } finally {
+      // Hand off to the lane's presence: runTurn enqueues and returns, so this
+      // stops the pre-turn indicator; the lane re-fires it for the turn itself.
+      try { stopPresence?.(); } catch { /* never throw from cleanup */ }
     }
   };
 }

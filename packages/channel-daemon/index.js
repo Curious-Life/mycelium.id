@@ -56,13 +56,14 @@ export function buildDaemon(cfg, { runTurn } = {}) {
   // ── shared agent-turn pipeline (one runtime/lane for all platforms) ────────
   let effectiveRunTurn = runTurn;
   let lane = null;
+  let presence = null; // typing indicator — shared by the lane (turn) + inbound (pre-turn media stage)
   if (!effectiveRunTurn) {
     // auto router records cloud-routing decisions hash-only via the vault.
     const auditEgress = (e) => { vault.recordInferenceEgress(e); };
     const runtime = selectRuntime(cfg, { auditEgress });
     if (runtime) {
       // Typing indicator while a turn runs (Telegram DMs; presence.js gates).
-      const presence = createTypingPresence({
+      presence = createTypingPresence({
         sendChatAction: (chatId) => telegram ? telegram.sendChatAction({ chatId }) : null,
       });
       lane = createLane({ runtime, presence, ...(cfg.turnTimeoutMs ? { turnTimeoutMs: cfg.turnTimeoutMs } : {}) });
@@ -118,7 +119,7 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     const mediaStage = cfg.mediaEnabled
       ? (msg) => contextualizeMedia(msg, { telegram, vault, maxBytes: cfg.mediaMaxBytes })
       : undefined;
-    const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized, checkChannelAccess, contextualizeMedia: mediaStage });
+    const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized, checkChannelAccess, contextualizeMedia: mediaStage, presence });
     poller = createTelegramPoller({ telegram, handleInbound });
   }
 

@@ -6,6 +6,7 @@
 import { createReplyDomain } from '../src/tools/reply.js';
 import { createTypingPresence } from '../packages/channel-daemon/presence.js';
 import { createLane } from '../packages/channel-daemon/agent/lane.js';
+import { createInboundHandler } from '../packages/channel-daemon/inbound.js';
 
 const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? ` — ${d}` : ''}`); };
@@ -62,6 +63,38 @@ const afterError = pings.length;
 await sleep(70);
 rec('P6. presence stopped in finally on turn error (never outlives the turn)',
   pings.length === afterError && afterError >= 1, `pings=${pings.length} (during turn: ${afterError})`);
+
+// ── Part 4: inbound pre-turn presence — typing covers the MEDIA stage ──
+// (vision/transcription runs BEFORE the turn and is the longest phase for
+// images + voice notes; text messages get pre-turn typing too).
+pings = [];
+let mediaRunning = false, typedDuringMedia = false, stoppedAtEnqueue = false;
+const inbound = createInboundHandler({
+  vault: { captureMessage: async () => ({}) },
+  ownerTelegramId: '42',
+  runTurn: () => { stoppedAtEnqueue = false; return Promise.resolve(); }, // enqueue-and-return
+  contextualizeMedia: async () => {
+    mediaRunning = true;
+    await sleep(60); // typing keepalive (25ms) must fire during this
+    typedDuringMedia = pings.length >= 2;
+    mediaRunning = false;
+    return { attachmentId: null, contextLine: '[photo: a test]' };
+  },
+  presence,
+});
+await inbound({ channelKind: 'telegram-dm', chatId: '42', fromId: '42', messageId: '9', source: 'telegram', content: '', media: { kind: 'photo' } });
+const afterInbound = pings.length;
+await sleep(60);
+rec('P7. media inbound: typing during vision/transcription, stopped after enqueue',
+  typedDuringMedia && pings.length === afterInbound, `duringMedia=${typedDuringMedia} pings=${pings.length}/${afterInbound}`);
+
+pings = [];
+await inbound({ channelKind: 'telegram-dm', chatId: '42', fromId: '42', messageId: '10', source: 'telegram', content: 'plain text message' });
+rec('P8. text inbound also starts pre-turn typing', pings.length >= 1, `pings=${pings.length}`);
+
+pings = [];
+await inbound({ channelKind: 'telegram-dm', chatId: '99', fromId: '99', messageId: '11', source: 'telegram', content: 'not the owner' });
+rec('P9. unauthorized inbound never types (auth precedes presence)', pings.length === 0, `pings=${pings.length}`);
 
 const okAll = ledger.every(Boolean);
 console.log(`VERDICT: ${okAll ? 'GO' : 'NO-GO'} — reply quote opt-in + typing presence (DM-gated, keepalive, error-safe)  EXIT=${okAll ? 0 : 1}`);
