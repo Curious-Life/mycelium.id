@@ -136,30 +136,94 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   // Dependency-ordered (folders before documents, people before links, points
   // after hierarchy) — mirrors the reference import's order (reference:1012-1135).
   await run('folders', m.folders);
-  await run('documents', m.documents, { embedding_768: null });
+
+  // Documents — CONTENT DEDUP across paths, sources and imports. The schema's
+  // UNIQUE(user_id, path) already blocks same-path duplicates; the gap is the
+  // same CONTENT at different paths — canonical exports carry mind files BOTH
+  // as documents AND as agents/-tree mirrors, and a doc may already exist here
+  // via Obsidian import or native saveDocument (which writes the same
+  // SHA-256(plaintext) content_hash — document-store.js B1). One copy wins; the
+  // mirror is skipped. Guard: only dedupe substantial content (≥ 32 chars) so
+  // trivially-identical stubs (empty README) don't collapse.
+  const DOC_DEDUP_MIN_CHARS = 32;
+  const docHashesSeen = new Set();
+  try {
+    const existingDocs = await db.rawQuery('SELECT content_hash FROM documents WHERE content_hash IS NOT NULL', []);
+    for (const row of existingDocs?.results || []) if (row.content_hash) docHashesSeen.add(row.content_hash);
+  } catch { /* no preload → path/id dedup still holds */ }
+  const docHashOf = (content) => (typeof content === 'string' && content.length >= DOC_DEDUP_MIN_CHARS)
+    ? crypto.createHash('sha256').update(content, 'utf8').digest('hex') : null;
+  {
+    const incoming = asArray(m.documents);
+    let dedupedByContent = 0;
+    const rows = [];
+    for (const doc of incoming) {
+      if (!doc || typeof doc !== 'object') { rows.push(doc); continue; }
+      const hash = docHashOf(doc.content);
+      if (hash && docHashesSeen.has(hash)) { dedupedByContent++; continue; }
+      if (hash) docHashesSeen.add(hash);
+      rows.push(hash ? { ...doc, content_hash: hash } : doc);
+    }
+    stats.documents = await restoreTable(db, 'documents', rows, { userId, overrides: { embedding_768: null } });
+    stats.documents.dedupedByContent = dedupedByContent;
+  }
   await run('document_versions', m.documents_meta?.versions);
   await run('note_links', m.documents_meta?.noteLinks);
   await run('share_links', m.documents_meta?.shareLinks);
   await run('access_grants', m.documents_meta?.accessGrants);
 
-  // Attachments: binary → encrypted blob → row (id preserved so messages link).
-  // Per-FILE accountability: every id that lost its binary or failed its row is
-  // NAMED in the report (ids only — zero-leakage), never folded into a count.
+  // Attachments (images/media): binary → encrypted blob → row (id preserved so
+  // messages link). DEDUP SEMANTICS differ from documents: rows must ALWAYS
+  // land (message attachment_ids point at them), but identical BYTES are stored
+  // ONCE — duplicates share one encrypted blob via the same local_path. The
+  // binary's SHA-256 rides in the row's metadata JSON so FUTURE imports dedupe
+  // against blobs already in the vault, and rows whose id already exists skip
+  // the blob write entirely (a re-import must not orphan duplicate blobs on
+  // disk). Per-FILE accountability: every id that lost its binary or failed its
+  // row is NAMED in the report (ids only — zero-leakage).
+  // CONSTRAINT for future blob DELETION (none exists today — blob-store has no
+  // unlink path): local_path may be SHARED by several attachment rows; delete a
+  // blob only when no other row references its local_path.
   const attRows = asArray(m.attachments);
-  const attStats = { attempted: attRows.length, inserted: 0, deduped: 0, failed: 0, blobs: 0, blobMissing: 0, blobMissingIds: [], failedIds: [] };
+  const attStats = { attempted: attRows.length, inserted: 0, deduped: 0, failed: 0, blobs: 0, blobsReused: 0, blobMissing: 0, blobMissingIds: [], failedIds: [] };
+  const existingAttIds = new Set();
+  const blobByHash = new Map(); // sha256(bytes) → local_path (existing vault + this import)
+  try {
+    const existingAtts = await db.rawQuery('SELECT id, local_path, metadata FROM attachments', []);
+    for (const row of existingAtts?.results || []) {
+      if (row.id) existingAttIds.add(row.id);
+      try {
+        const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+        if (meta?.sha256 && row.local_path) blobByHash.set(meta.sha256, row.local_path);
+      } catch { /* metadata not JSON → no hash to reuse */ }
+    }
+  } catch { /* no preload → per-id skip unavailable, import still correct */ }
   for (const att of attRows) {
     if (!att || typeof att !== 'object') { attStats.failed++; continue; }
     try {
+      if (att.id && existingAttIds.has(att.id)) { attStats.deduped++; continue; } // row exists → no blob write
       let localPath = null;
+      let sha = null;
       const buf = att.zipPath ? await readBinaryEntry(zip, att.zipPath) : null;
       if (buf) {
-        const ext = att.file_name ? extname(att.file_name) : '';
-        const { path } = await putBlob(buf, { userId, ext });
-        localPath = path;
-        attStats.blobs++;
+        sha = crypto.createHash('sha256').update(buf).digest('hex');
+        const reuse = blobByHash.get(sha);
+        if (reuse) {
+          localPath = reuse;
+          attStats.blobsReused++;
+        } else {
+          const ext = att.file_name ? extname(att.file_name) : '';
+          const { path } = await putBlob(buf, { userId, ext });
+          localPath = path;
+          blobByHash.set(sha, path);
+          attStats.blobs++;
+        }
       } else { attStats.blobMissing++; if (att.id) attStats.blobMissingIds.push(att.id); }
       const { zipPath: _zp, ...row } = att;
-      const r = await restoreTable(db, 'attachments', [{ ...row, local_path: localPath, r2_key: null, stream_uid: null }], { userId });
+      let meta = null;
+      try { meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata ?? null); } catch { meta = null; }
+      const metadata = sha ? { ...(meta && typeof meta === 'object' ? meta : {}), sha256: sha } : row.metadata;
+      const r = await restoreTable(db, 'attachments', [{ ...row, metadata, local_path: localPath, r2_key: null, stream_uid: null }], { userId });
       attStats.inserted += r.inserted; attStats.deduped += r.deduped;
       if (r.failed) { attStats.failed += r.failed; if (att.id) attStats.failedIds.push(att.id); }
     } catch { attStats.failed++; if (att?.id) attStats.failedIds.push(att.id); }
@@ -357,11 +421,13 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   // a pure tool server (no agent runtime FS), so the TEXT files land as
   // documents under their original `agents/...` path. Deterministic ids
   // (sha256 of the path) make re-imports no-ops; binaries and oversized files
-  // are counted, never silently dropped.
+  // are counted, never silently dropped. Shares the documents content-hash set:
+  // canonical MIRRORS mind files into the agent tree (MIND_MIRRORS), so a file
+  // whose content already landed as a document is a mirror → skipped, counted.
   {
     const TEXT_EXT = new Set(['.md', '.txt', '.json', '.yaml', '.yml', '.csv']);
     const MAX_AGENT_FILE_BYTES = 5 * 1024 * 1024;
-    const agentStats = { attempted: 0, inserted: 0, deduped: 0, failed: 0, skippedBinary: 0, skippedOversize: 0 };
+    const agentStats = { attempted: 0, inserted: 0, deduped: 0, dedupedByContent: 0, failed: 0, skippedBinary: 0, skippedOversize: 0 };
     const entries = Object.values(zip.files).filter((f) => !f.dir && f.name.startsWith('agents/'));
     for (const entry of entries) {
       const ext = extname(entry.name).toLowerCase();
@@ -371,16 +437,21 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
       try {
         const buf = await entry.async('nodebuffer');
         if (buf.length === 0 || buf.length > MAX_AGENT_FILE_BYTES) { agentStats.skippedOversize++; continue; }
+        const content = buf.toString('utf8');
+        const hash = docHashOf(content);
+        if (hash && docHashesSeen.has(hash)) { agentStats.dedupedByContent++; continue; }
         agentStats.attempted++;
         const id = crypto.createHash('sha256').update(`vault-import:agents:${entry.name}`).digest('hex').slice(0, 32);
         const r = await restoreTable(db, 'documents', [{
           id,
           path: entry.name,
           title: basename(entry.name),
-          content: buf.toString('utf8'),
+          content,
+          content_hash: hash,
           created_by: 'vault-import',
           embedding_768: null,
         }], { userId });
+        if (hash && r.inserted) docHashesSeen.add(hash);
         agentStats.inserted += r.inserted; agentStats.deduped += r.deduped; agentStats.failed += r.failed;
       } catch { agentStats.failed++; }
     }
