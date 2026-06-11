@@ -30,9 +30,9 @@
 
 	// Launch primary navigation — 5 destinations (NAV-IA-LOCK-2026-06-08):
 	//   Mycelium · Library · Streams (Import+Timeline) · People (Connections/Spaces/
-	//   Sharing cluster) · Curious Life. Profile + Settings are pinned at the bottom;
-	//   not-yet-shipped surfaces live under "Coming later" below as disabled chips,
-	//   so the roadmap stays visible without dead links.
+	//   Sharing cluster) · Curious Life. Profile + Settings are pinned at the bottom.
+	//   Not-yet-shipped life-domain surfaces (Wealth/Body/…) now live as "coming
+	//   later" facets inside Streams, not the nav.
 	const coreNav: NavItem[] = [
 		{ id: 'mindscape', label: 'Mycelium', icon: 'ratio',   href: '/mindscape' },
 		{ id: 'library',   label: 'Library',  icon: 'folder',  href: '/library' },
@@ -48,17 +48,10 @@
 	}
 
 	// Curious Life — the one aspirational surface, set apart from the working
-	// tabs above and the roadmap below: traverse from where your paths have led
-	// toward who you're becoming.
+	// tabs above: traverse from where your paths have led toward who you're
+	// becoming. (The planned life-domain areas — Wealth/Intel/Body/Vitality/
+	// Activity — now live as "coming later" facets inside Streams, not the nav.)
 	const curiousLife: NavItem = { id: 'curious-life', label: 'Curious Life', icon: 'compass', href: '/curious-life' };
-
-	// Planned screens (modules · social · agents). Shown disabled, no routing —
-	// they render nothing in V1. Collapsed by default.
-	const comingLater = [
-		'Chat', 'Agents', 'Cycles',
-		'Wealth', 'Intel', 'Body', 'Vitality', 'Activity', 'Media',
-	];
-	let comingLaterOpen = $state(false);
 
 	function handleNavClick(item: NavItem) {
 		// Don't re-navigate if already on this view — prevents 3D map remount
@@ -151,9 +144,9 @@
 	style={isMobile ? '' : `width: ${isOpen ? sidebarWidth + 'px' : '0'};`}
 >
 	<!-- Scrollable nav region: primary nav + contextual nav scroll together so a
-	     tall list (core + Curious Life + an expanded "Coming later") can
-	     never push Settings / the user footer off-screen. Settings + footer are
-	     pinned below as flex-shrink-0 siblings. -->
+	     tall list (core nav + Curious Life + contextual sub-nav) can never push
+	     Settings / the user footer off-screen. Settings + footer are pinned
+	     below as flex-shrink-0 siblings. -->
 	<div class="flex-1 min-h-0 overflow-y-auto">
 	<!-- Spacer top -->
 	<div class="pt-2"></div>
@@ -244,38 +237,6 @@
 				</button>
 			</div>
 
-			<!-- Coming later: planned screens (modules · social · agents), shown
-			     as disabled chips so the roadmap is visible without dead links.
-			     Collapsed by default; no routing — these render nothing in V1. -->
-			<div class="mt-3 pt-3 border-t border-[var(--color-border)]">
-				<button
-					class="w-full flex items-center justify-between px-3 py-1.5 mb-1 rounded-md text-[0.65rem] font-semibold text-[var(--color-text-tertiary)] uppercase tracking-widest cursor-pointer hover:text-[var(--color-text-secondary)] hover:bg-[var(--color-elevated)] transition-colors"
-					onclick={() => (comingLaterOpen = !comingLaterOpen)}
-					aria-expanded={comingLaterOpen}
-				>
-					Coming later
-					<svg class="w-3.5 h-3.5 opacity-50 transition-transform duration-150 {comingLaterOpen ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
-						<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-					</svg>
-				</button>
-				{#if comingLaterOpen}
-					{#each comingLater as label}
-						<div
-							class="flex items-center gap-3 px-3 py-2 rounded-lg opacity-40 cursor-default select-none"
-							title="Planned for a future release"
-						>
-							<div class="w-1.5 h-1.5 rounded-full bg-transparent flex-shrink-0"></div>
-							<div class="w-5 h-5 flex items-center justify-center flex-shrink-0">
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-									<circle cx="12" cy="12" r="8.25" />
-								</svg>
-							</div>
-							<span class="text-sm font-medium">{label}</span>
-							<span class="ml-auto text-[0.5rem] uppercase tracking-wider text-[var(--color-text-tertiary)] border border-[var(--color-border)] rounded-full px-1.5 py-0.5">soon</span>
-						</div>
-					{/each}
-				{/if}
-			</div>
 		</nav>
 	</div>
 
