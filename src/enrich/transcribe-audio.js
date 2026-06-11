@@ -57,7 +57,9 @@ export async function transcribeAudio({
   prefer,
   baseUrl = DEFAULT_OLLAMA_URL,
   fetch: fetchImpl = globalThis.fetch,
-  timeoutMs = Number(process.env.MYCELIUM_TRANSCRIBE_TIMEOUT_MS) || 180000,
+  // 300s: a ~7s voice note on a 12B model took >180s live (2026-06-10) — the
+  // same cold-model lesson as the channel turn's CHANNEL_OLLAMA_TIMEOUT_MS.
+  timeoutMs = Number(process.env.MYCELIUM_TRANSCRIBE_TIMEOUT_MS) || 300000,
 } = {}) {
   let buf = Buffer.isBuffer(bytes) ? bytes : (base64 ? Buffer.from(base64, "base64") : null);
   if (!buf || typeof fetchImpl !== "function") return null;
