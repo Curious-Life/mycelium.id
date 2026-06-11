@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { assertSafeColumns } from './column-guard.js';
+import { assertSafeColumns, clampLimit } from './column-guard.js';
 import { buildAgentIdFilter, resolveAgentIds } from '../agent-id-aliases.js';
 
 /**
@@ -456,6 +456,7 @@ export function createMessagesNamespace(deps) {
     },
 
     async selectRecent(userId, { limit = 10, agentId, since, scope, includeEmbedding768 = false } = {}) {
+      limit = clampLimit(limit, 10);
       const cols = `id, content, role, source, agent_id, attachment_id, tags, entities, scope, created_at, pinned${
         includeEmbedding768 ? ', embedding_768' : ''
       }`;
@@ -501,6 +502,7 @@ export function createMessagesNamespace(deps) {
     },
 
     async selectPaginated(userId, { since, until, offset = 0, limit = 30, channel, agentId, excludeAgentId } = {}) {
+      limit = clampLimit(limit, 30);
       let where = `WHERE user_id = ? AND forgotten_at IS NULL`;
       const params = [userId];
       if (since)   { where += ` AND created_at >= ?`; params.push(since); }
@@ -601,6 +603,7 @@ export function createMessagesNamespace(deps) {
     },
 
     async selectAll(userId, { limit = 500, offset = 0 } = {}) {
+      limit = clampLimit(limit, 500, 5000);
       const result = await d1Query(
         `SELECT id, role, content, source, agent_id, created_at, message_type, attachment_id FROM messages WHERE user_id = ? AND forgotten_at IS NULL ORDER BY created_at DESC LIMIT ? OFFSET ?`,
         [userId, limit, offset],

@@ -24,6 +24,7 @@
  */
 
 import { randomUUID as nodeRandomUUID } from 'node:crypto';
+import { clampLimit } from './column-guard.js';
 
 export function createWealthNamespace(deps) {
   if (!deps) throw new TypeError('createWealthNamespace: deps required');
@@ -211,6 +212,7 @@ export function createWealthNamespace(deps) {
     },
 
     async listTransactions(portfolioId, { symbol, type, asset_id, from, to, limit = 100 } = {}) {
+      limit = clampLimit(limit, 100);
       let sql = `SELECT t.*, a.symbol, a.name as asset_name, a.type as asset_type
                   FROM wealth_transactions t
                   JOIN wealth_assets a ON a.id = t.asset_id

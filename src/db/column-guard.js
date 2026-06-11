@@ -22,3 +22,14 @@ export function assertSafeColumns(keys, table) {
   }
   return keys;
 }
+
+/**
+ * Clamp a caller-supplied LIMIT to a sane integer range (DB-LIMIT, 2026-06-11):
+ * an unbounded LIMIT lets one request pull an entire table into memory. Returns
+ * an integer in [1, max]; non-numbers fall back to `def`.
+ */
+export function clampLimit(value, def = 50, max = 1000) {
+  const n = Math.trunc(Number(value));
+  if (!Number.isFinite(n) || n <= 0) return def;
+  return Math.min(n, max);
+}
