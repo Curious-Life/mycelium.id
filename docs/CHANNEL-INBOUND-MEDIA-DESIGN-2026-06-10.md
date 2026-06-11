@@ -1,6 +1,8 @@
 # Channel Inbound Media Pipeline — Design (2026-06-10)
 
-**Status:** BUILT (steps 1–5) — gates GO: verify:ingest I8-I10, verify:model-caps 9/9, verify:attachment-context 11/11, verify:channel-inbound 33/33; live smoke = step 6 ledger in the PR
+**Status:** BUILT (steps 1–5) — gates GO: verify:ingest I8-I10, verify:model-caps 9/9, verify:attachment-context 13/13, verify:channel-inbound 33/33; live smoke = step 6 ledger in the PR
+
+> **Hardening (MED-3, media-smoke-2 review, 2026-06-11):** PDF/DOCX extraction (`src/enrich/extract-document.js`) now runs the unpdf/mammoth parse in a throwaway `worker_thread` (`extract-document.worker.js`) under a bounded heap (`resourceLimits.maxOldGenerationSizeMb`, default 256MB / env `MYCELIUM_EXTRACT_HEAP_MB`) and is `terminate()`d on timeout. A decompression/XML bomb — a tiny docx that mammoth inflates to GBs — is now hard-killed in an isolated thread (V8 OOMs the worker, the vault survives) instead of running to completion behind a `Promise.race` ("the loser keeps running"). The 20MB attachment gate bounds INPUT; the worker bounds DECOMPRESSED output + wall-clock. Gate proof: `verify:attachment-context` A11 (570KB→~150MB bomb → null in ~0.9s, worker torn down) + A12 (timeout → terminate → null, torn down).
 **Scope:** Telegram first. Photos, documents (txt/md/csv/json now; pdf/docx step 5), voice notes, audio files — downloaded from Telegram, encrypted-at-rest in the vault blob store, described/transcribed **locally** via the user's own multimodal model, linked to captured messages, and visible to the channel agent turn.
 **Elevation over canonical:** canonical (`reference/core/attachments.js`) needed cloud (R2 storage, Workers AI vision, Workers AI Whisper). V1 does all three on-box: encrypted local blobs, local vision, local audio transcription — zero new egress.
 

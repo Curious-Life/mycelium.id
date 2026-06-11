@@ -10,7 +10,14 @@
 //   A6 no capable model (extractor null) → ok:true contextText:null
 //   A7 binary 'file' kind (pdf) → ok:true contextText:null (honest, step-5 scope)
 //   A8 blob read failure → 200 ok:false-free fail-soft (extraction-error)
+//   A11 decompression-bomb docx → null WITHIN BUDGET + parse worker torn down
+//       (MED-3: a tiny docx that inflates to GBs cannot hold vault memory)
 process.env.MYCELIUM_UPLOADS_ROOT = 'data/verify-attctx-uploads';
+// Tight parse budget + floor heap so the bomb (A11) trips fast: V8 OOM-kills the
+// worker on the heap cap, or the timeout terminate()s it — either way, quickly.
+// Set BEFORE importing extract-document.js (HEAP_MB is read at module load).
+process.env.MYCELIUM_EXTRACT_HEAP_MB = '64';
+process.env.MYCELIUM_EXTRACT_TIMEOUT_MS = '10000';
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';
@@ -20,6 +27,7 @@ import { applyMigrations } from '../src/db/migrate.js';
 import { internalRouter } from '../src/internal-router.js';
 import { uploadAttachment } from '../src/ingest/upload.js';
 import { isEncrypted } from '../src/crypto/crypto-local.js';
+import { extractDocumentText, activeExtractWorkers } from '../src/enrich/extract-document.js';
 
 const DB = 'data/verify-attctx.db';
 const KCV = 'data/verify-attctx-kcv.json';
@@ -178,6 +186,67 @@ const rawCol = (id, col) => {
   const r = await call({ attachmentId: inserted.id });
   rec('A8. blob read failure → 200 fail-soft (reason extraction-error)',
     r.status === 200 && r.body?.contextText === null && r.body?.reason === 'extraction-error', `reason=${r.body?.reason}`);
+}
+
+// A11: decompression-bomb docx — a ~100KB zip that inflates to >150MB of XML.
+// The 20MB attachment gate bounds INPUT, not decompressed output; only the
+// hard-killable worker bounds the blast. Asserts: contextText null, returned
+// WELL under the old 30s window (proves the kill, not a hang), and the parse
+// worker is fully torn down (activeExtractWorkers back to 0 → no leaked memory).
+{
+  const { default: JSZip } = await import('jszip');
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+  zip.file('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  // ~150MB of valid wordprocessing paragraphs — compresses to a few hundred KB.
+  const para = '<w:p><w:r><w:t>The quick brown fox jumps over the lazy dog. </w:t></w:r></w:p>';
+  const bomb = `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${para.repeat(2_200_000)}</w:body></w:document>`;
+  zip.file('word/document.xml', bomb);
+  const bombBytes = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 9 } });
+
+  const { attachmentId } = await uploadAttachment(db, { userId, bytes: bombBytes, fileName: 'bomb.docx', fileType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+  const t0 = Date.now();
+  const r = await call({ attachmentId });
+  const elapsedMs = Date.now() - t0;
+  // Settle: terminate() resolution is awaited inside extractDocumentText, so the
+  // counter is already 0 here; one tick of slack guards against scheduler skew.
+  await new Promise((res) => setImmediate(res));
+  rec('A11. decompression-bomb docx → null within budget + worker torn down',
+    r.status === 200 && r.body?.contextText === null && elapsedMs < 20_000 && activeExtractWorkers() === 0,
+    `null=${r.body?.contextText === null} elapsed=${elapsedMs}ms workers=${activeExtractWorkers()} compressed=${(bombBytes.length / 1024).toFixed(0)}KB`);
+}
+
+// A12: timeout hard-kill — the OTHER half of the protection. A CPU-bound parse
+// that never OOMs must still be terminate()d when the budget elapses (Promise
+// .race could not — "the loser keeps running"). A 1ms budget on a valid PDF
+// can't finish in time, so the timer fires and terminate()s the live worker →
+// null, worker torn down. Direct call (bypasses the router's 30s default).
+{
+  const mk = () => {
+    const objs = [
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+      null,
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    ];
+    const stream = 'BT /F1 24 Tf 72 700 Td (Hello vault PDF) Tj ET';
+    objs[3] = `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
+    let out = '%PDF-1.4\n';
+    const offsets = [];
+    objs.forEach((o, i) => { offsets.push(out.length); out += `${i + 1} 0 obj\n${o}\nendobj\n`; });
+    const xref = out.length;
+    out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}`;
+    out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+    return Buffer.from(out, 'latin1');
+  };
+  const t0 = Date.now();
+  const out = await extractDocumentText({ bytes: mk(), mimeType: 'application/pdf', fileName: 'slow.pdf', timeoutMs: 1 });
+  const elapsedMs = Date.now() - t0;
+  await new Promise((res) => setImmediate(res));
+  rec('A12. timeout → worker hard-killed (terminate) → null, torn down',
+    out === null && elapsedMs < 5_000 && activeExtractWorkers() === 0,
+    `out=${out} elapsed=${elapsedMs}ms workers=${activeExtractWorkers()}`);
 }
 
 server.close();
