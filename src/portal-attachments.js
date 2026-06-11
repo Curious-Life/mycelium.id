@@ -109,12 +109,22 @@ export function portalAttachmentsRouter({ db, userId }) {
   });
 
   // DELETE /attachments/:id — row (user-scoped) + best-effort blob unlink.
+  // SHARED-BLOB GUARD: byte-identical attachments share ONE encrypted blob via
+  // the same local_path (vault-import + obsidian-import dedup, PR #152) — so
+  // the file is unlinked ONLY when no other row still references it. Without
+  // this, deleting one duplicate destroys its siblings' bytes.
   router.delete('/attachments/:id', async (req, res) => {
     try {
       const row = await db.attachments.getById(String(req.params.id));
       if (!row || row.user_id !== userId) return res.status(404).json({ error: 'not-found' });
       await db.attachments.delete(row.id, userId);
-      if (row.local_path) { try { await unlink(join(uploadsRoot(), row.local_path)); } catch { /* row is gone; orphan blob is unreachable ciphertext */ } }
+      if (row.local_path) {
+        try {
+          const sharers = await db.rawQuery('SELECT COUNT(*) AS c FROM attachments WHERE local_path = ? AND id != ?', [row.local_path, row.id]);
+          const stillReferenced = (sharers?.results?.[0]?.c ?? 0) > 0;
+          if (!stillReferenced) await unlink(join(uploadsRoot(), row.local_path));
+        } catch { /* row is gone; an orphan blob is unreachable ciphertext */ }
+      }
       res.json({ ok: true });
     } catch (err) {
       console.error('[portal-attachments] delete failed:', err.message);

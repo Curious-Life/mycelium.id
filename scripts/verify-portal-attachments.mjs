@@ -98,6 +98,26 @@ const alien = await db.attachments.insert({ user_id: 'someone-else', file_name: 
   rec('L7. delete: row gone + blob unlinked', d.status === 200 && !after && !existsSync(blobPath), `blobGone=${!existsSync(blobPath)}`);
 }
 
+// L8: SHARED blob survives deleting one sharer (vault/obsidian-import dedup
+// stores byte-identical attachments under ONE local_path) — the blob is
+// unlinked only when the LAST referencing row is deleted.
+{
+  const sharedRel = (await db.attachments.getById(png.attachmentId)).local_path;
+  const twin = await db.attachments.insert({
+    user_id: userId, file_name: 'cat-copy.jpg', file_type: 'image/jpeg', file_size: 12,
+    local_path: sharedRel, metadata: JSON.stringify({ sha256: 'same-bytes' }),
+  });
+  const blobPath = join('data/verify-pattach-uploads', sharedRel);
+  const d1 = await fetch(`${base}/attachments/${twin.id}`, { method: 'DELETE' });
+  const survivedFirst = existsSync(blobPath);
+  const stillServes = (await fetch(`${base}/attachments/${png.attachmentId}/file`)).status === 200;
+  const d2 = await fetch(`${base}/attachments/${png.attachmentId}`, { method: 'DELETE' });
+  const goneAfterLast = !existsSync(blobPath);
+  rec('L8. shared blob: survives first delete (sibling still serves), unlinked on last',
+    d1.status === 200 && survivedFirst && stillServes && d2.status === 200 && goneAfterLast,
+    `survived=${survivedFirst} stillServes=${stillServes} goneAfterLast=${goneAfterLast}`);
+}
+
 server.close();
 close();
 const passed = ledger.filter(Boolean).length;
