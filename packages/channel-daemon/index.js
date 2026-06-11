@@ -23,6 +23,7 @@ import { createTelegramChokepoint } from './chokepoint.js';
 import { createVoicePipeline } from './voice-pipeline.js';
 import { createInboundHandler } from './inbound.js';
 import { contextualizeMedia } from './media.js';
+import { createMediaQueue } from './media-queue.js';
 import { createTelegramPoller } from './transport/telegram-poller.js';
 import { createCommandHandler } from './commands.js';
 // discord
@@ -119,7 +120,12 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     const mediaStage = cfg.mediaEnabled
       ? (msg) => contextualizeMedia(msg, { telegram, vault, maxBytes: cfg.mediaMaxBytes })
       : undefined;
-    const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized, checkChannelAccess, contextualizeMedia: mediaStage, presence });
+    // MED-4 — offload the minutes-long media stage onto a bounded serial worker
+    // so the poller never stalls; degrade-to-placeholder under flood (never drop).
+    const mediaQueue = cfg.mediaEnabled
+      ? createMediaQueue({ maxPending: cfg.mediaQueueMax, senderMax: cfg.mediaSenderMax, senderWindowMs: cfg.mediaSenderWindowMs })
+      : undefined;
+    const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized, checkChannelAccess, contextualizeMedia: mediaStage, mediaQueue, presence });
     poller = createTelegramPoller({ telegram, handleInbound });
   }
 
