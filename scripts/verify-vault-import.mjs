@@ -30,6 +30,7 @@ const { applyMigrations } = await import('../src/db/migrate.js');
 const { startRestServer } = await import('../src/server-rest.js');
 const { importMasterKey, decrypt } = await import('../src/crypto/crypto-local.js');
 const { decryptVector } = await import('../src/search/ann/decode.js');
+const { captureMessage } = await import('../src/ingest/capture.js');
 
 // A real 256D float32 vector, hex-encoded the way the canonical export does
 // (`SELECT hex(nomic_embedding)` of RAW float bytes — reference:541).
@@ -44,6 +45,8 @@ const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAI
 const MARKER = 'unmistakable-vault-plaintext-marker';
 const ATT_BYTES = Buffer.from('attachment-plaintext-binary-marker-0123456789');
 const BACKDATE = '2024-03-15T10:20:30.000Z';
+const DUP_CONTENT = 'cross-import duplicate marker text';
+const DUP_TS = '2024-04-01T00:00:00.000Z';
 const PROVIDER_KEY = 'sk-canonical-plaintext-api-key-marker';
 const AGENT_FILE_TEXT = 'agent memory file — continuity marker text';
 const CANON_UID = 'canonical-user-1';
@@ -54,9 +57,12 @@ function manifest() {
     version: 4,
     format: 'mycelium-vault-export',
     user: { id: CANON_UID, displayName: 'Altus', timezone: 'Europe/Amsterdam', settings: { theme: 'dark' }, profile: { id: 'prof1', display_name: 'Altus' }, identities: [], passkeys: [{ id: 'pk1', credential_id: 'must-not-import' }] },
-    messages: { total: 2, data: [
+    messages: { total: 3, data: [
       { id: 'vm1', role: 'user', content: MARKER, source: 'telegram', message_type: 'chat', created_at: BACKDATE, conversation_id: 'conv1', nlp_processed: 1, embedding_768: 'stale-canonical-vector' },
       { id: 'vm2', role: 'assistant', content: 'a canonical reply', source: 'telegram', created_at: BACKDATE, conversation_id: 'conv1', attachment_id: 'att1' },
+      // Same content + same instant as a message ALREADY in the vault under a
+      // different id (pre-captured via captureMessage) → must dedupe by content.
+      { id: 'vm3', role: 'user', content: DUP_CONTENT, source: 'telegram', created_at: DUP_TS },
     ] },
     documents: { total: 1, data: [{ id: 'doc1', path: 'mind/areas/imported.md', title: 'Imported doc', content: 'doc body from canonical', created_at: BACKDATE }] },
     folders: [{ id: 'fold1', name: 'Imported', user_id: 'canonical-user-1' }],
@@ -111,7 +117,7 @@ async function main() {
   const raw0 = new Database(DB); applyMigrations(raw0); raw0.close();
 
   const srv = await startRestServer({ dbPath: DB, kcvPath: KCV, userHex: USER_HEX, systemHex: hex(), port: 0, host: '127.0.0.1', portalMode: 'legacy' });
-  const { url } = srv;
+  const { url, db } = srv;
   const postFile = async (buf, name = 'mycelium-vault-export.zip') => {
     const fd = new FormData();
     fd.append('file', new Blob([buf]), name);
@@ -121,6 +127,10 @@ async function main() {
   };
 
   try {
+    // Pre-capture a message through the NATIVE path with the same content+time
+    // as manifest vm3 but a different id — the import must dedupe it by content.
+    await captureMessage(db, { userId: 'local-user', content: DUP_CONTENT, createdAt: DUP_TS, source: 'claude-import', id: 'pre-existing-claude-1' });
+
     // ── V1: detection + per-family stats ────────────────────────────────────
     const r1 = await postFile(await vaultZip());
     const ir = r1.body?.importResult;
@@ -243,12 +253,49 @@ async function main() {
       tcPlain === 'time chronicle narrative marker' && arcPlain === 'current arc narrative marker' && arc?.phase === 'emergence',
       `tc=${tcPlain === 'time chronicle narrative marker'} arc=${arcPlain === 'current arc narrative marker'}`);
 
+    // ── R1: reconciliation — every declared data point accounted for ────────
+    rec('R1 clean import reports complete:true, zero missing/failed across families',
+      ir?.complete === true
+      && ir?.reconciliation && Object.values(ir.reconciliation).every((f) => f.missing === 0 && f.failed === 0)
+      && ir.reconciliation.messages?.declared === 3 && ir.reconciliation.messages?.landed === 3,
+      `complete=${ir?.complete} messages=${JSON.stringify(ir?.reconciliation?.messages)}`);
+
+    // The durable audit artifact: an encrypted report document INSIDE the vault.
+    const repDoc = raw.prepare("SELECT content FROM documents WHERE path LIKE 'imports/vault-import-report-%'").get();
+    let repParsed = null;
+    try { repParsed = JSON.parse(await decrypt(String(repDoc?.content || ''), await importMasterKey(USER_HEX))); } catch { /* */ }
+    rec('R2 report persisted as an encrypted in-vault document (decrypts, complete:true)',
+      repParsed?.v === 1 && repParsed?.complete === true && repParsed?.reconciliation?.messages?.landed === 3,
+      `path=${ir?.reportPath} parsed=${Boolean(repParsed)}`);
+
+    // ── R3: cross-import content dedup — vm3 must NOT duplicate the
+    // pre-captured claude-import message (same content + same instant).
+    const vm3 = raw.prepare("SELECT COUNT(*) c FROM messages WHERE id = 'vm3'").get()?.c;
+    const dupCount = raw.prepare('SELECT COUNT(*) c FROM messages WHERE content_hash = ?')
+      .get(crypto.createHash('sha256').update(DUP_CONTENT, 'utf8').digest('hex'))?.c;
+    rec('R3 content+time duplicate deduped across imports (one copy, not two)',
+      vm3 === 0 && dupCount === 1 && ir?.stats?.messages?.dedupedByContent === 1,
+      `vm3=${vm3} copies=${dupCount} dedupedByContent=${ir?.stats?.messages?.dedupedByContent}`);
+
     // ── V6: idempotent re-import ────────────────────────────────────────────
     const before = raw.prepare('SELECT COUNT(*) c FROM messages').get()?.c;
     const r2 = await postFile(await vaultZip());
     const after = new Database(DB, { readonly: true }).prepare('SELECT COUNT(*) c FROM messages').get()?.c;
     rec('V6 re-import duplicates nothing', r2.status === 200 && r2.body?.importResult?.imported === 0 && before === after,
       `second imported=${r2.body?.importResult?.imported} skipped=${r2.body?.importResult?.skipped} rows ${before}→${after}`);
+
+    // ── R4: loss + unknown-family flagging — a manifest declaring MORE rows
+    // than it carries, plus a family this importer doesn't know, must come back
+    // complete:false with both named (never silently dropped).
+    const manLoss = manifest();
+    manLoss.messages.total = 5; // declares 5, carries 3
+    manLoss.mysteryFutureFamily = [{ id: 'x1' }];
+    const r4 = await postFile(await vaultZip(manLoss));
+    const ir4 = r4.body?.importResult;
+    rec('R4 declared-count shortfall + unknown family → complete:false, both named',
+      ir4?.complete === false && ir4?.reconciliation?.messages?.missing === 2
+      && Array.isArray(ir4?.unhandledFamilies) && ir4.unhandledFamilies.includes('mysteryFutureFamily'),
+      `missing=${ir4?.reconciliation?.messages?.missing} unhandled=${JSON.stringify(ir4?.unhandledFamilies)}`);
 
     // ── V7: unknown manifest format → safe 400 ──────────────────────────────
     const badZip = new JSZip(); badZip.file('manifest.json', JSON.stringify({ format: 'not-a-mycelium-export' }));

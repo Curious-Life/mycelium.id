@@ -63,14 +63,17 @@ const normalizeValue = (v) => {
  * abort a 50k-row import.
  */
 async function restoreTable(db, table, rows, { userId, overrides = {} }) {
-  const out = { inserted: 0, deduped: 0, failed: 0 };
+  // `attempted`/`capped` feed the reconciliation report: declared − attempted
+  // must be zero, or the report names exactly what was never even tried.
+  const out = { attempted: 0, inserted: 0, deduped: 0, failed: 0, capped: 0 };
   if (!Array.isArray(rows) || rows.length === 0) return out;
   const cols = await tableColumns(db, table);
-  if (cols.size === 0) { out.failed = rows.length; out.tableMissing = true; return out; }
+  if (cols.size === 0) { out.failed = rows.length; out.attempted = rows.length; out.tableMissing = true; return out; }
 
   let n = 0;
   for (const row of rows) {
-    if (++n > MAX_ROWS_PER_TABLE) break;
+    if (++n > MAX_ROWS_PER_TABLE) { out.capped++; continue; }
+    out.attempted++;
     if (!row || typeof row !== 'object') { out.failed++; continue; }
     try {
       const r = { ...row, ...overrides };
@@ -140,8 +143,10 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   await run('access_grants', m.documents_meta?.accessGrants);
 
   // Attachments: binary → encrypted blob → row (id preserved so messages link).
+  // Per-FILE accountability: every id that lost its binary or failed its row is
+  // NAMED in the report (ids only — zero-leakage), never folded into a count.
   const attRows = asArray(m.attachments);
-  const attStats = { inserted: 0, deduped: 0, failed: 0, blobs: 0, blobMissing: 0 };
+  const attStats = { attempted: attRows.length, inserted: 0, deduped: 0, failed: 0, blobs: 0, blobMissing: 0, blobMissingIds: [], failedIds: [] };
   for (const att of attRows) {
     if (!att || typeof att !== 'object') { attStats.failed++; continue; }
     try {
@@ -152,17 +157,51 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
         const { path } = await putBlob(buf, { userId, ext });
         localPath = path;
         attStats.blobs++;
-      } else { attStats.blobMissing++; }
+      } else { attStats.blobMissing++; if (att.id) attStats.blobMissingIds.push(att.id); }
       const { zipPath: _zp, ...row } = att;
       const r = await restoreTable(db, 'attachments', [{ ...row, local_path: localPath, r2_key: null, stream_uid: null }], { userId });
-      attStats.inserted += r.inserted; attStats.deduped += r.deduped; attStats.failed += r.failed;
-    } catch { attStats.failed++; }
+      attStats.inserted += r.inserted; attStats.deduped += r.deduped;
+      if (r.failed) { attStats.failed += r.failed; if (att.id) attStats.failedIds.push(att.id); }
+    } catch { attStats.failed++; if (att?.id) attStats.failedIds.push(att.id); }
   }
   stats.attachments = attStats;
 
   // Messages — the core corpus. Ids + timestamps preserved; enrichment reset so
   // the drainer re-embeds locally (the export has no search vectors).
-  await run('messages', m.messages, MESSAGE_OVERRIDES);
+  //
+  // CROSS-IMPORT CONTENT DEDUP: a message that already exists under a DIFFERENT
+  // id (e.g. the same conversation previously imported via the Claude/ChatGPT
+  // path) must not duplicate. Key = plaintext SHA-256 of content (the exact
+  // captureMessage/0007 hash, kept in the plaintext content_hash column)
+  // + normalized created_at — content alone is too aggressive (repeated short
+  // messages like "ok" are legitimate); content AT the same instant is the same
+  // original message. Rows without content or timestamp fall back to id-dedup.
+  {
+    const incoming = asArray(m.messages);
+    const normTs = (t) => { const d = t ? new Date(t) : null; return d && !Number.isNaN(d.getTime()) ? d.toISOString() : null; };
+    const seen = new Set();
+    try {
+      const existing = await db.rawQuery('SELECT content_hash, created_at FROM messages WHERE content_hash IS NOT NULL', []);
+      for (const row of existing?.results || []) {
+        const ts = normTs(row.created_at);
+        if (row.content_hash && ts) seen.add(`${row.content_hash}:${ts}`);
+      }
+    } catch { /* no preload → id-dedup still holds */ }
+    let dedupedByContent = 0;
+    const rows = [];
+    for (const msg of incoming) {
+      if (!msg || typeof msg !== 'object') { rows.push(msg); continue; }
+      const hash = (typeof msg.content === 'string' && msg.content)
+        ? crypto.createHash('sha256').update(msg.content, 'utf8').digest('hex') : null;
+      const ts = normTs(msg.created_at);
+      const key = hash && ts ? `${hash}:${ts}` : null;
+      if (key && seen.has(key)) { dedupedByContent++; continue; }
+      if (key) seen.add(key); // also dedupes duplicates WITHIN the export itself
+      rows.push(hash ? { ...msg, content_hash: hash } : msg);
+    }
+    stats.messages = await restoreTable(db, 'messages', rows, { userId, overrides: MESSAGE_OVERRIDES });
+    stats.messages.dedupedByContent = dedupedByContent;
+  }
 
   await run('people', m.contacts);
   await run('contact_territories', m.contacts?.territoryLinks);
@@ -322,7 +361,7 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   {
     const TEXT_EXT = new Set(['.md', '.txt', '.json', '.yaml', '.yml', '.csv']);
     const MAX_AGENT_FILE_BYTES = 5 * 1024 * 1024;
-    const agentStats = { inserted: 0, deduped: 0, failed: 0, skippedBinary: 0, skippedOversize: 0 };
+    const agentStats = { attempted: 0, inserted: 0, deduped: 0, failed: 0, skippedBinary: 0, skippedOversize: 0 };
     const entries = Object.values(zip.files).filter((f) => !f.dir && f.name.startsWith('agents/'));
     for (const entry of entries) {
       const ext = extname(entry.name).toLowerCase();
@@ -332,6 +371,7 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
       try {
         const buf = await entry.async('nodebuffer');
         if (buf.length === 0 || buf.length > MAX_AGENT_FILE_BYTES) { agentStats.skippedOversize++; continue; }
+        agentStats.attempted++;
         const id = crypto.createHash('sha256').update(`vault-import:agents:${entry.name}`).digest('hex').slice(0, 32);
         const r = await restoreTable(db, 'documents', [{
           id,
@@ -354,14 +394,100 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   }
 
   let imported = 0, skipped = 0, failed = 0;
-  for (const s of Object.values(stats)) { imported += s.inserted || 0; skipped += s.deduped || 0; failed += s.failed || 0; }
-  return {
-    imported, skipped, failed,
-    stats,
+  for (const s of Object.values(stats)) {
+    imported += s.inserted || 0;
+    skipped += (s.deduped || 0) + (s.dedupedByContent || 0);
+    failed += s.failed || 0;
+  }
+
+  // ── Reconciliation: account for EVERY data point the export declared ───────
+  // Three independent accountability layers, so loss can never be silent:
+  //   1. per-family: declared (the exporter's own totals where present, else
+  //      the array length we consumed) vs landed (inserted+deduped) vs failed —
+  //      `missing` > 0 means rows we never even attempted (cap hit etc.);
+  //   2. manifest coverage: any TOP-LEVEL key this importer does not know is
+  //      named in `unhandledFamilies` — a future exporter addition is flagged
+  //      loudly, never silently dropped;
+  //   3. per-file: attachment ids that lost a binary or failed a row are listed
+  //      by id (zero-leakage) in stats.attachments.
+  const KNOWN_KEYS = new Set([
+    'exportedAt', 'version', 'format', 'meta', 'user', 'messages', 'documents',
+    'folders', 'attachments', 'mindscape', 'contacts', 'health', 'activity',
+    'wealth', 'wealthExtra', 'canvases', 'tasks', 'internalModel',
+    'documents_meta', 'connections', 'reflections', 'aiProviders',
+    'scheduledEvents', 'secrets', 'agentEvents', 'cycleMetrics',
+    'cognitiveMetrics', 'topology', 'timeChronicles', 'currentArcChronicle',
+    'currentArcChronicles',
+  ]);
+  const unhandledFamilies = Object.keys(m).filter((k) => !KNOWN_KEYS.has(k));
+
+  const declaredOf = {
+    messages: m.messages?.total,
+    documents: m.documents?.total,
+    attachments: m.attachments?.total,
+    people: m.contacts?.total,
+    clustering_points: m.mindscape?.clusteringPoints?.total,
+    agent_events: m.agentEvents?.total,
+  };
+  const reconciliation = {};
+  let missingTotal = 0, cappedTotal = 0, tableMissingCount = 0;
+  for (const [table, s] of Object.entries(stats)) {
+    const handled = (s.attempted ?? 0) + (s.capped ?? 0) + (s.dedupedByContent ?? 0);
+    const declared = Number.isFinite(declaredOf[table]) ? declaredOf[table] : handled;
+    const landed = (s.inserted || 0) + (s.deduped || 0) + (s.dedupedByContent || 0) + (s.updated || 0);
+    const missing = Math.max(0, declared - landed - (s.failed || 0));
+    reconciliation[table] = {
+      declared, landed, failed: s.failed || 0, missing,
+      ...(s.capped ? { capped: s.capped } : {}),
+      ...(s.tableMissing ? { tableMissing: true } : {}),
+      ...(s.dedupedByContent ? { dedupedByContent: s.dedupedByContent } : {}),
+    };
+    missingTotal += missing; cappedTotal += s.capped || 0;
+    if (s.tableMissing) tableMissingCount++;
+  }
+  // Export-side losses (canonical couldn't fetch these from R2 — they were
+  // never IN the zip; distinct from receiver-side loss but still reported).
+  const exportSide = { attachmentsFetchFailedAtExport: Number(m.attachments?.failed) || 0 };
+  const complete = failed === 0 && missingTotal === 0 && cappedTotal === 0
+    && tableMissingCount === 0 && unhandledFamilies.length === 0;
+
+  // Persist the report INSIDE the vault (encrypted document, deterministic id
+  // keyed by the export's timestamp → a re-import refreshes it in place). The
+  // response is transient; this is the durable migration-audit artifact.
+  const report = {
+    v: 1,
+    importedAt: new Date().toISOString(),
+    exportedAt: m.exportedAt ?? null,
+    exportVersion: m.version ?? null,
+    complete,
+    unhandledFamilies,
+    reconciliation,
+    exportSide,
+    attachmentsDetail: { blobMissingIds: stats.attachments?.blobMissingIds || [], failedIds: stats.attachments?.failedIds || [] },
+    agentFiles: stats.agent_files || null,
     skippedFamilies: [
       'passkeys (WebAuthn is origin-bound — re-enroll on this device)',
       'secrets (values excluded by the exporter — re-add in Settings)',
     ],
+  };
+  const reportPath = `imports/vault-import-report-${String(m.exportedAt || report.importedAt).slice(0, 10)}.json`;
+  try {
+    const reportId = crypto.createHash('sha256').update(`vault-import-report:${m.exportedAt ?? 'unknown'}`).digest('hex').slice(0, 32);
+    await db.rawQuery(
+      'INSERT OR REPLACE INTO documents (id, user_id, path, title, content, created_by, scope) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [reportId, userId, reportPath, 'Vault import report', JSON.stringify(report, null, 2), 'vault-import', 'personal'],
+    );
+  } catch { /* the response still carries the report */ }
+
+  return {
+    imported, skipped, failed,
+    complete,
+    stats,
+    reconciliation,
+    unhandledFamilies,
+    exportSide,
+    reportPath,
+    skippedFamilies: report.skippedFamilies,
     exportVersion: m.version ?? null,
     exportedAt: m.exportedAt ?? null,
   };
