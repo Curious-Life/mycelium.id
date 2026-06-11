@@ -26,7 +26,7 @@ const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? ` — ${d}` : ''}`); };
 
 /** Build a fresh daemon app + capture buffers + a knob for authority/telegram. */
-function makeApp({ authorityAllowed = true, telegram = 'ok', rateLimit = null, voicePipeline = null } = {}) {
+function makeApp({ authorityAllowed = true, telegram = 'ok', rateLimit = null, voicePipeline = null, trustedToken = null } = {}) {
   const audits = [];
   const sends = [];
   const persists = [];
@@ -49,6 +49,7 @@ function makeApp({ authorityAllowed = true, telegram = 'ok', rateLimit = null, v
     voicePipeline,
     getActiveTurn,
     agentId: 'personal-agent',
+    trustedToken,
   });
 
   const app = createDaemonApp({ telegramSendHandler: handler, getActiveTurn });
@@ -235,6 +236,34 @@ const HASH = crypto.createHash('sha256').update(TEXT, 'utf8').digest('hex');
   const port = await listen(server);
   const r = await req(port, 'POST', '/telegram/send', { body: { chatId: OWNER, text: TEXT, voice: true } });
   rec('C18. voice failure is fail-soft (text still 200 delivered)', r.status === 200 && r.json?.delivered === true && sends.length === 1, `status=${r.status}`);
+  await close(server);
+}
+
+// ── H2: `trusted` is a token-gated capability, not a self-assertable body flag ─
+{
+  _resetForTests();
+  const TOKEN = 'a'.repeat(64);
+  const { server, sends, audits } = makeApp({ authorityAllowed: false, trustedToken: TOKEN });
+  const port = await listen(server);
+
+  // body trusted:true WITHOUT the secret header → ignored → full authority gate → 403.
+  let r = await req(port, 'POST', '/telegram/send', { body: { chatId: '999', text: TEXT, trusted: true } });
+  rec('C19. body trusted:true without token is NOT trusted (authority enforced → 403)',
+    r.status === 403 && sends.length === 0, `status=${r.status} sends=${sends.length}`);
+
+  // wrong token → still not trusted → 403.
+  r = await req(port, 'POST', '/telegram/send', { headers: { 'x-egress-trusted': 'b'.repeat(64) }, body: { chatId: '999', text: TEXT, trusted: true } });
+  rec('C20. body trusted:true with WRONG token → still enforced (403)', r.status === 403 && sends.length === 0, `status=${r.status}`);
+
+  // correct token (strict-loopback, no XFF) → trusted → bypasses denied authority → delivered.
+  r = await req(port, 'POST', '/telegram/send', { headers: { 'x-egress-trusted': TOKEN }, body: { chatId: '999', text: `${TEXT} trusted`, trusted: true } });
+  rec('C21. correct token on loopback → trusted bypass delivers despite denied authority',
+    r.status === 200 && r.json?.delivered === true && sends.length === 1, `status=${r.status} sends=${sends.length}`);
+  rec('C21b. trusted send audited provenance=system-template', (audits[audits.length - 1] || {}).provenanceKind === 'system-template');
+
+  // correct token but a forwarded (proxied) request → not strict-loopback → enforced.
+  r = await req(port, 'POST', '/telegram/send', { headers: { 'x-egress-trusted': TOKEN, 'x-forwarded-for': '203.0.113.9' }, body: { chatId: '999', text: `${TEXT} proxied`, trusted: true } });
+  rec('C22. correct token but XFF present (proxied) → not trusted (403)', r.status === 403, `status=${r.status}`);
   await close(server);
 }
 
