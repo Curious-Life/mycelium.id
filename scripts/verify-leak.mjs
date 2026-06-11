@@ -73,6 +73,16 @@ rec('INSERT…SELECT into encrypted table is refused',
 rec('UPDATE encrypted col = NULL is allowed',
   !(await threw(() => db._base.d1Query(`UPDATE messages SET thinking = NULL WHERE id = ?`, ['lk1']))));
 
+// ── SCRUB-2: a secret mistakenly placed in an allowlisted scrubber field is
+// masked by the final redaction pass; tenant fingerprint is non-reversible. ──
+{
+  const { scrubByKind } = await import('../src/crypto/guardians/scrubbers.js');
+  const out = scrubByKind('default', { path: '/x?k=' + 'a'.repeat(64), method: 'GET' });
+  rec('guardian scrubber redacts a hex secret in an allowlisted field', !String(out.path).includes('a'.repeat(64)));
+  const t = scrubByKind('tenant', { actual_tenant: 'tenant-42' }).actual_tenant;
+  rec('guardian tenant fingerprint is HMAC (12 hex, not the raw id)', t.length === 12 && t !== 'tenant-42');
+}
+
 // ── DB-COL: column builders reject a non-identifier (injected) column key ──
 rec('messages.insert refuses an unsafe column identifier',
   await threw(() => db.messages.insert([{ id: 'x', 'evil)--': 1, content: 'y', scope: 'personal' }])));
