@@ -7,6 +7,7 @@
 		id: string;
 		type: 'image' | 'voice' | 'video' | 'file';
 		url: string;
+		playbackUrl?: string; // WAV-transcoded source for OGG voice notes (WKWebView can't play Opus)
 		streamUid: string | null;
 		filename: string | null;
 		fileSize: number | null;
@@ -526,7 +527,7 @@
 						{:else if selectedItem.type === 'voice'}
 							<div class="p-4 bg-[var(--color-elevated)] rounded-lg border border-[var(--color-border)]">
 								<audio controls preload="metadata" class="w-full block">
-									<source src={selectedItem.url} />
+									<source src={selectedItem.playbackUrl || selectedItem.url} />
 								</audio>
 								{#if selectedItem.transcript}
 									<p class="text-sm text-[var(--color-text-secondary)] mt-3 italic leading-relaxed">
