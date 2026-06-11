@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { assertSafeColumns } from './column-guard.js';
 import { buildAgentIdFilter, resolveAgentIds } from '../agent-id-aliases.js';
 
 /**
@@ -56,6 +57,7 @@ export function createMessagesNamespace(deps) {
   return {
     async insert(rows) {
       const arr = Array.isArray(rows) ? rows : [rows];
+      assertSafeColumns(Object.keys(arr[0] || {}), 'messages');
       const placeholders = arr.map(() =>
         `(${Object.keys(arr[0]).map(() => '?').join(', ')})`,
       ).join(', ');
@@ -282,7 +284,7 @@ export function createMessagesNamespace(deps) {
     async insertIgnore(rows) {
       const arr = Array.isArray(rows) ? rows : [rows];
       if (arr.length === 0) return [];
-      const cols = Object.keys(arr[0]);
+      const cols = assertSafeColumns(Object.keys(arr[0]), 'messages');
       const colNames = cols.join(', ');
       const allInserted = [];
       // ROWS_PER_STMT keeps each statement under D1's ~100-param ceiling.

@@ -15,6 +15,7 @@
  */
 
 import { randomBytes, createHash } from 'node:crypto';
+import { assertSafeColumns } from './column-guard.js';
 
 /** A fresh capability epoch for unlisted links (16 bytes hex = 128 bits). */
 function randomNonce() {
@@ -91,6 +92,7 @@ export function createDocumentsNamespace(deps) {
     },
 
     async upsert(doc) {
+      assertSafeColumns(Object.keys(doc || {}), 'documents');
       const cols = Object.keys(doc).join(', ');
       const placeholders = Object.keys(doc).map(() => '?').join(', ');
       // SET clause for ON CONFLICT (exclude conflict-key columns).

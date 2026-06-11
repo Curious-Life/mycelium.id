@@ -73,6 +73,10 @@ rec('INSERT…SELECT into encrypted table is refused',
 rec('UPDATE encrypted col = NULL is allowed',
   !(await threw(() => db._base.d1Query(`UPDATE messages SET thinking = NULL WHERE id = ?`, ['lk1']))));
 
+// ── DB-COL: column builders reject a non-identifier (injected) column key ──
+rec('messages.insert refuses an unsafe column identifier',
+  await threw(() => db.messages.insert([{ id: 'x', 'evil)--': 1, content: 'y', scope: 'personal' }])));
+
 // ── THE scan: raw db + wal + shm bytes must contain NONE of the tokens ──
 const raw = [DB, `${DB}-wal`, `${DB}-shm`].filter(existsSync).map((f) => readFileSync(f).toString('latin1')).join('');
 for (const [col, tok] of Object.entries(T)) {
