@@ -6,6 +6,16 @@
 > as `.claude/memory/` — see GEN-1) until the HIGHs are closed, then archive
 > privately.
 
+> **STATUS — 2026-06-11:** all six HIGH items are **FIXED** on
+> `claude/adversarial-security-review-1dzf3r` (H1 crypto fail-closed, H2 egress
+> `trusted` token-gate, H3 default-deny tool surface, H4 SSRF IPv6 parser, H5
+> BYOK base_url validation, H6 login CSRF + scoped CORS), each with a verify
+> gate. GEN-1/GEN-2 (purge `.claude/memory/` + root `_*.mjs` pre-release) are
+> tracked in `.claude/memory/feedback_pre_release_purge.md` (left in for now per
+> operator decision). MEDIUM/LOW items remain open. H1 additionally surfaced two
+> latent plaintext test-seeds (now bound) — proof the guard works.
+
+
 Scope: full `src/` (~34k LOC), `packages/channel-daemon/`, `pipeline/`,
 `mycelium-managed/`, `portal-app/`, `src-tauri/`, root scripts, CI, git
 hygiene. Method: 7 parallel adversarial domain audits + a hand audit of the
