@@ -214,6 +214,23 @@ const rawCol = (id, col) => {
   captionResult = 'a red square on white';
 }
 
+// A13: every extracted attachment ALSO lands as a Library document (uploads/)
+// with the derived text + a stable attachment reference (All-docs visibility).
+{
+  const { attachmentId } = await uploadAttachment(db, { userId, bytes: Buffer.from('PNG-DOC'), fileName: 'sunset.jpg', fileType: 'image/jpeg' });
+  await call({ attachmentId });
+  const path = `uploads/${attachmentId.slice(0, 8)}-sunset.jpg`;
+  const doc = await db.documents.get(userId, path);
+  rec('A13. attachment → Library document under uploads/ with caption + reference',
+    !!doc && /a red square on white/.test(doc.content || '') && (doc.content || '').includes(attachmentId),
+    `path=${path} found=${!!doc}`);
+
+  // re-extraction upserts the SAME document (no duplicates)
+  await call({ attachmentId });
+  const all = await db.rawQuery('SELECT COUNT(*) c FROM documents WHERE path = ?', [path]);
+  rec('A14. re-extraction upserts in place (one document)', (all?.results?.[0]?.c ?? 0) === 1);
+}
+
 // A8: blob read failure → fail-soft 200 (daemon falls back to placeholder)
 {
   const inserted = await db.attachments.insert({ user_id: userId, file_name: 'gone.png', file_type: 'image/png', file_size: 1, local_path: `${userId}/does-not-exist.enc` });

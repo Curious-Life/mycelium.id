@@ -118,6 +118,30 @@ const alien = await db.attachments.insert({ user_id: 'someone-else', file_name: 
     `survived=${survivedFirst} stillServes=${stillServes} goneAfterLast=${goneAfterLast}`);
 }
 
+// L9: the timeline join — /portal/messages carries msg.attachment {type,url,…}
+// so the stream renders the ACTUAL image instead of the placeholder line.
+{
+  const { portalCompatRouter } = await import('../src/portal-compat.js');
+  const { captureMessage } = await import('../src/ingest/capture.js');
+  const att = await uploadAttachment(db, { userId, bytes: Buffer.from('STREAMIMG'), fileName: 'stream.jpg', fileType: 'image/jpeg' });
+  await db.attachments.update(att.attachmentId, { description: 'a stream test image' });
+  await captureMessage(db, { userId, content: '[Image attached]', source: 'telegram', attachmentId: att.attachmentId, id: 'msg-stream-1' });
+
+  const capp = express();
+  capp.use('/api/v1/portal', portalCompatRouter({ db, userId }));
+  const cs = capp.listen(0, '127.0.0.1');
+  await new Promise((r) => cs.on('listening', r));
+  const j = await fetch(`http://127.0.0.1:${cs.address().port}/api/v1/portal/messages?limit=10`).then((x) => x.json());
+  cs.close();
+  const m = (j.messages || []).find((x) => x.id === 'msg-stream-1');
+  rec('L9. /messages joins attachment {type,url,description} for the stream',
+    m?.attachment?.type === 'image'
+    && m?.attachment?.url === `/api/v1/portal/attachments/${att.attachmentId}/file`
+    && m?.attachment?.description === 'a stream test image'
+    && m?.metadata === undefined,
+    `att=${JSON.stringify(m?.attachment || null).slice(0, 80)}`);
+}
+
 server.close();
 close();
 const passed = ledger.filter(Boolean).length;

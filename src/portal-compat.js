@@ -1,5 +1,6 @@
 import express from 'express';
 import { nudgeEnrichDrainer } from './enrich/drainer.js';
+import { mediaTypeOf } from './portal-attachments.js';
 
 /**
  * portalCompatRouter — a thin compatibility surface that lets the CANONICAL
@@ -119,7 +120,30 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       const limit = !Number.isFinite(raw) || raw <= 0 ? 50 : Math.min(raw, 200);
       const before = typeof req.query.before === 'string' && req.query.before ? req.query.before : undefined;
       const rows = await db.messages.selectTimeline(userId, { limit, before, scope: 'all' });
-      const messages = rows.map(({ metadata, ...m }) => m);
+      // Join attachment metadata so the timeline renders the ACTUAL media
+      // (TimelineView expects msg.attachment {type,url,description,transcript,
+      // filename,fileSize}). One batched user-scoped lookup; decrypted fields
+      // come back through the adapter like any read. Fail-soft: a lookup error
+      // degrades to text-only messages, never an empty feed.
+      let attMap = new Map();
+      try {
+        const ids = [...new Set(rows.map((m) => m.attachment_id).filter(Boolean))];
+        if (ids.length && db.attachments?.getByIds) {
+          const atts = await db.attachments.getByIds(ids, userId);
+          attMap = new Map((atts || []).map((a) => [a.id, {
+            type: mediaTypeOf(a.file_type),
+            url: `/api/v1/portal/attachments/${a.id}/file`,
+            filename: a.file_name || null,
+            fileSize: a.file_size ?? null,
+            description: a.description || null,
+            transcript: a.transcript || null,
+          }]));
+        }
+      } catch { /* text-only fallback */ }
+      const messages = rows.map(({ metadata, ...m }) => ({
+        ...m,
+        ...(m.attachment_id && attMap.has(m.attachment_id) ? { attachment: attMap.get(m.attachment_id) } : {}),
+      }));
       ok(res, { messages });
     } catch { ok(res, { messages: [] }); }
   });
