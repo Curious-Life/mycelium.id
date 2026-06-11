@@ -100,16 +100,39 @@ async function restoreTable(db, table, rows, { userId, overrides = {} }) {
   return out;
 }
 
-/** Read one zip binary entry, double-capped (declared size + actual length). */
-async function readBinaryEntry(zip, name) {
-  const entry = zip.file(name);
-  if (!entry || entry.dir) return null;
+/**
+ * Inflate one zip entry to a Buffer with TWO independent caps so a decompression
+ * bomb can never exhaust memory (M-ZIPBOMB, mirrors import-parsers.js):
+ *   1) fast reject on the DECLARED uncompressed size before inflating; and
+ *   2) a STREAMING byte counter that aborts inflation the instant the output
+ *      passes maxBytes — bounds memory even if the header lies low or a future
+ *      jszip drops the internal size field. Returns null if absent/empty/oversized.
+ */
+export function streamEntryCapped(entry, maxBytes) {
+  if (!entry || entry.dir) return Promise.resolve(null);
   const declared = entry?._data?.uncompressedSize;
-  if (typeof declared === 'number' && declared > MAX_ATTACHMENT_BYTES) return null;
-  try {
-    const buf = await entry.async('nodebuffer');
-    return buf.length > 0 && buf.length <= MAX_ATTACHMENT_BYTES ? buf : null;
-  } catch { return null; }
+  if (typeof declared === 'number' && declared > maxBytes) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let total = 0;
+    const chunks = [];
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    let stream;
+    try { stream = entry.nodeStream('nodebuffer'); } catch { return finish(null); }
+    stream.on('data', (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) { try { stream.destroy(); } catch { /* noop */ } return finish(null); }
+      chunks.push(chunk);
+    });
+    stream.on('end', () => finish(total === 0 ? null : Buffer.concat(chunks)));
+    stream.on('error', () => finish(null));
+    stream.on('close', () => finish(null)); // aborted/destroyed without 'end'
+  });
+}
+
+/** Read one zip binary entry, streaming-capped at MAX_ATTACHMENT_BYTES. */
+async function readBinaryEntry(zip, name) {
+  return streamEntryCapped(zip.file(name), MAX_ATTACHMENT_BYTES);
 }
 
 /** Strip canonical enrichment products so the local pipeline regenerates them. */
@@ -366,11 +389,11 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
     for (const entry of entries) {
       const ext = extname(entry.name).toLowerCase();
       if (!TEXT_EXT.has(ext)) { agentStats.skippedBinary++; continue; }
-      const declared = entry?._data?.uncompressedSize;
-      if (typeof declared === 'number' && declared > MAX_AGENT_FILE_BYTES) { agentStats.skippedOversize++; continue; }
       try {
-        const buf = await entry.async('nodebuffer');
-        if (buf.length === 0 || buf.length > MAX_AGENT_FILE_BYTES) { agentStats.skippedOversize++; continue; }
+        // Streaming-capped inflate (M-ZIPBOMB): aborts past MAX_AGENT_FILE_BYTES
+        // before buffering the whole entry. null = absent/empty/oversized.
+        const buf = await streamEntryCapped(entry, MAX_AGENT_FILE_BYTES);
+        if (!buf) { agentStats.skippedOversize++; continue; }
         agentStats.attempted++;
         const id = crypto.createHash('sha256').update(`vault-import:agents:${entry.name}`).digest('hex').slice(0, 32);
         const r = await restoreTable(db, 'documents', [{

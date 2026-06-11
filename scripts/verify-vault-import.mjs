@@ -19,6 +19,7 @@ import { rmSync, mkdirSync, readFileSync, existsSync, readdirSync } from 'node:f
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import JSZip from 'jszip';
+import { streamEntryCapped } from '../src/ingest/vault-import.js';
 
 const DB = 'data/verify-vault-import.db';
 const KCV = 'data/verify-vault-import-kcv.json';
@@ -306,6 +307,18 @@ async function main() {
     rec('V8 skippedFamilies = exactly passkeys + secrets (everything else crosses)',
       Array.isArray(ir?.skippedFamilies) && ir.skippedFamilies.length === 2
       && ir.skippedFamilies.some((s) => /passkeys/.test(s)) && ir.skippedFamilies.some((s) => /secrets/.test(s)));
+
+    // ── V9: M-ZIPBOMB — streaming-capped binary reader bounds inflated bytes ──
+    {
+      const z = new JSZip();
+      z.file('small.bin', Buffer.alloc(1000, 0x41));
+      z.file('big.bin', Buffer.alloc(50_000, 0x42));
+      const loaded = await JSZip.loadAsync(await z.generateAsync({ type: 'nodebuffer' }));
+      const small = await streamEntryCapped(loaded.file('small.bin'), 10_000);
+      const big = await streamEntryCapped(loaded.file('big.bin'), 10_000); // exceeds cap → refused
+      rec('V9 streamEntryCapped returns the entry under cap, refuses over cap (zip-bomb backstop)',
+        Buffer.isBuffer(small) && small.length === 1000 && big === null);
+    }
 
     raw.close();
   } finally {
