@@ -14,13 +14,20 @@
 > M-FED-RL (rate-limit on socket peer + global backstop), M-REST-BIND (REST
 > non-loopback bind fail-closed), M-ZIPBOMB (streaming backstop in vault-import),
 > M-INJECT-PROMPT (untrusted-data prompt boundary + channel default flipped to
-> `allowlist`). **Still open (documented residuals):** M-SSRF-TOCTOU (IP-pinning
-> undici agent) + M-SSRF-FAILOPEN (fail-closed-on-resolve) — deferred as
-> higher-risk/federation-test-coupled; the H4 parser already closes the concrete
-> bypass. GEN-1/GEN-2 (purge `.claude/memory/` + root `_*.mjs` pre-release)
-> tracked in `.claude/memory/feedback_pre_release_purge.md` (left in per operator
-> decision). LOW items remain open. H1 additionally surfaced two latent plaintext
-> test-seeds (now bound) — proof the guard works.
+> `allowlist`). **Seven LOW also FIXED:** DB-COL (column-identifier guard),
+> DB-LIMIT (LIMIT clamps), LOG-1 (no plaintext in channel logs), LOG-2 (no
+> auth-header bytes), PUB-1 (unlisted-page no-store/no-referrer), SCRUB-1 (HMAC
+> tenant fingerprint), SCRUB-2 (secret-pattern redaction backstop), CSRF-COOKIE
+> (Secure over https). **Still open (documented residuals):** M-SSRF-TOCTOU
+> (IP-pinning undici agent) + M-SSRF-FAILOPEN (fail-closed-on-resolve) and
+> TAURI-CSP — deferred as higher-risk / require real-environment (network, Tauri
+> build) verification, which this container can't do; the H4 parser already
+> closes the concrete SSRF bypass. PORTAL-ERR (generic 500 strings) +
+> MANAGED-1 (turnstile mock footgun, V2 tier) remain low-priority open.
+> GEN-1/GEN-2 (purge `.claude/memory/` + root `_*.mjs` pre-release) tracked in
+> `.claude/memory/feedback_pre_release_purge.md` (left in per operator decision).
+> H1 additionally surfaced two latent plaintext test-seeds (now bound) — proof
+> the guard works.
 
 
 Scope: full `src/` (~34k LOC), `packages/channel-daemon/`, `pipeline/`,
