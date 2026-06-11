@@ -56,15 +56,19 @@ def _deps_ok():
 
 
 def _model_cached(model):
-    """True when the CT2 snapshot is already in the local HF cache."""
+    """True when the CT2 snapshot is FULLY in the local HF cache.
+
+    local_files_only can resolve a snapshot whose model.bin blob is still
+    *.incomplete (live, 2026-06-11: health flashed 'ok' mid-download after a
+    service restart) — verify the weights file actually exists.
+    """
     if not model:
         return False
     try:
-        os.environ["HF_HUB_OFFLINE"] = os.environ.get("HF_HUB_OFFLINE", "")
         from faster_whisper.utils import download_model
         # local_files_only never touches the network — raises when not cached.
-        download_model(model, local_files_only=True)
-        return True
+        path = download_model(model, local_files_only=True)
+        return bool(path) and os.path.exists(os.path.join(str(path), "model.bin"))
     except Exception:
         return False
 
