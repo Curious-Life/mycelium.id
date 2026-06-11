@@ -40,8 +40,11 @@ function tokenMatches(presented, expected) {
 }
 
 function preview(text) {
-  const s = String(text);
-  return `«${s.slice(0, 12).replace(/\s+/g, ' ')}${s.length > 12 ? '…' : ''}»(${s.length})`;
+  // Zero-plaintext logs (LOG-1, CLAUDE.md §1/§8): emit length + a non-reversible
+  // hash, never any of the message content — these lines hit stdout/PM2 logs.
+  const s = String(text ?? '');
+  const h = crypto.createHash('sha256').update(s, 'utf8').digest('hex').slice(0, 6);
+  return `«len=${s.length} #${h}»`;
 }
 
 /**

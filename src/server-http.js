@@ -272,7 +272,7 @@ export async function createHttpApp(opts = {}) {
   async function authenticate(req) {
     const authHeader = req.headers['authorization'];
     if (!authHeader || !/^Bearer\s+/i.test(authHeader)) {
-      console.error('[myc-auth]', req.method, '/mcp — no/non-bearer header:', authHeader ? authHeader.slice(0, 14) : '(none)');
+      console.error('[myc-auth]', req.method, '/mcp — no/non-bearer header:', authHeader ? '(non-bearer)' : '(none)');
       return null;
     }
     // §3b opt-in static bearer (fail-closed: only when MYCELIUM_MCP_BEARER is set,
