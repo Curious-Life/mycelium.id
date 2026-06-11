@@ -59,6 +59,20 @@ await people.upsert(
   new Map([[T.people_name, PID]]),
 ); // → multi-line COALESCE UPDATE (the parser-fix path)
 
+// ── FAIL-CLOSED: a write the encryption parser can't model must THROW, never
+// silently persist plaintext into an encrypted column (H1, 2026-06-11). ──
+const threw = async (fn) => { try { await fn(); return false; } catch { return true; } };
+const LITERAL = 'ZZleakLiteralPlaintext';
+// 1) encrypted column assigned a string LITERAL (not a bound ?) → refuse.
+rec('UPDATE encrypted col = string literal is refused',
+  await threw(() => db._base.d1Query(`UPDATE messages SET content = '${LITERAL}' WHERE id = ?`, ['lk1'])));
+// 2) INSERT…SELECT into an encrypted table (no parseable column→value map) → refuse.
+rec('INSERT…SELECT into encrypted table is refused',
+  await threw(() => db._base.d1Query(`INSERT INTO messages SELECT * FROM messages WHERE id = ?`, ['lk1'])));
+// 3) clearing an encrypted column to NULL stays ALLOWED (no plaintext to encrypt).
+rec('UPDATE encrypted col = NULL is allowed',
+  !(await threw(() => db._base.d1Query(`UPDATE messages SET thinking = NULL WHERE id = ?`, ['lk1']))));
+
 // ── THE scan: raw db + wal + shm bytes must contain NONE of the tokens ──
 const raw = [DB, `${DB}-wal`, `${DB}-shm`].filter(existsSync).map((f) => readFileSync(f).toString('latin1')).join('');
 for (const [col, tok] of Object.entries(T)) {
