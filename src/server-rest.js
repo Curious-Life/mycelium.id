@@ -14,6 +14,7 @@ import { portalMindscapeRouter } from './portal-mindscape.js';
 import { portalMeasurementRouter } from './portal-measurement.js';
 import { portalClaimsRouter } from './portal-claims.js';
 import { portalUploadsRouter } from './portal-uploads.js';
+import { portalAttachmentsRouter } from './portal-attachments.js';
 import { portalProvidersRouter } from './portal-providers.js';
 import { portalHardwareRouter } from './portal-hardware.js';
 import { createOllamaDaemon } from './hardware/ollama-daemon.js';
@@ -21,6 +22,9 @@ import { portalImportRouter } from './portal-import.js';
 import { portalSettingsRouter } from './portal-settings.js';
 import { portalChatRouter } from './portal-chat.js';
 import { portalActivityRouter } from './portal-activity.js';
+import { portalTranscriptionRouter } from './portal-transcription.js';
+import { ensureTranscribeSupervisor } from './transcribe/supervisor.js';
+import { detectHardware } from './hardware/detect.js';
 import { portalChannelsRouter } from './portal-channels.js';
 import { portalConnectorsRouter } from './portal-connectors.js';
 import { registerBuiltinAdapters, createConnectorRunner, startConnectorScheduler } from './connectors/index.js';
@@ -143,7 +147,16 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
     db, userId,
     authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
   }));
+  // Voice transcription (dedicated Whisper) — status + opt-in model download.
+  v.use('/api/v1/portal', portalTranscriptionRouter({
+    db, userId,
+    authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
+    detectHardware,
+  }));
   v.use('/api/v1/portal', portalUploadsRouter({ db, userId, enqueueEnrichment }));
+  // Media library (the portal's /media view): list / preview / edit / delete
+  // attachments — channel media + portal uploads. Same auth gate as uploads.
+  v.use('/api/v1/portal', portalAttachmentsRouter({ db, userId }));
   v.use('/api/v1/portal', portalProvidersRouter({ db, userId }));
   // One lazy Ollama daemon controller, shared by the hardware routes; stopped in
   // closeHandle. dataDir = where we download the runtime + store its models (app-
@@ -329,12 +342,20 @@ export async function startRestServer({
         // only over loopback (vault-client + /internal/mcp). Reaped via the Rust
         // shell's process-group kill on app exit regardless.
         channelSup = startChannelSupervisor({ home: process.cwd(), db, userId: bootUserId, restPort: port });
+        // Re-attach the Whisper transcription service when the user opted in
+        // earlier (users.settings.transcribeModel survives restarts; ensure is
+        // a no-op without a model — no idle python for users who never opted in).
+        let transcribeSup = null;
+        db.users.getSettings(bootUserId)
+          .then((s) => { if (s?.transcribeModel) transcribeSup = ensureTranscribeSupervisor({ model: s.transcribeModel }); })
+          .catch(() => { /* optional */ });
         closeHandle = () => {
           try { connectorScheduler?.stop(); } catch { /* */ }
           try { drainer.stop(); } catch { /* */ }
           try { claimsHeartbeat.stop(); } catch { /* */ }
           try { embedSup.stop(); } catch { /* */ }
           try { channelSup?.stop(); } catch { /* */ }
+          try { transcribeSup?.stop(); } catch { /* */ }
           try { hwOllamaDaemon.stop(); } catch { /* */ }
           try { close(); } catch { /* */ }
         };

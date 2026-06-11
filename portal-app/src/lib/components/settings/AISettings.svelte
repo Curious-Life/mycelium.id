@@ -103,7 +103,40 @@
 		try { const r = await api('/portal/providers/routing', { method: 'PUT', body: JSON.stringify({ cascade: v }) }); if (r.ok) cascade = (await r.json()).cascade === true; }
 		catch { /* leave */ } finally { cascadeBusy = false; }
 	}
-	onMount(() => { load(); loadRouting(); });
+	// ── Voice transcription (dedicated Whisper — fast on-device STT) ──
+	type WhisperCat = { model: string; label: string; sizeMB: number; blurb: string; recommended?: boolean };
+	let trans = $state<{ health: any; model: string | null; catalog: WhisperCat[] } | null>(null);
+	let transErr = $state<string | null>(null);
+	let transBusy = $state(false);
+	let transPoll: ReturnType<typeof setInterval> | null = null;
+
+	async function loadTranscription() {
+		try {
+			const r = await api('/portal/transcription/status');
+			if (r.ok) { trans = await r.json(); maybePollTranscription(); }
+		} catch { /* section shows unavailable */ }
+	}
+	function maybePollTranscription() {
+		const st = trans?.health?.status;
+		const busy = st === 'downloading' || st === 'loading' || st === 'starting';
+		if (busy && !transPoll) transPoll = setInterval(loadTranscription, 2000);
+		if (!busy && transPoll) { clearInterval(transPoll); transPoll = null; }
+	}
+	async function downloadWhisper(m: string) {
+		transBusy = true; transErr = null;
+		try {
+			const r = await api('/portal/transcription/download', { method: 'POST', body: JSON.stringify({ model: m }) });
+			const j = await r.json().catch(() => null);
+			if (!r.ok || !j?.ok) throw new Error(j?.error || 'download failed');
+			await loadTranscription();
+		} catch (e: any) { transErr = e?.message || 'download failed'; }
+		finally { transBusy = false; }
+	}
+
+	onMount(() => {
+		load(); loadRouting(); loadTranscription();
+		return () => { if (transPoll) clearInterval(transPoll); };
+	});
 
 	function choose(p: Preset) { chosen = p; apiKey = ''; model = p.defaultModel || ''; saveErr = null; }
 	const needsKey = $derived(chosen ? chosen.jurisdiction !== 'local' : false);
@@ -316,6 +349,52 @@
 				<span class="routing-sub">Try providers in order — EU-sovereign → frontier → on-device — falling back if one is down. Sensitive requests always skip US.</span>
 			</span>
 		</button>
+
+		<!-- ── Voice transcription (dedicated Whisper) ── -->
+		<div class="lane">
+			<div class="lane-head"><span class="lane-title">Voice transcription</span><span class="lane-tag j-green">private · on your device</span></div>
+			{#if !trans}
+				<div class="muted">Transcription status unavailable.</div>
+			{:else}
+				{#if trans.health?.status === 'ok' && trans.model}
+					<div class="trans-status">✓ Voice notes are transcribed on-device by <span class="mono">{trans.model}</span>.</div>
+				{:else if trans.health?.status === 'downloading'}
+					<div class="trans-progress">
+						<span class="muted pulse">Downloading {trans.model}… {trans.health?.progress?.pct ?? 0}%</span>
+						<div class="trans-bar"><div class="trans-fill" style={`width:${trans.health?.progress?.pct ?? 0}%`}></div></div>
+					</div>
+				{:else if trans.health?.status === 'loading' || trans.health?.status === 'starting'}
+					<div class="muted pulse">{trans.health?.message || 'Preparing transcription…'}</div>
+				{:else if trans.health?.status === 'deps_missing'}
+					<div class="note-amber">{trans.health?.message}</div>
+				{:else if trans.health?.status === 'error'}
+					<div class="err-box">{trans.health?.detail || 'The transcription model failed.'}</div>
+				{:else}
+					<div class="muted">Voice notes currently lean on your chat model — slow and only when it understands audio. Download a dedicated Whisper model once for fast, accurate transcripts that never leave your device.</div>
+				{/if}
+				{#if trans.health?.status !== 'downloading'}
+					<div class="trans-cards">
+						{#each trans.catalog as c (c.model)}
+							<div class="trans-card">
+								<div class="trans-card-head">
+									<span class="trans-name">{c.label}</span>
+									{#if c.recommended}<span class="chip j-green">★ recommended</span>{/if}
+								</div>
+								<span class="muted-xs">{c.blurb} · ~{(c.sizeMB / 1000).toFixed(1)} GB</span>
+								{#if trans.model === c.model && trans.health?.status === 'ok'}
+									<span class="trans-inuse">✓ in use</span>
+								{:else}
+									<button class="ghost-btn" disabled={transBusy} onclick={() => downloadWhisper(c.model)}>
+										{trans.health?.status === 'ok' ? 'Switch to this model' : 'Download & use'}
+									</button>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				{/if}
+				{#if transErr}<div class="err-box">{transErr}</div>{/if}
+			{/if}
+		</div>
 	{/if}
 </div>
 
@@ -410,6 +489,17 @@
 	.toggle.on .knob { left: 18px; }
 	.routing-title { display: block; font-size: 0.8rem; font-weight: 500; color: var(--color-text-primary); }
 	.routing-sub { display: block; font-size: 0.68rem; color: var(--color-text-tertiary); line-height: 1.45; margin-top: 2px; }
+
+	/* Voice transcription */
+	.trans-status { font-size: 0.8rem; color: var(--color-text-primary); }
+	.trans-progress { display: flex; flex-direction: column; gap: 0.4rem; }
+	.trans-bar { height: 5px; border-radius: 3px; background: var(--glass-input-bg, rgba(255,255,255,0.06)); overflow: hidden; }
+	.trans-fill { height: 100%; border-radius: 3px; background: var(--color-accent-aurum, #e5b84c); transition: width 0.5s ease; }
+	.trans-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.6rem; }
+	.trans-card { display: flex; flex-direction: column; gap: 0.4rem; padding: 0.75rem 0.9rem; border-radius: 12px; border: 1px solid var(--glass-border, rgba(255,255,255,0.07)); background: var(--glass-card-bg, rgba(255,255,255,0.025)); }
+	.trans-card-head { display: flex; align-items: center; gap: 0.5rem; justify-content: space-between; }
+	.trans-name { font-size: 0.8rem; font-weight: 500; color: var(--color-text-primary); }
+	.trans-inuse { font-size: 0.74rem; color: var(--color-accent-aurum, #e5b84c); }
 
 	@keyframes pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
 </style>

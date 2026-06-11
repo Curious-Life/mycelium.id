@@ -13,6 +13,7 @@
 
 import { DEFAULT_OLLAMA_URL } from "../inference/local.js";
 import { pickModelWithCapability } from "./model-caps.js";
+import { getTranscriberHealth, transcribeServiceUrl } from "../transcribe/supervisor.js";
 
 const TRANSCRIBE_PROMPT =
   "Transcribe this audio exactly, word for word. Output ONLY the transcription " +
@@ -75,6 +76,17 @@ export async function transcribeAudio({
     const wav = await oggOpusToWav(buf);
     if (wav) { buf = wav; format = "wav"; }
   }
+
+  // PREFERENCE 1 — the dedicated Whisper service, when the user set it up
+  // (docs/WHISPER-TRANSCRIPTION-DESIGN-2026-06-11.md). ~100x faster than the
+  // LLM path (1.8s vs >180s live, 2026-06-11) and independent of the chat
+  // model. Only WAV reaches it (Telegram voice is transcoded above); other
+  // formats fall through to the LLM path which decodes them natively.
+  if (format === "wav" && getTranscriberHealth().status === "ok") {
+    const text = await transcribeViaWhisper({ buf, fetch: fetchImpl });
+    if (text) return text;
+    // fall through — whisper hiccup must never lose a voice note
+  }
   const b64 = buf.toString("base64");
 
   const chosen = model
@@ -113,4 +125,31 @@ export async function transcribeAudio({
   }
 }
 
+/**
+ * POST the WAV to the local Whisper service. Same NEVER-throw contract:
+ * any failure → null → the caller's LLM fallback runs.
+ * @param {{buf: Buffer, fetch: typeof fetch, timeoutMs?: number}} a
+ */
+async function transcribeViaWhisper({ buf, fetch: fetchImpl, timeoutMs = Number(process.env.MYCELIUM_WHISPER_TIMEOUT_MS) || 120000 }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(`${transcribeServiceUrl()}/transcribe`, {
+      method: "POST",
+      headers: { "Content-Type": "audio/wav" },
+      body: buf,
+      signal: controller.signal,
+    });
+    if (!res || !res.ok) return null;
+    const data = await res.json().catch(() => null);
+    const text = String(data?.text || "").trim();
+    return text.length ? text.slice(0, 8000) : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export default transcribeAudio;
+
