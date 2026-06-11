@@ -10,10 +10,17 @@
 > `claude/adversarial-security-review-1dzf3r` (H1 crypto fail-closed, H2 egress
 > `trusted` token-gate, H3 default-deny tool surface, H4 SSRF IPv6 parser, H5
 > BYOK base_url validation, H6 login CSRF + scoped CORS), each with a verify
-> gate. GEN-1/GEN-2 (purge `.claude/memory/` + root `_*.mjs` pre-release) are
-> tracked in `.claude/memory/feedback_pre_release_purge.md` (left in for now per
-> operator decision). MEDIUM/LOW items remain open. H1 additionally surfaced two
-> latent plaintext test-seeds (now bound) — proof the guard works.
+> gate. **Five MEDIUM also FIXED:** M-XSS (intel page → marked+DOMPurify),
+> M-FED-RL (rate-limit on socket peer + global backstop), M-REST-BIND (REST
+> non-loopback bind fail-closed), M-ZIPBOMB (streaming backstop in vault-import),
+> M-INJECT-PROMPT (untrusted-data prompt boundary + channel default flipped to
+> `allowlist`). **Still open (documented residuals):** M-SSRF-TOCTOU (IP-pinning
+> undici agent) + M-SSRF-FAILOPEN (fail-closed-on-resolve) — deferred as
+> higher-risk/federation-test-coupled; the H4 parser already closes the concrete
+> bypass. GEN-1/GEN-2 (purge `.claude/memory/` + root `_*.mjs` pre-release)
+> tracked in `.claude/memory/feedback_pre_release_purge.md` (left in per operator
+> decision). LOW items remain open. H1 additionally surfaced two latent plaintext
+> test-seeds (now bound) — proof the guard works.
 
 
 Scope: full `src/` (~34k LOC), `packages/channel-daemon/`, `pipeline/`,
