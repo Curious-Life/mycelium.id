@@ -84,6 +84,24 @@ function fakeOllama(models, { tagsFail = false } = {}) {
   rec('C7. result cached (no re-probe on second call)', m === 'gemma4:12b' && calls.tags === tagsAfterFirst, `tagsCalls=${calls.tags}`);
 }
 
+// C7b: a NULL result is NOT cached — Ollama busy during the probe must not
+// permanently disable vision/audio (2026-06-11 live bug: audio probe ran while
+// a vision call hogged Ollama, cached null, every transcription failed forever).
+{
+  _resetModelCapsCache();
+  let fail = true;
+  const fetchImpl = async (url, init) => {
+    if (fail) throw new Error('busy');
+    if (String(url).includes('/api/tags')) return { ok: true, json: async () => ({ models: [{ name: 'gemma4:12b' }] }) };
+    const { model } = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ capabilities: model === 'gemma4:12b' ? ['completion', 'audio'] : [] }) };
+  };
+  const first = await pickModelWithCapability('audio', { fetch: fetchImpl });
+  fail = false; // Ollama recovers
+  const second = await pickModelWithCapability('audio', { fetch: fetchImpl });
+  rec('C7b. null NOT cached — probe recovers when Ollama does', first === null && second === 'gemma4:12b', `first=${first} second=${second}`);
+}
+
 // C8: INTEGRATION — pickVisionModel finds a gemma4-class model via capabilities
 // even though the legacy name list cannot match it (the motivating bug).
 {

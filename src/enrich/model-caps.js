@@ -85,7 +85,12 @@ export async function pickModelWithCapability(capability, {
     return null;
   })();
 
-  cache.set(key, pick);
+  // Cache POSITIVE picks only. A null here usually means Ollama was busy/down
+  // during the probe (2.5s timeouts) — caching it would permanently disable
+  // vision/audio for the process lifetime (live-bit 2026-06-11: the audio probe
+  // ran while a vision call hogged Ollama, cached null, and every transcription
+  // thereafter failed instantly).
+  if (pick) cache.set(key, pick);
   return pick;
 }
 
