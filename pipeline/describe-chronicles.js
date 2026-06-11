@@ -166,6 +166,7 @@ export async function describeChronicles({ db, userId, infer, version = CHRONICL
     try {
       await db.territoryDocs.upsertDescription(userId, t.territory_id, desc, version, typeof raw === 'string' ? raw : null, modelLabel);
       described += 1;
+      await recordNarrative(db, userId, 'territory', t.territory_id, desc, version, modelLabel);
     } catch (e) {
       failed += 1; log(`chronicle write failed for territory ${t.territory_id}: ${e.message}`);
     }
@@ -192,12 +193,40 @@ export async function describeChronicles({ db, userId, infer, version = CHRONICL
     try {
       await db.mindscape.upsertRealmDescription(userId, rm.realm_id, desc, version, modelLabel);
       described += 1;
+      await recordNarrative(db, userId, 'realm', rm.realm_id, desc, version, modelLabel);
     } catch (e) {
       failed += 1; log(`chronicle write failed for realm ${rm.realm_id}: ${e.message}`);
     }
     try { await onProgress?.(described + skipped + failed, total); } catch { /* */ }
   }
   return { total, described, skipped, failed };
+}
+
+// Narrative fields worth versioning (the prose). Bookkeeping (description_version,
+// point_count_at_description, last_described_at) is deliberately excluded so a
+// drift-only re-narration with identical prose does not append a near-duplicate.
+const PROSE_FIELDS = [
+  'name', 'essence', 'archetype_type', 'archetype_character',
+  'story_birth', 'story_arc', 'story_current_chapter', 'story_peak_moments',
+  'signature_patterns', 'uncertainty_open_questions', 'uncertainty_edges',
+  'agent_expertise', 'agent_curious_about', 'agent_can_help_with', 'agent_would_consult',
+  'top_entities',
+];
+function prose(desc) {
+  const o = {};
+  for (const f of PROSE_FIELDS) if (desc[f] != null) o[f] = desc[f];
+  return o;
+}
+/** Append a narrative version to the entity change-log (best-effort: a history
+ * miss must never fail narration). Dedup-vs-latest lives in db.history. */
+async function recordNarrative(db, userId, entityKind, entityId, desc, version, modelLabel) {
+  if (!db.history?.recordSnapshot) return;
+  try {
+    await db.history.recordSnapshot(userId, {
+      entityKind, entityId, snapshotKind: 'narrative', stage: 'chronicle',
+      payload: prose(desc), entityVersion: version, model: modelLabel,
+    });
+  } catch { /* history is best-effort */ }
 }
 
 /**

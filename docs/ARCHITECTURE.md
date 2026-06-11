@@ -181,6 +181,19 @@ claim level) · personaClaims MCP tool · portal /claims (ClaimsView + TimeSerie
   `person_claims` + `person_claim_snapshots` for Persona-Claims). Applied in
   lexical order every boot by `src/db/migrate.js` (idempotent).
 - **Blobs:** uploaded files encrypted to a local blob store (`src/ingest/blob-store.js`).
+- **Entity change-log** (`entity_snapshots`, migration 0013, `src/db/history.js`,
+  design `docs/ENTITY-HISTORY-DESIGN-2026-06-11.md`, gate `verify:history`):
+  append-only version history of each territory/realm's **narrative**
+  (name/essence/chronicle — hooked at the describe write sites) and **dynamics**
+  (energy/coherence/velocity/counts — `pipeline/snapshot-entities.js`, every Generate).
+  Describe otherwise upserts in place, losing the past. `db.history.recordSnapshot`
+  dedups vs the latest version (decrypt-and-compare — no plaintext content hash) and
+  appends `seq+1` only on real change; rows persist after the entity dissolves/prunes.
+  The single `payload` JSON blob is the only encrypted column. Structural/metric
+  change-over-time is *already* logged elsewhere (`cluster_events`, `territory_lineage`,
+  `*_snapshots`, `person_claim_snapshots`); the unified per-entity timeline is a
+  deferred UNION-at-read, not a copy (avoids a second source of truth). Read surfaces
+  (portal panel, MCP tool) deferred — storage only for now.
 - **Realms lifecycle:** territories dissolve (`dissolved_at`, lineage preserved);
   realms have no lineage, so re-cluster **prunes** realm rows with no live
   `clustering_points` (`pipeline/cluster.py`) and the Describe pass maintains

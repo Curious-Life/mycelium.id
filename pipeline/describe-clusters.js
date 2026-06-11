@@ -47,6 +47,20 @@ function inputSignature(sampleIds, pointCount) {
     .digest('hex');
 }
 
+/** Append the first-pass name/essence to the entity change-log (best-effort —
+ * a history miss must never fail describe). Only called on a real narration;
+ * dedup-vs-latest in db.history drops no-op repeats. The fuller chronicle prose
+ * lands as a later version via describe-chronicles. */
+async function recordName(db, entityKind, entityId, name, essence) {
+  if (!db.history?.recordSnapshot) return;
+  try {
+    await db.history.recordSnapshot(USER_ID, {
+      entityKind, entityId, snapshotKind: 'narrative', stage: 'name',
+      payload: { name, essence },
+    });
+  } catch { /* history is best-effort */ }
+}
+
 if (!USER_MASTER || !SYSTEM_KEY) {
   console.error('Missing: USER_MASTER and SYSTEM_KEY (64-char hex each)');
   process.exit(1);
@@ -177,6 +191,7 @@ async function run() {
            describe_input_hash = excluded.describe_input_hash, updated_at = datetime('now')`,
         [USER_ID, realm_id, name, essence, counts.tc ?? 0, counts.mc ?? 0, described ? sig : null],
       ).catch(err => console.error(`[describe] realm ${realm_id} write failed:`, err.message));
+      if (described) await recordName(db, 'realm', realm_id, name, essence);
       await tick(total);
     }
 
@@ -225,6 +240,7 @@ async function run() {
            realm_id = excluded.realm_id, describe_input_hash = excluded.describe_input_hash, updated_at = datetime('now')`,
         [USER_ID, territory_id, realm_id, name, essence, tc.mc ?? samples.length, described ? sig : null],
       ).catch(err => console.error(`[describe] territory ${territory_id} write failed:`, err.message));
+      if (described) await recordName(db, 'territory', territory_id, name, essence);
       await tick(total);
     }
 

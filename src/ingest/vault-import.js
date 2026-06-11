@@ -235,6 +235,10 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   await run('territory_cofire', m.topology?.cofiring);
   await run('territory_neighbors', m.topology?.territoryNeighbors);
   await run('realm_neighbors', m.topology?.realmNeighbors);
+  // Entity change-log (V1-native; absent from canonical exports → no-op there).
+  // Present so a V1→V1 export/import round-trips the history; restoreTable
+  // re-encrypts the payload blob via the adapter like every other table.
+  await run('entity_snapshots', m.history?.entitySnapshots);
 
   // v4 historical metrics (v3 bundles simply lack these keys → no-op).
   await run('cognitive_metrics_window', m.cognitiveMetrics?.window);

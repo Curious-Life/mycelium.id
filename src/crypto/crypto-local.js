@@ -378,6 +378,14 @@ const ENCRYPTED_FIELDS = {
     'activity_timeline',
   ],
 
+  // entity_snapshots — append-only history of territory/realm narrative + dynamics
+  // (ENTITY-HISTORY-DESIGN-2026-06-11). The single `payload` JSON blob holds the
+  // prose (name/essence/story_*/…) or the SEC-3 scalars — all narrative or
+  // cognitive signal, so the whole blob is encrypted (uniform, future-proof to new
+  // fields). Structural columns (entity_kind/id, seq, cluster_version, model label,
+  // timestamps) stay plaintext — keys/labels the read path needs, not content.
+  entity_snapshots: ['payload'],
+
   // Semantic themes
   semantic_themes: [
     'label', 'keywords', 'description',
