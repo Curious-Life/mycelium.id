@@ -92,6 +92,10 @@ export async function transcribeAudio({
       body: JSON.stringify({
         model: chosen,
         stream: false,
+        // Always 127.0.0.1 Ollama here (capability-picked local model), which
+        // accepts `think` on /v1/chat/completions. Thinking adds minutes of
+        // hidden reasoning before a verbatim transcription — disable it.
+        think: false,
         messages: [{
           role: "user",
           content: [

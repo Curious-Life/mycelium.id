@@ -36,6 +36,7 @@ export async function localInfer({
   timeoutMs = 60000,
   numCtx,
   format,
+  think,
 } = {}) {
   if (typeof fetch !== "function") {
     throw new InferenceError("localInfer: no fetch implementation (Node >= 18 or pass opts.fetch)", { backend: "local" });
@@ -59,6 +60,11 @@ export async function localInfer({
   // no prose preamble, no ``` fences, no half-formatted replies. Essential for
   // structured callers (claim discovery) where a non-JSON reply = a lost run.
   if (format) body.format = format;
+  // think:false matters for THINKING models (gemma4-class): on /api/generate
+  // their hidden reasoning consumes the whole num_predict budget and `response`
+  // comes back EMPTY (done_reason "length") — live-bit 2026-06-11. Callers that
+  // want a direct answer (captioning, naming) must disable it explicitly.
+  if (think !== undefined) body.think = think;
   if (Array.isArray(images) && images.length) body.images = images;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
