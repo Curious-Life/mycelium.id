@@ -172,6 +172,48 @@ const rawCol = (id, col) => {
     `ctx="${(r.body?.contextText || '').slice(0, 40)}"`);
 }
 
+// A11: COLD-START RETRY — extractor null on attempt 1 (cold timeout), value on
+// attempt 2 (warm) → context returned + stored. The dominant live failure mode.
+{
+  let calls = 0;
+  captionResult = null; // base fake unused here; use a stateful one via the seam
+  const statefulApp = express();
+  statefulApp.use(internalRouter({ db, userId, enrich: {
+    describeImage: async () => (++calls >= 2 ? 'warm caption' : null),
+    transcribeAudio: async () => null,
+  } }));
+  const s2 = statefulApp.listen(0, '127.0.0.1');
+  await new Promise((r) => s2.on('listening', r));
+  const call2 = (body) => fetch(`http://127.0.0.1:${s2.address().port}/api/v1/internal/attachment-context`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
+
+  const { attachmentId } = await uploadAttachment(db, { userId, bytes: Buffer.from('PNG3'), fileName: 'p3.png', fileType: 'image/png' });
+  const r = await call2({ attachmentId });
+  const raw = rawCol(attachmentId, 'description');
+  rec('A11. cold-start retry: null then value → returned + stored',
+    calls === 2 && r.body?.contextText === 'warm caption' && isEncrypted(raw), `calls=${calls} ctx="${r.body?.contextText}"`);
+
+  // A12: permanently-null extractor → exactly 2 attempts, honest null
+  calls = 0;
+  const statefulApp2 = express();
+  let calls2 = 0;
+  statefulApp2.use(internalRouter({ db, userId, enrich: {
+    describeImage: async () => { calls2++; return null; },
+    transcribeAudio: async () => null,
+  } }));
+  const s3 = statefulApp2.listen(0, '127.0.0.1');
+  await new Promise((r) => s3.on('listening', r));
+  const { attachmentId: a2 } = await uploadAttachment(db, { userId, bytes: Buffer.from('PNG4'), fileName: 'p4.png', fileType: 'image/png' });
+  const r2 = await fetch(`http://127.0.0.1:${s3.address().port}/api/v1/internal/attachment-context`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ attachmentId: a2 }),
+  }).then(async (x) => ({ status: x.status, body: await x.json().catch(() => null) }));
+  rec('A12. both attempts null → exactly 2 calls, ok:true contextText:null',
+    calls2 === 2 && r2.status === 200 && r2.body?.contextText === null, `calls=${calls2}`);
+  s2.close(); s3.close();
+  captionResult = 'a red square on white';
+}
+
 // A8: blob read failure → fail-soft 200 (daemon falls back to placeholder)
 {
   const inserted = await db.attachments.insert({ user_id: userId, file_name: 'gone.png', file_type: 'image/png', file_size: 1, local_path: `${userId}/does-not-exist.enc` });

@@ -333,14 +333,30 @@ export function internalRouter({ db, userId, enrich = {} }) {
       const bytes = await getBlob(row.local_path);
       let contextText = null;
 
+      // Model extraction gets ONE retry: the dominant live failure is the
+      // first call dying on a cold model (load + ingest blow the budget)
+      // while the very next call — model now warm — succeeds in seconds.
+      // Both attempts stay fail-soft; attempt count is logged, content never.
+      const withRetry = async (label, fn) => {
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          const out = await fn();
+          if (out) {
+            if (attempt > 1) console.log(`[internal-router] attachment-context ${label} succeeded on retry`);
+            return out;
+          }
+          if (attempt === 1) console.log(`[internal-router] attachment-context ${label} empty on attempt 1 — retrying once`);
+        }
+        return null;
+      };
+
       if (kind === 'image') {
         // Explicit budget: describeImage defaults to 30s (portal-upload UX),
         // but a COLD 12B vision call takes ~110s live — the channel path is
         // async (placeholder degrades gracefully) so it can afford to wait.
-        contextText = await describeImage({ bytes, timeoutMs: Number(process.env.MYCELIUM_VISION_TIMEOUT_MS) || 240_000 });
+        contextText = await withRetry('vision', () => describeImage({ bytes, timeoutMs: Number(process.env.MYCELIUM_VISION_TIMEOUT_MS) || 240_000 }));
         if (contextText) await db.attachments.update(attachmentId, { description: contextText });
       } else if (kind === 'audio' || kind === 'voice') {
-        contextText = await transcribeAudio({ bytes, mimeType: fileType, fileName });
+        contextText = await withRetry('transcribe', () => transcribeAudio({ bytes, mimeType: fileType, fileName }));
         if (contextText) await db.attachments.update(attachmentId, { transcript: contextText });
       } else if (kind === 'text') {
         const text = bytes.toString('utf8').replace(/\u0000/g, '').trim();
