@@ -13,7 +13,7 @@ const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAI
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── Part 1: reply tool quote semantics (mock agent-server fetch) ──
-const TURN = { source: 'telegram', channelKind: 'telegram-dm', channelId: '777', inboundMessageId: '4242' };
+const TURN = { source: 'telegram', channelKind: 'telegram', channelId: '777', inboundMessageId: '4242' };
 let lastSendBody = null;
 const fetchMock = async (url, init) => {
   if (String(url).endsWith('/internal/inbound-context/current')) {
@@ -40,7 +40,7 @@ rec('R3. quote:false stays plain',
 let pings = [];
 const presence = createTypingPresence({ sendChatAction: (chatId) => { pings.push(String(chatId)); }, intervalMs: 25 });
 
-const stopDm = presence.start({ channelKind: 'telegram-dm', channelId: '777' });
+const stopDm = presence.start({ channelKind: 'telegram', channelId: '777' });
 rec('P1. DM turn starts typing immediately', typeof stopDm === 'function' && pings.length === 1, `pings=${pings.length}`);
 await sleep(70);
 const midCount = pings.length;
@@ -52,12 +52,17 @@ rec('P4. group turn gets NO typing (no triage step yet — by design)',
   presence.start({ channelKind: 'telegram-group', channelId: '-100' }) === null && pings.length === midCount);
 rec('P5. discord turn gets NO typing',
   presence.start({ channelKind: 'discord-guild', channelId: '555' }) === null);
+// Regression guard: normalize.js emits 'telegram' for a DM — never 'telegram-dm'.
+// This gate used to FEED 'telegram-dm', which is why the dead-gate bug shipped
+// green. Real DMs ('telegram') MUST type; the fictional value MUST NOT.
+rec("P5b. fictional 'telegram-dm' kind gets NO typing (the value the pipeline never produces)",
+  presence.start({ channelKind: 'telegram-dm', channelId: '777' }) === null);
 
 // ── Part 3: the lane stops presence even when the turn THROWS ──
 pings = [];
 const failingRuntime = { label: 'boom', runTurn: async () => { await sleep(40); throw new Error('turn exploded'); } };
 const lane = createLane({ runtime: failingRuntime, presence, turnTimeoutMs: 5_000, logPrefix: 'verify-presence' });
-lane.runTurn({ source: 'telegram', channelKind: 'telegram-dm', channelId: '777', inboundMessageId: '1' }, { content: 'hi' });
+lane.runTurn({ source: 'telegram', channelKind: 'telegram', channelId: '777', inboundMessageId: '1' }, { content: 'hi' });
 await lane.idle();
 const afterError = pings.length;
 await sleep(70);
@@ -82,18 +87,18 @@ const inbound = createInboundHandler({
   },
   presence,
 });
-await inbound({ channelKind: 'telegram-dm', chatId: '42', fromId: '42', messageId: '9', source: 'telegram', content: '', media: { kind: 'photo' } });
+await inbound({ channelKind: 'telegram', chatId: '42', fromId: '42', messageId: '9', source: 'telegram', content: '', media: { kind: 'photo' } });
 const afterInbound = pings.length;
 await sleep(60);
 rec('P7. media inbound: typing during vision/transcription, stopped after enqueue',
   typedDuringMedia && pings.length === afterInbound, `duringMedia=${typedDuringMedia} pings=${pings.length}/${afterInbound}`);
 
 pings = [];
-await inbound({ channelKind: 'telegram-dm', chatId: '42', fromId: '42', messageId: '10', source: 'telegram', content: 'plain text message' });
+await inbound({ channelKind: 'telegram', chatId: '42', fromId: '42', messageId: '10', source: 'telegram', content: 'plain text message' });
 rec('P8. text inbound also starts pre-turn typing', pings.length >= 1, `pings=${pings.length}`);
 
 pings = [];
-await inbound({ channelKind: 'telegram-dm', chatId: '99', fromId: '99', messageId: '11', source: 'telegram', content: 'not the owner' });
+await inbound({ channelKind: 'telegram', chatId: '99', fromId: '99', messageId: '11', source: 'telegram', content: 'not the owner' });
 rec('P9. unauthorized inbound never types (auth precedes presence)', pings.length === 0, `pings=${pings.length}`);
 
 const okAll = ledger.every(Boolean);

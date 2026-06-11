@@ -53,10 +53,13 @@ export function createAttachmentsNamespace(deps) {
       return firstRow(result);
     },
 
-    async getById(id) {
+    async getById(id, userId) {
+      // user_id in the WHERE is the SQL-layer enforcement; callers still
+      // re-check row.user_id (defense in depth). Optional for backward compat,
+      // but every caller on user data should pass it (mirrors getByIds).
       const result = await d1Query(
-        `SELECT id, user_id, r2_key, local_path, stream_uid, file_name, file_type, file_size, transcript, description, metadata, created_at FROM attachments WHERE id = ?`,
-        [id],
+        `SELECT id, user_id, r2_key, local_path, stream_uid, file_name, file_type, file_size, transcript, description, metadata, created_at FROM attachments WHERE id = ?${userId ? ' AND user_id = ?' : ''}`,
+        userId ? [id, userId] : [id],
       );
       return firstRow(result);
     },

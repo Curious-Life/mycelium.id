@@ -29,7 +29,11 @@ export function createTypingPresence({ sendChatAction, intervalMs = 4000 }) {
   return {
     /** Start typing for this turn if it qualifies. Returns stop() or null. */
     start(turnCtx) {
-      if (!turnCtx || turnCtx.channelKind !== 'telegram-dm' || turnCtx.channelId == null) return null;
+      // DMs only. normalize.js emits 'telegram' for a DM and 'telegram-group'
+      // for groups (there is no 'telegram-dm' channelKind) — gating on the
+      // non-existent value made this whole feature inert. Groups are excluded
+      // by design (no pre-turn triage; typing-then-NO_REPLY telegraphs nothing).
+      if (!turnCtx || turnCtx.channelKind !== 'telegram' || turnCtx.channelId == null) return null;
       const chatId = turnCtx.channelId;
       try { sendChatAction(chatId); } catch { /* fire-and-forget */ }
       const timer = setInterval(() => {

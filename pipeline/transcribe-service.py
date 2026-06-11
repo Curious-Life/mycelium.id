@@ -33,6 +33,10 @@ import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_PORT = 8093
+# Hard request-body ceiling. The node side only ever POSTs a single voice note
+# (≤20MB Telegram cap → ~its WAV); 64MB leaves headroom while stopping any local
+# actor from forcing an unbounded rfile.read() allocation (loopback DoS).
+MAX_BODY = 64 * 1024 * 1024
 # Curated, stable sizes only — resolved to official CT2 repos by faster-whisper.
 ALLOWED_MODELS = ("large-v3-turbo", "small")
 
@@ -196,8 +200,13 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, {k: st[k] for k in ("status", "model", "error", "progress") if st.get(k) is not None or k == "status"})
 
     def do_POST(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(n) if n else b""
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._json(400, {"error": "bad content-length"})
+        if n > MAX_BODY:
+            return self._json(413, {"error": "body too large"})
+        body = self.rfile.read(n) if n > 0 else b""
 
         if self.path == "/download":
             try:

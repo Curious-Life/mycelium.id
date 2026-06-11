@@ -108,6 +108,14 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
         signal: AbortSignal.timeout(timeoutMs * 6), // a 20MB body needs longer than a JSON call
       });
       if (!dl.ok) throw new Error(`telegram file download http ${dl.status}`);
+      // Reject by advertised length BEFORE buffering the whole body into RAM —
+      // the descriptor file_size can be absent/lying; this bounds the allocation.
+      const clen = Number(dl.headers.get('content-length'));
+      if (Number.isFinite(clen) && clen > maxBytes) {
+        const err = new Error('telegram file exceeds maxBytes');
+        err.code = 'FILE_TOO_LARGE';
+        throw err;
+      }
       const buf = Buffer.from(await dl.arrayBuffer());
       if (buf.length > maxBytes) {
         const err = new Error('telegram file exceeds maxBytes');

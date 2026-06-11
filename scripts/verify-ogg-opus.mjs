@@ -91,6 +91,25 @@ const { ogg, packets } = buildFixture();
   rec('G5. transcribeAudio transcodes ogg → format:"wav" reaches the model', out === 'transcribed!' && sentFormat === 'wav' && sentDataLen > 100000, `format=${sentFormat} dataLen=${sentDataLen}`);
 }
 
+// G6 — the output cap STOPS decoding (DoS guard): a tiny maxSeconds bounds the
+// WAV data to ~the cap, proving we don't decode every packet to completion.
+{
+  const t0 = Date.now();
+  const capped = await oggOpusToWav(ogg, { maxSeconds: 0.01, timeoutMs: 5000 }); // cap ≈ 960 PCM bytes
+  const ms = Date.now() - t0;
+  const dataBytes = capped ? capped.length - 44 : 0;
+  // bound = cap (960) + at most one extra decoded frame (FRAME samples) before capping
+  const bound = 0.01 * RATE * CH * 2 + FRAME * CH * 2;
+  rec('G6. output cap bounds decode work (no full-stream decode under a small cap)',
+    !!capped && dataBytes <= bound && ms < 4000, `dataBytes=${dataBytes} bound=${bound} ms=${ms}`);
+}
+
+// G7 — timeoutMs is an accepted, non-breaking option for the normal path.
+{
+  const wav = await oggOpusToWav(ogg, { timeoutMs: 5000 });
+  rec('G7. timeoutMs option does not break a normal decode', !!wav && wav.subarray(0, 4).toString() === 'RIFF');
+}
+
 const passed = ledger.filter(Boolean).length;
 console.log(`\n${passed}/${ledger.length} checks passed`);
 console.log(`VERDICT: ${passed === ledger.length ? 'GO' : 'NO-GO'}`);

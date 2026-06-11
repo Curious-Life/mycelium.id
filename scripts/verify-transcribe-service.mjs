@@ -124,6 +124,18 @@ transcribeBehavior = 'ok'; llmCalled = false;
 const t3 = await transcribeAudio({ bytes: wavBuf, mimeType: 'audio/wav', fetch: llmFetch });
 rec('A3. whisper not ready → straight to the LLM path', t3 === 'llm transcript here' && llmCalled === true);
 
+// T5. (static) the python service caps Content-Length BEFORE allocating the
+// read buffer — a loopback memory-DoS guard that this hermetic mock (which
+// stands in for transcribe-service.py) cannot exercise at runtime.
+{
+  const { readFileSync } = await import('node:fs');
+  const py = readFileSync(new URL('../pipeline/transcribe-service.py', import.meta.url), 'utf8');
+  const capPos = py.indexOf('if n > MAX_BODY');
+  const readPos = py.indexOf('self.rfile.read(');
+  rec('T5. transcribe-service caps Content-Length (413) before rfile.read (loopback DoS guard)',
+    /MAX_BODY\s*=/.test(py) && capPos > -1 && readPos > -1 && capPos < readPos);
+}
+
 sup.stop(); svc.close(); api.close();
 const okAll = ledger.every(Boolean);
 console.log(`VERDICT: ${okAll ? 'GO' : 'NO-GO'} — whisper transcription: opt-in supervisor + portal routes + whisper-first fallback chain  EXIT=${okAll ? 0 : 1}`);

@@ -30,9 +30,11 @@ function wavHeader({ sampleRate, channels, dataBytes }) {
  * @param {object} [opts]
  * @param {number} [opts.channels=1]   Telegram voice notes are mono
  * @param {number} [opts.maxSeconds=900]  hard output cap (~83MB stereo) — DoS guard
+ * @param {number} [opts.timeoutMs=60000]  wall-clock backstop — a crafted Ogg
+ *        packed with millions of tiny Opus packets must not pin a core forever.
  * @returns {Promise<Buffer|null>}
  */
-export async function oggOpusToWav(ogg, { channels = 1, maxSeconds = 900 } = {}) {
+export async function oggOpusToWav(ogg, { channels = 1, maxSeconds = 900, timeoutMs = 60000 } = {}) {
   if (!Buffer.isBuffer(ogg) || ogg.length < 4 || ogg.subarray(0, 4).toString("latin1") !== "OggS") return null;
   try {
     const prism = await import("prism-media");
@@ -44,19 +46,29 @@ export async function oggOpusToWav(ogg, { channels = 1, maxSeconds = 900 } = {})
     const demuxer = new prism.opus.OggDemuxer();
     const pcm = [];
     let total = 0;
+    let capped = false; // once the output cap (or timeout) is hit, STOP decoding
 
     const done = new Promise((resolve, reject) => {
       demuxer.on("data", (packet) => {
+        if (capped) return; // skip the expensive decode for remaining packets
         try {
           const out = decoder.decode(packet);
-          if (out && total < maxBytes) { const b = Buffer.from(out.buffer, out.byteOffset, out.byteLength); pcm.push(b); total += b.length; }
+          if (out) {
+            const b = Buffer.from(out.buffer, out.byteOffset, out.byteLength);
+            pcm.push(b); total += b.length;
+            if (total >= maxBytes) capped = true; // bound total decode work, not just the push
+          }
         } catch { /* skip an undecodable packet; keep the rest */ }
       });
       demuxer.on("end", resolve);
       demuxer.on("error", reject);
     });
+    // Wall-clock backstop: a tiny-packet flood is bounded by maxBytes (each
+    // decoded frame yields proportional PCM), but the timeout guarantees the
+    // call returns even if the container parse itself is pathological.
+    const timeout = new Promise((resolve) => { setTimeout(() => { capped = true; resolve(); }, timeoutMs).unref?.(); });
     Readable.from(ogg).pipe(demuxer);
-    await done;
+    await Promise.race([done, timeout]);
     try { decoder.delete?.(); } catch { /* */ }
 
     if (!total) return null;
