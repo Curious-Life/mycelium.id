@@ -86,33 +86,52 @@ def _load_model(model):
             return None
 
 
-def _download(model):
-    """Background HF snapshot with coarse byte-level progress.
+# Expected snapshot sizes (MB) for byte-accurate progress. Approximate is fine
+# (pct is clamped to 99 until the snapshot returns).
+EXPECTED_MB = {"large-v3-turbo": 1620, "small": 480}
 
-    faster_whisper.utils.download_model pins a disabled tqdm, so we replicate
-    its snapshot_download call (same repo mapping + allow_patterns, verified
-    against faster-whisper 1.2.1 source) with our own tqdm to surface pct.
+
+def _download(model):
+    """Background HF snapshot with BYTES-ON-DISK progress.
+
+    Lesson (live, 2026-06-11): hooking snapshot_download's tqdm_class reports
+    the OUTER "Fetching N files" bar — pct froze at 20% (1/5 files) while the
+    1.6GB model.bin downloaded invisibly. Instead a sizer thread walks the
+    repo's HF cache dir (incl. *.incomplete blobs) against the expected total.
     """
     _state.update(status="downloading", model=model, error=None, progress={"pct": 0})
     # Explicit user action — allow network for this thread even in offline mode.
     os.environ.pop("HF_HUB_OFFLINE", None)
+    done = threading.Event()
     try:
         import huggingface_hub
-        from tqdm import tqdm
         from faster_whisper.utils import _MODELS
 
-        class _Progress(tqdm):
-            def update(self, n=1):
-                super().update(n)
-                if self.total:
-                    # model.bin dominates the snapshot; coarse per-file share is honest enough
-                    _state["progress"] = {"pct": int(min(99, (self.n / self.total) * 100))}
-
         repo_id = _MODELS.get(model, model)
+        expected = EXPECTED_MB.get(model, 500) * 1024 * 1024
+
+        def _repo_cache_dir():
+            base = os.environ.get("HF_HOME")
+            hub = os.path.join(base, "hub") if base else os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+            return os.path.join(hub, "models--" + repo_id.replace("/", "--"))
+
+        def _sizer():
+            d = _repo_cache_dir()
+            while not done.wait(1.0):
+                total = 0
+                for root, _dirs, files in os.walk(d):
+                    for f in files:
+                        try:
+                            total += os.path.getsize(os.path.join(root, f))
+                        except OSError:
+                            pass
+                if total > 0:
+                    _state["progress"] = {"pct": int(min(99, (total / expected) * 100))}
+
+        threading.Thread(target=_sizer, daemon=True).start()
         huggingface_hub.snapshot_download(
             repo_id,
             allow_patterns=["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"],
-            tqdm_class=_Progress,
         )
         _state.update(progress={"pct": 100})
         global _whisper
@@ -121,6 +140,8 @@ def _download(model):
         _state.update(status="ok" if _load_model(model) else _state["status"])
     except Exception as e:
         _state.update(status="error", error=str(e)[:200], progress=None)
+    finally:
+        done.set()
 
 
 def _wav_to_float16k(buf):
