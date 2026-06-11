@@ -14,10 +14,12 @@ import { importObsidianVault } from './ingest/obsidian-import.js';
 
 export function portalImportRouter({ db, userId, enqueueEnrichment }) {
   const router = express.Router();
-  // Browser `files` mode ships note bodies as JSON; allow a generous cap.
-  // folderPath mode (Tauri) sends a tiny body. Per-file/total caps live in
-  // importObsidianVault; this is the transport ceiling.
-  router.use(express.json({ limit: '64mb' }));
+  // Browser `files` mode ships note bodies as JSON — and vault images/media as
+  // base64 entries (contentBase64), which inflate 4/3 — so the ceiling is
+  // generous and env-tunable. folderPath mode (Tauri) sends a tiny body.
+  // Per-file/total caps live in importObsidianVault.
+  const limitMb = Number(process.env.MYCELIUM_OBSIDIAN_IMPORT_LIMIT_MB) || 256;
+  router.use(express.json({ limit: `${limitMb}mb` }));
 
   router.post('/import/obsidian', async (req, res) => {
     try {

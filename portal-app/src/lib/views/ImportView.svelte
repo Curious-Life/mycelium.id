@@ -17,6 +17,10 @@
 		skipped_duplicates?: number;
 		artifacts_kept?: number;
 		artifacts_deduplicated?: number;
+		assets?: number;
+		assets_skipped?: number;
+		refs_rewritten?: number;
+		refs_unresolved?: number;
 		imported?: number;
 		skipped?: number;
 		connections?: number;
@@ -247,9 +251,11 @@
 	interface ObsidianSummary {
 		scanned: number; documentsUpserted: number; memoriesCreated: number;
 		memoriesDeduped: number; memoriesUpdated?: number; folders: number; skipped: number; truncated?: boolean;
+		assets?: { imported: number; deduped: number; blobsReused: number; skipped: number };
+		refs?: { rewritten: number; unresolved: number };
 	}
 
-	async function importObsidian(payload: { folderPath?: string; files?: { relPath: string; content: string; mtime?: string }[]; vaultName?: string }) {
+	async function importObsidian(payload: { folderPath?: string; files?: { relPath: string; content?: string; contentBase64?: string; mtime?: string }[]; vaultName?: string }) {
 		importing = true; error = null; result = null; statusMsg = 'Importing notes…';
 		try {
 			const res = await api('/portal/import/obsidian', { method: 'POST', body: JSON.stringify(payload) });
@@ -260,7 +266,14 @@
 				type: 'obsidian',
 				imported: s.documentsUpserted,
 				skipped: s.skipped,
-				stats: { imported: s.documentsUpserted, skipped: s.skipped, memories: s.memoriesCreated + (s.memoriesUpdated || 0), folders: s.folders },
+				stats: {
+					imported: s.documentsUpserted, skipped: s.skipped,
+					memories: s.memoriesCreated + (s.memoriesUpdated || 0), folders: s.folders,
+					assets: (s.assets?.imported || 0) + (s.assets?.deduped || 0),
+					assets_skipped: s.assets?.skipped || 0,
+					refs_rewritten: s.refs?.rewritten || 0,
+					refs_unresolved: s.refs?.unresolved || 0,
+				},
 			};
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Import failed';
@@ -288,14 +301,39 @@
 			// vault; send it as vaultName and strip it so relPaths are vault-relative.
 			const vaultName = (((mdFiles[0] as any).webkitRelativePath as string) || '').split('/')[0] || undefined;
 			const prefix = vaultName ? `${vaultName}/` : '';
-			const files = await Promise.all(mdFiles.map(async (f) => {
+			const relOf = (f: File) => {
 				const rel = ((f as any).webkitRelativePath as string) || f.name;
-				return {
-					relPath: prefix && rel.startsWith(prefix) ? rel.slice(prefix.length) : rel,
+				return prefix && rel.startsWith(prefix) ? rel.slice(prefix.length) : rel;
+			};
+			const files: { relPath: string; content?: string; contentBase64?: string; mtime?: string }[] =
+				await Promise.all(mdFiles.map(async (f) => ({
+					relPath: relOf(f),
 					content: await f.text(),
 					mtime: new Date(f.lastModified).toISOString(),
-				};
-			}));
+				})));
+			// Vault images/media → base64 entries, so `![[photo.png]]` embeds render
+			// instead of breaking. Caps mirror the server (25MB/file); a total-payload
+			// cap keeps the JSON body within the transport ceiling. Skips are reported.
+			const ASSET_RE = /\.(png|jpe?g|gif|webp|svg|bmp|avif|heic|heif|pdf|mp3|m4a|wav|ogg|flac|mp4|mov|webm)$/i;
+			const MAX_ASSET = 25 * 1024 * 1024;
+			const MAX_TOTAL_ASSETS = 150 * 1024 * 1024;
+			statusMsg = 'Reading vault media…';
+			const toBase64 = async (f: File) => {
+				const buf = new Uint8Array(await f.arrayBuffer());
+				let s = '';
+				const CHUNK = 0x8000;
+				for (let i = 0; i < buf.length; i += CHUNK) s += String.fromCharCode(...buf.subarray(i, i + CHUNK));
+				return btoa(s);
+			};
+			let assetTotal = 0;
+			let assetsSkippedClient = 0;
+			for (const f of Array.from(list)) {
+				if (!ASSET_RE.test(f.name)) continue;
+				if (f.size === 0 || f.size > MAX_ASSET || assetTotal + f.size > MAX_TOTAL_ASSETS) { assetsSkippedClient++; continue; }
+				assetTotal += f.size;
+				files.push({ relPath: relOf(f), contentBase64: await toBase64(f), mtime: new Date(f.lastModified).toISOString() });
+			}
+			if (assetsSkippedClient > 0) console.warn(`[import] ${assetsSkippedClient} vault media file(s) skipped (size caps)`);
 			await importObsidian({ files, vaultName });
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Could not read the folder';
@@ -336,6 +374,9 @@
 		} else if (r.type === 'obsidian') {
 			lines.push(`${s.imported ?? r.imported} notes imported as documents${s.folders ? ` across ${s.folders} folders` : ''}`);
 			if (s.memories) lines.push(`${s.memories} new memories queued for the mindscape`);
+			if (s.assets) lines.push(`${s.assets} images & files imported${s.refs_rewritten ? ` — ${s.refs_rewritten} embeds now render` : ''}`);
+			if (s.refs_unresolved) lines.push(`${s.refs_unresolved} embeds point at files not in the vault (left as-is)`);
+			if (s.assets_skipped) lines.push(`${s.assets_skipped} media files skipped (size caps)`);
 			if (s.skipped || r.skipped) lines.push(`${s.skipped || r.skipped} skipped`);
 		}
 
