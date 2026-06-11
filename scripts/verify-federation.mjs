@@ -101,6 +101,18 @@ async function main() {
   catch { rebindThrew = true; }
   rec('SSRF guard: rebinding to ::ffff:7f00:1 (hex-grouped loopback) throws', rebindThrew);
 
+  // M-FED-RL: rotating the (spoofable) source IP must NOT mint unlimited buckets;
+  // the global backstop caps total inbound connects regardless of per-request IP.
+  {
+    const h = createFederationHandlers({ db: {}, userId: 'u', identity: { publicKeyB64: 'x' }, getHost: () => 'rl.test', getHandle: () => 'rl', now: () => Date.now() });
+    let blocked = 0;
+    for (let i = 0; i < 200; i++) {
+      const r = await h.connect({ payload: { ts: Date.now(), nonce: `n${i}` }, headers: {}, ip: `1.2.3.${i % 256}` });
+      if (r.status === 429) blocked++;
+    }
+    rec('federation rate-limit holds under rotated source IPs (global backstop)', blocked > 0);
+  }
+
   // did.json + webfinger
   const did = await (await shimFetch('https://alice.mycelium.id/.well-known/did.json')).json();
   rec('did.json served with did:web id + multibase key', did.id === 'did:web:alice.mycelium.id' && !!did.verificationMethod?.[0]?.publicKeyMultibase);

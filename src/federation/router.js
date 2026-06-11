@@ -28,7 +28,10 @@ export function createFederationRouter(deps) {
     res.status(r.status).type('application/jrd+json').send(JSON.stringify(r.body));
   });
 
-  const ipOf = (req) => req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress;
+  // Key the rate limiter on the REAL socket peer, never a client-spoofable
+  // X-Forwarded-For (M-FED-RL): XFF rotation would mint unlimited buckets and
+  // defeat the cap. The handler's global backstop covers shared-proxy topologies.
+  const ipOf = (req) => req.socket?.remoteAddress || '?';
   const hdrs = (req) => ({ 'x-myc-did': req.get('x-myc-did'), 'x-myc-sig': req.get('x-myc-sig') });
 
   router.post('/federation/connect', async (req, res) => {
