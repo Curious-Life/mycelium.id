@@ -15,9 +15,27 @@ import { createIdentity } from '../src/identity/identity.js';
 import { createFederationHandlers } from '../src/federation/handlers.js';
 import { createConnectionsNamespace } from '../src/db/connections.js';
 import { canonicalize } from '../src/federation/sign.js';
+import { isPrivateAddress, assertResolvesPublic } from '../src/federation/ssrf.js';
 
 const ledger = [];
 const rec = (name, pass, detail = '') => { ledger.push(pass); console.log(`${pass ? '[✓]' : '[✗]'} ${name}${detail ? ` — ${detail}` : ''}`); };
+
+// ── SSRF guard: the IPv6 byte-parser must catch every internal-address form ──
+function ssrfChecks() {
+  // Forms that the old string-prefix matcher MISSED (H4) — must now be private:
+  const mustBlock = [
+    '127.0.0.1', '10.0.0.1', '169.254.169.254', '172.16.0.1', '192.168.1.1', '100.64.0.1', '0.0.0.0',
+    '::1', '::', '::ffff:127.0.0.1', '::ffff:7f00:1', '::ffff:a9fe:a9fe',
+    'fe80::1', 'fc00::1', 'fd12:3456::1', 'ff02::1',
+    '64:ff9b::7f00:1', '2002:7f00:1::', '2002:a9fe:a9fe::', '2001:0:0:0::1',
+    '[::ffff:7f00:1]', '::1%eth0',
+  ];
+  const mustAllow = ['8.8.8.8', '1.1.1.1', '93.184.216.34', '2606:2800:220:1::', '2620:fe::fe'];
+  let ok = true;
+  for (const ip of mustBlock) if (!isPrivateAddress(ip)) { ok = false; console.log(`    SSRF MISS (should block): ${ip}`); }
+  for (const ip of mustAllow) if (isPrivateAddress(ip)) { ok = false; console.log(`    SSRF FALSE-POSITIVE (should allow): ${ip}`); }
+  return ok;
+}
 
 const HOST_PORT = {};
 function shimFetch(urlStr, init = {}) {
@@ -74,6 +92,14 @@ async function main() {
   console.log('\n=== verify:federation — Tier-0 did:web + WebFinger + signed connect ===\n');
   const alice = await startBox('alice', 'alice.mycelium.id', { withConnections: true });
   const bob = await startBox('bob', 'bob.mycelium.id');
+
+  // SSRF guard (H4): IPv6 byte-parser catches every internal form; rebinding to a
+  // private IP throws even when the hostname looks public.
+  rec('SSRF guard: every internal IPv4/IPv6 form is blocked, public IPs allowed', ssrfChecks());
+  let rebindThrew = false;
+  try { await assertResolvesPublic('evil.example', { lookup: async () => [{ address: '::ffff:7f00:1' }] }); }
+  catch { rebindThrew = true; }
+  rec('SSRF guard: rebinding to ::ffff:7f00:1 (hex-grouped loopback) throws', rebindThrew);
 
   // did.json + webfinger
   const did = await (await shimFetch('https://alice.mycelium.id/.well-known/did.json')).json();
