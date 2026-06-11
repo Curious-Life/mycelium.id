@@ -26,6 +26,11 @@ ok(/startsWith\('\/api\/auth\/sign-up'\)/.test(srvHttp) && /res\.status\(404\)/.
 // ── H6: POST /login CSRF guard + scoped credentialed CORS (source + unit) ──
 ok(/verifyLoginCsrf\(req\)/.test(srvHttp) && /issueLoginCsrf\(req, res\)/.test(srvHttp), 'H6a. POST /login enforces CSRF; GET issues a token (server-http.js)');
 ok(/p\.endsWith\('\/mcp\/register'\)\s*\|\|\s*p\.endsWith\('\/mcp\/token'\)/.test(srvHttp), 'H6b. credentialed CORS scoped to /mcp/register + /mcp/token only');
+
+// M-REST-BIND: the portal/REST server must FAIL CLOSED on a non-loopback bind
+// (recovery-key surface) unless explicitly opted in.
+const srvRest = readFileSync(new URL('../src/server-rest.js', import.meta.url), 'utf8');
+ok(/REST_LOOPBACK_HOSTS\.has\(host\)/.test(srvRest) && /MYCELIUM_ALLOW_NETWORK_REST/.test(srvRest) && /process\.exit\(2\)/.test(srvRest), 'M-REST-BIND. server-rest refuses non-loopback bind without MYCELIUM_ALLOW_NETWORK_REST=1');
 {
   const fakeRes = () => { const c = []; return { append: (_k, v) => c.push(v), cookies: c }; };
   const r1 = fakeRes();
