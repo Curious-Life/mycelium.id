@@ -65,7 +65,7 @@ async function run() {
       };
       if (DRY_RUN) { console.log(`[snapshot] (dry) territory ${t.territory_id}`); continue; }
       const r = await db.history.recordSnapshot(USER_ID, {
-        entityKind: 'territory', entityId: t.territory_id, snapshotKind: 'dynamics', payload,
+        entityKind: 'territory', entityId: t.territory_id, snapshotKind: 'dynamics', content: payload,
       }).catch(() => ({ skipped: true }));
       if (r.skipped) skipped += 1; else terr += 1;
     }
@@ -79,7 +79,7 @@ async function run() {
       const payload = { messageCount: num(rm.message_count, 0), territoryCount: num(rm.territory_count, 0) };
       if (DRY_RUN) { console.log(`[snapshot] (dry) realm ${rm.realm_id}`); continue; }
       const r = await db.history.recordSnapshot(USER_ID, {
-        entityKind: 'realm', entityId: rm.realm_id, snapshotKind: 'dynamics', payload,
+        entityKind: 'realm', entityId: rm.realm_id, snapshotKind: 'dynamics', content: payload,
       }).catch(() => ({ skipped: true }));
       if (r.skipped) skipped += 1; else realms += 1;
     }

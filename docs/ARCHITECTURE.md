@@ -189,7 +189,11 @@ claim level) · personaClaims MCP tool · portal /claims (ClaimsView + TimeSerie
   Describe otherwise upserts in place, losing the past. `db.history.recordSnapshot`
   dedups vs the latest version (decrypt-and-compare — no plaintext content hash) and
   appends `seq+1` only on real change; rows persist after the entity dissolves/prunes.
-  The single `payload` JSON blob is the only encrypted column. Structural/metric
+  The single `payload` JSON blob carries content AND all metadata (stage/model/version/
+  capture timestamp) and is the only data column — everything that describes the user
+  or its timing is encrypted; the rest is the row-addressing skeleton
+  (`entity_kind/id, snapshot_kind, seq`) that can't be encrypted without losing
+  WHERE/ORDER/UNIQUE (non-deterministic AES-GCM) and carries no content. Structural/metric
   change-over-time is *already* logged elsewhere (`cluster_events`, `territory_lineage`,
   `*_snapshots`, `person_claim_snapshots`); the unified per-entity timeline is a
   deferred UNION-at-read, not a copy (avoids a second source of truth). Read surfaces

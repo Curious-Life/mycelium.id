@@ -9,6 +9,20 @@ hold any past, and per-entity dynamics over time are lost on each Generate.
 **Scope (user decision):** *Everything — unified change log*, *storage only for now*
 (read surfaces — portal panel, MCP tool — deferred to a later phase).
 
+**v3 — encryption hardening (operator: no plaintext storage).** The table is now
+**skeleton + one encrypted blob**. `payload` (encrypted) holds the content AND all
+soft metadata — `{ content, meta:{ stage, model, entityVersion, clusterVersion,
+capturedAt } }`. The only plaintext columns are the irreducible row-addressing keys
+`id, user_id, entity_kind, entity_id, snapshot_kind, seq` — SQLite needs them in
+WHERE/ORDER/UNIQUE and AES-GCM here is non-deterministic, so an encrypted column can
+never be matched (the same reason `description_version` is compared in JS). They carry
+no prose and leak strictly less than territory_profiles' existing plaintext
+(message_count, realm_id, updated_at). `recordSnapshot({content, meta})` dedups on
+**content only**, so metadata + the per-version timestamp never defeat dedup. Truly
+opaque addressing (blind-index/HMAC over the keys) is a vault-wide pattern decision,
+not a one-table patch — deferred + named. Gate H6 asserts the schema is exactly
+skeleton+payload and that no content/metadata marker appears at rest.
+
 ## What is ALREADY logged (do NOT rebuild)
 
 The sweeps found most "change over time" is already append-only and authoritative:
@@ -55,49 +69,50 @@ the live row always == the latest snapshot.
 
 ```sql
 CREATE TABLE IF NOT EXISTS entity_snapshots (
-  id              TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-  user_id         TEXT NOT NULL,
-  entity_kind     TEXT NOT NULL,   -- 'territory' | 'realm'  (extensible: 'theme')
-  entity_id       INTEGER NOT NULL,-- territory_id / realm_id (stable across re-cluster)
-  snapshot_kind   TEXT NOT NULL,   -- 'narrative' | 'dynamics'
-  stage           TEXT,            -- narrative: 'name' | 'chronicle' ; dynamics: NULL
-  seq             INTEGER NOT NULL,-- monotonic per (user,kind,id,snapshot_kind)
-  payload         TEXT NOT NULL,   -- ENCRYPTED JSON blob (prose fields, or dynamics scalars)
-  entity_version  TEXT,            -- description_version / generation_version label (non-sensitive)
-  cluster_version TEXT,            -- Generate era; plaintext join key to cluster_events
-  generation_model TEXT,           -- narrator label (plaintext)
-  created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  id            TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+  user_id       TEXT NOT NULL,      -- scope key (single-user vault)
+  entity_kind   TEXT NOT NULL,      -- addressing: 'territory' | 'realm'
+  entity_id     INTEGER NOT NULL,   -- addressing: territory_id / realm_id
+  snapshot_kind TEXT NOT NULL,      -- addressing: 'narrative' | 'dynamics'
+  seq           INTEGER NOT NULL,   -- ordering within the (entity, kind) stream
+  payload       TEXT NOT NULL,      -- ENCRYPTED JSON: { content, meta:{stage,model,entityVersion,clusterVersion,capturedAt} }
   UNIQUE(user_id, entity_kind, entity_id, snapshot_kind, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_entity_snapshots_lookup
   ON entity_snapshots(user_id, entity_kind, entity_id, snapshot_kind, seq);
 ```
 
-**Crypto:** `ENCRYPTED_FIELDS.entity_snapshots = ['payload']`. Everything narrative or
-SEC-3 lives inside the one blob → uniformly encrypted, and future narrative fields are
-covered with no schema/policy change. All other columns are structural (id/fk/enum/
-timestamp/label) → plaintext per the crypto-local.js classification rule (188-207).
-A single encrypted JSON-blob column round-trips exactly like `raw_response` /
-`activity_timeline` (auto-encrypt on write, auto-decrypt on read, `parseJson` on the
-caller). It is **not** a vector column → not in `NEVER_AUTO_DECRYPT`.
+**Crypto (v3):** `ENCRYPTED_FIELDS.entity_snapshots = ['payload']`. The blob holds the
+content AND all soft metadata (stage/model/version/cluster era/capture timestamp) →
+everything that describes the user's life or its timing is encrypted; future fields are
+covered with no schema/policy change. The remaining columns are the irreducible
+row-addressing skeleton (`id, user_id, entity_kind, entity_id, snapshot_kind, seq`) —
+non-content keys SQLite needs for WHERE/ORDER/UNIQUE. AES-GCM here is non-deterministic
+so they cannot be encrypted and still be matched (the crypto-local.js rule, 188-207,
+and why `description_version` is compared in JS). They carry no prose and leak strictly
+less than territory_profiles' existing plaintext (message_count/realm_id/updated_at).
+The blob round-trips exactly like `raw_response`/`activity_timeline` (auto-encrypt on
+write, auto-decrypt on read, `parseJson` on the caller); not a vector → not in
+`NEVER_AUTO_DECRYPT`.
 
-**No content-hash column.** Dedup compares the new payload to the *latest* snapshot's
-**decrypted** payload (one row read) — so we never store a plaintext hash of narrative
-content (avoids the documents.content_hash inversion-risk class entirely). A revert
-A→B→A correctly records three versions (a `UNIQUE(content_hash)` would have wrongly
-blocked the third).
+**No content-hash column, no plaintext timestamp.** Dedup compares the incoming
+**content** to the *latest* snapshot's **decrypted** content (one row read) — so we
+store no plaintext hash of content, and the per-version `capturedAt` lives inside the
+encrypted blob (excluded from the dedup compare, or it would defeat it). A revert
+A→B→A correctly records three versions (dedup is vs LATEST only).
 
 ## Module shape (~300 LOC ±20%)
 
 1. **migrations/0013_entity_snapshots.sql** (~10) — table + index above.
 2. **src/crypto/crypto-local.js** (~2) — `entity_snapshots: ['payload']`.
-3. **src/db/history.js** (NEW, ~80) — namespace:
-   - `recordSnapshot(userId, { entityKind, entityId, snapshotKind, stage, payload, entityVersion, clusterVersion, model })`
-     → canonicalize payload (stable key order); read latest payload for
-     (entity,kind); if canonically equal → `{ skipped:true }`; else INSERT `seq+1`.
+3. **src/db/history.js** (NEW, ~95) — namespace:
+   - `recordSnapshot(userId, { entityKind, entityId, snapshotKind, content, meta })`
+     → canonicalize `content`; read latest row for (entity,kind); if content
+     canonically equal → `{ skipped:true }`; else INSERT `seq+1` with
+     `payload = encrypt(JSON{ content, meta:{...meta, capturedAt: now()} })`.
      Returns `{ seq }`.
    - `readHistory(userId, entityKind, entityId, { snapshotKind, limit=500 })`
-     → rows ASC by seq, payload `parseJson`'d (for tests now, read surface later).
+     → rows ASC by seq, payload decrypted + unwrapped to `{content, ...meta}`.
    - `canonicalize(obj)` — sorted-key JSON.
 4. **src/db/index.js** (~3) — wire `db.history`.
 5. **src/db/territory-docs.js** `upsertDescription` (~5) — after the upsert,

@@ -118,7 +118,7 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // surface (src/portal-mindscape.js) + the Phase C chronicles writer.
     mindscape: createMindscapeNamespace({ d1Query, parseJson }),
     territoryDocs: createTerritoryDocsNamespace({ d1Query, parseJson }),
-    history: createHistoryNamespace({ d1Query, parseJson }),
+    history: createHistoryNamespace({ d1Query, parseJson, now }),
 
     // Persona-Claims (PersonaTree adoption): current person-level claims +
     // per-window snapshots for temporal evolution. Sensitive cols encrypted at

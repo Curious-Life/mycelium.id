@@ -223,8 +223,9 @@ async function recordNarrative(db, userId, entityKind, entityId, desc, version, 
   if (!db.history?.recordSnapshot) return;
   try {
     await db.history.recordSnapshot(userId, {
-      entityKind, entityId, snapshotKind: 'narrative', stage: 'chronicle',
-      payload: prose(desc), entityVersion: version, model: modelLabel,
+      entityKind, entityId, snapshotKind: 'narrative',
+      content: prose(desc),
+      meta: { stage: 'chronicle', entityVersion: version, model: modelLabel },
     });
   } catch { /* history is best-effort */ }
 }

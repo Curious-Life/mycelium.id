@@ -55,8 +55,8 @@ async function recordName(db, entityKind, entityId, name, essence) {
   if (!db.history?.recordSnapshot) return;
   try {
     await db.history.recordSnapshot(USER_ID, {
-      entityKind, entityId, snapshotKind: 'narrative', stage: 'name',
-      payload: { name, essence },
+      entityKind, entityId, snapshotKind: 'narrative',
+      content: { name, essence }, meta: { stage: 'name' },
     });
   } catch { /* history is best-effort */ }
 }
