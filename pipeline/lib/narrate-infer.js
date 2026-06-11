@@ -16,6 +16,7 @@
 import { resolveInferenceConfig } from '../../src/inference/resolve.js';
 import { createInferenceRouter } from '../../src/inference/router.js';
 import { createEgressAuditSink } from '../../src/inference/egress.js';
+import { DEFAULT_LOCAL_MODEL } from '../../src/inference/local.js';
 
 const LOCALHOST_RE = /(?:\/\/)?(?:127\.0\.0\.1|localhost|0\.0\.0\.0)/;
 
@@ -35,7 +36,10 @@ export async function createNarrator({ db, userId, fetch = globalThis.fetch }) {
   // ── Local Ollama: native /api/chat, think OFF, JSON-constrained — fast + reliable.
   if (isLocal && cfg.baseUrl) {
     const host = cfg.baseUrl.replace(/\/v1\/?$/, '').replace(/\/+$/, ''); // strip the OpenAI-compat /v1 suffix
-    const model = cfg.cloudModel || 'llama3.1';
+    // cloudModel = the user's model_preference on the ACTIVE provider (Settings →
+    // Intelligence) — the same value chat resolves. The shared constant keeps the
+    // no-preference fallback in lockstep with chat instead of drifting separately.
+    const model = cfg.cloudModel || DEFAULT_LOCAL_MODEL;
     const infer = async (prompt, { maxTokens = 700 } = {}) => {
       const res = await fetch(`${host}/api/chat`, {
         method: 'POST',

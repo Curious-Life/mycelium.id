@@ -134,8 +134,9 @@ export function createTerritoryDocsNamespace(deps) {
           dynamics.point_delta, dynamics.realm_id]);
     },
 
-    /** Upsert full description (LLM-generated fields) */
-    async upsertDescription(userId, territoryId, desc, version, rawResponse) {
+    /** Upsert full description (LLM-generated fields). modelLabel = the REAL
+     * narrator (was hardcoded 'claude-opus' regardless of provider). */
+    async upsertDescription(userId, territoryId, desc, version, rawResponse, modelLabel = 'unknown') {
       await d1Query(`
         INSERT INTO territory_profiles (user_id, territory_id, name, essence,
           archetype_type, archetype_character,
@@ -145,7 +146,7 @@ export function createTerritoryDocsNamespace(deps) {
           top_entities,
           description_version, point_count_at_description, last_described_at,
           generation_model, raw_response)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'claude-opus', ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)
         ON CONFLICT(territory_id, user_id) DO UPDATE SET
           name = excluded.name, essence = excluded.essence,
           archetype_type = excluded.archetype_type, archetype_character = excluded.archetype_character,
@@ -178,7 +179,7 @@ export function createTerritoryDocsNamespace(deps) {
           JSON.stringify(desc.agent_would_consult || []),
           JSON.stringify(desc.top_entities || []),
           version, desc.point_count,
-          rawResponse || JSON.stringify(desc)]);
+          modelLabel, rawResponse || JSON.stringify(desc)]);
     },
 
     /** Append a moment of interest to a territory (keeps last 20) */

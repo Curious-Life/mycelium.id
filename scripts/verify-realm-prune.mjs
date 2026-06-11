@@ -38,8 +38,11 @@ const cp = (id, realm, terr) => db.rawQuery(
    VALUES (?, ?, 'message', ?, ?, ?)`, [id, U, `m-${id}`, realm, terr]);
 await cp('p1', 0, 1); await cp('p2', 0, 1); await cp('p3', 0, 2);
 await cp('p4', 5, 7); await cp('p5', 5, 7);
+// name/essence bound as PARAMS — autoEncryptParams only encrypts params, a SQL
+// literal would land plaintext at rest (and the clobber guard now preserves the
+// seeded name instead of overwriting it, so the seed must be properly encrypted).
 await db.rawQuery(
-  `INSERT INTO realms (user_id, realm_id, name, essence) VALUES (?, 0, 'Old Name', 'stale essence')`, [U]);
+  `INSERT INTO realms (user_id, realm_id, name, essence) VALUES (?, 0, ?, ?)`, [U, 'Old Name', 'stale essence']);
 await db.rawQuery(
   `INSERT INTO realms (user_id, realm_id, name, essence, territory_count, message_count)
    VALUES (?, 99, 'Ghost Realm', 'no live points', 0, 0)`, [U]);
@@ -90,7 +93,7 @@ close2();
 const raw = new Database(DB, { readonly: true });
 const rawRow = raw.prepare('SELECT name, territory_count, message_count FROM realms WHERE realm_id = 0').get();
 raw.close();
-rec('R6. territory_count/message_count plaintext integers; name still ciphertext at rest',
+rec('R6. territory_count/message_count plaintext integers; name still ciphertext at rest (clobber guard preserved the seeded name)',
   Number(rawRow?.territory_count) === 2 && Number(rawRow?.message_count) === 3
   && typeof rawRow?.name === 'string' && !rawRow.name.includes('Realm') && !rawRow.name.includes('Old Name'),
   `tc=${rawRow?.territory_count} mc=${rawRow?.message_count}`);

@@ -112,6 +112,37 @@ export function createMindscapeNamespace(deps) {
       }));
     },
 
+    /** Write a realm's chronicle (describe-chronicles realm pass). UPDATE-only —
+     * realm rows are created exclusively by describe-clusters from live points
+     * (or import); narration must never resurrect a pruned/absent realm
+     * (fail-closed). NOTE: raw model output is deliberately NOT stored —
+     * realms.raw_response is not in ENCRYPTED_FIELDS.realms, so writing it
+     * would put narrative plaintext at rest (CLAUDE.md §1). */
+    async upsertRealmDescription(userId, realmId, desc, version, modelLabel = 'unknown') {
+      await d1Query(
+        `UPDATE realms SET
+           essence = ?, archetype_type = ?, archetype_character = ?,
+           story_birth = ?, story_arc = ?, story_current_chapter = ?,
+           story_peak_moments = ?, signature_patterns = ?,
+           uncertainty_open_questions = ?, uncertainty_edges = ?,
+           agent_expertise = ?, agent_curious_about = ?, agent_can_help_with = ?,
+           generation_version = ?, point_count_at_description = ?,
+           generated_at = datetime('now'), generation_model = ?,
+           updated_at = datetime('now')
+         WHERE user_id = ? AND realm_id = ?`,
+        [desc.essence, desc.archetype_type, desc.archetype_character,
+         desc.story_birth, desc.story_arc, desc.story_current_chapter,
+         JSON.stringify(desc.story_peak_moments || []),
+         JSON.stringify(desc.signature_patterns || []),
+         JSON.stringify(desc.uncertainty_open_questions || []),
+         desc.uncertainty_edges,
+         desc.agent_expertise, desc.agent_curious_about,
+         JSON.stringify(desc.agent_can_help_with || []),
+         version, desc.point_count, modelLabel,
+         userId, realmId],
+      );
+    },
+
     async getSemanticThemes(userId) {
       const result = await d1Query(
         `SELECT realm_id, semantic_theme_id, name, essence,

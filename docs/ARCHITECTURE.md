@@ -189,6 +189,22 @@ claim level) · personaClaims MCP tool · portal /claims (ClaimsView + TimeSerie
   + `topology_metrics` are 0-row by design until a canonical v4 import or the
   spec'd topology-graph family lands — kept as restore targets, NOT vestiges
   (audit: `docs/MEASUREMENT-DEADWEIGHT-AUDIT-2026-06-10.md`, gate `verify:realm-prune`).
+- **Describe management** (`docs/DESCRIBE-MANAGEMENT-DESIGN-2026-06-11.md`, gate
+  `verify:describe-gating`): the naming pass skips unchanged clusters via a
+  plaintext `describe_input_hash` (SHA-256 over sampled message UUIDs + point
+  count — never content-derived) and never clobbers a real name with a
+  placeholder (failed narration on an unnamed cluster leaves hash NULL → retried
+  every run). Chronicles re-narrate on **drift** (`message_count` vs
+  `point_count_at_description`, ratio ≥1.5 + Δ≥10, env-tunable) — not only on
+  version bumps; **realms get chronicles too** (UPDATE-only via
+  `db.mindscape.upsertRealmDescription`; `raw_response` deliberately not stored —
+  plaintext column). Dominant successors **inherit** the dissolved predecessor's
+  chronicle in cluster.py (ciphertext-verbatim copy, after `compute_dynamics`);
+  drift re-narrates them as content diverges. `src/jobs.js` refreshes the in-RAM
+  search index after Generate + chronicle completion (mind-search registry;
+  stored vectors rehydrate). Narration always uses the user's ACTIVE provider +
+  `model_preference` (same `resolveInferenceConfig` as chat);
+  `generation_model` records the real narrator label.
 - **Location (#36):** the vault lives in a **durable per-OS data dir** (`src/paths.js` →
   `~/Library/Application Support/id.mycelium.app` on macOS, set by the Tauri shell as
   `MYCELIUM_DATA_DIR`), so app updates don't wipe history. A legacy in-repo `./data` vault is

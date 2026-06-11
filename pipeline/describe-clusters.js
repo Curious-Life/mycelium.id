@@ -21,6 +21,7 @@
  *     node pipeline/describe-clusters.js [--dry-run]
  */
 
+import crypto from 'node:crypto';
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { createNarrator } from './lib/narrate-infer.js';
@@ -30,6 +31,21 @@ const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
 const USER_MASTER = process.env.USER_MASTER;
 const SYSTEM_KEY = process.env.SYSTEM_KEY;
 const DRY_RUN = process.argv.includes('--dry-run');
+// Bypass the input-signature skip and re-narrate everything (recovery hatch).
+const FORCE = process.argv.includes('--force') || process.env.MYCELIUM_DESCRIBE_FORCE === '1';
+
+/**
+ * Change-detection signature for a cluster's describe input: SHA-256 over the
+ * sampled message IDs (random UUIDs — never content-derived, so the plaintext
+ * hash leaks nothing about plaintext) + the cluster's live point count. Same
+ * sample + same count → narration input is literally identical → skip. Stored
+ * in the (previously vestigial) plaintext describe_input_hash column.
+ */
+function inputSignature(sampleIds, pointCount) {
+  return crypto.createHash('sha256')
+    .update(JSON.stringify([...sampleIds, Number(pointCount) || 0]))
+    .digest('hex');
+}
 
 if (!USER_MASTER || !SYSTEM_KEY) {
   console.error('Missing: USER_MASTER and SYSTEM_KEY (64-char hex each)');
@@ -101,12 +117,9 @@ async function run() {
     console.log(`[describe] ${realmIds.length} realms · ${terrIds.length} territories`);
     if (feedId) { try { await db.activityFeed.heartbeat(feedId, { totalSteps: total }); } catch { /* */ } }
 
+    let skippedRealms = 0;
     for (const { realm_id } of realmIds) {
       const samples = await sampleContent(query, 'realm_id', realm_id);
-      const described = samples.length ? await describe(narrator, 'realm', samples) : null;
-      if (described) namedRealms += 1;
-      const name = described?.name || `Realm ${realm_id}`;
-      const essence = described?.essence || '';
       // Real counts from live points — no other stage maintains these, and the
       // search corpus ranks realms by message_count (zeros = arbitrary order).
       const [counts = {}] = await query(
@@ -115,45 +128,108 @@ async function run() {
          FROM clustering_points WHERE user_id = ? AND realm_id = ?`,
         [USER_ID, realm_id],
       ).catch(() => []);
-      if (DRY_RUN) {
-        console.log(`[describe] (dry) realm ${realm_id} → "${name}"`);
+      const sig = inputSignature(samples.map((s) => s.id), counts.mc);
+      const [existing] = await query(
+        `SELECT name, describe_input_hash FROM realms WHERE user_id = ? AND realm_id = ?`,
+        [USER_ID, realm_id],
+      ).catch(() => []);
+
+      // Skip-if-unchanged: named + identical narration input → no inference.
+      // Counts stay fresh (describe owns realm counters).
+      if (!FORCE && existing?.name && existing.describe_input_hash === sig) {
+        skippedRealms += 1;
+        if (DRY_RUN) { console.log(`[describe] (dry) realm ${realm_id} unchanged — skip`); continue; }
+        await query(
+          `UPDATE realms SET territory_count = ?, message_count = ?, updated_at = datetime('now')
+           WHERE user_id = ? AND realm_id = ?`,
+          [counts.tc ?? 0, counts.mc ?? 0, USER_ID, realm_id],
+        ).catch(err => console.error(`[describe] realm ${realm_id} count update failed:`, err.message));
+        await tick(total);
         continue;
       }
+
+      const described = samples.length ? await describe(narrator, 'realm', samples.map((s) => s.content)) : null;
+      if (described) namedRealms += 1;
+      if (DRY_RUN) {
+        console.log(`[describe] (dry) realm ${realm_id} → "${described?.name || `Realm ${realm_id}`}"`);
+        continue;
+      }
+      if (!described && existing?.name) {
+        // Clobber guard: narration failed but the realm already has a real name —
+        // keep it (old hash stays ≠ sig, so the next run retries narration).
+        await query(
+          `UPDATE realms SET territory_count = ?, message_count = ?, updated_at = datetime('now')
+           WHERE user_id = ? AND realm_id = ?`,
+          [counts.tc ?? 0, counts.mc ?? 0, USER_ID, realm_id],
+        ).catch(err => console.error(`[describe] realm ${realm_id} count update failed:`, err.message));
+        await tick(total);
+        continue;
+      }
+      // Success → write name + signature. Failure on an UNNAMED realm → placeholder
+      // for UX, but hash stays NULL so every future run retries until a model lands.
+      const name = described?.name || `Realm ${realm_id}`;
+      const essence = described?.essence || '';
       await query(
-        `INSERT INTO realms (user_id, realm_id, name, essence, territory_count, message_count, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        `INSERT INTO realms (user_id, realm_id, name, essence, territory_count, message_count, describe_input_hash, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
          ON CONFLICT(user_id, realm_id) DO UPDATE SET name = excluded.name, essence = excluded.essence,
-           territory_count = excluded.territory_count, message_count = excluded.message_count, updated_at = datetime('now')`,
-        [USER_ID, realm_id, name, essence, counts.tc ?? 0, counts.mc ?? 0],
+           territory_count = excluded.territory_count, message_count = excluded.message_count,
+           describe_input_hash = excluded.describe_input_hash, updated_at = datetime('now')`,
+        [USER_ID, realm_id, name, essence, counts.tc ?? 0, counts.mc ?? 0, described ? sig : null],
       ).catch(err => console.error(`[describe] realm ${realm_id} write failed:`, err.message));
       await tick(total);
     }
 
     // ── Territories ─────────────────────────────────────────────────
+    // cluster.py's dynamics upsert owns message_count + realm_id (refreshed every
+    // run, before this stage) — so the skip and clobber-guard paths here write
+    // nothing at all.
+    let skippedTerr = 0;
     for (const { territory_id, realm_id } of terrIds) {
       const samples = await sampleContent(query, 'territory_id', territory_id);
-      const msgCount = samples.length;
-      const described = samples.length ? await describe(narrator, 'territory', samples) : null;
-      if (described) namedTerr += 1;
-      const name = described?.name || `Territory ${territory_id}`;
-      const essence = described?.essence || '';
-      if (DRY_RUN) {
-        console.log(`[describe] (dry) territory ${territory_id} → "${name}"`);
+      const [tc = {}] = await query(
+        `SELECT COUNT(*) AS mc FROM clustering_points WHERE user_id = ? AND territory_id = ?`,
+        [USER_ID, territory_id],
+      ).catch(() => []);
+      const sig = inputSignature(samples.map((s) => s.id), tc.mc);
+      const [existing] = await query(
+        `SELECT name, describe_input_hash FROM territory_profiles WHERE user_id = ? AND territory_id = ?`,
+        [USER_ID, territory_id],
+      ).catch(() => []);
+
+      if (!FORCE && existing?.name && existing.describe_input_hash === sig) {
+        skippedTerr += 1;
+        if (DRY_RUN) console.log(`[describe] (dry) territory ${territory_id} unchanged — skip`);
+        await tick(total);
         continue;
       }
+
+      const described = samples.length ? await describe(narrator, 'territory', samples.map((s) => s.content)) : null;
+      if (described) namedTerr += 1;
+      if (DRY_RUN) {
+        console.log(`[describe] (dry) territory ${territory_id} → "${described?.name || `Territory ${territory_id}`}"`);
+        continue;
+      }
+      if (!described && existing?.name) {
+        // Clobber guard: keep the real name; old hash ≠ sig → retried next run.
+        await tick(total);
+        continue;
+      }
+      const name = described?.name || `Territory ${territory_id}`;
+      const essence = described?.essence || '';
       await query(
         `INSERT INTO territory_profiles
-           (user_id, territory_id, realm_id, name, essence, message_count, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+           (user_id, territory_id, realm_id, name, essence, message_count, describe_input_hash, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
          ON CONFLICT(user_id, territory_id) DO UPDATE SET name = excluded.name, essence = excluded.essence,
-           realm_id = excluded.realm_id, updated_at = datetime('now')`,
-        [USER_ID, territory_id, realm_id, name, essence, msgCount],
+           realm_id = excluded.realm_id, describe_input_hash = excluded.describe_input_hash, updated_at = datetime('now')`,
+        [USER_ID, territory_id, realm_id, name, essence, tc.mc ?? samples.length, described ? sig : null],
       ).catch(err => console.error(`[describe] territory ${territory_id} write failed:`, err.message));
       await tick(total);
     }
 
-    console.log(`[describe] Done — named ${namedRealms}/${realmIds.length} realms · ${namedTerr}/${terrIds.length} territories via ${narrator.label}`);
-    const failedAll = namedRealms === 0 && realmIds.length > 0;
+    console.log(`[describe] Done — named ${namedRealms}/${realmIds.length} realms (${skippedRealms} unchanged) · ${namedTerr}/${terrIds.length} territories (${skippedTerr} unchanged) via ${narrator.label}`);
+    const failedAll = namedRealms === 0 && realmIds.length - skippedRealms > 0;
     if (failedAll) {
       console.error(`[describe] WARNING: named 0 realms — the model (${narrator.label}) returned nothing usable. Check Settings → Intelligence.`);
     }
@@ -166,17 +242,19 @@ async function run() {
 
 /**
  * Pull up to 5 decrypted member snippets for a cluster column (realm_id /
- * territory_id). The adapter transparently decrypts messages.content.
+ * territory_id). The adapter transparently decrypts messages.content. Returns
+ * [{id, content}] — the ids feed the input signature, so the order must be
+ * deterministic (m.id tiebreak on equal timestamps, else the hash would flap).
  */
 async function sampleContent(query, column, value) {
   const rows = await query(
-    `SELECT m.content FROM clustering_points cp
+    `SELECT m.id, m.content FROM clustering_points cp
      JOIN messages m ON m.id = cp.source_id AND cp.source_type = 'message'
      WHERE cp.user_id = ? AND cp.${column} = ?
-     ORDER BY m.created_at DESC LIMIT 5`,
+     ORDER BY m.created_at DESC, m.id DESC LIMIT 5`,
     [USER_ID, value],
   ).catch(() => []);
-  return rows.map(r => r.content).filter(Boolean);
+  return rows.filter(r => r.content).map(r => ({ id: r.id, content: r.content }));
 }
 
 run().catch(err => { console.error('[describe] Fatal:', err); process.exit(1); });
