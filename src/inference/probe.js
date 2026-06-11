@@ -9,6 +9,8 @@
 // inference router adopts the same split when the outbound widening (S3) lands;
 // this probe is the seed.
 
+import { assertSafeBaseUrl } from './base-url.js';
+
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
 const OPENAI_DEFAULT = 'https://api.openai.com';
@@ -31,6 +33,9 @@ export async function probeProvider({ provider, baseUrl, model, apiKey, fetch = 
   // LM Studio) usually does not.
   if (!apiKey && !isLocal) return { ok: false, error: 'no_key' };
   if (provider === 'custom' && !baseUrl) return { ok: false, error: 'no_base_url' };
+  // SSRF + exfil guard (H5): refuse to probe a private/internal or non-http(s)
+  // base_url with the user's key. Category-only error, never the key/host.
+  if (!isAnthropic) { try { assertSafeBaseUrl(baseUrl); } catch { return { ok: false, error: 'invalid_base_url' }; } }
 
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
