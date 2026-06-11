@@ -10,8 +10,8 @@
  * Owner /commands are control-plane (handled, never captured/turned).
  */
 function preview(text) {
-  const s = String(text || '');
-  return `«${s.slice(0, 12).replace(/\s+/g, ' ')}${s.length > 12 ? '…' : ''}»(${s.length})`;
+  // Zero-plaintext logs (LOG-1): length only, never message content.
+  return `«len=${String(text ?? '').length}»`;
 }
 
 /**

@@ -16,7 +16,8 @@ import { canonicalize, verifyDetached } from './sign.js';
 
 const MAX_CANONICAL_BYTES = 8 * 1024;     // body cap (DoS)
 const TS_WINDOW_MS = 5 * 60 * 1000;       // ±5 min freshness window
-const RATE_MAX = 30;                       // inbound connects per IP per window
+const RATE_MAX = 30;                       // inbound connects per peer per window
+const RATE_MAX_GLOBAL = 120;               // backstop: total inbound connects per window (any peer)
 const RATE_WINDOW_MS = 60 * 1000;
 
 /**
@@ -31,12 +32,20 @@ const RATE_WINDOW_MS = 60 * 1000;
  */
 export function createFederationHandlers({ db, userId = 'local-user', identity, getHost, getHandle, fetch = globalThis.fetch, now = () => Date.now() }) {
   const seenNonces = new Map(); // nonce -> expiry ms
-  const rate = new Map();       // ip -> { n, resetAt }
+  const rate = new Map();       // peer-ip -> { n, resetAt }
+  let globalRate = { n: 0, resetAt: 0 }; // backstop across ALL peers (M-FED-RL)
 
+  // `ip` is the real socket peer (router keys on req.socket.remoteAddress, NOT a
+  // client-spoofable X-Forwarded-For). The global backstop catches the case where
+  // the peer is a shared tunnel/proxy (all traffic collapses to one key) or where
+  // an attacker could still rotate the per-key value.
   function rateLimited(ip) {
+    const t = now();
+    if (t > globalRate.resetAt) globalRate = { n: 1, resetAt: t + RATE_WINDOW_MS };
+    else if (++globalRate.n > RATE_MAX_GLOBAL) return true;
     const key = ip || '?';
     const rec = rate.get(key);
-    if (!rec || now() > rec.resetAt) { rate.set(key, { n: 1, resetAt: now() + RATE_WINDOW_MS }); return false; }
+    if (!rec || t > rec.resetAt) { rate.set(key, { n: 1, resetAt: t + RATE_WINDOW_MS }); return false; }
     rec.n += 1;
     return rec.n > RATE_MAX;
   }

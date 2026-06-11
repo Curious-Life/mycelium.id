@@ -110,7 +110,10 @@ function timingEqual(a, b) {
 export function csrfCookieMiddleware(req, res, next) {
   if (!parseCookies(req)[CSRF_COOKIE]) {
     const token = crypto.randomBytes(16).toString('hex');
-    res.append('Set-Cookie', `${CSRF_COOKIE}=${token}; Path=/; SameSite=Lax`);
+    // Secure over the relay (https end-to-end), flagless on loopback http (local
+    // dev / desktop). NOT HttpOnly by design — the SPA reads it for double-submit.
+    const https = req.secure === true || String(req.headers?.['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+    res.append('Set-Cookie', `${CSRF_COOKIE}=${token}; Path=/; SameSite=Lax${https ? '; Secure' : ''}`);
     // Make it visible to handlers within THIS request too (double-submit on the
     // very first unsafe call would otherwise lack the cookie side).
     req.headers.cookie = (req.headers.cookie ? req.headers.cookie + '; ' : '') + `${CSRF_COOKIE}=${token}`;

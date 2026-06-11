@@ -54,8 +54,11 @@ export function loadConfig(env = process.env) {
   const ollamaNumCtx = Number(env.CHANNEL_OLLAMA_NUM_CTX || 8192);
   // Local models get a TRIMMED tool surface: the full vault schema set is ~7.7k
   // tokens of prompt — past the ctx and minutes of ingest per round on a 12B.
-  // csv override; `reply` (the egress tool) is ALWAYS kept regardless.
-  const localTools = (env.CHANNEL_LOCAL_TOOLS || 'getContext,searchMindscape,remember,reply')
+  // csv override; `reply` (the egress tool) is ALWAYS kept regardless. Default is
+  // READ-ONLY (H3, 2026-06-11): a channel turn can be driven by an untrusted
+  // third party, so write tools like `remember` are NOT in the default surface —
+  // opt in explicitly via CHANNEL_LOCAL_TOOLS if the deployment accepts the risk.
+  const localTools = (env.CHANNEL_LOCAL_TOOLS || 'getContext,searchMindscape,reply')
     .split(',').map((s) => s.trim()).filter(Boolean);
   // Lane-level whole-turn budget (multi-round tool loop on a local model).
   const turnTimeoutMs = Number(env.CHANNEL_TURN_TIMEOUT_MS || 600_000);

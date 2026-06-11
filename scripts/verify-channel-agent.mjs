@@ -192,6 +192,28 @@ const msg = (t) => ({ content: t });
   await runOllamaTurn({ ollamaChat, mcpClient, systemPrompt: 's', userMessage: 'hi', signal: ac.signal });
   rec('OL11. abort signal threaded to chat calls', sawSignal === true);
 }
+{
+  // H3 DEFAULT-DENY: with NO allowTools, the model must NOT see the full surface —
+  // write tools (remember/saveDocument) are excluded; only the read-only safe set
+  // + the reply egress tool are exposed. A channel turn can be attacker-driven.
+  const mcpClient = {
+    listTools: async () => ({ tools: [
+      { name: 'mcp__v__getContext', inputSchema: {} },
+      { name: 'mcp__v__searchMindscape', inputSchema: {} },
+      { name: 'mcp__v__remember', inputSchema: {} },
+      { name: 'mcp__v__saveDocument', inputSchema: {} },
+      { name: 'mcp__v__reply', inputSchema: {} },
+    ] }),
+    callTool: async () => ({ content: [{ type: 'text', text: '{"delivered":true}' }] }),
+  };
+  let seenTools = null;
+  const ollamaChat = async (req) => { if (!seenTools) seenTools = req.tools.map((t) => t.function.name); return { message: { tool_calls: [{ function: { name: 'mcp__v__reply', arguments: { text: 'hi' } } }] } }; };
+  await runOllamaTurn({ ollamaChat, mcpClient, systemPrompt: 's', userMessage: 'hi' }); // NO allowTools
+  rec('OL12. default-deny: write tools (remember/saveDocument) NOT exposed without allowTools',
+    !!seenTools && !seenTools.includes('mcp__v__remember') && !seenTools.includes('mcp__v__saveDocument'), seenTools?.join(','));
+  rec('OL13. default-deny still exposes the read-only safe set + reply',
+    !!seenTools && seenTools.includes('mcp__v__getContext') && seenTools.includes('mcp__v__searchMindscape') && seenTools.includes('mcp__v__reply'), seenTools?.join(','));
+}
 
 // ── lane: lastTurn outcome surface (healthz forensics) ───────────────────────
 {

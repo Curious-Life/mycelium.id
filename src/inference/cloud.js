@@ -12,6 +12,7 @@
 // no SDK dependency to install, no model pinned by a transitive package.
 
 import { InferenceError } from "./errors.js";
+import { assertSafeBaseUrl } from "./base-url.js";
 
 // Defaults are overridable via INFERENCE_CLOUD_MODEL (see router.js). Anthropic
 // default favors the capable-but-balanced current Sonnet; both are just strings
@@ -116,9 +117,13 @@ async function anthropicInfer({ prompt, maxTokens, apiKey, model, fetch, timeout
   return out;
 }
 
-/** base_url → the chat-completions URL. Accepts a host, a `…/v1`, or a full URL. */
+/** base_url → the chat-completions URL. Accepts a host, a `…/v1`, or a full URL.
+ *  Validates the base_url (SSRF + exfil guard, H5) before building — throws on a
+ *  private/internal or non-http(s) target so a malicious base_url can't redirect
+ *  the prompt+key to an internal service. */
 export function resolveChatUrl(baseUrl) {
   if (!baseUrl) return OPENAI_URL;
+  assertSafeBaseUrl(baseUrl);
   const b = String(baseUrl).replace(/\/+$/, "");
   if (/\/chat\/completions$/.test(b)) return b;
   return /\/v1$/.test(b) ? `${b}/chat/completions` : `${b}/v1/chat/completions`;

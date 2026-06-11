@@ -44,8 +44,8 @@ for (const t of territories) {
 // T1 & T2 co-fire (so they are NOT a gap); T1 & T4 do not.
 await db.rawQuery(
   `INSERT INTO territory_cofire (id, user_id, territory_a, territory_b, cofire_immediate, cofire_session, cofire_daily, cofire_weekly)
-   VALUES (?, ?, 1, 2, 0, 0, 0, 0.8)`,
-  [`${U}:1:2`, U],
+   VALUES (?, ?, 1, 2, ?, ?, ?, ?)`,
+  [`${U}:1:2`, U, 0, 0, 0, 0.8],
 );
 
 // ── Run the stage ──

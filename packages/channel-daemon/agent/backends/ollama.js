@@ -16,6 +16,16 @@ import { buildReplySystemPrompt } from '../prompt.js';
 
 const REPLY_TOOL_SUFFIX = 'reply';
 
+// Default-deny read-only tool surface for an autonomous channel reply turn (H3,
+// 2026-06-11). A channel turn can be driven by an UNTRUSTED third party (group /
+// open-mode message); handing the model the full vault MCP surface lets prompt
+// injection read private data and exfiltrate it via the reply tool, or corrupt
+// the vault via write tools. So when no explicit allowTools is given we fall back
+// to these read-only tools (NOT the unfiltered set), mirroring the cloud
+// claude-sdk backend. `reply` (the egress tool) is always kept. Write tools
+// (e.g. `remember`) are never in the default — opt in via CHANNEL_LOCAL_TOOLS.
+const SAFE_DEFAULT_TOOLS = ['getContext', 'searchMindscape'];
+
 function extractText(result) {
   const c = result?.content;
   if (typeof c === 'string') return c;
@@ -33,16 +43,18 @@ function extractText(result) {
  * @param {number} [a.maxTurns]
  * @param {string[]} [a.allowTools]  trim the tool surface to these names (suffix-
  *   matched so MCP prefixes like `mcp__x__name` work); the reply tool is ALWAYS
- *   kept. Local models need this: the full schema set overflows their context.
+ *   kept. DEFAULT-DENY (H3): if omitted/empty, falls back to SAFE_DEFAULT_TOOLS
+ *   (read-only), NEVER the full surface — a channel turn may be attacker-driven.
  * @param {AbortSignal} [a.signal]  lane-level whole-turn abort, threaded to chat calls
  */
 export async function runOllamaTurn({ ollamaChat, mcpClient, systemPrompt, userMessage, maxTurns = 8, allowTools, signal }) {
   const { tools: mcpTools } = await mcpClient.listTools();
-  const kept = (allowTools && allowTools.length)
-    ? (mcpTools || []).filter((t) =>
-        t.name.endsWith(REPLY_TOOL_SUFFIX)
-        || allowTools.some((k) => t.name === k || t.name.endsWith(`__${k}`)))
-    : (mcpTools || []);
+  // Default-deny: an empty/absent allowTools falls back to the read-only safe set,
+  // NEVER the unfiltered MCP surface (H3). The reply egress tool is always kept.
+  const allow = (allowTools && allowTools.length) ? allowTools : SAFE_DEFAULT_TOOLS;
+  const kept = (mcpTools || []).filter((t) =>
+    t.name.endsWith(REPLY_TOOL_SUFFIX)
+    || allow.some((k) => t.name === k || t.name.endsWith(`__${k}`)));
   const tools = kept.map((t) => ({
     type: 'function',
     function: { name: t.name, description: t.description || '', parameters: t.inputSchema || { type: 'object', properties: {} } },

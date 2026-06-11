@@ -18,6 +18,7 @@
 import express from 'express';
 import { probeProvider } from './inference/probe.js';
 import { PROVIDER_PRESETS } from './inference/presets.js';
+import { assertSafeBaseUrlResolved } from './inference/base-url.js';
 
 const ok = (res, body = {}) => res.json({ ok: true, ...body });
 const bad = (res, code, error) => res.status(code).json({ ok: false, error });
@@ -96,6 +97,9 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     if (provider === 'custom' && !b.base_url) return bad(res, 400, 'custom provider requires base_url');
     const apiKey = typeof b.api_key === 'string' ? b.api_key.trim() : '';
     if (!apiKey && provider !== 'custom') return bad(res, 400, 'api_key is required');
+    // SSRF + exfil guard (H5): reject a private/internal or non-http(s) base_url
+    // before it's ever fetched with the prompt + the user's key.
+    if (b.base_url) { try { await assertSafeBaseUrlResolved(b.base_url); } catch (e) { return bad(res, 400, `invalid base_url: ${e.message}`); } }
     try {
       // Auto-activate the FIRST provider so onboarding's "Connect AI" step lands
       // the user on a usable model with no extra click — but never steal `active`
@@ -124,6 +128,9 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return bad(res, 400, 'invalid id');
     const b = req.body || {};
+    if (typeof b.base_url === 'string' && b.base_url) {
+      try { await assertSafeBaseUrlResolved(b.base_url); } catch (e) { return bad(res, 400, `invalid base_url: ${e.message}`); }
+    }
     try {
       if (b.is_active === true) await db.providers.setActive(id, userId);
       const fields = {};

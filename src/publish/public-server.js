@@ -44,6 +44,7 @@ function page({ title, body, handle }) {
   const by = handle ? `<footer>published by <strong>@${esc(handle)}</strong> · mycelium</footer>` : "";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title || "Mycelium")}</title>
+<meta name="referrer" content="no-referrer">
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=JetBrains+Mono&display=swap" rel="stylesheet">
 <style>:root{--bg:#0A0A0C;--surface:#141417;--ink:#E8E8EC;--muted:#9898A3;--accent:#5B9FE8;--line:#2A2A32}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.7 'Geist',system-ui,sans-serif;-webkit-font-smoothing:antialiased}
@@ -90,7 +91,16 @@ export async function startPublicServer({ dbPath, kcvPath, userHex, systemHex, u
   const envMax = Number(process.env.MYCELIUM_PUBLIC_MAX_DOC_BYTES);
   const MAX_DOC_BYTES = Number.isFinite(envMax) && envMax > 0 ? envMax : 1_048_576; // 1 MiB
 
-  const serveDoc = (res, doc) => {
+  const serveDoc = (res, doc, { unlisted = false } = {}) => {
+    // PUB-1: an unlisted doc is gated only by a capability token in the URL — keep
+    // it out of shared caches and don't leak the token via Referer. (Published /p/
+    // docs are intentionally public, so they may be cached.)
+    if (unlisted) {
+      res.set("Cache-Control", "private, no-store, max-age=0");
+      res.set("Referrer-Policy", "no-referrer");
+    } else {
+      res.set("Cache-Control", "public, max-age=300");
+    }
     let content = String(doc.content ?? "");
     // Truncate by BYTES (not UTF-16 code units) so multibyte content can't
     // exceed the cap; subarray on a byte buffer may split a codepoint, which
@@ -125,7 +135,7 @@ export async function startPublicServer({ dbPath, kcvPath, userHex, systemHex, u
       if (v.valid) {
         const doc = await db.documents.getBySlug(owner, req.params.slug);
         if (doc && doc.publish_nonce && doc.publish_nonce === v.nonce) {
-          return serveDoc(res, doc);
+          return serveDoc(res, doc, { unlisted: true });
         }
       }
     } catch { /* fall through */ }
