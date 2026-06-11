@@ -24,7 +24,7 @@
 
 const REPLY_TOOL_DESCRIPTION = `Reply to the inbound message that started this turn. Auto-targets the inbound channel (Telegram chat / Discord channel / WhatsApp DM that delivered the user's message).
 
-Use this tool instead of curl whenever you are replying to the message you were addressed in — it eliminates chatId/channelId hallucination, fills in the right reply-to id for Telegram groups, and surfaces audit/provenance correctly.
+Use this tool instead of curl whenever you are replying to the message you were addressed in — it eliminates chatId/channelId hallucination and surfaces audit/provenance correctly. Replies are plain messages by default; pass quote: true to tag/quote the user's message (Telegram reply preview) when that genuinely helps, e.g. in a busy group.
 
 Returns a JSON object: { delivered: boolean, errorCode?: string }.
 
@@ -52,6 +52,10 @@ const REPLY_TOOL_SCHEMA = {
       voice: {
         type: 'boolean',
         description: 'Telegram only — also synthesize a voice (TTS) message. Ignored on Discord/WhatsApp.',
+      },
+      quote: {
+        type: 'boolean',
+        description: "Telegram only — quote/tag the user's message you are replying to (Telegram reply preview). Default false: send a plain message. Set true only when it genuinely disambiguates — e.g. answering an older or specific message in a busy group chat. In a 1:1 DM quoting is almost never needed.",
       },
     },
     required: ['text'],
@@ -164,7 +168,10 @@ export function createReplyDomain(deps) {
       channelId: turn.channelId,
       text,
       voice: !!args?.voice && platform === 'telegram',
-      replyToMessageId: turn.inboundMessageId,
+      // Reply-tagging is the AGENT'S CHOICE (quote: true), never automatic —
+      // auto-tagging every reply reads as quote-spam in a 1:1 chat. The
+      // inbound id stays available from the active turn when the agent asks.
+      replyToMessageId: args?.quote ? turn.inboundMessageId : undefined,
       sourceKind: turn.channelKind,
       sourceId: turn.channelId,
     });

@@ -21,10 +21,11 @@ import { setActiveTurn, clearActiveTurn } from '../inbound-context.js';
 /**
  * @param {object} deps
  * @param {{runTurn:(a:{turnCtx:object,userMessage:string,signal?:AbortSignal})=>Promise<any>}} deps.runtime
+ * @param {{start:(turnCtx:object)=>(()=>void)|null}} [deps.presence]  typing indicator (presence.js)
  * @param {number} [deps.turnTimeoutMs]
  * @param {string} [deps.logPrefix]
  */
-export function createLane({ runtime, turnTimeoutMs = 600_000, logPrefix = 'channel-daemon' }) {
+export function createLane({ runtime, presence, turnTimeoutMs = 600_000, logPrefix = 'channel-daemon' }) {
   if (!runtime?.runTurn) throw new TypeError('createLane: runtime.runTurn required');
 
   let tail = Promise.resolve(); // serial chain; the worker is "whatever tail resolves to"
@@ -37,6 +38,10 @@ export function createLane({ runtime, turnTimeoutMs = 600_000, logPrefix = 'chan
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), turnTimeoutMs);
     setActiveTurn(turnCtx);
+    // Typing presence: the user sees "typing…" while the turn runs. Stopped in
+    // finally so it can never outlive the turn (error/timeout included).
+    let stopPresence = null;
+    try { stopPresence = presence?.start?.(turnCtx) || null; } catch { /* presence must never break a turn */ }
     try {
       const r = await runtime.runTurn({ turnCtx, userMessage: msg.content, signal: ac.signal });
       const verdict = r?.delivered ? 'delivered' : (r?.usedReplyTool ? 'reply-undelivered' : 'no-reply');
@@ -47,6 +52,7 @@ export function createLane({ runtime, turnTimeoutMs = 600_000, logPrefix = 'chan
       lastTurn = { at: new Date().toISOString(), chatId: String(turnCtx.channelId), verdict: 'error', error: String(e.message || e).slice(0, 200) };
       console.error(`[${logPrefix}] turn error for chat=${turnCtx.channelId}: ${e.message}`);
     } finally {
+      try { stopPresence?.(); } catch { /* never let presence cleanup throw */ }
       clearTimeout(timer);
       clearActiveTurn();
       active--;

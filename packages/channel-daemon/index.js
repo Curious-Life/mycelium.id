@@ -14,6 +14,7 @@ import { createRateLimiter } from './ratelimit.js';
 import { createDaemonApp } from './server.js';
 import { selectRuntime } from './agent/runtime.js';
 import { createLane } from './agent/lane.js';
+import { createTypingPresence } from './presence.js';
 import { createCoalescer } from './transport/coalescer.js';
 import { getActiveTurn } from './inbound-context.js';
 // telegram
@@ -46,6 +47,12 @@ export function buildDaemon(cfg, { runTurn } = {}) {
   const dedup = createEnvelopeDedup();
   const rateLimit = createRateLimiter({ maxPerWindow: cfg.rateLimitMax, windowMs: cfg.rateLimitWindowMs });
 
+  // Platform clients — declared ahead of the lane so presence can late-bind
+  // (the lane exists before the Telegram client; presence only fires mid-turn,
+  // long after both are constructed).
+  let telegram = null, poller = null, telegramSendHandler;
+  let discord = null, gateway = null, discordSendHandler;
+
   // ── shared agent-turn pipeline (one runtime/lane for all platforms) ────────
   let effectiveRunTurn = runTurn;
   let lane = null;
@@ -54,7 +61,11 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     const auditEgress = (e) => { vault.recordInferenceEgress(e); };
     const runtime = selectRuntime(cfg, { auditEgress });
     if (runtime) {
-      lane = createLane({ runtime, ...(cfg.turnTimeoutMs ? { turnTimeoutMs: cfg.turnTimeoutMs } : {}) });
+      // Typing indicator while a turn runs (Telegram DMs; presence.js gates).
+      const presence = createTypingPresence({
+        sendChatAction: (chatId) => telegram ? telegram.sendChatAction({ chatId }) : null,
+      });
+      lane = createLane({ runtime, presence, ...(cfg.turnTimeoutMs ? { turnTimeoutMs: cfg.turnTimeoutMs } : {}) });
       if (cfg.coalesceWindowMs > 0) {
         const coalescer = createCoalescer({ windowMs: cfg.coalesceWindowMs, flush: (turnCtx, merged) => lane.runTurn(turnCtx, merged) });
         effectiveRunTurn = (turnCtx, msg) => { coalescer.push(turnCtx, msg); };
@@ -75,9 +86,6 @@ export function buildDaemon(cfg, { runTurn } = {}) {
 
   const recordEgress = (entry) => { vault.recordEgress(entry); };
   const persistOutbound = (args) => { vault.captureMessage(args).catch((e) => console.error('[channel-daemon] outbound persist failed:', e.message)); };
-
-  let telegram = null, poller = null, telegramSendHandler;
-  let discord = null, gateway = null, discordSendHandler;
 
   // ── Telegram ───────────────────────────────────────────────────────────────
   if (cfg.botToken) {

@@ -163,6 +163,30 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
     },
 
     /**
+     * Presence signal — Telegram "typing…" chat action. Expires server-side
+     * after ~5s, so callers keep it alive with an interval while a turn runs
+     * (presence.js). Fire-and-forget by contract: a failed presence ping must
+     * never affect a turn, so every failure path resolves false (mirrors the
+     * canonical packages/core/telegram-api.js sendChatAction).
+     * @param {object} a
+     * @param {string|number} a.chatId
+     * @param {string} [a.action]
+     */
+    async sendChatAction({ chatId, action = 'typing' }) {
+      try {
+        const res = await fetchImpl(`${base}/sendChatAction`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, action }),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        return res.ok;
+      } catch {
+        return false;
+      }
+    },
+
+    /**
      * Send a voice note (OGG/OPUS). Multipart upload over fetch — no Grammy.
      * @param {object} a
      * @param {string|number} a.chatId
