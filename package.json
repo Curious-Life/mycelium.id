@@ -130,6 +130,7 @@
     "verify:model-caps": "node scripts/verify-model-caps.mjs",
     "verify:attachment-context": "node scripts/verify-attachment-context.mjs",
     "verify:ogg-opus": "node scripts/verify-ogg-opus.mjs",
+    "verify:portal-attachments": "node scripts/verify-portal-attachments.mjs",
     "verify:channel-egress": "node scripts/verify-channel-egress.mjs",
     "verify:channel-egress-e2e": "node scripts/verify-channel-egress-e2e.mjs",
     "verify:channel-inbound": "node scripts/verify-channel-inbound.mjs",

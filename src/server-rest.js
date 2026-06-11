@@ -144,6 +144,9 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
     authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
   }));
   v.use('/api/v1/portal', portalUploadsRouter({ db, userId, enqueueEnrichment }));
+  // Media library (the portal's /media view): list / preview / edit / delete
+  // attachments — channel media + portal uploads. Same auth gate as uploads.
+  v.use('/api/v1/portal', portalAttachmentsRouter({ db, userId }));
   v.use('/api/v1/portal', portalProvidersRouter({ db, userId }));
   // One lazy Ollama daemon controller, shared by the hardware routes; stopped in
   // closeHandle. dataDir = where we download the runtime + store its models (app-

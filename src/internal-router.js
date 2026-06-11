@@ -334,7 +334,10 @@ export function internalRouter({ db, userId, enrich = {} }) {
       let contextText = null;
 
       if (kind === 'image') {
-        contextText = await describeImage({ bytes });
+        // Explicit budget: describeImage defaults to 30s (portal-upload UX),
+        // but a COLD 12B vision call takes ~110s live — the channel path is
+        // async (placeholder degrades gracefully) so it can afford to wait.
+        contextText = await describeImage({ bytes, timeoutMs: Number(process.env.MYCELIUM_VISION_TIMEOUT_MS) || 240_000 });
         if (contextText) await db.attachments.update(attachmentId, { description: contextText });
       } else if (kind === 'audio' || kind === 'voice') {
         contextText = await transcribeAudio({ bytes, mimeType: fileType, fileName });
