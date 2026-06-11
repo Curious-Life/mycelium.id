@@ -151,7 +151,7 @@
 	style={isMobile ? '' : `width: ${isOpen ? sidebarWidth + 'px' : '0'};`}
 >
 	<!-- Scrollable nav region: primary nav + contextual nav scroll together so a
-	     tall list (core + Curious Life + Recents + an expanded "Coming later") can
+	     tall list (core + Curious Life + an expanded "Coming later") can
 	     never push Settings / the user footer off-screen. Settings + footer are
 	     pinned below as flex-shrink-0 siblings. -->
 	<div class="flex-1 min-h-0 overflow-y-auto">
@@ -243,23 +243,6 @@
 					<span class="curious-label text-sm font-medium">Curious Life</span>
 				</button>
 			</div>
-
-			<!-- Recents — recently-closed tabs/items; click to reopen in the focused pane. -->
-			{#if $workspace.recents.length > 0}
-				<div class="mt-3 pt-3 border-t border-[var(--color-border)]">
-					<div class="px-3 py-1.5 mb-1 text-[0.65rem] font-semibold text-[var(--color-text-tertiary)] uppercase tracking-widest">Recents</div>
-					{#each $workspace.recents.slice(0, 6) as r (r.viewId + JSON.stringify(r.params))}
-						<button
-							onclick={() => { workspace.openOrFocus(r.viewId, r.params); closeMobileDrawer(); }}
-							class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)] transition-colors"
-							title={r.title}
-						>
-							<div class="w-1.5 h-1.5 rounded-full bg-[var(--color-text-tertiary)] flex-shrink-0 opacity-50"></div>
-							<span class="text-sm truncate">{r.title}</span>
-						</button>
-					{/each}
-				</div>
-			{/if}
 
 			<!-- Coming later: planned screens (modules · social · agents), shown
 			     as disabled chips so the roadmap is visible without dead links.
