@@ -68,6 +68,10 @@ export function createOpenAiCompatRuntime(cfg) {
           ollamaChat: openaiChat, mcpClient,
           systemPrompt: buildReplySystemPrompt({ turnCtx, persona: cfg.persona }),
           userMessage, maxTurns: cfg.maxTurns || 8,
+          // Explicit read-only allowlist (H3): never hand a possibly attacker-driven
+          // channel turn the full MCP surface. Falls back to runOllamaTurn's
+          // default-deny safe set when cfg.localTools is unset.
+          allowTools: cfg.localTools,
         });
       } finally {
         try { await mcpClient.close?.(); } catch { /* */ }
