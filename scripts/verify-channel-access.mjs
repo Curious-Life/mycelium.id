@@ -23,7 +23,8 @@ process.env.MYCELIUM_USER_ID = 'verify-user'; // vault binds this userId at boot
 {
   // open → anyone
   rec('A1. open → stranger responds', decideAccess({ mode: 'open' }, '999', OWNER).respond === true);
-  rec('A2. missing policy defaults to open', decideAccess(null, '999', OWNER).respond === true);
+  rec('A2. missing policy defaults to ALLOWLIST (stranger dropped, fail-closed)', decideAccess(null, '999', OWNER).respond === false && decideAccess(null, '999', OWNER).mode === 'allowlist');
+  rec('A2b. missing policy default still responds to the OWNER', decideAccess(null, OWNER, OWNER).respond === true);
   // owner → only owner
   rec('A3. owner mode → owner responds', decideAccess({ mode: 'owner' }, OWNER, OWNER).respond === true);
   rec('A4. owner mode → stranger dropped', decideAccess({ mode: 'owner' }, '999', OWNER).respond === false);
@@ -57,8 +58,9 @@ try {
   const d2 = await ca.decide('discord', 'C1', '999', OWNER);
   rec('A11. decide via vault: listed=allow, stranger=deny', d1.respond === true && d2.respond === false);
 
-  // default (no row) → open
-  rec('A12. unset channel decides open (default)', (await ca.decide('discord', 'NOPE', '999', OWNER)).respond === true);
+  // default (no row) → allowlist (fail-closed): stranger dropped, owner allowed
+  rec('A12. unset channel decides allowlist default (stranger dropped)', (await ca.decide('discord', 'NOPE', '999', OWNER)).respond === false);
+  rec('A12b. unset channel still responds to the owner', (await ca.decide('discord', 'NOPE', OWNER, OWNER)).respond === true);
 
   // encryption-at-rest: raw row ciphertext must NOT contain the plaintext ids
   const raw = new Database(DB, { readonly: true }).prepare('SELECT allowed_senders_json FROM channel_access WHERE channel_value = ?').get('C1');
@@ -71,7 +73,7 @@ try {
   rec('A14. endpoint: owner responds (implicit)', (await acc('telegram-group', 'G1', OWNER)).respond === true);
   rec('A15. endpoint: allowlisted sender responds', (await acc('telegram-group', 'G1', '222')).respond === true);
   rec('A16. endpoint: stranger dropped', (await acc('telegram-group', 'G1', '999')).respond === false);
-  rec('A17. endpoint: unset channel → open default', (await acc('telegram-group', 'OPEN', '999')).respond === true);
+  rec('A17. endpoint: unset channel → allowlist default (stranger dropped)', (await acc('telegram-group', 'OPEN', '999')).respond === false);
 
   // ── B2: daemon inbound sender filter (DI, fake checkChannelAccess) ─────────
   process.env.MYCELIUM_USER_ID = 'verify-user';
