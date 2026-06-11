@@ -99,7 +99,7 @@ async function main() {
 
     rec("L11. setPublicSlug returns a publish_nonce (capability epoch)", typeof bRow.publish_nonce === "string" && bRow.publish_nonce.length >= 16);
     const bTok = mintLink(identity, { slug: "b-unl", nonce: bRow.publish_nonce });
-    const get = async (p) => { const r = await fetch(`${url}${p}`); return { status: r.status, body: await r.text() }; };
+    const get = async (p) => { const r = await fetch(`${url}${p}`); return { status: r.status, body: await r.text(), headers: r.headers }; };
 
     const a = await get("/p/a-pub");
     rec("S1. public doc served at /p/:slug", a.status === 200 && a.body.includes("PUBLIC_A_BODY"), `status=${a.status}`);
@@ -107,6 +107,9 @@ async function main() {
     rec("S2. unlisted doc NOT served at /p/:slug", bPub.status === 404 && !bPub.body.includes("UNLISTED_B_BODY"), `status=${bPub.status}`);
     const bUnl = await get(`/s/b-unl?t=${encodeURIComponent(bTok)}`);
     rec("S3. unlisted doc served at /s/:slug with a valid token", bUnl.status === 200 && bUnl.body.includes("UNLISTED_B_BODY"), `status=${bUnl.status}`);
+    rec("S3b. unlisted response is no-store + no-referrer (PUB-1: token not cached/leaked)",
+      /no-store/.test(bUnl.headers.get("cache-control") || "") && (bUnl.headers.get("referrer-policy") || "") === "no-referrer"
+      && bUnl.body.includes('name="referrer" content="no-referrer"'), `cc=${bUnl.headers.get("cache-control")}`);
     const bBad = await get(`/s/b-unl?t=${encodeURIComponent(bTok)}TAMPER`);
     rec("S4. unlisted with a bad token → 404", bBad.status === 404 && !bBad.body.includes("UNLISTED_B_BODY"));
     const bNo = await get("/s/b-unl");
