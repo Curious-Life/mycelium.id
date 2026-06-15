@@ -38,6 +38,8 @@ import { createInferenceRouter } from '../inference/router.js';
 import { resolveChatUrl } from '../inference/cloud.js';
 import { createEgressAuditSink } from '../inference/egress.js';
 import { inferWithCascade } from '../inference/cascade.js';
+import { estimateTokens } from '../inference/token-budget.js';
+import { createUsageSink } from '../inference/usage.js';
 
 // §4g cascade (opt-in). Default OFF → the single active provider preserves v1
 // behavior; ON → try EU→frontier→local until one succeeds. The preference is a
@@ -107,8 +109,9 @@ export function flattenMessages(messages) {
 }
 
 // Approximate token count (~4 chars/token) for the usage block. Clients only
-// need a plausible shape; we never have exact provider counts in v1.
-const approxTokens = (s) => Math.max(1, Math.ceil(String(s || '').length / 4));
+// need a plausible shape; we never have exact provider counts in v1. Shared
+// estimator (src/inference/token-budget.js) — same chars/4 + floor-of-1.
+const approxTokens = estimateTokens;
 
 function clampMaxTokens(v) {
   const n = Number(v);
@@ -218,6 +221,7 @@ function modelIdForProvider(p) {
  */
 export function createGatewayHandlers({ db, userId = 'local-user', fetch = globalThis.fetch, getContext, captureMessage } = {}) {
   const onEgress = createEgressAuditSink(db, userId);
+  const onUsage = createUsageSink(db, userId, { source: 'gateway' });
 
   // ── Memory bridge (opt-in via `X-Mycelium-Capture: <conversationId>`) ────────
   // When a harness sends that header AND the deps are wired, the gateway turns a
@@ -268,7 +272,7 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
   // takes effect immediately. Cheap (one indexed read) for a single-user vault.
   async function buildRouter() {
     const cfg = await resolveInferenceConfig(db, userId);
-    return createInferenceRouter({ ...cfg, onEgress, fetch });
+    return createInferenceRouter({ ...cfg, onEgress, onUsage, fetch });
   }
 
   // Tools pass-through: a request carrying `tools` is transparently proxied to an
@@ -374,7 +378,7 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
       // sensitive request skips US providers. Default OFF → the single active
       // provider (router). Streaming above is single-provider by design.
       const text = (await isCascadeEnabled(db, userId))
-        ? await inferWithCascade({ chain: await resolveProviderChain(db, userId, { sensitive }), prompt, task: 'complex', maxTokens, sensitive, onEgress, fetch })
+        ? await inferWithCascade({ chain: await resolveProviderChain(db, userId, { sensitive }), prompt, task: 'complex', maxTokens, sensitive, onEgress, onUsage, fetch })
         : await router.infer({ prompt, task: 'complex', maxTokens, sensitive });
       if (conv) fireCapture(conv, 'assistant', text);
       const completion = buildCompletion({ model, prompt, text });

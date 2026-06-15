@@ -23,12 +23,14 @@
 
 import { createEmbedClient } from '../embed/client.js';
 import { GatewayError } from './openai-compat.js';
+import { estimateTokens } from '../inference/token-budget.js';
 
 export const EMBED_MODEL_ID = 'nomic-embed-text-v1.5';
 
 // Approximate token count (~4 chars/token) for the usage block — clients only
-// need a plausible shape; the embed-service does not return token counts.
-const approxTokens = (s) => Math.max(1, Math.ceil(String(s || '').length / 4));
+// need a plausible shape; the embed-service does not return token counts. Shared
+// estimator (src/inference/token-budget.js) — same chars/4 + floor-of-1.
+const approxTokens = estimateTokens;
 
 // OpenAI's base64 embedding format = the raw float32 buffer (little-endian),
 // base64-encoded. Float32Array is little-endian on every platform Node targets.

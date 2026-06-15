@@ -31,6 +31,7 @@ import { captureMessage } from './capture.js';
 import { saveDocument } from '../core/document-store.js';
 import { parseMarkdownNote } from './markdown.js';
 import { putBlob } from './blob-store.js';
+import { recordContentFlow } from '../inference/usage.js';
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024; // 2MB per note
 const MAX_FILES = 20000;                // total vault cap (logged if hit)
@@ -385,5 +386,11 @@ export async function importObsidianVault(db, { userId, folderPath, files, vault
 
   // Distinct folders this import touched (root + each subfolder it placed notes in).
   summary.folders = touchedFolders.size;
+
+  // §12 token-flow: record the estimated token volume that flowed in via this
+  // import so the Usage surface shows how much is moving through ingest (no model
+  // touched this content, so it's a chars/4 estimate, not provider counts).
+  recordContentFlow(db, userId, { source: 'ingest', area: 'import', content: work.map((w) => w.content) });
+
   return summary;
 }

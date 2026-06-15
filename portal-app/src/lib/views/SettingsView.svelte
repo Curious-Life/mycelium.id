@@ -10,6 +10,7 @@
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
 	import ChannelsSection from '$lib/components/settings/ChannelsSection.svelte';
 	import AISettings from '$lib/components/settings/AISettings.svelte';
+	import UsageSection from '$lib/components/settings/UsageSection.svelte';
 	import AIAccessSection from '$lib/components/settings/AIAccessSection.svelte';
 	import AgentCaptureSection from '$lib/components/settings/AgentCaptureSection.svelte';
 	import ManagedConnectSection from '$lib/components/settings/ManagedConnectSection.svelte';
@@ -129,6 +130,7 @@
 		] },
 		{ title: 'Intelligence & access', items: [
 			{ id: 'intelligence', label: 'Intelligence', icon: 'sparkles', desc: 'The model that powers Mycelium' },
+			{ id: 'usage', label: 'Usage', icon: 'chart', desc: 'Token consumption — input/output by area and model' },
 			{ id: 'connections', label: 'Connections', icon: 'plug', desc: 'Use Mycelium from your other apps and devices' },
 			{ id: 'channels', label: 'Channels', icon: 'messages', desc: 'Where your agent may listen and reply' },
 			{ id: 'integrations', label: 'Integrations', icon: 'puzzle', desc: 'Connect third-party tools with your own keys' },
@@ -1086,6 +1088,8 @@
 		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15A2.25 2.25 0 0 0 2.25 6.75v10.5A2.25 2.25 0 0 0 4.5 19.5z"/></svg>
 	{:else if name === 'id'}
 		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15 9h3.75M15 12h3.75M15 15h3.75M4.5 19.5h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15A2.25 2.25 0 0 0 2.25 6.75v10.5A2.25 2.25 0 0 0 4.5 19.5zm6-10.125a1.875 1.875 0 1 1-3.75 0 1.875 1.875 0 0 1 3.75 0zm1.294 6.336a5.5 5.5 0 0 0-6.338 0 .53.53 0 0 0-.21.434c0 .29.235.525.526.525h5.706c.29 0 .526-.234.526-.525a.53.53 0 0 0-.21-.434z"/></svg>
+	{:else if name === 'chart'}
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 20.25h18M6 20.25V13.5m4.5 6.75V8.25M15 20.25v-9m4.5 9V6.75"/></svg>
 	{/if}
 {/snippet}
 
@@ -1180,6 +1184,11 @@
 			<!-- Bring your own domain / relay (free) — operator password, public URL,
 			     enable toggle, own-relay advanced. -->
 			<RemoteAccessSection />
+			{/if}
+
+			{#if activePane === 'usage'}
+			<!-- Token usage transparency — input/output by area/source/provider/model -->
+			<UsageSection />
 			{/if}
 
 			{#if activePane === 'intelligence'}

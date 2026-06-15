@@ -17,7 +17,10 @@ import express from 'express';
 import { createAgentHarness, describeProvider } from './agent/harness.js';
 import { toolsForDomains, normalizePolicy, defaultPolicy, DOMAINS } from './agent/tool-domains.js';
 import { resolveInferenceConfigForTask } from './inference/resolve.js';
+import { resolveModelProfile } from './inference/model-profile.js';
+import { planGeneration, estimateTokens, trimToTokenBudget } from './inference/token-budget.js';
 import { createEgressAuditSink } from './inference/egress.js';
+import { createUsageSink } from './inference/usage.js';
 import { captureMessage } from './ingest/capture.js';
 
 const POLICY_KEY = 'AI_ACCESS_POLICY';
@@ -41,7 +44,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
 
   const router = express.Router();
   router.use(express.json({ limit: '256kb' }));
-  const harness = createAgentHarness({ onEgress: createEgressAuditSink(db, userId), fetch, logger: (m) => console.error(`[chat] ${m}`) });
+  const harness = createAgentHarness({ onEgress: createEgressAuditSink(db, userId), onUsage: createUsageSink(db, userId, { source: 'chat' }), fetch, logger: (m) => console.error(`[chat] ${m}`) });
 
   const auth = (req, res) => { const u = authenticatePortalRequest(req); if (!u) { res.status(401).json({ error: 'Unauthorized' }); return null; } return u; };
 
@@ -165,7 +168,13 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       // cloud model takes the full context. (jurisdiction:'local' = on-box.)
       const isLocal = info.local;
       const recentN = isLocal ? 5 : 12;
-      const sysCap = isLocal ? 5000 : 28000;
+      // Model-aware budgeting: resolve the model's REAL window + output cap and
+      // budget the system preamble in TOKENS, replacing the old binary 5000/28000
+      // char cap (which starved 128k-window models and overflowed small ones). The
+      // probe is fail-soft + cached → no profile ⇒ the legacy char cap below.
+      const profile = await resolveModelProfile(provider, { fetch, defaultModel: info.model }).catch(() => null);
+      const plan = profile ? planGeneration(profile, { task: 'chat' }) : null;
+      const sysCap = isLocal ? 5000 : 28000; // fallback char cap when no profile
       // Local models (small on-box Ollama) are VERY slow to first token when tools
       // are attached — Ollama constrains generation to the tool grammar, which on a
       // 12B reasoning model pushes time-to-first-token to 30s+ (measured). They also
@@ -180,7 +189,14 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
         try { const hits = await handlers.searchMindscape({ query: message, limit: 5 }); if (typeof hits === 'string' && hits) system += `\n\n## Possibly relevant to this question\n${hits}`; } catch { /* skip */ }
         send({ type: 'tool_complete', name: 'searchMemory' });
       }
-      if (system.length > sysCap) system = system.slice(0, sysCap) + '\n\n[context truncated for this model]';
+      if (plan) {
+        // Leave room for the user message + the model's output within the window.
+        const budget = Math.max(512, plan.inputBudget - estimateTokens(message));
+        const trimmed = trimToTokenBudget(system, budget);
+        system = trimmed.text;
+      } else if (system.length > sysCap) {
+        system = system.slice(0, sysCap) + '\n\n[context truncated for this model]';
+      }
 
       const grantedNames = new Set(grantedTools.map((t) => t.name));
       const call = async (name, args) => {
@@ -207,7 +223,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
           send({ type: 'retry', attempt });
           console.error(`[chat] empty/stalled — retry ${attempt}/${MAX_RETRIES} after ${backoff}ms`);
         }
-        try { result = await harness.streamTurn({ provider, system, userMessage: message, tools: isLocal ? [] : grantedTools, call, send: captureText, signal: ctrl.signal }); lastErr = null; }
+        try { result = await harness.streamTurn({ provider, system, userMessage: message, tools: isLocal ? [] : grantedTools, call, send: captureText, signal: ctrl.signal, maxTokens: plan?.maxTokens, numCtx: plan?.numCtx }); lastErr = null; }
         catch (e) { lastErr = e; console.error('[chat] attempt failed:', e?.status || '', e?.message); }
         if (clientGone || assistantText.trim() || attempt >= MAX_RETRIES) break;
       }

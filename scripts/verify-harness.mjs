@@ -88,12 +88,15 @@ const TOOLS = [{ name: 'searchMindscape', description: 's', inputSchema: { type:
 }
 
 // ── H3 no-tool model: errors when tools present, retry text-only ──
+// (A CLOUD OpenAI-compatible model that rejects the `tools` param. Local chat is
+// now tool-free by construction — the native /api/chat adapter never sends tools —
+// so this fallback applies to the cloud openai path; see verify:harness-local L10.)
 {
   const queue = [errRes(400), streamRes(oFinal)];
   const fetch = async (url, opts) => { const b = JSON.parse(opts.body); if (b.tools) return queue.shift(); /* first call has tools → err */ return queue.shift(); };
   const events = []; let logged = '';
   const h = createAgentHarness({ fetch, logger: (m) => { logged += m; } });
-  const r = await h.streamTurn({ provider: { baseUrl: 'http://127.0.0.1:11434/v1', jurisdiction: 'local' }, system: 'SYS', userMessage: 'hi', tools: TOOLS, call: async () => 'X', send: (e) => events.push(e) });
+  const r = await h.streamTurn({ provider: { openaiApiKey: 'K', jurisdiction: 'us-standard' }, system: 'SYS', userMessage: 'hi', tools: TOOLS, call: async () => 'X', send: (e) => events.push(e) });
   rec('H3 fell back to text-only (no tool events)', !events.some((e) => e.type === 'tool_start') && events.some((e) => e.type === 'text_delta'), JSON.stringify(events.map((e) => e.type)));
   rec('H3 fallback logged', /falling back to text-only/.test(logged));
   rec('H3 returned an answer', events.filter((e) => e.type === 'text_delta').map((e) => e.content).join('') === 'Here you go.');

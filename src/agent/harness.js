@@ -187,20 +187,97 @@ const openaiAdapter = {
   },
 };
 
+const LOOPBACK_RE = /(?:\/\/)?(?:127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])/;
+
+// ── Native Ollama adapter (LOCAL chat) ───────────────────────────────────────
+// Local chat is tool-free (portal-chat strips tools for local — slow TTFB + poor
+// tool use on small models), so this is a TEXT-ONLY streaming adapter over Ollama's
+// NATIVE /api/chat. The reason it isn't the OpenAI-compatible /v1 surface: /v1
+// IGNORES num_ctx, so the model silently truncates a long briefing at Ollama's
+// ~4096 default. /api/chat honors options.num_ctx, so streamTurn can size the
+// window to hold the whole prompt + the reply. Leak-safe (no prompt/response echo).
+const ollamaNativeAdapter = {
+  kind: 'ollama',
+  mapTools: () => [],                                   // local runs tool-free
+  init: ({ userMessage }) => [{ role: 'user', content: userMessage }],
+  pushAssistant(messages, text) { messages.push({ role: 'assistant', content: text || '' }); },
+  toolResult: (tc, out) => ({ role: 'tool', content: String(out) }),
+  pushToolResults(messages, results) { for (const r of results) messages.push(r); },
+
+  async streamOnce({ cfg, system, messages, model, maxTokens, numCtx, send, signal, fetch, timeoutMs }) {
+    const host = String(cfg.baseUrl || DEFAULT_OLLAMA_URL).replace(/\/+$/, '');
+    const options = { num_predict: maxTokens };
+    if (Number.isFinite(numCtx) && numCtx > 0) options.num_ctx = Math.round(numCtx);
+    const body = { model, stream: true, think: false, options, messages: [{ role: 'system', content: system }, ...messages] };
+    // Connection (TTFB) timeout only — a long generation must not be aborted
+    // mid-flight; the turn's signal handles stall/disconnect/abort.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    if (signal) { if (signal.aborted) controller.abort(); else signal.addEventListener('abort', () => controller.abort(), { once: true }); }
+    let res;
+    try {
+      res = await fetch(`${host}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal });
+    } catch (err) {
+      clearTimeout(timer);
+      throw new InferenceError(`harness: Ollama unreachable at ${host}/api/chat`, { cause: err, backend: 'local' });
+    }
+    clearTimeout(timer);
+    if (!res.ok) throw new InferenceError(`harness: Ollama error (status ${res.status})`, { status: res.status, backend: 'local' });
+    if (!res.body) throw new InferenceError('harness: Ollama returned no stream body', { backend: 'local' });
+
+    let text = '';
+    const usage = { inputTokens: 0, outputTokens: 0 };
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (signal?.aborted) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let ev; try { ev = JSON.parse(line); } catch { continue; } // skip a partial/garbled line
+          const c = ev.message?.content;
+          if (typeof c === 'string' && c) { text += c; send({ type: 'text_delta', content: c }); }
+          // Thinking models stream reasoning here if think:false isn't honored —
+          // surface it so the chat inactivity watchdog sees progress (mirror openai).
+          const th = ev.message?.thinking;
+          if (typeof th === 'string' && th) send({ type: 'thinking_delta', content: th });
+          if (ev.done) {
+            if (Number.isFinite(ev.prompt_eval_count)) usage.inputTokens = ev.prompt_eval_count;
+            if (Number.isFinite(ev.eval_count)) usage.outputTokens = ev.eval_count;
+          }
+        }
+      }
+    } catch (err) {
+      if (!signal?.aborted) throw err;   // genuine stream error → propagate; abort → keep partial
+    }
+    return { text, toolCalls: [], stopReason: 'stop', usage, isTool: false, aborted: !!signal?.aborted };
+  },
+};
+
 // ── Provider normalization ───────────────────────────────────────────────────
 // resolveInferenceConfig returns {anthropicApiKey?, openaiApiKey?, baseUrl?,
 // cloudModel?, jurisdiction?}. An empty object = no provider configured → the
-// guaranteed floor: on-box Ollama over its OpenAI-compatible /v1 surface.
+// guaranteed floor: on-box Ollama via its NATIVE /api/chat (so num_ctx is sizable).
 function normalizeProvider(cfg = {}) {
   if (cfg.anthropicApiKey) {
     return { adapter: anthropicAdapter, cfg, model: cfg.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard' };
   }
-  if (cfg.openaiApiKey || cfg.baseUrl) {
+  const isLocal = cfg.jurisdiction === 'local' || (!!cfg.baseUrl && LOOPBACK_RE.test(cfg.baseUrl));
+  // Non-local cloud over the OpenAI-compatible surface (OpenAI / OpenRouter / EU-ZDR …).
+  if ((cfg.openaiApiKey || cfg.baseUrl) && !isLocal) {
     return { adapter: openaiAdapter, cfg, model: cfg.cloudModel || DEFAULT_OPENAI_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard' };
   }
-  // Local floor: Ollama's OpenAI-compatible endpoint. Tool-calling depends on the
-  // model; if it rejects tools, streamTurn retries text-only (the relay floor).
-  return { adapter: openaiAdapter, cfg: { baseUrl: `${DEFAULT_OLLAMA_URL}/v1` }, model: cfg.cloudModel || DEFAULT_LOCAL_MODEL, jurisdiction: 'local', local: true };
+  // Local Ollama — a configured local provider OR the no-provider floor. Native
+  // /api/chat (baseUrl stripped of any /v1 suffix) so streamTurn can size num_ctx.
+  const host = String(cfg.baseUrl || DEFAULT_OLLAMA_URL).replace(/\/v1\/?$/, '').replace(/\/+$/, '');
+  return { adapter: ollamaNativeAdapter, cfg: { ...cfg, baseUrl: host }, model: cfg.cloudModel || DEFAULT_LOCAL_MODEL, jurisdiction: 'local', local: true };
 }
 
 /**
@@ -243,7 +320,7 @@ export function describeProvider(cfg = {}) {
  * @param {number} [opts.timeoutMs]           per-call connection (TTFB) timeout
  * @param {(msg:string)=>void} [opts.logger]
  */
-export function createAgentHarness({ onEgress, fetch = globalThis.fetch, timeoutMs = 120000, logger = () => {} } = {}) {
+export function createAgentHarness({ onEgress, onUsage, fetch = globalThis.fetch, timeoutMs = 120000, logger = () => {} } = {}) {
   /**
    * Drive ONE user turn to completion, streaming SSE-shaped events via send().
    * @param {object} a
@@ -258,7 +335,7 @@ export function createAgentHarness({ onEgress, fetch = globalThis.fetch, timeout
    * @param {number} [a.maxTokens=4096]
    * @returns {Promise<{toolsUsed:string[], capped?:boolean}>}
    */
-  async function streamTurn({ provider, system, userMessage, tools = [], call, send, signal, maxIterations = 8, maxTokens = 4096 }) {
+  async function streamTurn({ provider, system, userMessage, tools = [], call, send, signal, maxIterations = 8, maxTokens = 4096, numCtx }) {
     const { adapter, cfg, model, jurisdiction, local } = normalizeProvider(provider);
     const messages = adapter.init({ userMessage });
     let toolDefs = adapter.mapTools(tools);
@@ -271,7 +348,16 @@ export function createAgentHarness({ onEgress, fetch = globalThis.fetch, timeout
       } catch { /* audit must never break the turn */ }
     };
 
-    const once = (defs, first) => adapter.streamOnce({ cfg, system, messages, toolDefs: defs, model, maxTokens, send, signal, fetch, timeoutMs, logger }).catch((err) => {
+    // §12 token-usage accounting — the provider reports real counts; record them
+    // (counts only, never the messages). Fires once per turn on completion.
+    const recordUsage = (usage) => {
+      try {
+        if (!usage || typeof onUsage !== 'function') return;
+        onUsage({ area: 'chat', isLocal: !!local, provider: adapter.kind, model, jurisdiction, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, estimated: false });
+      } catch { /* accounting must never break the turn */ }
+    };
+
+    const once = (defs, first) => adapter.streamOnce({ cfg, system, messages, toolDefs: defs, model, maxTokens, numCtx, send, signal, fetch, timeoutMs, logger }).catch((err) => {
       // No-tool model (common with small local models): retry the very first call
       // without tools → degrade to a plain context-grounded answer (the relay floor).
       if (first && defs && defs.length) { logger(`harness: provider rejected tools (${err?.status || '?'}); falling back to text-only`); toolDefs = []; return null; }
@@ -285,7 +371,7 @@ export function createAgentHarness({ onEgress, fetch = globalThis.fetch, timeout
       if (r === null) r = await once([], false);   // tool-fallback retry, no tools
       if (r.aborted) return { toolsUsed, aborted: true };   // stall/disconnect — partial text already streamed
       adapter.pushAssistant(messages, r.text, r.toolCalls);
-      if (!r.isTool || !r.toolCalls.length) { if (r.usage) send({ type: 'usage', inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens }); return { toolsUsed, local: !!local }; }
+      if (!r.isTool || !r.toolCalls.length) { if (r.usage) { send({ type: 'usage', inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens }); recordUsage(r.usage); } return { toolsUsed, local: !!local }; }
 
       const results = [];
       for (const tc of r.toolCalls) {
@@ -304,8 +390,8 @@ export function createAgentHarness({ onEgress, fetch = globalThis.fetch, timeout
     // not a silent stop. Logged (no silent caps).
     logger(`harness: hit maxIterations=${maxIterations}; final answer pass without tools`);
     audit();
-    const fin = await adapter.streamOnce({ cfg, system, messages, toolDefs: null, model, maxTokens, send, signal, fetch, timeoutMs, logger });
-    if (fin.usage) send({ type: 'usage', inputTokens: fin.usage.inputTokens, outputTokens: fin.usage.outputTokens });
+    const fin = await adapter.streamOnce({ cfg, system, messages, toolDefs: null, model, maxTokens, numCtx, send, signal, fetch, timeoutMs, logger });
+    if (fin.usage) { send({ type: 'usage', inputTokens: fin.usage.inputTokens, outputTokens: fin.usage.outputTokens }); recordUsage(fin.usage); }
     return { toolsUsed, capped: true };
   }
 

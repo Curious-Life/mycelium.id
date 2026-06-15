@@ -22,6 +22,7 @@ import { portalImportRouter } from './portal-import.js';
 import { portalSettingsRouter } from './portal-settings.js';
 import { portalChatRouter } from './portal-chat.js';
 import { portalActivityRouter } from './portal-activity.js';
+import { portalUsageRouter } from './portal-usage.js';
 import { portalTranscriptionRouter } from './portal-transcription.js';
 import { ensureTranscribeSupervisor } from './transcribe/supervisor.js';
 import { detectHardware } from './hardware/detect.js';
@@ -144,6 +145,11 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath }));
   // Unified activity feed (background_jobs) — header stream indicator + mindscape chip.
   v.use('/api/v1/portal', portalActivityRouter({
+    db, userId,
+    authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
+  }));
+  // Token-usage transparency (input/output by area/source/provider/model/day).
+  v.use('/api/v1/portal', portalUsageRouter({
     db, userId,
     authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
   }));

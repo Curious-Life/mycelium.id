@@ -20,6 +20,7 @@ import { createHash } from "node:crypto";
 import { localInfer, localStream, DEFAULT_OLLAMA_URL, DEFAULT_LOCAL_MODEL } from "./local.js";
 import { cloudInfer, cloudStream } from "./cloud.js";
 import { InferenceError } from "./errors.js";
+import { planGeneration, estimateTokens } from "./token-budget.js";
 
 export const LOCAL_TASKS = Object.freeze(["summarize", "classify", "extract"]);
 export const CLOUD_TASKS = Object.freeze(["narrate", "complex"]);
@@ -47,6 +48,7 @@ export function createInferenceRouter({
   baseUrl,
   jurisdiction,
   onEgress,
+  onUsage,
   cloudFallbackToLocal = true,
   timeoutMs = 60000,
   env = process.env,
@@ -67,12 +69,36 @@ export function createInferenceRouter({
   // local/self-hosted base_url servers are keyless).
   const hasCloud = () => Boolean(cfg.anthropicApiKey || cfg.openaiApiKey || cfg.baseUrl);
 
-  function runLocal({ prompt, maxTokens, numCtx, format }) {
-    return localInfer({ prompt, maxTokens, numCtx, format, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs });
+  // §12 token-usage accounting — enrich a backend's raw {inputTokens,outputTokens}
+  // with provider/model/jurisdiction/area + an estimate fallback, then forward to
+  // the user's onUsage sink. Counts only, never content. Fail-soft.
+  function emitUsage({ prompt, text, raw, area, isLocal, model, provider }) {
+    if (typeof onUsage !== "function") return;
+    try {
+      const inOk = Number.isFinite(raw?.inputTokens) && raw.inputTokens > 0;
+      const outOk = Number.isFinite(raw?.outputTokens) && raw.outputTokens > 0;
+      onUsage({
+        area, isLocal,
+        provider: provider || (isLocal ? "local" : providerLabel()),
+        model: model || (isLocal ? cfg.localModel : cfg.cloudModel) || null,
+        jurisdiction: isLocal ? "local" : cloudJurisdiction(),
+        inputTokens: inOk ? raw.inputTokens : estimateTokens(prompt),
+        outputTokens: outOk ? raw.outputTokens : estimateTokens(String(text ?? "")),
+        estimated: !(inOk && outOk),
+      });
+    } catch { /* accounting must never break inference */ }
   }
 
-  function runCloud({ prompt, maxTokens }) {
-    return cloudInfer({
+  async function runLocal({ prompt, maxTokens, numCtx, format, area }) {
+    let raw = null;
+    const text = await localInfer({ prompt, maxTokens, numCtx, format, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs, onUsage: (u) => { raw = u; } });
+    emitUsage({ prompt, text, raw, area, isLocal: true });
+    return text;
+  }
+
+  async function runCloud({ prompt, maxTokens, area }) {
+    let raw = null;
+    const text = await cloudInfer({
       prompt, maxTokens,
       anthropicApiKey: cfg.anthropicApiKey,
       openaiApiKey: cfg.openaiApiKey,
@@ -80,15 +106,27 @@ export function createInferenceRouter({
       model: cfg.cloudModel,
       fetch: cfg.fetch,
       timeoutMs: cfg.timeoutMs,
+      onUsage: (u) => { raw = u; },
     });
+    emitUsage({ prompt, text, raw, area, isLocal: false });
+    return text;
   }
 
-  function runLocalStream({ prompt, maxTokens }) {
-    return localStream({ prompt, maxTokens, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs });
+  async function* runLocalStream({ prompt, maxTokens, area }) {
+    let raw = null;
+    // Accumulate the streamed deltas so the usage estimate has the real output text
+    // to fall back on when the provider doesn't report counts (token-budget §12).
+    let acc = "";
+    for await (const delta of localStream({ prompt, maxTokens, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs, onUsage: (u) => { raw = u; } })) {
+      acc += delta; yield delta;
+    }
+    emitUsage({ prompt, text: acc, raw, area, isLocal: true });
   }
 
-  function runCloudStream({ prompt, maxTokens }) {
-    return cloudStream({
+  async function* runCloudStream({ prompt, maxTokens, area }) {
+    let raw = null;
+    let acc = "";
+    for await (const delta of cloudStream({
       prompt, maxTokens,
       anthropicApiKey: cfg.anthropicApiKey,
       openaiApiKey: cfg.openaiApiKey,
@@ -96,7 +134,11 @@ export function createInferenceRouter({
       model: cfg.cloudModel,
       fetch: cfg.fetch,
       timeoutMs: cfg.timeoutMs,
-    });
+      onUsage: (u) => { raw = u; },
+    })) {
+      acc += delta; yield delta;
+    }
+    emitUsage({ prompt, text: acc, raw, area, isLocal: false });
   }
 
   // The active provider's effective jurisdiction (the privacy-relevant fact),
@@ -136,12 +178,21 @@ export function createInferenceRouter({
    *   NEVER egresses to a US provider — it falls back to on-box local instead.
    * @returns {Promise<string>}
    */
-  async function infer({ prompt, task = "summarize", maxTokens, sensitive = false, numCtx, format } = {}) {
+  async function infer({ prompt, task = "summarize", maxTokens, sensitive = false, numCtx, format, profile } = {}) {
     if (typeof prompt !== "string" || prompt.trim() === "") {
       throw new InferenceError("infer: prompt must be a non-empty string");
     }
     if (!TASKS.includes(task)) {
       throw new InferenceError(`infer: unknown task ${JSON.stringify(task)} (valid: ${TASKS.join(", ")})`);
+    }
+
+    // Model-aware auto-sizing (opt-in): when the caller passes a ModelProfile and
+    // leaves maxTokens/numCtx unset, size both to the model's real limits +
+    // this prompt. Back-compat: no profile, or explicit values, → unchanged.
+    if (profile) {
+      const plan = planGeneration(profile, { inputTokens: estimateTokens(prompt), task, requestedMaxTokens: maxTokens });
+      if (maxTokens == null) maxTokens = plan.maxTokens;
+      if (numCtx == null) numCtx = plan.numCtx;
     }
 
     if (CLOUD_TASKS.includes(task) && hasCloud()) {
@@ -150,17 +201,17 @@ export function createInferenceRouter({
       // denial. eu-zdr / local providers are unaffected.
       if (sensitive && /^us/.test(cloudJurisdiction())) {
         emitEgress(prompt, "denied", "sensitive_us_block");
-        return runLocal({ prompt, maxTokens, numCtx, format });
+        return runLocal({ prompt, maxTokens, numCtx, format, area: task });
       }
       try {
         emitEgress(prompt, "allowed");
-        return await runCloud({ prompt, maxTokens }); // cloud models carry large context; numCtx is local-only
+        return await runCloud({ prompt, maxTokens, area: task }); // cloud models carry large context; numCtx is local-only
       } catch (cloudErr) {
         // cloudFallbackToLocal:false (cascade mode) propagates the error so the
         // caller can try the NEXT provider; otherwise resilience → on-box local.
         if (!cloudFallbackToLocal) throw cloudErr;
         try {
-          return await runLocal({ prompt, maxTokens, numCtx, format });
+          return await runLocal({ prompt, maxTokens, numCtx, format, area: task });
         } catch (localErr) {
           throw new InferenceError("infer: cloud failed and local fallback failed", { cause: localErr, backend: "both" });
         }
@@ -168,7 +219,7 @@ export function createInferenceRouter({
     }
 
     // Simple tasks, or complex with no cloud configured → local.
-    return runLocal({ prompt, maxTokens, numCtx, format });
+    return runLocal({ prompt, maxTokens, numCtx, format, area: task });
   }
 
   /**
@@ -190,24 +241,24 @@ export function createInferenceRouter({
     if (CLOUD_TASKS.includes(task) && hasCloud()) {
       if (sensitive && /^us/.test(cloudJurisdiction())) {
         emitEgress(prompt, "denied", "sensitive_us_block");
-        yield* runLocalStream({ prompt, maxTokens });
+        yield* runLocalStream({ prompt, maxTokens, area: task });
         return;
       }
       emitEgress(prompt, "allowed");
       let started = false;
       try {
-        for await (const delta of runCloudStream({ prompt, maxTokens })) {
+        for await (const delta of runCloudStream({ prompt, maxTokens, area: task })) {
           started = true;
           yield delta;
         }
         return;
       } catch (cloudErr) {
-        if (!started && cloudFallbackToLocal) { yield* runLocalStream({ prompt, maxTokens }); return; }
+        if (!started && cloudFallbackToLocal) { yield* runLocalStream({ prompt, maxTokens, area: task }); return; }
         throw cloudErr;
       }
     }
 
-    yield* runLocalStream({ prompt, maxTokens });
+    yield* runLocalStream({ prompt, maxTokens, area: task });
   }
 
   return {
