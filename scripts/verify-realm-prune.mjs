@@ -45,7 +45,7 @@ await db.rawQuery(
   `INSERT INTO realms (user_id, realm_id, name, essence) VALUES (?, 0, ?, ?)`, [U, 'Old Name', 'stale essence']);
 await db.rawQuery(
   `INSERT INTO realms (user_id, realm_id, name, essence, territory_count, message_count)
-   VALUES (?, 99, 'Ghost Realm', 'no live points', 0, 0)`, [U]);
+   VALUES (?, 99, ?, ?, 0, 0)`, [U, 'Ghost Realm', 'no live points']);
 close();
 
 // ── R1: describe-clusters writes real counts (no messages → placeholder names,
