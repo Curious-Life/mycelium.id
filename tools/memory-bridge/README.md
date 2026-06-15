@@ -47,8 +47,18 @@ injected and nothing is captured, but the agent's turn is never blocked.
 
 ### Claude Code (built — `claude-code/`)
 - `on-prompt.mjs` — `UserPromptSubmit` hook: injects vault context for the turn.
-- `on-stop.mjs` — `Stop` hook: captures the human message **and** the assistant reply
-  from the transcript, each keyed by its transcript `uuid` (idempotent).
+- `on-stop.mjs` — `Stop` hook: **syncs the whole transcript** — captures every human
+  message + assistant text (conversation only; skips tool calls/results & meta
+  entries), each keyed by its transcript `uuid` (idempotent), with full metadata
+  (session, cwd, gitBranch, model, parentUuid, isSidechain) and real timestamps. A
+  per-session high-water mark (`~/.mycelium-bridge/cc-<session>.hwm`) avoids
+  re-scanning. `transcript.mjs` is the shared parser.
+- **Backfill existing history:** `node scripts/backfill-claude-code.mjs [filter]`
+  imports your existing `~/.claude/projects/**/*.jsonl` transcripts (idempotent,
+  consent-gated). Needs `MYCELIUM_BASE_URL` + `MYCELIUM_MCP_BEARER`.
+
+> Capture is **consent-gated** (off by default) — enable via Settings → Memory
+> capture or `PUT /portal/agent-capture {"enabled":true}`; until then it no-ops.
 
 Wire them in `.claude/settings.local.json` (personal, gitignored):
 ```json

@@ -490,12 +490,23 @@ export async function createHttpApp(opts = {}) {
     const body = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {};
     const maxChars = Math.min(Number(body.maxChars) > 0 ? Number(body.maxChars) : 4000, 16000);
     try {
-      // getContext returns a bare STRING (not an MCP {content:[…]} envelope).
+      // getContext returns a bare STRING (not an MCP {content:[…]} envelope). It
+      // is the fast, always-available per-turn orientation — fetch + return it
+      // FIRST so a slow/failing search can never drop the base context.
       let text = await ingest.handlers.getContext({});
       text = typeof text === 'string' ? text : '';
+      // Optional relevance slice — BEST-EFFORT and TIME-BOUNDED. searchMindscape
+      // can be slow on a large vault (BM25 fallback + per-row decrypt), and a
+      // per-turn hook is latency-sensitive, so we race it against a short budget
+      // and skip it on timeout/throw rather than blocking or 500-ing the call.
       if (typeof body.query === 'string' && body.query.trim()) {
-        const s = await ingest.handlers.searchMindscape({ query: body.query, limit: 5 });
-        if (typeof s === 'string' && s.trim()) text += `\n\n---\n# RELEVANT TO THIS TURN\n\n${s}`;
+        try {
+          const s = await Promise.race([
+            ingest.handlers.searchMindscape({ query: body.query, limit: 5 }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('search-timeout')), 1500)),
+          ]);
+          if (typeof s === 'string' && s.trim()) text += `\n\n---\n# RELEVANT TO THIS TURN\n\n${s}`;
+        } catch { /* skip the slice; base context already set */ }
       }
       res.json({ ok: true, text: text.slice(0, maxChars) });
     } catch {

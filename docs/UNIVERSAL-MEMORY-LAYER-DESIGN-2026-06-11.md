@@ -248,3 +248,32 @@ shapes to build against. **PIVOT:** my v1 design's openclaw hooks (`llm_input`/
 - Config/secrets: the `options` arg (from `plugin: [["@mycelium/opencode-memory", { baseUrl, bearer }]]`) or env. **Install:** opencode config `plugin: [...]` (npm pkg / `[pkg,opts]` / local path — type `Config.plugin`, index.ts:70-72) loaded by `PluginBoot` ([core/src/plugin/boot.ts](../../opencode/packages/core/src/plugin/boot.ts)), or drop a file in `.opencode/plugin/` (autoload, `customize-opencode.md:295`). MCP also supported: `mcp.servers.<name>` `{type:"remote",url,headers,oauth}` (`core/src/config/mcp.ts`).
 
 *Sweep-first protocol applied (4 cycles): gateway/connect/mechanism map → CC + harness hook APIs (web) → REST surface + capture dedup reads → **local hermes + openclaw repo reads** (rows 13-15). Rows 1-11, 13-15 are file:line read against real code; row 12 (Claude Code) is official docs, re-verified at restart. Earlier web-doc openclaw hook names were refuted and corrected here.*
+
+---
+
+## 13. Agent-capture consent controls (2026-06-15)
+
+Auto-capture is powerful but captured conversations can contain secrets (keys,
+file contents, command output). So capture of **agent-source** messages is
+**opt-in, fail-closed** — a privacy-first default for new users.
+
+- **Setting:** `settings.agentCapture = { enabled, redactSecrets }` (same store as
+  `inferCascade`; default unset → off).
+- **Enforcement (single choke-point):** in `captureMessage` ([src/ingest/capture.js](../src/ingest/capture.js)),
+  after userId validation: if `isAgentSource(source)` and not `agentCapture.enabled`
+  → **no-op** `{blocked:true}` (nothing written). Covers all three ingest paths +
+  the gateway capture tier. Unreadable settings → off (fail-closed).
+- **Agent sources** (gated): `claude-code`, `gateway:*`, `opencode`, `openclaw`,
+  `hermes`, `bridge`. **Not gated** (intentional): `mcp`, `api`, connectors
+  (`telegram`/`email`), `import`/restore, notes.
+- **Redaction:** `redactSecrets:true` scrubs OpenAI/Anthropic/GitHub/AWS/Slack
+  keys + JWTs before write.
+- **Surface:** `GET`/`PUT /portal/agent-capture` ([src/portal-providers.js](../src/portal-providers.js))
+  mirrors the `inferCascade` route. Portal "Memory capture" card + onboarding
+  consent step + secrets disclosure — DEFERRED (UI, needs portal browser-verify).
+- **Gate:** `verify:agent-capture`; `verify:memory-bridge` opts in before its
+  capture assertions.
+
+**Decision:** default OFF — the hooks/gateway run, but capture is a silent no-op
+until the user consents, so connecting an agent never silently siphons a
+conversation into the vault.

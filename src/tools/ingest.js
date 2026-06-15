@@ -102,8 +102,11 @@ export function createIngestDomain(deps) {
       let created = 0, skipped = 0, errors = 0;
       // Loop the verified captureMessage choke-point — each row self-dedups on
       // its id. (Not a bulk INSERT: rows have heterogeneous optional columns, and
-      // this reuses the single audited write path.) Originating timestamp, if
-      // given, is preserved in metadata (created_at is schema-defaulted to now).
+      // this reuses the single audited write path.) Originating timestamp is
+      // preserved BOTH in metadata.original_timestamp (provenance) AND as the
+      // created_at column (real occurrence time → correct timeline ordering) via
+      // captureMessage's createdAt — accepts an explicit createdAt or falls back
+      // to timestamp. Without this, bulk-imported history collapses to insert-time.
       for (const m of items) {
         const content = typeof m?.content === 'string' ? m.content.trim() : '';
         if (!content && !m?.attachmentId) { errors += 1; continue; }
@@ -117,6 +120,7 @@ export function createIngestDomain(deps) {
             source: m.source || 'import',
             conversationId: m.conversationId,
             id: m.id,
+            createdAt: m.createdAt ?? m.timestamp,
             metadata: Object.keys(metadata).length ? metadata : undefined,
           }, enqueueEnrichment);
           if (deduped) skipped += 1; else created += 1;

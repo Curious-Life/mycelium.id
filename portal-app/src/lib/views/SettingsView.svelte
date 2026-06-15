@@ -11,6 +11,7 @@
 	import ChannelsSection from '$lib/components/settings/ChannelsSection.svelte';
 	import AISettings from '$lib/components/settings/AISettings.svelte';
 	import AIAccessSection from '$lib/components/settings/AIAccessSection.svelte';
+	import AgentCaptureSection from '$lib/components/settings/AgentCaptureSection.svelte';
 	import ManagedConnectSection from '$lib/components/settings/ManagedConnectSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 	import ConnectYourAISection from '$lib/components/settings/ConnectYourAISection.svelte';
@@ -1165,6 +1166,11 @@
 			<HarnessPickerSection />
 			<!-- The raw endpoints + auth (bearer / OAuth) the recipes above point to. -->
 			<ConnectYourAISection />
+			<!-- Consent to auto-capture conversations from the connected agents above
+			     (Claude Code / gateway / opencode / openclaw / hermes) into the vault.
+			     Default OFF — captures can contain secrets. Home here (not Channels):
+			     it governs the CONNECTED agents you just set up, not the in-app chat. -->
+			<AgentCaptureSection />
 
 			<div class="conn-group">Reach it over the internet</div>
 			<!-- Easiest: claim a handle.mycelium.id over the managed relay. Placed
