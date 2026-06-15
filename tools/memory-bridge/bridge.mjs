@@ -27,7 +27,7 @@ export const BASE_URL = (env.MYCELIUM_BASE_URL || 'http://127.0.0.1:4711').repla
 const BEARER = env.MYCELIUM_MCP_BEARER || '';
 const SOURCE = env.MYCELIUM_BRIDGE_SOURCE || 'bridge';
 const REDACT = /^(1|true|yes)$/i.test(String(env.MYCELIUM_BRIDGE_REDACT || ''));
-const TIMEOUT_MS = Number(env.MYCELIUM_BRIDGE_TIMEOUT_MS) > 0 ? Number(env.MYCELIUM_BRIDGE_TIMEOUT_MS) : 4000;
+const TIMEOUT_MS = Number(env.MYCELIUM_BRIDGE_TIMEOUT_MS) > 0 ? Number(env.MYCELIUM_BRIDGE_TIMEOUT_MS) : 8000;
 
 const sha256 = (s) => createHash('sha256').update(String(s), 'utf8').digest('hex');
 
