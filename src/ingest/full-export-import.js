@@ -104,6 +104,16 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
   const stats = {};
   const dbDir = path.join(root, 'db');
 
+  // A full-vault restore writes tables in readdir (alphabetical) order, so a
+  // child lands before its parent (contact_territories before people,
+  // document_versions before documents, identity_channels before users) — with
+  // foreign_keys=ON every such row is rejected. The bundle is internally
+  // consistent (parents ARE present), so defer FK enforcement for the restore
+  // and re-enable it after. The `finally` is mandatory: the app's db connection
+  // is long-lived and SHARED — leaving FKs off would weaken every later write.
+  await db.rawQuery('PRAGMA foreign_keys = OFF').catch(() => {});
+  try {
+
   // ── 1. Tables: every db/<table>.ndjson, allowlisted by the live V1 schema ──
   // restoreTable column-intersects + reports tableMissing for tables V1 lacks;
   // DENY blocks operational/cross-tenant/FTS tables outright.
@@ -232,5 +242,8 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
   // nlp_processed=0 and will re-embed locally; vectored ones are searchable now.
   try { if (typeof enqueueEnrichment === 'function') { const m = await db.rawQuery('SELECT id FROM messages WHERE nlp_processed = 0 AND user_id = ? LIMIT 1', [userId]); const id = m?.results?.[0]?.id; if (id) enqueueEnrichment(id); } } catch { /* */ }
 
-  return { imported, deduped, failed, stats, reportPath: report && `imports/full-export-report-${String(manifest.exportedAt || report.importedAt).slice(0, 10)}.json`, exportedAt: manifest.exportedAt ?? null };
+    return { imported, deduped, failed, stats, reportPath: report && `imports/full-export-report-${String(manifest.exportedAt || report.importedAt).slice(0, 10)}.json`, exportedAt: manifest.exportedAt ?? null };
+  } finally {
+    await db.rawQuery('PRAGMA foreign_keys = ON').catch(() => {});
+  }
 }

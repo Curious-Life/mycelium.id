@@ -52,6 +52,10 @@ function buildBundle(root, { format = 'mycelium-full-export' } = {}) {
     { id: 'fx_m2', role: 'assistant', content: 'a reply', source: 'telegram', created_at: '2024-02-02T00:01:00.000Z' },
   ]);
   nd('db/people.ndjson', [{ id: 'fx_p1', name: 'Grace Hopper', email: 'grace@example.com' }]);
+  // FK-ordering case: contact_territories (FK contact_id→people) sorts BEFORE
+  // 'people' alphabetically, so it's imported first — must still land (FK
+  // enforcement deferred during the restore).
+  nd('db/contact_territories.ndjson', [{ id: 'fx_ct1', user_id: 'martin', contact_id: 'fx_p1', territory_id: 3, strength: 0.9 }]);
   nd('db/audit_log.ndjson', [{ id: 'fx_audit1', action: 'should_not_import' }]); // DENY
   nd('db/clustering_points.ndjson', [{ id: 'fx_cp1', source_type: 'message', source_id: 'fx_m1', territory_id: 3 }]);
   nd('db/attachments.ndjson', [{ id: 'att1', file_name: 'note.txt', file_type: 'text/plain', file_size: ATT_BYTES.length }]);
@@ -87,6 +91,9 @@ async function main() {
       && cnt("SELECT COUNT(*) n FROM clustering_points WHERE id='fx_cp1'")?.n === 1);
 
     rec('F2 denied table (audit_log) NOT imported', cnt("SELECT COUNT(*) n FROM audit_log WHERE id='fx_audit1'")?.n === 0);
+
+    rec('F1b FK-ordered child lands (contact_territories before people, FK deferred)',
+      cnt("SELECT COUNT(*) n FROM contact_territories WHERE id='fx_ct1'")?.n === 1);
 
     const m1 = cnt("SELECT embedding_768, nlp_processed FROM messages WHERE id='fx_m1'");
     let v768 = null; try { v768 = await decryptVector(String(m1?.embedding_768 || ''), await importMasterKey(USER_HEX), null, 768); } catch { /* */ }
