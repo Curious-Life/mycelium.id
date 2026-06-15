@@ -250,25 +250,10 @@
 	</div>
 	</div><!-- /scrollable nav region -->
 
-	<!-- Profile + Settings (pinned) -->
+	<!-- Settings hub (pinned) — Profile is now the first pane inside Settings,
+	     so the sidebar carries one "You" entry instead of two. The footer
+	     identity below also deep-links to the Profile pane. -->
 	<div class="px-2 py-2 border-t border-[var(--color-border)] flex-shrink-0 flex flex-col gap-1">
-		<button
-			onclick={() => { navigationState.setPrimaryView('profile'); goto('/profile'); closeMobileDrawer(); }}
-			class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 w-full
-				{currentView === 'profile'
-				? 'bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]'
-				: 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)]'}"
-		>
-			<div class="w-1.5 h-1.5 rounded-full flex-shrink-0
-				{currentView === 'profile' ? 'bg-[var(--color-accent)]' : 'bg-transparent group-hover:bg-[var(--color-text-tertiary)]'}">
-			</div>
-			<div class="w-5 h-5 flex items-center justify-center flex-shrink-0">
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-					<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
-				</svg>
-			</div>
-			<span class="text-sm font-medium">Profile</span>
-		</button>
 		<button
 			onclick={() => { navigationState.setPrimaryView('settings'); goto('/settings'); closeMobileDrawer(); }}
 			class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 w-full
@@ -293,7 +278,11 @@
 	<div class="p-3 border-t border-[var(--color-border)] flex-shrink-0">
 		{#if $auth.user}
 			<div class="flex items-center justify-between">
-				<div class="flex items-center gap-3 min-w-0">
+				<button
+					onclick={() => { navigationState.setPrimaryView('settings'); goto('/settings?pane=profile'); closeMobileDrawer(); }}
+					class="flex items-center gap-3 min-w-0 flex-1 text-left rounded-lg -m-1 p-1 hover:bg-[var(--color-elevated)] transition-colors"
+					aria-label="Open your profile"
+				>
 					<div class="w-9 h-9 rounded-full bg-[var(--color-accent)]/20 flex items-center justify-center flex-shrink-0">
 						<span class="text-[var(--color-accent)] text-sm font-medium">
 							{($auth.user.displayName || '?')[0].toUpperCase()}
@@ -304,7 +293,7 @@
 							{$auth.user.displayName || 'User'}
 						</div>
 					</div>
-				</div>
+				</button>
 				<button
 					onclick={handleLogout}
 					class="p-2 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)] rounded-lg transition-colors flex-shrink-0"
