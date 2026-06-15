@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Mycelium V1 \u2014 self-hosted single-user MCP cognitive vault.",
+  "description": "Mycelium V1 — self-hosted single-user MCP cognitive vault.",
   "license": "AGPL-3.0",
   "engines": {
     "node": ">=22"
@@ -162,7 +162,8 @@
     "verify:describe-image": "node scripts/verify-describe-image.mjs",
     "verify:federation": "node scripts/verify-federation.mjs",
     "verify:spaces": "node scripts/verify-spaces.mjs",
-    "verify:obsidian-images": "node scripts/verify-obsidian-images.mjs"
+    "verify:obsidian-images": "node scripts/verify-obsidian-images.mjs",
+    "verify:agent-capture": "node scripts/verify-agent-capture.mjs"
   },
   "dependencies": {
     "@better-auth/passkey": "^1.6.14",

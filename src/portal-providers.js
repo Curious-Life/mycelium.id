@@ -89,6 +89,30 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     } catch { bad(res, 500, 'failed to update routing preference'); }
   });
 
+  // Agent-message capture consent — the opt-in control for AUTO-capturing
+  // connected-agent conversations (Claude Code, the gateway, opencode, …) into
+  // the vault. DEFAULT OFF: these captures can contain secrets (keys, file
+  // contents, command output), so the single capture choke-point
+  // (src/ingest/capture.js) stores agent-source messages ONLY when `enabled` is
+  // true here. `redactSecrets` scrubs obvious credentials before the row is
+  // written. Non-secret booleans → plain user settings (like inferCascade).
+  router.get('/agent-capture', async (_req, res) => {
+    try {
+      const ac = (await db.users.getSettings(userId))?.agentCapture || {};
+      ok(res, { enabled: ac.enabled === true, redactSecrets: ac.redactSecrets === true });
+    } catch { bad(res, 500, 'failed to read capture preference'); }
+  });
+  router.put('/agent-capture', async (req, res) => {
+    try {
+      const enabled = req.body?.enabled === true;
+      const redactSecrets = req.body?.redactSecrets === true;
+      try { await db.users.create(userId, userId); } catch { /* row already exists */ }
+      const s = await db.users.getSettings(userId);
+      await db.users.updateSettings(userId, { ...s, agentCapture: { enabled, redactSecrets } });
+      ok(res, { enabled, redactSecrets });
+    } catch { bad(res, 500, 'failed to update capture preference'); }
+  });
+
   // Create a provider (BYOK API key). Body: { provider, label?, api_key, model_preference?, base_url? }.
   router.post('/providers', async (req, res) => {
     const b = req.body || {};
