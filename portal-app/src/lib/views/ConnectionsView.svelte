@@ -2,6 +2,7 @@
 	import { browser } from '$app/environment';
 	import { api, apiGet, apiPost } from '$lib/api';
 	import { workspace } from '$lib/workspace/store';
+	import { toasts } from '$lib/stores/toast';
 
 	interface Connection {
 		id: string;
@@ -79,12 +80,38 @@
 		sent.length ? `${sent.length} sent` : '',
 	].filter(Boolean).join(' · '));
 
-	$effect(() => {
-		if (browser) {
-			loadConnections();
-			loadPending();
-			loadSent();
+	// Live refresh: federation events (a new inbound request, or a peer accepting
+	// one we sent) are written by the :4711 federation host but surface through the
+	// :8787 portal we read — different processes sharing the DB, so we poll rather
+	// than push. On each tick we diff against what we'd already seen and toast only
+	// genuinely new arrivals (the global toast store shows app-wide, even off this
+	// page). `seeded` suppresses toasts for the initial load.
+	let seenPending = new Set<string>();
+	let seenConns = new Set<string>();
+	let seeded = false;
+
+	async function refreshAll() {
+		await Promise.all([loadConnections(), loadPending(), loadSent()]);
+		if (seeded) {
+			for (const r of pending) {
+				if (!seenPending.has(r.id)) toasts.info(`@${r.handle} wants to connect`);
+			}
+			for (const c of connections) {
+				if (!seenConns.has(c.id)) toasts.success(`Connected with @${c.other_handle}`);
+			}
 		}
+		seenPending = new Set(pending.map((r) => r.id));
+		seenConns = new Set(connections.map((c) => c.id));
+		seeded = true;
+	}
+
+	$effect(() => {
+		if (!browser) return;
+		refreshAll();
+		// 10s while the page is open — fast enough to feel live for a handshake,
+		// cheap enough to poll. Cleared on unmount.
+		const t = setInterval(refreshAll, 10000);
+		return () => clearInterval(t);
 	});
 
 	async function loadConnections() {
