@@ -103,8 +103,9 @@ async function main() {
 
     // ── I4 chunked ChatGPT ──
     const gz = await chatgptZip();
-    const mid = Math.floor(gz.length / 2);
-    const parts = [gz.subarray(0, mid), gz.subarray(mid)];
+    const cs = Math.ceil(gz.length / 2); // fixed chunk size → 2 parts, last is the remainder
+    const parts = [];
+    for (let off = 0; off < gz.length; off += cs) parts.push(gz.subarray(off, Math.min(off + cs, gz.length)));
     const uploadId = 'up_test123';
     for (let i = 0; i < parts.length; i++) {
       const fd = new FormData();
@@ -112,6 +113,8 @@ async function main() {
       fd.append('uploadId', uploadId);
       fd.append('index', String(i));
       fd.append('filename', 'chatgpt.zip');
+      fd.append('fileSize', String(gz.length));
+      fd.append('chunkSize', String(cs));
       const rc = await fetch(M('/upload/chunk'), { method: 'POST', body: fd });
       if (rc.status !== 200) { rec('I4. chunked ChatGPT', false, `chunk ${i} status=${rc.status}`); break; }
     }

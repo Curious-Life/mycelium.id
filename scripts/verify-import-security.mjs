@@ -5,7 +5,7 @@
 //
 //   S1 decompression bomb   DEFLATE zip whose conversations.json declares >cap → refused (400), not inflated
 //   S2 concurrent-upload cap  flood of unique uploadIds → 429 before OOM
-//   S3 chunks-per-upload cap  many tiny chunks on one id → 413 before the parts Map grows
+//   S3 implied chunk-count cap  declared fileSize/chunkSize implying >cap chunks → 413 (no alloc)
 //   S4 chunk retry            re-sending an index overwrites (no double-count) → finalize still parses
 //   S5 uploadId injection     path-ish / oversized uploadId → 400 (regex fail-closed)
 //   S6 prototype pollution    ChatGPT mapping with __proto__/constructor keys → no Object.prototype pollution
@@ -24,6 +24,7 @@ import { applyMigrations } from '../src/db/migrate.js';
 process.env.MYCELIUM_IMPORT_MAX_JSON_BYTES = '100000';   // 100KB cap on conversations.json
 process.env.MYCELIUM_IMPORT_MAX_CONCURRENT = '3';
 process.env.MYCELIUM_IMPORT_MAX_CHUNKS = '2';
+process.env.MYCELIUM_IMPORT_LIMIT_BYTES = '1000000';     // 1MB total cap (tiny fixtures stay under)
 const { startRestServer } = await import('../src/server-rest.js');
 
 const DB = 'data/verify-import-security.db';
@@ -40,7 +41,7 @@ const srv = await startRestServer({ dbPath: DB, kcvPath: KCV, userHex: hex(), sy
 const { url } = srv;
 const M = (p) => `${url}/api/v1/portal${p}`;
 const postFile = (buf, name = 'e.zip') => { const fd = new FormData(); fd.append('file', new Blob([buf]), name); return fetch(M('/upload'), { method: 'POST', body: fd }); };
-const chunk = (uploadId, index, bytes) => { const fd = new FormData(); fd.append('chunk', new Blob([bytes])); fd.append('uploadId', uploadId); fd.append('index', String(index)); fd.append('filename', 'e.zip'); return fetch(M('/upload/chunk'), { method: 'POST', body: fd }); };
+const chunk = (uploadId, index, bytes, fileSize, chunkSize) => { const fd = new FormData(); fd.append('chunk', new Blob([bytes])); fd.append('uploadId', uploadId); fd.append('index', String(index)); fd.append('filename', 'e.zip'); if (fileSize != null) fd.append('fileSize', String(fileSize)); if (chunkSize != null) fd.append('chunkSize', String(chunkSize)); return fetch(M('/upload/chunk'), { method: 'POST', body: fd }); };
 const complete = (uploadId, totalChunks) => fetch(M('/upload/complete'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ uploadId, totalChunks }) });
 
 async function main() {
@@ -87,29 +88,33 @@ async function main() {
     cz.file('conversations.json', JSON.stringify([{ uuid: 's4', name: 'x', chat_messages: [
       { uuid: 's4-1', sender: 'human', text: 'retry-marker-one' }, { uuid: 's4-2', sender: 'assistant', text: 'two' }] }]));
     const czBuf = await cz.generateAsync({ type: 'nodebuffer' });
-    const mid = Math.floor(czBuf.length / 2);
-    await chunk('up_retry', 0, czBuf.subarray(0, mid));
-    await chunk('up_retry', 1, czBuf.subarray(mid));
-    await chunk('up_retry', 0, czBuf.subarray(0, mid)); // resend index 0 (idempotent)
+    const cs = Math.ceil(czBuf.length / 2); // fixed chunk size → exactly 2 parts, last is the remainder
+    await chunk('up_retry', 0, czBuf.subarray(0, cs), czBuf.length, cs);
+    await chunk('up_retry', 1, czBuf.subarray(cs), czBuf.length, cs);
+    await chunk('up_retry', 0, czBuf.subarray(0, cs), czBuf.length, cs); // resend index 0 (idempotent)
     const s4 = await complete('up_retry', 2);
     const s4b = await s4.json().catch(() => ({}));
     rec('S4. chunk retry overwrites + finalize parses (no corruption/double-count)',
       s4.status === 200 && s4b.importResult?.type === 'claude' && s4b.importResult?.imported === 2,
       `status=${s4.status} imported=${s4b.importResult?.imported}`);
 
-    // ── S3 chunks-per-upload cap (fresh id; MAX_CHUNKS=2) ──
-    await chunk('up_chunkcap', 0, Buffer.from('a'));
-    await chunk('up_chunkcap', 1, Buffer.from('b'));
-    const s3 = await chunk('up_chunkcap', 2, Buffer.from('c')); // 3rd distinct index → over cap
-    rec('S3. chunks-per-upload cap → 413', s3.status === 413, `status=${s3.status}`);
+    // ── S3 implied chunk-count cap (MAX_CHUNKS=2): a declared fileSize/chunkSize
+    // implying >2 chunks is refused on the FIRST chunk (before any allocation) ──
+    const s3 = await chunk('up_chunkcap', 0, Buffer.from('a'), 300, 100); // ceil(300/100)=3 > 2
+    rec('S3. implied chunk-count over cap → 413 (no allocation)', s3.status === 413, `status=${s3.status}`);
 
-    // ── S2 concurrent-upload cap (MAX_CONCURRENT=3): spam unique ids ──
+    // ── S2 concurrent-upload cap (MAX_CONCURRENT=3): spam unique ids (each with
+    // a valid tiny declared size so it reserves a slot) → 429 before OOM ──
     let saw429 = false;
     for (let i = 0; i < 8; i++) {
-      const r = await chunk(`up_flood${i}`, 0, Buffer.from('x'));
+      const r = await chunk(`up_flood${i}`, 0, Buffer.from('x'), 1, 1);
       if (r.status === 429) { saw429 = true; break; }
     }
     rec('S2. concurrent-upload flood → 429 (bounded memory)', saw429, `saw429=${saw429}`);
+
+    // ── S8 declared fileSize over IMPORT_LIMIT → 413 (no allocation) ──
+    const s8 = await chunk('up_toobig', 0, Buffer.from('x'), 2_000_000, 50_000); // 2MB > 1MB cap
+    rec('S8. declared fileSize over IMPORT_LIMIT → 413 (refused before alloc)', s8.status === 413, `status=${s8.status}`);
   } finally {
     srv.server.close(); try { srv.close?.(); } catch {}
   }

@@ -107,9 +107,11 @@ async function main() {
     // ── E3 incomplete chunks → 400 ──
     {
       const buf = await claudeZip('chunk-marker');
+      const cs = Math.ceil(buf.length / 2); // declares a 2-chunk upload…
       const fd = new FormData();
-      fd.append('chunk', new Blob([buf.subarray(0, 10)])); fd.append('uploadId', 'up_inc1'); fd.append('index', '0'); fd.append('filename', 'e.zip');
-      await fetch(`${url}${M('/upload/chunk')}`, { method: 'POST', body: fd });
+      fd.append('chunk', new Blob([buf.subarray(0, cs)])); fd.append('uploadId', 'up_inc1'); fd.append('index', '0'); fd.append('filename', 'e.zip');
+      fd.append('fileSize', String(buf.length)); fd.append('chunkSize', String(cs));
+      await fetch(`${url}${M('/upload/chunk')}`, { method: 'POST', body: fd }); // …but only sends chunk 0
       const comp = await fetch(`${url}${M('/upload/complete')}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ uploadId: 'up_inc1', totalChunks: 2 }) });
       rec('E3. incomplete upload (missing chunk) → 400', comp.status === 400, `status=${comp.status}`);
     }
@@ -117,13 +119,14 @@ async function main() {
     // ── E4 out-of-order chunks still assemble ──
     {
       const buf = await claudeZip('ooo-marker');
-      const mid = Math.floor(buf.length / 2);
-      const parts = [buf.subarray(0, mid), buf.subarray(mid)];
+      const cs = Math.ceil(buf.length / 2); // fixed chunk size → 2 parts (offset-addressed)
+      const parts = [buf.subarray(0, cs), buf.subarray(cs)];
       const id = 'up_ooo1';
-      // send index 1 first, then 0
+      // send index 1 first, then 0 — offset assembly makes order irrelevant
       for (const i of [1, 0]) {
         const fd = new FormData();
         fd.append('chunk', new Blob([parts[i]])); fd.append('uploadId', id); fd.append('index', String(i)); fd.append('filename', 'e.zip');
+        fd.append('fileSize', String(buf.length)); fd.append('chunkSize', String(cs));
         await fetch(`${url}${M('/upload/chunk')}`, { method: 'POST', body: fd });
       }
       const comp = await fetch(`${url}${M('/upload/complete')}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ uploadId: id, totalChunks: 2 }) });
