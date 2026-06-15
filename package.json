@@ -75,6 +75,8 @@
     "verify:behavioral": "node scripts/verify-behavioral.mjs",
     "verify:mindfiles": "node scripts/verify-mindfiles.mjs",
     "verify:rest": "node scripts/verify-rest.mjs",
+    "verify:memory-bridge": "node scripts/verify-memory-bridge.mjs",
+    "verify:memory-adapters": "node scripts/verify-memory-adapters.mjs",
     "verify:search": "node scripts/verify-search.mjs",
     "verify:search-rehydrate": "node scripts/verify-search-rehydrate.mjs",
     "verify:embed": "node scripts/verify-embed.mjs",
@@ -166,7 +168,9 @@
     "verify:obsidian-images": "node scripts/verify-obsidian-images.mjs",
     "verify:chronicle-hierarchy": "node scripts/verify-chronicle-hierarchy.mjs",
     "verify:describe-preserve": "node scripts/verify-describe-preserve.mjs",
-    "verify:task-models": "node scripts/verify-task-models.mjs"
+    "verify:task-models": "node scripts/verify-task-models.mjs",
+    "verify:agent-capture": "node scripts/verify-agent-capture.mjs",
+    "verify:claude-sync": "node scripts/verify-claude-sync.mjs"
   },
   "dependencies": {
     "@better-auth/passkey": "^1.6.14",

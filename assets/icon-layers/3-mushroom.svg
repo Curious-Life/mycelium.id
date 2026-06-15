@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="gold" x1="312" y1="120" x2="712" y2="848" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FCE38A"/>
+      <stop offset="0.5" stop-color="#E6B92E"/>
+      <stop offset="1" stop-color="#B07E1C"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <g fill="url(#gold)">
+    <path d="M256,512 L768,512 A64,64 0 0 0 832,448 C832,88 192,88 192,448 A64,64 0 0 0 256,512 Z"/>
+    <path d="M412,560 L612,560 A32,32 0 0 1 644,592 L672,800 A48,48 0 0 1 624,848 L400,848 A48,48 0 0 1 352,800 L380,592 A32,32 0 0 1 412,560 Z"/>
+  </g>
+</svg>

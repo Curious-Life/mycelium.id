@@ -155,11 +155,12 @@ function sendStreamShim(res, { id, created, model, text }) {
 // normal JSON error envelope (headers not yet sent); a failure AFTER tokens have
 // streamed ends the SSE with a terminal stop frame. We NEVER echo err.message
 // (§1 zero-leak) — provider/plaintext detail can ride along on it.
-async function streamCompletion(res, { router, model, prompt, maxTokens, sensitive }) {
+async function streamCompletion(res, { router, model, prompt, maxTokens, sensitive, onText }) {
   const id = `chatcmpl-${randomUUID().replace(/-/g, '')}`;
   const created = Math.floor(Date.now() / 1000);
   const base = { id, object: 'chat.completion.chunk', created, model };
   let opened = false;
+  let full = ''; // accumulate deltas so the memory bridge can capture the reply
   const open = () => {
     if (opened) return;
     res.set('Content-Type', 'text/event-stream; charset=utf-8');
@@ -171,6 +172,7 @@ async function streamCompletion(res, { router, model, prompt, maxTokens, sensiti
   try {
     for await (const delta of router.inferStream({ prompt, task: 'complex', maxTokens, sensitive })) {
       open();
+      full += delta;
       res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] })}\n\n`);
     }
     open(); // a zero-token stream still emits the role frame for client compat
@@ -184,6 +186,9 @@ async function streamCompletion(res, { router, model, prompt, maxTokens, sensiti
       res.write('data: [DONE]\n\n');
       res.end();
     } catch { try { res.end(); } catch { /* ignore */ } }
+  } finally {
+    // Capture whatever streamed (even a partial reply on a mid-stream failure).
+    if (onText) { try { onText(full); } catch { /* capture must never break egress */ } }
   }
 }
 
@@ -211,8 +216,53 @@ function modelIdForProvider(p) {
  * @param {typeof fetch} [opts.fetch=globalThis.fetch]
  * @returns {{ chatCompletions: Function, listModels: Function }}
  */
-export function createGatewayHandlers({ db, userId = 'local-user', fetch = globalThis.fetch } = {}) {
+export function createGatewayHandlers({ db, userId = 'local-user', fetch = globalThis.fetch, getContext, captureMessage } = {}) {
   const onEgress = createEgressAuditSink(db, userId);
+
+  // ── Memory bridge (opt-in via `X-Mycelium-Capture: <conversationId>`) ────────
+  // When a harness sends that header AND the deps are wired, the gateway turns a
+  // stateless inference call into the universal memory loop: INJECT vault context
+  // as a system preamble, and CAPTURE the new user turn + the assistant reply.
+  // Absent the header → behavior is the unchanged pass-through proxy. Capture is
+  // ALWAYS fire-and-forget: a memory failure must never break inference (§ egress).
+  //
+  // CRITICAL (capture.js dedup is id-keyed, not content-keyed): capture only the
+  // LAST user message of this request — never loop messages[], or every prior turn
+  // re-inserts as a fresh row each request (OpenAI calls resend the full history).
+  const captureConv = (req) => {
+    if (!captureMessage) return null;
+    const h = req?.headers?.['x-mycelium-capture'];
+    const v = Array.isArray(h) ? h[0] : h;
+    return typeof v === 'string' && v.trim() ? v.trim() : null;
+  };
+  const capId = (conv, role, content) =>
+    'cap-' + createHash('sha256').update(`gateway|${conv}|${role}|${content}`).digest('hex').slice(0, 40);
+  const fireCapture = (conv, role, content) => {
+    const text = String(content ?? '').trim();
+    if (!conv || !text) return;
+    // Fire-and-forget; swallow everything (incl. the promise rejection).
+    Promise.resolve()
+      .then(() => captureMessage({ content: text, role, source: `gateway:${conv}`, conversationId: conv, id: capId(conv, role, text) }))
+      .catch(() => { /* capture never breaks egress */ });
+  };
+  // Prepend vault context as a system message (not folded into user content, so it
+  // is never captured as the user's turn). Returns a NEW messages array.
+  const withInjectedContext = async (messages) => {
+    if (!getContext) return messages;
+    try {
+      const t = await getContext({});
+      const ctx = typeof t === 'string' ? t.slice(0, 4000) : '';
+      if (ctx.trim()) return [{ role: 'system', content: `# Mycelium memory (the user's vault)\n\n${ctx}` }, ...messages];
+    } catch { /* fail-open: no context */ }
+    return messages;
+  };
+  // The last user message of THIS request = the new turn to capture.
+  const lastUserContent = (messages) => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (String(messages[i]?.role || '').toLowerCase() === 'user') return coerceContent(messages[i].content);
+    }
+    return '';
+  };
 
   // Resolve the ACTIVE provider per request so a change in Settings → Intelligence
   // takes effect immediately. Cheap (one indexed read) for a single-user vault.
@@ -289,14 +339,25 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
       // egress to a US provider (falls to on-box local + audits the denial).
       const sensitive = headerTrue(req.headers['x-mycelium-sensitive']);
 
+      // Memory bridge (opt-in): conversation id from the header → capture + inject.
+      // Capture the new user turn now (fire-and-forget) from the ORIGINAL messages,
+      // BEFORE we prepend the context system message (so context isn't miscaptured).
+      const conv = captureConv(req);
+      if (conv) fireCapture(conv, 'user', lastUserContent(body.messages || []));
+
       // Tools pass-through: a request carrying `tools` is proxied raw to an
       // OpenAI-compatible provider so tool_calls round-trip; a non-compatible
-      // active provider falls through to the flatten path (tools dropped).
+      // active provider falls through to the flatten path (tools dropped). When
+      // capture is on, inject context into the proxied messages too (assistant-
+      // capture on the verbatim-SSE path is a documented deferral).
       if (Array.isArray(body.tools) && body.tools.length > 0) {
-        if (await toolsPassthrough(req, res, { body, sensitive })) return;
+        const ptBody = conv ? { ...body, messages: await withInjectedContext(body.messages) } : body;
+        if (await toolsPassthrough(req, res, { body: ptBody, sensitive })) return;
       }
 
-      const prompt = flattenMessages(body.messages);
+      // Inject vault context as a leading system message when capture is on.
+      const messages = conv ? await withInjectedContext(body.messages) : body.messages;
+      const prompt = flattenMessages(messages);
 
       const router = await buildRouter();
       // Gateway calls are treated as cloud-capable (the harness wants a capable
@@ -305,7 +366,7 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
 
       // Real token streaming when the router supports it; else the v1 shim.
       if (stream && typeof router.inferStream === 'function') {
-        await streamCompletion(res, { router, model, prompt, maxTokens, sensitive });
+        await streamCompletion(res, { router, model, prompt, maxTokens, sensitive, onText: conv ? (t) => fireCapture(conv, 'assistant', t) : undefined });
         return;
       }
 
@@ -315,6 +376,7 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
       const text = (await isCascadeEnabled(db, userId))
         ? await inferWithCascade({ chain: await resolveProviderChain(db, userId, { sensitive }), prompt, task: 'complex', maxTokens, sensitive, onEgress, fetch })
         : await router.infer({ prompt, task: 'complex', maxTokens, sensitive });
+      if (conv) fireCapture(conv, 'assistant', text);
       const completion = buildCompletion({ model, prompt, text });
       if (stream) {
         sendStreamShim(res, { id: completion.id, created: completion.created, model, text });

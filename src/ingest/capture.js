@@ -59,14 +59,54 @@ export function normalizeCreatedAt(v) {
  * @param {string} [msg.id]           caller-supplied id for idempotency
  * @param {() => void} [enqueueEnrichment]  optional fire-and-forget hook(id)
  */
+// Sources that are AUTO-captured agent conversations (per-turn hooks, the
+// gateway capture tier, the native harness adapters). Gated behind explicit user
+// consent because they can contain secrets. NOT gated: intentional ingest — `mcp`
+// tool calls, `api`, connectors (`telegram`/`email`), `import`/restore, notes.
+const AGENT_SOURCE_RE = /^(claude-code|gateway|opencode|openclaw|hermes|bridge)\b/i;
+export function isAgentSource(source) {
+  return typeof source === 'string' && AGENT_SOURCE_RE.test(source.trim());
+}
+
+// Best-effort scrub of high-confidence secret shapes (only when the user enables
+// agentCapture.redactSecrets). Conservative — patterns rarely seen in real prose.
+// Mirrors tools/memory-bridge/bridge.mjs.
+const SECRET_PATTERNS = [
+  /\b(sk|pk|rk)-[A-Za-z0-9]{16,}\b/g,
+  /\bsk-ant-[A-Za-z0-9_-]{16,}\b/g,
+  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+];
+export function redactSecrets(text) {
+  let out = String(text ?? '');
+  for (const re of SECRET_PATTERNS) out = out.replace(re, '«redacted-secret»');
+  return out;
+}
+
 export async function captureMessage(db, msg, enqueueEnrichment) {
   if (!db?.messages) throw new TypeError('captureMessage: db.messages required');
   const userId = msg?.userId;
   if (typeof userId !== 'string' || !userId) throw new Error('captureMessage: userId is required');
 
-  const content = typeof msg.content === 'string' ? msg.content : '';
+  let content = typeof msg.content === 'string' ? msg.content : '';
   if (!content && !msg.attachmentId) {
     throw new Error('captureMessage: content is required (or an attachmentId)');
+  }
+
+  // ── Agent-capture consent gate (privacy-first, FAIL-CLOSED) ─────────────────
+  // Auto-captured agent conversations are stored ONLY when the user has opted in
+  // (settings.agentCapture.enabled — the portal "Memory capture" control). Unset
+  // or unreadable settings → treated as off → no-op (nothing written), so capture
+  // never happens without explicit consent. Non-agent ingest is unaffected.
+  if (isAgentSource(msg.source)) {
+    let ac = null;
+    try { ac = (await db.users?.getSettings?.(userId))?.agentCapture; } catch { /* fail-closed */ }
+    if (!ac?.enabled) {
+      return { id: msg.id || crypto.randomUUID(), deduped: true, updated: false, blocked: true };
+    }
+    if (ac.redactSecrets) content = redactSecrets(content);
   }
 
   const id = msg.id || crypto.randomUUID();
