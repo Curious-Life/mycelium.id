@@ -206,7 +206,9 @@ describe('connections — Tier-0b accept handshake', () => {
     const sentRow = { id: 's1', user_a: 'me', user_b: 'bob@bob.mycelium.id', remote_instance: 'bob.mycelium.id' };
     const d1Query = async (sql, params) => {
       if (/SELECT id, user_a, user_b FROM connections/.test(sql)) {
-        return { results: params[1] === sentRow.remote_instance && params[2] === 'bob' ? [sentRow] : [] };
+        // Matched on the verified host (params[1]) only — handle is no longer part
+        // of the match (it can legitimately differ: federation vs profile handle).
+        return { results: params[1] === sentRow.remote_instance ? [sentRow] : [] };
       }
       if (/INSERT INTO user_profiles/.test(sql)) { updates.push({ kind: 'profile', params }); return { results: [] }; }
       if (/UPDATE connections SET status = 'accepted'/.test(sql)) { updates.push({ kind: 'accept', params }); return { results: [] }; }
@@ -215,13 +217,18 @@ describe('connections — Tier-0b accept handshake', () => {
     return { d1Query, updates };
   }
 
-  it('receiveResponse(accept) flips the row matched on the VERIFIED host', async () => {
+  it('receiveResponse(accept) flips the pending row matched on the VERIFIED host — even when from_handle differs from the one we stored', async () => {
     const { d1Query, updates } = responseDb();
     const ns = createConnectionsNamespace({ d1Query });
-    const cid = await ns.receiveResponse({ fromHandle: 'bob', verifiedHost: 'bob.mycelium.id', fromDid: 'did:web:bob.mycelium.id', profile: { signature: 'graphs' }, action: 'accept', toUserId: 'me' });
+    // We sent to "bob", but bob's box signs its connect-response with a different
+    // from_handle (its profile handle "bobby"). Matching on the verified host means
+    // the accept still lands — this is the "accepted on their side, pending on ours" fix.
+    const cid = await ns.receiveResponse({ fromHandle: 'bobby', verifiedHost: 'bob.mycelium.id', fromDid: 'did:web:bob.mycelium.id', profile: { signature: 'graphs' }, action: 'accept', toUserId: 'me' });
     assert.equal(cid, 's1');
     assert.ok(updates.find((u) => u.kind === 'accept'));
-    assert.equal(updates.find((u) => u.kind === 'profile').params[0], 'bob@bob.mycelium.id'); // cached under the verified peer id
+    const prof = updates.find((u) => u.kind === 'profile');
+    assert.equal(prof.params[0], 'bob@bob.mycelium.id');       // keyed by the synthetic peer id (user_b)
+    assert.equal(prof.params[1], 'bobby@bob.mycelium.id');     // display_name carries the response's from_handle
   });
 
   it('receiveResponse REJECTS a forged accept from a different verified signer (the HIGH fix)', async () => {
