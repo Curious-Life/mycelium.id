@@ -35,7 +35,7 @@ const CADDY_LOCAL_PORT = 8443;                  // relay-mode local TLS listener
 export function edgeRoutes({ upstream = LOCAL_HTTP, portalUpstream = PORTAL_HTTP } = {}) {
   return [
     { name: 'control', match: ['/api/v1/account', '/api/v1/account/*', '/api/v1/remote', '/api/v1/remote/*'], action: { type: 'deny' } },
-    { name: 'oauth', match: ['/mcp', '/mcp/*', '/v1/*', '/.well-known/*', '/api/auth/*', '/login', '/login/*', '/ingest/*'], action: { type: 'proxy', upstream } },
+    { name: 'oauth', match: ['/mcp', '/mcp/*', '/v1/*', '/.well-known/*', '/federation/*', '/api/auth/*', '/login', '/login/*', '/ingest/*'], action: { type: 'proxy', upstream } },
     { name: 'portal', match: ['/*'], action: { type: 'proxy', upstream: portalUpstream } },
   ];
 }
