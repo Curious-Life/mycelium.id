@@ -38,8 +38,12 @@ let calls = 0;
 const ollamaStub = (reply) => (req, res) => {
   req.on('data', () => {});
   req.on('end', () => {
-    calls += 1;
     res.setHeader('content-type', 'application/json');
+    // /api/show = the model-profile probe (num_ctx sizing in createNarrator), NOT a
+    // narration call — don't count it; answer benignly so resolveModelProfile fails
+    // soft to the registry. Only /api/chat requests are narration calls.
+    if (/\/api\/show$/.test(req.url || '')) { res.end('{}'); return; }
+    calls += 1;
     res.end(JSON.stringify({ message: { content: reply } }));
   });
 };
