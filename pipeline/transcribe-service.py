@@ -19,7 +19,9 @@ bytes stay in-process.
 
 SECURITY: binds 127.0.0.1 only (CLAUDE.md §13); audio bytes and transcripts are
 NEVER logged. Model downloads are the only network egress and happen ONLY on an
-explicit /download (HF_HUB_OFFLINE is bypassed for that call alone).
+explicit /download (HF_HUB_OFFLINE is bypassed for that call alone). The HF
+snapshot is pinned to an immutable commit (MODEL_REVISIONS) so a retagged or
+compromised upstream repo cannot swap weights — see _revision().
 """
 
 import io
@@ -39,6 +41,23 @@ DEFAULT_PORT = 8093
 MAX_BODY = 64 * 1024 * 1024
 # Curated, stable sizes only — resolved to official CT2 repos by faster-whisper.
 ALLOWED_MODELS = ("large-v3-turbo", "small")
+# Supply-chain pin — freeze each model to an IMMUTABLE commit so a retagged or
+# compromised upstream HF repo can't silently swap model weights on the next
+# /download. These are the exact revisions validated on this deployment (the
+# commits faster-whisper's _MODELS currently resolves: large-v3-turbo →
+# mobiuslabsgmbh/faster-whisper-large-v3-turbo, small → Systran/faster-whisper-
+# small). Override the active model with WHISPER_MODEL_REVISION; an unknown model
+# stays unpinned (revision=None ⇒ unchanged behavior). The same revision is used
+# for download AND the offline load so the HF cache resolves consistently.
+MODEL_REVISIONS = {
+    "large-v3-turbo": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+    "small": "536b0662742c02347bc0e980a01041f333bce120",
+}
+
+
+def _revision(model):
+    """Pinned HF commit for `model` (env override → built-in map → None)."""
+    return os.environ.get("WHISPER_MODEL_REVISION") or MODEL_REVISIONS.get(model)
 
 _state = {
     "status": "no_model",   # ok | loading | downloading | no_model | error
@@ -71,7 +90,8 @@ def _model_cached(model):
     try:
         from faster_whisper.utils import download_model
         # local_files_only never touches the network — raises when not cached.
-        path = download_model(model, local_files_only=True)
+        # Pin the revision so the lookup targets the SAME snapshot /download fetched.
+        path = download_model(model, local_files_only=True, revision=_revision(model))
         return bool(path) and os.path.exists(os.path.join(str(path), "model.bin"))
     except Exception:
         return False
@@ -86,7 +106,7 @@ def _load_model(model):
         _state.update(status="loading", error=None)
         try:
             from faster_whisper import WhisperModel
-            _whisper = WhisperModel(model, device="cpu", compute_type="int8", local_files_only=True)
+            _whisper = WhisperModel(model, device="cpu", compute_type="int8", local_files_only=True, revision=_revision(model))
             _state.update(status="ok", model=model)
             return _whisper
         except Exception as e:
@@ -139,6 +159,7 @@ def _download(model):
         threading.Thread(target=_sizer, daemon=True).start()
         huggingface_hub.snapshot_download(
             repo_id,
+            revision=_revision(model),
             allow_patterns=["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"],
         )
         _state.update(progress={"pct": 100})
