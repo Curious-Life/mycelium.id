@@ -102,6 +102,21 @@ export async function capture(m = {}) {
 }
 
 /**
+ * Bulk-capture many messages in one call (POST /ingest/import) — idempotent on
+ * each item's `id`. Items: {content, id, role, source, conversationId, timestamp,
+ * createdAt, metadata}. Returns the server result string or null; never throws.
+ */
+export async function importBatch(messages) {
+  try {
+    if (!Array.isArray(messages) || messages.length === 0) return null;
+    const { ok, json } = await post('/ingest/import', { messages });
+    return ok ? (json?.result ?? json) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Pull vault context for this turn. Returns the context string, or '' on any
  * failure (the caller then proceeds with no injected context — fail-open).
  * @param {object} [opts] {query?, maxChars?}

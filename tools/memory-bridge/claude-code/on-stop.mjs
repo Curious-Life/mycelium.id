@@ -1,68 +1,37 @@
 #!/usr/bin/env node
-// Claude Code Stop hook — the PUSH half (both sides).
+// Claude Code Stop hook — the PUSH half (EVERY message, both sides).
 //
-// Fires when the assistant finishes a turn. The Stop payload does NOT carry the
-// reply text, so we read it from the transcript (JSONL at `transcript_path`):
-// capture the LAST human `user` message and the LAST `assistant` text of this
-// turn, each keyed by its transcript `uuid` so re-runs dedup (capture.js is
-// id-keyed). Threaded on `session_id` as the conversationId, source 'claude-code'.
-//
-// Robustness: skip tool-result `user` entries (they aren't human messages) and
-// assistant entries with no text (pure tool_use). Fire-and-forget — capture
-// failures never surface. Always exit 0 (Stop cannot block the turn anyway).
-import { capture, readStdin } from '../bridge.mjs';
-import { readFileSync } from 'node:fs';
-
-const SOURCE = 'claude-code';
-
-// Pull the human-typed text out of a transcript message.content (string | parts[]).
-// Returns '' for tool-result-only user entries (not a human message).
-function userText(content) {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  // If ANY part is a tool_result, this is a tool turn, not a human message.
-  if (content.some((p) => p && p.type === 'tool_result')) return '';
-  return content.filter((p) => p && p.type === 'text' && typeof p.text === 'string').map((p) => p.text).join('');
-}
-
-// Assistant text = the text parts only (drop thinking / tool_use).
-function assistantText(content) {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content.filter((p) => p && p.type === 'text' && typeof p.text === 'string').map((p) => p.text).join('');
-}
+// The transcript JSONL is the complete record of the conversation, so on each
+// Stop we SYNC it: capture every human message + assistant text since the last
+// sync (high-water mark per session), with full metadata + real timestamps. Bulk
+// /ingest/import is idempotent on each entry's transcript `uuid`, so re-syncing
+// never duplicates and nothing is missed (incl. intermediate assistant blocks &
+// sub-agent turns). Capture is consent-gated server-side (off until the user opts
+// in) — fail-open: any error, or a hook with no transcript, just exits 0.
+import { importBatch, readStdin } from '../bridge.mjs';
+import { parseTranscript } from './transcript.mjs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 try {
   const payload = JSON.parse((await readStdin()) || '{}');
-  const conversationId = typeof payload.session_id === 'string' ? payload.session_id : undefined;
+  const sessionId = typeof payload.session_id === 'string' ? payload.session_id : '';
   const path = payload.transcript_path;
   if (!path) process.exit(0);
 
-  const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean);
-  const entries = [];
-  for (const line of lines) { try { entries.push(JSON.parse(line)); } catch { /* skip malformed */ } }
+  // High-water mark: how many transcript lines we've already synced this session.
+  const stateDir = join(homedir(), '.mycelium-bridge');
+  const hwmFile = join(stateDir, `cc-${sessionId || 'nosession'}.hwm`);
+  let sinceLine = 0;
+  try { sinceLine = parseInt(readFileSync(hwmFile, 'utf8'), 10) || 0; } catch { /* first sync */ }
 
-  // Walk from the end: the last assistant text + the last human user message.
-  let lastUser = null, lastAssistant = null;
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const e = entries[i];
-    const msg = e?.message;
-    if (!msg) continue;
-    if (!lastAssistant && (e.type === 'assistant' || msg.role === 'assistant')) {
-      const t = assistantText(msg.content);
-      if (t.trim()) lastAssistant = { id: e.uuid, content: t };
-    } else if (!lastUser && (e.type === 'user' || msg.role === 'user')) {
-      const t = userText(msg.content);
-      if (t.trim()) lastUser = { id: e.uuid, content: t };
-    }
-    if (lastUser && lastAssistant) break;
-  }
+  const { items, lastLine } = parseTranscript(path, { sinceLine });
+  if (items.length) await importBatch(items);
 
-  const jobs = [];
-  if (lastUser) jobs.push(capture({ content: lastUser.content, role: 'user', conversationId, source: SOURCE, id: lastUser.id }));
-  if (lastAssistant) jobs.push(capture({ content: lastAssistant.content, role: 'assistant', conversationId, source: SOURCE, id: lastAssistant.id }));
-  await Promise.allSettled(jobs);
+  // Advance the mark even if nothing was capturable (so we don't re-scan).
+  try { mkdirSync(stateDir, { recursive: true }); writeFileSync(hwmFile, String(lastLine)); } catch { /* non-fatal */ }
 } catch {
-  // fail silent — capture must never break the session
+  // fail-silent — capture must never break the session
 }
 process.exit(0);
