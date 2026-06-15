@@ -222,9 +222,21 @@ fn main() {
             let hf_home = home.join("hf-cache");
 
             // Node REST + portal (:8787) — required.
+            // Give V8 headroom: a "bring-your-vault-home" import assembles a
+            // multi-GB export in memory then JSZip-loads it; the default heap
+            // (~2GB) OOMs on large vaults. 4GB floor covers a ~2GB zip; the user
+            // can raise it via NODE_OPTIONS for bigger vaults. Preserve any
+            // existing NODE_OPTIONS (don't clobber a user override).
+            let node_options = {
+                let existing = std::env::var("NODE_OPTIONS").unwrap_or_default();
+                if existing.contains("--max-old-space-size") { existing }
+                else if existing.is_empty() { "--max-old-space-size=4096".to_string() }
+                else { format!("{} --max-old-space-size=4096", existing) }
+            };
             let mut cmd = Command::new(&node_bin);
             cmd.arg("src/server-rest.js")
                 .current_dir(&home)
+                .env("NODE_OPTIONS", &node_options)
                 .env("MYCELIUM_REST_PORT", PORT.to_string())
                 .env("MYCELIUM_KEY_SOURCE", &key_source);
             if bundled {

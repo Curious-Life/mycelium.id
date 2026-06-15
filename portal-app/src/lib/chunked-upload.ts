@@ -14,7 +14,7 @@ function getCsrfToken(): string | null {
 	return match ? match[1] : null;
 }
 
-async function uploadChunkWithRetry(blob: Blob, uploadId: string, index: number, filename: string): Promise<void> {
+async function uploadChunkWithRetry(blob: Blob, uploadId: string, index: number, filename: string, fileSize: number, chunkSize: number): Promise<void> {
 	let lastError: Error | null = null;
 
 	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -24,6 +24,11 @@ async function uploadChunkWithRetry(blob: Blob, uploadId: string, index: number,
 			formData.append('uploadId', uploadId);
 			formData.append('index', String(index));
 			formData.append('filename', filename);
+			// The server pre-allocates one buffer of fileSize and writes each chunk
+			// at index*chunkSize — so it must know both up front (per-chunk, so a
+			// retried/out-of-order chunk still lands in the right slot).
+			formData.append('fileSize', String(fileSize));
+			formData.append('chunkSize', String(chunkSize));
 
 			const headers: Record<string, string> = {};
 			const csrf = getCsrfToken();
@@ -103,7 +108,7 @@ export async function uploadFile(
 		const start = i * CHUNK_SIZE;
 		const end = Math.min(start + CHUNK_SIZE, total);
 		const chunk = file.slice(start, end);
-		await uploadChunkWithRetry(chunk, uploadId, i, file.name);
+		await uploadChunkWithRetry(chunk, uploadId, i, file.name, total, CHUNK_SIZE);
 		if (onProgress) {
 			onProgress({
 				loaded: end, total,
