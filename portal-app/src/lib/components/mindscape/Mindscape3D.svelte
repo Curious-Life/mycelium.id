@@ -918,6 +918,7 @@
 	let tooltipVisible = $state(false);
 	let tooltipX = $state(0);
 	let tooltipY = $state(0);
+	let tooltipBelow = $state(false); // true → anchor below the cursor (no room above)
 	let tooltipData = $state<{ realm?: string; territory?: string; essence?: string; type?: string; date?: string } | null>(null);
 	let hoveredIdx = -1;
 
@@ -1946,8 +1947,22 @@
 		mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
 		raycaster.setFromCamera(mouse, camera);
-		const tipX = event.clientX - rect.left + 12;
-		const tipY = event.clientY - rect.top - 10;
+		// Tooltip placement, clamped to the canvas so it never runs off-screen.
+		// Horizontal: sit to the RIGHT of the cursor, but flip LEFT when that
+		// would overflow the right edge. Vertical: float ABOVE the cursor
+		// (translateY(-100%)), but flip BELOW when there isn't room near the top.
+		// TW/TH are the max card box (max-w-[260px]); we clamp by those so a
+		// narrower card is always fully inside too.
+		const TW = 260, TH = 120, pad = 10;
+		const cx = event.clientX - rect.left;
+		const cy = event.clientY - rect.top;
+		let tipX = cx + 14;
+		if (tipX + TW > rect.width - pad) tipX = cx - 14 - TW; // flip to the left
+		tipX = Math.max(pad, Math.min(tipX, rect.width - TW - pad));
+		const below = cy - TH < pad;                            // not enough room above → drop below
+		let tipY = below ? cy + 16 : cy - 10;
+		tipY = Math.max(pad, Math.min(tipY, rect.height - (below ? TH : 0) - pad));
+		tooltipBelow = below;
 
 		// Check contacts first (they're on top visually)
 		if (contactCloud && contactCloud.visible && renderedContacts.length > 0) {
@@ -2395,12 +2410,12 @@
 						mindscapeState.goBack();
 					}
 				}}
-				class="btn-ghost text-xs px-3 py-1.5 rounded-md bg-[var(--color-surface)]/80 backdrop-blur-sm border border-[var(--color-border)]"
+				class="btn-ghost text-xs px-3 py-1.5 rounded-md ms-glass border border-[var(--color-border)]"
 			>
 				&larr; Back
 			</button>
 		{/if}
-		<span class="text-xs text-[var(--color-text-tertiary)] bg-[var(--color-surface)]/80 backdrop-blur-sm px-2 py-1 rounded">
+		<span class="text-xs text-[var(--color-text-tertiary)] ms-glass px-2 py-1 rounded">
 			{#if msState.selectedRealmId === null}
 				All Realms
 			{:else}
@@ -2416,7 +2431,7 @@
 
 	<!-- Loading overlay -->
 	{#if msState.loading}
-		<div class="absolute inset-0 flex items-center justify-center bg-[var(--color-bg)]/80">
+		<div class="absolute inset-0 flex items-center justify-center ms-scrim">
 			<div class="text-[var(--color-text-tertiary)] text-sm animate-pulse">Loading Mycelium...</div>
 		</div>
 	{/if}
@@ -2433,7 +2448,7 @@
 
 	<!-- Stats badge -->
 	{#if msState.meta && !msState.loading}
-		<div class="absolute bottom-4 left-4 text-[0.65rem] text-[var(--color-text-tertiary)] bg-[var(--color-surface)]/80 backdrop-blur-sm px-2.5 py-1 rounded border border-[var(--color-border)]">
+		<div class="absolute bottom-4 left-4 text-[0.65rem] text-[var(--color-text-tertiary)] ms-glass px-2.5 py-1 rounded border border-[var(--color-border)]">
 			{msState.meta.total.toLocaleString()} points &middot;
 			{Object.keys(msState.realms).length} realms &middot;
 			{Object.keys(msState.territories).length} territories
@@ -2446,7 +2461,7 @@
 	<!-- Contact detail panel -->
 	{#if $selectedContact}
 		{@const c = $selectedContact}
-		<div class="absolute top-4 right-4 w-80 max-h-[calc(100%-2rem)] bg-[var(--color-surface)]/95 backdrop-blur-sm rounded-lg border border-[#E5B84C]/30 shadow-lg flex flex-col overflow-hidden">
+		<div class="absolute top-4 right-4 w-80 max-h-[calc(100%-2rem)] ms-glass rounded-lg border border-[#E5B84C]/30 shadow-lg flex flex-col overflow-hidden">
 			<!-- Header -->
 			<div class="p-4 pb-0">
 				<div class="flex items-start justify-between mb-1">
@@ -2565,7 +2580,7 @@
 	{/if}
 
 	<!-- Layer controls -->
-	<div class="absolute bottom-4 right-4 bg-[var(--color-surface)]/90 backdrop-blur-sm rounded-lg border border-[var(--color-border)] p-2.5 min-w-[140px] max-h-[calc(100%-7rem)] overflow-y-auto">
+	<div class="absolute bottom-4 right-4 ms-glass rounded-lg border border-[var(--color-border)] p-2.5 min-w-[140px] max-h-[calc(100%-7rem)] overflow-y-auto">
 		<div class="text-[0.55rem] uppercase tracking-wider text-[var(--color-text-tertiary)] mb-1.5 px-1">Layers</div>
 
 		<!-- Points layer -->
@@ -2738,8 +2753,8 @@
 	<!-- Point tooltip -->
 	{#if tooltipVisible && tooltipData}
 		<div
-			class="absolute pointer-events-none z-50 bg-[var(--color-surface)]/95 backdrop-blur-sm border border-[var(--color-border)] rounded-lg px-3 py-2 shadow-lg max-w-[260px]"
-			style="left: {tooltipX}px; top: {tooltipY}px; transform: translateY(-100%);"
+			class="absolute pointer-events-none z-50 border border-[var(--color-border)] rounded-lg px-3 py-2 shadow-lg max-w-[260px]"
+			style="left: {tooltipX}px; top: {tooltipY}px; {tooltipBelow ? '' : 'transform: translateY(-100%);'} background: var(--color-surface); background: color-mix(in srgb, var(--color-surface) 94%, transparent); backdrop-filter: blur(14px) saturate(160%); -webkit-backdrop-filter: blur(14px) saturate(160%);"
 		>
 			{#if tooltipData.territory}
 				<div class="text-[0.7rem] font-medium text-[var(--color-text-primary)] leading-tight">{tooltipData.territory}</div>
@@ -2763,6 +2778,25 @@
 </div>
 
 <style>
+	/* Readable glass for overlay panels/chips floating over the 3D canvas.
+	   Tailwind's bg-[var(--color-surface)]/NN modifier produces NO valid rule
+	   because --color-surface is a hex (#141417), not raw channels — so those
+	   panels rendered fully transparent (unreadable). color-mix gives a real,
+	   readable glass with a solid fallback for older WebKit (never transparent). */
+	.ms-glass {
+		background: var(--color-surface);
+		background: color-mix(in srgb, var(--color-surface) 92%, transparent);
+		-webkit-backdrop-filter: blur(14px) saturate(160%);
+		backdrop-filter: blur(14px) saturate(160%);
+	}
+	/* Dimming scrim (loading overlay) — same fix for bg-[var(--color-bg)]/80. */
+	.ms-scrim {
+		background: var(--color-bg);
+		background: color-mix(in srgb, var(--color-bg) 78%, transparent);
+		-webkit-backdrop-filter: blur(2px);
+		backdrop-filter: blur(2px);
+	}
+
 	/* Ethereal drum dial — floating ticks, no box.
 	   Default opacity bumped 0.4 → 0.65 so the dial remains visible
 	   over the brighter halo + afterglow layers added in M1–M3. */
