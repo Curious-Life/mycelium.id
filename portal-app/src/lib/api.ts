@@ -74,10 +74,21 @@ export async function api(path: string, options: RequestInit = {}): Promise<Resp
 
 // --- Typed helpers ---
 
+// Surface the server's JSON {error} message (these routes fail with a useful
+// reason, e.g. "Instance not reachable") instead of a bare "failed (400)".
+// Falls back to the generic status line for non-JSON / bodyless errors.
+async function failMessage(res: Response, fallback: string): Promise<string> {
+	try {
+		const b = await res.clone().json();
+		if (b && typeof b.error === 'string' && b.error.trim()) return b.error;
+	} catch { /* non-JSON body — use the fallback */ }
+	return `${fallback} (${res.status})`;
+}
+
 export async function apiGet<T>(path: string, params?: Record<string, string>): Promise<T> {
 	const qs = params ? '?' + new URLSearchParams(params).toString() : '';
 	const res = await api(`${path}${qs}`);
-	if (!res.ok) throw new Error(`GET ${path} failed (${res.status})`);
+	if (!res.ok) throw new Error(await failMessage(res, `GET ${path} failed`));
 	return res.json();
 }
 
@@ -86,7 +97,7 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
 		method: 'POST',
 		body: JSON.stringify(body),
 	});
-	if (!res.ok) throw new Error(`POST ${path} failed (${res.status})`);
+	if (!res.ok) throw new Error(await failMessage(res, `POST ${path} failed`));
 	return res.json();
 }
 
@@ -95,13 +106,13 @@ export async function apiPut<T>(path: string, body: unknown): Promise<T> {
 		method: 'PUT',
 		body: JSON.stringify(body),
 	});
-	if (!res.ok) throw new Error(`PUT ${path} failed (${res.status})`);
+	if (!res.ok) throw new Error(await failMessage(res, `PUT ${path} failed`));
 	return res.json();
 }
 
 export async function apiDelete<T = { ok: true }>(path: string): Promise<T> {
 	const res = await api(path, { method: 'DELETE' });
-	if (!res.ok) throw new Error(`DELETE ${path} failed (${res.status})`);
+	if (!res.ok) throw new Error(await failMessage(res, `DELETE ${path} failed`));
 	return res.json();
 }
 
@@ -110,6 +121,6 @@ export async function apiPostForm<T>(path: string, formData: FormData): Promise<
 		method: 'POST',
 		body: formData,
 	});
-	if (!res.ok) throw new Error(`POST ${path} failed (${res.status})`);
+	if (!res.ok) throw new Error(await failMessage(res, `POST ${path} failed`));
 	return res.json();
 }
