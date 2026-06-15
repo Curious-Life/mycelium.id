@@ -1,0 +1,11 @@
+{
+  "name": "@mycelium/opencode-memory",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Mycelium universal memory layer for opencode — inject vault context + capture both sides of every turn.",
+  "license": "AGPL-3.0",
+  "main": "index.ts",
+  "exports": { ".": "./index.ts" },
+  "peerDependencies": { "@opencode-ai/plugin": ">=1.17.0" }
+}

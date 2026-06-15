@@ -460,19 +460,56 @@ export async function createHttpApp(opts = {}) {
     }
   });
 
+  // POST /context — the pull half of the memory bridge. Returns the getContext
+  // preamble (+ an optional searchMindscape slice) as plain JSON so a connected
+  // harness can inject vault context per turn WITHOUT speaking MCP JSON-RPC (a
+  // shell hook just curls this). Reuses the SAME getContext/searchMindscape
+  // handlers the MCP surface exposes. Bearer-guarded like /ingest/* and /v1/*.
+  //   body: { query?: string, maxChars?: number }  →  { ok, text }
+  // SECURITY: the returned text is vault plaintext; the caller decides whether to
+  // feed it to an external model (documented egress surface). maxChars caps bloat.
+  app.post('/context', async (req, res) => {
+    if (!(await requireAuth(req, res))) return;
+    const body = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {};
+    const maxChars = Math.min(Number(body.maxChars) > 0 ? Number(body.maxChars) : 4000, 16000);
+    try {
+      // getContext returns a bare STRING (not an MCP {content:[…]} envelope).
+      let text = await ingest.handlers.getContext({});
+      text = typeof text === 'string' ? text : '';
+      if (typeof body.query === 'string' && body.query.trim()) {
+        const s = await ingest.handlers.searchMindscape({ query: body.query, limit: 5 });
+        if (typeof s === 'string' && s.trim()) text += `\n\n---\n# RELEVANT TO THIS TURN\n\n${s}`;
+      }
+      res.json({ ok: true, text: text.slice(0, maxChars) });
+    } catch {
+      // Fail-soft: a context failure must never block the harness's turn. The
+      // caller treats a non-2xx / empty text as "no context" and proceeds.
+      res.status(500).json({ ok: false, error: 'context failed' });
+    }
+  });
+
   // ── OpenAI-compatible outbound gateway (S8), Bearer-guarded like /ingest/* ──
   // A user's harness points its model base-URL at <handle>.mycelium.id/v1 → it
   // gets sovereign, jurisdiction-gated, AUDITED inference through the operator's
   // own BYOK keys (no provider key of its own). Uses the SAME shared `ingest`
   // vault handle (db + userId) as the ingest routes; NEVER on the no-auth :8787.
-  const gateway = createGatewayHandlers({ db: ingest.db, userId: ingest.userId, fetch: globalThis.fetch });
+  // getContext + captureMessage wired in so the gateway can act as the universal
+  // memory bridge when a harness opts in via `X-Mycelium-Capture` (reuses the SAME
+  // handlers the MCP + /ingest surfaces expose; absent the header → pure proxy).
+  const gateway = createGatewayHandlers({
+    db: ingest.db,
+    userId: ingest.userId,
+    fetch: globalThis.fetch,
+    getContext: ingest.handlers.getContext,
+    captureMessage: ingest.handlers.captureMessage,
+  });
   // /v1/embeddings — fronts the LOCAL Nomic embed-service ONLY (never cloud); see
   // src/gateway/embeddings.js for the §7 rationale (vectors are sensitive).
   const embeddings = createEmbeddingsHandler();
   const setGatewayCors = (res) => {
     res.set('Access-Control-Allow-Origin', '*');
     res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Mycelium-Sensitive, X-Mycelium-Embed-Task');
+    res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Mycelium-Sensitive, X-Mycelium-Embed-Task, X-Mycelium-Capture, X-Mycelium-Conversation');
   };
   app.options('/v1/*splat', (req, res) => { setGatewayCors(res); res.status(204).end(); });
   app.post('/v1/chat/completions', async (req, res) => {
