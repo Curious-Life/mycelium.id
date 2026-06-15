@@ -7,7 +7,6 @@
 	import { preparePrfOptions } from '$lib/passkey-prf';
 	import { browser } from '$app/environment';
 	import ProfileView from '$lib/views/ProfileView.svelte';
-	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
 	import ChannelsSection from '$lib/components/settings/ChannelsSection.svelte';
 	import AISettings from '$lib/components/settings/AISettings.svelte';
@@ -1147,21 +1146,34 @@
 				<div class="space-y-6">
 
 			{#if activePane === 'connections'}
-			<!-- Connect-your-AI onboarding checklist -->
-			<section class="card p-5">
-				<ConnectionsChecklist compact />
-			</section>
+			<!-- Mental-model intro: two doors (memory + model), two reaches (local /
+			     remote). Grounds the cards below so they don't read as a flat pile.
+			     The stale onboarding checklist (ConnectionsChecklist) was removed here
+			     2026-06-15 — it duplicated the dedicated onboarding flow and the
+			     Connect-an-app cards. Local-first order: most clients connect on this
+			     Mac; remote is the secondary path. -->
+			<div class="conn-intro">
+				<p>
+					Mycelium exposes two doors to any AI app — <span class="door">Memory</span> over MCP and
+					<span class="door">Model</span> over an OpenAI-compatible gateway. Use them on
+					<strong>this Mac</strong> right now, or reach them <strong>over the internet</strong> with an address.
+				</p>
+			</div>
 
-			<!-- Get your address — claim a free <handle>.mycelium.id over the managed relay (handle availability + one-click connect). Placed above RemoteAccessSection: it's the recommended path and its copy refers to the operator-password field "below". -->
-			<ManagedConnectSection />
-
-			<!-- Remote Access — connect Claude / any MCP client over the internet (operator password, status, connector URL) -->
-			<RemoteAccessSection />
-
-			<!-- Use Mycelium in another app — Mycelium as the memory (MCP) +
-			     model (gateway) for an external AI app. -->
+			<div class="conn-group">Connect an app</div>
+			<!-- Pick your AI app → copy-paste recipe (memory + optional model door). -->
 			<HarnessPickerSection />
+			<!-- The raw endpoints + auth (bearer / OAuth) the recipes above point to. -->
 			<ConnectYourAISection />
+
+			<div class="conn-group">Reach it over the internet</div>
+			<!-- Easiest: claim a handle.mycelium.id over the managed relay. Placed
+			     before RemoteAccessSection: its copy refers to the operator password
+			     field "below" (in Remote Access). -->
+			<ManagedConnectSection />
+			<!-- Bring your own domain / relay (free) — operator password, public URL,
+			     enable toggle, own-relay advanced. -->
+			<RemoteAccessSection />
 			{/if}
 
 			{#if activePane === 'intelligence'}
@@ -2166,6 +2178,35 @@
 	}
 	.animate-fade-in {
 		animation: fade-in 0.2s ease-out;
+	}
+
+	/* Connections pane — mental-model intro + group dividers that turn a flat
+	   stack of cards into a two-part narrative. */
+	.conn-intro {
+		padding: 0.9rem 1.1rem;
+		border: 1px solid var(--color-border);
+		border-radius: 12px;
+		background: var(--color-surface);
+	}
+	.conn-intro p {
+		margin: 0;
+		font-size: 0.82rem;
+		line-height: 1.6;
+		color: var(--color-text-secondary);
+	}
+	.conn-intro .door {
+		color: var(--color-accent-aurum);
+		font-weight: 500;
+	}
+	.conn-intro strong { color: var(--color-text-primary); font-weight: 500; }
+	.conn-group {
+		font-size: 0.6rem;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--color-text-tertiary);
+		font-family: var(--font-mono);
+		padding: 0.5rem 0.25rem 0;
+		margin-top: 0.5rem;
 	}
 
 	/* Two-pane hub: a scannable rail + one detail pane (macOS System Settings). */
