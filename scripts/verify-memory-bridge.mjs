@@ -15,6 +15,8 @@ import express from 'express';
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
@@ -78,6 +80,10 @@ const tx = [
   { type: 'assistant', uuid: 'a-final', message: { role: 'assistant', content: [{ type: 'text', text: 'final assistant reply' }] } },
 ];
 writeFileSync(T_PATH, tx.map((e) => JSON.stringify(e)).join('\n') + '\n');
+// Clear the on-stop high-water mark for this session so a LOCAL re-run starts
+// fresh (the sync skips already-synced lines; without this, a 2nd run on the same
+// machine reads a stale HWM → 0 new → false failure). CI runs fresh regardless.
+try { rmSync(join(homedir(), '.mycelium-bridge', 'cc-cc-sess-1.hwm'), { force: true }); } catch { /* none */ }
 await new Promise((resolve) => {
   const child = spawn('node', ['tools/memory-bridge/claude-code/on-stop.mjs'], {
     env: { ...process.env, MYCELIUM_BASE_URL: base, MYCELIUM_MCP_BEARER: BEARER },

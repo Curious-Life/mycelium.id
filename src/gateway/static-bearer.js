@@ -42,8 +42,12 @@ export function configuredStaticBearer(env = process.env) {
  * @param {Record<string,string|undefined>} [env=process.env]
  * @returns {boolean}
  */
-export function matchStaticBearer(authHeader, env = process.env) {
-  const expected = configuredStaticBearer(env);
+export function matchStaticBearer(authHeader, env = process.env, expectedOverride) {
+  // Expected token: an explicit value (the server passes the persisted,
+  // auto-provisioned bearer from remote/config.resolveMcpBearer) else the env var.
+  // Length-floored either way so a too-short value can never be honored.
+  const candidate = typeof expectedOverride === 'string' ? expectedOverride : configuredStaticBearer(env);
+  const expected = typeof candidate === 'string' && candidate.length >= MIN_BEARER_LEN ? candidate : null;
   if (!expected) return false;                       // not configured → fail closed
   if (typeof authHeader !== 'string') return false;
   const m = /^Bearer\s+(.+)$/i.exec(authHeader);

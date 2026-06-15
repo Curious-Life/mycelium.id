@@ -38,7 +38,7 @@ import { createEmbeddingsHandler } from './gateway/embeddings.js';
 import { matchStaticBearer } from './gateway/static-bearer.js';
 import { createPathThrottle } from './http/rate-limit.js';
 import { createFederationRouter } from './federation/router.js';
-import { readRemoteConfig } from './remote/config.js';
+import { readRemoteConfig, resolveMcpBearer } from './remote/config.js';
 
 /**
  * Build the Express app (no listen). Returns { app, auth, baseURL, transports }.
@@ -50,6 +50,12 @@ import { readRemoteConfig } from './remote/config.js';
 export async function createHttpApp(opts = {}) {
   const { auth, baseURL } = createAuth(opts.authOpts);
   await migrateAuth(auth);
+  // The static bearer for this :4711 surface. env MYCELIUM_MCP_BEARER wins; else a
+  // stable value auto-provisioned + persisted in auth.db — so the self-hosted app
+  // ALWAYS accepts a copy-paste bearer (the hooks / local harnesses) with no manual
+  // setup, instead of being OAuth-only. Resolved ONCE here; retrievable by the
+  // operator via GET /portal/mcp-bearer.
+  const staticBearer = resolveMcpBearer();
 
   // Seed the single operator account when credentials are available.
   const seedPassword = opts.operator?.password || process.env.MYCELIUM_USER_PASSWORD;
@@ -280,8 +286,8 @@ export async function createHttpApp(opts = {}) {
     // Accepted IN ADDITION to OAuth so a local harness / 2.0-only client connects
     // with a copy-paste token. Covers /mcp AND the /v1 gateway (both authenticate
     // through here). The token itself is never logged.
-    if (matchStaticBearer(authHeader)) {
-      console.error('[myc-auth]', req.method, '— static bearer accepted (MYCELIUM_MCP_BEARER)');
+    if (matchStaticBearer(authHeader, process.env, staticBearer)) {
+      console.error('[myc-auth]', req.method, '— static bearer accepted');
       return { userId: ingest.userId || 'local-user', static: true };
     }
     const headers = new Headers({ authorization: authHeader });
