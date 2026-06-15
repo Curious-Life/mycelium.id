@@ -13,7 +13,7 @@
 // think:false AND response_format for reasoning models). Cloud providers go through
 // the existing inference router (audited egress).
 
-import { resolveInferenceConfig } from '../../src/inference/resolve.js';
+import { resolveInferenceConfigForTask } from '../../src/inference/resolve.js';
 import { createInferenceRouter } from '../../src/inference/router.js';
 import { createEgressAuditSink } from '../../src/inference/egress.js';
 import { DEFAULT_LOCAL_MODEL } from '../../src/inference/local.js';
@@ -29,7 +29,7 @@ const LOCALHOST_RE = /(?:\/\/)?(?:127\.0\.0\.1|localhost|0\.0\.0\.0)/;
  * @returns {Promise<{ infer:(prompt:string,opts?:{maxTokens?:number})=>Promise<string>, label:string, local:boolean }>}
  */
 export async function createNarrator({ db, userId, fetch = globalThis.fetch }) {
-  const cfg = await resolveInferenceConfig(db, userId);
+  const cfg = await resolveInferenceConfigForTask(db, userId, 'narrate');
   const isLocal = cfg.jurisdiction === 'local' || (!!cfg.baseUrl && LOCALHOST_RE.test(cfg.baseUrl));
   const label = cfg.label || (isLocal ? 'local model' : cfg.anthropicApiKey ? 'Claude' : cfg.baseUrl ? 'custom' : 'local model');
 

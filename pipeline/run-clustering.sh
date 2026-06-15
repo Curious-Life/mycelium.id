@@ -96,6 +96,12 @@ echo "Step 2/16: Cluster (spherical k-means + Ward HAC; FAISS k-NN = noise only)
 
 echo ""
 echo "Step 3/16: Describe realms + territories"
+# Chronicle-safe by default: PRESERVE existing narration (e.g. canonical chronicles
+# inherited by dominant successors in Step 2) — describe fills gaps only, never
+# rewrites a chronicle the local model would only degrade. Override with
+# MYCELIUM_DESCRIBE_PRESERVE=0 to allow progressive re-narration. A fresh vault has
+# no existing narration, so preserve-on still narrates everything (all gaps).
+export MYCELIUM_DESCRIBE_PRESERVE="${MYCELIUM_DESCRIBE_PRESERVE:-1}"
 node pipeline/describe-clusters.js $DRY_RUN
 # Chronicle narration (story / archetype / patterns) is now an ASYNC BACKGROUND
 # pass: the server spawns pipeline/describe-chronicles.js (startChronicleNarrationJob

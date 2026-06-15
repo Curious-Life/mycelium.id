@@ -16,7 +16,7 @@
 import express from 'express';
 import { createAgentHarness, describeProvider } from './agent/harness.js';
 import { toolsForDomains, normalizePolicy, defaultPolicy, DOMAINS } from './agent/tool-domains.js';
-import { resolveInferenceConfig } from './inference/resolve.js';
+import { resolveInferenceConfigForTask } from './inference/resolve.js';
 import { createEgressAuditSink } from './inference/egress.js';
 import { captureMessage } from './ingest/capture.js';
 
@@ -148,7 +148,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     try {
       send({ type: 'stream_start', streamIndex: 0 });
 
-      const provider = await resolveInferenceConfig(db, userId);
+      const provider = await resolveInferenceConfigForTask(db, userId, 'chat');
       // NO silent fallback (operator directive): if no model is connected, refuse
       // with an actionable state instead of quietly attempting local Ollama and
       // hanging for 90s. describeProvider() returns null iff nothing is configured.

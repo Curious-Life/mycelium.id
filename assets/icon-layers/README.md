@@ -47,21 +47,30 @@ To edit: `open -a "Icon Composer" src-tauri/icons/Mycelium.icon`, change, Save. 
 PNGs from the SVGs first: `cargo tauri icon assets/icon-layers/2-stars.svg -o /tmp/s -p 1024` (and
 the mushroom), then drop the `1024x1024.png`s into `Mycelium.icon/Assets/`.
 
-### Wiring it into the macOS app (Liquid Glass at runtime)
+### What ships in the app — baked glass `.icns`
 
-Tauri's bundler ships a flat `.icns` and does **not** consume `.icon` files, so adding
-`Mycelium.icon` to `tauri.conf.json` does nothing. macOS shows the glass/tinted icon only when the
-`.app` carries a compiled asset catalog (`Assets.car` from the `.icon`) + `CFBundleIconName`. Run the
-injector **after** `cargo tauri build`:
+The app uses the glass **look** in every build: `scripts/gen-glass-icns.sh` renders the `.icon`'s
+macOS *Default* appearance (which already carries the glass material — specular, depth, edge light)
+to a PNG via Icon Composer's `ictool`, pads it to the standard macOS margin, and runs
+`cargo tauri icon` to regenerate `src-tauri/icons/*` (`.icns` + `.ico` + PNGs + Windows `Square*`).
+Those are what `cargo tauri build` already bundles into the `.app` and `.dmg` — so **every build and
+every new user gets the glass icon with no extra step**. Re-run the script whenever the `.icon` (or
+`assets/mushroom.svg`) changes.
 
 ```sh
-sudo xcode-select -s /Applications/Xcode.app   # actool needs full Xcode (one-time)
-xcodebuild -runFirstLaunch                      # if prompted (one-time)
-scripts/build-glass-icon.sh                     # finds the built .app, injects, re-signs
+scripts/gen-glass-icns.sh      # needs Xcode (for ictool) + cargo tauri
 ```
 
-The flat `.icns` remains the pre-Tahoe fallback. (Note: the injector step is not yet verified
-end-to-end here — it needs full Xcode selected, which requires admin.)
+### Why not the *dynamic* system-tint (the honest limitation)
+
+macOS 26's **live** glass/tint (the icon re-coloring with system appearance settings) needs a
+compiled **`Assets.car`** with the AppIcon + `CFBundleIconName`. Producing that car from a macOS
+`.icon` requires Xcode's asset-catalog build step — and on Xcode 26.5 here, `actool` does **not**
+compile a macOS `.icon` into a car (verified every way: standalone `actool`, a Swift package, and a
+full `xcodebuild` app target — even Apple's own sample `.icon` yields an empty plist + no car). Until
+that tooling works for macOS `.icon` files, the baked-glass `.icns` above is the shipping path: it
+looks like the Icon Composer design but won't re-tint live. `Mycelium.icon` stays the source of truth,
+so flipping to the dynamic car later is just a re-render away.
 
 ## Regenerating the flat icon + favicons
 
