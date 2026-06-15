@@ -12,10 +12,27 @@
 
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { resolveKeys } from './crypto/key-source.js';
 import { getSessionKeys } from './account/session-keys.js';
 import { dbPath as resolveDbPath } from './paths.js';
 import { readGenerateStats, writeGenerateStats } from './generate-stats.js';
+
+/**
+ * Kill-switch for the destructive re-cluster. Generate (auto OR manual) rebuilds
+ * the whole mindscape — dissolving territories and, on an interrupted run, blanking
+ * chronicles. After a vault-recovery/import we must protect the restored map until
+ * the narration pipeline makes re-clustering safe. Returns true when generation is
+ * locked, via EITHER env (MYCELIUM_DISABLE_GENERATE=1) or a sentinel file
+ * `.generate-disabled` next to the DB (survives restarts; `rm` it to re-enable).
+ * Default OFF — no behavior change unless the operator explicitly locks it.
+ */
+export function generateLocked() {
+  if (process.env.MYCELIUM_DISABLE_GENERATE === '1') return true;
+  try { return fs.existsSync(path.join(path.dirname(resolveDbPath()), '.generate-disabled')); }
+  catch { return false; }
+}
 
 const MAX_MS = Number(process.env.MYCELIUM_GEN_MAX_MS) || 45 * 60 * 1000; // 45 min hard cap
 // If the child emits NO stdout for this long, flag the job `stalled` so the UI can
@@ -50,6 +67,12 @@ let runningJobId = null;  // single-flight: at most one clustering run at a time
  * @param {{ dbPath?: string, userId?: string }} opts
  */
 export function startClusteringJob({ dbPath, userId, db } = {}) {
+  // Kill-switch (see generateLocked): refuse to spawn the destructive re-cluster
+  // while the mindscape is protected post-recovery. No child, no DB writes.
+  if (generateLocked()) {
+    console.error('[mycelium] Generate is LOCKED (.generate-disabled / MYCELIUM_DISABLE_GENERATE) — refusing to re-cluster.');
+    return { jobId: null, status: 'disabled' };
+  }
   // Single-flight: block while a child is still ALIVE — `running`, or `canceled`
   // but not yet reaped (cur.child set). Prevents two clustering children racing on
   // the same SQLite during a cancel→restart.
@@ -319,6 +342,9 @@ export function startChronicleNarrationJob({ dbPath, userId } = {}) {
     // Generous per-territory timeout (background → no UI bar to freeze): absorbs the
     // first call's cold model-load. Env override wins so tests can shrink it.
     MYCELIUM_CHRONICLE_TIMEOUT_MS: process.env.MYCELIUM_CHRONICLE_TIMEOUT_MS || '180000',
+    // Chronicle-safe by default: fill gaps, never rewrite an existing/inherited
+    // chronicle with the local model (override with MYCELIUM_DESCRIBE_PRESERVE=0).
+    MYCELIUM_DESCRIBE_PRESERVE: process.env.MYCELIUM_DESCRIBE_PRESERVE ?? '1',
     // Inherit the bundled-runtime envs (packaged app) like the clustering job.
     ...(process.env.HF_HOME ? { HF_HOME: process.env.HF_HOME } : {}),
     ...(process.env.HF_HUB_OFFLINE ? { HF_HUB_OFFLINE: process.env.HF_HUB_OFFLINE } : {}),

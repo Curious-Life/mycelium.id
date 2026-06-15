@@ -19,6 +19,7 @@ import express from 'express';
 import { probeProvider } from './inference/probe.js';
 import { PROVIDER_PRESETS } from './inference/presets.js';
 import { assertSafeBaseUrlResolved } from './inference/base-url.js';
+import { INFERENCE_TASKS } from './inference/resolve.js';
 
 const ok = (res, body = {}) => res.json({ ok: true, ...body });
 const bad = (res, code, error) => res.status(code).json({ ok: false, error });
@@ -62,6 +63,37 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   // Per-agent assignments — V1 is single-agent, so intentionally empty (the
   // multi-agent assignment reconciler is deferred; see the design doc).
   router.get('/providers/assignments', (_req, res) => ok(res, { assignments: [] }));
+
+  // ── Per-TASK model selection (Settings → Intelligence) ──────────────────────
+  // Which configured provider/model handles which task (chat vs narrate). Stored
+  // in users.settings.taskModels[task] = { providerId, model? }. Unassigned tasks
+  // fall back to the active provider (resolveInferenceConfigForTask). Metadata
+  // only — no secrets cross this boundary.
+  router.get('/providers/task-models', async (_req, res) => {
+    try {
+      const settings = (await db.users?.getSettings?.(userId)) || {};
+      ok(res, { tasks: INFERENCE_TASKS, taskModels: settings.taskModels || {} });
+    } catch { bad(res, 500, 'failed to read task models'); }
+  });
+
+  // Assign (or clear) a task's provider/model. Body: { task, providerId|null, model? }.
+  router.put('/providers/task-models', async (req, res) => {
+    try {
+      const { task, providerId = null, model = null } = req.body || {};
+      if (!INFERENCE_TASKS.includes(task)) return bad(res, 400, `unknown task (allowed: ${INFERENCE_TASKS.join(', ')})`);
+      const settings = (await db.users?.getSettings?.(userId)) || {};
+      const taskModels = { ...(settings.taskModels || {}) };
+      if (providerId == null) {
+        delete taskModels[task]; // clear → falls back to the active provider
+      } else {
+        const row = await db.providers.get(providerId, userId); // must be a configured provider of THIS user
+        if (!row) return bad(res, 404, 'provider not found');
+        taskModels[task] = { providerId, ...(model ? { model: String(model) } : {}) };
+      }
+      await db.users.updateSettings(userId, { ...settings, taskModels });
+      ok(res, { taskModels });
+    } catch { bad(res, 500, 'failed to set task model'); }
+  });
 
   // The curated catalog of connectable providers — the "Intelligence" options the
   // UI offers (label, kind, base_url, jurisdiction, default model). Static data;

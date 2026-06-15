@@ -20,6 +20,7 @@ use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use tauri::menu::{Menu, MenuItem, Submenu};
 use tauri::{Manager, RunEvent, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
 
 const PORT: u16 = 8787;
@@ -387,7 +388,27 @@ fn main() {
 
             let _ = &win;
 
+            // Reload binding (Cmd/Ctrl+R). WKWebView in a Tauri dev build binds no
+            // reload by default, so a frontend deploy "won't show" until the app is
+            // fully restarted (cost a debugging round-trip 2026-06-15). A menu item
+            // is how desktop accelerators are registered in Tauri v2 — we keep the
+            // standard app menu (Quit/Copy/Paste/…) and append a View › Reload.
+            // Paired with the `no-store` SPA shell in server-rest.js so the reload
+            // fetches the current hashed bundle rather than a cached shell.
+            let reload = MenuItem::with_id(app, "reload", "Reload", true, Some("CmdOrCtrl+R"))?;
+            let view = Submenu::with_items(app, "View", true, &[&reload])?;
+            let menu = Menu::default(app.handle())?;
+            menu.append(&view)?;
+            app.set_menu(menu)?;
+
             Ok(())
+        })
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "reload" {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.eval("window.location.reload()");
+                }
+            }
         })
         .on_window_event(|window, event| {
             // Reap on window close (redundant with RunEvent::Exit; covers either path).

@@ -3,18 +3,24 @@
  * Generate realm + territory names/essences from clustered points.
  *
  * Populates `realms` and `territory_profiles` with human-readable names and
- * essences so the portal/3D view has labels. For each unnamed realm/territory,
- * samples representative member messages and asks the LOCAL Claude CLI to name
- * + summarize them — plaintext never leaves the VPS (the canonical design
- * rejected a cloud-model variant for exactly this reason).
+ * essences so the portal/3D view has labels. For each realm/territory it draws a
+ * TIMELINE-STRATIFIED sample (≈20 members spread across the cluster's whole date
+ * range, ALL source types, 5k chars each, plus aggregated top tags + entities —
+ * pipeline/lib/narrate-sample.js) and asks the user's ACTIVE provider to name +
+ * summarize them. Plaintext never leaves the box on a local model.
+ *
+ * PROGRESSIVE: the model is shown the EXISTING name/essence and asked to refine or
+ * rewrite as understanding deepens. COVERAGE (territories): the sampled member ids
+ * are recorded in `territory_seen_points`; each pass biases toward UNSEEN content
+ * so coverage accumulates, and `explored_count`/`explored_percent` track "% described"
+ * (realms roll up their children's coverage). Realms have no per-entity seen table —
+ * they draw a plain stratified spread.
  *
  * V1 single-user port:
- *   - Reads/writes the local encrypted SQLite vault via the in-process db
- *     adapter (no Worker proxy, no MINDSCAPE_OWNER_ID / AGENT_ID scope
- *     plumbing). The single user scope is always 'personal'.
- *   - If the Claude CLI is unavailable, falls back to deterministic
- *     placeholder names so the pipeline still completes (fail-soft on the
- *     describe step; the structural clustering is what matters).
+ *   - Reads/writes the local encrypted SQLite vault via the in-process db adapter
+ *     (no Worker proxy, no scope plumbing; scope is always 'personal').
+ *   - If the model is unavailable, falls back to deterministic placeholder names so
+ *     the pipeline still completes (fail-soft; structural clustering is what matters).
  *
  * Usage:
  *   USER_MASTER=<hex> SYSTEM_KEY=<hex> MYCELIUM_DB=./data/vault.db \
@@ -25,6 +31,9 @@ import crypto from 'node:crypto';
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { createNarrator } from './lib/narrate-infer.js';
+import {
+  loadMembers, sampleMembers, getSeenIds, recordSeen, exploredPercent, lastPassNumber,
+} from './lib/narrate-sample.js';
 
 const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';
 const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
@@ -33,13 +42,20 @@ const SYSTEM_KEY = process.env.SYSTEM_KEY;
 const DRY_RUN = process.argv.includes('--dry-run');
 // Bypass the input-signature skip and re-narrate everything (recovery hatch).
 const FORCE = process.argv.includes('--force') || process.env.MYCELIUM_DESCRIBE_FORCE === '1';
+// Preserve-imported (gap-fill-only): NEVER re-narrate an entity that already has a
+// name — only fill the unnamed. Used for the one-shot over a freshly-imported vault
+// so canonical narration is never overwritten by the local model. Coverage columns
+// still refresh (non-destructive). FORCE wins (explicit re-narrate).
+const PRESERVE = !FORCE && (process.argv.includes('--preserve-imported') || process.env.MYCELIUM_DESCRIBE_PRESERVE === '1');
 
 /**
  * Change-detection signature for a cluster's describe input: SHA-256 over the
- * sampled message IDs (random UUIDs — never content-derived, so the plaintext
- * hash leaks nothing about plaintext) + the cluster's live point count. Same
- * sample + same count → narration input is literally identical → skip. Stored
- * in the (previously vestigial) plaintext describe_input_hash column.
+ * sampled source IDs (random UUIDs — never content-derived, so the hash leaks
+ * nothing about plaintext) + the cluster's live point count. Same sample + same
+ * count → narration input is identical → skip. Stored in describe_input_hash.
+ * Because the sampler biases to UNSEEN content, the signature rotates while a
+ * territory is still under-covered (→ re-narrate) and stabilizes once fully
+ * covered (→ skip), giving progressive enrichment without endless churn.
  */
 function inputSignature(sampleIds, pointCount) {
   return crypto.createHash('sha256')
@@ -67,20 +83,31 @@ if (!USER_MASTER || !SYSTEM_KEY) {
 }
 
 /**
- * Name + summarize a cluster with the user's ACTIVE provider (the model selected in
- * Settings → Intelligence). Returns null on any failure so the caller can fall back
- * to a deterministic placeholder (fail-soft: a describe miss never blocks Generate).
+ * Name + summarize a cluster with the user's ACTIVE provider. Shows the model a
+ * timeline-stratified sample + top tags + entities, and (when present) the EXISTING
+ * name/essence so it can refine rather than restart. Returns null on any failure so
+ * the caller can fall back to a placeholder (fail-soft: a miss never blocks Generate).
  */
-async function describe(narrator, kind, samples) {
-  const prompt = [
+async function describe(narrator, kind, { samples, topTags = [], entities = [], existing = null }) {
+  const lines = [
     `You are naming a ${kind} in a personal knowledge graph.`,
-    `Below are representative snippets that belong to this ${kind}.`,
+    `Below are representative snippets sampled across this ${kind}'s WHOLE timeline (not just recent).`,
+  ];
+  if (existing?.name) {
+    lines.push(
+      `It is currently titled "${existing.name}"${existing.essence ? ` — "${existing.essence}"` : ''}.`,
+      `Refine or rewrite the title and essence as your understanding deepens; keep them only if they still fit.`,
+    );
+  }
+  if (topTags.length) lines.push(`Recurring tags: ${topTags.join(', ')}.`);
+  if (entities.length) lines.push(`Key entities: ${entities.join(', ')}.`);
+  lines.push(
     `Reply with EXACTLY one line of minified JSON: {"name": "<2-4 word title>", "essence": "<one sentence>"}.`,
     '',
-    ...samples.map((s, i) => `(${i + 1}) ${s.slice(0, 300)}`),
-  ].join('\n');
+    ...samples.map((s, i) => `(${i + 1}) ${String(s.content ?? s).slice(0, 5000)}`),
+  );
   try {
-    const raw = await narrator.infer(prompt, { maxTokens: 300 });
+    const raw = await narrator.infer(lines.join('\n'), { maxTokens: 300 });
     const m = String(raw).match(/\{[\s\S]*\}/);
     const parsed = m ? JSON.parse(m[0]) : null;
     if (parsed && typeof parsed.name === 'string' && parsed.name.trim()) {
@@ -133,7 +160,8 @@ async function run() {
 
     let skippedRealms = 0;
     for (const { realm_id } of realmIds) {
-      const samples = await sampleContent(query, 'realm_id', realm_id);
+      const members = await loadMembers(query, USER_ID, 'realm_id', realm_id);
+      const sample = sampleMembers(members, {}); // realms: plain stratified spread (no per-realm seen table)
       // Real counts from live points — no other stage maintains these, and the
       // search corpus ranks realms by message_count (zeros = arbitrary order).
       const [counts = {}] = await query(
@@ -142,15 +170,15 @@ async function run() {
          FROM clustering_points WHERE user_id = ? AND realm_id = ?`,
         [USER_ID, realm_id],
       ).catch(() => []);
-      const sig = inputSignature(samples.map((s) => s.id), counts.mc);
+      const sig = inputSignature(sample.sampledIds, counts.mc);
       const [existing] = await query(
-        `SELECT name, describe_input_hash FROM realms WHERE user_id = ? AND realm_id = ?`,
+        `SELECT name, essence, describe_input_hash FROM realms WHERE user_id = ? AND realm_id = ?`,
         [USER_ID, realm_id],
       ).catch(() => []);
 
       // Skip-if-unchanged: named + identical narration input → no inference.
       // Counts stay fresh (describe owns realm counters).
-      if (!FORCE && existing?.name && existing.describe_input_hash === sig) {
+      if (!FORCE && existing?.name && (PRESERVE || existing.describe_input_hash === sig)) {
         skippedRealms += 1;
         if (DRY_RUN) { console.log(`[describe] (dry) realm ${realm_id} unchanged — skip`); continue; }
         await query(
@@ -162,7 +190,9 @@ async function run() {
         continue;
       }
 
-      const described = samples.length ? await describe(narrator, 'realm', samples.map((s) => s.content)) : null;
+      const described = sample.samples.length
+        ? await describe(narrator, 'realm', { samples: sample.samples, topTags: sample.topTags, entities: sample.entities, existing })
+        : null;
       if (described) namedRealms += 1;
       if (DRY_RUN) {
         console.log(`[describe] (dry) realm ${realm_id} → "${described?.name || `Realm ${realm_id}`}"`);
@@ -197,51 +227,90 @@ async function run() {
 
     // ── Territories ─────────────────────────────────────────────────
     // cluster.py's dynamics upsert owns message_count + realm_id (refreshed every
-    // run, before this stage) — so the skip and clobber-guard paths here write
-    // nothing at all.
+    // run, before this stage). describe owns name/essence + the coverage columns
+    // (explored_count/explored_percent) and the seen-points ledger.
     let skippedTerr = 0;
     for (const { territory_id, realm_id } of terrIds) {
-      const samples = await sampleContent(query, 'territory_id', territory_id);
+      const members = await loadMembers(query, USER_ID, 'territory_id', territory_id);
+      const seenIds = await getSeenIds(query, USER_ID, territory_id);
+      const sample = sampleMembers(members, { seenIds });
+      const total_pts = members.length;
       const [tc = {}] = await query(
         `SELECT COUNT(*) AS mc FROM clustering_points WHERE user_id = ? AND territory_id = ?`,
         [USER_ID, territory_id],
       ).catch(() => []);
-      const sig = inputSignature(samples.map((s) => s.id), tc.mc);
+      const sig = inputSignature(sample.sampledIds, total_pts);
       const [existing] = await query(
-        `SELECT name, describe_input_hash FROM territory_profiles WHERE user_id = ? AND territory_id = ?`,
+        `SELECT name, essence, describe_input_hash FROM territory_profiles WHERE user_id = ? AND territory_id = ?`,
         [USER_ID, territory_id],
       ).catch(() => []);
+      const seenBefore = seenIds.size;
+      const unseen = sample.unseenRemaining;
 
-      if (!FORCE && existing?.name && existing.describe_input_hash === sig) {
+      // Skip: named AND input unchanged AND fully covered (no new content to fold
+      // in). Refresh the coverage % on the way past so the UI stays honest.
+      if (!FORCE && existing?.name && (PRESERVE || (existing.describe_input_hash === sig && unseen === 0))) {
         skippedTerr += 1;
-        if (DRY_RUN) console.log(`[describe] (dry) territory ${territory_id} unchanged — skip`);
+        if (DRY_RUN) { console.log(`[describe] (dry) territory ${territory_id} unchanged + fully covered — skip`); await tick(total); continue; }
+        await query(
+          `UPDATE territory_profiles SET explored_count = ?, explored_percent = ?, updated_at = datetime('now')
+           WHERE user_id = ? AND territory_id = ?`,
+          [seenBefore, exploredPercent(seenBefore, total_pts), USER_ID, territory_id],
+        ).catch(() => {});
         await tick(total);
         continue;
       }
 
-      const described = samples.length ? await describe(narrator, 'territory', samples.map((s) => s.content)) : null;
+      const described = sample.samples.length
+        ? await describe(narrator, 'territory', { samples: sample.samples, topTags: sample.topTags, entities: sample.entities, existing })
+        : null;
       if (described) namedTerr += 1;
       if (DRY_RUN) {
-        console.log(`[describe] (dry) territory ${territory_id} → "${described?.name || `Territory ${territory_id}`}"`);
+        console.log(`[describe] (dry) territory ${territory_id} → "${described?.name || `Territory ${territory_id}`}" (covered ${seenBefore}/${total_pts})`);
         continue;
       }
       if (!described && existing?.name) {
-        // Clobber guard: keep the real name; old hash ≠ sig → retried next run.
+        // Clobber guard: keep the real name; old hash ≠ sig → retried next run. No
+        // seen-points advance (coverage only grows on a real narration).
         await tick(total);
         continue;
       }
+      // Real narration → fold the sampled members into coverage, then write.
+      let seenCount = seenBefore;
+      if (described) {
+        const pass = (await lastPassNumber(query, USER_ID, territory_id)) + 1;
+        await recordSeen(query, USER_ID, territory_id, sample.sampledIds, pass);
+        seenCount = (await getSeenIds(query, USER_ID, territory_id)).size;
+      }
+      const ep = exploredPercent(seenCount, total_pts);
       const name = described?.name || `Territory ${territory_id}`;
       const essence = described?.essence || '';
       await query(
         `INSERT INTO territory_profiles
-           (user_id, territory_id, realm_id, name, essence, message_count, describe_input_hash, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+           (user_id, territory_id, realm_id, name, essence, message_count, explored_count, explored_percent, describe_input_hash, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
          ON CONFLICT(user_id, territory_id) DO UPDATE SET name = excluded.name, essence = excluded.essence,
-           realm_id = excluded.realm_id, describe_input_hash = excluded.describe_input_hash, updated_at = datetime('now')`,
-        [USER_ID, territory_id, realm_id, name, essence, tc.mc ?? samples.length, described ? sig : null],
+           realm_id = excluded.realm_id, explored_count = excluded.explored_count, explored_percent = excluded.explored_percent,
+           describe_input_hash = excluded.describe_input_hash, updated_at = datetime('now')`,
+        [USER_ID, territory_id, realm_id, name, essence, tc.mc ?? total_pts, seenCount, ep, described ? sig : null],
       ).catch(err => console.error(`[describe] territory ${territory_id} write failed:`, err.message));
       if (described) await recordName(db, 'territory', territory_id, name, essence);
       await tick(total);
+    }
+
+    // ── Realm coverage roll-up (CASCADE): a realm's explored_percent is the
+    // message-weighted average of its live territories' coverage. Pure SQL, no
+    // inference; runs once after territories so the children are fresh.
+    if (!DRY_RUN) {
+      await query(
+        `UPDATE realms SET explored_percent = COALESCE((
+            SELECT ROUND(SUM(tp.explored_percent * tp.message_count) * 1.0 / NULLIF(SUM(tp.message_count), 0))
+            FROM territory_profiles tp
+            WHERE tp.user_id = realms.user_id AND tp.realm_id = realms.realm_id AND tp.dissolved_at IS NULL
+          ), explored_percent)
+         WHERE user_id = ?`,
+        [USER_ID],
+      ).catch(err => console.error('[describe] realm coverage roll-up failed:', err.message));
     }
 
     console.log(`[describe] Done — named ${namedRealms}/${realmIds.length} realms (${skippedRealms} unchanged) · ${namedTerr}/${terrIds.length} territories (${skippedTerr} unchanged) via ${narrator.label}`);
@@ -254,23 +323,6 @@ async function run() {
     if (hbTimer) clearInterval(hbTimer);
     close();
   }
-}
-
-/**
- * Pull up to 5 decrypted member snippets for a cluster column (realm_id /
- * territory_id). The adapter transparently decrypts messages.content. Returns
- * [{id, content}] — the ids feed the input signature, so the order must be
- * deterministic (m.id tiebreak on equal timestamps, else the hash would flap).
- */
-async function sampleContent(query, column, value) {
-  const rows = await query(
-    `SELECT m.id, m.content FROM clustering_points cp
-     JOIN messages m ON m.id = cp.source_id AND cp.source_type = 'message'
-     WHERE cp.user_id = ? AND cp.${column} = ?
-     ORDER BY m.created_at DESC, m.id DESC LIMIT 5`,
-    [USER_ID, value],
-  ).catch(() => []);
-  return rows.filter(r => r.content).map(r => ({ id: r.id, content: r.content }));
 }
 
 run().catch(err => { console.error('[describe] Fatal:', err); process.exit(1); });

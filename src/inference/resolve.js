@@ -62,6 +62,33 @@ export async function resolveInferenceConfig(db, userId) {
   return {}; // router reads env (ANTHROPIC_API_KEY / OPENAI_API_KEY) when unset
 }
 
+// Inference tasks the user can route to a specific provider/model (Settings →
+// Intelligence). Unlisted tasks (or no assignment) fall back to the ACTIVE provider.
+export const INFERENCE_TASKS = ['chat', 'narrate'];
+
+/**
+ * Resolve the provider/model for a SPECIFIC task. Reads the per-task assignment
+ * from users.settings.taskModels[task] = { providerId, model? }, loads that
+ * provider row, and (optionally) overrides its model. Falls back to the ACTIVE
+ * provider (resolveInferenceConfig) when no assignment exists or it's
+ * unresolvable — so this is always safe to use in place of resolveInferenceConfig.
+ */
+export async function resolveInferenceConfigForTask(db, userId, task) {
+  try {
+    const settings = await db?.users?.getSettings?.(userId);
+    const a = settings?.taskModels?.[task];
+    if (a && a.providerId != null) {
+      let row = await db?.providers?.get?.(a.providerId, userId);
+      if (row) {
+        if (a.model) row = { ...row, model_preference: a.model }; // per-task model override
+        const cfg = mapRowToConfig(row);
+        if (cfg) return cfg;
+      }
+    }
+  } catch { /* fail-soft → active provider */ }
+  return resolveInferenceConfig(db, userId);
+}
+
 // §4g cascade priority (operator decision): EU-sovereign ZDR → frontier (US) →
 // local. Sensitive requests drop US providers entirely.
 const JURISDICTION_RANK = (j) => (j === 'eu-zdr' ? 0 : j === 'local' ? 2 : 1);
