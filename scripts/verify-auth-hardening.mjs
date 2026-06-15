@@ -13,6 +13,7 @@ import { createAuth, migrateAuth, ensureOperatorUser } from '../src/auth.js';
 import { authShimRouter } from '../src/auth-shim.js';
 import { createPathThrottle } from '../src/http/rate-limit.js';
 import { resolveRequester } from '../src/http/require-vault-auth.js';
+import { issueLoginCsrf, verifyLoginCsrf, LOGIN_CSRF_COOKIE } from '../src/http/login-csrf.js';
 
 let pass = 0, fail = 0;
 const ok = (c, label, extra = '') => { if (c) { pass++; console.log(`PASS  ${label}${extra ? '  ' + extra : ''}`); } else { fail++; console.log(`FAIL  ${label}${extra ? '  ' + extra : ''}`); } };
@@ -21,6 +22,29 @@ const ok = (c, label, extra = '') => { if (c) { pass++; console.log(`PASS  ${lab
 const srvHttp = readFileSync(new URL('../src/server-http.js', import.meta.url), 'utf8');
 ok(/createPathThrottle\([^)]*\/api\/auth\/sign-in\/email/.test(srvHttp), '0. sign-in throttle mounted in server-http.js');
 ok(/startsWith\('\/api\/auth\/sign-up'\)/.test(srvHttp) && /res\.status\(404\)/.test(srvHttp), '0b. relay HTTP sign-up BLOCKED in server-http.js (audit)');
+
+// ── H6: POST /login CSRF guard + scoped credentialed CORS (source + unit) ──
+ok(/verifyLoginCsrf\(req\)/.test(srvHttp) && /issueLoginCsrf\(req, res\)/.test(srvHttp), 'H6a. POST /login enforces CSRF; GET issues a token (server-http.js)');
+ok(/p\.endsWith\('\/mcp\/register'\)\s*\|\|\s*p\.endsWith\('\/mcp\/token'\)/.test(srvHttp), 'H6b. credentialed CORS scoped to /mcp/register + /mcp/token only');
+
+// M-REST-BIND: the portal/REST server must FAIL CLOSED on a non-loopback bind
+// (recovery-key surface) unless explicitly opted in.
+const srvRest = readFileSync(new URL('../src/server-rest.js', import.meta.url), 'utf8');
+ok(/REST_LOOPBACK_HOSTS\.has\(host\)/.test(srvRest) && /MYCELIUM_ALLOW_NETWORK_REST/.test(srvRest) && /process\.exit\(2\)/.test(srvRest), 'M-REST-BIND. server-rest refuses non-loopback bind without MYCELIUM_ALLOW_NETWORK_REST=1');
+{
+  const fakeRes = () => { const c = []; return { append: (_k, v) => c.push(v), cookies: c }; };
+  const r1 = fakeRes();
+  const tok = issueLoginCsrf({ headers: {} }, r1);
+  const sc = r1.cookies[0] || '';
+  ok(/^myc_login_csrf=/.test(sc) && /HttpOnly/.test(sc) && /SameSite=Strict/.test(sc) && tok.length >= 32, 'H6c. GET mints a high-entropy HttpOnly SameSite=Strict CSRF cookie');
+  const r2 = fakeRes(); issueLoginCsrf({ headers: { 'x-forwarded-proto': 'https' } }, r2);
+  ok(/Secure/.test(r2.cookies[0] || ''), 'H6c2. Secure flag set when the request arrived over https (relay)');
+  const reqOk = { headers: { cookie: `${LOGIN_CSRF_COOKIE}=${tok}`, host: 'vault', origin: 'http://vault' }, body: { _csrf: tok } };
+  ok(verifyLoginCsrf(reqOk).ok, 'H6d. matching token + same-origin → accepted');
+  ok(!verifyLoginCsrf({ headers: { host: 'vault' }, body: {} }).ok, 'H6e. cross-site post (no cookie, no field) → rejected');
+  ok(!verifyLoginCsrf({ headers: { cookie: `${LOGIN_CSRF_COOKIE}=${tok}`, host: 'vault' }, body: { _csrf: 'wrong' } }).ok, 'H6f. mismatched token → rejected');
+  ok(!verifyLoginCsrf({ headers: { cookie: `${LOGIN_CSRF_COOKIE}=${tok}`, host: 'vault', origin: 'http://evil.example' }, body: { _csrf: tok } }).ok, 'H6g. cross-origin Origin header → rejected even with a token');
+}
 
 process.env.MYCELIUM_AUTH_SECRET = 'auth-hardening-secret-'.padEnd(48, 'x');
 process.env.MYCELIUM_USER_EMAIL = 'operator@mycelium.local'; // deterministic owner email for the pin

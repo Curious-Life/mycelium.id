@@ -7,6 +7,7 @@
  * Config comes from the vault (portal Settings → Channels, hydrated over loopback)
  * with env as the fallback. Run: node packages/channel-daemon/index.js
  */
+import crypto from 'node:crypto';
 import { loadConfig, assertEgressConfig, applyChannelConfigToEnv } from './config.js';
 import { createVaultClient } from './vault-client.js';
 import { createEnvelopeDedup } from './dedup.js';
@@ -53,6 +54,12 @@ export function buildDaemon(cfg, { runTurn } = {}) {
   // long after both are constructed).
   let telegram = null, poller = null, telegramSendHandler;
   let discord = null, gateway = null, discordSendHandler;
+
+  // Per-boot secret that authorizes a `trusted` (authority/rate-limit-bypass)
+  // send. Only the in-process command-ack closures below carry it (header
+  // x-egress-trusted); a body `trusted:true` from any other loopback caller is
+  // ignored. Random per process — never persisted, never logged (H2).
+  const trustedToken = crypto.randomBytes(32).toString('hex');
 
   // ── shared agent-turn pipeline (one runtime/lane for all platforms) ────────
   let effectiveRunTurn = runTurn;
@@ -106,10 +113,11 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     telegramSendHandler = createTelegramChokepoint({
       sendToTelegram: (a) => telegram.sendMessage(a), recordEgress, persistOutbound,
       checkAuthority: checkTelegramAuthority, dedup, rateLimit, voicePipeline, getActiveTurn, agentId: cfg.agentId,
+      trustedToken,
     });
 
     const sendReply = async ({ chatId, text, replyToMessageId }) => {
-      try { await fetch(`${cfg.selfUrl}/telegram/send`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chatId, text, replyToMessageId, trusted: true }) }); }
+      try { await fetch(`${cfg.selfUrl}/telegram/send`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-egress-trusted': trustedToken }, body: JSON.stringify({ chatId, text, replyToMessageId, trusted: true }) }); }
       catch (e) { console.error('[channel-daemon] command reply failed:', e.message); }
     };
     const commands = createCommandHandler({ vault, sendReply, ownerTelegramId: cfg.ownerTelegramId });
@@ -150,10 +158,11 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     discordSendHandler = createDiscordChokepoint({
       sendToDiscord: (a) => discord.sendMessage(a), recordEgress, persistOutbound,
       checkAuthority: checkDiscordAuthority, dedup, rateLimit, voicePipeline: discordVoice, getActiveTurn, agentId: cfg.agentId,
+      trustedToken,
     });
 
     const discordSendReply = async ({ channelId, content, replyToMessageId }) => {
-      try { await fetch(`${cfg.selfUrl}/discord/send`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channelId, content, replyToMessageId, trusted: true }) }); }
+      try { await fetch(`${cfg.selfUrl}/discord/send`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-egress-trusted': trustedToken }, body: JSON.stringify({ channelId, content, replyToMessageId, trusted: true }) }); }
       catch (e) { console.error('[channel-daemon] discord command reply failed:', e.message); }
     };
     const discordCommands = createDiscordCommandHandler({ vault, sendReply: discordSendReply, ownerDiscordId: cfg.ownerDiscordId });

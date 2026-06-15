@@ -19,12 +19,18 @@
 // the local drainer re-embeds the whole backlog, then Generate evolves the
 // (restored) mindscape natively.
 //
-// WHAT'S SKIPPED (reported, never silent): the `agents/` filesystem (V1 is a
-// pure tool server — D5), passkeys + secrets (different auth; values excluded
-// from the export anyway), ai_providers (credentials don't ride along — re-add
-// keys in Settings), connections (federation identity is per-instance),
-// internal_model_items (dead schema).
-import { extname } from 'node:path';
+// WHAT'S SKIPPED (reported, never silent): passkeys (WebAuthn credentials are
+// origin-bound — meaningless on a new substrate) and secrets (the exporter
+// excludes the values; key-only stubs would shadow real secret reads).
+// Everything else crosses: user identity meta (display name / timezone /
+// settings → the V1 users row), internal_model_items (the agent's model of the
+// user), connections (canonical-uid remapped to the V1 user), ai_providers
+// (the canonical export decrypts, so credentials may ride along — re-encrypted
+// here by the adapter), and the `agents/` filesystem's text files (mind files,
+// memory, prompts — V1 has no agent runtime FS, so they land as documents under
+// `agents/...`, deterministic ids ⇒ idempotent).
+import { extname, basename } from 'node:path';
+import crypto from 'node:crypto';
 import { putBlob } from './blob-store.js';
 import { getMasterKey } from '../crypto/crypto-local.js';
 import { encryptVector } from '../search/ann/decode.js';
@@ -57,18 +63,31 @@ const normalizeValue = (v) => {
  * abort a 50k-row import.
  */
 async function restoreTable(db, table, rows, { userId, overrides = {} }) {
-  const out = { inserted: 0, deduped: 0, failed: 0 };
+  // `attempted`/`capped` feed the reconciliation report: declared − attempted
+  // must be zero, or the report names exactly what was never even tried.
+  const out = { attempted: 0, inserted: 0, deduped: 0, failed: 0, capped: 0 };
   if (!Array.isArray(rows) || rows.length === 0) return out;
   const cols = await tableColumns(db, table);
-  if (cols.size === 0) { out.failed = rows.length; out.tableMissing = true; return out; }
+  if (cols.size === 0) { out.failed = rows.length; out.attempted = rows.length; out.tableMissing = true; return out; }
 
   let n = 0;
   for (const row of rows) {
-    if (++n > MAX_ROWS_PER_TABLE) break;
+    if (++n > MAX_ROWS_PER_TABLE) { out.capped++; continue; }
+    out.attempted++;
     if (!row || typeof row !== 'object') { out.failed++; continue; }
     try {
       const r = { ...row, ...overrides };
       if (cols.has('user_id')) r.user_id = userId;
+      // Row↔envelope scope consistency: the adapter seals every imported value
+      // under its fixed 'personal' scope, so the plaintext scope COLUMN must
+      // say the same — a canonical 'org' label over a 'personal' envelope would
+      // trip scope-filtered readers (SQL-level AGENT_SCOPES filtering and the
+      // decrypt-time scope guardian both key off it).
+      if (cols.has('scope')) r.scope = 'personal';
+      // embedding_768 is NEVER_AUTO_DECRYPT: the canonical exporter's SELECT *
+      // ships it as a CANONICAL-KEY envelope (territory_profiles, realms,
+      // semantic_themes…), undecryptable here. Null it everywhere — V1 re-embeds.
+      if (cols.has('embedding_768')) r.embedding_768 = null;
       const keys = Object.keys(r).filter((k) => cols.has(k) && r[k] !== undefined);
       if (keys.length === 0) { out.failed++; continue; }
       const res = await db.rawQuery(
@@ -81,16 +100,39 @@ async function restoreTable(db, table, rows, { userId, overrides = {} }) {
   return out;
 }
 
-/** Read one zip binary entry, double-capped (declared size + actual length). */
-async function readBinaryEntry(zip, name) {
-  const entry = zip.file(name);
-  if (!entry || entry.dir) return null;
+/**
+ * Inflate one zip entry to a Buffer with TWO independent caps so a decompression
+ * bomb can never exhaust memory (M-ZIPBOMB, mirrors import-parsers.js):
+ *   1) fast reject on the DECLARED uncompressed size before inflating; and
+ *   2) a STREAMING byte counter that aborts inflation the instant the output
+ *      passes maxBytes — bounds memory even if the header lies low or a future
+ *      jszip drops the internal size field. Returns null if absent/empty/oversized.
+ */
+export function streamEntryCapped(entry, maxBytes) {
+  if (!entry || entry.dir) return Promise.resolve(null);
   const declared = entry?._data?.uncompressedSize;
-  if (typeof declared === 'number' && declared > MAX_ATTACHMENT_BYTES) return null;
-  try {
-    const buf = await entry.async('nodebuffer');
-    return buf.length > 0 && buf.length <= MAX_ATTACHMENT_BYTES ? buf : null;
-  } catch { return null; }
+  if (typeof declared === 'number' && declared > maxBytes) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let total = 0;
+    const chunks = [];
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    let stream;
+    try { stream = entry.nodeStream('nodebuffer'); } catch { return finish(null); }
+    stream.on('data', (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) { try { stream.destroy(); } catch { /* noop */ } return finish(null); }
+      chunks.push(chunk);
+    });
+    stream.on('end', () => finish(total === 0 ? null : Buffer.concat(chunks)));
+    stream.on('error', () => finish(null));
+    stream.on('close', () => finish(null)); // aborted/destroyed without 'end'
+  });
+}
+
+/** Read one zip binary entry, streaming-capped at MAX_ATTACHMENT_BYTES. */
+async function readBinaryEntry(zip, name) {
+  return streamEntryCapped(zip.file(name), MAX_ATTACHMENT_BYTES);
 }
 
 /** Strip canonical enrichment products so the local pipeline regenerates them. */
@@ -117,41 +159,147 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   // Dependency-ordered (folders before documents, people before links, points
   // after hierarchy) — mirrors the reference import's order (reference:1012-1135).
   await run('folders', m.folders);
-  await run('documents', m.documents, { embedding_768: null });
+
+  // Documents — CONTENT DEDUP across paths, sources and imports. The schema's
+  // UNIQUE(user_id, path) already blocks same-path duplicates; the gap is the
+  // same CONTENT at different paths — canonical exports carry mind files BOTH
+  // as documents AND as agents/-tree mirrors, and a doc may already exist here
+  // via Obsidian import or native saveDocument (which writes the same
+  // SHA-256(plaintext) content_hash — document-store.js B1). One copy wins; the
+  // mirror is skipped. Guard: only dedupe substantial content (≥ 32 chars) so
+  // trivially-identical stubs (empty README) don't collapse.
+  const DOC_DEDUP_MIN_CHARS = 32;
+  const docHashesSeen = new Set();
+  try {
+    const existingDocs = await db.rawQuery('SELECT content_hash FROM documents WHERE content_hash IS NOT NULL', []);
+    for (const row of existingDocs?.results || []) if (row.content_hash) docHashesSeen.add(row.content_hash);
+  } catch { /* no preload → path/id dedup still holds */ }
+  const docHashOf = (content) => (typeof content === 'string' && content.length >= DOC_DEDUP_MIN_CHARS)
+    ? crypto.createHash('sha256').update(content, 'utf8').digest('hex') : null;
+  {
+    const incoming = asArray(m.documents);
+    let dedupedByContent = 0;
+    const rows = [];
+    for (const doc of incoming) {
+      if (!doc || typeof doc !== 'object') { rows.push(doc); continue; }
+      const hash = docHashOf(doc.content);
+      if (hash && docHashesSeen.has(hash)) { dedupedByContent++; continue; }
+      if (hash) docHashesSeen.add(hash);
+      rows.push(hash ? { ...doc, content_hash: hash } : doc);
+    }
+    stats.documents = await restoreTable(db, 'documents', rows, { userId, overrides: { embedding_768: null } });
+    stats.documents.dedupedByContent = dedupedByContent;
+  }
   await run('document_versions', m.documents_meta?.versions);
   await run('note_links', m.documents_meta?.noteLinks);
   await run('share_links', m.documents_meta?.shareLinks);
   await run('access_grants', m.documents_meta?.accessGrants);
 
-  // Attachments: binary → encrypted blob → row (id preserved so messages link).
+  // Attachments (images/media): binary → encrypted blob → row (id preserved so
+  // messages link). DEDUP SEMANTICS differ from documents: rows must ALWAYS
+  // land (message attachment_ids point at them), but identical BYTES are stored
+  // ONCE — duplicates share one encrypted blob via the same local_path. The
+  // binary's SHA-256 rides in the row's metadata JSON so FUTURE imports dedupe
+  // against blobs already in the vault, and rows whose id already exists skip
+  // the blob write entirely (a re-import must not orphan duplicate blobs on
+  // disk). Per-FILE accountability: every id that lost its binary or failed its
+  // row is NAMED in the report (ids only — zero-leakage).
+  // CONSTRAINT for future blob DELETION (none exists today — blob-store has no
+  // unlink path): local_path may be SHARED by several attachment rows; delete a
+  // blob only when no other row references its local_path.
   const attRows = asArray(m.attachments);
-  const attStats = { inserted: 0, deduped: 0, failed: 0, blobs: 0, blobMissing: 0 };
+  const attStats = { attempted: attRows.length, inserted: 0, deduped: 0, failed: 0, blobs: 0, blobsReused: 0, blobMissing: 0, blobMissingIds: [], failedIds: [] };
+  const existingAttIds = new Set();
+  const blobByHash = new Map(); // sha256(bytes) → local_path (existing vault + this import)
+  try {
+    const existingAtts = await db.rawQuery('SELECT id, local_path, metadata FROM attachments', []);
+    for (const row of existingAtts?.results || []) {
+      if (row.id) existingAttIds.add(row.id);
+      try {
+        const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+        if (meta?.sha256 && row.local_path) blobByHash.set(meta.sha256, row.local_path);
+      } catch { /* metadata not JSON → no hash to reuse */ }
+    }
+  } catch { /* no preload → per-id skip unavailable, import still correct */ }
   for (const att of attRows) {
     if (!att || typeof att !== 'object') { attStats.failed++; continue; }
     try {
+      if (att.id && existingAttIds.has(att.id)) { attStats.deduped++; continue; } // row exists → no blob write
       let localPath = null;
+      let sha = null;
       const buf = att.zipPath ? await readBinaryEntry(zip, att.zipPath) : null;
       if (buf) {
-        const ext = att.file_name ? extname(att.file_name) : '';
-        const { path } = await putBlob(buf, { userId, ext });
-        localPath = path;
-        attStats.blobs++;
-      } else { attStats.blobMissing++; }
+        sha = crypto.createHash('sha256').update(buf).digest('hex');
+        const reuse = blobByHash.get(sha);
+        if (reuse) {
+          localPath = reuse;
+          attStats.blobsReused++;
+        } else {
+          const ext = att.file_name ? extname(att.file_name) : '';
+          const { path } = await putBlob(buf, { userId, ext });
+          localPath = path;
+          blobByHash.set(sha, path);
+          attStats.blobs++;
+        }
+      } else { attStats.blobMissing++; if (att.id) attStats.blobMissingIds.push(att.id); }
       const { zipPath: _zp, ...row } = att;
-      const r = await restoreTable(db, 'attachments', [{ ...row, local_path: localPath, r2_key: null, stream_uid: null }], { userId });
-      attStats.inserted += r.inserted; attStats.deduped += r.deduped; attStats.failed += r.failed;
-    } catch { attStats.failed++; }
+      let meta = null;
+      try { meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata ?? null); } catch { meta = null; }
+      const metadata = sha ? { ...(meta && typeof meta === 'object' ? meta : {}), sha256: sha } : row.metadata;
+      const r = await restoreTable(db, 'attachments', [{ ...row, metadata, local_path: localPath, r2_key: null, stream_uid: null }], { userId });
+      attStats.inserted += r.inserted; attStats.deduped += r.deduped;
+      if (r.failed) { attStats.failed += r.failed; if (att.id) attStats.failedIds.push(att.id); }
+    } catch { attStats.failed++; if (att?.id) attStats.failedIds.push(att.id); }
   }
   stats.attachments = attStats;
 
   // Messages — the core corpus. Ids + timestamps preserved; enrichment reset so
   // the drainer re-embeds locally (the export has no search vectors).
-  await run('messages', m.messages, MESSAGE_OVERRIDES);
+  //
+  // CROSS-IMPORT CONTENT DEDUP: a message that already exists under a DIFFERENT
+  // id (e.g. the same conversation previously imported via the Claude/ChatGPT
+  // path) must not duplicate. Key = plaintext SHA-256 of content (the exact
+  // captureMessage/0007 hash, kept in the plaintext content_hash column)
+  // + normalized created_at — content alone is too aggressive (repeated short
+  // messages like "ok" are legitimate); content AT the same instant is the same
+  // original message. Rows without content or timestamp fall back to id-dedup.
+  {
+    const incoming = asArray(m.messages);
+    const normTs = (t) => { const d = t ? new Date(t) : null; return d && !Number.isNaN(d.getTime()) ? d.toISOString() : null; };
+    const seen = new Set();
+    try {
+      const existing = await db.rawQuery('SELECT content_hash, created_at FROM messages WHERE content_hash IS NOT NULL', []);
+      for (const row of existing?.results || []) {
+        const ts = normTs(row.created_at);
+        if (row.content_hash && ts) seen.add(`${row.content_hash}:${ts}`);
+      }
+    } catch { /* no preload → id-dedup still holds */ }
+    let dedupedByContent = 0;
+    const rows = [];
+    for (const msg of incoming) {
+      if (!msg || typeof msg !== 'object') { rows.push(msg); continue; }
+      const hash = (typeof msg.content === 'string' && msg.content)
+        ? crypto.createHash('sha256').update(msg.content, 'utf8').digest('hex') : null;
+      const ts = normTs(msg.created_at);
+      const key = hash && ts ? `${hash}:${ts}` : null;
+      if (key && seen.has(key)) { dedupedByContent++; continue; }
+      if (key) seen.add(key); // also dedupes duplicates WITHIN the export itself
+      rows.push(hash ? { ...msg, content_hash: hash } : msg);
+    }
+    stats.messages = await restoreTable(db, 'messages', rows, { userId, overrides: MESSAGE_OVERRIDES });
+    stats.messages.dedupedByContent = dedupedByContent;
+  }
 
   await run('people', m.contacts);
   await run('contact_territories', m.contacts?.territoryLinks);
 
-  await run('health_daily', m.health?.daily ?? m.health);
+  // health arrives in the namespace's getRange shape (parsed rows, numbers,
+  // possibly no id) — synthesize the documented deterministic key when absent.
+  {
+    const healthRows = asArray(m.health?.daily ?? m.health).map((h) =>
+      (h && typeof h === 'object' && !h.id && h.date) ? { ...h, id: `${userId}:${h.date}` } : h);
+    stats.health_daily = await restoreTable(db, 'health_daily', healthRows, { userId });
+  }
   await run('activity_sessions', m.activity?.sessions);
   await run('activity_daily', m.activity?.daily);
 
@@ -176,8 +324,51 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   await run('scheduled_events', m.scheduledEvents);
   await run('agent_events', m.agentEvents);
 
+  // The agent's internal model of the user — "model internals" are continuity-
+  // critical even though new writes go to persona-claims; preserve the history.
+  await run('internal_model_items', m.internalModel);
+
+  // AI providers: the canonical export reads through its decrypting proxy, so
+  // credentials MAY ride along as plaintext — the adapter re-encrypts them here
+  // (ENCRYPTED_FIELDS.ai_providers). Absent credentials just mean re-keying.
+  await run('ai_providers', m.aiProviders);
+
+  // Connections: V1 carries the same user_a/user_b schema. Remap the canonical
+  // user id to the V1 user on every side it appears; the counterpart stays as
+  // recorded (it's another instance's identity — historical, not actionable).
+  {
+    const canonicalUid = m.user?.id;
+    const remap = (v) => (canonicalUid && v === canonicalUid ? userId : v);
+    const conns = asArray(m.connections).map((c) => (c && typeof c === 'object'
+      ? { ...c, user_a: remap(c.user_a), user_b: remap(c.user_b), initiated_by: remap(c.initiated_by) }
+      : c));
+    stats.connections = await restoreTable(db, 'connections', conns, { userId });
+  }
+
   await run('user_profiles', m.user?.profile ? [m.user.profile] : []);
   await run('user_identities', m.user?.identities);
+
+  // User identity meta → the V1 users row (UPDATE, never a second row keyed by
+  // the canonical id): display name, timezone, settings carry the person over.
+  {
+    const u = m.user || {};
+    const sets = [];
+    const params = [];
+    if (typeof u.displayName === 'string' && u.displayName) { sets.push('display_name = ?'); params.push(u.displayName); }
+    if (typeof u.timezone === 'string' && u.timezone) { sets.push('timezone = ?'); params.push(u.timezone); }
+    if (u.settings && typeof u.settings === 'object' && Object.keys(u.settings).length) { sets.push('settings = ?'); params.push(JSON.stringify(u.settings)); }
+    let updated = 0;
+    if (sets.length) {
+      try {
+        await db.rawQuery('INSERT OR IGNORE INTO users (id) VALUES (?)', [userId]);
+        const res = await db.rawQuery(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`, [...params, userId]);
+        updated = res?.meta?.changes ?? 0;
+      } catch { /* fail-soft like every family */ }
+    }
+    // `updated`, not `inserted`: an UPDATE re-applies on every run (SQLite
+    // counts matched rows), so it must not break re-import ⇒ imported:0.
+    stats.user_meta = { inserted: 0, deduped: 0, failed: 0, updated };
+  }
 
   // Mindscape — restored, not regenerated: territory narratives/names/lineage
   // are user history that cannot be recreated identically. Nomic hex vectors are
@@ -240,11 +431,59 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   // re-encrypts the payload blob via the adapter like every other table.
   await run('entity_snapshots', m.history?.entitySnapshots);
 
+  // Temporal Chronicles — period narratives + the current arc. The canonical
+  // exporter does not ship these yet (exporter-side gap, flagged 2026-06-10);
+  // the receiver is ready for the manifest keys the exporter patch adds, and
+  // tolerates singular/plural. Absent keys → no-op, like every family.
+  await run('time_chronicles', m.timeChronicles);
+  await run('current_arc_chronicles', m.currentArcChronicles ?? (m.currentArcChronicle ? [m.currentArcChronicle].flat() : undefined));
+
   // v4 historical metrics (v3 bundles simply lack these keys → no-op).
   await run('cognitive_metrics_window', m.cognitiveMetrics?.window);
   await run('cognitive_metrics_trajectory', m.cognitiveMetrics?.trajectory);
   await run('cognitive_metrics_per_territory', m.cognitiveMetrics?.perTerritory);
   await run('topology_metrics', m.cognitiveMetrics?.topology);
+
+  // The agents/ filesystem — mind files, memory, prompts, .shared/ notes. V1 is
+  // a pure tool server (no agent runtime FS), so the TEXT files land as
+  // documents under their original `agents/...` path. Deterministic ids
+  // (sha256 of the path) make re-imports no-ops; binaries and oversized files
+  // are counted, never silently dropped. Shares the documents content-hash set:
+  // canonical MIRRORS mind files into the agent tree (MIND_MIRRORS), so a file
+  // whose content already landed as a document is a mirror → skipped, counted.
+  {
+    const TEXT_EXT = new Set(['.md', '.txt', '.json', '.yaml', '.yml', '.csv']);
+    const MAX_AGENT_FILE_BYTES = 5 * 1024 * 1024;
+    const agentStats = { attempted: 0, inserted: 0, deduped: 0, dedupedByContent: 0, failed: 0, skippedBinary: 0, skippedOversize: 0 };
+    const entries = Object.values(zip.files).filter((f) => !f.dir && f.name.startsWith('agents/'));
+    for (const entry of entries) {
+      const ext = extname(entry.name).toLowerCase();
+      if (!TEXT_EXT.has(ext)) { agentStats.skippedBinary++; continue; }
+      try {
+        // Streaming-capped inflate (M-ZIPBOMB): aborts past MAX_AGENT_FILE_BYTES
+        // before buffering the whole entry. null = absent/empty/oversized.
+        const buf = await streamEntryCapped(entry, MAX_AGENT_FILE_BYTES);
+        if (!buf) { agentStats.skippedOversize++; continue; }
+        const content = buf.toString('utf8');
+        const hash = docHashOf(content);
+        if (hash && docHashesSeen.has(hash)) { agentStats.dedupedByContent++; continue; }
+        agentStats.attempted++;
+        const id = crypto.createHash('sha256').update(`vault-import:agents:${entry.name}`).digest('hex').slice(0, 32);
+        const r = await restoreTable(db, 'documents', [{
+          id,
+          path: entry.name,
+          title: basename(entry.name),
+          content,
+          content_hash: hash,
+          created_by: 'vault-import',
+          embedding_768: null,
+        }], { userId });
+        if (hash && r.inserted) docHashesSeen.add(hash);
+        agentStats.inserted += r.inserted; agentStats.deduped += r.deduped; agentStats.failed += r.failed;
+      } catch { agentStats.failed++; }
+    }
+    stats.agent_files = agentStats;
+  }
 
   // One nudge wakes the drainer; it scans the whole nlp_processed=0 backlog.
   const firstMsg = asArray(m.messages)[0];
@@ -253,11 +492,100 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   }
 
   let imported = 0, skipped = 0, failed = 0;
-  for (const s of Object.values(stats)) { imported += s.inserted || 0; skipped += s.deduped || 0; failed += s.failed || 0; }
+  for (const s of Object.values(stats)) {
+    imported += s.inserted || 0;
+    skipped += (s.deduped || 0) + (s.dedupedByContent || 0);
+    failed += s.failed || 0;
+  }
+
+  // ── Reconciliation: account for EVERY data point the export declared ───────
+  // Three independent accountability layers, so loss can never be silent:
+  //   1. per-family: declared (the exporter's own totals where present, else
+  //      the array length we consumed) vs landed (inserted+deduped) vs failed —
+  //      `missing` > 0 means rows we never even attempted (cap hit etc.);
+  //   2. manifest coverage: any TOP-LEVEL key this importer does not know is
+  //      named in `unhandledFamilies` — a future exporter addition is flagged
+  //      loudly, never silently dropped;
+  //   3. per-file: attachment ids that lost a binary or failed a row are listed
+  //      by id (zero-leakage) in stats.attachments.
+  const KNOWN_KEYS = new Set([
+    'exportedAt', 'version', 'format', 'meta', 'user', 'messages', 'documents',
+    'folders', 'attachments', 'mindscape', 'contacts', 'health', 'activity',
+    'wealth', 'wealthExtra', 'canvases', 'tasks', 'internalModel',
+    'documents_meta', 'connections', 'reflections', 'aiProviders',
+    'scheduledEvents', 'secrets', 'agentEvents', 'cycleMetrics',
+    'cognitiveMetrics', 'topology', 'timeChronicles', 'currentArcChronicle',
+    'currentArcChronicles',
+  ]);
+  const unhandledFamilies = Object.keys(m).filter((k) => !KNOWN_KEYS.has(k));
+
+  const declaredOf = {
+    messages: m.messages?.total,
+    documents: m.documents?.total,
+    attachments: m.attachments?.total,
+    people: m.contacts?.total,
+    clustering_points: m.mindscape?.clusteringPoints?.total,
+    agent_events: m.agentEvents?.total,
+  };
+  const reconciliation = {};
+  let missingTotal = 0, cappedTotal = 0, tableMissingCount = 0;
+  for (const [table, s] of Object.entries(stats)) {
+    const handled = (s.attempted ?? 0) + (s.capped ?? 0) + (s.dedupedByContent ?? 0);
+    const declared = Number.isFinite(declaredOf[table]) ? declaredOf[table] : handled;
+    const landed = (s.inserted || 0) + (s.deduped || 0) + (s.dedupedByContent || 0) + (s.updated || 0);
+    const missing = Math.max(0, declared - landed - (s.failed || 0));
+    reconciliation[table] = {
+      declared, landed, failed: s.failed || 0, missing,
+      ...(s.capped ? { capped: s.capped } : {}),
+      ...(s.tableMissing ? { tableMissing: true } : {}),
+      ...(s.dedupedByContent ? { dedupedByContent: s.dedupedByContent } : {}),
+    };
+    missingTotal += missing; cappedTotal += s.capped || 0;
+    if (s.tableMissing) tableMissingCount++;
+  }
+  // Export-side losses (canonical couldn't fetch these from R2 — they were
+  // never IN the zip; distinct from receiver-side loss but still reported).
+  const exportSide = { attachmentsFetchFailedAtExport: Number(m.attachments?.failed) || 0 };
+  const complete = failed === 0 && missingTotal === 0 && cappedTotal === 0
+    && tableMissingCount === 0 && unhandledFamilies.length === 0;
+
+  // Persist the report INSIDE the vault (encrypted document, deterministic id
+  // keyed by the export's timestamp → a re-import refreshes it in place). The
+  // response is transient; this is the durable migration-audit artifact.
+  const report = {
+    v: 1,
+    importedAt: new Date().toISOString(),
+    exportedAt: m.exportedAt ?? null,
+    exportVersion: m.version ?? null,
+    complete,
+    unhandledFamilies,
+    reconciliation,
+    exportSide,
+    attachmentsDetail: { blobMissingIds: stats.attachments?.blobMissingIds || [], failedIds: stats.attachments?.failedIds || [] },
+    agentFiles: stats.agent_files || null,
+    skippedFamilies: [
+      'passkeys (WebAuthn is origin-bound — re-enroll on this device)',
+      'secrets (values excluded by the exporter — re-add in Settings)',
+    ],
+  };
+  const reportPath = `imports/vault-import-report-${String(m.exportedAt || report.importedAt).slice(0, 10)}.json`;
+  try {
+    const reportId = crypto.createHash('sha256').update(`vault-import-report:${m.exportedAt ?? 'unknown'}`).digest('hex').slice(0, 32);
+    await db.rawQuery(
+      'INSERT OR REPLACE INTO documents (id, user_id, path, title, content, created_by, scope) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [reportId, userId, reportPath, 'Vault import report', JSON.stringify(report, null, 2), 'vault-import', 'personal'],
+    );
+  } catch { /* the response still carries the report */ }
+
   return {
     imported, skipped, failed,
+    complete,
     stats,
-    skippedFamilies: ['agents filesystem', 'ai_providers (re-add keys in Settings)', 'connections', 'passkeys', 'secrets', 'internal_model_items'],
+    reconciliation,
+    unhandledFamilies,
+    exportSide,
+    reportPath,
+    skippedFamilies: report.skippedFamilies,
     exportVersion: m.version ?? null,
     exportedAt: m.exportedAt ?? null,
   };

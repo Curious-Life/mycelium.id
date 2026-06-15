@@ -10,6 +10,7 @@ import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
 import { portalProvidersRouter } from '../src/portal-providers.js';
+import { jurisdictionForBaseUrl } from '../src/inference/presets.js';
 
 const DB = 'data/verify-providers.db', KCV = 'data/verify-providers-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -76,6 +77,23 @@ rec('P6. POST /test with a bad key → auth_rejected (category only, no body)', 
 
 r = await J(await post('/providers', { provider: 'custom', label: 'nourl' }));
 rec('P7. custom without base_url → 400', r.status === 400, JSON.stringify(r.body));
+
+// ── H5: BYOK base_url SSRF + exfil guard ────────────────────────────────────
+// Reject: https→private IP literal (SSRF), http→non-loopback (plaintext), bad scheme.
+for (const url of ['https://169.254.169.254/v1', 'https://10.0.0.5/v1', 'http://evil.example/v1', 'ftp://x/v1']) {
+  r = await J(await post('/providers', { provider: 'custom', label: 'ssrf', base_url: url }));
+  const blocked = r.status === 400 && /invalid base_url/i.test(r.body.error || '');
+  rec(`P7-ssrf. internal/non-https base_url rejected: ${url}`, blocked, `status=${r.status} ${r.body.error || ''}`);
+}
+// Allow: loopback http (local Ollama/LM Studio) — the sovereign default path.
+for (const url of ['http://127.0.0.1:11434', 'http://localhost:1234/v1']) {
+  r = await J(await post('/providers', { provider: 'custom', label: 'local-ok', base_url: url, api_key: 'k' }));
+  rec(`P7-ok. loopback http base_url allowed (local provider): ${url}`, r.status === 200 && r.body.ok, JSON.stringify(r.body));
+}
+// Jurisdiction classifier cannot be spoofed into eu-zdr by a lookalike host.
+rec('P7-juris. lookalike host does NOT downgrade to eu-zdr',
+  jurisdictionForBaseUrl('https://regolo.ai.attacker.com/v1') === 'us-standard'
+  && jurisdictionForBaseUrl('https://api.regolo.ai/v1') === 'eu-zdr');
 
 r = await J(await post('/auth/claude', { label: 'x' }));
 rec('P8. /auth/claude subscription OAuth fails closed (ToS)', r.status === 400 && /not supported/i.test(r.body.error || ''), JSON.stringify(r.body));

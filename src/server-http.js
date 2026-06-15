@@ -32,6 +32,7 @@ import { boot } from './index.js';
 import { createAuth, migrateAuth, ensureOperatorUser } from './auth.js';
 import { uploadAttachment } from './ingest/upload.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
+import { issueLoginCsrf, verifyLoginCsrf } from './http/login-csrf.js';
 import { createGatewayHandlers } from './gateway/openai-compat.js';
 import { createEmbeddingsHandler } from './gateway/embeddings.js';
 import { matchStaticBearer } from './gateway/static-bearer.js';
@@ -146,8 +147,15 @@ export async function createHttpApp(opts = {}) {
     // browsers reject "*" for those. (Server-side clients — Claude's backend, the Inspector
     // CLI — skip preflight entirely, which is why they already connect.)
     if (req.method === 'OPTIONS') {
+      // Scope the CREDENTIALED reflection to exactly the two browser-MCP CORS
+      // endpoints that need it (DCR register + token exchange) — H6. Reflecting
+      // Origin + Allow-Credentials on ALL /api/auth/* was a latent footgun on the
+      // OAuth/session authority; other auth endpoints get a non-credentialed
+      // preflight (origin still echoed so nothing breaks).
+      const credentialed = !!origin && (p.endsWith('/mcp/register') || p.endsWith('/mcp/token'));
       res.set('Access-Control-Allow-Origin', origin || '*');
-      if (origin) { res.set('Access-Control-Allow-Credentials', 'true'); res.set('Vary', 'Origin'); }
+      if (origin) res.set('Vary', 'Origin');
+      if (credentialed) res.set('Access-Control-Allow-Credentials', 'true');
       res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       res.set('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || 'Authorization, Content-Type');
       res.set('Access-Control-Max-Age', '86400');
@@ -187,25 +195,34 @@ export async function createHttpApp(opts = {}) {
   // sign-in is called SERVER-SIDE (auth.api), which bypasses better-auth's
   // HTTP-layer Origin/CSRF check; we forward its Set-Cookie to the browser.
   const escHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  const loginPage = (qs, err) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mycelium — Sign in</title><style>body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0c;color:#eaeaea;display:grid;place-items:center;min-height:100vh;margin:0}form{background:#15151a;padding:2rem;border-radius:14px;width:320px;border:1px solid #26262e}h1{font-size:1.05rem;margin:0 0 1.2rem;color:#c9a227;font-weight:600}input{width:100%;box-sizing:border-box;margin:.35rem 0;padding:.65rem;background:#0a0a0c;border:1px solid #26262e;border-radius:8px;color:#eaeaea}button{width:100%;margin-top:1rem;padding:.7rem;background:#c9a227;color:#0a0a0c;border:0;border-radius:8px;font-weight:700;cursor:pointer}.e{color:#f87171;font-size:.85rem;margin:.3rem 0}.s{color:#8a8a99;font-size:.72rem;margin-top:1rem;text-align:center}</style></head><body><form method="POST" action="/login?${escHtml(qs)}"><h1>Connect to your vault</h1>${err ? `<div class="e">${escHtml(err)}</div>` : ''}<input name="email" type="email" placeholder="email" value="operator@mycelium.local" autocomplete="username"><input name="password" type="password" placeholder="password" autocomplete="current-password" autofocus required><button type="submit">Sign in</button><div class="s">Authorizing an MCP client to reach this vault.</div></form></body></html>`;
+  const loginPage = (qs, err, csrf = '') => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mycelium — Sign in</title><style>body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0c;color:#eaeaea;display:grid;place-items:center;min-height:100vh;margin:0}form{background:#15151a;padding:2rem;border-radius:14px;width:320px;border:1px solid #26262e}h1{font-size:1.05rem;margin:0 0 1.2rem;color:#c9a227;font-weight:600}input{width:100%;box-sizing:border-box;margin:.35rem 0;padding:.65rem;background:#0a0a0c;border:1px solid #26262e;border-radius:8px;color:#eaeaea}button{width:100%;margin-top:1rem;padding:.7rem;background:#c9a227;color:#0a0a0c;border:0;border-radius:8px;font-weight:700;cursor:pointer}.e{color:#f87171;font-size:.85rem;margin:.3rem 0}.s{color:#8a8a99;font-size:.72rem;margin-top:1rem;text-align:center}</style></head><body><form method="POST" action="/login?${escHtml(qs)}"><h1>Connect to your vault</h1>${err ? `<div class="e">${escHtml(err)}</div>` : ''}<input type="hidden" name="_csrf" value="${escHtml(csrf)}"><input name="email" type="email" placeholder="email" value="operator@mycelium.local" autocomplete="username"><input name="password" type="password" placeholder="password" autocomplete="current-password" autofocus required><button type="submit">Sign in</button><div class="s">Authorizing an MCP client to reach this vault.</div></form></body></html>`;
 
   app.get('/login', (req, res) => {
     const qs = req.originalUrl.split('?').slice(1).join('?') || '';
-    res.type('html').send(loginPage(qs, null));
+    const csrf = issueLoginCsrf(req, res);
+    res.type('html').send(loginPage(qs, null, csrf));
   });
   app.post('/login', express.urlencoded({ extended: false }), async (req, res) => {
     const qs = req.originalUrl.split('?').slice(1).join('?') || '';
+    // CSRF + same-origin guard (H6): this server-side sign-in bypasses
+    // better-auth's HTTP-layer CSRF check, so we enforce our own before touching
+    // credentials. A failed check re-renders with a fresh token (no info leak).
+    const csrfCheck = verifyLoginCsrf(req);
+    if (!csrfCheck.ok) {
+      res.status(403).type('html').send(loginPage(qs, 'Your session expired — please try again.', issueLoginCsrf(req, res)));
+      return;
+    }
     const email = String(req.body?.email || '').trim();
     const password = String(req.body?.password || '');
-    if (!email || !password) { res.status(400).type('html').send(loginPage(qs, 'Email and password required')); return; }
+    if (!email || !password) { res.status(400).type('html').send(loginPage(qs, 'Email and password required', issueLoginCsrf(req, res))); return; }
     try {
       const r = await auth.api.signInEmail({ body: { email, password }, asResponse: true });
-      if (!r.ok) { res.status(401).type('html').send(loginPage(qs, 'Invalid email or password')); return; }
+      if (!r.ok) { res.status(401).type('html').send(loginPage(qs, 'Invalid email or password', issueLoginCsrf(req, res))); return; }
       const cookies = typeof r.headers.getSetCookie === 'function' ? r.headers.getSetCookie() : [r.headers.get('set-cookie')].filter(Boolean);
       if (cookies.length) res.setHeader('set-cookie', cookies);
       res.redirect(302, `/api/auth/mcp/authorize?${qs}`);
     } catch {
-      res.status(401).type('html').send(loginPage(qs, 'Invalid email or password'));
+      res.status(401).type('html').send(loginPage(qs, 'Invalid email or password', issueLoginCsrf(req, res)));
     }
   });
 
@@ -255,7 +272,7 @@ export async function createHttpApp(opts = {}) {
   async function authenticate(req) {
     const authHeader = req.headers['authorization'];
     if (!authHeader || !/^Bearer\s+/i.test(authHeader)) {
-      console.error('[myc-auth]', req.method, '/mcp — no/non-bearer header:', authHeader ? authHeader.slice(0, 14) : '(none)');
+      console.error('[myc-auth]', req.method, '/mcp — no/non-bearer header:', authHeader ? '(non-bearer)' : '(none)');
       return null;
     }
     // §3b opt-in static bearer (fail-closed: only when MYCELIUM_MCP_BEARER is set,

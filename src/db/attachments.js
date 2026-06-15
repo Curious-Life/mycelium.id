@@ -13,6 +13,7 @@
  * @property {(sql: string, params: any[]) => Promise<any>} d1Query
  * @property {(result: any) => any} firstRow
  */
+import { assertSafeColumns } from './column-guard.js';
 
 export function createAttachmentsNamespace(deps) {
   if (!deps) throw new TypeError('createAttachmentsNamespace: deps required');
@@ -44,6 +45,7 @@ export function createAttachmentsNamespace(deps) {
 
   return {
     async insert(record) {
+      assertSafeColumns(Object.keys(record || {}), 'attachments');
       const cols = Object.keys(record).join(', ');
       const placeholders = Object.keys(record).map(() => '?').join(', ');
       const result = await d1Query(
@@ -103,7 +105,7 @@ export function createAttachmentsNamespace(deps) {
     },
 
     async update(id, fields) {
-      const keys = Object.keys(fields);
+      const keys = assertSafeColumns(Object.keys(fields), 'attachments');
       if (!keys.length) return;
       const sets = keys.map((k) => `${k} = ?`).join(', ');
       await d1Query(

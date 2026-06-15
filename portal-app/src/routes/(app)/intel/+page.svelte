@@ -4,6 +4,8 @@
 	import { apiGet } from '$lib/api';
 	import { navigationState } from '$lib/stores/navigation';
 	import * as topojson from 'topojson-client';
+	import { marked } from 'marked';
+	import DOMPurify from 'isomorphic-dompurify';
 
 	// ── Types ──────────────────────────────────────────────────────────────
 
@@ -1486,46 +1488,12 @@
 	}
 
 	function renderMarkdown(md: string): string {
-		// Simple markdown to HTML — handles headers, bold, italic, lists, tables, code, hr, blockquotes, links
-		let html = md
-			.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-			// Code blocks
-			.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
-			// Inline code
-			.replace(/`([^`]+)`/g, '<code>$1</code>')
-			// Headers
-			.replace(/^### (.+)$/gm, '<h3>$1</h3>')
-			.replace(/^## (.+)$/gm, '<h2>$1</h2>')
-			.replace(/^# (.+)$/gm, '<h1>$1</h1>')
-			// HR
-			.replace(/^---+$/gm, '<hr />')
-			// Bold + italic
-			.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
-			.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-			.replace(/\*(.+?)\*/g, '<em>$1</em>')
-			// Links
-			.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-			// Blockquotes
-			.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>')
-			// List items
-			.replace(/^- (.+)$/gm, '<li>$1</li>')
-			.replace(/^(\d+)\. (.+)$/gm, '<li>$2</li>')
-			// Tables
-			.replace(/^\|(.+)\|$/gm, (_, row) => {
-				const cells = row.split('|').map((c: string) => c.trim());
-				if (cells.every((c: string) => /^[-:]+$/.test(c))) return '';
-				const tag = 'td';
-				return '<tr>' + cells.map((c: string) => `<${tag}>${c}</${tag}>`).join('') + '</tr>';
-			});
-		// Wrap consecutive <li> in <ul>
-		html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>');
-		// Wrap consecutive <tr> in <table>
-		html = html.replace(/((?:<tr>.*<\/tr>\n?)+)/g, '<table>$1</table>');
-		// Paragraphs — wrap remaining loose lines
-		html = html.replace(/^(?!<[hupoltbr]|$)(.+)$/gm, '<p>$1</p>');
-		// Clean up empty lines
-		html = html.replace(/\n{2,}/g, '\n');
-		return html;
+		// SECURITY (M-XSS, 2026-06-11): situationReport is LLM-generated text over
+		// vault data that includes externally-ingested content — a bespoke renderer
+		// previously emitted `<a href="$2">` from link targets without escaping `"`
+		// or allowlisting the protocol (javascript:/event-handler injection). Use the
+		// SAME marked + DOMPurify.sanitize pipeline as every other {@html} sink.
+		return DOMPurify.sanitize(marked(md ?? '', { gfm: true, breaks: true }) as string);
 	}
 
 	// Top-level stats

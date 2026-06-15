@@ -31,9 +31,20 @@ function isStrictLoopback(req) {
   return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip) && !fwd;
 }
 
+// Constant-time match of the per-boot trusted token (never length-leaks).
+function tokenMatches(presented, expected) {
+  if (typeof presented !== 'string' || typeof expected !== 'string' || !expected) return false;
+  const a = Buffer.from(presented), b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(a, b); } catch { return false; }
+}
+
 function preview(text) {
-  const s = String(text);
-  return `«${s.slice(0, 12).replace(/\s+/g, ' ')}${s.length > 12 ? '…' : ''}»(${s.length})`;
+  // Zero-plaintext logs (LOG-1, CLAUDE.md §1/§8): emit length + a non-reversible
+  // hash, never any of the message content — these lines hit stdout/PM2 logs.
+  const s = String(text ?? '');
+  const h = crypto.createHash('sha256').update(s, 'utf8').digest('hex').slice(0, 6);
+  return `«len=${s.length} #${h}»`;
 }
 
 /**
@@ -53,6 +64,7 @@ export function createSendHandler(deps) {
   const {
     adapter, recordEgress, persistOutbound, checkAuthority, dedup,
     rateLimit, voicePipeline, getActiveTurn, agentId = 'personal-agent', logPrefix = 'channel-daemon',
+    trustedToken = null,
   } = deps || {};
   if (!adapter || typeof adapter.send !== 'function') throw new TypeError('send-handler: adapter.send required');
   if (!adapter.contentField || !adapter.targetField) throw new TypeError('send-handler: adapter content/target fields required');
@@ -69,6 +81,19 @@ export function createSendHandler(deps) {
     const content = typeof body[contentField] === 'string' ? body[contentField] : '';
     const target = body[targetField];
     const { replyToMessageId, sourceKind, sourceId, trusted, crossChannelReason, voice } = body;
+
+    // `trusted` (skip authority + rate-limit, e.g. command-ack replies) is a
+    // CAPABILITY, not a self-assertable body flag (H2, 2026-06-11). A body
+    // boolean is attacker-suppliable by anything that can reach this loopback
+    // endpoint (other local process/user, co-located SSRF, a 0.0.0.0 misbind).
+    // Honor it ONLY when the request is strict-loopback AND carries the per-boot
+    // secret header that only the in-process daemon (the sendReply closures)
+    // knows. Otherwise the request is treated as untrusted and passes the full
+    // authority + rate-limit gates. Fail-closed: no token configured → never
+    // trusted.
+    const trustedReq = trusted === true
+      && isStrictLoopback(req)
+      && tokenMatches((req.headers || {})['x-egress-trusted'], trustedToken);
 
     // 1. content present
     if (!content) return res.status(400).json({ ok: false, error: `${contentField} required` });
@@ -88,7 +113,7 @@ export function createSendHandler(deps) {
     // 4. provenance
     const headerProv = (req.headers || {})['x-egress-provenance'];
     const isAgentExplicit = headerProv === 'agent-explicit' && isStrictLoopback(req);
-    const provenanceKind = trusted ? 'system-template' : (isAgentExplicit ? 'agent-explicit-via-tool' : 'agent-explicit-via-curl');
+    const provenanceKind = trustedReq ? 'system-template' : (isAgentExplicit ? 'agent-explicit-via-tool' : 'agent-explicit-via-curl');
 
     const kind = inferKind(target);
     const contentHash = crypto.createHash('sha256').update(content, 'utf8').digest('hex');
@@ -105,8 +130,8 @@ export function createSendHandler(deps) {
       contentHash, contentLength: content.length,
     };
 
-    // 5. channel authority — fail-closed; `trusted` bypasses.
-    if (!trusted) {
+    // 5. channel authority — fail-closed; only a token-verified trusted request bypasses.
+    if (!trustedReq) {
       const a = await checkAuthority({ kind, id: target });
       if (!a?.allowed) {
         console.warn(`[${logPrefix}] ${platform} send denied by channel authority (${a?.reason || 'unknown'}) → ${preview(content)}`);
@@ -123,7 +148,7 @@ export function createSendHandler(deps) {
     }
 
     // 6b. rate limit — after dedup so a collapsed resend doesn't consume budget.
-    if (rateLimit && !trusted) {
+    if (rateLimit && !trustedReq) {
       const rl = rateLimit.take(target);
       if (!rl.allowed) {
         console.warn(`[${logPrefix}] ${platform} send rate-limited (retry ${rl.retryAfterMs}ms) → ${preview(content)}`);
@@ -138,7 +163,7 @@ export function createSendHandler(deps) {
       dedup.mark(target, content);
       console.log(`[${logPrefix}] ${platform} delivered (${result.sent}/${result.total}) → ${preview(content)}`);
 
-      audit({ ...baseAudit, decision: 'allowed', reason: isAgentExplicit ? 'reply-tool' : (trusted ? 'trusted' : 'cross-source'), delivered: true, httpStatus: result.httpStatus });
+      audit({ ...baseAudit, decision: 'allowed', reason: isAgentExplicit ? 'reply-tool' : (trustedReq ? 'trusted' : 'cross-source'), delivered: true, httpStatus: result.httpStatus });
       persist({
         content, role: 'assistant', source: kind,
         conversationId: String(target),

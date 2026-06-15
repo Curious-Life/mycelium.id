@@ -59,6 +59,34 @@ await people.upsert(
   new Map([[T.people_name, PID]]),
 ); // → multi-line COALESCE UPDATE (the parser-fix path)
 
+// ── FAIL-CLOSED: a write the encryption parser can't model must THROW, never
+// silently persist plaintext into an encrypted column (H1, 2026-06-11). ──
+const threw = async (fn) => { try { await fn(); return false; } catch { return true; } };
+const LITERAL = 'ZZleakLiteralPlaintext';
+// 1) encrypted column assigned a string LITERAL (not a bound ?) → refuse.
+rec('UPDATE encrypted col = string literal is refused',
+  await threw(() => db._base.d1Query(`UPDATE messages SET content = '${LITERAL}' WHERE id = ?`, ['lk1'])));
+// 2) INSERT…SELECT into an encrypted table (no parseable column→value map) → refuse.
+rec('INSERT…SELECT into encrypted table is refused',
+  await threw(() => db._base.d1Query(`INSERT INTO messages SELECT * FROM messages WHERE id = ?`, ['lk1'])));
+// 3) clearing an encrypted column to NULL stays ALLOWED (no plaintext to encrypt).
+rec('UPDATE encrypted col = NULL is allowed',
+  !(await threw(() => db._base.d1Query(`UPDATE messages SET thinking = NULL WHERE id = ?`, ['lk1']))));
+
+// ── SCRUB-2: a secret mistakenly placed in an allowlisted scrubber field is
+// masked by the final redaction pass; tenant fingerprint is non-reversible. ──
+{
+  const { scrubByKind } = await import('../src/crypto/guardians/scrubbers.js');
+  const out = scrubByKind('default', { path: '/x?k=' + 'a'.repeat(64), method: 'GET' });
+  rec('guardian scrubber redacts a hex secret in an allowlisted field', !String(out.path).includes('a'.repeat(64)));
+  const t = scrubByKind('tenant', { actual_tenant: 'tenant-42' }).actual_tenant;
+  rec('guardian tenant fingerprint is HMAC (12 hex, not the raw id)', t.length === 12 && t !== 'tenant-42');
+}
+
+// ── DB-COL: column builders reject a non-identifier (injected) column key ──
+rec('messages.insert refuses an unsafe column identifier',
+  await threw(() => db.messages.insert([{ id: 'x', 'evil)--': 1, content: 'y', scope: 'personal' }])));
+
 // ── THE scan: raw db + wal + shm bytes must contain NONE of the tokens ──
 const raw = [DB, `${DB}-wal`, `${DB}-shm`].filter(existsSync).map((f) => readFileSync(f).toString('latin1')).join('');
 for (const [col, tok] of Object.entries(T)) {

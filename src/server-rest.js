@@ -480,11 +480,34 @@ export async function startRestServer({
  * main() — CLI entrypoint for `node src/server-rest.js` (or `--rest`).
  * Reads MYCELIUM_REST_PORT / MYCELIUM_REST_HOST; defaults localhost:8787.
  */
+const REST_LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
 async function main() {
   const port = Number(process.env.MYCELIUM_REST_PORT ?? 8787);
   const host = process.env.MYCELIUM_REST_HOST ?? '127.0.0.1';
+  // The portal/REST surface gates the recovery key + account/key-minting routes
+  // on the loopback-trust invariant (socket peer is local AND no X-Forwarded-For).
+  // A non-loopback bind — or a reverse proxy that does NOT inject X-Forwarded-For —
+  // makes every request read as trusted-local and can hand out the recovery key.
+  // FAIL CLOSED (M-REST-BIND): refuse a non-loopback bind unless explicitly opted in.
+  if (!REST_LOOPBACK_HOSTS.has(host)) {
+    if (process.env.MYCELIUM_ALLOW_NETWORK_REST !== '1') {
+      process.stderr.write(
+        `[mycelium] ⚠️ REFUSING to bind the portal/REST server to ${host} (non-loopback).\n` +
+        `  The loopback-trust model gives anything that reaches this port WITHOUT an X-Forwarded-For\n` +
+        `  header full local-owner access — including the recovery key. A non-loopback bind, or a front\n` +
+        `  proxy that does not ALWAYS set X-Forwarded-For, exposes that.\n` +
+        `  If you front it with a TLS reverse proxy that injects X-Forwarded-For AND enforces auth, set\n` +
+        `  MYCELIUM_ALLOW_NETWORK_REST=1 to proceed.\n`);
+      process.exit(2);
+    }
+    process.stderr.write(
+      `[mycelium] ⚠️ portal/REST bound to ${host} (non-loopback, MYCELIUM_ALLOW_NETWORK_REST=1) — ` +
+      `ensure the front proxy ALWAYS sets X-Forwarded-For and enforces auth.\n`);
+  }
   const { url, server, close } = await startRestServer({ port, host });
-  process.stderr.write(`mycelium portal + REST on ${url} (open in a browser; localhost-only, no auth — Phase 4)\n`);
+  const reach = REST_LOOPBACK_HOSTS.has(host) ? 'localhost-only' : `bound to ${host} (networked — proxy must auth)`;
+  process.stderr.write(`mycelium portal + REST on ${url} (open in a browser; ${reach})\n`);
 
   const shutdown = () => {
     server.close(() => {

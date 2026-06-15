@@ -28,23 +28,31 @@ export const PROVIDER_PRESETS = Object.freeze([
   { id: 'lmstudio', label: 'LM Studio (local)', kind: 'openai', baseUrl: 'http://127.0.0.1:1234/v1',  jurisdiction: 'local', defaultModel: '' },
 ]);
 
-// EU-sovereign host fragments (matched against the base_url hostname).
-const EU_ZDR_HOSTS = ['regolo.ai', 'scaleway.ai', 'scaleway.com', 'exoscale', 'nebius'];
+// EU-sovereign apex domains (EXACT-suffix matched against the base_url hostname).
+// Concrete apexes only — never substrings: a substring match let
+// `regolo.ai.attacker.com` masquerade as EU and downgrade the §4g sensitive-egress
+// hard block (H5). Erring toward fewer eu-zdr classifications is fail-safe.
+const EU_ZDR_HOSTS = ['regolo.ai', 'scaleway.ai', 'scaleway.com', 'exoscale.com', 'nebius.ai', 'nebius.com'];
+
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+const hostSuffixMatch = (host, apex) => host === apex || host.endsWith(`.${apex}`);
 
 /**
  * Jurisdiction for a provider, by base_url host (the privacy-relevant fact).
- * Loopback → 'local'; known EU-sovereign hosts → 'eu-zdr'; everything else →
- * 'us-standard' (fail-safe: assume US Cloud Act exposure unless known otherwise).
+ * Loopback → 'local'; known EU-sovereign hosts (exact-suffix) → 'eu-zdr';
+ * everything else → 'us-standard' (fail-safe: assume US Cloud Act exposure unless
+ * KNOWN otherwise; an unparseable URL is also us-standard, never substring-matched).
  * @param {string} [baseUrl]
  * @param {string} [provider]  used when there's no base_url (native anthropic/openai = US)
  * @returns {'local'|'eu-zdr'|'us-zdr'|'us-standard'}
  */
 export function jurisdictionForBaseUrl(baseUrl, provider) {
   if (!baseUrl) return 'us-standard'; // native Anthropic / OpenAI are US
-  let host = '';
-  try { host = new URL(baseUrl).hostname.toLowerCase(); } catch { host = String(baseUrl).toLowerCase(); }
-  if (/^127\.0\.0\.1$|^localhost$|^::1$|^\[::1\]$|^0\.0\.0\.0$/.test(host) || host.endsWith('.local')) return 'local';
-  if (EU_ZDR_HOSTS.some((h) => host.includes(h))) return 'eu-zdr';
+  let host;
+  try { host = new URL(baseUrl).hostname.replace(/^\[|\]$/g, '').toLowerCase(); }
+  catch { return 'us-standard'; } // unparseable → fail-safe (do NOT substring the raw string)
+  if (LOOPBACK_HOSTS.has(host) || host.endsWith('.local')) return 'local';
+  if (EU_ZDR_HOSTS.some((h) => hostSuffixMatch(host, h))) return 'eu-zdr';
   return 'us-standard';
 }
 

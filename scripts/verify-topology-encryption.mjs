@@ -28,8 +28,8 @@ for (const [tid, name, realm, msgs] of [[1, 'Alpha', 1, 50], [2, 'Beta', 1, 40],
 // Cofire (numbers → auto-encrypted): T1-T2 strong, T1-T3 medium. T4 has none → orphan.
 for (const [a, b, w] of [[1, 2, 0.8], [1, 3, 0.5]]) {
   await db.rawQuery(
-    `INSERT INTO territory_cofire (id, user_id, territory_a, territory_b, cofire_immediate, cofire_session, cofire_daily, cofire_weekly) VALUES (?,?,?,?,0,0,0,?)`,
-    [`${U}:${a}:${b}`, U, a, b, w]);
+    `INSERT INTO territory_cofire (id, user_id, territory_a, territory_b, cofire_immediate, cofire_session, cofire_daily, cofire_weekly) VALUES (?,?,?,?,?,?,?,?)`,
+    [`${U}:${a}:${b}`, U, a, b, 0, 0, 0, w]);
 }
 // Neighbors (distance → auto-encrypted): T1~T2 (cofiring → not a gap), T1~T4 (no cofire → a gap).
 for (const [t, nb, dist] of [[1, 2, 0.1], [1, 4, 0.2]]) {

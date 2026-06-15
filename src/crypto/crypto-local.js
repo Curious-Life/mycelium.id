@@ -1419,12 +1419,35 @@ async function decryptFields(record, masterKey, allowedScopes = null, opts = {})
 
 // ── SQL parsing (ported from Worker db-proxy.ts) ──
 
+// Extract the (statement-type, target table) of a write without a full parse.
+// Used to make the encryption boundary FAIL-CLOSED: if a write targets a table
+// with ENCRYPTED_FIELDS but the structural parser below can't model its shape,
+// we must REFUSE rather than silently emit plaintext (CLAUDE.md §3). Returns
+// null for DELETE and any shape we don't recognize as INSERT/UPDATE.
+function writeTarget(sql) {
+  const t = sql.trimStart();
+  let m = t.match(/^INSERT\s+(?:OR\s+(?:REPLACE|IGNORE)\s+)?INTO\s+(\w+)/i);
+  if (m) return { type: 'insert', table: m[1] };
+  m = t.match(/^UPDATE\s+(?:OR\s+(?:ROLLBACK|ABORT|REPLACE|FAIL|IGNORE)\s+)?(\w+)/i);
+  if (m) return { type: 'update', table: m[1] };
+  return null;
+}
+
 function parseWriteSQL(sql) {
   const trimmed = sql.trimStart().toUpperCase();
 
   if (trimmed.startsWith('INSERT')) {
     const match = sql.match(/INSERT\s+(?:OR\s+(?:REPLACE|IGNORE)\s+)?INTO\s+(\w+)\s*\(([^)]+)\)/i);
-    if (!match) return null;
+    if (!match) {
+      // Could not parse the column list (e.g. INSERT…SELECT, DEFAULT VALUES, or
+      // a shape the regex doesn't model). If the table has encrypted fields we
+      // cannot prove we aren't writing one as plaintext → FAIL CLOSED.
+      const tgt = writeTarget(sql);
+      if (tgt && getEncryptedFields(tgt.table).length) {
+        throw new Error(`REFUSE: cannot parse INSERT column list for encrypted table '${tgt.table}' — refusing to write (would risk plaintext at rest). This SQL shape is unsupported by the encryption parser.`);
+      }
+      return null;
+    }
     const table = match[1];
     const columns = match[2].split(',').map(c => c.trim());
     const encrypted = getEncryptedFields(table);
@@ -1439,7 +1462,13 @@ function parseWriteSQL(sql) {
 
   if (trimmed.startsWith('UPDATE')) {
     const tableMatch = sql.match(/UPDATE\s+(\w+)\s+SET/i);
-    if (!tableMatch) return null;
+    if (!tableMatch) {
+      const tgt = writeTarget(sql);
+      if (tgt && getEncryptedFields(tgt.table).length) {
+        throw new Error(`REFUSE: cannot parse UPDATE…SET for encrypted table '${tgt.table}' — refusing to write (would risk plaintext at rest).`);
+      }
+      return null;
+    }
     const table = tableMatch[1];
     const encrypted = getEncryptedFields(table);
     if (!encrypted.length) return null;
@@ -1453,7 +1482,9 @@ function parseWriteSQL(sql) {
     // `strftime('%Y-%m-%dT%H:%M:%fZ','now')` stays one assignment (the inner
     // comma doesn't shift the param index of a later encrypted column).
     const setMatch = sql.match(/SET\s+(.+?)(?:\s+WHERE|\s+ORDER|\s+LIMIT|\s+RETURNING|;|$)/is);
-    if (!setMatch) return null;
+    if (!setMatch) {
+      throw new Error(`REFUSE: cannot parse SET clause for encrypted table '${table}' — refusing to write (would risk plaintext at rest).`);
+    }
     const assignments = splitValueExprs(setMatch[1]).map(s => s.trim());
     const encryptedParamIndices = [];
     let paramIndex = 0;
@@ -1463,8 +1494,19 @@ function parseWriteSQL(sql) {
       const col = colMatch[1];
       const value = colMatch[2].trim();
       const qCount = (value.match(/\?/g) || []).length;
-      if (qCount === 1 && encrypted.includes(col)) {
-        encryptedParamIndices.push(paramIndex);
+      if (encrypted.includes(col)) {
+        if (qCount === 1) {
+          // Exactly one bound param feeds this encrypted column (incl. inside a
+          // COALESCE(?, col) expression) — encrypt that param.
+          encryptedParamIndices.push(paramIndex);
+        } else if (value.replace(/;\s*$/, '').trim().toUpperCase() === 'NULL') {
+          // Clearing the column to NULL — no plaintext, nothing to encrypt.
+        } else {
+          // A literal/expression with 0 or ≥2 bound params for an encrypted
+          // column: we cannot know which value to encrypt → FAIL CLOSED rather
+          // than persist a possible plaintext (CLAUDE.md §3).
+          throw new Error(`REFUSE: encrypted column '${col}' on table '${table}' is assigned a non-bound expression ('${value}') — refusing (cannot encrypt a literal/expression).`);
+        }
       }
       paramIndex += qCount;
     }
@@ -1563,7 +1605,19 @@ async function autoEncryptParams(sql, params, scope, masterKey, userId = null, o
     for (let row = 0; row < numRows; row++) {
       for (const colIdx of encryptedColumnIndices) {
         const paramPos = colToParamIdx.get(colIdx);
-        if (paramPos === undefined) continue;
+        if (paramPos === undefined) {
+          // The encrypted column's VALUES expression is not a bound `?`. A NULL
+          // (or absent) literal is safe — there's no plaintext. Anything else is
+          // an un-encryptable literal/expression → FAIL CLOSED (CLAUDE.md §3),
+          // checked once (row 0) since every row shares the value template.
+          if (row === 0) {
+            const expr = (valueExprs[colIdx] || '').replace(/;\s*$/, '').trim().toUpperCase();
+            if (expr !== 'NULL' && expr !== '') {
+              throw new Error(`REFUSE: encrypted column '${columns[colIdx]}' on INSERT into '${table}' has a non-bound value ('${valueExprs[colIdx]}') — refusing (cannot encrypt a literal/expression).`);
+            }
+          }
+          continue;
+        }
         const absIdx = row * paramsPerRow + paramPos;
         const plain = encryptablePlaintext(params[absIdx]);
         if (plain !== null) {
