@@ -100,6 +100,18 @@ The sections above let an agent read/write the vault *when it chooses to*. To ma
 
 Both need `npm run start:http` with `MYCELIUM_MCP_BEARER` set (§4). The bridge **fails open** — if the server is down, no turn is ever blocked. Gated by `npm run verify:memory-bridge` + `npm run verify:memory-adapters`.
 
+> **Consent required — auto-capture is OFF by default.** Captured conversations can
+> contain secrets (keys, file contents, command output), so Mycelium stores
+> agent-source messages (`claude-code`, `gateway:*`, `opencode`, `openclaw`,
+> `hermes`) **only after you opt in** — set it in **Settings → Memory capture**, or:
+> ```bash
+> curl -X PUT http://127.0.0.1:4711/portal/agent-capture \
+>   -H "Authorization: Bearer $MYCELIUM_MCP_BEARER" -H 'content-type: application/json' \
+>   -d '{"enabled":true,"redactSecrets":false}'   # redactSecrets scrubs obvious creds
+> ```
+> Until enabled, the hooks/gateway run but capture is a silent no-op. Non-agent
+> ingest (your notes, connector messages) is never gated. Gate: `verify:agent-capture`.
+
 ---
 
 ## 4. Auth: the static bearer (copy-paste)

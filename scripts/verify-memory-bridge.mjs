@@ -33,7 +33,17 @@ const A_DB = 'data/verify-membridge-a.db', A_KCV = 'data/verify-membridge-a-kcv.
 for (const f of [A_DB, A_KCV, `${A_DB}-shm`, `${A_DB}-wal`]) { try { rmSync(f); } catch {} }
 mkdirSync('data', { recursive: true });
 applyMigrations(new Database(A_DB));
-const { app } = await createHttpApp({ bootOpts: { dbPath: A_DB, kcvPath: A_KCV, userHex: hex(), systemHex: hex(), embedder: null } });
+// Agent-source captures (source 'claude-code', 'gateway:*', …) are consent-gated
+// in captureMessage — opt in on this vault first so the on-stop capture flow (B6)
+// is exercised. Same keys as the HTTP server below so the KCV matches.
+const A_UH = hex(), A_SH = hex();
+{
+  const pre = await boot({ dbPath: A_DB, kcvPath: A_KCV, userHex: A_UH, systemHex: A_SH, embedder: null });
+  try { await pre.db.users.create('local-user', 'local-user'); } catch { /* exists */ }
+  await pre.db.users.updateSettings('local-user', { agentCapture: { enabled: true } });
+  await pre.close();
+}
+const { app } = await createHttpApp({ bootOpts: { dbPath: A_DB, kcvPath: A_KCV, userHex: A_UH, systemHex: A_SH, embedder: null } });
 const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
 const base = `http://127.0.0.1:${server.address().port}`;
 const post = (p, b, h = {}) => fetch(base + p, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${BEARER}`, ...h }, body: JSON.stringify(b || {}) });
