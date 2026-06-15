@@ -111,7 +111,13 @@
 		connecting = true;
 		error = null;
 		try {
-			await apiPost('/portal/connections/request', { toHandle: connectHandle.trim().replace(/^@/, '') });
+			let target = connectHandle.trim().replace(/^@/, '');
+			// A bare handle is a mycelium.id handle: "lo" → "lo@lo.mycelium.id" (the
+			// domain is always <handle>.mycelium.id, so typing it twice is redundant).
+			// Anything already containing "@" is a full federated handle (e.g. a custom
+			// domain / another instance) and is sent verbatim.
+			if (target && !target.includes('@')) target = `${target}@${target}.mycelium.id`;
+			await apiPost('/portal/connections/request', { toHandle: target });
 			connectHandle = '';
 			composerOpen = false;
 			showSuccess('Request sent');
@@ -238,7 +244,7 @@
 		<form class="composer glass" onsubmit={(e) => { e.preventDefault(); sendRequest(); }}>
 			<input
 				type="text" bind:value={connectHandle} autocomplete="off"
-				placeholder="name  ·  or  name@their-server.org" class="composer-input" />
+				placeholder="their handle  ·  or  name@their-server.org" class="composer-input" />
 			<button type="submit" disabled={connecting || !connectHandle.trim()} class="btn btn-primary">
 				{connecting ? 'Sending…' : 'Send'}
 			</button>
@@ -255,14 +261,14 @@
 			<h2 class="onboard-title">Where your mind meets others'</h2>
 			<p class="onboard-lede">Link with anyone on Mycelium to see where your minds overlap — shared territories, kindred realms — and selectively share a space or a facet. Nothing leaves your vault until you choose it.</p>
 			<div class="steps">
-				<div class="step"><span class="step-n">1</span><span class="step-t">Send a request by handle, or <code>name@their-server.org</code> to reach any Mycelium.</span></div>
+				<div class="step"><span class="step-n">1</span><span class="step-t">Send a request — just their handle (e.g. <code>lo</code>), or <code>name@their-server.org</code> for a custom domain.</span></div>
 				<div class="step"><span class="step-n">2</span><span class="step-t">They accept — a private, signed link forms between your vaults, revocable anytime.</span></div>
 				<div class="step"><span class="step-n">3</span><span class="step-t">Compare your overlap, then grant a space or a mindscape facet — only what you pick.</span></div>
 			</div>
 			<form class="composer onboard-composer" onsubmit={(e) => { e.preventDefault(); sendRequest(); }}>
 				<input
 					type="text" bind:value={connectHandle} autocomplete="off"
-					placeholder="name  ·  or  name@their-server.org" class="composer-input" />
+					placeholder="their handle  ·  or  name@their-server.org" class="composer-input" />
 				<button type="submit" disabled={connecting || !connectHandle.trim()} class="btn btn-primary">
 					{connecting ? 'Sending…' : 'Connect'}
 				</button>
