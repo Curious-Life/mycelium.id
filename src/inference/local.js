@@ -37,6 +37,7 @@ export async function localInfer({
   numCtx,
   format,
   think,
+  onUsage,
 } = {}) {
   if (typeof fetch !== "function") {
     throw new InferenceError("localInfer: no fetch implementation (Node >= 18 or pass opts.fetch)", { backend: "local" });
@@ -97,6 +98,11 @@ export async function localInfer({
   if (typeof data.response !== "string") {
     throw new InferenceError("localInfer: Ollama response missing .response field", { backend: "local" });
   }
+  // Token-usage accounting (§12): Ollama reports REAL counts on /api/generate.
+  // Counts only — never the prompt/response. Fire-and-forget.
+  if (typeof onUsage === "function") {
+    try { onUsage({ inputTokens: data.prompt_eval_count, outputTokens: data.eval_count }); } catch { /* never break inference */ }
+  }
   return data.response;
 }
 
@@ -117,6 +123,7 @@ export async function* localStream({
   baseUrl = DEFAULT_OLLAMA_URL,
   fetch = globalThis.fetch,
   timeoutMs = 60000,
+  onUsage,
 } = {}) {
   if (typeof fetch !== "function") {
     throw new InferenceError("localStream: no fetch implementation", { backend: "local" });
@@ -163,7 +170,11 @@ export async function* localStream({
       let ev;
       try { ev = JSON.parse(line); } catch { continue; } // skip a partial/garbled line
       if (typeof ev.response === "string" && ev.response) yield ev.response;
-      if (ev.done) return;
+      if (ev.done) {
+        // Ollama's terminal event carries REAL token counts (§12). Counts only.
+        if (typeof onUsage === "function") { try { onUsage({ inputTokens: ev.prompt_eval_count, outputTokens: ev.eval_count }); } catch { /* never break stream */ } }
+        return;
+      }
     }
   }
 }

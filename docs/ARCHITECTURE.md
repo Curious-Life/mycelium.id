@@ -85,6 +85,9 @@ The **channel daemon** (`:3010`, `packages/channel-daemon/`, Telegram/Discord br
 | Data location (durable per-OS dir; survives updates) | `src/paths.js` (`MYCELIUM_DATA_DIR`) | ✅ (#36) |
 | Embeddings client + search adapter | `src/embed/client.js` (→ `:8091`), `src/search/embedder.js` (`createServiceEmbedder`) | ✅ (real vectors ⚠️ Tier-2) |
 | Inference router (local Ollama + BYOK cloud) | `src/inference/{router,local,cloud,errors}.js` | ✅ (real models need Ollama/keys) |
+| Model-aware sizing (profiles + token budgeting; auto `num_ctx`/`max_tokens` per model) | `src/inference/{model-registry,model-profile,token-budget}.js` · `verify:model-sizing` | ✅ ([design](TEXT-GENERATION-ABSTRACTION-DESIGN-2026-06-15.md); local probe live-smoked) |
+| Native local chat adapter (Ollama `/api/chat`, sized `num_ctx`) + token-budgeted preamble | `src/agent/harness.js` (`ollamaNativeAdapter`), `src/portal-chat.js` · `verify:harness-local` | ✅ (live-smoked) |
+| Token-usage accounting (counts by source/area/provider/model; no content) + transparency UI | `src/db/llm-usage.js`, `src/inference/usage.js`, `src/portal-usage.js` (`GET /portal/usage`), `portal-app/.../settings/UsageSection.svelte` · `migrations/0014` · `verify:usage` | ✅ (live-smoked) |
 | Search (BM25 + vector + RRF fusion) | `src/search/**` | ✅ |
 | Topology / AnalysisEngine pipeline | `src/topology.js`, `src/topology/helpers.js`, `pipeline/` | ✅ (real run ⚠️) |
 | Ingestion choke-point + uploads | `src/ingest/{capture,upload,blob-store,enqueue}.js` | ✅ |

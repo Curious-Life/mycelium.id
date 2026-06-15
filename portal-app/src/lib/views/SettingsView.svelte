@@ -9,6 +9,7 @@
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
 	import ChannelsSection from '$lib/components/settings/ChannelsSection.svelte';
 	import AISettings from '$lib/components/settings/AISettings.svelte';
+	import UsageSection from '$lib/components/settings/UsageSection.svelte';
 	import AIAccessSection from '$lib/components/settings/AIAccessSection.svelte';
 	import AgentCaptureSection from '$lib/components/settings/AgentCaptureSection.svelte';
 	import ManagedConnectSection from '$lib/components/settings/ManagedConnectSection.svelte';
@@ -116,6 +117,7 @@
 	const TABS = [
 		{ id: 'connection', label: 'Connection' },
 		{ id: 'intelligence', label: 'Intelligence' },
+		{ id: 'usage', label: 'Usage' },
 		{ id: 'integrations', label: 'Integrations' },
 		{ id: 'billing', label: 'Billing' },
 		{ id: 'general', label: 'General' },
@@ -1041,6 +1043,11 @@
 			<!-- Remote Access — connect Claude / any MCP client over the internet (operator password, status, connector URL) -->
 			<RemoteAccessSection />
 
+			{/if}
+
+			{#if activeTab === 'usage'}
+			<!-- Token usage transparency — input/output by area/source/provider/model -->
+			<UsageSection />
 			{/if}
 
 			{#if activeTab === 'intelligence'}
