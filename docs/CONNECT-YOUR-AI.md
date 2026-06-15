@@ -91,6 +91,17 @@ It supports **real token streaming** (`stream: true`) and **tool calling** (`too
 
 ---
 
+## 3b. Auto-capture — make every turn flow into memory (the memory bridge)
+
+The sections above let an agent read/write the vault *when it chooses to*. To make **every** turn flow into memory automatically — both your message and the assistant's reply, with context pulled back in — use the **memory bridge**. Two ways:
+
+- **Zero-config (any gateway harness):** add the header **`X-Mycelium-Capture: <conversation-id>`** to your `/v1/chat/completions` calls. The gateway then injects your vault context as a system preamble and captures both sides (last turn only, idempotent). Without the header it's the unchanged pass-through proxy.
+- **Native plugins (agent keeps its own model):** drop-in adapters for **Claude Code, hermes-agent, opencode, openclaw** in [`tools/memory-bridge/`](../tools/memory-bridge/) — each wires the harness's own lifecycle hooks to `POST /context` (pull) + `POST /ingest/message` (push). Recipes: [HARNESS-RECIPES.md](HARNESS-RECIPES.md) → "Auto-capture"; per-harness install in each folder's README.
+
+Both need `npm run start:http` with `MYCELIUM_MCP_BEARER` set (§4). The bridge **fails open** — if the server is down, no turn is ever blocked. Gated by `npm run verify:memory-bridge` + `npm run verify:memory-adapters`.
+
+---
+
 ## 4. Auth: the static bearer (copy-paste)
 
 Generate a token and start the server with it:
