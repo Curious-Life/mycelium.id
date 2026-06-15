@@ -30,6 +30,14 @@ export const REGISTRY: Record<string, ViewDef> = {
 		title: 'Library', icon: 'folder', singleton: true,
 		load: () => import('$lib/views/LibraryView.svelte'),
 	},
+	media: {
+		// Was stranded as a route page ((app)/media/+page.svelte): the (app) layout
+		// renders the workspace BY REGISTRY, not the route, so the media grid rendered
+		// into a hidden div and never showed. De-routed into a view + registered here
+		// so the "Media" nav button actually shows the grid/lightbox.
+		title: 'Media', icon: 'image', singleton: true,
+		load: () => import('$lib/views/MediaView.svelte'),
+	},
 	streams: {
 		// The merged data surface (NAV-IA-LOCK-2026-06-08): Import + Timeline behind
 		// one tab. params.facet ('stream' | 'sources') selects the in-view panel and
@@ -37,10 +45,6 @@ export const REGISTRY: Record<string, ViewDef> = {
 		// both focus this one tab and just switch the facet.
 		title: 'Streams', icon: 'streams', singleton: true,
 		load: () => import('$lib/views/StreamsView.svelte'),
-	},
-	profile: {
-		title: 'Profile', icon: 'profile', singleton: true,
-		load: () => import('$lib/views/ProfileView.svelte'),
 	},
 	connections: {
 		title: 'Connections', icon: 'connections', singleton: true,

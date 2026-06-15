@@ -121,7 +121,18 @@
 					<span class="text-[11px] font-medium">{$activity.active.length}</span>
 				</button>
 				{#if activityOpen}
-					<div class="absolute right-0 top-full mt-1.5 z-50 min-w-[240px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 shadow-lg" style="backdrop-filter: blur(12px) saturate(140%); -webkit-backdrop-filter: blur(12px) saturate(140%);">
+					<!-- Click-away backdrop (transparent) — closes the popover on
+					     any outside click/scroll-tap. -->
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<!-- svelte-ignore a11y_click_events_have_key_events -->
+					<div class="fixed inset-0 z-[59]" onclick={() => (activityOpen = false)}></div>
+					<!-- POSITION: FIXED, not absolute. The .app-header has overflow-hidden
+					     (drag-strip clip), which was scissoring this top-full dropdown into
+					     an invisible sliver under the content. A viewport-anchored fixed
+					     popover escapes the clip. No ancestor has transform/filter, so
+					     fixed resolves to the viewport. Offset matches header height
+					     (h-12 / md:h-14) + the right padding (px-3 / sm:px-4). -->
+					<div class="fixed top-[3.25rem] md:top-[3.75rem] right-3 sm:right-4 z-[60] min-w-[240px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 shadow-lg" style="backdrop-filter: blur(12px) saturate(140%); -webkit-backdrop-filter: blur(12px) saturate(140%);">
 						<div class="px-2.5 py-1 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Active</div>
 						{#each $activity.active as j (j.id)}
 							<div class="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">

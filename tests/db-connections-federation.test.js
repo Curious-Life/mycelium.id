@@ -90,13 +90,21 @@ describe('connections — signed outbound connect', () => {
     await assert.rejects(() => ns.request('me', 'bob@bob.mycelium.id'), /not reachable|host/i);
   });
 
-  it('a federated re-request that is already pending returns the existing id (no UNIQUE error, no network)', async () => {
-    const { d1Query } = makeDb({ existingConn: { id: 'pending-1', status: 'pending' } });
-    let fetched = false;
-    const fetchImpl = async () => { fetched = true; return { ok: true, status: 202, async json() { return {}; } }; };
+  it('a federated re-request that is already pending RE-DELIVERS (re-POSTs) and keeps the same id', async () => {
+    // The connect POST is fire-and-forget with no background retry, so a failed
+    // first delivery leaves a pending row. Re-requesting must re-deliver (not
+    // silently no-op) — that is the only recovery path for the user.
+    const { d1Query, writes } = makeDb({ existingConn: { id: 'pending-1', status: 'pending' } });
+    let posted = null;
+    const fetchImpl = async (url, init) => {
+      if (url.includes('/.well-known/webfinger')) return { ok: true, status: 200, async json() { return { links: [{ rel: 'x.federation', href: 'https://bob.mycelium.id/federation' }] }; } };
+      if (url.endsWith('/federation/connect')) { posted = { url, init }; return { ok: true, status: 202, async json() { return {}; } }; }
+      return { ok: false, status: 404, async json() { return {}; } };
+    };
     const ns = createConnectionsNamespace({ d1Query, fetch: fetchImpl, sign: (b) => id.sign(b), did: () => 'did:web:alice.mycelium.id', selfInstance: () => 'alice.mycelium.id' });
-    assert.equal(await ns.request('me', 'bob@bob.mycelium.id'), 'pending-1');
-    assert.equal(fetched, false, 'no WebFinger/POST for an already-pending re-request');
+    assert.equal(await ns.request('me', 'bob@bob.mycelium.id'), 'pending-1', 'keeps the existing pending row id');
+    assert.ok(posted, 're-delivered: POST /federation/connect fired again');
+    assert.equal(writes.filter((w) => w.kind === 'connection').length, 0, 'no duplicate INSERT — reuses the pending row');
   });
 
   it('a federated re-request to an already-accepted handle throws a friendly error (not raw SQL)', async () => {
@@ -215,5 +223,44 @@ describe('connections — Tier-0b accept handshake', () => {
     const ns = createConnectionsNamespace({ d1Query });
     assert.equal(await ns.receiveResponse({ fromHandle: 'x', verifiedHost: 'y.example', action: 'accept', toUserId: 'me' }), null);
     assert.equal(await ns.receiveResponse({ fromHandle: 'x', verifiedHost: 'y.example', action: 'reject', toUserId: 'me' }), null);
+  });
+});
+
+describe('connections — withdraw a sent request', () => {
+  // loadConnection uses `SELECT * FROM connections WHERE id = ? AND status = ?`
+  // (requireStatus: 'pending'); honor the status param so a non-pending row
+  // surfaces as "not found".
+  function withdrawDb(row) {
+    const deletes = [];
+    const d1Query = async (sql, params) => {
+      if (/SELECT \* FROM connections WHERE id/.test(sql)) {
+        return { results: row && (params.length < 2 || params[1] === row.status) ? [row] : [] };
+      }
+      if (/DELETE FROM connections WHERE id/.test(sql)) { deletes.push(params); return { results: [] }; }
+      return { results: [] };
+    };
+    return { d1Query, deletes };
+  }
+
+  it('initiator withdraws their own pending outbound row (deleted)', async () => {
+    const { d1Query, deletes } = withdrawDb({ id: 'p1', user_a: 'me', user_b: 'bob@bob.mycelium.id', initiated_by: 'me', status: 'pending' });
+    const ns = createConnectionsNamespace({ d1Query });
+    await ns.withdraw('me', 'p1');
+    assert.equal(deletes.length, 1);
+    assert.equal(deletes[0][0], 'p1');
+  });
+
+  it('refuses to withdraw a request the caller did not initiate', async () => {
+    const { d1Query, deletes } = withdrawDb({ id: 'p1', user_a: 'me', user_b: 'bob@bob.mycelium.id', initiated_by: 'bob@bob.mycelium.id', status: 'pending' });
+    const ns = createConnectionsNamespace({ d1Query });
+    await assert.rejects(() => ns.withdraw('me', 'p1'), /your own sent request/);
+    assert.equal(deletes.length, 0);
+  });
+
+  it('refuses when there is no pending row (already accepted or absent)', async () => {
+    const { d1Query, deletes } = withdrawDb(null);
+    const ns = createConnectionsNamespace({ d1Query });
+    await assert.rejects(() => ns.withdraw('me', 'nope'), /not found/i);
+    assert.equal(deletes.length, 0);
   });
 });

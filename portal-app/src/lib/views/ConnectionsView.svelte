@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { api, apiGet, apiPost } from '$lib/api';
+	import { workspace } from '$lib/workspace/store';
 
 	interface Connection {
 		id: string;
@@ -54,18 +55,29 @@
 	let error = $state<string | null>(null);
 	let success = $state<string | null>(null);
 
-	// Connect form
+	// Connect composer — a single handle field; opens on demand (always shown in
+	// the empty state). The old free-text "message" field was a no-op (the request
+	// route drops it), so it's gone.
+	let composerOpen = $state(false);
 	let connectHandle = $state('');
-	let connectMessage = $state('');
 	let connecting = $state(false);
 
-	// Overlap view
+	// Detail pane
 	let selectedConnection = $state<Connection | null>(null);
 	let overlap = $state<Overlap | null>(null);
 	let overlapLoading = $state(false);
+	let showUnique = $state(false);
+	let menuOpen = $state(false); // disconnect overflow
 	// What you've shared WITH the selected connection (the management hub).
 	let shared = $state<{ peer_id: string | null; spaces: Array<{ id: string; name: string; role: string }>; contexts: Array<{ id: string; name: string; is_private: number }> }>({ peer_id: null, spaces: [], contexts: [] });
 	let sharedLoading = $state(false);
+
+	const isEmpty = $derived(connections.length === 0 && pending.length === 0 && sent.length === 0);
+	const summary = $derived([
+		connections.length ? `${connections.length} connected` : '',
+		pending.length ? `${pending.length} request${pending.length > 1 ? 's' : ''}` : '',
+		sent.length ? `${sent.length} sent` : '',
+	].filter(Boolean).join(' · '));
 
 	$effect(() => {
 		if (browser) {
@@ -81,14 +93,12 @@
 			connections = data.connections;
 		} catch {} finally { loading = false; }
 	}
-
 	async function loadPending() {
 		try {
 			const data = await apiGet<{ requests: PendingRequest[] }>('/portal/connections/pending');
 			pending = data.requests;
 		} catch {}
 	}
-
 	async function loadSent() {
 		try {
 			const data = await apiGet<{ sent: SentRequest[] }>('/portal/connections/sent');
@@ -101,9 +111,9 @@
 		connecting = true;
 		error = null;
 		try {
-			await apiPost('/portal/connections/request', { toHandle: connectHandle.trim().replace(/^@/, ''), message: connectMessage.trim() || undefined });
+			await apiPost('/portal/connections/request', { toHandle: connectHandle.trim().replace(/^@/, '') });
 			connectHandle = '';
-			connectMessage = '';
+			composerOpen = false;
 			showSuccess('Request sent');
 			loadSent();
 		} catch (e: any) {
@@ -119,12 +129,19 @@
 			showSuccess('Connected');
 		} catch (e: any) { error = e.message; }
 	}
-
 	async function rejectRequest(id: string) {
 		try {
 			await apiPost(`/portal/connections/${id}/reject`, {});
 			pending = pending.filter(r => r.id !== id);
 		} catch (e: any) { error = e.message; }
+	}
+	// Clear a sent-but-unaccepted invite (e.g. a stranded delivery, or changed mind).
+	async function withdrawRequest(id: string) {
+		try {
+			await apiPost(`/portal/connections/${id}/withdraw`, {});
+			sent = sent.filter(s => s.id !== id);
+			showSuccess('Invite withdrawn');
+		} catch (e: any) { error = e.message || 'Failed to withdraw'; }
 	}
 
 	async function disconnectConnection(id: string) {
@@ -135,12 +152,15 @@
 			connections = connections.filter(c => c.id !== id);
 			selectedConnection = null;
 			overlap = null;
+			menuOpen = false;
 			showSuccess('Disconnected');
 		} catch (e: any) { error = e.message; }
 	}
 
 	async function viewOverlap(conn: Connection) {
 		selectedConnection = conn;
+		menuOpen = false;
+		showUnique = false;
 		overlapLoading = true;
 		overlap = null;
 		loadShared(conn.id);
@@ -183,12 +203,15 @@
 
 	function shapeColor(shape: string): string {
 		switch (shape) {
-			case 'twin': return '#4ade80';
-			case 'deep-collaborators': return '#E5B84C';
-			case 'broad-kindred': return '#818cf8';
-			case 'complementary': return '#f472b6';
+			case 'twin': return 'var(--color-accent-jade)';
+			case 'deep-collaborators': return 'var(--color-accent-aurum)';
+			case 'broad-kindred': return 'var(--color-accent-amethyst)';
+			case 'complementary': return 'var(--color-accent-rose)';
 			default: return 'var(--color-text-tertiary)';
 		}
+	}
+	function cachedScore(conn: Connection): number | null {
+		try { return conn.overlap_json ? (JSON.parse(conn.overlap_json).matchScore ?? null) : null; } catch { return null; }
 	}
 </script>
 
@@ -196,515 +219,354 @@
 	<title>Connections - Mycelium</title>
 </svelte:head>
 
-<div class="connections-page">
-	<!-- Intro -->
-	<div class="intro">
-		<p class="eyebrow">Connections</p>
-		<h1 class="intro-title">Where your mind meets others'</h1>
-		<p class="intro-lede">
-			Link with anyone on Mycelium to see where your minds overlap — shared territories,
-			kindred realms — and selectively share a space or a facet. Private by default:
-			nothing leaves your vault until you choose it.
-		</p>
-	</div>
-
-	<!-- How it works -->
-	<div class="how glass">
-		<div class="how-step">
-			<span class="how-n">1</span>
-			<div class="how-body">
-				<span class="how-t">Send a request</span>
-				<span class="how-d">By handle here, or <code>name@their-server.org</code> to reach any machine running Mycelium.</span>
-			</div>
+<div class="conn">
+	<!-- Header -->
+	<header class="conn-top">
+		<div class="title-wrap">
+			<h1>Connections</h1>
+			{#if !isEmpty && summary}<span class="sub">{summary}</span>{/if}
 		</div>
-		<div class="how-step">
-			<span class="how-n">2</span>
-			<div class="how-body">
-				<span class="how-t">They accept</span>
-				<span class="how-d">A private, signed link forms between your vaults — revocable anytime.</span>
-			</div>
-		</div>
-		<div class="how-step">
-			<span class="how-n">3</span>
-			<div class="how-body">
-				<span class="how-t">Compare &amp; share</span>
-				<span class="how-d">See your overlap, then grant a space or a mindscape facet — only what you pick.</span>
-			</div>
-		</div>
-	</div>
-
-	<!-- Connect form -->
-	<form class="connect glass" onsubmit={(e) => { e.preventDefault(); sendRequest(); }}>
-		<label class="connect-label" for="connect-handle">Connect to someone</label>
-		<div class="connect-fields">
-			<input id="connect-handle" type="text" bind:value={connectHandle} placeholder="name  ·  or  name@their-server.org" class="connect-input" autocomplete="off" />
-			<input type="text" bind:value={connectMessage} placeholder="Add a message (optional)" maxlength="200" class="connect-input connect-message" />
-			<button type="submit" disabled={connecting || !connectHandle.trim()} class="btn-sm btn-primary">
-				{connecting ? 'Sending…' : 'Connect'}
+		{#if !isEmpty}
+			<button class="btn btn-primary" onclick={() => { composerOpen = !composerOpen; connectHandle = ''; }}>
+				<span class="plus">+</span> Connect
 			</button>
-		</div>
-		<p class="connect-hint">A bare handle finds someone on this instance; <code>name@server</code> reaches any Mycelium, anywhere. <span class="soon">Matrix addresses (@you:homeserver) coming soon.</span></p>
-	</form>
+		{/if}
+	</header>
 
-	<!-- Pending requests -->
-	{#if pending.length > 0}
-		<div class="section">
-			<h2 class="section-label">Requests ({pending.length})</h2>
-			{#each pending as req}
-				<div class="request-card">
-					<div class="request-info">
-						<div class="request-identity">
-							{#if req.avatar_url}
-								<img src={req.avatar_url} alt="" class="conn-avatar" />
-							{:else}
-								<div class="conn-avatar-placeholder">@</div>
-							{/if}
-							<div>
-								<span class="request-handle">@{req.handle}</span>
-								{#if req.signature}
-									<span class="request-sig">"{req.signature}"</span>
-								{/if}
-								<span class="request-meta">{req.territory_count} territories · {req.realm_count} realms</span>
-							</div>
-						</div>
-					</div>
-					<div class="request-actions">
-						<button onclick={() => acceptRequest(req.id)} class="btn-sm btn-primary">Accept</button>
-						<button onclick={() => rejectRequest(req.id)} class="btn-sm btn-ghost">Ignore</button>
-					</div>
-				</div>
-			{/each}
-		</div>
+	<!-- Connect composer (always shown in the empty state) -->
+	{#if composerOpen && !isEmpty}
+		<form class="composer glass" onsubmit={(e) => { e.preventDefault(); sendRequest(); }}>
+			<input
+				type="text" bind:value={connectHandle} autocomplete="off"
+				placeholder="name  ·  or  name@their-server.org" class="composer-input" />
+			<button type="submit" disabled={connecting || !connectHandle.trim()} class="btn btn-primary">
+				{connecting ? 'Sending…' : 'Send'}
+			</button>
+			<button type="button" class="btn btn-ghost" onclick={() => { composerOpen = false; connectHandle = ''; }}>Cancel</button>
+		</form>
 	{/if}
 
-	<!-- Sent invites -->
-	{#if sent.length > 0}
-		<div class="section">
-			<h2 class="section-label">Sent ({sent.length})</h2>
-			{#each sent as s}
-				<div class="request-card sent-card">
-					<div class="request-info">
-						<div class="request-identity">
-							{#if s.to_avatar_url}
-								<img src={s.to_avatar_url} alt="" class="conn-avatar" />
-							{:else}
-								<div class="conn-avatar-placeholder">@</div>
-							{/if}
-							<div>
-								<span class="request-handle">@{s.to_handle || '?'}</span>
-								<span class="request-meta">sent {new Date(s.created_at).toLocaleDateString()}</span>
-							</div>
-						</div>
-					</div>
-					<span class="sent-status">pending</span>
-				</div>
-			{/each}
-		</div>
-	{/if}
-
-	<!-- Connection list -->
 	{#if loading}
-		<div class="loading">Loading connections...</div>
-	{:else if connections.length === 0 && pending.length === 0 && sent.length === 0}
-		<div class="empty">
-			<p>No connections yet</p>
-			<p class="empty-sub">Enter a handle above to connect with someone on Mycelium</p>
-		</div>
-	{:else}
-		<div class="section">
-			<h2 class="section-label">Connected ({connections.length})</h2>
-			{#each connections as conn}
-				{@const cachedOverlap = conn.overlap_json ? JSON.parse(conn.overlap_json) : null}
-				<button class="conn-card" class:selected={selectedConnection?.id === conn.id} onclick={() => viewOverlap(conn)}>
-					<div class="conn-main">
-						{#if conn.other_avatar_url}
-							<img src={conn.other_avatar_url} alt="" class="conn-avatar" />
-						{:else}
-							<div class="conn-avatar-placeholder">@</div>
-						{/if}
-						<span class="conn-handle">@{conn.other_handle}</span>
-						{#if cachedOverlap?.shapeLabel}
-							<span class="conn-shape" style="color: {shapeColor(cachedOverlap.shape)}">{cachedOverlap.shapeLabel}</span>
-						{/if}
-						{#if cachedOverlap?.matchScore != null}
-							<span class="conn-score">{cachedOverlap.matchScore}%</span>
-						{/if}
-					</div>
-					{#if conn.other_signature}
-						<div class="conn-sig">"{conn.other_signature}"</div>
-					{/if}
-				</button>
-			{/each}
-		</div>
-	{/if}
+		<div class="loading">Loading connections…</div>
 
-	<!-- Overlap detail -->
-	{#if selectedConnection}
-		<div class="overlap-panel">
-			<div class="overlap-header">
-				<h2>You & @{selectedConnection.other_handle}</h2>
-				<button onclick={() => selectedConnection && disconnectConnection(selectedConnection.id)} class="btn-sm btn-ghost btn-danger">Disconnect</button>
+	{:else if isEmpty}
+		<!-- Onboarding only when there's nothing yet -->
+		<div class="onboard glass">
+			<h2 class="onboard-title">Where your mind meets others'</h2>
+			<p class="onboard-lede">Link with anyone on Mycelium to see where your minds overlap — shared territories, kindred realms — and selectively share a space or a facet. Nothing leaves your vault until you choose it.</p>
+			<div class="steps">
+				<div class="step"><span class="step-n">1</span><span class="step-t">Send a request by handle, or <code>name@their-server.org</code> to reach any Mycelium.</span></div>
+				<div class="step"><span class="step-n">2</span><span class="step-t">They accept — a private, signed link forms between your vaults, revocable anytime.</span></div>
+				<div class="step"><span class="step-n">3</span><span class="step-t">Compare your overlap, then grant a space or a mindscape facet — only what you pick.</span></div>
 			</div>
+			<form class="composer onboard-composer" onsubmit={(e) => { e.preventDefault(); sendRequest(); }}>
+				<input
+					type="text" bind:value={connectHandle} autocomplete="off"
+					placeholder="name  ·  or  name@their-server.org" class="composer-input" />
+				<button type="submit" disabled={connecting || !connectHandle.trim()} class="btn btn-primary">
+					{connecting ? 'Sending…' : 'Connect'}
+				</button>
+			</form>
+		</div>
 
-			{#if overlapLoading}
-				<div class="loading">Computing overlap...</div>
-			{:else if overlap}
-				<!-- Score + shape -->
-				<div class="overlap-summary">
-					{#if overlap.matchScore != null}
-						<span class="overlap-score">{overlap.matchScore}%</span>
-					{:else}
-						<span class="overlap-score-na">Not enough overlap to score</span>
-					{/if}
-					<span class="overlap-shape" style="color: {shapeColor(overlap.shape)}">{overlap.shapeLabel}</span>
-				</div>
+	{:else}
+		<!-- Two-pane workspace -->
+		<div class="panes">
+			<!-- Left: unified people list -->
+			<aside class="list">
+				{#each pending as req (req.id)}
+					<div class="row request">
+						<div class="who">
+							{#if req.avatar_url}<img src={req.avatar_url} alt="" class="avatar" />{:else}<div class="avatar ph">@</div>{/if}
+							<div class="who-text">
+								<span class="handle">@{req.handle}</span>
+								<span class="meta">wants to connect</span>
+							</div>
+						</div>
+						{#if req.signature}<p class="row-sig">"{req.signature}"</p>{/if}
+						<div class="row-actions">
+							<button class="btn btn-primary btn-xs" onclick={() => acceptRequest(req.id)}>Accept</button>
+							<button class="btn btn-ghost btn-xs" onclick={() => rejectRequest(req.id)}>Ignore</button>
+						</div>
+					</div>
+				{/each}
 
-				<!-- Shared territories -->
-				{#if overlap.shared.length > 0}
-					<div class="overlap-section">
-						<h3>Shared ({overlap.sharedCount})</h3>
-						{#each overlap.shared as t}
-							{@const maxDepth = Math.max(t.my_depth, t.their_depth, 1)}
-							<div class="shared-territory">
-								<div class="shared-name">{t.name}</div>
-								<div class="depth-bars">
-									<div class="depth-row">
-										<span class="depth-label">you</span>
-										<div class="depth-track">
-											<div class="depth-fill" style="width: {t.my_depth / maxDepth * 100}%"></div>
+				{#each connections as conn (conn.id)}
+					{@const score = cachedScore(conn)}
+					<button class="row conn-row" class:selected={selectedConnection?.id === conn.id} onclick={() => viewOverlap(conn)}>
+						<div class="who">
+							{#if conn.other_avatar_url}<img src={conn.other_avatar_url} alt="" class="avatar" />{:else}<div class="avatar ph">@</div>{/if}
+							<div class="who-text"><span class="handle">@{conn.other_handle}</span></div>
+							{#if score != null}<span class="score">{score}%</span>{/if}
+						</div>
+					</button>
+				{/each}
+
+				{#each sent as s (s.id)}
+					<div class="row sent">
+						<div class="who">
+							<div class="avatar ph muted">⋯</div>
+							<div class="who-text">
+								<span class="handle muted">@{s.to_handle || '?'}</span>
+								<span class="meta">invite sent</span>
+							</div>
+							<button class="link-revoke" onclick={() => withdrawRequest(s.id)}>Withdraw</button>
+						</div>
+					</div>
+				{/each}
+			</aside>
+
+			<!-- Right: detail pane -->
+			<section class="detail">
+				{#if !selectedConnection}
+					<div class="detail-empty">
+						<p>Select a connection to see where your minds overlap.</p>
+					</div>
+				{:else}
+					<button class="detail-back" onclick={() => { selectedConnection = null; }}>← All connections</button>
+
+					<div class="detail-hero">
+						{#if selectedConnection.other_avatar_url}<img src={selectedConnection.other_avatar_url} alt="" class="avatar lg" />{:else}<div class="avatar lg ph">@</div>{/if}
+						<div class="hero-text">
+							<span class="hero-handle">@{selectedConnection.other_handle}</span>
+							{#if selectedConnection.other_signature}<span class="hero-sig">"{selectedConnection.other_signature}"</span>{/if}
+						</div>
+						<div class="menu-wrap">
+							<button class="icon-btn" aria-label="More" onclick={() => menuOpen = !menuOpen}>⋯</button>
+							{#if menuOpen}
+								<div class="menu">
+									<button class="menu-item danger" onclick={() => selectedConnection && disconnectConnection(selectedConnection.id)}>Disconnect</button>
+								</div>
+							{/if}
+						</div>
+					</div>
+
+					{#if overlapLoading}
+						<div class="loading">Computing overlap…</div>
+					{:else if overlap}
+						<div class="summary-row">
+							{#if overlap.matchScore != null}
+								<span class="score-hero">{overlap.matchScore}%</span>
+							{:else}
+								<span class="score-na">Not enough overlap to score</span>
+							{/if}
+							{#if overlap.shapeLabel}<span class="shape-chip" style="color: {shapeColor(overlap.shape)}; border-color: {shapeColor(overlap.shape)}">{overlap.shapeLabel}</span>{/if}
+							<span class="summary-count">{overlap.sharedCount} shared</span>
+						</div>
+
+						{#if overlap.shared.length > 0}
+							<div class="block">
+								<h3>Where you overlap</h3>
+								{#each overlap.shared as t}
+									{@const maxDepth = Math.max(t.my_depth, t.their_depth, 1)}
+									<div class="terr">
+										<div class="terr-name">{t.name}</div>
+										<div class="bars">
+											<div class="bar-track"><div class="bar you" style="width: {t.my_depth / maxDepth * 100}%"></div></div>
+											<div class="bar-track"><div class="bar them" style="width: {t.their_depth / maxDepth * 100}%"></div></div>
 										</div>
 									</div>
-									<div class="depth-row">
-										<span class="depth-label">them</span>
-										<div class="depth-track">
-											<div class="depth-fill their" style="width: {t.their_depth / maxDepth * 100}%"></div>
-										</div>
-									</div>
+								{/each}
+								<div class="legend">
+									<span><i class="sw you"></i>you</span>
+									<span><i class="sw them"></i>@{selectedConnection.other_handle}</span>
+									{#if overlap.myOnly.length || overlap.theirOnly.length}
+										<button class="legend-toggle" onclick={() => showUnique = !showUnique}>
+											{showUnique ? 'Hide' : `${overlap.myOnly.length + overlap.theirOnly.length} only-yours/theirs`} ›
+										</button>
+									{/if}
 								</div>
 							</div>
-						{/each}
-					</div>
-				{/if}
+						{/if}
 
-				<!-- Unique territories -->
-				{#if overlap.myOnly.length > 0}
-					<div class="overlap-section">
-						<h3>Only You</h3>
-						<div class="unique-tags">
-							{#each overlap.myOnly as t}
-								<span class="unique-tag" title={t.essence}>{t.name}</span>
-							{/each}
+						{#if showUnique}
+							{#if overlap.myOnly.length > 0}
+								<div class="block"><h3>Only you</h3>
+									<div class="tags">{#each overlap.myOnly as t}<span class="tag" title={t.essence}>{t.name}</span>{/each}</div>
+								</div>
+							{/if}
+							{#if overlap.theirOnly.length > 0}
+								<div class="block"><h3>Only @{selectedConnection.other_handle}</h3>
+									<div class="tags">{#each overlap.theirOnly as t}<span class="tag" title={t.essence}>{t.name}</span>{/each}</div>
+								</div>
+							{/if}
+						{/if}
+					{/if}
+
+					<!-- Shared-with management — promoted, not buried -->
+					<div class="block shared-card">
+						<div class="shared-head">
+							<h3>Shared with @{selectedConnection.other_handle}</h3>
+							<button class="btn btn-ghost btn-xs" onclick={() => workspace.openOrFocus('contexts')}>
+								<span class="plus">+</span> Share
+							</button>
 						</div>
-					</div>
-				{/if}
-
-				{#if overlap.theirOnly.length > 0}
-					<div class="overlap-section">
-						<h3>Only @{selectedConnection.other_handle}</h3>
-						<div class="unique-tags">
-							{#each overlap.theirOnly as t}
-								<span class="unique-tag" title={t.essence}>{t.name}</span>
-							{/each}
-						</div>
-					</div>
-				{/if}
-			{/if}
-
-			<!-- What you've shared WITH this connection — manage it here -->
-			<div class="overlap-section shared-mgmt">
-				<h3>Shared with @{selectedConnection.other_handle}</h3>
-				{#if sharedLoading}
-					<div class="loading">Loading…</div>
-				{:else if shared.spaces.length === 0 && shared.contexts.length === 0}
-					<p class="shared-empty">Nothing shared yet. Share a space (Spaces → a space → Members) or a mindscape facet (Sharing) with this connection.</p>
-				{:else}
-					{#if shared.spaces.length > 0}
-						<div class="shared-group">
-							<span class="shared-kind">Spaces</span>
+						{#if sharedLoading}
+							<div class="loading sm">Loading…</div>
+						{:else if shared.spaces.length === 0 && shared.contexts.length === 0}
+							<p class="shared-empty">Nothing shared yet. Grant a space (Spaces → a space → Members) or a mindscape facet (Sharing).</p>
+						{:else}
 							{#each shared.spaces as s (s.id)}
 								<div class="shared-row">
-									<span class="shared-label">{s.name} <span class="shared-role">({s.role === 'contributor' ? 'can add' : 'can view'})</span></span>
-									<button class="btn-revoke" onclick={() => revokeSpaceShare(s.id)}>Revoke</button>
+									<span class="shared-label">{s.name} <span class="shared-role">· {s.role === 'contributor' ? 'can add' : 'can view'}</span></span>
+									<button class="link-revoke" onclick={() => revokeSpaceShare(s.id)}>Revoke</button>
 								</div>
 							{/each}
-						</div>
-					{/if}
-					{#if shared.contexts.length > 0}
-						<div class="shared-group">
-							<span class="shared-kind">Mindscape facets</span>
 							{#each shared.contexts as c (c.id)}
 								<div class="shared-row">
-									<span class="shared-label">{c.name}</span>
-									<button class="btn-revoke" onclick={() => revokeContextGrant(c.id)}>Revoke</button>
+									<span class="shared-label">{c.name} <span class="shared-role">· facet</span></span>
+									<button class="link-revoke" onclick={() => revokeContextGrant(c.id)}>Revoke</button>
 								</div>
 							{/each}
-						</div>
-					{/if}
+						{/if}
+					</div>
 				{/if}
-			</div>
+			</section>
 		</div>
 	{/if}
 
-	{#if error}
-		<div class="toast error">{error}</div>
-	{/if}
-	{#if success}
-		<div class="toast success">{success}</div>
-	{/if}
+	{#if error}<button type="button" class="toast error" onclick={() => error = null}>{error}</button>{/if}
+	{#if success}<div class="toast success">{success}</div>{/if}
 </div>
 
 <style>
-	.connections-page {
-		padding: 2rem;
-		max-width: 700px;
-		margin: 0 auto;
-		height: 100%;
-		overflow-y: auto;
-	}
+	.conn { padding: 1.5rem 2rem; max-width: 1000px; margin: 0 auto; height: 100%; display: flex; flex-direction: column; overflow: hidden; }
 
-	/* Intro */
-	.intro { margin-bottom: 1.25rem; }
-	.eyebrow {
-		font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.16em;
-		text-transform: uppercase; color: var(--color-accent-aurum); margin-bottom: 0.5rem;
-	}
-	.intro-title { font-size: 1.5rem; font-weight: 400; letter-spacing: -0.01em; color: var(--color-text-primary); margin-bottom: 0.5rem; }
-	.intro-lede { font-size: 0.86rem; line-height: 1.6; color: var(--color-text-secondary); max-width: 60ch; }
-
-	/* Shared glass surface — the onboarding/mindscape taste. */
 	.glass {
-		background: var(--glass-card-bg);
-		border: 1px solid var(--glass-border);
-		border-radius: 14px;
-		backdrop-filter: blur(12px) saturate(130%);
-		-webkit-backdrop-filter: blur(12px) saturate(130%);
+		background: var(--glass-card-bg); border: 1px solid var(--glass-border); border-radius: 14px;
+		backdrop-filter: blur(12px) saturate(130%); -webkit-backdrop-filter: blur(12px) saturate(130%);
 	}
 
-	/* How it works */
-	.how { display: flex; flex-direction: column; gap: 0.85rem; padding: 1.1rem 1.25rem; margin-bottom: 1rem; }
-	.how-step { display: flex; align-items: flex-start; gap: 0.75rem; }
-	.how-n {
-		flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
-		width: 1.5rem; height: 1.5rem; border-radius: 50%; font-family: var(--font-mono); font-size: 0.7rem;
-		background: rgba(229, 184, 76, 0.14); color: var(--color-accent-aurum);
-	}
-	.how-body { display: flex; flex-direction: column; gap: 0.15rem; }
-	.how-t { font-size: 0.82rem; font-weight: 600; color: var(--color-text-primary); }
-	.how-d { font-size: 0.76rem; line-height: 1.5; color: var(--color-text-secondary); }
-	.how-d code, .connect-hint code {
-		font-family: var(--font-mono); font-size: 0.92em; color: var(--color-text-primary);
-		background: var(--glass-input-bg); padding: 0.5px 5px; border-radius: 4px;
-	}
+	/* Header */
+	.conn-top { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; flex-shrink: 0; }
+	.title-wrap { display: flex; align-items: baseline; gap: 0.75rem; min-width: 0; }
+	.conn-top h1 { font-size: 1.35rem; font-weight: 400; letter-spacing: -0.01em; color: var(--color-text-primary); }
+	.sub { font-size: 0.78rem; color: var(--color-text-tertiary); }
+	.plus { font-weight: 400; opacity: 0.85; }
 
-	/* Connect form */
-	.connect { padding: 1.1rem 1.25rem; margin-bottom: 2rem; }
-	.connect-label { display: block; font-size: 0.78rem; font-weight: 600; color: var(--color-text-primary); margin-bottom: 0.6rem; }
-	.connect-fields { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
-	.connect-input {
-		padding: 0.5rem 0.75rem;
-		font-family: var(--font-mono);
-		font-size: 0.8rem;
-		background: var(--glass-input-bg);
-		border: 1px solid var(--glass-input-border);
-		border-radius: 8px;
-		color: var(--color-text-primary);
-		outline: none;
-		flex: 1;
-		min-width: 220px;
+	/* Composer */
+	.composer { display: flex; gap: 0.5rem; align-items: center; padding: 0.6rem 0.7rem; margin-bottom: 1rem; flex-shrink: 0; }
+	.composer-input {
+		flex: 1; min-width: 0; padding: 0.5rem 0.75rem; font-family: var(--font-mono); font-size: 0.82rem;
+		background: var(--glass-input-bg); border: 1px solid var(--glass-input-border); border-radius: 8px;
+		color: var(--color-text-primary); outline: none;
 	}
-	.connect-input::placeholder { color: var(--color-text-tertiary); }
-	.connect-message { font-family: var(--font-sans); flex: 1; min-width: 150px; }
-	.connect-input:focus { border-color: var(--color-accent-aurum); }
-	.connect-hint { font-size: 0.7rem; color: var(--color-text-tertiary); margin-top: 0.6rem; line-height: 1.5; }
-	.connect-hint .soon { opacity: 0.7; }
+	.composer-input::placeholder { color: var(--color-text-tertiary); }
+	.composer-input:focus { border-color: var(--color-accent-aurum); }
 
-	.section { margin-bottom: 2rem; }
-	.section-label {
-		font-family: var(--font-mono);
-		font-size: 0.6rem;
-		font-weight: 500;
-		letter-spacing: 0.12em;
-		text-transform: uppercase;
-		color: var(--color-accent-aurum);
-		margin-bottom: 0.75rem;
+	/* Onboarding (empty state) */
+	.onboard { padding: 2rem; max-width: 620px; margin: 1rem auto; }
+	.onboard-title { font-size: 1.4rem; font-weight: 400; color: var(--color-text-primary); margin-bottom: 0.6rem; }
+	.onboard-lede { font-size: 0.88rem; line-height: 1.6; color: var(--color-text-secondary); margin-bottom: 1.5rem; }
+	.steps { display: flex; flex-direction: column; gap: 0.85rem; margin-bottom: 1.5rem; }
+	.step { display: flex; align-items: flex-start; gap: 0.75rem; }
+	.step-n {
+		flex-shrink: 0; width: 1.4rem; height: 1.4rem; border-radius: 50%; display: inline-flex; align-items: center;
+		justify-content: center; font-family: var(--font-mono); font-size: 0.7rem;
+		background: rgba(var(--color-accent-aurum-rgb), 0.14); color: var(--color-accent-aurum);
 	}
+	.step-t { font-size: 0.82rem; line-height: 1.5; color: var(--color-text-secondary); }
+	.onboard-composer { padding: 0; border: none; background: none; backdrop-filter: none; -webkit-backdrop-filter: none; margin: 0; }
+	code { font-family: var(--font-mono); font-size: 0.92em; color: var(--color-text-primary); background: var(--glass-input-bg); padding: 0.5px 5px; border-radius: 4px; }
 
-	.request-card {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 1rem;
-		padding: 1rem;
-		background: var(--color-surface);
-		border: 1px solid var(--glass-border);
-		border-radius: 12px;
-		margin-bottom: 0.5rem;
-	}
-	.request-info { display: flex; flex-direction: column; gap: 0.2rem; flex: 1; min-width: 0; }
-	.request-identity { display: flex; align-items: center; gap: 0.75rem; }
-	.conn-avatar {
-		width: 36px;
-		height: 36px;
-		border-radius: 50%;
-		object-fit: cover;
-		border: 1.5px solid var(--color-border);
-		flex-shrink: 0;
-	}
-	.conn-avatar-placeholder {
-		width: 36px;
-		height: 36px;
-		border-radius: 50%;
-		background: var(--color-elevated);
-		border: 1.5px solid var(--color-border);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		font-size: 0.75rem;
-		color: var(--color-text-tertiary);
-		flex-shrink: 0;
-	}
-	.request-handle { font-weight: 600; font-size: 0.9rem; color: var(--color-text-emphasis); }
-	.request-sig { font-size: 0.78rem; color: var(--color-text-secondary); }
-	.request-meta { font-size: 0.7rem; color: var(--color-text-tertiary); }
-	.request-actions { display: flex; gap: 0.4rem; flex-shrink: 0; }
-	.sent-status {
-		font-size: 0.68rem;
-		font-family: var(--font-mono);
-		color: var(--color-text-tertiary);
-		padding: 0.2rem 0.5rem;
-		background: var(--color-elevated);
-		border-radius: 4px;
-		flex-shrink: 0;
-	}
-	.sent-card { opacity: 0.7; }
+	/* Two-pane */
+	.panes { display: grid; grid-template-columns: 280px 1fr; gap: 1rem; flex: 1; min-height: 0; }
+	.list { display: flex; flex-direction: column; gap: 0.4rem; overflow-y: auto; padding-right: 0.25rem; }
+	.detail { overflow-y: auto; padding: 0 0.25rem; }
 
-	.conn-card {
-		display: block;
-		width: 100%;
-		text-align: left;
-		padding: 0.85rem 1rem;
-		background: var(--color-surface);
-		border: 1px solid var(--glass-border);
-		border-radius: 12px;
-		margin-bottom: 0.4rem;
-		cursor: pointer;
-		transition: all 0.15s;
-		font-family: inherit;
-		font-size: inherit;
-		color: inherit;
-	}
-	.conn-card:hover { border-color: var(--color-accent-aurum); }
-	.conn-card.selected { border-color: var(--color-accent-aurum); box-shadow: 0 0 12px rgba(229, 184, 76, 0.1); }
+	/* List rows */
+	.row { background: var(--color-surface); border: 1px solid var(--glass-border); border-radius: 12px; padding: 0.7rem 0.8rem; text-align: left; width: 100%; }
+	.who { display: flex; align-items: center; gap: 0.6rem; }
+	.who-text { display: flex; flex-direction: column; min-width: 0; gap: 0.05rem; }
+	.avatar { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; border: 1.5px solid var(--color-border); flex-shrink: 0; }
+	.avatar.lg { width: 44px; height: 44px; }
+	.avatar.ph { background: var(--color-elevated); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; color: var(--color-text-tertiary); }
+	.avatar.ph.muted { font-size: 0.9rem; }
+	.handle { font-weight: 600; font-size: 0.86rem; color: var(--color-text-emphasis); }
+	.handle.muted, .muted { color: var(--color-text-tertiary); }
+	.meta { font-size: 0.68rem; color: var(--color-text-tertiary); }
+	.score { margin-left: auto; font-family: var(--font-mono); font-size: 0.74rem; color: var(--color-text-secondary); }
+	.row-sig { font-size: 0.74rem; color: var(--color-text-secondary); margin: 0.45rem 0 0; }
 
-	.conn-main { display: flex; align-items: center; gap: 0.75rem; }
-	.conn-handle { font-weight: 600; font-size: 0.88rem; color: var(--color-text-emphasis); }
-	.conn-shape { font-size: 0.7rem; font-weight: 500; }
-	.conn-score { font-family: var(--font-mono); font-size: 0.7rem; color: var(--color-text-tertiary); margin-left: auto; }
-	.conn-sig { font-size: 0.75rem; color: var(--color-text-tertiary); margin-top: 0.25rem; }
+	.request { border-color: rgba(var(--color-accent-aurum-rgb), 0.35); background: rgba(var(--color-accent-aurum-rgb), 0.06); }
+	.row-actions { display: flex; gap: 0.4rem; margin-top: 0.55rem; }
+	.row-actions .btn { flex: 1; }
 
-	.overlap-panel {
-		margin-top: 1.5rem;
-		padding: 1.5rem;
-		background: var(--color-surface);
-		border: 1px solid var(--glass-border);
-		border-radius: 14px;
-	}
-	.shared-mgmt { border-top: 1px solid var(--color-border); margin-top: 1rem; padding-top: 1rem; }
-	.shared-empty { font-size: 0.8rem; color: var(--color-text-tertiary); }
-	.shared-group { margin-bottom: 0.75rem; }
-	.shared-kind { display: block; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--color-text-tertiary); margin-bottom: 0.35rem; }
+	.conn-row { cursor: pointer; transition: border-color 0.15s, background 0.15s; font-family: inherit; color: inherit; }
+	.conn-row:hover { border-color: var(--color-accent-aurum); }
+	.conn-row.selected { border-color: var(--color-accent-aurum); background: rgba(var(--color-accent-aurum-rgb), 0.06); }
+
+	.sent { opacity: 0.92; }
+	.link-revoke { margin-left: auto; font-size: 0.7rem; color: var(--color-text-tertiary); background: none; border: none; cursor: pointer; flex-shrink: 0; }
+	.link-revoke:hover { color: var(--color-accent-coral); }
+
+	/* Detail pane */
+	.detail-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--color-text-tertiary); font-size: 0.85rem; text-align: center; padding: 2rem; }
+	.detail-back { display: none; background: none; border: none; color: var(--color-text-tertiary); font-size: 0.78rem; cursor: pointer; margin-bottom: 0.75rem; padding: 0; }
+	.detail-hero { display: flex; align-items: flex-start; gap: 0.75rem; margin-bottom: 1rem; }
+	.hero-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
+	.hero-handle { font-size: 1.05rem; font-weight: 600; color: var(--color-text-emphasis); }
+	.hero-sig { font-size: 0.8rem; color: var(--color-text-secondary); font-style: italic; }
+	.menu-wrap { position: relative; flex-shrink: 0; }
+	.icon-btn { background: none; border: 1px solid var(--color-border); border-radius: 6px; color: var(--color-text-tertiary); cursor: pointer; padding: 0.2rem 0.5rem; font-size: 0.9rem; line-height: 1; }
+	.icon-btn:hover { color: var(--color-text-secondary); border-color: var(--color-text-tertiary); }
+	.menu { position: absolute; right: 0; top: 110%; background: var(--color-elevated); border: 1px solid var(--glass-border); border-radius: 8px; padding: 0.25rem; z-index: 20; min-width: 130px; }
+	.menu-item { display: block; width: 100%; text-align: left; background: none; border: none; padding: 0.4rem 0.6rem; font-size: 0.78rem; border-radius: 6px; cursor: pointer; color: var(--color-text-secondary); }
+	.menu-item:hover { background: var(--color-surface); }
+	.menu-item.danger { color: var(--color-accent-coral); }
+
+	.summary-row { display: flex; align-items: center; gap: 0.7rem; padding: 0.85rem 0; border-top: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); margin-bottom: 1.25rem; }
+	.score-hero { font-size: 1.9rem; font-weight: 700; font-family: var(--font-mono); color: var(--color-accent-aurum); line-height: 1; }
+	.score-na { font-size: 0.82rem; color: var(--color-text-tertiary); }
+	.shape-chip { font-size: 0.72rem; padding: 0.15rem 0.6rem; border: 1px solid; border-radius: 999px; }
+	.summary-count { margin-left: auto; font-size: 0.74rem; color: var(--color-text-tertiary); }
+
+	.block { margin-bottom: 1.4rem; }
+	.block h3 { font-family: var(--font-mono); font-size: 0.62rem; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; color: var(--color-text-tertiary); margin-bottom: 0.7rem; }
+
+	.terr { margin-bottom: 0.7rem; }
+	.terr-name { font-size: 0.82rem; color: var(--color-text-primary); margin-bottom: 0.3rem; }
+	.bars { display: flex; flex-direction: column; gap: 0.2rem; }
+	.bar-track { height: 5px; background: var(--color-elevated); border-radius: 3px; overflow: hidden; }
+	.bar { height: 100%; border-radius: 3px; }
+	.bar.you { background: var(--color-accent-aurum); }
+	.bar.them { background: var(--color-accent); }
+	.legend { display: flex; align-items: center; gap: 1rem; margin-top: 0.6rem; font-size: 0.7rem; color: var(--color-text-tertiary); }
+	.legend .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 0.35rem; }
+	.legend .sw.you { background: var(--color-accent-aurum); }
+	.legend .sw.them { background: var(--color-accent); }
+	.legend-toggle { margin-left: auto; background: none; border: none; color: var(--color-accent); font-size: 0.7rem; cursor: pointer; }
+
+	.tags { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+	.tag { font-size: 0.72rem; padding: 0.2rem 0.5rem; background: var(--color-elevated); border: 1px solid var(--color-border); border-radius: 6px; color: var(--color-text-secondary); }
+
+	.shared-card { border-top: 1px solid var(--color-border); padding-top: 1.1rem; }
+	.shared-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.6rem; }
+	.shared-head h3 { margin-bottom: 0; }
+	.shared-empty { font-size: 0.78rem; color: var(--color-text-tertiary); }
 	.shared-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.35rem 0; }
-	.shared-label { font-size: 0.85rem; color: var(--color-text-primary); }
-	.shared-role { color: var(--color-text-tertiary); font-size: 0.75rem; }
-	.btn-revoke { font-size: 0.7rem; color: var(--color-text-tertiary); background: none; border: none; cursor: pointer; flex-shrink: 0; }
-	.btn-revoke:hover { color: var(--color-coral, #e5736a); }
-	.overlap-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		margin-bottom: 1.25rem;
-	}
-	.overlap-header h2 { font-size: 1.1rem; font-weight: 600; color: var(--color-text-emphasis); }
+	.shared-label { font-size: 0.82rem; color: var(--color-text-primary); }
+	.shared-role { color: var(--color-text-tertiary); font-size: 0.74rem; }
 
-	.overlap-summary {
-		display: flex;
-		align-items: baseline;
-		gap: 1rem;
-		margin-bottom: 1.5rem;
-		padding-bottom: 1rem;
-		border-bottom: 1px solid var(--color-border);
-	}
-	.overlap-score { font-size: 2rem; font-weight: 700; color: var(--color-accent-aurum); font-family: var(--font-mono); }
-	.overlap-score-na { font-size: 0.82rem; color: var(--color-text-tertiary); }
-	.overlap-shape { font-size: 0.85rem; font-weight: 500; }
-
-	.overlap-section { margin-bottom: 1.5rem; }
-	.overlap-section h3 {
-		font-size: 0.65rem;
-		font-family: var(--font-mono);
-		font-weight: 500;
-		letter-spacing: 0.1em;
-		text-transform: uppercase;
-		color: var(--color-text-tertiary);
-		margin-bottom: 0.6rem;
-	}
-
-	.shared-territory {
-		padding: 0.6rem 0;
-		border-bottom: 1px solid rgba(255,255,255,0.04);
-	}
-	.shared-territory:last-child { border-bottom: none; }
-	.shared-name { font-size: 0.82rem; font-weight: 500; color: var(--color-text-primary); margin-bottom: 0.4rem; }
-
-	.depth-bars { display: flex; flex-direction: column; gap: 0.2rem; }
-	.depth-row { display: flex; align-items: center; gap: 0.5rem; }
-	.depth-label { width: 35px; font-size: 0.65rem; color: var(--color-text-tertiary); }
-	.depth-track { flex: 1; height: 4px; background: var(--color-elevated); border-radius: 2px; overflow: hidden; }
-	.depth-fill { height: 100%; background: var(--color-accent-aurum); border-radius: 2px; }
-	.depth-fill.their { background: var(--color-accent); }
-
-	.unique-tags { display: flex; flex-wrap: wrap; gap: 0.35rem; }
-	.unique-tag {
-		font-size: 0.72rem;
-		padding: 0.2rem 0.5rem;
-		background: var(--color-elevated);
-		border: 1px solid var(--color-border);
-		border-radius: 6px;
-		color: var(--color-text-secondary);
-	}
-
-	.loading { text-align: center; padding: 2rem; color: var(--color-text-tertiary); font-size: 0.82rem; }
-	.empty { text-align: center; padding: 4rem 2rem; }
-	.empty p { color: var(--color-text-secondary); font-size: 0.9rem; }
-	.empty-sub { font-size: 0.78rem; color: var(--color-text-tertiary); margin-top: 0.25rem; }
-
-	.btn-sm {
-		padding: 0.35rem 0.75rem;
-		font-size: 0.75rem;
-		font-family: var(--font-sans);
-		border-radius: 6px;
-		cursor: pointer;
-		border: none;
-		transition: all 0.15s;
-	}
+	/* Buttons */
+	.btn { padding: 0.4rem 0.8rem; font-size: 0.78rem; font-family: var(--font-sans); border-radius: 7px; cursor: pointer; border: none; transition: all 0.15s; white-space: nowrap; }
+	.btn-xs { padding: 0.3rem 0.6rem; font-size: 0.72rem; }
 	.btn-primary { background: var(--color-accent-aurum); color: var(--color-bg); font-weight: 500; }
 	.btn-primary:hover { opacity: 0.9; }
 	.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-	.btn-ghost { background: transparent; color: var(--color-text-tertiary); border: 1px solid var(--color-border); }
-	.btn-ghost:hover { color: var(--color-text-secondary); }
-	.btn-danger { color: var(--color-accent-coral); border-color: rgba(248, 113, 113, 0.3); }
-	.btn-danger:hover { color: #f87171; border-color: #f87171; }
+	.btn-ghost { background: transparent; color: var(--color-text-secondary); border: 1px solid var(--color-border); }
+	.btn-ghost:hover { color: var(--color-text-primary); border-color: var(--color-text-tertiary); }
 
-	.toast {
-		position: fixed;
-		bottom: 1.5rem;
-		left: 50%;
-		transform: translateX(-50%);
-		padding: 0.5rem 1.25rem;
-		border-radius: 8px;
-		font-size: 0.78rem;
-		z-index: 100;
+	.loading { text-align: center; padding: 2rem; color: var(--color-text-tertiary); font-size: 0.82rem; }
+	.loading.sm { padding: 0.75rem; text-align: left; }
+
+	.toast { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); padding: 0.5rem 1.25rem; border-radius: 8px; font-size: 0.78rem; z-index: 100; border: none; font-family: var(--font-sans); }
+	.toast.error { background: rgba(var(--color-accent-coral-rgb), 0.15); border: 1px solid rgba(var(--color-accent-coral-rgb), 0.3); color: var(--color-accent-coral); cursor: pointer; }
+	.toast.success { background: rgba(var(--color-accent-jade-rgb), 0.15); border: 1px solid rgba(var(--color-accent-jade-rgb), 0.3); color: var(--color-accent-jade); }
+
+	/* Narrow: stack to one column; show the selected detail with a back button. */
+	@media (max-width: 720px) {
+		.panes { grid-template-columns: 1fr; }
+		.detail-back { display: block; }
 	}
-	.toast.error { background: rgba(248, 113, 113, 0.15); border: 1px solid rgba(248, 113, 113, 0.3); color: #f87171; }
-	.toast.success { background: rgba(74, 222, 128, 0.15); border: 1px solid rgba(74, 222, 128, 0.3); color: #4ade80; }
 </style>

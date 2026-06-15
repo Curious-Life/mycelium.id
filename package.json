@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Mycelium V1 \u2014 self-hosted single-user MCP cognitive vault.",
+  "description": "Mycelium V1 — self-hosted single-user MCP cognitive vault.",
   "license": "AGPL-3.0",
   "engines": {
     "node": ">=22"
@@ -72,6 +72,8 @@
     "verify:behavioral": "node scripts/verify-behavioral.mjs",
     "verify:mindfiles": "node scripts/verify-mindfiles.mjs",
     "verify:rest": "node scripts/verify-rest.mjs",
+    "verify:memory-bridge": "node scripts/verify-memory-bridge.mjs",
+    "verify:memory-adapters": "node scripts/verify-memory-adapters.mjs",
     "verify:search": "node scripts/verify-search.mjs",
     "verify:search-rehydrate": "node scripts/verify-search-rehydrate.mjs",
     "verify:embed": "node scripts/verify-embed.mjs",
@@ -161,7 +163,9 @@
     "verify:federation": "node scripts/verify-federation.mjs",
     "verify:spaces": "node scripts/verify-spaces.mjs",
     "verify:obsidian-images": "node scripts/verify-obsidian-images.mjs",
-    "verify:full-export-import": "node scripts/verify-full-export-import.mjs"
+    "verify:full-export-import": "node scripts/verify-full-export-import.mjs",
+    "verify:agent-capture": "node scripts/verify-agent-capture.mjs",
+    "verify:claude-sync": "node scripts/verify-claude-sync.mjs"
   },
   "dependencies": {
     "@better-auth/passkey": "^1.6.14",

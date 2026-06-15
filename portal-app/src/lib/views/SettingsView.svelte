@@ -5,11 +5,13 @@
 	import { auth } from '$lib/stores/auth';
 	import { api } from '$lib/api';
 	import { preparePrfOptions } from '$lib/passkey-prf';
-	import ConnectionsChecklist from '$lib/components/ConnectionsChecklist.svelte';
+	import { browser } from '$app/environment';
+	import ProfileView from '$lib/views/ProfileView.svelte';
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
 	import ChannelsSection from '$lib/components/settings/ChannelsSection.svelte';
 	import AISettings from '$lib/components/settings/AISettings.svelte';
 	import AIAccessSection from '$lib/components/settings/AIAccessSection.svelte';
+	import AgentCaptureSection from '$lib/components/settings/AgentCaptureSection.svelte';
 	import ManagedConnectSection from '$lib/components/settings/ManagedConnectSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 	import ConnectYourAISection from '$lib/components/settings/ConnectYourAISection.svelte';
@@ -110,18 +112,76 @@
 	let saving = $state(false);
 	let saved = $state(false);
 
-	// Settings is grouped into categories (Apple-style) instead of one long scroll;
-	// the nav switches which group is shown. Order matches the markup top-to-bottom.
-	const TABS = [
-		{ id: 'connection', label: 'Connection' },
-		{ id: 'intelligence', label: 'Intelligence' },
-		{ id: 'integrations', label: 'Integrations' },
-		{ id: 'billing', label: 'Billing' },
-		{ id: 'general', label: 'General' },
-		{ id: 'security', label: 'Security' },
-		{ id: 'account', label: 'Account' },
-	] as const;
-	let activeTab = $state<(typeof TABS)[number]['id']>('connection');
+	// One hub, two panes. The left rail lists categories (grouped); the right pane
+	// shows one at a time. The active pane rides in the tab params (mirrored to
+	// /settings?pane=…) so deep-links and back/forward work — same pattern as
+	// StreamsView's facet. Profile is folded in as the first pane (one home for
+	// "you"); it self-loads, so it renders outside the settings `loading` gate.
+	let { pane = 'profile', setParams }: {
+		pane?: string;
+		setParams?: (patch: Record<string, unknown>) => void;
+	} = $props();
+
+	interface PaneDef { id: string; label: string; icon: string; desc: string; managedOnly?: boolean }
+	const GROUPS: { title: string; items: PaneDef[] }[] = [
+		{ title: '', items: [
+			{ id: 'profile', label: 'Profile', icon: 'user', desc: 'Your public identity and how you think' },
+		] },
+		{ title: 'Intelligence & access', items: [
+			{ id: 'intelligence', label: 'Intelligence', icon: 'sparkles', desc: 'The model that powers Mycelium' },
+			{ id: 'connections', label: 'Connections', icon: 'plug', desc: 'Use Mycelium from your other apps and devices' },
+			{ id: 'channels', label: 'Channels', icon: 'messages', desc: 'Where your agent may listen and reply' },
+			{ id: 'integrations', label: 'Integrations', icon: 'puzzle', desc: 'Connect third-party tools with your own keys' },
+		] },
+		{ title: 'Your vault', items: [
+			{ id: 'data', label: 'Data', icon: 'database', desc: 'Move your vault in and out — it’s yours' },
+			{ id: 'security', label: 'Security', icon: 'shield', desc: 'Keys, locks, and recovery' },
+		] },
+		{ title: 'App', items: [
+			{ id: 'general', label: 'General', icon: 'sliders', desc: 'Appearance and region' },
+			{ id: 'billing', label: 'Billing', icon: 'card', desc: 'Your subscription', managedOnly: true },
+		] },
+		{ title: '', items: [
+			{ id: 'account', label: 'Account', icon: 'id', desc: 'Sign-in and account lifecycle' },
+		] },
+	];
+	const allPanes = GROUPS.flatMap((g) => g.items);
+
+	// Managed-hosted detection: Billing only exists for managed subscriptions, so
+	// it is auto-hidden on a local single-user vault (where billing.managed is
+	// false/absent). Other surfaces (relay handle, remote access) apply to
+	// self-hosted too and stay visible.
+	const isManaged = $derived(!!billing?.managed);
+
+	// Resolve the active pane defensively: unknown ids (or billing when not
+	// managed) fall back to Profile so a stale deep-link never shows a blank pane.
+	const activePane = $derived.by(() => {
+		const def = allPanes.find((p) => p.id === pane);
+		if (!def) return 'profile';
+		if (def.managedOnly && !isManaged) return 'profile';
+		return def.id;
+	});
+	const activeDef = $derived(allPanes.find((p) => p.id === activePane) ?? allPanes[0]);
+
+	let railQuery = $state('');
+
+	// Mobile = list → detail drill. On a phone the rail is the whole screen until
+	// you pick a pane; a back button returns to the list.
+	let isMobile = $state(false);
+	let mobileDetail = $state(false);
+	$effect(() => {
+		if (!browser) return;
+		const mq = window.matchMedia('(max-width: 767px)');
+		isMobile = mq.matches;
+		const handler = (e: MediaQueryListEvent) => { isMobile = e.matches; };
+		mq.addEventListener('change', handler);
+		return () => mq.removeEventListener('change', handler);
+	});
+
+	function selectPane(id: string) {
+		setParams?.({ pane: id });
+		if (isMobile) mobileDetail = true;
+	}
 	let exporting = $state(false);
 	let exportError = $state<string | null>(null);
 	let exportSuccess = $state<string | null>(null);
@@ -386,13 +446,9 @@
 	}
 
 	onMount(async () => {
-		// Deep-link: ?tab=<id> preselects a tab (e.g. "Connect AI"/"Spawn
-		// intelligence" → /settings?tab=intelligence).
-		try {
-			const t = new URLSearchParams(window.location.search).get('tab');
-			if (t && TABS.some((x) => x.id === t)) activeTab = t as typeof activeTab;
-		} catch { /* no-op */ }
-
+		// Deep-link to a pane (?pane=…, with legacy ?tab=… aliased) is resolved by
+		// the /settings route → tab params → the `pane` prop, so nothing to parse
+		// here. We just load the data the panes need.
 		const [settingsRes, statsRes, billingRes] = await Promise.all([
 			api('/portal/settings').catch(() => null),
 			api('/portal/stats').catch(() => null),
@@ -1009,56 +1065,134 @@
 	<title>Settings - Mycelium</title>
 </svelte:head>
 
-<div class="h-full overflow-y-auto">
-<div class="max-w-2xl mx-auto px-8 py-8">
-	<h1 class="text-xl font-medium text-[var(--color-text-emphasis)] mb-2">Settings</h1>
-	<p class="text-sm text-[var(--color-text-secondary)] mb-6">Your Mycelium instance at a glance</p>
+{#snippet railIcon(name: string)}
+	{#if name === 'user'}
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.1a7.5 7.5 0 0 1 15 0A17.9 17.9 0 0 1 12 21.75c-2.7 0-5.2-.6-7.5-1.65Z"/></svg>
+	{:else if name === 'sparkles'}
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.8 9.8 12 3l2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12zM18 4.5l.6 1.9 1.9.6-1.9.6L18 9.5l-.6-1.9-1.9-.6 1.9-.6z"/></svg>
+	{:else if name === 'plug'}
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9 3v5m6-5v5M6 8h12v3a6 6 0 0 1-12 0zm6 9v4"/></svg>
+	{:else if name === 'messages'}
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m8.25 1.5a2.25 2.25 0 0 1-2.25 2.25H8.7L4.5 19.5V6.75A2.25 2.25 0 0 1 6.75 4.5h11.25a2.25 2.25 0 0 1 2.25 2.25z"/></svg>
+	{:else if name === 'puzzle'}
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M14 6a2 2 0 1 0-4 0H6v4a2 2 0 1 1 0 4v4h4a2 2 0 1 1 4 0h4v-4a2 2 0 1 0 0-4V6z"/></svg>
+	{:else if name === 'database'}
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.07-3.69 3.75-8.25 3.75s-8.25-1.68-8.25-3.75 3.69-3.75 8.25-3.75 8.25 1.68 8.25 3.75zM3.75 6.375v11.25c0 2.07 3.69 3.75 8.25 3.75s8.25-1.68 8.25-3.75V6.375M3.75 12c0 2.07 3.69 3.75 8.25 3.75s8.25-1.68 8.25-3.75"/></svg>
+	{:else if name === 'shield'}
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3 4.5 6v5.5c0 4.5 3.2 7.4 7.5 8.8 4.3-1.4 7.5-4.3 7.5-8.8V6zm0 6.75v3.75"/></svg>
+	{:else if name === 'sliders'}
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 6h9m-9 0a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm-6 0h3m1.5 6h9m-12 0h0m4.5 6h9m-12 0h0m4.5 0a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm6-6a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/></svg>
+	{:else if name === 'card'}
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15A2.25 2.25 0 0 0 2.25 6.75v10.5A2.25 2.25 0 0 0 4.5 19.5z"/></svg>
+	{:else if name === 'id'}
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15 9h3.75M15 12h3.75M15 15h3.75M4.5 19.5h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15A2.25 2.25 0 0 0 2.25 6.75v10.5A2.25 2.25 0 0 0 4.5 19.5zm6-10.125a1.875 1.875 0 1 1-3.75 0 1.875 1.875 0 0 1 3.75 0zm1.294 6.336a5.5 5.5 0 0 0-6.338 0 .53.53 0 0 0-.21.434c0 .29.235.525.526.525h5.706c.29 0 .526-.234.526-.525a.53.53 0 0 0-.21-.434z"/></svg>
+	{/if}
+{/snippet}
 
-	<!-- Category nav — groups settings into panes (Apple-style) instead of one long scroll. -->
-	<nav class="sticky top-0 z-10 -mx-8 px-8 py-3 mb-6 bg-[var(--color-bg)]/85 backdrop-blur border-b border-[var(--color-border)]">
-		<div class="flex flex-wrap gap-1.5">
-			{#each TABS as tab}
-				<button
-					onclick={() => (activeTab = tab.id)}
-					class="text-xs px-3 py-1.5 rounded-full transition-colors cursor-pointer {activeTab === tab.id
-						? 'bg-[var(--color-accent)] text-[var(--color-bg)] font-medium'
-						: 'text-[var(--color-text-secondary)] hover:bg-[var(--color-border)]/40'}"
-				>{tab.label}</button>
-			{/each}
+<div class="settings-hub">
+	<!-- Left rail — identity chip, search, grouped categories. On a phone the
+	     rail IS the screen until a pane is picked (mobile drill). -->
+	<aside class="rail" class:drilled={isMobile && mobileDetail}>
+		{#if $auth.user}
+			<button class="rail-id" onclick={() => selectPane('profile')} aria-label="Open your profile">
+				<span class="rail-id-avatar">{($auth.user.displayName || '?')[0].toUpperCase()}</span>
+				<span class="rail-id-name">{$auth.user.displayName || 'User'}</span>
+			</button>
+		{/if}
+
+		<div class="rail-search">
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m21 21-4.35-4.35M17 10.5a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0z"/></svg>
+			<input class="rail-search-input" placeholder="Search settings" bind:value={railQuery} aria-label="Search settings" />
 		</div>
-	</nav>
 
-	{#if loading}
-		<div class="text-[var(--color-text-tertiary)] text-sm animate-pulse">Loading...</div>
-	{:else}
-		<div class="space-y-6">
+		<nav class="rail-nav">
+			{#each GROUPS as g}
+				{@const items = g.items.filter((p) => (!p.managedOnly || isManaged) && (!railQuery || p.label.toLowerCase().includes(railQuery.toLowerCase())))}
+				{#if items.length}
+					{#if g.title && !railQuery}<div class="rail-group">{g.title}</div>{/if}
+					{#each items as p}
+						<button class="rail-item" class:on={activePane === p.id} onclick={() => selectPane(p.id)} aria-current={activePane === p.id ? 'page' : undefined}>
+							<span class="rail-ic">{@render railIcon(p.icon)}</span>
+							<span>{p.label}</span>
+						</button>
+					{/each}
+				{/if}
+			{/each}
+		</nav>
+	</aside>
 
-			{#if activeTab === 'connection'}
-			<!-- Get your address — claim a free <handle>.mycelium.id over the managed relay (handle availability + one-click connect). Placed above RemoteAccessSection: it's the recommended path and its copy refers to the operator-password field "below". -->
+	<!-- Detail — one pane at a time. -->
+	<section class="detail" class:drilled={isMobile && !mobileDetail}>
+		{#if isMobile}
+			<button class="mobile-back" onclick={() => (mobileDetail = false)}>
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5"/></svg>
+				Settings
+			</button>
+		{/if}
+
+		{#if activePane === 'profile'}
+			<!-- Profile is self-loading (its own /portal/profile + /stats fetch), so
+			     it lives outside the settings `loading` gate and fills the pane. -->
+			<div class="profile-host"><ProfileView /></div>
+		{:else}
+			<div class="detail-body">
+				<header class="pane-head">
+					<h1 class="pane-title">{activeDef.label}</h1>
+					<p class="pane-desc">{activeDef.desc}</p>
+				</header>
+
+				{#if loading}
+					<div class="text-[var(--color-text-tertiary)] text-sm animate-pulse">Loading…</div>
+				{:else}
+				<div class="space-y-6">
+
+			{#if activePane === 'connections'}
+			<!-- Mental-model intro: two doors (memory + model), two reaches (local /
+			     remote). Grounds the cards below so they don't read as a flat pile.
+			     The stale onboarding checklist (ConnectionsChecklist) was removed here
+			     2026-06-15 — it duplicated the dedicated onboarding flow and the
+			     Connect-an-app cards. Local-first order: most clients connect on this
+			     Mac; remote is the secondary path. -->
+			<div class="conn-intro">
+				<p>
+					Mycelium exposes two doors to any AI app — <span class="door">Memory</span> over MCP and
+					<span class="door">Model</span> over an OpenAI-compatible gateway. Use them on
+					<strong>this Mac</strong> right now, or reach them <strong>over the internet</strong> with an address.
+				</p>
+			</div>
+
+			<div class="conn-group">Connect an app</div>
+			<!-- Pick your AI app → copy-paste recipe (memory + optional model door). -->
+			<HarnessPickerSection />
+			<!-- The raw endpoints + auth (bearer / OAuth) the recipes above point to. -->
+			<ConnectYourAISection />
+			<!-- Consent to auto-capture conversations from the connected agents above
+			     (Claude Code / gateway / opencode / openclaw / hermes) into the vault.
+			     Default OFF — captures can contain secrets. Home here (not Channels):
+			     it governs the CONNECTED agents you just set up, not the in-app chat. -->
+			<AgentCaptureSection />
+
+			<div class="conn-group">Reach it over the internet</div>
+			<!-- Easiest: claim a handle.mycelium.id over the managed relay. Placed
+			     before RemoteAccessSection: its copy refers to the operator password
+			     field "below" (in Remote Access). -->
 			<ManagedConnectSection />
-
-			<!-- Remote Access — connect Claude / any MCP client over the internet (operator password, status, connector URL) -->
+			<!-- Bring your own domain / relay (free) — operator password, public URL,
+			     enable toggle, own-relay advanced. -->
 			<RemoteAccessSection />
-
 			{/if}
 
-			{#if activeTab === 'intelligence'}
+			{#if activePane === 'intelligence'}
 			<!-- The model that powers Mycelium — active-model hero + Local/Cloud lanes -->
 			<AISettings />
 
-			<!-- Use Mycelium in another app — Mycelium as the memory (MCP) +
-			     model (gateway) for an external AI app. Folded here from the old
-			     Connection tab so every AI surface lives on one page. -->
-			<HarnessPickerSection />
-			<ConnectYourAISection />
+			<!-- Voice / TTS — provider config + per-voice preview -->
+			<VoiceSection />
+			{/if}
 
-			<!-- Per-agent management moved to /agents on 2026-05-06.
-			     Settings is operator-account only now. -->
-
-			<!-- Connections -->
-			<section class="card p-5">
-				<ConnectionsChecklist compact />
-			</section>
+			{#if activePane === 'channels'}
+			<!-- Channels — Telegram + Discord bot token/owner, two-way assistant key, authorized groups -->
+			<ChannelsSection />
 
 			<!-- Channel Authority — every channel the personal-agent may post to,
 			     plus per-channel + global autonomous flags. Backed by
@@ -1147,15 +1281,9 @@
 
 			<!-- AI Access — which vault areas the in-app chat agent may use -->
 			<AIAccessSection />
-
-			<!-- Voice / TTS — provider config + per-voice preview -->
-			<VoiceSection />
-
-			<!-- Channels — Telegram + Discord bot token/owner, two-way assistant key, authorized groups -->
-			<ChannelsSection />
 			{/if}
 
-			{#if activeTab === 'integrations'}
+			{#if activePane === 'integrations'}
 			<!-- External Integrations — user-supplied API credentials -->
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">External Integrations</h2>
@@ -1239,7 +1367,7 @@
 
 			{/if}
 
-			{#if activeTab === 'billing'}
+			{#if activePane === 'billing'}
 			<!-- Billing -->
 			{#if billing?.managed && billing.subscription}
 				<section class="card p-5">
@@ -1332,7 +1460,7 @@
 
 			{/if}
 
-			{#if activeTab === 'general'}
+			{#if activePane === 'general'}
 			<!-- Appearance -->
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Appearance</h2>
@@ -1364,10 +1492,15 @@
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Region</h2>
 				<div>
-					<p class="text-sm text-[var(--color-text-primary)] mb-1">Timezone</p>
-					<p class="text-xs text-[var(--color-text-tertiary)] mb-3">Used for message timestamps and scheduled events</p>
+					<div class="flex items-center justify-between mb-1">
+						<p class="text-sm text-[var(--color-text-primary)]">Timezone</p>
+						{#if saved}<span class="text-xs text-jade animate-fade-in">Saved</span>{/if}
+					</div>
+					<p class="text-xs text-[var(--color-text-tertiary)] mb-3">Used for message timestamps and scheduled events · saves instantly</p>
 					<select
 						bind:value={settings.timezone}
+						onchange={saveSettings}
+						disabled={saving}
 						class="input w-full text-sm"
 					>
 						{#each timezones as tz}
@@ -1376,10 +1509,12 @@
 					</select>
 				</div>
 			</section>
+			{/if}
 
-			<!-- Data -->
+			{#if activePane === 'data'}
+			<!-- Data — export / restore the whole vault. The encrypted .myvault
+			     backup lives under Security, alongside the recovery key it pairs with. -->
 			<section class="card p-5">
-				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Data</h2>
 				<div class="flex items-center justify-between">
 					<div>
 						<p class="text-sm text-[var(--color-text-primary)]">Export All Data</p>
@@ -1491,7 +1626,7 @@
 
 			{/if}
 
-			{#if activeTab === 'security'}
+			{#if activePane === 'security'}
 			<!-- Recovery Key (V1 local) — reveal to back up the single key again -->
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Recovery Key</h2>
@@ -1839,7 +1974,7 @@
 
 			{/if}
 
-			{#if activeTab === 'account'}
+			{#if activePane === 'account'}
 			<!-- Account -->
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Account</h2>
@@ -2035,18 +2170,11 @@
 			</section>
 
 			{/if}
-			<!-- Save -->
-			<div class="flex items-center gap-3">
-				<button onclick={saveSettings} disabled={saving} class="btn btn-primary">
-					{saving ? 'Saving...' : 'Save Settings'}
-				</button>
-				{#if saved}
-					<span class="text-xs text-jade animate-fade-in">Saved</span>
+				</div>
 				{/if}
 			</div>
-		</div>
-	{/if}
-</div>
+		{/if}
+	</section>
 </div>
 
 <style>
@@ -2058,4 +2186,193 @@
 		animation: fade-in 0.2s ease-out;
 	}
 
+	/* Connections pane — mental-model intro + group dividers that turn a flat
+	   stack of cards into a two-part narrative. */
+	.conn-intro {
+		padding: 0.9rem 1.1rem;
+		border: 1px solid var(--color-border);
+		border-radius: 12px;
+		background: var(--color-surface);
+	}
+	.conn-intro p {
+		margin: 0;
+		font-size: 0.82rem;
+		line-height: 1.6;
+		color: var(--color-text-secondary);
+	}
+	.conn-intro .door {
+		color: var(--color-accent-aurum);
+		font-weight: 500;
+	}
+	.conn-intro strong { color: var(--color-text-primary); font-weight: 500; }
+	.conn-group {
+		font-size: 0.6rem;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--color-text-tertiary);
+		font-family: var(--font-mono);
+		padding: 0.5rem 0.25rem 0;
+		margin-top: 0.5rem;
+	}
+
+	/* Two-pane hub: a scannable rail + one detail pane (macOS System Settings). */
+	.settings-hub {
+		display: flex;
+		height: 100%;
+		min-height: 0;
+		overflow: hidden;
+	}
+
+	/* ── Left rail ── */
+	.rail {
+		width: 232px;
+		flex-shrink: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		padding: 0.75rem;
+		background: var(--color-surface);
+		border-right: 1px solid var(--color-border);
+		overflow-y: auto;
+	}
+	.rail-id {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		padding: 0.4rem;
+		border-radius: 10px;
+		background: transparent;
+		border: none;
+		cursor: pointer;
+		text-align: left;
+		transition: background var(--duration-fast) var(--ease-out);
+	}
+	.rail-id:hover { background: var(--color-elevated); }
+	.rail-id-avatar {
+		width: 32px;
+		height: 32px;
+		flex-shrink: 0;
+		border-radius: 50%;
+		background: rgb(var(--color-accent-aurum-rgb) / 0.18);
+		color: var(--color-accent-aurum);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 0.8rem;
+		font-weight: 500;
+	}
+	.rail-id-name {
+		font-size: 0.82rem;
+		font-weight: 500;
+		color: var(--color-text-primary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.rail-search {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.4rem 0.6rem;
+		margin: 0.15rem 0 0.35rem;
+		background: var(--color-bg);
+		border: 1px solid var(--color-border);
+		border-radius: 8px;
+	}
+	.rail-search svg { width: 14px; height: 14px; color: var(--color-text-tertiary); flex-shrink: 0; }
+	.rail-search-input {
+		flex: 1;
+		min-width: 0;
+		background: transparent;
+		border: none;
+		outline: none;
+		font-size: 0.78rem;
+		color: var(--color-text-primary);
+	}
+	.rail-search-input::placeholder { color: var(--color-text-tertiary); }
+	.rail-nav { display: flex; flex-direction: column; gap: 1px; }
+	.rail-group {
+		font-size: 0.6rem;
+		letter-spacing: 0.09em;
+		text-transform: uppercase;
+		color: var(--color-text-tertiary);
+		padding: 0.7rem 0.6rem 0.3rem;
+	}
+	.rail-item {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		width: 100%;
+		text-align: left;
+		padding: 0.45rem 0.6rem;
+		border-radius: 8px;
+		border: none;
+		background: transparent;
+		color: var(--color-text-secondary);
+		font-size: 0.82rem;
+		cursor: pointer;
+		transition: background var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out);
+	}
+	.rail-item:hover { background: var(--color-elevated); color: var(--color-text-primary); }
+	.rail-item.on {
+		background: rgb(var(--color-accent-rgb) / 0.12);
+		color: var(--color-text-primary);
+		font-weight: 500;
+	}
+	.rail-ic { display: inline-flex; flex-shrink: 0; }
+	.rail-ic :global(svg) { width: 17px; height: 17px; }
+
+	/* ── Detail ── */
+	.detail {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+	}
+	.detail-body {
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
+		padding: 1.75rem 2rem 3rem;
+		max-width: 720px;
+		width: 100%;
+	}
+	.profile-host { flex: 1; min-height: 0; overflow: hidden; }
+	.pane-head { margin-bottom: 1.5rem; }
+	.pane-title {
+		font-size: 1.3rem;
+		font-weight: 500;
+		color: var(--color-text-emphasis);
+		letter-spacing: -0.01em;
+		margin: 0;
+	}
+	.pane-desc {
+		font-size: 0.85rem;
+		color: var(--color-text-secondary);
+		margin: 0.2rem 0 0;
+	}
+	.mobile-back {
+		display: none;
+		align-items: center;
+		gap: 0.35rem;
+		padding: 0.6rem 1rem;
+		background: var(--color-surface);
+		border: none;
+		border-bottom: 1px solid var(--color-border);
+		color: var(--color-text-secondary);
+		font-size: 0.82rem;
+		cursor: pointer;
+		flex-shrink: 0;
+	}
+	.mobile-back svg { width: 16px; height: 16px; }
+
+	/* ── Mobile: list → detail drill ── */
+	@media (max-width: 767px) {
+		.rail { width: 100%; border-right: none; }
+		.detail { width: 100%; }
+		.detail-body { padding: 1.25rem 1.25rem 3rem; }
+		.mobile-back { display: flex; }
+		.drilled { display: none; }
+	}
 </style>

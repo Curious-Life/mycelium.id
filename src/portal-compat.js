@@ -302,6 +302,12 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
     try { await db.connections.disconnect(userId, connId(req)); ok(res, { ok: true }); }
     catch (e) { fail(res, 400, e.message || 'could not disconnect'); }
   });
+  // Withdraw a sent-but-unaccepted request (clears a stranded/failed-delivery
+  // pending outbound row so it can be re-sent). Initiator-only; pending-only.
+  router.post('/connections/:id/withdraw', async (req, res) => {
+    try { await db.connections.withdraw(userId, connId(req)); ok(res, { ok: true }); }
+    catch (e) { fail(res, 400, e.message || 'could not withdraw'); }
+  });
   router.get('/connections/:id/overlap', async (req, res) => {
     try { ok(res, { overlap: await db.connections.computeOverlap(userId, connId(req)) }); }
     catch (e) { fail(res, 400, e.message || 'could not compute overlap'); }
