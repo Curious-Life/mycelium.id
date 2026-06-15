@@ -163,10 +163,16 @@ export function createConnectionsNamespace(deps) {
       [fromUserId, remoteId],
     );
     const ex = existing.results?.[0];
+    // A pre-existing pending row means a prior request whose delivery may have
+    // failed (the POST is fire-and-forget and there is no background retry). So
+    // a re-request RE-DELIVERS rather than no-op'ing: we keep the row and re-POST
+    // below with a fresh nonce/ts. receiveRemote on the peer is idempotent, so a
+    // re-delivery to a peer that already has the request is harmless.
+    let redeliverId = null;
     if (ex) {
       if (ex.status === 'accepted') throw new Error('Already connected to this handle');
-      if (ex.status === 'pending') return ex.id; // idempotent — request already pending
       if (ex.status === 'blocked') throw new Error('This peer is blocked');
+      if (ex.status === 'pending') redeliverId = ex.id;
       if (ex.status === 'rejected') await d1Query(`DELETE FROM connections WHERE id = ?`, [ex.id]); // allow re-request
     }
 
@@ -184,7 +190,9 @@ export function createConnectionsNamespace(deps) {
     );
     const fp = fromProfile.results?.[0] || {};
 
-    if (await pendingCount(fromUserId) >= PENDING_LIMIT) {
+    // Only a genuinely NEW request counts against the cap; a re-delivery reuses
+    // the existing pending row.
+    if (!redeliverId && await pendingCount(fromUserId) >= PENDING_LIMIT) {
       throw new Error(`Too many pending requests (max ${PENDING_LIMIT})`);
     }
 
@@ -206,19 +214,25 @@ export function createConnectionsNamespace(deps) {
       profile,
     };
 
-    // Store outbound connection locally first so reconciliation has something to retry against.
-    const id = randomUUID();
-    await d1Query(
-      `INSERT INTO connections (id, user_a, user_b, initiated_by, status, remote_instance, remote_user_handle, created_at)
-       VALUES (?, ?, ?, ?, 'pending', ?, ?, datetime('now'))`,
-      [id, fromUserId, remoteId, fromUserId, remoteDomain, remoteHandle],
-    );
+    // Store the outbound connection locally first (new request only) so a failed
+    // delivery leaves a pending row the user can re-deliver by requesting again,
+    // or clear via withdraw().
+    const id = redeliverId || randomUUID();
+    if (!redeliverId) {
+      await d1Query(
+        `INSERT INTO connections (id, user_a, user_b, initiated_by, status, remote_instance, remote_user_handle, created_at)
+         VALUES (?, ?, ?, ?, 'pending', ?, ?, datetime('now'))`,
+        [id, fromUserId, remoteId, fromUserId, remoteDomain, remoteHandle],
+      );
+    }
 
-    // Fire-and-forget signed federation POST; failures are handled by reconciliation.
+    // Signed federation POST. Failure is non-fatal: the pending row persists and
+    // re-requesting (or a future reconcile sweep) re-delivers. We surface the
+    // failure to the caller's logs but keep the row so the request isn't lost.
     try {
       await signedFederationPost(federationEndpoint, 'connect', requestBody);
     } catch (e) {
-      console.warn(`[federation] Remote connect POST failed (will retry): ${e.message}`);
+      console.warn(`[federation] Remote connect POST failed (re-request to retry): ${e.message}`);
     }
 
     return id;
@@ -488,6 +502,18 @@ export function createConnectionsNamespace(deps) {
       const row = await loadConnection(connectionId, { requireStatus: 'accepted' });
       if (!row) throw new Error('Connection not found');
       assertMember(row, userId);
+      await d1Query(`DELETE FROM connections WHERE id = ?`, [connectionId]);
+    },
+
+    // Withdraw a sent-but-not-yet-accepted request. Clears a stranded pending
+    // outbound row (e.g. delivery failed, or the user changed their mind) so it
+    // can be re-sent. Local-only in Tier-0b: the peer's inbound pending row, if
+    // any, is left for them to ignore. Only the initiator may withdraw.
+    async withdraw(userId, connectionId) {
+      const row = await loadConnection(connectionId, { requireStatus: 'pending' });
+      if (!row) throw new Error('Connection not found');
+      assertMember(row, userId);
+      if (row.initiated_by !== userId) throw new Error('Can only withdraw your own sent request');
       await d1Query(`DELETE FROM connections WHERE id = ?`, [connectionId]);
     },
 
