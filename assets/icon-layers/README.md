@@ -33,23 +33,45 @@ Apple's Tinted and Clear appearances throw away your colors and recolor each lay
 Keep the mushroom as one flat fill (the gradient is luminance-monotonic, so it survives tinting). Do
 not add dark detailing *inside* the mushroom or it will punch holes in the tinted silhouette.
 
-## Building the `.icon` (Icon Composer — Mac, one-time, GUI)
+## The `.icon` is already built — `src-tauri/icons/Mycelium.icon`
 
-Icon Composer ships with Xcode 26+. It cannot be driven headlessly, so this is a manual step:
+Built from these layers and **verified in Icon Composer across Default, Dark, and Mono/Tinted**
+(2026-06-15). Structure (`icon.json`):
 
-1. Open **Icon Composer** → New.
-2. Add three layers, bottom → top: `1-background.svg`, `2-stars.svg`, `3-mushroom.svg`.
-   (Import SVG directly; if it insists on raster, export each layer to 1024 PNG first.)
-3. Group **stars + mushroom** as the foreground; leave background as the bottom layer so the system
-   can swap it in Tinted/Clear.
-4. Check all four appearances in the preview: **Default, Dark, Clear, Tinted**. The mushroom should
-   stay a clean silhouette and the stars should sparkle in every mode. Nudge layer opacity/“specular”
-   only if a mode looks muddy — don't re-color (the system owns color in Tinted/Clear).
-5. Export `Mycelium.icon` into `src-tauri/icons/`.
+- `fill` = the dark sky (a near-black-blue gradient). This is the layer the system **replaces** under
+  Tinted/Clear — which is why the sky is the fill, not a layer.
+- group `stars` (glass) — the Milky-Way starfield; sparkles as bright points under tint.
+- group `mushroom` (glass, neutral shadow) — the gold silhouette; reads as one clean tinted shape.
 
-Then wire it into the bundle: add `"icons/Mycelium.icon"` to the `bundle.icon` array in
-`src-tauri/tauri.conf.json` (alongside the PNG/`.icns` fallbacks — older macOS ignores it and uses
-`.icns`). Tauri passes `.icon` through to the app bundle.
+To edit: `open -a "Icon Composer" src-tauri/icons/Mycelium.icon`, change, Save. To rebuild the layer
+PNGs from the SVGs first: `cargo tauri icon assets/icon-layers/2-stars.svg -o /tmp/s -p 1024` (and
+the mushroom), then drop the `1024x1024.png`s into `Mycelium.icon/Assets/`.
+
+### Wiring it into the macOS app (Liquid Glass at runtime)
+
+Tauri's bundler ships a flat `.icns` and does **not** consume `.icon` files, so adding
+`Mycelium.icon` to `tauri.conf.json` does nothing. macOS shows the glass/tinted icon only when the
+`.app` carries a compiled asset catalog (`Assets.car` from the `.icon`) + `CFBundleIconName`. Run the
+injector **after** `cargo tauri build`:
+
+```sh
+sudo xcode-select -s /Applications/Xcode.app   # actool needs full Xcode (one-time)
+xcodebuild -runFirstLaunch                      # if prompted (one-time)
+scripts/build-glass-icon.sh                     # finds the built .app, injects, re-signs
+```
+
+The flat `.icns` remains the pre-Tahoe fallback. (Note: the injector step is not yet verified
+end-to-end here — it needs full Xcode selected, which requires admin.)
+
+## Regenerating the flat icon + favicons
+
+The composite and these layers are emitted by the generator script (kept out of the repo, run ad-hoc):
+`node scripts/gen-icon.mjs` — seeded starfield, so output is reproducible. After regenerating,
+rebuild the rasters on the Mac:
+
+```sh
+cargo tauri icon ../assets/mushroom.svg   # writes src-tauri/icons/{icon.icns,*.png,icon.ico}
+```
 
 ## Regenerating the flat icon + favicons
 
