@@ -61,7 +61,14 @@ function hasVectorKey(o) {
     && Object.keys(o).some((k) => /centroid|embedding|vector/i.test(k) || hasVectorKey(o[k]));
 }
 
-const HANDLE_LOCAL_PART_RE = /^([a-z0-9][a-z0-9_]{2,29})@(.+)$/i;
+// Federated handle = <local>@<domain>. The local part must accept every handle
+// the managed control plane can ISSUE (2–32 chars, lowercase alnum + hyphen,
+// e.g. "hi", "lo", "my-handle"). The old `[a-z0-9][a-z0-9_]{2,29}` required ≥3
+// chars and no hyphen, so a 2-char handle fell through to the local lookup and
+// surfaced as "User not found" — neither box could federate to the other. The
+// domain side + WebFinger + did:web verification are the real gates, so this
+// stays deliberately permissive (2–64 chars, alnum + hyphen/underscore).
+const HANDLE_LOCAL_PART_RE = /^([a-z0-9][a-z0-9_-]{1,62})@(.+)$/i;
 const DOMAIN_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
 
 const PENDING_LIMIT = 20;

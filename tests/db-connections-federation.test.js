@@ -112,6 +112,22 @@ describe('connections — signed outbound connect', () => {
     const ns = createConnectionsNamespace({ d1Query, fetch: async () => ({ ok: true, status: 202, async json() { return {}; } }), sign: (b) => id.sign(b), did: () => 'did:web:alice.mycelium.id', selfInstance: () => 'alice.mycelium.id' });
     await assert.rejects(() => ns.request('me', 'bob@bob.mycelium.id'), /Already connected/);
   });
+
+  it('routes a 2-char federated handle (lo@lo.mycelium.id) to the federated path, NOT local "User not found"', async () => {
+    // The managed control plane issues 2-char handles (e.g. "hi"/"lo"); the
+    // federated-handle parser must accept them or the request falls through to the
+    // local lookup and dies with "User not found".
+    const { d1Query } = makeDb();
+    let wf = false;
+    const fetchImpl = async (url) => {
+      if (url.includes('/.well-known/webfinger')) { wf = true; return { ok: true, status: 200, async json() { return { links: [{ rel: 'x.federation', href: 'https://lo.mycelium.id/federation' }] }; } }; }
+      if (url.endsWith('/federation/connect')) return { ok: true, status: 202, async json() { return {}; } };
+      return { ok: false, status: 404, async json() { return {}; } };
+    };
+    const ns = createConnectionsNamespace({ d1Query, fetch: fetchImpl, sign: (b) => id.sign(b), did: () => 'did:web:hi.mycelium.id', selfInstance: () => 'hi.mycelium.id' });
+    await assert.doesNotReject(() => ns.request('me', 'lo@lo.mycelium.id'));
+    assert.equal(wf, true, '2-char handle resolved via WebFinger (federated), not treated as a local handle');
+  });
 });
 
 describe('connections — receiveRemote (inbound)', () => {
