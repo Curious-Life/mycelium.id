@@ -98,6 +98,16 @@ export function createConnectionsNamespace(deps) {
     return a < b ? { user_a: a, user_b: b } : { user_a: b, user_b: a };
   }
 
+  // Our FEDERATION handle = the first label of our public host (what WebFinger +
+  // did:web publish, e.g. "hi" for hi.mycelium.id). This is the handle a peer
+  // MUST use to resolve us back (acct:<handle>@<host>) — NOT user_profiles.handle,
+  // which is a human label that can differ ("martin") and 404s WebFinger. Outbound
+  // from_handle uses this so the reverse handshake (connect-response) can find us.
+  function selfHandle() {
+    const h = selfInstance && selfInstance();
+    return h ? String(h).split('.')[0] : null;
+  }
+
   async function loadConnection(connectionId, { requireStatus } = {}) {
     let sql = `SELECT * FROM connections WHERE id = ?`;
     const params = [connectionId];
@@ -212,7 +222,7 @@ export function createConnectionsNamespace(deps) {
     if (hasVectorKey(profile)) throw new Error('refusing to federate a vector/embedding field (CLAUDE.md §7)');
     const requestBody = {
       $type: 'social.mycelium.connect-request.v1',
-      from_handle: fp.handle || fromUserId,
+      from_handle: selfHandle() || fp.handle || fromUserId,
       from_instance: selfHost,
       from_did: did ? did() : null,
       to_handle: remoteHandle,
@@ -393,7 +403,7 @@ export function createConnectionsNamespace(deps) {
           if (hasVectorKey(respProfile)) throw new Error('refusing to federate a vector/embedding field (CLAUDE.md §7)');
           await signedFederationPost(endpoint, 'connect-response', {
             $type: 'social.mycelium.connect-response.v1',
-            from_handle: me.handle || userId,
+            from_handle: selfHandle() || me.handle || userId,
             from_instance: (selfInstance && selfInstance()) || '',
             from_did: did(),
             to_handle: row.remote_user_handle,
@@ -426,11 +436,18 @@ export function createConnectionsNamespace(deps) {
       if (action !== 'accept') return null; // only accept advances state in Tier-0b
       // remote_instance must equal the verified signer's host: a connect-response
       // is only honored from the very instance the request was sent to.
+      // Match on the VERIFIED host (the real identity) + initiated_by, NOT the
+      // handle: from_handle is a label that can legitimately differ from the one
+      // we stored (federation handle vs profile handle, or an older peer build),
+      // and requiring it to match silently dropped valid accepts → "accepted on
+      // their side, still pending on ours". One handle per host in V1, so host +
+      // initiated_by uniquely identifies the pending row.
       const found = await d1Query(
         `SELECT id, user_a, user_b FROM connections
-         WHERE initiated_by = ? AND remote_instance = ? AND remote_user_handle = ? AND status = 'pending'
+         WHERE initiated_by = ? AND remote_instance = ? AND status = 'pending'
+         ORDER BY created_at DESC
          LIMIT 1`,
-        [toUserId, verifiedHost, fromHandle],
+        [toUserId, verifiedHost],
       );
       const row = found.results?.[0];
       if (!row) return null; // no pending row from this verified peer → ignore
