@@ -105,6 +105,33 @@ rec('A16. recent() returns 4 shaped events newest-first', recent.length === 4 &&
 // ── Sink is fail-soft when db has no usage namespace ─────────────────────────
 rec('A17. createUsageSink → undefined when db has no usage namespace', createUsageSink({}, U) === undefined && createUsageSink(db, '') === undefined);
 
+// ── A18) STREAMING estimate fallback: provider streams text but reports NO counts
+//     → output estimated from the ACCUMULATED stream text (not 1), estimated=1.
+{
+  const sink = createUsageSink(db, U, { source: 'enrichment' });
+  const nd = (objs) => objs.map((o) => JSON.stringify(o) + '\n');
+  const sres = (lines) => ({ ok: true, status: 200, body: new ReadableStream({ start(c) { for (const x of lines) c.enqueue(enc.encode(x)); c.close(); } }) });
+  // Ollama NDJSON stream with NO prompt_eval_count/eval_count on the done event.
+  const fetchStream = async () => sres(nd([{ response: 'hello ', done: false }, { response: 'there friend', done: false }, { response: '', done: true }]));
+  const router = createInferenceRouter({ fetch: fetchStream, onUsage: sink, ollamaUrl: 'http://127.0.0.1:11434' });
+  let acc = '';
+  for await (const d of router.inferStream({ prompt: 'abcd', task: 'summarize' })) acc += d;
+  await new Promise((r) => setTimeout(r, 50));
+  const row = (await db.rawQuery("SELECT area, input_tokens, output_tokens, estimated FROM llm_usage WHERE user_id=? AND area='summarize' ORDER BY at DESC LIMIT 1", [U])).results?.[0];
+  rec('A18. streaming no-count → output estimated from accumulated text (not 1)', acc === 'hello there friend' && row && row.estimated === 1 && row.output_tokens === Math.ceil('hello there friend'.length / 4) && row.output_tokens > 1, JSON.stringify(row));
+}
+
+// ── A19) recordContentFlow: estimated ingest/import token-flow row ────────────
+{
+  const { recordContentFlow } = await import('../src/inference/usage.js');
+  recordContentFlow(db, U, { source: 'ingest', area: 'import', content: ['x'.repeat(4000), 'y'.repeat(2000)] }); // 1000 + 500 = 1500 tokens
+  await new Promise((r) => setTimeout(r, 50));
+  const row = (await db.rawQuery("SELECT source, area, provider, input_tokens, output_tokens, estimated, is_local FROM llm_usage WHERE user_id=? AND source='ingest' ORDER BY at DESC LIMIT 1", [U])).results?.[0];
+  rec('A19. recordContentFlow → ingest/import row, estimated, input=Σchars/4, output=0', row && row.source === 'ingest' && row.area === 'import' && row.estimated === 1 && row.input_tokens === 1500 && row.output_tokens === 0 && row.provider === null, JSON.stringify(row));
+  const s2 = await db.usage.summary(U, { sinceDays: 1 });
+  rec('A20. summary surfaces the ingest source + import area', s2.bySource.some((x) => x.key === 'ingest') && s2.byArea.some((x) => x.key === 'import'), `${s2.bySource.map((x) => x.key)} | ${s2.byArea.map((x) => x.key)}`);
+}
+
 close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 const allPass = ledger.every(Boolean);

@@ -280,6 +280,11 @@ Proceed to implementation when the operator confirms **scope**: (A) sizing layer
 - **UI** a "Usage" pane in the Settings hub (`portal-app` SettingsView TABS) — totals (input/output), a by-area table with CSS bars (no chart lib in the portal — matches activity-chip bars), provider/model breakdown, last-N events. **UI live-smoke pending the portal dev build.**
 - **Gate** `verify:usage` — temp vault + injected fetch: capture from router (local + cloud, actual + estimated fallback) and harness → assert rows persisted with correct dimensions → assert `summary()` aggregates by area/provider/model and splits input vs output → assert NO prompt/response text in any column.
 
+### 12.4 Estimate fallback + content-flow (added 2026-06-15)
+- **Per-call estimate, never an average.** When a provider omits counts, the router estimates from the ACTUAL text via `chars/4` (`estimateTokens`) and flags `estimated:1`. Real counts are used whenever the provider reports them (the normal case for Ollama/Anthropic/OpenAI).
+- **Streaming hardened**: `runLocalStream`/`runCloudStream` now ACCUMULATE the streamed deltas and pass the joined text to `emitUsage`, so the output estimate is correct even when a streaming provider reports no usage (previously it passed `""` → ~1 token). Gate `A18`.
+- **Content-flow for non-model areas** (`recordContentFlow`, `src/inference/usage.js`): bulk imports don't touch a model, but the user wants to see how much is flowing through each area. An import records an ESTIMATED row (`source:'ingest'`, `area:'import'`, `inputTokens=Σ chars/4`, `outputTokens:0`, `estimated:1`). Wired in `src/ingest/obsidian-import.js` (the portal Obsidian import delegates to it). Gates `A19`/`A20`. The DB-row importers (full-export/vault) carry ciphertext rows → estimating there needs plaintext; deferred as a follow-on (§11). `VALID_SOURCES` gains `ingest`.
+
 ### 12.3 Threat / privacy note
 Counts per area reveal coarse activity signal (e.g. how much you journal), but this is the **operator's own single-user vault**, read only over loopback/bearer by the owner — same trust boundary + plaintext class as `background_jobs`/`audit_log`. Accepted (consistent with [[deployment-local-primary]]). Hard invariant the gate enforces: **no prompt or completion text ever enters `llm_usage`** — counts + dimensions only.
 

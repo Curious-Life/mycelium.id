@@ -15,7 +15,7 @@
 
 import { randomUUID as nodeRandomUUID } from 'node:crypto';
 
-const VALID_SOURCES = new Set(['chat', 'gateway', 'enrichment']);
+const VALID_SOURCES = new Set(['chat', 'gateway', 'enrichment', 'ingest']);
 const intOr0 = (v) => (Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
 
 export function createLlmUsageNamespace(deps) {

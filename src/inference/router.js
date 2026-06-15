@@ -114,13 +114,19 @@ export function createInferenceRouter({
 
   async function* runLocalStream({ prompt, maxTokens, area }) {
     let raw = null;
-    yield* localStream({ prompt, maxTokens, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs, onUsage: (u) => { raw = u; } });
-    emitUsage({ prompt, text: "", raw, area, isLocal: true });
+    // Accumulate the streamed deltas so the usage estimate has the real output text
+    // to fall back on when the provider doesn't report counts (token-budget §12).
+    let acc = "";
+    for await (const delta of localStream({ prompt, maxTokens, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs, onUsage: (u) => { raw = u; } })) {
+      acc += delta; yield delta;
+    }
+    emitUsage({ prompt, text: acc, raw, area, isLocal: true });
   }
 
   async function* runCloudStream({ prompt, maxTokens, area }) {
     let raw = null;
-    yield* cloudStream({
+    let acc = "";
+    for await (const delta of cloudStream({
       prompt, maxTokens,
       anthropicApiKey: cfg.anthropicApiKey,
       openaiApiKey: cfg.openaiApiKey,
@@ -129,8 +135,10 @@ export function createInferenceRouter({
       fetch: cfg.fetch,
       timeoutMs: cfg.timeoutMs,
       onUsage: (u) => { raw = u; },
-    });
-    emitUsage({ prompt, text: "", raw, area, isLocal: false });
+    })) {
+      acc += delta; yield delta;
+    }
+    emitUsage({ prompt, text: acc, raw, area, isLocal: false });
   }
 
   // The active provider's effective jurisdiction (the privacy-relevant fact),
