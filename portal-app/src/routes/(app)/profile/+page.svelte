@@ -1,6 +1,8 @@
 <script lang="ts">
-	// Thin route intent → open/focus the Profile tab in the workspace.
+	// Profile is no longer a standalone tab — it's the first pane of the unified
+	// Settings hub (one home for "you"). This route redirects into the hub so old
+	// /profile links and bookmarks keep working.
 	import { onMount } from 'svelte';
 	import { workspace } from '$lib/workspace/store';
-	onMount(() => workspace.openFromRoute('profile'));
+	onMount(() => workspace.openFromRoute('settings', { pane: 'profile' }));
 </script>
