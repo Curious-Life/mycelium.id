@@ -23,7 +23,8 @@
       "signingIdentity": "-"
     },
     "resources": {
-      "../build-staging/": "app"
+      "../build-staging/": "app",
+      "icons/Assets.car": "."
     },
     "icon": [
       "icons/32x32.png",
