@@ -47,9 +47,9 @@
 		return id === 'people' ? peopleCluster.has(currentView) : currentView === id;
 	}
 
-	// Curious Life — the one aspirational surface, set apart from the working
-	// tabs above: traverse from where your paths have led toward who you're
-	// becoming. (The planned life-domain areas — Wealth/Intel/Body/Vitality/
+	// Curious Life — the aspirational surface: traverse from where your paths
+	// have led toward who you're becoming. Rendered inline with the working
+	// tabs, same styling. (The planned life-domain areas — Wealth/Intel/Body/Vitality/
 	// Activity — now live as "coming later" facets inside Streams, not the nav.)
 	const curiousLife: NavItem = { id: 'curious-life', label: 'Curious Life', icon: 'compass', href: '/curious-life' };
 
@@ -217,25 +217,26 @@
 				</button>
 			{/each}
 
-			<!-- Curious Life — set apart between the working tabs and the roadmap.
-			     Aurum→amethyst accent marks it as the aspirational surface. -->
-			<div class="mt-3 pt-3 border-t border-[var(--color-border)]">
-				<button
-					onclick={() => handleNavClick(curiousLife)}
-					class="curious group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 w-full"
-					class:active={currentView === 'curious-life'}
-					aria-current={currentView === 'curious-life' ? 'page' : undefined}
-				>
-					<div class="curious-dot w-1.5 h-1.5 rounded-full flex-shrink-0"></div>
-					<div class="curious-icon w-5 h-5 flex items-center justify-center flex-shrink-0">
-						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-							<circle cx="12" cy="12" r="9" />
-							<path stroke-linecap="round" stroke-linejoin="round" d="M14.8 9.2l-1.7 3.9-3.9 1.7 1.7-3.9z" />
-						</svg>
-					</div>
-					<span class="curious-label text-sm font-medium">Curious Life</span>
-				</button>
-			</div>
+			<!-- Curious Life — rendered inline with the working tabs, same styling. -->
+			<button
+				onclick={() => handleNavClick(curiousLife)}
+				class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 w-full
+					{currentView === 'curious-life'
+					? 'bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]'
+					: 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)]'}"
+				aria-current={currentView === 'curious-life' ? 'page' : undefined}
+			>
+				<div class="w-1.5 h-1.5 rounded-full transition-all duration-150 flex-shrink-0
+					{currentView === 'curious-life' ? 'bg-[var(--color-accent)]' : 'bg-transparent group-hover:bg-[var(--color-text-tertiary)]'}">
+				</div>
+				<div class="w-5 h-5 flex items-center justify-center flex-shrink-0">
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+						<circle cx="12" cy="12" r="9" />
+						<path stroke-linecap="round" stroke-linejoin="round" d="M14.8 9.2l-1.7 3.9-3.9 1.7 1.7-3.9z" />
+					</svg>
+				</div>
+				<span class="text-sm font-medium">Curious Life</span>
+			</button>
 
 		</nav>
 	</div>
@@ -384,23 +385,4 @@
 	.resize-handle.active {
 		background: var(--color-accent);
 	}
-
-	/* Curious Life — the aspirational nav item, marked apart with a warm
-	   aurum→amethyst accent (gold of where you've been → violet of becoming). */
-	.curious .curious-label {
-		background: linear-gradient(90deg, var(--color-accent-aurum), var(--color-accent-amethyst));
-		-webkit-background-clip: text;
-		background-clip: text;
-		color: transparent;
-	}
-	.curious .curious-icon { color: var(--color-accent-aurum); transition: color var(--duration-fast) var(--ease-out); }
-	.curious .curious-dot {
-		background: var(--color-accent-aurum);
-		box-shadow: 0 0 8px rgb(var(--color-accent-aurum-rgb) / 0.55);
-	}
-	.curious:hover { background: var(--color-elevated); }
-	.curious.active {
-		background: linear-gradient(90deg, rgb(var(--color-accent-aurum-rgb) / 0.12), rgb(var(--color-accent-amethyst-rgb) / 0.12));
-	}
-	.curious.active .curious-dot { box-shadow: 0 0 10px rgb(var(--color-accent-aurum-rgb) / 0.9); }
 </style>
