@@ -56,8 +56,10 @@ try {
   _resetForTests();
   const vc = createVaultClient({ baseUrl: vault.url });
   const sends = [];
-  async function checkAuthority({ kind, id }) {
-    if (String(id) === OWNER) return { allowed: true, reason: 'owner-bootstrap' };
+  // Mirrors the REAL checkTelegramAuthority (index.js): owner-bootstrap is gated on
+  // agent provenance, so a bare loopback caller can't impersonate the agent to the owner.
+  async function checkAuthority({ kind, id, isAgentExplicit }) {
+    if (isAgentExplicit && String(id) === OWNER) return { allowed: true, reason: 'owner-bootstrap' };
     return vc.checkChannelAuthority({ kind, id });
   }
   const handler = createTelegramChokepoint({
@@ -90,7 +92,15 @@ try {
 
   // ── E4. owner-bootstrap send delivers ─────────────────────────────────────
   const r4 = await dsend({ chatId: OWNER, text: TEXT }, { 'x-egress-provenance': 'agent-explicit' });
-  check('E4. owner send → 200 delivered + Telegram called', r4.status === 200 && r4.json?.delivered === true && sends.length === 1, `status=${r4.status} sends=${sends.length}`);
+  check('E4. owner send (agent-explicit) → 200 delivered + Telegram called', r4.status === 200 && r4.json?.delivered === true && sends.length === 1, `status=${r4.status} sends=${sends.length}`);
+
+  // ── E4b. owner send WITHOUT agent provenance → 403 (no agent-impersonation) ──
+  // A bare loopback caller must NOT ride owner-bootstrap; it falls through to the
+  // registry (owner unbound) → denied. This is the F1 fix.
+  const r4b = await dsend({ chatId: OWNER, text: TEXT }); // no x-egress-provenance
+  check('E4b. owner send WITHOUT agent-explicit → 403 (owner-bootstrap gated, no impersonation)',
+    r4b.status === 403 && r4b.json?.error === 'channel-authority-denied' && sends.length === 1,
+    `status=${r4b.status} sends=${sends.length}`);
 
   // give the fire-and-forget audit + persist a tick to land
   await new Promise((r) => setTimeout(r, 150));

@@ -131,8 +131,11 @@ export function createSendHandler(deps) {
     };
 
     // 5. channel authority — fail-closed; only a token-verified trusted request bypasses.
+    //    isAgentExplicit is threaded through so the authority resolver can gate its
+    //    short-circuits (owner-bootstrap / reply-to-inbound) on agent provenance —
+    //    a bare loopback caller must not impersonate the agent over a trusted channel.
     if (!trustedReq) {
-      const a = await checkAuthority({ kind, id: target });
+      const a = await checkAuthority({ kind, id: target, isAgentExplicit });
       if (!a?.allowed) {
         console.warn(`[${logPrefix}] ${platform} send denied by channel authority (${a?.reason || 'unknown'}) → ${preview(content)}`);
         audit({ ...baseAudit, decision: 'denied', reason: `channel-authority:${a?.reason || 'denied'}` });
