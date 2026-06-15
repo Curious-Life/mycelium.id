@@ -163,7 +163,8 @@
     "verify:federation": "node scripts/verify-federation.mjs",
     "verify:spaces": "node scripts/verify-spaces.mjs",
     "verify:obsidian-images": "node scripts/verify-obsidian-images.mjs",
-    "verify:agent-capture": "node scripts/verify-agent-capture.mjs"
+    "verify:agent-capture": "node scripts/verify-agent-capture.mjs",
+    "verify:claude-sync": "node scripts/verify-claude-sync.mjs"
   },
   "dependencies": {
     "@better-auth/passkey": "^1.6.14",
