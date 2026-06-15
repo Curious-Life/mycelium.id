@@ -10,7 +10,7 @@
 	import { api } from '$lib/api';
 
 	type Preset = { id: string; label: string; kind: 'openai' | 'anthropic'; baseUrl: string; jurisdiction: string; defaultModel: string };
-	type Provider = { id: number; provider: string; label: string | null; base_url: string | null; model_preference: string | null; is_active: number; status: string };
+	type Provider = { id: number; provider: string; label: string | null; base_url: string | null; model_preference: string | null; is_active: number; status: string; last_used_at: string | null };
 
 	let presets = $state<Preset[]>([]);
 	let providers = $state<Provider[]>([]);
@@ -43,6 +43,12 @@
 	let cascade = $state(false);
 	let cascadeBusy = $state(false);
 
+	// Per-task model selection — which configured provider handles which task.
+	let tasks = $state<string[]>([]);
+	let taskModels = $state<Record<string, { providerId: number; model?: string }>>({});
+	let taskBusy = $state<string | null>(null);
+	const TASK_LABELS: Record<string, string> = { chat: 'Chat & agents', narrate: 'Narration — mindscape names + chronicles' };
+
 	const FIT: Record<string, { label: string; cls: string }> = {
 		perfect: { label: 'great fit', cls: 'fit-green' },
 		good: { label: 'good fit', cls: 'fit-blue' },
@@ -66,7 +72,14 @@
 	]);
 
 	// ── Active model (hero) ──
-	const active = $derived(providers.find((p) => p.is_active));
+	// The RESOLVED active provider — mirror the backend getActive(): among the
+	// is_active rows (there's one per provider TYPE), the most-recently-used wins.
+	// (find(is_active) was wrong — it returned whichever sorted first, e.g. Claude
+	// before Regolo, so the UI showed a provider the system wasn't actually using.)
+	const active = $derived(
+		[...providers].filter((p) => p.is_active)
+			.sort((a, b) => (b.last_used_at || '').localeCompare(a.last_used_at || ''))[0] ?? null,
+	);
 	const activeInfo = $derived.by(() => {
 		if (!active) return null;
 		const local = isLocalUrl(active.base_url) || active.provider === 'custom' && isLocalUrl(active.base_url);
@@ -97,6 +110,14 @@
 	}
 	async function loadRouting() {
 		try { const r = await api('/portal/providers/routing'); if (r.ok) cascade = (await r.json()).cascade === true; } catch { /* default off */ }
+	}
+	async function loadTaskModels() {
+		try { const r = await api('/portal/providers/task-models'); if (r.ok) { const j = await r.json(); tasks = j.tasks || []; taskModels = j.taskModels || {}; } } catch { /* default: all tasks use the active provider */ }
+	}
+	async function setTaskModel(task: string, providerId: number | null) {
+		taskBusy = task;
+		try { const r = await api('/portal/providers/task-models', { method: 'PUT', body: JSON.stringify({ task, providerId }) }); if (r.ok) taskModels = (await r.json()).taskModels || {}; }
+		catch { /* leave */ } finally { taskBusy = null; }
 	}
 	async function setCascade(v: boolean) {
 		cascadeBusy = true;
@@ -134,7 +155,7 @@
 	}
 
 	onMount(() => {
-		load(); loadRouting(); loadTranscription();
+		load(); loadRouting(); loadTaskModels(); loadTranscription();
 		return () => { if (transPoll) clearInterval(transPoll); };
 	});
 
@@ -327,12 +348,12 @@
 				<div class="lane-head"><span class="lane-title">Connected</span></div>
 				{#each providers as p (p.id)}
 					<div class="row">
-						<span class="dot" class:on={p.is_active}></span>
+						<span class="dot" class:on={p.id === active?.id}></span>
 						<span class="conn-name">{p.label || p.provider}</span>
-						{#if p.is_active}<span class="chip j-green">active</span>{/if}
+						{#if p.id === active?.id}<span class="chip j-green">active</span>{/if}
 						<span class="row-action">
 							{#if testMsg[p.id]}<span class="muted-xs">{testMsg[p.id]}</span>{/if}
-							{#if !p.is_active}<button class="link-btn" onclick={() => setActive(p.id)}>Use</button>{/if}
+							{#if p.id !== active?.id}<button class="link-btn" onclick={() => setActive(p.id)}>Use</button>{/if}
 							<button class="link-btn dim-link" onclick={() => test(p.id)}>Test</button>
 							<button class="link-btn x-red-link" onclick={() => remove(p.id)}>Remove</button>
 						</span>
@@ -349,6 +370,30 @@
 				<span class="routing-sub">Try providers in order — EU-sovereign → frontier → on-device — falling back if one is down. Sensitive requests always skip US.</span>
 			</span>
 		</button>
+
+		<!-- ── Per-task model selection ── -->
+		{#if providers.length && tasks.length}
+			<div class="lane">
+				<div class="lane-head"><span class="lane-title">Model per task</span><span class="lane-tag">optional</span></div>
+				<p class="muted task-intro">Route specific work to specific providers — e.g. narration on a fast on-device model, chat on a frontier model. Left unset, a task uses your active provider.</p>
+				{#each tasks as task}
+					<div class="task-row">
+						<span class="task-label">{TASK_LABELS[task] || task}</span>
+						<select
+							class="task-select"
+							disabled={taskBusy === task}
+							value={taskModels[task]?.providerId ?? ''}
+							onchange={(e) => setTaskModel(task, (e.currentTarget as HTMLSelectElement).value ? Number((e.currentTarget as HTMLSelectElement).value) : null)}
+						>
+							<option value="">Use active provider{active ? ` (${active.label || active.provider})` : ''}</option>
+							{#each providers as p}
+								<option value={p.id}>{p.label || p.provider}{p.model_preference ? ` · ${p.model_preference}` : ''}</option>
+							{/each}
+						</select>
+					</div>
+				{/each}
+			</div>
+		{/if}
 
 		<!-- ── Voice transcription (dedicated Whisper) ── -->
 		<div class="lane">
@@ -500,6 +545,13 @@
 	.trans-card-head { display: flex; align-items: center; gap: 0.5rem; justify-content: space-between; }
 	.trans-name { font-size: 0.8rem; font-weight: 500; color: var(--color-text-primary); }
 	.trans-inuse { font-size: 0.74rem; color: var(--color-accent-aurum, #e5b84c); }
+
+	/* Per-task model selection */
+	.task-intro { font-size: 0.72rem; color: var(--color-text-tertiary); line-height: 1.45; margin: 0 0 0.6rem; }
+	.task-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.35rem 0; }
+	.task-label { font-size: 0.8rem; color: var(--color-text-primary); }
+	.task-select { flex: 0 1 auto; max-width: 60%; font-size: 0.76rem; color: var(--color-text-primary); background: var(--color-surface-2, rgba(255,255,255,0.04)); border: 1px solid var(--color-border, rgba(255,255,255,0.12)); border-radius: 8px; padding: 0.3rem 0.5rem; }
+	.task-select:disabled { opacity: 0.5; }
 
 	@keyframes pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
 </style>
