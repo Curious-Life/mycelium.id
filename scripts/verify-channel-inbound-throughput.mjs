@@ -95,6 +95,24 @@ const textMsg = (id, { from = OWNER, chat = OWNER } = {}) => normalizeUpdate({
   await q.idle();
 }
 
+// Q8 — OWNER PRIORITY: an owner job jumps AHEAD of already-queued non-owner work
+// (the running job is not preempted; owner-owner stays FIFO).
+{
+  const gate = deferred();
+  const q = createMediaQueue({ maxPending: 8, senderMax: 99, senderWindowMs: 60_000 });
+  const ran = [];
+  const job = (id, p) => () => { ran.push(id); return p; };
+  q.submit({ fromId: '1', owner: false, run: job('block', gate.promise) }); // running — holds the worker
+  await sleep(1);
+  q.submit({ fromId: '2', owner: false, run: job('n1', Promise.resolve()) }); // queued non-owner
+  q.submit({ fromId: '3', owner: false, run: job('n2', Promise.resolve()) }); // queued non-owner
+  q.submit({ fromId: OWNER, owner: true, run: job('owner', Promise.resolve()) }); // priority → ahead of n1/n2
+  gate.resolve();
+  await q.idle();
+  rec('Q8. owner media jumps ahead of queued non-owner work (running job not preempted)',
+    ran.join(',') === 'block,owner,n1,n2', `ran=${ran.join(',')}`);
+}
+
 // ── inbound integration: offload + degrade ────────────────────────────────────
 // `groupOpen` wires the group-authorization deps so a NON-owner sender in an
 // authorized-open group is accepted (the realistic flood source).
