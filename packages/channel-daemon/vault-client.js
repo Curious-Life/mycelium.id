@@ -89,7 +89,9 @@ export function createVaultClient({ baseUrl, fetch: fetchImpl = globalThis.fetch
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ attachmentId, ...(kind ? { kind } : {}) }),
-          signal: AbortSignal.timeout(ctxTimeoutMs || 240_000),
+          // must exceed the vault's worst case — two transcription attempts
+          // (300s × 2, cold-start retry) — or the daemon gives up mid-extract.
+          signal: AbortSignal.timeout(ctxTimeoutMs || 660_000),
         });
         if (!res.ok) return null;
         const j = await res.json().catch(() => null);

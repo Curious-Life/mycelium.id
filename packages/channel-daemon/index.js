@@ -15,6 +15,7 @@ import { createRateLimiter } from './ratelimit.js';
 import { createDaemonApp } from './server.js';
 import { selectRuntime } from './agent/runtime.js';
 import { createLane } from './agent/lane.js';
+import { createTypingPresence } from './presence.js';
 import { createCoalescer } from './transport/coalescer.js';
 import { getActiveTurn } from './inbound-context.js';
 // telegram
@@ -23,6 +24,7 @@ import { createTelegramChokepoint } from './chokepoint.js';
 import { createVoicePipeline } from './voice-pipeline.js';
 import { createInboundHandler } from './inbound.js';
 import { contextualizeMedia } from './media.js';
+import { createMediaQueue } from './media-queue.js';
 import { createTelegramPoller } from './transport/telegram-poller.js';
 import { createCommandHandler } from './commands.js';
 // discord
@@ -47,6 +49,12 @@ export function buildDaemon(cfg, { runTurn } = {}) {
   const dedup = createEnvelopeDedup();
   const rateLimit = createRateLimiter({ maxPerWindow: cfg.rateLimitMax, windowMs: cfg.rateLimitWindowMs });
 
+  // Platform clients — declared ahead of the lane so presence can late-bind
+  // (the lane exists before the Telegram client; presence only fires mid-turn,
+  // long after both are constructed).
+  let telegram = null, poller = null, telegramSendHandler;
+  let discord = null, gateway = null, discordSendHandler;
+
   // Per-boot secret that authorizes a `trusted` (authority/rate-limit-bypass)
   // send. Only the in-process command-ack closures below carry it (header
   // x-egress-trusted); a body `trusted:true` from any other loopback caller is
@@ -56,12 +64,17 @@ export function buildDaemon(cfg, { runTurn } = {}) {
   // ── shared agent-turn pipeline (one runtime/lane for all platforms) ────────
   let effectiveRunTurn = runTurn;
   let lane = null;
+  let presence = null; // typing indicator — shared by the lane (turn) + inbound (pre-turn media stage)
   if (!effectiveRunTurn) {
     // auto router records cloud-routing decisions hash-only via the vault.
     const auditEgress = (e) => { vault.recordInferenceEgress(e); };
     const runtime = selectRuntime(cfg, { auditEgress });
     if (runtime) {
-      lane = createLane({ runtime, ...(cfg.turnTimeoutMs ? { turnTimeoutMs: cfg.turnTimeoutMs } : {}) });
+      // Typing indicator while a turn runs (Telegram DMs; presence.js gates).
+      presence = createTypingPresence({
+        sendChatAction: (chatId) => telegram ? telegram.sendChatAction({ chatId }) : null,
+      });
+      lane = createLane({ runtime, presence, ...(cfg.turnTimeoutMs ? { turnTimeoutMs: cfg.turnTimeoutMs } : {}) });
       if (cfg.coalesceWindowMs > 0) {
         const coalescer = createCoalescer({ windowMs: cfg.coalesceWindowMs, flush: (turnCtx, merged) => lane.runTurn(turnCtx, merged) });
         effectiveRunTurn = (turnCtx, msg) => { coalescer.push(turnCtx, msg); };
@@ -82,9 +95,6 @@ export function buildDaemon(cfg, { runTurn } = {}) {
 
   const recordEgress = (entry) => { vault.recordEgress(entry); };
   const persistOutbound = (args) => { vault.captureMessage(args).catch((e) => console.error('[channel-daemon] outbound persist failed:', e.message)); };
-
-  let telegram = null, poller = null, telegramSendHandler;
-  let discord = null, gateway = null, discordSendHandler;
 
   // ── Telegram ───────────────────────────────────────────────────────────────
   if (cfg.botToken) {
@@ -118,7 +128,12 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     const mediaStage = cfg.mediaEnabled
       ? (msg) => contextualizeMedia(msg, { telegram, vault, maxBytes: cfg.mediaMaxBytes })
       : undefined;
-    const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized, checkChannelAccess, contextualizeMedia: mediaStage });
+    // MED-4 — offload the minutes-long media stage onto a bounded serial worker
+    // so the poller never stalls; degrade-to-placeholder under flood (never drop).
+    const mediaQueue = cfg.mediaEnabled
+      ? createMediaQueue({ maxPending: cfg.mediaQueueMax, senderMax: cfg.mediaSenderMax, senderWindowMs: cfg.mediaSenderWindowMs })
+      : undefined;
+    const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized, checkChannelAccess, contextualizeMedia: mediaStage, mediaQueue, presence });
     poller = createTelegramPoller({ telegram, handleInbound });
   }
 

@@ -181,6 +181,47 @@ claim level) · personaClaims MCP tool · portal /claims (ClaimsView + TimeSerie
   `person_claims` + `person_claim_snapshots` for Persona-Claims). Applied in
   lexical order every boot by `src/db/migrate.js` (idempotent).
 - **Blobs:** uploaded files encrypted to a local blob store (`src/ingest/blob-store.js`).
+- **Entity change-log** (`entity_snapshots`, migration 0013, `src/db/history.js`,
+  design `docs/ENTITY-HISTORY-DESIGN-2026-06-11.md`, gate `verify:history`):
+  append-only version history of each territory/realm's **narrative**
+  (name/essence/chronicle — hooked at the describe write sites) and **dynamics**
+  (energy/coherence/velocity/counts — `pipeline/snapshot-entities.js`, every Generate).
+  Describe otherwise upserts in place, losing the past. `db.history.recordSnapshot`
+  dedups vs the latest version (decrypt-and-compare — no plaintext content hash) and
+  appends `seq+1` only on real change; rows persist after the entity dissolves/prunes.
+  The single `payload` JSON blob carries content AND all metadata (stage/model/version/
+  capture timestamp) and is the only data column — everything that describes the user
+  or its timing is encrypted; the rest is the row-addressing skeleton
+  (`entity_kind/id, snapshot_kind, seq`) that can't be encrypted without losing
+  WHERE/ORDER/UNIQUE (non-deterministic AES-GCM) and carries no content. Structural/metric
+  change-over-time is *already* logged elsewhere (`cluster_events`, `territory_lineage`,
+  `*_snapshots`, `person_claim_snapshots`); the unified per-entity timeline is a
+  deferred UNION-at-read, not a copy (avoids a second source of truth). Read surfaces
+  (portal panel, MCP tool) deferred — storage only for now.
+- **Realms lifecycle:** territories dissolve (`dissolved_at`, lineage preserved);
+  realms have no lineage, so re-cluster **prunes** realm rows with no live
+  `clustering_points` (`pipeline/cluster.py`) and the Describe pass maintains
+  `realms.territory_count`/`message_count` from live points
+  (`pipeline/describe-clusters.js`; plaintext ranking keys). `cognitive_metrics_per_territory`
+  + `topology_metrics` are 0-row by design until a canonical v4 import or the
+  spec'd topology-graph family lands — kept as restore targets, NOT vestiges
+  (audit: `docs/MEASUREMENT-DEADWEIGHT-AUDIT-2026-06-10.md`, gate `verify:realm-prune`).
+- **Describe management** (`docs/DESCRIBE-MANAGEMENT-DESIGN-2026-06-11.md`, gate
+  `verify:describe-gating`): the naming pass skips unchanged clusters via a
+  plaintext `describe_input_hash` (SHA-256 over sampled message UUIDs + point
+  count — never content-derived) and never clobbers a real name with a
+  placeholder (failed narration on an unnamed cluster leaves hash NULL → retried
+  every run). Chronicles re-narrate on **drift** (`message_count` vs
+  `point_count_at_description`, ratio ≥1.5 + Δ≥10, env-tunable) — not only on
+  version bumps; **realms get chronicles too** (UPDATE-only via
+  `db.mindscape.upsertRealmDescription`; `raw_response` deliberately not stored —
+  plaintext column). Dominant successors **inherit** the dissolved predecessor's
+  chronicle in cluster.py (ciphertext-verbatim copy, after `compute_dynamics`);
+  drift re-narrates them as content diverges. `src/jobs.js` refreshes the in-RAM
+  search index after Generate + chronicle completion (mind-search registry;
+  stored vectors rehydrate). Narration always uses the user's ACTIVE provider +
+  `model_preference` (same `resolveInferenceConfig` as chat);
+  `generation_model` records the real narrator label.
 - **Location (#36):** the vault lives in a **durable per-OS data dir** (`src/paths.js` →
   `~/Library/Application Support/id.mycelium.app` on macOS, set by the Tauri shell as
   `MYCELIUM_DATA_DIR`), so app updates don't wipe history. A legacy in-repo `./data` vault is

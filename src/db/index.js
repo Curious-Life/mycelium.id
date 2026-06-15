@@ -30,6 +30,7 @@ import { createSpaceKnowledgeNamespace } from './space-knowledge.js';
 import { createPublicPresenceNamespace } from './public-presence.js';
 import { createMindscapeNamespace } from './mindscape.js';
 import { createTerritoryDocsNamespace } from './territory-docs.js';
+import { createHistoryNamespace } from './history.js';
 import { createProvidersNamespace } from './providers.js';
 import { createConnectorsNamespace } from './connectors.js';
 import { createUsersNamespace } from './users.js';
@@ -117,6 +118,7 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // surface (src/portal-mindscape.js) + the Phase C chronicles writer.
     mindscape: createMindscapeNamespace({ d1Query, parseJson }),
     territoryDocs: createTerritoryDocsNamespace({ d1Query, parseJson }),
+    history: createHistoryNamespace({ d1Query, parseJson, now }),
 
     // Persona-Claims (PersonaTree adoption): current person-level claims +
     // per-window snapshots for temporal evolution. Sensitive cols encrypted at

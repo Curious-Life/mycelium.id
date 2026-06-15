@@ -426,6 +426,10 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   await run('territory_cofire', m.topology?.cofiring);
   await run('territory_neighbors', m.topology?.territoryNeighbors);
   await run('realm_neighbors', m.topology?.realmNeighbors);
+  // Entity change-log (V1-native; absent from canonical exports → no-op there).
+  // Present so a V1→V1 export/import round-trips the history; restoreTable
+  // re-encrypts the payload blob via the adapter like every other table.
+  await run('entity_snapshots', m.history?.entitySnapshots);
 
   // Temporal Chronicles — period narratives + the current arc. The canonical
   // exporter does not ship these yet (exporter-side gap, flagged 2026-06-10);

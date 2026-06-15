@@ -171,6 +171,11 @@ export function startClusteringJob({ dbPath, userId, db } = {}) {
       // slow local-LLM never stalls the run. Fire-and-forget; territories fill in
       // their chronicles as the background pass writes them (the UI polls). Fail-soft.
       try { startChronicleNarrationJob({ dbPath, userId }); } catch { /* never block completion */ }
+      // Describe renamed territories/realms — the in-RAM search corpus indexes
+      // name+essence and otherwise stays stale for the whole session (it builds
+      // once on first query). Best-effort: rehydrates stored vectors, so no
+      // message re-embeds; only profile texts re-embed.
+      refreshSearchIndex();
     } else if (state.status !== 'error') {
       state.status = 'error';
       const detail = lastErrLine();
@@ -286,7 +291,21 @@ export function startClaimDiscoveryJob({ dbPath, userId, cadence } = {}) {
  * loop. The child (pipeline/describe-chronicles.js) is fail-soft (no model → no-op).
  * @returns {{ pid: number|null }}
  */
+/** Best-effort in-RAM search index refresh (registry may be empty in stdio/test
+ * boots; rebuild reuses stored message vectors so the cost is profile-text-only). */
+function refreshSearchIndex() {
+  import('./search/registry.js')
+    .then(({ getMindSearch }) => getMindSearch()?.rebuild())
+    .catch(() => { /* best-effort — search self-heals on next process start */ });
+}
+
+// Single-flight for the chronicle pass: two overlapping Generates would otherwise
+// double-narrate every pending territory (duplicate inference spend; last write
+// wins). A crashed child clears the flag via its close handler.
+let chronicleChildRunning = false;
+
 export function startChronicleNarrationJob({ dbPath, userId } = {}) {
+  if (chronicleChildRunning) return { pid: null };
   const { userHex, systemHex } = getSessionKeys() ?? resolveKeys();
   const childEnv = {
     PATH: process.env.PATH,
@@ -310,10 +329,15 @@ export function startChronicleNarrationJob({ dbPath, userId } = {}) {
   } catch {
     return { pid: null };
   }
+  chronicleChildRunning = true;
   let err = '';
   child.stderr.on('data', (d) => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
   child.on('close', (code) => {
+    chronicleChildRunning = false;
     if (code !== 0) process.stderr.write(`[chronicles] narration exited ${code}: ${err.slice(-300)}\n`);
+    // Chronicles change essence (part of the indexed corpus text) — refresh.
+    else refreshSearchIndex();
   });
+  child.on('error', () => { chronicleChildRunning = false; });
   return { pid: child.pid ?? null };
 }

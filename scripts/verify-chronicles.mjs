@@ -99,6 +99,49 @@ async function main() {
     rec('C4. model failure → failed:2, no crash, prior chronicle intact',
       r4.failed === 2 && r4.described === 0 && /experiments/.test(tAfter?.story_arc || '') && tAfter.description_version === 'chronicle-v1',
       `r4=${JSON.stringify(r4)} stillArc=${/experiments/.test(tAfter?.story_arc || '')}`);
+
+    // ── C5 drift refresh: same version, but the territory grew ≥1.5× since
+    //    narration → re-narrated WITHOUT a version bump (the 2026-06-11 gap fix). ──
+    await db.rawQuery(`UPDATE territory_profiles SET message_count = 30 WHERE territory_id = 10 AND user_id = ?`, [userId]);
+    const r5 = await describeChronicles({ db, userId, infer: okInfer, version: 'chronicle-v1', modelLabel: 'stub-model' });
+    const t10 = await db.territoryDocs.getByTerritoryId(userId, 10);
+    rec('C5. drift (3→30 msgs) re-narrates exactly the drifted territory at the SAME version',
+      r5.described === 1 && r5.total === 1, JSON.stringify(r5));
+
+    // ── C6 pcad semantics: stores the territory's LIVE message_count (30), not
+    //    samples.length (3) — the drift anchor the old code broke. Then no-drift skip. ──
+    const r6 = await describeChronicles({ db, userId, infer: okInfer, version: 'chronicle-v1' });
+    rec('C6. point_count_at_description = message_count (30); re-run drift-stable → 0 targets',
+      Number(t10?.point_count_at_description) === 30 && r6.total === 0,
+      `pcad=${t10?.point_count_at_description} rerun=${JSON.stringify(r6)}`);
+
+    // ── C7 honest model label (was hardcoded 'claude-opus') ──
+    rec('C7. generation_model records the real narrator label',
+      t10?.generation_model === 'stub-model', `label=${t10?.generation_model}`);
+
+    // ── C8 realm pass: existing realm row gets a chronicle (UPDATE-only) ──
+    await db.rawQuery(
+      `INSERT INTO realms (user_id, realm_id, name, essence, message_count) VALUES (?, 0, ?, ?, 3)`,
+      [userId, 'Grove', 'seed essence']);
+    const r8 = await describeChronicles({ db, userId, infer: okInfer, version: 'chronicle-v1', modelLabel: 'stub-model' });
+    const realms = await db.mindscape.getRealms(userId);
+    const grove = realms.find((r) => Number(r.realm_id) === 0);
+    const realmCount = ((await db.rawQuery(`SELECT COUNT(*) AS n FROM realms WHERE user_id = ?`, [userId])).results || [])[0];
+    rec('C8. realm chronicle written via UPDATE-only (story fields + version + pcad; no row created)',
+      r8.described === 1 && /experiments/.test(grove?.story_arc || '') && grove?.archetype_type === 'the explorer'
+      && Number(realmCount?.n) === 1,
+      `r8=${JSON.stringify(r8)} arc=${(grove?.story_arc || '').slice(0, 24)}…`);
+
+    // ── C9 security: realm raw_response stays NULL (not in ENCRYPTED_FIELDS.realms —
+    //    storing raw model narrative there would be plaintext at rest), and the
+    //    encrypted realm story is ciphertext at rest. ──
+    const rawDb = new Database(DB, { readonly: true });
+    const rawRealm = rawDb.prepare(`SELECT raw_response, story_birth, generation_version FROM realms WHERE realm_id = 0`).get();
+    rawDb.close();
+    rec('C9. realms.raw_response NULL; story_birth ciphertext at rest; generation_version plaintext gate key',
+      rawRealm?.raw_response == null && typeof rawRealm?.story_birth === 'string'
+      && !rawRealm.story_birth.includes('question') && rawRealm?.generation_version === 'chronicle-v1',
+      `raw=${rawRealm?.raw_response} ver=${rawRealm?.generation_version}`);
   } finally {
     close();
   }

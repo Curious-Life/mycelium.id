@@ -108,6 +108,14 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
         signal: AbortSignal.timeout(timeoutMs * 6), // a 20MB body needs longer than a JSON call
       });
       if (!dl.ok) throw new Error(`telegram file download http ${dl.status}`);
+      // Reject by advertised length BEFORE buffering the whole body into RAM —
+      // the descriptor file_size can be absent/lying; this bounds the allocation.
+      const clen = Number(dl.headers.get('content-length'));
+      if (Number.isFinite(clen) && clen > maxBytes) {
+        const err = new Error('telegram file exceeds maxBytes');
+        err.code = 'FILE_TOO_LARGE';
+        throw err;
+      }
       const buf = Buffer.from(await dl.arrayBuffer());
       if (buf.length > maxBytes) {
         const err = new Error('telegram file exceeds maxBytes');
@@ -160,6 +168,30 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
         sent++;
       }
       return { sent, total: chunks.length, httpStatus: lastStatus || 200 };
+    },
+
+    /**
+     * Presence signal — Telegram "typing…" chat action. Expires server-side
+     * after ~5s, so callers keep it alive with an interval while a turn runs
+     * (presence.js). Fire-and-forget by contract: a failed presence ping must
+     * never affect a turn, so every failure path resolves false (mirrors the
+     * canonical packages/core/telegram-api.js sendChatAction).
+     * @param {object} a
+     * @param {string|number} a.chatId
+     * @param {string} [a.action]
+     */
+    async sendChatAction({ chatId, action = 'typing' }) {
+      try {
+        const res = await fetchImpl(`${base}/sendChatAction`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, action }),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        return res.ok;
+      } catch {
+        return false;
+      }
     },
 
     /**

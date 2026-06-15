@@ -67,6 +67,14 @@ export function loadConfig(env = process.env) {
   // 20MB = the Bot API getFile hard cap; telegram-api re-checks server-side.
   const mediaEnabled = env.CHANNEL_MEDIA_ENABLED !== '0';
   const mediaMaxBytes = Number(env.CHANNEL_MEDIA_MAX_BYTES || 20 * 1024 * 1024);
+  // MED-4 — the media stage runs OFF the poller on a bounded serial worker so a
+  // minutes-long extraction never stalls inbound. queueMax caps queued+running
+  // jobs; over the cap a message degrades to a placeholder (still captured +
+  // turned). senderMax/senderWindow throttle a single NON-owner flooder (owner
+  // exempt) so they can't monopolize the one serial worker.
+  const mediaQueueMax = Number(env.CHANNEL_MEDIA_QUEUE_MAX || 8);
+  const mediaSenderMax = Number(env.CHANNEL_MEDIA_SENDER_MAX || 3);
+  const mediaSenderWindowMs = Number(env.CHANNEL_MEDIA_SENDER_WINDOW_MS || 60_000);
 
   // ── Phase 3 hardening ──────────────────────────────────────────────────────
   const coalesceWindowMs = Number(env.CHANNEL_COALESCE_MS || 1500); // 0 disables
@@ -78,7 +86,7 @@ export function loadConfig(env = process.env) {
     anthropicApiKey, mcpMode, mcpUrl, mcpBearer, mcpStdioEntry, model,
     ollamaModel, ollamaUrl, openaiBaseUrl, openaiApiKey, openaiModel, channelRouter, sensitivePatterns,
     ollamaTimeoutMs, ollamaNumCtx, localTools, turnTimeoutMs,
-    mediaEnabled, mediaMaxBytes,
+    mediaEnabled, mediaMaxBytes, mediaQueueMax, mediaSenderMax, mediaSenderWindowMs,
     coalesceWindowMs, rateLimitMax, rateLimitWindowMs,
   };
 }
@@ -120,6 +128,10 @@ export function applyChannelConfigToEnv(cc, env = process.env) {
   put('CHANNEL_RATELIMIT_MAX', cc.routing?.rateLimitMax);
   put('CHANNEL_RATELIMIT_WINDOW_MS', cc.routing?.rateLimitWindowMs);
   put('CHANNEL_SENSITIVE_PATTERNS', cc.routing?.sensitivePatterns);
+  // MED-4 inbound media throughput (optional vault overrides).
+  put('CHANNEL_MEDIA_QUEUE_MAX', cc.routing?.mediaQueueMax);
+  put('CHANNEL_MEDIA_SENDER_MAX', cc.routing?.mediaSenderMax);
+  put('CHANNEL_MEDIA_SENDER_WINDOW_MS', cc.routing?.mediaSenderWindowMs);
 }
 
 /** Throw a clear error if no platform is configured (fail-closed boot). */

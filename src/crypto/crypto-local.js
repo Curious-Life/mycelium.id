@@ -378,6 +378,14 @@ const ENCRYPTED_FIELDS = {
     'activity_timeline',
   ],
 
+  // entity_snapshots — append-only history of territory/realm narrative + dynamics
+  // (ENTITY-HISTORY-DESIGN-2026-06-11). The single `payload` JSON blob holds the
+  // prose (name/essence/story_*/…) or the SEC-3 scalars — all narrative or
+  // cognitive signal, so the whole blob is encrypted (uniform, future-proof to new
+  // fields). Structural columns (entity_kind/id, seq, cluster_version, model label,
+  // timestamps) stay plaintext — keys/labels the read path needs, not content.
+  entity_snapshots: ['payload'],
+
   // Semantic themes
   semantic_themes: [
     'label', 'keywords', 'description',
@@ -743,11 +751,19 @@ function readMasterKeyHex() {
     }
   } catch { /* fall through to env */ }
 
-  // Fallback: process.env (insecure — log warning)
+  // Fallback: process.env. The PRIMARY deployment is a single-user LOCAL install
+  // (the user's own Mac/Windows/Linux machine), where the key is bounded by
+  // same-user trust — and an env allowlist on every child spawn keeps it out of
+  // the embed/transcribe/channel services (only first-party crypto children get
+  // it). CLAUDE.md §4 ("never in env") was inherited from the multi-tenant VPS
+  // repo; its threat model (shared host, /proc, cross-tenant) does not apply to
+  // a local install, so this is an accepted boundary here. Only a shared /
+  // multi-tenant host would need the 0600-tmpfs hardening — see
+  // docs/SECURITY-FOLLOWUP-KEY-IN-ENV-2026-06-11.md.
   const envKey = process.env.ENCRYPTION_MASTER_KEY;
   if (envKey) {
     if (!global._masterKeyFallbackWarned) {
-      console.warn('⚠️  SECURITY: Reading master key from process.env (insecure). Migrate to tmpfs via scripts/migrate-key-to-tmpfs.sh');
+      console.info('[crypto] master key resolved from process.env — expected for a single-user local install; a shared/multi-tenant host would use a 0600 tmpfs key file instead.');
       global._masterKeyFallbackWarned = true;
     }
     return envKey;

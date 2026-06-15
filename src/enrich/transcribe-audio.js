@@ -13,6 +13,7 @@
 
 import { DEFAULT_OLLAMA_URL } from "../inference/local.js";
 import { pickModelWithCapability } from "./model-caps.js";
+import { getTranscriberHealth, transcribeServiceUrl } from "../transcribe/supervisor.js";
 
 const TRANSCRIBE_PROMPT =
   "Transcribe this audio exactly, word for word. Output ONLY the transcription " +
@@ -57,10 +58,36 @@ export async function transcribeAudio({
   prefer,
   baseUrl = DEFAULT_OLLAMA_URL,
   fetch: fetchImpl = globalThis.fetch,
-  timeoutMs = Number(process.env.MYCELIUM_TRANSCRIBE_TIMEOUT_MS) || 180000,
+  // 300s: a ~7s voice note on a 12B model took >180s live (2026-06-10) — the
+  // same cold-model lesson as the channel turn's CHANNEL_OLLAMA_TIMEOUT_MS.
+  timeoutMs = Number(process.env.MYCELIUM_TRANSCRIBE_TIMEOUT_MS) || 300000,
 } = {}) {
-  const b64 = base64 || (Buffer.isBuffer(bytes) ? bytes.toString("base64") : null);
-  if (!b64 || typeof fetchImpl !== "function") return null;
+  let buf = Buffer.isBuffer(bytes) ? bytes : (base64 ? Buffer.from(base64, "base64") : null);
+  if (!buf || typeof fetchImpl !== "function") return null;
+
+  // llama.cpp's audio loader rejects Ogg containers outright (live-verified
+  // 2026-06-10) and Telegram voice notes are always OGG/Opus — transcode to
+  // WAV in-process (pure JS, src/enrich/ogg-opus.js). Fail-soft: if the
+  // transcode returns null we still try the original bytes (a future decoder
+  // may accept them) and otherwise fall back via the normal null path.
+  let format = audioFormatFor(mimeType, fileName);
+  if (format === "ogg") {
+    const { oggOpusToWav } = await import("./ogg-opus.js");
+    const wav = await oggOpusToWav(buf);
+    if (wav) { buf = wav; format = "wav"; }
+  }
+
+  // PREFERENCE 1 — the dedicated Whisper service, when the user set it up
+  // (docs/WHISPER-TRANSCRIPTION-DESIGN-2026-06-11.md). ~100x faster than the
+  // LLM path (1.8s vs >180s live, 2026-06-11) and independent of the chat
+  // model. Only WAV reaches it (Telegram voice is transcoded above); other
+  // formats fall through to the LLM path which decodes them natively.
+  if (format === "wav" && getTranscriberHealth().status === "ok") {
+    const text = await transcribeViaWhisper({ buf, fetch: fetchImpl });
+    if (text) return text;
+    // fall through — whisper hiccup must never lose a voice note
+  }
+  const b64 = buf.toString("base64");
 
   const chosen = model
     || process.env.MYCELIUM_AUDIO_MODEL
@@ -77,11 +104,15 @@ export async function transcribeAudio({
       body: JSON.stringify({
         model: chosen,
         stream: false,
+        // Always 127.0.0.1 Ollama here (capability-picked local model), which
+        // accepts `think` on /v1/chat/completions. Thinking adds minutes of
+        // hidden reasoning before a verbatim transcription — disable it.
+        think: false,
         messages: [{
           role: "user",
           content: [
             { type: "text", text: TRANSCRIBE_PROMPT },
-            { type: "input_audio", input_audio: { data: b64, format: audioFormatFor(mimeType, fileName) } },
+            { type: "input_audio", input_audio: { data: b64, format } },
           ],
         }],
       }),
@@ -93,6 +124,32 @@ export async function transcribeAudio({
     return text.length ? text.slice(0, 8000) : null;
   } catch {
     return null; // timeout / decode error / model error → caller falls back
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * POST the WAV to the local Whisper service. Same NEVER-throw contract:
+ * any failure → null → the caller's LLM fallback runs.
+ * @param {{buf: Buffer, fetch: typeof fetch, timeoutMs?: number}} a
+ */
+async function transcribeViaWhisper({ buf, fetch: fetchImpl, timeoutMs = Number(process.env.MYCELIUM_WHISPER_TIMEOUT_MS) || 120000 }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(`${transcribeServiceUrl()}/transcribe`, {
+      method: "POST",
+      headers: { "Content-Type": "audio/wav" },
+      body: buf,
+      signal: controller.signal,
+    });
+    if (!res || !res.ok) return null;
+    const data = await res.json().catch(() => null);
+    const text = String(data?.text || "").trim();
+    return text.length ? text.slice(0, 8000) : null;
+  } catch {
+    return null;
   } finally {
     clearTimeout(timer);
   }

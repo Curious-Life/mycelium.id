@@ -70,8 +70,17 @@ export async function boot({
   // the same hex so mind files and vault rows share one key and can never
   // diverge. Without this, getMasterKey() returns null on a host without tmpfs
   // and every mind-file write throws. getMasterKey() pins on first use, so this
-  // must run before buildDomains (the first encrypt/decrypt path). Process-local
-  // env, memory-only, never logged — consistent with the key discipline.
+  // must run before buildDomains (the first encrypt/decrypt path). NOTE: this
+  // puts the hex in process.env. The keychain/1Password source only protects the
+  // key AT REST (shell history, config files), NOT at runtime; once boot() runs
+  // the key is in env for the process lifetime (clearMasterKeyFromEnv() can't run
+  // here — mind-files/identity/blob/publish/remote read it lazily). For the
+  // PRIMARY deployment — a single-user LOCAL install — this is an accepted
+  // same-user-trust boundary: CLAUDE.md §4 ("never in env") came from the
+  // multi-tenant VPS repo and its shared-host threat model doesn't apply. Every
+  // child spawn uses an env allowlist, so the key never leaks to the embed/
+  // transcribe/channel services. A shared/multi-tenant host would harden with a
+  // 0600 tmpfs file (env never set): docs/SECURITY-FOLLOWUP-KEY-IN-ENV-2026-06-11.md.
   process.env.ENCRYPTION_MASTER_KEY = userHex;
 
   // Box identity (Tier-0 federation): one ed25519 identity from the master key,

@@ -57,11 +57,11 @@ const probes = ["/portal/fleet/gate"].filter((s) => sidebar.includes(s));
 rec("N3 zero dead 404 probes in Sidebar", probes.length === 0,
   probes.length ? `still calls: ${probes.join(", ")}` : "");
 
-// N4 — the honest "Coming later" group exists, with planned (not-yet-shipped) screens.
-const hasComingLater = /const comingLater\s*=\s*\[/.test(sidebar)
-  && sidebar.includes("Coming later")
-  && ["Wealth", "Intel", "Agents"].every((s) => sidebar.includes(`'${s}'`));
-rec("N4 'Coming later' group present", hasComingLater);
+// N4 — the not-yet-shipped life-domain facets (Wealth/Intel/…) moved INTO Streams
+// in the nav redesign (c9dcf4f): the Sidebar no longer carries a separate
+// `comingLater` nav group. Mirrors N2's "deferred nav arrays removed" intent.
+const noComingLaterNav = !/const comingLater\s*=\s*\[/.test(sidebar);
+rec("N4 'Coming later' nav group removed (now Streams facets)", noComingLaterNav);
 
 // N5 — mobile tab bar = the launch set (Mycelium/Library/Streams/People), no chat tab,
 // and Import is no longer a standalone mobile tab (it's a Streams facet).

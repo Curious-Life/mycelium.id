@@ -1,6 +1,8 @@
 # Channel Inbound Media Pipeline — Design (2026-06-10)
 
-**Status:** BUILT (steps 1–5) — gates GO: verify:ingest I8-I10, verify:model-caps 9/9, verify:attachment-context 11/11, verify:channel-inbound 33/33; live smoke = step 6 ledger in the PR
+**Status:** BUILT (steps 1–5) — gates GO: verify:ingest I8-I10, verify:model-caps 9/9, verify:attachment-context 13/13, verify:channel-inbound 33/33; live smoke = step 6 ledger in the PR
+
+> **Hardening (MED-3, media-smoke-2 review, 2026-06-11):** PDF/DOCX extraction (`src/enrich/extract-document.js`) now runs the unpdf/mammoth parse in a throwaway `worker_thread` (`extract-document.worker.js`) under a bounded heap (`resourceLimits.maxOldGenerationSizeMb`, default 256MB / env `MYCELIUM_EXTRACT_HEAP_MB`) and is `terminate()`d on timeout. A decompression/XML bomb — a tiny docx that mammoth inflates to GBs — is now hard-killed in an isolated thread (V8 OOMs the worker, the vault survives) instead of running to completion behind a `Promise.race` ("the loser keeps running"). The 20MB attachment gate bounds INPUT; the worker bounds DECOMPRESSED output + wall-clock. Gate proof: `verify:attachment-context` A11 (570KB→~150MB bomb → null in ~0.9s, worker torn down) + A12 (timeout → terminate → null, torn down).
 **Scope:** Telegram first. Photos, documents (txt/md/csv/json now; pdf/docx step 5), voice notes, audio files — downloaded from Telegram, encrypted-at-rest in the vault blob store, described/transcribed **locally** via the user's own multimodal model, linked to captured messages, and visible to the channel agent turn.
 **Elevation over canonical:** canonical (`reference/core/attachments.js`) needed cloud (R2 storage, Workers AI vision, Workers AI Whisper). V1 does all three on-box: encrypted local blobs, local vision, local audio transcription — zero new egress.
 
@@ -54,7 +56,7 @@ Every media step is **fail-soft**: download error → capture caption + `[media 
 - **New route surface:** `/api/v1/internal/attachment-context` is loopback-gated like every `/internal` route (vaultAuth via `resolveRequester` loopback path + internal-router pattern). It accepts only `{attachmentId, kind}` — no bytes, no paths — and operates on vault-owned rows for `userId` only.
 - **Derived text is plaintext-sensitive:** description/transcript land in `attachments` encrypted columns (`ENCRYPTED_FIELDS.attachments = ['transcript','file_name','description','metadata']`, crypto-local.js:266) and in `messages.content` (already encrypted). Embeddings of that text follow the existing message pipeline (CLAUDE.md §7 applies as before).
 - **Inference egress:** extraction is LOCAL ONLY in this design (127.0.0.1 Ollama). When the selected provider is cloud, extraction fails soft to filename placeholders — media bytes are never sent to a cloud provider without an explicit future design (deferred).
-- **Group abuse:** media in groups downloads only after the group is authorized (fail-closed) — but any member of an authorized-open group can trigger a ≤20MB download + ≤2min local inference, serialized by the poller. Accepted for v1 (single owner, low volume); per-chat media budget deferred.
+- **Group abuse:** media in groups downloads only after the group is authorized (fail-closed) — but any member of an authorized-open group can trigger a ≤20MB download + ≤2min local inference. **RESOLVED 2026-06-11 (MED-4):** the media stage is now OFFLOADED onto a bounded serial worker (`media-queue.js`) so it no longer serializes the poller, with a per-sender throttle (owner-exempt) that degrades a flooder to a placeholder (never drops). See [`CHANNEL-INBOUND-THROUGHPUT-DESIGN-2026-06-11.md`](CHANNEL-INBOUND-THROUGHPUT-DESIGN-2026-06-11.md).
 - **Replay:** the poller advances offset before handling (restart = drop, not replay); message capture is idempotent on `tg-<msgId>-<chatId>`. A re-handled message would re-download and create a duplicate attachment row (message row dedups) — accepted (rare, harmless duplicate blob); `fileUniqueId` is stored in attachment metadata to make later dedup/GC possible.
 
 ## Module shape (≈ 460 LOC total ± 20%)
@@ -91,7 +93,7 @@ Every media step is **fail-soft**: download error → capture caption + `[media 
 | Non-owner sender in authorized open group sends media | captured with `senderRole:'other'` like text; access policy still gates the reply |
 | Replay of an already-captured message | message dedups on id; duplicate attachment row accepted (metadata carries `fileUniqueId` for future GC) |
 | Daemon restart mid-download | offset already advanced → message dropped (existing semantics, unchanged) |
-| Extraction slow (cold model ~2min) | inline await in inbound handler (poller pauses) — accepted for v1 single-user; turn budget already 600s; future: detach per-message |
+| Extraction slow (cold model ~2min) | ~~inline await in inbound handler (poller pauses)~~ **RESOLVED 2026-06-11 (MED-4):** offloaded to `media-queue.js` (bounded serial worker) — poller never pauses; see [`CHANNEL-INBOUND-THROUGHPUT-DESIGN-2026-06-11.md`](CHANNEL-INBOUND-THROUGHPUT-DESIGN-2026-06-11.md) |
 
 ## Test strategy
 
@@ -122,14 +124,14 @@ Step 4 is DONE when: a photo, a voice note, and an .md file each produce (a) an 
 | Risk | L | I | Mitigation |
 |---|---|---|---|
 | OGG/Opus unsupported by llama.cpp audio decode | M | M | fail-soft placeholder; step-3 live fixture decides; optional ffmpeg transcode follow-up |
-| Cold-model extraction latency (≈2min) stalls poller | M | L | single-user serial volume; 600s turn budget; detach later if real |
+| Cold-model extraction latency (≈2min) stalls poller | ~~M~~ | ~~L~~ | **RESOLVED 2026-06-11 (MED-4):** media stage offloaded to a bounded serial worker (`media-queue.js`); gate `verify:channel-inbound-throughput` proves a media flood doesn't stall a subsequent owner DM |
 | Capabilities probe unsupported on old Ollama | L | L | name-list fallback retained |
 | 20MB+ media expectations | M | L | clear placeholder text tells the user the limit |
 | Duplicate attachment rows on rare replay | L | L | fileUniqueId in metadata enables GC |
 
 ## Deferred (named so they don't ambush later)
 
-video ingestion · cloud-provider multimodal extraction · auto-document creation from text files (canonical behavior; V1 captures as message only) · group @mention-triage gate · per-chat media rate budget · re-extraction backfill when a capable model is installed later · WhatsApp/Discord media (Discord normalize has no attachment parsing).
+video ingestion · cloud-provider multimodal extraction · auto-document creation from text files (canonical behavior; V1 captures as message only) · group @mention-triage gate · ~~per-chat media rate budget~~ (per-sender throttle BUILT 2026-06-11, MED-4) · re-extraction backfill when a capable model is installed later · WhatsApp/Discord media (Discord normalize has no attachment parsing).
 
 ## Verification table
 

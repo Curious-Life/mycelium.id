@@ -69,7 +69,27 @@
 		parent_id?: string;
 	}
 
+	// Media attachment from /portal/attachments — channel media (photos, voice
+	// notes, files) + portal uploads. Shown alongside documents in All Documents
+	// with inline previews; the actual file serves from `url` (decrypted on read).
+	interface MediaItem {
+		id: string;
+		type: 'image' | 'voice' | 'video' | 'file';
+		url: string;
+		playbackUrl?: string;
+		filename?: string | null;
+		fileSize?: number | null;
+		description?: string | null;
+		transcript?: string | null;
+		createdAt?: string | null;
+	}
+
+	// One grid/list entry — a document or a media attachment, date-sorted.
+	type LibraryItem = { kind: 'doc'; date: string; doc: DocListItem } | { kind: 'media'; date: string; media: MediaItem };
+
 	let documents = $state<DocListItem[]>([]);
+	let mediaItems = $state<MediaItem[]>([]);
+	let selectedMedia = $state<MediaItem | null>(null);
 	let folders = $state<Folder[]>([]);
 	let selectedDoc = $state<DocFull | null>(null);
 	let loadingDoc = $state(false);
@@ -132,7 +152,7 @@
 		// Initial load is fire-and-forget — the listeners below don't depend on
 		// it, so they attach synchronously (onMount must return its cleanup
 		// synchronously; an async callback can't).
-		void Promise.all([loadDocuments(), loadFolders()]).then(() => {
+		void Promise.all([loadDocuments(), loadFolders(), loadMedia()]).then(() => {
 			loading = false;
 			prevFolderId = activeFolderId;
 		});
@@ -317,6 +337,18 @@
 		}
 	}
 
+	async function loadMedia() {
+		try {
+			const res = await api('/portal/attachments?limit=200');
+			if (res.ok) {
+				const data = await res.json();
+				mediaItems = data.attachments || [];
+			}
+		} catch (e) {
+			console.error('[Library] Error loading media:', e);
+		}
+	}
+
 	const filteredDocs = $derived.by(() => {
 		let docs = documents;
 		if (searchQuery) {
@@ -328,6 +360,34 @@
 		}
 		return docs;
 	});
+
+	const filteredMedia = $derived.by(() => {
+		// Media lives in All Documents only — folders + starred are doc concepts.
+		if (activeFolderId) return [];
+		let items = mediaItems;
+		if (searchQuery) {
+			const q = searchQuery.toLowerCase();
+			items = items.filter((m) =>
+				(m.filename || '').toLowerCase().includes(q) ||
+				(m.description || '').toLowerCase().includes(q) ||
+				(m.transcript || '').toLowerCase().includes(q)
+			);
+		}
+		return items;
+	});
+
+	// Unified, recency-sorted feed: documents + media in one grid/list.
+	const libraryItems = $derived.by<LibraryItem[]>(() => {
+		const items: LibraryItem[] = filteredDocs.map((d) => ({ kind: 'doc' as const, date: d.updated_at || '', doc: d }));
+		for (const m of filteredMedia) items.push({ kind: 'media' as const, date: m.createdAt || '', media: m });
+		return items.sort((a, b) => b.date.localeCompare(a.date));
+	});
+
+	function formatBytes(n?: number | null): string {
+		if (!n || n <= 0) return '';
+		if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+		return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+	}
 
 	async function selectDoc(doc: DocListItem, updateParams = true) {
 		loadingDoc = true;
@@ -1214,7 +1274,7 @@
 					<div class="min-w-0">
 						<h1 class="text-lg sm:text-xl font-medium text-[var(--color-text-primary)] truncate">{getFolderLabel()}</h1>
 						<p class="text-xs sm:text-sm text-[var(--color-text-tertiary)]">
-							{filteredDocs.length} {filteredDocs.length === 1 ? 'document' : 'documents'}
+							{filteredDocs.length} {filteredDocs.length === 1 ? 'document' : 'documents'}{#if filteredMedia.length} · {filteredMedia.length} media{/if}
 						</p>
 					</div>
 				</div>
@@ -1363,7 +1423,7 @@
 					</button>
 				</div>
 			</div>
-		{:else if filteredDocs.length === 0}
+		{:else if libraryItems.length === 0}
 			<div class="flex items-center justify-center h-full p-8">
 				<div class="text-center max-w-md">
 					<div class="w-16 h-16 rounded-full bg-[var(--color-elevated)] flex items-center justify-center mx-auto mb-4">
@@ -1602,7 +1662,41 @@
 		{:else if viewMode === 'list'}
 			<!-- List view -->
 			<div class="max-w-3xl mx-auto space-y-1.5">
-				{#each filteredDocs as doc}
+				{#each libraryItems as item}
+					{#if item.kind === 'media'}
+						{@const m = item.media}
+						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<div
+							onclick={() => (selectedMedia = m)}
+							onkeydown={(e) => { if (e.key === 'Enter') selectedMedia = m; }}
+							role="button"
+							tabindex="0"
+							class="flex items-start gap-2 sm:gap-3 rounded-lg sm:rounded-xl p-2.5 sm:p-3 transition-all duration-150 cursor-pointer border bg-[var(--color-surface)] w-full text-left border-[var(--color-border)] hover:border-aurum/50 group"
+						>
+							<span class="flex-shrink-0 w-8 sm:w-10 flex items-center justify-center pt-0.5">
+								{#if m.type === 'image'}
+									<img src={m.url} alt={m.filename || 'image'} loading="lazy" class="w-8 h-8 sm:w-10 sm:h-10 rounded-md object-cover" />
+								{:else if m.type === 'voice'}
+									<svg class="w-5 h-5 sm:w-6 sm:h-6 text-aurum/80" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
+								{:else}
+									<svg class="w-5 h-5 sm:w-6 sm:h-6 text-[var(--color-text-tertiary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+								{/if}
+							</span>
+							<div class="flex-1 min-w-0 text-left">
+								<div class="flex items-center gap-1.5 sm:gap-2 mb-0.5">
+									<h3 class="text-sm sm:text-base font-medium text-[var(--color-text-primary)] truncate">{m.filename || (m.type === 'voice' ? 'Voice note' : m.type)}</h3>
+									<span class="flex-shrink-0 text-[9px] font-mono uppercase tracking-wider text-aurum bg-[var(--color-elevated)] px-1.5 py-0.5 rounded">{m.type}</span>
+								</div>
+								{#if m.transcript || m.description}
+									<p class="text-xs sm:text-sm text-[var(--color-text-secondary)] leading-snug line-clamp-2 italic">{m.transcript || m.description}</p>
+								{/if}
+								<p class="text-xs text-[var(--color-text-tertiary)] mt-1 sm:mt-1.5">
+									{#if formatBytes(m.fileSize)}{formatBytes(m.fileSize)} &middot; {/if}{#if m.createdAt}{formatDate(m.createdAt, true)}{/if}
+								</p>
+							</div>
+						</div>
+					{:else}
+						{@const doc = item.doc}
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<div
 						onclick={() => selectDoc(doc)}
@@ -1650,12 +1744,54 @@
 							</p>
 						</div>
 					</div>
+					{/if}
 				{/each}
 			</div>
 		{:else}
 			<!-- Grid view -->
 			<div class="grid gap-3 sm:gap-4" style="grid-template-columns: repeat(auto-fill, minmax({gridMinPx}px, 1fr));">
-				{#each filteredDocs as doc}
+				{#each libraryItems as item}
+					{#if item.kind === 'media'}
+						{@const m = item.media}
+						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<div
+							onclick={() => (selectedMedia = m)}
+							onkeydown={(e) => { if (e.key === 'Enter') selectedMedia = m; }}
+							role="button"
+							tabindex="0"
+							class="flex flex-col rounded-xl transition-all duration-150 cursor-pointer border bg-[var(--color-surface)] text-left relative group border-[var(--color-border)] hover:border-aurum/50 overflow-hidden"
+						>
+							<div class="px-3 py-2 border-b border-[var(--color-border)]">
+								<div class="flex items-center gap-2">
+									<h3 class="flex-1 min-w-0 text-sm font-medium text-[var(--color-text-primary)] truncate">{m.filename || (m.type === 'voice' ? 'Voice note' : m.type)}</h3>
+									<span class="flex-shrink-0 text-[9px] font-mono uppercase tracking-wider text-aurum bg-[var(--color-elevated)] px-1.5 py-0.5 rounded">{m.type}</span>
+								</div>
+								<p class="text-[10px] text-[var(--color-text-tertiary)] mt-0.5 truncate">
+									{#if formatBytes(m.fileSize)}{formatBytes(m.fileSize)}{/if}{#if formatBytes(m.fileSize) && m.createdAt}<span class="mx-1">·</span>{/if}{#if m.createdAt}{formatDate(m.createdAt, true)}{/if}
+								</p>
+							</div>
+							<div class="w-full aspect-[4/3] bg-[var(--color-elevated)] overflow-hidden relative flex items-center justify-center">
+								{#if m.type === 'image'}
+									<img src={m.url} alt={m.filename || 'image'} loading="lazy" class="w-full h-full object-cover" />
+								{:else if m.type === 'voice'}
+									<div class="flex flex-col items-center justify-center gap-2 w-full px-3">
+										<svg class="w-7 h-7 text-aurum/70" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
+										<!-- svelte-ignore a11y_no_static_element_interactions -->
+										<audio controls preload="none" src={m.playbackUrl || m.url} class="w-full max-w-[240px]" onclick={(e) => e.stopPropagation()}></audio>
+										{#if m.transcript}
+											<p class="text-[10px] text-[var(--color-text-tertiary)] line-clamp-2 italic text-center">{m.transcript}</p>
+										{/if}
+									</div>
+								{:else}
+									<div class="flex flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
+										<svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+										<span class="text-[10px]">{m.filename || 'file'}</span>
+									</div>
+								{/if}
+							</div>
+						</div>
+					{:else}
+						{@const doc = item.doc}
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					{@const _name = (doc.path.split('/').pop() || doc.path).trim()}
 					{@const _dot = _name.lastIndexOf('.')}
@@ -1709,11 +1845,53 @@
 							<DocThumbnail path={doc.path} title={docTitle} ariaLabel={docTitle || doc.path} />
 						</div>
 					</div>
+					{/if}
 				{/each}
 			</div>
 		{/if}
 	</div>
 </div>
+
+<!-- Media detail — full preview + transcript/description + the actual file -->
+{#if selectedMedia}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<!-- svelte-ignore a11y_click_events_have_key_events -->
+	<div class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onclick={() => (selectedMedia = null)}>
+		<!-- svelte-ignore a11y_click_events_have_key_events -->
+		<div class="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto" onclick={(e) => e.stopPropagation()}>
+			<div class="flex items-center gap-2 px-4 py-3 border-b border-[var(--color-border)]">
+				<h3 class="flex-1 min-w-0 text-sm font-medium text-[var(--color-text-primary)] truncate">{selectedMedia.filename || (selectedMedia.type === 'voice' ? 'Voice note' : selectedMedia.type)}</h3>
+				<span class="text-[9px] font-mono uppercase tracking-wider text-aurum bg-[var(--color-elevated)] px-1.5 py-0.5 rounded">{selectedMedia.type}</span>
+				<button class="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors" onclick={() => (selectedMedia = null)} aria-label="Close">
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+				</button>
+			</div>
+			<div class="p-4 space-y-3">
+				{#if selectedMedia.type === 'image'}
+					<img src={selectedMedia.url} alt={selectedMedia.filename || 'image'} class="max-h-[55vh] w-auto mx-auto rounded-lg object-contain" />
+				{:else if selectedMedia.type === 'voice'}
+					<audio controls preload="metadata" src={selectedMedia.playbackUrl || selectedMedia.url} class="w-full"></audio>
+				{/if}
+				{#if selectedMedia.transcript}
+					<p class="text-sm text-[var(--color-text-secondary)] italic leading-relaxed">{selectedMedia.transcript}</p>
+				{/if}
+				{#if selectedMedia.description}
+					<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">{selectedMedia.description}</p>
+				{/if}
+				<div class="flex items-center justify-between pt-1">
+					<span class="text-xs text-[var(--color-text-tertiary)]">
+						{#if formatBytes(selectedMedia.fileSize)}{formatBytes(selectedMedia.fileSize)}{/if}{#if formatBytes(selectedMedia.fileSize) && selectedMedia.createdAt}<span class="mx-1">·</span>{/if}{#if selectedMedia.createdAt}{formatDate(selectedMedia.createdAt, true)}{/if}
+					</span>
+					<a
+						href={selectedMedia.url}
+						download={selectedMedia.filename || 'attachment'}
+						class="text-xs px-3 py-1.5 rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-aurum/60 hover:text-[var(--color-text-primary)] transition-colors"
+					>Download file</a>
+				</div>
+			</div>
+		</div>
+	</div>
+{/if}
 
 <!-- Context menu -->
 {#if contextMenu}

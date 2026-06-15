@@ -107,6 +107,12 @@ if [ "${MYCELIUM_RUN_CHRONICLES:-}" = "1" ]; then
   node pipeline/describe-chronicles.js $DRY_RUN
 fi
 
+# Append a per-entity DYNAMICS snapshot to the entity change-log (history). Narrative
+# history is hooked at the describe write sites above; this captures the trajectory of
+# energy/coherence/velocity/counts that territory_profiles otherwise overwrites each
+# run. Dedup-vs-latest; fail-soft (never blocks the cycle).
+node pipeline/snapshot-entities.js $DRY_RUN
+
 echo ""
 echo "Step 4/16: Compute territory co-firing"
 node pipeline/compute-cofire.js

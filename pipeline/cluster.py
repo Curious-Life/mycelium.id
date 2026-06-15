@@ -2021,9 +2021,9 @@ def main():
             )
 
     # Write lineage and inherit identity to dominant successors
+    successor_inherits = {}  # new_id → old_id (dominant only); read again after compute_dynamics
     if terr_lineage and not args.dry_run:
         print(f"  Recording {len(terr_lineage)} lineage relationships...")
-        successor_inherits = {}  # new_id → old_id (dominant only)
         for ln in terr_lineage:
             d1_query(
                 """INSERT OR REPLACE INTO territory_lineage
@@ -2040,11 +2040,10 @@ def main():
         for new_id, old_id in successor_inherits.items():
             try:
                 old_p = d1_query(
-                    "SELECT name, essence FROM territory_profiles WHERE territory_id = ? AND user_id = ?",
+                    "SELECT territory_id FROM territory_profiles WHERE territory_id = ? AND user_id = ?",
                     [old_id, user_id],
                 )
                 if old_p:
-                    old_name = old_p[0].get('name') or f'T{old_id}'
                     new_p = d1_query(
                         "SELECT predecessor_ids, evolved_from_count FROM territory_profiles WHERE territory_id = ? AND user_id = ?",
                         [new_id, user_id],
@@ -2098,6 +2097,50 @@ def main():
         point_ids, results, embeddings, terr_events,
         old_territories, user_id, dry_run=args.dry_run,
     )
+
+    # Chronicle inheritance: a dominant successor starts with its dissolved
+    # predecessor's chronicle instead of a blank card. MUST run after
+    # compute_dynamics (which upserts every live territory row — the successor
+    # may not exist before it). The copy is CIPHERTEXT-VERBATIM: d1_query
+    # returns the stored AES-GCM envelopes for ENCRYPTED_FIELDS as-is and we
+    # write the same values back — never decrypt in Python, never route through
+    # the encrypt bridge (that would double-encrypt). Guards: predecessor must
+    # HAVE a chronicle, successor must NOT (its own chronicle is never
+    # overwritten). The inherited point_count_at_description makes the
+    # describe-chronicles drift gate re-narrate naturally once the successor's
+    # content meaningfully diverges.
+    _CHRONICLE_COLS = [
+        'essence', 'archetype_type', 'archetype_character',
+        'story_birth', 'story_arc', 'story_current_chapter', 'story_peak_moments',
+        'signature_patterns', 'uncertainty_open_questions', 'uncertainty_edges',
+        'agent_expertise', 'agent_curious_about', 'agent_can_help_with',
+        'agent_would_consult', 'top_entities',
+        'description_version', 'point_count_at_description', 'last_described_at',
+        'generation_model',
+    ]
+    if successor_inherits and not args.dry_run:
+        inherited = 0
+        for new_id, old_id in successor_inherits.items():
+            try:
+                old_rows = d1_query(
+                    f"SELECT {', '.join(_CHRONICLE_COLS)} FROM territory_profiles "
+                    "WHERE territory_id = ? AND user_id = ? AND description_version IS NOT NULL",
+                    [old_id, user_id],
+                )
+                if not old_rows:
+                    continue  # predecessor was never chronicled — nothing to carry
+                vals = [old_rows[0].get(c) for c in _CHRONICLE_COLS]
+                sets = ', '.join(f"{c} = ?" for c in _CHRONICLE_COLS)
+                d1_query(
+                    f"UPDATE territory_profiles SET {sets} "
+                    "WHERE territory_id = ? AND user_id = ? AND description_version IS NULL",
+                    [*vals, new_id, user_id],
+                )
+                inherited += 1
+            except Exception as e:
+                print(f"    (chronicle inheritance failed for T{old_id} → T{new_id}: {e})")
+        if inherited:
+            print(f"  Inherited chronicles for {inherited} dominant successors")
 
     # Flag catch-all territories (statistical outliers with low coherence)
     flag_catch_all_territories(

@@ -16,6 +16,7 @@ import { getBlob as realGetBlob } from './ingest/blob-store.js';
 import { describeImage as realDescribeImage } from './enrich/describe-image.js';
 import { transcribeAudio as realTranscribeAudio } from './enrich/transcribe-audio.js';
 import { extractDocumentText as realExtractDocumentText, documentKindOf } from './enrich/extract-document.js';
+import { saveDocument } from './core/document-store.js';
 
 /** Parse the decrypted `{ "apiKey": "…" }` credentials envelope → key string|null. */
 function parseProviderApiKey(credentials) {
@@ -317,7 +318,7 @@ export function internalRouter({ db, userId, enrich = {} }) {
     if (!attachmentId) return res.status(400).json({ ok: false, error: 'attachmentId required' });
     if (!db?.attachments?.getById) return res.status(503).json({ ok: false, error: 'attachments unavailable' });
     try {
-      const row = await db.attachments.getById(attachmentId);
+      const row = await db.attachments.getById(attachmentId, userId);
       // 404 on missing AND on cross-user rows alike — don't leak existence.
       if (!row || row.user_id !== userId) return res.status(404).json({ ok: false, error: 'not-found' });
       if (!row.local_path) return res.json({ ok: true, contextText: null, reason: 'no-local-blob' });
@@ -333,11 +334,30 @@ export function internalRouter({ db, userId, enrich = {} }) {
       const bytes = await getBlob(row.local_path);
       let contextText = null;
 
+      // Model extraction gets ONE retry: the dominant live failure is the
+      // first call dying on a cold model (load + ingest blow the budget)
+      // while the very next call — model now warm — succeeds in seconds.
+      // Both attempts stay fail-soft; attempt count is logged, content never.
+      const withRetry = async (label, fn) => {
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          const out = await fn();
+          if (out) {
+            if (attempt > 1) console.log(`[internal-router] attachment-context ${label} succeeded on retry`);
+            return out;
+          }
+          if (attempt === 1) console.log(`[internal-router] attachment-context ${label} empty on attempt 1 — retrying once`);
+        }
+        return null;
+      };
+
       if (kind === 'image') {
-        contextText = await describeImage({ bytes });
+        // Explicit budget: describeImage defaults to 30s (portal-upload UX),
+        // but a COLD 12B vision call takes ~110s live — the channel path is
+        // async (placeholder degrades gracefully) so it can afford to wait.
+        contextText = await withRetry('vision', () => describeImage({ bytes, timeoutMs: Number(process.env.MYCELIUM_VISION_TIMEOUT_MS) || 240_000 }));
         if (contextText) await db.attachments.update(attachmentId, { description: contextText });
       } else if (kind === 'audio' || kind === 'voice') {
-        contextText = await transcribeAudio({ bytes, mimeType: fileType, fileName });
+        contextText = await withRetry('transcribe', () => transcribeAudio({ bytes, mimeType: fileType, fileName }));
         if (contextText) await db.attachments.update(attachmentId, { transcript: contextText });
       } else if (kind === 'text') {
         const text = bytes.toString('utf8').replace(/\u0000/g, '').trim();
@@ -348,6 +368,32 @@ export function internalRouter({ db, userId, enrich = {} }) {
         if (contextText) await db.attachments.update(attachmentId, { description: contextText });
       }
       // other binaries: honest null (stored + linked, no derived text).
+
+      // Library presence: every channel attachment ALSO lands as a document
+      // under uploads/ so it shows in Library → All docs (canonical did this
+      // for text files; users expect it for all media). Content = the derived
+      // text plus a stable reference to the encrypted attachment. Fail-soft:
+      // a document hiccup never fails the extraction response.
+      try {
+        const title = fileName || `${kind}-${attachmentId.slice(0, 8)}`;
+        const label = kind === 'image' ? 'Image' : (kind === 'audio' || kind === 'voice') ? 'Voice / audio' : 'File';
+        const body = [
+          `# ${title}`,
+          '',
+          `${label} received via channel — stored encrypted (attachment ${attachmentId}).`,
+          `[View in Media](/media) · [open file](/api/v1/portal/attachments/${attachmentId}/file)`,
+          '',
+          contextText ? (kind === 'image' ? `**Description:** ${contextText}` : contextText) : '_No derived text yet._',
+        ].join('\n');
+        await saveDocument({ db }, {
+          userId, source: 'portal-upload', sourceType: 'upload', scope: 'personal',
+          createdBy: 'channel-daemon',
+          // attachmentId prefix keeps paths unique (two photos named photo.jpg
+          // must not upsert-overwrite each other); re-extraction upserts in place.
+          pathArgs: { filename: `${attachmentId.slice(0, 8)}-${title}` },
+          content: body, title,
+        });
+      } catch (e) { console.error('[internal-router] attachment document upsert failed:', e.message); }
 
       return res.json({ ok: true, contextText, kind });
     } catch (err) {
