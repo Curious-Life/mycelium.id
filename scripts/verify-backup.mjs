@@ -8,7 +8,8 @@
 // (same trick as verify-account).
 import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { safeUploadDest } from '../src/account/backup.js';
 import Database from 'better-sqlite3';
 import JSZip from 'jszip';
 
@@ -146,6 +147,15 @@ try {
   // ── G. a non-archive upload is rejected ─────────────────────────────────────
   const garbage = await upload(`${s2.url}/api/v1/account/restore-backup`, Buffer.from('not a zip at all'), { overwrite: 'true' });
   ok(garbage.status === 400 && garbage.body.error === 'invalid_archive', 'G1. garbage upload → 400 invalid_archive');
+
+  // ── G2. restore zip-slip containment: an uploads/../escape entry must resolve
+  //        to null (skipped); legit entries resolve under uploadsRoot. ──
+  const upRoot = '/tmp/myc-uploads-root';
+  ok(safeUploadDest(upRoot, 'uploads/legit.txt') === resolve(upRoot, 'legit.txt'), 'G2. legit uploads entry → contained dest');
+  ok(safeUploadDest(upRoot, 'uploads/sub/a.bin') === resolve(upRoot, 'sub/a.bin'), 'G2b. nested uploads entry → contained dest');
+  ok(safeUploadDest(upRoot, 'uploads/../escape.txt') === null, 'G2c. uploads/../escape → null (containment blocks escape)');
+  ok(safeUploadDest(upRoot, 'uploads/a/../../escape') === null, 'G2d. deep ../.. escape → null');
+  ok(safeUploadDest(upRoot, 'uploads/') === null, 'G2e. empty rel → null');
 
   await new Promise((r) => s2.server.close(r)); s2.close?.();
 } catch (err) {

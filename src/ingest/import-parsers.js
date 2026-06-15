@@ -14,8 +14,28 @@
 // so all storage goes through the audited, encrypting write path — the parser
 // module itself never touches the db or crypto directly.
 
-const MAX_JSON_BYTES = Number(process.env.MYCELIUM_IMPORT_MAX_JSON_BYTES) || 400 * 1024 * 1024; // cap on conversations.json (bytes)
+const MAX_JSON_BYTES = Number(process.env.MYCELIUM_IMPORT_MAX_JSON_BYTES) || 128 * 1024 * 1024;  // cap on conversations.json (bytes)
 const MAX_MESSAGES   = Number(process.env.MYCELIUM_IMPORT_MAX_MESSAGES) || 1_000_000;            // bound the work per import
+const MAX_ENTRIES    = Number(process.env.MYCELIUM_IMPORT_MAX_ENTRIES) || 200_000;               // archive entry-count cap
+
+/**
+ * Reject an archive with a pathological number of entries BEFORE any per-entry
+ * work. JSZip.loadAsync parses the whole central directory into `zip.files`, so a
+ * crafted zip with millions of tiny entries is an OOM/CPU bomb that the per-entry
+ * byte caps never catch. Throws { code: 'TOO_MANY_ENTRIES' }; callers map to a
+ * clean 4xx. Bound is env-overridable for a legitimately huge vault.
+ * @param {object} zip  a loaded JSZip
+ * @returns {number}    the entry count (when within bound)
+ */
+export function assertEntryCount(zip, max = MAX_ENTRIES) {
+  const n = zip?.files ? Object.keys(zip.files).length : 0;
+  if (n > max) {
+    const e = new Error(`archive entry count ${n} exceeds the import cap (${max})`);
+    e.code = 'TOO_MANY_ENTRIES';
+    throw e;
+  }
+  return n;
+}
 
 /**
  * Read a zip text entry, hard-capping inflated bytes. Two independent layers so

@@ -2,7 +2,7 @@ import express from 'express';
 import Busboy from 'busboy';
 import JSZip from 'jszip';
 import { captureMessage } from './ingest/capture.js';
-import { detectExportType, processClaudeExport, processOpenAIExport } from './ingest/import-parsers.js';
+import { detectExportType, processClaudeExport, processOpenAIExport, assertEntryCount } from './ingest/import-parsers.js';
 import { importMyceliumVault } from './ingest/vault-import.js';
 import { uploadAttachment } from './ingest/upload.js';
 import { describeImage } from './enrich/describe-image.js';
@@ -103,8 +103,11 @@ export function portalUploadsRouter({ db, userId, enqueueEnrichment = null }) {
   // Detect + parse an assembled archive buffer → importResult (or a typed error).
   async function processArchive(buffer, filename) {
     let zip;
-    try { zip = await JSZip.loadAsync(buffer); }
-    catch { return { error: 'unrecognized file — upload a Mycelium vault export, or a Claude/ChatGPT export .zip' }; }
+    try { zip = await JSZip.loadAsync(buffer); assertEntryCount(zip); }
+    catch (e) {
+      if (e?.code === 'TOO_MANY_ENTRIES') return { error: 'this archive has too many entries — refusing to import (possible archive bomb)' };
+      return { error: 'unrecognized file — upload a Mycelium vault export, or a Claude/ChatGPT export .zip' };
+    }
 
     const detected = await detectExportType(zip);
     const capture = (msg) => captureMessage(db, { userId, ...msg }, enqueueEnrichment);
