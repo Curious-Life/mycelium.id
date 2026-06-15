@@ -62,7 +62,7 @@ const normalizeValue = (v) => {
  * (⇒ idempotent re-import). Fail-soft per row — one malformed row must not
  * abort a 50k-row import.
  */
-async function restoreTable(db, table, rows, { userId, overrides = {} }) {
+export async function restoreTable(db, table, rows, { userId, overrides = {} }) {
   // `attempted`/`capped` feed the reconciliation report: declared − attempted
   // must be zero, or the report names exactly what was never even tried.
   const out = { attempted: 0, inserted: 0, deduped: 0, failed: 0, capped: 0 };
