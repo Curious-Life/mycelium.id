@@ -72,6 +72,8 @@
     "verify:behavioral": "node scripts/verify-behavioral.mjs",
     "verify:mindfiles": "node scripts/verify-mindfiles.mjs",
     "verify:rest": "node scripts/verify-rest.mjs",
+    "verify:memory-bridge": "node scripts/verify-memory-bridge.mjs",
+    "verify:memory-adapters": "node scripts/verify-memory-adapters.mjs",
     "verify:search": "node scripts/verify-search.mjs",
     "verify:search-rehydrate": "node scripts/verify-search-rehydrate.mjs",
     "verify:embed": "node scripts/verify-embed.mjs",

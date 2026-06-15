@@ -125,4 +125,33 @@ Goose, Cline, Continue, Codex, OpenHands, Cursor, … all fit this shape — see
 
 ---
 
+## Auto-capture — the universal memory layer
+
+The recipes above let an agent *read and write* the vault when the model chooses to.
+To make **every** turn flow into memory automatically (both your message and the
+reply, plus context pulled back in) — without relying on the model's discretion —
+use the **memory bridge**. Full guide: [`tools/memory-bridge/README.md`](../tools/memory-bridge/README.md); design: [UNIVERSAL-MEMORY-LAYER-DESIGN-2026-06-11.md](UNIVERSAL-MEMORY-LAYER-DESIGN-2026-06-11.md).
+
+**Two ways, by harness capability:**
+
+1. **Gateway tier (zero adapter code, any harness with a custom base-URL).** Point the
+   model at `:4711/v1` as above and add one header — `X-Mycelium-Capture: <conversation-id>`.
+   The gateway then injects your vault context as a system preamble and captures the new
+   user turn + the assistant reply (idempotent, last-turn-only). Without the header it's
+   the unchanged pass-through proxy. Works today for opencode / openclaw / hermes / Cline / …
+
+2. **Native-hook tier (agent keeps its own model).** A drop-in plugin per harness wires
+   its lifecycle hooks to `POST /context` (pull) + `POST /ingest/message` (push). All
+   built + gated (`npm run verify:memory-adapters`), each code-verified against the real
+   harness repo — see each folder's README:
+   - **Claude Code** — `tools/memory-bridge/claude-code/` (`.claude/settings.local.json`: `UserPromptSubmit`→inject, `Stop`→capture both sides from the transcript).
+   - **hermes-agent** — `tools/memory-bridge/hermes/mycelium-memory/` (drop in `~/.hermes/plugins/`; hooks `pre_llm_call` inject + `post_llm_call` capture).
+   - **opencode** — `tools/memory-bridge/opencode/` (config `plugin:[…]` or `.opencode/plugin/`; `experimental.chat.system.transform` inject + `chat.message`/`event` capture).
+   - **openclaw** — `tools/memory-bridge/openclaw/` (`plugins.load.paths` + `plugins.entries`; `before_prompt_build` inject + `llm_output` capture both sides).
+
+Both require `npm run start:http` running with `MYCELIUM_MCP_BEARER` set. The bridge
+**fails open** — if the server is down, no turn is ever blocked. Gate: `npm run verify:memory-bridge`.
+
+---
+
 *Config key names for third-party harnesses were verified against each project's current docs on 2026-06-06; if a harness has since changed its schema, its own MCP docs are authoritative. Design rationale: [DESIGN-harness-connect-2026-06-06.md](DESIGN-harness-connect-2026-06-06.md).*
