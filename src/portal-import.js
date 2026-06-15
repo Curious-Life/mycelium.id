@@ -11,6 +11,7 @@
 
 import express from 'express';
 import { importObsidianVault } from './ingest/obsidian-import.js';
+import { importFullExport } from './ingest/full-export-import.js';
 
 export function portalImportRouter({ db, userId, enqueueEnrichment }) {
   const router = express.Router();
@@ -33,6 +34,23 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
       const msg = String(e?.message || e);
       // Known caller errors → 400; everything else → 500. Never leak a stack.
       const is400 = /required|not a directory|folderPath|files/i.test(msg);
+      return res.status(is400 ? 400 : 500).json({ ok: false, error: msg.slice(0, 200) });
+    }
+  });
+
+  // POST /import/full-export { dirPath } — ingest a DECRYPTED mycelium-full-export
+  // directory straight off disk (GB-scale: streamed, never uploaded). Same
+  // localhost-only posture as /import/obsidian folderPath: reads server-local
+  // paths, gated by the vault sub-app's loopback/auth middleware.
+  router.post('/import/full-export', express.json({ limit: '64kb' }), async (req, res) => {
+    try {
+      const dirPath = req.body?.dirPath;
+      if (typeof dirPath !== 'string' || !dirPath) return res.status(400).json({ ok: false, error: 'dirPath required' });
+      const summary = await importFullExport({ db, userId, dirPath, enqueueEnrichment });
+      return res.json({ ok: true, ...summary });
+    } catch (e) {
+      const msg = String(e?.message || e);
+      const is400 = /required|invalid_bundle|format|manifest/i.test(msg);
       return res.status(is400 ? 400 : 500).json({ ok: false, error: msg.slice(0, 200) });
     }
   });

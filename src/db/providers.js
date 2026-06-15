@@ -80,8 +80,14 @@ export function createProvidersNamespace(deps) {
          WHERE user_id = ? AND provider = ?`,
         [userId, row.provider],
       );
+      // Bump last_used_at on activate so THIS provider becomes the resolved
+      // "active" one — getActive(no type) returns is_active=1 ORDER BY last_used_at
+      // DESC, so choosing a provider must make it the most-recent or the UI/system
+      // would keep showing whichever ran inference last (the "shows Claude 3 but
+      // uses Regolo" bug). Cross-type siblings stay is_active (one per type), but
+      // only the chosen one is the resolved default.
       await d1Query(
-        `UPDATE ai_providers SET is_active = 1, updated_at = datetime('now')
+        `UPDATE ai_providers SET is_active = 1, last_used_at = datetime('now'), updated_at = datetime('now')
          WHERE id = ? AND user_id = ?`,
         [id, userId],
       );

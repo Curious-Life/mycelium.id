@@ -455,13 +455,24 @@ export async function startRestServer({
   // fall back to 200.html for NAVIGATION requests only — GET, accepts html, not
   // under a data prefix, extensionless (a missing asset like /x.js still 404s).
   const { dir: portalDir, spaFallback } = resolvePortal(portalMode);
-  app.use(express.static(portalDir));
+  app.use(express.static(portalDir, {
+    setHeaders(res, filePath) {
+      // The SPA shell (200.html / index.html) must NEVER be cached. SvelteKit's
+      // JS/CSS are content-hashed and immutable, but the shell references them by
+      // hash — a cached shell pins the OLD bundle, so the app "won't update" after
+      // a deploy until the WebView cache is manually cleared (cost a debugging
+      // round-trip 2026-06-15). no-store on the shell makes a reload always fetch
+      // the current bundle; hashed assets keep their default long cache.
+      if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-store');
+    },
+  }));
   if (spaFallback) {
     // /api, /ingest, /portal, /auth are data paths — never shadow them with the
     // SPA shell (so unmatched data calls 404 cleanly instead of returning HTML).
     // Exclude both `/api/…` and a bare `/api` (the `(?:\/|$)` guard).
     app.get(/^\/(?!(?:api|ingest|portal|auth)(?:\/|$))(?:[^.]*)$/, (req, res, next) => {
       if (req.method !== 'GET' || !req.accepts('html')) return next();
+      res.setHeader('Cache-Control', 'no-store'); // see static setHeaders above
       res.sendFile(spaFallback);
     });
   }

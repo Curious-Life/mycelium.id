@@ -146,6 +146,13 @@ function canonicalUrl(tab: Tab): string {
 	if (tab.viewId === 'streams') {
 		return tab.params.facet === 'sources' ? '/streams?facet=sources' : '/streams';
 	}
+	if (tab.viewId === 'settings') {
+		// Settings is a single hub with a left-rail of panes; the active pane
+		// rides in params.pane (mirrored to /settings?pane=…). Profile is the
+		// default pane, so a bare /settings == the Profile pane.
+		const pane = tab.params.pane;
+		return typeof pane === 'string' && pane && pane !== 'profile' ? `/settings?pane=${pane}` : '/settings';
+	}
 	return `/${tab.viewId}`;
 }
 

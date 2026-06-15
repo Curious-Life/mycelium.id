@@ -99,6 +99,12 @@
 		if (status) {
 			dismissed = !!status.dismissed;
 			welcomeSeen = !status.showWelcome; // showWelcome is true only on an unseen empty vault
+			// Correct the first-frame localStorage guess (line ~64): if the BACKEND
+			// already knows the welcome was seen/dismissed, close the backdrop even
+			// when client localStorage is empty — e.g. a populated vault loaded on a
+			// fresh dev-server origin (new vite port) where localStorage resets.
+			// Without this the welcome wrongly re-shows over an existing vault.
+			if (welcomeSeen || dismissed) welcomeOpen = false;
 			const d = status.steps?.data ?? {};
 			messageCount = Number(d.messageCount ?? 0);
 			embedded = Number(d.enrichedCount ?? 0);

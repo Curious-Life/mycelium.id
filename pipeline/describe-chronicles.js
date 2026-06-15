@@ -24,6 +24,9 @@
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { createNarrator } from './lib/narrate-infer.js';
+import {
+  loadMembers, sampleMembers, getSeenIds, recordSeen, exploredPercent, lastPassNumber,
+} from './lib/narrate-sample.js';
 
 export const CHRONICLE_VERSION = process.env.MYCELIUM_CHRONICLE_VERSION || 'chronicle-v1';
 
@@ -50,38 +53,68 @@ export function hasDrifted(currentCount, countAtDescription, { factor = DRIFT_FA
  * compare the DECRYPTED value in JS. This is why we don't use
  * db.territoryDocs.getNeedingDescription (whose SQL version filter is ineffective).
  */
-async function getTerritoriesToNarrate(db, userId, version) {
+async function getTerritoriesToNarrate(db, userId, version, preserveImported = false) {
   const r = await db.rawQuery(
-    `SELECT territory_id, name, essence, description_version, message_count,
-            point_count_at_description
+    `SELECT territory_id, name, essence, archetype_type,
+            story_birth, story_arc, story_current_chapter,
+            description_version, message_count,
+            point_count_at_description, explored_percent
        FROM territory_profiles
       WHERE user_id = ? AND dissolved_at IS NULL
       ORDER BY message_count DESC`,
     [userId],
   ).catch(() => ({ results: [] }));
   const rows = r.results || r || [];
-  // Narrate when the version is stale OR the content drifted since narration.
+  // PRESERVE-IMPORTED (gap-fill): narrate ONLY territories that have NO chronicle
+  // yet (no story) — never touch an existing one (e.g. canonical import).
+  if (preserveImported) return rows.filter((t) => !t.story_arc && !t.story_current_chapter && !t.story_birth);
+  // Normal: narrate when version is stale, OR content drifted, OR not yet fully
+  // described (coverage gate — fold in unseen content until explored_percent=100).
   return rows.filter((t) => t.description_version !== version
-    || hasDrifted(t.message_count, t.point_count_at_description));
+    || hasDrifted(t.message_count, t.point_count_at_description)
+    || t.explored_percent == null || Number(t.explored_percent) < 100);
 }
 
-/** Pull up to `n` decrypted member snippets for a territory (adapter decrypts). */
-async function sampleTerritoryContent(db, userId, territoryId, n = 6) {
-  const r = await db.rawQuery(
-    `SELECT m.content FROM clustering_points cp
-       JOIN messages m ON m.id = cp.source_id AND cp.source_type = 'message'
-      WHERE cp.user_id = ? AND cp.territory_id = ?
-      ORDER BY m.created_at DESC LIMIT ?`,
-    [userId, territoryId, n],
-  ).catch(() => ({ results: [] }));
-  return (r.results || r || []).map((x) => x.content).filter(Boolean);
+/**
+ * Timeline-stratified, all-source, incremental sample for a territory (shared
+ * sampler). Returns the full sample object: { samples:[{id,content}], sampledIds,
+ * topTags, entities, totalPoints, unseenRemaining }. Biased toward UNSEEN content
+ * (territory_seen_points ledger) so repeated chronicling accumulates coverage.
+ */
+async function sampleTerritoryContent(db, userId, territoryId) {
+  const query = (sql, p = []) => db.rawQuery(sql, p).then((r) => r.results || r || []);
+  const members = await loadMembers(query, userId, 'territory_id', territoryId);
+  const seenIds = await getSeenIds(query, userId, territoryId);
+  return sampleMembers(members, { seenIds });
 }
 
-function buildPrompt(t, samples) {
-  return [
+/** Normalize a sample (legacy injected `sample` may return a string[] of content;
+ * the default returns the rich object) into the rich shape. */
+function normalizeSample(raw) {
+  if (Array.isArray(raw)) {
+    return { samples: raw.map((c) => ({ content: c })), sampledIds: [], topTags: [], entities: [], totalPoints: raw.length, unseenRemaining: raw.length };
+  }
+  return raw || { samples: [], sampledIds: [], topTags: [], entities: [], totalPoints: 0, unseenRemaining: 0 };
+}
+
+function buildPrompt(t, samples, topTags = [], entities = []) {
+  const lines = [
     `You are writing the "chronicle" of a region in someone's personal knowledge map.`,
     `This region is currently titled "${t.name || 'a territory'}".`,
-    `Below are representative snippets that belong to it.`,
+  ];
+  // PROGRESSIVE: show the existing chronicle so the model refines/extends rather
+  // than restarts as coverage deepens.
+  if (t.story_arc || t.story_current_chapter || t.story_birth) {
+    lines.push(
+      `Its current chronicle — refine and extend it as your understanding deepens (keep what still holds):`,
+      [t.story_birth && `birth: ${t.story_birth}`, t.story_arc && `arc: ${t.story_arc}`,
+        t.story_current_chapter && `now: ${t.story_current_chapter}`].filter(Boolean).join(' · '),
+    );
+  }
+  if (topTags.length) lines.push(`Recurring tags: ${topTags.join(', ')}.`);
+  if (entities.length) lines.push(`Key entities: ${entities.join(', ')}.`);
+  lines.push(
+    `Below are representative snippets sampled across this region's WHOLE timeline (not just recent).`,
     ``,
     `Reply with EXACTLY one line of minified JSON with these keys:`,
     `{"essence":"<one vivid sentence>","archetype_type":"<1-2 words>",`,
@@ -90,8 +123,9 @@ function buildPrompt(t, samples) {
     `"signature_patterns":["<short phrase>","..."],"open_questions":["<question>","..."],`,
     `"agent_expertise":"<what an agent stewarding this would be expert in>"}`,
     ``,
-    ...samples.map((s, i) => `(${i + 1}) ${String(s).slice(0, 400)}`),
-  ].join('\n');
+    ...samples.map((s, i) => `(${i + 1}) ${String(s.content ?? s).slice(0, 5000)}`),
+  );
+  return lines.join('\n');
 }
 
 /** Extract the last JSON object from a model response (tolerant). */
@@ -104,7 +138,9 @@ function parseChronicle(raw, t, pointCount) {
   const arr = (v) => (Array.isArray(v) ? v.map(String).slice(0, 8) : []);
   const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : undefined);
   return {
-    name: t.name,                                   // keep the describe-clusters title
+    // Territories/realms keep their describe-clusters title; themes have none yet
+    // (materialized here) → take the narrated name.
+    name: t.name || (typeof parsed.name === 'string' ? parsed.name.trim().slice(0, 80) : undefined),
     essence: str(parsed.essence, 500) || t.essence,
     archetype_type: str(parsed.archetype_type, 60),
     archetype_character: str(parsed.archetype_character, 200),
@@ -141,19 +177,22 @@ function withTimeout(promise, ms, label) {
  * the verify can stub the model + content. Returns counts.
  * @param {{ db: object, userId: string, infer: Function, version?: string, sample?: Function, log?: Function }} opts
  */
-export async function describeChronicles({ db, userId, infer, version = CHRONICLE_VERSION, sample, sampleRealm, log = () => {}, onProgress, modelLabel = 'unknown' }) {
-  const targets = await getTerritoriesToNarrate(db, userId, version);
-  const realmTargets = await getRealmsToNarrate(db, userId, version);
+export async function describeChronicles({ db, userId, infer, version = CHRONICLE_VERSION, sample, sampleRealm, log = () => {}, onProgress, modelLabel = 'unknown', preserveImported = false, skipTerritories = false }) {
+  // skipTerritories: run ONLY the theme + realm passes (the territory-chronicle
+  // gap-fill is the long pole — defer it). Themes still narrate from the existing
+  // territory names/essences, so this is coherent.
+  const targets = skipTerritories ? [] : await getTerritoriesToNarrate(db, userId, version, preserveImported);
+  const realmTargets = await getRealmsToNarrate(db, userId, version, preserveImported);
   const total = targets.length + realmTargets.length;
   let described = 0, skipped = 0, failed = 0;
   try { await onProgress?.(0, total); } catch { /* */ }
   for (const t of targets) {
-    const samples = await (sample ? sample(t) : sampleTerritoryContent(db, userId, t.territory_id));
-    if (!samples.length) { skipped += 1; continue; }
+    const S = normalizeSample(await (sample ? sample(t) : sampleTerritoryContent(db, userId, t.territory_id)));
+    if (!S.samples.length) { skipped += 1; continue; }
     let raw;
     try {
       raw = await withTimeout(
-        infer({ task: 'narrate', prompt: buildPrompt(t, samples), maxTokens: 700 }),
+        infer({ task: 'narrate', prompt: buildPrompt(t, S.samples, S.topTags, S.entities), maxTokens: 700 }),
         CHRONICLE_INFER_TIMEOUT_MS, 'chronicle narration',
       );
     } catch {
@@ -161,10 +200,23 @@ export async function describeChronicles({ db, userId, infer, version = CHRONICL
       continue;
     }
     // point_count_at_description anchors the drift gate — it must be the
-    // territory's LIVE size, not samples.length (≤6), or drift math is dead.
-    const desc = parseChronicle(raw, t, Number(t.message_count) || samples.length);
+    // territory's LIVE size, not the sample size, or drift math is dead.
+    const desc = parseChronicle(raw, t, Number(t.message_count) || S.totalPoints || S.samples.length);
     try {
       await db.territoryDocs.upsertDescription(userId, t.territory_id, desc, version, typeof raw === 'string' ? raw : null, modelLabel);
+      // Coverage: fold the sampled members into the shared territory_seen_points
+      // ledger, then refresh explored_count/explored_percent ("% described").
+      // upsertDescription doesn't own those columns, so write them here.
+      if (S.sampledIds.length) {
+        const query = (sql, p = []) => db.rawQuery(sql, p).then((r) => r.results || r || []);
+        const pass = (await lastPassNumber(query, userId, t.territory_id)) + 1;
+        await recordSeen(query, userId, t.territory_id, S.sampledIds, pass);
+        const seen = (await getSeenIds(query, userId, t.territory_id)).size;
+        await query(
+          `UPDATE territory_profiles SET explored_count = ?, explored_percent = ? WHERE user_id = ? AND territory_id = ?`,
+          [seen, exploredPercent(seen, S.totalPoints || seen), userId, t.territory_id],
+        ).catch(() => {});
+      }
       described += 1;
       await recordNarrative(db, userId, 'territory', t.territory_id, desc, version, modelLabel);
     } catch (e) {
@@ -172,6 +224,45 @@ export async function describeChronicles({ db, userId, infer, version = CHRONICL
     }
     try { await onProgress?.(described + skipped + failed, total); } catch { /* */ }
   }
+
+  // ── Theme pass (mid-level: territory → theme). Materialize semantic_themes from
+  // clustering_points.theme_id (cluster.py's structural output), narrate each
+  // theme FROM its member territory descriptions (bottom-up, not raw messages),
+  // PRESERVE imported chronicles (narrate only nameless gaps + drift), PRUNE dead
+  // themes, then CASCADE explored % territory→theme→realm. Fail-soft as a whole.
+  let themesDescribed = 0;
+  try {
+    const rosters = await db.mindscape.assignTerritoryThemes(userId);
+    for (const r of rosters) await db.mindscape.upsertSemanticThemeStructural(userId, r);
+    await db.mindscape.pruneSemanticThemes(userId, rosters.map((r) => ({ realm_id: r.realm_id, theme_id: r.theme_id })));
+    const rosterByKey = new Map(rosters.map((r) => [`${r.realm_id}:${r.theme_id}`, r]));
+    const themeRows = await db.mindscape.getSemanticThemesForNarration(userId);
+    // Gate: live theme with NO name yet (fill the gap — preserves imported themes,
+    // whose generated_at is NULL → never the regen branch) OR a member territory
+    // was described AFTER we last narrated this theme (regenerate-on-child-change).
+    const themeTargets = themeRows.filter((th) => rosterByKey.has(`${th.realm_id}:${th.theme_id}`)
+      && (!th.name || (!preserveImported && th.generated_at && th.child_max_described && th.child_max_described > th.generated_at)));
+    for (const th of themeTargets) {
+      const digests = await db.mindscape.getThemeTerritoryDigests(userId, th.realm_id, th.theme_id);
+      if (!digests.length) { skipped += 1; continue; }
+      let raw;
+      try {
+        raw = await withTimeout(
+          infer({ task: 'narrate', prompt: buildThemePrompt(th, digests), maxTokens: 700 }),
+          CHRONICLE_INFER_TIMEOUT_MS, 'theme chronicle narration',
+        );
+      } catch { failed += 1; continue; }
+      const roster = rosterByKey.get(`${th.realm_id}:${th.theme_id}`);
+      const desc = parseChronicle(raw, th, Number(roster?.message_count) || digests.length);
+      try {
+        await db.mindscape.upsertSemanticThemeChronicle(userId, th.realm_id, th.theme_id, desc, version, modelLabel);
+        themesDescribed += 1; described += 1;
+        await recordNarrative(db, userId, 'theme', `${th.realm_id}:${th.theme_id}`, desc, version, modelLabel);
+      } catch (e) { failed += 1; log(`chronicle write failed for theme ${th.realm_id}:${th.theme_id}: ${e.message}`); }
+      try { await onProgress?.(described + skipped + failed, total); } catch { /* */ }
+    }
+    await db.mindscape.cascadeExploredPercent(userId);
+  } catch (e) { log(`theme pass failed (non-fatal): ${e.message}`); }
 
   // ── Realm pass — same narrator, same gating shape (generation_version +
   // drift). UPDATE-only: realm rows exist only via describe-clusters from live
@@ -182,7 +273,7 @@ export async function describeChronicles({ db, userId, infer, version = CHRONICL
     let raw;
     try {
       raw = await withTimeout(
-        infer({ task: 'narrate', prompt: buildRealmPrompt(rm, ctx.samples, ctx.territoryNames), maxTokens: 700 }),
+        infer({ task: 'narrate', prompt: buildRealmPrompt(rm, ctx.samples, ctx.territoryDigests), maxTokens: 700 }),
         CHRONICLE_INFER_TIMEOUT_MS, 'realm chronicle narration',
       );
     } catch {
@@ -236,44 +327,79 @@ async function recordNarrative(db, userId, entityKind, entityId, desc, version, 
  * in JS for symmetry with the territory pass. Only EXISTING rows are returned —
  * the realm pass never creates realm rows.
  */
-async function getRealmsToNarrate(db, userId, version) {
+async function getRealmsToNarrate(db, userId, version, preserveImported = false) {
   const r = await db.rawQuery(
-    `SELECT realm_id, name, essence, generation_version, message_count,
-            point_count_at_description
+    `SELECT realm_id, name, essence, story_arc, story_current_chapter,
+            generation_version, message_count,
+            point_count_at_description, generated_at,
+            (SELECT MAX(tp.last_described_at) FROM territory_profiles tp
+              WHERE tp.user_id = realms.user_id AND tp.realm_id = realms.realm_id
+                AND tp.dissolved_at IS NULL) AS child_max_described
        FROM realms WHERE user_id = ? ORDER BY message_count DESC`,
     [userId],
   ).catch(() => ({ results: [] }));
   const rows = r.results || r || [];
+  // PRESERVE-IMPORTED (gap-fill): narrate ONLY realms with NO chronicle yet.
+  if (preserveImported) return rows.filter((rm) => !rm.story_arc && !rm.story_current_chapter && !rm.essence);
+  // Normal: narrate when version stale, OR content drifted, OR a member territory
+  // was described AFTER this realm was last narrated (regenerate-on-child-change —
+  // the hierarchy fold: a realm restory follows its territories evolving).
   return rows.filter((rm) => rm.generation_version !== version
-    || hasDrifted(rm.message_count, rm.point_count_at_description));
+    || hasDrifted(rm.message_count, rm.point_count_at_description)
+    || (rm.generated_at && rm.child_max_described && rm.child_max_described > rm.generated_at));
 }
 
-/** Snippets + member territory names for a realm (adapter decrypts both). */
-async function sampleRealmContext(db, userId, realmId, n = 6) {
-  const r = await db.rawQuery(
-    `SELECT m.content FROM clustering_points cp
-       JOIN messages m ON m.id = cp.source_id AND cp.source_type = 'message'
-      WHERE cp.user_id = ? AND cp.realm_id = ?
-      ORDER BY m.created_at DESC LIMIT ?`,
-    [userId, realmId, n],
-  ).catch(() => ({ results: [] }));
-  const samples = (r.results || r || []).map((x) => x.content).filter(Boolean);
-  const t = await db.rawQuery(
-    `SELECT name FROM territory_profiles
+/** Realm narration input: a timeline-stratified all-source message sample (for
+ * texture) PLUS the realm's member-territory DIGESTS (name + essence + current
+ * chapter) — the lower-level descriptions the realm story is synthesized from. */
+async function sampleRealmContext(db, userId, realmId) {
+  const query = (sql, p = []) => db.rawQuery(sql, p).then((r) => r.results || r || []);
+  const members = await loadMembers(query, userId, 'realm_id', realmId);
+  const s = sampleMembers(members, {});
+  const samples = s.samples.map((x) => x.content);
+  const digestRows = await query(
+    `SELECT name, essence, story_current_chapter FROM territory_profiles
       WHERE user_id = ? AND realm_id = ? AND dissolved_at IS NULL AND name IS NOT NULL
-      ORDER BY message_count DESC LIMIT 6`,
+      ORDER BY message_count DESC LIMIT 12`,
     [userId, realmId],
-  ).catch(() => ({ results: [] }));
-  const territoryNames = (t.results || t || []).map((x) => x.name).filter(Boolean);
-  return { samples, territoryNames };
+  );
+  const territoryNames = digestRows.map((x) => x.name).filter(Boolean);
+  const territoryDigests = digestRows.map((d) =>
+    `${d.name}${d.essence ? ` — ${d.essence}` : ''}${d.story_current_chapter ? ` [now: ${d.story_current_chapter}]` : ''}`);
+  return { samples, territoryNames, territoryDigests };
 }
 
-function buildRealmPrompt(rm, samples, territoryNames) {
+/** A theme is narrated FROM its member territories' descriptions (bottom-up),
+ * not raw messages. It must also produce a NAME (themes are materialized here). */
+function buildThemePrompt(th, digests) {
   return [
+    `You are naming and writing the "chronicle" of a THEME — a mid-level grouping of related territories in someone's personal knowledge map.`,
+    th.name ? `It is currently titled "${th.name}". Refine it as understanding deepens.` : '',
+    `Synthesize the theme FROM its member territories and their stories below:`,
+    ...digests.map((d, i) => `(${i + 1}) ${d.name}${d.essence ? ` — ${d.essence}` : ''}${d.story_current_chapter ? ` [now: ${d.story_current_chapter}]` : ''}`),
+    ``,
+    `Reply with EXACTLY one line of minified JSON:`,
+    `{"name":"<2-4 word title>","essence":"<one vivid sentence>","archetype_type":"<1-2 words>",`,
+    `"story_birth":"<how this theme began, 1 sentence>","story_arc":"<how it evolved, 1-2 sentences>",`,
+    `"story_current_chapter":"<where it is now, 1 sentence>",`,
+    `"signature_patterns":["<short phrase>"],"open_questions":["<question>"]}`,
+  ].filter(Boolean).join('\n');
+}
+
+function buildRealmPrompt(rm, samples, territoryDigests = []) {
+  const lines = [
     `You are writing the "chronicle" of a REALM — a broad region of someone's personal knowledge map that contains several territories.`,
     `This realm is currently titled "${rm.name || 'a realm'}".`,
-    territoryNames.length ? `Territories inside it: ${territoryNames.join(', ')}.` : '',
-    `Below are representative snippets from across the realm.`,
+  ];
+  if (rm.story_arc || rm.story_current_chapter) {
+    lines.push(`Its current chronicle — refine and extend as understanding deepens: ${[rm.story_arc && `arc: ${rm.story_arc}`, rm.story_current_chapter && `now: ${rm.story_current_chapter}`].filter(Boolean).join(' · ')}`);
+  }
+  // The lower-level descriptions the realm is synthesized FROM (hierarchy fold).
+  if (territoryDigests.length) {
+    lines.push(`Its territories and their stories:`, ...territoryDigests.map((d, i) => `  ${i + 1}. ${d}`));
+  }
+  lines.push(
+    `Below are representative snippets sampled across the realm's whole timeline.`,
     ``,
     `Reply with EXACTLY one line of minified JSON with these keys:`,
     `{"essence":"<one vivid sentence>","archetype_type":"<1-2 words>",`,
@@ -282,8 +408,9 @@ function buildRealmPrompt(rm, samples, territoryNames) {
     `"signature_patterns":["<short phrase>","..."],"open_questions":["<question>","..."],`,
     `"agent_expertise":"<what an agent stewarding this would be expert in>"}`,
     ``,
-    ...samples.map((s, i) => `(${i + 1}) ${String(s).slice(0, 400)}`),
-  ].filter(Boolean).join('\n');
+    ...samples.map((s, i) => `(${i + 1}) ${String(s).slice(0, 5000)}`),
+  );
+  return lines.filter(Boolean).join('\n');
 }
 
 // ── CLI entry (pipeline stage) ──────────────────────────────────────────────
@@ -319,7 +446,9 @@ if (isMain) {
       const onProgress = feedId ? (done, total) => db.activityFeed.heartbeat(feedId, { step: done, totalSteps: total }).catch(() => {}) : undefined;
       let res;
       try {
-        res = await describeChronicles({ db, userId: USER_ID, infer: ({ prompt, maxTokens }) => narrator.infer(prompt, { maxTokens }), log: console.error, onProgress, modelLabel: narrator.label });
+        res = await describeChronicles({ db, userId: USER_ID, infer: ({ prompt, maxTokens }) => narrator.infer(prompt, { maxTokens }), log: console.error, onProgress, modelLabel: narrator.label,
+          preserveImported: process.argv.includes('--preserve-imported') || process.env.MYCELIUM_DESCRIBE_PRESERVE === '1',
+          skipTerritories: process.argv.includes('--skip-territories') || process.env.MYCELIUM_DESCRIBE_SKIP_TERRITORIES === '1' });
       } finally {
         if (hbTimer) clearInterval(hbTimer);
         if (feedId) { try { await db.activityFeed.finish(feedId, { status: 'done' }); } catch { /* */ } }
