@@ -10,6 +10,7 @@
 	import ChannelsSection from '$lib/components/settings/ChannelsSection.svelte';
 	import AISettings from '$lib/components/settings/AISettings.svelte';
 	import AIAccessSection from '$lib/components/settings/AIAccessSection.svelte';
+	import AgentCaptureSection from '$lib/components/settings/AgentCaptureSection.svelte';
 	import ManagedConnectSection from '$lib/components/settings/ManagedConnectSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 	import ConnectYourAISection from '$lib/components/settings/ConnectYourAISection.svelte';
@@ -1147,6 +1148,9 @@
 
 			<!-- AI Access — which vault areas the in-app chat agent may use -->
 			<AIAccessSection />
+
+			<!-- Memory capture — opt-in consent for auto-capturing connected-agent conversations -->
+			<AgentCaptureSection />
 
 			<!-- Voice / TTS — provider config + per-voice preview -->
 			<VoiceSection />
