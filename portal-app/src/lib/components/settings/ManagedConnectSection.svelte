@@ -23,7 +23,7 @@
 	let status = $state<RemoteStatus | null>(null);
 	let loading = $state(true);
 	let handle = $state('');
-	let availability = $state<'idle' | 'checking' | 'available' | 'taken' | 'invalid'>('idle');
+	let availability = $state<'idle' | 'checking' | 'available' | 'taken' | 'invalid' | 'unreachable'>('idle');
 	let connecting = $state(false);
 	let result = $state<{ host: string; connectorUrl: string } | null>(null);
 	let error = $state<string | null>(null);
@@ -114,9 +114,13 @@
 				const res = await api(`/api/v1/remote/managed/available?handle=${encodeURIComponent(h)}`);
 				const data = await res.json().catch(() => ({}));
 				if (seq !== reqSeq) return; // a newer keystroke superseded this response
-				availability = res.ok && data.available ? 'available' : 'taken';
+				// Distinguish a genuine "taken" (control plane answered) from the control
+				// plane being unreachable/errored — otherwise EVERY failure reads as "taken".
+				if (res.ok && data.available) availability = 'available';
+				else if (res.status >= 500 || data?.error === 'control plane unreachable') availability = 'unreachable';
+				else availability = 'taken';
 			} catch {
-				if (seq === reqSeq) availability = 'idle';
+				if (seq === reqSeq) availability = 'unreachable';
 			}
 		}, 400);
 	}
@@ -235,6 +239,7 @@
 				{#if availability === 'checking'}<span class="text-[var(--color-text-tertiary)]">checking…</span>
 				{:else if availability === 'available'}<span class="text-green-400">✓ available</span>
 				{:else if availability === 'taken'}<span class="text-red-400">taken</span>
+				{:else if availability === 'unreachable'}<span class="text-amber-400">address service unreachable — can't check right now</span>
 				{:else if availability === 'invalid'}<span class="text-amber-400">2–32 chars: a–z, 0–9, dashes</span>{/if}
 			</div>
 			{#if tsRequired && tsSrc}

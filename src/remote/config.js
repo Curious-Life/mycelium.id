@@ -29,7 +29,15 @@ const DEFAULT_EMAIL = 'operator@mycelium.local';
 // Managed-endpoint defaults — mycelium operates these; a full-control user
 // overrides relayAddr/acmeDnsServer/controlPlaneUrl to a self-hosted instance.
 // "Managed" is just mycelium running the same open-source stack.
-const DEFAULT_CONTROL_PLANE = 'https://connect.mycelium.id';
+// The control-plane API edge is published on :8443 by design — frps owns :443
+// on the managed box for tenant SNI-passthrough, so the Caddy edge that fronts
+// /v1/* (provision/challenge/handle/release) listens on :8443 (see
+// mycelium-managed/relay/deploy/Caddyfile.edge). Pointing at :443 lands on frps,
+// which serves no cert for connect.mycelium.id → TLS "unrecognized_name", so
+// every availability check failed and the claim UI showed "taken". Verified
+// 2026-06-15: :8443 returns a valid LE cert + working /v1/challenge + /v1/handle.
+// Override via MYCELIUM_CONTROL_PLANE / remote.json for a self-hosted plane.
+const DEFAULT_CONTROL_PLANE = 'https://connect.mycelium.id:8443';
 const DEFAULT_ACME_DNS = 'https://acme-dns.mycelium.id';
 const REMOTE_MODES = new Set(['off', 'managed', 'own-relay', 'direct']);
 
