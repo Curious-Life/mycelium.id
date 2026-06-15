@@ -2,6 +2,7 @@
 	import { browser } from '$app/environment';
 	import { api, apiGet, apiPost } from '$lib/api';
 	import { workspace } from '$lib/workspace/store';
+	import { toasts } from '$lib/stores/toast';
 
 	interface Connection {
 		id: string;
@@ -79,12 +80,38 @@
 		sent.length ? `${sent.length} sent` : '',
 	].filter(Boolean).join(' · '));
 
-	$effect(() => {
-		if (browser) {
-			loadConnections();
-			loadPending();
-			loadSent();
+	// Live refresh: federation events (a new inbound request, or a peer accepting
+	// one we sent) are written by the :4711 federation host but surface through the
+	// :8787 portal we read — different processes sharing the DB, so we poll rather
+	// than push. On each tick we diff against what we'd already seen and toast only
+	// genuinely new arrivals (the global toast store shows app-wide, even off this
+	// page). `seeded` suppresses toasts for the initial load.
+	let seenPending = new Set<string>();
+	let seenConns = new Set<string>();
+	let seeded = false;
+
+	async function refreshAll() {
+		await Promise.all([loadConnections(), loadPending(), loadSent()]);
+		if (seeded) {
+			for (const r of pending) {
+				if (!seenPending.has(r.id)) toasts.info(`@${r.handle} wants to connect`);
+			}
+			for (const c of connections) {
+				if (!seenConns.has(c.id)) toasts.success(`Connected with @${c.other_handle}`);
+			}
 		}
+		seenPending = new Set(pending.map((r) => r.id));
+		seenConns = new Set(connections.map((c) => c.id));
+		seeded = true;
+	}
+
+	$effect(() => {
+		if (!browser) return;
+		refreshAll();
+		// 10s while the page is open — fast enough to feel live for a handshake,
+		// cheap enough to poll. Cleared on unmount.
+		const t = setInterval(refreshAll, 10000);
+		return () => clearInterval(t);
 	});
 
 	async function loadConnections() {
@@ -111,7 +138,13 @@
 		connecting = true;
 		error = null;
 		try {
-			await apiPost('/portal/connections/request', { toHandle: connectHandle.trim().replace(/^@/, '') });
+			let target = connectHandle.trim().replace(/^@/, '');
+			// A bare handle is a mycelium.id handle: "lo" → "lo@lo.mycelium.id" (the
+			// domain is always <handle>.mycelium.id, so typing it twice is redundant).
+			// Anything already containing "@" is a full federated handle (e.g. a custom
+			// domain / another instance) and is sent verbatim.
+			if (target && !target.includes('@')) target = `${target}@${target}.mycelium.id`;
+			await apiPost('/portal/connections/request', { toHandle: target });
 			connectHandle = '';
 			composerOpen = false;
 			showSuccess('Request sent');
@@ -238,7 +271,7 @@
 		<form class="composer glass" onsubmit={(e) => { e.preventDefault(); sendRequest(); }}>
 			<input
 				type="text" bind:value={connectHandle} autocomplete="off"
-				placeholder="name  ·  or  name@their-server.org" class="composer-input" />
+				placeholder="their handle  ·  or  name@their-server.org" class="composer-input" />
 			<button type="submit" disabled={connecting || !connectHandle.trim()} class="btn btn-primary">
 				{connecting ? 'Sending…' : 'Send'}
 			</button>
@@ -255,14 +288,14 @@
 			<h2 class="onboard-title">Where your mind meets others'</h2>
 			<p class="onboard-lede">Link with anyone on Mycelium to see where your minds overlap — shared territories, kindred realms — and selectively share a space or a facet. Nothing leaves your vault until you choose it.</p>
 			<div class="steps">
-				<div class="step"><span class="step-n">1</span><span class="step-t">Send a request by handle, or <code>name@their-server.org</code> to reach any Mycelium.</span></div>
+				<div class="step"><span class="step-n">1</span><span class="step-t">Send a request — just their handle (e.g. <code>lo</code>), or <code>name@their-server.org</code> for a custom domain.</span></div>
 				<div class="step"><span class="step-n">2</span><span class="step-t">They accept — a private, signed link forms between your vaults, revocable anytime.</span></div>
 				<div class="step"><span class="step-n">3</span><span class="step-t">Compare your overlap, then grant a space or a mindscape facet — only what you pick.</span></div>
 			</div>
 			<form class="composer onboard-composer" onsubmit={(e) => { e.preventDefault(); sendRequest(); }}>
 				<input
 					type="text" bind:value={connectHandle} autocomplete="off"
-					placeholder="name  ·  or  name@their-server.org" class="composer-input" />
+					placeholder="their handle  ·  or  name@their-server.org" class="composer-input" />
 				<button type="submit" disabled={connecting || !connectHandle.trim()} class="btn btn-primary">
 					{connecting ? 'Sending…' : 'Connect'}
 				</button>

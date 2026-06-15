@@ -26,7 +26,7 @@
 			try { const d = await apiGet<{ count: number }>('/portal/connections/count'); if (alive) pendingConnections = d.count ?? 0; } catch {}
 		};
 		load();
-		const t = setInterval(load, 60000);
+		const t = setInterval(load, 15000);
 		return () => { alive = false; clearInterval(t); };
 	});
 
