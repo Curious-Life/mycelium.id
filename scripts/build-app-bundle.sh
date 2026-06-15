@@ -33,6 +33,30 @@ NODE_URL="https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-darwin-arm64.tar.
 log(){ echo "[stage] $*"; }
 mkdir -p "$CACHE" "$RT"
 
+# ── 0. Liquid Glass app icon (Assets.car) ─────────────────────────────────────
+# The committed Assets.car ships the adaptive Liquid Glass icon in every build
+# (see src-tauri/Info.plist CFBundleIconName + tauri.conf resources). If full
+# Xcode (actool) is present and Mycelium.icon is newer than the committed car,
+# refresh it so the dev's build stays in sync; otherwise keep the committed car
+# (no-Xcode builds still work).
+refresh_glass_icon(){
+  local icon="$REPO/src-tauri/icons/Mycelium.icon" car="$REPO/src-tauri/icons/Assets.car"
+  [ -d "$icon" ] || { log "glass-icon: no Mycelium.icon, skipping"; return; }
+  if /usr/bin/xcrun --find actool >/dev/null 2>&1 && /usr/bin/xcrun actool --version >/dev/null 2>&1; then
+    if [ ! -f "$car" ] || [ "$icon" -nt "$car" ]; then
+      log "glass-icon: regenerating Assets.car (icon changed)…"
+      bash "$REPO/scripts/gen-glass-assets.sh"
+    else
+      log "glass-icon: Assets.car up to date"
+    fi
+  elif [ -f "$car" ]; then
+    log "glass-icon: using committed Assets.car (full Xcode not selected)"
+  else
+    log "glass-icon: WARNING — no Assets.car and no actool; run: sudo xcode-select -s /Applications/Xcode.app && scripts/gen-glass-assets.sh"
+  fi
+}
+refresh_glass_icon
+
 # ── 1. Bundled Node binary (cached) ───────────────────────────────────────────
 ensure_node(){
   if [ -x "$RT/node" ]; then log "node: cached ($("$RT/node" --version))"; return; fi
