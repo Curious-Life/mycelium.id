@@ -171,7 +171,8 @@
     "verify:task-models": "node scripts/verify-task-models.mjs",
     "verify:agent-capture": "node scripts/verify-agent-capture.mjs",
     "verify:claude-sync": "node scripts/verify-claude-sync.mjs",
-    "verify:full-export-import": "node scripts/verify-full-export-import.mjs"
+    "verify:full-export-import": "node scripts/verify-full-export-import.mjs",
+    "verify:app-bearer": "node scripts/verify-app-bearer.mjs"
   },
   "dependencies": {
     "@better-auth/passkey": "^1.6.14",

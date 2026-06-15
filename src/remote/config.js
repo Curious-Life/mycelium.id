@@ -152,6 +152,43 @@ export function resolveAuthSecret({ env = process.env } = {}) {
   }
 }
 
+/**
+ * The stable static MCP/gateway bearer for the :4711 surface — the token a local
+ * harness or the memory-bridge hooks present as `Authorization: Bearer …`. env
+ * override wins (MYCELIUM_MCP_BEARER — verify scripts + power users); else
+ * read-or-generate-once from auth.db, so the self-hosted app ALWAYS has a stable
+ * bearer with zero manual setup instead of being OAuth-only. Persisted + never
+ * regenerated on a normal boot (a new value would 401 already-connected clients).
+ * Retrieve it for the operator via the authed portal (GET /portal/mcp-bearer).
+ * Returns 64-char hex. This is an API token (NOT the master key, CLAUDE.md §4) —
+ * stored 0600 in auth.db beside the signing secret; local-primary single-user.
+ */
+export function resolveMcpBearer({ env = process.env } = {}) {
+  const fromEnv = clean(env.MYCELIUM_MCP_BEARER);
+  if (fromEnv) return fromEnv;
+  const dbp = authDbPath({ env });
+  if (dbp === ':memory:') return randomBytes(32).toString('hex');
+  mkdirSync(dirname(dbp), { recursive: true });
+  const db = new Database(dbp);
+  hardenDbPerms(dbp);
+  try {
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS mycelium_mcp_bearer (
+         id INTEGER PRIMARY KEY CHECK (id = 1),
+         bearer TEXT NOT NULL,
+         created_at TEXT NOT NULL DEFAULT (datetime('now'))
+       )`,
+    );
+    const row = db.prepare('SELECT bearer FROM mycelium_mcp_bearer WHERE id = 1').get();
+    if (row?.bearer) return row.bearer;
+    const bearer = randomBytes(32).toString('hex');
+    db.prepare('INSERT INTO mycelium_mcp_bearer (id, bearer) VALUES (1, ?)').run(bearer);
+    return bearer;
+  } finally {
+    db.close();
+  }
+}
+
 // ── Remote-transport secret store ────────────────────────────────────────────
 // Credentials RECEIVED from a control-plane (the FRP relay token, the acme-dns
 // creds) live in auth.db — NEVER remote.json (which is plaintext, non-secret),

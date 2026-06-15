@@ -20,6 +20,7 @@ import { probeProvider } from './inference/probe.js';
 import { PROVIDER_PRESETS } from './inference/presets.js';
 import { assertSafeBaseUrlResolved } from './inference/base-url.js';
 import { INFERENCE_TASKS } from './inference/resolve.js';
+import { resolveMcpBearer } from './remote/config.js';
 
 const ok = (res, body = {}) => res.json({ ok: true, ...body });
 const bad = (res, code, error) => res.status(code).json({ ok: false, error });
@@ -143,6 +144,16 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
       await db.users.updateSettings(userId, { ...s, agentCapture: { enabled, redactSecrets } });
       ok(res, { enabled, redactSecrets });
     } catch { bad(res, 500, 'failed to update capture preference'); }
+  });
+
+  // The static MCP/gateway bearer for THIS box — the copy-paste token a local
+  // harness or the memory-bridge hooks present to :4711. Auto-provisioned +
+  // persisted in auth.db (remote/config.resolveMcpBearer); surfaced here so the
+  // operator can paste it into a harness or the Claude Code hook env. Operator-only
+  // (this router is mounted behind the portal session). Never logged.
+  router.get('/mcp-bearer', (_req, res) => {
+    try { ok(res, { bearer: resolveMcpBearer() }); }
+    catch { bad(res, 500, 'failed to resolve bearer'); }
   });
 
   // Create a provider (BYOK API key). Body: { provider, label?, api_key, model_preference?, base_url? }.

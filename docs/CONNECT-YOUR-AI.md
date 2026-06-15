@@ -123,7 +123,14 @@ npm run start:http
 ```
 Use that exact value as the **API key / Bearer** in any harness above, and on `http://127.0.0.1:4711/mcp` for HTTP MCP clients.
 
-It's **fail-closed**: off unless `MYCELIUM_MCP_BEARER` is set, must be **≥24 chars**, compared in constant time, and never logged. It works **in addition** to OAuth, on `/mcp` and every `/v1/*` route.
+**Auto-provisioned in the app.** You don't have to set this manually: the self-hosted app generates a **stable** bearer once and persists it (in `auth.db`), so `:4711` always accepts one with zero setup. Retrieve it (operator-only, via the logged-in portal) to paste into a harness or the Claude Code hook env:
+```bash
+curl -s http://127.0.0.1:4711/portal/agent-capture >/dev/null   # any portal route is session-authed
+curl -s http://127.0.0.1:4711/portal/mcp-bearer                 # → {"ok":true,"bearer":"…"}
+```
+An explicit `MYCELIUM_MCP_BEARER` env var still **wins** (verify scripts, power users, pinning a known value). Gate: `verify:app-bearer`.
+
+It's compared in constant time, length-floored (**≥24 chars**), and never logged. It works **in addition** to OAuth, on `/mcp` and every `/v1/*` route.
 
 ---
 
