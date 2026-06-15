@@ -5,7 +5,7 @@
 	import { api } from '$lib/api';
 
 
-	type ImportSource = 'obsidian' | 'chatgpt' | 'claude' | 'linkedin';
+	type ImportSource = 'mycelium' | 'obsidian' | 'chatgpt' | 'claude' | 'linkedin';
 
 	interface ImportStats {
 		conversations?: number;
@@ -40,6 +40,14 @@
 		stats?: ImportStats;
 		enrichmentJobId?: string;
 		note?: string;
+		// Canonical-vault import (type: 'mycelium') reconciliation surface.
+		failed?: number;
+		complete?: boolean;
+		reconciliation?: Record<string, { declared: number; landed: number; failed: number; missing: number; capped?: number; tableMissing?: boolean; dedupedByContent?: number }>;
+		unhandledFamilies?: string[];
+		skippedFamilies?: string[];
+		reportPath?: string;
+		exportedAt?: string;
 	}
 
 	let selectedSource = $state<ImportSource | null>(null);
@@ -148,6 +156,7 @@
 	}
 
 	const sources: { id: ImportSource; name: string; description: string; accept: string; hint: string }[] = [
+		{ id: 'mycelium', name: 'Mycelium vault', description: 'Bring your whole vault from a hosted Mycelium', accept: '.zip', hint: 'The export ZIP from your old Mycelium (Settings → Export). Everything — messages, documents, media, people, mindscape, chronicles — re-encrypted under this vault’s key. Duplicates are skipped; you get a full reconciliation report.' },
 		{ id: 'claude', name: 'Claude', description: 'Import Claude conversation export', accept: '.zip,.json', hint: 'Conversations, projects, memories, and artifacts with automatic deduplication' },
 		{ id: 'chatgpt', name: 'ChatGPT', description: 'Import OpenAI conversation export', accept: '.zip,.json', hint: 'Conversation trees flattened to canonical path with deduplication' },
 		{ id: 'obsidian', name: 'Obsidian', description: 'Open your Obsidian vault folder', accept: '.md', hint: 'Pick the folder — every .md note becomes a document + a mindscape memory. No export needed.' },
@@ -175,6 +184,15 @@
 
 		const buffer = await file.arrayBuffer();
 		const zip = await JSZip.loadAsync(buffer);
+
+		// A Mycelium vault export carries its data in manifest.json AND its media
+		// in attachments/ — NEVER strip it down to text files (that would drop
+		// every image/voice note). Upload raw; the server keeps everything.
+		if (zip.file('manifest.json')) {
+			statusMsg = `Mycelium vault export (${Math.round(file.size / 1024 / 1024)}MB) — uploading with media intact…`;
+			return file;
+		}
+
 		const jsonFiles = Object.keys(zip.files).filter(n => n.endsWith('.json') && !zip.files[n].dir);
 		const mdFiles = Object.keys(zip.files).filter(n => n.endsWith('.md') && !zip.files[n].dir);
 		const csvFiles = Object.keys(zip.files).filter(n => n.endsWith('.csv') && !zip.files[n].dir);
@@ -350,6 +368,34 @@
 			return lines;
 		}
 
+		if (r.type === 'mycelium') {
+			const rc = r.reconciliation || {};
+			const att = r.stats as any;
+			const landed = (t: string) => rc[t]?.landed || 0;
+			const docs = landed('documents') + (att?.agent_files?.inserted || 0);
+			const media = (att?.attachments?.blobs || 0) + (att?.attachments?.blobsReused || 0) + (att?.attachments?.deduped || 0);
+			const territories = landed('territory_profiles');
+			const dedup = Object.values(rc).reduce((a, f) => a + (f.dedupedByContent || 0), 0)
+				+ (att?.attachments?.deduped || 0);
+			if (landed('messages')) lines.push(`${landed('messages').toLocaleString()} messages`);
+			if (docs) lines.push(`${docs.toLocaleString()} documents`);
+			if (media) lines.push(`${media.toLocaleString()} images & files (encrypted, embeds rewritten)`);
+			if (landed('people')) lines.push(`${landed('people').toLocaleString()} people`);
+			if (territories) lines.push(`${territories.toLocaleString()} mindscape territories (chronicles preserved)`);
+			lines.push(`${(r.imported || 0).toLocaleString()} records imported in total${dedup ? `, ${dedup.toLocaleString()} duplicates skipped` : ''}`);
+			if (r.complete) {
+				lines.push('✓ Every data point the export declared was accounted for.');
+			} else {
+				const missing = Object.values(rc).reduce((a, f) => a + (f.missing || 0), 0);
+				if (r.failed) lines.push(`⚠ ${r.failed} record(s) failed to import — see the report.`);
+				if (missing) lines.push(`⚠ ${missing} declared record(s) did not arrive — see the report.`);
+				if (r.unhandledFamilies?.length) lines.push(`⚠ Unrecognized data: ${r.unhandledFamilies.join(', ')} (this app may be older than the export).`);
+			}
+			if (r.reportPath) lines.push(`Full reconciliation report saved to “${r.reportPath}” in your Library.`);
+			lines.push('Not imported (by design): passkeys and saved secrets — re-add those here.');
+			return lines;
+		}
+
 		if (r.type === 'claude') {
 			if (s.messages) lines.push(`${s.messages} messages from ${s.conversations || '?'} conversations`);
 			if (s.skipped_duplicates) lines.push(`${s.skipped_duplicates} duplicate messages skipped`);
@@ -419,11 +465,17 @@
 					<p class="text-sm text-[var(--color-text-secondary)]">{line}</p>
 				{/each}
 			</div>
-			{#if (result.type === 'claude' || result.type === 'chatgpt' || result.type === 'obsidian') && !result.note}
-				<p class="text-xs text-[var(--color-accent-aurum)] mt-4">
-					{result.type === 'obsidian'
-						? 'Your notes are saved and queued — run Generate to weave them into the Mindscape.'
-						: 'Your conversations are saved and embedding now. View them in Timeline, then Generate your Mindscape.'}
+			{#if (result.type === 'claude' || result.type === 'chatgpt' || result.type === 'obsidian' || result.type === 'mycelium') && !result.note}
+				<p class="text-xs mt-4 {result.type === 'mycelium' && result.complete === false ? 'text-coral' : 'text-[var(--color-accent-aurum)]'}">
+					{#if result.type === 'mycelium'}
+						{result.complete === false
+							? 'Imported with exceptions — review the reconciliation report in your Library before deleting the export file.'
+							: 'Your vault is home. Everything is re-encrypted under this device’s key and embedding now — run Generate to rebuild your Mindscape.'}
+					{:else if result.type === 'obsidian'}
+						Your notes are saved and queued — run Generate to weave them into the Mindscape.
+					{:else}
+						Your conversations are saved and embedding now. View them in Timeline, then Generate your Mindscape.
+					{/if}
 				</p>
 				<div class="flex gap-2 justify-center mt-3">
 					<a href="/mindscape" class="btn btn-primary">Go to Mindscape</a>
