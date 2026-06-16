@@ -114,6 +114,8 @@ export function applyChannelConfigToEnv(cc, env = process.env) {
   put('CHANNEL_OPENAI_API_KEY', cc.agent?.openai?.apiKey);
   put('CHANNEL_OPENAI_MODEL', cc.agent?.openai?.model);
   put('TTS_PROVIDER', cc.tts?.provider);
+  put('KOKORO_TTS_ENABLED', cc.tts?.kokoroEnabled);   // local TTS opt-in
+  put('KOKORO_TTS_VOICE', cc.tts?.kokoroVoice);
   put('OPENAI_API_KEY', cc.tts?.openaiApiKey);
   put('OPENAI_TTS_VOICE', cc.tts?.openaiVoice);
   put('OPENAI_TTS_MODEL', cc.tts?.openaiModel);

@@ -19,14 +19,17 @@
 
 import { openAIProvider } from './openai.js';
 import { elevenLabsProvider } from './elevenlabs.js';
+import { kokoroProvider } from './kokoro.js';
 
 export const PROVIDERS = {
+  'kokoro':     kokoroProvider,
   'openai':     openAIProvider,
   'elevenlabs': elevenLabsProvider,
 };
 
-/** Order-preserving list for implicit fallback. */
+/** Order-preserving list for implicit fallback. Local-first (zero egress). */
 export const PROVIDER_FALLBACK_ORDER = [
+  'kokoro',
   'openai',
   'elevenlabs',
 ];

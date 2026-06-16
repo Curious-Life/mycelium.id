@@ -6,6 +6,18 @@
 // (ConnectionsChecklist / OnboardingGuide PUT /portal/settings/secret).
 
 import express from 'express';
+import { getModelState, startDownload } from './tts/kokoro-model.js';
+
+// Kokoro (local TTS) voices — a curated subset of the 54-voice catalog.
+const KOKORO_VOICES = [
+  { id: 'af_heart', label: 'Heart', description: 'American female · warm (default)' },
+  { id: 'af_bella', label: 'Bella', description: 'American female · bright' },
+  { id: 'af_nicole', label: 'Nicole', description: 'American female · soft' },
+  { id: 'am_michael', label: 'Michael', description: 'American male · steady' },
+  { id: 'am_adam', label: 'Adam', description: 'American male · deep' },
+  { id: 'bf_emma', label: 'Emma', description: 'British female · clear' },
+  { id: 'bm_george', label: 'George', description: 'British male · measured' },
+];
 
 // TTS catalogs — mirror packages/channel-daemon/tts/voices.js (kept inline so
 // src/ doesn't depend on the daemon package; ids must stay in sync).
@@ -49,9 +61,16 @@ export function portalSettingsRouter({ db, userId }) {
       const provider = await getS('TTS_PROVIDER');
       const openaiHasKey = await hasS('OPENAI_API_KEY');
       const elevenHasKey = await hasS('ELEVENLABS_API_KEY');
+      const kokoroEnabled = (await getS('KOKORO_TTS_ENABLED')) === '1';
+      const model = getModelState();
       res.json({
-        enabled: !!(provider && ((provider === 'openai' && openaiHasKey) || (provider === 'elevenlabs' && elevenHasKey))),
+        enabled: !!(provider && (
+          (provider === 'openai' && openaiHasKey) ||
+          (provider === 'elevenlabs' && elevenHasKey) ||
+          (provider === 'kokoro' && kokoroEnabled && model.phase === 'ready')
+        )),
         provider: provider || null,
+        kokoro: { enabled: kokoroEnabled, voice: (await getS('KOKORO_TTS_VOICE')) || 'af_heart', voices: KOKORO_VOICES, model },
         openai: { hasKey: openaiHasKey, voice: (await getS('OPENAI_TTS_VOICE')) || 'onyx', model: (await getS('OPENAI_TTS_MODEL')) || 'tts-1-hd', voices: OPENAI_VOICES, models: OPENAI_MODELS },
         elevenlabs: { hasKey: elevenHasKey, voiceId: (await getS('ELEVENLABS_VOICE_ID')) || null, model: (await getS('ELEVENLABS_MODEL_ID')) || 'eleven_turbo_v2_5', models: ELEVENLABS_MODELS },
       });
@@ -60,10 +79,17 @@ export function portalSettingsRouter({ db, userId }) {
 
   router.put('/settings/tts', async (req, res) => {
     try {
-      const { provider, openai, elevenlabs } = req.body || {};
+      const { provider, openai, elevenlabs, kokoro } = req.body || {};
       if (provider !== undefined) {
-        if (provider && !['openai', 'elevenlabs'].includes(provider)) return res.status(400).json({ error: 'invalid provider' });
+        if (provider && !['openai', 'elevenlabs', 'kokoro'].includes(provider)) return res.status(400).json({ error: 'invalid provider' });
         if (provider) await setS('TTS_PROVIDER', provider); else await delS('TTS_PROVIDER');
+        // selecting the local provider is the per-box opt-in the kokoro provider checks
+        if (provider === 'kokoro') await setS('KOKORO_TTS_ENABLED', '1');
+      }
+      if (kokoro && typeof kokoro === 'object') {
+        if (kokoro.voice) await setS('KOKORO_TTS_VOICE', String(kokoro.voice));
+        if (kokoro.enabled === true) await setS('KOKORO_TTS_ENABLED', '1');
+        else if (kokoro.enabled === false) await delS('KOKORO_TTS_ENABLED');
       }
       if (openai && typeof openai === 'object') {
         if (openai.apiKey) await setS('OPENAI_API_KEY', String(openai.apiKey));
@@ -79,8 +105,20 @@ export function portalSettingsRouter({ db, userId }) {
     } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
   });
 
-  // Preview runs in the daemon (needs the provider key in-process + ffmpeg), not
-  // here. Degrade clearly rather than half-synthesize in the vault process.
+  // ── Kokoro local model: download trigger + status (the UI button) ─────────
+  // Triggers pip-install kokoro-onnx + the ~340MB model-file download in the
+  // background; the UI polls GET .../model for progress.
+  router.post('/settings/tts/kokoro/download', async (_req, res) => {
+    try { res.json(await startDownload()); }
+    catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
+  });
+  router.get('/settings/tts/kokoro/model', (_req, res) => {
+    try { res.json(getModelState()); }
+    catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
+  });
+
+  // Preview runs in the daemon (needs the provider key in-process), not here.
+  // Degrade clearly rather than half-synthesize in the vault process.
   router.post('/settings/tts/preview', (_req, res) => {
     res.status(501).json({ error: 'Preview runs in the channel-daemon — save, then send yourself a voice message (or run npm run smoke:telegram-live --voice).' });
   });

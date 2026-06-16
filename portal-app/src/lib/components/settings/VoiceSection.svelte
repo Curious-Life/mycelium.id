@@ -17,9 +17,11 @@
 
 	type VoiceCatalog = { id: string; label: string; description: string };
 	type ModelCatalog = { id: string; label: string; description: string };
+	type KokoroModel = { phase: 'absent' | 'installing' | 'downloading' | 'ready' | 'error'; progress: number; error: string | null; sizeMB: number };
 	type TtsState = {
 		enabled: boolean;
 		provider: string | null;
+		kokoro: { enabled: boolean; voice: string; voices: VoiceCatalog[]; model: KokoroModel };
 		openai: { hasKey: boolean; voice: string; model: string; voices: VoiceCatalog[]; models: ModelCatalog[] };
 		elevenlabs: { hasKey: boolean; voiceId: string | null; model: string; models: ModelCatalog[] };
 	};
@@ -29,9 +31,15 @@
 	let saving = $state(false);
 	let error = $state<string | null>(null);
 
+	// Kokoro local-model download state (polled while provisioning).
+	let kModel = $state<KokoroModel | null>(null);
+	let downloading = $state(false);
+	let pollTimer: ReturnType<typeof setInterval> | null = null;
+
 	// Form fields — separate from the canonical `tts` so unsaved edits don't
 	// pollute the canonical view. `Save` flushes form → server → tts.
-	let formProvider = $state<'openai' | 'elevenlabs' | ''>('');
+	let formProvider = $state<'kokoro' | 'openai' | 'elevenlabs' | ''>('');
+	let formKokoroVoice = $state('af_heart');
 	let formOpenaiKey = $state('');
 	let formOpenaiVoice = $state('onyx');
 	let formOpenaiModel = $state('tts-1-hd');
@@ -51,7 +59,10 @@
 			const res = await api('/portal/settings/tts');
 			if (!res.ok) throw new Error(`Failed to load (${res.status})`);
 			tts = (await res.json()) as TtsState;
-			formProvider = (tts.provider as 'openai' | 'elevenlabs' | '' | null) ?? '';
+			formProvider = (tts.provider as 'kokoro' | 'openai' | 'elevenlabs' | '' | null) ?? '';
+			formKokoroVoice = tts.kokoro?.voice ?? 'af_heart';
+			kModel = tts.kokoro?.model ?? null;
+			if (kModel && (kModel.phase === 'downloading' || kModel.phase === 'installing')) startPolling();
 			formOpenaiVoice = tts.openai.voice;
 			formOpenaiModel = tts.openai.model;
 			formElevenVoiceId = tts.elevenlabs.voiceId ?? '';
@@ -64,6 +75,38 @@
 	}
 
 	onMount(loadState);
+	$effect(() => () => { if (pollTimer) clearInterval(pollTimer); });
+
+	function startPolling() {
+		if (pollTimer) return;
+		pollTimer = setInterval(async () => {
+			try {
+				const res = await api('/portal/settings/tts/kokoro/model');
+				if (res.ok) {
+					kModel = (await res.json()) as KokoroModel;
+					if (kModel.phase === 'ready' || kModel.phase === 'error' || kModel.phase === 'absent') {
+						if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+						downloading = false;
+					}
+				}
+			} catch { /* keep polling */ }
+		}, 1500);
+	}
+
+	async function downloadModel() {
+		downloading = true;
+		error = null;
+		try {
+			const res = await api('/portal/settings/tts/kokoro/download', { method: 'POST' });
+			const json = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(json?.error || 'Download failed to start');
+			kModel = json as KokoroModel;
+			startPolling();
+		} catch (e: any) {
+			error = e?.message || 'Download failed';
+			downloading = false;
+		}
+	}
 
 	async function save() {
 		if (!tts) return;
@@ -71,6 +114,9 @@
 		error = null;
 		try {
 			const body: Record<string, unknown> = { provider: formProvider };
+			if (formProvider === 'kokoro' || formKokoroVoice !== tts.kokoro?.voice) {
+				body.kokoro = { voice: formKokoroVoice, ...(formProvider === 'kokoro' ? { enabled: true } : {}) };
+			}
 			const openai: Record<string, string> = {};
 			if (formOpenaiKey.trim().length > 0) openai.apiKey = formOpenaiKey.trim();
 			if (formOpenaiVoice !== tts.openai.voice) openai.voice = formOpenaiVoice;
@@ -161,6 +207,7 @@
 			<div class="flex gap-4">
 				{#each [
 					{ id: '',           label: 'Off' },
+					{ id: 'kokoro',     label: 'Local (Kokoro)' },
 					{ id: 'openai',     label: 'OpenAI' },
 					{ id: 'elevenlabs', label: 'ElevenLabs' },
 				] as opt (opt.id)}
@@ -171,6 +218,66 @@
 				{/each}
 			</div>
 		</div>
+
+		<!-- Local (Kokoro) block -->
+		{#if formProvider === 'kokoro'}
+			{@const m = kModel ?? tts.kokoro.model}
+			<div class="mb-5 space-y-4">
+				<p class="text-[0.7rem] text-[var(--color-text-tertiary)]">
+					Runs fully on-device — no API key, no cloud, audio never leaves this machine. One-time ~340&nbsp;MB model download.
+				</p>
+
+				<!-- Model status / download -->
+				<div class="p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]">
+					{#if m.phase === 'ready'}
+						<div class="text-sm text-[var(--color-accent)]">Model ready ✓</div>
+						<div class="text-[0.62rem] text-[var(--color-text-tertiary)] mt-0.5">Kokoro-82M installed locally.</div>
+					{:else if m.phase === 'installing' || m.phase === 'downloading'}
+						<div class="text-sm text-[var(--color-text-primary)] mb-2">
+							{m.phase === 'installing' ? 'Installing kokoro-onnx…' : `Downloading model… ${m.progress}%`}
+						</div>
+						<div class="h-1.5 w-full rounded-full bg-[var(--color-border)] overflow-hidden">
+							<div class="h-full bg-[var(--color-accent)] transition-all" style:width={`${Math.max(3, m.progress)}%`}></div>
+						</div>
+					{:else}
+						<div class="flex items-center justify-between gap-3">
+							<div>
+								<div class="text-sm text-[var(--color-text-primary)]">Model not installed</div>
+								<div class="text-[0.62rem] text-[var(--color-text-tertiary)]">Downloads Kokoro-82M (~340 MB) to this machine.</div>
+								{#if m.phase === 'error' && m.error}
+									<div class="text-[0.62rem] text-red-400 mt-1">{m.error}</div>
+								{/if}
+							</div>
+							<button
+								type="button"
+								onclick={(e) => { e.preventDefault(); downloadModel(); }}
+								disabled={downloading}
+								class="shrink-0 px-3 py-1.5 text-[0.7rem] font-medium bg-[var(--color-accent)] text-[var(--color-bg)] rounded-lg hover:opacity-90 disabled:opacity-40 cursor-pointer"
+							>
+								{downloading ? 'Starting…' : (m.phase === 'error' ? 'Retry download' : 'Download model')}
+							</button>
+						</div>
+					{/if}
+				</div>
+
+				<!-- Voice -->
+				<div>
+					<span class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-2">Voice</span>
+					<div class="space-y-1.5">
+						{#each tts.kokoro.voices as v (v.id)}
+							<label class="flex items-center gap-3 p-2 rounded-lg border border-[var(--color-border)] hover:border-[var(--color-accent)]/50 cursor-pointer transition-colors"
+								style:border-color={formKokoroVoice === v.id ? 'var(--color-accent)' : ''}>
+								<input type="radio" bind:group={formKokoroVoice} value={v.id} class="accent-[var(--color-accent)]" />
+								<div class="flex-1 min-w-0">
+									<div class="text-sm text-[var(--color-text-primary)]">{v.label}</div>
+									<div class="text-[0.62rem] text-[var(--color-text-tertiary)]">{v.description}</div>
+								</div>
+							</label>
+						{/each}
+					</div>
+				</div>
+			</div>
+		{/if}
 
 		<!-- OpenAI block -->
 		{#if formProvider === 'openai'}

@@ -124,6 +124,10 @@ export function resolveVoice(provider, agentId) {
     const v = process.env.ELEVENLABS_VOICE_ID;
     if (v) return v;
   }
+  if (provider.name === 'kokoro') {
+    const v = process.env.KOKORO_TTS_VOICE;
+    if (v) return v;
+  }
 
   // 3. Provider's hardcoded default
   return provider.defaultVoice;
