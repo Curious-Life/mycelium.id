@@ -16,14 +16,31 @@
 //     router (a later unit).
 //   - The probe reports a category only — never the key, never the body.
 import express from 'express';
+import { execFileSync } from 'node:child_process';
 import { probeProvider } from './inference/probe.js';
 import { PROVIDER_PRESETS } from './inference/presets.js';
 import { assertSafeBaseUrlResolved } from './inference/base-url.js';
 import { INFERENCE_TASKS } from './inference/resolve.js';
-import { resolveMcpBearer } from './remote/config.js';
+import { resolveMcpBearer, readRemoteConfig } from './remote/config.js';
 
 const ok = (res, body = {}) => res.json({ ok: true, ...body });
 const bad = (res, code, error) => res.status(code).json({ ok: false, error });
+
+// Best-effort Tailscale MagicDNS name of THIS machine (e.g. mymac.tailXXXX.ts.net),
+// so the "Connect a phone" panel can show the exact https:// address. Shells out to
+// the Tailscale CLI (PATH or the macOS app bundle); returns null on any failure
+// (not installed / signed out / not on macOS). Read-only, no secrets, localhost-only.
+function detectTailscaleDnsName() {
+  const bins = ['tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale'];
+  for (const bin of bins) {
+    try {
+      const out = execFileSync(bin, ['status', '--json'], { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
+      const name = JSON.parse(out.toString())?.Self?.DNSName;
+      if (name) return String(name).replace(/\.$/, '');
+    } catch { /* try next candidate */ }
+  }
+  return null;
+}
 
 // Shape a stored row → the metadata the UI consumes. NEVER includes credentials
 // (providers.list() doesn't select it; this is the second, explicit guard).
@@ -154,6 +171,27 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   router.get('/mcp-bearer', (_req, res) => {
     try { ok(res, { bearer: resolveMcpBearer() }); }
     catch { bad(res, 500, 'failed to resolve bearer'); }
+  });
+
+  // One-stop "Connect a phone" payload: the access token (Bearer) + the best
+  // server address to type into the native app. The app authenticates with the
+  // static Bearer (NOT the operator password). recommended = Tailscale HTTPS when
+  // a TLS cert is configured + the tailnet name resolves (the no-compromise path),
+  // else the relay URL. Operator-only (portal session). Never logs the bearer.
+  router.get('/phone-connect', (_req, res) => {
+    try {
+      const bearer = resolveMcpBearer();
+      const tlsConfigured = Boolean(process.env.MYCELIUM_REST_TLS_CERT && process.env.MYCELIUM_REST_TLS_KEY);
+      const tlsPort = Number(process.env.MYCELIUM_REST_TLS_PORT) || 8443;
+      const tailscaleHost = detectTailscaleDnsName();
+      const tailscaleUrl = tailscaleHost ? `https://${tailscaleHost}:${tlsPort}` : null;
+      let relayUrl = null;
+      try { relayUrl = readRemoteConfig()?.publicBaseUrl || null; } catch { /* not configured */ }
+      // Recommend the secure direct path when it's actually live (TLS on + tailnet
+      // known); otherwise the relay; otherwise null → the UI guides setup.
+      const recommended = (tlsConfigured && tailscaleUrl) ? tailscaleUrl : (relayUrl || tailscaleUrl || null);
+      ok(res, { bearer, tlsConfigured, tlsPort, tailscaleHost, tailscaleUrl, relayUrl, recommended });
+    } catch { bad(res, 500, 'failed to build phone-connect payload'); }
   });
 
   // Create a provider (BYOK API key). Body: { provider, label?, api_key, model_preference?, base_url? }.
