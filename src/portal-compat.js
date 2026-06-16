@@ -1,6 +1,7 @@
 import express from 'express';
 import { nudgeEnrichDrainer } from './enrich/drainer.js';
 import { mediaTypeOf } from './portal-attachments.js';
+import { clampStored } from './enrich/text-limits.js';
 
 /**
  * portalCompatRouter — a thin compatibility surface that lets the CANONICAL
@@ -212,8 +213,14 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
         if (RESERVED_HANDLES.has(h)) return fail(res, 400, 'that handle is reserved');
         sets.push('handle = ?'); params.push(h);
       }
-      if (typeof body.display_name === 'string') { sets.push('display_name = ?'); params.push(body.display_name.slice(0, 80)); }
-      if (typeof body.signature === 'string') { sets.push('signature = ?'); params.push(body.signature.slice(0, 500)); }
+      // Validate-don't-silently-slice: a too-long name is rejected (the user
+      // learns), not quietly truncated. The signature/bio is free-text content —
+      // store it in full (DoS-bounded), never clip it. (persistence ≠ budget)
+      if (typeof body.display_name === 'string') {
+        if (body.display_name.length > 200) return fail(res, 400, 'display name too long (max 200 chars)');
+        sets.push('display_name = ?'); params.push(body.display_name);
+      }
+      if (typeof body.signature === 'string') { sets.push('signature = ?'); params.push(clampStored(body.signature)); }
       if (!sets.length) return fail(res, 400, 'nothing to update');
       await ensureRow();
       await db.rawQuery(`UPDATE user_profiles SET ${sets.join(', ')}, updated_at = datetime('now') WHERE user_id = ?`, [...params, userId]);
