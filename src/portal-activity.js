@@ -23,11 +23,9 @@ const KIND_LABELS = {
 // exists. (Embedding == enrichment in V1: both = messages with embedding_768.)
 async function embedProjection(db, userId) {
   try {
-    const er = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND embedding_768 IS NOT NULL', [userId]);
-    const tr = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ?', [userId]);
-    const embedded = Number(er?.results?.[0]?.c ?? 0);
-    const total = Number(tr?.results?.[0]?.c ?? 0);
-    const pending = Math.max(0, total - embedded);
+    // Single source of truth — counts only embeddable (content-bearing) messages,
+    // so `pending` reaches 0 (content-NULL rows can never embed). PIPELINE-INTEGRITY §P1.2.
+    const { embedded, total, pending } = await db.messages.embedBacklog(userId);
     if (pending <= 0) return null;                       // nothing to do → not active
     let health = 'unknown';
     try { health = getEmbedderHealth()?.status ?? 'unknown'; } catch { /* supervisor down */ }
