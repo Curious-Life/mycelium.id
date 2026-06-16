@@ -24,7 +24,31 @@
 
 **Two things still open (both small):**
 1. **Finish the Tier-0 two-way handshake.** `hi` shows the connection as `pending`, `lo` shows it `accepted` (one-sided). Root cause was the `from_handle` bug, fixed in #181 — but **`hi` is still running a bundle built *before* #181**, so it hasn't taken effect. Needs: rebuild `hi`, clear the stuck rows, reconnect.
-2. **Tier-1 Matrix** — designed this session, fully unwired (no homeserver/real client). A separate build session.
+2. **Tier-1 Matrix** — wiring BUILT 2026-06-16 PM ([#182](https://github.com/Curious-Life/mycelium.id/pull/182)); real client + homeserver still deploy-bound. See the 2026-06-16 PM section below.
+
+---
+
+## 2026-06-16 PM session summary — Tier-1 Matrix wiring + Tier-0 state correction
+
+### Tier-0 state correction (to the TL;DR above)
+The TL;DR says #181 is "✅ merged" — **true on `origin/main` (`0e97bc2`, `selfHandle`×3 in connections.js)**, verified live this session. The earlier-session worry that "main might not have #181" was a **stale local checkout** (local `main` sat at #180 until `git fetch`). So: building any box from `main` (after `git pull`) **does** include the fix. The one stale artifact is the installed `/Applications/Mycelium.app` on `hi` — its bundled `connections.js` has `selfHandle`×0 → still pre-#181. **hi rebuild remains the only blocker for the two-way handshake.** Stuck row on hi to clear: connection `2d38a80f` (pending → lo); plus two ignorable junk rows (`4fb72464` rejected self-test, `aa0b40ac` 2026-04 foreign-ciphertext).
+
+### What shipped — Matrix Tier-1 wiring (PR #182, branch `feat/matrix-tier1-bringup`, commit `9edd9e6`)
+All **inert behind `matrixConfig()`-null** → safe to merge before any homeserver exists.
+- **config** ([remote/config.js](../src/remote/config.js)): `matrixHomeserver`/`matrixUserId` in remote.json (validated) + `matrixConfig()` gate; access token in auth.db via `setRemoteSecret('matrix_access_token')`, never remote.json (§1/§4).
+- **advertise** ([handlers.js](../src/federation/handlers.js) + [server-http.js:251](../src/server-http.js)): `getMatrixId` → did.json `#matrix` service (per-request read).
+- **server-rest boot** ([server-rest.js](../src/server-rest.js)): `buildSpaceSync()` = client + egress + `resolveMxid` (peer did:web `#matrix`, SSRF-guarded) + selfMxid + MXID-bind + `onTimelineEvent`→`handleInbound`, threaded into `portalCompatRouter`.
+- **createMatrixClient**: a throwing **deploy-session stub** (boot catches → stays inert). Real matrix-js-sdk+rust-crypto adapter NOT written blind (can't validate w/o live homeserver; would pull heavy crypto dep into the vault).
+
+### What was learned
+- **The consumer side was already wired.** `portalCompatRouter` already accepted `spaceSync` and already called `syncGrant`/`syncRevoke`/`mirrorKnowledge` — only the producer/instantiation was missing. The "180–240 LOC" estimate was high; the verifiable wiring was ~70 LOC + tests.
+- **Pivot v2→v3 (design §3a):** "wire in `index.js` boot()" was wrong — `boot()` only builds the MCP surface; routers assemble in the **two server processes** (advertise → server-http :4711; client+sync → server-rest :8787). The split is intrinsic.
+
+### Verification (this session)
+`verify:federation` 12/12 · `verify:spaces` 32/32 (spawns the real REST server, exercises share grant/revoke over the new spaceSync path) · `verify:remote-config` RC11 · `verify:remote-runtime` · 57/57 federation unit tests. **PR #182 CI: in progress at handoff** — federation/config-adjacent diff → needs human review before merge (per /auto-merge-on-green security-sensitive rule).
+
+### Pickup for the Matrix DEPLOY session (the real bring-up)
+Per [DESIGN §8](DESIGN-matrix-cross-machine-bringup-2026-06-16.md): (1) stand up a shared Continuwuity homeserver, register `@hi`/`@lo`; (2) implement `createMatrixClient` ([matrix-client.js](../src/federation/matrix-client.js) — the stub documents the exact steps) against the live server: persistent crypto store, login from `matrixConfig()`, A1b first-send; (3) on each box set config (`matrixHomeserver`/`matrixUserId` + `setRemoteSecret` token), restart server-rest; (4) confirm did.json shows `#matrix`; (5) run the two-box E2E (share→grant→add knowledge on hi→assert on lo: decrypts once, `source_type='remote'`; revoke→kicked). That row on `lo` is the GO criterion.
 
 ---
 
