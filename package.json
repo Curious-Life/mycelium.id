@@ -177,7 +177,8 @@
     "verify:claude-sync": "node scripts/verify-claude-sync.mjs",
     "verify:full-export-import": "node scripts/verify-full-export-import.mjs",
     "verify:app-bearer": "node scripts/verify-app-bearer.mjs",
-    "verify:bridge-bearer": "node scripts/verify-bridge-bearer.mjs"
+    "verify:bridge-bearer": "node scripts/verify-bridge-bearer.mjs",
+    "verify:history-sync": "node scripts/verify-history-sync.mjs"
   },
   "dependencies": {
     "@better-auth/passkey": "^1.6.14",
