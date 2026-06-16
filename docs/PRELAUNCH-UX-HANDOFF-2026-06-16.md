@@ -116,10 +116,13 @@ Vault data lives at `~/Library/Application Support/id.mycelium.app` (Tauri app_d
 
 ## Plan for the 4 remaining items (for the 3-fold sweep)
 
-### #19 — Public space + context areas (start here)
-- **Context Areas** (decision: EXTEND Sharing-contexts): `db.contexts` already does named groups of mindscape **territories** shared with **connections** (the "Sharing" view + 10 `/contexts/*` endpoints in `src/portal-compat.js`). Add an AI `summary` + optional attached document paths in `users.settings.contextAreas[id]` (avoids a migration); surface as "Areas" with a summary view; feed the AI as life-domain context.
-- **Public Space**: the Profile pane (`user_profiles.handle` = public slug, `GET/PUT /profile`, handle-availability check + publish pipeline) already IS the public surface. Add `users.settings.publicSpace = {enabled, showProfile, showPublished}` + `GET/PUT /portal/public-space` + an enable/visibility card.
-- SettingsView panes = `GROUPS` registry (`portal-app/src/lib/views/SettingsView.svelte:127`) + `{#if activePane==='x'}` render blocks + an import + an icon-switch case (`:1075`). Adding a pane = PaneDef + block + import + icon.
+### #19 — Public space + context areas (DESIGN LOCKED 2026-06-16)
+**3-fold sweep DONE → `docs/PUBLIC-SPACE-CONTEXT-AREAS-DESIGN-2026-06-16.md`** (verification table; ~536 LOC budget). Three pivots from reading live code:
+1. **Contexts is already fully built AND mounted** (`src/db/contexts.js`, routes `src/portal-compat.js:619-676`, mounted `src/server-rest.js:164`). The "unverifiable wiring / never mounted" worry was stale — all 16 portal routers ARE mounted here. Scope shrinks to additive, gate-verifiable.
+2. **Areas attach DOCUMENTS** (new `context_documents` junction), whereas contexts today attach **territories** for federation sharing — a different lens on the same row. Spaces (sharing) view left intact.
+3. **PIVOT off the `users.settings` sketch** → use a dedicated **encrypted** `sharing_contexts.summary` column. The AI summary is a semantic fingerprint of plaintext (CLAUDE.md §1/§7) and MUST be encrypted; add `sharing_contexts:['summary']` to the LIVE registry `src/crypto/crypto-local.js` (NOT the `reference/` copy). A migration is re-exec-safe (`ADD COLUMN` guarded by `src/db/migrate.js`), so "avoid a migration" is moot.
+- **Public Space**: add `public_space_enabled` + (intentionally-public, plaintext) `public_bio` to `user_profiles`; extend `PUT /profile`'s dynamic `sets` builder; Profile-pane card with toggle + URL (`<handle>.mycelium.id`) + bio. The rendered landing page at that host is **explicitly deferred** (serving surface; same env gate as #11/#13) — #19's acceptance ("toggle + URL config + persist") is met by the flag/bio/URL.
+- New backend: migration `0015_context_areas.sql`, 4 db methods, 4 routes, `verify:context-areas` gate. UI: new `AreasView.svelte` pane + Profile card. SettingsView panes = `GROUPS` registry (`SettingsView.svelte:127`) + `{#if activePane==='x'}` block + import + `railIcon` case (`:1070`).
 
 ### #10 — MCP/webhook streams
 - Stream-source registry is `/portal/connectors` (Gmail/Linear) rendered by `ImportView.svelte` (Sources facet). Add `mcp` + `webhook` connector types + config forms (MCP server URL/bearer; webhook endpoint). The ingestion worker (poll MCP / receive webhooks) is the real backend lift — scope it in the sweep.
