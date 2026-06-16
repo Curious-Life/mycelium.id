@@ -52,7 +52,7 @@
 
 import { randomUUID as nodeRandomUUID } from 'node:crypto';
 import { canonicalize } from '../federation/sign.js';
-import { assertResolvesPublic } from '../federation/ssrf.js';
+import { safeFetch } from '../federation/ssrf.js';
 
 // Recursive key tripwire (CLAUDE.md §7): never let an embedding/vector field
 // leave the box, even via a future regression that adds one to the profile.
@@ -91,6 +91,7 @@ export function createConnectionsNamespace(deps) {
     sign, did, selfInstance,
     randomUUID = nodeRandomUUID,
     fetch: fetchImpl = globalThis.fetch,
+    lookup, // injectable DNS resolver — threaded into safeFetch (tests inject a stub)
   } = deps;
   if (typeof d1Query !== 'function') throw new TypeError('createConnectionsNamespace: d1Query required');
 
@@ -135,9 +136,10 @@ export function createConnectionsNamespace(deps) {
   // HTTPS-only, no redirect, abort timeout). Shared by request + response.
   async function resolveFederationEndpoint(remoteDomain, remoteHandle) {
     if (!DOMAIN_RE.test(remoteDomain)) throw new Error('Invalid domain');
-    await assertResolvesPublic(remoteDomain); // SSRF: no DNS-rebinding to a private IP
     const webfingerUrl = `https://${remoteDomain}/.well-known/webfinger?resource=acct:${remoteHandle}@${remoteDomain}`;
-    const wfRes = await fetchImpl(webfingerUrl, { signal: AbortSignal.timeout(WEBFINGER_TIMEOUT_MS), redirect: 'manual' });
+    // safeFetch resolves once, validates every address (fail-closed), and pins the
+    // connection — no DNS-rebinding the WebFinger host to a private IP.
+    const wfRes = await safeFetch(webfingerUrl, { lookup, fetch: fetchImpl, signal: AbortSignal.timeout(WEBFINGER_TIMEOUT_MS), redirect: 'manual' });
     if (!wfRes.ok) throw new Error(`WebFinger failed: ${wfRes.status}`);
     const wf = await wfRes.json();
     const fedLink = wf.links?.find((l) => l.rel?.includes('federation'));
@@ -167,7 +169,10 @@ export function createConnectionsNamespace(deps) {
     } else {
       bodyStr = JSON.stringify(body);
     }
-    await fetchImpl(url, { method: 'POST', headers, body: bodyStr, redirect: 'manual', signal: AbortSignal.timeout(FEDERATION_POST_TIMEOUT_MS) });
+    // safeFetch re-resolves + validates + pins the endpoint host: the subdomain
+    // bind above stops a confused-deputy host swap, this stops rebinding that host
+    // to a private IP (the SIGNED POST must never reach an internal target).
+    await safeFetch(url, { lookup, fetch: fetchImpl, method: 'POST', headers, body: bodyStr, redirect: 'manual', signal: AbortSignal.timeout(FEDERATION_POST_TIMEOUT_MS) });
   }
 
   async function requestRemote(fromUserId, remoteHandle, remoteDomain) {

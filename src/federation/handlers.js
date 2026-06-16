@@ -34,7 +34,7 @@ const RATE_WINDOW_MS = 60 * 1000;
  * @param {Function} [deps.fetch]          injected for did resolution / tests
  * @param {()=>number} [deps.now]          injectable clock for tests
  */
-export function createFederationHandlers({ db, userId = 'local-user', identity, getHost, getHandle, getMatrixId = () => null, fetch = globalThis.fetch, now = () => Date.now() }) {
+export function createFederationHandlers({ db, userId = 'local-user', identity, getHost, getHandle, getMatrixId = () => null, fetch = globalThis.fetch, lookup, now = () => Date.now() }) {
   const seenNonces = new Map(); // nonce -> expiry ms
   const rate = new Map();       // peer-ip -> { n, resetAt }
   let globalRate = { n: 0, resetAt: 0 }; // backstop across ALL peers (M-FED-RL)
@@ -80,7 +80,7 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
     if (payload.from_did && payload.from_did !== did) return { ok: false, status: 401, body: { error: 'did mismatch' } };
 
     let pub;
-    try { pub = await resolveDidKey(did, { fetch }); } catch { return { ok: false, status: 401, body: { error: 'unresolvable did' } }; }
+    try { pub = await resolveDidKey(did, { fetch, lookup }); } catch { return { ok: false, status: 401, body: { error: 'unresolvable did' } }; }
     if (!verifyDetached(pub, canonical, sig)) return { ok: false, status: 401, body: { error: 'signature verification failed' } };
 
     seenNonces.set(payload.nonce, now() + TS_WINDOW_MS);
