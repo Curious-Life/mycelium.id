@@ -101,8 +101,11 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     telegram = createTelegramApi({ botToken: cfg.botToken });
     const voicePipeline = createVoicePipeline({ sendVoice: ({ target, filePath, replyToMessageId }) => telegram.sendVoice({ chatId: target, filePath, replyToMessageId }), agentId: cfg.agentId });
 
-    async function checkTelegramAuthority({ kind, id }) {
-      if (cfg.ownerTelegramId && String(id) === String(cfg.ownerTelegramId)) return { allowed: true, reason: 'owner-bootstrap' };
+    async function checkTelegramAuthority({ kind, id, isAgentExplicit }) {
+      // owner-bootstrap (reply to the operator's own DM) is ONLY for an agent-explicit
+      // send — the reply tool's x-egress-provenance. A bare loopback caller must not be
+      // able to impersonate the agent to the owner; it falls through to the registry.
+      if (isAgentExplicit && cfg.ownerTelegramId && String(id) === String(cfg.ownerTelegramId)) return { allowed: true, reason: 'owner-bootstrap' };
       if (kind === 'telegram-group') {
         const g = await vault.getTelegramGroup(id);
         return g.authorized && g.active !== false ? { allowed: true, reason: 'group-authorized' } : { allowed: false, reason: 'group-not-authorized' };
@@ -146,9 +149,11 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     // (reply path) OR any channel the operator authorized via /allow
     // (identity_channels kind 'discord'). Cross-channel to an unauthorized
     // channel is fail-closed.
-    async function checkDiscordAuthority({ kind, id }) {
+    async function checkDiscordAuthority({ kind, id, isAgentExplicit }) {
       const turn = getActiveTurn();
-      if (turn && String(turn.channelId) === String(id) && (turn.source === 'discord' || turn.source === 'discord-thread')) {
+      // reply-to-inbound is ONLY for an agent-explicit send — otherwise any local
+      // caller that reads the active channelId could inject into the live channel.
+      if (isAgentExplicit && turn && String(turn.channelId) === String(id) && (turn.source === 'discord' || turn.source === 'discord-thread')) {
         return { allowed: true, reason: 'reply-to-inbound' };
       }
       const a = await vault.checkChannelAuthority({ kind: 'discord', id });

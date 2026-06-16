@@ -36,7 +36,15 @@ export function createDaemonApp({ telegramSendHandler, discordSendHandler, getAc
   app.get('/internal/inbound-context/current', (_req, res) => {
     const turn = getActiveTurn();
     if (!turn || !turn.channelId) return res.status(404).json({ error: 'no-active-turn' });
-    res.json(turn);
+    // Minimal projection — the reply tool needs only routing fields. Withhold the
+    // human-identifying metadata (username/userId/channel name) from this loopback
+    // endpoint so a co-resident local process can't harvest who the owner is
+    // talking to right now (F3). Exploitation of the channelId is already closed by
+    // the agent-explicit gate on reply-to-inbound; this minimizes the residual leak.
+    res.json({
+      source: turn.source, channelKind: turn.channelKind, channelId: turn.channelId,
+      inboundMessageId: turn.inboundMessageId, voiceMode: turn.voiceMode, taskId: turn.taskId,
+    });
   });
 
   // The reply tool POSTs /{platform}/send based on the inbound turn's source.
