@@ -70,6 +70,7 @@ export function createEnrichmentService(deps) {
     const rows = await messages.selectPendingEnrichment(userId, { limit: batchSize });
     let embedded = 0;
     let failed = 0;
+    let skipped = 0;
 
     // Embed in BOUNDED CHUNKS. A whole 50-row batch of long messages takes >60s
     // on the CPU model, but the embed client aborts at 30s → the request fails
@@ -97,12 +98,25 @@ export function createEnrichmentService(deps) {
 
       for (let i = 0; i < chunk.length; i++) {
         const row = chunk[i];
+        const vec = vectors[i];
+        // Empty/blank content can't embed — TERMINAL SKIP (nlp_processed=1) so it
+        // leaves the backlog for good. Was: stuck at nlp_processed=0 forever,
+        // keeping enrichmentPending > 0 and starving the "settled → generate" gate.
+        if (!row.content || !String(row.content).trim()) {
+          await messages.updateEnrichment(row.id, userId, { nlpProcessed: 1 });
+          skipped++;
+          continue;
+        }
+        // TRANSIENT embed failure: vec is null/undefined (a service timeout/outage
+        // during this chunk, not a model error). Leave the row PENDING (no write) so
+        // the drainer retries it next healthy cycle. NEVER permanent-poison it — the
+        // old code threw "embed returned object dims, expected 768" (typeof null ===
+        // 'object'), which the drainer's self-heal skips forever, stranding valid msgs.
+        if (vec == null) { continue; }
         try {
-          const vec = vectors[i];
+          // GENUINE dimension mismatch (a real wrong-size array) → permanent poison.
           if (!Array.isArray(vec) || vec.length !== EMBED_DIM) {
-            throw new Error(
-              `embed returned ${Array.isArray(vec) ? vec.length : typeof vec} dims, expected ${EMBED_DIM}`,
-            );
+            throw new Error(`embed returned ${vec.length} dims, expected ${EMBED_DIM}`);
           }
           const scope = row.scope || 'org';
           // No userId — match the decryptVector read path's key derivation.
@@ -121,7 +135,7 @@ export function createEnrichmentService(deps) {
       }
     }
 
-    return { scanned: rows.length, embedded, failed };
+    return { scanned: rows.length, embedded, failed, skipped };
   }
 
   /**
