@@ -68,6 +68,20 @@
 		try { localStorage.setItem(WELCOME_SEEN_KEY, '1'); } catch { /* private mode */ }
 		api('/portal/onboarding/welcome-seen', { method: 'POST' }).catch(() => {});
 	}
+
+	// The welcome modal must always be escapable (spec #2): ESC, a click on the
+	// backdrop outside the card, and an explicit × all dismiss it — same as "Later".
+	function onWelcomeKeydown(e: KeyboardEvent) {
+		if (welcomeOpen && e.key === 'Escape') {
+			e.preventDefault();
+			markWelcomeSeen();
+		}
+	}
+	function onBackdropClick(e: MouseEvent) {
+		// Only a click on the backdrop itself (not the card) closes — never swallow
+		// clicks on the welcome content.
+		if (!(e.target as HTMLElement)?.closest('.welcome')) markWelcomeSeen();
+	}
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 	// The first incomplete step drives the rail's emphasis + auto-advance.
@@ -259,11 +273,19 @@
 	});
 </script>
 
+<svelte:window onkeydown={onWelcomeKeydown} />
+
 {#if welcomeOpen}
-	<div class="backdrop" role="dialog" aria-modal="true" aria-labelledby="onb-welcome-title">
+	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+	<div class="backdrop" role="dialog" aria-modal="true" aria-labelledby="onb-welcome-title" onclick={onBackdropClick}>
 		<!-- The hero mycelium animation grows across the whole backdrop, behind the glass. -->
 		<MyceliumCanvas />
 		<div class="welcome">
+			<button class="welcome-close" aria-label="Close" onclick={markWelcomeSeen}>
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+				</svg>
+			</button>
 			<div class="welcome-body">
 				<div class="eyebrow">Welcome</div>
 				<h1 id="onb-welcome-title" class="title">See your mind take shape</h1>
@@ -408,6 +430,27 @@
 	}
 	.welcome-body {
 		padding: 1.5rem 2.25rem 1.75rem;
+	}
+	.welcome-close {
+		position: absolute;
+		top: 0.75rem;
+		right: 0.75rem;
+		z-index: 2;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.9rem;
+		height: 1.9rem;
+		border: none;
+		border-radius: 8px;
+		background: transparent;
+		color: var(--color-text-secondary, #9898a3);
+		cursor: pointer;
+		transition: background 0.15s ease, color 0.15s ease;
+	}
+	.welcome-close:hover {
+		background: var(--color-elevated, rgba(255, 255, 255, 0.06));
+		color: var(--color-text-primary);
 	}
 	.eyebrow {
 		font-family: var(--font-mono, 'JetBrains Mono', monospace);

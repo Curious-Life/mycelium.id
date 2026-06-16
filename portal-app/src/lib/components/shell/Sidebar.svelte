@@ -53,7 +53,22 @@
 	// Activity — now live as "coming later" facets inside Streams, not the nav.)
 	const curiousLife: NavItem = { id: 'curious-life', label: 'Curious Life', icon: 'compass', href: '/curious-life' };
 
-	function handleNavClick(item: NavItem) {
+	// Nav items are real <a href> anchors so the browser's native right-click /
+	// ⌘-click / middle-click "open in new tab" works (spec #17) and the route is a
+	// shareable URL. A plain left-click is intercepted here for SPA navigation
+	// (spec #16 — same-tab, no full reload); modified/middle clicks fall through to
+	// the browser. A short same-target guard swallows accidental double-fires so
+	// rapid clicking can't stack navigations (spec #15).
+	let lastNavId: string | null = null;
+	let lastNavAt = 0;
+	function handleNavClick(e: MouseEvent, item: NavItem) {
+		// Let the browser handle "open in new tab/window" gestures natively.
+		if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+		e.preventDefault();
+		const now = Date.now();
+		if (item.id === lastNavId && now - lastNavAt < 400) { closeMobileDrawer(); return; }
+		lastNavId = item.id;
+		lastNavAt = now;
 		// Don't re-navigate if already on this view — prevents 3D map remount
 		if (currentView === item.id) {
 			closeMobileDrawer();
@@ -156,9 +171,10 @@
 		<nav class="flex flex-col gap-1 px-2">
 			{#each coreNav as item}
 				{@const isActive = navActive(item.id)}
-				<button
-					onclick={() => handleNavClick(item)}
-					class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150
+				<a
+					href={item.href}
+					onclick={(e) => handleNavClick(e, item)}
+					class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 no-underline
 						{isActive
 						? 'bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]'
 						: 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)]'}"
@@ -214,13 +230,14 @@
 					{#if item.id === 'people' && pendingConnections > 0}
 						<span class="conn-badge" aria-label="{pendingConnections} pending requests">{pendingConnections}</span>
 					{/if}
-				</button>
+				</a>
 			{/each}
 
 			<!-- Curious Life — rendered inline with the working tabs, same styling. -->
-			<button
-				onclick={() => handleNavClick(curiousLife)}
-				class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 w-full
+			<a
+				href={curiousLife.href}
+				onclick={(e) => handleNavClick(e, curiousLife)}
+				class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 w-full no-underline
 					{currentView === 'curious-life'
 					? 'bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]'
 					: 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)]'}"
@@ -236,7 +253,7 @@
 					</svg>
 				</div>
 				<span class="text-sm font-medium">Curious Life</span>
-			</button>
+			</a>
 
 		</nav>
 	</div>
@@ -255,9 +272,10 @@
 	     so the sidebar carries one "You" entry instead of two. The footer
 	     identity below also deep-links to the Profile pane. -->
 	<div class="px-2 py-2 border-t border-[var(--color-border)] flex-shrink-0 flex flex-col gap-1">
-		<button
-			onclick={() => { navigationState.setPrimaryView('settings'); goto('/settings'); closeMobileDrawer(); }}
-			class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 w-full
+		<a
+			href="/settings"
+			onclick={(e) => handleNavClick(e, { id: 'settings', label: 'Settings', icon: 'settings', href: '/settings' })}
+			class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 w-full no-underline
 				{currentView === 'settings'
 				? 'bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]'
 				: 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)]'}"
@@ -272,7 +290,7 @@
 				</svg>
 			</div>
 			<span class="text-sm font-medium">Settings</span>
-		</button>
+		</a>
 	</div>
 
 	<!-- User footer -->

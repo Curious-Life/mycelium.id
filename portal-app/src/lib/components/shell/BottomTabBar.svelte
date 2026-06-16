@@ -23,7 +23,19 @@
 		return id === 'people' ? peopleCluster.has(currentView) : currentView === id;
 	}
 
-	function handleTab(tab: TabItem) {
+	// Real <a href> anchors (see Sidebar) — modified/middle clicks open a new tab
+	// natively (spec #17); a plain click is intercepted for same-tab SPA nav (#16),
+	// with a short same-target guard against double-fire stacking (#15).
+	let lastTabId: string | null = null;
+	let lastTabAt = 0;
+	function handleTab(e: MouseEvent, tab: TabItem) {
+		if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+		e.preventDefault();
+		const now = Date.now();
+		if (tab.id === lastTabId && now - lastTabAt < 400) return;
+		lastTabId = tab.id;
+		lastTabAt = now;
+		if (currentView === tab.id) return;
 		navigationState.setPrimaryView(tab.id);
 		goto(tab.href);
 	}
@@ -38,10 +50,11 @@
 <nav class="tab-bar md:hidden" aria-label="Main navigation">
 	{#each tabs as tab}
 		{@const isActive = tabActive(tab.id)}
-		<button
+		<a
 			class="tab-item"
 			class:active={isActive}
-			onclick={() => handleTab(tab)}
+			href={tab.href}
+			onclick={(e) => handleTab(e, tab)}
 			aria-label={tab.label}
 			aria-current={isActive ? 'page' : undefined}
 		>
@@ -71,7 +84,7 @@
 				{/if}
 			</div>
 			<span class="tab-label">{tab.label}</span>
-		</button>
+		</a>
 	{/each}
 
 	<!-- More button -->
@@ -132,6 +145,7 @@
 		border: none;
 		cursor: pointer;
 		color: var(--color-text-tertiary);
+		text-decoration: none;
 		transition: color var(--duration-fast) var(--ease-out);
 		-webkit-tap-highlight-color: transparent;
 		position: relative;
