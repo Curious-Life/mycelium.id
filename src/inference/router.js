@@ -89,14 +89,14 @@ export function createInferenceRouter({
     } catch { /* accounting must never break inference */ }
   }
 
-  async function runLocal({ prompt, maxTokens, numCtx, format, area }) {
+  async function runLocal({ prompt, maxTokens, numCtx, format, area, onTruncated }) {
     let raw = null;
-    const text = await localInfer({ prompt, maxTokens, numCtx, format, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs, onUsage: (u) => { raw = u; } });
+    const text = await localInfer({ prompt, maxTokens, numCtx, format, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs, onUsage: (u) => { raw = u; }, onTruncated });
     emitUsage({ prompt, text, raw, area, isLocal: true });
     return text;
   }
 
-  async function runCloud({ prompt, maxTokens, area }) {
+  async function runCloud({ prompt, maxTokens, area, onTruncated }) {
     let raw = null;
     const text = await cloudInfer({
       prompt, maxTokens,
@@ -107,23 +107,24 @@ export function createInferenceRouter({
       fetch: cfg.fetch,
       timeoutMs: cfg.timeoutMs,
       onUsage: (u) => { raw = u; },
+      onTruncated,
     });
     emitUsage({ prompt, text, raw, area, isLocal: false });
     return text;
   }
 
-  async function* runLocalStream({ prompt, maxTokens, area }) {
+  async function* runLocalStream({ prompt, maxTokens, area, onTruncated }) {
     let raw = null;
     // Accumulate the streamed deltas so the usage estimate has the real output text
     // to fall back on when the provider doesn't report counts (token-budget §12).
     let acc = "";
-    for await (const delta of localStream({ prompt, maxTokens, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs, onUsage: (u) => { raw = u; } })) {
+    for await (const delta of localStream({ prompt, maxTokens, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs, onUsage: (u) => { raw = u; }, onTruncated })) {
       acc += delta; yield delta;
     }
     emitUsage({ prompt, text: acc, raw, area, isLocal: true });
   }
 
-  async function* runCloudStream({ prompt, maxTokens, area }) {
+  async function* runCloudStream({ prompt, maxTokens, area, onTruncated }) {
     let raw = null;
     let acc = "";
     for await (const delta of cloudStream({
@@ -135,6 +136,7 @@ export function createInferenceRouter({
       fetch: cfg.fetch,
       timeoutMs: cfg.timeoutMs,
       onUsage: (u) => { raw = u; },
+      onTruncated,
     })) {
       acc += delta; yield delta;
     }
@@ -176,9 +178,13 @@ export function createInferenceRouter({
    * @param {number} [req.maxTokens]
    * @param {boolean} [req.sensitive=false]  §4g hard-block: sensitive content
    *   NEVER egresses to a US provider — it falls back to on-box local instead.
+   * @param {(info:{reason:string})=>void} [req.onTruncated]  fires (additive,
+   *   fail-soft, counts/category only) when the provider stopped at its OUTPUT
+   *   CAP (max_tokens / finish_reason:'length' / done_reason:'length') so a caller
+   *   can report truncation instead of a false clean stop.
    * @returns {Promise<string>}
    */
-  async function infer({ prompt, task = "summarize", maxTokens, sensitive = false, numCtx, format, profile } = {}) {
+  async function infer({ prompt, task = "summarize", maxTokens, sensitive = false, numCtx, format, profile, onTruncated } = {}) {
     if (typeof prompt !== "string" || prompt.trim() === "") {
       throw new InferenceError("infer: prompt must be a non-empty string");
     }
@@ -201,17 +207,17 @@ export function createInferenceRouter({
       // denial. eu-zdr / local providers are unaffected.
       if (sensitive && /^us/.test(cloudJurisdiction())) {
         emitEgress(prompt, "denied", "sensitive_us_block");
-        return runLocal({ prompt, maxTokens, numCtx, format, area: task });
+        return runLocal({ prompt, maxTokens, numCtx, format, area: task, onTruncated });
       }
       try {
         emitEgress(prompt, "allowed");
-        return await runCloud({ prompt, maxTokens, area: task }); // cloud models carry large context; numCtx is local-only
+        return await runCloud({ prompt, maxTokens, area: task, onTruncated }); // cloud models carry large context; numCtx is local-only
       } catch (cloudErr) {
         // cloudFallbackToLocal:false (cascade mode) propagates the error so the
         // caller can try the NEXT provider; otherwise resilience → on-box local.
         if (!cloudFallbackToLocal) throw cloudErr;
         try {
-          return await runLocal({ prompt, maxTokens, numCtx, format, area: task });
+          return await runLocal({ prompt, maxTokens, numCtx, format, area: task, onTruncated });
         } catch (localErr) {
           throw new InferenceError("infer: cloud failed and local fallback failed", { cause: localErr, backend: "both" });
         }
@@ -219,7 +225,7 @@ export function createInferenceRouter({
     }
 
     // Simple tasks, or complex with no cloud configured → local.
-    return runLocal({ prompt, maxTokens, numCtx, format, area: task });
+    return runLocal({ prompt, maxTokens, numCtx, format, area: task, onTruncated });
   }
 
   /**
@@ -230,7 +236,7 @@ export function createInferenceRouter({
    * @param {object} req  same shape as infer()
    * @returns {AsyncGenerator<string>}
    */
-  async function* inferStream({ prompt, task = "summarize", maxTokens, sensitive = false } = {}) {
+  async function* inferStream({ prompt, task = "summarize", maxTokens, sensitive = false, onTruncated } = {}) {
     if (typeof prompt !== "string" || prompt.trim() === "") {
       throw new InferenceError("inferStream: prompt must be a non-empty string");
     }
@@ -241,24 +247,24 @@ export function createInferenceRouter({
     if (CLOUD_TASKS.includes(task) && hasCloud()) {
       if (sensitive && /^us/.test(cloudJurisdiction())) {
         emitEgress(prompt, "denied", "sensitive_us_block");
-        yield* runLocalStream({ prompt, maxTokens, area: task });
+        yield* runLocalStream({ prompt, maxTokens, area: task, onTruncated });
         return;
       }
       emitEgress(prompt, "allowed");
       let started = false;
       try {
-        for await (const delta of runCloudStream({ prompt, maxTokens, area: task })) {
+        for await (const delta of runCloudStream({ prompt, maxTokens, area: task, onTruncated })) {
           started = true;
           yield delta;
         }
         return;
       } catch (cloudErr) {
-        if (!started && cloudFallbackToLocal) { yield* runLocalStream({ prompt, maxTokens, area: task }); return; }
+        if (!started && cloudFallbackToLocal) { yield* runLocalStream({ prompt, maxTokens, area: task, onTruncated }); return; }
         throw cloudErr;
       }
     }
 
-    yield* runLocalStream({ prompt, maxTokens, area: task });
+    yield* runLocalStream({ prompt, maxTokens, area: task, onTruncated });
   }
 
   return {

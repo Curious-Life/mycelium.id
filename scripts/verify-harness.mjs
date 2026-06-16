@@ -153,8 +153,93 @@ const TOOLS = [{ name: 'searchMindscape', description: 's', inputSchema: { type:
   rec('H7 no second-pass text after abort', !events.some((e) => e.type === 'text_delta' && e.content === 'Found it.'));
 }
 
+// ── H8 Anthropic truncation on a TEXT turn (stop_reason 'max_tokens') ──
+// The output cap was hit mid-answer. The harness must REPORT truncation (not
+// swallow it as a clean stop) and keep the partial text already streamed.
+{
+  const aTruncText = sse([
+    { type: 'message_start', message: { usage: { input_tokens: 10 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'This answer was cut o' } },
+    { type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 4096 } },
+    '[DONE]',
+  ]);
+  const fetch = async () => streamRes(aTruncText);
+  const events = []; let logged = '';
+  const h = createAgentHarness({ fetch, logger: (m) => { logged += m; } });
+  const r = await h.streamTurn({ provider: { anthropicApiKey: 'K' }, system: 'S', userMessage: 'hi', tools: TOOLS, call: async () => 'R', send: (e) => events.push(e) });
+  rec('H8 Anthropic max_tokens → truncated reported (not swallowed)', r.truncated === true, JSON.stringify(r));
+  rec('H8 partial text preserved', events.filter((e) => e.type === 'text_delta').map((e) => e.content).join('') === 'This answer was cut o');
+  rec('H8 truncation logged (no silent swallow)', /output cap|truncat/i.test(logged), logged);
+}
+
+// ── H9 Anthropic truncation on a TOOL-CALL turn (the silent-no-op bug) ──
+// The model was emitting writeMindFileWhole({content}) when the cap hit, so the
+// tool-call JSON is cut mid-string → parses to {} → a silent no-op write. The
+// harness must NOT execute that broken call, and must report truncated.
+{
+  const aTruncTool = sse([
+    { type: 'message_start', message: { usage: { input_tokens: 10 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_x', name: 'writeMindFileWhole' } },
+    // Partial, INVALID JSON — the content string is cut off (no closing quote/brace).
+    { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":"notes.md","content":"a very long note that got cut o' } },
+    { type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 4096 } },
+    '[DONE]',
+  ]);
+  const fetch = async () => streamRes(aTruncTool);
+  const events = []; let toolCalled = false;
+  const h = createAgentHarness({ fetch });
+  const r = await h.streamTurn({ provider: { anthropicApiKey: 'K' }, system: 'S', userMessage: 'save this', tools: TOOLS, call: async () => { toolCalled = true; return 'R'; }, send: (e) => events.push(e) });
+  rec('H9 truncated tool-call → tool NOT executed (no silent no-op write)', toolCalled === false && r.truncated === true, `toolCalled=${toolCalled} ${JSON.stringify(r)}`);
+  rec('H9 no tool_start emitted for the broken call', !events.some((e) => e.type === 'tool_start'), JSON.stringify(events.map((e) => e.type)));
+  rec('H9 not reported as capped/clean completion', r.capped !== true);
+}
+
+// ── H10 OpenAI truncation (finish_reason 'length') ──
+{
+  const oTrunc = sse([
+    { choices: [{ index: 0, delta: { content: 'partial reply' } }] },
+    { choices: [{ index: 0, delta: {}, finish_reason: 'length' }] },
+    { usage: { prompt_tokens: 12, completion_tokens: 4096 }, choices: [] },
+    '[DONE]',
+  ]);
+  const fetch = async () => streamRes(oTrunc);
+  const events = [];
+  const h = createAgentHarness({ fetch });
+  const r = await h.streamTurn({ provider: { openaiApiKey: 'K', baseUrl: 'https://api.openai.com/v1' }, system: 'S', userMessage: 'hi', tools: TOOLS, call: async () => 'R', send: (e) => events.push(e) });
+  rec('H10 OpenAI finish_reason length → truncated reported', r.truncated === true, JSON.stringify(r));
+  rec('H10 partial text preserved', events.filter((e) => e.type === 'text_delta').map((e) => e.content).join('') === 'partial reply');
+}
+
+// ── H11 Ollama native truncation (done_reason 'length') ──
+// Local chat is tool-free, but a cut-off reply must still be reported, not read
+// as a clean stop (the native adapter previously hardcoded stopReason 'stop').
+{
+  const ndjson = (objs) => objs.map((o) => JSON.stringify(o) + '\n');
+  const oll = ndjson([
+    { message: { role: 'assistant', content: 'partial ' }, done: false },
+    { message: { role: 'assistant', content: 'local answer' }, done: false },
+    { message: { role: 'assistant', content: '' }, done: true, done_reason: 'length', prompt_eval_count: 50, eval_count: 4096 },
+  ]);
+  const fetch = async () => streamRes(oll);
+  const events = [];
+  const h = createAgentHarness({ fetch });
+  const r = await h.streamTurn({ provider: { jurisdiction: 'local' }, system: 'S', userMessage: 'hi', tools: [], call: async () => 'R', send: (e) => events.push(e) });
+  rec('H11 Ollama done_reason length → truncated reported', r.truncated === true, JSON.stringify(r));
+  rec('H11 partial text preserved', events.filter((e) => e.type === 'text_delta').map((e) => e.content).join('') === 'partial local answer');
+}
+
+// ── H12 a CLEAN stop is NOT mis-flagged as truncated (no false positives) ──
+{
+  const queue = [streamRes(aFinal)];
+  const fetch = async () => queue.shift();
+  const h = createAgentHarness({ fetch });
+  const r = await h.streamTurn({ provider: { anthropicApiKey: 'K' }, system: 'S', userMessage: 'hi', tools: [], call: async () => 'R', send: () => {} });
+  rec('H12 end_turn → truncated falsy (no false positive)', !r.truncated, JSON.stringify(r));
+}
+
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
-console.log(`VERDICT: ${allPass ? 'GO — harness: Anthropic + OpenAI tool loops · no-tool fallback · cap · tool-error recovery · audited · abortable' : 'NO-GO — see FAIL rows'}`);
+console.log(`VERDICT: ${allPass ? 'GO — harness: Anthropic + OpenAI tool loops · no-tool fallback · cap · tool-error recovery · truncation surfaced · audited · abortable' : 'NO-GO — see FAIL rows'}`);
 console.log('='.repeat(64));
 process.exit(allPass ? 0 : 1);

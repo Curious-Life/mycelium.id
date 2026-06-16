@@ -62,6 +62,13 @@ const mockFetch = async (url, opts) => {
       { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial answer' } },
     ]), opts?.signal);
     if (mode === 'stallempty') return stallRes([], opts?.signal);   // 200 but no tokens, then stall
+    if (mode === 'trunc') return streamRes(sse([   // partial text then the output cap (stop_reason max_tokens)
+      { type: 'message_start', message: { usage: { input_tokens: 9 } } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial cut-off answer' } },
+      { type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 4096 } },
+      '[DONE]',
+    ]));
     return streamRes(sse([
       { type: 'message_start', message: { usage: { input_tokens: 9 } } },
       { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
@@ -186,9 +193,27 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
   rec('C8 no_model → ends with done', types[types.length - 1] === 'done');
 }
 
+// ── C9 truncation at the model's output cap → visible 'truncated' state, NOT a
+//    silent success. (Re-add the provider so chat resolves a model.) ──
+{
+  mode = 'ok';
+  const pid2 = await db.providers.create(U, { provider: 'anthropic', label: 'A', authType: 'api_key', credentials: JSON.stringify({ apiKey: 'KEY' }) });
+  await db.providers.setActive(pid2, U);
+  mode = 'trunc';
+  const r = await fetch(`${base}/chat/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'write me a very long thing' }) });
+  const evs = await readSSE(r);
+  mode = 'ok';
+  const tr = evs.find((e) => e.type === 'truncated');
+  const done = evs.find((e) => e.type === 'done');
+  const text = evs.filter((e) => e.type === 'text_delta').map((e) => e.content).join('');
+  rec('C9 emits a `truncated` event with an actionable message', !!tr && typeof tr.message === 'string' && /cut off|incomplete|limit/i.test(tr.message), JSON.stringify(tr));
+  rec('C9 `done` carries truncated:true (not a clean success)', !!done && done.truncated === true, JSON.stringify(done));
+  rec('C9 keeps the partial text (no error event)', text === 'partial cut-off answer' && !evs.some((e) => e.type === 'error'), JSON.stringify(text));
+}
+
 server.close(); await close?.();
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
-console.log(`VERDICT: ${allPass ? 'GO — portal chat: auth fail-closed · streams · persists · policy-gated · leak-safe' : 'NO-GO — see FAIL rows'}`);
+console.log(`VERDICT: ${allPass ? 'GO — portal chat: auth fail-closed · streams · persists · policy-gated · truncation surfaced · leak-safe' : 'NO-GO — see FAIL rows'}`);
 console.log('='.repeat(64));
 process.exit(allPass ? 0 : 1);

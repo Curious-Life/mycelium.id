@@ -38,6 +38,7 @@ export async function localInfer({
   format,
   think,
   onUsage,
+  onTruncated,
 } = {}) {
   if (typeof fetch !== "function") {
     throw new InferenceError("localInfer: no fetch implementation (Node >= 18 or pass opts.fetch)", { backend: "local" });
@@ -103,6 +104,13 @@ export async function localInfer({
   if (typeof onUsage === "function") {
     try { onUsage({ inputTokens: data.prompt_eval_count, outputTokens: data.eval_count }); } catch { /* never break inference */ }
   }
+  // done_reason:"length" = Ollama hit num_predict (the output cap) → the reply is
+  // cut off. Surface it (additive, fail-soft) so a caller can flag truncation
+  // instead of reporting a clean stop. NOTE: a thinking model can also burn the
+  // budget on hidden reasoning (see the think:false note above) → same signal.
+  if (data?.done_reason === "length" && typeof onTruncated === "function") {
+    try { onTruncated({ reason: "length" }); } catch { /* never break inference */ }
+  }
   return data.response;
 }
 
@@ -124,6 +132,7 @@ export async function* localStream({
   fetch = globalThis.fetch,
   timeoutMs = 60000,
   onUsage,
+  onTruncated,
 } = {}) {
   if (typeof fetch !== "function") {
     throw new InferenceError("localStream: no fetch implementation", { backend: "local" });
@@ -173,6 +182,8 @@ export async function* localStream({
       if (ev.done) {
         // Ollama's terminal event carries REAL token counts (§12). Counts only.
         if (typeof onUsage === "function") { try { onUsage({ inputTokens: ev.prompt_eval_count, outputTokens: ev.eval_count }); } catch { /* never break stream */ } }
+        // done_reason:"length" = the output cap (num_predict) was hit → cut off.
+        if (ev.done_reason === "length" && typeof onTruncated === "function") { try { onTruncated({ reason: "length" }); } catch { /* never break stream */ } }
         return;
       }
     }

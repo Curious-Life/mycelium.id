@@ -120,7 +120,11 @@ const anthropicAdapter = {
       let args = {}; try { args = b.json ? JSON.parse(b.json) : {}; } catch { args = {}; }
       toolCalls.push({ id: b.id, name: b.name, args });
     }
-    return { text, toolCalls, stopReason, usage, isTool: stopReason === 'tool_use', aborted: !!signal?.aborted };
+    // `max_tokens` = the model hit the output cap mid-stream. Its text — and any
+    // tool-call args — are cut off; truncated JSON parses to {} below, so a write
+    // tool would silently no-op. Surface it so the caller refuses to treat it as
+    // success (the "model said it saved but nothing was written" failure).
+    return { text, toolCalls, stopReason, usage, isTool: stopReason === 'tool_use', truncated: stopReason === 'max_tokens', aborted: !!signal?.aborted };
   },
 };
 
@@ -183,7 +187,11 @@ const openaiAdapter = {
       let args = {}; try { args = slot.args ? JSON.parse(slot.args) : {}; } catch { args = {}; }
       toolCalls.push({ id: slot.id, name: slot.name, args });
     }
-    return { text, toolCalls, stopReason, usage, isTool: stopReason === 'tool_calls', aborted: !!signal?.aborted };
+    // `length` = the output cap was hit mid-stream (OpenAI's truncation reason).
+    // Same hazard as Anthropic's `max_tokens`: a cut-off tool-call argument string
+    // parses to {} above → a silent no-op. Surface it (truncated) so the caller
+    // can refuse rather than report success on an incomplete turn.
+    return { text, toolCalls, stopReason, usage, isTool: stopReason === 'tool_calls', truncated: stopReason === 'length', aborted: !!signal?.aborted };
   },
 };
 
@@ -226,6 +234,7 @@ const ollamaNativeAdapter = {
     if (!res.body) throw new InferenceError('harness: Ollama returned no stream body', { backend: 'local' });
 
     let text = '';
+    let doneReason = null;                 // Ollama's terminal `done_reason` (e.g. 'stop' | 'length')
     const usage = { inputTokens: 0, outputTokens: 0 };
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -249,6 +258,7 @@ const ollamaNativeAdapter = {
           const th = ev.message?.thinking;
           if (typeof th === 'string' && th) send({ type: 'thinking_delta', content: th });
           if (ev.done) {
+            if (typeof ev.done_reason === 'string') doneReason = ev.done_reason;
             if (Number.isFinite(ev.prompt_eval_count)) usage.inputTokens = ev.prompt_eval_count;
             if (Number.isFinite(ev.eval_count)) usage.outputTokens = ev.eval_count;
           }
@@ -257,7 +267,11 @@ const ollamaNativeAdapter = {
     } catch (err) {
       if (!signal?.aborted) throw err;   // genuine stream error → propagate; abort → keep partial
     }
-    return { text, toolCalls: [], stopReason: 'stop', usage, isTool: false, aborted: !!signal?.aborted };
+    // `done_reason: 'length'` = Ollama hit num_predict (the output cap). Local chat
+    // is tool-free so there's no broken tool-call here, but the reply is cut off —
+    // surface it (truncated) so the caller flags an incomplete answer rather than a
+    // clean stop. Default to 'stop' when Ollama omits the reason.
+    return { text, toolCalls: [], stopReason: doneReason || 'stop', usage, isTool: false, truncated: doneReason === 'length', aborted: !!signal?.aborted };
   },
 };
 
@@ -333,7 +347,10 @@ export function createAgentHarness({ onEgress, onUsage, fetch = globalThis.fetch
    * @param {AbortSignal} [a.signal]
    * @param {number} [a.maxIterations=8]
    * @param {number} [a.maxTokens=4096]
-   * @returns {Promise<{toolsUsed:string[], capped?:boolean}>}
+   * @returns {Promise<{toolsUsed:string[], capped?:boolean, truncated?:boolean, aborted?:boolean, local?:boolean}>}
+   *   `truncated:true` ⇒ the model stopped at its output cap — the (partial) text
+   *   is cut off and any tool action it was emitting did NOT complete; callers must
+   *   surface this rather than treat the turn as success.
    */
   async function streamTurn({ provider, system, userMessage, tools = [], call, send, signal, maxIterations = 8, maxTokens = 4096, numCtx }) {
     const { adapter, cfg, model, jurisdiction, local } = normalizeProvider(provider);
@@ -371,6 +388,16 @@ export function createAgentHarness({ onEgress, onUsage, fetch = globalThis.fetch
       if (r === null) r = await once([], false);   // tool-fallback retry, no tools
       if (r.aborted) return { toolsUsed, aborted: true };   // stall/disconnect — partial text already streamed
       adapter.pushAssistant(messages, r.text, r.toolCalls);
+      // Truncation = the provider stopped at the output cap mid-stream. Any tool
+      // call it was emitting has cut-off args (truncated JSON → {} → a silent
+      // no-op write — the "said it saved but nothing was written" bug). DON'T run
+      // those tools or iterate further: surface `truncated` and stop so the caller
+      // raises a visible, actionable state. Partial text already streamed; keep it.
+      if (r.truncated) {
+        logger(`harness: provider stopped at the output cap (stop_reason=${r.stopReason}); turn truncated — not executing possibly-truncated tool calls`);
+        if (r.usage) { send({ type: 'usage', inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens }); recordUsage(r.usage); }
+        return { toolsUsed, local: !!local, truncated: true };
+      }
       if (!r.isTool || !r.toolCalls.length) { if (r.usage) { send({ type: 'usage', inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens }); recordUsage(r.usage); } return { toolsUsed, local: !!local }; }
 
       const results = [];
@@ -392,7 +419,8 @@ export function createAgentHarness({ onEgress, onUsage, fetch = globalThis.fetch
     audit();
     const fin = await adapter.streamOnce({ cfg, system, messages, toolDefs: null, model, maxTokens, numCtx, send, signal, fetch, timeoutMs, logger });
     if (fin.usage) { send({ type: 'usage', inputTokens: fin.usage.inputTokens, outputTokens: fin.usage.outputTokens }); recordUsage(fin.usage); }
-    return { toolsUsed, capped: true };
+    if (fin.truncated) logger(`harness: final answer pass also hit the output cap (stop_reason=${fin.stopReason})`);
+    return { toolsUsed, capped: true, truncated: !!fin.truncated };
   }
 
   return { streamTurn };
