@@ -269,11 +269,9 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
     let embedder = { status: 'unknown', message: '', detail: null };
     try { embedder = getEmbedderHealth(); } catch { /* supervisor not running */ }
     try {
-      const er = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND embedding_768 IS NOT NULL', [userId]);
-      const tr = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ?', [userId]);
-      const embedded = Number(er?.results?.[0]?.c ?? 0);
-      const total = Number(tr?.results?.[0]?.c ?? 0);
-      res.json({ embedded, total, pending: Math.max(0, total - embedded), embedder });
+      // Single source of truth — embeddable-only counts so pending reaches 0 (PIPELINE-INTEGRITY §P1.2).
+      const { embedded, total, pending } = await db.messages.embedBacklog(userId);
+      res.json({ embedded, total, pending, embedder });
     } catch { res.json({ embedded: 0, total: 0, pending: 0, embedder }); }
   });
 
@@ -290,11 +288,8 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
       const MIN_EMBEDDED = 5;
       let embedded = 0, total = 0;
       try {
-        const er = await db.rawQuery(
-          'SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND embedding_768 IS NOT NULL', [userId]);
-        const tr = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ?', [userId]);
-        embedded = Number(er?.results?.[0]?.c ?? 0);
-        total = Number(tr?.results?.[0]?.c ?? 0);
+        // Embeddable-only counts (PIPELINE-INTEGRITY §P1.2).
+        ({ embedded, total } = await db.messages.embedBacklog(userId));
       } catch { /* count failed — don't block generation on a counting error */ }
 
       if (total === 0) {

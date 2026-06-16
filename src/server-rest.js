@@ -367,9 +367,8 @@ export async function startRestServer({
         const AUTO_GEN_MIN = Number(process.env.MYCELIUM_AUTO_GEN_MIN) || 25;
         const maybeAutoGenerate = async () => {
           try {
-            const er = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND embedding_768 IS NOT NULL', [bootUserId]);
+            const { embedded } = await db.messages.embedBacklog(bootUserId); // content-bearing embedded count (PIPELINE-INTEGRITY §P1.2)
             const pr = await db.rawQuery('SELECT COUNT(*) AS c FROM clustering_points WHERE user_id = ?', [bootUserId]);
-            const embedded = Number(er?.results?.[0]?.c ?? 0);
             const points = Number(pr?.results?.[0]?.c ?? 0);
             if (!shouldAutoGenerate({ embedded, points, clusteringRunning: isClusteringRunning(), min: AUTO_GEN_MIN })) return;
             console.error('[mycelium] auto-generating first topology — embedding settled');

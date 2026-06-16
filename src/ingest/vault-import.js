@@ -65,7 +65,7 @@ const normalizeValue = (v) => {
 export async function restoreTable(db, table, rows, { userId, overrides = {} }) {
   // `attempted`/`capped` feed the reconciliation report: declared − attempted
   // must be zero, or the report names exactly what was never even tried.
-  const out = { attempted: 0, inserted: 0, deduped: 0, failed: 0, capped: 0 };
+  const out = { attempted: 0, inserted: 0, deduped: 0, failed: 0, capped: 0, skippedEmpty: 0 };
   if (!Array.isArray(rows) || rows.length === 0) return out;
   const cols = await tableColumns(db, table);
   if (cols.size === 0) { out.failed = rows.length; out.attempted = rows.length; out.tableMissing = true; return out; }
@@ -88,6 +88,16 @@ export async function restoreTable(db, table, rows, { userId, overrides = {} }) 
       // ships it as a CANONICAL-KEY envelope (territory_profiles, realms,
       // semantic_themes…), undecryptable here. Null it everywhere — V1 re-embeds.
       if (cols.has('embedding_768')) r.embedding_768 = null;
+      // Fail-closed pipeline integrity (PIPELINE-INTEGRITY design §P1.1): a message
+      // with no content AND no attachment can never embed/cluster/search — it would
+      // land as a permanently-pending dead row (the source of the stuck "N remaining"
+      // backlog). Skip it, mirroring captureMessage's live-path rule. Other tables
+      // are unaffected.
+      if (table === 'messages') {
+        const content = typeof r.content === 'string' ? r.content.trim() : '';
+        const hasAttachment = (r.attachment_id != null && r.attachment_id !== '') || (r.attachmentId != null && r.attachmentId !== '');
+        if (!content && !hasAttachment) { out.skippedEmpty++; continue; }
+      }
       const keys = Object.keys(r).filter((k) => cols.has(k) && r[k] !== undefined);
       if (keys.length === 0) { out.failed++; continue; }
       const res = await db.rawQuery(

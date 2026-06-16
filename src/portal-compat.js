@@ -707,13 +707,10 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
   // portal-mindscape's /mycelium/processing-status; `embedded` rows have a
   // non-NULL embedding_768. Best-effort: any error reads as all-zero.
   async function embedCounts() {
-    try {
-      const tr = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ?', [userId]);
-      const er = await db.rawQuery('SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND embedding_768 IS NOT NULL', [userId]);
-      const total = Number((tr?.results || tr || [])[0]?.c ?? 0);
-      const embedded = Number((er?.results || er || [])[0]?.c ?? 0);
-      return { total, embedded, pending: Math.max(0, total - embedded) };
-    } catch { return { total: 0, embedded: 0, pending: 0 }; }
+    // Single source of truth (db.messages.embedBacklog) — counts only embeddable
+    // (content-bearing) messages so `pending` reaches 0. PIPELINE-INTEGRITY §P1.2.
+    try { return await db.messages.embedBacklog(userId); }
+    catch { return { total: 0, embedded: 0, pending: 0 }; }
   }
 
   router.get('/onboarding/status', async (_req, res) => {

@@ -163,6 +163,33 @@ export function createMessagesNamespace(deps) {
     },
 
     /**
+     * Embedding backlog snapshot for the activity/status surfaces. The single
+     * source of truth for "embedded vs total vs pending" — `total` counts only
+     * EMBEDDABLE messages (`content IS NOT NULL AND content != ''`), the SAME
+     * predicate selectPendingEnrichment uses, so `pending` reflects work the
+     * drainer can actually do and reaches 0 (a content-NULL row can never embed,
+     * so counting it in `total` made the old `total − embedded` stick forever —
+     * the "19 remaining" bug). PIPELINE-INTEGRITY design §P1.2.
+     * @returns {Promise<{ embedded:number, total:number, pending:number }>}
+     */
+    async embedBacklog(userId) {
+      const r = await d1Query(
+        `SELECT
+           COUNT(*) AS total,
+           COALESCE(SUM(CASE WHEN embedding_768 IS NOT NULL THEN 1 ELSE 0 END), 0) AS embedded
+         FROM messages
+         WHERE user_id = ?
+           AND forgotten_at IS NULL
+           AND content IS NOT NULL AND content != ''`,
+        [userId],
+      );
+      const row = (r.results || [])[0] || {};
+      const total = Number(row.total || 0);
+      const embedded = Number(row.embedded || 0);
+      return { embedded, total, pending: Math.max(0, total - embedded) };
+    },
+
+    /**
      * Drain query for the NLP rules pass (enrichment stage 2). Selects rows
      * that are embedded but not yet enriched — nlp_processed = 2 — per the
      * canonical state machine (0 unprocessed → 2 embedded → 1 enriched).

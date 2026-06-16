@@ -47,7 +47,10 @@ export function stripPrefix(id) {
 // table would throw SQLITE_ERROR, which the per-source try/catch swallows,
 // silently dropping that whole layer — so every column below is confirmed.
 const SOURCES = [
-  { table: 'messages', sql: 'SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ? AND forgotten_at IS NULL', kind: 'message', prefix: '' },
+  // content IS NOT NULL/'' — a content-NULL message can never be a useful search
+  // hit (empty doc) and must not enter the pipeline (PIPELINE-INTEGRITY design
+  // §P1.3); excludes the quarantined/dead rows that otherwise bloat the index.
+  { table: 'messages', sql: "SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ? AND forgotten_at IS NULL AND content IS NOT NULL AND content != ''", kind: 'message', prefix: '' },
   { table: 'territory_profiles', sql: "SELECT CAST(territory_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM territory_profiles WHERE user_id = ?", kind: 'territory', prefix: ID_PREFIX.territory },
   { table: 'realms', sql: "SELECT CAST(realm_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM realms WHERE user_id = ?", kind: 'realm', prefix: ID_PREFIX.realm },
   { table: 'semantic_themes', sql: "SELECT CAST(semantic_theme_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM semantic_themes WHERE user_id = ?", kind: 'theme', prefix: ID_PREFIX.theme },
@@ -96,7 +99,15 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
   let added = 0;
   let vectorsLoaded = 0;
   let vectorsFailed = 0;
+  let processed = 0;
   const byKind = {};
+  // Cooperative build: a large vault (tens of thousands of rows) would otherwise
+  // run this whole loop as an unbroken microtask chain — `await` over a resolved
+  // decrypt/add yields only a MICROTASK, which preempts I/O, so the HTTP event
+  // loop is STARVED for the entire build (the user-visible "app frozen" symptom).
+  // Yield to the MACROTASK queue every YIELD_EVERY rows so requests are serviced
+  // mid-build. (PIPELINE-INTEGRITY design §P2.1.) Negligible wall-clock cost.
+  const YIELD_EVERY = 256;
   for (const src of SOURCES) {
     let rows;
     try {
@@ -107,6 +118,7 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
       continue;
     }
     for (const row of rows) {
+      if (++processed % YIELD_EVERY === 0) await new Promise((r) => setImmediate(r));
       const rawId = row.id != null ? String(row.id) : '';
       if (!rawId) continue;
       const id = src.prefix + rawId; // kind-prefixed for profiles; bare for messages

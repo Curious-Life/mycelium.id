@@ -101,6 +101,7 @@
     "verify:ct-monitor": "node scripts/verify-ct-monitor.mjs",
     "verify:context": "node scripts/verify-context.mjs",
     "verify:ingest": "node scripts/verify-ingest.mjs",
+    "verify:pipeline-integrity": "node scripts/verify-pipeline-integrity.mjs",
     "verify:blob": "node scripts/verify-blob.mjs",
     "verify:embed-supervisor": "node scripts/verify-embed-supervisor.mjs",
     "verify:claims": "node scripts/verify-claims.mjs",
