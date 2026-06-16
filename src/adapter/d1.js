@@ -28,8 +28,21 @@ const hasReturning = (sql) => /\bRETURNING\b/i.test(sql);
  * @returns {{ db, d1Query, d1QueryAdmin, firstRow, d1Batch, parseJson,
  *             randomUUID, now, close }}
  */
-export function createDb({ dbPath, userKey, systemKey, scope = 'personal' }) {
+export function createDb({ dbPath, userKey, systemKey, scope = 'personal', dbKeyHex = null }) {
   const db = new Database(dbPath);
+  // At-rest blindness (opt-in): when a whole-file SQLCipher key is supplied, key
+  // the connection BEFORE any other statement (the key PRAGMA must be first).
+  // Absent dbKeyHex → plaintext open, unchanged — this is what keeps the ~104
+  // raw-read verify gates (plaintext temp DBs) green. The aliased driver
+  // (better-sqlite3-multiple-ciphers) makes `cipher`/`key` no-op-safe in plain
+  // mode. temp_store=MEMORY prevents plaintext spill to on-disk temp files.
+  // @see docs/AT-REST-BLINDNESS-DESIGN-2026-06-11.md, keystore.deriveDbKey.
+  if (dbKeyHex) {
+    if (!/^[0-9a-f]{64}$/i.test(dbKeyHex)) throw new Error('dbKeyHex must be 64-char hex');
+    db.pragma(`cipher='sqlcipher'`);
+    db.pragma(`key="x'${dbKeyHex}'"`);
+    db.pragma('temp_store = MEMORY');
+  }
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
 
