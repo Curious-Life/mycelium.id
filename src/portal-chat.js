@@ -174,7 +174,10 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     // Live-inference signal: a background_jobs row that surfaces in the global
     // header activity feed ("the model is working now"). Content-free per §1.
     let chatJob = null;
-    req.on('close', () => { clientGone = true; ctrl.abort(); });
+    // On client disconnect, clear the live-inference row immediately — nobody is
+    // waiting on this turn, so it must not linger as a phantom "Thinking…" (the
+    // server turn may keep generating/persisting; that's the harness's concern).
+    req.on('close', () => { clientGone = true; ctrl.abort(); if (chatJob) db.activityFeed?.finish?.(chatJob).catch(() => {}); });
     const captureText = (ev) => {
       if (ev.type === 'text_delta' || ev.type === 'tool_start' || ev.type === 'tool_complete' || ev.type === 'thinking_delta') {
         lastActivity = Date.now();
@@ -189,9 +192,18 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     const watchTick = Math.max(500, Math.min(4000, Math.floor(TTFB_MS / 4)));
     const watchdog = setInterval(() => {
       const limit = streaming ? IDLE_MS : TTFB_MS;    // first-token wait vs inter-token gap
-      if (Date.now() - lastActivity > limit) ctrl.abort();
-      // keep the live-inference row fresh so a long local generation isn't reaped
-      if (chatJob) db.activityFeed?.heartbeat?.(chatJob).catch(() => {});
+      if (Date.now() - lastActivity > limit) {
+        ctrl.abort();
+        // Turn declared stalled. CLEAR the live row here, not just in the finally:
+        // a hung upstream fetch (Ollama dropped the request but the promise never
+        // settles) can keep the handler from ever reaching the finally, which would
+        // otherwise leave a permanent phantom "Thinking…". Null it so the heartbeat
+        // below can't re-touch it.
+        if (chatJob) { const j = chatJob; chatJob = null; db.activityFeed?.finish?.(j).catch(() => {}); }
+      } else if (chatJob && !clientGone) {
+        // keep the row fresh during a healthy long generation
+        db.activityFeed?.heartbeat?.(chatJob).catch(() => {});
+      }
     }, watchTick);
 
     try {
