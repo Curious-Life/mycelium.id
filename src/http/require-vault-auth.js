@@ -18,11 +18,26 @@
 import crypto from 'node:crypto';
 import { isTrustedLoopback } from './loopback.js';
 import { matchStaticBearer } from '../gateway/static-bearer.js';
-import { readRemoteConfig } from '../remote/config.js';
+import { readRemoteConfig, resolveMcpBearer } from '../remote/config.js';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const CSRF_COOKIE = 'mycelium_csrf';
 const VALIDATE_TIMEOUT_MS = 5000;
+
+// The Bearer the native app authenticates with. matchStaticBearer is env-first
+// (MYCELIUM_MCP_BEARER) but ALSO accepts the auto-provisioned/persisted bearer —
+// the value GET /portal/mcp-bearer surfaces in the "Connect a phone" panel — so a
+// token copied from that panel works with ZERO env setup (a GUI app can't easily
+// inject env into the spawned vault). resolveMcpBearer() is env-first→persisted,
+// identical to what the panel shows. Resolved once + cached (one auth.db read);
+// fail-soft to null (→ bearer path simply disabled, loopback/cookie unaffected).
+let _expectedBearer;
+function expectedBearer() {
+  if (_expectedBearer === undefined) {
+    try { _expectedBearer = resolveMcpBearer() || null; } catch { _expectedBearer = null; }
+  }
+  return _expectedBearer;
+}
 
 export function parseCookies(req) {
   const out = {};
@@ -79,7 +94,7 @@ export function defaultValidateSession(cookieHeader) {
 export async function resolveRequester(req, { userId, validateSession = defaultValidateSession }) {
   if (isTrustedLoopback(req)) return { id: userId, via: 'loopback' };
   const authz = req?.headers?.authorization;
-  if (authz && matchStaticBearer(authz)) return { id: userId, via: 'bearer' };
+  if (authz && matchStaticBearer(authz, process.env, expectedBearer())) return { id: userId, via: 'bearer' };
   const cookieHeader = req?.headers?.cookie;
   if (cookieHeader) {
     const id = await validateSession(cookieHeader);
@@ -147,7 +162,7 @@ export function makePortalOwnerGate({ userId }) {
   return (req) => {
     if (isTrustedLoopback(req)) return { id: userId };
     const authz = req?.headers?.authorization;
-    if (authz && matchStaticBearer(authz)) return { id: userId };
+    if (authz && matchStaticBearer(authz, process.env, expectedBearer())) return { id: userId };
     return null;
   };
 }
