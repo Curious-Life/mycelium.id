@@ -5,7 +5,6 @@
 	import MindscapeDetail from '$lib/components/mindscape/MindscapeDetail.svelte';
 	import MindscapeBackground from '$lib/components/mindscape/MindscapeBackground.svelte';
 	import MindscapeInvite from '$lib/components/mindscape/MindscapeInvite.svelte';
-	import MindscapeActivityChip from '$lib/components/mindscape/MindscapeActivityChip.svelte';
 	import PulsesLens from '$lib/components/mindscape/PulsesLens.svelte';
 	import { api, apiGet } from '$lib/api';
 	import { generate, start as startGen, resume as resumeGen, reset as resetGen, cancel as cancelGen, fmtSeconds } from '$lib/generate';
@@ -615,10 +614,9 @@
 	</div>
 {:else}
 <div class="mindscape-layout" class:resizing={isResizing} bind:this={containerRef}>
-	<!-- Pipeline progress — a glassy top-right chip driven by the generate poller.
-	     Mounted at the layout root so it's visible in BOTH the empty-state AND the
-	     populated mindscape (e.g. when "Illuminate" runs from the realm sidebar). -->
-	<MindscapeActivityChip />
+	<!-- Pipeline/inference progress now lives ONLY in the global header activity
+	     indicator (top-right) — a single source of truth. The old canvas chip was a
+	     duplicate of that feed (generate surfaces via the `mycelium_generate` job row). -->
 
 	<!-- Navigation + detail panel — only once there's a mindscape to navigate.
 	     On an empty vault it would be a blank rail, so we hide it entirely. -->

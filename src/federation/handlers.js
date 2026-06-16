@@ -140,5 +140,32 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
       }
       return { status: 202, body: { accepted: true, verified: true } };
     },
+
+    /**
+     * Inbound DIRECT MESSAGE from a connected peer (federation Tier-0c). Same
+     * fail-closed did:web verify gate as /connect — and receiveMessage ADDS an
+     * authorization check: a valid signature is not enough, the peer must be an
+     * ACCEPTED connection. Replay/dedup handled by verify()'s nonce set + the
+     * UNIQUE(connection_id, remote_nonce) index. Content never logged.
+     */
+    async message({ payload, headers = {}, ip } = {}) {
+      const v = await verify({ payload, headers, ip });
+      if (!v.ok) return { status: v.status, body: v.body };
+      if (payload.$type !== 'social.mycelium.message.v1') return { status: 400, body: { error: 'unexpected $type' } };
+      try {
+        const id = await db.connections.receiveMessage({
+          fromDid: v.did,
+          verifiedHost: didWebHost(v.did),
+          content: payload.content,
+          nonce: payload.nonce,
+          toUserId: userId,
+        });
+        return { status: 202, body: { accepted: true, id } };
+      } catch (e) {
+        // Signed but not a connection → 403 (authenticated, unauthorized).
+        const status = /no accepted connection/.test(e.message) ? 403 : 400;
+        return { status, body: { error: e.message } };
+      }
+    },
   };
 }

@@ -319,6 +319,28 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
     try { ok(res, { overlap: await db.connections.computeOverlap(userId, connId(req)) }); }
     catch (e) { fail(res, 400, e.message || 'could not compute overlap'); }
   });
+
+  // ── Direct messaging with a connected peer (federation Tier-0c) ───────────
+  // unread is registered before /:id/messages; its literal path can't be
+  // captured by the :id pattern (distinct 3rd segment).
+  router.get('/connections/messages/unread', async (_req, res) => {
+    try { ok(res, await db.connections.unreadMessages(userId)); }
+    catch { ok(res, { total: 0, byConnection: {} }); }
+  });
+  router.get('/connections/:id/messages', async (req, res) => {
+    try { ok(res, { messages: await db.connections.listMessages(userId, connId(req)) }); }
+    catch (e) { fail(res, 400, e.message || 'could not load messages'); }
+  });
+  router.post('/connections/:id/messages', async (req, res) => {
+    try {
+      const message = await db.connections.sendMessage(userId, connId(req), String(req.body?.text || ''));
+      ok(res, { ok: true, message });
+    } catch (e) { fail(res, 400, e.message || 'could not send message'); }
+  });
+  router.post('/connections/:id/messages/read', async (req, res) => {
+    try { await db.connections.markMessagesRead(userId, connId(req)); ok(res, { ok: true }); }
+    catch (e) { fail(res, 400, e.message || 'could not mark read'); }
+  });
   // Everything shared WITH this connection — the management hub: spaces granted
   // to the peer + contexts (territory facets) granted to the connection.
   router.get('/connections/:id/shared', async (req, res) => {
