@@ -9,7 +9,8 @@
 //   N3 it decrypts back to the exact stub vector via the canonical read path
 //      (decryptVector, no userId) — write/read key-derivation parity
 //   N4 an already-embedded row (nlp_processed=2) is NOT re-touched
-//   N5 a poison row (embed throws) is isolated → nlp_processed=-1 + nlp_error,
+//   N5 a poison row (embed returns a wrong-size vector) is isolated →
+//      nlp_processed=-1 + nlp_error,
 //      and the batch still drains the healthy rows around it
 //   N6 fail-closed: a locked vault (getMasterKey→null) refuses to write
 //
@@ -53,18 +54,24 @@ function stubVec(text) {
   return v;
 }
 const FAIL_SENTINEL = '__FAIL_ME__';
+// A genuine-poison vector: a real WRONG-SIZE array (not 768-d). Post-#192 the
+// drainer only permanent-poisons a wrong-size array; a null/undefined vector is
+// a TRANSIENT failure (service blip) that's left pending for retry — so modeling
+// poison as null would now exercise the retry path, not the isolate path (the
+// N1b/N5/N5b assertions below expect a row driven to -1 + nlp_error).
+const POISON_VEC = [0, 0, 0];
 const stubEmbed = {
   async embed(text) {
-    if (text === FAIL_SENTINEL) throw new Error('stub: forced embed failure');
+    if (text === FAIL_SENTINEL) return POISON_VEC;
     return stubVec(text);
   },
   // drainOnce now embeds the whole batch in one /batch call. Mirror the real
-  // service: a single poison text yields a BAD per-item vector (not a thrown
-  // batch) so the service's per-row validation isolates just that row → -1,
-  // while healthy rows still embed. (A true service-down throw is a separate
-  // path the service already handles by failing the whole batch.)
+  // service: a single poison text yields a BAD per-item vector (a wrong-size
+  // array, not null) so the service's per-row validation isolates just that row
+  // → -1, while healthy rows still embed. (A true service-down throw is a
+  // separate path the service already handles by failing the whole batch.)
   async embedBatch(texts) {
-    return texts.map((t) => (t === FAIL_SENTINEL ? null : stubVec(t)));
+    return texts.map((t) => (t === FAIL_SENTINEL ? POISON_VEC : stubVec(t)));
   },
 };
 
@@ -120,7 +127,7 @@ async function main() {
   freshDb();
 
   // Seed: 3 healthy pending (nlp_processed defaults to 0), 1 already-embedded
-  // (skip), 1 poison (forced embed failure). Insert via a raw connection with
+  // (skip), 1 poison (embed returns a wrong-size vector). Insert via a raw connection with
   // PLAINTEXT content — the read path will encrypt-compare at SQL level and
   // auto-decrypt on the way out; for the drain we only need content to be
   // embeddable, and stubEmbed reads whatever selectPendingEnrichment returns.
@@ -139,7 +146,7 @@ async function main() {
   }
   // Already-embedded row — must be skipped by the drain.
   await db.messages.insert({ id: 'e-done', user_id: USER, role: 'user', content: 'already embedded, leave me alone', source: 'verify', agent_id: 'personal-agent', scope: 'org', nlp_processed: 2 });
-  // Poison row — embed throws on this content.
+  // Poison row — embed returns a wrong-size vector for this content.
   await db.messages.insert({ id: 'e-poison', user_id: USER, role: 'user', content: FAIL_SENTINEL, source: 'verify', agent_id: 'personal-agent', scope: 'org' });
 
   const svc = createEnrichmentService({ messages: db.messages, embed: stubEmbed, getMasterKey });
