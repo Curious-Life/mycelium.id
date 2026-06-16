@@ -21,6 +21,7 @@
 
 import net from 'node:net';
 import { lookup as dnsLookup } from 'node:dns/promises';
+import { Agent, fetch as undiciFetch } from 'undici';
 
 /** v4 octet array → is it private / loopback / link-local / CGNAT / metadata? */
 function isPrivateV4(p) {
@@ -105,14 +106,60 @@ export function isPrivateAddress(ip) {
 }
 
 /**
- * Throw if `host` resolves to any private address. Allow (return) when it does
- * not resolve. @param {string} host @param {{lookup?:Function}} [opts]
+ * Resolve `host` and throw if it does not resolve to at least one usable PUBLIC
+ * address. FAIL-CLOSED: an unresolvable host throws (an attacker who can make the
+ * guard's resolver fail must not get a free pass — the fetch's own resolver may
+ * still succeed to a private IP). Returns the validated public addresses.
+ * @param {string} host @param {{lookup?:Function}} [opts]
+ * @returns {Promise<Array<{address:string, family:number}>>}
  */
 export async function assertResolvesPublic(host, { lookup = dnsLookup } = {}) {
   let addrs;
   try { addrs = await lookup(host, { all: true }); }
-  catch { return; } // unresolvable → the fetch can't reach any IP; nothing to block
-  for (const a of addrs || []) {
+  catch { throw new Error('refusing to fetch an unresolvable host'); } // fail-closed
+  if (!addrs || !addrs.length) throw new Error('refusing to fetch an unresolvable host');
+  for (const a of addrs) {
     if (isPrivateAddress(a.address)) throw new Error(`refusing to fetch a non-public address (${a.address})`);
+  }
+  return addrs;
+}
+
+/**
+ * SSRF-safe fetch for an attacker-influenced URL. Resolves the host ONCE,
+ * validates EVERY address as public (fail-closed via assertResolvesPublic), then
+ * PINS the connection to the validated address through an undici dispatcher whose
+ * connect-hook lookup re-checks isPrivateAddress — so the fetch cannot re-resolve
+ * to a different (private) IP between the check and the connect (TOCTOU / DNS
+ * rebinding). TLS still validates the cert against the original hostname (SNI is
+ * unchanged; only the address is pinned).
+ *
+ * Test seam: when a non-default `fetch` is injected (the verify shim), the
+ * resolve+validate guard still runs, then the injected fetch performs the call —
+ * the undici pin (a connection-level guarantee) is exercised only on the real path.
+ *
+ * @param {string} url
+ * @param {{lookup?:Function, fetch?:Function} & RequestInit} [opts]
+ */
+export async function safeFetch(url, { lookup = dnsLookup, fetch: fetchImpl = globalThis.fetch, ...init } = {}) {
+  const host = new URL(url).hostname;
+  const addrs = await assertResolvesPublic(host, { lookup }); // fail-closed, all-addresses
+  if (fetchImpl !== globalThis.fetch) return fetchImpl(url, init); // injected test seam
+  const pinned = addrs[0];
+  const agent = new Agent({
+    connect: {
+      lookup: (_hostname, _options, cb) => {
+        // Re-validate at connect time — defeats a resolver that changed its answer.
+        if (isPrivateAddress(pinned.address)) return cb(new Error('refusing to connect to a non-public address'));
+        cb(null, [{ address: pinned.address, family: pinned.family === 6 ? 6 : 4 }]); // undici connect lookup: (err, [{address,family}])
+      },
+    },
+  });
+  try {
+    // Use undici's OWN fetch (not Node's bundled global fetch) so the npm-undici
+    // Agent/dispatcher interface matches — a cross-version dispatcher throws
+    // "invalid onRequestStart method" against the global fetch.
+    return await undiciFetch(url, { ...init, dispatcher: agent });
+  } finally {
+    agent.close().catch(() => {});
   }
 }

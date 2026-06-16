@@ -15,7 +15,7 @@ import { createIdentity } from '../src/identity/identity.js';
 import { createFederationHandlers } from '../src/federation/handlers.js';
 import { createConnectionsNamespace } from '../src/db/connections.js';
 import { canonicalize } from '../src/federation/sign.js';
-import { isPrivateAddress, assertResolvesPublic } from '../src/federation/ssrf.js';
+import { isPrivateAddress, assertResolvesPublic, safeFetch } from '../src/federation/ssrf.js';
 
 const ledger = [];
 const rec = (name, pass, detail = '') => { ledger.push(pass); console.log(`${pass ? '[✓]' : '[✗]'} ${name}${detail ? ` — ${detail}` : ''}`); };
@@ -53,6 +53,14 @@ function shimFetch(urlStr, init = {}) {
   });
 }
 
+// safeFetch is fail-CLOSED, so the test boxes (alice/bob.mycelium.id, which do not
+// resolve in real DNS) need an injected lookup that maps them to a PUBLIC literal —
+// the resolve+validate guard then passes and shimFetch performs the loopback call.
+const testLookup = async (host) => {
+  if (HOST_PORT[host] != null || /\.mycelium\.id$/.test(host)) return [{ address: '93.184.216.34', family: 4 }];
+  throw new Error(`testLookup: unmapped host ${host}`);
+};
+
 // Mount a box's federation handlers behind a tiny node:http server.
 function startBox(handle, host, { withConnections } = {}) {
   const inserts = [];
@@ -62,9 +70,9 @@ function startBox(handle, host, { withConnections } = {}) {
     if (/INSERT INTO/.test(sql)) { inserts.push({ sql, params }); return { results: [] }; }
     return { results: [] };
   };
-  const db = withConnections ? { connections: createConnectionsNamespace({ d1Query: fakeD1 }) } : {};
+  const db = withConnections ? { connections: createConnectionsNamespace({ d1Query: fakeD1, fetch: shimFetch, lookup: testLookup }) } : {};
   const identity = createIdentity({ masterHex: BOX_KEYS[handle], handle });
-  const h = createFederationHandlers({ db, userId: `${handle}-user`, identity, getHost: () => host, getHandle: () => handle, fetch: shimFetch });
+  const h = createFederationHandlers({ db, userId: `${handle}-user`, identity, getHost: () => host, getHandle: () => handle, fetch: shimFetch, lookup: testLookup });
 
   const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
@@ -100,6 +108,20 @@ async function main() {
   try { await assertResolvesPublic('evil.example', { lookup: async () => [{ address: '::ffff:7f00:1' }] }); }
   catch { rebindThrew = true; }
   rec('SSRF guard: rebinding to ::ffff:7f00:1 (hex-grouped loopback) throws', rebindThrew);
+
+  // safeFetch fail-CLOSED layer-1 (resolve-once + validate-every-address). The
+  // undici connect-pin (layer-2, TOCTOU defense) is validated live, not here.
+  {
+    let unresolvable = false, privateBlocked = false, mixedBlocked = false, publicOk = false;
+    try { await safeFetch('https://x.test/', { lookup: async () => { throw new Error('nx'); } }); } catch { unresolvable = true; }
+    try { await safeFetch('https://x.test/', { lookup: async () => [{ address: '127.0.0.1', family: 4 }] }); } catch { privateBlocked = true; }
+    try { await safeFetch('https://x.test/', { lookup: async () => [{ address: '93.184.216.34', family: 4 }, { address: '10.0.0.1', family: 4 }] }); } catch { mixedBlocked = true; }
+    try { const r = await safeFetch('https://x.test/', { lookup: async () => [{ address: '93.184.216.34', family: 4 }], fetch: async () => ({ status: 207 }) }); publicOk = r.status === 207; } catch { publicOk = false; }
+    rec('SSRF safeFetch fail-closed: unresolvable host throws (was fail-open)', unresolvable);
+    rec('SSRF safeFetch fail-closed: a private resolution throws', privateBlocked);
+    rec('SSRF safeFetch fail-closed: a mixed [public, private] set throws (validates ALL addresses)', mixedBlocked);
+    rec('SSRF safeFetch: a fully-public resolution proceeds via the seam', publicOk);
+  }
 
   // M-FED-RL: rotating the (spoofable) source IP must NOT mint unlimited buckets;
   // the global backstop caps total inbound connects regardless of per-request IP.

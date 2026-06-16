@@ -15,7 +15,7 @@
 // Pure protocol — no storage. Network only via the injected/global fetch in
 // resolveDidKey().
 
-import { assertResolvesPublic } from './ssrf.js';
+import { safeFetch } from './ssrf.js';
 
 const HOST_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/; // DNS host: no scheme, port, or underscore
 const DID_WEB_RE = /^did:web:([a-z0-9]([a-z0-9.-]*[a-z0-9])?)$/;
@@ -130,8 +130,7 @@ export async function resolveMatrixService(did, { fetch = globalThis.fetch, time
   if (!m) return null;
   const host = m[1];
   if (!isPublicHost(host)) return null;
-  await assertResolvesPublic(host, { lookup });
-  const res = await fetch(`https://${host}/.well-known/did.json`, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
+  const res = await safeFetch(`https://${host}/.well-known/did.json`, { lookup, fetch, redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok) return null;
   const doc = await res.json();
   if (doc.id !== did) return null; // no key confusion
@@ -179,8 +178,10 @@ export async function resolveDidKey(did, { fetch = globalThis.fetch, timeoutMs =
   if (!m) throw new Error('unsupported or malformed did:web');
   const host = m[1];
   if (!isPublicHost(host)) throw new Error('did:web host is not a public domain'); // SSRF: no IP-literal / loopback
-  await assertResolvesPublic(host, { lookup }); // SSRF: no DNS-rebinding to a private IP
-  const res = await fetch(`https://${host}/.well-known/did.json`, {
+  // safeFetch resolves once, validates every address (fail-closed), and PINS the
+  // connection to the validated IP — no DNS-rebinding to a private/internal target.
+  const res = await safeFetch(`https://${host}/.well-known/did.json`, {
+    lookup, fetch,
     redirect: 'manual', // SSRF: never follow a peer's redirect to an internal address
     signal: AbortSignal.timeout(timeoutMs),
   });
