@@ -32,6 +32,7 @@ const sites = [
   ['src/enrich/transcribe-audio.js', /slice\(0,\s*8000\)/, 'clampStored'],
   ['src/enrich/describe-image.js', /slice\(0,\s*600\)/, 'CAPTION_MAX_CHARS'],
   ['src/portal-attachments.js', /\.slice\(0,\s*4000\)/, 'clampStored'],
+  ['src/portal-compat.js', /signature\.slice\(0,\s*500\)|display_name\.slice\(0,\s*80\)/, 'clampStored(body.signature)'],
 ];
 for (const [file, badRe, mustHave] of sites) {
   const src = read(file);
