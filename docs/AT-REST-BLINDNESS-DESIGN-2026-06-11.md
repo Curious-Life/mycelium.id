@@ -3,7 +3,9 @@
 > **Status:** DESIGN, sweep-verified. Re-created 2026-06-16 after the v3 draft + JS
 > groundwork were written but never committed (lost from disk). Decision locked:
 > **A′** — single Node keyed opener + a long-running Python loopback DB bridge,
-> whole-file SQLCipher. Branch: `claude/at-rest-blindness` (off `main` @ 221ab0d).
+> whole-file SQLCipher. Branch: `claude/at-rest-cipher` (off `main` @ 221ab0d) — split
+> from the shared `claude/at-rest-blindness` (which co-develops the coupled search-Phase-1
+> work) so this security-sensitive crypto diff is an independently-reviewable PR.
 >
 > Authoritative handoff also lives in the persistent memory `at-rest-blindness.md`.
 
