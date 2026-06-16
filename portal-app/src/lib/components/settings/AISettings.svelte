@@ -88,6 +88,29 @@
 	let cascade = $state(false);
 	let cascadeBusy = $state(false);
 
+	// Assistant identity (spec #4) — name + personality, changeable here and set in
+	// onboarding. The name propagates to the chat header via /portal/chat/agents.
+	let agentName = $state('');
+	let agentPersonality = $state('friendly');
+	let identityBusy = $state(false);
+	let identitySaved = $state(false);
+	const PERSONALITY_OPTS: { id: string; label: string }[] = [
+		{ id: 'friendly', label: 'Friendly' },
+		{ id: 'formal', label: 'Formal' },
+		{ id: 'concise', label: 'Concise' },
+		{ id: 'creative', label: 'Creative' },
+	];
+	async function loadIdentity() {
+		try { const r = await api('/portal/agent-identity'); if (r.ok) { const j = await r.json(); agentName = j.name || ''; agentPersonality = j.personality || 'friendly'; } } catch { /* defaults */ }
+	}
+	async function saveIdentity() {
+		identityBusy = true; identitySaved = false;
+		try {
+			const r = await api('/portal/agent-identity', { method: 'PUT', body: JSON.stringify({ name: agentName.trim(), personality: agentPersonality }) });
+			if (r.ok) { const j = await r.json(); agentName = j.name; agentPersonality = j.personality; identitySaved = true; setTimeout(() => (identitySaved = false), 2000); }
+		} catch { /* leave */ } finally { identityBusy = false; }
+	}
+
 	// Per-task model selection — which configured provider handles which task.
 	let tasks = $state<string[]>([]);
 	let taskModels = $state<Record<string, { providerId: number; model?: string }>>({});
@@ -200,7 +223,7 @@
 	}
 
 	onMount(() => {
-		load(); loadRouting(); loadTaskModels(); loadTranscription();
+		load(); loadRouting(); loadTaskModels(); loadTranscription(); loadIdentity();
 		return () => { if (transPoll) clearInterval(transPoll); };
 	});
 
@@ -318,6 +341,19 @@
 				<span class="hero-sub">Connect one below — local &amp; private, or a cloud key.</span>
 			{/if}
 		</div>
+	</div>
+
+	<!-- ── Assistant identity (name + personality) ── -->
+	<div class="lane">
+		<div class="lane-head"><span class="lane-title">Your assistant</span><span class="lane-tag">name &amp; personality</span></div>
+		<div class="identity-row">
+			<input class="inp id-name" type="text" maxlength="40" bind:value={agentName} placeholder="Mycelium" aria-label="Assistant name" />
+			<select class="task-select id-persona" bind:value={agentPersonality} aria-label="Personality">
+				{#each PERSONALITY_OPTS as o}<option value={o.id}>{o.label}</option>{/each}
+			</select>
+			<button class="solid-btn" disabled={identityBusy} onclick={saveIdentity}>{identityBusy ? 'Saving…' : identitySaved ? '✓ Saved' : 'Save'}</button>
+		</div>
+		<p class="muted-xs">This name appears wherever your AI shows up — chat, notifications, settings.</p>
 	</div>
 
 	{#if loading}
@@ -588,6 +624,9 @@
 	.cf-actions { display: flex; align-items: center; gap: 0.7rem; }
 	.inp { width: 100%; padding: 0.5rem 0.65rem; font-size: 0.76rem; font-family: var(--font-mono, monospace); background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; color: var(--color-text-primary); outline: none; }
 	.inp:focus { border-color: var(--color-accent-aurum, #e5b84c); }
+	.identity-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
+	.id-name { flex: 1; min-width: 0; font-family: inherit; }
+	.id-persona { flex-shrink: 0; }
 	.model-field { display: flex; align-items: center; gap: 0.5rem; }
 	.model-field .inp { flex: 1; min-width: 0; }
 	.load-models { flex-shrink: 0; white-space: nowrap; }

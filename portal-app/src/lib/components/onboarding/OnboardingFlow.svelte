@@ -56,6 +56,23 @@
 	let justGenerated = $state(false);
 	let probedOllama = $state(false);
 
+	// Agent identity (spec #4) — name + personality, set here in onboarding and
+	// changeable later in Settings → Intelligence. Saved on "Let's grow".
+	let agentName = $state('');
+	let agentPersonality = $state('friendly');
+	const PERSONALITY_OPTS = [
+		{ id: 'friendly', label: 'Friendly' },
+		{ id: 'formal', label: 'Formal' },
+		{ id: 'concise', label: 'Concise' },
+		{ id: 'creative', label: 'Creative' },
+	];
+	async function saveAgentIdentity() {
+		if (!agentName.trim() && agentPersonality === 'friendly') return; // nothing chosen
+		try {
+			await api('/portal/agent-identity', { method: 'PUT', body: JSON.stringify({ name: agentName.trim(), personality: agentPersonality }) });
+		} catch { /* best-effort — they can set it in Settings */ }
+	}
+
 	// Decide synchronously from a localStorage hint so the opaque Welcome backdrop
 	// is painted on the FIRST frame (no flash of the app behind it). The async
 	// /status check below corrects this for the rare edge cases. Returning users
@@ -155,6 +172,7 @@
 
 	// ── Welcome (Step 2): one breath, then into the flow ───────────────────────
 	function beginFlow() {
+		saveAgentIdentity(); // persist the chosen name/personality (best-effort)
 		markWelcomeSeen();
 		// Land on the mindscape — the empty-state invitation (Data · Intelligence ·
 		// Connect) is the first thing they should see, not an abrupt jump elsewhere.
@@ -277,7 +295,7 @@
 
 {#if welcomeOpen}
 	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-	<div class="backdrop" role="dialog" aria-modal="true" aria-labelledby="onb-welcome-title" onclick={onBackdropClick}>
+	<div class="backdrop" role="dialog" aria-modal="true" aria-labelledby="onb-welcome-title" tabindex="-1" onclick={onBackdropClick}>
 		<!-- The hero mycelium animation grows across the whole backdrop, behind the glass. -->
 		<MyceliumCanvas />
 		<div class="welcome">
@@ -298,6 +316,12 @@
 					<li><span class="n">2</span> Connect an AI</li>
 					<li><span class="n">3</span> Watch your mind take shape</li>
 				</ol>
+				<div class="name-field">
+					<input class="name-input" type="text" maxlength="40" bind:value={agentName} placeholder="Name your assistant (e.g. Aria)" aria-label="Assistant name" />
+					<select class="persona-select" bind:value={agentPersonality} aria-label="Personality">
+						{#each PERSONALITY_OPTS as o}<option value={o.id}>{o.label}</option>{/each}
+					</select>
+				</div>
 				<div class="welcome-actions">
 					<button class="btn-skip" onclick={markWelcomeSeen}>
 						Later
@@ -508,6 +532,37 @@
 		justify-content: space-between;
 		gap: 0.75rem;
 	}
+	.name-field {
+		display: flex;
+		gap: 0.5rem;
+		margin: 0 0 1.25rem;
+	}
+	.name-input {
+		flex: 1;
+		min-width: 0;
+		padding: 0.55rem 0.7rem;
+		font-size: 0.85rem;
+		font-family: inherit;
+		color: var(--color-text-primary);
+		background: var(--glass-input-bg, rgba(0, 0, 0, 0.25));
+		border: 1px solid var(--glass-input-border, rgba(255, 255, 255, 0.12));
+		border-radius: 9px;
+		outline: none;
+	}
+	.name-input:focus { border-color: var(--color-accent-aurum, #e5b84c); }
+	.name-input::placeholder { color: var(--color-text-tertiary, #9898a3); }
+	.persona-select {
+		flex-shrink: 0;
+		padding: 0.55rem 0.6rem;
+		font-size: 0.82rem;
+		font-family: inherit;
+		color: var(--color-text-primary);
+		background: var(--glass-input-bg, rgba(0, 0, 0, 0.25));
+		border: 1px solid var(--glass-input-border, rgba(255, 255, 255, 0.12));
+		border-radius: 9px;
+		outline: none;
+	}
+	.persona-select:focus { border-color: var(--color-accent-aurum, #e5b84c); }
 
 	/* ── Guide rail ────────────────────────────────────────────────────────── */
 	.rail {
