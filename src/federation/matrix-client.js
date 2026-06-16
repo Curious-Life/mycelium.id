@@ -20,6 +20,39 @@
  */
 
 /**
+ * REAL headless Matrix client (matrix-js-sdk + rust-crypto). Implements the
+ * MatrixClient seam above against a live homeserver.
+ *
+ * ⚠️ DEPLOY-SESSION TASK — NOT YET IMPLEMENTED. This adapter cannot be validated
+ * without a live homeserver, and pulling matrix-js-sdk + @matrix-org/matrix-sdk-
+ * crypto-wasm into the vault dependency tree is a security-relevant decision that
+ * must be made with hard evidence (a working 2-client send/receive against the
+ * real server), not paper reasoning. Per docs/DESIGN-matrix-cross-machine-bringup-
+ * 2026-06-16.md §4 step 2 + §8 step 2, the deploy session:
+ *   1. `npm i matrix-js-sdk @matrix-org/matrix-sdk-crypto-wasm`
+ *   2. implements this against the contract, with a PERSISTENT crypto store
+ *      (RocksDB/sqlite — device keys MUST survive restart or all history is UTD),
+ *      login from { homeserver, userId, accessToken }, startClient + initRustCrypto,
+ *      and the A1b first-send rule (await peer join + getUserDeviceInfo before the
+ *      first send) inside `send`.
+ *   3. proves it with the §7 two-box E2E (the GO criterion).
+ *
+ * The boot path (server-rest.js) calls this inside try/catch: until it's
+ * implemented, the throw is caught → matrixClient stays null → every Matrix op is
+ * an inert no-op, exactly as when no homeserver is configured. So shipping this
+ * stub is safe; it documents the contract and the deploy steps in one place.
+ *
+ * @param {{ homeserver:string, userId:string, accessToken:string, cryptoStorePath?:string }} _opts
+ * @returns {Promise<MatrixClient>}
+ */
+export async function createMatrixClient(_opts = {}) {
+  throw new Error(
+    'createMatrixClient: real matrix-js-sdk adapter not yet implemented — '
+    + 'deploy-session task (see docs/DESIGN-matrix-cross-machine-bringup-2026-06-16.md §4 step 2)',
+  );
+}
+
+/**
  * In-memory MatrixClient for tests + sandbox orchestration (no homeserver).
  * Records `calls` for assertions and tracks room membership.
  * @returns {MatrixClient & { calls: any[][], _rooms: Map<string, any> }}

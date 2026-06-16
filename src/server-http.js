@@ -257,6 +257,10 @@ export async function createHttpApp(opts = {}) {
       const h = (readRemoteConfig().publicHost || '').split('.')[0];
       return h || null;
     },
+    // Phase B: advertise the box MXID as a #matrix service so connected peers can
+    // discover where to invite us for shared-space Megolm rooms. Read per-request
+    // (like getHost/getHandle); null until a homeserver is configured.
+    getMatrixId: () => readRemoteConfig().matrixUserId || null,
   }));
 
   // Stateful transport registry: sessionId → { transport, close }.
