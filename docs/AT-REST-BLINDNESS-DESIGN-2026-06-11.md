@@ -199,14 +199,19 @@ Boot-time, idempotent, **non-destructive** (mirrors `ensureDataDir`):
 2. Read the first 16 bytes of the prod vault. If `SQLite format 3\0` → it's
    plaintext, migrate. If it won't open keyless but opens with `dbKeyHex` → already
    encrypted, no-op. (Done-flag also short-circuits.)
-3. Open plaintext (no key) → `ATTACH ... KEY x'<dbKeyHex>'` an encrypted sidecar →
-   `SELECT sqlcipher_export('cipher')` → `DETACH`.
-4. **Parity check:** per-table `COUNT(*)` in plaintext == encrypted before proceeding
-   (fail closed — abort + keep original if any table mismatches).
+3. **AS-BUILT (spike-verified):** `sqlcipher_export()` is NOT available in
+   `better-sqlite3-multiple-ciphers`, so we do NOT attach+export. Instead: `wal_checkpoint(TRUNCATE)`
+   the plaintext → `copyFileSync` main file → `<db>.cipher-tmp` → rekey the copy in
+   place (`cipher='sqlcipher'` + `rekey="x'<dbKeyHex>'"`, `journal_mode=DELETE` so no
+   sidecars). The original is never mutated → a mid-run crash leaves it intact.
+4. **Parity check:** per-table `COUNT(*)` plaintext (snapshot pre-copy) == encrypted
+   copy before proceeding (fail closed — abort, delete the temp, keep original).
 5. **Atomic swap:** rename plaintext aside to `mycelium.db.pre-cipher-<ts>`
    (**never auto-deleted** — operator removes after confirming), `rename` encrypted
-   sidecar → `mycelium.db`. Discard stale `-wal`/`-shm` (checkpointed pre-export).
-6. Idempotent: a `.cipher-migrated` flag + the header check both prevent re-runs.
+   copy → `mycelium.db`. Discard stale `-wal`/`-shm` (checkpointed pre-copy).
+6. Idempotent: the magic-header check (`isPlaintextSqlite`) short-circuits a re-run.
+
+Implemented in `src/account/db-cipher-migrate.js` (`ensureVaultEncrypted`).
 
 Backup (`.myvault`), import, and Tauri are file-format-agnostic → no breakage; the
 encrypted vault simply backs up as encrypted bytes (the backup is *also* blind now).
@@ -236,8 +241,10 @@ encrypted vault simply backs up as encrypted bytes (the backup is *also* blind n
 | Opt-in opener keeps 104 verify gates green | else full regression fails | ✅ DESIGNED | §4; verify scripts use plaintext temp DBs |
 | Key derivation needs no third KCV | operator directive | ✅ DESIGNED | HKDF off USER_MASTER; SQLCipher self-verifies |
 | Migration can be idempotent + non-destructive | else a failed boot bricks the vault | ✅ DESIGNED | mirrors `ensureDataDir`; parity gate; keep `.pre-cipher` |
-| Boot order: unlock → deriveDbKey → migrate → keyed schema apply | `ensureVaultSchema` opens raw today | ⚠️ TO-WIRE | `server-rest.js:109` must take the key |
-| SQLCipher encrypts `-wal`/`-shm` | else WAL leaks plaintext frames | ⚠️ TO-VERIFY in A2 | SQLCipher docs say yes; gate proves it |
+| Boot order: unlock → deriveDbKey → migrate → keyed schema apply | `ensureVaultSchema` opens raw today | ⚠️ TO-WIRE (last step) | `server-rest.js:109` must take the key; migration not yet called at boot |
+| SQLCipher encrypts `-wal`/`-shm` | else WAL leaks plaintext frames | ✅ PROVEN (A2) | gate: a known plaintext column value is absent from db/-wal/-shm bytes |
+| Bridge + Python reroute + migration work end-to-end | the whole A′ chain | ✅ PROVEN | `verify:at-rest` 17/17 GO (incl. real python3 round-trip) |
+| Alias is non-breaking | else the regression fails | ✅ PROVEN | 16+ DB/crypto gates GO through the aliased driver; the only 2 non-GO are a pre-existing python-venv issue reproducing on main |
 
 ## 10. Build sequence
 
