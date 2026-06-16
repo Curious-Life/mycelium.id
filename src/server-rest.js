@@ -22,6 +22,7 @@ import { createOllamaDaemon } from './hardware/ollama-daemon.js';
 import { portalImportRouter } from './portal-import.js';
 import { portalSettingsRouter } from './portal-settings.js';
 import { portalChatRouter } from './portal-chat.js';
+import { portalIngestRouter } from './portal-ingest.js';
 import { portalActivityRouter } from './portal-activity.js';
 import { portalUsageRouter } from './portal-usage.js';
 import { portalTranscriptionRouter } from './portal-transcription.js';
@@ -227,6 +228,12 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // loopback-trusted (decrypts vault plaintext), same boundary as measurement/claims.
   v.use('/api/v1/portal', portalChatRouter({
     db, userId, tools, handlers, enqueueEnrichment,
+    authenticatePortalRequest: portalOwnerGate,
+  }));
+  // Owner push-ingestion for the native app (Apple data → the stream via the one
+  // captureMessage boundary). Owner-gated like chat; decrypts/writes vault plaintext.
+  v.use('/api/v1/portal', portalIngestRouter({
+    db, userId, enqueueEnrichment,
     authenticatePortalRequest: portalOwnerGate,
   }));
   v.use('/api/v1/portal', portalChannelsRouter({ db, userId, channelSup }));

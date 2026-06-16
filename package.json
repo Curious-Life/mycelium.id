@@ -18,6 +18,7 @@
     "verify:control-loopback": "node scripts/verify-control-loopback.mjs",
     "verify:portal-auth": "node scripts/verify-portal-auth.mjs",
     "verify:portal-bearer-remote": "node scripts/verify-portal-bearer-remote.mjs",
+    "verify:portal-ingest": "node scripts/verify-portal-ingest.mjs",
     "verify:rest-tls": "node scripts/verify-rest-tls.mjs",
     "verify:passphrase-lock": "node scripts/verify-passphrase-lock.mjs",
     "verify:foundation": "node scripts/verify-foundation.mjs",
