@@ -28,6 +28,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { assertEntryCount } from '../ingest/import-parsers.js';
 
 export const ARCHIVE_VERSION = 1;
 export const ARCHIVE_EXT = '.myvault';
@@ -119,8 +120,11 @@ export async function buildVaultArchive({ dbPath, kcvPath, uploadsRoot, remoteCo
  */
 export async function validateArchive(buffer) {
   let zip;
-  try { zip = await JSZip.loadAsync(buffer); }
-  catch { return { ok: false, error: 'unrecognized file — that is not a Mycelium backup (.myvault).' }; }
+  try { zip = await JSZip.loadAsync(buffer); assertEntryCount(zip); }
+  catch (e) {
+    if (e?.code === 'TOO_MANY_ENTRIES') return { ok: false, error: 'this backup has too many entries — refusing to restore (possible archive bomb).' };
+    return { ok: false, error: 'unrecognized file — that is not a Mycelium backup (.myvault).' };
+  }
 
   const manFile = zip.file('manifest.json');
   const dbFile = zip.file('mycelium.db');
@@ -162,6 +166,24 @@ function moveAside(p, ts) {
  *
  * @returns {Promise<{ ok:true, manifest, movedAside:string[] } >}
  */
+/**
+ * Resolve a `uploads/<rel>` archive entry to its on-disk destination IFF it stays
+ * contained under uploadsRoot; otherwise null (skip). A substring '..' check is
+ * fragile (backslashes, absolute paths, normalization); path.resolve containment
+ * is the correct test. Exported for the verify gate.
+ * @param {string} uploadsRoot  the uploads dir
+ * @param {string} entryName    the archive entry name ('uploads/<rel>')
+ * @returns {string|null}        absolute dest path, or null if it escapes
+ */
+export function safeUploadDest(uploadsRoot, entryName) {
+  const root = path.resolve(uploadsRoot);
+  const rel = String(entryName || '').slice('uploads/'.length);
+  if (!rel) return null;
+  const dest = path.resolve(root, rel);
+  if (dest !== root && !dest.startsWith(root + path.sep)) return null;
+  return dest;
+}
+
 export async function restoreVaultArchive({ buffer, dbPath, kcvPath, uploadsRoot, overwrite = false }) {
   const v = await validateArchive(buffer);
   if (!v.ok) { const e = new Error(v.error); e.code = 'invalid_archive'; throw e; }
@@ -202,9 +224,8 @@ export async function restoreVaultArchive({ buffer, dbPath, kcvPath, uploadsRoot
   if (uploadsRoot) {
     const entries = Object.values(zip.files).filter((f) => !f.dir && f.name.startsWith('uploads/'));
     for (const entry of entries) {
-      const rel = entry.name.slice('uploads/'.length);
-      if (!rel || rel.includes('..')) continue; // path-traversal guard
-      const dest = path.join(uploadsRoot, rel);
+      const dest = safeUploadDest(uploadsRoot, entry.name); // null → escapes uploadsRoot
+      if (!dest) continue;
       mkdirSync(path.dirname(dest), { recursive: true });
       writeFileSync(dest, Buffer.from(await entry.async('uint8array')));
     }

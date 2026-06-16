@@ -25,6 +25,7 @@ process.env.MYCELIUM_IMPORT_MAX_JSON_BYTES = '100000';   // 100KB cap on convers
 process.env.MYCELIUM_IMPORT_MAX_CONCURRENT = '3';
 process.env.MYCELIUM_IMPORT_MAX_CHUNKS = '2';
 process.env.MYCELIUM_IMPORT_LIMIT_BYTES = '1000000';     // 1MB total cap (tiny fixtures stay under)
+process.env.MYCELIUM_IMPORT_MAX_ENTRIES = '1000';        // entry-count cap (a real vault has far fewer)
 const { startRestServer } = await import('../src/server-rest.js');
 
 const DB = 'data/verify-import-security.db';
@@ -55,6 +56,15 @@ async function main() {
     const s1ms = Date.now() - t0;
     rec('S1. decompression bomb refused (declared > cap → 400, not inflated)', s1.status === 400 && s1ms < 3000,
       `status=${s1.status} compressed=${bombBuf.length}B ${s1ms}ms`);
+
+    // ── S1b entry-count bomb (millions of tiny entries → OOM, here capped at 1000) ──
+    const ecZip = new JSZip();
+    for (let i = 0; i < 1100; i++) ecZip.file(`e${i}.txt`, 'x'); // > MAX_ENTRIES(1000)
+    const ecBuf = await ecZip.generateAsync({ type: 'nodebuffer' });
+    const t1b = Date.now();
+    const s1b = await postFile(ecBuf);
+    rec('S1b. entry-count bomb refused (>cap entries → 400, no OOM)', s1b.status === 400 && (Date.now() - t1b) < 3000,
+      `status=${s1b.status} ${Date.now() - t1b}ms`);
 
     // ── S5 uploadId injection (run before the map fills) ──
     const inj1 = await chunk('../../etc/passwd', 0, Buffer.from('x'));
