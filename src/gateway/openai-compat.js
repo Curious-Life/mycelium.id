@@ -126,7 +126,7 @@ function headerTrue(v) {
   return typeof s === 'string' && /^(1|true|yes)$/i.test(s.trim());
 }
 
-function buildCompletion({ model, prompt, text }) {
+function buildCompletion({ model, prompt, text, finishReason = 'stop' }) {
   const prompt_tokens = approxTokens(prompt);
   const completion_tokens = approxTokens(text);
   return {
@@ -134,7 +134,10 @@ function buildCompletion({ model, prompt, text }) {
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
     model,
-    choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
+    // finish_reason:'length' when the provider hit its output cap — an external
+    // harness keys off this to detect a cut-off (e.g. truncated tool-call args)
+    // rather than trusting a false 'stop'. Default 'stop' (the normal case).
+    choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: finishReason }],
     usage: { prompt_tokens, completion_tokens, total_tokens: prompt_tokens + completion_tokens },
   };
 }
@@ -142,13 +145,13 @@ function buildCompletion({ model, prompt, text }) {
 // v1 streaming compat shim: emit the whole completion as ONE delta chunk, then a
 // terminal stop chunk, then the [DONE] sentinel. Real token-streaming is a
 // fast-follow (needs router + adapter streaming, which don't exist yet).
-function sendStreamShim(res, { id, created, model, text }) {
+function sendStreamShim(res, { id, created, model, text, finishReason = 'stop' }) {
   res.set('Content-Type', 'text/event-stream; charset=utf-8');
   res.set('Cache-Control', 'no-store');
   res.set('Connection', 'keep-alive');
   const base = { id, object: 'chat.completion.chunk', created, model };
   res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: { role: 'assistant', content: text }, finish_reason: null }] })}\n\n`);
-  res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: finishReason }] })}\n\n`);
   res.write('data: [DONE]\n\n');
   res.end();
 }
@@ -164,6 +167,7 @@ async function streamCompletion(res, { router, model, prompt, maxTokens, sensiti
   const base = { id, object: 'chat.completion.chunk', created, model };
   let opened = false;
   let full = ''; // accumulate deltas so the memory bridge can capture the reply
+  let truncated = false; // provider hit its output cap (finish_reason:'length'/max_tokens)
   const open = () => {
     if (opened) return;
     res.set('Content-Type', 'text/event-stream; charset=utf-8');
@@ -173,13 +177,15 @@ async function streamCompletion(res, { router, model, prompt, maxTokens, sensiti
     opened = true;
   };
   try {
-    for await (const delta of router.inferStream({ prompt, task: 'complex', maxTokens, sensitive })) {
+    for await (const delta of router.inferStream({ prompt, task: 'complex', maxTokens, sensitive, onTruncated: () => { truncated = true; } })) {
       open();
       full += delta;
       res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] })}\n\n`);
     }
     open(); // a zero-token stream still emits the role frame for client compat
-    res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+    // 'length' when the provider truncated at its output cap → the client sees a
+    // cut-off, not a false clean 'stop'. Default 'stop' (the normal case).
+    res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: truncated ? 'length' : 'stop' }] })}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (err) {
@@ -377,13 +383,18 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
       // §4g cascade (opt-in): try EU→frontier→local until one succeeds; a
       // sensitive request skips US providers. Default OFF → the single active
       // provider (router). Streaming above is single-provider by design.
+      let truncated = false;
+      const onTruncated = () => { truncated = true; };
       const text = (await isCascadeEnabled(db, userId))
-        ? await inferWithCascade({ chain: await resolveProviderChain(db, userId, { sensitive }), prompt, task: 'complex', maxTokens, sensitive, onEgress, onUsage, fetch })
-        : await router.infer({ prompt, task: 'complex', maxTokens, sensitive });
+        ? await inferWithCascade({ chain: await resolveProviderChain(db, userId, { sensitive }), prompt, task: 'complex', maxTokens, sensitive, onEgress, onUsage, onTruncated, fetch })
+        : await router.infer({ prompt, task: 'complex', maxTokens, sensitive, onTruncated });
       if (conv) fireCapture(conv, 'assistant', text);
-      const completion = buildCompletion({ model, prompt, text });
+      // finish_reason:'length' when the provider hit its output cap so a harness can
+      // detect a cut-off (e.g. truncated tool-call args) instead of a false 'stop'.
+      const finishReason = truncated ? 'length' : 'stop';
+      const completion = buildCompletion({ model, prompt, text, finishReason });
       if (stream) {
-        sendStreamShim(res, { id: completion.id, created: completion.created, model, text });
+        sendStreamShim(res, { id: completion.id, created: completion.created, model, text, finishReason });
         return;
       }
       res.json(completion);

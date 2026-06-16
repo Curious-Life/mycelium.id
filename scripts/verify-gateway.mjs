@@ -32,7 +32,7 @@ const CLOUD_TEXT = 'cloud-says-hello';
 const LOCAL_TEXT = 'local-says-hello';
 const MARK = 'PROMPT_MARKER_42';
 
-let cloudCalls = 0, localCalls = 0, lastCloudBody = null;
+let cloudCalls = 0, localCalls = 0, lastCloudBody = null, truncate = false;
 const mkRes = (obj, status = 200) => { const t = JSON.stringify(obj); return { ok: status >= 200 && status < 300, status, async text() { return t; }, async json() { return obj; } }; };
 const enc = new TextEncoder();
 const streamRes = (chunks) => ({ ok: true, status: 200, body: new ReadableStream({ start(c) { for (const ch of chunks) c.enqueue(enc.encode(ch)); c.close(); } }) });
@@ -41,13 +41,14 @@ const mockFetch = async (url, opts) => {
   const body = opts?.body ? JSON.parse(opts.body) : {};
   if (u.includes('/chat/completions')) {
     cloudCalls++; lastCloudBody = body;
+    // `truncate` simulates the provider hitting its output cap (finish_reason:'length').
     if (body.stream) return streamRes([
       `data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant' } }] })}\n\n`,
       `data: ${JSON.stringify({ choices: [{ delta: { content: CLOUD_TEXT.slice(0, 5) } }] })}\n\n`,
-      `data: ${JSON.stringify({ choices: [{ delta: { content: CLOUD_TEXT.slice(5) } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: { content: CLOUD_TEXT.slice(5) }, finish_reason: truncate ? 'length' : null }] })}\n\n`,
       'data: [DONE]\n\n',
     ]);
-    return mkRes({ choices: [{ message: { content: CLOUD_TEXT } }] });
+    return mkRes({ choices: [{ message: { content: CLOUD_TEXT }, finish_reason: truncate ? 'length' : 'stop' }] });
   }
   if (u.includes('/api/generate')) {
     localCalls++;
@@ -147,10 +148,24 @@ const ccEnv = await isCascadeEnabled({}, U, { MYCELIUM_INFER_CASCADE: '1' });   
 const ccDefault = await isCascadeEnabled({}, U, {});                             // nothing set → off
 rec('G11. cascade toggle: DB-first + env fallback + default off', ccDbOn === true && ccDbOff === false && ccEnv === true && ccDefault === false, `dbOn=${ccDbOn} dbOff=${ccDbOff} env=${ccEnv} default=${ccDefault}`);
 
+// G12 — truncation at the provider output cap → finish_reason 'length' (NOT a
+// false 'stop'), so an external harness can detect a cut-off (e.g. truncated
+// tool-call args). Both the non-stream envelope and the stream terminal chunk.
+truncate = true;
+r = await J(await post('/v1/chat/completions', { model: 'mycelium-auto', messages: [{ role: 'user', content: 'long' }] }));
+rec('G12a. non-stream truncation → finish_reason "length"', r.status === 200 && r.body.choices?.[0]?.finish_reason === 'length', JSON.stringify(r.body.choices?.[0]));
+const sseT = await (await post('/v1/chat/completions', { model: 'mycelium-auto', stream: true, messages: [{ role: 'user', content: 'long' }] })).text();
+const finReasons = sseT.split('\n').filter((l) => l.startsWith('data: ') && !l.includes('[DONE]')).map((l) => { try { return JSON.parse(l.slice(6)).choices?.[0]?.finish_reason; } catch { return undefined; } }).filter(Boolean);
+rec('G12b. stream truncation → terminal chunk finish_reason "length"', finReasons.includes('length') && !finReasons.includes('stop'), JSON.stringify(finReasons));
+truncate = false;
+// G12c — a normal turn is still 'stop' (no false positive after the toggle).
+r = await J(await post('/v1/chat/completions', { model: 'mycelium-auto', messages: [{ role: 'user', content: 'short' }] }));
+rec('G12c. normal turn still finish_reason "stop"', r.body.choices?.[0]?.finish_reason === 'stop', JSON.stringify(r.body.choices?.[0]));
+
 server.close(); close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
-console.log(`VERDICT: ${allPass ? 'GO — /v1 gateway: messages→prompt · OpenAI envelope · Bearer-guard · hash-only egress audit · sensitive hard-block · real token streaming · static bearer' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
+console.log(`VERDICT: ${allPass ? 'GO — /v1 gateway: messages→prompt · OpenAI envelope · Bearer-guard · hash-only egress audit · sensitive hard-block · real token streaming · truncation surfaced · static bearer' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
 console.log('='.repeat(64));
 process.exit(allPass ? 0 : 1);

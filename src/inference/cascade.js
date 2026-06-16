@@ -26,7 +26,7 @@ import { InferenceError } from './errors.js';
  * @param {typeof fetch} [opts.fetch]
  * @returns {Promise<string>}
  */
-export async function inferWithCascade({ chain, prompt, task = 'complex', maxTokens, sensitive = false, onEgress, onUsage, fetch } = {}) {
+export async function inferWithCascade({ chain, prompt, task = 'complex', maxTokens, sensitive = false, onEgress, onUsage, onTruncated, fetch } = {}) {
   if (!Array.isArray(chain) || chain.length === 0) {
     throw new InferenceError('inferWithCascade: empty provider chain');
   }
@@ -37,7 +37,7 @@ export async function inferWithCascade({ chain, prompt, task = 'complex', maxTok
     // The trailing local element has no cloud, so it runs on-box Ollama directly.
     const router = createInferenceRouter({ ...cfg, onEgress, onUsage, fetch, cloudFallbackToLocal: false });
     try {
-      return await router.infer({ prompt, task, maxTokens, sensitive });
+      return await router.infer({ prompt, task, maxTokens, sensitive, onTruncated });
     } catch (err) {
       lastErr = err; // try the next provider in the chain
     }

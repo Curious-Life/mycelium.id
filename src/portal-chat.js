@@ -225,16 +225,29 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
         }
         try { result = await harness.streamTurn({ provider, system, userMessage: message, tools: isLocal ? [] : grantedTools, call, send: captureText, signal: ctrl.signal, maxTokens: plan?.maxTokens, numCtx: plan?.numCtx }); lastErr = null; }
         catch (e) { lastErr = e; console.error('[chat] attempt failed:', e?.status || '', e?.message); }
-        if (clientGone || assistantText.trim() || attempt >= MAX_RETRIES) break;
+        // A truncated turn is a definitive (if unhappy) completion — the model hit
+        // its output cap, so retrying just re-hits it. Stop and surface it below.
+        if (clientGone || assistantText.trim() || result?.truncated || attempt >= MAX_RETRIES) break;
       }
 
       if (!clientGone) {
-        if (assistantText.trim()) {
-          // Completed OR gracefully cut off mid-stream — keep the (possibly partial) answer.
-          send({ type: 'done', toolsUsed: result?.toolsUsed || [] });
+        if (assistantText.trim() || result?.truncated) {
+          // Completed, gracefully cut off mid-stream, OR truncated at the model's
+          // output cap. A truncated turn is NOT a success: the (partial) answer is
+          // incomplete and any save/edit the model was emitting did not finish
+          // (truncated tool-call JSON no-ops). Tell the user explicitly so they
+          // don't trust a "saved" that never happened.
+          if (result?.truncated) {
+            send({ type: 'truncated', message: 'The response hit the model’s output limit and was cut off — it may be incomplete, and any save or edit it was making did not finish. Ask it to continue, or retry with a shorter request (or raise the output limit in Settings → Intelligence).' });
+          }
+          send({ type: 'done', toolsUsed: result?.toolsUsed || [], truncated: !!result?.truncated });
           res.write('data: [DONE]\n\n');
-          const cap = (role, content) => captureMessage(db, { userId, role, content, source: CHAT_SOURCE, messageType: 'chat' }, enqueueEnrichment);
-          cap('user', message).then(() => cap('assistant', assistantText.trim())).catch((e) => console.error('[chat] persist failed:', e?.message));
+          // Persist only when there's actual assistant text (a truncated tool-call
+          // turn can have none) — never write an empty assistant bubble.
+          if (assistantText.trim()) {
+            const cap = (role, content) => captureMessage(db, { userId, role, content, source: CHAT_SOURCE, messageType: 'chat' }, enqueueEnrichment);
+            cap('user', message).then(() => cap('assistant', assistantText.trim())).catch((e) => console.error('[chat] persist failed:', e?.message));
+          }
         } else {
           // Surface an ACTIONABLE reason from the upstream status (safe: status
           // codes + the provider label/model carry no secrets, per §1). A bare
