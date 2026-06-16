@@ -48,6 +48,12 @@ const REMOTE_MODES = new Set(['off', 'managed', 'own-relay', 'direct']);
 const SAFE_HOST = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,62})(\.[a-z0-9]([a-z0-9-]{0,62}))+$/i;
 export function isSafeHostname(h) { return typeof h === 'string' && SAFE_HOST.test(h); }
 const SAFE_RELAY = /^[a-z0-9.-]{1,253}(:\d{1,5})?$/i; // host[:port]
+// A Matrix MXID (@localpart:server.name). The localpart/server grammar is
+// permissive on purpose — the homeserver is authoritative; we only reject the
+// obviously-malformed (no `@`, no `:`, whitespace) before it lands in did.json
+// (which a peer fetches) and the config file. Mirrors did.js's advertise regex.
+const SAFE_MXID = /^@[^:\s]+:[^\s/]+$/;
+export function isSafeMxid(v) { return typeof v === 'string' && SAFE_MXID.test(v); }
 
 // Harden auth.db: dir 0700, file 0600. It holds the better-auth signing secret,
 // the operator password hash, AND the relay/acme-dns secrets — all plaintext.
@@ -84,6 +90,12 @@ export function readRemoteConfig({ env = process.env } = {}) {
     relayAddr: clean(env.MYCELIUM_RELAY_ADDR) || clean(file.relayAddr) || '',
     acmeDnsServer: clean(env.MYCELIUM_ACME_DNS) || clean(file.acmeDnsServer) || DEFAULT_ACME_DNS,
     controlPlaneUrl: clean(env.MYCELIUM_CONTROL_PLANE) || clean(file.controlPlaneUrl) || DEFAULT_CONTROL_PLANE,
+    // Phase B Tier-1 Matrix (NON-secret): the shared homeserver URL + this box's
+    // MXID. The access TOKEN is a secret and lives in auth.db (matrixConfig()
+    // below), never here. Both empty until a homeserver is configured → Matrix
+    // stays inert.
+    matrixHomeserver: clean(env.MYCELIUM_MATRIX_HS) || clean(file.matrixHomeserver) || '',
+    matrixUserId: clean(env.MYCELIUM_MATRIX_USER) || clean(file.matrixUserId) || '',
   };
 }
 
@@ -111,6 +123,18 @@ export function writeRemoteConfig(patch = {}, { env = process.env } = {}) {
   }
   if (typeof patch.acmeDnsServer === 'string') next.acmeDnsServer = patch.acmeDnsServer.trim();
   if (typeof patch.controlPlaneUrl === 'string') next.controlPlaneUrl = patch.controlPlaneUrl.trim();
+  // Matrix (NON-secret): homeserver must be an https URL (it is fetched + rendered);
+  // the MXID is validated before it lands in the peer-fetched did.json.
+  if (typeof patch.matrixHomeserver === 'string') {
+    const u = patch.matrixHomeserver.trim();
+    if (u !== '' && !/^https:\/\/[^\s]+$/i.test(u)) throw new Error('invalid matrixHomeserver (https URL required)');
+    next.matrixHomeserver = u;
+  }
+  if (typeof patch.matrixUserId === 'string') {
+    const m = patch.matrixUserId.trim();
+    if (m !== '' && !isSafeMxid(m)) throw new Error('invalid matrixUserId (expected @user:server)');
+    next.matrixUserId = m;
+  }
   mkdirSync(dirname(p), { recursive: true });
   try { chmodSync(dirname(p), 0o700); } catch { /* */ }
   const tmp = `${p}.tmp`;
@@ -234,6 +258,29 @@ export function getRemoteSecret(key, { env = process.env } = {}) {
   } finally {
     db.close();
   }
+}
+
+// Storage key for the Matrix access token in the remote-secret store (auth.db).
+export const MATRIX_TOKEN_KEY = 'matrix_access_token';
+
+/**
+ * The effective Matrix client config, or `null` when not fully configured.
+ * This is the ONE "is Matrix wired?" gate the boot path and did.json advertise
+ * consult — every Matrix op stays an inert no-op until this returns non-null.
+ * Non-secret host/MXID come from remote.json (or env); the access token comes
+ * from auth.db (or MYCELIUM_MATRIX_TOKEN for verify scripts). Never logs the
+ * token (CLAUDE.md §1).
+ * @returns {{ homeserver:string, userId:string, accessToken:string }|null}
+ */
+export function matrixConfig({ env = process.env } = {}) {
+  const c = readRemoteConfig({ env });
+  const homeserver = c.matrixHomeserver;
+  const userId = c.matrixUserId;
+  if (!homeserver || !userId || !isSafeMxid(userId)) return null;
+  if (!/^https:\/\/[^\s]+$/i.test(homeserver)) return null;
+  const accessToken = clean(env.MYCELIUM_MATRIX_TOKEN) || getRemoteSecret(MATRIX_TOKEN_KEY, { env });
+  if (!accessToken) return null;
+  return { homeserver, userId, accessToken };
 }
 
 /**

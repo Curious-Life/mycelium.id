@@ -27,10 +27,14 @@ const RATE_WINDOW_MS = 60 * 1000;
  * @param {object} deps.identity           the box identity (publicKeyB64)
  * @param {()=>string} deps.getHost        current public host ("" when unset → fail closed)
  * @param {()=>(string|null)} deps.getHandle current handle (null when unset)
+ * @param {()=>(string|null)} [deps.getMatrixId] current box MXID for the #matrix
+ *   service in did.json (null when Matrix unconfigured → no #matrix advertised).
+ *   Read per-request like getHost/getHandle so a homeserver configured after boot
+ *   is picked up without a restart.
  * @param {Function} [deps.fetch]          injected for did resolution / tests
  * @param {()=>number} [deps.now]          injectable clock for tests
  */
-export function createFederationHandlers({ db, userId = 'local-user', identity, getHost, getHandle, fetch = globalThis.fetch, now = () => Date.now() }) {
+export function createFederationHandlers({ db, userId = 'local-user', identity, getHost, getHandle, getMatrixId = () => null, fetch = globalThis.fetch, now = () => Date.now() }) {
   const seenNonces = new Map(); // nonce -> expiry ms
   const rate = new Map();       // peer-ip -> { n, resetAt }
   let globalRate = { n: 0, resetAt: 0 }; // backstop across ALL peers (M-FED-RL)
@@ -85,7 +89,7 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
 
   return {
     didJson() {
-      const doc = buildDidDocument(getHost(), identity?.publicKeyB64);
+      const doc = buildDidDocument(getHost(), identity?.publicKeyB64, getMatrixId() || undefined);
       return doc ? { status: 200, body: doc } : { status: 404, body: { error: 'no public identity' } };
     },
 

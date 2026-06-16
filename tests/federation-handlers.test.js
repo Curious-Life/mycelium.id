@@ -21,7 +21,7 @@ const fetchSenderDid = async (url, init) => {
   return { ok: false, status: 404, async json() { return {}; } };
 };
 
-function makeHandlers({ host = 'alice.mycelium.id', handle = 'alice', now } = {}) {
+function makeHandlers({ host = 'alice.mycelium.id', handle = 'alice', matrixId = null, now } = {}) {
   const received = [];
   const responses = [];
   const db = { connections: {
@@ -30,7 +30,7 @@ function makeHandlers({ host = 'alice.mycelium.id', handle = 'alice', now } = {}
   } };
   const h = createFederationHandlers({
     db, userId: 'me', identity: LOCAL,
-    getHost: () => host, getHandle: () => handle,
+    getHost: () => host, getHandle: () => handle, getMatrixId: () => matrixId,
     fetch: fetchSenderDid, now,
   });
   return { h, received, responses };
@@ -51,6 +51,14 @@ describe('didJson / webfinger', () => {
   it('serves the did doc when a host is set, 404 otherwise', () => {
     assert.equal(makeHandlers().h.didJson().status, 200);
     assert.equal(makeHandlers({ host: '' }).h.didJson().status, 404);
+  });
+  it('advertises the #matrix service only when a box MXID is configured', () => {
+    const without = makeHandlers().h.didJson().body;
+    assert.equal(without.service.find((s) => s.type === 'MatrixHomeserver'), undefined);
+    const withMx = makeHandlers({ matrixId: '@alice:hs.example' }).h.didJson().body;
+    const mx = withMx.service.find((s) => s.type === 'MatrixHomeserver');
+    assert.ok(mx, 'expected a #matrix service entry');
+    assert.equal(mx.serviceEndpoint, 'matrix:u/alice:hs.example');
   });
   it('webfinger describes our acct, 404 for foreign', () => {
     const { h } = makeHandlers();

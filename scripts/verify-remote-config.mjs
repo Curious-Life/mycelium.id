@@ -74,6 +74,35 @@ try { await cfg.setOperatorPassword({ email: EMAIL, password: 'short' }); }
 catch { weakRejected = true; }
 rec('RC4. password <12 chars rejected', weakRejected, `rejected=${weakRejected}`);
 
+// RC11 — Matrix (Phase B Tier-1) config: non-secret host/MXID round-trip through
+// remote.json with validation; the access token lands in auth.db (NOT remote.json);
+// matrixConfig() gates on all three present + valid, never returns the token in
+// the file, and rejects a malformed MXID.
+{
+  // unconfigured → null
+  const before = cfg.matrixConfig();
+  // malformed MXID rejected at the config boundary
+  let badMxid = false;
+  try { cfg.writeRemoteConfig({ matrixUserId: 'not-an-mxid' }); } catch { badMxid = true; }
+  // non-https homeserver rejected
+  let badHs = false;
+  try { cfg.writeRemoteConfig({ matrixHomeserver: 'http://insecure.example' }); } catch { badHs = true; }
+  // valid non-secret config persists; token goes to auth.db
+  cfg.writeRemoteConfig({ matrixHomeserver: 'https://hs.example', matrixUserId: '@alice:hs.example' });
+  const fileHasNoToken = cfg.readRemoteConfig().matrixHomeserver === 'https://hs.example'
+    && !('matrix_access_token' in cfg.readRemoteConfig());
+  const stillNullWithoutToken = cfg.matrixConfig() === null; // host+MXID set, token absent
+  cfg.setRemoteSecret(cfg.MATRIX_TOKEN_KEY, 'syt_fake_access_token');
+  const wired = cfg.matrixConfig();
+  rec('RC11. Matrix config: validated round-trip, token in auth.db, matrixConfig gates correctly',
+    before === null && badMxid && badHs && fileHasNoToken && stillNullWithoutToken
+    && !!wired && wired.userId === '@alice:hs.example' && wired.homeserver === 'https://hs.example'
+    && wired.accessToken === 'syt_fake_access_token',
+    `before=${before} badMxid=${badMxid} badHs=${badHs} gatedNoToken=${stillNullWithoutToken} wired=${!!wired}`);
+  // leave config clean for the spawned-server section (Matrix unset → inert)
+  cfg.writeRemoteConfig({ matrixHomeserver: '', matrixUserId: '' });
+}
+
 // ── Spawn the --http server from PERSISTED config (no secret/baseURL/pw env) ──
 function startServer() {
   const child = spawn(process.execPath, [join(ROOT, 'src', 'index.js'), '--http'], {
