@@ -17,6 +17,7 @@
 //   - The probe reports a category only — never the key, never the body.
 import express from 'express';
 import { probeProvider } from './inference/probe.js';
+import { listModels } from './inference/models.js';
 import { PROVIDER_PRESETS } from './inference/presets.js';
 import { assertSafeBaseUrlResolved } from './inference/base-url.js';
 import { INFERENCE_TASKS } from './inference/resolve.js';
@@ -100,6 +101,42 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   // UI offers (label, kind, base_url, jurisdiction, default model). Static data;
   // the UI prefills the add-provider form from a chosen preset. No secrets.
   router.get('/providers/presets', (_req, res) => ok(res, { presets: PROVIDER_PRESETS }));
+
+  // Auto-fill the model dropdown (spec #9): given a provider config the user is
+  // mid-entering — { provider, base_url?, api_key? } — fetch that provider's
+  // available models so the UI can offer them instead of free-text. The key is
+  // used for the listing call and never stored/echoed; base_url is SSRF-guarded;
+  // errors are a category only. Always 200 with { ok, models, error } so the UI
+  // degrades gracefully to free-text entry when listing isn't available.
+  router.post('/providers/models', async (req, res) => {
+    const b = req.body || {};
+    const provider = String(b.provider || '').toLowerCase();
+    const baseUrl = typeof b.base_url === 'string' ? b.base_url : '';
+    if (baseUrl) {
+      try { await assertSafeBaseUrlResolved(baseUrl); }
+      catch (e) { return res.json({ ok: false, models: [], error: `invalid base_url: ${e.message}` }); }
+    }
+    const apiKey = typeof b.api_key === 'string' ? b.api_key.trim() : '';
+    try {
+      const r = await listModels({ provider, baseUrl, apiKey, fetch });
+      res.json({ ok: r.ok, models: r.models || [], error: r.ok ? null : r.error });
+    } catch { res.json({ ok: false, models: [], error: 'unreachable' }); }
+  });
+
+  // Same, for an ALREADY-SAVED provider (uses its stored key) — lets the UI offer
+  // a model dropdown when editing a connected provider, without re-entering the key.
+  router.get('/providers/:id/models', async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return bad(res, 400, 'invalid id');
+    try {
+      const row = await db.providers.get(id, userId);
+      if (!row) return bad(res, 404, 'provider not found');
+      let apiKey = null;
+      try { apiKey = row.credentials ? JSON.parse(row.credentials).apiKey : null; } catch { /* malformed → no key */ }
+      const r = await listModels({ provider: row.provider, baseUrl: row.base_url, apiKey, fetch });
+      res.json({ ok: r.ok, models: r.models || [], error: r.ok ? null : r.error });
+    } catch { res.json({ ok: false, models: [], error: 'unreachable' }); }
+  });
 
   // §4g "smart routing" (multi-provider cascade) preference — persisted in the
   // user settings blob; the gateway reads it DB-first (env MYCELIUM_INFER_CASCADE

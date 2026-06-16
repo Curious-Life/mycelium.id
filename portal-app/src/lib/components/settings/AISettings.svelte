@@ -20,9 +20,54 @@
 	let chosen = $state<Preset | null>(null);
 	let apiKey = $state('');
 	let model = $state('');
+	let customBaseUrl = $state('');
 	let saving = $state(false);
 	let saveErr = $state<string | null>(null);
 	let testMsg = $state<Record<number, string>>({});
+
+	// Auto-fill the model field (spec #9): once a provider + key (+ URL for a custom
+	// endpoint) are entered, fetch that provider's available models and offer them
+	// as a datalist. Degrades gracefully to free-text when listing isn't available.
+	let cfModels = $state<string[]>([]);
+	let cfModelsLoading = $state(false);
+	let cfModelsErr = $state<string | null>(null);
+	const MODELS_ERR: Record<string, string> = {
+		auth_rejected: 'key rejected', no_key: 'enter your key first', not_found: 'no model list here',
+		timeout: 'timed out', unreachable: 'unreachable', invalid_base_url: 'invalid endpoint',
+		rate_limited: 'rate-limited', provider_error: 'provider error',
+	};
+	// A synthetic preset for an arbitrary endpoint / agent handler (spec #6) — the
+	// user supplies the base URL + (optional) key themselves.
+	const CUSTOM_PRESET: Preset = { id: 'custom', label: 'Custom endpoint / agent handler', kind: 'openai', baseUrl: '', jurisdiction: 'us-standard', defaultModel: '' };
+	const isCustom = $derived(chosen?.id === 'custom');
+	const showKey = $derived(chosen ? chosen.jurisdiction !== 'local' : false);
+	const keyRequired = $derived(chosen ? (chosen.jurisdiction !== 'local' && chosen.id !== 'custom') : false);
+
+	function customLabel(url: string): string {
+		const u = url.trim();
+		if (!u) return 'Custom endpoint';
+		try { return `Custom · ${new URL(u).host}`; } catch { return 'Custom endpoint'; }
+	}
+
+	async function fetchModels() {
+		if (!chosen) return;
+		const base = chosen.baseUrl || customBaseUrl.trim();
+		cfModelsLoading = true; cfModelsErr = null;
+		try {
+			const res = await api('/portal/providers/models', { method: 'POST', body: JSON.stringify({
+				provider: chosen.kind === 'anthropic' ? 'anthropic' : 'custom',
+				base_url: chosen.kind !== 'anthropic' ? base : undefined,
+				api_key: apiKey.trim() || undefined,
+			}) });
+			const j = await res.json().catch(() => ({}));
+			cfModels = Array.isArray(j.models) ? j.models : [];
+			if (!j.ok) cfModelsErr = MODELS_ERR[j.error] ?? null;
+			if (!model && cfModels.length) {
+				model = chosen.defaultModel && cfModels.includes(chosen.defaultModel) ? chosen.defaultModel : cfModels[0];
+			}
+		} catch { cfModelsErr = 'could not load models'; }
+		finally { cfModelsLoading = false; }
+	}
 
 	type Rec = { name: string; bestFor: string; estimatedGb: number; fitScore: number; fitLevel: string; blurb: string; installed: boolean; recommended?: boolean; ageMonths?: number | null };
 	let hwRec = $state<{ hardware: any; available: number; recommendations: Rec[]; note: string | null; ollamaUp: boolean; ollamaInstalled: boolean } | null>(null);
@@ -42,6 +87,29 @@
 
 	let cascade = $state(false);
 	let cascadeBusy = $state(false);
+
+	// Assistant identity (spec #4) — name + personality, changeable here and set in
+	// onboarding. The name propagates to the chat header via /portal/chat/agents.
+	let agentName = $state('');
+	let agentPersonality = $state('friendly');
+	let identityBusy = $state(false);
+	let identitySaved = $state(false);
+	const PERSONALITY_OPTS: { id: string; label: string }[] = [
+		{ id: 'friendly', label: 'Friendly' },
+		{ id: 'formal', label: 'Formal' },
+		{ id: 'concise', label: 'Concise' },
+		{ id: 'creative', label: 'Creative' },
+	];
+	async function loadIdentity() {
+		try { const r = await api('/portal/agent-identity'); if (r.ok) { const j = await r.json(); agentName = j.name || ''; agentPersonality = j.personality || 'friendly'; } } catch { /* defaults */ }
+	}
+	async function saveIdentity() {
+		identityBusy = true; identitySaved = false;
+		try {
+			const r = await api('/portal/agent-identity', { method: 'PUT', body: JSON.stringify({ name: agentName.trim(), personality: agentPersonality }) });
+			if (r.ok) { const j = await r.json(); agentName = j.name; agentPersonality = j.personality; identitySaved = true; setTimeout(() => (identitySaved = false), 2000); }
+		} catch { /* leave */ } finally { identityBusy = false; }
+	}
 
 	// Per-task model selection — which configured provider handles which task.
 	let tasks = $state<string[]>([]);
@@ -155,12 +223,17 @@
 	}
 
 	onMount(() => {
-		load(); loadRouting(); loadTaskModels(); loadTranscription();
+		load(); loadRouting(); loadTaskModels(); loadTranscription(); loadIdentity();
 		return () => { if (transPoll) clearInterval(transPoll); };
 	});
 
-	function choose(p: Preset) { chosen = p; apiKey = ''; model = p.defaultModel || ''; saveErr = null; }
-	const needsKey = $derived(chosen ? chosen.jurisdiction !== 'local' : false);
+	function choose(p: Preset) {
+		chosen = p; apiKey = ''; model = p.defaultModel || ''; saveErr = null;
+		customBaseUrl = ''; cfModels = []; cfModelsErr = null;
+		// A keyless, known-endpoint provider (e.g. a local server) can list models
+		// immediately; keyed/custom providers list after the user fills the form.
+		if (!keyRequired && !isCustom) fetchModels();
+	}
 
 	async function connect(e: Event) {
 		e.preventDefault();
@@ -168,10 +241,10 @@
 		saving = true; saveErr = null;
 		const body: Record<string, unknown> = {
 			provider: chosen.kind === 'anthropic' ? 'anthropic' : 'custom',
-			label: chosen.label,
+			label: isCustom ? customLabel(customBaseUrl) : chosen.label,
 			model_preference: model.trim() || chosen.defaultModel || undefined,
 		};
-		if (chosen.kind !== 'anthropic') body.base_url = chosen.baseUrl;
+		if (chosen.kind !== 'anthropic') body.base_url = chosen.baseUrl || customBaseUrl.trim();
 		if (apiKey.trim()) body.api_key = apiKey.trim();
 		try {
 			const res = await api('/portal/providers', { method: 'POST', body: JSON.stringify(body) });
@@ -270,6 +343,19 @@
 		</div>
 	</div>
 
+	<!-- ── Assistant identity (name + personality) ── -->
+	<div class="lane">
+		<div class="lane-head"><span class="lane-title">Your assistant</span><span class="lane-tag">name &amp; personality</span></div>
+		<div class="identity-row">
+			<input class="inp id-name" type="text" maxlength="40" bind:value={agentName} placeholder="Mycelium" aria-label="Assistant name" />
+			<select class="task-select id-persona" bind:value={agentPersonality} aria-label="Personality">
+				{#each PERSONALITY_OPTS as o}<option value={o.id}>{o.label}</option>{/each}
+			</select>
+			<button class="solid-btn" disabled={identityBusy} onclick={saveIdentity}>{identityBusy ? 'Saving…' : identitySaved ? '✓ Saved' : 'Save'}</button>
+		</div>
+		<p class="muted-xs">This name appears wherever your AI shows up — chat, notifications, settings.</p>
+	</div>
+
 	{#if loading}
 		<div class="muted pulse">Loading…</div>
 	{:else if error}
@@ -320,10 +406,18 @@
 			{#if chosen}
 				<form onsubmit={connect} class="connect-form">
 					<div class="cf-head"><span class="cf-name">{chosen.label}</span>{#if JURIS[chosen.jurisdiction]}<span class="chip {JURIS[chosen.jurisdiction].cls}">{JURIS[chosen.jurisdiction].label}</span>{/if}</div>
-					{#if needsKey}<input type="password" bind:value={apiKey} placeholder="API key" autocomplete="off" class="inp" />{/if}
-					<input type="text" bind:value={model} placeholder={chosen.defaultModel || 'model (optional)'} class="inp" />
+					{#if isCustom}<input type="url" bind:value={customBaseUrl} placeholder="https://endpoint.example/v1 — base URL or agent handler" autocomplete="off" class="inp" />{/if}
+					{#if showKey}<input type="password" bind:value={apiKey} placeholder={keyRequired ? 'API key' : 'API key (optional)'} autocomplete="off" class="inp" />{/if}
+					<div class="model-field">
+						<input type="text" list="cf-models" bind:value={model} placeholder={chosen.defaultModel || 'model'} class="inp" />
+						<button type="button" class="link-btn load-models" onclick={fetchModels} disabled={cfModelsLoading || (isCustom && !customBaseUrl.trim())}>
+							{cfModelsLoading ? 'Loading…' : cfModels.length ? `↻ ${cfModels.length}` : 'Load models'}
+						</button>
+					</div>
+					<datalist id="cf-models">{#each cfModels as m}<option value={m}></option>{/each}</datalist>
+					{#if cfModelsErr}<div class="muted-xs">Couldn’t list models ({cfModelsErr}) — type the model id.</div>{/if}
 					<div class="cf-actions">
-						<button type="submit" disabled={saving || (needsKey && !apiKey.trim())} class="solid-btn">{saving ? 'Connecting…' : 'Connect'}</button>
+						<button type="submit" disabled={saving || (keyRequired && !apiKey.trim()) || (isCustom && !customBaseUrl.trim())} class="solid-btn">{saving ? 'Connecting…' : 'Connect'}</button>
 						<button type="button" class="link-btn dim-link" onclick={() => (chosen = null)}>Cancel</button>
 					</div>
 					{#if saveErr}<div class="x-red">{saveErr}</div>{/if}
@@ -339,6 +433,12 @@
 						</div>
 					{/if}
 				{/each}
+				<div class="preset-group">
+					<div class="group-title">Other</div>
+					<div class="chips-row">
+						<button class="preset-chip" onclick={() => choose(CUSTOM_PRESET)}>+ Custom endpoint / agent handler</button>
+					</div>
+				</div>
 			{/if}
 		</div>
 
@@ -524,6 +624,13 @@
 	.cf-actions { display: flex; align-items: center; gap: 0.7rem; }
 	.inp { width: 100%; padding: 0.5rem 0.65rem; font-size: 0.76rem; font-family: var(--font-mono, monospace); background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; color: var(--color-text-primary); outline: none; }
 	.inp:focus { border-color: var(--color-accent-aurum, #e5b84c); }
+	.identity-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
+	.id-name { flex: 1; min-width: 0; font-family: inherit; }
+	.id-persona { flex-shrink: 0; }
+	.model-field { display: flex; align-items: center; gap: 0.5rem; }
+	.model-field .inp { flex: 1; min-width: 0; }
+	.load-models { flex-shrink: 0; white-space: nowrap; }
+	.load-models:disabled { opacity: 0.5; cursor: default; }
 
 	/* Smart routing */
 	.routing { display: flex; align-items: flex-start; gap: 0.7rem; padding: 0.8rem 1rem; border-radius: 13px; border: 1px solid rgba(255,255,255,0.07); background: rgba(255,255,255,0.025); cursor: pointer; text-align: left; font-family: inherit; }

@@ -26,6 +26,18 @@ import { captureMessage } from './ingest/capture.js';
 const POLICY_KEY = 'AI_ACCESS_POLICY';
 const CHAT_SOURCE = 'portal-chat';
 
+// Agent identity (spec #4) — a user-chosen name + personality for their assistant,
+// persisted in users.settings.agent and surfaced everywhere the AI is referenced
+// (chat header via /agents) and in how it speaks (the system preamble below).
+const DEFAULT_AGENT_NAME = 'Mycelium';
+const PERSONALITIES = ['friendly', 'formal', 'concise', 'creative'];
+const PERSONALITY_GUIDE = {
+  friendly: 'Be warm, encouraging and personable.',
+  formal: 'Maintain a formal, professional tone.',
+  concise: 'Be brief and to the point — minimise elaboration.',
+  creative: 'Be imaginative and expressive; offer fresh angles.',
+};
+
 // Short, static orientation for the chat agent — the dynamic state comes from the
 // getContext preamble appended below (so this stays cache-stable + injection-free).
 const CHAT_SYSTEM = [
@@ -53,11 +65,40 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     catch { return defaultPolicy(); }
   }
 
+  async function readAgentIdentity() {
+    try {
+      const a = (await db.users?.getSettings?.(userId))?.agent || {};
+      const name = (typeof a.name === 'string' && a.name.trim()) ? a.name.trim() : DEFAULT_AGENT_NAME;
+      const personality = PERSONALITIES.includes(a.personality) ? a.personality : 'friendly';
+      return { name, personality };
+    } catch { return { name: DEFAULT_AGENT_NAME, personality: 'friendly' }; }
+  }
+
   // ── GET /agents — single synthetic agent so the UI's picker + per-agent
-  //    history filter work. V1 is single-user/single-agent.
-  router.get('/agents', (req, res) => {
+  //    history filter work. V1 is single-user/single-agent. The name reflects the
+  //    user's chosen agent identity (spec #4) so it propagates to the chat header.
+  router.get('/agents', async (req, res) => {
     if (!auth(req, res)) return;
-    res.json({ agents: [{ id: 'personal-agent', name: 'Mycelium', color: 'amethyst', role: 'Your vault', status: 'online' }] });
+    const { name } = await readAgentIdentity();
+    res.json({ agents: [{ id: 'personal-agent', name, color: 'amethyst', role: 'Your vault', status: 'online' }] });
+  });
+
+  // ── GET/PUT /agent-identity — the assistant's name + personality (spec #4).
+  //    Set in onboarding, changeable here; non-secret → plain user settings.
+  router.get('/agent-identity', async (req, res) => {
+    if (!auth(req, res)) return;
+    res.json({ ...(await readAgentIdentity()), personalities: PERSONALITIES });
+  });
+  router.put('/agent-identity', async (req, res) => {
+    if (!auth(req, res)) return;
+    try {
+      const name = String(req.body?.name || '').trim().slice(0, 40) || DEFAULT_AGENT_NAME;
+      const personality = PERSONALITIES.includes(req.body?.personality) ? req.body.personality : 'friendly';
+      try { await db.users.create(userId, userId); } catch { /* row already exists */ }
+      const s = (await db.users.getSettings(userId)) || {};
+      await db.users.updateSettings(userId, { ...s, agent: { name, personality } });
+      res.json({ ok: true, name, personality });
+    } catch { res.status(500).json({ error: 'Could not save agent identity' }); }
   });
 
   // ── GET /ai-access — the AI Access policy (for the settings panel). Returns the
@@ -182,7 +223,10 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       // briefing is already in the system preamble); cloud keeps the full tool set.
 
       // System = orientation + getContext briefing + (cloud only) memory retrieval.
-      let system = CHAT_SYSTEM;
+      const ident = await readAgentIdentity();
+      // Identity preamble (spec #4): the user's chosen name + personality shape who
+      // the assistant is and how it speaks, ahead of the static orientation.
+      let system = `Your name is ${ident.name}. ${PERSONALITY_GUIDE[ident.personality] || ''} ${CHAT_SYSTEM}`.trim();
       try { const ctx = await handlers.getContext?.({ recentMessages: recentN }); if (typeof ctx === 'string' && ctx) system += `\n\n${ctx}`; } catch { /* honest-empty */ }
       if (!isLocal && policy.domains.includes('search') && typeof handlers.searchMindscape === 'function') {
         send({ type: 'tool_start', name: 'searchMemory' }); lastActivity = Date.now();
