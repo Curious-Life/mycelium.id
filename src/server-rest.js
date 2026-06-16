@@ -37,6 +37,7 @@ import { startEnrichDrainer } from './enrich/drainer.js';
 import { startClaimHeartbeat } from './claims/heartbeat.js';
 import { startClaimDiscoveryJob, isClusteringRunning, startClusteringJob, shouldAutoGenerate } from './jobs.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
+import { startKokoroSupervisor } from './tts/kokoro-supervisor.js';
 import { startChannelSupervisor } from './channels/supervisor.js';
 import { mcpLoopbackRouter } from './mcp-loopback.js';
 import { matrixConfig } from './remote/config.js';
@@ -391,6 +392,13 @@ export async function startRestServer({
         // only over loopback (vault-client + /internal/mcp). Reaped via the Rust
         // shell's process-group kill on app exit regardless.
         channelSup = startChannelSupervisor({ home: process.cwd(), db, userId: bootUserId, restPort: port });
+        // Local TTS (Kokoro :8094): start the on-box voice service once the user
+        // has downloaded the model AND opted in (KOKORO_TTS_ENABLED in secrets).
+        // Keyless, loopback-only; stays idle (no python) until both are true.
+        startKokoroSupervisor({
+          home: process.cwd(),
+          shouldRun: async () => { try { return (await db.secrets.get(bootUserId, 'KOKORO_TTS_ENABLED')) === '1'; } catch { return false; } },
+        });
         // Re-attach the Whisper transcription service when the user opted in
         // earlier (users.settings.transcribeModel survives restarts; ensure is
         // a no-op without a model — no idle python for users who never opted in).

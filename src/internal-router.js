@@ -287,6 +287,8 @@ export function internalRouter({ db, userId, enrich = {} }) {
         },
         tts: {
           provider: (await g('TTS_PROVIDER')) || null,
+          kokoroEnabled: (await g('KOKORO_TTS_ENABLED')) || null,
+          kokoroVoice: (await g('KOKORO_TTS_VOICE')) || null,
           openaiApiKey: (await g('OPENAI_API_KEY')) || null,
           openaiVoice: (await g('OPENAI_TTS_VOICE')) || null,
           openaiModel: (await g('OPENAI_TTS_MODEL')) || null,
