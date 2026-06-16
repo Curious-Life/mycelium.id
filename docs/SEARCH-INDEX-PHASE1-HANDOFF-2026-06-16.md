@@ -14,9 +14,22 @@
 | Phase | Commit (main) | Status |
 |---|---|---|
 | Phase 0 — pipeline integrity + cooperative build | `221ab0d` (PR #183, squash) | ✅ MERGED, CI green |
-| Phase 1 — on-disk FTS5 + sqlite-vec (whole-file encryption) | — | 📐 DIRECTION SCOPED, needs its own sweep + a load-bearing spike before any code |
+| Phase 1 — on-disk FTS5 + sqlite-vec (whole-file encryption) | — | ✅ SWEPT + SPIKED (gate GO, latency pivot found) → **awaiting operator decisions D-1..D-4**, then implement |
 
-Phase 0 stopped the app from freezing (cooperative index build) and closed the null-content pipeline hole. **Phase 1 is the durable scaling fix** and has NOT started beyond the direction doc. There is **no emergency pressure** — Phase 0 restored responsiveness, so Phase 1 should be designed right, not rushed.
+Phase 0 stopped the app from freezing (cooperative index build) and closed the null-content pipeline hole. **Phase 1 is the durable scaling fix** and has now been **sweep-verified + spiked** (see the 2026-06-16 PM update below). There is **no emergency pressure** — Phase 0 restored responsiveness, so Phase 1 should be designed right, not rushed.
+
+---
+
+## 2026-06-16 PM session — spike + sweep complete (start here)
+
+The pickup protocol below was executed. **Outcome: the gate passed; one load-bearing assumption was refuted by measurement.**
+
+- **GATE GO ✅** — `sqlite-vec` (v0.1.9) loads + runs inside an encrypted `better-sqlite3-multiple-ciphers` connection. Ciphertext-at-rest, wrong-key-fail-closed, FTS5/bm25 in the same build, WAL+cipher, vec0 insert/KNN/persist/delete all proven with running code. Spike: [../spike/sqlite-vec-encrypted/](../spike/sqlite-vec-encrypted/).
+- **PIVOT ❌→🔀** — the v1 "brute-force fine < 100 k, no ANN" claim is **refuted at 768-d**: measured **1.2 s/query @ 58 k**. The design now requires **two-stage retrieve-then-rescore**. 256-d matryoshka top-200 → rescore 768 = **100 % recall@10 / 550 ms p95** (on adversarial synthetic data) and reuses the 256-d projection the codebase already computes. Binary quantization is ~18× faster but recall is unproven on synthetic data.
+- **4 sweeps verified** (file:line) the encryption architecture, keystore/key-lifecycle, the full search-index caller list (deletion audit — no danglers; RRF reusable verbatim), and the native-build/migration surface.
+- **Full design written** with a verification table + 4 operator decisions (D-1 candidate method, D-2 per-column fate, D-3 boot/unlock key ordering, D-4 migration cadence): [SEARCH-INDEX-ONDISK-PHASE1-DESIGN-2026-06-16.md](SEARCH-INDEX-ONDISK-PHASE1-DESIGN-2026-06-16.md) (now the authoritative design, upgraded from "direction").
+- **Gotchas found:** vec0 rowid must be bound as `BigInt`; `bit[768]` column with no inline `distance_metric`; cipher pragma before any I/O; the Tauri bundle `rsync`s `node_modules` verbatim so native-module **bundle-load still needs verifying** (npm-install on this machine worked, prebuilt arm64).
+- **The one remaining gate before code (D-1):** re-run [bench2.mjs](../spike/sqlite-vec-encrypted/bench2.mjs) against a **decrypted sample of the real vault's `embedding_768`** to choose 256-d vs binary (falsifiable: recall@10 ≥ 95 % at < 600 ms p95).
 
 ---
 
