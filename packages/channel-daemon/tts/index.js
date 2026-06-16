@@ -34,12 +34,31 @@
  *     await tts.synthesizeForDiscord(text, { agentId });
  */
 
-import { rm } from 'fs/promises';
+import { rm, mkdtemp, writeFile, stat } from 'fs/promises';
+import { join } from 'path';
+import { tmpdir } from 'os';
 
 import { stripMarkdownForTTS } from './shared/markdown.js';
 import { splitTextForTTS } from './shared/chunking.js';
 import { remuxToTelegramSpec, concatOggBuffers } from './shared/remux.js';
+import { wavToOggOpus } from './shared/wav-to-ogg-opus.js';
 import { generateWaveform } from './shared/waveform.js';
+
+/**
+ * Encode a WAV buffer (from the local kokoro provider) to a Telegram-spec
+ * OGG/Opus file using the PURE-JS encoder — no ffmpeg (V1 principle). Returns
+ * the same { path, dir, size } shape as remuxToTelegramSpec, or null so the
+ * caller can fall back to the ffmpeg path.
+ */
+async function encodeWavToOgg(wav) {
+  const ogg = wavToOggOpus(wav);
+  if (!ogg) return null;
+  const dir = await mkdtemp(join(tmpdir(), 'tts-'));
+  const path = join(dir, 'out.ogg');
+  await writeFile(path, ogg);
+  const { size } = await stat(path);
+  return { path, dir, size };
+}
 
 import { resolveProvider, resolveVoice, isEnabled, getConfig } from './config.js';
 import { TTSError, TTSDisabledError, TTSProviderError } from './errors.js';
@@ -115,9 +134,15 @@ export async function* synthesizeForTelegram(text, opts = {}) {
         });
       }
 
-      remuxed = await remuxToTelegramSpec(result.audio, {
-        inputExt: result.format === 'mp3' ? '.mp3' : result.format === 'wav' ? '.wav' : '.ogg',
-      });
+      // Local provider returns WAV → encode OGG/Opus in PURE JS (no ffmpeg).
+      // Cloud opus/mp3, or a pure-JS encode miss, fall back to the ffmpeg remux
+      // (itself fail-soft to raw audio when ffmpeg is absent).
+      if (result.format === 'wav') remuxed = await encodeWavToOgg(result.audio);
+      if (!remuxed) {
+        remuxed = await remuxToTelegramSpec(result.audio, {
+          inputExt: result.format === 'mp3' ? '.mp3' : result.format === 'wav' ? '.wav' : '.ogg',
+        });
+      }
 
       if (remuxed.size < MIN_CHUNK_BYTES) {
         await rm(remuxed.dir, { recursive: true, force: true }).catch(() => {});

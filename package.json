@@ -181,7 +181,8 @@
     "verify:bridge-bearer": "node scripts/verify-bridge-bearer.mjs",
     "verify:history-sync": "node scripts/verify-history-sync.mjs",
     "verify:enrich-resilience": "node scripts/verify-enrich-resilience.mjs",
-    "verify:wav-to-ogg-opus": "node scripts/verify-wav-to-ogg-opus.mjs"
+    "verify:wav-to-ogg-opus": "node scripts/verify-wav-to-ogg-opus.mjs",
+    "verify:tts-kokoro": "node scripts/verify-tts-kokoro.mjs"
   },
   "dependencies": {
     "@better-auth/passkey": "^1.6.14",
