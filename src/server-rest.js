@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'node:path';
-import { existsSync, mkdirSync, cpSync, renameSync } from 'node:fs';
+import https from 'node:https';
+import { existsSync, mkdirSync, cpSync, renameSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { boot } from './index.js';
@@ -45,8 +46,7 @@ import { createMatrixEgress } from './federation/matrix-egress.js';
 import { createMatrixClient } from './federation/matrix-client.js';
 import { resolveMatrixService } from './federation/did.js';
 import { setSessionKeys } from './account/session-keys.js';
-import { isTrustedLoopback } from './http/loopback.js';
-import { createVaultAuthMiddleware, csrfCookieMiddleware, isAuthorized } from './http/require-vault-auth.js';
+import { createVaultAuthMiddleware, csrfCookieMiddleware, isAuthorized, makePortalOwnerGate } from './http/require-vault-auth.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CANONICAL_BUILD = path.join(HERE, '..', 'portal-app', 'build');
@@ -161,6 +161,11 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // path check that could diverge from the routers). Loopback (desktop) bypasses;
   // SPA navigation isn't under /api so it falls through to static (step 1.2).
   if (vaultAuth) v.use('/api', vaultAuth);
+  // Per-router owner gate for the SENSITIVE routers (they decrypt vault plaintext,
+  // so they authenticate independently of the global /api gate — defence in depth).
+  // Trust: trusted-loopback (desktop) OR the owner's static Bearer (native app over
+  // Tailscale / the native-TLS listener), the SAME authority the global gate trusts.
+  const portalOwnerGate = makePortalOwnerGate({ userId });
   v.use('/api/v1/portal', portalCompatRouter({ db, userId, spaceSync }));
   // S1 measurement REST bridge — auth-GATED, fail-closed (the rest of the V1
   // surface is unauthenticated/localhost-only; this surface decrypts the
@@ -175,32 +180,27 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // response is a superset, so MindscapeView's summary.phase read still works.
   v.use('/api/v1/portal', portalMeasurementRouter({
     db, userId,
-    authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
+    authenticatePortalRequest: portalOwnerGate,
   }));
   v.use('/api/v1/portal', portalClaimsRouter({
     db, userId,
-    authenticatePortalRequest: (req) => {
-      const ip = req.socket?.remoteAddress || '';
-      const loopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
-      if (!loopback || req.headers['x-forwarded-for']) return null;
-      return { id: userId };
-    },
+    authenticatePortalRequest: portalOwnerGate,
   }));
   v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath }));
   // Unified activity feed (background_jobs) — header stream indicator + mindscape chip.
   v.use('/api/v1/portal', portalActivityRouter({
     db, userId,
-    authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
+    authenticatePortalRequest: portalOwnerGate,
   }));
   // Token-usage transparency (input/output by area/source/provider/model/day).
   v.use('/api/v1/portal', portalUsageRouter({
     db, userId,
-    authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
+    authenticatePortalRequest: portalOwnerGate,
   }));
   // Voice transcription (dedicated Whisper) — status + opt-in model download.
   v.use('/api/v1/portal', portalTranscriptionRouter({
     db, userId,
-    authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
+    authenticatePortalRequest: portalOwnerGate,
     detectHardware,
   }));
   v.use('/api/v1/portal', portalUploadsRouter({ db, userId, enqueueEnrichment }));
@@ -226,7 +226,7 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // loopback-trusted (decrypts vault plaintext), same boundary as measurement/claims.
   v.use('/api/v1/portal', portalChatRouter({
     db, userId, tools, handlers, enqueueEnrichment,
-    authenticatePortalRequest: (req) => (isTrustedLoopback(req) ? { id: userId } : null),
+    authenticatePortalRequest: portalOwnerGate,
   }));
   v.use('/api/v1/portal', portalChannelsRouter({ db, userId, channelSup }));
   if (connectorRunner) v.use('/api/v1/portal', portalConnectorsRouter({ runner: connectorRunner }));
@@ -533,10 +533,51 @@ export async function startRestServer({
   const boundPort = typeof addr === 'object' && addr ? addr.port : port;
   const url = `http://${host}:${boundPort}`;
 
+  // ── Optional native TLS listener (S-REST-TLS) ──────────────────────────────
+  // The plain-http server above stays LOOPBACK-only (desktop / Tauri / a loopback
+  // reverse proxy). For a native mobile client that reaches the box DIRECTLY over
+  // Tailscale we expose the SAME express app over real TLS on a network interface
+  // (cert from `tailscale cert <node>.<tailnet>.ts.net`). The security model
+  // (Odysseus "bind + TLS + auth-always-on"): a remote client's socket peer is its
+  // real, NON-loopback address, so isTrustedLoopback() is false → every request
+  // must carry the owner Bearer (require-vault-auth / A1), and the account/remote
+  // control surfaces self-reject. There is NO dependence on a front proxy's
+  // X-Forwarded-For header — the peer address alone enforces auth.
+  //
+  // Fail closed: TLS starts ONLY when BOTH cert+key are set AND readable. A
+  // missing/unreadable cert logs loudly and is SKIPPED — we NEVER fall back to
+  // serving the vault as plaintext on a network interface.
+  let tlsServer = null;
+  let tlsUrl = null;
+  const certPath = process.env.MYCELIUM_REST_TLS_CERT;
+  const keyPath = process.env.MYCELIUM_REST_TLS_KEY;
+  if (certPath && keyPath) {
+    const tlsPort = Number(process.env.MYCELIUM_REST_TLS_PORT ?? 8443);
+    const tlsHost = process.env.MYCELIUM_REST_TLS_HOST ?? '0.0.0.0';
+    try {
+      const cred = { cert: readFileSync(certPath), key: readFileSync(keyPath) };
+      tlsServer = await new Promise((resolve, reject) => {
+        const s = https.createServer(cred, app).listen(tlsPort, tlsHost, () => resolve(s));
+        s.on('error', reject);
+      });
+      const tlsAddr = tlsServer.address();
+      const tlsBound = typeof tlsAddr === 'object' && tlsAddr ? tlsAddr.port : tlsPort;
+      tlsUrl = `https://${tlsHost}:${tlsBound}`;
+      console.error(`[mycelium] portal/REST TLS listener on ${tlsUrl} — remote clients authenticate via Bearer; loopback http stays on ${url}`);
+    } catch (err) {
+      // No insecure fallback: log + continue loopback-only (remote access stays OFF).
+      console.error(
+        `[mycelium] ⚠️ TLS listener NOT started: ${String(err?.message || err)}. ` +
+        `Check MYCELIUM_REST_TLS_CERT / MYCELIUM_REST_TLS_KEY (PEM paths). ` +
+        `Remote access is OFF; loopback http is unaffected.`);
+      tlsServer = null;
+    }
+  }
+
   return {
-    app, server, url, port: boundPort, host,
+    app, server, tlsServer, url, tlsUrl, port: boundPort, host,
     get db() { return dbHandle; },
-    close: () => closeHandle?.(),
+    close: () => { try { tlsServer?.close(); } catch { /* */ } return closeHandle?.(); },
   };
 }
 

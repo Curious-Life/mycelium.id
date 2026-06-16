@@ -129,6 +129,29 @@ export function csrfCookieMiddleware(req, res, next) {
  *
  * @param {{ userId: string, validateSession?: (cookie:string)=>Promise<string|null> }} opts
  */
+/**
+ * Sync owner-gate for the per-router `authenticatePortalRequest` on the SENSITIVE
+ * portal routers (chat / measurement / claims / activity / usage / transcription).
+ * Those routers decrypt vault plaintext, so they gate INDEPENDENTLY of the global
+ * `/api` vaultAuth middleware (defence in depth). Historically loopback-only; this
+ * adds the owner's static Bearer so the native app (over Tailscale, incl. the
+ * native-TLS listener) can reach them — the SAME bearer authority the global gate
+ * already trusts (`matchStaticBearer`, env `MYCELIUM_MCP_BEARER`, fail-closed). It
+ * deliberately does NOT honor the cookie/relay path here. Fail-closed: returns
+ * null for anything that is neither trusted-loopback nor the owner's valid Bearer.
+ *
+ * @param {{ userId: string }} opts
+ * @returns {(req) => ({ id: string } | null)}
+ */
+export function makePortalOwnerGate({ userId }) {
+  return (req) => {
+    if (isTrustedLoopback(req)) return { id: userId };
+    const authz = req?.headers?.authorization;
+    if (authz && matchStaticBearer(authz)) return { id: userId };
+    return null;
+  };
+}
+
 export function createVaultAuthMiddleware({ userId, validateSession = defaultValidateSession }) {
   // NB: mounted at `/api` in the vault sub-app (see server-rest.js), so Express's
   // own route matching — the SAME matcher the data routers use — decides what is
