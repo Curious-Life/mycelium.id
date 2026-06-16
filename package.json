@@ -180,7 +180,8 @@
     "verify:app-bearer": "node scripts/verify-app-bearer.mjs",
     "verify:bridge-bearer": "node scripts/verify-bridge-bearer.mjs",
     "verify:history-sync": "node scripts/verify-history-sync.mjs",
-    "verify:enrich-resilience": "node scripts/verify-enrich-resilience.mjs"
+    "verify:enrich-resilience": "node scripts/verify-enrich-resilience.mjs",
+    "verify:wav-to-ogg-opus": "node scripts/verify-wav-to-ogg-opus.mjs"
   },
   "dependencies": {
     "@better-auth/passkey": "^1.6.14",
