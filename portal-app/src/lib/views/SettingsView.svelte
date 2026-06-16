@@ -16,6 +16,7 @@
 	import ManagedConnectSection from '$lib/components/settings/ManagedConnectSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 	import ConnectYourAISection from '$lib/components/settings/ConnectYourAISection.svelte';
+	import PhoneConnectSection from '$lib/components/settings/PhoneConnectSection.svelte';
 	import HarnessPickerSection from '$lib/components/settings/HarnessPickerSection.svelte';
 
 	interface Settings {
@@ -1164,6 +1165,11 @@
 					<strong>this Mac</strong> right now, or reach them <strong>over the internet</strong> with an address.
 				</p>
 			</div>
+
+			<div class="conn-group">Your phone</div>
+			<!-- The native iOS app: shows Server address + Access token (the Bearer,
+			     NOT the operator password) with copy buttons + Tailscale-TLS setup. -->
+			<PhoneConnectSection />
 
 			<div class="conn-group">Connect an app</div>
 			<!-- Pick your AI app → copy-paste recipe (memory + optional model door). -->
