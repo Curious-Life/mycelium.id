@@ -178,6 +178,7 @@
     "verify:full-export-import": "node scripts/verify-full-export-import.mjs",
     "verify:app-bearer": "node scripts/verify-app-bearer.mjs",
     "verify:bridge-bearer": "node scripts/verify-bridge-bearer.mjs",
+    "verify:history-sync": "node scripts/verify-history-sync.mjs",
     "verify:enrich-resilience": "node scripts/verify-enrich-resilience.mjs"
   },
   "dependencies": {

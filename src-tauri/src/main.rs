@@ -17,7 +17,8 @@ use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tauri::menu::{Menu, MenuItem, Submenu};
@@ -30,6 +31,10 @@ const PORT: u16 = 8787;
 struct Server {
     children: Mutex<Vec<Child>>,
     pidfile: Option<PathBuf>,
+    // Set on shutdown so the :4711 supervisor thread stops respawning. The current
+    // live :4711 pid (owned by that thread, NOT `children`) so reap() can group-kill it.
+    shutting_down: Arc<AtomicBool>,
+    http_pid: Arc<Mutex<Option<u32>>>,
 }
 
 fn wait_for_port(port: u16, timeout: Duration) -> bool {
@@ -137,6 +142,15 @@ fn kill_group(_pid: u32) {}
 
 /// Reap every tracked child + clear the pidfile. Idempotent (drain empties).
 fn reap(server: &Server) {
+    // Tell the :4711 supervisor to stop respawning, then group-kill the live child
+    // it owns (it isn't in `children`). Order matters: flag BEFORE kill so the
+    // supervisor sees shutdown when its wait() returns and exits instead of respawning.
+    server.shutting_down.store(true, Ordering::SeqCst);
+    if let Ok(g) = server.http_pid.lock() {
+        if let Some(pid) = *g {
+            kill_group(pid);
+        }
+    }
     if let Ok(mut guard) = server.children.lock() {
         for mut child in guard.drain(..) {
             kill_group(child.id());
@@ -273,6 +287,9 @@ fn main() {
             // fire-and-forget Rust spawn here (which never noticed a post-spawn crash
             // and left the UI hanging at "Processing 0/N").
             let mut children: Vec<Child> = vec![child];
+            // Shared with the :4711 supervisor thread (created below, when remote is on).
+            let shutting_down = Arc::new(AtomicBool::new(false));
+            let http_pid: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
 
             // Remote stack (--http + caddy + frpc) — only when remote is configured.
             if let Some(d) = &data_dir {
@@ -281,25 +298,74 @@ fn main() {
                 if mode != "off" || remote_enabled_legacy(&cfg) {
                     // --http OAuth/MCP server (loopback). Pass the public base URL so
                     // OAuth metadata/redirects use the real hostname (empty → localhost).
-                    let public_host = cfg.get("publicHost").and_then(|v| v.as_str()).unwrap_or("");
-                    let mut http = Command::new(&node_bin);
-                    http.arg("src/index.js")
-                        .arg("--http")
-                        .current_dir(&home)
-                        .env("MYCELIUM_PORT", "4711")
-                        .env("MYCELIUM_KEY_SOURCE", &key_source)
-                        .env("MYCELIUM_DATA_DIR", d);
-                    if !public_host.is_empty() {
-                        http.env("MYCELIUM_BASE_URL", format!("https://{public_host}"));
-                    }
-                    set_group(&mut http);
-                    match http.spawn() {
-                        Ok(c) => {
-                            children.push(c);
-                            eprintln!("[mycelium] remote MCP (OAuth) server on 127.0.0.1:4711");
+                    // :4711 (remote MCP/OAuth + the LOCAL capture surface the memory
+                    // bridge posts to) is the one child we SUPERVISE. A dedicated thread
+                    // respawns it (capped exponential backoff) if it dies, so a crash no
+                    // longer silently kills capture/sync until the next app relaunch. It
+                    // also now gets the 4GB heap (NODE_OPTIONS) the one-shot spawn lacked
+                    // — the likely OOM when a large history backfill hit it. Shutdown is
+                    // clean: reap() flips `shutting_down` and group-kills the live pid.
+                    let public_host =
+                        cfg.get("publicHost").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let sup_node = node_bin.clone();
+                    let sup_home = home.clone();
+                    let sup_key = key_source.clone();
+                    let sup_data = d.clone();
+                    let sup_opts = node_options.clone();
+                    let sup_flag = shutting_down.clone();
+                    let sup_pid = http_pid.clone();
+                    std::thread::spawn(move || {
+                        let spawn_http = || {
+                            let mut http = Command::new(&sup_node);
+                            http.arg("src/index.js")
+                                .arg("--http")
+                                .current_dir(&sup_home)
+                                .env("NODE_OPTIONS", &sup_opts)
+                                .env("MYCELIUM_PORT", "4711")
+                                .env("MYCELIUM_KEY_SOURCE", &sup_key)
+                                .env("MYCELIUM_DATA_DIR", &sup_data);
+                            if !public_host.is_empty() {
+                                http.env("MYCELIUM_BASE_URL", format!("https://{public_host}"));
+                            }
+                            set_group(&mut http);
+                            http.spawn()
+                        };
+                        let mut backoff = Duration::from_secs(1);
+                        loop {
+                            if sup_flag.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            match spawn_http() {
+                                Ok(mut c) => {
+                                    if let Ok(mut g) = sup_pid.lock() {
+                                        *g = Some(c.id());
+                                    }
+                                    eprintln!("[mycelium] remote MCP (OAuth) server on 127.0.0.1:4711 (supervised)");
+                                    let started = Instant::now();
+                                    let _ = c.wait();
+                                    if let Ok(mut g) = sup_pid.lock() {
+                                        *g = None;
+                                    }
+                                    if sup_flag.load(Ordering::SeqCst) {
+                                        break;
+                                    }
+                                    // A healthy run resets the backoff; a fast crash grows
+                                    // it (capped) so we never hot-loop a broken server.
+                                    if started.elapsed() >= Duration::from_secs(60) {
+                                        backoff = Duration::from_secs(1);
+                                    }
+                                    eprintln!("[mycelium] :4711 exited — restarting in {}s", backoff.as_secs());
+                                    std::thread::sleep(backoff);
+                                    backoff = std::cmp::min(backoff * 2, Duration::from_secs(30));
+                                }
+                                Err(e) => {
+                                    eprintln!("[mycelium] remote MCP server did not start ({e}); retry in {}s", backoff.as_secs());
+                                    std::thread::sleep(backoff);
+                                    backoff = std::cmp::min(backoff * 2, Duration::from_secs(30));
+                                }
+                            }
                         }
-                        Err(e) => eprintln!("[mycelium] remote MCP server did not start ({e})"),
-                    }
+                    });
 
                     // Caddy terminates TLS for <publicHost> (managed/own-relay/direct).
                     if mode == "managed" || mode == "own-relay" || mode == "direct" {
@@ -352,7 +418,12 @@ fn main() {
                 }
             }
 
-            app.manage(Server { children: Mutex::new(children), pidfile });
+            app.manage(Server {
+                children: Mutex::new(children),
+                pidfile,
+                shutting_down,
+                http_pid,
+            });
 
             if !wait_for_port(PORT, Duration::from_secs(25)) {
                 eprintln!("[mycelium] server did not open port {PORT} in time");
