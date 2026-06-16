@@ -19,6 +19,7 @@ import { unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { getBlob } from './ingest/blob-store.js';
 import { uploadsRoot } from './paths.js';
+import { clampStored } from './enrich/text-limits.js';
 
 const LIST_SCAN_CAP = 2000; // rows decrypted per list call — personal-scale guard
 
@@ -136,7 +137,7 @@ export function portalAttachmentsRouter({ db, userId }) {
     try {
       const row = await db.attachments.getById(String(req.params.id), userId);
       if (!row || row.user_id !== userId) return res.status(404).json({ error: 'not-found' });
-      const description = typeof req.body?.description === 'string' ? req.body.description.slice(0, 4000) : null;
+      const description = typeof req.body?.description === 'string' ? clampStored(req.body.description) : null; // store the FULL description (was a silent 4000-char cut)
       if (description === null) return res.status(400).json({ error: 'description required' });
       await db.attachments.update(row.id, { description });
       res.json({ ok: true });

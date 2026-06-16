@@ -16,6 +16,7 @@ import { getBlob as realGetBlob } from './ingest/blob-store.js';
 import { describeImage as realDescribeImage } from './enrich/describe-image.js';
 import { transcribeAudio as realTranscribeAudio } from './enrich/transcribe-audio.js';
 import { extractDocumentText as realExtractDocumentText, documentKindOf } from './enrich/extract-document.js';
+import { clampStored } from './enrich/text-limits.js';
 import { saveDocument } from './core/document-store.js';
 
 /** Parse the decrypted `{ "apiKey": "…" }` credentials envelope → key string|null. */
@@ -312,7 +313,6 @@ export function internalRouter({ db, userId, enrich = {} }) {
   // Derived text lands in ENCRYPTED_FIELDS.attachments columns.
   const TEXT_MIME = /^(text\/|application\/(json|xml|x-yaml|toml|csv))/i;
   const TEXT_EXT = /\.(txt|md|markdown|csv|json|xml|ya?ml|toml|log|ini|conf)$/i;
-  const MAX_INLINE_TEXT = 6000; // chars of file text folded into the message
   router.post('/api/v1/internal/attachment-context', json, async (req, res) => {
     const attachmentId = String(req.body?.attachmentId || '');
     if (!attachmentId) return res.status(400).json({ ok: false, error: 'attachmentId required' });
@@ -361,7 +361,10 @@ export function internalRouter({ db, userId, enrich = {} }) {
         if (contextText) await db.attachments.update(attachmentId, { transcript: contextText });
       } else if (kind === 'text') {
         const text = bytes.toString('utf8').replace(/\u0000/g, '').trim();
-        contextText = text ? (text.length > MAX_INLINE_TEXT ? `${text.slice(0, MAX_INLINE_TEXT)}\n[… truncated]` : text) : null;
+        // Store the FULL decoded text; clampStored only guards a pathological
+        // payload at a ~200k DoS ceiling. The old 6000-char clamp permanently
+        // truncated the captured message + Library doc — persistence ≠ budget.
+        contextText = text ? clampStored(text) : null;
       } else if (kind === 'file' && documentKindOf(fileType, fileName)) {
         // pdf/docx → unpdf/mammoth (pure-JS, fail-soft null on corrupt/scanned).
         contextText = await extractDocumentText({ bytes, mimeType: fileType, fileName });

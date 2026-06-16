@@ -89,17 +89,20 @@ const rawCol = (id, col) => {
     `ctx="${(r.body?.contextText || '').slice(0, 30)}…" enc=${isEncrypted(raw)}`);
 }
 
-// A3: text file → decoded inline; oversize truncated
+// A3: text file → decoded inline, stored IN FULL (persistence ≠ budget — a long
+// file is no longer clipped at 6000 chars; see src/enrich/text-limits.js).
 {
   const { attachmentId } = await uploadAttachment(db, { userId, bytes: Buffer.from('# Notes\nwater the plants'), fileName: 'notes.md', fileType: 'text/markdown' });
   const r = await call({ attachmentId });
   rec('A3a. markdown → decoded text returned', r.body?.contextText === '# Notes\nwater the plants', `ctx="${r.body?.contextText}"`);
 
+  // A 9000-char file (well past the old 6000 clamp) must come back COMPLETE,
+  // with no truncation marker — the data-integrity fix.
   const big = 'x'.repeat(9000);
   const { attachmentId: bigId } = await uploadAttachment(db, { userId, bytes: Buffer.from(big), fileName: 'big.txt', fileType: 'text/plain' });
   const rb = await call({ attachmentId: bigId });
-  rec('A3b. oversize text truncated with marker',
-    (rb.body?.contextText || '').length < 9000 && /truncated/.test(rb.body?.contextText || ''),
+  rec('A3b. oversize text stored IN FULL (no truncation, no marker)',
+    (rb.body?.contextText || '').length === 9000 && !/truncated/.test(rb.body?.contextText || ''),
     `len=${(rb.body?.contextText || '').length}`);
 }
 

@@ -12,6 +12,7 @@
 // back to a placeholder. Bytes go to 127.0.0.1 only and are never logged.
 
 import { DEFAULT_OLLAMA_URL } from "../inference/local.js";
+import { clampStored } from "./text-limits.js";
 import { pickModelWithCapability } from "./model-caps.js";
 import { getTranscriberHealth, transcribeServiceUrl } from "../transcribe/supervisor.js";
 
@@ -121,7 +122,7 @@ export async function transcribeAudio({
     if (!res || !res.ok) return null;
     const data = await res.json().catch(() => null);
     const text = String(data?.choices?.[0]?.message?.content || "").trim();
-    return text.length ? text.slice(0, 8000) : null;
+    return text.length ? clampStored(text) : null; // store the FULL transcript (was a silent 8000-char cut)
   } catch {
     return null; // timeout / decode error / model error → caller falls back
   } finally {
@@ -147,7 +148,7 @@ async function transcribeViaWhisper({ buf, fetch: fetchImpl, timeoutMs = Number(
     if (!res || !res.ok) return null;
     const data = await res.json().catch(() => null);
     const text = String(data?.text || "").trim();
-    return text.length ? text.slice(0, 8000) : null;
+    return text.length ? clampStored(text) : null; // store the FULL transcript (was a silent 8000-char cut)
   } catch {
     return null;
   } finally {
