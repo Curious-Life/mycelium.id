@@ -13,6 +13,7 @@
 
 import { localInfer, DEFAULT_OLLAMA_URL } from "../inference/local.js";
 import { pickModelWithCapability } from "./model-caps.js";
+import { CAPTION_MAX_CHARS } from "./text-limits.js";
 
 // Known multimodal Ollama tags, best-first. Override with MYCELIUM_VISION_MODEL.
 const VISION_CANDIDATES = [
@@ -117,7 +118,7 @@ export async function describeImage({
       think: false,
     });
     const caption = String(text || "").trim().replace(/\s+/g, " ");
-    return caption.length ? caption.slice(0, 600) : null;
+    return caption.length ? caption.slice(0, CAPTION_MAX_CHARS) : null; // was a silent 600-char cut
   } catch {
     return null; // timeout / model error → fall back, never block the upload
   }

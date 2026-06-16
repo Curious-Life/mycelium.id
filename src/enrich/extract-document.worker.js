@@ -14,14 +14,18 @@
 // this thread; nothing is logged.
 
 import { workerData, parentPort } from "node:worker_threads";
+import { clampStored } from "./text-limits.js";
 
-const MAX_EXTRACT_CHARS = 6000; // matches the attachment-context inline clamp
 const NUL = new RegExp(String.fromCharCode(0), "g");
 
+// Store the FULL extracted text. The previous 6000-char clamp permanently
+// truncated stored documents (it conflated a model-context budget with
+// persistence). clampStored only guards against a pathological payload at a
+// ~200k-char DoS ceiling — no real document is cut. See text-limits.js.
 function clamp(text) {
   const t = String(text || "").replace(NUL, "").trim();
   if (!t) return null;
-  return t.length > MAX_EXTRACT_CHARS ? `${t.slice(0, MAX_EXTRACT_CHARS)}\n[… truncated]` : t;
+  return clampStored(t);
 }
 
 async function run() {

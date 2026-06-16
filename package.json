@@ -11,6 +11,7 @@
   "scripts": {
     "init-db": "node scripts/init-db.mjs",
     "set-keys": "node scripts/set-keys.mjs",
+    "verify:no-destructive-truncation": "node scripts/verify-no-destructive-truncation.mjs",
     "verify:keysource": "node scripts/verify-keysource.mjs",
     "verify:account": "node scripts/verify-account.mjs",
     "verify:backup": "node scripts/verify-backup.mjs",
