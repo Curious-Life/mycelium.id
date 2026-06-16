@@ -14,7 +14,8 @@ const KIND_LABELS = {
   'describe:name': 'Naming your areas',
   'describe:chronicle': 'Describing your areas',
   mycelium_generate: 'Mapping your mind',
-  embed: 'Reading your world',
+  embed: 'Weaving your world',          // #20: warmer than "Reading your world"
+  'inference:chat': 'Thinking…',        // live: the chat model is generating a reply
 };
 
 // Embedding/enrichment are CONTINUOUS (a drainer embeds the backlog on a timer),
