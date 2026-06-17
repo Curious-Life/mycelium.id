@@ -15,7 +15,8 @@
  *   }
  *
  * Implementation: one in-RAM mind-search index (BM25 + ANN cosine + RRF +
- * temporal) holds all indexable rows (messages + topology profiles). bulkSearch
+ * temporal) holds all indexable rows (messages + documents + topology profiles;
+ * documents are BM25-only — no stored embedding). bulkSearch
  * embeds the query (via the INJECTED embedder — embed-service :8091 is sibling
  * unit R2; absent → BM25-only), runs the tier, then groups the ranked ids back
  * into their source layer by hydrating from the DB via `db.rawQuery`.
@@ -125,6 +126,28 @@ export function createSearchHelpers(deps = {}) {
     return new Map(rows.map((r) => [prefix + String(r.id), r]));
   }
 
+  // Documents are `document:`-prefixed in the index (bare UUIDs, but prefixed to
+  // keep the message id-space clean — see d1-loader ID-namespace note). Strip the
+  // prefix for the IN clause, re-key the map by the prefixed id.
+  //
+  // forgotten_at IS NULL and is_internal = 0 are UNCONDITIONAL (defense in depth:
+  // the index may be stale until the next rebuild, but hydration is a second read
+  // path — a forgotten or internal-model doc must never surface). excludeSensitive
+  // additionally drops sensitive=1 rows for proactive recall (relatedTo), mirroring
+  // hydrateMessages.
+  async function hydrateDocuments(ids, { excludeSensitive = false } = {}) {
+    const mine = ids.filter((id) => id.startsWith(ID_PREFIX.document));
+    if (mine.length === 0) return new Map();
+    const rawIds = mine.map(stripPrefix);
+    const placeholders = rawIds.map(() => '?').join(',');
+    const sensitiveClause = excludeSensitive ? ' AND sensitive = 0' : '';
+    const rows = await rawRows(
+      `SELECT id, path, title, summary FROM documents WHERE user_id = ? AND id IN (${placeholders}) AND forgotten_at IS NULL AND is_internal = 0${sensitiveClause}`,
+      [userId, ...rawIds],
+    );
+    return new Map(rows.map((r) => [ID_PREFIX.document + String(r.id), r]));
+  }
+
   /**
    * The contract method. Runs the fused tier, then partitions ranked hits into
    * the 5 mindscape layers by checking which table owns each id.
@@ -157,8 +180,9 @@ export function createSearchHelpers(deps = {}) {
 
     // Hydrate each layer's matching ids. The id space is shared but each row
     // exists in exactly one table, so these maps are disjoint.
-    const [msgMap, terrMap, realmMap, themeMap] = await Promise.all([
+    const [msgMap, docMap, terrMap, realmMap, themeMap] = await Promise.all([
       want('messages') ? hydrateMessages(ids, { excludeSensitive }) : Promise.resolve(new Map()),
+      want('documents') ? hydrateDocuments(ids, { excludeSensitive }) : Promise.resolve(new Map()),
       want('territories') ? hydrateProfiles('territory_profiles', 'territory_id', ID_PREFIX.territory, ids, ', message_count') : Promise.resolve(new Map()),
       want('realms') ? hydrateProfiles('realms', 'realm_id', ID_PREFIX.realm, ids, ', message_count') : Promise.resolve(new Map()),
       want('themes') ? hydrateProfiles('semantic_themes', 'semantic_theme_id', ID_PREFIX.theme, ids, ', message_count') : Promise.resolve(new Map()),
@@ -166,14 +190,15 @@ export function createSearchHelpers(deps = {}) {
 
     const result = {
       messages: [],
-      documents: [], // documents layer arrives with the mind-files unit; honest empty here
+      documents: [],
       territories: { formatted: [], raw: [] },
       realms: [],
       themes: [],
     };
 
     for (const id of ids) {
-      if (result.messages.length >= limit && result.territories.raw.length >= limit
+      if (result.messages.length >= limit && result.documents.length >= limit
+        && result.territories.raw.length >= limit
         && result.realms.length >= limit && result.themes.length >= limit) break;
 
       if (msgMap.has(id)) {
@@ -181,6 +206,9 @@ export function createSearchHelpers(deps = {}) {
         const m = msgMap.get(id);
         if (agent && m.agent_id && m.agent_id !== agent) continue;
         result.messages.push(formatMessage(m));
+      } else if (docMap.has(id)) {
+        if (result.documents.length >= limit) continue;
+        result.documents.push(formatDocument(docMap.get(id)));
       } else if (terrMap.has(id)) {
         if (result.territories.raw.length >= limit) continue;
         const t = terrMap.get(id);
@@ -280,6 +308,11 @@ function formatMessage(m) {
 function formatProfile(p) {
   const count = p.message_count != null ? ` (${p.message_count} messages)` : '';
   return `**${p.name}**${count}\n${snippet(p.essence)}`;
+}
+
+function formatDocument(d) {
+  const label = d.title || d.path || '(untitled)';
+  return `**${label}**\n${snippet(d.summary)}`;
 }
 
 // Re-exports for tests + downstream units.

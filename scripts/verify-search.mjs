@@ -151,6 +151,12 @@ function seedRows(raw) {
   // semantic_themes.realm_id is NOT NULL (composite UNIQUE(user_id,realm_id,semantic_theme_id)).
   const s = raw.prepare('INSERT INTO semantic_themes (semantic_theme_id, realm_id, user_id, name, essence, message_count) VALUES (?,?,?,?,?,?)');
   s.run(301, 201, 'local-user', 'Forest Theme', 'mycelium forest roots theme', 8);
+  // Documents (BM25-only — no embedding_768). Explicit ids so the cold-start
+  // "no live embed" assertion can address them. d-internal must NOT surface.
+  // DOCUMENT-SEARCH design 2026-06-17.
+  const d = raw.prepare('INSERT INTO documents (id, user_id, path, title, summary, content, is_internal, sensitive, created_at) VALUES (?,?,?,?,?,?,?,?,?)');
+  d.run('d-forest-1', 'local-user', 'notes/forest.md', 'Forest Notes', 'mycelium networks beneath the forest floor', 'a document about the forest and its deep mycelium roots', 0, 0, '2026-05-04 10:00:00');
+  d.run('d-internal-1', 'local-user', '_internal/model.md', 'Internal Model', 'internal forest mycelium scaffolding', 'internal-model document about forest mycelium', 1, 0, '2026-05-05 10:00:00');
 }
 
 async function bulkSearchDb() {
@@ -181,6 +187,32 @@ async function bulkSearchDb() {
   rec('bulkSearch: theme layer indexed + returned',
     res.themes.some((th) => /Forest Theme/.test(th)),
     `themes=${res.themes.length}`);
+
+  // ── Document layer (DOCUMENT-SEARCH design 2026-06-17) ───────────────────
+  rec('bulkSearch: document layer indexed + returned in scope=all',
+    res.documents.some((dd) => /Forest Notes/.test(dd)),
+    `documents=${res.documents.length}`);
+  rec('bulkSearch: internal-model doc (is_internal=1) never surfaces',
+    !res.documents.some((dd) => /Internal Model/.test(dd)));
+
+  const docRes = await sh.bulkSearch({ query: 'forest mycelium roots', limit: 5, scope: 'documents' });
+  rec('bulkSearch: scope=documents returns only the documents layer',
+    docRes.documents.some((dd) => /Forest Notes/.test(dd))
+    && docRes.messages.length === 0 && docRes.territories.raw.length === 0,
+    `documents=${docRes.documents.length} messages=${docRes.messages.length}`);
+  rec('bulkSearch: scope=documents excludes internal-model doc',
+    !docRes.documents.some((dd) => /Internal Model/.test(dd)));
+
+  // Cold-start guarantee: documents are BM25-only (skipEmbed) — they must NOT
+  // trigger a live embed at load. Messages (no stored vector here) DO embed via
+  // the stub, so the contrast proves skipEmbed is wired, not that embedding is
+  // globally off.
+  const vecs = sh.backend._internal().vectors;
+  rec('bulkSearch: documents are BM25-only (no vector cached at load — skipEmbed)',
+    !vecs.has('document:d-forest-1') && !vecs.has('document:d-internal-1'),
+    `docVecCached=${vecs.has('document:d-forest-1')}`);
+  rec('bulkSearch: messages still embed at load (skipEmbed is doc-scoped, not global)',
+    vecs.has('m-forest-1'));
 
   // agent filter
   const filtered = await sh.bulkSearch({ query: 'forest mycelium roots', limit: 5, scope: 'messages', agent: 'research-agent' });
