@@ -1510,7 +1510,7 @@
 			// nearly grey so it recedes.
 			const satRaw = ((px * 3.71 + py * 8.53 + pz * 5.29) % 1 + 1) % 1;
 			const saturation = isLight
-				? (isNoise ? 0.04 + satRaw * 0.08 : 0.55 + satRaw * 0.4)
+				? (isNoise ? 0.05 + satRaw * 0.1 : 0.7 + satRaw * 0.3)
 				: (isNoise ? 0.1 + satRaw * 0.15 : 0.4 + satRaw * 0.5);
 
 			// Lightness. Light mode INVERTS the dark-mode logic: clustered points must
@@ -1520,7 +1520,7 @@
 			const terrData = !isNoise ? territories[tid] : null;
 			const activityBoost = terrData ? computeLuminosity(terrData, maxCount) * 0.15 : 0;
 			const lightness = isLight
-				? (isNoise ? 0.66 + litRaw * 0.08 : 0.42 - litRaw * 0.14 - activityBoost)
+				? (isNoise ? 0.66 + litRaw * 0.08 : 0.44 + litRaw * 0.06 + activityBoost)
 				: (isNoise ? 0.08 + litRaw * 0.1 : 0.3 + litRaw * 0.3 + activityBoost);
 
 			const color = new THREE.Color().setHSL(hue, saturation, lightness);
@@ -1679,11 +1679,16 @@
 					vec2 uv = gl_PointCoord - vec2(0.5);
 					float r = length(uv);
 					if (r > 0.5) discard;
-					// Solid circle with subtle border for light mode
-					float edge = 1.0 - smoothstep(0.4, 0.5, r);
-					float border = smoothstep(0.35, 0.42, r) * 0.15;
-					vec3 col = vColor * (1.0 - border);
-					gl_FragColor = vec4(col, vAlpha * edge * 0.95);
+					// Luminous bead: a bright highlight CORE (the "shine"), a vivid body,
+					// and a crisp darker RIM that gives each point a distinct colour
+					// contour against the light paper background.
+					float core = 1.0 - smoothstep(0.0, 0.40, r);   // central highlight
+					float rim  = smoothstep(0.34, 0.5, r);         // outer edge
+					vec3 col = vColor;
+					col = mix(col, col * 0.5, rim);                                  // deepen rim → contour
+					col = mix(col, min(col + vec3(0.4), vec3(1.0)), core * 0.6);     // lift core → shine
+					float edge = 1.0 - smoothstep(0.46, 0.5, r);   // antialiased cut
+					gl_FragColor = vec4(col, vAlpha * edge);
 				}
 			` : `
 				varying vec3 vColor;
