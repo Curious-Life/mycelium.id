@@ -152,6 +152,12 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // chained (tools/documents.js:102,516 `db.shareLinks?.…`), so absence
     // cleanly degrades to "not public" / "no links" for the single-user vault.
     _base: base,
+
+    // Raw better-sqlite3 handle (same connection the adapter opened). Internal:
+    // the on-disk SQLite search backend (src/search/backend/sqlite.js) needs
+    // direct synchronous access to its FTS5/vec0 tables in this same vault file.
+    // Underscore-prefixed = not a public namespace; only the search wiring reads it.
+    _sqlite: adapter.db,
   };
 
   return { db, adapter, close: adapter.close };

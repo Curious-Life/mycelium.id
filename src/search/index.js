@@ -32,21 +32,47 @@
  */
 
 import { createLocalBackend } from './backend/local.js';
+import { createSqliteBackend } from './backend/sqlite.js';
 import { loadFromDb, ID_PREFIX, stripPrefix } from './d1-loader.js';
 import { setMindSearch } from './registry.js';
 
 const DEFAULT_USER = 'local-user';
 
-export function createSearchHelpers(deps = {}) {
-  const { db = null, embedder = null, userId = DEFAULT_USER, getMasterKey = null } = deps;
+/**
+ * Select the search backend. Default = the in-RAM LocalBackend (rebuilt from the
+ * whole corpus per boot). Opt-in (Phase 1) = the on-disk SqliteBackend (FTS5 +
+ * sqlite-vec inside the vault DB; no rebuild, page-cache memory). The on-disk
+ * path stays OFF by default until incremental maintenance owns every write —
+ * otherwise the disk index goes stale between Generates. Enable with
+ * MYCELIUM_SEARCH_BACKEND=sqlite (requires db._sqlite, the raw handle).
+ */
+function chooseBackend({ db, embedder, userId, searchBackend }) {
+  const want = (searchBackend ?? process.env.MYCELIUM_SEARCH_BACKEND ?? '').toLowerCase();
+  if (want === 'sqlite' && db && db._sqlite) {
+    return { backend: createSqliteBackend({ sqliteDb: db._sqlite, embedder, userId }), kind: 'sqlite' };
+  }
+  return { backend: createLocalBackend({ embedder, userId }), kind: 'local' };
+}
 
-  const backend = createLocalBackend({ embedder, userId });
+export function createSearchHelpers(deps = {}) {
+  const { db = null, embedder = null, userId = DEFAULT_USER, getMasterKey = null, searchBackend = null } = deps;
+
+  const { backend, kind: backendKind } = chooseBackend({ db, embedder, userId, searchBackend });
   let built = false;
 
   async function ensureBuilt() {
     if (built) return;
     if (db && typeof db.rawQuery === 'function') {
-      try { await loadFromDb({ backend, db, userId, getMasterKey }); } catch { /* fall through */ }
+      try {
+        // On-disk backend persists across boots: populate ONCE when empty (the
+        // same loadFromDb path the in-RAM backend uses every boot), then rely on
+        // incremental maintenance. The in-RAM backend always (re)builds.
+        if (backendKind === 'sqlite' && typeof backend.count === 'function' && (await backend.count()) > 0) {
+          // already populated on disk — no rebuild
+        } else {
+          await loadFromDb({ backend, db, userId, getMasterKey });
+        }
+      } catch { /* fall through */ }
     }
     built = true;
   }

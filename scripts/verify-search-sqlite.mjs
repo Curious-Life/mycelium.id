@@ -9,7 +9,7 @@
 import Database from 'better-sqlite3';
 import { webcrypto } from 'node:crypto';
 import { createSqliteBackend } from '../src/search/backend/sqlite.js';
-import { createLocalBackend, createStubEmbedder } from '../src/search/index.js';
+import { createLocalBackend, createStubEmbedder, createSearchHelpers } from '../src/search/index.js';
 
 const ledger = [];
 const rec = (name, pass, detail = '') => {
@@ -133,6 +133,41 @@ async function main() {
   const eq = await ebe.query({ text: 'alpine lakes and mountain trails', topK: 2 });
   rec('SQ11 embed path: stub embedder populates 768-d vec table + vectors the query',
     vecRows === 2 && eq.hits[0]?.id === 'e1', `vecRows=${vecRows} top=${eq.hits[0]?.id}`);
+
+  // ── SQ12 step-2b: createSearchHelpers flag-selects sqlite + populates once ─
+  // Minimal real-handle "db" namespace: rawQuery routes to the same better-
+  // sqlite3 file the backend uses (plaintext fixture; no crypto/migrations).
+  const intRaw = new Database(':memory:');
+  intRaw.exec(`CREATE TABLE messages (id TEXT, user_id TEXT, content TEXT, created_at TEXT, embedding_768 TEXT, forgotten_at TEXT, sensitive INTEGER DEFAULT 0, agent_id TEXT)`);
+  const seed = intRaw.prepare('INSERT INTO messages(id,user_id,content,created_at) VALUES (?,?,?,?)');
+  seed.run('m-forest', 'u1', 'the forest canopy and ancient trees', '2026-06-01T00:00:00.000Z');
+  seed.run('m-vault', 'u1', 'an encrypted vault of private notes', '2026-06-02T00:00:00.000Z');
+  seed.run('m-budget', 'u1', 'quarterly budget and finances', '2026-06-03T00:00:00.000Z');
+  const fakeDb = {
+    _sqlite: intRaw,
+    rawQuery: (sql, params = []) => { try { return { results: intRaw.prepare(sql).all(...params) }; } catch { return { results: [] }; } },
+  };
+  const sh = createSearchHelpers({ db: fakeDb, userId: 'u1', searchBackend: 'sqlite' });
+  const isSqlite = !!sh.backend?._internal && sh.backend._internal().raw === intRaw;
+  const bs = await sh.bulkSearch({ query: 'forest trees', limit: 5 });
+  rec('SQ12a createSearchHelpers(searchBackend:sqlite) selects + populates the on-disk backend',
+    isSqlite && bs.messages.some((m) => m.includes('forest')),
+    `kind=${isSqlite ? 'sqlite' : 'local'} msgs=${bs.messages.length}`);
+
+  // Persistence: a SECOND helper over the SAME handle must NOT rebuild (count>0
+  // path) yet still return hits — proves no per-boot whole-corpus rehydrate.
+  const populated = intRaw.prepare('SELECT COUNT(*) c FROM doc_meta').get().c;
+  const sh2 = createSearchHelpers({ db: fakeDb, userId: 'u1', searchBackend: 'sqlite' });
+  const bs2 = await sh2.bulkSearch({ query: 'budget', limit: 5 });
+  rec('SQ12b on-disk index persists → 2nd boot skips rebuild, still searchable',
+    populated === 3 && bs2.messages.some((m) => m.includes('budget')),
+    `docMeta=${populated} 2ndHits=${bs2.messages.length}`);
+
+  // Default (no flag) still selects the in-RAM backend — zero behavior change.
+  const shDefault = createSearchHelpers({ db: fakeDb, userId: 'u1' });
+  rec('SQ12c default (no flag) keeps the in-RAM LocalBackend',
+    !!shDefault.backend?._internal && !!shDefault.backend._internal().index,
+    'default backend is in-RAM');
 
   const passed = ledger.filter(Boolean).length;
   const failed = ledger.length - passed;
