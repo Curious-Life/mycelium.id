@@ -7,10 +7,10 @@
 <p align="center"><strong>Self-sovereign memory infrastructure for AI.</strong><br>Own your keys. Own your data. Own the intelligence.</p>
 
 <p align="center">
-  <a href="docs/HOW-IT-WORKS.md">How It Works</a> ·
-  <a href="docs/MCP-OVERVIEW.md">MCP Server</a> ·
+  <a href="docs/guide/"><strong>Docs</strong></a> ·
+  <a href="docs/guide/handbook/">Handbook</a> ·
+  <a href="docs/guide/reference/">Reference</a> ·
   <a href="docs/V1-BUILD-SPEC.md">Build Spec</a> ·
-  <a href="docs/V1-IMPLEMENTATION-PLAN.md">Implementation Plan</a> ·
   <a href="https://mycelium.id">Website</a>
 </p>
 

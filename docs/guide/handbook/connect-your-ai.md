@@ -28,7 +28,7 @@ Claude is the smoothest path, because it speaks MCP natively.
   Claude, and Mycelium's tools appear. From then on, Claude is oriented by your vault
   automatically at the start of each conversation.
 - **Claude on the web / mobile** *(remote)* — connect over a secure tunnel to your own
-  machine. See [remote access](../reference/connect.md#reach-your-box-from-the-internet).
+  machine. See [remote access](../reference/connect.md#5-reach-your-box-from-the-internet-remote).
 
 You don't have to do anything special after that. Just chat. Claude pulls context when
 it helps, and can save things you ask it to remember.
