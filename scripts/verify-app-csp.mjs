@@ -78,8 +78,16 @@ try {
   }
 
   // The RENDERED HTML (shell + SPA fallback) — what the webview actually executes —
-  // gets the full hash-pinned policy + companion headers.
-  for (const [name, r] of [['shell', shell], ['fallback', fallback]]) {
+  // gets the full hash-pinned policy + companion headers. The SPA fallback route
+  // is ONLY registered for the canonical build (legacy portal/ is a single-file
+  // SPA with spaFallback=null — server-rest.js:74), so an unknown client route
+  // like /library legitimately 404s in legacy mode (finalhandler → default-src
+  // 'none', already covered by the data404 class). Assert the fallback-is-shell
+  // contract only when the canonical build is present (e.g. CI builds portal-app,
+  // or a local build). The shell at / renders in BOTH modes, so it always asserts.
+  const renderedClasses = haveCanonical ? [['shell', shell], ['fallback', fallback]] : [['shell', shell]];
+  if (!haveCanonical) console.log('[—] canonical build absent — SPA-fallback (/library) checks skipped (legacy has no client-route fallback)');
+  for (const [name, r] of renderedClasses) {
     ok(/(^|;)\s*frame-ancestors 'none'/.test(csp(r)), `${name}: explicit frame-ancestors 'none'`);
     ok(/script-src 'self'/.test(scriptSrc(r)), `${name}: script-src includes 'self'`);
     ok(r.headers['referrer-policy'] === 'strict-origin-when-cross-origin', `${name}: Referrer-Policy`);
