@@ -479,12 +479,21 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
         if (hash && docHashesSeen.has(hash)) { agentStats.dedupedByContent++; continue; }
         agentStats.attempted++;
         const id = crypto.createHash('sha256').update(`vault-import:agents:${entry.name}`).digest('hex').slice(0, 32);
+        // created_at from the zip entry's stored date — WITHOUT it restoreTable
+        // omits the column and documents.created_at defaults to now(), stamping
+        // every agent mind-file with the IMPORT date (the same bug fixed on the
+        // full-export path). Fall back to now() only when the entry carries no
+        // usable date. PROPER FIX is exporter-side: mycelium-vault-export should
+        // write each agent file's ORIGINAL mtime into the zip entry (JSZip
+        // `{ date }`) so the stored date is the authored date, not export time.
+        const entryDate = entry.date instanceof Date && !Number.isNaN(entry.date.getTime()) ? entry.date : null;
         const r = await restoreTable(db, 'documents', [{
           id,
           path: entry.name,
           title: basename(entry.name),
           content,
           content_hash: hash,
+          ...(entryDate ? { created_at: entryDate.toISOString() } : {}),
           created_by: 'vault-import',
           embedding_768: null,
         }], { userId });

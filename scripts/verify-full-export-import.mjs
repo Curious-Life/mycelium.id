@@ -7,12 +7,13 @@
 //   F4 256d → mindscape       clustering_points.nomic_embedding set + decrypts
 //   F5 attachments            db row + encrypted MYCB blob on disk
 //   F6 agent mind docs        agents/**/*.md → document; .next/ build-junk skipped
+//   F6b agent doc created_at   = file mtime, NOT import-time now() (timestamp regression)
 //   F7 encrypted at rest      message marker absent from raw db; decrypts back
 //   F8 report doc             imports/full-export-report-* persisted + decrypts
 //   F9 idempotent             re-import → 0 new rows
 //   F10 bad format            wrong manifest.format → 400
 import crypto from 'node:crypto';
-import { rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -34,6 +35,10 @@ const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? `\n      ${d}` : ''}`); };
 
 const MARKER = 'full-export-plaintext-marker-xyz';
+// The agent mind-file's on-disk mtime — must become the imported doc's created_at
+// (NOT the import-time now() default). Years before any plausible import date so
+// the assertion is unambiguous.
+const AGENT_MTIME = new Date('2021-07-04T12:00:00.000Z');
 const ATT_BYTES = Buffer.from('full-export-attachment-binary-marker');
 const VEC768 = new Float32Array(768).map((_, i) => Math.fround(Math.cos(i + 1)));
 const VEC256 = new Float32Array(256).map((_, i) => Math.fround(Math.sin(i + 1)));
@@ -62,7 +67,9 @@ function buildBundle(root, { format = 'mycelium-full-export' } = {}) {
   nd('embeddings/messages.768d.ndjson', [{ id: 'fx_m1', dim: 768, vector_b64: Buffer.from(VEC768.buffer).toString('base64') }]);
   nd('embeddings/clustering_points.256d.ndjson', [{ id: 'fx_cp1', dim: 256, vector_hex: Buffer.from(VEC256.buffer).toString('hex') }]);
   writeFileSync(join(pre, 'attachments', 'att1', 'note.txt'), ATT_BYTES);
-  writeFileSync(join(pre, 'agents', 'personal', 'mind', 'note.md'), 'agent mind note — continuity');
+  const agentNote = join(pre, 'agents', 'personal', 'mind', 'note.md');
+  writeFileSync(agentNote, 'agent mind note — continuity');
+  utimesSync(agentNote, AGENT_MTIME, AGENT_MTIME); // import must restore this as created_at
   writeFileSync(join(pre, 'agents', 'personal', 'frontend', '.next', 'server', 'pages-manifest.json'), '{"junk":true}');
   return root; // POST the parent; resolveRoot finds the wrapper subdir
 }
@@ -110,9 +117,20 @@ async function main() {
     if (att?.local_path && existsSync(join(UPLOADS, att.local_path))) { const b = readFileSync(join(UPLOADS, att.local_path)); blobOk = b.subarray(0, 4).toString('latin1') === 'MYCB' && !b.includes(ATT_BYTES); }
     rec('F5 attachment row + encrypted MYCB blob', Boolean(att?.local_path) && blobOk);
 
-    const adoc = cnt("SELECT content FROM documents WHERE path='agents/personal/mind/note.md'");
+    const adoc = cnt("SELECT content, created_at FROM documents WHERE path='agents/personal/mind/note.md'");
     const junk = cnt("SELECT COUNT(*) n FROM documents WHERE path LIKE '%.next%'");
     rec('F6 agent mind doc imported; .next build-junk skipped', Boolean(adoc) && junk?.n === 0);
+
+    // F6b — created_at follows the file's mtime, NOT the import-time now() default.
+    // Regression guard: the 2026-06-15 canonical import stamped 754 agent docs with
+    // the import date because restoreTable omits any column the row doesn't carry,
+    // letting documents.created_at default to now(). Assert equality with the mtime
+    // and inequality with today, so a reverted fix fails loudly.
+    const expectedTs = AGENT_MTIME.toISOString();
+    const adocTs = adoc?.created_at;
+    rec('F6b agent doc created_at = file mtime (not import now())',
+      adocTs === expectedTs && new Date(adocTs).getUTCFullYear() === 2021,
+      `created_at=${adocTs} expected=${expectedTs}`);
 
     const dbBytes = readFileSync(DB);
     let mPlain = null; try { mPlain = await decrypt(String(cnt("SELECT content FROM messages WHERE id='fx_m1'")?.content || ''), await importMasterKey(USER_HEX)); } catch { /* */ }
