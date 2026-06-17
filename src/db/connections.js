@@ -72,6 +72,7 @@ const HANDLE_LOCAL_PART_RE = /^([a-z0-9][a-z0-9_-]{1,62})@(.+)$/i;
 const DOMAIN_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
 
 const PENDING_LIMIT = 20;
+const MAX_MESSAGE_CHARS = 4000; // peer-message body cap (well under the 8KB canonical envelope cap)
 const WEBFINGER_TIMEOUT_MS = 5000;
 const FEDERATION_POST_TIMEOUT_MS = 10000;
 const RESOLVE_HANDLE_TIMEOUT_MS = 5000;
@@ -688,6 +689,129 @@ export function createConnectionsNamespace(deps) {
       );
 
       return overlap;
+    },
+
+    // ─── Direct messaging (federation Tier-0c) ─────────────────────────────
+    // Two connected instances exchange text. Outbound signs + POSTs a
+    // social.mycelium.message.v1 envelope to the peer's /federation/message;
+    // inbound is accepted ONLY from a verified, ACCEPTED connection (the
+    // federation handler runs the same did:web verify gate as /connect).
+
+    /**
+     * Send a text message to a connected peer's instance. Persists the outbound
+     * row first (so a failed delivery is visible + retryable), then signs+POSTs.
+     * @returns {{id:string, status:string, created_at:string}}
+     */
+    async sendMessage(userId, connectionId, text) {
+      const content = typeof text === 'string' ? text.trim() : '';
+      if (!content) throw new Error('Message is empty');
+      if (content.length > MAX_MESSAGE_CHARS) throw new Error(`Message too long (max ${MAX_MESSAGE_CHARS} chars)`);
+      const row = await loadConnection(connectionId, { requireStatus: 'accepted' });
+      if (!row) throw new Error('Connection not found');
+      assertMember(row, userId);
+
+      const id = randomUUID();
+      await d1Query(
+        `INSERT INTO peer_messages (id, user_id, connection_id, direction, content, status)
+         VALUES (?, ?, ?, 'out', ?, 'sending')`,
+        [id, userId, connectionId, content],
+      );
+
+      // Local-only peer (no remote instance) → nothing to deliver over the wire;
+      // leave it 'sent' (a same-box connection, mostly a test fixture).
+      if (!row.remote_instance || !row.remote_user_handle || !sign || !did) {
+        await d1Query(`UPDATE peer_messages SET status = 'sent' WHERE id = ?`, [id]);
+        return { id, status: 'sent', created_at: new Date().toISOString() };
+      }
+
+      let status = 'failed';
+      try {
+        const endpoint = await resolveFederationEndpoint(row.remote_instance, row.remote_user_handle);
+        const me = (await d1Query(`SELECT handle FROM user_profiles WHERE user_id = ?`, [userId])).results?.[0] || {};
+        await signedFederationPost(endpoint, 'message', {
+          $type: 'social.mycelium.message.v1',
+          from_handle: selfHandle() || me.handle || userId,
+          from_instance: (selfInstance && selfInstance()) || '',
+          from_did: did(),
+          to_handle: row.remote_user_handle,
+          content,
+          nonce: randomUUID(),
+          ts: Date.now(),
+        });
+        status = 'delivered';
+      } catch (e) {
+        console.warn(`[federation] message POST failed (will show as failed): ${e.message}`);
+      }
+      await d1Query(`UPDATE peer_messages SET status = ? WHERE id = ?`, [status, id]);
+      return { id, status, created_at: new Date().toISOString() };
+    },
+
+    /**
+     * Inbound message from a VERIFIED peer (the federation handler already ran the
+     * did:web signature/nonce/timestamp gate). We additionally require an ACCEPTED
+     * connection from this peer — a valid signature alone is NOT authorization to
+     * message a vault. Dedup is the UNIQUE(connection_id, remote_nonce) index.
+     * @param {{fromDid?:string, verifiedHost:string, content:string, nonce:string, toUserId:string}} p
+     * @returns {Promise<string|null>} the message id, or null if dropped
+     */
+    async receiveMessage({ fromDid, verifiedHost, content, nonce, toUserId }) {
+      const body = typeof content === 'string' ? content.trim() : '';
+      if (!body) throw new Error('empty message');
+      if (body.length > MAX_MESSAGE_CHARS) throw new Error('message too long');
+      // Find the ACCEPTED connection for this verified peer. Prefer the did
+      // binding; fall back to the verified host (one handle per host in V1).
+      const found = await d1Query(
+        `SELECT id FROM connections
+         WHERE (user_a = ? OR user_b = ?) AND status = 'accepted'
+           AND (remote_did = ? OR remote_instance = ?)
+         ORDER BY accepted_at DESC LIMIT 1`,
+        [toUserId, toUserId, fromDid ?? ' ', verifiedHost ?? ' '],
+      );
+      const conn = found.results?.[0];
+      if (!conn) throw new Error('no accepted connection from this peer');
+      const id = randomUUID();
+      // INSERT OR IGNORE: the partial-unique nonce index drops a re-delivery.
+      await d1Query(
+        `INSERT OR IGNORE INTO peer_messages (id, user_id, connection_id, direction, content, remote_nonce, status, read)
+         VALUES (?, ?, ?, 'in', ?, ?, 'received', 0)`,
+        [id, toUserId, conn.id, body, nonce ?? null],
+      );
+      return id;
+    },
+
+    /** Thread for a connection (oldest→newest). content auto-decrypts on read. */
+    async listMessages(userId, connectionId, { limit = 200 } = {}) {
+      const row = await loadConnection(connectionId);
+      if (!row) throw new Error('Connection not found');
+      assertMember(row, userId);
+      const r = await d1Query(
+        `SELECT id, direction, content, status, read, created_at
+         FROM peer_messages WHERE connection_id = ? AND user_id = ?
+         ORDER BY created_at ASC LIMIT ?`,
+        [connectionId, userId, Number(limit) || 200],
+      );
+      return r.results || [];
+    },
+
+    /** Mark all inbound messages on a connection as read. */
+    async markMessagesRead(userId, connectionId) {
+      await d1Query(
+        `UPDATE peer_messages SET read = 1 WHERE connection_id = ? AND user_id = ? AND direction = 'in' AND read = 0`,
+        [connectionId, userId],
+      );
+    },
+
+    /** Unread inbound counts: { total, byConnection: { [connId]: n } }. Feeds badges. */
+    async unreadMessages(userId) {
+      const r = await d1Query(
+        `SELECT connection_id, COUNT(*) AS n FROM peer_messages
+         WHERE user_id = ? AND direction = 'in' AND read = 0 GROUP BY connection_id`,
+        [userId],
+      );
+      const byConnection = {};
+      let total = 0;
+      for (const row of (r.results || [])) { byConnection[row.connection_id] = row.n; total += row.n; }
+      return { total, byConnection };
     },
   };
 }

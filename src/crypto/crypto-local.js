@@ -238,6 +238,12 @@ const ENCRYPTED_FIELDS = {
     'metadata', 'nlp_error',
   ],
 
+  // Peer messages — direct messages exchanged with a connected instance. The
+  // body is a private communication → ENCRYPT. All other columns (direction,
+  // status, read, nonce, ids) are structural state the server queries.
+  // See migrations/0015_peer_messages.sql.
+  peer_messages: ['content'],
+
   // Documents — content + every column that describes it. content_hash
   // (SHA of plaintext) stays plaintext because dedup/change-detection
   // queries need it — but this IS a known inversion risk if attacker

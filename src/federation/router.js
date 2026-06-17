@@ -44,5 +44,13 @@ export function createFederationRouter(deps) {
     res.status(r.status).json(r.body);
   });
 
+  // Direct message from a connected peer (Tier-0c). Signature-gated in the
+  // handler (fail closed), same as /connect; receiveMessage additionally
+  // requires an accepted connection (403 otherwise).
+  router.post('/federation/message', async (req, res) => {
+    const r = await h.message({ payload: req.body, headers: hdrs(req), ip: ipOf(req) });
+    res.status(r.status).json(r.body);
+  });
+
   return router;
 }
