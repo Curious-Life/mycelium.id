@@ -9,8 +9,15 @@
 		formatDateHeader, formatTime, formatFileSize, formatChannelLabel,
 		type TimelineMessage, type AgentInfo, type OwnerIdentity,
 	} from '$lib/timeline/utils';
+	import { canonicalClientSource } from '$lib/streams/sources';
 
 	marked.use({ breaks: true, gfm: true });
+
+	// When embedded under the source spectrum, the spectrum drives the filter
+	// (externalSource = a canonical source key) and the in-feed source buttons are
+	// hidden (showSourceFilter=false) so there's one filter, not two.
+	let { externalSource = null, showSourceFilter = true }:
+		{ externalSource?: string | null; showSourceFilter?: boolean } = $props();
 
 	let messages = $state<TimelineMessage[]>([]);
 	let loading = $state(true);
@@ -124,11 +131,17 @@
 	// single chat/channel within that source. The channel filter only takes
 	// effect when a source is selected (otherwise it'd be stale across
 	// re-filters).
+	// externalSource (spectrum-driven) takes precedence and matches ANY source by
+	// its canonical key — so gmail/obsidian/agent rows filter too, not just the
+	// four platforms the in-feed buttons knew. Falls back to the legacy in-feed
+	// sourceFilter when the spectrum isn't driving.
 	const sourceFilteredMessages = $derived(
-		sourceFilter
-			? messages.filter(m => parseSource(m.source).platform === sourceFilter
-				|| parseSource(m.source).platform === `${sourceFilter}-group`)
-			: messages,
+		externalSource
+			? messages.filter(m => canonicalClientSource(m.source) === externalSource)
+			: sourceFilter
+				? messages.filter(m => parseSource(m.source).platform === sourceFilter
+					|| parseSource(m.source).platform === `${sourceFilter}-group`)
+				: messages,
 	);
 
 	const filteredMessages = $derived(
@@ -217,8 +230,11 @@
 {/if}
 
 <div class="flex flex-col h-full">
-	<!-- Filters: source row + (when a source is selected) channel sub-row -->
+	<!-- Filters: source row + (when a source is selected) channel sub-row.
+	     When embedded under the spectrum (showSourceFilter=false) the source row is
+	     replaced by a slim count bar — the spectrum chips ARE the source filter. -->
 	<div class="border-b border-[var(--color-border)]">
+		{#if showSourceFilter}
 		<div class="flex items-center gap-2 px-4 sm:px-6 py-3 flex-wrap">
 			<button
 				onclick={() => sourceFilter = null}
@@ -244,7 +260,14 @@
 				</span>
 			{/if}
 		</div>
-		{#if sourceFilter && channelPills.length > 0}
+		{:else if messages.length > 0}
+		<div class="flex items-center gap-2 px-4 sm:px-6 py-2.5">
+			<span class="text-xs text-[var(--color-text-tertiary)]">
+				{filteredMessages.length} {filteredMessages.length === 1 ? 'message' : 'messages'}{#if externalSource} in {externalSource}{/if}
+			</span>
+		</div>
+		{/if}
+		{#if showSourceFilter && sourceFilter && channelPills.length > 0}
 			<div class="flex items-center gap-2 px-4 sm:px-6 pb-3 flex-wrap">
 				<span class="text-[0.65rem] uppercase tracking-wider text-[var(--color-text-tertiary)] mr-1">
 					Channels

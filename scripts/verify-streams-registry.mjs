@@ -41,6 +41,12 @@ rec('telegram-group collapses to telegram', canon('telegram-group') === 'telegra
 rec('discord-thread collapses to discord', canon('discord-thread') === 'discord' && kind('discord-thread') === 'messaging');
 rec('inference:chat collapses to portal', canon('inference:chat') === 'portal' && kind('inference:chat') === 'portal');
 
+// Per-conversation id suffixes fold to the platform (telegram_123 → telegram).
+rec('telegram_<chatId> folds to telegram', canon('telegram_123456') === 'telegram' && kind('telegram_123456') === 'messaging');
+rec('telegram-group_<id> folds to telegram', canon('telegram-group_99') === 'telegram');
+rec('discord_<channelId> folds to discord', canon('discord_42') === 'discord' && kind('discord_42') === 'messaging');
+rec('suffixed non-platform NOT folded (claude-import untouched)', canon('claude-import') === 'claude-import');
+
 // #10 namespaced connector ids prefix-match to 'connector'.
 rec('http-poll:<uuid> → connector', kind('http-poll:abc-123') === 'connector');
 rec('webhook:<uuid> → connector', kind('webhook:xyz') === 'connector');

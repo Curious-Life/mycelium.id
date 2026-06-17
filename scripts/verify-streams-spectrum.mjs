@@ -48,7 +48,7 @@ async function main() {
   const msg = (id, source, ms) => q(
     `INSERT INTO messages (id, user_id, role, content, source, created_at) VALUES (?, ?, 'user', ?, ?, ?)`,
     [id, U, `body of ${id}`, source, iso(ms)]);
-  await msg('m1', 'telegram', NOW - 5 * MIN);          // live (<15m)
+  await msg('m1', 'telegram_555', NOW - 5 * MIN);      // live (<15m), per-chat suffix
   await msg('m2', 'telegram-group', NOW - 2 * DAY);    // folds into telegram
   await msg('m3', 'discord-thread', NOW - 2 * HOUR);   // folds into discord
   await msg('m4', 'gmail', NOW - 1 * HOUR);            // connector source

@@ -50,10 +50,19 @@ const CANONICAL = {
   'inference:chat': 'portal',
 };
 
+// Platform sources carry a per-conversation id suffix (telegram_<chatId>,
+// telegram-group_<id>, discord_<channelId>). Strip it so the spectrum shows ONE
+// chip per platform, not one per chat. Only the known platform heads are folded
+// (gmail / agent ids etc. have no id suffix and must pass through untouched).
+const SUFFIXED_HEADS = new Set(['telegram', 'telegram-group', 'discord', 'discord-thread']);
+
 /** Collapse a raw provenance tag to its canonical spectrum key. */
 export function canonicalSource(raw) {
-  const s = (raw == null || raw === '') ? 'unknown' : String(raw);
-  return CANONICAL[s] || s;
+  const s = (raw == null || raw === '') ? 'unknown' : String(raw).trim();
+  let base = s;
+  const us = s.indexOf('_');
+  if (us > 0 && SUFFIXED_HEADS.has(s.slice(0, us))) base = s.slice(0, us);
+  return CANONICAL[base] || base;
 }
 
 /** Classify a RAW source tag → { canonical, kind }. Unknown ⇒ kind 'other'. */
