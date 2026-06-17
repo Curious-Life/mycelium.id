@@ -99,6 +99,7 @@ TARGET_TERRITORIES = 300
 TARGET_THEMES = 35
 TARGET_REALMS_MIN = 2
 TARGET_REALMS_MAX = 10
+TARGET_REALMS = 12  # √n-scaled in scale_targets() — realm-k fix 2026-06-17
 
 def scale_targets(n_points):
     """Scale clustering targets to dataset size (sqrt schedule).
@@ -110,13 +111,19 @@ def scale_targets(n_points):
     N=600 → 34/9 (≈ the old floors), N=45k → 297/50 (≈ the old targets).
     See docs/CLUSTERING-REBALANCE-DESIGN-2026-06-10.md.
     """
-    global TARGET_ATOMS, TARGET_TERRITORIES, TARGET_THEMES
+    global TARGET_ATOMS, TARGET_TERRITORIES, TARGET_THEMES, TARGET_REALMS
     TARGET_ATOMS = max(300, min(2000, n_points // 15))
     TARGET_TERRITORIES = int(max(2, min(300, round(1.4 * (n_points ** 0.5)))))
     TARGET_THEMES = int(max(2, min(50, round(0.35 * (n_points ** 0.5)))))
+    # Realms are now √n-targeted like themes/territories (realm-k fix 2026-06-17).
+    # Was: silhouette-selected k∈[2,10], which collapses to k=2 on anisotropic
+    # embeddings (mean random-pair cosine ~0.58) — one realm held 78% of points.
+    # The 0.05 coefficient gives ~13 realms at the live ~72k points (matching the
+    # recovered active count); lab balance max-share 0.17 vs the collapse's 0.78.
+    TARGET_REALMS = int(max(3, min(20, round(0.05 * (n_points ** 0.5)))))
     if n_points < 600:
         print(f"  NOTE: {n_points} points is small for the 4-level hierarchy — targets auto-shrunk")
-    print(f"  Scaled targets for {n_points} points: atoms={TARGET_ATOMS}, territories={TARGET_TERRITORIES}, themes={TARGET_THEMES}")
+    print(f"  Scaled targets for {n_points} points: atoms={TARGET_ATOMS}, territories={TARGET_TERRITORIES}, themes={TARGET_THEMES}, realms={TARGET_REALMS}")
 NOISE_MEMBERSHIP_THRESHOLD = 0.3
 NOISE_KNN_SIGMA = 2.0
 NOISE_MAX_SHARE = 0.15  # hard cap on the liminal share (percentile-bounding, research brief §1)
@@ -1068,31 +1075,21 @@ def run_clustering(embeddings: np.ndarray) -> dict:
     n_themes = len(set(int(t) for t in theme_labels) - {-1})
     print(f"    → {n_themes} themes")
 
-    # ── Stage 5: Realms via mass-weighted Ward + silhouette-selected k ──
-    # The old elbow heuristic (largest gap in Ward merge distances) was clamped
-    # to [5, 10]: the floor of 5 forced singleton realms whenever the data had
-    # fewer natural groups (live vault: realms of 146/2/2/1/1 points). Now k is
-    # chosen in [TARGET_REALMS_MIN=2, TARGET_REALMS_MAX] by maximizing the
-    # point-level cosine silhouette (sampled at scale) — the most stable
-    # selector in the lab (design doc 2026-06-10).
-    print(f"  HAC: themes → realms (k by silhouette, {TARGET_REALMS_MIN}..{TARGET_REALMS_MAX})...")
+    # ── Stage 5: Realms via mass-weighted Ward to a √n TARGET (realm-k fix 2026-06-17) ──
+    # Was silhouette-selected k∈[2,10]. Cosine silhouette is mathematically biased
+    # toward low k on anisotropic embeddings (mean random-pair cosine ~0.58 on this
+    # vault), so at full scale it collapsed to k=2 with one realm holding 78% of
+    # points. Themes & territories never collapse because they use a fixed √n target
+    # via mass-weighted Ward (no silhouette) — realms now do the same. Lab on a 72k
+    # copy (docs/REALM-K-CLUSTERING-FIX-DESIGN-2026-06-17.md): TARGET_REALMS → 12
+    # balanced realms, max-share 0.17 (vs 0.78), near-uniform entropy; deterministic
+    # → run-to-run stable (no silhouette argmax churn). centroids_to_groups clamps
+    # to the available theme count, so small vaults degrade gracefully.
     unique_themes = sorted(set(int(t) for t in theme_labels))
     if len(unique_themes) > 1:
-        from sklearn.metrics import silhouette_score
-        best_k, best_s, best_labels = 1, -2.0, np.zeros(n_points, dtype=int)
-        sil_kwargs = {'sample_size': 4000, 'random_state': 42} if n_points > 4000 else {}
-        for k in range(max(2, TARGET_REALMS_MIN), min(TARGET_REALMS_MAX, len(unique_themes)) + 1):
-            cand = centroids_to_groups(theme_labels, embeddings, k)
-            if len(set(int(v) for v in cand)) < 2:
-                continue
-            try:
-                s = float(silhouette_score(embeddings, cand, metric='cosine', **sil_kwargs))
-            except Exception:
-                continue
-            if s > best_s:
-                best_k, best_s, best_labels = k, s, cand
-        realm_labels, n_realms = best_labels, best_k
-        print(f"    silhouette-selected k={n_realms} (score={best_s:.3f})")
+        print(f"  HAC: themes → realms (√n target ~{TARGET_REALMS})...")
+        realm_labels = centroids_to_groups(theme_labels, embeddings, TARGET_REALMS)
+        n_realms = len(set(int(v) for v in realm_labels))
     else:
         realm_labels = np.zeros(n_points, dtype=int)
         n_realms = 1

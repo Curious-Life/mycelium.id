@@ -298,6 +298,32 @@ def realm_level(theme_labels, emb, mode, grouper):
             return np.zeros(len(theme_labels), dtype=int), 1
         return best_labels, best_k
 
+    # realm-k fix 2026-06-17: target_sqrt = deterministic √n realm target via Ward
+    # (like themes/territories — the SHIPPED fix). silhouette_floor = silhouette but
+    # bounded below by the √n floor. *_centered applies REALM-LOCAL mean-centering
+    # (transient; stored centroids untouched). See REALM-K-CLUSTERING-FIX-DESIGN.
+    if mode in ("target_sqrt", "target_sqrt_centered"):
+        e = prep_center(emb) if mode.endswith("_centered") else emb
+        k = int(max(3, min(20, round(0.05 * np.sqrt(len(emb))))))
+        k = min(k, len(uniq))
+        pl = grouper(theme_labels, e, k)
+        return pl, len(set(int(v) for v in pl))
+
+    if mode in ("silhouette_floor", "silhouette_floor_centered"):
+        e = prep_center(emb) if mode.endswith("_centered") else emb
+        floor = int(max(3, min(20, round(0.05 * np.sqrt(len(emb))))))
+        cap = min(20, len(uniq))
+        best_k, best_s, best_labels = None, -2.0, None
+        for k in range(min(floor, cap), cap + 1):
+            pl = grouper(theme_labels, e, k)
+            s = silhouette(e, pl)
+            if s is not None and s > best_s:
+                best_k, best_s, best_labels = k, s, pl
+        if best_labels is None:
+            pl = grouper(theme_labels, e, min(floor, len(uniq)))
+            return pl, len(set(int(v) for v in pl))
+        return best_labels, best_k
+
     raise ValueError(mode)
 
 
@@ -329,6 +355,11 @@ VARIANTS = {
     "combo_centered": dict(targets=targets_sqrt, ward="weighted", realm="silhouette_2_10", noise="sigma_cap", prep="center"),
     "combo_elbow":   dict(targets=targets_sqrt, ward="weighted", realm="elbow_2_10",     noise="sigma_cap"),
     "combo_elbow_centered": dict(targets=targets_sqrt, ward="weighted", realm="elbow_2_10", noise="sigma_cap", prep="center"),
+    # realm-k fix 2026-06-17 candidates. combo_target_sqrt = the SHIPPED fix.
+    "combo_target_sqrt":          dict(targets=targets_sqrt, ward="weighted", realm="target_sqrt",               noise="sigma_cap"),
+    "combo_target_sqrt_centered": dict(targets=targets_sqrt, ward="weighted", realm="target_sqrt_centered",      noise="sigma_cap"),
+    "combo_sil_floor":            dict(targets=targets_sqrt, ward="weighted", realm="silhouette_floor",          noise="sigma_cap"),
+    "combo_sil_floor_centered":   dict(targets=targets_sqrt, ward="weighted", realm="silhouette_floor_centered", noise="sigma_cap"),
 }
 
 
