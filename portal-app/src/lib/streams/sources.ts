@@ -32,6 +32,7 @@ const MAP: Record<string, SourcePresentation> = {
   'claude-import': { title: 'Claude', mono: 'CL', color: 'var(--color-accent-coral)' },
   'chatgpt-import': { title: 'ChatGPT', mono: 'GP', color: 'var(--color-accent-teal)' },
   import: { title: 'Import', mono: 'IM', color: 'var(--color-text-secondary)' },
+  upload: { title: 'Uploads', mono: 'UP', color: 'var(--color-accent-teal)' },
   'claude-code': { title: 'Claude Code', mono: 'CC', color: 'var(--color-accent-teal)' },
   gateway: { title: 'Gateway', mono: 'GW', color: 'var(--color-accent-teal)' },
   opencode: { title: 'opencode', mono: 'OC', color: 'var(--color-accent-teal)' },
@@ -67,6 +68,7 @@ export function sourcePresentation(source: string): SourcePresentation {
 const SUFFIXED_HEADS = new Set(['telegram', 'telegram-group', 'discord', 'discord-thread']);
 const CANONICAL: Record<string, string> = {
   'telegram-group': 'telegram', 'discord-thread': 'discord', 'inference:chat': 'portal',
+  'apple-health': 'apple_health', 'portal-chat': 'portal',
 };
 export function canonicalClientSource(raw: string | null | undefined): string {
   if (!raw) return 'unknown';
@@ -74,6 +76,9 @@ export function canonicalClientSource(raw: string | null | undefined): string {
   let base = s;
   const us = s.indexOf('_');
   if (us > 0 && SUFFIXED_HEADS.has(s.slice(0, us))) base = s.slice(0, us);
+  // Sub-source paths fold to their head ('claude-code/subagent' → 'claude-code').
+  const slash = base.indexOf('/');
+  if (slash > 0) base = base.slice(0, slash);
   return CANONICAL[base] || base;
 }
 

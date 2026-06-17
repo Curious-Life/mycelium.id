@@ -51,6 +51,12 @@ rec('suffixed non-platform NOT folded (claude-import untouched)', canon('claude-
 rec('http-poll:<uuid> → connector', kind('http-poll:abc-123') === 'connector');
 rec('webhook:<uuid> → connector', kind('webhook:xyz') === 'connector');
 
+// Real live tags seen against actual vaults must land in the right kind/chip.
+rec("apple-health → device (folds to apple_health)", canon('apple-health') === 'apple_health' && kind('apple-health') === 'device');
+rec("portal-chat → portal", canon('portal-chat') === 'portal' && kind('portal-chat') === 'portal');
+rec("upload → knowledge", kind('upload') === 'knowledge');
+rec("claude-code/subagent → agent (folds to claude-code)", canon('claude-code/subagent') === 'claude-code' && kind('claude-code/subagent') === 'agent');
+
 // Unknown self-places to 'other' (no crash, no void) and keeps its raw key.
 rec("unknown 'frobnicator' → other", kind('frobnicator') === 'other' && canon('frobnicator') === 'frobnicator');
 rec('null/empty source → other (kind), no throw', kind(null) === 'other' && kind('') === 'other');
