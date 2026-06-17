@@ -63,7 +63,7 @@
 <header
 	data-tauri-drag-region
 	onmousedown={startWindowDrag}
-	class="app-header h-12 md:h-14 border-b border-[var(--color-border)] flex items-center px-3 sm:px-4 gap-2 sm:gap-3 bg-[var(--color-surface)] relative z-10 overflow-hidden flex-shrink-0"
+	class="app-header h-10 border-b border-[var(--color-border)] flex items-center px-2 sm:px-3 gap-1.5 sm:gap-2 bg-[var(--color-surface)] relative z-10 overflow-hidden flex-shrink-0"
 >
 	<!-- Sidebar toggle. macOS traffic-light clearance in the native shell is a
 	     DETERMINISTIC CSS padding on `.app-header` under `html.is-tauri` (tagged
@@ -71,10 +71,10 @@
 	     flashes under the traffic lights nor lands mis-positioned. -->
 	<button
 		onclick={handleMenuClick}
-		class="p-2 hover:bg-[var(--color-elevated)] rounded-lg transition-colors text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] flex-shrink-0 hidden md:flex"
+		class="p-1 hover:bg-[var(--color-elevated)] rounded-md transition-colors text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] flex-shrink-0 hidden md:flex"
 		aria-label="Toggle menu"
 	>
-		<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+		<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 12h16M4 18h16" />
 		</svg>
 	</button>
@@ -114,14 +114,14 @@
 		<!-- Chat agent toggle (Cmd/Ctrl+J) — opens the floating tool-using agent. -->
 		<button
 			onclick={() => navigationState.toggleChat()}
-			class="w-8 h-8 rounded-full border flex items-center justify-center transition-all duration-150 {chatOpen
+			class="w-7 h-7 rounded-full border flex items-center justify-center transition-all duration-150 {chatOpen
 				? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-white'
 				: 'border-[var(--color-border)] bg-[var(--color-elevated)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface)] hover:border-[var(--color-accent)]'}"
 			title="Chat with your vault (⌘J)"
 			aria-label="Toggle chat"
 			aria-pressed={chatOpen}
 		>
-			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 				<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
 			</svg>
 		</button>
@@ -129,16 +129,16 @@
 		<!-- Theme toggle -->
 		<button
 			onclick={toggleTheme}
-			class="w-8 h-8 rounded-full border border-[var(--color-border)] bg-[var(--color-elevated)] flex items-center justify-center text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface)] hover:border-[var(--color-accent)] transition-all duration-150"
+			class="w-7 h-7 rounded-full border border-[var(--color-border)] bg-[var(--color-elevated)] flex items-center justify-center text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface)] hover:border-[var(--color-accent)] transition-all duration-150"
 			title={currentTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
 			aria-label="Toggle theme"
 		>
 			{#if currentTheme === 'dark'}
-				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 					<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
 				</svg>
 			{:else}
-				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 					<circle cx="12" cy="12" r="5" />
 					<line x1="12" y1="1" x2="12" y2="3" />
 					<line x1="12" y1="21" x2="12" y2="23" />
