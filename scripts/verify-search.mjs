@@ -151,13 +151,25 @@ function seedRows(raw) {
   // semantic_themes.realm_id is NOT NULL (composite UNIQUE(user_id,realm_id,semantic_theme_id)).
   const s = raw.prepare('INSERT INTO semantic_themes (semantic_theme_id, realm_id, user_id, name, essence, message_count) VALUES (?,?,?,?,?,?)');
   s.run(301, 201, 'local-user', 'Forest Theme', 'mycelium forest roots theme', 8);
-  // Documents (BM25-only — no embedding_768). Explicit ids so the cold-start
-  // "no live embed" assertion can address them. d-internal must NOT surface.
-  // DOCUMENT-SEARCH design 2026-06-17.
-  const d = raw.prepare('INSERT INTO documents (id, user_id, path, title, summary, content, is_internal, sensitive, created_at) VALUES (?,?,?,?,?,?,?,?,?)');
-  d.run('d-forest-1', 'local-user', 'notes/forest.md', 'Forest Notes', 'mycelium networks beneath the forest floor', 'a document about the forest and its deep mycelium roots', 0, 0, '2026-05-04 10:00:00');
-  d.run('d-internal-1', 'local-user', '_internal/model.md', 'Internal Model', 'internal forest mycelium scaffolding', 'internal-model document about forest mycelium', 1, 0, '2026-05-05 10:00:00');
-  d.run('d-sensitive-1', 'local-user', 'notes/private.md', 'Private Forest Note', 'a sensitive note about forest mycelium roots', 'private reflection on the forest mycelium', 0, 1, '2026-05-06 10:00:00');
+  // NOTE: documents are seeded AFTER boot via db.documents.upsert (the ENCRYPTING
+  // path), not here — see seedDocuments(). Raw plaintext doc rows would mask the
+  // encrypted-text indexing bug the live smoke caught (2026-06-18).
+}
+
+// Seed documents through the encrypting db namespace so title/summary/content are
+// stored as real envelopes — this exercises the loader's per-column decrypt +
+// JS-concat path. (Plaintext raw-SQL seeding indexed fine even with the broken
+// SQL-concat loader, hiding the bug.) Explicit ids so the cold-start no-embed
+// assertion can address them; d-internal must never surface; d-sensitive is
+// excluded from proactive recall but present on explicit query.
+async function seedDocuments(db) {
+  // `zorbletwig` is a CONTENT-ONLY sentinel — absent from title + summary. It
+  // guards the encrypted-text bug: the broken SQL-concat loader decrypted only the
+  // first envelope (title), silently dropping summary+content, so a content-only
+  // term would NOT surface. Per-column decrypt + JS-concat indexes the full text.
+  await db.documents.upsert({ id: 'd-forest-1', user_id: 'local-user', path: 'notes/forest.md', title: 'Forest Notes', summary: 'mycelium networks beneath the forest floor', content: 'a document about the forest and its deep mycelium roots zorbletwig', is_internal: 0, sensitive: 0 });
+  await db.documents.upsert({ id: 'd-internal-1', user_id: 'local-user', path: '_internal/model.md', title: 'Internal Model', summary: 'internal forest mycelium scaffolding', content: 'internal-model document about forest mycelium', is_internal: 1, sensitive: 0 });
+  await db.documents.upsert({ id: 'd-sensitive-1', user_id: 'local-user', path: 'notes/private.md', title: 'Private Forest Note', summary: 'a sensitive note about forest mycelium roots', content: 'private reflection on the forest mycelium', is_internal: 0, sensitive: 1 });
 }
 
 async function bulkSearchDb() {
@@ -166,6 +178,7 @@ async function bulkSearchDb() {
   // Build searchHelpers against a real encrypted db namespace via boot's createDb.
   // Simpler: reuse boot to get the db namespace, then a fresh helper over it.
   const { db, close } = await boot({ dbPath: DB, kcvPath: KCV, userHex: hex(), systemHex: hex(), embedder: createStubEmbedder(48) });
+  await seedDocuments(db); // ENCRYPTED docs (envelopes) — exercises the real decrypt path
   const sh = createSearchHelpers({ db, embedder: createStubEmbedder(48), userId: 'local-user' });
 
   const res = await sh.bulkSearch({ query: 'forest mycelium roots', limit: 5 });
@@ -203,6 +216,15 @@ async function bulkSearchDb() {
     `documents=${docRes.documents.length} messages=${docRes.messages.length}`);
   rec('bulkSearch: scope=documents excludes internal-model doc',
     !docRes.documents.some((dd) => /Internal Model/.test(dd)));
+
+  // Encrypted-text regression guard: `zorbletwig` lives ONLY in d-forest-1's
+  // (encrypted) content. The broken SQL-concat loader decrypted only the first
+  // envelope (title) and dropped content, so this CONTENT-ONLY term would miss.
+  // Proves the loader indexes full decrypted title+summary+content. (2026-06-18)
+  const contentOnly = await sh.bulkSearch({ query: 'zorbletwig', limit: 5, scope: 'documents' });
+  rec('bulkSearch: content-only term matches doc (encrypted summary/content indexed, not just title)',
+    contentOnly.documents.some((dd) => /Forest Notes/.test(dd)),
+    `documents=${contentOnly.documents.length}`);
 
   // Cold-start guarantee: documents are BM25-only (skipEmbed) — they must NOT
   // trigger a live embed at load. Messages (no stored vector here) DO embed via
