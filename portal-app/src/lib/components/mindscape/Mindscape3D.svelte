@@ -1039,7 +1039,10 @@
 	}
 
 	function getBgColor(): string {
-		if (isLight) return '#EDEDF2'; // cool light gray — more contrast for points
+		// Warm paper/parchment — harmonises with the light palette (--color-bg #FAF8F5,
+		// surface #F5F3EE, elevated #EBE8E2), a touch deeper so the canvas reads as its
+		// own surface. The dark points (createPointCloud) then sit on it like ink.
+		if (isLight) return '#F2ECE1';
 		const style = getComputedStyle(document.documentElement);
 		return style.getPropertyValue('--color-bg').trim() || '#0A0A0C';
 	}
