@@ -36,8 +36,17 @@ On-disk index stays fresh on every write (no rebuild). NO-OP for the in-RAM back
 
 **⚠️ Pre-step-5 requirement surfaced by P3:** the bridge rejects BLOB result columns, so **every `clustering_points.nomic_embedding` must be a TEXT envelope or NULL — no legacy raw BLOBs** — before the vault is encrypted, else clustering reads break. Ties to the `sync-clustering-points` insert-only backfill (see [[measurement-pipeline-recluster-unsafe]]). Add a pre-migration check (`SELECT count(*) FROM clustering_points WHERE typeof(nomic_embedding)='blob'` must be 0). The full §13 byte-identical-Generate criterion is deferred (Generate is kill-switched).
 
-### Then: Step 5 — encrypt the live vault (⚠️ GATED on explicit operator go)
-`src/account/db-cipher-migrate.js` (built, `verify:at-rest` A5 GO). Dry-run on a vault COPY first; build-new-encrypted + atomic swap + keep the plaintext copy. Only after this is the on-disk index encrypted at rest — so flipping `MYCELIUM_SEARCH_BACKEND=sqlite` to default should pair with step 5 (else a plaintext on-disk content/vector index sits on disk — the at-rest regression). Until then the backend stays opt-in for dev/testing.
+### Step 5 — encrypt the live vault (⚠️ GATED on explicit operator go) — code COMPLETE, action pending
+
+**Boot-wiring DONE (commit `4ab07dd`):** `boot()` honors `MYCELIUM_AT_REST` (default OFF → plaintext, unchanged). ON → `resolveDbKeyHex` (src/db/open.js) → `ensureVaultEncrypted` (one-time, idempotent) → keyed `getDb`. Fail-closed. Gate `verify:at-rest-boot` 7/7; verify:foundation/rest/at-rest/search non-regressing. **Rehearsal GO** on a copy of the real 1.8GB vault: online-backup 4.3s + encrypt 39.5s = ~44s; parity OK; `nomic_embedding` raw-BLOB count = **0** (clustering bridge-safe).
+
+**The remaining step-5 is now a pure OPERATOR action (no more code):**
+1. Quit the app (the 7 `node src/index.js` processes must release the vault).
+2. (precheck) `SELECT count(*) FROM clustering_points WHERE typeof(nomic_embedding)='blob'` → must be 0 (currently is).
+3. Set `MYCELIUM_AT_REST=1` (+ keys resolvable) and start the app → boot runs the ~44s migration in place, keeps `mycelium.db.pre-cipher-<ts>` plaintext backup. Confirm it opens.
+4. Set `MYCELIUM_SEARCH_BACKEND=sqlite` to make the on-disk index the default (now encrypted at rest). One-time first-query populate via `loadFromDb`, then incremental.
+5. After confirming, delete the `.pre-cipher` backup.
+Reversible until step 5 lands: rename the `.pre-cipher` plaintext copy back. Wire `backup.js` / `remote/config.js` openers for `dbKeyHex` if those surfaces are used while encrypted (follow-on; both can adopt `src/db/open.js`).
 
 ### (superseded) Original Step 3 plan
 
