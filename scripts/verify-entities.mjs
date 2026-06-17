@@ -10,6 +10,7 @@ import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
+import { diffTools, toolDiffDetail, EXPECTED_TOOL_COUNT } from './lib/expected-tools.mjs';
 
 const DB = 'data/verify-entities.db', KCV = 'data/verify-entities-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -32,7 +33,7 @@ function looksEncrypted(value) {
 }
 
 const names = tools.map((t) => t.name);
-rec('EN1. remember + link registered; total tools = 34', names.includes('remember') && names.includes('link') && tools.length === 34, `${tools.length} tools`);
+rec(`EN1. remember + link registered; full roster intact (${EXPECTED_TOOL_COUNT} tools)`, names.includes('remember') && names.includes('link') && diffTools(tools).ok, toolDiffDetail(tools));
 
 // ── remember an entity ──
 const out1 = await handlers.remember({ kind: 'entity', entityType: 'person', name: 'Alice Rivera', summary: 'my sister in Berlin', pinned: true });
