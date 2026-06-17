@@ -18,7 +18,9 @@
 	const SCENE_SCALE = 8;
 	const isLight = $derived($theme === 'light');
 	const POINT_SIZE_DARK = 0.28;
-	const POINT_SIZE_LIGHT = 0.38;
+	// Light mode needs noticeably bigger dots: they're solid (not glowing), so each
+	// must read as a distinct mark against the light background.
+	const POINT_SIZE_LIGHT = 0.6;
 	const POINT_SIZE = $derived(isLight ? POINT_SIZE_LIGHT : POINT_SIZE_DARK);
 	const CONTACT_SIZE = 0.9;
 	const CONTACT_COLOR = '#E5B84C'; // Aurum/Gold — brand color
@@ -91,6 +93,9 @@
 	function createPhaseHalos() {
 		if (!scene) return;
 		if (territoryHalos) { scene.remove(territoryHalos); territoryHalos = null; }
+		// Additive glow halos wash out on a light background — skip in light mode
+		// (matches the starfield + glow-layer behaviour).
+		if (isLight) return;
 
 		const territories = msState.territories;
 		const positions: number[] = [];
@@ -666,8 +671,11 @@
 				depthWrite: false,
 				vertexColors: true,
 			});
-			cofireGlows = new THREE.Points(glowGeo, cofireMaterial);
-			scene.add(cofireGlows);
+			// Additive glow washes out on a light bg — show the lines only there.
+			if (!isLight) {
+				cofireGlows = new THREE.Points(glowGeo, cofireMaterial);
+				scene.add(cofireGlows);
+			}
 		}
 	}
 
@@ -1494,20 +1502,23 @@
 				hue = blend(rh, hue, 0.15);
 			}
 
-			// Saturation: more vivid — Hubble vibrancy
+			// Saturation: more vivid — Hubble vibrancy. Light mode pushes clustered
+			// points MORE saturated (vivid darks read on a light bg) and keeps noise
+			// nearly grey so it recedes.
 			const satRaw = ((px * 3.71 + py * 8.53 + pz * 5.29) % 1 + 1) % 1;
-			const saturation = isNoise
-				? 0.1 + satRaw * 0.15
-				: 0.4 + satRaw * 0.5;
+			const saturation = isLight
+				? (isNoise ? 0.04 + satRaw * 0.08 : 0.55 + satRaw * 0.4)
+				: (isNoise ? 0.1 + satRaw * 0.15 : 0.4 + satRaw * 0.5);
 
-			// Lightness: base from spatial variation + activity boost
+			// Lightness. Light mode INVERTS the dark-mode logic: clustered points must
+			// be DARK (low lightness) to contrast the light bg, and activity makes them
+			// darker/heavier (not brighter); noise is a faint light-grey that recedes.
 			const litRaw = ((px * 11.13 + py * 4.87 + pz * 17.63) % 1 + 1) % 1;
-			// Active territories get a brightness boost (luminosity from activity timeline)
 			const terrData = !isNoise ? territories[tid] : null;
 			const activityBoost = terrData ? computeLuminosity(terrData, maxCount) * 0.15 : 0;
-			const lightness = isNoise
-				? 0.08 + litRaw * 0.1
-				: 0.3 + litRaw * 0.3 + activityBoost;
+			const lightness = isLight
+				? (isNoise ? 0.66 + litRaw * 0.08 : 0.42 - litRaw * 0.14 - activityBoost)
+				: (isNoise ? 0.08 + litRaw * 0.1 : 0.3 + litRaw * 0.3 + activityBoost);
 
 			const color = new THREE.Color().setHSL(hue, saturation, lightness);
 			colors[i * 3] = color.r;
@@ -1530,7 +1541,15 @@
 			const exploredPct = (!isNoise && territories[tid]) ? (territories[tid].exploredPercent || 0) / 100 : 0;
 			const awarenessBoost = 0.7 + exploredPct * 0.3; // 0.7 (unexplored) to 1.0 (fully explored)
 
-			if (isNoise) {
+			// Light mode needs MUCH higher opacity — solid dark dots on a light bg,
+			// not faint glows. Unfocused jumps from 0.06 → 0.55 so the cloud is
+			// actually visible; noise stays semi-transparent so it recedes.
+			if (isLight) {
+				if (isNoise) alphas[i] = hasSelection ? 0.12 : 0.4;
+				else if (isInFocus) alphas[i] = 0.95 * awarenessBoost;
+				else if (isCofiring) alphas[i] = 0.7 * awarenessBoost;
+				else alphas[i] = 0.55 * awarenessBoost;
+			} else if (isNoise) {
 				alphas[i] = hasSelection ? 0.03 : 0.5;
 			} else if (isInFocus) {
 				alphas[i] = 0.9 * awarenessBoost;
@@ -1639,7 +1658,9 @@
 					// relative to the dataset's own time span (aTime: 0 = oldest, 1 = now).
 					// pow(.,0.55) keeps recent-ish points bright and only the oldest dim.
 					float recency = clamp(aTime, 0.0, 1.0);
-					float recencyBright = 0.32 + 0.68 * pow(recency, 0.55);
+					// Light mode keeps a much higher floor so aged points stay readable
+					// against the light bg (a 0.32 floor would vanish there).
+					float recencyBright = ${isLight ? '0.7 + 0.3' : '0.32 + 0.68'} * pow(recency, 0.55);
 
 					vAlpha = aAlpha * timeAlpha * recencyBright;
 					vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
@@ -2188,14 +2209,21 @@
 		composer.render();
 	}
 
-	// Update scene background when theme changes
+	// Update scene background when theme changes — and REBUILD the theme-baked
+	// visuals (point colors/alpha/size are computed at creation per isLight, so a
+	// toggle must rebuild them, else light-mode points stay dark-tuned + invisible).
 	const currentTheme = $derived($theme);
+	let themeApplied = false;
 	$effect(() => {
-		// Track the theme to re-run when it changes
-		currentTheme;
-		if (scene) {
-			scene.background = new THREE.Color(getBgColor());
+		currentTheme; // track
+		if (!scene) return;
+		scene.background = new THREE.Color(getBgColor());
+		if (themeApplied && pointCloud) {
+			createPointCloud();
+			createStarfield();   // skips itself in light mode
+			createGlowLayer();   // skips itself in light mode
 		}
+		themeApplied = true;
 	});
 
 	// Load health data once timeline range is known
