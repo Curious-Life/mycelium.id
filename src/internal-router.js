@@ -17,7 +17,6 @@ import { describeImage as realDescribeImage } from './enrich/describe-image.js';
 import { transcribeAudio as realTranscribeAudio } from './enrich/transcribe-audio.js';
 import { extractDocumentText as realExtractDocumentText, documentKindOf } from './enrich/extract-document.js';
 import { clampStored } from './enrich/text-limits.js';
-import { saveDocument } from './core/document-store.js';
 
 /** Parse the decrypted `{ "apiKey": "…" }` credentials envelope → key string|null. */
 function parseProviderApiKey(credentials) {
@@ -374,31 +373,17 @@ export function internalRouter({ db, userId, enrich = {} }) {
       }
       // other binaries: honest null (stored + linked, no derived text).
 
-      // Library presence: every channel attachment ALSO lands as a document
-      // under uploads/ so it shows in Library → All docs (canonical did this
-      // for text files; users expect it for all media). Content = the derived
-      // text plus a stable reference to the encrypted attachment. Fail-soft:
-      // a document hiccup never fails the extraction response.
-      try {
-        const title = fileName || `${kind}-${attachmentId.slice(0, 8)}`;
-        const label = kind === 'image' ? 'Image' : (kind === 'audio' || kind === 'voice') ? 'Voice / audio' : 'File';
-        const body = [
-          `# ${title}`,
-          '',
-          `${label} received via channel — stored encrypted (attachment ${attachmentId}).`,
-          `[View in Media](/media) · [open file](/api/v1/portal/attachments/${attachmentId}/file)`,
-          '',
-          contextText ? (kind === 'image' ? `**Description:** ${contextText}` : contextText) : '_No derived text yet._',
-        ].join('\n');
-        await saveDocument({ db }, {
-          userId, source: 'portal-upload', sourceType: 'upload', scope: 'personal',
-          createdBy: 'channel-daemon',
-          // attachmentId prefix keeps paths unique (two photos named photo.jpg
-          // must not upsert-overwrite each other); re-extraction upserts in place.
-          pathArgs: { filename: `${attachmentId.slice(0, 8)}-${title}` },
-          content: body, title,
-        });
-      } catch (e) { console.error('[internal-router] attachment document upsert failed:', e.message); }
+      // NOTE: we deliberately do NOT create a separate "wrapper" document for
+      // the attachment here. The file already has a single canonical Library
+      // presence — the attachment row itself, which the Library view renders as
+      // a media tile (preview + description/transcript) via /portal/attachments.
+      // The inbound capture also folds the derived text into the message body
+      // (see channel-daemon inbound.js — `msg.content += contextLine`), so the
+      // image description / transcript / file text is already in the searchable
+      // corpus. Creating a wrapper doc here made every channel file show TWICE
+      // in Library (media tile + a `created_by='channel-daemon'` doc tile) and
+      // added nothing for display or search. The derived text is persisted onto
+      // the attachment above (description/transcript); that is the single source.
 
       return res.json({ ok: true, contextText, kind });
     } catch (err) {
