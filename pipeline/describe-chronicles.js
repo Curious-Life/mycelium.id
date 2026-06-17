@@ -110,7 +110,7 @@ function buildPrompt(t, samples, topTags = [], entities = [], contextBlock = '')
   // than restarts as coverage deepens.
   if (t.story_arc || t.story_current_chapter || t.story_birth) {
     lines.push(
-      `Its current chronicle — refine and extend it as your understanding deepens (keep what still holds):`,
+      `Its current chronicle — refine and extend it as your understanding deepens (keep what still holds; if nothing has meaningfully changed, return it unchanged):`,
       [t.story_birth && `birth: ${t.story_birth}`, t.story_arc && `arc: ${t.story_arc}`,
         t.story_current_chapter && `now: ${t.story_current_chapter}`].filter(Boolean).join(' · '),
     );
