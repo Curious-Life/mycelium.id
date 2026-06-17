@@ -49,7 +49,7 @@ export function createNarrationDomain({ db, userId }) {
     },
     {
       name: 'describeEntity',
-      description: 'Write a name and essence (and optionally a chronicle) for a mindscape realm or territory, folding new content into the existing understanding. Call getEntityContext first to see the prior description, covered period, and connections. UPDATE-only: it refines an existing entity, never creates one.',
+      description: 'Write a name and essence (and optionally a chronicle) for a mindscape realm or territory, folding new content into the existing understanding. Call getEntityContext first to see the prior description, covered period, and connections. Only call this when the description should actually change — if nothing new is worth adding, do not call it and leave the existing description as it is. UPDATE-only: it refines an existing entity, never creates one.',
       inputSchema: {
         type: 'object',
         properties: {

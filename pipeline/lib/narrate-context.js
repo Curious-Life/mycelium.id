@@ -200,7 +200,7 @@ export function renderCapsule(cap) {
       const pct = cap.temporal.exploredPercent != null ? `, ${cap.temporal.exploredPercent}% described overall` : '';
       L.push(`NOW FOLDING IN ${day(cap.temporal.newRange.start)} → ${day(cap.temporal.newRange.end)} (${cap.temporal.newRange.points} new item${cap.temporal.newRange.points === 1 ? '' : 's'}${pct}).`);
     }
-    L.push('Fold the new period into the existing understanding; keep what still holds; note what changed.');
+    L.push('Fold the new period into the existing understanding; keep what still holds and note what changed. If the new content does not change the picture, it is fine to leave the description exactly as it is — reflect rather than rewrite.');
   } else if (cap.temporal.newRange) {
     L.push(`FIRST DESCRIPTION — content spans ${day(cap.temporal.newRange.start)} → ${day(cap.temporal.newRange.end)} (${cap.temporal.newRange.points} items).`);
   }

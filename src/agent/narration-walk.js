@@ -19,11 +19,13 @@ import { buildContextCapsule, renderCapsule } from '../../pipeline/lib/narrate-c
 import { loadMembers, getSeenIds } from '../../pipeline/lib/narrate-sample.js';
 
 const WALK_SYSTEM = [
-  'You are exploring and describing regions of the user\'s mind, one area at a time.',
-  'For the current area, read its context, then call describeEntity with a 2-4 word name',
-  'and a one-sentence essence that FOLDS the new period into what was already understood',
-  '(keep what still holds; note what changed). Carry forward what you learned from the',
-  'areas you already described — a realm\'s essence should reflect the territories within it.',
+  'You are exploring the regions of the user\'s mind, one area at a time, deciding for each',
+  'whether its description needs to change. Read the area\'s context. If the new content',
+  'meaningfully changes your understanding, call describeEntity with a 2-4 word name and a',
+  'one-sentence essence that FOLDS the new period into what was already understood (keep what',
+  'still holds; note what changed). If the new content does NOT change the picture, do not',
+  'call describeEntity — just reflect and move on, leaving the description as it is. Carry',
+  'forward what you learn — a realm\'s essence should reflect the territories within it.',
 ].join(' ');
 
 const TABLE = { realm: 'realms', territory: 'territory_profiles', theme: 'semantic_themes' };
@@ -92,7 +94,7 @@ export async function runNarrationWalk(deps, opts = {}) {
 
   const worklist = await buildWorklist(query, userId, scope);
   const ledger = [];
-  let described = 0, skipped = 0;
+  let described = 0, reflected = 0, skipped = 0;
 
   for (const item of worklist) {
     if (signal?.aborted) { log('walk aborted'); break; }
@@ -100,29 +102,32 @@ export async function runNarrationWalk(deps, opts = {}) {
 
     // Coverage-aware skip: already named AND nothing new to fold → leave it (fold-not-replace).
     const nothingNew = !capsule.temporal.newRange || capsule.temporal.newRange.points === 0;
-    if (capsule.identity.name && nothingNew) { skipped += 1; await onProgress?.({ described, skipped, total: worklist.length, item, skipped: true }); continue; }
+    if (capsule.identity.name && nothingNew) { skipped += 1; await onProgress?.({ described, reflected, skipped, total: worklist.length, item, skipped: true }); continue; }
 
-    const userMessage = `${renderCapsule(capsule)}\n\nDescribe this ${item.kind} now: call describeEntity with {kind:"${item.kind}", id:${JSON.stringify(item.id)}, name, essence}.`;
+    const userMessage = `${renderCapsule(capsule)}\n\nConsider this ${item.kind}. If its description should change, call describeEntity with {kind:"${item.kind}", id:${JSON.stringify(item.id)}, name, essence}. If nothing new is worth adding, leave it unchanged and say so briefly.`;
     const systemExtra = `${WALK_SYSTEM}\n\n${renderLedger(ledger, item, capsule)}`;
     // One conversation across the whole walk → conversation_summaries accumulates the
     // running understanding; a non-empty history triggers the summarized-preamble path.
     const history = ledger.length ? [{ role: 'assistant', content: `Described ${ledger[ledger.length - 1].name || 'the prior area'}.` }] : [];
 
-    await runTurn(
+    const res = await runTurn(
       { db, userId, tools, handlers, loop, fetchImpl, signal },
       { userMessage, systemExtra, enabledTools: ['describeEntity', 'getEntityContext'], conversationId, history, localTools: true },
     );
+    // Did the agent actually write, or reflect-and-leave? (toolsUsed from the turn.)
+    const wrote = Array.isArray(res?.toolsUsed) && res.toolsUsed.includes('describeEntity');
 
-    // Read back what was written so the ledger carries the real name + covered span.
+    // Read back the current state so the ledger carries the real name + covered span
+    // (whether it changed or not — awareness still accrues for the next turn).
     const [row] = await query(
       `SELECT name, described_period_end FROM ${TABLE[item.kind]} WHERE user_id = ? AND ${COL[item.kind]} = ?`,
       [userId, item.id]).catch(() => []);
-    ledger.push({ kind: item.kind, id: item.id, name: row?.name || capsule.identity.name || null, through: row?.described_period_end || capsule.temporal.newRange?.end || null });
-    described += 1;
-    await onProgress?.({ described, skipped, total: worklist.length, item, name: row?.name });
+    ledger.push({ kind: item.kind, id: item.id, name: row?.name || capsule.identity.name || null, through: row?.described_period_end || capsule.temporal.newRange?.end || null, changed: wrote });
+    if (wrote) described += 1; else reflected += 1;
+    await onProgress?.({ described, reflected, skipped, total: worklist.length, item, name: row?.name, changed: wrote });
   }
 
-  return { described, skipped, total: worklist.length, conversationId, ledger };
+  return { described, reflected, skipped, total: worklist.length, conversationId, ledger };
 }
 
 export default runNarrationWalk;

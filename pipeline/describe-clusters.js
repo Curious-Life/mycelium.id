@@ -100,7 +100,7 @@ async function describe(narrator, kind, { samples, topTags = [], entities = [], 
   if (existing?.name) {
     lines.push(
       `It is currently titled "${existing.name}"${existing.essence ? ` — "${existing.essence}"` : ''}.`,
-      `Refine or rewrite the title and essence as your understanding deepens; keep them only if they still fit.`,
+      `Refine or rewrite the title and essence as your understanding deepens; keep them only if they still fit. If your understanding has not changed, return the existing title and essence unchanged.`,
     );
   }
   if (topTags.length) lines.push(`Recurring tags: ${topTags.join(', ')}.`);

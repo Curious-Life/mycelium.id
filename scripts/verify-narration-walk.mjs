@@ -52,16 +52,19 @@ for (let i = 0; i < 6; i++) await mk(`t2${i}`, 2, `2024-0${1 + i}-10T10:00:00Z`)
 
 const { handlers } = createNarrationDomain({ db, userId: U });
 
-// Fake turn: record what the walk passed, then simulate the agent calling describeEntity.
+// Fake turn: record what the walk passed. The agent WRITES for a territory (new
+// content worth folding) but REFLECTS for the realm (returns no toolsUsed → the
+// walk must count it as reflected, not described, and the realm name must NOT change).
 const turns = [];
 const fakeRunTurn = async (deps, opts) => {
   turns.push({ conversationId: opts.conversationId, systemExtra: opts.systemExtra, enabledTools: opts.enabledTools });
   const m = /kind:"(\w+)", id:([^,}]+)/.exec(opts.userMessage || '');
-  if (m) {
-    const kind = m[1]; const id = JSON.parse(m[2]);
-    await deps.handlers.describeEntity({ kind, id, name: `Auto ${kind}${id}`, essence: 'a synthesized essence folding the new period' });
+  if (m && m[1] === 'territory') {
+    const id = JSON.parse(m[2]);
+    await deps.handlers.describeEntity({ kind: 'territory', id, name: `Auto territory${id}`, essence: 'a synthesized essence folding the new period' });
+    return { text: 'done', toolsUsed: ['describeEntity'] };
   }
-  return { text: 'done' };
+  return { text: 'Nothing new changes the picture; leaving it unchanged.' }; // reflected (realm)
 };
 
 const result = await runNarrationWalk(
@@ -69,17 +72,17 @@ const result = await runNarrationWalk(
   { runId: 'gate-1', scope: { realm_id: REALM } },
 );
 
-// W1 — worklist: 3 entities (T1, T2, realm), 2 described + 1 skipped, 2 turns taken
-rec('W1. worklist = T1,T2,realm (3); described 2, skipped 1, 2 turns taken',
-  result.described === 2 && result.skipped === 1 && result.total === 3 && turns.length === 2,
-  `described=${result.described} skipped=${result.skipped} total=${result.total} turns=${turns.length}`);
+// W1 — worklist: 3 entities (T1, T2, realm); T1 written, realm reflected, T2 skipped
+rec('W1. worklist=3 → described 1 (T1), reflected 1 (realm), skipped 1 (T2); 2 turns taken',
+  result.described === 1 && result.reflected === 1 && result.skipped === 1 && result.total === 3 && turns.length === 2,
+  `described=${result.described} reflected=${result.reflected} skipped=${result.skipped} total=${result.total} turns=${turns.length}`);
 
-// stricter W2: DB reflects writes for T1 + realm, NOT T2
+// W2 — DB: T1 written; realm UNCHANGED (agent reflected, didn't rewrite); T2 untouched
 const [t1] = await query(`SELECT name FROM territory_profiles WHERE user_id=? AND territory_id=1`, [U]);
 const [t2] = await query(`SELECT name FROM territory_profiles WHERE user_id=? AND territory_id=2`, [U]);
 const [r5] = await query(`SELECT name FROM realms WHERE user_id=? AND realm_id=?`, [U, REALM]);
-rec('W2b. describeEntity wrote T1 + realm; T2 (covered) untouched',
-  t1.name === 'Auto territory1' && r5.name === 'Auto realm5' && t2.name === 'Caretaking',
+rec('W2. T1 written; realm left unchanged (reflected, not rewritten); T2 (covered) untouched',
+  t1.name === 'Auto territory1' && r5.name === 'Inner weather' && t2.name === 'Caretaking',
   `T1="${t1.name}" realm="${r5.name}" T2="${t2.name}"`);
 
 // W3 — one conversation across the walk; ledger accumulates
@@ -88,7 +91,6 @@ rec('W3. all turns share one conversationId (conversation_summaries accumulates)
   oneConvo && turns.length === 2, `convos=${[...new Set(turns.map((t) => t.conversationId))].join(',')}`);
 
 // W4 — skip was coverage-aware (T2 named + nothing new, never got a turn)
-const t2HadTurn = turns.some((t) => /id:2\b/.test(JSON.stringify(t)) );
 rec('W4. coverage-aware skip: the fully-covered named territory got NO turn', result.skipped === 1,
   `skipped=${result.skipped}`);
 
