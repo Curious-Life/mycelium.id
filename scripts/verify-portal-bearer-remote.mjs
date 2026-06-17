@@ -48,13 +48,22 @@ try {
   server = await startRestServer({ dbPath: DB, kcvPath: KCV, userHex: hex(), systemHex: hex(), port: 0, host: '127.0.0.1', portalMode: 'legacy' });
   const base = server.url;
 
-  const call = (path, { xff = null, bearer = null, method = 'GET' } = {}) => {
+  const call = (path, { xff = null, bearer = null, cookie = null, method = 'GET' } = {}) => {
     const headers = {};
     if (xff) headers['x-forwarded-for'] = xff;       // simulate a non-loopback (networked) peer
     if (bearer) headers['authorization'] = `Bearer ${bearer}`;
+    if (cookie) headers['cookie'] = cookie;
     return fetch(`${base}${path}`, { method, headers }).then((r) => r.status);
   };
   const NET = '9.9.9.9';
+
+  // F: WKWebView bearer-as-cookie path (portal SPA same-origin auth).
+  const f1 = await call(SENS[0], { xff: NET, cookie: `mycelium_bearer=${STATIC_BEARER}` });
+  ok(f1 !== 401, `F1. networked + mycelium_bearer cookie → not 401 (webview SPA auth)`, `(${f1})`);
+  const f2 = await call(SENS[0], { xff: NET, cookie: `mycelium_bearer=${WRONG_BEARER}` });
+  ok(f2 === 401, `F2. networked + wrong bearer cookie → 401`, `(${f2})`);
+  const f3 = await call(CTRL_RECOVERY, { xff: NET, cookie: `mycelium_bearer=${STATIC_BEARER}` });
+  ok(f3 !== 200, `F3. networked + bearer cookie → /account/recovery-key → NOT 200 (still protected)`, `(${f3})`);
 
   // A–D: sensitive routers.
   for (const ep of SENS) {

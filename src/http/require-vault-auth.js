@@ -95,6 +95,15 @@ export async function resolveRequester(req, { userId, validateSession = defaultV
   if (isTrustedLoopback(req)) return { id: userId, via: 'loopback' };
   const authz = req?.headers?.authorization;
   if (authz && matchStaticBearer(authz, process.env, expectedBearer())) return { id: userId, via: 'bearer' };
+  // Bearer presented as a cookie — the in-app WKWebView "window into the portal"
+  // sets an HttpOnly `mycelium_bearer` cookie so the portal SPA's same-origin
+  // fetches authenticate without an Authorization header (WKWebView can't add one
+  // to XHR). Same authority as the header Bearer; treated as via:'bearer' (no
+  // ambient browser credential to forge → CSRF-exempt, like the header path).
+  const bearerCookie = parseCookies(req).mycelium_bearer;
+  if (bearerCookie && matchStaticBearer(`Bearer ${bearerCookie}`, process.env, expectedBearer())) {
+    return { id: userId, via: 'bearer' };
+  }
   const cookieHeader = req?.headers?.cookie;
   if (cookieHeader) {
     const id = await validateSession(cookieHeader);
@@ -163,6 +172,10 @@ export function makePortalOwnerGate({ userId }) {
     if (isTrustedLoopback(req)) return { id: userId };
     const authz = req?.headers?.authorization;
     if (authz && matchStaticBearer(authz, process.env, expectedBearer())) return { id: userId };
+    // Bearer-as-cookie (the in-app WKWebView portal) — same authority, so the SPA's
+    // same-origin fetches reach the sensitive routers too (chat/measurement/…).
+    const bearerCookie = parseCookies(req).mycelium_bearer;
+    if (bearerCookie && matchStaticBearer(`Bearer ${bearerCookie}`, process.env, expectedBearer())) return { id: userId };
     return null;
   };
 }
