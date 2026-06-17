@@ -7,6 +7,7 @@
 	import { preparePrfOptions } from '$lib/passkey-prf';
 	import { browser } from '$app/environment';
 	import ProfileView from '$lib/views/ProfileView.svelte';
+	import AreasView from '$lib/views/AreasView.svelte';
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
 	import ChannelsSection from '$lib/components/settings/ChannelsSection.svelte';
 	import AISettings from '$lib/components/settings/AISettings.svelte';
@@ -131,6 +132,7 @@
 		] },
 		{ title: 'Intelligence & access', items: [
 			{ id: 'intelligence', label: 'Intelligence', icon: 'sparkles', desc: 'The model that powers Mycelium' },
+			{ id: 'areas', label: 'Areas', icon: 'layers', desc: 'Life domains that give your AI context' },
 			{ id: 'usage', label: 'Usage', icon: 'chart', desc: 'Token consumption — input/output by area and model' },
 			{ id: 'connections', label: 'Connections', icon: 'plug', desc: 'Use Mycelium from your other apps and devices' },
 			{ id: 'channels', label: 'Channels', icon: 'messages', desc: 'Where your agent may listen and reply' },
@@ -1073,6 +1075,8 @@
 		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.1a7.5 7.5 0 0 1 15 0A17.9 17.9 0 0 1 12 21.75c-2.7 0-5.2-.6-7.5-1.65Z"/></svg>
 	{:else if name === 'sparkles'}
 		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.8 9.8 12 3l2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12zM18 4.5l.6 1.9 1.9.6-1.9.6L18 9.5l-.6-1.9-1.9-.6 1.9-.6z"/></svg>
+	{:else if name === 'layers'}
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 2 2 7l10 5 10-5-10-5ZM2 12l10 5 10-5M2 17l10 5 10-5"/></svg>
 	{:else if name === 'plug'}
 		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9 3v5m6-5v5M6 8h12v3a6 6 0 0 1-12 0zm6 9v4"/></svg>
 	{:else if name === 'messages'}
@@ -1139,6 +1143,8 @@
 			<!-- Profile is self-loading (its own /portal/profile + /stats fetch), so
 			     it lives outside the settings `loading` gate and fills the pane. -->
 			<div class="profile-host"><ProfileView /></div>
+		{:else if activePane === 'areas'}
+			<AreasView />
 		{:else}
 			<div class="detail-body">
 				<header class="pane-head">

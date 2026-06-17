@@ -6,7 +6,6 @@
 		handle: string | null;
 		display_name: string | null;
 		avatar_url: string | null;
-		exlibris_url: string | null;
 		signature: string | null;
 		depth_score: number;
 		breadth_score: number;
@@ -17,6 +16,8 @@
 		message_count: number;
 		member_since: string | null;
 		public_realms_json: string | null;
+		public_space_enabled: number;
+		public_bio: string | null;
 	}
 
 	interface Stats {
@@ -45,7 +46,6 @@
 	// Edit state
 	// Avatar
 	let uploadingAvatar = $state(false);
-	let uploadingExlibris = $state(false);
 
 	async function uploadAvatar(e: Event) {
 		const input = e.target as HTMLInputElement;
@@ -82,45 +82,6 @@
 			showError('Upload failed');
 		} finally {
 			uploadingAvatar = false;
-			input.value = '';
-		}
-	}
-
-	async function uploadExlibris(e: Event) {
-		const input = e.target as HTMLInputElement;
-		const file = input.files?.[0];
-		if (!file) return;
-		if (file.size > 5 * 1024 * 1024) { showError('Image too large (max 5MB)'); return; }
-		if (!file.type.startsWith('image/')) { showError('Please select an image'); return; }
-
-		uploadingExlibris = true;
-		try {
-			const reader = new FileReader();
-			const base64 = await new Promise<string>((resolve, reject) => {
-				reader.onload = () => {
-					const result = reader.result as string;
-					resolve(result.split(',')[1]);
-				};
-				reader.onerror = reject;
-				reader.readAsDataURL(file);
-			});
-
-			const res = await api('/portal/exlibris', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ image: base64 }),
-			});
-			if (res.ok) {
-				const data = await res.json();
-				if (profile) profile.exlibris_url = data.exlibrisUrl + '?t=' + Date.now();
-				showSuccess('Ex libris updated');
-			} else {
-				showError('Upload failed');
-			}
-		} catch {
-			showError('Upload failed');
-		} finally {
-			uploadingExlibris = false;
 			input.value = '';
 		}
 	}
@@ -169,15 +130,30 @@
 	});
 
 
+	// Public Space (#19)
+	let publicEnabled = $state(false);
+	let publicBio = $state('');
+
 	async function loadProfile() {
 		try {
 			const data = await apiGet<{ profile: Profile }>('/portal/profile');
 			profile = data.profile;
+			publicEnabled = !!data.profile.public_space_enabled;
+			publicBio = data.profile.public_bio || '';
 		} catch (e) {
 			error = 'Failed to load profile';
 		} finally {
 			loading = false;
 		}
+	}
+
+	async function savePublicSpace() {
+		saving = true; error = null;
+		try {
+			const data = await apiPut<{ profile: Profile }>('/portal/profile', { public_space_enabled: publicEnabled ? 1 : 0, public_bio: publicBio.trim() });
+			profile = data.profile;
+			showSuccess('Public space updated');
+		} catch (e: any) { error = e.message || 'Failed to save'; } finally { saving = false; }
 	}
 
 	async function loadStats() {
@@ -346,27 +322,6 @@
 					{/if}
 				</div>
 
-				<!-- Ex Libris -->
-				<div style="margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--color-border);">
-					<p style="font-size: 0.65rem; font-weight: 500; color: var(--color-text-tertiary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.75rem;">Ex Libris</p>
-					<label style="cursor: pointer; display: inline-block; position: relative;">
-						{#if profile.exlibris_url}
-							<img src={profile.exlibris_url} alt="Ex Libris" style="width: 120px; height: 120px; border-radius: 8px; object-fit: cover; border: 1px solid var(--color-border);" />
-						{:else}
-							<div style="width: 120px; height: 120px; border-radius: 8px; background: var(--color-elevated); border: 2px dashed var(--color-border); display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 0.25rem;">
-								<svg style="width: 24px; height: 24px; color: var(--color-text-tertiary);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 4v16m8-8H4" /></svg>
-								<span style="font-size: 0.6rem; color: var(--color-text-tertiary);">Upload seal</span>
-							</div>
-						{/if}
-						{#if uploadingExlibris}
-							<div style="position: absolute; inset: 0; border-radius: 8px; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center;">
-								<div style="width: 16px; height: 16px; border: 2px solid var(--color-border); border-top-color: var(--color-accent); border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
-							</div>
-						{/if}
-						<input type="file" accept="image/*" onchange={uploadExlibris} style="display: none;" />
-					</label>
-				</div>
-
 				<div class="stats-row">
 					<span>{profile.territory_count} territories</span>
 					<span class="dot">&middot;</span>
@@ -425,6 +380,39 @@
 							{/if}
 							<span class="edit-icon">&#9998;</span>
 						</div>
+					{/if}
+				</div>
+
+				<!-- Public Space (#19) -->
+				<div class="public-space">
+					<div class="ps-head">
+						<h3 class="section-label">Public space</h3>
+						<button
+							class="toggle"
+							class:on={publicEnabled}
+							role="switch"
+							aria-checked={publicEnabled}
+							aria-label="Enable public space"
+							onclick={() => { publicEnabled = !publicEnabled; savePublicSpace(); }}
+						><span class="knob"></span></button>
+					</div>
+					<p class="ps-hint">A public-facing page others can find you at. Only what you choose is shown — your vault stays private.</p>
+					{#if publicEnabled}
+						<div class="ps-url">
+							{#if profile.handle}
+								<span class="url">{profile.handle}.mycelium.id</span>
+							{:else}
+								<span class="url muted">Set a handle above to claim your URL</span>
+							{/if}
+						</div>
+						<textarea
+							bind:value={publicBio}
+							class="ps-bio"
+							rows="3"
+							maxlength="1000"
+							placeholder="A short public bio (optional) — this is the one thing shown publicly."
+						></textarea>
+						<button onclick={savePublicSpace} disabled={saving} class="btn-sm btn-primary">Save public space</button>
 					{/if}
 				</div>
 
@@ -526,6 +514,21 @@
 		color: var(--color-accent-aurum);
 		margin-bottom: 0.75rem;
 	}
+
+	/* Public Space (#19) */
+	.public-space { margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--color-border); }
+	.ps-head { display: flex; align-items: center; justify-content: space-between; }
+	.ps-head .section-label { margin-bottom: 0; }
+	.ps-hint { font-size: 0.76rem; color: var(--color-text-tertiary); line-height: 1.5; margin: 0.5rem 0 0.75rem; }
+	.toggle { width: 40px; height: 23px; border-radius: 999px; border: none; background: var(--color-border); position: relative; cursor: pointer; transition: background 0.15s; flex-shrink: 0; }
+	.toggle.on { background: var(--color-accent-aurum); }
+	.toggle .knob { position: absolute; top: 3px; left: 3px; width: 17px; height: 17px; border-radius: 50%; background: #fff; transition: transform 0.15s; }
+	.toggle.on .knob { transform: translateX(17px); }
+	.ps-url { margin-bottom: 0.6rem; }
+	.ps-url .url { font-family: var(--font-mono); font-size: 0.82rem; color: var(--color-accent-aurum); background: var(--color-elevated); padding: 0.35rem 0.6rem; border-radius: 7px; display: inline-block; }
+	.ps-url .url.muted { color: var(--color-text-tertiary); }
+	.ps-bio { width: 100%; resize: vertical; padding: 0.6rem 0.75rem; font-family: var(--font-sans); font-size: 0.84rem; line-height: 1.5; background: var(--glass-input-bg); border: 1px solid var(--glass-input-border); border-radius: 9px; color: var(--color-text-primary); outline: none; margin-bottom: 0.6rem; }
+	.ps-bio:focus { border-color: var(--color-accent-aurum); }
 
 	/* Handle */
 	.handle-row { margin-bottom: 1rem; }

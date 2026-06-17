@@ -2,6 +2,9 @@ import express from 'express';
 import { nudgeEnrichDrainer } from './enrich/drainer.js';
 import { mediaTypeOf } from './portal-attachments.js';
 import { clampStored } from './enrich/text-limits.js';
+import { resolveInferenceConfigForTask } from './inference/resolve.js';
+import { createInferenceRouter } from './inference/router.js';
+import { createUsageSink } from './inference/usage.js';
 
 /**
  * portalCompatRouter — a thin compatibility surface that lets the CANONICAL
@@ -162,7 +165,8 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
     let row = {};
     try {
       const r = await db.rawQuery(
-        `SELECT handle, display_name, signature, avatar_url, exlibris_url,
+        `SELECT handle, display_name, signature, avatar_url,
+                public_space_enabled, public_bio,
                 depth_score, breadth_score, coherence_score, exploration_score,
                 territory_count, realm_count, message_count, member_since, public_realms_json
            FROM user_profiles WHERE user_id = ?`, [userId]);
@@ -175,8 +179,10 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       display_name: row.display_name || 'You',
       handle: row.handle || null,
       avatar_url: row.avatar_url || null,
-      exlibris_url: row.exlibris_url || null,
       signature: row.signature || null,
+      // Public Space (#19): the enable flag + the intentionally-public bio.
+      public_space_enabled: row.public_space_enabled ? 1 : 0,
+      public_bio: row.public_bio || null,
       depth_score: row.depth_score ?? null, breadth_score: row.breadth_score ?? null,
       coherence_score: row.coherence_score ?? null, exploration_score: row.exploration_score ?? null,
       territory_count, realm_count, message_count,
@@ -221,6 +227,9 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
         sets.push('display_name = ?'); params.push(body.display_name);
       }
       if (typeof body.signature === 'string') { sets.push('signature = ?'); params.push(clampStored(body.signature)); }
+      // Public Space (#19): enable flag (0/1) + the public bio (free text, bounded).
+      if (body.public_space_enabled !== undefined) { sets.push('public_space_enabled = ?'); params.push(body.public_space_enabled ? 1 : 0); }
+      if (typeof body.public_bio === 'string') { sets.push('public_bio = ?'); params.push(clampStored(body.public_bio)); }
       if (!sets.length) return fail(res, 400, 'nothing to update');
       await ensureRow();
       await db.rawQuery(`UPDATE user_profiles SET ${sets.join(', ')}, updated_at = datetime('now') WHERE user_id = ?`, [...params, userId]);
@@ -702,6 +711,49 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
     if (!(await guardContext(res, id))) return;
     try { await db.contexts.revoke(id, decodePath(req.params.connId)); ok(res, { ok: true }); }
     catch { fail(res, 500, 'could not revoke'); }
+  });
+
+  // ── Context Areas (#19): documents + AI summary lens on a sharing_context ──
+  router.get('/contexts/:id/documents', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { ok(res, { documents: await db.contexts.getDocuments(id) }); } catch { ok(res, { documents: [] }); }
+  });
+  router.post('/contexts/:id/documents', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    const path = String(req.body?.path || '').trim();
+    if (!path) return fail(res, 400, 'path required');
+    try { await db.contexts.addDocument(id, path); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not attach document'); }
+  });
+  router.delete('/contexts/:id/documents/:path', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try { await db.contexts.removeDocument(id, decodePath(req.params.path)); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not remove document'); }
+  });
+  // POST /contexts/:id/summary → synthesize a high-level summary of the area's
+  // documents via the user's active model (inline). Encrypted at rest on write.
+  router.post('/contexts/:id/summary', async (req, res) => {
+    const id = decodePath(req.params.id);
+    if (!(await guardContext(res, id))) return;
+    try {
+      const docs = await db.contexts.getDocuments(id);
+      if (!docs.length) return fail(res, 400, 'attach documents to this area first');
+      const provider = await resolveInferenceConfigForTask(db, userId, 'summarize');
+      if (!provider || (!provider.anthropicApiKey && !provider.openaiApiKey && !provider.baseUrl && !provider.cloudModel && !process.env.OLLAMA_URL)) {
+        return fail(res, 503, 'no AI model is connected — connect one in Settings → Intelligence');
+      }
+      // Prompt from each doc's title + summary (fall back to a truncated content
+      // peek). Bounded so a huge area can't overflow a small local model.
+      const parts = docs.slice(0, 40).map((d) => `- ${d.title || d.path}${d.summary ? `: ${String(d.summary).slice(0, 400)}` : ''}`);
+      const prompt = `Write a 2-3 sentence high-level summary of this area of someone's life, based on the documents in it. Be concise and concrete.\n\nArea documents:\n${parts.join('\n')}`;
+      const router2 = createInferenceRouter({ ...provider, onUsage: createUsageSink(db, userId, { source: 'context-area' }) });
+      const summary = (await router2.infer({ prompt, task: 'summarize', maxTokens: 400 })).trim();
+      await db.contexts.setSummary(userId, id, summary);
+      ok(res, { ok: true, summary });
+    } catch (e) { fail(res, 500, e.message || 'could not generate summary'); }
   });
 
   // ── Settings (Phase S) — timezone only; theme is client-side localStorage ─
