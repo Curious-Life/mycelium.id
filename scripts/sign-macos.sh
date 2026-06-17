@@ -18,12 +18,22 @@
 #   xcrun stapler staple <dmg> && xcrun stapler staple <app>
 set -euo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP="${1:-src-tauri/target/release/bundle/macos/Mycelium.app}"
 IDENTITY="${APPLE_SIGNING_IDENTITY:?Set APPLE_SIGNING_IDENTITY to your 'Developer ID Application: Name (TEAMID)'}"
-ENTITLEMENTS="${ENTITLEMENTS:-src-tauri/entitlements.plist}"
+ENTITLEMENTS="${ENTITLEMENTS:-$HERE/src-tauri/entitlements.plist}"
+# Child entitlements for the bundled interpreters (node, python3) — they run as
+# their OWN processes, so hardened-runtime exceptions are NOT inherited from the
+# .app and must be on their own signatures: V8's JIT (allow-jit /
+# allow-unsigned-executable-memory) and python3's dlopen of wheel .so not signed
+# by our Team ID (disable-library-validation). Signing them with --options
+# runtime but no entitlements notarizes fine yet CRASHES at launch. The Go
+# sidecars (caddy/frpc) need neither, so they get hardened runtime only.
+ENT_CHILD="${ENT_CHILD:-$HERE/src-tauri/entitlements-child.plist}"
 
 [ -d "$APP" ] || { echo "✗ app not found: $APP" >&2; exit 1; }
 [ -f "$ENTITLEMENTS" ] || { echo "✗ entitlements not found: $ENTITLEMENTS" >&2; exit 1; }
+[ -f "$ENT_CHILD" ] || { echo "✗ child entitlements not found: $ENT_CHILD" >&2; exit 1; }
 command -v codesign >/dev/null || { echo "✗ codesign not on PATH (install Xcode CLT)" >&2; exit 1; }
 
 echo "→ deep-signing $APP"
@@ -42,11 +52,20 @@ find "$APP/Contents" \( -name "*.framework" -o -name "*.app" \) -print0 2>/dev/n
   | while IFS= read -r -d '' b; do sign_one "$b"; done
 
 # Loose Mach-O files (content-detected — bundled node/python have no extension).
+# node + python3* get the child entitlements; everything else (.dylib/.so/.node,
+# caddy, frpc) gets hardened runtime only (least privilege). -type f skips the
+# python3 → python3.12 symlink, so we match python3.* to catch the real binary.
 count=0
 while IFS= read -r -d '' f; do
-  if file -b "$f" | grep -q "Mach-O"; then sign_one "$f"; count=$((count+1)); fi
+  file -b "$f" | grep -q "Mach-O" || continue
+  case "${f##*/}" in
+    node|python3|python3.*) sign_one --entitlements "$ENT_CHILD" "$f" ;;
+    *)                      sign_one "$f" ;;
+  esac
+  count=$((count+1))
 done < <(find "$APP/Contents" -type f -print0)
 echo "  signed $count nested Mach-O file(s)"
+[ "$count" -gt 0 ] || { echo "✗ found 0 nested Mach-O — enumeration is broken, aborting before a false-clean notarization" >&2; exit 1; }
 
 # 2. Sign the outer .app last, with the hardened-runtime entitlements.
 codesign --force --timestamp --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP"

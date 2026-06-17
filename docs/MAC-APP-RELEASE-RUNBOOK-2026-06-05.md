@@ -43,40 +43,55 @@ which is operator-gated (Apple Developer ID credentials).
 
 ---
 
-## §A — Notarization (operator-gated; I can't do this — needs your Apple credentials)
+## §A — Notarization (operator-gated; needs your Apple credentials)
 
-Requires an **Apple Developer account** ($99/yr) with a *Developer ID Application* certificate in
-the login keychain, and an app-specific password (or App Store Connect API key). Steps:
+> **SUPERSEDED 2026-06-18 → see [`docs/DESIGN-macos-signed-distribution-2026-06-17.md`](DESIGN-macos-signed-distribution-2026-06-17.md).**
+> The original step-1 below was **wrong**: it claimed `cargo tauri build` signs
+> "sidecars + bundled node/python too" when the identity is set. A sweep proved
+> Tauri's macOS bundler signs only the main binary + frameworks + `externalBin`
+> sidecars — **NOT** the ~300 nested Mach-O we stage under `Resources/app/`
+> (bundled Node, the relocatable Python, every wheel `.so`/`.dylib`,
+> `better_sqlite3.node`). Setting `signingIdentity` alone would FAIL notarization.
+> The correct flow is a custom **inside-out** signing pass, now scripted. Original
+> text kept below struck-through for history.
 
-1. **Set signing + entitlements** in `src-tauri/tauri.conf.json`. The entitlements file is already
-   authored (`src-tauri/entitlements.plist` — JIT + dyld-env + library-validation, the four this
-   app needs). Just add to `tauri.conf.json`:
-   ```json
-   "bundle": {
-     "macOS": {
-       "signingIdentity": "Developer ID Application: <Your Name> (<TEAMID>)",
-       "entitlements": "entitlements.plist"
-     }
-   }
-   ```
-   Sign sidecars + bundled node/python too (`cargo tauri build` does this when the identity is set;
-   each runs with `--options runtime`).
-2. **Build**: `cargo tauri build` (now Developer-ID-signed instead of ad-hoc).
-3. **Notarize** the `.dmg`:
-   ```bash
-   xcrun notarytool submit "src-tauri/target/release/bundle/dmg/Mycelium_0.1.0_aarch64.dmg" \
-     --apple-id "<you@apple.id>" --team-id "<TEAMID>" --password "<app-specific-pw>" --wait
-   xcrun stapler staple "src-tauri/target/release/bundle/dmg/Mycelium_0.1.0_aarch64.dmg"
-   ```
-4. **Verify**: `spctl -a -t open --context context:primary-signature <dmg>` → "accepted",
-   and `codesign --verify --deep --strict Mycelium.app`.
+Requires an **Apple Developer account** ($99/yr) with a *Developer ID Application* certificate, and
+an app-specific password (or App Store Connect API key).
 
-Tauri can automate signing in CI via env: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
-`APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`.
+### Correct flow (as-built)
 
-**Why I stopped here:** there is no Developer-ID identity on this machine
-(`security find-identity -v -p codesigning` → none), and notarization publishes the binary to
-Apple with your credentials — not something to fake or guess.
+**Local (one machine):**
+```bash
+# one-time: store notarization creds in the login keychain
+xcrun notarytool store-credentials mycelium-notary \
+  --apple-id "<you@apple.id>" --team-id "<TEAMID>" --password "<app-specific-pw>"
+
+cargo tauri build --bundles app          # ad-hoc; do NOT set APPLE_* here
+APPLE_SIGNING_IDENTITY="Developer ID Application: <Your Name> (<TEAMID>)" \
+  bash scripts/notarize-macos.sh         # deep-sign inside-out → notarize app →
+                                         # hdiutil DMG from stapled app → notarize DMG
+```
+- `scripts/sign-macos.sh` signs **every** nested Mach-O inside-out (content-detected,
+  not by extension), applying `src-tauri/entitlements-child.plist` to the bundled
+  `node`/`python3` (they run as their own processes → need JIT + library-validation
+  exceptions on their own signatures) and hardened-runtime-only to the Go sidecars +
+  libs, then seals the `.app` last. No `--deep` (Apple-discouraged).
+- `scripts/notarize-macos.sh` orchestrates sign → notarize → DMG → notarize.
+- `tauri.conf.json` stays `signingIdentity: "-"` — we own all signing post-build.
+
+**CI (both arches, automated):** push a `v*` tag → `.github/workflows/desktop-release.yml`
+builds, signs, notarizes, and attaches `Mycelium_<ver>_aarch64.dmg` + `_x64.dmg` to the
+Release. Operator wires 6 repo secrets (listed in that workflow's header).
+
+**Verify:** `spctl -a -t open --context context:primary-signature <dmg>` → "accepted";
+`xcrun stapler validate <dmg>`; `codesign --verify --deep --strict Mycelium.app`.
+
+<details><summary>Original (incorrect) step 1 — kept for history</summary>
+
+> ~~Set signing + entitlements in `tauri.conf.json` … Sign sidecars + bundled
+> node/python too (`cargo tauri build` does this when the identity is set).~~
+> — false; Tauri does not sign nested `Resources/` Mach-O (tauri#8075).
+</details>
 
 ## §B — Rebuild with latest code (after merges)
 

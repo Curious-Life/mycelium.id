@@ -4,31 +4,55 @@
 #
 # Output:  <repo>/build-staging/  — everything the packaged app needs at runtime
 # with ZERO host prerequisites:
-#   node                    bundled Node v22.x arm64 binary
+#   node                    bundled Node v22.x binary (target-arch)
 #   python/bin/python3      relocatable python-build-standalone 3.12 + ALL wheels
 #   hf-cache/hub/…          Nomic v1.5 ONNX model (offline first run, via HF_HOME)
-#   node_modules/…          incl. the native better_sqlite3.node (arm64)
+#   node_modules/…          incl. the native better_sqlite3.node (HOST-arch)
 #   src/ pipeline/ migrations/ package.json portal-app/build/
 #
 # The heavy runtime bits (Node binary, Python+wheels, model) are built ONCE into
-# <repo>/.build-cache/runtime/ and reused; only the app code re-syncs each run, so
-# iterative `cargo tauri build`s stay fast. Wired as tauri.conf
+# <repo>/.build-cache/runtime-<arch>/ and reused; only the app code re-syncs each
+# run, so iterative `cargo tauri build`s stay fast. Wired as tauri.conf
 # `build.beforeBuildCommand`. Verified relocatable by Spikes P + N
 # (docs/DESIGN-packaged-app-distribution-2026-06-02.md).
 #
-# macOS arm64 only (matches the bundled Node/Python + native wheels). Needs network
-# at BUILD time (downloads + pip + npm) — never at the user's runtime.
+# macOS, arm64 OR x86_64 — set MYC_ARCH (defaults to host). The bundled
+# Node/Python/wheels + node_modules better_sqlite3.node are arch-specific and do
+# NOT cross-compile: build each arch on a runner of that arch (Intel => macos-13,
+# Apple Silicon => macos-14). node_modules is rsync'd from the host's npm install,
+# so run `npm ci` on the target-arch runner before this script. Needs network at
+# BUILD time (downloads + pip + npm) — never at the user's runtime.
+# See docs/DESIGN-macos-signed-distribution-2026-06-17.md.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGE="$REPO/build-staging"
 CACHE="$REPO/.build-cache"
-RT="$CACHE/runtime"
+
+# ── Target architecture ───────────────────────────────────────────────────────
+# Defaults to the host arch; override with MYC_ARCH=x86_64|arm64 to stage an
+# Intel bundle on an Intel runner (native wheels + better_sqlite3.node + bundled
+# Node/Python are arch-specific and DO NOT cross-compile — build each arch on a
+# runner of that arch; see docs/DESIGN-macos-signed-distribution-2026-06-17.md).
+MYC_ARCH="${MYC_ARCH:-$(uname -m)}"
+case "$MYC_ARCH" in
+  arm64|aarch64) MYC_ARCH=arm64;  PBS_ARCH=aarch64; NODE_ARCH=arm64 ;;
+  x86_64|amd64)  MYC_ARCH=x86_64; PBS_ARCH=x86_64;  NODE_ARCH=x64   ;;
+  *) echo "[build-app-bundle] FATAL — unsupported MYC_ARCH: $MYC_ARCH (want arm64|x86_64)" >&2; exit 1 ;;
+esac
+# Arch-scoped runtime cache so an arm64 cache never poisons an x86_64 build (and
+# vice-versa) on a machine that builds both.
+RT="$CACHE/runtime-${MYC_ARCH}"
+# One-time migration: adopt the pre-arch-split cache (was $CACHE/runtime, always
+# arm64) so existing arm64 dev machines don't re-download Node/Python + re-pip.
+if [ "$MYC_ARCH" = arm64 ] && [ -d "$CACHE/runtime" ] && [ ! -d "$RT" ]; then
+  mv "$CACHE/runtime" "$RT"
+fi
 
 PY_VER="3.12.13"; PBS_TAG="20260510"
-PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/cpython-${PY_VER}%2B${PBS_TAG}-aarch64-apple-darwin-install_only.tar.gz"
+PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/cpython-${PY_VER}%2B${PBS_TAG}-${PBS_ARCH}-apple-darwin-install_only.tar.gz"
 NODE_VER="v22.22.3"
-NODE_URL="https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-darwin-arm64.tar.gz"
+NODE_URL="https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-darwin-${NODE_ARCH}.tar.gz"
 
 log(){ echo "[stage] $*"; }
 mkdir -p "$CACHE" "$RT"
@@ -61,11 +85,12 @@ refresh_glass_icon
 ensure_node(){
   if [ -x "$RT/node" ]; then log "node: cached ($("$RT/node" --version))"; return; fi
   log "node: downloading ${NODE_VER}…"
-  local tgz="$CACHE/node-${NODE_VER}.tar.gz"
+  local tgz="$CACHE/node-${NODE_VER}-${NODE_ARCH}.tar.gz"
   [ -f "$tgz" ] || curl -fsSL "$NODE_URL" -o "$tgz"
-  rm -rf "$CACHE/node-x"; mkdir -p "$CACHE/node-x"; tar -xzf "$tgz" -C "$CACHE/node-x"
-  cp "$CACHE/node-x/node-${NODE_VER}-darwin-arm64/bin/node" "$RT/node"; chmod +x "$RT/node"
-  rm -rf "$CACHE/node-x"
+  local nx="$CACHE/node-x-${NODE_ARCH}"
+  rm -rf "$nx"; mkdir -p "$nx"; tar -xzf "$tgz" -C "$nx"
+  cp "$nx/node-${NODE_VER}-darwin-${NODE_ARCH}/bin/node" "$RT/node"; chmod +x "$RT/node"
+  rm -rf "$nx"
   log "node: $("$RT/node" --version)"
 }
 
@@ -77,7 +102,7 @@ ensure_python(){
     log "python: cached (deps current)"; return
   fi
   log "python: building relocatable ${PY_VER} + wheels (one-time, slow)…"
-  local tgz="$CACHE/pbs-${PY_VER}-${PBS_TAG}.tar.gz"
+  local tgz="$CACHE/pbs-${PY_VER}-${PBS_TAG}-${PBS_ARCH}.tar.gz"
   [ -f "$tgz" ] || curl -fsSL "$PBS_URL" -o "$tgz"
   rm -rf "$RT/python"; tar -xzf "$tgz" -C "$RT"   # extracts ./python/
   "$RT/python/bin/python3" -m pip install --quiet --disable-pip-version-check \
