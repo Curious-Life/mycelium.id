@@ -8,6 +8,7 @@ import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
+import { diffTools, toolDiffDetail, EXPECTED_TOOL_COUNT } from './lib/expected-tools.mjs';
 
 const DB = 'data/verify-forget.db', KCV = 'data/verify-forget-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -24,7 +25,7 @@ const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAI
 const one = async (sql, params) => (await db.rawQuery(sql, params)).results?.[0] || {};
 
 const names = tools.map((t) => t.name);
-rec('F1. forget + mark registered; total tools = 34', names.includes('forget') && names.includes('mark') && tools.length === 34, `${tools.length} tools`);
+rec(`F1. forget + mark registered; full roster intact (${EXPECTED_TOOL_COUNT} tools)`, names.includes('forget') && names.includes('mark') && diffTools(tools).ok, toolDiffDetail(tools));
 
 // Seed a message + fingerprints + clustering point, and index it (BM25, no embedder).
 const id = 'm-forget';

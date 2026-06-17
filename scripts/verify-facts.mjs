@@ -9,6 +9,7 @@ import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
+import { diffTools, toolDiffDetail, EXPECTED_TOOL_COUNT } from './lib/expected-tools.mjs';
 
 const DB = 'data/verify-facts.db', KCV = 'data/verify-facts-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -32,7 +33,7 @@ function looksEncrypted(value) {
 }
 
 const names = tools.map((t) => t.name);
-rec('FA1. remember registered; total tools = 34', names.includes('remember') && tools.length === 34, `${tools.length} tools`);
+rec(`FA1. remember registered; full roster intact (${EXPECTED_TOOL_COUNT} tools)`, names.includes('remember') && diffTools(tools).ok, toolDiffDetail(tools));
 
 // ── remember a fact ──
 const PLAIN = 'oat flat white';
