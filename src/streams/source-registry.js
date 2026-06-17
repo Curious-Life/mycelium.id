@@ -30,6 +30,8 @@ const KIND_BY_SOURCE = {
   apple: 'device', apple_health: 'device',
   // portal / direct
   portal: 'portal', api: 'portal',
+  // imports / uploads
+  upload: 'knowledge',
   // synthetic
   task: 'task',
 };
@@ -48,6 +50,9 @@ const CANONICAL = {
   'telegram-group': 'telegram',
   'discord-thread': 'discord',
   'inference:chat': 'portal',
+  // real live tags seen against actual vaults: hyphenated apple, portal chat.
+  'apple-health': 'apple_health',
+  'portal-chat': 'portal',
 };
 
 // Platform sources carry a per-conversation id suffix (telegram_<chatId>,
@@ -62,6 +67,10 @@ export function canonicalSource(raw) {
   let base = s;
   const us = s.indexOf('_');
   if (us > 0 && SUFFIXED_HEADS.has(s.slice(0, us))) base = s.slice(0, us);
+  // Sub-source paths fold to their head so a chip groups its variants:
+  // 'claude-code/subagent' → 'claude-code', 'gateway/bg' → 'gateway', etc.
+  const slash = base.indexOf('/');
+  if (slash > 0) base = base.slice(0, slash);
   return CANONICAL[base] || base;
 }
 
