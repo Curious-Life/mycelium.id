@@ -34,15 +34,19 @@
 </script>
 
 <div class="pane" class:focused={focused && multiPane} data-pane-id={pane.id} onpointerdowncapture={() => workspace.focusPane(pane.id)}>
-	<TabStrip
-		tabs={pane.tabs}
-		activeTabId={pane.activeTabId}
-		paneId={pane.id}
-		onfocus={(id) => workspace.focusTab(id)}
-		onclose={(id) => workspace.closeTab(id)}
-		onopen={(viewId) => workspace.openInPane(pane.id, viewId)}
-		onreorder={(tabId, toIndex) => workspace.moveTabWithinPane(pane.id, tabId, toIndex)}
-	/>
+	<!-- Single-pane: the tabs are hoisted into the header (Header.svelte), so the
+	     in-pane strip is suppressed. Multi-pane (split): each pane keeps its own. -->
+	{#if multiPane}
+		<TabStrip
+			tabs={pane.tabs}
+			activeTabId={pane.activeTabId}
+			paneId={pane.id}
+			onfocus={(id) => workspace.focusTab(id)}
+			onclose={(id) => workspace.closeTab(id)}
+			onopen={(viewId) => workspace.openInPane(pane.id, viewId)}
+			onreorder={(tabId, toIndex) => workspace.moveTabWithinPane(pane.id, tabId, toIndex)}
+		/>
+	{/if}
 	<div class="pane-body">
 		{#each pane.tabs as tab (tab.id)}
 			{@const Comp = comps[tab.viewId]}

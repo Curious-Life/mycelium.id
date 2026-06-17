@@ -46,6 +46,9 @@
 	let contactPositions: Map<string, THREE.Vector3> = new Map();
 	let coordScale = SCENE_SCALE; // updated by createPointCloud based on data range
 	let showPoints = $state(true);
+	// Layer-controls panel: collapsed to a tiny pill by default (per app-UI feedback)
+	// so it doesn't crowd the mindscape; click to reveal the Points/Contacts toggles.
+	let layersOpen = $state(false);
 
 	// Co-firing connections state
 	let cofireLines: THREE.LineSegments | null = null;
@@ -2579,10 +2582,20 @@
 		</div>
 	{/if}
 
-	<!-- Layer controls -->
-	<div class="absolute bottom-4 right-4 ms-glass rounded-lg border border-[var(--color-border)] p-2.5 min-w-[140px] max-h-[calc(100%-7rem)] overflow-y-auto">
-		<div class="text-[0.55rem] uppercase tracking-wider text-[var(--color-text-tertiary)] mb-1.5 px-1">Layers</div>
+	<!-- Layer controls — collapsed to a tiny pill by default; expands on click. -->
+	<div class="absolute bottom-4 right-4 ms-glass rounded-lg border border-[var(--color-border)] {layersOpen ? 'p-2.5 min-w-[140px] max-h-[calc(100%-7rem)] overflow-y-auto' : 'p-0'}">
+		<button
+			onclick={() => (layersOpen = !layersOpen)}
+			class="flex items-center gap-1.5 text-[0.55rem] uppercase tracking-wider text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors w-full {layersOpen ? 'mb-1.5 px-1' : 'px-2 py-1.5'}"
+			aria-expanded={layersOpen}
+			title="Layers"
+		>
+			<span class="w-1.5 h-1.5 rounded-full bg-[var(--color-text-tertiary)]"></span>
+			Layers
+			{#if layersOpen}<span class="ml-auto text-[0.6rem]">×</span>{/if}
+		</button>
 
+		{#if layersOpen}
 		<!-- Points layer -->
 		<button
 			onclick={togglePoints}
@@ -2626,6 +2639,7 @@
 				{/each}
 			</div>
 		{/if}
+	{/if}
 	</div>
 
 	<!-- Radio drum dial — ticks on a barrel surface -->
