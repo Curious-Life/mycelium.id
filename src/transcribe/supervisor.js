@@ -14,8 +14,18 @@
 // embedder (PATH/HOME/HF_*) plus the chosen model tag.
 
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dataDir } from '../paths.js';
+
+// requirements live next to pipeline/ — resolve from the repo root (this file is src/transcribe/).
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const REQ_FILE = join(REPO_ROOT, 'pipeline', 'requirements-transcribe.txt');
+// Whisper models download from HF → a PERSISTENT user-data cache (NOT the bundle's
+// offline Nomic cache), and downloads must be ONLINE (the parent sets
+// HF_HUB_OFFLINE=1 for the shipped embed model — we override it here).
+const WHISPER_HF_HOME = process.env.MYCELIUM_WHISPER_HF_HOME || join(dataDir(), 'models', 'whisper-cache');
 
 const DEFAULT_PORT = Number(process.env.MYCELIUM_TRANSCRIBE_PORT) || 8093;
 const PROBE_TIMEOUT_MS = 2500;
@@ -96,8 +106,11 @@ export function startTranscribeSupervisor({
   const childEnv = () => ({
     PATH: process.env.PATH,
     HOME: process.env.HOME,
-    ...(process.env.HF_HOME ? { HF_HOME: process.env.HF_HOME } : {}),
-    ...(process.env.HF_HUB_OFFLINE ? { HF_HUB_OFFLINE: process.env.HF_HUB_OFFLINE } : {}),
+    // The whisper model is USER-downloaded: a persistent user-data HF cache +
+    // ONLINE (override the parent's HF_HUB_OFFLINE=1, which is for the shipped
+    // offline embed model and would block this download).
+    HF_HOME: WHISPER_HF_HOME,
+    HF_HUB_OFFLINE: '0',
     ...(chosenModel ? { MYCELIUM_WHISPER_MODEL: chosenModel } : {}),
   });
 
@@ -117,7 +130,7 @@ export function startTranscribeSupervisor({
       const extra = h?.progress ? { progress: h.progress } : {};
       if (h?.model) chosenModel = h.model;
       if (h?.status === 'deps_missing') {
-        setHealth('deps_missing', 'Transcription needs setup — run: pipeline/.venv/bin/pip install -r pipeline/requirements-transcribe.txt', `python: ${python}`);
+        setHealth('installing_deps', 'Installing the transcription engine…', `python: ${python}`);
       } else if (h?.status === 'error') {
         setHealth('error', 'The transcription model failed.', h?.error || null);
       } else if (h?.status === 'downloading') {
@@ -148,17 +161,43 @@ export function startTranscribeSupervisor({
 
   function backoff() { nextStartAt = Date.now() + Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(failures, 5)); }
 
+  // Auto-install the python deps (faster-whisper + scipy) — UI-driven, no manual
+  // pip command. Tried once per supervisor lifetime; a failure surfaces actionably.
+  let _depsAttempted = false;
+  function pipInstallDeps() {
+    return new Promise((resolve) => {
+      let p;
+      try { p = spawn(python, ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', REQ_FILE], { stdio: 'ignore' }); }
+      catch { return resolve(false); }
+      p.on('error', () => resolve(false));
+      p.on('close', (code) => resolve(code === 0));
+    });
+  }
+
   async function tryStart() {
     if (stopped || child || Date.now() < nextStartAt) return;
 
     if (!(await checkDeps())) {
-      setHealth('deps_missing', 'Transcription needs setup — run: pipeline/.venv/bin/pip install -r pipeline/requirements-transcribe.txt', `python: ${python}`);
-      nextStartAt = Date.now() + DEPS_RETRY_MS;
-      return;
+      if (!_depsAttempted) {
+        _depsAttempted = true;
+        setHealth('installing_deps', 'Installing the transcription engine (one-time, ~1 min)…', `python: ${python}`);
+        await pipInstallDeps();
+        if (!(await checkDeps())) {
+          setHealth('deps_missing', 'Transcription engine install failed — check your connection, then re-select the model.', `python: ${python}`);
+          nextStartAt = Date.now() + DEPS_RETRY_MS;
+          return;
+        }
+        // deps now present → fall through and start the service
+      } else {
+        setHealth('deps_missing', 'Transcription engine not installed yet — re-select the model to retry.', `python: ${python}`);
+        nextStartAt = Date.now() + DEPS_RETRY_MS;
+        return;
+      }
     }
 
     setHealth('starting', failures ? 'Restarting the transcription engine…' : 'Starting the transcription engine…');
     try {
+      mkdirSync(WHISPER_HF_HOME, { recursive: true }); // ensure the user-data HF cache exists
       child = spawn(python, ['pipeline/transcribe-service.py', '--serve', '--port', String(port)], {
         cwd: home, env: childEnv(), stdio: ['ignore', 'ignore', 'pipe'],
       });
