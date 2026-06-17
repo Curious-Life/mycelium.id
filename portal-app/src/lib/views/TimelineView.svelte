@@ -263,7 +263,7 @@
 		{:else if messages.length > 0}
 		<div class="flex items-center gap-2 px-4 sm:px-6 py-2.5">
 			<span class="text-xs text-[var(--color-text-tertiary)]">
-				{filteredMessages.length} {filteredMessages.length === 1 ? 'message' : 'messages'}{#if externalSource} in {externalSource}{/if}
+				{filteredMessages.length} {filteredMessages.length === 1 ? 'message' : 'messages'}{#if externalSource}{' '}in {externalSource}{/if}
 			</span>
 		</div>
 		{/if}
