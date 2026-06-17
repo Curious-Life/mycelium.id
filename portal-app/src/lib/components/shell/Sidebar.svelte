@@ -163,9 +163,44 @@
 				: 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)]'}"
 			aria-current={isActive ? 'page' : undefined}
 		>
-			<div class="w-1.5 h-1.5 rounded-full transition-all duration-150 flex-shrink-0
-				{isActive ? 'bg-[var(--color-accent)]' : 'bg-transparent group-hover:bg-[var(--color-text-tertiary)]'}">
-			</div>
+			<!-- Small, simple line icons (14px, 1.5 stroke). The icon IS the active
+			     marker now — accent when active, tertiary otherwise — so there's no
+			     separate dot. -->
+			<span class="flex items-center justify-center w-3.5 h-3.5 flex-shrink-0
+				{isActive ? 'text-[var(--color-accent)]' : 'text-[var(--color-text-tertiary)] group-hover:text-[var(--color-text-secondary)]'}">
+				{#if item.icon === 'ratio'}
+					<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+						<rect width="11" height="18" x="6.5" y="3" rx="2"/><rect width="18" height="11" x="3" y="6.5" rx="2"/>
+					</svg>
+				{:else if item.icon === 'folder'}
+					<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linejoin="round">
+						<path d="M3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-7l-2-2H5a2 2 0 0 0-2 2z"/>
+					</svg>
+				{:else if item.icon === 'streams'}
+					<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round">
+						<path d="M3 9c.6.5 1.2 1 2.5 1C8 10 8 8 10.5 8c2.6 0 2.4 2 5 2 1.3 0 1.9-.5 2.5-1"/>
+						<path d="M3 15c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 1.3 0 1.9-.5 2.5-1"/>
+					</svg>
+				{:else if item.icon === 'people'}
+					<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round">
+						<circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/>
+					</svg>
+				{:else if item.icon === 'compass'}
+					<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linejoin="round">
+						<circle cx="12" cy="12" r="9"/><path d="m15 9-2 4-4 2 2-4z"/>
+					</svg>
+				{:else if item.icon === 'agents'}
+					<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round">
+						<rect x="4" y="9" width="16" height="10" rx="2.5"/><path d="M12 9V5"/><circle cx="12" cy="4" r="1"/>
+					</svg>
+				{:else if item.icon === 'settings'}
+					<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round">
+						<path d="M4 6h10M18 6h2"/><circle cx="16" cy="6" r="2"/>
+						<path d="M4 12h6M14 12h6"/><circle cx="12" cy="12" r="2"/>
+						<path d="M4 18h2M10 18h10"/><circle cx="8" cy="18" r="2"/>
+					</svg>
+				{/if}
+			</span>
 			<span class="text-sm font-medium">{item.label}</span>
 			{#if item.id === 'people' && peopleBadge > 0}
 				<span class="conn-badge" aria-label="{peopleBadge} new (invites, messages, shares)">{peopleBadge}</span>
@@ -184,9 +219,9 @@
 				{@render navLink(item)}
 			{/each}
 
-			<!-- All secondary destinations (Curious Life, Body & Health, Agents) render
-			     in the SAME flat list as the primary group — one level, no eyebrow
-			     section headers (per app-UI feedback: "all in one level"). -->
+			<!-- Secondary destinations (Curious Life, Agents) render in the SAME flat
+			     list as the primary group — one level, no eyebrow section headers.
+			     (Body & Health is reached via the Streams → Body tab, not the rail.) -->
 			{#each NAV_SECTIONS as section}
 				{#each section.items as item}
 					{@render navLink(item)}
