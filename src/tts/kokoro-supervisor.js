@@ -8,9 +8,7 @@
 // synthesizes text passed over loopback. Minimal env allowlist (PATH/HOME +
 // model paths). Loopback-only.
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { kokoroPaths, getModelState } from './kokoro-model.js';
+import { kokoroPaths, getModelState, resolveKokoroPython } from './kokoro-model.js';
 
 const PORT = Number(process.env.MYCELIUM_KOKORO_PORT) || 8094;
 const TICK_MS = 4000;
@@ -20,11 +18,10 @@ let _instance = null;
 let _health = { status: 'idle', message: 'Local TTS not started.' };
 export function getKokoroHealth() { return _health; }
 
-function resolvePython({ home }) {
-  if (process.env.MYCELIUM_PYTHON) return process.env.MYCELIUM_PYTHON;
-  const venv = join(home, 'pipeline/.venv/bin/python3');
-  return existsSync(venv) ? venv : 'python3';
-}
+// Shared resolver — the supervisor MUST use the same python as the pip-install
+// and the import-check (kokoro-model.js), or the service runs under a python
+// that lacks the package.
+const resolvePython = resolveKokoroPython;
 
 async function probe() {
   try {
