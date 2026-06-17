@@ -43,4 +43,8 @@ psutil>=5.9              # optional memory reporting in cluster.py
 
 # Python-side vault crypto (crypto_local.py: HKDF→AES-KW→AES-256-GCM) for the
 # local clustering pipeline (replaces the Worker's JS encryption).
-cryptography>=42
+# Cap <45: cryptography 45+ dropped Intel-mac wheels (49 ships arm64-only); 44.x
+# still publishes macosx_10_9_universal2 (arm64+x86_64), so the x86_64 bundle
+# installs from a wheel — no Rust/OpenSSL source build on the Intel runner.
+# Verified on PyPI 2026-06-17. See docs/DESIGN-macos-signed-distribution-2026-06-17.md.
+cryptography>=42,<45
