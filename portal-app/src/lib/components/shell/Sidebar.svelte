@@ -166,51 +166,6 @@
 			<div class="w-1.5 h-1.5 rounded-full transition-all duration-150 flex-shrink-0
 				{isActive ? 'bg-[var(--color-accent)]' : 'bg-transparent group-hover:bg-[var(--color-text-tertiary)]'}">
 			</div>
-			<div class="w-5 h-5 flex items-center justify-center flex-shrink-0">
-				{#if item.icon === 'ratio'}
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-						<rect width="12" height="20" x="6" y="2" rx="2"/>
-						<rect width="20" height="12" x="2" y="6" rx="2"/>
-					</svg>
-				{:else if item.icon === 'folder'}
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-					</svg>
-				{:else if item.icon === 'streams'}
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-						<path d="M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5c2.6 0 2.4 2 5 2 1.3 0 1.9-.5 2.5-1"/>
-						<path d="M2 12c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 1.3 0 1.9-.5 2.5-1"/>
-						<path d="M2 18c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 1.3 0 1.9-.5 2.5-1"/>
-					</svg>
-				{:else if item.icon === 'people'}
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-						<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
-						<circle cx="9" cy="7" r="4"/>
-						<path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
-						<path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-					</svg>
-				{:else if item.icon === 'compass'}
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-						<circle cx="12" cy="12" r="9" />
-						<path stroke-linecap="round" stroke-linejoin="round" d="M14.8 9.2l-1.7 3.9-3.9 1.7 1.7-3.9z" />
-					</svg>
-				{:else if item.icon === 'body'}
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-						<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.29 1.51 4.04 3 5.5l7 7Z"/>
-					</svg>
-				{:else if item.icon === 'agents'}
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-						<rect x="4" y="8" width="16" height="11" rx="2"/>
-						<path d="M12 8V4M9 4h6"/>
-						<circle cx="9" cy="13" r="1"/><circle cx="15" cy="13" r="1"/>
-					</svg>
-				{:else if item.icon === 'settings'}
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-					</svg>
-				{/if}
-			</div>
 			<span class="text-sm font-medium">{item.label}</span>
 			{#if item.id === 'people' && peopleBadge > 0}
 				<span class="conn-badge" aria-label="{peopleBadge} new (invites, messages, shares)">{peopleBadge}</span>
@@ -229,14 +184,10 @@
 				{@render navLink(item)}
 			{/each}
 
-			<!-- Sections below the primary group (Curious Life, the Agents section).
-			     Each renders its eyebrow label then its items, all via navLink. -->
+			<!-- All secondary destinations (Curious Life, Body & Health, Agents) render
+			     in the SAME flat list as the primary group — one level, no eyebrow
+			     section headers (per app-UI feedback: "all in one level"). -->
 			{#each NAV_SECTIONS as section}
-				{#if section.label}
-					<div class="px-3 pt-3 pb-1">
-						<span class="text-[0.65rem] font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider">{section.label}</span>
-					</div>
-				{/if}
 				{#each section.items as item}
 					{@render navLink(item)}
 				{/each}

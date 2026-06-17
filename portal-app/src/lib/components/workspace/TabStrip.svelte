@@ -5,7 +5,7 @@
 	import { workspace, tabDrag, type DropEdge } from '$lib/workspace/store';
 	import type { Tab as TabT } from '$lib/workspace/types';
 
-	let { tabs, activeTabId, paneId, onfocus, onclose, onopen, onreorder }: {
+	let { tabs, activeTabId, paneId, onfocus, onclose, onopen, onreorder, inline = false }: {
 		tabs: TabT[];
 		activeTabId: string | null;
 		paneId: string;
@@ -13,6 +13,7 @@
 		onclose: (id: string) => void;
 		onopen: (viewId: string) => void;
 		onreorder: (tabId: string, toIndex: number) => void;
+		inline?: boolean;   // rendered in the header row — sheds the bar chrome
 	} = $props();
 
 	let menuOpen = $state(false);
@@ -122,7 +123,7 @@
 	}
 </script>
 
-<div class="tab-strip" role="tablist">
+<div class="tab-strip" class:inline role="tablist">
 	<div class="tabs" role="group" bind:this={tabsEl} onpointerdown={onPointerDown} onclickcapture={onClickCapture}>
 		{#each tabs as tab (tab.id)}
 			<Tab
@@ -155,6 +156,9 @@
 		display: flex; align-items: stretch; height: 36px; min-height: 36px;
 		background: var(--color-surface); border-bottom: 1px solid var(--color-border);
 	}
+	/* Inline (hoisted into the header row): no separate bar — transparent, no
+	   border, fill the header height so the active-tab underline sits at its edge. */
+	.tab-strip.inline { height: 100%; min-height: 0; background: transparent; border-bottom: none; flex: 1; min-width: 0; }
 	.tabs { display: flex; overflow-x: auto; scrollbar-width: none; flex: 1; min-width: 0; }
 	.tabs::-webkit-scrollbar { display: none; }
 	.actions { display: flex; align-items: stretch; flex-shrink: 0; }

@@ -3,12 +3,23 @@
 	import { browser } from '$app/environment';
 	import { navigationState } from '$lib/stores/navigation';
 	import { theme } from '$lib/stores/theme';
-	import { activity, startActivityPolling, fmtEta } from '$lib/stores/activity';
 	import { viewLabel } from '$lib/nav/config';
-
-	let activityOpen = $state(false);
+	import { workspace } from '$lib/workspace/store';
+	import TabStrip from '$lib/components/workspace/TabStrip.svelte';
+	import type { WsNode, LeafPane } from '$lib/workspace/types';
 
 	const currentView = $derived($navigationState.primaryView);
+
+	// Hoist the workspace tabs into the header row (one bar instead of two) for the
+	// common single-pane case. When the workspace is split into multiple panes, each
+	// pane keeps its own in-pane strip (Pane.svelte) and the header shows none.
+	function collectLeaves(n: WsNode): LeafPane[] {
+		return n.kind === 'leaf' ? [n] : [...collectLeaves(n.children[0]), ...collectLeaves(n.children[1])];
+	}
+	const onlyPane: LeafPane | null = $derived.by(() => {
+		const leaves = collectLeaves($workspace.root);
+		return leaves.length === 1 ? leaves[0] : null;
+	});
 	const chatOpen = $derived($navigationState.chatOpen);
 	const currentTheme = $derived($theme);
 
@@ -18,13 +29,12 @@
 	// page (external URL) doesn't get the attribute handler wired.
 	let isTauri = $state(false);
 	onMount(() => { if (browser) isTauri = !!(window as any).__TAURI__ || !!(window as any).__TAURI_INTERNALS__; });
-	// Poll the unified activity feed so the stream dot is live on every page.
-	onMount(() => startActivityPolling());
 
 	function startWindowDrag(e: MouseEvent) {
 		if (!isTauri || e.button !== 0) return;
 		const t = e.target as HTMLElement;
-		if (t.closest('button, a, input, select, textarea, [role="button"]')) return; // let controls work
+		// Controls + the hoisted tab strip own their own gestures (click/drag-reorder).
+		if (t.closest('button, a, input, select, textarea, [role="button"], .tab-strip')) return;
 		try {
 			// `withGlobalTauri` is OFF (hardening: no full Tauri API on window for the
 			// remote origin), so reach the core window command through the internals
@@ -79,55 +89,28 @@
 		{viewLabel(currentView)}
 	</h2>
 
-	<!-- Flex spacer -->
-	<div class="flex-1"></div>
+	<!-- Workspace tabs, hoisted into the header (desktop, single pane) — one bar, not
+	     two. Falls back to a flex spacer on mobile / when the workspace is split. -->
+	{#if onlyPane}
+		<div class="hidden md:flex flex-1 min-w-0 self-stretch overflow-hidden">
+			<TabStrip
+				inline
+				tabs={onlyPane.tabs}
+				activeTabId={onlyPane.activeTabId}
+				paneId={onlyPane.id}
+				onfocus={(id) => workspace.focusTab(id)}
+				onclose={(id) => workspace.closeTab(id)}
+				onopen={(viewId) => workspace.openInPane(onlyPane.id, viewId)}
+				onreorder={(tabId, toIndex) => workspace.moveTabWithinPane(onlyPane.id, tabId, toIndex)}
+			/>
+		</div>
+		<div class="flex-1 md:hidden"></div>
+	{:else}
+		<div class="flex-1"></div>
+	{/if}
 
 	<!-- Right side actions -->
 	<div class="flex items-center gap-1 sm:gap-2 flex-shrink-0">
-		<!-- Activity stream dot — pulses while background/inference jobs run; click
-		     for the live list (stage · done/total · ETA). Reads the unified feed. -->
-		{#if $activity.active.length > 0}
-			<div class="relative">
-				<button
-					onclick={() => (activityOpen = !activityOpen)}
-					class="h-8 px-2 rounded-full border border-[var(--color-border)] bg-[var(--color-elevated)] flex items-center gap-1.5 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent)] transition-all"
-					title="Background activity"
-					aria-label={`Background activity (${$activity.active.length})`}
-					aria-expanded={activityOpen}
-				>
-					<span class="relative flex h-2 w-2">
-						<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--color-accent)] opacity-60"></span>
-						<span class="relative inline-flex rounded-full h-2 w-2 bg-[var(--color-accent)]"></span>
-					</span>
-					<span class="text-[11px] font-medium">{$activity.active.length}</span>
-				</button>
-				{#if activityOpen}
-					<!-- Click-away backdrop (transparent) — closes the popover on
-					     any outside click/scroll-tap. -->
-					<!-- svelte-ignore a11y_no_static_element_interactions -->
-					<!-- svelte-ignore a11y_click_events_have_key_events -->
-					<div class="fixed inset-0 z-[59]" onclick={() => (activityOpen = false)}></div>
-					<!-- POSITION: FIXED, not absolute. The .app-header has overflow-hidden
-					     (drag-strip clip), which was scissoring this top-full dropdown into
-					     an invisible sliver under the content. A viewport-anchored fixed
-					     popover escapes the clip. No ancestor has transform/filter, so
-					     fixed resolves to the viewport. Offset matches header height
-					     (h-12 / md:h-14) + the right padding (px-3 / sm:px-4). -->
-					<div class="fixed top-[3.25rem] md:top-[3.75rem] right-3 sm:right-4 z-[60] min-w-[240px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 shadow-lg" style="backdrop-filter: blur(12px) saturate(140%); -webkit-backdrop-filter: blur(12px) saturate(140%);">
-						<div class="px-2.5 py-1 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Active</div>
-						{#each $activity.active as j (j.id)}
-							<div class="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
-								<span class="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] flex-shrink-0"></span>
-								<span class="text-[var(--color-text-primary)] truncate">{j.stage}</span>
-								{#if j.total > 0}<span class="text-[var(--color-text-tertiary)] flex-shrink-0">{j.done}/{j.total}</span>{/if}
-								{#if fmtEta(j.etaSeconds)}<span class="ml-auto text-[var(--color-accent)] flex-shrink-0">{fmtEta(j.etaSeconds)} left</span>{/if}
-							</div>
-						{/each}
-					</div>
-				{/if}
-			</div>
-		{/if}
-
 		<!-- Chat agent toggle (Cmd/Ctrl+J) — opens the floating tool-using agent. -->
 		<button
 			onclick={() => navigationState.toggleChat()}
