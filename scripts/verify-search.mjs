@@ -136,11 +136,15 @@ function freshDb() {
   return raw;
 }
 
-function seedRows(raw) {
+function seedMessages(raw) {
   const ins = raw.prepare('INSERT INTO messages (id, user_id, role, content, source, agent_id, created_at) VALUES (?,?,?,?,?,?,?)');
   ins.run('m-forest-1', 'local-user', 'user', ROWS[0].content, 'chat', 'personal-agent', '2026-05-01 10:00:00');
   ins.run('m-forest-2', 'local-user', 'user', ROWS[1].content, 'chat', 'research-agent', '2026-05-02 10:00:00');
   ins.run('m-money-1', 'local-user', 'user', ROWS[2].content, 'chat', 'wealth-agent', '2026-05-03 10:00:00');
+}
+
+function seedRows(raw) {
+  seedMessages(raw);
   const t = raw.prepare('INSERT INTO territory_profiles (territory_id, user_id, name, essence, message_count, top_entities, created_at) VALUES (?,?,?,?,?,?,?)');
   t.run(101, 'local-user', 'Forest Ecology', 'mycelium networks and forest roots', 12, '[]', '2026-05-01 10:00:00');
   // Seed realms + semantic_themes so the realm/theme layers of bulkSearch and
@@ -153,7 +157,31 @@ function seedRows(raw) {
   s.run(301, 201, 'local-user', 'Forest Theme', 'mycelium forest roots theme', 8);
   // NOTE: documents are seeded AFTER boot via db.documents.upsert (the ENCRYPTING
   // path), not here — see seedDocuments(). Raw plaintext doc rows would mask the
-  // encrypted-text indexing bug the live smoke caught (2026-06-18).
+  // encrypted-text indexing bug the live smoke caught (2026-06-18). The same is true
+  // of topology name/essence — bulkSearchDb re-seeds those ENCRYPTED via
+  // seedTopologyEncrypted(); this plaintext seed is for the MCP grounding path only.
+}
+
+// Seed the topology rows (territory/realm/theme) through the ENCRYPTING db path
+// (db.rawQuery → d1Query → autoEncryptParams), so name + essence are stored as real
+// AES-GCM envelopes — mirroring seedDocuments() for the profile sources. This
+// exercises the loader's per-column decrypt + JS-concat (textFrom) path. Plaintext
+// raw-SQL topology rows index fine even under the broken SQL-concat loader
+// (`name || ' ' || essence` over two envelopes → garbage), masking the bug — the
+// IDENTICAL root cause fixed for documents in PR #229. Each essence carries a
+// CONTENT-ONLY sentinel (absent from every name + message), so a hit PROVES essence
+// was decrypted-then-indexed, not just name. Same ids/names as the plaintext seed so
+// structure() counts stay at exactly 1 each. (2026-06-18)
+async function seedTopologyEncrypted(db) {
+  await db.rawQuery(
+    'INSERT INTO territory_profiles (territory_id, user_id, name, essence, message_count, top_entities, created_at) VALUES (?,?,?,?,?,?,?)',
+    [101, 'local-user', 'Forest Ecology', 'mycelium networks and forest roots quignathol', 12, '[]', '2026-05-01 10:00:00']);
+  await db.rawQuery(
+    'INSERT INTO realms (realm_id, user_id, name, essence, message_count) VALUES (?,?,?,?,?)',
+    [201, 'local-user', 'Forest Realm', 'the broad forest mycelium realm vorthangle', 30]);
+  await db.rawQuery(
+    'INSERT INTO semantic_themes (semantic_theme_id, realm_id, user_id, name, essence, message_count) VALUES (?,?,?,?,?,?)',
+    [301, 201, 'local-user', 'Forest Theme', 'mycelium forest roots theme flemwicket', 8]);
 }
 
 // Seed documents through the encrypting db namespace so title/summary/content are
@@ -174,11 +202,12 @@ async function seedDocuments(db) {
 
 async function bulkSearchDb() {
   const raw = freshDb();
-  seedRows(raw);
+  seedMessages(raw); // messages raw (plaintext content indexes fine); topology seeded ENCRYPTED below
   // Build searchHelpers against a real encrypted db namespace via boot's createDb.
   // Simpler: reuse boot to get the db namespace, then a fresh helper over it.
   const { db, close } = await boot({ dbPath: DB, kcvPath: KCV, userHex: hex(), systemHex: hex(), embedder: createStubEmbedder(48) });
   await seedDocuments(db); // ENCRYPTED docs (envelopes) — exercises the real decrypt path
+  await seedTopologyEncrypted(db); // ENCRYPTED name/essence — exercises the per-column decrypt path for profiles
   const sh = createSearchHelpers({ db, embedder: createStubEmbedder(48), userId: 'local-user' });
 
   const res = await sh.bulkSearch({ query: 'forest mycelium roots', limit: 5 });
@@ -201,6 +230,33 @@ async function bulkSearchDb() {
   rec('bulkSearch: theme layer indexed + returned',
     res.themes.some((th) => /Forest Theme/.test(th)),
     `themes=${res.themes.length}`);
+
+  // Encrypted-essence regression guards (mirror the documents `zorbletwig` guard).
+  // Each sentinel lives ONLY in the (encrypted) essence of its row — never in the
+  // name or any message. The broken SQL-concat loader (`name || ' ' || essence`)
+  // joins two envelopes into a non-envelope; autoDecryptResults then decrypts only
+  // the FIRST whole envelope (name) and DROPS essence — so the essence-only term is
+  // absent from the index and must NOT surface. The fix (per-column decrypt +
+  // JS-concat via textFrom) indexes full name+essence, so it DOES.
+  //
+  // Crucially these run on a BM25-ONLY helper (no embedder): unlike documents
+  // (skipEmbed=true), profiles carry vectors, so the ANN tier of the stub embedder
+  // would surface the entity for ANY query — masking whether the keyword matched.
+  // Keyword-only isolates the BM25 signal, so the assertion truly depends on essence
+  // being in the indexed text. Verified to FAIL on the pre-fix loader. (2026-06-18)
+  const shKw = createSearchHelpers({ db, userId: 'local-user' }); // no embedder → BM25-only
+  const tEss = await shKw.bulkSearch({ query: 'quignathol', limit: 5 });
+  rec('bulkSearch: essence-only term surfaces territory (encrypted essence indexed, not just name)',
+    tEss.territories.formatted.some((f) => /Forest Ecology/.test(f)),
+    `territories=${tEss.territories.formatted.length}`);
+  const rEss = await shKw.bulkSearch({ query: 'vorthangle', limit: 5 });
+  rec('bulkSearch: essence-only term surfaces realm (encrypted essence indexed, not just name)',
+    rEss.realms.some((r) => /Forest Realm/.test(r)),
+    `realms=${rEss.realms.length}`);
+  const thEss = await shKw.bulkSearch({ query: 'flemwicket', limit: 5 });
+  rec('bulkSearch: essence-only term surfaces theme (encrypted essence indexed, not just name)',
+    thEss.themes.some((th) => /Forest Theme/.test(th)),
+    `themes=${thEss.themes.length}`);
 
   // ── Document layer (DOCUMENT-SEARCH design 2026-06-17) ───────────────────
   rec('bulkSearch: document layer indexed + returned in scope=all',

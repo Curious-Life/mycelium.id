@@ -57,9 +57,19 @@ const SOURCES = [
   // hit (empty doc) and must not enter the pipeline (PIPELINE-INTEGRITY design
   // §P1.3); excludes the quarantined/dead rows that otherwise bloat the index.
   { table: 'messages', sql: "SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ? AND forgotten_at IS NULL AND content IS NOT NULL AND content != ''", kind: 'message', prefix: '' },
-  { table: 'territory_profiles', sql: "SELECT CAST(territory_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM territory_profiles WHERE user_id = ?", kind: 'territory', prefix: ID_PREFIX.territory },
-  { table: 'realms', sql: "SELECT CAST(realm_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM realms WHERE user_id = ?", kind: 'realm', prefix: ID_PREFIX.realm },
-  { table: 'semantic_themes', sql: "SELECT CAST(semantic_theme_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM semantic_themes WHERE user_id = ?", kind: 'theme', prefix: ID_PREFIX.theme },
+  // name + essence are ENCRYPTED columns on all three topology tables
+  // (ENCRYPTED_FIELDS.territory_profiles / .realms / .semantic_themes — name was
+  // "newly encrypted (was plaintext)"). Same root cause as the documents source
+  // below: SQL-concatenating two encrypted columns (`name || ' ' || essence`) joins
+  // two base64 envelopes into a non-envelope string autoDecryptResults can't decrypt,
+  // so essence is dropped (name-only index) or garbled. We SELECT name + essence as
+  // individual columns (each decrypted in place) and concatenate the DECRYPTED text
+  // in JS via textFrom. Latent because pre-migration vault rows are still plaintext
+  // (the SQL concat happens to work there); newly-encrypted profiles are the ones
+  // that lose essence. Mirrors PR #229's documents fix.
+  { table: 'territory_profiles', sql: "SELECT CAST(territory_id AS TEXT) AS id, name, essence, created_at FROM territory_profiles WHERE user_id = ?", kind: 'territory', prefix: ID_PREFIX.territory, textFrom: (r) => [r.name, r.essence].filter(Boolean).join(' ') },
+  { table: 'realms', sql: "SELECT CAST(realm_id AS TEXT) AS id, name, essence, created_at FROM realms WHERE user_id = ?", kind: 'realm', prefix: ID_PREFIX.realm, textFrom: (r) => [r.name, r.essence].filter(Boolean).join(' ') },
+  { table: 'semantic_themes', sql: "SELECT CAST(semantic_theme_id AS TEXT) AS id, name, essence, created_at FROM semantic_themes WHERE user_id = ?", kind: 'theme', prefix: ID_PREFIX.theme, textFrom: (r) => [r.name, r.essence].filter(Boolean).join(' ') },
   // Documents have no stored embedding_768 (enrichment embeds messages only),
   // so skipEmbed=true keeps them BM25-only — adding them with a wired embedder
   // would otherwise fire one live :8091 call PER document at cold start (the
@@ -74,8 +84,8 @@ const SOURCES = [
   // envelopes into a non-envelope string the adapter can't decrypt → garbage tokens
   // that never match. Caught by live smoke 2026-06-18; messages dodge it via a
   // single `content AS text` alias, and territory rows on existing vaults are
-  // pre-migration plaintext. (The profile sources above carry the same latent risk
-  // for newly-encrypted name/essence — tracked separately.)
+  // pre-migration plaintext. (The profile sources above now apply the same
+  // per-column-select + textFrom fix for their encrypted name/essence.)
   { table: 'documents', sql: "SELECT id, title, summary, content, created_at FROM documents WHERE user_id = ? AND is_internal = 0 AND forgotten_at IS NULL AND ((content IS NOT NULL AND content != '') OR (title IS NOT NULL AND title != ''))", kind: 'document', prefix: ID_PREFIX.document, skipEmbed: true, textFrom: (r) => [r.title, r.summary, r.content].filter(Boolean).join(' ') },
 ];
 
