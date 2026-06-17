@@ -31,6 +31,7 @@ import { createEgressAuditSink } from './inference/egress.js';
 import { createUsageSink } from './inference/usage.js';
 import { captureMessage } from './ingest/capture.js';
 import { portalIngestRouter } from './portal-ingest.js';
+import { portalHealthRouter } from './portal-health.js';
 import { portalActivityRouter } from './portal-activity.js';
 import { portalUsageRouter } from './portal-usage.js';
 import { portalTranscriptionRouter } from './portal-transcription.js';
@@ -243,6 +244,9 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
     db, userId,
     authenticatePortalRequest: portalOwnerGate,
   }));
+  // Apple Health structured read/write (health_daily). Mounted BEFORE the mindscape
+  // router so the real /health/summary wins over its legacy empty stub.
+  v.use('/api/v1/portal', portalHealthRouter({ db, userId, authenticatePortalRequest: portalOwnerGate }));
   v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath }));
   // Unified activity feed (background_jobs) — header stream indicator + mindscape chip.
   v.use('/api/v1/portal', portalActivityRouter({
