@@ -1146,7 +1146,7 @@
 												<div class="min-w-0 flex-1">
 													<div class="flex items-center gap-2">
 														<span class="text-sm text-[var(--color-text-primary)] font-medium truncate">{t.name}</span>
-														{#if t.current_phase}
+														{#if t.current_phase === 'sparse' || t.current_phase === 'active' || t.current_phase === 'anchor'}
 															<span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--color-elevated)] text-[var(--color-text-tertiary)]">{t.current_phase}</span>
 														{/if}
 													</div>
