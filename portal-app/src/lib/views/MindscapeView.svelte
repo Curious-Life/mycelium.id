@@ -1,11 +1,10 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
-	import { mindscapeState, timelineHealth } from '$lib/stores/mindscape';
+	import { mindscapeState } from '$lib/stores/mindscape';
 	import MindscapeDetail from '$lib/components/mindscape/MindscapeDetail.svelte';
 	import MindscapeBackground from '$lib/components/mindscape/MindscapeBackground.svelte';
 	import MindscapeInvite from '$lib/components/mindscape/MindscapeInvite.svelte';
-	import PulsesLens from '$lib/components/mindscape/PulsesLens.svelte';
 	import { api, apiGet } from '$lib/api';
 	import { generate, start as startGen, resume as resumeGen, reset as resetGen, cancel as cancelGen, fmtSeconds } from '$lib/generate';
 	import { get } from 'svelte/store';
@@ -102,14 +101,6 @@
 			if (enrichPollTimer) clearTimeout(enrichPollTimer);
 		};
 	});
-
-	// Health data for body state bar
-	interface HealthDay { date: string; sleep_duration_min: number|null; sleep_efficiency: number|null; hrv_avg: number|null; resting_hr: number|null; steps: number|null; }
-	interface HealthSummary { today: HealthDay|null; averages: Record<string, number|null>; trends: Record<string, string>; days: HealthDay[]; }
-	let healthData = $state<HealthSummary|null>(null);
-	// Fisher trajectory summary (Phase 5). Renders as a Movement pill in the
-	// top bar alongside health metrics. Null until pipeline produces data.
-	let trajectorySummary = $state<any>(null);
 
 	const isCaptureMode = browser && new URLSearchParams(window.location.search).has('capture');
 
@@ -273,17 +264,6 @@
 		mindscapeState.load();
 		loadTerritories();
 
-		// Load health summary
-		apiGet<HealthSummary>('/portal/health/summary', { days: '7' })
-			.then(d => { healthData = d; })
-			.catch(() => {});
-
-		// Load Fisher trajectory summary (cognitive movement). Failure is silent —
-		// the pill just doesn't render until the pipeline produces data.
-		apiGet<any>('/portal/trajectory/summary', { period: 'month', level: 'realm' })
-			.then(d => { trajectorySummary = d?.summary || null; })
-			.catch(() => {});
-
 		// Check generation + enrichment state
 		checkGenerationState().then(() => {
 			if (enrichment && enrichment.pending > 0 && get(generate).phase !== 'running') pollEnrichment();
@@ -291,15 +271,6 @@
 
 		// Resume an in-flight generate job from before a page refresh.
 		resumeGen();
-
-		// Resume explore polling + SSE
-		const savedExplore = sessionStorage.getItem('mycelium_explore_job');
-		if (savedExplore) { exploreJobId = savedExplore; connectExploreSSE(savedExplore); pollExplore(); }
-
-		// Always load exploration status (needed for 3D view overlay)
-		loadExplorationStatus();
-		// Re-check every 30s to pick up externally triggered explorations
-		const statusInterval = setInterval(loadExplorationStatus, 30000);
 
 		// Poll for data imported AFTER mount. The tabbed workspace keeps this view
 		// alive, so the one-shot onMount check missed conversations imported on the
@@ -323,13 +294,10 @@
 		document.addEventListener('visibilitychange', onVisible);
 
 		return () => {
-			clearInterval(statusInterval);
 			if (dataPoll) clearInterval(dataPoll);
 			document.removeEventListener('visibilitychange', onVisible);
 		};
 	});
-
-	const th = $derived($timelineHealth);
 
 	// Territory + realm data. `realms` powers the 3D map's exploration realm-filter;
 	// the rest feed the generate/explore lifecycle below.
@@ -347,166 +315,6 @@
 	let fingerprint: { depth_score: number; breadth_score: number; coherence_score: number; exploration_score: number } | null = $state(null);
 	let complexity: { global_complexity: number | null; territories: Array<{ id: number; name: string; complexity: number }>; realms: Array<{ id: number; name: string; complexity: number }> } | null = $state(null);
 
-	// Exploration status + control
-	let explorationStatus: {
-		globalExploredPercent: number; territoriesWithChronicles: number; totalTerritories: number;
-		totalMessages: number; messagesAnalyzed: number; lastRunAt: string | null;
-		explorationRunning: boolean; explorationJobId: string | null;
-	} | null = $state(null);
-	let exploreJobId: string | null = $state(null);
-	let exploreJob: { status: string; step: number; totalSteps: number; stageLabel: string; error: string | null } | null = $state(null);
-	let exploreCooldownSec = $state(0);
-	let exploreError = $state('');
-	let exploreLimit = $state(20);
-	let exploreShowOptions = $state(false);
-	let lensExpanded = $state<'explore' | 'pulses' | null>(null);
-	let pulsesLensExpanded = $state(false);
-	let exploreRealm = $state<number | null>(null);
-	let explorePeriod = $state('');
-	let exploreEvents: Array<{ type: string; [key: string]: any }> = $state([]);
-	let exploreReport: any = $state(null);
-	let exploreEventSource: EventSource | null = null;
-
-	function relativeTime(iso: string | null): string {
-		if (!iso) return '';
-		const ms = Date.now() - new Date(iso).getTime();
-		const min = Math.floor(ms / 60000);
-		if (min < 1) return 'just now';
-		if (min < 60) return `${min}m ago`;
-		const hrs = Math.floor(min / 60);
-		if (hrs < 24) return `${hrs}h ago`;
-		const days = Math.floor(hrs / 24);
-		return `${days}d ago`;
-	}
-
-	async function loadExplorationStatus() {
-		try {
-			const res = await api('/portal/mindscape/exploration-status');
-			if (res.ok) {
-				explorationStatus = await res.json();
-				if (explorationStatus?.explorationRunning && explorationStatus?.explorationJobId) {
-					exploreJobId = explorationStatus.explorationJobId;
-					lensExpanded = 'explore';
-					if (!exploreEventSource) connectExploreSSE(exploreJobId);
-					pollExplore();
-				}
-			}
-		} catch {}
-	}
-
-	async function startExplore() {
-		exploreError = '';
-		exploreEvents = [];
-		exploreReport = null;
-		try {
-			const body: any = { limit: exploreLimit };
-		if (exploreRealm != null) body.realm = exploreRealm;
-		if (explorePeriod) body.period = explorePeriod;
-		const res = await api('/portal/mindscape/explore', { method: 'POST', body: JSON.stringify(body) });
-			if (res.status === 429) {
-				const data = await res.json();
-				exploreCooldownSec = data.retryAfter || 60;
-				const timer = setInterval(() => {
-					exploreCooldownSec--;
-					if (exploreCooldownSec <= 0) clearInterval(timer);
-				}, 1000);
-				return;
-			}
-			if (!res.ok) { exploreError = 'Failed to start exploration'; return; }
-			const data = await res.json();
-			exploreJobId = data.jobId;
-			if (browser) sessionStorage.setItem('mycelium_explore_job', data.jobId);
-			connectExploreSSE(data.jobId);
-			pollExplore();
-			lensExpanded = 'explore';
-		} catch {
-			exploreError = 'Failed to start exploration';
-		}
-	}
-
-	let sseRetries = 0;
-	function connectExploreSSE(jobId: string) {
-		if (exploreEventSource) { exploreEventSource.close(); exploreEventSource = null; }
-		try {
-			const es = new EventSource(`/portal/mindscape/explore/stream/${jobId}`);
-			exploreEventSource = es;
-			es.onopen = () => { sseRetries = 0; };
-			es.onmessage = (e) => {
-				try {
-					const event = JSON.parse(e.data);
-					exploreEvents = [...exploreEvents, event];
-					if (event.type === 'territory_done' || event.type === 'territory_skip' || event.type === 'territory_error') {
-						const step = exploreEvents.filter(ev => ['territory_done','territory_skip','territory_error'].includes(ev.type)).length;
-						if (exploreJob) exploreJob = { ...exploreJob, step };
-					}
-					if (event.type === 'job_done') {
-						es.close();
-						exploreEventSource = null;
-					}
-				} catch {}
-			};
-			es.onerror = () => {
-				es.close();
-				exploreEventSource = null;
-				if (sseRetries < 5 && exploreJob?.status === 'running') {
-					sseRetries++;
-					setTimeout(() => connectExploreSSE(jobId), 2000 * sseRetries);
-				}
-			};
-		} catch {}
-	}
-
-	async function loadExploreReport(jobId: string) {
-		try {
-			const res = await api(`/portal/mindscape/explore/report/${jobId}`);
-			if (res.ok) exploreReport = await res.json();
-		} catch {}
-	}
-
-	let pollFailures = 0;
-	async function pollExplore() {
-		if (!exploreJobId) return;
-		try {
-			const res = await api(`/portal/mindscape/explore/status/${exploreJobId}`);
-			if (!res.ok) {
-				pollFailures++;
-				if (pollFailures > 5) { exploreJobId = null; exploreJob = null; return; }
-				setTimeout(pollExplore, 5000);
-				return;
-			}
-			pollFailures = 0;
-			exploreJob = await res.json();
-
-			if (exploreJob!.status === 'done') {
-				sessionStorage.removeItem('mycelium_explore_job');
-				if (exploreEventSource) { exploreEventSource.close(); exploreEventSource = null; }
-				await loadExploreReport(exploreJobId!);
-				lensExpanded = 'explore';
-				territories = []; realms = [];
-				loadTerritories();
-				loadExplorationStatus();
-				return;
-			}
-			if (exploreJob!.status === 'error' || exploreJob!.status === 'abandoned') {
-				exploreError = exploreJob!.error || 'Exploration failed';
-				sessionStorage.removeItem('mycelium_explore_job');
-				if (exploreEventSource) { exploreEventSource.close(); exploreEventSource = null; }
-				setTimeout(() => { exploreJobId = null; exploreJob = null; }, 5000);
-				return;
-			}
-			setTimeout(pollExplore, 5000);
-		} catch {
-			pollFailures++;
-			setTimeout(pollExplore, 8000);
-		}
-	}
-
-	function dismissExploreReport() {
-		exploreReport = null;
-		exploreEvents = [];
-		exploreJobId = null;
-		exploreJob = null;
-	}
 
 	async function loadTerritories() {
 		if (territoriesLoaded) return; // flag-guarded — see territoriesLoaded decl (NOT territories.length)
@@ -541,8 +349,6 @@
 			if (cxRes.ok) {
 				complexity = await cxRes.json();
 			}
-			// Load exploration status in parallel (non-blocking)
-			loadExplorationStatus();
 		} catch (e) {
 			console.error('Failed to load territories:', e);
 		}
@@ -635,108 +441,6 @@
 
 	<!-- Main content area -->
 	<main class="view-panel">
-		<!-- Top bar: health metrics left, view toggle right -->
-		<div class="top-bar">
-			<div class="top-bar-metrics">
-				{#if th.active}
-					{#if th.sleep != null}
-						{@const h = Math.floor(th.sleep / 60)}
-						{@const m = th.sleep % 60}
-						<span class="hb-metric" title="Sleep avg">
-							<span class="hb-icon" style="color: #818cf8;">&#9790;</span>
-							{h}h{m.toString().padStart(2,'0')}m
-						</span>
-					{/if}
-					{#if th.hrv != null}
-						<span class="hb-metric" title="HRV avg">
-							<span class="hb-icon" style="color: #4ade80;">&#9829;</span>
-							{th.hrv}ms
-						</span>
-					{/if}
-					{#if th.rhr != null}
-						<span class="hb-metric" title="RHR avg">
-							<span class="hb-icon" style="color: #f87171;">&#9829;</span>
-							{th.rhr}bpm
-						</span>
-					{/if}
-					{#if th.steps != null}
-						<span class="hb-metric" title="Steps avg">
-							<span class="hb-icon" style="color: #fb923c;">&#x1F6B6;</span>
-							{th.steps.toLocaleString()}
-						</span>
-					{/if}
-					{#if th.mindful != null}
-						<span class="hb-metric" title="Mindfulness avg">
-							<span class="hb-icon" style="color: #a78bfa;">&#x1F9D8;</span>
-							{th.mindful}m
-						</span>
-					{/if}
-				{:else if healthData?.today || healthData?.days?.length}
-					{@const raw = healthData.today}
-					{@const yesterday = healthData.days?.length >= 2 ? healthData.days[healthData.days.length - 2] : null}
-					{@const t = {
-						sleep_duration_min: raw?.sleep_duration_min ?? yesterday?.sleep_duration_min ?? null,
-						sleep_efficiency: raw?.sleep_efficiency ?? yesterday?.sleep_efficiency ?? null,
-						hrv_avg: raw?.hrv_avg ?? yesterday?.hrv_avg ?? null,
-						resting_hr: raw?.resting_hr ?? yesterday?.resting_hr ?? null,
-						steps: raw?.steps ?? null,
-					}}
-					{#if t.sleep_duration_min != null}
-						{@const h = Math.floor(t.sleep_duration_min / 60)}
-						{@const m = Math.round(t.sleep_duration_min % 60)}
-						<span class="hb-metric" title="Sleep">
-							<span class="hb-icon" style="color: #818cf8;">&#9790;</span>
-							{h}h{m.toString().padStart(2,'0')}m
-							{#if t.sleep_efficiency != null}<span class="hb-sub">{Math.round(t.sleep_efficiency * 100)}%</span>{/if}
-						</span>
-					{/if}
-					{#if t.hrv_avg != null}
-						<span class="hb-metric" title="HRV">
-							<span class="hb-icon" style="color: #4ade80;">&#9829;</span>
-							{Math.round(t.hrv_avg)}ms
-						</span>
-					{/if}
-					{#if t.resting_hr != null}
-						<span class="hb-metric" title="Resting HR">
-							<span class="hb-icon" style="color: #f87171;">&#9829;</span>
-							{Math.round(t.resting_hr)}bpm
-						</span>
-					{/if}
-					{#if t.steps != null}
-						<span class="hb-metric" title="Steps">
-							<span class="hb-icon" style="color: #fb923c;">&#x1F6B6;</span>
-							{t.steps.toLocaleString()}
-						</span>
-					{/if}
-					{#if healthData.trends}
-						{#each Object.entries(healthData.trends) as [k, v]}
-							{#if v && v !== 'insufficient'}
-								{@const label = k === 'sleep_duration_min' ? 'Sleep' : k === 'hrv_avg' ? 'HRV' : k === 'resting_hr' ? 'RHR' : k === 'steps' ? 'Steps' : null}
-								{#if label}
-									{@const arrow = v === 'improving' ? '\u2197' : v === 'declining' ? '\u2198' : '\u2192'}
-									{@const clr = v === 'improving' ? '#4ade80' : v === 'declining' ? '#f87171' : 'var(--color-text-tertiary)'}
-									<span class="hb-trend" style="color: {clr}">{arrow}{label}</span>
-								{/if}
-							{/if}
-						{/each}
-					{/if}
-				{/if}
-				{#if trajectorySummary?.phase}
-					{@const phaseColors: Record<string, string> = {
-						cycling: '#fb923c', exploring: '#f59e0b',
-						transforming: '#06b6d4', stable: '#4ade80',
-					}}
-					{@const phaseColor = phaseColors[trajectorySummary.phase] || '#6B6B75'}
-					<a class="hb-metric movement-pill" href="/vitality" title="Cognitive Movement: {trajectorySummary.phase}{trajectorySummary.exploration_ratio != null ? ` (R = ${trajectorySummary.exploration_ratio.toFixed(2)})` : ''}. Past 30 days.">
-						<span class="hb-icon" style="color: {phaseColor};">&#x223F;</span>
-						<span class="movement-phase" style="color: {phaseColor};">{trajectorySummary.phase}</span>
-						{#if trajectorySummary.exploration_ratio != null}
-							<span class="movement-r">R={trajectorySummary.exploration_ratio.toFixed(2)}</span>
-						{/if}
-					</a>
-				{/if}
-			</div>
-		</div>
 
 			{#if msState.loading}
 				<div class="loading-3d">
@@ -744,119 +448,9 @@
 				</div>
 			{:else if msState.points && msState.points.length > 0}
 				{#if Mindscape3D}
-					<!-- svelte-ignore a11y_no_static_element_interactions -->
-					<div class="map-container" onilluminate={(e) => {
-						const period = e.detail;
-						if (period && !exploreJob) {
-							exploreError = '';
-							exploreEvents = [];
-							exploreReport = null;
-							api('/portal/mindscape/explore', { method: 'POST', body: JSON.stringify({ limit: 20, period }) })
-								.then(async (res) => {
-									if (res.ok) {
-										const data = await res.json();
-										exploreJobId = data.jobId;
-										if (browser) sessionStorage.setItem('mycelium_explore_job', data.jobId);
-										connectExploreSSE(data.jobId);
-										pollExplore();
-									}
-								}).catch(() => {});
-						}
-					}}>
+			<div class="map-container">
 						<Mindscape3D {active} />
 					</div>
-					<!-- Lens bar (floats top-right of 3D map) -->
-					<div class="lens-bar">
-						<!-- Pulses lens (M4) — play/pause + layer toggles + sparkline -->
-						<PulsesLens bind:expanded={pulsesLensExpanded} />
-						<!-- Exploration lens -->
-						{#if explorationStatus}
-							{@const isExploring = exploreJob?.status === 'running' || explorationStatus.explorationRunning}
-							<button class="lens-chip" class:lens-active={isExploring} onclick={() => { lensExpanded = lensExpanded === 'explore' ? null : 'explore'; }}>
-								<span class="lens-ring" style="background: conic-gradient(var(--color-accent-jade) {explorationStatus.globalExploredPercent}%, transparent {explorationStatus.globalExploredPercent}%);"></span>
-								{#if isExploring}
-									<span class="lens-pct lens-pulse">{exploreJob ? `${exploreJob.step}/${exploreJob.totalSteps}` : '...'}</span>
-								{:else}
-									<span class="lens-pct">{explorationStatus.globalExploredPercent.toFixed(0)}%</span>
-								{/if}
-							</button>
-						{/if}
-					</div>
-
-					<!-- Exploration detail (expands from lens) -->
-					{#if lensExpanded === 'explore' && explorationStatus}
-						<div class="lens-panel">
-							{#if exploreReport}
-								<div class="lens-panel-header">
-									<span class="lens-panel-title">Explored {exploreReport.territories.length} territories</span>
-									<button class="lens-dismiss" onclick={dismissExploreReport}>&times;</button>
-								</div>
-								<div class="explore-log" style="max-height: 400px;">
-									{#each exploreReport.territories as t}
-										<div class="log-item done">
-											<span class="log-icon">&#10003;</span>
-											<div>
-												<span class="log-text">{t.name}</span>
-												<span class="log-entities">{t.coverage?.toFixed(0)}%{#if t.keyEntities?.length} · {t.keyEntities.slice(0, 3).join(', ')}{/if}</span>
-											</div>
-										</div>
-									{/each}
-								</div>
-							{:else if exploreJob?.status === 'running'}
-								<div class="lens-panel-header">
-									<span class="lens-panel-title">{exploreJob.step} / {exploreJob.totalSteps}</span>
-								</div>
-								<div class="gen-bar" style="margin-bottom: 6px;"><div class="gen-fill" style="width: {(exploreJob.step / exploreJob.totalSteps) * 100}%; background: var(--color-accent-jade);"></div></div>
-								<div class="explore-log" style="max-height: 400px;">
-									{#each exploreEvents as ev}
-										{#if ev.type === 'territory_done'}
-											<div class="log-item done">
-												<span class="log-icon">&#10003;</span>
-												<div class="log-content">
-													<span class="log-text">{ev.name || `T${ev.id}`}{#if ev.coverage < 100} · {ev.coverage}%{/if}</span>
-													{#if ev.insight}
-														<span class="log-insight">{ev.insight}</span>
-													{/if}
-												</div>
-											</div>
-										{:else if ev.type === 'territory_start'}
-											<div class="log-item active">
-												<span class="log-icon spin">&#9679;</span>
-												<span class="log-text">{ev.name || `T${ev.id}`}</span>
-											</div>
-										{/if}
-									{/each}
-								</div>
-							{:else}
-								<div class="lens-panel-header">
-									<span class="lens-panel-title">{explorationStatus.territoriesWithChronicles} / {explorationStatus.totalTerritories} territories</span>
-									{#if explorationStatus.lastRunAt}
-										<span class="lens-panel-meta">last {relativeTime(explorationStatus.lastRunAt)}</span>
-									{/if}
-								</div>
-								<div class="lens-filters">
-									<select bind:value={exploreRealm} class="lens-select">
-										<option value={null}>All realms</option>
-										{#each realms as r}
-											<option value={r.realm_id}>{r.name}</option>
-										{/each}
-									</select>
-									<input type="month" bind:value={explorePeriod} class="lens-input" />
-								</div>
-								<div class="lens-explore-controls">
-									<select bind:value={exploreLimit} class="lens-select">
-										<option value={10}>10</option>
-										<option value={20}>20</option>
-										<option value={50}>50</option>
-										<option value={100}>100</option>
-									</select>
-									<button class="lens-explore-btn" onclick={startExplore} disabled={exploreCooldownSec > 0}>
-										{exploreCooldownSec > 0 ? `${exploreCooldownSec}s` : 'Explore'}
-									</button>
-								</div>
-							{/if}
-						</div>
-					{/if}
 				{:else}
 					<div class="loading-3d">
 						<div class="spinner"></div>
@@ -886,67 +480,6 @@
 		height: 100vh;
 		overflow: hidden;
 		background: #0A0A0C;
-	}
-
-	.top-bar {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 12px;
-		padding: 6px 12px;
-		min-height: 36px;
-		background: var(--color-surface);
-		border-bottom: 1px solid var(--color-border);
-		font-size: 0.7rem;
-		color: var(--color-text-secondary);
-		flex-shrink: 0;
-		z-index: 5;
-		position: relative;
-	}
-	.top-bar-metrics {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		flex-wrap: nowrap;
-		overflow: hidden;
-		min-width: 0;
-	}
-	.hb-metric {
-		display: flex;
-		align-items: center;
-		gap: 3px;
-		white-space: nowrap;
-	}
-	.hb-icon { font-size: 0.8rem; }
-	.hb-sub { font-size: 0.6rem; color: var(--color-text-tertiary); }
-	.hb-trend {
-		font-size: 0.6rem;
-		font-weight: 500;
-		padding: 1px 5px;
-		border-radius: 4px;
-		background: rgba(255,255,255,0.05);
-	}
-	.movement-pill {
-		text-decoration: none;
-		padding: 2px 8px;
-		border-radius: 999px;
-		background: rgba(255,255,255,0.04);
-		border: 1px solid rgba(255,255,255,0.06);
-		transition: background 0.15s, border-color 0.15s;
-		cursor: pointer;
-	}
-	.movement-pill:hover {
-		background: rgba(255,255,255,0.08);
-		border-color: rgba(255,255,255,0.12);
-	}
-	.movement-phase {
-		font-weight: 700;
-		text-transform: capitalize;
-	}
-	.movement-r {
-		font-family: var(--font-mono);
-		font-size: 0.65rem;
-		color: var(--color-text-tertiary);
 	}
 
 	.mindscape-layout {
@@ -1048,247 +581,11 @@
 		box-shadow: var(--shadow-lg);
 	}
 	/* Breadcrumb *//* Realm cards *//* Exploration overview *//* Live exploration log */
-	.explore-log {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		margin-top: 8px;
-	}
-	.log-item {
-		display: flex;
-		align-items: flex-start;
-		gap: 6px;
-		font-size: 12px;
-		padding: 4px 0;
-	}
-	.log-icon {
-		flex-shrink: 0;
-		width: 16px;
-		text-align: center;
-	}
-	.log-item.done .log-icon { color: var(--color-accent-jade); }
-	.log-item.active .log-icon { color: var(--color-accent); }
-	.log-icon.spin { animation: spin 1s linear infinite; }
-	.log-text {
-		color: var(--color-text-secondary);
-		min-width: 0;
-	}
-	.log-item.done .log-text { color: var(--color-text-primary); }
-	.log-content {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		min-width: 0;
-	}
-	.log-insight {
-		font-size: 10px;
-		color: var(--color-text-tertiary);
-		line-height: 1.3;
-		display: -webkit-box;
-		-webkit-line-clamp: 2;
-		line-clamp: 2;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-	}
-	.log-entities {
-		font-size: 10px;
-		color: var(--color-text-tertiary);
-		margin-left: auto;
-		white-space: nowrap;
-	}/* Session report *//* 3D map exploration overlay */
 	.map-container {
 		position: relative;
 		width: 100%;
 		flex: 1;
 		min-height: 0;
 		overflow: hidden;
-	}/* Lens bar — compact floating chips top-right of 3D */
-	.lens-bar {
-		position: absolute;
-		top: 12px;
-		right: 12px;
-		z-index: 30;
-		display: flex;
-		gap: 6px;
-		pointer-events: auto;
-	}
-	.lens-chip {
-		display: flex;
-		align-items: center;
-		gap: 5px;
-		padding: 5px 10px;
-		border-radius: 20px;
-		border: 1px solid rgba(255, 255, 255, 0.08);
-		background: rgba(20, 20, 23, 0.7);
-		backdrop-filter: blur(12px);
-		-webkit-backdrop-filter: blur(12px);
-		cursor: pointer;
-		transition: all 0.2s;
-		color: var(--color-text-secondary);
-		font: inherit;
-	}
-	.lens-chip:hover {
-		background: rgba(30, 30, 35, 0.85);
-		border-color: rgba(255, 255, 255, 0.15);
-	}
-	.lens-chip.lens-active {
-		border-color: rgba(74, 222, 128, 0.4);
-	}
-	:global([data-theme='light']) .lens-chip {
-		background: rgba(255, 255, 255, 0.8);
-		border-color: rgba(0, 0, 0, 0.08);
-	}
-	.lens-ring {
-		width: 18px;
-		height: 18px;
-		border-radius: 50%;
-		display: block;
-		position: relative;
-	}
-	.lens-ring::after {
-		content: '';
-		position: absolute;
-		inset: 3px;
-		border-radius: 50%;
-		background: rgba(20, 20, 23, 0.9);
-	}
-	:global([data-theme='light']) .lens-ring::after {
-		background: rgba(255, 255, 255, 0.95);
-	}
-	.lens-pct {
-		font-size: 11px;
-		font-weight: 600;
-		font-family: var(--font-mono);
-		color: var(--color-text-primary);
-	}
-	.lens-pulse {
-		animation: lens-pulse-anim 2s ease-in-out infinite;
-		color: var(--color-accent-jade);
-	}
-	@keyframes lens-pulse-anim {
-		0%, 100% { opacity: 1; }
-		50% { opacity: 0.5; }
-	}/* Lens panel — expanded detail from chip */
-	.lens-panel {
-		position: absolute;
-		top: 48px;
-		right: 12px;
-		z-index: 30;
-		width: 300px;
-		max-height: 60vh;
-		overflow-y: auto;
-		padding: 12px 14px;
-		border-radius: 10px;
-		border: 1px solid rgba(255, 255, 255, 0.08);
-		background: rgba(20, 20, 23, 0.88);
-		backdrop-filter: blur(16px);
-		-webkit-backdrop-filter: blur(16px);
-		pointer-events: auto;
-		animation: lens-in 0.15s ease-out;
-	}
-	:global([data-theme='light']) .lens-panel {
-		background: rgba(255, 255, 255, 0.92);
-		border-color: rgba(0, 0, 0, 0.1);
-	}
-	@keyframes lens-in {
-		from { opacity: 0; transform: translateY(-4px); }
-		to { opacity: 1; transform: translateY(0); }
-	}
-	.lens-panel-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		margin-bottom: 8px;
-	}
-	.lens-panel-title {
-		font-size: 12px;
-		font-weight: 500;
-		color: var(--color-text-primary);
-	}
-	.lens-panel-meta {
-		font-size: 10px;
-		color: var(--color-text-tertiary);
-	}
-	.lens-dismiss {
-		background: none;
-		border: none;
-		color: var(--color-text-tertiary);
-		font-size: 16px;
-		cursor: pointer;
-		padding: 0 2px;
-		line-height: 1;
-	}
-	.lens-dismiss:hover { color: var(--color-text-primary); }
-	.lens-explore-controls {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-	.lens-select {
-		flex: 1;
-		padding: 5px 8px;
-		border: 1px solid var(--color-border);
-		border-radius: 6px;
-		background: transparent;
-		color: var(--color-text-secondary);
-		font-size: 11px;
-		cursor: pointer;
-	}
-	.lens-explore-btn {
-		padding: 5px 14px;
-		border: none;
-		border-radius: 6px;
-		background: var(--color-accent-jade);
-		color: var(--color-bg);
-		font-size: 11px;
-		font-weight: 600;
-		cursor: pointer;
-		transition: opacity 0.15s;
-		white-space: nowrap;
-	}
-	.lens-explore-btn:hover:not(:disabled) { opacity: 0.85; }
-	.lens-explore-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-	.lens-filters {
-		display: flex;
-		gap: 6px;
-		margin-bottom: 8px;
-	}
-	.lens-input {
-		flex: 1;
-		padding: 5px 8px;
-		border: 1px solid var(--color-border);
-		border-radius: 6px;
-		background: transparent;
-		color: var(--color-text-secondary);
-		font-size: 11px;
-		font-family: var(--font-mono);
-	}
-	.lens-input::-webkit-calendar-picker-indicator {
-		filter: invert(0.6);
-	}
-
-	@media (max-width: 767px) {
-		.lens-bar {
-			top: 8px;
-			right: 8px;
-		}
-		.lens-panel {
-			top: 44px;
-			right: 8px;
-			left: 8px;
-			width: auto;
-		}}/* Territories view *//* Generation + enrichment progress */
-	.gen-bar {
-		height: 6px;
-		background: var(--color-surface);
-		border-radius: 3px;
-		overflow: hidden;
-		margin-bottom: 8px;
-	}
-	.gen-fill {
-		height: 100%;
-		background: linear-gradient(90deg, #E5B84C, #D4A23C);
-		border-radius: 3px;
-		transition: width 0.5s ease;
 	}
 </style>
