@@ -7,7 +7,7 @@
 	// The workspace passes `facet` in tab params (mirrored to /streams?facet=…); the
 	// segmented control switches between them. Facets lazy-mount on first visit, then
 	// stay alive (display-toggled) so switching never refetches.
-	import TimelineView from './TimelineView.svelte';
+	import StreamRiver from './StreamRiver.svelte';
 	import ImportView from './ImportView.svelte';
 	import BodyView from './BodyView.svelte';
 	import SourceSpectrum from './SourceSpectrum.svelte';
@@ -64,7 +64,7 @@
 					<SourceSpectrum selected={selectedSource} onSelect={(s) => (selectedSource = s)} />
 				</div>
 				<div class="river-wrap">
-					<TimelineView externalSource={selectedSource} showSourceFilter={false} />
+					<StreamRiver externalSource={selectedSource} />
 				</div>
 			</div>
 		{/if}
