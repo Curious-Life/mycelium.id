@@ -56,7 +56,9 @@ rec('T3. downloading state + progress pct surface', getTranscriberHealth().statu
 
 svcState = { status: 'deps_missing' };
 sup.nudge(); await sleep(300);
-rec('T4. deps_missing surfaces actionable message', getTranscriberHealth().status === 'deps_missing' && /pip install/.test(getTranscriberHealth().message));
+rec('T4. deps_missing → supervisor auto-installs (status installing_deps, NO manual pip command)',
+  getTranscriberHealth().status === 'installing_deps' && !/pip install/.test(getTranscriberHealth().message),
+  JSON.stringify(getTranscriberHealth()));
 svcState = { status: 'ok', model: 'small' };
 sup.nudge(); await sleep(300);
 

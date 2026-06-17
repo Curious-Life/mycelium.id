@@ -207,7 +207,7 @@
 	}
 	function maybePollTranscription() {
 		const st = trans?.health?.status;
-		const busy = st === 'downloading' || st === 'loading' || st === 'starting';
+		const busy = st === 'downloading' || st === 'loading' || st === 'starting' || st === 'installing_deps';
 		if (busy && !transPoll) transPoll = setInterval(loadTranscription, 2000);
 		if (!busy && transPoll) { clearInterval(transPoll); transPoll = null; }
 	}
@@ -508,7 +508,7 @@
 						<span class="muted pulse">Downloading {trans.model}… {trans.health?.progress?.pct ?? 0}%</span>
 						<div class="trans-bar"><div class="trans-fill" style={`width:${trans.health?.progress?.pct ?? 0}%`}></div></div>
 					</div>
-				{:else if trans.health?.status === 'loading' || trans.health?.status === 'starting'}
+				{:else if trans.health?.status === 'loading' || trans.health?.status === 'starting' || trans.health?.status === 'installing_deps'}
 					<div class="muted pulse">{trans.health?.message || 'Preparing transcription…'}</div>
 				{:else if trans.health?.status === 'deps_missing'}
 					<div class="note-amber">{trans.health?.message}</div>

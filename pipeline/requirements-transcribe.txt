@@ -10,4 +10,6 @@
 # Node (src/enrich/ogg-opus.js) + scipy resampling — faster-whisper's PyAV
 # file path is never exercised at runtime.
 faster-whisper>=1.1
-# scipy + numpy already in requirements.txt (48k→16k resample_poly).
+# scipy = audio resampling (48k→16k resample_poly). numpy ships with the embed
+# deps; scipy does NOT, so it's pinned here so the UI-driven install is complete.
+scipy>=1.10
