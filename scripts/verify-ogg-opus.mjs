@@ -7,7 +7,7 @@
 //   G4 junk / truncated bytes → null
 //   G5 transcribeAudio transcodes ogg → sends format:"wav" to the model
 import OpusScript from 'opusscript';
-import { oggOpusToWav } from '../src/enrich/ogg-opus.js';
+import { oggOpusToWav, oggOpusToWavChunks } from '../src/enrich/ogg-opus.js';
 import { transcribeAudio } from '../src/enrich/transcribe-audio.js';
 
 const ledger = [];
@@ -108,6 +108,22 @@ const { ogg, packets } = buildFixture();
 {
   const wav = await oggOpusToWav(ogg, { timeoutMs: 5000 });
   rec('G7. timeoutMs option does not break a normal decode', !!wav && wav.subarray(0, 4).toString() === 'RIFF');
+}
+
+// G8 — LOSSLESS chunking: windowed decode must reconstruct the SAME PCM as the
+// single-shot decode, byte-for-byte, across MANY windows (nothing dropped at a
+// boundary). A tiny windowSeconds forces multiple windows from the 2s fixture.
+{
+  const single = await oggOpusToWav(ogg);
+  const singlePcm = single.subarray(44);
+  const parts = [];
+  for await (const wavWin of oggOpusToWavChunks(ogg, { windowSeconds: 0.1, maxSeconds: 14400, timeoutMs: 5000 })) {
+    parts.push(wavWin.subarray(44));               // strip each WAV header → raw PCM
+  }
+  const joined = Buffer.concat(parts);
+  rec('G8. windowed decode is lossless (>1 window, PCM identical to single-shot)',
+    parts.length > 1 && joined.length === singlePcm.length && joined.equals(singlePcm),
+    `windows=${parts.length} joinedBytes=${joined.length} singleBytes=${singlePcm.length}`);
 }
 
 const passed = ledger.filter(Boolean).length;

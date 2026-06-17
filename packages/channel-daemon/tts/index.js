@@ -70,11 +70,13 @@ export {
   OPENAI_VOICE_IDS, OPENAI_MODEL_IDS, ELEVENLABS_MODEL_IDS,
 } from './voices.js';
 
-// Default upper bound on speakable text (matches today's Telegram bot
-// behavior: long messages get truncated rather than rejected). Discord's
-// previous limit was 6000 — use platform-specific defaults below.
-export const TELEGRAM_DEFAULT_MAX_TEXT_CHARS = 50_000;
-export const DISCORD_DEFAULT_MAX_TEXT_CHARS  = 6_000;
+// No pre-truncation by default. splitTextForTTS (below) is LOSSLESS — it splits
+// at sentence boundaries and emits one voice message per chunk — so a long reply
+// is spoken IN FULL instead of being silently cut at a char ceiling. `maxTextChars`
+// stays an OPT-IN override (caller/env) for anyone who wants a hard cap. (Was
+// 50_000 Telegram / 6_000 Discord, which dropped the tail of long replies.)
+export const TELEGRAM_DEFAULT_MAX_TEXT_CHARS = Infinity;
+export const DISCORD_DEFAULT_MAX_TEXT_CHARS  = Infinity;
 
 // Minimum bytes per chunk after remux. Below this we treat the chunk as
 // failed (provider returned an error wrapped in tiny audio). Matches
@@ -114,7 +116,7 @@ export async function* synthesizeForTelegram(text, opts = {}) {
   const cleanText = preprocess(text || '');
   if (!cleanText || cleanText.length < 20) return;
 
-  const ttsText = cleanText.substring(0, maxTextChars);
+  const ttsText = Number.isFinite(maxTextChars) ? cleanText.substring(0, maxTextChars) : cleanText;
   const chunks = splitTextForTTS(ttsText, provider.maxChars);
   const total = chunks.length;
   const errors = [];
@@ -227,7 +229,7 @@ export async function synthesizeForDiscord(text, opts = {}) {
     });
   }
 
-  const ttsText = cleanText.substring(0, maxTextChars);
+  const ttsText = Number.isFinite(maxTextChars) ? cleanText.substring(0, maxTextChars) : cleanText;
   const chunks = splitTextForTTS(ttsText, provider.maxChars);
   const total = chunks.length;
   const audioChunks = [];

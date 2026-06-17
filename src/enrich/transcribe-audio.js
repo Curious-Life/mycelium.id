@@ -66,68 +66,84 @@ export async function transcribeAudio({
   let buf = Buffer.isBuffer(bytes) ? bytes : (base64 ? Buffer.from(base64, "base64") : null);
   if (!buf || typeof fetchImpl !== "function") return null;
 
-  // llama.cpp's audio loader rejects Ogg containers outright (live-verified
-  // 2026-06-10) and Telegram voice notes are always OGG/Opus — transcode to
-  // WAV in-process (pure JS, src/enrich/ogg-opus.js). Fail-soft: if the
-  // transcode returns null we still try the original bytes (a future decoder
-  // may accept them) and otherwise fall back via the normal null path.
-  let format = audioFormatFor(mimeType, fileName);
+  const format = audioFormatFor(mimeType, fileName);
+
+  // Transcribe ONE audio buffer: the dedicated Whisper service first (WAV only,
+  // ~100x faster than the LLM path — docs/WHISPER-TRANSCRIPTION-DESIGN), else a
+  // local audio-capable model. Returns RAW text; the 200k DoS clamp is applied
+  // ONCE at the top-level return, after rejoining windows (store full, clamp at
+  // the end). The LLM-model capability probe is memoized across windows.
+  let _llmModel;
+  const llmModel = async () => {
+    if (_llmModel !== undefined) return _llmModel;
+    _llmModel = model || process.env.MYCELIUM_AUDIO_MODEL
+      || (await pickModelWithCapability("audio", { prefer, baseUrl, fetch: fetchImpl })) || null;
+    return _llmModel;
+  };
+  const transcribeOne = async (b, fmt) => {
+    if (fmt === "wav" && getTranscriberHealth().status === "ok") {
+      const t = await transcribeViaWhisper({ buf: b, fetch: fetchImpl });
+      if (t) return t;   // whisper hiccup → fall through to the LLM path (never lose audio)
+    }
+    const chosen = await llmModel();
+    if (!chosen) return null; // no audio-capable model → graceful fallback
+    const base = String(baseUrl || "").replace(/\/+$/, "");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetchImpl(`${base}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: chosen,
+          stream: false,
+          // Always 127.0.0.1 Ollama here (capability-picked local model), which
+          // accepts `think` on /v1/chat/completions. Thinking adds minutes of
+          // hidden reasoning before a verbatim transcription — disable it.
+          think: false,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "text", text: TRANSCRIBE_PROMPT },
+              { type: "input_audio", input_audio: { data: b.toString("base64"), format: fmt } },
+            ],
+          }],
+        }),
+        signal: controller.signal,
+      });
+      if (!res || !res.ok) return null;
+      const data = await res.json().catch(() => null);
+      const t = String(data?.choices?.[0]?.message?.content || "").trim();
+      return t.length ? t : null;
+    } catch {
+      return null; // timeout / decode error / model error → caller falls back
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  // OGG (Telegram voice) — llama.cpp's audio loader rejects Ogg outright
+  // (live-verified 2026-06-10), so transcode to WAV in-process. Decode into WAV
+  // WINDOWS and transcribe each, rejoining in full: a long voice note is no
+  // longer cut at the old 900s decode / 8000-char output bounds, and peak memory
+  // stays bounded to one window. A short note yields exactly ONE window → the
+  // common path is unchanged. If decode yields nothing usable, fall through and
+  // try the ORIGINAL ogg bytes via the LLM path (a future decoder may accept them).
   if (format === "ogg") {
-    const { oggOpusToWav } = await import("./ogg-opus.js");
-    const wav = await oggOpusToWav(buf);
-    if (wav) { buf = wav; format = "wav"; }
+    const { oggOpusToWavChunks } = await import("./ogg-opus.js");
+    const parts = [];
+    for await (const wavWindow of oggOpusToWavChunks(buf)) {
+      const t = await transcribeOne(wavWindow, "wav");
+      if (t) parts.push(t);
+    }
+    if (parts.length) {
+      const joined = parts.join(" ").trim();
+      return joined.length ? clampStored(joined) : null;
+    }
   }
 
-  // PREFERENCE 1 — the dedicated Whisper service, when the user set it up
-  // (docs/WHISPER-TRANSCRIPTION-DESIGN-2026-06-11.md). ~100x faster than the
-  // LLM path (1.8s vs >180s live, 2026-06-11) and independent of the chat
-  // model. Only WAV reaches it (Telegram voice is transcoded above); other
-  // formats fall through to the LLM path which decodes them natively.
-  if (format === "wav" && getTranscriberHealth().status === "ok") {
-    const text = await transcribeViaWhisper({ buf, fetch: fetchImpl });
-    if (text) return text;
-    // fall through — whisper hiccup must never lose a voice note
-  }
-  const b64 = buf.toString("base64");
-
-  const chosen = model
-    || process.env.MYCELIUM_AUDIO_MODEL
-    || (await pickModelWithCapability("audio", { prefer, baseUrl, fetch: fetchImpl }));
-  if (!chosen) return null; // no audio-capable model → graceful fallback
-
-  const base = String(baseUrl || "").replace(/\/+$/, "");
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetchImpl(`${base}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: chosen,
-        stream: false,
-        // Always 127.0.0.1 Ollama here (capability-picked local model), which
-        // accepts `think` on /v1/chat/completions. Thinking adds minutes of
-        // hidden reasoning before a verbatim transcription — disable it.
-        think: false,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "text", text: TRANSCRIBE_PROMPT },
-            { type: "input_audio", input_audio: { data: b64, format } },
-          ],
-        }],
-      }),
-      signal: controller.signal,
-    });
-    if (!res || !res.ok) return null;
-    const data = await res.json().catch(() => null);
-    const text = String(data?.choices?.[0]?.message?.content || "").trim();
-    return text.length ? clampStored(text) : null; // store the FULL transcript (was a silent 8000-char cut)
-  } catch {
-    return null; // timeout / decode error / model error → caller falls back
-  } finally {
-    clearTimeout(timer);
-  }
+  const text = await transcribeOne(buf, format);
+  return text ? clampStored(text) : null;
 }
 
 /**
@@ -148,7 +164,7 @@ async function transcribeViaWhisper({ buf, fetch: fetchImpl, timeoutMs = Number(
     if (!res || !res.ok) return null;
     const data = await res.json().catch(() => null);
     const text = String(data?.text || "").trim();
-    return text.length ? clampStored(text) : null; // store the FULL transcript (was a silent 8000-char cut)
+    return text.length ? text : null; // RAW — caller clamps once after rejoining windows
   } catch {
     return null;
   } finally {

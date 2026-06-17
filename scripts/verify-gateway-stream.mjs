@@ -23,6 +23,7 @@ const jsonRes = (obj) => ({ ok: true, status: 200, async text() { return JSON.st
 
 let cloudFail = false;
 let cloudStreamCalls = 0;
+let lastGenBody = null;   // last /api/generate request body (to assert options.num_ctx)
 const mockFetch = async (url, opts) => {
   const u = String(url);
   const body = opts?.body ? JSON.parse(opts.body) : {};
@@ -47,6 +48,7 @@ const mockFetch = async (url, opts) => {
     ]);
   }
   if (u.includes('/api/generate')) {
+    lastGenBody = body;
     if (!body.stream) return jsonRes({ response: LT });
     return sse([
       JSON.stringify({ response: LT.slice(0, 9), done: false }) + '\n',
@@ -64,6 +66,24 @@ const usProvider = { baseUrl: 'https://api.us-test.example/v1', openaiApiKey: 'k
 {
   const out = await drain(localStream({ prompt: 'hi', baseUrl: 'http://127.0.0.1:11434', fetch: mockFetch }));
   rec('SB1. localStream NDJSON → ordered deltas', out === LT, out);
+}
+// SB1b — localStream honors numCtx (was previously dropped → silent ~4096 input truncation)
+{
+  lastGenBody = null;
+  await drain(localStream({ prompt: 'hi', baseUrl: 'http://127.0.0.1:11434', fetch: mockFetch, numCtx: 16384 }));
+  rec('SB1b. localStream sets options.num_ctx (no silent input truncation)',
+    lastGenBody?.options?.num_ctx === 16384, JSON.stringify(lastGenBody?.options));
+}
+// SB1c — router.inferStream local AUTO-sizes num_ctx (no profile) so a long prompt
+// is not silently truncated at Ollama's ~4096 default on the gateway-streaming path.
+{
+  lastGenBody = null;
+  const router = createInferenceRouter({ ollamaUrl: 'http://127.0.0.1:11434', fetch: mockFetch });
+  const longPrompt = 'word '.repeat(8000); // ~10k tokens → window must exceed 4096
+  await drain(router.inferStream({ prompt: longPrompt, task: 'summarize' }));
+  const ctx = lastGenBody?.options?.num_ctx;
+  rec('SB1c. inferStream local auto-sizes num_ctx > 4096 for a long prompt',
+    Number.isFinite(ctx) && ctx > 4096, `num_ctx=${ctx}`);
 }
 // SB2 — cloudStream OpenAI SSE
 {

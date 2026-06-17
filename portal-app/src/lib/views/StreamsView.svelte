@@ -1,36 +1,41 @@
 <script lang="ts">
-	// Streams — the merged data surface (NAV-IA-LOCK-2026-06-08). Two facets behind
-	// one tab:
-	//   • Stream  — the live incoming feed (TimelineView: telegram/discord/whatsapp/portal)
+	// Streams — the merged data surface. Facets behind one tab:
+	//   • Stream  — the live incoming feed (source spectrum + TimelineView river)
 	//   • Sources — manage inputs/connectors + run imports (ImportView)
+	//   • Body    — Apple Health (sleep/HRV/activity); folded in here because health
+	//               is just another stream of incoming data (BodyView).
 	// The workspace passes `facet` in tab params (mirrored to /streams?facet=…); the
 	// segmented control switches between them. Facets lazy-mount on first visit, then
 	// stay alive (display-toggled) so switching never refetches.
 	import TimelineView from './TimelineView.svelte';
 	import ImportView from './ImportView.svelte';
+	import BodyView from './BodyView.svelte';
 	import SourceSpectrum from './SourceSpectrum.svelte';
 
+	type Facet = 'stream' | 'sources' | 'body';
+
 	let { facet = 'stream', setParams }: {
-		facet?: 'stream' | 'sources';
+		facet?: Facet;
 		setParams?: (patch: Record<string, unknown>) => void;
 	} = $props();
 
 	// The tab param is the single source of truth (mirrored to /streams?facet=…), so
 	// the active facet is derived — a click just writes the param back via setParams.
-	const current = $derived(facet === 'sources' ? 'sources' : 'stream');
+	const current = $derived<Facet>(facet === 'sources' ? 'sources' : facet === 'body' ? 'body' : 'stream');
 
 	// Lazy-mount + keep-alive: a facet mounts on first visit, then stays mounted
 	// (display-toggled) so switching never refetches.
 	let visited = $state<Record<string, boolean>>({});
 	$effect(() => { if (!visited[current]) visited = { ...visited, [current]: true }; });
 
-	function select(f: 'stream' | 'sources') {
+	function select(f: Facet) {
 		setParams?.({ facet: f });
 	}
 
 	const facets = [
 		{ id: 'stream', label: 'Stream' },
 		{ id: 'sources', label: 'Sources' },
+		{ id: 'body', label: 'Body' },
 	] as const;
 
 	// Spectrum → river filter. A canonical source key (or null = all). The spectrum
@@ -65,6 +70,9 @@
 		{/if}
 		{#if visited.sources}
 			<div class="facet" class:hidden={current !== 'sources'}><ImportView /></div>
+		{/if}
+		{#if visited.body}
+			<div class="facet" class:hidden={current !== 'body'}><BodyView /></div>
 		{/if}
 	</div>
 </div>
