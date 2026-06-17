@@ -15,6 +15,18 @@
 
 	const captureMode = browser && new URLSearchParams(window.location.search).has('capture');
 
+	// Embed mode (the native iOS app's WKWebview): hide the web chrome — Header,
+	// Sidebar, BottomTabBar, ChatFloat — so the native tab bar is the SINGLE nav.
+	// Set once via ?embed=1 and persisted in sessionStorage so it survives the SPA's
+	// client-side navigations within the same webview session.
+	if (browser && new URLSearchParams(window.location.search).has('embed')) {
+		try { sessionStorage.setItem('myc_embed', '1'); } catch { /* private mode */ }
+	}
+	const embed = browser && (
+		new URLSearchParams(window.location.search).has('embed') ||
+		(() => { try { return sessionStorage.getItem('myc_embed') === '1'; } catch { return false; } })()
+	);
+
 	let { children } = $props();
 
 	let paletteOpen = $state(false);   // ⌘K command palette
@@ -73,14 +85,14 @@
 	</div>
 {:else}
 	<div class="app-shell flex flex-col bg-[var(--color-bg)] overflow-hidden">
-		<Header />
+		{#if !embed}<Header />{/if}
 
 		<div class="flex-1 flex overflow-hidden">
-			<Sidebar />
+			{#if !embed}<Sidebar />{/if}
 			<main class="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
 				<div
 					class="flex-1 min-h-0 overflow-hidden flex flex-col"
-					class:mobile-content-area={isMobile}
+					class:mobile-content-area={isMobile && !embed}
 				>
 					<WorkspaceRoot />
 				</div>
@@ -93,11 +105,11 @@
 	     (and every existing goto('/x') keeps working) without showing page UI. -->
 	<div style="display: none" aria-hidden="true">{@render children()}</div>
 
-	{#if !(isMobile && chatOpen)}
+	{#if !embed && !(isMobile && chatOpen)}
 		<BottomTabBar onMoreTap={openMobileDrawer} />
 	{/if}
 
-	<ChatFloat visible={chatOpen} />
+	{#if !embed}<ChatFloat visible={chatOpen} />{/if}
 	<Toast />
 	<ImportDropZone />
 	<CommandPalette bind:open={paletteOpen} />
