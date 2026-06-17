@@ -26,6 +26,21 @@ export const LOCAL_TASKS = Object.freeze(["summarize", "classify", "extract"]);
 export const CLOUD_TASKS = Object.freeze(["narrate", "complex"]);
 export const TASKS = Object.freeze([...LOCAL_TASKS, ...CLOUD_TASKS]);
 
+// Size a LOCAL Ollama context window to hold the prompt PLUS the output, so the
+// model never silently truncates the INPUT at Ollama's ~4096 default (the tail
+// of a long prompt is dropped before the model ever sees it — invisible, unlike
+// the output cap). Used only when no profile-driven numCtx was supplied. Grows
+// with the actual prompt (proportional, not a blanket large allocation) and is
+// capped so a pathological prompt can't blow up the KV cache; Ollama itself
+// clamps to the model's trained max. Floor at 4096 so we never SHRINK the window.
+const NUMCTX_CEILING = Math.max(8192, Number(process.env.MYCELIUM_LOCAL_NUMCTX_CEILING) || 32768);
+function autoNumCtx(prompt, maxTokens) {
+  const out = Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 1024;
+  const want = estimateTokens(String(prompt || "")) + out + 512; // prompt + output + margin
+  const rounded = Math.ceil(want / 2048) * 2048;                  // round up to a clean window
+  return Math.min(NUMCTX_CEILING, Math.max(4096, rounded));
+}
+
 /**
  * Create an inference router.
  * @param {object} [opts]
@@ -91,7 +106,8 @@ export function createInferenceRouter({
 
   async function runLocal({ prompt, maxTokens, numCtx, format, area, onTruncated }) {
     let raw = null;
-    const text = await localInfer({ prompt, maxTokens, numCtx, format, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs, onUsage: (u) => { raw = u; }, onTruncated });
+    const ctx = numCtx ?? autoNumCtx(prompt, maxTokens);   // never leave Ollama at its ~4096 default
+    const text = await localInfer({ prompt, maxTokens, numCtx: ctx, format, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs, onUsage: (u) => { raw = u; }, onTruncated });
     emitUsage({ prompt, text, raw, area, isLocal: true });
     return text;
   }
@@ -113,12 +129,13 @@ export function createInferenceRouter({
     return text;
   }
 
-  async function* runLocalStream({ prompt, maxTokens, area, onTruncated }) {
+  async function* runLocalStream({ prompt, maxTokens, numCtx, area, onTruncated }) {
     let raw = null;
+    const ctx = numCtx ?? autoNumCtx(prompt, maxTokens);   // size the window or Ollama silently truncates the prompt at ~4096
     // Accumulate the streamed deltas so the usage estimate has the real output text
     // to fall back on when the provider doesn't report counts (token-budget §12).
     let acc = "";
-    for await (const delta of localStream({ prompt, maxTokens, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs, onUsage: (u) => { raw = u; }, onTruncated })) {
+    for await (const delta of localStream({ prompt, maxTokens, numCtx: ctx, model: cfg.localModel, baseUrl: cfg.ollamaUrl, fetch: cfg.fetch, timeoutMs: cfg.timeoutMs, onUsage: (u) => { raw = u; }, onTruncated })) {
       acc += delta; yield delta;
     }
     emitUsage({ prompt, text: acc, raw, area, isLocal: true });

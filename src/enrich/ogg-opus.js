@@ -80,3 +80,84 @@ export async function oggOpusToWav(ogg, { channels = 1, maxSeconds = 900, timeou
 }
 
 export default oggOpusToWav;
+
+/**
+ * LOSSLESS long-audio variant: decode an OGG/Opus buffer and YIELD it as a
+ * sequence of WAV windows (each <= windowSeconds), so a long voice note can be
+ * transcribed in pieces and rejoined WITHOUT ever holding the whole decoded PCM
+ * in memory. Peak memory is bounded to ~one window (pause/resume backpressure),
+ * which is why the overall `maxSeconds` ceiling can be hours instead of the
+ * single-shot 900s memory bound — nothing is lost on a long recording.
+ *
+ * A short voice note yields exactly ONE window whose bytes are identical to
+ * oggOpusToWav's output, so the common path is unchanged.
+ *
+ * @param {Buffer} ogg
+ * @param {object} [opts]
+ * @param {number} [opts.channels=1]
+ * @param {number} [opts.windowSeconds=600]   per-window audio length (~55MB mono PCM)
+ * @param {number} [opts.maxSeconds=14400]    overall DoS ceiling (4h) — bounds total work
+ * @param {number} [opts.timeoutMs=300000]    wall-clock backstop for the whole decode
+ * @returns {AsyncGenerator<Buffer>}          successive WAV buffers
+ */
+export async function* oggOpusToWavChunks(ogg, { channels = 1, windowSeconds = 600, maxSeconds = 14400, timeoutMs = 300000 } = {}) {
+  if (!Buffer.isBuffer(ogg) || ogg.length < 4 || ogg.subarray(0, 4).toString("latin1") !== "OggS") return;
+  let prism, OpusScript;
+  try { prism = await import("prism-media"); OpusScript = (await import("opusscript")).default; }
+  catch { return; }
+  const SAMPLE_RATE = 48000;
+  const decoder = new OpusScript(SAMPLE_RATE, channels, OpusScript.Application.VOIP);
+  const bytesPerSec = SAMPLE_RATE * channels * 2;
+  const windowBytes = Math.max(bytesPerSec, Math.round(windowSeconds) * bytesPerSec);
+  const maxBytes = Math.round(maxSeconds) * bytesPerSec;
+
+  const demuxer = new prism.opus.OggDemuxer();
+  const ready = [];          // completed WAV windows awaiting the consumer
+  let win = [];              // current window's PCM chunks
+  let winLen = 0;
+  let totalLen = 0;
+  let capped = false;
+  let ended = false;
+  let wake = null;           // resolver: a window is ready OR the stream ended
+  const signal = () => { if (wake) { const r = wake; wake = null; r(); } };
+
+  const flushWindow = () => {
+    if (!winLen) return;
+    const pcm = Buffer.concat(win, winLen);
+    ready.push(Buffer.concat([wavHeader({ sampleRate: SAMPLE_RATE, channels, dataBytes: pcm.length }), pcm]));
+    win = []; winLen = 0;
+    signal();
+  };
+
+  demuxer.on("data", (packet) => {
+    if (capped) return;
+    try {
+      const out = decoder.decode(packet);
+      if (out) {
+        const b = Buffer.from(out.buffer, out.byteOffset, out.byteLength);
+        win.push(b); winLen += b.length; totalLen += b.length;
+        if (winLen >= windowBytes) { flushWindow(); demuxer.pause(); }   // backpressure: wait for the consumer
+        if (totalLen >= maxBytes) { capped = true; }                      // overall ceiling reached
+      }
+    } catch { /* skip an undecodable packet; keep the rest */ }
+  });
+  demuxer.on("end", () => { ended = true; signal(); });
+  demuxer.on("error", () => { ended = true; signal(); });
+  const timer = setTimeout(() => { capped = true; ended = true; signal(); }, timeoutMs);
+  timer.unref?.();
+  Readable.from(ogg).pipe(demuxer);
+
+  try {
+    for (;;) {
+      if (ready.length) { yield ready.shift(); if (!ended && !capped) demuxer.resume(); continue; }
+      if (ended) break;
+      await new Promise((r) => { wake = r; });
+    }
+    flushWindow();                       // emit the trailing partial window
+    while (ready.length) yield ready.shift();
+  } finally {
+    clearTimeout(timer);
+    try { decoder.delete?.(); } catch { /* */ }
+    try { demuxer.destroy?.(); } catch { /* */ }
+  }
+}
