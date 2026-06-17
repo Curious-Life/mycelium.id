@@ -359,7 +359,7 @@
 
 	{:else}
 		<!-- Two-pane hub -->
-		<div class="hub">
+		<div class="hub" class:has-selection={!!selectedConnection}>
 			<!-- Sidebar -->
 			<aside class="sidebar">
 				<div class="sb-top">
@@ -810,8 +810,12 @@
 	@media (max-width: 760px) {
 		.hub { grid-template-columns: 1fr; }
 		.sidebar { border-right: none; }
-		.main { position: absolute; inset: 0; background: var(--color-bg); z-index: 5; }
-		.main:not(:has(.main-empty)) { display: flex; }
+		/* Single column: the connection LIST (sidebar) shows by default; the detail
+		   pane only overlays once a connection is selected. Without this, the empty
+		   "select someone" detail pane covered the list and you couldn't pick anyone. */
+		.main { position: absolute; inset: 0; background: var(--color-bg); z-index: 5; display: none; }
+		.hub.has-selection .main { display: flex; }
+		.hub.has-selection .sidebar { display: none; }
 		.back { display: block; }
 		.tabs { margin-left: 0; }
 	}
