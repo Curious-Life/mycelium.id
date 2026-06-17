@@ -143,6 +143,25 @@ export function createMindscapeNamespace(deps) {
       );
     },
 
+    /** Gated narration write (the describeEntity tool): set a realm/territory
+     * name + essence + the covered period. UPDATE-only — fail-closed: it never
+     * resurrects a pruned/absent entity (0 rows touched → caller rejects). name/
+     * essence are ENCRYPTED at the adapter; described_period and activity_timeline
+     * are plaintext metadata (same shape the describe pipeline writes). Returns
+     * the number of rows updated. */
+    async setNameEssence(userId, kind, id, { name, essence }, periods = {}) {
+      const table = kind === 'realm' ? 'realms' : 'territory_profiles';
+      const idCol = kind === 'realm' ? 'realm_id' : 'territory_id';
+      const sets = ['name = ?', 'essence = ?', "updated_at = datetime('now')"];
+      const params = [name, essence];
+      if (kind !== 'realm') sets.push("last_described_at = datetime('now')"); // realms have no such column
+      if (periods.start !== undefined) { sets.push('described_period_start = ?', 'described_period_end = ?'); params.push(periods.start ?? null, periods.end ?? null); }
+      if (periods.activityTimeline !== undefined) { sets.push('activity_timeline = ?'); params.push(periods.activityTimeline); }
+      params.push(userId, id);
+      const r = await d1Query(`UPDATE ${table} SET ${sets.join(', ')} WHERE user_id = ? AND ${idCol} = ?`, params);
+      return r?.meta?.changes ?? r?.changes ?? 0;
+    },
+
     async getSemanticThemes(userId) {
       const result = await d1Query(
         `SELECT realm_id, semantic_theme_id, name, essence,

@@ -94,6 +94,40 @@ async function buildNeighbourhood(query, db, userId, kind, id) {
   return {};
 }
 
+/** Per-entity measured "shape" from the analysis engine (v4). All fail-soft: a
+ *  metric the engine hasn't computed yet → null → omitted from the prompt. So the
+ *  capsule works pre-analysis (Phase 1) and gets richer once the engine has run
+ *  (the design runs the metric stages BEFORE describe). current_phase is plaintext
+ *  post-gift-fix (null until vitality runs); current_vitality/coherence decrypt via
+ *  the rawQuery passthrough. fisher phase = latest trajectory window at this level. */
+async function buildMetrics(query, userId, kind, id) {
+  const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+  const out = { vitality: null, phase: null, fisherPhase: null, coherence: null, recurrence: null };
+  // Fisher movement is a LEVEL-wide signal (per-id proportions live inside
+  // activation_vector JSON, not a column) — take the latest window's phase at this
+  // entity's level. phase_recent (smoothed) preferred over the raw step phase.
+  const level = kind === 'realm' ? 'realm' : kind === 'theme' ? 'theme' : 'territory';
+  const [fisher] = await safe(() => query(
+    `SELECT phase, phase_recent FROM fisher_trajectory WHERE user_id = ? AND level = ?
+      ORDER BY window_end DESC LIMIT 1`, [userId, level]), []);
+  out.fisherPhase = fisher?.phase_recent || fisher?.phase || null;
+  if (kind === 'territory') {
+    const [tp] = await safe(() => query(
+      `SELECT current_vitality, current_phase, coherence FROM territory_profiles WHERE user_id = ? AND territory_id = ?`,
+      [userId, id]), []);
+    if (tp) {
+      out.vitality = num(tp.current_vitality);
+      out.phase = ['sparse', 'active', 'anchor'].includes(tp.current_phase) ? tp.current_phase : null;
+      out.coherence = num(tp.coherence);
+    }
+    const [rec] = await safe(() => query(
+      `SELECT recurrence_interval FROM cognitive_metrics_per_territory WHERE user_id = ? AND territory_id = ?
+        ORDER BY window_end DESC LIMIT 1`, [userId, id]), []);
+    out.recurrence = rec ? num(rec.recurrence_interval) : null;
+  }
+  return out;
+}
+
 /**
  * Build the Context Capsule for an entity.
  * @param {object} args
@@ -129,6 +163,7 @@ export async function buildContextCapsule({ query, db, userId, kind, id, members
     : null;
 
   const neighbourhood = await buildNeighbourhood(query, db, userId, kind, id);
+  const metrics = await buildMetrics(query, userId, kind, id);
 
   return {
     kind,
@@ -137,6 +172,7 @@ export async function buildContextCapsule({ query, db, userId, kind, id, members
     temporal: { coveredRange, newRange, exploredPercent, lifespan },
     activity: { histogram, sparkline: sparkline(histogram), peak: peakPeriod(histogram) },
     neighbourhood,
+    metrics,
   };
 }
 
@@ -168,6 +204,16 @@ export function renderCapsule(cap) {
   } else if (cap.temporal.newRange) {
     L.push(`FIRST DESCRIPTION — content spans ${day(cap.temporal.newRange.start)} → ${day(cap.temporal.newRange.end)} (${cap.temporal.newRange.points} items).`);
   }
+
+  // SHAPE: the measured analysis-engine signals (v4). Omitted entirely pre-analysis.
+  const mx = cap.metrics || {};
+  const shape = [];
+  if (mx.vitality != null) shape.push(`vitality ${mx.vitality.toFixed(2)}${mx.phase ? ` (${mx.phase})` : ''}`);
+  else if (mx.phase) shape.push(`phase ${mx.phase}`);
+  if (mx.fisherPhase) shape.push(`movement ${mx.fisherPhase}`);
+  if (mx.coherence != null) shape.push(`coherence ${mx.coherence.toFixed(2)} (${mx.coherence < 0.4 ? 'scattered' : mx.coherence > 0.7 ? 'focused' : 'mixed'})`);
+  if (mx.recurrence != null) shape.push(`recurs ~${Math.round(mx.recurrence)}d`);
+  if (shape.length) L.push(`SHAPE: ${shape.join(' · ')}.`);
 
   const n = cap.neighbourhood || {};
   const conn = [];

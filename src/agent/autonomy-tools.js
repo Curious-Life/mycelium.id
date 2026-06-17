@@ -20,14 +20,15 @@
 export const SAFE_AUTONOMOUS_TOOLS = new Set([
   'getContext', 'searchMindscape', 'listDocuments', 'getDocument', 'listTasks',
   'getDailyMessages', 'cognitiveState', 'cognitiveHistory', 'readMindFile',
-  'mindscape', 'personaClaims', 'getHealthData',
+  'mindscape', 'personaClaims', 'getHealthData', 'getEntityContext',
 ]);
 
 // Gated tools — granted only when a task explicitly enables them by name. These are the
 // SAME names kept out of the chat DOMAINS catalog (tool-domains.js §9-13): an autonomous
 // turn can schedule follow-ups and reply to a channel; interactive chat can do neither.
+// describeEntity (narration write) joins them: the narration walk opts it in; chat cannot.
 export const AUTONOMY_TOOLS = new Set([
-  'schedule_task', 'list_my_schedules', 'cancel_task', 'reply',
+  'schedule_task', 'list_my_schedules', 'cancel_task', 'reply', 'describeEntity',
 ]);
 
 /**
