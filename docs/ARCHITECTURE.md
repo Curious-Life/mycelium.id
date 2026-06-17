@@ -88,7 +88,7 @@ The **channel daemon** (`:3010`, `packages/channel-daemon/`, Telegram/Discord br
 | Model-aware sizing (profiles + token budgeting; auto `num_ctx`/`max_tokens` per model) | `src/inference/{model-registry,model-profile,token-budget}.js` · `verify:model-sizing` | ✅ ([design](TEXT-GENERATION-ABSTRACTION-DESIGN-2026-06-15.md); local probe live-smoked) |
 | Native local chat adapter (Ollama `/api/chat`, sized `num_ctx`) + token-budgeted preamble | `src/agent/harness.js` (`ollamaNativeAdapter`), `src/portal-chat.js` · `verify:harness-local` | ✅ (live-smoked) |
 | Token-usage accounting (counts by source/area/provider/model; no content) + transparency UI | `src/db/llm-usage.js`, `src/inference/usage.js`, `src/portal-usage.js` (`GET /portal/usage`), `portal-app/.../settings/UsageSection.svelte` · `migrations/0014` · `verify:usage` | ✅ (live-smoked) |
-| Search (BM25 + vector + RRF fusion) | `src/search/**` | ✅ |
+| Search (BM25 + vector + RRF fusion) over messages + documents + topology profiles | `src/search/**` · `verify:search` | ✅ (documents BM25-only — see below) |
 | Topology / AnalysisEngine pipeline | `src/topology.js`, `src/topology/helpers.js`, `pipeline/` | ✅ (real run ⚠️) |
 | Ingestion choke-point + uploads | `src/ingest/{capture,upload,blob-store,enqueue}.js` | ✅ |
 | Enrichment service (embed + NLP) | `src/enrich/{service,server,extract}.js` | ✅ |
@@ -142,6 +142,17 @@ that bridges the embed client's positional-task signature to the search
 embedder's `{task}` contract, and reports `unit:true` since the embed-service
 L2-normalizes). The backend fail-softs to BM25 per query when `:8091` is down.
 Opt out with `MYCELIUM_DISABLE_EMBED=1`; redirect with `MYCELIUM_EMBED_URL`.
+
+**Indexed layers (`src/search/d1-loader.js` SOURCES):** messages (with stored
+`embedding_768` → ANN+BM25), the three topology profile tables (kind-prefixed
+`territory:`/`realm:`/`theme:`), and **documents** (`document:`-prefixed,
+**BM25-only**). Documents carry no stored embedding (enrichment embeds messages
+only), so they load with `skipEmbed` — indexing them with a live embedder would
+fire one `:8091` call per doc at cold start (the freeze PIPELINE-INTEGRITY fought).
+`bulkSearch` partitions ranked hits back into the 5 mindscape layers and hydrates
+each; documents/internal/forgotten/sensitive are filtered at load **and** hydrate
+(defense in depth). Semantic (ANN) document ranking = deferred Phase 2 (embed docs
+in the enrich pipeline). Design: `docs/DOCUMENT-SEARCH-DESIGN-2026-06-17.md`.
 
 Enrichment state machine (faithful to the canonical model): **`0 unprocessed →
 2 embedded → 1 enriched → -1 failed`**. The NLP pass (`src/enrich/extract.js`)
