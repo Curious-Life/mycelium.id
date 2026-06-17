@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'node:path';
 import https from 'node:https';
 import { existsSync, mkdirSync, cpSync, renameSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { boot } from './index.js';
@@ -71,6 +72,53 @@ function resolvePortal(mode = process.env.MYCELIUM_PORTAL || 'auto') {
     return { dir: CANONICAL_BUILD, spaFallback: canonicalFallback };
   }
   return { dir: LEGACY_PORTAL, spaFallback: null };
+}
+
+/**
+ * Build the Content-Security-Policy for the portal webview.
+ *
+ * The Tauri webview loads this Node server as a REMOTE origin
+ * (http://127.0.0.1:8787), so Tauri's compile-time CSP (app.security.csp) does
+ * NOT apply — the CSP must ride the HTTP response. We avoid `script-src
+ * 'unsafe-inline'` (which would defeat most of CSP's XSS value, and this is a
+ * cognitive vault) by hashing the shell's first-party inline scripts at boot:
+ * the SES polyfill + SvelteKit's bootstrap are not byte-stable across builds, so
+ * a hardcoded hash would rot — extracting them at startup auto-adapts and needs
+ * no per-request HTML rewrite (the shell is still served via sendFile/static).
+ *
+ * Fail closed: if the shell can't be read, we emit `script-src 'self'` only
+ * (stricter, not laxer). DOMPurify on rendered markdown remains the first layer;
+ * this is defense-in-depth. See docs/APP-SANDBOX-HARDENING-DESIGN-2026-06-16.md.
+ */
+function buildPortalCsp(shellPath) {
+  const hashes = [];
+  try {
+    const html = readFileSync(shellPath, 'utf8');
+    // Inline <script> blocks only (those WITHOUT a src=) — src'd modules are 'self'.
+    for (const m of html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)) {
+      const body = m[1];
+      if (!body.trim()) continue;
+      hashes.push(`'sha256-${createHash('sha256').update(body, 'utf8').digest('base64')}'`);
+    }
+  } catch {
+    /* shell unreadable → script-src 'self' only (fail closed = stricter) */
+  }
+  return [
+    "default-src 'self'",
+    `script-src 'self' ${hashes.join(' ')}`.trim(),
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "img-src 'self' data: blob: https://*.basemaps.cartocdn.com",
+    "connect-src 'self'",
+    "worker-src 'self' blob:",
+    // Turnstile is a CROSS-ORIGIN iframe to the control plane (its script runs
+    // THERE, never in this origin) — frame it, but grant it no script/connect here.
+    "frame-src https://connect.mycelium.id",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "object-src 'none'",
+    "form-action 'self'",
+  ].join('; ');
 }
 
 /**
@@ -465,6 +513,23 @@ export async function startRestServer({
 
   const app = express();
   app.disable('x-powered-by');
+
+  // Security headers on EVERY response (the webview loads us as a remote origin,
+  // so this is the only place a CSP can attach — see buildPortalCsp). Computed
+  // once at boot from the resolved shell. No HSTS: this origin is loopback HTTP
+  // (HSTS is ignored there); caddy adds it for the public TLS host.
+  {
+    const { dir: cspDir, spaFallback: cspShell } = resolvePortal(portalMode);
+    const portalCsp = buildPortalCsp(cspShell || path.join(cspDir, 'index.html'));
+    app.use((req, res, next) => {
+      res.setHeader('Content-Security-Policy', portalCsp);
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+      res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+      next();
+    });
+  }
 
   // Issue the double-submit CSRF cookie early so it rides the SPA document load,
   // /auth/session, and every subsequent request. Loopback (desktop) ignores it

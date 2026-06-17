@@ -25,10 +25,12 @@
 		const t = e.target as HTMLElement;
 		if (t.closest('button, a, input, select, textarea, [role="button"]')) return; // let controls work
 		try {
-			const tauri = (window as any).__TAURI__;
-			const getWin = tauri?.window?.getCurrentWindow || tauri?.webviewWindow?.getCurrentWebviewWindow;
-			getWin?.()?.startDragging?.();
-		} catch { /* not in Tauri / API shape differs — the attribute handles it */ }
+			// `withGlobalTauri` is OFF (hardening: no full Tauri API on window for the
+			// remote origin), so reach the core window command through the internals
+			// bridge, which Tauri injects for the granted origin regardless of the flag.
+			// `core:window:allow-start-dragging` is granted in capabilities/default.json.
+			(window as any).__TAURI_INTERNALS__?.invoke?.('plugin:window|start_dragging');
+		} catch { /* not in Tauri / API shape differs — data-tauri-drag-region handles it */ }
 	}
 
 	const viewLabels: Record<string, string> = {
