@@ -42,6 +42,9 @@ const KIND_BY_PREFIX = [
   ['http-poll:', 'connector'],
   ['webhook:', 'connector'],
   ['connector:', 'connector'],
+  // Agent activity sub-tags: agent-file, agent-output, agent-delegation,
+  // agent-send-file, … each keeps its own chip but groups under Agents.
+  ['agent-', 'agent'],
 ];
 
 // Raw source → canonical source (collapse per-platform variants so the spectrum
