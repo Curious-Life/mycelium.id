@@ -15,6 +15,14 @@ import { buildDidDocument, buildWebfinger, resolveDidKey, didWebHost } from './d
 import { canonicalize, verifyDetached } from './sign.js';
 
 const MAX_CANONICAL_BYTES = 8 * 1024;     // body cap (DoS)
+const MAX_SHARED_CONTENT_BYTES = 1024 * 1024; // cap an OUTBOUND shared-content response
+
+// §7 tripwire (mirror of db/connections.js): never let an embedding/vector field
+// leave the box, even via a future regression on the shared-content serve path.
+function hasVectorKey(o) {
+  return o && typeof o === 'object'
+    && Object.keys(o).some((k) => /centroid|embedding|vector/i.test(k) || hasVectorKey(o[k]));
+}
 const TS_WINDOW_MS = 5 * 60 * 1000;       // ±5 min freshness window
 const RATE_MAX = 30;                       // inbound connects per peer per window
 const RATE_MAX_GLOBAL = 120;               // backstop: total inbound connects per window (any peer)
@@ -165,6 +173,92 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
         // Signed but not a connection → 403 (authenticated, unauthorized).
         const status = /no accepted connection/.test(e.message) ? 403 : 400;
         return { status, body: { error: e.message } };
+      }
+    },
+
+    /**
+     * Inbound SHARE ANNOUNCE from a connected peer (federation Tier-0d). The peer
+     * is telling us they granted (or revoked) us access to one of THEIR spaces/
+     * contexts. Same fail-closed verify gate; must come from an ACCEPTED connection
+     * (matched on the VERIFIED did, never payload claims). We only RECORD the
+     * announcement — the content is fetched on demand later (grant-gated on their
+     * side). The label is the only sensitive field; it is encrypted at rest.
+     */
+    async share({ payload, headers = {}, ip } = {}) {
+      const v = await verify({ payload, headers, ip });
+      if (!v.ok) return { status: v.status, body: v.body };
+      if (payload.$type !== 'social.mycelium.share.v1') return { status: 400, body: { error: 'unexpected $type' } };
+      const kind = payload.kind === 'context' ? 'context' : payload.kind === 'space' ? 'space' : null;
+      if (!kind || !payload.ref) return { status: 400, body: { error: 'invalid share' } };
+      try {
+        const connId = await db.connections.findAcceptedByPeer({ fromDid: v.did, verifiedHost: didWebHost(v.did), toUserId: userId });
+        if (!connId) return { status: 403, body: { error: 'no accepted connection from this peer' } };
+        const ref = String(payload.ref).slice(0, 200);
+        const name = typeof payload.name === 'string' ? payload.name.slice(0, 200) : null;
+        const role = ['member', 'contributor'].includes(payload.role) ? payload.role : null;
+        if (payload.action === 'revoke') {
+          await db.inboundShares.revoke({ connectionId: connId, kind, remoteRef: ref });
+        } else {
+          await db.inboundShares.upsert({ connectionId: connId, peerDid: v.did, kind, remoteRef: ref, name, role, grantedAt: new Date(Number(payload.ts) || Date.now()).toISOString() });
+        }
+        return { status: 202, body: { accepted: true } };
+      } catch (e) {
+        return { status: 400, body: { error: e.message } };
+      }
+    },
+
+    /**
+     * SERVE shared content to a verified peer (federation Tier-0e) — the security
+     * core. Fail-closed at every step:
+     *   1. verify() the requester's signature (gate).
+     *   2. resolveSharedGrant: a LIVE grant must exist for this peer + ref, else 403
+     *      (revocation is honored on every request; private contexts never serve).
+     *   3. assemble a VECTOR-FREE payload (explicit columns; getForShare excludes
+     *      embedding_768) + hasVectorKey tripwire before serialization (§7).
+     *   4. size-cap + audit (counts only, never content).
+     *   5. SIGN the response body so the peer can prove it came from us (no MITM).
+     * Returns { status, signedBody, sig, did } — the router emits the signature
+     * headers + the raw signed bytes.
+     */
+    async sharedContent({ payload, headers = {}, ip } = {}) {
+      const v = await verify({ payload, headers, ip });
+      if (!v.ok) return { status: v.status, body: v.body };
+      if (payload.$type !== 'social.mycelium.shared-content.v1') return { status: 400, body: { error: 'unexpected $type' } };
+      const kind = payload.kind === 'context' ? 'context' : payload.kind === 'space' ? 'space' : null;
+      if (!kind || !payload.ref) return { status: 400, body: { error: 'invalid request' } };
+      try {
+        const grant = await db.connections.resolveSharedGrant({ fromDid: v.did, verifiedHost: didWebHost(v.did), toUserId: userId, kind, ref: payload.ref });
+        if (!grant.granted) return { status: 403, body: { error: 'not shared with you' } };
+
+        let content;
+        if (kind === 'space') {
+          const knowledge = (await db.spaceKnowledge.list(payload.ref).catch(() => [])).slice(0, 200)
+            .map((k) => ({ content: k.content, source_type: k.source_type, created_at: k.created_at }));
+          const documents = (await db.spaceRoomDocuments.listAtRoot(payload.ref, userId).catch(() => [])).slice(0, 200)
+            .map((d) => ({ path: d.path, title: d.title, summary: d.summary }));
+          const sp = await db.spaces.get(payload.ref).catch(() => null);
+          content = { kind, name: sp?.name || sp?.display_name || null, knowledge, documents };
+        } else {
+          const territories = (await db.contexts.getTerritories(payload.ref).catch(() => [])).slice(0, 500)
+            .map((t) => ({ territory_id: t.territory_id, name: t.name, essence: t.essence, realm_id: t.realm_id }));
+          content = { kind, territories };
+        }
+        // §7: refuse to serve if any vector/embedding field slipped into the payload.
+        if (hasVectorKey(content)) return { status: 500, body: { error: 'refusing to serve a vector field' } };
+
+        const canon = canonicalize(content);
+        if (canon.length > MAX_SHARED_CONTENT_BYTES) return { status: 413, body: { error: 'shared content too large' } };
+
+        db.audit?.log?.({
+          action: 'federation_shared_content_served', userId, ip,
+          resourceType: kind, resourceId: String(payload.ref),
+          details: { peer: didWebHost(v.did), docs: content.documents?.length ?? 0, knowledge: content.knowledge?.length ?? 0, territories: content.territories?.length ?? 0 },
+        })?.catch?.(() => {});
+
+        // Sign the EXACT bytes we send so the peer verifies authenticity.
+        return { status: 200, signedBody: canon, sig: identity.sign(canon), did: `did:web:${getHost()}` };
+      } catch (e) {
+        return { status: 400, body: { error: e.message } };
       }
     },
   };

@@ -37,12 +37,16 @@ export function createContextsNamespace(deps) {
 
   return {
     async list(userId) {
+      // Correlated subqueries (not JOIN+GROUP BY) so the territory and document
+      // counts don't multiply each other. sc.* carries the (auto-decrypted)
+      // summary + summary_updated_at for the Areas lens.
       const result = await d1Query(
-        `SELECT sc.*, COUNT(ct.territory_id) as territory_count
+        `SELECT sc.*,
+           (SELECT COUNT(*) FROM context_territories ct WHERE ct.context_id = sc.id) AS territory_count,
+           (SELECT COUNT(*) FROM context_documents cd WHERE cd.context_id = sc.id) AS doc_count
          FROM sharing_contexts sc
-         LEFT JOIN context_territories ct ON ct.context_id = sc.id
          WHERE sc.user_id = ?
-         GROUP BY sc.id ORDER BY sc.is_default DESC, sc.created_at`,
+         ORDER BY sc.is_default DESC, sc.created_at`,
         [userId],
       );
       return result.results || [];
@@ -174,6 +178,50 @@ export function createContextsNamespace(deps) {
         [ownerUserId, territoryId, viewerUserId, viewerUserId],
       );
       return (result.results?.length || 0) > 0;
+    },
+
+    // ─── Context Areas (#19) — the documents + AI-summary lens ────────────────
+    // The same sharing_contexts row, viewed as a "life domain": attach documents
+    // and synthesize a high-level summary that gives the AI context. `summary` is
+    // ENCRYPTED at rest (registry); it is only ever written via UPDATE here, never
+    // an INSERT, so the auto-encrypt VALUES-paren caveat does not apply.
+
+    /** Store/replace the AI summary for an area (auth via the WHERE user_id clause). */
+    async setSummary(userId, contextId, summary) {
+      await d1Query(
+        `UPDATE sharing_contexts SET summary = ?, summary_updated_at = datetime('now')
+         WHERE id = ? AND user_id = ?`,
+        [summary, contextId, userId],
+      );
+    },
+
+    async addDocument(contextId, documentPath) {
+      await d1Query(
+        `INSERT OR IGNORE INTO context_documents (context_id, document_path, added_at)
+         VALUES (?, ?, datetime('now'))`,
+        [contextId, documentPath],
+      );
+    },
+
+    async removeDocument(contextId, documentPath) {
+      await d1Query(
+        `DELETE FROM context_documents WHERE context_id = ? AND document_path = ?`,
+        [contextId, documentPath],
+      );
+    },
+
+    /** Documents attached to an area (joined to the live documents row for title/summary). */
+    async getDocuments(contextId) {
+      const result = await d1Query(
+        `SELECT cd.document_path AS path, d.title, d.summary, d.updated_at
+         FROM context_documents cd
+         LEFT JOIN documents d ON d.path = cd.document_path
+         WHERE cd.context_id = ?
+         ORDER BY cd.added_at DESC`,
+        [contextId],
+      );
+      // Drop rows whose document was deleted (LEFT JOIN → NULL title+summary+updated).
+      return (result.results || []).filter((r) => r.title != null || r.summary != null || r.updated_at != null);
     },
   };
 }

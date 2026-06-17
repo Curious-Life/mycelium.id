@@ -11,15 +11,15 @@
 	const isOpen = $derived($navigationState.sidebarOpen);
 	const currentView = $derived($navigationState.primaryView);
 
-	// Pending inbound connection requests — feeds the Connections nav badge.
-	// Polls the lightweight count endpoint; degrades silently when federation
-	// is off (count stays 0).
-	let pendingConnections = $state(0);
+	// People nav badge — combined count: pending invites + unread direct messages
+	// + newly-received shares. One poll of /people/badge drives the single dot.
+	// Degrades silently to 0 when federation is off.
+	let peopleBadge = $state(0);
 	$effect(() => {
 		if (!browser) return;
 		let alive = true;
 		const load = async () => {
-			try { const d = await apiGet<{ count: number }>('/portal/connections/count'); if (alive) pendingConnections = d.count ?? 0; } catch {}
+			try { const d = await apiGet<{ total: number }>('/portal/people/badge'); if (alive) peopleBadge = d.total ?? 0; } catch {}
 		};
 		load();
 		const t = setInterval(load, 15000);
@@ -227,8 +227,8 @@
 						{/if}
 					</div>
 					<span class="text-sm font-medium">{item.label}</span>
-					{#if item.id === 'people' && pendingConnections > 0}
-						<span class="conn-badge" aria-label="{pendingConnections} pending requests">{pendingConnections}</span>
+					{#if item.id === 'people' && peopleBadge > 0}
+						<span class="conn-badge" aria-label="{peopleBadge} new (invites, messages, shares)">{peopleBadge}</span>
 					{/if}
 				</a>
 			{/each}

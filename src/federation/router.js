@@ -52,5 +52,26 @@ export function createFederationRouter(deps) {
     res.status(r.status).json(r.body);
   });
 
+  // Share announce from a connected peer (Tier-0d): they granted/revoked us access
+  // to one of their spaces/contexts. Signature-gated + accepted-connection only.
+  router.post('/federation/share', async (req, res) => {
+    const r = await h.share({ payload: req.body, headers: hdrs(req), ip: ipOf(req) });
+    res.status(r.status).json(r.body);
+  });
+
+  // Serve shared content to a verified, GRANTED peer (Tier-0e). The handler signs
+  // the response body; we emit it verbatim with the signature headers so the peer
+  // can verify it (no MITM). Error paths return plain JSON.
+  router.post('/federation/shared-content', async (req, res) => {
+    const r = await h.sharedContent({ payload: req.body, headers: hdrs(req), ip: ipOf(req) });
+    if (r.signedBody != null) {
+      res.set('X-Myc-Did', r.did);
+      res.set('X-Myc-Sig', r.sig);
+      res.status(200).type('application/json').send(r.signedBody);
+      return;
+    }
+    res.status(r.status).json(r.body);
+  });
+
   return router;
 }

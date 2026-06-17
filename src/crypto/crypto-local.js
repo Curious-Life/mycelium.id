@@ -244,6 +244,15 @@ const ENCRYPTED_FIELDS = {
   // See migrations/0015_peer_messages.sql.
   peer_messages: ['content'],
 
+  // Sharing contexts double as "Context Areas" (#19). `name` stays plaintext (a
+  // queryable facet label); the AI `summary` is a synthesis of attached documents
+  // — a semantic fingerprint of plaintext → ENCRYPT. See 0016_context_areas.sql.
+  sharing_contexts: ['summary'],
+
+  // Inbound shares — a peer's label for something they shared with me, received
+  // over the wire (a hint about their life) → ENCRYPT. See 0017_inbound_shares.sql.
+  inbound_shares: ['name'],
+
   // Documents — content + every column that describes it. content_hash
   // (SHA of plaintext) stays plaintext because dedup/change-detection
   // queries need it — but this IS a known inversion risk if attacker

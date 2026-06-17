@@ -1,8 +1,22 @@
 <script lang="ts">
+	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
+	import { apiGet } from '$lib/api';
 	import { navigationState, type PrimaryView } from '$lib/stores/navigation';
 
 	const currentView = $derived($navigationState.primaryView);
+
+	// People badge — combined invites + unread messages + new shares (same source
+	// as the desktop sidebar). Drives a dot on the People tab.
+	let peopleBadge = $state(0);
+	$effect(() => {
+		if (!browser) return;
+		let alive = true;
+		const load = async () => { try { const d = await apiGet<{ total: number }>('/portal/people/badge'); if (alive) peopleBadge = d.total ?? 0; } catch {} };
+		load();
+		const t = setInterval(load, 15000);
+		return () => { alive = false; clearInterval(t); };
+	});
 
 	interface TabItem {
 		id: PrimaryView;
@@ -59,6 +73,9 @@
 			aria-current={isActive ? 'page' : undefined}
 		>
 			<div class="tab-icon">
+				{#if tab.id === 'people' && peopleBadge > 0}
+					<span class="tab-badge" aria-label="{peopleBadge} new">{peopleBadge > 9 ? '9+' : peopleBadge}</span>
+				{/if}
 				{#if tab.id === 'mindscape'}
 					<svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 						<rect width="12" height="20" x="6" y="2" rx="2"/>
@@ -185,5 +202,24 @@
 		font-weight: 500;
 		letter-spacing: 0.01em;
 		line-height: 1;
+	}
+
+	.tab-badge {
+		position: absolute;
+		top: -2px;
+		right: 50%;
+		margin-right: -18px;
+		min-width: 16px;
+		height: 16px;
+		padding: 0 4px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 9px;
+		font-weight: 700;
+		line-height: 1;
+		color: var(--color-bg);
+		background: var(--color-accent-aurum);
+		border-radius: 9999px;
 	}
 </style>

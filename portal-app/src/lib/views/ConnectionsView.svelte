@@ -90,7 +90,7 @@
 	let overlap = $state<Overlap | null>(null);
 	let overlapLoading = $state(false);
 	let showUnique = $state(false);
-	let shared = $state<{ peer_id: string | null; spaces: Array<{ id: string; name: string; role: string }>; contexts: Array<{ id: string; name: string; is_private: number }> }>({ peer_id: null, spaces: [], contexts: [] });
+	let shared = $state<{ peer_id: string | null; spaces: Array<{ id: string; name: string; role: string }>; contexts: Array<{ id: string; name: string; is_private: number }>; inbound: Array<{ id: string; kind: string; name: string | null; role: string | null; granted_at: string | null }> }>({ peer_id: null, spaces: [], contexts: [], inbound: [] });
 	let sharedLoading = $state(false);
 
 	const isEmpty = $derived(connections.length === 0 && pending.length === 0 && sent.length === 0);
@@ -288,9 +288,28 @@
 		finally { overlapLoading = false; }
 	}
 	async function loadShared(connId: string) {
-		sharedLoading = true; shared = { peer_id: null, spaces: [], contexts: [] };
+		sharedLoading = true; shared = { peer_id: null, spaces: [], contexts: [], inbound: [] };
 		try { shared = await apiGet(`/portal/connections/${connId}/shared`); } catch {} finally { sharedLoading = false; }
+		// Opening the Shared view clears the "new share" part of the People badge.
+		try { await apiPost('/portal/inbound-shares/seen', {}); } catch {}
 	}
+	// Read-only viewer for a share a peer granted me. Fetches the contents from
+	// THEIR instance (signed + grant-gated + signature-verified on the server).
+	let viewing = $state<{ id: string; kind: string; name: string | null } | null>(null);
+	let shareContent = $state<any | null>(null);
+	let shareContentLoading = $state(false);
+	let shareContentError = $state<string | null>(null);
+	async function openInboundShare(item: { id: string; kind: string; name: string | null }) {
+		if (!selectedConnection) return;
+		viewing = item; shareContent = null; shareContentError = null; shareContentLoading = true;
+		try {
+			const r = await apiGet<{ content: any }>(`/portal/connections/${selectedConnection.id}/shared/${item.id}/contents`);
+			shareContent = r.content;
+		} catch (e: any) {
+			shareContentError = e.message || 'Could not load — the share may have been revoked, or their instance is offline.';
+		} finally { shareContentLoading = false; }
+	}
+	function closeShareViewer() { viewing = null; shareContent = null; shareContentError = null; }
 	async function revokeSpaceShare(spaceId: string) {
 		if (!shared.peer_id) return;
 		try { await api(`/portal/spaces/${spaceId}/shares/${encodeURIComponent(shared.peer_id)}`, { method: 'DELETE' }); if (selectedConnection) await loadShared(selectedConnection.id); showSuccess('Space access revoked'); }
@@ -507,21 +526,39 @@
 
 					{:else}
 						<div class="pane-scroll">
+							<!-- You → them -->
 							<div class="block">
 								<div class="shared-head">
-									<h3>Shared with {displayName(selectedConnection)}</h3>
+									<h3>You shared</h3>
 									<button class="btn btn-ghost btn-xs" onclick={() => workspace.openOrFocus('contexts')}>＋ Share</button>
 								</div>
 								{#if sharedLoading}
 									<div class="loading sm">Loading…</div>
 								{:else if shared.spaces.length === 0 && shared.contexts.length === 0}
-									<p class="shared-empty">Nothing shared yet. Grant a space (Spaces → a space → Members) or a mindscape facet (Sharing).</p>
+									<p class="shared-empty">You haven't shared anything with {displayName(selectedConnection)} yet. Grant a space (Spaces → a space → Members) or a mindscape facet (Sharing).</p>
 								{:else}
 									{#each shared.spaces as s (s.id)}
-										<div class="shared-row"><span class="shared-label">{s.name} <span class="shared-role">· {s.role === 'contributor' ? 'can add' : 'can view'}</span></span><button class="link-revoke" onclick={() => revokeSpaceShare(s.id)}>Revoke</button></div>
+										<div class="shared-row"><span class="shared-label">{s.name} <span class="shared-role">· space · {s.role === 'contributor' ? 'can add' : 'can view'}</span></span><button class="link-revoke" onclick={() => revokeSpaceShare(s.id)}>Revoke</button></div>
 									{/each}
 									{#each shared.contexts as c (c.id)}
 										<div class="shared-row"><span class="shared-label">{c.name} <span class="shared-role">· facet</span></span><button class="link-revoke" onclick={() => revokeContextGrant(c.id)}>Revoke</button></div>
+									{/each}
+								{/if}
+							</div>
+
+							<!-- Them → you -->
+							<div class="block">
+								<h3>Shared with you</h3>
+								{#if sharedLoading}
+									<div class="loading sm">Loading…</div>
+								{:else if shared.inbound.length === 0}
+									<p class="shared-empty">{displayName(selectedConnection)} hasn't shared anything with you yet. When they do, it'll appear here.</p>
+								{:else}
+									{#each shared.inbound as item (item.id)}
+										<button class="shared-row inbound" onclick={() => openInboundShare(item)}>
+											<span class="shared-label">{item.name || 'Shared ' + item.kind} <span class="shared-role">· {item.kind}{item.role ? ' · ' + (item.role === 'contributor' ? 'can add' : 'can view') : ''}</span></span>
+											<span class="shared-open">Open ›</span>
+										</button>
 									{/each}
 								{/if}
 							</div>
@@ -529,6 +566,52 @@
 					{/if}
 				{/if}
 			</section>
+		</div>
+	{/if}
+
+	<!-- Read-only viewer for an inbound share's contents (fetched from the peer) -->
+	{#if viewing}
+		<!-- svelte-ignore a11y_click_events_have_key_events -->
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="share-modal-backdrop" onclick={closeShareViewer}>
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="share-modal" onclick={(e) => e.stopPropagation()}>
+				<header class="share-modal-head">
+					<div>
+						<span class="share-modal-title">{viewing.name || viewing.kind}</span>
+						<span class="share-modal-sub">shared by {displayName(selectedConnection!)} · read-only</span>
+					</div>
+					<button class="icon-btn" aria-label="Close" onclick={closeShareViewer}>✕</button>
+				</header>
+				<div class="share-modal-body">
+					{#if shareContentLoading}
+						<div class="loading">Loading from {displayName(selectedConnection!)}'s instance…</div>
+					{:else if shareContentError}
+						<p class="share-empty">{shareContentError}</p>
+					{:else if shareContent}
+						{#if shareContent.kind === 'space'}
+							{#if shareContent.knowledge?.length}
+								<h4 class="share-h">Knowledge</h4>
+								{#each shareContent.knowledge as k}<p class="share-knowledge">{k.content}</p>{/each}
+							{/if}
+							{#if shareContent.documents?.length}
+								<h4 class="share-h">Documents</h4>
+								{#each shareContent.documents as d}
+									<div class="share-doc"><span class="share-doc-title">{d.title || d.path}</span>{#if d.summary}<span class="share-doc-sum">{d.summary}</span>{/if}</div>
+								{/each}
+							{/if}
+							{#if !shareContent.knowledge?.length && !shareContent.documents?.length}<p class="share-empty">This space is empty.</p>{/if}
+						{:else if shareContent.kind === 'context'}
+							{#if shareContent.territories?.length}
+								<h4 class="share-h">Territories</h4>
+								{#each shareContent.territories as t}
+									<div class="share-doc"><span class="share-doc-title">{t.name}</span>{#if t.essence}<span class="share-doc-sum">{t.essence}</span>{/if}</div>
+								{/each}
+							{:else}<p class="share-empty">Nothing shared in this facet.</p>{/if}
+						{/if}
+					{/if}
+				</div>
+			</div>
 		</div>
 	{/if}
 
@@ -670,7 +753,24 @@
 	.shared-head h3 { margin-bottom: 0; }
 	.shared-empty { font-size: 0.8rem; color: var(--color-text-tertiary); line-height: 1.5; }
 	.shared-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.4rem 0; }
+	.shared-row.inbound { width: 100%; text-align: left; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 9px; padding: 0.55rem 0.7rem; margin-bottom: 0.3rem; cursor: pointer; transition: border-color 0.12s; }
+	.shared-row.inbound:hover { border-color: var(--color-accent-aurum); }
+	.shared-open { font-size: 0.74rem; color: var(--color-accent-aurum); white-space: nowrap; }
 	.shared-label { font-size: 0.82rem; color: var(--color-text-primary); }
+
+	/* Inbound-share content viewer */
+	.share-modal-backdrop { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center; padding: 1.5rem; }
+	.share-modal { width: 100%; max-width: 560px; max-height: 80vh; display: flex; flex-direction: column; background: var(--color-surface); border: 1px solid var(--glass-border); border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,0.4); overflow: hidden; }
+	.share-modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: 1rem 1.2rem; border-bottom: 1px solid var(--color-border); }
+	.share-modal-title { display: block; font-size: 1rem; font-weight: 600; color: var(--color-text-emphasis); }
+	.share-modal-sub { font-size: 0.74rem; color: var(--color-text-tertiary); }
+	.share-modal-body { overflow-y: auto; padding: 1.1rem 1.2rem; }
+	.share-h { font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--color-text-tertiary); margin: 0.5rem 0 0.6rem; }
+	.share-knowledge { font-size: 0.84rem; line-height: 1.55; color: var(--color-text-primary); background: var(--color-elevated); padding: 0.6rem 0.75rem; border-radius: 9px; margin-bottom: 0.5rem; white-space: pre-wrap; }
+	.share-doc { display: flex; flex-direction: column; gap: 0.1rem; padding: 0.5rem 0; border-bottom: 1px solid var(--color-border); }
+	.share-doc-title { font-size: 0.84rem; color: var(--color-text-primary); }
+	.share-doc-sum { font-size: 0.76rem; color: var(--color-text-tertiary); }
+	.share-empty { font-size: 0.82rem; color: var(--color-text-tertiary); }
 	.shared-role { color: var(--color-text-tertiary); font-size: 0.74rem; }
 
 	/* Buttons */

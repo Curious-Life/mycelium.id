@@ -55,6 +55,17 @@ jobs:
             'numpy>=1.26,<3' 'scipy>=1.11' 'cryptography>=42' \
             'python-dotenv>=1.0' 'ripser>=0.6' 'persim>=0.3' 'PyWavelets>=1.6'
 
+      # Install + BUILD the SvelteKit portal BEFORE the verify suite. verify:app-csp
+      # asserts the hardened CSP on the REAL shipped shell (canonical build); without
+      # portal-app/build/200.html it falls back to the legacy single-file portal,
+      # which has no SPA-fallback route, so the canonical SPA-fallback CSP path goes
+      # unverified. Building here makes the gate exercise the actual shipped path.
+      - name: Install portal-app dependencies
+        run: npm --prefix portal-app ci
+
+      - name: Build portal-app (canonical shell for verify:app-csp)
+        run: npm --prefix portal-app run build
+
       - name: Run verify suite
         run: npm run verify
 
@@ -62,8 +73,5 @@ jobs:
       # verify` (that's the backend suite) and previously ungated — which let
       # frontend type errors accumulate. svelte-check exits non-zero on errors
       # only (a11y warnings don't fail the gate).
-      - name: Install portal-app dependencies
-        run: npm --prefix portal-app ci
-
       - name: Type-check portal-app
         run: npm run portal:check
