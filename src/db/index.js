@@ -53,8 +53,8 @@ import { createSpaceMatrixRoomsNamespace } from './space-matrix-rooms.js';
  * Open the vault db and assemble the tool-facing `db` namespace object.
  * @returns {{ db: object, close: () => void, adapter: object }}
  */
-export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federationDeps = {} }) {
-  const adapter = createDb({ dbPath, userKey, systemKey, scope });
+export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federationDeps = {}, dbKeyHex = null }) {
+  const adapter = createDb({ dbPath, userKey, systemKey, scope, dbKeyHex });
   const { d1Query, d1QueryAdmin, d1Batch, firstRow, parseJson, randomUUID, now } = adapter;
 
   const base = { d1Query, d1QueryAdmin, d1Batch, firstRow, parseJson, randomUUID, now };
