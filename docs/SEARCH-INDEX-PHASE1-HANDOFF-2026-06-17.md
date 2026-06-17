@@ -13,7 +13,14 @@
 
 **Step 5 (encrypting the live 1.7 GB vault via the migration CLI) is hard-to-reverse → requires explicit operator go.** Steps 1–4 are fixture-only, default-OFF, real vault untouched. Never populate a plaintext on-disk FTS5/vec index on the REAL vault — the real index is built encrypted, only at step 5. Test backends on synthetic fixtures (no real secrets at rest).
 
-## Next: Step 2 — SQLite-backed `LocalBackend` (the scaling win, ~290 LOC)
+## Step 2 — SQLite-backed backend ✅ DONE (commit `77e7f40`)
+
+`src/search/backend/sqlite.js` (`createSqliteBackend`) + `src/search/sqlite/schema.js` + gate `verify:search-sqlite` (wired into the chain). **12/12 GO**: keyword hit/miss, two-stage 256→768 KNN nearest-first, hybrid RRF fusion, idempotent upsert, forget removal, temporal ordering, contract shape, **100% keyword parity vs in-RAM backend**, perf N=4000 hybrid **p50=8ms RSS=96MB**, stub-embedder embed path. Matches `createLocalBackend`'s contract exactly; rrf/temporal reused verbatim. Fixture-only, default-OFF. Bug caught + fixed: decoupled 768/256 inserts so a valid 768-d vector is never dropped when its 256-d prefix is degenerate. `sqlite-vec@0.1.7-alpha.2` added as a dep.
+
+### Next: Step 2b — wire into `index.js` (flag-select, default OFF)
+`createSearchHelpers` ([index.js:43-52](../src/search/index.js)) currently always builds `createLocalBackend` + `loadFromDb`. Add a flag (e.g. `MYCELIUM_SEARCH_BACKEND=sqlite` / a config) that instead builds `createSqliteBackend({ sqliteDb: <raw vault handle>, embedder, userId })` and SKIPS `loadFromDb`. Needs the raw better-sqlite3 handle reachable from the assembled db namespace (the adapter exposes `db` — see `src/adapter/d1.js` return; thread it through `src/db/index.js` to search). On a plaintext vault the index must be POPULATED once (one-time build from existing rows — a small CLI or a guarded boot build); on the encrypted vault that population happens during the step-5 migration. **Keep default OFF until step 3 maintenance lands** (else the on-disk index goes stale on writes). Smoke: `verify:search` stays GO; flag ON → fixture search hits without a rebuild.
+
+### Original Step 2 spec (kept for reference)
 
 Build `src/search/backend/sqlite.js` matching the **exact contract** of `src/search/backend/local.js`:
 - `query(req) → { hits:[{id,score}], degraded, tier, takenMs }`; `add/upsert(req{id,text,embedding,ts})`; `delete({ids})`; `count()`; `health()`; `_internal()`.
