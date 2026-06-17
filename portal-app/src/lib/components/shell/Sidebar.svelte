@@ -28,16 +28,21 @@
 
 	type NavItem = { id: PrimaryView; label: string; icon: string; href: string };
 
-	// Launch primary navigation — 5 destinations (NAV-IA-LOCK-2026-06-08):
+	// Launch primary navigation (NAV-IA-LOCK-2026-06-08, amended 2026-06-17):
 	//   Mycelium · Library · Streams (Import+Timeline) · People (Connections/Spaces/
-	//   Sharing cluster) · Curious Life. Profile + Settings are pinned at the bottom.
-	//   Not-yet-shipped life-domain surfaces (Wealth/Body/…) now live as "coming
-	//   later" facets inside Streams, not the nav.
+	//   Sharing cluster) · Body & Health · Curious Life. Profile + Settings pinned at
+	//   the bottom. Body is now surfaced (live /health/summary View + Apple-Health
+	//   ingest); the remaining un-shipped life-domains (Wealth/Intel/…) were deleted
+	//   in the nav-audit P0 (no backend), not parked as Streams facets.
 	const coreNav: NavItem[] = [
 		{ id: 'mindscape', label: 'Mycelium', icon: 'ratio',   href: '/mindscape' },
 		{ id: 'library',   label: 'Library',  icon: 'folder',  href: '/library' },
 		{ id: 'streams',   label: 'Streams',  icon: 'streams', href: '/streams' },
 		{ id: 'people',    label: 'People',   icon: 'people',  href: '/connections' },
+		// Body & Health — surfaced now that the page is a live registry View
+		// (/health/summary + the Apple-Health ingest stream feeds it). Primary
+		// destination on mobile (where wearable/health is a first-class surface).
+		{ id: 'body',      label: 'Body & Health', icon: 'body', href: '/body' },
 	];
 
 	// The People item is active across its whole cluster (its sub-nav — Connections /
@@ -205,6 +210,10 @@
 								<circle cx="9" cy="7" r="4"/>
 								<path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
 								<path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+							</svg>
+						{:else if item.icon === 'body'}
+							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.29 1.51 4.04 3 5.5l7 7Z"/>
 							</svg>
 						{:else if item.icon === 'profile'}
 							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
