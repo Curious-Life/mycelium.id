@@ -11,6 +11,7 @@
 //   V6 idempotent           re-import → 0 new rows (all deduped)
 //   V7 unknown manifest     wrong `format` → safe 400 (no leak)
 //   V8 honest reporting     skippedFamilies named in the result
+//   C5b agent doc created_at = zip entry date, NOT import now() (timestamp regression)
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>. Design:
 // docs/VAULT-IMPORT-FROM-CANONICAL-DESIGN-2026-06-10.md
@@ -51,6 +52,10 @@ const DUP_TS = '2024-04-01T00:00:00.000Z';
 const DOC_CONTENT = 'doc body from canonical — long enough to exercise the cross-path mirror collapse';
 const PROVIDER_KEY = 'sk-canonical-plaintext-api-key-marker';
 const AGENT_FILE_TEXT = 'agent memory file — continuity marker text';
+// The agent file's zip-entry date — must become the imported doc's created_at,
+// NOT the import-time now() default. Mid-year so DOS-date/timezone rounding can't
+// shift the asserted YEAR.
+const AGENT_FILE_DATE = new Date('2021-07-04T12:00:00.000Z');
 const CANON_UID = 'canonical-user-1';
 
 function manifest() {
@@ -114,7 +119,7 @@ async function vaultZip(man = manifest()) {
   zip.file('manifest.json', JSON.stringify(man));
   zip.file('attachments/att1/note.txt', ATT_BYTES);
   zip.file('attachments/att2/copy.txt', ATT_BYTES);
-  zip.file('agents/personal/memory/note.md', AGENT_FILE_TEXT);
+  zip.file('agents/personal/memory/note.md', AGENT_FILE_TEXT, { date: AGENT_FILE_DATE });
   zip.file('agents/personal/mind/mirror.md', DOC_CONTENT); // mirror of doc1 — must collapse
   zip.file('agents/personal/blob.bin', Buffer.from([0, 1, 2, 3]));
   return zip.generateAsync({ type: 'nodebuffer' });
@@ -226,13 +231,20 @@ async function main() {
     rec('C4 provider credentials re-encrypted at rest + decrypt back', provEncrypted && provRoundtrip
       && !dbBytes.includes(Buffer.from(PROVIDER_KEY)), `encrypted=${provEncrypted} roundtrip=${provRoundtrip}`);
 
-    const agentDoc = raw.prepare("SELECT id, content, title FROM documents WHERE path = 'agents/personal/memory/note.md'").get();
+    const agentDoc = raw.prepare("SELECT id, content, title, created_at FROM documents WHERE path = 'agents/personal/memory/note.md'").get();
     let agentDocPlain = null;
     try { agentDocPlain = await decrypt(String(agentDoc?.content || ''), await importMasterKey(USER_HEX)); } catch { /* */ }
     rec('C5 agents/ text file lands as an encrypted document (binary skipped, counted)',
       Boolean(agentDoc) && agentDocPlain === AGENT_FILE_TEXT && ir?.stats?.agent_files?.skippedBinary === 1
       && !dbBytes.includes(Buffer.from(AGENT_FILE_TEXT)),
       `doc=${Boolean(agentDoc)} binarySkipped=${ir?.stats?.agent_files?.skippedBinary}`);
+
+    // C5b — created_at follows the zip entry's date, NOT the import-time now()
+    // default (regression guard: the full-export path stamped 754 agent docs with
+    // the import date). YEAR-level assert dodges DOS-date 2s / timezone rounding.
+    rec('C5b agent doc created_at follows the file date (not import now())',
+      Boolean(agentDoc?.created_at) && new Date(agentDoc.created_at).getUTCFullYear() === 2021,
+      `created_at=${agentDoc?.created_at}`);
 
     const hd = raw.prepare("SELECT id FROM health_daily WHERE date = '2024-03-15'").get();
     rec('C6 health id synthesized ({userId}:{date}) from getRange-shaped rows', hd?.id === 'local-user:2024-03-15', `id=${hd?.id}`);
