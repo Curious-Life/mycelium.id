@@ -1634,7 +1634,14 @@
 					float timeFade = max(max(dayFade, weekFade), max(monthFade, baseline));
 					float timeAlpha = mix(1.0, timeFade, timeActive);
 
-					vAlpha = aAlpha * timeAlpha;
+					// Recency brightness (always on, independent of the scrubber): newer
+					// points glow brighter; older ones decay GENTLY to a generous floor,
+					// relative to the dataset's own time span (aTime: 0 = oldest, 1 = now).
+					// pow(.,0.55) keeps recent-ish points bright and only the oldest dim.
+					float recency = clamp(aTime, 0.0, 1.0);
+					float recencyBright = 0.32 + 0.68 * pow(recency, 0.55);
+
+					vAlpha = aAlpha * timeAlpha * recencyBright;
 					vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
 					gl_PointSize = pointSize * (300.0 / -mvPos.z);
 					gl_Position = projectionMatrix * mvPos;
