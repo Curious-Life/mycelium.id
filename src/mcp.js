@@ -23,6 +23,7 @@ import { createDocumentsDomain } from './tools/documents.js';
 import { createInternalDomain } from './tools/internal.js';
 import { createMindFiles, MIND_MIRRORS } from './mindfiles/mind-files.js';
 import { createMindscapeDomain } from './tools/mindscape.js';
+import { createNarrationDomain } from './tools/narration.js';
 import { createClaimsToolsDomain } from './tools/claims.js';
 import { createSearchHelpers } from './search/index.js';
 import { createTopologyHelpers } from './topology/helpers.js';
@@ -114,6 +115,10 @@ export function buildDomains({
       writeMindFile: (filename, content) => mindFiles.writeMindFile(filename, content),
     }),
     createMindscapeDomain({ searchHelpers, db, userId }),
+    // Narration (Phase 2): getEntityContext (READ, the Context Capsule) + describeEntity
+    // (WRITE, gated). One registration → MCP + REST + native harness + gateway. The
+    // capsule is single-sourced from pipeline/lib/narrate-context.js (same as describe).
+    createNarrationDomain({ db, userId }),
     // Persona-Claims read tool (PersonaTree adoption): list active claims +
     // chart one claim's confidence trajectory over time. Tier-1 (works on any
     // vault; honest-empty until discovery has run).
