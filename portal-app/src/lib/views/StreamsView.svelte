@@ -1,6 +1,6 @@
 <script lang="ts">
 	// Streams — the merged data surface. Facets behind one tab:
-	//   • Stream  — the live incoming feed (TimelineView: telegram/discord/whatsapp/portal)
+	//   • Stream  — the live incoming feed (source spectrum + TimelineView river)
 	//   • Sources — manage inputs/connectors + run imports (ImportView)
 	//   • Body    — Apple Health (sleep/HRV/activity); folded in here because health
 	//               is just another stream of incoming data (BodyView).
@@ -10,6 +10,7 @@
 	import TimelineView from './TimelineView.svelte';
 	import ImportView from './ImportView.svelte';
 	import BodyView from './BodyView.svelte';
+	import SourceSpectrum from './SourceSpectrum.svelte';
 
 	type Facet = 'stream' | 'sources' | 'body';
 
@@ -36,6 +37,11 @@
 		{ id: 'sources', label: 'Sources' },
 		{ id: 'body', label: 'Body' },
 	] as const;
+
+	// Spectrum → river filter. A canonical source key (or null = all). The spectrum
+	// chips are the river's source filter (Phase 1); the unified "everything" river
+	// + multi-select land in Phase 2.
+	let selectedSource = $state<string | null>(null);
 </script>
 
 <div class="streams">
@@ -53,7 +59,14 @@
 
 	<div class="facet-body">
 		{#if visited.stream}
-			<div class="facet" class:hidden={current !== 'stream'}><TimelineView /></div>
+			<div class="facet stream-facet" class:hidden={current !== 'stream'}>
+				<div class="spectrum-wrap">
+					<SourceSpectrum selected={selectedSource} onSelect={(s) => (selectedSource = s)} />
+				</div>
+				<div class="river-wrap">
+					<TimelineView externalSource={selectedSource} showSourceFilter={false} />
+				</div>
+			</div>
 		{/if}
 		{#if visited.sources}
 			<div class="facet" class:hidden={current !== 'sources'}><ImportView /></div>
@@ -82,4 +95,12 @@
 	.facet-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 	.facet { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 	.facet.hidden { display: none; }
+
+	/* Stream facet = source spectrum (hero, capped) above the river (flex-1). */
+	.stream-facet { gap: 0; }
+	.spectrum-wrap {
+		flex-shrink: 0; padding: 14px 16px 12px; max-height: 42%; overflow-y: auto;
+		border-bottom: 1px solid var(--color-border); background: var(--color-bg);
+	}
+	.river-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 </style>
