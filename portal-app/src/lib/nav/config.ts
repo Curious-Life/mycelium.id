@@ -40,21 +40,21 @@ export const PRIMARY_NAV: NavItem[] = [
 
 // Sidebar sections rendered BELOW the primary group, each with an eyebrow label
 // (the first group has none — it reads as a continuation of the primary list).
+// Order (flat list, rendered after PRIMARY_NAV): Agents sits right below People;
+// Curious Life is last. Body & Health is NOT a standalone item — it lives INSIDE
+// Streams as the 'body' facet tab (/body deep-links there).
 export const NAV_SECTIONS: NavSection[] = [
-	{
-		id: 'explore',
-		items: [
-			{ id: 'curious-life', label: 'Curious Life', icon: 'compass', href: '/curious-life' },
-		],
-	},
-	// Body & Health is NOT a standalone nav item — it lives INSIDE Streams as the
-	// 'body' facet tab (Stream · Body · Manage sources). /body still deep-links there
-	// (store maps it to /streams?facet=body); we just don't duplicate it in the rail.
 	{
 		id: 'agents',
 		label: 'Agents',
 		items: [
 			{ id: 'agents', label: 'Agents', icon: 'agents', href: '/agents' },
+		],
+	},
+	{
+		id: 'explore',
+		items: [
+			{ id: 'curious-life', label: 'Curious Life', icon: 'compass', href: '/curious-life' },
 		],
 	},
 ];

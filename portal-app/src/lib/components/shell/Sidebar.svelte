@@ -30,6 +30,16 @@
 		return () => { alive = false; clearInterval(t); };
 	});
 
+	// User handle — shown under the display name in the footer when set. From the
+	// public profile (not on $auth.user). Silent on failure / no handle.
+	let userHandle = $state<string | null>(null);
+	$effect(() => {
+		if (!browser) return;
+		apiGet<{ handle: string | null }>('/portal/profile')
+			.then((d) => { userHandle = (d?.handle || '').trim() || null; })
+			.catch(() => {});
+	});
+
 	// Navigation is driven entirely by $lib/nav/config — the single source of truth
 	// shared with the mobile tab bar and the header title (see that file for why).
 	// PRIMARY_NAV = Mycelium · Library · Streams · People; NAV_SECTIONS adds the
@@ -240,17 +250,12 @@
 	</div>
 	</div><!-- /scrollable nav region -->
 
-	<!-- Settings hub (pinned) — Profile is now the first pane inside Settings,
-	     so the sidebar carries one "You" entry instead of two. The footer
-	     identity below also deep-links to the Profile pane. -->
-	<div class="px-2 py-2 border-t border-[var(--color-border)] flex-shrink-0 flex flex-col gap-1">
-		{@render navLink(SETTINGS_NAV)}
-	</div>
-
-	<!-- User footer -->
+	<!-- User footer — identity (display name + @handle) opens the Profile pane;
+	     Settings + Sign-out sit next to it in the same row (Settings is no longer a
+	     standalone nav item). -->
 	<div class="p-3 border-t border-[var(--color-border)] flex-shrink-0">
 		{#if $auth.user}
-			<div class="flex items-center justify-between">
+			<div class="flex items-center gap-1">
 				<button
 					onclick={() => { navigationState.setPrimaryView('settings'); goto('/settings?pane=profile'); closeMobileDrawer(); }}
 					class="flex items-center gap-3 min-w-0 flex-1 text-left rounded-lg -m-1 p-1 hover:bg-[var(--color-elevated)] transition-colors"
@@ -265,12 +270,28 @@
 						<div class="text-sm text-[var(--color-text-primary)] font-medium truncate">
 							{$auth.user.displayName || 'User'}
 						</div>
+						{#if userHandle}
+							<div class="text-xs text-[var(--color-text-tertiary)] truncate">@{userHandle}</div>
+						{/if}
 					</div>
+				</button>
+				<button
+					onclick={() => { navigationState.setPrimaryView('settings'); goto(SETTINGS_NAV.href); closeMobileDrawer(); }}
+					class="p-2 rounded-lg transition-colors flex-shrink-0 {navActive('settings') ? 'text-[var(--color-accent)]' : 'text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)]'}"
+					aria-label="Settings"
+					title="Settings"
+				>
+					<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round">
+						<path d="M4 6h10M18 6h2"/><circle cx="16" cy="6" r="2"/>
+						<path d="M4 12h6M14 12h6"/><circle cx="12" cy="12" r="2"/>
+						<path d="M4 18h2M10 18h10"/><circle cx="8" cy="18" r="2"/>
+					</svg>
 				</button>
 				<button
 					onclick={handleLogout}
 					class="p-2 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)] rounded-lg transition-colors flex-shrink-0"
 					aria-label="Sign out"
+					title="Sign out"
 				>
 					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
