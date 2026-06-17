@@ -400,6 +400,22 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
     } catch { ok(res, { peer_id: null, spaces: [], contexts: [], inbound: [] }); }
   });
 
+  // View the CONTENTS of a share a peer granted me (federation sharing Phase 3).
+  // Drives the signed, grant-gated content fetch from THEIR instance + verifies
+  // their signature on the response. Read-only; the content is never stored here.
+  router.get('/connections/:id/shared/:shareId/contents', async (req, res) => {
+    const cid = connId(req);
+    const shareId = decodePath(req.params.shareId);
+    try {
+      const share = await db.inboundShares.get(shareId);
+      // Bind the share to the connection in the URL (no cross-connection access).
+      if (!share || share.connection_id !== cid || share.revoked) return fail(res, 404, 'share not found');
+      const content = await db.connections.fetchSharedContent(userId, cid, { kind: share.kind, ref: share.remote_ref });
+      await db.inboundShares.markSeen(shareId).catch(() => {});
+      ok(res, { content });
+    } catch (e) { fail(res, 502, e.message || 'could not load shared content'); }
+  });
+
   // ── Spaces (default-private shareable folders, Phase A) ──────────────────
   // Every read/write is gated by space_access via db.spaces.requireRole, which
   // is fail-closed (no grant → throws). Non-members get 404 (indistinguishable

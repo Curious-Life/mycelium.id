@@ -293,12 +293,23 @@
 		// Opening the Shared view clears the "new share" part of the People badge.
 		try { await apiPost('/portal/inbound-shares/seen', {}); } catch {}
 	}
-	// Phase 3 replaces this with the signed content fetch + a read-only viewer of
-	// the shared space/context's documents. Until then, inbound is populated by the
-	// Phase 2 announce and this just acknowledges intent.
-	function openInboundShare(item: { kind: string; name: string | null }) {
-		showSuccess(`Viewing the contents of "${item.name || item.kind}" is coming in the next step.`);
+	// Read-only viewer for a share a peer granted me. Fetches the contents from
+	// THEIR instance (signed + grant-gated + signature-verified on the server).
+	let viewing = $state<{ id: string; kind: string; name: string | null } | null>(null);
+	let shareContent = $state<any | null>(null);
+	let shareContentLoading = $state(false);
+	let shareContentError = $state<string | null>(null);
+	async function openInboundShare(item: { id: string; kind: string; name: string | null }) {
+		if (!selectedConnection) return;
+		viewing = item; shareContent = null; shareContentError = null; shareContentLoading = true;
+		try {
+			const r = await apiGet<{ content: any }>(`/portal/connections/${selectedConnection.id}/shared/${item.id}/contents`);
+			shareContent = r.content;
+		} catch (e: any) {
+			shareContentError = e.message || 'Could not load — the share may have been revoked, or their instance is offline.';
+		} finally { shareContentLoading = false; }
 	}
+	function closeShareViewer() { viewing = null; shareContent = null; shareContentError = null; }
 	async function revokeSpaceShare(spaceId: string) {
 		if (!shared.peer_id) return;
 		try { await api(`/portal/spaces/${spaceId}/shares/${encodeURIComponent(shared.peer_id)}`, { method: 'DELETE' }); if (selectedConnection) await loadShared(selectedConnection.id); showSuccess('Space access revoked'); }
@@ -558,6 +569,52 @@
 		</div>
 	{/if}
 
+	<!-- Read-only viewer for an inbound share's contents (fetched from the peer) -->
+	{#if viewing}
+		<!-- svelte-ignore a11y_click_events_have_key_events -->
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="share-modal-backdrop" onclick={closeShareViewer}>
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="share-modal" onclick={(e) => e.stopPropagation()}>
+				<header class="share-modal-head">
+					<div>
+						<span class="share-modal-title">{viewing.name || viewing.kind}</span>
+						<span class="share-modal-sub">shared by {displayName(selectedConnection!)} · read-only</span>
+					</div>
+					<button class="icon-btn" aria-label="Close" onclick={closeShareViewer}>✕</button>
+				</header>
+				<div class="share-modal-body">
+					{#if shareContentLoading}
+						<div class="loading">Loading from {displayName(selectedConnection!)}'s instance…</div>
+					{:else if shareContentError}
+						<p class="share-empty">{shareContentError}</p>
+					{:else if shareContent}
+						{#if shareContent.kind === 'space'}
+							{#if shareContent.knowledge?.length}
+								<h4 class="share-h">Knowledge</h4>
+								{#each shareContent.knowledge as k}<p class="share-knowledge">{k.content}</p>{/each}
+							{/if}
+							{#if shareContent.documents?.length}
+								<h4 class="share-h">Documents</h4>
+								{#each shareContent.documents as d}
+									<div class="share-doc"><span class="share-doc-title">{d.title || d.path}</span>{#if d.summary}<span class="share-doc-sum">{d.summary}</span>{/if}</div>
+								{/each}
+							{/if}
+							{#if !shareContent.knowledge?.length && !shareContent.documents?.length}<p class="share-empty">This space is empty.</p>{/if}
+						{:else if shareContent.kind === 'context'}
+							{#if shareContent.territories?.length}
+								<h4 class="share-h">Territories</h4>
+								{#each shareContent.territories as t}
+									<div class="share-doc"><span class="share-doc-title">{t.name}</span>{#if t.essence}<span class="share-doc-sum">{t.essence}</span>{/if}</div>
+								{/each}
+							{:else}<p class="share-empty">Nothing shared in this facet.</p>{/if}
+						{/if}
+					{/if}
+				</div>
+			</div>
+		</div>
+	{/if}
+
 	{#if error}<button type="button" class="toast error" onclick={() => (error = null)}>{error}</button>{/if}
 	{#if success}<div class="toast success">{success}</div>{/if}
 </div>
@@ -700,6 +757,20 @@
 	.shared-row.inbound:hover { border-color: var(--color-accent-aurum); }
 	.shared-open { font-size: 0.74rem; color: var(--color-accent-aurum); white-space: nowrap; }
 	.shared-label { font-size: 0.82rem; color: var(--color-text-primary); }
+
+	/* Inbound-share content viewer */
+	.share-modal-backdrop { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center; padding: 1.5rem; }
+	.share-modal { width: 100%; max-width: 560px; max-height: 80vh; display: flex; flex-direction: column; background: var(--color-surface); border: 1px solid var(--glass-border); border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,0.4); overflow: hidden; }
+	.share-modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: 1rem 1.2rem; border-bottom: 1px solid var(--color-border); }
+	.share-modal-title { display: block; font-size: 1rem; font-weight: 600; color: var(--color-text-emphasis); }
+	.share-modal-sub { font-size: 0.74rem; color: var(--color-text-tertiary); }
+	.share-modal-body { overflow-y: auto; padding: 1.1rem 1.2rem; }
+	.share-h { font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--color-text-tertiary); margin: 0.5rem 0 0.6rem; }
+	.share-knowledge { font-size: 0.84rem; line-height: 1.55; color: var(--color-text-primary); background: var(--color-elevated); padding: 0.6rem 0.75rem; border-radius: 9px; margin-bottom: 0.5rem; white-space: pre-wrap; }
+	.share-doc { display: flex; flex-direction: column; gap: 0.1rem; padding: 0.5rem 0; border-bottom: 1px solid var(--color-border); }
+	.share-doc-title { font-size: 0.84rem; color: var(--color-text-primary); }
+	.share-doc-sum { font-size: 0.76rem; color: var(--color-text-tertiary); }
+	.share-empty { font-size: 0.82rem; color: var(--color-text-tertiary); }
 	.shared-role { color: var(--color-text-tertiary); font-size: 0.74rem; }
 
 	/* Buttons */

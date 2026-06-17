@@ -129,6 +129,7 @@
     "verify:secrets": "node scripts/verify-secrets.mjs",
     "verify:connectors": "node scripts/verify-connectors.mjs",
     "verify:connectors-store": "node scripts/verify-connectors-store.mjs",
+    "verify:federation-sharing": "node --test tests/federation-sharing.test.js",
     "verify:connector-upsert": "node scripts/verify-connector-upsert.mjs",
     "verify:adapters": "node scripts/verify-adapters.mjs",
     "verify:generate": "node scripts/verify-generate.mjs",

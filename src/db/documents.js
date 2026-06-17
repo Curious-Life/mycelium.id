@@ -91,6 +91,22 @@ export function createDocumentsNamespace(deps) {
       return firstRow(result);
     },
 
+    /**
+     * Document fields SAFE to serve to a federated peer (a shared-space read).
+     * EXPLICIT column list — NEVER `SELECT *`, which would leak `embedding_768`
+     * (CLAUDE.md §7: an embedding is a semantic fingerprint and must never leave
+     * the box). content/title/summary decrypt on read; the caller still runs the
+     * hasVectorKey tripwire before serialization as a second line of defense.
+     */
+    async getForShare(userId, path) {
+      const result = await d1Query(
+        `SELECT path, title, summary, content, source_type, created_by, updated_at
+         FROM documents WHERE user_id = ? AND path = ? AND forgotten_at IS NULL`,
+        [userId, path],
+      );
+      return firstRow(result);
+    },
+
     async upsert(doc) {
       assertSafeColumns(Object.keys(doc || {}), 'documents');
       const cols = Object.keys(doc).join(', ');
