@@ -1,5 +1,7 @@
 import express from 'express';
-import { startClusteringJob, getJob, cancelJob } from './jobs.js';
+import { startClusteringJob, getJob, cancelJob,
+  startNarrationWalkJob, pauseNarration, resumeNarration, cancelNarration, getNarrationStatus } from './jobs.js';
+import { makeNarrationRunner } from './agent/narration-runner.js';
 import { getEmbedderHealth } from './embed/supervisor.js';
 
 /**
@@ -311,6 +313,48 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
       // resolveKeys/spawn unavailable — fail closed, no internals leaked.
       fail(res, 503, 'mindscape generation is unavailable (key source or pipeline not ready)');
     }
+  });
+
+  // ── Narration walk (Phase 3): UI-controlled, pausable agent narration ────────
+  // Start/pause/resume/cancel + status. The walk runner is assembled per-call from
+  // the keyed db (real agent runtime). The walk only does real work when a narration
+  // provider is configured (else each turn no-ops, no-model) — the lifecycle works
+  // regardless. content-free progress; provider is surfaced so the UI can flag cloud.
+  const njson = express.json({ limit: '16kb' });
+
+  router.post('/mycelium/narrate', njson, async (req, res) => {
+    try {
+      const scope = req.body?.scope ?? 'all';
+      const provider = typeof req.body?.provider === 'string' ? req.body.provider : null;
+      const runWalk = makeNarrationRunner({ db, userId });
+      const r = await startNarrationWalkJob({ db, userId, scope, provider, runWalk });
+      res.json(r);
+    } catch {
+      fail(res, 503, 'narration is unavailable (agent runtime or key source not ready)');
+    }
+  });
+
+  router.post('/mycelium/narrate/pause', njson, async (req, res) => {
+    const r = await pauseNarration({ db, runId: String(req.body?.runId || '') }).catch(() => ({ ok: false }));
+    res.status(r.ok ? 200 : 409).json(r);
+  });
+
+  router.post('/mycelium/narrate/resume', njson, async (req, res) => {
+    try {
+      const runWalk = makeNarrationRunner({ db, userId });
+      const r = await resumeNarration({ db, userId, runId: String(req.body?.runId || ''), runWalk });
+      res.status(r.ok ? 200 : 409).json(r);
+    } catch { fail(res, 503, 'narration runtime unavailable'); }
+  });
+
+  router.post('/mycelium/narrate/cancel', njson, async (req, res) => {
+    const r = await cancelNarration({ db, runId: String(req.body?.runId || '') }).catch(() => ({ ok: false }));
+    res.status(r.ok ? 200 : 409).json(r);
+  });
+
+  router.get('/mycelium/narrate/status', async (req, res) => {
+    const row = await getNarrationStatus({ db, userId, runId: req.query.runId ? String(req.query.runId) : null }).catch(() => null);
+    res.json({ run: row });
   });
 
   // GET /mycelium/generate/status/:id → progress for the polling UI.
