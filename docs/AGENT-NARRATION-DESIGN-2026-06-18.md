@@ -26,6 +26,19 @@
   (`src/tools/narration.js`) — NOT a harness-private tool — split into a READ tool `getEntityContext`
   (the Context Capsule) and a WRITE tool `describeEntity`. Registering once makes it native-harness +
   MCP + REST + gateway-reachable. See "Tool surface & reach" below.
+- **v4** (this) — operator: *run the full analysis engine on the vault; it should run PRIOR to
+  description, and the metrics we derive should inform description too.* Sweep verified the pipeline
+  order is currently **backwards** for this: `run-clustering.sh` runs describe at **Step 3** and the
+  analysis engine at **Steps 4–16** (`pipeline/run-clustering.sh:98,123-178`), so today's description
+  is metric-blind (this is also why the Phase-1 capsule's "co-activates with" is empty and falls back
+  to centroid neighbours). Analysis stages depend only on `cluster.py`'s Step-2 output, NOT on
+  names/essences — EXCEPT `compute-complexity.js` which reads territory/realm names
+  (`compute-complexity.js:142-151`). So the fix is NOT "move 4–16 before 3" wholesale: split the
+  engine into **pre-description metrics** (cofire, neighbours, fisher, vitality, coherence — none read
+  names → move before describe so the capsule consumes them) and **post-description metrics**
+  (complexity, frequency, coupling, criticality, behavioral, anchors — global/derived, stay after).
+  Adds a **metrics** block to the Context Capsule + a standalone "see the data" test path. Execution
+  DEFERRED to testing (operator: "it can wait"). See "Analysis before description" below.
 
 ---
 
@@ -226,6 +239,53 @@ This is the v2→v3 pivot: `describeEntity` is no longer a harness-private file 
 so "works with the native harness" and "intuitive MCP/API + middleware for other harnesses" are the
 SAME registration, not three.
 
+### Analysis before description — metrics-informed narration (v4)
+**Operator intent:** run the full analysis (measurement) engine on the vault; it must run *before*
+description, and its metrics must *inform* description. Execution is deferred to testing — this section
+locks the design.
+
+**The problem (verified):** `run-clustering.sh` runs **describe at Step 3** and the analysis engine at
+**Steps 4–16** (`run-clustering.sh:98` then `:123-178`: cofire, territory-neighbors, harmonics, fisher,
+topology-audit, vitality, complexity, frequency, coupling, criticality, coherence, behavioral, anchors).
+So description today is metric-blind — and the Phase-1 capsule's `cofiring` / vitality / phase signals are
+empty at describe time (hence the centroid-neighbour fallback). The analysis stages read only `cluster.py`'s
+Step-2 output (points/territories/centroids), **not** names/essences — the one exception is
+`compute-complexity.js` (reads `territory_profiles.name`/`realms.name`, `:142-151`).
+
+**The reorder (dependency-correct):** split the engine, don't wholesale-move it.
+- **Pre-description metrics** (move to run *between* Step 2 cluster and describe): **cofire**
+  (→ real "co-activates with"), **territory-neighbors**, **fisher** (→ movement phase), **vitality**
+  (→ `current_phase` sparse/active/anchor + `current_vitality`), **coherence** (→ focus). None read names.
+- **Post-description metrics** (stay after describe): complexity (reads names), frequency, coupling,
+  criticality, behavioral, anchors — global/derived, not per-entity narration inputs.
+- New foreground order: `sync → cluster → [pre-description metrics] → describe → [post-description metrics]`.
+  Chronicles can still run async (`startChronicleNarrationJob`) — they too then read populated metrics.
+
+**Capsule `metrics` block (v4 addition to the Context Capsule):** when present, fold these per-entity
+signals into the prompt so the narrator describes *with the measured shape of the area*, not just its text:
+```
+metrics: {
+  vitality:    number|null,          // territory_vitality.vitality / territory_profiles.current_vitality
+  phase:       'sparse'|'active'|'anchor'|null,   // current_phase (post-gift-fix: null until vitality runs)
+  fisherPhase: 'stable'|'cycling'|'exploring'|'transforming'|null,  // fisher_trajectory latest window
+  coherence:   number|null,          // territory_profiles.coherence (focused↔scattered)
+  recurrence:  number|null,          // cognitive_metrics_per_territory.recurrence_interval (days between activations)
+}
+```
+Rendered line, e.g.: `SHAPE: vitality 0.71 (active) · movement exploring · coherence 0.38 (scattered) ·
+recurs ~6d.` All fail-soft (a metric absent → omitted), so the capsule still works pre-analysis (as Phase 1
+ships) and gets richer once the engine has run. The `cofiring` neighbour line becomes real (not centroid
+fallback) once cofire precedes describe.
+
+**Standalone "see the data" path (the deferred run, for testing):** the analysis stages are independent
+scripts that read the *existing* mindscape — they refresh metrics WITHOUT a re-cluster
+([[measurement-pipeline-recluster-unsafe]]). So during testing we can: (1) run the engine standalone on
+the current recovered/re-clustered vault to inspect the data (vitality/fisher/cofire/coherence/…), THEN
+(2) run describe standalone (now metric-informed). This avoids re-running `cluster.py` (which would replace
+the recovered structure). A small `verify:narrate-metrics` gate asserts the capsule folds vitality/phase/
+fisher/coherence when present and omits them when absent. Keeps the re-cluster decision separate from the
+"refresh metrics + re-narrate" decision.
+
 ### Phase 2 — Agent traversal with temporally-explicit retained awareness (reuse the harness) ~240 LOC
 The user's core ask. Reuses `runAgentTurn` + `conversation_summaries` + the Tool-surface domain above.
 - **Tools come from the registered `narration` domain** (above): the walk grants `describeEntity` via
@@ -418,3 +478,7 @@ agent/UI land.
 | Write tools are owner-gated + kept out of chat DOMAINS (saveDocument/remember precedent) | `src/tools/documents.js` saveDocument; `src/agent/tool-domains.js` (sweep) |
 | Gateway for external harnesses is BUILT: /context, /ingest/message, /v1/chat/completions + X-Mycelium-Capture | `src/server-http.js:428,498,553,550` (read) |
 | Four native adapters exist (middleware) | `tools/memory-bridge/{claude-code,hermes,opencode,openclaw}` + bridge.mjs (ls) |
+| Pipeline order is backwards for metrics-informed describe: describe Step 3, analysis Steps 4–16 | `pipeline/run-clustering.sh:98,123-178` (read) |
+| Analysis stages read cluster.py output, not names — EXCEPT complexity reads names | `compute-complexity.js:142-151` (read); fisher matches were `history_days` false-positives |
+| Vitality writes current_phase (sparse/active/anchor); fisher writes movement phase | `compute-vitality.js:251`; `fisher_trajectory.phase` (read/sweep) |
+| Analysis stages are standalone scripts → refresh metrics WITHOUT re-cluster | [[measurement-pipeline-recluster-unsafe]] (copy-test verdict) |
