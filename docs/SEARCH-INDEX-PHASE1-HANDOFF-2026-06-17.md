@@ -30,8 +30,11 @@ On-disk index stays fresh on every write (no rebuild). NO-OP for the in-RAM back
 - Gate `verify:search-sqlite` 19/19 (SQ13 build-flag, SQ14 capture→searchable-no-rebuild e2e, SQ15 noteVector+ts-preserved, SQ16 in-RAM no-op). Non-regressing: `verify:ingest` / `verify:enrich` / `verify:search` GO.
 - **Deferred:** profile (territory/realm/theme) incremental upserts — covered by the full `loadFromDb` build + `refreshSearchIndex`; Generate is kill-switched anyway. Add a `noteUpsert` on the describe/clustering profile-write path when Generate returns.
 
-### Next: Step 4 — pipeline read bridge wiring (Python reads via vault-bridge.js)
-`pipeline/vault-bridge.js` + the Python reroute already landed with the A′ foundation (`verify:at-rest` A6/A7 GO). Confirm clustering/measurement reads (`pipeline/local_db.py`, `cluster.py`) go through `/query` on the bridge rather than a direct `sqlite3.connect` — needed because once the vault is encrypted (step 5) stdlib sqlite3 can't open it. Smoke: `verify:cognition`/`verify:mindscape` through the bridge. (Largely done in PR #188; verify + close gaps.)
+## Step 4 — pipeline read bridge ✅ DONE (commit `8fc9851`)
+
+`pipeline/vault-bridge.js` + Python reroute landed with the A′ foundation; reroute is **opt-in** (`MYCELIUM_DB_BRIDGE_URL`; unset → direct `sqlite3.connect`, non-breaking). New gate `verify:pipeline-readbridge` (6/6, in chain after `verify:at-rest`) proves the actual clustering read shapes on an encrypted vault: P1 `cluster.py:274` content-JOIN parity, P2 `nomic_embedding` (TEXT envelope + NULL) parity, P3 raw-BLOB rejection, P4 Python `local_db` reroute e2e.
+
+**⚠️ Pre-step-5 requirement surfaced by P3:** the bridge rejects BLOB result columns, so **every `clustering_points.nomic_embedding` must be a TEXT envelope or NULL — no legacy raw BLOBs** — before the vault is encrypted, else clustering reads break. Ties to the `sync-clustering-points` insert-only backfill (see [[measurement-pipeline-recluster-unsafe]]). Add a pre-migration check (`SELECT count(*) FROM clustering_points WHERE typeof(nomic_embedding)='blob'` must be 0). The full §13 byte-identical-Generate criterion is deferred (Generate is kill-switched).
 
 ### Then: Step 5 — encrypt the live vault (⚠️ GATED on explicit operator go)
 `src/account/db-cipher-migrate.js` (built, `verify:at-rest` A5 GO). Dry-run on a vault COPY first; build-new-encrypted + atomic swap + keep the plaintext copy. Only after this is the on-disk index encrypted at rest — so flipping `MYCELIUM_SEARCH_BACKEND=sqlite` to default should pair with step 5 (else a plaintext on-disk content/vector index sits on disk — the at-rest regression). Until then the backend stays opt-in for dev/testing.
