@@ -21,7 +21,22 @@
 
 `createSearchHelpers` selects the backend: default in-RAM (unchanged); `MYCELIUM_SEARCH_BACKEND=sqlite` (or `deps.searchBackend`) → `createSqliteBackend` over `db._sqlite` (raw handle now exposed on the db namespace). On-disk index persists, so `ensureBuilt` populates ONCE via `loadFromDb` when empty, then skips. Gate `verify:search-sqlite` 15/15 (SQ12a/b/c: selects+populates, 2nd boot skips rebuild, default keeps in-RAM); `verify:search` 39/39 + `verify:search-rehydrate` GO (default non-regressing).
 
-### Next: Step 3 — incremental maintenance (so the on-disk index stays fresh; lets default flip ON)
+## Step 3 — incremental maintenance ✅ DONE (commit `3fba5ff`)
+
+On-disk index stays fresh on every write (no rebuild). NO-OP for the in-RAM backend.
+- Persisted build-flag (`search_state` + `isCorpusBuilt`/`markCorpusBuilt`); `ensureBuilt` keys off it, not `count()>0`.
+- searchHelpers maintenance API (sqlite-only): `noteUpsert` (fts+vec), `noteVector` (vector-only, preserves ts/fts), `noteDelete`.
+- Hooks: capture new-insert + edit ([capture.js](../src/ingest/capture.js)) → `noteUpsert`; enrichment `embedding_768` write ([enrich/service.js:124](../src/enrich/service.js)) → `noteVector` (no re-decrypt); forget already calls `backend.delete` ([curate.js:190](../src/tools/curate.js)).
+- Gate `verify:search-sqlite` 19/19 (SQ13 build-flag, SQ14 capture→searchable-no-rebuild e2e, SQ15 noteVector+ts-preserved, SQ16 in-RAM no-op). Non-regressing: `verify:ingest` / `verify:enrich` / `verify:search` GO.
+- **Deferred:** profile (territory/realm/theme) incremental upserts — covered by the full `loadFromDb` build + `refreshSearchIndex`; Generate is kill-switched anyway. Add a `noteUpsert` on the describe/clustering profile-write path when Generate returns.
+
+### Next: Step 4 — pipeline read bridge wiring (Python reads via vault-bridge.js)
+`pipeline/vault-bridge.js` + the Python reroute already landed with the A′ foundation (`verify:at-rest` A6/A7 GO). Confirm clustering/measurement reads (`pipeline/local_db.py`, `cluster.py`) go through `/query` on the bridge rather than a direct `sqlite3.connect` — needed because once the vault is encrypted (step 5) stdlib sqlite3 can't open it. Smoke: `verify:cognition`/`verify:mindscape` through the bridge. (Largely done in PR #188; verify + close gaps.)
+
+### Then: Step 5 — encrypt the live vault (⚠️ GATED on explicit operator go)
+`src/account/db-cipher-migrate.js` (built, `verify:at-rest` A5 GO). Dry-run on a vault COPY first; build-new-encrypted + atomic swap + keep the plaintext copy. Only after this is the on-disk index encrypted at rest — so flipping `MYCELIUM_SEARCH_BACKEND=sqlite` to default should pair with step 5 (else a plaintext on-disk content/vector index sits on disk — the at-rest regression). Until then the backend stays opt-in for dev/testing.
+
+### (superseded) Original Step 3 plan
 
 **FIRST fix the build signal (prerequisite):** 2b's `ensureBuilt` uses `count()>0` to mean "already populated". Once step-3 incremental adds exist, a single capture before the first query makes `count>0` and would SKIP the full `loadFromDb`. Replace with a persisted flag: add `search_state(key TEXT PRIMARY KEY, value TEXT)` to `schema.js` + `isCorpusBuilt()`/`markCorpusBuilt()` on the sqlite backend; `ensureBuilt` (sqlite) → if `isCorpusBuilt()` skip, else `loadFromDb` then `markCorpusBuilt()`.
 
