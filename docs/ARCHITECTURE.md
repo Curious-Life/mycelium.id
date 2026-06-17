@@ -233,7 +233,11 @@ claim level) · personaClaims MCP tool · portal /claims (ClaimsView + TimeSerie
   chronicle in cluster.py (ciphertext-verbatim copy, after `compute_dynamics`);
   drift re-narrates them as content diverges. `src/jobs.js` refreshes the in-RAM
   search index after Generate + chronicle completion (mind-search registry;
-  stored vectors rehydrate). Narration always uses the user's ACTIVE provider +
+  stored vectors rehydrate). The corpus build is **single-flight** (one in-flight
+  build promise; concurrent searches await it rather than each starting a fresh
+  full-vault load) and is **warmed in the background at boot** (`searchHelpers.warm()`
+  in `server-rest.js`, real-app block) so the first search joins an already-running
+  warm instead of eating the minutes-long cold build — PR #232. Narration always uses the user's ACTIVE provider +
   `model_preference` (same `resolveInferenceConfig` as chat);
   `generation_model` records the real narrator label.
 - **Location (#36):** the vault lives in a **durable per-OS data dir** (`src/paths.js` →
