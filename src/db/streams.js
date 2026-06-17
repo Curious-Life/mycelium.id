@@ -11,9 +11,39 @@
 // health_daily/tasks have no soft-delete column (hard-deleted), so all rows count.
 
 import { classifySource, canonicalSource, sourceForDocumentType, STREAM_KINDS } from '../streams/source-registry.js';
+import { assembleTimelineMessages } from '../streams/assemble-messages.js';
+import { hasVectorKey } from '../federation/lexicon.js';
 
 const DAY_MS = 86400000;
 const LIVE_WINDOW_MS = 15 * 60 * 1000; // "live" = activity within 15 min
+const PREVIEW_MAX = 240;               // truncate document/task previews server-side
+
+const truncate = (s) => {
+  if (s == null) return '';
+  const t = String(s);
+  return t.length > PREVIEW_MAX ? t.slice(0, PREVIEW_MAX).trimEnd() + '…' : t;
+};
+
+// One health day → a short headline string. Metrics are encrypted TEXT, decrypted
+// to strings by the adapter; coerce to numbers for formatting.
+function healthSummary(r) {
+  const n = (v) => (v == null || v === '' ? null : Number(v));
+  const parts = [];
+  const sleep = n(r.sleep_duration_min);
+  if (sleep != null && Number.isFinite(sleep)) {
+    const h = Math.floor(sleep / 60), m = Math.round(sleep % 60);
+    parts.push(`Sleep ${h}h${m ? ` ${m}m` : ''}`);
+  }
+  const steps = n(r.steps);
+  if (steps != null && Number.isFinite(steps)) parts.push(`${Math.round(steps).toLocaleString()} steps`);
+  const hrv = n(r.hrv_avg);
+  if (hrv != null && Number.isFinite(hrv)) parts.push(`HRV ${Math.round(hrv)}`);
+  const rhr = n(r.resting_hr);
+  if (rhr != null && Number.isFinite(rhr)) parts.push(`RHR ${Math.round(rhr)}`);
+  const mind = n(r.mindful_minutes);
+  if (!parts.length && mind != null && Number.isFinite(mind)) parts.push(`${Math.round(mind)} min mindful`);
+  return parts.join(' · ') || 'Health data';
+}
 
 // Build the ascending list of YYYY-MM-DD day keys for a window ending today (UTC).
 function dayKeys(now, windowDays) {
@@ -45,7 +75,7 @@ function bucketSql(table, srcExpr, softDelete) {
 
 export function createStreamsNamespace(deps) {
   if (!deps) throw new TypeError('createStreamsNamespace: deps required');
-  const { d1Query, connectors } = deps;
+  const { d1Query, connectors, db } = deps;
   if (typeof d1Query !== 'function') throw new TypeError('createStreamsNamespace: d1Query required');
 
   // The four ingest tables, each contributing rows to the river + spectrum.
@@ -152,6 +182,123 @@ export function createStreamsNamespace(deps) {
       });
 
       return { windowDays: win, days, kinds: STREAM_KINDS, sources };
+    },
+
+    /**
+     * The unified river: recent items across messages + documents + health_daily
+     * + tasks, interleaved by created_at DESC with a single cursor.
+     *
+     * SECURITY (§7): each arm is an EXPLICIT, vector-free column projection (never
+     * SELECT *, never embedding_768/centroid). Per-row content auto-decrypts at the
+     * adapter. Raw message `metadata` is stripped (assembleTimelineMessages). The
+     * assembled payload is run through hasVectorKey() as a belt-and-suspenders egress
+     * guard — a match fails closed (throws), never serves.
+     *
+     * @param {string} userId
+     * @param {{ limit?:number, before?:string, since?:string, types?:string[] }} [opts]
+     *   before = ISO cursor (exclusive); since = ISO floor (time scope); types =
+     *   subset of ['message','document','health','task'] (default: all).
+     * @returns {Promise<{ items: object[], nextCursor: string|null }>}
+     */
+    async feed(userId, { limit = 40, before, since, types } = {}) {
+      const lim = Math.min(Math.max(limit | 0, 1), 100);
+      const want = new Set(Array.isArray(types) && types.length ? types : ['message', 'document', 'health', 'task']);
+      const range = (extra = []) => {
+        // shared WHERE tail + params for created_at windowing
+        let sql = '';
+        const params = [];
+        if (before) { sql += ' AND created_at < ?'; params.push(before); }
+        if (since) { sql += ' AND created_at >= ?'; params.push(since); }
+        return { sql, params, extra };
+      };
+
+      const arms = [];
+
+      // message — selectTimeline is already vector-free; assemble joins attachments
+      // + strips metadata (shared with GET /messages). scope:'all' mirrors the river.
+      if (want.has('message') && db?.messages?.selectTimeline) {
+        arms.push((async () => {
+          const rows = await db.messages.selectTimeline(userId, { limit: lim + 1, before, since, scope: 'all' });
+          const msgs = await assembleTimelineMessages(rows, { db, userId });
+          return msgs.map((m) => ({
+            type: 'message', id: m.id, source: m.source || 'unknown', createdAt: m.created_at, message: m,
+          }));
+        })());
+      }
+
+      // document — getForShare-shape + created_at, minus content (summary is the row
+      // preview; content is a click-through). Excludes internal + forgotten.
+      if (want.has('document')) {
+        arms.push((async () => {
+          const r = range();
+          const res = await d1Query(
+            `SELECT path, title, summary, source_type, created_at
+               FROM documents
+              WHERE user_id = ? AND forgotten_at IS NULL AND is_internal = 0${r.sql}
+              ORDER BY created_at DESC LIMIT ?`,
+            [userId, ...r.params, lim + 1],
+          );
+          return (res.results || []).map((d) => ({
+            type: 'document', id: `doc:${d.path}`, source: sourceForDocumentType(d.source_type), createdAt: d.created_at,
+            title: d.title || d.path, preview: truncate(d.summary), path: d.path, sourceType: d.source_type,
+          }));
+        })());
+      }
+
+      // health — explicit metric columns (no vector columns exist on this table);
+      // one row per day with a short headline summary.
+      if (want.has('health')) {
+        arms.push((async () => {
+          const r = range();
+          const res = await d1Query(
+            `SELECT id, date, source, created_at, sleep_duration_min, steps, hrv_avg, resting_hr,
+                    active_energy_kcal, workout_minutes, mindful_minutes
+               FROM health_daily
+              WHERE user_id = ?${r.sql}
+              ORDER BY created_at DESC LIMIT ?`,
+            [userId, ...r.params, lim + 1],
+          );
+          return (res.results || []).map((h) => ({
+            type: 'health', id: `health:${h.id}`, source: h.source || 'apple_health', createdAt: h.created_at,
+            date: h.date, preview: healthSummary(h),
+          }));
+        })());
+      }
+
+      // task — title auto-decrypts; status/priority/dates are plaintext. Exclude
+      // soft-deleted (status). No vector columns exist on this table.
+      if (want.has('task')) {
+        arms.push((async () => {
+          const r = range();
+          const res = await d1Query(
+            `SELECT id, title, status, priority, due_date, created_at, completed_at
+               FROM tasks
+              WHERE user_id = ? AND (status IS NULL OR status != 'deleted')${r.sql}
+              ORDER BY created_at DESC LIMIT ?`,
+            [userId, ...r.params, lim + 1],
+          );
+          return (res.results || []).map((t) => ({
+            type: 'task', id: `task:${t.id}`, source: 'task', createdAt: t.created_at,
+            title: truncate(t.title), status: t.status, priority: t.priority,
+            dueDate: t.due_date, completedAt: t.completed_at,
+          }));
+        })());
+      }
+
+      const armResults = await Promise.all(arms);
+      // k-way merge: created_at is the SAME ISO %f format in all four tables, so a
+      // lexicographic string compare sorts the union correctly (verified).
+      const merged = armResults.flat()
+        .filter((it) => it && it.createdAt)
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
+
+      const items = merged.slice(0, lim);
+      const nextCursor = merged.length > lim && items.length ? items[items.length - 1].createdAt : null;
+
+      // §7 belt-and-suspenders: refuse to serve if any vector field slipped through.
+      if (hasVectorKey(items)) throw new Error('streams.feed: refusing to serve a vector field (§7)');
+
+      return { items, nextCursor };
     },
   };
 }

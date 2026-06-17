@@ -593,7 +593,7 @@ export function createMessagesNamespace(deps) {
       return { data: result.results || [], count };
     },
 
-    async selectTimeline(userId, { limit = 50, before, afterId, scope } = {}) {
+    async selectTimeline(userId, { limit = 50, before, since, afterId, scope } = {}) {
       // metadata is encrypted at rest; the auto-decrypt layer returns a
       // JSON string here. Routes parse it before projecting to the UI so
       // we never leak triage decisions / dedupe nonces / delivery state
@@ -601,6 +601,9 @@ export function createMessagesNamespace(deps) {
       let sql = `SELECT id, role, content, source, agent_id, created_at, message_type, attachment_id, metadata FROM messages WHERE user_id = ? AND forgotten_at IS NULL`;
       const params = [userId];
       if (before) { sql += ` AND created_at < ?`; params.push(before); }
+      // `since` is the unified-river time-scope floor (Today/7d/All) — pushed into
+      // SQL so cursor pagination stays correct across the cross-table merge.
+      if (since) { sql += ` AND created_at >= ?`; params.push(since); }
       if (afterId) {
         sql += ` AND rowid < (SELECT rowid FROM messages WHERE id = ?)`;
         params.push(afterId);

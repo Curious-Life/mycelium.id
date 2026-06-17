@@ -1,6 +1,6 @@
 import express from 'express';
 import { nudgeEnrichDrainer } from './enrich/drainer.js';
-import { mediaTypeOf } from './portal-attachments.js';
+import { assembleTimelineMessages } from './streams/assemble-messages.js';
 import { clampStored } from './enrich/text-limits.js';
 import { resolveInferenceConfigForTask } from './inference/resolve.js';
 import { createInferenceRouter } from './inference/router.js';
@@ -124,30 +124,9 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       const limit = !Number.isFinite(raw) || raw <= 0 ? 50 : Math.min(raw, 200);
       const before = typeof req.query.before === 'string' && req.query.before ? req.query.before : undefined;
       const rows = await db.messages.selectTimeline(userId, { limit, before, scope: 'all' });
-      // Join attachment metadata so the timeline renders the ACTUAL media
-      // (TimelineView expects msg.attachment {type,url,description,transcript,
-      // filename,fileSize}). One batched user-scoped lookup; decrypted fields
-      // come back through the adapter like any read. Fail-soft: a lookup error
-      // degrades to text-only messages, never an empty feed.
-      let attMap = new Map();
-      try {
-        const ids = [...new Set(rows.map((m) => m.attachment_id).filter(Boolean))];
-        if (ids.length && db.attachments?.getByIds) {
-          const atts = await db.attachments.getByIds(ids, userId);
-          attMap = new Map((atts || []).map((a) => [a.id, {
-            type: mediaTypeOf(a.file_type),
-            url: `/api/v1/portal/attachments/${a.id}/file`,
-            filename: a.file_name || null,
-            fileSize: a.file_size ?? null,
-            description: a.description || null,
-            transcript: a.transcript || null,
-          }]));
-        }
-      } catch { /* text-only fallback */ }
-      const messages = rows.map(({ metadata, ...m }) => ({
-        ...m,
-        ...(m.attachment_id && attMap.has(m.attachment_id) ? { attachment: attMap.get(m.attachment_id) } : {}),
-      }));
+      // Attachment-join + metadata-strip (shared with the Streams river so the two
+      // can't drift) — see src/streams/assemble-messages.js.
+      const messages = await assembleTimelineMessages(rows, { db, userId });
       ok(res, { messages });
     } catch { ok(res, { messages: [] }); }
   });
@@ -162,6 +141,21 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       const windowDays = !Number.isFinite(raw) || raw <= 0 ? 7 : Math.min(raw, 90);
       ok(res, await db.streams.spectrum(userId, { windowDays }));
     } catch { ok(res, { windowDays: 7, days: [], kinds: [], sources: [] }); }
+  });
+
+  // GET /streams?limit&before&since&types=message,document → { items, nextCursor }
+  // The unified river: messages + documents + health + tasks interleaved by time.
+  // Vector-free + metadata-stripped + §7-guarded in db.streams.feed.
+  router.get('/streams', async (req, res) => {
+    try {
+      const raw = parseInt(req.query.limit, 10);
+      const limit = !Number.isFinite(raw) || raw <= 0 ? 40 : Math.min(raw, 100);
+      const before = typeof req.query.before === 'string' && req.query.before ? req.query.before : undefined;
+      const since = typeof req.query.since === 'string' && req.query.since ? req.query.since : undefined;
+      const types = typeof req.query.types === 'string' && req.query.types
+        ? req.query.types.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+      ok(res, await db.streams.feed(userId, { limit, before, since, types }));
+    } catch { ok(res, { items: [], nextCursor: null }); }
   });
 
   // ── Profile (Phase P) — read + edit, backed by user_profiles ────────────
