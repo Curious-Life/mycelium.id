@@ -66,7 +66,17 @@ const SOURCES = [
   // ~81s freeze PIPELINE-INTEGRITY fought). is_internal=0 + forgotten_at IS NULL
   // exclude internal-model scaffolding and forgotten docs at load (hydrate
   // re-applies both as defense in depth). DOCUMENT-SEARCH design 2026-06-17.
-  { table: 'documents', sql: "SELECT id, COALESCE(title,'') || ' ' || COALESCE(summary,'') || ' ' || COALESCE(content,'') AS text, created_at FROM documents WHERE user_id = ? AND is_internal = 0 AND forgotten_at IS NULL AND ((content IS NOT NULL AND content != '') OR (title IS NOT NULL AND title != ''))", kind: 'document', prefix: ID_PREFIX.document, skipEmbed: true },
+  //
+  // title/summary/content are ENCRYPTED columns (ENCRYPTED_FIELDS.documents). The
+  // adapter's autoDecryptResults decrypts envelope-shaped VALUES per column, so we
+  // SELECT them as individual columns and concatenate the DECRYPTED text in JS
+  // (textFrom). Concatenating them in SQL (`title || content`) joins ciphertext
+  // envelopes into a non-envelope string the adapter can't decrypt → garbage tokens
+  // that never match. Caught by live smoke 2026-06-18; messages dodge it via a
+  // single `content AS text` alias, and territory rows on existing vaults are
+  // pre-migration plaintext. (The profile sources above carry the same latent risk
+  // for newly-encrypted name/essence — tracked separately.)
+  { table: 'documents', sql: "SELECT id, title, summary, content, created_at FROM documents WHERE user_id = ? AND is_internal = 0 AND forgotten_at IS NULL AND ((content IS NOT NULL AND content != '') OR (title IS NOT NULL AND title != ''))", kind: 'document', prefix: ID_PREFIX.document, skipEmbed: true, textFrom: (r) => [r.title, r.summary, r.content].filter(Boolean).join(' ') },
 ];
 
 function tsFromRow(row) {
@@ -148,8 +158,11 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
           vectorsFailed++;
         }
       }
+      // text is either a single decrypted column aliased AS text, or built in JS
+      // from several decrypted columns (src.textFrom) — see the documents source.
+      const text = typeof src.textFrom === 'function' ? src.textFrom(row) : (row.text ?? '');
       try {
-        await backend.add({ id, text: row.text ?? '', embedding, ts: tsFromRow(row), skipEmbed: src.skipEmbed === true });
+        await backend.add({ id, text, embedding, ts: tsFromRow(row), skipEmbed: src.skipEmbed === true });
         added++;
         byKind[src.kind] = (byKind[src.kind] || 0) + 1;
       } catch { /* skip unindexable row */ }
