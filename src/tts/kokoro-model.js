@@ -20,11 +20,37 @@ export function kokoroPaths(opts = {}) {
   return { dir, onnx: join(dir, 'kokoro-v1.0.onnx'), voices: join(dir, 'voices-v1.0.bin') };
 }
 
-function resolvePython({ home = process.cwd() } = {}) {
+// The python the app's services run under. main.rs sets MYCELIUM_PYTHON to the
+// bundled interpreter; we ALSO resolve it explicitly (home/python/bin/python3)
+// so pip-install + the service + the import-check always agree on ONE python.
+// Exported so kokoro-supervisor.js uses the identical resolution.
+export function resolveKokoroPython({ home = process.cwd() } = {}) {
   if (process.env.MYCELIUM_PYTHON) return process.env.MYCELIUM_PYTHON;
+  const bundled = join(home, 'python/bin/python3');
+  if (existsSync(bundled)) return bundled;
   const venv = join(home, 'pipeline/.venv/bin/python3');
   if (existsSync(venv)) return venv;
   return 'python3';
+}
+const resolvePython = resolveKokoroPython;
+
+// True iff `import kokoro_onnx` succeeds in the given python — the REAL readiness
+// signal (files on disk ≠ an importable runtime). Cheap, cached.
+function pkgImportable(python) {
+  return new Promise((resolve) => {
+    let p; try { p = spawn(python, ['-c', 'import kokoro_onnx'], { stdio: 'ignore' }); }
+    catch { return resolve(false); }
+    p.on('error', () => resolve(false));
+    p.on('close', (code) => resolve(code === 0));
+  });
+}
+let _pkgInstalled = null;   // null=unknown · true · false
+let _pkgChecking = false;
+async function checkPkg(opts = {}) {
+  if (_pkgChecking) return _pkgInstalled;
+  _pkgChecking = true;
+  try { _pkgInstalled = await pkgImportable(resolvePython(opts)); } catch { _pkgInstalled = false; } finally { _pkgChecking = false; }
+  return _pkgInstalled;
 }
 
 // module-level download state (one machine, one model)
@@ -32,8 +58,18 @@ let _state = { phase: 'idle', progress: 0, error: null, bytes: 0, total: 0 };
 export function getModelState(opts = {}) {
   const p = kokoroPaths(opts);
   const files = existsSync(p.onnx) && existsSync(p.voices) && statSync(p.onnx).size > 1_000_000;
-  const phase = _state.phase === 'downloading' || _state.phase === 'installing' ? _state.phase : (files ? 'ready' : (_state.error ? 'error' : 'absent'));
-  return { phase, progress: _state.progress, error: _state.error, files, sizeMB: 340 };
+  // Files present but runtime not yet verified → kick a background import check
+  // (cached). "ready" requires BOTH the files AND an importable kokoro_onnx, so
+  // the UI never falsely shows ready when the pip package didn't land (the bug).
+  if (files && _pkgInstalled === null && !_pkgChecking) checkPkg(opts);
+  let phase;
+  if (_state.phase === 'installing' || _state.phase === 'downloading') phase = _state.phase;
+  else if (files && _pkgInstalled === true) phase = 'ready';
+  else if (files && _pkgInstalled === false) phase = 'needs-runtime'; // files ok, runtime missing → re-run install
+  else if (_state.error) phase = 'error';
+  else if (files) phase = 'checking';                                  // verifying import (brief)
+  else phase = 'absent';
+  return { phase, progress: _state.progress, error: _state.error, files, pkg: _pkgInstalled, sizeMB: 340 };
 }
 
 async function downloadTo(url, dest, onProgress) {
@@ -74,8 +110,14 @@ export async function startDownload(opts = {}) {
     try {
       mkdirSync(p.dir, { recursive: true });
       const python = resolvePython(opts);
-      const pip = await pipInstall(python);
+      let pip = await pipInstall(python);
       if (!pip.ok) throw new Error(`kokoro-onnx install failed: ${pip.err}`);
+      // A clean pip exit is NOT proof of an importable runtime (relocatable
+      // pythons can install where import can't see, or hit a half-built dep).
+      // Verify the import in THIS python; retry once before giving up.
+      _pkgInstalled = await pkgImportable(python);
+      if (!_pkgInstalled) { pip = await pipInstall(python); _pkgInstalled = await pkgImportable(python); }
+      if (!_pkgInstalled) throw new Error(`kokoro-onnx installed but not importable (python: ${python})`);
       _state.phase = 'downloading'; _state.progress = 5;
       // voices first (small), then the big onnx; weight progress by size (~26MB + ~310MB)
       if (!existsSync(p.voices)) await downloadTo(VOICES_URL, p.voices, (b, t) => { _state.progress = 5 + Math.round((b / (t || 26e6)) * 5); });

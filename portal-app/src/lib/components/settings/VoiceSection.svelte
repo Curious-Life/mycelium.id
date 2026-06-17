@@ -17,7 +17,7 @@
 
 	type VoiceCatalog = { id: string; label: string; description: string };
 	type ModelCatalog = { id: string; label: string; description: string };
-	type KokoroModel = { phase: 'absent' | 'installing' | 'downloading' | 'ready' | 'error'; progress: number; error: string | null; sizeMB: number };
+	type KokoroModel = { phase: 'absent' | 'installing' | 'downloading' | 'checking' | 'needs-runtime' | 'ready' | 'error'; progress: number; error: string | null; sizeMB: number };
 	type TtsState = {
 		enabled: boolean;
 		provider: string | null;
@@ -62,7 +62,7 @@
 			formProvider = (tts.provider as 'kokoro' | 'openai' | 'elevenlabs' | '' | null) ?? '';
 			formKokoroVoice = tts.kokoro?.voice ?? 'af_heart';
 			kModel = tts.kokoro?.model ?? null;
-			if (kModel && (kModel.phase === 'downloading' || kModel.phase === 'installing')) startPolling();
+			if (kModel && (kModel.phase === 'downloading' || kModel.phase === 'installing' || kModel.phase === 'checking')) startPolling();
 			formOpenaiVoice = tts.openai.voice;
 			formOpenaiModel = tts.openai.model;
 			formElevenVoiceId = tts.elevenlabs.voiceId ?? '';
@@ -84,7 +84,7 @@
 				const res = await api('/portal/settings/tts/kokoro/model');
 				if (res.ok) {
 					kModel = (await res.json()) as KokoroModel;
-					if (kModel.phase === 'ready' || kModel.phase === 'error' || kModel.phase === 'absent') {
+					if (kModel.phase === 'ready' || kModel.phase === 'error' || kModel.phase === 'absent' || kModel.phase === 'needs-runtime') {
 						if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 						downloading = false;
 					}
@@ -232,9 +232,9 @@
 					{#if m.phase === 'ready'}
 						<div class="text-sm text-[var(--color-accent)]">Model ready ✓</div>
 						<div class="text-[0.62rem] text-[var(--color-text-tertiary)] mt-0.5">Kokoro-82M installed locally.</div>
-					{:else if m.phase === 'installing' || m.phase === 'downloading'}
+					{:else if m.phase === 'installing' || m.phase === 'downloading' || m.phase === 'checking'}
 						<div class="text-sm text-[var(--color-text-primary)] mb-2">
-							{m.phase === 'installing' ? 'Installing kokoro-onnx…' : `Downloading model… ${m.progress}%`}
+							{m.phase === 'installing' ? 'Installing kokoro-onnx…' : m.phase === 'checking' ? 'Verifying runtime…' : `Downloading model… ${m.progress}%`}
 						</div>
 						<div class="h-1.5 w-full rounded-full bg-[var(--color-border)] overflow-hidden">
 							<div class="h-full bg-[var(--color-accent)] transition-all" style:width={`${Math.max(3, m.progress)}%`}></div>
@@ -242,8 +242,12 @@
 					{:else}
 						<div class="flex items-center justify-between gap-3">
 							<div>
-								<div class="text-sm text-[var(--color-text-primary)]">Model not installed</div>
-								<div class="text-[0.62rem] text-[var(--color-text-tertiary)]">Downloads Kokoro-82M (~340 MB) to this machine.</div>
+								<div class="text-sm text-[var(--color-text-primary)]">
+									{m.phase === 'needs-runtime' ? 'Model downloaded — runtime needs install' : 'Model not installed'}
+								</div>
+								<div class="text-[0.62rem] text-[var(--color-text-tertiary)]">
+									{m.phase === 'needs-runtime' ? 'The files are here but kokoro-onnx isn’t installed in the app’s Python. Click to finish.' : 'Downloads Kokoro-82M (~340 MB) to this machine.'}
+								</div>
 								{#if m.phase === 'error' && m.error}
 									<div class="text-[0.62rem] text-red-400 mt-1">{m.error}</div>
 								{/if}
@@ -254,7 +258,7 @@
 								disabled={downloading}
 								class="shrink-0 px-3 py-1.5 text-[0.7rem] font-medium bg-[var(--color-accent)] text-[var(--color-bg)] rounded-lg hover:opacity-90 disabled:opacity-40 cursor-pointer"
 							>
-								{downloading ? 'Starting…' : (m.phase === 'error' ? 'Retry download' : 'Download model')}
+								{downloading ? 'Starting…' : m.phase === 'needs-runtime' ? 'Finish install' : m.phase === 'error' ? 'Retry download' : 'Download model'}
 							</button>
 						</div>
 					{/if}
