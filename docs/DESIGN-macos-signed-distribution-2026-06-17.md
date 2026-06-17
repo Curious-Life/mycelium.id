@@ -1,13 +1,30 @@
 # Design — macOS signed + notarized distribution (Intel + Apple Silicon) (2026-06-17)
 
-> **Status: DESIGN LOCKED (not built).** Sweep-first design (4 parallel sweeps +
-> direct PyPI / file:line verification) taking the existing **arm64-only,
-> ad-hoc-signed** `Mycelium.app` to **two notarized DMGs** — `aarch64` + `x86_64` —
-> behind a website Download button. Operator has an Apple Developer account.
+> **Status: BUILT — pending operator secrets + first CI run** (branch
+> `feat/macos-signed-dist`). Sweep-first design (4 parallel sweeps + direct PyPI /
+> file:line verification) taking the existing **arm64-only, ad-hoc-signed**
+> `Mycelium.app` to **two notarized DMGs** — `aarch64` + `x86_64` — behind a
+> website Download button. Operator has an Apple Developer account.
 >
 > Parent plan: [`DESIGN-cross-platform-distribution-2026-06-17.md`](DESIGN-cross-platform-distribution-2026-06-17.md)
 > (Phase 1). Supersedes that doc's hand-wavy "decision D1: sign-in-bundle vs
 > first-run provision" with a concrete, sweep-verified signing pipeline.
+>
+> ### As-built status (2026-06-18, branch `feat/macos-signed-dist`)
+> Reconciled against pre-existing code — commit 98ee249 already shipped most of
+> the signing path. **Committed:**
+> - **Step 1** — `build-app-bundle.sh` arch-parameterized (`MYC_ARCH`) + cache
+>   arch-scoped + `cryptography>=42,<45` cap. *(a96315d)*
+> - **Step 3** — `sign-macos.sh` already existed and was inside-out-correct; fixed
+>   its one real defect (no child entitlements on `node`/`python3` → would
+>   notarize but crash at launch) via new `entitlements-child.plist`. *(7bb45f5)*
+> - **Step 4** — planned `make-dmg.sh` **DROPPED as redundant**: the pre-existing
+>   `notarize-macos.sh` already builds the DMG via `hdiutil` from the stapled app.
+> - **Step 5** — `desktop-release.yml` 2-arch CI (macos-14 + macos-13). *(8a444f6)*
+>
+> **Remaining:** operator wires 6 GH secrets (§9) → gates **G1** (Intel bundle
+> builds) + **G3** (notarytool ACCEPTED) run in CI on the first `v*` tag; **Step
+> 6** website button; **Step 2** Intel smoke folds into that CI run.
 
 ---
 
