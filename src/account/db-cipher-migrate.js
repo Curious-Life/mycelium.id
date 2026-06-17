@@ -17,7 +17,8 @@
 //   5. atomic swap: rename original → <db>.pre-cipher-<ts> (KEPT, never auto-deleted),
 //      rename the encrypted copy → <db>
 import Database from 'better-sqlite3';
-import { existsSync, openSync, readSync, closeSync, copyFileSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, openSync, readSync, closeSync, copyFileSync, renameSync, rmSync, readdirSync, statSync, writeSync, fsyncSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 
 const PLAINTEXT_MAGIC = Buffer.from('SQLite format 3\0', 'latin1'); // first 16 bytes of any plaintext sqlite db
 
@@ -111,6 +112,82 @@ export function ensureVaultEncrypted({ dbPath, dbKeyHex, log = () => {} }) {
   for (const sfx of ['-wal', '-shm']) { try { rmSync(dbPath + sfx); } catch {} } // stale (checkpointed) sidecars
   renameSync(tmpPath, dbPath);
 
-  log(`[mycelium] vault encrypted at rest (${tableN} tables, parity OK). Plaintext copy kept at ${preCipherPath} — delete it once you have confirmed the vault opens.`);
+  log(`[mycelium] vault encrypted at rest (${tableN} tables, parity OK). Plaintext copy kept at ${preCipherPath} — removed automatically on the next verified keyed reopen.`);
   return { migrated: true, preCipherPath, tables: tableN };
+}
+
+/**
+ * Best-effort, single-pass zero-overwrite of a file's bytes, then fsync.
+ *
+ * SECURE-ERASE LIMITATION (read before relying on this): on a modern SSD with
+ * wear-leveling, and especially on a copy-on-write filesystem (APFS — the macOS
+ * default, which is the PRIMARY deployment here), overwriting a file's bytes in
+ * place does NOT reliably scrub the physical blocks that held the original data:
+ * the filesystem writes the overwrite to fresh blocks and leaves the old blocks
+ * live until they are garbage-collected / TRIM'd. So this overwrite is
+ * best-effort only — it can help on the rare non-CoW / spinning-disk case and is
+ * cheap, but it is NOT a guarantee. The real at-rest defense for residue is
+ * full-disk encryption (FileVault). The `unlink` in reapPreCipherBackups() is the
+ * practical floor; this pass is belt-and-suspenders, never a substitute.
+ */
+function bestEffortOverwrite(path) {
+  let size;
+  try { size = statSync(path).size; } catch { return; }
+  if (!size) return;
+  let fd;
+  try {
+    fd = openSync(path, 'r+');
+    const chunk = Buffer.alloc(Math.min(size, 1 << 20)); // up to 1 MiB of zeros
+    let off = 0;
+    while (off < size) {
+      const n = Math.min(chunk.length, size - off);
+      writeSync(fd, chunk, 0, n, off);
+      off += n;
+    }
+    fsyncSync(fd);
+  } catch { /* best-effort: swallow and let the caller's unlink do the real work */ }
+  finally { if (fd !== undefined) { try { closeSync(fd); } catch {} } }
+}
+
+/**
+ * Remove any lingering plaintext `.pre-cipher-<ts>` backup(s) left beside the
+ * vault by ensureVaultEncrypted() (the renamed pre-migration plaintext copy, plus
+ * any stray -wal/-shm sidecars for it).
+ *
+ * SAFETY CONTRACT — the caller MUST have already proven the *encrypted* vault
+ * opens with the derived key (a keyed probe read) BEFORE calling this. This
+ * function does NOT re-verify the encrypted copy; it only deletes the plaintext
+ * safety net, which is irreversible. Removing the backup before the encrypted copy
+ * is confirmed readable would risk total data loss — see src/index.js boot() for
+ * the gating (at-rest enabled + migration did NOT run this boot + keyed probe
+ * read OK). On its own this function is a no-op when no backup is present.
+ *
+ * Each backup is run through bestEffortOverwrite() (see its LIMITATION note —
+ * unlink is the real floor, not the overwrite) and then unlinked. Failures are
+ * logged and skipped, never thrown: a backup we cannot remove must not crash boot.
+ *
+ * @param {{ dbPath: string, log?: (m:string)=>void }} opts
+ * @returns {{ reaped: string[] }} absolute paths removed (empty if none lingering)
+ */
+export function reapPreCipherBackups({ dbPath, log = () => {} }) {
+  const dir = dirname(dbPath);
+  const prefix = `${basename(dbPath)}.pre-cipher-`; // matches <db>.pre-cipher-<ts>[ -wal | -shm ]
+  let names;
+  try { names = readdirSync(dir); } catch { return { reaped: [] }; }
+  const reaped = [];
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue; // never matches the live <db> (no .pre-cipher-) or <db>.cipher-tmp
+    const p = join(dir, name);
+    try {
+      bestEffortOverwrite(p);
+      rmSync(p, { force: true });
+      reaped.push(p);
+    } catch (e) {
+      log(`[mycelium] at-rest: could not remove plaintext backup ${p}: ${e.message}`);
+    }
+  }
+  if (reaped.length) {
+    log(`[mycelium] at-rest: removed ${reaped.length} plaintext pre-cipher backup(s) after verified keyed reopen`);
+  }
+  return { reaped };
 }

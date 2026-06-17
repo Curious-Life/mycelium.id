@@ -207,11 +207,44 @@ Boot-time, idempotent, **non-destructive** (mirrors `ensureDataDir`):
 4. **Parity check:** per-table `COUNT(*)` plaintext (snapshot pre-copy) == encrypted
    copy before proceeding (fail closed — abort, delete the temp, keep original).
 5. **Atomic swap:** rename plaintext aside to `mycelium.db.pre-cipher-<ts>`
-   (**never auto-deleted** — operator removes after confirming), `rename` encrypted
+   (kept on the migration boot; auto-reaped later — see §7.1), `rename` encrypted
    copy → `mycelium.db`. Discard stale `-wal`/`-shm` (checkpointed pre-copy).
 6. Idempotent: the magic-header check (`isPlaintextSqlite`) short-circuits a re-run.
 
 Implemented in `src/account/db-cipher-migrate.js` (`ensureVaultEncrypted`).
+
+### 7.1 Reaping the plaintext `.pre-cipher` backup (AS-BUILT 2026-06-18)
+
+The `.pre-cipher-<ts>` copy is the migration's crash safety net, but it is a full
+**plaintext** copy of the entire vault sitting beside the encrypted DB — it defeats
+the "blind at rest" guarantee until removed. It was originally left for the operator
+to delete by hand; with at-rest now ON by default in the packaged app (PR #233),
+that manual step is a pre-launch security blocker. So boot now reaps it
+**automatically, but only once the encrypted copy is proven readable** — never
+before. Gate (all three required), in `src/index.js` boot() after `getDb`:
+
+1. at-rest is enabled (`dbKeyHex` resolved), **and**
+2. the migration did **not** run this boot — i.e. the vault was already encrypted
+   and has now survived a full process restart and reopened. On the migration boot
+   itself the backup is **kept** (the encrypted copy has not yet been re-opened by a
+   fresh process); it is reaped on the *first verified keyed reopen*, **and**
+3. a keyed probe read (`SELECT 1`) returns — concrete proof this process can read
+   the encrypted vault with the derived key.
+
+Only then does `reapPreCipherBackups({ dbPath })` overwrite-best-effort + `unlink`
+every `<db>.pre-cipher-*` (the renamed main file + any stray `-wal`/`-shm`). It is
+**fail-safe**: any probe failure or read error leaves the plaintext backup in place
+(boot does not crash), and the function never touches the live `<db>` or
+`<db>.cipher-tmp`. Net effect: after the **first restart** following an at-rest
+migration, no plaintext copy remains on disk.
+
+**Secure-erase limitation (documented, not papered over):** on a copy-on-write
+filesystem (APFS — the macOS default and primary deployment) and on wear-leveled
+SSDs, an in-place byte overwrite does **not** reliably scrub the physical blocks
+that held the data (the FS writes to fresh blocks; old blocks linger until GC/TRIM).
+So the overwrite pass is best-effort only — `unlink` is the practical floor, and
+full-disk encryption (FileVault) is the real defense for at-rest residue. See the
+`bestEffortOverwrite` / `reapPreCipherBackups` doc comments.
 
 Backup (`.myvault`), import, and Tauri are file-format-agnostic → no breakage; the
 encrypted vault simply backs up as encrypted bytes (the backup is *also* blind now).
@@ -228,6 +261,21 @@ encrypted vault simply backs up as encrypted bytes (the backup is *also* blind n
 | A6 | Python-via-bridge reads the encrypted vault | start `vault-bridge.js` keyed → `d1_client.query`/`local_db.query` over loopback return correct rows; bridge rejects a request with `x-forwarded-for` |
 | A7 | Two write semantics preserved | `/query` write lands raw (column NOT auto-encrypted); `/batch_encrypted` write lands as an AES-GCM envelope |
 | A8 (regression) | Full `npm run verify` GO through the aliased driver | the 104 raw-read verify gates stay green (plaintext temp DBs, opt-out) |
+
+### 8.1 `verify:at-rest-boot` gate (boot-wiring + backup reap)
+
+Separate gate (`scripts/verify-at-rest-boot.mjs`), boots `boot()` against temp fixtures:
+
+| # | Assertion |
+|---|---|
+| B1 | opt-in resolver: default OFF → `resolveDbKeyHex()=null`; ON → 64-hex key, rejects bad USER_MASTER |
+| B2 | fresh vault + flag ON → file born encrypted + keyed connection reads |
+| B3 | existing plaintext vault → boot migrates; marker survives; **backup KEPT on the migration boot** |
+| B4 | 2nd boot is idempotent (already encrypted) + still reads |
+| **B4b** | **plaintext `.pre-cipher` backup REAPED after the verified keyed reopen (2nd boot) + data intact** |
+| **B4c** | 3rd boot: no backup lingering + still reads (clean no-op) |
+| **B6** | unit: `reapPreCipherBackups` removes only `.pre-cipher-*` (incl. `-wal` sidecar), leaves live `<db>` + `.cipher-tmp`; no-op when none lingering |
+| B5 | default OFF → fresh vault stays plaintext (unchanged) |
 
 ## 9. Verification table (load-bearing assumptions)
 

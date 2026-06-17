@@ -11,7 +11,8 @@ import { join } from 'node:path';
 import { boot } from '../src/index.js';
 import { createStubEmbedder } from '../src/search/index.js';
 import { resolveDbKeyHex, atRestEnabled } from '../src/db/open.js';
-import { isPlaintextSqlite } from '../src/account/db-cipher-migrate.js';
+import { isPlaintextSqlite, reapPreCipherBackups } from '../src/account/db-cipher-migrate.js';
+import { writeFileSync, mkdirSync } from 'node:fs';
 
 const ledger = [];
 const rec = (n, c, x = '') => { ledger.push(c); console.log(`  [${c ? '✓' : '✗'}] ${n}${x ? ' — ' + x : ''}`); };
@@ -67,6 +68,38 @@ async function main() {
     const marker2 = (await db2.rawQuery('SELECT v FROM bw_marker')).results?.[0]?.v;
     close2();
     rec('B4 2nd boot is idempotent (already encrypted) + still reads', marker2 === 'MARKER_PLAINTEXT', `marker=${marker2}`);
+
+    // ── B4b SECURITY: plaintext pre-cipher backup is GONE after the verified ──
+    // keyed reopen (the 2nd boot), and the encrypted data still reads. This is
+    // the core assertion: the "blind at rest" guarantee holds because no
+    // plaintext copy lingers once the encrypted vault has been proven openable.
+    rec('B4b plaintext pre-cipher backup REAPED after verified keyed reopen + data intact',
+      !hasPreCipher(dbPath) && marker2 === 'MARKER_PLAINTEXT',
+      `backupGone=${!hasPreCipher(dbPath)} marker=${marker2}`);
+
+    // ── B4c 3rd boot: nothing left to reap, vault still reads (clean no-op) ──
+    const { db: db3, close: close3 } = await boot({ dbPath, kcvPath: join(base, 'kcv.json'), userHex: uHex, systemHex: sHex, embedder: stub() });
+    const marker3 = (await db3.rawQuery('SELECT v FROM bw_marker')).results?.[0]?.v;
+    close3();
+    rec('B4c 3rd boot: no backup lingering + still reads', !hasPreCipher(dbPath) && marker3 === 'MARKER_PLAINTEXT',
+      `backupGone=${!hasPreCipher(dbPath)} marker=${marker3}`);
+  }
+
+  // ── B6 unit: reapPreCipherBackups removes ONLY pre-cipher files, fail-safe ──
+  {
+    const base = join(dir, 'b6'); mkdirSync(base, { recursive: true });
+    const dbPath = join(base, 'mycelium.db');
+    writeFileSync(dbPath, 'LIVE_ENCRYPTED_VAULT');            // must survive
+    writeFileSync(`${dbPath}.cipher-tmp`, 'STALE_TMP');       // different suffix → must survive
+    writeFileSync(`${dbPath}.pre-cipher-111`, 'PLAINTEXT_A'); // reap
+    writeFileSync(`${dbPath}.pre-cipher-222`, 'PLAINTEXT_B'); // reap
+    writeFileSync(`${dbPath}.pre-cipher-111-wal`, 'WAL');     // reap (sidecar)
+    const { reaped } = reapPreCipherBackups({ dbPath });
+    rec('B6 reap removes all 3 pre-cipher files, leaves live vault + cipher-tmp untouched',
+      reaped.length === 3 && !hasPreCipher(dbPath) && existsSync(dbPath) && existsSync(`${dbPath}.cipher-tmp`),
+      `reaped=${reaped.length} vault=${existsSync(dbPath)} tmp=${existsSync(`${dbPath}.cipher-tmp`)}`);
+    const again = reapPreCipherBackups({ dbPath });
+    rec('B6 reap is a no-op when no backup lingers', again.reaped.length === 0);
   }
 
   // ── B5 default OFF: boot leaves a fresh vault PLAINTEXT (no behavior change) ─

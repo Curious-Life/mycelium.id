@@ -11,7 +11,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
 import { resolveDbKeyHex } from './db/open.js';
-import { ensureVaultEncrypted } from './account/db-cipher-migrate.js';
+import { ensureVaultEncrypted, reapPreCipherBackups } from './account/db-cipher-migrate.js';
 import { createIdentity, isValidHandle } from './identity/identity.js';
 import { readRemoteConfig } from './remote/config.js';
 import { buildDomains, collectTools, createMcpServer, TIER2_TOOLS, TOPOLOGY_NOT_READY_MESSAGE } from './mcp.js';
@@ -108,15 +108,40 @@ export async function boot({
   // but the migration throws, refuse to fall back to a plaintext open (would
   // write new rows in cleartext into a half-migrated vault). @see src/db/open.js.
   const dbKeyHex = resolveDbKeyHex(userHex);
+  let migratedThisBoot = false;
   if (dbKeyHex) {
     try {
       const r = ensureVaultEncrypted({ dbPath, dbKeyHex, log: (m) => console.error(m) });
-      if (r.migrated) console.error(`[mycelium] at-rest: encrypted ${r.tables} tables; plaintext backup kept at ${r.preCipherPath}`);
+      migratedThisBoot = r.migrated === true;
+      if (r.migrated) console.error(`[mycelium] at-rest: encrypted ${r.tables} tables; plaintext backup kept at ${r.preCipherPath} (removed on the next verified keyed reopen)`);
     } catch (e) {
       throw new Error(`at-rest encryption requested (MYCELIUM_AT_REST) but the migration failed — refusing a plaintext open: ${e.message}`);
     }
   }
   const { db, close } = getDb({ dbPath, userKey, systemKey, federationDeps, dbKeyHex });
+
+  // At-rest residue cleanup: ensureVaultEncrypted() keeps the pre-migration
+  // PLAINTEXT vault as `<db>.pre-cipher-<ts>` (so a mid-migration crash never
+  // loses data). That backup defeats the "blind at rest" guarantee, so we delete
+  // it — but ONLY once the encrypted copy is PROVEN openable, never before. Gate:
+  //   (a) at-rest enabled (dbKeyHex set), and
+  //   (b) the migration did NOT run this boot — i.e. the vault was already
+  //       encrypted and has now survived a full process restart and reopened
+  //       (the "first verified keyed reopen"; on the migration boot itself we keep
+  //       the backup), and
+  //   (c) a keyed probe read returns — concrete proof this process can read the
+  //       encrypted vault with the derived key.
+  // Fail-safe: any probe failure leaves the plaintext backup untouched.
+  // @see reapPreCipherBackups (src/account/db-cipher-migrate.js).
+  if (dbKeyHex && !migratedThisBoot) {
+    try {
+      const probeOk = (await db.rawQuery('SELECT 1 AS x')).results?.[0]?.x === 1;
+      if (probeOk) reapPreCipherBackups({ dbPath, log: (m) => console.error(m) });
+      else console.error('[mycelium] at-rest: keyed probe read returned no row; keeping plaintext backup (fail-safe)');
+    } catch (e) {
+      console.error(`[mycelium] at-rest: keyed probe read failed; keeping plaintext backup (fail-safe): ${e.message}`);
+    }
+  }
   const { domains, deferred, searchHelpers, isTopologyReady } = buildDomains({ db, userId, embedder, identity });
   // Cold-start gating (Phase 4): Tier-2 readers return a uniform "not ready"
   // message until the topology pipeline has run, instead of honest-empty.
