@@ -8,7 +8,7 @@
 // synthesizes text passed over loopback. Minimal env allowlist (PATH/HOME +
 // model paths). Loopback-only.
 import { spawn } from 'node:child_process';
-import { kokoroPaths, getModelState, resolveKokoroPython } from './kokoro-model.js';
+import { kokoroPaths, getModelState, resolveKokoroPython, startDownload } from './kokoro-model.js';
 
 const PORT = Number(process.env.MYCELIUM_KOKORO_PORT) || 8094;
 const TICK_MS = 4000;
@@ -39,7 +39,7 @@ export function startKokoroSupervisor({ home = process.cwd(), shouldRun = () => 
   if (_instance) return _instance;
   const python = resolvePython({ home });
   const paths = kokoroPaths();
-  let child = null, spawnedByUs = false, failures = 0, nextStartAt = 0, stopped = false;
+  let child = null, spawnedByUs = false, failures = 0, nextStartAt = 0, stopped = false, installing = false;
 
   const env = () => ({
     PATH: process.env.PATH, HOME: process.env.HOME,
@@ -52,12 +52,30 @@ export function startKokoroSupervisor({ home = process.cwd(), shouldRun = () => 
   async function tick() {
     if (stopped) return;
     let want = false; try { want = await shouldRun(); } catch { want = false; }
-    const ready = getModelState().phase === 'ready';
+    const phase = getModelState().phase;
 
-    if (!want || !ready) {
-      // not opted in / model absent → make sure we aren't running a child we spawned
+    if (!want) { // not opted in → stop any child we spawned
       if (child && spawnedByUs) { try { child.kill(); } catch { /* */ } }
-      _health = { status: 'idle', message: !ready ? 'Local TTS model not installed.' : 'Local TTS off.' };
+      _health = { status: 'idle', message: 'Local TTS off.' };
+      return;
+    }
+
+    // Model FILES present but the runtime isn't importable (e.g. after an app
+    // update reset the bundled python) → AUTO-INSTALL kokoro-onnx, no UI click.
+    // startDownload skips the model download since the files already exist. Only
+    // for 'needs-runtime'; 'absent' means no model yet — that ~340MB fetch stays a
+    // deliberate Download click. (Mirrors the whisper supervisor's auto-install.)
+    if (phase === 'needs-runtime' && !installing) {
+      installing = true;
+      _health = { status: 'installing', message: 'Installing local TTS runtime…' };
+      try { await startDownload(); } catch { /* surfaced via model state */ }
+      installing = false;
+      return; // next tick re-evaluates (should be 'ready')
+    }
+
+    if (phase !== 'ready') { // absent / installing / checking / error → wait
+      if (child && spawnedByUs) { try { child.kill(); } catch { /* */ } }
+      _health = { status: phase === 'absent' ? 'idle' : 'installing', message: phase === 'absent' ? 'Local TTS model not installed.' : 'Preparing local TTS…' };
       return;
     }
     if (child) return;                                   // already running ours
