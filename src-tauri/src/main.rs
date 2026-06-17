@@ -265,6 +265,14 @@ fn main() {
                     format!("{}:{}:{}", home.display(), home.join("python/bin").display(), path),
                 )
                 .env("MYCELIUM_PYTHON", &python_bin);
+                // Whole-vault at-rest encryption (A′) — ON in the packaged app, OFF
+                // in `cargo tauri dev` (bundled=false) so a dev vault is never
+                // surprise-migrated. index.js boot derives the DB key from the
+                // master key, runs the idempotent encrypt-in-place migration (fresh
+                // vaults are born encrypted), then opens every connection keyed.
+                // MUST also be set on the :4711 supervisor below — it opens the SAME
+                // vault, and a plaintext open of an encrypted file fail-closes.
+                cmd.env("MYCELIUM_AT_REST", "1");
             }
             if hf_home.exists() {
                 // Offline embedding model bundled under Resources/app/hf-cache.
@@ -314,6 +322,10 @@ fn main() {
                     let sup_opts = node_options.clone();
                     let sup_flag = shutting_down.clone();
                     let sup_pid = http_pid.clone();
+                    // Same at-rest decision as the :8787 server (bundled = packaged
+                    // app). This process opens the SAME vault; without the flag it
+                    // would try a plaintext open of the encrypted file and fail-close.
+                    let sup_at_rest = bundled;
                     std::thread::spawn(move || {
                         let spawn_http = || {
                             let mut http = Command::new(&sup_node);
@@ -324,6 +336,9 @@ fn main() {
                                 .env("MYCELIUM_PORT", "4711")
                                 .env("MYCELIUM_KEY_SOURCE", &sup_key)
                                 .env("MYCELIUM_DATA_DIR", &sup_data);
+                            if sup_at_rest {
+                                http.env("MYCELIUM_AT_REST", "1");
+                            }
                             if !public_host.is_empty() {
                                 http.env("MYCELIUM_BASE_URL", format!("https://{public_host}"));
                             }
