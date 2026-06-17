@@ -31,8 +31,14 @@ import { EMBED_DIM } from '../embed/client.js';
  * (`territory:1`, `realm:1`, `theme:1`) to keep them distinct in the index AND
  * unambiguous when partitioning ranked hits back into layers. See ID_PREFIX +
  * stripPrefix; index.js hydration mirrors this.
+ *
+ * Documents use UUID string ids like messages (no integer overlap), but we
+ * prefix them `document:` anyway so the bare-id space stays message-only —
+ * index.js hydrateMessages selects candidates by `!id.includes(':')`, and a
+ * `document:` prefix keeps documents out of that filter while making the
+ * partition self-describing. See DOCUMENT-SEARCH design 2026-06-17.
  */
-export const ID_PREFIX = { territory: 'territory:', realm: 'realm:', theme: 'theme:' };
+export const ID_PREFIX = { territory: 'territory:', realm: 'realm:', theme: 'theme:', document: 'document:' };
 
 /** Strip a kind prefix from an index id → the raw DB pk (string). */
 export function stripPrefix(id) {
@@ -54,6 +60,13 @@ const SOURCES = [
   { table: 'territory_profiles', sql: "SELECT CAST(territory_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM territory_profiles WHERE user_id = ?", kind: 'territory', prefix: ID_PREFIX.territory },
   { table: 'realms', sql: "SELECT CAST(realm_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM realms WHERE user_id = ?", kind: 'realm', prefix: ID_PREFIX.realm },
   { table: 'semantic_themes', sql: "SELECT CAST(semantic_theme_id AS TEXT) AS id, name || ' ' || COALESCE(essence,'') AS text, created_at FROM semantic_themes WHERE user_id = ?", kind: 'theme', prefix: ID_PREFIX.theme },
+  // Documents have no stored embedding_768 (enrichment embeds messages only),
+  // so skipEmbed=true keeps them BM25-only — adding them with a wired embedder
+  // would otherwise fire one live :8091 call PER document at cold start (the
+  // ~81s freeze PIPELINE-INTEGRITY fought). is_internal=0 + forgotten_at IS NULL
+  // exclude internal-model scaffolding and forgotten docs at load (hydrate
+  // re-applies both as defense in depth). DOCUMENT-SEARCH design 2026-06-17.
+  { table: 'documents', sql: "SELECT id, COALESCE(title,'') || ' ' || COALESCE(summary,'') || ' ' || COALESCE(content,'') AS text, created_at FROM documents WHERE user_id = ? AND is_internal = 0 AND forgotten_at IS NULL AND ((content IS NOT NULL AND content != '') OR (title IS NOT NULL AND title != ''))", kind: 'document', prefix: ID_PREFIX.document, skipEmbed: true },
 ];
 
 function tsFromRow(row) {
@@ -136,7 +149,7 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
         }
       }
       try {
-        await backend.add({ id, text: row.text ?? '', embedding, ts: tsFromRow(row) });
+        await backend.add({ id, text: row.text ?? '', embedding, ts: tsFromRow(row), skipEmbed: src.skipEmbed === true });
         added++;
         byKind[src.kind] = (byKind[src.kind] || 0) + 1;
       } catch { /* skip unindexable row */ }

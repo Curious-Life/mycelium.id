@@ -90,8 +90,11 @@ export function createLocalBackend(deps = {}) {
   /**
    * Add (or replace) a document. Embedding is best-effort: if absent and an
    * embedder is wired, embed with task=document; if that fails, the doc is
-   * still BM25-searchable (ANN just won't return it).
-   * @param {{ id:string, text?:string, embedding?:Float32Array|number[], ts:number }} req
+   * still BM25-searchable (ANN just won't return it). Pass skipEmbed=true to
+   * suppress the live embed-service round-trip entirely (BM25-only) — used by
+   * the loader for sources with no stored vector that must not pay a per-row
+   * :8091 call at cold start (e.g. documents; DOCUMENT-SEARCH design 2026-06-17).
+   * @param {{ id:string, text?:string, embedding?:Float32Array|number[], ts:number, skipEmbed?:boolean }} req
    */
   async function add(req) {
     if (!req || typeof req !== 'object') throw new TypeError('add: req object required');
@@ -105,7 +108,7 @@ export function createLocalBackend(deps = {}) {
     let vec = null;
     if (req.embedding instanceof Float32Array) vec = req.embedding;
     else if (Array.isArray(req.embedding)) vec = Float32Array.from(req.embedding);
-    else if (embedder && typeof req.text === 'string' && req.text.length > 0) {
+    else if (!req.skipEmbed && embedder && typeof req.text === 'string' && req.text.length > 0) {
       try { vec = await safeEmbed(embedder, req.text, 'document'); } catch { vec = null; }
     }
     if (vec) _vectors.set(req.id, vec);
