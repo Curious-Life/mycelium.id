@@ -1329,6 +1329,36 @@
 		scene.add(glowLayer);
 	}
 
+	// Build (or REBUILD) the tone-mapping + post-processing pipeline for the
+	// CURRENT theme. Called at init and on every theme toggle. Light mode renders
+	// plain — NoToneMapping (no ACES highlight compression) and no bloom — so the
+	// luminous beads read true on the warm paper background; dark mode gets ACES +
+	// a gentle UnrealBloom haze. This MUST run on toggle: the composer + tone map
+	// used to be frozen at the init theme, so flipping to light left ACES + bloom
+	// applied over light points (murk / washout that read as "not rendering")
+	// until a full page reload reset it.
+	function setupRenderPipeline() {
+		if (!renderer || !scene || !camera || !container) return;
+		renderer.toneMapping = isLight ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
+		renderer.toneMappingExposure = 1.1;
+		renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+		if (composer) composer.dispose();
+		composer = new EffectComposer(renderer);
+		composer.addPass(new RenderPass(scene, camera));
+		if (!isLight) {
+			const bloomPass = new UnrealBloomPass(
+				new THREE.Vector2(container.clientWidth, container.clientHeight),
+				0.35, // strength — gentle nebula haze
+				0.5,  // radius — wider spread for soft halos
+				0.5   // threshold — catch glow halos, not data points
+			);
+			composer.addPass(bloomPass);
+		}
+		composer.addPass(new OutputPass());
+		composer.setSize(container.clientWidth, container.clientHeight);
+	}
+
 	function initThree() {
 		if (!container) return;
 		scene = new THREE.Scene();
@@ -1343,27 +1373,11 @@
 		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 		container.appendChild(renderer.domElement);
 
-		// Tone mapping for bloom — balanced exposure so points stay visible
-		renderer.toneMapping = isLight ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
-		renderer.toneMappingExposure = 1.1;
-		renderer.outputColorSpace = THREE.SRGBColorSpace;
-
 		// Setup clock for animations
 		clock = new THREE.Clock();
 
-		// Setup composer — bloom in dark mode, plain render in light mode
-		composer = new EffectComposer(renderer);
-		composer.addPass(new RenderPass(scene, camera));
-		if (!isLight) {
-			const bloomPass = new UnrealBloomPass(
-				new THREE.Vector2(container.clientWidth, container.clientHeight),
-				0.35, // strength — gentle nebula haze
-				0.5,  // radius — wider spread for soft halos
-				0.5   // threshold — catch glow halos, not data points
-			);
-			composer.addPass(bloomPass);
-		}
-		composer.addPass(new OutputPass());
+		// Tone mapping + post-processing pipeline (theme-dependent; rebuilt on toggle).
+		setupRenderPipeline();
 
 		controls = new OrbitControls(camera, renderer.domElement);
 		controls.enableDamping = true;
@@ -1682,12 +1696,12 @@
 					// Luminous bead: a bright highlight CORE (the "shine"), a vivid body,
 					// and a crisp darker RIM that gives each point a distinct colour
 					// contour against the light paper background.
-					float core = 1.0 - smoothstep(0.0, 0.40, r);   // central highlight
-					float rim  = smoothstep(0.34, 0.5, r);         // outer edge
+					float core = 1.0 - smoothstep(0.0, 0.40, r);
+					float rim  = smoothstep(0.34, 0.5, r);
 					vec3 col = vColor;
-					col = mix(col, col * 0.5, rim);                                  // deepen rim → contour
-					col = mix(col, min(col + vec3(0.4), vec3(1.0)), core * 0.6);     // lift core → shine
-					float edge = 1.0 - smoothstep(0.46, 0.5, r);   // antialiased cut
+					col = mix(col, col * 0.5, rim);
+					col = mix(col, min(col + vec3(0.4), vec3(1.0)), core * 0.6);
+					float edge = 1.0 - smoothstep(0.46, 0.5, r);
 					gl_FragColor = vec4(col, vAlpha * edge);
 				}
 			` : `
@@ -2228,8 +2242,9 @@
 		scene.background = new THREE.Color(getBgColor());
 		if (themeApplied && pointCloud) {
 			createPointCloud();
-			createStarfield();   // skips itself in light mode
-			createGlowLayer();   // skips itself in light mode
+			createStarfield();      // skips itself in light mode
+			createGlowLayer();      // skips itself in light mode
+			setupRenderPipeline();  // rebuild tone-map + bloom for the new theme
 		}
 		themeApplied = true;
 	});
