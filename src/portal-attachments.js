@@ -101,6 +101,37 @@ export function portalAttachmentsRouter({ db, userId }) {
       const bytes = await getBlob(row.local_path);
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('X-Content-Type-Options', 'nosniff'); // covers both the wav and raw branches
+      res.setHeader('Accept-Ranges', 'bytes');
+
+      // WKWebView (the Tauri/iOS shell) REQUIRES HTTP Range (206 Partial Content)
+      // for <audio>/<video> playback — a plain 200 full-body response makes the
+      // media element silently refuse to play (every view was broken). Serve the
+      // requested byte range when asked; full body otherwise. Headers (Content-
+      // Type / Content-Disposition) are already set by each branch before calling.
+      const sendRange = (buf) => {
+        const total = buf.length;
+        const hdr = req.headers.range;
+        const m = hdr && /^bytes=(\d*)-(\d*)$/.exec(String(hdr).trim());
+        if (m) {
+          let start = m[1] === '' ? NaN : parseInt(m[1], 10);
+          let end = m[2] === '' ? NaN : parseInt(m[2], 10);
+          if (Number.isNaN(start)) { // suffix range: bytes=-N → last N bytes
+            const n = Number.isNaN(end) ? total : end;
+            start = Math.max(0, total - n); end = total - 1;
+          }
+          if (Number.isNaN(end) || end >= total) end = total - 1;
+          if (Number.isFinite(start) && start >= 0 && start <= end && start < total) {
+            res.status(206);
+            res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+            res.setHeader('Content-Length', end - start + 1);
+            return res.end(buf.subarray(start, end + 1));
+          }
+          res.status(416).setHeader('Content-Range', `bytes */${total}`); // unsatisfiable
+          return res.end();
+        }
+        res.setHeader('Content-Length', total);
+        return res.send(buf);
+      };
 
       // ?format=wav — in-process OGG/Opus → WAV transcode for browser playback
       // (WKWebView can't decode Opus; Telegram voice notes are always OGG).
@@ -112,7 +143,7 @@ export function portalAttachmentsRouter({ db, userId }) {
           if (wav) {
             res.setHeader('Content-Type', 'audio/wav');
             if (row.file_name) res.setHeader('Content-Disposition', `inline; filename="${String(row.file_name).replace(/[^\w. -]/g, '_')}.wav"`);
-            return res.send(wav);
+            return sendRange(wav);
           }
         } catch { /* fall through to raw bytes */ }
       }
@@ -125,7 +156,7 @@ export function portalAttachmentsRouter({ db, userId }) {
         const safeName = String(row.file_name).replace(/[^\w. -]/g, '_');
         res.setHeader('Content-Disposition', `${inlineSafe ? 'inline' : 'attachment'}; filename="${safeName}"`);
       }
-      res.send(bytes);
+      return sendRange(bytes);
     } catch (err) {
       console.error('[portal-attachments] serve failed:', err.message); // message only — never content
       res.status(404).json({ error: 'not-found' }); // fail closed, no detail leak
