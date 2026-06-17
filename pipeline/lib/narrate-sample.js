@@ -89,21 +89,48 @@ export async function loadMembers(query, userId, column, value) {
 }
 
 /**
+ * Min/max created_at over a member list → the time-span it covers. Members carry
+ * ISO 8601 `created_at` (plaintext, lexicographically orderable). Returns null for
+ * an empty list. The narration Context Capsule uses this to state "prior essence
+ * covered X–Y" and "new content spans A–B".
+ * @param {Array<{created_at?:string}>} members
+ * @returns {{start:string,end:string,points:number}|null}
+ */
+export function memberRange(members) {
+  let min = null, max = null, n = 0;
+  for (const m of (members || [])) {
+    const c = m && m.created_at; if (!c) continue;
+    const s = String(c);
+    if (min === null || s < min) min = s;
+    if (max === null || s > max) max = s;
+    n += 1;
+  }
+  return min === null ? null : { start: min, end: max, points: n };
+}
+
+/**
  * Build a narration sample from preloaded members.
  * @param {Array} members  output of loadMembers (date-ordered, content present)
  * @param {{ n?:number, maxChars?:number, seenIds?:Set<string>|null }} opts
  *   seenIds → incremental mode: ≈70% UNSEEN + ≈30% already-seen anchors (so the
  *   model refines with new content but keeps continuity). Omit for a plain spread.
  * @returns {{ samples:{id,content,created_at}[], topTags, entities, totalPoints,
- *             sampledIds:string[], unseenRemaining:number }}
+ *             sampledIds:string[], unseenRemaining:number,
+ *             coveredRange:{start,end,points}|null, newRange:{start,end,points}|null }}
+ *   coveredRange = span of already-SEEN members (the prior description's basis);
+ *   newRange = span of UNSEEN members (what this pass folds in). With no seenIds:
+ *   coveredRange=null, newRange = full member span (a first/plain description).
  */
 export function sampleMembers(members, { n = DEFAULT_SAMPLE_N, maxChars = MAX_SAMPLE_CHARS, seenIds = null, totalBudgetChars = TOTAL_BUDGET_CHARS } = {}) {
   let picked;
   let unseenRemaining = 0;
+  let coveredRange = null, newRange = null;
   if (seenIds && seenIds.size) {
     const unseen = members.filter((m) => !seenIds.has(m.id));
     const seen = members.filter((m) => seenIds.has(m.id));
     unseenRemaining = unseen.length;
+    coveredRange = memberRange(seen);
+    newRange = memberRange(unseen);
     if (unseen.length === 0) {
       picked = stratifiedPick(seen, n);                       // fully covered → representative refresh
     } else {
@@ -114,6 +141,7 @@ export function sampleMembers(members, { n = DEFAULT_SAMPLE_N, maxChars = MAX_SA
     }
   } else {
     unseenRemaining = members.length;
+    newRange = memberRange(members);
     picked = stratifiedPick(members, n);
   }
   const { topTags, entities } = aggregateTagsEntities(members);   // aggregate over ALL members, not just the picked sample
@@ -127,6 +155,8 @@ export function sampleMembers(members, { n = DEFAULT_SAMPLE_N, maxChars = MAX_SA
     totalPoints: members.length,
     sampledIds: picked.map((m) => m.id),
     unseenRemaining,
+    coveredRange,
+    newRange,
   };
 }
 

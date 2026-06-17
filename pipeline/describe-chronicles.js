@@ -27,6 +27,7 @@ import { createNarrator } from './lib/narrate-infer.js';
 import {
   loadMembers, sampleMembers, getSeenIds, recordSeen, exploredPercent, lastPassNumber,
 } from './lib/narrate-sample.js';
+import { buildContextCapsule, renderCapsule, describedPeriodFor } from './lib/narrate-context.js';
 
 export const CHRONICLE_VERSION = process.env.MYCELIUM_CHRONICLE_VERSION || 'chronicle-v1';
 
@@ -97,11 +98,14 @@ function normalizeSample(raw) {
   return raw || { samples: [], sampledIds: [], topTags: [], entities: [], totalPoints: 0, unseenRemaining: 0 };
 }
 
-function buildPrompt(t, samples, topTags = [], entities = []) {
+function buildPrompt(t, samples, topTags = [], entities = [], contextBlock = '') {
   const lines = [
     `You are writing the "chronicle" of a region in someone's personal knowledge map.`,
     `This region is currently titled "${t.name || 'a territory'}".`,
   ];
+  // Context Capsule: prior-covered span vs. new content, activity timeline, and what
+  // this region connects to BY NAME — so the chronicle extends with awareness.
+  if (contextBlock) lines.push('', contextBlock, '');
   // PROGRESSIVE: show the existing chronicle so the model refines/extends rather
   // than restarts as coverage deepens.
   if (t.story_arc || t.story_current_chapter || t.story_birth) {
@@ -189,10 +193,16 @@ export async function describeChronicles({ db, userId, infer, version = CHRONICL
   for (const t of targets) {
     const S = normalizeSample(await (sample ? sample(t) : sampleTerritoryContent(db, userId, t.territory_id)));
     if (!S.samples.length) { skipped += 1; continue; }
+    const query = (sql, p = []) => db.rawQuery(sql, p).then((r) => r.results || r || []);
+    // Context Capsule: temporal coverage + activity timeline + connected-by-name,
+    // prepended to the chronicle prompt. Fail-soft → narration proceeds without it.
+    const capMembers = await loadMembers(query, userId, 'territory_id', t.territory_id).catch(() => []);
+    const capSeen = await getSeenIds(query, userId, t.territory_id).catch(() => new Set());
+    const capsule = await buildContextCapsule({ query, db, userId, kind: 'territory', id: t.territory_id, members: capMembers, seenIds: capSeen, stored: t }).catch(() => null);
     let raw;
     try {
       raw = await withTimeout(
-        infer({ task: 'narrate', prompt: buildPrompt(t, S.samples, S.topTags, S.entities), maxTokens: 700 }),
+        infer({ task: 'narrate', prompt: buildPrompt(t, S.samples, S.topTags, S.entities, capsule ? renderCapsule(capsule) : ''), maxTokens: 700 }),
         CHRONICLE_INFER_TIMEOUT_MS, 'chronicle narration',
       );
     } catch {
@@ -208,13 +218,16 @@ export async function describeChronicles({ db, userId, infer, version = CHRONICL
       // ledger, then refresh explored_count/explored_percent ("% described").
       // upsertDescription doesn't own those columns, so write them here.
       if (S.sampledIds.length) {
-        const query = (sql, p = []) => db.rawQuery(sql, p).then((r) => r.results || r || []);
         const pass = (await lastPassNumber(query, userId, t.territory_id)) + 1;
         await recordSeen(query, userId, t.territory_id, S.sampledIds, pass);
-        const seen = (await getSeenIds(query, userId, t.territory_id)).size;
+        const seenSet = await getSeenIds(query, userId, t.territory_id);
+        const seen = seenSet.size;
+        // Persist covered span (now incl. this pass) + activity histogram alongside
+        // the coverage %, so the next chronicle knows what was already folded in.
+        const dp = describedPeriodFor('territory', capMembers, seenSet);
         await query(
-          `UPDATE territory_profiles SET explored_count = ?, explored_percent = ? WHERE user_id = ? AND territory_id = ?`,
-          [seen, exploredPercent(seen, S.totalPoints || seen), userId, t.territory_id],
+          `UPDATE territory_profiles SET explored_count = ?, explored_percent = ?, described_period_start = ?, described_period_end = ?, activity_timeline = ? WHERE user_id = ? AND territory_id = ?`,
+          [seen, exploredPercent(seen, S.totalPoints || seen), dp?.start ?? null, dp?.end ?? null, JSON.stringify(capsule?.activity?.histogram ?? []), userId, t.territory_id],
         ).catch(() => {});
       }
       described += 1;
