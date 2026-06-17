@@ -36,6 +36,24 @@ export const DEFAULT_OPENAI_CHAT_MODEL = 'gpt-4o';
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// In-turn safety (odysseus/openclaw): cap a single tool result before feeding it back
+// to the model, so one huge result can't blow the context window mid-turn. High default
+// (~8k tokens) → never touches a normal result; trims only pathological ones. Cross-turn
+// summary-compaction (src/agent/compaction.js) handles the conversation-level case.
+const TOOL_OUTPUT_MAX = Number(process.env.MYCELIUM_TOOL_OUTPUT_MAX) || 32000;
+const capToolOutput = (s) => {
+  const str = String(s);
+  return str.length > TOOL_OUTPUT_MAX ? `${str.slice(0, TOOL_OUTPUT_MAX)}\n…[tool output truncated: ${str.length} chars]` : str;
+};
+
+// Tool-loop circuit breaker (Step 7b): `maxIterations` is the outer hard cap (odysseus
+// MAX_AGENT_ROUNDS-style); TOOL_REPEAT_LIMIT trips when the model calls the SAME tool with
+// the SAME args this many times — a wedged turn (e.g. searching the same query forever). On
+// a trip we stop the tool loop and force the final no-tools answer pass, so the turn still
+// produces an answer instead of burning the whole budget.
+const MAX_ITERATIONS_DEFAULT = Number(process.env.MYCELIUM_MAX_ITERATIONS) || 8;
+const TOOL_REPEAT_LIMIT = Number(process.env.MYCELIUM_TOOL_REPEAT_LIMIT) || 3;
+
 // Retry the connection on TRANSIENT pre-token failures (network blip, provider
 // 5xx). A 4xx (bad request / tools unsupported) won't change on retry, and a
 // TTFB timeout would just time out again — neither is retried. Retries happen
@@ -352,11 +370,13 @@ export function createAgentHarness({ onEgress, onUsage, fetch = globalThis.fetch
    *   is cut off and any tool action it was emitting did NOT complete; callers must
    *   surface this rather than treat the turn as success.
    */
-  async function streamTurn({ provider, system, userMessage, tools = [], call, send, signal, maxIterations = 8, maxTokens = 4096, numCtx }) {
+  async function streamTurn({ provider, system, userMessage, tools = [], call, send, signal, maxIterations = MAX_ITERATIONS_DEFAULT, maxTokens = 4096, numCtx }) {
     const { adapter, cfg, model, jurisdiction, local } = normalizeProvider(provider);
     const messages = adapter.init({ userMessage });
     let toolDefs = adapter.mapTools(tools);
     const toolsUsed = [];
+    const callRepeats = new Map();   // tool sig → count (circuit breaker, Step 7b)
+    let breaker = null;
 
     const audit = (decision = 'allowed', reason) => {
       try {
@@ -381,6 +401,7 @@ export function createAgentHarness({ onEgress, onUsage, fetch = globalThis.fetch
       throw err;
     });
 
+    toolLoop:
     for (let i = 0; i < maxIterations; i++) {
       if (signal?.aborted) return { toolsUsed, aborted: true };
       audit();
@@ -403,24 +424,32 @@ export function createAgentHarness({ onEgress, onUsage, fetch = globalThis.fetch
       const results = [];
       for (const tc of r.toolCalls) {
         if (signal?.aborted) return { toolsUsed, aborted: true };
+        // Circuit breaker: same tool + same args N× ⇒ a wedged turn. Stop the tool
+        // loop (don't execute the repeat) and fall to the final answer pass.
+        const sig = `${tc.name}:${JSON.stringify(tc.args ?? {})}`;
+        const reps = (callRepeats.get(sig) || 0) + 1; callRepeats.set(sig, reps);
+        if (reps >= TOOL_REPEAT_LIMIT) { breaker = 'repeat'; logger(`harness: circuit-breaker — '${tc.name}' repeated ${reps}× with identical args; final answer pass`); break toolLoop; }
         send({ type: 'tool_start', name: tc.name }); toolsUsed.push(tc.name);
         let out, isErr = false;
         try { out = await call(tc.name, tc.args); }
         catch { out = 'tool execution failed'; isErr = true; }   // never surface err.message (§1)
+        out = capToolOutput(out);                                 // in-turn window safety
         send({ type: isErr ? 'tool_error' : 'tool_complete', name: tc.name });
         results.push(adapter.toolResult(tc, out, isErr));
       }
       adapter.pushToolResults(messages, results);
     }
 
-    // maxIterations exhausted — one final no-tools pass so the user gets an answer,
-    // not a silent stop. Logged (no silent caps).
-    logger(`harness: hit maxIterations=${maxIterations}; final answer pass without tools`);
+    // Loop ended — either maxIterations exhausted or the breaker tripped. One final
+    // no-tools pass so the user gets an answer, not a silent stop. Logged (no silent caps).
+    logger(breaker
+      ? `harness: tool-loop circuit-breaker (${breaker}); final answer pass without tools`
+      : `harness: hit maxIterations=${maxIterations}; final answer pass without tools`);
     audit();
     const fin = await adapter.streamOnce({ cfg, system, messages, toolDefs: null, model, maxTokens, numCtx, send, signal, fetch, timeoutMs, logger });
     if (fin.usage) { send({ type: 'usage', inputTokens: fin.usage.inputTokens, outputTokens: fin.usage.outputTokens }); recordUsage(fin.usage); }
     if (fin.truncated) logger(`harness: final answer pass also hit the output cap (stop_reason=${fin.stopReason})`);
-    return { toolsUsed, capped: true, truncated: !!fin.truncated };
+    return { toolsUsed, capped: true, truncated: !!fin.truncated, ...(breaker ? { breaker } : {}) };
   }
 
   return { streamTurn };

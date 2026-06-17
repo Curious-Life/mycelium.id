@@ -23,6 +23,13 @@ import { createOllamaDaemon } from './hardware/ollama-daemon.js';
 import { portalImportRouter } from './portal-import.js';
 import { portalSettingsRouter } from './portal-settings.js';
 import { portalChatRouter } from './portal-chat.js';
+import { createScheduler } from './agent/scheduler.js';
+import { createChannelTurnRouter } from './agent/channel-turn.js';
+import { createAgentHarness } from './agent/harness.js';
+import { createAgentLoop } from './agent/loop.js';
+import { createEgressAuditSink } from './inference/egress.js';
+import { createUsageSink } from './inference/usage.js';
+import { captureMessage } from './ingest/capture.js';
 import { portalIngestRouter } from './portal-ingest.js';
 import { portalActivityRouter } from './portal-activity.js';
 import { portalUsageRouter } from './portal-usage.js';
@@ -294,6 +301,15 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // channel daemon can run its agent turn (incl. the `reply` egress tool) without
   // a second vault process or OAuth. Strict-loopback gated; never binds publicly.
   v.use(mcpLoopbackRouter({ tools, handlers }));
+  // Native channel-turn endpoint (Phase 5, Step 6c) — the channel-daemon's native
+  // backend POSTs an inbound message here; the turn runs in-process over the same
+  // open-vault tools (incl. `reply`), with conversation history + an untrusted
+  // envelope. Strict-loopback gated inside the router (same boundary as MCP above).
+  {
+    const chHarness = createAgentHarness({ onEgress: createEgressAuditSink(db, userId), onUsage: createUsageSink(db, userId, { source: 'gateway' }), logger: (m) => console.error(`[channel-turn] ${m}`) });
+    const chLoop = createAgentLoop({ harness: chHarness, logger: (m) => console.error(`[channel-turn] ${m}`) });
+    v.use(createChannelTurnRouter({ db, userId, tools, handlers, loop: chLoop, logger: (m) => console.error(`[channel-turn] ${m}`) }));
+  }
   v.use(apiRouter({ tools, handlers, db, userId, enqueueEnrichment }));
   return v;
 }
@@ -461,7 +477,32 @@ export async function startRestServer({
         db.users.getSettings(bootUserId)
           .then((s) => { if (s?.transcribeModel) transcribeSup = ensureTranscribeSupervisor({ model: s.transcribeModel }); })
           .catch(() => { /* optional */ });
+        // Native agent harness (Phase 5, Step 4b): the autonomous wake-cycle runtime.
+        // Fires due scheduled_tasks as headless turns over the SAME streamTurn engine
+        // chat uses, serialized on one lane. Gated with the drainer so verify scripts
+        // (injected keys) never run a turn against a deterministic test vault. The
+        // delivery sink persists 'chat'-targeted output as an assistant message via the
+        // same captureMessage funnel; 'channel:*' proactive sends are deferred to Step 6
+        // (a turn-less send has no active-turn registry entry to target).
+        const schedulerDeliver = async (task, text) => {
+          const target = task.output_target || 'none';
+          if (target === 'none' || target.startsWith('channel:')) return; // channel:* → Step 6
+          const conversationId = target.startsWith('conversation:') ? target.slice('conversation:'.length) : null;
+          await captureMessage(db, { role: 'assistant', content: text, source: 'scheduler', message_type: 'text', conversation_id: conversationId }, enqueueEnrichment);
+        };
+        const harnessScheduler = createScheduler({
+          db, userId: bootUserId, tools, handlers, deliver: schedulerDeliver,
+          logger: (m) => console.error(`[scheduler] ${m}`),
+        });
+        // Boot recovery (§5.4): flip orphaned in-flight runs to aborted, then push any
+        // overdue tasks forward so a downtime gap doesn't fire them all at once.
+        try {
+          await db.harness.reconcileOnBoot();
+          await db.harness.advanceOverdue(new Date().toISOString());
+        } catch (e) { console.warn('[scheduler] boot reconcile skipped:', e?.message || e); }
+        harnessScheduler.start();
         closeHandle = () => {
+          try { harnessScheduler.stop(); } catch { /* */ }
           try { connectorScheduler?.stop(); } catch { /* */ }
           try { drainer.stop(); } catch { /* */ }
           try { claimsHeartbeat.stop(); } catch { /* */ }

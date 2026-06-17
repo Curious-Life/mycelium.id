@@ -26,6 +26,7 @@ import { createCanvasesNamespace } from './canvases.js';
 import { createAuditNamespace } from './audit.js';
 import { createLlmUsageNamespace } from './llm-usage.js';
 import { createActivityFeedNamespace } from './activity-feed.js';
+import { createHarnessNamespace } from './harness.js';
 import { createSpacesNamespace } from './spaces.js';
 import { createSpaceKnowledgeNamespace } from './space-knowledge.js';
 import { createPublicPresenceNamespace } from './public-presence.js';
@@ -84,6 +85,10 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     usage: createLlmUsageNamespace({ d1Query, randomUUID }),
     // Cross-process job/activity feed over background_jobs (content-free, plaintext).
     activityFeed: createActivityFeedNamespace({ d1QueryAdmin, randomUUID }),
+    // Native agent harness state (Phase 5): scheduled_tasks (encrypted prompt) +
+    // harness_runs (content-free run lifecycle/recovery/dedup) + conversation_summaries
+    // (encrypted compaction). @see src/db/harness.js, migrations/0018_harness.sql.
+    harness: createHarnessNamespace({ d1Query, d1QueryAdmin, randomUUID, now }),
     spaces: createSpacesNamespace({ d1Query, firstRow, parseJson }),
     // Shared spaces as default-private folders (Phase A). space_access is the
     // grant primitive (fail-closed: no grant = invisible); rooms + room-documents

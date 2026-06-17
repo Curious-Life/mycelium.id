@@ -238,6 +238,16 @@ const ENCRYPTED_FIELDS = {
     'metadata', 'nlp_error',
   ],
 
+  // Native agent harness (Phase 5; 0019_harness.sql). scheduled_tasks.prompt is the
+  // user-authored instruction the autonomous agent runs → ENCRYPT. conversation_summaries
+  // .summary is an LLM synthesis of conversation plaintext (compaction) → a semantic
+  // fingerprint → ENCRYPT. All other harness columns are structural operational state
+  // (schedule DSL, status, timestamps, token COUNTS, prompt_hash, CODE-only errors) and
+  // stay plaintext so the scheduler/recovery can query them. Both are written via
+  // all-bound-`?` INSERTs (src/db/harness.js) per the VALUES-paren caveat.
+  scheduled_tasks: ['prompt'],
+  conversation_summaries: ['summary'],
+
   // Peer messages — direct messages exchanged with a connected instance. The
   // body is a private communication → ENCRYPT. All other columns (direction,
   // status, read, nonce, ids) are structural state the server queries.

@@ -104,9 +104,18 @@ const TOOLS = [{ name: 'searchMindscape', description: 's', inputSchema: { type:
 
 // ── H4 maxIterations cap ──
 {
-  // Provider always returns a tool_use; harness must cap and do a final pass.
+  // Provider always returns a tool_use (with DISTINCT args each iter so the repeated-call
+  // circuit breaker (Step 7b) doesn't trip first — this isolates the maxIterations cap).
   let calls = 0;
-  const fetch = async () => { calls += 1; return streamRes(calls <= 3 ? aTool : aFinal); };
+  const aToolQ = (q) => sse([
+    { type: 'message_start', message: { usage: { input_tokens: 10 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: 'searchMindscape' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify({ query: q }) } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 5 } },
+    '[DONE]',
+  ]);
+  const fetch = async () => { calls += 1; return streamRes(calls <= 3 ? aToolQ(`q${calls}`) : aFinal); };
   const events = []; let logged = '';
   const h = createAgentHarness({ fetch, logger: (m) => { logged += m; } });
   const r = await h.streamTurn({ provider: { anthropicApiKey: 'K' }, system: 'S', userMessage: 'hi', tools: TOOLS, call: async () => 'R', send: (e) => events.push(e), maxIterations: 3 });
