@@ -71,6 +71,23 @@ export const REGISTRY: Record<string, ViewDef> = {
 		title: 'Claims', icon: 'profile', singleton: true,
 		load: () => import('$lib/views/ClaimsView.svelte'),
 	},
+	vitality: {
+		// De-routed from (app)/vitality/+page.svelte (same stranded-in-a-hidden-div
+		// bug the `media` note above describes). Live backend: /vitality/snapshot +
+		// /trajectory/*. Linked from MilestoneBanner + the Mindscape movement pill.
+		title: 'Vitality', icon: 'compass', singleton: true,
+		load: () => import('$lib/views/VitalityView.svelte'),
+	},
+	body: {
+		// De-routed full page. Live backend: /health/summary.
+		title: 'Body', icon: 'ratio', singleton: true,
+		load: () => import('$lib/views/BodyView.svelte'),
+	},
+	agents: {
+		// De-routed full page. Live backend: /agents + /providers (11 handlers).
+		title: 'Agents', icon: 'people', singleton: true,
+		load: () => import('$lib/views/AgentsView.svelte'),
+	},
 	settings: {
 		title: 'Settings', icon: 'settings', singleton: true,
 		load: () => import('$lib/views/SettingsView.svelte'),
