@@ -9,6 +9,15 @@
 2. **A′ foundation reconciled onto CURRENT main** (it was 53 commits stale on PR #188's branch). Merged `origin/claude/at-rest-cipher` into this branch; only conflict was the `verify` chain line (kept main's superset + inserted `verify:at-rest` after `verify:foundation`). Brought in: driver alias (`better-sqlite3` → `better-sqlite3-multiple-ciphers@^11.10.0`), `keystore.deriveDbKey`, keyed open in `src/adapter/d1.js`, `pipeline/vault-bridge.js` (Python loopback read/write bridge), Python reroute (`d1_client.py`/`local_db.py`), `src/account/db-cipher-migrate.js` (encrypt-vault migration CLI), `scripts/verify-at-rest.mjs`.
 3. **Verified green on current main:** `verify:at-rest` 17/17 GO (incl. bridge A6/A7, migration A5, fail-closed A3); `verify:foundation`, `verify:search`, `verify:search-rehydrate` all GO (the driver swap is non-regressing — it behaves as plain better-sqlite3 with no key).
 
+## Reconciled onto current main (merge `1054569`) — deploy-ready, deploy BLOCKED on coordination
+
+Merged `origin/main` (+23: streams redesign, native-agent-harness, cluster √n fix) into the branch — only conflict was the verify chain (resolved: main's superset + my 4 gates). `db/index.js` auto-merged (`_sqlite` + streams/harness coexist). Re-verified GREEN post-merge (my gates + main's `streams-feed`; `cluster-embed` fails only on missing numpy in the worktree). `git rev-list origin/main...HEAD = 0 19` → clean merge to main.
+
+**Deploy is blocked on an operator coordination decision, NOT code:**
+- The running app is a **full Tauri desktop bundle** (`Mycelium.app` PID 9427: server-rest + caddy + frpc + channel-daemon + transcribe + kokoro) running an **old bundled snapshot**, plus 6 MCP servers — all on the parallel branch **`feat/document-search-phase1`** (indexes documents into the in-RAM bulkSearch, BM25-only; overlaps my `src/search/index.js`; edited today).
+- Deploying mine needs: reconcile/decide on `feat/document-search-phase1` → `cargo tauri build` rebuild → app restart (downtime) → verify the **cipher + sqlite-vec native modules load inside the rebuilt bundle** (design risk #3, unverified; failure = encrypted vault + no app = lockout) → then encrypt.
+- **OPEN Q (operator):** keep+fold `feat/document-search-phase1`'s doc-indexing into my SQLite backend (it slots into `loadFromDb`/SOURCES), or drop it as superseded by the on-disk backend.
+
 ## ⚠️ Guardrail (carry forward)
 
 **Step 5 (encrypting the live 1.7 GB vault via the migration CLI) is hard-to-reverse → requires explicit operator go.** Steps 1–4 are fixture-only, default-OFF, real vault untouched. Never populate a plaintext on-disk FTS5/vec index on the REAL vault — the real index is built encrypted, only at step 5. Test backends on synthetic fixtures (no real secrets at rest).
