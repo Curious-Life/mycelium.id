@@ -406,7 +406,7 @@ export async function startRestServer({
         opts.systemHex = k.systemHex;
       }
       ensureVaultSchema(effectiveDbPath); // self-initialise a fresh vault (idempotent)
-      const { tools, handlers, db, close, userId: bootUserId } = await boot(opts);
+      const { tools, handlers, db, close, userId: bootUserId, searchHelpers } = await boot(opts);
       dbHandle = db;
       // Record the ceremony success now that the vault (and audit_log) is open.
       // Fire-and-forget — audit failure must never block a successful boot.
@@ -429,6 +429,15 @@ export async function startRestServer({
       let connectorScheduler = null;
       let channelSup = null;
       if (!injectedKeys) {
+        // Warm the in-RAM mind-search index in the BACKGROUND, right after unlock,
+        // so the FIRST search doesn't eat the full cold-start build (minutes on a
+        // large vault: per-row content + 768-dim vector decrypt for tens of
+        // thousands of rows on one thread). Fire-and-forget + single-flight: a user
+        // search that arrives mid-warm joins this same build instead of starting a
+        // second one. Gated with the drainer (real-app only) so verify scripts keep
+        // their lazy first-query build. The cooperative yield in loadFromDb keeps the
+        // event loop responsive while this runs.
+        searchHelpers?.warm?.();
         // Own the embed-service (:8091) lifecycle in-process: spawn/adopt, dep
         // self-check, restart-on-crash, and expose health to /processing-status.
         // Without a live embedder the drainer can't embed → Generate has no data.

@@ -60,9 +60,19 @@ export function createSearchHelpers(deps = {}) {
 
   const { backend, kind: backendKind } = chooseBackend({ db, embedder, userId, searchBackend });
   let built = false;
+  // Single-flight build latch. The first build of a large vault is minutes-long
+  // and single-threaded; without this latch, every search that arrives mid-build
+  // sees `built === false` (only set AFTER loadFromDb completes) and kicks off
+  // ANOTHER full-vault loadFromDb on the SAME shared backend/_index — N concurrent
+  // builds thrashing the one JS thread and mutating shared index state. Storing the
+  // in-flight promise makes every concurrent caller await the SAME build.
+  let buildPromise = null;
 
-  async function ensureBuilt() {
-    if (built) return;
+  // The actual corpus load. Never throws (errors are swallowed so a failed build
+  // still flips `built`, matching the prior fall-through behavior — a partial/empty
+  // schema must not wedge every future search retrying forever). Always sets
+  // `built = true` on completion.
+  async function buildCorpus() {
     if (db && typeof db.rawQuery === 'function') {
       try {
         // On-disk backend persists across boots: populate ONCE (the same
@@ -80,6 +90,34 @@ export function createSearchHelpers(deps = {}) {
     }
     built = true;
   }
+
+  async function ensureBuilt() {
+    if (built) return;
+    // Single-flight: the first caller starts the build and stores its promise;
+    // concurrent callers await that same promise instead of starting their own.
+    // `.finally` clears the latch so rebuild() can trigger a fresh build later.
+    if (!buildPromise) buildPromise = buildCorpus().finally(() => { buildPromise = null; });
+    await buildPromise;
+  }
+
+  // Kick the corpus build in the BACKGROUND (fire-and-forget) so the first
+  // user-facing search does not eat the full cold-start latency. Safe to call at
+  // boot (after unlock) and idempotent — it routes through the same single-flight
+  // ensureBuilt(), so a concurrent first search joins this build rather than
+  // starting a second one. Returns the in-flight promise for callers that want to
+  // await it (e.g. tests); rejections are swallowed (build self-heals on next call).
+  function warm() {
+    const p = ensureBuilt();
+    p.catch(() => { /* best-effort: search self-heals on next query/boot */ });
+    return p;
+  }
+
+  // Introspection for warming UIs / health endpoints: has the corpus finished
+  // loading, and is a build currently in flight? (mirrors the mindscape 503+
+  // Retry-After "warming" convention — a caller can surface "indexing…" instead
+  // of blocking or returning a misleading empty result.)
+  const isBuilt = () => built;
+  const isWarming = () => !built && buildPromise !== null;
 
   // Incremental index maintenance (§8). NO-OP unless the on-disk backend is
   // active: the in-RAM backend is rebuilt per boot, so per-write upserts would
@@ -341,6 +379,9 @@ export function createSearchHelpers(deps = {}) {
     search,
     structure,
     rebuild,
+    warm,
+    isBuilt,
+    isWarming,
     indexDocument,
     noteUpsert,
     noteDelete,

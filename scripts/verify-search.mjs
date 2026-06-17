@@ -126,6 +126,56 @@ async function unitPipeline() {
     `hits=${kwHits.map((h) => h.id).join(',')}`);
 }
 
+// ── Layer 1: single-flight build latch ─────────────────────────────────────
+// Regression guard for the concurrent-build bug: ensureBuilt() flips `built`
+// only AFTER loadFromDb completes, so on a large vault (minutes-long, single-
+// threaded build) every search arriving mid-build used to see built===false and
+// kick off ANOTHER full-vault loadFromDb on the SAME shared backend. We prove the
+// fix by counting how many times the build's first source query (FROM messages)
+// runs: with the latch it must be EXACTLY ONE no matter how many concurrent
+// callers race in. A deliberately slow rawQuery guarantees the callers overlap.
+async function singleFlight() {
+  const slowMessagesDb = (counter) => ({
+    rawQuery: async (sql) => {
+      if (/FROM messages WHERE user_id = \? AND forgotten_at IS NULL/.test(sql)) {
+        counter.n++;
+        await new Promise((r) => setTimeout(r, 40)); // simulate the long cold build
+        return { results: [{ id: 'm-1', text: 'forest mycelium roots', created_at: '2026-05-01T10:00:00Z' }] };
+      }
+      return { results: [] }; // other sources + hydration → empty
+    },
+  });
+
+  // 5 searches fired before any build can finish → must coalesce to ONE build.
+  const c1 = { n: 0 };
+  const sh = createSearchHelpers({ db: slowMessagesDb(c1), embedder: createStubEmbedder(48), userId: 'local-user' });
+  const builtBefore = sh.isBuilt();
+  const results = await Promise.all([
+    sh.search('forest', { limit: 3 }),
+    sh.search('mycelium', { limit: 3 }),
+    sh.search('roots', { limit: 3 }),
+    sh.search('forest mycelium', { limit: 3 }),
+    sh.search('roots forest', { limit: 3 }),
+  ]);
+  rec('single-flight: 5 concurrent ensureBuilt() trigger EXACTLY ONE loadFromDb', c1.n === 1,
+    `loadFromDb runs=${c1.n} (must be 1; pre-fix would be 5)`);
+  rec('single-flight: index not built before the first query', builtBefore === false);
+  rec('single-flight: built===true after concurrent queries settle', sh.isBuilt() === true);
+  rec('single-flight: every concurrent search returned hits from the one build',
+    results.every((h) => Array.isArray(h) && h.length > 0));
+
+  // warm() background build + a search that joins it → still ONE build.
+  const c2 = { n: 0 };
+  const sh2 = createSearchHelpers({ db: slowMessagesDb(c2), embedder: createStubEmbedder(48), userId: 'local-user' });
+  const warming = sh2.warm();
+  rec('single-flight: isWarming() true while the background build is in flight', sh2.isWarming() === true);
+  const joined = await sh2.search('forest', { limit: 3 });
+  await warming;
+  rec('single-flight: warm() + a concurrent search share ONE loadFromDb', c2.n === 1, `runs=${c2.n}`);
+  rec('single-flight: isWarming() false once the build settles', sh2.isWarming() === false && sh2.isBuilt() === true);
+  rec('single-flight: the search that joined warm() got hits', Array.isArray(joined) && joined.length > 0);
+}
+
 // ── Layer 1: bulkSearch grouping against a real DB ─────────────────────────
 
 function freshDb() {
@@ -448,6 +498,8 @@ async function main() {
   unitPrimitives();
   console.log('\n— Layer 1: searchHelpers pipeline (stub embedder) —');
   await unitPipeline();
+  console.log('\n— Layer 1: single-flight build latch —');
+  await singleFlight();
   console.log('\n— Layer 1: bulkSearch grouping against real DB —');
   await bulkSearchDb();
   console.log('\n— Layer 1b: service-embedder wiring (mock :8091) —');
