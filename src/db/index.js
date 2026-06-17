@@ -161,9 +161,10 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     _base: base,
   };
 
-  // streams.spectrum joins connector op-state, so it's wired after the literal
-  // (it needs the assembled db.connectors namespace).
-  db.streams = createStreamsNamespace({ d1Query, connectors: db.connectors });
+  // streams.spectrum joins connector op-state + streams.feed reuses messages/
+  // attachments for the message arm, so it's wired after the literal (it needs the
+  // assembled db). Passing `db` is a deliberate back-reference (db.streams holds db).
+  db.streams = createStreamsNamespace({ d1Query, connectors: db.connectors, db });
 
   return { db, adapter, close: adapter.close };
 }
