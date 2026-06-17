@@ -367,3 +367,117 @@ export function startChronicleNarrationJob({ dbPath, userId } = {}) {
   child.on('error', () => { chronicleChildRunning = false; });
   return { pid: child.pid ?? null };
 }
+
+// ── Narration walk (Phase 3): UI-controlled, pausable/resumable agent narration ──
+// The job owns the narration_runs checkpoint + the activity feed + single-flight.
+// The actual traversal is an INJECTED async `runWalk({ scope, skipIds, onProgress,
+// shouldStop })` — production wires src/agent/narration-walk.js with the assembled
+// agent runtime; the gate injects a stub. Pause/cancel never interrupt mid-write:
+// they flip narration_runs.status; the walk's shouldStop() reads it and stops AFTER
+// the current entity, persisting done_ids as the resume checkpoint.
+let narrationRunning = null; // single-flight: the active run_id, or null
+
+const nrQuery = (db, sql, p = []) => db.rawQuery(sql, p).then((r) => (Array.isArray(r) ? r : r.results || []));
+async function nrGet(db, runId) { return (await nrQuery(db, `SELECT * FROM narration_runs WHERE run_id = ?`, [runId]))[0] || null; }
+async function nrStatus(db, runId) { return (await nrGet(db, runId))?.status || null; }
+async function nrUpdate(db, runId, fields) {
+  const keys = Object.keys(fields); if (!keys.length) return;
+  const sets = keys.map((k) => `${k} = ?`).concat("updated_at = datetime('now')");
+  await nrQuery(db, `UPDATE narration_runs SET ${sets.join(', ')} WHERE run_id = ?`, [...keys.map((k) => fields[k]), runId]);
+}
+
+/** Start a narration walk. runWalk is required (route wires the real one; gate stubs).
+ *  Returns { runId, status } immediately; the walk runs async. Single-flight. */
+export async function startNarrationWalkJob({ db, userId, scope = 'all', provider = null, runWalk } = {}) {
+  if (typeof runWalk !== 'function') throw new TypeError('startNarrationWalkJob: runWalk required');
+  if (narrationRunning) { const r = await nrGet(db, narrationRunning); if (r && r.status === 'running') return { runId: r.run_id, status: 'running', already: true }; }
+  const runId = crypto.randomUUID();
+  narrationRunning = runId;
+  await nrQuery(db,
+    `INSERT INTO narration_runs (run_id, user_id, scope, provider, status) VALUES (?, ?, ?, ?, 'running')`,
+    [runId, userId, JSON.stringify(scope), provider || null]);
+  if (db?.activityFeed) db.activityFeed.begin({ userId, kind: 'mycelium_narrate', id: runId, stageLabel: 'Narrating your mind' }).catch(() => {});
+
+  const done = new Set();
+  const onProgress = async (p) => {
+    if (p?.doneKey) done.add(p.doneKey);
+    await nrUpdate(db, runId, {
+      described: p.described ?? 0, reflected: p.reflected ?? 0, skipped: p.skipped ?? 0, total: p.total ?? 0,
+      done_ids: JSON.stringify([...done]),
+      current_kind: p.item?.kind ?? null, current_id: p.item?.id ?? null,
+    }).catch(() => {});
+    if (db?.activityFeed) db.activityFeed.heartbeat(runId, { step: (p.described ?? 0) + (p.reflected ?? 0) + (p.skipped ?? 0), totalSteps: p.total ?? 0 }).catch(() => {});
+  };
+  // Stop cleanly when status is no longer 'running' (paused/canceled by a control route).
+  const shouldStop = async () => (await nrStatus(db, runId)) !== 'running';
+
+  (async () => {
+    try {
+      await runWalk({ runId, scope, skipIds: [], onProgress, shouldStop });
+      const cur = await nrStatus(db, runId);
+      if (cur === 'running') await nrUpdate(db, runId, { status: 'done' });
+    } catch (e) {
+      await nrUpdate(db, runId, { status: 'error', error: String(e?.message || e).slice(0, 500) }).catch(() => {});
+    } finally {
+      narrationRunning = (narrationRunning === runId) ? null : narrationRunning;
+      const st = await nrStatus(db, runId);
+      if (db?.activityFeed) db.activityFeed.finish(runId, { status: st === 'done' ? 'done' : st === 'canceled' ? 'abandoned' : st === 'paused' ? 'abandoned' : 'error' }).catch(() => {});
+    }
+  })();
+
+  return { runId, status: 'running' };
+}
+
+/** Pause: stop after the current entity (the walk's shouldStop sees 'paused'). */
+export async function pauseNarration({ db, runId }) {
+  const r = await nrGet(db, runId); if (!r || r.status !== 'running') return { ok: false, status: r?.status || null };
+  await nrUpdate(db, runId, { status: 'paused' });
+  return { ok: true, status: 'paused' };
+}
+
+/** Resume a paused walk from its done_ids checkpoint (already-done entities skipped). */
+export async function resumeNarration({ db, userId, runId, runWalk }) {
+  if (typeof runWalk !== 'function') throw new TypeError('resumeNarration: runWalk required');
+  const r = await nrGet(db, runId); if (!r || r.status !== 'paused') return { ok: false, status: r?.status || null };
+  if (narrationRunning && narrationRunning !== runId) return { ok: false, status: 'busy' };
+  narrationRunning = runId;
+  await nrUpdate(db, runId, { status: 'running' });
+  const scope = JSON.parse(r.scope || '"all"');
+  const done = new Set(JSON.parse(r.done_ids || '[]'));
+  const onProgress = async (p) => {
+    if (p?.doneKey) done.add(p.doneKey);
+    await nrUpdate(db, runId, {
+      described: p.described ?? r.described, reflected: p.reflected ?? r.reflected, skipped: p.skipped ?? r.skipped, total: p.total ?? r.total,
+      done_ids: JSON.stringify([...done]), current_kind: p.item?.kind ?? null, current_id: p.item?.id ?? null,
+    }).catch(() => {});
+    if (db?.activityFeed) db.activityFeed.heartbeat(runId, {}).catch(() => {});
+  };
+  const shouldStop = async () => (await nrStatus(db, runId)) !== 'running';
+  (async () => {
+    try {
+      await runWalk({ runId, scope, skipIds: [...done], onProgress, shouldStop });
+      if ((await nrStatus(db, runId)) === 'running') await nrUpdate(db, runId, { status: 'done' });
+    } catch (e) {
+      await nrUpdate(db, runId, { status: 'error', error: String(e?.message || e).slice(0, 500) }).catch(() => {});
+    } finally {
+      narrationRunning = (narrationRunning === runId) ? null : narrationRunning;
+    }
+  })();
+  return { ok: true, status: 'running' };
+}
+
+/** Cancel: stop after the current entity; the run ends (checkpoint preserved). */
+export async function cancelNarration({ db, runId }) {
+  const r = await nrGet(db, runId); if (!r || (r.status !== 'running' && r.status !== 'paused')) return { ok: false, status: r?.status || null };
+  await nrUpdate(db, runId, { status: 'canceled' });
+  if (narrationRunning === runId) narrationRunning = null;
+  return { ok: true, status: 'canceled' };
+}
+
+export async function getNarrationStatus({ db, runId, userId }) {
+  if (runId) { const r = await nrGet(db, runId); return r && (!userId || r.user_id === userId) ? r : null; }
+  // latest for the user
+  return (await nrQuery(db, `SELECT * FROM narration_runs WHERE user_id = ? ORDER BY started_at DESC LIMIT 1`, [userId]))[0] || null;
+}
+
+export function _resetNarration() { narrationRunning = null; }

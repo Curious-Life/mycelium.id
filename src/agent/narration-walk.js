@@ -87,22 +87,29 @@ function renderLedger(ledger, item, capsule) {
  */
 export async function runNarrationWalk(deps, opts = {}) {
   const { db, userId, tools = [], handlers = {}, loop, fetchImpl, signal, runTurn = runAgentTurn } = deps;
-  const { runId, scope = 'all', onProgress, log = () => {} } = opts;
+  const { runId, scope = 'all', onProgress, log = () => {}, skipIds = null, shouldStop = null } = opts;
   if (!runId) throw new Error('runNarrationWalk: runId required');
   const query = (sql, p = []) => db.rawQuery(sql, p).then((r) => (Array.isArray(r) ? r : r.results || []));
   const conversationId = `narration-walk:${runId}`;
+  const done = skipIds instanceof Set ? skipIds : new Set(Array.isArray(skipIds) ? skipIds : []);
+  const keyOf = (item) => `${item.kind}:${item.id}`;
 
   const worklist = await buildWorklist(query, userId, scope);
   const ledger = [];
   let described = 0, reflected = 0, skipped = 0;
+  let stopped = false;
 
   for (const item of worklist) {
-    if (signal?.aborted) { log('walk aborted'); break; }
+    if (signal?.aborted) { log('walk aborted'); stopped = true; break; }
+    // Pause/cancel: stop cleanly BEFORE the next entity (never mid-write). The job
+    // flips narration_runs.status; shouldStop() reads it. done_ids is the checkpoint.
+    if (typeof shouldStop === 'function' && await shouldStop()) { log('walk paused/canceled'); stopped = true; break; }
+    if (done.has(keyOf(item))) { continue; } // resume: already completed in a prior segment
     const { capsule } = await capsuleFor(query, db, userId, item);
 
     // Coverage-aware skip: already named AND nothing new to fold → leave it (fold-not-replace).
     const nothingNew = !capsule.temporal.newRange || capsule.temporal.newRange.points === 0;
-    if (capsule.identity.name && nothingNew) { skipped += 1; await onProgress?.({ described, reflected, skipped, total: worklist.length, item, skipped: true }); continue; }
+    if (capsule.identity.name && nothingNew) { skipped += 1; done.add(keyOf(item)); await onProgress?.({ described, reflected, skipped, total: worklist.length, item, doneKey: keyOf(item), skipped: true }); continue; }
 
     const userMessage = `${renderCapsule(capsule)}\n\nConsider this ${item.kind}. If its description should change, call describeEntity with {kind:"${item.kind}", id:${JSON.stringify(item.id)}, name, essence}. If nothing new is worth adding, leave it unchanged and say so briefly.`;
     const systemExtra = `${WALK_SYSTEM}\n\n${renderLedger(ledger, item, capsule)}`;
@@ -124,10 +131,11 @@ export async function runNarrationWalk(deps, opts = {}) {
       [userId, item.id]).catch(() => []);
     ledger.push({ kind: item.kind, id: item.id, name: row?.name || capsule.identity.name || null, through: row?.described_period_end || capsule.temporal.newRange?.end || null, changed: wrote });
     if (wrote) described += 1; else reflected += 1;
-    await onProgress?.({ described, reflected, skipped, total: worklist.length, item, name: row?.name, changed: wrote });
+    done.add(keyOf(item));
+    await onProgress?.({ described, reflected, skipped, total: worklist.length, item, name: row?.name, changed: wrote, doneKey: keyOf(item) });
   }
 
-  return { described, reflected, skipped, total: worklist.length, conversationId, ledger };
+  return { described, reflected, skipped, total: worklist.length, conversationId, ledger, stopped, doneKeys: [...done] };
 }
 
 export default runNarrationWalk;
