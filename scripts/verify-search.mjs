@@ -157,6 +157,7 @@ function seedRows(raw) {
   const d = raw.prepare('INSERT INTO documents (id, user_id, path, title, summary, content, is_internal, sensitive, created_at) VALUES (?,?,?,?,?,?,?,?,?)');
   d.run('d-forest-1', 'local-user', 'notes/forest.md', 'Forest Notes', 'mycelium networks beneath the forest floor', 'a document about the forest and its deep mycelium roots', 0, 0, '2026-05-04 10:00:00');
   d.run('d-internal-1', 'local-user', '_internal/model.md', 'Internal Model', 'internal forest mycelium scaffolding', 'internal-model document about forest mycelium', 1, 0, '2026-05-05 10:00:00');
+  d.run('d-sensitive-1', 'local-user', 'notes/private.md', 'Private Forest Note', 'a sensitive note about forest mycelium roots', 'private reflection on the forest mycelium', 0, 1, '2026-05-06 10:00:00');
 }
 
 async function bulkSearchDb() {
@@ -213,6 +214,17 @@ async function bulkSearchDb() {
     `docVecCached=${vecs.has('document:d-forest-1')}`);
   rec('bulkSearch: messages still embed at load (skipEmbed is doc-scoped, not global)',
     vecs.has('m-forest-1'));
+
+  // Sensitive-doc exclusion: proactive recall (excludeSensitive) must drop a
+  // sensitive=1 doc; an explicit query (no excludeSensitive) must include it.
+  // Mirrors the message sensitive-exclusion (verify-related R3/R5) for documents.
+  const proactiveDocs = await sh.bulkSearch({ query: 'forest mycelium roots', limit: 5, scope: 'documents', excludeSensitive: true });
+  rec('bulkSearch: proactive recall (excludeSensitive) drops sensitive=1 doc',
+    !proactiveDocs.documents.some((dd) => /Private Forest Note/.test(dd)),
+    `leaked=${proactiveDocs.documents.some((dd) => /Private Forest Note/.test(dd))}`);
+  rec('bulkSearch: explicit query (no excludeSensitive) includes sensitive doc',
+    docRes.documents.some((dd) => /Private Forest Note/.test(dd)),
+    `hasSens=${docRes.documents.some((dd) => /Private Forest Note/.test(dd))}`);
 
   // agent filter
   const filtered = await sh.bulkSearch({ query: 'forest mycelium roots', limit: 5, scope: 'messages', agent: 'research-agent' });
