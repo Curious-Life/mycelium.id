@@ -52,5 +52,12 @@ export function createFederationRouter(deps) {
     res.status(r.status).json(r.body);
   });
 
+  // Share announce from a connected peer (Tier-0d): they granted/revoked us access
+  // to one of their spaces/contexts. Signature-gated + accepted-connection only.
+  router.post('/federation/share', async (req, res) => {
+    const r = await h.share({ payload: req.body, headers: hdrs(req), ip: ipOf(req) });
+    res.status(r.status).json(r.body);
+  });
+
   return router;
 }

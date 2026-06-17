@@ -813,5 +813,52 @@ export function createConnectionsNamespace(deps) {
       for (const row of (r.results || [])) { byConnection[row.connection_id] = row.n; total += row.n; }
       return { total, byConnection };
     },
+
+    /**
+     * Resolve a cryptographically VERIFIED peer (their did + did:web host) to one
+     * of MY accepted connections. Prefer the did binding; fall back to the verified
+     * host (one handle per host in V1). Returns the connection id, or null.
+     * Shared by inbound message/share/content handlers — the single authorization
+     * anchor (a valid signature is not access; an accepted connection is).
+     */
+    async findAcceptedByPeer({ fromDid, verifiedHost, toUserId }) {
+      const r = await d1Query(
+        `SELECT id FROM connections
+         WHERE (user_a = ? OR user_b = ?) AND status = 'accepted'
+           AND (remote_did = ? OR remote_instance = ?)
+         ORDER BY accepted_at DESC LIMIT 1`,
+        [toUserId, toUserId, fromDid ?? ' ', verifiedHost ?? ' '],
+      );
+      return r.results?.[0]?.id || null;
+    },
+
+    // ─── Federation sharing (Tier-0d) — announce a grant/revoke to the peer ────
+    /**
+     * Tell a connected peer's instance that I granted (or revoked) them access to
+     * one of my spaces/contexts, via a signed social.mycelium.share.v1 to their
+     * /federation/share. Fire-and-forget: my LOCAL grant is the source of truth;
+     * a failed announce just means the peer doesn't see it yet (re-grant re-syncs).
+     * @param {string} userId @param {string} connectionId
+     * @param {{kind:'space'|'context', ref:string, name?:string, role?:string, action:'grant'|'revoke'}} share
+     */
+    async announceShare(userId, connectionId, { kind, ref, name = null, role = null, action = 'grant' }) {
+      const row = await loadConnection(connectionId, { requireStatus: 'accepted' });
+      if (!row) return;
+      assertMember(row, userId);
+      if (!row.remote_instance || !row.remote_user_handle || !sign || !did) return; // local/unsigned
+      try {
+        const endpoint = await resolveFederationEndpoint(row.remote_instance, row.remote_user_handle);
+        await signedFederationPost(endpoint, 'share', {
+          $type: 'social.mycelium.share.v1',
+          from_did: did(),
+          from_handle: selfHandle() || userId,
+          kind, ref, name, role, action,
+          nonce: randomUUID(),
+          ts: Date.now(),
+        });
+      } catch (e) {
+        console.warn(`[federation] share announce failed (peer re-syncs on re-grant): ${e.message}`);
+      }
+    },
   };
 }

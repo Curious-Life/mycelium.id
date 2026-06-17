@@ -167,5 +167,36 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
         return { status, body: { error: e.message } };
       }
     },
+
+    /**
+     * Inbound SHARE ANNOUNCE from a connected peer (federation Tier-0d). The peer
+     * is telling us they granted (or revoked) us access to one of THEIR spaces/
+     * contexts. Same fail-closed verify gate; must come from an ACCEPTED connection
+     * (matched on the VERIFIED did, never payload claims). We only RECORD the
+     * announcement — the content is fetched on demand later (grant-gated on their
+     * side). The label is the only sensitive field; it is encrypted at rest.
+     */
+    async share({ payload, headers = {}, ip } = {}) {
+      const v = await verify({ payload, headers, ip });
+      if (!v.ok) return { status: v.status, body: v.body };
+      if (payload.$type !== 'social.mycelium.share.v1') return { status: 400, body: { error: 'unexpected $type' } };
+      const kind = payload.kind === 'context' ? 'context' : payload.kind === 'space' ? 'space' : null;
+      if (!kind || !payload.ref) return { status: 400, body: { error: 'invalid share' } };
+      try {
+        const connId = await db.connections.findAcceptedByPeer({ fromDid: v.did, verifiedHost: didWebHost(v.did), toUserId: userId });
+        if (!connId) return { status: 403, body: { error: 'no accepted connection from this peer' } };
+        const ref = String(payload.ref).slice(0, 200);
+        const name = typeof payload.name === 'string' ? payload.name.slice(0, 200) : null;
+        const role = ['member', 'contributor'].includes(payload.role) ? payload.role : null;
+        if (payload.action === 'revoke') {
+          await db.inboundShares.revoke({ connectionId: connId, kind, remoteRef: ref });
+        } else {
+          await db.inboundShares.upsert({ connectionId: connId, peerDid: v.did, kind, remoteRef: ref, name, role, grantedAt: new Date(Number(payload.ts) || Date.now()).toISOString() });
+        }
+        return { status: 202, body: { accepted: true } };
+      } catch (e) {
+        return { status: 400, body: { error: e.message } };
+      }
+    },
   };
 }

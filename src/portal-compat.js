@@ -580,10 +580,14 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       // wired into a space's access list (defense-in-depth; the UI already only
       // offers connections).
       const conns = await db.connections.list(userId);
-      if (!conns.some((c) => c.other_user_id === granteeId)) return fail(res, 400, 'grantee must be an accepted connection');
+      const conn = conns.find((c) => c.other_user_id === granteeId);
+      if (!conn) return fail(res, 400, 'grantee must be an accepted connection');
       await db.spaceAccess.grant(id, granteeId, role, userId);
       // best-effort Megolm-room invite (no-op until Matrix is configured)
       spaceSync?.syncGrant(id, granteeId, userId).catch(() => {});
+      // Announce the grant to the peer's instance → appears in their "Shared with
+      // you" + lights their People badge (federation sharing Phase 2).
+      try { const sp = await db.spaces.get(id); db.connections.announceShare(userId, conn.id, { kind: 'space', ref: id, name: sp?.name || sp?.display_name || null, role, action: 'grant' }).catch(() => {}); } catch {}
       ok(res, { ok: true });
     } catch { fail(res, 500, 'could not share space'); }
   });
@@ -594,6 +598,7 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       const granteeId = decodePath(req.params.granteeId);
       await db.spaceAccess.revoke(id, granteeId);
       spaceSync?.syncRevoke(id, granteeId).catch(() => {});
+      try { const conns = await db.connections.list(userId); const conn = conns.find((c) => c.other_user_id === granteeId); if (conn) db.connections.announceShare(userId, conn.id, { kind: 'space', ref: id, action: 'revoke' }).catch(() => {}); } catch {}
       ok(res, { ok: true });
     } catch { fail(res, 500, 'could not revoke share'); }
   });
@@ -723,14 +728,27 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
   router.post('/contexts/:id/grant/:connId', async (req, res) => {
     const id = decodePath(req.params.id);
     if (!(await guardContext(res, id))) return;
-    try { await db.contexts.grant(id, decodePath(req.params.connId)); ok(res, { ok: true }); }
-    catch { fail(res, 500, 'could not grant'); }
+    const cn = decodePath(req.params.connId);
+    try {
+      await db.contexts.grant(id, cn);
+      // Announce to the peer's instance (federation sharing Phase 2). Only NON-private
+      // contexts are ever exposed cross-instance, mirroring canSeeTerritory.
+      try {
+        const c = (await db._base.d1Query(`SELECT name, is_private FROM sharing_contexts WHERE id = ? AND user_id = ?`, [id, userId])).results?.[0];
+        if (c && !c.is_private) db.connections.announceShare(userId, cn, { kind: 'context', ref: id, name: c.name || null, action: 'grant' }).catch(() => {});
+      } catch {}
+      ok(res, { ok: true });
+    } catch { fail(res, 500, 'could not grant'); }
   });
   router.delete('/contexts/:id/grant/:connId', async (req, res) => {
     const id = decodePath(req.params.id);
     if (!(await guardContext(res, id))) return;
-    try { await db.contexts.revoke(id, decodePath(req.params.connId)); ok(res, { ok: true }); }
-    catch { fail(res, 500, 'could not revoke'); }
+    const cn = decodePath(req.params.connId);
+    try {
+      await db.contexts.revoke(id, cn);
+      db.connections.announceShare(userId, cn, { kind: 'context', ref: id, action: 'revoke' }).catch(() => {});
+      ok(res, { ok: true });
+    } catch { fail(res, 500, 'could not revoke'); }
   });
 
   // ── Context Areas (#19): documents + AI summary lens on a sharing_context ──
