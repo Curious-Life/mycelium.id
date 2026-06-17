@@ -197,6 +197,7 @@
 	let trans = $state<{ health: any; model: string | null; catalog: WhisperCat[] } | null>(null);
 	let transErr = $state<string | null>(null);
 	let transBusy = $state(false);
+	let transStarting = $state<string | null>(null); // model whose download we just kicked off (instant feedback)
 	let transPoll: ReturnType<typeof setInterval> | null = null;
 
 	async function loadTranscription() {
@@ -212,14 +213,19 @@
 		if (!busy && transPoll) { clearInterval(transPoll); transPoll = null; }
 	}
 	async function downloadWhisper(m: string) {
-		transBusy = true; transErr = null;
+		if (transBusy) return; // ignore repeat clicks while one is in flight
+		transBusy = true; transErr = null; transStarting = m;
+		// Optimistic feedback + start polling IMMEDIATELY — the POST can take up to
+		// ~20s (it waits for the service to come up), so don't leave the user staring
+		// at an unchanged screen wondering if the click registered.
+		if (!transPoll) transPoll = setInterval(loadTranscription, 2000);
 		try {
 			const r = await api('/portal/transcription/download', { method: 'POST', body: JSON.stringify({ model: m }) });
 			const j = await r.json().catch(() => null);
 			if (!r.ok || !j?.ok) throw new Error(j?.error || 'download failed');
 			await loadTranscription();
 		} catch (e: any) { transErr = e?.message || 'download failed'; }
-		finally { transBusy = false; }
+		finally { transBusy = false; transStarting = null; }
 	}
 
 	onMount(() => {
@@ -501,7 +507,9 @@
 			{#if !trans}
 				<div class="muted">Transcription status unavailable.</div>
 			{:else}
-				{#if trans.health?.status === 'ok' && trans.model}
+				{#if transStarting && trans.health?.status !== 'downloading'}
+						<div class="muted pulse">Starting {transStarting} download…</div>
+					{:else if trans.health?.status === 'ok' && trans.model}
 					<div class="trans-status">✓ Voice notes are transcribed on-device by <span class="mono">{trans.model}</span>.</div>
 				{:else if trans.health?.status === 'downloading'}
 					<div class="trans-progress">
@@ -530,7 +538,7 @@
 									<span class="trans-inuse">✓ in use</span>
 								{:else}
 									<button class="ghost-btn" disabled={transBusy} onclick={() => downloadWhisper(c.model)}>
-										{trans.health?.status === 'ok' ? 'Switch to this model' : 'Download & use'}
+										{transStarting === c.model ? 'Starting…' : trans.health?.status === 'ok' ? 'Switch to this model' : 'Download & use'}
 									</button>
 								{/if}
 							</div>
