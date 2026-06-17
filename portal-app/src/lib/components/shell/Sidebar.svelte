@@ -194,6 +194,10 @@
 						<circle cx="12" cy="12" r="9" />
 						<path stroke-linecap="round" stroke-linejoin="round" d="M14.8 9.2l-1.7 3.9-3.9 1.7 1.7-3.9z" />
 					</svg>
+				{:else if item.icon === 'body'}
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+						<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.29 1.51 4.04 3 5.5l7 7Z"/>
+					</svg>
 				{:else if item.icon === 'agents'}
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 						<rect x="4" y="8" width="16" height="11" rx="2"/>
