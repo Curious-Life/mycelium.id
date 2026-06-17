@@ -31,14 +31,35 @@
 	let agentMap = $state<Map<string, AgentInfo>>(new Map());
 	let owner = $state<OwnerIdentity>({ ownerName: null, ownerTelegramId: null, ownerDiscordId: null });
 
+	// Search (Phase 2.1): a keyword filter pushed to the server (?q). Single bounded
+	// pass — no "load older" while searching; `truncated` flags more than the cap.
+	let query = $state('');
+	let truncated = $state(false);
+	let searchTimer: ReturnType<typeof setTimeout> | null = null;
+	const searching = $derived(query.trim().length > 0);
+
 	onMount(async () => {
 		await Promise.all([loadFeed(), loadAgents(), loadIdentity()]);
 		loading = false;
 	});
 
+	function onSearchInput(v: string) {
+		query = v;
+		if (searchTimer) clearTimeout(searchTimer);
+		searchTimer = setTimeout(async () => { loading = true; await loadFeed(); loading = false; }, 250);
+	}
+	function clearSearch() {
+		query = '';
+		if (searchTimer) clearTimeout(searchTimer);
+		loading = true;
+		loadFeed().then(() => (loading = false));
+	}
+
 	async function loadFeed(before?: string) {
 		const params = new URLSearchParams({ limit: '40' });
 		if (before) params.set('before', before);
+		const q = query.trim();
+		if (q) params.set('q', q);
 		try {
 			const res = await api(`/portal/streams?${params}`);
 			if (!res.ok) return;
@@ -46,6 +67,7 @@
 			const batch: StreamItem[] = data.items || [];
 			items = before ? [...items, ...batch] : batch;
 			nextCursor = data.nextCursor ?? null;
+			truncated = Boolean(data.truncated);
 		} catch { /* non-fatal */ }
 	}
 	async function loadAgents() {
@@ -106,13 +128,29 @@
 {/if}
 
 <div class="flex flex-col h-full">
-	{#if filtered.length > 0}
-		<div class="border-b border-[var(--color-border)] px-4 sm:px-6 py-2.5 flex-shrink-0">
-			<span class="text-xs text-[var(--color-text-tertiary)]">
-				{filtered.length} {filtered.length === 1 ? 'item' : 'items'}{#if externalSource}{' '}in {externalSource}{/if}
-			</span>
+	<div class="border-b border-[var(--color-border)] px-4 sm:px-6 py-2.5 flex-shrink-0 flex items-center gap-3">
+		<div class="flex items-center gap-2 flex-1 min-w-0 max-w-md bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg px-3 py-1.5 focus-within:border-[var(--color-text-tertiary)] transition-colors">
+			<svg class="w-3.5 h-3.5 flex-shrink-0 text-[var(--color-text-tertiary)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+			<input
+				type="search"
+				value={query}
+				oninput={(e) => onSearchInput((e.target as HTMLInputElement).value)}
+				placeholder="Search your streams…"
+				aria-label="Search streams"
+				class="flex-1 min-w-0 bg-transparent border-0 outline-none text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)]"
+			/>
+			{#if searching}
+				<button class="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] flex-shrink-0" aria-label="Clear search" onclick={clearSearch}>✕</button>
+			{/if}
 		</div>
-	{/if}
+		<span class="text-xs text-[var(--color-text-tertiary)] flex-shrink-0">
+			{#if searching}
+				{filtered.length}{truncated ? '+' : ''} {filtered.length === 1 ? 'result' : 'results'} · recent
+			{:else}
+				{filtered.length} {filtered.length === 1 ? 'item' : 'items'}{#if externalSource}{' '}in {externalSource}{/if}
+			{/if}
+		</span>
+	</div>
 
 	<div class="flex-1 overflow-y-auto px-4 sm:px-6 py-4">
 		{#if loading}
@@ -122,8 +160,8 @@
 		{:else if filtered.length === 0}
 			<div class="flex items-center justify-center min-h-[200px]">
 				<div class="text-center">
-					<p class="text-[var(--color-text-tertiary)] text-sm">{externalSource ? `Nothing from ${externalSource} in view` : 'Nothing flowing in yet'}</p>
-					<p class="text-[var(--color-text-tertiary)] text-xs mt-1">Everything entering your vault appears here</p>
+					<p class="text-[var(--color-text-tertiary)] text-sm">{searching ? `No recent matches for “${query.trim()}”` : externalSource ? `Nothing from ${externalSource} in view` : 'Nothing flowing in yet'}</p>
+					<p class="text-[var(--color-text-tertiary)] text-xs mt-1">{searching ? 'Search covers your recent streams' : 'Everything entering your vault appears here'}</p>
 				</div>
 			</div>
 		{:else}
