@@ -7,6 +7,13 @@
 	import { workspace } from '$lib/workspace/store';
 	import TabStrip from '$lib/components/workspace/TabStrip.svelte';
 	import type { WsNode, LeafPane } from '$lib/workspace/types';
+	import { activity, startActivityPolling, fmtEta } from '$lib/stores/activity';
+
+	// One consolidated activity indicator (next to chat) — ALWAYS present. A calm
+	// dim dot when idle; accent + count + a clickable job list when work is running.
+	let activityOpen = $state(false);
+	const active = $derived($activity.active);
+	onMount(() => startActivityPolling());
 
 	const currentView = $derived($navigationState.primaryView);
 
@@ -111,6 +118,48 @@
 
 	<!-- Right side actions -->
 	<div class="flex items-center gap-1 sm:gap-2 flex-shrink-0">
+		<!-- Activity indicator — ALWAYS visible next to chat. Idle = a calm dim dot
+		     ("Idle"); active = an accent dot + count, clickable for the live job list
+		     (stage · done/total · ETA). The single source of truth for pipeline /
+		     inference / background-job status. -->
+		<div class="relative">
+			<button
+				onclick={() => { if (active.length) activityOpen = !activityOpen; }}
+				class="h-7 px-2 rounded-full border flex items-center gap-1.5 transition-all duration-150 {active.length
+					? 'border-[var(--color-border)] bg-[var(--color-elevated)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent)] cursor-pointer'
+					: 'border-[var(--color-border)]/60 bg-transparent text-[var(--color-text-tertiary)] cursor-default'}"
+				title={active.length ? 'Background activity' : 'Idle'}
+				aria-label={active.length ? `Background activity (${active.length})` : 'System idle'}
+				aria-expanded={activityOpen}
+			>
+				{#if active.length}
+					<span class="relative inline-flex h-2 w-2">
+						<span class="animate-pulse absolute inline-flex h-full w-full rounded-full bg-[var(--color-accent)] opacity-50"></span>
+						<span class="relative inline-flex rounded-full h-2 w-2 bg-[var(--color-accent)]"></span>
+					</span>
+					<span class="text-[11px] font-medium">{active.length}</span>
+				{:else}
+					<span class="inline-flex rounded-full h-2 w-2 bg-[var(--color-text-tertiary)]/70"></span>
+				{/if}
+			</button>
+			{#if activityOpen && active.length}
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<!-- svelte-ignore a11y_click_events_have_key_events -->
+				<div class="fixed inset-0 z-[59]" onclick={() => (activityOpen = false)}></div>
+				<div class="fixed top-[2.75rem] right-2 sm:right-3 z-[60] min-w-[240px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 shadow-lg" style="backdrop-filter: blur(12px) saturate(140%); -webkit-backdrop-filter: blur(12px) saturate(140%);">
+					<div class="px-2.5 py-1 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Active</div>
+					{#each active as j (j.id)}
+						<div class="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
+							<span class="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] flex-shrink-0"></span>
+							<span class="text-[var(--color-text-primary)] truncate">{j.stage}</span>
+							{#if j.total > 0}<span class="text-[var(--color-text-tertiary)] flex-shrink-0">{j.done}/{j.total}</span>{/if}
+							{#if fmtEta(j.etaSeconds)}<span class="ml-auto text-[var(--color-accent)] flex-shrink-0">{fmtEta(j.etaSeconds)} left</span>{/if}
+						</div>
+					{/each}
+				</div>
+			{/if}
+		</div>
+
 		<!-- Chat agent toggle (Cmd/Ctrl+J) — opens the floating tool-using agent. -->
 		<button
 			onclick={() => navigationState.toggleChat()}
