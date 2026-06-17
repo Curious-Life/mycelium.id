@@ -66,6 +66,9 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let success = $state<string | null>(null);
+	// Surfaces a failed connections fetch (was silently swallowed → looked like an
+	// empty/onboarding state even when the user has connections).
+	let loadError = $state<string | null>(null);
 	let query = $state('');
 
 	// Connect composer
@@ -175,8 +178,12 @@
 	});
 
 	async function loadConnections() {
-		try { connections = (await apiGet<{ connections: Connection[] }>('/portal/connections')).connections; }
-		catch {} finally { loading = false; }
+		try {
+			connections = (await apiGet<{ connections: Connection[] }>('/portal/connections')).connections;
+			loadError = null;
+		}
+		catch (e: any) { loadError = `GET /portal/connections — ${e?.status ?? ''} ${e?.message || String(e)}`.trim(); }
+		finally { loading = false; }
 	}
 	async function loadPending() {
 		try { pending = (await apiGet<{ requests: PendingRequest[] }>('/portal/connections/pending')).requests; } catch {}
@@ -331,6 +338,13 @@
 	{:else if isEmpty}
 		<!-- Empty / onboarding -->
 		<div class="onboard">
+			{#if loadError}
+				<div class="load-error glass" role="alert">
+					<strong>Couldn't load your connections.</strong>
+					<code>{loadError}</code>
+					<button class="btn btn-sm" onclick={() => navigator.clipboard?.writeText(loadError ?? '')}>Copy error</button>
+				</div>
+			{/if}
 			<div class="onboard-card glass">
 				<div class="orbit" aria-hidden="true"><span class="orbit-dot"></span></div>
 				<h2>Where your mind meets others'</h2>
@@ -627,7 +641,10 @@
 	.avatar { width: 38px; height: 38px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 600; letter-spacing: 0.02em; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08); }
 
 	/* ── Empty / onboarding ── */
-	.onboard { flex: 1; display: flex; align-items: center; justify-content: center; padding: 2rem; }
+	.onboard { flex: 1; display: flex; flex-direction: column; gap: 1rem; align-items: center; justify-content: center; padding: 2rem; }
+	.load-error { max-width: 540px; width: 100%; padding: 1rem 1.25rem; border: 1px solid var(--color-status-error, #c0392b); border-radius: 12px; display: flex; flex-direction: column; gap: 0.5rem; text-align: left; }
+	.load-error code { font-size: 0.8rem; color: var(--color-text-secondary); word-break: break-word; }
+	.load-error button { align-self: flex-start; }
 	.onboard-card { max-width: 540px; padding: 2.25rem 2.25rem 1.75rem; text-align: center; }
 	.orbit { width: 64px; height: 64px; margin: 0 auto 1.25rem; border-radius: 50%; border: 1px solid var(--glass-border); position: relative; background: radial-gradient(circle at 50% 50%, rgba(var(--color-accent-aurum-rgb),0.18), transparent 70%); }
 	.orbit-dot { position: absolute; top: -3px; left: 50%; width: 7px; height: 7px; border-radius: 50%; background: var(--color-accent-aurum); transform-origin: 50% 35px; animation: spin 6s linear infinite; }
