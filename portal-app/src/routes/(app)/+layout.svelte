@@ -33,6 +33,16 @@
 
 	const chatOpen = $derived($navigationState.chatOpen);
 
+	// Native shell bridge: tell the iOS app when the in-app chat is open so it can
+	// hide its floating Record button (which otherwise overlaps chat's controls).
+	// Guarded — a plain no-op in a normal browser (no webkit message handler).
+	$effect(() => {
+		if (!browser) return;
+		try {
+			(window as any).webkit?.messageHandlers?.mycChat?.postMessage(chatOpen ? 1 : 0);
+		} catch { /* not running inside the native shell */ }
+	});
+
 	// Mobile detection
 	let isMobile = $state(false);
 	$effect(() => {
