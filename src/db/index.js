@@ -26,6 +26,7 @@ import { createCanvasesNamespace } from './canvases.js';
 import { createAuditNamespace } from './audit.js';
 import { createLlmUsageNamespace } from './llm-usage.js';
 import { createActivityFeedNamespace } from './activity-feed.js';
+import { createHarnessNamespace } from './harness.js';
 import { createSpacesNamespace } from './spaces.js';
 import { createSpaceKnowledgeNamespace } from './space-knowledge.js';
 import { createPublicPresenceNamespace } from './public-presence.js';
@@ -47,6 +48,7 @@ import { createSpaceRoomDocumentsNamespace } from './space-room-documents.js';
 import { createSpaceConversationsNamespace } from './space-conversations.js';
 import { createContextsNamespace } from './contexts.js';
 import { createInboundSharesNamespace } from './inbound-shares.js';
+import { createStreamsNamespace } from './streams.js';
 import { createSpaceMatrixRoomsNamespace } from './space-matrix-rooms.js';
 
 /**
@@ -83,6 +85,10 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     usage: createLlmUsageNamespace({ d1Query, randomUUID }),
     // Cross-process job/activity feed over background_jobs (content-free, plaintext).
     activityFeed: createActivityFeedNamespace({ d1QueryAdmin, randomUUID }),
+    // Native agent harness state (Phase 5): scheduled_tasks (encrypted prompt) +
+    // harness_runs (content-free run lifecycle/recovery/dedup) + conversation_summaries
+    // (encrypted compaction). @see src/db/harness.js, migrations/0018_harness.sql.
+    harness: createHarnessNamespace({ d1Query, d1QueryAdmin, randomUUID, now }),
     spaces: createSpacesNamespace({ d1Query, firstRow, parseJson }),
     // Shared spaces as default-private folders (Phase A). space_access is the
     // grant primitive (fail-closed: no grant = invisible); rooms + room-documents
@@ -119,6 +125,12 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // rest (ENCRYPTED_FIELDS.connectors); list() returns metadata only. OAuth
     // tokens stay in the `secrets` table (src/connectors/store.js).
     connectors: createConnectorsNamespace({ d1Query }),
+
+    // Unified Streams surface. spectrum() is PLAINTEXT-ONLY aggregates across
+    // messages/documents/health_daily/tasks + connector status (§7 fail-safe);
+    // feed() (Phase 2) does the per-table decrypting union. Reads db.connectors
+    // for the status join. @see src/db/streams.js, src/streams/source-registry.js.
+    streams: null, // set below (needs the assembled `connectors` namespace)
 
     // Mindscape reads (clustering points + territory/realm/theme profiles) and
     // territory-docs (narrative read/write). Wired for the portal mindscape
@@ -159,6 +171,11 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // Underscore-prefixed = not a public namespace; only the search wiring reads it.
     _sqlite: adapter.db,
   };
+
+  // streams.spectrum joins connector op-state + streams.feed reuses messages/
+  // attachments for the message arm, so it's wired after the literal (it needs the
+  // assembled db). Passing `db` is a deliberate back-reference (db.streams holds db).
+  db.streams = createStreamsNamespace({ d1Query, connectors: db.connectors, db });
 
   return { db, adapter, close: adapter.close };
 }

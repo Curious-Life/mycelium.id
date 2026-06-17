@@ -30,6 +30,7 @@ import { createContextDomain } from './tools/context.js';
 import { createIngestDomain } from './tools/ingest.js';
 import { createCurateDomain } from './tools/curate.js';
 import { createReplyDomain } from './tools/reply.js';
+import { createScheduleTasksDomain } from './tools/schedule-tasks.js';
 import { createFederationDomain } from './tools/federation.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { getMasterKey } from './crypto/crypto-local.js';
@@ -125,6 +126,12 @@ export function buildDomains({
     // (signing outbound, verifying inbound) lives in db.connections + the
     // federation router; this is the user-facing verb surface.
     createFederationDomain({ db, userId }),
+    // Phase 5 (Step 5): gated autonomy scheduling. schedule_task / list_my_schedules /
+    // cancel_task are REGISTERED here (handlers exist) but their names are kept OUT of
+    // the chat DOMAINS catalog (tool-domains.js) — so interactive chat can never grant
+    // them. They reach an autonomous turn only via autonomyTools() (agent/autonomy-tools.js)
+    // when a task opts in. Needs db.harness (present on the keyed db).
+    ...(db.harness ? [createScheduleTasksDomain({ db, userId })] : []),
   ];
 
   // reply (agent-explicit egress): wired ONLY when AGENT_URL is set — i.e. when

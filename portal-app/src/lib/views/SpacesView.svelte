@@ -19,6 +19,8 @@
 	let spaces = $state<Space[]>([]);
 	let loading = $state(true);
 	let showCreate = $state(false);
+	// Surfaces a failed spaces fetch (was silently swallowed → looked like "no spaces").
+	let loadError = $state<string | null>(null);
 
 	// Create form
 	let newName = $state('');
@@ -32,8 +34,13 @@
 			if (res.ok) {
 				const data = await res.json();
 				spaces = data.spaces || [];
+				loadError = null;
+			} else {
+				loadError = `GET /portal/spaces — HTTP ${res.status}`;
 			}
-		} catch {} finally {
+		} catch (e: any) {
+			loadError = `GET /portal/spaces — ${e?.message || String(e)}`;
+		} finally {
 			loading = false;
 		}
 	}
@@ -96,6 +103,13 @@
 	{#if loading}
 		<div class="flex items-center justify-center py-24">
 			<div class="w-8 h-8 border-2 border-[var(--color-border)] border-t-[var(--color-accent)] rounded-full animate-spin"></div>
+		</div>
+	{:else if loadError}
+		<!-- Load failed — surface it instead of looking like "no spaces" -->
+		<div class="flex flex-col items-center justify-center py-24 text-center gap-3 px-6" role="alert">
+			<p class="text-base font-medium text-[var(--color-status-error,#c0392b)]">Couldn't load your spaces.</p>
+			<code class="text-xs text-[var(--color-text-secondary)] break-all max-w-md">{loadError}</code>
+			<button class="text-sm text-[var(--color-accent)]" onclick={() => navigator.clipboard?.writeText(loadError ?? '')}>Copy error</button>
 		</div>
 	{:else if spaces.length === 0 && !showCreate}
 		<!-- Empty state -->

@@ -72,8 +72,14 @@ if not os.environ.get('MYCELIUM_DB'):
 NOMIC_MODEL = "nomic-ai/nomic-embed-text-v1.5"
 NOMIC_DIM = 256         # Matryoshka truncation (768 → 256)
 NOMIC_TASK_PREFIX = "clustering: "  # Nomic task-specific prefix
-NOMIC_MAX_CHARS = 2000  # Max input chars per text (keeps token count manageable)
-NOMIC_BATCH_SIZE = int(os.environ.get('NOMIC_BATCH_SIZE', '8'))   # Texts per ONNX inference batch
+# Full-text embedding (mirrors embed-service.py): tokenize the WHOLE text (capped
+# at NOMIC_MAX_TOTAL_TOKENS), slice into <=NOMIC_WINDOW-token windows, and
+# token-count-weighted-pool them — so a long imported transcript/document clusters
+# on its full content, not just its first 2000 chars (the old single-window cap).
+NOMIC_MAX_CHARS = 40000       # bound payload before tokenization (~8k tokens) — was 2000
+NOMIC_WINDOW = 512            # per-window token cap (model context window)
+NOMIC_MAX_TOTAL_TOKENS = 8192 # Nomic v1.5's real cap — chunk up to this, then stop
+NOMIC_BATCH_SIZE = int(os.environ.get('NOMIC_BATCH_SIZE', '8'))   # WINDOWS per ONNX inference batch
 
 # Cache paths
 CACHE_DIR = Path(__file__).resolve().parent / "cache"
@@ -93,6 +99,7 @@ TARGET_TERRITORIES = 300
 TARGET_THEMES = 35
 TARGET_REALMS_MIN = 2
 TARGET_REALMS_MAX = 10
+TARGET_REALMS = 12  # √n-scaled in scale_targets() — realm-k fix 2026-06-17
 
 def scale_targets(n_points):
     """Scale clustering targets to dataset size (sqrt schedule).
@@ -104,13 +111,19 @@ def scale_targets(n_points):
     N=600 → 34/9 (≈ the old floors), N=45k → 297/50 (≈ the old targets).
     See docs/CLUSTERING-REBALANCE-DESIGN-2026-06-10.md.
     """
-    global TARGET_ATOMS, TARGET_TERRITORIES, TARGET_THEMES
+    global TARGET_ATOMS, TARGET_TERRITORIES, TARGET_THEMES, TARGET_REALMS
     TARGET_ATOMS = max(300, min(2000, n_points // 15))
     TARGET_TERRITORIES = int(max(2, min(300, round(1.4 * (n_points ** 0.5)))))
     TARGET_THEMES = int(max(2, min(50, round(0.35 * (n_points ** 0.5)))))
+    # Realms are now √n-targeted like themes/territories (realm-k fix 2026-06-17).
+    # Was: silhouette-selected k∈[2,10], which collapses to k=2 on anisotropic
+    # embeddings (mean random-pair cosine ~0.58) — one realm held 78% of points.
+    # The 0.05 coefficient gives ~13 realms at the live ~72k points (matching the
+    # recovered active count); lab balance max-share 0.17 vs the collapse's 0.78.
+    TARGET_REALMS = int(max(3, min(20, round(0.05 * (n_points ** 0.5)))))
     if n_points < 600:
         print(f"  NOTE: {n_points} points is small for the 4-level hierarchy — targets auto-shrunk")
-    print(f"  Scaled targets for {n_points} points: atoms={TARGET_ATOMS}, territories={TARGET_TERRITORIES}, themes={TARGET_THEMES}")
+    print(f"  Scaled targets for {n_points} points: atoms={TARGET_ATOMS}, territories={TARGET_TERRITORIES}, themes={TARGET_THEMES}, realms={TARGET_REALMS}")
 NOISE_MEMBERSHIP_THRESHOLD = 0.3
 NOISE_KNN_SIGMA = 2.0
 NOISE_MAX_SHARE = 0.15  # hard cap on the liminal share (percentile-bounding, research brief §1)
@@ -306,6 +319,43 @@ def _fetch_content_for_points(point_ids: list[str], batch_size: int = 50) -> dic
     return content_map
 
 
+def _split_windows(enc_ids_list, window):
+    """Split each text's token-id list into <=`window`-token windows.
+
+    Returns (windows, owner, weights): the flat list of window id-lists, the
+    text index each window belongs to, and each window's real token count (its
+    pooling weight). A text with <=window tokens yields exactly ONE window, so
+    its downstream vector is identical to the pre-chunking single-pool output.
+    """
+    windows, owner, weights = [], [], []
+    for ti, ids in enumerate(enc_ids_list):
+        ids = ids if ids else [0]   # never produce zero windows
+        for j in range(0, len(ids), window):
+            w = ids[j:j + window]
+            windows.append(w)
+            owner.append(ti)
+            weights.append(len(w))
+    return windows, owner, weights
+
+
+def _weighted_pool_windows(pooled_per_window, owner, weights, n_texts, dim):
+    """Token-count-weighted mean of each text's window vectors → (n_texts, dim).
+
+    One window → that window's vector unchanged. Mirrors embed-service.py's
+    per-text pooling so a long text's WHOLE content shapes its vector, not just
+    its first window. (L2-normalization is applied by the caller afterward.)
+    """
+    out = np.zeros((n_texts, dim), dtype=np.float32)
+    w_arr = np.asarray(weights, dtype=np.float32)
+    owner_arr = np.asarray(owner)
+    for ti in range(n_texts):
+        sel = owner_arr == ti
+        wsum = float(w_arr[sel].sum())
+        if wsum > 0:
+            out[ti] = (pooled_per_window[sel] * w_arr[sel, None]).sum(axis=0) / wsum
+    return out
+
+
 def _embed_batch(point_ids: list[str], batch_size: int = 50) -> tuple[list[str], np.ndarray]:
     """
     Fetch content and embed in streaming chunks to minimize peak memory.
@@ -345,8 +395,11 @@ def _embed_batch(point_ids: list[str], batch_size: int = 50) -> tuple[list[str],
     # Download tokenizer.json directly and load via the Rust tokenizers lib.
     tokenizer_path = hf_hub_download(NOMIC_MODEL, "tokenizer.json")
     tokenizer = Tokenizer.from_file(tokenizer_path)
-    tokenizer.enable_truncation(max_length=512)
-    tokenizer.enable_padding()  # pad to longest-in-batch (dynamic)
+    # Tokenize the FULL text (capped at the model's real total); chunking below
+    # owns windowing. NO tokenizer padding — we right-pad each window batch
+    # manually so enc.ids carries each text's REAL token count (the pool weight).
+    tokenizer.enable_truncation(max_length=NOMIC_MAX_TOTAL_TOKENS)
+    tokenizer.no_padding()
 
     all_embs = []
     all_ids = []
@@ -376,36 +429,42 @@ def _embed_batch(point_ids: list[str], batch_size: int = 50) -> tuple[list[str],
             print(f"    Chunk {chunk_num}/{n_chunks}: 0 embeddable texts (skipped)")
             continue
 
-        # Tokenize + run ONNX in sub-batches
-        chunk_embs_list = []
-        for bi in range(0, len(texts), NOMIC_BATCH_SIZE):
-            batch_texts = texts[bi:bi + NOMIC_BATCH_SIZE]
-            encodings = tokenizer.encode_batch(batch_texts)
-            input_ids = np.array([e.ids for e in encodings], dtype=np.int64)
-            attention_mask = np.array([e.attention_mask for e in encodings], dtype=np.int64)
-            token_type_ids = np.array([e.type_ids for e in encodings], dtype=np.int64)
+        # Tokenize each text in FULL and slice into <=NOMIC_WINDOW-token windows so
+        # the WHOLE text is embedded, not just its first 512 tokens. A short text
+        # yields exactly ONE window → its pooled 256D vector is identical to the
+        # pre-chunking output, so existing clustering_points vectors stay stable.
+        encs = tokenizer.encode_batch(texts)
+        windows, owner, weights = _split_windows([e.ids for e in encs], NOMIC_WINDOW)
+        del encs
+        gc.collect()
 
+        # Inference over WINDOWS, batched + right-padded to the batch's longest
+        # window (padding is masked out of the pool). 768→256D matryoshka slice.
+        pooled_per_window = np.zeros((len(windows), NOMIC_DIM), dtype=np.float32)
+        for bi in range(0, len(windows), NOMIC_BATCH_SIZE):
+            batch = windows[bi:bi + NOMIC_BATCH_SIZE]
+            maxlen = max(len(w) for w in batch)
+            input_ids = np.zeros((len(batch), maxlen), dtype=np.int64)
+            attention_mask = np.zeros((len(batch), maxlen), dtype=np.int64)
+            for k, w in enumerate(batch):
+                input_ids[k, :len(w)] = w
+                attention_mask[k, :len(w)] = 1
             feed = {
                 "input_ids": input_ids,
                 "attention_mask": attention_mask,
-                "token_type_ids": token_type_ids,
+                "token_type_ids": np.zeros((len(batch), maxlen), dtype=np.int64),
             }
-
             outputs = session.run(None, feed)
-
-            # Mean pooling: average token embeddings (masked)
             token_embs = outputs[0]  # (batch, seq_len, 768)
             mask = attention_mask[:, :, np.newaxis].astype(np.float32)
             pooled = (token_embs * mask).sum(axis=1) / mask.sum(axis=1).clip(min=1)
-
-            # Truncate 768→256D
-            chunk_embs_list.append(pooled[:, :NOMIC_DIM].astype(np.float32))
-
-            del encodings, input_ids, attention_mask, token_type_ids, outputs, token_embs, mask, pooled
+            pooled_per_window[bi:bi + len(batch)] = pooled[:, :NOMIC_DIM].astype(np.float32)
+            del input_ids, attention_mask, feed, outputs, token_embs, mask, pooled
             gc.collect()
 
-        chunk_embs = np.vstack(chunk_embs_list)
-        del texts, chunk_embs_list
+        # Per text: token-count-weighted mean of its windows (one window → itself).
+        chunk_embs = _weighted_pool_windows(pooled_per_window, owner, weights, len(texts), NOMIC_DIM)
+        del texts, windows, owner, weights, pooled_per_window
         gc.collect()
 
         all_embs.append(chunk_embs)
@@ -1016,31 +1075,21 @@ def run_clustering(embeddings: np.ndarray) -> dict:
     n_themes = len(set(int(t) for t in theme_labels) - {-1})
     print(f"    → {n_themes} themes")
 
-    # ── Stage 5: Realms via mass-weighted Ward + silhouette-selected k ──
-    # The old elbow heuristic (largest gap in Ward merge distances) was clamped
-    # to [5, 10]: the floor of 5 forced singleton realms whenever the data had
-    # fewer natural groups (live vault: realms of 146/2/2/1/1 points). Now k is
-    # chosen in [TARGET_REALMS_MIN=2, TARGET_REALMS_MAX] by maximizing the
-    # point-level cosine silhouette (sampled at scale) — the most stable
-    # selector in the lab (design doc 2026-06-10).
-    print(f"  HAC: themes → realms (k by silhouette, {TARGET_REALMS_MIN}..{TARGET_REALMS_MAX})...")
+    # ── Stage 5: Realms via mass-weighted Ward to a √n TARGET (realm-k fix 2026-06-17) ──
+    # Was silhouette-selected k∈[2,10]. Cosine silhouette is mathematically biased
+    # toward low k on anisotropic embeddings (mean random-pair cosine ~0.58 on this
+    # vault), so at full scale it collapsed to k=2 with one realm holding 78% of
+    # points. Themes & territories never collapse because they use a fixed √n target
+    # via mass-weighted Ward (no silhouette) — realms now do the same. Lab on a 72k
+    # copy (docs/REALM-K-CLUSTERING-FIX-DESIGN-2026-06-17.md): TARGET_REALMS → 12
+    # balanced realms, max-share 0.17 (vs 0.78), near-uniform entropy; deterministic
+    # → run-to-run stable (no silhouette argmax churn). centroids_to_groups clamps
+    # to the available theme count, so small vaults degrade gracefully.
     unique_themes = sorted(set(int(t) for t in theme_labels))
     if len(unique_themes) > 1:
-        from sklearn.metrics import silhouette_score
-        best_k, best_s, best_labels = 1, -2.0, np.zeros(n_points, dtype=int)
-        sil_kwargs = {'sample_size': 4000, 'random_state': 42} if n_points > 4000 else {}
-        for k in range(max(2, TARGET_REALMS_MIN), min(TARGET_REALMS_MAX, len(unique_themes)) + 1):
-            cand = centroids_to_groups(theme_labels, embeddings, k)
-            if len(set(int(v) for v in cand)) < 2:
-                continue
-            try:
-                s = float(silhouette_score(embeddings, cand, metric='cosine', **sil_kwargs))
-            except Exception:
-                continue
-            if s > best_s:
-                best_k, best_s, best_labels = k, s, cand
-        realm_labels, n_realms = best_labels, best_k
-        print(f"    silhouette-selected k={n_realms} (score={best_s:.3f})")
+        print(f"  HAC: themes → realms (√n target ~{TARGET_REALMS})...")
+        realm_labels = centroids_to_groups(theme_labels, embeddings, TARGET_REALMS)
+        n_realms = len(set(int(v) for v in realm_labels))
     else:
         realm_labels = np.zeros(n_points, dtype=int)
         n_realms = 1

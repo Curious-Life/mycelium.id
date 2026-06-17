@@ -15,6 +15,7 @@
 
 import express from 'express';
 import { createAgentHarness, describeProvider } from './agent/harness.js';
+import { createAgentLoop } from './agent/loop.js';
 import { toolsForDomains, normalizePolicy, defaultPolicy, DOMAINS } from './agent/tool-domains.js';
 import { resolveInferenceConfigForTask } from './inference/resolve.js';
 import { resolveModelProfile } from './inference/model-profile.js';
@@ -57,6 +58,10 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
   const router = express.Router();
   router.use(express.json({ limit: '256kb' }));
   const harness = createAgentHarness({ onEgress: createEgressAuditSink(db, userId), onUsage: createUsageSink(db, userId, { source: 'chat' }), fetch, logger: (m) => console.error(`[chat] ${m}`) });
+  // The native agent loop (Phase 5) — the watchdog + retry turn-driver, extracted
+  // from this route so the same core serves channel + scheduler turns. Step 1 is
+  // behavior-preserving: this route's reliability semantics are now loop.run's.
+  const loop = createAgentLoop({ harness, logger: (m) => console.error(`[chat] ${m}`) });
 
   const auth = (req, res) => { const u = authenticatePortalRequest(req); if (!u) { res.status(401).json({ error: 'Unauthorized' }); return null; } return u; };
 
@@ -165,46 +170,19 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     const TTFB_MS = Number(process.env.MYCELIUM_CHAT_TTFB_MS) || 45000;
     const IDLE_MS = Number(process.env.MYCELIUM_CHAT_IDLE_MS) || 60000;
     const MAX_RETRIES = 2;
-    const BACKOFF_BASE_MS = 1000;                     // 1s, 2s, … between retries
-    let assistantText = '';
-    let lastActivity = Date.now();
-    let streaming = false;                            // flipped on the first token
-    let clientGone = false;
-    let ctrl = new AbortController();                 // re-created per attempt
     // Live-inference signal: a background_jobs row that surfaces in the global
     // header activity feed ("the model is working now"). Content-free per §1.
     let chatJob = null;
-    // On client disconnect, clear the live-inference row immediately — nobody is
-    // waiting on this turn, so it must not linger as a phantom "Thinking…" (the
-    // server turn may keep generating/persisting; that's the harness's concern).
-    req.on('close', () => { clientGone = true; ctrl.abort(); if (chatJob) db.activityFeed?.finish?.(chatJob).catch(() => {}); });
-    const captureText = (ev) => {
-      if (ev.type === 'text_delta' || ev.type === 'tool_start' || ev.type === 'tool_complete' || ev.type === 'thinking_delta') {
-        lastActivity = Date.now();
-        if (!streaming && (ev.type === 'text_delta' || ev.type === 'thinking_delta')) {
-          streaming = true;
-          send({ type: 'responding' });               // "the model started responding"
-        }
-      }
-      if (ev.type === 'text_delta' && ev.content) assistantText += ev.content;
-      send(ev);
-    };
-    const watchTick = Math.max(500, Math.min(4000, Math.floor(TTFB_MS / 4)));
-    const watchdog = setInterval(() => {
-      const limit = streaming ? IDLE_MS : TTFB_MS;    // first-token wait vs inter-token gap
-      if (Date.now() - lastActivity > limit) {
-        ctrl.abort();
-        // Turn declared stalled. CLEAR the live row here, not just in the finally:
-        // a hung upstream fetch (Ollama dropped the request but the promise never
-        // settles) can keep the handler from ever reaching the finally, which would
-        // otherwise leave a permanent phantom "Thinking…". Null it so the heartbeat
-        // below can't re-touch it.
-        if (chatJob) { const j = chatJob; chatJob = null; db.activityFeed?.finish?.(j).catch(() => {}); }
-      } else if (chatJob && !clientGone) {
-        // keep the row fresh during a healthy long generation
-        db.activityFeed?.heartbeat?.(chatJob).catch(() => {});
-      }
-    }, watchTick);
+    // The loop owns the watchdog now; these let it keep the live row honest. finishJob
+    // nulls chatJob so a stall (or a hung upstream fetch that never settles) clears the
+    // phantom "Thinking…" immediately, and a later heartbeat can't re-touch it.
+    const finishJob = () => { if (chatJob) { const j = chatJob; chatJob = null; db.activityFeed?.finish?.(j).catch(() => {}); } };
+    const heartbeatJob = () => { if (chatJob) db.activityFeed?.heartbeat?.(chatJob).catch(() => {}); };
+    // External (client-gone) signal: on disconnect, abort the in-flight turn and
+    // clear the live row immediately — nobody is waiting (the server turn may keep
+    // generating/persisting; that's the loop/harness concern).
+    const clientGoneCtrl = new AbortController();
+    req.on('close', () => { clientGoneCtrl.abort(); finishJob(); });
 
     try {
       send({ type: 'stream_start', streamIndex: 0 });
@@ -249,7 +227,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       let system = `Your name is ${ident.name}. ${PERSONALITY_GUIDE[ident.personality] || ''} ${CHAT_SYSTEM}`.trim();
       try { const ctx = await handlers.getContext?.({ recentMessages: recentN }); if (typeof ctx === 'string' && ctx) system += `\n\n${ctx}`; } catch { /* honest-empty */ }
       if (!isLocal && policy.domains.includes('search') && typeof handlers.searchMindscape === 'function') {
-        send({ type: 'tool_start', name: 'searchMemory' }); lastActivity = Date.now();
+        send({ type: 'tool_start', name: 'searchMemory' });
         try { const hits = await handlers.searchMindscape({ query: message, limit: 5 }); if (typeof hits === 'string' && hits) system += `\n\n## Possibly relevant to this question\n${hits}`; } catch { /* skip */ }
         send({ type: 'tool_complete', name: 'searchMemory' });
       }
@@ -271,40 +249,29 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
         return typeof out === 'string' ? out : JSON.stringify(out);
       };
 
-      // Attempt loop: retry the whole turn while it produced NOTHING (stalled or
-      // errored before any token). Once any text streams, we keep it — no retry
-      // (re-streaming would duplicate into the same bubble).
-      let result = null;
-      let lastErr = null;
-      for (let attempt = 0; ; attempt++) {
-        if (clientGone) break;
-        if (attempt > 0) {
-          // Exponential backoff before re-attempting a turn that produced nothing.
-          const backoff = BACKOFF_BASE_MS * 2 ** (attempt - 1);   // 1s, 2s, …
-          await new Promise((r) => setTimeout(r, backoff));
-          if (clientGone) break;
-          ctrl = new AbortController(); lastActivity = Date.now(); streaming = false;
-          send({ type: 'retry', attempt });
-          console.error(`[chat] empty/stalled — retry ${attempt}/${MAX_RETRIES} after ${backoff}ms`);
-        }
-        try { result = await harness.streamTurn({ provider, system, userMessage: message, tools: isLocal ? [] : grantedTools, call, send: captureText, signal: ctrl.signal, maxTokens: plan?.maxTokens, numCtx: plan?.numCtx }); lastErr = null; }
-        catch (e) { lastErr = e; console.error('[chat] attempt failed:', e?.status || '', e?.message); }
-        // A truncated turn is a definitive (if unhappy) completion — the model hit
-        // its output cap, so retrying just re-hits it. Stop and surface it below.
-        if (clientGone || assistantText.trim() || result?.truncated || attempt >= MAX_RETRIES) break;
-      }
+      // Drive the turn through the native agent loop: the watchdog (TTFB/IDLE) +
+      // retry-on-empty + first-token signalling now live in loop.run. It streams
+      // through our SSE `send`, keeps the live activity row honest via the callbacks,
+      // and returns the accumulated answer + truncation/error state.
+      const result = await loop.run({
+        provider, system, userMessage: message, tools: isLocal ? [] : grantedTools, call,
+        send, maxTokens: plan?.maxTokens, numCtx: plan?.numCtx,
+        ttfbMs: TTFB_MS, idleMs: IDLE_MS, maxRetries: MAX_RETRIES,
+        signal: clientGoneCtrl.signal, onStall: finishJob, onHeartbeat: heartbeatJob,
+      });
+      const assistantText = result.text;
 
-      if (!clientGone) {
-        if (assistantText.trim() || result?.truncated) {
+      if (!result.clientGone) {
+        if (assistantText.trim() || result.truncated) {
           // Completed, gracefully cut off mid-stream, OR truncated at the model's
           // output cap. A truncated turn is NOT a success: the (partial) answer is
           // incomplete and any save/edit the model was emitting did not finish
           // (truncated tool-call JSON no-ops). Tell the user explicitly so they
           // don't trust a "saved" that never happened.
-          if (result?.truncated) {
+          if (result.truncated) {
             send({ type: 'truncated', message: 'The response hit the model’s output limit and was cut off — it may be incomplete, and any save or edit it was making did not finish. Ask it to continue, or retry with a shorter request (or raise the output limit in Settings → Intelligence).' });
           }
-          send({ type: 'done', toolsUsed: result?.toolsUsed || [], truncated: !!result?.truncated });
+          send({ type: 'done', toolsUsed: result.toolsUsed || [], truncated: !!result.truncated });
           res.write('data: [DONE]\n\n');
           // Persist only when there's actual assistant text (a truncated tool-call
           // turn can have none) — never write an empty assistant bubble.
@@ -316,7 +283,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
           // Surface an ACTIONABLE reason from the upstream status (safe: status
           // codes + the provider label/model carry no secrets, per §1). A bare
           // "didn't respond" hides config problems like a wrong model name or key.
-          const st = lastErr?.status;
+          const st = result.lastErr?.status;
           const who = info.label || 'The model';
           let msg = `${who} didn’t respond after several tries. Try another model in Settings → Intelligence.`;
           if (st === 401 || st === 403) msg = `${who} rejected the request — the API key looks invalid. Update it in Settings → Intelligence.`;
@@ -334,8 +301,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       send({ type: 'done', toolsUsed: [] });
     } finally {
       clearInterval(keepalive);
-      clearInterval(watchdog);
-      if (chatJob) db.activityFeed?.finish?.(chatJob).catch(() => {});
+      finishJob();
       try { res.end(); } catch { /* already closed */ }
     }
   });

@@ -1661,7 +1661,7 @@
 			</div>
 		{:else if viewMode === 'list'}
 			<!-- List view -->
-			<div class="max-w-3xl mx-auto space-y-1.5">
+			<div class="max-w-3xl mx-auto space-y-1.5 lib-scroll-list">
 				{#each libraryItems as item}
 					{#if item.kind === 'media'}
 						{@const m = item.media}
@@ -1749,7 +1749,7 @@
 			</div>
 		{:else}
 			<!-- Grid view -->
-			<div class="grid gap-3 sm:gap-4" style="grid-template-columns: repeat(auto-fill, minmax({gridMinPx}px, 1fr));">
+			<div class="grid gap-3 sm:gap-4 lib-scroll-grid" style="grid-template-columns: repeat(auto-fill, minmax({gridMinPx}px, 1fr));">
 				{#each libraryItems as item}
 					{#if item.kind === 'media'}
 						{@const m = item.media}
@@ -1969,6 +1969,20 @@
 {/if}
 
 <style>
+	/* Off-screen rows/cards skip layout+paint until scrolled near. The library
+	   renders every doc+media item into the DOM (no virtualization), so on large
+	   vaults scrolling was janky — content-visibility gives near-virtualization for
+	   free. contain-intrinsic-size keeps the scrollbar stable by reserving an
+	   estimated height for not-yet-rendered items (auto = remember last real size). */
+	.lib-scroll-list > :global(*) {
+		content-visibility: auto;
+		contain-intrinsic-size: auto 64px;
+	}
+	.lib-scroll-grid > :global(*) {
+		content-visibility: auto;
+		contain-intrinsic-size: auto 240px;
+	}
+
 	/* HTML doc preview wrapper. `resize: horizontal` adds a native
 	   browser grip on the bottom-right edge — drag-shrink to make
 	   room for a side pane (second chat, portal to another VPS,

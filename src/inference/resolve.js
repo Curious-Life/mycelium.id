@@ -64,7 +64,7 @@ export async function resolveInferenceConfig(db, userId) {
 
 // Inference tasks the user can route to a specific provider/model (Settings →
 // Intelligence). Unlisted tasks (or no assignment) fall back to the ACTIVE provider.
-export const INFERENCE_TASKS = ['chat', 'narrate'];
+export const INFERENCE_TASKS = ['chat', 'narrate', 'harness'];
 
 /**
  * Resolve the provider/model for a SPECIFIC task. Reads the per-task assignment

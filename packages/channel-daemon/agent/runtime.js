@@ -20,6 +20,7 @@ import { createClaudeSdkRuntime } from './backends/claude-sdk.js';
 import { createOllamaRuntime } from './backends/ollama.js';
 import { createOpenAiCompatRuntime } from './backends/openai-compat.js';
 import { createAutoRuntime } from './backends/auto.js';
+import { createNativeRuntime } from './backends/native.js';
 import { parseSensitivePatterns } from './classify.js';
 
 /**
@@ -37,6 +38,12 @@ export function selectRuntime(cfg, { auditEgress } = {}) {
   const cloud = () => createClaudeSdkRuntime(cfg);
   const local = () => createOllamaRuntime(cfg);
   const openai = () => createOpenAiCompatRuntime(cfg);
+
+  // Native backend (H11): the turn runs on the SERVER (POST /internal/agent/channel-turn);
+  // this daemon just forwards. Needs no model creds here — the server resolves the user's
+  // provider. Opt-in via MYCELIUM_CHANNEL_ROUTER=native (default OFF until soaked; the
+  // SDK/Ollama backends remain the default + the rollback path).
+  if (forced === 'native') return createNativeRuntime(cfg);
 
   // Explicit override (the active-provider bridge sets this to pin one backend).
   if (forced === 'cloud') return hasCloud ? cloud() : null;

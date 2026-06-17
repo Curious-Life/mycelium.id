@@ -48,6 +48,18 @@ export const NAV_SECTIONS: NavSection[] = [
 		],
 	},
 	{
+		id: 'health',
+		label: 'Wellbeing',
+		items: [
+			// Dedicated front-door for Body & Health. The view itself lives inside
+			// Streams as the 'body' facet (P1 #212): /body deep-links to that facet
+			// (store maps it to /streams?facet=body), so the active highlight lands on
+			// Streams. This entry just makes it discoverable from the sidebar + mobile
+			// drawer — first-class on mobile, where wearable/health is a key surface.
+			{ id: 'body', label: 'Body & Health', icon: 'body', href: '/body' },
+		],
+	},
+	{
 		id: 'agents',
 		label: 'Agents',
 		items: [

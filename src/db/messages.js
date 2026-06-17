@@ -593,7 +593,7 @@ export function createMessagesNamespace(deps) {
       return { data: result.results || [], count };
     },
 
-    async selectTimeline(userId, { limit = 50, before, afterId, scope } = {}) {
+    async selectTimeline(userId, { limit = 50, before, since, afterId, scope } = {}) {
       // metadata is encrypted at rest; the auto-decrypt layer returns a
       // JSON string here. Routes parse it before projecting to the UI so
       // we never leak triage decisions / dedupe nonces / delivery state
@@ -601,6 +601,9 @@ export function createMessagesNamespace(deps) {
       let sql = `SELECT id, role, content, source, agent_id, created_at, message_type, attachment_id, metadata FROM messages WHERE user_id = ? AND forgotten_at IS NULL`;
       const params = [userId];
       if (before) { sql += ` AND created_at < ?`; params.push(before); }
+      // `since` is the unified-river time-scope floor (Today/7d/All) — pushed into
+      // SQL so cursor pagination stays correct across the cross-table merge.
+      if (since) { sql += ` AND created_at >= ?`; params.push(since); }
       if (afterId) {
         sql += ` AND rowid < (SELECT rowid FROM messages WHERE id = ?)`;
         params.push(afterId);
@@ -620,6 +623,23 @@ export function createMessagesNamespace(deps) {
       }
       sql += ` ORDER BY created_at DESC LIMIT ?`;
       params.push(limit);
+      const result = await d1Query(sql, params);
+      return result.results || [];
+    },
+
+    // Conversation-scoped history (Phase 5, Step 6) — the rows for ONE conversation,
+    // for a channel/scheduled turn's history hydration. Modeled on selectTimeline but
+    // filtered by conversation_id (which selectTimeline ignores). user_id + conversation_id
+    // together scope it: a channel turn can only ever see ITS conversation, never the
+    // owner's chat or another channel. content auto-decrypts via the d1Query wrapper.
+    // Newest-first (like selectTimeline); the caller reverses for chronological order.
+    async selectByConversation(userId, conversationId, { limit = 30, before } = {}) {
+      if (!conversationId) return [];
+      let sql = `SELECT id, role, content, source, agent_id, created_at, message_type, attachment_id FROM messages WHERE user_id = ? AND conversation_id = ? AND forgotten_at IS NULL`;
+      const params = [userId, conversationId];
+      if (before) { sql += ` AND created_at < ?`; params.push(before); }
+      sql += ` ORDER BY created_at DESC LIMIT ?`;
+      params.push(Number(limit) || 30);
       const result = await d1Query(sql, params);
       return result.results || [];
     },
