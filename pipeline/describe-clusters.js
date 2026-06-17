@@ -34,6 +34,7 @@ import { createNarrator } from './lib/narrate-infer.js';
 import {
   loadMembers, sampleMembers, getSeenIds, recordSeen, exploredPercent, lastPassNumber,
 } from './lib/narrate-sample.js';
+import { buildContextCapsule, renderCapsule, describedPeriodFor } from './lib/narrate-context.js';
 
 const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';
 const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
@@ -88,11 +89,14 @@ if (!USER_MASTER || !SYSTEM_KEY) {
  * name/essence so it can refine rather than restart. Returns null on any failure so
  * the caller can fall back to a placeholder (fail-soft: a miss never blocks Generate).
  */
-async function describe(narrator, kind, { samples, topTags = [], entities = [], existing = null }) {
+async function describe(narrator, kind, { samples, topTags = [], entities = [], existing = null, contextBlock = '' }) {
   const lines = [
     `You are naming a ${kind} in a personal knowledge graph.`,
-    `Below are representative snippets sampled across this ${kind}'s WHOLE timeline (not just recent).`,
   ];
+  // Context Capsule: temporal coverage (prior span vs. new span), activity timeline,
+  // and what this area connects to BY NAME — so the model refines with awareness.
+  if (contextBlock) lines.push('', contextBlock, '');
+  lines.push(`Below are representative snippets sampled across this ${kind}'s WHOLE timeline (not just recent).`);
   if (existing?.name) {
     lines.push(
       `It is currently titled "${existing.name}"${existing.essence ? ` — "${existing.essence}"` : ''}.`,
@@ -172,7 +176,7 @@ async function run() {
       ).catch(() => []);
       const sig = inputSignature(sample.sampledIds, counts.mc);
       const [existing] = await query(
-        `SELECT name, essence, describe_input_hash FROM realms WHERE user_id = ? AND realm_id = ?`,
+        `SELECT name, essence, describe_input_hash, described_period_start, described_period_end FROM realms WHERE user_id = ? AND realm_id = ?`,
         [USER_ID, realm_id],
       ).catch(() => []);
 
@@ -190,8 +194,11 @@ async function run() {
         continue;
       }
 
+      // Context Capsule: timeline + connected-by-name (child territories) so the
+      // realm essence is named with awareness of what it actually contains.
+      const capsule = await buildContextCapsule({ query, db, userId: USER_ID, kind: 'realm', id: realm_id, members, seenIds: null, stored: existing }).catch(() => null);
       const described = sample.samples.length
-        ? await describe(narrator, 'realm', { samples: sample.samples, topTags: sample.topTags, entities: sample.entities, existing })
+        ? await describe(narrator, 'realm', { samples: sample.samples, topTags: sample.topTags, entities: sample.entities, existing, contextBlock: capsule ? renderCapsule(capsule) : '' })
         : null;
       if (described) namedRealms += 1;
       if (DRY_RUN) {
@@ -221,7 +228,16 @@ async function run() {
            describe_input_hash = excluded.describe_input_hash, updated_at = datetime('now')`,
         [USER_ID, realm_id, name, essence, counts.tc ?? 0, counts.mc ?? 0, described ? sig : null],
       ).catch(err => console.error(`[describe] realm ${realm_id} write failed:`, err.message));
-      if (described) await recordName(db, 'realm', realm_id, name, essence);
+      if (described) {
+        // Persist the covered span (what this essence is based on) + activity histogram.
+        const dp = describedPeriodFor('realm', members);
+        await query(
+          `UPDATE realms SET described_period_start = ?, described_period_end = ?, activity_timeline = ?
+           WHERE user_id = ? AND realm_id = ?`,
+          [dp?.start ?? null, dp?.end ?? null, JSON.stringify(capsule?.activity?.histogram ?? []), USER_ID, realm_id],
+        ).catch(() => {});
+        await recordName(db, 'realm', realm_id, name, essence);
+      }
       await tick(total);
     }
 
@@ -241,7 +257,7 @@ async function run() {
       ).catch(() => []);
       const sig = inputSignature(sample.sampledIds, total_pts);
       const [existing] = await query(
-        `SELECT name, essence, describe_input_hash FROM territory_profiles WHERE user_id = ? AND territory_id = ?`,
+        `SELECT name, essence, describe_input_hash, described_period_start, described_period_end FROM territory_profiles WHERE user_id = ? AND territory_id = ?`,
         [USER_ID, territory_id],
       ).catch(() => []);
       const seenBefore = seenIds.size;
@@ -261,8 +277,11 @@ async function run() {
         continue;
       }
 
+      // Context Capsule: prior-covered span vs. new-content span, % described,
+      // activity timeline, and connected-by-name (realm / nearest / lineage).
+      const capsule = await buildContextCapsule({ query, db, userId: USER_ID, kind: 'territory', id: territory_id, members, seenIds, stored: existing }).catch(() => null);
       const described = sample.samples.length
-        ? await describe(narrator, 'territory', { samples: sample.samples, topTags: sample.topTags, entities: sample.entities, existing })
+        ? await describe(narrator, 'territory', { samples: sample.samples, topTags: sample.topTags, entities: sample.entities, existing, contextBlock: capsule ? renderCapsule(capsule) : '' })
         : null;
       if (described) namedTerr += 1;
       if (DRY_RUN) {
@@ -294,7 +313,18 @@ async function run() {
            describe_input_hash = excluded.describe_input_hash, updated_at = datetime('now')`,
         [USER_ID, territory_id, realm_id, name, essence, tc.mc ?? total_pts, seenCount, ep, described ? sig : null],
       ).catch(err => console.error(`[describe] territory ${territory_id} write failed:`, err.message));
-      if (described) await recordName(db, 'territory', territory_id, name, essence);
+      if (described) {
+        // Persist the covered span (now includes this pass's freshly-seen members) +
+        // the activity histogram, so the NEXT narration knows what was already folded.
+        const seenNow = await getSeenIds(query, USER_ID, territory_id);
+        const dp = describedPeriodFor('territory', members, seenNow);
+        await query(
+          `UPDATE territory_profiles SET described_period_start = ?, described_period_end = ?, activity_timeline = ?
+           WHERE user_id = ? AND territory_id = ?`,
+          [dp?.start ?? null, dp?.end ?? null, JSON.stringify(capsule?.activity?.histogram ?? []), USER_ID, territory_id],
+        ).catch(() => {});
+        await recordName(db, 'territory', territory_id, name, essence);
+      }
       await tick(total);
     }
 
