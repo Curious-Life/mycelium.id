@@ -72,8 +72,14 @@ if not os.environ.get('MYCELIUM_DB'):
 NOMIC_MODEL = "nomic-ai/nomic-embed-text-v1.5"
 NOMIC_DIM = 256         # Matryoshka truncation (768 → 256)
 NOMIC_TASK_PREFIX = "clustering: "  # Nomic task-specific prefix
-NOMIC_MAX_CHARS = 2000  # Max input chars per text (keeps token count manageable)
-NOMIC_BATCH_SIZE = int(os.environ.get('NOMIC_BATCH_SIZE', '8'))   # Texts per ONNX inference batch
+# Full-text embedding (mirrors embed-service.py): tokenize the WHOLE text (capped
+# at NOMIC_MAX_TOTAL_TOKENS), slice into <=NOMIC_WINDOW-token windows, and
+# token-count-weighted-pool them — so a long imported transcript/document clusters
+# on its full content, not just its first 2000 chars (the old single-window cap).
+NOMIC_MAX_CHARS = 40000       # bound payload before tokenization (~8k tokens) — was 2000
+NOMIC_WINDOW = 512            # per-window token cap (model context window)
+NOMIC_MAX_TOTAL_TOKENS = 8192 # Nomic v1.5's real cap — chunk up to this, then stop
+NOMIC_BATCH_SIZE = int(os.environ.get('NOMIC_BATCH_SIZE', '8'))   # WINDOWS per ONNX inference batch
 
 # Cache paths
 CACHE_DIR = Path(__file__).resolve().parent / "cache"
@@ -306,6 +312,43 @@ def _fetch_content_for_points(point_ids: list[str], batch_size: int = 50) -> dic
     return content_map
 
 
+def _split_windows(enc_ids_list, window):
+    """Split each text's token-id list into <=`window`-token windows.
+
+    Returns (windows, owner, weights): the flat list of window id-lists, the
+    text index each window belongs to, and each window's real token count (its
+    pooling weight). A text with <=window tokens yields exactly ONE window, so
+    its downstream vector is identical to the pre-chunking single-pool output.
+    """
+    windows, owner, weights = [], [], []
+    for ti, ids in enumerate(enc_ids_list):
+        ids = ids if ids else [0]   # never produce zero windows
+        for j in range(0, len(ids), window):
+            w = ids[j:j + window]
+            windows.append(w)
+            owner.append(ti)
+            weights.append(len(w))
+    return windows, owner, weights
+
+
+def _weighted_pool_windows(pooled_per_window, owner, weights, n_texts, dim):
+    """Token-count-weighted mean of each text's window vectors → (n_texts, dim).
+
+    One window → that window's vector unchanged. Mirrors embed-service.py's
+    per-text pooling so a long text's WHOLE content shapes its vector, not just
+    its first window. (L2-normalization is applied by the caller afterward.)
+    """
+    out = np.zeros((n_texts, dim), dtype=np.float32)
+    w_arr = np.asarray(weights, dtype=np.float32)
+    owner_arr = np.asarray(owner)
+    for ti in range(n_texts):
+        sel = owner_arr == ti
+        wsum = float(w_arr[sel].sum())
+        if wsum > 0:
+            out[ti] = (pooled_per_window[sel] * w_arr[sel, None]).sum(axis=0) / wsum
+    return out
+
+
 def _embed_batch(point_ids: list[str], batch_size: int = 50) -> tuple[list[str], np.ndarray]:
     """
     Fetch content and embed in streaming chunks to minimize peak memory.
@@ -345,8 +388,11 @@ def _embed_batch(point_ids: list[str], batch_size: int = 50) -> tuple[list[str],
     # Download tokenizer.json directly and load via the Rust tokenizers lib.
     tokenizer_path = hf_hub_download(NOMIC_MODEL, "tokenizer.json")
     tokenizer = Tokenizer.from_file(tokenizer_path)
-    tokenizer.enable_truncation(max_length=512)
-    tokenizer.enable_padding()  # pad to longest-in-batch (dynamic)
+    # Tokenize the FULL text (capped at the model's real total); chunking below
+    # owns windowing. NO tokenizer padding — we right-pad each window batch
+    # manually so enc.ids carries each text's REAL token count (the pool weight).
+    tokenizer.enable_truncation(max_length=NOMIC_MAX_TOTAL_TOKENS)
+    tokenizer.no_padding()
 
     all_embs = []
     all_ids = []
@@ -376,36 +422,42 @@ def _embed_batch(point_ids: list[str], batch_size: int = 50) -> tuple[list[str],
             print(f"    Chunk {chunk_num}/{n_chunks}: 0 embeddable texts (skipped)")
             continue
 
-        # Tokenize + run ONNX in sub-batches
-        chunk_embs_list = []
-        for bi in range(0, len(texts), NOMIC_BATCH_SIZE):
-            batch_texts = texts[bi:bi + NOMIC_BATCH_SIZE]
-            encodings = tokenizer.encode_batch(batch_texts)
-            input_ids = np.array([e.ids for e in encodings], dtype=np.int64)
-            attention_mask = np.array([e.attention_mask for e in encodings], dtype=np.int64)
-            token_type_ids = np.array([e.type_ids for e in encodings], dtype=np.int64)
+        # Tokenize each text in FULL and slice into <=NOMIC_WINDOW-token windows so
+        # the WHOLE text is embedded, not just its first 512 tokens. A short text
+        # yields exactly ONE window → its pooled 256D vector is identical to the
+        # pre-chunking output, so existing clustering_points vectors stay stable.
+        encs = tokenizer.encode_batch(texts)
+        windows, owner, weights = _split_windows([e.ids for e in encs], NOMIC_WINDOW)
+        del encs
+        gc.collect()
 
+        # Inference over WINDOWS, batched + right-padded to the batch's longest
+        # window (padding is masked out of the pool). 768→256D matryoshka slice.
+        pooled_per_window = np.zeros((len(windows), NOMIC_DIM), dtype=np.float32)
+        for bi in range(0, len(windows), NOMIC_BATCH_SIZE):
+            batch = windows[bi:bi + NOMIC_BATCH_SIZE]
+            maxlen = max(len(w) for w in batch)
+            input_ids = np.zeros((len(batch), maxlen), dtype=np.int64)
+            attention_mask = np.zeros((len(batch), maxlen), dtype=np.int64)
+            for k, w in enumerate(batch):
+                input_ids[k, :len(w)] = w
+                attention_mask[k, :len(w)] = 1
             feed = {
                 "input_ids": input_ids,
                 "attention_mask": attention_mask,
-                "token_type_ids": token_type_ids,
+                "token_type_ids": np.zeros((len(batch), maxlen), dtype=np.int64),
             }
-
             outputs = session.run(None, feed)
-
-            # Mean pooling: average token embeddings (masked)
             token_embs = outputs[0]  # (batch, seq_len, 768)
             mask = attention_mask[:, :, np.newaxis].astype(np.float32)
             pooled = (token_embs * mask).sum(axis=1) / mask.sum(axis=1).clip(min=1)
-
-            # Truncate 768→256D
-            chunk_embs_list.append(pooled[:, :NOMIC_DIM].astype(np.float32))
-
-            del encodings, input_ids, attention_mask, token_type_ids, outputs, token_embs, mask, pooled
+            pooled_per_window[bi:bi + len(batch)] = pooled[:, :NOMIC_DIM].astype(np.float32)
+            del input_ids, attention_mask, feed, outputs, token_embs, mask, pooled
             gc.collect()
 
-        chunk_embs = np.vstack(chunk_embs_list)
-        del texts, chunk_embs_list
+        # Per text: token-count-weighted mean of its windows (one window → itself).
+        chunk_embs = _weighted_pool_windows(pooled_per_window, owner, weights, len(texts), NOMIC_DIM)
+        del texts, windows, owner, weights, pooled_per_window
         gc.collect()
 
         all_embs.append(chunk_embs)

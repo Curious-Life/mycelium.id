@@ -152,6 +152,18 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
     } catch { ok(res, { messages: [] }); }
   });
 
+  // GET /streams/spectrum?windowDays=7 → { windowDays, days, kinds, sources:[…] }
+  // The at-a-glance source spectrum: every source the user has (or has a connector
+  // for), with health + a daily volume sparkline. PLAINTEXT-ONLY aggregates — no
+  // decryption path (§7 fail-safe). Backed by db.streams.spectrum.
+  router.get('/streams/spectrum', async (req, res) => {
+    try {
+      const raw = parseInt(req.query.windowDays, 10);
+      const windowDays = !Number.isFinite(raw) || raw <= 0 ? 7 : Math.min(raw, 90);
+      ok(res, await db.streams.spectrum(userId, { windowDays }));
+    } catch { ok(res, { windowDays: 7, days: [], kinds: [], sources: [] }); }
+  });
+
   // ── Profile (Phase P) — read + edit, backed by user_profiles ────────────
   // user_profiles holds the public-facing fields (handle/display_name/signature
   // — plaintext by design, not in ENCRYPTED_FIELDS). Cognitive scores

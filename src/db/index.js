@@ -47,6 +47,7 @@ import { createSpaceRoomDocumentsNamespace } from './space-room-documents.js';
 import { createSpaceConversationsNamespace } from './space-conversations.js';
 import { createContextsNamespace } from './contexts.js';
 import { createInboundSharesNamespace } from './inbound-shares.js';
+import { createStreamsNamespace } from './streams.js';
 import { createSpaceMatrixRoomsNamespace } from './space-matrix-rooms.js';
 
 /**
@@ -120,6 +121,12 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // tokens stay in the `secrets` table (src/connectors/store.js).
     connectors: createConnectorsNamespace({ d1Query }),
 
+    // Unified Streams surface. spectrum() is PLAINTEXT-ONLY aggregates across
+    // messages/documents/health_daily/tasks + connector status (§7 fail-safe);
+    // feed() (Phase 2) does the per-table decrypting union. Reads db.connectors
+    // for the status join. @see src/db/streams.js, src/streams/source-registry.js.
+    streams: null, // set below (needs the assembled `connectors` namespace)
+
     // Mindscape reads (clustering points + territory/realm/theme profiles) and
     // territory-docs (narrative read/write). Wired for the portal mindscape
     // surface (src/portal-mindscape.js) + the Phase C chronicles writer.
@@ -153,6 +160,10 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // cleanly degrades to "not public" / "no links" for the single-user vault.
     _base: base,
   };
+
+  // streams.spectrum joins connector op-state, so it's wired after the literal
+  // (it needs the assembled db.connectors namespace).
+  db.streams = createStreamsNamespace({ d1Query, connectors: db.connectors });
 
   return { db, adapter, close: adapter.close };
 }
