@@ -517,7 +517,7 @@
 						{#if currentTerritory.archetypeType}
 							<span class="archetype-badge">{currentTerritory.archetypeType}</span>
 						{/if}
-						{#if currentTerritory.currentPhase}
+						{#if currentTerritory.currentPhase === 'sparse' || currentTerritory.currentPhase === 'active' || currentTerritory.currentPhase === 'anchor'}
 							<span class="phase-badge phase-{currentTerritory.currentPhase}">{currentTerritory.currentPhase} · {(currentTerritory.currentVitality || 0).toFixed(2)}</span>
 						{/if}
 						{#if currentTerritory.isAnchored}
