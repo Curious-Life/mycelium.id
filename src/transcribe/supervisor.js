@@ -17,15 +17,18 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dataDir } from '../paths.js';
+import { homedir } from 'node:os';
 
 // requirements live next to pipeline/ — resolve from the repo root (this file is src/transcribe/).
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const REQ_FILE = join(REPO_ROOT, 'pipeline', 'requirements-transcribe.txt');
-// Whisper models download from HF → a PERSISTENT user-data cache (NOT the bundle's
-// offline Nomic cache), and downloads must be ONLINE (the parent sets
-// HF_HUB_OFFLINE=1 for the shipped embed model — we override it here).
-const WHISPER_HF_HOME = process.env.MYCELIUM_WHISPER_HF_HOME || join(dataDir(), 'models', 'whisper-cache');
+// Whisper models download to the STANDARD HuggingFace cache (~/.cache/huggingface),
+// NOT the bundle's offline Nomic cache. Using the default means a model already
+// present (from this app or any HF tool) is REUSED instead of re-downloaded, and
+// it persists across app reinstalls. Downloads must be ONLINE — the parent sets
+// HF_HUB_OFFLINE=1 for the shipped embed model, which we override below. (NB: we
+// deliberately do NOT fall back to the inherited HF_HOME, which is the bundle.)
+const WHISPER_HF_HOME = process.env.MYCELIUM_WHISPER_HF_HOME || join(homedir(), '.cache', 'huggingface');
 
 const DEFAULT_PORT = Number(process.env.MYCELIUM_TRANSCRIBE_PORT) || 8093;
 const PROBE_TIMEOUT_MS = 2500;
