@@ -144,7 +144,10 @@ function canonicalUrl(tab: Tab): string {
 		if (typeof doc === 'string' && doc) return `/library?doc=${encodeURIComponent(doc)}`;
 	}
 	if (tab.viewId === 'streams') {
-		return tab.params.facet === 'sources' ? '/streams?facet=sources' : '/streams';
+		const facet = tab.params.facet;
+		if (facet === 'sources') return '/streams?facet=sources';
+		if (facet === 'body') return '/streams?facet=body';
+		return '/streams';
 	}
 	if (tab.viewId === 'settings') {
 		// Settings is a single hub with a left-rail of panes; the active pane

@@ -4,6 +4,7 @@
 	import { navigationState } from '$lib/stores/navigation';
 	import { theme } from '$lib/stores/theme';
 	import { activity, startActivityPolling, fmtEta } from '$lib/stores/activity';
+	import { viewLabel } from '$lib/nav/config';
 
 	let activityOpen = $state(false);
 
@@ -33,24 +34,6 @@
 		} catch { /* not in Tauri / API shape differs — data-tauri-drag-region handles it */ }
 	}
 
-	const viewLabels: Record<string, string> = {
-		mindscape: 'Mycelium',
-		library: 'Library',
-		streams: 'Streams',
-		timeline: 'Streams',
-		people: 'People',
-		agents: 'Agents',
-		profile: 'Profile',
-		'curious-life': 'Curious Life',
-		connections: 'Connections',
-		contexts: 'Sharing',
-		settings: 'Settings',
-		import: 'Import',
-		media: 'Media',
-		body: 'Body',
-		vitality: 'Vitality',
-		chat: 'Chat',
-	};
 
 	function handleMenuClick() {
 		navigationState.toggleSidebar();
@@ -93,7 +76,7 @@
 
 	<!-- Mobile: page title -->
 	<h2 class="md:hidden text-sm font-medium text-[var(--color-text-primary)] truncate">
-		{viewLabels[currentView] || 'Mycelium'}
+		{viewLabel(currentView)}
 	</h2>
 
 	<!-- Flex spacer -->

@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { apiGet } from '$lib/api';
 	import { navigationState, type PrimaryView } from '$lib/stores/navigation';
+	import { PRIMARY_NAV, navItemActive, type NavItem } from '$lib/nav/config';
 
 	const currentView = $derived($navigationState.primaryView);
 
@@ -18,23 +19,13 @@
 		return () => { alive = false; clearInterval(t); };
 	});
 
-	interface TabItem {
-		id: PrimaryView;
-		label: string;
-		href: string;
-	}
+	// The four mobile tabs ARE the primary nav (single source of truth — same
+	// list the desktop sidebar renders).
+	type TabItem = NavItem;
+	const tabs: TabItem[] = PRIMARY_NAV;
 
-	const tabs: TabItem[] = [
-		{ id: 'mindscape', label: 'Mycelium', href: '/mindscape' },
-		{ id: 'library',   label: 'Library',  href: '/library' },
-		{ id: 'streams',   label: 'Streams',  href: '/streams' },
-		{ id: 'people',    label: 'People',   href: '/connections' },
-	];
-
-	// People is active across its whole cluster (its entry routes to Connections).
-	const peopleCluster = new Set<string>(['people', 'connections', 'spaces', 'contexts']);
 	function tabActive(id: PrimaryView): boolean {
-		return id === 'people' ? peopleCluster.has(currentView) : currentView === id;
+		return navItemActive(id, currentView);
 	}
 
 	// Real <a href> anchors (see Sidebar) — modified/middle clicks open a new tab

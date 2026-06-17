@@ -78,11 +78,6 @@ export const REGISTRY: Record<string, ViewDef> = {
 		title: 'Vitality', icon: 'compass', singleton: true,
 		load: () => import('$lib/views/VitalityView.svelte'),
 	},
-	body: {
-		// De-routed full page. Live backend: /health/summary.
-		title: 'Body', icon: 'ratio', singleton: true,
-		load: () => import('$lib/views/BodyView.svelte'),
-	},
 	agents: {
 		// De-routed full page. Live backend: /agents + /providers (11 handlers).
 		title: 'Agents', icon: 'people', singleton: true,
