@@ -100,10 +100,9 @@ async function run() {
 
     console.log(`[sync] ${rows.length} new messages with embedding_768`);
 
-    if (rows.length === 0) {
-      console.log('[sync] Nothing to sync. Exiting.');
-      return;
-    }
+    // NB: do NOT early-return when rows.length === 0 — the backfill pass below
+    // still needs to run (existing point rows may be unembedded even when there
+    // are no NEW messages to insert; that is the exact case this fix addresses).
 
     // Resolve the vector master key the same way enrich/search do. boot() wires
     // ENCRYPTION_MASTER_KEY = USER_MASTER hex; this is a standalone process, so
@@ -147,7 +146,45 @@ async function run() {
       }
     }
 
-    console.log(`[sync] Done: ${inserted} clustering_points upserted, ${skipped} skipped (no/undecryptable embedding)`);
+    // Backfill: existing point rows whose message is NOW embedded but whose
+    // nomic_embedding is still NULL. The insert loop above can't fix these — the
+    // SELECT's NOT EXISTS excludes any message that already HAS a point row, and
+    // even if it didn't, those rows carry the import's UUID id (not this script's
+    // `…:cp:message:…` scheme), so the INSERT's ON CONFLICT(id) would never match
+    // and would create a DUPLICATE point. So update IN PLACE by the existing
+    // row's id (found via JOIN). Root cause of stale clustering coverage after an
+    // embed-backlog clear: a point created while its message was unembedded was
+    // never re-filled once the message got its embedding_768.
+    let backfilled = 0;
+    if (!DRY_RUN) {
+      const stale = await query(
+        `SELECT cp.id AS cp_id, m.embedding_768 AS e
+           FROM clustering_points cp
+           JOIN messages m ON m.id = cp.source_id AND m.user_id = cp.user_id
+          WHERE cp.user_id = ? AND cp.source_type = 'message'
+            AND cp.nomic_embedding IS NULL AND m.embedding_768 IS NOT NULL`,
+        [USER_ID],
+      );
+      for (const r of stale) {
+        const vec = await decode256(r.e, masterKey);
+        if (!vec) { skipped++; continue; }
+        try {
+          const envelope = await encryptVector(vec, NOMIC_SCOPE, masterKey);
+          await query(
+            `UPDATE clustering_points
+                SET nomic_embedding = ?, embedding_model = 'nomic-v1.5-256d', updated_at = datetime('now')
+              WHERE id = ?`,
+            [envelope, r.cp_id],
+          );
+          backfilled++;
+        } catch (err) {
+          console.error(`[sync] backfill failed for ${r.cp_id}:`, err.message);
+          skipped++;
+        }
+      }
+    }
+
+    console.log(`[sync] Done: ${inserted} inserted, ${backfilled} backfilled, ${skipped} skipped (no/undecryptable embedding)`);
   } finally {
     close();
   }
