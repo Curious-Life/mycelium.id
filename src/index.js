@@ -10,6 +10,8 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
+import { resolveDbKeyHex } from './db/open.js';
+import { ensureVaultEncrypted } from './account/db-cipher-migrate.js';
 import { createIdentity, isValidHandle } from './identity/identity.js';
 import { readRemoteConfig } from './remote/config.js';
 import { buildDomains, collectTools, createMcpServer, TIER2_TOOLS, TOPOLOGY_NOT_READY_MESSAGE } from './mcp.js';
@@ -98,7 +100,23 @@ export async function boot({
     selfInstance: () => publicHost,
   };
 
-  const { db, close } = getDb({ dbPath, userKey, systemKey, federationDeps });
+  // At-rest blindness (A′) — OPT-IN via MYCELIUM_AT_REST, default OFF (plaintext
+  // open, unchanged). When enabled: derive the DB-file key, run the one-time
+  // idempotent encrypt-in-place migration (no-op if already encrypted or no file
+  // yet — a fresh vault is then BORN encrypted because getDb opens keyed), then
+  // open every vault connection keyed. FAIL CLOSED: if encryption was requested
+  // but the migration throws, refuse to fall back to a plaintext open (would
+  // write new rows in cleartext into a half-migrated vault). @see src/db/open.js.
+  const dbKeyHex = resolveDbKeyHex(userHex);
+  if (dbKeyHex) {
+    try {
+      const r = ensureVaultEncrypted({ dbPath, dbKeyHex, log: (m) => console.error(m) });
+      if (r.migrated) console.error(`[mycelium] at-rest: encrypted ${r.tables} tables; plaintext backup kept at ${r.preCipherPath}`);
+    } catch (e) {
+      throw new Error(`at-rest encryption requested (MYCELIUM_AT_REST) but the migration failed — refusing a plaintext open: ${e.message}`);
+    }
+  }
+  const { db, close } = getDb({ dbPath, userKey, systemKey, federationDeps, dbKeyHex });
   const { domains, deferred, searchHelpers, isTopologyReady } = buildDomains({ db, userId, embedder, identity });
   // Cold-start gating (Phase 4): Tier-2 readers return a uniform "not ready"
   // message until the topology pipeline has run, instead of honest-empty.

@@ -33,23 +33,81 @@
  */
 
 import { createLocalBackend } from './backend/local.js';
+import { createSqliteBackend } from './backend/sqlite.js';
 import { loadFromDb, ID_PREFIX, stripPrefix } from './d1-loader.js';
 import { setMindSearch } from './registry.js';
 
 const DEFAULT_USER = 'local-user';
 
-export function createSearchHelpers(deps = {}) {
-  const { db = null, embedder = null, userId = DEFAULT_USER, getMasterKey = null } = deps;
+/**
+ * Select the search backend. Default = the in-RAM LocalBackend (rebuilt from the
+ * whole corpus per boot). Opt-in (Phase 1) = the on-disk SqliteBackend (FTS5 +
+ * sqlite-vec inside the vault DB; no rebuild, page-cache memory). The on-disk
+ * path stays OFF by default until incremental maintenance owns every write —
+ * otherwise the disk index goes stale between Generates. Enable with
+ * MYCELIUM_SEARCH_BACKEND=sqlite (requires db._sqlite, the raw handle).
+ */
+function chooseBackend({ db, embedder, userId, searchBackend }) {
+  const want = (searchBackend ?? process.env.MYCELIUM_SEARCH_BACKEND ?? '').toLowerCase();
+  if (want === 'sqlite' && db && db._sqlite) {
+    return { backend: createSqliteBackend({ sqliteDb: db._sqlite, embedder, userId }), kind: 'sqlite' };
+  }
+  return { backend: createLocalBackend({ embedder, userId }), kind: 'local' };
+}
 
-  const backend = createLocalBackend({ embedder, userId });
+export function createSearchHelpers(deps = {}) {
+  const { db = null, embedder = null, userId = DEFAULT_USER, getMasterKey = null, searchBackend = null } = deps;
+
+  const { backend, kind: backendKind } = chooseBackend({ db, embedder, userId, searchBackend });
   let built = false;
 
   async function ensureBuilt() {
     if (built) return;
     if (db && typeof db.rawQuery === 'function') {
-      try { await loadFromDb({ backend, db, userId, getMasterKey }); } catch { /* fall through */ }
+      try {
+        // On-disk backend persists across boots: populate ONCE (the same
+        // loadFromDb path the in-RAM backend uses every boot), tracked by a
+        // PERSISTED flag — NOT count()>0, which incremental writes (noteUpsert)
+        // would trip before the first query, skipping the full corpus load. The
+        // in-RAM backend always (re)builds.
+        if (backendKind === 'sqlite' && typeof backend.isCorpusBuilt === 'function' && backend.isCorpusBuilt()) {
+          // already populated on disk — no rebuild
+        } else {
+          await loadFromDb({ backend, db, userId, getMasterKey });
+          if (backendKind === 'sqlite' && typeof backend.markCorpusBuilt === 'function') backend.markCorpusBuilt();
+        }
+      } catch { /* fall through */ }
     }
     built = true;
+  }
+
+  // Incremental index maintenance (§8). NO-OP unless the on-disk backend is
+  // active: the in-RAM backend is rebuilt per boot, so per-write upserts would
+  // just grow it unboundedly between Generates. Best-effort everywhere — a
+  // maintenance failure NEVER blocks the originating write. Reached from the
+  // write paths via getMindSearch() (registry), so capture/enrich keep the
+  // on-disk index fresh without a rebuild.
+  const incremental = backendKind === 'sqlite';
+  async function noteUpsert(doc) {
+    if (!incremental || !doc || typeof doc.id !== 'string' || !doc.id) return;
+    try {
+      await backend.add({
+        id: doc.id,
+        text: doc.text ?? doc.content ?? '',
+        embedding: doc.embedding,
+        ts: Number.isFinite(doc.ts) ? doc.ts : Math.floor(Date.now() / 1000),
+      });
+    } catch { /* best-effort: never block the write */ }
+  }
+  async function noteDelete(ids) {
+    if (!incremental) return;
+    const list = Array.isArray(ids) ? ids : [ids];
+    try { await backend.delete({ ids: list.filter((id) => typeof id === 'string' && id) }); } catch { /* best-effort */ }
+  }
+  // Vector-ready hook (enrichment): update only this id's vector, preserve ts/fts.
+  function noteVector(id, embedding) {
+    if (!incremental || typeof id !== 'string' || !id || !embedding) return;
+    try { backend.noteVector?.(id, embedding); } catch { /* best-effort */ }
   }
 
   // Index a document directly (tests / incremental updates). Marks built so a
@@ -284,7 +342,11 @@ export function createSearchHelpers(deps = {}) {
     structure,
     rebuild,
     indexDocument,
+    noteUpsert,
+    noteDelete,
+    noteVector,
     backend,
+    backendKind,
     // expose isScoped for parity with the canonical searchHelpers shape
     isScoped: () => false,
   };

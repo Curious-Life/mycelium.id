@@ -1,37 +1,39 @@
-"""d1_client.py — local SQLite query shim for the V1 single-user vault.
+"""d1_client.py — local query shim for the V1 single-user vault.
 
-This REPLACES the Cloudflare Worker D1 proxy used by the cloud app. In V1
-there is no Worker and no httpx round-trip: every "D1" query runs directly
-against the local SQLite vault at ``os.environ['MYCELIUM_DB']``.
+This REPLACES the Cloudflare Worker D1 proxy used by the cloud app. Every "D1"
+query runs against the local vault — by one of two transports:
 
-Contract (matches what cluster.py / compute_information_harmonics.py call):
-  - ``query(sql, params=None) -> list[dict]``
-      Runs ``sql`` with positional ``params`` (a list/tuple, mapped to
-      sqlite3 '?' placeholders). SELECT-style statements return a list of
-      dict rows (``row_factory = sqlite3.Row`` → ``dict(row)``). Write
-      statements (INSERT/UPDATE/DELETE/UPSERT/DDL) are committed and return
-      ``[]``.
-  - ``d1_query`` is provided as an alias (cluster.py uses that name).
+  * BRIDGE MODE (at-rest blindness, A′): when ``MYCELIUM_DB_BRIDGE_URL`` is set,
+    the vault is whole-file SQLCipher and only Node may open the cipher, so we
+    POST each query to the long-running loopback ``vault-bridge.js`` over
+    127.0.0.1 (it opens the keyed vault and runs the SQL on the raw handle).
+    See docs/AT-REST-BLINDNESS-DESIGN-2026-06-11.md.
+  * LEGACY MODE: when the bridge URL is unset, open the plaintext vault directly
+    via stock ``sqlite3`` (the pre-A′ behavior — used for plaintext vaults / dev).
 
-Notes:
-  - The cloud schema encrypts certain columns at write time via the Worker
-    proxy's autoEncryptParams. In the V1 local path that envelope encryption
-    is NOT reproduced here: callers that write plaintext scalars (e.g. the
-    harmonics UPSERT) get plaintext rows, which is correct for a local vault.
-    Reads of already-encrypted columns (e.g. messages.embedding_768) return
-    the raw envelope string unchanged; decryption is the caller's job via
-    crypto_local.
+Contract (unchanged — what cluster.py / compute_information_harmonics.py call):
+  - ``query(sql, params=None) -> list[dict]`` — SELECT → list of dict rows;
+    write statements commit and return ``[]``. ``params`` is a positional
+    list/tuple bound to '?' placeholders.
+  - ``d1_query`` / ``execute`` are aliases.
+
+Both transports preserve RAW semantics: encrypted columns (e.g.
+messages.embedding_768) come back as the raw envelope string; decryption is the
+caller's job via crypto_local. Plaintext writes stay plaintext at the column
+level (the whole file is still encrypted at rest in bridge mode).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
+import urllib.request
 from typing import Any, Optional, Sequence
 
-# Cache the connection per process. SQLite connections are cheap, but the
-# harmonics + clustering stages issue many small queries; one shared
-# connection avoids repeated open/close and keeps WAL readers consistent.
+_BRIDGE_URL: Optional[str] = os.environ.get("MYCELIUM_DB_BRIDGE_URL") or None
+
+# ── legacy direct-sqlite3 transport (plaintext vault) ────────────────────────
 _CONN: Optional[sqlite3.Connection] = None
 _CONN_PATH: Optional[str] = None
 
@@ -47,7 +49,7 @@ def _db_path() -> str:
 
 
 def get_connection() -> sqlite3.Connection:
-    """Return a process-cached sqlite3 connection with Row factory."""
+    """Return a process-cached sqlite3 connection (LEGACY/plaintext mode only)."""
     global _CONN, _CONN_PATH
     path = _db_path()
     if _CONN is None or _CONN_PATH != path:
@@ -56,13 +58,8 @@ def get_connection() -> sqlite3.Connection:
                 _CONN.close()
             except Exception:
                 pass
-        # check_same_thread=False: the pipeline is single-threaded today, but
-        # this keeps the shim usable from helper threads without surprises.
         conn = sqlite3.connect(path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        # Match the app's pragmas closely enough for correctness: the vault
-        # ships in WAL mode and busy_timeout avoids spurious "database is
-        # locked" errors when the JS side is mid-write.
         conn.execute("PRAGMA busy_timeout = 5000")
         conn.execute("PRAGMA foreign_keys = ON")
         _CONN = conn
@@ -70,37 +67,43 @@ def get_connection() -> sqlite3.Connection:
     return _CONN
 
 
-def _is_write(sql: str) -> bool:
-    head = sql.lstrip().split(None, 1)
-    if not head:
-        return False
-    verb = head[0].upper()
-    return verb in {
-        'INSERT', 'UPDATE', 'DELETE', 'REPLACE',
-        'CREATE', 'DROP', 'ALTER', 'PRAGMA', 'VACUUM', 'BEGIN',
-        'COMMIT', 'ATTACH', 'DETACH',
-    }
-
-
-def query(sql: str, params: Optional[Sequence[Any]] = None) -> list[dict]:
-    """Execute ``sql`` against the local vault.
-
-    Read statements return ``list[dict]``; write statements commit and
-    return ``[]``. ``params`` is a positional list/tuple bound to '?'
-    placeholders (None → no params).
-    """
+def _query_legacy(sql: str, params: Optional[Sequence[Any]]) -> list[dict]:
     conn = get_connection()
     cur = conn.execute(sql, tuple(params) if params else ())
     if cur.description is None:
-        # No result set → it was a write (or a statement that yields nothing).
         conn.commit()
         return []
-    rows = cur.fetchall()
-    return [dict(r) for r in rows]
+    return [dict(r) for r in cur.fetchall()]
 
 
-# cluster.py and some reference scripts import the query helper under the
-# name ``d1_query``. Provide it as an alias so a single module satisfies both.
+# ── bridge transport (whole-file SQLCipher vault) ────────────────────────────
+def _post(route: str, body: dict, timeout: int = 120) -> dict:
+    req = urllib.request.Request(
+        _BRIDGE_URL + route,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        out = json.loads(resp.read().decode("utf-8"))
+    if not out.get("ok"):
+        raise RuntimeError(f"vault-bridge error: {out.get('error', 'unknown')}")
+    return out
+
+
+def _query_bridge(sql: str, params: Optional[Sequence[Any]]) -> list[dict]:
+    return _post("/query", {"sql": sql, "params": list(params) if params else []}).get("rows", [])
+
+
+def query(sql: str, params: Optional[Sequence[Any]] = None) -> list[dict]:
+    """Execute ``sql`` against the local vault. Read → ``list[dict]``; write →
+    commits and returns ``[]``. Routes to the bridge or legacy sqlite3."""
+    if _BRIDGE_URL:
+        return _query_bridge(sql, params)
+    return _query_legacy(sql, params)
+
+
+# cluster.py and some reference scripts import the query helper as ``d1_query``.
 d1_query = query
 
 
@@ -110,7 +113,7 @@ def execute(sql: str, params: Optional[Sequence[Any]] = None) -> list[dict]:
 
 
 def close() -> None:
-    """Close the cached connection (used by tests / clean shutdown)."""
+    """Close the cached legacy connection (no-op in bridge mode)."""
     global _CONN, _CONN_PATH
     if _CONN is not None:
         try:

@@ -32,6 +32,11 @@ const HEX64 = /^[0-9a-f]{64}$/i;
 // HKDF domain-separation label for SYSTEM_KEY. This is a PERMANENT part of the
 // scheme — changing it would orphan any data encrypted under the old SYSTEM_KEY.
 const SYSTEM_KEY_INFO = 'mycelium:system-key:v1';
+// HKDF domain-separation label for the whole-file SQLCipher DB key (at-rest
+// blindness). PERMANENT — changing it would make the encrypted vault unopenable.
+// No third secret: like SYSTEM_KEY, this is derived from USER_MASTER, so the one
+// recovery key still reconstructs everything (operator: "no third KCV, all local").
+const DB_CIPHER_INFO = 'mycelium:db-cipher:v1';
 
 export function isHex64(s) { return typeof s === 'string' && HEX64.test(s.trim()); }
 
@@ -52,6 +57,19 @@ export function generateUserMaster() { return crypto.randomBytes(32).toString('h
 export function deriveSystemKey(userHex) {
   const ikm = Buffer.from(normalizeKey(userHex), 'hex');
   const out = crypto.hkdfSync('sha256', ikm, Buffer.alloc(0), Buffer.from(SYSTEM_KEY_INFO), 32);
+  return Buffer.from(out).toString('hex');
+}
+
+/**
+ * Deterministically derive the whole-file SQLCipher key from USER_MASTER
+ * (HKDF-SHA256, no salt, info=DB_CIPHER_INFO). Returns 64-char hex (the raw key
+ * SQLCipher binds via `key="x'<hex>'"`). Same input → same output, forever.
+ * No new secret and no third KCV: SQLCipher self-verifies (wrong key → the file
+ * won't open), so the per-key KCV scheme is untouched. @see deriveSystemKey.
+ */
+export function deriveDbKey(userHex) {
+  const ikm = Buffer.from(normalizeKey(userHex), 'hex');
+  const out = crypto.hkdfSync('sha256', ikm, Buffer.alloc(0), Buffer.from(DB_CIPHER_INFO), 32);
   return Buffer.from(out).toString('hex');
 }
 

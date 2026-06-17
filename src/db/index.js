@@ -55,8 +55,8 @@ import { createSpaceMatrixRoomsNamespace } from './space-matrix-rooms.js';
  * Open the vault db and assemble the tool-facing `db` namespace object.
  * @returns {{ db: object, close: () => void, adapter: object }}
  */
-export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federationDeps = {} }) {
-  const adapter = createDb({ dbPath, userKey, systemKey, scope });
+export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federationDeps = {}, dbKeyHex = null }) {
+  const adapter = createDb({ dbPath, userKey, systemKey, scope, dbKeyHex });
   const { d1Query, d1QueryAdmin, d1Batch, firstRow, parseJson, randomUUID, now } = adapter;
 
   const base = { d1Query, d1QueryAdmin, d1Batch, firstRow, parseJson, randomUUID, now };
@@ -164,6 +164,12 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // chained (tools/documents.js:102,516 `db.shareLinks?.…`), so absence
     // cleanly degrades to "not public" / "no links" for the single-user vault.
     _base: base,
+
+    // Raw better-sqlite3 handle (same connection the adapter opened). Internal:
+    // the on-disk SQLite search backend (src/search/backend/sqlite.js) needs
+    // direct synchronous access to its FTS5/vec0 tables in this same vault file.
+    // Underscore-prefixed = not a public namespace; only the search wiring reads it.
+    _sqlite: adapter.db,
   };
 
   // streams.spectrum joins connector op-state + streams.feed reuses messages/

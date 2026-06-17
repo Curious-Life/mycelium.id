@@ -14,6 +14,24 @@
 // Idempotency: a caller may pass `id` (e.g. a source message id / webhook key);
 // insertIgnore makes a resend a no-op. Without `id`, the schema generates one.
 import crypto from 'node:crypto';
+import { getMindSearch } from '../search/registry.js';
+
+/**
+ * Incremental search-index maintenance (Phase 1, §8). NO-OP unless the on-disk
+ * search backend is active (noteUpsert self-guards). Best-effort: a maintenance
+ * failure NEVER blocks or fails the capture. Keeps the on-disk FTS index fresh
+ * on every new/edited message so search needs no rebuild. The vector is added
+ * later by enrichment (when embedding_768 is computed). Never logs content.
+ */
+async function indexCaptured(id, content, createdAtIso) {
+  try {
+    const ms = getMindSearch();
+    if (!ms?.noteUpsert) return;
+    const ms2 = createdAtIso ? Date.parse(createdAtIso) : NaN;
+    const ts = Number.isFinite(ms2) ? Math.floor(ms2 / 1000) : Math.floor(Date.now() / 1000);
+    await ms.noteUpsert({ id, text: content, ts });
+  } catch { /* best-effort: never block the write */ }
+}
 
 /**
  * Normalize a caller-supplied "when this message actually occurred" value into
@@ -150,6 +168,7 @@ export async function captureMessage(db, msg, enqueueEnrichment) {
     try { await db.audit?.log?.({ action: 'message_captured', userId, resourceType: 'message', resourceId: id, details: { source: row.source } }); } catch { /* non-fatal */ }
     // Fire-and-forget enrichment hand-off (row already durably queued at nlp_processed=0).
     if (typeof enqueueEnrichment === 'function') { try { enqueueEnrichment(id); } catch { /* non-fatal */ } }
+    await indexCaptured(id, content, createdAtIso); // on-disk FTS upsert (no-op for in-RAM)
     return { id, deduped: false, updated: false };
   }
 
@@ -175,5 +194,6 @@ export async function captureMessage(db, msg, enqueueEnrichment) {
   if (!changed) return { id, deduped: true, updated: false };
   try { await db.audit?.log?.({ action: 'message_updated', userId, resourceType: 'message', resourceId: id, details: { source: row.source } }); } catch { /* non-fatal */ }
   if (typeof enqueueEnrichment === 'function') { try { enqueueEnrichment(id); } catch { /* non-fatal */ } }
+  await indexCaptured(id, content, createdAtIso); // re-upsert edited content (no-op for in-RAM)
   return { id, deduped: false, updated: true };
 }

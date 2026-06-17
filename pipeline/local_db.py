@@ -1,26 +1,55 @@
-# pipeline/local_db.py — V1 single-user LOCAL data layer.
+# pipeline/local_db.py — V1 single-user LOCAL data layer (used by cluster.py).
 #
-# Replaces the Cloudflare Worker proxy (the old httpx `/api/db/*` calls + the
-# d1_client module). Every pipeline stage reads/writes the local encrypted
-# SQLite vault directly. There is NO worker, NO MYA_WORKER_URL, NO auth token.
+# Two transports (see d1_client.py for the same split):
+#   * BRIDGE MODE (at-rest blindness, A′): ``MYCELIUM_DB_BRIDGE_URL`` set → POST to
+#     the long-running loopback ``vault-bridge.js``, which owns the only handle to
+#     the whole-file SQLCipher vault. See docs/AT-REST-BLINDNESS-DESIGN-2026-06-11.md.
+#   * LEGACY MODE: unset → open the plaintext vault directly via stock ``sqlite3``;
+#     batch_encrypted shells out to the spawn-per-call local-write-bridge.js.
 #
 #   query(sql, params)           → list[dict]   (SELECT) or [] (write via query)
 #   batch(statements)            → run PLAINTEXT writes (columns NOT encrypted)
 #   batch_encrypted(statements)  → run writes that touch ENCRYPTED_FIELDS columns
-#                                  through the canonical JS adapter (local Node
-#                                  bridge) so the values are encrypted at rest.
+#                                  through the canonical JS adapter (auto-encrypt)
 #
 # A "statement" is {"sql": str, "params": list} (also accepts [sql, params]).
 import json
 import os
 import sqlite3
 import subprocess
+import urllib.request
 from pathlib import Path
 
 DB_PATH = os.environ.get("MYCELIUM_DB", "")
+_BRIDGE_URL = os.environ.get("MYCELIUM_DB_BRIDGE_URL") or None
 _conn = None
 
 
+# ── shared statement-shape helper ────────────────────────────────────────────
+def _parts(s):
+    if isinstance(s, dict):
+        return s.get("sql", ""), s.get("params") or []
+    if isinstance(s, (list, tuple)):
+        return s[0], (s[1] if len(s) > 1 else []) or []
+    return str(s), []
+
+
+# ── bridge transport ─────────────────────────────────────────────────────────
+def _post(route, body, timeout=120):
+    req = urllib.request.Request(
+        _BRIDGE_URL + route,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        out = json.loads(resp.read().decode("utf-8"))
+    if not out.get("ok"):
+        raise RuntimeError(f"vault-bridge error: {out.get('error', 'unknown')}")
+    return out
+
+
+# ── legacy direct-sqlite3 transport ──────────────────────────────────────────
 def _conn_get():
     global _conn
     if _conn is None:
@@ -32,17 +61,11 @@ def _conn_get():
     return _conn
 
 
-def _parts(s):
-    if isinstance(s, dict):
-        return s.get("sql", ""), s.get("params") or []
-    if isinstance(s, (list, tuple)):
-        return s[0], (s[1] if len(s) > 1 else []) or []
-    return str(s), []
-
-
 def query(sql, params=None):
     """Run a query against the local vault. SELECT → list[dict]; a write issued
     through query() (UPDATE/DELETE) commits and returns []."""
+    if _BRIDGE_URL:
+        return _post("/query", {"sql": sql, "params": list(params) if params else []}).get("rows", [])
     conn = _conn_get()
     cur = conn.execute(sql, params or [])
     if cur.description is None:
@@ -54,6 +77,8 @@ def query(sql, params=None):
 def batch(statements):
     """Run a batch of PLAINTEXT statements in one transaction. Only for columns
     NOT in ENCRYPTED_FIELDS (centroids, energy, coherence, …)."""
+    if _BRIDGE_URL:
+        return _post("/batch", {"statements": statements or []})
     conn = _conn_get()
     n = 0
     for s in (statements or []):
@@ -70,11 +95,13 @@ _BRIDGE = Path(__file__).parent / "local-write-bridge.js"
 
 def batch_encrypted(statements):
     """Run a batch of statements that write ENCRYPTED_FIELDS columns through the
-    canonical JS encryption adapter (a local Node bridge), so the values land
-    encrypted at rest — NOT plaintext. Mirrors the old worker d1_batch_encrypted
-    contract, but local + in-vault. Raises RuntimeError on bridge failure."""
+    canonical JS encryption adapter, so the values land encrypted at rest. In
+    bridge mode this is the long-running vault-bridge; in legacy mode it is the
+    spawn-per-call local-write-bridge.js. Raises RuntimeError on failure."""
     if not statements:
         return {"ok": True, "written": 0}
+    if _BRIDGE_URL:
+        return _post("/batch_encrypted", {"statements": statements})
     payload = json.dumps({"statements": statements})
     try:
         proc = subprocess.run(
