@@ -46,6 +46,7 @@ import { createSpaceRoomsNamespace } from './space-rooms.js';
 import { createSpaceRoomDocumentsNamespace } from './space-room-documents.js';
 import { createSpaceConversationsNamespace } from './space-conversations.js';
 import { createContextsNamespace } from './contexts.js';
+import { createInboundSharesNamespace } from './inbound-shares.js';
 import { createSpaceMatrixRoomsNamespace } from './space-matrix-rooms.js';
 
 /**
@@ -91,6 +92,8 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     spaceRoomDocuments: createSpaceRoomDocumentsNamespace({ d1Query, randomUUID }),
     spaceConversations: createSpaceConversationsNamespace({ d1Query, firstRow, randomUUID }),
     contexts: createContextsNamespace({ d1Query, randomUUID }),
+    // Federation sharing (grantee side): spaces/contexts a peer shared WITH me.
+    inboundShares: createInboundSharesNamespace({ d1Query, randomUUID }),
     // Per-user channel bindings (Phase B: the box's Matrix MXID under kind='matrix').
     identityChannels: createIdentityChannelsNamespace({ d1Query, firstRow }),
     spaceMatrixRooms: createSpaceMatrixRoomsNamespace({ d1Query, firstRow }),

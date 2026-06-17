@@ -283,6 +283,22 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
     try { ok(res, { count: (await db.connections.pending(userId)).length }); }
     catch { ok(res, { count: 0 }); }
   });
+  // Combined People nav badge: pending invites + unread direct messages + unseen
+  // inbound shares. One poll drives the single dot next to "People".
+  router.get('/people/badge', async (_req, res) => {
+    const [invites, unread, newShares] = await Promise.all([
+      db.connections.pending(userId).then((r) => r.length).catch(() => 0),
+      db.connections.unreadMessages(userId).then((u) => u.total).catch(() => 0),
+      db.inboundShares.unseenCount().catch(() => 0),
+    ]);
+    ok(res, { invites, unread, newShares, total: invites + unread + newShares });
+  });
+  // Mark all inbound shares seen (called when the Shared view is opened) → clears
+  // the "new share" part of the badge.
+  router.post('/inbound-shares/seen', async (_req, res) => {
+    try { await db.inboundShares.markAllSeen(); ok(res, { ok: true }); }
+    catch { fail(res, 500, 'could not mark seen'); }
+  });
   router.get('/connections/pending', async (_req, res) => {
     try { ok(res, { requests: (await db.connections.pending(userId)).map(mapPending) }); }
     catch { ok(res, { requests: [] }); }
@@ -376,8 +392,12 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
          ORDER BY sc.name`,
         [cid, userId],
       )).results || [];
-      ok(res, { peer_id: peerId, spaces, contexts });
-    } catch { ok(res, { peer_id: null, spaces: [], contexts: [] }); }
+      // INBOUND: what this peer shared WITH me (federation sharing, grantee side).
+      // Populated by the signed share-announce (Phase 2); names decrypt here.
+      let inbound = [];
+      try { inbound = (await db.inboundShares.listForConnection(cid)).map((s) => ({ id: s.id, kind: s.kind, name: s.name, role: s.role, granted_at: s.granted_at })); } catch {}
+      ok(res, { peer_id: peerId, spaces, contexts, inbound });
+    } catch { ok(res, { peer_id: null, spaces: [], contexts: [], inbound: [] }); }
   });
 
   // ── Spaces (default-private shareable folders, Phase A) ──────────────────

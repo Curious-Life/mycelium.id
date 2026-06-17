@@ -90,7 +90,7 @@
 	let overlap = $state<Overlap | null>(null);
 	let overlapLoading = $state(false);
 	let showUnique = $state(false);
-	let shared = $state<{ peer_id: string | null; spaces: Array<{ id: string; name: string; role: string }>; contexts: Array<{ id: string; name: string; is_private: number }> }>({ peer_id: null, spaces: [], contexts: [] });
+	let shared = $state<{ peer_id: string | null; spaces: Array<{ id: string; name: string; role: string }>; contexts: Array<{ id: string; name: string; is_private: number }>; inbound: Array<{ id: string; kind: string; name: string | null; role: string | null; granted_at: string | null }> }>({ peer_id: null, spaces: [], contexts: [], inbound: [] });
 	let sharedLoading = $state(false);
 
 	const isEmpty = $derived(connections.length === 0 && pending.length === 0 && sent.length === 0);
@@ -288,8 +288,16 @@
 		finally { overlapLoading = false; }
 	}
 	async function loadShared(connId: string) {
-		sharedLoading = true; shared = { peer_id: null, spaces: [], contexts: [] };
+		sharedLoading = true; shared = { peer_id: null, spaces: [], contexts: [], inbound: [] };
 		try { shared = await apiGet(`/portal/connections/${connId}/shared`); } catch {} finally { sharedLoading = false; }
+		// Opening the Shared view clears the "new share" part of the People badge.
+		try { await apiPost('/portal/inbound-shares/seen', {}); } catch {}
+	}
+	// Phase 3 replaces this with the signed content fetch + a read-only viewer of
+	// the shared space/context's documents. Until then, inbound is populated by the
+	// Phase 2 announce and this just acknowledges intent.
+	function openInboundShare(item: { kind: string; name: string | null }) {
+		showSuccess(`Viewing the contents of "${item.name || item.kind}" is coming in the next step.`);
 	}
 	async function revokeSpaceShare(spaceId: string) {
 		if (!shared.peer_id) return;
@@ -507,21 +515,39 @@
 
 					{:else}
 						<div class="pane-scroll">
+							<!-- You → them -->
 							<div class="block">
 								<div class="shared-head">
-									<h3>Shared with {displayName(selectedConnection)}</h3>
+									<h3>You shared</h3>
 									<button class="btn btn-ghost btn-xs" onclick={() => workspace.openOrFocus('contexts')}>＋ Share</button>
 								</div>
 								{#if sharedLoading}
 									<div class="loading sm">Loading…</div>
 								{:else if shared.spaces.length === 0 && shared.contexts.length === 0}
-									<p class="shared-empty">Nothing shared yet. Grant a space (Spaces → a space → Members) or a mindscape facet (Sharing).</p>
+									<p class="shared-empty">You haven't shared anything with {displayName(selectedConnection)} yet. Grant a space (Spaces → a space → Members) or a mindscape facet (Sharing).</p>
 								{:else}
 									{#each shared.spaces as s (s.id)}
-										<div class="shared-row"><span class="shared-label">{s.name} <span class="shared-role">· {s.role === 'contributor' ? 'can add' : 'can view'}</span></span><button class="link-revoke" onclick={() => revokeSpaceShare(s.id)}>Revoke</button></div>
+										<div class="shared-row"><span class="shared-label">{s.name} <span class="shared-role">· space · {s.role === 'contributor' ? 'can add' : 'can view'}</span></span><button class="link-revoke" onclick={() => revokeSpaceShare(s.id)}>Revoke</button></div>
 									{/each}
 									{#each shared.contexts as c (c.id)}
 										<div class="shared-row"><span class="shared-label">{c.name} <span class="shared-role">· facet</span></span><button class="link-revoke" onclick={() => revokeContextGrant(c.id)}>Revoke</button></div>
+									{/each}
+								{/if}
+							</div>
+
+							<!-- Them → you -->
+							<div class="block">
+								<h3>Shared with you</h3>
+								{#if sharedLoading}
+									<div class="loading sm">Loading…</div>
+								{:else if shared.inbound.length === 0}
+									<p class="shared-empty">{displayName(selectedConnection)} hasn't shared anything with you yet. When they do, it'll appear here.</p>
+								{:else}
+									{#each shared.inbound as item (item.id)}
+										<button class="shared-row inbound" onclick={() => openInboundShare(item)}>
+											<span class="shared-label">{item.name || 'Shared ' + item.kind} <span class="shared-role">· {item.kind}{item.role ? ' · ' + (item.role === 'contributor' ? 'can add' : 'can view') : ''}</span></span>
+											<span class="shared-open">Open ›</span>
+										</button>
 									{/each}
 								{/if}
 							</div>
@@ -670,6 +696,9 @@
 	.shared-head h3 { margin-bottom: 0; }
 	.shared-empty { font-size: 0.8rem; color: var(--color-text-tertiary); line-height: 1.5; }
 	.shared-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.4rem 0; }
+	.shared-row.inbound { width: 100%; text-align: left; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 9px; padding: 0.55rem 0.7rem; margin-bottom: 0.3rem; cursor: pointer; transition: border-color 0.12s; }
+	.shared-row.inbound:hover { border-color: var(--color-accent-aurum); }
+	.shared-open { font-size: 0.74rem; color: var(--color-accent-aurum); white-space: nowrap; }
 	.shared-label { font-size: 0.82rem; color: var(--color-text-primary); }
 	.shared-role { color: var(--color-text-tertiary); font-size: 0.74rem; }
 
