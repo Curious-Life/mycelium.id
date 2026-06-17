@@ -56,6 +56,7 @@ rec("apple-health → device (folds to apple_health)", canon('apple-health') ===
 rec("portal-chat → portal", canon('portal-chat') === 'portal' && kind('portal-chat') === 'portal');
 rec("upload → knowledge", kind('upload') === 'knowledge');
 rec("claude-code/subagent → agent (folds to claude-code)", canon('claude-code/subagent') === 'claude-code' && kind('claude-code/subagent') === 'agent');
+rec("agent-* tags → agent (own chip, Agents group)", kind('agent-file') === 'agent' && kind('agent-output') === 'agent' && kind('agent-delegation') === 'agent' && canon('agent-file') === 'agent-file');
 
 // Unknown self-places to 'other' (no crash, no void) and keeps its raw key.
 rec("unknown 'frobnicator' → other", kind('frobnicator') === 'other' && canon('frobnicator') === 'frobnicator');
