@@ -269,8 +269,13 @@ class Handler(BaseHTTPRequestHandler):
                 text = " ".join(s.text.strip() for s in segments).strip()
             except Exception as e:
                 return self._json(500, {"error": str(e)[:200]})
+            # Return the FULL transcript — faster-whisper already produced every
+            # segment of the audio it was given. The old `text[:8000]` cut silently
+            # dropped the tail of any voice note longer than ~8000 chars (~8-10 min
+            # of speech), even though the whole thing was transcribed. The Node
+            # caller applies its own 200k DoS ceiling (clampStored); nothing is lost.
             return self._json(200, {
-                "text": text[:8000],
+                "text": text,
                 "language": getattr(info, "language", None),
                 "ms": int((time.time() - t0) * 1000),
             })

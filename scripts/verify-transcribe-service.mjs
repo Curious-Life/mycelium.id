@@ -136,6 +136,12 @@ rec('A3. whisper not ready → straight to the LLM path', t3 === 'llm transcript
   const readPos = py.indexOf('self.rfile.read(');
   rec('T5. transcribe-service caps Content-Length (413) before rfile.read (loopback DoS guard)',
     /MAX_BODY\s*=/.test(py) && capPos > -1 && readPos > -1 && capPos < readPos);
+
+  // T6. (static) the service returns the FULL transcript — the old `text[:8000]`
+  // cut silently dropped the tail of any voice note > ~8000 chars (the whole audio
+  // WAS transcribed; only the response was truncated). Node clamps at 200k.
+  rec('T6. transcribe-service returns the full transcript (no text[:8000] cap)',
+    !/"text":\s*text\s*\[:/.test(py) && /"text":\s*text\s*,/.test(py), 'cap removed');
 }
 
 sup.stop(); svc.close(); api.close();

@@ -131,6 +131,7 @@ export async function* localStream({
   baseUrl = DEFAULT_OLLAMA_URL,
   fetch = globalThis.fetch,
   timeoutMs = 60000,
+  numCtx,
   onUsage,
   onTruncated,
 } = {}) {
@@ -141,7 +142,13 @@ export async function* localStream({
     throw new InferenceError("localStream: prompt must be a non-empty string", { backend: "local" });
   }
   const url = `${baseUrl.replace(/\/+$/, "")}/api/generate`;
-  const body = { model, prompt, stream: true, options: { num_predict: maxTokens } };
+  const options = { num_predict: maxTokens };
+  // num_ctx: Ollama defaults to a SMALL window (~4096). Without it a long prompt
+  // is silently truncated at the INPUT (the model never sees the tail) — distinct
+  // from the OUTPUT cap onTruncated reports. Size it to hold prompt+output, same
+  // as localInfer (the streaming path previously omitted it entirely).
+  if (Number.isFinite(numCtx) && numCtx > 0) options.num_ctx = Math.round(numCtx);
+  const body = { model, prompt, stream: true, options };
   if (Array.isArray(images) && images.length) body.images = images;
 
   // Timeout guards time-to-first-byte (the connection), not the whole stream —
