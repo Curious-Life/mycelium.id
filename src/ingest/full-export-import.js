@@ -212,11 +212,20 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
       if (ent.isDirectory()) { await importAgentDocs(abs, r); continue; }
       if (!TEXT_EXT.has(path.extname(ent.name).toLowerCase())) { agentStats.skippedBinary++; continue; }
       try {
-        const sz = fs.statSync(abs).size;
-        if (sz === 0 || sz > MAX_AGENT_FILE_BYTES) { agentStats.skippedBinary++; continue; }
+        const st = fs.statSync(abs);
+        if (st.size === 0 || st.size > MAX_AGENT_FILE_BYTES) { agentStats.skippedBinary++; continue; }
         const content = fs.readFileSync(abs, 'utf8');
         const id = crypto.createHash('sha256').update(`full-export:agents:${r}`).digest('hex').slice(0, 32);
-        const rr = await restoreTable(db, 'documents', [{ id, path: `agents/${r}`, title: path.basename(r), content, created_by: 'full-export', embedding_768: null }], { userId });
+        // created_at from the file's mtime — WITHOUT this, restoreTable omits the
+        // column and documents.created_at defaults to now(), stamping every agent
+        // mind-file with the IMPORT date (the 2026-06-15 canonical import did this
+        // to 754 docs). mtime is deterministic, so re-imports are stable.
+        // PROPER FIX is exporter-side: the canonical `mycelium-vault-export` tool
+        // should record each agent file's ORIGINAL mtime in the bundle (the
+        // decrypted bundle's file mtimes are the export's own write times, not the
+        // file's true authored date) so import can restore the authoritative value.
+        const createdAt = new Date(st.mtimeMs).toISOString();
+        const rr = await restoreTable(db, 'documents', [{ id, path: `agents/${r}`, title: path.basename(r), content, created_at: createdAt, created_by: 'full-export', embedding_768: null }], { userId });
         agentStats.inserted += rr.inserted; agentStats.deduped += rr.deduped; agentStats.failed += rr.failed;
       } catch { agentStats.failed++; }
     }
