@@ -64,17 +64,49 @@ export function createSearchHelpers(deps = {}) {
     if (built) return;
     if (db && typeof db.rawQuery === 'function') {
       try {
-        // On-disk backend persists across boots: populate ONCE when empty (the
-        // same loadFromDb path the in-RAM backend uses every boot), then rely on
-        // incremental maintenance. The in-RAM backend always (re)builds.
-        if (backendKind === 'sqlite' && typeof backend.count === 'function' && (await backend.count()) > 0) {
+        // On-disk backend persists across boots: populate ONCE (the same
+        // loadFromDb path the in-RAM backend uses every boot), tracked by a
+        // PERSISTED flag — NOT count()>0, which incremental writes (noteUpsert)
+        // would trip before the first query, skipping the full corpus load. The
+        // in-RAM backend always (re)builds.
+        if (backendKind === 'sqlite' && typeof backend.isCorpusBuilt === 'function' && backend.isCorpusBuilt()) {
           // already populated on disk — no rebuild
         } else {
           await loadFromDb({ backend, db, userId, getMasterKey });
+          if (backendKind === 'sqlite' && typeof backend.markCorpusBuilt === 'function') backend.markCorpusBuilt();
         }
       } catch { /* fall through */ }
     }
     built = true;
+  }
+
+  // Incremental index maintenance (§8). NO-OP unless the on-disk backend is
+  // active: the in-RAM backend is rebuilt per boot, so per-write upserts would
+  // just grow it unboundedly between Generates. Best-effort everywhere — a
+  // maintenance failure NEVER blocks the originating write. Reached from the
+  // write paths via getMindSearch() (registry), so capture/enrich keep the
+  // on-disk index fresh without a rebuild.
+  const incremental = backendKind === 'sqlite';
+  async function noteUpsert(doc) {
+    if (!incremental || !doc || typeof doc.id !== 'string' || !doc.id) return;
+    try {
+      await backend.add({
+        id: doc.id,
+        text: doc.text ?? doc.content ?? '',
+        embedding: doc.embedding,
+        ts: Number.isFinite(doc.ts) ? doc.ts : Math.floor(Date.now() / 1000),
+      });
+    } catch { /* best-effort: never block the write */ }
+  }
+  async function noteDelete(ids) {
+    if (!incremental) return;
+    const list = Array.isArray(ids) ? ids : [ids];
+    try { await backend.delete({ ids: list.filter((id) => typeof id === 'string' && id) }); } catch { /* best-effort */ }
+  }
+  // Vector-ready hook (enrichment): update only this id's vector, preserve ts/fts.
+  function noteVector(id, embedding) {
+    if (!incremental || typeof id !== 'string' || !id || !embedding) return;
+    try { backend.noteVector?.(id, embedding); } catch { /* best-effort */ }
   }
 
   // Index a document directly (tests / incremental updates). Marks built so a
@@ -282,7 +314,11 @@ export function createSearchHelpers(deps = {}) {
     structure,
     rebuild,
     indexDocument,
+    noteUpsert,
+    noteDelete,
+    noteVector,
     backend,
+    backendKind,
     // expose isScoped for parity with the canonical searchHelpers shape
     isScoped: () => false,
   };

@@ -10,6 +10,7 @@ import Database from 'better-sqlite3';
 import { webcrypto } from 'node:crypto';
 import { createSqliteBackend } from '../src/search/backend/sqlite.js';
 import { createLocalBackend, createStubEmbedder, createSearchHelpers } from '../src/search/index.js';
+import { captureMessage } from '../src/ingest/capture.js';
 
 const ledger = [];
 const rec = (name, pass, detail = '') => {
@@ -168,6 +169,63 @@ async function main() {
   rec('SQ12c default (no flag) keeps the in-RAM LocalBackend',
     !!shDefault.backend?._internal && !!shDefault.backend._internal().index,
     'default backend is in-RAM');
+
+  // ── SQ13 build-flag robustness: incremental add before 1st query must NOT
+  //    skip the full corpus build (the count()>0 trap the flag fixes) ─────────
+  const bfRaw = new Database(':memory:');
+  bfRaw.exec(`CREATE TABLE messages (id TEXT, user_id TEXT, content TEXT, created_at TEXT, embedding_768 TEXT, forgotten_at TEXT, sensitive INTEGER DEFAULT 0, agent_id TEXT)`);
+  const bfSeed = bfRaw.prepare('INSERT INTO messages(id,user_id,content,created_at) VALUES (?,?,?,?)');
+  bfSeed.run('seed-1', 'u1', 'seeded alpha document', '2026-06-01T00:00:00.000Z');
+  bfSeed.run('seed-2', 'u1', 'seeded beta document', '2026-06-02T00:00:00.000Z');
+  const bfDb = { _sqlite: bfRaw, rawQuery: (s, p = []) => { try { return { results: bfRaw.prepare(s).all(...p) }; } catch { return { results: [] }; } } };
+  const bfSh = createSearchHelpers({ db: bfDb, userId: 'u1', searchBackend: 'sqlite' });
+  await bfSh.noteUpsert({ id: 'incr-1', text: 'incrementally added before any query', ts: now }); // makes count>0
+  const bfBeforeBuilt = bfRaw.prepare("SELECT value FROM search_state WHERE key='corpus_built'").get()?.value;
+  await bfSh.search('document', { limit: 5 }); // triggers ensureBuilt
+  const bfSeededIndexed = bfRaw.prepare("SELECT COUNT(*) c FROM doc_meta WHERE id LIKE 'seed-%'").get().c;
+  const bfBuiltAfter = bfRaw.prepare("SELECT value FROM search_state WHERE key='corpus_built'").get()?.value;
+  rec('SQ13 persisted build-flag: incremental add does NOT skip the full loadFromDb',
+    bfBeforeBuilt !== '1' && bfSeededIndexed === 2 && bfBuiltAfter === '1',
+    `seededIndexed=${bfSeededIndexed} builtBefore=${bfBeforeBuilt} builtAfter=${bfBuiltAfter}`);
+
+  // ── SQ14 capture hook end-to-end: a NEW message is searchable with NO rebuild
+  const capRaw = new Database(':memory:');
+  capRaw.exec(`CREATE TABLE messages (id TEXT PRIMARY KEY, user_id TEXT, content TEXT, created_at TEXT, embedding_768 TEXT, forgotten_at TEXT, sensitive INTEGER DEFAULT 0, agent_id TEXT)`);
+  const capDb = {
+    _sqlite: capRaw,
+    rawQuery: (s, p = []) => { try { return { results: capRaw.prepare(s).all(...p) }; } catch { return { results: [] }; } },
+    messages: {
+      getContentMeta: async () => ({ exists: false }),
+      insertIgnore: async (rows) => { for (const r of rows) capRaw.prepare('INSERT OR IGNORE INTO messages(id,user_id,content,created_at) VALUES (?,?,?,?)').run(r.id, r.user_id, r.content, r.created_at || '2026-06-05T00:00:00.000Z'); },
+    },
+    audit: { log: async () => {} },
+  };
+  const capSh = createSearchHelpers({ db: capDb, userId: 'u1', searchBackend: 'sqlite' }); // registers as active (setMindSearch)
+  capSh.backend.markCorpusBuilt(); // steady state: ensureBuilt must NOT rebuild
+  await captureMessage(capDb, { userId: 'u1', id: 'cap-1', content: 'a brand new note about kayaking on alpine rivers', source: 'api' });
+  const capFound = await capSh.bulkSearch({ query: 'kayaking alpine rivers', limit: 5 });
+  rec('SQ14 capture hook: new message searchable immediately, NO rebuild (corpus_built stayed set)',
+    capRaw.prepare("SELECT value FROM search_state WHERE key='corpus_built'").get()?.value === '1' &&
+    capFound.messages.some((m) => m.includes('kayaking')),
+    `msgs=${capFound.messages.length}`);
+
+  // ── SQ15 enrich noteVector: vector added to an existing fts-only doc → vector
+  //    query finds it; ts/fts preserved (no clobber) ─────────────────────────
+  const enRaw = new Database(':memory:');
+  const enbe = createSqliteBackend({ sqliteDb: enRaw, userId: 'u1' });
+  await enbe.add({ id: 'en-1', text: 'photosynthesis in deep ocean vents', ts: now - 999 }); // fts + ts, no vector
+  enbe.noteVector('en-1', axisVec(9)); // enrichment hands the raw vector
+  const enVecHits = await enbe.query({ embedding: axisVec(9), topK: 3 });
+  const enTs = enRaw.prepare("SELECT ts FROM doc_meta WHERE id='en-1'").get()?.ts;
+  rec('SQ15 noteVector: enrichment vector indexed for an existing doc; ts preserved',
+    enVecHits.hits.some((h) => h.id === 'en-1') && enTs === now - 999,
+    `vecHit=${enVecHits.hits.some((h) => h.id === 'en-1')} ts=${enTs} (want ${now - 999})`);
+
+  // ── SQ16 maintenance is a NO-OP on the default in-RAM backend ──────────────
+  const ramSh = createSearchHelpers({ db: { rawQuery: () => ({ results: [] }) }, userId: 'u1' }); // no flag → in-RAM
+  let threw = false;
+  try { await ramSh.noteUpsert({ id: 'x', text: 'y', ts: now }); ramSh.noteVector('x', axisVec(1)); await ramSh.noteDelete(['x']); } catch { threw = true; }
+  rec('SQ16 maintenance API is a safe no-op on the in-RAM backend', !threw && ramSh.backendKind === 'local');
 
   const passed = ledger.filter(Boolean).length;
   const failed = ledger.length - passed;

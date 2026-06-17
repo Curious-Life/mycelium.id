@@ -27,6 +27,7 @@
 
 import { encryptVector } from '../search/ann/decode.js';
 import { EMBED_DIM } from '../embed/client.js';
+import { getMindSearch } from '../search/registry.js';
 import { extract } from './extract.js';
 
 export function createEnrichmentService(deps) {
@@ -122,6 +123,10 @@ export function createEnrichmentService(deps) {
           // No userId — match the decryptVector read path's key derivation.
           const envelope = await encryptVector(Float32Array.from(vec), scope, masterKey);
           await messages.updateEnrichment(row.id, userId, { embedding768: envelope, nlpProcessed: 2 });
+          // Incremental search maintenance (§8): hand the just-computed vector to
+          // the on-disk index (NO-OP for the in-RAM backend; never decrypts again;
+          // best-effort, never blocks enrichment). @see src/search/index.js noteVector.
+          try { getMindSearch()?.noteVector?.(row.id, vec); } catch { /* best-effort */ }
           embedded++;
         } catch (err) {
           // Isolate the poison row. Never log row.content (CLAUDE.md §1 — zero

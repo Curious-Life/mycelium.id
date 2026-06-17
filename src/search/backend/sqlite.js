@@ -101,6 +101,8 @@ export function createSqliteBackend(deps = {}) {
     metaDel: raw.prepare('DELETE FROM doc_meta WHERE id = ?'),
     bm25: raw.prepare('SELECT id, bm25(fts_docs) AS rank FROM fts_docs WHERE fts_docs MATCH ? ORDER BY rank LIMIT ?'),
     shortlist: raw.prepare('SELECT id FROM vec_docs_256 WHERE embedding MATCH ? ORDER BY distance LIMIT ?'),
+    stateGet: raw.prepare('SELECT value FROM search_state WHERE key = ?'),
+    stateSet: raw.prepare('INSERT INTO search_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'),
   };
   let _lastQueryAt = null;
 
@@ -219,6 +221,26 @@ export function createSqliteBackend(deps = {}) {
       return { deleted };
     },
     async count() { return stmts.metaCount.get().c; },
+    // Vector-ready upsert (enrichment): replace ONLY this id's vector entries,
+    // leaving its fts row + doc_meta.ts untouched (capture already set those at
+    // the message's real created_at — re-add() would clobber ts with now()).
+    noteVector(id, embedding) {
+      if (typeof id !== 'string' || !id) return;
+      const norm = embedding ? normalize(toF32(embedding)) : null;
+      if (!norm || norm.length !== VEC_DIM) return;
+      const norm256 = prefix256(norm);
+      raw.transaction(() => {
+        stmts.vec768Del.run(id);
+        stmts.vec256Del.run(id);
+        stmts.vec768Ins.run(id, f32buf(norm));
+        if (norm256) stmts.vec256Ins.run(id, f32buf(norm256));
+      })();
+    },
+    // Persisted "the whole corpus was loaded once" flag — robust against the
+    // count()>0 heuristic breaking once incremental writes (noteUpsert) add rows
+    // before the first query. ensureBuilt uses this to decide loadFromDb.
+    isCorpusBuilt() { return stmts.stateGet.get('corpus_built')?.value === '1'; },
+    markCorpusBuilt() { stmts.stateSet.run('corpus_built', '1'); },
     async health() {
       const embedHealthy = embedder ? await embedder.health().catch(() => false) : false;
       const indexLoaded = stmts.metaCount.get().c > 0;

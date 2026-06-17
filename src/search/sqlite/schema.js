@@ -36,6 +36,10 @@ export function ensureSearchSchema(rawDb) {
       id TEXT PRIMARY KEY,
       ts INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS search_state (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
     CREATE VIRTUAL TABLE IF NOT EXISTS fts_docs USING fts5(
       id UNINDEXED,
       content,
