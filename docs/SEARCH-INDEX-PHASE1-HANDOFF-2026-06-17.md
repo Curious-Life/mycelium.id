@@ -17,7 +17,26 @@
 
 `src/search/backend/sqlite.js` (`createSqliteBackend`) + `src/search/sqlite/schema.js` + gate `verify:search-sqlite` (wired into the chain). **12/12 GO**: keyword hit/miss, two-stage 256→768 KNN nearest-first, hybrid RRF fusion, idempotent upsert, forget removal, temporal ordering, contract shape, **100% keyword parity vs in-RAM backend**, perf N=4000 hybrid **p50=8ms RSS=96MB**, stub-embedder embed path. Matches `createLocalBackend`'s contract exactly; rrf/temporal reused verbatim. Fixture-only, default-OFF. Bug caught + fixed: decoupled 768/256 inserts so a valid 768-d vector is never dropped when its 256-d prefix is degenerate. `sqlite-vec@0.1.7-alpha.2` added as a dep.
 
-### Next: Step 2b — wire into `index.js` (flag-select, default OFF)
+## Step 2b — flag-select wiring ✅ DONE (commit `55a533e`)
+
+`createSearchHelpers` selects the backend: default in-RAM (unchanged); `MYCELIUM_SEARCH_BACKEND=sqlite` (or `deps.searchBackend`) → `createSqliteBackend` over `db._sqlite` (raw handle now exposed on the db namespace). On-disk index persists, so `ensureBuilt` populates ONCE via `loadFromDb` when empty, then skips. Gate `verify:search-sqlite` 15/15 (SQ12a/b/c: selects+populates, 2nd boot skips rebuild, default keeps in-RAM); `verify:search` 39/39 + `verify:search-rehydrate` GO (default non-regressing).
+
+### Next: Step 3 — incremental maintenance (so the on-disk index stays fresh; lets default flip ON)
+
+**FIRST fix the build signal (prerequisite):** 2b's `ensureBuilt` uses `count()>0` to mean "already populated". Once step-3 incremental adds exist, a single capture before the first query makes `count>0` and would SKIP the full `loadFromDb`. Replace with a persisted flag: add `search_state(key TEXT PRIMARY KEY, value TEXT)` to `schema.js` + `isCorpusBuilt()`/`markCorpusBuilt()` on the sqlite backend; `ensureBuilt` (sqlite) → if `isCorpusBuilt()` skip, else `loadFromDb` then `markCorpusBuilt()`.
+
+**Hook points (§8) — add a no-op-unless-sqlite maintenance API on searchHelpers** (`noteUpsert({id,text,embedding,ts})` → `backend.add`; `noteDelete(ids)` → `backend.delete`; guarded by `backendKind==='sqlite'` so the default path is zero-change):
+- **New message** — `captureMessage` insert ([ingest/capture.js:148](../src/ingest/capture.js)): `noteUpsert` FTS (content, ts; no vector yet).
+- **Content edit** — `captureMessage` update ([capture.js:174](../src/ingest/capture.js)) / `db.messages.updateContent`: re-`noteUpsert`.
+- **Vector ready** — enrichment writes `embedding_768` ([enrich/service.js](../src/enrich/service.js)): `noteUpsert` with the just-computed Float32Array (no decrypt).
+- **Forget** — already wired ([curate.js:190](../src/tools/curate.js) calls `backend.delete`) ✓.
+- **Profiles** — territory/realm/theme name+essence writes (clustering/describe): `noteUpsert` the prefixed id.
+
+`captureMessage`/enrich reach the active backend via `getMindSearch()` (registry) — NOTE the registry import bug found this session (`src/db/messages.js:689` imports the non-existent `../mind-search/registry.js`; should be `../search/registry.js`) — spawned as task_b403f299; fix or avoid that path.
+
+**Gate** (extend `verify:search-sqlite`): capture a new message → it's searchable with NO rebuild/populate; edit → new content searchable, old gone; enrich adds a vector → hybrid finds it; forget → gone. Then a 2nd boot with the flag ON does NOT rebuild (isCorpusBuilt). Only after this is green should the default flip to sqlite (separate decision).
+
+### Original Step 2b spec (kept for reference) — wire into `index.js` (flag-select, default OFF)
 `createSearchHelpers` ([index.js:43-52](../src/search/index.js)) currently always builds `createLocalBackend` + `loadFromDb`. Add a flag (e.g. `MYCELIUM_SEARCH_BACKEND=sqlite` / a config) that instead builds `createSqliteBackend({ sqliteDb: <raw vault handle>, embedder, userId })` and SKIPS `loadFromDb`. Needs the raw better-sqlite3 handle reachable from the assembled db namespace (the adapter exposes `db` — see `src/adapter/d1.js` return; thread it through `src/db/index.js` to search). On a plaintext vault the index must be POPULATED once (one-time build from existing rows — a small CLI or a guarded boot build); on the encrypted vault that population happens during the step-5 migration. **Keep default OFF until step 3 maintenance lands** (else the on-disk index goes stale on writes). Smoke: `verify:search` stays GO; flag ON → fixture search hits without a rebuild.
 
 ### Original Step 2 spec (kept for reference)
