@@ -16,6 +16,16 @@
   covered-period pair of columns. Also added: the **walk-level provenance** (the agent is told,
   every turn, which entities it has already described and through what period) so its retained
   awareness is explicitly temporal, not just a free-text summary.
+- **v3** (this) — operator: *the tool must work for whatever model/harness the user runs — our
+  native harness AND as an intuitive MCP/API and middleware for other harnesses.* Sweep verified
+  Mycelium already has a **single tool registry that backs all three channels at once**
+  (`buildDomains`→`collectTools` flatten → MCP `mcp.js:246`, REST `POST /api/v1/:toolName`
+  `api.js:86`, harness grant `autonomy-tools.js`), plus a **built** gateway for external harnesses
+  (`/context`, `/ingest/message`, `/v1/chat/completions` + `X-Mycelium-Capture`, and four adapters
+  in `tools/memory-bridge/`). **Pivot:** narration ships as a registered **MCP domain**
+  (`src/tools/narration.js`) — NOT a harness-private tool — split into a READ tool `getEntityContext`
+  (the Context Capsule) and a WRITE tool `describeEntity`. Registering once makes it native-harness +
+  MCP + REST + gateway-reachable. See "Tool surface & reach" below.
 
 ---
 
@@ -179,14 +189,48 @@ Fold the new period into the existing understanding; keep what still holds; note
   Assert the neighbourhood degrades gracefully (centroid `nearest` present) when `territory_cofire`
   is empty.
 
+### Tool surface & reach — one domain, every harness (v3)
+Narration is **one registered MCP domain** `src/tools/narration.js` (`createNarrationDomain({db,userId})`
+returning `{tools, handlers}`), added to `buildDomains()` (`src/mcp.js:56-159`). `collectTools()`
+(`src/mcp.js:197-221`) flattens it into the shared `tools[]`/`handlers{}` map (duplicate-name guarded,
+:202) that backs **all channels** — so registering once exposes it to:
+- **MCP** (native + remote) — dispatched at `src/mcp.js:246` (`handlers[name]`); OAuth 2.1 bearer
+  (`src/server-http.js`) or trusted loopback (`src/mcp-loopback.js`).
+- **REST/API** — automatic: `GET /api/v1/tools` lists it, `POST /api/v1/<tool>` invokes it with the
+  JSON body as args (`src/api.js:73-86`), loopback-gated.
+- **Our native harness** — `autonomyTools(registryTools, enabledNames)` (`src/agent/autonomy-tools.js:39`)
+  filters that SAME registry; we place the two tools deliberately (below).
+- **Other harnesses (middleware)** — the built gateway (`/context`, `/ingest/message`,
+  `/v1/chat/completions` + `X-Mycelium-Capture`, `src/server-http.js:428-553`) and the four adapters
+  in `tools/memory-bridge/` (claude-code, hermes, opencode, openclaw): any of them can call the MCP/REST
+  tools, and `getEntityContext` slots into the same `/context`-style preamble pattern.
+
+**Two tools, split by read/write so they compose cleanly across channels:**
+- **`getEntityContext`** (READ) — args `{kind:'territory'|'realm'|'theme', id}` → returns the **Context
+  Capsule** (above) as structured JSON + a rendered text block. **Read-safe → added to
+  `SAFE_AUTONOMOUS_TOOLS`** (`autonomy-tools.js:20`), so it is available to the native harness, MCP,
+  REST, AND any external harness with no opt-in. This is the "intuitive MCP/API/middleware" piece: any
+  model/harness can pull the tight, temporal, topology-aware context for an area and narrate it however
+  it wants — Mycelium owns the context assembly, the caller owns the prose.
+- **`describeEntity`** (WRITE) — args `{kind, id, name, essence, chronicle?}` →
+  `territoryDocs.upsertDescription` (+ a thin `mindscape.setNameEssence` DAL for realms) + stamps
+  `described_period_*`/`activity_timeline`. Gated like the existing write tools (`remember`/
+  `saveDocument`): **owner-authenticated at every channel boundary**, kept OUT of the interactive-chat
+  domain catalog (`src/agent/tool-domains.js`) so chat can't silently rewrite the map, and placed in
+  `AUTONOMY_TOOLS` (gated, opt-in) so only the narration walk grants it to an autonomous turn. An
+  external harness calling it over MCP/REST is an **explicit, user-driven** write — the intended path.
+  Validates (name 2–4 words, essence non-empty), fail-soft (never overwrites a good description with
+  junk), never logs content.
+
+This is the v2→v3 pivot: `describeEntity` is no longer a harness-private file — it is a registry domain,
+so "works with the native harness" and "intuitive MCP/API + middleware for other harnesses" are the
+SAME registration, not three.
+
 ### Phase 2 — Agent traversal with temporally-explicit retained awareness (reuse the harness) ~240 LOC
-The user's core ask. Reuses `runAgentTurn` + `conversation_summaries`.
-- **New gated write tool `describeEntity`** (`src/agent/narration-tools.js`): args
-  `{kind:'territory'|'realm', id, name, essence, chronicle?}` → `territoryDocs.upsertDescription`
-  (+ a new thin `mindscape.setNameEssence` DAL writer for realms) + stamps `described_period_*` and
-  `activity_timeline` from the in-scope capsule. Added to `AUTONOMY_TOOLS` (gated, opt-in) so only
-  the walk grants it; validates (name 2–4 words, essence non-empty) and is fail-soft (never wipes a
-  good description with junk); never logs content.
+The user's core ask. Reuses `runAgentTurn` + `conversation_summaries` + the Tool-surface domain above.
+- **Tools come from the registered `narration` domain** (above): the walk grants `describeEntity` via
+  `enabledNames` (AUTONOMY_TOOLS opt-in) and always has `getEntityContext`/`mindscape`/`searchMindscape`
+  (read-safe). No harness-private tool file — the harness consumes the same registry as MCP/REST.
 - **Traversal adapter `src/agent/narration-walk.js`:** drives `runAgentTurn` over an ordered worklist
   (each realm's territories, then the realm) on **one `conversationId = narration-walk:<runId>`** so
   `conversation_summaries` accumulates the running understanding. Per item the `userMessage` is
@@ -292,7 +336,11 @@ The user's core ask. Reuses `runAgentTurn` + `conversation_summaries`.
    migration (`described_period_*`) + prompt wiring + store + `verify:narrate-context`.
    Smoke: re-narrate one territory (CLI, deterministic path) → prompt shows the full capsule, columns
    + activity_timeline set.
-2. **Phase 2a** `describeEntity` gated tool + `mindscape.setNameEssence` DAL + `verify:describe-entity-tool`.
+2. **Phase 2a** register the `narration` MCP domain (`src/tools/narration.js`: `getEntityContext` read +
+   `describeEntity` write) in `buildDomains`; `getEntityContext`→`SAFE_AUTONOMOUS_TOOLS`,
+   `describeEntity`→`AUTONOMY_TOOLS` (not in chat `DOMAINS`); + `mindscape.setNameEssence` DAL +
+   `verify:describe-entity-tool` (asserts the tool is reachable via MCP + `POST /api/v1/describeEntity`,
+   owner-gated, absent from chat).
 3. **Phase 2b** `narration-walk` adapter (runAgentTurn + conversation_summaries + walk ledger) +
    `verify:narration-walk`. Smoke: walk a 2-realm DB copy with a tool-capable provider → descriptions
    written, summary + ledger accumulated, realm essence cites its territories.
@@ -364,3 +412,9 @@ agent/UI land.
 | Agent read tools incl. mindscape; gated set = schedule_task/reply/…; no description writer | `src/agent/autonomy-tools.js:20-31` (read) |
 | Jobs: cancel only, no pause; kill-switch; bulk chronicle job | `src/jobs.js:31,72,234,305-363` (read/grep) |
 | No per-entity narrate route/UI; provider via resolveInferenceConfigForTask('narrate') | `src/jobs.js:354` env; `resolveInferenceConfigForTask` (read/sweep) |
+| One registry backs all channels: domains → collectTools flatten (dup-guarded) → handlers map | `src/mcp.js:56,197-221,246` (read) |
+| A registered tool is auto-exposed over REST: GET /api/v1/tools + POST /api/v1/:toolName | `src/api.js:11-13,73-86` (read) |
+| Harness grant filters the SAME registry; read-safe vs gated sets | `src/agent/autonomy-tools.js:20,29,39` (read) |
+| Write tools are owner-gated + kept out of chat DOMAINS (saveDocument/remember precedent) | `src/tools/documents.js` saveDocument; `src/agent/tool-domains.js` (sweep) |
+| Gateway for external harnesses is BUILT: /context, /ingest/message, /v1/chat/completions + X-Mycelium-Capture | `src/server-http.js:428,498,553,550` (read) |
+| Four native adapters exist (middleware) | `tools/memory-bridge/{claude-code,hermes,opencode,openclaw}` + bridge.mjs (ls) |
