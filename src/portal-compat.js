@@ -154,7 +154,10 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       const since = typeof req.query.since === 'string' && req.query.since ? req.query.since : undefined;
       const types = typeof req.query.types === 'string' && req.query.types
         ? req.query.types.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
-      ok(res, await db.streams.feed(userId, { limit, before, since, types }));
+      // q = a keyword substring filter (Phase 2.1). Bounded recent-window search,
+      // not semantic; never logged (user plaintext about their own vault).
+      const q = typeof req.query.q === 'string' && req.query.q.trim() ? req.query.q : undefined;
+      ok(res, await db.streams.feed(userId, { limit, before, since, types, q }));
     } catch { ok(res, { items: [], nextCursor: null }); }
   });
 

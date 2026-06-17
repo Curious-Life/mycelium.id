@@ -17,6 +17,11 @@ import { hasVectorKey } from '../federation/lexicon.js';
 const DAY_MS = 86400000;
 const LIVE_WINDOW_MS = 15 * 60 * 1000; // "live" = activity within 15 min
 const PREVIEW_MAX = 240;               // truncate document/task previews server-side
+// River search (Phase 2.1) — a keyword substring filter over a BOUNDED recent
+// window, NOT semantic and NOT deep-paginated (see the Phase-3/search design doc).
+const SEARCH_SCAN = 800;               // rows scanned per table when q is set
+const SEARCH_RESULT_CAP = 100;         // max matches returned (single pass, no cursor)
+const SEARCH_Q_MAX = 200;              // clamp the query length
 
 const truncate = (s) => {
   if (s == null) return '';
@@ -195,14 +200,21 @@ export function createStreamsNamespace(deps) {
      * guard — a match fails closed (throws), never serves.
      *
      * @param {string} userId
-     * @param {{ limit?:number, before?:string, since?:string, types?:string[] }} [opts]
+     * @param {{ limit?:number, before?:string, since?:string, types?:string[], q?:string }} [opts]
      *   before = ISO cursor (exclusive); since = ISO floor (time scope); types =
-     *   subset of ['message','document','health','task'] (default: all).
-     * @returns {Promise<{ items: object[], nextCursor: string|null }>}
+     *   subset of ['message','document','health','task'] (default: all). q = a
+     *   case-insensitive keyword substring filter over a bounded recent window
+     *   (single pass, no cursor; returns `truncated` when matches exceed the cap).
+     * @returns {Promise<{ items: object[], nextCursor: string|null, truncated?: boolean }>}
      */
-    async feed(userId, { limit = 40, before, since, types } = {}) {
+    async feed(userId, { limit = 40, before, since, types, q } = {}) {
       const lim = Math.min(Math.max(limit | 0, 1), 100);
       const want = new Set(Array.isArray(types) && types.length ? types : ['message', 'document', 'health', 'task']);
+      // Search mode: a case-insensitive substring filter over a bounded recent
+      // window. `ql` null ⇒ normal live feed. `hit(text)` is the per-item match.
+      const ql = typeof q === 'string' && q.trim() ? q.trim().slice(0, SEARCH_Q_MAX).toLowerCase() : null;
+      const scanN = ql ? SEARCH_SCAN : lim + 1;
+      const hit = (text) => !ql || String(text || '').toLowerCase().includes(ql);
       const range = (extra = []) => {
         // shared WHERE tail + params for created_at windowing
         let sql = '';
@@ -218,11 +230,13 @@ export function createStreamsNamespace(deps) {
       // + strips metadata (shared with GET /messages). scope:'all' mirrors the river.
       if (want.has('message') && db?.messages?.selectTimeline) {
         arms.push((async () => {
-          const rows = await db.messages.selectTimeline(userId, { limit: lim + 1, before, since, scope: 'all' });
+          const rows = await db.messages.selectTimeline(userId, { limit: scanN, before, since, scope: 'all' });
           const msgs = await assembleTimelineMessages(rows, { db, userId });
-          return msgs.map((m) => ({
-            type: 'message', id: m.id, source: m.source || 'unknown', createdAt: m.created_at, message: m,
-          }));
+          return msgs
+            .filter((m) => hit(`${m.content || ''} ${m.senderName || ''} ${m.channel || ''}`))
+            .map((m) => ({
+              type: 'message', id: m.id, source: m.source || 'unknown', createdAt: m.created_at, message: m,
+            }));
         })());
       }
 
@@ -236,12 +250,14 @@ export function createStreamsNamespace(deps) {
                FROM documents
               WHERE user_id = ? AND forgotten_at IS NULL AND is_internal = 0${r.sql}
               ORDER BY created_at DESC LIMIT ?`,
-            [userId, ...r.params, lim + 1],
+            [userId, ...r.params, scanN],
           );
-          return (res.results || []).map((d) => ({
-            type: 'document', id: `doc:${d.path}`, source: sourceForDocumentType(d.source_type), createdAt: d.created_at,
-            title: d.title || d.path, preview: truncate(d.summary), path: d.path, sourceType: d.source_type,
-          }));
+          return (res.results || [])
+            .filter((d) => hit(`${d.title || d.path || ''} ${d.summary || ''}`))
+            .map((d) => ({
+              type: 'document', id: `doc:${d.path}`, source: sourceForDocumentType(d.source_type), createdAt: d.created_at,
+              title: d.title || d.path, preview: truncate(d.summary), path: d.path, sourceType: d.source_type,
+            }));
         })());
       }
 
@@ -256,12 +272,14 @@ export function createStreamsNamespace(deps) {
                FROM health_daily
               WHERE user_id = ?${r.sql}
               ORDER BY created_at DESC LIMIT ?`,
-            [userId, ...r.params, lim + 1],
+            [userId, ...r.params, scanN],
           );
-          return (res.results || []).map((h) => ({
-            type: 'health', id: `health:${h.id}`, source: h.source || 'apple_health', createdAt: h.created_at,
-            date: h.date, preview: healthSummary(h),
-          }));
+          return (res.results || [])
+            .map((h) => ({
+              type: 'health', id: `health:${h.id}`, source: h.source || 'apple_health', createdAt: h.created_at,
+              date: h.date, preview: healthSummary(h),
+            }))
+            .filter((it) => hit(`${it.preview} ${it.date || ''}`));
         })());
       }
 
@@ -275,13 +293,15 @@ export function createStreamsNamespace(deps) {
                FROM tasks
               WHERE user_id = ? AND (status IS NULL OR status != 'deleted')${r.sql}
               ORDER BY created_at DESC LIMIT ?`,
-            [userId, ...r.params, lim + 1],
+            [userId, ...r.params, scanN],
           );
-          return (res.results || []).map((t) => ({
-            type: 'task', id: `task:${t.id}`, source: 'task', createdAt: t.created_at,
-            title: truncate(t.title), status: t.status, priority: t.priority,
-            dueDate: t.due_date, completedAt: t.completed_at,
-          }));
+          return (res.results || [])
+            .filter((t) => hit(t.title))
+            .map((t) => ({
+              type: 'task', id: `task:${t.id}`, source: 'task', createdAt: t.created_at,
+              title: truncate(t.title), status: t.status, priority: t.priority,
+              dueDate: t.due_date, completedAt: t.completed_at,
+            }));
         })());
       }
 
@@ -292,13 +312,16 @@ export function createStreamsNamespace(deps) {
         .filter((it) => it && it.createdAt)
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
 
-      const items = merged.slice(0, lim);
-      const nextCursor = merged.length > lim && items.length ? items[items.length - 1].createdAt : null;
+      // Search mode is a single bounded pass: cap the matches, no cursor. Live mode
+      // paginates by created_at cursor as normal.
+      const cap = ql ? SEARCH_RESULT_CAP : lim;
+      const items = merged.slice(0, cap);
+      const nextCursor = !ql && merged.length > lim && items.length ? items[items.length - 1].createdAt : null;
 
       // §7 belt-and-suspenders: refuse to serve if any vector field slipped through.
       if (hasVectorKey(items)) throw new Error('streams.feed: refusing to serve a vector field (§7)');
 
-      return { items, nextCursor };
+      return ql ? { items, nextCursor: null, truncated: merged.length > cap } : { items, nextCursor };
     },
   };
 }

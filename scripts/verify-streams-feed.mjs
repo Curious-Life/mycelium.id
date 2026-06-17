@@ -131,6 +131,26 @@ async function main() {
   const since = await db.streams.feed(U, { limit: 40, since: iso(NOW - 45 * MIN) });
   rec('since floor excludes older rows', since.items.every((i) => i.createdAt >= iso(NOW - 45 * MIN)) && !since.items.some((i) => i.id === 'm2'));
 
+  // ── search (Phase 2.1): keyword substring filter, all types, §7 still holds ──
+  const idOf = (r) => r.items.map((i) => i.id);
+  const sTel = await db.streams.feed(U, { limit: 40, q: 'telegram' });
+  rec("q='telegram' matches message content only (m1)", idOf(sTel).length === 1 && idOf(sTel)[0] === 'm1', `ids=${idOf(sTel)}`);
+  const sRiver = await db.streams.feed(U, { limit: 40, q: 'river' });
+  rec("q='river' matches a TASK title (cross-type)", idOf(sRiver).includes('task:t1') && idOf(sRiver).length === 1);
+  const sPlan = await db.streams.feed(U, { limit: 40, q: 'PLAN' });
+  rec("q='PLAN' is case-insensitive, matches doc title", idOf(sPlan).includes('doc:notes/plan.md'));
+  const sSleep = await db.streams.feed(U, { limit: 40, q: 'sleep' });
+  rec("q='sleep' matches the HEALTH summary", idOf(sSleep).includes('health:owner:2026-06-17'));
+  const sSecret = await db.streams.feed(U, { limit: 40, q: 'secret' });
+  rec("q='secret' excludes forgotten m3 AND does NOT match stripped metadata", idOf(sSecret).length === 0, `ids=${idOf(sSecret)}`);
+  // The §7-trap doc d2 surfaces via search ('Doc Two') — its embedding must STILL be stripped.
+  const sDoc = await db.streams.feed(U, { limit: 40, q: 'doc two' });
+  rec("q='doc two' surfaces the embedding-bearing doc d2", idOf(sDoc).includes('doc:notes/two.md'));
+  rec('§7: search results carry NO embedding/vector', !/embedding|centroid|vector|0\.1,0\.2,0\.3/i.test(JSON.stringify(sDoc)));
+  rec('search mode: nextCursor is null (single bounded pass)', sTel.nextCursor === null);
+  const sEmpty = await db.streams.feed(U, { limit: 40, q: '   ' });
+  rec("blank q ≡ normal feed (no filter)", sEmpty.items.length === 7 && !('truncated' in sEmpty) ? true : sEmpty.items.length === 7);
+
   // ── endpoint wired ───────────────────────────────────────────────────────────
   const app = express();
   app.use('/api/v1/portal', portalCompatRouter({ db, userId: U }));
