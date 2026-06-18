@@ -11,6 +11,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
 import { initVaultStorage } from './db/init.js';
+import { resolveDbKeyHex } from './db/open.js';
 import { createIdentity, isValidHandle } from './identity/identity.js';
 import { readRemoteConfig } from './remote/config.js';
 import { buildDomains, collectTools, createMcpServer, TIER2_TOOLS, TOPOLOGY_NOT_READY_MESSAGE } from './mcp.js';
@@ -50,6 +51,13 @@ export async function boot({
   // :8091 is down. Pass an explicit embedder (e.g. a stub) to override, or `null`
   // to force BM25-only. The default param only evaluates when the arg is omitted.
   embedder = resolveDefaultEmbedder(),
+  // initStorage: apply schema + run the at-rest migration (key-aware, locked) on
+  // open. Default true — the app + MCP + pipeline self-initialise the vault. The
+  // PUBLIC server passes false: it is a read-only serving surface that must FAIL
+  // CLOSED on a wrong/old schema (e.g. missing publish_nonce), never auto-repair
+  // it by re-applying migrations. It still opens an encrypted vault keyed
+  // (resolveDbKeyHex self-detects) — just without touching the schema.
+  initStorage = true,
 } = {}) {
   // Acquire the two hex keys from the configured source unless injected. The
   // source layer keeps keys out of shell history / config files on a Mac (macOS
@@ -108,7 +116,9 @@ export async function boot({
   // Finder launch / MCP server opens it without the env flag) or at-rest is on;
   // null for a plaintext vault with at-rest off → plaintext open, unchanged.
   // FAIL CLOSED inside initVaultStorage: a migration error refuses a plaintext open.
-  const dbKeyHex = await initVaultStorage({ dbPath, userHex, log: (m) => console.error(m) });
+  const dbKeyHex = initStorage
+    ? await initVaultStorage({ dbPath, userHex, log: (m) => console.error(m) })
+    : resolveDbKeyHex(userHex, dbPath); // open-only (e.g. public server): no schema apply, fail-closed
   const { db, close } = getDb({ dbPath, userKey, systemKey, federationDeps, dbKeyHex });
   const { domains, deferred, searchHelpers, isTopologyReady } = buildDomains({ db, userId, embedder, identity });
   // Cold-start gating (Phase 4): Tier-2 readers return a uniform "not ready"
