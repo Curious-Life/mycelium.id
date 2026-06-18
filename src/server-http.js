@@ -278,6 +278,11 @@ export async function createHttpApp(opts = {}) {
     // discover where to invite us for shared-space Megolm rooms. Read per-request
     // (like getHost/getHandle); null until a homeserver is configured.
     getMatrixId: () => readRemoteConfig().matrixUserId || null,
+    // Presence (online/offline dot): config + the owner activity heartbeat. Read
+    // per-request; the heartbeat is written by the :8787 auth chokepoint to the
+    // shared DB (cross-process), read here to answer online/offline for connections.
+    getPresenceConfig: () => readRemoteConfig().presence || {},
+    getLastActiveAt: () => ingest.db.peerPresence.lastActiveAt(ingest.userId),
   }));
 
   // Stateful transport registry: sessionId → { transport, close }.

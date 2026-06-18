@@ -19,6 +19,7 @@
 		overlap_json: string | null;
 		accepted_at: string;
 		remote_instance?: string | null;
+		presence_share?: number | null;
 	}
 
 	interface PendingRequest {
@@ -88,6 +89,8 @@
 	let sending = $state(false);
 	let threadEl = $state<HTMLElement | null>(null);
 	let unread = $state<{ total: number; byConnection: Record<string, number> }>({ total: 0, byConnection: {} });
+	// Online/offline presence per connection: 'online' (green) | 'offline' (grey) | 'none'/absent (no dot).
+	let presence = $state<Record<string, string>>({});
 
 	// Overlap + sharing
 	let overlap = $state<Overlap | null>(null);
@@ -177,6 +180,18 @@
 		return () => clearInterval(t);
 	});
 
+	// Online/offline presence: pull-on-demand (the backend caches ~45s + fans out to
+	// peers). Poll every 30s while the page is open; only when we have connections.
+	$effect(() => {
+		if (!browser || connections.length === 0) return;
+		loadPresence();
+		const t = setInterval(loadPresence, 30000);
+		return () => clearInterval(t);
+	});
+	async function loadPresence() {
+		try { presence = (await apiGet<{ presence: Record<string, string> }>('/portal/connections/presence')).presence || {}; } catch {}
+	}
+
 	async function loadConnections() {
 		try {
 			connections = (await apiGet<{ connections: Connection[] }>('/portal/connections')).connections;
@@ -229,6 +244,18 @@
 			selectedConnection = null; overlap = null; menuOpen = false; messages = [];
 			showSuccess('Disconnected');
 		} catch (e: any) { error = e.message; }
+	}
+	// Toggle whether I expose my online status to this connection (default on).
+	async function togglePresenceShare(conn: Connection) {
+		const next = (conn.presence_share ?? 1) !== 0 ? 0 : 1;
+		try {
+			const res = await api(`/portal/connections/${conn.id}/presence`, { method: 'PUT', body: JSON.stringify({ share: next === 1 }) });
+			if (!res.ok) throw new Error('Failed');
+			conn.presence_share = next;
+			connections = connections.map((c) => (c.id === conn.id ? { ...c, presence_share: next } : c));
+			menuOpen = false;
+			showSuccess(next === 1 ? 'Sharing your online status' : 'Hidden — your status is private to this connection');
+		} catch (e: any) { error = e.message || 'Failed to update'; }
 	}
 
 	// ── conversation ─────────────────────────────────────────────────────────
@@ -406,7 +433,12 @@
 							{@const a = avatarSeed(conn.other_handle)}
 							{@const n = unread.byConnection[conn.id] || 0}
 							<button class="person" class:selected={selectedConnection?.id === conn.id} onclick={() => selectConnection(conn)}>
-								<div class="avatar" style="background:{a.bg};color:{a.fg}">{a.initials}</div>
+								<div class="avatar-wrap">
+									<div class="avatar" style="background:{a.bg};color:{a.fg}">{a.initials}</div>
+									{#if presence[conn.id] === 'online' || presence[conn.id] === 'offline'}
+										<span class="presence-dot {presence[conn.id]}" title={presence[conn.id] === 'online' ? 'Online' : 'Offline'}></span>
+									{/if}
+								</div>
 								<div class="person-body">
 									<div class="person-line1">
 										<span class="name">{displayName(conn)}</span>
@@ -449,7 +481,12 @@
 					{@const a = avatarSeed(selectedConnection.other_handle)}
 					<header class="convo-head">
 						<button class="back" onclick={() => (selectedConnection = null)} aria-label="Back">←</button>
-						<div class="avatar" style="background:{a.bg};color:{a.fg}">{a.initials}</div>
+						<div class="avatar-wrap">
+							<div class="avatar" style="background:{a.bg};color:{a.fg}">{a.initials}</div>
+							{#if presence[selectedConnection.id] === 'online' || presence[selectedConnection.id] === 'offline'}
+								<span class="presence-dot {presence[selectedConnection.id]}" title={presence[selectedConnection.id] === 'online' ? 'Online' : 'Offline'}></span>
+							{/if}
+						</div>
 						<div class="head-text">
 							<span class="head-name">{displayName(selectedConnection)}</span>
 							<span class="head-sub">@{selectedConnection.other_handle}{#if instanceOf(selectedConnection)} · <span class="instance">{instanceOf(selectedConnection)}</span>{/if}</span>
@@ -463,6 +500,9 @@
 							<button class="icon-btn" aria-label="More" onclick={() => (menuOpen = !menuOpen)}>⋯</button>
 							{#if menuOpen}
 								<div class="menu">
+									<button class="menu-item" onclick={() => selectedConnection && togglePresenceShare(selectedConnection)}>
+										{(selectedConnection.presence_share ?? 1) !== 0 ? 'Hide my online status' : 'Share my online status'}
+									</button>
 									<button class="menu-item danger" onclick={() => selectedConnection && disconnectConnection(selectedConnection.id)}>Disconnect</button>
 								</div>
 							{/if}
@@ -639,6 +679,11 @@
 
 	/* Avatars */
 	.avatar { width: 38px; height: 38px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 600; letter-spacing: 0.02em; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08); }
+	/* Presence dot — green (online) / grey (offline); absent entirely when not shared. */
+	.avatar-wrap { position: relative; flex-shrink: 0; display: flex; }
+	.presence-dot { position: absolute; right: -1px; bottom: -1px; width: 11px; height: 11px; border-radius: 50%; box-shadow: 0 0 0 2px var(--color-surface, #1b1b22); }
+	.presence-dot.online { background: var(--color-accent-jade, #34d399); }
+	.presence-dot.offline { background: var(--color-text-tertiary, #8a8a96); }
 
 	/* ── Empty / onboarding ── */
 	.onboard { flex: 1; display: flex; flex-direction: column; gap: 1rem; align-items: center; justify-content: center; padding: 2rem; }

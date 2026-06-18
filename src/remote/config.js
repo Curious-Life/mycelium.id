@@ -109,6 +109,14 @@ export function readRemoteConfig({ env = process.env } = {}) {
     // stays inert.
     matrixHomeserver: clean(env.MYCELIUM_MATRIX_HS) || clean(file.matrixHomeserver) || '',
     matrixUserId: clean(env.MYCELIUM_MATRIX_USER) || clean(file.matrixUserId) || '',
+    // Connection presence (online/offline dot). `paused` = appear offline to ALL
+    // connections (master kill-switch; default false = sharing active, per-connection
+    // control lives on connections.presence_share). `activeWindowMin` = minutes of
+    // client inactivity before "offline" (default 5).
+    presence: {
+      paused: file.presence?.paused === true,
+      activeWindowMin: Number(file.presence?.activeWindowMin) > 0 ? Number(file.presence.activeWindowMin) : 5,
+    },
   };
 }
 
@@ -153,6 +161,19 @@ export function writeRemoteConfig(patch = {}, { env = process.env } = {}) {
     const m = patch.matrixUserId.trim();
     if (m !== '' && !isSafeMxid(m)) throw new Error('invalid matrixUserId (expected @user:server)');
     next.matrixUserId = m;
+  }
+  // Presence (NON-secret): global pause + active window. Merge into the existing
+  // object so a partial patch (just `paused`) doesn't drop activeWindowMin.
+  if (patch.presence && typeof patch.presence === 'object') {
+    const cur = (next.presence && typeof next.presence === 'object') ? next.presence : {};
+    const merged = { ...cur };
+    if (typeof patch.presence.paused === 'boolean') merged.paused = patch.presence.paused;
+    if (patch.presence.activeWindowMin !== undefined) {
+      const n = Number(patch.presence.activeWindowMin);
+      if (!Number.isFinite(n) || n <= 0 || n > 1440) throw new Error('invalid presence.activeWindowMin');
+      merged.activeWindowMin = n;
+    }
+    next.presence = merged;
   }
   mkdirSync(dirname(p), { recursive: true });
   try { chmodSync(dirname(p), 0o700); } catch { /* */ }
