@@ -1520,21 +1520,23 @@
 			}
 
 			// Saturation: more vivid — Hubble vibrancy. Light mode pushes clustered
-			// points MORE saturated (vivid darks read on a light bg) and keeps noise
-			// nearly grey so it recedes.
+			// points MORE saturated (deep jewel-tone darks read on a light bg) and
+			// keeps noise nearly grey so it recedes.
 			const satRaw = ((px * 3.71 + py * 8.53 + pz * 5.29) % 1 + 1) % 1;
 			const saturation = isLight
-				? (isNoise ? 0.05 + satRaw * 0.1 : 0.7 + satRaw * 0.3)
+				? (isNoise ? 0.05 + satRaw * 0.1 : 0.65 + satRaw * 0.35)
 				: (isNoise ? 0.1 + satRaw * 0.15 : 0.4 + satRaw * 0.5);
 
-			// Lightness. Light mode INVERTS the dark-mode logic: clustered points must
-			// be DARK (low lightness) to contrast the light bg, and activity makes them
-			// darker/heavier (not brighter); noise is a faint light-grey that recedes.
+			// Lightness. Light mode is the INVERSE of dark mode: dark mode paints bright
+			// points that GLOW (additive + bloom) on near-black; light mode paints DARK
+			// saturated ink on near-white paper. So clustered points are LOW lightness
+			// (visible as ink), and activity makes them darker/heavier (more present, not
+			// brighter); noise is a faint light-grey that recedes into the paper.
 			const litRaw = ((px * 11.13 + py * 4.87 + pz * 17.63) % 1 + 1) % 1;
 			const terrData = !isNoise ? territories[tid] : null;
 			const activityBoost = terrData ? computeLuminosity(terrData, maxCount) * 0.15 : 0;
 			const lightness = isLight
-				? (isNoise ? 0.66 + litRaw * 0.08 : 0.44 + litRaw * 0.06 + activityBoost)
+				? (isNoise ? 0.70 + litRaw * 0.08 : 0.38 - litRaw * 0.08 - activityBoost)
 				: (isNoise ? 0.08 + litRaw * 0.1 : 0.3 + litRaw * 0.3 + activityBoost);
 
 			const color = new THREE.Color().setHSL(hue, saturation, lightness);
@@ -1693,15 +1695,17 @@
 					vec2 uv = gl_PointCoord - vec2(0.5);
 					float r = length(uv);
 					if (r > 0.5) discard;
-					// Luminous bead: a bright highlight CORE (the "shine"), a vivid body,
-					// and a crisp darker RIM that gives each point a distinct colour
-					// contour against the light paper background.
-					float core = 1.0 - smoothstep(0.0, 0.40, r);
-					float rim  = smoothstep(0.34, 0.5, r);
-					vec3 col = vColor;
-					col = mix(col, col * 0.5, rim);
-					col = mix(col, min(col + vec3(0.4), vec3(1.0)), core * 0.6);
-					float edge = 1.0 - smoothstep(0.46, 0.5, r);
+					// Ink bead — the INVERSE of the dark-mode glow. The body stays dark
+					// and saturated (so it reads on light paper) and DEEPENS toward the
+					// rim for a crisp colour contour. A small glossy specular highlight
+					// in the upper-left makes each point read as a lit bead WITHOUT
+					// washing the body out (it's a tiny bright touch, not a core lift).
+					float edge = 1.0 - smoothstep(0.42, 0.5, r);   // antialiased disc
+					float rim  = smoothstep(0.26, 0.5, r);         // outer ring 0..1
+					vec3 col = vColor * (1.0 - rim * 0.45);        // darken toward rim
+					vec2 sp = uv - vec2(-0.15, -0.15);             // highlight centre
+					float spec = 1.0 - smoothstep(0.0, 0.17, length(sp));
+					col = mix(col, vec3(1.0), spec * 0.45);        // small glossy dot
 					gl_FragColor = vec4(col, vAlpha * edge);
 				}
 			` : `
