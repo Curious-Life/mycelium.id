@@ -157,7 +157,7 @@ node -e '
 ' "$REPO"
 
 # ── 5. Assemble staging (code fresh each run; runtime bits from cache) ─────────
-log "assembling $STAGE…"
+log "assembling ${STAGE}…"
 rm -rf "$STAGE"; mkdir -p "$STAGE/pipeline"
 rsync -a "$REPO/src/"               "$STAGE/src/"
 rsync -a "$REPO/migrations/"        "$STAGE/migrations/" 2>/dev/null || true
