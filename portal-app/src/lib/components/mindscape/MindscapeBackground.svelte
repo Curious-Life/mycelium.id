@@ -9,6 +9,7 @@
 	// Cleans up its RAF + renderer + observer on destroy (no leaks on view switch).
 	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
+	import { canUseWebGL } from '$lib/utils/webgl';
 
 	let { interactive = false }: { interactive?: boolean } = $props();
 
@@ -21,6 +22,10 @@
 		let disposed = false;
 
 		(async () => {
+			// Decorative-only: if WebGL is unavailable, skip silently (no crash, no
+			// fallback UI — it's a background). The 3D mindscape view itself shows a
+			// proper fallback (Mindscape3D.svelte).
+			if (!canUseWebGL()) return;
 			const THREE = await import('three');
 			const { OrbitControls } = await import('three/addons/controls/OrbitControls.js');
 			if (disposed || !canvas) return;

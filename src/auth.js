@@ -33,8 +33,15 @@ export function createAuth(opts = {}) {
   // (readRemoteConfig folds in the env-var precedence). For a remote connector
   // this MUST be the public HTTPS (tunnel) URL — every OAuth metadata/resource
   // field derives from it.
-  const baseURL =
+  let baseURL =
     opts.baseURL || readRemoteConfig().publicBaseUrl || 'http://localhost:4711';
+  // Defence in depth: readRemoteConfig() now normalizes publicBaseUrl, but an
+  // explicit opts.baseURL could still be malformed. better-auth throws on a
+  // scheme-less/invalid URL and crashes boot — guard + fail soft to loopback.
+  try { new URL(baseURL); } catch {
+    console.warn(`[mycelium] auth: invalid baseURL ${JSON.stringify(baseURL)} — falling back to http://localhost:4711`);
+    baseURL = 'http://localhost:4711';
+  }
   // Signing secret: explicit opt > MYCELIUM_AUTH_SECRET > a stable secret
   // persisted in auth.db (generated once). resolveAuthSecret never returns empty,
   // so the old "must set MYCELIUM_AUTH_SECRET" boot friction is gone; the guard

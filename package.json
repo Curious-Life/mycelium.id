@@ -137,6 +137,7 @@
     "build:app": "bash scripts/build-app.sh",
     "ensure-portal": "node scripts/ensure-portal-built.mjs",
     "prestart": "node scripts/ensure-portal-built.mjs",
+    "verify:core": "npm run verify:foundation && npm run verify:primitives && npm run verify:at-rest && npm run verify:mcp && npm run verify:leak && npm run verify:account && npm run verify:portal && npm run verify:search",
     "start": "node src/index.js",
     "prerest": "node scripts/ensure-portal-built.mjs",
     "rest": "node src/server-rest.js",
@@ -237,5 +238,8 @@
     "sqlite-vec": "0.1.7-alpha.2",
     "undici": "^8.5.0",
     "unpdf": "^1.6.2"
+  },
+  "overrides": {
+    "hono": "^4.12.26"
   }
 }

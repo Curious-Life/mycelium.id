@@ -26,6 +26,19 @@ import { remoteConfigPath, authDbPath } from '../paths.js';
 const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
 const DEFAULT_EMAIL = 'operator@mycelium.local';
 
+// Normalize a configured base URL → a parseable http(s) URL, or '' (FAIL SOFT).
+// Prepends https:// when no scheme is present; returns '' for anything that
+// won't parse. A scheme-less / garbage `publicBaseUrl` in remote.json used to
+// flow into betterAuth({ baseURL }) and CRASH boot (better-auth throws on an
+// invalid URL). Normalizing here guarantees readRemoteConfig() never yields a
+// value that can crash the server — at worst remote stays effectively off.
+function normalizeBaseUrl(value) {
+  const v = clean(value);
+  if (!v) return '';
+  const withScheme = /^https?:\/\//i.test(v) ? v : `https://${v}`;
+  try { return new URL(withScheme).href.replace(/\/$/, ''); } catch { return ''; }
+}
+
 // Managed-endpoint defaults — mycelium operates these; a full-control user
 // overrides relayAddr/acmeDnsServer/controlPlaneUrl to a self-hosted instance.
 // "Managed" is just mycelium running the same open-source stack.
@@ -81,7 +94,7 @@ export function readRemoteConfig({ env = process.env } = {}) {
     // publicBaseUrl derives from publicHost when not set explicitly, so the
     // managed/own-relay flows only need to persist the host.
     publicBaseUrl:
-      clean(env.MYCELIUM_BASE_URL) || clean(file.publicBaseUrl)
+      normalizeBaseUrl(env.MYCELIUM_BASE_URL) || normalizeBaseUrl(file.publicBaseUrl)
         || (publicHost ? `https://${publicHost}` : ''),
     operatorEmail: clean(env.MYCELIUM_USER_EMAIL) || clean(file.operatorEmail) || DEFAULT_EMAIL,
     remoteEnabled: env.MYCELIUM_REMOTE_ENABLED === '1' || file.remoteEnabled === true,
@@ -106,7 +119,13 @@ export function readRemoteConfig({ env = process.env } = {}) {
 export function writeRemoteConfig(patch = {}, { env = process.env } = {}) {
   const p = remoteConfigPath({ env });
   const next = { v: 1, ...readFileJson(p) };
-  if (typeof patch.publicBaseUrl === 'string') next.publicBaseUrl = patch.publicBaseUrl.trim();
+  if (typeof patch.publicBaseUrl === 'string') {
+    const u = patch.publicBaseUrl.trim();
+    // Reject a malformed URL at write time (clear UI error) + store it normalized
+    // (scheme-prefixed) so a later read can never crash boot — see normalizeBaseUrl.
+    if (u !== '' && !normalizeBaseUrl(u)) throw new Error('invalid publicBaseUrl');
+    next.publicBaseUrl = u === '' ? '' : normalizeBaseUrl(u);
+  }
   if (typeof patch.operatorEmail === 'string') next.operatorEmail = patch.operatorEmail.trim();
   if (typeof patch.remoteEnabled === 'boolean') next.remoteEnabled = patch.remoteEnabled;
   // Transport keys (all NON-secret — secrets go in auth.db via setRemoteSecret).

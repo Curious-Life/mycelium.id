@@ -116,6 +116,23 @@ export async function createHttpApp(opts = {}) {
   app.options(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], sendPrm);
   app.get(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], sendPrm);
 
+  // Friendly root — a browser hitting :4711 used to get Express's bare
+  // "Cannot GET /". Respond with a tiny static page that explains what this is,
+  // WITHOUT enumerating routes or leaking the auth surface (the route-hiding 404
+  // gate below stays intact). Exact "/" only, so it never shadows /mcp, /login,
+  // the well-knowns, or OAuth endpoints. No inline script (inert).
+  app.get('/', (req, res) => {
+    if (req.accepts('html')) {
+      return res.type('html').send(
+        '<!doctype html><meta charset="utf-8"><title>Mycelium</title>' +
+        '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+        '<style>:root{color-scheme:dark}body{background:#0A0A0C;color:#E8E8EC;display:grid;place-items:center;height:100vh;margin:0;font:15px/1.6 system-ui,-apple-system,sans-serif;text-align:center;padding:2rem}h1{font-weight:600;margin:0 0 .5rem}p{color:#9898A3;max-width:30rem}a{color:#E5B84C}</style>' +
+        '<main><h1>Mycelium</h1><p>This is the Mycelium MCP server — your private, encrypted memory vault. It speaks the Model Context Protocol; connect an MCP client (Claude, the MCP Inspector, …) rather than a browser.</p><p><a href="https://mycelium.id">mycelium.id</a></p></main>',
+      );
+    }
+    res.json({ service: 'mycelium-mcp', transport: 'mcp', docs: 'https://mycelium.id' });
+  });
+
   // CRITICAL (security audit): block the relay-exposed HTTP sign-up. This is a
   // single-user vault — the operator account is seeded server-side at provisioning
   // (ensureOperatorUser, an in-process call that does NOT traverse this guard).
