@@ -30,7 +30,7 @@ import { isTrustedLoopback } from '../http/loopback.js';
  * @param {string} [deps.uploadsRoot]  uploads dir (for backup/restore-backup)
  * @param {string} [deps.remoteConfigPath]  remote.json (optional, non-secret, in backup)
  */
-export function accountRouter({ isInitialized, completeBoot, kcvPath, lockFile, dbPath, uploadsRoot, remoteConfigPath }) {
+export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPath, lockFile, dbPath, uploadsRoot, remoteConfigPath }) {
   const router = express.Router();
   router.use(express.json({ limit: '64kb' }));
 
@@ -59,6 +59,10 @@ export function accountRouter({ isInitialized, completeBoot, kcvPath, lockFile, 
       // Keychain holds matching keys, so open=false + files + no passphrase ⇒ key.
       needsRecoveryKey: !open && vaultExists && !passphraseEnabled,
       passphraseEnabled,
+      // Why boot couldn't open an existing vault (key_mismatch | at_rest_migration_failed
+      // | boot_failed), so the UI shows the specific recovery instead of "not set up".
+      // null when the vault is open or genuinely uncreated.
+      bootError: (typeof getBootError === 'function' ? getBootError() : null) || null,
       keychainAvailable: keychainAvailable(),
       onePasswordAvailable: onePasswordAvailable(),
     });

@@ -8,7 +8,7 @@
 	import { onDestroy } from 'svelte';
 	import { apiGet, apiPost } from '$lib/api';
 
-	type Status = { status: 'running' | 'done' | 'error' | 'canceled'; step: number; totalSteps: number; stageLabel?: string; error?: string | null };
+	type Status = { status: 'running' | 'done' | 'error' | 'canceled'; step: number; totalSteps: number; stageLabel?: string; error?: string | null; stalled?: boolean; failedStep?: number | null };
 
 	let jobId = $state<string | null>(null);
 	let st = $state<Status | null>(null);
@@ -46,8 +46,12 @@
 	{#if running}
 		<div class="bar"><div class="fill" style="width:{pct}%"></div></div>
 		<div class="step">{st?.stageLabel || 'Working'} · step {st?.step}/{st?.totalSteps}</div>
+		{#if st?.stalled}<div class="stall">Taking longer than usual on this step — still working. You can leave this running.</div>{/if}
+	{:else if st?.status === 'done'}
+		<div class="done">✓ Analysis refreshed.</div>
 	{:else if st?.status === 'error'}
-		<div class="err">{st.error || 'failed'}</div>
+		<div class="err">{st.error || 'Refresh failed.'}</div>
+		<div class="step">You can retry. If it keeps failing on the same step, that stage’s data may need attention.</div>
 	{/if}
 	<div class="actions">
 		<button onclick={start} disabled={busy || running}>{running ? 'Refreshing…' : 'Refresh analysis'}</button>
@@ -63,6 +67,8 @@
 	.status-running { color: #4ade80; background: rgba(74,222,128,0.12); }
 	.status-done { color: #7DB6D9; background: rgba(125,182,217,0.15); }
 	.status-error, .status-canceled { color: #94a3b8; background: rgba(148,163,184,0.12); }
+	.stall { font-size: 0.7rem; color: #E5B84C; line-height: 1.35; }
+	.done { font-size: 0.74rem; color: #7DB6D9; }
 	.bar { height: 5px; border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; }
 	.fill { height: 100%; background: var(--color-accent, #E5B84C); transition: width 0.4s ease; }
 	.step { font-size: 0.72rem; color: var(--color-text-secondary); }

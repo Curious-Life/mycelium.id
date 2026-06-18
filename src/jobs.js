@@ -210,9 +210,13 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
     } else if (state.status !== 'error') {
       state.status = 'error';
       const detail = lastErrLine();
-      state.error = detail ? `${detail} (exit ${code})` : `clustering exited with code ${code}`;
+      // Name the STAGE that was running so the user (and the activity feed) sees
+      // "Step 7/16 (Fisher trajectory) failed: …" instead of a bare exit code.
+      const stage = state.step > 0 ? `Step ${state.step}/${state.totalSteps} (${state.stageLabel}) failed` : 'pipeline failed';
+      state.error = detail ? `${stage}: ${detail} (exit ${code})` : `${stage} (exit ${code})`;
+      state.failedStep = state.step || null;
     }
-    if (db?.activityFeed) db.activityFeed.finish(jobId, { status: state.status === 'done' ? 'done' : state.status === 'canceled' ? 'abandoned' : 'error' }).catch(() => {});
+    if (db?.activityFeed) db.activityFeed.finish(jobId, { status: state.status === 'done' ? 'done' : state.status === 'canceled' ? 'abandoned' : 'error', error: state.status === 'error' ? state.error : null }).catch(() => {});
     finish();
   });
   child.on('error', () => {
@@ -238,7 +242,7 @@ export function startMeasurementJob({ dbPath, userId, db } = {}) {
 export function getJob(jobId) {
   const j = jobs.get(jobId);
   if (!j) return null;
-  return { id: j.id, status: j.status, step: j.step, totalSteps: j.totalSteps, stageLabel: j.stageLabel, error: j.error, stalled: j.stalled ?? false, startedAt: j.startedAt, finishedAt: j.finishedAt, priorDurationMs: j.priorDurationMs ?? null };
+  return { id: j.id, status: j.status, step: j.step, totalSteps: j.totalSteps, stageLabel: j.stageLabel, error: j.error, failedStep: j.failedStep ?? null, stalled: j.stalled ?? false, startedAt: j.startedAt, finishedAt: j.finishedAt, priorDurationMs: j.priorDurationMs ?? null };
 }
 
 /**
