@@ -15,8 +15,7 @@
  *   USER_MASTER=<hex> SYSTEM_KEY=<hex> MYCELIUM_DB=./data/vault.db \
  *     node pipeline/discover-claims.mjs [--cadence=day|week|month|quarter] [--dry-run]
  */
-import { getDb } from '../src/db/index.js';
-import { loadKey } from '../src/crypto/keys.js';
+import { boot } from '../src/index.js';
 import { createInferenceRouter } from '../src/inference/router.js';
 import { resolveInferenceConfig } from '../src/inference/resolve.js';
 import { createEgressAuditSink } from '../src/inference/egress.js';
@@ -77,8 +76,8 @@ if (isMain) {
   const SYSTEM_KEY = process.env.SYSTEM_KEY;
   if (!USER_MASTER || !SYSTEM_KEY) { console.error('[claims] Missing USER_MASTER and SYSTEM_KEY'); process.exit(1); }
 
-  const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
-  const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal' });
+  // boot() (NOT getDb-with-hex): keys the at-rest vault (resolveDbKeyHex) + unlock→CryptoKeys; getDb-with-hex opened UNKEYED → SQLITE_NOTADB on an encrypted vault.
+  const { db, close } = await boot({ dbPath: DB_PATH, userHex: USER_MASTER, systemHex: SYSTEM_KEY, userId: USER_ID, embedder: null });
   const router = createInferenceRouter({
     ...(await resolveInferenceConfig(db, USER_ID)),
     onEgress: createEgressAuditSink(db, USER_ID),

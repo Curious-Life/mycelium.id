@@ -28,8 +28,7 @@
  */
 
 import crypto from 'node:crypto';
-import { getDb } from '../src/db/index.js';
-import { loadKey } from '../src/crypto/keys.js';
+import { boot } from '../src/index.js';
 import { createNarrator } from './lib/narrate-infer.js';
 import {
   loadMembers, sampleMembers, getSeenIds, recordSeen, exploredPercent, lastPassNumber,
@@ -124,10 +123,8 @@ async function describe(narrator, kind, { samples, topTags = [], entities = [], 
 }
 
 async function run() {
-  // The encrypting adapter needs imported HKDF CryptoKeys (not raw hex) — writing
-  // an ENCRYPTED_FIELDS column (name/essence) otherwise throws deriveBits.
-  const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
-  const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal' });
+  // boot() (NOT getDb-with-hex): keys the at-rest vault (resolveDbKeyHex) + unlock→CryptoKeys; getDb-with-hex opened UNKEYED → SQLITE_NOTADB on an encrypted vault.
+  const { db, close } = await boot({ dbPath: DB_PATH, userHex: USER_MASTER, systemHex: SYSTEM_KEY, userId: USER_ID, embedder: null });
   const query = (sql, params = []) => db.rawQuery(sql, params).then(r => (Array.isArray(r) ? r : r.results || []));
   const narrator = await createNarrator({ db, userId: USER_ID });
   let namedRealms = 0, namedTerr = 0;

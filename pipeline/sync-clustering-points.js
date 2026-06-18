@@ -26,7 +26,7 @@
  *     node pipeline/sync-clustering-points.js [--dry-run]
  */
 
-import { getDb } from '../src/db/index.js';
+import { boot } from '../src/index.js';
 import * as cryptoLocal from '../src/crypto/crypto-local.js';
 import { decryptVector, encryptVector } from '../src/search/ann/decode.js';
 
@@ -79,7 +79,8 @@ async function decode256(envelope, masterKey) {
 }
 
 async function run() {
-  const { db, close } = getDb({ dbPath: DB_PATH, userKey: USER_MASTER, systemKey: SYSTEM_KEY, scope: 'personal' });
+  // boot() (NOT getDb-with-hex): keys the at-rest vault (resolveDbKeyHex) + unlock→CryptoKeys; getDb-with-hex opened UNKEYED → SQLITE_NOTADB on an encrypted vault.
+  const { db, close } = await boot({ dbPath: DB_PATH, userHex: USER_MASTER, systemHex: SYSTEM_KEY, userId: USER_ID, embedder: null });
   const query = (sql, params = []) => db.rawQuery(sql, params).then(r => (Array.isArray(r) ? r : r.results || []));
 
   try {

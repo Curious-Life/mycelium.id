@@ -18,8 +18,7 @@
  *     node pipeline/snapshot-entities.js [--dry-run]
  */
 
-import { getDb } from '../src/db/index.js';
-import { loadKey } from '../src/crypto/keys.js';
+import { boot } from '../src/index.js';
 
 const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';
 const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
@@ -42,8 +41,8 @@ function num(v, dp = 4) {
 }
 
 async function run() {
-  const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
-  const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal' });
+  // boot() (NOT getDb-with-hex): keys the at-rest vault (resolveDbKeyHex) + unlock→CryptoKeys; getDb-with-hex opened UNKEYED → SQLITE_NOTADB on an encrypted vault.
+  const { db, close } = await boot({ dbPath: DB_PATH, userHex: USER_MASTER, systemHex: SYSTEM_KEY, userId: USER_ID, embedder: null });
   const q = (sql, params = []) => db.rawQuery(sql, params).then((r) => (Array.isArray(r) ? r : r.results || []));
   let terr = 0, realms = 0, skipped = 0;
   try {

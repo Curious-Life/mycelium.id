@@ -15,6 +15,7 @@ import {
   autoEncryptParams,
   autoDecryptResults,
 } from '../crypto/crypto-local.js';
+import { vaultIsEncrypted } from '../db/open.js';
 
 const isWrite = (sql) => /^\s*(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(sql);
 const hasReturning = (sql) => /\bRETURNING\b/i.test(sql);
@@ -29,6 +30,19 @@ const hasReturning = (sql) => /\bRETURNING\b/i.test(sql);
  *             randomUUID, now, close }}
  */
 export function createDb({ dbPath, userKey, systemKey, scope = 'personal', dbKeyHex = null }) {
+  // Fail-closed (CLAUDE.md §3, defense-in-depth): refuse to open an at-rest
+  // SQLCipher vault WITHOUT its cipher key. An unkeyed open otherwise surfaces as
+  // an opaque SQLITE_NOTADB on the first statement deep inside a query — which is
+  // exactly how the older getDb-hex CLI/pipeline openers crashed at boot. Catching
+  // it at the single open chokepoint turns a silent deep failure into one clear,
+  // actionable error, and guards against any future opener that forgets the key.
+  // Plaintext fixtures (the ~104 raw-read verify gates) have a plaintext header →
+  // vaultIsEncrypted() is false → unaffected. dbKeyHex present → keyed open below.
+  if (!dbKeyHex && vaultIsEncrypted(dbPath)) {
+    throw new Error(
+      `refusing to open an at-rest-encrypted vault unkeyed (${dbPath}): derive the DB-file key (resolveDbKeyHex/boot) and pass dbKeyHex`,
+    );
+  }
   const db = new Database(dbPath);
   // At-rest blindness (opt-in): when a whole-file SQLCipher key is supplied, key
   // the connection BEFORE any other statement (the key PRAGMA must be first).

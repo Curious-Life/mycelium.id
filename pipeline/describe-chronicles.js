@@ -21,8 +21,7 @@
  *     node pipeline/describe-chronicles.js [--dry-run]
  */
 
-import { getDb } from '../src/db/index.js';
-import { loadKey } from '../src/crypto/keys.js';
+import { boot } from '../src/index.js';
 import { createNarrator } from './lib/narrate-infer.js';
 import {
   loadMembers, sampleMembers, getSeenIds, recordSeen, exploredPercent, lastPassNumber,
@@ -436,10 +435,8 @@ if (isMain) {
   const SYSTEM_KEY = process.env.SYSTEM_KEY;
   if (!USER_MASTER || !SYSTEM_KEY) { console.error('[chronicles] Missing USER_MASTER and SYSTEM_KEY'); process.exit(1); }
 
-  // getDb needs IMPORTED HKDF CryptoKeys, not raw hex — raw hex throws
-  // "deriveBits 2nd argument is not of type CryptoKey" on every content decrypt.
-  const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
-  const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal' });
+  // boot() (NOT getDb-with-hex): keys the at-rest vault (resolveDbKeyHex) + unlock→CryptoKeys; getDb-with-hex opened UNKEYED → SQLITE_NOTADB on an encrypted vault.
+  const { db, close } = await boot({ dbPath: DB_PATH, userHex: USER_MASTER, systemHex: SYSTEM_KEY, userId: USER_ID, embedder: null });
   // The user's ACTIVE provider names + chronicles (same seam describe-clusters uses).
   // Local Ollama is reached over native /api/chat with think:false (fast); cloud goes
   // through the audited router. The narrator's infer(prompt, {maxTokens}) is adapted
