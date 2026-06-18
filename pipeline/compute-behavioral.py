@@ -189,7 +189,10 @@ def main(querier=None):
         if not iso:
             continue
         try:
-            dt = datetime.fromisoformat(iso.replace('Z', '+00:00').replace(' ', 'T'))
+            _s = str(iso).strip().replace(' UTC', '').replace(' utc', '').replace('Z', '+00:00').strip()
+            if 'T' not in _s and ' ' in _s:
+                _s = _s.replace(' ', 'T', 1)
+            dt = datetime.fromisoformat(_s)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
         except (ValueError, AttributeError):

@@ -1,5 +1,5 @@
 import express from 'express';
-import { startClusteringJob, getJob, cancelJob,
+import { startClusteringJob, startMeasurementJob, getJob, cancelJob,
   startNarrationWalkJob, pauseNarration, resumeNarration, cancelNarration, getNarrationStatus } from './jobs.js';
 import { makeNarrationRunner } from './agent/narration-runner.js';
 import { getEmbedderHealth } from './embed/supervisor.js';
@@ -313,6 +313,19 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
     } catch {
       // resolveKeys/spawn unavailable — fail closed, no internals leaked.
       fail(res, 503, 'mindscape generation is unavailable (key source or pipeline not ready)');
+    }
+  });
+
+  // POST /mycelium/measure → { jobId, status }. Refresh the analysis/measurement layer
+  // on the EXISTING mindscape (no re-cluster, no narration) — runs even while Generate
+  // is kill-switched. Same single-flight lane as generate; progress polls the same
+  // /mycelium/generate/status/:id endpoint (shared job registry).
+  router.post('/mycelium/measure', async (_req, res) => {
+    try {
+      const r = startMeasurementJob({ dbPath, userId, db });
+      res.json(r);
+    } catch {
+      fail(res, 503, 'analysis refresh is unavailable (key source or pipeline not ready)');
     }
   });
 
