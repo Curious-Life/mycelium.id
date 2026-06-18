@@ -236,20 +236,26 @@ same tool surface, same query embedder wiring.
 
 ---
 
-## 10. Optional: the web portal UI
+## 10. The web portal UI
 
-Mycelium ships a browser/desktop UI served from the same localhost origin as the
-API. The **canonical** UI is the full SvelteKit app (`portal-app/`); build it once:
+Mycelium's UI is the SvelteKit app in `portal-app/`, served from the same
+localhost origin as the API. **You don't build it manually** — `npm start`
+(and `npm run portal`/`npm run rest`) auto-build it on first run via the
+`prestart` hook, installing the portal's deps if needed:
 
 ```bash
-npm run portal:install     # one-time: install the portal's deps
-npm run portal:build       # builds portal-app/build (a static SPA)
-MYCELIUM_KEY_SOURCE=keychain npm run portal   # serves UI + REST at http://127.0.0.1:8787
+MYCELIUM_KEY_SOURCE=keychain npm start   # first run builds the UI, then serves UI + REST at :8787
 ```
 
-The server auto-serves the canonical build when present, otherwise the built-in
-single-file portal. The Tauri Mac app (`cargo tauri dev`) shows whichever the
-server serves. To iterate on the UI with hot reload: `npm run portal:dev` (:5173).
+The first `npm start` takes ~1–2 min extra to build the UI; later runs are
+instant (the build is cached). If the build is ever missing AND the auto-build
+is skipped/fails, the server serves a small **"portal not built"** placeholder
+that tells you to run `npm run portal:build` — it never silently serves a stale
+UI. The Tauri Mac app builds the UI at bundle time, so it always ships the real
+one.
+
+To iterate on the UI with hot reload: `npm run portal:dev` (:5173). To rebuild
+manually: `npm run portal:build`.
 
 > **Note:** the canonical UI builds + is served today; wiring each screen's data
 > to the local API is in progress (`portal-app/README.md`, "M2"). Until then some
