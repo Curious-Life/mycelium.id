@@ -10,7 +10,7 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
-import { resolveDbKeyHex } from './db/open.js';
+import { resolveDbKeyHex, atRestEnabled } from './db/open.js';
 import { ensureVaultEncrypted } from './account/db-cipher-migrate.js';
 import { createIdentity, isValidHandle } from './identity/identity.js';
 import { readRemoteConfig } from './remote/config.js';
@@ -100,15 +100,17 @@ export async function boot({
     selfInstance: () => publicHost,
   };
 
-  // At-rest blindness (A′) — OPT-IN via MYCELIUM_AT_REST, default OFF (plaintext
-  // open, unchanged). When enabled: derive the DB-file key, run the one-time
-  // idempotent encrypt-in-place migration (no-op if already encrypted or no file
-  // yet — a fresh vault is then BORN encrypted because getDb opens keyed), then
-  // open every vault connection keyed. FAIL CLOSED: if encryption was requested
-  // but the migration throws, refuse to fall back to a plaintext open (would
-  // write new rows in cleartext into a half-migrated vault). @see src/db/open.js.
-  const dbKeyHex = resolveDbKeyHex(userHex);
-  if (dbKeyHex) {
+  // At-rest blindness (A′). resolveDbKeyHex returns a key when the vault is
+  // ALREADY encrypted (self-detected — so a normal GUI/Finder launch and the
+  // Claude-Code MCP servers open it keyed WITHOUT the env flag) OR when at-rest
+  // is opted in via MYCELIUM_AT_REST (to migrate a still-plaintext vault). Null
+  // for a plaintext vault with at-rest off → plaintext open, unchanged.
+  const dbKeyHex = resolveDbKeyHex(userHex, dbPath);
+  // The one-time encrypt-in-place MIGRATION runs ONLY when explicitly opted in
+  // (never auto-encrypt). Idempotent: no-op once encrypted / on a fresh vault
+  // (which getDb then BORNS encrypted via the keyed open). FAIL CLOSED: a
+  // migration error refuses a plaintext fallback (no half-migrated cleartext).
+  if (dbKeyHex && atRestEnabled()) {
     try {
       const r = ensureVaultEncrypted({ dbPath, dbKeyHex, log: (m) => console.error(m) });
       if (r.migrated) console.error(`[mycelium] at-rest: encrypted ${r.tables} tables; plaintext backup kept at ${r.preCipherPath}`);

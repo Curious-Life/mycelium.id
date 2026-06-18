@@ -29,6 +29,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { assertEntryCount } from '../ingest/import-parsers.js';
+import { resolveDbKeyHex } from '../db/open.js';
 
 export const ARCHIVE_VERSION = 1;
 export const ARCHIVE_EXT = '.myvault';
@@ -39,11 +40,38 @@ export const BACKUP_SOFT_LIMIT_BYTES = 1_000_000_000;
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 
 /**
- * Consistent ciphertext snapshot of the SQLite vault into destPath, using a fresh
- * connection (decoupled from boot) and the online-backup API. No key required.
+ * Consistent snapshot of the SQLite vault into destPath, using a fresh connection
+ * (decoupled from boot).
+ *
+ * - PLAINTEXT vault (no dbKeyHex): the online-backup API (consistent single file,
+ *   WAL folded in). Unchanged.
+ * - ENCRYPTED vault (at-rest A′, dbKeyHex supplied): the online-backup API can't
+ *   span a keyed source and a plaintext target ("incompatible source and target"),
+ *   so snapshot via `VACUUM INTO` from the KEYED connection. Verified: that writes
+ *   a CONSISTENT, still-ENCRYPTED single-file snapshot (cipher dest, readable only
+ *   with the key) — so the `.myvault` stays ciphertext at rest. VACUUM INTO uses a
+ *   read transaction, so it's safe under concurrent writes.
+ *
+ * @param {string} srcDbPath
+ * @param {string} destPath
+ * @param {{ dbKeyHex?: string|null }} [opts]
  */
-export async function snapshotDb(srcDbPath, destPath) {
+export async function snapshotDb(srcDbPath, destPath, { dbKeyHex = null } = {}) {
   if (!existsSync(srcDbPath)) throw new Error(`no vault db at ${srcDbPath}`);
+  if (dbKeyHex) {
+    if (!/^[0-9a-f]{64}$/i.test(dbKeyHex)) throw new Error('snapshotDb: dbKeyHex must be 64-char hex');
+    // VACUUM INTO requires the target to not exist.
+    for (const sfx of ['', '-wal', '-shm']) { try { rmSync(destPath + sfx); } catch { /* */ } }
+    const db = new Database(srcDbPath, { fileMustExist: true });
+    try {
+      db.pragma(`cipher='sqlcipher'`);
+      db.pragma(`key="x'${dbKeyHex}'"`);
+      db.exec(`VACUUM INTO '${destPath.replace(/'/g, "''")}'`);
+    } finally {
+      try { db.close(); } catch { /* */ }
+    }
+    return;
+  }
   const src = new Database(srcDbPath, { fileMustExist: true });
   try {
     await src.backup(destPath);   // online backup: consistent single file, WAL folded in
@@ -81,9 +109,15 @@ function walk(root, base = root) {
 export async function buildVaultArchive({ dbPath, kcvPath, uploadsRoot, remoteConfigPath, app = 'mycelium-v1' }) {
   if (!existsSync(kcvPath)) throw new Error('refusing to back up: no kcv.json (vault not initialised)');
 
+  // At-rest A′: when the vault is whole-file encrypted, the snapshot must open
+  // keyed (else the backup fails / can't read). resolveDbKeyHex returns null when
+  // at-rest is off (MYCELIUM_AT_REST unset) → the plaintext online-backup path,
+  // unchanged. The DB key derives from USER_MASTER, which boot pins to env.
+  const dbKeyHex = resolveDbKeyHex(process.env.ENCRYPTION_MASTER_KEY || '', dbPath);
+
   const tmpSnap = path.join(os.tmpdir(), `myvault-snap-${process.pid}-${sha256(Buffer.from(dbPath + Date.now())).slice(0, 12)}.db`);
   try {
-    await snapshotDb(dbPath, tmpSnap);
+    await snapshotDb(dbPath, tmpSnap, { dbKeyHex });
     const dbBuf = readFileSync(tmpSnap);
     const kcvBuf = readFileSync(kcvPath);
 
