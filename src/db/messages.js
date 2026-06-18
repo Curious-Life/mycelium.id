@@ -642,11 +642,14 @@ export function createMessagesNamespace(deps) {
     },
 
     async selectTimeline(userId, { limit = 50, before, since, afterId, scope } = {}) {
-      // metadata is encrypted at rest; the auto-decrypt layer returns a
-      // JSON string here. Routes parse it before projecting to the UI so
-      // we never leak triage decisions / dedupe nonces / delivery state
-      // beyond the read path.
-      let sql = `SELECT id, role, content, source, agent_id, created_at, message_type, attachment_id, metadata FROM messages WHERE user_id = ? AND forgotten_at IS NULL`;
+      // metadata is encrypted at rest and is NEVER projected to the UI — both
+      // consumers (GET /messages and db.streams.feed) run rows through
+      // assembleTimelineMessages, which strips it. So we don't SELECT it at all:
+      // that avoids a per-row decrypt of an encrypted column on every timeline /
+      // river open (a hot path), AND keeps triage decisions / dedupe nonces /
+      // delivery state strictly behind the read path (assemble still destructures
+      // `metadata` out defensively in case a future projection re-adds it).
+      let sql = `SELECT id, role, content, source, agent_id, created_at, message_type, attachment_id FROM messages WHERE user_id = ? AND forgotten_at IS NULL`;
       const params = [userId];
       if (before) { sql += ` AND created_at < ?`; params.push(before); }
       // `since` is the unified-river time-scope floor (Today/7d/All) — pushed into
