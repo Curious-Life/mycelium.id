@@ -129,7 +129,7 @@ USER_MASTER_KEY="<64-char-hex>" SYSTEM_KEY="<64-char-hex>" npm start
 Expected output on **stderr** (exact):
 
 ```
-[mycelium] 31 tools registered; 2 deferred (reply, services)
+[mycelium] 36 tools registered; 1 deferred (services)
 [mycelium] stdio MCP server connected.
 ```
 
@@ -164,7 +164,8 @@ or `~/.config/Claude/claude_desktop_config.json` (Linux):
       "args": ["src/index.js"],
       "cwd": "/Users/YOUR_USERNAME/mycelium.id",
       "env": {
-        "MYCELIUM_KEY_SOURCE": "keychain"
+        "MYCELIUM_KEY_SOURCE": "keychain",
+        "MYCELIUM_DATA_DIR": "/Users/YOUR_USERNAME/mycelium.id/data"
       }
     }
   }
@@ -176,6 +177,14 @@ Replace `YOUR_USERNAME`/`cwd`. With the **Keychain** (or **1Password**) source,
 plain env vars instead? Put `USER_MASTER_KEY`/`SYSTEM_KEY` in the `env` block —
 the same pair from step 4.) Restart Claude Desktop; the `mycelium` tools appear
 once it connects.
+
+> **Point at the right vault — `MYCELIUM_DATA_DIR`.** Claude Desktop launches the
+> server with its own working directory, so a `cwd`-relative `./data` can resolve
+> to the wrong place and the server will open a **fresh, empty** vault (the #1
+> "connected but no data" gotcha). Set `MYCELIUM_DATA_DIR` to the **absolute path**
+> of the `data/` directory holding your `mycelium.db` + `kcv.json` — the one
+> `npm run init-db` created (here, `<repo>/data`). If your vault lives in the
+> packaged Mycelium app's directory instead, point it there.
 
 ---
 
@@ -289,7 +298,7 @@ mycelium.id/
 │   ├── crypto/keys.js     <- two-key unlock + KCV verification (fail-closed)
 │   ├── adapter/d1.js      <- the encrypting SQLite/D1 adapter (AES-256-GCM envelope)
 │   ├── db/index.js        <- assembles the per-table db namespaces over the adapter
-│   ├── mcp.js             <- tool registration (31 tools + 2 deferred)
+│   ├── mcp.js             <- tool registration (36 tools + 1 deferred)
 │   ├── server-http.js     <- Streamable HTTP + OAuth 2.1 transport
 │   ├── embed/client.js    <- embed-service (:8091) HTTP client
 │   ├── search/embedder.js <- embedder contract + service adapter (createServiceEmbedder)
