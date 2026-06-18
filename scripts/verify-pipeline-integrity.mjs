@@ -62,10 +62,25 @@ const insRaw = (id, content) => raw.prepare(`INSERT INTO messages (id, user_id, 
 
 // ── P2.1) the build YIELDS the event loop (no freeze) — behavioral test ──────
 {
-  // Mock a 300-row message source (> YIELD_EVERY=256). With the cooperative yield,
-  // macrotask timers run DURING the load; without it the microtask chain starves them.
-  const rows = Array.from({ length: 300 }, (_, i) => ({ id: `m${i}`, text: `doc ${i}`, created_at: '2026-01-01T00:00:00.000Z', embedding_768: null }));
-  const mockDb = { rawQuery: async (sql) => (/FROM messages/.test(sql) ? { results: rows } : { results: [] }) };
+  // Mock a message source LARGER than one page (the messages source paginates at
+  // PAGE=1000 and batches at BATCH=2000 in d1-loader.js). The loader flushes +
+  // yields to the macrotask (check) queue after EACH keyset page, and the per-row
+  // add() runs inside that flush — so a pre-scheduled macrotask can only be
+  // observed by add() if the build yielded between pages. The source must exceed
+  // PAGE for ≥2 pages (hence ≥2 flushes) to occur: use 2*BATCH = 4000 rows (4
+  // pages). With a single sub-page source the lone end-of-source flush runs all
+  // its add()s in one unbroken microtask chain and the marker is never seen.
+  const TOTAL = 4000; // 2 * BATCH (also > PAGE=1000) → multiple paginated flushes
+  const rows = Array.from({ length: TOTAL }, (_, i) => ({ id: `m${String(i).padStart(6, '0')}`, text: `doc ${i}`, created_at: '2026-01-01T00:00:00.000Z', embedding_768: null }));
+  // Faithful keyset-paginating source: honor the `id > ?` cursor + LIMIT (params
+  // [userId, lastId, PAGE]) so the loader's pagination loop terminates. A mock
+  // that returned the full set every page would spin forever. Ids are zero-padded
+  // so string (TEXT pk) ordering matches insertion order.
+  const mockDb = { rawQuery: async (sql, params) => {
+    if (!/FROM messages/.test(sql)) return { results: [] };
+    const [, lastId = '', limit = rows.length] = params || [];
+    return { results: rows.filter((r) => r.id > lastId).slice(0, limit) };
+  } };
   // A macrotask scheduled BEFORE the load. It can only run mid-load if the build
   // breaks its microtask chain by yielding to the macrotask (check) queue. With
   // the old non-yielding loop, this marker runs only AFTER the whole load.
