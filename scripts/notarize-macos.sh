@@ -49,6 +49,12 @@ rm -f "$DMG_OUT"
 STAGE="$(mktemp -d)"; cp -R "$APP" "$STAGE/"; ln -s /Applications "$STAGE/Applications"
 hdiutil create -volname "Mycelium" -srcfolder "$STAGE" -ov -format UDZO "$DMG_OUT"
 rm -rf "$STAGE"
+# Code-sign the DMG itself (Developer ID, secure timestamp). Notarizing an UNSIGNED
+# dmg succeeds and staples, but `spctl --assess --context context:primary-signature`
+# then rejects it (no primary signature to evaluate). Signing the disk image gives
+# it a primary signature so Gatekeeper assessment passes. No --options runtime: a
+# dmg is data, not executable code.
+codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DMG_OUT"
 
 # 4. Notarize + staple the .dmg (so the disk image itself passes Gatekeeper).
 echo "── 4/4  notarize .dmg ──────────────────────────────────────────"
