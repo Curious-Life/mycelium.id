@@ -17,7 +17,7 @@
 	 * doesn't re-hit the network.
 	 */
 	import { onMount, onDestroy } from 'svelte';
-	import { api } from '$lib/api';
+	import { getDocPreview } from '$lib/stores/docPreviews';
 	import { marked } from 'marked';
 	import DOMPurify from 'isomorphic-dompurify';
 	import { wrapHtmlForLive } from '$lib/iframe-live';
@@ -27,18 +27,6 @@
 		title = '',
 		ariaLabel = '',
 	}: { path: string; title?: string; ariaLabel?: string } = $props();
-
-	// Module-scoped cache, shared with HtmlThumbnail to avoid duplicate
-	// network round-trips when both components reference the same doc
-	// (e.g. library grid + space context). Keyed by path; values are
-	// content strings (or null for "fetch returned no content").
-	let cache: Map<string, Promise<string | null>>;
-	if (typeof window !== 'undefined') {
-		// @ts-expect-error attach to window to survive HMR
-		cache = window.__libraryHtmlPreviewCache ||= new Map();
-	} else {
-		cache = new Map();
-	}
 
 	let container = $state<HTMLDivElement | null>(null);
 	let scale = $state(0.25);
@@ -73,14 +61,9 @@
 	async function loadContent() {
 		if (content !== null) return;
 		try {
-			let p = cache.get(path);
-			if (!p) {
-				p = api(`/portal/documents/${path}`)
-					.then(async (r) => (r.ok ? (await r.json()).document?.content || null : null))
-					.catch(() => null);
-				cache.set(path, p);
-			}
-			content = (await p) ?? '';
+			// Batched snippet preview (one POST per frame of visible cards) instead
+			// of a full-document fetch per card. See $lib/stores/docPreviews.
+			content = (await getDocPreview(path)) ?? '';
 		} finally {
 			loaded = true;
 		}
