@@ -11,7 +11,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
 import { resolveDbKeyHex } from './db/open.js';
-import { ensureVaultEncrypted } from './account/db-cipher-migrate.js';
+import { ensureVaultEncrypted, purgePlaintextBackup } from './account/db-cipher-migrate.js';
 import { createIdentity, isValidHandle } from './identity/identity.js';
 import { readRemoteConfig } from './remote/config.js';
 import { buildDomains, collectTools, createMcpServer, TIER2_TOOLS, TOPOLOGY_NOT_READY_MESSAGE } from './mcp.js';
@@ -108,15 +108,29 @@ export async function boot({
   // but the migration throws, refuse to fall back to a plaintext open (would
   // write new rows in cleartext into a half-migrated vault). @see src/db/open.js.
   const dbKeyHex = resolveDbKeyHex(userHex);
+  let migration = null;
   if (dbKeyHex) {
     try {
-      const r = ensureVaultEncrypted({ dbPath, dbKeyHex, log: (m) => console.error(m) });
-      if (r.migrated) console.error(`[mycelium] at-rest: encrypted ${r.tables} tables; plaintext backup kept at ${r.preCipherPath}`);
+      migration = ensureVaultEncrypted({ dbPath, dbKeyHex, log: (m) => console.error(m) });
+      if (migration.migrated) console.error(`[mycelium] at-rest: encrypted ${migration.tables} tables`);
     } catch (e) {
       throw new Error(`at-rest encryption requested (MYCELIUM_AT_REST) but the migration failed — refusing a plaintext open: ${e.message}`);
     }
   }
   const { db, close } = getDb({ dbPath, userKey, systemKey, federationDeps, dbKeyHex });
+  // At-rest: getDb above is the keyed open of the freshly-encrypted vault, so the
+  // ciphertext is now proven usable. Retire the plaintext pre-cipher backup so no
+  // cleartext copy of the vault lingers at rest. Best-effort + self-verifying:
+  // purgePlaintextBackup refuses unless the live vault is encrypted + opens keyed,
+  // and a failure here is logged loudly, not fatal (the vault is already encrypted).
+  if (migration?.migrated && migration.preCipherPath) {
+    try {
+      const p = purgePlaintextBackup({ dbPath, preCipherPath: migration.preCipherPath, dbKeyHex, log: (m) => console.error(m) });
+      if (!p.purged) console.error(`[mycelium] at-rest: WARNING — plaintext backup NOT removed (${p.reason}): ${migration.preCipherPath}`);
+    } catch (e) {
+      console.error(`[mycelium] at-rest: WARNING — failed to remove plaintext backup ${migration.preCipherPath}: ${e.message}`);
+    }
+  }
   const { domains, deferred, searchHelpers, isTopologyReady } = buildDomains({ db, userId, embedder, identity });
   // Cold-start gating (Phase 4): Tier-2 readers return a uniform "not ready"
   // message until the topology pipeline has run, instead of honest-empty.

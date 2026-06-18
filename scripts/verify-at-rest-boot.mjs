@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { boot } from '../src/index.js';
 import { createStubEmbedder } from '../src/search/index.js';
 import { resolveDbKeyHex, atRestEnabled } from '../src/db/open.js';
-import { isPlaintextSqlite } from '../src/account/db-cipher-migrate.js';
+import { isPlaintextSqlite, purgePlaintextBackup } from '../src/account/db-cipher-migrate.js';
 
 const ledger = [];
 const rec = (n, c, x = '') => { ledger.push(c); console.log(`  [${c ? '✓' : '✗'}] ${n}${x ? ' — ' + x : ''}`); };
@@ -58,15 +58,39 @@ async function main() {
     const { db, close } = await boot({ dbPath, kcvPath: join(base, 'kcv.json'), userHex: uHex, systemHex: sHex, embedder: stub() });
     const marker = (await db.rawQuery('SELECT v FROM bw_marker')).results?.[0]?.v;
     close();
-    rec('B3 existing plaintext vault → boot migrates to encrypted; marker survives; backup kept',
-      !isPlaintextSqlite(dbPath) && marker === 'MARKER_PLAINTEXT' && hasPreCipher(dbPath),
-      `encrypted=${!isPlaintextSqlite(dbPath)} marker=${marker} backup=${hasPreCipher(dbPath)}`);
+    rec('B3 existing plaintext vault → boot migrates to encrypted; marker survives; plaintext backup PURGED after keyed open',
+      !isPlaintextSqlite(dbPath) && marker === 'MARKER_PLAINTEXT' && !hasPreCipher(dbPath),
+      `encrypted=${!isPlaintextSqlite(dbPath)} marker=${marker} backupGone=${!hasPreCipher(dbPath)}`);
 
     // ── B4 idempotent: 2nd boot on the now-encrypted vault still reads ───────
     const { db: db2, close: close2 } = await boot({ dbPath, kcvPath: join(base, 'kcv.json'), userHex: uHex, systemHex: sHex, embedder: stub() });
     const marker2 = (await db2.rawQuery('SELECT v FROM bw_marker')).results?.[0]?.v;
     close2();
     rec('B4 2nd boot is idempotent (already encrypted) + still reads', marker2 === 'MARKER_PLAINTEXT', `marker=${marker2}`);
+  }
+
+  // ── B6 purge safety: never discard the plaintext until ciphertext is proven ─
+  {
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    const base = join(dir, 'b6'); mkdirSync(base, { recursive: true });
+    const kHex = hex();
+    // a real ENCRYPTED live vault + a plaintext "backup" fixture beside it
+    const dbPath = join(base, 'mycelium.db');
+    const enc = new Database(dbPath); enc.pragma(`cipher='sqlcipher'`); enc.pragma(`key="x'${kHex}'"`); enc.exec(`CREATE TABLE t(x)`); enc.close();
+    const backup = `${dbPath}.pre-cipher-1`; writeFileSync(backup, 'plaintext-backup-fixture');
+
+    const wrong = purgePlaintextBackup({ dbPath, preCipherPath: backup, dbKeyHex: hex() });
+    rec('B6a purge REFUSES on wrong key (plaintext backup kept)', wrong.purged === false && existsSync(backup), wrong.reason);
+
+    const ok = purgePlaintextBackup({ dbPath, preCipherPath: backup, dbKeyHex: kHex });
+    rec('B6b purge removes the backup once the encrypted vault opens keyed', ok.purged === true && !existsSync(backup));
+
+    // live vault itself still PLAINTEXT (a failed/half migration) → must refuse
+    const ptLive = join(base, 'pt.db'); const ptBackup = `${ptLive}.pre-cipher-1`;
+    const s = new Database(ptLive); s.exec(`CREATE TABLE t(x)`); s.pragma('wal_checkpoint(TRUNCATE)'); s.close();
+    writeFileSync(ptBackup, 'plaintext-backup-fixture');
+    const refused = purgePlaintextBackup({ dbPath: ptLive, preCipherPath: ptBackup, dbKeyHex: kHex });
+    rec('B6c purge REFUSES when the live vault is still plaintext (backup kept)', refused.purged === false && existsSync(ptBackup), refused.reason);
   }
 
   // ── B5 default OFF: boot leaves a fresh vault PLAINTEXT (no behavior change) ─
