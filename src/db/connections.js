@@ -100,6 +100,7 @@ export function createConnectionsNamespace(deps) {
     randomUUID = nodeRandomUUID,
     fetch: fetchImpl = globalThis.fetch,
     lookup, // injectable DNS resolver — threaded into safeFetch (tests inject a stub)
+    now = () => Date.now(), // injectable clock for the presence caches (tests advance it)
   } = deps;
   if (typeof d1Query !== 'function') throw new TypeError('createConnectionsNamespace: d1Query required');
 
@@ -895,7 +896,7 @@ export function createConnectionsNamespace(deps) {
      * Best-effort: a peer error never throws — it degrades to last-known/none.
      */
     async queryPresence(userId) {
-      const nowMs = Date.now();
+      const nowMs = now();
       if (nowMs - _presenceResult.at < PRESENCE_RESULT_TTL_MS) return _presenceResult.map;
       if (!sign || !did) { _presenceResult = { map: {}, at: nowMs }; return {}; } // remote off → no presence
 
