@@ -1,5 +1,12 @@
 # Handoff — G2 Prompt Caching (for a fresh session)
 
+> **✅ RESOLVED 2026-06-19** — the fresh session ran this. The Step-0 spike (§6) measured the
+> live vault and **refuted §1's premise**: the real preamble is ~975 tok (~435 stable), 4–9× below
+> Opus 4.8's 4096 floor → system-preamble caching writes nothing. Pivoted to two levers (volatile-last
+> reorder + intra-turn tool-loop `cache_control`) + turn-level cache-token accounting. BUILT + GATED
+> on `feat/prompt-caching`. See `docs/PROMPT-CACHING-SPIKE-RESULT-2026-06-19.md` (evidence) and
+> `docs/PROMPT-CACHING-DESIGN-2026-06-19.md` (the as-built design). The doc below is the original brief.
+
 **Date:** 2026-06-19
 **Audience:** the next Claude Code session, picking up G2 (prompt caching) cold.
 **Companions:** `docs/HARNESS-STATE-AND-GAP-ANALYSIS-2026-06-18.md` (the gap table, G2 row), `docs/HOOK-BUS-DESIGN-2026-06-18.md` (G1, just shipped — the sibling gap).
