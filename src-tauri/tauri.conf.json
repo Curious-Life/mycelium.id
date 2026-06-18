@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "identifier": "id.mycelium.app",
   "build": {
-    "frontendDist": "../portal",
+    "frontendDist": "../portal-app/build",
+    "beforeDevCommand": "node scripts/ensure-portal-built.mjs",
     "beforeBuildCommand": "bash scripts/build-app-bundle.sh"
   },
   "app": {

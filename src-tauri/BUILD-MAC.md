@@ -4,6 +4,22 @@ This turns the local server + portal into a real `Mycelium.app` in your dock.
 The shell (`src-tauri/`) spawns the Node server (which serves the portal UI **and**
 the REST API at `http://127.0.0.1:8787`) and opens a window pointed at it.
 
+## TL;DR — one command
+
+From the repo root:
+
+```bash
+npm run build:app            # builds Mycelium.app (+ dmg)
+npm run build:app -- --dev   # or: run the app live (cargo tauri dev)
+```
+
+`scripts/build-app.sh` checks every prerequisite up front with an actionable
+message — so a missing **Rust** no longer fails with a cryptic `cargo: command
+not found`; it offers to install Rust + the Tauri CLI, builds the SvelteKit
+portal, fetches the sidecars, then runs `cargo tauri build`. The numbered steps
+below are what it does under the hood. (End users don't build from source — they
+download the notarized DMG.)
+
 > **Honesty note:** the Rust shell (`src/main.rs`) was authored without a Rust
 > toolchain in CI, so it's verified by *building it here on the Mac*, not in the
 > repo's `npm run verify`. The **portal itself is fully verified** (`npm run
