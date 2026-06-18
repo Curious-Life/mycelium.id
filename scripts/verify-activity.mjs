@@ -32,6 +32,23 @@ await af.heartbeat(id, { step: 3, totalSteps: 6 });
 active = await af.active(U);
 rec('A2. heartbeat advances step + total', Number(active[0]?.step) === 3 && Number(active[0]?.total_steps) === 6, `step=${active[0]?.step} total=${active[0]?.total_steps}`);
 
+// A2b. stalled flag round-trips via the keep-alive heartbeat (Gap #4)
+await af.heartbeat(id, { stalled: true });
+active = await af.active(U);
+const stalledOn = Number(active[0]?.stalled) === 1;
+await af.heartbeat(id, { stalled: false });
+active = await af.active(U);
+const stalledOff = Number(active[0]?.stalled) === 0;
+rec('A2b. heartbeat carries stalled (true→1, false→0)', stalledOn && stalledOff, `on=${stalledOn} off=${stalledOff}`);
+
+// A2c. a keep-alive heartbeat refreshes last_heartbeat → a slow-but-alive job is NOT
+// false-reaped (the Gap #4 regression: the feed reaped quiet-but-running jobs because
+// heartbeats only fired on Step lines). The watchdog's stalled-tick keeps it fresh.
+raw.prepare("UPDATE background_jobs SET last_heartbeat = datetime('now','-120 seconds') WHERE id = ?").run(id);
+await af.heartbeat(id, { stalled: true });
+await af.reap(U);
+rec('A2c. stalled keep-alive prevents false-reap', rowOf(id)?.status === 'running', JSON.stringify(rowOf(id) || {}));
+
 // A3. finish → leaves active, enters recent (done)
 await af.finish(id, { status: 'done' });
 active = await af.active(U);

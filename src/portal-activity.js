@@ -76,6 +76,7 @@ function shape(row, nowMs) {
     remaining: total > done ? total - done : 0,
     etaSeconds: etaSeconds(row, nowMs),
     status: row.status,
+    stalled: !!Number(row.stalled),  // watchdog flag → "taking longer than usual" chip hint (Gap #4)
     startedAt: row.started_at,
     finishedAt: row.finished_at || null,
   };

@@ -162,7 +162,7 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
         state.step = parseInt(m[1], 10);
         state.totalSteps = parseInt(m[2], 10);
         state.stageLabel = STAGE_LABELS[state.step] || m[3].trim();
-        if (db?.activityFeed) db.activityFeed.heartbeat(jobId, { step: state.step, totalSteps: state.totalSteps, stageLabel: feedLabel }).catch(() => {});
+        if (db?.activityFeed) db.activityFeed.heartbeat(jobId, { step: state.step, totalSteps: state.totalSteps, stageLabel: feedLabel, stalled: false }).catch(() => {});
       }
     }
   });
@@ -183,8 +183,14 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
 
   // Inactivity watchdog: flag (don't kill) a run that's gone quiet so the UI can
   // surface "taking longer than usual" + Cancel. Cleared when the child closes.
+  // It ALSO sends a keep-alive heartbeat carrying `stalled` — this both refreshes
+  // last_heartbeat (so the feed's 45s freshness gate doesn't FALSE-REAP a heavy
+  // stage that's quiet on Step lines but still alive) and propagates the stalled
+  // flag to the header chip (the feed, not getJob, drives the chip). Gap #4.
   const stallTimer = setInterval(() => {
-    if (state.status === 'running' && Date.now() - state.lastOutputAt > STALL_MS) state.stalled = true;
+    if (state.status !== 'running') return;
+    if (Date.now() - state.lastOutputAt > STALL_MS) state.stalled = true;
+    if (db?.activityFeed) db.activityFeed.heartbeat(jobId, { stalled: state.stalled }).catch(() => {});
   }, 15000);
   if (stallTimer.unref) stallTimer.unref();
 
