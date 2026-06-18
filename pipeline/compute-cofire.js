@@ -20,6 +20,7 @@
  */
 
 import { boot } from '../src/index.js';
+import { createStageResult } from './lib/stage-result.js';
 
 const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';
 const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
@@ -64,6 +65,7 @@ async function run() {
 
   try {
     const USER_ID_LOCAL = USER_ID;
+    const res = createStageResult('cofire', { record: db.pipelineState.recorderFor(USER_ID_LOCAL, 'cofire') });
     console.log(`[cofire] Computing co-firing for user=${USER_ID_LOCAL}`);
 
     // Fetch all points with territory assignments
@@ -191,7 +193,9 @@ async function run() {
       try {
         await query(sql, params);
         inserted++;
+        res.ok();
       } catch (err) {
+        res.fail(err);
         console.error(`[cofire] Insert failed for ${e.a}:${e.b}:`, err.message);
       }
 
@@ -201,6 +205,10 @@ async function run() {
     }
 
     console.log(`[cofire] Done: ${inserted} co-firing pairs computed and stored`);
+    // Fail loud if the write was materially incomplete (e.g. a systematic encrypted-
+    // write regression) + record per-stage health to pipeline_state. Throws →
+    // run().catch → exit 1 → run-clustering.sh (set -e) aborts → jobs.js names it.
+    await res.finalize();
   } finally {
     close();
   }

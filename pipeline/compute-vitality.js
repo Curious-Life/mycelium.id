@@ -42,6 +42,7 @@
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { cosineSim } from '../src/metrics/primitives.js';
+import { createStageResult } from './lib/stage-result.js';
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
@@ -275,6 +276,7 @@ export async function computeVitality({ db, userId, runId = null, dryRun = false
     return { territories: territories.length, written: 0, sparse, active: activeN, anchor };
   }
 
+  const res = createStageResult('vitality', { record: db.pipelineState.recorderFor(userId, 'vitality') });
   let written = 0;
   for (const r of results) {
     try {
@@ -290,7 +292,9 @@ export async function computeVitality({ db, userId, runId = null, dryRun = false
          runId],
       );
       written++;
+      res.ok();
     } catch (err) {
+      res.fail(err);
       log(`[vitality] insert failed for T${r.territory_id}: ${err.message}`);
     }
   }
@@ -306,6 +310,8 @@ export async function computeVitality({ db, userId, runId = null, dryRun = false
     );
   }
 
+  // Fail loud on materially-incomplete output + record per-stage health.
+  await res.finalize();
   log(`[vitality] Done: ${written} vitality scores written`);
   return { territories: territories.length, written, sparse, active: activeN, anchor };
 }

@@ -1,0 +1,14 @@
+-- 0024 — Surface the "stalled" job state in the activity feed (Gap #4).
+-- (0023 was taken by 0023_connection_presence.sql, which landed on main concurrently.)
+--
+-- jobs.js already detects a job that's gone quiet (no stdout for STALL_MS) and sets
+-- an in-memory `stalled` flag — but the header activity chip reads the activity feed
+-- (background_jobs), not the in-memory job, so the flag never reached the UI. Worse,
+-- the feed's 45s freshness gate (active()/reap()) FALSE-REAPED a slow-but-alive job
+-- as 'abandoned' because heartbeats only fired on stage transitions. This column lets
+-- the watchdog's keep-alive heartbeat carry the stalled state to the chip (and keeps
+-- the row fresh so it isn't false-reaped). Content-free operational flag.
+--
+-- Idempotent: ALTER TABLE ADD COLUMN is guarded per-statement by applyMigrations
+-- (src/db/migrate.js) so re-running on a populated DB is a no-op once applied.
+ALTER TABLE background_jobs ADD COLUMN stalled INTEGER DEFAULT 0;

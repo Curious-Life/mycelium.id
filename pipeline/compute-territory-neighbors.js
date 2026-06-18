@@ -38,6 +38,7 @@
 import { pathToFileURL } from 'node:url';
 import { boot } from '../src/index.js';
 import { cosineSim } from '../src/metrics/primitives.js';
+import { createStageResult } from './lib/stage-result.js';
 
 const DEFAULT_TOP_K = 12;
 const DEFAULT_MIN_SIM = 0.5;
@@ -115,6 +116,7 @@ export async function computeTerritoryNeighbors({ db, userId, topK = DEFAULT_TOP
   // Replace-all (idempotent rebuild), same pattern as compute-cofire / realm_neighbors.
   await db.rawQuery(`DELETE FROM territory_neighbors WHERE user_id = ?`, [userId]);
 
+  const res = createStageResult('territory-neighbors', { record: db.pipelineState.recorderFor(userId, 'territory-neighbors') });
   let written = 0;
   for (const p of pairs) {
     try {
@@ -124,11 +126,15 @@ export async function computeTerritoryNeighbors({ db, userId, topK = DEFAULT_TOP
         [`${userId}:${p.tid}:${p.nid}`, userId, p.tid, p.nid, p.distance],
       );
       written++;
+      res.ok();
     } catch (err) {
+      res.fail(err);
       log(`[neighbors] insert failed for ${p.tid}→${p.nid}: ${err.message}`);
     }
   }
 
+  // Fail loud on materially-incomplete output + record per-stage health.
+  await res.finalize();
   log(`[neighbors] Done: ${written} semantic neighbor edges written`);
   return { territories: terts.length, pairs: pairs.length, written };
 }

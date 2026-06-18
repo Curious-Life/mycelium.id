@@ -23,24 +23,27 @@ export function createActivityFeedNamespace({ d1QueryAdmin, randomUUID }) {
     async begin({ userId, kind, id, totalSteps = 0, stageLabel = null, pid = null }) {
       const rowId = id || uuid();
       await q(
-        `INSERT INTO background_jobs (id, user_id, kind, status, step, total_steps, stage_label, started_at, last_heartbeat, pid)
-         VALUES (?, ?, ?, 'running', 0, ?, ?, datetime('now'), datetime('now'), ?)
+        `INSERT INTO background_jobs (id, user_id, kind, status, step, total_steps, stage_label, started_at, last_heartbeat, pid, stalled)
+         VALUES (?, ?, ?, 'running', 0, ?, ?, datetime('now'), datetime('now'), ?, 0)
          ON CONFLICT(id) DO UPDATE SET status='running', step=0, total_steps=excluded.total_steps,
            stage_label=excluded.stage_label, started_at=datetime('now'), finished_at=NULL, error=NULL,
-           last_heartbeat=datetime('now'), pid=excluded.pid`,
+           last_heartbeat=datetime('now'), pid=excluded.pid, stalled=0`,
         [rowId, userId, kind, Number(totalSteps) || 0, stageLabel, pid],
       ).catch(() => {});
       return rowId;
     },
 
-    /** Update progress (done/total/stage) + refresh the heartbeat. Cheap; call often. */
-    async heartbeat(id, { step, totalSteps, stageLabel } = {}) {
+    /** Update progress (done/total/stage) + refresh the heartbeat. Cheap; call often.
+     *  `stalled` (0/1) is carried by the watchdog's keep-alive tick (jobs.js) so a
+     *  slow-but-alive job both stays fresh (no false reap) and shows the chip hint. */
+    async heartbeat(id, { step, totalSteps, stageLabel, stalled } = {}) {
       await q(
         `UPDATE background_jobs SET
            step = COALESCE(?, step), total_steps = COALESCE(?, total_steps),
-           stage_label = COALESCE(?, stage_label), last_heartbeat = datetime('now')
+           stage_label = COALESCE(?, stage_label), stalled = COALESCE(?, stalled),
+           last_heartbeat = datetime('now')
          WHERE id = ? AND status = 'running'`,
-        [step ?? null, totalSteps ?? null, stageLabel ?? null, id],
+        [step ?? null, totalSteps ?? null, stageLabel ?? null, stalled == null ? null : (stalled ? 1 : 0), id],
       ).catch(() => {});
     },
 
@@ -57,7 +60,7 @@ export function createActivityFeedNamespace({ d1QueryAdmin, randomUUID }) {
     async active(userId) {
       // d1QueryAdmin returns { results: [...] } (same as audit_log) — unwrap it.
       const r = await q(
-        `SELECT id, kind, status, step, total_steps, stage_label, started_at, last_heartbeat, pid
+        `SELECT id, kind, status, step, total_steps, stage_label, started_at, last_heartbeat, pid, stalled
          FROM background_jobs
          WHERE user_id = ? AND status = 'running'
            AND (strftime('%s','now') - strftime('%s', last_heartbeat)) * 1000 < ?

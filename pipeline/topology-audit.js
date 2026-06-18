@@ -36,6 +36,7 @@
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { gini, entropyBits, entropyNormalized, countsToProbs } from '../src/metrics/primitives.js';
+import { createStageResult } from './lib/stage-result.js';
 
 /**
  * Core stage. Exported for the verify gate.
@@ -212,6 +213,7 @@ export async function topologyAudit({ db, userId, dryRun = false, log = console.
   // 8. Write non-healthy findings only (keep the table small). Each metric
   //    column + explanation is ENCRYPTED by the adapter.
   const nonHealthy = findings.filter((f) => f.finding_type !== 'healthy');
+  const res = createStageResult('topology-audit', { record: db.pipelineState.recorderFor(userId, 'topology-audit') });
   let writtenFindings = 0;
   for (const f of nonHealthy) {
     try {
@@ -228,11 +230,16 @@ export async function topologyAudit({ db, userId, dryRun = false, log = console.
          f.explanation],
       );
       writtenFindings++;
+      res.ok();
     } catch (err) {
+      res.fail(err);
       log(`[audit] finding insert failed for T${f.territory_id}: ${err.message}`);
     }
   }
 
+  // Fail loud on materially-incomplete findings + record per-stage health. (The
+  // single snapshot INSERT above is un-caught → already fail-loud if it throws.)
+  await res.finalize();
   log(`[audit] Snapshot written with ${writtenFindings} findings`);
   // Suppress unused m2Entropy/m2MaxEntropy lints — kept for parity (diagnostic).
   void m2Entropy; void m2MaxEntropy;

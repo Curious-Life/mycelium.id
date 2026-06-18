@@ -5,6 +5,7 @@
 	import MindscapeDetail from '$lib/components/mindscape/MindscapeDetail.svelte';
 	import NarrateControl from '$lib/components/mindscape/NarrateControl.svelte';
 	import MeasureControl from '$lib/components/mindscape/MeasureControl.svelte';
+	import MeasurementHealthSection from '$lib/components/mindscape/MeasurementHealthSection.svelte';
 	import MindscapeBackground from '$lib/components/mindscape/MindscapeBackground.svelte';
 	import MindscapeInvite from '$lib/components/mindscape/MindscapeInvite.svelte';
 	import { api, apiGet } from '$lib/api';
@@ -432,6 +433,7 @@
 	<aside class="nav-panel" style="width: {panelWidth}px;">
 		<MindscapeDetail />
 		<MeasureControl />
+		<MeasurementHealthSection />
 		<NarrateControl />
 		<!-- Resize handle -->
 		<!-- svelte-ignore a11y_no_static_element_interactions -->

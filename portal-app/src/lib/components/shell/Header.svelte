@@ -150,10 +150,11 @@
 					<div class="px-2.5 py-1 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Active</div>
 					{#each active as j (j.id)}
 						<div class="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
-							<span class="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] flex-shrink-0"></span>
+							<span class="w-1.5 h-1.5 rounded-full flex-shrink-0 {j.stalled ? 'bg-[var(--color-warning,#f59e0b)]' : 'bg-[var(--color-accent)]'}"></span>
 							<span class="text-[var(--color-text-primary)] truncate">{j.stage}</span>
 							{#if j.total > 0}<span class="text-[var(--color-text-tertiary)] flex-shrink-0">{j.done}/{j.total}</span>{/if}
-							{#if fmtEta(j.etaSeconds)}<span class="ml-auto text-[var(--color-accent)] flex-shrink-0">{fmtEta(j.etaSeconds)} left</span>{/if}
+							{#if j.stalled}<span class="ml-auto text-[var(--color-warning,#f59e0b)] flex-shrink-0 whitespace-nowrap">taking longer…</span>
+							{:else if fmtEta(j.etaSeconds)}<span class="ml-auto text-[var(--color-accent)] flex-shrink-0">{fmtEta(j.etaSeconds)} left</span>{/if}
 						</div>
 					{/each}
 				</div>

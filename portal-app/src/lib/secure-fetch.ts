@@ -45,6 +45,7 @@ const SENSITIVE_PREFIXES = [
 	'/portal/onboarding',      // onboarding state
 	'/portal/integrations',    // third-party integrations (Linear etc.)
 	'/portal/metric-freshness',
+	'/portal/measurement-health',
 	'/portal/pipeline',
 	'/portal/telegram',        // social media relays
 	'/portal/auth/claude',     // post-session OAuth linking (NOT pre-session /api/login/* or /portal/auth/channel/*)
@@ -175,6 +176,7 @@ function routeToType(method: string, path: string): string | null {
 		'POST /portal/onboarding/dismiss': 'onboarding-dismiss',
 		'POST /portal/onboarding/reset': 'onboarding-reset',
 		'GET /portal/metric-freshness': 'metric-freshness',
+		'GET /portal/measurement-health': 'measurement-health',
 		'GET /portal/pipeline/status': 'pipeline-status',
 		'GET /portal/integrations/linear': 'integrations-linear-get',
 		'POST /portal/integrations/linear': 'integrations-linear-connect',

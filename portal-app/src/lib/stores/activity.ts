@@ -13,6 +13,7 @@ export interface ActivityJob {
   remaining: number;
   etaSeconds: number | null;
   status: string;
+  stalled?: boolean;
 }
 
 export const activity = writable<{ active: ActivityJob[]; recent: ActivityJob[] }>({ active: [], recent: [] });

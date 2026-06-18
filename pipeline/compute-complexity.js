@@ -36,6 +36,7 @@
 
 import { pathToFileURL } from 'node:url';
 import { lzComplexity } from '../src/metrics/primitives.js';
+import { createStageResult } from './lib/stage-result.js';
 
 const DEFAULT_WINDOW_DAYS = 90;
 
@@ -162,6 +163,7 @@ export async function computeComplexity({ db, userId, windowDays = DEFAULT_WINDO
     return { snapshots: allResults.length, written: 0, territory: territoryResults.length, realm: realmResults.length, global: globalResults.length };
   }
 
+  const res = createStageResult('complexity', { record: db.pipelineState.recorderFor(userId, 'complexity') });
   let written = 0;
   for (const r of allResults) {
     try {
@@ -185,11 +187,15 @@ export async function computeComplexity({ db, userId, windowDays = DEFAULT_WINDO
          r.sequenceLength, r.alphabetSize, windowStart.slice(0, 10), windowEnd, r.pointCount],
       );
       written++;
+      res.ok();
     } catch (err) {
+      res.fail(err);
       log(`[complexity] insert failed for ${r.level}/${r.level_id}: ${err.message}`);
     }
   }
 
+  // Fail loud on materially-incomplete output + record per-stage health.
+  await res.finalize();
   log(`[complexity] Done: ${written}/${allResults.length} snapshots written`);
   return { snapshots: allResults.length, written, territory: territoryResults.length, realm: realmResults.length, global: globalResults.length };
 }
