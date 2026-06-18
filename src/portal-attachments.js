@@ -58,17 +58,27 @@ export function portalAttachmentsRouter({ db, userId }) {
       const limit = Math.min(Number(req.query.limit) || 50, 200);
       const offset = Math.max(Number(req.query.offset) || 0, 0);
 
-      const rows = await db.attachments.listByUser(userId, { limit: LIST_SCAN_CAP, offset: 0 });
-      const filtered = rows.filter((r) => {
-        if (type && mediaTypeOf(r.file_type) !== type) return false;
-        if (search) {
-          const hay = `${r.file_name || ''} ${r.description || ''} ${r.transcript || ''}`.toLowerCase();
-          if (!hay.includes(search)) return false;
-        }
-        return true;
-      });
+      // Filtering on encrypted fields (file_name/description/transcript) can't be
+      // done in SQL, so it still needs a decrypting scan (capped). The common
+      // open has no filter → page at the DB and decrypt only the requested
+      // window instead of LIST_SCAN_CAP rows.
+      const filtering = Boolean(type || search);
+      const rows = filtering
+        ? await db.attachments.listByUser(userId, { limit: LIST_SCAN_CAP, offset: 0 })
+        : await db.attachments.listByUser(userId, { limit, offset });
+      const filtered = filtering
+        ? rows.filter((r) => {
+          if (type && mediaTypeOf(r.file_type) !== type) return false;
+          if (search) {
+            const hay = `${r.file_name || ''} ${r.description || ''} ${r.transcript || ''}`.toLowerCase();
+            if (!hay.includes(search)) return false;
+          }
+          return true;
+        })
+        : rows;
+      const page = filtering ? filtered.slice(offset, offset + limit) : filtered;
 
-      const attachments = filtered.slice(offset, offset + limit).map((r) => ({
+      const attachments = page.map((r) => ({
         id: r.id,
         type: mediaTypeOf(r.file_type),
         url: `/api/v1/portal/attachments/${r.id}/file`,

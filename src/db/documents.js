@@ -132,20 +132,50 @@ export function createDocumentsNamespace(deps) {
       return row;
     },
 
-    async list(userId, { category, folderId, pinnedOnly, internalOnly = false } = {}) {
+    async list(userId, { category, folderId, pinnedOnly, internalOnly = false, limit, offset } = {}) {
       // PR 5.10: include metadata so the library list view can resolve
       // per-upload sender names (encrypted JSON; auto-decrypted in
       // db-d1's read path). Cost: extra column read + one decrypt per
-      // row. Acceptable for 600+ row libraries; revisit if list-view
-      // perf degrades.
+      // row — paginate (limit/offset) so the list view only decrypts a page.
       let sql = `SELECT path, title, summary, folder_id, is_pinned AS pinned, source_type, created_by, metadata, updated_at FROM documents WHERE user_id = ? AND is_internal = ? AND forgotten_at IS NULL`;
       const params = [userId, internalOnly ? 1 : 0];
       if (category) { sql += ` AND path LIKE ?`; params.push(`${category}/%`); }
       if (folderId) { sql += ` AND folder_id = ?`; params.push(folderId); }
       if (pinnedOnly) sql += ` AND is_pinned = 1`;
       sql += ` ORDER BY updated_at DESC`;
+      // Optional pagination: omit (callers like MCP listDocuments) → full set, unchanged.
+      if (Number.isFinite(limit) && limit > 0) {
+        sql += ` LIMIT ?`; params.push(Math.floor(limit));
+        if (Number.isFinite(offset) && offset > 0) { sql += ` OFFSET ?`; params.push(Math.floor(offset)); }
+      }
       const result = await d1Query(sql, params);
       return result.results || [];
+    },
+
+    /** Count of list()-visible documents (no decrypt) — for paginated totals. */
+    async count(userId, { category, folderId, pinnedOnly, internalOnly = false } = {}) {
+      let sql = `SELECT COUNT(*) AS n FROM documents WHERE user_id = ? AND is_internal = ? AND forgotten_at IS NULL`;
+      const params = [userId, internalOnly ? 1 : 0];
+      if (category) { sql += ` AND path LIKE ?`; params.push(`${category}/%`); }
+      if (folderId) { sql += ` AND folder_id = ?`; params.push(folderId); }
+      if (pinnedOnly) sql += ` AND is_pinned = 1`;
+      const result = await d1Query(sql, params);
+      return result.results?.[0]?.n || 0;
+    },
+
+    /**
+     * Cheap card-preview: decrypt ONLY the content column and return its first
+     * `maxChars`. Avoids db.documents.get's SELECT * (which decrypts every
+     * encrypted column) for grid thumbnails.
+     */
+    async contentSnippet(userId, path, maxChars = 600) {
+      const result = await d1Query(
+        `SELECT content FROM documents WHERE user_id = ? AND path = ? AND forgotten_at IS NULL`,
+        [userId, path],
+      );
+      const content = result.results?.[0]?.content;
+      if (typeof content !== 'string') return '';
+      return content.length > maxChars ? content.slice(0, maxChars) : content;
     },
 
     // ── Metadata mutations (PR 7) ──────────────────────────────────────
