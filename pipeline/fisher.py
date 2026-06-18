@@ -1,6 +1,6 @@
 """Fisher information geometry for cognitive trajectory tracking (V1 port).
 
-Ported VERBATIM from the canonical scripts/fisher.py (Curious-Life/mycelium)
+Ported VERBATIM from the canonical scripts/fisher.py (the canonical reference implementation)
 with ONE behavioral fix flagged inline:
 
   * clamp-inf-z (K1 audit fix): null_model_z returned float('inf') when the

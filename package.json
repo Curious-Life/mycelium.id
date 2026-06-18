@@ -5,10 +5,15 @@
   "type": "module",
   "description": "Mycelium V1 — self-hosted single-user MCP cognitive vault.",
   "license": "AGPL-3.0",
+  "homepage": "https://mycelium.id",
+  "repository": { "type": "git", "url": "git+https://github.com/Curious-Life/mycelium.id.git" },
+  "bugs": { "url": "https://github.com/Curious-Life/mycelium.id/issues" },
+  "author": "Curious Life (https://curious.life)",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
+    "test": "npm run verify:core",
     "init-db": "node scripts/init-db.mjs",
     "set-keys": "node scripts/set-keys.mjs",
     "verify:no-destructive-truncation": "node scripts/verify-no-destructive-truncation.mjs",

@@ -10,7 +10,7 @@
   <a href="docs/guide/"><strong>Docs</strong></a> ·
   <a href="docs/guide/handbook/">Handbook</a> ·
   <a href="docs/guide/reference/">Reference</a> ·
-  <a href="docs/V1-BUILD-SPEC.md">Build Spec</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
   <a href="https://mycelium.id">Website</a>
 </p>
 
@@ -52,7 +52,7 @@ A self-hosted MCP server that gives **any AI model** complete context about your
 | Layer | What | Sovereignty |
 |-------|------|-------------|
 | **MCP Interface** | model-agnostic tools over stdio + Streamable HTTP | Full — runs on your machine |
-| **Encryption** | AES-256-GCM, scope-partitioned, two hex master keys | Full — keys never leave your hardware |
+| **Encryption** | AES-256-GCM, scope-partitioned, one hex recovery key | Full — keys never leave your hardware |
 | **Search** | Nomic v1.5 ONNX embeddings, ANN + BM25 + RRF fusion | Full — local inference, no API calls |
 | **Topology** | Leiden clustering, co-firing, information harmonics | Full — open source, runs locally |
 | **REST + Ingest** | `/api/v1/*` + `/ingest/*` for non-MCP clients (bots, webhooks, scripts) | Full — same tools, HTTP interface |
@@ -117,15 +117,15 @@ Even when the code is free, these can't be copied:
 | D3 | Encryption | Port `crypto-local.js` — wrapped-DEK envelope, AES-256-GCM |
 | D4 | Master key | 64-char hex strings, no BIP-39 in V1 |
 | D5 | Runtime | Pure MCP tool server — no autonomous loop |
-| D6 | System key | Two independent hex keys (USER_MASTER + SYSTEM_KEY) |
+| D6 | System key | One recovery key (USER_MASTER); SYSTEM_KEY HKDF-derived from it |
 | D7 | Enrichment | Build-new NLP tagging + embed-on-write service |
 
 ## Build Status
 
-**Under active development** (branch `claude/repo-overview-mC69M`). The core is built and continuously verified; remaining pieces are environment-gated — they need a networked host for ML models, deploy, and platform tokens.
+**Under active development.** The core is built and continuously verified; remaining pieces are environment-gated — they need a networked host for ML models, deploy, and platform tokens.
 
 ```
-Phase 1  Core Server + Data Layer       ✅ built   encrypting SQLite adapter, two-key vault
+Phase 1  Core Server + Data Layer       ✅ built   encrypting SQLite adapter, recovery-key vault
 Phase 2  Embeddings + Search            ◑ built*   in-RAM ANN+BM25+RRF; real embeddings gated
 Phase 3  Topology Pipeline              ◑ built*   ported pipeline + tools; clustering wheels gated
 Phase 4  OAuth + Security               ✅ built   OAuth 2.1 + PKCE, stateful Streamable HTTP
@@ -137,14 +137,14 @@ Phase 6  Enrichment + Connectors        ◷ next     D7 service skeleton, messag
 
 **Verification:** `npm install --legacy-peer-deps && npm run verify` runs the full suite (every `verify:*` gate prints `VERDICT: GO`). For a fast sanity check use `npm run verify:core` (boot · crypto · MCP tools · portal · search). A real MCP client completes OAuth and lists the live tools over HTTPS; messages and file uploads round-trip through the encrypting vault.
 
-See [`docs/V1-BUILD-SPEC.md`](docs/V1-BUILD-SPEC.md) (spec), [`docs/V1-IMPLEMENTATION-PLAN.md`](docs/V1-IMPLEMENTATION-PLAN.md) (day-by-day plan), and [`docs/V1-BUILD-HANDOFF-2026-05-30.md`](docs/V1-BUILD-HANDOFF-2026-05-30.md) (current state).
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the as-built system and [`docs/SETUP.md`](docs/SETUP.md) to run it.
 
 ## Install
 
 > **Status:** the `@mycelium/mcp` npm package is a roadmap deliverable. Today the server runs from source on the development branch.
 
 ```bash
-git clone <repo> && cd mycelium.id
+git clone https://github.com/Curious-Life/mycelium.id.git && cd mycelium.id
 nvm use                 # Node 22 LTS (see .nvmrc) — Node 23+ breaks prebuilt native modules
 npm install --legacy-peer-deps   # the --legacy-peer-deps flag is required
 npm run verify:core     # fast sanity (or `npm run verify` for the full suite)
@@ -177,8 +177,12 @@ mycelium.id/
 ├── scripts/                       verify-*.mjs (one per subsystem) + init-db
 ├── migrations/                    0001 schema (111 tables) + 0002 local_path
 ├── pipeline/                      Python: embed-service, clustering, harmonics
-├── docs/                          build spec, plan, design + handoff docs
-├── reference/                     ~32K LOC from the canonical production system
+├── portal-app/                    SvelteKit web UI (built + served at :8787)
+├── src-tauri/                     Tauri desktop app shell (macOS)
+├── packages/channel-daemon/       Telegram / Discord bridge
+├── tools/memory-bridge/           harness adapters (Claude Code, opencode, …)
+├── docs/                          guide (handbook + reference) + architecture
+├── tests/ · assets/ · mobile/     test suites · brand · mobile scaffold
 ├── CLAUDE.md · LICENSE (AGPL-3.0)
 ```
 
@@ -198,23 +202,17 @@ Everyone else is building memory. We're building the **nervous system**.
 
 ## Support development
 
-<!-- ⚠️ BEFORE LAUNCH: replace YOUR_GITHUB_SPONSORS_HANDLE and YOUR_STRIPE_PAYMENT_LINK below
-     (and uncomment the entries in .github/FUNDING.yml). Tracked in docs/PRE-LAUNCH-CHECKLIST.md. -->
-
 Mycelium is free and open source — clone it, run it, fork it, own your data. That's the point.
 
 If it's useful to you, support its development. This is infrastructure built in the open, **value-for-value**: the practice is free, and the people who get value from it fund the work that keeps it growing. The Redis / Linux model — commoditize the layer, fund what's above it.
 
-- **[Sponsor on GitHub](https://github.com/sponsors/YOUR_GITHUB_SPONSORS_HANDLE)** — one-time or recurring, no platform fee.
-- **[Support via Stripe](YOUR_STRIPE_PAYMENT_LINK)** — one-time or recurring, outside GitHub.
-
-> **⚠️ Placeholders — set the Sponsors handle + Stripe link before launch.**
+Sponsorship links will be available at launch — see [mycelium.id](https://mycelium.id).
 
 No ads, no data sold, no strings. Just people funding the infrastructure they rely on.
 
 ## License
 
-[AGPL-3.0](LICENSE) — the full Mycelium core will be open at V1 launch. Until then, this repository is private to avoid signaling a half-finished design.
+[AGPL-3.0](LICENSE) — Mycelium's core is free and open source.
 
 ---
 

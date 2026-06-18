@@ -8,7 +8,7 @@
  * (the modular-monolith principle: shared primitives live in exactly one place).
  *
  * PORTED VERBATIM from the canonical @mycelium/metrics/primitives.js
- * (Curious-Life/mycelium) so the 1e-12 cross-language fixture parity holds and
+ * (the canonical reference implementation) so the 1e-12 cross-language fixture parity holds and
  * re-sync stays trivial. The function bodies are byte-equivalent to canonical;
  * only this header differs. Cross-language gate: scripts/verify-primitives.mjs
  * against scripts/fixtures/primitives_fixture.json.
