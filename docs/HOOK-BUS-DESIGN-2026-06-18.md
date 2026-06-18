@@ -1,6 +1,16 @@
 # Native Agent Harness — Lifecycle Hook Bus (G1) — Design (2026-06-18)
 
-**Status:** LOCKED (sweep-first: 4 parallel Explore sweeps + own-eyes verification of every load-bearing file). Not built.
+**Status:** ✅ BUILT (Steps 1–4 of 5) on branch `feat/hook-bus` — 2026-06-19. Step 5 = operator live-smoke. Originally LOCKED (sweep-first: 4 parallel Explore sweeps + own-eyes verification of every load-bearing file).
+
+> **Build log (branch `feat/hook-bus`, worktree `mycelium-worktrees/hook-bus`):**
+> - **Step 1** (`src/agent/hooks.js` + `verify:harness-hooks` U1–U8) — fire helpers (fail-CLOSED block + timeout, fail-OPEN observers) + `createAgentHooks` tool-guard factory.
+> - **Step 2** (`harness.js` streamTurn wiring, K1–K6) — `beforeToolCall`/`afterToolCall` at the single dispatch chokepoint; no-hooks path byte-for-byte unchanged.
+> - **Step 3** (`history.js` + `run-turn.js`, K7) — `before/after_compaction` (autonomous-only).
+> - **Step 4** (`scheduler.js`, `server-rest.js`+`channel-turn.js`, `narration-runner.js`+`narration-walk.js`, W1–W3) — `createAgentHooks` + `autonomousToolGuard()` env denylist (`MYCELIUM_AUTONOMOUS_TOOL_DENY`) wired into the 3 autonomous surfaces; chat untouched (seam present, no guard).
+>
+> **Gate `verify:harness-hooks`: 47/47.** Regression GREEN + UNCHANGED: all 18 `verify:harness*`, `verify:chat`, `verify:narration-walk`/`-job`, plus `gating/leak/providers-leak/egress/resolve/cascade/mcp/rest/control-loopback/gateway*/channel-presence`. Full `npm run verify` ran its 11 JS gates green then halted at the Python-venv parity gate (`verify:nomic-embedding-encryption`) — a worktree environment gap (no provisioned `pipeline/.venv`; symlink fails — venvs are path-anchored), NOT a regression: that gate is cross-language measurement-pipeline parity and imports none of the changed files. A true full-chain green needs the real app env (venv + embed-service + network).
+>
+> **Step 5 (operator, needs the running app):** set `MYCELIUM_AUTONOMOUS_TOOL_DENY=<tool>` → run an autonomous turn (scheduled task or a native-router channel DM) → confirm a `tool_blocked` event + a `tool-guard` audit row (name only) + the turn still completes. Security-sensitive diff (runtime tool gate + plaintext hook surface) → **human approval** before merge per `/auto-merge-on-green`.
 **Scope:** G1 from [`HARNESS-STATE-AND-GAP-ANALYSIS-2026-06-18.md`](HARNESS-STATE-AND-GAP-ANALYSIS-2026-06-18.md). Adds a **minimal** lifecycle hook seam to the native agent engine so tool-call gating/observation and compaction become pluggable, instead of the only seams being `onEgress`/`onUsage`/`onStall`. G2 (prompt caching) is a **separate** next-session pass.
 **Principle anchors:** CLAUDE.md §1 (zero plaintext leakage), §2 (defense in depth), §3 (fail closed), §8 (audit, no PII), §11 (explicit-send egress chokepoint untouched). Decision context: autonomous-at-launch (operator chose the scheduler runs live), so a runtime tool-call guard is launch-relevant defense-in-depth, not a future nicety.
 
