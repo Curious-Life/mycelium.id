@@ -1,7 +1,11 @@
 # Measurement & Narration Hardening — Design
 
 **Date:** 2026-06-18
-**Status:** LOCKED (sweep-first, three cycles + self-verified reads)
+**Status:** BUILT (steps 1–6) on branch `feat/measurement-health`. Gap #3 (fail-loud accounting) + measurement-health (pipeline_state populated + `/measurement-health` + Mindscape card) + Gap #4 (stalled surfaced, false-reap fixed). Realm-chronicles + reorder closed as non-issues. New/extended gates GO; 13/13 touched gates GO. Remaining: full `npm run verify` + live portal-ui smoke of the card at PR time.
+
+**As-built deltas from the design:** (a) the Python helper lives at `pipeline/stage_result.py` (flat, beside `stage_base.py`), not `pipeline/lib/` (Python convention); (b) Python adoption used a `run_main()` __main__ wrapper (no body reindent) applied to ALL 9 stages incl. harmonics/fisher (so the `cognitive-harmonics` freshness probe resolves) + `cluster` (fixes era rung 1) — `SystemExit` is treated as intentional control-flow to avoid false-quarantining benign insufficient-data exits; (c) the health surface extends the existing `/metric-freshness` (shared `computeFreshness()`) into a sibling `/measurement-health` rather than a standalone endpoint; (d) the card lives in MindscapeView next to MeasureControl.
+
+**Status (design):** LOCKED (sweep-first, three cycles + self-verified reads)
 **Scope:** Close the open issues identified in the measurement/narration deep-dive: the silent partial-data failure mode (Gap #3), the un-surfaced/false-reaped "stalled" job state (Gap #4); add a **measurement-health / trackability layer** (failures visible, per-family health knowable) by *populating the pipeline_state ledger that already exists and is already wired into era-resolution + freshness*; and formally resolve two items that the sweep proved are **non-issues** (realm chronicles, pipeline reorder).
 
 ---
