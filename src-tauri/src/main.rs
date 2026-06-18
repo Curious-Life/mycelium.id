@@ -273,6 +273,12 @@ fn main() {
                 // MUST also be set on the :4711 supervisor below — it opens the SAME
                 // vault, and a plaintext open of an encrypted file fail-closes.
                 cmd.env("MYCELIUM_AT_REST", "1");
+                // On-disk search (FTS5 + sqlite-vec INSIDE the encrypted vault) is a
+                // package deal with at-rest: the in-RAM index would otherwise
+                // re-decrypt + rebuild ALL messages into the heap on every boot
+                // (minutes of event-loop starvation through the cipher). The on-disk
+                // index persists + queries run in C. @see src/search/index.js.
+                cmd.env("MYCELIUM_SEARCH_BACKEND", "sqlite");
             }
             if hf_home.exists() {
                 // Offline embedding model bundled under Resources/app/hf-cache.
@@ -338,6 +344,7 @@ fn main() {
                                 .env("MYCELIUM_DATA_DIR", &sup_data);
                             if sup_at_rest {
                                 http.env("MYCELIUM_AT_REST", "1");
+                                http.env("MYCELIUM_SEARCH_BACKEND", "sqlite"); // on-disk search (see server-rest spawn)
                             }
                             if !public_host.is_empty() {
                                 http.env("MYCELIUM_BASE_URL", format!("https://{public_host}"));
