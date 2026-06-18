@@ -222,6 +222,24 @@ async function main() {
     rec('J. GET /metric-freshness → 200 + seeded tables present w/ last_write', frOk,
       `status=${fr.status} total=${fr.body?.summary?.total} fisher=${byTable.fisher_trajectory?.verdict} vitality=${byTable.territory_vitality?.verdict} harmonic=${byTable.cognitive_metrics_harmonic?.verdict}`);
 
+    // ── L. /measurement-health → freshness verdict JOINED with pipeline_state ──
+    // Seed a chronically-failed stage so "stale because it failed" is legible.
+    await db.rawQuery(
+      `INSERT INTO pipeline_state (user_id, stage_name, last_failure_at, last_failure_reason, consecutive_failures, quarantined, last_duration_ms)
+       VALUES (?, 'vitality', ?, ?, 3, 1, 1200)`,
+      [uid, isoDaysAgo(0), 'vitality: incomplete — 0/42 written, 42 failed (e.g. SQLITE_ERROR)']);
+    const mh = await ja(M('/measurement-health'));
+    const fam = Object.fromEntries((mh.body?.families || []).map((f) => [f.stage || f.table, f]));
+    const vitFam = (mh.body?.families || []).find((f) => f.stage === 'vitality');
+    const mhOk = mh.status === 200
+      && Array.isArray(mh.body?.families) && mh.body.families.length > 0
+      && vitFam?.quarantined === true && /incomplete/.test(vitFam?.last_failure_reason || '')
+      && mh.body?.summary?.quarantined >= 1 && mh.body?.summary?.failing >= 1
+      && 'fresh' in (mh.body?.summary || {}) // freshness verdict still merged in
+      && !!fam['cluster']?.last_success_at;  // a success-only stage surfaces too
+    rec('L. GET /measurement-health → 200 + freshness⋈pipeline_state; quarantined legible', mhOk,
+      `status=${mh.status} fams=${mh.body?.families?.length} vitQ=${vitFam?.quarantined} q=${mh.body?.summary?.quarantined} failing=${mh.body?.summary?.failing}`);
+
     // ── K. FAIL-CLOSED: an unauth (proxied) request is rejected with 401 ─────
     // Pattern-B gate: a genuine same-host request never carries x-forwarded-for;
     // setting it simulates a request relayed through a network proxy → 401.

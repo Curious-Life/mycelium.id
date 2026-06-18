@@ -451,23 +451,32 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
     { table: 'cognitive_metrics_harmonic', probe: { kind: 'pipeline_state', stage_name: 'cognitive-harmonics' }, budget_ms: 26 * HOUR, cadence: '24h (era-anchored)', description: 'Cognitive harmonics (information-harmonics + bigram flow + topology H0 entropy).' },
   ];
 
-  router.get('/metric-freshness', async (req, res) => {
-    const u = owner(req, res); if (!u) return;
-    try {
-      const nowMs = Date.now();
-      const rows = await Promise.all(METRIC_BUDGETS.map(async (b) => {
+  // Which pipeline_state stage writes each metric family — so /measurement-health
+  // can say "stale BECAUSE the stage failed" (not just "stale"). Mirrors the stage
+  // names recorded by pipeline/lib/stage-result.js + pipeline/stage_result.py.
+  const FAMILY_STAGE = {
+    fisher_trajectory: 'fisher', fisher_milestones: 'fisher', territory_vitality: 'vitality',
+    territory_cofire: 'cofire', complexity_snapshots: 'complexity', topology_audit_snapshots: 'topology-audit',
+    frequency_snapshots: 'frequency', cognitive_metrics_harmonic: 'cognitive-harmonics',
+  };
+
+  // Shared freshness probe (MAX(timestamp) / pipeline_state) → per-family verdict map.
+  // No decrypted values, just plaintext timestamps — nothing here can leak ciphertext.
+  async function computeFreshness(uid) {
+    const nowMs = Date.now();
+    const rows = await Promise.all(METRIC_BUDGETS.map(async (b) => {
         let lastWrite = null, present = true;
         try {
           if (b.probe?.kind === 'pipeline_state') {
             const r = await db.rawQuery(
               `SELECT last_success_at AS last_write FROM pipeline_state WHERE user_id = ? AND stage_name = ?`,
-              [u.id, b.probe.stage_name]);
+              [uid, b.probe.stage_name]);
             lastWrite = (r.results || [])[0]?.last_write ?? null;
           } else {
             // timestamp columns are PLAINTEXT — MAX() is valid in SQL.
             const r = await db.rawQuery(
               `SELECT MAX(${b.timestamp_column}) AS last_write FROM ${b.table} WHERE user_id = ?`,
-              [u.id]);
+              [uid]);
             lastWrite = (r.results || [])[0]?.last_write ?? null;
           }
         } catch (err) {
@@ -484,15 +493,72 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
         const ageMs = Number.isFinite(writeMs) ? nowMs - writeMs : null;
         const verdict = ageMs === null ? 'empty' : ageMs <= b.budget_ms ? 'fresh' : 'stale';
         return { table: b.table, present, last_write: lastWrite, age_ms: ageMs, budget_ms: b.budget_ms, cadence: b.cadence, description: b.description, verdict };
-      }));
+    }));
+    const summary = rows.reduce((acc, r) => {
+      acc.total += 1; acc[r.verdict] = (acc[r.verdict] || 0) + 1; return acc;
+    }, { total: 0, fresh: 0, stale: 0, missing: 0, empty: 0 });
+    return { nowMs, rows, summary };
+  }
 
-      const summary = rows.reduce((acc, r) => {
-        acc.total += 1; acc[r.verdict] = (acc[r.verdict] || 0) + 1; return acc;
-      }, { total: 0, fresh: 0, stale: 0, missing: 0, empty: 0 });
-
+  router.get('/metric-freshness', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const { nowMs, rows, summary } = await computeFreshness(u.id);
       res.set('Cache-Control', 'no-store');
       res.json({ user_id: u.id, now: new Date(nowMs).toISOString(), metrics: rows, summary });
     } catch { fail(res, 500, 'Failed to fetch metric freshness'); }
+  });
+
+  // Measurement health: per-stage trackability. Joins the freshness verdict with the
+  // pipeline_state ledger (last success/failure, streak, quarantine) so a stale family
+  // is DIAGNOSABLE — failed vs never-ran — and chronically-broken stages are badged.
+  // Content-free (counts/timestamps/short reason). @see src/db/pipeline-state.js.
+  router.get('/measurement-health', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const [{ nowMs, rows: freshRows }, health] = await Promise.all([
+        computeFreshness(u.id),
+        db.pipelineState.all(u.id),
+      ]);
+      const byStage = new Map(health.map((h) => [h.stage_name, h]));
+      const used = new Set();
+      const shape = (h, base = {}) => {
+        if (h) used.add(h.stage_name);
+        return {
+          ...base,
+          stage: h?.stage_name ?? base.stage ?? null,
+          last_success_at: h?.last_success_at ?? null,
+          last_failure_at: h?.last_failure_at ?? null,
+          last_failure_reason: h?.last_failure_reason ?? null,
+          consecutive_failures: Number(h?.consecutive_failures ?? 0),
+          quarantined: !!Number(h?.quarantined ?? 0),
+          last_duration_ms: h?.last_duration_ms ?? null,
+        };
+      };
+      // Freshness families, each joined to the health of the stage that writes it.
+      const families = freshRows.map((r) => {
+        const stage = FAMILY_STAGE[r.table] ?? null;
+        return shape(stage ? byStage.get(stage) : null, {
+          table: r.table, stage, verdict: r.verdict, last_write: r.last_write,
+          age_ms: r.age_ms, budget_ms: r.budget_ms, cadence: r.cadence, description: r.description,
+        });
+      });
+      // Stages with health but no freshness-mapped table (cluster, describe,
+      // territory-neighbors, coupling, criticality, coherence, behavioral, anchors)
+      // — surfaced health-only so a quarantined stage is never hidden.
+      const others = health.filter((h) => !used.has(h.stage_name))
+        .map((h) => shape(h, { table: null, verdict: null, last_write: null, age_ms: null, budget_ms: null, cadence: null, description: null }));
+      const all = [...families, ...others];
+      const summary = all.reduce((acc, r) => {
+        acc.total += 1;
+        if (r.verdict) acc[r.verdict] = (acc[r.verdict] || 0) + 1;
+        if (r.consecutive_failures > 0) acc.failing += 1;
+        if (r.quarantined) acc.quarantined += 1;
+        return acc;
+      }, { total: 0, fresh: 0, stale: 0, missing: 0, empty: 0, failing: 0, quarantined: 0 });
+      res.set('Cache-Control', 'no-store');
+      res.json({ user_id: u.id, now: new Date(nowMs).toISOString(), families: all, summary });
+    } catch { fail(res, 500, 'Failed to fetch measurement health'); }
   });
 
   return router;
