@@ -159,13 +159,11 @@ export function ensureDataDir({ env = process.env } = {}) {
   console.error(`[mycelium] relocated legacy vault ./data → ${dir} (original db renamed aside, not deleted)`);
 }
 
-/** Create the data dir + apply all migrations to the vault db (idempotent). Lets
- *  a fresh vault self-initialise on first boot — no separate `init-db` needed. */
-function ensureVaultSchema(dbFile) {
-  mkdirSync(path.dirname(dbFile), { recursive: true });
-  const db = new Database(dbFile);
-  try { applyMigrations(db); } finally { db.close(); }
-}
+// Vault schema self-initialisation moved into boot() → initVaultStorage()
+// (src/db/init.js): it is now KEY-AWARE (a fresh at-rest vault is born encrypted;
+// an already-encrypted vault opens keyed for the idempotent schema apply) and runs
+// under a cross-process lock together with the migration. Opening the schema
+// connection UNKEYED here threw "file is not a database" on any encrypted vault.
 
 /**
  * Phase B Tier-1 Matrix wiring (membership-sync + egress + inbound). Always
@@ -401,7 +399,8 @@ export async function startRestServer({
         opts.userHex = k.userHex;
         opts.systemHex = k.systemHex;
       }
-      ensureVaultSchema(effectiveDbPath); // self-initialise a fresh vault (idempotent)
+      // Schema + at-rest migration now happen INSIDE boot() → initVaultStorage(),
+      // key-aware + under a cross-process lock (self-initialises a fresh vault).
       const { tools, handlers, db, close, userId: bootUserId } = await boot(opts);
       dbHandle = db;
       // Record the ceremony success now that the vault (and audit_log) is open.
