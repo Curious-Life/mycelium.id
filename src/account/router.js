@@ -20,6 +20,15 @@ import {
 import { getSessionKeys } from './session-keys.js';
 import { isTrustedLoopback } from '../http/loopback.js';
 
+// 500s: log the real error server-side (key-free by construction — these paths
+// never carry key material) and return ONLY a generic message to the client, so a
+// deep internal error (a path, a schema/migration detail) never echoes out the
+// HTTP boundary. The stable `error:` code is what the UI keys on, not the prose.
+function sanitizeErr(err) {
+  try { console.error('[account] request failed:', err?.message || err); } catch { /* never throw from logging */ }
+  return 'Something went wrong — check the app logs for details.';
+}
+
 /**
  * @param {object} deps
  * @param {() => boolean} deps.isInitialized   is the vault open (booted) yet?
@@ -79,9 +88,12 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
       const systemHex = deriveSystemKey(userHex);
       writeKeychain(userHex, systemHex);     // persist BEFORE boot so a restart re-opens it
       await completeBoot({ userHex, systemHex, reason: 'setup' });
+      // The recovery key is returned ONCE here — no-store so it never caches.
+      res.setHeader('Cache-Control', 'no-store, max-age=0');
+      res.setHeader('Pragma', 'no-cache');
       return res.json({ recoveryKey: userHex });
     } catch (err) {
-      return res.status(500).json({ error: 'setup_failed', message: String(err?.message || err) });
+      return res.status(500).json({ error: 'setup_failed', message: sanitizeErr(err) });
     }
   });
 
@@ -119,7 +131,7 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
       await completeBoot({ userHex, systemHex, reason: 'restore' });
       return res.json({ ok: true });
     } catch (err) {
-      return res.status(500).json({ error: 'restore_failed', message: String(err?.message || err) });
+      return res.status(500).json({ error: 'restore_failed', message: sanitizeErr(err) });
     }
   });
 
@@ -127,6 +139,13 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
   router.get('/recovery-key', (_req, res) => {
     const key = readUserMaster();
     if (!key) return res.status(404).json({ error: 'no_key' });
+    // The single most sensitive value in the system. Loopback-gated above; ALSO
+    // forbid any caching (browser disk cache, devtools, any intermediary) so it
+    // never persists outside this response, and leave an audit line (NEVER the
+    // value) so an unexpected reveal is observable.
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    console.info('[account] recovery key revealed (GET /recovery-key, loopback)');
     res.json({ recoveryKey: key });
   });
 
@@ -146,7 +165,7 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
     } catch (err) {
       const msg = target === '1password'
         ? 'Could not save to 1Password — is the `op` CLI installed and signed in?'
-        : String(err?.message || err);
+        : sanitizeErr(err);
       return res.status(500).json({ error: 'save_failed', message: msg });
     }
   });
@@ -172,7 +191,7 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
       res.setHeader('X-Vault-Manifest', JSON.stringify({ v: manifest.v, createdAt: manifest.createdAt, uploadCount: manifest.uploadCount }));
       return res.end(buffer);
     } catch (err) {
-      return res.status(500).json({ error: 'backup_failed', message: String(err?.message || err) });
+      return res.status(500).json({ error: 'backup_failed', message: sanitizeErr(err) });
     }
   });
 
@@ -208,7 +227,7 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
       } catch (err) {
         if (err?.code === 'vault_exists') return res.status(409).json({ error: 'vault_exists', message: 'A vault already exists on this device. Confirm to replace it.' });
         if (err?.code === 'invalid_archive') return res.status(400).json({ error: 'invalid_archive', message: String(err.message) });
-        return res.status(500).json({ error: 'restore_backup_failed', message: String(err?.message || err) });
+        return res.status(500).json({ error: 'restore_backup_failed', message: sanitizeErr(err) });
       }
     });
     req.pipe(bb);
@@ -244,7 +263,7 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
       await completeBoot({ userHex: keys.userHex, systemHex: keys.systemHex, reason: 'unlock' });
       return res.json({ ok: true });
     } catch (err) {
-      return res.status(500).json({ error: 'unlock_failed', message: String(err?.message || err) });
+      return res.status(500).json({ error: 'unlock_failed', message: sanitizeErr(err) });
     }
   });
 
@@ -273,7 +292,7 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
       return res.json({ ok: true });
     } catch (err) {
       removeLock(lockFile);
-      return res.status(500).json({ error: 'enable_failed', message: String(err?.message || err) });
+      return res.status(500).json({ error: 'enable_failed', message: sanitizeErr(err) });
     }
   });
 
@@ -295,7 +314,7 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
       removeLock(lockFile);
       return res.json({ ok: true });
     } catch (err) {
-      return res.status(500).json({ error: 'disable_failed', message: String(err?.message || err) });
+      return res.status(500).json({ error: 'disable_failed', message: sanitizeErr(err) });
     }
   });
 
