@@ -18,15 +18,16 @@
 
 	let summary = $state<BodySummary | null>(null);
 	let loading = $state(true);
-	let range = $state<7 | 14 | 30>(7);
+	let range = $state<7 | 14 | 30 | 90>(7);
+
+	const today = new Date().toISOString().split('T')[0];
 
 	const metricLabel: Record<string, string> = {
-		sleep_duration_min: 'Sleep', hrv_avg: 'HRV', resting_hr: 'RHR',
+		sleep_duration_min: 'Sleep', hrv_avg: 'HRV', resting_hr: 'Resting HR',
 		steps: 'Steps', active_energy_kcal: 'Energy', mindful_minutes: 'Mindful',
-		workout_minutes: 'Workouts', sleep_efficiency: 'Sleep efficiency',
+		workout_minutes: 'Workouts', sleep_efficiency: 'Efficiency',
 	};
-	const trendArrow: Record<string, string> = { improving: '\u2197', declining: '\u2198', stable: '\u2192' };
-	const trendColor: Record<string, string> = { improving: 'text-green-400', declining: 'text-red-400', stable: 'text-[var(--color-text-tertiary)]' };
+	const trendArrow: Record<string, string> = { improving: '↗', declining: '↘', stable: '→' };
 
 	async function loadSummary() {
 		try {
@@ -35,193 +36,184 @@
 		} catch { /* silent */ }
 		loading = false;
 	}
+	function switchRange(r: 7 | 14 | 30 | 90) {
+		if (r === range) return;
+		range = r; loading = true; loadSummary();
+	}
+	onMount(() => { loadSummary(); });
 
-	function switchRange(r: 7 | 14 | 30) {
-		range = r;
-		loading = true;
-		loadSummary();
+	// Latest reading = today if present, else the most recent synced day.
+	const latest = $derived.by<BodyDay | null>(() => {
+		if (!summary) return null;
+		if (summary.today) return summary.today;
+		const d = summary.days;
+		return d && d.length ? d[d.length - 1] : null;
+	});
+	const latestIsToday = $derived(latest?.date === today);
+	const hasData = $derived(!!(summary && (summary.today || summary.days?.length)));
+
+	function fmtDate(d: string): string {
+		const dt = new Date(d + 'T00:00:00');
+		return dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+	}
+	function sleepHM(min: number | null): string {
+		if (min == null) return '—';
+		return `${Math.floor(min / 60)}h ${Math.round(min % 60).toString().padStart(2, '0')}m`;
 	}
 
-	onMount(() => { loadSummary(); });
+	// Smooth-ish SVG sparkline (line + area) over a 300×60 viewBox.
+	function spark(days: BodyDay[], key: keyof BodyDay) {
+		const series = days.map((d) => d[key] as number | null);
+		const idx = series.map((v, i) => [i, v] as const).filter(([, v]) => v != null && Number.isFinite(v as number));
+		if (idx.length < 2) return null;
+		const W = 300, H = 60, pad = 6;
+		const vals = idx.map(([, v]) => v as number);
+		const min = Math.min(...vals), max = Math.max(...vals);
+		const span = max - min || 1;
+		const n = series.length;
+		const pts = idx.map(([i, v]) => {
+			const x = n === 1 ? W / 2 : (i / (n - 1)) * (W - 2 * pad) + pad;
+			const y = H - pad - (((v as number) - min) / span) * (H - 2 * pad);
+			return [x, y] as const;
+		});
+		const line = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+		const area = `${line} L${pts[pts.length - 1][0].toFixed(1)},${H} L${pts[0][0].toFixed(1)},${H} Z`;
+		return { line, area, last: pts[pts.length - 1] };
+	}
 </script>
 
 <svelte:head><title>Body</title></svelte:head>
 
 <div class="page">
-	<!-- Header -->
 	<div class="header">
-		<h1>Body</h1>
+		<div class="title-wrap">
+			<h1>Body</h1>
+			{#if hasData && latest}
+				<span class="as-of">{latestIsToday ? 'Today' : `as of ${fmtDate(latest.date)}`}</span>
+			{/if}
+		</div>
 		<div class="range-toggle">
-			<button class:active={range === 7} onclick={() => switchRange(7)}>7 days</button>
-			<button class:active={range === 14} onclick={() => switchRange(14)}>14 days</button>
-			<button class:active={range === 30} onclick={() => switchRange(30)}>30 days</button>
+			{#each [7, 14, 30, 90] as r}
+				<button class:active={range === r} onclick={() => switchRange(r as 7 | 14 | 30 | 90)}>{r}d</button>
+			{/each}
 		</div>
 	</div>
 
 	{#if loading}
 		<div class="loading"><div class="spinner"></div></div>
-	{:else if !summary || (!summary.today && !summary.days?.length)}
+	{:else if !hasData}
 		<div class="empty">
-			<h2>No health data yet</h2>
-			<p>Connect Apple Body from the Mycelium iOS app to see your sleep, HRV, activity, and wellness trends here.</p>
+			<div class="empty-orb"></div>
+			<h2>No health data in this window</h2>
+			<p>Open the Mycelium iOS app, long-press the action button and choose <strong>Sync Apple Health</strong> to bring your sleep, heart, and movement here. If you've synced before, try a longer range.</p>
 		</div>
-	{:else}
+	{:else if summary}
 		{@const hs = summary}
+		{@const l = latest}
 
-		<!-- Today's vitals -->
-		{#if hs.today}
-			{@const t = hs.today}
-			<div class="vitals-grid">
-				{#if t.sleep_duration_min != null}
-					{@const h = Math.floor(t.sleep_duration_min / 60)}
-					{@const m = Math.round(t.sleep_duration_min % 60)}
-					<div class="vital-card">
-						<div class="vital-label">Sleep</div>
-						<div class="vital-value sleep">{h}h{m.toString().padStart(2,'0')}m</div>
-						{#if t.sleep_efficiency != null}<div class="vital-sub">{Math.round(t.sleep_efficiency * 100)}% efficiency</div>{/if}
-					</div>
+		<!-- Hero: the three signals that matter most -->
+		{#if l}
+			<div class="hero">
+				<div class="hero-card sleep">
+					<span class="hero-label">Sleep</span>
+					<span class="hero-value">{sleepHM(l.sleep_duration_min)}</span>
+					<span class="hero-sub">
+						{#if l.sleep_efficiency != null}{Math.round(l.sleep_efficiency * 100)}% efficiency{:else}—{/if}
+					</span>
+				</div>
+				<div class="hero-card hrv">
+					<span class="hero-label">HRV</span>
+					<span class="hero-value">{l.hrv_avg != null ? Math.round(l.hrv_avg) : '—'}<small>ms</small></span>
+					<span class="hero-sub">{hs.averages?.hrv_avg ? `avg ${Math.round(hs.averages.hrv_avg)}` : ''}</span>
+				</div>
+				<div class="hero-card rhr">
+					<span class="hero-label">Resting HR</span>
+					<span class="hero-value">{l.resting_hr != null ? Math.round(l.resting_hr) : '—'}<small>bpm</small></span>
+					<span class="hero-sub">{hs.averages?.resting_hr ? `avg ${Math.round(hs.averages.resting_hr)}` : ''}</span>
+				</div>
+			</div>
+		{/if}
+
+		<!-- Movement strip -->
+		{#if l}
+			<div class="vitals">
+				{#if l.steps != null}
+					<div class="vital steps"><span class="v-label">Steps</span><span class="v-value">{l.steps.toLocaleString()}</span></div>
 				{/if}
-				{#if t.hrv_avg != null}
-					<div class="vital-card">
-						<div class="vital-label">HRV</div>
-						<div class="vital-value hrv">{Math.round(t.hrv_avg)}<span class="vital-unit">ms</span></div>
-						{#if hs.averages?.hrv_avg}<div class="vital-sub">avg {Math.round(hs.averages.hrv_avg)}</div>{/if}
-					</div>
+				{#if l.active_energy_kcal != null}
+					<div class="vital energy"><span class="v-label">Energy</span><span class="v-value">{Math.round(l.active_energy_kcal)}<small>kcal</small></span></div>
 				{/if}
-				{#if t.resting_hr != null}
-					<div class="vital-card">
-						<div class="vital-label">Resting HR</div>
-						<div class="vital-value rhr">{Math.round(t.resting_hr)}<span class="vital-unit">bpm</span></div>
-						{#if hs.averages?.resting_hr}<div class="vital-sub">avg {Math.round(hs.averages.resting_hr)}</div>{/if}
-					</div>
+				{#if l.workout_minutes != null && l.workout_minutes > 0}
+					<div class="vital workout"><span class="v-label">Workouts</span><span class="v-value">{Math.round(l.workout_minutes)}<small>min</small></span></div>
 				{/if}
-				{#if t.steps != null}
-					<div class="vital-card">
-						<div class="vital-label">Steps</div>
-						<div class="vital-value steps">{t.steps.toLocaleString()}</div>
-						{#if hs.averages?.steps}<div class="vital-sub">avg {Math.round(hs.averages.steps).toLocaleString()}</div>{/if}
-					</div>
-				{/if}
-				{#if t.active_energy_kcal != null}
-					<div class="vital-card">
-						<div class="vital-label">Active Energy</div>
-						<div class="vital-value energy">{Math.round(t.active_energy_kcal)}<span class="vital-unit">kcal</span></div>
-					</div>
-				{/if}
-				{#if t.workout_minutes != null && t.workout_minutes > 0}
-					<div class="vital-card">
-						<div class="vital-label">Workouts</div>
-						<div class="vital-value workout">{Math.round(t.workout_minutes)}<span class="vital-unit">min</span></div>
-					</div>
-				{/if}
-				{#if t.mindful_minutes != null && t.mindful_minutes > 0}
-					<div class="vital-card">
-						<div class="vital-label">Mindfulness</div>
-						<div class="vital-value mindful">{Math.round(t.mindful_minutes)}<span class="vital-unit">min</span></div>
-					</div>
+				{#if l.mindful_minutes != null && l.mindful_minutes > 0}
+					<div class="vital mindful"><span class="v-label">Mindful</span><span class="v-value">{Math.round(l.mindful_minutes)}<small>min</small></span></div>
 				{/if}
 			</div>
 		{/if}
 
-		<!-- Sleep analysis -->
-		{#if hs.days?.some(d => d.sleep_duration_min != null)}
-			{@const sleepDays = hs.days.filter(d => d.sleep_duration_min != null)}
-			{@const maxSleep = Math.max(...sleepDays.map(x => x.sleep_duration_min || 0))}
-			<div class="chart-card">
-				<h2 class="chart-title">Sleep</h2>
-				<div class="bar-chart">
+		<!-- Sleep stages -->
+		{#if hs.days?.some((d) => d.sleep_duration_min != null)}
+			{@const sleepDays = hs.days.filter((d) => d.sleep_duration_min != null)}
+			{@const maxSleep = Math.max(...sleepDays.map((x) => x.sleep_duration_min || 0))}
+			<div class="card">
+				<div class="card-head"><h2>Sleep</h2>
+					<div class="legend">
+						<span><i class="dot deep"></i>Deep</span><span><i class="dot rem"></i>REM</span><span><i class="dot core"></i>Core</span>
+					</div>
+				</div>
+				<div class="bars">
 					{#each sleepDays as d}
 						{@const barH = maxSleep > 0 ? ((d.sleep_duration_min || 0) / maxSleep) * 100 : 0}
-						{@const deep = d.sleep_deep_min || 0}
-						{@const rem = d.sleep_rem_min || 0}
-						{@const core = d.sleep_core_min || 0}
+						{@const deep = d.sleep_deep_min || 0}{@const rem = d.sleep_rem_min || 0}{@const core = d.sleep_core_min || 0}
 						{@const total = deep + rem + core || 1}
-						<div class="bar-col" title="{d.date}: {Math.round((d.sleep_duration_min || 0) / 60)}h{Math.round((d.sleep_duration_min || 0) % 60)}m">
-							<div class="bar-stack" style="height: {barH}%; min-height: 2px;">
-								<div class="bar-seg deep" style="height: {(deep/total)*100}%"></div>
-								<div class="bar-seg rem" style="height: {(rem/total)*100}%"></div>
-								<div class="bar-seg core" style="height: {(core/total)*100}%"></div>
+						<div class="bar-col" title="{fmtDate(d.date)}: {sleepHM(d.sleep_duration_min)}">
+							<div class="bar" style="height:{barH}%">
+								<div class="seg core" style="height:{(core / total) * 100}%"></div>
+								<div class="seg rem" style="height:{(rem / total) * 100}%"></div>
+								<div class="seg deep" style="height:{(deep / total) * 100}%"></div>
 							</div>
-							<span class="bar-label">{d.date.slice(5)}</span>
 						</div>
 					{/each}
-				</div>
-				<div class="legend">
-					<span class="legend-item"><span class="legend-dot deep"></span>Deep</span>
-					<span class="legend-item"><span class="legend-dot rem"></span>REM</span>
-					<span class="legend-item"><span class="legend-dot core"></span>Core</span>
 				</div>
 			</div>
 		{/if}
 
-		<!-- Heart: HRV + RHR -->
-		{#if hs.days?.some(d => d.hrv_avg != null || d.resting_hr != null)}
-			<div class="heart-grid">
-				{#if hs.days.some(d => d.hrv_avg != null)}
-					{@const hrvDays = hs.days.filter(d => d.hrv_avg != null)}
-					{@const maxHrv = Math.max(...hrvDays.map(d => d.hrv_avg || 0))}
-					<div class="chart-card">
-						<h2 class="chart-title">HRV <span class="chart-unit">ms</span></h2>
-						<div class="spark-chart">
-							{#each hrvDays as d}
-								<div class="spark-bar hrv" style="height: {maxHrv > 0 ? ((d.hrv_avg || 0) / maxHrv) * 100 : 0}%; min-height: 1px;" title="{d.date}: {Math.round(d.hrv_avg || 0)}ms"></div>
-							{/each}
+		<!-- Heart + movement trends as elegant sparklines -->
+		<div class="spark-grid">
+			{#each [ {key:'hrv_avg', label:'HRV', unit:'ms', cls:'hrv'}, {key:'resting_hr', label:'Resting HR', unit:'bpm', cls:'rhr'}, {key:'steps', label:'Steps', unit:'', cls:'steps'} ] as m}
+				{@const sp = spark(hs.days || [], m.key as keyof BodyDay)}
+				{#if sp}
+					<div class="card spark-card {m.cls}">
+						<div class="card-head"><h2>{m.label}{#if m.unit}<span class="unit">{m.unit}</span>{/if}</h2>
+							{#if hs.trends?.[m.key] && hs.trends[m.key] !== 'insufficient'}
+								<span class="trend {hs.trends[m.key]}">{trendArrow[hs.trends[m.key]]} {hs.trends[m.key]}</span>
+							{/if}
 						</div>
+						<svg class="spark" viewBox="0 0 300 60" preserveAspectRatio="none">
+							<defs>
+								<linearGradient id="grad-{m.cls}" x1="0" y1="0" x2="0" y2="1">
+									<stop offset="0%" class="grad-top" />
+									<stop offset="100%" class="grad-bot" />
+								</linearGradient>
+							</defs>
+							<path d={sp.area} fill="url(#grad-{m.cls})" />
+							<path d={sp.line} fill="none" class="spark-line" vector-effect="non-scaling-stroke" />
+							<circle cx={sp.last[0]} cy={sp.last[1]} r="3" class="spark-dot" />
+						</svg>
 					</div>
 				{/if}
-				{#if hs.days.some(d => d.resting_hr != null)}
-					{@const rhrDays = hs.days.filter(d => d.resting_hr != null)}
-					{@const maxRhr = Math.max(...rhrDays.map(d => d.resting_hr || 0))}
-					<div class="chart-card">
-						<h2 class="chart-title">Resting HR <span class="chart-unit">bpm</span></h2>
-						<div class="spark-chart">
-							{#each rhrDays as d}
-								<div class="spark-bar rhr" style="height: {maxRhr > 0 ? ((d.resting_hr || 0) / maxRhr) * 100 : 0}%; min-height: 1px;" title="{d.date}: {Math.round(d.resting_hr || 0)}bpm"></div>
-							{/each}
-						</div>
-					</div>
-				{/if}
-			</div>
-		{/if}
+			{/each}
+		</div>
 
-		<!-- Steps + Energy -->
-		{#if hs.days?.some(d => d.steps != null)}
-			{@const stepDays = hs.days.filter(d => d.steps != null)}
-			{@const maxSteps = Math.max(...stepDays.map(d => d.steps || 0))}
-			<div class="chart-card">
-				<h2 class="chart-title">Steps</h2>
-				<div class="spark-chart wide">
-					{#each stepDays as d}
-						<div class="spark-bar steps" style="height: {maxSteps > 0 ? ((d.steps || 0) / maxSteps) * 100 : 0}%; min-height: 1px;" title="{d.date}: {(d.steps || 0).toLocaleString()}"></div>
-					{/each}
-				</div>
-			</div>
-		{/if}
-
-		<!-- Trends -->
-		{#if hs.trends && Object.values(hs.trends).some(v => v && v !== 'insufficient')}
-			<div class="chart-card">
-				<h2 class="chart-title">Trends</h2>
-				<div class="trends">
-					{#each Object.entries(hs.trends) as [key, val]}
-						{#if val && val !== 'insufficient' && metricLabel[key]}
-							<span class="trend-pill {trendColor[val] || ''}">
-								{trendArrow[val] || ''} {metricLabel[key]} {val}
-							</span>
-						{/if}
-					{/each}
-				</div>
-			</div>
-		{/if}
-
-		<!-- Anomalies -->
+		<!-- Notable -->
 		{#if hs.anomalies?.length}
-			<div class="chart-card">
-				<h2 class="chart-title">Notable</h2>
+			<div class="card">
+				<div class="card-head"><h2>Notable</h2></div>
 				{#each hs.anomalies.slice(0, 5) as a}
 					<div class="anomaly">
-						<span class="anomaly-date">{a.date}</span>
-						<span class="anomaly-text">{metricLabel[a.metric] || a.metric}: {Math.round(a.value)} (baseline {Math.round(a.baseline)})</span>
+						<span class="a-date">{fmtDate(a.date)}</span>
+						<span class="a-text">{metricLabel[a.metric] || a.metric} · {Math.round(a.value)} <em>(usually {Math.round(a.baseline)})</em></span>
 					</div>
 				{/each}
 			</div>
@@ -230,176 +222,105 @@
 </div>
 
 <style>
-	.page {
-		flex: 1;
-		overflow-y: auto;
-		padding: 1.5rem 2rem;
-		background: var(--color-bg);
-	}
-	.header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		margin-bottom: 1.5rem;
-	}
-	.header h1 {
-		font-size: 1.1rem;
-		font-weight: 600;
-		color: var(--color-text-primary);
-	}
-	.range-toggle {
-		display: flex;
-		gap: 2px;
-		background: var(--color-surface);
-		border: 1px solid var(--color-border);
-		border-radius: 8px;
-		padding: 2px;
-	}
-	.range-toggle button {
-		padding: 5px 12px;
-		border: none;
-		background: transparent;
-		color: var(--color-text-tertiary);
-		font-size: 0.7rem;
-		font-weight: 500;
-		border-radius: 6px;
-		cursor: pointer;
-		transition: all 0.15s;
-	}
-	.range-toggle button.active {
-		background: var(--color-accent);
-		color: var(--color-bg);
-	}
-	.loading {
-		display: flex;
-		justify-content: center;
-		padding: 4rem;
-	}
-	.spinner {
-		width: 24px; height: 24px;
-		border: 2px solid var(--color-border);
-		border-top-color: var(--color-accent);
-		border-radius: 50%;
-		animation: spin 0.8s linear infinite;
-	}
+	.page { flex: 1; overflow-y: auto; padding: 1.5rem clamp(1rem, 4vw, 2.25rem) 3rem; background: var(--color-bg); }
+
+	.header { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 1.5rem; }
+	.title-wrap { display: flex; align-items: baseline; gap: 0.7rem; }
+	.header h1 { font-size: 1.5rem; font-weight: 300; letter-spacing: 0.01em; color: var(--color-text-primary); }
+	.as-of { font-size: 0.72rem; color: var(--color-text-tertiary); }
+	.range-toggle { display: flex; gap: 2px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 999px; padding: 3px; }
+	.range-toggle button { padding: 5px 12px; border: none; background: transparent; color: var(--color-text-tertiary); font-size: 0.72rem; font-weight: 500; border-radius: 999px; cursor: pointer; transition: all 0.18s ease; }
+	.range-toggle button.active { background: rgba(var(--color-accent-aurum-rgb), 0.18); color: rgb(var(--color-accent-aurum-rgb)); }
+
+	.loading { display: flex; justify-content: center; padding: 5rem; }
+	.spinner { width: 26px; height: 26px; border: 2px solid var(--color-border); border-top-color: rgb(var(--color-accent-aurum-rgb)); border-radius: 50%; animation: spin 0.8s linear infinite; }
 	@keyframes spin { to { transform: rotate(360deg); } }
-	.empty {
-		text-align: center;
-		padding: 4rem 2rem;
-		color: var(--color-text-secondary);
-	}
-	.empty h2 { font-size: 1rem; font-weight: 500; margin-bottom: 0.5rem; color: var(--color-text-primary); }
-	.empty p { font-size: 0.8rem; max-width: 400px; margin: 0 auto; line-height: 1.6; }
 
-	/* Vitals grid */
-	.vitals-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-		gap: 0.75rem;
-		margin-bottom: 1.25rem;
-	}
-	.vital-card {
-		background: var(--color-surface);
-		border-radius: 10px;
-		padding: 1rem;
-		text-align: center;
-	}
-	.vital-label { font-size: 0.65rem; color: var(--color-text-tertiary); margin-bottom: 0.25rem; }
-	.vital-value { font-size: 1.4rem; font-weight: 600; }
-	.vital-unit { font-size: 0.7rem; font-weight: 400; color: var(--color-text-tertiary); margin-left: 2px; }
-	.vital-sub { font-size: 0.6rem; color: var(--color-text-tertiary); margin-top: 2px; }
-	.vital-value.sleep { color: #818cf8; }
-	.vital-value.hrv { color: #4ade80; }
-	.vital-value.rhr { color: #f87171; }
-	.vital-value.steps { color: #fb923c; }
-	.vital-value.energy { color: #facc15; }
-	.vital-value.workout { color: #34d399; }
-	.vital-value.mindful { color: #a78bfa; }
+	.empty { text-align: center; padding: 4rem 2rem; max-width: 460px; margin: 2rem auto; }
+	.empty-orb { width: 72px; height: 72px; margin: 0 auto 1.5rem; border-radius: 50%;
+		background: radial-gradient(circle at 35% 30%, rgba(var(--color-accent-amethyst-rgb), 0.55), rgba(var(--color-accent-coral-rgb), 0.25) 60%, transparent 75%);
+		filter: blur(2px); animation: pulse 4s ease-in-out infinite; }
+	@keyframes pulse { 0%,100% { opacity: 0.7; transform: scale(1); } 50% { opacity: 1; transform: scale(1.08); } }
+	.empty h2 { font-size: 1.05rem; font-weight: 400; margin-bottom: 0.6rem; color: var(--color-text-primary); }
+	.empty p { font-size: 0.82rem; color: var(--color-text-secondary); line-height: 1.65; }
+	.empty strong { color: rgb(var(--color-accent-aurum-rgb)); font-weight: 500; }
 
-	/* Charts */
-	.chart-card {
-		background: var(--color-surface);
-		border-radius: 10px;
-		padding: 1rem 1.25rem;
-		margin-bottom: 0.75rem;
-	}
-	.chart-title {
-		font-size: 0.75rem;
-		font-weight: 500;
-		color: var(--color-text-tertiary);
-		margin-bottom: 0.75rem;
-	}
-	.chart-unit { font-weight: 400; font-size: 0.65rem; }
-	.bar-chart {
-		display: flex;
-		align-items: flex-end;
-		gap: 3px;
-		height: 7rem;
-	}
-	.bar-col {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		height: 100%;
-		justify-content: flex-end;
-		gap: 4px;
-	}
-	.bar-stack {
-		width: 100%;
-		border-radius: 3px 3px 0 0;
-		position: relative;
-		display: flex;
-		flex-direction: column-reverse;
-	}
-	.bar-seg { width: 100%; }
-	.bar-seg.deep { background: #4f46e5; border-radius: 0 0 3px 3px; }
-	.bar-seg.rem { background: rgba(168, 85, 247, 0.7); }
-	.bar-seg.core { background: rgba(96, 165, 250, 0.5); border-radius: 3px 3px 0 0; }
-	.bar-label { font-size: 0.5rem; color: var(--color-text-tertiary); }
-	.legend { display: flex; gap: 0.75rem; margin-top: 0.5rem; }
-	.legend-item { display: flex; align-items: center; gap: 4px; font-size: 0.6rem; color: var(--color-text-tertiary); }
-	.legend-dot { width: 8px; height: 8px; border-radius: 2px; }
-	.legend-dot.deep { background: #4f46e5; }
-	.legend-dot.rem { background: rgba(168, 85, 247, 0.7); }
-	.legend-dot.core { background: rgba(96, 165, 250, 0.5); }
+	/* Hero */
+	.hero { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.85rem; margin-bottom: 0.85rem; }
+	@media (max-width: 560px) { .hero { grid-template-columns: 1fr; } }
+	.hero-card { position: relative; overflow: hidden; padding: 1.25rem 1.35rem; border-radius: 16px;
+		background: linear-gradient(160deg, rgba(255,255,255,0.04), rgba(255,255,255,0.015));
+		border: 1px solid var(--glass-border); display: flex; flex-direction: column; gap: 0.35rem; }
+	.hero-card::before { content: ''; position: absolute; inset: 0; pointer-events: none; opacity: 0.5;
+		background: radial-gradient(120% 80% at 100% 0%, var(--glow), transparent 60%); }
+	.hero-card.sleep { --glow: rgba(var(--color-accent-amethyst-rgb), 0.22); }
+	.hero-card.hrv { --glow: rgba(var(--color-accent-jade-rgb), 0.20); }
+	.hero-card.rhr { --glow: rgba(var(--color-accent-coral-rgb), 0.20); }
+	.hero-label { font-size: 0.7rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--color-text-tertiary); }
+	.hero-value { font-size: 2rem; font-weight: 300; line-height: 1.05; color: var(--color-text-primary); }
+	.hero-value small { font-size: 0.85rem; font-weight: 400; color: var(--color-text-tertiary); margin-left: 3px; }
+	.hero-sub { font-size: 0.72rem; color: var(--color-text-tertiary); min-height: 1em; }
+	.hero-card.sleep .hero-value { color: rgb(var(--color-accent-amethyst-rgb)); }
+	.hero-card.hrv .hero-value { color: rgb(var(--color-accent-jade-rgb)); }
+	.hero-card.rhr .hero-value { color: rgb(var(--color-accent-coral-rgb)); }
 
-	.heart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 0.75rem; }
-	@media (max-width: 640px) { .heart-grid { grid-template-columns: 1fr; } }
+	/* Movement strip */
+	.vitals { display: grid; grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: 0.6rem; margin-bottom: 0.85rem; }
+	.vital { padding: 0.85rem 0.95rem; border-radius: 13px; background: var(--color-surface); border: 1px solid var(--color-border);
+		display: flex; flex-direction: column; gap: 0.25rem; }
+	.v-label { font-size: 0.66rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--color-text-tertiary); }
+	.v-value { font-size: 1.25rem; font-weight: 400; color: var(--color-text-primary); }
+	.v-value small { font-size: 0.66rem; color: var(--color-text-tertiary); margin-left: 2px; }
+	.vital.steps .v-value { color: rgb(var(--color-accent-teal-rgb)); }
+	.vital.energy .v-value { color: rgb(var(--color-accent-aurum-rgb)); }
+	.vital.workout .v-value { color: rgb(var(--color-accent-jade-rgb)); }
+	.vital.mindful .v-value { color: rgb(var(--color-accent-amethyst-rgb)); }
 
-	.spark-chart {
-		display: flex;
-		align-items: flex-end;
-		gap: 2px;
-		height: 4.5rem;
-	}
-	.spark-chart.wide { height: 5rem; }
-	.spark-bar {
-		flex: 1;
-		border-radius: 2px 2px 0 0;
-		transition: opacity 0.15s;
-	}
-	.spark-bar:hover { opacity: 0.8; }
-	.spark-bar.hrv { background: rgba(74, 222, 128, 0.6); }
-	.spark-bar.rhr { background: rgba(248, 113, 113, 0.6); }
-	.spark-bar.steps { background: rgba(251, 146, 60, 0.5); }
+	/* Cards */
+	.card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 16px; padding: 1.1rem 1.3rem; margin-bottom: 0.85rem; }
+	.card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.9rem; }
+	.card-head h2 { font-size: 0.82rem; font-weight: 500; color: var(--color-text-secondary); }
+	.card-head .unit { font-weight: 400; font-size: 0.66rem; color: var(--color-text-tertiary); margin-left: 4px; }
+	.legend { display: flex; gap: 0.8rem; }
+	.legend span { display: flex; align-items: center; gap: 5px; font-size: 0.64rem; color: var(--color-text-tertiary); }
+	.dot { width: 8px; height: 8px; border-radius: 3px; }
+	.dot.deep { background: rgb(var(--color-accent-amethyst-rgb)); }
+	.dot.rem { background: rgba(var(--color-accent-amethyst-rgb), 0.6); }
+	.dot.core { background: rgba(var(--color-accent-rgb), 0.4); }
 
-	/* Trends */
-	.trends { display: flex; gap: 0.5rem; flex-wrap: wrap; }
-	.trend-pill {
-		font-size: 0.65rem;
-		padding: 0.3rem 0.6rem;
-		border-radius: 6px;
-		background: var(--color-bg);
-	}
+	/* Sleep bars */
+	.bars { display: flex; align-items: flex-end; gap: 4px; height: 8rem; }
+	.bar-col { flex: 1; height: 100%; display: flex; align-items: flex-end; }
+	.bar { width: 100%; min-height: 3px; border-radius: 5px; overflow: hidden; display: flex; flex-direction: column; transition: opacity 0.15s; }
+	.bar:hover { opacity: 0.82; }
+	.seg { width: 100%; }
+	.seg.deep { background: rgb(var(--color-accent-amethyst-rgb)); }
+	.seg.rem { background: rgba(var(--color-accent-amethyst-rgb), 0.6); }
+	.seg.core { background: rgba(var(--color-accent-rgb), 0.4); }
+
+	/* Sparklines */
+	.spark-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.85rem; margin-bottom: 0.85rem; }
+	@media (max-width: 640px) { .spark-grid { grid-template-columns: 1fr; } }
+	.spark-grid .spark-card:first-child { grid-column: 1 / -1; }
+	.spark { width: 100%; height: 60px; display: block; }
+	.spark-line { stroke-width: 2; }
+	.spark-card.hrv { --c: var(--color-accent-jade-rgb); }
+	.spark-card.rhr { --c: var(--color-accent-coral-rgb); }
+	.spark-card.steps { --c: var(--color-accent-teal-rgb); }
+	.spark-card .spark-line { stroke: rgb(var(--c)); }
+	.spark-card .spark-dot { fill: rgb(var(--c)); }
+	.spark-card .grad-top { stop-color: rgb(var(--c)); stop-opacity: 0.28; }
+	.spark-card .grad-bot { stop-color: rgb(var(--c)); stop-opacity: 0; }
+
+	.trend { font-size: 0.66rem; padding: 0.2rem 0.55rem; border-radius: 999px; }
+	.trend.improving { color: rgb(var(--color-accent-jade-rgb)); background: rgba(var(--color-accent-jade-rgb), 0.12); }
+	.trend.declining { color: rgb(var(--color-accent-coral-rgb)); background: rgba(var(--color-accent-coral-rgb), 0.12); }
+	.trend.stable { color: var(--color-text-tertiary); background: var(--color-elevated); }
 
 	/* Anomalies */
-	.anomaly {
-		display: flex;
-		gap: 0.75rem;
-		padding: 0.3rem 0;
-		font-size: 0.7rem;
-	}
-	.anomaly-date { color: var(--color-text-tertiary); white-space: nowrap; }
-	.anomaly-text { color: var(--color-text-secondary); }
+	.anomaly { display: flex; gap: 0.85rem; padding: 0.45rem 0; font-size: 0.76rem; border-top: 1px solid var(--color-border); }
+	.anomaly:first-of-type { border-top: none; }
+	.a-date { color: var(--color-text-tertiary); white-space: nowrap; min-width: 3.2rem; }
+	.a-text { color: var(--color-text-secondary); }
+	.a-text em { color: var(--color-text-tertiary); font-style: normal; }
 </style>

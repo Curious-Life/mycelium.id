@@ -43,6 +43,16 @@
 		} catch { /* not running inside the native shell */ }
 	});
 
+	// Native shell → portal: let the iOS Chat action open the (nicely-formatted)
+	// in-app chat instead of a bare native chat. Idempotent (won't toggle closed).
+	onMount(() => {
+		if (!browser) return;
+		(window as any).__mycOpenChat = () => {
+			if (!$navigationState.chatOpen) navigationState.toggleChat();
+		};
+		return () => { try { delete (window as any).__mycOpenChat; } catch { /* noop */ } };
+	});
+
 	// Mobile detection
 	let isMobile = $state(false);
 	$effect(() => {
