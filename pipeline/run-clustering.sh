@@ -81,6 +81,33 @@ if ! "$PYTHON" -c "import numpy,dotenv,cryptography,faiss,igraph,leidenalg,scipy
   exit 3
 fi
 
+# At-rest: the Python stages cannot open a whole-file SQLCipher vault (stdlib
+# sqlite3 has no cipher) — only Node holds the DB-file key. So when the vault is
+# encrypted, start the long-running Node vault-bridge and route the Python d1
+# client through it (MYCELIUM_DB_BRIDGE_URL); kill it on EXIT. For a PLAINTEXT
+# vault (dev / verify fixtures) we SKIP the bridge entirely and the Python stages
+# use sqlite3.connect directly, unchanged. Gate = resolveDbKeyHex (encrypted file
+# self-detected, or MYCELIUM_AT_REST opted in).
+BRIDGE_PID=""
+if node -e "import('./src/db/open.js').then(m=>process.exit(m.resolveDbKeyHex(process.env.USER_MASTER, process.env.MYCELIUM_DB)?0:1)).catch(()=>process.exit(1))"; then
+  export MYCELIUM_DB_BRIDGE_PORT="${MYCELIUM_DB_BRIDGE_PORT:-8099}"
+  node pipeline/vault-bridge.js &
+  BRIDGE_PID=$!
+  trap '[ -n "${BRIDGE_PID}" ] && kill "${BRIDGE_PID}" 2>/dev/null || true' EXIT
+  # Wait (≤10s) for /healthz before any Python stage runs; fail closed if the
+  # bridge dies or never becomes healthy (else Python silently falls back to a
+  # plaintext open of the cipher file → SQLITE_NOTADB mid-run).
+  if ! node -e "
+    const p = process.env.MYCELIUM_DB_BRIDGE_PORT, deadline = Date.now() + 10000;
+    (async () => { while (Date.now() < deadline) { try { const r = await fetch('http://127.0.0.1:' + p + '/healthz'); if (r.ok) process.exit(0); } catch {} await new Promise((r) => setTimeout(r, 200)); } process.exit(1); })();
+  "; then
+    echo "[bridge] vault-bridge did not become healthy on :${MYCELIUM_DB_BRIDGE_PORT} — aborting (encrypted vault, Python stages need the bridge)" >&2
+    exit 4
+  fi
+  export MYCELIUM_DB_BRIDGE_URL="http://127.0.0.1:${MYCELIUM_DB_BRIDGE_PORT}"
+  echo "[bridge] vault-bridge ready on :${MYCELIUM_DB_BRIDGE_PORT} (pid ${BRIDGE_PID}) — Python stages routed through it"
+fi
+
 echo "════════════════════════════════════════════════"
 echo "  Mycelium V1 Clustering Cycle — $(date '+%Y-%m-%d %H:%M')"
 echo "  DB: ${MYCELIUM_DB}  user: ${MYCELIUM_USER_ID}"

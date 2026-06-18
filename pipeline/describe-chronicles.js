@@ -23,6 +23,7 @@
 
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
+import { resolveDbKeyHex } from '../src/db/open.js';
 import { createNarrator } from './lib/narrate-infer.js';
 import {
   loadMembers, sampleMembers, getSeenIds, recordSeen, exploredPercent, lastPassNumber,
@@ -436,10 +437,13 @@ if (isMain) {
   const SYSTEM_KEY = process.env.SYSTEM_KEY;
   if (!USER_MASTER || !SYSTEM_KEY) { console.error('[chronicles] Missing USER_MASTER and SYSTEM_KEY'); process.exit(1); }
 
-  // getDb needs IMPORTED HKDF CryptoKeys, not raw hex — raw hex throws
-  // "deriveBits 2nd argument is not of type CryptoKey" on every content decrypt.
+  // getDb + loadKey (CryptoKeys) + resolveDbKeyHex (the at-rest DB-file key). NOT boot():
+  // boot runs initVaultStorage (schema + cross-process migration lock) + builds domains,
+  // which deadlocks/alters state when a parent (a test, or the app) already holds the vault.
+  // This opens the vault keyed — the one thing the old getDb-with-hex lacked — no side effects.
   const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
-  const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal' });
+  const dbKeyHex = resolveDbKeyHex(USER_MASTER, DB_PATH);
+  const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal', dbKeyHex });
   // The user's ACTIVE provider names + chronicles (same seam describe-clusters uses).
   // Local Ollama is reached over native /api/chat with think:false (fast); cloud goes
   // through the audited router. The narrator's infer(prompt, {maxTokens}) is adapted

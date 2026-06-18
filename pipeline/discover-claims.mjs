@@ -17,6 +17,7 @@
  */
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
+import { resolveDbKeyHex } from '../src/db/open.js';
 import { createInferenceRouter } from '../src/inference/router.js';
 import { resolveInferenceConfig } from '../src/inference/resolve.js';
 import { createEgressAuditSink } from '../src/inference/egress.js';
@@ -77,8 +78,13 @@ if (isMain) {
   const SYSTEM_KEY = process.env.SYSTEM_KEY;
   if (!USER_MASTER || !SYSTEM_KEY) { console.error('[claims] Missing USER_MASTER and SYSTEM_KEY'); process.exit(1); }
 
+  // getDb + loadKey (CryptoKeys) + resolveDbKeyHex (the at-rest DB-file key). NOT boot():
+  // boot runs initVaultStorage (schema + cross-process migration lock) + builds domains,
+  // which deadlocks/alters state when a parent (a test, or the app) already holds the vault.
+  // This opens the vault keyed — the one thing the old getDb-with-hex lacked — no side effects.
   const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
-  const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal' });
+  const dbKeyHex = resolveDbKeyHex(USER_MASTER, DB_PATH);
+  const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal', dbKeyHex });
   const router = createInferenceRouter({
     ...(await resolveInferenceConfig(db, USER_ID)),
     onEgress: createEgressAuditSink(db, USER_ID),
