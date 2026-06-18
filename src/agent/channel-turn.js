@@ -36,14 +36,14 @@ const CHANNEL_SYSTEM = [
  *   triage  — override the reply/skip gate (tests). Default = createTriage({ agentName }).
  *   runTurn — override the turn executor (tests). Default = runAgentTurn over the deps.
  */
-export function createChannelTurnRouter({ db, userId, tools = [], handlers = {}, loop, fetchImpl = globalThis.fetch, triage, agentName = 'Mycelium', runTurn, logger = () => {} } = {}) {
+export function createChannelTurnRouter({ db, userId, tools = [], handlers = {}, loop, fetchImpl = globalThis.fetch, triage, agentName = 'Mycelium', runTurn, hooks, logger = () => {} } = {}) {
   if (!db) throw new TypeError('createChannelTurnRouter: db required');
   const router = express.Router();
   const json = express.json({ limit: '256kb' });
   const decide = typeof triage === 'function' ? triage : createTriage({ agentName });
   const execTurn = typeof runTurn === 'function'
     ? runTurn
-    : (opts) => runAgentTurn({ db, userId, tools, handlers, loop, fetchImpl }, opts);
+    : (opts) => runAgentTurn({ db, userId, tools, handlers, loop, fetchImpl, hooks }, opts);
 
   router.post('/internal/agent/channel-turn', json, async (req, res) => {
     if (!isTrustedLoopback(req)) { res.status(403).json({ error: 'loopback only' }); return; }

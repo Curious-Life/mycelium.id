@@ -8,7 +8,7 @@
 
 import {
   fireBeforeToolCall, fireAfterToolCall, fireBeforeCompaction, fireAfterCompaction,
-  createAgentHooks,
+  createAgentHooks, autonomousToolGuard,
 } from '../src/agent/hooks.js';
 import { createAgentHarness } from '../src/agent/harness.js';
 import { hydrateHistoryBlock } from '../src/agent/history.js';
@@ -222,6 +222,30 @@ const CANARY = 'SENSITIVE-HOOK-XYZ';
     hooks: { beforeCompaction: () => { throw new Error('b'); }, afterCompaction: () => { throw new Error('a'); } },
   });
   rec('K7 throwing compaction hooks → fail-OPEN (still returns a block)', typeof block2 === 'string' && block2.length > 0);
+}
+
+// ── W1/W2 autonomousToolGuard env denylist (the Step-4 config surface) ──
+{
+  delete process.env.MYCELIUM_AUTONOMOUS_TOOL_DENY;
+  rec('W1 env unset → autonomousToolGuard() undefined (no guard ⇒ unchanged path)', autonomousToolGuard() === undefined);
+
+  process.env.MYCELIUM_AUTONOMOUS_TOOL_DENY = 'reply, schedule_task';   // note the space → trim
+  const g = autonomousToolGuard();
+  delete process.env.MYCELIUM_AUTONOMOUS_TOOL_DENY;
+  rec('W2 env set → predicate denies listed tools (trimmed)', typeof g === 'function' && typeof g('reply') === 'string' && typeof g('schedule_task') === 'string');
+  rec('W2 predicate allows non-listed tools', g('searchMindscape') === false);
+}
+
+// ── W3 end-to-end: the REAL createAgentHooks factory + env guard blocks through streamTurn ──
+{
+  process.env.MYCELIUM_AUTONOMOUS_TOOL_DENY = 'searchMindscape';
+  const auditRows = [];
+  const hooks = createAgentHooks({ db: { audit: { log: (r) => auditRows.push(r) } }, userId: 'u', source: 'scheduler', toolGuard: autonomousToolGuard() });
+  delete process.env.MYCELIUM_AUTONOMOUS_TOOL_DENY; // guard closure already captured the denylist
+  const { events, calls } = await runTurn(hooks);
+  rec('W3 factory denylist blocks the tool through streamTurn (call not run)', calls === 0 && events.some((e) => e.type === 'tool_blocked'));
+  rec('W3 block audited (name only) + turn reached final answer',
+    auditRows.some((r) => r.action === 'tool-guard' && r.resourceId === 'searchMindscape' && r.details?.decision === 'blocked') && final(events));
 }
 
 console.log('\n' + '='.repeat(64));

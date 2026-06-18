@@ -74,6 +74,19 @@ export function fireBeforeCompaction(hooks, evt, logger) { return fireObserver(h
 export function fireAfterCompaction(hooks, evt, logger) { return fireObserver(hooks?.afterCompaction, evt, logger, 'afterCompaction'); }
 
 /**
+ * The default runtime tool guard for AUTONOMOUS surfaces: a denylist read from
+ * MYCELIUM_AUTONOMOUS_TOOL_DENY (comma-separated tool names). Returns `undefined` when
+ * unset/empty → no guard wired → behavior unchanged. Defense-in-depth layered UNDER the
+ * grant-time autonomyTools allowlist. NOT applied to interactive chat (the user-operator).
+ * @returns {((name:string)=>(string|false))|undefined}
+ */
+export function autonomousToolGuard() {
+  const deny = new Set((process.env.MYCELIUM_AUTONOMOUS_TOOL_DENY || '').split(',').map((s) => s.trim()).filter(Boolean));
+  if (!deny.size) return undefined;
+  return (name) => (deny.has(name) ? `tool '${name}' denied by MYCELIUM_AUTONOMOUS_TOOL_DENY` : false);
+}
+
+/**
  * Build the standard AgentHooks for a surface. Returns `undefined` when nothing is wired
  * (so the default path stays byte-for-byte unchanged). The first built-in consumer is a
  * runtime tool guard — a defense-in-depth deny predicate layered UNDER the grant-time
@@ -115,4 +128,4 @@ export function createAgentHooks({ db, userId, source, toolGuard } = {}) {
   };
 }
 
-export default { fireBeforeToolCall, fireAfterToolCall, fireBeforeCompaction, fireAfterCompaction, createAgentHooks };
+export default { fireBeforeToolCall, fireAfterToolCall, fireBeforeCompaction, fireAfterCompaction, createAgentHooks, autonomousToolGuard };
