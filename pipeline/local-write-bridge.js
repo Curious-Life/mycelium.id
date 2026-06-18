@@ -15,6 +15,7 @@
 // Env: MYCELIUM_DB, USER_MASTER, SYSTEM_KEY (inherited from the calling stage).
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
+import { resolveDbKeyHex } from '../src/db/open.js';
 
 async function main() {
   const dbPath = process.env.MYCELIUM_DB;
@@ -30,7 +31,10 @@ async function main() {
 
   // Imported CryptoKeys (NOT raw hex) — autoEncryptParams needs HKDF keys.
   const [userKey, systemKey] = await Promise.all([loadKey(userHex), loadKey(systemHex)]);
-  const { db, close } = getDb({ dbPath, userKey, systemKey, scope: 'personal' });
+  // Key the open when the vault is at-rest-encrypted (self-detected) — without this
+  // the spawn-per-call fallback opened the cipher file UNKEYED → SQLITE_NOTADB.
+  const dbKeyHex = resolveDbKeyHex(userHex, dbPath);
+  const { db, close } = getDb({ dbPath, userKey, systemKey, scope: 'personal', dbKeyHex });
 
   let written = 0;
   try {

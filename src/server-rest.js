@@ -233,6 +233,24 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // path check that could diverge from the routers). Loopback (desktop) bypasses;
   // SPA navigation isn't under /api so it falls through to static (step 1.2).
   if (vaultAuth) v.use('/api', vaultAuth);
+  // Connection-presence activity heartbeat. Every authenticated /api request (the
+  // portal polls every 5–15s while the app is open) marks the owner "active now" so
+  // the :4711 federation responder can answer online/offline for connections. This
+  // is the shared-DB cross-process bridge (the responder runs in a different process
+  // and cannot see an in-memory flag). Throttled to ≥60s, fire-and-forget (never
+  // awaited, never throws) so it adds no latency. @see src/db/peer-presence.js.
+  let lastTouchAt = 0;
+  v.use('/api', (req, _res, next) => {
+    const id = req.requester?.id;
+    if (id) {
+      const t = Date.now();
+      if (t - lastTouchAt >= 60_000) {
+        lastTouchAt = t;
+        Promise.resolve(db.peerPresence?.touch(id)).catch(() => {});
+      }
+    }
+    next();
+  });
   // Per-router owner gate for the SENSITIVE routers (they decrypt vault plaintext,
   // so they authenticate independently of the global /api gate — defence in depth).
   // Trust: trusted-loopback (desktop) OR the owner's static Bearer (native app over
@@ -478,7 +496,7 @@ export async function startRestServer({
         const AUTO_GEN_MIN = Number(process.env.MYCELIUM_AUTO_GEN_MIN) || 25;
         const maybeAutoGenerate = async () => {
           try {
-            const { embedded } = await db.messages.embedBacklog(bootUserId); // content-bearing embedded count (PIPELINE-INTEGRITY §P1.2)
+            const { embedded } = await db.messages.embedBacklogCached(bootUserId); // boot: warms the SWR cache so the first activity poll is instant (not a 6s cold scan)
             const pr = await db.rawQuery('SELECT COUNT(*) AS c FROM clustering_points WHERE user_id = ?', [bootUserId]);
             const points = Number(pr?.results?.[0]?.c ?? 0);
             if (!shouldAutoGenerate({ embedded, points, clusteringRunning: isClusteringRunning(), min: AUTO_GEN_MIN })) return;

@@ -27,6 +27,8 @@
  */
 
 import { getDb } from '../src/db/index.js';
+import { loadKey } from '../src/crypto/keys.js';
+import { resolveDbKeyHex } from '../src/db/open.js';
 import * as cryptoLocal from '../src/crypto/crypto-local.js';
 import { decryptVector, encryptVector } from '../src/search/ann/decode.js';
 
@@ -79,7 +81,13 @@ async function decode256(envelope, masterKey) {
 }
 
 async function run() {
-  const { db, close } = getDb({ dbPath: DB_PATH, userKey: USER_MASTER, systemKey: SYSTEM_KEY, scope: 'personal' });
+  // getDb + loadKey (CryptoKeys) + resolveDbKeyHex (the at-rest DB-file key). NOT boot():
+  // boot runs initVaultStorage (schema + cross-process migration lock) + builds domains,
+  // which deadlocks/alters state when a parent (a test, or the app) already holds the vault.
+  // This opens the vault keyed — the one thing the old getDb-with-hex lacked — no side effects.
+  const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
+  const dbKeyHex = resolveDbKeyHex(USER_MASTER, DB_PATH);
+  const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal', dbKeyHex });
   const query = (sql, params = []) => db.rawQuery(sql, params).then(r => (Array.isArray(r) ? r : r.results || []));
 
   try {

@@ -43,6 +43,7 @@ import { createIdentityChannelsNamespace } from './identity-channels.js';
 import { createTelegramGroupsNamespace } from './telegram-groups.js';
 import { createChannelAccessNamespace } from './channel-access.js';
 import { createConnectionsNamespace } from './connections.js';
+import { createPeerPresenceNamespace } from './peer-presence.js';
 import { createSpaceAccessNamespace } from './space-access.js';
 import { createSpaceRoomsNamespace } from './space-rooms.js';
 import { createSpaceRoomDocumentsNamespace } from './space-room-documents.js';
@@ -117,6 +118,10 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
       did: federationDeps.did,
       selfInstance: federationDeps.selfInstance,
     }),
+    // Connection online/offline presence: owner activity heartbeat (users.last_active_at),
+    // written by the :8787 auth chokepoint, read by the :4711 federation responder.
+    // NOT db.publicPresence (anonymous doc-reader counts). @see src/db/peer-presence.js.
+    peerPresence: createPeerPresenceNamespace({ d1Query }),
     spaceKnowledge: createSpaceKnowledgeNamespace({ d1Query, firstRow, randomUUID }),
     publicPresence: createPublicPresenceNamespace({ d1Query }),
 

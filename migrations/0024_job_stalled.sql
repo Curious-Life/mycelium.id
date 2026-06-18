@@ -1,4 +1,5 @@
--- 0023 — Surface the "stalled" job state in the activity feed (Gap #4).
+-- 0024 — Surface the "stalled" job state in the activity feed (Gap #4).
+-- (0023 was taken by 0023_connection_presence.sql, which landed on main concurrently.)
 --
 -- jobs.js already detects a job that's gone quiet (no stdout for STALL_MS) and sets
 -- an in-memory `stalled` flag — but the header activity chip reads the activity feed

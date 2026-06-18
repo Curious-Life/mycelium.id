@@ -23,7 +23,7 @@ import Database from 'better-sqlite3';
 import JSZip from 'jszip';
 import crypto from 'node:crypto';
 import {
-  existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, renameSync,
+  existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, renameSync, chmodSync,
   readdirSync, statSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -70,6 +70,7 @@ export async function snapshotDb(srcDbPath, destPath, { dbKeyHex = null } = {}) 
     } finally {
       try { db.close(); } catch { /* */ }
     }
+    restrictTempPerms(destPath);
     return;
   }
   const src = new Database(srcDbPath, { fileMustExist: true });
@@ -78,6 +79,16 @@ export async function snapshotDb(srcDbPath, destPath, { dbKeyHex = null } = {}) 
   } finally {
     try { src.close(); } catch { /* */ }
   }
+  // The plaintext-branch snapshot lands in os.tmpdir() with the default umask;
+  // restrict it to owner-only so a transient vault copy (even field-encrypted) is
+  // never group/world-readable on a shared temp dir. Best-effort (never fail a
+  // backup on chmod). Ciphertext (VACUUM INTO) branch gets the same hygiene above.
+  restrictTempPerms(destPath);
+}
+
+/** Owner-only (0600) perms on a transient snapshot file. Best-effort. */
+function restrictTempPerms(p) {
+  try { chmodSync(p, 0o600); } catch { /* best-effort: chmod must never fail a backup */ }
 }
 
 /** Recursively list files under root as { abs, rel } (rel uses forward slashes). */

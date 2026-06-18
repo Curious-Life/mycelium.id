@@ -292,6 +292,13 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
     try { ok(res, { count: (await db.connections.pending(userId)).length }); }
     catch { ok(res, { count: 0 }); }
   });
+  // Online/offline presence for accepted remote connections (pull-on-demand, cached
+  // ~45s). Returns { presence: { [connectionId]: 'online'|'offline'|'none' } }.
+  // Literal path registered BEFORE /connections/:id so it isn't captured as id.
+  router.get('/connections/presence', async (_req, res) => {
+    try { ok(res, { presence: await db.connections.queryPresence(userId) }); }
+    catch { ok(res, { presence: {} }); }
+  });
   // Combined People nav badge: pending invites + unread direct messages + unseen
   // inbound shares. One poll drives the single dot next to "People".
   router.get('/people/badge', async (_req, res) => {
@@ -338,6 +345,12 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
   router.post('/connections/:id/block', async (req, res) => {
     try { await db.connections.block(userId, connId(req)); ok(res, { ok: true }); }
     catch (e) { fail(res, 400, e.message || 'could not block'); }
+  });
+  // Toggle whether I expose my online status to this connection (per-peer revoke /
+  // re-grant). Default is shared; this turns the green/grey dot off for the peer.
+  router.put('/connections/:id/presence', async (req, res) => {
+    try { await db.connections.setPresenceShare(userId, connId(req), req.body?.share === true); ok(res, { ok: true }); }
+    catch (e) { fail(res, 400, e.message || 'could not update presence sharing'); }
   });
   router.delete('/connections/:id', async (req, res) => {
     try { await db.connections.disconnect(userId, connId(req)); ok(res, { ok: true }); }
@@ -853,6 +866,12 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
   async function embedCounts() {
     // Single source of truth (db.messages.embedBacklog) — counts only embeddable
     // (content-bearing) messages so `pending` reaches 0. PIPELINE-INTEGRITY §P1.2.
+    // PURE (not cached): feeds /onboarding/status showWelcome (`total === 0`), a
+    // read-after-import correctness check — a stale 0 here would keep the welcome
+    // screen up after the user imports. These compat endpoints are not the hot
+    // pollers (the activity feed @2.5s is, and uses the cached accessor); on an
+    // empty/onboarding vault this scan is instant (0 rows), and by the time the
+    // table is large onboarding is long done.
     try { return await db.messages.embedBacklog(userId); }
     catch { return { total: 0, embedded: 0, pending: 0 }; }
   }
