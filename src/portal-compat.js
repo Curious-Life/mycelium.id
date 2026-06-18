@@ -866,6 +866,12 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
   async function embedCounts() {
     // Single source of truth (db.messages.embedBacklog) — counts only embeddable
     // (content-bearing) messages so `pending` reaches 0. PIPELINE-INTEGRITY §P1.2.
+    // PURE (not cached): feeds /onboarding/status showWelcome (`total === 0`), a
+    // read-after-import correctness check — a stale 0 here would keep the welcome
+    // screen up after the user imports. These compat endpoints are not the hot
+    // pollers (the activity feed @2.5s is, and uses the cached accessor); on an
+    // empty/onboarding vault this scan is instant (0 rows), and by the time the
+    // table is large onboarding is long done.
     try { return await db.messages.embedBacklog(userId); }
     catch { return { total: 0, embedded: 0, pending: 0 }; }
   }
