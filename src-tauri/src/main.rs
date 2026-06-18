@@ -253,6 +253,12 @@ fn main() {
                 .current_dir(&home)
                 .env("NODE_OPTIONS", &node_options)
                 .env("MYCELIUM_REST_PORT", PORT.to_string())
+                // At-rest blindness (A′) is the app DEFAULT: a fresh vault is born
+                // encrypted; an existing plaintext vault migrates once (race-safe via
+                // the cross-process lock in src/db/init.js initVaultStorage). NOT a
+                // code default — the verify gates (which open plaintext fixtures) must
+                // stay opt-out, so it's set only for the real app's node processes.
+                .env("MYCELIUM_AT_REST", "1")
                 .env("MYCELIUM_KEY_SOURCE", &key_source);
             if bundled {
                 // Make the bundled node + python resolvable to the clustering child
@@ -323,6 +329,11 @@ fn main() {
                                 .env("NODE_OPTIONS", &sup_opts)
                                 .env("MYCELIUM_PORT", "4711")
                                 .env("MYCELIUM_KEY_SOURCE", &sup_key)
+                                // At-rest default (see server-rest spawn). BOTH app
+                                // node processes carry it so both serialize on the
+                                // init lock → neither opens the plaintext vault while
+                                // the other migrates (no split-brain).
+                                .env("MYCELIUM_AT_REST", "1")
                                 .env("MYCELIUM_DATA_DIR", &sup_data);
                             if !public_host.is_empty() {
                                 http.env("MYCELIUM_BASE_URL", format!("https://{public_host}"));
