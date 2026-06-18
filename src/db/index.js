@@ -26,6 +26,7 @@ import { createCanvasesNamespace } from './canvases.js';
 import { createAuditNamespace } from './audit.js';
 import { createLlmUsageNamespace } from './llm-usage.js';
 import { createActivityFeedNamespace } from './activity-feed.js';
+import { createPipelineStateNamespace } from './pipeline-state.js';
 import { createHarnessNamespace } from './harness.js';
 import { createSpacesNamespace } from './spaces.js';
 import { createSpaceKnowledgeNamespace } from './space-knowledge.js';
@@ -85,6 +86,10 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     usage: createLlmUsageNamespace({ d1Query, randomUUID }),
     // Cross-process job/activity feed over background_jobs (content-free, plaintext).
     activityFeed: createActivityFeedNamespace({ d1QueryAdmin, randomUUID }),
+    // Per-stage measurement-health ledger over pipeline_state (content-free): the
+    // recorder that pipeline/lib/stage-result.js finalize() writes — last success/
+    // failure, streak, quarantine. Backs era-resolution rung 1 + /measurement-health.
+    pipelineState: createPipelineStateNamespace({ d1QueryAdmin }),
     // Native agent harness state (Phase 5): scheduled_tasks (encrypted prompt) +
     // harness_runs (content-free run lifecycle/recovery/dedup) + conversation_summaries
     // (encrypted compaction). @see src/db/harness.js, migrations/0018_harness.sql.
