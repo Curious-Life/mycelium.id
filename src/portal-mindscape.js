@@ -261,7 +261,8 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
   router.get('/mindscape/cofire', (_req, res) => res.json({ connections: [] }));
   router.get('/mindscape/time-chronicles', (_req, res) => res.json({ chronicles: [], coverage: [] }));
   router.get('/mindscape/social', (_req, res) => res.json({ contacts: [], tiers: [] }));
-  router.get('/health/summary', (_req, res) => res.json({ today: null, averages: {}, trends: {}, days: [] }));
+  // /health/summary now served by portalHealthRouter (src/portal-health.js) from
+  // the real health_daily table — the empty stub that used to live here is removed.
 
   // Embedding progress — drives the "N of M ready" UI + the Generate preflight.
   router.get('/mycelium/processing-status', async (_req, res) => {
