@@ -113,7 +113,7 @@ export async function buildVaultArchive({ dbPath, kcvPath, uploadsRoot, remoteCo
   // keyed (else the backup fails / can't read). resolveDbKeyHex returns null when
   // at-rest is off (MYCELIUM_AT_REST unset) → the plaintext online-backup path,
   // unchanged. The DB key derives from USER_MASTER, which boot pins to env.
-  const dbKeyHex = resolveDbKeyHex(process.env.ENCRYPTION_MASTER_KEY || '');
+  const dbKeyHex = resolveDbKeyHex(process.env.ENCRYPTION_MASTER_KEY || '', dbPath);
 
   const tmpSnap = path.join(os.tmpdir(), `myvault-snap-${process.pid}-${sha256(Buffer.from(dbPath + Date.now())).slice(0, 12)}.db`);
   try {

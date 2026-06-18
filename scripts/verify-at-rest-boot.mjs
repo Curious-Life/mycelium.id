@@ -67,6 +67,20 @@ async function main() {
     const marker2 = (await db2.rawQuery('SELECT v FROM bw_marker')).results?.[0]?.v;
     close2();
     rec('B4 2nd boot is idempotent (already encrypted) + still reads', marker2 === 'MARKER_PLAINTEXT', `marker=${marker2}`);
+
+    // ── B6 SELF-DETECT: an already-encrypted vault opens keyed with NO flag ───
+    // The critical persistence property: a Finder/GUI launch + the Claude-Code
+    // MCP servers carry no MYCELIUM_AT_REST, yet must open the encrypted vault.
+    setFlag(false);
+    let b6Read = null, b6Threw = false;
+    try {
+      const { db: db3, close: close3 } = await boot({ dbPath, kcvPath: join(base, 'kcv.json'), userHex: uHex, systemHex: sHex, embedder: stub() });
+      b6Read = (await db3.rawQuery('SELECT v FROM bw_marker')).results?.[0]?.v;
+      close3();
+    } catch { b6Threw = true; }
+    setFlag(true);
+    rec('B6 encrypted vault opens keyed with NO MYCELIUM_AT_REST flag (self-detect)',
+      !b6Threw && b6Read === 'MARKER_PLAINTEXT' && !isPlaintextSqlite(dbPath), `read=${b6Read} threw=${b6Threw}`);
   }
 
   // ── B5 default OFF: boot leaves a fresh vault PLAINTEXT (no behavior change) ─
