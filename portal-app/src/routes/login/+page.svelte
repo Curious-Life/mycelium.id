@@ -2,18 +2,12 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
-	import { auth } from '$lib/stores/auth';
-	import { api } from '$lib/api';
-	import { base64urlToBytes, preparePrfOptions } from '$lib/passkey-prf';
 
-	let mode: 'loading' | 'setup' | 'passkey' | 'key' | 'operator' | 'enroll' = $state('loading');
+	let mode: 'loading' | 'operator' | 'enroll' = $state('loading');
 	let loading = $state(false);
 	let error = $state<string | null>(null);
-	let masterKeyInput = $state('');
 	let emailInput = $state('operator@mycelium.local');
 	let passwordInput = $state('');
-	let setupTokenInput = $state('');
-	let displayNameInput = $state('');
 	let userHandle = $state<string | null>(null);
 	let telegramAvailable = $state(false);
 	let telegramRedirecting = $state(false);
@@ -24,22 +18,14 @@
 			if (res.ok) {
 				const data = await res.json();
 				userHandle = data.handle || null;
-				if (data.setupRequired) {
-					mode = 'setup';
-				} else if (data.hasPasskeys === false) {
-					// V1 self-hosted: no server-side passkey. A networked client (over
-					// the relay) signs in with the operator password; loopback never
-					// reaches /login (the shim authorizes it). The master-key 'key' flow
-					// is cloud-era and unreachable here.
-					mode = 'operator';
-				} else {
-					mode = 'passkey';
-				}
-			} else {
-				mode = 'passkey';
 			}
+			// V1 self-hosted: a networked client (over the relay) signs in with the
+			// operator password; loopback never reaches /login (the shim authorizes
+			// it). Returning users can use an enrolled passkey from the operator
+			// screen. Always land on the operator sign-in.
+			mode = 'operator';
 		} catch {
-			mode = 'passkey';
+			mode = 'operator';
 		}
 
 		// Discover available channel verifiers (e.g. telegram-widget). Best-effort —
@@ -245,7 +231,6 @@
 
 
 
-	// Master key verification → passkey registration → logged in
 	// Operator-password sign-in (V1 self-hosted, reached over the relay). POSTs to
 	// better-auth's /api/auth/sign-in/email — same-origin to this webview, routed
 	// to the :4711 server by the relay Caddy. On success better-auth sets the
@@ -329,241 +314,6 @@
 		}
 	}
 
-	async function handleKeyLogin() {
-		const key = masterKeyInput.trim().replace(/\s/g, '');
-		if (!key || key.length !== 64) {
-			error = 'Enter your 64-character master encryption key';
-			return;
-		}
-
-		loading = true;
-		error = null;
-
-		try {
-			const hashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key));
-			const keyHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
-
-			const res = await fetch('/auth/first-login', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				credentials: 'same-origin',
-				body: JSON.stringify({ keyHash }),
-			});
-
-			if (!res.ok) {
-				const data = await res.json().catch(() => ({}));
-				throw new Error(data.error || 'Verification failed');
-			}
-
-			const { registrationCode } = await res.json();
-
-			// Key verified — now register passkey
-			await registerPasskey(registrationCode);
-
-			// Passkey registered — now restore master key to VPS tmpfs.
-			// Session exists at this point (passkey just registered);
-			// api() will route through the secure channel if configured.
-			try {
-				await api('/portal/master-key/restore', {
-					method: 'POST',
-					body: JSON.stringify({ key }),
-				});
-			} catch {};
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Verification failed';
-			loading = false;
-		}
-	}
-
-	// ── PRF / URK helpers ──
-	// base64urlToBytes + preparePrfOptions live in $lib/passkey-prf so every
-	// caller of startAuthentication/startRegistration uses the same conversion.
-	// See packages/portal/src/lib/passkey-prf.ts + passkey-prf-callers.test.ts.
-
-	function bytesToHex(bytes: Uint8Array): string {
-		return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-	}
-
-	/**
-	 * Normalize any BufferSource-like input to a Uint8Array without touching
-	 * the caller's byteOffset/byteLength triad. The previous implementation
-	 * threaded those dimensions through `new Uint8Array(buffer, offset, length)`
-	 * and RangeError'd under some browsers when the view sat at a non-zero
-	 * offset or the backing buffer was detached. Using the single-arg copy
-	 * constructor `new Uint8Array(view)` lets the runtime do the math.
-	 */
-	function toBytes(input: ArrayBuffer | ArrayBufferView | Uint8Array | unknown): Uint8Array {
-		if (input instanceof Uint8Array) return new Uint8Array(input); // copy
-		if (input instanceof ArrayBuffer) return new Uint8Array(input);
-		if (ArrayBuffer.isView(input)) {
-			// Copy constructor — handles DataView, Int8Array, subarrays, etc.
-			return new Uint8Array(input as unknown as ArrayBufferView as any);
-		}
-		// Last-resort: treat as ArrayBufferLike and hope. Throws cleanly if not.
-		return new Uint8Array(input as ArrayBuffer);
-	}
-
-	/**
-	 * Derive URK from PRF output via HKDF-SHA-256.
-	 * Same derivation on every login — deterministic from passkey + salt.
-	 *
-	 * The PRF output can arrive as ArrayBuffer, DataView, or an ArrayBufferView
-	 * subclass depending on browser + extension environment. crypto.subtle.importKey
-	 * does a strict BufferSource check that can fail cross-realm (e.g. under
-	 * SES / LavaMoat lockdown from MetaMask). We normalize to a fresh, same-realm
-	 * Uint8Array whose backing buffer we control — this satisfies the strict
-	 * BufferSource check AND avoids the offset arithmetic that caused
-	 * "offset is out of bounds" on some authenticators.
-	 */
-	async function deriveUrk(prfOutput: ArrayBuffer | ArrayBufferView): Promise<string> {
-		const src = toBytes(prfOutput);
-		// Allocate a fresh buffer we own, copy into it. Passing `fresh.buffer`
-		// to importKey guarantees a same-realm ArrayBuffer.
-		const fresh = new Uint8Array(src.length);
-		fresh.set(src);
-		const prfKey = await crypto.subtle.importKey('raw', fresh.buffer, 'HKDF', false, ['deriveBits']);
-		const urkBits = await crypto.subtle.deriveBits(
-			{ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('mycelium:urk:v1') },
-			prfKey, 256
-		);
-		// deriveBits returns ArrayBuffer in standards-compliant runtimes; under
-		// some shims it can hand back a view. toBytes handles both.
-		return bytesToHex(toBytes(urkBits));
-	}
-
-	// Passkey login (returning user)
-	async function handlePasskeyLogin() {
-		loading = true;
-		error = null;
-
-		try {
-			const optionsRes = await fetch('/auth/passkey/login/options', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				credentials: 'same-origin',
-			});
-			if (!optionsRes.ok) throw new Error('Failed to get authentication options');
-
-			const options = await optionsRes.json();
-
-			// PRF handling: mobile strips entirely (1Password iOS blank-sheet bug),
-			// desktop decodes base64url salts to Uint8Array (WebAuthn type contract).
-			// See $lib/passkey-prf.
-			const { hasPrf } = preparePrfOptions(options as Record<string, unknown>);
-
-			const credential = await startAuthentication({ optionsJSON: options });
-
-			// Derive URK from PRF output if available
-			let urk: string | null = null;
-			const prfResults = (credential.clientExtensionResults as Record<string, unknown>)?.prf as { results?: { first?: ArrayBuffer } } | undefined;
-			if (hasPrf && prfResults?.results?.first) {
-				urk = await deriveUrk(prfResults.results.first);
-			}
-
-			const verifyRes = await fetch('/auth/passkey/login/verify', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				credentials: 'same-origin',
-				body: JSON.stringify({ credential, urk }),
-			});
-			if (!verifyRes.ok) {
-				const data = await verifyRes.json().catch(() => ({}));
-				throw new Error(data.error || data.message || 'Authentication failed');
-			}
-
-			await loadSessionAndRedirect();
-		} catch (e) {
-			if (e instanceof Error) {
-				error = e.name === 'NotAllowedError' ? 'Authentication was cancelled' : e.message;
-			} else {
-				error = 'Authentication failed';
-			}
-		} finally {
-			loading = false;
-		}
-	}
-
-	// Register passkey with a registration code
-	async function registerPasskey(code: string) {
-		try {
-			const optionsRes = await fetch('/auth/passkey/register/options', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				credentials: 'same-origin',
-				body: JSON.stringify({ registrationCode: code }),
-			});
-			if (!optionsRes.ok) {
-				const data = await optionsRes.json().catch(() => ({}));
-				throw new Error(data.error || 'Failed to start registration');
-			}
-
-			const options = await optionsRes.json();
-
-			// PRF salt prep for registration (see $lib/passkey-prf)
-			const { hasPrf } = preparePrfOptions(options as Record<string, unknown>);
-
-			const credential = await startRegistration({ optionsJSON: options });
-
-			// Derive URK from PRF output if authenticator supports it
-			let urk: string | null = null;
-			const prfResults = (credential.clientExtensionResults as Record<string, unknown>)?.prf as { enabled?: boolean; results?: { first?: ArrayBuffer } } | undefined;
-			if (hasPrf && prfResults?.enabled && prfResults?.results?.first) {
-				urk = await deriveUrk(prfResults.results.first);
-			}
-
-			const verifyRes = await fetch('/auth/passkey/register/verify', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				credentials: 'same-origin',
-				body: JSON.stringify({ registrationCode: code, credential, urk }),
-			});
-			if (!verifyRes.ok) {
-				const data = await verifyRes.json().catch(() => ({}));
-				throw new Error(data.error || 'Registration failed');
-			}
-
-			await loadSessionAndRedirect();
-		} catch (e) {
-			if (e instanceof Error) {
-				if (e.name === 'NotAllowedError') error = 'Passkey creation was cancelled. Try again.';
-				else if (e.name === 'InvalidStateError') error = 'This device is already registered';
-				else error = e.message;
-			} else {
-				error = 'Registration failed';
-			}
-			loading = false;
-		}
-	}
-
-	async function loadSessionAndRedirect() {
-		const sessionRes = await fetch('/auth/session', { credentials: 'same-origin' });
-		if (sessionRes.ok) {
-			const { user } = await sessionRes.json();
-			auth.setUser(user);
-		}
-		goto('/mindscape');
-	}
-
-	// Self-hosted first-run setup
-	async function handleSetup() {
-		if (!setupTokenInput.trim()) { error = 'Enter the setup token from your server logs'; return; }
-		loading = true;
-		error = null;
-		try {
-			const res = await fetch('/auth/setup', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				credentials: 'same-origin',
-				body: JSON.stringify({ token: setupTokenInput.trim(), displayName: displayNameInput.trim() || undefined }),
-			});
-			if (!res.ok) { const data = await res.json().catch(() => ({})); throw new Error(data.error || 'Setup failed'); }
-			const { registrationCode } = await res.json();
-			await registerPasskey(registrationCode);
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Setup failed';
-			loading = false;
-		}
-	}
 </script>
 
 <svelte:head>
@@ -660,6 +410,37 @@
 								<span>Sign in with passkey</span>
 							</button>
 						</div>
+
+						{#if telegramAvailable}
+							<div class="pt-4 border-t border-[var(--color-border)] space-y-3">
+								<p class="text-center text-xs text-[var(--color-text-tertiary)] uppercase tracking-wider">or</p>
+								<button
+									onclick={handleTelegramLogin}
+									disabled={telegramRedirecting}
+									class="w-full btn py-3 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 border border-[var(--color-border)] hover:border-[#0088CC]/50 transition-colors"
+								>
+									{#if telegramRedirecting}
+										<svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+										<span>Redirecting…</span>
+									{:else}
+										<svg class="w-5 h-5" viewBox="0 0 24 24" fill="#0088CC" aria-hidden="true">
+											<path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/>
+										</svg>
+										<span>Continue with Telegram</span>
+									{/if}
+								</button>
+							</div>
+						{/if}
+
+						<!-- Fallback for new devices -->
+						<div class="pt-4 border-t border-[var(--color-border)]">
+							<button
+								onclick={() => goto('/setup')}
+								class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors py-2"
+							>
+								New device? Restore from your recovery key
+							</button>
+						</div>
 					</div>
 				</div>
 
@@ -695,174 +476,6 @@
 					</div>
 				</div>
 
-			{:else if mode === 'key'}
-				<!-- First login: verify master key → create passkey -->
-				<div class="card-elevated p-8">
-					<div class="space-y-6">
-						<div class="text-center">
-							<div class="mb-4">
-								<svg width="48" height="48" viewBox="0 0 64 64" fill="none" class="mx-auto">
-									<circle cx="20" cy="20" r="14" stroke="currentColor" stroke-width="2.5" fill="none" class="text-aurum"/>
-									<circle cx="20" cy="20" r="6" stroke="currentColor" stroke-width="1.5" fill="none" class="text-aurum" opacity="0.4"/>
-									<line x1="34" y1="20" x2="58" y2="20" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" class="text-aurum"/>
-									<line x1="50" y1="20" x2="50" y2="28" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="text-aurum"/>
-									<line x1="56" y1="20" x2="56" y2="26" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="text-aurum"/>
-								</svg>
-							</div>
-							{#if userHandle}
-								<p class="text-lg font-medium text-[var(--color-text-primary)]">@{userHandle}</p>
-							{/if}
-							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Welcome to your vault</h2>
-							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
-								Paste your master encryption key to verify your identity and set up your passkey.
-							</p>
-						</div>
-
-						<div>
-							<input
-								bind:value={masterKeyInput}
-								type="password"
-								placeholder="Paste your 64-character master key"
-								autocomplete="off"
-								spellcheck="false"
-								data-1p-ignore
-								data-lpignore="true"
-								class="input w-full text-sm font-mono tracking-wide"
-							/>
-							<p class="text-xs text-[var(--color-text-tertiary)] mt-2">
-								After verification, you'll create a passkey for future logins.
-							</p>
-						</div>
-
-						<button
-							onclick={handleKeyLogin}
-							disabled={loading || masterKeyInput.trim().replace(/\s/g, '').length < 64}
-							class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed"
-						>
-							{#if loading}
-								<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24">
-									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-								</svg>
-								<span>Verifying...</span>
-							{:else}
-								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A13.916 13.916 0 008 11a4 4 0 118 0c0 1.017-.07 2.019-.203 3m-2.118 6.844A21.88 21.88 0 0015.171 17m3.839 1.132c.645-2.266.99-4.659.99-7.132A8 8 0 008 4.07M3 15.364c.64-1.319 1-2.8 1-4.364 0-1.457.39-2.823 1.07-4" />
-								</svg>
-								<span>Verify & Create Passkey</span>
-							{/if}
-						</button>
-
-						{#if telegramAvailable}
-							<div class="pt-4 border-t border-[var(--color-border)] space-y-3">
-								<p class="text-center text-xs text-[var(--color-text-tertiary)] uppercase tracking-wider">or</p>
-								<button
-									onclick={handleTelegramLogin}
-									disabled={telegramRedirecting}
-									class="w-full btn py-3 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 border border-[var(--color-border)] hover:border-[#0088CC]/50 transition-colors"
-								>
-									{#if telegramRedirecting}
-										<svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-										<span>Redirecting…</span>
-									{:else}
-										<svg class="w-5 h-5" viewBox="0 0 24 24" fill="#0088CC" aria-hidden="true">
-											<path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/>
-										</svg>
-										<span>Continue with Telegram</span>
-									{/if}
-								</button>
-							</div>
-						{/if}
-					</div>
-				</div>
-
-			{:else if mode === 'setup'}
-				<!-- Self-hosted first-run setup -->
-				<div class="card-elevated p-8">
-					<div class="space-y-6">
-						<div class="text-center">
-							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">First-Run Setup</h2>
-							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
-								Enter the setup token from your server logs to create your account.
-							</p>
-						</div>
-						<div class="space-y-4">
-							<input bind:value={setupTokenInput} type="text" placeholder="Setup token" autocomplete="off" spellcheck="false" class="input w-full text-center text-sm tracking-widest font-mono" />
-							<input bind:value={displayNameInput} type="text" placeholder="Display name (optional)" autocomplete="name" class="input w-full text-center text-sm" />
-						</div>
-						<button onclick={handleSetup} disabled={loading || !setupTokenInput.trim()} class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed">
-							{#if loading}
-								<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-							{:else}
-								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-							{/if}
-							<span>Set Up & Register Passkey</span>
-						</button>
-					</div>
-				</div>
-
-			{:else}
-				<!-- Passkey login (returning user) -->
-				<div class="card-elevated p-8">
-					<div class="space-y-6">
-						{#if userHandle}
-							<p class="text-center text-lg font-medium text-[var(--color-text-primary)]">@{userHandle}</p>
-						{/if}
-						<p class="text-[var(--color-text-secondary)] text-sm text-center leading-relaxed">
-							Authenticate to open your vault
-						</p>
-
-						<button
-							onclick={handlePasskeyLogin}
-							disabled={loading}
-							class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed"
-						>
-							{#if loading}
-								<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-							{:else}
-								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A13.916 13.916 0 008 11a4 4 0 118 0c0 1.017-.07 2.019-.203 3m-2.118 6.844A21.88 21.88 0 0015.171 17m3.839 1.132c.645-2.266.99-4.659.99-7.132A8 8 0 008 4.07M3 15.364c.64-1.319 1-2.8 1-4.364 0-1.457.39-2.823 1.07-4" />
-								</svg>
-							{/if}
-							<span>Continue with Passkey</span>
-						</button>
-
-						<p class="text-center text-xs text-[var(--color-text-tertiary)]">
-							Fingerprint, Face ID, or security key
-						</p>
-
-						{#if telegramAvailable}
-							<div class="pt-4 border-t border-[var(--color-border)] space-y-3">
-								<p class="text-center text-xs text-[var(--color-text-tertiary)] uppercase tracking-wider">or</p>
-								<button
-									onclick={handleTelegramLogin}
-									disabled={telegramRedirecting}
-									class="w-full btn py-3 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 border border-[var(--color-border)] hover:border-[#0088CC]/50 transition-colors"
-								>
-									{#if telegramRedirecting}
-										<svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-										<span>Redirecting…</span>
-									{:else}
-										<svg class="w-5 h-5" viewBox="0 0 24 24" fill="#0088CC" aria-hidden="true">
-											<path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/>
-										</svg>
-										<span>Continue with Telegram</span>
-									{/if}
-								</button>
-							</div>
-						{/if}
-
-						<!-- Fallback for new devices -->
-						<div class="pt-4 border-t border-[var(--color-border)]">
-							<button
-								onclick={() => goto('/setup')}
-								class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors py-2"
-							>
-								New device? Restore from your recovery key
-							</button>
-						</div>
-					</div>
-				</div>
 			{/if}
 
 			<div class="mt-8 text-center">
