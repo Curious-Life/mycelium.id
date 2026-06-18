@@ -92,9 +92,9 @@ rec("N7 Header is a window-drag region (Tauri)", /data-tauri-drag-region/.test(h
 // N8 — Import accepts drag-and-drop, not just a file picker (in the ImportView).
 rec("N8 Import has a drag-and-drop drop zone", /ondrop=/.test(importView) && /onDrop/.test(importView));
 
-// N9 — the LOCAL single-file portal is also a window-drag handle in the shell.
-const localPortal = read(path.join(HERE, "..", "portal", "index.html"));
-rec("N9 local portal header is a window-drag region", /<header data-tauri-drag-region/.test(localPortal) && /startDragging/.test(localPortal));
+// N9 removed: the legacy single-file portal/index.html was deleted (#259) — the
+// SvelteKit app is the only UI. Its window-drag region is already covered by N7
+// (the portal-app Header). Reading the deleted file crashed the whole verify run.
 
 // N10 — Streams merge (Import + Timeline → one registry view) + People sub-nav exist.
 const streamsMerged = /\bstreams:\s*{/.test(registry)
