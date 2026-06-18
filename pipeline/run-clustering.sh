@@ -86,6 +86,16 @@ echo "  Mycelium V1 Clustering Cycle — $(date '+%Y-%m-%d %H:%M')"
 echo "  DB: ${MYCELIUM_DB}  user: ${MYCELIUM_USER_ID}"
 echo "════════════════════════════════════════════════"
 
+# MEASURE-ONLY (MYCELIUM_MEASURE_ONLY=1): refresh the analysis/measurement layer on
+# the EXISTING mindscape WITHOUT re-clustering (skip Step 2 cluster.py) or narrating
+# (skip Step 3 describe). Steps 4-16 read the current clustering_points/profiles and
+# rewrite the metric tables. Non-destructive to the territory structure — so it is
+# SAFE even while Generate is kill-switched (this path never calls cluster.py).
+if [ "${MYCELIUM_MEASURE_ONLY:-}" = "1" ]; then
+  echo ""
+  echo "MEASURE-ONLY: skipping sync/cluster/describe (Steps 1-3); refreshing metrics on the existing mindscape."
+else
+
 echo ""
 echo "Step 1/16: Sync content → clustering_points"
 node pipeline/sync-clustering-points.js $DRY_RUN
@@ -118,6 +128,8 @@ fi
 # energy/coherence/velocity/counts that territory_profiles otherwise overwrites each
 # run. Dedup-vs-latest; fail-soft (never blocks the cycle).
 node pipeline/snapshot-entities.js $DRY_RUN
+
+fi  # end non-MEASURE_ONLY (Steps 1-3)
 
 echo ""
 echo "Step 4/16: Compute territory co-firing"

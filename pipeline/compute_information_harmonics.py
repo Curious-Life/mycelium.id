@@ -517,8 +517,14 @@ def upsert_row(user_id: str, row: dict, querier=None) -> None:
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def _iso_to_unix(ts_iso: str) -> float:
-    """Parse ISO 8601 with timezone → unix seconds."""
-    return datetime.fromisoformat(ts_iso.replace('Z', '+00:00')).timestamp()
+    """Parse a timestamp → unix seconds. Tolerant of the legacy/import variants in
+    the vault: trailing 'Z' or ' UTC', and space-separated 'YYYY-MM-DD HH:MM:SS'
+    (e.g. '2018-06-26 21:33:13 UTC') which bare fromisoformat rejects."""
+    s = str(ts_iso).strip()
+    s = s.replace(' UTC', '').replace(' utc', '').replace('Z', '+00:00').strip()
+    if 'T' not in s and ' ' in s:  # 'YYYY-MM-DD HH:MM:SS[+tz]' → ISO 'T' separator
+        s = s.replace(' ', 'T', 1)
+    return datetime.fromisoformat(s).timestamp()
 
 
 def _detect_history_days(metadata: list[dict]) -> int:

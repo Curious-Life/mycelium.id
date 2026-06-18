@@ -66,10 +66,13 @@ let runningJobId = null;  // single-flight: at most one clustering run at a time
  * returns the in-flight job. Returns { jobId, status: 'running' | 'already_running' }.
  * @param {{ dbPath?: string, userId?: string }} opts
  */
-export function startClusteringJob({ dbPath, userId, db } = {}) {
+export function startClusteringJob({ dbPath, userId, db, measureOnly = false } = {}) {
   // Kill-switch (see generateLocked): refuse to spawn the destructive re-cluster
   // while the mindscape is protected post-recovery. No child, no DB writes.
-  if (generateLocked()) {
+  // MEASURE-ONLY is exempt: it never calls cluster.py (no re-cluster) — it only
+  // refreshes the metric tables on the existing mindscape, so it is non-destructive
+  // and safe while Generate is locked.
+  if (!measureOnly && generateLocked()) {
     console.error('[mycelium] Generate is LOCKED (.generate-disabled / MYCELIUM_DISABLE_GENERATE) — refusing to re-cluster.');
     return { jobId: null, status: 'disabled' };
   }
@@ -111,9 +114,12 @@ export function startClusteringJob({ dbPath, userId, db } = {}) {
     ...(process.env.MYCELIUM_PYTHON ? { PYTHON: process.env.MYCELIUM_PYTHON } : {}),
     ...(process.env.HF_HOME ? { HF_HOME: process.env.HF_HOME } : {}),
     ...(process.env.HF_HUB_OFFLINE ? { HF_HUB_OFFLINE: process.env.HF_HUB_OFFLINE } : {}),
+    // Measure-only: run-clustering.sh skips Steps 1-3 (sync/cluster/describe) and
+    // refreshes the metric tables on the existing mindscape (Steps 4-16 only).
+    ...(measureOnly ? { MYCELIUM_MEASURE_ONLY: '1' } : {}),
   };
 
-  const jobId = `gen_${crypto.randomBytes(6).toString('hex')}`;
+  const jobId = `${measureOnly ? 'measure' : 'gen'}_${crypto.randomBytes(6).toString('hex')}`;
   const state = {
     id: jobId, status: 'running', step: 0, totalSteps: 5,
     stageLabel: 'Starting…', startedAt: Date.now(), finishedAt: null, error: null,
@@ -126,7 +132,8 @@ export function startClusteringJob({ dbPath, userId, db } = {}) {
   jobs.set(jobId, state);
   runningJobId = jobId;
   // Mirror into the unified activity feed (header dot + chip) — content-free.
-  if (db?.activityFeed) db.activityFeed.begin({ userId, kind: 'mycelium_generate', id: jobId, totalSteps: 16, stageLabel: 'Mapping your mind' }).catch(() => {});
+  const feedLabel = measureOnly ? 'Refreshing analysis' : 'Mapping your mind';
+  if (db?.activityFeed) db.activityFeed.begin({ userId, kind: measureOnly ? 'mycelium_measure' : 'mycelium_generate', id: jobId, totalSteps: 16, stageLabel: feedLabel }).catch(() => {});
 
   let child;
   try {
@@ -155,7 +162,7 @@ export function startClusteringJob({ dbPath, userId, db } = {}) {
         state.step = parseInt(m[1], 10);
         state.totalSteps = parseInt(m[2], 10);
         state.stageLabel = STAGE_LABELS[state.step] || m[3].trim();
-        if (db?.activityFeed) db.activityFeed.heartbeat(jobId, { step: state.step, totalSteps: state.totalSteps, stageLabel: 'Mapping your mind' }).catch(() => {});
+        if (db?.activityFeed) db.activityFeed.heartbeat(jobId, { step: state.step, totalSteps: state.totalSteps, stageLabel: feedLabel }).catch(() => {});
       }
     }
   });
@@ -193,7 +200,8 @@ export function startClusteringJob({ dbPath, userId, db } = {}) {
       // Chronicle narration runs ASYNC, after the foreground Generate is done, so a
       // slow local-LLM never stalls the run. Fire-and-forget; territories fill in
       // their chronicles as the background pass writes them (the UI polls). Fail-soft.
-      try { startChronicleNarrationJob({ dbPath, userId }); } catch { /* never block completion */ }
+      // SKIP for measure-only: it never re-described, so there is nothing new to narrate.
+      if (!measureOnly) { try { startChronicleNarrationJob({ dbPath, userId }); } catch { /* never block completion */ } }
       // Describe renamed territories/realms — the in-RAM search corpus indexes
       // name+essence and otherwise stays stale for the whole session (it builds
       // once on first query). Best-effort: rehydrates stored vectors, so no
@@ -216,6 +224,14 @@ export function startClusteringJob({ dbPath, userId, db } = {}) {
   });
 
   return { jobId, status: 'running' };
+}
+
+/** Refresh the analysis/measurement layer on the existing mindscape — NO re-cluster,
+ *  NO narration (run-clustering.sh MEASURE_ONLY skips Steps 1-3). Non-destructive, so
+ *  it runs even while Generate is kill-switched. Same single-flight lane as Generate
+ *  (one pipeline child at a time). The running app supplies the in-memory session key. */
+export function startMeasurementJob({ dbPath, userId, db } = {}) {
+  return startClusteringJob({ dbPath, userId, db, measureOnly: true });
 }
 
 /** Public status view for a job (no internals/secrets — note `child` is omitted). */
