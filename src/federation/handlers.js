@@ -42,7 +42,7 @@ const RATE_WINDOW_MS = 60 * 1000;
  * @param {Function} [deps.fetch]          injected for did resolution / tests
  * @param {()=>number} [deps.now]          injectable clock for tests
  */
-export function createFederationHandlers({ db, userId = 'local-user', identity, getHost, getHandle, getMatrixId = () => null, fetch = globalThis.fetch, lookup, now = () => Date.now() }) {
+export function createFederationHandlers({ db, userId = 'local-user', identity, getHost, getHandle, getMatrixId = () => null, getPresenceConfig = () => ({}), getLastActiveAt = async () => null, fetch = globalThis.fetch, lookup, now = () => Date.now() }) {
   const seenNonces = new Map(); // nonce -> expiry ms
   const rate = new Map();       // peer-ip -> { n, resetAt }
   let globalRate = { n: 0, resetAt: 0 }; // backstop across ALL peers (M-FED-RL)
@@ -260,6 +260,39 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
       } catch (e) {
         return { status: 400, body: { error: e.message } };
       }
+    },
+
+    /**
+     * Presence query from a connected peer — answers online/offline/hidden for the
+     * connection online-status dot. Same fail-closed did:web verify gate. Returns
+     * `hidden` IDENTICALLY for not-a-connection, a revoked share, or a global pause
+     * (no oracle separating them). `online` only when the peer is an ACCEPTED
+     * connection that we still share with AND a Mycelium client was active within the
+     * window. The reply is SIGNED (no forged "online") and ECHOES the request nonce
+     * (no stale-reply replay). Audit records host + state only — never the timestamp.
+     */
+    async presence({ payload, headers = {}, ip } = {}) {
+      const v = await verify({ payload, headers, ip });
+      if (!v.ok) return { status: v.status, body: v.body };
+      if (payload.$type !== 'social.mycelium.presence-query.v1') return { status: 400, body: { error: 'unexpected $type' } };
+      let state = 'hidden';
+      try {
+        const peer = await db.connections.presenceShareForPeer({ fromDid: v.did, verifiedHost: didWebHost(v.did), toUserId: userId });
+        const cfg = getPresenceConfig() || {};
+        if (peer && peer.share && !cfg.paused) {
+          const last = await getLastActiveAt();
+          const windowMs = (Number(cfg.activeWindowMin) > 0 ? Number(cfg.activeWindowMin) : 5) * 60 * 1000;
+          // SQLite datetime('now') is UTC without a 'Z' — parse as UTC.
+          const lastMs = last ? Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(last) ? last : last.replace(' ', 'T') + 'Z') : NaN;
+          state = Number.isFinite(lastMs) && (now() - lastMs) < windowMs ? 'online' : 'offline';
+        }
+      } catch {
+        state = 'hidden'; // fail closed — any error reveals nothing
+      }
+      const body = { state, nonce: payload.nonce, ts: now() };
+      const canon = canonicalize(body);
+      db.audit?.log?.({ action: 'presence_served', userId, ip, details: { peer: didWebHost(v.did), state } })?.catch?.(() => {});
+      return { status: 200, signedBody: canon, sig: identity.sign(canon), did: `did:web:${getHost()}` };
     },
   };
 }

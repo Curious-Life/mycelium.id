@@ -73,5 +73,19 @@ export function createFederationRouter(deps) {
     res.status(r.status).json(r.body);
   });
 
+  // Presence query from a connected peer (online/offline dot). Signature-gated in
+  // the handler (fail closed); the signed {state, nonce, ts} reply is emitted with
+  // X-Myc-Did/X-Myc-Sig so the querier can verify it (no forged "online").
+  router.post('/federation/presence', async (req, res) => {
+    const r = await h.presence({ payload: req.body, headers: hdrs(req), ip: ipOf(req) });
+    if (r.signedBody != null) {
+      res.set('X-Myc-Did', r.did);
+      res.set('X-Myc-Sig', r.sig);
+      res.status(200).type('application/json').send(r.signedBody);
+      return;
+    }
+    res.status(r.status).json(r.body);
+  });
+
   return router;
 }

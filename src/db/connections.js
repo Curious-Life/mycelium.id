@@ -80,6 +80,10 @@ const WEBFINGER_TIMEOUT_MS = 5000;
 const FEDERATION_POST_TIMEOUT_MS = 10000;
 const RESOLVE_HANDLE_TIMEOUT_MS = 5000;
 const OVERLAP_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const PRESENCE_QUERY_TIMEOUT_MS = 3000;          // short per-peer timeout: a slow peer just shows last-known/offline
+const PRESENCE_RESULT_TTL_MS = 45 * 1000;        // memoize the whole presence map (UI polls ~30s)
+const PRESENCE_ENDPOINT_TTL_MS = 60 * 60 * 1000; // cache the resolved federation endpoint (skip WebFinger every poll)
+const PRESENCE_CONCURRENCY = 6;                  // cap concurrent outbound presence queries
 
 export function createConnectionsNamespace(deps) {
   if (!deps) throw new TypeError('createConnectionsNamespace: deps required');
@@ -98,6 +102,15 @@ export function createConnectionsNamespace(deps) {
     lookup, // injectable DNS resolver — threaded into safeFetch (tests inject a stub)
   } = deps;
   if (typeof d1Query !== 'function') throw new TypeError('createConnectionsNamespace: d1Query required');
+
+  // Presence caches (per-process, transient — no presence state at rest, by design).
+  // _presenceResult: the last computed { map, at } so the UI's ~30s poll reuses it.
+  // _presenceEndpoint: connId -> { endpoint, at } so we don't WebFinger every poll.
+  // _presenceLastShared: connId -> bool, last-known "this peer shares with me" — lets
+  //   an unreachable-but-known-shared peer render grey instead of vanishing.
+  let _presenceResult = { map: {}, at: 0 };
+  const _presenceEndpoint = new Map();
+  const _presenceLastShared = new Map();
 
   function canonical(a, b) {
     return a < b ? { user_a: a, user_b: b } : { user_a: b, user_b: a };
@@ -833,6 +846,111 @@ export function createConnectionsNamespace(deps) {
         [toUserId, toUserId, fromDid ?? ' ', verifiedHost ?? ' '],
       );
       return r.results?.[0]?.id || null;
+    },
+
+    // ─── Presence (online/offline dot) ─────────────────────────────────────────
+
+    /**
+     * Resolve a VERIFIED peer to my accepted connection AND whether I currently
+     * share my online status with them. The single authorization+consent anchor for
+     * the presence responder. Returns { connId, share:boolean } or null (not an
+     * accepted connection → caller answers `hidden`, no oracle).
+     */
+    async presenceShareForPeer({ fromDid, verifiedHost, toUserId }) {
+      const r = await d1Query(
+        `SELECT id, presence_share FROM connections
+         WHERE (user_a = ? OR user_b = ?) AND status = 'accepted'
+           AND (remote_did = ? OR remote_instance = ?)
+         ORDER BY accepted_at DESC LIMIT 1`,
+        [toUserId, toUserId, fromDid ?? ' ', verifiedHost ?? ' '],
+      );
+      const row = r.results?.[0];
+      if (!row) return null;
+      // DEFAULT 1: a NULL (shouldn't happen post-migration) is treated as shared.
+      return { connId: row.id, share: row.presence_share !== 0 };
+    },
+
+    /**
+     * Toggle whether I expose my online status to a connection (per-connection
+     * revoke / re-grant). Auth-checked (must be a member); takes effect on the peer's
+     * NEXT query (live-checked at serve time, like share revocation).
+     */
+    async setPresenceShare(userId, connectionId, share) {
+      const row = await loadConnection(connectionId);
+      if (!row) throw new Error('Connection not found');
+      assertMember(row, userId);
+      await d1Query(`UPDATE connections SET presence_share = ? WHERE id = ?`, [share ? 1 : 0, connectionId]);
+      return connectionId;
+    },
+
+    /**
+     * Query the online status of every accepted REMOTE connection (pull-on-demand).
+     * Signs a presence-query to each peer's /federation/presence and verifies the
+     * signed reply (signer-did match + echoed-nonce + freshness). Returns a render
+     * map { [connectionId]: 'online' | 'offline' | 'none' }:
+     *   online  → peer shares + active        (green dot)
+     *   offline → peer shares + idle, OR unreachable-but-last-known-shared (grey dot)
+     *   none    → not shared / revoked / never reached            (no dot)
+     * Memoized ~45s; endpoint-cached; concurrency-capped; ~3s per-peer timeout.
+     * Best-effort: a peer error never throws — it degrades to last-known/none.
+     */
+    async queryPresence(userId) {
+      const nowMs = Date.now();
+      if (nowMs - _presenceResult.at < PRESENCE_RESULT_TTL_MS) return _presenceResult.map;
+      if (!sign || !did) { _presenceResult = { map: {}, at: nowMs }; return {}; } // remote off → no presence
+
+      const conns = (await this.list(userId)).filter((c) => c.remote_instance && c.remote_user_handle);
+
+      const queryOne = async (c) => {
+        try {
+          // Resolve (and cache) the peer's federation endpoint — skip WebFinger on
+          // steady-state polls.
+          let ep = _presenceEndpoint.get(c.id);
+          if (!ep || nowMs - ep.at > PRESENCE_ENDPOINT_TTL_MS) {
+            ep = { endpoint: await resolveFederationEndpoint(c.remote_instance, c.remote_user_handle), at: nowMs };
+            _presenceEndpoint.set(c.id, ep);
+          }
+          const url = `${ep.endpoint.replace(/\/$/, '')}/presence`;
+          const nonce = randomUUID();
+          const body = { $type: 'social.mycelium.presence-query.v1', from_did: did(), nonce, ts: Date.now() };
+          const bodyStr = canonicalize(body);
+          const res = await safeFetch(url, {
+            lookup, fetch: fetchImpl, method: 'POST', redirect: 'manual',
+            headers: { 'Content-Type': 'application/json', 'X-Myc-Did': did(), 'X-Myc-Sig': sign(bodyStr) },
+            body: bodyStr, signal: AbortSignal.timeout(PRESENCE_QUERY_TIMEOUT_MS),
+          });
+          if (!res.ok) throw new Error(`presence ${res.status}`);
+          const raw = await res.text();
+          if (raw.length > 4096) throw new Error('presence reply too large');
+          const respDid = res.headers.get('x-myc-did');
+          const respSig = res.headers.get('x-myc-sig');
+          if (!respDid || !respSig) throw new Error('unsigned presence');
+          if (c.remote_did && respDid !== c.remote_did) throw new Error('presence signed by wrong peer');
+          const pub = await resolveDidKey(respDid, { fetch: fetchImpl, lookup });
+          if (!verifyDetached(pub, raw, respSig)) throw new Error('presence signature invalid');
+          const reply = JSON.parse(raw);
+          if (reply.nonce !== nonce) throw new Error('presence nonce mismatch'); // anti-replay
+          if (!Number.isFinite(Number(reply.ts)) || Math.abs(Date.now() - Number(reply.ts)) > 5 * 60 * 1000) throw new Error('stale presence');
+          const state = reply.state;
+          if (state === 'online') { _presenceLastShared.set(c.id, true); return 'online'; }
+          if (state === 'offline') { _presenceLastShared.set(c.id, true); return 'offline'; }
+          _presenceLastShared.set(c.id, false); // 'hidden' → they don't share with me
+          return 'none';
+        } catch {
+          // Unreachable/invalid: known-shared peer is just offline (grey); else no dot.
+          return _presenceLastShared.get(c.id) ? 'offline' : 'none';
+        }
+      };
+
+      // Concurrency-capped fan-out.
+      const map = {};
+      for (let i = 0; i < conns.length; i += PRESENCE_CONCURRENCY) {
+        const batch = conns.slice(i, i + PRESENCE_CONCURRENCY);
+        const states = await Promise.all(batch.map(queryOne));
+        batch.forEach((c, j) => { map[c.id] = states[j]; });
+      }
+      _presenceResult = { map, at: nowMs };
+      return map;
     },
 
     // ─── Federation sharing (Tier-0d) — announce a grant/revoke to the peer ────

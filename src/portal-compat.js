@@ -292,6 +292,13 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
     try { ok(res, { count: (await db.connections.pending(userId)).length }); }
     catch { ok(res, { count: 0 }); }
   });
+  // Online/offline presence for accepted remote connections (pull-on-demand, cached
+  // ~45s). Returns { presence: { [connectionId]: 'online'|'offline'|'none' } }.
+  // Literal path registered BEFORE /connections/:id so it isn't captured as id.
+  router.get('/connections/presence', async (_req, res) => {
+    try { ok(res, { presence: await db.connections.queryPresence(userId) }); }
+    catch { ok(res, { presence: {} }); }
+  });
   // Combined People nav badge: pending invites + unread direct messages + unseen
   // inbound shares. One poll drives the single dot next to "People".
   router.get('/people/badge', async (_req, res) => {
@@ -338,6 +345,12 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
   router.post('/connections/:id/block', async (req, res) => {
     try { await db.connections.block(userId, connId(req)); ok(res, { ok: true }); }
     catch (e) { fail(res, 400, e.message || 'could not block'); }
+  });
+  // Toggle whether I expose my online status to this connection (per-peer revoke /
+  // re-grant). Default is shared; this turns the green/grey dot off for the peer.
+  router.put('/connections/:id/presence', async (req, res) => {
+    try { await db.connections.setPresenceShare(userId, connId(req), req.body?.share === true); ok(res, { ok: true }); }
+    catch (e) { fail(res, 400, e.message || 'could not update presence sharing'); }
   });
   router.delete('/connections/:id', async (req, res) => {
     try { await db.connections.disconnect(userId, connId(req)); ok(res, { ok: true }); }
