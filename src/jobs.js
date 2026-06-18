@@ -18,6 +18,7 @@ import { resolveKeys } from './crypto/key-source.js';
 import { getSessionKeys } from './account/session-keys.js';
 import { dbPath as resolveDbPath } from './paths.js';
 import { readGenerateStats, writeGenerateStats } from './generate-stats.js';
+import { bustMindscape } from './mindscape-cache.js';
 
 /**
  * Kill-switch for the destructive re-cluster. Generate (auto OR manual) rebuilds
@@ -213,6 +214,7 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
       // once on first query). Best-effort: rehydrates stored vectors, so no
       // message re-embeds; only profile texts re-embed.
       refreshSearchIndex();
+      bustMindscape(userId); // points/profiles changed → drop the cached aggregate
     } else if (state.status !== 'error') {
       state.status = 'error';
       const detail = lastErrLine();
@@ -388,7 +390,7 @@ export function startChronicleNarrationJob({ dbPath, userId } = {}) {
     chronicleChildRunning = false;
     if (code !== 0) process.stderr.write(`[chronicles] narration exited ${code}: ${err.slice(-300)}\n`);
     // Chronicles change essence (part of the indexed corpus text) — refresh.
-    else refreshSearchIndex();
+    else { refreshSearchIndex(); bustMindscape(userId); } // narrative changed → drop cache
   });
   child.on('error', () => { chronicleChildRunning = false; });
   return { pid: child.pid ?? null };

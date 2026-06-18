@@ -152,9 +152,13 @@
 		// Initial load is fire-and-forget — the listeners below don't depend on
 		// it, so they attach synchronously (onMount must return its cleanup
 		// synchronously; an async callback can't).
-		void Promise.all([loadDocuments(), loadFolders(), loadMedia()]).then(() => {
+		void Promise.all([loadDocuments(), loadFolders()]).then(() => {
 			loading = false;
 			prevFolderId = activeFolderId;
+			// Media appears only in the combined "All Documents" feed and costs an
+			// attachment decrypt scan — load it AFTER documents paint so the Library
+			// shows immediately and media streams in a beat later.
+			void loadMedia();
 		});
 
 		// Reload after drag-and-drop move

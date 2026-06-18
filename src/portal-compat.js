@@ -43,14 +43,40 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
   const decodePath = (raw) => { try { return decodeURIComponent(raw); } catch { return raw; } };
 
   // ── Library: documents ─────────────────────────────────────────────────
-  // GET /documents?pinned=1&folder_id=… → { documents: [...] }
+  // GET /documents?pinned=1&folder_id=&limit=&offset= → { documents:[...], total? }
   router.get('/documents', async (req, res) => {
     try {
       const opts = {};
       if (req.query.pinned === '1' || req.query.pinned === 'true') opts.pinnedOnly = true;
       if (typeof req.query.folder_id === 'string' && req.query.folder_id) opts.folderId = req.query.folder_id;
+      // Optional pagination — when limit is given, page the decrypt + return a
+      // total for infinite scroll. Omitted (e.g. MCP callers) → full set, unchanged.
+      const limit = Number(req.query.limit);
+      const paged = Number.isFinite(limit) && limit > 0;
+      if (paged) {
+        opts.limit = Math.min(Math.floor(limit), 500);
+        const offset = Number(req.query.offset);
+        opts.offset = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
+      }
       const documents = await db.documents.list(userId, opts);
-      ok(res, { documents });
+      const body = { documents };
+      if (paged) body.total = await db.documents.count(userId, opts);
+      ok(res, body);
+    } catch { fail(res); }
+  });
+
+  // POST /documents/previews { paths:[...] } → { previews: { path: snippet } }
+  // One round-trip for a page of grid cards; each snippet decrypts only the
+  // content column (not the whole document). Replaces the per-card full-doc GET.
+  router.post('/documents/previews', async (req, res) => {
+    try {
+      const paths = Array.isArray(req.body?.paths) ? req.body.paths.slice(0, 100) : [];
+      const previews = {};
+      for (const p of paths) {
+        if (typeof p !== 'string' || !p) continue;
+        previews[decodePath(p)] = await db.documents.contentSnippet(userId, decodePath(p), 600);
+      }
+      ok(res, { previews });
     } catch { fail(res); }
   });
 
