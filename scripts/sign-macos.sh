@@ -46,10 +46,14 @@ echo "  entitlements: $ENTITLEMENTS"
 sign_one() { codesign --force --timestamp --options runtime --sign "$IDENTITY" "$@"; }
 
 # Nested bundles (rare here — relocatable python is a dir tree, not a framework —
-# but handle them if present), deepest path first.
-find "$APP/Contents" \( -name "*.framework" -o -name "*.app" \) -print0 2>/dev/null \
-  | awk 'BEGIN{RS="\0";ORS="\0"}{print length($0), $0}' | sort -z -rn | sed -z 's/^[0-9]* //' \
-  | while IFS= read -r -d '' b; do sign_one "$b"; done
+# but handle them if present), deepest path first. BSD-portable: prefix each path
+# with its slash-count (depth), numeric-sort descending, strip the prefix. Avoids
+# GNU-only `sort -z`/`sed -z` (macOS sed has no -z → "illegal option"); bundle
+# names never contain newlines, so line-based iteration is safe.
+while IFS= read -r b; do
+  [ -n "$b" ] && sign_one "$b"
+done < <(find "$APP/Contents" \( -name "*.framework" -o -name "*.app" \) 2>/dev/null \
+           | awk '{print gsub(/\//,"/"), $0}' | sort -rn | cut -d' ' -f2-)
 
 # Loose Mach-O files (content-detected — bundled node/python have no extension).
 # node + python3* get the child entitlements; everything else (.dylib/.so/.node,
