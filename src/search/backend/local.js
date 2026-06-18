@@ -121,9 +121,27 @@ export function createLocalBackend(deps = {}) {
     return { hits, degraded: false, tier: 1, takenMs: 0 };
   }
 
+  // Contract parity with the on-disk backend (loadFromDb feature-detects these).
+  // The in-RAM index has no per-doc transaction cost, so bulkAdd is just a loop;
+  // resetIndex gives a full rebuild a clean slate (evicts rows deleted from the
+  // source since the last build — add() alone only ever replaces-by-id).
+  function resetIndex() {
+    _index = new InvertedIndex();
+    _vectors.clear();
+    _scorer = new BM25Scorer(_index);
+  }
+  async function bulkAdd(docs) {
+    if (!Array.isArray(docs)) return 0;
+    let n = 0;
+    for (const d of docs) { try { await add(d); n++; } catch { /* skip */ } }
+    return n;
+  }
+
   return {
     add,
     upsert: add,
+    bulkAdd,
+    resetIndex,
     query,
     async delete(filter) {
       const ids = (filter && Array.isArray(filter.ids)) ? filter.ids : [];

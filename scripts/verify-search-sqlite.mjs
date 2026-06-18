@@ -8,8 +8,12 @@
 // VERDICT + EXIT=<code>. Run: npm run verify:search-sqlite
 import Database from 'better-sqlite3';
 import { webcrypto } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { rmSync, existsSync } from 'node:fs';
 import { createSqliteBackend } from '../src/search/backend/sqlite.js';
 import { createLocalBackend, createStubEmbedder, createSearchHelpers } from '../src/search/index.js';
+import { loadFromDb } from '../src/search/d1-loader.js';
 import { captureMessage } from '../src/ingest/capture.js';
 
 const ledger = [];
@@ -226,6 +230,79 @@ async function main() {
   let threw = false;
   try { await ramSh.noteUpsert({ id: 'x', text: 'y', ts: now }); ramSh.noteVector('x', axisVec(1)); await ramSh.noteDelete(['x']); } catch { threw = true; }
   rec('SQ16 maintenance API is a safe no-op on the in-RAM backend', !threw && ramSh.backendKind === 'local');
+
+  // ── SQ17 bulk build: resetIndex + bulkAdd correctness (no dup; eviction) ─────
+  // loadFromDb now resets the index then commits rows in batches via bulkAdd. A
+  // full rebuild over a SHRUNK source must (a) not duplicate, (b) drop the row
+  // that left the source. (Same fixture shape as SQ12 but driven through the
+  // real loadFromDb bulk path.)
+  const blkRaw = new Database(':memory:');
+  blkRaw.exec(`CREATE TABLE messages (id TEXT PRIMARY KEY, user_id TEXT, content TEXT, created_at TEXT, embedding_768 TEXT, forgotten_at TEXT, sensitive INTEGER DEFAULT 0, agent_id TEXT)`);
+  const blkSeed = blkRaw.prepare('INSERT INTO messages(id,user_id,content,created_at) VALUES (?,?,?,?)');
+  for (let i = 0; i < 5; i++) blkSeed.run(`bk-${i}`, 'u1', `bulk loaded entry ${i} about forest and vault`, `2026-06-0${i + 1}T00:00:00.000Z`);
+  const blkBe = createSqliteBackend({ sqliteDb: blkRaw, userId: 'u1' });
+  const blkDb = { _sqlite: blkRaw, rawQuery: (s, p = []) => { try { return { results: blkRaw.prepare(s).all(...p) }; } catch { return { results: [] }; } } };
+  const r1 = await loadFromDb({ backend: blkBe, db: blkDb, userId: 'u1' });
+  const cnt1 = await blkBe.count();
+  // Rebuild #2 over the SAME source: count must be identical (no dup).
+  await loadFromDb({ backend: blkBe, db: blkDb, userId: 'u1' });
+  const cnt2 = await blkBe.count();
+  // Shrink the source (delete bk-4), rebuild #3: the row must be evicted.
+  blkRaw.prepare("DELETE FROM messages WHERE id='bk-4'").run();
+  await loadFromDb({ backend: blkBe, db: blkDb, userId: 'u1' });
+  const cnt3 = await blkBe.count();
+  const stillFinds = (await blkBe.query({ text: 'forest vault', topK: 10 })).hits.length;
+  rec('SQ17 bulk loadFromDb: no dup on rebuild + evicts removed rows + searchable',
+    r1.added === 5 && cnt1 === 5 && cnt2 === 5 && cnt3 === 4 && stillFinds === 4,
+    `added=${r1.added} cnt1=${cnt1} cnt2=${cnt2} cnt3(afterDelete)=${cnt3} finds=${stillFinds}`);
+
+  // ── SQ18 PERF GUARD (encrypted DB): bulkAdd must be ≫ faster than per-doc add
+  //    AND flat (no degradation). This is the permanent guard against regressing
+  //    to one-transaction-per-doc — the exact bug that made the at-rest build take
+  //    days (spike strategy A: 900/s → 14/min). Runs on a REAL SQLCipher file so
+  //    the cipher's per-page crypto cost is in the measurement, not a plaintext :memory:.
+  const PN = parseInt(process.env.SQLITE_PERF_N || '4000', 10);
+  const KEY = 'b'.repeat(64);
+  const mkEnc = (tag) => {
+    const p = join(tmpdir(), `verify-sqlite-perf-${tag}-${process.pid}.db`);
+    for (const s of ['', '-wal', '-shm']) { try { if (existsSync(p + s)) rmSync(p + s); } catch { /* ignore */ } }
+    const d = new Database(p);
+    d.pragma(`cipher='sqlcipher'`); d.pragma(`key="x'${KEY}'"`); d.pragma('journal_mode = WAL');
+    return { db: d, path: p };
+  };
+  const mkCorpus = (n) => {
+    const out = [];
+    for (let i = 0; i < n; i++) { const v = axisVec(i % 64, i); out.push({ id: `pf-${i}`, text: `reflection ${i} term${i % 97} term${i % 53} about meaning and people`, embedding: v, ts: now - i }); }
+    return out;
+  };
+  const corpusPerf = mkCorpus(PN);
+  // (a) per-doc add() — measure first vs last window to expose degradation.
+  const encA = mkEnc('perdoc');
+  const beA = createSqliteBackend({ sqliteDb: encA.db, userId: 'u1' });
+  const W = Math.max(500, Math.floor(PN / 4));
+  let firstW = 0, lastW = 0, tA0 = Date.now(), wStart = Date.now();
+  for (let i = 0; i < PN; i++) {
+    await beA.add(corpusPerf[i]);
+    if ((i + 1) % W === 0) { const dt = (Date.now() - wStart) / 1000; if (i + 1 === W) firstW = W / dt; lastW = W / dt; wStart = Date.now(); }
+  }
+  const perDocRate = PN / ((Date.now() - tA0) / 1000);
+  encA.db.close();
+  // (b) bulkAdd via resetIndex + batched transaction.
+  const encB = mkEnc('bulk');
+  const beB = createSqliteBackend({ sqliteDb: encB.db, userId: 'u1' });
+  beB.resetIndex();
+  const tB0 = Date.now();
+  for (let i = 0; i < PN; i += 2000) beB.bulkAdd(corpusPerf.slice(i, i + 2000));
+  beB.optimize();
+  const bulkRate = PN / ((Date.now() - tB0) / 1000);
+  const bulkCount = await beB.count();
+  encB.db.close();
+  for (const e of [encA, encB]) for (const s of ['', '-wal', '-shm']) { try { if (existsSync(e.path + s)) rmSync(e.path + s); } catch { /* ignore */ } }
+  const speedup = bulkRate / Math.max(1, perDocRate);
+  const perDocDecay = firstW > 0 ? lastW / firstW : 1; // <1 means it slowed down
+  rec(`SQ18 PERF GUARD: bulk build ≥4× per-doc on encrypted DB + per-doc DOES degrade`,
+    bulkCount === PN && speedup >= 4 && perDocDecay < 0.85,
+    `N=${PN} bulk=${Math.round(bulkRate)}/s perDoc=${Math.round(perDocRate)}/s speedup=${speedup.toFixed(1)}× perDocDecay(last/first)=${perDocDecay.toFixed(2)}`);
 
   const passed = ledger.filter(Boolean).length;
   const failed = ledger.length - passed;

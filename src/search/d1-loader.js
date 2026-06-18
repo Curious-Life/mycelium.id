@@ -132,15 +132,45 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
   let added = 0;
   let vectorsLoaded = 0;
   let vectorsFailed = 0;
-  let processed = 0;
   const byKind = {};
-  // Cooperative build: a large vault (tens of thousands of rows) would otherwise
-  // run this whole loop as an unbroken microtask chain — `await` over a resolved
-  // decrypt/add yields only a MICROTASK, which preempts I/O, so the HTTP event
-  // loop is STARVED for the entire build (the user-visible "app frozen" symptom).
-  // Yield to the MACROTASK queue every YIELD_EVERY rows so requests are serviced
-  // mid-build. (PIPELINE-INTEGRITY design §P2.1.) Negligible wall-clock cost.
-  const YIELD_EVERY = 256;
+
+  // Bulk build path (Phase 1 perf fix). The old loop did one `await backend.add`
+  // PER ROW — on the on-disk backend that is one encrypted-WAL transaction +
+  // delete-then-insert per doc, which decays from ~900/s to ~14/min over a 69k
+  // vault (the "build takes days / app frozen" symptom). When the backend exposes
+  // bulkAdd, we instead accumulate BATCH rows and commit them in ONE transaction,
+  // insert-only into a freshly reset index → a FLAT ~6k/s (full 69k in ~12s; spike
+  // scripts/spike-index-build-perf.mjs). Backends without bulkAdd fall back to the
+  // old per-row add (unchanged behavior). The embedding decrypt stays per-row.
+  const useBulk = typeof backend.bulkAdd === 'function';
+  const BATCH = 2000;
+  // resetIndex gives a full rebuild a clean slate (no dup inserts; evicts rows
+  // deleted from the source since the last build). Both backends implement it;
+  // guard for any third-party backend that does not.
+  if (typeof backend.resetIndex === 'function') {
+    try { backend.resetIndex(); } catch { /* non-fatal: a partial reset still rebuilds */ }
+  }
+
+  // Cooperative build: yield to the MACROTASK queue between batches so the HTTP
+  // event loop is serviced mid-build (an unbroken `await` chain only yields a
+  // microtask, which preempts I/O → "app frozen"). ~35 batches at 69k, each a
+  // ~0.3s sync commit, so no single block exceeds the prior YIELD_EVERY budget.
+  // (PIPELINE-INTEGRITY design §P2.1.) For the per-row fallback we yield on the
+  // same cadence by flushing the batch through add() one at a time.
+  let batch = [];
+  async function flush() {
+    if (batch.length === 0) return;
+    if (useBulk) {
+      try { added += backend.bulkAdd(batch); } catch { /* skip unindexable batch */ }
+    } else {
+      for (const d of batch) {
+        try { await backend.add(d); added++; } catch { /* skip unindexable row */ }
+      }
+    }
+    batch = [];
+    await new Promise((r) => setImmediate(r)); // yield between batches
+  }
+
   for (const src of SOURCES) {
     let rows;
     try {
@@ -151,11 +181,10 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
       continue;
     }
     for (const row of rows) {
-      if (++processed % YIELD_EVERY === 0) await new Promise((r) => setImmediate(r));
       const rawId = row.id != null ? String(row.id) : '';
       if (!rawId) continue;
       const id = src.prefix + rawId; // kind-prefixed for profiles; bare for messages
-      // Reuse the stored vector when present so backend.add does NOT re-embed.
+      // Reuse the stored vector when present so the backend does NOT re-embed.
       // Best-effort: a missing/garbled envelope falls through to text-only
       // (never aborts the load; never logs vector bytes — CLAUDE.md §1).
       let embedding;
@@ -171,12 +200,17 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
       // text is either a single decrypted column aliased AS text, or built in JS
       // from several decrypted columns (src.textFrom) — see the documents source.
       const text = typeof src.textFrom === 'function' ? src.textFrom(row) : (row.text ?? '');
-      try {
-        await backend.add({ id, text, embedding, ts: tsFromRow(row), skipEmbed: src.skipEmbed === true });
-        added++;
-        byKind[src.kind] = (byKind[src.kind] || 0) + 1;
-      } catch { /* skip unindexable row */ }
+      batch.push({ id, text, embedding, ts: tsFromRow(row), skipEmbed: src.skipEmbed === true });
+      byKind[src.kind] = (byKind[src.kind] || 0) + 1;
+      if (batch.length >= BATCH) await flush();
     }
+    await flush(); // flush at every source boundary (keeps batches kind-homogeneous)
+  }
+
+  // Compact FTS5 segments once after the full load → faster BM25 queries (no-op
+  // on backends without it). Best-effort; never fails the build.
+  if (typeof backend.optimize === 'function') {
+    try { backend.optimize(); } catch { /* best-effort */ }
   }
   return { added, byKind, vectorsLoaded, vectorsFailed };
 }
