@@ -347,4 +347,4 @@ def main():
 
 if __name__ == "__main__":
     import stage_result
-    stage_result.run_main('frequency', main)
+    stage_result.run_main('compute-frequency', main)

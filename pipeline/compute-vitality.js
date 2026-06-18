@@ -276,7 +276,7 @@ export async function computeVitality({ db, userId, runId = null, dryRun = false
     return { territories: territories.length, written: 0, sparse, active: activeN, anchor };
   }
 
-  const res = createStageResult('vitality', { record: db.pipelineState.recorderFor(userId, 'vitality') });
+  const res = createStageResult('compute-vitality', { record: db.pipelineState.recorderFor(userId, 'compute-vitality') });
   let written = 0;
   for (const r of results) {
     try {

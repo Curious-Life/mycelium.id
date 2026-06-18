@@ -837,4 +837,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     import stage_result
-    stage_result.run_main('fisher', main)
+    stage_result.run_main('fisher-trajectory', main)

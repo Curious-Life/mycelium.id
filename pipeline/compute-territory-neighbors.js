@@ -116,7 +116,7 @@ export async function computeTerritoryNeighbors({ db, userId, topK = DEFAULT_TOP
   // Replace-all (idempotent rebuild), same pattern as compute-cofire / realm_neighbors.
   await db.rawQuery(`DELETE FROM territory_neighbors WHERE user_id = ?`, [userId]);
 
-  const res = createStageResult('territory-neighbors', { record: db.pipelineState.recorderFor(userId, 'territory-neighbors') });
+  const res = createStageResult('compute-territory-neighbors', { record: db.pipelineState.recorderFor(userId, 'compute-territory-neighbors') });
   let written = 0;
   for (const p of pairs) {
     try {
