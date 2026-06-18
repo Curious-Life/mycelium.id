@@ -3,6 +3,7 @@ import { startClusteringJob, startMeasurementJob, getJob, cancelJob,
   startNarrationWalkJob, pauseNarration, resumeNarration, cancelNarration, getNarrationStatus } from './jobs.js';
 import { makeNarrationRunner } from './agent/narration-runner.js';
 import { getEmbedderHealth } from './embed/supervisor.js';
+import { getMindscapeCached } from './mindscape-cache.js';
 
 /**
  * portalMindscapeRouter — the V1 read surface for the canonical portal's
@@ -50,6 +51,11 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
   // GET /mindscape → { nodes, themes, territories, realms, semanticThemes, meta }
   router.get('/mindscape', async (_req, res) => {
     try {
+      // SWR-cached: this aggregate is a multi-second decrypting scan of the whole
+      // clustering-point corpus, recomputed only when the source data changes
+      // (jobs / chronicle / clustering_points deletes all bust it). See
+      // src/mindscape-cache.js.
+      const payload = await getMindscapeCached(userId, async () => {
       const settled = await Promise.allSettled([
         db.mindscape.getPoints(userId),
         db.mindscape.getThemeCards(userId),
@@ -196,7 +202,7 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
       }
 
       const total = points.length;
-      res.json({
+      return {
         nodes, themes, territories, realms, semanticThemes,
         meta: {
           total,
@@ -204,7 +210,9 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
           noise3d: noiseTerritory, noise3dPercent: total > 0 ? (noiseTerritory / total * 100).toFixed(1) : 0,
           clusterCounts: realmCounts, cluster3dCounts: territoryCounts,
         },
+      };
       });
+      res.json(payload);
     } catch { fail(res, 500, 'failed to load mindscape data'); }
   });
 

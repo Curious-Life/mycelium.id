@@ -16,6 +16,7 @@
 
 import { randomBytes, createHash } from 'node:crypto';
 import { assertSafeColumns } from './column-guard.js';
+import { bustMindscape } from '../mindscape-cache.js';
 
 /** A fresh capability epoch for unlisted links (16 bytes hex = 128 bits). */
 function randomNonce() {
@@ -259,6 +260,7 @@ export function createDocumentsNamespace(deps) {
         `DELETE FROM clustering_points WHERE user_id = ? AND source_type = 'document' AND source_id = ?`,
         [userId, row.id],
       );
+      bustMindscape(userId); // points changed → drop cached mindscape aggregate
       if (afterDeleteHooks.length) fireHooks(afterDeleteHooks, { user_id: userId, path });
       return { found: true, contentHash, length: content.length };
     },
