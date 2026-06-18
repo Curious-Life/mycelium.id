@@ -1,7 +1,13 @@
 # DESIGN — Connection Presence Indicator (online/offline)
 
 **Date:** 2026-06-18
-**Status:** Designed, sweep-verified (3 cycles), **decisions locked**. Not built.
+**Status:** **BUILT** on branch `feat/connection-presence` (worktree). Sweep-verified (3 cycles), decisions locked. Merge gate (full `npm run verify` + two-box live smoke) pending a networked environment.
+
+## Build status (as-built 2026-06-18)
+
+Implemented per §9 steps 1–7 + UI. Files: `migrations/0023_connection_presence.sql`, `src/db/peer-presence.js`, `src/db/index.js`, `src/db/connections.js` (`presenceShareForPeer`/`setPresenceShare`/`queryPresence` + `now` seam), `src/federation/handlers.js` (`presence()` + deps), `src/federation/router.js`, `src/server-http.js`, `src/server-rest.js` (throttled touch middleware), `src/portal-compat.js` (`GET /connections/presence`, `PUT /connections/:id/presence`), `src/remote/config.js`, `portal-app/.../ConnectionsView.svelte`, `tests/federation-presence.test.js` + `tests/db-connections-presence.test.js`.
+
+Verified: `verify:presence` 19/19 (V1–V8,V10 handler + V7 querier incl. unreachable→grey); migration idempotency smoke (V9); `verify:remote-config`/`verify:portal-data`/`verify:portal`/`verify:rest` GO; `verify:federation-sharing` 12/12; `svelte-check` 0 errors. Federation handshake tests show only pre-existing DNS-dependent failures (identical on pristine main — the offline sandbox can't resolve did:web hosts). Remaining for merge: full `npm run verify` + the two-box hi↔lo live smoke (§8), which need a networked environment.
 **Surface:** Federation Tier-0 — `src/federation/*` (:4711), `src/db/connections.js`, a new `src/db/peer-presence.js`, `src/portal-compat.js` + `src/server-rest.js` (:8787), one migration, `portal-app/.../ConnectionsView.svelte`.
 **Principle anchors:** CLAUDE.md §1 (no plaintext leakage), §3 (fail closed), §7 (no vectors — N/A), §8 (audit, no PII), and the "local-primary single-user" deployment note.
 
