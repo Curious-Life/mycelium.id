@@ -496,7 +496,7 @@ export async function startRestServer({
         const AUTO_GEN_MIN = Number(process.env.MYCELIUM_AUTO_GEN_MIN) || 25;
         const maybeAutoGenerate = async () => {
           try {
-            const { embedded } = await db.messages.embedBacklog(bootUserId); // content-bearing embedded count (PIPELINE-INTEGRITY §P1.2)
+            const { embedded } = await db.messages.embedBacklogCached(bootUserId); // boot: warms the SWR cache so the first activity poll is instant (not a 6s cold scan)
             const pr = await db.rawQuery('SELECT COUNT(*) AS c FROM clustering_points WHERE user_id = ?', [bootUserId]);
             const points = Number(pr?.results?.[0]?.c ?? 0);
             if (!shouldAutoGenerate({ embedded, points, clusteringRunning: isClusteringRunning(), min: AUTO_GEN_MIN })) return;

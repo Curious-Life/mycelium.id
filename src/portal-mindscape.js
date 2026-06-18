@@ -273,7 +273,9 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
     try { embedder = getEmbedderHealth(); } catch { /* supervisor not running */ }
     try {
       // Single source of truth — embeddable-only counts so pending reaches 0 (PIPELINE-INTEGRITY §P1.2).
-      const { embedded, total, pending } = await db.messages.embedBacklog(userId);
+      // Polled by the UI → cached (SWR) so the multi-second at-rest scan never piles up. The Generate
+      // PREFLIGHT below deliberately uses the PURE embedBacklog (a fresh count gates the run).
+      const { embedded, total, pending } = await db.messages.embedBacklogCached(userId);
       res.json({ embedded, total, pending, embedder });
     } catch { res.json({ embedded: 0, total: 0, pending: 0, embedder }); }
   });

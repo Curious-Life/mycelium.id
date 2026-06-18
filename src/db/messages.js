@@ -54,6 +54,35 @@ export function createMessagesNamespace(deps) {
   if (typeof d1Batch !== 'function')      throw new TypeError('createMessagesNamespace: d1Batch required');
   if (typeof firstRow !== 'function')     throw new TypeError('createMessagesNamespace: firstRow required');
 
+  // SWR cache for embedBacklog (see the method below). The count is a full-table
+  // scan over the large, at-rest-encrypted messages table (multiple seconds on a
+  // big vault — SQLCipher page-decrypt), and it is polled HARD: the activity feed
+  // every 2.5s, plus processing-status and the compat shim. Recomputing per call
+  // made a multi-second query arrive faster than it finishes → the single Node
+  // thread's microtask/macrotask queue grew without bound → the app hung at boot
+  // (observed: identical queries climbing 4.6s→43s as the backlog of requests grew).
+  // Cache the last result + revalidate in the background under a single-flight latch
+  // so at most ONE scan runs per window and no caller ever queues behind another.
+  // Per-process (one server-rest owns the pollers); keyed by userId defensively.
+  let _backlog = null;          // { userId, value:{embedded,total,pending}, at:ms }
+  let _backlogInFlight = null;  // Promise while a recompute runs (single-flight)
+  async function _computeEmbedBacklog(userId) {
+    const r = await d1Query(
+      `SELECT
+         COUNT(*) AS total,
+         COALESCE(SUM(CASE WHEN embedding_768 IS NOT NULL THEN 1 ELSE 0 END), 0) AS embedded
+       FROM messages
+       WHERE user_id = ?
+         AND forgotten_at IS NULL
+         AND content IS NOT NULL AND content != ''`,
+      [userId],
+    );
+    const row = (r.results || [])[0] || {};
+    const total = Number(row.total || 0);
+    const embedded = Number(row.embedded || 0);
+    return { embedded, total, pending: Math.max(0, total - embedded) };
+  }
+
   return {
     async insert(rows) {
       const arr = Array.isArray(rows) ? rows : [rows];
@@ -173,20 +202,36 @@ export function createMessagesNamespace(deps) {
      * @returns {Promise<{ embedded:number, total:number, pending:number }>}
      */
     async embedBacklog(userId) {
-      const r = await d1Query(
-        `SELECT
-           COUNT(*) AS total,
-           COALESCE(SUM(CASE WHEN embedding_768 IS NOT NULL THEN 1 ELSE 0 END), 0) AS embedded
-         FROM messages
-         WHERE user_id = ?
-           AND forgotten_at IS NULL
-           AND content IS NOT NULL AND content != ''`,
-        [userId],
-      );
-      const row = (r.results || [])[0] || {};
-      const total = Number(row.total || 0);
-      const embedded = Number(row.embedded || 0);
-      return { embedded, total, pending: Math.max(0, total - embedded) };
+      // PURE + always-fresh. Correctness-critical callers (the Generate preflight)
+      // and read-after-write tests depend on this reflecting the DB exactly. The
+      // POLLED progress surfaces use embedBacklogCached() below instead.
+      return _computeEmbedBacklog(userId);
+    },
+
+    /**
+     * Cached embedding-backlog snapshot for the POLLED progress surfaces (activity
+     * feed @2.5s, processing-status, compat). Serve-stale-while-revalidate under a
+     * single-flight latch: returns the last value instantly and kicks at most ONE
+     * background recompute per window — SHORT while a backlog drains (live progress),
+     * LONG once pending hits 0 (stable). The underlying scan is a multi-second
+     * SQLCipher full-table decrypt on a large at-rest vault; polling it per-call
+     * arrives faster than it completes → unbounded event-loop queue → boot hang.
+     * This makes a hammered query ≤1 scan/window with no caller queueing behind
+     * another. Few-seconds staleness is immaterial for a "N of M ready" indicator.
+     * Use embedBacklog() (pure) where freshness matters. Per-process, userId-keyed.
+     * @returns {Promise<{ embedded:number, total:number, pending:number }>}
+     */
+    async embedBacklogCached(userId) {
+      const cached = _backlog && _backlog.userId === userId ? _backlog : null;
+      const ttlMs = cached && cached.value.pending > 0 ? 8000 : 60000;
+      if (cached && (Date.now() - cached.at) < ttlMs) return cached.value;
+      if (!_backlogInFlight) {
+        _backlogInFlight = _computeEmbedBacklog(userId)
+          .then((v) => { _backlog = { userId, value: v, at: Date.now() }; return v; })
+          .finally(() => { _backlogInFlight = null; });
+      }
+      if (cached) return cached.value;   // serve stale instantly — never block a poll
+      return _backlogInFlight;           // cold start only: await the first scan once
     },
 
     /**

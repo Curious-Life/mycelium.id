@@ -26,7 +26,7 @@ async function embedProjection(db, userId) {
   try {
     // Single source of truth — counts only embeddable (content-bearing) messages,
     // so `pending` reaches 0 (content-NULL rows can never embed). PIPELINE-INTEGRITY §P1.2.
-    const { embedded, total, pending } = await db.messages.embedBacklog(userId);
+    const { embedded, total, pending } = await db.messages.embedBacklogCached(userId); // polled @2.5s → cached (see embedBacklogCached)
     if (pending <= 0) return null;                       // nothing to do → not active
     let health = 'unknown';
     try { health = getEmbedderHealth()?.status ?? 'unknown'; } catch { /* supervisor down */ }
