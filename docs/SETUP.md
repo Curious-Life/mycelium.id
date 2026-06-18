@@ -144,10 +144,12 @@ launches the server itself (step 7).
 npm run verify
 ```
 
-**15 suites** must each print `VERDICT: GO` (exit 0): foundation, mcp, mindfiles,
-metrics, rest, search, topology, embed, context, ingest, blob, enqueue, enrich,
-keysource, oauth. All are Tier-1 — they pass **without** Ollama/onnxruntime, so a
-clean machine with no ML stack still goes fully green.
+This runs the full verification suite — each gate prints `VERDICT: GO` (exit 0). The
+**Tier-1** gates (crypto/foundation, MCP, encryption-at-rest, leak/egress, account,
+keys) pass on a clean machine with **no ML stack**. The semantic-search, embedding, and
+topology gates additionally exercise the Python stack from step 8 — install it first if
+you want the whole suite green, or run a focused gate for the surface you changed (e.g.
+`npm run verify:mcp`, `npm run verify:at-rest`, `npm run verify:egress`).
 
 ---
 

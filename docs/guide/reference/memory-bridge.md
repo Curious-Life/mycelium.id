@@ -75,9 +75,11 @@ Install per the folder's README. Gated by `npm run verify:memory-bridge` +
 
 ## Fail-open
 
-The bridge **never blocks a turn.** If Mycelium is down or slow, the pull returns
-nothing and the turn proceeds; the push is best-effort. Memory degrades gracefully — it
-never gets in the way of the conversation.
+The bridge **never blocks a turn.** The pull always returns the base context briefing
+first; the optional relevance slice is time-bounded (~1.5s) and silently skipped when
+search is slow, so a large vault never stalls a turn. If Mycelium is down, the pull
+returns nothing and the turn proceeds anyway; the push is best-effort. Memory degrades
+gracefully — it never gets in the way of the conversation.
 
 ---
 
