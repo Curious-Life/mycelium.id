@@ -69,7 +69,7 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
   // Verify a signed inbound federation envelope. Returns { ok:true, did } when
   // valid, or { ok:false, status, body }. Marks the nonce on success. Shared by
   // /connect and /connect-response (identical trust model).
-  async function verify({ payload, headers = {}, ip }) {
+  async function verify({ payload, headers = {}, ip, rawBody = null }) {
     if (!getHost() || !identity?.publicKeyB64) return { ok: false, status: 503, body: { error: 'federation not configured' } };
     if (rateLimited(ip)) return { ok: false, status: 429, body: { error: 'rate limited' } };
     if (!payload || typeof payload !== 'object') return { ok: false, status: 400, body: { error: 'invalid body' } };
@@ -78,8 +78,22 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
     const sig = headers['x-myc-sig'];
     if (!did || !sig) return { ok: false, status: 401, body: { error: 'unsigned request' } };
 
-    const canonical = canonicalize(payload);
-    if (canonical.length > MAX_CANONICAL_BYTES) return { ok: false, status: 400, body: { error: 'body too large' } };
+    // Verify the signature over the EXACT bytes received. A sender signs
+    // canonicalize(body) and transmits PRECISELY those bytes (src/db/connections.js
+    // outbound + the sign.js wire contract), so the raw request body IS the signed
+    // message. Verifying the raw bytes — rather than re-canonicalize(parsedPayload) —
+    // keeps the auth decision off the assumption that canonicalize() is a perfect
+    // round-trip through JSON.parse (a hand-rolled canonicalizer in the trust path is
+    // fragile; a future edit to it could silently weaken verification). This mirrors
+    // the already-correct response-verification path (db/connections.js presence /
+    // shared-content verify the signature over res.text()). The live express path
+    // always supplies req.rawBody (server-http.js parser `verify` hook); the
+    // canonicalize(payload) fallback covers only in-process callers (unit tests) that
+    // pass no raw body — never attacker-reachable, since a request with no parsed
+    // body is rejected as 'invalid body' above before reaching here.
+    const signedBytes = (rawBody != null && rawBody.length > 0) ? rawBody : canonicalize(payload);
+    const byteLen = Buffer.isBuffer(signedBytes) ? signedBytes.length : Buffer.byteLength(signedBytes);
+    if (byteLen > MAX_CANONICAL_BYTES) return { ok: false, status: 400, body: { error: 'body too large' } };
 
     const ts = Number(payload.ts);
     if (!Number.isFinite(ts) || Math.abs(now() - ts) > TS_WINDOW_MS) return { ok: false, status: 401, body: { error: 'stale or missing timestamp' } };
@@ -89,7 +103,7 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
 
     let pub;
     try { pub = await resolveDidKey(did, { fetch, lookup }); } catch { return { ok: false, status: 401, body: { error: 'unresolvable did' } }; }
-    if (!verifyDetached(pub, canonical, sig)) return { ok: false, status: 401, body: { error: 'signature verification failed' } };
+    if (!verifyDetached(pub, signedBytes, sig)) return { ok: false, status: 401, body: { error: 'signature verification failed' } };
 
     seenNonces.set(payload.nonce, now() + TS_WINDOW_MS);
     return { ok: true, did };
@@ -107,8 +121,8 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
     },
 
     /** Inbound connect request. @param {{payload:object, headers:object, ip?:string}} */
-    async connect({ payload, headers = {}, ip } = {}) {
-      const v = await verify({ payload, headers, ip });
+    async connect({ payload, headers = {}, ip, rawBody } = {}) {
+      const v = await verify({ payload, headers, ip, rawBody });
       if (!v.ok) return { status: v.status, body: v.body };
       if (payload.$type !== 'social.mycelium.connect-request.v1') return { status: 400, body: { error: 'unexpected $type' } };
       try {
@@ -127,8 +141,8 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
     },
 
     /** Inbound connect RESPONSE (the peer accepted our request). Same trust model. */
-    async connectResponse({ payload, headers = {}, ip } = {}) {
-      const v = await verify({ payload, headers, ip });
+    async connectResponse({ payload, headers = {}, ip, rawBody } = {}) {
+      const v = await verify({ payload, headers, ip, rawBody });
       if (!v.ok) return { status: v.status, body: v.body };
       if (payload.$type !== 'social.mycelium.connect-response.v1') return { status: 400, body: { error: 'unexpected $type' } };
       try {
@@ -156,8 +170,8 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
      * ACCEPTED connection. Replay/dedup handled by verify()'s nonce set + the
      * UNIQUE(connection_id, remote_nonce) index. Content never logged.
      */
-    async message({ payload, headers = {}, ip } = {}) {
-      const v = await verify({ payload, headers, ip });
+    async message({ payload, headers = {}, ip, rawBody } = {}) {
+      const v = await verify({ payload, headers, ip, rawBody });
       if (!v.ok) return { status: v.status, body: v.body };
       if (payload.$type !== 'social.mycelium.message.v1') return { status: 400, body: { error: 'unexpected $type' } };
       try {
@@ -184,8 +198,8 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
      * announcement — the content is fetched on demand later (grant-gated on their
      * side). The label is the only sensitive field; it is encrypted at rest.
      */
-    async share({ payload, headers = {}, ip } = {}) {
-      const v = await verify({ payload, headers, ip });
+    async share({ payload, headers = {}, ip, rawBody } = {}) {
+      const v = await verify({ payload, headers, ip, rawBody });
       if (!v.ok) return { status: v.status, body: v.body };
       if (payload.$type !== 'social.mycelium.share.v1') return { status: 400, body: { error: 'unexpected $type' } };
       const kind = payload.kind === 'context' ? 'context' : payload.kind === 'space' ? 'space' : null;
@@ -220,8 +234,8 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
      * Returns { status, signedBody, sig, did } — the router emits the signature
      * headers + the raw signed bytes.
      */
-    async sharedContent({ payload, headers = {}, ip } = {}) {
-      const v = await verify({ payload, headers, ip });
+    async sharedContent({ payload, headers = {}, ip, rawBody } = {}) {
+      const v = await verify({ payload, headers, ip, rawBody });
       if (!v.ok) return { status: v.status, body: v.body };
       if (payload.$type !== 'social.mycelium.shared-content.v1') return { status: 400, body: { error: 'unexpected $type' } };
       const kind = payload.kind === 'context' ? 'context' : payload.kind === 'space' ? 'space' : null;
@@ -232,6 +246,12 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
 
         let content;
         if (kind === 'space') {
+          // NB: this serve path assumes every space_knowledge row is visibility='all'
+          // (the only value any writer sets today — db/space-knowledge.js default).
+          // db.spaceKnowledge.list() returns all active rows unfiltered, so IF a
+          // restrictive visibility (e.g. 'members-only') is ever introduced, this
+          // query MUST filter on it — otherwise restricted entries would leak to a
+          // remote grantee. Keep that coupling here, not just in the schema comment.
           const knowledge = (await db.spaceKnowledge.list(payload.ref).catch(() => [])).slice(0, 200)
             .map((k) => ({ content: k.content, source_type: k.source_type, created_at: k.created_at }));
           const documents = (await db.spaceRoomDocuments.listAtRoot(payload.ref, userId).catch(() => [])).slice(0, 200)
@@ -271,8 +291,8 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
      * window. The reply is SIGNED (no forged "online") and ECHOES the request nonce
      * (no stale-reply replay). Audit records host + state only — never the timestamp.
      */
-    async presence({ payload, headers = {}, ip } = {}) {
-      const v = await verify({ payload, headers, ip });
+    async presence({ payload, headers = {}, ip, rawBody } = {}) {
+      const v = await verify({ payload, headers, ip, rawBody });
       if (!v.ok) return { status: v.status, body: v.body };
       if (payload.$type !== 'social.mycelium.presence-query.v1') return { status: 400, body: { error: 'unexpected $type' } };
       let state = 'hidden';

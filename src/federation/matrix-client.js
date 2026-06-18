@@ -37,6 +37,27 @@
  *      first send) inside `send`.
  *   3. proves it with the §7 two-box E2E (the GO criterion).
  *
+ * 🔒 SECURITY INVARIANTS the real adapter MUST enforce (federation audit 2026-06-19,
+ * slice 3) — they are NOT optional and cannot be added later without re-auditing:
+ *   • NO trust-on-first-use key-share. The homeserver is a semi-trusted relay that
+ *     can present arbitrary devices for a peer's MXID; `send` MUST NOT share a Megolm
+ *     session to an unverified/unknown device. Either gate on explicit device
+ *     verification (cross-signing) or set blacklistUnverifiedDevices and refuse to
+ *     send until the peer device is known — otherwise a malicious HS silently reads
+ *     plaintext. The contract test must assert `send` refuses before the peer has
+ *     joined AND a device is known.
+ *   • The senderMxid on inbound events is homeserver-controlled — resolve it to a
+ *     verified space member before trusting it as source attribution (space-sync.js
+ *     handleInbound currently stores it raw; that becomes a spoof vector once a real
+ *     HS is in the loop).
+ *   • EGRESS provenance (CLAUDE.md §11): matrix-egress.js is the ONLY sanctioned
+ *     send path (allowlist + encryption-required + audit). `matrixClient.send` is
+ *     membership/protocol-only — never route content through it directly. If the
+ *     native agent harness is ever wired to mirror AGENT-AUTHORED free-form text into
+ *     a space room, that content MUST first pass assertDeliverable (the silent-reply /
+ *     trivial-content / anti-impersonation gate — see reference/egress/send-handler.js)
+ *     so agent output can't reach a peer's room unfiltered.
+ *
  * The boot path (server-rest.js) calls this inside try/catch: until it's
  * implemented, the throw is caught → matrixClient stays null → every Matrix op is
  * an inert no-op, exactly as when no homeserver is configured. So shipping this

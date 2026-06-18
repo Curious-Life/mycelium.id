@@ -249,8 +249,12 @@ export async function createHttpApp(opts = {}) {
     }
   });
 
-  // JSON parsing for the MCP route only (after the auth handler).
-  app.use(express.json());
+  // JSON parsing for the MCP + federation routes (after the auth handler). The
+  // `verify` hook stashes the exact received bytes on req.rawBody so the federation
+  // handlers can verify a peer's ed25519 signature over the RAW request body (the
+  // bytes the sender actually signed) instead of a re-canonicalized parse — see
+  // src/federation/handlers.js verify(). Stashing the buffer does not alter parsing.
+  app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
   // Shared vault handle for the authenticated ingestion routes (one per app,
   // not per request — unlike /mcp which isolates per session). Reuses the SAME
@@ -261,7 +265,8 @@ export async function createHttpApp(opts = {}) {
 
   // Federation (Tier-0): did:web + WebFinger + signed inbound /federation/connect.
   // Mounted AFTER express.json() so the connect handler sees the parsed payload
-  // (it verifies over canonicalize(payload), not raw bytes). The /.well-known
+  // (for ts/nonce/$type checks) AND req.rawBody (the signature is verified over the
+  // raw received bytes — the bytes the sender signed). The /.well-known
   // GETs inherit the CORS middleware above and are public by design. getHost/
   // getHandle re-read remote config per request so a handle claimed after boot
   // is picked up without a restart. Fail closed when no public host is set.
