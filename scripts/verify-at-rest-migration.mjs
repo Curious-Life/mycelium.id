@@ -141,6 +141,25 @@ async function main() {
       `ok=${ok} lockGone=${!existsSync(lockPath)}`);
   }
 
+  // ── E. KEY MATCH — the data-safety invariant. The vault is encrypted with the
+  //    key DERIVED from USER_MASTER (deterministic HKDF), and opens with the SAME
+  //    derived key — no separate/random key (so never "encrypted with a key we
+  //    don't have", no data loss). A NEW user holds USER_MASTER (their recovery
+  //    key) so can always re-derive it. A DIFFERENT master must NOT open it. ─────
+  {
+    const base = join(dir, 'keymatch'); const f = join(base, 'mycelium.db'); require_mkdir(f); seedPlaintextVault(f);
+    const OTHER = 'f'.repeat(64);
+    const detOk = deriveDbKey(USER) === deriveDbKey(USER) && deriveDbKey(USER) !== deriveDbKey(OTHER);
+    const openKey = await initVaultStorage({ dbPath: f, userHex: USER, log: () => {} });
+    const d = openKeyed(f); const v = d.prepare("SELECT v FROM marker WHERE v='LIVE_DATA'").get()?.v; d.close();
+    let otherRejected = false;
+    try { const b = new Database(f); b.pragma(`cipher='sqlcipher'`); b.pragma(`key="x'${deriveDbKey(OTHER)}'"`); b.prepare('SELECT 1 FROM marker').get(); b.close(); }
+    catch { otherRejected = true; }
+    rec('E KEY MATCH: encrypt-key == open-key == deriveDbKey(USER_MASTER); our key opens; wrong master rejected',
+      detOk && openKey === deriveDbKey(USER) && v === 'LIVE_DATA' && otherRejected,
+      `deterministic=${detOk} openKey==derive=${openKey === deriveDbKey(USER)} ourKeyReads=${v === 'LIVE_DATA'} wrongRejected=${otherRejected}`);
+  }
+
   setFlag(false);
   rmSync(dir, { recursive: true, force: true });
   const pass = ledger.filter(Boolean).length, fail = ledger.length - pass;
