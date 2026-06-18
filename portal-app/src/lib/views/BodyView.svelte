@@ -18,7 +18,9 @@
 
 	let summary = $state<BodySummary | null>(null);
 	let loading = $state(true);
-	let range = $state<7 | 14 | 30 | 90>(7);
+	let range = $state<number>(7);
+	const RANGES = [7, 30, 90, 365];
+	const rangeLabel = (r: number) => (r >= 365 ? '1y' : `${r}d`);
 
 	const today = new Date().toISOString().split('T')[0];
 
@@ -29,25 +31,45 @@
 	};
 	const trendArrow: Record<string, string> = { improving: '↗', declining: '↘', stable: '→' };
 
-	async function loadSummary() {
+	async function fetchSummary(r: number): Promise<BodySummary | null> {
 		try {
-			const res = await api(`/portal/health/summary?days=${range}`);
-			if (res.ok) summary = await res.json();
-		} catch { /* silent */ }
-		loading = false;
+			const res = await api(`/portal/health/summary?days=${r}`);
+			return res.ok ? await res.json() : null;
+		} catch { return null; }
 	}
-	function switchRange(r: 7 | 14 | 30 | 90) {
+	const hasRows = (s: BodySummary | null) => !!(s && (s.today || s.days?.length));
+
+	// Initial load auto-widens to the first range that actually has data, so the
+	// page never sits confusingly empty when recent days haven't synced yet (e.g.
+	// the latest health_daily row is weeks old).
+	async function smartLoad() {
+		loading = true;
+		let last: BodySummary | null = null;
+		for (const r of RANGES) {
+			const s = await fetchSummary(r);
+			last = s;
+			if (hasRows(s)) { summary = s; range = r; loading = false; return; }
+		}
+		summary = last; loading = false;
+	}
+	function switchRange(r: number) {
 		if (r === range) return;
-		range = r; loading = true; loadSummary();
+		range = r; loading = true;
+		fetchSummary(r).then((s) => { summary = s; loading = false; });
 	}
-	onMount(() => { loadSummary(); });
+	onMount(() => { smartLoad(); });
 
 	// Latest reading = today if present, else the most recent synced day.
 	const latest = $derived.by<BodyDay | null>(() => {
 		if (!summary) return null;
+		const days = summary.days || [];
+		// Prefer the most recent day with a real sleep reading — a fresh-morning
+		// 'today' is sparse (no sleep logged yet) and reads as empty in the hero.
+		for (let i = days.length - 1; i >= 0; i--) {
+			if (days[i].sleep_duration_min != null) return days[i];
+		}
 		if (summary.today) return summary.today;
-		const d = summary.days;
-		return d && d.length ? d[d.length - 1] : null;
+		return days.length ? days[days.length - 1] : null;
 	});
 	const latestIsToday = $derived(latest?.date === today);
 	const hasData = $derived(!!(summary && (summary.today || summary.days?.length)));
@@ -93,8 +115,8 @@
 			{/if}
 		</div>
 		<div class="range-toggle">
-			{#each [7, 14, 30, 90] as r}
-				<button class:active={range === r} onclick={() => switchRange(r as 7 | 14 | 30 | 90)}>{r}d</button>
+			{#each RANGES as r}
+				<button class:active={range === r} onclick={() => switchRange(r)}>{rangeLabel(r)}</button>
 			{/each}
 		</div>
 	</div>
