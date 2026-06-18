@@ -329,4 +329,5 @@ def main(querier=None):
 
 
 if __name__ == "__main__":
-    main()
+    import stage_result
+    stage_result.run_main('anchors', main)
