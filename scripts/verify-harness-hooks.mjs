@@ -10,6 +10,45 @@ import {
   fireBeforeToolCall, fireAfterToolCall, fireBeforeCompaction, fireAfterCompaction,
   createAgentHooks,
 } from '../src/agent/hooks.js';
+import { createAgentHarness } from '../src/agent/harness.js';
+
+// ── shared stubbed-Anthropic SSE fixtures (mirror verify-harness.mjs) ──
+const enc = new TextEncoder();
+const streamRes = (chunks) => ({ ok: true, status: 200, body: new ReadableStream({ start(c) { for (const x of chunks) c.enqueue(enc.encode(x)); c.close(); } }) });
+const sse = (objs) => objs.map((o) => (o === '[DONE]' ? 'data: [DONE]\n\n' : `data: ${JSON.stringify(o)}\n\n`));
+const aToolWith = (q) => sse([
+  { type: 'message_start', message: { usage: { input_tokens: 10 } } },
+  { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Searching. ' } },
+  { type: 'content_block_stop', index: 0 },
+  { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_1', name: 'searchMindscape' } },
+  { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: `{"query":"${q}"}` } },
+  { type: 'content_block_stop', index: 1 },
+  { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 5 } },
+  '[DONE]',
+]);
+const aTool = aToolWith('x');
+const aFinal = sse([
+  { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Found it.' } },
+  { type: 'content_block_stop', index: 0 },
+  { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } },
+  '[DONE]',
+]);
+const TOOLS = [{ name: 'searchMindscape', description: 's', inputSchema: { type: 'object', properties: { query: { type: 'string' } } } }];
+
+// Drive one stubbed turn (firstPass → aFinal) through the REAL streamTurn with `hooks`.
+// Returns { events, calls }; `calls` counts tool executions.
+async function runTurn(hooks, { firstPass = aTool } = {}) {
+  const queue = [streamRes(firstPass), streamRes(aFinal)];
+  const fetch = async () => queue.shift();
+  const events = []; let calls = 0;
+  const h = createAgentHarness({ hooks, surface: 'test', fetch });
+  await h.streamTurn({ provider: { anthropicApiKey: 'K' }, system: 'S', userMessage: 'hi', tools: TOOLS, call: async () => { calls += 1; return 'R'; }, send: (e) => events.push(e) });
+  await new Promise((r) => setTimeout(r, 0)); // let fire-and-forget observers settle
+  return { events, calls };
+}
+const final = (events) => events.some((e) => e.type === 'text_delta' && e.content === 'Found it.');
 
 let pass = 0, fail = 0;
 const rec = (label, ok, detail = '') => {
@@ -108,9 +147,64 @@ const CANARY = 'SENSITIVE-HOOK-XYZ';
   rec('U8 throwing toolGuard → BLOCK (fail-closed)', r?.block === true && r.reason === 'guard-error');
 }
 
+// ════════════════ K-section: streamTurn integration (Step 2 wiring) ════════════════
+
+// ── K1 no hooks → tool runs, no block (the hook-free path is unchanged) ──
+{
+  const { events, calls } = await runTurn(undefined);
+  rec('K1 no hooks → tool executed once', calls === 1);
+  rec('K1 no hooks → tool_start + tool_complete, NO tool_blocked',
+    events.some((e) => e.type === 'tool_start') && events.some((e) => e.type === 'tool_complete') && !events.some((e) => e.type === 'tool_blocked'));
+  rec('K1 no hooks → reached final answer', final(events));
+}
+
+// ── K2 beforeToolCall blocks → call() NOT run; model re-plans to a final answer ──
+{
+  const { events, calls } = await runTurn({ beforeToolCall: () => ({ block: true, reason: 'denied' }) });
+  rec('K2 block → call() NOT invoked', calls === 0);
+  rec('K2 block → tool_blocked emitted, NO tool_start',
+    events.some((e) => e.type === 'tool_blocked' && e.name === 'searchMindscape') && !events.some((e) => e.type === 'tool_start'));
+  rec('K2 block → loop continued to final answer', final(events));
+}
+
+// ── K3 beforeToolCall throws → fail-CLOSED block ──
+{
+  const { events, calls } = await runTurn({ beforeToolCall: () => { throw new Error('SECRET-K3'); } });
+  rec('K3 throw → blocked (call not invoked)', calls === 0 && events.some((e) => e.type === 'tool_blocked'));
+  rec('K3 throw → turn still completes', final(events));
+  rec('K3 thrown message never reaches events', !JSON.stringify(events).includes('SECRET-K3'));
+}
+
+// ── K4 beforeToolCall times out → fail-CLOSED block ──
+{
+  process.env.MYCELIUM_HOOK_TIMEOUT_MS = '50';
+  const { events, calls } = await runTurn({ beforeToolCall: () => new Promise(() => {}) });
+  delete process.env.MYCELIUM_HOOK_TIMEOUT_MS;
+  rec('K4 timeout → blocked (call not invoked)', calls === 0 && events.some((e) => e.type === 'tool_blocked'));
+  rec('K4 timeout → turn completes', final(events));
+}
+
+// ── K5 afterToolCall observes (fail-OPEN), fires per executed tool ──
+{
+  const seen = [];
+  const { calls } = await runTurn({ afterToolCall: (e) => seen.push(e) });
+  rec('K5 afterToolCall fired once with {name,output,isError}',
+    seen.length === 1 && seen[0].name === 'searchMindscape' && seen[0].output === 'R' && seen[0].isError === false, `seen=${seen.length}`);
+  rec('K5 the tool actually ran', calls === 1);
+  const { events, calls: c2 } = await runTurn({ afterToolCall: () => { throw new Error('obs'); } });
+  rec('K5 throwing afterToolCall → fail-OPEN (tool ran + turn completed)', c2 === 1 && final(events));
+}
+
+// ── K6 §1 no plaintext args in the event stream on a block ──
+{
+  const C = 'SENSITIVE-HOOK-XYZ';
+  const { events } = await runTurn({ beforeToolCall: () => ({ block: true, reason: 'x' }) }, { firstPass: aToolWith(C) });
+  rec('K6 blocked-call events carry NO plaintext args (canary absent)', !JSON.stringify(events).includes(C));
+}
+
 console.log('\n' + '='.repeat(64));
 if (fail === 0) {
-  console.log(`VERDICT: GO — hook-bus fire helpers: fail-closed blocking + timeout, fail-open observers, tool-guard factory (no plaintext) — ${pass}/${pass} checks`);
+  console.log(`VERDICT: GO — hook bus: fire helpers (fail-closed block + timeout, fail-open observers, no-plaintext factory) + streamTurn wiring (block/observe/no-leak) — ${pass}/${pass} checks`);
   process.exit(0);
 } else {
   console.log(`VERDICT: NO-GO — ${fail} failing check(s), ${pass} passing`);
