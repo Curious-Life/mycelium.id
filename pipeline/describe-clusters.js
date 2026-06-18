@@ -28,7 +28,9 @@
  */
 
 import crypto from 'node:crypto';
-import { boot } from '../src/index.js';
+import { getDb } from '../src/db/index.js';
+import { loadKey } from '../src/crypto/keys.js';
+import { resolveDbKeyHex } from '../src/db/open.js';
 import { createNarrator } from './lib/narrate-infer.js';
 import {
   loadMembers, sampleMembers, getSeenIds, recordSeen, exploredPercent, lastPassNumber,
@@ -123,8 +125,15 @@ async function describe(narrator, kind, { samples, topTags = [], entities = [], 
 }
 
 async function run() {
-  // boot() (NOT getDb-with-hex): keys the at-rest vault (resolveDbKeyHex) + unlock→CryptoKeys; getDb-with-hex opened UNKEYED → SQLITE_NOTADB on an encrypted vault.
-  const { db, close } = await boot({ dbPath: DB_PATH, userHex: USER_MASTER, systemHex: SYSTEM_KEY, userId: USER_ID, embedder: null });
+  // getDb + loadKey (CryptoKeys) + resolveDbKeyHex (the at-rest DB-file key). NOT
+  // boot(): boot runs initVaultStorage (schema + cross-process migration lock) +
+  // builds domains, which deadlocks/alters state when a parent (e.g. a test, or the
+  // app) already holds the vault. This opens the vault keyed — the ONLY thing the
+  // old getDb-with-hex lacked — with no side effects. dbKeyHex is null for a
+  // plaintext vault (unchanged) and the derived key for an at-rest one.
+  const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
+  const dbKeyHex = resolveDbKeyHex(USER_MASTER, DB_PATH);
+  const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal', dbKeyHex });
   const query = (sql, params = []) => db.rawQuery(sql, params).then(r => (Array.isArray(r) ? r : r.results || []));
   const narrator = await createNarrator({ db, userId: USER_ID });
   let namedRealms = 0, namedTerr = 0;

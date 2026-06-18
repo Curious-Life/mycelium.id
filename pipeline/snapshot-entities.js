@@ -18,7 +18,9 @@
  *     node pipeline/snapshot-entities.js [--dry-run]
  */
 
-import { boot } from '../src/index.js';
+import { getDb } from '../src/db/index.js';
+import { loadKey } from '../src/crypto/keys.js';
+import { resolveDbKeyHex } from '../src/db/open.js';
 
 const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';
 const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
@@ -41,8 +43,13 @@ function num(v, dp = 4) {
 }
 
 async function run() {
-  // boot() (NOT getDb-with-hex): keys the at-rest vault (resolveDbKeyHex) + unlock→CryptoKeys; getDb-with-hex opened UNKEYED → SQLITE_NOTADB on an encrypted vault.
-  const { db, close } = await boot({ dbPath: DB_PATH, userHex: USER_MASTER, systemHex: SYSTEM_KEY, userId: USER_ID, embedder: null });
+  // getDb + loadKey (CryptoKeys) + resolveDbKeyHex (the at-rest DB-file key). NOT boot():
+  // boot runs initVaultStorage (schema + cross-process migration lock) + builds domains,
+  // which deadlocks/alters state when a parent (a test, or the app) already holds the vault.
+  // This opens the vault keyed — the one thing the old getDb-with-hex lacked — no side effects.
+  const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
+  const dbKeyHex = resolveDbKeyHex(USER_MASTER, DB_PATH);
+  const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal', dbKeyHex });
   const q = (sql, params = []) => db.rawQuery(sql, params).then((r) => (Array.isArray(r) ? r : r.results || []));
   let terr = 0, realms = 0, skipped = 0;
   try {
