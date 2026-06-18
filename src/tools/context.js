@@ -60,15 +60,25 @@ export function createContextDomain(deps) {
     getContext: async (args = {}) => {
       const include = Array.isArray(args.include) && args.include.length ? args.include : null;
       const db = getDb();
-      const sections = [];
+      // Prompt-caching (G2 Lever 1): emit STABLE sections first, VOLATILE last, so
+      // the stable prefix is contiguous and cacheable. `stable` holds the
+      // session-stable briefing (mind/facts/people/phase/health/claims); `volatile`
+      // holds the per-turn/per-minute content (current time + recent messages). The
+      // joined blob is `[...stable, ...volatile]` — content is byte-identical to
+      // before, only the ORDER changed (no consumer parses this positionally:
+      // server-http.js:/context returns the bare string; portal-chat/run-turn append
+      // it). Lets OpenAI-compatible auto-caching + Ollama KV reuse work for any vault
+      // whose stable prefix clears their floor. See docs/PROMPT-CACHING-DESIGN-2026-06-19.md.
+      const stable = [];
+      const volatile = [];
 
-      // ── time (always) ──
+      // ── time (always; volatile — moved to the tail for caching) ──
       let tz = 'UTC';
       try { tz = (db?.users && await db.users.getTimezone(userId)) || 'UTC'; } catch { /* default */ }
       const now = new Date();
       const fmt = (o) => new Intl.DateTimeFormat('en-US', { ...o, timeZone: tz }).format(now);
       const tzLabel = tz.split('/').pop().replace(/_/g, ' ');
-      sections.push(
+      volatile.push(
         `**Current time:** ${fmt({ weekday: 'long' })}, ${fmt({ month: 'long', day: 'numeric', year: 'numeric' })} `
         + `${fmt({ hour: '2-digit', minute: '2-digit' })} (${tzLabel})`,
       );
@@ -79,8 +89,8 @@ export function createContextDomain(deps) {
           readMindFile('model.md').catch(() => null),
           readMindFile('flagged.md').catch(() => null),
         ]);
-        if (model) sections.push(`---\n# YOUR INTERNAL MODEL (private — never share unless you choose to)\n\n${model.trim()}`);
-        if (flagged) sections.push(`---\n# FLAGGED FOR DISCUSSION\n\n${flagged.trim()}`);
+        if (model) stable.push(`---\n# YOUR INTERNAL MODEL (private — never share unless you choose to)\n\n${model.trim()}`);
+        if (flagged) stable.push(`---\n# FLAGGED FOR DISCUSSION\n\n${flagged.trim()}`);
       }
 
       // ── facts you know (durable; pinned-first; sensitive excluded) ──
@@ -91,7 +101,7 @@ export function createContextDomain(deps) {
             const lines = rows
               .map((f) => `- ${f.pinned ? '📌 ' : ''}**${f.category}/${f.key}**: ${(f.value || '').slice(0, 200)}`)
               .join('\n');
-            sections.push(`---\n# FACTS YOU KNOW\n\n${lines}`);
+            stable.push(`---\n# FACTS YOU KNOW\n\n${lines}`);
           }
         } catch { /* non-fatal */ }
       }
@@ -104,7 +114,7 @@ export function createContextDomain(deps) {
             const lines = rows
               .map((e) => `- **${e.type}: ${e.name}**${e.summary ? ` — ${(e.summary || '').slice(0, 160)}` : ''}`)
               .join('\n');
-            sections.push(`---\n# PEOPLE & PROJECTS\n\n${lines}`);
+            stable.push(`---\n# PEOPLE & PROJECTS\n\n${lines}`);
           }
         } catch { /* non-fatal */ }
       }
@@ -124,7 +134,7 @@ export function createContextDomain(deps) {
                 return `${m.pinned ? '📌 ' : ''}**${who}** _${when}_: ${(m.content || '').slice(0, 500)}`;
               })
               .join('\n');
-            sections.push(`---\n# RECENT MESSAGES (last ${rows.length})\n\n${lines}`);
+            volatile.push(`---\n# RECENT MESSAGES (last ${rows.length})\n\n${lines}`);
           }
         } catch { /* non-fatal */ }
       }
@@ -134,7 +144,7 @@ export function createContextDomain(deps) {
         try {
           const phase = await db.fisher.getCurrentPhase(userId, { level: 'realm' });
           if (phase?.phase) {
-            sections.push(`---\n# COGNITIVE PHASE\n\nCurrent phase: **${phase.phase}** (realm level).`);
+            stable.push(`---\n# COGNITIVE PHASE\n\nCurrent phase: **${phase.phase}** (realm level).`);
           }
         } catch { /* non-fatal */ }
       }
@@ -150,7 +160,7 @@ export function createContextDomain(deps) {
             if (a.hrv_avg != null) parts.push(`HRV ~${Math.round(a.hrv_avg)}ms`);
             if (a.resting_hr != null) parts.push(`RHR ~${Math.round(a.resting_hr)}bpm`);
             if (a.steps != null) parts.push(`~${Math.round(a.steps).toLocaleString()} steps/day`);
-            if (parts.length) sections.push(`---\n# BODY STATE (7-day average)\n\n${parts.join(' · ')}`);
+            if (parts.length) stable.push(`---\n# BODY STATE (7-day average)\n\n${parts.join(' · ')}`);
           }
         } catch { /* non-fatal */ }
       }
@@ -166,11 +176,11 @@ export function createContextDomain(deps) {
             confidence: c.confidenceLogodds == null ? undefined : toConfidence(c.confidenceLogodds),
           }));
           const block = renderClaimsBlock(claims, { depth: 0, budgetTokens: 600 });
-          if (block) sections.push(`---\n# WHAT YOU'VE LEARNED ABOUT THEM (claims — grounded in evidence over time)\n\n${block}`);
+          if (block) stable.push(`---\n# WHAT YOU'VE LEARNED ABOUT THEM (claims — grounded in evidence over time)\n\n${block}`);
         } catch { /* non-fatal */ }
       }
 
-      return sections.join('\n\n');
+      return [...stable, ...volatile].join('\n\n');
     },
   };
 

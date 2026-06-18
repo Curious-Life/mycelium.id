@@ -48,7 +48,7 @@ export function createLlmUsageNamespace(deps) {
     /**
      * Record one generation call's usage. Fire-and-forget — never throws.
      * @param {string} userId
-     * @param {object} e  { source, area, provider?, model?, jurisdiction?, isLocal?, inputTokens, outputTokens, estimated?, durationMs? }
+     * @param {object} e  { source, area, provider?, model?, jurisdiction?, isLocal?, inputTokens, outputTokens, cacheReadTokens?, cacheWriteTokens?, estimated?, durationMs? }
      */
     async record(userId, e = {}) {
       try {
@@ -56,13 +56,14 @@ export function createLlmUsageNamespace(deps) {
         const source = VALID_SOURCES.has(e.source) ? e.source : 'enrichment';
         const area = (typeof e.area === 'string' && e.area) ? e.area : 'complex';
         await d1Query(
-          `INSERT INTO llm_usage (id, user_id, source, area, provider, model, jurisdiction, is_local, input_tokens, output_tokens, estimated, duration_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO llm_usage (id, user_id, source, area, provider, model, jurisdiction, is_local, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, estimated, duration_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             randomUUID(), userId, source, area,
             e.provider || null, e.model || null, e.jurisdiction || null,
             e.isLocal ? 1 : 0,
             intOr0(e.inputTokens), intOr0(e.outputTokens),
+            intOr0(e.cacheReadTokens), intOr0(e.cacheWriteTokens),
             e.estimated ? 1 : 0,
             Number.isFinite(e.durationMs) ? Math.round(e.durationMs) : null,
           ],

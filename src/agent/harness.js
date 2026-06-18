@@ -81,6 +81,30 @@ async function openStreamRetry(args, { retries = 2, signal, logger } = {}) {
   throw lastErr;
 }
 
+// Prompt caching (G2 Lever 2) — Anthropic-only, intra-turn. The tool loop re-sends
+// `system` + the GROWING `messages` up to maxIterations× per turn; one tool result
+// can be ~8k tokens, so a multi-tool turn's accumulated prompt readily clears Opus's
+// 4096-token cache floor. Marking ONE cache_control breakpoint on the LAST content
+// block of the LAST message caches tools+system+all prior messages together (they
+// render before it), so iteration N+1 reads iterations 1..N at ~0.1× input cost. It's
+// a graceful no-op below the floor (Anthropic writes nothing, no error). Default ON;
+// MYCELIUM_PROMPT_CACHE=0 restores byte-identical bodies (tests / opt-out). OpenAI +
+// Ollama need no marker (automatic prefix/KV caching). See docs/PROMPT-CACHING-DESIGN-2026-06-19.md.
+const promptCacheEnabled = () => process.env.MYCELIUM_PROMPT_CACHE !== '0';   // default ON; call-time so it's toggleable without a restart
+function withCacheBreakpoint(messages) {
+  if (!promptCacheEnabled() || !Array.isArray(messages) || !messages.length) return messages;
+  const out = messages.slice();
+  const last = out[out.length - 1];
+  // cache_control attaches to a content BLOCK; wrap string content into one text block.
+  const content = typeof last.content === 'string'
+    ? [{ type: 'text', text: last.content }]
+    : Array.isArray(last.content) ? last.content.slice() : null;
+  if (!content || !content.length) return messages;   // nothing markable → unchanged
+  content[content.length - 1] = { ...content[content.length - 1], cache_control: { type: 'ephemeral' } };
+  out[out.length - 1] = { ...last, content };
+  return out;
+}
+
 // ── Adapters ─────────────────────────────────────────────────────────────────
 // Each adapter owns: its provider tool format, its native message shape, and
 // parsing one streamed completion into a uniform { text, toolCalls, stopReason,
@@ -102,19 +126,28 @@ const anthropicAdapter = {
   pushToolResults(messages, results) { messages.push({ role: 'user', content: results }); },
 
   async streamOnce({ cfg, system, messages, toolDefs, model, maxTokens, send, signal, fetch, timeoutMs, logger }) {
-    const body = { model, max_tokens: maxTokens, system, messages, stream: true };
+    // Intra-turn prompt caching (G2 Lever 2): mark a cache_control breakpoint on the
+    // last message block. No-op when disabled or below the model's cache floor.
+    const body = { model, max_tokens: maxTokens, system, messages: withCacheBreakpoint(messages), stream: true };
     if (toolDefs && toolDefs.length) { body.tools = toolDefs; body.tool_choice = { type: 'auto' }; }
     const res = await openStreamRetry([ANTHROPIC_URL, { 'x-api-key': cfg.anthropicApiKey, 'anthropic-version': ANTHROPIC_VERSION }, body, fetch, timeoutMs], { retries: 2, signal, logger });
     let text = '';
     const blocks = new Map();        // index → { type, id, name, json }
     let stopReason = null;
-    const usage = { inputTokens: 0, outputTokens: 0 };
+    const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
     try {
       for await (const payload of ssePayloads(res)) {
         if (signal?.aborted) break;
         let ev; try { ev = JSON.parse(payload); } catch { continue; }
         switch (ev.type) {
-          case 'message_start': usage.inputTokens = ev.message?.usage?.input_tokens || 0; break;
+          // message_start.usage carries input + cache accounting (counts only, §1).
+          case 'message_start': {
+            const u = ev.message?.usage || {};
+            usage.inputTokens = u.input_tokens || 0;
+            usage.cacheWriteTokens = u.cache_creation_input_tokens || 0;
+            usage.cacheReadTokens = u.cache_read_input_tokens || 0;
+            break;
+          }
           case 'content_block_start': {
             const cb = ev.content_block || {};
             blocks.set(ev.index, { type: cb.type, id: cb.id, name: cb.name, json: '' });
@@ -387,11 +420,23 @@ export function createAgentHarness({ onEgress, onUsage, hooks, surface, fetch = 
     };
 
     // §12 token-usage accounting — the provider reports real counts; record them
-    // (counts only, never the messages). Fires once per turn on completion.
-    const recordUsage = (usage) => {
+    // (counts only, never the messages). A turn can span MULTIPLE provider passes
+    // (one per tool round + a final answer): accumulate every pass's usage and record
+    // the TURN TOTAL once on completion — otherwise a multi-tool turn under-counts
+    // (only the last pass was recorded). Cache WRITES happen on early passes and READS
+    // on later ones (G2 Lever 2), so the per-turn sum is the only honest cache picture.
+    const turnUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    const accumulate = (u) => {
+      if (!u) return;
+      turnUsage.inputTokens += u.inputTokens || 0;
+      turnUsage.outputTokens += u.outputTokens || 0;
+      turnUsage.cacheReadTokens += u.cacheReadTokens || 0;
+      turnUsage.cacheWriteTokens += u.cacheWriteTokens || 0;
+    };
+    const recordUsage = () => {
       try {
-        if (!usage || typeof onUsage !== 'function') return;
-        onUsage({ area: 'chat', isLocal: !!local, provider: adapter.kind, model, jurisdiction, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, estimated: false });
+        if (typeof onUsage !== 'function') return;
+        onUsage({ area: 'chat', isLocal: !!local, provider: adapter.kind, model, jurisdiction, inputTokens: turnUsage.inputTokens, outputTokens: turnUsage.outputTokens, cacheReadTokens: turnUsage.cacheReadTokens, cacheWriteTokens: turnUsage.cacheWriteTokens, estimated: false });
       } catch { /* accounting must never break the turn */ }
     };
 
@@ -409,6 +454,7 @@ export function createAgentHarness({ onEgress, onUsage, hooks, surface, fetch = 
       let r = await once(toolDefs, i === 0);
       if (r === null) r = await once([], false);   // tool-fallback retry, no tools
       if (r.aborted) return { toolsUsed, aborted: true };   // stall/disconnect — partial text already streamed
+      accumulate(r.usage);   // every provider pass counts toward the turn total
       adapter.pushAssistant(messages, r.text, r.toolCalls);
       // Truncation = the provider stopped at the output cap mid-stream. Any tool
       // call it was emitting has cut-off args (truncated JSON → {} → a silent
@@ -417,10 +463,11 @@ export function createAgentHarness({ onEgress, onUsage, hooks, surface, fetch = 
       // raises a visible, actionable state. Partial text already streamed; keep it.
       if (r.truncated) {
         logger(`harness: provider stopped at the output cap (stop_reason=${r.stopReason}); turn truncated — not executing possibly-truncated tool calls`);
-        if (r.usage) { send({ type: 'usage', inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens }); recordUsage(r.usage); }
+        if (r.usage) send({ type: 'usage', inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens });
+        recordUsage();
         return { toolsUsed, local: !!local, truncated: true };
       }
-      if (!r.isTool || !r.toolCalls.length) { if (r.usage) { send({ type: 'usage', inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens }); recordUsage(r.usage); } return { toolsUsed, local: !!local }; }
+      if (!r.isTool || !r.toolCalls.length) { if (r.usage) send({ type: 'usage', inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens }); recordUsage(); return { toolsUsed, local: !!local }; }
 
       const results = [];
       for (const tc of r.toolCalls) {
@@ -462,7 +509,9 @@ export function createAgentHarness({ onEgress, onUsage, hooks, surface, fetch = 
       : `harness: hit maxIterations=${maxIterations}; final answer pass without tools`);
     audit();
     const fin = await adapter.streamOnce({ cfg, system, messages, toolDefs: null, model, maxTokens, numCtx, send, signal, fetch, timeoutMs, logger });
-    if (fin.usage) { send({ type: 'usage', inputTokens: fin.usage.inputTokens, outputTokens: fin.usage.outputTokens }); recordUsage(fin.usage); }
+    accumulate(fin.usage);
+    if (fin.usage) send({ type: 'usage', inputTokens: fin.usage.inputTokens, outputTokens: fin.usage.outputTokens });
+    recordUsage();
     if (fin.truncated) logger(`harness: final answer pass also hit the output cap (stop_reason=${fin.stopReason})`);
     return { toolsUsed, capped: true, truncated: !!fin.truncated, ...(breaker ? { breaker } : {}) };
   }
