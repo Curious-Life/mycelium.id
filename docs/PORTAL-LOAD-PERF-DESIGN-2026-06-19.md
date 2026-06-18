@@ -3,7 +3,15 @@
 **Date:** 2026-06-19
 **Branch:** `feat/portal-load-perf` (worktree `mycelium-id-worktrees/portal-perf`), off `main` @ `89e3325`
 **Skill:** authored under `/sweep-first-design` (3 sweep cycles + own-eyes verification)
-**Status:** design locked; implementation pending (Phases 1–3)
+**Status:** design locked; **Phase 1 COMPLETE + verified** (commits below); Phase 2d/3 re-prioritized (see Implementation log).
+
+## Implementation log
+- `237b573` design doc.
+- **P1a — Mindscape SWR cache** (`2bc81b2`): `src/mindscape-cache.js` + busts on jobs/chronicle/3 delete paths. Gate `verify:mindscape-cache` GO. → repeat opens instant.
+- **P1b backend** (`2c4d4a1`): `db.documents.list` limit/offset + `count` + `contentSnippet`; `GET /documents` pagination; `POST /documents/previews`; attachments page unfiltered; migration `0025` index. Gate `verify:library-perf` GO.
+- **P1b frontend** (`78c1c4a`): `docPreviews.ts` batched preview store; `DocThumbnail` uses it (kills N+1); `LibraryView` defers media after first paint. svelte-check 0/0, vite build ✓.
+- **Pivot (realized):** frontend list pagination is DEFERRED — `filteredDocs` searches the full `documents` array client-side ([LibraryView.svelte:352](../portal-app/src/lib/views/LibraryView.svelte)), so paging the list would break search. Needs server-side search first (follow-up). Backend pagination shipped and is used by the previews path / future server-search.
+- **Re-prioritization:** P1a (cache) makes the cold full-scan RARE (served from cache between mutations), which sharply lowers the marginal value of **P2d** (slim payload — helps only the now-infrequent cold open + webview parse) and **P3** (decryption-scoping — kills wasted probing only on the cold scan). P3 also touches the crypto boundary right before go-live. Recommendation: ship Phase 1, validate on-device, then decide if P2d/P3 are worth it. Both remain designed + independently shippable.
 
 ---
 
