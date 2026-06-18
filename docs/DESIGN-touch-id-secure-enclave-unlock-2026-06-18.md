@@ -120,12 +120,23 @@ the shell. (Decide during build; `security-framework` may need a thin FFI shim f
 3. Migration: on first launch after upgrade, if a plaintext keychain item exists and the user
    opts in, enroll the SE wrap and remove the plaintext item. Opt-in; recovery key always works.
 
-## Open decisions for the build
+## Build decisions — LOCKED (user, 2026-06-18)
 
-- `.biometryCurrentSet` (Touch ID only, invalidate on biometry change — strongest) vs
-  `.userPresence` (allow passcode fallback — friendlier). Recommend `.biometryCurrentSet` with
-  the recovery-key fallback covering the rest.
-- Per-launch prompt vs a trusted-session TTL (1Password-style "unlock once per N minutes").
-  Recommend per-launch for V1 (the app is long-running; one prompt at boot is low-friction).
-- `security-framework` crate vs bundled Swift helper — decide by what cleanly exposes SE
-  `kSecAttrTokenID` + `LAContext` from the Tauri build.
+- **Cadence: once per launch.** One Touch ID/passcode prompt at app start; the key stays
+  unlocked for the running session; re-prompt only on relaunch. (The app is long-running.)
+- **Access control: `.userPresence`** (kSecAccessControlUserPresence) — **Touch ID OR device
+  passcode** unlocks the SE key. Friendlier than biometry-only; the 64-hex recovery key remains
+  the ultimate fallback for all other cases (new Mac, SE unavailable, etc.).
+- Still open (build-time, toolchain): `security-framework` crate vs bundled Swift helper —
+  decide by what cleanly exposes SE `kSecAttrTokenID` + `LAContext` from the Tauri build.
+
+## Why this is built WITH the Mac, not autonomously
+
+The SE generation, `.userPresence` access-control evaluation, and the Touch ID/passcode prompt
+are native macOS calls that **cannot be exercised headless** — there is no way to assert the
+prompt appears or that the SE unwrap succeeds without a real Mac + the user. Writing this
+security-critical native code blind (untested even once against the finicky SE/LAContext APIs)
+risks subtle correctness bugs. Per the "production-ready / no-hotfix / full-verify-green"
+discipline, the native build is a **focused live session at the user's Mac** (iterate fast
+against real SE errors), gated by `verify:se-unlock` (the mock-SE + recovery-fallback parts)
+and a live Touch ID smoke before merge.
