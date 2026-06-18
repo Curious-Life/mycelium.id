@@ -1329,6 +1329,36 @@
 		scene.add(glowLayer);
 	}
 
+	// Build (or REBUILD) the tone-mapping + post-processing pipeline for the
+	// CURRENT theme. Called at init and on every theme toggle. Light mode renders
+	// plain — NoToneMapping (no ACES highlight compression) and no bloom — so the
+	// luminous beads read true on the warm paper background; dark mode gets ACES +
+	// a gentle UnrealBloom haze. This MUST run on toggle: the composer + tone map
+	// used to be frozen at the init theme, so flipping to light left ACES + bloom
+	// applied over light points (murk / washout that read as "not rendering")
+	// until a full page reload reset it.
+	function setupRenderPipeline() {
+		if (!renderer || !scene || !camera || !container) return;
+		renderer.toneMapping = isLight ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
+		renderer.toneMappingExposure = 1.1;
+		renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+		if (composer) composer.dispose();
+		composer = new EffectComposer(renderer);
+		composer.addPass(new RenderPass(scene, camera));
+		if (!isLight) {
+			const bloomPass = new UnrealBloomPass(
+				new THREE.Vector2(container.clientWidth, container.clientHeight),
+				0.35, // strength — gentle nebula haze
+				0.5,  // radius — wider spread for soft halos
+				0.5   // threshold — catch glow halos, not data points
+			);
+			composer.addPass(bloomPass);
+		}
+		composer.addPass(new OutputPass());
+		composer.setSize(container.clientWidth, container.clientHeight);
+	}
+
 	function initThree() {
 		if (!container) return;
 		scene = new THREE.Scene();
@@ -1343,27 +1373,11 @@
 		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 		container.appendChild(renderer.domElement);
 
-		// Tone mapping for bloom — balanced exposure so points stay visible
-		renderer.toneMapping = isLight ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
-		renderer.toneMappingExposure = 1.1;
-		renderer.outputColorSpace = THREE.SRGBColorSpace;
-
 		// Setup clock for animations
 		clock = new THREE.Clock();
 
-		// Setup composer — bloom in dark mode, plain render in light mode
-		composer = new EffectComposer(renderer);
-		composer.addPass(new RenderPass(scene, camera));
-		if (!isLight) {
-			const bloomPass = new UnrealBloomPass(
-				new THREE.Vector2(container.clientWidth, container.clientHeight),
-				0.35, // strength — gentle nebula haze
-				0.5,  // radius — wider spread for soft halos
-				0.5   // threshold — catch glow halos, not data points
-			);
-			composer.addPass(bloomPass);
-		}
-		composer.addPass(new OutputPass());
+		// Tone mapping + post-processing pipeline (theme-dependent; rebuilt on toggle).
+		setupRenderPipeline();
 
 		controls = new OrbitControls(camera, renderer.domElement);
 		controls.enableDamping = true;
@@ -1506,21 +1520,23 @@
 			}
 
 			// Saturation: more vivid — Hubble vibrancy. Light mode pushes clustered
-			// points MORE saturated (vivid darks read on a light bg) and keeps noise
-			// nearly grey so it recedes.
+			// points MORE saturated (deep jewel-tone darks read on a light bg) and
+			// keeps noise nearly grey so it recedes.
 			const satRaw = ((px * 3.71 + py * 8.53 + pz * 5.29) % 1 + 1) % 1;
 			const saturation = isLight
-				? (isNoise ? 0.04 + satRaw * 0.08 : 0.55 + satRaw * 0.4)
+				? (isNoise ? 0.05 + satRaw * 0.1 : 0.65 + satRaw * 0.35)
 				: (isNoise ? 0.1 + satRaw * 0.15 : 0.4 + satRaw * 0.5);
 
-			// Lightness. Light mode INVERTS the dark-mode logic: clustered points must
-			// be DARK (low lightness) to contrast the light bg, and activity makes them
-			// darker/heavier (not brighter); noise is a faint light-grey that recedes.
+			// Lightness. Light mode is the INVERSE of dark mode: dark mode paints bright
+			// points that GLOW (additive + bloom) on near-black; light mode paints DARK
+			// saturated ink on near-white paper. So clustered points are LOW lightness
+			// (visible as ink), and activity makes them darker/heavier (more present, not
+			// brighter); noise is a faint light-grey that recedes into the paper.
 			const litRaw = ((px * 11.13 + py * 4.87 + pz * 17.63) % 1 + 1) % 1;
 			const terrData = !isNoise ? territories[tid] : null;
 			const activityBoost = terrData ? computeLuminosity(terrData, maxCount) * 0.15 : 0;
 			const lightness = isLight
-				? (isNoise ? 0.66 + litRaw * 0.08 : 0.42 - litRaw * 0.14 - activityBoost)
+				? (isNoise ? 0.70 + litRaw * 0.08 : 0.38 - litRaw * 0.08 - activityBoost)
 				: (isNoise ? 0.08 + litRaw * 0.1 : 0.3 + litRaw * 0.3 + activityBoost);
 
 			const color = new THREE.Color().setHSL(hue, saturation, lightness);
@@ -1679,11 +1695,18 @@
 					vec2 uv = gl_PointCoord - vec2(0.5);
 					float r = length(uv);
 					if (r > 0.5) discard;
-					// Solid circle with subtle border for light mode
-					float edge = 1.0 - smoothstep(0.4, 0.5, r);
-					float border = smoothstep(0.35, 0.42, r) * 0.15;
-					vec3 col = vColor * (1.0 - border);
-					gl_FragColor = vec4(col, vAlpha * edge * 0.95);
+					// Ink bead — the INVERSE of the dark-mode glow. The body stays dark
+					// and saturated (so it reads on light paper) and DEEPENS toward the
+					// rim for a crisp colour contour. A small glossy specular highlight
+					// in the upper-left makes each point read as a lit bead WITHOUT
+					// washing the body out (it's a tiny bright touch, not a core lift).
+					float edge = 1.0 - smoothstep(0.42, 0.5, r);   // antialiased disc
+					float rim  = smoothstep(0.26, 0.5, r);         // outer ring 0..1
+					vec3 col = vColor * (1.0 - rim * 0.45);        // darken toward rim
+					vec2 sp = uv - vec2(-0.15, -0.15);             // highlight centre
+					float spec = 1.0 - smoothstep(0.0, 0.17, length(sp));
+					col = mix(col, vec3(1.0), spec * 0.45);        // small glossy dot
+					gl_FragColor = vec4(col, vAlpha * edge);
 				}
 			` : `
 				varying vec3 vColor;
@@ -2223,8 +2246,9 @@
 		scene.background = new THREE.Color(getBgColor());
 		if (themeApplied && pointCloud) {
 			createPointCloud();
-			createStarfield();   // skips itself in light mode
-			createGlowLayer();   // skips itself in light mode
+			createStarfield();      // skips itself in light mode
+			createGlowLayer();      // skips itself in light mode
+			setupRenderPipeline();  // rebuild tone-map + bloom for the new theme
 		}
 		themeApplied = true;
 	});
