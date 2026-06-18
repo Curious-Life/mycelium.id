@@ -317,4 +317,4 @@ def main(querier=None):
 
 if __name__ == '__main__':
     import stage_result
-    stage_result.run_main('cross-scale-coupling', main)
+    stage_result.run_main('compute-cross-scale-coupling', main)

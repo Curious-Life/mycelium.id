@@ -163,7 +163,7 @@ export async function computeComplexity({ db, userId, windowDays = DEFAULT_WINDO
     return { snapshots: allResults.length, written: 0, territory: territoryResults.length, realm: realmResults.length, global: globalResults.length };
   }
 
-  const res = createStageResult('complexity', { record: db.pipelineState.recorderFor(userId, 'complexity') });
+  const res = createStageResult('compute-complexity', { record: db.pipelineState.recorderFor(userId, 'compute-complexity') });
   let written = 0;
   for (const r of allResults) {
     try {

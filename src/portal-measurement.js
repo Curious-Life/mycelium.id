@@ -452,12 +452,14 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
   ];
 
   // Which pipeline_state stage writes each metric family — so /measurement-health
-  // can say "stale BECAUSE the stage failed" (not just "stale"). Mirrors the stage
-  // names recorded by pipeline/lib/stage-result.js + pipeline/stage_result.py.
+  // can say "stale BECAUSE the stage failed" (not just "stale"). These match the
+  // CANONICAL stage_names the stages record (script-basename, e.g. 'compute-cofire';
+  // specials: 'fisher-trajectory', 'cognitive-harmonics', 'cluster') so the surface
+  // joins to the live pipeline_state rows instead of orphan short-name entries.
   const FAMILY_STAGE = {
-    fisher_trajectory: 'fisher', fisher_milestones: 'fisher', territory_vitality: 'vitality',
-    territory_cofire: 'cofire', complexity_snapshots: 'complexity', topology_audit_snapshots: 'topology-audit',
-    frequency_snapshots: 'frequency', cognitive_metrics_harmonic: 'cognitive-harmonics',
+    fisher_trajectory: 'fisher-trajectory', fisher_milestones: 'fisher-trajectory', territory_vitality: 'compute-vitality',
+    territory_cofire: 'compute-cofire', complexity_snapshots: 'compute-complexity', topology_audit_snapshots: 'topology-audit',
+    frequency_snapshots: 'compute-frequency', cognitive_metrics_harmonic: 'cognitive-harmonics',
   };
 
   // Shared freshness probe (MAX(timestamp) / pipeline_state) → per-family verdict map.

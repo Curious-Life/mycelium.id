@@ -226,11 +226,11 @@ async function main() {
     // Seed a chronically-failed stage so "stale because it failed" is legible.
     await db.rawQuery(
       `INSERT INTO pipeline_state (user_id, stage_name, last_failure_at, last_failure_reason, consecutive_failures, quarantined, last_duration_ms)
-       VALUES (?, 'vitality', ?, ?, 3, 1, 1200)`,
-      [uid, isoDaysAgo(0), 'vitality: incomplete — 0/42 written, 42 failed (e.g. SQLITE_ERROR)']);
+       VALUES (?, 'compute-vitality', ?, ?, 3, 1, 1200)`,
+      [uid, isoDaysAgo(0), 'compute-vitality: incomplete — 0/42 written, 42 failed (e.g. SQLITE_ERROR)']);
     const mh = await ja(M('/measurement-health'));
     const fam = Object.fromEntries((mh.body?.families || []).map((f) => [f.stage || f.table, f]));
-    const vitFam = (mh.body?.families || []).find((f) => f.stage === 'vitality');
+    const vitFam = (mh.body?.families || []).find((f) => f.stage === 'compute-vitality');
     const mhOk = mh.status === 200
       && Array.isArray(mh.body?.families) && mh.body.families.length > 0
       && vitFam?.quarantined === true && /incomplete/.test(vitFam?.last_failure_reason || '')

@@ -65,7 +65,7 @@ async function run() {
 
   try {
     const USER_ID_LOCAL = USER_ID;
-    const res = createStageResult('cofire', { record: db.pipelineState.recorderFor(USER_ID_LOCAL, 'cofire') });
+    const res = createStageResult('compute-cofire', { record: db.pipelineState.recorderFor(USER_ID_LOCAL, 'compute-cofire') });
     console.log(`[cofire] Computing co-firing for user=${USER_ID_LOCAL}`);
 
     // Fetch all points with territory assignments
