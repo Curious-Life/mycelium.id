@@ -29,6 +29,12 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGE="$REPO/build-staging"
 CACHE="$REPO/.build-cache"
 
+# Fail LOUD if a required tool is missing (this script assumes node/npm/curl/
+# rsync on PATH — each would otherwise die with a cryptic bash 127).
+# shellcheck source=scripts/preflight.sh
+source "$REPO/scripts/preflight.sh"
+check_tools node npm curl rsync
+
 # ── Target architecture ───────────────────────────────────────────────────────
 # Defaults to the host arch; override with MYC_ARCH=x86_64|arm64 to stage an
 # Intel bundle on an Intel runner (native wheels + better_sqlite3.node + bundled

@@ -13,6 +13,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$HERE/src-tauri/binaries"
 mkdir -p "$BIN"
 
+# Fail LOUD if a required tool is missing — esp. rustc, used just below for the
+# target triple, which would otherwise die with a cryptic bash 127.
+# shellcheck source=scripts/preflight.sh
+source "$HERE/scripts/preflight.sh"
+check_tools rustc curl tar awk
+
 TRIPLE="$(rustc -Vv | awk -F': ' '/host/{print $2}')"
 FRP_VERSION="${FRP_VERSION:-0.61.1}"
 

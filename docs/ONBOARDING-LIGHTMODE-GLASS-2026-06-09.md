@@ -75,7 +75,8 @@ Panel/border/progress-track → glass tokens; keep aurum/coral/jade accents.
 `cargo tauri dev` has **no `beforeDevCommand`** — it spawns node with `current_dir(home)`
 where `home` falls back to the **stale bundled copy** at `src-tauri/target/debug/app/`
 (refreshed only by `scripts/build-app-bundle.sh` on `tauri build`). So plain `cargo tauri
-dev` runs OLD `src/` **and** old `portal-app/build`. **Always launch the dev app as
+dev` runs the **stale bundled copy** of `src/` + `portal-app/build` (not your working
+tree — `portal-app/build` is the canonical UI, just a stale snapshot here). **Always launch the dev app as
 `MYCELIUM_HOME="$(pwd)" cargo tauri dev`** so node runs the working tree. (The throwaway
 `node src/server-rest.js` launched from the repo root is always fresh.) Verified:
 `main.rs:46-54` (`mycelium_home`), `tauri.conf.json:8` (only `beforeBuildCommand`).
