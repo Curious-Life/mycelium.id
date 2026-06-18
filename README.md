@@ -18,7 +18,7 @@
 
 ## What This Is
 
-A self-hosted MCP server that gives **any AI model** complete context about your life through a standard protocol. Your data compounds across every service. You switch models freely. Nobody else can read it.
+A self-hosted MCP server that gives **any AI model** complete context about your life through a standard protocol. Your data compounds across every service. You switch models freely. Your vault is encrypted on your machine, with keys only you hold.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -192,7 +192,7 @@ mycelium.id/
 | Harmonics | ✗ | ✗ | ✗ | ✗ | **✓** |
 | Federation | ✗ | ✗ | ✗ | ✗ | **✓** *(roadmap)* |
 | Model-agnostic | partial | partial | ✓ | ✓ | **✓** |
-| E2E encrypted | ✗ | ✗ | ✗ | ✗ | **✓** |
+| Encrypted at rest (your keys) | ✗ | ✗ | ✗ | ✗ | **✓** |
 
 Everyone else is building memory. We're building the **nervous system**.
 
