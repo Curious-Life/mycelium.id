@@ -48,9 +48,12 @@ async function main() {
       page.status === 200 && /text\/html/.test(page.headers.get('content-type') || '') && /<title>Mycelium<\/title>/.test(html),
       `status=${page.status}`);
 
-    // P2 — the page actually wires the API + the core tools
-    rec('P2. portal wires /api/v1 + the core tools (getContext/captureMessage/searchMindscape)',
-      html.includes('/api/v1/') && html.includes('getContext') && html.includes('captureMessage') && html.includes('searchMindscape'));
+    // P2 — the fallback is the "not built" placeholder (the old single-file UI
+    // was removed); it must direct the user at the canonical build, not pose as
+    // a working app.
+    rec('P2. fallback shell is the placeholder (directs to npm run portal:build)',
+      html.includes('portal:build') && html.includes('portal-app'),
+      `len=${html.length}`);
 
     // P3 — API not shadowed by the static mount
     const tools = await (await fetch(`${url}/api/v1/tools`)).json();

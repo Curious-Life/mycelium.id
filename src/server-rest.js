@@ -61,16 +61,21 @@ import { createVaultAuthMiddleware, csrfCookieMiddleware, isAuthorized, makePort
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CANONICAL_BUILD = path.join(HERE, '..', 'portal-app', 'build');
-const LEGACY_PORTAL = path.join(HERE, '..', 'portal');
+// The ONLY real UI is the canonical SvelteKit app (portal-app/build). `portal/`
+// is no longer a second UI — it's a minimal "not built yet" placeholder shell,
+// served only when the canonical build is missing (a fresh source checkout that
+// skipped `npm run portal:build`). The packaged desktop app always builds the
+// canonical UI, so end users never see the placeholder.
+const PLACEHOLDER_PORTAL = path.join(HERE, '..', 'portal');
 
 /**
- * Resolve which portal to serve. The canonical SvelteKit app
- * (portal-app/build — the real UI, see portal-app/README.md) is preferred when
- * it's been built; otherwise we serve the single-file SPA in portal/.
+ * Resolve which portal directory to serve. Canonical (portal-app/build) when
+ * built; otherwise the placeholder in portal/ (which tells the user to build).
  *
- * mode: 'auto' (default) | 'canonical' | 'legacy'. Set per-call or via the
- * MYCELIUM_PORTAL env var. Resolved at call time (not import) so tests/CLI can
- * pick a mode deterministically. Returns { dir, spaFallback|null }.
+ * mode: 'auto' (default) | 'canonical' | 'legacy'. 'legacy' forces the
+ * placeholder (used by API/route tests that don't need the heavy SvelteKit
+ * build). Resolved at call time so tests/CLI can pick a mode deterministically.
+ * Returns { dir, spaFallback|null }.
  */
 function resolvePortal(mode = process.env.MYCELIUM_PORTAL || 'auto') {
   const canonicalFallback = path.join(CANONICAL_BUILD, '200.html');
@@ -79,7 +84,12 @@ function resolvePortal(mode = process.env.MYCELIUM_PORTAL || 'auto') {
   if (useCanonical && canonicalBuilt) {
     return { dir: CANONICAL_BUILD, spaFallback: canonicalFallback };
   }
-  return { dir: LEGACY_PORTAL, spaFallback: null };
+  // Auto-fallback to the placeholder means the real UI isn't built — say so
+  // loudly (don't silently serve a shell that looks like a stale app).
+  if (mode !== 'legacy') {
+    console.warn('[mycelium] portal-app/build not found — serving the "not built" placeholder. Build the real UI: npm run portal:build');
+  }
+  return { dir: PLACEHOLDER_PORTAL, spaFallback: null };
 }
 
 /**
