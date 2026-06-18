@@ -158,7 +158,10 @@ node -e '
 
 # ── 5. Assemble staging (code fresh each run; runtime bits from cache) ─────────
 log "assembling ${STAGE}…"
-rm -rf "$STAGE"; mkdir -p "$STAGE/pipeline"
+# Pre-create nested parents: Apple's bundled rsync 2.6.9 (GitHub macOS runners)
+# does NOT create intermediate dirs for a 2-level dest like portal-app/build/
+# (newer openrsync on recent macOS does — which is why this only failed in CI).
+rm -rf "$STAGE"; mkdir -p "$STAGE/pipeline" "$STAGE/portal-app"
 rsync -a "$REPO/src/"               "$STAGE/src/"
 rsync -a "$REPO/migrations/"        "$STAGE/migrations/" 2>/dev/null || true
 rsync -a "$REPO/package.json"       "$STAGE/"
