@@ -38,9 +38,13 @@
 	let searchTimer: ReturnType<typeof setTimeout> | null = null;
 	const searching = $derived(query.trim().length > 0);
 
-	onMount(async () => {
-		await Promise.all([loadFeed(), loadAgents(), loadIdentity()]);
-		loading = false;
+	onMount(() => {
+		// Block first paint ONLY on the feed. agents + identity are label side-data
+		// (speaker names/avatars) that populate agentMap/owner reactively as they
+		// arrive, so a slow /agents or /identity must never delay the river render.
+		loadFeed().finally(() => { loading = false; });
+		loadAgents();
+		loadIdentity();
 	});
 
 	function onSearchInput(v: string) {
@@ -154,8 +158,21 @@
 
 	<div class="flex-1 overflow-y-auto px-4 sm:px-6 py-4">
 		{#if loading}
-			<div class="flex items-center justify-center min-h-[200px]" role="status" aria-live="polite">
-				<div class="text-[var(--color-text-tertiary)] text-sm animate-pulse">Reading your streams…</div>
+			<!-- Skeleton: render the river's shape immediately so a Streams click feels
+			     instant, instead of a blank panel while the feed fetch is in flight. -->
+			<div class="max-w-3xl mx-auto" role="status" aria-live="polite" aria-label="Loading your streams">
+				<div class="section-marker text-xs my-4"><span class="inline-block h-3 w-24 rounded bg-[var(--color-border)] animate-pulse align-middle"></span></div>
+				<div class="space-y-3">
+					{#each Array.from({ length: 6 }) as _, i (i)}
+						<div class="flex gap-3 animate-pulse" style="animation-delay: {i * 70}ms">
+							<div class="h-8 w-8 rounded-full bg-[var(--color-border)] shrink-0"></div>
+							<div class="flex-1 space-y-2 py-1">
+								<div class="h-3 rounded bg-[var(--color-border)]" style="width: {[55, 80, 42, 68, 50, 73][i]}%"></div>
+								<div class="h-3 rounded bg-[var(--color-border)]" style="width: {[88, 46, 72, 38, 84, 60][i]}%"></div>
+							</div>
+						</div>
+					{/each}
+				</div>
 			</div>
 		{:else if filtered.length === 0}
 			<div class="flex items-center justify-center min-h-[200px]">
