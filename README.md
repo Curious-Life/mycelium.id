@@ -135,7 +135,7 @@ Phase 6  Enrichment + Connectors        ◷ next     D7 service skeleton, messag
 
 <sub>✅ verified to `EXIT 0` · ◑ built, a Tier-2 path needs a networked host · ◷ designed, not yet built</sub>
 
-**Verification:** `npm install --legacy-peer-deps && npm run verify` runs the full suite (13 verify scripts; each prints `VERDICT: GO`). A real MCP client completes OAuth and lists the live tools over HTTPS; messages and file uploads round-trip through the encrypting vault.
+**Verification:** `npm install --legacy-peer-deps && npm run verify` runs the full suite (every `verify:*` gate prints `VERDICT: GO`). For a fast sanity check use `npm run verify:core` (boot · crypto · MCP tools · portal · search). A real MCP client completes OAuth and lists the live tools over HTTPS; messages and file uploads round-trip through the encrypting vault.
 
 See [`docs/V1-BUILD-SPEC.md`](docs/V1-BUILD-SPEC.md) (spec), [`docs/V1-IMPLEMENTATION-PLAN.md`](docs/V1-IMPLEMENTATION-PLAN.md) (day-by-day plan), and [`docs/V1-BUILD-HANDOFF-2026-05-30.md`](docs/V1-BUILD-HANDOFF-2026-05-30.md) (current state).
 
@@ -145,12 +145,21 @@ See [`docs/V1-BUILD-SPEC.md`](docs/V1-BUILD-SPEC.md) (spec), [`docs/V1-IMPLEMENT
 
 ```bash
 git clone <repo> && cd mycelium.id
-npm install --legacy-peer-deps
-npm run verify          # full suite → 13× VERDICT: GO
+nvm use                 # Node 22 LTS (see .nvmrc) — Node 23+ breaks prebuilt native modules
+npm install --legacy-peer-deps   # the --legacy-peer-deps flag is required
+npm run verify:core     # fast sanity (or `npm run verify` for the full suite)
 npm start               # stdio MCP server   (or: npm run start:http for OAuth)
 ```
 
-Pure Node.js (≥22). No Docker required. Connect Claude, ChatGPT, or any MCP-compatible client.
+Pure Node.js (**22 LTS** — pinned in `.nvmrc`). No Docker required. Connect Claude, ChatGPT, or any MCP-compatible client.
+
+**Optional (Tier-2 features):** the embeddings + clustering pipeline needs **Python ≥3.10** and, on macOS, the Xcode Command Line Tools (`xcode-select --install`). Search, capture, and the MCP tools work without it; semantic clustering / Generate need it. Setup: [`docs/SETUP.md`](docs/SETUP.md).
+
+### Troubleshooting
+
+- **`better-sqlite3` fails to build (libtool / `clang` errors), conda active** — a conda environment puts its own `libtool`/compiler ahead of the system toolchain and collides with the native build. **`conda deactivate`** (so no env is active), then re-run `npm install --legacy-peer-deps`.
+- **Native module errors / `NODE_MODULE_VERSION` mismatch** — you're on Node 23+. The prebuilt binaries target Node 22 LTS. **`nvm use`** (or install Node 22), delete `node_modules`, and reinstall.
+- **`npm install` fails on peer-dependency conflicts** — use the **`--legacy-peer-deps`** flag (a committed `.npmrc` sets it by default; pass it explicitly if your npm ignores the file).
 
 ## Repo Structure
 

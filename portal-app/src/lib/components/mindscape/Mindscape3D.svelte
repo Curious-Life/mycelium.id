@@ -10,6 +10,7 @@
 	import { theme } from '$lib/stores/theme';
 	import { phaseColorAt, hexToRgbNormalized, type PhaseSample } from '$lib/mindscape/phase-color';
 	import { api } from '$lib/api';
+	import { canUseWebGL } from '$lib/utils/webgl';
 
 	// false when this Mindscape tab is backgrounded (workspace keep-alive): the
 	// rAF loop stays alive for instant resume, but the expensive render is skipped.
@@ -26,6 +27,7 @@
 	const CONTACT_COLOR = '#E5B84C'; // Aurum/Gold — brand color
 
 	let container: HTMLDivElement;
+	let webglReady = true; // false → WebGL unavailable; initThree shows a fallback + onMount skips the 3D setup
 	let scene: THREE.Scene;
 	let camera: THREE.PerspectiveCamera;
 	let renderer: THREE.WebGLRenderer;
@@ -1359,8 +1361,26 @@
 		composer.setSize(container.clientWidth, container.clientHeight);
 	}
 
+	// Friendly fallback injected into the mount point when WebGL is unavailable —
+	// no reactive flag needed (works regardless of the component's state model).
+	function showWebglFallback() {
+		if (!container || container.querySelector('.ms-webgl-fallback')) return;
+		const el = document.createElement('div');
+		el.className = 'ms-webgl-fallback absolute inset-0 flex items-center justify-center p-6 text-center';
+		el.innerHTML =
+			'<div class="ms-glass rounded-lg px-6 py-4 max-w-sm">' +
+			'<p class="text-[var(--color-text-primary)] text-sm font-medium">3D mindscape unavailable</p>' +
+			'<p class="text-[var(--color-text-tertiary)] text-xs mt-2">Your browser or device doesn\'t have WebGL enabled. Enable hardware acceleration / WebGL, or open Mycelium in a recent browser.</p>' +
+			'</div>';
+		container.appendChild(el);
+	}
+
 	function initThree() {
-		if (!container) return;
+		if (!container) { webglReady = false; return; }
+		// WebGL guard: probe first, and guard the renderer creation, so a device
+		// without WebGL shows a friendly fallback instead of a blank canvas + a
+		// crash in renderLoop (renderer would be undefined). See $lib/utils/webgl.
+		if (!canUseWebGL()) { webglReady = false; showWebglFallback(); return; }
 		scene = new THREE.Scene();
 		scene.background = new THREE.Color(getBgColor());
 
@@ -1368,7 +1388,12 @@
 		// Start far away — the intro animation will drift in
 		camera.position.set(80, 50, 80);
 
-		renderer = new THREE.WebGLRenderer({ antialias: true });
+		try {
+			renderer = new THREE.WebGLRenderer({ antialias: true });
+		} catch (e) {
+			console.error('[mindscape] WebGL renderer creation failed:', e);
+			webglReady = false; showWebglFallback(); return;
+		}
 		renderer.setSize(container.clientWidth, container.clientHeight);
 		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 		container.appendChild(renderer.domElement);
@@ -2433,6 +2458,7 @@
 		// when msState.points.length > 0. Calling mindscapeState.load() here would
 		// set loading=true, causing the parent to unmount us (infinite loop).
 		initThree();
+		if (!webglReady) return; // WebGL unavailable → fallback shown; skip the 3D setup
 		createPointCloud();
 		renderLoop();
 	});
