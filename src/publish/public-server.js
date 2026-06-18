@@ -62,6 +62,10 @@ p{margin:.9em 0}ul{padding-left:22px}footer{margin-top:56px;padding-top:20px;bor
 export async function startPublicServer({ dbPath, kcvPath, userHex, systemHex, userId, handle, port = 0, host = "127.0.0.1" } = {}) {
   const bootOpts = {};
   for (const [k, v] of Object.entries({ dbPath, kcvPath, userHex, systemHex, userId })) if (v !== undefined) bootOpts[k] = v;
+  // Open-only: the public surface must NOT self-init/migrate the schema — the
+  // fail-closed interlock below depends on a missing publish_nonce STAYING missing
+  // (boot() default would re-apply migrations and silently re-add the column).
+  bootOpts.initStorage = false;
   const { db, close, userId: owner } = await boot(bootOpts);
 
   // Fail-closed schema interlock: the revocation guarantee depends on the

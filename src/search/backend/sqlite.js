@@ -200,9 +200,83 @@ export function createSqliteBackend(deps = {}) {
     return { hits, degraded: false, tier: 1, takenMs: Date.now() - t0 };
   }
 
+  // ── Bulk initial build (Phase 1 perf fix) ──────────────────────────────────
+  // The per-doc add() above wraps ONE encrypted-WAL transaction per document and
+  // does a delete-then-insert. For the FIRST full-corpus build that is fatal: on
+  // SQLCipher, 69k separate commits + FTS5 delete-marker/segment churn whose cost
+  // GROWS with corpus size decays throughput from ~900/s to ~14/min (spike
+  // scripts/spike-index-build-perf.mjs: strategy A). Batching the build into one
+  // transaction per ~2k docs, INSERT-ONLY (the index is empty — nothing to
+  // delete), holds a FLAT ~6k/s → the full 69k build runs in ~12s. add() keeps
+  // its delete-then-insert for incremental upserts (noteUpsert) where idempotency
+  // matters; bulkAdd is for the cleared-index initial load only.
+
+  // Clear the index to empty so bulkAdd can INSERT-only with no dup risk. Called
+  // by loadFromDb at the start of every full (re)build — also evicts rows that
+  // were deleted from the source since the last build. Idempotent.
+  function resetIndex() {
+    raw.transaction(() => {
+      raw.exec('DELETE FROM fts_docs; DELETE FROM vec_docs_768; DELETE FROM vec_docs_256; DELETE FROM doc_meta;');
+      stmts.stateSet.run('corpus_built', '0');
+    })();
+  }
+
+  // Insert a batch of docs in ONE transaction (insert-only — assumes the id is
+  // not already present, guaranteed by resetIndex()). Uses ONLY precomputed
+  // embeddings: bulk build never calls the embed service (no per-doc :8091 round
+  // trip at cold start) — a doc with no/invalid vector is indexed BM25-only and
+  // enrichment's noteVector backfills its vector later. Returns the count added.
+  function bulkAdd(docs) {
+    if (!Array.isArray(docs) || docs.length === 0) return 0;
+    let n = 0;
+    raw.transaction(() => {
+      for (const d of docs) {
+        if (!d || typeof d.id !== 'string' || !d.id || !Number.isFinite(d.ts)) continue;
+        stmts.metaUpsert.run(d.id, Math.floor(d.ts));
+        if (typeof d.text === 'string' && d.text.length > 0) stmts.ftsIns.run(d.id, d.text);
+        const vec = toF32(d.embedding);
+        const norm = vec ? normalize(vec) : null;
+        if (norm && norm.length === VEC_DIM) {
+          stmts.vec768Ins.run(d.id, f32buf(norm));
+          const norm256 = prefix256(norm);
+          if (norm256) stmts.vec256Ins.run(d.id, f32buf(norm256));
+        }
+        n++;
+      }
+    })();
+    return n;
+  }
+
+  // Merge FTS5 segments into one after a bulk load → faster BM25 queries. Cheap
+  // (~0.3s at 69k) and best-effort; vec0 needs no equivalent. Call once at end.
+  function optimize() {
+    try { raw.prepare(`INSERT INTO fts_docs(fts_docs) VALUES('optimize')`).run(); } catch { /* best-effort */ }
+  }
+
+  // Suspend WAL auto-checkpoint for the duration of a bulk build. Default
+  // wal_autocheckpoint=1000 fires a blocking checkpoint every ~1000 dirty pages;
+  // on SQLCipher each checkpoint RE-ENCRYPTS + HMACs every flushed page, so a
+  // multi-thousand-page build pays that storm repeatedly (and re-encrypts pages
+  // touched again by later FTS5 merges). Suspending it lets the WAL grow once and
+  // be flushed by a SINGLE checkpoint in endBulk(). NOT a durability change —
+  // synchronous is left untouched (a crash mid-build just rebuilds the derived
+  // index next boot). Best-effort.
+  function beginBulk() {
+    try { raw.pragma('wal_autocheckpoint = 0'); } catch { /* best-effort */ }
+  }
+  function endBulk() {
+    try { raw.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* best-effort */ }
+    try { raw.pragma('wal_autocheckpoint = 1000'); } catch { /* best-effort */ }
+  }
+
   return {
     add,
     upsert: add,
+    bulkAdd,
+    resetIndex,
+    optimize,
+    beginBulk,
+    endBulk,
     query,
     async delete(filter) {
       const ids = (filter && Array.isArray(filter.ids)) ? filter.ids : [];
