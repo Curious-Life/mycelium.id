@@ -85,7 +85,10 @@ function startBox(handle, host, { withConnections } = {}) {
         let payload; try { payload = JSON.parse(raw); } catch { return send({ status: 400, body: { error: 'bad json' } }); }
         const headers = { 'x-myc-did': req.headers['x-myc-did'], 'x-myc-sig': req.headers['x-myc-sig'] };
         const fn = u.pathname.endsWith('-response') ? h.connectResponse : h.connect;
-        send(await fn({ payload, headers, ip: req.socket.remoteAddress }));
+        // Pass the RAW received bytes (as express does via req.rawBody) so the gate
+        // exercises the production signature-over-raw-bytes path, not the test-only
+        // canonicalize(payload) fallback.
+        send(await fn({ payload, headers, ip: req.socket.remoteAddress, rawBody: Buffer.from(raw) }));
       });
       return;
     }

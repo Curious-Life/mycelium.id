@@ -35,12 +35,12 @@ export function createFederationRouter(deps) {
   const hdrs = (req) => ({ 'x-myc-did': req.get('x-myc-did'), 'x-myc-sig': req.get('x-myc-sig') });
 
   router.post('/federation/connect', async (req, res) => {
-    const r = await h.connect({ payload: req.body, headers: hdrs(req), ip: ipOf(req) });
+    const r = await h.connect({ payload: req.body, headers: hdrs(req), ip: ipOf(req), rawBody: req.rawBody });
     res.status(r.status).json(r.body);
   });
 
   router.post('/federation/connect-response', async (req, res) => {
-    const r = await h.connectResponse({ payload: req.body, headers: hdrs(req), ip: ipOf(req) });
+    const r = await h.connectResponse({ payload: req.body, headers: hdrs(req), ip: ipOf(req), rawBody: req.rawBody });
     res.status(r.status).json(r.body);
   });
 
@@ -48,14 +48,14 @@ export function createFederationRouter(deps) {
   // handler (fail closed), same as /connect; receiveMessage additionally
   // requires an accepted connection (403 otherwise).
   router.post('/federation/message', async (req, res) => {
-    const r = await h.message({ payload: req.body, headers: hdrs(req), ip: ipOf(req) });
+    const r = await h.message({ payload: req.body, headers: hdrs(req), ip: ipOf(req), rawBody: req.rawBody });
     res.status(r.status).json(r.body);
   });
 
   // Share announce from a connected peer (Tier-0d): they granted/revoked us access
   // to one of their spaces/contexts. Signature-gated + accepted-connection only.
   router.post('/federation/share', async (req, res) => {
-    const r = await h.share({ payload: req.body, headers: hdrs(req), ip: ipOf(req) });
+    const r = await h.share({ payload: req.body, headers: hdrs(req), ip: ipOf(req), rawBody: req.rawBody });
     res.status(r.status).json(r.body);
   });
 
@@ -63,7 +63,7 @@ export function createFederationRouter(deps) {
   // the response body; we emit it verbatim with the signature headers so the peer
   // can verify it (no MITM). Error paths return plain JSON.
   router.post('/federation/shared-content', async (req, res) => {
-    const r = await h.sharedContent({ payload: req.body, headers: hdrs(req), ip: ipOf(req) });
+    const r = await h.sharedContent({ payload: req.body, headers: hdrs(req), ip: ipOf(req), rawBody: req.rawBody });
     if (r.signedBody != null) {
       res.set('X-Myc-Did', r.did);
       res.set('X-Myc-Sig', r.sig);
@@ -77,7 +77,7 @@ export function createFederationRouter(deps) {
   // the handler (fail closed); the signed {state, nonce, ts} reply is emitted with
   // X-Myc-Did/X-Myc-Sig so the querier can verify it (no forged "online").
   router.post('/federation/presence', async (req, res) => {
-    const r = await h.presence({ payload: req.body, headers: hdrs(req), ip: ipOf(req) });
+    const r = await h.presence({ payload: req.body, headers: hdrs(req), ip: ipOf(req), rawBody: req.rawBody });
     if (r.signedBody != null) {
       res.set('X-Myc-Did', r.did);
       res.set('X-Myc-Sig', r.sig);

@@ -10,6 +10,15 @@
 //   3. audit — an egress_audit row (sha256 hex + length only, NEVER plaintext;
 //      CLAUDE.md §1/§8) records the decision for allowed AND denied.
 // Membership ops (invite/kick) are NOT content egress and stay on the client.
+//
+// DELIBERATE REDUCTION (federation audit 2026-06-19, slice 3): the reference gate
+// chain also runs assertDeliverable — the §11 silent-reply / trivial-content /
+// anti-impersonation gate. It is omitted here because the ONLY content that flows
+// through this path is validated lexicon records (knowledge.v1 etc. via
+// space-sync.mirrorKnowledge), never raw agent free-form output. THE MOMENT any
+// agent-authored free-form text can reach this send (e.g. the native agent harness
+// mirroring a reply into a space room), assertDeliverable MUST be ported in as a
+// gate-0 — otherwise agent output reaches a peer's room unfiltered.
 import { createHash } from 'node:crypto';
 
 /**

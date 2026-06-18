@@ -30,6 +30,37 @@ const SCHEMAS = {
 
 const typeOk = (v, t) => t === 'str' ? typeof v === 'string' : t === 'arr' ? Array.isArray(v) : true;
 
+// Bounds on peer-supplied fields (DoS / storage-exhaustion defense). A malicious
+// peer in a shared Megolm room could otherwise push arbitrarily large records into
+// space_knowledge — each one decrypted and rendered in the portal. `content` is the
+// one legitimately-large field (a shared note); everything else is an identifier or
+// short label. The HTTP federation path caps the whole canonical envelope at 8 KB
+// (handlers.js MAX_CANONICAL_BYTES), but Matrix timeline events bypass that gate, so
+// the bound has to live here, at the ingest validator. Byte length (not char count)
+// so a multibyte payload can't slip the cap. Fail closed.
+const MAX_CONTENT_BYTES = 64 * 1024;  // knowledge body
+const MAX_FIELD_BYTES = 8 * 1024;     // name, essence, refs, ids, source_*
+const MAX_ARR_ITEMS = 64;             // domain_tags element count
+const MAX_ARR_ITEM_BYTES = 256;       // a single tag
+
+/** Bounds-check a present field. Returns an error string, or null when within bounds. */
+function boundError(f, v) {
+  if (typeof v === 'string') {
+    const max = f === 'content' ? MAX_CONTENT_BYTES : MAX_FIELD_BYTES;
+    if (Buffer.byteLength(v, 'utf8') > max) return `field ${f} exceeds ${max} bytes`;
+    return null;
+  }
+  if (Array.isArray(v)) {
+    if (v.length > MAX_ARR_ITEMS) return `field ${f} exceeds ${MAX_ARR_ITEMS} items`;
+    for (const item of v) {
+      if (typeof item !== 'string') return `field ${f} items must be strings`;
+      if (Buffer.byteLength(item, 'utf8') > MAX_ARR_ITEM_BYTES) return `field ${f} item too long`;
+    }
+    return null;
+  }
+  return null;
+}
+
 /**
  * Validate an inbound lexicon record. Returns { ok:true } or { ok:false, error }.
  * Never throws. @param {object} record
@@ -45,9 +76,12 @@ export function validateLexicon(record) {
   for (const [f, t] of Object.entries(schema.required)) {
     if (record[f] == null || (t === 'str' && record[f] === '')) return { ok: false, error: `missing required field: ${f}` };
     if (!typeOk(record[f], t)) return { ok: false, error: `field ${f} must be ${t}` };
+    const be = boundError(f, record[f]); if (be) return { ok: false, error: be };
   }
   for (const [f, t] of Object.entries(schema.optional)) {
-    if (record[f] != null && !typeOk(record[f], t)) return { ok: false, error: `field ${f} must be ${t}` };
+    if (record[f] == null) continue;
+    if (!typeOk(record[f], t)) return { ok: false, error: `field ${f} must be ${t}` };
+    const be = boundError(f, record[f]); if (be) return { ok: false, error: be };
   }
   if (hasVectorKey(record)) return { ok: false, error: 'vector/embedding field refused (CLAUDE.md §7)' };
   return { ok: true };
