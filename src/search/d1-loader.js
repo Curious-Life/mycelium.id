@@ -56,7 +56,17 @@ const SOURCES = [
   // content IS NOT NULL/'' — a content-NULL message can never be a useful search
   // hit (empty doc) and must not enter the pipeline (PIPELINE-INTEGRITY design
   // §P1.3); excludes the quarantined/dead rows that otherwise bloat the index.
-  { table: 'messages', sql: "SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ? AND forgotten_at IS NULL AND content IS NOT NULL AND content != ''", kind: 'message', prefix: '' },
+  // messages is the ONLY large source (tens of thousands of rows, each carrying a
+  // ~16KB embedding_768 BLOB). On an at-rest vault a single SELECT of the whole
+  // table is a ~300s blocking SQLCipher page-decrypt scan (measured: 69k rows /
+  // 313s on a 2GB vault) that freezes the event loop end-to-end. paginate=true
+  // reads it in keyset pages (id PK, indexed) so the loader can YIELD between
+  // pages → the app stays responsive during the one-time build, and per-page
+  // marshalling avoids materializing ~1GB of rows at once. pageSql appends the
+  // keyset predicate + ORDER BY id + LIMIT to the same filter.
+  { table: 'messages', sql: "SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ? AND forgotten_at IS NULL AND content IS NOT NULL AND content != ''", kind: 'message', prefix: '',
+    paginate: true,
+    pageSql: "SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ? AND forgotten_at IS NULL AND content IS NOT NULL AND content != '' AND id > ? ORDER BY id LIMIT ?" },
   // name + essence are ENCRYPTED columns on all three topology tables
   // (ENCRYPTED_FIELDS.territory_profiles / .realms / .semantic_themes — name was
   // "newly encrypted (was plaintext)"). Same root cause as the documents source
@@ -171,46 +181,69 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
     await new Promise((r) => setImmediate(r)); // yield between batches
   }
 
-  for (const src of SOURCES) {
-    let rows;
-    try {
-      const res = await db.rawQuery(src.sql, [userId]);
-      rows = res?.results || [];
-    } catch {
-      // Table absent or query failed — skip this source (e.g. a partial schema).
-      continue;
+  // Decrypt one row's stored vector, build its index req, append to the batch,
+  // flushing (+ yielding) when full. Shared by the single-query and paginated
+  // source paths. Never logs vector bytes (CLAUDE.md §1).
+  async function processRow(src, row) {
+    const rawId = row.id != null ? String(row.id) : '';
+    if (!rawId) return;
+    const id = src.prefix + rawId; // kind-prefixed for profiles; bare for messages
+    // Reuse the stored vector when present so the backend does NOT re-embed.
+    // Best-effort: a missing/garbled envelope falls through to text-only.
+    let embedding;
+    if (masterKey && row.embedding_768) {
+      try { embedding = await decryptVector(row.embedding_768, masterKey, null, EMBED_DIM); vectorsLoaded++; }
+      catch { embedding = undefined; vectorsFailed++; }
     }
-    for (const row of rows) {
-      const rawId = row.id != null ? String(row.id) : '';
-      if (!rawId) continue;
-      const id = src.prefix + rawId; // kind-prefixed for profiles; bare for messages
-      // Reuse the stored vector when present so the backend does NOT re-embed.
-      // Best-effort: a missing/garbled envelope falls through to text-only
-      // (never aborts the load; never logs vector bytes — CLAUDE.md §1).
-      let embedding;
-      if (masterKey && row.embedding_768) {
-        try {
-          embedding = await decryptVector(row.embedding_768, masterKey, null, EMBED_DIM);
-          vectorsLoaded++;
-        } catch {
-          embedding = undefined;
-          vectorsFailed++;
-        }
-      }
-      // text is either a single decrypted column aliased AS text, or built in JS
-      // from several decrypted columns (src.textFrom) — see the documents source.
-      const text = typeof src.textFrom === 'function' ? src.textFrom(row) : (row.text ?? '');
-      batch.push({ id, text, embedding, ts: tsFromRow(row), skipEmbed: src.skipEmbed === true });
-      byKind[src.kind] = (byKind[src.kind] || 0) + 1;
-      if (batch.length >= BATCH) await flush();
-    }
-    await flush(); // flush at every source boundary (keeps batches kind-homogeneous)
+    // text is either a single decrypted column aliased AS text, or built in JS
+    // from several decrypted columns (src.textFrom) — see the documents source.
+    const text = typeof src.textFrom === 'function' ? src.textFrom(row) : (row.text ?? '');
+    batch.push({ id, text, embedding, ts: tsFromRow(row), skipEmbed: src.skipEmbed === true });
+    byKind[src.kind] = (byKind[src.kind] || 0) + 1;
+    if (batch.length >= BATCH) await flush();
   }
 
-  // Compact FTS5 segments once after the full load → faster BM25 queries (no-op
-  // on backends without it). Best-effort; never fails the build.
-  if (typeof backend.optimize === 'function') {
-    try { backend.optimize(); } catch { /* best-effort */ }
+  // Suspend WAL auto-checkpoint for the build (one checkpoint at the end instead
+  // of an encrypt-storm every ~1000 pages). ALWAYS restored in finally — a
+  // suspended autocheckpoint must never leak onto the shared connection.
+  if (typeof backend.beginBulk === 'function') { try { backend.beginBulk(); } catch { /* best-effort */ } }
+  try {
+    for (const src of SOURCES) {
+      if (src.paginate) {
+        // Keyset pagination over the id PK: each page is a BOUNDED SQLCipher scan,
+        // then flush + yield so the event loop is serviced — vs one ~300s block
+        // that freezes the app for the whole one-time build of a large vault.
+        const PAGE = 1000;
+        let lastId = '';
+        for (;;) {
+          let rows;
+          try {
+            const res = await db.rawQuery(src.pageSql, [userId, lastId, PAGE]);
+            rows = res?.results || [];
+          } catch { break; } // table absent / query failed → skip this source
+          if (rows.length === 0) break;
+          lastId = String(rows[rows.length - 1].id);
+          for (const row of rows) await processRow(src, row);
+          await flush(); // flush each bounded page + yield
+          if (rows.length < PAGE) break; // final (short) page
+        }
+      } else {
+        let rows;
+        try {
+          const res = await db.rawQuery(src.sql, [userId]);
+          rows = res?.results || [];
+        } catch { continue; } // table absent / query failed → skip this source
+        for (const row of rows) await processRow(src, row);
+        await flush(); // flush at source boundary (keeps batches kind-homogeneous)
+      }
+    }
+    // Compact FTS5 segments once after the full load → faster BM25 queries (no-op
+    // on backends without it). Best-effort; never fails the build.
+    if (typeof backend.optimize === 'function') {
+      try { backend.optimize(); } catch { /* best-effort */ }
+    }
+  } finally {
+    if (typeof backend.endBulk === 'function') { try { backend.endBulk(); } catch { /* best-effort */ } }
   }
   return { added, byKind, vectorsLoaded, vectorsFailed };
 }

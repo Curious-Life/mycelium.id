@@ -253,12 +253,30 @@ export function createSqliteBackend(deps = {}) {
     try { raw.prepare(`INSERT INTO fts_docs(fts_docs) VALUES('optimize')`).run(); } catch { /* best-effort */ }
   }
 
+  // Suspend WAL auto-checkpoint for the duration of a bulk build. Default
+  // wal_autocheckpoint=1000 fires a blocking checkpoint every ~1000 dirty pages;
+  // on SQLCipher each checkpoint RE-ENCRYPTS + HMACs every flushed page, so a
+  // multi-thousand-page build pays that storm repeatedly (and re-encrypts pages
+  // touched again by later FTS5 merges). Suspending it lets the WAL grow once and
+  // be flushed by a SINGLE checkpoint in endBulk(). NOT a durability change —
+  // synchronous is left untouched (a crash mid-build just rebuilds the derived
+  // index next boot). Best-effort.
+  function beginBulk() {
+    try { raw.pragma('wal_autocheckpoint = 0'); } catch { /* best-effort */ }
+  }
+  function endBulk() {
+    try { raw.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* best-effort */ }
+    try { raw.pragma('wal_autocheckpoint = 1000'); } catch { /* best-effort */ }
+  }
+
   return {
     add,
     upsert: add,
     bulkAdd,
     resetIndex,
     optimize,
+    beginBulk,
+    endBulk,
     query,
     async delete(filter) {
       const ids = (filter && Array.isArray(filter.ids)) ? filter.ids : [];
