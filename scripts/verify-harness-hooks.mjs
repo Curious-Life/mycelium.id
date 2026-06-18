@@ -11,6 +11,7 @@ import {
   createAgentHooks,
 } from '../src/agent/hooks.js';
 import { createAgentHarness } from '../src/agent/harness.js';
+import { hydrateHistoryBlock } from '../src/agent/history.js';
 
 // ── shared stubbed-Anthropic SSE fixtures (mirror verify-harness.mjs) ──
 const enc = new TextEncoder();
@@ -200,6 +201,27 @@ const CANARY = 'SENSITIVE-HOOK-XYZ';
   const C = 'SENSITIVE-HOOK-XYZ';
   const { events } = await runTurn({ beforeToolCall: () => ({ block: true, reason: 'x' }) }, { firstPass: aToolWith(C) });
   rec('K6 blocked-call events carry NO plaintext args (canary absent)', !JSON.stringify(events).includes(C));
+}
+
+// ── K7 compaction hooks fire in the over-budget path (observe · fail-OPEN) ──
+{
+  const big = Array.from({ length: 12 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: 'x'.repeat(2000) }));
+  const summarize = async () => 'SUMMARY';
+  let before = null, after = null;
+  const block = await hydrateHistoryBlock({
+    history: big, contextWindow: 200, maxOutputTokens: 20, summarize, conversationId: 'c1', userId: 'u1',
+    hooks: { beforeCompaction: (e) => { before = e; }, afterCompaction: (e) => { after = e; } },
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  rec('K7 beforeCompaction fired with {messages,contextWindow}', !!before && Array.isArray(before.messages) && before.contextWindow === 200);
+  rec('K7 afterCompaction fired with a summary + compacted', !!after && after.compacted === true && typeof after.summary === 'string' && after.summary.length > 0);
+  rec('K7 hydrateHistoryBlock still returned a preamble block', typeof block === 'string' && block.length > 0);
+
+  const block2 = await hydrateHistoryBlock({
+    history: big, contextWindow: 200, maxOutputTokens: 20, summarize, conversationId: 'c2', userId: 'u1',
+    hooks: { beforeCompaction: () => { throw new Error('b'); }, afterCompaction: () => { throw new Error('a'); } },
+  });
+  rec('K7 throwing compaction hooks → fail-OPEN (still returns a block)', typeof block2 === 'string' && block2.length > 0);
 }
 
 console.log('\n' + '='.repeat(64));
