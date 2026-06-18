@@ -36,6 +36,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { resolveInferenceConfig, resolveProviderChain } from '../inference/resolve.js';
 import { createInferenceRouter } from '../inference/router.js';
 import { resolveChatUrl } from '../inference/cloud.js';
+import { fetchProvider } from '../inference/base-url.js';
 import { createEgressAuditSink } from '../inference/egress.js';
 import { inferWithCascade } from '../inference/cascade.js';
 import { estimateTokens } from '../inference/token-budget.js';
@@ -312,7 +313,7 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
 
     let upstream;
     try {
-      upstream = await fetch(resolveChatUrl(cfg.baseUrl), { method: 'POST', headers, body: JSON.stringify({ ...body, model }) });
+      upstream = await fetchProvider(resolveChatUrl(cfg.baseUrl), { fetch, method: 'POST', headers, body: JSON.stringify({ ...body, model }) });
     } catch {
       throw new GatewayError('inference failed: provider unreachable', 502, 'upstream_error');
     }
