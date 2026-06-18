@@ -51,8 +51,8 @@ async function main() {
     // P2 — the fallback is the "not built" placeholder (the old single-file UI
     // was removed); it must direct the user at the canonical build, not pose as
     // a working app.
-    rec('P2. fallback shell is the placeholder (directs to npm run portal:build)',
-      html.includes('portal:build') && html.includes('portal-app'),
+    rec('P2. fallback shell is the inline placeholder (directs to npm run build:app)',
+      html.includes('build:app') && html.includes('portal-app'),
       `len=${html.length}`);
 
     // P3 — API not shadowed by the static mount

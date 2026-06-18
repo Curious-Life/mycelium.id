@@ -71,11 +71,22 @@ One command for a fresh clone:
 Source `preflight.sh`; call `check_tools` at the top (rustc for fetch-sidecars;
 node/npm/curl/rsync for build-app-bundle) so standalone runs also fail helpfully.
 
-### `src-tauri/tauri.conf.json`
-`frontendDist: "../portal"` → `"../portal-app/build"`. The bundle's
-`beforeBuildCommand` (build-app-bundle.sh) builds `portal-app/build` before Tauri
-validates frontendDist, so it exists in time; runtime is unaffected (window loads
-the server). A server-crash fallback now shows the real UI, not the old one.
+### Single source of truth (revised — supersedes the earlier "leave it" call)
+The operator's directive: the portal build must point at **the one place that
+works and is actively used** (`portal-app/build`); clean up every divergence.
+- `src-tauri/tauri.conf.json`: `frontendDist: "../portal"` → `"../portal-app/build"`.
+  `beforeBuildCommand` already builds it before `cargo tauri build` validates;
+  added **`beforeDevCommand: "node scripts/ensure-portal-built.mjs"`** so raw
+  `cargo tauri dev` also builds it first (frontendDist must exist for dev).
+- **Deleted the `portal/` directory entirely.** The "not built" placeholder is
+  now `PLACEHOLDER_HTML` inlined in `server-rest.js` (code, not a 2nd on-disk
+  UI). `resolvePortal` returns `{ built, spaFallback }`; the server serves
+  `portal-app/build` when built, else the inline placeholder (+ favicon from
+  `portal-app/static`). The ~25 `portalMode:'legacy'` gates now get the inline
+  placeholder — they test API/routes, not UI content.
+- **Security preserved:** `isPortalNav` rejects data paths after collapsing
+  duplicate slashes, so `//api/…` can't be answered with a 200 HTML shell that
+  masks the auth gate (verify:portal-auth case I — caught + fixed in review).
 
 ### Docs
 - `src-tauri/BUILD-MAC.md` + `README.md` + `docs/SETUP.md`: lead with

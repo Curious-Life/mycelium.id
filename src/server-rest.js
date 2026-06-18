@@ -60,36 +60,42 @@ import { setSessionKeys } from './account/session-keys.js';
 import { createVaultAuthMiddleware, csrfCookieMiddleware, isAuthorized, makePortalOwnerGate } from './http/require-vault-auth.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+// SINGLE SOURCE OF TRUTH: the one and only UI is the canonical SvelteKit app at
+// portal-app/build. There is no second UI directory. When the build is missing
+// (a fresh source checkout that skipped `npm run build:app` / `npm start`) we
+// serve the inline PLACEHOLDER_HTML below — code, not a divergent on-disk shell.
 const CANONICAL_BUILD = path.join(HERE, '..', 'portal-app', 'build');
-// The ONLY real UI is the canonical SvelteKit app (portal-app/build). `portal/`
-// is no longer a second UI — it's a minimal "not built yet" placeholder shell,
-// served only when the canonical build is missing (a fresh source checkout that
-// skipped `npm run portal:build`). The packaged desktop app always builds the
-// canonical UI, so end users never see the placeholder.
-const PLACEHOLDER_PORTAL = path.join(HERE, '..', 'portal');
+const PORTAL_FAVICON = path.join(HERE, '..', 'portal-app', 'static', 'favicon.svg');
+
+// "Not built" placeholder. No inline <script> (keeps the hardened CSP simple —
+// buildPortalCsp fails closed to script-src 'self'); meta-refresh reloads into
+// the real UI once `npm run build:app`/`portal:build` finishes.
+const PLACEHOLDER_HTML = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mycelium</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<meta http-equiv="refresh" content="5" />
+<style>:root{color-scheme:dark}body{background:#0A0A0C;color:#E8E8EC;display:grid;place-items:center;height:100vh;margin:0;font:15px/1.6 system-ui,-apple-system,sans-serif;text-align:center;padding:2rem}main{max-width:30rem}.sub{color:#E5B84C;font-size:.8rem;letter-spacing:.08em;text-transform:uppercase}h1{font-weight:600;margin:.25rem 0 1rem}p{color:#9898A3;margin:.5rem 0}code{background:#141417;border:1px solid #2A2A32;border-radius:6px;padding:.15rem .45rem;color:#E8E8EC;font:13px ui-monospace,Menlo,monospace}</style>
+</head><body><main>
+<div class="sub">Mycelium</div>
+<h1>The portal isn't built yet</h1>
+<p>The UI is the SvelteKit app in <code>portal-app/</code>. Build it (this page reloads automatically when it's ready):</p>
+<p><code>npm run build:app</code></p>
+<p style="font-size:.8rem;margin-top:1.5rem">The packaged desktop app builds this for you — you only see this in a fresh source checkout.</p>
+</main></body></html>`;
 
 /**
- * Resolve which portal directory to serve. Canonical (portal-app/build) when
- * built; otherwise the placeholder in portal/ (which tells the user to build).
- *
+ * Is the canonical UI (portal-app/build) available to serve?
  * mode: 'auto' (default) | 'canonical' | 'legacy'. 'legacy' forces the
  * placeholder (used by API/route tests that don't need the heavy SvelteKit
  * build). Resolved at call time so tests/CLI can pick a mode deterministically.
- * Returns { dir, spaFallback|null }.
+ * Returns { built, spaFallback }: spaFallback is the 200.html path when built.
  */
 function resolvePortal(mode = process.env.MYCELIUM_PORTAL || 'auto') {
-  const canonicalFallback = path.join(CANONICAL_BUILD, '200.html');
-  const canonicalBuilt = existsSync(canonicalFallback);
-  const useCanonical = mode === 'canonical' || (mode !== 'legacy' && canonicalBuilt);
-  if (useCanonical && canonicalBuilt) {
-    return { dir: CANONICAL_BUILD, spaFallback: canonicalFallback };
-  }
-  // Auto-fallback to the placeholder means the real UI isn't built — say so
-  // loudly (don't silently serve a shell that looks like a stale app).
-  if (mode !== 'legacy') {
-    console.warn('[mycelium] portal-app/build not found — serving the "not built" placeholder. Build the real UI: npm run portal:build');
-  }
-  return { dir: PLACEHOLDER_PORTAL, spaFallback: null };
+  const shell = path.join(CANONICAL_BUILD, '200.html');
+  const built = mode !== 'legacy' && mode !== 'placeholder' && existsSync(shell);
+  return { built, spaFallback: built ? shell : null };
 }
 
 /**
@@ -582,8 +588,11 @@ export async function startRestServer({
   // once at boot from the resolved shell. No HSTS: this origin is loopback HTTP
   // (HSTS is ignored there); caddy adds it for the public TLS host.
   {
-    const { dir: cspDir, spaFallback: cspShell } = resolvePortal(portalMode);
-    const portalCsp = buildPortalCsp(cspShell || path.join(cspDir, 'index.html'));
+    const { built: cspBuilt, spaFallback: cspShell } = resolvePortal(portalMode);
+    // Built → hash the SvelteKit shell's inline scripts. Not built → the inline
+    // placeholder has no inline <script>, so an unreadable path makes
+    // buildPortalCsp fail closed to `script-src 'self'` (correct + strict).
+    const portalCsp = buildPortalCsp(cspBuilt ? cspShell : '');
     app.use((req, res, next) => {
       res.setHeader('Content-Security-Policy', portalCsp);
       res.setHeader('X-Frame-Options', 'DENY');
@@ -644,26 +653,49 @@ export async function startRestServer({
   // client-side routes (/library, /mindscape, /setup, …) have no file on disk, so
   // fall back to 200.html for NAVIGATION requests only — GET, accepts html, not
   // under a data prefix, extensionless (a missing asset like /x.js still 404s).
-  const { dir: portalDir, spaFallback } = resolvePortal(portalMode);
-  app.use(express.static(portalDir, {
-    setHeaders(res, filePath) {
-      // The SPA shell (200.html / index.html) must NEVER be cached. SvelteKit's
-      // JS/CSS are content-hashed and immutable, but the shell references them by
-      // hash — a cached shell pins the OLD bundle, so the app "won't update" after
-      // a deploy until the WebView cache is manually cleared (cost a debugging
-      // round-trip 2026-06-15). no-store on the shell makes a reload always fetch
-      // the current bundle; hashed assets keep their default long cache.
-      if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-store');
-    },
-  }));
-  if (spaFallback) {
-    // /api, /ingest, /portal, /auth are data paths — never shadow them with the
-    // SPA shell (so unmatched data calls 404 cleanly instead of returning HTML).
-    // Exclude both `/api/…` and a bare `/api` (the `(?:\/|$)` guard).
-    app.get(/^\/(?!(?:api|ingest|portal|auth)(?:\/|$))(?:[^.]*)$/, (req, res, next) => {
-      if (req.method !== 'GET' || !req.accepts('html')) return next();
-      res.setHeader('Cache-Control', 'no-store'); // see static setHeaders above
+  const { built: portalBuilt, spaFallback } = resolvePortal(portalMode);
+  // Navigation matcher: GET, html-accepting, extensionless (so a missing asset
+  // like /x.js still 404s), not a data path. The regex's `(?!api…)` lookahead is
+  // bypassable by a leading double-slash (`//api/…`), so isPortalNav ALSO rejects
+  // data paths after collapsing duplicate slashes — otherwise an HTML 200 would
+  // mask the auth gate (verify:portal-auth case I). Shared by built + placeholder.
+  const NAV_ROUTE = /^\/(?!(?:api|ingest|portal|auth)(?:\/|$))(?:[^.]*)$/;
+  const DATA_PREFIX = /^\/(?:api|ingest|portal|auth)(?:\/|$)/;
+  const isPortalNav = (req) =>
+    req.method === 'GET' && req.accepts('html') &&
+    !DATA_PREFIX.test(req.path.replace(/\/{2,}/g, '/'));
+  if (portalBuilt) {
+    app.use(express.static(CANONICAL_BUILD, {
+      setHeaders(res, filePath) {
+        // The SPA shell (200.html) must NEVER be cached. SvelteKit's JS/CSS are
+        // content-hashed + immutable, but the shell references them by hash — a
+        // cached shell pins the OLD bundle, so the app "won't update" after a
+        // deploy until the WebView cache is cleared (cost a round-trip 2026-06-15).
+        if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-store');
+      },
+    }));
+    // Client-side routes (/library, /mindscape, /setup, …) have no file → SPA
+    // fallback to 200.html for NAVIGATION requests only. Data paths never shadowed.
+    app.get(NAV_ROUTE, (req, res, next) => {
+      if (!isPortalNav(req)) return next();
+      res.setHeader('Cache-Control', 'no-store');
       res.sendFile(spaFallback);
+    });
+  } else {
+    // Canonical UI not built → serve the inline "not built" placeholder (no
+    // second on-disk UI). Loud unless a test explicitly forced placeholder mode.
+    if (portalMode !== 'legacy' && portalMode !== 'placeholder') {
+      console.warn('[mycelium] portal-app/build not found — serving the "not built" placeholder. Build the real UI: npm run build:app');
+    }
+    // Favicon comes from portal-app/static (present in source even pre-build).
+    app.get('/favicon.svg', (req, res, next) => {
+      if (existsSync(PORTAL_FAVICON)) return res.type('image/svg+xml').sendFile(PORTAL_FAVICON);
+      next();
+    });
+    app.get(NAV_ROUTE, (req, res, next) => {
+      if (!isPortalNav(req)) return next();
+      res.setHeader('Cache-Control', 'no-store');
+      res.type('html').send(PLACEHOLDER_HTML);
     });
   }
 
