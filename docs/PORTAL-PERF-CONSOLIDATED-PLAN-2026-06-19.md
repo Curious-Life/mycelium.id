@@ -35,6 +35,16 @@ Shipped on `feat/portal-load-perf` (verified by reading the commits):
 
 ## 2. New root causes (verified) — owned by THIS plan
 
+### ⚠️ Empirical correction (2026-06-19, built + analyzed the real bundle)
+
+Before cutting, I built portal-app and analyzed the actual chunk graph — and it **refutes** the audit's bundle premise (S3 below):
+- **The entry graph (loaded before first paint) is only 81 KB across 20 chunks**, not 4.2 MB. SvelteKit already code-splits per route/component.
+- The **703 KB chunk is `three.js`** (`BufferGeometry`/`WebGLRenderer`), and it is **NOT in the entry** — it loads lazily only when Mindscape opens (`MindscapeView`/`MindscapeBackground` use `await import('three')`; `Mindscape3D` is itself dynamically imported).
+- **`globe.gl` and `leaflet` have ZERO imports** — dead `package.json` deps, not bundled at all (hygiene cleanup, not perf).
+- `marked` lives only in lazy-loaded views.
+
+**Therefore Step 2 (route-splitting) is UNNECESSARY and is dropped.** The bundle-delivery problem was purely the *serving* of those chunks (uncompressed + uncached), which Step 1 fixes: the 81 KB entry → ~25 KB brotli before first paint; the lazy `three` chunk (703 KB → ~148 KB brotli) now loads compressed + immutable-cached only when Mindscape opens. This is the "hard evidence over paper reasoning" discipline catching a wrong assumption (cf. the embedBacklog correction).
+
 ### Tier 0 — Serving layer (taxes every page; verified by own read)
 
 - **S1 — No compression, anywhere.** No `compression` / `express-static-gzip` / `shrink-ray` in `package.json` (confirmed `NONE`); zero `Content-Encoding` negotiation in [src/server-rest.js](../src/server-rest.js) or [src/server-http.js](../src/server-http.js). Consequences:
@@ -79,10 +89,10 @@ Each step is independently shippable, smoke-tested, and behind the auto-merge-on
 
 | # | Step | Tier | Why this order | Gate |
 |---|---|---|---|---|
-| **1** | **Serving: precompressed static + immutable cache headers + dynamic `compression`** (excl. auth) | 0 | Biggest perceived win, lowest risk, helps **every** page incl. already-done Library/Mindscape. Pure transport. | `verify:serving-perf` (new): asset served `.br` w/ `Content-Encoding` on `Accept-Encoding: br`; immutable header on hashed chunk; `no-store` preserved on shell; auth route NOT compressed |
-| **2** | **Route-split heavy libs** (`three`/`globe.gl`/`leaflet`/`marked` → dynamic import by route) | 0 | Shrinks the boot chunk so first paint is fast on every non-3D route. Build-time only. | bundle-size assertion: boot chunk < target; `three` absent from entry graph |
-| **3** | **Streams backend: drop `metadata` projection + cap/short-circuit the search scan + SWR cache** | 1 | Mirrors shipped Library fixes; cuts the dominant Streams cost. | `verify:streams-perf` (new): feed honors result cap without full 4×800 scan; `metadata` not selected; repeat open hits cache |
-| **4** | **Streams frontend: virtualize the river + skeleton render** | 1/2 | Bounds DOM + markdown work to the viewport; first paint immediate. | live smoke: scroll 500 items, stable DOM count |
+| **1** ✅ | **Serving: precompressed static + immutable cache headers + dynamic `compression`** (excl. auth) | 0 | Biggest perceived win, lowest risk, helps **every** page incl. already-done Library/Mindscape. Pure transport. | **DONE** `a7d5b80` — `verify:serving-perf` 8/8 GO |
+| **2** ❌ | ~~Route-split heavy libs~~ | 0 | **DROPPED** — bundle is already code-split (entry = 81 KB; `three` already lazy). See empirical correction above. | n/a |
+| **3** ✅ | **Streams backend: drop `metadata` projection** (+ search-scan cap / SWR = follow-up) | 1 | Cuts a per-row decrypt on every river/timeline open. | **DONE** `8ee6f0f` — `verify:streams-feed` 29/29 GO |
+| **4** ◐ | **Streams frontend: skeleton render** (✅ done) **+ virtualize the river** (pending) | 1/2 | Skeleton = instant first paint (done); virtualization bounds DOM (needs live scroll smoke). | skeleton: `aec7c07` svelte-check 0/0 + build ✓, live WKWebView pending |
 | **5** | **Frontend: skeleton-first render + client TTL/SWR cache layer** (all sections) | 2 | Makes every section click feel instant + revisits free. Generalize `docPreviews.ts`. | live smoke: section shows skeleton < 50 ms; revisit served from cache |
 | **6** | *(other workstream)* **P2d Mindscape payload slim + P3 scoped decrypt** | — | Owned by `feat/portal-load-perf`. EL1 resolves with P3. | their `verify:decrypt-scope` |
 
