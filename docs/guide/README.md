@@ -73,6 +73,6 @@ copy-pasteable, and verified against the running server.
 - **Website** — [mycelium.id](https://mycelium.id)
 - **Repository** — [`Curious-Life/mycelium.id`](https://github.com/Curious-Life/mycelium.id)
 - **License** — [AGPL-3.0](../../LICENSE). Free and open source, forever.
-- **Built by** — [Curious Life](https://curious.life)
+- **Built by** — [Curious Life](https://curiouslife.is)
 
 <p align="center"><sub>mycelium · your local mushroom 🍄</sub></p>
