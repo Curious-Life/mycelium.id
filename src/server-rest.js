@@ -400,6 +400,17 @@ export async function startRestServer({
   let dbHandle = null;
   let closeHandle = null;
   let booting = false;
+  // Why the vault didn't open, for transparent UX (else every failure looks like
+  // "not set up yet"). null = no failure. Classified so the UI can route to the
+  // right recovery (re-enter key vs. disable at-rest) instead of a dead-end setup.
+  let bootError = null;
+  const classifyBootError = (err) => {
+    const m = String(err?.message || err || '');
+    if (/KCV failed|wrong key|does not match/i.test(m)) return 'key_mismatch';
+    if (/at-rest|MYCELIUM_AT_REST|migration/i.test(m)) return 'at_rest_migration_failed';
+    return 'boot_failed';
+  };
+  const getBootError = () => bootError;
 
   async function completeBoot(extraKeys = {}) {
     if (vaultSubApp || booting) return;
@@ -560,6 +571,7 @@ export async function startRestServer({
       // portal's share grant/revoke + knowledge-mirror paths.
       const spaceSync = await buildSpaceSync({ db, userId: bootUserId });
       vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId }), channelSup, spaceSync });
+      bootError = null; // opened cleanly → clear any prior failure
     } finally {
       booting = false;
     }
@@ -575,7 +587,17 @@ export async function startRestServer({
     try {
       await completeBoot();
     } catch (err) {
-      console.error(`[mycelium] vault not opened — entering setup mode (${err?.message || err})`);
+      // Only a bootError if a vault FILE actually exists (else this is a genuine
+      // fresh "not created yet" — no keys present is expected, not a failure).
+      if (existsSync(effectiveKcvPath)) {
+        bootError = classifyBootError(err);
+        // Surface the CLASS to /account/status so the UI offers the right recovery;
+        // keep the raw reason out of the response (it can name key material) — log
+        // it for the operator only.
+        console.error(`[mycelium] vault not opened (${bootError}) — entering setup mode (${err?.message || err})`);
+      } else {
+        console.error(`[mycelium] no vault yet — entering setup mode (${err?.message || err})`);
+      }
     }
   }
   const resolvedUserId = userId || process.env.MYCELIUM_USER_ID || 'local-user';
@@ -614,6 +636,7 @@ export async function startRestServer({
   app.use('/api/v1/account', accountRouter({
     isInitialized: () => Boolean(vaultSubApp),
     completeBoot,
+    getBootError,
     kcvPath: effectiveKcvPath,
     lockFile: effectiveLockPath,
     dbPath: effectiveDbPath,
@@ -644,7 +667,19 @@ export async function startRestServer({
   app.use((req, res, next) => {
     if (vaultSubApp) return vaultSubApp(req, res, next);
     if (isVaultDataPath(req.path)) {
-      return res.status(503).json({ error: 'vault_not_initialized', message: 'Your vault is not set up yet.' });
+      // Distinguish "no vault yet" from "vault exists but couldn't open" so the UI
+      // doesn't dead-end a mis-keyed vault into the create-new-vault flow.
+      if (bootError) {
+        return res.status(503).json({
+          error: 'vault_locked', reason: bootError,
+          message: bootError === 'key_mismatch'
+            ? 'Your vault exists but the saved key can’t open it. Enter your recovery key, or restore from a backup.'
+            : bootError === 'at_rest_migration_failed'
+              ? 'Your vault couldn’t finish encrypting at rest and didn’t open. See recovery options.'
+              : 'Your vault exists but failed to open. See recovery options.',
+        });
+      }
+      return res.status(503).json({ error: 'vault_not_initialized', reason: 'not_created', message: 'Your vault is not set up yet.' });
     }
     return next();
   });

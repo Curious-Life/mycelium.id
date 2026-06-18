@@ -9,6 +9,10 @@
 	let mode = $state<Mode>('loading');
 	let busy = $state(false);
 	let error = $state<string | null>(null);
+	// Why the vault couldn't open (from /account/status): null | 'key_mismatch' |
+	// 'at_rest_migration_failed' | 'boot_failed'. Lets the restore screen explain
+	// itself instead of looking like a blank "paste a key" prompt.
+	let bootError = $state<string | null>(null);
 	let keychainAvailable = $state(true);
 
 	let recoveryKey = $state('');
@@ -49,12 +53,13 @@
 			if (res.ok) {
 				const s = await res.json();
 				keychainAvailable = s.keychainAvailable !== false;
+				bootError = s.bootError || null;
 				if (s.initialized) { enterVault(); return; }
 				if (s.locked) { window.location.assign('/unlock'); return; }
 				// Vault files are present but the Keychain can't open them (a hand-copied
-				// data dir, or right after a restore-from-backup): go straight to the
-				// recovery-key paste, which now succeeds because kcv.json is on disk.
-				if (s.needsRecoveryKey) { mode = 'restore'; return; }
+				// data dir, a key mismatch, or right after a restore-from-backup): go
+				// to the recovery-key paste, which succeeds because kcv.json is on disk.
+				if (s.needsRecoveryKey || bootError) { mode = 'restore'; return; }
 			}
 		} catch { /* show intro regardless */ }
 		mode = 'intro';
@@ -279,7 +284,7 @@
 			{:else if mode === 'restore'}
 				<div class="card-elevated p-8 space-y-6">
 					<div class="text-center">
-						<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Restore your vault</h2>
+						{#if bootError}<div class="rounded-lg border border-[#E5B84C]/40 bg-[#E5B84C]/10 p-3 mb-4 text-sm text-left text-[var(--color-text-secondary)] leading-relaxed">{#if bootError === "key_mismatch"}<strong class="text-[var(--color-text-primary)]">Your vault is here, but the saved key couldn’t open it.</strong> Usually it was re-keyed or copied from another setup. Paste your recovery key below — your data is safe.{:else if bootError === "at_rest_migration_failed"}<strong class="text-[var(--color-text-primary)]">Your vault didn’t finish encrypting at rest.</strong> Paste your recovery key to reopen it. A plaintext backup was kept, so nothing is lost.{:else}<strong class="text-[var(--color-text-primary)]">Your vault exists but couldn’t open on startup.</strong> Paste your recovery key to unlock it.{/if}</div>{/if}<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">{bootError ? "Unlock your vault" : "Restore your vault"}</h2>
 						<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
 							Paste the 64-character recovery key you saved when you first set up Mycelium.
 						</p>
