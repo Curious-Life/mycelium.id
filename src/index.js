@@ -10,8 +10,7 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
-import { resolveDbKeyHex, atRestEnabled } from './db/open.js';
-import { ensureVaultEncrypted } from './account/db-cipher-migrate.js';
+import { initVaultStorage } from './db/init.js';
 import { createIdentity, isValidHandle } from './identity/identity.js';
 import { readRemoteConfig } from './remote/config.js';
 import { buildDomains, collectTools, createMcpServer, TIER2_TOOLS, TOPOLOGY_NOT_READY_MESSAGE } from './mcp.js';
@@ -100,24 +99,16 @@ export async function boot({
     selfInstance: () => publicHost,
   };
 
-  // At-rest blindness (A′). resolveDbKeyHex returns a key when the vault is
-  // ALREADY encrypted (self-detected — so a normal GUI/Finder launch and the
-  // Claude-Code MCP servers open it keyed WITHOUT the env flag) OR when at-rest
-  // is opted in via MYCELIUM_AT_REST (to migrate a still-plaintext vault). Null
-  // for a plaintext vault with at-rest off → plaintext open, unchanged.
-  const dbKeyHex = resolveDbKeyHex(userHex, dbPath);
-  // The one-time encrypt-in-place MIGRATION runs ONLY when explicitly opted in
-  // (never auto-encrypt). Idempotent: no-op once encrypted / on a fresh vault
-  // (which getDb then BORNS encrypted via the keyed open). FAIL CLOSED: a
-  // migration error refuses a plaintext fallback (no half-migrated cleartext).
-  if (dbKeyHex && atRestEnabled()) {
-    try {
-      const r = ensureVaultEncrypted({ dbPath, dbKeyHex, log: (m) => console.error(m) });
-      if (r.migrated) console.error(`[mycelium] at-rest: encrypted ${r.tables} tables; plaintext backup kept at ${r.preCipherPath}`);
-    } catch (e) {
-      throw new Error(`at-rest encryption requested (MYCELIUM_AT_REST) but the migration failed — refusing a plaintext open: ${e.message}`);
-    }
-  }
+  // At-rest blindness (A′). initVaultStorage applies the schema (key-aware) and,
+  // when at-rest is opted in (MYCELIUM_AT_REST), migrates a still-plaintext vault
+  // to whole-file cipher — ALL under a cross-process lock so the several node
+  // processes the app spawns (server-rest, index.js --http, the stdio MCP server,
+  // pipeline children) can NEVER race on the one-time migration. It returns the
+  // key getDb opens with: set when the vault is encrypted (self-detected, so a
+  // Finder launch / MCP server opens it without the env flag) or at-rest is on;
+  // null for a plaintext vault with at-rest off → plaintext open, unchanged.
+  // FAIL CLOSED inside initVaultStorage: a migration error refuses a plaintext open.
+  const dbKeyHex = await initVaultStorage({ dbPath, userHex, log: (m) => console.error(m) });
   const { db, close } = getDb({ dbPath, userKey, systemKey, federationDeps, dbKeyHex });
   const { domains, deferred, searchHelpers, isTopologyReady } = buildDomains({ db, userId, embedder, identity });
   // Cold-start gating (Phase 4): Tier-2 readers return a uniform "not ready"
