@@ -39,6 +39,7 @@ import { matchStaticBearer } from './gateway/static-bearer.js';
 import { createPathThrottle } from './http/rate-limit.js';
 import { createFederationRouter } from './federation/router.js';
 import { readRemoteConfig, resolveMcpBearer } from './remote/config.js';
+import { isValidHandle } from './identity/identity.js';
 
 /**
  * Build the Express app (no listen). Returns { app, auth, baseURL, transports }.
@@ -154,6 +155,31 @@ export async function createHttpApp(opts = {}) {
   // /login is the OAuth-authorize login form — it ALSO checks the operator
   // password (signInEmail) and is relay-exposed, so throttle it too.
   app.use(createPathThrottle({ method: 'POST', path: '/login', max: 5, windowMs: 60_000 }));
+  // The portal SPA's password-only sign-in shim (see below) is relay-exposed and
+  // checks the operator password — throttle it on the same global bucket policy.
+  app.use(createPathThrottle({ method: 'POST', path: '/api/auth/operator-login', max: 5, windowMs: 60_000 }));
+
+  // Password-only operator sign-in for the portal SPA (the webview /login). The
+  // vault is single-user, so the SPA never asks for or sees the operator account's
+  // internal email — it POSTs just { password } and we inject the canonical
+  // operatorEmail SERVER-SIDE, then relay better-auth's Set-Cookie. signInEmail is
+  // called server-side (bypassing better-auth's HTTP Origin/CSRF guard), so we
+  // enforce a trusted-Origin check here (login-CSRF defense) + the throttle above.
+  // Mounted BEFORE the /api/auth/*splat catch-all so better-auth doesn't 404 it.
+  app.post('/api/auth/operator-login', express.json(), async (req, res) => {
+    const origin = req.headers.origin;
+    if (origin && origin !== baseURL) return res.status(403).json({ error: 'forbidden' });
+    const password = String(req.body?.password || '');
+    if (!password) return res.status(400).json({ error: 'password required' });
+    const email = readRemoteConfig().operatorEmail; // fixed internal identifier — never surfaced
+    try {
+      const r = await auth.api.signInEmail({ body: { email, password }, asResponse: true });
+      if (!r.ok) return res.status(401).json({ error: 'invalid password' });
+      const cookies = typeof r.headers.getSetCookie === 'function' ? r.headers.getSetCookie() : [r.headers.get('set-cookie')].filter(Boolean);
+      if (cookies.length) res.setHeader('set-cookie', cookies);
+      return res.status(200).json({ ok: true });
+    } catch { return res.status(401).json({ error: 'invalid password' }); }
+  });
 
   // better-auth owns everything under /api/auth/* (Express 5 NAMED splat).
   // Mounted BEFORE express.json() so better-auth parses its own bodies.
@@ -218,12 +244,19 @@ export async function createHttpApp(opts = {}) {
   // sign-in is called SERVER-SIDE (auth.api), which bypasses better-auth's
   // HTTP-layer Origin/CSRF check; we forward its Set-Cookie to the browser.
   const escHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  const loginPage = (qs, err, csrf = '') => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mycelium — Sign in</title><style>body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0c;color:#eaeaea;display:grid;place-items:center;min-height:100vh;margin:0}form{background:#15151a;padding:2rem;border-radius:14px;width:320px;border:1px solid #26262e}h1{font-size:1.05rem;margin:0 0 1.2rem;color:#c9a227;font-weight:600}input{width:100%;box-sizing:border-box;margin:.35rem 0;padding:.65rem;background:#0a0a0c;border:1px solid #26262e;border-radius:8px;color:#eaeaea}button{width:100%;margin-top:1rem;padding:.7rem;background:#c9a227;color:#0a0a0c;border:0;border-radius:8px;font-weight:700;cursor:pointer}.e{color:#f87171;font-size:.85rem;margin:.3rem 0}.s{color:#8a8a99;font-size:.72rem;margin-top:1rem;text-align:center}</style></head><body><form method="POST" action="/login?${escHtml(qs)}"><h1>Connect to your vault</h1>${err ? `<div class="e">${escHtml(err)}</div>` : ''}<input type="hidden" name="_csrf" value="${escHtml(csrf)}"><input name="email" type="email" placeholder="email" value="operator@mycelium.local" autocomplete="username"><input name="password" type="password" placeholder="password" autocomplete="current-password" autofocus required><button type="submit">Sign in</button><div class="s">Authorizing an MCP client to reach this vault.</div></form></body></html>`;
+  // The vault's tag (first label of publicHost), or null when no remote handle is
+  // configured → the form brands generically. This is the IDENTITY the user sees;
+  // the single operator account's internal email is never asked for or shown.
+  const currentHandle = () => { const h = (readRemoteConfig().publicHost || '').split('.')[0]; return isValidHandle(h) ? h : null; };
+  const loginPage = (qs, err, csrf = '', handle = null) => {
+    const ident = handle ? `@${escHtml(handle)}` : 'your vault';
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mycelium — Sign in</title><style>body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0c;color:#eaeaea;display:grid;place-items:center;min-height:100vh;margin:0}form{background:#15151a;padding:2rem;border-radius:14px;width:320px;border:1px solid #26262e}h1{font-size:1.05rem;margin:0 0 .4rem;color:#c9a227;font-weight:600}.id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#8a8a99;font-size:.85rem;margin:0 0 1.2rem}input{width:100%;box-sizing:border-box;margin:.35rem 0;padding:.65rem;background:#0a0a0c;border:1px solid #26262e;border-radius:8px;color:#eaeaea}button{width:100%;margin-top:1rem;padding:.7rem;background:#c9a227;color:#0a0a0c;border:0;border-radius:8px;font-weight:700;cursor:pointer}.e{color:#f87171;font-size:.85rem;margin:.3rem 0}.s{color:#8a8a99;font-size:.72rem;margin-top:1rem;text-align:center}</style></head><body><form method="POST" action="/login?${escHtml(qs)}"><h1>Connect to your vault</h1><div class="id">${ident}</div>${err ? `<div class="e">${escHtml(err)}</div>` : ''}<input type="hidden" name="_csrf" value="${escHtml(csrf)}"><input name="password" type="password" placeholder="operator password" autocomplete="current-password" autofocus required><button type="submit">Sign in</button><div class="s">Authorizing an MCP client to reach this vault.</div></form></body></html>`;
+  };
 
   app.get('/login', (req, res) => {
     const qs = req.originalUrl.split('?').slice(1).join('?') || '';
     const csrf = issueLoginCsrf(req, res);
-    res.type('html').send(loginPage(qs, null, csrf));
+    res.type('html').send(loginPage(qs, null, csrf, currentHandle()));
   });
   app.post('/login', express.urlencoded({ extended: false }), async (req, res) => {
     const qs = req.originalUrl.split('?').slice(1).join('?') || '';
@@ -232,20 +265,23 @@ export async function createHttpApp(opts = {}) {
     // credentials. A failed check re-renders with a fresh token (no info leak).
     const csrfCheck = verifyLoginCsrf(req);
     if (!csrfCheck.ok) {
-      res.status(403).type('html').send(loginPage(qs, 'Your session expired — please try again.', issueLoginCsrf(req, res)));
+      res.status(403).type('html').send(loginPage(qs, 'Your session expired — please try again.', issueLoginCsrf(req, res), currentHandle()));
       return;
     }
-    const email = String(req.body?.email || '').trim();
+    // Single-user vault: the identity is the seeded operator account; the user
+    // authenticates with their password only. We never ask for or surface the
+    // internal account email — fill the canonical operatorEmail server-side.
+    const email = readRemoteConfig().operatorEmail;
     const password = String(req.body?.password || '');
-    if (!email || !password) { res.status(400).type('html').send(loginPage(qs, 'Email and password required', issueLoginCsrf(req, res))); return; }
+    if (!password) { res.status(400).type('html').send(loginPage(qs, 'Password required', issueLoginCsrf(req, res), currentHandle())); return; }
     try {
       const r = await auth.api.signInEmail({ body: { email, password }, asResponse: true });
-      if (!r.ok) { res.status(401).type('html').send(loginPage(qs, 'Invalid email or password', issueLoginCsrf(req, res))); return; }
+      if (!r.ok) { res.status(401).type('html').send(loginPage(qs, 'Invalid password', issueLoginCsrf(req, res), currentHandle())); return; }
       const cookies = typeof r.headers.getSetCookie === 'function' ? r.headers.getSetCookie() : [r.headers.get('set-cookie')].filter(Boolean);
       if (cookies.length) res.setHeader('set-cookie', cookies);
       res.redirect(302, `/api/auth/mcp/authorize?${qs}`);
     } catch {
-      res.status(401).type('html').send(loginPage(qs, 'Invalid email or password', issueLoginCsrf(req, res)));
+      res.status(401).type('html').send(loginPage(qs, 'Invalid password', issueLoginCsrf(req, res), currentHandle()));
     }
   });
 

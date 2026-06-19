@@ -42,8 +42,8 @@ Leave it running. It prints your **Public URL** and the **Connector URL** (`…/
 ### 4. Add the connector in Claude (web)
 - claude.ai → **Settings → Connectors → Add custom connector**.
 - URL = `https://mycelium.YOURDOMAIN.com/mcp`.
-- It runs OAuth: sign in with your operator email (default `operator@mycelium.local`,
-  shown in the panel) + the password from step 3 → **Approve**.
+- It runs OAuth: the sign-in page shows your vault's `@handle` and asks for the
+  operator password from step 3 (single-user — no email to enter) → **Approve**.
 - The 31 Mycelium tools appear.
 
 ### 5. From your phone

@@ -6,7 +6,6 @@
 	let mode: 'loading' | 'operator' | 'enroll' = $state('loading');
 	let loading = $state(false);
 	let error = $state<string | null>(null);
-	let emailInput = $state('operator@mycelium.local');
 	let passwordInput = $state('');
 	let userHandle = $state<string | null>(null);
 	let telegramAvailable = $state(false);
@@ -231,27 +230,27 @@
 
 
 
-	// Operator-password sign-in (V1 self-hosted, reached over the relay). POSTs to
-	// better-auth's /api/auth/sign-in/email — same-origin to this webview, routed
-	// to the :4711 server by the relay Caddy. On success better-auth sets the
-	// HttpOnly session cookie; the app's /auth/session check then passes, so we
-	// reload into the app (which re-runs that check, now authenticated).
+	// Operator-password sign-in (V1 self-hosted, reached over the relay). The vault
+	// is single-user, so there is no email to ask for — we POST only the password to
+	// the server-side shim /api/auth/operator-login (same-origin to this webview,
+	// relay-routed to :4711), which injects the canonical operator identity and calls
+	// better-auth server-side. On success better-auth sets the HttpOnly session
+	// cookie; the app's /auth/session check then passes, so we reload into the app.
 	async function handleOperatorLogin() {
-		const email = emailInput.trim();
 		const password = passwordInput;
-		if (!email || !password) { error = 'Enter your email and operator password'; return; }
+		if (!password) { error = 'Enter your operator password'; return; }
 		loading = true;
 		error = null;
 		try {
-			const res = await fetch('/api/auth/sign-in/email', {
+			const res = await fetch('/api/auth/operator-login', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				credentials: 'same-origin',
-				body: JSON.stringify({ email, password }),
+				body: JSON.stringify({ password }),
 			});
 			if (!res.ok) {
 				const data = await res.json().catch(() => ({}));
-				throw new Error(data?.message || data?.error?.message || 'Sign-in failed — check your password');
+				throw new Error(data?.error || data?.message || 'Sign-in failed — check your password');
 			}
 			// Signed in. Offer Face ID enrolment for next time (skippable).
 			mode = 'enroll';
@@ -370,13 +369,6 @@
 						</div>
 
 						<form class="space-y-3" onsubmit={(e) => { e.preventDefault(); handleOperatorLogin(); }}>
-							<input
-								bind:value={emailInput}
-								type="email"
-								placeholder="email"
-								autocomplete="username"
-								class="input w-full text-sm"
-							/>
 							<input
 								bind:value={passwordInput}
 								type="password"
