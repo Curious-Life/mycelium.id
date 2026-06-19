@@ -21,6 +21,7 @@
 	import Spark from '$lib/curious/Spark.svelte';
 	import TimeSeries from '$lib/curious/TimeSeries.svelte';
 	import TerritoryRiver from '$lib/curious/TerritoryRiver.svelte';
+	import WeeklyTopTerritories from '$lib/curious/WeeklyTopTerritories.svelte';
 	import { METRIC_FAMILIES, RIGOR_LABEL, RIGOR_ACCENT, RIGOR_BLURB, type Rigor } from '$lib/curious/metricsCatalog';
 
 	type Any = Record<string, any>;
@@ -43,6 +44,7 @@
 	let criticality = $state<Any[]>([]); // per-level latest rows
 	let events = $state<Any[]>([]);
 	let river = $state<Any | null>(null); // territory-river: anchor bands + active count over time
+	let hoverDate = $state<string | null>(null); // shared hovered week across the river-section graphs
 	const anchorCountVals = $derived((river?.anchor_count ?? []).map((p: Any) => (p.count == null ? null : Number(p.count))));
 	const anchorCountLabels = $derived((river?.anchor_count ?? []).map((p: Any) => (p.end ?? '').slice(0, 10)));
 	const hasAnchorCount = $derived(anchorCountVals.some((v: number | null) => v != null));
@@ -377,7 +379,7 @@
 		{#if !active}
 			<!-- ── OVERVIEW ─────────────────────────────────────────────────── -->
 			<header class="hero">
-				<h1 class="title">Your mind, quantified.</h1>
+				<p class="page-label">Curious Life</p>
 			</header>
 
 			{#if loading}
@@ -415,7 +417,13 @@
 						<h2 class="group-head">How your topics move over time</h2>
 						<span class="river-note">territory level · drawn from activation counts, not Fisher</span>
 					</div>
-					<TerritoryRiver data={river} />
+					<TerritoryRiver data={river} bind:hoverDate />
+					{#if river?.weekly_top?.length}
+						<div class="anchor-count">
+							<div class="ac-head"><span class="ac-title">Week by week — your top topics</span><span class="river-note">message volume split by each week's top 3 · hover for names</span></div>
+							<WeeklyTopTerritories data={river} bind:hoverDate />
+						</div>
+					{/if}
 					{#if hasAnchorCount}
 						<div class="anchor-count">
 							<div class="ac-head"><span class="ac-title">Anchor topics over time</span><span class="river-note">your stable core — count of persistent topics</span></div>
@@ -982,8 +990,8 @@
 
 	.inner { position: relative; z-index: 1; max-width: 64rem; margin: 0 auto; padding: clamp(2rem, 5vh, 3.5rem) clamp(1.1rem, 4vw, 2.5rem) 4rem; }
 
-	.hero { text-align: center; max-width: 40rem; margin: 0 auto clamp(1.6rem, 3vh, 2.4rem); }
-	.title { font-size: clamp(1.9rem, 4.5vw, 3rem); line-height: 1.06; letter-spacing: -0.025em; font-weight: 600; background: linear-gradient(112deg, var(--color-text-emphasis) 22%, var(--color-accent-aurum) 70%, var(--color-accent-amethyst) 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+	.hero { margin: 0 0 0.9rem; }
+	.page-label { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--color-text-tertiary); }
 
 	/* ── Layer 1: summary band + glance ── */
 	.summary-band { border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: linear-gradient(150deg, rgb(var(--color-accent-rgb) / 0.08), var(--color-surface) 70%); padding: clamp(1rem, 2.5vw, 1.5rem) clamp(1.1rem, 3vw, 1.7rem); margin-bottom: 1rem; }

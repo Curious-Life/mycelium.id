@@ -9,7 +9,7 @@
 	// Built from robust counts/shares only — does NOT lean on Fisher velocity.
 	// Hand-rolled SVG (no WebGL / no chart lib) for WKWebView safety.
 	type Any = Record<string, any>;
-	let { data = null }: { data: Any | null } = $props();
+	let { data = null, hoverDate = $bindable<string | null>(null) }: { data: Any | null; hoverDate?: string | null } = $props();
 
 	const ACCENTS = [
 		'var(--color-accent-jade)', 'var(--color-accent)', 'var(--color-accent-amethyst)',
@@ -28,9 +28,8 @@
 	let showCount = $state(true);
 	let showText = $state(false);
 	let showPath = $state(false);
-	let hoverIdx = $state<number | null>(null);
-	let hoverX = $state(0);
-	let hoverY = $state(0);
+	// hoverIdx derives from the shared hoverDate (defined after dateIndex) so the
+	// cursor stays in sync with the other graphs on the page.
 
 	const weeks = $derived<Any[]>(data?.weeks ?? []);
 	const anchors = $derived<Any[]>(data?.anchors ?? []);
@@ -82,6 +81,7 @@
 		weeks.forEach((w, i) => { m[w.end] = i; });
 		return m;
 	});
+	const hoverIdx = $derived(hoverDate != null && dateIndex[hoverDate] != null ? dateIndex[hoverDate] : null);
 	function noveltyLine(series: Any[]): string {
 		if (!series?.length) return '';
 		const pts: string[] = [];
@@ -110,10 +110,8 @@
 	// Hover-to-inspect: map cursor x to a week index; build a small per-week readout.
 	function onMove(e: PointerEvent) {
 		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-		const px = e.clientX - rect.left;
-		const frac = Math.max(0, Math.min(1, px / (rect.width || 1)));
-		hoverIdx = Math.round(frac * (n - 1));
-		hoverX = px; hoverY = e.clientY - rect.top;
+		const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / (rect.width || 1)));
+		hoverDate = weeks[Math.round(frac * (n - 1))]?.end ?? null;
 	}
 	const hoverWeek = $derived(hoverIdx != null && weeks[hoverIdx] ? weeks[hoverIdx] : null);
 	const hoverTop = $derived.by(() => {
@@ -141,7 +139,7 @@
 		</div>
 
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<div class="plot" onpointermove={onMove} onpointerleave={() => (hoverIdx = null)}>
+		<div class="plot" onpointermove={onMove} onpointerleave={() => (hoverDate = null)}>
 			<svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" role="img" aria-label="Territory activation over time, with active-territory count and novelty overlays">
 				{#each anchors as a, b}
 					<path d={bandPath(b)} fill={ACCENTS[b % ACCENTS.length]} fill-opacity={bandOpacity(a)} stroke="none" />
@@ -168,7 +166,7 @@
 			</svg>
 
 			{#if hoverWeek}
-				<div class="tip" style="left:{hoverX}px; top:{hoverY}px;">
+				<div class="tip" style="left:{Math.min(88, (hoverIdx! / Math.max(1, n - 1)) * 100)}%;">
 					<div class="tip-h">{hoverWeek.end} · {hoverWeek.active_count ?? '—'} active</div>
 					{#each hoverTop as t}
 						<div class="tip-row"><i style="background:{t.color}"></i><span class="tip-n">{t.name}</span><span class="tip-v">{Math.round(t.share * 100)}%</span></div>
@@ -214,7 +212,7 @@
 	.toggles button i.dash { border-radius: 0; height: 0; border-top: 2px dashed; width: 12px; }
 	.toggles button i.dash.coral { border-color: var(--color-accent-coral); }
 	.toggles button i.dash.amethyst { border-color: var(--color-accent-amethyst); }
-	.tip { position: absolute; transform: translate(12px, -50%); pointer-events: none; background: var(--color-elevated); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 0.5rem 0.6rem; font-size: 0.72rem; min-width: 11rem; max-width: 16rem; box-shadow: 0 8px 24px rgb(0 0 0 / 0.35); z-index: 2; }
+	.tip { position: absolute; top: 0; transform: translateX(12px); pointer-events: none; background: var(--color-elevated); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 0.5rem 0.6rem; font-size: 0.72rem; min-width: 11rem; max-width: 16rem; box-shadow: 0 8px 24px rgb(0 0 0 / 0.35); z-index: 2; }
 	.tip-h { color: var(--color-text-emphasis); font-weight: 600; margin-bottom: 0.35rem; }
 	.tip-row { display: flex; align-items: center; gap: 0.4rem; padding: 0.1rem 0; }
 	.tip-row i { width: 8px; height: 8px; border-radius: 2px; flex: none; }

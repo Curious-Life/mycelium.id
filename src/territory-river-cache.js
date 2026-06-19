@@ -34,7 +34,7 @@ const _inFlight = new Map(); // userId -> { key, promise }
 // Payload-shape version. Bump whenever the river payload SHAPE changes (not its
 // data) so stale persisted/in-process caches from an older code version are
 // invalidated — the data-only probe below can't see code changes. v2: anchor_count.
-const RIVER_SCHEMA = 'v2-anchorcount';
+const RIVER_SCHEMA = 'v3-weeklytop';
 
 /**
  * Cheap staleness probe. Reads only structural (non-encrypted) columns —
