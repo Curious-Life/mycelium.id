@@ -103,7 +103,10 @@ ensure_node(){
 # ── 2. Relocatable Python + all wheels (cached; re-pip only if reqs change) ────
 ensure_python(){
   local reqhash
-  reqhash="$(cat "$REPO/pipeline/requirements.txt" "$REPO/pipeline/requirements-embed.txt" | shasum -a 256 | cut -d' ' -f1)"
+  # Cache key = the hash-locked file (the single source of truth for bundled
+  # wheels). requirements.txt/requirements-embed.txt feed pip-compile but are not
+  # installed directly any more — see the --require-hashes install below.
+  reqhash="$(shasum -a 256 "$REPO/pipeline/requirements.lock.txt" | cut -d' ' -f1)"
   if [ -x "$RT/python/bin/python3" ] && [ "$(cat "$RT/python/.deps-hash" 2>/dev/null || true)" = "$reqhash" ]; then
     log "python: cached (deps current)"; return
   fi
@@ -111,8 +114,13 @@ ensure_python(){
   local tgz="$CACHE/pbs-${PY_VER}-${PBS_TAG}-${PBS_ARCH}.tar.gz"
   [ -f "$tgz" ] || curl -fsSL "$PBS_URL" -o "$tgz"
   rm -rf "$RT/python"; tar -xzf "$tgz" -C "$RT"   # extracts ./python/
+  # --require-hashes: install ONLY the pinned, hash-locked wheels (supply-chain
+  # integrity — a tampered/yanked release on PyPI fails the hash check and aborts
+  # the build rather than silently shipping). Regenerate the lock with:
+  #   pip-compile --generate-hashes --strip-extras -o pipeline/requirements.lock.txt \
+  #     pipeline/requirements.txt pipeline/requirements-embed.txt   # run on arm64
   "$RT/python/bin/python3" -m pip install --quiet --disable-pip-version-check \
-     -r "$REPO/pipeline/requirements.txt" -r "$REPO/pipeline/requirements-embed.txt"
+     --require-hashes -r "$REPO/pipeline/requirements.lock.txt"
   echo "$reqhash" > "$RT/python/.deps-hash"
   log "python: $("$RT/python/bin/python3" --version) — $(du -sh "$RT/python" | cut -f1)"
 }

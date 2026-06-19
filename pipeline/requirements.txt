@@ -43,8 +43,15 @@ psutil>=5.9              # optional memory reporting in cluster.py
 
 # Python-side vault crypto (crypto_local.py: HKDF→AES-KW→AES-256-GCM) for the
 # local clustering pipeline (replaces the Worker's JS encryption).
-# Cap <45: cryptography 45+ dropped Intel-mac wheels (49 ships arm64-only); 44.x
-# still publishes macosx_10_9_universal2 (arm64+x86_64), so the x86_64 bundle
-# installs from a wheel — no Rust/OpenSSL source build on the Intel runner.
-# Verified on PyPI 2026-06-17. See docs/DESIGN-macos-signed-distribution-2026-06-17.md.
-cryptography>=42,<45
+# Floor >=48.0.1 (SECURITY): 44.x ships a vulnerable statically-linked OpenSSL
+# (GHSA-537c-gmf6-5ccf) plus CVE-2026-26007 (EC subgroup-order validation →
+# ECDSA forgery / ECDH key leak on SECT curves) and PYSEC-2026-35 (name-constraint
+# bypass); all three fixes land above the old <45 cap. 48.0.0 is still vulnerable
+# to GHSA-537c, so the floor is >=48.0.1.
+# Cap <49: 48.0.1 still publishes macosx_10_9_universal2 (cp39-abi3) wheels, so
+# BOTH the arm64 and x86_64 bundles install from a wheel — no Rust/OpenSSL source
+# build on the Intel runner. cryptography 49.x dropped Intel/universal2 wheels
+# (arm64-only), which would force a source build on x86_64; revisit the cap if the
+# Intel bundle is retired. 48.0.1 clears all four CVEs (pip-audit verified).
+# Verified on PyPI 2026-06-19. See docs/DESIGN-macos-signed-distribution-2026-06-17.md.
+cryptography>=48.0.1,<49
