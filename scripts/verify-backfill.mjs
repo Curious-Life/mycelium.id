@@ -81,6 +81,16 @@ async function main() {
   try { await backfillColumn(db._sqlite ?? db, { table: 'secrets', column: 'value', codec: { kind: 'content' }, masterKey }); } catch { refused = true; }
   rec('5 SYSTEM_KEY table (secrets) is refused', refused);
 
+  // ── composite-PK / no-`id` table paginates on rowid (cognitive_anchor_vectors shape) ──
+  // The cursor must work for an INTEGER rowid pk, not just a TEXT id (a fixed-'' start
+  // would select 0 rows: `rowid > ''` is always false in SQLite).
+  db.exec(`CREATE TABLE anchors(construct TEXT, anchor_version TEXT, vec TEXT, PRIMARY KEY(construct, anchor_version))`);
+  const ains = db.prepare(`INSERT INTO anchors(construct, anchor_version, vec) VALUES (?,?,?)`);
+  for (const c of ['insight', 'reflection', 'affect']) ains.run(c, 'v1', await encryptVector(vsample, 'personal', masterKey));
+  const an = await backfillColumn(db._sqlite ?? db, { table: 'anchors', column: 'vec', codec: { kind: 'vector', dim: DIM }, masterKey, pk: 'rowid', batch: 2 });
+  rec('7a composite-PK table backfills via rowid (3 converted across pages)', an.converted === 3 && an.failed === 0, `converted=${an.converted} scanned=${an.scanned} failed=${an.failed}`);
+  rec('7b composite-PK table: 0 envelopes remain', countRemainingEnvelopes(db._sqlite ?? db, 'anchors', 'vec') === 0);
+
   db.close();
   rec('6 vault file is ciphertext at rest (no SQLite magic header)', !header16(dbPath).equals(magic));
   rmSync(dir, { recursive: true, force: true });

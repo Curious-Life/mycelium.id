@@ -21,7 +21,9 @@ const BACKFILL_TARGETS = {
   'realms.embedding_768': { table: 'realms', column: 'embedding_768', codec: { kind: 'vector', dim: 768 } },
   'semantic_themes.embedding_768': { table: 'semantic_themes', column: 'embedding_768', codec: { kind: 'vector', dim: 768 } },
   // anchor_vector — compute-anchors.py now writes raw via the bridge blob param.
-  'cognitive_anchor_vectors.anchor_vector': { table: 'cognitive_anchor_vectors', column: 'anchor_vector', codec: { kind: 'vector', dim: 768 } },
+  // cognitive_anchor_vectors has a COMPOSITE primary key (construct, anchor_version)
+  // and no `id` column, so the backfill paginates on the implicit `rowid`.
+  'cognitive_anchor_vectors.anchor_vector': { table: 'cognitive_anchor_vectors', column: 'anchor_vector', codec: { kind: 'vector', dim: 768 }, pk: 'rowid' },
   // NOTE: person_claims.embedding_768 is intentionally OMITTED — its writer is
   // caller-supplied and the column is reserved/NULL today (src/claims/discovery.js);
   // migrating it without a flipped writer or active consumer adds risk for no gain.

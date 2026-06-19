@@ -316,7 +316,7 @@ export function startBackfillJob({ db, dbPath, columns } = {}) {
       const masterKey = await getMasterKey();
       for (const c of columns) {
         state.stageLabel = `${c.table}.${c.column}`;
-        await backfillColumn(rawDb, { table: c.table, column: c.column, codec: c.codec, masterKey });
+        await backfillColumn(rawDb, { table: c.table, column: c.column, codec: c.codec, masterKey, ...(c.pk ? { pk: c.pk } : {}) });
         state.step += 1;
       }
 
