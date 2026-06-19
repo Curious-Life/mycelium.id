@@ -390,8 +390,8 @@
 							</button>
 						</form>
 
-						<!-- Passkey / Face ID — for returning users who enrolled one. If
-						     none exists the call fails gracefully → use the password. -->
+						<!-- Passkey (Touch ID / Face ID / security key) — for returning users
+						     who enrolled one. If none exists the call fails gracefully → password. -->
 						<div class="pt-4 border-t border-[var(--color-border)]">
 							<button
 								onclick={handleV1PasskeyLogin}
@@ -437,13 +437,15 @@
 				</div>
 
 			{:else if mode === 'enroll'}
-				<!-- Post-login: offer Face ID / passkey enrolment for next time. -->
+				<!-- Post-login: offer passkey enrolment for next time. Platform-neutral
+				     copy — the authenticator is Touch ID on a Mac, Face ID on iPhone,
+				     Windows Hello, or a security key. -->
 				<div class="card-elevated p-8">
 					<div class="space-y-6">
 						<div class="text-center">
-							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Enable Face ID?</h2>
+							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Set up a passkey?</h2>
 							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
-								Sign in faster next time with a passkey (Face ID / fingerprint) on this device. Your password still works as a backup.
+								Sign in faster next time with a passkey — Touch ID, Face ID, or a security key on this device. Your password still works as a backup.
 							</p>
 						</div>
 						<button
@@ -455,7 +457,7 @@
 								<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
 								<span>Setting up…</span>
 							{:else}
-								<span>Enable Face ID</span>
+								<span>Set up passkey</span>
 							{/if}
 						</button>
 						<button
