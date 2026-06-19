@@ -19,6 +19,14 @@ export function atRestEnabled() {
   return ['1', 'true', 'yes', 'on'].includes(String(process.env.MYCELIUM_AT_REST || '').toLowerCase());
 }
 
+// NOTE: at-rest default-on is wired at the REAL launch entry point (src/index.js main
+// guard sets MYCELIUM_AT_REST), NOT by a path predicate here. A path/MYCELIUM_DB-based
+// "is this the canonical vault" check was tried and removed — the ~104 verify gates and
+// the pipeline subprocesses (compute-*.js → import boot) set MYCELIUM_DB to a temp
+// fixture, so the fixture matched "canonical" and got born-encrypted (broke 29 gates).
+// Entry-point gating is the only signal that distinguishes the real server launch from
+// a library importer. @see src/index.js, docs/PRE-FREEZE-SECURITY-DESIGN-2026-06-19.md.
+
 /** True iff the vault FILE at dbPath is already whole-file encrypted (no plaintext
  *  SQLite magic header). Self-detection so any launcher opens it keyed. */
 export function vaultIsEncrypted(dbPath) {

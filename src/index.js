@@ -11,7 +11,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
 import { initVaultStorage } from './db/init.js';
-import { resolveDbKeyHex } from './db/open.js';
+import { resolveDbKeyHex, atRestEnabled } from './db/open.js';
 import { purgePlaintextBackup } from './account/db-cipher-migrate.js';
 import path from 'node:path';
 import { createIdentity, isValidHandle } from './identity/identity.js';
@@ -118,9 +118,29 @@ export async function boot({
   // Finder launch / MCP server opens it without the env flag) or at-rest is on;
   // null for a plaintext vault with at-rest off → plaintext open, unchanged.
   // FAIL CLOSED inside initVaultStorage: a migration error refuses a plaintext open.
+  //
+  // AT-REST DEFAULT-ON IS WIRED AT THE ENTRY POINT, NOT HERE. The SQLCipher Stage B/C
+  // collapse removed per-field content encryption, so whole-file SQLCipher is now the
+  // ONLY at-rest defense — and the documented self-host launch (`node src/index.js` /
+  // `npm start`, connect.md) + `cargo tauri dev` carry no MYCELIUM_AT_REST. The real
+  // launch opts in from the `import.meta.url === argv1` main guard below (the packaged
+  // app already sets the flag). It MUST NOT be done here: boot() is called as a library
+  // by the ~104 verify gates AND the pipeline subprocesses (compute-*.js → import boot),
+  // many of which set MYCELIUM_DB to a temp fixture — keying off the path/MYCELIUM_DB
+  // would born-encrypt those plaintext fixtures (it did: it broke verify:vitality + 28
+  // other gates). Entry-point gating keeps Design D5 intact: importers never trip it.
   const dbKeyHex = initStorage
     ? await initVaultStorage({ dbPath, userHex, log: (m) => console.error(m) })
     : resolveDbKeyHex(userHex, dbPath); // open-only (e.g. public server): no schema apply, fail-closed
+
+  // FAIL CLOSED (belt to the default-on suspenders): once at-rest is enabled — the real
+  // launch sets it below, the packaged app sets it, or the vault self-detects as already
+  // encrypted — the vault must NEVER open UNKEYED, since content carries no field
+  // envelope after the collapse. Refuse rather than open plaintext / fail obscurely.
+  // (Plaintext test fixtures with at-rest off: atRestEnabled()=false → unaffected.)
+  if (atRestEnabled() && !dbKeyHex) {
+    throw new Error('REFUSE: at-rest is enabled but the vault would open UNKEYED — content is not field-encrypted after the SQLCipher collapse, so whole-file at-rest (USER_MASTER → dbKey) is required. Set USER_MASTER or derive the DB key.');
+  }
   const { db, close } = getDb({ dbPath, userKey, systemKey, federationDeps, dbKeyHex });
   // Stage 0 (SQLCipher-mandatory): the at-rest migration leaves a full PLAINTEXT
   // copy at <db>.pre-cipher-<ts>. Once the REAL vault is open + keyed, remove it —
@@ -186,6 +206,15 @@ async function startPublic() {
 
 // Run only when invoked directly (not when imported by a verifier).
 if (import.meta.url === `file://${process.argv[1]}`) {
+  // AT-REST DEFAULT-ON (SQLCipher collapse): content lost its per-field envelope, so the
+  // REAL server launch must default to whole-file at-rest — the documented self-host path
+  // (`node src/index.js` / `npm start`) and `cargo tauri dev` carry no MYCELIUM_AT_REST.
+  // This is entry-point-gated (we are argv1, not an importer), so the verify gates +
+  // pipeline subprocesses that `import { boot }` as a library are untouched (Design D5).
+  // The packaged app already sets the flag; setting it again here is a harmless no-op.
+  // boot() then born-encrypts a fresh vault / migrates an existing plaintext one, and the
+  // fail-closed belt refuses an unkeyed open. Spawned children inherit it via env.
+  if (!atRestEnabled()) process.env.MYCELIUM_AT_REST = '1';
   let run = startStdio;
   if (process.argv.includes('--enrich') || process.env.MYCELIUM_ENRICH === '1') {
     run = startEnrich;
