@@ -110,6 +110,38 @@ git ls-files -z 'docs/*' | while IFS= read -r -d '' f; do
   [ "$keep" -eq 0 ] && git rm -qf --ignore-unmatch "$f"
 done
 
+# ── PHASE 3 — neutralize dead doc links ───────────────────────────────────────
+# The kept docs (README, the 6 top docs, guide/**) link to internal design docs
+# that Phase 2 just deleted → those would be 404s in the public repo. Rewrite any
+# markdown link [text](target.md) whose target no longer exists into plain `text`,
+# keeping the prose. Dev docs are untouched (this runs only on the frozen public
+# tree); handles future drift automatically. Only .md targets are touched (code
+# paths / images left alone) and only when the resolved target is truly gone.
+echo "── Phase 3: de-link deleted docs ──"
+node - <<'NODE'
+const { execSync } = require('child_process');
+const fs = require('fs'); const path = require('path');
+const kept = new Set(execSync('git ls-files', {encoding:'utf8'}).split('\n').filter(Boolean));
+const mdFiles = [...kept].filter(f => f.endsWith('.md'));
+const linkRe = /\[([^\]]+)\]\(([^)]+)\)/g;
+let changedFiles = 0, changedLinks = 0;
+for (const f of mdFiles) {
+  const src = fs.readFileSync(f, 'utf8'); const dir = path.dirname(f);
+  let touched = false;
+  const out = src.replace(linkRe, (m, text, target) => {
+    const t = target.trim();
+    if (/^(https?:|mailto:|#|\/\/)/.test(t)) return m;          // external / anchor
+    const clean = t.split('#')[0].split('?')[0];
+    if (!clean.endsWith('.md')) return m;                       // only doc links
+    const resolved = path.normalize(path.join(dir, clean));
+    if (kept.has(resolved)) return m;                           // target survives
+    touched = true; changedLinks++; return text;               // dead → plain text
+  });
+  if (touched) { fs.writeFileSync(f, out); execSync(`git add "${f}"`); changedFiles++; }
+}
+console.log(`  de-linked ${changedLinks} dead doc link(s) across ${changedFiles} file(s)`);
+NODE
+
 # ── GATES ─────────────────────────────────────────────────────────────────────
 echo; echo "── Grep gates (must all be clean) ──"
 fail=0
@@ -125,6 +157,7 @@ chk "no reference/ etc"     bash -c "git ls-files | grep -E '^(reference|myceliu
 chk "no private repo name"  bash -c "git grep -nE 'Curious-Life/mycelium([^.]|\$)' -- . | grep -v node_modules || true"
 chk "no internal CLAUDE.md" bash -c "git grep -l 'REDESIGN-LIVING-SPEC' -- CLAUDE.md || true"
 chk "no release tooling"    bash -c "git ls-files | grep -E '^scripts/release/' || true"
+chk "no dead doc links"     node -e 'const{execSync}=require("child_process"),fs=require("fs"),path=require("path");const kept=new Set(execSync("git ls-files",{encoding:"utf8"}).split("\n").filter(Boolean));let bad=[];for(const f of [...kept].filter(x=>x.endsWith(".md"))){const s=fs.readFileSync(f,"utf8"),d=path.dirname(f);let m;const re=/\[([^\]]+)\]\(([^)]+)\)/g;while(m=re.exec(s)){const t=m[2].trim();if(/^(https?:|mailto:|#|\/\/)/.test(t))continue;const c=t.split("#")[0].split("?")[0];if(!c.endsWith(".md"))continue;if(!kept.has(path.normalize(path.join(d,c))))bad.push(f+" -> "+c)}}if(bad.length)console.log(bad.join("\n"))'
 
 echo
 echo "docs/ files now: $(git ls-files 'docs/*' | wc -l | tr -d ' ')  | total deletions staged: $(git diff --cached --name-status | grep -c '^D')"
