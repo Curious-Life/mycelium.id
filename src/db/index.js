@@ -39,6 +39,7 @@ import { createProvidersNamespace } from './providers.js';
 import { createConnectorsNamespace } from './connectors.js';
 import { createUsersNamespace } from './users.js';
 import { createClaimsNamespace } from './claims.js';
+import { createReflectionsNamespace } from './reflections.js';
 import { createEgressAuditNamespace } from './egress-audit.js';
 import { createIdentityChannelsNamespace } from './identity-channels.js';
 import { createTelegramGroupsNamespace } from './telegram-groups.js';
@@ -161,6 +162,10 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // rest (ENCRYPTED_FIELDS.person_claims / .person_claim_snapshots).
     // @see migrations/0011_persona_claims.sql, src/claims/.
     claims: createClaimsNamespace({ d1Query, firstRow, randomUUID }),
+
+    // reflection_records (Context Engine "day cards"): a dated, queryable digest of each cycle's
+    // reflective read — for categorizing days + tracing red threads. @see src/db/reflections.js.
+    reflections: createReflectionsNamespace({ d1Query, randomUUID, now }),
 
     // Core user row: timezone (read by getContext — tools/context.js:63, which
     // already optional-chains db.users) + a `settings` JSON blob that backs the

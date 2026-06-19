@@ -42,15 +42,17 @@ async function readAgentName(db, userId) {
  * @param {Array}    [opts.history]       hydrated [{role,content}] (chronological)
  * @param {number}   [opts.recentN]       getContext recentMessages (default by model size)
  * @param {boolean}  [opts.localTools]    allow tools even on a local model (default false)
+ * @param {string}   [opts.inferenceTask] which inference task to route to (default 'harness';
+ *                    reflection cycles pass 'reflection' → cloud-by-default, user-configurable)
  * @returns {Promise<{text:string,truncated?:boolean,skipped?:string,toolsUsed?:string[]}>}
  */
 export async function runAgentTurn(
   { db, userId, tools = [], handlers = {}, loop, fetchImpl = globalThis.fetch, signal, hooks } = {},
-  { userMessage, systemExtra = '', enabledTools = [], history = [], conversationId = null, recentN, localTools = false, historyUntrusted = false, onWrite = null } = {},
+  { userMessage, systemExtra = '', enabledTools = [], history = [], conversationId = null, recentN, localTools = false, historyUntrusted = false, onWrite = null, inferenceTask = 'harness' } = {},
 ) {
   if (!loop || typeof loop.run !== 'function') throw new TypeError('runAgentTurn: loop with run() required');
 
-  const provider = await resolveInferenceConfigForTask(db, userId, 'harness');
+  const provider = await resolveInferenceConfigForTask(db, userId, inferenceTask);
   const info = describeProvider(provider);
   if (!info) return { skipped: 'no-model' };
   const isLocal = info.local;

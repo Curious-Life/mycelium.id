@@ -61,13 +61,13 @@ try {
   rec('D3. snapshot series has one window with delta=new', series.length === 1 && series[0].deltaKind === 'new',
     series[0] ? `delta=${series[0].deltaKind} conf=${series[0].confidence?.toFixed?.(3)}` : 'no series');
 
-  // ── D3b. getContext graft surfaces the claim as a support path ──────────────
+  // ── D3b. getContext graft surfaces the claim as a bi-temporal TENDENCY (Phase 2d) ──
   {
     const { handlers } = createContextDomain({ getDb: () => db, readMindFile: async () => null, userId: U });
     const brief = await handlers.getContext({ include: ['claims'] });
-    rec('D3b. getContext({include:[claims]}) renders the claim section',
-      /WHAT YOU'VE LEARNED ABOUT THEM/.test(brief) && /\[Claim\].*outdoors/.test(brief),
-      brief.split('\n').find((l) => /\[Claim\]/.test(l)) || 'no claim line');
+    rec('D3b. getContext({include:[claims]}) renders the claim as a tendency (asOf view)',
+      /WHAT YOU'VE NOTICED — TENDENCIES/.test(brief) && /outdoors/.test(brief),
+      brief.split('\n').find((l) => /outdoors/.test(l)) || 'no claim line');
   }
 
   // ── D3c. personaClaims MCP tool: list + series ──────────────────────────────
