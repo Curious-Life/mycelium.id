@@ -54,7 +54,10 @@
 	let rhythmSeries = $state<Any | null>(null); // { metric, series }
 	let rhythmMetric = $state('total_spectral_energy_gamma');
 	let freqMetric = $state('coherence');
-	let moveMetric = $state<'fisher_velocity' | 'fisher_trajectory_length' | 'activation_entropy' | 'fisher_displacement'>('fisher_velocity');
+	// Cumulative columns (fisher_trajectory_length / fisher_displacement) are RETIRED from the
+	// chart toggle — plotted over time they grow/saturate with history depth, not with this
+	// week's change, and read as "weird numbers". They remain as internal/archival columns.
+	let moveMetric = $state<'fisher_velocity' | 'activation_entropy'>('fisher_velocity');
 
 	const apiBase = '/portal';
 	async function loadRhythmSeries() {
@@ -131,9 +134,7 @@
 	const moveLabels = $derived(trajectory.map((r) => (r.window_end ?? '').slice(0, 10)));
 	const moveMetricOpts = [
 		{ key: 'fisher_velocity', label: 'velocity' },
-		{ key: 'fisher_trajectory_length', label: 'path length' },
 		{ key: 'activation_entropy', label: 'activation entropy' },
-		{ key: 'fisher_displacement', label: 'displacement' },
 	];
 	const rhythmSeriesVals = $derived((rhythmSeries?.series ?? []).map((p: Any) => {
 		const v = p.value;
@@ -203,6 +204,29 @@
 		if (latest < median * 0.8) return { tone: 'down', text: 'quieter than usual' };
 		return { tone: 'flat', text: 'a typical pace' };
 	});
+
+	// ── Honest movement headline — baseline-relative z ("unusual for ME"), with the
+	// pooled-null avg_velocity_z as the CONFIDENCE GATE ("above measurement noise"). The
+	// baseline-z fails closed server-side (degenerate near-constant history → low_confidence),
+	// so a flat writer never gets a fabricated σ; here that surfaces as "building your baseline".
+	const moveBaseline = $derived.by(() => {
+		const z = movement?.velocity_baseline_z;
+		const low = movement?.velocity_baseline_low_confidence ?? true;
+		if (low || z == null || Number.isNaN(Number(z))) return { sigma: null, tone: 'flat', text: 'building your baseline' };
+		const mag = Math.abs(Number(z));
+		if (mag < 1) return { sigma: Number(z), tone: 'flat', text: 'a typical week for you' };
+		if (Number(z) > 0) return { sigma: Number(z), tone: 'up', text: `${mag.toFixed(1)}σ — a big week for you` };
+		return { sigma: Number(z), tone: 'down', text: `${mag.toFixed(1)}σ quieter than your normal` };
+	});
+	// Confidence gate: is the latest movement even above measurement noise (|pooled-z| ≥ 2)?
+	const moveAboveNoise = $derived(
+		movement?.avg_velocity_z != null ? Math.abs(Number(movement.avg_velocity_z)) >= 2 : null,
+	);
+	const entBaselineLabel = $derived(
+		movement?.entropy_baseline_low_confidence || movement?.entropy_baseline_z == null
+			? '—'
+			: `${Number(movement.entropy_baseline_z).toFixed(1)}σ`,
+	);
 
 	// ── Narrative summary (Layer 1) ───────────────────────────────────────────
 	const summary = $derived.by(() => {
@@ -436,7 +460,7 @@
 									<div class="card-body">
 										<div class="phase-badge" style="--rgb:{accentRgb.azure}">{cap(curRealm?.phase ?? movement?.phase)}</div>
 										<div class="spark-row"><Spark points={velocities} color={accentVar.azure} width={150} height={42} /></div>
-										{#if moveRelative}<span class="rel-chip {moveRelative.tone}">{moveRelative.text}</span>{/if}
+										<span class="rel-chip {moveBaseline.tone}">{moveBaseline.text}</span>
 									</div>
 									<p class="tagline">How far and fast your focus travels</p>
 								</button>
@@ -691,11 +715,12 @@
 						<p class="muted sm">How your {moveMetricOpts.find((o) => o.key === moveMetric)?.label} changed week by week. Flat-zero stretches are weeks with little activity.</p>
 					</div>
 					<div class="stat-row">
-						<div class="stat"><span class="s-v">{fmt(movement?.exploration_ratio, 2)}</span><span class="s-l">exploration ratio</span></div>
-						<div class="stat"><span class="s-v">{fmt(movement?.avg_velocity, 3)}</span><span class="s-l">avg velocity</span></div>
-						<div class="stat"><span class="s-v">{fmt(curRealm?.activation_entropy, 2)}</span><span class="s-l">activation entropy</span></div>
+						<div class="stat"><span class="s-v">{moveBaseline.sigma != null ? `${moveBaseline.sigma.toFixed(1)}σ` : '—'}</span><span class="s-l">vs your normal</span></div>
+						<div class="stat"><span class="s-v">{entBaselineLabel}</span><span class="s-l">attention spread (σ)</span></div>
 						<div class="stat"><span class="s-v">{movement?.R_recent != null ? fmt(movement?.R_recent, 2) : '—'}</span><span class="s-l">recent reach (R)</span></div>
+						<div class="stat"><span class="s-v">{fmt(movement?.exploration_ratio, 2)}</span><span class="s-l">exploration ratio</span></div>
 					</div>
+					{#if moveAboveNoise === false}<p class="muted sm">This week's movement is within your measurement noise — read the σ as advisory.</p>{/if}
 					<div class="panel">
 						<h3>Phase by level</h3>
 						<div class="level-chips">
