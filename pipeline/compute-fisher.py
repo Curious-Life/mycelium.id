@@ -62,6 +62,13 @@ from fisher import (
     fisher_distance,
 )
 
+# The canonical phase enum (the only values classify_phase() can return). A row
+# whose phase_recent is NULL (insufficient rolling window or a low-confidence
+# step) has NO defined recent phase — it is a data gap, never a transition
+# endpoint. Milestone rules below fire ONLY between two real phases so a gap can
+# never surface as a phantom "cycling → indeterminate" shift.
+REAL_PHASES = frozenset({"stable", "cycling", "exploring", "transforming"})
+
 
 # ── Configuration ────────────────────────────────────────────────────────
 
@@ -336,8 +343,13 @@ def apply_milestone_rules(
                 }))
 
         # Rule 2: phase_shift — phase changed AND prev was not low_confidence.
+        # Both endpoints must be REAL phases: a transition into/out of a NULL
+        # recent-phase gap (insufficient window or low_confidence) is a data
+        # gap, not a cognitive shift, so it never becomes a milestone.
         if (
             prev is not None
+            and row.get('phase') in REAL_PHASES
+            and prev.get('phase') in REAL_PHASES
             and row.get('phase') != prev.get('phase')
             and not prev.get('low_confidence')
         ):
@@ -633,8 +645,15 @@ def run_level_window(
         # R_recent=None.
         K_recent = k_recent(window_type, R_RECENT_DAYS)
         if i + 1 < K_recent or step.low_confidence:
+            # Insufficient rolling window OR low-confidence step → there is no
+            # confident recent classification. Store NULL (mirrors R_recent),
+            # NOT a sentinel string: phase_recent's enum stays exactly
+            # {stable,cycling,exploring,transforming}. A prior bug wrote the
+            # phantom 'indeterminate' here, which then leaked into milestones
+            # as "cycling → indeterminate" phase-shifts (METRICS-AUDIT
+            # 2026-06-19 live-probe #1).
             r_recent_val = None
-            phase_recent_val = 'indeterminate'
+            phase_recent_val = None
         else:
             k_slice = series[i - K_recent + 1 : i + 1]
             p_first_K = np.array([k_slice[0]['p_dict'][c] for c in categories])
@@ -678,14 +697,18 @@ def run_level_window(
 def detect_milestones(user_id: str, run_id: str, querier=None) -> int:
     """Scan weekly_step realm rows for this run; upsert new milestones.
 
-    Reads phase_recent (rolling 90-day) via COALESCE, falling back to legacy
-    phase only for rows predating phase_recent.
+    Uses phase_recent (rolling 90-day) as the authoritative phase signal —
+    NOT COALESCE(phase_recent, phase). detect_milestones only ever sees rows
+    from the CURRENT run, which always writes phase_recent (a real phase, or
+    NULL when there is no confident recent classification). Reviving the
+    degenerate cumulative `phase` for a NULL row would resurrect spurious
+    transitions; a NULL phase_recent must stay a gap (see REAL_PHASES gate).
     """
     querier = querier or d1_client.query
 
     rows = querier(
         "SELECT level, window_start, window_end, "
-        "       COALESCE(phase_recent, phase) AS phase, "
+        "       phase_recent AS phase, "
         "       fisher_velocity_z, low_confidence, clustering_run_id "
         "FROM fisher_trajectory "
         "WHERE user_id = ? AND level = 'realm' AND window_type = 'weekly_step' "
