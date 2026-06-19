@@ -23,8 +23,10 @@ The user reported the agent "doesn't function well." A review + 4 external-refer
 - **Native engine is now the channel default** (was the Claude Agent SDK), with honest health.
 - **Red team found a CRITICAL + HIGHs** → 6/7 fixed + gated; owner-writes ship **OFF by default**.
 
-**State:** 8 commits, all 17 `verify:harness*` + `verify:chat` GO locally, PR #326 open (CI running).
-**One security item deferred (RT2-H1 recoverability) — the only blocker before enabling owner-writes.**
+**State:** 9 commits, all 17 `verify:harness*` + `verify:chat` + `verify:write-recoverability` GO
+locally, PR #326 open. **RT2-H1 (overwrite recoverability) is now BUILT (`d2665f6`) — all 7 red-team
+findings fixed.** The only remaining gate before enabling owner-writes is operator: a live owner-DM
+smoke + flip `MYCELIUM_CHANNEL_OWNER_WRITE=1`.
 
 ---
 
@@ -40,8 +42,9 @@ The user reported the agent "doesn't function well." A review + 4 external-refer
 | `f6bd01e` | fix(security): RT1 CRITICAL — daemon↔server per-boot token gates owner-write |
 | `095d0c8` | feat(channel): native engine = default + honest health (B1) + untrusted history (RT3-H2) |
 | `b59ad49` | feat(security): RT2-H2 — channel write-audit (hash-only) |
+| `d2665f6` | feat(security): RT2-H1 — overwrite recoverability (encrypted version capture + restore) |
 
-(+ this handoff commit.)
+(+ handoff commits.)
 
 ---
 
@@ -113,20 +116,28 @@ State: scheduled_tasks · harness_runs · conversation_summaries · channel_writ
 
 ---
 
-## 6. THE ONE DEFERRED ITEM — RT2-H1 overwrite recoverability (the finish-line blocker)
+## 6. RT2-H1 overwrite recoverability — ✅ BUILT (`d2665f6`)
 
-`remember` (`facts.upsert` ON CONFLICT DO UPDATE) and `saveDocument` (`documents.upsert`) **overwrite in
-place with no version row** → an injection-poisoned write from forwarded content is unrecoverable in-vault.
+`remember` (`facts.upsert`) and `saveDocument` (`documents.upsert`) overwrote in place with no version
+row → a poisoned write was unrecoverable. **Now closed.** Design + evidence:
+`docs/DESIGN-RT2-H1-overwrite-recoverability-2026-06-19.md`.
 
-**Spec to finish it:**
-- `documents.upsert` UPDATE branch: read the prior row, write a `document_versions` row (the table
-  EXISTS — `migrations/0001_init.sql:631` — currently only written by import `ingest/vault-import.js:209`).
-- `facts`: add a fact-version table (small migration ~0032) + write prior value before overwrite.
-- Touches the SHARED chat write path (`src/db/documents.js`, `src/db/facts.js`) → its own
-  `/sweep-first-design` pass; gate it (round-trip + at-rest like S9).
-- Mitigated meanwhile by: tool-trim (no wipers) + write-audit (detection) + default-off flag.
+- **migration `0032`** — extend `document_versions` (encrypted prior snapshot
+  title/summary/content + user_id/path/trigger) + new `fact_versions` table.
+- **`ENCRYPTED_FIELDS`** (crypto-local.js) — `document_versions[title,summary,content]` +
+  `fact_versions[value]`; snapshot encrypts at rest under the uniform `'personal'` scope.
+- **Capture in the DAL** (`src/db/documents.js`, `src/db/facts.js`) — fires only on a
+  content-CHANGING overwrite of an existing, non-forgotten row; create + identical re-write capture
+  nothing; bulk importers bypass the DAL (raw inserts) so import is unaffected. Non-fatal + isolated.
+- **Recovery** — `listVersions` + `restoreVersion` on both namespaces (restore is itself versioned).
+- **Gate** `verify:write-recoverability` (12 assertions GO; encrypted-at-rest proven via rawRead).
+  Neighbors re-run GREEN (facts, loose-document, run-import, import, portal-data, forget).
 
-This is the gate before `MYCELIUM_CHANNEL_OWNER_WRITE=1` is safe to enable.
+Remaining before `MYCELIUM_CHANNEL_OWNER_WRITE=1`: **operator-only** — a live owner-DM smoke
+(write persists + survives reopen; injection/group → zero `channel_write_audit` rows). No code left.
+
+**Follow-up (not blocking):** a portal/MCP surface to browse+restore version history (the DAL methods
+ship; the UI does not), and per-surface `trigger` labeling (today defaults `'overwrite'`).
 
 ---
 
@@ -139,10 +150,10 @@ This is the gate before `MYCELIUM_CHANNEL_OWNER_WRITE=1` is safe to enable.
 - Live Telegram native-parity smoke (see PR checklist): DM text/image/voice+TTS, >4096 chunk,
   group addressed-only, no-model → capture-only.
 
-**Phase 1 — finish owner-writes** (gating: RT2-H1 + smoke):
-- Build RT2-H1 recoverability (§6). ~half day.
-- Enable `MYCELIUM_CHANNEL_OWNER_WRITE=1` + owner-DM smoke: write persists; injection/group → zero rows
-  in `channel_write_audit`.
+**Phase 1 — finish owner-writes** (✅ code done; operator smoke remains):
+- ✅ RT2-H1 recoverability built (§6, `d2665f6`).
+- Operator: enable `MYCELIUM_CHANNEL_OWNER_WRITE=1` + owner-DM smoke: write persists + survives reopen;
+  injection/group → zero rows in `channel_write_audit`; an overwrite is recoverable via `restoreVersion`.
 
 **Phase 2 — scoped/named agents** (the "create new agents, scoped access" vision, §4.5 deferred):
 - `agents` registry table + `db.agents` DAL + generalize `resolve-grant.js` to named agents
