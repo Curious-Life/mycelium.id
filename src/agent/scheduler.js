@@ -23,6 +23,7 @@ import { createAgentLoop } from './loop.js';
 import { createLane } from './lane.js';
 import { computeNextRun } from './scheduler-time.js';
 import { runAgentTurn } from './run-turn.js';
+import { cycleTurnOpts, isNoReply } from './cycle-prompts.js';
 import { createEgressAuditSink } from '../inference/egress.js';
 import { createUsageSink } from '../inference/usage.js';
 
@@ -82,10 +83,19 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
 
   // Build + drive one headless turn via the shared assembly (tests inject runTurnOverride).
   // A scheduled turn opts into whatever gated tools the task named in enabled_tools.
+  // A reflection-cycle task (Context Engine L2) runs with the relationship persona as its
+  // system preamble and routes to the cloud-by-default 'reflection' inference task; any other
+  // task keeps SCHEDULER_SYSTEM + the 'harness' model. cycleTurnOpts is the single decision point.
   async function buildAndRunTurn(task) {
+    const { systemExtra, inferenceTask } = cycleTurnOpts(task);
     return runAgentTurn(
       { db, userId: task.user_id || userId, tools, handlers, loop, fetchImpl, signal: ctrl.signal },
-      { userMessage: task.prompt || '', systemExtra: SCHEDULER_SYSTEM, enabledTools: task.enabled_tools || [] },
+      {
+        userMessage: task.prompt || '',
+        systemExtra: systemExtra ?? SCHEDULER_SYSTEM,
+        enabledTools: task.enabled_tools || [],
+        inferenceTask,
+      },
     );
   }
 
@@ -130,7 +140,9 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
       }
       const text = (r && typeof r.text === 'string') ? r.text : '';
       const status = r?.truncated ? 'truncated' : 'done';
-      if (text.trim() && task.output_target && task.output_target !== 'none') {
+      // NO_REPLY is the canonical "skip the check-in" sentinel — a cycle that returns it
+      // delivers nothing (never surface the literal token to the person).
+      if (text.trim() && !isNoReply(text) && task.output_target && task.output_target !== 'none') {
         try { await deliverFn(task, text); } catch (e) { logger(`scheduler: deliver failed for ${task.id}: ${errCode(e)}`); }
       }
       await db.harness.finishRun(runId, { status });

@@ -35,6 +35,7 @@
     "verify:nomic-embedding-encryption": "node scripts/verify-nomic-embedding-encryption.mjs",
     "verify:vectors-raw": "node scripts/verify-vectors-raw.mjs",
     "verify:mcp": "node scripts/verify-mcp.mjs",
+    "verify:reflection-cycles": "node scripts/verify-reflection-cycles.mjs",
     "verify:forget": "node scripts/verify-forget.mjs",
     "verify:facts": "node scripts/verify-facts.mjs",
     "verify:related": "node scripts/verify-related.mjs",

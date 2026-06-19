@@ -25,6 +25,7 @@ import { portalImportRouter } from './portal-import.js';
 import { portalSettingsRouter } from './portal-settings.js';
 import { portalChatRouter } from './portal-chat.js';
 import { createScheduler } from './agent/scheduler.js';
+import { seedReflectionCycles } from './agent/seed-cycles.js';
 import { createChannelTurnRouter } from './agent/channel-turn.js';
 import { createAgentHarness } from './agent/harness.js';
 import { createAgentLoop } from './agent/loop.js';
@@ -553,6 +554,15 @@ export async function startRestServer({
           db, userId: bootUserId, tools, handlers, deliver: schedulerDeliver,
           logger: (m) => console.error(`[scheduler] ${m}`),
         });
+        // Context Engine L2 (Phase 1a): seed the six reflection cycles when the user has
+        // opted in (settings.reflection.enabled — off by default, cost governance §10).
+        // Idempotent: safe on every boot, never clobbers a user's edits to a cycle.
+        try {
+          const rs = await db.users.getSettings(bootUserId).catch(() => null);
+          if (rs?.reflection?.enabled) {
+            await seedReflectionCycles(db, bootUserId, { logger: (m) => console.error(`[scheduler] ${m}`) });
+          }
+        } catch (e) { console.warn('[scheduler] reflection seed skipped:', e?.message || e); }
         // Boot recovery (§5.4): flip orphaned in-flight runs to aborted, then push any
         // overdue tasks forward so a downtime gap doesn't fire them all at once.
         try {
