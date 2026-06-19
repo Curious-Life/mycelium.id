@@ -21,7 +21,8 @@ function makeDomain(files, { domainRows = [], claims = [] } = {}) {
       domainMix: async () => domainRows,
       selectRecent: async () => [],
     },
-    claims: { listActive: async () => claims },
+    // Phase 2d: getContext reads the bi-temporal AS-OF view (currently-true claims), not listActive.
+    claims: { asOf: async () => claims, listActive: async () => claims },
   };
   return createContextDomain({
     getDb: () => db,
@@ -39,18 +40,19 @@ function makeDomain(files, { domainRows = [], claims = [] } = {}) {
         { domain: 'Self & Inner Life', register: 'Resonance', count: 5 },
         { domain: '(unclassified)', register: '(unclassified)', count: 3 },
       ],
-      claims: [{ id: 'c1', claimType: 'identity', content: 'Leads Curious Life', confidenceLogodds: 1.2 }],
+      claims: [{ id: 'c1', claimType: 'identity', domain: 'Work & Creativity', content: 'leans into building over planning', confidenceLogodds: 1.2, variability: 0.2 }],
     },
   );
   const out = await handlers.getContext({});
   const iCore = out.indexOf('# WHO YOU ARE (core');
   const iModel = out.indexOf('# YOUR INTERNAL MODEL');
-  const iClaims = out.indexOf("WHAT YOU'VE LEARNED ABOUT THEM");
+  const iClaims = out.indexOf("WHAT YOU'VE NOTICED — TENDENCIES");
   ok(iCore !== -1, 'Core section renders');
   ok(iCore !== -1 && iModel !== -1 && iCore < iModel, 'Core LEADS the full internal model');
   ok(/TODAY'S SHAPE/.test(out) && /Work & Creativity \(12\)/.test(out), "today's shape renders the domain mix");
   ok(!/\(unclassified\) \(3\)/.test(out), 'unclassified noise dropped from the mix');
-  ok(iClaims !== -1, 'claims block KEPT (not deleted in 1c)');
+  ok(iClaims !== -1, 'claims rendered as bi-temporal TENDENCIES (asOf view)');
+  ok(/leans into building over planning/.test(out) && /varies little/.test(out), 'a tendency renders with its variability, never as "is X"');
   ok(iCore < iClaims, 'claims block DEMOTED below the Core');
 }
 

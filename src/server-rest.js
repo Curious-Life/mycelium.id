@@ -509,14 +509,20 @@ export async function startRestServer({
         };
         const drainer = startEnrichDrainer({ db, userId: bootUserId, onSettled: maybeAutoGenerate });
         enqueueEnrichment = (id) => { try { baseEnqueue(id); } catch { /* :8095 optional */ } drainer.nudge(); };
-        // Persona-Claims cadence trigger: a zero-LLM hourly heartbeat that spawns
-        // the discovery child when a day/week/month/quarter window rolls over (and
-        // no clustering run is in flight). The child is Tier-3 fail-soft (no local
-        // model → no-op). Gated with the drainer so verify scripts never run it.
-        const claimsHeartbeat = startClaimHeartbeat({
-          db, userId: bootUserId, isJobRunning: isClusteringRunning,
-          spawn: (cadences) => startClaimDiscoveryJob({ dbPath: effectiveDbPath, userId: bootUserId, cadence: cadences.join(',') }),
-        });
+        // Persona-Claims source (Context Engine Phase 2): claims now DISTILL from the agent's
+        // consolidated model.md / day cards via the integration cycle's proposeClaim (L3) — NOT
+        // from a psychological profiler on raw messages. The legacy discovery heartbeat (a zero-LLM
+        // hourly timer that spawned pipeline/discover-claims.mjs on each window roll-over) is
+        // therefore OFF by default; it stays intact + reversible behind
+        // MYCELIUM_LEGACY_CLAIM_DISCOVERY=1. See docs/AGENT-REFLECTION-SYSTEM-SPEC-2026-06-19.md
+        // (the profiler is "Replaced by distillation from consolidated model.md").
+        let claimsHeartbeat = null;
+        if (process.env.MYCELIUM_LEGACY_CLAIM_DISCOVERY === '1') {
+          claimsHeartbeat = startClaimHeartbeat({
+            db, userId: bootUserId, isJobRunning: isClusteringRunning,
+            spawn: (cadences) => startClaimDiscoveryJob({ dbPath: effectiveDbPath, userId: bootUserId, cadence: cadences.join(',') }),
+          });
+        }
         // Co-manage the channel daemon (Telegram/Discord bridge): spawn it when the
         // user enabled channels + configured a bot token, adopt an existing one,
         // restart on crash, and stop on shutdown. Keyless — it reaches the vault
@@ -574,7 +580,7 @@ export async function startRestServer({
           try { harnessScheduler.stop(); } catch { /* */ }
           try { connectorScheduler?.stop(); } catch { /* */ }
           try { drainer.stop(); } catch { /* */ }
-          try { claimsHeartbeat.stop(); } catch { /* */ }
+          try { claimsHeartbeat?.stop(); } catch { /* */ }
           try { embedSup.stop(); } catch { /* */ }
           try { channelSup?.stop(); } catch { /* */ }
           try { transcribeSup?.stop(); } catch { /* */ }

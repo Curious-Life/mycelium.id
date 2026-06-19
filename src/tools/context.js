@@ -19,7 +19,6 @@
 // @property {(f: string) => Promise<string|null>} readMindFile  mind-files reader
 // @property {string} userId
 
-import { renderClaimsBlock } from '../claims/support-path.js';
 import { toConfidence } from '../claims/confidence.js';
 import { trimToTokenBudget } from '../inference/token-budget.js';
 
@@ -190,18 +189,37 @@ export function createContextDomain(deps) {
         } catch { /* non-fatal */ }
       }
 
-      // ── persona claims (durable person-level claims, highest confidence first) ──
-      // Rendered as support paths at depth 0 under a token budget (PersonaTree
-      // §3.6); the budget scopes THIS section only, never the rest of the brief.
+      // ── persona claims — the bi-temporal AS-OF view (what is TRUE of them NOW) ──
+      // asOf(now) returns only currently-valid, promoted claims: pending is held out (the CVP
+      // gate — a claim earns the briefing only after enough distinct days), and a since-superseded
+      // claim is excluded by its closed valid_to. Rendered as TENDENCIES grouped by life domain —
+      // a distribution of states, never a fixed verdict (Whole-Trait Theory) — bounded so this
+      // section never crowds the rest of the brief.
       if (want(include, 'claims') && db?.claims) {
         try {
-          const rows = await db.claims.listActive(userId, { limit: 12 });
-          const claims = rows.map((c) => ({
-            id: c.id, claimType: c.claimType, content: c.content,
-            confidence: c.confidenceLogodds == null ? undefined : toConfidence(c.confidenceLogodds),
-          }));
-          const block = renderClaimsBlock(claims, { depth: 0, budgetTokens: 600 });
-          if (block) sections.push(`---\n# WHAT YOU'VE LEARNED ABOUT THEM (claims — grounded in evidence over time)\n\n${block}`);
+          const at = new Date().toISOString();
+          const rows = (await db.claims.asOf(userId, at))
+            .filter((c) => c.content)
+            .sort((a, b) => (b.confidenceLogodds ?? -Infinity) - (a.confidenceLogodds ?? -Infinity))
+            .slice(0, 12);
+          if (rows.length) {
+            const byDomain = new Map();
+            for (const c of rows) {
+              const k = c.domain || 'Other';
+              if (!byDomain.has(k)) byDomain.set(k, []);
+              if (byDomain.get(k).length < 5) byDomain.get(k).push(c);
+            }
+            const fmt = (c) => {
+              const conf = c.confidenceLogodds == null ? null : toConfidence(c.confidenceLogodds);
+              const vary = c.variability == null ? ''
+                : `, varies ${c.variability < 0.34 ? 'little' : c.variability > 0.66 ? 'widely' : 'some'}${c.contextPrimary ? ` with ${c.contextPrimary}` : ''}`;
+              return `- ${c.content}${conf == null ? '' : `  (~${Math.round(conf * 100)}%${vary})`}`;
+            };
+            const block = [...byDomain.entries()]
+              .map(([dom, cs]) => `**${dom}**\n${cs.map(fmt).join('\n')}`)
+              .join('\n\n');
+            sections.push(`---\n# WHAT YOU'VE NOTICED — TENDENCIES (held provisionally, grounded in days of evidence)\n\n${block}`);
+          }
         } catch { /* non-fatal */ }
       }
 
