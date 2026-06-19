@@ -99,7 +99,7 @@ export function createIngestDomain(deps) {
       const items = Array.isArray(args.messages) ? args.messages : [];
       if (items.length === 0) return 'Error: messages array is required (and non-empty)';
 
-      let created = 0, skipped = 0, errors = 0;
+      let created = 0, skipped = 0, skippedEmpty = 0, failed = 0;
       // Loop the verified captureMessage choke-point — each row self-dedups on
       // its id. (Not a bulk INSERT: rows have heterogeneous optional columns, and
       // this reuses the single audited write path.) Originating timestamp is
@@ -109,7 +109,7 @@ export function createIngestDomain(deps) {
       // to timestamp. Without this, bulk-imported history collapses to insert-time.
       for (const m of items) {
         const content = typeof m?.content === 'string' ? m.content.trim() : '';
-        if (!content && !m?.attachmentId) { errors += 1; continue; }
+        if (!content && !m?.attachmentId) { skippedEmpty += 1; continue; }
         const metadata = { ...(m.metadata || {}) };
         if (m.timestamp) metadata.original_timestamp = m.timestamp;
         try {
@@ -124,10 +124,15 @@ export function createIngestDomain(deps) {
             metadata: Object.keys(metadata).length ? metadata : undefined,
           }, enqueueEnrichment);
           if (deduped) skipped += 1; else created += 1;
-        } catch { errors += 1; }
+        } catch { failed += 1; /* FAIL-LOUD: a capture error is a dropped message, not a dup */ }
       }
-      const errNote = errors ? `, ${errors} skipped (missing content)` : '';
-      return `Imported ${items.length} messages: ${created} new, ${skipped} duplicates${errNote}.`;
+      // Honest accounting: headline = rows actually landed; failures and
+      // empties are named separately (never folded into "imported").
+      const notes = [];
+      if (skippedEmpty) notes.push(`${skippedEmpty} skipped (empty)`);
+      if (failed) notes.push(`${failed} FAILED`);
+      const suffix = notes.length ? `, ${notes.join(', ')}` : '';
+      return `Processed ${items.length} messages: ${created} new, ${skipped} duplicates${suffix}.`;
     },
   };
 

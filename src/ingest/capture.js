@@ -15,6 +15,7 @@
 // insertIgnore makes a resend a no-op. Without `id`, the schema generates one.
 import crypto from 'node:crypto';
 import { getMindSearch } from '../search/registry.js';
+import { normalizeTimestamp } from './timestamp.js';
 
 /**
  * Incremental search-index maintenance (Phase 1, §8). NO-OP unless the on-disk
@@ -35,30 +36,15 @@ async function indexCaptured(id, content, createdAtIso) {
 
 /**
  * Normalize a caller-supplied "when this message actually occurred" value into
- * the schema's `created_at` ISO format (`%Y-%m-%dT%H:%M:%fZ`). Accepts an ISO
- * string, a Date, or a Unix epoch (seconds — e.g. ChatGPT `create_time` — or
- * milliseconds; disambiguated by magnitude). Returns null for absent/invalid
- * input so the caller falls back to the DB default (insert-time = "now").
+ * the schema's `created_at` ISO format. Thin wrapper over the shared timestamp
+ * authority (`./timestamp.js`) so messages and documents normalize identically.
+ * Returns null for absent/invalid input → caller falls back to the DB default
+ * (insert-time). @see normalizeTimestamp.
  * @param {string|number|Date|null|undefined} v
  * @returns {string|null}
  */
 export function normalizeCreatedAt(v) {
-  if (v == null) return null;
-  let d;
-  if (v instanceof Date) {
-    d = v;
-  } else if (typeof v === 'number') {
-    d = new Date(v < 1e12 ? v * 1000 : v); // epoch seconds vs ms
-  } else if (typeof v === 'string') {
-    const s = v.trim();
-    if (!s) return null;
-    if (/^\d+(\.\d+)?$/.test(s)) { const n = Number(s); d = new Date(n < 1e12 ? n * 1000 : n); }
-    else d = new Date(s); // ISO-8601 (Claude `created_at`)
-  } else {
-    return null;
-  }
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toISOString(); // e.g. 2025-08-29T07:24:00.000Z — matches the schema format
+  return normalizeTimestamp(v);
 }
 
 /**

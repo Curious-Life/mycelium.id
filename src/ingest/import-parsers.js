@@ -135,7 +135,7 @@ export async function processClaudeExport(zip, ctx) {
   if (!Array.isArray(conversations)) {
     conversations = safeParse(await readTextEntry(zip, 'conversations.json'), []);
   }
-  let imported = 0, skipped = 0, conversationCount = 0, seen = 0;
+  let imported = 0, skipped = 0, failed = 0, conversationCount = 0, seen = 0;
   for (const conv of conversations) {
     const msgs = Array.isArray(conv?.chat_messages) ? conv.chat_messages : [];
     if (!msgs.length) continue;
@@ -155,10 +155,12 @@ export async function processClaudeExport(zip, ctx) {
           metadata: { title: conv.name, original_timestamp: m.created_at },
         });
         if (deduped) skipped += 1; else imported += 1;
-      } catch { /* skip a bad row; never surface contents */ }
+      } catch { failed += 1; /* count the loss; never surface contents */ }
     }
   }
-  return { imported, skipped, stats: { messages: imported, conversations: conversationCount, skipped_duplicates: skipped } };
+  // `failed` is FAIL-LOUD accounting: a swallowed capture error is a dropped
+  // message — counted so the caller/UI can report it, not a silent loss.
+  return { imported, skipped, failed, stats: { messages: imported, conversations: conversationCount, skipped_duplicates: skipped, failed } };
 }
 
 /** Walk a ChatGPT mapping tree into time-ordered {role, text, id, create_time}. */
@@ -184,7 +186,7 @@ function flattenOpenAIMapping(mapping) {
  * @param {{ capture: (msg:object)=>Promise<{deduped:boolean}> }} ctx
  */
 export async function processOpenAIExport(conversations, ctx) {
-  let imported = 0, skipped = 0, conversationCount = 0, seen = 0;
+  let imported = 0, skipped = 0, failed = 0, conversationCount = 0, seen = 0;
   for (const conv of Array.isArray(conversations) ? conversations : []) {
     const ordered = flattenOpenAIMapping(conv?.mapping);
     if (!ordered.length) continue;
@@ -200,8 +202,8 @@ export async function processOpenAIExport(conversations, ctx) {
           metadata: { title: conv.title, original_timestamp: m.create_time },
         });
         if (deduped) skipped += 1; else imported += 1;
-      } catch { /* skip a bad row */ }
+      } catch { failed += 1; /* count the loss */ }
     }
   }
-  return { imported, skipped, stats: { messages: imported, conversations: conversationCount, skipped_duplicates: skipped } };
+  return { imported, skipped, failed, stats: { messages: imported, conversations: conversationCount, skipped_duplicates: skipped, failed } };
 }
