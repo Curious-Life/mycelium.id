@@ -611,7 +611,7 @@ const ENCRYPTED_FIELDS = {
   complexity_snapshots: [
     'level_name',
     'lz_complexity', 'raw_complexity', 'sequence_length', 'alphabet_size',
-    'point_count',
+    'point_count', 'embedding_novelty',
   ],
 
   // frequency_snapshots — windowed cognitive metrics (pipeline/

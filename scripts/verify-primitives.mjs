@@ -49,11 +49,27 @@ rec('P5. countsToProbs sums to 1 + uniform on zero-total',
 
 const lzRepeat = lzComplexity([1, 1, 1, 1, 1, 1, 1, 1]);
 const lzVaried = lzComplexity([1, 2, 3, 4, 5, 6, 7, 8]);
-rec('P6. lzComplexity: repetitive < varied; shape intact',
+rec('P6. lzComplexity: repetitive < varied; textbook c≤n; surrogate shape',
   lzRepeat.complexity < lzVaried.complexity
-    && lzComplexity([1]).complexity === 0
-    && typeof lzVaried.normalized === 'number' && lzVaried.sequenceLength === 8,
-  `repeat=${lzRepeat.complexity} varied=${lzVaried.complexity}`);
+    && lzComplexity([1]).complexity === 1            // single symbol → c=1 (textbook; was 0)
+    && lzVaried.complexity <= lzVaried.sequenceLength // char-fix invariant: raw ≤ seqlen
+    && typeof lzVaried.normalized === 'number' && lzVaried.sequenceLength === 8
+    && 'lowConfidence' in lzVaried,                   // new surrogate-shape field
+  `repeat=${lzRepeat.complexity} varied=${lzVaried.complexity} lowConf=${lzVaried.lowConfidence}`);
+
+// P6b. surrogate normalization kills small-n saturation discrimination: a STRUCTURED
+// long sequence scores well below 1; a RANDOM one near 1; short seqs flagged.
+const seedRng = (s => () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff))(7);
+const structured = Array.from({ length: 40 }, (_, i) => i % 3);
+const random40 = Array.from({ length: 40 }, () => Math.floor(seedRng() * 4));
+const lzStruct = lzComplexity(structured, { seed: 1 });
+const lzRand = lzComplexity(random40, { seed: 1 });
+const lzShort = lzComplexity([3, 5], { seed: 1 });
+rec('P6b. surrogate norm: structured≪random (no saturation); short→low_confidence; deterministic',
+  lzStruct.normalized < 0.7 && lzRand.normalized > lzStruct.normalized
+    && lzStruct.lowConfidence === 0 && lzShort.lowConfidence === 1
+    && lzComplexity(random40, { seed: 1 }).normalized === lzRand.normalized,
+  `struct=${lzStruct.normalized} rand=${lzRand.normalized} short.lowConf=${lzShort.lowConfidence}`);
 
 // ── F3 new primitives: true LZ76 + variance ──
 const lzSame = lz76Complexity([0, 0, 0, 0, 0, 0]).complexity;

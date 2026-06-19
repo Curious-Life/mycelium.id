@@ -40,6 +40,15 @@ import { createStageResult } from './lib/stage-result.js';
 
 const DEFAULT_WINDOW_DAYS = 90;
 
+// Deterministic 32-bit seed per (level, entity) so the LZ surrogate-null draws are
+// reproducible across runs (stable UI) + for the verify gate. djb2 string hash —
+// the surrogate is a statistical null, not a secret, so no crypto needed.
+function djb2(str) {
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  return h >>> 0;
+}
+
 function computeTerritoryComplexity(points, nameMap, log) {
   // Group points by territory.
   const byTerritory = new Map();
@@ -64,7 +73,7 @@ function computeTerritoryComplexity(points, nameMap, log) {
     const quantize = (c) => Math.min(5, Math.floor((c / Math.max(maxCount, 1)) * 5));
     const sequence = days.map((d) => quantize(dayCounts.get(d)));
 
-    const result = lzComplexity(sequence);
+    const result = lzComplexity(sequence, { seed: djb2(`territory:${territoryId}`) });
     results.push({
       level: 'territory',
       level_id: territoryId,
@@ -89,7 +98,7 @@ function computeRealmComplexity(points, realmNames, log) {
   for (const [realmId, pts] of byRealm) {
     if (pts.length < 10) continue;
     const sequence = pts.map((p) => p.territory_id); // territory-transition sequence
-    const result = lzComplexity(sequence);
+    const result = lzComplexity(sequence, { seed: djb2(`realm:${realmId}`) });
     results.push({
       level: 'realm',
       level_id: realmId,
@@ -108,7 +117,7 @@ function computeGlobalComplexity(points, log) {
     log('[complexity]   not enough data for global complexity');
     return [];
   }
-  const result = lzComplexity(seq);
+  const result = lzComplexity(seq, { seed: djb2('global:0') });
   return [{
     level: 'global',
     level_id: null,
@@ -173,8 +182,8 @@ export async function computeComplexity({ db, userId, windowDays = DEFAULT_WINDO
       await db.rawQuery(
         `INSERT INTO complexity_snapshots
            (user_id, level, level_id, level_name, lz_complexity, raw_complexity,
-            sequence_length, alphabet_size, window_start, window_end, point_count)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            sequence_length, alphabet_size, window_start, window_end, point_count, low_confidence)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (user_id, level, level_id, window_end) DO UPDATE SET
            level_name = excluded.level_name,
            lz_complexity = excluded.lz_complexity,
@@ -182,9 +191,10 @@ export async function computeComplexity({ db, userId, windowDays = DEFAULT_WINDO
            sequence_length = excluded.sequence_length,
            alphabet_size = excluded.alphabet_size,
            point_count = excluded.point_count,
+           low_confidence = excluded.low_confidence,
            computed_at = datetime('now')`,
         [userId, r.level, r.level_id, r.level_name, r.normalized, r.complexity,
-         r.sequenceLength, r.alphabetSize, windowStart.slice(0, 10), windowEnd, r.pointCount],
+         r.sequenceLength, r.alphabetSize, windowStart.slice(0, 10), windowEnd, r.pointCount, r.lowConfidence ?? 0],
       );
       written++;
       res.ok();
