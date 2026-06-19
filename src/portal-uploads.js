@@ -1,9 +1,7 @@
 import express from 'express';
 import Busboy from 'busboy';
-import JSZip from 'jszip';
 import { captureMessage } from './ingest/capture.js';
-import { detectExportType, processClaudeExport, processOpenAIExport, assertEntryCount } from './ingest/import-parsers.js';
-import { importMyceliumVault } from './ingest/vault-import.js';
+import { runImport } from './ingest/run-import.js';
 import { uploadAttachment } from './ingest/upload.js';
 import { describeImage } from './enrich/describe-image.js';
 
@@ -101,47 +99,13 @@ export function portalUploadsRouter({ db, userId, enqueueEnrichment = null }) {
   });
 
   // Detect + parse an assembled archive buffer → importResult (or a typed error).
-  async function processArchive(buffer, filename) {
-    let zip;
-    try { zip = await JSZip.loadAsync(buffer); assertEntryCount(zip); }
-    catch (e) {
-      if (e?.code === 'TOO_MANY_ENTRIES') return { error: 'this archive has too many entries — refusing to import (possible archive bomb)' };
-      return { error: 'unrecognized file — upload a Mycelium vault export, or a Claude/ChatGPT export .zip' };
-    }
-
-    const detected = await detectExportType(zip);
-    const capture = (msg) => captureMessage(db, { userId, ...msg }, enqueueEnrichment);
-
-    if (detected.type === 'mycelium-oversized') {
-      return { error: `this Mycelium export's manifest exceeds the inflation cap (${Math.round(detected.limitBytes / 1024 / 1024)}MB) — relaunch with MYCELIUM_IMPORT_MAX_JSON_BYTES raised, then retry` };
-    }
-    if (detected.type === 'mycelium') {
-      // Canonical-Mycelium vault export — the bring-your-vault-home path. All
-      // rows land through the auto-encrypting adapter; messages are reset to
-      // nlp_processed=0 so the local pipeline re-embeds (the export carries no
-      // search vectors). See docs/VAULT-IMPORT-FROM-CANONICAL-DESIGN-2026-06-10.md.
-      const r = await importMyceliumVault(zip, detected.manifest, { db, userId, enqueueEnrichment });
-      return { importResult: { type: 'mycelium', ...r } };
-    }
-    if (detected.type === 'claude') {
-      const r = await processClaudeExport(zip, { capture, conversations: detected.conversations });
-      return { importResult: { type: 'claude', ...r } };
-    }
-    if (detected.type === 'chatgpt') {
-      const r = await processOpenAIExport(detected.conversations, { capture });
-      return { importResult: { type: 'chatgpt', ...r } };
-    }
-    // NOT success-shaped: a `{imported:0}` result reads as "import worked, file
-    // was empty". Return an error so the UI surfaces a real failure. (Obsidian
-    // HAS a working importer — the folder path POST /import/obsidian — just not
-    // this zip path; point the user there rather than feign success.)
-    if (detected.type === 'obsidian') {
-      return { error: 'Obsidian vaults import via the folder importer (Settings → Import → Obsidian), not as a .zip upload — nothing was imported.' };
-    }
-    if (detected.type === 'linkedin') {
-      return { error: 'LinkedIn export import is not supported yet — nothing was imported.' };
-    }
-    return { error: 'unrecognized export — expected a Mycelium vault export, or a Claude/ChatGPT conversations.json' };
+  // Archive imports (Claude/ChatGPT/Mycelium vault zips) now route through the
+  // single import spine (src/ingest/run-import.js) — detection, dispatch, the
+  // zip-bomb/entry-count guard and the unsupported-format errors all live there.
+  // `filename` is currently unused by the archive path (detection is by content)
+  // but kept in the signature for the loose-file kind that 2b will add.
+  async function processArchive(buffer, filename) { // eslint-disable-line no-unused-vars
+    return runImport({ kind: 'archive', buffer }, { db, userId, enqueueEnrichment });
   }
 
   // ── POST /upload — single-shot multipart `file` ────────────────────────────
