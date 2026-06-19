@@ -70,6 +70,10 @@ async function main() {
       const db = new Database(vault);
       db.exec(`CREATE TABLE facts(id TEXT PRIMARY KEY, user_id TEXT, category TEXT, key TEXT, value TEXT, UNIQUE(user_id,category,key))`);
       db.exec(`CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT)`);
+      // secrets (SYSTEM_KEY) is the only field-encrypted table after the SQLCipher
+      // collapse (Stage B/C cut 4) → A7 uses it to prove the bridge's /batch_encrypted
+      // path still envelopes. Schema mirrors migrations/0001_init.sql.
+      db.exec(`CREATE TABLE secrets(id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL, value TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'org', user_id TEXT NOT NULL DEFAULT 'system', agent TEXT, version INTEGER NOT NULL DEFAULT 1, description TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), key_family TEXT NOT NULL DEFAULT 'system', UNIQUE(key,user_id,agent))`);
       db.prepare(`INSERT INTO facts(id,user_id,category,key,value) VALUES (?,?,?,?,?)`).run('f1', 'u', 'pre', 'k1', 'PLAINTEXT_PRE_MARKER');
       for (let i = 0; i < 25; i++) db.prepare(`INSERT INTO notes(body) VALUES (?)`).run(`note-${i}`);
       db.pragma('wal_checkpoint(TRUNCATE)');
@@ -128,17 +132,22 @@ async function main() {
       ok('A7 /query raw write is NOT column-encrypted', v === 'RAW_PLAINTEXT_WRITE');
     }
 
-    // ── A7-enc: /batch_encrypted write lands as an AES-GCM envelope ──────────
-    await bridgeReq('/batch_encrypted', { statements: [{ sql: `INSERT INTO facts(id,user_id,category,key,value) VALUES (?,?,?,?,?)`, params: ['f3', 'u', 'enc', 'k3', 'ENC_SECRET_VALUE'] }] });
+    // ── A7-enc: /batch_encrypted write lands as an AES-GCM envelope. After the
+    // SQLCipher collapse (Stage B/C cut 4) `secrets` (SYSTEM_KEY) is the ONLY field-
+    // encrypted table left, so it's the durable target proving the bridge's encrypt
+    // path still envelopes where ENCRYPTED_FIELDS says to. (facts.value is now plaintext-
+    // in-cipher → the bridge writes it raw; that contrast is A7-raw above.) The bridge
+    // (pipeline/vault-bridge.js) holds BOTH userKey + systemKey, so it can write secrets.
+    await bridgeReq('/batch_encrypted', { statements: [{ sql: `INSERT INTO secrets(user_id,key,value,scope) VALUES (?,?,?,?)`, params: ['u', 'k3', 'ENC_SECRET_VALUE', 'personal'] }] });
     {
-      const rawRead = await bridgeReq('/query', { sql: `SELECT value FROM facts WHERE key='k3'` });
+      const rawRead = await bridgeReq('/query', { sql: `SELECT value FROM secrets WHERE user_id='u'` });
       const raw = rawRead.json?.rows?.[0]?.value;
       // Envelopes are stored as base64(JSON{v,s,iv,ct,dk}) — decode before checking shape.
       let env = null; try { env = JSON.parse(Buffer.from(String(raw), 'base64').toString('utf8')); } catch {}
-      ok('A7 /batch_encrypted stored an envelope (not plaintext)', raw !== 'ENC_SECRET_VALUE' && !!(env && env.ct && env.iv && env.s && env.dk));
+      ok('A7 /batch_encrypted stored a SYSTEM_KEY envelope (secrets — only field-encrypted table post-collapse)', raw !== 'ENC_SECRET_VALUE' && !!(env && env.ct && env.iv && env.s && env.dk));
       // adapter (auto-decrypt) reads the plaintext back → proves it's a valid envelope
       const { db, close } = getDb({ dbPath: vault, userKey: await loadKey(USER_MASTER), systemKey: await loadKey(SYSTEM_KEY), dbKeyHex: DB_KEY });
-      const dec = (await db.rawQuery(`SELECT value FROM facts WHERE key='k3'`)).results?.[0]?.value;
+      const dec = (await db.rawQuery(`SELECT value FROM secrets WHERE user_id='u'`)).results?.[0]?.value;
       close();
       ok('A7 adapter auto-decrypts the envelope back to plaintext', dec === 'ENC_SECRET_VALUE');
     }
