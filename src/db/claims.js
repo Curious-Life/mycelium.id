@@ -34,7 +34,8 @@ export function createClaimsNamespace(deps) {
   const num = (v) => (v == null ? null : Number(v));
   const rows = (res) => (Array.isArray(res) ? res : res?.results || []);
   const CLAIM_COLS =
-    'id, subject, claim_type, content, confidence_logodds, decay_class, support, content_hash, status, last_evidence_at, created_at, updated_at';
+    'id, subject, claim_type, content, confidence_logodds, decay_class, support, content_hash, status, '
+    + 'last_evidence_at, created_at, updated_at, valid_from, valid_to, superseded_by, domain, variability, context_primary';
 
   /** Hydrate a decrypted person_claims row to a typed object (numbers coerced). */
   function toClaim(r) {
@@ -54,6 +55,15 @@ export function createClaimsNamespace(deps) {
       lastEvidenceAt: r.last_evidence_at,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
+      // bi-temporal + distribution (Phase 2a) — valid-time, the revision chain, and the
+      // Whole-Trait params. variability/context_primary are the structured "distribution, not
+      // point" fields; the full conditioning distribution rides support.contexts.
+      validFrom: r.valid_from,
+      validTo: r.valid_to,
+      supersededBy: r.superseded_by,
+      domain: r.domain,
+      variability: num(r.variability),
+      contextPrimary: r.context_primary,
     };
   }
 
@@ -70,11 +80,15 @@ export function createClaimsNamespace(deps) {
       // updated_at is bound as a param (all-? VALUES group, like facts/messages):
       // the adapter's write-rewriter only handles ? placeholders in VALUES, and a
       // bare strftime() literal there parses as a syntax error.
+      // valid_from is the birth-of-validity — set on INSERT, IMMUTABLE on conflict (like created_at).
+      // domain/variability/context_primary are mutable (re-distilled). valid_to/superseded_by are
+      // owned by retract() (the revision chain), never by upsert.
       const res = await d1Query(
         `INSERT INTO person_claims
            (id, user_id, subject, claim_type, content, confidence_logodds, decay_class,
-            support, content_hash, embedding_768, status, last_evidence_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            support, content_hash, embedding_768, status, last_evidence_at,
+            valid_from, domain, variability, context_primary, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(id) DO UPDATE SET
            subject = excluded.subject,
            claim_type = excluded.claim_type,
@@ -86,22 +100,28 @@ export function createClaimsNamespace(deps) {
            embedding_768 = excluded.embedding_768,
            status = excluded.status,
            last_evidence_at = excluded.last_evidence_at,
+           domain = excluded.domain,
+           variability = excluded.variability,
+           context_primary = excluded.context_primary,
            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
          RETURNING id`,
         [id, c.userId, c.subject ?? 'self', c.claimType ?? null, c.content ?? null,
           c.confidenceLogodds ?? null, c.decayClass ?? null,
           c.support != null ? JSON.stringify(c.support) : null,
           c.contentHash ?? null, c.embedding768 ?? null, c.status ?? 'active',
-          c.lastEvidenceAt ?? null, new Date().toISOString()],
+          c.lastEvidenceAt ?? null,
+          c.validFrom ?? new Date().toISOString(), c.domain ?? null,
+          c.variability ?? null, c.contextPrimary ?? null, new Date().toISOString()],
       );
       return { id: firstRow(res)?.id || id };
     },
 
-    /** Active claims for getContext / retrieval — highest confidence first. */
+    /** Active + currently-valid claims for getContext / retrieval — highest confidence first.
+     * status='active' excludes pending (CVP gate) + superseded/archived; valid_to IS NULL = now-true. */
     async listActive(userId, { limit = 20 } = {}) {
       const res = await d1Query(
         `SELECT ${CLAIM_COLS} FROM person_claims
-         WHERE user_id = ? AND status = 'active'
+         WHERE user_id = ? AND status = 'active' AND valid_to IS NULL
          ORDER BY last_evidence_at DESC LIMIT ?`,
         [userId, limit]);
       // confidence_logodds is encrypted (can't ORDER BY it in SQL); recency-ordered
@@ -135,12 +155,92 @@ export function createClaimsNamespace(deps) {
       return toClaim(firstRow(res));
     },
 
-    /** Set a claim's status (active|archived|superseded|rejected). */
+    /** Set a claim's status (pending|active|archived|superseded|rejected). */
     async setStatus(userId, id, status) {
       await d1Query(
         `UPDATE person_claims SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
          WHERE user_id = ? AND id = ?`, [status, userId, id]);
       return { id, status };
+    },
+
+    /**
+     * AGM contraction (Phase 2a): CLOSE a claim's validity + link its successor — never overwrite,
+     * never delete. valid_to marks when it ceased being true; superseded_by points at the new row.
+     * The old row stays (status='superseded') as the audit trail. `boundary` claims are caller-gated
+     * (the lifecycle refuses to auto-retract a safety boundary).
+     */
+    async retract(userId, id, { validTo = null, supersededBy = null, status = 'superseded' } = {}) {
+      const vt = validTo ?? new Date().toISOString();
+      await d1Query(
+        `UPDATE person_claims
+           SET status = ?, valid_to = ?, superseded_by = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE user_id = ? AND id = ?`,
+        [status, vt, supersededBy, userId, id]);
+      return { id, status, validTo: vt, supersededBy };
+    },
+
+    /** Promote a pending claim to active — the SPRT promotion bar cleared (§1). Idempotent: only fires
+     * from 'pending'. */
+    async promote(userId, id) {
+      await d1Query(
+        `UPDATE person_claims SET status = 'active', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE user_id = ? AND id = ? AND status = 'pending'`,
+        [userId, id]);
+      return { id, status: 'active' };
+    },
+
+    /**
+     * VALID-time AS-OF: the claims TRUE of the user at `date`. getContext uses date=now → currently-
+     * true active claims (a since-superseded claim has valid_to<=now → excluded by the interval).
+     * A historical date returns what was true THEN, including since-superseded claims (set
+     * includeArchived to also surface low-confidence-archived ones for an audit replay). pending
+     * (CVP-gated) and rejected (tombstones) are never returned. NULL valid_from = always-having-been.
+     */
+    async asOf(userId, date, { includeArchived = false } = {}) {
+      const excluded = includeArchived ? "('pending','rejected')" : "('pending','rejected','archived')";
+      const res = await d1Query(
+        `SELECT ${CLAIM_COLS} FROM person_claims
+         WHERE user_id = ? AND status NOT IN ${excluded}
+           AND (valid_from IS NULL OR valid_from <= ?)
+           AND (valid_to IS NULL OR valid_to > ?)
+         ORDER BY last_evidence_at DESC`,
+        [userId, date, date]);
+      return rows(res).map(toClaim);
+    },
+
+    /**
+     * Per-change TRANSACTION-time record (Phase 2a, the D fix): one row per assertion change so the
+     * belief axis is GAPLESS (the periodic per-window snapshots left intermediate revisions invisible).
+     * granularity='change', window=the change instant, delta_kind=the op (added|corroborated|weakened|
+     * retracted|promoted|superseded). Same-ms collisions DO UPDATE (a non-issue in a single-user
+     * nightly system).
+     */
+    async recordChange(s) {
+      const id = s.id || randomUUID();
+      const at = s.at || new Date().toISOString();
+      await d1Query(
+        `INSERT INTO person_claim_snapshots
+           (id, user_id, claim_id, window_start, window_end, granularity,
+            confidence_logodds, content, evidence_count, delta_kind)
+         VALUES (?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(user_id, claim_id, window_end, granularity) DO UPDATE SET
+           confidence_logodds = excluded.confidence_logodds, content = excluded.content,
+           evidence_count = excluded.evidence_count, delta_kind = excluded.delta_kind,
+           computed_at = datetime('now')`,
+        [id, s.userId, s.claimId, at, at, 'change',
+          s.confidenceLogodds ?? null, s.content ?? null, s.evidenceCount ?? null, s.deltaKind ?? null]);
+      return { id, at };
+    },
+
+    /** TRANSACTION-time AS-OF replay: what we BELIEVED about a claim at `date` (the per-change log). */
+    async believedAsOf(userId, claimId, date) {
+      const r = firstRow(await d1Query(
+        `SELECT window_end, confidence_logodds, content, delta_kind FROM person_claim_snapshots
+         WHERE user_id = ? AND claim_id = ? AND granularity = 'change' AND window_end <= ?
+         ORDER BY window_end DESC LIMIT 1`,
+        [userId, claimId, date]));
+      if (!r) return null;
+      return { at: r.window_end, confidenceLogodds: num(r.confidence_logodds), content: r.content, deltaKind: r.delta_kind };
     },
 
     /**

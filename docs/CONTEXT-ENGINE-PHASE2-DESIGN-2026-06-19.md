@@ -14,7 +14,14 @@ Phase 2 = the **stable-facts layer**, built by marrying three mature sciences (A
 | 4 | **Reuse vs new table** | **Extend `person_claims`** (+4 plaintext cols). `person_claim_snapshots` already provides transaction-time history; no `claims_bitemporal` table. |
 | 5 | **Distillation trigger** | **Both:** the **integration cycle** runs it nightly (schedule), but each claim proposal is **importance-gated** (a theme needs ≥3 corroborating day-cards before it's proposed). |
 
-## 2. Storage — extend `person_claims` (migration `0033`)
+## 2a STATUS — ✅ BUILT 2026-06-19 (`verify:claims-bitemporal` 16/0) + the 4 reviewer refinements
+- **B (structured distribution — gated 2a, DONE):** the schema adds **6** plaintext columns, not 4 — incl. **`variability REAL`** + **`context_primary TEXT`** (queryable structured fields, never prose); the full conditioning distribution rides **`support.contexts`** as structured JSON. "Distribution, not point" is now reasoned-over, not cosmetic.
+- **D (per-change transaction-time — gated 2a, DONE):** verified the existing `person_claim_snapshots` are **periodic per-window checkpoints** (`writeSnapshot` keyed by `window_end+granularity`, driven by `lastSnapshotWindow`) → gappy. Added **`recordChange`** (granularity `'change'`, one row per assertion change) + **`believedAsOf`** (gapless transaction-time replay). The gate proves an intermediate "corroborated" state survives that periodic checkpoints would lose.
+- **C (propose-vs-corroborate role split — flagged for 2b/2c):** **model.md may only GENERATE candidates; confidence may only move on day-card (observation) evidence.** A structural rule in the confidence update, not a prompt — the prior belief must never vote for itself (anti-self-anchoring). *The one not to ship without.*
+- **A (config + scaled promotion bar — flagged for 2b/2c):** the SPRT bound is an **env default** (calibrate fire-rate on the real vault) and **scales with `decay_class`** (identity/boundary need *more* distinct-day corroborations than mood — Whole Trait: a trait needs many states); and 2b names the **retraction/demotion lower bound** (when contradicting day-cards push L low enough to contract).
+- Affirmed: deprecate `discover-claims.mjs` (sole caller `jobs.js:418`); **source-priority** (user-stated > agent-inferred) lives in 2b's contradiction-resolve; **human-reviewed merge** (highest-value memory); pending excluded from getContext (CVP gate).
+
+## 2. Storage — extend `person_claims` (migration `0033`) — built per §2a (6 cols: + variability + context_primary)
 The bi-temporal substrate is *mostly there* (`0011`): `created_at`/`updated_at` + the `person_claim_snapshots` series = **transaction-time**; `confidence_logodds` + `decay_class` = the posterior. **Add valid-time + the supersede link + the domain axis** (all plaintext — queryable):
 ```sql
 ALTER TABLE person_claims ADD COLUMN valid_from    TEXT;  -- when the trait/fact became true (real-world)
