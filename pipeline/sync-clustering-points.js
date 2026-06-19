@@ -5,12 +5,13 @@
  * Selects messages that carry a search-side 768D Nomic embedding
  * (`embedding_768`, an encrypted envelope), decrypts + base64-decodes it,
  * slices the matryoshka 256D prefix, L2-normalizes, and upserts a
- * clustering_points row carrying the 256D vector as an ENCRYPTED wrapped-DEK
- * envelope in `nomic_embedding` (the same caller-encrypts scheme embedding_768
- * uses — see decode.js encryptVector). cluster.py's fetch_all_embeddings()
- * decrypts it via crypto_local.decrypt_vector (model 'nomic-v1.5-256d',
- * NOMIC_DIM=256 floats). nomic_embedding is in NEVER_AUTO_DECRYPT (not
- * ENCRYPTED_FIELDS), so the db adapter passes the envelope through verbatim.
+ * clustering_points row carrying the 256D vector as RAW little-endian Float32
+ * BLOB bytes in `nomic_embedding` (Stage A of the SQLCipher collapse — no
+ * per-field envelope; at-rest secrecy is whole-file SQLCipher). cluster.py's
+ * fetch_all_embeddings() reads it via _decode_nomic_embedding, which dual-reads
+ * raw bytes + any legacy envelope (model 'nomic-v1.5-256d', NOMIC_DIM=256).
+ * nomic_embedding is NEVER_AUTO_DECRYPT (not ENCRYPTED_FIELDS), so the db adapter
+ * passes the value through verbatim — Buffer in → BLOB on disk.
  *
  * This is the fresh, small "Step 1" the slim orchestrator owns: it does NOT
  * recompute embeddings, it derives the 256D clustering vector from the 768D
@@ -30,7 +31,7 @@ import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { resolveDbKeyHex } from '../src/db/open.js';
 import * as cryptoLocal from '../src/crypto/crypto-local.js';
-import { decryptVector, encryptVector } from '../src/search/ann/decode.js';
+import { decryptVector, encodeVectorRaw } from '../src/search/ann/decode.js';
 
 const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';
 const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
@@ -39,10 +40,9 @@ const SYSTEM_KEY = process.env.SYSTEM_KEY;
 const DRY_RUN = process.argv.includes('--dry-run');
 
 const NOMIC_DIM = 256; // matryoshka truncation 768 → 256
-// Scope tag for the nomic_embedding envelope. Single-user vault → fixed scope;
-// decrypt is scope-agnostic (allowedScopes=null), so this only needs to match
-// what cluster.py's ONNX-fallback writer uses (it does — crypto_local default).
-const NOMIC_SCOPE = 'personal';
+// (Stage A: nomic_embedding is now written as a RAW LE-f32 BLOB, no envelope, so the
+// old per-field NOMIC_SCOPE tag is gone. Reads stay scope-agnostic: decryptVector is
+// called with allowedScopes=null for any legacy envelope rows still in the column.)
 
 if (!USER_MASTER || !SYSTEM_KEY) {
   console.error('Missing: USER_MASTER and SYSTEM_KEY (64-char hex each)');
@@ -133,10 +133,13 @@ async function run() {
 
       const id = `${USER_ID}:cp:message:${r.source_id}`;
       try {
-        // Encrypt the 256D clustering vector at rest. Bound as a TEXT param (the
-        // envelope is base64 ASCII) — NOT the old raw X'<hex>' BLOB. Stored in a
-        // BLOB-affinity column; SQLite keeps the value's own (TEXT) type.
-        const envelope = await encryptVector(vec, NOMIC_SCOPE, masterKey);
+        // Stage A (SQLCipher collapse): the 256D clustering vector is bound as RAW
+        // little-endian Float32 BLOB bytes — no per-field envelope. At-rest secrecy
+        // comes from whole-file SQLCipher; the old base64 wrapped-DEK envelope added
+        // ~2.43× bloat and decrypt cost for zero added protection on a local vault.
+        // better-sqlite3 binds a Buffer as a BLOB natively. The reader
+        // (cluster.py:_decode_nomic_embedding) dual-reads raw bytes + legacy envelopes.
+        const raw = encodeVectorRaw(vec);
         await query(
           `INSERT INTO clustering_points
              (id, user_id, source_type, source_id, nomic_embedding, embedding_model, created_at, updated_at)
@@ -145,7 +148,7 @@ async function run() {
              nomic_embedding = excluded.nomic_embedding,
              embedding_model = excluded.embedding_model,
              updated_at = datetime('now')`,
-          [id, USER_ID, r.source_id, envelope, r.created_at],
+          [id, USER_ID, r.source_id, raw, r.created_at],
         );
         inserted++;
       } catch (err) {
@@ -177,12 +180,12 @@ async function run() {
         const vec = await decode256(r.e, masterKey);
         if (!vec) { skipped++; continue; }
         try {
-          const envelope = await encryptVector(vec, NOMIC_SCOPE, masterKey);
+          const raw = encodeVectorRaw(vec);   // Stage A: raw LE-f32 BLOB (see insert loop)
           await query(
             `UPDATE clustering_points
                 SET nomic_embedding = ?, embedding_model = 'nomic-v1.5-256d', updated_at = datetime('now')
               WHERE id = ?`,
-            [envelope, r.cp_id],
+            [raw, r.cp_id],
           );
           backfilled++;
         } catch (err) {
