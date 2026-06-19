@@ -13,6 +13,7 @@
 import { classifySource, canonicalSource, sourceForDocumentType, STREAM_KINDS } from '../streams/source-registry.js';
 import { assembleTimelineMessages } from '../streams/assemble-messages.js';
 import { hasVectorKey } from '../federation/lexicon.js';
+import { getSpectrumCached } from '../streams-cache.js';
 
 const DAY_MS = 86400000;
 const LIVE_WINDOW_MS = 15 * 60 * 1000; // "live" = activity within 15 min
@@ -64,7 +65,6 @@ function dayKeys(now, windowDays) {
 function aggregateSql(table, srcExpr, softDelete) {
   return `SELECT ${srcExpr} AS source,
             MAX(created_at) AS last_activity,
-            COUNT(*) AS total_all,
             SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS window_total,
             SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS today_total
           FROM ${table}
@@ -113,6 +113,11 @@ export function createStreamsNamespace(deps) {
      */
     async spectrum(userId, { windowDays = 7, nowMs } = {}) {
       const win = Math.min(Math.max(windowDays | 0, 1), 90);
+      // Live path serves from the (userId, windowDays) SWR cache — the 0027
+      // covering indexes make the cold recompute sub-second, the cache makes
+      // repeat opens / the 2.5s poller near-instant. A deterministic test that
+      // injects nowMs bypasses the cache so seeded-data assertions stay exact.
+      const compute = async () => {
       const now = Number.isFinite(nowMs) ? nowMs : Date.now();
       const days = dayKeys(now, win);
       const windowFloor = new Date(now - win * DAY_MS).toISOString();
@@ -194,7 +199,10 @@ export function createStreamsNamespace(deps) {
         return (b.lastActivity || '').localeCompare(a.lastActivity || '');
       });
 
-      return { windowDays: win, days, kinds: STREAM_KINDS, sources };
+        return { windowDays: win, days, kinds: STREAM_KINDS, sources };
+      };
+      // Deterministic test (nowMs injected) bypasses the cache; live path caches.
+      return nowMs != null ? compute() : getSpectrumCached(userId, win, compute);
     },
 
     /**

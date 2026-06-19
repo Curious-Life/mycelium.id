@@ -21,6 +21,7 @@
 	import Spark from '$lib/curious/Spark.svelte';
 	import TimeSeries from '$lib/curious/TimeSeries.svelte';
 	import TerritoryRiver from '$lib/curious/TerritoryRiver.svelte';
+	import CrossCheckQuadrant from '$lib/curious/CrossCheckQuadrant.svelte';
 	import { METRIC_FAMILIES, RIGOR_LABEL, RIGOR_ACCENT, RIGOR_BLURB, type Rigor } from '$lib/curious/metricsCatalog';
 
 	type Any = Record<string, any>;
@@ -34,6 +35,7 @@
 	let current = $state<Any | null>(null); // trajectory/current.current (level=all → {realm,theme,territory})
 	let moveFresh = $state<Any | null>(null); // P2: fisher_trajectory freshness verdict ({verdict, age_ms, budget_ms})
 	let movementCrossCheck = $state<Any | null>(null); // P3b: 2x2 honesty quadrant (Fisher × basis-free embedding)
+	let xcHedge = $state<string | null>(null); // P3b: embedding_trajectory freshness hedge (top-level of the response)
 	let milestones = $state<Any[]>([]);
 	let trajectory = $state<Any[]>([]); // weekly_step rows
 	let rhythmByGran = $state<Record<string, Any | null>>({ alpha: null, theta: null, delta: null });
@@ -112,7 +114,7 @@
 		current = c?.current ?? null;
 		moveFresh = m?.freshness ?? c?.freshness ?? null;
 		// P3b: non-blocking basis-free cross-check (realm-F live altitude).
-		g('/portal/trajectory/cross-check?level=realm').then((xc) => { movementCrossCheck = xc?.cross_check ?? null; });
+		g('/portal/trajectory/cross-check?level=realm').then((xc) => { movementCrossCheck = xc?.cross_check ?? null; xcHedge = xc?.freshness_hedge ?? null; });
 		milestones = ms?.milestones ?? [];
 		trajectory = tr?.trajectory ?? [];
 		rhythmByGran = { alpha: rA, theta: rT, delta: rD };
@@ -250,6 +252,32 @@
 			default: return 'var(--hairline, #8883)';
 		}
 	});
+	// P3b honesty gate: the cross-check qualifies the HEADLINE σ only when its aligned week
+	// is the current one (is_current). The endpoint computes is_current over the SAME Fisher
+	// series the headline uses → is_current ⇒ fisher_velocity_z === velocity_baseline_z. When
+	// the embedding stage lags (is_current false) we must NOT vouch for the on-screen number.
+	const xcCurrent = $derived(Boolean(movementCrossCheck?.is_current));
+	const xcActionable = $derived(['corroborated', 'basis_suspect', 'hidden_drift'].includes(movementCrossCheck?.state));
+	const headlineTrust = $derived.by(() => {
+		if (!movementCrossCheck || !xcCurrent || !xcActionable) return null;
+		switch (movementCrossCheck.state) {
+			case 'corroborated': return { text: 'corroborated', tone: 'jade', mark: '✓' };
+			case 'basis_suspect': return { text: 'map effect?', tone: 'azure', mark: '⚠' };
+			case 'hidden_drift': return { text: 'drift your map missed', tone: 'amethyst', mark: '•' };
+			default: return null;
+		}
+	});
+	// Honest "as of {date}" when the cross-check trails the displayed week.
+	const xcLag = $derived(
+		movementCrossCheck && !xcCurrent && movementCrossCheck.state !== 'insufficient'
+			? (movementCrossCheck.window_start || '').slice(0, 10)
+			: null,
+	);
+	const xcMovers = $derived(
+		movementCrossCheck?.state === 'basis_suspect' && Array.isArray(movementCrossCheck?.top_movers)
+			? movementCrossCheck.top_movers.filter(Boolean)
+			: [],
+	);
 
 	// ── Narrative summary (Layer 1) ───────────────────────────────────────────
 	const summary = $derived.by(() => {
@@ -739,16 +767,32 @@
 						<p class="muted sm">How your {moveMetricOpts.find((o) => o.key === moveMetric)?.label} changed week by week. Flat-zero stretches are weeks with little activity.</p>
 					</div>
 					<div class="stat-row">
-						<div class="stat"><span class="s-v">{moveBaseline.sigma != null ? `${moveBaseline.sigma.toFixed(1)}σ` : '—'}</span><span class="s-l">vs your normal</span></div>
+						<div class="stat"><span class="s-v">{moveBaseline.sigma != null ? `${moveBaseline.sigma.toFixed(1)}σ` : '—'}</span><span class="s-l">vs your normal</span>{#if headlineTrust}<span class="trust" style="background:rgb({accentRgb[headlineTrust.tone]} / 0.16); color:{accentVar[headlineTrust.tone]}">{headlineTrust.mark} {headlineTrust.text}</span>{/if}</div>
 						<div class="stat"><span class="s-v">{entBaselineLabel}</span><span class="s-l">attention spread (σ)</span></div>
 						<div class="stat"><span class="s-v">{movement?.R_recent != null ? fmt(movement?.R_recent, 2) : '—'}</span><span class="s-l">recent reach (R)</span></div>
 						<div class="stat"><span class="s-v">{fmt(movement?.exploration_ratio, 2)}</span><span class="s-l">exploration ratio</span></div>
 					</div>
 					{#if moveAboveNoise === false}<p class="muted sm">This week's movement is within your measurement noise — read the σ as advisory.</p>{/if}
 						{#if movementCrossCheck && movementCrossCheck.state !== 'insufficient'}
-							<p class="muted sm" style="border-left:2px solid {xcAccent}; padding-left:0.55rem; margin-top:0.4rem">
-								<b>Cross-check — {movementCrossCheck.label}.</b> {movementCrossCheck.detail}
-							</p>
+							<div class="panel xc-panel">
+								<div class="row-between">
+									<h3>Cross-check — a second, basis-free witness</h3>
+									{#if xcLag}<span class="lc">as of {xcLag}</span>{/if}
+								</div>
+								{#if xcHedge}<p class="muted sm">{xcHedge}</p>{/if}
+								<div class="xc-grid">
+									<CrossCheckQuadrant
+										f={movementCrossCheck.fisher_velocity_z}
+										e={movementCrossCheck.centroid_drift_z}
+										state={movementCrossCheck.state}
+										accent={xcAccent} />
+									<div class="xc-copy">
+										<p style="border-left:2px solid {xcAccent}; padding-left:0.6rem"><b>{movementCrossCheck.label}.</b> <span class="muted">{movementCrossCheck.detail}</span></p>
+										{#if xcLag}<p class="muted sm">Compared on the most recent week confident in both signals — your semantic-center reading is still catching up to the latest week, so this doesn't yet qualify the σ above.</p>{/if}
+										{#if xcMovers.length}<p class="muted sm">Fisher pins this on {xcMovers.join(', ')} — but your semantic center held, so it may be a topic-map effect.</p>{/if}
+									</div>
+								</div>
+							</div>
 						{/if}
 					<div class="panel">
 						<h3>Phase by level</h3>
@@ -1187,6 +1231,14 @@
 	.stat { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 0.9rem 1rem; text-align: center; }
 	.s-v { display: block; font-size: 1.3rem; font-weight: 600; letter-spacing: -0.02em; color: var(--color-text-emphasis); font-variant-numeric: tabular-nums; }
 	.s-l { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-text-tertiary); margin-top: 0.2rem; display: block; }
+	/* P3b cross-check: trust pill on the σ stat + the 2×2 quadrant panel */
+	.trust { display: inline-block; margin-top: 0.35rem; font-size: 0.6rem; font-weight: 600; letter-spacing: 0.03em; padding: 0.1rem 0.45rem; border-radius: var(--radius-full); white-space: nowrap; }
+	.xc-panel { margin-top: 0.6rem; }
+	.xc-grid { display: flex; flex-wrap: wrap; align-items: center; gap: 1.1rem; }
+	.xc-grid :global(.xc) { flex: 0 0 auto; }
+	.xc-copy { flex: 1 1 12rem; min-width: 12rem; }
+	.xc-copy p { margin: 0 0 0.5rem; font-size: 0.82rem; line-height: 1.45; }
+	.xc-copy p:last-child { margin-bottom: 0; }
 
 	.level-chips { display: flex; flex-wrap: wrap; gap: 0.7rem; margin-bottom: 0.8rem; }
 	.lchip { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.8rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); }

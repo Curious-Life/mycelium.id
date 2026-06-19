@@ -73,21 +73,43 @@ async function main() {
   const get = () => fetch(`${url}/api/v1/portal/territory-river`).then((r) => r.text());
   bustTerritoryRiver();
 
+  // Measure event-loop responsiveness DURING the cold MISS. A 20ms heartbeat
+  // timer records its actual fire gaps; the max gap is the longest the single
+  // Node event loop was monopolized (unable to serve any other request). Before
+  // the chunked-decrypt fix this gap ≈ the whole ~10–23s fold (HTTP 000 for every
+  // other endpoint). After, each setImmediate batch boundary lets the timer (and
+  // real concurrent requests) run, so the max stall collapses to ~one batch.
+  let last = process.hrtime.bigint();
+  let maxStall = 0;
+  const beat = setInterval(() => {
+    const now = process.hrtime.bigint();
+    maxStall = Math.max(maxStall, Number(now - last) / 1e6);
+    last = now;
+  }, 20);
   const [tMiss, body] = await timed(get);
+  clearInterval(beat);
+
   const parsed = JSON.parse(body);
   const [tWarm] = await timed(get);
   bustTerritoryRiver(); // simulate app restart: in-proc memo gone, persisted row remains
   const [tReboot] = await timed(get);
 
+  // The cap means a genuine MISS now decrypts at most CAP weeks, not all 417.
+  const CAP = 180;
+  const cappedOk = parsed.weeks?.length === Math.min(WEEKS, CAP);
+  const stallOk = maxStall < 1000; // loop must stay sub-second responsive under a cold fold
+
   console.log('\n────────────── territory-river timings (production scale) ──────────────');
-  console.log(`  weeks=${parsed.weeks?.length} anchors=${parsed.anchors?.length} novelty.path=${parsed.novelty?.path?.length}`);
-  console.log(`  MISS   (decrypt 417 vectors + fold)      : ${ms(tMiss)}   ← before (every load did this)`);
-  console.log(`  WARM   (in-process memo hit)             : ${ms(tWarm)}   ← after, repeat load`);
-  console.log(`  REBOOT (persisted row, decrypt 1 blob)   : ${ms(tReboot)}   ← after, first load post-restart`);
+  console.log(`  weeks=${parsed.weeks?.length} (cap ${CAP}) anchors=${parsed.anchors?.length} novelty.path=${parsed.novelty?.path?.length}`);
+  console.log(`  MISS   (decrypt ≤${CAP} vectors + fold)    : ${ms(tMiss)}   ← cold path`);
+  console.log(`  WARM   (in-process memo hit)             : ${ms(tWarm)}   ← repeat load`);
+  console.log(`  REBOOT (persisted row, decrypt 1 blob)   : ${ms(tReboot)}   ← first load post-restart`);
   console.log(`  speedup: warm ${(tMiss / tWarm).toFixed(0)}× · reboot ${(tMiss / tReboot).toFixed(0)}×`);
+  console.log(`  max event-loop stall during cold MISS    : ${ms(maxStall)}   ${stallOk ? '✓ responsive' : '✗ MONOPOLIZED'}`);
+  console.log(`  capped to recent ${CAP} weeks            : ${cappedOk ? '✓' : `✗ got ${parsed.weeks?.length}`}`);
   console.log('────────────────────────────────────────────────────────────────────────');
 
   await srv.close?.();
-  process.exit(0);
+  process.exit(stallOk && cappedOk ? 0 : 1);
 }
 main().catch((e) => { console.error('FATAL', e); process.exit(1); });

@@ -20,6 +20,7 @@
 import { createHash } from 'node:crypto';
 import { createAgentHarness } from './harness.js';
 import { createAgentLoop } from './loop.js';
+import { createAgentHooks, autonomousToolGuard } from './hooks.js';
 import { createLane } from './lane.js';
 import { computeNextRun } from './scheduler-time.js';
 import { runAgentTurn } from './run-turn.js';
@@ -63,9 +64,13 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
   let timer = null;
   let stopped = false;
 
+  // Runtime tool guard (G1): defense-in-depth under the grant-time allowlist; opt-in via
+  // MYCELIUM_AUTONOMOUS_TOOL_DENY (unset ⇒ undefined ⇒ unchanged).
+  const hooks = createAgentHooks({ db, userId, source: 'scheduler', toolGuard: autonomousToolGuard() });
   const harness = createAgentHarness({
     onEgress: createEgressAuditSink(db, userId),
     onUsage: createUsageSink(db, userId, { source: 'scheduler' }),
+    hooks, surface: 'scheduler',
     fetch: fetchImpl,
     logger: (m) => logger(`harness: ${m}`),
   });
@@ -84,7 +89,7 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
   // A scheduled turn opts into whatever gated tools the task named in enabled_tools.
   async function buildAndRunTurn(task) {
     return runAgentTurn(
-      { db, userId: task.user_id || userId, tools, handlers, loop, fetchImpl, signal: ctrl.signal },
+      { db, userId: task.user_id || userId, tools, handlers, loop, fetchImpl, signal: ctrl.signal, hooks },
       { userMessage: task.prompt || '', systemExtra: SCHEDULER_SYSTEM, enabledTools: task.enabled_tools || [] },
     );
   }

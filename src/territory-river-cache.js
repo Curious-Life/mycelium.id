@@ -34,34 +34,52 @@ const _inFlight = new Map(); // userId -> { key, promise }
 // Payload-shape version. Bump whenever the river payload SHAPE changes (not its
 // data) so stale persisted/in-process caches from an older code version are
 // invalidated — the data-only probe below can't see code changes. v2: anchor_count.
-const RIVER_SCHEMA = 'v3-weeklytop';
+// v4: dropped territory_profiles.MAX(updated_at) from the probe (see below).
+// v5: restored weekly_top in the payload (regression from #315; see CURIOUS-LIFE handoff).
+const RIVER_SCHEMA = 'v5-weeklytop';
 
 /**
  * Cheap staleness probe. Reads only structural (non-encrypted) columns —
- * COUNT / MAX over fisher_trajectory, territory_profiles, frequency_snapshots —
- * so it never decrypts an activation vector. Any change that alters the river
- * (new clustering run, appended weekly step, re-described / re-anchored profile,
- * new weekly frequency snapshot) moves one of these signals and rotates the key.
+ * COUNT / MAX over fisher_trajectory + frequency_snapshots, COUNT over
+ * territory_profiles — so it never decrypts an activation vector. Any change that
+ * alters the river *structurally* (new clustering run, appended weekly step,
+ * added/removed profile, new weekly frequency snapshot) moves one of these
+ * signals and rotates the key.
+ *
+ * Deliberately EXCLUDES territory_profiles.MAX(updated_at). That column churns on
+ * every per-profile re-describe during an active measure/enrich pipeline — the
+ * exact congested state this cache exists to survive — which rotated the key on
+ * back-to-back calls and made the cache never hit (a 2nd river call still paid the
+ * full ~10–23s fold). The river only changes meaningfully when a clustering run is
+ * recomputed (caught by `r:` = MAX(clustering_run_id)) or a step/profile/snapshot
+ * is added/removed (caught by the COUNTs / window-ends). A cosmetic re-describe
+ * (a band's NAME) within the same run is a label overlay that refreshes on the
+ * next run — an acceptable trade for staying responsive under load. See #301.
+ *
+ * `variant` folds a request-shaped parameter (e.g. the recent-week cap) into the
+ * key so two different windows never collide on the single per-user cache slot.
  *
  * @param {{ rawQuery: Function }} db
  * @param {string} userId
+ * @param {string} [variant]  request-shaped key component (e.g. `cap:180`)
  * @returns {Promise<string>}
  */
-export async function riverCacheKey(db, userId) {
+export async function riverCacheKey(db, userId, variant = '') {
   const one = async (sql) => (await db.rawQuery(sql, [userId])).results?.[0] || {};
   const traj = await one(
     `SELECT MAX(clustering_run_id) AS run, COUNT(*) AS n, MAX(window_end) AS w
        FROM fisher_trajectory
       WHERE user_id = ? AND level = 'territory' AND window_type = 'weekly_step'`);
   const prof = await one(
-    `SELECT COUNT(*) AS n, MAX(updated_at) AS mu FROM territory_profiles WHERE user_id = ?`);
+    `SELECT COUNT(*) AS n FROM territory_profiles WHERE user_id = ?`);
   const freq = await one(
     `SELECT COUNT(*) AS n, MAX(window_end) AS w
        FROM frequency_snapshots WHERE user_id = ? AND granularity = 'week'`);
   return [
     `s:${RIVER_SCHEMA}`,
+    `v:${variant || '-'}`,
     `r:${traj.run ?? '-'}`, `tn:${traj.n ?? 0}`, `tw:${traj.w ?? '-'}`,
-    `pn:${prof.n ?? 0}`, `pu:${prof.mu ?? '-'}`,
+    `pn:${prof.n ?? 0}`,
     `fn:${freq.n ?? 0}`, `fw:${freq.w ?? '-'}`,
   ].join('|');
 }
@@ -74,10 +92,11 @@ export async function riverCacheKey(db, userId) {
  * @param {{ rawQuery: Function }} db
  * @param {string} userId
  * @param {() => Promise<object>} computeFn  produces the full river payload
+ * @param {string} [variant]  request-shaped key component (e.g. `cap:180`)
  * @returns {Promise<object>}
  */
-export async function getTerritoryRiverCached(db, userId, computeFn) {
-  const key = await riverCacheKey(db, userId);
+export async function getTerritoryRiverCached(db, userId, computeFn, variant = '') {
+  const key = await riverCacheKey(db, userId, variant);
 
   const mem = _mem.get(userId);
   if (mem && mem.key === key) return mem.value;

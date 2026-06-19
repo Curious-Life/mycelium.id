@@ -24,6 +24,7 @@ import { createHash } from 'node:crypto';
 import { openStream, ssePayloads, resolveChatUrl } from '../inference/cloud.js';
 import { DEFAULT_OLLAMA_URL, DEFAULT_LOCAL_MODEL } from '../inference/local.js';
 import { InferenceError } from '../inference/errors.js';
+import { fireBeforeToolCall, fireAfterToolCall } from './hooks.js';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -352,7 +353,7 @@ export function describeProvider(cfg = {}) {
  * @param {number} [opts.timeoutMs]           per-call connection (TTFB) timeout
  * @param {(msg:string)=>void} [opts.logger]
  */
-export function createAgentHarness({ onEgress, onUsage, fetch = globalThis.fetch, timeoutMs = 120000, logger = () => {} } = {}) {
+export function createAgentHarness({ onEgress, onUsage, hooks, surface, fetch = globalThis.fetch, timeoutMs = 120000, logger = () => {} } = {}) {
   /**
    * Drive ONE user turn to completion, streaming SSE-shaped events via send().
    * @param {object} a
@@ -429,11 +430,25 @@ export function createAgentHarness({ onEgress, onUsage, fetch = globalThis.fetch
         const sig = `${tc.name}:${JSON.stringify(tc.args ?? {})}`;
         const reps = (callRepeats.get(sig) || 0) + 1; callRepeats.set(sig, reps);
         if (reps >= TOOL_REPEAT_LIMIT) { breaker = 'repeat'; logger(`harness: circuit-breaker — '${tc.name}' repeated ${reps}× with identical args; final answer pass`); break toolLoop; }
+        // Runtime tool gate (G1): the FIRST per-call authorization seam, layered UNDER the
+        // grant-time allowlist (autonomyTools). Fail-CLOSED — a throwing/timed-out guard blocks.
+        // The denial is pushed as a tool-result so the model re-plans; the breaker above caps a
+        // model that keeps re-requesting a blocked tool. No-hooks ⇒ this branch is skipped entirely.
+        if (hooks?.beforeToolCall) {
+          const verdict = await fireBeforeToolCall(hooks, { name: tc.name, args: tc.args, surface });
+          if (verdict?.block) {
+            send({ type: 'tool_blocked', name: tc.name });
+            results.push(adapter.toolResult(tc, `blocked: ${verdict.reason || 'policy'}`, true));
+            continue;   // not executed → deliberately NOT added to toolsUsed
+          }
+        }
         send({ type: 'tool_start', name: tc.name }); toolsUsed.push(tc.name);
-        let out, isErr = false;
+        let out, isErr = false; const t0 = Date.now();
         try { out = await call(tc.name, tc.args); }
         catch { out = 'tool execution failed'; isErr = true; }   // never surface err.message (§1)
         out = capToolOutput(out);                                 // in-turn window safety
+        // Observer hook (G1): fire-and-forget, fail-OPEN — never stalls or breaks the turn.
+        if (hooks?.afterToolCall) fireAfterToolCall(hooks, { name: tc.name, args: tc.args, output: out, isError: isErr, durationMs: Date.now() - t0 }, logger);
         send({ type: isErr ? 'tool_error' : 'tool_complete', name: tc.name });
         results.push(adapter.toolResult(tc, out, isErr));
       }

@@ -6,7 +6,8 @@
 //   1. the endpoint still returns a correct river through the cache,
 //   2. the persisted payload is ENCRYPTED at rest (no territory-name leak),
 //   3. an in-process hit and a persisted (cross-"reboot") hit both skip recompute,
-//   4. a real data change (profile touch / new week) rotates the key → recompute,
+//   4. a structural data change (new week) rotates the key → recompute, while
+//      benign profile updated_at churn does NOT (cache survives active enrich),
 //   5. concurrent cold requests single-flight onto ONE recompute,
 //   6. fail-soft: with the cache table absent, the endpoint still answers.
 // PASS/FAIL ledger; exit 0 only if all pass.
@@ -105,13 +106,30 @@ async function main() {
   const c = await getTerritoryRiverCached(db, UID, compute); // persisted hit → no compute
   rec('4. persisted hit (post in-proc clear) skips recompute', computes === 1 && c.marker === a.marker, `computes=${computes} marker=${c.marker}`);
 
-  // 5) A real data change rotates the key → recompute.
+  // 5) A structural data change (new weekly step) rotates the key → recompute.
   const keyBefore = await riverCacheKey(db, UID);
-  seed.prepare(`UPDATE territory_profiles SET updated_at = '2025-03-01T00:00:00Z' WHERE user_id = ? AND territory_id = 10`).run(UID);
+  seed.prepare(
+    `INSERT INTO fisher_trajectory
+       (user_id, level, window_type, window_start, window_end, activation_vector,
+        message_count, active_territory_count, clustering_run_id, low_confidence, scope)
+     VALUES (?, 'territory', 'weekly_step', '2025-02-09', '2025-02-09', ?, 12, 3, ?, 0, 'personal')`,
+  ).run(UID, JSON.stringify({ '10': 0.6, '20': 0.3, '30': 0.05 }), RUN);
   const keyAfter = await riverCacheKey(db, UID);
   const d = await getTerritoryRiverCached(db, UID, compute); // miss → compute (2)
-  rec('5. data change rotates key → recompute', keyBefore !== keyAfter && computes === 2 && d.marker === 2,
+  rec('5. structural data change (new week) rotates key → recompute', keyBefore !== keyAfter && computes === 2 && d.marker === 2,
     `keyMoved=${keyBefore !== keyAfter} computes=${computes}`);
+
+  // 5b) Benign profile updated_at churn (per-profile re-describe during an active
+  //     enrich pipeline) must NOT rotate the key. This was the regression that made
+  //     the cache never hit under load — the key included MAX(updated_at), so a 2nd
+  //     back-to-back river call still paid the full ~10–23s fold. The robust key
+  //     (no updated_at) tolerates this churn; labels refresh on the next clustering
+  //     run. @see src/territory-river-cache.js.
+  const kPre = await riverCacheKey(db, UID);
+  seed.prepare(`UPDATE territory_profiles SET updated_at = '2099-12-31T23:59:59Z' WHERE user_id = ? AND territory_id = 10`).run(UID);
+  const kPost = await riverCacheKey(db, UID);
+  rec('5b. benign updated_at churn does NOT rotate key (survives active enrich)',
+    kPre === kPost, `moved=${kPre !== kPost}`);
 
   // 6) Single-flight: clear memo, fire 5 concurrent cold requests → ONE recompute.
   bustTerritoryRiver();
