@@ -92,3 +92,51 @@ export async function encryptVector(vec, scope, masterKey, userId = null) {
   if (!masterKey) throw new Error('encryptVector: masterKey required');
   return encrypt(encodeVector(vec), scope, masterKey, userId);
 }
+
+// ── SQLCipher-collapse codec (Stage A) ───────────────────────────────────────
+// Vectors live as RAW little-endian float32 BYTES inside the whole-file-encrypted
+// vault — no inner AES-GCM envelope, no base64 (which doubled storage ~2.43×).
+// Confidentiality is the SQLCipher file itself. Same byte layout as encodeVector's
+// pre-base64 buffer and the Python encode_vector_raw, so a value written by either
+// side decodes on the other. @see docs/DESIGN-sqlcipher-stageA-vectors-2026-06-19.md
+
+/**
+ * Encode a Float32Array as raw little-endian bytes for direct BLOB storage.
+ * @param {Float32Array} vec
+ * @returns {Buffer}
+ */
+export function encodeVectorRaw(vec) {
+  if (!(vec instanceof Float32Array)) {
+    throw new TypeError(`encodeVectorRaw: expected Float32Array, got ${typeof vec === 'object' ? vec?.constructor?.name : typeof vec}`);
+  }
+  return Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength);
+}
+
+/**
+ * Shape-aware vector read for the migration window (mirrors Python
+ * decode_stored_vector), so a half-migrated column reads correctly:
+ *   - Buffer/Uint8Array → RAW little-endian float32 (new rows, no crypto)
+ *   - string            → legacy wrapped-DEK envelope (decryptVector)
+ * @param {Buffer|Uint8Array|string} value  the stored column value
+ * @param {number} dim
+ * @param {Buffer|CryptoKey|null} [masterKey]  required only for legacy string rows
+ * @param {string[]|null} [allowedScopes]
+ * @returns {Promise<Float32Array>}
+ */
+export async function decodeStoredVector(value, dim, masterKey = null, allowedScopes = null) {
+  if (!Number.isInteger(dim) || dim <= 0) {
+    throw new TypeError(`decodeStoredVector: dim must be a positive integer, got ${dim}`);
+  }
+  if (value instanceof Uint8Array) { // Buffer extends Uint8Array — covers both
+    const buf = Buffer.isBuffer(value) ? value : Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    const expectedBytes = dim * BYTES_PER_FLOAT32;
+    if (buf.length !== expectedBytes) {
+      throw new DecryptError('raw vector length mismatch', { dim, expectedBytes, actualBytes: buf.length });
+    }
+    const out = new Float32Array(dim);
+    for (let i = 0; i < dim; i++) out[i] = buf.readFloatLE(i * BYTES_PER_FLOAT32);
+    return out;
+  }
+  // Legacy envelope (string) — still supported until the column is fully backfilled.
+  return decryptVector(value, masterKey, allowedScopes, dim);
+}
