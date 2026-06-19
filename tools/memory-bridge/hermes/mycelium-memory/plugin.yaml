@@ -1,0 +1,9 @@
+name: mycelium-memory
+version: "1.0.0"
+description: "Mycelium universal memory layer — inject vault context + capture both sides of every turn."
+hooks:
+  - pre_llm_call
+  - post_llm_call
+requires_env:
+  - MYCELIUM_BASE_URL
+  - MYCELIUM_MCP_BEARER

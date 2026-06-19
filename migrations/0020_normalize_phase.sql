@@ -1,0 +1,17 @@
+-- 0020 — Remove the legacy 'gift' phase from territory_profiles.current_phase.
+--
+-- 'gift' was a leftover DEFAULT for current_phase, but the only REAL phases are
+-- sparse | active | anchor (pipeline/compute-vitality.js). compute-vitality runs
+-- only during Generate; until it runs, every territory carries the bogus default
+-- and the UI rendered a "gift · 0.50" badge (MindscapeDetail / SpaceDetailView).
+-- The column default is now NULL (0001_init.sql), and this scrub normalizes any
+-- row still holding the legacy value to NULL so the UI shows no phase until a real
+-- one is computed.
+--
+-- Idempotent + intentionally self-healing: applyMigrations re-execs every file on
+-- every boot (src/db/migrate.js). This UPDATE only touches rows that are exactly
+-- 'gift', so re-running is a no-op once clean — and it also neutralizes any 'gift'
+-- a future INSERT picks up from a pre-existing table's column default before
+-- vitality recomputes. current_phase is a plaintext enum (crypto-local.js), so
+-- this is a safe plain UPDATE (no decryption needed) that loses no real signal.
+UPDATE territory_profiles SET current_phase = NULL WHERE current_phase = 'gift';

@@ -1,0 +1,5 @@
+# Generated / heavy — rebuild with `npm run portal:build` from the repo root.
+node_modules
+build/
+.svelte-kit/
+*.tsbuildinfo

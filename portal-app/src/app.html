@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<script>
+			(function() {
+				// SES/LavaMoat (MetaMask etc.) can strip Set/Map prototype methods
+				// before the app boots, crashing Svelte 5's reactivity engine.
+				// Polyfill if stripped.
+				try {
+					var s = new Set();
+					if (typeof s.add !== 'function') throw 1;
+				} catch(e) {
+					console.warn('[mycelium] SES detected — restoring Set.prototype');
+					var NativeSet = Set;
+					Set.prototype.add = function(v) { NativeSet.prototype.add.call(this, v); return this; };
+					Set.prototype.has = function(v) { return NativeSet.prototype.has.call(this, v); };
+					Set.prototype.delete = function(v) { return NativeSet.prototype.delete.call(this, v); };
+				}
+
+				// Dark on first load by default (no OS-preference consult); only a
+				// remembered toggle flips it to light. Set pre-paint to avoid a flash.
+				var theme = localStorage.getItem('mycelium-theme') || 'dark';
+				if (theme === 'light') {
+					document.documentElement.setAttribute('data-theme', 'light');
+				}
+
+				// Pre-paint Tauri detection. Tauri injects __TAURI_INTERNALS__ before
+				// page scripts, so tagging <html> here (rather than in an onMount) makes
+				// the native shell's chrome deterministic from frame 0: the header
+				// reserves macOS traffic-light clearance with NO post-mount layout shift,
+				// and app.css drops backdrop-filter (which WKWebView mis-repaints).
+				if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
+					document.documentElement.classList.add('is-tauri');
+				}
+			})();
+		</script>
+		<link rel="icon" href="%sveltekit.assets%/favicon.svg" />
+		<!-- viewport-fit=cover is REQUIRED for env(safe-area-inset-*) to resolve
+		     non-zero on notched iOS devices — without it the BottomTabBar / Header
+		     safe-area padding is inert in a WKWebView (Capacitor). -->
+		<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+		<meta name="theme-color" content="#0A0A0C" />
+		<link rel="preconnect" href="https://fonts.googleapis.com">
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+		<link rel="preload" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" as="style" onload="this.onload=null;this.rel='stylesheet'">
+		<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"></noscript>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

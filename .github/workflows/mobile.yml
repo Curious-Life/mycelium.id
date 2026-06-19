@@ -1,0 +1,28 @@
+name: mobile
+
+# Path-gated so the mobile shell never entangles the Node `verify` chain. This
+# job is the toolchain-free config/security sanity gate; the full iOS/Android
+# build needs a macOS runner + Xcode/Gradle + signing and is an operator step
+# (see mobile/README.md).
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/mobile.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/**'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Mobile config + security sanity
+        run: node mobile/scripts/check-config.mjs

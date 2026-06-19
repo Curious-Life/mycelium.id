@@ -1,0 +1,161 @@
+name: desktop-release
+
+# Build, sign, notarize, and publish the macOS desktop app as a signed DMG.
+# Triggered by a version tag (v*) or manually.
+#
+# APPLE SILICON ONLY. Intel (macos-13/x86_64) was dropped 2026-06-18: GitHub's
+# free macos-13 runner pool would not schedule the Intel job (queued 5-8h, never
+# assigned) while macos-14 ran fine. Apple stopped selling Intel Macs in 2023, so
+# ARM-first is the launch target. To re-add Intel later, restore the macos-13
+# matrix entry below (and, if the free pool still won't schedule it, use the paid
+# macos-13-large runner).
+#
+# Builds on a runner of the target arch: the bundled Node/Python + native wheels
+# + better_sqlite3.node are arch-specific and do NOT cross-compile
+# (docs/DESIGN-macos-signed-distribution-2026-06-17.md). macos-14 = Apple Silicon.
+#
+# Signing is OURS, not Tauri's: `cargo tauri build` runs ad-hoc (no APPLE_* in
+# its env, so it does not auto-notarize and does not hit the externalBin
+# re-sign bug). scripts/notarize-macos.sh then deep-signs every nested Mach-O
+# inside-out (incl. the 300 the Tauri bundler ignores), notarizes the .app,
+# rebuilds the DMG from the stapled app, and notarizes the DMG.
+#
+# Required repo secrets:
+#   MACOS_CERT_P12_BASE64   base64 of the "Developer ID Application" cert+key (.p12)
+#   MACOS_CERT_PW           password for that .p12
+#   APPLE_SIGNING_IDENTITY  e.g. "Developer ID Application: Your Name (TEAMID)"
+#   APPLE_ID                Apple ID email for notarization
+#   APPLE_TEAM_ID           10-char Team ID
+#   APPLE_APP_PW            app-specific password for that Apple ID
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # attach DMGs to the GitHub Release on a tag
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14   # Apple Silicon
+            arch: arm64
+            dmgarch: aarch64
+          # Intel (macos-13/x86_64/x64) intentionally removed — see header. Add
+          # the entry back here to restore the two-arch build.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version '^2.0' --locked
+
+      # Native node_modules (better_sqlite3.node) compile for THIS runner's arch.
+      # build-app-bundle.sh rsyncs node_modules into the bundle as-is, so npm ci
+      # MUST run on the target-arch runner — .node files do not cross-compile.
+      - name: Install dependencies (target-arch native modules)
+        run: npm ci
+
+      - name: Build portal-app
+        run: |
+          npm --prefix portal-app ci
+          npm --prefix portal-app run build
+
+      - name: Fetch sidecars (caddy + frpc for this host triple)
+        run: bash scripts/fetch-sidecars.sh
+
+      # Import the Developer ID cert into a throwaway keychain. Scoped to this
+      # job; deleted in the always() cleanup below.
+      - name: Import signing certificate
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PW: ${{ secrets.MACOS_CERT_PW }}
+        run: |
+          set -euo pipefail
+          CERT="$RUNNER_TEMP/cert.p12"
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KCPW="$(openssl rand -hex 24)"
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$CERT"
+          security create-keychain -p "$KCPW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KCPW" "$KEYCHAIN"
+          security import "$CERT" -k "$KEYCHAIN" -P "$MACOS_CERT_PW" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KEYCHAIN"
+          # Put our keychain first in the search list (keep the login keychain too).
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$CERT"
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
+      - name: Store notarytool credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PW: ${{ secrets.APPLE_APP_PW }}
+        run: |
+          # Store in the default (login) keychain — notarize-macos.sh resolves the
+          # profile via --keychain-profile without naming a keychain. The signing
+          # cert lives in our throwaway keychain (added to the search list) for
+          # codesign; the two are decoupled.
+          xcrun notarytool store-credentials mycelium-notary \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PW"
+
+      # Build ad-hoc: NO APPLE_* in this step's env, so Tauri neither
+      # Developer-ID-signs nor notarizes — we own both, after the build.
+      - name: Build app bundle (cargo tauri build)
+        env:
+          MYC_ARCH: ${{ matrix.arch }}
+        run: cargo tauri build --bundles app
+
+      - name: Resolve app version
+        id: ver
+        run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
+
+      # Deep-sign inside-out → notarize .app → build DMG from the stapled app →
+      # notarize DMG. notarize-macos.sh uses the notarytool profile + the keychain.
+      - name: Sign + notarize + staple
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          NOTARY_PROFILE: mycelium-notary
+          DMG_OUT: ${{ github.workspace }}/dist/Mycelium_${{ steps.ver.outputs.version }}_${{ matrix.dmgarch }}.dmg
+        run: |
+          mkdir -p "$(dirname "$DMG_OUT")"
+          bash scripts/notarize-macos.sh
+          echo "── verify ──"
+          spctl -a -t open --context context:primary-signature "$DMG_OUT"
+          xcrun stapler validate "$DMG_OUT"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mycelium_${{ steps.ver.outputs.version }}_${{ matrix.dmgarch }}
+          path: dist/Mycelium_${{ steps.ver.outputs.version }}_${{ matrix.dmgarch }}.dmg
+          if-no-files-found: error
+
+      - name: Attach DMG to the Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Mycelium_${{ steps.ver.outputs.version }}_${{ matrix.dmgarch }}.dmg
+
+      - name: Clean up keychain
+        if: always()
+        run: security delete-keychain "$KEYCHAIN" || true
