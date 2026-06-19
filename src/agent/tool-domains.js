@@ -34,6 +34,7 @@ export const DOMAINS = Object.freeze([
   { key: 'cycles',     label: 'Reflection cycles', description: 'Change how your reflection cycles run — their instructions, schedule, on/off — and your relationship persona.', tools: ['listCycles', 'getCyclePrompt', 'updateCycle', 'updatePersona'] },
   { key: 'reflections', label: 'Reflection log', description: 'Record + look back on your dated reflection digests (day cards) — categorize days, trace red threads.', tools: ['recordReflection', 'listReflections'] },
   { key: 'claims',     label: 'Persona claims',   description: 'Durable person-level claims about you and their confidence.',         tools: ['personaClaims'] },
+  { key: 'claims-distill', label: 'Claim distillation', description: 'Propose durable tendencies from your reflection records, and review how a belief moved over time.', tools: ['proposeClaim', 'listClaimsHistory'] },
   { key: 'federation', label: 'Connections',      description: 'Request and respond to connections with other Mycelium instances.',  tools: ['requestConnection', 'listConnectionRequests', 'respondToConnectionRequest'] },
 ]);
 

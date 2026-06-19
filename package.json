@@ -43,6 +43,7 @@
     "verify:claims-bitemporal": "node scripts/verify-claims-bitemporal.mjs",
     "verify:claims-lifecycle": "node scripts/verify-claims-lifecycle.mjs",
     "verify:claims-distill": "node scripts/verify-claims-distill.mjs",
+    "verify:claims-distill-tool": "node scripts/verify-claims-distill-tool.mjs",
     "verify:forget": "node scripts/verify-forget.mjs",
     "verify:facts": "node scripts/verify-facts.mjs",
     "verify:related": "node scripts/verify-related.mjs",

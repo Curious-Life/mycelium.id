@@ -34,6 +34,7 @@ import { createReplyDomain } from './tools/reply.js';
 import { createScheduleTasksDomain } from './tools/schedule-tasks.js';
 import { createCyclesDomain } from './tools/cycles.js';
 import { createReflectionsDomain } from './tools/reflections.js';
+import { createClaimsDistillDomain } from './tools/claims-distill.js';
 import { createFederationDomain } from './tools/federation.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { getMasterKey } from './crypto/crypto-local.js';
@@ -145,6 +146,12 @@ export function buildDomains({
     ...(db.harness ? [createCyclesDomain({ db, userId })] : []),
     // Context Engine "day cards": record + look back on each cycle's reflective read.
     ...(db.reflections ? [createReflectionsDomain({ db, userId })] : []),
+    // Context Engine L3 ("distill"): proposeClaim turns clustered day cards into a GOVERNED
+    // bi-temporal claim (born pending, promoted only on enough distinct days; confidence from the
+    // day cards, never the synthesis). Contradiction `validate` stays off until a sensitive-aware
+    // infer is threaded in — distill skips it safely (no destructive retraction). Chat-grantable
+    // ('claims-distill'); the integration cycle drives it.
+    createClaimsDistillDomain({ db, userId }),
   ];
 
   // reply (agent-explicit egress): wired ONLY when AGENT_URL is set — i.e. when
