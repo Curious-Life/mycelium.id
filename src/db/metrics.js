@@ -28,6 +28,8 @@
  * @property {(result: any) => any} firstRow
  */
 
+import { assertColumnSurfaceable } from '../metrics/surface-gate.js';
+
 const BANDS = Object.freeze(['gamma', 'beta', 'alpha', 'theta', 'delta']);
 const HARMONIC_K = Object.freeze([1, 2, 3]);
 const FLOW_FEATURES = Object.freeze([
@@ -70,6 +72,16 @@ function checkMetric(m) {
   if (!METRIC_COLUMN_SET.has(m)) {
     throw new TypeError(`metrics: invalid metric "${m}" — see METRIC_COLUMNS for the 41 valid names`);
   }
+}
+
+// Presentation-contract chokepoint (audit S1). Mirrors checkMetric: every column
+// this namespace is about to read must clear the presentation gate before any
+// number reaches a formatter. The 41 harmonic columns are non-Tier-1 and carry
+// contracts, so they pass; but if a Tier-1 embedding-anchor column ever reaches
+// this read path it THROWS (CVP_NOT_VALIDATED) rather than surfacing a number
+// that has not cleared the §2.3 CVP gate. Fail-closed by construction.
+function checkSurfaceable(m) {
+  assertColumnSurfaceable(m);
 }
 
 
@@ -129,7 +141,7 @@ export function createMetricsNamespace(deps) {
       const cols = requestedMetrics && requestedMetrics.length > 0
         ? requestedMetrics
         : METRIC_COLUMNS;
-      for (const c of cols) checkMetric(c);
+      for (const c of cols) { checkMetric(c); checkSurfaceable(c); }
 
       const eraId = await getCurrentEra(userId);
 
@@ -185,6 +197,7 @@ export function createMetricsNamespace(deps) {
     async getSeries(userId, { metric, granularity = 'alpha', from = null, to = null, limit = SERIES_DEFAULT_LIMIT } = {}) {
       if (!metric) throw new TypeError('metrics: metric required');
       checkMetric(metric);
+      checkSurfaceable(metric);
       checkGranularity(granularity);
 
       const rawLim = parseInt(limit, 10);

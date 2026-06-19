@@ -1,6 +1,7 @@
 import express from 'express';
 import { CONTRACTS } from './metrics/contracts.js';
 import { METRIC_COLUMNS, _internal as metricsInternal } from './db/metrics.js';
+import { computeFreshness, FAMILY_STAGE } from './metrics/freshness.js';
 
 // Lempel-Ziv (1976) complexity of a symbol sequence (Kaspar-Schuster). Used for
 // the territory-river "path novelty" overlay — how varied vs repetitive the route
@@ -464,79 +465,16 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
   // ──────────────────────────────────────────────────────────────────────────
   // METRIC FRESHNESS — per-table staleness map (no decrypted values, just
   // MAX(timestamp) / pipeline_state probes). All timestamp/state columns are
-  // plaintext, so nothing here can leak ciphertext.
+  // plaintext, so nothing here can leak ciphertext. The budget map + probe live
+  // in src/metrics/freshness.js (shared with the agent surface so the two never
+  // drift — spec §6 I5/I7); this router and src/tools/metrics.js are its two
+  // consumers.
   // ──────────────────────────────────────────────────────────────────────────
-
-  const HOUR = 3600000, DAY = 24 * HOUR;
-  // V1 freshness budgets — the subset of reference/core/metric-budgets.js whose
-  // tables exist in the V1 schema. Era-anchored tables (cognitive_metrics_harmonic)
-  // use a pipeline_state probe; the rest use MAX(timestamp_column).
-  const METRIC_BUDGETS = [
-    { table: 'fisher_trajectory', timestamp_column: 'computed_at', budget_ms: 26 * HOUR, cadence: '24h', description: 'Cognitive trajectory (Fisher information geometry per window).' },
-    { table: 'fisher_milestones', timestamp_column: 'detected_at', budget_ms: 26 * HOUR, cadence: '24h', description: 'Milestone events (phase shifts, velocity outliers).' },
-    { table: 'territory_vitality', timestamp_column: 'computed_at', budget_ms: 26 * HOUR, cadence: '24h', description: 'Per-territory vitality scores (sparse/active/anchor phase).' },
-    { table: 'territory_cofire', timestamp_column: 'last_computed', budget_ms: 26 * HOUR, cadence: '24h', description: 'Territory co-firing graph (4 temporal scales).' },
-    { table: 'complexity_snapshots', timestamp_column: 'computed_at', budget_ms: 30 * HOUR, cadence: '24h', description: 'LZ76 complexity (territory-id sequence novelty).' },
-    { table: 'topology_audit_snapshots', timestamp_column: 'run_at', budget_ms: 30 * HOUR, cadence: '24h', description: 'Topology health (M2 entropy, degree Gini, orphans).' },
-    { table: 'frequency_snapshots', timestamp_column: 'computed_at', budget_ms: 30 * HOUR, cadence: '24h', description: 'Windowed cognitive frequency metrics.' },
-    { table: 'cognitive_metrics_harmonic', probe: { kind: 'pipeline_state', stage_name: 'cognitive-harmonics' }, budget_ms: 26 * HOUR, cadence: '24h (era-anchored)', description: 'Cognitive harmonics (information-harmonics + bigram flow + topology H0 entropy).' },
-  ];
-
-  // Which pipeline_state stage writes each metric family — so /measurement-health
-  // can say "stale BECAUSE the stage failed" (not just "stale"). These match the
-  // CANONICAL stage_names the stages record (script-basename, e.g. 'compute-cofire';
-  // specials: 'fisher-trajectory', 'cognitive-harmonics', 'cluster') so the surface
-  // joins to the live pipeline_state rows instead of orphan short-name entries.
-  const FAMILY_STAGE = {
-    fisher_trajectory: 'fisher-trajectory', fisher_milestones: 'fisher-trajectory', territory_vitality: 'compute-vitality',
-    territory_cofire: 'compute-cofire', complexity_snapshots: 'compute-complexity', topology_audit_snapshots: 'topology-audit',
-    frequency_snapshots: 'compute-frequency', cognitive_metrics_harmonic: 'cognitive-harmonics',
-  };
-
-  // Shared freshness probe (MAX(timestamp) / pipeline_state) → per-family verdict map.
-  // No decrypted values, just plaintext timestamps — nothing here can leak ciphertext.
-  async function computeFreshness(uid) {
-    const nowMs = Date.now();
-    const rows = await Promise.all(METRIC_BUDGETS.map(async (b) => {
-        let lastWrite = null, present = true;
-        try {
-          if (b.probe?.kind === 'pipeline_state') {
-            const r = await db.rawQuery(
-              `SELECT last_success_at AS last_write FROM pipeline_state WHERE user_id = ? AND stage_name = ?`,
-              [uid, b.probe.stage_name]);
-            lastWrite = (r.results || [])[0]?.last_write ?? null;
-          } else {
-            // timestamp columns are PLAINTEXT — MAX() is valid in SQL.
-            const r = await db.rawQuery(
-              `SELECT MAX(${b.timestamp_column}) AS last_write FROM ${b.table} WHERE user_id = ?`,
-              [uid]);
-            lastWrite = (r.results || [])[0]?.last_write ?? null;
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (msg.includes('no such table')) {
-            return { table: b.table, present: false, last_write: null, age_ms: null, budget_ms: b.budget_ms, cadence: b.cadence, description: b.description, verdict: 'missing' };
-          }
-          throw err;
-        }
-        if (!lastWrite) {
-          return { table: b.table, present, last_write: null, age_ms: null, budget_ms: b.budget_ms, cadence: b.cadence, description: b.description, verdict: 'empty' };
-        }
-        const writeMs = Date.parse(lastWrite);
-        const ageMs = Number.isFinite(writeMs) ? nowMs - writeMs : null;
-        const verdict = ageMs === null ? 'empty' : ageMs <= b.budget_ms ? 'fresh' : 'stale';
-        return { table: b.table, present, last_write: lastWrite, age_ms: ageMs, budget_ms: b.budget_ms, cadence: b.cadence, description: b.description, verdict };
-    }));
-    const summary = rows.reduce((acc, r) => {
-      acc.total += 1; acc[r.verdict] = (acc[r.verdict] || 0) + 1; return acc;
-    }, { total: 0, fresh: 0, stale: 0, missing: 0, empty: 0 });
-    return { nowMs, rows, summary };
-  }
 
   router.get('/metric-freshness', async (req, res) => {
     const u = owner(req, res); if (!u) return;
     try {
-      const { nowMs, rows, summary } = await computeFreshness(u.id);
+      const { nowMs, rows, summary } = await computeFreshness(db, u.id);
       res.set('Cache-Control', 'no-store');
       res.json({ user_id: u.id, now: new Date(nowMs).toISOString(), metrics: rows, summary });
     } catch { fail(res, 500, 'Failed to fetch metric freshness'); }
@@ -550,7 +488,7 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
     const u = owner(req, res); if (!u) return;
     try {
       const [{ nowMs, rows: freshRows }, health] = await Promise.all([
-        computeFreshness(u.id),
+        computeFreshness(db, u.id),
         db.pipelineState.all(u.id),
       ]);
       const byStage = new Map(health.map((h) => [h.stage_name, h]));

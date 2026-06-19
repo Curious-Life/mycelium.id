@@ -24,6 +24,12 @@
  * @property {string} userId
  */
 
+import { familyFreshness, freshnessHedge } from '../metrics/freshness.js';
+
+// The Fisher movement family's primary table — its freshness backs the I7
+// staleness hedge inserted into getCurrentPhase output (spec §6 I7).
+const FISHER_TABLE = 'fisher_trajectory';
+
 // The canonical phase enum — the only values classify_phase() emits
 // (pipeline/fisher.py). A milestone or phase reading outside this set (e.g. the
 // historical phantom 'indeterminate') is NOT a real cognitive phase.
@@ -207,6 +213,12 @@ export function createFisherToolsDomain(deps) {
       // phase_shift that the consistency guard drops, so we need fallbacks.
       const rawMilestones = await db.fisher.getActiveMilestones(userId, { limit: 5 });
 
+      // I7: a family-level staleness hedge for the Fisher movement family, placed
+      // right under the header (above the numbers) when there is trajectory data.
+      // Best-effort — a freshness probe failure must never block the read.
+      const hedge = freshnessHedge(await familyFreshness(db, userId, FISHER_TABLE).catch(() => null));
+      const pushHedge = (sections) => { if (hedge) { sections.push(hedge, ''); } };
+
       // Multi-level mode: render all three side-by-side.
       if (level === 'all') {
         const all = await db.fisher.getCurrentPhase(userId, { level: 'all' });
@@ -214,6 +226,7 @@ export function createFisherToolsDomain(deps) {
         if (!all) {
           sections.push('No trajectory data yet at any level.');
         } else {
+          pushHedge(sections);
           for (const lvl of ['realm', 'theme', 'territory']) {
             sections.push(`## ${lvl[0].toUpperCase()}${lvl.slice(1)}`);
             sections.push(formatPhase(all[lvl]));
@@ -238,6 +251,7 @@ export function createFisherToolsDomain(deps) {
         : await db.fisher.getCurrentPhase(userId, { level: 'realm' });
       const milestones = consistentMilestones(rawMilestones, effectivePhase(realmRow));
       const sections = [`# Cognitive Movement (level: ${level})`, ''];
+      if (phaseRow) pushHedge(sections);
       sections.push(formatPhase(phaseRow));
       if (milestones.length > 0) {
         sections.push('');

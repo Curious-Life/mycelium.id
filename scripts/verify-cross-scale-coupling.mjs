@@ -151,6 +151,96 @@ assert maxerr < 1e-6, f'H0 W1 DP diverged from persim: {maxerr}'
   const par = spawnSync(PY, ['-c', PARITY], { encoding: 'utf8', env: { ...process.env, PYTHONPATH: 'pipeline' } });
   rec('H6. fast H0-line Wasserstein DP equals persim.wasserstein (exact, <1e-6)',
     par.status === 0, (par.stdout || par.stderr || '').trim().split('\n').pop());
+
+  // ── H7. effective-N stored PLAINTEXT per pair (audit S3 item e) ────────────
+  //    Counts are not metric scalars → they must NOT be encrypted, so the read
+  //    layer can suppress near-floor estimates without decrypting.
+  const raw2 = new Database(DB, { readonly: true });
+  // Pick the most-populated row so the ledger shows real per-pair counts.
+  const effRow = raw2.prepare(
+    `SELECT couple_eff_n_gamma_beta g, couple_eff_n_beta_alpha b,
+            couple_eff_n_alpha_theta a, couple_eff_n_theta_delta t
+     FROM cognitive_metrics_harmonic
+     WHERE user_id=? AND clustering_run_id=? AND couple_eff_n_gamma_beta IS NOT NULL
+     ORDER BY couple_eff_n_gamma_beta DESC LIMIT 1`).get(U, RUN);
+  const effPlain = effRow && [effRow.g, effRow.b, effRow.a, effRow.t]
+    .every((v) => v === null || (Number.isInteger(v) && !isEnvelope(String(v))));
+  // And prove the column carries genuine sample counts (not just 0s): at least
+  // one row must record an above-floor N — the rows that DID get an estimate.
+  const maxEff = raw2.prepare(
+    `SELECT MAX(couple_eff_n_gamma_beta) m FROM cognitive_metrics_harmonic
+     WHERE user_id=? AND clustering_run_id=?`).get(U, RUN).m;
+  rec('H7. couple_eff_n_* stored as plaintext integer counts (not encrypted)',
+    !!effRow && effPlain && Number.isInteger(maxEff) && maxEff >= 24,
+    effRow ? `eff_n{γβ=${effRow.g} βα=${effRow.b} αθ=${effRow.a} θδ=${effRow.t}} max(γβ)=${maxEff}` : 'no eff_n row');
+
+  // ── H8. low-N gate fires: no estimate is written below the raw-N floor, and
+  //    the slow band pairs ARE suppressed (proves the gate is reached, not a
+  //    no-op). The floor (MIN_COUPLE_N) is read from the module so the gate
+  //    tracks the source.
+  const FLOOR = `
+import importlib.util as u
+spec = u.spec_from_file_location('cs', 'pipeline/compute-cross-scale-coupling.py')
+cs = u.module_from_spec(spec); spec.loader.exec_module(cs)
+print(cs.MIN_COUPLE_N, cs.PAC_MIN_N)
+`;
+  const fl = spawnSync(PY, ['-c', FLOOR], { encoding: 'utf8', env: { ...process.env, PYTHONPATH: 'pipeline' } });
+  const [MIN_N, PAC_N] = (fl.stdout || '24 36').trim().split(/\s+/).map(Number);
+  // Invariant: any pair with a (non-NULL) PLV/PAC estimate had raw-N >= floor.
+  const pairs = [['gamma', 'beta'], ['beta', 'alpha'], ['alpha', 'theta'], ['theta', 'delta']];
+  let viol = 0, suppressedSlow = 0, totalSlow = 0;
+  for (const [lo, hi] of pairs) {
+    const rows = raw2.prepare(
+      `SELECT couple_eff_n_${lo}_${hi} n, plv_${lo}_${hi} plv, pac_${lo}_${hi} pac
+       FROM cognitive_metrics_harmonic WHERE user_id=? AND clustering_run_id=?`).all(U, RUN);
+    for (const r of rows) {
+      if (r.plv != null && (r.n == null || r.n < MIN_N)) viol++;
+      if (r.pac != null && (r.n == null || r.n < PAC_N)) viol++;
+      if (lo === 'alpha' || lo === 'theta') {   // slow pairs: alpha_theta, theta_delta
+        totalSlow++;
+        if (r.n != null && r.n < MIN_N && r.plv == null && r.pac == null) suppressedSlow++;
+      }
+    }
+  }
+  rec('H8. no estimate written below the raw-N floor; slow pairs suppressed',
+    viol === 0 && suppressedSlow > 0,
+    `floor=${MIN_N}/${PAC_N} below-floor-estimates=${viol} slow-pairs-suppressed=${suppressedSlow}/${totalSlow}`);
+  raw2.close();
+
+  // ── H9. demean-before-Hilbert (S3 item c) + surrogate-debiased PLV (S3 item b)
+  //    are correct: a DC offset must not change the envelope, and an UNCOUPLED
+  //    smooth pair must debias to ~0 even though raw PLV is inflated at low N.
+  const STAT = `
+import numpy as np
+from harmonics import hilbert_amplitude, phase_locking_value, phase_locking_value_debiased
+# (c) demean-before-Hilbert: the envelope is invariant to a large DC pedestal —
+#     exactly the cosine-distance offset that distorted phase/amplitude before.
+t = np.linspace(0, 8*np.pi, 40); base = np.sin(t)
+demean_ok = float(np.max(np.abs(hilbert_amplitude(base) - hilbert_amplitude(base + 5.0)))) < 1e-9
+# (b) population test at N=24 (the floor): two INDEPENDENT smooth band-like
+#     signals carry a LARGE raw-PLV bias; the surrogate null debiases it toward 0.
+def smooth(seed, n=24):
+    x = np.random.default_rng(seed).standard_normal(n)
+    return np.convolve(x, np.ones(5)/5.0, mode='same')
+raws, debs = [], []
+for k in range(80):
+    lo, hi = smooth(2*k+1), smooth(2*k+2)
+    raws.append(phase_locking_value(lo, hi))
+    debs.append(phase_locking_value_debiased(lo, hi, n_surrogates=300, seed=k)['debiased'])
+mean_raw, mean_deb = float(np.mean(raws)), float(np.mean(debs))
+# a genuinely coupled pair must survive the debiasing far above the null residue.
+phi = np.cumsum(np.ones(24)) * 0.4
+deb_co = phase_locking_value_debiased(np.sin(phi), np.sin(phi + 0.3), n_surrogates=300, seed=1)['debiased']
+print(f'demean_ok={demean_ok} mean_raw={mean_raw:.3f} mean_deb={mean_deb:.3f} deb_coupled={deb_co:.3f}')
+assert demean_ok, 'demean changed the Hilbert envelope'
+assert mean_raw > 0.25, f'expected large finite-sample PLV bias at N=24, got {mean_raw}'
+assert mean_deb < 0.15, f'surrogate debiasing should pull uncoupled PLV to ~0, got {mean_deb}'
+assert mean_deb < mean_raw * 0.5, 'debiasing should remove most of the bias'
+assert deb_co > 0.6, f'coupled pair should debias high, got {deb_co}'
+`;
+  const st = spawnSync(PY, ['-c', STAT], { encoding: 'utf8', env: { ...process.env, PYTHONPATH: 'pipeline' } });
+  rec('H9. demean-before-Hilbert invariant + surrogate-debiased PLV (b,c)',
+    st.status === 0, (st.stdout || st.stderr || '').trim().split('\n').pop());
 } finally {
   close();
   for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
