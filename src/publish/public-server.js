@@ -120,7 +120,9 @@ export async function startPublicServer({ dbPath, kcvPath, userHex, systemHex, u
   app.get("/p/:slug", async (req, res) => {
     try {
       const doc = await db.documents.getBySlug(owner, req.params.slug);
-      if (doc && doc.published === 1) return serveDoc(res, doc);
+      // Never serve a doc the user flagged sensitive, even if also published —
+      // "sensitive" must always win over "published" on the public surface.
+      if (doc && doc.published === 1 && !doc.sensitive) return serveDoc(res, doc);
     } catch { /* fall through to 404 */ }
     notFound(res);
   });
@@ -138,7 +140,7 @@ export async function startPublicServer({ dbPath, kcvPath, userHex, systemHex, u
       const v = verifyLink(identity, t, { slug: req.params.slug });
       if (v.valid) {
         const doc = await db.documents.getBySlug(owner, req.params.slug);
-        if (doc && doc.publish_nonce && doc.publish_nonce === v.nonce) {
+        if (doc && !doc.sensitive && doc.publish_nonce && doc.publish_nonce === v.nonce) {
           return serveDoc(res, doc, { unlisted: true });
         }
       }
