@@ -112,11 +112,13 @@ try {
   const row = probe.prepare('SELECT content FROM documents WHERE user_id = ? AND path = ?')
     .get('local-user', 'people/sarah');
   probe.close();
-  const leaks = typeof row?.content === 'string' && row.content.includes(DOC_BODY);
-  m7 = !!row && !leaks;
-  m7d = `raw row present=${!!row}; leaks-plaintext=${leaks}`;
+  // SQLCipher collapse (Stage B/C cut 4): documents.content is PLAINTEXT-in-cipher —
+  // at-rest = whole-file SQLCipher (verify:at-rest), not a per-field envelope.
+  const isPlain = typeof row?.content === 'string' && row.content.includes(DOC_BODY);
+  m7 = !!row && isPlain;
+  m7d = `raw row present=${!!row}; plaintext-in-cipher=${isPlain}`;
 } catch (e) { m7d = `THREW: ${e.message}`; }
-rec('M7. document content is ciphertext at rest (no plaintext leak)', m7, m7d);
+rec('M7. document content PLAINTEXT-in-cipher (collapse cut 4; at-rest = whole-file SQLCipher, verify:at-rest)', m7, m7d);
 
 // M8: mirror side effect — updateDocument on a MIND_MIRRORS path writes the
 // mirror mind-file. 'internal/reflection_log' -> 'reflections.md'.

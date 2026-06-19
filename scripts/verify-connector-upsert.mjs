@@ -64,12 +64,15 @@ async function main() {
     // ── U1 created ──
     const r1 = await captureMessage(db, { userId: uid, content: C1, source: 'gmail', messageType: 'email', id: ID, metadata: { subject: META } }, enq);
     const row1 = await q1('SELECT content, content_hash, nlp_processed, metadata FROM messages WHERE id = ? AND user_id = ?', [ID, uid]);
-    rec('U1. new id → created; hash set+plaintext; content+metadata encrypted; queued',
+    // SQLCipher collapse (Stage B/C cut 4): messages content+metadata are now
+    // PLAINTEXT-in-cipher (the plaintext test DB scans them in fileHas); at-rest =
+    // whole-file SQLCipher (verify:at-rest). content_hash stays PLAINTEXT (dedup key).
+    rec('U1. new id → created; hash set+plaintext; content+metadata plaintext-in-cipher (verify:at-rest); queued',
       r1.deduped === false && r1.updated === false
       && row1?.content === C1 && row1?.content_hash === sha(C1) && row1?.nlp_processed === 0
       && /UPSERT-METADATA-MARKER/.test(row1?.metadata || '')
-      && !fileHas(C1) && !fileHas(META) && fileHas(sha(C1)),
-      `created=${!r1.deduped} hash=${row1?.content_hash?.slice(0, 8)}… contentLeak=${fileHas(C1)} metaLeak=${fileHas(META)} hashPlaintext=${fileHas(sha(C1))} nlp=${row1?.nlp_processed}`);
+      && fileHas(C1) && fileHas(META) && fileHas(sha(C1)),
+      `created=${!r1.deduped} hash=${row1?.content_hash?.slice(0, 8)}… contentPlain=${fileHas(C1)} metaPlain=${fileHas(META)} hashPlaintext=${fileHas(sha(C1))} nlp=${row1?.nlp_processed}`);
 
     // simulate an already-enriched message: mark processed + embedding + a mindscape point
     await db.rawQuery('UPDATE messages SET nlp_processed = 1, embedding_768 = ? WHERE id = ? AND user_id = ?', ['[0.1,0.2,0.3]', ID, uid]);
@@ -87,13 +90,13 @@ async function main() {
     const r3 = await captureMessage(db, { userId: uid, content: C2, source: 'gmail', messageType: 'email', id: ID }, enq);
     const row3 = await q1('SELECT content, content_hash, nlp_processed, embedding_768, metadata FROM messages WHERE id = ? AND user_id = ?', [ID, uid]);
     const cp3 = await q1('SELECT COUNT(*) AS c FROM clustering_points WHERE user_id = ? AND source_id = ?', [uid, ID]);
-    rec('U3. changed → updated + re-enrich (nlp=0, emb NULL, clusters dropped); metadata preserved; new content encrypted',
+    rec('U3. changed → updated + re-enrich (nlp=0, emb NULL, clusters dropped); metadata preserved; new content plaintext-in-cipher (verify:at-rest)',
       r3.updated === true && r3.deduped === false
       && row3?.content === C2 && row3?.content_hash === sha(C2)
       && row3?.nlp_processed === 0 && row3?.embedding_768 === null && cp3?.c === 0
       && /UPSERT-METADATA-MARKER/.test(row3?.metadata || '')
-      && !fileHas(C2) && fileHas(sha(C2)) && !fileHas(META),
-      `updated=${r3.updated} nlp=${row3?.nlp_processed} emb=${row3?.embedding_768} clusters=${cp3?.c} metaPreserved=${/UPSERT-METADATA-MARKER/.test(row3?.metadata || '')} newContentLeak=${fileHas(C2)}`);
+      && fileHas(C2) && fileHas(sha(C2)) && fileHas(META),
+      `updated=${r3.updated} nlp=${row3?.nlp_processed} emb=${row3?.embedding_768} clusters=${cp3?.c} metaPreserved=${/UPSERT-METADATA-MARKER/.test(row3?.metadata || '')} newContentPlain=${fileHas(C2)}`);
 
     // ── U4 forgotten not resurrected ──
     const FID = 'gmail:forget-1';

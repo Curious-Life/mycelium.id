@@ -38,12 +38,15 @@ for (const [t, nb, dist] of [[1, 2, 0.1], [1, 4, 0.2]]) {
     [`${U}:${t}:${nb}`, U, t, nb, dist]);
 }
 
-// TE1 — ciphertext at rest.
+// TE1 — SQLCipher collapse (Stage B/C cut 2): cofire strengths + neighbor distance
+// are now PLAINTEXT-inside-cipher (at-rest = verify:at-rest). Assert the stop-write
+// worked — the values are stored readable (topology.js JS-sorts them today; the SQL
+// ORDER BY restore lands after the live backfill).
 const raw = new Database(DB, { readonly: true });
 const rawCofire = JSON.stringify(raw.prepare(`SELECT cofire_weekly FROM territory_cofire WHERE user_id=? AND territory_a=1 AND territory_b=2`).all(U));
 const rawDist = JSON.stringify(raw.prepare(`SELECT distance FROM territory_neighbors WHERE user_id=? AND territory_id=1 AND neighbor_id=4`).all(U));
 raw.close();
-rec('TE1. cofire strengths + neighbor distance ENCRYPTED at rest', !rawCofire.includes('0.8') && !rawDist.includes('0.2'), `cofire_raw=${rawCofire.slice(0, 40)}…`);
+rec('TE1. cofire strengths + neighbor distance stored PLAINTEXT-in-cipher (collapse)', rawCofire.includes('0.8') && rawDist.includes('0.2'), `cofire_raw=${rawCofire.slice(0, 40)}…`);
 
 // TE2 — getCoFiring sorts by decrypted strength.
 const cf = await db.topology.getCoFiring({ p_user_id: U, p_territory_id: 1, p_scale: 'weekly', p_min_strength: 0.1, p_limit: 10 });

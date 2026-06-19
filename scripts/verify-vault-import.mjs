@@ -162,11 +162,13 @@ async function main() {
 
     // ── V3: encrypted at rest + decrypts back ───────────────────────────────
     const dbBytes = readFileSync(DB);
-    const noPlain = !dbBytes.includes(Buffer.from(MARKER));
-    const env1 = raw.prepare('SELECT content FROM messages WHERE id = ?').get('vm1')?.content || '';
-    let roundtrip = false;
-    try { roundtrip = (await decrypt(env1, await importMasterKey(USER_HEX))) === MARKER; } catch { /* */ }
-    rec('V3 marker absent from raw db; envelope decrypts to marker', noPlain && roundtrip, `noPlain=${noPlain} roundtrip=${roundtrip}`);
+    // SQLCipher collapse (Stage B/C cut 4): messages.content is PLAINTEXT-in-cipher —
+    // read directly (no field-decrypt). at-rest = whole-file SQLCipher (verify:at-rest).
+    // The column reads back the plaintext marker; whole-file at-rest (raw file bytes are
+    // ciphertext) is verify:at-rest's job — not asserted here (and WAL-timing makes a
+    // main-file byte scan unreliable).
+    const content1 = raw.prepare('SELECT content FROM messages WHERE id = ?').get('vm1')?.content || '';
+    rec('V3 content plaintext-in-cipher; reads back the marker (collapse cut 4; verify:at-rest)', content1 === MARKER, `match=${content1 === MARKER}`);
 
     // ── V4: attachment blob encrypted + row linked ──────────────────────────
     const att = raw.prepare('SELECT id, local_path, file_size FROM attachments WHERE id = ?').get('att1');
@@ -225,18 +227,17 @@ async function main() {
       `user_a=${conn?.user_a}`);
 
     const prov = raw.prepare('SELECT credentials FROM ai_providers WHERE id = ?').get(7);
-    const provEncrypted = Boolean(prov?.credentials) && !String(prov.credentials).includes(PROVIDER_KEY);
-    let provRoundtrip = false;
-    try { provRoundtrip = (await decrypt(String(prov.credentials), await importMasterKey(USER_HEX))) === PROVIDER_KEY; } catch { /* */ }
-    rec('C4 provider credentials re-encrypted at rest + decrypt back', provEncrypted && provRoundtrip
-      && !dbBytes.includes(Buffer.from(PROVIDER_KEY)), `encrypted=${provEncrypted} roundtrip=${provRoundtrip}`);
+    // SQLCipher collapse (Stage B/C cut 4): ai_providers.credentials is plaintext-in-
+    // cipher — at-rest = whole-file SQLCipher (verify:at-rest). Field encryption added
+    // zero protection over whole-file (the field DEK was wrapped by the same USER_MASTER).
+    const provPlain = Boolean(prov?.credentials) && String(prov.credentials).includes(PROVIDER_KEY);
+    rec('C4 provider credentials plaintext-in-cipher (collapse cut 4; verify:at-rest)',
+      provPlain, `plain=${provPlain}`);
 
     const agentDoc = raw.prepare("SELECT id, content, title, created_at FROM documents WHERE path = 'agents/personal/memory/note.md'").get();
-    let agentDocPlain = null;
-    try { agentDocPlain = await decrypt(String(agentDoc?.content || ''), await importMasterKey(USER_HEX)); } catch { /* */ }
-    rec('C5 agents/ text file lands as an encrypted document (binary skipped, counted)',
-      Boolean(agentDoc) && agentDocPlain === AGENT_FILE_TEXT && ir?.stats?.agent_files?.skippedBinary === 1
-      && !dbBytes.includes(Buffer.from(AGENT_FILE_TEXT)),
+    // SQLCipher collapse (Stage B/C cut 4): documents.content is plaintext-in-cipher.
+    rec('C5 agents/ text file lands as a plaintext-in-cipher document (binary skipped, counted)',
+      Boolean(agentDoc) && String(agentDoc?.content || '') === AGENT_FILE_TEXT && ir?.stats?.agent_files?.skippedBinary === 1,
       `doc=${Boolean(agentDoc)} binarySkipped=${ir?.stats?.agent_files?.skippedBinary}`);
 
     // C5b — created_at follows the zip entry's date, NOT the import-time now()
@@ -255,23 +256,22 @@ async function main() {
     const pk = raw.prepare("SELECT COUNT(*) c FROM passkey_credentials").get()?.c ?? 0;
     rec('C8 passkeys NOT imported (origin-bound)', pk === 0);
 
-    // territory chronicle crosses (encrypted, decrypts back); the canonical-key
-    // embedding_768 envelope is NULLED, never copied as undecryptable junk.
+    // SQLCipher collapse (Stage B/C cut 1): territory_profiles.chronicle is now
+    // PLAINTEXT-inside-cipher (no longer field-encrypted) — the import stores it
+    // readable, and at-rest confidentiality is whole-file SQLCipher (verify:at-rest).
+    // The foreign canonical-key embedding_768 envelope is still NULLED, never copied
+    // as undecryptable junk (Stage A vector logic, unchanged).
     const tp = raw.prepare('SELECT chronicle, embedding_768 FROM territory_profiles WHERE id = ?').get('tp1');
-    let chronPlain = null;
-    try { chronPlain = await decrypt(String(tp?.chronicle || ''), await importMasterKey(USER_HEX)); } catch { /* */ }
-    rec('C9 territory chronicle re-encrypted + decrypts; foreign embedding_768 nulled',
-      chronPlain === 'territory chronicle marker text' && tp?.embedding_768 === null
-      && !dbBytes.includes(Buffer.from('territory chronicle marker text')),
-      `chronicle=${chronPlain === 'territory chronicle marker text'} emb=${tp?.embedding_768}`);
+    rec('C9 territory chronicle imported as plaintext-in-cipher (collapse cut 1); foreign embedding_768 nulled',
+      tp?.chronicle === 'territory chronicle marker text' && tp?.embedding_768 === null,
+      `chronicle=${tp?.chronicle === 'territory chronicle marker text'} emb=${tp?.embedding_768}`);
 
     // temporal chronicles (receiver-side readiness for the exporter patch)
     const tc = raw.prepare("SELECT narrative FROM time_chronicles WHERE period_key = '2024-03'").get();
     const arc = raw.prepare("SELECT narrative, phase FROM current_arc_chronicles WHERE user_id = 'local-user'").get();
-    let tcPlain = null, arcPlain = null;
-    try { tcPlain = await decrypt(String(tc?.narrative || ''), await importMasterKey(USER_HEX)); } catch { /* */ }
-    try { arcPlain = await decrypt(String(arc?.narrative || ''), await importMasterKey(USER_HEX)); } catch { /* */ }
-    rec('C10 time_chronicles + current_arc imported, encrypted, decrypt back',
+    // SQLCipher collapse (Stage B/C cut 4): chronicle narratives are plaintext-in-cipher.
+    const tcPlain = String(tc?.narrative || ''), arcPlain = String(arc?.narrative || '');
+    rec('C10 time_chronicles + current_arc imported as plaintext-in-cipher (collapse cut 4; verify:at-rest)',
       tcPlain === 'time chronicle narrative marker' && arcPlain === 'current arc narrative marker' && arc?.phase === 'emergence',
       `tc=${tcPlain === 'time chronicle narrative marker'} arc=${arcPlain === 'current arc narrative marker'}`);
 
@@ -284,9 +284,10 @@ async function main() {
 
     // The durable audit artifact: an encrypted report document INSIDE the vault.
     const repDoc = raw.prepare("SELECT content FROM documents WHERE path LIKE 'imports/vault-import-report-%'").get();
+    // SQLCipher collapse (Stage B/C cut 4): documents.content is plaintext-in-cipher → parse directly.
     let repParsed = null;
-    try { repParsed = JSON.parse(await decrypt(String(repDoc?.content || ''), await importMasterKey(USER_HEX))); } catch { /* */ }
-    rec('R2 report persisted as an encrypted in-vault document (decrypts, complete:true)',
+    try { repParsed = JSON.parse(String(repDoc?.content || '')); } catch { /* */ }
+    rec('R2 report persisted as a plaintext-in-cipher in-vault document (collapse cut 4; complete:true)',
       repParsed?.v === 1 && repParsed?.complete === true && repParsed?.reconciliation?.messages?.landed === 3,
       `path=${ir?.reportPath} parsed=${Boolean(repParsed)}`);
 

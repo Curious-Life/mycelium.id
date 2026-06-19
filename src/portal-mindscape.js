@@ -27,7 +27,146 @@ const BACKFILL_TARGETS = {
   // NOTE: person_claims.embedding_768 is intentionally OMITTED — its writer is
   // caller-supplied and the column is reserved/NULL today (src/claims/discovery.js);
   // migrating it without a flipped writer or active consumer adds risk for no gain.
+
+  // ── Stage B/C cut 1: hot-path CONTENT (documents list-cols + mindscape
+  // narrative). All stopped in crypto-local.js ENCRYPTED_FIELDS (now plaintext-
+  // inside-cipher); these named targets backfill the existing envelope rows so the
+  // per-row decrypt disappears. A target may name MULTIPLE `columns` (same codec) —
+  // expanded server-side into per-column jobs by expandBackfillTargets(); the NAME
+  // still gates (fail-closed), columns are server-defined (never client-supplied).
+  'content.documents': { table: 'documents', columns: ['title', 'summary', 'metadata', 'content', 'tags', 'entities', 'relations', 'entity_summary', 'source_path'], codec: { kind: 'content' } },
+  'content.territory_profiles_narrative': {
+    table: 'territory_profiles',
+    columns: ['title', 'essence', 'story_birth', 'story_arc', 'story_peak_moments', 'story_current_chapter',
+      'uncertainty_open_questions', 'agent_expertise', 'agent_curious_about', 'name', 'archetype_character',
+      'top_entities', 'signature_patterns', 'agent_can_help_with', 'agent_would_consult', 'raw_response',
+      'moments_of_interest', 'activity_timeline', 'chronicle', 'chronicle_cursor', 'anchored_reason',
+      'description', 'description_version'],
+    codec: { kind: 'content' },
+  },
+  'content.realms': {
+    table: 'realms',
+    columns: ['name', 'description', 'essence', 'archetype_character', 'top_entities', 'signature_patterns',
+      'story_birth', 'story_arc', 'story_peak_moments', 'story_current_chapter', 'uncertainty_open_questions',
+      'uncertainty_edges', 'agent_expertise', 'agent_curious_about', 'agent_can_help_with', 'activity_timeline'],
+    codec: { kind: 'content' },
+  },
+  'content.semantic_themes': {
+    table: 'semantic_themes',
+    columns: ['label', 'keywords', 'description', 'name', 'essence', 'top_entities', 'signature_patterns',
+      'story_birth', 'story_arc', 'story_current_chapter', 'uncertainty_open_questions', 'raw_response'],
+    codec: { kind: 'content' },
+  },
+  'content.theme_cards': { table: 'theme_cards', columns: ['title', 'description', 'content', 'metadata'], codec: { kind: 'content' } },
+
+  // ── Stage B/C cut 2: topology metrics (territory_profiles scalars + centroids,
+  // territory_cofire / neighbors / vitality). All stopped in ENCRYPTED_FIELDS;
+  // backfill to plaintext. Centroids are JSON (read by JS cosine via JSON.parse) →
+  // content codec, NOT the raw-bytes vector codec. The topology.js SQL restore
+  // lands only AFTER these reach 0 envelopes live (ordering law).
+  'content.territory_profiles_scalars': {
+    table: 'territory_profiles',
+    columns: ['energy', 'coherence', 'velocity', 'current_vitality', 'point_delta', 'centroid_256', 'centroid_3d'],
+    codec: { kind: 'content' },
+  },
+  'content.territory_cofire': { table: 'territory_cofire', columns: ['cofire_immediate', 'cofire_session', 'cofire_daily', 'cofire_weekly'], codec: { kind: 'content' } },
+  'content.territory_neighbors': { table: 'territory_neighbors', columns: ['distance', 'shared_entities'], codec: { kind: 'content' } },
+  'content.territory_vitality': {
+    table: 'territory_vitality',
+    columns: ['entropy_diversification', 'connection_growth_rate', 'reach', 'cofire_partner_diversity', 'engagement_depth_normalized', 'vitality'],
+    codec: { kind: 'content' },
+  },
+
+  // ── Stage B/C cut 3: claims + people. All stopped in ENCRYPTED_FIELDS (JS-adapter-
+  // written); backfill the existing envelope rows to plaintext. person_claims.
+  // embedding_768 is NOT here (NEVER_AUTO_DECRYPT vector, reserved/NULL). The people
+  // UNIQUE(user_id,name) migration + ON CONFLICT restore land after this backfill.
+  'content.people': {
+    table: 'people',
+    columns: ['name', 'aliases', 'description', 'metadata', 'email', 'phone', 'company', 'position', 'linkedin_url', 'notes', 'avatar_url'],
+    codec: { kind: 'content' },
+  },
+  'content.person_claims': { table: 'person_claims', columns: ['claim_type', 'content', 'confidence_logodds', 'decay_class', 'support'], codec: { kind: 'content' } },
+  'content.person_claim_snapshots': { table: 'person_claim_snapshots', columns: ['confidence_logodds', 'content', 'evidence_count', 'delta_kind'], codec: { kind: 'content' } },
+
+  // ── Stage B/C cut 4: bulk content (messages + the long tail). All stopped in
+  // ENCRYPTED_FIELDS (every table JS-adapter-written, ZERO Python caller-encrypt —
+  // verified). messages.content is the LARGEST backfill. Credentials collapse too
+  // (ai_providers/connectors/scheduled_tasks): the field DEK is wrapped by the same
+  // USER_MASTER that opens the whole file → field-encryption adds zero protection
+  // over SQLCipher (only `secrets`, on the separate SYSTEM_KEY, stays encrypted).
+  // Column lists mirror the pre-collapse ENCRYPTED_FIELDS entries verbatim.
+  'content.messages': { table: 'messages', columns: ['content', 'thinking', 'tags', 'entities', 'entity_summary', 'suggested_new_tag', 'relations', 'metadata', 'nlp_error'], codec: { kind: 'content' } },
+  'content.facts': { table: 'facts', columns: ['value'], codec: { kind: 'content' } },
+  'content.entities': { table: 'entities', columns: ['name', 'aliases', 'summary'], codec: { kind: 'content' } },
+  'content.attachments': { table: 'attachments', columns: ['transcript', 'file_name', 'description', 'metadata'], codec: { kind: 'content' } },
+  'content.clustering_points_content': { table: 'clustering_points', columns: ['content'], codec: { kind: 'content' } },
+  'content.territory_river_cache': { table: 'territory_river_cache', columns: ['payload'], codec: { kind: 'content' } },
+  'content.agent_events': { table: 'agent_events', columns: ['payload'], codec: { kind: 'content' } },
+  'content.agent_tasks': { table: 'agent_tasks', columns: ['context', 'result', 'description', 'summary', 'error'], codec: { kind: 'content' } },
+  'content.agent_customizations': { table: 'agent_customizations', columns: ['system_prompt', 'settings', 'tools_config'], codec: { kind: 'content' } },
+  'content.internal_model_items': { table: 'internal_model_items', columns: ['content', 'metadata'], codec: { kind: 'content' } },
+  'content.reflections': { table: 'reflections', columns: ['content', 'trigger', 'metadata'], codec: { kind: 'content' } },
+  'content.tasks': { table: 'tasks', columns: ['title', 'description', 'notes', 'metadata'], codec: { kind: 'content' } },
+  'content.folders': { table: 'folders', columns: ['name', 'description', 'metadata'], codec: { kind: 'content' } },
+  'content.note_links': { table: 'note_links', columns: ['description', 'metadata'], codec: { kind: 'content' } },
+  'content.entity_snapshots': { table: 'entity_snapshots', columns: ['payload'], codec: { kind: 'content' } },
+  'content.activity_sessions': { table: 'activity_sessions', columns: ['window_title', 'url', 'app_bundle', 'app_name'], codec: { kind: 'content' } },
+  'content.health_daily': {
+    table: 'health_daily',
+    columns: ['sleep_duration_min', 'sleep_in_bed_min', 'sleep_efficiency', 'sleep_deep_min', 'sleep_rem_min',
+      'sleep_core_min', 'sleep_awake_min', 'sleep_start', 'sleep_end', 'hrv_avg', 'hrv_sleep_avg', 'resting_hr',
+      'steps', 'active_energy_kcal', 'workout_count', 'workout_minutes', 'workout_types', 'mindful_minutes'],
+    codec: { kind: 'content' },
+  },
+  'content.wealth_transactions': { table: 'wealth_transactions', columns: ['notes', 'quantity', 'price_per_unit', 'fees', 'exchange_rate'], codec: { kind: 'content' } },
+  'content.wealth_positions': { table: 'wealth_positions', columns: ['total_cost', 'current_value', 'unrealized_pnl', 'avg_cost_basis', 'quantity'], codec: { kind: 'content' } },
+  'content.wealth_snapshots': { table: 'wealth_snapshots', columns: ['total_value', 'total_invested', 'total_pnl', 'day_change'], codec: { kind: 'content' } },
+  'content.wealth_accounts': { table: 'wealth_accounts', columns: ['name', 'institution', 'account_number_last4', 'notes', 'metadata'], codec: { kind: 'content' } },
+  'content.wealth_assets': { table: 'wealth_assets', columns: ['custom_name', 'notes', 'metadata'], codec: { kind: 'content' } },
+  'content.wealth_wallets': { table: 'wealth_wallets', columns: ['label', 'address', 'notes', 'metadata'], codec: { kind: 'content' } },
+  'content.wealth_watchlist': { table: 'wealth_watchlist', columns: ['notes'], codec: { kind: 'content' } },
+  'content.wealth_portfolios': { table: 'wealth_portfolios', columns: ['name', 'description', 'notes', 'metadata'], codec: { kind: 'content' } },
+  'content.time_chronicles': { table: 'time_chronicles', columns: ['theme', 'narrative', 'key_moments', 'top_territories', 'top_contacts', 'top_agents', 'cross_references', 'voice_sample', 'raw_response'], codec: { kind: 'content' } },
+  'content.current_arc_chronicles': { table: 'current_arc_chronicles', columns: ['theme', 'narrative', 'raw_response'], codec: { kind: 'content' } },
+  'content.contact_chronicles': { table: 'contact_chronicles', columns: ['narrative', 'summary', 'metadata'], codec: { kind: 'content' } },
+  'content.territory_pass_notes': { table: 'territory_pass_notes', columns: ['note', 'entities_mentioned', 'metadata'], codec: { kind: 'content' } },
+  'content.space_rooms': { table: 'space_rooms', columns: ['name', 'essence'], codec: { kind: 'content' } },
+  'content.space_knowledge': { table: 'space_knowledge', columns: ['content', 'domain_tags'], codec: { kind: 'content' } },
+  'content.share_links': { table: 'share_links', columns: ['invited_email'], codec: { kind: 'content' } },
+  'content.user_identities': { table: 'user_identities', columns: ['provider_username', 'provider_id', 'provider_avatar'], codec: { kind: 'content' } },
+  'content.provisioning_jobs': { table: 'provisioning_jobs', columns: ['email', 'stripe_customer_id', 'error'], codec: { kind: 'content' } },
+  'content.ai_providers': { table: 'ai_providers', columns: ['credentials'], codec: { kind: 'content' } },
+  'content.channel_access': { table: 'channel_access', columns: ['allowed_senders_json'], codec: { kind: 'content' } },
+  'content.connectors': { table: 'connectors', columns: ['account_label', 'last_error', 'recent_runs'], codec: { kind: 'content' } },
+  'content.scheduled_tasks': { table: 'scheduled_tasks', columns: ['prompt'], codec: { kind: 'content' } },
+  'content.conversation_summaries': { table: 'conversation_summaries', columns: ['summary'], codec: { kind: 'content' } },
+  'content.peer_messages': { table: 'peer_messages', columns: ['content'], codec: { kind: 'content' } },
+  'content.sharing_contexts': { table: 'sharing_contexts', columns: ['summary'], codec: { kind: 'content' } },
+  'content.inbound_shares': { table: 'inbound_shares', columns: ['name'], codec: { kind: 'content' } },
 };
+
+/**
+ * Resolve client-requested backfill target NAMES against the server allowlist,
+ * expanding any multi-`columns` entry into per-column job specs. Fail-closed: an
+ * unknown name yields `{ ok: false }` and NO columns (the whole request is
+ * rejected). Columns are always server-defined (from BACKFILL_TARGETS) — never
+ * taken from the request body.
+ * @param {string[]} names
+ * @param {Record<string, object>} [targets]
+ * @returns {{ ok: boolean, columns: Array<{table:string, column:string, codec:object, pk?:string}> }}
+ */
+export function expandBackfillTargets(names, targets = BACKFILL_TARGETS) {
+  if (!Array.isArray(names) || names.length === 0) return { ok: false, columns: [] };
+  const columns = [];
+  for (const n of names) {
+    const t = targets[n];
+    if (!t) return { ok: false, columns: [] }; // unknown name → reject the whole request
+    const cols = Array.isArray(t.columns) ? t.columns : [t.column];
+    for (const column of cols) columns.push({ table: t.table, column, codec: t.codec, ...(t.pk ? { pk: t.pk } : {}) });
+  }
+  return { ok: columns.length > 0, columns };
+}
 
 /**
  * portalMindscapeRouter — the V1 read surface for the canonical portal's
@@ -456,8 +595,8 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
     if (!isTrustedLoopback(req)) return fail(res, 403, 'backfill is local-only');
     if (req.body?.confirm !== true) return fail(res, 400, 'confirm:true required');
     const names = Array.isArray(req.body?.targets) ? req.body.targets : [];
-    const columns = names.map((n) => BACKFILL_TARGETS[n]).filter(Boolean);
-    if (!columns.length || columns.length !== names.length) return fail(res, 400, 'unknown or empty targets');
+    const { ok, columns } = expandBackfillTargets(names);
+    if (!ok) return fail(res, 400, 'unknown or empty targets');
     try {
       res.json(startBackfillJob({ db, dbPath, columns }));
     } catch {

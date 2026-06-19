@@ -33,13 +33,15 @@ for (const r of rows) {
     [`tp-${r.tid}`, U, r.tid, r.name, r.energy, 0.4, 0.1, r.vit, r.msg]);
 }
 
-// (1) ciphertext at rest — energy + current_vitality not plaintext; message_count IS plaintext.
+// (1) SQLCipher collapse (Stage B/C cut 2): energy + current_vitality are now
+// PLAINTEXT-inside-cipher (at-rest = verify:at-rest). Assert the stop-write worked —
+// the scalars are stored as readable numbers; message_count stays plaintext too.
 const raw = new Database(DB, { readonly: true });
 const rr = raw.prepare(`SELECT energy, current_vitality, message_count FROM territory_profiles WHERE id='tp-2'`).get();
 raw.close();
 const rb = JSON.stringify(rr);
-rec('TS1. energy + current_vitality ENCRYPTED at rest; message_count stays plaintext',
-  !rb.includes('0.912345') && !rb.includes('0.876543') && Number(rr.message_count) === 40,
+rec('TS1. energy + current_vitality stored PLAINTEXT-in-cipher (collapse); message_count plaintext',
+  rb.includes('0.912345') && rb.includes('0.876543') && Number(rr.message_count) === 40,
   `raw=${rb.slice(0, 60)}…`);
 
 // (2) getAllWithDynamics: energy decrypted to numbers, sorted DESC in JS.

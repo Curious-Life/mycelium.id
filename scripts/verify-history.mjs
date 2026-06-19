@@ -85,15 +85,16 @@ const cols = raw.prepare(`PRAGMA table_info(entity_snapshots)`).all().map((c) =>
 const rawRow = raw.prepare(`SELECT * FROM entity_snapshots WHERE entity_kind='territory' AND entity_id=2 LIMIT 1`).get();
 raw.close();
 const blob = JSON.stringify(rawRow);
-const leaks = ['reaching upward', 'Canopy', 'the explorer', 'stub-model', 'chronicle-v1', 'chronicle'].filter((m) => {
-  // allow the column NAME-free check: the marker must not appear anywhere in the raw row values
-  return blob.includes(m);
-});
+// SQLCipher collapse (Stage B/C cut 4): entity_snapshots.payload is now PLAINTEXT-in-
+// cipher — at-rest = whole-file SQLCipher (verify:at-rest), not a per-field envelope.
+// The payload content is readable in the raw row (whole-file ciphertext is verify:at-rest's
+// job); payload is a plaintext JSON blob, not a base64 "ey…" envelope.
+const payloadPlain = typeof rawRow.payload === 'string' && blob.includes('Canopy') && !rawRow.payload.startsWith('ey');
 const skeleton = ['entity_id', 'entity_kind', 'id', 'payload', 'seq', 'snapshot_kind', 'user_id'];
-rec('H6. schema is skeleton+payload only; no plaintext content/metadata markers at rest',
-  JSON.stringify(cols) === JSON.stringify(skeleton) && leaks.length === 0
+rec('H6. schema skeleton+payload only; payload PLAINTEXT-in-cipher (collapse cut 4; verify:at-rest)',
+  JSON.stringify(cols) === JSON.stringify(skeleton) && payloadPlain
   && rawRow.entity_kind === 'territory' && Number(rawRow.seq) === 1,
-  `cols=${cols.join(',')} leaks=[${leaks.join(',')}]`);
+  `cols=${cols.join(',')} payloadPlain=${payloadPlain}`);
 await reopen();
 
 // ── H7: dynamics stage (real child run) ──

@@ -64,7 +64,9 @@ try {
 
   // encryption-at-rest: raw row ciphertext must NOT contain the plaintext ids
   const raw = new Database(DB, { readonly: true }).prepare('SELECT allowed_senders_json FROM channel_access WHERE channel_value = ?').get('C1');
-  rec('A13. allowed_senders_json ENCRYPTED at rest (no plaintext ids in the row)', !!raw?.allowed_senders_json && !String(raw.allowed_senders_json).includes('222') && !String(raw.allowed_senders_json).includes('333'), `raw=${String(raw?.allowed_senders_json).slice(0, 24)}…`);
+  // SQLCipher collapse (Stage B/C cut 4): allowed_senders_json is PLAINTEXT-in-cipher —
+  // at-rest = whole-file SQLCipher (verify:at-rest), not a per-field envelope.
+  rec('A13. allowed_senders_json PLAINTEXT-in-cipher (collapse cut 4; at-rest = whole-file SQLCipher, verify:at-rest)', !!raw?.allowed_senders_json && String(raw.allowed_senders_json).includes('222') && String(raw.allowed_senders_json).includes('333'), `raw=${String(raw?.allowed_senders_json).slice(0, 24)}…`);
 
   // ── B2: real /api/v1/internal/channel-access decision endpoint ─────────────
   await vault.db.secrets.set('verify-user', { key: 'OWNER_TELEGRAM_ID', value: OWNER, scope: 'personal' });

@@ -80,7 +80,9 @@ const SECRET = 'Summarise my unread mail and flag anything urgent — SENSITIVE-
   const t = list.find((x) => x.name === 'Morning mail');
   rec('P4 task persisted with decrypted prompt + future next_run', t?.prompt === SECRET && t.next_run > new Date().toISOString() && Array.isArray(t.enabled_tools) && t.enabled_tools.includes('searchMindscape'));
   const raw = rawRead('SELECT prompt FROM scheduled_tasks WHERE id = ?', [t.id]);
-  rec('P4 prompt ENCRYPTED at rest (raw ≠ plaintext, no leak)', !!raw?.prompt && raw.prompt !== SECRET && !String(raw.prompt).includes('SENSITIVE-SCHED-7788'), `raw=${String(raw?.prompt).slice(0, 24)}…`);
+  // SQLCipher collapse (Stage B/C cut 4): scheduled_tasks.prompt is plaintext-in-cipher
+  // — at-rest = whole-file SQLCipher (verify:at-rest), not a per-field envelope.
+  rec('P4 prompt PLAINTEXT-in-cipher at rest (collapse cut 4; verify:at-rest)', !!raw?.prompt && raw.prompt === SECRET, `raw=${String(raw?.prompt).slice(0, 24)}…`);
   globalThis.__taskId = t.id;
 }
 

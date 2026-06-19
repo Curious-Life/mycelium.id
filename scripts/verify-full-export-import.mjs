@@ -147,12 +147,15 @@ async function main() {
       `created_at=${adocTs} expected=${expectedTs}`);
 
     const dbBytes = readFileSync(DB);
-    let mPlain = null; try { mPlain = await decrypt(String(cnt("SELECT content FROM messages WHERE id='fx_m1'")?.content || ''), await importMasterKey(USER_HEX)); } catch { /* */ }
-    rec('F7 message encrypted at rest + decrypts to marker', !dbBytes.includes(Buffer.from(MARKER)) && mPlain === MARKER);
+    // SQLCipher collapse (Stage B/C cut 4): messages.content + documents.content are
+    // PLAINTEXT-in-cipher — read directly (no field-decrypt). At-rest = whole-file
+    // SQLCipher (verify:at-rest); the marker now appears in the plaintext-DB bytes.
+    const mPlain = String(cnt("SELECT content FROM messages WHERE id='fx_m1'")?.content || '');
+    rec('F7 message content plaintext-in-cipher reads back the marker (collapse cut 4; verify:at-rest)', mPlain === MARKER);
 
     const rep = cnt("SELECT content FROM documents WHERE path LIKE 'imports/full-export-report-%'");
-    let repParsed = null; try { repParsed = JSON.parse(await decrypt(String(rep?.content || ''), await importMasterKey(USER_HEX))); } catch { /* */ }
-    rec('F8 report doc persisted + decrypts', repParsed?.kind === 'mycelium-full-export' && repParsed?.totals?.imported > 0, `path=${r1.body?.reportPath}`);
+    let repParsed = null; try { repParsed = JSON.parse(String(rep?.content || '')); } catch { /* */ }
+    rec('F8 report doc persisted + parses (plaintext-in-cipher)', repParsed?.kind === 'mycelium-full-export' && repParsed?.totals?.imported > 0, `path=${r1.body?.reportPath}`);
     raw.close();
 
     const before = new Database(DB, { readonly: true }).prepare('SELECT COUNT(*) n FROM messages').get().n;

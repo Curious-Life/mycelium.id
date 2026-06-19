@@ -33,14 +33,17 @@ for (const [tid, name, c] of [[1, 'Alpha', c1], [2, 'Beta', c2]]) {
   );
 }
 
-// (1) ciphertext at rest — raw read (no adapter) must not contain the plaintext centroid.
+// (1) SQLCipher collapse (Stage B/C cut 2): centroids are now PLAINTEXT JSON inside
+// whole-file SQLCipher (at-rest confidentiality = verify:at-rest, not this per-field
+// envelope). Assert the stop-write worked — the centroid is stored as readable JSON
+// (a `[`-array), not a wrapped-DEK envelope (which would start `ey`).
 const raw = new Database(DB, { readonly: true });
 const rawRow = raw.prepare(`SELECT centroid_256, centroid_3d FROM territory_profiles WHERE id = 'tp-1'`).get();
 raw.close();
 const rawBlob = JSON.stringify(rawRow);
-rec('CE1. centroid_256 + centroid_3d are ENCRYPTED at rest (was plaintext before SEC-1)',
-  !rawBlob.includes(MARK) && !rawBlob.includes('0.95') && String(rawRow.centroid_256).length > 20,
-  rawBlob.includes(MARK) ? 'LEAKED centroid plaintext' : 'centroids are envelopes');
+rec('CE1. centroid_256 + centroid_3d stored PLAINTEXT-JSON-in-cipher (collapse: no longer field-encrypted)',
+  rawBlob.includes('0.987654321') && String(rawRow.centroid_256).startsWith('['),
+  rawBlob.includes('0.987654321') ? 'plaintext JSON in cipher' : `unexpected: ${String(rawRow?.centroid_256).slice(0, 24)}…`);
 
 // (2) adapter read decrypts → parseable vector.
 const back = (await db.rawQuery(`SELECT centroid_256 FROM territory_profiles WHERE id = 'tp-1'`, [])).results?.[0];

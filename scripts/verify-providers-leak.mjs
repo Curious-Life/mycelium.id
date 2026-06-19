@@ -29,14 +29,19 @@ const SECRET = 'ZZsk-secretProviderKey-DEADBEEF';
 const id = await db.providers.create(U, { provider: 'openai', label: 'Test GPT', authType: 'api_key', credentials: JSON.stringify({ apiKey: SECRET }), model: 'gpt-4o-mini' });
 rec('PV1. create returns a row id', Number.isInteger(id) && id > 0, `id=${id}`);
 
-// raw bytes (db + wal + shm): the key must be ciphertext only.
+// SQLCipher collapse (Stage B/C cut 4): ai_providers.credentials is now PLAINTEXT-in-
+// cipher. Field encryption added ZERO protection beyond whole-file SQLCipher here — the
+// field DEK was wrapped by the SAME USER_MASTER that opens the file. At-rest protection
+// for the BYOK key is now whole-file SQLCipher (verify:at-rest); this gate boots a
+// PLAINTEXT test DB, so the key is expected in the raw bytes / column. PV4 (list omits
+// credentials) + PV5 (round-trip) stay — those are egress + read-path, unaffected.
 const raw = [DB, `${DB}-wal`, `${DB}-shm`].filter(existsSync).map((f) => readFileSync(f).toString('latin1')).join('');
-rec('PV2. API key ENCRYPTED at rest (absent from raw db bytes)', !raw.includes(SECRET), raw.includes(SECRET) ? 'PLAINTEXT LEAK' : 'ciphertext only');
+rec('PV2. API key PLAINTEXT-in-cipher (collapse cut 4; at-rest = whole-file SQLCipher, verify:at-rest)', raw.includes(SECRET), raw.includes(SECRET) ? 'plaintext-in-cipher (whole-file SQLCipher guards at rest)' : 'unexpectedly absent');
 
-// raw column read bypassing the adapter → must be an envelope, not the key.
+// raw column read bypassing the adapter → now a plaintext literal, not an envelope.
 const rawDb = new Database(DB, { readonly: true });
 const rawCred = rawDb.prepare('SELECT credentials FROM ai_providers WHERE id = ?').get(id)?.credentials ?? null;
-rec('PV3. credentials column is an envelope, not the key', looksEncrypted(rawCred) && !String(rawCred).includes(SECRET), `raw=${String(rawCred).slice(0, 40)}…`);
+rec('PV3. credentials column is plaintext-in-cipher (collapse cut 4; verify:at-rest)', !looksEncrypted(rawCred) && String(rawCred).includes(SECRET), `raw=${String(rawCred).slice(0, 40)}…`);
 
 // list() must omit credentials entirely.
 const listed = await db.providers.list(U);

@@ -72,9 +72,12 @@ try {
   const cof = raw1.prepare(`SELECT cofire_immediate, cofire_daily FROM territory_cofire WHERE user_id=? LIMIT 1`).get(U);
   const cofN = raw1.prepare(`SELECT COUNT(*) n FROM territory_cofire WHERE user_id=?`).get(U).n;
   raw1.close();
-  rec('CLI1. spawned compute-cofire.js populates territory_cofire with ENCRYPTED strengths',
-    r1.status === 0 && cofN > 0 && cof && isEnvelope(cof.cofire_immediate),
-    r1.status !== 0 ? (r1.stderr || '').slice(-300) : `rows=${cofN} cofire_immediate_enc=${cof ? isEnvelope(cof.cofire_immediate) : 'n/a'}`);
+  // SQLCipher collapse (Stage B/C cut 2): cofire strengths are now PLAINTEXT-inside-
+  // cipher; the spawned CLI writes them through the adapter as plaintext (the map no
+  // longer encrypts them). At-rest = whole-file SQLCipher (verify:at-rest).
+  rec('CLI1. spawned compute-cofire.js populates territory_cofire with PLAINTEXT strengths (collapse cut 2)',
+    r1.status === 0 && cofN > 0 && cof && !isEnvelope(cof.cofire_immediate),
+    r1.status !== 0 ? (r1.stderr || '').slice(-300) : `rows=${cofN} cofire_immediate_plain=${cof ? !isEnvelope(cof.cofire_immediate) : 'n/a'}`);
 
   // ── CLI2. compute-territory-neighbors.js (spawned) populates encrypted distance ──
   const r2 = spawnStage('compute-territory-neighbors.js');
@@ -82,9 +85,9 @@ try {
   const nb = raw2.prepare(`SELECT distance FROM territory_neighbors WHERE user_id=? LIMIT 1`).get(U);
   const nbN = raw2.prepare(`SELECT COUNT(*) n FROM territory_neighbors WHERE user_id=?`).get(U).n;
   raw2.close();
-  rec('CLI2. spawned compute-territory-neighbors.js populates territory_neighbors with ENCRYPTED distance',
-    r2.status === 0 && nbN > 0 && nb && isEnvelope(nb.distance),
-    r2.status !== 0 ? (r2.stderr || '').slice(-300) : `rows=${nbN} distance_enc=${nb ? isEnvelope(nb.distance) : 'n/a'}`);
+  rec('CLI2. spawned compute-territory-neighbors.js populates territory_neighbors with PLAINTEXT distance (collapse cut 2)',
+    r2.status === 0 && nbN > 0 && nb && !isEnvelope(nb.distance),
+    r2.status !== 0 ? (r2.stderr || '').slice(-300) : `rows=${nbN} distance_plain=${nb ? !isEnvelope(nb.distance) : 'n/a'}`);
 
   // ── CLI3. round-trip through the adapter → decrypted numbers ────────────────
   const { db: db2, close: close2 } = await boot({ dbPath: DB, kcvPath: KCV, userHex, systemHex, embedder: null });

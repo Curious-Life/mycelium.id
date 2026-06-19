@@ -211,13 +211,13 @@ const ENCRYPTED_FIELDS = {
   // custom-base_url providers). MUST be encrypted at rest: a leaked key here is
   // a leaked paid account + an egress identity. Stored as a JSON envelope in the
   // `credentials` column; providers.list() never selects it (metadata-only).
-  ai_providers: ['credentials'],
+  ai_providers: [],
 
   // Channel access policy — the per-channel allowlist of platform sender ids is a
   // slice of the operator's social graph (CLAUDE.md §7 spirit) → encrypted at
   // rest (USER_MASTER). mode + the (kind,value) PK stay plaintext so the policy
   // is resolvable without decrypting on lookup. See migrations/0011_channel_access.
-  channel_access: ['allowed_senders_json'],
+  channel_access: [],
 
   // Connectors — operational state for a data connection (gmail/linear/…). The
   // queryable structural columns (id/provider/status/cursor/counts/timestamps)
@@ -226,17 +226,13 @@ const ENCRYPTED_FIELDS = {
   // account identity (PII); last_error can carry provider detail; recent_runs is
   // a JSON run log that may embed error strings. USER_MASTER_KEY (NOT a
   // SYSTEM_KEY table — this is the user's own data). Tokens live in `secrets`.
-  connectors: ['account_label', 'last_error', 'recent_runs'],
+  connectors: [],
 
   // Messages — content + all AI-derived metadata
   // metadata column (arbitrary JSON) added: can contain sensitive
   // structured data from agents. nlp_error can reveal failure patterns
   // of specific messages — encrypt.
-  messages: [
-    'content', 'thinking', 'tags', 'entities', 'entity_summary',
-    'suggested_new_tag', 'relations',
-    'metadata', 'nlp_error',
-  ],
+  messages: [],
 
   // Native agent harness (Phase 5; 0019_harness.sql). scheduled_tasks.prompt is the
   // user-authored instruction the autonomous agent runs → ENCRYPT. conversation_summaries
@@ -245,39 +241,40 @@ const ENCRYPTED_FIELDS = {
   // (schedule DSL, status, timestamps, token COUNTS, prompt_hash, CODE-only errors) and
   // stay plaintext so the scheduler/recovery can query them. Both are written via
   // all-bound-`?` INSERTs (src/db/harness.js) per the VALUES-paren caveat.
-  scheduled_tasks: ['prompt'],
-  conversation_summaries: ['summary'],
+  scheduled_tasks: [],
+  conversation_summaries: [],
 
   // Peer messages — direct messages exchanged with a connected instance. The
   // body is a private communication → ENCRYPT. All other columns (direction,
   // status, read, nonce, ids) are structural state the server queries.
   // See migrations/0015_peer_messages.sql.
-  peer_messages: ['content'],
+  peer_messages: [],
 
   // Sharing contexts double as "Context Areas" (#19). `name` stays plaintext (a
   // queryable facet label); the AI `summary` is a synthesis of attached documents
   // — a semantic fingerprint of plaintext → ENCRYPT. See 0016_context_areas.sql.
-  sharing_contexts: ['summary'],
+  sharing_contexts: [],
 
   // Inbound shares — a peer's label for something they shared with me, received
   // over the wire (a hint about their life) → ENCRYPT. See 0017_inbound_shares.sql.
-  inbound_shares: ['name'],
+  inbound_shares: [],
 
   // Documents — content + every column that describes it. content_hash
   // (SHA of plaintext) stays plaintext because dedup/change-detection
   // queries need it — but this IS a known inversion risk if attacker
   // knows a corpus of possible documents. Source_path reveals document
   // origin; encrypt.
-  documents: [
-    'content', 'summary', 'title', 'tags', 'entities', 'relations',
-    'metadata', 'entity_summary',
-    'source_path',
-  ],
+  // SQLCipher collapse (Stage B/C cut 1): title/summary/metadata are now
+  // plaintext-inside-cipher so the Library list + river previews read them with
+  // NO per-row decrypt. content + tags/entities/relations/entity_summary/
+  // source_path follow in the bulk content cut. Old envelope rows still decrypt
+  // on read (isEncrypted is value-shape-driven) until the backfill converts them.
+  documents: [],
 
   // Facts — typed durable truths (category/key -> value). Only `value` is
   // sensitive; category/key stay plaintext so they remain queryable and carry
   // the UNIQUE upsert target. See migrations/0005_facts.sql.
-  facts: ['value'],
+  facts: [],
 
   // Overwrite recoverability (red-team RT2-H1, migrations 0035 + 0036). The version
   // rows hold the PRIOR document/fact/entity value captured before an overwrite — same
@@ -293,66 +290,59 @@ const ENCRYPTED_FIELDS = {
   // type/source/counts stay plaintext for filtering. Dedup is app-layer (name is
   // non-deterministically encrypted). entity_links holds only ids/enums — no
   // encrypted columns. See migrations/0006_entities.sql.
-  entities: ['name', 'aliases', 'summary'],
+  entities: [],
 
   // Attachments — filenames often verbatim describe content.
   // file_type + file_size can fingerprint content via ML; accept that
   // as metadata leak for now (breaks listing UI if encrypted).
-  attachments: ['transcript', 'file_name', 'description', 'metadata'],
+  attachments: [],
 
   // Clustering / mindscape points
-  clustering_points: ['content'],
+  clustering_points: [],
 
   // Territory-river cache — `payload` is the precomputed river JSON (territory
   // NAMES + per-week activation series), a semantic fingerprint of the vault →
   // ENCRYPT. cache_key/computed_at stay plaintext (structural staleness probe the
   // cache reader compares without decrypting). See migrations/0030 +
   // src/territory-river-cache.js.
-  territory_river_cache: ['payload'],
+  territory_river_cache: [],
 
   // Agent operations — every payload/result carries task context
-  agent_events: ['payload'],
-  agent_tasks: ['context', 'result', 'description', 'summary', 'error'],
+  agent_events: [],
+  agent_tasks: [],
 
   // Agent customizations — per-agent system prompts + settings
-  agent_customizations: ['system_prompt', 'settings', 'tools_config'],
+  agent_customizations: [],
 
-  // Contacts — all PII
-  people: [
-    'name', 'aliases', 'description', 'metadata',
-    'email', 'phone', 'company', 'position', 'linkedin_url',
-    'notes', 'avatar_url',
-  ],
+  // Contacts — SQLCipher collapse (Stage B/C cut 3): all PII columns are now
+  // plaintext-inside-cipher (at-rest = whole-file SQLCipher, verify:at-rest).
+  // people is JS-adapter-written (src/db/people.js) → the map shrink stops every
+  // write; old envelope rows decrypt on read until the backfill converts them.
+  // The deferred SQL restore replaces loadNameIndex/JS-dedup with a plaintext
+  // `name` UNIQUE(user_id,name) + ON CONFLICT (after the live backfill + de-dup).
+  people: [],
 
   // Wealth — amounts, notes, anything revealing position sizes
-  wealth_transactions: ['notes', 'quantity', 'price_per_unit', 'fees', 'exchange_rate'],
-  wealth_positions: ['total_cost', 'current_value', 'unrealized_pnl', 'avg_cost_basis', 'quantity'],
-  wealth_snapshots: ['total_value', 'total_invested', 'total_pnl', 'day_change'],
-  wealth_accounts: ['name', 'institution', 'account_number_last4', 'notes', 'metadata'],
-  wealth_assets: ['custom_name', 'notes', 'metadata'],
-  wealth_wallets: ['label', 'address', 'notes', 'metadata'],
-  wealth_watchlist: ['notes'],
-  wealth_portfolios: ['name', 'description', 'notes', 'metadata'],
+  wealth_transactions: [],
+  wealth_positions: [],
+  wealth_snapshots: [],
+  wealth_accounts: [],
+  wealth_assets: [],
+  wealth_wallets: [],
+  wealth_watchlist: [],
+  wealth_portfolios: [],
 
   // Health — every physiological metric
-  health_daily: [
-    'sleep_duration_min', 'sleep_in_bed_min', 'sleep_efficiency',
-    'sleep_deep_min', 'sleep_rem_min', 'sleep_core_min', 'sleep_awake_min',
-    'sleep_start', 'sleep_end',
-    'hrv_avg', 'hrv_sleep_avg', 'resting_hr',
-    'steps', 'active_energy_kcal',
-    'workout_count', 'workout_minutes', 'workout_types',
-    'mindful_minutes',
-  ],
+  health_daily: [],
 
   // Activity tracking — behavioral surveillance data
-  activity_sessions: ['window_title', 'url', 'app_bundle', 'app_name'],
+  activity_sessions: [],
 
   // Internal model — user's private reasoning. (Was ['content','evidence',
   // 'source_context'] — but evidence/source_context are PHANTOM: no such columns
   // exist in the table, only content + metadata. Corrected to the real sensitive
   // columns. See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §1 v2.)
-  internal_model_items: ['content', 'metadata'],
+  internal_model_items: [],
 
   // Persona-Claims — the most sensitive abstractions in the vault (values,
   // boundaries, identity). claim_type/decay_class/delta_kind are ENCRYPTED too:
@@ -361,68 +351,54 @@ const ENCRYPTED_FIELDS = {
   // is a JSON id-set. content_hash/status/scope stay plaintext for SQL filtering;
   // embedding_768 is in NEVER_AUTO_DECRYPT (vector envelope). Both tables are
   // SCOPE_AWARE. See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md.
-  person_claims: ['claim_type', 'content', 'confidence_logodds', 'decay_class', 'support'],
-  person_claim_snapshots: ['confidence_logodds', 'content', 'evidence_count', 'delta_kind'],
+  // Stage B/C cut 3: the claim content columns are now plaintext-inside-cipher
+  // (claims.js is JS-adapter-written → the map shrink stops every write). content_hash
+  // /status/scope stay PLAINTEXT (SQL filter keys); embedding_768 stays in
+  // NEVER_AUTO_DECRYPT (vector envelope, untouched); both tables stay SCOPE_AWARE.
+  // The deferred SQL restore adds ORDER BY confidence_logodds (after the backfill).
+  person_claims: [],
+  person_claim_snapshots: [],
 
   // Reflections — journal entries
-  reflections: ['content', 'trigger', 'metadata'],
+  reflections: [],
 
   // Reflection records (Context Engine "day cards") — the agent's characterizations are content.
   // cycle/day stay plaintext for SQL filtering (migrations/0039_reflection_records.sql).
   reflection_records: ['summary', 'themes', 'day_type', 'body'],
 
   // Tasks — descriptions reveal what user is working on
-  tasks: ['title', 'description', 'notes', 'metadata'],
+  tasks: [],
 
   // Folders — name/description organize user's thinking
-  folders: ['name', 'description', 'metadata'],
+  folders: [],
 
   // Note links — relationship descriptions between notes
-  note_links: ['description', 'metadata'],
+  note_links: [],
 
-  // Territory profiles — narrative about user's mind. Historically we
-  // only encrypted the story_* + agent_* fields; expanding to cover
-  // everything that describes the territory. archetype_character was
-  // plaintext and leaked verbatim descriptions; top_entities was a
-  // plaintext JSON array of people names. Both closed here.
-  territory_profiles: [
-    // already-encrypted
-    'title', 'essence',
-    'story_birth', 'story_arc', 'story_peak_moments', 'story_current_chapter',
-    'uncertainty_open_questions', 'agent_expertise', 'agent_curious_about',
-    // newly encrypted (was plaintext)
-    'name', 'archetype_character',
-    'top_entities', 'signature_patterns',
-    'agent_can_help_with', 'agent_would_consult',
-    'raw_response', 'moments_of_interest', 'activity_timeline',
-    'chronicle', 'chronicle_cursor', 'anchored_reason',
-    'description', 'description_version',
-    // Semantic fingerprints: 256D Nomic centroid + 3D viz centroid. Embeddings
-    // are sensitive (README §7); not SQL-queried (JS cosine only) so encryptable.
-    // cluster.py writes these via d1_batch_encrypted; JS readers decrypt via the
-    // adapter (NOT in NEVER_AUTO_DECRYPT — they're JSON envelopes, not raw bytes).
-    'centroid_256', 'centroid_3d',
-    // Derived cognitive scalars (SEC-3) — the per-territory measurement signal.
-    // cluster.py writes energy/coherence/velocity/point_delta via d1_batch_encrypted;
-    // the (un-ported) vitality stage writes current_vitality. Topology/chronicle
-    // readers sort/filter these in JS over decrypted values. message_count stays
-    // PLAINTEXT (a count + the primary search/ranking key — structural, not content);
-    // current_phase/growth_state are enum labels, also plaintext.
-    'energy', 'coherence', 'velocity', 'current_vitality', 'point_delta',
-  ],
+  // Territory profiles — SQLCipher collapse (Stage B/C cut 1): the NARRATIVE
+  // columns (title/essence/story_*/agent_*/name/archetype_character/top_entities/
+  // signature_patterns/raw_response/moments_of_interest/activity_timeline/
+  // chronicle*/anchored_reason/description/description_version) are now
+  // plaintext-inside-cipher — Mindscape reads them with NO per-row decrypt. All
+  // writers route through the JS adapter (mindscape.js / describe-clusters.js /
+  // cluster.py via d1_batch_encrypted), so dropping them here stops every write.
+  // Old envelope rows still decrypt on read until the backfill converts them.
+  //
+  // Stage B/C cut 2: the cognitive SCALARS + centroids are now plaintext-inside-
+  // cipher too — topology.js / territory-docs.js read+JS-sort them today (the SQL
+  // ORDER BY restore lands AFTER the live backfill converts existing rows, per the
+  // ordering law). Centroids → plaintext JSON (read by JS cosine via JSON.parse;
+  // no reader change). cluster.py writes scalars+centroids via d1_batch_encrypted
+  // (the adapter), so dropping them here stops every write. message_count stays
+  // PLAINTEXT (count + ranking key); current_phase/growth_state are enum labels.
+  // → territory_profiles is now fully collapsed (no field-encrypted columns).
+  territory_profiles: [],
 
-  // Realms — high-level mind organization. Expanding from just
-  // name+description to cover the full narrative structure that was
-  // mirrored in territory_profiles but mostly plaintext here.
-  realms: [
-    'name', 'description',
-    'essence', 'archetype_character',
-    'top_entities', 'signature_patterns',
-    'story_birth', 'story_arc', 'story_peak_moments', 'story_current_chapter',
-    'uncertainty_open_questions', 'uncertainty_edges',
-    'agent_expertise', 'agent_curious_about', 'agent_can_help_with',
-    'activity_timeline',
-  ],
+  // Realms — SQLCipher collapse (Stage B/C cut 1): all columns are narrative,
+  // all writers route through the JS adapter (mindscape.js / describe-clusters.js
+  // / cluster.py via d1_batch_encrypted) → fully stopped here. Now plaintext-
+  // inside-cipher; old envelope rows decrypt on read until the backfill converts.
+  realms: [],
 
   // entity_snapshots — append-only history of territory/realm narrative + dynamics
   // (ENTITY-HISTORY-DESIGN-2026-06-11). The single `payload` JSON blob holds the
@@ -430,23 +406,18 @@ const ENCRYPTED_FIELDS = {
   // cognitive signal, so the whole blob is encrypted (uniform, future-proof to new
   // fields). Structural columns (entity_kind/id, seq, cluster_version, model label,
   // timestamps) stay plaintext — keys/labels the read path needs, not content.
-  entity_snapshots: ['payload'],
+  entity_snapshots: [],
 
-  // Semantic themes
-  semantic_themes: [
-    'label', 'keywords', 'description',
-    'name', 'essence',
-    'top_entities', 'signature_patterns',
-    'story_birth', 'story_arc', 'story_current_chapter',
-    'uncertainty_open_questions',
-    'raw_response',
-  ],
+  // Semantic themes — SQLCipher collapse (Stage B/C cut 1): all-narrative,
+  // adapter-written (mindscape.js) → fully stopped. Plaintext-inside-cipher;
+  // old envelope rows decrypt on read until the backfill converts them.
+  semantic_themes: [],
 
   // User identities — social account links
-  user_identities: ['provider_username', 'provider_id', 'provider_avatar'],
+  user_identities: [],
 
   // Provisioning — customer PII
-  provisioning_jobs: ['email', 'stripe_customer_id', 'error'],
+  provisioning_jobs: [],
 
   // Secrets — key names reveal what's stored
   // `value` holds tokens (OAuth access/refresh, API keys) → MUST be encrypted
@@ -458,30 +429,28 @@ const ENCRYPTED_FIELDS = {
   secrets: ['key', 'value', 'description'],
 
   // Time chronicles — narrative about temporal periods
-  time_chronicles: [
-    'theme', 'narrative',
-    'key_moments', 'top_territories', 'top_contacts', 'top_agents',
-    'cross_references', 'voice_sample', 'raw_response',
-  ],
+  time_chronicles: [],
 
   // Current arc — living meta-narrative
-  current_arc_chronicles: ['theme', 'narrative', 'raw_response'],
+  current_arc_chronicles: [],
 
   // Contact chronicles — per-person narratives
-  contact_chronicles: ['narrative', 'summary', 'metadata'],
+  contact_chronicles: [],
 
   // Territory pass notes — agent's notes from visiting territories
-  territory_pass_notes: ['note', 'entities_mentioned', 'metadata'],
+  territory_pass_notes: [],
 
-  // Theme cards — theme-level narratives
-  theme_cards: ['title', 'description', 'content', 'metadata'],
+  // Theme cards — SQLCipher collapse (Stage B/C cut 1): all-narrative,
+  // adapter-written → fully stopped. Plaintext-inside-cipher; old envelope rows
+  // decrypt on read until the backfill converts them.
+  theme_cards: [],
 
   // Space rooms — name + essence reveal what topics a person is
   // organizing into a shared space. cover_doc_path stays plaintext
   // because it's a join key against documents.path (also plaintext).
   // Creator-keyed via Swiss Vault for now; SPACES.md §10.4 calls for
   // a space-key migration once multi-user spaces ship.
-  space_rooms: ['name', 'essence'],
+  space_rooms: [],
 
   // Space knowledge — content and tags are the seeded summaries
   // contributors approve. Per SPACES.md §8.2 these MUST be encrypted.
@@ -489,14 +458,14 @@ const ENCRYPTED_FIELDS = {
   // here. Existing rows remain plaintext (auto-decrypt's isEncrypted
   // check passes them through); new writes get protected. Backfill
   // is a separate one-shot script if/when needed.
-  space_knowledge: ['content', 'domain_tags'],
+  space_knowledge: [],
 
   // Share links — invited_email is PII, encrypt at rest. token,
   // user_id, document_path stay plaintext: token is a bearer
   // credential matched verbatim on lookup; the others are join
   // keys against documents.path (which is plaintext) and users.id.
   // Lives in admin D1 (cross-tenant scope) per migration 139.
-  share_links: ['invited_email'],
+  share_links: [],
 
   // ── Cognitive metrics (Phase 5, migration 158) ──────────────────
   // Scalar measurements derived from encrypted embeddings inherit the
@@ -580,16 +549,16 @@ const ENCRYPTED_FIELDS = {
   // plaintext for WHERE/ORDER; the read path Number()s the decrypted magnitude.
   cognitive_events: ['magnitude', 'detail', 'headline'],
 
-  // territory_cofire — co-activation strengths reveal cognitive structure (which
-  // themes fire together, how strongly). Pair keys (territory_a/b) + timestamps
-  // stay plaintext for joins; the 4 strength scales are ENCRYPTED. The topology
-  // queries filter/sort/aggregate these in JS (src/db/topology.js) because
-  // non-deterministic ciphertext can't be SQL-compared.
-  territory_cofire: ['cofire_immediate', 'cofire_session', 'cofire_daily', 'cofire_weekly'],
+  // territory_cofire — Stage B/C cut 2: the 4 co-activation strength scales are now
+  // plaintext-inside-cipher. compute-cofire.js writes them via the adapter, so
+  // dropping them here stops the write. topology.js filters/sorts/aggregates them
+  // in JS today; the SQL restore (WHERE/ORDER BY/SUM) lands after the live backfill.
+  territory_cofire: [],
 
-  // territory_neighbors — semantic-neighbor distance reveals structure. Keys +
-  // connection_type stay plaintext; distance (+ shared_entities) ENCRYPTED.
-  territory_neighbors: ['distance', 'shared_entities'],
+  // territory_neighbors — Stage B/C cut 2: distance + shared_entities now plaintext-
+  // inside-cipher (compute-territory-neighbors.js writes via the adapter). topology.js
+  // JS-sorts distance today; SQL restore after the live backfill.
+  territory_neighbors: [],
 
   // topology_metrics — graph-level cognitive shape per era. Each
   // scalar describes the user's mindscape topology; leak reveals
@@ -603,21 +572,13 @@ const ENCRYPTED_FIELDS = {
 
   // ── T1: topology-graph measurement stages (port from canonical) ──────
   //
-  // territory_vitality — per-territory behavioral-phase scores written by
-  // pipeline/compute-vitality.js. Every column is a derived cognitive
-  // signal (how much a territory bridges / grows / engages); a leak
-  // fingerprints the shape of the user's mind. ENCRYPT all six metric
-  // scalars. Structural columns stay plaintext: id/user_id/territory_id
-  // (keys), clustering_run_id (era key), computed_at/created_at (time keys),
-  // phase (low-cardinality enum: sparse/active/anchor — used for WHERE/group
-  // in JS). The vitality stage never SQL-filters/sorts on the encrypted
-  // metric columns; topology-tools already reads territory_vitality.* via the
-  // auto-decrypting adapter and Number()-coerces (the read is per-territory by
-  // key, no SQL aggregate over these columns).
-  territory_vitality: [
-    'entropy_diversification', 'connection_growth_rate', 'reach',
-    'cofire_partner_diversity', 'engagement_depth_normalized', 'vitality',
-  ],
+  // territory_vitality — Stage B/C cut 2: the six behavioral-phase scalars are now
+  // plaintext-inside-cipher. compute-vitality.js writes them via the adapter, so
+  // dropping them here stops the write. Structural columns stay plaintext: keys,
+  // clustering_run_id (era), timestamps, phase (sparse/active/anchor enum).
+  // topology-tools reads+Number()-coerces them today (per-territory by key);
+  // no SQL aggregate over them, so no restore is needed.
+  territory_vitality: [],
 
   // complexity_snapshots — Lempel-Ziv compressibility of thinking patterns
   // (pipeline/compute-complexity.js). T1 FIX: level_name was PLAINTEXT in the
