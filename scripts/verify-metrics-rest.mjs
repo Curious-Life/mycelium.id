@@ -173,6 +173,23 @@ async function main() {
     rec('D. GET /vitality/snapshot → 200 + real vitality scalars (decrypted)', visOk,
       `status=${vis.status} n=${vis.body?.territories?.length} avg=${vis.body?.summary?.avg_vitality} v0=${vis.body?.territories?.[0]?.vitality}`);
 
+    // ── D2. snapshot picks LATEST-BY-computed_at, NOT lexicographic MAX(run_id).
+    // Seed a run whose id sorts AFTER RUN ('zzz-stale-run' > 'era-…') but is OLDER
+    // (computed_at -30d). The fix must still return RUN (newer); the old MAX(string)
+    // code would have returned 'zzz-stale-run' + its territory 99.
+    await db.rawQuery(
+      `INSERT INTO territory_vitality
+        (user_id, territory_id, entropy_diversification, connection_growth_rate, reach,
+         cofire_partner_diversity, engagement_depth_normalized, vitality, phase, clustering_run_id, computed_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?, datetime('now','-30 days'))`,
+      [uid, 99, 0.5, 0.5, 0.5, 0.5, 0.5, 0.99, 'anchor', 'zzz-stale-run']);
+    const vis2 = await ja(M('/vitality/snapshot'));
+    const d2Ok = vis2.status === 200 && vis2.body?.run_id === RUN
+      && vis2.body.territories.length === 2
+      && !vis2.body.territories.some((t) => t.territory_id === 99);
+    rec('D2. snapshot = latest-by-computed_at, not string MAX (stale greater-id run ignored)', d2Ok,
+      `run_id=${vis2.body?.run_id} n=${vis2.body?.territories?.length} (RUN=${RUN})`);
+
     // ── E. /vitality/audit → real topology-health snapshot ───────────────────
     const aud = await ja(M('/vitality/audit'));
     const audOk = aud.status === 200 && aud.body?.audit
