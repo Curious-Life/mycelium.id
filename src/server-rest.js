@@ -35,6 +35,7 @@ import { captureMessage } from './ingest/capture.js';
 import { portalIngestRouter } from './portal-ingest.js';
 import { portalHealthRouter } from './portal-health.js';
 import { portalActivityRouter } from './portal-activity.js';
+import { portalAgentActivityRouter } from './portal-agent-activity.js';
 import { portalUsageRouter } from './portal-usage.js';
 import { portalTranscriptionRouter } from './portal-transcription.js';
 import { ensureTranscribeSupervisor } from './transcribe/supervisor.js';
@@ -290,6 +291,11 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath }));
   // Unified activity feed (background_jobs) — header stream indicator + mindscape chip.
   v.use('/api/v1/portal', portalActivityRouter({
+    db, userId,
+    authenticatePortalRequest: portalOwnerGate,
+  }));
+  // Agents activity timeline — harness_runs + scheduled cycles + write-audit, with inspect.
+  v.use('/api/v1/portal', portalAgentActivityRouter({
     db, userId,
     authenticatePortalRequest: portalOwnerGate,
   }));

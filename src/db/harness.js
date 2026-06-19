@@ -183,6 +183,32 @@ export function createHarnessNamespace({ d1Query, d1QueryAdmin, randomUUID, now 
       return rows(r);
     },
 
+    /** Runs for the activity timeline — paginated by a time cursor (content-free). The
+     *  spine of the Agents activity page: every chat/channel/scheduler turn is one row. */
+    async listRuns(userId, { limit = 50, before = null } = {}) {
+      const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
+      const params = [userId];
+      let where = 'user_id = ?';
+      if (before) { where += ' AND COALESCE(finished_at, started_at) < ?'; params.push(before); }
+      params.push(lim);
+      const r = await d1QueryAdmin(
+        `SELECT id, trigger, conversation_id, task_id, status, input_tokens, output_tokens, error, started_at, finished_at
+         FROM harness_runs WHERE ${where} ORDER BY COALESCE(finished_at, started_at) DESC LIMIT ?`,
+        params,
+      ).catch(() => null);
+      return rows(r);
+    },
+
+    /** One run by id (for the activity inspect drill-down) — content-free row. */
+    async getRun(userId, id) {
+      const r = await d1QueryAdmin(
+        `SELECT id, trigger, conversation_id, task_id, status, input_tokens, output_tokens, error, started_at, finished_at
+         FROM harness_runs WHERE user_id = ? AND id = ? LIMIT 1`,
+        [userId, id],
+      ).catch(() => null);
+      return rows(r)[0] || null;
+    },
+
     // ── conversation_summaries (compaction; encrypted summary) ────────────────
     /** Latest compaction summary for a conversation (summary decrypted). */
     async getSummary(userId, conversationId) {
