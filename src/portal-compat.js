@@ -169,6 +169,16 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
     } catch { ok(res, { windowDays: 7, days: [], kinds: [], sources: [] }); }
   });
 
+  // GET /streams/history → { start, end, days, sources:[{source,kind,total}], series, clamped }
+  // The since-start history graph: per-day item counts per canonical source across
+  // ALL of history (one stacked bar per day, coloured by source). PLAINTEXT-ONLY
+  // aggregates — no decryption path (§7 fail-safe). Backed by db.streams.dailyVolume.
+  router.get('/streams/history', async (req, res) => {
+    try {
+      ok(res, await db.streams.dailyVolume(userId));
+    } catch { ok(res, { start: null, end: new Date().toISOString().slice(0, 10), days: [], sources: [], series: {}, clamped: false }); }
+  });
+
   // GET /streams?limit&before&since&types=message,document → { items, nextCursor }
   // The unified river: messages + documents + health + tasks interleaved by time.
   // Vector-free + metadata-stripped + §7-guarded in db.streams.feed.
