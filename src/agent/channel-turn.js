@@ -95,7 +95,13 @@ export function createChannelTurnRouter({ db, userId, tools = [], handlers = {},
     // (trusted, like in-app chat) → full grant + no untrusted wrap; everyone else and
     // every group → read-safe ∪ reply, untrusted-wrapped. The owner-WRITE escalation ALSO
     // requires a valid daemon token (RT1) — without it, degrade to untrusted read+reply.
-    const ownerTrusted = isOwnerTrustedTurn({ senderRole, group }) && channelTurnTokenValid(req, expectedToken);
+    // Owner-write is ON by default for the personal agent; the user can disable it in the
+    // Agents page (users.settings.agent.channelWrite=false) and the env flag is a hard
+    // override. A settings read error degrades to the default, but the token gate still
+    // blocks forgery, so a read hiccup never grants a forged write.
+    let channelWrite;
+    try { channelWrite = (await db.users?.getSettings?.(userId))?.agent?.channelWrite; } catch { /* default */ }
+    const ownerTrusted = isOwnerTrustedTurn({ senderRole, group, channelWrite }) && channelTurnTokenValid(req, expectedToken);
 
     try {
       // Triage BEFORE the expensive turn (avoid a full turn per group message).
