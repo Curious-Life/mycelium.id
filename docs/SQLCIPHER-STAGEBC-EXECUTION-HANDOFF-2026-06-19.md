@@ -80,7 +80,42 @@ messages (`content/thinking/tags/entities/entity_summary/suggested_new_tag/relat
 
 **CREDENTIALS DECISION (resolved — collapse them too):** `ai_providers.credentials` (BYOK API keys), `connectors`, `scheduled_tasks.prompt` etc. are USER_MASTER-encrypted. Keeping them field-encrypted adds NO protection beyond whole-file SQLCipher — the field DEK is wrapped by the SAME USER_MASTER that opens the file (attacker-with-file-but-no-key → whole-file already protects; attacker-with-key → derives the field DEK anyway). The ONLY table with a genuinely separate key is `secrets` (SYSTEM_KEY) → that alone stays. So collapse credentials with the rest. (If you later want SYSTEM_KEY-grade separation for BYOK keys, MOVE them into `secrets` — a separate change, not this collapse.)
 
-`messages.content` is the LARGEST backfill. Gate breakers to invert (run each table's gates to confirm): `verify:health-encryption` HE1; `verify:import` I2, `:obsidian` O2, `:obsidian-images` I4, `:full-export-import` F7, `:frequency` FQ0 (all assert `messages.content` envelope); `verify:entities` EN4/EN15 (entities.name); `verify:facts`; `verify:providers-leak`/`:connectors*` (ai_providers/connectors — verify these don't assert the credential blob is an envelope in a way that should now invert, AND that no plaintext-credential-in-HTTP-response check breaks — egress redaction is separate from at-rest). `verify:mindfiles` M7 (documents.content). Run ALL gates referencing each table; reframe atomically.
+### Cut-4 sweep — VERIFIED 2026-06-19 (pre-execution, sweep-first)
+
+**Writer boundary (Sweep B — RESOLVED): every cut-4 table is JS-adapter-written or dead/import-only. ZERO Python caller-encrypt paths.** So cut 4 = pure `ENCRYPTED_FIELDS` shrink (+ backfill targets + gate reframes) — **no Python edits** (those are exclusively cut 5). The one Python *writer*, `agent_events` via `pipeline/event_emit.py:69`, INSERTs **plaintext** JSON and relies on the JS adapter to auto-encrypt → removing it from the map lands plaintext correctly. `entities` and ~10 long-tail tables read "no JS writer found" in the sweep (Explore reads excerpts) — irrelevant to the cut: removing from the map is safe whether live-written or import-only; backfill converts any existing envelope rows.
+
+**`ENCRYPTED_FIELDS` ground truth (Sweep A — crypto-local.js):** every cut-4 table is still present with columns (none pre-emptied). `secrets`=`['key','value','description']` is the lone `SYSTEM_KEY_TABLES` entry and is the ONLY table that stays field-encrypted. `SCOPE_AWARE_TABLES` (crypto-local.js:676) is INDEPENDENT of `ENCRYPTED_FIELDS` — scope tagging survives the collapse untouched (scope is a plaintext routing column); do NOT touch it in cut 4. Vector columns (`embedding_768`/`nomic_embedding`/`anchor_vector`) are already in `NEVER_AUTO_DECRYPT_COLUMNS` (Stage A) — `clustering_points.content` collapses, its `nomic_embedding` is already raw.
+
+**EXHAUSTIVE gate breakers to INVERT (verified by grep + read, NOT just the sweep — the Explore sweep missed 7 of these):**
+
+| Gate | Assertion | Table.column | Action |
+|---|---|---|---|
+| `verify-facts` | FA4 (value envelope) | facts.value | invert → plaintext |
+| `verify-entities` | EN4 :44 (name envelope); re-check for an EN15 | entities.name | invert → plaintext |
+| `verify-frequency` | FQ0 :73 (`isEnvelope(m.content)`) | messages.content | invert |
+| `verify-import` | I2 :94 (no plaintext in db file) | messages.content | invert |
+| `verify-ingest` | I2 :52 (raw content envelope) | messages.content | invert |
+| `verify-obsidian` | O2 :73 (note content at rest) | messages.content | invert |
+| `verify-obsidian-images` | I4 :105 (note text — **image BYTES are a separate MYCB blob, keep that half**) | messages.content | partial invert |
+| `verify-mindfiles` | M7 :108 (documents.content envelope) | documents.content | invert |
+| `verify-harness-channel-dal` | D1 :56 (content ≠ plaintext) | messages.content | invert |
+| `verify-health-encryption` | HE1 :45 (steps/hrv envelope) | health_daily | invert |
+| `verify-territory-river-cache` | #2 :87 (payload envelope) | territory_river_cache.payload | invert |
+| `verify-channel-access` | A13 :67 (allowed_senders_json envelope) | channel_access | invert |
+| `verify-harness-channel-compaction` | H3 :62 (summary at rest) | conversation_summaries.summary | invert |
+| `verify-connector-upsert` | clustering_points content at-rest (:4 comment → find assert) | clustering_points.content | invert |
+| `verify-connectors-store` | S3 :102 (account_label/last_error/recent_runs envelopes) | connectors | invert |
+| `verify-connectors` | C4 :76 (message contentLeak) | messages.content | invert; **C3 :71 token is in `secrets` → KEEP** |
+| `verify-providers-leak` | PV2 :34 (apiKey absent from raw bytes) + PV3 :39 (`looksEncrypted(rawCred)`) | ai_providers.credentials | **invert both** to plaintext-in-cipher; **PV4 list-omits + PV5 round-trip KEEP** (egress/read-path) |
+| `verify-leak` | T-map tokens fact_value/msg_content/entity_name/entity_summary | facts/messages/entities | **PIVOT (below)** |
+
+**`verify-leak` pivot — FEASIBLE + decided.** After cut 4 NO content table is field-encrypted; only `secrets` remains. The token-scan loop would empty out. **Pivot:** drop the 4 content tokens from `T`; seed a `secrets` row via `db.secrets.set(uid,{key,value,scope,description})` (API confirmed at `verify-secrets.mjs:43`) with a distinctive token; keep the raw-byte scan asserting that token is ABSENT (secrets stays SYSTEM_KEY-encrypted → ciphertext in the plaintext test DB). Keep the scan-integrity check (a plaintext id IS present), the fail-closed parser checks (`:57-64`), guardian scrubbers (`:67-74`), DB-COL guard (`:77`). This preserves verify-leak's unique value (raw-byte scan + parser fail-closed + guardians, none of which `verify-secrets` covers) targeted at the one remaining field-encrypted table.
+
+**Same reframe shape as cut 3:** `verify-leak` + `verify-providers-leak` both boot a **plaintext** better-sqlite3 DB; their at-rest-confidentiality premise for collapsed columns moves to whole-file SQLCipher (`verify:at-rest`). Invert with an inline comment pointing there (mirror the cut-3 claims/leak reframe).
+
+**KEEP (NOT breakers, confirmed by read):** `verify-secrets` (secrets stays), `verify-attachment-context` (HTTP egress, not at-rest), `verify-channel-egress` ("envelope-dedup" = message dedup, unrelated to encryption), `verify-gateway`/`verify-mcp` (response envelopes), `verify-search`/`verify-search-rehydrate` (decrypt-on-read), `verify-backfill` (exercises the engine on its own scratch table). `verify-full-export-import` :116 is a **vector dual-read** comment, not a content-at-rest assert — confirm no F7 content-envelope assert exists before assuming it breaks. `verify-fisher-encryption` FE3 + all cognitive_metrics_*/complexity/topology_audit asserts are **cut 5**.
+
+**Backfill targets (add to `BACKFILL_TARGETS`, all `codec:{kind:'content'}`):** one `content.<table>` entry per cut-4 table with its full column list from `ENCRYPTED_FIELDS` (Sweep A list). Add targets for ALL of them incl. the "dead/import-only" tables — existing rows may hold envelopes from prior imports.
 
 ## Cut 5 — Python-only metrics (the lockstep Python edit)
 Drop the caller-encrypt in `pipeline/compute-{frequency,criticality,coherence,behavioral,anchor,fisher}.py`, `compute_information_harmonics.py`, `compute-cross-scale-coupling.py` (the `stage_crypto.enc`/`_enc` wrappers). Tables: cognitive_metrics_*, fisher_trajectory/milestones, frequency_snapshots, cognitive_events, complexity_snapshots, topology_metrics. Invert the `isEnvelope` side-gates: `verify:complexity` C3, `:frequency` FQ3, `:criticality` C7, `:coherence`, `:behavioral`, `:vitality` (already done in cut 2 for territory_vitality — these are the cognitive_metrics_* ones), `:fisher-encryption` FE1, `:harmonics-encryption`, `:pipeline-cli-encryption` (cofire/neighbors already done cut 2; check for metrics asserts), `:measurement-schema` S5, `:history` H6 (entity_snapshots — actually that's a payload, check), `:topology-audit` A3/A4. Python decrypt-on-read stays (`stage_crypto.dec` dual-reads) for the mixed window.
