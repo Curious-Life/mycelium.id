@@ -122,12 +122,23 @@ bridge gets the raw keyed handle from `getDb`'s returned `adapter.db`.
   'mycelium:db-cipher:v1', 32)` → 64-hex. Mirrors `deriveSystemKey`. **No new
   secret, no third KCV** (operator was explicit). SQLCipher self-verifies: wrong
   key → file won't open, no KCV needed at the file layer. All in-process, all local.
-- **Bridge auth:** bind `127.0.0.1` only + reject any request carrying proxy
-  headers, via the existing `isTrustedLoopback(req)` (`src/http/loopback.js:40-48`).
-  Same same-machine trust boundary as `internal-router.js` (which already returns
-  *plaintext secrets* over loopback) and `mcp-loopback.js`. **Keys are read from
-  inherited env at startup (`USER_MASTER`/`SYSTEM_KEY`, plumbed by
-  `run-clustering.sh:47`), NEVER sent on the wire.** SQL + decrypted rows cross
+- **Bridge auth — TWO independent layers, fail-closed** (hardened 2026-06-19, see
+  `docs/DESIGN-vault-bridge-auth-2026-06-19.md`). Loopback alone proves *same host*,
+  NOT *same user*: on a shared/multi-user Mac (or via any other local uid) a process
+  could `POST` arbitrary SQL to the decrypted vault on a fixed `:8099`. So:
+  1. **Layer 1 — same host:** bind `127.0.0.1` only + reject any request carrying
+     proxy headers, via `isTrustedLoopback(req)` (`src/http/loopback.js:40-48`).
+  2. **Layer 2 — same user:** a **per-boot random token** (`MYCELIUM_DB_BRIDGE_TOKEN`,
+     32 random bytes minted by `run-clustering.sh`, inherited via env, echoed by the
+     Python client in the `X-Bridge-Token` header, compared in constant time). The
+     bridge **refuses to start** without it and returns **401** on every route (incl.
+     `/healthz`) for an absent/wrong token. The bridge also binds a **random ephemeral
+     port** (49152-65535) instead of a predictable `:8099` — defence in depth; the
+     token is the real boundary.
+
+  **Keys + token are read from inherited env at startup
+  (`USER_MASTER`/`SYSTEM_KEY`/`MYCELIUM_DB_BRIDGE_TOKEN`), NEVER sent on the wire**
+  (only the token is *matched*, never echoed back). SQL + decrypted rows cross
   loopback only (Python can't decrypt anyway; envelopes are returned raw on `/query`).
 
 ## 4. Opt-in per entry point (the 91/104-script constraint)
@@ -225,7 +236,7 @@ encrypted vault simply backs up as encrypted bytes (the backup is *also* blind n
 | A3 | Fail-closed | open with wrong key → throws; open with no key → throws (not plaintext) |
 | A4 | Round-trip | write via keyed adapter → read back decrypts identically |
 | A5 | Migration parity + idempotent | seed plaintext vault → migrate → per-table COUNT(*) parity; run migrate twice → 2nd is no-op; `.pre-cipher` copy exists |
-| A6 | Python-via-bridge reads the encrypted vault | start `vault-bridge.js` keyed → `d1_client.query`/`local_db.query` over loopback return correct rows; bridge rejects a request with `x-forwarded-for` |
+| A6 | Python-via-bridge reads the encrypted vault | start `vault-bridge.js` keyed → `d1_client.query`/`local_db.query` over loopback (with `X-Bridge-Token`) return correct rows; bridge rejects a request with `x-forwarded-for` (403); bridge rejects a loopback request with **no/wrong token** (401), incl. `/healthz` |
 | A7 | Two write semantics preserved | `/query` write lands raw (column NOT auto-encrypted); `/batch_encrypted` write lands as an AES-GCM envelope |
 | A8 (regression) | Full `npm run verify` GO through the aliased driver | the 104 raw-read verify gates stay green (plaintext temp DBs, opt-out) |
 

@@ -24,11 +24,21 @@ const magic = Buffer.from('SQLite format 3\0', 'latin1');
 const header16 = (p) => { const fd = openSync(p, 'r'); try { const b = Buffer.alloc(16); readSync(fd, b, 0, 16, 0); return b; } finally { closeSync(fd); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function post(port, route, body) {
+const TOKEN = crypto.randomBytes(32).toString('hex'); // per-boot bridge auth token
+const AUTH = { 'x-bridge-token': TOKEN };
+
+async function post(port, route, body, headers = AUTH) {
   const r = await fetch(`http://127.0.0.1:${port}${route}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body),
   });
   return r.json();
+}
+// Like post() but exposes the HTTP status (for the auth negative test).
+async function postStatus(port, route, body, headers) {
+  const r = await fetch(`http://127.0.0.1:${port}${route}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...(headers || {}) }, body: JSON.stringify(body),
+  });
+  return r.status;
 }
 
 async function main() {
@@ -47,7 +57,7 @@ async function main() {
 
   // Spin up the REAL bridge.
   const bridge = spawn('node', [resolve('pipeline/vault-bridge.js')], {
-    env: { ...process.env, MYCELIUM_DB: dbPath, USER_MASTER: userHex, SYSTEM_KEY: systemHex, MYCELIUM_DB_BRIDGE_PORT: String(port) },
+    env: { ...process.env, MYCELIUM_DB: dbPath, USER_MASTER: userHex, SYSTEM_KEY: systemHex, MYCELIUM_DB_BRIDGE_PORT: String(port), MYCELIUM_DB_BRIDGE_TOKEN: TOKEN },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   let stderr = '';
@@ -62,6 +72,10 @@ async function main() {
     }
     rec('0 bridge boots + /healthz', up, up ? '' : stderr.slice(0, 200));
     if (!up) throw new Error('bridge did not start');
+
+    // 0b: loopback alone is not auth — an un-tokened loopback request is rejected 401.
+    const unauth = await postStatus(port, '/query', { sql: 'SELECT 1' }, {});
+    rec('0b un-tokened loopback /query rejected (401)', unauth === 401, `status=${unauth}`);
 
     // The raw vector to round-trip.
     const vec = new Float32Array([1.0, -0.5, 0.25, 3.14159, -2.0]);

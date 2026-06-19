@@ -33,6 +33,10 @@ import urllib.request
 from typing import Any, Optional, Sequence
 
 _BRIDGE_URL: Optional[str] = os.environ.get("MYCELIUM_DB_BRIDGE_URL") or None
+# Per-boot shared secret minted by the spawner (run-clustering.sh) and inherited via
+# env. The bridge requires it on every request (X-Bridge-Token) — loopback alone is
+# not authentication. @see pipeline/vault-bridge.js.
+_BRIDGE_TOKEN: str = os.environ.get("MYCELIUM_DB_BRIDGE_TOKEN") or ""
 
 # ── legacy direct-sqlite3 transport (plaintext vault) ────────────────────────
 _CONN: Optional[sqlite3.Connection] = None
@@ -82,7 +86,7 @@ def _post(route: str, body: dict, timeout: int = 120) -> dict:
     req = urllib.request.Request(
         _BRIDGE_URL + route,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "X-Bridge-Token": _BRIDGE_TOKEN},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
