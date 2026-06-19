@@ -128,6 +128,29 @@ try {
   rec('H5. adapter auto-decrypts §4.24 columns → finite numbers in [0,1]',
     !!dr && Number.isFinite(pac) && pac >= 0 && pac <= 1 && Number.isFinite(plv) && plv >= 0 && plv <= 1,
     dr ? `pac=${dr.pac_gamma_beta}→${pac} plv→${plv}` : 'no row');
+
+  // ── H6. exact-Wasserstein parity: the fast H0-line DP that replaced persim's
+  //    O((M+N)³) Hungarian must equal persim.wasserstein bit-for-bit on H0
+  //    diagrams (birth=0). Guards the cross-scale perf fix from silent drift.
+  const PARITY = `
+import importlib.util as u, numpy as np
+spec = u.spec_from_file_location('cs', 'pipeline/compute-cross-scale-coupling.py')
+cs = u.module_from_spec(spec); spec.loader.exec_module(cs)
+from persim import wasserstein
+rng = np.random.default_rng(7); maxerr = 0.0
+for _ in range(400):
+    m = int(rng.integers(0, 50)); n = int(rng.integers(0, 50))
+    a = np.column_stack([np.zeros(m), rng.random(m) * 5]) if m else np.zeros((0, 2))
+    b = np.column_stack([np.zeros(n), rng.random(n) * 5]) if n else np.zeros((0, 2))
+    e = float(wasserstein(a, b)) if (m or n) else 0.0
+    g = cs._h0_wasserstein1(a if m else np.zeros((0,2)), b if n else np.zeros((0,2)))
+    maxerr = max(maxerr, abs(e - (g if g is not None else 0.0)))
+print(f'maxerr={maxerr:.2e}')
+assert maxerr < 1e-6, f'H0 W1 DP diverged from persim: {maxerr}'
+`;
+  const par = spawnSync(PY, ['-c', PARITY], { encoding: 'utf8', env: { ...process.env, PYTHONPATH: 'pipeline' } });
+  rec('H6. fast H0-line Wasserstein DP equals persim.wasserstein (exact, <1e-6)',
+    par.status === 0, (par.stdout || par.stderr || '').trim().split('\n').pop());
 } finally {
   close();
   for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
