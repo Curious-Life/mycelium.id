@@ -69,6 +69,41 @@ Streams](../handbook/data-streams.md) for the model.
 
 ---
 
+## Import from local sources (`:8787`)
+
+The portal can pull data straight off the machine it runs on — an Obsidian vault, your
+Claude Code transcripts, or a decrypted `mycelium-full-export` bundle. These live on the
+portal server (`:8787`, loopback-only) under `/api/v1/portal/import/*`. The "Scan this
+Mac" button in the UI drives the first two.
+
+| Method · Path | Body | Purpose |
+|---|---|---|
+| `GET /import/detect` | — | Scan the allowlist for known sources. Returns **presence, counts, and dates only — never file contents**. Feeds the "Found on this Mac — N · Import" CTAs. |
+| `POST /import/obsidian` | `{ folderPath }` **or** `{ files:[{relPath,content,…}], vaultName }` | Import an Obsidian vault. `folderPath` walks the dir server-side; `files` ships note bodies from the browser folder picker. Each note → a document + a memory. |
+| `POST /import/claude-code` | `{ folderPath?, mode? }` | Import Claude Code session transcripts (`~/.claude/projects/**/*.jsonl`). `mode` = `clean` (default, human↔agent turns) or `full` (keeps tool/meta turns). |
+| `POST /import/full-export` | `{ dirPath }` | Ingest a decrypted `mycelium-full-export` directory off disk (GB-scale, streamed). |
+
+Everything funnels through the **same `captureMessage` / `saveDocument` choke-points** as
+every other path — encrypted at rest, deduped on a path-stable id, queued for enrichment.
+
+> 🔒 **Path confinement (fail-closed).** The `folderPath` / `dirPath` modes read
+> server-local files, so a supplied path is `realpath`-resolved (collapsing symlink
+> escapes) and must sit inside the **import allowlist**, or the request is rejected
+> `400`:
+>
+> - your Obsidian config's registered vault dirs,
+> - `~/.claude/projects`,
+> - any path in [`MYCELIUM_IMPORT_ALLOWED_ROOTS`](configure.md#search--debug) — the
+>   explicit out-of-band grant for an arbitrary directory.
+>
+> The "Scan this Mac" flow only ever sends allowlisted paths, so it needs no config. A
+> `full-export` bundle lives outside those roots, so importing one requires granting its
+> parent via `MYCELIUM_IMPORT_ALLOWED_ROOTS` first. The browser `files` mode ships content
+> in the request body (no path read) and is not subject to confinement. Proven by
+> `npm run verify:import-confinement`.
+
+---
+
 ## Publishing (`:8788`)
 
 Documents you explicitly publish with [`publishDocument`](mcp-tools.md#publishdocument)
