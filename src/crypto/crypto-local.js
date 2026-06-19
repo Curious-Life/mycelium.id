@@ -279,6 +279,13 @@ const ENCRYPTED_FIELDS = {
   // the UNIQUE upsert target. See migrations/0005_facts.sql.
   facts: ['value'],
 
+  // Overwrite recoverability (red-team RT2-H1, migration 0032). The version rows
+  // hold the PRIOR document/fact value captured before an overwrite — same
+  // plaintext sensitivity as the live row, so the snapshot columns are encrypted.
+  // category/key/path/trigger stay plaintext (scoping + provenance, not content).
+  document_versions: ['title', 'summary', 'content'],
+  fact_versions: ['value'],
+
   // Entities — people/projects/places/orgs. name/aliases/summary are sensitive;
   // type/source/counts stay plaintext for filtering. Dedup is app-layer (name is
   // non-deterministically encrypted). entity_links holds only ids/enums — no

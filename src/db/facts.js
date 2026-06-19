@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { clampLimit } from './column-guard.js';
 
 /**
  * Facts namespace — typed durable truths the agent should always know.
@@ -45,12 +46,29 @@ export function createFactsNamespace(deps) {
      *
      * @returns {Promise<{ id: string, status: 'created'|'updated'|'restored' }>}
      */
-    async upsert({ userId, category, key, value, confidence = 'stated', source = 'user' }) {
-      // Prior state (incl. a forgotten husk) for an accurate status/UX message.
+    async upsert({ userId, category, key, value, confidence = 'stated', source = 'user', trigger, reason } = {}) {
+      // Prior state (incl. a forgotten husk + the prior value) for an accurate
+      // status/UX message AND overwrite recoverability.
       const prior = firstRow(await d1Query(
-        `SELECT id, forgotten_at FROM facts WHERE user_id = ? AND category = ? AND key = ?`,
+        `SELECT id, value, confidence, forgotten_at FROM facts WHERE user_id = ? AND category = ? AND key = ?`,
         [userId, category, key],
       ));
+      // RT2-H1 overwrite recoverability (migration 0032): snapshot the PRIOR value
+      // into fact_versions (encrypted) before a content-changing overwrite, so a
+      // poisoned/mistaken `remember` is recoverable. A fresh fact (no prior), a
+      // restore of a forgotten husk, and an identical re-assertion capture nothing.
+      // Non-fatal + isolated — never deny an owner-authorized write; no plaintext logged.
+      if (prior && !prior.forgotten_at && value !== undefined && value !== prior.value) {
+        try {
+          await d1Query(
+            `INSERT INTO fact_versions (user_id, fact_id, category, key, value, confidence, trigger, reason)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [userId, prior.id, category, key, prior.value ?? null, prior.confidence ?? null, trigger || 'overwrite', reason ?? null],
+          );
+        } catch (e) {
+          console.warn(`[fact-version] prior-snapshot capture failed: ${e?.code || e?.name || 'error'}`);
+        }
+      }
       const id = prior?.id || randomUUID();
       const res = await d1Query(
         `INSERT INTO facts (id, user_id, category, key, value, confidence, source)
@@ -151,6 +169,40 @@ export function createFactsNamespace(deps) {
       );
       const hit = firstRow(res);
       return { found: !!hit, changed: !!hit };
+    },
+
+    // ── RT2-H1 recovery (migration 0032) ────────────────────────────────
+
+    /**
+     * Prior values of a fact (category/key), captured before each overwrite,
+     * newest first. `value` auto-decrypts. The recovery half of the owner-write
+     * grant: an owner can see what a poisoned `remember` overwrote and restore it.
+     */
+    async listVersions({ userId, category, key, limit = 20 }) {
+      const res = await d1Query(
+        `SELECT id, value, confidence, trigger, reason, created_at FROM fact_versions
+         WHERE user_id = ? AND category = ? AND key = ?
+         ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+        [userId, category, key, clampLimit(limit, 20, 200)],
+      );
+      return res?.results || [];
+    },
+
+    /**
+     * Restore a prior fact version's value. Routes through upsert() so the CURRENT
+     * value is snapshotted first — reversible. Returns the restore status or null.
+     */
+    async restoreVersion(userId, versionId) {
+      const v = firstRow(await d1Query(
+        `SELECT category, key, value, confidence FROM fact_versions WHERE id = ? AND user_id = ?`,
+        [versionId, userId],
+      ));
+      if (!v) return null;
+      const { id, status } = await this.upsert({
+        userId, category: v.category, key: v.key, value: v.value,
+        confidence: v.confidence || 'stated', trigger: 'restore', reason: `restore ${versionId}`,
+      });
+      return { id, status, category: v.category, key: v.key };
     },
   };
 }

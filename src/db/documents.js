@@ -15,7 +15,7 @@
  */
 
 import { randomBytes, createHash } from 'node:crypto';
-import { assertSafeColumns } from './column-guard.js';
+import { assertSafeColumns, clampLimit } from './column-guard.js';
 import { bustMindscape } from '../mindscape-cache.js';
 
 /** A fresh capability epoch for unlisted links (16 bytes hex = 128 bits). */
@@ -108,8 +108,39 @@ export function createDocumentsNamespace(deps) {
       return firstRow(result);
     },
 
-    async upsert(doc) {
+    async upsert(doc, opts = {}) {
       assertSafeColumns(Object.keys(doc || {}), 'documents');
+
+      // RT2-H1 overwrite recoverability (migration 0032): before a content-changing
+      // overwrite of an EXISTING doc, snapshot the prior title/summary/content into
+      // document_versions (encrypted) so a poisoned/mistaken write is recoverable.
+      // Create (no prior) and identical re-write (no diff) capture nothing. Bulk
+      // importers bypass this DAL (raw inserts) so import is unaffected. Non-fatal +
+      // isolated — a versioning hiccup must NEVER deny an owner-authorized write
+      // (mirrors the afterUpsertHooks discipline). No plaintext is ever logged.
+      if (doc && doc.user_id && doc.path && opts.skipVersion !== true) {
+        try {
+          const prev = firstRow(await d1Query(
+            `SELECT id, title, summary, content, forgotten_at FROM documents WHERE user_id = ? AND path = ?`,
+            [doc.user_id, doc.path],
+          ));
+          const changed = prev && !prev.forgotten_at && (
+            (doc.content !== undefined && doc.content !== prev.content) ||
+            (doc.title !== undefined && doc.title !== prev.title) ||
+            (doc.summary !== undefined && doc.summary !== prev.summary)
+          );
+          if (changed) {
+            await d1Query(
+              `INSERT INTO document_versions (document_id, user_id, path, title, summary, content, trigger, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+              [prev.id, doc.user_id, doc.path, prev.title ?? null, prev.summary ?? null, prev.content ?? null, opts.trigger || 'overwrite', opts.reason ?? null],
+            );
+          }
+        } catch (e) {
+          console.warn(`[doc-version] prior-snapshot capture failed: ${e?.code || e?.name || 'error'}`);
+        }
+      }
+
       const cols = Object.keys(doc).join(', ');
       const placeholders = Object.keys(doc).map(() => '?').join(', ');
       // SET clause for ON CONFLICT. Exclude the conflict key (user_id, path) AND
@@ -448,6 +479,45 @@ export function createDocumentsNamespace(deps) {
       const row = firstRow(result);
       if (row && afterUpsertHooks.length) fireHooks(afterUpsertHooks, row);
       return row;
+    },
+
+    // ── RT2-H1 recovery (migration 0032) ────────────────────────────────
+
+    /**
+     * Prior versions of a document, captured before each content-changing
+     * overwrite (newest first). Snapshot columns (title/summary/content)
+     * auto-decrypt on read. The recovery half of the owner-write grant.
+     */
+    async listVersions(userId, path, { limit = 20 } = {}) {
+      const result = await d1Query(
+        `SELECT id, title, summary, content, trigger, reason, created_at
+           FROM document_versions
+          WHERE user_id = ? AND path = ?
+          ORDER BY created_at DESC, rowid DESC
+          LIMIT ?`,
+        [userId, path, clampLimit(limit, 20, 200)],
+      );
+      return result.results || [];
+    },
+
+    /**
+     * Restore a prior version's title/summary/content onto the live document.
+     * Routes through upsert() so the CURRENT value is itself snapshotted first —
+     * a restore is reversible. Returns the restored row, or null if the version
+     * or the live doc is gone.
+     */
+    async restoreVersion(userId, path, versionId) {
+      const v = firstRow(await d1Query(
+        `SELECT title, summary, content FROM document_versions WHERE id = ? AND user_id = ? AND path = ?`,
+        [versionId, userId, path],
+      ));
+      if (!v) return null;
+      const cur = await this.get(userId, path);
+      if (!cur) return null;
+      return this.upsert(
+        { user_id: userId, path, title: v.title ?? null, summary: v.summary ?? null, content: v.content ?? null },
+        { trigger: 'restore', reason: `restore ${versionId}` },
+      );
     },
 
     /**
