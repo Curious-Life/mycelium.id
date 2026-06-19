@@ -71,24 +71,28 @@ try {
          FROM person_claim_snapshots WHERE id='snap-1'`).get();
     raw.close();
     const encCols = ['claim_type', 'content', 'confidence_logodds', 'decay_class', 'support'];
-    const allEnc = row && encCols.every((c) => isEnvelope(row[c]));
-    rec('C2a. person_claims sensitive columns are envelopes at rest',
-      !!allEnc, row ? `enc{${encCols.filter((c) => isEnvelope(row[c])).length}/${encCols.length}}` : 'no row');
+    // SQLCipher collapse (Stage B/C cut 3): person_claims / person_claim_snapshots
+    // sensitive columns are now PLAINTEXT-inside-cipher (at-rest confidentiality is
+    // whole-file SQLCipher, verify:at-rest — not a per-field envelope). Assert the
+    // stop-write worked (columns stored plaintext); structural columns stay plaintext.
+    const allPlain = row && encCols.every((c) => !isEnvelope(row[c]));
+    rec('C2a. person_claims sensitive columns stored PLAINTEXT-in-cipher (collapse cut 3)',
+      !!allPlain, row ? `plain{${encCols.filter((c) => !isEnvelope(row[c])).length}/${encCols.length}}` : 'no row');
     rec('C2b. person_claims structural columns stay plaintext (subject/status/content_hash)',
       row && !isEnvelope(row.subject) && row.subject === 'self'
         && !isEnvelope(row.status) && row.status === 'active'
         && !isEnvelope(row.content_hash) && row.content_hash === 'hash-abc',
       row ? `subject=${row.subject} status=${row.status} content_hash=${row.content_hash}` : 'no row');
     const snapEnc = ['confidence_logodds', 'content', 'evidence_count', 'delta_kind'];
-    rec('C2c. person_claim_snapshots sensitive columns are envelopes; structural plaintext',
-      snap && snapEnc.every((c) => isEnvelope(snap[c]))
+    rec('C2c. person_claim_snapshots sensitive columns PLAINTEXT-in-cipher; structural plaintext',
+      snap && snapEnc.every((c) => !isEnvelope(snap[c]))
         && !isEnvelope(snap.granularity) && snap.granularity === 'week'
         && !isEnvelope(String(snap.window_end)),
-      snap ? `enc{${snapEnc.filter((c) => isEnvelope(snap[c])).length}/${snapEnc.length}} granularity=${snap.granularity}` : 'no row');
-    // No ciphertext leak: the boundary sentence never appears as plaintext at rest.
-    const leak = raw_search(DB, U);
-    rec('C2d. no plaintext leak: claim sentence is never stored in cleartext',
-      leak === false, leak === false ? 'no cleartext match' : `LEAK at ${leak}`);
+      snap ? `plain{${snapEnc.filter((c) => !isEnvelope(snap[c])).length}/${snapEnc.length}} granularity=${snap.granularity}` : 'no row');
+    // C2d (per-field cleartext-leak scan) RETIRED in cut 3: claim content is now
+    // plaintext-inside-cipher by design — at-rest confidentiality is whole-file
+    // SQLCipher (proven by verify:at-rest), not a per-field envelope. C2a proves the
+    // column is plaintext; verify:at-rest proves the file on disk is ciphertext.
   }
 
   // ── C3. adapter decrypts on read + coerces numeric confidence via Number() ──

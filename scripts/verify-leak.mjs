@@ -11,7 +11,6 @@ import { readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
-import { createPeopleNamespace } from '../src/db/people.js';
 
 const DB = 'data/verify-leak.db', KCV = 'data/verify-leak-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -28,8 +27,10 @@ const T = {
   fact_value: 'ZZleakFactValue',
   msg_content: 'ZZleakMsgContent',
   entity_name: 'ZZleakEntityName', entity_summary: 'ZZleakEntitySummary',
-  people_name: 'ZZleakPeopleName', people_email: 'ZZleakPeopleAtEmail', people_phone: 'ZZleakPeoplePhone',
-  people_company: 'ZZleakPeopleCo', people_linkedin: 'ZZleakPeopleLinkedin',
+  // people PII tokens removed in SQLCipher collapse (Stage B/C cut 3): `people` is
+  // now plaintext-inside-cipher — its at-rest protection is whole-file SQLCipher
+  // (verify:at-rest), not a per-field envelope. The tokens left here are the tables
+  // STILL field-encrypted (facts/entities/messages); each leaves as its cut lands.
 };
 
 // ── exercise every encrypted WRITE path ──
@@ -42,22 +43,11 @@ await handlers.link({ entity: T.entity_name, entityType: 'person', type: 'fact',
 // messages: INSERT (encrypted content)
 await db.messages.insert([{ id: 'lk1', user_id: U, role: 'user', content: T.msg_content, scope: 'personal', created_at: '2026-06-02T10:00:00.000Z' }]);
 
-// people (dormant namespace, but its multi-line COALESCE UPDATE shares the same
-// crypto path — a pre-existing PII-at-rest leak the parser fix also closes). Seed
-// the row with a plain INSERT (the upsert's own randomblob INSERT is a separate
-// dormant-path quirk, out of scope), then exercise the multi-line COALESCE UPDATE
-// — the exact path the parser fix repairs. The contact tokens enter ONLY via the
-// UPDATE, so their absence proves the UPDATE-path encryption.
-const PID = 'ZZleakPersonId1';
-const people = createPeopleNamespace({ d1Query: db._base.d1Query, d1QueryAdmin: db._base.d1QueryAdmin });
-await db._base.d1Query(
-  `INSERT INTO people (id, user_id, name, source, email, phone, company, linkedin_url, status) VALUES (?,?,?,?,?,?,?,?,?)`,
-  [PID, U, T.people_name, 'leaktest', 'seed@x', 'seedphone', 'seedco', 'seedlink', 'connected'],
-);
-await people.upsert(
-  { user_id: U, name: T.people_name, source: 'leaktest', email: T.people_email, phone: T.people_phone, company: T.people_company, linkedin_url: T.people_linkedin },
-  new Map([[T.people_name, PID]]),
-); // → multi-line COALESCE UPDATE (the parser-fix path)
+// people seed REMOVED in SQLCipher collapse (Stage B/C cut 3): `people` is now
+// plaintext-inside-cipher, so a per-field "PII absent from raw bytes" assertion no
+// longer applies (whole-file SQLCipher protects it at rest — verify:at-rest proves
+// it). The multi-line COALESCE UPDATE / parser-fix path stays covered by the
+// entities dedup UPDATE above (line 41, entities is still field-encrypted).
 
 // ── FAIL-CLOSED: a write the encryption parser can't model must THROW, never
 // silently persist plaintext into an encrypted column (H1, 2026-06-11). ──
@@ -93,7 +83,7 @@ for (const [col, tok] of Object.entries(T)) {
   rec(`${col} encrypted at rest`, !raw.includes(tok), raw.includes(tok) ? 'PLAINTEXT LEAK' : 'ciphertext only');
 }
 // Sanity: the scan reads real bytes — the plaintext (never-encrypted) row id IS present.
-rec('scan integrity (a known plaintext id IS found in the raw bytes)', raw.includes(PID), 'scan reads real bytes');
+rec('scan integrity (a known plaintext id IS found in the raw bytes)', raw.includes('lk1'), 'scan reads real bytes');
 
 close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }

@@ -311,12 +311,13 @@ const ENCRYPTED_FIELDS = {
   // Agent customizations — per-agent system prompts + settings
   agent_customizations: ['system_prompt', 'settings', 'tools_config'],
 
-  // Contacts — all PII
-  people: [
-    'name', 'aliases', 'description', 'metadata',
-    'email', 'phone', 'company', 'position', 'linkedin_url',
-    'notes', 'avatar_url',
-  ],
+  // Contacts — SQLCipher collapse (Stage B/C cut 3): all PII columns are now
+  // plaintext-inside-cipher (at-rest = whole-file SQLCipher, verify:at-rest).
+  // people is JS-adapter-written (src/db/people.js) → the map shrink stops every
+  // write; old envelope rows decrypt on read until the backfill converts them.
+  // The deferred SQL restore replaces loadNameIndex/JS-dedup with a plaintext
+  // `name` UNIQUE(user_id,name) + ON CONFLICT (after the live backfill + de-dup).
+  people: [],
 
   // Wealth — amounts, notes, anything revealing position sizes
   wealth_transactions: ['notes', 'quantity', 'price_per_unit', 'fees', 'exchange_rate'],
@@ -355,8 +356,13 @@ const ENCRYPTED_FIELDS = {
   // is a JSON id-set. content_hash/status/scope stay plaintext for SQL filtering;
   // embedding_768 is in NEVER_AUTO_DECRYPT (vector envelope). Both tables are
   // SCOPE_AWARE. See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md.
-  person_claims: ['claim_type', 'content', 'confidence_logodds', 'decay_class', 'support'],
-  person_claim_snapshots: ['confidence_logodds', 'content', 'evidence_count', 'delta_kind'],
+  // Stage B/C cut 3: the claim content columns are now plaintext-inside-cipher
+  // (claims.js is JS-adapter-written → the map shrink stops every write). content_hash
+  // /status/scope stay PLAINTEXT (SQL filter keys); embedding_768 stays in
+  // NEVER_AUTO_DECRYPT (vector envelope, untouched); both tables stay SCOPE_AWARE.
+  // The deferred SQL restore adds ORDER BY confidence_logodds (after the backfill).
+  person_claims: [],
+  person_claim_snapshots: [],
 
   // Reflections — journal entries
   reflections: ['content', 'trigger', 'metadata'],

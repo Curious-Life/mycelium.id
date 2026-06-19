@@ -76,6 +76,18 @@ const BACKFILL_TARGETS = {
     columns: ['entropy_diversification', 'connection_growth_rate', 'reach', 'cofire_partner_diversity', 'engagement_depth_normalized', 'vitality'],
     codec: { kind: 'content' },
   },
+
+  // ── Stage B/C cut 3: claims + people. All stopped in ENCRYPTED_FIELDS (JS-adapter-
+  // written); backfill the existing envelope rows to plaintext. person_claims.
+  // embedding_768 is NOT here (NEVER_AUTO_DECRYPT vector, reserved/NULL). The people
+  // UNIQUE(user_id,name) migration + ON CONFLICT restore land after this backfill.
+  'content.people': {
+    table: 'people',
+    columns: ['name', 'aliases', 'description', 'metadata', 'email', 'phone', 'company', 'position', 'linkedin_url', 'notes', 'avatar_url'],
+    codec: { kind: 'content' },
+  },
+  'content.person_claims': { table: 'person_claims', columns: ['claim_type', 'content', 'confidence_logodds', 'decay_class', 'support'], codec: { kind: 'content' } },
+  'content.person_claim_snapshots': { table: 'person_claim_snapshots', columns: ['confidence_logodds', 'content', 'evidence_count', 'delta_kind'], codec: { kind: 'content' } },
 };
 
 /**
