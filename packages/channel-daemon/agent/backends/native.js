@@ -60,7 +60,19 @@ export function createNativeRuntime(cfg = {}) {
     }
   }
 
-  return { runTurn, label: 'native' };
+  // Honest health (red-team RT4-B1): native runs the turn on the SERVER, which may have
+  // no model configured. The daemon probes this at boot; if false it reports capture-only
+  // instead of a silent green. Loopback GET; fail-closed (unreachable/no-model ⇒ false).
+  async function probeHealth() {
+    try {
+      const res = await fetchImpl(`${base}/internal/agent/model-status`, { signal: AbortSignal.timeout(3000) });
+      if (!res || !res.ok) return { hasModel: false };
+      const j = await res.json().catch(() => ({}));
+      return { hasModel: !!j.hasModel };
+    } catch { return { hasModel: false }; }
+  }
+
+  return { runTurn, label: 'native', probeHealth };
 }
 
 export default createNativeRuntime;

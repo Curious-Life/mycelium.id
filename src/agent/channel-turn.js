@@ -21,6 +21,8 @@ import crypto from 'node:crypto';
 import express from 'express';
 import { isTrustedLoopback } from '../http/loopback.js';
 import { runAgentTurn } from './run-turn.js';
+import { describeProvider } from './harness.js';
+import { resolveInferenceConfigForTask } from '../inference/resolve.js';
 import { wrapUntrusted } from './untrusted.js';
 import { createTriage } from './triage.js';
 import { OWNER_CHANNEL_TOOLS, UNTRUSTED_CHANNEL_TOOLS, isOwnerTrustedTurn } from './resolve-grant.js';
@@ -115,7 +117,9 @@ export function createChannelTurnRouter({ db, userId, tools = [], handlers = {},
         userMessage: input,
         systemExtra: ownerTrusted ? OWNER_SYSTEM : CHANNEL_SYSTEM,
         enabledTools: ownerTrusted ? [...OWNER_CHANNEL_TOOLS] : [...UNTRUSTED_CHANNEL_TOOLS],
-        history, conversationId, recentN: 8,
+        // Non-owner/group history may contain third-party messages → frame as untrusted
+        // in the preamble so an injection in prior turns is not obeyed (RT3-H2).
+        history, conversationId, recentN: 8, historyUntrusted: !ownerTrusted,
       });
 
       if (result?.skipped === 'no-model') { res.json({ delivered: false, usedReplyTool: false, reason: 'no-model' }); return; }
@@ -132,6 +136,17 @@ export function createChannelTurnRouter({ db, userId, tools = [], handlers = {},
       logger(`channel-turn failed: ${e?.code || e?.name || 'error'}`);
       res.status(200).json({ delivered: false, usedReplyTool: false, reason: 'turn-error' });
     }
+  });
+
+  // Honest-health probe for the native daemon (red-team RT4-B1): does the vault have a
+  // model that can answer a channel turn? Loopback-only; carries no secrets, only a
+  // boolean — lets the daemon report capture-only instead of a silent green.
+  router.get('/internal/agent/model-status', async (req, res) => {
+    if (!isTrustedLoopback(req)) { res.status(403).json({ error: 'loopback only' }); return; }
+    try {
+      const provider = await resolveInferenceConfigForTask(db, userId, 'harness');
+      res.json({ hasModel: !!describeProvider(provider) });
+    } catch { res.json({ hasModel: false }); }
   });
 
   return router;
