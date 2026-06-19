@@ -13,7 +13,7 @@
 //   F9 idempotent             re-import → 0 new rows
 //   F10 bad format            wrong manifest.format → 400
 import crypto from 'node:crypto';
-import { rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, utimesSync } from 'node:fs';
+import { rmSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync, readdirSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -56,6 +56,9 @@ function buildBundle(root, { format = 'mycelium-full-export' } = {}) {
     { id: 'fx_m1', role: 'user', content: MARKER, source: 'telegram', created_at: '2024-02-02T00:00:00.000Z', nlp_processed: 1 },
     { id: 'fx_m2', role: 'assistant', content: 'a reply', source: 'telegram', created_at: '2024-02-02T00:01:00.000Z' },
   ]);
+  // FAIL-LOUD test (2e-M5): a corrupt NDJSON line must be COUNTED (malformed),
+  // not silently dropped — and must NOT prevent the valid rows from importing.
+  appendFileSync(join(pre, 'db/messages.ndjson'), '{ "id": "fx_bad", this is not valid json\n');
   nd('db/people.ndjson', [{ id: 'fx_p1', name: 'Grace Hopper', email: 'grace@example.com' }]);
   // FK-ordering case: contact_territories (FK contact_id→people) sorts BEFORE
   // 'people' alphabetically, so it's imported first — must still land (FK
@@ -98,6 +101,13 @@ async function main() {
       && cnt("SELECT COUNT(*) n FROM clustering_points WHERE id='fx_cp1'")?.n === 1);
 
     rec('F2 denied table (audit_log) NOT imported', cnt("SELECT COUNT(*) n FROM audit_log WHERE id='fx_audit1'")?.n === 0);
+
+    // F-malformed (2e-M5): the corrupt messages line is COUNTED (total + per-table),
+    // and the two valid messages still imported (a bad line never blocks the rest).
+    rec('F2b malformed NDJSON line counted, not silently dropped',
+      (r1.body?.malformed >= 1) && (r1.body?.stats?.messages?.malformed >= 1)
+      && cnt("SELECT COUNT(*) n FROM messages WHERE id IN ('fx_m1','fx_m2')")?.n === 2,
+      `total.malformed=${r1.body?.malformed} messages.malformed=${r1.body?.stats?.messages?.malformed}`);
 
     rec('F1b FK-ordered child lands (contact_territories before people, FK deferred)',
       cnt("SELECT COUNT(*) n FROM contact_territories WHERE id='fx_ct1'")?.n === 1);
