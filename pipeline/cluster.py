@@ -701,23 +701,17 @@ def fetch_all_embeddings(batch_size: int = 100, dry_run: bool = False) -> tuple[
                                 missing_768 += 1
                                 continue
                             try:
-                                # encryptVector (decode.js:152) calls
-                                # encodeVector first → base64 string of the
-                                # float32 bytes → THAT is what gets encrypted.
-                                # So the plaintext from decrypt() is base64
-                                # ASCII, not raw float bytes. We decode_bytes
-                                # for binary-safety but then base64-decode to
-                                # get the actual float32 buffer.
-                                import base64 as _b64
-                                pt = decrypt_bytes(envelope, master_key)
-                                raw = _b64.b64decode(pt)
+                                # Dual-read (Stage A SQLCipher collapse): the value
+                                # is raw LE-f32 bytes (new, delivered as bytes through
+                                # the vault bridge) OR a legacy wrapped-DEK envelope
+                                # string. decode_stored_vector resolves both → (768,).
+                                from crypto_local import decode_stored_vector
+                                vec_768 = decode_stored_vector(envelope, master_key, dim=768)
                             except Exception:
                                 decrypt_failed += 1
                                 continue
-                            # 768D × 4B = 3072 expected. Be strict to catch
-                            # mismatched-dim envelopes early.
-                            if len(raw) == 768 * 4:
-                                vec_768 = np.frombuffer(raw, dtype=np.float32)
+                            # 768D expected. Be strict to catch mismatched-dim early.
+                            if vec_768 is not None and vec_768.size == 768:
                                 # L2-normalize after slicing — matryoshka
                                 # truncation breaks the unit-norm property of
                                 # the source 768D vector. Both embed-service

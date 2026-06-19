@@ -28,7 +28,7 @@ import { createEnrichmentService } from '../src/enrich/service.js';
 import { extract } from '../src/enrich/extract.js';
 import { startEnrichmentServer } from '../src/enrich/server.js';
 import { createEnqueueEnrichment } from '../src/ingest/enqueue.js';
-import { decryptVector } from '../src/search/ann/decode.js';
+import { decodeStoredVector } from '../src/search/ann/decode.js';
 import { EMBED_DIM } from '../src/embed/client.js';
 
 const DB = 'data/verify-enrich.db';
@@ -164,22 +164,22 @@ async function main() {
   rec('N1c. healthy rows flipped nlp_processed 0→2', flipped,
     Object.keys(pendingContents).map((id) => `${id}=${rawState(id).nlp_processed}`).join(' '));
 
-  // N2: stored embedding_768 is a ciphertext envelope, not the raw vector
+  // N2: stored embedding_768 is RAW LE-f32 BLOB bytes (Stage A), NOT an envelope.
+  // At-rest secrecy is whole-file SQLCipher; the column is NEVER_AUTO_DECRYPT so the
+  // adapter binds/returns the Buffer verbatim. 768 × 4 = 3072 bytes.
   const s1 = rawState('e-1');
-  const looksEncrypted = typeof s1.embedding_768 === 'string'
-    && s1.embedding_768.length > 0
-    && !s1.embedding_768.includes('0.')          // not a JSON number dump
-    && !s1.embedding_768.startsWith('[');        // not a raw array
-  rec('N2. embedding_768 stored as a ciphertext envelope (not raw vector)',
-    looksEncrypted, `len=${s1.embedding_768?.length} head=${String(s1.embedding_768).slice(0, 24)}`);
+  const isRawBlob = Buffer.isBuffer(s1.embedding_768) && s1.embedding_768.length === EMBED_DIM * 4;
+  rec('N2. embedding_768 stored as a raw LE-f32 BLOB (not an envelope)',
+    isRawBlob, `isBuffer=${Buffer.isBuffer(s1.embedding_768)} len=${s1.embedding_768?.length}`);
 
-  // N3: decrypts back to the exact stub vector via the canonical read path
+  // N3: decodeStoredVector recovers the exact stub vector (raw path; also dual-reads
+  // any legacy envelope). masterKey/scope are ignored for the raw path.
   const masterKey = await getMasterKey();
-  const back = await decryptVector(s1.embedding_768, masterKey, [s1.scope], EMBED_DIM);
+  const back = await decodeStoredVector(s1.embedding_768, EMBED_DIM, masterKey, [s1.scope]);
   const expected = stubVec(pendingContents['e-1']);
   let maxErr = 0;
   for (let i = 0; i < EMBED_DIM; i++) maxErr = Math.max(maxErr, Math.abs(back[i] - expected[i]));
-  rec('N3. decryptVector (no userId) recovers the exact 768-d vector — write/read key parity',
+  rec('N3. decodeStoredVector recovers the exact 768-d vector — write/read parity',
     back.length === EMBED_DIM && maxErr < 1e-5, `dim=${back.length} maxAbsErr=${maxErr.toExponential(2)}`);
 
   // N4: already-embedded row untouched (still has no embedding_768, still =2)

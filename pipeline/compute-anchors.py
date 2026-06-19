@@ -157,10 +157,13 @@ def ensure_anchor_vectors(querier) -> dict[str, np.ndarray]:
             mean_vec = rows.mean(axis=0).astype(np.float32)
             norm = float(np.linalg.norm(mean_vec)) or 1.0
             mean_vec = (mean_vec / norm).astype(np.float32)
-            env = crypto_local.encrypt_vector(mean_vec, "personal", mk)
+            # Stage A: store the anchor as RAW LE-f32 bytes (no per-field envelope).
+            # encode_vector_raw → bytes; the vault bridge carries it as a {__b64__}
+            # BLOB param and it lands as a BLOB at rest (whole-file SQLCipher).
+            raw = crypto_local.encode_vector_raw(mean_vec)
             querier(ANCHOR_UPSERT_SQL, [
                 construct, version, hashes[construct], anchordefs.ANCHOR_DIM,
-                len(seeds), embedder.label, env,
+                len(seeds), embedder.label, raw,
             ])
             out[construct] = mean_vec
 
@@ -175,8 +178,10 @@ def ensure_anchor_vectors(querier) -> dict[str, np.ndarray]:
         )
         if not row:
             raise RuntimeError(f"anchor vector missing after ensure for {construct!r}")
-        env = row[0]["anchor_vector"]
-        vec = crypto_local.decrypt_vector(env, mk, dim=anchordefs.ANCHOR_DIM)
+        # Dual-read (Stage A): raw LE-f32 bytes (new, via the bridge) OR a legacy
+        # wrapped-DEK envelope string. decode_stored_vector resolves both.
+        stored = row[0]["anchor_vector"]
+        vec = crypto_local.decode_stored_vector(stored, mk, dim=anchordefs.ANCHOR_DIM)
         norm = float(np.linalg.norm(vec)) or 1.0
         out[construct] = (vec / norm).astype(np.float32)
 

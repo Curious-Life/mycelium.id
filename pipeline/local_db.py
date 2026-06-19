@@ -13,6 +13,7 @@
 #                                  through the canonical JS adapter (auto-encrypt)
 #
 # A "statement" is {"sql": str, "params": list} (also accepts [sql, params]).
+import base64
 import json
 import os
 import sqlite3
@@ -32,6 +33,39 @@ def _parts(s):
     if isinstance(s, (list, tuple)):
         return s[0], (s[1] if len(s) > 1 else []) or []
     return str(s), []
+
+
+# ── BLOB transport over JSON (bridge mode only) ──────────────────────────────
+# A SQLite BLOB crosses the loopback bridge as a tagged object {"__b64__": <b64>}.
+# The legacy direct-sqlite3 path needs none of this (sqlite3 binds/returns bytes
+# natively). Mirrors vault-bridge.js decodeParams/encodeRow. Used for raw LE-f32
+# vector columns (Stage A: nomic_embedding, embedding_768, anchor_vector).
+def _encode_param(p):
+    if isinstance(p, (bytes, bytearray, memoryview)):
+        return {"__b64__": base64.b64encode(bytes(p)).decode("ascii")}
+    return p
+
+
+def _encode_params(params):
+    return [_encode_param(p) for p in (params or [])]
+
+
+def _encode_stmt(s):
+    if isinstance(s, dict):
+        return {**s, "params": _encode_params(s.get("params"))}
+    if isinstance(s, (list, tuple)):
+        return [s[0], _encode_params(s[1] if len(s) > 1 else [])]
+    return s
+
+
+def _decode_value(v):
+    if isinstance(v, dict) and len(v) == 1 and isinstance(v.get("__b64__"), str):
+        return base64.b64decode(v["__b64__"])
+    return v
+
+
+def _decode_rows(rows):
+    return [{k: _decode_value(v) for k, v in r.items()} for r in (rows or [])]
 
 
 # ── bridge transport ─────────────────────────────────────────────────────────
@@ -65,7 +99,8 @@ def query(sql, params=None):
     """Run a query against the local vault. SELECT → list[dict]; a write issued
     through query() (UPDATE/DELETE) commits and returns []."""
     if _BRIDGE_URL:
-        return _post("/query", {"sql": sql, "params": list(params) if params else []}).get("rows", [])
+        rows = _post("/query", {"sql": sql, "params": _encode_params(params)}).get("rows", [])
+        return _decode_rows(rows)
     conn = _conn_get()
     cur = conn.execute(sql, params or [])
     if cur.description is None:
@@ -78,7 +113,7 @@ def batch(statements):
     """Run a batch of PLAINTEXT statements in one transaction. Only for columns
     NOT in ENCRYPTED_FIELDS (centroids, energy, coherence, …)."""
     if _BRIDGE_URL:
-        return _post("/batch", {"statements": statements or []})
+        return _post("/batch", {"statements": [_encode_stmt(s) for s in (statements or [])]})
     conn = _conn_get()
     n = 0
     for s in (statements or []):

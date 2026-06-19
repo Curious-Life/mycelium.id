@@ -17,7 +17,7 @@
  * counts.
  */
 
-import { decryptVector } from './ann/decode.js';
+import { decodeStoredVector } from './ann/decode.js';
 import { EMBED_DIM } from '../embed/client.js';
 
 /**
@@ -192,7 +192,7 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
     // Best-effort: a missing/garbled envelope falls through to text-only.
     let embedding;
     if (masterKey && row.embedding_768) {
-      try { embedding = await decryptVector(row.embedding_768, masterKey, null, EMBED_DIM); vectorsLoaded++; }
+      try { embedding = await decodeStoredVector(row.embedding_768, EMBED_DIM, masterKey, null); vectorsLoaded++; }
       catch { embedding = undefined; vectorsFailed++; }
     }
     // text is either a single decrypted column aliased AS text, or built in JS

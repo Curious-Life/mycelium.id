@@ -12,6 +12,19 @@ import { isTrustedLoopback } from './http/loopback.js';
 // Extended per the collapse follow-on (embedding_768 / anchor_vector, then content).
 const BACKFILL_TARGETS = {
   'clustering_points.nomic_embedding': { table: 'clustering_points', column: 'nomic_embedding', codec: { kind: 'vector', dim: 256 } },
+  // Stage A 768-d vectors — every column whose writer is now flipped to raw
+  // (enrich/service.js for messages; full-export-import.js vectorPass for the 4
+  // profile/realm/theme tables). Readers dual-read raw + legacy envelope.
+  'messages.embedding_768': { table: 'messages', column: 'embedding_768', codec: { kind: 'vector', dim: 768 } },
+  'documents.embedding_768': { table: 'documents', column: 'embedding_768', codec: { kind: 'vector', dim: 768 } },
+  'territory_profiles.embedding_768': { table: 'territory_profiles', column: 'embedding_768', codec: { kind: 'vector', dim: 768 } },
+  'realms.embedding_768': { table: 'realms', column: 'embedding_768', codec: { kind: 'vector', dim: 768 } },
+  'semantic_themes.embedding_768': { table: 'semantic_themes', column: 'embedding_768', codec: { kind: 'vector', dim: 768 } },
+  // anchor_vector — compute-anchors.py now writes raw via the bridge blob param.
+  'cognitive_anchor_vectors.anchor_vector': { table: 'cognitive_anchor_vectors', column: 'anchor_vector', codec: { kind: 'vector', dim: 768 } },
+  // NOTE: person_claims.embedding_768 is intentionally OMITTED — its writer is
+  // caller-supplied and the column is reserved/NULL today (src/claims/discovery.js);
+  // migrating it without a flipped writer or active consumer adds risk for no gain.
 };
 
 /**
