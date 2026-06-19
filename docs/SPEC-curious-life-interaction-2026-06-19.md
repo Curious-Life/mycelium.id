@@ -2,7 +2,8 @@
 
 **Date:** 2026-06-19 · **Status:** Draft for review (pairs with the metric/validity spec)
 **Owns:** the page's *components, interactions, layout, and the event-anchor loop*.
-**Defers to:** [`SPEC-curious-life-page-2026-06-19.md`](SPEC-curious-life-page-2026-06-19.md) (Ada — metric definitions, reliability tiers, the detection→correlation→prediction staircase, the CVP gate) and [`CURIOUS-LIFE-METRICS-CATALOG.md`](CURIOUS-LIFE-METRICS-CATALOG.md) (per-metric plain-language + rigor).
+**Defers to:** [`SPEC-curious-life-page-2026-06-19.md`](SPEC-curious-life-page-2026-06-19.md) (metric definitions, reliability tiers, the detection→correlation→prediction staircase, the CVP gate) and [`CURIOUS-LIFE-METRICS-CATALOG.md`](CURIOUS-LIFE-METRICS-CATALOG.md) (per-metric plain-language + rigor).
+**Reconciliation:** this and the metric spec are two halves of one design and must be reconciled explicitly — several findings from the 2026-06-19 working session (Fisher depth/scope, dimension-aware smoothing, the AI stream) belong in *both* and are flagged inline + in §8.
 
 This spec says *how the page behaves and is built*. Where it names a metric's trustworthiness it cites the metric spec rather than re-deciding it.
 
@@ -16,6 +17,8 @@ The page is **one shared time axis** seen through stacked lenses. Two parties wr
 - **The person annotates upward** — *events they lived* ("since I started the new project").
 
 **Correlation lives in the overlap.** Every anchored event is a labeled `(shift ↔ event)` pair; over months that overlap is what lets the system (and the AI) learn whether a detected shift means anything *for this person*. The event-anchor is therefore not UX garnish — it is the ground-truth collection engine that earns the right to ever say more (per the metric spec's staircase).
+
+**A third writer — the AI.** The same shift-marks and event-anchors flow to the AI surface (the always-on cognitive preamble + on-demand tools defined in the metric spec §7), so the human page and the AI never fork on *what shifted* or *what you lived*. The timeline has three participants: the system marks shifts, you mark events, the AI reads both and reflects — in conversation, at the right moment, framed as a question.
 
 Everything derived drills down to one floor: the **week × top-3 territories** view (the literal, checkable base layer). Nothing on the page is an orphan number.
 
@@ -81,9 +84,9 @@ Each component: **purpose · data source · interaction · hover · drill · col
 ### 3.4 Movement (Fisher) — ✓ shipped, promote the shift layer
 - **Purpose:** *did my attention just reorganize unusually* — the shift layer.
 - **Display the z-score, not the raw value:** *"Unusual movement this week — 3.6σ above your baseline — driven by [creative] rising as [logistics] faded."* (`fisher_velocity_z` + `top_contributors`.)
-- **Also show D / L / R** = exploring (going somewhere) vs cycling (busy but stuck) — the most useful single distinction. Badge phase labels one notch softer (heuristic thresholds).
+- **Cycling vs exploring — use depth-invariant forms only.** Show "going somewhere vs circling" via **`R_recent` (rolling)**, a **windowed displacement `D_K`**, and **mean step size** — **NOT** the stored cumulative `fisher_displacement` / `fisher_trajectory_length` / `exploration_ratio` columns. Those are since-anchor cumulative → depth-degenerate (L→∞, D measured from 2018, R→0 as history grows) — they are the exact source of the weird numbers seen this session. `R_recent` exists; `D_K` is computed inline to derive it but then discarded — so this is a small **data addition** (persist/expose `D_K` + mean step size), not just a label swap. ⚠️ **Fix before the Movement component is built.** Phase labels stay one notch softer (heuristic thresholds).
 - **Shift markers:** velocity-z spikes become clickable marks *on the shared timeline* (the system's downward annotations).
-- **Reliability:** geometry + z-score validated-mathematical **within one clustering run** (null = surrogate shuffles of your own history); do **not** compare z across re-clusters — pin the series to a run and show the run boundary. Phase labels = heuristic.
+- **Reliability:** geometry + z-score validated-mathematical **within one clustering run** (null = surrogate shuffles of your own history); do **not** compare z across re-clusters — pin the series to a run and show the run boundary. Caveat: the per-category smoothing (ε = 0.01 × n) makes the z's σ-unit differ across scopes (territory vs realm), so "validated within run" is slightly optimistic across scopes until the dimension-aware smoothing fix lands (§8). Phase labels = heuristic.
 
 ### 3.5 Connectivity over time — + new (high priority)
 - **Purpose:** the connective tissue between "where I am" and "where I'm going" — and a **basis-robust shift detector** (graph-structural change is more identity-stable than distribution geometry).
@@ -105,7 +108,7 @@ Each component: **purpose · data source · interaction · hover · drill · col
 ### 3.7 Event anchors — + new (the ground-truth engine)
 - **Purpose:** the person's *upward* annotations; the labeled-data loop that makes correlation/prediction *measurable* instead of asserted.
 - **Capture:** "anchor an event" on any date, or "mark what happened here" on a detected shift. Stored as `{date, label, valence, note?}`.
-  - **Valence/direction is required** — EWS are direction-blind, so the human's own "this was good / hard / neutral" is the *only* way the system could ever learn direction. The math supplies *when*; the person supplies *what kind*.
+  - **Valence/direction is required, but not binary** — EWS are direction-blind, so the human's own label is the *only* way the system could ever learn direction. Offer **good / hard / neutral / mixed / unsure** — forcing a binary good/bad on a complex event is its own small dishonesty, and "mixed" / "unsure" are real signal. The math supplies *when*; the person supplies *what kind*.
 - **Two payoffs from one capture:** (1) per-user `(shift ↔ event)` correlation over time; (2) CVP labeled data for the validity gate.
 - **Display:** event markers overlaid on every time graph (the bidirectional timeline); an **"since [event]"** lens that splits any chart before/after — *"since you started the new project, your Water dropped 30% and your trajectory accelerated."*
 - **Storage:** new `user_events` table + `GET/POST /portal/events/anchor` (distinct from the existing `cognitive_events` system-detected events). Encrypted (label/note/valence are personal).
@@ -128,7 +131,7 @@ Mirrors the metric spec; this is how each stage *appears*:
 
 - **Detection (ships now):** shift-marks on the timeline; tap → "what moved" (top contributors) + drill to messages. Honest, checkable.
 - **Correlation (earned, quiet):** the event-anchor loop runs in the background; no claims until enough anchored pairs accrue. The UI never asserts a shift "means" something — it invites the person to anchor what it was.
-- **Prediction (present-tense only, gated):** the early-signal battery (autocorrelation↑, perturbation-from-baseline, **recovery / return-to-cycling time**) renders **only as present-tense observation** — *"you've taken longer than usual to return to your baseline rhythm these past three weeks."* Never *"a transition is coming."* Direction-blind by construction; the person's anchored valence is what could ever add direction. Recovery-time = the lag for velocity-z to fall back below threshold after a spike (computable from the trajectory; cross-check `criticality` ar1/variance).
+- **Prediction (present-tense only, gated):** the early-signal battery (autocorrelation↑, perturbation-from-baseline, **recovery / return-to-cycling time**) renders **only as present-tense observation** — *"you've taken longer than usual to return to your baseline rhythm these past three weeks."* Never *"a transition is coming."* Direction-blind by construction; the person's anchored valence is what could ever add direction. Recovery-time = the lag for velocity-z to fall back below threshold after a spike (computable from the trajectory; cross-check `criticality` ar1/variance) — **with an N-floor like every other signal** (needs a minimum run of windows before it reads anything; below it, say so).
 
 ---
 
@@ -144,6 +147,9 @@ Mirrors the metric spec; this is how each stage *appears*:
 
 ## 7. Build order (reliable-now first)
 
+**0. Territory naming — kick off NOW, in parallel (the real unblock).** A map of "Territory 2660" is illegible regardless of the title, so naming is the true first move — but it's *backend* (a describe-pipeline pass), so it runs alongside the frontend work, not before it. ⚠️ Must be a **describe-only** pass — a full re-cluster collapses realms (known issue), so this is owned by the pipeline/metrics-audit session or a verified describe-only trigger, not a blind re-run.
+
+Frontend, in order:
 1. **Title fix** + now-line as header (retire the gradient hero).
 2. **Shared-hover sync** across existing graphs (river + anchor-count) — the "one instrument" backbone.
 3. **Week × top-3 territories** (+ the per-week-per-territory counts endpoint) — the drill-floor.
@@ -158,7 +164,9 @@ Mirrors the metric spec; this is how each stage *appears*:
 
 ## 8. Open questions & dependencies
 
-- **Naming (blocking legibility):** 218/312 territories unnamed → bands read "Territory 2660". Re-run the describe pipeline; zero frontend change after ([FINDING-territory-naming-incomplete](FINDING-territory-naming-incomplete-2026-06-19.md)).
+- **Naming (blocking legibility):** 218/312 territories unnamed → bands read "Territory 2660". Re-run the describe pipeline (describe-only — no re-cluster); zero frontend change after ([FINDING-territory-naming-incomplete](FINDING-territory-naming-incomplete-2026-06-19.md)). This is the real first move (§7.0).
+- **Dimension-aware Fisher smoothing (metric/pipeline spec):** the per-category ε = 0.01 × n smoothing distorts the velocity-z's σ-unit across scopes (territory vs realm aren't comparable). Fix = ε = α/n with a fixed total prior mass. New this session — belongs in the metric spec; until it lands, "validated within run" is optimistic across scopes (§3.4).
+- **Fisher depth-invariant columns:** `D_K` (windowed displacement) + mean step size are computed inline but not persisted; the Movement component needs them as clean columns/fields, not the cumulative `fisher_*` columns (§3.4).
 - **Per-week-per-territory message counts:** need a `clustering_points` aggregation for the week×top-3 raw counts (vs normalized shares).
 - **`user_events` storage + endpoints + encryption** — net-new; the event-anchor keystone.
 - **Backward-coherence:** adopt the principle (proxy-confound-immune coherence); validate the specific method before it ships.
