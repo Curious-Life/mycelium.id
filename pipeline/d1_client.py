@@ -29,6 +29,7 @@ import base64
 import json
 import os
 import sqlite3
+import urllib.error
 import urllib.request
 from typing import Any, Optional, Sequence
 
@@ -89,8 +90,14 @@ def _post(route: str, body: dict, timeout: int = 120) -> dict:
         headers={"Content-Type": "application/json", "X-Bridge-Token": _BRIDGE_TOKEN},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        out = json.loads(resp.read().decode("utf-8"))
+    # A 4xx/5xx (e.g. 401 on a token mismatch) makes urlopen raise HTTPError before the
+    # ``out.get("ok")`` check below. Convert it to a clear RuntimeError carrying only the
+    # status code — never the token or response body (which could echo request data).
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            out = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"vault-bridge auth/HTTP failure: {e.code}") from None
     if not out.get("ok"):
         raise RuntimeError(f"vault-bridge error: {out.get('error', 'unknown')}")
     return out

@@ -26,6 +26,15 @@ independent auth layer, fail-closed, plus a **random ephemeral port**.
   local process — regardless of uid — satisfies this. So loopback is a *network*
   boundary, never a *user* boundary.
 
+**Security assumption (token secrecy):** the per-boot token is minted by the spawner
+and handed to the bridge and Python stages via **inherited process environment**. This
+defends against a *different* local uid only under the assumption that one uid cannot
+read another's process environment — which holds on the target OSes: on macOS a uid
+cannot read a foreign process's env, and on Linux `/proc/<pid>/environ` is readable only
+by the same uid (or root). A *same-uid* attacker already holds USER_MASTER (and can read
+this env directly), so they are explicitly out of scope — the token never raises the bar
+against the uid that owns the vault.
+
 ## Decision
 
 Two independent layers, both required on every route (CLAUDE.md §2 defense-in-depth,
