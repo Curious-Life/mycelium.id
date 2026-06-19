@@ -250,7 +250,11 @@ export async function createHttpApp(opts = {}) {
   const currentHandle = () => { const h = (readRemoteConfig().publicHost || '').split('.')[0]; return isValidHandle(h) ? h : null; };
   const loginPage = (qs, err, csrf = '', handle = null) => {
     const ident = handle ? `@${escHtml(handle)}` : 'your vault';
-    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mycelium — Sign in</title><style>body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0c;color:#eaeaea;display:grid;place-items:center;min-height:100vh;margin:0}form{background:#15151a;padding:2rem;border-radius:14px;width:320px;border:1px solid #26262e}h1{font-size:1.05rem;margin:0 0 .4rem;color:#c9a227;font-weight:600}.id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#8a8a99;font-size:.85rem;margin:0 0 1.2rem}input{width:100%;box-sizing:border-box;margin:.35rem 0;padding:.65rem;background:#0a0a0c;border:1px solid #26262e;border-radius:8px;color:#eaeaea}button{width:100%;margin-top:1rem;padding:.7rem;background:#c9a227;color:#0a0a0c;border:0;border-radius:8px;font-weight:700;cursor:pointer}.e{color:#f87171;font-size:.85rem;margin:.3rem 0}.s{color:#8a8a99;font-size:.72rem;margin-top:1rem;text-align:center}</style></head><body><form method="POST" action="/login?${escHtml(qs)}"><h1>Connect to your vault</h1><div class="id">${ident}</div>${err ? `<div class="e">${escHtml(err)}</div>` : ''}<input type="hidden" name="_csrf" value="${escHtml(csrf)}"><input name="password" type="password" placeholder="operator password" autocomplete="current-password" autofocus required><button type="submit">Sign in</button><div class="s">Authorizing an MCP client to reach this vault.</div></form></body></html>`;
+    // The subtitle reflects WHY you're here: an OAuth connector flow (client_id in
+    // the query) vs a plain web sign-in to open the vault.
+    const isOAuth = (() => { try { return new URLSearchParams(qs).has('client_id'); } catch { return false; } })();
+    const sub = isOAuth ? 'Authorizing an app to reach this vault.' : 'Sign in to open your vault.';
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mycelium — Sign in</title><style>body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0c;color:#eaeaea;display:grid;place-items:center;min-height:100vh;margin:0}form{background:#15151a;padding:2rem;border-radius:14px;width:320px;border:1px solid #26262e}h1{font-size:1.05rem;margin:0 0 .4rem;color:#c9a227;font-weight:600}.id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#8a8a99;font-size:.85rem;margin:0 0 1.2rem}input{width:100%;box-sizing:border-box;margin:.35rem 0;padding:.65rem;background:#0a0a0c;border:1px solid #26262e;border-radius:8px;color:#eaeaea}button{width:100%;margin-top:1rem;padding:.7rem;background:#c9a227;color:#0a0a0c;border:0;border-radius:8px;font-weight:700;cursor:pointer}.e{color:#f87171;font-size:.85rem;margin:.3rem 0}.s{color:#8a8a99;font-size:.72rem;margin-top:1rem;text-align:center}</style></head><body><form method="POST" action="/login?${escHtml(qs)}"><h1>Connect to your vault</h1><div class="id">${ident}</div>${err ? `<div class="e">${escHtml(err)}</div>` : ''}<input type="hidden" name="_csrf" value="${escHtml(csrf)}"><input name="password" type="password" placeholder="operator password" autocomplete="current-password" autofocus required><button type="submit">Sign in</button><div class="s">${sub}</div></form></body></html>`;
   };
 
   app.get('/login', (req, res) => {
@@ -279,7 +283,14 @@ export async function createHttpApp(opts = {}) {
       if (!r.ok) { res.status(401).type('html').send(loginPage(qs, 'Invalid password', issueLoginCsrf(req, res), currentHandle())); return; }
       const cookies = typeof r.headers.getSetCookie === 'function' ? r.headers.getSetCookie() : [r.headers.get('set-cookie')].filter(Boolean);
       if (cookies.length) res.setHeader('set-cookie', cookies);
-      res.redirect(302, `/api/auth/mcp/authorize?${qs}`);
+      // Two ways here: (1) an OAuth connector flow (Claude) bounced through /login —
+      // the query carries client_id, so resume the authorize handshake; (2) a plain
+      // WEB sign-in (the relay routes /login here) with NO client_id — resuming
+      // authorize would dead-end at better-auth's invalid_client error page. Instead
+      // send the now-authenticated browser to the portal home; the session cookie we
+      // just set is valid for the whole host, so the portal opens.
+      const hasOAuthClient = (() => { try { return new URLSearchParams(qs).has('client_id'); } catch { return false; } })();
+      res.redirect(302, hasOAuthClient ? `/api/auth/mcp/authorize?${qs}` : '/');
     } catch {
       res.status(401).type('html').send(loginPage(qs, 'Invalid password', issueLoginCsrf(req, res), currentHandle()));
     }
