@@ -216,4 +216,4 @@ No ads, no data sold, no strings. Just people funding the infrastructure they re
 
 ---
 
-<p align="center"><sub>Built by <a href="https://curious.life">Curious Life</a></sub></p>
+<p align="center"><sub>Built by <a href="https://curiouslife.is">Curious Life</a></sub></p>
