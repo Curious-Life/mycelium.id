@@ -961,7 +961,7 @@ with candidates; ask the user which one.`;
 
           // Skip the system notification when the agent already replied
           // to THIS inbound channel — natural-text response already
-          // mentioned (or should have mentioned) the files. Captain Hook
+          // mentioned (or should have mentioned) the files. the external webhook bot
           // can detect the pattern via artifact.published vs
           // meta-report-suppressed activity events.
           const inboundSendCount = inboundChannel?.id

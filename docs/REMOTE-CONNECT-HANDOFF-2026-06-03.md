@@ -153,7 +153,7 @@ We stood the managed stack up **live on the real `mycelium.id`** (operator = Mar
 - **control-plane** — `node /opt/mycelium/mycelium-managed/src/server.js` (systemd), `MYC_BIND_HOST=127.0.0.1`, Cloudflare token (IP-restricted to the box, Edit-zone-DNS), `MYC_ZONE=mycelium.id`.
 - **Caddy edge** — `connect.mycelium.id:8443` → control-plane `/v1/*`; `acme.mycelium.id:8443` → acme-dns `/update`; DNS-01 via `caddy-dns/cloudflare`. (frps owns `:443` → edge on `:8443`.)
 - **DNS** (Cloudflare, all grey): `connect`, `acme`, `ns.auth` A → box; `auth` NS → `ns.auth`; per-handle records auto-created by the control-plane.
-- **First handle `0m.mycelium.id` provisioned** — real LE cert via DNS-01; `https://0m.mycelium.id/mcp` reachable, valid cert, `401`-gated.
+- **First handle `relay.example.com` provisioned** — real LE cert via DNS-01; `https://relay.example.com/mcp` reachable, valid cert, `401`-gated.
 - Deploy kit committed: `mycelium-managed/relay/deploy/`.
 
 ### The Mac (client)
@@ -191,7 +191,7 @@ POST /api/auth/mcp/token     → 200   (token ISSUED)
 A client that requests `openid` (it's in `scopes_supported`) and validates the `id_token` against the advertised RS256 / the EdDSA JWKS **cannot verify an HS256-ephemeral token → "authorization failed" before `/mcp`** — server-side, and identical across accounts/IPs (matches "fresh account on VPN = same error"). The metadata **chain itself is correct** (verified: `/mcp` 401 → `WWW-Authenticate` → protected-resource `resource=…/mcp` + `authorization_servers=[…]` → AS metadata with S256). So the bug is the token/`id_token` signing — a **better-auth@1.6.12 MCP-plugin limitation (our side)**. It does NOT rule out an *additional* Anthropic beta-gate (see below). **Temporary `[myc-oauth]`/`[myc-auth]` logging is live in `src/server-http.js` — remove before merge.**
 
 ### UPDATE 2026-06-03 — SERVER PROVEN FUNCTIONAL; the failure is CLAUDE-SIDE (decisive test)
-Ran a scripted **reference OAuth 2.1 + DCR + PKCE MCP client** (`/tmp/myc-phase2/_oauth-probe.mjs`) against the LIVE `https://0m.mycelium.id`:
+Ran a scripted **reference OAuth 2.1 + DCR + PKCE MCP client** (`/tmp/myc-phase2/_oauth-probe.mjs`) against the LIVE `https://relay.example.com`:
 ```
 register 201 → sign-in 200 → authorize 302 → token 200 → POST /mcp initialize 200
   result: { protocolVersion 2025-06-18, capabilities.tools, serverInfo: mycelium 0.1.0 }   getMcpSession: OK
@@ -215,12 +215,12 @@ Claude does register/authorize/token (all 200) then **never sends the Bearer to 
 ### Whose side is it? (SUPERSEDED by the UPDATE + RESEARCH subsections above — kept for history; server is proven functional, remaining levers = PRM-path + transport)
 The operator believes Anthropic is deliberately blocking/targeting them. Synthesis after investigating (and being wrong twice — don't be over-confident here):
 - **Most likely cause = OUR token signing** (see the blocker above): a better-auth@1.6.12 MCP-plugin defect. Provable, server-side, fixable. This is the lead to chase first.
-- **The "connectors page won't load / VPN fixes it" is plausibly Anthropic-side** (custom connectors are in beta; could be a geo/beta gate) OR the operator's own network — it is **NOT** our relay. *(Corrected: an earlier version of this doc wrongly blamed our relay's nftables rate-limit. That page is served by claude.ai; our relay only ever serves `0m.mycelium.id`.)*
+- **The "connectors page won't load / VPN fixes it" is plausibly Anthropic-side** (custom connectors are in beta; could be a geo/beta gate) OR the operator's own network — it is **NOT** our relay. *(Corrected: an earlier version of this doc wrongly blamed our relay's nftables rate-limit. That page is served by claude.ai; our relay only ever serves `relay.example.com`.)*
 - **Deliberate IP-targeting is contradicted by the operator's own observation:** a *fresh account on a VPN* (different account, different IP) got the **identical** error. A block targeting them would have let that through. Same-error-everywhere ⇒ either our bug or a **blanket** gate — neither is "coordinated against *you*."
 - **An Anthropic beta-gate on custom connectors is NOT ruled out** (the error says "contact support"). The way to actually know: the **reference-client test** in the blocker section. If a standards MCP client connects but Claude won't, *that* is the evidence it's Anthropic-side — and at that point "contact support" is the correct next move, not a workaround.
 
 ### Pickup protocol (next session)
-1. Confirm live: `curl -s -o/dev/null -w '%{http_code}\n' https://0m.mycelium.id/api/auth/mcp/jwks` (200), `…/mcp` (401), `…/login?x=1` (200). Run the Mac app via the `MYCELIUM_HOME=…` command above (kill other copies first: `pkill -f 'Mycelium.app/Contents/MacOS/mycelium'`).
+1. Confirm live: `curl -s -o/dev/null -w '%{http_code}\n' https://relay.example.com/api/auth/mcp/jwks` (200), `…/mcp` (401), `…/login?x=1` (200). Run the Mac app via the `MYCELIUM_HOME=…` command above (kill other copies first: `pkill -f 'Mycelium.app/Contents/MacOS/mycelium'`).
 2. **Apply the server-side fixes — `/sweep-first-design` FIRST** (the server is PROVEN functional end-to-end via `_oauth-probe.mjs`; the signing theory is DEAD — see the UPDATE + RESEARCH subsections, which supersede "Whose side?" below). In order:
    a. **Serve the PRM at the `/mcp` path-suffixed well-known + point WWW-Authenticate at it** — `/.well-known/oauth-protected-resource/mcp` currently **404s** (root → 200); add a route in `src/server-http.js` returning the SAME JSON, AND change the `/mcp` 401 `WWW-Authenticate resource_metadata` to the suffixed URL. **CONFIRMED gap, validated against Sentry/Linear/Notion (all 3 work with Claude and do exactly this) — do this first.**
 
@@ -253,7 +253,7 @@ The operator believes Anthropic is deliberately blocking/targeting them. Synthes
 |---|---|
 | **PR #83** | 3 stacked **browser-only** CORS gaps in `src/server-http.js` fixed. CI green. |
 | App rebuild from `main` | `cargo tauri build` → reinstalled `/Applications/Mycelium.app`. Also closed a real auth-bypass the prior installed build had: it lacked the `getMcpSession({…, asResponse:false})` fix → public `/mcp` accepted ANY bearer. New build: bogus bearer→401, valid→200. |
-| Claude Desktop connector | Added `mcpServers.mycelium = npx -y mcp-remote https://0m.mycelium.id/mcp` to `~/Library/Application Support/Claude/claude_desktop_config.json` (backup made). Live + verified. |
+| Claude Desktop connector | Added `mcpServers.mycelium = npx -y mcp-remote https://relay.example.com/mcp` to `~/Library/Application Support/Claude/claude_desktop_config.json` (backup made). Live + verified. |
 
 ### What was LEARNED (the important part)
 The Claude debug dragged for sessions because **server-side clients don't enforce CORS** — Claude's backend (`python-httpx`), `curl`, OAuth probe scripts, even the MCP Inspector **CLI** all passed, while the **browser** OAuth flow failed. The real bug was **three stacked, browser-only CORS gaps** in `src/server-http.js`:

@@ -64,15 +64,17 @@ kcv.json
 
 # Claude Code per-developer state
 .claude/projects/
+.claude/memory/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .claude/worktrees/
 .claude/launch.json
 
-# Local scratch
+# Local scratch + operator-only debug scripts — never ship in the public repo
 scratch/
 .tmp/
 *.local.md
+/_*.mjs
 
 # Tauri (Rust) build artifacts
 src-tauri/target/

@@ -1042,7 +1042,7 @@ TUNNEL_DOMAIN=mycelium.yourdomain.com
 ### Option A: Wrangler export (preferred)
 
 ```bash
-npx wrangler d1 export mycelium-tenant-martin --output=./data/tenant-export.sql
+npx wrangler d1 export mycelium-tenant-person --output=./data/tenant-export.sql
 sqlite3 ./data/mycelium.db < ./data/tenant-export.sql
 ```
 
