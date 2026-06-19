@@ -120,6 +120,15 @@ export async function initVaultStorage({ dbPath, userHex, log = (m) => console.e
       if (r.migrated) log(`[mycelium] at-rest: encrypted ${r.tables} tables; plaintext backup kept at ${r.preCipherPath}`);
     }
 
+    // Guard (Stage 0, SQLCipher-mandatory): if at-rest is opted in but the vault is
+    // STILL plaintext after the migration attempt, the encryption silently did not
+    // happen. Fail closed rather than serve the real vault unencrypted — this is the
+    // tripwire that makes "encrypted at rest" non-negotiable once at-rest is on.
+    // Scoped to atRestEnabled() so plaintext test fixtures (flag off) are unaffected.
+    if (atRestEnabled() && existsSync(dbPath) && isPlaintextSqlite(dbPath)) {
+      throw new Error('at-rest is enabled but the vault is still plaintext after init — refusing to open it unencrypted');
+    }
+
     // 3. The key getDb opens with: set iff the vault is now encrypted (self-detected)
     //    or at-rest is opted in. Null → plaintext open, unchanged.
     return resolveDbKeyHex(userHex, dbPath);
