@@ -19,6 +19,7 @@ import { createSecretsNamespace } from './secrets.js';
 import { createHealthNamespace } from './health.js';
 import { createTasksNamespace } from './tasks.js';
 import { createMetricsNamespace } from './metrics.js';
+import { createAnchorNamespace } from './anchor.js';
 import { createTopologyNamespace } from './topology.js';
 import { createFisherNamespace } from './fisher.js';
 import { createFoldersNamespace } from './folders.js';
@@ -77,6 +78,12 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     health: createHealthNamespace({ d1QueryAdmin, firstRow, parseHealthRow, computeHealthSummary, now }),
     tasks: createTasksNamespace({ d1Query, firstRow }),
     metrics: createMetricsNamespace({ d1Query, firstRow }),
+    // Tier-1 embedding-anchor reader — deliberately a FAIL-CLOSED gated reader
+    // (audit S1). The four anchor metrics are cvp_status='pending', so every read
+    // returns honest refusal copy, never the raw number. It is the ONLY sanctioned
+    // path to cognitive_metrics_anchor; the no-ungated-reader invariant is enforced
+    // by verify:cvp. @see src/db/anchor.js, src/metrics/surface-gate.js.
+    anchor: createAnchorNamespace({ d1Query, firstRow }),
     topology: createTopologyNamespace({ d1Query, firstRow, cofireCol }),
     fisher: createFisherNamespace({ d1Query, firstRow }),
     folders: createFoldersNamespace({ d1Query, randomUUID }),
