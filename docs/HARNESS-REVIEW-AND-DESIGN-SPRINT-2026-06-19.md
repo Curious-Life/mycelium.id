@@ -420,7 +420,18 @@ mapping). All primitives exist.
   `/chat/stream` + history load. Modest frontend change in `ChatFloat.svelte`. (Alt: thread by
   `agentId` = one ever-growing thread — simpler, but no separable conversations.)
 
-### Workstream 2 — P0.5(a) agent registry + primary = full grant
+### ⚠ Build-time pivot (2026-06-19): W2 premise dissolved → fold into W3
+On contact with the code, W2's premise ("primary = full grant unlocks chat writes") proved **void**:
+`defaultPolicy()` already grants ALL domains (`tool-domains.js:72-74`) and chat's grant is
+`toolsForDomains(tools, policy.domains)` (`portal-chat.js:150`) — so **in-app chat already has full
+write access by default** on any cloud model. The read-only wall the operator hit was the *channel* SDK
+backend (`claude-sdk.js:84`) = **W3**. So: forcing the primary past the user's AI-Access policy would
+be wrong (the policy is the user's control); a standalone registry now has no live consumer (chat
+already works) and would hit the encrypted-`settings` backfill landmine for no felt gain → premature
+abstraction. **Decision:** build the `agents` registry + `resolveAgentGrant` **with W3**, where
+owner-vs-scoped first does real work. W1 shipped standalone (PR `feat/native-chat-history-agent-identity`).
+
+### Workstream 2 — P0.5(a) agent registry + primary = full grant  *(SUPERSEDED by the pivot above; merged into W3)*
 Net-new (small): `agents` table (`id,user_id,name,personality,is_primary,capability_scope JSON,
 created_by,created_at`); `db.agents` DAL (~50 LOC); `resolveAgentGrant(registry, agent, {surface,
 inputTrust, policy, enabledNames})` (~30 LOC, **one** function replacing the three grant sites —
