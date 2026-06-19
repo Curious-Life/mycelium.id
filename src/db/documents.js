@@ -23,7 +23,7 @@ function randomNonce() {
   return randomBytes(16).toString('hex');
 }
 
-// RT2-H1 (0034/0035): every ENCRYPTED document field a write can poison — versioned
+// RT2-H1 (0035/0036): every ENCRYPTED document field a write can poison — versioned
 // as a whole so an overwrite is fully recoverable, not just content/title/summary
 // (red-team MED-1). Must stay a subset of ENCRYPTED_FIELDS.documents (crypto-local.js).
 const DOC_VERSIONED_FIELDS = ['title', 'summary', 'content', 'tags', 'entities', 'relations', 'metadata', 'entity_summary', 'source_path'];
@@ -119,7 +119,7 @@ export function createDocumentsNamespace(deps) {
     async upsert(doc, opts = {}) {
       assertSafeColumns(Object.keys(doc || {}), 'documents');
 
-      // RT2-H1 overwrite recoverability (migration 0034): before a content-changing
+      // RT2-H1 overwrite recoverability (migration 0035): before a content-changing
       // overwrite of an EXISTING doc, snapshot the prior title/summary/content into
       // document_versions (encrypted) so a poisoned/mistaken write is recoverable.
       // Create (no prior) and identical re-write (no diff) capture nothing. Bulk
@@ -501,7 +501,7 @@ export function createDocumentsNamespace(deps) {
       return row;
     },
 
-    // ── RT2-H1 recovery (migration 0034) ────────────────────────────────
+    // ── RT2-H1 recovery (migration 0035) ────────────────────────────────
 
     /**
      * Prior versions of a document, captured before each content-changing

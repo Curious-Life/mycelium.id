@@ -41,7 +41,7 @@ and make it restorable.
 
 ## Locked design
 
-### Storage (migration `0034_overwrite_versions.sql`)
+### Storage (migration `0035_overwrite_versions.sql`)
 - **Extend `document_versions`** (ALTER ADD COLUMN, NULL-safe on existing rows): `user_id TEXT`,
   `path TEXT`, `title TEXT`, `summary TEXT`, `content TEXT`, `trigger TEXT`, `reason TEXT`.
   Index `(user_id, path, created_at DESC)`. Legacy `diff/changed_by/change_summary` left untouched.
@@ -70,7 +70,7 @@ and make it restorable.
 (MCP tool + portal surface for browsing/restoring history = a follow-up; the security gate is
 "recoverable in-vault," which list+restore DAL methods satisfy and the gate proves.)
 
-## Post-build red-team hardening (migration 0035)
+## Post-build red-team hardening (migration 0036)
 
 A two-agent adversarial pass on the version layer (2026-06-19) + a security-surface study of
 opencode/OpenClaw/Hermes found four gaps; all fixed in `0034` + the DAL, gate `verify:write-recoverability`

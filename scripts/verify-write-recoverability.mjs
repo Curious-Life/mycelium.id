@@ -109,7 +109,7 @@ const FV2 = 'POISONED — OVERWRITE-FACT-DDD';
   rec('V7 re-asserting a FORGOTTEN doc does not version the husk', after === before, `${before}→${after}`);
 }
 
-// ── Red-team hardening (0035): MED-1 non-content fields · MED-2 entities · HIGH-1 prune · LOW-1 trigger ──
+// ── Red-team hardening (0036): MED-1 non-content fields · MED-2 entities · HIGH-1 prune · LOW-1 trigger ──
 
 // V8 (MED-1) — overwriting ONLY a non-content encrypted field (metadata) still versions,
 // and the full prior snapshot round-trips that field.
