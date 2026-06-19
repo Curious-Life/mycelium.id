@@ -18,10 +18,9 @@
 					Set.prototype.delete = function(v) { return NativeSet.prototype.delete.call(this, v); };
 				}
 
-				var theme = localStorage.getItem('mycelium-theme');
-				if (!theme) {
-					theme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-				}
+				// Dark on first load by default (no OS-preference consult); only a
+				// remembered toggle flips it to light. Set pre-paint to avoid a flash.
+				var theme = localStorage.getItem('mycelium-theme') || 'dark';
 				if (theme === 'light') {
 					document.documentElement.setAttribute('data-theme', 'light');
 				}

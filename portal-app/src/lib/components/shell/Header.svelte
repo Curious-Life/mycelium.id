@@ -7,12 +7,27 @@
 	import { workspace } from '$lib/workspace/store';
 	import TabStrip from '$lib/components/workspace/TabStrip.svelte';
 	import type { WsNode, LeafPane } from '$lib/workspace/types';
-	import { activity, startActivityPolling, fmtEta } from '$lib/stores/activity';
+	import { activity, startActivityPolling, fmtEta, fmtAgo, isFreshError, statusLabel } from '$lib/stores/activity';
 
-	// One consolidated activity indicator (next to chat) — ALWAYS present. A calm
-	// dim dot when idle; accent + count + a clickable job list when work is running.
+	// One consolidated activity indicator (next to chat) — ALWAYS present and always
+	// clickable. A round glass "orb": grey when idle, green while any work runs
+	// (chat inference, embedding, mapping, narration — local or via API), red when
+	// the last job failed. Click for the live job list + what ran last and when.
 	let activityOpen = $state(false);
 	const active = $derived($activity.active);
+	const recent = $derived($activity.recent);
+	const busy = $derived(active.length > 0);
+	// Red only when idle AND the most recent finished job failed (recently) — a new
+	// success rolls it back to grey on its own. While busy, green wins.
+	const errored = $derived(!busy && isFreshError(recent[0]));
+	const orbState = $derived(busy ? 'busy' : errored ? 'error' : 'idle');
+	const lastJob = $derived(recent[0] ?? null);
+	const orbTitle = $derived(
+		busy ? `Working — ${active.length} ${active.length === 1 ? 'process' : 'processes'}`
+			: errored ? `Last job failed${lastJob ? ` — ${lastJob.stage}` : ''}`
+			: lastJob ? `Idle — last: ${lastJob.stage} ${fmtAgo(lastJob.finishedAt)}`
+			: 'Idle',
+	);
 	onMount(() => startActivityPolling());
 
 	const currentView = $derived($navigationState.primaryView);
@@ -118,45 +133,50 @@
 
 	<!-- Right side actions -->
 	<div class="flex items-center gap-1 sm:gap-2 flex-shrink-0">
-		<!-- Activity indicator — ALWAYS visible next to chat. Idle = a calm dim dot
-		     ("Idle"); active = an accent dot + count, clickable for the live job list
-		     (stage · done/total · ETA). The single source of truth for pipeline /
-		     inference / background-job status. -->
+		<!-- Activity orb — ALWAYS visible next to chat, ALWAYS clickable. A round
+		     glass disc: grey idle · green working · red on a failed job. Click for
+		     the live job list + what ran last and when. The single source of truth
+		     for pipeline / inference / background-job status (local or via API). -->
 		<div class="relative">
 			<button
-				onclick={() => { if (active.length) activityOpen = !activityOpen; }}
-				class="h-7 px-2 rounded-full border flex items-center gap-1.5 transition-all duration-150 {active.length
-					? 'border-[var(--color-border)] bg-[var(--color-elevated)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent)] cursor-pointer'
-					: 'border-[var(--color-border)]/60 bg-transparent text-[var(--color-text-tertiary)] cursor-default'}"
-				title={active.length ? 'Background activity' : 'Idle'}
-				aria-label={active.length ? `Background activity (${active.length})` : 'System idle'}
+				onclick={() => (activityOpen = !activityOpen)}
+				class="activity-orb {orbState}"
+				title={orbTitle}
+				aria-label={orbTitle}
 				aria-expanded={activityOpen}
 			>
-				{#if active.length}
-					<span class="relative inline-flex h-2 w-2">
-						<span class="animate-pulse absolute inline-flex h-full w-full rounded-full bg-[var(--color-accent)] opacity-50"></span>
-						<span class="relative inline-flex rounded-full h-2 w-2 bg-[var(--color-accent)]"></span>
-					</span>
-					<span class="text-[11px] font-medium">{active.length}</span>
-				{:else}
-					<span class="inline-flex rounded-full h-2 w-2 bg-[var(--color-text-tertiary)]/70"></span>
-				{/if}
+				<span class="orb-core"></span>
 			</button>
-			{#if activityOpen && active.length}
+			{#if activityOpen}
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<div class="fixed inset-0 z-[59]" onclick={() => (activityOpen = false)}></div>
-				<div class="fixed top-[2.75rem] right-2 sm:right-3 z-[60] min-w-[240px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 shadow-lg" style="backdrop-filter: blur(12px) saturate(140%); -webkit-backdrop-filter: blur(12px) saturate(140%);">
-					<div class="px-2.5 py-1 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Active</div>
-					{#each active as j (j.id)}
-						<div class="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
-							<span class="w-1.5 h-1.5 rounded-full flex-shrink-0 {j.stalled ? 'bg-[var(--color-warning,#f59e0b)]' : 'bg-[var(--color-accent)]'}"></span>
-							<span class="text-[var(--color-text-primary)] truncate">{j.stage}</span>
-							{#if j.total > 0}<span class="text-[var(--color-text-tertiary)] flex-shrink-0">{j.done}/{j.total}</span>{/if}
-							{#if j.stalled}<span class="ml-auto text-[var(--color-warning,#f59e0b)] flex-shrink-0 whitespace-nowrap">taking longer…</span>
-							{:else if fmtEta(j.etaSeconds)}<span class="ml-auto text-[var(--color-accent)] flex-shrink-0">{fmtEta(j.etaSeconds)} left</span>{/if}
-						</div>
-					{/each}
+				<div class="fixed top-[2.75rem] right-2 sm:right-3 z-[60] min-w-[260px] max-w-[320px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 shadow-lg" style="backdrop-filter: blur(14px) saturate(150%); -webkit-backdrop-filter: blur(14px) saturate(150%);">
+					{#if busy}
+						<div class="px-2.5 pt-1 pb-0.5 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Working now</div>
+						{#each active as j (j.id)}
+							<div class="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
+								<span class="w-1.5 h-1.5 rounded-full flex-shrink-0 {j.stalled ? 'bg-[var(--color-warning,#f59e0b)]' : 'bg-[#34d399]'}"></span>
+								<span class="text-[var(--color-text-primary)] truncate">{j.stage}</span>
+								{#if j.total > 0}<span class="text-[var(--color-text-tertiary)] flex-shrink-0">{j.done}/{j.total}</span>{/if}
+								{#if j.stalled}<span class="ml-auto text-[var(--color-warning,#f59e0b)] flex-shrink-0 whitespace-nowrap">taking longer…</span>
+								{:else if fmtEta(j.etaSeconds)}<span class="ml-auto text-[#34d399] flex-shrink-0">{fmtEta(j.etaSeconds)} left</span>{/if}
+							</div>
+						{/each}
+					{/if}
+
+					{#if recent.length}
+						<div class="px-2.5 pt-1.5 pb-0.5 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">{busy ? 'Recently' : 'Last activity'}</div>
+						{#each recent.slice(0, 6) as j (j.id + (j.finishedAt ?? ''))}
+							<div class="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
+								<span class="w-1.5 h-1.5 rounded-full flex-shrink-0 {j.status === 'error' ? 'bg-[#f87171]' : j.status === 'abandoned' ? 'bg-[var(--color-text-tertiary)]' : 'bg-[#34d399]'}"></span>
+								<span class="text-[var(--color-text-secondary)] truncate">{j.stage}</span>
+								<span class="ml-auto flex-shrink-0 {j.status === 'error' ? 'text-[#f87171]' : 'text-[var(--color-text-tertiary)]'}">{statusLabel(j.status)} · {fmtAgo(j.finishedAt)}</span>
+							</div>
+						{/each}
+					{:else if !busy}
+						<div class="px-2.5 py-2 text-[11px] text-[var(--color-text-tertiary)]">No activity yet — your vault is idle.</div>
+					{/if}
 				</div>
 			{/if}
 		</div>
@@ -203,3 +223,55 @@
 		</button>
 	</div>
 </header>
+
+<style>
+	/* The activity orb — a small round pane of glass with a glowing core. The
+	   --orb custom property carries the state colour; everything (ring, fill,
+	   glow, core) is derived from it so a state change is a single-token swap. */
+	.activity-orb {
+		--orb: var(--color-text-tertiary);
+		position: relative;
+		width: 1.75rem;
+		height: 1.75rem;
+		border-radius: 9999px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		border: 1px solid color-mix(in srgb, var(--orb) 40%, var(--color-border));
+		background: radial-gradient(circle at 50% 38%,
+			color-mix(in srgb, var(--orb) 24%, transparent),
+			color-mix(in srgb, var(--orb) 7%, transparent) 70%);
+		backdrop-filter: blur(10px) saturate(140%);
+		-webkit-backdrop-filter: blur(10px) saturate(140%);
+		transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+	}
+	.activity-orb:hover {
+		border-color: color-mix(in srgb, var(--orb) 70%, var(--color-border));
+	}
+	.orb-core {
+		width: 0.5rem;
+		height: 0.5rem;
+		border-radius: 9999px;
+		background: var(--orb);
+		box-shadow: 0 0 6px -1px var(--orb);
+		transition: background 0.2s ease;
+	}
+	.activity-orb.idle .orb-core { opacity: 0.55; box-shadow: none; }
+	.activity-orb.busy {
+		--orb: #34d399;
+		box-shadow: 0 0 11px -3px color-mix(in srgb, #34d399 70%, transparent);
+	}
+	.activity-orb.busy .orb-core { animation: orb-pulse 1.6s ease-in-out infinite; }
+	.activity-orb.error {
+		--orb: #f87171;
+		box-shadow: 0 0 11px -3px color-mix(in srgb, #f87171 70%, transparent);
+	}
+	@keyframes orb-pulse {
+		0%, 100% { transform: scale(0.8); opacity: 0.7; }
+		50% { transform: scale(1.18); opacity: 1; }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.activity-orb.busy .orb-core { animation: none; }
+	}
+</style>

@@ -30,15 +30,30 @@
 		return () => { alive = false; clearInterval(t); };
 	});
 
-	// User handle — shown under the display name in the footer when set. From the
+	// Vault identity for the footer — the @handle is the user's name here (the
+	// footer leads with it), and the avatar photo if they've set one. From the
 	// public profile (not on $auth.user). Silent on failure / no handle.
 	let userHandle = $state<string | null>(null);
+	let userAvatar = $state<string | null>(null);
 	$effect(() => {
 		if (!browser) return;
-		apiGet<{ handle: string | null }>('/portal/profile')
-			.then((d) => { userHandle = (d?.handle || '').trim() || null; })
+		apiGet<{ handle: string | null; avatar_url?: string | null }>('/portal/profile')
+			.then((d) => {
+				userHandle = (d?.handle || '').trim() || null;
+				userAvatar = (d?.avatar_url || '').trim() || null;
+			})
 			.catch(() => {});
 	});
+
+	// What we show as the user's name in the footer: their @handle (the vault
+	// name) first, falling back to the auth display name, then a neutral label.
+	// The avatar initial follows the same precedence so it always matches.
+	const vaultLabel = $derived(
+		userHandle ? `@${userHandle}` : ($auth.user?.displayName || 'Your vault'),
+	);
+	const vaultInitial = $derived(
+		(userHandle || $auth.user?.displayName || '·').trim().charAt(0).toUpperCase() || '·',
+	);
 
 	// Navigation is driven entirely by $lib/nav/config — the single source of truth
 	// shared with the mobile tab bar and the header title (see that file for why).
@@ -250,42 +265,37 @@
 	</div>
 	</div><!-- /scrollable nav region -->
 
-	<!-- User footer — identity (display name + @handle) opens the Profile pane;
-	     Settings + Sign-out sit next to it in the same row (Settings is no longer a
-	     standalone nav item). -->
+	<!-- User footer — a single identity row that IS the Settings entry: avatar +
+	     @vault-name + a trailing settings glyph, the whole row opening Settings
+	     (Profile is its first pane). There is no separate Settings button — it
+	     used to sit outside the row and read as inconsistent. Sign-out stays. -->
 	<div class="p-3 border-t border-[var(--color-border)] flex-shrink-0">
 		{#if $auth.user}
 			<div class="flex items-center gap-1">
 				<button
-					onclick={() => { navigationState.setPrimaryView('settings'); goto('/settings?pane=profile'); closeMobileDrawer(); }}
-					class="flex items-center gap-3 min-w-0 flex-1 text-left rounded-lg -m-1 p-1 hover:bg-[var(--color-elevated)] transition-colors"
-					aria-label="Open your profile"
-				>
-					<div class="w-9 h-9 rounded-full bg-[var(--color-accent)]/20 flex items-center justify-center flex-shrink-0">
-						<span class="text-[var(--color-accent)] text-sm font-medium">
-							{($auth.user.displayName || '?')[0].toUpperCase()}
-						</span>
-					</div>
-					<div class="min-w-0">
-						<div class="text-sm text-[var(--color-text-primary)] font-medium truncate">
-							{$auth.user.displayName || 'User'}
-						</div>
-						{#if userHandle}
-							<div class="text-xs text-[var(--color-text-tertiary)] truncate">@{userHandle}</div>
-						{/if}
-					</div>
-				</button>
-				<button
 					onclick={() => { navigationState.setPrimaryView('settings'); goto(SETTINGS_NAV.href); closeMobileDrawer(); }}
-					class="p-2 rounded-lg transition-colors flex-shrink-0 {navActive('settings') ? 'text-[var(--color-accent)]' : 'text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)]'}"
-					aria-label="Settings"
+					class="group flex items-center gap-3 min-w-0 flex-1 text-left rounded-lg -m-1 p-1 transition-colors {navActive('settings') ? 'bg-[var(--color-elevated)]' : 'hover:bg-[var(--color-elevated)]'}"
+					aria-label="Open settings"
 					title="Settings"
 				>
-					<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round">
-						<path d="M4 6h10M18 6h2"/><circle cx="16" cy="6" r="2"/>
-						<path d="M4 12h6M14 12h6"/><circle cx="12" cy="12" r="2"/>
-						<path d="M4 18h2M10 18h10"/><circle cx="8" cy="18" r="2"/>
-					</svg>
+					{#if userAvatar}
+						<img src={userAvatar} alt="" class="w-9 h-9 rounded-full object-cover flex-shrink-0 border border-[var(--color-border)]" />
+					{:else}
+						<div class="w-9 h-9 rounded-full bg-[var(--color-accent)]/20 flex items-center justify-center flex-shrink-0">
+							<span class="text-[var(--color-accent)] text-sm font-medium">{vaultInitial}</span>
+						</div>
+					{/if}
+					<div class="min-w-0 flex-1">
+						<div class="text-sm text-[var(--color-text-primary)] font-medium truncate">{vaultLabel}</div>
+						<div class="text-xs text-[var(--color-text-tertiary)] truncate">Settings</div>
+					</div>
+					<span class="flex-shrink-0 mr-1 {navActive('settings') ? 'text-[var(--color-accent)]' : 'text-[var(--color-text-tertiary)] group-hover:text-[var(--color-text-secondary)]'}">
+						<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round">
+							<path d="M4 6h10M18 6h2"/><circle cx="16" cy="6" r="2"/>
+							<path d="M4 12h6M14 12h6"/><circle cx="12" cy="12" r="2"/>
+							<path d="M4 18h2M10 18h10"/><circle cx="8" cy="18" r="2"/>
+						</svg>
+					</span>
 				</button>
 				<button
 					onclick={handleLogout}

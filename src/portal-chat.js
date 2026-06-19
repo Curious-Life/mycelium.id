@@ -211,7 +211,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     // The loop owns the watchdog now; these let it keep the live row honest. finishJob
     // nulls chatJob so a stall (or a hung upstream fetch that never settles) clears the
     // phantom "Thinking…" immediately, and a later heartbeat can't re-touch it.
-    const finishJob = () => { if (chatJob) { const j = chatJob; chatJob = null; db.activityFeed?.finish?.(j).catch(() => {}); } };
+    const finishJob = (status = 'done') => { if (chatJob) { const j = chatJob; chatJob = null; db.activityFeed?.finish?.(j, { status }).catch(() => {}); } };
     const heartbeatJob = () => { if (chatJob) db.activityFeed?.heartbeat?.(chatJob).catch(() => {}); };
     // External (client-gone) signal: on disconnect, abort the in-flight turn and
     // clear the live row immediately — nobody is waiting (the server turn may keep
@@ -317,7 +317,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
         provider, system, userMessage: message, tools: isLocal ? [] : grantedTools, call,
         send, maxTokens: plan?.maxTokens, numCtx: plan?.numCtx,
         ttfbMs: TTFB_MS, idleMs: IDLE_MS, maxRetries: MAX_RETRIES,
-        signal: clientGoneCtrl.signal, onStall: finishJob, onHeartbeat: heartbeatJob,
+        signal: clientGoneCtrl.signal, onStall: () => finishJob(), onHeartbeat: heartbeatJob,
       });
       const assistantText = result.text;
 
@@ -350,12 +350,14 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
           else if (st === 404 || st === 400) msg = `${who} didn’t recognise the model “${info.model}”. Pick a valid model in Settings → Intelligence.`;
           else if (st === 429) msg = `${who} is rate-limited right now. Wait a moment or switch model in Settings → Intelligence.`;
           else if (st >= 500) msg = `${who} had a server error. Try again, or switch model in Settings → Intelligence.`;
+          finishJob('error');   // surface as a red blip in the header activity feed
           send({ type: 'error', message: msg });
           send({ type: 'done', toolsUsed: [] });
         }
       }
     } catch (err) {
       console.error('[chat] turn failed:', err?.message);
+      finishJob('error');   // red blip in the header activity feed (status only, §1)
       if (!res.headersSent) { res.status(500).json({ error: 'Chat failed' }); return; }
       send({ type: 'error', message: 'Chat failed' });   // never echo err.message (§1)
       send({ type: 'done', toolsUsed: [] });
