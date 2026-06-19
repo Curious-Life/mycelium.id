@@ -173,7 +173,7 @@ Be selective. Not every day needs heavy triage. Don't manufacture observations. 
     schedule: 'daily:3',
     outputTarget: 'none',
     essential: false,
-    enabledTools: ['updateInternalModel', 'editMindFile', 'writeMindFileWhole', 'snapshotMindFile', 'updateDocument', 'flagForDiscussion'],
+    enabledTools: ['updateInternalModel', 'editMindFile', 'writeMindFileWhole', 'snapshotMindFile', 'removeFromMind', 'updateDocument', 'flagForDiscussion'],
     body: `## Integration Cycle
 
 The clustering pipeline has run; fresh territory geometry is available. This cycle walks the day's activations, integrates what you find into living documents, and then consolidates your internal model.
@@ -193,6 +193,11 @@ You've been appending observations all day (capture mode). Now consolidate:
 Operating instructions / blind-spots / any RULES content earned through correction stay intact across consolidations — do not compact them away. If in doubt about a move, leave it for next cycle; the snapshot preserves the pre-cycle state.
 
 (Mind files are encrypted at rest — ALWAYS use the mind-file MCP tools above; never a raw file read/write, which would see ciphertext or corrupt the format.)
+
+### Phase 3.6 — Distill the Core (self.md)
+After model.md is consolidated, refresh your Core — the ~1000-token capsule that loads on EVERY turn (it leads your briefing as "WHO YOU ARE"). readMindFile('self.md'), then writeMindFileWhole('self.md', <a tight rewrite>).
+
+Keep it to FIVE sections — Identity · Current focus · Stable preferences · Boundaries · Operating notes — and to ~1000 tokens, a curated list not an essay. REWRITE, don't append (especially Current focus — it is current state, not a log). Promote ONLY what you'd want present every single turn: corrections you've been given, boundaries (NEVER drop a safety item — health, a do-not-raise), durable preferences, stable identity, and the one or two things they're in right now. Leave hypotheses, topology, and dated logs in model.md. Hold it provisionally — "seems to," not "always." If a section is getting long, consolidate before adding. The pre-write state is auto-snapshotted, so a wrong distillation is always recoverable.
 
 Flag anything worth surfacing in the morning. Respond with NO_REPLY when done.`,
   },

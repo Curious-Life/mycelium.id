@@ -131,7 +131,15 @@ Order is strict: **1a → 1b → 1c → 2 → 3a → 3b.** Each ships behind its
 **Clustering**: no change to `cluster.py` — it already produces the territories; the new labels *describe/validate* clusters via SQL `GROUP BY domain` (the label→cluster join is a read, Phase 3b surface).
 **Gate** `verify:enrich-categories`: stub LLM (dev-msg→Work, "burnt out"→Body/Meaning, "called Una"→People); model-down → NULL not poison; batch-of-10 → 1 call; plaintext columns are SQL-`GROUP BY`-able.
 
-### Phase 1c — Three-tier memory (~320 LOC) · gate `verify:core-memory`
+### Phase 1c — Three-tier memory — ✅ BUILT 2026-06-19 (companion design: `CONTEXT-ENGINE-CORE-INTERACTION-DESIGN-2026-06-19.md`)
+**As-built (3 sub-units, all gated GO):**
+- **1c-A `sanitize.js`** (`7e41336`) — scan-on-write gate at the single `writeMindFile` chokepoint, fail-closed; blocks bidi/zero-width injection + live credential tokens + runaway size; low false-positive (emoji-ZWJ, multilingual, abstract security text, SHA-256 all pass). `verify:mindfile-sanitize` 15/0.
+- **1c-B Core + getContext** — `mind/self.md` is the bounded Core that **leads** the briefing (`# WHO YOU ARE`, defensively trimmed to ≤~1200 tok); new `db.messages.domainMix` + a "TODAY'S SHAPE" block from the 1b labels; the raw-claims block is **kept but demoted** below the Core (Phase 2 does the bi-temporal swap — no gap). `verify:core-context` 11/0.
+- **1c-C distillation + `removeFromMind`** — integration cycle gains **Phase 3.6 (Distill the Core)**: rewrite-not-append, 5 sections (Identity/Current focus/Stable preferences/Boundaries/Operating notes), the save-heuristic, never-drop-a-safety-boundary; new `removeFromMind` tool (unique-block prune, auto-snapshot) in the chat-grantable `mindfiles` domain. `verify:reflection-cycles` 108/0.
+
+No regression: `verify:context`/`narrate-context`/`mindfiles`/`mcp`/`gating` GO. Grounded in the live `model.md` (372KB → why a bounded Core). Deferred: a portal editor for the user to hand-edit the Core text directly (today the user shapes it by correcting the agent + editing the persona).
+
+### Phase 1c — Three-tier memory (~320 LOC, as-planned) · gate `verify:core-memory`
 **Create**
 - `src/mindfiles/sanitize.js` — injection-scan (credential-exfil / instruction-injection / invisible-Unicode) + exact-dedup; returns `{ok, reason}`. (closes B8)
 - `removeFromMind` tool in `tools/internal.js` (the missing `remove` op; B3).

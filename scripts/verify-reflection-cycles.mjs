@@ -173,6 +173,38 @@ function fakeCyclesDb() {
 ok(DOMAINS.some((d) => d.key === 'cycles'), "tool-domains has a 'cycles' domain");
 ok(['listCycles', 'updateCycle', 'updatePersona', 'getCyclePrompt'].every((t) => isGrantableTool(t)), 'all 4 cycle tools are chat-grantable');
 
+// ── 8. Core distillation (1c-C): the integration cycle writes self.md ────────
+const integration = CYCLES.find((c) => c.id === 'integration');
+ok(/Phase 3\.6/.test(integration.body) && /self\.md/.test(integration.body), 'integration cycle has Phase 3.6 (distill self.md)');
+ok(['Identity', 'Current focus', 'Stable preferences', 'Boundaries', 'Operating notes'].every((s) => integration.body.includes(s)), 'Phase 3.6 names the five Core sections');
+ok(/REWRITE, don't append/i.test(integration.body) && /NEVER drop a safety/i.test(integration.body), 'Phase 3.6 carries the rewrite + safety-boundary discipline');
+ok(integration.enabledTools.includes('removeFromMind') && integration.enabledTools.includes('writeMindFileWhole'), 'integration can write + prune the Core');
+
+// ── 9. removeFromMind tool (1c-C) ────────────────────────────────────────────
+const { createInternalDomain } = await import('../src/tools/internal.js');
+function memMind(initial = {}) {
+  const store = new Map(Object.entries(initial));
+  return {
+    _store: store,
+    readMindFile: async (f) => (store.has(f) ? store.get(f) : null),
+    writeMindFile: async (f, c) => { store.set(f, c); },
+  };
+}
+{
+  const m = memMind({ 'self.md': '# Self\n\n## A\n- keep\n\n## B\n- prune me\n\n## C\n- keep' });
+  const dom = createInternalDomain({ readMindFile: m.readMindFile, writeMindFile: m.writeMindFile });
+  ok(dom.handlers.removeFromMind, 'removeFromMind handler registered');
+  const r = JSON.parse(await dom.handlers.removeFromMind({ filename: 'self.md', block: '## B\n- prune me' }));
+  ok(r.ok === true, 'removeFromMind removes a unique block');
+  ok(!m._store.get('self.md').includes('prune me'), 'block is gone');
+  ok(!/\n{3,}/.test(m._store.get('self.md')), 'blank-line gap tidied');
+  const dup = JSON.parse(await dom.handlers.removeFromMind({ filename: 'self.md', block: '- keep' }));
+  ok(dup.ok === false && dup.error === 'block-not-unique', 'non-unique block is rejected (count enforced)');
+  const nf = JSON.parse(await dom.handlers.removeFromMind({ filename: 'self.md', block: 'nonexistent' }));
+  ok(nf.ok === false && nf.error === 'block-not-found', 'absent block is rejected');
+}
+ok(isGrantableTool('removeFromMind'), 'removeFromMind is chat-grantable (mindfiles domain)');
+
 console.log(`\n${pass} pass · ${fail} fail`);
 if (fail === 0) { console.log('VERDICT: GO'); process.exit(0); }
 console.log('VERDICT: NO-GO'); process.exit(1);

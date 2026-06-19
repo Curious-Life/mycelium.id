@@ -334,6 +334,27 @@ export function createMessagesNamespace(deps) {
     },
 
     /**
+     * Today's (or any window's) domain/register MIX — the life-balance read for getContext
+     * (Context Engine L1c). Plaintext label columns → a plain SQL GROUP BY (mirrors
+     * listDataSources). NULL labels surface as '(unclassified)'. Returns
+     * [{domain, register, count}] desc.
+     */
+    async domainMix(userId, { sinceIso } = {}) {
+      const since = sinceIso || new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+      const result = await d1Query(
+        `SELECT COALESCE(domain, '(unclassified)')   AS domain,
+                COALESCE(register, '(unclassified)') AS register,
+                COUNT(*)                              AS count
+           FROM messages
+           WHERE user_id = ? AND forgotten_at IS NULL AND created_at >= ?
+           GROUP BY domain, register
+           ORDER BY count DESC`,
+        [userId, since],
+      );
+      return result.results || [];
+    },
+
+    /**
      * Soft-redact (forget): destroy a message's sensitive payload but keep an
      * empty tombstone row (id + timestamps) for audit + anti-resurrection. Nulls
      * every ENCRYPTED_FIELDS column + the embedding (both fingerprints), deletes

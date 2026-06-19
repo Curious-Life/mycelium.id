@@ -21,8 +21,25 @@
 
 import { renderClaimsBlock } from '../claims/support-path.js';
 import { toConfidence } from '../claims/confidence.js';
+import { trimToTokenBudget } from '../inference/token-budget.js';
 
 const DAY = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+const CORE_TOKEN_CAP = 1200; // defensive trim — the cycle keeps self.md ≤~1000 tok; never bloat context
+
+// Compact "where your energy's been going" line from the domain/register mix (Context Engine L1c).
+// Aggregates registers into their parent domain, drops unclassified-only noise.
+function renderDomainMix(rows) {
+  if (!Array.isArray(rows) || !rows.length) return '';
+  const byDomain = new Map();
+  for (const r of rows) {
+    if (r.domain === '(unclassified)') continue;
+    byDomain.set(r.domain, (byDomain.get(r.domain) || 0) + (Number(r.count) || 0));
+  }
+  if (!byDomain.size) return '';
+  const top = [...byDomain.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+  return `Last 24h: ${top.map(([d, n]) => `${d} (${n})`).join(' · ')}`;
+}
 
 export function createContextDomain(deps) {
   if (!deps) throw new TypeError('createContextDomain: deps required');
@@ -46,7 +63,7 @@ export function createContextDomain(deps) {
           recentMessages: { type: 'number', description: 'How many recent messages to include (default 10, max 40).' },
           include: {
             type: 'array',
-            items: { type: 'string', enum: ['mind', 'facts', 'people', 'messages', 'phase', 'health', 'claims'] },
+            items: { type: 'string', enum: ['core', 'mind', 'facts', 'people', 'messages', 'domains', 'phase', 'health', 'claims'] },
             description: 'Limit to specific sections. Omit for all.',
           },
         },
@@ -72,6 +89,15 @@ export function createContextDomain(deps) {
         `**Current time:** ${fmt({ weekday: 'long' })}, ${fmt({ month: 'long', day: 'numeric', year: 'numeric' })} `
         + `${fmt({ hour: '2-digit', minute: '2-digit' })} (${tzLabel})`,
       );
+
+      // ── core: who they are (bounded ≤~1k tok — LEADS the briefing) ──
+      if (want(include, 'core')) {
+        const core = await readMindFile('self.md').catch(() => null);
+        if (core && core.trim()) {
+          const bounded = trimToTokenBudget(core.trim(), CORE_TOKEN_CAP).text;
+          sections.push(`---\n# WHO YOU ARE (core — your living read on them, kept tight)\n\n${bounded}`);
+        }
+      }
 
       // ── mind files: model + flagged ──
       if (want(include, 'mind')) {
@@ -126,6 +152,15 @@ export function createContextDomain(deps) {
               .join('\n');
             sections.push(`---\n# RECENT MESSAGES (last ${rows.length})\n\n${lines}`);
           }
+        } catch { /* non-fatal */ }
+      }
+
+      // ── today's shape: domain/register mix (life-balance read, from the 1b labels) ──
+      if (want(include, 'domains') && db?.messages?.domainMix) {
+        try {
+          const rows = await db.messages.domainMix(userId, {});
+          const block = renderDomainMix(rows);
+          if (block) sections.push(`---\n# TODAY'S SHAPE (where your energy's been going)\n\n${block}`);
         } catch { /* non-fatal */ }
       }
 
