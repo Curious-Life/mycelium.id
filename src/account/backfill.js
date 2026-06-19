@@ -55,16 +55,22 @@ export async function backfillColumn(rawDb, { table, column, codec, masterKey, b
   if (codec.kind === 'vector' && !(Number.isInteger(codec.dim) && codec.dim > 0)) throw new Error('backfill: vector codec needs a positive integer dim');
   if (!masterKey) throw new Error('backfill: masterKey required');
 
+  // Keyset pagination. The FIRST page has no lower bound; later pages use `pk > lastId`
+  // where lastId is a real pk value. This keeps the cursor type-correct for ANY pk —
+  // a TEXT id, an INTEGER `rowid` (composite-PK tables like cognitive_anchor_vectors),
+  // etc. (A fixed '' sentinel would break an integer pk: `rowid > ''` is always false
+  // in SQLite, since INTEGER sorts before TEXT.)
+  const selFirst = rawDb.prepare(`SELECT ${pk} AS _id, ${column} AS _v FROM ${table} ORDER BY ${pk} LIMIT ?`);
   const sel = rawDb.prepare(`SELECT ${pk} AS _id, ${column} AS _v FROM ${table} WHERE ${pk} > ? ORDER BY ${pk} LIMIT ?`);
   const upd = rawDb.prepare(`UPDATE ${table} SET ${column} = ? WHERE ${pk} = ?`);
   const writeBatch = rawDb.transaction((ups) => { for (const [val, id] of ups) upd.run(val, id); });
 
-  let scanned = 0, converted = 0, skipped = 0, failed = 0, lastId = '';
+  let scanned = 0, converted = 0, skipped = 0, failed = 0, lastId = null;
   try { rawDb.pragma('wal_autocheckpoint = 0'); } catch { /* best-effort */ }
   try {
     for (;;) {
       if (signal?.aborted) break;
-      const rows = sel.all(lastId, batch);
+      const rows = lastId === null ? selFirst.all(batch) : sel.all(lastId, batch);
       if (rows.length === 0) break;
       const updates = [];
       for (const r of rows) {
