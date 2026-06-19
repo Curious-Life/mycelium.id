@@ -116,6 +116,24 @@ try {
     !!latest && typeof latest.m2_entropy === 'number' && typeof latest.degree_gini === 'number'
       && findings.length > 0 && critFirst && msgCoerced,
     latest ? `m2_entropy=${latest.m2_entropy} (typeof ${typeof latest.m2_entropy}) gini=${latest.degree_gini} findings=${findings.length} first_sev=${findings[0]?.severity}` : 'null');
+
+  // ── A6. bounded growth: re-runs PRUNE to KEEP snapshots (no INSERT-forever) ──
+  // The stage accumulates 1 snapshot/run. With MYCELIUM_AUDIT_KEEP=2, two more runs
+  // must leave exactly 2 snapshots (not 3), zero orphaned findings, and the m2_delta
+  // prior preserved (latest snapshot's m2_delta is computed, not null).
+  const reEnv = { ...process.env, MYCELIUM_DB: DB, MYCELIUM_KCV: KCV, MYCELIUM_USER_ID: U,
+    USER_MASTER: userHex, SYSTEM_KEY: systemHex, MYCELIUM_AUDIT_KEEP: '2' };
+  spawnSync('node', ['pipeline/topology-audit.js'], { encoding: 'utf8', env: reEnv });
+  spawnSync('node', ['pipeline/topology-audit.js'], { encoding: 'utf8', env: reEnv });
+  const raw3 = new Database(DB, { readonly: true });
+  const snapN = raw3.prepare(`SELECT COUNT(*) n FROM topology_audit_snapshots WHERE user_id=?`).get(U).n;
+  const orphanFinds = raw3.prepare(
+    `SELECT COUNT(*) n FROM topology_audit_findings WHERE user_id=? AND snapshot_id NOT IN (SELECT id FROM topology_audit_snapshots WHERE user_id=?)`).get(U, U).n;
+  raw3.close();
+  const latest2 = await db.topology.getLatestAudit({ p_user_id: U });
+  rec('A6. re-runs prune to KEEP snapshots + orphan findings; m2_delta prior preserved',
+    snapN === 2 && orphanFinds === 0 && !!latest2 && Number.isFinite(Number(latest2.m2_delta)),
+    `snapshots=${snapN} (KEEP=2) orphanFindings=${orphanFinds} m2_delta=${latest2?.m2_delta}`);
 } finally {
   close();
   for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
