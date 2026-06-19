@@ -712,7 +712,7 @@ HARD RULES — violating these is a failure:
 5. If you cannot write a message that passes rules 3-4, respond with NO_REPLY.
 
 If you DO have something specific to say:
-- Name what happened: "You and Nate discussed X", "Ada finished Y", "Com tracked Z"
+- Name what happened: "You and Alex discussed X", "Ada finished Y", "Com tracked Z"
 - Reference actual decisions or shifts
 - Ask concrete questions tied to real events
 

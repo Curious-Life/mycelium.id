@@ -33,7 +33,7 @@ function makeDomain(files, { domainRows = [], claims = [] } = {}) {
 
 {
   const { handlers } = makeDomain(
-    { 'self.md': '# Self (core)\n## Identity\n- Martin, founder.', 'model.md': '# My Understanding\n## Observations\n- lots of detail' },
+    { 'self.md': '# Self (core)\n## Identity\n- Alice, founder.', 'model.md': '# My Understanding\n## Observations\n- lots of detail' },
     {
       domainRows: [
         { domain: 'Work & Creativity', register: 'Agency', count: 12 },

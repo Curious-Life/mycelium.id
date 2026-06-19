@@ -2,7 +2,7 @@
 
 **Status:** v0.3 — Round 1+2+3 sweeps folded in, MYA-0.2 abandonment lessons captured, 63 design docs classified, design recommendation locked. v1.0 = operator pickup list.
 **Started:** 2026-05-28
-**Owners:** Martin + Claude (sweep-first-design protocol)
+**Owners:** the maintainer + Claude (sweep-first-design protocol)
 
 ---
 
@@ -763,7 +763,7 @@ The spec listed 5; reality requires more. Numbered for tracking.
 
 ## From original spec (re-cast against reality)
 
-1. **Launch tier** — Tier 1 (Martin only) / Tier 2 (2-5 guided) / Tier 3 (20 self-serve)?
+1. **Launch tier** — Tier 1 (operator only) / Tier 2 (2-5 guided) / Tier 3 (20 self-serve)?
    - Recommendation: **Tier 2.** The spec's own honest reading + Round 1 sweep evidence (24-day work scope, not 14) both point here.
 2. **Key storage on client** — localStorage (insecure) / WebAuthn PRF (Chrome+Safari recent) / native keychain (mobile only)?
    - Recommendation: **WebAuthn PRF where available, localStorage with explicit "beta — keep your 24-word phrase safe, this browser store can be wiped" disclaimer otherwise.**
@@ -1148,7 +1148,7 @@ The redesign is BLOCKED on the following operator decisions. Each must be answer
 
 ## Product decisions
 
-5. **Launch tier: Tier 1 (Martin only), Tier 2 (2-5 guided), Tier 3 (20 self-serve)?**
+5. **Launch tier: Tier 1 (operator only), Tier 2 (2-5 guided), Tier 3 (20 self-serve)?**
    - Recommendation: **Tier 2.** Spec's own honest reading. June 15 unrealistic for any other.
 
 6. **Launch date: June 15 or August-September?**

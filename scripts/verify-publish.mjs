@@ -42,8 +42,8 @@ const PRIVATE_SECRET = "PRIVATE_C_SECRET_donotleak_42";
 async function main() {
   // ── Identity ──────────────────────────────────────────────────────────
   const master = hex();
-  const id = createIdentity({ masterHex: master, handle: "martin" });
-  const id2 = createIdentity({ masterHex: master, handle: "martin" });
+  const id = createIdentity({ masterHex: master, handle: "alice" });
+  const id2 = createIdentity({ masterHex: master, handle: "alice" });
   rec("I1. identity is deterministic from the master key", id.publicKeyB64 === id2.publicKeyB64);
   const sig = id.sign("publish:notes/forest.md");
   rec("I2. sign → verify round-trips", id.verify("publish:notes/forest.md", sig) === true);
@@ -51,7 +51,7 @@ async function main() {
   rec("I4. verifyWithPublicKey (no private key) verifies", verifyWithPublicKey(id.publicKeyB64, "publish:notes/forest.md", sig) === true
     && verifyWithPublicKey(id.publicKeyB64, "x", sig) === false);
   let badHandle = false; try { createIdentity({ masterHex: master, handle: "Bad Handle!" }); } catch { badHandle = true; }
-  rec("I5. invalid handle rejected", badHandle && isValidHandle("martin") && !isValidHandle("a"));
+  rec("I5. invalid handle rejected", badHandle && isValidHandle("alice") && !isValidHandle("a"));
 
   // ── Signed links ──────────────────────────────────────────────────────
   const tok = mintLink(id, { slug: "forest", nonce: "epoch1" });
@@ -86,7 +86,7 @@ async function main() {
   applyMigrations(new Database(DB));
 
   const userHex = hex();
-  const srv = await startPublicServer({ dbPath: DB, kcvPath: KCV, userHex, systemHex: hex(), handle: "martin", port: 0, host: "127.0.0.1" });
+  const srv = await startPublicServer({ dbPath: DB, kcvPath: KCV, userHex, systemHex: hex(), handle: "alice", port: 0, host: "127.0.0.1" });
   const { db, url, identity } = srv;
   try {
     // Seed: A public, B unlisted (slug, not published), C private (slug, not published, no link).

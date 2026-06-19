@@ -63,7 +63,7 @@ function buildBundle(root, { format = 'mycelium-full-export' } = {}) {
   // FK-ordering case: contact_territories (FK contact_id→people) sorts BEFORE
   // 'people' alphabetically, so it's imported first — must still land (FK
   // enforcement deferred during the restore).
-  nd('db/contact_territories.ndjson', [{ id: 'fx_ct1', user_id: 'martin', contact_id: 'fx_p1', territory_id: 3, strength: 0.9 }]);
+  nd('db/contact_territories.ndjson', [{ id: 'fx_ct1', user_id: 'alice', contact_id: 'fx_p1', territory_id: 3, strength: 0.9 }]);
   nd('db/audit_log.ndjson', [{ id: 'fx_audit1', action: 'should_not_import' }]); // DENY
   nd('db/clustering_points.ndjson', [{ id: 'fx_cp1', source_type: 'message', source_id: 'fx_m1', territory_id: 3 }]);
   nd('db/attachments.ndjson', [{ id: 'att1', file_name: 'note.txt', file_type: 'text/plain', file_size: ATT_BYTES.length }]);

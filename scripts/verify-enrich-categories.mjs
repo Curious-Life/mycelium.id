@@ -53,7 +53,7 @@ ok(p4.domain === null && p4.subregister === null, 'out-of-range values rejected'
 
 // ── 4. classifier ───────────────────────────────────────────────────────────
 const classifyOk = createCategoryClassifier({ infer: async () => '{"domain":3,"register":"Bond"}' });
-const got = await classifyOk('called Una, told her I missed her');
+const got = await classifyOk('called Alice, told her I missed her');
 ok(got.domain === 'People & Relationships' && got.subregister === 'Bond', 'classifier maps a model reply');
 const classifyDown = createCategoryClassifier({ infer: async () => { throw new Error('ECONNREFUSED'); } });
 let rejected = false;

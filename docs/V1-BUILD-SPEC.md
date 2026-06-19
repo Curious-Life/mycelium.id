@@ -1132,7 +1132,7 @@ Phase 6: Extensions (later — V2 / post-launch)
 ## Success Criteria
 
 The server is done when:
-1. Martin pastes both 64-char hex keys (USER_MASTER + SYSTEM_KEY, D6) → per-key KCV verifies → vault unlocks → data decrypted in session (a wrong/truncated/missing *either* key is rejected, not silently mis-unlocked)
+1. The operator pastes both 64-char hex keys (USER_MASTER + SYSTEM_KEY, D6) → per-key KCV verifies → vault unlocks → data decrypted in session (a wrong/truncated/missing *either* key is rejected, not silently mis-unlocked)
 2. Claude Desktop connects via stdio → the ~34 single-user tools (+ `getContext` preamble) work
 3. Mobile app connects via HTTPS → OAuth login → tools work through the account tunnel
 4. `searchMindscape` returns ranked results from the in-RAM mind-search index (ANN + BM25), content decrypted transparently
@@ -1170,7 +1170,7 @@ Production schema has 111 tables. All should be migrated.
 ## Environment
 
 - **Runtime:** Node.js 20+
-- **OS:** macOS (Martin's machine) — must work on macOS
+- **OS:** macOS (the operator's machine) — must work on macOS
 - **Ollama:** installed locally for **optional local text inference only** (NOT embeddings — see D2)
 - **Python 3 + onnxruntime + huggingface-hub:** for the ported `embed-service.py` (Nomic v1.5 ONNX) and the topology pipeline (`cluster.py` etc.)
 - **Cloudflare Tunnel:** `cloudflared` CLI (account tunnel — quick tunnels don't support SSE) for remote access

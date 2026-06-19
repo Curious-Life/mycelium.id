@@ -144,7 +144,7 @@ cd /tmp/myc-phase2 && for v in loopback remote-config remote-runtime managed-cla
 
 ## 2026-06-03 PM — LIVE DEPLOY on real `mycelium.id` + Claude-connect debugging — **START HERE**
 
-We stood the managed stack up **live on the real `mycelium.id`** (operator = Martina, Cloudflare DNS) and drove a real Claude→vault connect. **Transport, cert, relay, control-plane, and the full OAuth handshake all work live.** ONE blocker remains — a JWT **audience** detail. The operator suspects Anthropic is blocking them; the evidence says otherwise (see *Not Anthropic*).
+We stood the managed stack up **live on the real `mycelium.id`** (operator, Cloudflare DNS) and drove a real Claude→vault connect. **Transport, cert, relay, control-plane, and the full OAuth handshake all work live.** ONE blocker remains — a JWT **audience** detail. The operator suspects Anthropic is blocking them; the evidence says otherwise (see *Not Anthropic*).
 
 ### Live stack (UP this session)
 - **Hetzner cpx22 `77.42.122.15`** (hel1), cloud-init-hardened (`ops` user, key-only SSH, nftables, fail2ban).
