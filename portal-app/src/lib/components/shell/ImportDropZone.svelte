@@ -9,56 +9,26 @@
 	// so these HTML5 drop events fire identically in the desktop shell.
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
-	import { api } from '$lib/api';
 	import { toasts } from '$lib/stores/toast';
+	import { importFiles } from '$lib/import/upload-handlers';
 
 	let dragging = $state(false);
 	let busy = $state(false);
 	let counter = 0; // depth counter so nested dragenter/leave don't flicker the overlay
 
-	const ARCHIVE_RE = /\.(zip|json)$/i;
-
-	async function uploadAttachment(file: File): Promise<{ captioned?: boolean }> {
-		const form = new FormData();
-		form.append('file', file);
-		// api() rewrites /portal/* → /api/v1/portal/* and leaves FormData alone
-		// (no JSON content-type) so the browser sets the multipart boundary.
-		const res = await api('/portal/upload/file', { method: 'POST', body: form });
-		if (!res.ok) {
-			let msg = `Couldn't add ${file.name}`;
-			try { const j = await res.json(); if (j?.error) msg = j.error; } catch { /* keep default */ }
-			throw new Error(msg);
-		}
-		return res.json();
-	}
-
+	// Routing (archive→/upload, loose→/upload/file→document-or-attachment) lives in
+	// the shared upload handler — the same logic <ImportField> and the Library
+	// importer use, so a dropped .md becomes a Library document, not an attachment.
 	async function handleFiles(files: File[]) {
 		if (!files.length || busy) return;
 		busy = true;
 		const pending = toasts.info(`Adding ${files.length} item${files.length > 1 ? 's' : ''} to your vault…`, 120000);
-		let added = 0, failed = 0, importedMsgs = 0;
-		for (const file of files) {
-			try {
-				if (ARCHIVE_RE.test(file.name)) {
-					const { uploadFile } = await import('$lib/chunked-upload');
-					const r: any = await uploadFile(file);
-					if (r?.importResult?.imported != null) importedMsgs += r.importResult.imported;
-				} else {
-					await uploadAttachment(file);
-				}
-				added++;
-			} catch (e: any) {
-				failed++;
-				toasts.error(e?.message || `Couldn't add ${file.name}`);
-			}
-		}
+		const r = await importFiles(files);
 		toasts.remove(pending);
 		busy = false;
-		if (added > 0) {
-			const parts = [`${added} item${added > 1 ? 's' : ''} added`];
-			if (importedMsgs) parts.push(`${importedMsgs} messages imported`);
-			toasts.success(parts.join(' · '));
-		}
+		if (r.imported > 0) toasts.success(r.detail);
+		else if (r.error) toasts.error(r.error);
+		else if (r.failed > 0) toasts.error(`Couldn't add ${r.failed} item${r.failed > 1 ? 's' : ''}`);
 	}
 
 	onMount(() => {

@@ -7,26 +7,23 @@
 	//   • a loose file (.md/.txt/.pdf/…/img) → POST /portal/upload/file     (→ document or attachment)
 	// The backend spine (src/ingest/run-import.js) decides document-vs-attachment;
 	// this component just classifies transport and reports an honest result.
-	import { api } from '$lib/api';
-	import { uploadFile as chunkedUpload } from '$lib/chunked-upload';
+	import { importFiles, importFolder, type ImportResult } from '$lib/import/upload-handlers';
 
 	let {
 		accept = '*',
 		multiple = true,
 		folder = true,
 		label = 'Drop files here, or choose',
-		onResult = (_r: ImportFieldResult) => {},
+		onResult = (_r: ImportResult) => {},
 		onError = (_e: string) => {},
 	}: {
 		accept?: string;
 		multiple?: boolean;
 		folder?: boolean;
 		label?: string;
-		onResult?: (r: ImportFieldResult) => void;
+		onResult?: (r: ImportResult) => void;
 		onError?: (e: string) => void;
 	} = $props();
-
-	type ImportFieldResult = { kind: 'archive' | 'files' | 'folder'; imported: number; skipped: number; failed: number; detail: string };
 
 	let fileInput = $state<HTMLInputElement | null>(null);
 	let folderInput = $state<HTMLInputElement | null>(null);
@@ -35,97 +32,23 @@
 	let error = $state('');
 	let dragOver = $state(false);
 
-	const ARCHIVE_RE = /\.(zip|json)$/i;
-	const num = (n: unknown) => (typeof n === 'number' ? n : Number(n) || 0);
-
-	function reset() { error = ''; status = ''; }
-
+	// Both handlers delegate to the shared upload logic ($lib/import/upload-handlers)
+	// so this component is pure UI; ImportDropZone (and later ImportView/ChatFloat)
+	// reuse the exact same routing.
 	async function handleFiles(list: File[]) {
 		if (!list.length) return;
-		busy = true; reset();
-		let imported = 0, skipped = 0, failed = 0;
-		try {
-			for (let i = 0; i < list.length; i++) {
-				const file = list[i];
-				status = list.length > 1 ? `Importing ${i + 1}/${list.length}: ${file.name}…` : `Importing ${file.name}…`;
-				try {
-					if (ARCHIVE_RE.test(file.name)) {
-						// Conversation export / vault zip → chunked archive route.
-						const res = await chunkedUpload(file, (p) => { status = `Uploading ${file.name}… ${p.percent}%`; });
-						const d = await res.json().catch(() => ({}));
-						if (!res.ok) { failed++; error = d.error || `Could not import ${file.name}.`; continue; }
-						imported += num(d.importResult?.imported ?? d.stats?.messages ?? d.messages);
-						skipped += num(d.importResult?.skipped ?? d.stats?.skipped_duplicates);
-						failed += num(d.importResult?.failed ?? d.stats?.failed);
-					} else {
-						// Loose file → the spine turns md/txt/pdf/docx into a document,
-						// images/binaries into attachments. lastModified preserves the date.
-						const fd = new FormData();
-						fd.append('file', file);
-						fd.append('lastModified', new Date(file.lastModified).toISOString());
-						const res = await api('/portal/upload/file', { method: 'POST', body: fd });
-						const d = await res.json().catch(() => ({}));
-						if (!res.ok) { failed++; error = d.error || `Could not import ${file.name}.`; continue; }
-						imported += 1;
-					}
-				} catch { failed++; }
-			}
-			const detail = `${imported.toLocaleString()} imported${skipped ? `, ${skipped} duplicates` : ''}${failed ? `, ${failed} failed` : ''}`;
-			onResult({ kind: list.some((f) => ARCHIVE_RE.test(f.name)) ? 'archive' : 'files', imported, skipped, failed, detail });
-		} catch (e) {
-			const msg = e instanceof Error ? e.message : 'Import failed.';
-			error = msg; onError(msg);
-		} finally {
-			busy = false; status = '';
-		}
+		busy = true; error = ''; status = '';
+		const r = await importFiles(list, { onStatus: (s) => { status = s; } });
+		busy = false; status = '';
+		if (r.error && !r.imported) { error = r.error; onError(r.error); } else onResult(r);
 	}
 
-	// Folder (webkitdirectory): collect .md notes + media → /portal/import/obsidian.
-	// Mirrors the proven Library importer (vault-relative relPaths + base64 media).
-	const ASSET_RE = /\.(png|jpe?g|gif|webp|svg|bmp|avif|heic|heif|pdf|mp3|m4a|wav|ogg|flac|mp4|mov|webm)$/i;
-	const MAX_ASSET = 25 * 1024 * 1024;
-	const MAX_TOTAL_ASSETS = 150 * 1024 * 1024;
-	const toBase64 = async (f: File) => {
-		const buf = new Uint8Array(await f.arrayBuffer());
-		let s = ''; const CHUNK = 0x8000;
-		for (let i = 0; i < buf.length; i += CHUNK) s += String.fromCharCode(...buf.subarray(i, i + CHUNK));
-		return btoa(s);
-	};
-
 	async function handleFolder(list: File[]) {
-		busy = true; reset(); status = 'Reading folder…';
-		try {
-			const mdFiles = list.filter((f) => /\.md$/i.test(f.name));
-			if (!mdFiles.length) { error = 'No .md notes found in that folder.'; onError(error); return; }
-			const vaultName = (((mdFiles[0] as any).webkitRelativePath as string) || '').split('/')[0] || undefined;
-			const prefix = vaultName ? `${vaultName}/` : '';
-			const relOf = (f: File) => {
-				const rel = ((f as any).webkitRelativePath as string) || f.name;
-				return prefix && rel.startsWith(prefix) ? rel.slice(prefix.length) : rel;
-			};
-			const files: { relPath: string; content?: string; contentBase64?: string; mtime?: string }[] =
-				await Promise.all(mdFiles.map(async (f) => ({ relPath: relOf(f), content: await f.text(), mtime: new Date(f.lastModified).toISOString() })));
-			status = 'Reading folder media…';
-			let assetTotal = 0;
-			for (const f of list) {
-				if (!ASSET_RE.test(f.name)) continue;
-				if (f.size === 0 || f.size > MAX_ASSET || assetTotal + f.size > MAX_TOTAL_ASSETS) continue;
-				assetTotal += f.size;
-				files.push({ relPath: relOf(f), contentBase64: await toBase64(f), mtime: new Date(f.lastModified).toISOString() });
-			}
-			status = 'Importing notes…';
-			const res = await api('/portal/import/obsidian', { method: 'POST', body: JSON.stringify({ files, vaultName }) });
-			const d = await res.json().catch(() => ({}));
-			if (!res.ok || !d.ok) { error = d.error || `Import failed (${res.status}).`; onError(error); return; }
-			const imported = num(d.documentsUpserted);
-			const detail = `${imported.toLocaleString()} notes${d.failed ? `, ${num(d.failed)} failed` : ''}${d.assets?.imported ? `, ${num(d.assets.imported)} media` : ''}`;
-			onResult({ kind: 'folder', imported, skipped: num(d.skipped), failed: num(d.failed), detail });
-		} catch (e) {
-			const msg = e instanceof Error ? e.message : 'Could not read the folder.';
-			error = msg; onError(msg);
-		} finally {
-			busy = false; status = '';
-		}
+		if (!list.length) return;
+		busy = true; error = ''; status = '';
+		const r = await importFolder(list, { onStatus: (s) => { status = s; } });
+		busy = false; status = '';
+		if (r.error) { error = r.error; onError(r.error); } else onResult(r);
 	}
 
 	function onFilePicked(e: Event) {
