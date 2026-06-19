@@ -470,8 +470,10 @@
 			if (document.hidden) { sRaf = requestAnimationFrame(sFrame); return; }
 			const tgt = hover ? 1 : 0;
 			reveal += (tgt - reveal) * (reduce ? 1 : (tgt > reveal ? 0.022 : 0.16));
+			// Publish bloom progress so the over-backdrop text can crossfade to light.
+			document.documentElement.style.setProperty('--login-bloom', reveal.toFixed(3));
 			sctx.clearRect(0, 0, sW, sH);
-			if (reveal < 0.004 && tgt === 0) { sRunning = false; return; }
+			if (reveal < 0.004 && tgt === 0) { sRunning = false; document.documentElement.style.setProperty('--login-bloom', '0'); return; }
 			if (markEl) { const r = markEl.getBoundingClientRect(); ox = (r.left + r.width / 2) * sdpr; oy = (r.top + r.height / 2) * sdpr; maxR = Math.hypot(Math.max(ox, sW - ox), Math.max(oy, sH - oy)) * 1.12; }
 			const f = feather(), t = ts / 1000, R = reveal * maxR, amp = 0.12 * Math.max(0, 1 - reveal);
 			sctx.drawImage(gal, 0, 0);
@@ -534,6 +536,7 @@
 			hStop = true;
 			cancelAnimationFrame(hRaf); cancelAnimationFrame(sRaf);
 			unsub(); observer.disconnect();
+			document.documentElement.style.removeProperty('--login-bloom');
 			window.removeEventListener('resize', onResize);
 			if (markEl) { markEl.removeEventListener('mouseenter', onEnter); markEl.removeEventListener('mouseleave', onLeave); }
 			clearTimeout(rt);
@@ -653,10 +656,10 @@
 						<path d="M412,560 L612,560 A32,32 0 0 1 644,592 L672,800 A48,48 0 0 1 624,848 L400,848 A48,48 0 0 1 352,800 L380,592 A32,32 0 0 1 412,560 Z"/>
 					</svg>
 				</button>
-				<h1 class="text-3xl font-light text-[var(--color-text-primary)] mb-2 lowercase tracking-wide text-center">mycelium</h1>
-				<p class="text-aurum text-3xl font-semibold uppercase mb-2 text-center" style="letter-spacing: 0.45em; padding-left: 0.45em;">Vault</p>
+				<h1 class="wordmark text-3xl font-light mb-2 lowercase tracking-wide text-center">mycelium</h1>
+				<p class="vault-word text-aurum text-3xl font-semibold uppercase mb-2 text-center" style="letter-spacing: 0.45em; padding-left: 0.45em;">Vault</p>
 				{#if userHandle}
-					<p class="text-sm text-[var(--color-text-tertiary)] text-center mt-1 font-mono">@{userHandle}</p>
+					<p class="backdrop-text text-sm text-center mt-1 font-mono">@{userHandle}</p>
 				{/if}
 			</div>
 
@@ -678,7 +681,7 @@
 							{#if userHandle}
 								<p class="text-lg font-medium text-[var(--color-text-primary)]">@{userHandle}</p>
 							{/if}
-							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Sign in to your vault</h2>
+							<h2 class="text-lg font-semibold text-[var(--color-text-emphasis)] mb-2">Sign in to your vault</h2>
 							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
 								{#if requirePasskey}
 									This vault requires a passkey for web sign-in. Use Touch ID, Face ID, or your security key.
@@ -796,8 +799,8 @@
 			{/if}
 
 			<div class="mt-8 text-center">
-				<p class="text-xs text-[var(--color-text-tertiary)]">
-					<span class="opacity-40">Secured with WebAuthn</span> &middot; mycelium.id &middot; Your rights preserved.
+				<p class="backdrop-text text-xs">
+					<span class="opacity-60">Secured with WebAuthn</span> &middot; mycelium.id &middot; Your rights preserved.
 				</p>
 			</div>
 		</div>
@@ -814,6 +817,25 @@
 	}
 	.login-page.ready {
 		opacity: 1;
+	}
+
+	/* Text that sits directly over the animated backdrop (outside the glass card).
+	   At rest it uses the theme's strongest text token (max contrast in both
+	   modes). As the starfield blooms (--login-bloom 0→1, set per-frame in
+	   initBackground) the galaxy — always dark — slides underneath, so the text
+	   crossfades to light and gains a soft dark halo to stay legible over it. */
+	.wordmark {
+		color: color-mix(in srgb, #F4F4F8 calc(var(--login-bloom, 0) * 100%), var(--color-text-emphasis));
+		text-shadow: 0 2px 18px rgba(0, 0, 0, calc(var(--login-bloom, 0) * 0.6));
+		transition: color 0.15s linear;
+	}
+	.vault-word {
+		text-shadow: 0 2px 18px rgba(0, 0, 0, calc(var(--login-bloom, 0) * 0.55));
+	}
+	.backdrop-text {
+		color: color-mix(in srgb, #C9CAD6 calc(var(--login-bloom, 0) * 100%), var(--color-text-tertiary));
+		text-shadow: 0 1px 12px rgba(0, 0, 0, calc(var(--login-bloom, 0) * 0.5));
+		transition: color 0.15s linear;
 	}
 
 	/* Full-screen living backdrop canvases. Fixed so they cover the viewport
