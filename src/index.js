@@ -11,7 +11,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
 import { initVaultStorage } from './db/init.js';
-import { resolveDbKeyHex } from './db/open.js';
+import { resolveDbKeyHex, atRestEnabled, atRestDefaultOn } from './db/open.js';
 import { purgePlaintextBackup } from './account/db-cipher-migrate.js';
 import path from 'node:path';
 import { createIdentity, isValidHandle } from './identity/identity.js';
@@ -118,9 +118,29 @@ export async function boot({
   // Finder launch / MCP server opens it without the env flag) or at-rest is on;
   // null for a plaintext vault with at-rest off → plaintext open, unchanged.
   // FAIL CLOSED inside initVaultStorage: a migration error refuses a plaintext open.
+  //
+  // AT-REST IS THE DEFAULT FOR THE CANONICAL VAULT (every entry point). The SQLCipher
+  // Stage B/C collapse removed per-field content encryption, so whole-file SQLCipher is
+  // now the ONLY at-rest defense — it must NOT be opt-in on the documented self-host path
+  // (`node src/index.js` / `npm start`, connect.md) or `cargo tauri dev`, which carry no
+  // MYCELIUM_AT_REST. Opt the canonical-vault entry point in here. Design D5 is intact:
+  // this is per-entry-point (not a boot-default in open.js); the ~104 verify gates pass a
+  // NON-canonical temp dbPath → atRestDefaultOn=false → they keep opening plaintext
+  // fixtures untouched. A fresh canonical vault is born encrypted; an existing plaintext
+  // one migrates once (init.js cross-process lock); the packaged app already sets the flag.
+  const isCanonicalVault = atRestDefaultOn(dbPath);
+  if (isCanonicalVault && !atRestEnabled()) process.env.MYCELIUM_AT_REST = '1';
+
   const dbKeyHex = initStorage
     ? await initVaultStorage({ dbPath, userHex, log: (m) => console.error(m) })
     : resolveDbKeyHex(userHex, dbPath); // open-only (e.g. public server): no schema apply, fail-closed
+
+  // FAIL CLOSED (belt to the default-on suspenders): the canonical vault must NEVER open
+  // unkeyed now that content carries no field envelope — refuse rather than write plaintext.
+  // (Non-canonical test fixtures: isCanonicalVault=false → unaffected.)
+  if (isCanonicalVault && !dbKeyHex) {
+    throw new Error('REFUSE: the canonical vault would open UNKEYED — content is not field-encrypted after the SQLCipher collapse, so whole-file at-rest (USER_MASTER → dbKey) is required. Set MYCELIUM_AT_REST or derive the DB key.');
+  }
   const { db, close } = getDb({ dbPath, userKey, systemKey, federationDeps, dbKeyHex });
   // Stage 0 (SQLCipher-mandatory): the at-rest migration leaves a full PLAINTEXT
   // copy at <db>.pre-cipher-<ts>. Once the REAL vault is open + keyed, remove it —

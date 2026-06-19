@@ -11,12 +11,28 @@
 // held in process memory only, never logged/stored. @see db-cipher-migrate.js,
 // docs/AT-REST-BLINDNESS-DESIGN-2026-06-11.md.
 import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { deriveDbKey } from '../account/keystore.js';
 import { isPlaintextSqlite } from '../account/db-cipher-migrate.js';
+import { dbPath as canonicalDbPath } from '../paths.js';
 
 /** True iff at-rest whole-file encryption is opted in for this process. */
 export function atRestEnabled() {
   return ['1', 'true', 'yes', 'on'].includes(String(process.env.MYCELIUM_AT_REST || '').toLowerCase());
+}
+
+/**
+ * True iff `dbPath` is the CANONICAL vault → at-rest whole-file SQLCipher is the
+ * DEFAULT (not opt-in) for it. Rationale: the SQLCipher Stage B/C collapse removed
+ * per-field content encryption, so whole-file SQLCipher is now the ONLY at-rest
+ * defense for content — it MUST NOT be opt-in on the documented self-host path
+ * (`node src/index.js` / `npm start`, connect.md) or `cargo tauri dev`. The
+ * canonical-path scope keeps design D5 intact: the ~104 verify gates open NON-
+ * canonical temp fixtures → false → plaintext, byte-for-byte unchanged. Honors
+ * MYCELIUM_DB, so a self-hoster's custom vault location is still "canonical" for them.
+ */
+export function atRestDefaultOn(dbPath) {
+  return !!dbPath && path.resolve(dbPath) === path.resolve(canonicalDbPath());
 }
 
 /** True iff the vault FILE at dbPath is already whole-file encrypted (no plaintext
