@@ -36,10 +36,20 @@ low_confidence per the harmonic-table convention.
 ALIGNMENT (honest): PAC/PLV/coherence require two equal-length, co-sampled
 signals. The five bands have different native lengths (gamma=raw, beta=10-mean,
 alpha/theta/delta=calendar-bin means). We resample BOTH members of an adjacent
-pair onto a COMMON uniform grid (length = min of the two band lengths, floor
-MIN_COUPLE_N) via linear interpolation over each band's uniform [0,1) position.
-This is a defensible windowed alignment (spec §4.24 mitigation) but its validity
-for text bands is unproven → low_confidence + a notes marker.
+pair onto a COMMON uniform grid of length = min of the two band lengths (so the
+shorter/slow band is never up-sampled) via linear interpolation over each band's
+uniform [0,1) position. This is a defensible windowed alignment (spec §4.24
+mitigation) but its validity for text bands is unproven → low_confidence + a
+notes marker.
+
+LOW-N DISCIPLINE (audit METRICS-AUDIT-vs-LITERATURE-2026-06-19 S3): the estimators
+are faithful but were being called below their valid sample regime, where they are
+dominated by finite-sample bias (PLV → √(π/4N), Welch → 1). Every estimate is now
+gated on the RAW co-occurring sample count (the min of the two bands' native
+lengths, NOT the interpolated length): below MIN_COUPLE_N we write NULL, PAC needs
+PAC_MIN_N, coherence needs MIN_WELCH_SEGMENTS Welch segments, and PLV is stored
+surrogate-debiased (excess over a circular-shift chance null). The raw N per pair
+is stored plaintext (couple_eff_n_*) so the read layer can suppress near-floor rows.
 
 Direct invocation:
     MYCELIUM_USER_ID=<owner> MYCELIUM_DB=./data/vault.db \
@@ -49,6 +59,7 @@ Direct invocation:
 Security: counts/IDs only in logs; decrypted vectors never logged or serialized.
 """
 
+import hashlib
 import math
 import os
 import sys
@@ -89,6 +100,7 @@ from harmonics import (
     hilbert_amplitude,
     pac_tort_2010,
     phase_locking_value,
+    phase_locking_value_debiased,
     spectral_coherence,
 )
 
@@ -101,10 +113,41 @@ ADJACENT_PAIRS = [
     ('theta', 'delta'),
 ]
 
-# Minimum common-grid length for a coupling estimate. Below this the PAC/PLV/coh
-# estimators are noise (pac_tort_2010 internally needs >= 2*n_bins=36). We keep a
-# conservative floor and let the estimators' own guards return 0.0 otherwise.
-MIN_COUPLE_N = 8
+# ── Low-N statistical floors (audit METRICS-AUDIT-vs-LITERATURE-2026-06-19 S3) ──
+# The PAC/PLV/Welch estimators are mathematically correct but biased OUTSIDE their
+# valid sample regime. The OLD floor (8) sat squarely inside the biased zone — at
+# N=8 PLV's expected value under ZERO coupling is ≈ √(π/4N) ≈ 0.31, and Welch with
+# ~2 segments is biased toward 1 by construction. We gate on RAW co-occurring
+# samples (the min of the two bands' native lengths BEFORE interpolation — the
+# interpolated length carries no new information and must never lift a pair over a
+# floor) and write NULL below each estimator's regime rather than a noise number.
+MIN_COUPLE_N = 24          # hard floor for PLV / coherence (else NULL)
+PAC_MIN_N = 36             # Tort 2010 MI needs >= 2*n_bins (n_bins=18) to fill bins
+MIN_WELCH_SEGMENTS = 5     # Welch coherence needs several segments or it biases →1
+MIN_WELCH_NPERSEG = 8      # shortest segment that still resolves a few frequencies
+N_SURROGATES = 200         # circular-shift surrogates for the PLV chance-null
+
+
+def _welch_params(n: int) -> tuple[int, int, int]:
+    """Welch (nperseg, noverlap, n_segments) for a length-n co-sampled pair.
+
+    Targets ~5-7 50%-overlap segments by sizing nperseg ≈ n//4 (floored at
+    MIN_WELCH_NPERSEG). More segments → more averaging → less of the few-segment
+    upward-to-1 coherence bias, at the cost of frequency resolution we do not
+    need here. Returns n_segments=0 when n is too short to form any segment.
+    """
+    nperseg = max(MIN_WELCH_NPERSEG, n // 4)
+    nperseg = min(nperseg, n)
+    noverlap = nperseg // 2
+    step = nperseg - noverlap
+    n_seg = 1 + (n - nperseg) // step if (step > 0 and n >= nperseg) else 0
+    return nperseg, noverlap, n_seg
+
+
+def _couple_seed(low: str, high: str, w_start: float, w_end: float) -> int:
+    """Deterministic surrogate-null seed for one (pair, window) — reproducible runs."""
+    h = hashlib.sha256(f"{low}|{high}|{w_start:.3f}|{w_end:.3f}".encode()).digest()
+    return int.from_bytes(h[:4], 'big')
 
 
 def _resample_to(signal: np.ndarray, n: int) -> np.ndarray:
@@ -112,7 +155,10 @@ def _resample_to(signal: np.ndarray, n: int) -> np.ndarray:
 
     Each band signal is treated as samples on a uniform [0,1) position grid;
     resampling onto a common length lets adjacent bands be co-sampled for the
-    coupling estimators. Returns zeros if the input is empty.
+    coupling estimators. Callers pass n = min(both bands' lengths), so this only
+    ever DOWN-samples the longer band — it never fabricates samples for the
+    shorter (slow) band, which would inflate PLV (audit S3 item 4). Returns zeros
+    if the input is empty.
     """
     s = np.asarray(signal, dtype=np.float64).ravel()
     if s.size == 0:
@@ -128,10 +174,15 @@ def compute_coupling_for_window(
     timestamps_unix: np.ndarray, signal: np.ndarray,
     window_start_unix: float, window_end_unix: float,
 ) -> dict:
-    """Compute the 12 §4.24 coupling columns for one (granularity, window).
+    """Compute the §4.24 coupling columns for one (granularity, window).
 
-    Returns a dict mapping column-name → float|None (PLAINTEXT numerics; the
-    caller encrypts before write).
+    Returns a dict of column-name → float|int|None (PLAINTEXT; the caller encrypts
+    the metric scalars but writes the effective-N counts in the clear). Each
+    estimate is gated on the RAW co-occurring sample count `n` (= min of the two
+    bands' native lengths, before interpolation) against that estimator's valid
+    regime; below the floor the value is NULL, not a finite-sample-bias number
+    (audit S3). PLV is surrogate-debiased to its chance excess. The raw `n` is
+    stored per pair so the read layer can suppress / down-weight near-floor rows.
     """
     band_signals = {
         b: aggregate_to_band(timestamps_unix, signal, b, window_start_unix, window_end_unix)
@@ -141,31 +192,39 @@ def compute_coupling_for_window(
     for low, high in ADJACENT_PAIRS:
         lo = band_signals[low]
         hi = band_signals[high]
-        n = min(lo.size, hi.size)
+        n = int(min(lo.size, hi.size))         # raw co-occurring samples (no interp)
+        row[f'couple_eff_n_{low}_{high}'] = n  # always recorded (incl. below floor)
+        row[f'pac_{low}_{high}'] = None
+        row[f'plv_{low}_{high}'] = None
+        row[f'coh_{low}_{high}'] = None
         if n < MIN_COUPLE_N:
-            row[f'pac_{low}_{high}'] = None
-            row[f'plv_{low}_{high}'] = None
-            row[f'coh_{low}_{high}'] = None
-            continue
+            continue                            # too few samples → all NULL
         lo_r = _resample_to(lo, n)
         hi_r = _resample_to(hi, n)
         # PAC (Tort 2010): phase of LOW band modulates amplitude of HIGH band.
+        # Needs >= 2*n_bins samples to populate the phase bins; below that the
+        # primitive returns 0.0, which would read as "no coupling" — write NULL.
+        if n >= PAC_MIN_N:
+            try:
+                row[f'pac_{low}_{high}'] = float(pac_tort_2010(lo_r, hi_r))
+            except (ValueError, np.linalg.LinAlgError):
+                row[f'pac_{low}_{high}'] = None
+        # PLV, chance-corrected: store the surrogate-debiased excess over the
+        # circular-shift null (raw PLV is upward-biased ≈ √(π/4N) at low N).
         try:
-            row[f'pac_{low}_{high}'] = float(pac_tort_2010(lo_r, hi_r))
-        except (ValueError, np.linalg.LinAlgError):
-            row[f'pac_{low}_{high}'] = None
-        # PLV: |<exp(i Δφ)>| between the two band phases.
-        try:
-            row[f'plv_{low}_{high}'] = float(phase_locking_value(lo_r, hi_r))
+            seed = _couple_seed(low, high, window_start_unix, window_end_unix)
+            dbg = phase_locking_value_debiased(lo_r, hi_r, n_surrogates=N_SURROGATES, seed=seed)
+            row[f'plv_{low}_{high}'] = float(dbg['debiased'])
         except (ValueError, np.linalg.LinAlgError):
             row[f'plv_{low}_{high}'] = None
-        # Spectral coherence: mean magnitude-squared coherence over frequency.
-        try:
-            nperseg = min(n, max(4, n // 2))
-            _f, cxy = spectral_coherence(lo_r, hi_r, fs=1.0, nperseg=nperseg)
-            row[f'coh_{low}_{high}'] = float(np.nanmean(cxy)) if cxy.size else None
-        except (ValueError, np.linalg.LinAlgError):
-            row[f'coh_{low}_{high}'] = None
+        # Welch coherence: only when enough segments form, else it biases →1.
+        nperseg, _noverlap, n_seg = _welch_params(n)
+        if n_seg >= MIN_WELCH_SEGMENTS:
+            try:
+                _f, cxy = spectral_coherence(lo_r, hi_r, fs=1.0, nperseg=nperseg)
+                row[f'coh_{low}_{high}'] = float(np.nanmean(cxy)) if cxy.size else None
+            except (ValueError, np.linalg.LinAlgError):
+                row[f'coh_{low}_{high}'] = None
     return row
 
 
@@ -272,6 +331,8 @@ UPDATE_SQL = (
     "  pac_gamma_beta=?, pac_beta_alpha=?, pac_alpha_theta=?, pac_theta_delta=?, "
     "  plv_gamma_beta=?, plv_beta_alpha=?, plv_alpha_theta=?, plv_theta_delta=?, "
     "  coh_gamma_beta=?, coh_beta_alpha=?, coh_alpha_theta=?, coh_theta_delta=?, "
+    "  couple_eff_n_gamma_beta=?, couple_eff_n_beta_alpha=?, "
+    "  couple_eff_n_alpha_theta=?, couple_eff_n_theta_delta=?, "
     "  topology_h0_wasserstein_prev=?, "
     "  computed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
     "WHERE user_id=? AND window_end=? AND granularity=? AND clustering_run_id=?"
@@ -287,6 +348,10 @@ def update_row(user_id, granularity, window_end_iso, run_id, row, wass, querier)
         e(row.get('plv_alpha_theta')), e(row.get('plv_theta_delta')),
         e(row.get('coh_gamma_beta')), e(row.get('coh_beta_alpha')),
         e(row.get('coh_alpha_theta')), e(row.get('coh_theta_delta')),
+        # Effective-N is a COUNT, not a metric scalar → plaintext (lets the read
+        # layer suppress / down-weight near-floor estimates; audit S3 item e).
+        row.get('couple_eff_n_gamma_beta'), row.get('couple_eff_n_beta_alpha'),
+        row.get('couple_eff_n_alpha_theta'), row.get('couple_eff_n_theta_delta'),
         e(wass),
         user_id, window_end_iso, granularity, run_id,
     ]
