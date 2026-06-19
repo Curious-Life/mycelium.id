@@ -120,49 +120,92 @@ export function entropyNormalized(p) {
   return maxH > 0 ? h / maxH : 0;
 }
 
-// ── Lempel-Ziv complexity (HEURISTIC, see file header) ──────────────
+// ── Lempel-Ziv 1976 complexity (textbook, over SYMBOLS, surrogate-normalized) ──
+
+/** Deterministic, seedable PRNG (no crypto needed — this is a statistical surrogate
+ *  null, not a secret). mulberry32: tiny, good-enough uniformity for shuffling. */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** In-place-safe Fisher–Yates shuffle of a copy, driven by a PRNG. */
+function shuffled(arr, rng) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/** Raw textbook LZ76 production count c(n) over a SYMBOL array — delegates to the
+ *  shared `lz76Complexity` (Kaspar–Schuster, defined below; hoisted). Element
+ *  equality, NOT character matching, so c(n) ≤ n always. */
+function lz76(symbols) { return lz76Complexity(symbols).complexity; }
+
+const LZ_SURROGATE_MAX_N = Number(process.env.COMPLEXITY_SURROGATE_MAX_N) || 500;
+const LZ_SURROGATES = Number(process.env.COMPLEXITY_SURROGATES) || 99;
+const LZ_MIN_RELIABLE = Number(process.env.COMPLEXITY_MIN_RELIABLE) || 20;
 
 /**
- * Heuristic LZ76-style complexity of a stringifiable sequence. Detects
- * repetition/novelty. NOT textbook LZ76 (see header). Output shape preserved
- * verbatim from the original compute-complexity.js implementation.
+ * Normalized LZ complexity of a symbol sequence. Two regimes:
+ *  - SHORT (n < LZ_SURROGATE_MAX_N): the asymptotic n/log₂a bound is invalid
+ *    (O(log log n/log n) bias), so normalize by a SHUFFLE-SURROGATE null —
+ *    normalized = c_obs / mean(c_shuffled) ∈ [0,1] (1 ≈ no structure beyond
+ *    chance; <1 ≈ compressible/repetitive). Mirrors the Fisher/PLV null pattern.
+ *    Deterministic via the seed (reproducible across runs + for the verify gate).
+ *  - LONG (n ≥ LZ_SURROGATE_MAX_N): the asymptotic is statistically fine and the
+ *    surrogate would be costly → use n/log₂a (over SYMBOLS, n = symbol count).
+ *  `low_confidence` = 1 when the sequence is too short to discriminate OR the
+ *  surrogate null has no variance (every ordering equally complex).
  *
- *   complexity, normalized ∈ [0,1], sequenceLength, alphabetSize
  * @param {Array<number|string>} sequence
- * @returns {{complexity:number, normalized:number, sequenceLength:number, alphabetSize:number}}
+ * @param {{ seed?: number, surrogates?: number }} [opts]
+ * @returns {{complexity:number, normalized:number, nullMean:number|null,
+ *            nullStd:number|null, lowConfidence:number, sequenceLength:number, alphabetSize:number}}
  */
-export function lzComplexity(sequence) {
-  if (sequence.length < 2) {
-    return { complexity: 0, normalized: 0, sequenceLength: sequence.length, alphabetSize: 0 };
-  }
-
-  const s = sequence.map((x) => String(x)).join(',') + ',';
-  const n = s.length;
-
-  let complexity = 1;
-  let i = 0;
-  let k = 1;
-
-  while (i + k <= n) {
-    const substring = s.slice(i, i + k);
-    const searchRegion = s.slice(0, i);
-    if (searchRegion.includes(substring)) {
-      k++;
-    } else {
-      complexity++;
-      i = i + k;
-      k = 1;
-    }
-  }
-
+export function lzComplexity(sequence, { seed = 1, surrogates = LZ_SURROGATES } = {}) {
+  const n = sequence.length;
   const alphabetSize = new Set(sequence).size;
-  const maxComplexity = alphabetSize > 1 ? n / Math.log2(alphabetSize) : 1;
-  const normalized = maxComplexity > 0 ? Math.min(1, complexity / maxComplexity) : 0;
+  if (n < 2 || alphabetSize < 2) {
+    return { complexity: n ? 1 : 0, normalized: 0, nullMean: null, nullStd: null,
+      lowConfidence: 1, sequenceLength: n, alphabetSize };
+  }
+  const cObs = lz76(sequence);
+
+  if (n >= LZ_SURROGATE_MAX_N) {
+    const maxC = n / Math.log2(alphabetSize);
+    const normalized = maxC > 0 ? Math.min(1, cObs / maxC) : 0;
+    return { complexity: cObs, normalized: Math.round(normalized * 1000) / 1000,
+      nullMean: null, nullStd: null, lowConfidence: 0, sequenceLength: n, alphabetSize };
+  }
+
+  // Surrogate null: shuffle the SAME multiset; its LZ ≈ the max achievable at this
+  // (n, alphabet) → c_obs/mean(null) cancels the small-n bias the asymptotic can't.
+  const rng = mulberry32((seed >>> 0) || 1);
+  let sum = 0, sumSq = 0;
+  for (let r = 0; r < surrogates; r++) {
+    const c = lz76(shuffled(sequence, rng));
+    sum += c; sumSq += c * c;
+  }
+  const nullMean = sum / surrogates;
+  const nullStd = Math.sqrt(Math.max(0, sumSq / surrogates - nullMean * nullMean));
+  const normalized = nullMean > 0 ? Math.min(1, cObs / nullMean) : 0;
+  const lowConfidence = (n < LZ_MIN_RELIABLE || nullStd < 1e-9) ? 1 : 0;
 
   return {
-    complexity,
+    complexity: cObs,
     normalized: Math.round(normalized * 1000) / 1000,
-    sequenceLength: sequence.length,
+    nullMean: Math.round(nullMean * 1000) / 1000,
+    nullStd: Math.round(nullStd * 1000) / 1000,
+    lowConfidence,
+    sequenceLength: n,
     alphabetSize,
   };
 }

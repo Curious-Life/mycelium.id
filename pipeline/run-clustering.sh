@@ -200,6 +200,12 @@ node pipeline/compute-vitality.js
 echo ""
 echo "Step 10/16: Compute Lempel-Ziv complexity (compressibility of thinking)"
 node pipeline/compute-complexity.js
+# Embedding-novelty (spec §4.19, Tier-1): the embedding-native novelty cross-check on
+# LZ — well-defined at low n where LZ saturates. UPDATEs the complexity rows just
+# written (no window coupling). Python: decrypts messages.embedding_768 (NEVER_AUTO_
+# DECRYPT) via the same path harmonics/anchors use. Runs in measure-only too.
+echo "Step 10b/16: Compute embedding-novelty (Tier-1 novelty cross-check)"
+"$PYTHON" pipeline/compute-embedding-novelty.py
 
 echo ""
 echo "Step 11/16: Compute frequency metrics (coherence/entropy/compression/learning)"

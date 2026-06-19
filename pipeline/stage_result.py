@@ -90,6 +90,10 @@ class Accumulator:
         self.attempted += 1
         self.written += 1
 
+    def skip(self) -> None:
+        """Content absent (legitimately nothing to write) — NOT counted as attempted.
+        Parity with the JS createStageResult().skip()."""
+
     def fail(self, err: Any) -> None:
         self.attempted += 1
         self.failed += 1
