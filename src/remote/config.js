@@ -68,6 +68,20 @@ const SAFE_RELAY = /^[a-z0-9.-]{1,253}(:\d{1,5})?$/i; // host[:port]
 const SAFE_MXID = /^@[^:\s]+:[^\s/]+$/;
 export function isSafeMxid(v) { return typeof v === 'string' && SAFE_MXID.test(v); }
 
+// Operator-password weakness check. This single password is the gate between a
+// public URL and the vault, so beyond the ≥12-char floor we reject the obviously
+// guessable. Deliberately LENIENT — it must never reject a real passphrase, only
+// catch repetition, all-digit PINs, and common-word prefixes. Returns a reason
+// string (for the error/UI) or null when acceptable.
+export function passwordWeakness(p) {
+  if (typeof p !== 'string') return 'required';
+  if (new Set(p).size < 5) return 'too repetitive — use more distinct characters';
+  if (/^\d+$/.test(p)) return 'all digits — add letters and symbols';
+  if (/(.)\1{4,}/.test(p)) return 'avoid long runs of one character';
+  if (/^(password|qwerty|letmein|mycelium|changeme|iloveyou|welcome|admin)/i.test(p)) return 'starts with a common, guessable word';
+  return null;
+}
+
 // Harden auth.db: dir 0700, file 0600. It holds the better-auth signing secret,
 // the operator password hash, AND the relay/acme-dns secrets — all plaintext.
 // SQLite's default file mode is 0644 (world-readable). Best-effort.
@@ -98,6 +112,12 @@ export function readRemoteConfig({ env = process.env } = {}) {
         || (publicHost ? `https://${publicHost}` : ''),
     operatorEmail: clean(env.MYCELIUM_USER_EMAIL) || clean(file.operatorEmail) || DEFAULT_EMAIL,
     remoteEnabled: env.MYCELIUM_REMOTE_ENABLED === '1' || file.remoteEnabled === true,
+    // Hardening: require a passkey (WebAuthn) for WEB sign-in (opt-in, default off).
+    // Enforced ONLY when a passkey is actually enrolled (passkeyEnrolled()) so it can
+    // never lock out during bootstrap; auto-disabled on a publicHost change (a passkey
+    // is bound to the host's rpID — see writeRemoteConfig). Desktop loopback + the
+    // recovery key are independent escapes and always work.
+    requirePasskeyForWeb: env.MYCELIUM_REQUIRE_PASSKEY_WEB === '1' || file.requirePasskeyForWeb === true,
     remoteMode: REMOTE_MODES.has(remoteMode) ? remoteMode : 'off',
     publicHost,
     relayAddr: clean(env.MYCELIUM_RELAY_ADDR) || clean(file.relayAddr) || '',
@@ -136,11 +156,20 @@ export function writeRemoteConfig(patch = {}, { env = process.env } = {}) {
   }
   if (typeof patch.operatorEmail === 'string') next.operatorEmail = patch.operatorEmail.trim();
   if (typeof patch.remoteEnabled === 'boolean') next.remoteEnabled = patch.remoteEnabled;
+  // Require-passkey-for-web (hardening, opt-in). Enforced only when a passkey is
+  // enrolled (see passkeyEnrolled / the server guards), so writing `true` with no
+  // passkey is harmless until one exists.
+  if (typeof patch.requirePasskeyForWeb === 'boolean') next.requirePasskeyForWeb = patch.requirePasskeyForWeb;
   // Transport keys (all NON-secret — secrets go in auth.db via setRemoteSecret).
   if (typeof patch.remoteMode === 'string' && REMOTE_MODES.has(patch.remoteMode)) next.remoteMode = patch.remoteMode;
   if (typeof patch.publicHost === 'string') {
     const h = patch.publicHost.trim();
     if (h !== '' && !isSafeHostname(h)) throw new Error('invalid publicHost');
+    // A WebAuthn passkey is bound to the host's rpID, so CHANGING the host orphans
+    // every enrolled passkey. Auto-disable the passkey-for-web requirement on a real
+    // host change so a rename/disconnect can never lock the owner out of the web
+    // (they re-enroll on the new host, then re-enable). Same-value writes don't trip it.
+    if (h !== (next.publicHost || '') && next.requirePasskeyForWeb) next.requirePasskeyForWeb = false;
     next.publicHost = h;
   }
   if (typeof patch.relayAddr === 'string') {
@@ -342,6 +371,8 @@ export async function setOperatorPassword({ email, password, env = process.env }
   if (typeof password !== 'string' || password.length < 12) {
     throw new Error('operator password must be at least 12 characters');
   }
+  const weak = passwordWeakness(password);
+  if (weak) throw new Error(`operator password is weak: ${weak}`);
   const e = clean(email) || readRemoteConfig({ env }).operatorEmail;
   // Dynamic import breaks the auth.js <-> config.js cycle (auth.js imports
   // resolveAuthSecret/readRemoteConfig from here at load time).
@@ -376,6 +407,27 @@ export function operatorUserExists({ env = process.env } = {}) {
     return Number(row?.n || 0) > 0;
   } catch {
     return false; // table not migrated yet
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Best-effort: is at least one WebAuthn passkey enrolled? Gates the
+ * require-passkey-for-web policy (so it stays INERT until a passkey exists — no
+ * bootstrap lockout) and the Settings toggle (only enableable once enrolled).
+ * Reads auth.db read-only (mirrors operatorUserExists — :4711 is the single
+ * writer; a readonly handle adds no contention). Never throws.
+ */
+export function passkeyEnrolled({ env = process.env } = {}) {
+  const dbp = authDbPath({ env });
+  if (dbp === ':memory:' || !existsSync(dbp)) return false;
+  const db = new Database(dbp, { readonly: true });
+  try {
+    const row = db.prepare('SELECT COUNT(*) AS n FROM passkey').get();
+    return Number(row?.n || 0) > 0;
+  } catch {
+    return false; // passkey table not migrated yet
   } finally {
     db.close();
   }

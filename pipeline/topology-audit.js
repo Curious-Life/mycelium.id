@@ -241,6 +241,21 @@ export async function topologyAudit({ db, userId, dryRun = false, log = console.
   // single snapshot INSERT above is un-caught → already fail-loud if it throws.)
   await res.finalize();
   log(`[audit] Snapshot written with ${writtenFindings} findings`);
+
+  // Bound growth: this stage ACCUMULATES one snapshot per run with no dedup (the
+  // same INSERT-forever bug vitality had). It CANNOT clear-all — m2_delta reads the
+  // prior snapshot (above) and getAuditHistory reads a ~30-row trend — so keep the
+  // most recent N snapshots per user + prune their orphaned findings. Runs AFTER
+  // this run's prior-read + write, so the just-written snapshot + its prior survive.
+  const KEEP_SNAPSHOTS = Number(process.env.MYCELIUM_AUDIT_KEEP) || 50;
+  await db.rawQuery(
+    `DELETE FROM topology_audit_snapshots WHERE user_id = ? AND id NOT IN (
+       SELECT id FROM topology_audit_snapshots WHERE user_id = ? ORDER BY run_at DESC LIMIT ?)`,
+    [userId, userId, KEEP_SNAPSHOTS]);
+  await db.rawQuery(
+    `DELETE FROM topology_audit_findings WHERE user_id = ? AND snapshot_id NOT IN (
+       SELECT id FROM topology_audit_snapshots WHERE user_id = ?)`,
+    [userId, userId]);
   // Suppress unused m2Entropy/m2MaxEntropy lints — kept for parity (diagnostic).
   void m2Entropy; void m2MaxEntropy;
   return { snapshotId, territories: territories.length, findings: writtenFindings, critical: criticalCount, warning: warningCount };

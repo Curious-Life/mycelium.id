@@ -163,22 +163,21 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
   router.get('/vitality/snapshot', async (req, res) => {
     const u = owner(req, res); if (!u) return;
     try {
-      // Latest run for the user (clustering_run_id is plaintext); fall back to all.
-      const runRes = await db.rawQuery(
-        `SELECT MAX(clustering_run_id) AS run_id FROM territory_vitality WHERE user_id = ?`, [u.id]);
-      const runId = (runRes?.results || runRes || [])[0]?.run_id || null;
+      // Latest run by RECENCY (computed_at) — NOT lexicographic MAX(clustering_run_id).
+      // String max picked a stale 'backfill-v1' over 'era-2026-…' (b>e) and ignored
+      // NULL-tagged rows entirely. `clustering_run_id IS ?` matches a NULL run id too.
+      const latest = ((await db.rawQuery(
+        `SELECT clustering_run_id FROM territory_vitality WHERE user_id = ? ORDER BY computed_at DESC LIMIT 1`,
+        [u.id])).results || [])[0];
+      const runId = latest ? (latest.clustering_run_id ?? null) : null;
 
-      const sql = runId
-        ? `SELECT territory_id, phase, computed_at, clustering_run_id,
+      const cols = `territory_id, phase, computed_at, clustering_run_id,
                   entropy_diversification, connection_growth_rate, reach,
-                  cofire_partner_diversity, engagement_depth_normalized, vitality
-             FROM territory_vitality WHERE user_id = ? AND clustering_run_id = ?
-             ORDER BY territory_id`
-        : `SELECT territory_id, phase, computed_at, clustering_run_id,
-                  entropy_diversification, connection_growth_rate, reach,
-                  cofire_partner_diversity, engagement_depth_normalized, vitality
-             FROM territory_vitality WHERE user_id = ? ORDER BY territory_id`;
-      const params = runId ? [u.id, runId] : [u.id];
+                  cofire_partner_diversity, engagement_depth_normalized, vitality`;
+      const sql = latest
+        ? `SELECT ${cols} FROM territory_vitality WHERE user_id = ? AND clustering_run_id IS ? ORDER BY territory_id`
+        : `SELECT ${cols} FROM territory_vitality WHERE user_id = ? ORDER BY territory_id`;
+      const params = latest ? [u.id, runId] : [u.id];
       const rows = (await db.rawQuery(sql, params)).results || [];
       const territories = rows.map((r) => {
         const out = { territory_id: r.territory_id, phase: r.phase, computed_at: r.computed_at, clustering_run_id: r.clustering_run_id };

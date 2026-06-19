@@ -715,6 +715,15 @@ function fromBase64(b64) {
 
 function isEncrypted(value) {
   if (typeof value !== 'string' || value.length < 20) return false;
+  // Fast-reject guard (perf): every envelope is base64(JSON.stringify({...})), and
+  // a JSON object always starts with `{"`, whose base64 is invariably "ey" (the
+  // first 12 bits — `{`=0x7B + top nibble of `"`=0x22 — encode to 'e','y' regardless
+  // of the first key or later whitespace, so it holds for BOTH the JS and Python
+  // (json.dumps) encoders). So a value that doesn't start with "ey" CANNOT be an
+  // envelope → skip the expensive base64-decode + JSON.parse probe. This eliminates
+  // the per-cell parse storm on plaintext-heavy scans (e.g. a 100k-row mindscape
+  // load ≈ 1.1M cells). Proven 0 false-negatives over the envelope corpus.
+  if (value.charCodeAt(0) !== 101 /* 'e' */ || value.charCodeAt(1) !== 121 /* 'y' */) return false;
   try {
     const decoded = Buffer.from(value, 'base64').toString('utf8');
     const obj = JSON.parse(decoded);
@@ -1266,9 +1275,70 @@ async function encryptWithSystemKey(plaintext, scope, systemKey) {
   return Buffer.from(JSON.stringify(envelope)).toString('base64');
 }
 
+// ── Decrypt-once plaintext cache (perf) ─────────────────────────────────────
+// Caches DECRYPTED PLAINTEXT keyed by the envelope string, so re-reading the same
+// row doesn't re-run the (expensive) AES-KW DEK-unwrap + AES-GCM decrypt. Safe:
+//   • Non-deterministic encryption → each envelope string is globally unique and
+//     ALWAYS decrypts to the same plaintext; an UPDATE writes a NEW envelope (new
+//     random DEK/IV) → a new key → never any staleness.
+//   • Keyed by the CryptoKey (WeakMap) → no cross-key bleed; key rotation / GC drops it.
+//   • Consulted only AFTER the scope guardian passes (see decrypt()): a scope-denied
+//     caller throws before the cache is read, so the cache can NEVER bypass authz.
+//     The entry stores the envelope scope so the guardian still runs on every hit.
+//   • SYSTEM_KEY (secrets) envelopes are NOT cached (rarely read, more sensitive).
+//   • Bounded by total plaintext bytes with LRU eviction — caps the in-RAM plaintext
+//     surface (the working set is already in RAM during use on a local single-user
+//     vault). Tunable via MYCELIUM_DECRYPT_CACHE_MB (0 disables the cache).
+const DECRYPT_CACHE_BYTES = (() => {
+  const mb = Number(process.env.MYCELIUM_DECRYPT_CACHE_MB);
+  if (Number.isFinite(mb) && mb >= 0) return Math.floor(mb * 1024 * 1024);
+  return 64 * 1024 * 1024; // default 64 MB
+})();
+// WeakMap<CryptoKey, { map: Map<encoded, {scope, plaintext}>, bytes }> — Map insertion
+// order is the LRU order (touch = delete+re-set to move to the most-recent end).
+let decryptCacheByKey = new WeakMap();
+function decryptCacheGet(key, encoded) {
+  if (DECRYPT_CACHE_BYTES === 0) return undefined;
+  const entry = decryptCacheByKey.get(key);
+  if (!entry) return undefined;
+  const hit = entry.map.get(encoded);
+  if (hit === undefined) return undefined;
+  entry.map.delete(encoded); entry.map.set(encoded, hit); // LRU touch
+  return hit;
+}
+function decryptCacheSet(key, encoded, scope, plaintext) {
+  if (DECRYPT_CACHE_BYTES === 0) return;
+  let entry = decryptCacheByKey.get(key);
+  if (!entry) { entry = { map: new Map(), bytes: 0 }; decryptCacheByKey.set(key, entry); }
+  const cost = encoded.length + plaintext.length;
+  if (cost > DECRYPT_CACHE_BYTES) return; // single value larger than the whole budget
+  const prev = entry.map.get(encoded);
+  if (prev) { entry.bytes -= (encoded.length + prev.plaintext.length); entry.map.delete(encoded); }
+  entry.map.set(encoded, { scope, plaintext });
+  entry.bytes += cost;
+  while (entry.bytes > DECRYPT_CACHE_BYTES && entry.map.size > 0) {
+    const oldest = entry.map.keys().next().value; // front = least-recently-used
+    const v = entry.map.get(oldest);
+    entry.bytes -= (oldest.length + v.plaintext.length);
+    entry.map.delete(oldest);
+  }
+}
+
 // ── Decrypt ──
 
 async function decrypt(encoded, masterKey, allowedScopes = null, opts = {}) {
+  // Fast path: decrypt-once cache (USER-family only — system envelopes are never
+  // stored, so they simply miss here and take the full path below). The scope
+  // guardian STILL runs on every hit (authz is never skipped); only the parse +
+  // DEK-unwrap + GCM are saved.
+  if (masterKey) {
+    const hit = decryptCacheGet(masterKey, encoded);
+    if (hit !== undefined) {
+      const sr = await scopeGuardian.check({ allowedScopes, envelopeScope: hit.scope });
+      if (!sr.allow) throw new ScopeViolationError(`Scope denied: "${hit.scope}" not in [${allowedScopes}]`);
+      return hit.plaintext;
+    }
+  }
   const envelope = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
   if (envelope.v !== 1 && envelope.v !== 2 && envelope.v !== 3) {
     throw new Error(`Unknown envelope version: ${envelope.v}`);
@@ -1328,7 +1398,11 @@ async function decrypt(encoded, masterKey, allowedScopes = null, opts = {}) {
     ct.buffer.slice(ct.byteOffset, ct.byteOffset + ct.byteLength),
   );
 
-  return new TextDecoder().decode(decrypted);
+  const result = new TextDecoder().decode(decrypted);
+  // Cache USER-family plaintext only (secrets/SYSTEM_KEY excluded). Reached only
+  // after the scope guardian passed above, so caching can't bypass authz.
+  if (keyFamily !== 'system' && masterKey) decryptCacheSet(masterKey, encoded, envelope.s, result);
+  return result;
 }
 
 // ── Rewrap envelope (for master key rotation) ──
@@ -1975,6 +2049,9 @@ async function getSystemKeyFromBestSource() {
  * Zeros scope keys, user keys, and KMS client cache.
  */
 async function clearAllCaches() {
+  // Drop the decrypt-once plaintext cache explicitly (zeroing the in-RAM plaintext
+  // surface on rotation/reset; the old WeakMap becomes garbage).
+  decryptCacheByKey = new WeakMap();
   // WeakMaps are auto-pruned when keys are garbage collected, but during
   // rotation we want explicit invalidation. We can't .clear() a WeakMap,
   // so we re-create the maps. The old WeakMaps become garbage.

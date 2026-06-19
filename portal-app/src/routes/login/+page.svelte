@@ -6,9 +6,9 @@
 	let mode: 'loading' | 'operator' | 'enroll' = $state('loading');
 	let loading = $state(false);
 	let error = $state<string | null>(null);
-	let emailInput = $state('operator@mycelium.local');
 	let passwordInput = $state('');
 	let userHandle = $state<string | null>(null);
+	let requirePasskey = $state(false);
 	let telegramAvailable = $state(false);
 	let telegramRedirecting = $state(false);
 
@@ -18,6 +18,9 @@
 			if (res.ok) {
 				const data = await res.json();
 				userHandle = data.handle || null;
+				// When the vault requires a passkey for web sign-in, hide the password
+				// path and lead with the passkey button (the server also enforces this).
+				requirePasskey = data.requirePasskey === true;
 			}
 			// V1 self-hosted: a networked client (over the relay) signs in with the
 			// operator password; loopback never reaches /login (the shim authorizes
@@ -231,29 +234,34 @@
 
 
 
-	// Operator-password sign-in (V1 self-hosted, reached over the relay). POSTs to
-	// better-auth's /api/auth/sign-in/email — same-origin to this webview, routed
-	// to the :4711 server by the relay Caddy. On success better-auth sets the
-	// HttpOnly session cookie; the app's /auth/session check then passes, so we
-	// reload into the app (which re-runs that check, now authenticated).
+	// Operator-password sign-in (V1 self-hosted, reached over the relay). The vault
+	// is single-user, so there is no email to ask for — we POST only the password to
+	// the server-side shim /api/auth/operator-login (same-origin to this webview,
+	// relay-routed to :4711), which injects the canonical operator identity and calls
+	// better-auth server-side. On success better-auth sets the HttpOnly session
+	// cookie; the app's /auth/session check then passes, so we reload into the app.
 	async function handleOperatorLogin() {
-		const email = emailInput.trim();
 		const password = passwordInput;
-		if (!email || !password) { error = 'Enter your email and operator password'; return; }
+		if (!password) { error = 'Enter your operator password'; return; }
 		loading = true;
 		error = null;
 		try {
-			const res = await fetch('/api/auth/sign-in/email', {
+			const res = await fetch('/api/auth/operator-login', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				credentials: 'same-origin',
-				body: JSON.stringify({ email, password }),
+				body: JSON.stringify({ password }),
 			});
 			if (!res.ok) {
 				const data = await res.json().catch(() => ({}));
-				throw new Error(data?.message || data?.error?.message || 'Sign-in failed — check your password');
+				if (data?.error === 'passkey_required') {
+					// Policy turned on (server enforces it) — switch to passkey-only.
+					requirePasskey = true;
+					throw new Error(data?.message || 'This vault requires a passkey for web sign-in.');
+				}
+				throw new Error(data?.message || data?.error || 'Sign-in failed — check your password');
 			}
-			// Signed in. Offer Face ID enrolment for next time (skippable).
+			// Signed in. Offer a passkey for next time (skippable).
 			mode = 'enroll';
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Sign-in failed';
@@ -365,42 +373,42 @@
 							{/if}
 							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Sign in to your vault</h2>
 							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
-								Enter your operator password to reach your vault on this device.
+								{#if requirePasskey}
+									This vault requires a passkey for web sign-in. Use Touch ID, Face ID, or your security key.
+								{:else}
+									Enter your operator password to reach your vault on this device.
+								{/if}
 							</p>
 						</div>
 
-						<form class="space-y-3" onsubmit={(e) => { e.preventDefault(); handleOperatorLogin(); }}>
-							<input
-								bind:value={emailInput}
-								type="email"
-								placeholder="email"
-								autocomplete="username"
-								class="input w-full text-sm"
-							/>
-							<input
-								bind:value={passwordInput}
-								type="password"
-								placeholder="operator password"
-								autocomplete="current-password"
-								class="input w-full text-sm"
-							/>
-							<button
-								type="submit"
-								disabled={loading || !passwordInput}
-								class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed"
-							>
-								{#if loading}
-									<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-									<span>Signing in…</span>
-								{:else}
-									<span>Sign in</span>
-								{/if}
-							</button>
-						</form>
+						{#if !requirePasskey}
+							<form class="space-y-3" onsubmit={(e) => { e.preventDefault(); handleOperatorLogin(); }}>
+								<input
+									bind:value={passwordInput}
+									type="password"
+									placeholder="operator password"
+									autocomplete="current-password"
+									class="input w-full text-sm"
+								/>
+								<button
+									type="submit"
+									disabled={loading || !passwordInput}
+									class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed"
+								>
+									{#if loading}
+										<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+										<span>Signing in…</span>
+									{:else}
+										<span>Sign in</span>
+									{/if}
+								</button>
+							</form>
+						{/if}
 
-						<!-- Passkey / Face ID — for returning users who enrolled one. If
-						     none exists the call fails gracefully → use the password. -->
-						<div class="pt-4 border-t border-[var(--color-border)]">
+						<!-- Passkey (Touch ID / Face ID / security key). The primary path when a
+						     passkey is required; otherwise a returning-user shortcut (fails
+						     gracefully to the password if none is enrolled). -->
+						<div class="pt-4 {requirePasskey ? '' : 'border-t border-[var(--color-border)]'}">
 							<button
 								onclick={handleV1PasskeyLogin}
 								disabled={loading}
@@ -445,13 +453,15 @@
 				</div>
 
 			{:else if mode === 'enroll'}
-				<!-- Post-login: offer Face ID / passkey enrolment for next time. -->
+				<!-- Post-login: offer passkey enrolment for next time. Platform-neutral
+				     copy — the authenticator is Touch ID on a Mac, Face ID on iPhone,
+				     Windows Hello, or a security key. -->
 				<div class="card-elevated p-8">
 					<div class="space-y-6">
 						<div class="text-center">
-							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Enable Face ID?</h2>
+							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Set up a passkey?</h2>
 							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
-								Sign in faster next time with a passkey (Face ID / fingerprint) on this device. Your password still works as a backup.
+								Sign in faster next time with a passkey — Touch ID, Face ID, or a security key on this device. Your password still works as a backup.
 							</p>
 						</div>
 						<button
@@ -463,7 +473,7 @@
 								<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
 								<span>Setting up…</span>
 							{:else}
-								<span>Enable Face ID</span>
+								<span>Set up passkey</span>
 							{/if}
 						</button>
 						<button
