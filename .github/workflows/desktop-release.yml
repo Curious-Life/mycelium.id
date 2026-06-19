@@ -1,12 +1,18 @@
 name: desktop-release
 
-# Build, sign, notarize, and publish the macOS desktop app as two per-arch DMGs
-# (Apple Silicon + Intel). Triggered by a version tag (v*) or manually.
+# Build, sign, notarize, and publish the macOS desktop app as a signed DMG.
+# Triggered by a version tag (v*) or manually.
 #
-# Each arch builds on a runner of THAT arch: the bundled Node/Python + native
-# wheels + better_sqlite3.node are arch-specific and do NOT cross-compile
-# (docs/DESIGN-macos-signed-distribution-2026-06-17.md). macos-14 = Apple
-# Silicon, macos-13 = Intel.
+# APPLE SILICON ONLY. Intel (macos-13/x86_64) was dropped 2026-06-18: GitHub's
+# free macos-13 runner pool would not schedule the Intel job (queued 5-8h, never
+# assigned) while macos-14 ran fine. Apple stopped selling Intel Macs in 2023, so
+# ARM-first is the launch target. To re-add Intel later, restore the macos-13
+# matrix entry below (and, if the free pool still won't schedule it, use the paid
+# macos-13-large runner).
+#
+# Builds on a runner of the target arch: the bundled Node/Python + native wheels
+# + better_sqlite3.node are arch-specific and do NOT cross-compile
+# (docs/DESIGN-macos-signed-distribution-2026-06-17.md). macos-14 = Apple Silicon.
 #
 # Signing is OURS, not Tauri's: `cargo tauri build` runs ad-hoc (no APPLE_* in
 # its env, so it does not auto-notarize and does not hit the externalBin
@@ -39,9 +45,8 @@ jobs:
           - runner: macos-14   # Apple Silicon
             arch: arm64
             dmgarch: aarch64
-          - runner: macos-13   # Intel
-            arch: x86_64
-            dmgarch: x64
+          # Intel (macos-13/x86_64/x64) intentionally removed — see header. Add
+          # the entry back here to restore the two-arch build.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     steps:
