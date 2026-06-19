@@ -46,7 +46,7 @@ await seed(1, () => unit((d) => Math.sin((d + 1) * 0.011)), 6);
 // Territory 2 — SPREAD: each message a distinct direction → high NN distance → high novelty.
 await seed(2, (i) => unit((d) => Math.sin((d + 1) * (0.011 + i * 0.05)) + Math.cos((d + 1) * (0.02 + i * 0.07))), 6);
 
-const env0 = { ...process.env, PYTHONPATH: 'pipeline', MYCELIUM_DB: DB, MYCELIUM_USER_ID: U, USER_MASTER: userHex, SYSTEM_KEY: systemHex };
+const env0 = { ...process.env, PYTHONPATH: 'pipeline', MYCELIUM_DB: DB, MYCELIUM_KCV: KCV, MYCELIUM_USER_ID: U, USER_MASTER: userHex, SYSTEM_KEY: systemHex };
 // compute-complexity first (creates the territory rows the novelty stage UPDATEs).
 const cx = spawnSync('node', ['pipeline/compute-complexity.js'], { encoding: 'utf8', env: env0 });
 const nov = spawnSync(PY, ['pipeline/compute-embedding-novelty.py'], { encoding: 'utf8', env: env0 });
