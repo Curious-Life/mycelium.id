@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { marked } from 'marked';
 	import DOMPurify from 'isomorphic-dompurify';
-	import JSZip from 'jszip';
+	import { prepareFile } from '$lib/import/upload-handlers';
 	import { chatMessages, connectionStatus, activeModel, noModelMessage, type ChatMessage } from '$lib/stores/chat';
 	import { navigationState, spaceScope, docScope } from '$lib/stores/navigation';
 	import { apiPostForm, apiGet, api } from '$lib/api';
@@ -463,22 +463,10 @@
 		for (let i = 0; i < files.length; i++) {
 			let file = files[i];
 			try {
-				// 90-500MB ZIPs: strip media client-side; >500MB: upload raw (server extracts)
-				if (file.name.endsWith('.zip') && file.size > 90_000_000 && file.size <= 500_000_000) {
-					try {
-						const buf = await file.arrayBuffer();
-						const zip = await JSZip.loadAsync(buf);
-						const dataFiles = Object.keys(zip.files).filter(n => !zip.files[n].dir && (n.endsWith('.json') || n.endsWith('.md')));
-						if (dataFiles.length > 0) {
-							const newZip = new JSZip();
-							for (const name of dataFiles) {
-								newZip.file(name, await zip.files[name].async('uint8array'));
-							}
-							const blob = await newZip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
-							file = new File([blob], file.name, { type: 'application/zip' });
-						}
-					} catch { /* fall through with original file */ }
-				}
+				// Large-ZIP repack (strip media to stay under the upload cap) via the
+				// shared handler — also preserves Mycelium-vault media (the inline
+				// version stripped it). Falls through with the original file on error.
+				try { file = await prepareFile(file); } catch { /* keep original file */ }
 				const res = await chunkedUpload(file) as { attachmentId: string; type: string; content: string; filename: string; importResult?: { type: string; imported: number; skipped: number; stats?: Record<string, number> } };
 				pendingFiles = pendingFiles.filter(f => f !== file);
 				if (res.importResult) {
