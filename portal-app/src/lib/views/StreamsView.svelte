@@ -10,7 +10,7 @@
 	import StreamRiver from './StreamRiver.svelte';
 	import ImportView from './ImportView.svelte';
 	import BodyView from './BodyView.svelte';
-	import SourceSpectrum from './SourceSpectrum.svelte';
+	import SourceHistory from './SourceHistory.svelte';
 	import Drawer from '$lib/components/Drawer.svelte';
 
 	type Facet = 'stream' | 'sources' | 'body';
@@ -78,7 +78,7 @@
 		{#if visited.stream || underlying === 'stream' || sourcesOpen}
 			<div class="facet stream-facet" class:hidden={underlying !== 'stream'}>
 				<div class="spectrum-wrap">
-					<SourceSpectrum selected={selectedSource} onSelect={(s) => (selectedSource = s)} />
+					<SourceHistory selected={selectedSource} onSelect={(s) => (selectedSource = s)} />
 				</div>
 				<div class="river-wrap">
 					<StreamRiver externalSource={selectedSource} />
@@ -119,10 +119,10 @@
 	.facet { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 	.facet.hidden { display: none; }
 
-	/* Stream facet = source spectrum (hero, capped) above the river (flex-1). */
+	/* Stream facet = source history graph (hero) above the river (flex-1). */
 	.stream-facet { gap: 0; }
 	.spectrum-wrap {
-		flex-shrink: 0; padding: 14px 16px 12px; max-height: 42%; overflow-y: auto;
+		flex-shrink: 0; padding: 14px 16px 12px; max-height: 46%; overflow-y: auto;
 		border-bottom: 1px solid var(--color-border); background: var(--color-bg);
 	}
 	.river-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
