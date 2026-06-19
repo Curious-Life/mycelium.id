@@ -9,6 +9,7 @@ import { boot } from './index.js';
 import { dataDir, dbPath as resolveDbPath, kcvPath as resolveKcvPath, uploadsRoot as resolveUploadsRoot, remoteConfigPath as resolveRemoteConfigPath } from './paths.js';
 import { resolveKeys } from './crypto/key-source.js';
 import { applyMigrations } from './db/migrate.js';
+import { precompressedStatic, setStaticHeaders, compressionMiddleware } from './serving.js';
 import { apiRouter } from './api.js';
 import { internalRouter } from './internal-router.js';
 import { portalCompatRouter } from './portal-compat.js';
@@ -623,6 +624,12 @@ export async function startRestServer({
   const app = express();
   app.disable('x-powered-by');
 
+  // Compress dynamic responses (large /portal/* JSON: Mindscape aggregate,
+  // Streams feed, documents list) — mounted first so it wraps every route.
+  // Excludes auth/token surfaces and SSE; skips our already-encoded precompressed
+  // static. See src/serving.js for the security reasoning.
+  app.use(compressionMiddleware());
+
   // Security headers on EVERY response (the webview loads us as a remote origin,
   // so this is the only place a CSP can attach — see buildPortalCsp). Computed
   // once at boot from the resolved shell. No HSTS: this origin is loopback HTTP
@@ -718,14 +725,15 @@ export async function startRestServer({
     req.method === 'GET' && req.accepts('html') &&
     !DATA_PREFIX.test(req.path.replace(/\/{2,}/g, '/'));
   if (portalBuilt) {
+    // Serve the precompressed `.br`/`.gz` sibling of hashed immutable assets when
+    // the client accepts it (kills the 4.2 MB uncompressed bundle download), then
+    // fall through to express.static for everything else.
+    app.use(precompressedStatic(CANONICAL_BUILD));
     app.use(express.static(CANONICAL_BUILD, {
-      setHeaders(res, filePath) {
-        // The SPA shell (200.html) must NEVER be cached. SvelteKit's JS/CSS are
-        // content-hashed + immutable, but the shell references them by hash — a
-        // cached shell pins the OLD bundle, so the app "won't update" after a
-        // deploy until the WebView cache is cleared (cost a round-trip 2026-06-15).
-        if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-store');
-      },
+      // The SPA shell (200.html) must NEVER be cached (a stale shell pins the OLD
+      // bundle — cost a round-trip 2026-06-15); hashed _app/immutable/* assets get
+      // a 1-year immutable cache so warm loads skip revalidating ~100 chunks.
+      setHeaders: setStaticHeaders,
     }));
     // Client-side routes (/library, /mindscape, /setup, …) have no file → SPA
     // fallback to 200.html for NAVIGATION requests only. Data paths never shadowed.
