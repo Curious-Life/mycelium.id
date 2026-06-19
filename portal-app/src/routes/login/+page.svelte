@@ -649,12 +649,10 @@
 	<main class="flex-1 flex items-center justify-center p-6 relative overflow-y-auto" style="z-index:10">
 		<div class="w-full max-w-md">
 			<div class="text-center mb-6">
-				<!-- Gold mushroom mark (app logo). Hover it to bloom the starfield. -->
+				<!-- Full logo (night-sky app-icon tile + gold mushroom), sized + styled
+				     like the landing site's hero-mark. Hover it to bloom the starfield. -->
 				<button type="button" id="login-mark" class="login-mark" aria-label="Mycelium">
-					<svg viewBox="176 64 672 800" xmlns="http://www.w3.org/2000/svg" fill="var(--color-accent-aurum)">
-						<path d="M256,512 L768,512 A64,64 0 0 0 832,448 C832,88 192,88 192,448 A64,64 0 0 0 256,512 Z"/>
-						<path d="M412,560 L612,560 A32,32 0 0 1 644,592 L672,800 A48,48 0 0 1 624,848 L400,848 A48,48 0 0 1 352,800 L380,592 A32,32 0 0 1 412,560 Z"/>
-					</svg>
+					<img src="/favicon.svg" alt="" width="104" height="104" draggable="false" />
 				</button>
 				<h1 class="wordmark text-3xl font-light mb-2 lowercase tracking-wide text-center">mycelium</h1>
 				<p class="vault-word text-aurum text-3xl font-semibold uppercase mb-2 text-center" style="letter-spacing: 0.45em; padding-left: 0.45em;">Vault</p>
@@ -861,33 +859,34 @@
 		z-index: 1;
 	}
 
-	/* Gold mushroom mark — the app logo; hover origin for the starfield bloom. */
+	/* Full logo, styled exactly like the landing site's hero-mark: a rounded
+	   night-sky app-icon tile with a soft gold shadow. Hover origin for the bloom. */
 	.login-mark {
 		display: block;
-		width: 96px;
-		height: 96px;
-		margin: 0 auto 1.1rem;
+		width: 104px;
+		height: 104px;
+		border-radius: 24px;
+		margin: 0 auto 1.4rem;
 		padding: 0;
 		border: 0;
 		background: transparent;
 		cursor: pointer;
 		opacity: 0;
-		filter: drop-shadow(0 10px 28px rgba(184, 134, 11, 0.28));
+		box-shadow: 0 14px 38px rgba(184, 134, 11, 0.24);
 		animation: markAppear 0.9s ease-out 0.15s forwards;
-		transition: transform 0.4s var(--ease-out, ease), filter 0.4s ease;
+		transition: transform 0.4s var(--ease-out, ease), box-shadow 0.4s ease;
 	}
-	.login-mark svg { display: block; width: 100%; height: 100%; }
+	.login-mark img { display: block; width: 100%; height: 100%; border-radius: 24px; }
 	.login-mark:hover {
 		transform: translateY(-2px) scale(1.04);
-		filter: drop-shadow(0 14px 36px rgba(184, 134, 11, 0.42));
+		box-shadow: 0 18px 46px rgba(184, 134, 11, 0.34);
 	}
 	.login-mark:focus-visible {
 		outline: 2px solid var(--color-accent-aurum);
 		outline-offset: 6px;
-		border-radius: 16px;
 	}
 	@media (max-width: 520px) {
-		.login-mark { width: 80px; height: 80px; }
+		.login-mark { width: 84px; height: 84px; }
 	}
 	@keyframes markAppear {
 		0% { opacity: 0; transform: translateY(8px) scale(0.96); }
