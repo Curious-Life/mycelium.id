@@ -418,6 +418,17 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
       const top_movers = (q.state === 'basis_suspect' && Array.isArray(lastFisher?.top_contributors))
         ? lastFisher.top_contributors.slice(0, 3) : [];
 
+      // The latest Fisher-confident window — computed over the SAME getTrajectory() series
+      // the headline σ uses (/trajectory/summary's velBz), so this IS the headline's
+      // "current" week. is_current ⇒ W === that frontier ⇒ the cross-check's fSeries equals
+      // the headline's confVel ⇒ F.z === summary.velocity_baseline_z EXACTLY. Only then may
+      // the UI present the verdict as a trust-qualifier ON the displayed σ; when the
+      // embedding stage lags (W < frontier) the chip must NOT vouch for the on-screen number.
+      const latestFisherW = fisher.reduce(
+        (mx, r) => (!r.low_confidence && r.fisher_velocity != null && (mx === null || r.window_start > mx))
+          ? r.window_start : mx,
+        null);
+
       const fresh = await familyFreshness(db, u.id, 'embedding_trajectory').catch(() => null);
       res.set('Cache-Control', 'no-store');
       res.json({
@@ -425,6 +436,8 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
         freshness_hedge: freshnessHedge(fresh),
         cross_check: {
           level, window_start: W,
+          latest_window: latestFisherW,
+          is_current: W != null && latestFisherW != null && W === latestFisherW,
           state: q.state, label: copy.label, detail: copy.detail,
           fisher_velocity_z: F && Number.isFinite(F.z) ? F.z : null,
           centroid_drift_z: E && Number.isFinite(E.z) ? E.z : null,
