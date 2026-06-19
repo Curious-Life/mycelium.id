@@ -11,29 +11,21 @@
 // held in process memory only, never logged/stored. @see db-cipher-migrate.js,
 // docs/AT-REST-BLINDNESS-DESIGN-2026-06-11.md.
 import { existsSync } from 'node:fs';
-import path from 'node:path';
 import { deriveDbKey } from '../account/keystore.js';
 import { isPlaintextSqlite } from '../account/db-cipher-migrate.js';
-import { dbPath as canonicalDbPath } from '../paths.js';
 
 /** True iff at-rest whole-file encryption is opted in for this process. */
 export function atRestEnabled() {
   return ['1', 'true', 'yes', 'on'].includes(String(process.env.MYCELIUM_AT_REST || '').toLowerCase());
 }
 
-/**
- * True iff `dbPath` is the CANONICAL vault → at-rest whole-file SQLCipher is the
- * DEFAULT (not opt-in) for it. Rationale: the SQLCipher Stage B/C collapse removed
- * per-field content encryption, so whole-file SQLCipher is now the ONLY at-rest
- * defense for content — it MUST NOT be opt-in on the documented self-host path
- * (`node src/index.js` / `npm start`, connect.md) or `cargo tauri dev`. The
- * canonical-path scope keeps design D5 intact: the ~104 verify gates open NON-
- * canonical temp fixtures → false → plaintext, byte-for-byte unchanged. Honors
- * MYCELIUM_DB, so a self-hoster's custom vault location is still "canonical" for them.
- */
-export function atRestDefaultOn(dbPath) {
-  return !!dbPath && path.resolve(dbPath) === path.resolve(canonicalDbPath());
-}
+// NOTE: at-rest default-on is wired at the REAL launch entry point (src/index.js main
+// guard sets MYCELIUM_AT_REST), NOT by a path predicate here. A path/MYCELIUM_DB-based
+// "is this the canonical vault" check was tried and removed — the ~104 verify gates and
+// the pipeline subprocesses (compute-*.js → import boot) set MYCELIUM_DB to a temp
+// fixture, so the fixture matched "canonical" and got born-encrypted (broke 29 gates).
+// Entry-point gating is the only signal that distinguishes the real server launch from
+// a library importer. @see src/index.js, docs/PRE-FREEZE-SECURITY-DESIGN-2026-06-19.md.
 
 /** True iff the vault FILE at dbPath is already whole-file encrypted (no plaintext
  *  SQLite magic header). Self-detection so any launcher opens it keyed. */
