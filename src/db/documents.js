@@ -23,6 +23,14 @@ function randomNonce() {
   return randomBytes(16).toString('hex');
 }
 
+// RT2-H1 (0033/0034): every ENCRYPTED document field a write can poison — versioned
+// as a whole so an overwrite is fully recoverable, not just content/title/summary
+// (red-team MED-1). Must stay a subset of ENCRYPTED_FIELDS.documents (crypto-local.js).
+const DOC_VERSIONED_FIELDS = ['title', 'summary', 'content', 'tags', 'entities', 'relations', 'metadata', 'entity_summary', 'source_path'];
+// Keep-last-N bound on version rows per (user,path) — an injection loop of overwrites
+// must not grow the vault without bound (red-team HIGH-1; mirrors activity-feed.prune).
+const DOC_VERSION_KEEP = 50;
+
 export function createDocumentsNamespace(deps) {
   if (!deps) throw new TypeError('createDocumentsNamespace: deps required');
   const { d1Query, firstRow } = deps;
@@ -121,19 +129,31 @@ export function createDocumentsNamespace(deps) {
       if (doc && doc.user_id && doc.path && opts.skipVersion !== true) {
         try {
           const prev = firstRow(await d1Query(
-            `SELECT id, title, summary, content, forgotten_at FROM documents WHERE user_id = ? AND path = ?`,
+            `SELECT id, forgotten_at, ${DOC_VERSIONED_FIELDS.join(', ')} FROM documents WHERE user_id = ? AND path = ?`,
             [doc.user_id, doc.path],
           ));
-          const changed = prev && !prev.forgotten_at && (
-            (doc.content !== undefined && doc.content !== prev.content) ||
-            (doc.title !== undefined && doc.title !== prev.title) ||
-            (doc.summary !== undefined && doc.summary !== prev.summary)
-          );
+          // Version when ANY encrypted field the caller is writing actually changes —
+          // not just content/title/summary (red-team MED-1: metadata/tags/entities were
+          // silently overwritten unversioned). Create + identical re-write capture nothing.
+          const changed = prev && !prev.forgotten_at &&
+            DOC_VERSIONED_FIELDS.some((f) => doc[f] !== undefined && doc[f] !== prev[f]);
           if (changed) {
+            // Full prior snapshot (every non-null encrypted field) as one encrypted JSON
+            // blob → a document overwrite is fully recoverable; title/summary/content are
+            // also kept as columns for a cheap listVersions preview (no JSON parse).
+            const snap = {};
+            for (const f of DOC_VERSIONED_FIELDS) if (prev[f] != null) snap[f] = prev[f];
             await d1Query(
-              `INSERT INTO document_versions (document_id, user_id, path, title, summary, content, trigger, reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-              [prev.id, doc.user_id, doc.path, prev.title ?? null, prev.summary ?? null, prev.content ?? null, opts.trigger || 'overwrite', opts.reason ?? null],
+              `INSERT INTO document_versions (document_id, user_id, path, title, summary, content, snapshot_json, trigger, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [prev.id, doc.user_id, doc.path, prev.title ?? null, prev.summary ?? null, prev.content ?? null, JSON.stringify(snap), opts.trigger || 'overwrite', opts.reason ?? null],
+            );
+            // Bound growth (red-team HIGH-1): keep the most-recent N versions per (user,path).
+            await d1Query(
+              `DELETE FROM document_versions WHERE user_id = ? AND path = ? AND id NOT IN (
+                 SELECT id FROM document_versions WHERE user_id = ? AND path = ?
+                 ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
+              [doc.user_id, doc.path, doc.user_id, doc.path, DOC_VERSION_KEEP],
             );
           }
         } catch (e) {
@@ -508,16 +528,22 @@ export function createDocumentsNamespace(deps) {
      */
     async restoreVersion(userId, path, versionId) {
       const v = firstRow(await d1Query(
-        `SELECT title, summary, content FROM document_versions WHERE id = ? AND user_id = ? AND path = ?`,
+        `SELECT title, summary, content, snapshot_json FROM document_versions WHERE id = ? AND user_id = ? AND path = ?`,
         [versionId, userId, path],
       ));
       if (!v) return null;
       const cur = await this.get(userId, path);
       if (!cur) return null;
-      return this.upsert(
-        { user_id: userId, path, title: v.title ?? null, summary: v.summary ?? null, content: v.content ?? null },
-        { trigger: 'restore', reason: `restore ${versionId}` },
-      );
+      // Prefer the full snapshot (restores every prior encrypted field, MED-1); fall back
+      // to the title/summary/content columns for pre-0034 version rows.
+      let fields = { title: v.title ?? null, summary: v.summary ?? null, content: v.content ?? null };
+      if (v.snapshot_json) {
+        try {
+          const snap = JSON.parse(v.snapshot_json);
+          if (snap && typeof snap === 'object') fields = Object.fromEntries(DOC_VERSIONED_FIELDS.filter((f) => f in snap).map((f) => [f, snap[f]]));
+        } catch { /* corrupt snapshot → fall back to the three preview columns */ }
+      }
+      return this.upsert({ user_id: userId, path, ...fields }, { trigger: 'restore', reason: `restore ${versionId}` });
     },
 
     /**

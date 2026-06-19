@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { clampLimit } from './column-guard.js';
 
+// Keep-last-N bound on fact version rows per (user,category,key) — an injection loop of
+// overwrites must not grow the vault without bound (red-team HIGH-1; mirrors documents).
+const FACT_VERSION_KEEP = 50;
+
 /**
  * Facts namespace — typed durable truths the agent should always know.
  *
@@ -64,6 +68,13 @@ export function createFactsNamespace(deps) {
             `INSERT INTO fact_versions (user_id, fact_id, category, key, value, confidence, trigger, reason)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             [userId, prior.id, category, key, prior.value ?? null, prior.confidence ?? null, trigger || 'overwrite', reason ?? null],
+          );
+          // Bound growth (red-team HIGH-1): keep most-recent N versions per (user,category,key).
+          await d1Query(
+            `DELETE FROM fact_versions WHERE user_id = ? AND category = ? AND key = ? AND id NOT IN (
+               SELECT id FROM fact_versions WHERE user_id = ? AND category = ? AND key = ?
+               ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
+            [userId, category, key, userId, category, key, FACT_VERSION_KEEP],
           );
         } catch (e) {
           console.warn(`[fact-version] prior-snapshot capture failed: ${e?.code || e?.name || 'error'}`);

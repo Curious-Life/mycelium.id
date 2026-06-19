@@ -1,4 +1,8 @@
 import { createHash } from 'node:crypto';
+import { clampLimit } from './column-guard.js';
+
+// Keep-last-N bound on entity version rows per (user,entity) — bound growth (red-team HIGH-1).
+const ENTITY_VERSION_KEEP = 50;
 
 /**
  * Entities namespace — people/projects/places/orgs as first-class nodes, plus
@@ -51,7 +55,7 @@ export function createEntitiesNamespace(deps) {
    * mention_count; restores a forgotten husk (clears forgotten_at) on re-assert.
    * @returns {Promise<{id:string, status:'created'|'updated'|'restored'}>}
    */
-  async function upsert({ userId, type, name, aliases = null, summary = null, source = 'user', mentionCount = 0 }) {
+  async function upsert({ userId, type, name, aliases = null, summary = null, source = 'user', mentionCount = 0, trigger, reason }) {
     const rows = await scanByType(userId, type, { includeForgotten: true });
     const match = rows.find((e) => norm(e.name) === norm(name));
     if (match) {
@@ -59,6 +63,25 @@ export function createEntitiesNamespace(deps) {
       const newSummary = summary != null && summary !== '' ? summary : (match.summary ?? null);
       const newAliases = aliases != null && aliases !== '' ? aliases : (match.aliases ?? null);
       const newCount = Math.max(match.mention_count || 0, mentionCount || 0);
+      // RT2-H1 (0034): snapshot the prior entity content before an overwrite changes
+      // summary/aliases, so a poisoned remember(entity) is recoverable. A forgotten-husk
+      // restore and a no-op (e.g. an NLP mention-count bump) capture nothing. Non-fatal +
+      // isolated — never deny the write; no plaintext logged.
+      if (!match.forgotten_at && (newSummary !== (match.summary ?? null) || newAliases !== (match.aliases ?? null))) {
+        try {
+          await d1Query(
+            `INSERT INTO entity_versions (user_id, entity_id, type, name, aliases, summary, trigger, reason)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [userId, match.id, type, match.name ?? null, match.aliases ?? null, match.summary ?? null, trigger || 'overwrite', reason ?? null],
+          );
+          await d1Query(
+            `DELETE FROM entity_versions WHERE user_id = ? AND entity_id = ? AND id NOT IN (
+               SELECT id FROM entity_versions WHERE user_id = ? AND entity_id = ?
+               ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
+            [userId, match.id, userId, match.id, ENTITY_VERSION_KEEP],
+          );
+        } catch (e) { console.warn(`[entity-version] prior-snapshot capture failed: ${e?.code || e?.name || 'error'}`); }
+      }
       // `name` is deliberately NOT updated: the match is BY normalized name, so
       // the canonical display casing set on creation persists — a casual case
       // variant or an NLP-promoted proper noun must not downcase/overwrite a
@@ -205,5 +228,29 @@ export function createEntitiesNamespace(deps) {
     return { scanned: rows.length, candidates: agg.size, promoted, skipped };
   }
 
-  return { upsert, forContext, list, link, linksFor, redact, setSalience, promoteFromMessages };
+  // ── RT2-H1 recovery (migration 0034) ────────────────────────────────
+
+  // Prior versions of an entity (by entity_id), newest first; name/aliases/summary
+  // auto-decrypt. The recovery half for poisoned remember(entity) overwrites.
+  async function listVersions({ userId, entityId, limit = 20 }) {
+    const res = await d1Query(
+      `SELECT id, name, aliases, summary, trigger, reason, created_at FROM entity_versions
+       WHERE user_id = ? AND entity_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+      [userId, entityId, clampLimit(limit, 20, 200)],
+    );
+    return res?.results || [];
+  }
+
+  // Restore a prior version's summary/aliases. Routes through upsert() (matches by name,
+  // updates in place) so the CURRENT value is itself versioned first — reversible.
+  async function restoreVersion(userId, versionId) {
+    const v = firstRow(await d1Query(
+      `SELECT entity_id, type, name, aliases, summary FROM entity_versions WHERE id = ? AND user_id = ?`,
+      [versionId, userId],
+    ));
+    if (!v) return null;
+    return upsert({ userId, type: v.type, name: v.name, summary: v.summary, aliases: v.aliases, source: 'user', trigger: 'restore', reason: `restore ${versionId}` });
+  }
+
+  return { upsert, forContext, list, link, linksFor, redact, setSalience, promoteFromMessages, listVersions, restoreVersion };
 }

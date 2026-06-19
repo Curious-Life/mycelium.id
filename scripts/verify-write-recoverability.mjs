@@ -109,9 +109,61 @@ const FV2 = 'POISONED — OVERWRITE-FACT-DDD';
   rec('V7 re-asserting a FORGOTTEN doc does not version the husk', after === before, `${before}→${after}`);
 }
 
+// ── Red-team hardening (0034): MED-1 non-content fields · MED-2 entities · HIGH-1 prune · LOW-1 trigger ──
+
+// V8 (MED-1) — overwriting ONLY a non-content encrypted field (metadata) still versions,
+// and the full prior snapshot round-trips that field.
+{
+  const P = 'notes/med1.md';
+  await db.documents.upsert({ user_id: U, path: P, title: 'T', content: 'body', metadata: JSON.stringify({ sender: 'ORIGINAL-META-EEE' }) });
+  await db.documents.upsert({ user_id: U, path: P, title: 'T', content: 'body', metadata: JSON.stringify({ sender: 'POISONED-META' }) }); // content/title identical
+  const vers = await db.documents.listVersions(U, P);
+  rec('V8 metadata-only overwrite IS versioned (non-content field gap closed)', vers.length === 1, `n=${vers.length}`);
+  rec('V8 no metadata plaintext leaked at rest', !rawFileHasPlaintext('ORIGINAL-META-EEE'));
+  await db.documents.restoreVersion(U, P, vers[0].id);
+  const live = await db.documents.get(U, P);
+  rec('V8 restore brings back the prior metadata (full snapshot)', JSON.parse(live.metadata || '{}').sender === 'ORIGINAL-META-EEE', `meta=${live.metadata}`);
+}
+
+// V9 (HIGH-1) — keep-last-N prune bounds version growth under an overwrite loop.
+{
+  const P = 'notes/dos.md';
+  await db.documents.upsert({ user_id: U, path: P, title: 'X', content: 'v0' });
+  for (let i = 1; i <= 60; i++) await db.documents.upsert({ user_id: U, path: P, title: 'X', content: `v${i}-${i % 2}` }); // always changes
+  const raw = rawRead('SELECT id FROM document_versions WHERE path = ?', [P]);
+  rec('V9 unbounded-overwrite growth is BOUNDED (keep-last-50)', raw.length <= 50, `rows=${raw.length}`);
+}
+
+// V10 (MED-2) — remember(entity) overwrite captures the prior summary, encrypted + restorable.
+{
+  const ESUM1 = 'Met at the conference — ORIGINAL-ENTITY-SECRET-GGG';
+  const r1 = await db.entities.upsert({ userId: U, type: 'person', name: 'Dana', summary: ESUM1 });
+  const v0 = await db.entities.listVersions({ userId: U, entityId: r1.id });
+  rec('V10 entity create writes NO version', v0.length === 0, `n=${v0.length}`);
+  await db.entities.upsert({ userId: U, type: 'person', name: 'Dana', summary: 'POISONED entity summary', trigger: 'channel' });
+  const v1 = await db.entities.listVersions({ userId: U, entityId: r1.id });
+  rec('V10 entity overwrite captures the PRIOR summary', v1.length === 1 && v1[0].summary === ESUM1 && v1[0].trigger === 'channel', JSON.stringify({ n: v1.length, s: v1[0]?.summary?.slice(0, 16) }));
+  const rawe = rawRead('SELECT summary FROM entity_versions');
+  rec('V10 entity snapshot ENCRYPTED at rest + no plaintext in file', !!rawe[0]?.summary && rawe[0].summary !== ESUM1 && !rawFileHasPlaintext('ORIGINAL-ENTITY-SECRET-GGG'), `raw=${String(rawe[0]?.summary).slice(0, 20)}…`);
+  await db.entities.restoreVersion(U, v1[0].id);
+  const liveE = (await db.entities.list({ userId: U, type: 'person' })).find((e) => e.name === 'Dana');
+  rec('V10 entity restoreVersion round-trips the prior summary', liveE?.summary === ESUM1, `live=${liveE?.summary?.slice(0, 16)}`);
+}
+
+// V11 (LOW-1) — provenance honesty: with NO trigger supplied (the real saveDocument/remember
+// path), the version is stamped the default 'overwrite' (not a false 'channel'); an explicit
+// trigger is honored. Per-surface channel labeling is a documented follow-up.
+{
+  const P = 'notes/trigger.md';
+  await db.documents.upsert({ user_id: U, path: P, content: 'a' });
+  await db.documents.upsert({ user_id: U, path: P, content: 'b' }); // no opts → real default path
+  const vers = await db.documents.listVersions(U, P);
+  rec('V11 default trigger is honest "overwrite" (no false channel-provenance)', vers[0]?.trigger === 'overwrite', `trigger=${vers[0]?.trigger}`);
+}
+
 await close?.();
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
-console.log(`VERDICT: ${allPass ? 'GO — overwrite recoverability: prior captured · encrypted-at-rest · restore round-trips · no churn · husk-safe' : 'NO-GO — see FAIL rows'}`);
+console.log(`VERDICT: ${allPass ? 'GO — overwrite recoverability: prior captured · encrypted-at-rest · restore round-trips · no churn · husk-safe · all-fields (MED-1) · entities (MED-2) · growth-bounded (HIGH-1) · honest-trigger (LOW-1)' : 'NO-GO — see FAIL rows'}`);
 console.log('='.repeat(64));
 process.exit(allPass ? 0 : 1);

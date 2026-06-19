@@ -70,6 +70,35 @@ and make it restorable.
 (MCP tool + portal surface for browsing/restoring history = a follow-up; the security gate is
 "recoverable in-vault," which list+restore DAL methods satisfy and the gate proves.)
 
+## Post-build red-team hardening (migration 0034)
+
+A two-agent adversarial pass on the version layer (2026-06-19) + a security-surface study of
+opencode/OpenClaw/Hermes found four gaps; all fixed in `0034` + the DAL, gate `verify:write-recoverability`
+extended to V8–V11. The hook-bus (G1) × owner-write path was separately red-teamed → no regression
+(all invariants HOLD; hooks are a deny-only floor, never expand the grant).
+
+- **HIGH-1 — unbounded growth → storage-DoS.** An injection loop of alternating overwrites appended a
+  full snapshot each time with no cap → the recovery table became a DoS amplifier. FIX: keep-last-N=50
+  prune per (user,path)/(category,key)/(entity) after each capture (mirrors `activity-feed.prune`).
+  Gate V9 (60 overwrites → ≤50 rows). NB: a single turn is already bounded to 8 tool iterations +
+  a 3-repeat breaker (`harness.js:50-56`), so per-turn loop-DoS was already capped; this bounds growth
+  across turns.
+- **MED-1 — non-content fields unversioned.** Capture compared only content/title/summary, so an
+  overwrite of `tags/entities/relations/metadata/entity_summary/source_path` was lost. FIX: version on
+  ANY changed encrypted field + store the FULL prior field set in an encrypted `snapshot_json` blob;
+  `restoreVersion` restores from it. Gate V8.
+- **MED-2 — `remember(entity)` had no version capture.** `entities.upsert` overwrites summary/aliases
+  in place and is owner-channel-reachable. FIX: `entity_versions` table + capture in the UPDATE branch
+  + listVersions/restoreVersion + prune. Gate V10.
+- **LOW-1 — `trigger` provenance was a gate false-green.** The real `saveDocument`/`remember` path
+  never set `trigger`, so production always stamps `'overwrite'`; the gate asserted `'channel'` via a
+  direct call. FIX: gate now asserts the honest default (V11); per-surface channel labeling is a
+  documented follow-up (channel provenance already lives in `channel_write_audit`).
+
+Comparative note: our untrusted-envelope + per-boot loopback token + explicit-send chokepoint +
+identity grants are stronger than opencode/OpenClaw/Hermes for an injection-exposed channel agent.
+Worth borrowing later (MED, not blocking): a read-tool audit (we audit writes only).
+
 ### Gate — `scripts/verify-write-recoverability.mjs` (V-series, real booted vault)
 - V1 create ⇒ no version. V2 overwrite ⇒ prior captured. V3 snapshot ENCRYPTED at rest (rawRead =
   ciphertext, no plaintext substring). V4 restore round-trips prior content. V5 identical re-write ⇒
