@@ -617,30 +617,6 @@ export function createMessagesNamespace(deps) {
       };
     },
 
-    async selectByAgent(agentId, { offset = 0, limit = 50 } = {}) {
-      const userId = process.env.MYA_USER_ID;
-      // Alias-aware: 'personal-agent' includes 'mya-personal' rows so the
-      // portal "messages by agent" view shows the full historical roster
-      // (~38k pre-monorepo imports otherwise hidden).
-      const agentFilter = buildAgentIdFilter(agentId);
-      const where = agentFilter.sql
-        ? `WHERE ${agentFilter.sql} AND user_id = ? AND forgotten_at IS NULL`
-        : `WHERE user_id = ? AND forgotten_at IS NULL`;
-      const filterParams = [...agentFilter.params, userId];
-
-      const countResult = await d1Query(
-        `SELECT COUNT(*) as count FROM messages ${where}`,
-        filterParams,
-      );
-      const count = countResult.results?.[0]?.count || 0;
-
-      const result = await d1Query(
-        `SELECT id, role, content, created_at, metadata FROM messages ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-        [...filterParams, limit, offset],
-      );
-      return { data: result.results || [], count };
-    },
-
     async selectTimeline(userId, { limit = 50, before, since, afterId, scope } = {}) {
       // metadata is encrypted at rest and is NEVER projected to the UI — both
       // consumers (GET /messages and db.streams.feed) run rows through
@@ -716,36 +692,6 @@ export function createMessagesNamespace(deps) {
         [userId],
       );
       return (result.results || []).map((r) => r.agent_id);
-    },
-
-    /**
-     * Aggregate of every (source, agent_id) pair the user has ingested,
-     * with row count + date range + embedding coverage. Used by the
-     * `listDataSources` MCP tool so agents can introspect "what's
-     * actually in the vault" before claiming data is missing.
-     *
-     * source + agent_id + created_at + embedding_768 are NOT encrypted
-     * (per crypto-local.js plaintext field list), so the aggregate runs
-     * SQL-side with no decrypt cost.
-     *
-     * Returns rows pre-sorted by total count descending.
-     */
-    async listDataSources(userId) {
-      const result = await d1Query(
-        `SELECT
-           COALESCE(source, '(no source)')      AS source,
-           COALESCE(agent_id, '(no agent)')     AS agent_id,
-           COUNT(*)                             AS row_count,
-           MIN(created_at)                      AS oldest,
-           MAX(created_at)                      AS newest,
-           SUM(CASE WHEN embedding_768 IS NOT NULL THEN 1 ELSE 0 END) AS embedded
-         FROM messages
-         WHERE user_id = ? AND forgotten_at IS NULL
-         GROUP BY source, agent_id
-         ORDER BY row_count DESC`,
-        [userId],
-      );
-      return result.results || [];
     },
 
     async matchMessages(embedding, userId, count = 5) {

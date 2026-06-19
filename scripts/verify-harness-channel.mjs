@@ -26,6 +26,7 @@ applyMigrations(new Database(DB));
 const { db, close } = await boot({ dbPath: DB, kcvPath: KCV, userHex: crypto.randomBytes(32).toString('hex'), systemHex: crypto.randomBytes(32).toString('hex'), embedder: null });
 const U = 'local-user';
 const CONV = 'channel:telegram:777';
+try { await db.users.create(U, U); } catch { /* may already exist */ }
 
 const ledger = [];
 const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${d ? '\n      ' + d : ''}`); };
@@ -136,14 +137,32 @@ const OWNER_HDR = { 'x-mycelium-channel-turn-token': TURN_TOKEN };
   const et = lastOpts?.enabledTools || [];
   rec('C12 non-owner DM → reply-only (no write tools)', et.length === 1 && et[0] === 'reply', et.join(','));
 }
-// ── C13 SECURITY DEFAULT: owner-write DISABLED (default) → owner DM is reply-only+wrapped ──
+// ── C13 DEFAULT-ON: owner 1:1 DM + valid token, NO env/setting → WRITES (personal-agent default) ──
 {
-  delete process.env.MYCELIUM_CHANNEL_OWNER_WRITE;   // back to the safe default
-  await post({ userMessage: 'remember my dentist is on Tuesday', conversationId: CONV, source: 'telegram', group: false, senderRole: 'owner' });
+  delete process.env.MYCELIUM_CHANNEL_OWNER_WRITE;   // no operator override → use the default
+  await db.users.updateSettings(U, {});              // no channelWrite setting → default ON
+  nextResult = { text: 'done', toolsUsed: ['reply'] };
+  await post({ userMessage: 'remember my dentist is on Tuesday', conversationId: CONV, source: 'telegram', group: false, senderRole: 'owner' }, OWNER_HDR);
   const um = lastOpts?.userMessage || '';
   const et = lastOpts?.enabledTools || [];
-  rec('C13 owner DM, writes DISABLED (default) → reply-only', et.length === 1 && et[0] === 'reply', et.join(','));
-  rec('C13 owner DM, writes DISABLED → untrusted-wrapped (pre-W3 safe behavior)', /UNTRUSTED MESSAGE/.test(um));
+  rec('C13 owner DM, DEFAULT (no flag) + valid token → WRITES (default-on for personal agent)', et.includes('remember') && et.includes('saveDocument') && et.includes('reply'), et.join(','));
+  rec('C13 owner DM default-on → verbatim (not untrusted-wrapped)', um.includes('dentist') && !/UNTRUSTED MESSAGE/.test(um));
+}
+// ── C13b USER-DISABLE: settings.agent.channelWrite=false → reply-only even for owner + token ──
+{
+  await db.users.updateSettings(U, { agent: { channelWrite: false } });
+  await post({ userMessage: 'remember x', conversationId: CONV, source: 'telegram', group: false, senderRole: 'owner' }, OWNER_HDR);
+  const et = lastOpts?.enabledTools || [];
+  rec('C13b user disabled channelWrite → reply-only (owner can turn writes off in the Agents page)', et.length === 1 && et[0] === 'reply', et.join(','));
+  await db.users.updateSettings(U, {});   // reset to default
+}
+// ── C13c KILL-SWITCH: env=0 forces off even with token + owner + default setting ──
+{
+  process.env.MYCELIUM_CHANNEL_OWNER_WRITE = '0';
+  await post({ userMessage: 'remember x', conversationId: CONV, source: 'telegram', group: false, senderRole: 'owner' }, OWNER_HDR);
+  const et = lastOpts?.enabledTools || [];
+  rec('C13c env kill-switch (=0) → reply-only (operator hard override)', et.length === 1 && et[0] === 'reply', et.join(','));
+  delete process.env.MYCELIUM_CHANNEL_OWNER_WRITE;
 }
 // ── C14 RT1 CRITICAL: a forged owner claim WITHOUT the daemon token → reply-only ──
 {

@@ -46,6 +46,18 @@
 
 	// Spectrum → river filter. A canonical source key (or null = all).
 	let selectedSource = $state<string | null>(null);
+
+	// Search lives in the top bar now: a compact circle that expands to an input.
+	// The term is owned here and pushed into the river (which reloads, debounced).
+	let searchOpen = $state(false);
+	let searchQuery = $state('');
+	function toggleSearch() {
+		searchOpen = !searchOpen;
+		if (!searchOpen) searchQuery = '';
+	}
+	function closeSearch() { searchOpen = false; searchQuery = ''; }
+	// Focus the field the moment it appears (no a11y autofocus attribute warning).
+	function focusOnShow(node: HTMLInputElement) { node.focus(); }
 </script>
 
 <div class="streams">
@@ -59,6 +71,31 @@
 				onclick={() => select(f.id)}
 			>{f.label}</button>
 		{/each}
+		<!-- Search your streams — a circle that expands to an input on click. -->
+		<div class="search" class:open={searchOpen}>
+			<button
+				class="search-btn"
+				onclick={toggleSearch}
+				aria-label={searchOpen ? 'Close search' : 'Search your streams'}
+				aria-expanded={searchOpen}
+				title="Search your streams"
+			>
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+			</button>
+			{#if searchOpen}
+				<input
+					class="search-input"
+					placeholder="Search your streams…"
+					aria-label="Search streams"
+					bind:value={searchQuery}
+					use:focusOnShow
+					onkeydown={(e) => { if (e.key === 'Escape') closeSearch(); }}
+				/>
+				{#if searchQuery}
+					<button class="search-x" onclick={() => (searchQuery = '')} aria-label="Clear search">✕</button>
+				{/if}
+			{/if}
+		</div>
 		<button
 			class="seg-btn manage"
 			class:active={sourcesOpen}
@@ -77,11 +114,8 @@
 	<div class="facet-body">
 		{#if visited.stream || underlying === 'stream' || sourcesOpen}
 			<div class="facet stream-facet" class:hidden={underlying !== 'stream'}>
-				<div class="spectrum-wrap">
-					<SourceHistory selected={selectedSource} onSelect={(s) => (selectedSource = s)} />
-				</div>
 				<div class="river-wrap">
-					<StreamRiver externalSource={selectedSource} />
+					<StreamRiver externalSource={selectedSource} query={searchQuery} header={graphHeader} />
 				</div>
 			</div>
 		{/if}
@@ -90,6 +124,12 @@
 		{/if}
 	</div>
 </div>
+
+<!-- The history graph is handed to the river as its scroll-top header, so it
+     moves up with the feed instead of pinning a fixed band above it. -->
+{#snippet graphHeader()}
+	<SourceHistory selected={selectedSource} onSelect={(s) => (selectedSource = s)} />
+{/snippet}
 
 <Drawer open={sourcesOpen} onClose={closeSources} title="Manage sources">
 	<ImportView />
@@ -109,21 +149,46 @@
 	}
 	.seg-btn:hover { color: var(--color-text-primary); background: var(--color-elevated); }
 	.seg-btn.active { color: var(--color-text-primary); background: rgb(var(--color-accent-rgb) / 0.12); }
-	/* "Manage sources" is pushed to the right edge of the seg bar; it opens the
-	   Sources drawer (not a co-equal tab). */
-	.seg-btn.manage { margin-left: auto; color: var(--color-text-tertiary); }
+	/* "Manage sources" sits at the right edge of the seg bar (after search); it
+	   opens the Sources drawer (not a co-equal tab). */
+	.seg-btn.manage { color: var(--color-text-tertiary); }
 	.seg-btn.manage:hover { color: var(--color-text-primary); }
 	.seg-btn.manage .ico { width: 14px; height: 14px; }
+
+	/* Search — a circle that expands to an input. It owns the right-edge push, so
+	   it + "Manage sources" cluster at the far right of the bar. */
+	.search { display: inline-flex; align-items: center; margin-left: auto; }
+	.search.open {
+		background: var(--color-surface); border: 1px solid var(--color-border);
+		border-radius: 999px; padding-right: 4px;
+	}
+	.search-btn {
+		display: inline-flex; align-items: center; justify-content: center;
+		width: 30px; height: 30px; border-radius: 999px; cursor: pointer;
+		background: none; border: 1px solid transparent; color: var(--color-text-tertiary);
+		transition: color var(--duration-fast) var(--ease-out), background var(--duration-fast) var(--ease-out);
+	}
+	.search:not(.open) .search-btn { border-color: var(--color-border); }
+	.search:not(.open) .search-btn:hover { color: var(--color-text-primary); background: var(--color-elevated); }
+	.search.open .search-btn { color: var(--color-text-tertiary); }
+	.search-btn svg { width: 15px; height: 15px; }
+	.search-input {
+		width: 180px; max-width: 42vw; background: none; border: none; outline: none;
+		font-size: 0.8rem; color: var(--color-text-primary); padding: 0 2px;
+	}
+	.search-input::placeholder { color: var(--color-text-tertiary); }
+	.search-x {
+		display: inline-flex; align-items: center; background: none; border: none; cursor: pointer;
+		color: var(--color-text-tertiary); padding: 0 4px; font-size: 0.8rem;
+	}
+	.search-x:hover { color: var(--color-text-primary); }
 
 	.facet-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 	.facet { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 	.facet.hidden { display: none; }
 
-	/* Stream facet = source history graph (hero) above the river (flex-1). */
+	/* Stream facet = the river, which now carries the history graph as its own
+	   scroll-top header (so the graph scrolls away as you read down). */
 	.stream-facet { gap: 0; }
-	.spectrum-wrap {
-		flex-shrink: 0; padding: 14px 16px 12px; max-height: 46%; overflow-y: auto;
-		border-bottom: 1px solid var(--color-border); background: var(--color-bg);
-	}
 	.river-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 </style>

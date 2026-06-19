@@ -9,7 +9,8 @@ function getInitialTheme(): Theme {
 	if (!browser) return 'dark';
 	const stored = localStorage.getItem(STORAGE_KEY);
 	if (stored === 'light' || stored === 'dark') return stored;
-	if (window.matchMedia('(prefers-color-scheme: light)').matches) return 'light';
+	// Dark on first load by default (brand is the dark, starry surface). The OS
+	// preference is intentionally NOT consulted — a remembered toggle still wins.
 	return 'dark';
 }
 

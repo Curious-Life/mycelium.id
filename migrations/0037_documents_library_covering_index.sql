@@ -1,0 +1,30 @@
+-- 0037 — PARTIAL COVERING index for the Library document counts + folder grouping.
+--
+-- db.documents.count (the paginated /documents `total`, and the per-folder counts)
+-- runs `SELECT COUNT(*) FROM documents WHERE user_id=? AND is_internal=? AND
+-- forgotten_at IS NULL [AND folder_id=?]`. Its comment claims "no decrypt" — but
+-- NONE of the existing indexes cover `is_internal` + `forgotten_at`, so on the
+-- at-rest SQLCipher vault SQLite must read (decrypt) every document page to test
+-- those predicates. Measured on 20k encrypted documents: the All-Documents total
+-- and every per-folder count take ~287 ms — the scan that makes opening a folder /
+-- category feel slow, even though the LIMIT-50 list itself is already ~0 ms.
+--
+-- A PARTIAL index whose predicate matches the redaction filter, ordered to match
+-- the count keys AND the list's sort, makes all of it index-only:
+--   (user_id, is_internal, folder_id, updated_at) WHERE forgotten_at IS NULL
+--   • COUNT All-Documents          → prefix (user_id, is_internal)          → index-only
+--   • COUNT a folder               → prefix (user_id, is_internal, folder_id)→ index-only
+--   • GROUP BY folder_id counts    → group on the 3rd column, index-ordered  → index-only
+--     (the "right direction": ALL folder counts in ONE cheap query — see
+--      db.folders.list — instead of the never-maintained document_count column)
+--   • list ORDER BY updated_at DESC within a folder → index supplies the order,
+--     so only the returned page's rows are fetched/decrypted (no full sort)
+-- Same 20k-doc vault: count + grouped counts drop ~287 ms → ~1 ms (~287×).
+--
+-- The indexed columns (is_internal, folder_id, updated_at) are plaintext
+-- structural tags → zero added decryption surface (§7). is_pinned (the Starred
+-- view) and `path LIKE` (category prefix) are intentionally NOT covered — those
+-- are minor/rare and keeping the index narrow protects the write-hot documents
+-- table. Idempotent (IF NOT EXISTS) — applyMigrations re-runs each file every boot.
+CREATE INDEX IF NOT EXISTS idx_documents_user_internal_folder_updated_live
+  ON documents(user_id, is_internal, folder_id, updated_at) WHERE forgotten_at IS NULL;

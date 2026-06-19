@@ -16,7 +16,7 @@
 import express from 'express';
 import { createAgentHarness, describeProvider } from './agent/harness.js';
 import { createAgentLoop } from './agent/loop.js';
-import { toolsForDomains, normalizePolicy, defaultPolicy, DOMAINS } from './agent/tool-domains.js';
+import { toolsForDomains, normalizePolicy, defaultPolicy, DOMAINS, ALL_SCOPES } from './agent/tool-domains.js';
 import { resolveInferenceConfigForTask } from './inference/resolve.js';
 import { resolveModelProfile } from './inference/model-profile.js';
 import { planGeneration, estimateTokens, trimToTokenBudget } from './inference/token-budget.js';
@@ -76,8 +76,12 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       const a = (await db.users?.getSettings?.(userId))?.agent || {};
       const name = (typeof a.name === 'string' && a.name.trim()) ? a.name.trim() : DEFAULT_AGENT_NAME;
       const personality = PERSONALITIES.includes(a.personality) ? a.personality : 'friendly';
-      return { name, personality };
-    } catch { return { name: DEFAULT_AGENT_NAME, personality: 'friendly' }; }
+      // Channel writes are ON by default for the personal agent (the per-agent toggle in
+      // the Agents page; mirrors resolve-grant.ownerWriteEnabled — undefined ⇒ on).
+      const channelWrite = a.channelWrite !== false;
+      const scopes = Array.isArray(a.scopes) && a.scopes.length ? a.scopes.filter((s) => ALL_SCOPES.includes(s)) : [...ALL_SCOPES];
+      return { name, personality, channelWrite, scopes };
+    } catch { return { name: DEFAULT_AGENT_NAME, personality: 'friendly', channelWrite: true, scopes: [...ALL_SCOPES] }; }
   }
 
   // ── GET /agents — single synthetic agent so the UI's picker + per-agent
@@ -89,21 +93,31 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     res.json({ agents: [{ id: 'personal-agent', name, color: 'amethyst', role: 'Your vault', status: 'online' }] });
   });
 
-  // ── GET/PUT /agent-identity — the assistant's name + personality (spec #4).
-  //    Set in onboarding, changeable here; non-secret → plain user settings.
+  // ── GET/PUT /agent-identity — the assistant's name + personality + capability scopes +
+  //    the channel-write toggle (spec #4 + Agents page). Non-secret → plain user settings.
+  //    PUT MERGES into the existing agent settings (a partial update of one field must not
+  //    wipe the others — e.g. toggling channelWrite must keep name/scopes).
   router.get('/agent-identity', async (req, res) => {
     if (!auth(req, res)) return;
-    res.json({ ...(await readAgentIdentity()), personalities: PERSONALITIES });
+    res.json({ ...(await readAgentIdentity()), personalities: PERSONALITIES, allScopes: [...ALL_SCOPES] });
   });
   router.put('/agent-identity', async (req, res) => {
     if (!auth(req, res)) return;
     try {
-      const name = String(req.body?.name || '').trim().slice(0, 40) || DEFAULT_AGENT_NAME;
-      const personality = PERSONALITIES.includes(req.body?.personality) ? req.body.personality : 'friendly';
       try { await db.users.create(userId, userId); } catch { /* row already exists */ }
       const s = (await db.users.getSettings(userId)) || {};
-      await db.users.updateSettings(userId, { ...s, agent: { name, personality } });
-      res.json({ ok: true, name, personality });
+      const agent = { ...(s.agent || {}) };
+      if (req.body?.name !== undefined) agent.name = String(req.body.name || '').trim().slice(0, 40) || DEFAULT_AGENT_NAME;
+      if (req.body?.personality !== undefined) agent.personality = PERSONALITIES.includes(req.body.personality) ? req.body.personality : 'friendly';
+      if (typeof req.body?.channelWrite === 'boolean') agent.channelWrite = req.body.channelWrite;
+      if (Array.isArray(req.body?.scopes)) {
+        const sc = req.body.scopes.filter((x) => ALL_SCOPES.includes(x));
+        agent.scopes = sc.length ? sc : [...ALL_SCOPES];   // never empty — full access is the floor
+      }
+      if (agent.name === undefined) agent.name = DEFAULT_AGENT_NAME;
+      if (agent.personality === undefined) agent.personality = 'friendly';
+      await db.users.updateSettings(userId, { ...s, agent });
+      res.json({ ok: true, name: agent.name, personality: agent.personality, channelWrite: agent.channelWrite !== false, scopes: Array.isArray(agent.scopes) ? agent.scopes : [...ALL_SCOPES] });
     } catch { res.status(500).json({ error: 'Could not save agent identity' }); }
   });
 
@@ -197,7 +211,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     // The loop owns the watchdog now; these let it keep the live row honest. finishJob
     // nulls chatJob so a stall (or a hung upstream fetch that never settles) clears the
     // phantom "Thinking…" immediately, and a later heartbeat can't re-touch it.
-    const finishJob = () => { if (chatJob) { const j = chatJob; chatJob = null; db.activityFeed?.finish?.(j).catch(() => {}); } };
+    const finishJob = (status = 'done') => { if (chatJob) { const j = chatJob; chatJob = null; db.activityFeed?.finish?.(j, { status }).catch(() => {}); } };
     const heartbeatJob = () => { if (chatJob) db.activityFeed?.heartbeat?.(chatJob).catch(() => {}); };
     // External (client-gone) signal: on disconnect, abort the in-flight turn and
     // clear the live row immediately — nobody is waiting (the server turn may keep
@@ -303,7 +317,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
         provider, system, userMessage: message, tools: isLocal ? [] : grantedTools, call,
         send, maxTokens: plan?.maxTokens, numCtx: plan?.numCtx,
         ttfbMs: TTFB_MS, idleMs: IDLE_MS, maxRetries: MAX_RETRIES,
-        signal: clientGoneCtrl.signal, onStall: finishJob, onHeartbeat: heartbeatJob,
+        signal: clientGoneCtrl.signal, onStall: () => finishJob(), onHeartbeat: heartbeatJob,
       });
       const assistantText = result.text;
 
@@ -336,12 +350,14 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
           else if (st === 404 || st === 400) msg = `${who} didn’t recognise the model “${info.model}”. Pick a valid model in Settings → Intelligence.`;
           else if (st === 429) msg = `${who} is rate-limited right now. Wait a moment or switch model in Settings → Intelligence.`;
           else if (st >= 500) msg = `${who} had a server error. Try again, or switch model in Settings → Intelligence.`;
+          finishJob('error');   // surface as a red blip in the header activity feed
           send({ type: 'error', message: msg });
           send({ type: 'done', toolsUsed: [] });
         }
       }
     } catch (err) {
       console.error('[chat] turn failed:', err?.message);
+      finishJob('error');   // red blip in the header activity feed (status only, §1)
       if (!res.headersSent) { res.status(500).json({ error: 'Chat failed' }); return; }
       send({ type: 'error', message: 'Chat failed' });   // never echo err.message (§1)
       send({ type: 'done', toolsUsed: [] });
