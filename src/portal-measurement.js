@@ -2,6 +2,7 @@ import express from 'express';
 import { CONTRACTS } from './metrics/contracts.js';
 import { METRIC_COLUMNS, _internal as metricsInternal } from './db/metrics.js';
 import { computeFreshness, FAMILY_STAGE } from './metrics/freshness.js';
+import { baselineZ } from './metrics/baseline-z.js';
 import { getTerritoryRiverCached } from './territory-river-cache.js';
 
 // Lempel-Ziv (1976) complexity of a symbol sequence (Kaspar-Schuster). Used for
@@ -305,6 +306,21 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
       } : null;
 
       const lastDisp = last.fisher_displacement != null ? Number(last.fisher_displacement) / Math.PI : null;
+
+      // ── Baseline-relative z — the HONEST headline: "is the latest week unusual for ME".
+      // Computed over the WHOLE run series (`all`, chronological, single clustering_run_id —
+      // so the trailing window cannot straddle a run boundary), not the period slice: the
+      // headline is always "latest window vs my own trailing normal". The pooled-null
+      // `avg_velocity_z` stays the CONFIDENCE GATE ("is it even above measurement noise");
+      // the baseline-z is the SIZE-FOR-ME number the copy promises. Degenerate (near-constant)
+      // baselines fail closed inside baselineZ() — never a fabricated σ.
+      const confVel = all.filter((r) => !r.low_confidence && r.fisher_velocity != null)
+        .map((r) => Number(r.fisher_velocity));
+      const confEnt = all.filter((r) => !r.low_confidence && r.activation_entropy != null)
+        .map((r) => Number(r.activation_entropy));
+      const velBz = baselineZ(confVel);
+      const entBz = baselineZ(confEnt);
+
       res.set('Cache-Control', 'no-store');
       res.json({
         summary: {
@@ -317,6 +333,12 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
           exploration_ratio: ratio,
           R_recent: last.R_recent != null ? last.R_recent : null,
           avg_velocity, avg_velocity_z, peak_velocity,
+          // Headline (size-for-me) + its low-confidence fail-closed flags.
+          velocity_baseline_z: velBz.z,
+          velocity_baseline_low_confidence: velBz.lowConfidence,
+          velocity_baseline_reason: velBz.reason,
+          entropy_baseline_z: entBz.z,
+          entropy_baseline_low_confidence: entBz.lowConfidence,
           top_movers: Array.isArray(last.top_contributors) ? last.top_contributors : [],
           window_count: rows.length,
         },
