@@ -15,7 +15,7 @@
  * refactor (zero MCP calls in 7d for personal-agent).
  *
  * @typedef {object} MessagesDeps
- * @property {object} db — needs messages.{selectPaginated, listDataSources}
+ * @property {object} db — needs messages.selectPaginated
  * @property {string} userId
  * @property {Record<string,string>} agentLabels — for rendering role labels
  * @property {() => boolean} isScoped — true when MEMORY_SCOPE === 'company'

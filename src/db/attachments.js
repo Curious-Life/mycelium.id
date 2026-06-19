@@ -1,9 +1,9 @@
 /**
  * Attachments namespace — file uploads (R2 + Stream) metadata.
  *
- * listByUser / countByUser share filter logic: `type='file'` expands
- * to file/text/pdf/document; `onlyTypes` is an additional IN filter;
- * `search` does LIKE over file_name + description.
+ * listByUser filter logic: `type='file'` expands to file/text/pdf/document;
+ * `onlyTypes` is an additional IN filter; `search` does LIKE over file_name +
+ * description.
  *
  * SECURITY: delete() requires user_id in WHERE. insert() writes
  * arbitrary-key records (caller-controlled columns). update() allows
@@ -92,16 +92,6 @@ export function createAttachmentsNamespace(deps) {
         params,
       );
       return result.results || [];
-    },
-
-    async countByUser(userId, opts = {}) {
-      const { where, filterParams } = buildFilters(opts);
-      const params = [userId, ...filterParams];
-      const result = await d1Query(
-        `SELECT COUNT(*) as count FROM attachments WHERE ${where}`,
-        params,
-      );
-      return firstRow(result)?.count || 0;
     },
 
     async update(id, fields) {
