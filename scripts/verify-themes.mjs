@@ -99,13 +99,16 @@ try {
     `name=${th7?.name} arc=${(th7?.story_arc || '').slice(0, 24)}…`);
   close();
 
-  // ── T7: ciphertext at rest ──
+  // ── T7: SQLCipher collapse (Stage B/C cut 1) — semantic_themes narrative is now
+  // PLAINTEXT-inside-cipher. At-rest confidentiality is whole-file SQLCipher
+  // (gated by verify:at-rest), not this per-field envelope. Assert the stop-write
+  // worked: the narrative is stored as readable plaintext (was an envelope before). ──
   const rawDb = new Database(DB, { readonly: true });
   const rawTh = rawDb.prepare(`SELECT name, story_arc FROM semantic_themes WHERE semantic_theme_id=5`).get();
   rawDb.close();
-  rec('T7. theme name + story ciphertext at rest (no plaintext narrative leak)',
-    typeof rawTh?.name === 'string' && !rawTh.name.includes('Synthesized') && typeof rawTh?.story_arc === 'string' && !rawTh.story_arc.includes('cohered'),
-    `nameLen=${rawTh?.name?.length}`);
+  rec('T7. theme name + story stored PLAINTEXT-in-cipher (collapse: narrative no longer field-encrypted)',
+    !!rawTh?.name?.includes('Synthesized') && !!rawTh?.story_arc?.includes('cohered'),
+    `name=${rawTh?.name}`);
 } catch (e) {
   rec('FATAL', false, e.stack || e.message);
   try { close(); } catch {}

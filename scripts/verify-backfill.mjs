@@ -19,6 +19,7 @@ import crypto from 'node:crypto';
 import { encrypt, importMasterKey } from '../src/crypto/crypto-local.js';
 import { encryptVector, decryptVector } from '../src/search/ann/decode.js';
 import { backfillColumn, countRemainingEnvelopes } from '../src/account/backfill.js';
+import { expandBackfillTargets } from '../src/portal-mindscape.js';
 
 const DB_KEY = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
 const ledger = [];
@@ -90,6 +91,30 @@ async function main() {
   const an = await backfillColumn(db._sqlite ?? db, { table: 'anchors', column: 'vec', codec: { kind: 'vector', dim: DIM }, masterKey, pk: 'rowid', batch: 2 });
   rec('7a composite-PK table backfills via rowid (3 converted across pages)', an.converted === 3 && an.failed === 0, `converted=${an.converted} scanned=${an.scanned} failed=${an.failed}`);
   rec('7b composite-PK table: 0 envelopes remain', countRemainingEnvelopes(db._sqlite ?? db, 'anchors', 'vec') === 0);
+
+  // ── multi-column target expansion (Stage B/C cut 1): a named allowlist target
+  // with a `columns` array expands to one job spec per column; an unknown name
+  // rejects the WHOLE request (fail-closed); columns come from the allowlist, never
+  // the request body; a per-target pk threads through. A dropped column would
+  // silently skip a backfill — so this is gated, not assumed. ──
+  const TT = {
+    multi: { table: 'docs', columns: ['a', 'b', 'c'], codec: { kind: 'content' } },
+    single: { table: 'vecs', column: 'v', codec: { kind: 'vector', dim: 4 } },
+    withpk: { table: 'an', columns: ['x'], codec: { kind: 'content' }, pk: 'rowid' },
+  };
+  const e1 = expandBackfillTargets(['multi'], TT);
+  rec('8a multi-column target → one spec per column (order preserved)',
+    e1.ok && e1.columns.length === 3 && e1.columns.map((c) => c.column).join(',') === 'a,b,c'
+      && e1.columns.every((c) => c.table === 'docs' && c.codec.kind === 'content'));
+  const e2 = expandBackfillTargets(['single'], TT);
+  rec('8b single-column target still resolves', e2.ok && e2.columns.length === 1 && e2.columns[0].column === 'v');
+  rec('8c unknown name rejects the WHOLE request (fail-closed)', (() => { const r = expandBackfillTargets(['multi', 'nope'], TT); return !r.ok && r.columns.length === 0; })());
+  rec('8d empty/absent targets rejected', !expandBackfillTargets([], TT).ok && !expandBackfillTargets(undefined, TT).ok);
+  rec('8e per-target pk threads through expansion', expandBackfillTargets(['withpk'], TT).columns[0].pk === 'rowid');
+  const real = expandBackfillTargets(['content.documents']); // default allowlist
+  rec('8f real allowlist content.documents → title/summary/metadata (content codec)',
+    real.ok && real.columns.length === 3 && real.columns.map((c) => c.column).join(',') === 'title,summary,metadata'
+      && real.columns.every((c) => c.table === 'documents' && c.codec.kind === 'content'));
 
   db.close();
   rec('6 vault file is ciphertext at rest (no SQLite magic header)', !header16(dbPath).equals(magic));

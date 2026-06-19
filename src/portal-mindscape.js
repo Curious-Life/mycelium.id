@@ -27,7 +27,60 @@ const BACKFILL_TARGETS = {
   // NOTE: person_claims.embedding_768 is intentionally OMITTED — its writer is
   // caller-supplied and the column is reserved/NULL today (src/claims/discovery.js);
   // migrating it without a flipped writer or active consumer adds risk for no gain.
+
+  // ── Stage B/C cut 1: hot-path CONTENT (documents list-cols + mindscape
+  // narrative). All stopped in crypto-local.js ENCRYPTED_FIELDS (now plaintext-
+  // inside-cipher); these named targets backfill the existing envelope rows so the
+  // per-row decrypt disappears. A target may name MULTIPLE `columns` (same codec) —
+  // expanded server-side into per-column jobs by expandBackfillTargets(); the NAME
+  // still gates (fail-closed), columns are server-defined (never client-supplied).
+  'content.documents': { table: 'documents', columns: ['title', 'summary', 'metadata'], codec: { kind: 'content' } },
+  'content.territory_profiles_narrative': {
+    table: 'territory_profiles',
+    columns: ['title', 'essence', 'story_birth', 'story_arc', 'story_peak_moments', 'story_current_chapter',
+      'uncertainty_open_questions', 'agent_expertise', 'agent_curious_about', 'name', 'archetype_character',
+      'top_entities', 'signature_patterns', 'agent_can_help_with', 'agent_would_consult', 'raw_response',
+      'moments_of_interest', 'activity_timeline', 'chronicle', 'chronicle_cursor', 'anchored_reason',
+      'description', 'description_version'],
+    codec: { kind: 'content' },
+  },
+  'content.realms': {
+    table: 'realms',
+    columns: ['name', 'description', 'essence', 'archetype_character', 'top_entities', 'signature_patterns',
+      'story_birth', 'story_arc', 'story_peak_moments', 'story_current_chapter', 'uncertainty_open_questions',
+      'uncertainty_edges', 'agent_expertise', 'agent_curious_about', 'agent_can_help_with', 'activity_timeline'],
+    codec: { kind: 'content' },
+  },
+  'content.semantic_themes': {
+    table: 'semantic_themes',
+    columns: ['label', 'keywords', 'description', 'name', 'essence', 'top_entities', 'signature_patterns',
+      'story_birth', 'story_arc', 'story_current_chapter', 'uncertainty_open_questions', 'raw_response'],
+    codec: { kind: 'content' },
+  },
+  'content.theme_cards': { table: 'theme_cards', columns: ['title', 'description', 'content', 'metadata'], codec: { kind: 'content' } },
 };
+
+/**
+ * Resolve client-requested backfill target NAMES against the server allowlist,
+ * expanding any multi-`columns` entry into per-column job specs. Fail-closed: an
+ * unknown name yields `{ ok: false }` and NO columns (the whole request is
+ * rejected). Columns are always server-defined (from BACKFILL_TARGETS) — never
+ * taken from the request body.
+ * @param {string[]} names
+ * @param {Record<string, object>} [targets]
+ * @returns {{ ok: boolean, columns: Array<{table:string, column:string, codec:object, pk?:string}> }}
+ */
+export function expandBackfillTargets(names, targets = BACKFILL_TARGETS) {
+  if (!Array.isArray(names) || names.length === 0) return { ok: false, columns: [] };
+  const columns = [];
+  for (const n of names) {
+    const t = targets[n];
+    if (!t) return { ok: false, columns: [] }; // unknown name → reject the whole request
+    const cols = Array.isArray(t.columns) ? t.columns : [t.column];
+    for (const column of cols) columns.push({ table: t.table, column, codec: t.codec, ...(t.pk ? { pk: t.pk } : {}) });
+  }
+  return { ok: columns.length > 0, columns };
+}
 
 /**
  * portalMindscapeRouter — the V1 read surface for the canonical portal's
@@ -391,8 +444,8 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
     if (!isTrustedLoopback(req)) return fail(res, 403, 'backfill is local-only');
     if (req.body?.confirm !== true) return fail(res, 400, 'confirm:true required');
     const names = Array.isArray(req.body?.targets) ? req.body.targets : [];
-    const columns = names.map((n) => BACKFILL_TARGETS[n]).filter(Boolean);
-    if (!columns.length || columns.length !== names.length) return fail(res, 400, 'unknown or empty targets');
+    const { ok, columns } = expandBackfillTargets(names);
+    if (!ok) return fail(res, 400, 'unknown or empty targets');
     try {
       res.json(startBackfillJob({ db, dbPath, columns }));
     } catch {

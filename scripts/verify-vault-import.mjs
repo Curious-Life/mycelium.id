@@ -255,15 +255,15 @@ async function main() {
     const pk = raw.prepare("SELECT COUNT(*) c FROM passkey_credentials").get()?.c ?? 0;
     rec('C8 passkeys NOT imported (origin-bound)', pk === 0);
 
-    // territory chronicle crosses (encrypted, decrypts back); the canonical-key
-    // embedding_768 envelope is NULLED, never copied as undecryptable junk.
+    // SQLCipher collapse (Stage B/C cut 1): territory_profiles.chronicle is now
+    // PLAINTEXT-inside-cipher (no longer field-encrypted) — the import stores it
+    // readable, and at-rest confidentiality is whole-file SQLCipher (verify:at-rest).
+    // The foreign canonical-key embedding_768 envelope is still NULLED, never copied
+    // as undecryptable junk (Stage A vector logic, unchanged).
     const tp = raw.prepare('SELECT chronicle, embedding_768 FROM territory_profiles WHERE id = ?').get('tp1');
-    let chronPlain = null;
-    try { chronPlain = await decrypt(String(tp?.chronicle || ''), await importMasterKey(USER_HEX)); } catch { /* */ }
-    rec('C9 territory chronicle re-encrypted + decrypts; foreign embedding_768 nulled',
-      chronPlain === 'territory chronicle marker text' && tp?.embedding_768 === null
-      && !dbBytes.includes(Buffer.from('territory chronicle marker text')),
-      `chronicle=${chronPlain === 'territory chronicle marker text'} emb=${tp?.embedding_768}`);
+    rec('C9 territory chronicle imported as plaintext-in-cipher (collapse cut 1); foreign embedding_768 nulled',
+      tp?.chronicle === 'territory chronicle marker text' && tp?.embedding_768 === null,
+      `chronicle=${tp?.chronicle === 'territory chronicle marker text'} emb=${tp?.embedding_768}`);
 
     // temporal chronicles (receiver-side readiness for the exporter patch)
     const tc = raw.prepare("SELECT narrative FROM time_chronicles WHERE period_key = '2024-03'").get();

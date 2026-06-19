@@ -87,16 +87,18 @@ rec('R5. prune: ghost realm 99 detected + deleted; live realms 0 and 5 kept',
   && after.length === 2 && Number(after[0].realm_id) === 0 && Number(after[1].realm_id) === 5,
   `stale=[${stale.map((r) => r.realm_id)}] after=[${after.map((r) => r.realm_id)}]`);
 
-// ── R6: counts are PLAINTEXT at rest (search SQL-sorts on message_count —
-//    realms name/essence stay encrypted, counters must not be envelopes). ──
+// ── R6: counts are PLAINTEXT at rest (search SQL-sorts on message_count).
+//    SQLCipher collapse (Stage B/C cut 1): realms.name is now PLAINTEXT-in-cipher,
+//    so the clobber-guard check is now STRONGER — assert the seeded name survived
+//    verbatim (was only assertable as "ciphertext doesn't leak" when encrypted). ──
 close2();
 const raw = new Database(DB, { readonly: true });
 const rawRow = raw.prepare('SELECT name, territory_count, message_count FROM realms WHERE realm_id = 0').get();
 raw.close();
-rec('R6. territory_count/message_count plaintext integers; name still ciphertext at rest (clobber guard preserved the seeded name)',
+rec('R6. territory_count/message_count plaintext integers; name PLAINTEXT-in-cipher, seed preserved (clobber guard)',
   Number(rawRow?.territory_count) === 2 && Number(rawRow?.message_count) === 3
-  && typeof rawRow?.name === 'string' && !rawRow.name.includes('Realm') && !rawRow.name.includes('Old Name'),
-  `tc=${rawRow?.territory_count} mc=${rawRow?.message_count}`);
+  && rawRow?.name === 'Old Name',
+  `tc=${rawRow?.territory_count} mc=${rawRow?.message_count} name=${rawRow?.name}`);
 
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 const allPass = ledger.every(Boolean);

@@ -132,15 +132,17 @@ async function main() {
       && Number(realmCount?.n) === 1,
       `r8=${JSON.stringify(r8)} arc=${(grove?.story_arc || '').slice(0, 24)}…`);
 
-    // ── C9 security: realm raw_response stays NULL (not in ENCRYPTED_FIELDS.realms —
-    //    storing raw model narrative there would be plaintext at rest), and the
-    //    encrypted realm story is ciphertext at rest. ──
+    // ── C9 security: realm raw_response stays NULL (the chronicle generator never
+    //    persists the raw model response). SQLCipher collapse (Stage B/C cut 1):
+    //    realms.story_birth is now PLAINTEXT-inside-cipher — at-rest confidentiality
+    //    is whole-file SQLCipher (verify:at-rest), not a per-field envelope. Assert
+    //    the stop-write worked (story stored readable) + generation_version gate key. ──
     const rawDb = new Database(DB, { readonly: true });
     const rawRealm = rawDb.prepare(`SELECT raw_response, story_birth, generation_version FROM realms WHERE realm_id = 0`).get();
     rawDb.close();
-    rec('C9. realms.raw_response NULL; story_birth ciphertext at rest; generation_version plaintext gate key',
+    rec('C9. realms.raw_response NULL; story_birth PLAINTEXT-in-cipher (collapse cut 1); generation_version plaintext gate key',
       rawRealm?.raw_response == null && typeof rawRealm?.story_birth === 'string'
-      && !rawRealm.story_birth.includes('question') && rawRealm?.generation_version === 'chronicle-v1',
+      && rawRealm.story_birth.includes('question') && rawRealm?.generation_version === 'chronicle-v1',
       `raw=${rawRealm?.raw_response} ver=${rawRealm?.generation_version}`);
   } finally {
     close();

@@ -268,10 +268,14 @@ const ENCRYPTED_FIELDS = {
   // queries need it — but this IS a known inversion risk if attacker
   // knows a corpus of possible documents. Source_path reveals document
   // origin; encrypt.
+  // SQLCipher collapse (Stage B/C cut 1): title/summary/metadata are now
+  // plaintext-inside-cipher so the Library list + river previews read them with
+  // NO per-row decrypt. content + tags/entities/relations/entity_summary/
+  // source_path follow in the bulk content cut. Old envelope rows still decrypt
+  // on read (isEncrypted is value-shape-driven) until the backfill converts them.
   documents: [
-    'content', 'summary', 'title', 'tags', 'entities', 'relations',
-    'metadata', 'entity_summary',
-    'source_path',
+    'content', 'tags', 'entities', 'relations',
+    'entity_summary', 'source_path',
   ],
 
   // Facts — typed durable truths (category/key -> value). Only `value` is
@@ -366,49 +370,34 @@ const ENCRYPTED_FIELDS = {
   // Note links — relationship descriptions between notes
   note_links: ['description', 'metadata'],
 
-  // Territory profiles — narrative about user's mind. Historically we
-  // only encrypted the story_* + agent_* fields; expanding to cover
-  // everything that describes the territory. archetype_character was
-  // plaintext and leaked verbatim descriptions; top_entities was a
-  // plaintext JSON array of people names. Both closed here.
+  // Territory profiles — SQLCipher collapse (Stage B/C cut 1): the NARRATIVE
+  // columns (title/essence/story_*/agent_*/name/archetype_character/top_entities/
+  // signature_patterns/raw_response/moments_of_interest/activity_timeline/
+  // chronicle*/anchored_reason/description/description_version) are now
+  // plaintext-inside-cipher — Mindscape reads them with NO per-row decrypt. All
+  // writers route through the JS adapter (mindscape.js / describe-clusters.js /
+  // cluster.py via d1_batch_encrypted), so dropping them here stops every write.
+  // Old envelope rows still decrypt on read until the backfill converts them.
+  //
+  // The cognitive SCALARS + centroids stay encrypted until cut 2 — they pair with
+  // the topology.js / territory-docs.js decrypt-then-JS-sort → SQL restore and
+  // their dedicated gates (verify:territory-scalars-encryption, :centroid-
+  // encryption). message_count stays PLAINTEXT (count + ranking key);
+  // current_phase/growth_state are enum labels, also plaintext.
   territory_profiles: [
-    // already-encrypted
-    'title', 'essence',
-    'story_birth', 'story_arc', 'story_peak_moments', 'story_current_chapter',
-    'uncertainty_open_questions', 'agent_expertise', 'agent_curious_about',
-    // newly encrypted (was plaintext)
-    'name', 'archetype_character',
-    'top_entities', 'signature_patterns',
-    'agent_can_help_with', 'agent_would_consult',
-    'raw_response', 'moments_of_interest', 'activity_timeline',
-    'chronicle', 'chronicle_cursor', 'anchored_reason',
-    'description', 'description_version',
-    // Semantic fingerprints: 256D Nomic centroid + 3D viz centroid. Embeddings
-    // are sensitive (README §7); not SQL-queried (JS cosine only) so encryptable.
-    // cluster.py writes these via d1_batch_encrypted; JS readers decrypt via the
-    // adapter (NOT in NEVER_AUTO_DECRYPT — they're JSON envelopes, not raw bytes).
+    // centroids — cut 2 (decide raw-bytes vs plaintext-JSON there). cluster.py
+    // writes via d1_batch_encrypted; JS readers decrypt via the adapter.
     'centroid_256', 'centroid_3d',
-    // Derived cognitive scalars (SEC-3) — the per-territory measurement signal.
-    // cluster.py writes energy/coherence/velocity/point_delta via d1_batch_encrypted;
-    // the (un-ported) vitality stage writes current_vitality. Topology/chronicle
-    // readers sort/filter these in JS over decrypted values. message_count stays
-    // PLAINTEXT (a count + the primary search/ranking key — structural, not content);
-    // current_phase/growth_state are enum labels, also plaintext.
+    // derived cognitive scalars (SEC-3) — cut 2 (topology/chronicle readers
+    // sort/filter these in JS over decrypted values → SQL after backfill).
     'energy', 'coherence', 'velocity', 'current_vitality', 'point_delta',
   ],
 
-  // Realms — high-level mind organization. Expanding from just
-  // name+description to cover the full narrative structure that was
-  // mirrored in territory_profiles but mostly plaintext here.
-  realms: [
-    'name', 'description',
-    'essence', 'archetype_character',
-    'top_entities', 'signature_patterns',
-    'story_birth', 'story_arc', 'story_peak_moments', 'story_current_chapter',
-    'uncertainty_open_questions', 'uncertainty_edges',
-    'agent_expertise', 'agent_curious_about', 'agent_can_help_with',
-    'activity_timeline',
-  ],
+  // Realms — SQLCipher collapse (Stage B/C cut 1): all columns are narrative,
+  // all writers route through the JS adapter (mindscape.js / describe-clusters.js
+  // / cluster.py via d1_batch_encrypted) → fully stopped here. Now plaintext-
+  // inside-cipher; old envelope rows decrypt on read until the backfill converts.
+  realms: [],
 
   // entity_snapshots — append-only history of territory/realm narrative + dynamics
   // (ENTITY-HISTORY-DESIGN-2026-06-11). The single `payload` JSON blob holds the
@@ -418,15 +407,10 @@ const ENCRYPTED_FIELDS = {
   // timestamps) stay plaintext — keys/labels the read path needs, not content.
   entity_snapshots: ['payload'],
 
-  // Semantic themes
-  semantic_themes: [
-    'label', 'keywords', 'description',
-    'name', 'essence',
-    'top_entities', 'signature_patterns',
-    'story_birth', 'story_arc', 'story_current_chapter',
-    'uncertainty_open_questions',
-    'raw_response',
-  ],
+  // Semantic themes — SQLCipher collapse (Stage B/C cut 1): all-narrative,
+  // adapter-written (mindscape.js) → fully stopped. Plaintext-inside-cipher;
+  // old envelope rows decrypt on read until the backfill converts them.
+  semantic_themes: [],
 
   // User identities — social account links
   user_identities: ['provider_username', 'provider_id', 'provider_avatar'],
@@ -459,8 +443,10 @@ const ENCRYPTED_FIELDS = {
   // Territory pass notes — agent's notes from visiting territories
   territory_pass_notes: ['note', 'entities_mentioned', 'metadata'],
 
-  // Theme cards — theme-level narratives
-  theme_cards: ['title', 'description', 'content', 'metadata'],
+  // Theme cards — SQLCipher collapse (Stage B/C cut 1): all-narrative,
+  // adapter-written → fully stopped. Plaintext-inside-cipher; old envelope rows
+  // decrypt on read until the backfill converts them.
+  theme_cards: [],
 
   // Space rooms — name + essence reveal what topics a person is
   // organizing into a shared space. cover_doc_path stays plaintext

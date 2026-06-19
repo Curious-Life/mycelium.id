@@ -144,15 +144,20 @@ rec('G5b. model recovered: placeholder retried + renamed, hash now written; name
   r5.status === 0 && realm7b?.name === 'Recovered Name' && /^[0-9a-f]{64}$/.test(realm7b?.describe_input_hash || '') && calls === 2,
   `name=${realm7b?.name} calls=${calls} (1 realm + 1 territory of the new region)`);
 
-// ── G6: hash plaintext, name ciphertext at rest ──
+// ── G6: hash plaintext; realm name PLAINTEXT-in-cipher (SQLCipher collapse cut 1)
+// — the narrated name is no longer field-encrypted; at-rest confidentiality is
+// whole-file SQLCipher (verify:at-rest). describe_input_hash stays plaintext
+// 64-hex (the gating key). Assert the name is stored plaintext (not a wrapped-DEK
+// envelope), proving the stop-write worked. ──
 close();
 const raw = new Database(DB, { readonly: true });
 const rawRealm = raw.prepare(`SELECT name, describe_input_hash FROM realms WHERE realm_id = 0`).get();
 raw.close();
-rec('G6. describe_input_hash plaintext 64-hex at rest; name ciphertext (no narrated string leaks)',
+const isEnvelope = (v) => { if (typeof v !== 'string' || v.length < 20 || !v.startsWith('ey')) return false; try { const o = JSON.parse(Buffer.from(v, 'base64').toString('utf8')); return !!(o.v && o.s && o.iv && o.ct && o.dk); } catch { return false; } };
+rec('G6. describe_input_hash plaintext 64-hex; realm name PLAINTEXT-in-cipher (collapse: narrative not field-encrypted)',
   /^[0-9a-f]{64}$/.test(rawRealm?.describe_input_hash || '') && typeof rawRealm?.name === 'string'
-  && !rawRealm.name.includes('Stub') && !rawRealm.name.includes('Realm'),
-  `hash=${(rawRealm?.describe_input_hash || '').slice(0, 8)}…`);
+  && !isEnvelope(rawRealm.name),
+  `hash=${(rawRealm?.describe_input_hash || '').slice(0, 8)}… name=${rawRealm?.name}`);
 
 // ── G7: cluster.py chronicle inheritance — statements present + SQL simulation ──
 const py = readFileSync('pipeline/cluster.py', 'utf8');
