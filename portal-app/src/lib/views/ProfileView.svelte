@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api, apiGet, apiPost, apiPut } from '$lib/api';
+	import { api, apiGet, apiPut } from '$lib/api';
 
 	interface Profile {
 		handle: string | null;
@@ -110,9 +110,6 @@
 			handleChecking = false;
 		}, 400);
 	}
-	let editingSignature = $state(false);
-	let signatureInput = $state('');
-	let recomputing = $state(false);
 	let copied = $state(false);
 
 
@@ -179,34 +176,6 @@
 		}
 	}
 
-	async function saveSignature() {
-		saving = true;
-		error = null;
-		try {
-			const data = await apiPut<{ profile: Profile }>('/portal/profile', { signature: signatureInput.trim() });
-			profile = data.profile;
-			editingSignature = false;
-			showSuccess('Signature saved');
-		} catch (e: any) {
-			error = e.message || 'Failed to save';
-		} finally {
-			saving = false;
-		}
-	}
-
-	async function recomputeFingerprint() {
-		recomputing = true;
-		try {
-			await apiPost('/portal/profile/stats/recompute', {});
-			await loadProfile();
-			showSuccess('Fingerprint recomputed');
-		} catch (e: any) {
-			error = e.message || 'Failed to recompute';
-		} finally {
-			recomputing = false;
-		}
-	}
-
 	async function shareProfile() {
 		if (!profile?.handle) return;
 		const url = `https://mycelium.id/u/?h=${profile.handle}`;
@@ -228,17 +197,6 @@
 	function showError(msg: string) {
 		error = msg;
 		setTimeout(() => error = null, 5000);
-	}
-
-	function scoreDescriptor(key: string, score: number): string {
-		const label = score >= 0.8 ? 'very high' : score >= 0.6 ? 'high' : score >= 0.4 ? 'moderate' : score >= 0.2 ? 'low' : 'minimal';
-		const descriptors: Record<string, Record<string, string>> = {
-			depth: { 'very high': 'deep-diver', high: 'thorough', moderate: 'balanced', low: 'broad strokes', minimal: 'surface-level' },
-			breadth: { 'very high': 'polymathic', high: 'wide-ranging', moderate: 'focused', low: 'specialist', minimal: 'narrow' },
-			coherence: { 'very high': 'integrated', high: 'connected', moderate: 'mixed', low: 'scattered', minimal: 'fragmented' },
-			exploration: { 'very high': 'explorer', high: 'curious', moderate: 'balanced', low: 'settled', minimal: 'rooted' },
-		};
-		return descriptors[key]?.[label] || label;
 	}
 
 	function formatNumber(n: number): string {
@@ -334,54 +292,12 @@
 					{/if}
 				</div>
 
-				<!-- Thinking Style -->
-				<div class="fingerprint">
-					<h3 class="section-label">Thinking Style</h3>
-					{#each [
-						{ key: 'depth', label: 'Depth', score: profile.depth_score },
-						{ key: 'breadth', label: 'Breadth', score: profile.breadth_score },
-						{ key: 'coherence', label: 'Coherence', score: profile.coherence_score },
-						{ key: 'exploration', label: 'Exploration', score: profile.exploration_score },
-					] as stat}
-						<div class="fp-row">
-							<span class="fp-label">{stat.label}</span>
-							<div class="fp-track"><div class="fp-fill" style="width: {Math.round(stat.score * 100)}%"></div></div>
-							<span class="fp-desc">{scoreDescriptor(stat.key, stat.score)}</span>
-						</div>
-					{/each}
-				</div>
-
 				{#if realms.length > 0}
 					<div class="realms">
 						<h3 class="section-label">Active Realms</h3>
 						<div class="realm-tags">{#each realms as realm}<span class="realm-tag">{realm}</span>{/each}</div>
 					</div>
 				{/if}
-
-				<!-- Signature -->
-				<div class="signature-section">
-					<h3 class="section-label">Signature</h3>
-					{#if editingSignature}
-						<div class="sig-edit">
-							<input type="text" bind:value={signatureInput} placeholder="One line about how you think" class="sig-input" maxlength="120" />
-							<div class="sig-actions">
-								<button onclick={saveSignature} disabled={saving} class="btn-sm btn-primary">Save</button>
-								<button onclick={() => editingSignature = false} class="btn-sm btn-ghost">Cancel</button>
-							</div>
-						</div>
-					{:else}
-						<!-- svelte-ignore a11y_click_events_have_key_events -->
-						<!-- svelte-ignore a11y_no_static_element_interactions -->
-						<div class="sig-display" onclick={() => { editingSignature = true; signatureInput = profile?.signature || ''; }}>
-							{#if profile.signature}
-								<span class="sig-text">"{profile.signature}"</span>
-							{:else}
-								<span class="sig-placeholder">Add a one-line signature</span>
-							{/if}
-							<span class="edit-icon">&#9998;</span>
-						</div>
-					{/if}
-				</div>
 
 				<!-- Public Space (#19) -->
 				<div class="public-space">
@@ -418,9 +334,6 @@
 
 				<!-- Actions -->
 				<div class="profile-actions">
-					<button class="btn-sm btn-ghost" onclick={recomputeFingerprint} disabled={recomputing}>
-						{recomputing ? 'Recomputing...' : 'Recompute fingerprint'}
-					</button>
 					{#if profile.handle}
 						<button class="btn-sm btn-primary" onclick={shareProfile}>
 							{copied ? 'Copied!' : 'Share profile'}
@@ -551,11 +464,10 @@
 		opacity: 0;
 		transition: opacity 0.15s;
 	}
-	.handle-display:hover .edit-icon,
-	.sig-display:hover .edit-icon { opacity: 1; }
+	.handle-display:hover .edit-icon { opacity: 1; }
 	.handle-edit { display: flex; align-items: center; gap: 0.5rem; }
 	.handle-at { font-size: 1.2rem; color: var(--color-text-tertiary); font-weight: 500; }
-	.handle-input, .sig-input {
+	.handle-input {
 		flex: 1;
 		padding: 0.5rem 0.75rem;
 		font-family: var(--font-mono);
@@ -566,7 +478,7 @@
 		color: var(--color-text-primary);
 		outline: none;
 	}
-	.handle-input:focus, .sig-input:focus { border-color: var(--color-accent-aurum); }
+	.handle-input:focus { border-color: var(--color-accent-aurum); }
 
 	/* Stats row */
 	.stats-row {
@@ -580,14 +492,6 @@
 	}
 	.dot { color: var(--color-text-tertiary); }
 
-	/* Fingerprint */
-	.fingerprint { margin-bottom: 1.5rem; }
-	.fp-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
-	.fp-label { width: 80px; font-size: 0.78rem; color: var(--color-text-secondary); }
-	.fp-track { flex: 1; height: 6px; background: var(--color-elevated); border-radius: 3px; overflow: hidden; }
-	.fp-fill { height: 100%; background: var(--color-accent-aurum); border-radius: 3px; transition: width 0.6s ease; }
-	.fp-desc { width: 90px; font-size: 0.72rem; color: var(--color-text-tertiary); text-align: right; font-family: var(--font-mono); }
-
 	/* Realms */
 	.realms { margin-bottom: 1.5rem; }
 	.realm-tags { display: flex; flex-wrap: wrap; gap: 0.4rem; }
@@ -599,20 +503,6 @@
 		border-radius: 6px;
 		color: var(--color-text-secondary);
 	}
-
-	/* Signature */
-	.signature-section { margin-bottom: 0; }
-	.sig-display {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		cursor: pointer;
-	}
-	.sig-text { font-size: 0.9rem; color: var(--color-text-secondary); line-height: 1.5; }
-	.sig-placeholder { font-size: 0.85rem; color: var(--color-text-tertiary); }
-	.sig-edit { display: flex; flex-direction: column; gap: 0.5rem; }
-	.sig-input { font-family: var(--font-sans); }
-	.sig-actions { display: flex; gap: 0.5rem; }
 
 	/* Profile actions */
 	.profile-actions {

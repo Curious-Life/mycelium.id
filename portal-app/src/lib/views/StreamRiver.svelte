@@ -20,8 +20,13 @@
 		date?: string; status?: string; priority?: string; dueDate?: string; completedAt?: string;
 	}
 
-	// externalSource = a canonical source key from the spectrum (null = all).
-	let { externalSource = null }: { externalSource?: string | null } = $props();
+	// externalSource = a canonical source key from the graph legend (null = all).
+	// query = the search term, now owned by the parent (the expandable search in
+	// the Streams top bar) and pushed down here. header = an optional snippet the
+	// parent renders at the TOP of the scroll area (the history graph), so it
+	// scrolls up and out of the way as you read down the river.
+	let { externalSource = null, query = '', header }:
+		{ externalSource?: string | null; query?: string; header?: import('svelte').Snippet } = $props();
 
 	let items = $state<StreamItem[]>([]);
 	let nextCursor = $state<string | null>(null);
@@ -33,7 +38,6 @@
 
 	// Search (Phase 2.1): a keyword filter pushed to the server (?q). Single bounded
 	// pass — no "load older" while searching; `truncated` flags more than the cap.
-	let query = $state('');
 	let truncated = $state(false);
 	let searchTimer: ReturnType<typeof setTimeout> | null = null;
 	const searching = $derived(query.trim().length > 0);
@@ -47,17 +51,16 @@
 		loadIdentity();
 	});
 
-	function onSearchInput(v: string) {
-		query = v;
+	// React to the parent's search term (debounced). The initial empty query is a
+	// no-op — onMount already does the first load — so this only fires on change.
+	let lastQuery = '';
+	$effect(() => {
+		const q = query.trim();
+		if (q === lastQuery) return;
+		lastQuery = q;
 		if (searchTimer) clearTimeout(searchTimer);
 		searchTimer = setTimeout(async () => { loading = true; await loadFeed(); loading = false; }, 250);
-	}
-	function clearSearch() {
-		query = '';
-		if (searchTimer) clearTimeout(searchTimer);
-		loading = true;
-		loadFeed().then(() => (loading = false));
-	}
+	});
 
 	async function loadFeed(before?: string) {
 		const params = new URLSearchParams({ limit: '40' });
@@ -132,31 +135,13 @@
 {/if}
 
 <div class="flex flex-col h-full">
-	<div class="border-b border-[var(--color-border)] px-4 sm:px-6 py-2.5 flex-shrink-0 flex items-center gap-3">
-		<div class="flex items-center gap-2 flex-1 min-w-0 max-w-md bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg px-3 py-1.5 focus-within:border-[var(--color-text-tertiary)] transition-colors">
-			<svg class="w-3.5 h-3.5 flex-shrink-0 text-[var(--color-text-tertiary)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-			<input
-				type="search"
-				value={query}
-				oninput={(e) => onSearchInput((e.target as HTMLInputElement).value)}
-				placeholder="Search your streams…"
-				aria-label="Search streams"
-				class="flex-1 min-w-0 bg-transparent border-0 outline-none text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)]"
-			/>
-			{#if searching}
-				<button class="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] flex-shrink-0" aria-label="Clear search" onclick={clearSearch}>✕</button>
-			{/if}
-		</div>
-		<span class="text-xs text-[var(--color-text-tertiary)] flex-shrink-0">
-			{#if searching}
-				{filtered.length}{truncated ? '+' : ''} {filtered.length === 1 ? 'result' : 'results'} · recent
-			{:else}
-				{filtered.length} {filtered.length === 1 ? 'item' : 'items'}{#if externalSource}{' '}in {externalSource}{/if}
-			{/if}
-		</span>
-	</div>
-
 	<div class="flex-1 overflow-y-auto px-4 sm:px-6 py-4">
+		<!-- The history graph (parent-provided) rides at the top of the river's own
+		     scroll, so it slides up and out of the way as you read down — no fixed
+		     header band, no divider between it and the stream. -->
+		{#if header}
+			<div class="max-w-3xl mx-auto mb-2">{@render header()}</div>
+		{/if}
 		{#if loading}
 			<!-- Skeleton: render the river's shape immediately so a Streams click feels
 			     instant, instead of a blank panel while the feed fetch is in flight. -->

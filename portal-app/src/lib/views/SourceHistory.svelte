@@ -24,6 +24,13 @@
 	let data = $state<History | null>(null);
 	let loading = $state(true);
 	let hovered = $state<number | null>(null);
+	// Legend hover (a source) and its disclosure. Hovering a source dims the
+	// others — same focus treatment as a click — without committing the filter.
+	let hoveredSource = $state<string | null>(null);
+	let legendOpen = $state(false);
+	// The focused source: an explicit selection wins, else whatever's hovered.
+	// Drives the grey-out of every other source in both the chart and legend.
+	const focus = $derived(selected ?? hoveredSource);
 
 	onMount(load);
 	async function load() {
@@ -143,7 +150,7 @@
 						<rect
 							x={i * slot + gap / 2} y={seg.y} width={barW} height={seg.h}
 							fill={seg.color}
-							opacity={selected && selected !== seg.source ? 0.12 : hovered != null && hovered !== i ? 0.5 : 0.9}
+							opacity={focus && focus !== seg.source ? 0.12 : hovered != null && hovered !== i ? 0.5 : 0.9}
 						/>
 					{/each}
 					<!-- full-height transparent hit target for reliable hover on thin bars -->
@@ -176,22 +183,44 @@
 			<span>Today</span>
 		</div>
 
-		<div class="legend">
-			{#each sources as s (s.source)}
-				{@const p = sourcePresentation(s.source)}
-				<button
-					class="leg"
-					class:active={selected === s.source}
-					class:dim={selected && selected !== s.source}
-					style="--src: {p.color};"
-					onclick={() => toggle(s.source)}
-					title="{p.title || s.source} · {s.total} items — click to filter the river"
-				>
-					<span class="sw" style="background: {p.color};"></span>
-					<span class="ln">{p.title || s.source}</span>
-					<span class="lc">{fmt(s.total)}</span>
-				</button>
-			{/each}
+		<!-- Active sources — a disclosure under the graph (pills hidden by default,
+		     "all in one screen"). Hovering a source greys the others, exactly like
+		     a click does, so you can preview a filter before committing it. -->
+		<div class="legend-block">
+			<button
+				class="legend-toggle"
+				class:on={legendOpen}
+				onclick={() => (legendOpen = !legendOpen)}
+				aria-expanded={legendOpen}
+			>
+				<svg class="chev" class:open={legendOpen} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+				Active sources
+				<span class="lt-count">{sources.length}</span>
+				{#if selected}<span class="lt-sel" style="--src: {sourcePresentation(selected).color};">{sourcePresentation(selected).title || selected}</span>{/if}
+			</button>
+			{#if legendOpen}
+				<div class="legend">
+					{#each sources as s (s.source)}
+						{@const p = sourcePresentation(s.source)}
+						<button
+							class="leg"
+							class:active={selected === s.source}
+							class:dim={focus && focus !== s.source}
+							style="--src: {p.color};"
+							onclick={() => toggle(s.source)}
+							onmouseenter={() => (hoveredSource = s.source)}
+							onmouseleave={() => (hoveredSource = null)}
+							onfocus={() => (hoveredSource = s.source)}
+							onblur={() => (hoveredSource = null)}
+							title="{p.title || s.source} · {s.total} items — click to filter the river"
+						>
+							<span class="sw" style="background: {p.color};"></span>
+							<span class="ln">{p.title || s.source}</span>
+							<span class="lc">{fmt(s.total)}</span>
+						</button>
+					{/each}
+				</div>
+			{/if}
 		</div>
 	{/if}
 </section>
@@ -212,7 +241,7 @@
 
 	.chart-wrap { position: relative; }
 	.chart {
-		display: block; width: 100%; height: 200px;
+		display: block; width: 100%; height: 100px;
 		border-bottom: 1px solid var(--color-border);
 	}
 	.chart rect { transition: opacity .12s ease; }
@@ -231,6 +260,25 @@
 
 	.axis { display: flex; justify-content: space-between; font-size: 0.64rem; color: var(--color-text-tertiary); }
 
+	.legend-block { display: flex; flex-direction: column; gap: 8px; }
+	.legend-toggle {
+		display: inline-flex; align-items: center; gap: 6px; align-self: flex-start;
+		padding: 4px 10px 4px 6px; border-radius: 999px; cursor: pointer;
+		background: var(--color-surface); border: 0.5px solid var(--color-border);
+		font-size: 0.72rem; color: var(--color-text-secondary);
+		transition: background .15s, color .15s, border-color .15s;
+	}
+	.legend-toggle:hover, .legend-toggle.on { background: var(--color-elevated); color: var(--color-text-primary); }
+	.legend-toggle .chev { width: 13px; height: 13px; transition: transform .15s ease; }
+	.legend-toggle .chev.open { transform: rotate(180deg); }
+	.lt-count {
+		font-variant-numeric: tabular-nums; font-size: 0.66rem; color: var(--color-text-tertiary);
+		background: var(--color-elevated); border-radius: 999px; padding: 0 6px; line-height: 1.5;
+	}
+	.lt-sel {
+		font-size: 0.66rem; color: var(--src); border: 0.5px solid color-mix(in srgb, var(--src) 45%, var(--color-border));
+		border-radius: 999px; padding: 0 7px; line-height: 1.55;
+	}
 	.legend { display: flex; flex-wrap: wrap; gap: 6px; }
 	.leg {
 		display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px;
