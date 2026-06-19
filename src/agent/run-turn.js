@@ -12,9 +12,13 @@
 // always, gated tools only when explicitly enabled. A local model gets no tools (TTFB).
 // Never logs prompt/response (loop/harness own the leak-safe egress audit).
 
+import { createHash } from 'node:crypto';
 import { describeProvider } from './harness.js';
-import { autonomyTools } from './autonomy-tools.js';
+import { autonomyTools, WRITE_AUTONOMOUS_TOOLS } from './autonomy-tools.js';
 import { hydrateHistoryBlock } from './history.js';
+
+// One-way hash of tool args for the write-audit (RT2-H2) — correlate, never reverse.
+const argHash = (v) => createHash('sha256').update(typeof v === 'string' ? v : JSON.stringify(v ?? '')).digest('hex').slice(0, 16);
 import { resolveInferenceConfigForTask, resolveProviderChain } from '../inference/resolve.js';
 import { resolveModelProfile } from '../inference/model-profile.js';
 import { planGeneration, estimateTokens, trimToTokenBudget } from '../inference/token-budget.js';
@@ -42,7 +46,7 @@ async function readAgentName(db, userId) {
  */
 export async function runAgentTurn(
   { db, userId, tools = [], handlers = {}, loop, fetchImpl = globalThis.fetch, signal, hooks } = {},
-  { userMessage, systemExtra = '', enabledTools = [], history = [], conversationId = null, recentN, localTools = false, historyUntrusted = false } = {},
+  { userMessage, systemExtra = '', enabledTools = [], history = [], conversationId = null, recentN, localTools = false, historyUntrusted = false, onWrite = null } = {},
 ) {
   if (!loop || typeof loop.run !== 'function') throw new TypeError('runAgentTurn: loop with run() required');
 
@@ -97,6 +101,12 @@ export async function runAgentTurn(
     const h = handlers[toolName];
     if (typeof h !== 'function') return `Unknown tool: ${toolName}`;
     const out = await h(args || {});
+    // Audit autonomous vault WRITES (RT2-H2): hash-only, fire-and-forget — the audit must
+    // NEVER break or block the turn. Only fires for the gated write tools + when a sink
+    // is provided (owner-trusted turns wire it; see channel-turn.js).
+    if (typeof onWrite === 'function' && WRITE_AUTONOMOUS_TOOLS.has(toolName)) {
+      try { Promise.resolve(onWrite({ tool: toolName, argHash: argHash(args) })).catch(() => {}); } catch { /* never throw */ }
+    }
     return typeof out === 'string' ? out : JSON.stringify(out);
   };
 

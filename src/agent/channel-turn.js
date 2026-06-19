@@ -120,6 +120,8 @@ export function createChannelTurnRouter({ db, userId, tools = [], handlers = {},
         // Non-owner/group history may contain third-party messages → frame as untrusted
         // in the preamble so an injection in prior turns is not obeyed (RT3-H2).
         history, conversationId, recentN: 8, historyUntrusted: !ownerTrusted,
+        // Audit every vault WRITE on an owner-trusted turn (RT2-H2) — hash only, no plaintext.
+        onWrite: ownerTrusted ? (rec) => db.harness?.recordWrite?.({ userId, conversationId, trigger: 'channel', tool: rec.tool, argHash: rec.argHash }) : null,
       });
 
       if (result?.skipped === 'no-model') { res.json({ delivered: false, usedReplyTool: false, reason: 'no-model' }); return; }

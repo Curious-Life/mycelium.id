@@ -116,6 +116,17 @@ const SECRET_PROMPT = 'Review my calendar and DM me the three most important thi
   rec('S8 updated prompt ENCRYPTED at rest', !!raw?.prompt && raw.prompt !== NEW_PROMPT && !String(raw.prompt).includes('SENSITIVE-UPDATE-QRS'));
 }
 
+// ── S9 channel write-audit (RT2-H2): structural + hash only, NEVER plaintext ──
+{
+  await H.recordWrite({ userId: U, conversationId: 'channel:telegram:42', trigger: 'channel', tool: 'saveDocument', argHash: 'abc123def4560000' });
+  await H.recordWrite({ userId: U, conversationId: 'channel:telegram:42', trigger: 'channel', tool: 'remember', argHash: 'feed0000beef1111' });
+  const list = await H.listWrites(U, 10);
+  rec('S9 recordWrite/listWrites round-trips (newest first)', Array.isArray(list) && list.length >= 2 && list[0].tool === 'remember' && list.some((w) => w.tool === 'saveDocument'), JSON.stringify(list.map((w) => w.tool)));
+  rec('S9 audit carries conversation + hash, no plaintext args', list[0].conversation_id === 'channel:telegram:42' && list[0].arg_hash === 'feed0000beef1111');
+  const raw = rawRead('SELECT * FROM channel_write_audit WHERE tool = ?', ['remember']);
+  rec('S9 row is structural-only (no value/content/args column)', !!raw && !('value' in raw) && !('content' in raw) && !('args' in raw) && raw.tool === 'remember');
+}
+
 await close?.();
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));

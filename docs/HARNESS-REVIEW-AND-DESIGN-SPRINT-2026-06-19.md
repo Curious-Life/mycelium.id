@@ -602,5 +602,25 @@ overwrite-recoverability for `remember`/`saveDocument` [RT2-H1]; (4) authoritati
 daemon [RT1-M]; (5) untrusted-frame channel history [RT3-H2]; then a live owner-DM smoke (write persists
 + injection/group → zero writes in the audit).
 **Before flipping native default:** B1 + B2 + the live Telegram parity smoke.
+
+### Remediation status — UPDATE (2026-06-19, this session) — supersedes the table statuses above
+The prerequisites were implemented. **6 of 7 fixed + gated; native default FLIPPED.**
+
+| Item | Was | Now |
+|---|---|---|
+| RT1 CRIT daemon↔server auth | mitigated-by-default | **FIXED** — per-boot `CHANNEL_TURN_TOKEN` (server→supervisor→daemon env→header); owner-write requires timing-safe token match; missing/invalid → read+reply. Gate `verify:harness-channel` C14. |
+| RT1-MED authoritative isDirect | deferred | **FIXED** — daemon forwards `isDirect`; channel-turn prefers it over the regex. |
+| RT2-H2 channel write-audit | deferred | **FIXED** — `channel_write_audit` (migration 0031) + `db.harness.recordWrite/listWrites`; `run-turn.js` audits write tools hash-only, fire-and-forget; owner turns wire the sink. Gate `verify:harness-state` S9 (structural-only, no plaintext). |
+| RT2-H3 injection-defense preamble | fixed | FIXED (prior commit). |
+| RT3-H1/M3/M4 conversationId namespace | fixed | FIXED (prior commit). |
+| RT3-H2 untrusted channel history | deferred | **FIXED** — `history.js` untrusted banner via `hydrateHistoryBlock` flag threaded through `run-turn.js`; owner DMs unframed. Gate `verify:harness-channel` C7/C10. |
+| RT4-B1 honest health | open (blocked flip) | **FIXED** — `native.probeHealth()` + loopback `GET /internal/agent/model-status`; daemon stays capture-only when the vault has no model (no silent green). |
+| RT4-B2 native gate + flip | open (blocked flip) | **FIXED** — `selectRuntime` default = native; `verify-harness-channel-native` N7 updated. |
+| **RT2-H1 overwrite recoverability** | deferred | **STILL DEFERRED** — the only remaining owner-write prerequisite. Spec: write a `document_versions` row in `documents.upsert`'s UPDATE branch (table exists) + a fact-version row before `facts.upsert` overwrite (needs a small migration). Touches the SHARED chat write path → its own sweep-first pass. Mitigated meanwhile by the tool-trim (no mind-file wipers), the write-audit (detection), and the default-off flag. |
+
+**Net:** native default is live (honest health; live Telegram parity smoke still the operator's
+final confirmation). The owner-write flag (`MYCELIUM_CHANNEL_OWNER_WRITE=1`) is now safe to enable
+**after** RT2-H1 recoverability lands + a live owner-DM smoke (write persists; injection/group → zero
+writes in `channel_write_audit`). All gates: 17 `verify:harness*` + `verify:chat` GO.
 </content>
 </invoke>

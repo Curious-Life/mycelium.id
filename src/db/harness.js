@@ -206,6 +206,26 @@ export function createHarnessNamespace({ d1Query, d1QueryAdmin, randomUUID, now 
       );
       return id;
     },
+
+    // ── channel_write_audit (red-team RT2-H2): autonomous/channel vault writes ─────────
+    /** Record a vault WRITE by an autonomous turn — structural + hash only, NEVER plaintext. */
+    async recordWrite({ userId, conversationId = null, trigger = 'channel', tool, argHash = null }) {
+      await d1Query(
+        `INSERT INTO channel_write_audit (id, user_id, conversation_id, trigger, tool, arg_hash, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [uuid(), userId, conversationId, trigger, String(tool || ''), argHash, iso()],
+      );
+    },
+
+    /** Recent autonomous vault writes for the owner ("what did my assistant write?"). */
+    async listWrites(userId, limit = 50) {
+      const r = await d1Query(
+        `SELECT id, conversation_id, trigger, tool, arg_hash, created_at
+         FROM channel_write_audit WHERE user_id = ? ORDER BY created_at DESC LIMIT ?`,
+        [userId, Number(limit) || 50],
+      );
+      return rows(r);
+    },
   };
 }
 
