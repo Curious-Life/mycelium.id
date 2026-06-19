@@ -134,7 +134,13 @@ messages (`content/thinking/tags/entities/entity_summary/suggested_new_tag/relat
 - **No raw-bytes/bridge-blob blocker.** Metrics are scalars/JSON strings (not raw float bytes like the vectors), so the JSON `/query` bridge carries plaintext fine — unlike the cluster.py nomic case that was deferred.
 - **No JS writers** for any cut-5 table (all are Python-written or unwritten); `cognitive_metrics_window/trajectory` have NO writer at all (likely legacy/aggregate — their map entries are dead, cleaned in cut 6).
 
-**Python edits (drop `.enc()`/`_enc()`; remove the 2 local `_enc` helpers):**
+**⚠️ REFINED APPROACH (do NOT drop call sites — convert the helper to serialize-only).** `enc()`/`_enc()` do TWO things: (1) numpy-safe **coercion** (`None→None`; `bool→repr(1.0/0.0)`; `str→verbatim`; number→`repr(float(x))` — without this, numpy 2.x stores `'np.float64(x)'` GARBAGE), then (2) `encrypt_str(...)`. Naively replacing `_enc(x)`→`x` at call sites would lose the coercion. Instead, in **3 places** change the helper to RETURN the coerced string `s` and drop the `encrypt_str` call:
+- `pipeline/stage_crypto.py` `enc()` (`:39-58`) — covers all 8 `stage_crypto.enc`/`e=` callers.
+- `pipeline/compute-frequency.py` local `_enc` (`:79`).
+- `pipeline/compute-fisher.py` local `_enc` (`:129`).
+Every call site stays `_enc(x)` / `e(x)` but now writes coerced plaintext. VERIFIED every `enc()` caller writes a cut-5-collapsing metric table (`cognitive_anchor_vectors` is the VECTOR store on the Stage-A raw path, NOT an `enc()` target). `dec()` is unchanged (still dual-reads). Keep the name `enc` (renaming touches 8 callers) + a loud comment that it's serialize-only post-collapse; optional rename in cut 6. Per-table call sites below are for the GATE/backfill mapping, not edit targets:
+
+
 | script | table | enc sites |
 |---|---|---|
 | compute-frequency.py | frequency_snapshots | `:336-338` (+ local `_enc` `:79`) |
