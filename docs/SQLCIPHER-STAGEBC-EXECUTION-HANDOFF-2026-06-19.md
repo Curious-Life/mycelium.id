@@ -7,6 +7,31 @@
 
 ---
 
+## ▶ START HERE (cold pickup) — orient in 4 commands
+
+```bash
+cd /Users/altus/Documents/GitHub/mycelium-id-worktrees/sqlcipher-stageBC
+git fetch origin -q && git log --oneline -1            # expect 2b4c144 (or later); rebase onto origin/main if it moved
+git status --short                                      # expect clean
+[ -e node_modules ] || ln -s /Users/altus/Documents/GitHub/mycelium.id/node_modules ./node_modules
+gh pr checks 329                                         # cuts 1-3 = green; PR #329 OPEN + CLEAN
+```
+
+**State (2026-06-19 EOD):** Cuts **1, 2, 3 DONE + CI-green + pushed** on PR #329 (the two felt-win cuts + the security-critical `verify:leak` reframe). Worktree clean at `2b4c144`. **Next = cut 4 (bulk content).** Then cut 5 (Python metrics), cut 6 (finalize), then the operator-gated live backfill + the deferred SQL restores.
+
+**The mechanism is PROVEN over 3 cuts — apply it verbatim to cut 4:**
+1. **Verify the writer** for each table: `grep -rln "INTO <t>\|UPDATE <t>" src/ pipeline/`. JS-adapter-written (incl. `d1_batch_encrypted`) → the map shrink stops it. Python caller-encrypt (`stage_crypto.enc`/`_enc` in `compute-*.py`) → must ALSO drop that in lockstep (that's cut 5's nature; cut-4 tables are all JS).
+2. **Stop-write**: empty/shrink the table's `ENCRYPTED_FIELDS` entry in `src/crypto/crypto-local.js` (with a collapse-note comment).
+3. **Backfill target**: add a multi-column `content.<table>` entry to `BACKFILL_TARGETS` in `src/portal-mindscape.js` (codec `{kind:'content'}`).
+4. **Find gate breakers by RUNNING** every gate that references the cut's tables (NOT just grep — wording slips): `for g in <gates>; do npm run verify:$g 2>&1 | grep VERDICT; done`. A gate that writes a now-plaintext column AND asserts envelope-ness breaks instantly.
+5. **Invert atomically** (same commit): "ciphertext-at-column" → "plaintext-in-cipher". Where the seed value is known, assert it POSITIVELY (`raw.includes('0.91')`/`=== 'Old Name'`) — stronger than the old negation; else inline `isEnvelope` and assert `!isEnvelope(v)`. Keep functional read/sort assertions (work identically on plaintext). For `verify:leak`-style per-field-leak gates, NARROW the token scan (drop the now-plaintext table's tokens; keep the still-encrypted ones) — do NOT boot keyed.
+6. **Verify**: `node --check` the edited files; run the touched JS gates + floor (`verify:secrets`/`:at-rest`/`:leak`) + `verify:backfill`; all GO. Python gates crash locally (bare worktree has no venv — NOT a regression); CI runs them.
+7. **Commit + push** to the same branch (one commit per cut). CI re-runs the authoritative full chain. NO auto-merge (security-sensitive).
+
+**Cut 4 specifics + the resolved credentials decision are in the "Cut 4" section below.** SQL restores + VACUUM + the live backfill come AFTER all code cuts (ordering law).
+
+---
+
 ## TL;DR — where it stands
 
 The collapse removes the redundant per-field AES-GCM envelope on content, leaving content **plaintext-inside whole-file SQLCipher** (mandatory at-rest since #299). It's shipped as **sequential per-cut commits on one PR** (#329).
