@@ -24,6 +24,35 @@
  * @property {string} userId
  */
 
+// The canonical phase enum — the only values classify_phase() emits
+// (pipeline/fisher.py). A milestone or phase reading outside this set (e.g. the
+// historical phantom 'indeterminate') is NOT a real cognitive phase.
+const REAL_PHASES = new Set(['stable', 'cycling', 'exploring', 'transforming']);
+
+// The phase a row actually reports: prefer rolling phase_recent over the
+// degenerate legacy `phase`, and only honor it if it's a real enum member.
+// Returns null when there's no confident phase (NULL / phantom value).
+function effectivePhase(phaseRow) {
+  if (!phaseRow) return null;
+  const p = phaseRow.phase_recent || phaseRow.phase || null;
+  return REAL_PHASES.has(p) ? p : null;
+}
+
+// Consistency guard for the surfaced milestone alerts. Drops any phase_shift
+// whose endpoints aren't both real phases (the phantom-enum leak) and — when
+// the current phase is known — any phase_shift whose destination disagrees
+// with the currently-reported phase (a stale/contradictory alert). Other rule
+// types pass through untouched. `currentPhase` null → only the phantom check
+// applies (e.g. audit view, or no trajectory yet).
+function consistentMilestones(milestones, currentPhase) {
+  return milestones.filter((m) => {
+    if (m.rule_type !== 'phase_shift') return true;
+    if (!REAL_PHASES.has(m.phase_from) || !REAL_PHASES.has(m.phase_to)) return false;
+    if (currentPhase && m.phase_to !== currentPhase) return false;
+    return true;
+  });
+}
+
 export function createFisherToolsDomain(deps) {
   if (!deps) throw new TypeError('createFisherToolsDomain: deps required');
   const { db, userId } = deps;
@@ -174,7 +203,9 @@ export function createFisherToolsDomain(deps) {
   const handlers = {
     getCurrentPhase: async (args = {}) => {
       const level = args.level || 'realm';
-      const milestones = await db.fisher.getActiveMilestones(userId, { limit: 1 });
+      // Over-fetch a few: the freshest milestone may be a phantom/stale
+      // phase_shift that the consistency guard drops, so we need fallbacks.
+      const rawMilestones = await db.fisher.getActiveMilestones(userId, { limit: 5 });
 
       // Multi-level mode: render all three side-by-side.
       if (level === 'all') {
@@ -189,6 +220,8 @@ export function createFisherToolsDomain(deps) {
             sections.push('');
           }
         }
+        // Milestones are realm-level; reconcile against the realm phase.
+        const milestones = consistentMilestones(rawMilestones, effectivePhase(all?.realm));
         if (milestones.length > 0) {
           sections.push('## Active milestone (realm-level)');
           sections.push(formatMilestone(milestones[0]));
@@ -198,6 +231,12 @@ export function createFisherToolsDomain(deps) {
 
       // Single-level mode (the default).
       const phaseRow = await db.fisher.getCurrentPhase(userId, { level });
+      // Milestones are realm-level, so check them against the realm phase
+      // (reuse phaseRow when already at realm, else fetch the realm row).
+      const realmRow = level === 'realm'
+        ? phaseRow
+        : await db.fisher.getCurrentPhase(userId, { level: 'realm' });
+      const milestones = consistentMilestones(rawMilestones, effectivePhase(realmRow));
       const sections = [`# Cognitive Movement (level: ${level})`, ''];
       sections.push(formatPhase(phaseRow));
       if (milestones.length > 0) {
@@ -251,10 +290,18 @@ export function createFisherToolsDomain(deps) {
     },
 
     getActiveMilestones: async (args = {}) => {
-      const ms = await db.fisher.getActiveMilestones(userId, {
-        includeDismissed: !!args.includeDismissed,
+      const includeDismissed = !!args.includeDismissed;
+      const raw = await db.fisher.getActiveMilestones(userId, {
+        includeDismissed,
         limit: args.limit || 20,
       });
+      // Reconcile against the current realm phase (milestones are realm-level).
+      // In audit mode (includeDismissed) skip the current-phase contradiction
+      // check so the historical trail stays intact — but still drop phantoms.
+      const realmRow = includeDismissed
+        ? null
+        : await db.fisher.getCurrentPhase(userId, { level: 'realm' });
+      const ms = consistentMilestones(raw, includeDismissed ? null : effectivePhase(realmRow));
       if (ms.length === 0) {
         return '# Milestones\n\nNo active milestones.';
       }
