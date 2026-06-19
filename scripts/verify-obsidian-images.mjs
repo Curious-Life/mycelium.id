@@ -91,10 +91,12 @@ async function main() {
       `rows=${rows.length} shared=${rows[0]?.local_path === rows[1]?.local_path}`);
 
     // ── I3: the MEMORY copy keeps the original text (no URLs in embeddings) ──
+    // SQLCipher collapse (Stage B/C cut 4): messages.content is plaintext-in-cipher →
+    // read it directly (no field-decrypt). at-rest = whole-file SQLCipher (verify:at-rest;
+    // I4 below proves the marker is absent from the keyed file bytes).
     const mem = raw.prepare("SELECT content FROM messages WHERE id = 'obsidian:ImgVault/notes/idea'").get();
-    let memPlain = null;
-    try { memPlain = await decrypt(String(mem?.content || ''), await importMasterKey(USER_HEX)); } catch { /* */ }
-    rec('I3 memory copy unrewritten (keeps ![[photo.png]], no attachment URLs)',
+    const memPlain = String(mem?.content || '');
+    rec('I3 memory copy unrewritten (keeps ![[photo.png]], no attachment URLs; plaintext-in-cipher)',
       Boolean(memPlain) && memPlain.includes('![[photo.png]]') && !memPlain.includes('/api/v1/portal/attachments/'),
       `hasWiki=${memPlain?.includes('![[photo.png]]')}`);
 
