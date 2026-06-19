@@ -169,6 +169,64 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
     } catch { ok(res, { windowDays: 7, days: [], kinds: [], sources: [] }); }
   });
 
+  // GET /streams/history → { start, end, days, sources:[{source,kind,total}], series, clamped }
+  // The since-start history graph: per-day item counts per canonical source across
+  // ALL of history (one stacked bar per day, coloured by source). PLAINTEXT-ONLY
+  // aggregates — no decryption path (§7 fail-safe). Backed by db.streams.dailyVolume.
+  router.get('/streams/history', async (req, res) => {
+    try {
+      ok(res, await db.streams.dailyVolume(userId));
+    } catch { ok(res, { start: null, end: new Date().toISOString().slice(0, 10), days: [], sources: [], series: {}, clamped: false }); }
+  });
+
+  // POST /streams/recover-doc-dates  { sourceType?, apply?, overrides? }
+  // Maintenance repair: a 2026-02-16 bulk re-stamp flattened obsidian documents'
+  // created_at onto one day, losing their real timeline. The true date survives in
+  // each row's plaintext metadata.file_last_modified (mirrored in updated_at); this
+  // restores created_at from it. created_at + metadata are plaintext columns, so this
+  // is a parameterised UPDATE — no decryption, no encrypted-column writes. Owner-only
+  // (the router is single-user/loopback-mounted). Dry-run by default (apply !== true);
+  // `overrides` ({path: ISO}) lets a trusted backup manifest supply dates when a row's
+  // own metadata is missing one.
+  router.post('/streams/recover-doc-dates', async (req, res) => {
+    try {
+      const apply = req.body?.apply === true;
+      const sourceType = typeof req.body?.sourceType === 'string' ? req.body.sourceType : 'obsidian';
+      const overrides = (req.body && typeof req.body.overrides === 'object' && req.body.overrides) || {};
+      const day = (s) => String(s || '').slice(0, 10);
+      const r = await db.rawQuery(
+        `SELECT path, created_at, updated_at, metadata FROM documents
+          WHERE user_id = ? AND source_type = ? AND forgotten_at IS NULL`, [userId, sourceType]);
+      const rows = r.results || r || [];
+      const plan = [];
+      for (const d of rows) {
+        let md = {}; try { md = JSON.parse(d.metadata || '{}'); } catch { /* keep {} */ }
+        const cand = overrides[d.path] || md.file_last_modified || d.updated_at;
+        if (!cand) continue;
+        const t = Date.parse(cand);
+        if (Number.isNaN(t)) continue;
+        const iso = new Date(t).toISOString();
+        // Only ever pull created_at BACK to an earlier real date — the flatten moved
+        // dates FORWARD (onto 2026-02-16), so a candidate later than the current
+        // created_at is a genuine earlier-creation/later-edit and must be left alone.
+        if (day(iso) !== day(d.created_at) && t < Date.parse(d.created_at)) {
+          plan.push({ path: d.path, old: d.created_at, neu: iso });
+        }
+      }
+      let applied = 0;
+      if (apply) {
+        for (const p of plan) {
+          await db.rawQuery(`UPDATE documents SET created_at = ? WHERE user_id = ? AND path = ?`, [p.neu, userId, p.path]);
+          applied++;
+        }
+      }
+      ok(res, {
+        sourceType, scanned: rows.length, planned: plan.length, applied,
+        samples: plan.slice(0, 6).map((p) => ({ old: day(p.old), neu: day(p.neu) })),
+      });
+    } catch (e) { res.status(500).json({ error: String(e?.message || e) }); }
+  });
+
   // GET /streams?limit&before&since&types=message,document → { items, nextCursor }
   // The unified river: messages + documents + health + tasks interleaved by time.
   // Vector-free + metadata-stripped + §7-guarded in db.streams.feed.
