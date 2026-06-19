@@ -20,6 +20,7 @@ import { rmSync, mkdirSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';
 import { startRestServer } from '../src/server-rest.js';
+import { bustMindscape } from '../src/mindscape-cache.js';
 
 const DB = 'data/verify-portal-mindscape.db';
 const KCV = 'data/verify-portal-mindscape-kcv.json';
@@ -64,6 +65,26 @@ async function main() {
       && b.meta?.total === 5 && b.meta?.noise3d === 1;
     rec('M1. aggregator → nodes + territories + realms + meta', aggOk,
       `nodes=${b.nodes?.length} terr=${Object.keys(b.territories || {}).length} meta.total=${b.meta?.total} noise3d=${b.meta?.noise3d}`);
+
+    // before any diagnostics row, partitionConfidence is null (not measured yet)
+    rec('M1b. meta.partitionConfidence null before first run',
+      b.meta?.partitionConfidence === null, `value=${JSON.stringify(b.meta?.partitionConfidence)}`);
+
+    // ── M1c clustering-validity diagnostics surface (METRICS-AUDIT S5) ──
+    await db.rawQuery(
+      `INSERT OR REPLACE INTO clustering_diagnostics
+         (user_id, cluster_version, realm_max_share, realm_count, territory_validity,
+          bootstrap_ari_mean, bootstrap_ari_std, bootstrap_ari_runs, low_confidence, confidence_note)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      [uid, '2026-06-19T00:00:00Z', 0.78, 2, 0.05, 0.55, 0.04, 12, 1,
+       'Low-confidence partition: largest realm holds 78% of points (>50%).']);
+    bustMindscape(uid); // prod parity: the same clustering run changes points → cache busts
+    const agg2 = (await j(M('/mindscape'))).body || {};
+    const pc = agg2.meta?.partitionConfidence;
+    rec('M1c. meta.partitionConfidence surfaces low-confidence flag + scalars',
+      pc?.lowConfidence === true && pc?.realmMaxShare === 0.78 && pc?.bootstrapAriMean === 0.55
+      && pc?.bootstrapAriRuns === 12 && typeof pc?.note === 'string',
+      `lowConfidence=${pc?.lowConfidence} maxShare=${pc?.realmMaxShare} ari=${pc?.bootstrapAriMean}`);
 
     // ── M2 territories ──
     const terr = await j(M('/mindscape/territories'));
