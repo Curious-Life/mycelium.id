@@ -563,6 +563,107 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
     } catch { fail(res, 500, 'Failed to fetch measurement health'); }
   });
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // BEHAVIORAL — diurnal rhythm + session cadence (Tier-0, timestamps only).
+  // cognitive_metrics_behavioral is written by pipeline/compute-behavioral.py with
+  // caller-side envelope encryption; db.rawQuery's read path sniffs + auto-decrypts
+  // the envelopes per-column (crypto-local.js autoDecryptResults) → coerce to number.
+  // ──────────────────────────────────────────────────────────────────────────
+  router.get('/behavioral', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const rows = (await db.rawQuery(
+        `SELECT window_end, era_id, language,
+                diurnal_entropy, diurnal_peak_hour, diurnal_concentration, diurnal_hist,
+                session_count, intersession_entropy, intersession_cv,
+                message_count, low_confidence, notes, computed_at
+           FROM cognitive_metrics_behavioral WHERE user_id = ?
+           ORDER BY computed_at DESC LIMIT 1`, [u.id])).results || [];
+      const r = rows[0];
+      if (!r) { res.set('Cache-Control', 'no-store'); return res.json({ behavioral: null }); }
+      let hist = null;
+      try { hist = r.diurnal_hist ? JSON.parse(r.diurnal_hist) : null; } catch { hist = null; }
+      res.set('Cache-Control', 'no-store');
+      res.json({ behavioral: {
+        window_end: r.window_end, era_id: r.era_id,
+        diurnal_entropy: num(r.diurnal_entropy),
+        diurnal_peak_hour: num(r.diurnal_peak_hour),
+        diurnal_concentration: num(r.diurnal_concentration),
+        diurnal_hist: Array.isArray(hist) ? hist.map((v) => num(v)) : null,
+        session_count: num(r.session_count),
+        intersession_entropy: num(r.intersession_entropy),
+        intersession_cv: num(r.intersession_cv),
+        message_count: num(r.message_count),
+        low_confidence: !!Number(r.low_confidence),
+        computed_at: r.computed_at,
+      } });
+    } catch { fail(res, 500, 'Failed to load behavioral'); }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // CRITICALITY — early-warning signals (critical slowing) per level, latest window.
+  // Honest by construction: every row carries low_confidence=1 + a sensitivity caveat
+  // (EWS sensitivity is LOW in the literature). cognitive_metrics_criticality is
+  // envelope-encrypted by compute-criticality.py; read path auto-decrypts.
+  // ──────────────────────────────────────────────────────────────────────────
+  router.get('/criticality', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const windowType = String(req.query.window_type || 'weekly_step');
+      const rows = (await db.rawQuery(
+        `SELECT level, window_type, window_start, window_end,
+                ar1_autocorrelation, rolling_variance, early_warning_joint,
+                flickering_score, window_count, low_confidence, computed_at
+           FROM cognitive_metrics_criticality WHERE user_id = ? AND window_type = ?
+           ORDER BY window_end DESC`, [u.id, windowType])).results || [];
+      // Latest row per level (realm/theme/territory).
+      const seen = new Set(); const levels = [];
+      for (const r of rows) {
+        if (seen.has(r.level)) continue; seen.add(r.level);
+        levels.push({
+          level: r.level, window_start: r.window_start, window_end: r.window_end,
+          ar1_autocorrelation: num(r.ar1_autocorrelation),
+          rolling_variance: num(r.rolling_variance),
+          early_warning_joint: num(r.early_warning_joint),
+          flickering_score: num(r.flickering_score),
+          window_count: num(r.window_count),
+          low_confidence: !!Number(r.low_confidence),
+          computed_at: r.computed_at,
+        });
+      }
+      res.set('Cache-Control', 'no-store');
+      res.json({ window_type: windowType, levels });
+    } catch { fail(res, 500, 'Failed to load criticality'); }
+  });
+
+  // GET /events — discrete cognitive events (phase-lock, flickering). Undismissed by
+  // default; magnitude/detail/headline are encrypted and auto-decrypt on read.
+  router.get('/events', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const includeDismissed = req.query.include_dismissed === '1';
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const sql = `SELECT id, event_type, level, window_start, window_end,
+                          magnitude, severity, detail, headline, detected_at, dismissed_at
+                     FROM cognitive_events WHERE user_id = ?
+                     ${includeDismissed ? '' : 'AND dismissed_at IS NULL'}
+                     ORDER BY detected_at DESC LIMIT ?`;
+      const rows = (await db.rawQuery(sql, [u.id, limit])).results || [];
+      const events = rows.map((r) => {
+        let detail = null;
+        try { detail = r.detail ? JSON.parse(r.detail) : null; } catch { detail = null; }
+        return {
+          id: r.id, event_type: r.event_type, level: r.level,
+          window_start: r.window_start, window_end: r.window_end,
+          magnitude: num(r.magnitude), severity: r.severity, detail,
+          headline: r.headline, detected_at: r.detected_at, dismissed_at: r.dismissed_at,
+        };
+      });
+      res.set('Cache-Control', 'no-store');
+      res.json({ events });
+    } catch { fail(res, 500, 'Failed to load events'); }
+  });
+
   return router;
 }
 
