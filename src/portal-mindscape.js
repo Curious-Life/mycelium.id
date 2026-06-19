@@ -323,9 +323,20 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
     catch { fail(res); }
   });
 
+  // Noise stats are point-derived (total + territory-noise) and are already
+  // computed in the durable points bundle — serve from there instead of a second
+  // full COUNT scan of the 70k-row clustering_points corpus on every Mindscape
+  // open. db.mindscape.getNoiseStats is kept for the MCP onboarding probe
+  // (src/mcp.js), which has no bundle in scope. Shape is identical.
   router.get('/mindscape/noise-stats', async (_req, res) => {
-    try { res.json(await db.mindscape.getNoiseStats(userId)); }
-    catch { fail(res); }
+    try {
+      const { meta } = await loadPointsBundle();
+      res.json({
+        total: meta.total,
+        noise: meta.noise3d,
+        noisePct: meta.total > 0 ? (meta.noise3d / meta.total * 100).toFixed(1) : '0',
+      });
+    } catch { fail(res); }
   });
 
   // Today's activations (which territories fired, vs. baseline). Real read.

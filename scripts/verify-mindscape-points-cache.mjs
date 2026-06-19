@@ -125,6 +125,13 @@ async function main() {
     rec('B3. §7 — /points payload has no content/ciphertext',
       !/"(content|essence|title|ct|iv|wrappedDek|embedding)"/.test(pjson) && !pjson.includes('secret essence'));
 
+    // B4 — /mindscape/noise-stats is served from the SAME durable bundle (no second
+    // 70k-row COUNT scan): total + noise match the points bundle's meta.
+    const noise = await get('/mindscape/noise-stats');
+    rec('B4. /mindscape/noise-stats derives from the points bundle (total + noise match meta)',
+      noise.total === pts.meta.total && noise.noise === pts.meta.noise3d,
+      `noise.total=${noise.total} meta.total=${pts.meta.total} noise=${noise.noise}`);
+
     server.close();
   } finally {
     close?.();
