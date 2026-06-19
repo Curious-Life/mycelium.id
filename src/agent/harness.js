@@ -22,6 +22,7 @@
 
 import { createHash } from 'node:crypto';
 import { openStream, ssePayloads, resolveChatUrl } from '../inference/cloud.js';
+import { fetchProvider } from '../inference/base-url.js';
 import { DEFAULT_OLLAMA_URL, DEFAULT_LOCAL_MODEL } from '../inference/local.js';
 import { InferenceError } from '../inference/errors.js';
 import { fireBeforeToolCall, fireAfterToolCall } from './hooks.js';
@@ -243,7 +244,7 @@ const ollamaNativeAdapter = {
     if (signal) { if (signal.aborted) controller.abort(); else signal.addEventListener('abort', () => controller.abort(), { once: true }); }
     let res;
     try {
-      res = await fetch(`${host}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal });
+      res = await fetchProvider(`${host}/api/chat`, { fetch, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal });
     } catch (err) {
       clearTimeout(timer);
       throw new InferenceError(`harness: Ollama unreachable at ${host}/api/chat`, { cause: err, backend: 'local' });

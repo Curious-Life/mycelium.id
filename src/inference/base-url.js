@@ -13,7 +13,7 @@
 // Local providers (Ollama / LM Studio at http://127.0.0.1) stay allowed.
 
 import net from 'node:net';
-import { isPrivateAddress, assertResolvesPublic } from '../federation/ssrf.js';
+import { isPrivateAddress, assertResolvesPublic, safeFetch } from '../federation/ssrf.js';
 
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1']);
 
@@ -48,4 +48,34 @@ export async function assertSafeBaseUrlResolved(baseUrl, { lookup } = {}) {
   const host = new URL(String(baseUrl)).hostname.replace(/^\[|\]$/g, '').toLowerCase();
   if (LOOPBACK.has(host) || net.isIP(host)) return; // literal already validated above
   await assertResolvesPublic(host, lookup ? { lookup } : {});
+}
+
+/**
+ * SSRF-safe fetch for a provider base_url-derived URL (use-time guard, H5).
+ * Local providers (Ollama / LM Studio at loopback) and public IP literals fetch
+ * directly — there is no hostname to rebind. A real hostname goes through
+ * `safeFetch` (resolve + validate-EVERY-address-public + connection pin) so a
+ * malicious or DNS-rebinding base_url cannot exfiltrate the prompt + API key to
+ * an internal service between the write-time check and the connect. Honors an
+ * injected `fetch` (the inference layer's test seam): safeFetch runs its guard,
+ * then calls the injected fetch.
+ */
+export async function fetchProvider(url, { fetch = globalThis.fetch, lookup, ...init } = {}) {
+  // An injected (non-global) `fetch` is a test / custom-transport seam that does
+  // not open a real socket, so the SSRF guard (which only matters for the real
+  // connect) is skipped for it. On the real path `fetch` is always
+  // globalThis.fetch (cloudInfer/cloudStream/the gateway default it), so the
+  // resolve+pin below always runs in production.
+  if (fetch !== globalThis.fetch) return fetch(url, init);
+  let host;
+  try { host = new URL(url).hostname.replace(/^\[|\]$/g, '').toLowerCase(); }
+  catch { throw new Error('provider url is not a valid URL'); }
+  const ipVer = net.isIP(host); // 0 = hostname, 4/6 = IP literal
+  if (LOOPBACK.has(host) || (ipVer && !isPrivateAddress(host))) {
+    return fetch(url, init); // trusted local provider, or a public IP literal (no DNS → no rebinding)
+  }
+  if (ipVer && isPrivateAddress(host)) {
+    throw new Error('refusing to fetch a private/internal address');
+  }
+  return safeFetch(url, { ...(lookup ? { lookup } : {}), ...init }); // hostname → resolve-public + connection pin
 }

@@ -12,7 +12,7 @@
 // no SDK dependency to install, no model pinned by a transitive package.
 
 import { InferenceError } from "./errors.js";
-import { assertSafeBaseUrl } from "./base-url.js";
+import { assertSafeBaseUrl, fetchProvider } from "./base-url.js";
 
 // Defaults are overridable via INFERENCE_CLOUD_MODEL (see router.js). Anthropic
 // default favors the capable-but-balanced current Sonnet; both are just strings
@@ -91,7 +91,8 @@ export async function postJson(url, headers, body, fetch, timeoutMs) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res;
   try {
-    res = await fetch(url, {
+    res = await fetchProvider(url, {
+      fetch,
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers },
       body: JSON.stringify(body),
@@ -189,7 +190,7 @@ export async function openStream(url, headers, body, fetch, timeoutMs, extraSign
   }
   let res;
   try {
-    res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body), signal: controller.signal });
+    res = await fetchProvider(url, { fetch, method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body), signal: controller.signal });
   } catch (err) {
     clearTimeout(timer);
     const reason = err?.name === "AbortError" ? `timed out after ${timeoutMs}ms` : "network error";
