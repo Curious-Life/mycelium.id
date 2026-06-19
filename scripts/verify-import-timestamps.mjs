@@ -24,6 +24,8 @@ import {
   detectExportType, processClaudeExport, processOpenAIExport,
 } from '../src/ingest/import-parsers.js';
 import JSZip from 'jszip';
+import { normalizeTimestamp, deriveCreatedAt, TS_PROVENANCE } from '../src/ingest/timestamp.js';
+import { restoreTable } from '../src/ingest/vault-import.js';
 
 const DB = 'data/verify-ts.db';
 const KCV = 'data/verify-ts-kcv.json';
@@ -86,6 +88,54 @@ const claudeZip = await (async () => {
   await processOpenAIExport(convs, { capture: (m) => captureMessage(db, { userId, ...m }, null) });
   const want = new Date(t * 1000).toISOString();
   rec('T5 ChatGPT parser preserves create_time', createdAtOf('chatgpt-n1') === want, `got ${createdAtOf('chatgpt-n1')} want ${want}`);
+}
+
+// ── T6 — shared normalizer: naive/local strings → UTC (no calendar-day shift) ──
+rec('T6a naive datetime → UTC (no local shift)', normalizeTimestamp('2026-02-04 09:30:00') === '2026-02-04T09:30:00.000Z',
+  `got ${normalizeTimestamp('2026-02-04 09:30:00')}`);
+rec('T6b date-only → midnight UTC', normalizeTimestamp('2026-02-04') === '2026-02-04T00:00:00.000Z',
+  `got ${normalizeTimestamp('2026-02-04')}`);
+rec('T6c epoch-ms preserved', normalizeTimestamp(1615797000000) === '2021-03-15T08:30:00.000Z', `got ${normalizeTimestamp(1615797000000)}`);
+rec('T6d garbage → null', normalizeTimestamp('not a date') === null && normalizeTimestamp('') === null, '');
+
+// ── T7 — deriveCreatedAt provenance + future-skew rejection + fallback ──
+const d7a = deriveCreatedAt([{ value: undefined, provenance: 'x' }, { value: '2020-01-02T03:04:05Z', provenance: TS_PROVENANCE.SOURCE_FIELD }]);
+rec('T7a picks first usable candidate w/ provenance', d7a.iso === '2020-01-02T03:04:05.000Z' && d7a.provenance === 'source-field', JSON.stringify(d7a));
+const future = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString();
+const d7b = deriveCreatedAt([{ value: future, provenance: TS_PROVENANCE.FILE_MTIME }]);
+rec('T7b future-skew candidate rejected → inferred-now', d7b.provenance === TS_PROVENANCE.INFERRED_NOW, JSON.stringify(d7b));
+const d7c = deriveCreatedAt([{ value: null, provenance: 'x' }]);
+rec('T7c no usable source → inferred-now (FLAGGED, not silent)', d7c.provenance === 'inferred-now', JSON.stringify(d7c));
+
+// ── T8 — documents.created_at is IMMUTABLE across re-import (Fix A) ──
+const dPath = 'agents/test/immutable.md';
+await db.documents.upsert({ user_id: userId, path: dPath, title: 'v1', content: 'first content here', created_at: '2024-01-01T00:00:00.000Z', updated_at: '2024-01-01T00:00:00.000Z' });
+await db.documents.upsert({ user_id: userId, path: dPath, title: 'v2', content: 'edited content later', created_at: '2026-06-15T10:14:56.000Z', updated_at: '2026-06-15T10:14:56.000Z' });
+const docRow = raw.prepare('select created_at, updated_at from documents where user_id=? and path=?').get(userId, dPath);
+rec('T8 re-import keeps original created_at, bumps updated_at',
+  docRow?.created_at === '2024-01-01T00:00:00.000Z' && docRow?.updated_at === '2026-06-15T10:14:56.000Z',
+  `created_at=${docRow?.created_at} updated_at=${docRow?.updated_at}`);
+
+// ── T9 — restoreTable FAIL-LOUD counts rows stamped import-time (Fix B) ──
+const r9miss = await restoreTable(db, 'documents', [{ id: 't9-miss', path: 'agents/test/t9-miss.md', title: 't9', content: 'restore row with no created_at' }], { userId });
+const r9have = await restoreTable(db, 'documents', [{ id: 't9-have', path: 'agents/test/t9-have.md', title: 't9', content: 'restore row with a created_at', created_at: '2025-05-05T05:05:05.000Z' }], { userId });
+rec('T9 restoreTable counts inferredNow when created_at absent',
+  r9miss.inferredNow === 1 && r9have.inferredNow === 0,
+  `missing.inferredNow=${r9miss.inferredNow} have.inferredNow=${r9have.inferredNow}`);
+
+// ── T10 — parser FAIL-LOUD accounting: a swallowed capture error is counted ──
+{
+  const z = new JSZip();
+  z.file('conversations.json', JSON.stringify([{ uuid: 'cv2', name: 'C2', chat_messages: [
+    { uuid: 'ok1', sender: 'human', text: 'fine', created_at: '2020-01-01T00:00:00Z' },
+    { uuid: 'boom', sender: 'human', text: 'will throw', created_at: '2020-01-01T00:00:01Z' },
+  ] }]));
+  const zip = await JSZip.loadAsync(await z.generateAsync({ type: 'nodebuffer' }));
+  const detected = await detectExportType(zip);
+  const res = await processClaudeExport(zip, { conversations: detected.conversations,
+    capture: async (m) => { if (m.id === 'claude-boom') throw new Error('boom'); return { deduped: false }; } });
+  rec('T10 Claude parser reports failed count (not silent loss)',
+    res.failed === 1 && res.imported === 1 && res.stats.failed === 1, `imported=${res.imported} failed=${res.failed}`);
 }
 
 const ok = ledger.every(Boolean);

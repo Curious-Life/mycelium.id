@@ -112,13 +112,25 @@ export function createDocumentsNamespace(deps) {
       assertSafeColumns(Object.keys(doc || {}), 'documents');
       const cols = Object.keys(doc).join(', ');
       const placeholders = Object.keys(doc).map(() => '?').join(', ');
-      // SET clause for ON CONFLICT (exclude conflict-key columns).
-      const updateCols = Object.keys(doc).filter((c) => c !== 'user_id' && c !== 'path');
+      // SET clause for ON CONFLICT. Exclude the conflict key (user_id, path) AND
+      // `created_at`: created_at is the row's birth time — IMMUTABLE after first
+      // insert. Including it let a re-import (e.g. a re-export with a fresh file
+      // mtime) clobber the original creation date — the documents-timestamp bug
+      // (docs/DESIGN-import-system-robustness-2026-06-19.md, Fix A). It is still
+      // written on the initial INSERT (stays in `cols`/`placeholders`); only the
+      // UPDATE branch leaves it untouched. `updated_at` stays mutable so an edit /
+      // re-import still bumps it. Deliberate lowering of created_at is a separate
+      // audited repair tool — never the import path.
+      const IMMUTABLE = new Set(['user_id', 'path', 'created_at']);
+      const updateCols = Object.keys(doc).filter((c) => !IMMUTABLE.has(c));
       const setClause = updateCols.map((c) => `${c} = excluded.${c}`).join(', ');
 
+      // If every supplied column is immutable, there is nothing to update on
+      // conflict — DO NOTHING (avoids an empty `SET` = invalid SQL).
+      const conflict = setClause ? `DO UPDATE SET ${setClause}` : 'DO NOTHING';
       const result = await d1Query(
         `INSERT INTO documents (${cols}) VALUES (${placeholders})
-         ON CONFLICT (user_id, path) DO UPDATE SET ${setClause}
+         ON CONFLICT (user_id, path) ${conflict}
          RETURNING *`,
         Object.values(doc),
       );

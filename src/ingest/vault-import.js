@@ -65,7 +65,11 @@ const normalizeValue = (v) => {
 export async function restoreTable(db, table, rows, { userId, overrides = {} }) {
   // `attempted`/`capped` feed the reconciliation report: declared − attempted
   // must be zero, or the report names exactly what was never even tried.
-  const out = { attempted: 0, inserted: 0, deduped: 0, failed: 0, capped: 0, skippedEmpty: 0 };
+  // `inferredNow` (FAIL-LOUD, design Fix B): rows we INSERTED into a table that
+  // HAS a created_at column WITHOUT carrying one → SQLite stamps the schema
+  // default (import-time "now"). Silently this is the date-cliff bug; counted
+  // here it surfaces in the reconciliation report so a lossy restore is visible.
+  const out = { attempted: 0, inserted: 0, deduped: 0, failed: 0, capped: 0, skippedEmpty: 0, inferredNow: 0 };
   if (!Array.isArray(rows) || rows.length === 0) return out;
   const cols = await tableColumns(db, table);
   if (cols.size === 0) { out.failed = rows.length; out.attempted = rows.length; out.tableMissing = true; return out; }
@@ -100,11 +104,13 @@ export async function restoreTable(db, table, rows, { userId, overrides = {} }) 
       }
       const keys = Object.keys(r).filter((k) => cols.has(k) && r[k] !== undefined);
       if (keys.length === 0) { out.failed++; continue; }
+      // Will this insert fall back to the schema-default created_at?
+      const createdAtMissing = cols.has('created_at') && !keys.includes('created_at');
       const res = await db.rawQuery(
         `INSERT OR IGNORE INTO ${table} (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`,
         keys.map((k) => normalizeValue(r[k])),
       );
-      if ((res?.meta?.changes ?? 0) > 0) out.inserted++; else out.deduped++;
+      if ((res?.meta?.changes ?? 0) > 0) { out.inserted++; if (createdAtMissing) out.inferredNow++; } else out.deduped++;
     } catch { out.failed++; }
   }
   return out;
@@ -464,9 +470,15 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   {
     const TEXT_EXT = new Set(['.md', '.txt', '.json', '.yaml', '.yml', '.csv']);
     const MAX_AGENT_FILE_BYTES = 5 * 1024 * 1024;
-    const agentStats = { attempted: 0, inserted: 0, deduped: 0, dedupedByContent: 0, failed: 0, skippedBinary: 0, skippedOversize: 0 };
+    const agentStats = { attempted: 0, inserted: 0, deduped: 0, dedupedByContent: 0, failed: 0, skippedBinary: 0, skippedOversize: 0, skippedUnsafe: 0, inferredNow: 0 };
     const entries = Object.values(zip.files).filter((f) => !f.dir && f.name.startsWith('agents/'));
     for (const entry of entries) {
+      // Path-traversal guard: entry.name is stored verbatim as documents.path.
+      // A crafted `agents/../../x` passes the startsWith filter; reject any `..`
+      // segment / absolute / `//` so a malicious export can't write outside the
+      // agents/ namespace in the document model.
+      const segs = entry.name.split('/');
+      if (entry.name.startsWith('/') || segs.some((s) => s === '..' || s === '')) { agentStats.skippedUnsafe++; continue; }
       const ext = extname(entry.name).toLowerCase();
       if (!TEXT_EXT.has(ext)) { agentStats.skippedBinary++; continue; }
       try {
@@ -499,6 +511,7 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
         }], { userId });
         if (hash && r.inserted) docHashesSeen.add(hash);
         agentStats.inserted += r.inserted; agentStats.deduped += r.deduped; agentStats.failed += r.failed;
+        agentStats.inferredNow += (r.inferredNow || 0); // FAIL-LOUD: agent files stamped import-time (no entry date)
       } catch { agentStats.failed++; }
     }
     stats.agent_files = agentStats;

@@ -39,6 +39,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { normalizeTimestamp } from '../ingest/timestamp.js';
 
 const PATH_MAX_LEN = 255;
 
@@ -385,8 +386,12 @@ export async function saveDocument(deps, input) {
   // branch it overwrites the existing row's updated_at (intentional
   // — a scanner re-run on a changed file should bump updated_at to
   // the new mtime).
-  if (createdAt !== undefined) doc.created_at = createdAt;
-  if (updatedAt !== undefined) doc.updated_at = updatedAt;
+  // Normalize through the shared timestamp authority (same as messages) so a
+  // Date / epoch / naive-local string becomes a UTC ISO instant rather than
+  // being stored verbatim (a naive local string would otherwise shift the day).
+  // Unparseable → omit, so the schema default applies (matches the message path).
+  if (createdAt !== undefined) { const c = normalizeTimestamp(createdAt); if (c) doc.created_at = c; }
+  if (updatedAt !== undefined) { const u = normalizeTimestamp(updatedAt); if (u) doc.updated_at = u; }
 
   const row = await deps.db.documents.upsert(doc);
 

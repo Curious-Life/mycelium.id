@@ -99,7 +99,7 @@ export async function importObsidianVault(db, { userId, folderPath, files, vault
 
   const summary = {
     scanned: 0, documentsUpserted: 0, memoriesCreated: 0, memoriesDeduped: 0,
-    memoriesUpdated: 0, memoriesMigrated: 0, folders: 0, skipped: 0, truncated: false, errors: [],
+    memoriesUpdated: 0, memoriesMigrated: 0, folders: 0, skipped: 0, failed: 0, truncated: false, errors: [],
     assets: { imported: 0, deduped: 0, blobsReused: 0, skipped: 0 },
     refs: { rewritten: 0, unresolved: 0, unresolvedSample: [] },
   };
@@ -380,6 +380,7 @@ export async function importObsidianVault(db, { userId, folderPath, files, vault
         }
       }
     } catch (e) {
+      summary.failed += 1; // FAIL-LOUD aggregate (errors[] holds the detail)
       summary.errors.push({ relPath: note.vaultRel, error: String(e?.message || e).slice(0, 200) });
     }
   }
