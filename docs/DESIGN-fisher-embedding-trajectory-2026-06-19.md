@@ -1,9 +1,27 @@
 # DESIGN — Fisher P2 (surface-gate) + P3 (basis-free embedding-trajectory cross-check)
 
-**Status:** LOCKED design, NOT built. Build spec for P2 + P3 of the Fisher faithfulness plan.
+**Status:** P2 SHIPPED (#315) · P3a BUILT (branch `feat/embedding-trajectory`) · P3b designed, not built.
 **Date:** 2026-06-19
 **Parent:** `docs/DESIGN-fisher-faithfulness-2026-06-19.md` (this supersedes its high-level P2/P3 sketch with sweep-verified build detail).
 **Skill:** sweep-first-design (4 parallel Explore sweeps + own-eyes verification of the build-critical facts).
+
+> **⚠️ Bounce-2 update (see Part 12):** the per-scope embedding drift in Parts 1–5 below is SUPERSEDED. The basis-free comparator is a **single GLOBAL centroid-drift series** (per-scope re-imports the clustering and so cannot detect a basis artifact), and confidence gates on **resultant length R̄·√n vs a random-direction floor**, not message count. Part 12 is the as-built spec; read it first.
+
+## Part 12 — Bounce-2 resolutions (the as-built P3a)
+
+Two red-team items changed the design; resolving #1 also simplified it.
+
+**🔴 #1 — "Basis-free" only holds at GLOBAL scope → one series, not N.** You cannot have a clustering-independent version of a clustering-defined quantity at the same granularity: a per-realm centroid uses `realm_id` for membership, so a re-cluster moves it for a non-semantic reason and the contamination cancels in the comparison. The only truly basis-free signal carries no scope membership — the **global** centroid (mean direction of ALL the week's unit embeddings). And since Fisher's "level" is the granularity of the whole distribution (not a per-entity breakdown), **one global series is the correct comparator at every granularity**. The quadrant compares two baseline-z's (global-drift-z × scoped-Fisher-velocity-z), so the unit difference is moot — z's are self-normalized. Net: per-scope drift is dropped entirely; cost collapses from N-scopes to one series.
+
+**🔴 #2 — Confidence is resultant length, not count.** Reliability of a mean direction is governed by R̄ = ‖mean(unit vectors)‖ (von Mises–Fisher); a diffuse week is directionless at any n. Under uniform directions E[R̄] ≈ 1/√n, so the gate is **R̄·√n < RAYLEIGH_MIN (≈2) → low_confidence**, with a small N floor secondary. `dispersion = 1 − R̄` (spherical variance) carries R̄, so it's free. Drift confidence ANDs both endpoint windows + adjacency.
+
+**As-built P3a** (`feat/embedding-trajectory`):
+- Migration `0031_embedding_trajectory.sql` — **global-only** table (no `level`), `centroid_drift` + `dispersion` encrypted, structural + `low_confidence` plaintext, keyed `UNIQUE(user_id, window_type, window_start, clustering_run_id)`. **Centroids are never persisted** (768D fingerprint) — only the two scalars.
+- `pipeline/compute-embedding-trajectory.py` — Step 7b. Decrypt-ONCE + in-memory weekly_step bucketing (Fisher's ISO-Monday grid, byte-identical → rows align 1:1); run-id via Fisher's rule; era-skip; `stage_result.run_main` health; measure-only + kill-switch exempt. A gap (empty week) breaks drift adjacency → `low_confidence`.
+- Crypto + freshness registration: `ENCRYPTED_FIELDS.embedding_trajectory`; own `METRIC_BUDGET` + `FAMILY_STAGE` entry → `/measurement-health` attributes a failed stage honestly.
+- Gate `verify:embedding-trajectory` (6/6 GO): rotation discriminates (flat 0.000 vs rotated 1.525≈π/2), diffuse week → high dispersion + low_confidence **by the R̄ floor** (n=6, not count), both scalars encrypted at rest, era-skip idempotent. No regression: `verify:fisher{,-display,-encryption}` · `measurement-{schema,health}` · `metrics-rest` all GO.
+
+**P3b (next, unchanged by the bounce except inputs):** `/trajectory/cross-check` reads this series, computes `centroid_drift_z` via `baseline-z.js`, and renders the quadrant vs Fisher's `velocity_baseline_z`. **Run-boundary disambiguator** (the bounce's refinement): Fisher↑/global-flat *at a re-cluster boundary* → "the map shifted, not your thinking"; *within a run* → "real but minor reshuffle among related areas." Chip confidence = AND of both sides; deadzones (moved z>2, flat z<1, 1–2 = consistent) so it doesn't flap. Spearman kept only as a slow per-user calibration meta-signal. Attribution mitigation: surface Fisher's `top_contributors` *inverted* ("Fisher attributes this to X, but your semantic center didn't move"). Ship basis-suspect first, hidden-drift fast-follow.
 
 ---
 

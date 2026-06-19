@@ -621,6 +621,16 @@ const ENCRYPTED_FIELDS = {
     'point_count', 'embedding_novelty',
   ],
 
+  // embedding_trajectory — basis-free movement cross-check (pipeline/
+  // compute-embedding-trajectory.py, Python caller-encrypt). centroid_drift +
+  // dispersion are sensitive derived semantic-movement signals. Structural keys
+  // (window_*, window_type, clustering_run_id), message_count + low_confidence
+  // stay plaintext. The UPSERT conflict target touches no encrypted column. The
+  // centroid itself (768D fingerprint) is NEVER stored — only these two scalars.
+  embedding_trajectory: [
+    'centroid_drift', 'dispersion',
+  ],
+
   // frequency_snapshots — windowed cognitive metrics (pipeline/
   // compute-frequency.py, Python caller-encrypt). The 5 core metrics +
   // 3 context counts are derived signals → ENCRYPT. Structural columns stay
