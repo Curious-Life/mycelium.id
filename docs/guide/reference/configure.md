@@ -69,6 +69,8 @@ real Nomic embeddings; search **fail-softs to BM25** when it's down.
 | `MYCELIUM_DISABLE_EMBED=1` | Force BM25-only search (skip the embed service) |
 | `MYCELIUM_EMBED_URL` | Point at a different embed service |
 | `MYCELIUM_DEBUG=1` | Print tool-failure stacks to **stderr only** (off by default — errors can embed user content) |
+| `MYCELIUM_IMPORT_ALLOWED_ROOTS` | Extra directories the [local import routes](rest-and-ingest.md#import-from-local-sources-8787) may read from (OS path-list separated, e.g. `/a:/b`). The import allowlist is Obsidian vaults + `~/.claude/projects` by default; add a `mycelium-full-export` bundle's parent here to import it. |
+| `MYCELIUM_OBSIDIAN_IMPORT_LIMIT_MB` | Request-body ceiling for the browser-mode Obsidian import (default `256`). |
 
 ### Ports
 

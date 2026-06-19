@@ -58,9 +58,13 @@ Imports run on attacker-influenceable files, so the parser:
 - reads only the known entry — no archive-path writes (**no zip-slip**),
 - caps decompressed size with a streaming abort (**no decompression bombs**),
 - bounds in-memory chunk assembly (**no memory-exhaustion DoS**),
-- never echoes file contents in errors.
+- never echoes file contents in errors,
+- confines local-folder imports to an allowlist — a supplied `folderPath`/`dirPath` is
+  `realpath`-resolved and must sit inside your Obsidian vaults, `~/.claude/projects`, or
+  an explicit `MYCELIUM_IMPORT_ALLOWED_ROOTS` grant (**no reading arbitrary paths or
+  symlink-escaping out of the allowed roots**).
 
-Proven by `npm run verify:import-security`.
+Proven by `npm run verify:import-security` and `npm run verify:import-confinement`.
 
 ## Inference egress
 
