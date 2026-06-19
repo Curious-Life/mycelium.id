@@ -87,11 +87,11 @@ The collapse removed the field envelope to kill **per-row decrypt** on hot reads
 
 ---
 
-## 2. 🔴 HIGH — `vault-bridge` :8099 unauthenticated decrypted-vault SQL oracle
-`pipeline/vault-bridge.js` serves arbitrary SQL against the **decrypted** vault on `127.0.0.1:8099`, gated only by `isTrustedLoopback` — which proves *same host*, not *same user*. On a shared/multi-user Mac, any local process can read the entire vault while the pipeline runs. Also a CLAUDE.md §13 ("no ad-hoc network servers") tension.
-**Fix:** per-boot shared-secret token (parent → bridge via env; required header) + a random ephemeral port, or a `0600` unix-domain socket. Clean-room patchable.
+## 2. 🔴 HIGH — `vault-bridge` :8099 unauthenticated decrypted-vault SQL oracle ✅ FIXED + MERGED (PR #345)
+`pipeline/vault-bridge.js` served arbitrary SQL against the **decrypted** vault on `127.0.0.1:8099`, gated only by `isTrustedLoopback` — which proves *same host*, not *same user*. On a shared/multi-user Mac, any local process could read the entire vault while the pipeline runs.
+**Fixed by a parallel agent — PR #345 (`3cffad06`, merged to main):** per-boot `X-Bridge-Token` (random secret minted by `run-clustering.sh`, shared via inherited env, constant-time compared on **every** route incl. `/healthz`) + **fail-closed startup** (no token ⇒ bridge refuses to boot) + an ephemeral port (49152–65535) replacing fixed 8099. Threaded through `d1_client.py`/`local_db.py` + the 3 bridge gates (+ 401 negative tests). Design: `docs/DESIGN-vault-bridge-auth-2026-06-19.md`. (NOTE: this session independently built an equivalent token fix before discovering #345 was already merged — the duplicate was dropped; #345 is canonical.)
 
-## 3. 🟠 MED-HIGH — import accepts arbitrary local paths
+## 3. 🟠 MED-HIGH — import accepts arbitrary local paths ✅ FIXED (PR #344, parallel agent: realpath + detect-sources allowlist)
 `/import/{obsidian,full-export,claude-code}` take any absolute server-local path (owner-gated) and ingest arbitrary `.md`/`.jsonl`/assets — a confused-deputy / stolen-Bearer risk.
 **Fix:** confine roots to the `detect-sources` allowlist + a `realpath` prefix-check (reject paths that escape the allowed roots). Clean-room patchable.
 

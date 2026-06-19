@@ -10,8 +10,8 @@
 |---|---|---|
 | 1 | 🔴 CRITICAL — plaintext-at-rest on the self-host path | ✅ **FIXED** (`9515de7`, PR #341, CI verifying) — **entry-point gated** (not path; first cut `10a8f1a` broke 29 gates — see below). verify:at-rest-default 5/5 GO local |
 | 2 | 🔴 — `cryptography>=48.0.1` (was `<45` cap, 4 CVEs) | ✅ **applied on main by the parallel supply-chain agent** (`pipeline/requirements.txt`); see `docs/PYTHON-DEPS-SUPPLY-CHAIN-2026-06-19.md` — NOT this PR |
-| 3 | 🔴 — vault-bridge :8099 unauth SQL oracle | ⏳ TODO (clean-room) |
-| 4 | 🟠 — import accepts arbitrary local paths | ⏳ TODO (clean-room) |
+| 3 | 🔴 — vault-bridge :8099 unauth SQL oracle | ✅ **FIXED + MERGED to main — PR #345** (`3cffad06`, parallel agent): per-boot `X-Bridge-Token` (constant-time) on every route + fail-closed start + ephemeral port. NOT this PR (I built a dup, dropped it). |
+| 4 | 🟠 — import accepts arbitrary local paths | ✅ **FIXED — PR #344** (parallel agent): realpath+allowlist confinement. NOT this PR. |
 | 5 | 🟠 — bump dompurify (XSS sanitizer advisory) | ⏳ TODO |
 | 6 | 🟠 — pin+hash-lock Python deps + wire pip-audit into CI | ⏳ TODO (parallel agent's plan) |
 | 7 | 🟠 — scrubs: /Users paths in KEEP files + exploit doc + email + .gitignore | ⏳ TODO (mechanical) |

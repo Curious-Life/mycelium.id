@@ -81,6 +81,10 @@ async function main() {
   for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch { /* */ } }
   try { rmSync(UPLOADS, { recursive: true, force: true }); } catch { /* */ }
   mkdirSync('data', { recursive: true });
+  // The /import/full-export route confines dirPath to the allowlist
+  // (src/ingest/detect-sources.js). This gate's synthetic bundle lives under
+  // the OS temp dir — grant it via the explicit out-of-band root.
+  process.env.MYCELIUM_IMPORT_ALLOWED_ROOTS = tmpdir();
   new Database(DB).close(); applyMigrations(new Database(DB));
   const srv = await startRestServer({ dbPath: DB, kcvPath: KCV, userHex: USER_HEX, systemHex: hex(), port: 0, host: '127.0.0.1', portalMode: 'legacy' });
   const { url } = srv; const uid = 'local-user';

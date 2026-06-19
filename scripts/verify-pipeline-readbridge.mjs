@@ -23,6 +23,8 @@ const USER_MASTER = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7
 const SYSTEM_KEY = deriveSystemKey(USER_MASTER);
 const DB_KEY = deriveDbKey(USER_MASTER);
 const PORT = 8232;
+const TOKEN = '0123456789abcdef'.repeat(4); // 64-char per-boot bridge auth token (test)
+const AUTH = { 'x-bridge-token': TOKEN };
 
 let pass = 0, fail = 0;
 const ok = (n, c, extra = '') => { c ? pass++ : fail++; console.log(`  [${c ? '✓' : '✗'}] ${n}${extra ? ' — ' + extra : ''}`); };
@@ -33,7 +35,7 @@ function openKeyed(path) {
   db.pragma(`key="x'${DB_KEY}'"`);
   return db;
 }
-async function bridgeReq(path, body, headers = {}) {
+async function bridgeReq(path, body, headers = AUTH) {
   return new Promise((resolve, reject) => {
     const data = body ? Buffer.from(JSON.stringify(body)) : null;
     const req = http.request({ host: '127.0.0.1', port: PORT, path, method: body ? 'POST' : 'GET',
@@ -83,10 +85,14 @@ async function main() {
     ok('vault encrypted (migration ran)', res.migrated === true, `tables=${res.tables}`);
 
     bridge = spawn('node', [join(ROOT, 'pipeline/vault-bridge.js')], {
-      env: { ...process.env, MYCELIUM_DB: vault, USER_MASTER, SYSTEM_KEY, MYCELIUM_DB_BRIDGE_PORT: String(PORT) },
+      env: { ...process.env, MYCELIUM_DB: vault, USER_MASTER, SYSTEM_KEY, MYCELIUM_DB_BRIDGE_PORT: String(PORT), MYCELIUM_DB_BRIDGE_TOKEN: TOKEN },
       stdio: ['ignore', 'ignore', 'inherit'],
     });
     ok('bridge: /healthz reachable', await waitHealthz());
+
+    // P0: loopback alone is not auth — an un-tokened loopback request is 401.
+    const noTok = await bridgeReq('/query', { sql: 'SELECT 1' }, {});
+    ok('P0 bridge rejects un-tokened loopback /query (401)', noTok.status === 401, `status=${noTok.status}`);
 
     // direct keyed read = ground truth for parity
     const direct = openKeyed(vault);
@@ -131,7 +137,7 @@ blob = local_db.query("SELECT id, nomic_embedding FROM clustering_points WHERE i
 v = blob[0]["nomic_embedding"]
 assert isinstance(v, (bytes, bytearray)) and bytes(v) == bytes([1,2,3,4]), repr(v)
 print("PYOK")
-`], { env: { ...process.env, MYCELIUM_DB_BRIDGE_URL: `http://127.0.0.1:${PORT}` }, encoding: 'utf8' });
+`], { env: { ...process.env, MYCELIUM_DB_BRIDGE_URL: `http://127.0.0.1:${PORT}`, MYCELIUM_DB_BRIDGE_TOKEN: TOKEN }, encoding: 'utf8' });
     const pyOk = py.status === 0 && /PYOK/.test(py.stdout || '');
     ok('P4 Python local_db reads via the bridge: TEXT envelope as str, raw BLOB decoded to bytes',
       pyOk, pyOk ? '' : (py.stderr || py.stdout || 'no python3?').trim().split('\n').pop());

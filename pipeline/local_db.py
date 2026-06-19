@@ -23,6 +23,9 @@ from pathlib import Path
 
 DB_PATH = os.environ.get("MYCELIUM_DB", "")
 _BRIDGE_URL = os.environ.get("MYCELIUM_DB_BRIDGE_URL") or None
+# Per-boot shared secret minted by the spawner (run-clustering.sh), inherited via env;
+# the bridge requires it on every request. @see pipeline/vault-bridge.js.
+_BRIDGE_TOKEN = os.environ.get("MYCELIUM_DB_BRIDGE_TOKEN") or ""
 _conn = None
 
 
@@ -73,7 +76,7 @@ def _post(route, body, timeout=120):
     req = urllib.request.Request(
         _BRIDGE_URL + route,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "X-Bridge-Token": _BRIDGE_TOKEN},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:

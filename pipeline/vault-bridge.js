@@ -12,9 +12,16 @@
 // server the pipeline owns (run-clustering.sh starts it, waits on /healthz, kills it
 // on EXIT). NEVER expose this port (CLAUDE.md §13) — it serves DECRYPTED rows.
 //
-// Auth: isTrustedLoopback(req) — loopback peer AND no proxy headers (same trust model
-// as src/internal-router.js, which already returns plaintext secrets over loopback).
-// Keys are read from inherited env at startup and NEVER cross the wire.
+// Auth: TWO independent layers, fail-closed (CLAUDE.md §2, §3).
+//   1. isTrustedLoopback(req) — loopback peer AND no proxy headers. Proves SAME HOST.
+//   2. X-Bridge-Token — a per-boot random secret. Proves SAME USER. Loopback alone is
+//      NOT authentication: on a shared/multi-user Mac (or via any other local uid) a
+//      process could POST arbitrary SQL to the DECRYPTED vault. The parent that spawns
+//      the bridge mints MYCELIUM_DB_BRIDGE_TOKEN, passes it via inherited env, and the
+//      Python client echoes it in the X-Bridge-Token header (checked in constant time).
+// Both layers must pass on EVERY route (incl. /healthz). No token configured ⇒ the
+// bridge refuses to START; absent/bad header ⇒ 401. Keys + token are read from inherited
+// env at startup and NEVER cross the wire (only the token is matched, never echoed).
 //
 // Two write semantics, preserved exactly from the Python layer being replaced:
 //   POST /query, /batch          RAW — run on the raw keyed handle, NO auto-encrypt /
@@ -26,14 +33,30 @@
 //                                autoDecrypt) so ENCRYPTED_FIELDS columns land as
 //                                AES-GCM envelopes. @see local_db.batch_encrypted.
 //
-// Env: MYCELIUM_DB, USER_MASTER, SYSTEM_KEY (inherited), MYCELIUM_DB_BRIDGE_PORT (8099).
+// Env: MYCELIUM_DB, USER_MASTER, SYSTEM_KEY, MYCELIUM_DB_BRIDGE_TOKEN (all inherited,
+// all required), MYCELIUM_DB_BRIDGE_PORT (defaults to 8099 for a manual run; the spawner
+// passes a random ephemeral port).
 import http from 'node:http';
+import crypto from 'node:crypto';
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { deriveDbKey } from '../src/account/keystore.js';
 import { isTrustedLoopback } from '../src/http/loopback.js';
 
 const HOST = '127.0.0.1';
+const TOKEN_HEADER = 'x-bridge-token';
+const EXPECTED_TOKEN = process.env.MYCELIUM_DB_BRIDGE_TOKEN || '';
+
+/** Layer 2 auth: constant-time compare of the per-boot token. Both sides are hashed to
+ *  a fixed 32-byte digest first, so there is no length-leak and timingSafeEqual never
+ *  throws on unequal-length inputs. Returns false for a missing/empty header. */
+function tokenOk(req) {
+  const provided = req?.headers?.[TOKEN_HEADER];
+  if (typeof provided !== 'string' || provided.length === 0) return false;
+  const a = crypto.createHash('sha256').update(provided).digest();
+  const b = crypto.createHash('sha256').update(EXPECTED_TOKEN).digest();
+  return crypto.timingSafeEqual(a, b);
+}
 
 // Binary transport over JSON: a SQLite BLOB travels as a tagged object
 // `{ __b64__: <base64> }`. The tag is applied/stripped at exactly two points —
@@ -91,6 +114,10 @@ async function main() {
   const port = Number(process.env.MYCELIUM_DB_BRIDGE_PORT || 8099);
   if (!dbPath) throw new Error('MYCELIUM_DB not set');
   if (!userHex || !systemHex) throw new Error('USER_MASTER and SYSTEM_KEY required');
+  // Fail closed: never serve the decrypted vault without a per-boot auth token.
+  if (EXPECTED_TOKEN.length < 32) {
+    throw new Error('MYCELIUM_DB_BRIDGE_TOKEN required (≥32 chars) — the bridge will not serve the decrypted vault without a per-boot auth token');
+  }
 
   // Imported CryptoKeys for the encrypting path; raw hex DB key for the cipher open.
   const [userKey, systemKey] = await Promise.all([loadKey(userHex), loadKey(systemHex)]);
@@ -99,8 +126,9 @@ async function main() {
   const rawDb = adapter.db; // the keyed better-sqlite3 handle (bypasses auto-crypt)
 
   const server = http.createServer(async (req, res) => {
-    // Fail closed: loopback-only, reject any proxied request.
+    // Fail closed, two layers: same-host (loopback, no proxy hop) AND same-user (token).
     if (!isTrustedLoopback(req)) return send(res, 403, { ok: false, error: 'forbidden: loopback only' });
+    if (!tokenOk(req)) return send(res, 401, { ok: false, error: 'unauthorized' });
     if (req.method !== 'POST' && req.url !== '/healthz') return send(res, 405, { ok: false, error: 'POST only' });
     try {
       if (req.url === '/healthz') return send(res, 200, { ok: true });

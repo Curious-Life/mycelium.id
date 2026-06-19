@@ -37,6 +37,11 @@ async function main() {
   for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
   try { rmSync(VAULT, { recursive: true, force: true }); } catch {}
   mkdirSync('data', { recursive: true });
+  // The import routes confine folderPath to the allowlist (src/ingest/detect-sources.js).
+  // This test's fixture vault lives under data/ — grant it via the explicit
+  // out-of-band root so the legit folderPath transport can be exercised.
+  mkdirSync(VAULT, { recursive: true });
+  process.env.MYCELIUM_IMPORT_ALLOWED_ROOTS = VAULT;
   const raw = new Database(DB); applyMigrations(raw); raw.close();
 
   // ── P1 parser (no server) ──

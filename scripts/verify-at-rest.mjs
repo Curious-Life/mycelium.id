@@ -27,6 +27,8 @@ const USER_MASTER = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7
 const SYSTEM_KEY = deriveSystemKey(USER_MASTER);
 const DB_KEY = deriveDbKey(USER_MASTER);
 const PORT = 8231; // test-only port, loopback
+const TOKEN = '0123456789abcdef'.repeat(4); // 64-char per-boot bridge auth token (test)
+const AUTH = { 'x-bridge-token': TOKEN };
 const MAGIC = 'SQLite format 3\0';
 
 let pass = 0, fail = 0;
@@ -40,7 +42,7 @@ function openKeyed(path, key = DB_KEY) {
   return db;
 }
 
-async function bridgeReq(path, body, headers = {}) {
+async function bridgeReq(path, body, headers = AUTH) {
   return new Promise((resolve, reject) => {
     const data = body ? Buffer.from(JSON.stringify(body)) : null;
     const req = http.request({ host: '127.0.0.1', port: PORT, path, method: body ? 'POST' : 'GET',
@@ -110,7 +112,7 @@ async function main() {
 
     // ── start the bridge against the encrypted vault ────────────────────────
     bridge = spawn('node', [join(ROOT, 'pipeline/vault-bridge.js')], {
-      env: { ...process.env, MYCELIUM_DB: vault, USER_MASTER, SYSTEM_KEY, MYCELIUM_DB_BRIDGE_PORT: String(PORT) },
+      env: { ...process.env, MYCELIUM_DB: vault, USER_MASTER, SYSTEM_KEY, MYCELIUM_DB_BRIDGE_PORT: String(PORT), MYCELIUM_DB_BRIDGE_TOKEN: TOKEN },
       stdio: ['ignore', 'ignore', 'inherit'],
     });
     ok('bridge: /healthz reachable', await waitHealthz());
@@ -118,6 +120,15 @@ async function main() {
     // ── A6: bridge rejects a proxied request ────────────────────────────────
     const proxied = await bridgeReq('/query', { sql: 'SELECT 1' }, { 'x-forwarded-for': '8.8.8.8' });
     ok('A6 bridge rejects proxied (x-forwarded-for) request', proxied.status === 403);
+
+    // ── A6-token: loopback alone is NOT enough — a request with NO token (and a
+    // request with the WRONG token) is rejected 401 even from genuine loopback.
+    const noTok = await bridgeReq('/query', { sql: 'SELECT 1' }, {});
+    ok('A6 bridge rejects loopback request with NO token (401)', noTok.status === 401, `status=${noTok.status}`);
+    const badTok = await bridgeReq('/query', { sql: 'SELECT 1' }, { 'x-bridge-token': 'wrong'.repeat(13) });
+    ok('A6 bridge rejects loopback request with WRONG token (401)', badTok.status === 401, `status=${badTok.status}`);
+    const noTokHealth = await bridgeReq('/healthz', null, {});
+    ok('A6 /healthz also requires the token (no liveness oracle without it)', noTokHealth.status === 401, `status=${noTokHealth.status}`);
 
     // ── A6: read pre-migration data over the bridge ─────────────────────────
     const rd = await bridgeReq('/query', { sql: `SELECT value FROM facts WHERE key='k1'` });
@@ -164,7 +175,7 @@ assert d1_client.query("SELECT value FROM facts WHERE key=?", ["k2"])[0]["value"
 local_db.batch([{"sql":"INSERT INTO facts(id,user_id,category,key,value) VALUES(?,?,?,?,?)","params":["f4","u","py","k5","PY_BATCH_WRITE"]}])
 assert d1_client.query("SELECT value FROM facts WHERE key=?", ["k5"])[0]["value"] == "PY_BATCH_WRITE"
 print("PYOK")
-`], { env: { ...process.env, MYCELIUM_DB_BRIDGE_URL: `http://127.0.0.1:${PORT}` }, encoding: 'utf8' });
+`], { env: { ...process.env, MYCELIUM_DB_BRIDGE_URL: `http://127.0.0.1:${PORT}`, MYCELIUM_DB_BRIDGE_TOKEN: TOKEN }, encoding: 'utf8' });
     const pyOk = py.status === 0 && /PYOK/.test(py.stdout || '');
     ok('A6 Python d1_client/local_db read+write via bridge', pyOk, pyOk ? '' : (py.stderr || py.stdout || 'no python3?').trim().split('\n').pop());
   } finally {

@@ -90,16 +90,25 @@ fi
 # self-detected, or MYCELIUM_AT_REST opted in).
 BRIDGE_PID=""
 if node -e "import('./src/db/open.js').then(m=>process.exit(m.resolveDbKeyHex(process.env.USER_MASTER, process.env.MYCELIUM_DB)?0:1)).catch(()=>process.exit(1))"; then
-  export MYCELIUM_DB_BRIDGE_PORT="${MYCELIUM_DB_BRIDGE_PORT:-8099}"
+  # Mint a per-boot shared secret so loopback is not the ONLY gate (loopback proves
+  # same-host, not same-user — on a shared Mac any local uid could otherwise POST SQL
+  # to the decrypted vault). The bridge requires it on every request; the Python stages
+  # inherit it via env and echo it in X-Bridge-Token. Also bind a RANDOM ephemeral port
+  # (49152-65535) rather than a predictable fixed 8099 — defence in depth; the token is
+  # the real boundary. @see pipeline/vault-bridge.js.
+  export MYCELIUM_DB_BRIDGE_TOKEN="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+  export MYCELIUM_DB_BRIDGE_PORT="${MYCELIUM_DB_BRIDGE_PORT:-$(( RANDOM % 16384 + 49152 ))}"
   node pipeline/vault-bridge.js &
   BRIDGE_PID=$!
   trap '[ -n "${BRIDGE_PID}" ] && kill "${BRIDGE_PID}" 2>/dev/null || true' EXIT
   # Wait (≤10s) for /healthz before any Python stage runs; fail closed if the
   # bridge dies or never becomes healthy (else Python silently falls back to a
-  # plaintext open of the cipher file → SQLITE_NOTADB mid-run).
+  # plaintext open of the cipher file → SQLITE_NOTADB mid-run). /healthz also
+  # requires the token, so the probe sends it too.
   if ! node -e "
     const p = process.env.MYCELIUM_DB_BRIDGE_PORT, deadline = Date.now() + 10000;
-    (async () => { while (Date.now() < deadline) { try { const r = await fetch('http://127.0.0.1:' + p + '/healthz'); if (r.ok) process.exit(0); } catch {} await new Promise((r) => setTimeout(r, 200)); } process.exit(1); })();
+    const h = { 'x-bridge-token': process.env.MYCELIUM_DB_BRIDGE_TOKEN };
+    (async () => { while (Date.now() < deadline) { try { const r = await fetch('http://127.0.0.1:' + p + '/healthz', { headers: h }); if (r.ok) process.exit(0); } catch {} await new Promise((r) => setTimeout(r, 200)); } process.exit(1); })();
   "; then
     echo "[bridge] vault-bridge did not become healthy on :${MYCELIUM_DB_BRIDGE_PORT} — aborting (encrypted vault, Python stages need the bridge)" >&2
     exit 4
