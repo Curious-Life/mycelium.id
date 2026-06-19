@@ -22,8 +22,8 @@ const bot = new AgentDiscordBot({
   channelId: process.env.DISCORD_WEALTH_CHANNEL,
   allowedServers: (process.env.DISCORD_ALLOWED_SERVERS || '').split(',').filter(Boolean),
   allowedUsers: (process.env.DISCORD_ALLOWED_USERS || '').split(',').filter(Boolean),
-  // Webhook bots whose messages Rob should process (e.g., Captain Hook trading reports)
-  webhookBotIds: (process.env.DISCORD_WEBHOOK_BOT_IDS || '1480182601640841387').split(',').filter(Boolean),
+  // Webhook bots whose messages the agent should process (e.g., external trading-report webhook bots)
+  webhookBotIds: (process.env.DISCORD_WEBHOOK_BOT_IDS || '').split(',').filter(Boolean),
 });
 
 export async function startRobBot() {

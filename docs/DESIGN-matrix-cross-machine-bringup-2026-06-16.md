@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-16
 **Author:** sweep-first-design pass over the live code + the existing Tier-1 docs
-**Goal:** Get two real Mycelium boxes (`hi.mycelium.id` ↔ `lo.mycelium.id`) exchanging end-to-end-encrypted (Megolm) messages over Matrix, on top of the now-working Tier-0 connection handshake.
+**Goal:** Get two real Mycelium boxes (`hi.example.com` ↔ `lo.example.com`) exchanging end-to-end-encrypted (Megolm) messages over Matrix, on top of the now-working Tier-0 connection handshake.
 
 This is **not greenfield.** Phase B (B1–B10) is built, merged, and unit-green behind an injectable `MatrixClient` seam; the A1/A1b spikes proved the real client + Megolm + S2S work on a live server. The remaining work is **wiring + a homeserver**, captured by [DEPLOY-federation-phaseB-B11-HANDOFF-2026-06-06.md](DEPLOY-federation-phaseB-B11-HANDOFF-2026-06-06.md). This doc verifies that handoff against today's code, makes the one decision it leaves open (cross-machine homeserver topology), and adds the verification table + threat model.
 
@@ -55,7 +55,7 @@ This is **not greenfield.** Phase B (B1–B10) is built, merged, and unit-green 
 
 ## 3. The decision: homeserver topology for cross-machine (revision v1→v2)
 
-**v1 (from D-FED-7, the locked decision):** one Continuwuity sidecar **per box**. `hi` runs its own homeserver, `lo` runs its own, and the two **federate via Matrix S2S** so `@hi:hi.mycelium.id` can talk to `@lo:lo.mycelium.id`.
+**v1 (from D-FED-7, the locked decision):** one Continuwuity sidecar **per box**. `hi` runs its own homeserver, `lo` runs its own, and the two **federate via Matrix S2S** so `@hi:hi.example.com` can talk to `@lo:lo.example.com`.
 
 **Why v1 is wrong for the bring-up (the pivot):** S2S federation is its own large surface — each homeserver must expose a federation endpoint (`:8448` or `.well-known/matrix/server` delegation), implement server-keys exchange, and be publicly reachable for S2S — and the design **explicitly defers** Continuwuity footprint + S2S cost to the unbuilt A2 spike. Putting an unproven, heavyweight dependency on the critical path of the *first* cross-machine test is exactly the structural mistake this protocol exists to catch. The B11 handoff itself says "a homeserver reachable from the box" (singular), not one-per-box — i.e. it already leans client-of-a-homeserver.
 
@@ -136,7 +136,7 @@ No new orchestration. Five concrete additions, all against the existing seam:
 
 1. **Stand up the shared homeserver** (Continuwuity) + register `@hi` / `@lo`; record homeserver URL + per-box access token. *Smoke:* both boxes can log in via a throwaway script (the spike harness).
 2. **`createMatrixClient`** against the seam + persistent crypto store; add `matrix-js-sdk`. *Smoke:* adapter conformance test + a 2-client local send/receive (spike-style).
-3. **Bind MXID + advertise** (`identity_channels` + `buildDidDocument`). *Smoke:* `curl https://hi.mycelium.id/.well-known/did.json` shows the `#matrix` service.
+3. **Bind MXID + advertise** (`identity_channels` + `buildDidDocument`). *Smoke:* `curl https://hi.example.com/.well-known/did.json` shows the `#matrix` service.
 4. **Boot wiring** (`matrixClient`/`matrixEgress`/`spaceSync` + `onTimelineEvent` + `portalCompatRouter`). *Smoke:* `spaceSync.enabled === true`; grant on a 1-box space creates a room (check `space_matrix_rooms`).
 5. **`resolveMxid` + MXID↔peer map.** *Smoke:* grant to a connected peer returns `{invited:true}` not `{skipped:'peer-has-no-matrix'}`.
 6. **Two-box E2E** (§7). *Smoke:* the share→decrypt→persist-once→revoke→kick run.

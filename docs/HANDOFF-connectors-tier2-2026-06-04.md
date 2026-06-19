@@ -14,8 +14,8 @@ Self-contained: read this + the three design docs and you can build 2b without r
 ## 1. Repo / branch / worktree state
 - `origin/main` = **`e76eb00`** (includes: #64 AI-interface layer w/ `ai_providers`/providers; #78 remote-access; #80 Tier 1; #76 benchmark doc).
 - **Open PR:** **#81** `feat(connectors): health UI + per-connection daily budget (Tier 2a)` on branch **`feat/connectors-tier2`**. Awaiting user decision (merge / review / hold) — see §7.
-- **Worktree for this work:** `/Users/altus/mycelium-tier2` on branch `feat/connectors-tier2` (off `e76eb00`).
-  - `node_modules` and `portal-app/node_modules` are **symlinks** → `/Users/altus/mycelium.id/{,portal-app/}node_modules` (deps verified identical). **Never `git add` them.** If main advances with new deps, re-check parity before trusting the symlinks.
+- **Worktree for this work:** `~/mycelium-tier2` on branch `feat/connectors-tier2` (off `e76eb00`).
+  - `node_modules` and `portal-app/node_modules` are **symlinks** → `~/mycelium.id/{,portal-app/}node_modules` (deps verified identical). **Never `git add` them.** If main advances with new deps, re-check parity before trusting the symlinks.
 - **Live app checkout** `~/mycelium.id` is on **stale main `b90fa2a`** — `git pull` there to run the merged app. Don't disturb its working tree (worktrees are created from it but don't touch it).
 - Latest migration = **`0007_messages_content_hash.sql`** → **next is `0008`**.
 

@@ -44,8 +44,8 @@ async function main() {
   // --- authenticate a resource owner (single-user) ---
   // better-auth enforces an Origin header (CSRF). Browsers/MCP clients send it.
   const jsonOrigin = { "content-type": "application/json", origin: BASE };
-  const email = `martin+${Date.now()}@spike.local`, password = "spike-Password-123";
-  await fetch(`${BASE}/api/auth/sign-up/email`, { method: "POST", headers: jsonOrigin, body: JSON.stringify({ email, password, name: "Martin" }) }).then(stashCookies);
+  const email = `alice+${Date.now()}@spike.local`, password = "spike-Password-123";
+  await fetch(`${BASE}/api/auth/sign-up/email`, { method: "POST", headers: jsonOrigin, body: JSON.stringify({ email, password, name: "Alice" }) }).then(stashCookies);
   const signIn = await fetch(`${BASE}/api/auth/sign-in/email`, { method: "POST", headers: jsonOrigin, body: JSON.stringify({ email, password }) });
   stashCookies(signIn);
 

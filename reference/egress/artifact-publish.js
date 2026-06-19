@@ -380,7 +380,7 @@ export function createArtifactPublisher(deps) {
       });
     }
 
-    // 4. Success hook — Captain Hook + activity feed observers.
+    // 4. Success hook — the external webhook bot + activity feed observers.
     hookBus?.emit('artifact.published', {
       agentId, source, filename,
       documentPath: finalDocumentPath,

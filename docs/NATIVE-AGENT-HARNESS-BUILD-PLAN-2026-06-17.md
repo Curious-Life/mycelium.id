@@ -6,7 +6,7 @@
 **Skills fired:** `/sweep-first-design` (5 parallel Explore sweeps + own-eyes verification, this session).
 **Scope:** Steps 1–4a are shipped + gated (see handoff). This doc is the verified plan for the **remaining four steps**, written after a fresh 5-sweep pass against the worktree code.
 
-> All work lives in the worktree `/Users/altus/Documents/GitHub/mycelium-worktrees/native-agent-harness` (branch `feat/native-agent-harness`). Build + gate each step inside it. Run full `npm run verify` before any merge to main.
+> All work lives in the worktree `~/Documents/GitHub/mycelium-worktrees/native-agent-harness` (branch `feat/native-agent-harness`). Build + gate each step inside it. Run full `npm run verify` before any merge to main.
 
 ---
 

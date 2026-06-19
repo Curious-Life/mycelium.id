@@ -76,7 +76,7 @@ Read-only audit of the federation/shared-spaces surface (the real "multi-user" s
 ```
 curl -s --max-time 8 http://127.0.0.1:8787/api/v1/account/status        # {"open":true,...,"bootError":null}
 curl -s -o /dev/null -w "%{time_total}s\n" http://127.0.0.1:8787/api/v1/portal/activity   # should be ~ms, not seconds
-git -C /Users/altus/Documents/GitHub/mycelium.id log --oneline origin/main -4   # 89e3325 / 39777b7(#270) / 13b6373(#267) / 0ff3273(#269)
+git -C ~/Documents/GitHub/mycelium.id log --oneline origin/main -4   # 89e3325 / 39777b7(#270) / 13b6373(#267) / 0ff3273(#269)
 ```
 
 ---

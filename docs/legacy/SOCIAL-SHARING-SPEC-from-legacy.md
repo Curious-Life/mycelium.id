@@ -33,7 +33,7 @@ A new "Profile" card accessible from the portal sidebar or a `/profile` route. S
 
 ```
 ┌─────────────────────────────────────────┐
-│  mycelium.id/@martin                    │
+│  mycelium.id/@person                    │
 │                                         │
 │  12 territories · 5 realms              │
 │  48,231 messages · since Sep 2024       │
@@ -72,7 +72,7 @@ A new "Profile" card accessible from the portal sidebar or a `/profile` route. S
 -- Migration: 103_user_profiles.sql
 CREATE TABLE IF NOT EXISTS user_profiles (
   user_id TEXT PRIMARY KEY,
-  handle TEXT UNIQUE,                    -- @martin
+  handle TEXT UNIQUE,                    -- @person
   display_name TEXT,                     -- encrypted
   signature TEXT,                        -- one-line bio, encrypted
   stats_json TEXT,                       -- {depth, breadth, coherence, exploration, territory_count, realm_count, message_count, member_since}
@@ -133,7 +133,7 @@ PUT /portal/mindscape/territory/:id/visibility  body: { visibility: 'public' }
 ### 1.3 Shareable Profile Card
 
 **What the user sees:**
-A "Share Profile" button that generates a link: `mycelium.id/@martin`
+A "Share Profile" button that generates a link: `mycelium.id/@person`
 
 The public page (served from mycelium.id-site, not the portal) shows:
 - Handle, signature

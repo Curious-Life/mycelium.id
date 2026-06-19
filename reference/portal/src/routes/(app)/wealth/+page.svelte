@@ -746,7 +746,7 @@
 						id="pf-name"
 						type="text"
 						bind:value={newPortfolioName}
-						placeholder="e.g. Personal, Shared with Nate"
+						placeholder="e.g. Personal, Shared with Alex"
 						class="w-full px-3 py-2 rounded-lg bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-primary)] text-sm focus:outline-none focus:border-aurum/50"
 					/>
 				</div>

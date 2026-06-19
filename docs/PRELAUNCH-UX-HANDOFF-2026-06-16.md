@@ -26,7 +26,7 @@
 ## 2026-06-16 session summary — start here when picking up
 
 ### What shipped
-- 3 commits above on branch **`claude/prelaunch-ux-v2`** in worktree **`/Users/altus/Documents/GitHub/mycelium-worktrees/prelaunch-ux`** (off clean `origin/main`). Local `main` fast-forwarded to `b22fde0`.
+- 3 commits above on branch **`claude/prelaunch-ux-v2`** in worktree **`~/Documents/GitHub/mycelium-worktrees/prelaunch-ux`** (off clean `origin/main`). Local `main` fast-forwarded to `b22fde0`.
 - The updated payload is **LIVE in `/Applications/Mycelium.app`** (relaunched + verified — see Production state).
 
 ### What was learned (MOST IMPORTANT — these die if not read)
@@ -44,8 +44,8 @@
 
 ### Pickup protocol for the next session
 1. Read this handoff cold + the `portal-ui-live-verify` memory note.
-2. `cd /Users/altus/Documents/GitHub/mycelium-worktrees/prelaunch-ux` (= `main` + UX work; node_modules symlinked from the main repo).
-3. Verify state: `git -C . log --oneline -4` → top is `b22fde0`. `git -C /Users/altus/Documents/GitHub/mycelium.id rev-parse main` → `b22fde0`.
+2. `cd ~/Documents/GitHub/mycelium-worktrees/prelaunch-ux` (= `main` + UX work; node_modules symlinked from the main repo).
+3. Verify state: `git -C . log --oneline -4` → top is `b22fde0`. `git -C ~/Documents/GitHub/mycelium.id rev-parse main` → `b22fde0`.
 4. **Run `/sweep-first-design` (3 cycles) on #19** before any code — it touches shared abstractions (`db.contexts`, `user_profiles`/`handle`, publish pipeline, `users.settings`). Inventory: how do "context areas" relate to Sharing-contexts, Spaces, territories, Library docs, and the publish surface? How does "public space" relate to the existing Profile pane (`handle` = public slug) + publish?
 5. Build → `/deploy-and-verify` (svelte-check + a new `verify:*` gate + live-verify via the browser preview, now viable).
 6. Live-verify recipe is in the memory note (vite dev :5174 proxied to live :8787; OR — since the app is live — relaunch via the payload-swap recipe).
@@ -136,7 +136,7 @@ Vault data lives at `~/Library/Application Support/id.mycelium.app` (Tauri app_d
 
 ## Pickup checklist (execute step-by-step)
 1. Read this handoff cold. Don't skim.
-2. `cd /Users/altus/Documents/GitHub/mycelium-worktrees/prelaunch-ux`; confirm `git log -1` = `b22fde0`.
+2. `cd ~/Documents/GitHub/mycelium-worktrees/prelaunch-ux`; confirm `git log -1` = `b22fde0`.
 3. `/sweep-first-design` × 3 on **#19** (the operator's chosen starting point).
 4. Build #19 → svelte-check + a new `verify:*` gate + live-verify.
 5. Then #10, then #13/#11 (visual, browser-verified).

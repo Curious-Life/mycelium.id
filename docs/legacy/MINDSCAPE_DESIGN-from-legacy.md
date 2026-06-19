@@ -266,7 +266,7 @@ The Mindscape should feel:
 
 ## Next Steps
 
-1. Review this design with Martin
+1. Review this design with the maintainer
 2. Prioritize which enhancements to implement first
 3. Start with starfield + glow (highest visual impact per effort)
 4. Iterate on activation colors/pulse frequencies based on feel

@@ -120,7 +120,7 @@ export function createConnectionsNamespace(deps) {
   // Our FEDERATION handle = the first label of our public host (what WebFinger +
   // did:web publish, e.g. "hi" for hi.mycelium.id). This is the handle a peer
   // MUST use to resolve us back (acct:<handle>@<host>) — NOT user_profiles.handle,
-  // which is a human label that can differ ("martin") and 404s WebFinger. Outbound
+  // which is a human label that can differ ("person") and 404s WebFinger. Outbound
   // from_handle uses this so the reverse handshake (connect-response) can find us.
   function selfHandle() {
     const h = selfInstance && selfInstance();

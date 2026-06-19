@@ -129,7 +129,7 @@ Order is strict: **1a → 1b → 1c → 2 → 3a → 3b.** Each ships behind its
 - `src/enrich/service.js` — inject inference dep; register the new stage in the drainer loop after embed.
 - `src/db/messages.js` — `selectPendingCategories` + `updateCategories`.
 **Clustering**: no change to `cluster.py` — it already produces the territories; the new labels *describe/validate* clusters via SQL `GROUP BY domain` (the label→cluster join is a read, Phase 3b surface).
-**Gate** `verify:enrich-categories`: stub LLM (dev-msg→Work, "burnt out"→Body/Meaning, "called Una"→People); model-down → NULL not poison; batch-of-10 → 1 call; plaintext columns are SQL-`GROUP BY`-able.
+**Gate** `verify:enrich-categories`: stub LLM (dev-msg→Work, "burnt out"→Body/Meaning, "called Alice"→People); model-down → NULL not poison; batch-of-10 → 1 call; plaintext columns are SQL-`GROUP BY`-able.
 
 ### Phase 1c — Three-tier memory — ✅ BUILT 2026-06-19 (companion design: `CONTEXT-ENGINE-CORE-INTERACTION-DESIGN-2026-06-19.md`)
 **As-built (3 sub-units, all gated GO):**

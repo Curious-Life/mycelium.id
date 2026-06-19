@@ -85,17 +85,17 @@ async function main() {
     // P3 — edit (PUT) persists handle + display_name + signature
     const put = await fetch(`${url}/api/v1/portal/profile`, {
       method: 'PUT', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ handle: 'forest_walker', display_name: 'Martin', signature: 'into the trees' }),
+      body: JSON.stringify({ handle: 'forest_walker', display_name: 'Alice', signature: 'into the trees' }),
     });
     const putBody = await put.json().catch(() => ({}));
     rec('P3. PUT /profile persists handle/display_name/signature',
-      put.status === 200 && putBody.profile?.handle === 'forest_walker' && putBody.profile?.display_name === 'Martin' && putBody.profile?.signature === 'into the trees',
+      put.status === 200 && putBody.profile?.handle === 'forest_walker' && putBody.profile?.display_name === 'Alice' && putBody.profile?.signature === 'into the trees',
       `status=${put.status} handle=${putBody.profile?.handle}`);
 
     // P4 — read-back is persisted (round-trips through user_profiles)
     const prof2 = await j(M('/profile'));
     rec('P4. GET /profile reflects the saved edits',
-      prof2.body?.profile?.handle === 'forest_walker' && prof2.body?.profile?.display_name === 'Martin',
+      prof2.body?.profile?.handle === 'forest_walker' && prof2.body?.profile?.display_name === 'Alice',
       `handle=${prof2.body?.profile?.handle}`);
 
     // P5 — invalid handle rejected (fail-closed)

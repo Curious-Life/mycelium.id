@@ -55,7 +55,7 @@ repo and never ported to this V1 codebase. So they're new work here, not regress
   **BLOCKED:** GitHub **Actions minutes/spending cap** → all new jobs fail at
   0 steps. **Operator must raise the org spending limit** to finish the 2-arch
   release. 6 GH secrets set + notarytool validated (Developer ID
-  `Martins Balodis (C5TSZBNYB6)`; `.p12` in `~/mycelium-signing/`).
+  `<signing identity> (<TEAM_ID>)`; `.p12` in `~/mycelium-signing/`).
 - **At-rest encryption:** ON by default in the packaged app (#233 merged).
   **🔴 PR #256 is CRITICAL** — "main currently corrupts vaults on encrypt"
   (migration race); review/merge before any release. #253/#237 = plaintext-backup

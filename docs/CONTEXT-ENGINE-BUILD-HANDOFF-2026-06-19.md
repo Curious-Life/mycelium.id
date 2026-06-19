@@ -3,7 +3,7 @@
 **Date:** 2026-06-19 · **Audience:** the next instance (likely post-compaction). **This is the as-built state.** Supersedes `CONTEXT-ENGINE-HANDOFF-2026-06-19.md` (design-only, pre-build).
 
 ## TL;DR — where everything is
-- **Worktree:** `/Users/altus/Documents/GitHub/mycelium-id-worktrees/ctx-engine-1a` · **branch:** `feat/context-engine-1a-reflection` (off `main` `0858e89`) · **HEAD `19461af`**. **NOT merged / pushed / deployed.** Isolated worktree (the main tree is contested).
+- **Worktree:** `~/Documents/GitHub/mycelium-id-worktrees/ctx-engine-1a` · **branch:** `feat/context-engine-1a-reflection` (off `main` `0858e89`) · **HEAD `19461af`**. **NOT merged / pushed / deployed.** Isolated worktree (the main tree is contested).
 - **PHASE 2 COMPLETE** (2a schema · 2b lifecycle · 2c-core `distill.js` · **2c-wire** `proposeClaim` tool · **2d** getContext asOf + profiler deprecation). **9 engine gates GO** — `verify:reflection-cycles · enrich-categories · mindfile-sanitize · core-context · reflection-records · claims-bitemporal · claims-lifecycle · claims-distill · claims-distill-tool` (+ `context · rest · mcp · mindscape · claims-discovery` regress GREEN). Run them first to confirm the baseline.
 
 ## ⏱ DO THIS FIRST — deploy + live-smoke the foundation, THEN Phase 3
@@ -15,7 +15,7 @@
 **Step 2 — wire contradiction `validate` (the one deferred piece).** `proposeClaim` ships WITHOUT contradiction auto-retraction because a correct in-process `infer` must honor §4g (`sensitive → on-box`, no US egress) via `resolveProviderChain` — reusable inference-layer plumbing, not hand-rolled in a tool. It's a DROP-IN: `createClaimsDistillDomain` already accepts `infer`/`validate`; build a sensitive-aware `infer` (mirror `run-turn.js`'s `resolveInferenceConfigForTask` + `resolveProviderChain({sensitive:true})` → router with on-box fallback), pass it at the `mcp.js` registration, done. Until then nothing auto-retracts (safe; human-reviewed merge is the backstop).
 
 **Step 3 — Phase 3.** 3a register compass (centroids from accrued 1b labels + anisotropy mean-subtraction; reuse `cluster.py compute_and_store_centroids_256d`) · 3b surfaces (life-balance chart from `domainMix` + the day-card timeline/red-threads from `db.reflections` + claim tendencies; wire `settings.models.{enrichment,distillation}` into the per-task lane — `reflection` already there). 3b is frontend → needs the live WKWebView (see the webkit-shader-verify discipline).
-- **GOTCHA:** the bare worktree has no `node_modules` — it's **symlinked** to the main checkout (`ln -sfn /Users/altus/Documents/GitHub/mycelium.id/node_modules node_modules`) so native-dep gates run. `node_modules` is gitignored; the symlink is never committed.
+- **GOTCHA:** the bare worktree has no `node_modules` — it's **symlinked** to the main checkout (`ln -sfn ~/Documents/GitHub/mycelium.id/node_modules node_modules`) so native-dep gates run. `node_modules` is gitignored; the symlink is never committed.
 - **Build source of truth:** `CONTEXT-ENGINE-SPEC-2026-06-19.md` (what) · `CONTEXT-ENGINE-IMPLEMENTATION-PLAN-2026-06-19.md` (how, with per-phase as-built notes) · `CONTEXT-ENGINE-PHASE2-DESIGN-2026-06-19.md` (the claims layer) · `CONTEXT-ENGINE-CORE-INTERACTION-DESIGN-2026-06-19.md` (agent↔memory, end-to-end) · `SCIENCE-phase2-bitemporal-claims-2026-06-19.md` (Ada's brief).
 
 ### Commit ledger (all on the branch, all gated `VERDICT: GO`)

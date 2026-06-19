@@ -63,9 +63,9 @@ grep -rn "from ['\"]@mycelium/[^'\"]*['\"]" packages/ | grep "<symbolName>"
 grep -rn "['\"]<symbolName>['\"]" packages/
 
 # Cross-repo if applicable
-grep -rn "<symbolName>" /Users/sfn/Documents/GitHub/mycelium.id/lib/ \
-  /Users/sfn/Documents/GitHub/MYA-0.2/src/ \
-  /Users/sfn/Documents/GitHub/mycelium-ios/MyceliumMobile/MyceliumMobile/ 2>/dev/null
+grep -rn "<symbolName>" ~/Documents/GitHub/mycelium.id/lib/ \
+  ~/Documents/GitHub/MYA-0.2/src/ \
+  ~/Documents/GitHub/mycelium-ios/MyceliumMobile/MyceliumMobile/ 2>/dev/null
 
 # Documentation
 grep -rn "<symbolName>" docs/ *.md

@@ -1,7 +1,7 @@
 # Cognitive-Measurement Audit — Built Metrics vs. Collected Literature
 
 **Date:** 2026-06-19
-**Method:** 8 parallel adversarial auditors, one per method family, each cross-referencing the as-built pipeline (`/Users/altus/Documents/GitHub/mycelium.id`) against the collected research corpus (`Curious-Life/research-agent`, Ada), anchored on the unified spec `research/mycelium-cognitive-measurement-unified-2026-06-04.md`. Plus one live probe against the real vault via the Mycelium MCP.
+**Method:** 8 parallel adversarial auditors, one per method family, each cross-referencing the as-built pipeline (`~/Documents/GitHub/mycelium.id`) against the collected research corpus (`Curious-Life/research-agent`, Ada), anchored on the unified spec `research/mycelium-cognitive-measurement-unified-2026-06-04.md`. Plus one live probe against the real vault via the Mycelium MCP.
 **Scope:** information-geometry/Fisher · information-harmonics · cross-scale-coupling · criticality · coherence+frequency · embedding-anchor (Tier-1) · topology/graph+clustering · behavioral-temporal + the presentation/honesty layer.
 
 ---

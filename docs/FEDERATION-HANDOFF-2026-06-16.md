@@ -12,7 +12,7 @@
 
 ## TL;DR — current state
 
-**Tier-0 federation works live between two real boxes.** A connection between `hi.mycelium.id` and `lo.mycelium.id` was established end-to-end this session. Five PRs merged to `main` fixing the bug chain that blocked it. Tier-1 (Matrix messaging) is designed but unbuilt.
+**Tier-0 federation works live between two real boxes.** A connection between `hi.example.com` and `lo.example.com` was established end-to-end this session. Five PRs merged to `main` fixing the bug chain that blocked it. Tier-1 (Matrix messaging) is designed but unbuilt.
 
 | PR | squash SHA on main | What | State |
 |---|---|---|---|
@@ -60,14 +60,14 @@ The bug chain that stood between "Tier-0 code exists" and "two real boxes connec
 1. **Stuck-pending delivery (#170).** A failed fire-and-forget connect POST left a `pending` row with no recovery (re-request no-op'd; `disconnect` required `accepted`). Fixed: re-request **re-delivers**; new `withdraw()` clears a stranded sent invite.
 2. **Control-plane port (#170).** The managed-claim UI showed every handle "taken" because the app hit `connect.mycelium.id:443` (frps SNI-passthrough, no cert → TLS `unrecognized_name`). The control plane lives on **`:8443`**. Fixed the default + the false-"taken" label.
 3. **Edge routing (#178).** The on-Mac Caddy proxied `/.well-known/*` to `:4711` but **not `/federation/*`** → inbound connect POSTs 404'd at the edge (hit `:8787` which doesn't mount federation). A peer could fetch your DID but not deliver a request. Added `/federation/*` to the `oauth` edge route.
-4. **2-char handles (#179).** `HANDLE_LOCAL_PART_RE` required ≥3 chars; both boxes are named `hi`/`lo` → `requestConnection("lo@lo.mycelium.id")` fell through to local lookup → "User not found." Relaxed to 2+ chars + hyphens.
-5. **Profile-vs-federation handle mismatch (#181).** Outbound `from_handle` used `user_profiles.handle` (`martin`) instead of the federation handle (`hi`, the subdomain that WebFinger/did:web publish). So the accepter's `connect-response` did `WebFinger acct:martin@hi.mycelium.id` → 404 → never sent → initiator stuck `pending`. Fixed: send the federation handle; match the inbound accept on the **verified host** (handle is cosmetic; host is the identity).
-6. **UX (#180).** Real server error messages (not "failed (400)"), bare-handle entry (`lo` → `lo@lo.mycelium.id`), 10s live-refresh + toasts on the Connections page, badge poll 60s→15s.
+4. **2-char handles (#179).** `HANDLE_LOCAL_PART_RE` required ≥3 chars; both boxes are named `hi`/`lo` → `requestConnection("lo@lo.example.com")` fell through to local lookup → "User not found." Relaxed to 2+ chars + hyphens.
+5. **Profile-vs-federation handle mismatch (#181).** Outbound `from_handle` used `user_profiles.handle` (`person`) instead of the federation handle (`hi`, the subdomain that WebFinger/did:web publish). So the accepter's `connect-response` did `WebFinger acct:person@hi.example.com` → 404 → never sent → initiator stuck `pending`. Fixed: send the federation handle; match the inbound accept on the **verified host** (handle is cosmetic; host is the identity).
+6. **UX (#180).** Real server error messages (not "failed (400)"), bare-handle entry (`lo` → `lo@lo.example.com`), 10s live-refresh + toasts on the Connections page, badge poll 60s→15s.
 
 ### What was learned (READ THIS — the most valuable lines)
 - **The running app is the installed `Mycelium.app` bundle, NOT the source tree.** It runs `…/src-tauri/target/release/bundle/macos/Mycelium.app/Contents/Resources/app/`. Source edits/merges do nothing until a **`cargo tauri build`** rebuild. Every "still broken after the fix" this session traced to this.
-- **The vault's profile handle (`martin`) ≠ the federation handle (`hi`).** They're set independently (onboarding vs subdomain claim). `hi` and `lo` have **different keys** (different `did.json`), so they are genuinely separate vaults — not a clone. The "resolves as martin over the wire" symptom was #181, now fixed.
-- **Tailscale MagicDNS negative-caching is a real federation footgun.** Querying `lo.mycelium.id` *before* it was registered cached NXDOMAIN in Tailscale's resolver (`100.100.100.100`); the box couldn't resolve `lo` even after it went live (macOS cache was empty — Tailscale is the caching layer; `dscacheutil` flush won't help). Resolved by **disabling Tailscale**. The app resolves federation hosts via the system resolver, so split-DNS interferes. (Possible future hardening: resolve federation lookups via a public resolver.)
+- **The vault's profile handle (`person`) ≠ the federation handle (`hi`).** They're set independently (onboarding vs subdomain claim). `hi` and `lo` have **different keys** (different `did.json`), so they are genuinely separate vaults — not a clone. The "resolves as person over the wire" symptom was #181, now fixed.
+- **Tailscale MagicDNS negative-caching is a real federation footgun.** Querying `lo.example.com` *before* it was registered cached NXDOMAIN in Tailscale's resolver (`100.100.100.100`); the box couldn't resolve `lo` even after it went live (macOS cache was empty — Tailscale is the caching layer; `dscacheutil` flush won't help). Resolved by **disabling Tailscale**. The app resolves federation hosts via the system resolver, so split-DNS interferes. (Possible future hardening: resolve federation lookups via a public resolver.)
 - **`codesign` fails while the app is running** ("Operation not permitted" on the live binary). Quit the app before rebuilding. The rebuild also fails at the optional **DMG** step (`bundle_dmg.sh`) — that's harmless; the `.app` itself signs fine (`codesign --verify --deep --strict` → OK).
 - **The live Caddyfile patch survives restarts but not re-provision.** I hand-patched `hi`'s materialized Caddyfile to add `/federation/*` + reloaded Caddy (backup at `…/id.mycelium.app/Caddyfile.bak-prefed`); `materializeRemoteConfigs` only re-runs on provision (`src/remote/router.js:229,291`), not boot. A from-`main` build makes it permanent.
 - **The reservation-spam concern is real but control-plane-only.** Audited `mycelium-managed`: cert/CA side is well-protected (daily cap after entitlement), but the **namespace** is exposed — `claim()` reserves before payment, **no per-key cap**, and re-claim **refreshes the hold** → free squatting (gated only by Turnstile + per-IP). Cannot be fixed from this repo. Operator ruled out touching `mycelium-managed` for now → **accepted limitation**.
@@ -85,14 +85,14 @@ The bug chain that stood between "Tier-0 code exists" and "two real boxes connec
 
 | Box | publicHost | remoteMode | reachable | can receive (`/federation/connect`) | running build |
 |---|---|---|---|---|---|
-| `hi` (this Mac) | `hi.mycelium.id` | managed, `httpListening:true` | ✅ (did.json 200) | ✅ 401 (edge patched live) | **built ~02:03, PRE-#181** → from_handle bug still live |
-| `lo` (other computer) | `lo.mycelium.id` | managed | ✅ (verified via IP-pin) | ✅ 401 | from-`main` build (has fixes) |
+| `hi` (this Mac) | `hi.example.com` | managed, `httpListening:true` | ✅ (did.json 200) | ✅ 401 (edge patched live) | **built ~02:03, PRE-#181** → from_handle bug still live |
+| `lo` (other computer) | `lo.example.com` | managed | ✅ (verified via IP-pin) | ✅ 401 | from-`main` build (has fixes) |
 
 Connection rows right now: `hi` has a `pending` sent to `lo` (`id 2d38a80f…`); `lo` shows it `accepted` (one-sided — the #181 bug, not yet live on `hi`).
 
 **Verification commands (run on/from `hi`):**
 ```sh
-# hi self-state — expect remoteMode:managed, publicHost:hi.mycelium.id, httpListening:true, controlPlaneUrl …:8443
+# hi self-state — expect remoteMode:managed, publicHost:hi.example.com, httpListening:true, controlPlaneUrl …:8443
 curl -s http://127.0.0.1:8787/api/v1/remote/status | jq '{remoteMode,publicHost,httpListening,controlPlaneUrl}'
 # both boxes reachable + can receive — expect did.json 200, POST → 401 (unsigned)
 for H in hi lo; do
@@ -100,11 +100,11 @@ for H in hi lo; do
   curl -s -o /dev/null -w "$H connect %{http_code}\n" -X POST -H 'content-type: application/json' -d '{}' https://$H.mycelium.id/federation/connect
 done
 # is the running bundle pre/post #181? (grep the bundle source)
-grep -c selfHandle "/Users/altus/Documents/GitHub/mycelium.id/src-tauri/target/release/bundle/macos/Mycelium.app/Contents/Resources/app/src/db/connections.js"
+grep -c selfHandle "$HOME/Documents/GitHub/mycelium.id/src-tauri/target/release/bundle/macos/Mycelium.app/Contents/Resources/app/src/db/connections.js"
 #   0 = PRE-#181 (rebuild needed) · 3 = #181 is live
 ```
 
-`main` HEAD should be `0e97bc2` (#181): `git -C /Users/altus/Documents/GitHub/mycelium.id log -1 --format=%h origin/main`.
+`main` HEAD should be `0e97bc2` (#181): `git -C ~/Documents/GitHub/mycelium.id log -1 --format=%h origin/main`.
 
 ---
 
@@ -123,7 +123,7 @@ grep -c selfHandle "/Users/altus/Documents/GitHub/mycelium.id/src-tauri/target/r
 2. **Verify live state** with the commands above. Confirm the `grep -c selfHandle` on the bundle = 0 (pre-#181) — that's why `hi` is one-sided.
 3. **Finish Tier-0 two-way** (if the operator wants it):
    a. Quit `Mycelium.app` on `hi` (clean Cmd-Q — `codesign` fails on a running binary).
-   b. Rebuild: `cd /Users/altus/Documents/GitHub/mycelium.id && cargo tauri build` (Rust cached; ignore the DMG-step failure — the `.app` signs fine). Confirm `grep -c selfHandle …/app/src/db/connections.js` = 3.
+   b. Rebuild: `cd ~/Documents/GitHub/mycelium.id && cargo tauri build` (Rust cached; ignore the DMG-step failure — the `.app` signs fine). Confirm `grep -c selfHandle …/app/src/db/connections.js` = 3.
    c. Reopen `Mycelium.app`.
    d. **Clear the stuck rows:** on `lo`, disconnect the `hi` connection (deletes its accepted row); on `hi`, withdraw the pending (`POST /api/v1/portal/connections/<id>/withdraw`, id from `/connections/sent`).
    e. Reconnect: on `hi`, Connections → `lo` → accept on `lo` → confirm **both** sides show connected + `computeOverlap` returns.

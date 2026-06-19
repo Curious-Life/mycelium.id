@@ -40,9 +40,9 @@
 **Fix:** resolve the requested path with `fs.realpathSync` and require it to be a prefix of an allowed root (the `detect-sources` allowlist roots — `src/streams/source-registry.js`); reject (400) anything escaping. Add a `verify:import-security` assertion (a `../` / absolute-outside path is refused). ~15–30 LOC.
 
 ## #4 scrubs (mechanical, ~15 min)
-- Genericize `/Users/altus` → e.g. `~`/`<repo>` in **`.claude/skills/pre-deletion-caller-audit/SKILL.md`** + **`tools/memory-bridge/openclaw/README.md`** (KEEP files).
+- Genericize hardcoded developer home paths → e.g. `~`/`<repo>` in **`.claude/skills/pre-deletion-caller-audit/SKILL.md`** + **`tools/memory-bridge/openclaw/README.md`** (KEEP files).
 - Delete the exploit doc **`SECURITY-FOLLOWUP-KEY-IN-ENV*`** (confirm no sibling exploit docs survive the dated-doc cleanup).
-- Remove **`martin@hi.mycelium.id`** from the handoff doc that carries it (Phase-2 archive may drop it — confirm).
+- Remove the developer's real `handle@host` from the handoff doc that carries it (Phase-2 archive may drop it — confirm).
 - **`.gitignore`**: add `/.claude/memory/`, `MEMORY.md`, `_*.mjs` (and confirm `data/`, `*.db`) so personal memory/scratch never ships in a public clone.
 
 ## Pickup protocol

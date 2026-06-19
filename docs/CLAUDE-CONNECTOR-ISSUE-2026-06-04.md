@@ -23,7 +23,7 @@ Four attempts, **two different Claude accounts**, identical outcome:
 
 ## Server
 
-- Connector URL: `https://0m.mycelium.id/mcp` (self-hosted; reachable from the public internet; valid Let's Encrypt certificate).
+- Connector URL: `https://relay.example.com/mcp` (self-hosted; reachable from the public internet; valid Let's Encrypt certificate).
 - OAuth 2.1 + DCR + PKCE via `better-auth`; MCP Streamable HTTP transport (`@modelcontextprotocol/sdk`).
 
 ## Server-side log of Claude's requests
@@ -54,7 +54,7 @@ This succeeds **both with and without** an `openid` scope. So the token Claude r
 ## Verified correct, server-side (RFC-compliant)
 
 - RFC 9728 protected-resource metadata at **both** the root and the path-suffixed `/.well-known/oauth-protected-resource/mcp` — `200`, minimal body, CORS + `OPTIONS` preflight.
-- `/mcp` (no token) → `401` with `WWW-Authenticate: Bearer error="invalid_token", …, resource_metadata="https://0m.mycelium.id/.well-known/oauth-protected-resource/mcp"`. **No redirects** on `/mcp`.
+- `/mcp` (no token) → `401` with `WWW-Authenticate: Bearer error="invalid_token", …, resource_metadata="https://relay.example.com/.well-known/oauth-protected-resource/mcp"`. **No redirects** on `/mcp`.
 - RFC 8414 authorization-server metadata: S256 PKCE, `registration_endpoint` (DCR), `code_challenge_methods_supported: ["S256"]`, no `openid` advertised.
 - JWKS resolves. Opaque access token, validated server-side by session lookup (per MCP 2025-06-18).
 - `Access-Control-Expose-Headers: WWW-Authenticate, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-Id`.
