@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { assertSafeColumns, clampLimit } from './column-guard.js';
 import { buildAgentIdFilter, resolveAgentIds } from '../agent-id-aliases.js';
-import { bustMindscape } from '../mindscape-cache.js';
+import { bustMindscapePoints } from '../mindscape-cache.js';
 
 /**
  * Read AGENT_SCOPES env at call time. Returns null in admin mode
@@ -391,7 +391,7 @@ export function createMessagesNamespace(deps) {
           params: [userId, id],
         },
       ]);
-      bustMindscape(userId); // clustering_points row deleted → drop cached mindscape aggregate
+      bustMindscapePoints(userId); // clustering_points row deleted → drop BOTH points + full caches
       return { found: true, contentHash, length: content.length };
     },
 
@@ -534,7 +534,7 @@ export function createMessagesNamespace(deps) {
           `DELETE FROM clustering_points WHERE user_id = ? AND source_type = 'message' AND source_id = ?`,
           [userId, id],
         );
-        bustMindscape(userId); // points changed → drop cached mindscape aggregate
+        bustMindscapePoints(userId); // clustering_points changed → drop BOTH points + full caches
       }
       return { changed };
     },

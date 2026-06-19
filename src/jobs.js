@@ -18,7 +18,7 @@ import { resolveKeys } from './crypto/key-source.js';
 import { getSessionKeys } from './account/session-keys.js';
 import { dbPath as resolveDbPath } from './paths.js';
 import { readGenerateStats, writeGenerateStats } from './generate-stats.js';
-import { bustMindscape } from './mindscape-cache.js';
+import { bustMindscape, bustMindscapePoints } from './mindscape-cache.js';
 import { backfillColumn, countRemainingEnvelopes } from './account/backfill.js';
 import { getMasterKey } from './crypto/crypto-local.js';
 
@@ -216,7 +216,7 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
       // once on first query). Best-effort: rehydrates stored vectors, so no
       // message re-embeds; only profile texts re-embed.
       refreshSearchIndex();
-      bustMindscape(userId); // points/profiles changed → drop the cached aggregate
+      bustMindscapePoints(userId); // clustering re-ran → points changed → drop BOTH points + full caches
     } else if (state.status !== 'error') {
       state.status = 'error';
       const detail = lastErrLine();

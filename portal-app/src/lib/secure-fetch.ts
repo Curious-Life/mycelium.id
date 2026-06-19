@@ -89,6 +89,7 @@ function routeToType(method: string, path: string): string | null {
 		'GET /portal/documents': 'documents-list',
 		'POST /portal/documents': 'documents-create',
 		'GET /portal/mindscape': 'mindscape',
+		'GET /portal/mindscape/points': 'mindscape-points',
 		'GET /portal/mindscape/social': 'mindscape-social',
 		'GET /portal/mindscape/growth': 'mindscape-growth',
 		'GET /portal/mindscape/growth/summary': 'mindscape-growth-summary',
