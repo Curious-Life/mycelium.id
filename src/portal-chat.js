@@ -23,6 +23,7 @@ import { planGeneration, estimateTokens, trimToTokenBudget } from './inference/t
 import { createEgressAuditSink } from './inference/egress.js';
 import { createUsageSink } from './inference/usage.js';
 import { captureMessage } from './ingest/capture.js';
+import { hydrateHistoryBlock } from './agent/history.js';
 
 const POLICY_KEY = 'AI_ACCESS_POLICY';
 const CHAT_SOURCE = 'portal-chat';
@@ -126,16 +127,23 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
 
   // ── GET /chat/history — recent chat turns mapped to the UI ChatMessage shape.
   //    Omits metadata/entities/embedding (§1/§7) — only id/role/content/timestamp.
+  //    With ?conversationId= the history is scoped to that ONE thread (Phase 5 chat
+  //    threading); without it, the legacy cross-thread recent view (pre-threading
+  //    turns carry no conversation_id, so they only surface here).
   router.get('/chat/history', async (req, res) => {
     if (!auth(req, res)) return;
     try {
       const limit = Math.min(Number(req.query.limit) || 50, 100);
-      const rows = (await db.messages.selectRecent(userId, { limit: 200 })) || [];
-      const msgs = rows
-        .filter((r) => r.source === CHAT_SOURCE)
-        .slice(0, limit)
-        .map((r) => ({ id: r.id, role: r.role === 'assistant' ? 'assistant' : 'user', content: r.content || '', timestamp: Date.parse(r.created_at) || Date.now(), source: CHAT_SOURCE }))
-        .reverse();   // chronological for display
+      const conversationId = typeof req.query.conversationId === 'string' ? req.query.conversationId.trim() : '';
+      const toMsg = (r) => ({ id: r.id, role: r.role === 'assistant' ? 'assistant' : 'user', content: r.content || '', timestamp: Date.parse(r.created_at) || Date.now(), source: r.source || CHAT_SOURCE });
+      let msgs;
+      if (conversationId) {
+        const rows = (await db.messages.selectByConversation(userId, conversationId, { limit })) || [];
+        msgs = rows.map(toMsg).reverse();   // newest-first → chronological for display
+      } else {
+        const rows = (await db.messages.selectRecent(userId, { limit: 200 })) || [];
+        msgs = rows.filter((r) => r.source === CHAT_SOURCE).slice(0, limit).map(toMsg).reverse();
+      }
       res.json({ messages: msgs });
     } catch { res.json({ messages: [] }); }
   });
@@ -145,6 +153,12 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     if (!auth(req, res)) return;
     const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
     if (!message) { res.status(400).json({ error: 'message required' }); return; }
+    // Conversation thread key (Phase 5 chat threading): the client sends one UUID per
+    // chat thread (new on "Clear"). Scopes history hydration + persistence to this
+    // thread. Absent (legacy client) ⇒ stateless turn, exactly today's behavior.
+    const conversationId = (typeof req.body?.conversationId === 'string' && req.body.conversationId.trim())
+      ? req.body.conversationId.trim().slice(0, 100)
+      : null;
 
     const policy = await readPolicy();
     const { tools: grantedTools, unmapped } = toolsForDomains(tools || [], policy.domains);
@@ -231,6 +245,31 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
         try { const hits = await handlers.searchMindscape({ query: message, limit: 5 }); if (typeof hits === 'string' && hits) system += `\n\n## Possibly relevant to this question\n${hits}`; } catch { /* skip */ }
         send({ type: 'tool_complete', name: 'searchMemory' });
       }
+      // Conversation history (Phase 5 chat threading) → preamble, summarized + tail
+      // when over budget (the SAME path the channel/scheduler turns use, run-turn.js).
+      // The current message is NOT yet persisted, so this is PRIOR turns only — no dup.
+      // The summarize call is signal-aware so a client disconnect mid-summary aborts it
+      // instead of stalling the stream.
+      if (conversationId) {
+        try {
+          const rows = await db.messages.selectByConversation(userId, conversationId, { limit: 50 });
+          const history = (rows || []).reverse().map((r) => ({ role: r.role, content: r.content })).filter((m) => typeof m.content === 'string' && m.content.trim());
+          if (history.length) {
+            const contextWindow = plan ? (plan.inputBudget + (plan.maxTokens || 1024)) : 8192;
+            const maxOutputTokens = plan?.maxTokens || 1024;
+            const summarize = async (sys, usr, maxTokens) => {
+              const r = await loop.run({ provider, system: sys, userMessage: usr, tools: [], call: async () => '', send: () => {}, maxTokens, signal: clientGoneCtrl.signal });
+              return r?.text || '';
+            };
+            system += await hydrateHistoryBlock({
+              history, contextWindow, maxOutputTokens, summarize,
+              getSummary: db?.harness?.getSummary ? (u, c) => db.harness.getSummary(u, c) : undefined,
+              putSummary: db?.harness?.putSummary ? (rec) => db.harness.putSummary(rec) : undefined,
+              conversationId, userId,
+            });
+          }
+        } catch (e) { console.error('[chat] history hydrate failed:', e?.message); }
+      }
       if (plan) {
         // Leave room for the user message + the model's output within the window.
         const budget = Math.max(512, plan.inputBudget - estimateTokens(message));
@@ -276,7 +315,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
           // Persist only when there's actual assistant text (a truncated tool-call
           // turn can have none) — never write an empty assistant bubble.
           if (assistantText.trim()) {
-            const cap = (role, content) => captureMessage(db, { userId, role, content, source: CHAT_SOURCE, messageType: 'chat' }, enqueueEnrichment);
+            const cap = (role, content) => captureMessage(db, { userId, role, content, source: CHAT_SOURCE, messageType: 'chat', ...(conversationId ? { conversationId } : {}) }, enqueueEnrichment);
             cap('user', message).then(() => cap('assistant', assistantText.trim())).catch((e) => console.error('[chat] persist failed:', e?.message));
           }
         } else {

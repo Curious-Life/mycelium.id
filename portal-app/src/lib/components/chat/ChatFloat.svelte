@@ -713,6 +713,7 @@
 					body: JSON.stringify({
 						message: messageWithContext,
 						enableThinking,
+						conversationId: chatMessages.getConversationId(),
 						...(selectedAgentId ? { agentId: selectedAgentId } : {}),
 						...(scopedSpace ? { spaceId: scopedSpace.id } : {}),
 						...(scopedDoc ? { docPath: scopedDoc.path, docTitle: scopedDoc.title } : {}),
@@ -787,6 +788,9 @@
 		if (abortController) abortController.abort();
 		// Drop any queued sends — the user is starting fresh.
 		pendingSends = [];
+		// Start a NEW conversation thread (fresh id) so the next turn has no carried
+		// history — "Clear" means a clean slate, not just hiding the messages.
+		chatMessages.newConversation();
 		chatMessages.clear();
 		connectionStatus.reset();
 		isExpanded = false;
