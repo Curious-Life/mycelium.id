@@ -68,6 +68,20 @@ const SAFE_RELAY = /^[a-z0-9.-]{1,253}(:\d{1,5})?$/i; // host[:port]
 const SAFE_MXID = /^@[^:\s]+:[^\s/]+$/;
 export function isSafeMxid(v) { return typeof v === 'string' && SAFE_MXID.test(v); }
 
+// Operator-password weakness check. This single password is the gate between a
+// public URL and the vault, so beyond the ≥12-char floor we reject the obviously
+// guessable. Deliberately LENIENT — it must never reject a real passphrase, only
+// catch repetition, all-digit PINs, and common-word prefixes. Returns a reason
+// string (for the error/UI) or null when acceptable.
+export function passwordWeakness(p) {
+  if (typeof p !== 'string') return 'required';
+  if (new Set(p).size < 5) return 'too repetitive — use more distinct characters';
+  if (/^\d+$/.test(p)) return 'all digits — add letters and symbols';
+  if (/(.)\1{4,}/.test(p)) return 'avoid long runs of one character';
+  if (/^(password|qwerty|letmein|mycelium|changeme|iloveyou|welcome|admin)/i.test(p)) return 'starts with a common, guessable word';
+  return null;
+}
+
 // Harden auth.db: dir 0700, file 0600. It holds the better-auth signing secret,
 // the operator password hash, AND the relay/acme-dns secrets — all plaintext.
 // SQLite's default file mode is 0644 (world-readable). Best-effort.
@@ -342,6 +356,8 @@ export async function setOperatorPassword({ email, password, env = process.env }
   if (typeof password !== 'string' || password.length < 12) {
     throw new Error('operator password must be at least 12 characters');
   }
+  const weak = passwordWeakness(password);
+  if (weak) throw new Error(`operator password is weak: ${weak}`);
   const e = clean(email) || readRemoteConfig({ env }).operatorEmail;
   // Dynamic import breaks the auth.js <-> config.js cycle (auth.js imports
   // resolveAuthSecret/readRemoteConfig from here at load time).

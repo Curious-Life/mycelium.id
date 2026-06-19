@@ -73,6 +73,17 @@ export function createAuth(opts = {}) {
     secret,
     database,
     emailAndPassword: { enabled: true },
+    // Session lifetime (hardening). These sessions are ONLY used for NETWORKED
+    // (web/relay) access — the desktop loopback path is "always signed in" via the
+    // auth shim and never holds a better-auth session — so a short window costs
+    // desktop nothing and bounds the blast radius of a stolen/forgotten web cookie.
+    // expiresIn acts as an IDLE timeout (a session unused this long expires);
+    // updateAge slides it on active use. Overridable via MYCELIUM_SESSION_TTL_HOURS;
+    // default 24h idle, hourly slide.
+    session: {
+      expiresIn: Math.max(1, Number(process.env.MYCELIUM_SESSION_TTL_HOURS) || 24) * 60 * 60,
+      updateAge: 60 * 60,
+    },
     // better-auth rejects auth POSTs whose Origin is not trusted (CSRF guard).
     // Claude's connector callbacks originate from claude.ai / claude.com, so
     // trust them alongside our own base URL (validated end-to-end in the Phase-4

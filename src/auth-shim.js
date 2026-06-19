@@ -25,18 +25,30 @@ import { isTrustedLoopback } from './http/loopback.js';
  *
  * @param {object} deps
  * @param {string} deps.userId  the single V1 owner id
- * @param {string} [deps.handle]
+ * @param {string} [deps.handle]  static fallback handle (legacy/tests)
+ * @param {() => (string|null)} [deps.getHandle]  live handle source (the vault's
+ *   tag, derived from publicHost). Read per-request so a handle claimed after boot
+ *   is reflected without a restart, and returns null when no handle is set yet —
+ *   the login UI then shows a generic "your vault" instead of a placeholder. When
+ *   provided it is authoritative over `handle`.
  * @param {(req: import('express').Request) => boolean | Promise<boolean>} [deps.resolveAuthorized]
  *   Optional gate for `/session`: when provided, a request that is NOT authorized
  *   gets 401 (so a networked browser bounces to /login). Default (loopback-only
  *   V1) is "always authorized" — desktop behavior is unchanged.
  * @returns {import('express').Router}
  */
-export function authShimRouter({ userId, handle = 'local', resolveAuthorized }) {
+export function authShimRouter({ userId, handle = 'local', getHandle, resolveAuthorized }) {
   const router = express.Router();
   router.use(express.json({ limit: '256kb' }));
 
-  const user = { id: userId, handle, display_name: 'You', avatar_url: null };
+  // The vault's tag. getHandle (when supplied) is authoritative and live — it may
+  // return null (no remote handle configured yet) → the login UI shows a generic
+  // identity rather than a misleading placeholder. Falls back to the static handle.
+  const currentHandle = () => {
+    if (getHandle) { try { const h = getHandle(); return (typeof h === 'string' && h) ? h : null; } catch { return null; } }
+    return handle;
+  };
+  const userOf = () => ({ id: userId, handle: currentHandle(), display_name: 'You', avatar_url: null });
 
   // NOTE: mounted under '/auth' (see server-rest.js), so routes are relative —
   // this keeps the express.json parser scoped to /auth/* (it must not touch the
@@ -51,12 +63,13 @@ export function authShimRouter({ userId, handle = 'local', resolveAuthorized }) 
         if (!(await resolveAuthorized(req))) return res.status(401).json({ error: 'unauthorized' });
       } catch { return res.status(401).json({ error: 'unauthorized' }); }
     }
-    res.json({ user });
+    res.json({ user: userOf() });
   });
 
-  // The /login page (not normally reached) reads this to decide its flow.
+  // The /login page reads this to brand the sign-in with the vault's @handle (and
+  // to decide its flow). handle is null when none is configured → generic UI.
   router.get('/setup-status', (_req, res) =>
-    res.json({ setupRequired: false, hasPasskeys: false, handle }));
+    res.json({ setupRequired: false, hasPasskeys: false, handle: currentHandle() }));
 
   // Logout. Loopback (desktop) is "always signed in" — nothing to revoke; no-op.
   // A NETWORKED client (over the relay) holds a REAL better-auth session, so a
