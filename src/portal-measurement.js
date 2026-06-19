@@ -2,6 +2,7 @@ import express from 'express';
 import { CONTRACTS } from './metrics/contracts.js';
 import { METRIC_COLUMNS, _internal as metricsInternal } from './db/metrics.js';
 import { computeFreshness, FAMILY_STAGE } from './metrics/freshness.js';
+import { getTerritoryRiverCached } from './territory-river-cache.js';
 
 // Lempel-Ziv (1976) complexity of a symbol sequence (Kaspar-Schuster). Used for
 // the territory-river "path novelty" overlay — how varied vs repetitive the route
@@ -646,6 +647,12 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
   router.get('/territory-river', async (req, res) => {
     const u = owner(req, res); if (!u) return;
     try {
+      // The river is an expensive decrypt (400+ weekly activation vectors) but a
+      // pure function of one clustering run's trajectory + profiles + frequency
+      // snapshots — it only changes when those are recomputed. Serve it from the
+      // persisted + in-process cache, keyed by a cheap staleness probe, and only
+      // pay the fold on a genuine miss. @see src/territory-river-cache.js.
+      const payload = await getTerritoryRiverCached(db, u.id, async () => {
       const FLOOR = 0.01;      // a territory counts as "active" in a week above this share
       const TOP_ANCHORS = 7;   // named bands to show
       const LZ_WINDOW = 26;    // rolling window (weeks) for path-novelty LZ76
@@ -739,15 +746,33 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
            ORDER BY window_end ASC`, [u.id])).results || [];
       const textNovelty = freqRows.map((r) => ({ end: (r.window_end || '').slice(0, 10), value: num(r.compression) }));
 
-      res.set('Cache-Control', 'no-store');
-      res.json({
+      // 6) Anchor COUNT over time — how many persistent (anchor) territories you're
+      // holding as of each week: active above FLOOR in >=60% of a trailing 26-week
+      // window. A count (basis-internal, robust) — your stable-core size over time.
+      const TW = 26, PERSIST = 0.6;
+      const anchorCount = weeks.map((w, i) => {
+        const win = vectors.slice(Math.max(0, i - TW + 1), i + 1);
+        if (win.length < Math.ceil(TW * 0.5)) return { end: w.end, count: null }; // too little history
+        const tally = {};
+        for (const v of win) for (const k in v) if ((Number(v[k]) || 0) > FLOOR) tally[k] = (tally[k] || 0) + 1;
+        const need = Math.ceil(win.length * PERSIST);
+        let c = 0; for (const k in tally) if (tally[k] >= need) c++;
+        return { end: w.end, count: c };
+      });
+
+      return {
         run_id: runId,
         level: 'territory',
         span: weeks.length ? { start: weeks[0].end, end: weeks[weeks.length - 1].end } : null,
         weeks,
         anchors,
+        anchor_count: anchorCount,
         novelty: { text: textNovelty, path: pathNovelty },
+      };
       });
+
+      res.set('Cache-Control', 'no-store');
+      res.json(payload);
     } catch { fail(res, 500, 'Failed to load territory river'); }
   });
 

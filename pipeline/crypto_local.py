@@ -338,6 +338,44 @@ def encrypt_vector(vec, scope: str, master_key: bytes,
     return encrypt_str(b64, scope, master_key, user_id, system_key=system_key)
 
 
+# ── SQLCipher-collapse codec (Stage A) ─────────────────────────────
+# Vectors live as RAW little-endian float32 BYTES inside the whole-file-encrypted
+# vault — no inner AES-GCM envelope, no base64. Same layout as the JS
+# encodeVectorRaw / decodeStoredVector, so either side decodes the other.
+# @see docs/DESIGN-sqlcipher-stageA-vectors-2026-06-19.md
+
+
+def encode_vector_raw(vec) -> bytes:
+    """Float32 vector → RAW little-endian bytes (no base64, no envelope) for direct
+    BLOB storage. Same LE-f32 layout as encrypt_vector's pre-base64 buffer."""
+    return _vector_to_f32_bytes(vec)
+
+
+def decode_stored_vector(value, master_key: Optional[bytes] = None,
+                         dim: Optional[int] = None, *,
+                         system_key: Optional[bytes] = None):
+    """Shape-aware vector read for the migration window (mirrors JS
+    decodeStoredVector):
+
+      - bytes/bytearray/memoryview → RAW little-endian float32 (new, no crypto)
+      - str envelope               → legacy wrapped-DEK (:func:`decrypt_vector`)
+
+    Returns a contiguous numpy float32 array (truncated to ``dim`` if given), or
+    None for a None input.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        import numpy as np
+        arr = np.frombuffer(bytes(value), dtype="<f4")
+        if dim is not None:
+            if arr.size < dim:
+                raise ValueError(f"raw vector too short: {arr.size} floats < dim={dim}")
+            arr = arr[:dim]
+        return np.ascontiguousarray(arr, dtype=np.float32)
+    return decrypt_vector(value, master_key, dim, system_key=system_key)
+
+
 # ── Self-test ──────────────────────────────────────────────────────
 # `python3 crypto_local.py` exercises every encrypt/decrypt path round-trip so
 # any reusing service can sanity-check the module standalone (no vault needed).
