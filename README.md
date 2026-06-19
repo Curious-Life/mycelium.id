@@ -4,7 +4,7 @@
 
 <h1 align="center">Mycelium</h1>
 
-<p align="center"><strong>Self-sovereign memory infrastructure for AI.</strong><br>Own your keys. Own your data. Own the intelligence.</p>
+<p align="center"><strong>Personal intelligence that belongs to you.</strong><br>Own your data · Think in private · Connect meaningfully · Know the truth</p>
 
 <p align="center">
   <a href="docs/guide/"><strong>Docs</strong></a> ·
@@ -18,7 +18,9 @@
 
 ## What This Is
 
-A self-hosted MCP server that gives **any AI model** complete context about your life through a standard protocol. Your data compounds across every service. You switch models freely. Your vault is encrypted on your machine, with keys only you hold.
+Your AI gets more useful the more it knows about you — and with Mycelium, that knowledge stays yours. It lives on your own machine, not on someone else's server tied to whichever model you happen to use this month.
+
+Mycelium is a self-hosted memory layer for AI. A local server ingests your conversations, notes, and reflections, encrypts them at rest on your own machine, and serves that context to **any** AI model through the Model Context Protocol (MCP). Your memory compounds across every tool you use, you switch models freely, and nobody else holds the keys.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -60,7 +62,9 @@ A self-hosted MCP server that gives **any AI model** complete context about your
 
 ## The Measurement Layer
 
-Storage is commodity. Everyone is building memory retrieval. We're building **measurement science** — and open-sourcing it deliberately.
+Mycelium is an environment for curiosity about your own mind. Beneath the storage and search, a measurement layer turns your accumulated thinking into something you can actually see — the shape of your attention, how your ideas move, what's shifting over time. Patterns no single conversation can show you.
+
+We cultivate it in the open because of what we care about: people owning their inner life, having room to think in private, and being free to leave any platform without leaving their data behind. That's why [Curious Life](https://curiouslife.is) builds Mycelium — and why it's free, open source, and community-driven.
 
 ```
 Topology        Leiden clustering → 200-400 territories
@@ -79,25 +83,18 @@ What it does    Detect cognitive regime shifts before conscious awareness.
 
 ## Why Open Source
 
-```
-Everything is copyable — by design.
+A tool that holds your inner life is easier to trust when you can read it, run it, and fork it — no black box, no faith required. So everything is yours to take:
 
+```
   MCP interface spec                      → copy it
   Vault structure (local-first SQLite)    → copy it
   Federation protocol                     → copy it
   Topology algorithms (Leiden, co-firing) → copy it
-
-More copies = more nodes in the federated network.
-Open source GROWS the network. Proprietary would cap it.
-
-  1 node     → personal vault (useful alone)
-  10 nodes   → topology resonance discovery begins
-  100 nodes  → cross-pollination, agent-to-agent context
-  1000 nodes → protocol becomes standard
-  10000+     → the memory layer for AI
 ```
 
-The **Redis / Elasticsearch / Linux** model: commoditization of the infrastructure layer funds everything above it.
+The more people who run their own, the more of us there are who **own our data** instead of renting it back, **think in private** without lock-in, **hold the keys** to our own memory, and **connect on terms we set ourselves**.
+
+A healthy forest needs a free and open mycelial network connecting its trees. If you care about open source — about people owning their own minds — come build it with us.
 
 ## Build Status
 
@@ -166,15 +163,11 @@ mycelium.id/
 | Model-agnostic | partial | partial | ✓ | ✓ | **✓** |
 | Encrypted at rest (your keys) | ✗ | ✗ | ✗ | ✗ | **✓** |
 
-Everyone else is building memory. We're building the **nervous system**.
-
 ## Support development
 
 Mycelium is free and open source — clone it, run it, fork it, own your data. That's the point.
 
-If it's useful to you, support its development. This is infrastructure built in the open, **value-for-value**: the practice is free, and the people who get value from it fund the work that keeps it growing. The Redis / Linux model — commoditize the layer, fund what's above it.
-
-Sponsorship links will be available at launch — see [mycelium.id](https://mycelium.id).
+If it's useful to you, support its development. Mycelium is **value-for-value**: the software is free, and the people who find it useful fund the work that keeps it growing and independent. Use the **Sponsor** button at the top of this repo, or [mycelium.id](https://mycelium.id).
 
 No ads, no data sold, no strings. Just people funding the infrastructure they rely on.
 
