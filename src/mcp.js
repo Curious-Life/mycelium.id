@@ -33,6 +33,7 @@ import { createCurateDomain } from './tools/curate.js';
 import { createReplyDomain } from './tools/reply.js';
 import { createScheduleTasksDomain } from './tools/schedule-tasks.js';
 import { createCyclesDomain } from './tools/cycles.js';
+import { createReflectionsDomain } from './tools/reflections.js';
 import { createFederationDomain } from './tools/federation.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { getMasterKey } from './crypto/crypto-local.js';
@@ -142,6 +143,8 @@ export function buildDomains({
     // (instructions / schedule / on-off) + the persona, when the user asks. Chat-grantable
     // (tool-domains.js 'cycles' domain), unlike the autonomy-only schedule_task family.
     ...(db.harness ? [createCyclesDomain({ db, userId })] : []),
+    // Context Engine "day cards": record + look back on each cycle's reflective read.
+    ...(db.reflections ? [createReflectionsDomain({ db, userId })] : []),
   ];
 
   // reply (agent-explicit egress): wired ONLY when AGENT_URL is set — i.e. when

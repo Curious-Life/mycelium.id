@@ -233,6 +233,14 @@ A concise summary (the highlights, not the whole thing) is your final response t
   },
 ];
 
+// Every cycle ends by logging a dated "day card" (recordReflection) — a structured retrospective
+// record (summary + red-thread themes + day-type) for categorizing days + tracing threads over
+// time, separate from model.md. Appended uniformly here so all six cycles carry it.
+for (const _c of CYCLES) {
+  _c.body += `\n\nFinally, before you finish, call recordReflection({ cycle: '${_c.id}', summary: <a 1-2 sentence digest of what you found>, themes: [<the red threads you're tracking, as short labels>], day_type: <the kind of day this was, in your read> }). This is your dated record for looking back — keep it tight; the full thinking stays in model.md.`;
+  if (!_c.enabledTools.includes('recordReflection')) _c.enabledTools.push('recordReflection');
+}
+
 // The marker that tags a seeded reflection-cycle scheduled_task (createTask assigns its own
 // uuid, so we identify cycles by created_by, NOT id). The scheduler keys persona-injection +
 // cloud routing off this. Also the dedup key for idempotent re-seeding.
@@ -247,7 +255,7 @@ export const REFLECTION_INFERENCE_TASK = 'reflection';
 export const CYCLE_REFERENCED_TOOLS = [
   'getDailyMessages', 'searchMindscape', 'mindscape', 'getEntityContext',
   'readMindFile', 'updateInternalModel', 'editMindFile', 'writeMindFileWhole',
-  'snapshotMindFile', 'updateDocument', 'flagForDiscussion',
+  'snapshotMindFile', 'updateDocument', 'flagForDiscussion', 'recordReflection',
 ];
 
 // Canonical-only tool names that must NOT survive the port (the renames in the header).
