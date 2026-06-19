@@ -87,9 +87,11 @@ try {
             level, window_type, era_id, low_confidence
      FROM cognitive_metrics_criticality
      WHERE user_id=? AND era_id=? AND ar1_autocorrelation IS NOT NULL LIMIT 1`).get(U, RUN);
-  const enc = crow && isEnvelope(crow.ar1_autocorrelation) && isEnvelope(crow.rolling_variance) && isEnvelope(crow.flickering_score);
-  rec('C3. CSD metric columns are envelopes at rest (no plaintext numbers)',
-    !!enc, crow ? `ar1_enc=${isEnvelope(crow.ar1_autocorrelation)} var_enc=${isEnvelope(crow.rolling_variance)}` : 'no row');
+  // SQLCipher collapse (Stage B/C cut 5): CSD metric columns are PLAINTEXT-in-cipher —
+  // at-rest = whole-file SQLCipher (verify:at-rest), not per-field envelopes.
+  const allPlain = crow && !isEnvelope(crow.ar1_autocorrelation) && !isEnvelope(crow.rolling_variance) && !isEnvelope(crow.flickering_score);
+  rec('C3. CSD metric columns PLAINTEXT-in-cipher (collapse cut 5; verify:at-rest)',
+    !!allPlain, crow ? `ar1_plain=${!isEnvelope(crow.ar1_autocorrelation)} var_plain=${!isEnvelope(crow.rolling_variance)}` : 'no row');
   rec('C4. structural columns plaintext (level / window_type / era / low_confidence=1)',
     crow && !isEnvelope(crow.level) && LEVELS.includes(crow.level) && crow.window_type === 'weekly_step'
       && crow.era_id === RUN && crow.low_confidence === 1,
@@ -111,10 +113,10 @@ try {
     `SELECT magnitude, detail, headline, event_type, severity FROM cognitive_events
      WHERE user_id=? AND era_id=? AND event_type='phase_lock' LIMIT 1`).get(U, RUN);
   raw.close();
-  rec('C7. event magnitude/detail/headline encrypted; event_type/severity plaintext',
-    ev && isEnvelope(ev.magnitude) && isEnvelope(ev.detail) && isEnvelope(ev.headline)
+  rec('C7. event magnitude/detail/headline PLAINTEXT-in-cipher (collapse cut 5; verify:at-rest); event_type/severity plaintext',
+    ev && !isEnvelope(ev.magnitude) && !isEnvelope(ev.detail) && !isEnvelope(ev.headline)
       && !isEnvelope(ev.event_type) && ev.event_type === 'phase_lock' && ['notable', 'rare'].includes(ev.severity),
-    ev ? `mag_enc=${isEnvelope(ev.magnitude)} type=${ev.event_type} sev=${ev.severity}` : 'no event');
+    ev ? `mag_plain=${!isEnvelope(ev.magnitude)} type=${ev.event_type} sev=${ev.severity}` : 'no event');
 
   // ── C8. adapter read decrypts CSD + event magnitude → finite numbers ────────
   const dcrit = await db.rawQuery(

@@ -70,9 +70,11 @@ try {
   const raw = new Database(DB, { readonly: true });
   const rawRow = raw.prepare(`SELECT embedding_novelty, embedding_novelty_low_conf FROM complexity_snapshots WHERE user_id=? AND level='territory' AND level_id=2`).get(U);
   raw.close();
-  rec('N3. embedding_novelty encrypted at rest (envelope); low_conf flag plaintext',
-    isEnvelope(rawRow?.embedding_novelty) && (rawRow.embedding_novelty_low_conf === 0 || rawRow.embedding_novelty_low_conf === 1),
-    `enc=${isEnvelope(rawRow?.embedding_novelty)} low_conf=${rawRow?.embedding_novelty_low_conf}`);
+  // SQLCipher collapse (Stage B/C cut 5): embedding_novelty is PLAINTEXT-in-cipher —
+  // at-rest = whole-file SQLCipher (verify:at-rest), not a per-field envelope.
+  rec('N3. embedding_novelty PLAINTEXT-in-cipher (collapse cut 5; verify:at-rest); low_conf flag plaintext',
+    !isEnvelope(rawRow?.embedding_novelty) && (rawRow.embedding_novelty_low_conf === 0 || rawRow.embedding_novelty_low_conf === 1),
+    `plain=${!isEnvelope(rawRow?.embedding_novelty)} low_conf=${rawRow?.embedding_novelty_low_conf}`);
 
   // N4. min-length gate: re-run with MIN above the seed size → low_conf flips to 1.
   const nov2 = spawnSync(PY, ['pipeline/compute-embedding-novelty.py'], { encoding: 'utf8', env: { ...env0, EMBEDDING_NOVELTY_MIN: '9' } });

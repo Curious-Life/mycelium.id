@@ -77,21 +77,18 @@ def _master_key():
 
 
 def _enc(value):
-    """Encrypt a scalar/string sensitive value → envelope TEXT. None → None.
-
-    numpy 2.x repr(np.float64(x)) == 'np.float64(x)' poisons the value, so
-    coerce float()/int() before repr (mirrors compute-fisher.py._enc).
+    """SERIALIZE-ONLY (SQLCipher collapse, Stage B/C cut 5) — coerce to a plaintext str
+    (numpy-safe repr(float); numpy 2.x repr(np.float64(x)) would poison the value), no
+    field encryption. At-rest confidentiality is whole-file SQLCipher (verify:at-rest).
     """
     if value is None:
         return None
     if isinstance(value, str):
-        s = value
-    else:
-        try:
-            s = repr(float(value))
-        except (TypeError, ValueError):
-            s = str(value)
-    return crypto_local.encrypt_str(s, _FREQ_SCOPE, _master_key())
+        return value
+    try:
+        return repr(float(value))
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _decrypt_content(value):

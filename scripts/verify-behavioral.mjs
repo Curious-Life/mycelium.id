@@ -86,9 +86,11 @@ try {
   const encCols = ['diurnal_entropy', 'diurnal_peak_hour', 'diurnal_concentration', 'diurnal_hist',
     'session_count', 'intersession_entropy', 'intersession_cv'];
   const present = row ? encCols.filter((c) => row[c] != null) : [];
-  const allEnc = row && present.length >= 5 && present.every((c) => isEnvelope(row[c]));
-  rec('B3. behavioral scalars + diurnal histogram JSON are envelopes at rest',
-    !!allEnc, row ? `enc{${present.filter((c) => isEnvelope(row[c])).length}/${present.length}}` : 'no row');
+  // SQLCipher collapse (Stage B/C cut 5): behavioral scalars + diurnal histogram JSON
+  // are PLAINTEXT-in-cipher — at-rest = whole-file SQLCipher (verify:at-rest).
+  const allPlain = row && present.length >= 5 && present.every((c) => !isEnvelope(row[c]));
+  rec('B3. behavioral scalars + diurnal histogram JSON PLAINTEXT-in-cipher (collapse cut 5; verify:at-rest)',
+    !!allPlain, row ? `plain{${present.filter((c) => !isEnvelope(row[c])).length}/${present.length}}` : 'no row');
   rec('B4. structural columns plaintext (era / window_end / message_count / low_confidence=1)',
     row && !isEnvelope(row.era_id) && row.era_id === RUN && Number.isInteger(row.message_count)
       && row.message_count === DAYS * 7 && row.low_confidence === 1,

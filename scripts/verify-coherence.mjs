@@ -91,9 +91,11 @@ try {
             entity_grid_coherence, notes, granularity, window_end, era_id, low_confidence, pair_count
      FROM cognitive_metrics_coherence
      WHERE user_id=? AND era_id=? AND semantic_coherence_adjacent IS NOT NULL LIMIT 1`).get(U, RUN);
-  const enc = row && isEnvelope(row.semantic_coherence_adjacent) && isEnvelope(row.discourse_coherence_embedding);
-  rec('CO3. coherence metric columns are envelopes at rest (no plaintext numbers)',
-    !!enc, row ? `sca_enc=${isEnvelope(row.semantic_coherence_adjacent)} disc_enc=${isEnvelope(row.discourse_coherence_embedding)}` : 'no row');
+  // SQLCipher collapse (Stage B/C cut 5): coherence metric columns are PLAINTEXT-in-
+  // cipher — at-rest = whole-file SQLCipher (verify:at-rest), not per-field envelopes.
+  const allPlain = row && !isEnvelope(row.semantic_coherence_adjacent) && !isEnvelope(row.discourse_coherence_embedding);
+  rec('CO3. coherence metric columns PLAINTEXT-in-cipher (collapse cut 5; verify:at-rest)',
+    !!allPlain, row ? `sca_plain=${!isEnvelope(row.semantic_coherence_adjacent)} disc_plain=${!isEnvelope(row.discourse_coherence_embedding)}` : 'no row');
   rec('CO4. structural columns plaintext (granularity / window_end / era / pair_count / low_confidence=1)',
     row && !isEnvelope(row.granularity) && ['alpha', 'theta', 'delta'].includes(row.granularity)
       && row.era_id === RUN && Number.isInteger(row.pair_count) && row.low_confidence === 1,

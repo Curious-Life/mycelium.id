@@ -37,25 +37,24 @@ def _master_key() -> bytes:
 
 
 def enc(value):
-    """Encrypt a scalar/string sensitive value → envelope TEXT. None → None.
-
-    Numbers are serialized as a PLAIN-python-float repr (numpy-poison-proof).
-    Booleans are serialized as 1.0/0.0 (read path Number()s them). Strings pass
-    through verbatim (e.g. JSON detail blobs, headlines, notes).
+    """SERIALIZE-ONLY (SQLCipher collapse, Stage B/C cut 5). Was field-encrypt; now
+    returns the COERCED PLAINTEXT STRING — at-rest confidentiality is whole-file
+    SQLCipher (verify:at-rest), not a per-field envelope. The coercion is LOAD-BEARING:
+    numbers → repr(float(x)) because numpy 2.x repr(np.float64(x)) is 'np.float64(x)'
+    and would poison the stored value; booleans → '1.0'/'0.0' (read path Number()s);
+    strings pass through verbatim; None → None. dec() still dual-reads any legacy
+    envelopes until the live backfill converts them.
     """
     if value is None:
         return None
-    from crypto_local import encrypt_str
     if isinstance(value, bool):
-        s = repr(1.0 if value else 0.0)
-    elif isinstance(value, str):
-        s = value
-    else:
-        try:
-            s = repr(float(value))
-        except (TypeError, ValueError):
-            s = str(value)
-    return encrypt_str(s, _SCOPE, _master_key())
+        return repr(1.0 if value else 0.0)
+    if isinstance(value, str):
+        return value
+    try:
+        return repr(float(value))
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def dec(value):
