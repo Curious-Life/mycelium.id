@@ -96,6 +96,15 @@
 	let searchQuery = $state('');
 	let loading = $state(true);
 	let loadError = $state<string | null>(null);
+	// Progressive load: paint the first page immediately, then stream the rest
+	// in the background so client-side search still sees the full set. Without
+	// this the list blocks on decrypting every document up front (≈15s cold for
+	// a few-thousand-doc vault). `loadGeneration` invalidates an in-flight
+	// background fill when the folder changes or a resync restarts the load.
+	let backgroundFilling = $state(false);
+	let loadGeneration = 0;
+	const FIRST_PAGE = 60; // first screenful — paints fast
+	const FILL_PAGE = 150; // background page size — bounds each server-side decrypt block
 	let copySuccess = $state(false);
 	let viewMode = $state<'grid' | 'list'>('grid');
 	// Grid card size — 'sm' = 180px floor (compact, default), 'lg' = 360px
@@ -302,23 +311,37 @@
 		}
 	});
 
+	// Build the base query (folder/pinned filter) shared by every page of a load.
+	function docsBaseParams(): URLSearchParams {
+		const params = new URLSearchParams();
+		if (activeFolderId === 'starred') params.set('pinned', '1');
+		else if (activeFolderId) params.set('folder_id', activeFolderId);
+		return params;
+	}
+
 	async function loadDocuments() {
 		loadError = null;
+		// New load supersedes any background fill still running for a prior
+		// folder/state — that fill checks this token and bails.
+		const gen = ++loadGeneration;
+		backgroundFilling = false;
 		try {
-			let url = '/portal/documents';
-			const params = new URLSearchParams();
-			if (activeFolderId === 'starred') {
-				params.set('pinned', '1');
-			} else if (activeFolderId) {
-				params.set('folder_id', activeFolderId);
-			}
-			const qs = params.toString();
-			if (qs) url += `?${qs}`;
-
-			const res = await api(url);
+			const params = docsBaseParams();
+			params.set('limit', String(FIRST_PAGE));
+			params.set('offset', '0');
+			const res = await api(`/portal/documents?${params.toString()}`);
+			if (gen !== loadGeneration) return; // superseded mid-flight
 			if (res.ok) {
 				const data = await res.json();
+				if (gen !== loadGeneration) return;
 				documents = data.documents || [];
+				const total = Number(data.total);
+				// Stream the remainder in the background (non-blocking) so the
+				// grid paints now and client-side search fills in shortly.
+				if (Number.isFinite(total) && documents.length < total) {
+					backgroundFilling = true;
+					void fillRemainingDocs(gen, documents.length, total);
+				}
 			} else {
 				console.error('[Library] Failed to load documents:', res.status, res.statusText);
 				loadError = `Failed to load documents (${res.status})`;
@@ -326,6 +349,42 @@
 		} catch (e) {
 			console.error('[Library] Error loading documents:', e);
 			loadError = e instanceof Error ? e.message : 'Failed to load documents';
+		}
+	}
+
+	// Background pager: append pages until the full set is loaded. Bails the
+	// moment a newer load starts (loadGeneration bumped). Dedupes by path so
+	// SSE inserts that arrive mid-fill don't double-render. A short gap between
+	// pages lets the server interleave user actions (e.g. opening a doc)
+	// between page decrypts instead of queueing behind the whole backfill.
+	async function fillRemainingDocs(gen: number, startOffset: number, knownTotal: number) {
+		let offset = startOffset;
+		let total = knownTotal;
+		try {
+			while (offset < total && gen === loadGeneration) {
+				const params = docsBaseParams();
+				params.set('limit', String(FILL_PAGE));
+				params.set('offset', String(offset));
+				const res = await api(`/portal/documents?${params.toString()}`);
+				if (gen !== loadGeneration) return;
+				if (!res.ok) break;
+				const data = await res.json();
+				if (gen !== loadGeneration) return;
+				const page: DocListItem[] = data.documents || [];
+				if (page.length === 0) break;
+				const seen = new Set(documents.map((d) => d.path));
+				const fresh = page.filter((d) => !seen.has(d.path));
+				if (fresh.length) documents = [...documents, ...fresh];
+				offset += page.length;
+				if (Number.isFinite(Number(data.total))) total = Number(data.total);
+				if (offset < total) await new Promise((r) => setTimeout(r, 30));
+			}
+		} catch (e) {
+			// Transient — the next reconnect resync re-runs the load. Search just
+			// stays scoped to what loaded until then.
+			console.error('[Library] Background fill interrupted:', e);
+		} finally {
+			if (gen === loadGeneration) backgroundFilling = false;
 		}
 	}
 
@@ -1278,7 +1337,7 @@
 					<div class="min-w-0">
 						<h1 class="text-lg sm:text-xl font-medium text-[var(--color-text-primary)] truncate">{getFolderLabel()}</h1>
 						<p class="text-xs sm:text-sm text-[var(--color-text-tertiary)]">
-							{filteredDocs.length} {filteredDocs.length === 1 ? 'document' : 'documents'}{#if filteredMedia.length} · {filteredMedia.length} media{/if}
+							{filteredDocs.length} {filteredDocs.length === 1 ? 'document' : 'documents'}{#if filteredMedia.length} · {filteredMedia.length} media{/if}{#if backgroundFilling} · <span class="text-[var(--color-accent)]">loading…</span>{/if}
 						</p>
 					</div>
 				</div>
