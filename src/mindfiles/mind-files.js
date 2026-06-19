@@ -36,6 +36,7 @@
  */
 
 import { encrypt, decrypt, getMasterKey, inferScope } from '../crypto/crypto-local.js';
+import { sanitizeMindWrite } from './sanitize.js';
 
 const MAGIC = Buffer.from('MIND', 'latin1'); // 4 bytes, format v1
 const SAVE_FILE_MODE = 0o600;
@@ -106,6 +107,11 @@ export function createMindFiles(deps) {
   async function writeMindFile(filename, content) {
     const dir = await ensureMindDir();
     if (!dir) throw new Error('AGENT_ROOT not configured — cannot write mind files');
+    // Scan-on-write gate (Context Engine 1c-A): fail-closed BEFORE encrypt so blocked content
+    // never persists. Snapshots are skipped inside (already-scanned). The error code is
+    // content-free (§1); the harness surfaces it to the agent as a tool error.
+    const scan = sanitizeMindWrite(String(content), filename);
+    if (!scan.ok) throw new Error(`mindfile-blocked:${scan.code}`);
     const finalPath = path.join(dir, filename);
     const parentDir = path.dirname(finalPath);
     if (parentDir !== dir) {

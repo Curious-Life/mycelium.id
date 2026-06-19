@@ -25,13 +25,16 @@ export const DOMAINS = Object.freeze([
   { key: 'messages',   label: 'Messages',         description: 'Capture new messages, import, and read by day.',                     tools: ['captureMessage', 'importMessages', 'getDailyMessages'] },
   { key: 'memory',     label: 'Facts & relations', description: 'Remember facts/people, link them, pin or mark sensitive, forget.',  tools: ['remember', 'link', 'mark', 'forget'] },
   { key: 'documents',  label: 'Documents',        description: 'Create, read, update, list — and publish — your documents.',         tools: ['saveDocument', 'findDocuments', 'updateDocument', 'getDocument', 'listDocuments', 'getDocumentShareStatus', 'publishDocument'] },
-  { key: 'mindfiles',  label: 'Mind files',       description: 'Read and edit your internal model + flag items for discussion.',     tools: ['updateInternalModel', 'flagForDiscussion', 'snapshotMindFile', 'readMindFile', 'editMindFile', 'writeMindFileWhole'] },
+  { key: 'mindfiles',  label: 'Mind files',       description: 'Read and edit your internal model + flag items for discussion.',     tools: ['updateInternalModel', 'flagForDiscussion', 'snapshotMindFile', 'readMindFile', 'editMindFile', 'writeMindFileWhole', 'removeFromMind'] },
   { key: 'topology',   label: 'Mindscape',        description: 'Explore the territory map of your cognition (when computed).',       tools: ['listTerritories', 'territoryDetail', 'mindscapeStructure', 'exploreTerritory', 'timeView'] },
   { key: 'cognition',  label: 'Cognitive state',  description: 'Your current phase, trajectory, milestones and topology view.',      tools: ['cognitiveState', 'cognitiveHistory', 'mindscape', 'getCurrentPhase', 'getTrajectoryHistory', 'getActiveMilestones', 'getTopMovers'] },
   { key: 'metrics',    label: 'Metrics',          description: 'Information-harmonic state and metric series.',                       tools: ['getHarmonicState', 'getMetricSeries'] },
   { key: 'health',     label: 'Body state',       description: 'Sleep, HRV, steps and other Apple Health data.',                     tools: ['getHealthData'] },
   { key: 'tasks',      label: 'Tasks',            description: 'Create and list your tasks.',                                         tools: ['createTask', 'listTasks'] },
+  { key: 'cycles',     label: 'Reflection cycles', description: 'Change how your reflection cycles run — their instructions, schedule, on/off — and your relationship persona.', tools: ['listCycles', 'getCyclePrompt', 'updateCycle', 'updatePersona'] },
+  { key: 'reflections', label: 'Reflection log', description: 'Record + look back on your dated reflection digests (day cards) — categorize days, trace red threads.', tools: ['recordReflection', 'listReflections'] },
   { key: 'claims',     label: 'Persona claims',   description: 'Durable person-level claims about you and their confidence.',         tools: ['personaClaims'] },
+  { key: 'claims-distill', label: 'Claim distillation', description: 'Propose durable tendencies from your reflection records, and review how a belief moved over time.', tools: ['proposeClaim', 'listClaimsHistory'] },
   { key: 'federation', label: 'Connections',      description: 'Request and respond to connections with other Mycelium instances.',  tools: ['requestConnection', 'listConnectionRequests', 'respondToConnectionRequest'] },
 ]);
 

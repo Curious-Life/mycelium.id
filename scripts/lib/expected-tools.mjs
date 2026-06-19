@@ -20,6 +20,7 @@ export const EXPECTED_TOOLS = [
   'flagForDiscussion',
   'forget',
   'getContext',
+  'getCyclePrompt',        // Context Engine L2 — reflection-cycle editing (cycles domain)
   'getDailyMessages',
   'getDocument',
   'getDocumentShareStatus',
@@ -27,24 +28,32 @@ export const EXPECTED_TOOLS = [
   'getHealthData',
   'importMessages',
   'link',
+  'listClaimsHistory',     // Context Engine L3 — claim belief-history (claims-distill domain)
   'listConnectionRequests',
+  'listCycles',            // Context Engine L2 (cycles domain)
   'listDocuments',
+  'listReflections',       // Context Engine "day cards" (reflections domain)
   'listTasks',
   'list_my_schedules',
   'mark',
   'mindscape',
   'personaClaims',
+  'proposeClaim',          // Context Engine L3 — day-card → governed claim (claims-distill domain)
   'publishDocument',
   'readMindFile',
+  'recordReflection',      // Context Engine "day cards" (reflections domain)
   'remember',
+  'removeFromMind',        // Context Engine 1c — Core/mind prune (mindfiles domain)
   'requestConnection',
   'respondToConnectionRequest',
   'saveDocument',
   'schedule_task',
   'searchMindscape',
   'snapshotMindFile',
+  'updateCycle',           // Context Engine L2 (cycles domain)
   'updateDocument',
   'updateInternalModel',
+  'updatePersona',         // Context Engine L2 — relationship persona (cycles domain)
   'writeMindFileWhole',
 ];
 

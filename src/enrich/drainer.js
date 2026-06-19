@@ -12,7 +12,9 @@
 // burn the backlog. Health-gating keeps rows pending (0) for a later retry.
 import { createEmbedClient } from '../embed/client.js';
 import { getMasterKey } from '../crypto/crypto-local.js';
+import { localInfer } from '../inference/local.js';
 import { createEnrichmentService } from './service.js';
+import { createCategoryClassifier } from './categories.js';
 
 // The live drainer for the booted vault. Set by startEnrichDrainer so a portal
 // route (POST /portal/enrichment/trigger) can kick a drain WITHOUT threading the
@@ -31,7 +33,14 @@ export function startEnrichDrainer({
   log = (m) => process.stderr.write(`${m}\n`),
   onSettled,
 } = {}) {
-  const svc = createEnrichmentService({ messages: db.messages, embed, getMasterKey });
+  // Context Engine L1: per-message domain+register tagging via the on-box model (cheap,
+  // private; format:'json' constrains the reply). The model is configurable in principle
+  // (settings.models.enrichment) — a follow-on; default = local. A model outage leaves rows
+  // pending (self-heals next cycle), never poisons a row.
+  const classify = createCategoryClassifier({
+    infer: (prompt) => localInfer({ prompt, format: 'json', maxTokens: 40, numCtx: 1024, think: false }),
+  });
+  const svc = createEnrichmentService({ messages: db.messages, embed, getMasterKey, classify });
   let running = false;
   let pending = false;
   let timer = null;
@@ -75,6 +84,18 @@ export function startEnrichDrainer({
         // imports jobs.js; server-rest wires the gate (single-flight + topology-empty).
         try { await onSettled?.({ embedded }); } catch { /* non-fatal */ }
       }
+
+      // Context Engine L1: tag new + backfill messages with domain/register. Separate from
+      // the embed gate so the historical backfill proceeds on cycles with no new embeds.
+      // Bounded per cycle (≤8 batches = 200 msgs); stops on a model outage (failed>0), leaving
+      // the rest pending for the next tick. Single-flighted by the outer `running` guard.
+      let tagged = 0;
+      for (let i = 0; i < 8; i++) {
+        const c = await svc.enrichCategoriesOnce({ userId });
+        tagged += c?.enriched ?? 0;
+        if ((c?.scanned ?? 0) === 0 || (c?.failed ?? 0) > 0) break;
+      }
+      if (tagged > 0) log(`[enrich] tagged ${tagged} message(s) with domain/register`);
     } catch (err) {
       log(`[enrich] drain cycle error: ${String(err?.message || err)}`);
     } finally {

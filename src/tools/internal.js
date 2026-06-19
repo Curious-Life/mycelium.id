@@ -117,6 +117,18 @@ export function createInternalDomain(deps) {
         required: ['filename', 'content'],
       },
     },
+    {
+      name: 'removeFromMind',
+      description: 'Remove a block of text from a mind/ file by exact match — for pruning a stale entry during consolidation (clearer intent than editMindFile with an empty replacement). The `block` MUST appear exactly once (uniqueness enforced). Surrounding blank lines are tidied. Encryption-aware; auto-snapshots the pre-removal state so it is recoverable. Returns JSON: { ok: true } or { ok: false, error: "block-not-found" | "block-not-unique" | "file-not-found" | "invalid-filename" | "empty-block", count? }.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filename: { type: 'string', description: 'Mind/ filename (e.g., "model.md", "self.md").' },
+          block:    { type: 'string', description: 'Exact text block to remove. Must appear exactly once.' },
+        },
+        required: ['filename', 'block'],
+      },
+    },
   ];
 
   const handlers = {
@@ -281,6 +293,24 @@ export function createInternalDomain(deps) {
 
       await writeMindFile(filename, content);
       return JSON.stringify({ ok: true, snapshotted });
+    },
+
+    removeFromMind: async (args) => {
+      const filename = String(args?.filename || '').trim();
+      if (!filename || filename.includes('\\') || filename.includes('..')) {
+        return JSON.stringify({ ok: false, error: 'invalid-filename' });
+      }
+      const block = String(args?.block ?? '');
+      if (!block) return JSON.stringify({ ok: false, error: 'empty-block' });
+      const content = await readMindFile(filename);
+      if (content == null) return JSON.stringify({ ok: false, error: 'file-not-found' });
+      const occurrences = content.split(block).length - 1;
+      if (occurrences === 0) return JSON.stringify({ ok: false, error: 'block-not-found' });
+      if (occurrences > 1) return JSON.stringify({ ok: false, error: 'block-not-unique', count: occurrences });
+      try { await captureSnapshot(filename); } catch { /* non-fatal — recoverable via git/snapshots */ }
+      const next = content.replace(block, '').replace(/\n{3,}/g, '\n\n'); // remove + tidy the blank-line gap
+      await writeMindFile(filename, next);
+      return JSON.stringify({ ok: true });
     },
   };
 

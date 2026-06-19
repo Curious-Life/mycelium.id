@@ -115,7 +115,12 @@
 	let tasks = $state<string[]>([]);
 	let taskModels = $state<Record<string, { providerId: number; model?: string }>>({});
 	let taskBusy = $state<string | null>(null);
-	const TASK_LABELS: Record<string, string> = { chat: 'Chat & agents', narrate: 'Narration — mindscape names + chronicles' };
+	const TASK_LABELS: Record<string, string> = {
+		chat: 'Chat & agents',
+		narrate: 'Narration — mindscape names + chronicles',
+		harness: 'Autonomous tasks — scheduled & background',
+		reflection: 'Reflection cycles — your daily/weekly inner model',
+	};
 
 	const FIT: Record<string, { label: string; cls: string }> = {
 		perfect: { label: 'great fit', cls: 'fit-green' },
