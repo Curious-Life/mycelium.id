@@ -38,7 +38,7 @@ import { createEmbeddingsHandler } from './gateway/embeddings.js';
 import { matchStaticBearer } from './gateway/static-bearer.js';
 import { createPathThrottle } from './http/rate-limit.js';
 import { createFederationRouter } from './federation/router.js';
-import { readRemoteConfig, resolveMcpBearer } from './remote/config.js';
+import { readRemoteConfig, resolveMcpBearer, passkeyEnrolled } from './remote/config.js';
 import { isValidHandle } from './identity/identity.js';
 
 /**
@@ -147,6 +147,29 @@ export async function createHttpApp(opts = {}) {
     return next();
   });
 
+  // Require-passkey-for-web (hardening, opt-in). When the operator has turned it on
+  // AND has at least one passkey enrolled, the operator PASSWORD is no longer a
+  // sufficient web credential — every relay-reachable password sign-in is refused, so
+  // the only way in over the web is the phishing-resistant passkey. Inert until both
+  // conditions hold (no bootstrap lockout), and auto-disabled on a host change
+  // (rpID-orphan safety, see config.writeRemoteConfig). Desktop loopback never hits
+  // these endpoints (it's "always signed in" via the shim) and the recovery-key flow
+  // is loopback-only, so this can NEVER permanently lock the owner out.
+  // Read per-request (config is cheap, file-backed) so toggling takes effect live.
+  const webPasswordLoginBlocked = () => {
+    try { return readRemoteConfig().requirePasskeyForWeb === true && passkeyEnrolled(); }
+    catch { return false; } // fail OPEN on a config/db read error — never lock out by accident
+  };
+  // Pre-handler guard for the better-auth catch-all password sign-in (the SPA's
+  // raw path + any direct caller). The operator-login shim and /login form guard
+  // themselves below (they render friendlier responses).
+  app.use((req, res, next) => {
+    if (req.method === 'POST' && req.path.toLowerCase() === '/api/auth/sign-in/email' && webPasswordLoginBlocked()) {
+      return res.status(403).json({ error: 'passkey_required', message: 'This vault requires a passkey for web sign-in.' });
+    }
+    return next();
+  });
+
   // Brute-force throttle on the relay-exposed operator sign-in (gap review): a
   // GLOBAL bucket (un-evadable by header spoofing) — see src/http/rate-limit.js.
   // Mounted BEFORE the auth handler so a 429 short-circuits before better-auth.
@@ -175,6 +198,8 @@ export async function createHttpApp(opts = {}) {
   app.post('/api/auth/operator-login', express.json(), async (req, res) => {
     const origin = req.headers.origin;
     if (origin && origin !== baseURL) return res.status(403).json({ error: 'forbidden' });
+    // Passkey-required: refuse password sign-in; the SPA falls back to its passkey button.
+    if (webPasswordLoginBlocked()) return res.status(403).json({ error: 'passkey_required', message: 'This vault requires a passkey for web sign-in.' });
     const password = String(req.body?.password || '');
     if (!password) return res.status(400).json({ error: 'password required' });
     const email = readRemoteConfig().operatorEmail; // fixed internal identifier — never surfaced
@@ -254,22 +279,68 @@ export async function createHttpApp(opts = {}) {
   // configured → the form brands generically. This is the IDENTITY the user sees;
   // the single operator account's internal email is never asked for or shown.
   const currentHandle = () => { const h = (readRemoteConfig().publicHost || '').split('.')[0]; return isValidHandle(h) ? h : null; };
-  const loginPage = (qs, err, csrf = '', handle = null) => {
+  const loginPage = (qs, err, csrf = '', handle = null, opts = {}) => {
+    const { passkeyRequired = false } = opts;
     const ident = handle ? `@${escHtml(handle)}` : 'your vault';
     // The subtitle reflects WHY you're here: an OAuth connector flow (client_id in
     // the query) vs a plain web sign-in to open the vault.
     const isOAuth = (() => { try { return new URLSearchParams(qs).has('client_id'); } catch { return false; } })();
     const sub = isOAuth ? 'Authorizing an app to reach this vault.' : 'Sign in to open your vault.';
-    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mycelium — Sign in</title><style>body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0c;color:#eaeaea;display:grid;place-items:center;min-height:100vh;margin:0}form{background:#15151a;padding:2rem;border-radius:14px;width:320px;border:1px solid #26262e}h1{font-size:1.05rem;margin:0 0 .4rem;color:#c9a227;font-weight:600}.id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#8a8a99;font-size:.85rem;margin:0 0 1.2rem}input{width:100%;box-sizing:border-box;margin:.35rem 0;padding:.65rem;background:#0a0a0c;border:1px solid #26262e;border-radius:8px;color:#eaeaea}button{width:100%;margin-top:1rem;padding:.7rem;background:#c9a227;color:#0a0a0c;border:0;border-radius:8px;font-weight:700;cursor:pointer}.e{color:#f87171;font-size:.85rem;margin:.3rem 0}.s{color:#8a8a99;font-size:.72rem;margin-top:1rem;text-align:center}</style></head><body><form method="POST" action="/login?${escHtml(qs)}"><h1>Connect to your vault</h1><div class="id">${ident}</div>${err ? `<div class="e">${escHtml(err)}</div>` : ''}<input type="hidden" name="_csrf" value="${escHtml(csrf)}"><input name="password" type="password" placeholder="operator password" autocomplete="current-password" autofocus required><button type="submit">Sign in</button><div class="s">${sub}</div></form></body></html>`;
+    const errBlock = `<div class="e" id="err"${err ? '' : ' style="display:none"'}>${err ? escHtml(err) : ''}</div>`;
+    // Passkey-required → passkey-only (no password field/submit). Otherwise show the
+    // password form AND a passkey button (a returning user with a passkey can use it).
+    const pwBlock = passkeyRequired ? ''
+      : `<input name="password" type="password" placeholder="operator password" autocomplete="current-password" autofocus required><button type="submit">Sign in</button>`;
+    const pkNote = passkeyRequired ? `<div class="s" style="margin-top:0;margin-bottom:.4rem">This vault requires a passkey.</div>` : '';
+    const pkBtn = `<button type="button" id="pk" class="alt">Sign in with passkey</button>`;
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mycelium — Sign in</title><style>body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0c;color:#eaeaea;display:grid;place-items:center;min-height:100vh;margin:0}form{background:#15151a;padding:2rem;border-radius:14px;width:320px;border:1px solid #26262e}h1{font-size:1.05rem;margin:0 0 .4rem;color:#c9a227;font-weight:600}.id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#8a8a99;font-size:.85rem;margin:0 0 1.2rem}input{width:100%;box-sizing:border-box;margin:.35rem 0;padding:.65rem;background:#0a0a0c;border:1px solid #26262e;border-radius:8px;color:#eaeaea}button{width:100%;margin-top:1rem;padding:.7rem;background:#c9a227;color:#0a0a0c;border:0;border-radius:8px;font-weight:700;cursor:pointer}button.alt{background:transparent;color:#c9a227;border:1px solid #26262e}.e{color:#f87171;font-size:.85rem;margin:.3rem 0}.s{color:#8a8a99;font-size:.72rem;margin-top:1rem;text-align:center}</style></head><body><form id="lf" method="POST" action="/login?${escHtml(qs)}" data-qs="${escHtml(qs)}"><h1>Connect to your vault</h1><div class="id">${ident}</div>${pkNote}${errBlock}<input type="hidden" name="_csrf" value="${escHtml(csrf)}">${pwBlock}${pkBtn}<div class="s">${sub}</div></form><script src="/login.js"></script></body></html>`;
   };
+
+  // First-party WebAuthn driver for the OAuth /login passkey button (served 'self'
+  // so it's CSP-safe; the plain form can't bundle @simplewebauthn). It drives the
+  // same better-auth passkey endpoints the portal SPA uses, then resumes the flow:
+  // an OAuth connect (client_id present) → /api/auth/mcp/authorize; else → portal.
+  const LOGIN_JS = `(function(){
+  var btn=document.getElementById('pk'); if(!btn) return;
+  var lf=document.getElementById('lf'); var qs=(lf&&lf.dataset.qs)||'';
+  function b2b(s){s=String(s).replace(/-/g,'+').replace(/_/g,'/');var p=s.length%4;if(p)s+='='.repeat(4-p);var b=atob(s),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u.buffer;}
+  function b2u(buf){var u=new Uint8Array(buf),s='';for(var i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);return btoa(s).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');}
+  function err(m){var e=document.getElementById('err');if(e){e.textContent=m;e.style.display='block';}}
+  btn.addEventListener('click',async function(){
+    btn.disabled=true; err('');
+    try{
+      var o=await fetch('/api/auth/passkey/generate-authenticate-options',{credentials:'same-origin'});
+      if(!o.ok) throw new Error('No passkey is set up on this vault yet.');
+      var opt=await o.json();
+      var pub={challenge:b2b(opt.challenge),timeout:opt.timeout,rpId:opt.rpId,userVerification:opt.userVerification||'preferred',
+        allowCredentials:(opt.allowCredentials||[]).map(function(c){return {id:b2b(c.id),type:c.type,transports:c.transports};})};
+      var cred=await navigator.credentials.get({publicKey:pub});
+      var resp={id:cred.id,rawId:b2u(cred.rawId),type:cred.type,response:{
+        authenticatorData:b2u(cred.response.authenticatorData),clientDataJSON:b2u(cred.response.clientDataJSON),
+        signature:b2u(cred.response.signature),userHandle:cred.response.userHandle?b2u(cred.response.userHandle):null}};
+      var v=await fetch('/api/auth/passkey/verify-authentication',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({response:resp})});
+      if(!v.ok) throw new Error('Passkey sign-in failed.');
+      var hasClient=false; try{hasClient=new URLSearchParams(qs).has('client_id');}catch(e){}
+      window.location=hasClient?('/api/auth/mcp/authorize?'+qs):'/';
+    }catch(e){btn.disabled=false; err((e&&e.name==='NotAllowedError')?'Passkey sign-in cancelled':((e&&e.message)||'Passkey sign-in failed'));}
+  });
+})();`;
+  app.get('/login.js', (_req, res) => {
+    res.type('application/javascript').set('Cache-Control', 'no-store').send(LOGIN_JS);
+  });
 
   app.get('/login', (req, res) => {
     const qs = req.originalUrl.split('?').slice(1).join('?') || '';
     const csrf = issueLoginCsrf(req, res);
-    res.type('html').send(loginPage(qs, null, csrf, currentHandle()));
+    res.type('html').send(loginPage(qs, null, csrf, currentHandle(), { passkeyRequired: webPasswordLoginBlocked() }));
   });
   app.post('/login', express.urlencoded({ extended: false }), async (req, res) => {
     const qs = req.originalUrl.split('?').slice(1).join('?') || '';
+    // Passkey-required: never process a password here — re-render passkey-only.
+    if (webPasswordLoginBlocked()) {
+      res.status(403).type('html').send(loginPage(qs, 'This vault requires a passkey — use the passkey button.', issueLoginCsrf(req, res), currentHandle(), { passkeyRequired: true }));
+      return;
+    }
     // CSRF + same-origin guard (H6): this server-side sign-in bypasses
     // better-auth's HTTP-layer CSRF check, so we enforce our own before touching
     // credentials. A failed check re-renders with a fresh token (no info leak).

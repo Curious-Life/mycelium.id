@@ -6,7 +6,7 @@
 import express from 'express';
 import net from 'node:net';
 import path from 'node:path';
-import { readRemoteConfig, writeRemoteConfig, setOperatorPassword, operatorUserExists, setRemoteSecret, isSafeHostname } from './config.js';
+import { readRemoteConfig, writeRemoteConfig, setOperatorPassword, operatorUserExists, passkeyEnrolled, setRemoteSecret, isSafeHostname } from './config.js';
 import { buildClaim } from './managed-claim.js';
 import { materializeRemoteConfigs } from './runtime.js';
 import { dataDir } from '../paths.js';
@@ -58,6 +58,10 @@ export function remoteRouter() {
       publicHost: rc.publicHost,
       operatorEmail: rc.operatorEmail,
       passwordSet: operatorUserExists(),
+      // Require-passkey-for-web: the current policy + whether a passkey is enrolled
+      // (the Settings toggle can only be ENABLED once a passkey exists).
+      requirePasskeyForWeb: rc.requirePasskeyForWeb === true,
+      passkeyEnrolled: passkeyEnrolled(),
       httpListening: await probeListening(port),
       // Non-secret transport coords for the own-relay / own-domain UI (O9).
       controlPlaneUrl: rc.controlPlaneUrl || '',
@@ -80,10 +84,20 @@ export function remoteRouter() {
   // Patch the non-secret config (publicBaseUrl / operatorEmail / remoteEnabled).
   router.post('/config', (req, res) => {
     try {
+      // Guard: don't let the policy be enabled before a passkey exists (would be a
+      // no-op anyway — enforcement also gates on passkeyEnrolled — but reject clearly
+      // so the UI can't show a misleading "on" with nothing protecting it).
+      if (req.body?.requirePasskeyForWeb === true && !passkeyEnrolled()) {
+        res.status(400).json({ ok: false, error: 'enroll a passkey before requiring one for web sign-in' });
+        return;
+      }
       const next = writeRemoteConfig(req.body || {});
       res.json({
         ok: true,
-        config: { publicBaseUrl: next.publicBaseUrl || '', operatorEmail: next.operatorEmail || '', remoteEnabled: next.remoteEnabled === true },
+        config: {
+          publicBaseUrl: next.publicBaseUrl || '', operatorEmail: next.operatorEmail || '',
+          remoteEnabled: next.remoteEnabled === true, requirePasskeyForWeb: next.requirePasskeyForWeb === true,
+        },
       });
     } catch {
       res.status(500).json({ ok: false, error: 'could not write config' });

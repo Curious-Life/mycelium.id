@@ -52,7 +52,7 @@ import { startEmbedSupervisor } from './embed/supervisor.js';
 import { startKokoroSupervisor } from './tts/kokoro-supervisor.js';
 import { startChannelSupervisor } from './channels/supervisor.js';
 import { mcpLoopbackRouter } from './mcp-loopback.js';
-import { matrixConfig, readRemoteConfig } from './remote/config.js';
+import { matrixConfig, readRemoteConfig, passkeyEnrolled } from './remote/config.js';
 import { isValidHandle } from './identity/identity.js';
 import { createSpaceSync } from './federation/space-sync.js';
 import { createMatrixEgress } from './federation/matrix-egress.js';
@@ -685,6 +685,9 @@ export async function startRestServer({
     // This is the IDENTITY the login surfaces show — the operator account's
     // internal email is never surfaced (single-user: there is one account).
     getHandle: () => { const h = (readRemoteConfig().publicHost || '').split('.')[0]; return isValidHandle(h) ? h : null; },
+    // Effective "web sign-in needs a passkey" policy (enabled AND a passkey enrolled),
+    // surfaced to the relay browser via /auth/setup-status so the SPA renders passkey-only.
+    getRequirePasskey: () => { try { return readRemoteConfig().requirePasskeyForWeb === true && passkeyEnrolled(); } catch { return false; } },
     // Networked clients (over the relay) must present a valid session; loopback
     // (desktop) stays "always signed in". So /auth/session 401s an unauthed
     // networked browser → the SPA bounces it to /login (operator password).

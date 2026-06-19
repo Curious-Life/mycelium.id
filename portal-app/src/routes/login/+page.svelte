@@ -8,6 +8,7 @@
 	let error = $state<string | null>(null);
 	let passwordInput = $state('');
 	let userHandle = $state<string | null>(null);
+	let requirePasskey = $state(false);
 	let telegramAvailable = $state(false);
 	let telegramRedirecting = $state(false);
 
@@ -17,6 +18,9 @@
 			if (res.ok) {
 				const data = await res.json();
 				userHandle = data.handle || null;
+				// When the vault requires a passkey for web sign-in, hide the password
+				// path and lead with the passkey button (the server also enforces this).
+				requirePasskey = data.requirePasskey === true;
 			}
 			// V1 self-hosted: a networked client (over the relay) signs in with the
 			// operator password; loopback never reaches /login (the shim authorizes
@@ -250,9 +254,14 @@
 			});
 			if (!res.ok) {
 				const data = await res.json().catch(() => ({}));
-				throw new Error(data?.error || data?.message || 'Sign-in failed — check your password');
+				if (data?.error === 'passkey_required') {
+					// Policy turned on (server enforces it) — switch to passkey-only.
+					requirePasskey = true;
+					throw new Error(data?.message || 'This vault requires a passkey for web sign-in.');
+				}
+				throw new Error(data?.message || data?.error || 'Sign-in failed — check your password');
 			}
-			// Signed in. Offer Face ID enrolment for next time (skippable).
+			// Signed in. Offer a passkey for next time (skippable).
 			mode = 'enroll';
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Sign-in failed';
@@ -364,35 +373,42 @@
 							{/if}
 							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Sign in to your vault</h2>
 							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
-								Enter your operator password to reach your vault on this device.
+								{#if requirePasskey}
+									This vault requires a passkey for web sign-in. Use Touch ID, Face ID, or your security key.
+								{:else}
+									Enter your operator password to reach your vault on this device.
+								{/if}
 							</p>
 						</div>
 
-						<form class="space-y-3" onsubmit={(e) => { e.preventDefault(); handleOperatorLogin(); }}>
-							<input
-								bind:value={passwordInput}
-								type="password"
-								placeholder="operator password"
-								autocomplete="current-password"
-								class="input w-full text-sm"
-							/>
-							<button
-								type="submit"
-								disabled={loading || !passwordInput}
-								class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed"
-							>
-								{#if loading}
-									<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-									<span>Signing in…</span>
-								{:else}
-									<span>Sign in</span>
-								{/if}
-							</button>
-						</form>
+						{#if !requirePasskey}
+							<form class="space-y-3" onsubmit={(e) => { e.preventDefault(); handleOperatorLogin(); }}>
+								<input
+									bind:value={passwordInput}
+									type="password"
+									placeholder="operator password"
+									autocomplete="current-password"
+									class="input w-full text-sm"
+								/>
+								<button
+									type="submit"
+									disabled={loading || !passwordInput}
+									class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed"
+								>
+									{#if loading}
+										<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+										<span>Signing in…</span>
+									{:else}
+										<span>Sign in</span>
+									{/if}
+								</button>
+							</form>
+						{/if}
 
-						<!-- Passkey (Touch ID / Face ID / security key) — for returning users
-						     who enrolled one. If none exists the call fails gracefully → password. -->
-						<div class="pt-4 border-t border-[var(--color-border)]">
+						<!-- Passkey (Touch ID / Face ID / security key). The primary path when a
+						     passkey is required; otherwise a returning-user shortcut (fails
+						     gracefully to the password if none is enrolled). -->
+						<div class="pt-4 {requirePasskey ? '' : 'border-t border-[var(--color-border)]'}">
 							<button
 								onclick={handleV1PasskeyLogin}
 								disabled={loading}
