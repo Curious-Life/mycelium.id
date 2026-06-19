@@ -227,6 +227,27 @@ The topology graph **by view**:
 
 ---
 
+## Entity narration *(Tier-2 — needs a computed mindscape)*
+
+Read an area's full context, then refine its name + essence. `describeEntity` is
+**update-only** — it refines an existing realm/territory, never creates one.
+
+### `getEntityContext`
+The rich **Context Capsule** for a mindscape entity: current name + essence, the
+time-span the prior description covered vs. new content (% described), an
+activity-by-month timeline, what it connects to **by name** (parent realm, nearest
+by meaning, co-activation, lineage), and its measured shape (vitality / phase /
+movement / coherence). Call this before describing or reasoning about an area.
+`kind*` (territory|realm|theme) · `id*`
+
+### `describeEntity`
+Write a name + essence (and, for a territory, an optional fuller **chronicle**) for a
+realm or territory, folding new content into the existing understanding. Call
+`getEntityContext` first; only call it when the description should actually change.
+`kind*` (territory|realm) · `id*` · `name*` (2–4 words) · `essence*` (one vivid sentence) · `chronicle` (territory only)
+
+---
+
 ## Federation
 
 Cross-instance connections by federated handle (e.g. `@alice@alice.mycelium.id`), built

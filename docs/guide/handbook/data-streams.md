@@ -43,10 +43,10 @@ searchable.
 
 ### Channels
 
-Connect a messaging channel — **Telegram, Discord, WhatsApp** — and messages flow in
-as you send and receive them. Photos, documents, and voice notes that arrive are
-understood locally too, so your channel history becomes part of your memory without
-anything leaving your box.
+Connect a messaging channel — **Telegram or Discord** (add a bot token in Settings) —
+and messages flow in as you send and receive them. Photos, documents, and voice notes
+that arrive are understood locally too, so your channel history becomes part of your
+memory without anything leaving your box. *(WhatsApp support is on the way.)*
 
 ### Health
 

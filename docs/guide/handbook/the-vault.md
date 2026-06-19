@@ -53,6 +53,11 @@ This is what "zero-knowledge" means: even the people who built Mycelium know not
 about what's in your vault. That's not a policy we could change later — it's a
 consequence of the architecture.
 
+The caveats — each **opt-in, by your action**: if you route a query to a *cloud* AI
+model, that provider sees what you send it; if you **publish** a document or **share**
+with a connection, that specific content leaves your vault. Everything you don't
+explicitly send out stays encrypted on your machine.
+
 > **The flip side:** because no one else can read your vault, no one else can recover
 > it for you either. Your recovery key and your backups are the *only* way back. This
 > is the deal sovereignty makes. See **[Keys & recovery](keys-and-recovery.md)**.
