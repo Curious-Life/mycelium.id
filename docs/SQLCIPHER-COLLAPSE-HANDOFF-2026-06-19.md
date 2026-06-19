@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-19
 **Audience:** the next Claude Code instance executing this migration.
-**Status:** DECIDED + inventoried; NOT started. Execute stage-by-stage, sweep-first, full `verify` green per stage.
+**Status (updated 2026-06-19):** ⚠️ this is the original DECISION + inventory record — superseded for *current status*. **Read [`SESSION-HANDOFF-2026-06-19-sqlcipher-collapse.md`](SESSION-HANDOFF-2026-06-19-sqlcipher-collapse.md) + [`SQLCIPHER-COLLAPSE-NEXT-PR-RUNBOOK-2026-06-19.md`](SQLCIPHER-COLLAPSE-NEXT-PR-RUNBOOK-2026-06-19.md) for what to do next.** The FOUNDATION is now MERGED + live (Stage 0 #299, codec #302, backfill engine #303); the execution (backfill campaign → vectors → content) is next. Still: execute stage-by-stage, sweep-first, full `verify` green per stage.
 **Companions:** [`docs/DESIGN-decrypt-perf-2026-06-19.md`](DESIGN-decrypt-perf-2026-06-19.md) (the decrypt-cache that shipped as the bridge), [`docs/AT-REST-BLINDNESS-DESIGN-2026-06-11.md`](AT-REST-BLINDNESS-DESIGN-2026-06-11.md) (the SQLCipher layer), memories `at-rest-blindness`, `embedding-storage-layout-candidate`, `deployment-local-primary`.
 
 ---
