@@ -159,12 +159,21 @@ Every call site stays `_enc(x)` / `e(x)` but now writes coerced plaintext. VERIF
 
 **⚠️ VERIFICATION = CI-ONLY for most of cut 5.** ~10 of the gates SPAWN Python (`compute-*.py`) and the bare worktree has NO venv → they crash locally (NOT a regression — same as cut 4's frequency/anchors). So the loop is: edit Python + gates → run the **node-only** gates locally (topology-audit, complexity, measurement-schema, metrics-rest) → push → **CI verifies the Python gates (~6 min/round)**. This is the slow-paced cut; read carefully before each push. GOTCHA: when removing the local `_enc` helpers, confirm nothing else in the script calls them.
 
-## Cut 6 — finalize
-- Shrink `ENCRYPTED_FIELDS` to `{secrets}` exactly (remove all now-empty entries).
-- Neutralize scope guardians for content (keep `secrets` tagging).
-- Land the SQL restores (topology.js / territory-docs.js / claims.js / people.js) — but ONLY after the live backfill confirms 0 envelopes in those columns. Golden-diff each restored query vs the old JS-sort on a real-vault clone.
-- `VACUUM` to reclaim the envelope overhead (size shrink).
-- Full `npm run verify` green; floor (`secrets`/at-rest/leak-reframed) intact.
+## Cut 6 — finalize — ✅ CODE DONE (PR #340, `690ab95`, CI verifying)
+- ✅ **Shrank `ENCRYPTED_FIELDS` to EXACTLY `{secrets}`** (emptied 14 entries: the cut-5 metric tables + 4 NOT-in-cut-4 tables — document_versions/fact_versions/entity_versions/reflection_records, all JS-adapter-written, surfaced by the cut-6 map sweep). Fail-loud script asserted secrets is the lone populated entry.
+- ✅ **Inverted the 5 gates that break when the map empties** (they seed via the JS adapter → map gone = plaintext): topology-audit A3/A4 · complexity C3 · measurement-schema S5 · write-recoverability V3/V6/V8/V10 (V8 reads `snapshot_json`) · reflection-records (allowlist→`[]`). metrics-rest GO (egress). Cut-5 python gates unaffected (seed via python).
+- ✅ **+5 backfill targets** (append-only collapsed tables): content.{document_versions,fact_versions,entity_versions,reflection_records,cognitive_events}.
+- ✅ Full local sweep: NO JS straggler (20 NO-GO = no-venv-python / runtime-orphan / env). verify:backfill GO, floor GO.
+- **DECISION: scope guardians LEFT INTACT** — scope is a plaintext routing column, orthogonal to the encryption collapse; removing risks breaking scope-based reads. (The original "neutralize scope guardians" plan was misframed.)
+- **DEFERRED to post-live-backfill:** SQL restores + VACUUM (below) — both need 0 envelopes.
+- **FOLLOW-UP (cosmetic, non-blocking):** stale `caller-encrypted` module docstrings in `pipeline/*.py` + crypto-local.js comments; now-unused `_SCOPE` consts in stage_crypto.py.
+
+## POST-COLLAPSE — SQL restores + VACUUM (operator, AFTER the live backfill verifies 0 envelopes)
+Only safe once the live backfill (below) confirms 0 envelopes per column (ORDER BY / UNIQUE are only correct at 0-envelopes). Golden-diff each restored query vs the current JS-sort on a real-vault clone:
+- **topology.js / territory-docs.js** — replace mixed-tolerant JS-sort/coerce with SQL `ORDER BY` on the now-plaintext scalar/centroid cols (cut-2 deferral).
+- **claims.js** — `ORDER BY confidence_logodds` (cut-3 deferral).
+- **people.js** — plaintext `name` + `UNIQUE(user_id,name)` + `ON CONFLICT`, drop `loadNameIndex`/JS-dedup; migration AFTER the people backfill + de-dup (cut-3 deferral).
+- **`VACUUM`** — reclaim the envelope-overhead page bloat (the on-disk size win; SQLite keeps freed pages until VACUUM).
 
 ---
 
