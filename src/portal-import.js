@@ -77,9 +77,12 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
     try {
       const folderPath = (typeof req.body?.folderPath === 'string' && req.body.folderPath)
         ? req.body.folderPath : path.join(os.homedir(), '.claude', 'projects');
+      // 'clean' (default) imports just the human↔agent conversation; 'full' keeps
+      // tool/meta turns too. Either way the full raw line is kept in metadata.raw.
+      const mode = req.body?.mode === 'full' ? 'full' : 'clean';
       const entries = readClaudeCodeEntries(folderPath);
       const capture = (msg) => captureMessage(db, { userId, ...msg }, enqueueEnrichment);
-      const summary = await processClaudeCodeExport(entries, { capture });
+      const summary = await processClaudeCodeExport(entries, { capture }, { mode });
       return res.json({ ok: true, scanned: entries.length, ...summary });
     } catch (e) {
       return res.status(500).json({ ok: false, error: String(e?.message || e).slice(0, 200) });

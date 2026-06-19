@@ -173,18 +173,63 @@ function claudeCodeText(message) {
   return '';
 }
 
+const CC_WRAPPER_RE = /^(<system-reminder|<command-)/;
+const CC_CLEAN_KINDS = new Set(['human', 'agent-text']); // what 'clean' mode keeps
+
 /**
- * Parse Claude Code session transcripts (the `.jsonl` files under
- * ~/.claude/projects/**). Each entry is one session file's raw text; each LINE is
- * a JSON event — we keep only `user`/`assistant` message lines, preserve the
- * original `timestamp`, group by `sessionId`, and dedup on the stable `uuid`.
- * Non-message lines (queue-operation, attachment, ai-title, …) and unparseable
- * lines are skipped (they're not dropped messages). Mirrors processClaudeExport.
+ * Classify ONE Claude Code transcript line into a turn {kind, role, text, type}.
+ * The filter: assistant `text` blocks + a real typed `user` prompt are the
+ * human↔agent CONVERSATION; tool_use / tool_result / isMeta / <system-reminder> /
+ * <command-> are tool/meta NOISE (kept only in 'full' mode). Returns null for
+ * non-message lines. (User's recipe — most of a Claude Code log is tool noise.)
+ */
+function classifyClaudeCodeLine(d) {
+  const message = d.message;
+  const role = message?.role;
+  if (role !== 'user' && role !== 'assistant') return null;
+  const content = message.content;
+  const text = claudeCodeText(message);
+  if (role === 'assistant') {
+    if (text) return { kind: 'agent-text', role, text, messageType: 'chat' };
+    if (Array.isArray(content) && content.some((b) => b && b.type === 'tool_use')) {
+      const names = content.filter((b) => b?.type === 'tool_use').map((b) => b.name).filter(Boolean).join(', ');
+      return { kind: 'tool-call', role, text: `[tool_use${names ? `: ${names}` : ''}]`, messageType: 'tool-call' };
+    }
+    return null;
+  }
+  // user
+  if (d.isMeta) return { kind: 'meta', role, text: text || '[meta]', messageType: 'meta' };
+  if (Array.isArray(content) && content.length > 0 && content.every((b) => b && b.type === 'tool_result')) {
+    return { kind: 'tool-result', role, text: '[tool_result]', messageType: 'tool-result' };
+  }
+  if (text && !CC_WRAPPER_RE.test(text)) return { kind: 'human', role, text, messageType: 'chat' };
+  if (text) return { kind: 'meta', role, text, messageType: 'meta' }; // system-reminder/command wrapper
+  return null;
+}
+
+/**
+ * Parse Claude Code session transcripts (`.jsonl` under ~/.claude/projects/**).
+ *
+ * mode='clean' (DEFAULT): import only the human↔agent conversation — most of a
+ *   Claude Code log is tool noise (tool_use/tool_result/meta), dropped from
+ *   MESSAGES so they don't pollute the mindscape. The dropped turns are COUNTED
+ *   in `filtered` (fail-loud — we say what we left out).
+ * mode='full': import EVERY turn; tool/meta turns are flagged via messageType.
+ *
+ * EITHER way, each created message keeps its FULL original line in
+ * `metadata.raw` — no field is lost even when it doesn't fit our schema, so the
+ * data can be re-filtered/cleaned later (a kept text turn thus also retains its
+ * accompanying tool_use blocks). Preserves the original `timestamp`, groups by
+ * `sessionId`, dedups on stable `uuid`, fail-loud on capture errors.
+ *
  * @param {Array<{relPath?:string, content:string}>} entries
  * @param {{ capture: (msg:object)=>Promise<{deduped:boolean}> }} ctx
+ * @param {{ mode?: 'clean'|'full' }} [opts]
  */
-export async function processClaudeCodeExport(entries, ctx) {
+export async function processClaudeCodeExport(entries, ctx, { mode = 'clean' } = {}) {
+  const clean = mode !== 'full';
   let imported = 0, skipped = 0, failed = 0, sessions = 0, seen = 0;
+  const filtered = { 'tool-call': 0, 'tool-result': 0, meta: 0 };
   for (const entry of Array.isArray(entries) ? entries : []) {
     const text = typeof entry?.content === 'string' ? entry.content : '';
     if (!text.trim()) continue;
@@ -195,27 +240,29 @@ export async function processClaudeCodeExport(entries, ctx) {
       if (++seen > MAX_MESSAGES) break;
       let d; try { d = JSON.parse(s); } catch { continue; } // metadata/partial line — not a message
       if (d.type !== 'user' && d.type !== 'assistant') continue;
-      const message = d.message;
-      if (message?.role !== 'user' && message?.role !== 'assistant') continue;
-      const content = claudeCodeText(message);
-      if (!content) continue;
+      const turn = classifyClaudeCodeLine(d);
+      if (!turn) continue;
+      if (clean && !CC_CLEAN_KINDS.has(turn.kind)) { filtered[turn.kind] = (filtered[turn.kind] || 0) + 1; continue; }
       const id = `claude-code-${d.uuid || `${d.sessionId || 's'}-${seen}`}`;
       try {
-        // Source is 'import-claude-code' (NOT 'claude-code…') on purpose: an
-        // intentional import must NOT match the agent-capture consent gate
-        // (capture.js isAgentSource /^claude-code\b/), which is for LIVE auto-
-        // capture only. Mirrors 'claude-import'/'chatgpt-import' (ungated ingest).
+        // Source 'import-claude-code' (NOT 'claude-code…') so it does NOT trip the
+        // agent-capture consent gate (capture.js isAgentSource /^claude-code\b/),
+        // which is for LIVE auto-capture; an import is intentional ingest.
         const { deduped } = await ctx.capture({
-          id, content, role: message.role, source: 'import-claude-code', conversationId: d.sessionId || null,
-          createdAt: d.timestamp, // ISO — preserve the original session time, not import-time
-          metadata: { sessionId: d.sessionId, cwd: d.cwd, gitBranch: d.gitBranch, original_timestamp: d.timestamp },
+          id, content: turn.text, role: turn.role, source: 'import-claude-code',
+          messageType: turn.messageType, conversationId: d.sessionId || null,
+          createdAt: d.timestamp, // ISO — preserve the original session time
+          // FULL original line preserved (LOSSLESS): every field kept even when
+          // our schema ignores it, so it can be re-filtered/cleaned later.
+          metadata: { sessionId: d.sessionId, cwd: d.cwd, gitBranch: d.gitBranch, kind: turn.kind, original_timestamp: d.timestamp, raw: d },
         });
         if (deduped) skipped += 1; else { imported += 1; any = true; }
       } catch { failed += 1; /* FAIL-LOUD: count the dropped message */ }
     }
     if (any) sessions += 1;
   }
-  return { imported, skipped, failed, stats: { messages: imported, sessions, skipped_duplicates: skipped, failed } };
+  return { imported, skipped, failed, mode: clean ? 'clean' : 'full', filtered,
+    stats: { messages: imported, sessions, skipped_duplicates: skipped, failed, filtered } };
 }
 
 /** Walk a ChatGPT mapping tree into time-ordered {role, text, id, create_time}. */

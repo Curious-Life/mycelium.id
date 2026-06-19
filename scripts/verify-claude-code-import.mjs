@@ -58,6 +58,32 @@ const r3 = await processClaudeCodeExport([{ content: JSON.stringify({ type: 'use
 	{ capture: async () => { throw new Error('boom'); } });
 rec('CC5 capture error counted as failed (fail-loud)', r3.failed === 1 && r3.imported === 0, JSON.stringify(r3));
 
+// A noisy session: human + assistant-text + pure tool_use + tool_result + isMeta + <system-reminder>.
+const noisy = [{ content: [
+	JSON.stringify({ type: 'user', uuid: 'nh', sessionId: 'N1', timestamp: '2026-06-04T00:00:00.000Z', message: { role: 'user', content: 'do the thing' } }),
+	JSON.stringify({ type: 'assistant', uuid: 'na', sessionId: 'N1', timestamp: '2026-06-04T00:00:01.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'doing it' }, { type: 'tool_use', name: 'Bash', input: { command: 'ls' } }] } }),
+	JSON.stringify({ type: 'assistant', uuid: 'nt', sessionId: 'N1', timestamp: '2026-06-04T00:00:02.000Z', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Edit', input: {} }] } }),
+	JSON.stringify({ type: 'user', uuid: 'ntr', sessionId: 'N1', timestamp: '2026-06-04T00:00:03.000Z', message: { role: 'user', content: [{ type: 'tool_result', content: 'ok' }] } }),
+	JSON.stringify({ type: 'user', uuid: 'nm1', isMeta: true, sessionId: 'N1', timestamp: '2026-06-04T00:00:04.000Z', message: { role: 'user', content: 'caveat' } }),
+	JSON.stringify({ type: 'user', uuid: 'nm2', sessionId: 'N1', timestamp: '2026-06-04T00:00:05.000Z', message: { role: 'user', content: '<system-reminder>noise</system-reminder>' } }),
+].join('\n') + '\n' }];
+
+const rc = await processClaudeCodeExport(noisy, { capture }, { mode: 'clean' });
+rec('CC6 clean: keeps human+agent-text only, tool/meta counted in filtered',
+	rc.imported === 2 && rc.filtered['tool-call'] === 1 && rc.filtered['tool-result'] === 1 && rc.filtered.meta === 2,
+	JSON.stringify({ imported: rc.imported, filtered: rc.filtered }));
+
+// metadata.raw lossless: the kept assistant turn retains its tool_use block.
+const metaRow = (await db.rawQuery('SELECT metadata FROM messages WHERE id = ?', ['claude-code-na']))?.results?.[0];
+let rawOk = false;
+try { const m = JSON.parse(metaRow?.metadata || '{}'); rawOk = m?.raw?.uuid === 'na' && Array.isArray(m.raw.message.content) && m.raw.message.content.some((b) => b.type === 'tool_use'); } catch { /* */ }
+rec('CC7 metadata.raw preserves the FULL original line (incl. tool_use blocks)', rawOk, `rawPresent=${!!metaRow}`);
+
+const rf = await processClaudeCodeExport(noisy, { capture }, { mode: 'full' });
+const toolRow = rowOf('claude-code-nt');
+rec('CC8 full: imports tool/meta turns too (nothing dropped)',
+	rf.imported === 4 && !!toolRow, JSON.stringify({ imported: rf.imported, skipped: rf.skipped }));
+
 const ok = ledger.every(Boolean);
 console.log(`\nVERDICT: ${ok ? 'GO' : 'NO-GO'} — Claude Code transcripts import with original timestamps, dedup, fail-loud`);
 raw.close(); await close();
