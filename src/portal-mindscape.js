@@ -62,6 +62,7 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
         db.mindscape.getTerritoryProfiles(userId),
         db.mindscape.getRealms(userId),
         db.mindscape.getSemanticThemes(userId),
+        db.mindscape.getClusteringDiagnostics(userId),
       ]);
       const val = (r) => (r.status === 'fulfilled' ? r.value : []);
       const points = val(settled[0]);
@@ -69,6 +70,7 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
       const territoryProfiles = val(settled[2]);
       const realmProfiles = val(settled[3]);
       const semanticThemeProfiles = val(settled[4]);
+      const diag = settled[5]?.status === 'fulfilled' ? settled[5].value : null;
 
       const nodes = points.map((p) => ({
         id: p.source_id ? `${p.source_type === 'message' ? 'msg' : p.source_type}-${p.source_id}` : `cp-${p.id}`,
@@ -209,6 +211,22 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
           noise10d: noiseRealm, noise10dPercent: total > 0 ? (noiseRealm / total * 100).toFixed(1) : 0,
           noise3d: noiseTerritory, noise3dPercent: total > 0 ? (noiseTerritory / total * 100).toFixed(1) : 0,
           clusterCounts: realmCounts, cluster3dCounts: territoryCounts,
+          // Clustering-validity confidence (METRICS-AUDIT S5). The cluster COUNTS
+          // above are deterministic √n targets, not discovered — this surfaces a
+          // low-confidence flag when the shipped partition is degenerate (one realm
+          // >50% of points) or unstable (bootstrap ARI <0.6), rather than presenting
+          // an unvalidated partition as a measurement. null until the first run that
+          // computed diagnostics (pipeline/cluster.py write_clustering_diagnostics).
+          partitionConfidence: diag ? {
+            lowConfidence: !!diag.low_confidence,
+            note: diag.confidence_note || null,
+            realmMaxShare: diag.realm_max_share ?? null,
+            realmCount: diag.realm_count ?? null,
+            territoryValidity: diag.territory_validity ?? null,
+            bootstrapAriMean: diag.bootstrap_ari_mean ?? null,
+            bootstrapAriRuns: diag.bootstrap_ari_runs ?? 0,
+            clusterVersion: diag.cluster_version || null,
+          } : null,
         },
       };
       });

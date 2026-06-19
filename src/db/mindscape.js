@@ -112,6 +112,22 @@ export function createMindscapeNamespace(deps) {
       }));
     },
 
+    /** Clustering-validity diagnostics for this run (METRICS-AUDIT S5): the
+     * single-row-per-user partition-quality health metrics written by
+     * pipeline/cluster.py write_clustering_diagnostics. Plaintext partition-
+     * geometry scalars (same disclosure class as the noise %/counts already in
+     * `meta`) — no decrypt needed. Returns null before the first measured run. */
+    async getClusteringDiagnostics(userId) {
+      const result = await d1Query(
+        `SELECT cluster_version, realm_max_share, realm_count, territory_validity,
+                bootstrap_ari_mean, bootstrap_ari_std, bootstrap_ari_runs,
+                low_confidence, confidence_note, updated_at
+         FROM clustering_diagnostics WHERE user_id = ?`,
+        [userId],
+      );
+      return (result.results || [])[0] || null;
+    },
+
     /** Write a realm's chronicle (describe-chronicles realm pass). UPDATE-only —
      * realm rows are created exclusively by describe-clusters from live points
      * (or import); narration must never resurrect a pruned/absent realm
