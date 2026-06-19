@@ -163,6 +163,61 @@ export async function processClaudeExport(zip, ctx) {
   return { imported, skipped, failed, stats: { messages: imported, conversations: conversationCount, skipped_duplicates: skipped, failed } };
 }
 
+/** Text from a Claude Code transcript message (content: string | content-block[]). */
+function claudeCodeText(message) {
+  const c = message?.content;
+  if (typeof c === 'string') return c.trim();
+  if (Array.isArray(c)) {
+    return c.map((b) => (typeof b === 'string' ? b : (typeof b?.text === 'string' ? b.text : ''))).filter(Boolean).join('\n').trim();
+  }
+  return '';
+}
+
+/**
+ * Parse Claude Code session transcripts (the `.jsonl` files under
+ * ~/.claude/projects/**). Each entry is one session file's raw text; each LINE is
+ * a JSON event — we keep only `user`/`assistant` message lines, preserve the
+ * original `timestamp`, group by `sessionId`, and dedup on the stable `uuid`.
+ * Non-message lines (queue-operation, attachment, ai-title, …) and unparseable
+ * lines are skipped (they're not dropped messages). Mirrors processClaudeExport.
+ * @param {Array<{relPath?:string, content:string}>} entries
+ * @param {{ capture: (msg:object)=>Promise<{deduped:boolean}> }} ctx
+ */
+export async function processClaudeCodeExport(entries, ctx) {
+  let imported = 0, skipped = 0, failed = 0, sessions = 0, seen = 0;
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const text = typeof entry?.content === 'string' ? entry.content : '';
+    if (!text.trim()) continue;
+    let any = false;
+    for (const line of text.split('\n')) {
+      const s = line.trim();
+      if (!s) continue;
+      if (++seen > MAX_MESSAGES) break;
+      let d; try { d = JSON.parse(s); } catch { continue; } // metadata/partial line — not a message
+      if (d.type !== 'user' && d.type !== 'assistant') continue;
+      const message = d.message;
+      if (message?.role !== 'user' && message?.role !== 'assistant') continue;
+      const content = claudeCodeText(message);
+      if (!content) continue;
+      const id = `claude-code-${d.uuid || `${d.sessionId || 's'}-${seen}`}`;
+      try {
+        // Source is 'import-claude-code' (NOT 'claude-code…') on purpose: an
+        // intentional import must NOT match the agent-capture consent gate
+        // (capture.js isAgentSource /^claude-code\b/), which is for LIVE auto-
+        // capture only. Mirrors 'claude-import'/'chatgpt-import' (ungated ingest).
+        const { deduped } = await ctx.capture({
+          id, content, role: message.role, source: 'import-claude-code', conversationId: d.sessionId || null,
+          createdAt: d.timestamp, // ISO — preserve the original session time, not import-time
+          metadata: { sessionId: d.sessionId, cwd: d.cwd, gitBranch: d.gitBranch, original_timestamp: d.timestamp },
+        });
+        if (deduped) skipped += 1; else { imported += 1; any = true; }
+      } catch { failed += 1; /* FAIL-LOUD: count the dropped message */ }
+    }
+    if (any) sessions += 1;
+  }
+  return { imported, skipped, failed, stats: { messages: imported, sessions, skipped_duplicates: skipped, failed } };
+}
+
 /** Walk a ChatGPT mapping tree into time-ordered {role, text, id, create_time}. */
 function flattenOpenAIMapping(mapping) {
   const out = [];

@@ -43,6 +43,7 @@ const MAP: Record<string, SourcePresentation> = {
   import: { title: 'Import', mono: 'IM', color: 'var(--color-text-secondary)' },
   upload: { title: 'Uploads', mono: 'UP', color: 'var(--color-accent-teal)' },
   'claude-code': { title: 'Claude Code', mono: 'CC', color: 'var(--color-accent-teal)' },
+  'import-claude-code': { title: 'Claude Code (import)', mono: 'CC', color: 'var(--color-accent-teal)' },
   gateway: { title: 'Gateway', mono: 'GW', color: 'var(--color-accent-teal)' },
   opencode: { title: 'opencode', mono: 'OC', color: 'var(--color-accent-teal)' },
   openclaw: { title: 'openclaw', mono: 'OW', color: 'var(--color-accent-teal)' },
