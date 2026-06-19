@@ -31,6 +31,11 @@
 const _mem = new Map();      // userId -> { key, value }
 const _inFlight = new Map(); // userId -> { key, promise }
 
+// Payload-shape version. Bump whenever the river payload SHAPE changes (not its
+// data) so stale persisted/in-process caches from an older code version are
+// invalidated — the data-only probe below can't see code changes. v2: anchor_count.
+const RIVER_SCHEMA = 'v2-anchorcount';
+
 /**
  * Cheap staleness probe. Reads only structural (non-encrypted) columns —
  * COUNT / MAX over fisher_trajectory, territory_profiles, frequency_snapshots —
@@ -54,6 +59,7 @@ export async function riverCacheKey(db, userId) {
     `SELECT COUNT(*) AS n, MAX(window_end) AS w
        FROM frequency_snapshots WHERE user_id = ? AND granularity = 'week'`);
   return [
+    `s:${RIVER_SCHEMA}`,
     `r:${traj.run ?? '-'}`, `tn:${traj.n ?? 0}`, `tw:${traj.w ?? '-'}`,
     `pn:${prof.n ?? 0}`, `pu:${prof.mu ?? '-'}`,
     `fn:${freq.n ?? 0}`, `fw:${freq.w ?? '-'}`,
