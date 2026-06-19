@@ -7,6 +7,67 @@
 
 > **⚠️ Bounce-2 update (see Part 12):** the per-scope embedding drift in Parts 1–5 below is SUPERSEDED. The basis-free comparator is a **single GLOBAL centroid-drift series** (per-scope re-imports the clustering and so cannot detect a basis artifact), and confidence gates on **resultant length R̄·√n vs a random-direction floor**, not message count. Part 12 is the as-built spec; read it first.
 
+## Part 13 — P3b build plan (endpoint + 2×2 quadrant chip) — LOCKED, not built
+
+P3b is pure read/display on top of the P3a series. No schema, no pipeline change. Sweep-verified (2 Explore sweeps + own-reads); file:line in the verification table.
+
+### 13.1 Endpoint — `GET /api/v1/portal/trajectory/cross-check?level=realm`
+House style: `owner(req,res)` auth gate, `Cache-Control: no-store`, `familyFreshness('embedding_trajectory')` hedge. Reads:
+- `embedding_trajectory` via `db.rawQuery` (the adapter auto-decrypts `centroid_drift` + `dispersion`; `num()`-coerce) — the vitality-snapshot read is the template.
+- `fisher_trajectory` via `db.fisher.getTrajectory(level, 'weekly_step')` for the `fisher_velocity` series.
+
+**Alignment (load-bearing):** the quadrant must compare the SAME week. Find the **latest `window_start` present + confident in BOTH series**; truncate each series there (so `baselineZ`'s "current = last element" lands on week W); compute:
+- `F = baselineZ(confident fisher_velocity up to W)` — reuses `src/metrics/baseline-z.js` (P0), same as `/summary`'s `velocity_baseline_z`.
+- `E = baselineZ(confident centroid_drift up to W)` — global series.
+
+### 13.2 Quadrant logic
+`moved = |z| > MOVED_Z (2)`, `flat = |z| < FLAT_Z (1)`, the `1–2` band = indeterminate. **Low-confidence if EITHER side is low-conf** (insufficient/degenerate, or no common confident week) → chip = *"not enough signal yet"*, NO quadrant (never a false alarm). Both confident + both decisive →
+
+| | E flat | E moved |
+|---|---|---|
+| **F moved** | **Basis-suspect** → run-boundary disambiguation (13.3) | **Corroborated** — *"real movement"* |
+| **F flat** | **Settled** — *"a calm, settled week"* | **Hidden drift** — *"movement your topic-map didn't catch"* |
+
+Any axis in the `1–2` deadzone → **Consistent** (no alarm; the chip stays quiet so it doesn't flap week to week).
+
+### 13.3 Run-boundary disambiguator (sharpens basis-suspect only)
+The signal: **a PAST window's Fisher activation can change between runs ONLY via re-clustering** (no new messages land in a past week) → comparing week W's activation across the two most-recent runs is **confound-free**.
+- `runs = SELECT DISTINCT clustering_run_id FROM fisher_trajectory WHERE user_id=? AND level=? AND window_type='weekly_step' ORDER BY clustering_run_id DESC LIMIT 2` (era-ISO sorts chronologically).
+- If 2 runs: fetch W's `activation_vector` for both (`getTrajectory({runId})` honors a non-latest run; adapter decrypts), take their Fisher distance `d` (`fisherDistance` already in portal-measurement.js). `d > REDRAW_MIN` ⇒ **the map redrew W** → chip *"the map may have shifted, not your thinking."* Else ⇒ **stable basis** → chip *"you moved — but among related areas (a small move semantically)."*
+- If only 1 run (no prior): hedged copy covering both.
+- Prior-run retention CONFIRMED (no `DELETE FROM fisher_trajectory`); `getTrajectory({runId})` reads a specific run.
+
+### 13.4 Inverted attribution (mitigates the no-attribution limit)
+Basis-suspect has no embedding-side attribution (it's basis-free). Surface Fisher's `top_contributors` (already in `/summary` as `top_movers`) **inverted**: *"Fisher attributes this to [X], but your semantic center didn't move — likely a map effect on [X]."* Honest: attribute the SUSPICION, not a movement.
+
+### 13.5 Display
+`CuriousLifeView.svelte`, `active==='movement'` detail: add a cross-check chip + one explanatory line after the P0 stat-row (the freshness/low-conf badge pattern is already there). Non-blocking fetch added after the movement assignment in `onMount` (`g('/portal/trajectory/cross-check?level=realm')`). No CVP contract needed (movement isn't in the surface-gate; freshness only).
+
+### 13.6 Gate — `verify:cross-check-quadrant`
+Pure-function test of the quadrant+threshold logic with synthetic z-pairs: corroborated / settled / basis-suspect / hidden-drift each fire on the right inputs; deadzone + either-low-conf → "consistent/insufficient" (NEVER a false basis-suspect). Run-boundary: identical activations across runs → "reshuffle"; differing activations at a window → "map redrew" (pure unit test, per the bounce — no real corpus). Factor the quadrant decision into a pure helper (`src/metrics/cross-check-quadrant.js`) so it's single-sourced + testable, like `baseline-z.js`.
+
+### 13.7 Verification table
+
+| Assumption | Verified at |
+|---|---|
+| encrypted measurement tables read via `db.rawQuery` (auto-decrypt + `num()`) | `src/portal-measurement.js:172-188` (sweep, quoted) |
+| `baselineZ` reusable; `/summary` filters confident series then calls it | `src/portal-measurement.js:322-327` + `src/metrics/baseline-z.js:27-56` (sweep, quoted) |
+| `/trajectory/*` house style (owner + no-store + validation) | `src/portal-measurement.js:269-362` (sweep, quoted) |
+| prior-run fisher rows RETAINED (no DELETE) → cross-run compare feasible | `pipeline/compute-fisher.py:385-423` (sweep; no `DELETE FROM fisher_trajectory`) |
+| `getTrajectory({runId})` reads a specific (non-latest) run | `src/db/fisher.js:149-183` (sweep, quoted `opts.runId`) |
+| `fisherDistance` helper available in the endpoint | `src/portal-measurement.js:85-92` (own-read, P0) |
+| `top_movers`/`top_contributors` available for inverted attribution | `src/portal-measurement.js:354` (sweep, quoted) |
+| movement NOT in CVP surface-gate → no contract needed (freshness only) | `src/metrics/surface-gate.js` (sweep) + `freshness.js:32` |
+| display insertion point = movement-detail stat-row; onMount fetch block | `CuriousLifeView.svelte:709-753, 87-129` (sweep, quoted) |
+
+### 13.8 Open questions for the research-agent bounce
+1. **Run-boundary signal:** confound-free per-window cross-run activation distance (recommended) vs the O(1) `pipeline_state(cluster).last_success_at` recency heuristic — is the per-window distance worth the extra reads, and what's `REDRAW_MIN` (the Fisher-distance threshold that counts as "the map redrew this week")?
+2. **Thresholds:** `MOVED_Z=2 / FLAT_Z=1` — lock now or defer to calibration on the real vault? (Deadzone behavior is fixed: "consistent", no alarm.)
+3. **Scope of comparison:** global-E vs realm-F is the default. Should the chip also offer theme-F (finer) as the comparison, or keep realm as the single trustworthy altitude?
+4. **Ship scope:** basis-suspect + the other three quadrants are all "free" once both z's exist — ship all four at once, or basis-suspect first behind the others?
+
+---
+
 ## Part 12 — Bounce-2 resolutions (the as-built P3a)
 
 Two red-team items changed the design; resolving #1 also simplified it.
