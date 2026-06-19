@@ -105,15 +105,17 @@ const post = (body, headers = {}) => fetch(URL, { method: 'POST', headers: { 'co
   shouldThrow = false;
 }
 
-// ── C10 owner 1:1 DM → TRUSTED: full write grant, NOT untrusted-wrapped (W3) ──
+// ── C10 owner 1:1 DM with owner-write ENABLED → trimmed full grant, NOT wrapped (W3) ──
 {
+  process.env.MYCELIUM_CHANNEL_OWNER_WRITE = '1';   // gated capability ON for this block
   shouldThrow = false; nextResult = { text: 'done', toolsUsed: ['reply'] };
   await post({ userMessage: 'remember my dentist is on Tuesday', conversationId: CONV, source: 'telegram', group: false, senderRole: 'owner' });
   const um = lastOpts?.userMessage || '';
   const et = lastOpts?.enabledTools || [];
-  rec('C10 owner DM → message passed verbatim (NOT untrusted-wrapped)', um === 'remember my dentist is on Tuesday' && !/UNTRUSTED MESSAGE/.test(um), JSON.stringify(um));
-  rec('C10 owner DM → write tools granted (remember + saveDocument + reply)', et.includes('remember') && et.includes('saveDocument') && et.includes('reply') && et.length > 1, et.join(','));
-  rec('C10 owner DM → owner system preamble (read+write authority)', typeof lastOpts?.systemExtra === 'string' && /OWNER/.test(lastOpts.systemExtra));
+  rec('C10 owner DM (write-enabled) → message verbatim (NOT untrusted-wrapped)', um === 'remember my dentist is on Tuesday' && !/UNTRUSTED MESSAGE/.test(um), JSON.stringify(um));
+  rec('C10 owner DM → trimmed write grant (remember + saveDocument + reply)', et.includes('remember') && et.includes('saveDocument') && et.includes('reply') && et.length > 1, et.join(','));
+  rec('C10 owner DM → destructive mind-model tools EXCLUDED (red-team trim)', !et.includes('editMindFile') && !et.includes('writeMindFileWhole') && !et.includes('updateInternalModel') && !et.includes('forget'), et.join(','));
+  rec('C10 owner DM → owner preamble w/ injection-defense note', typeof lastOpts?.systemExtra === 'string' && /OWNER/.test(lastOpts.systemExtra) && /forwarded/i.test(lastOpts.systemExtra));
 }
 // ── C11 SECURITY: owner in a GROUP → still UNTRUSTED + reply-only (writes are DM-only) ──
 {
@@ -129,6 +131,15 @@ const post = (body, headers = {}) => fetch(URL, { method: 'POST', headers: { 'co
   await post({ userMessage: 'remember my fake fact', conversationId: CONV, source: 'telegram', group: false, senderRole: 'other' });
   const et = lastOpts?.enabledTools || [];
   rec('C12 non-owner DM → reply-only (no write tools)', et.length === 1 && et[0] === 'reply', et.join(','));
+}
+// ── C13 SECURITY DEFAULT: owner-write DISABLED (default) → owner DM is reply-only+wrapped ──
+{
+  delete process.env.MYCELIUM_CHANNEL_OWNER_WRITE;   // back to the safe default
+  await post({ userMessage: 'remember my dentist is on Tuesday', conversationId: CONV, source: 'telegram', group: false, senderRole: 'owner' });
+  const um = lastOpts?.userMessage || '';
+  const et = lastOpts?.enabledTools || [];
+  rec('C13 owner DM, writes DISABLED (default) → reply-only', et.length === 1 && et[0] === 'reply', et.join(','));
+  rec('C13 owner DM, writes DISABLED → untrusted-wrapped (pre-W3 safe behavior)', /UNTRUSTED MESSAGE/.test(um));
 }
 
 await new Promise((r) => server.close(r));

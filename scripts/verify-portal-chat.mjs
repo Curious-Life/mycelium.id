@@ -13,6 +13,7 @@ import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
 import { portalChatRouter } from '../src/portal-chat.js';
 import { toolsForDomains } from '../src/agent/tool-domains.js';
+import { captureMessage } from '../src/ingest/capture.js';
 
 const DB = 'data/verify-portal-chat.db', KCV = 'data/verify-portal-chat-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -221,9 +222,10 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
   const conv = `verify-conv-${crypto.randomUUID()}`;
   // Turn 1: state a fact under this conversation.
   await readSSE(await fetch(`${base}/chat/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'Remember: my favourite colour is teal.', conversationId: conv }) }));
-  // Persistence is fire-and-forget — poll the conversation for its two turns.
+  // Persistence is fire-and-forget — poll the conversation for its two turns. The server
+  // namespaces chat threads under `chat:` (red-team RT3), so query the prefixed id.
   let crows = [];
-  for (let i = 0; i < 80; i++) { crows = (await db.messages.selectByConversation(U, conv, { limit: 50 })) || []; if (crows.length >= 2) break; await new Promise((r2) => setTimeout(r2, 50)); }
+  for (let i = 0; i < 80; i++) { crows = (await db.messages.selectByConversation(U, `chat:${conv}`, { limit: 50 })) || []; if (crows.length >= 2) break; await new Promise((r2) => setTimeout(r2, 50)); }
   rec('C10 turn-1 user+assistant persisted under the conversationId', crows.length >= 2, `rows=${crows.length}`);
   // Turn 2 (same conversation): the system the model receives must carry the prior turn.
   lastSystem = '';
@@ -234,6 +236,15 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
   rec('C10 /chat/history scoped to the conversation', Array.isArray(hThis.messages) && hThis.messages.length >= 2 && hThis.messages.some((m) => /teal/i.test(m.content)));
   const hOther = await (await fetch(`${base}/chat/history?conversationId=does-not-exist`)).json();
   rec('C10 a different conversation has NO history bleed', Array.isArray(hOther.messages) && hOther.messages.length === 0);
+}
+
+// ── C11 RT3 isolation: a chat read can NEVER address a CHANNEL conversation ──
+{
+  // Seed a channel-style message under a bare chatId conversation (as the daemon persists).
+  await captureMessage(db, { userId: U, role: 'user', content: 'SECRET third-party channel message', source: 'telegram', conversationId: '987654321' }, () => {});
+  // A chat client asking for that id gets NOTHING — the server namespaces it to chat:987654321.
+  const h = await (await fetch(`${base}/chat/history?conversationId=987654321`)).json();
+  rec('C11 chat cannot read a channel conversation (RT3 namespace isolation)', Array.isArray(h.messages) && h.messages.length === 0 && !JSON.stringify(h.messages).includes('SECRET'), JSON.stringify(h.messages?.length));
 }
 
 server.close(); await close?.();

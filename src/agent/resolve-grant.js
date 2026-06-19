@@ -3,38 +3,57 @@
 // Capability follows IDENTITY, not surface. A channel turn is one of two trust tiers:
 //
 //   • OWNER-TRUSTED — a 1:1 DM from the vault owner (senderRole==='owner' AND not a
-//     group). This is owner-authored input, exactly as trusted as in-app chat, so the
-//     turn gets the FULL assistant grant: read-safe (always) ∪ the gated egress/schedule
-//     tools ∪ the vault-WRITE tools. The owner can ask their assistant to remember a fact
-//     or save a document from their phone.
+//     group). This is owner-authored input, exactly as trusted as in-app chat. When the
+//     owner-write capability is ENABLED (see the flag below), this turn gets read-safe ∪
+//     the gated egress/schedule tools ∪ a TRIMMED vault-write set, and the message is not
+//     untrusted-wrapped — the owner can ask their assistant to remember a fact or save a
+//     note from their phone.
 //
-//   • UNTRUSTED — everyone else, and EVERY group context (even a message the owner sends
-//     in a group, because other people are present and other messages are untrusted). The
-//     turn keeps today's read-safe ∪ ['reply'] grant: it can read + reply, never write or
-//     schedule. A prompt injection in untrusted content therefore can never write the vault.
+//   • UNTRUSTED — everyone else, EVERY group context (even a message the owner sends in a
+//     group, because other people + other messages are present), AND every turn when the
+//     owner-write capability is disabled. read-safe ∪ ['reply'], untrusted-wrapped. A
+//     prompt injection therefore can never write the vault.
 //
-// The grant is expressed as a list of opt-in tool NAMES handed to autonomyTools(), which
-// stays the single fail-closed chokepoint: read-safe always; gated/write ONLY when named.
+// SECURITY (red-team 2026-06-19, before enabling MYCELIUM_CHANNEL_OWNER_WRITE):
+//   • The grant rests on a daemon-computed senderRole forwarded over loopback. Until the
+//     daemon↔server call is authenticated (per-boot shared secret), ANY local process can
+//     POST senderRole='owner' to the loopback endpoint → so the owner-write capability is
+//     GATED OFF BY DEFAULT (this flag). With it off, a forged owner claim grants only
+//     read+reply, exactly as before W3 — the CRITICAL finding is dormant by default.
+//   • Destructive mind-model rewriters (editMindFile / writeMindFileWhole /
+//     updateInternalModel) are EXCLUDED from the channel set even when enabled — they
+//     belong to the deliberate consolidation cycle, not a phone DM, and are the deepest,
+//     hardest-to-recover surfaces. The remaining writes are additive or document-scoped.
 //
-// SECURITY: this is the one seam that lets a channel turn write. It is gated on a daemon-
-// computed senderRole forwarded over the trusted loopback (channel-turn.js is loopback-only,
-// 403 otherwise). The owner binding is the daemon's ownerTelegramId check (inbound.js).
+// The grant is a list of opt-in tool NAMES handed to autonomyTools(), which stays the
+// single fail-closed chokepoint: read-safe always; gated/write ONLY when named.
 
-import { AUTONOMY_TOOLS, WRITE_AUTONOMOUS_TOOLS } from './autonomy-tools.js';
+// Owner-write is OFF until the daemon↔server auth + write-audit + recoverability land
+// (red-team prerequisites). Set MYCELIUM_CHANNEL_OWNER_WRITE=1 only after those ship.
+export function ownerWriteEnabled() {
+  return process.env.MYCELIUM_CHANNEL_OWNER_WRITE === '1';
+}
 
-// Owner-trusted DM → the full assistant grant (gated egress/schedule + every write tool).
-// read-safe tools come for free via autonomyTools(); only the opt-in names go here.
-export const OWNER_CHANNEL_TOOLS = Object.freeze([...AUTONOMY_TOOLS, ...WRITE_AUTONOMOUS_TOOLS]);
+// Owner-trusted DM gated egress/schedule tools (NOT describeEntity — narration is the
+// cycle's job, not a DM's).
+const OWNER_GATED_TOOLS = ['reply', 'schedule_task', 'list_my_schedules', 'cancel_task'];
+// Owner-trusted DM write tools — TRIMMED: additive + document-scoped only. No mind-model
+// rewriters (editMindFile/writeMindFileWhole/updateInternalModel), no forget, no publish.
+const OWNER_WRITE_TOOLS = ['remember', 'link', 'mark', 'saveDocument', 'updateDocument', 'captureMessage', 'createTask', 'flagForDiscussion'];
 
-// Untrusted (any non-owner sender, any group) → read-safe ∪ reply only. Fail-closed.
+// Full owner-trusted grant (names handed to autonomyTools as enabledNames).
+export const OWNER_CHANNEL_TOOLS = Object.freeze([...OWNER_GATED_TOOLS, ...OWNER_WRITE_TOOLS]);
+// Untrusted (any non-owner sender, any group, or owner-write disabled) → reply only.
 export const UNTRUSTED_CHANNEL_TOOLS = Object.freeze(['reply']);
 
 /**
- * Is this channel turn owner-authored + private (⇒ trusted, full grant)?
+ * Is this channel turn owner-authored + private + write-enabled (⇒ trusted, full grant)?
+ * Fail-closed: requires senderRole==='owner', a 1:1 (non-group) context, AND the
+ * owner-write capability flag. Any one missing ⇒ untrusted.
  * @param {{senderRole?:string, group?:boolean}} ctx
  */
 export function isOwnerTrustedTurn({ senderRole, group } = {}) {
-  return senderRole === 'owner' && !group;
+  return senderRole === 'owner' && !group && ownerWriteEnabled();
 }
 
 /**

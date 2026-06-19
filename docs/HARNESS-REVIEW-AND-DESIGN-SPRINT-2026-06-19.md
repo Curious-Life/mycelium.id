@@ -564,5 +564,43 @@ worktree (main is contested). Each lands with `/living-docs` + `/deploy-and-veri
 3. Build P0.1 first (highest ROI, lowest risk — reuses built machinery). Sweep-first its own pass;
    `verify:chat` + live portal smoke; behavior-preserving elsewhere.
 4. Each item lands with `/living-docs` + `/deploy-and-verify` ledger.
+
+## 10. Security audit — red team (2026-06-19)
+
+Four parallel red teamers audited the branch (owner-trust chain · prompt-injection→writes ·
+conversation/data-scoping · native-flip parity). Verdict: **owner-writes NOT acceptable as-built, and
+the native-default flip is NO-GO as a blind flip.** Findings + remediation:
+
+| # | Sev | Finding | Status |
+|---|---|---|---|
+| RT1 | **CRIT** | Owner-write authority rests on `isTrustedLoopback` + a caller-asserted `senderRole`; no daemon↔server auth → any local process can POST `senderRole:'owner'` and write the vault | **MITIGATED by default** — owner-write now gated OFF behind `MYCELIUM_CHANNEL_OWNER_WRITE` (`resolve-grant.js`); a forged owner claim grants only read+reply. **Proper fix (per-boot shared secret) REQUIRED before enabling the flag.** |
+| RT2-H1 | HIGH | Destructive unversioned writes (`remember`/`saveDocument` overwrite; mind-file wipers) reachable from owner-forwarded content | **Partially fixed:** mind-model rewriters (`editMindFile`/`writeMindFileWhole`/`updateInternalModel`) + `forget`/`publish` EXCLUDED from the channel set (`resolve-grant.js`). `remember`/`saveDocument` overwrite-recoverability (versioning) **DEFERRED**. |
+| RT2-H2 | HIGH | Channel vault writes are not audited (which tool/target/hash) | **DEFERRED** — required before enabling the flag. |
+| RT2-H3 | HIGH | Owner DM ran verbatim with no injection-defense line | **FIXED** — defensive note added to `OWNER_SYSTEM` (forwarded/pasted = data, never write on its strength). |
+| RT3-H1/M3/M4 | HIGH | Client-supplied `conversationId` flat keyspace → a chat turn could pull CHANNEL/third-party history into the cloud preamble; summary/persist under attacker-chosen key | **FIXED** — chat threads namespaced `chat:<id>` server-side (`portal-chat.js`); proven by `verify:chat` C11. |
+| RT3-H2 | HIGH | Channel *history* replayed into the preamble without the untrusted envelope | **DEFERRED** — render non-owner history untrusted (`history.js`); bounded while writes are off (read+reply only). |
+| RT4-B1 | HIGH | Native default = silent-green: `/healthz` reports `replies:'on'` while turns are no-model+silent | **OPEN — blocks the flip.** |
+| RT4-B2 | HIGH | Flipping default breaks `selectRuntime` gate; no E2E parity gate exists | **OPEN — blocks the flip.** |
+| RT1-M | MED | `group` re-derived by regex (`native.js /group/i`) diverges from authoritative DM/group → Discord guilds misclassify | **DEFERRED** (dormant while writes off) — forward authoritative `isDirect` from the daemon. |
+
+**Fixed + verified this round (all gates GREEN):** owner-write gated OFF by default; write set trimmed
+(no mind-model rewriters); injection-defense preamble; `conversationId` namespaced. Gates:
+`verify:harness-channel` C10 (trimmed grant + exclusions + preamble), C13 (default-off = reply-only +
+wrapped); `verify:chat` C11 (channel-history isolation). All 17 `verify:harness*` + `verify:chat` GO.
+
+### Native-default flip — DEFERRED (NO-GO per RT4)
+Not flipped. Blockers: **B1** (honest health — don't report `replies:'on'` for a native runtime with no
+server-side model), **B2** (update `verify-harness-channel-native` N7 + add an E2E parity gate), and a
+**live Telegram smoke** (media/voice/TTS/chunking/triage/provider-resolution) that cannot run headless.
+Parity is otherwise intact (egress/chunking/TTS/media-as-text all chokepoint-side, preserved). The
+operator may force native today via `MYCELIUM_CHANNEL_ROUTER=native` accepting the silent-green caveat.
+
+### Enablement checklists (fail-closed prerequisites)
+**Before `MYCELIUM_CHANNEL_OWNER_WRITE=1`:** (1) daemon↔server per-boot shared secret on
+`/internal/agent/channel-turn` [RT1 CRIT]; (2) audit every channel vault write [RT2-H2]; (3)
+overwrite-recoverability for `remember`/`saveDocument` [RT2-H1]; (4) authoritative `isDirect` from the
+daemon [RT1-M]; (5) untrusted-frame channel history [RT3-H2]; then a live owner-DM smoke (write persists
++ injection/group → zero writes in the audit).
+**Before flipping native default:** B1 + B2 + the live Telegram parity smoke.
 </content>
 </invoke>

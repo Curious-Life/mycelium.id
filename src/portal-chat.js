@@ -134,7 +134,10 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     if (!auth(req, res)) return;
     try {
       const limit = Math.min(Number(req.query.limit) || 50, 100);
-      const conversationId = typeof req.query.conversationId === 'string' ? req.query.conversationId.trim() : '';
+      // Same `chat:` namespace as /chat/stream (red-team RT3) — a chat read can only ever
+      // see chat-sourced threads, never a channel conversation.
+      const rawConv = typeof req.query.conversationId === 'string' ? req.query.conversationId.trim().slice(0, 100) : '';
+      const conversationId = rawConv ? `chat:${rawConv}` : '';
       const toMsg = (r) => ({ id: r.id, role: r.role === 'assistant' ? 'assistant' : 'user', content: r.content || '', timestamp: Date.parse(r.created_at) || Date.now(), source: r.source || CHAT_SOURCE });
       let msgs;
       if (conversationId) {
@@ -156,9 +159,13 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     // Conversation thread key (Phase 5 chat threading): the client sends one UUID per
     // chat thread (new on "Clear"). Scopes history hydration + persistence to this
     // thread. Absent (legacy client) ⇒ stateless turn, exactly today's behavior.
-    const conversationId = (typeof req.body?.conversationId === 'string' && req.body.conversationId.trim())
+    // SECURITY (red-team RT3, 2026-06-19): namespace under `chat:` so a client-supplied
+    // id can NEVER address a CHANNEL conversation (bare chatId / `channel:*`) and pull
+    // third-party message history into this cloud-egressed preamble. Chat owns `chat:`.
+    const rawConv = (typeof req.body?.conversationId === 'string' && req.body.conversationId.trim())
       ? req.body.conversationId.trim().slice(0, 100)
       : null;
+    const conversationId = rawConv ? `chat:${rawConv}` : null;
 
     const policy = await readPolicy();
     const { tools: grantedTools, unmapped } = toolsForDomains(tools || [], policy.domains);
