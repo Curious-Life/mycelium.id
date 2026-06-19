@@ -1,9 +1,18 @@
 import express from 'express';
-import { startClusteringJob, startMeasurementJob, getJob, cancelJob,
+import { startClusteringJob, startMeasurementJob, startBackfillJob, getJob, cancelJob,
   startNarrationWalkJob, pauseNarration, resumeNarration, cancelNarration, getNarrationStatus } from './jobs.js';
 import { makeNarrationRunner } from './agent/narration-runner.js';
 import { getEmbedderHealth } from './embed/supervisor.js';
 import { getMindscapeCached } from './mindscape-cache.js';
+import { isTrustedLoopback } from './http/loopback.js';
+
+// SQLCipher-collapse backfill: the body may ONLY request these NAMED targets — never
+// an arbitrary {table,column}. Fail-closed: an unknown name → 400. The engine also
+// refuses `secrets` and validates identifiers; this allowlist is the outer guard.
+// Extended per the collapse follow-on (embedding_768 / anchor_vector, then content).
+const BACKFILL_TARGETS = {
+  'clustering_points.nomic_embedding': { table: 'clustering_points', column: 'nomic_embedding', codec: { kind: 'vector', dim: 256 } },
+};
 
 /**
  * portalMindscapeRouter — the V1 read surface for the canonical portal's
@@ -354,6 +363,25 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
       res.json(r);
     } catch {
       fail(res, 503, 'analysis refresh is unavailable (key source or pipeline not ready)');
+    }
+  });
+
+  // POST /mycelium/backfill → { jobId, status }. SQLCipher-collapse migration: convert
+  // a column's encrypted envelopes to raw/plaintext in-app. DESTRUCTIVE (rewrites vault
+  // data) → gated to genuine same-host owner only (isTrustedLoopback rejects anything
+  // proxied/remote, even with a valid owner Bearer — stricter than the measure surface),
+  // requires confirm:true, and accepts ONLY allowlisted target names. Same single-flight
+  // lane + status polling as Generate. Body: { targets: string[], confirm: true }.
+  router.post('/mycelium/backfill', (req, res) => {
+    if (!isTrustedLoopback(req)) return fail(res, 403, 'backfill is local-only');
+    if (req.body?.confirm !== true) return fail(res, 400, 'confirm:true required');
+    const names = Array.isArray(req.body?.targets) ? req.body.targets : [];
+    const columns = names.map((n) => BACKFILL_TARGETS[n]).filter(Boolean);
+    if (!columns.length || columns.length !== names.length) return fail(res, 400, 'unknown or empty targets');
+    try {
+      res.json(startBackfillJob({ db, dbPath, columns }));
+    } catch {
+      fail(res, 503, 'backfill is unavailable (key source not ready)');
     }
   });
 

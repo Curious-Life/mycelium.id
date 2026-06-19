@@ -533,6 +533,15 @@ def _write_embeddings_to_d1(
         statements = []
         for j, pid in enumerate(batch_ids):
             idx = i + j
+            # NOTE (SQLCipher collapse, Stage A): nomic_embedding is migrating to RAW
+            # LE-f32 BLOB bytes (the in-app JS writer sync-clustering-points.js already
+            # emits raw; readers dual-read raw + envelope). This Python writer still
+            # emits an ENVELOPE because the JSON d1_batch bridge (local_db._post →
+            # json.dumps) cannot carry raw `bytes` as a BLOB — that needs a bridge
+            # blob-param protocol. It is read-safe (dual-read), and this path runs ONLY
+            # during a full re-cluster (Generate), which is kill-switched on the live
+            # vault. Flipping it (bridge blob support) is a PRECONDITION before Generate
+            # is re-enabled — see docs/DESIGN-sqlcipher-backfill-job-nomic-2026-06-19.md.
             envelope = encrypt_vector(
                 embeddings[idx].astype(np.float32), _NOMIC_SCOPE, master_key)
             # user_id required by the SQL guardian (USER_DATA_TABLES rule):

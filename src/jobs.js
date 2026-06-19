@@ -19,6 +19,8 @@ import { getSessionKeys } from './account/session-keys.js';
 import { dbPath as resolveDbPath } from './paths.js';
 import { readGenerateStats, writeGenerateStats } from './generate-stats.js';
 import { bustMindscape } from './mindscape-cache.js';
+import { backfillColumn, countRemainingEnvelopes } from './account/backfill.js';
+import { getMasterKey } from './crypto/crypto-local.js';
 
 /**
  * Kill-switch for the destructive re-cluster. Generate (auto OR manual) rebuilds
@@ -244,6 +246,106 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
  *  (one pipeline child at a time). The running app supplies the in-memory session key. */
 export function startMeasurementJob({ dbPath, userId, db } = {}) {
   return startClusteringJob({ dbPath, userId, db, measureOnly: true });
+}
+
+/**
+ * Kill-switch for the SQLCipher-collapse backfill (separate from generateLocked so an
+ * operator can disable migrations without disabling Generate, and vice-versa). Returns
+ * true when backfill is locked via env (MYCELIUM_DISABLE_BACKFILL=1) or a sentinel file
+ * `.backfill-disabled` next to the DB. Default OFF.
+ */
+export function backfillLocked() {
+  if (process.env.MYCELIUM_DISABLE_BACKFILL === '1') return true;
+  try { return fs.existsSync(path.join(path.dirname(resolveDbPath()), '.backfill-disabled')); }
+  catch { return false; }
+}
+
+/**
+ * Start an in-app SQLCipher-collapse backfill — convert a column's encrypted
+ * wrapped-DEK envelopes to plaintext (content) or raw LE-f32 bytes (vector), IN the
+ * app's own keyed handle (NOT a spawned child: a 2nd writer would contend on
+ * SQLCipher's single-writer lock). Shares the clustering single-flight (`runningJobId`)
+ * so a backfill and a re-cluster — both write the same tables — can't race; status
+ * polls the SAME /mycelium/generate/status/:id endpoint via the `jobs` Map.
+ *
+ * Safety: a pre-campaign ciphertext copy of the vault is taken before any mutation and
+ * is PURGED only after every column verifies 0 remaining envelopes; on any failure (or
+ * a non-zero envelope count) the backup is KEPT for recovery and the job is `error`.
+ *
+ * @param {{ db: object, dbPath?: string, columns: Array<{table:string, column:string, codec:object}> }} opts
+ * @returns {{ jobId: string|null, status: string }}
+ */
+export function startBackfillJob({ db, dbPath, columns } = {}) {
+  if (backfillLocked()) {
+    console.error('[mycelium] Backfill is LOCKED (.backfill-disabled / MYCELIUM_DISABLE_BACKFILL) — refusing to run.');
+    return { jobId: null, status: 'disabled' };
+  }
+  // Same single-flight as clustering: a backfill and a re-cluster both write
+  // clustering_points/profiles — never let two vault writers run at once.
+  const cur = runningJobId ? jobs.get(runningJobId) : null;
+  if (cur && (cur.status === 'running' || cur.child)) {
+    return { jobId: runningJobId, status: 'already_running' };
+  }
+  const rawDb = db?._sqlite;
+  if (!rawDb || typeof rawDb.prepare !== 'function') return { jobId: null, status: 'unavailable' };
+  if (!Array.isArray(columns) || columns.length === 0) return { jobId: null, status: 'no_columns' };
+
+  const jobId = `backfill_${crypto.randomBytes(6).toString('hex')}`;
+  const startedAt = Date.now();
+  const path0 = dbPath || resolveDbPath();
+  const state = {
+    id: jobId, status: 'running', step: 0, totalSteps: columns.length + 2,
+    stageLabel: 'starting', error: null, failedStep: null, stalled: false,
+    startedAt, finishedAt: null, priorDurationMs: null, child: null,
+  };
+  jobs.set(jobId, state);
+  runningJobId = jobId;
+
+  (async () => {
+    let backupPath = null;
+    try {
+      // 1. Pre-campaign backup — a copy of the ALREADY-ENCRYPTED vault (ciphertext at
+      //    rest, safe on disk). Checkpoint the WAL first so the main file is current.
+      state.stageLabel = 'backup';
+      try { rawDb.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* best-effort */ }
+      backupPath = `${path0}.pre-backfill-${startedAt}`;
+      fs.copyFileSync(path0, backupPath);
+      state.step = 1;
+
+      // 2. Per-column backfill on the keyed handle (the engine yields + suspends WAL).
+      const masterKey = await getMasterKey();
+      for (const c of columns) {
+        state.stageLabel = `${c.table}.${c.column}`;
+        await backfillColumn(rawDb, { table: c.table, column: c.column, codec: c.codec, masterKey });
+        state.step += 1;
+      }
+
+      // 3. Assert 0 remaining envelopes per column. Purge the backup ONLY when clean.
+      state.stageLabel = 'verify';
+      const dirty = columns
+        .map((c) => ({ c, n: countRemainingEnvelopes(rawDb, c.table, c.column) }))
+        .filter((r) => r.n > 0);
+      if (dirty.length) {
+        state.status = 'error';
+        state.error = `envelopes remain: ${dirty.map((r) => `${r.c.table}.${r.c.column}=${r.n}`).join(', ')}`;
+        // keep the backup — do NOT purge a dirty run
+      } else {
+        if (backupPath) { try { fs.unlinkSync(backupPath); } catch { /* */ } }
+        state.status = 'done';
+      }
+    } catch (err) {
+      state.status = 'error';
+      state.error = String(err?.message || err);   // engine never includes plaintext
+      // keep the backup on any failure
+    } finally {
+      state.step = state.totalSteps;
+      state.finishedAt = Date.now();
+      state.priorDurationMs = state.finishedAt - startedAt;
+      if (runningJobId === jobId) runningJobId = null;
+    }
+  })();
+
+  return { jobId, status: 'running' };
 }
 
 /** Public status view for a job (no internals/secrets — note `child` is omitted). */
