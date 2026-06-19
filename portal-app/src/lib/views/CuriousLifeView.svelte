@@ -126,11 +126,15 @@
 		criticality = cr?.levels ?? [];
 		events = ev?.events ?? [];
 		loading = false;
-		// Temporal series (non-blocking; charts fill in once back).
+		// Temporal series (non-blocking; charts fill in once back). The frequency
+		// series + rhythm series have no inter-dependency, so run them concurrently
+		// rather than as a serial waterfall (loadRhythmSeries uses static gran/metric).
 		g('/portal/territory-river').then((rv) => { river = rv ?? null; });
-		const fs = await g(`/portal/frequency/series?granularity=${frequency?.granularity ?? 'day'}`);
-		freqSeries = fs?.series ?? [];
-		await loadRhythmSeries();
+		await Promise.all([
+			g(`/portal/frequency/series?granularity=${frequency?.granularity ?? 'day'}`)
+				.then((fs) => { freqSeries = fs?.series ?? []; }),
+			loadRhythmSeries(),
+		]);
 	});
 
 	// Build a labelled series from the weekly_step trajectory rows.
