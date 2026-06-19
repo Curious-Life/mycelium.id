@@ -14,7 +14,7 @@ A pre-freeze red-team of the ~60 never-audited commits (SQLCipher collapse, scan
 | 1 | 🔴 **CRITICAL** | Plaintext content at rest on the **documented self-host path** (collapse removed the field layer; whole-file SQLCipher is flag-gated OFF by default off the packaged app) | **team** — boot/migration product call |
 | 2 | 🔴 HIGH | `vault-bridge` :8099 = unauthenticated decrypted-vault SQL oracle (loopback-only ≠ same-user) | clean-room patchable |
 | 3 | 🟠 MED-HIGH | `/import/{obsidian,full-export,claude-code}` accept arbitrary absolute local paths | clean-room patchable |
-| 4 | 🟠 scrubs | `/Users/altus` paths in 2 KEEP files + 1 exploit doc + 1 email + `.gitignore` gap | mechanical |
+| 4 | 🟠 scrubs | hardcoded developer home paths in 2 KEEP files + 1 exploit doc + 1 email + `.gitignore` gap | mechanical |
 
 **Must-fix before freeze:** #1 (it touches boot + plaintext-vault migration + the search-build perf that motivated the collapse → needs the team's call). #2–#4 fold into the same pre-freeze pass.
 
@@ -96,9 +96,9 @@ The collapse removed the field envelope to kill **per-row decrypt** on hot reads
 **Fix:** confine roots to the `detect-sources` allowlist + a `realpath` prefix-check (reject paths that escape the allowed roots). Clean-room patchable.
 
 ## 4. 🟠 Data-leak scrubs (files we KEEP — must scrub before public)
-- `/Users/altus` absolute paths in **`.claude/skills/pre-deletion-caller-audit/SKILL.md`** and **`tools/memory-bridge/openclaw/README.md`** → genericize.
+- Hardcoded developer home paths in **`.claude/skills/pre-deletion-caller-audit/SKILL.md`** and **`tools/memory-bridge/openclaw/README.md`** → genericize.
 - Purge exploit doc **`SECURITY-FOLLOWUP-KEY-IN-ENV`** (and confirm no sibling exploit docs survive cleanup).
-- **`martin@hi.mycelium.id`** in a handoff doc (Phase-2 archive drops it; confirm).
+- The developer's real `handle@host` in a handoff doc (Phase-2 archive drops it; confirm).
 - **`.gitignore`** still doesn't guard `.claude/memory/`, `MEMORY.md`, `_*.mjs` — add, so personal memory/scratch never ships.
 
 ## 5. Pre-freeze order
