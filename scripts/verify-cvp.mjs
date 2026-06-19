@@ -12,7 +12,7 @@
 //       the REAL compute-anchors.py stage writes (stub embedder, no network).
 // PASS/FAIL ledger; exit 0 only if all pass.
 import Database from 'better-sqlite3';
-import { rmSync, mkdirSync } from 'node:fs';
+import { rmSync, mkdirSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
@@ -24,6 +24,11 @@ import {
   TIER1_EMBEDDING_FAMILIES,
 } from '../src/metrics/cvp.js';
 import { CONTRACTS } from '../src/metrics/contracts.js';
+import {
+  assertColumnSurfaceable, gateAnchorValue, metricColumnFamily, ANCHOR_METRIC_COLUMNS,
+  _HARMONIC_COLUMN_FAMILY,
+} from '../src/metrics/surface-gate.js';
+import { METRIC_COLUMNS } from '../src/db/metrics.js';
 
 const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? `\n      ${d}` : ''}`); };
@@ -104,6 +109,77 @@ try { assertNotSurfacedUnlessValidated({ family: 'affective_volatility_within_wi
 catch (e) { threw = e.code === 'CVP_NOT_VALIDATED'; }
 rec('2e. assertNotSurfacedUnlessValidated THROWS CVP_NOT_VALIDATED for a pending Tier-1 metric', threw);
 
+// ── 4. Surface-gate chokepoint (audit S1) — the gate is now WIRED ────────────
+// 4a. assertColumnSurfaceable PASSES a non-Tier-1 harmonic column (has contract).
+let harmonicOk = false;
+try { const v = assertColumnSurfaceable('harmonic_amplitude_gamma_k1'); harmonicOk = v.surfaceable === true && v.requiresCVP === false; }
+catch { harmonicOk = false; }
+rec('4a. assertColumnSurfaceable ALLOWS a harmonic column (non-Tier-1, contracted)', harmonicOk);
+
+// 4b. assertColumnSurfaceable THROWS for every Tier-1 anchor column (cvp pending).
+let anchorThrows = ANCHOR_METRIC_COLUMNS.length === 4;
+for (const c of ANCHOR_METRIC_COLUMNS) {
+  let threwHere = false;
+  try { assertColumnSurfaceable(c); } catch (e) { threwHere = e.code === 'CVP_NOT_VALIDATED'; }
+  if (!threwHere) anchorThrows = false;
+}
+rec('4b. assertColumnSurfaceable THROWS CVP_NOT_VALIDATED for all 4 Tier-1 anchor columns', anchorThrows,
+  `anchor_cols=${ANCHOR_METRIC_COLUMNS.join(',')}`);
+
+// 4c. An UNKNOWN column fails closed (never silently surfaced).
+let unknownThrows = false;
+try { assertColumnSurfaceable('totally_made_up_column'); } catch (e) { unknownThrows = e.code === 'CVP_UNKNOWN_COLUMN'; }
+rec('4c. assertColumnSurfaceable FAILS CLOSED (CVP_UNKNOWN_COLUMN) on an unclassifiable column', unknownThrows);
+
+// 4d. gateAnchorValue REPLACES a pending Tier-1 number with its refusal copy (never the raw value).
+const g = gateAnchorValue('insight_embedding_proximity', 0.4242, { cvp_status: 'pending' });
+rec('4d. gateAnchorValue drops the raw number + substitutes refusal copy for a pending Tier-1 metric',
+  g.surfaceable === false && g.value === null && typeof g.refusal === 'string'
+    && g.refusal === CONTRACTS.insight_embedding_proximity.refusal_mode,
+  `surfaceable=${g.surfaceable} value=${g.value}`);
+
+// 4e. gateAnchorValue surfaces the number once a metric is cvp_status='pass' (operator-calibrated).
+const gp = gateAnchorValue('insight_embedding_proximity', 0.4242, { cvp_status: 'pass' });
+rec('4e. gateAnchorValue surfaces the number once cvp_status=pass', gp.surfaceable === true && gp.value === 0.4242);
+
+// 4f. DRIFT GUARD — surface-gate's harmonic column→family map covers EXACTLY the
+// 41 columns db.metrics reads (so the two lists can never silently diverge).
+const gateHarmonic = new Set(Object.keys(_HARMONIC_COLUMN_FAMILY));
+const dbCols = new Set(METRIC_COLUMNS);
+const missingInGate = [...dbCols].filter((c) => !gateHarmonic.has(c));
+const extraInGate = [...gateHarmonic].filter((c) => !dbCols.has(c));
+rec('4f. surface-gate harmonic family map == db.metrics METRIC_COLUMNS (no drift)',
+  missingInGate.length === 0 && extraInGate.length === 0 && gateHarmonic.size === dbCols.size,
+  `db=${dbCols.size} gate=${gateHarmonic.size} missing=[${missingInGate.join(',')}] extra=[${extraInGate.join(',')}]`);
+
+// 4g. anchor columns resolve to Tier-1; harmonic columns to non-Tier-1.
+const tierOk = ANCHOR_METRIC_COLUMNS.every((c) => metricColumnFamily(c)?.tier === 1)
+  && metricColumnFamily('autocorrelation_lag1_gamma')?.tier === 0;
+rec('4g. metricColumnFamily classifies anchor cols Tier-1 and harmonic cols non-Tier-1', tierOk);
+
+// 4h. db/metrics.js INVOKES the gate on both read paths (structural — the live
+// chokepoint, not just the helper existing). getCurrentWindow + getSeries both
+// call checkSurfaceable.
+const dbMetricsSrc = readFileSync('src/db/metrics.js', 'utf8');
+const invokesGate = /checkSurfaceable\s*\(/.test(dbMetricsSrc)
+  && /assertColumnSurfaceable/.test(dbMetricsSrc)
+  && (dbMetricsSrc.match(/checkSurfaceable\(/g) || []).length >= 2; // def + ≥1 call site (loop counts once textually)
+rec('4h. src/db/metrics.js wires the gate (checkSurfaceable → assertColumnSurfaceable) into its reads', invokesGate);
+
+// 4i. NO UNGATED READER — the only src/packages file that queries the anchor
+// table is the sanctioned gated reader src/db/anchor.js. Preserves the invariant
+// the audit flagged: the day a reader is wired, it must go through the gate.
+// Match an actual SQL access (FROM/JOIN/INTO/UPDATE <table>), not a prose mention
+// in a comment — so the doc references in surface-gate.js/db/index.js don't trip it.
+const grep = spawnSync('grep', ['-rlEi', '(from|join|into|update)[[:space:]]+cognitive_metrics_anchor',
+  '--include=*.js', '--include=*.mjs', '--include=*.ts', 'src', 'packages'], { encoding: 'utf8' });
+const readers = (grep.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean)
+  .map((p) => p.replace(/^\.\//, ''));
+const allowed = new Set(['src/db/anchor.js']);
+const ungated = readers.filter((p) => !allowed.has(p));
+rec('4i. NO ungated reader of cognitive_metrics_anchor outside src/db/anchor.js (the gated reader)',
+  ungated.length === 0, `readers=[${readers.join(', ') || 'none'}] ungated=[${ungated.join(', ') || 'none'}]`);
+
 // ── 3. Anchor metrics are registered + stored as cvp_status=pending ──────────
 const allAnchorFamiliesPending = Object.values(TIER1_EMBEDDING_FAMILIES).every((f) => f.cvp_status === 'pending' && f.tier === 1);
 const allHaveContracts = Object.keys(TIER1_EMBEDDING_FAMILIES).every((k) => !!CONTRACTS[k] && CONTRACTS[k].cvp_status === 'pending');
@@ -141,6 +217,20 @@ try {
   raw.close();
   rec('3c. EVERY stored anchor metric row has cvp_status=pending (not surfaced as validated)',
     total > 0 && nonPending === 0, `rows=${total} non_pending=${nonPending}`);
+
+  // 3d. The GATED reader (db.anchor) — wired into the assembled db — returns the
+  // honest refusal copy and NEVER the raw decrypted number for these pending rows.
+  // This is the chokepoint the audit asked for: a number cannot reach a consumer.
+  let probed = null;
+  for (const gr of ['alpha', 'theta', 'delta']) {
+    const w = await db.anchor.getCurrentWindow(U, { granularity: gr });
+    if (w.window_end) { probed = w; break; }
+  }
+  const noRawNumbers = !!probed && Object.values(probed.values).every((v) => v === null);
+  const allRefused = !!probed && ANCHOR_METRIC_COLUMNS.every((c) => typeof probed.refusals[c] === 'string' && probed.refusals[c].length > 0);
+  rec('3d. db.anchor (gated reader) returns refusal copy + ZERO raw numbers for pending anchor rows',
+    !!probed && probed.surfaceable === false && probed.cvp_status === 'pending' && noRawNumbers && allRefused,
+    probed ? `granularity=${probed.granularity} cvp=${probed.cvp_status} nonNullValues=${Object.values(probed.values).filter((v) => v !== null).length}` : 'no anchor window found via db.anchor');
 } finally {
   close();
   for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }

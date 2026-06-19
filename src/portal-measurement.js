@@ -1,6 +1,34 @@
 import express from 'express';
 import { CONTRACTS } from './metrics/contracts.js';
 import { METRIC_COLUMNS, _internal as metricsInternal } from './db/metrics.js';
+import { computeFreshness, FAMILY_STAGE } from './metrics/freshness.js';
+
+// Lempel-Ziv (1976) complexity of a symbol sequence (Kaspar-Schuster). Used for
+// the territory-river "path novelty" overlay — how varied vs repetitive the route
+// through topics is. Returns the production count c (≥1); the caller normalizes.
+function lz76Count(seq) {
+  const n = seq.length;
+  if (n === 0) return 0;
+  let i = 0, k = 1, l = 1, c = 1, kmax = 1;
+  while (true) {
+    if (seq[i + k - 1] === seq[l + k - 1]) {
+      k++;
+      if (l + k - 1 >= n) { c++; break; }
+    } else {
+      if (k > kmax) kmax = k;
+      i++;
+      if (i === l) {
+        c++;
+        l += kmax;
+        if (l >= n) break;
+        i = 0; k = 1; kmax = 1;
+      } else {
+        k = 1;
+      }
+    }
+  }
+  return c;
+}
 
 /**
  * portalMeasurementRouter — S1 measurement REST bridge.
@@ -332,7 +360,8 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
     try {
       const rows = (await db.rawQuery(
         `SELECT level, level_id, level_name, lz_complexity, raw_complexity, sequence_length,
-                alphabet_size, point_count, window_start, window_end, computed_at
+                alphabet_size, point_count, low_confidence, embedding_novelty,
+                embedding_novelty_low_conf, window_start, window_end, computed_at
            FROM complexity_snapshots WHERE user_id = ?
            ORDER BY computed_at DESC LIMIT 400`, [u.id])).results || [];
       const seen = new Set(); const latest = [];
@@ -344,6 +373,10 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
           lz_complexity: num(r.lz_complexity), raw_complexity: num(r.raw_complexity),
           sequence_length: num(r.sequence_length), alphabet_size: num(r.alphabet_size),
           point_count: num(r.point_count),
+          // LZ honesty + the Tier-1 embedding-novelty primary (§4.19).
+          low_confidence: Number(r.low_confidence) ? 1 : 0,
+          embedding_novelty: r.embedding_novelty != null ? num(r.embedding_novelty) : null,
+          embedding_novelty_low_conf: Number(r.embedding_novelty_low_conf) ? 1 : 0,
           window_start: r.window_start, window_end: r.window_end, computed_at: r.computed_at,
         });
       }
@@ -432,79 +465,16 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
   // ──────────────────────────────────────────────────────────────────────────
   // METRIC FRESHNESS — per-table staleness map (no decrypted values, just
   // MAX(timestamp) / pipeline_state probes). All timestamp/state columns are
-  // plaintext, so nothing here can leak ciphertext.
+  // plaintext, so nothing here can leak ciphertext. The budget map + probe live
+  // in src/metrics/freshness.js (shared with the agent surface so the two never
+  // drift — spec §6 I5/I7); this router and src/tools/metrics.js are its two
+  // consumers.
   // ──────────────────────────────────────────────────────────────────────────
-
-  const HOUR = 3600000, DAY = 24 * HOUR;
-  // V1 freshness budgets — the subset of reference/core/metric-budgets.js whose
-  // tables exist in the V1 schema. Era-anchored tables (cognitive_metrics_harmonic)
-  // use a pipeline_state probe; the rest use MAX(timestamp_column).
-  const METRIC_BUDGETS = [
-    { table: 'fisher_trajectory', timestamp_column: 'computed_at', budget_ms: 26 * HOUR, cadence: '24h', description: 'Cognitive trajectory (Fisher information geometry per window).' },
-    { table: 'fisher_milestones', timestamp_column: 'detected_at', budget_ms: 26 * HOUR, cadence: '24h', description: 'Milestone events (phase shifts, velocity outliers).' },
-    { table: 'territory_vitality', timestamp_column: 'computed_at', budget_ms: 26 * HOUR, cadence: '24h', description: 'Per-territory vitality scores (sparse/active/anchor phase).' },
-    { table: 'territory_cofire', timestamp_column: 'last_computed', budget_ms: 26 * HOUR, cadence: '24h', description: 'Territory co-firing graph (4 temporal scales).' },
-    { table: 'complexity_snapshots', timestamp_column: 'computed_at', budget_ms: 30 * HOUR, cadence: '24h', description: 'LZ76 complexity (territory-id sequence novelty).' },
-    { table: 'topology_audit_snapshots', timestamp_column: 'run_at', budget_ms: 30 * HOUR, cadence: '24h', description: 'Topology health (M2 entropy, degree Gini, orphans).' },
-    { table: 'frequency_snapshots', timestamp_column: 'computed_at', budget_ms: 30 * HOUR, cadence: '24h', description: 'Windowed cognitive frequency metrics.' },
-    { table: 'cognitive_metrics_harmonic', probe: { kind: 'pipeline_state', stage_name: 'cognitive-harmonics' }, budget_ms: 26 * HOUR, cadence: '24h (era-anchored)', description: 'Cognitive harmonics (information-harmonics + bigram flow + topology H0 entropy).' },
-  ];
-
-  // Which pipeline_state stage writes each metric family — so /measurement-health
-  // can say "stale BECAUSE the stage failed" (not just "stale"). These match the
-  // CANONICAL stage_names the stages record (script-basename, e.g. 'compute-cofire';
-  // specials: 'fisher-trajectory', 'cognitive-harmonics', 'cluster') so the surface
-  // joins to the live pipeline_state rows instead of orphan short-name entries.
-  const FAMILY_STAGE = {
-    fisher_trajectory: 'fisher-trajectory', fisher_milestones: 'fisher-trajectory', territory_vitality: 'compute-vitality',
-    territory_cofire: 'compute-cofire', complexity_snapshots: 'compute-complexity', topology_audit_snapshots: 'topology-audit',
-    frequency_snapshots: 'compute-frequency', cognitive_metrics_harmonic: 'cognitive-harmonics',
-  };
-
-  // Shared freshness probe (MAX(timestamp) / pipeline_state) → per-family verdict map.
-  // No decrypted values, just plaintext timestamps — nothing here can leak ciphertext.
-  async function computeFreshness(uid) {
-    const nowMs = Date.now();
-    const rows = await Promise.all(METRIC_BUDGETS.map(async (b) => {
-        let lastWrite = null, present = true;
-        try {
-          if (b.probe?.kind === 'pipeline_state') {
-            const r = await db.rawQuery(
-              `SELECT last_success_at AS last_write FROM pipeline_state WHERE user_id = ? AND stage_name = ?`,
-              [uid, b.probe.stage_name]);
-            lastWrite = (r.results || [])[0]?.last_write ?? null;
-          } else {
-            // timestamp columns are PLAINTEXT — MAX() is valid in SQL.
-            const r = await db.rawQuery(
-              `SELECT MAX(${b.timestamp_column}) AS last_write FROM ${b.table} WHERE user_id = ?`,
-              [uid]);
-            lastWrite = (r.results || [])[0]?.last_write ?? null;
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (msg.includes('no such table')) {
-            return { table: b.table, present: false, last_write: null, age_ms: null, budget_ms: b.budget_ms, cadence: b.cadence, description: b.description, verdict: 'missing' };
-          }
-          throw err;
-        }
-        if (!lastWrite) {
-          return { table: b.table, present, last_write: null, age_ms: null, budget_ms: b.budget_ms, cadence: b.cadence, description: b.description, verdict: 'empty' };
-        }
-        const writeMs = Date.parse(lastWrite);
-        const ageMs = Number.isFinite(writeMs) ? nowMs - writeMs : null;
-        const verdict = ageMs === null ? 'empty' : ageMs <= b.budget_ms ? 'fresh' : 'stale';
-        return { table: b.table, present, last_write: lastWrite, age_ms: ageMs, budget_ms: b.budget_ms, cadence: b.cadence, description: b.description, verdict };
-    }));
-    const summary = rows.reduce((acc, r) => {
-      acc.total += 1; acc[r.verdict] = (acc[r.verdict] || 0) + 1; return acc;
-    }, { total: 0, fresh: 0, stale: 0, missing: 0, empty: 0 });
-    return { nowMs, rows, summary };
-  }
 
   router.get('/metric-freshness', async (req, res) => {
     const u = owner(req, res); if (!u) return;
     try {
-      const { nowMs, rows, summary } = await computeFreshness(u.id);
+      const { nowMs, rows, summary } = await computeFreshness(db, u.id);
       res.set('Cache-Control', 'no-store');
       res.json({ user_id: u.id, now: new Date(nowMs).toISOString(), metrics: rows, summary });
     } catch { fail(res, 500, 'Failed to fetch metric freshness'); }
@@ -518,7 +488,7 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
     const u = owner(req, res); if (!u) return;
     try {
       const [{ nowMs, rows: freshRows }, health] = await Promise.all([
-        computeFreshness(u.id),
+        computeFreshness(db, u.id),
         db.pipelineState.all(u.id),
       ]);
       const byStage = new Map(health.map((h) => [h.stage_name, h]));
@@ -560,6 +530,225 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
       res.set('Cache-Control', 'no-store');
       res.json({ user_id: u.id, now: new Date(nowMs).toISOString(), families: all, summary });
     } catch { fail(res, 500, 'Failed to fetch measurement health'); }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // BEHAVIORAL — diurnal rhythm + session cadence (Tier-0, timestamps only).
+  // cognitive_metrics_behavioral is written by pipeline/compute-behavioral.py with
+  // caller-side envelope encryption; db.rawQuery's read path sniffs + auto-decrypts
+  // the envelopes per-column (crypto-local.js autoDecryptResults) → coerce to number.
+  // ──────────────────────────────────────────────────────────────────────────
+  router.get('/behavioral', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const rows = (await db.rawQuery(
+        `SELECT window_end, era_id, language,
+                diurnal_entropy, diurnal_peak_hour, diurnal_concentration, diurnal_hist,
+                session_count, intersession_entropy, intersession_cv,
+                message_count, low_confidence, notes, computed_at
+           FROM cognitive_metrics_behavioral WHERE user_id = ?
+           ORDER BY computed_at DESC LIMIT 1`, [u.id])).results || [];
+      const r = rows[0];
+      if (!r) { res.set('Cache-Control', 'no-store'); return res.json({ behavioral: null }); }
+      let hist = null;
+      try { hist = r.diurnal_hist ? JSON.parse(r.diurnal_hist) : null; } catch { hist = null; }
+      res.set('Cache-Control', 'no-store');
+      res.json({ behavioral: {
+        window_end: r.window_end, era_id: r.era_id,
+        diurnal_entropy: num(r.diurnal_entropy),
+        diurnal_peak_hour: num(r.diurnal_peak_hour),
+        diurnal_concentration: num(r.diurnal_concentration),
+        diurnal_hist: Array.isArray(hist) ? hist.map((v) => num(v)) : null,
+        session_count: num(r.session_count),
+        intersession_entropy: num(r.intersession_entropy),
+        intersession_cv: num(r.intersession_cv),
+        message_count: num(r.message_count),
+        low_confidence: !!Number(r.low_confidence),
+        computed_at: r.computed_at,
+      } });
+    } catch { fail(res, 500, 'Failed to load behavioral'); }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // CRITICALITY — early-warning signals (critical slowing) per level, latest window.
+  // Honest by construction: every row carries low_confidence=1 + a sensitivity caveat
+  // (EWS sensitivity is LOW in the literature). cognitive_metrics_criticality is
+  // envelope-encrypted by compute-criticality.py; read path auto-decrypts.
+  // ──────────────────────────────────────────────────────────────────────────
+  router.get('/criticality', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const windowType = String(req.query.window_type || 'weekly_step');
+      const rows = (await db.rawQuery(
+        `SELECT level, window_type, window_start, window_end,
+                ar1_autocorrelation, rolling_variance, early_warning_joint,
+                flickering_score, window_count, low_confidence, computed_at
+           FROM cognitive_metrics_criticality WHERE user_id = ? AND window_type = ?
+           ORDER BY window_end DESC`, [u.id, windowType])).results || [];
+      // Latest row per level (realm/theme/territory).
+      const seen = new Set(); const levels = [];
+      for (const r of rows) {
+        if (seen.has(r.level)) continue; seen.add(r.level);
+        levels.push({
+          level: r.level, window_start: r.window_start, window_end: r.window_end,
+          ar1_autocorrelation: num(r.ar1_autocorrelation),
+          rolling_variance: num(r.rolling_variance),
+          early_warning_joint: num(r.early_warning_joint),
+          flickering_score: num(r.flickering_score),
+          window_count: num(r.window_count),
+          low_confidence: !!Number(r.low_confidence),
+          computed_at: r.computed_at,
+        });
+      }
+      res.set('Cache-Control', 'no-store');
+      res.json({ window_type: windowType, levels });
+    } catch { fail(res, 500, 'Failed to load criticality'); }
+  });
+
+  // GET /events — discrete cognitive events (phase-lock, flickering). Undismissed by
+  // default; magnitude/detail/headline are encrypted and auto-decrypt on read.
+  router.get('/events', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const includeDismissed = req.query.include_dismissed === '1';
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const sql = `SELECT id, event_type, level, window_start, window_end,
+                          magnitude, severity, detail, headline, detected_at, dismissed_at
+                     FROM cognitive_events WHERE user_id = ?
+                     ${includeDismissed ? '' : 'AND dismissed_at IS NULL'}
+                     ORDER BY detected_at DESC LIMIT ?`;
+      const rows = (await db.rawQuery(sql, [u.id, limit])).results || [];
+      const events = rows.map((r) => {
+        let detail = null;
+        try { detail = r.detail ? JSON.parse(r.detail) : null; } catch { detail = null; }
+        return {
+          id: r.id, event_type: r.event_type, level: r.level,
+          window_start: r.window_start, window_end: r.window_end,
+          magnitude: num(r.magnitude), severity: r.severity, detail,
+          headline: r.headline, detected_at: r.detected_at, dismissed_at: r.dismissed_at,
+        };
+      });
+      res.set('Cache-Control', 'no-store');
+      res.json({ events });
+    } catch { fail(res, 500, 'Failed to load events'); }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // TERRITORY RIVER — how your topics change over time. The reliable spine:
+  // anchor (persistent) territories as named bands + the count of active
+  // territories per week. Built ONLY from robust counts/shares of the activation
+  // trajectory (a single clustering run) — it does NOT lean on Fisher velocity
+  // (temporal-amnesia risk). Realm-level naming is currently inconsistent (see
+  // docs/FINDING-clustering-run-inconsistency-...md) so this rides the TERRITORY
+  // altitude, which reconciles (311/372 ids name-resolvable). Two novelty
+  // overlays: text (gzip compression) + path (rolling LZ76 of the topic route).
+  // ──────────────────────────────────────────────────────────────────────────
+  router.get('/territory-river', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const FLOOR = 0.01;      // a territory counts as "active" in a week above this share
+      const TOP_ANCHORS = 7;   // named bands to show
+      const LZ_WINDOW = 26;    // rolling window (weeks) for path-novelty LZ76
+
+      // 1) Weekly territory-activation trajectory, scoped to one clustering run.
+      const runRow = (await db.rawQuery(
+        `SELECT MAX(clustering_run_id) AS run FROM fisher_trajectory
+           WHERE user_id = ? AND level = 'territory' AND window_type = 'weekly_step'`, [u.id])).results || [];
+      const runId = runRow[0]?.run || null;
+      const trajRows = (await db.rawQuery(
+        `SELECT window_end, activation_vector, active_territory_count, message_count, low_confidence
+           FROM fisher_trajectory
+           WHERE user_id = ? AND level = 'territory' AND window_type = 'weekly_step'
+             ${runId ? 'AND clustering_run_id = ?' : ''}
+           ORDER BY window_end ASC`, runId ? [u.id, runId] : [u.id])).results || [];
+
+      const weeks = []; const vectors = [];
+      for (const r of trajRows) {
+        let v = {};
+        try { v = typeof r.activation_vector === 'string' ? JSON.parse(r.activation_vector) : (r.activation_vector || {}); } catch { v = {}; }
+        if (!v || typeof v !== 'object' || Array.isArray(v)) v = {};
+        vectors.push(v);
+        weeks.push({
+          end: (r.window_end || '').slice(0, 10),
+          active_count: num(r.active_territory_count),
+          message_count: num(r.message_count),
+          low_confidence: !!Number(r.low_confidence),
+        });
+      }
+
+      // 2) Territory profiles → name + current standing (anchor / active / dormant).
+      const profRows = (await db.rawQuery(
+        `SELECT territory_id, name, current_phase, is_anchored, last_active
+           FROM territory_profiles WHERE user_id = ?`, [u.id])).results || [];
+      const profById = {};
+      for (const r of profRows) if (r.territory_id != null) profById[String(r.territory_id)] = r;
+      const nameById = {};
+      for (const id in profById) nameById[id] = profById[id].name || null;
+      // Status is data-relative: "recent" is measured against the latest window.
+      const refMs = weeks.length ? Date.parse(weeks[weeks.length - 1].end) : Date.now();
+      const DORMANT_DAYS = 60;
+      const statusOf = (p) => {
+        if (!p) return 'unknown';
+        if (Number(p.is_anchored) || p.current_phase === 'anchor') return 'anchor';
+        const la = p.last_active ? Date.parse(p.last_active) : NaN;
+        const ageDays = Number.isNaN(la) ? Infinity : (refMs - la) / 86400000;
+        if (ageDays > DORMANT_DAYS) return 'dormant';
+        return 'active';
+      };
+
+      // 3) Anchors = territories active above FLOOR in the most weeks (persistent core).
+      const weeksActive = {}; const totalShare = {};
+      vectors.forEach((v) => {
+        for (const k in v) {
+          const s = Number(v[k]) || 0;
+          if (s > FLOOR) { weeksActive[k] = (weeksActive[k] || 0) + 1; totalShare[k] = (totalShare[k] || 0) + s; }
+        }
+      });
+      const anchorIds = Object.keys(weeksActive)
+        .sort((a, b) => (weeksActive[b] - weeksActive[a]) || (totalShare[b] - totalShare[a]))
+        .slice(0, TOP_ANCHORS);
+      const anchors = anchorIds.map((id) => ({
+        territory_id: Number(id),
+        name: nameById[id] || `Territory ${id}`,
+        named: nameById[id] != null,
+        status: statusOf(profById[id]),                 // anchor | active | dormant | unknown
+        last_active: profById[id]?.last_active ?? null,
+        weeks_active: weeksActive[id],
+        series: vectors.map((v) => Number(v[id]) || 0),
+      }));
+
+      // 4) Path novelty — rolling LZ76 over the dominant-territory-per-week sequence.
+      const dominant = vectors.map((v) => {
+        let best = null, bs = -1;
+        for (const k in v) { const s = Number(v[k]) || 0; if (s > bs) { bs = s; best = k; } }
+        return best;
+      });
+      const pathNovelty = weeks.map((w, i) => {
+        if (i + 1 < LZ_WINDOW) return { end: w.end, value: null };
+        const win = dominant.slice(i + 1 - LZ_WINDOW, i + 1).filter((x) => x != null);
+        if (win.length < LZ_WINDOW * 0.6) return { end: w.end, value: null };
+        const c = lz76Count(win);
+        const norm = (c * Math.log2(win.length)) / win.length;
+        return { end: w.end, value: Math.max(0, Math.min(1, norm)) };
+      });
+
+      // 5) Text novelty — weekly gzip compression (higher = less compressible = more novel).
+      const freqRows = (await db.rawQuery(
+        `SELECT window_end, compression FROM frequency_snapshots
+           WHERE user_id = ? AND granularity = 'week'
+           ORDER BY window_end ASC`, [u.id])).results || [];
+      const textNovelty = freqRows.map((r) => ({ end: (r.window_end || '').slice(0, 10), value: num(r.compression) }));
+
+      res.set('Cache-Control', 'no-store');
+      res.json({
+        run_id: runId,
+        level: 'territory',
+        span: weeks.length ? { start: weeks[0].end, end: weeks[weeks.length - 1].end } : null,
+        weeks,
+        anchors,
+        novelty: { text: textNovelty, path: pathNovelty },
+      });
+    } catch { fail(res, 500, 'Failed to load territory river'); }
   });
 
   return router;

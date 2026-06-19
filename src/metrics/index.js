@@ -36,6 +36,15 @@ export {
   TIER1_EMBEDDING_FAMILIES,
 } from './cvp.js';
 
+// The metric-read chokepoint (audit S1): column→family resolution + the
+// throwing/substituting gates the db boundary invokes. @see surface-gate.js.
+export {
+  metricColumnFamily,
+  assertColumnSurfaceable,
+  gateAnchorValue,
+  ANCHOR_METRIC_COLUMNS,
+} from './surface-gate.js';
+
 // Wire the contracts registry into the CVP validator (avoids an import cycle:
 // cvp.js holds an optional ref instead of importing contracts.js directly).
 import { CONTRACTS as _CONTRACTS } from './contracts.js';

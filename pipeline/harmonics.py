@@ -271,10 +271,21 @@ def _safe_hilbert(signal) -> np.ndarray:
 
     scipy.signal.hilbert raises on empty input and is numerically unreliable on
     zero-variance signals; both are normalized to explicit zeros here.
+
+    The signal is DEMEANED first. The cross-scale-coupling bands are built from
+    cosine-DISTANCE (1 − cos) values, which carry a large positive DC offset; the
+    Hilbert transform of a signal with a DC pedestal yields an analytic signal
+    whose phase winds around the offset and whose envelope is dominated by the
+    constant, distorting both instantaneous phase and amplitude. Removing the
+    mean isolates the oscillatory component, matching the reference PAC/PLV
+    implementations (research/multi-scale-surprisal-harmonic-coherence-research-
+    2026-05-07.md). Demeaning leaves the std unchanged, so the constant-signal
+    guard below still fires for a flat input (→ explicit zeros).
     """
     arr = np.asarray(signal, dtype=np.float64).ravel()
     if arr.size == 0:
         return np.zeros(0, dtype=np.complex128)
+    arr = arr - arr.mean()
     if float(np.std(arr)) < EPS:
         return np.zeros_like(arr, dtype=np.complex128)
     return scipy_hilbert(arr)
@@ -358,6 +369,66 @@ def phase_locking_value(low, high) -> float:
         return 0.0
     delta = hilbert_phase(high) - hilbert_phase(low)
     return float(max(0.0, min(1.0, float(np.abs(np.mean(np.exp(1j * delta)))))))
+
+
+def phase_locking_value_debiased(low, high, *, n_surrogates: int = 200, seed: int = 0) -> dict:
+    """Chance-corrected PLV via a circular-shift surrogate null.
+
+    Raw PLV is biased upward at small N: its expectation under ZERO coupling is
+    ≈ √(π/4N) (≈0.31 at N=8), so a short slow-band pair produces a large
+    "coupling" value that is pure finite-sample noise. The analytic √(π/4N) null
+    assumes i.i.d. uniform phases, but these band signals are SMOOTH (calendar-bin
+    means, 10-msg rolling means, then linear-interpolated onto a common grid), so
+    their phases are strongly autocorrelated and the i.i.d. null UNDER-estimates
+    the bias. We therefore estimate the null EMPIRICALLY with circular time-shift
+    surrogates: shifting one band's phase by a random offset preserves that band's
+    own autocorrelation while destroying any genuine cross-band timing, giving the
+    correct chance level for THESE signals.
+
+    Returns ``{'plv': observed, 'null_mean':, 'null_std':, 'z':, 'debiased':}``
+    where ``debiased = max(0, (plv − null_mean) / (1 − null_mean))`` — the
+    fraction of the available phase-locking range exceeded over chance, in [0, 1].
+    Length mismatch -> ValueError; empty / constant -> all-zero dict (no coupling).
+    The surrogate RNG is seeded (``seed``) so a row recomputes identically.
+    """
+    if low is None or high is None:
+        raise ValueError("low and high must not be None")
+    low = np.asarray(low, dtype=np.float64).ravel()
+    high = np.asarray(high, dtype=np.float64).ravel()
+    if low.shape[0] != high.shape[0]:
+        raise ValueError(f"low and high length mismatch: {low.shape[0]} vs {high.shape[0]}")
+    zero = {'plv': 0.0, 'null_mean': 0.0, 'null_std': 0.0, 'z': 0.0, 'debiased': 0.0}
+    n = low.size
+    if n == 0 or float(np.std(low)) < EPS or float(np.std(high)) < EPS:
+        return dict(zero)
+    if not isinstance(n_surrogates, int) or n_surrogates < 1:
+        raise ValueError(f"n_surrogates must be int >= 1, got {n_surrogates!r}")
+
+    phi_low = hilbert_phase(low)
+    phi_high = hilbert_phase(high)
+    obs = float(np.abs(np.mean(np.exp(1j * (phi_high - phi_low)))))
+
+    rng = np.random.default_rng(seed)
+    # Random non-zero circular shifts of phi_high (a shift of 0 would reproduce
+    # the observed value and bias the null toward it).
+    shifts = rng.integers(1, n, size=n_surrogates) if n > 1 else np.ones(n_surrogates, dtype=int)
+    t = np.arange(n)
+    idx = (t[None, :] - shifts[:, None]) % n          # (S, N) rolled indices
+    delta_s = phi_high[idx] - phi_low[None, :]        # (S, N)
+    null = np.abs(np.mean(np.exp(1j * delta_s), axis=1))  # (S,)
+    null_mean = float(null.mean())
+    null_std = float(null.std())
+
+    denom = 1.0 - null_mean
+    debiased = max(0.0, (obs - null_mean) / denom) if denom > EPS else 0.0
+    z = (obs - null_mean) / null_std if null_std > EPS else 0.0
+    return {
+        'plv': obs,
+        'null_mean': null_mean,
+        'null_std': null_std,
+        'z': float(z),
+        'debiased': float(min(1.0, debiased)),
+    }
 
 
 def spectral_coherence(x, y, fs: float, nperseg: Optional[int] = None):

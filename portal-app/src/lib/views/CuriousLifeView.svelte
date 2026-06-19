@@ -1,15 +1,18 @@
 <script lang="ts">
 	// Curious Life — the human-facing analytics surface. An Apple-Health-style
-	// overview of the cognitive-measurement plane: high-level summary cards you can
-	// tap to explore. Honest by construction — sparse / low-confidence signals say
-	// so rather than fabricating a number. Surfaces EVERY metric family the
-	// measurement plane actually computes: vitality, Fisher movement, harmonics,
-	// LZ-complexity, cognitive frequency, topology + co-firing, and milestones —
-	// plus a "what's measured" freshness strip.
+	// read of the cognitive-measurement plane, built on a PRECISION LADDER:
+	//   Layer 1 (glance)  — a plain-language summary band + at-a-glance stats.
+	//   Layer 2 (scan)    — metric cards grouped into "how you think / your world /
+	//                       turning points", each pairing one number with meaning.
+	//   Layer 3 (study)   — detail views with the precise metrics, charts, exact
+	//                       names + math, and a "what we measure" glossary with
+	//                       honest rigor labels (validated / heuristic / experimental).
+	// Honest by construction — sparse / low-confidence signals say so. Surfaces every
+	// metric family the plane computes, incl. the previously-hidden Routine
+	// (behavioral) and Early signals (criticality) families.
 	//
 	// Aesthetic: pure-CSS atmosphere (drifting radial gradients), no WebGL / no
-	// backdrop-filter (both misbehave in the desktop WKWebView — see app.css
-	// `html.is-tauri`). All charts are hand-rolled SVG.
+	// backdrop-filter (both misbehave in the desktop WKWebView). Hand-rolled SVG charts.
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { navigationState } from '$lib/stores/navigation';
@@ -17,6 +20,8 @@
 	import Ring from '$lib/curious/Ring.svelte';
 	import Spark from '$lib/curious/Spark.svelte';
 	import TimeSeries from '$lib/curious/TimeSeries.svelte';
+	import TerritoryRiver from '$lib/curious/TerritoryRiver.svelte';
+	import { METRIC_FAMILIES, RIGOR_LABEL, RIGOR_ACCENT, RIGOR_BLURB, type Rigor } from '$lib/curious/metricsCatalog';
 
 	type Any = Record<string, any>;
 
@@ -34,6 +39,10 @@
 	let cofire = $state<Any | null>(null);
 	let frequency = $state<Any | null>(null);
 	let freshness = $state<Any | null>(null);
+	let behavioral = $state<Any | null>(null);
+	let criticality = $state<Any[]>([]); // per-level latest rows
+	let events = $state<Any[]>([]);
+	let river = $state<Any | null>(null); // territory-river: anchor bands + active count over time
 
 	let gran = $state<'alpha' | 'theta' | 'delta'>('theta');
 
@@ -54,10 +63,24 @@
 	const pct = (v: any) => (v == null || Number.isNaN(Number(v)) ? '—' : `${Math.round(Number(v) * 100)}%`);
 	const cap = (s: any) => (typeof s === 'string' && s ? s[0].toUpperCase() + s.slice(1) : '—');
 
+	// Plain-language relabelling — kill the bands/granularity jargon at the surface.
+	// Bands are temporal aggregation scales, NOT EEG frequencies. Granularities are
+	// window sizes. Exact names live only in the Layer-3 "show detail" expanders.
+	const BAND_LABEL: Record<string, string> = { gamma: 'per-message', beta: 'hourly', alpha: 'daily', theta: 'weekly', delta: 'monthly' };
+	const GRAN_LABEL: Record<string, string> = { alpha: 'daily', theta: 'weekly', delta: 'monthly' };
+	const hourPart = (h: number | null) => {
+		if (h == null || Number.isNaN(h)) return null;
+		const x = ((Math.round(h) % 24) + 24) % 24;
+		if (x >= 5 && x < 12) return 'Morning';
+		if (x >= 12 && x < 17) return 'Afternoon';
+		if (x >= 17 && x < 22) return 'Evening';
+		return 'Night';
+	};
+
 	onMount(async () => {
 		navigationState.setPrimaryView('curious-life');
 		const g = (p: string) => apiGet<Any>(p).catch(() => null);
-		const [v, a, m, c, ms, tr, rA, rT, rD, cx, cf, fq, fr] = await Promise.all([
+		const [v, a, m, c, ms, tr, rA, rT, rD, cx, cf, fq, fr, bh, cr, ev] = await Promise.all([
 			g('/portal/vitality/snapshot'),
 			g('/portal/vitality/audit'),
 			g('/portal/trajectory/summary?period=quarter&level=realm'),
@@ -71,6 +94,9 @@
 			g('/portal/cofire?limit=18'),
 			g('/portal/frequency'),
 			g('/portal/metric-freshness'),
+			g('/portal/behavioral'),
+			g('/portal/criticality?window_type=weekly_step'),
+			g('/portal/events?limit=12'),
 		]);
 		vitality = v;
 		audit = a?.audit ?? null;
@@ -83,8 +109,12 @@
 		cofire = cf ?? null;
 		frequency = fq?.snapshot ?? null;
 		freshness = fr ?? null;
+		behavioral = bh?.behavioral ?? null;
+		criticality = cr?.levels ?? [];
+		events = ev?.events ?? [];
 		loading = false;
 		// Temporal series (non-blocking; charts fill in once back).
+		g('/portal/territory-river').then((rv) => { river = rv ?? null; });
 		const fs = await g(`/portal/frequency/series?granularity=${frequency?.granularity ?? 'day'}`);
 		freqSeries = fs?.series ?? [];
 		await loadRhythmSeries();
@@ -153,6 +183,46 @@
 	const levelPhases = $derived(
 		['realm', 'theme', 'territory'].map((lv) => ({ level: lv, row: current?.[lv] ?? null })),
 	);
+	const activeTerritories = $derived(
+		curRealm?.active_territory_count ?? movement?.active_territory_count ?? null,
+	);
+
+	// ── Honest relative context — only when a genuine comparison is available ──
+	// Movement: latest velocity vs the median of the weekly series (needs ≥6 windows).
+	const moveRelative = $derived.by(() => {
+		const xs = velocities.filter((x) => x > 0);
+		if (xs.length < 6) return null;
+		const sorted = [...xs].sort((a, b) => a - b);
+		const median = sorted[Math.floor(sorted.length / 2)];
+		const latest = velocities[velocities.length - 1];
+		if (!median || latest == null) return null;
+		if (latest > median * 1.2) return { tone: 'up', text: 'moving more than usual' };
+		if (latest < median * 0.8) return { tone: 'down', text: 'quieter than usual' };
+		return { tone: 'flat', text: 'a typical pace' };
+	});
+
+	// ── Narrative summary (Layer 1) ───────────────────────────────────────────
+	const summary = $derived.by(() => {
+		if (loading) return '';
+		const phase = curRealm?.phase ?? movement?.phase ?? null;
+		const parts: string[] = [];
+		if (phase) {
+			let s = `Your thinking is in a ${phase} phase`;
+			if (moveRelative && moveRelative.tone !== 'flat') s += ` — ${moveRelative.text}`;
+			parts.push(s + '.');
+		}
+		if (activeTerritories != null) {
+			parts.push(`Right now ${activeTerritories} territor${activeTerritories === 1 ? 'y is' : 'ies are'} active.`);
+		} else if (vSummary?.territory_count) {
+			parts.push(`Drawn from your territories across every conversation.`);
+		}
+		if (milestones.length) {
+			const d = (milestones[0].window_start ?? '').slice(0, 10);
+			parts.push(`Your latest turning point${d ? ` (${d})` : ''}: ${milestones[0].headline}`);
+		}
+		if (!parts.length) return 'Your measurements are still gathering. A few more active days and this fills in.';
+		return parts.join(' ');
+	});
 
 	// ── Rhythm (harmonics) ───────────────────────────────────────────────────
 	const BANDS = ['gamma', 'beta', 'alpha', 'theta', 'delta'];
@@ -167,7 +237,7 @@
 	const rhythmHasSignal = $derived(
 		Object.values(overviewRhythm).some((v) => v != null && Number(v) !== 0),
 	);
-	// The 9 feature rows × 5 bands grid (the 41 harmonic columns made legible).
+	// The 8 feature rows × 5 bands grid (the 41 harmonic columns made legible).
 	const FEATURES = [
 		{ key: 'harmonic_amplitude', suffix: '_k1', label: 'amplitude k1' },
 		{ key: 'harmonic_amplitude', suffix: '_k2', label: 'amplitude k2' },
@@ -186,8 +256,12 @@
 
 	// ── Complexity / Frequency / Co-firing ───────────────────────────────────
 	const cxGlobal = $derived(complexity?.global ?? null);
+	// Primary = embedding-novelty (Tier-1; robust at low n). Show only territories with
+	// a CONFIDENT novelty value; LZ is the cross-check (greyed when its own gate fires).
 	const cxTerr = $derived(
-		[...(complexity?.territories ?? [])].sort((a, b) => (b.lz_complexity ?? 0) - (a.lz_complexity ?? 0)),
+		[...(complexity?.territories ?? [])]
+			.filter((t) => t.embedding_novelty != null && !t.embedding_novelty_low_conf)
+			.sort((a, b) => (b.embedding_novelty ?? 0) - (a.embedding_novelty ?? 0)),
 	);
 	const freq = $derived(frequency);
 	const freqStats = [
@@ -205,39 +279,67 @@
 		{ key: 'weekly', label: 'week' },
 	];
 
+	// ── Routine (behavioral) ──────────────────────────────────────────────────
+	const diurnalHist = $derived<(number | null)[]>(
+		Array.isArray(behavioral?.diurnal_hist) ? behavioral!.diurnal_hist : [],
+	);
+	const diurnalMax = $derived(Math.max(1, ...diurnalHist.map((v) => Number(v) || 0)));
+	const peakPart = $derived(hourPart(behavioral?.diurnal_peak_hour ?? null));
+	const hasRoutine = $derived(behavioral != null && (behavioral.diurnal_peak_hour != null || behavioral.session_count != null));
+
+	// ── Early signals (criticality) ──────────────────────────────────────────
+	const critStirring = $derived(
+		criticality.some((c) => (Number(c.early_warning_joint) || 0) > 0 || (Number(c.flickering_score) || 0) > 0.5),
+	);
+	const hasCrit = $derived(criticality.length > 0);
+
 	// ── Freshness ("what's measured") ────────────────────────────────────────
-	const FRESH_LABELS: Record<string, string> = {
-		fisher_trajectory: 'Movement',
-		fisher_milestones: 'Milestones',
-		territory_vitality: 'Vitality',
-		territory_cofire: 'Co-firing',
-		complexity_snapshots: 'Complexity',
-		topology_audit_snapshots: 'Topology',
-		frequency_snapshots: 'Frequency',
-		cognitive_metrics_harmonic: 'Harmonics',
-	};
 	const freshColor: Record<string, string> = {
 		fresh: 'var(--color-accent-jade)',
 		stale: 'var(--color-accent-coral)',
 		empty: 'var(--color-text-tertiary)',
 		missing: 'var(--color-text-tertiary)',
 	};
-	const freshList = $derived(freshness?.metrics ?? []);
+	const freshByTable = $derived.by(() => {
+		const map: Record<string, Any> = {};
+		for (const f of (freshness?.metrics ?? [])) map[f.table] = f;
+		return map;
+	});
 
 	function openMindscape() {
 		navigationState.setPrimaryView('mindscape');
 		goto('/mindscape');
 	}
 
+	// ── Pillars + groups ──────────────────────────────────────────────────────
 	const pillars = [
-		{ key: 'vitality', label: 'Vitality', accent: 'jade', tagline: 'How alive your territories are' },
 		{ key: 'movement', label: 'Movement', accent: 'azure', tagline: 'How your mind is moving' },
 		{ key: 'rhythm', label: 'Rhythm', accent: 'amethyst', tagline: 'The cadence of your thinking' },
 		{ key: 'complexity', label: 'Complexity', accent: 'teal', tagline: 'How varied your patterns are' },
 		{ key: 'growth', label: 'Growth', accent: 'rose', tagline: 'How your thinking consolidates' },
+		{ key: 'vitality', label: 'Vitality', accent: 'jade', tagline: 'How alive your territories are' },
 		{ key: 'mindscape', label: 'Mindscape', accent: 'aurum', tagline: 'The shape of your inner world' },
 		{ key: 'milestones', label: 'Milestones', accent: 'coral', tagline: 'Moments your mind turned' },
+		{ key: 'routine', label: 'Routine', accent: 'teal', tagline: 'When you write, and how regularly' },
+		{ key: 'early-signals', label: 'Early signals', accent: 'aurum', tagline: 'Faint hints a shift may be near' },
 	];
+	const GROUPS = [
+		{ key: 'think', label: 'How you think' },
+		{ key: 'world', label: 'Your world' },
+		{ key: 'turning', label: 'Turning points' },
+	];
+	const groupOf: Record<string, string> = {
+		movement: 'think', rhythm: 'think', complexity: 'think', growth: 'think',
+		vitality: 'world', mindscape: 'world',
+		milestones: 'turning', routine: 'turning', 'early-signals': 'turning',
+	};
+	const familyById = $derived.by(() => {
+		const map: Record<string, Any> = {};
+		for (const f of METRIC_FAMILIES) map[f.id] = f;
+		return map;
+	});
+	const pillarRigor = (key: string): Rigor | null => (familyById[key]?.rigor ?? null) as Rigor | null;
+
 	const accentVar: Record<string, string> = {
 		jade: 'var(--color-accent-jade)',
 		azure: 'var(--color-accent)',
@@ -256,6 +358,9 @@
 		teal: 'var(--color-accent-teal-rgb)',
 		rose: 'var(--color-accent-rose-rgb)',
 	};
+
+	// Glossary state
+	let glossaryOpen = $state(false);
 </script>
 
 <svelte:head><title>Curious Life · Mycelium</title></svelte:head>
@@ -269,171 +374,254 @@
 		{#if !active}
 			<!-- ── OVERVIEW ─────────────────────────────────────────────────── -->
 			<header class="hero">
-				<p class="overline">Curious Life</p>
-				<h1 class="title">Where your mind stands today.</h1>
-				<p class="lede">A living read of how your thinking moves, gathers, and grows — drawn from your own conversations.</p>
+				<h1 class="title">Your mind, quantified.</h1>
 			</header>
 
 			{#if loading}
+				<div class="summary-band skeleton-band"></div>
 				<div class="grid">
 					{#each pillars as _}<div class="card skeleton"></div>{/each}
 				</div>
 			{:else}
-				<div class="grid">
-					<!-- VITALITY -->
-					<button class="card" style="--rgb:{accentRgb.jade};" onclick={() => (active = 'vitality')}>
-						<div class="card-head"><span class="dot" style="background:{accentVar.jade}"></span><span class="ctitle">Vitality</span><span class="chev">›</span></div>
-						<div class="card-body two">
-							<Ring value={vSummary?.avg_vitality ?? 0} max={1} color={accentVar.jade}
-								center={fmt(vSummary?.avg_vitality, 2)} sub="avg" size={84} />
-							<div class="col">
-								<div class="big">{vSummary?.territory_count ?? '—'} <span class="unit">territories</span></div>
-								<div class="phasebar">
-									{#each phaseOrder as ph}
-										{@const n = vSummary?.phases?.[ph] ?? 0}
-										{#if n > 0}<span class="seg" style="flex:{n};background:{phaseColor[ph]}" title="{n} {ph}"></span>{/if}
-									{/each}
-								</div>
-								<div class="legend">
-									{#each phaseOrder as ph}
-										{#if (vSummary?.phases?.[ph] ?? 0) > 0}
-											<span><i style="background:{phaseColor[ph]}"></i>{vSummary.phases[ph]} {ph}</span>
-										{/if}
-									{/each}
-								</div>
-							</div>
-						</div>
-						<p class="tagline">How alive your territories are</p>
-					</button>
-
-					<!-- MOVEMENT -->
-					<button class="card" style="--rgb:{accentRgb.azure};" onclick={() => (active = 'movement')}>
-						<div class="card-head"><span class="dot" style="background:{accentVar.azure}"></span><span class="ctitle">Movement</span>{#if moveLowConf}<span class="lc">early signal</span>{/if}<span class="chev">›</span></div>
-						<div class="card-body">
-							<div class="phase-badge" style="--rgb:{accentRgb.azure}">{cap(curRealm?.phase ?? movement?.phase)}</div>
-							<div class="spark-row"><Spark points={velocities} color={accentVar.azure} width={150} height={42} /></div>
-							<div class="ministats">
-								<span><b>{fmt(movement?.exploration_ratio, 2)}</b> exploration</span>
-								<span><b>{fmt(movement?.avg_velocity, 3)}</b> velocity</span>
-							</div>
-						</div>
-						<p class="tagline">How your mind is moving</p>
-					</button>
-
-					<!-- RHYTHM -->
-					<button class="card" style="--rgb:{accentRgb.amethyst};" onclick={() => (active = 'rhythm')}>
-						<div class="card-head"><span class="dot" style="background:{accentVar.amethyst}"></span><span class="ctitle">Rhythm</span>{#if !rhythmHasSignal}<span class="lc">gathering</span>{/if}<span class="chev">›</span></div>
-						<div class="card-body">
-							{#if rhythmHasSignal}
-								<div class="bands">
-									{#each BANDS as band}
-										{@const v = Number(overviewRhythm[`harmonic_amplitude_${band}_k1`]) || 0}
-										<div class="band"><span class="bandbar" style="height:{Math.min(100, v * 600)}%;background:{accentVar.amethyst}"></span></div>
-									{/each}
-								</div>
-								<p class="muted">Harmonic signature across timescales</p>
-							{:else}
-								<div class="empty-rhythm">
-									<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M3 12h3l2-6 4 14 3-10 2 4h4" /></svg>
-									<p class="muted">Your rhythm sharpens as you keep capturing. A few more active days and the bands light up.</p>
-								</div>
-							{/if}
-						</div>
-						<p class="tagline">The cadence of your thinking</p>
-					</button>
-
-					<!-- COMPLEXITY -->
-					<button class="card" style="--rgb:{accentRgb.teal};" onclick={() => (active = 'complexity')}>
-						<div class="card-head"><span class="dot" style="background:{accentVar.teal}"></span><span class="ctitle">Complexity</span><span class="chev">›</span></div>
-						<div class="card-body two">
-							<Ring value={cxGlobal?.lz_complexity ?? 0} max={1} color={accentVar.teal}
-								center={fmt(cxGlobal?.lz_complexity, 2)} sub="LZ" size={84} />
-							<div class="col">
-								<div class="big">{cxGlobal?.alphabet_size ?? '—'} <span class="unit">territories in play</span></div>
-								<div class="ministats wrap">
-									<span><b>{cxGlobal?.sequence_length ?? '—'}</b> steps</span>
-									<span><b>{cxGlobal?.raw_complexity ?? '—'}</b> patterns</span>
-								</div>
-							</div>
-						</div>
-						<p class="tagline">How varied your thinking sequences are</p>
-					</button>
-
-					<!-- GROWTH (frequency) -->
-					<button class="card" style="--rgb:{accentRgb.rose};" onclick={() => (active = 'growth')}>
-						<div class="card-head"><span class="dot" style="background:{accentVar.rose}"></span><span class="ctitle">Growth</span>{#if !freq}<span class="lc">gathering</span>{/if}<span class="chev">›</span></div>
-						<div class="card-body">
-							{#if freq}
-								<div class="ministats wrap">
-									<span><b>{pct(freq.coherence)}</b> coherence</span>
-									<span><b>{pct(freq.entropy)}</b> spread</span>
-									<span><b>{pct(freq.learning_rate)}</b> learning</span>
-								</div>
-								<p class="muted">Window of {freq.message_count ?? '—'} messages · {freq.granularity ?? ''}</p>
-							{:else}
-								<p class="muted">Growth metrics resolve once a few windows of activity accrue.</p>
-							{/if}
-						</div>
-						<p class="tagline">How your thinking consolidates and changes</p>
-					</button>
-
-					<!-- MINDSCAPE -->
-					<button class="card" style="--rgb:{accentRgb.aurum};" onclick={() => (active = 'mindscape')}>
-						<div class="card-head"><span class="dot" style="background:{accentVar.aurum}"></span><span class="ctitle">Mindscape</span><span class="chev">›</span></div>
-						<div class="card-body">
-							<div class="big">{audit?.total_territories ?? '—'} <span class="unit">territories</span></div>
-							<div class="ministats wrap">
-								<span><b>{audit?.total_connections ?? '—'}</b> links</span>
-								<span><b>{fmt(audit?.m2_entropy, 2)}</b> spread</span>
-								<span><b>{audit?.orphan_count ?? 0}</b> orphans</span>
-								<span><b>{audit?.bridge_count ?? 0}</b> bridges</span>
-							</div>
-						</div>
-						<p class="tagline">The shape of your inner world</p>
-					</button>
-
-					<!-- MILESTONES -->
-					<button class="card wide" style="--rgb:{accentRgb.coral};" onclick={() => (active = 'milestones')}>
-						<div class="card-head"><span class="dot" style="background:{accentVar.coral}"></span><span class="ctitle">Milestones</span><span class="count">{milestones.length}</span><span class="chev">›</span></div>
-						<div class="card-body">
-							{#if milestones.length}
-								<p class="headline">{milestones[0].headline}</p>
-								<p class="muted">{(milestones[0].window_start ?? '').slice(0, 10)} · {milestones.length} moment{milestones.length > 1 ? 's' : ''} your mind turned</p>
-							{:else}
-								<p class="muted">No turning points detected yet — they appear when your focus shifts decisively.</p>
-							{/if}
-						</div>
-						<p class="tagline">Moments your mind turned</p>
-					</button>
+				<!-- LAYER 1 — narrative summary + glance -->
+				<div class="summary-band">
+					<p class="summary-text">{summary}</p>
+				</div>
+				<div class="glance">
+					<div class="glance-stat">
+						<span class="g-l">Phase</span>
+						<span class="g-v">{cap(curRealm?.phase ?? movement?.phase)}</span>
+					</div>
+					<div class="glance-stat">
+						<span class="g-l">Vitality</span>
+						<span class="g-v">{fmt(vSummary?.avg_vitality, 2)}{#if moveRelative && moveRelative.tone === 'up'}<span class="g-rel up"> ↑</span>{/if}</span>
+					</div>
+					<div class="glance-stat">
+						<span class="g-l">Active territories</span>
+						<span class="g-v">{activeTerritories ?? '—'}</span>
+					</div>
+					<div class="glance-stat">
+						<span class="g-l">Milestones</span>
+						<span class="g-v">{milestones.length}</span>
+					</div>
 				</div>
 
-				<!-- WHAT'S MEASURED — freshness strip -->
-				{#if freshList.length}
-					<div class="freshness">
-						<span class="fresh-title">What's measured</span>
-						<div class="fresh-row">
-							{#each freshList as f}
-								<span class="fresh-chip" title="{f.description} · {f.verdict}{f.cadence ? ' · ' + f.cadence : ''}">
-									<i style="background:{freshColor[f.verdict] ?? 'var(--color-text-tertiary)'}"></i>
-									{FRESH_LABELS[f.table] ?? f.table}
-								</span>
-							{/each}
-						</div>
+				<!-- THE RIVER — how your topics change over time (the reliable spine) -->
+				<section class="river-section">
+					<div class="river-head">
+						<h2 class="group-head">How your topics move over time</h2>
+						<span class="river-note">territory level · drawn from activation counts, not Fisher</span>
 					</div>
-				{/if}
+					<TerritoryRiver data={river} />
+				</section>
 
-				<p class="footnote">Computed from {vSummary?.territory_count ?? 0} territories across your conversations. Signals marked “early” / “gathering” are advisory until more data accrues.</p>
+				<!-- LAYER 2 — grouped pillar cards -->
+				{#each GROUPS as grp}
+					<h2 class="group-head">{grp.label}</h2>
+					<div class="grid">
+						{#each pillars.filter((p) => groupOf[p.key] === grp.key) as p (p.key)}
+							{#if p.key === 'movement'}
+								<button class="card" style="--rgb:{accentRgb.azure};" onclick={() => (active = 'movement')}>
+									<div class="card-head"><span class="dot" style="background:{accentVar.azure}"></span><span class="ctitle">Movement</span>{#if moveLowConf}<span class="lc">early signal</span>{/if}<span class="chev">›</span></div>
+									<div class="card-body">
+										<div class="phase-badge" style="--rgb:{accentRgb.azure}">{cap(curRealm?.phase ?? movement?.phase)}</div>
+										<div class="spark-row"><Spark points={velocities} color={accentVar.azure} width={150} height={42} /></div>
+										{#if moveRelative}<span class="rel-chip {moveRelative.tone}">{moveRelative.text}</span>{/if}
+									</div>
+									<p class="tagline">How far and fast your focus travels</p>
+								</button>
+
+							{:else if p.key === 'rhythm'}
+								<button class="card" style="--rgb:{accentRgb.amethyst};" onclick={() => (active = 'rhythm')}>
+									<div class="card-head"><span class="dot" style="background:{accentVar.amethyst}"></span><span class="ctitle">Rhythm</span>{#if !rhythmHasSignal}<span class="lc">gathering</span>{/if}<span class="chev">›</span></div>
+									<div class="card-body">
+										{#if rhythmHasSignal}
+											<div class="bands">
+												{#each BANDS as band}
+													{@const v = Number(overviewRhythm[`harmonic_amplitude_${band}_k1`]) || 0}
+													<div class="band"><span class="bandbar" style="height:{Math.min(100, v * 600)}%;background:{accentVar.amethyst}"></span></div>
+												{/each}
+											</div>
+											<p class="muted">Pattern strength, per-message → monthly</p>
+										{:else}
+											<div class="empty-rhythm">
+												<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M3 12h3l2-6 4 14 3-10 2 4h4" /></svg>
+												<p class="muted">Your rhythm sharpens as you keep capturing. A few more active days and the bands light up.</p>
+											</div>
+										{/if}
+									</div>
+									<p class="tagline">The cadence of your thinking</p>
+								</button>
+
+							{:else if p.key === 'complexity'}
+								<button class="card" style="--rgb:{accentRgb.teal};" onclick={() => (active = 'complexity')}>
+									<div class="card-head"><span class="dot" style="background:{accentVar.teal}"></span><span class="ctitle">Complexity</span><span class="chev">›</span></div>
+									<div class="card-body two">
+										<Ring value={cxGlobal?.lz_complexity ?? 0} max={1} color={accentVar.teal}
+											center={fmt(cxGlobal?.lz_complexity, 2)} sub="LZ" size={84} />
+										<div class="col">
+											<div class="big">{cxGlobal?.alphabet_size ?? '—'} <span class="unit">territories in play</span></div>
+											<div class="ministats wrap">
+												<span><b>{cxGlobal?.sequence_length ?? '—'}</b> steps</span>
+											</div>
+										</div>
+									</div>
+									<p class="tagline">How varied your thinking sequences are</p>
+								</button>
+
+							{:else if p.key === 'growth'}
+								<button class="card" style="--rgb:{accentRgb.rose};" onclick={() => (active = 'growth')}>
+									<div class="card-head"><span class="dot" style="background:{accentVar.rose}"></span><span class="ctitle">Growth</span>{#if !freq}<span class="lc">gathering</span>{/if}<span class="chev">›</span></div>
+									<div class="card-body">
+										{#if freq}
+											<div class="ministats wrap">
+												<span><b>{pct(freq.coherence)}</b> coherence</span>
+												<span><b>{pct(freq.entropy)}</b> spread</span>
+												<span><b>{pct(freq.learning_rate)}</b> learning</span>
+											</div>
+											<p class="muted">Window of {freq.message_count ?? '—'} messages</p>
+										{:else}
+											<p class="muted">Growth metrics resolve once a few windows of activity accrue.</p>
+										{/if}
+									</div>
+									<p class="tagline">How your thinking consolidates and changes</p>
+								</button>
+
+							{:else if p.key === 'vitality'}
+								<button class="card" style="--rgb:{accentRgb.jade};" onclick={() => (active = 'vitality')}>
+									<div class="card-head"><span class="dot" style="background:{accentVar.jade}"></span><span class="ctitle">Vitality</span><span class="chev">›</span></div>
+									<div class="card-body two">
+										<Ring value={vSummary?.avg_vitality ?? 0} max={1} color={accentVar.jade}
+											center={fmt(vSummary?.avg_vitality, 2)} sub="avg" size={84} />
+										<div class="col">
+											<div class="big">{vSummary?.territory_count ?? '—'} <span class="unit">territories</span></div>
+											<div class="phasebar">
+												{#each phaseOrder as ph}
+													{@const n = vSummary?.phases?.[ph] ?? 0}
+													{#if n > 0}<span class="seg" style="flex:{n};background:{phaseColor[ph]}" title="{n} {ph}"></span>{/if}
+												{/each}
+											</div>
+											<div class="legend">
+												{#each phaseOrder as ph}
+													{#if (vSummary?.phases?.[ph] ?? 0) > 0}
+														<span><i style="background:{phaseColor[ph]}"></i>{vSummary.phases[ph]} {ph}</span>
+													{/if}
+												{/each}
+											</div>
+										</div>
+									</div>
+									<p class="tagline">How alive your territories are</p>
+								</button>
+
+							{:else if p.key === 'mindscape'}
+								<button class="card" style="--rgb:{accentRgb.aurum};" onclick={() => (active = 'mindscape')}>
+									<div class="card-head"><span class="dot" style="background:{accentVar.aurum}"></span><span class="ctitle">Mindscape</span><span class="chev">›</span></div>
+									<div class="card-body">
+										<div class="big">{audit?.total_territories ?? '—'} <span class="unit">territories</span></div>
+										<div class="ministats wrap">
+											<span><b>{audit?.total_connections ?? '—'}</b> links</span>
+											<span><b>{fmt(audit?.m2_entropy, 2)}</b> spread</span>
+											<span><b>{audit?.orphan_count ?? 0}</b> orphans</span>
+											<span><b>{audit?.bridge_count ?? 0}</b> bridges</span>
+										</div>
+									</div>
+									<p class="tagline">The shape of your inner world</p>
+								</button>
+
+							{:else if p.key === 'milestones'}
+								<button class="card" style="--rgb:{accentRgb.coral};" onclick={() => (active = 'milestones')}>
+									<div class="card-head"><span class="dot" style="background:{accentVar.coral}"></span><span class="ctitle">Milestones</span><span class="count">{milestones.length}</span><span class="chev">›</span></div>
+									<div class="card-body">
+										{#if milestones.length}
+											<p class="headline">{milestones[0].headline}</p>
+											<p class="muted">{(milestones[0].window_start ?? '').slice(0, 10)} · {milestones.length} moment{milestones.length > 1 ? 's' : ''} your mind turned</p>
+										{:else}
+											<p class="muted">No turning points detected yet — they appear when your focus shifts decisively.</p>
+										{/if}
+									</div>
+									<p class="tagline">Moments your mind turned</p>
+								</button>
+
+							{:else if p.key === 'routine'}
+								<button class="card" style="--rgb:{accentRgb.teal};" onclick={() => (active = 'routine')}>
+									<div class="card-head"><span class="dot" style="background:{accentVar.teal}"></span><span class="ctitle">Routine</span><span class="badge-new">new</span>{#if !hasRoutine}<span class="lc">gathering</span>{/if}<span class="chev">›</span></div>
+									<div class="card-body">
+										{#if hasRoutine}
+											<div class="big">{peakPart ?? '—'} <span class="unit">peak</span></div>
+											<div class="ministats wrap">
+												<span><b>{behavioral?.session_count != null ? Math.round(Number(behavioral.session_count)) : '—'}</b> sessions</span>
+												<span><b>{pct(behavioral?.diurnal_concentration)}</b> concentration</span>
+											</div>
+										{:else}
+											<p class="muted">Your daily rhythm resolves once you've written across a range of hours.</p>
+										{/if}
+									</div>
+									<p class="tagline">When you write, and how regularly</p>
+								</button>
+
+							{:else if p.key === 'early-signals'}
+								<button class="card" style="--rgb:{accentRgb.aurum};" onclick={() => (active = 'early-signals')}>
+									<div class="card-head"><span class="dot" style="background:{accentVar.aurum}"></span><span class="ctitle">Early signals</span><span class="lc">advisory</span><span class="chev">›</span></div>
+									<div class="card-body">
+										{#if hasCrit}
+											<div class="big">{critStirring ? 'Stirring' : 'Quiet'}</div>
+											<p class="muted">Faint hints only — low-sensitivity by nature, never a prediction.</p>
+										{:else}
+											<p class="muted">Early-warning signals need a longer stretch of weekly movement to read.</p>
+										{/if}
+									</div>
+									<p class="tagline">Faint hints a shift may be near</p>
+								</button>
+							{/if}
+						{/each}
+					</div>
+				{/each}
+
+				<!-- LAYER 3 entry — What we measure (glossary) -->
+				<div class="glossary">
+					<button class="glossary-toggle" onclick={() => (glossaryOpen = !glossaryOpen)} aria-expanded={glossaryOpen}>
+						<span class="fresh-title">What we measure</span>
+						<span class="g-sub">Every signal, in plain words, with an honest rigor label</span>
+						<span class="chev" style="transform:rotate({glossaryOpen ? 90 : 0}deg)">›</span>
+					</button>
+					{#if glossaryOpen}
+						<div class="glossary-body">
+							{#each METRIC_FAMILIES as fam}
+								{@const fr = fam.freshTable ? freshByTable[fam.freshTable] : null}
+								<div class="gloss-fam">
+									<div class="gloss-fam-head">
+										<span class="gf-name">{fam.name}</span>
+										{#if fr}<i class="gf-fresh" style="background:{freshColor[fr.verdict] ?? 'var(--color-text-tertiary)'}" title="{fr.verdict}"></i>{/if}
+										{#if !fam.surfaced}<span class="gf-hidden">not shown</span>{/if}
+										<span class="gf-rigor" style="--rg:{RIGOR_ACCENT[fam.rigor]}" title={RIGOR_BLURB[fam.rigor]}>{RIGOR_LABEL[fam.rigor]}</span>
+									</div>
+									<p class="gloss-tag">{fam.tagline}</p>
+									<ul class="gloss-metrics">
+										{#each fam.metrics as mt}
+											<li><span class="gm-name">{mt.name}</span><span class="gm-mean">{mt.meaning}</span></li>
+										{/each}
+									</ul>
+								</div>
+							{/each}
+							<p class="muted sm gloss-foot">Rigor: <b>validated math</b> = a canonical computation · <b>heuristic</b> = a sensible signal, not a verdict · <b>experimental</b> = suggestive only, never a diagnosis or prediction. Bands (per-message → monthly) are time-scales, not EEG frequencies.</p>
+						</div>
+					{/if}
+				</div>
+
+				<p class="footnote">Computed locally from your own conversations, encrypted at rest. Signals marked “early” / “gathering” / “advisory” are suggestive until more data accrues.</p>
 			{/if}
 		{:else}
 			<!-- ── DETAIL ───────────────────────────────────────────────────── -->
 			{@const p = pillars.find((x) => x.key === active)!}
+			{@const rg = pillarRigor(active)}
 			<button class="back" onclick={() => (active = null)}>
 				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6" /></svg>
 				Overview
 			</button>
 			<header class="detail-head" style="--rgb:{accentRgb[p.accent]}">
 				<span class="dot lg" style="background:{accentVar[p.accent]}"></span>
-				<div><h1>{p.label}</h1><p>{p.tagline}</p></div>
+				<div class="dh-text"><h1>{p.label}</h1><p>{p.tagline}</p></div>
+				{#if rg}<span class="rigor-badge" style="--rg:{RIGOR_ACCENT[rg]}" title={RIGOR_BLURB[rg]}>{RIGOR_LABEL[rg]}</span>{/if}
 			</header>
 
 			{#if active === 'vitality'}
@@ -476,6 +664,7 @@
 			{:else if active === 'movement'}
 				<div class="detail-grid one">
 					<div class="panel">
+						<p class="lead">How far and fast your focus is travelling between ideas, read on the Fisher-Rao geometry of your territory distribution.</p>
 						<div class="row-between">
 							<div><div class="phase-badge lg" style="--rgb:{accentRgb.azure}">{cap(curRealm?.phase)}</div>{#if curRealm?.phase_recent && curRealm.phase_recent !== curRealm.phase}<span class="muted sm">recently {curRealm.phase_recent}</span>{/if}</div>
 							{#if moveLowConf}<span class="lc">early signal · advisory</span>{/if}
@@ -489,7 +678,7 @@
 							</div>
 						</div>
 						<div class="big-spark"><TimeSeries points={moveSeries} labels={moveLabels} color={accentVar.azure} height={150} /></div>
-						<p class="muted sm">How your {moveMetricOpts.find((o) => o.key === moveMetric)?.label} changed week by week — drawn from your full history. Flat-zero stretches are weeks with little activity.</p>
+						<p class="muted sm">How your {moveMetricOpts.find((o) => o.key === moveMetric)?.label} changed week by week. Flat-zero stretches are weeks with little activity.</p>
 					</div>
 					<div class="stat-row">
 						<div class="stat"><span class="s-v">{fmt(movement?.exploration_ratio, 2)}</span><span class="s-l">exploration ratio</span></div>
@@ -518,42 +707,49 @@
 
 			{:else if active === 'rhythm'}
 				<div class="panel">
+					<p class="lead">The cadence of your thinking across timescales. Each value summarises a signal built from how consecutive messages move.</p>
 					<div class="row-between">
 						<h3>Harmonic signature</h3>
 						<div class="seg-toggle">
 							{#each ['alpha', 'theta', 'delta'] as gk}
-								<button class:on={gran === gk} onclick={() => { gran = gk as any; loadRhythmSeries(); }}>{gk}</button>
+								<button class:on={gran === gk} onclick={() => { gran = gk as any; loadRhythmSeries(); }}>{GRAN_LABEL[gk]}</button>
 							{/each}
 						</div>
 					</div>
 					{#if Object.values(rhythmValues).some((v) => v != null && Number(v) !== 0)}
-						<div class="metric-grid">
-							<div class="mg-row mg-head">
-								<span class="mg-feat"></span>
-								{#each BANDS as band}<span class="mg-band">{band}</span>{/each}
-							</div>
-							{#each FEATURES as feat}
-								<div class="mg-row">
-									<span class="mg-feat">{feat.label}</span>
-									{#each BANDS as band}
-										{@const v = cellVal(feat, band)}
-										<span class="mg-cell" class:null={v == null} style={v != null ? `--m:${Math.min(1, Math.abs(v))}` : ''}>
-											{v == null ? '·' : fmt(v, 2)}
-										</span>
-									{/each}
+						<div class="band-key">
+							{#each BANDS as band}<span><i style="background:{accentVar.amethyst}"></i>{BAND_LABEL[band]}</span>{/each}
+						</div>
+						<details class="jargon">
+							<summary>Show the full metric grid</summary>
+							<div class="metric-grid">
+								<div class="mg-row mg-head">
+									<span class="mg-feat"></span>
+									{#each BANDS as band}<span class="mg-band">{BAND_LABEL[band]}</span>{/each}
 								</div>
-							{/each}
-						</div>
-						<div class="h0">
-							<span class="s-l">topology persistence entropy (H0)</span>
-							<span class="s-v">{fmt(rhythmValues.topology_h0_persistence_entropy, 3)}</span>
-						</div>
-						<p class="muted sm">Bands are temporal aggregation scales, not EEG frequencies — gamma = per-message, delta = monthly. {rhythm?.low_confidence ? 'Low-confidence: based on a small window.' : ''}</p>
+								{#each FEATURES as feat}
+									<div class="mg-row">
+										<span class="mg-feat">{feat.label}</span>
+										{#each BANDS as band}
+											{@const v = cellVal(feat, band)}
+											<span class="mg-cell" class:null={v == null} style={v != null ? `--m:${Math.min(1, Math.abs(v))}` : ''}>
+												{v == null ? '·' : fmt(v, 2)}
+											</span>
+										{/each}
+									</div>
+								{/each}
+							</div>
+							<div class="h0">
+								<span class="s-l">topology persistence entropy (H0)</span>
+								<span class="s-v">{fmt(rhythmValues.topology_h0_persistence_entropy, 3)}</span>
+							</div>
+							<p class="muted sm">Columns are temporal aggregation scales (gamma=per-message … delta=monthly), not EEG frequencies. {rhythm?.low_confidence ? 'Low-confidence: based on a small window.' : ''}</p>
+						</details>
 					{:else}
 						<div class="empty-lg">
 							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M2 12h4l2.5-7 4.5 16 3-12 2 3h4" /></svg>
-							<h3>No {gran} window yet</h3>
-							<p class="muted">The harmonic signature reads the cadence of your thinking across timescales. This granularity needs a denser stretch of activity to resolve — try another, or keep capturing.</p>
+							<h3>No {GRAN_LABEL[gran]} window yet</h3>
+							<p class="muted">The harmonic signature reads the cadence of your thinking across timescales. This window size needs a denser stretch of activity to resolve — try another, or keep capturing.</p>
 						</div>
 					{/if}
 				</div>
@@ -567,9 +763,9 @@
 					</div>
 					{#if rhythmSeriesVals.some((v: unknown) => v != null)}
 						<TimeSeries points={rhythmSeriesVals} labels={rhythmSeriesLabels} color={accentVar.amethyst} height={150} />
-						<p class="muted sm">{rhythmMetric.replace(/_/g, ' ')} across {rhythmSeriesLabels.length} {gran} windows. Gaps are windows it couldn't be computed for.</p>
+						<p class="muted sm">{rhythmMetric.replace(/_/g, ' ')} across {rhythmSeriesLabels.length} {GRAN_LABEL[gran]} windows. Gaps are windows it couldn't be computed for.</p>
 					{:else}
-						<p class="muted sm">No time series for this metric at {gran} granularity yet — try another metric or granularity.</p>
+						<p class="muted sm">No time series for this metric at {GRAN_LABEL[gran]} window size yet — try another metric or window.</p>
 					{/if}
 				</div>
 
@@ -584,20 +780,21 @@
 						</div>
 					</div>
 					<div class="panel">
-						<h3>Complexity by territory</h3>
+						<h3>Novelty by territory <span class="muted" style="font-weight:400">· embedding-native (LZ cross-check)</span></h3>
 						{#if cxTerr.length}
 							<ul class="terr-list">
 								{#each cxTerr.slice(0, 16) as t}
 									<li>
 										<span class="t-phase" style="background:{accentVar.teal}"></span>
 										<span class="t-id">{t.level_name ?? `Territory ${t.level_id}`}</span>
-										<span class="t-bar"><span style="width:{Math.round((t.lz_complexity ?? 0) * 100)}%;background:{accentVar.teal}"></span></span>
-										<span class="t-val">{fmt(t.lz_complexity, 2)}</span>
+										<span class="t-bar"><span style="width:{Math.round((t.embedding_novelty ?? 0) * 100)}%;background:{accentVar.teal}"></span></span>
+										<span class="t-val">{fmt(t.embedding_novelty, 2)}</span>
+										<span class="t-val muted" title="LZ compressibility cross-check{t.low_confidence ? ' — low confidence (short sequence)' : ''}" style={t.low_confidence ? 'opacity:0.35' : 'opacity:0.6'}>LZ {fmt(t.lz_complexity, 2)}</span>
 									</li>
 								{/each}
 							</ul>
 						{:else}
-							<p class="muted">Per-territory complexity resolves once territories have enough sequence to measure.</p>
+							<p class="muted">Novelty resolves once territories have a few messages to compare.</p>
 						{/if}
 					</div>
 				</div>
@@ -620,7 +817,7 @@
 								</div>
 							{/each}
 						</div>
-						<p class="muted sm">Over a window of {freq.message_count ?? '—'} messages across {freq.territory_count ?? '—'} territories ({freq.granularity ?? ''}). Coherence + spread describe the present; learning-rate + drift describe change.</p>
+						<p class="muted sm">Over a window of {freq.message_count ?? '—'} messages across {freq.territory_count ?? '—'} territories. Coherence + spread describe the present; learning-rate + drift describe change.</p>
 					</div>
 					{#if freqSeries.length > 1}
 						<div class="panel">
@@ -633,7 +830,7 @@
 								</div>
 							</div>
 							<TimeSeries points={freqCol(freqMetric)} labels={freqLabels} color={accentVar.rose} height={150} yMin={0} yMax={1} unit="" />
-							<p class="muted sm">{freqStats.find((s) => s.key === freqMetric)?.label} across {freqSeries.length} {freqSeries[0]?.granularity ?? ''} windows — {freqStats.find((s) => s.key === freqMetric)?.hint}.</p>
+							<p class="muted sm">{freqStats.find((s) => s.key === freqMetric)?.label} across {freqSeries.length} windows — {freqStats.find((s) => s.key === freqMetric)?.hint}.</p>
 						</div>
 					{/if}
 				{:else}
@@ -692,6 +889,74 @@
 						<div class="empty-lg"><h3>No turning points yet</h3><p class="muted">Milestones mark the weeks your focus shifted decisively — a phase change, or an unusually fast move. They surface as your story accrues.</p></div>
 					{/if}
 				</div>
+
+			{:else if active === 'routine'}
+				<p class="lead">When you tend to write, and how regular your sessions are — read from message timestamps only (no content). Descriptive, not a clinical circadian measure.</p>
+				{#if hasRoutine}
+					<div class="stat-row four">
+						<div class="stat"><span class="s-v">{peakPart ?? '—'}</span><span class="s-l">peak time</span></div>
+						<div class="stat"><span class="s-v">{pct(behavioral?.diurnal_concentration)}</span><span class="s-l">time concentration</span></div>
+						<div class="stat"><span class="s-v">{behavioral?.session_count != null ? Math.round(Number(behavioral.session_count)) : '—'}</span><span class="s-l">sessions</span></div>
+						<div class="stat"><span class="s-v">{pct(behavioral?.intersession_entropy)}</span><span class="s-l">cadence regularity</span></div>
+					</div>
+					{#if diurnalHist.length === 24}
+						<div class="panel">
+							<h3>When you write</h3>
+							<div class="diurnal">
+								{#each diurnalHist as v, h}
+									<div class="dh-col" title="{h}:00 · {v ?? 0}">
+										<span class="dh-bar" style="height:{Math.round(((Number(v) || 0) / diurnalMax) * 100)}%;background:{accentVar.teal}"></span>
+										{#if h % 6 === 0}<span class="dh-h">{h}</span>{/if}
+									</div>
+								{/each}
+							</div>
+							<p class="muted sm">Messages by hour of day (local). Peak around {behavioral?.diurnal_peak_hour != null ? `${Math.round(Number(behavioral.diurnal_peak_hour))}:00` : '—'}.</p>
+						</div>
+					{/if}
+				{:else}
+					<div class="panel"><div class="empty-lg"><h3>Your routine is still forming</h3><p class="muted">Diurnal rhythm and session cadence resolve once you've written across a range of hours and days.</p></div></div>
+				{/if}
+
+			{:else if active === 'early-signals'}
+				<div class="advisory-note">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16.5v.5"/></svg>
+					<p>These are <b>faint, advisory hints</b> — the kind of "critical slowing" pattern that can precede a shift. Real-world sensitivity is <b>low</b>; treat as a gentle prompt to reflect, never as a prediction or warning.</p>
+				</div>
+				{#if hasCrit}
+					<div class="panel">
+						<h3>By level</h3>
+						<ul class="crit-list">
+							<li class="crit-head"><span>level</span><span>critical slowing</span><span>variance</span><span>flickering</span></li>
+							{#each criticality as c}
+								<li>
+									<span class="crit-lv">{c.level}</span>
+									<span class="crit-v" class:warn={(Number(c.ar1_autocorrelation) || 0) > 0.3}>{fmt(c.ar1_autocorrelation, 2)}</span>
+									<span class="crit-v">{fmt(c.rolling_variance, 3)}</span>
+									<span class="crit-v" class:warn={(Number(c.flickering_score) || 0) > 0.5}>{fmt(c.flickering_score, 2)}</span>
+								</li>
+							{/each}
+						</ul>
+						<p class="muted sm">Critical slowing (lag-1 autocorrelation) rising alongside variance is the textbook early-warning pattern. Every reading is low-confidence by design.</p>
+					</div>
+				{:else}
+					<div class="panel"><div class="empty-lg"><h3>Nothing to flag</h3><p class="muted">Early-warning signals need a longer run of weekly movement before they can be read.</p></div></div>
+				{/if}
+				{#if events.length}
+					<div class="panel">
+						<h3>Notable events</h3>
+						<ul class="mile-list">
+							{#each events as ev}
+								<li>
+									<span class="m-node" style="background:{accentVar.aurum}"></span>
+									<div class="m-body">
+										<p class="m-head">{ev.headline ?? cap(ev.event_type)}</p>
+										<p class="muted sm">{(ev.window_end ?? '').slice(0, 10)}{ev.severity ? ` · ${ev.severity}` : ''}{ev.level ? ` · ${ev.level}` : ''}</p>
+									</div>
+								</li>
+							{/each}
+						</ul>
+					</div>
+				{/if}
 			{/if}
 		{/if}
 	</div>
@@ -707,14 +972,30 @@
 
 	.inner { position: relative; z-index: 1; max-width: 64rem; margin: 0 auto; padding: clamp(2rem, 5vh, 3.5rem) clamp(1.1rem, 4vw, 2.5rem) 4rem; }
 
-	.hero { text-align: center; max-width: 40rem; margin: 0 auto clamp(2rem, 4vh, 3rem); }
-	.overline { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.4em; text-transform: uppercase; color: var(--color-accent-aurum); margin-bottom: 1rem; }
+	.hero { text-align: center; max-width: 40rem; margin: 0 auto clamp(1.6rem, 3vh, 2.4rem); }
 	.title { font-size: clamp(1.9rem, 4.5vw, 3rem); line-height: 1.06; letter-spacing: -0.025em; font-weight: 600; background: linear-gradient(112deg, var(--color-text-emphasis) 22%, var(--color-accent-aurum) 70%, var(--color-accent-amethyst) 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
-	.lede { margin-top: 1rem; font-size: clamp(0.95rem, 1.4vw, 1.1rem); line-height: 1.6; color: var(--color-text-secondary); }
+
+	/* ── Layer 1: summary band + glance ── */
+	.summary-band { border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: linear-gradient(150deg, rgb(var(--color-accent-rgb) / 0.08), var(--color-surface) 70%); padding: clamp(1rem, 2.5vw, 1.5rem) clamp(1.1rem, 3vw, 1.7rem); margin-bottom: 1rem; }
+	.summary-text { font-size: clamp(1rem, 1.6vw, 1.18rem); line-height: 1.6; color: var(--color-text-primary); margin: 0; }
+	.skeleton-band { min-height: 84px; animation: pulse 1.5s ease-in-out infinite; }
+
+	.glance { display: grid; grid-template-columns: repeat(4, 1fr); gap: clamp(0.6rem, 1.4vw, 1rem); margin-bottom: 1.8rem; }
+	.glance-stat { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 0.8rem 1rem; }
+	.g-l { display: block; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--color-text-tertiary); margin-bottom: 0.25rem; }
+	.g-v { font-size: 1.35rem; font-weight: 600; letter-spacing: -0.02em; color: var(--color-text-emphasis); font-variant-numeric: tabular-nums; }
+	.g-rel.up { color: var(--color-accent-jade); font-size: 0.9rem; }
+
+	.group-head { font-size: 0.74rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--color-text-tertiary); margin: 1.6rem 0 0.7rem; }
+
+	/* The river (hero spine) */
+	.river-section { border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: linear-gradient(160deg, rgb(var(--color-accent-jade-rgb) / 0.05), var(--color-surface) 60%); padding: clamp(1rem, 2.4vw, 1.5rem); margin-top: 0.4rem; }
+	.river-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+	.river-head .group-head { margin: 0 0 0.8rem; }
+	.river-note { font-size: 0.68rem; color: var(--color-text-tertiary); }
 
 	/* ── Overview grid ── */
 	.grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: clamp(0.8rem, 1.6vw, 1.1rem); }
-	.card.wide { grid-column: 1 / -1; }
 	.card {
 		position: relative; text-align: left; display: flex; flex-direction: column; gap: 0.85rem;
 		padding: 1.25rem 1.35rem 1.1rem; border-radius: var(--radius-lg);
@@ -731,12 +1012,14 @@
 	.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; box-shadow: 0 0 10px currentColor; }
 	.dot.lg { width: 12px; height: 12px; }
 	.ctitle { font-size: 0.92rem; font-weight: 600; letter-spacing: -0.01em; color: var(--color-text-emphasis); }
-	.chev { margin-left: auto; color: var(--color-text-tertiary); font-size: 1.2rem; line-height: 1; }
+	.chev { margin-left: auto; color: var(--color-text-tertiary); font-size: 1.2rem; line-height: 1; transition: transform var(--duration-fast) var(--ease-out); }
 	.count, .lc { font-size: 0.62rem; font-weight: 600; letter-spacing: 0.05em; }
 	.count { margin-left: auto; padding: 0.1rem 0.5rem; border-radius: var(--radius-full); background: rgb(var(--rgb) / 0.16); color: var(--color-text-emphasis); }
 	.card-head .count + .chev { margin-left: 0.4rem; }
 	.lc { margin-left: auto; text-transform: uppercase; color: var(--color-text-tertiary); padding: 0.12rem 0.5rem; border-radius: var(--radius-full); border: 1px solid var(--color-border); }
-	.card-head .lc + .chev { margin-left: 0.4rem; }
+	.card-head .lc + .chev, .card-head .badge-new + .chev { margin-left: 0.4rem; }
+	.badge-new { font-size: 0.58rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: rgb(var(--rgb)); padding: 0.1rem 0.45rem; border-radius: var(--radius-full); background: rgb(var(--rgb) / 0.14); }
+	.card-head .badge-new + .lc { margin-left: 0.4rem; }
 
 	.card-body { display: flex; flex-direction: column; gap: 0.6rem; min-height: 92px; }
 	.card-body.two { flex-direction: row; align-items: center; gap: 1.1rem; }
@@ -744,6 +1027,10 @@
 	.big { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.03em; color: var(--color-text-emphasis); }
 	.big .unit { font-size: 0.8rem; font-weight: 400; color: var(--color-text-tertiary); letter-spacing: 0; }
 	.tagline { font-size: 0.78rem; color: var(--color-text-tertiary); margin-top: auto; }
+
+	.rel-chip { align-self: flex-start; font-size: 0.7rem; padding: 0.15rem 0.6rem; border-radius: var(--radius-full); background: rgb(255 255 255 / 0.05); color: var(--color-text-secondary); border: 1px solid var(--color-border); }
+	.rel-chip.up { color: var(--color-accent-jade); border-color: rgb(var(--color-accent-jade-rgb) / 0.4); }
+	.rel-chip.down { color: var(--color-accent-coral); border-color: rgb(var(--color-accent-coral-rgb) / 0.4); }
 
 	.phasebar { display: flex; height: 9px; border-radius: var(--radius-full); overflow: hidden; gap: 2px; }
 	.seg { display: block; border-radius: 2px; }
@@ -767,22 +1054,38 @@
 	.headline { font-size: 1.05rem; font-weight: 500; color: var(--color-text-primary); line-height: 1.4; }
 	.muted { color: var(--color-text-tertiary); font-size: 0.82rem; line-height: 1.5; }
 	.muted.sm { font-size: 0.76rem; }
+	.lead { font-size: 0.92rem; line-height: 1.55; color: var(--color-text-secondary); margin-bottom: 1rem; }
 	.footnote { margin-top: 1.5rem; text-align: center; font-size: 0.72rem; color: var(--color-text-tertiary); }
 
-	/* ── What's measured ── */
-	.freshness { margin-top: 1.6rem; padding: 1rem 1.2rem; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); }
-	.fresh-title { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--color-text-tertiary); }
-	.fresh-row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.7rem; }
-	.fresh-chip { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.74rem; color: var(--color-text-secondary); padding: 0.25rem 0.6rem; border-radius: var(--radius-full); border: 1px solid var(--color-border); }
-	.fresh-chip i { width: 7px; height: 7px; border-radius: 50%; flex: none; box-shadow: 0 0 8px currentColor; }
+	/* ── Glossary ── */
+	.glossary { margin-top: 1.8rem; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); overflow: hidden; }
+	.glossary-toggle { width: 100%; display: flex; align-items: center; gap: 0.7rem; padding: 1rem 1.2rem; background: transparent; border: none; cursor: pointer; text-align: left; color: inherit; }
+	.fresh-title { font-size: 0.82rem; font-weight: 600; color: var(--color-text-emphasis); }
+	.g-sub { font-size: 0.74rem; color: var(--color-text-tertiary); }
+	.glossary-toggle .chev { margin-left: auto; }
+	.glossary-body { padding: 0 1.2rem 1.2rem; display: flex; flex-direction: column; gap: 1.1rem; }
+	.gloss-fam { border-top: 1px solid var(--color-border); padding-top: 0.9rem; }
+	.gloss-fam-head { display: flex; align-items: center; gap: 0.55rem; }
+	.gf-name { font-size: 0.88rem; font-weight: 600; color: var(--color-text-emphasis); }
+	.gf-fresh { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+	.gf-hidden { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--color-text-tertiary); border: 1px solid var(--color-border); border-radius: var(--radius-full); padding: 0.08rem 0.45rem; }
+	.gf-rigor { margin-left: auto; font-size: 0.64rem; font-weight: 600; text-transform: lowercase; letter-spacing: 0.02em; color: var(--rg); border: 1px solid color-mix(in srgb, var(--rg) 40%, transparent); border-radius: var(--radius-full); padding: 0.12rem 0.55rem; }
+	.gloss-tag { font-size: 0.78rem; color: var(--color-text-secondary); margin: 0.3rem 0 0.6rem; }
+	.gloss-metrics { display: flex; flex-direction: column; gap: 0.4rem; }
+	.gloss-metrics li { display: grid; grid-template-columns: 9rem 1fr; gap: 0.8rem; font-size: 0.78rem; align-items: baseline; }
+	.gm-name { color: var(--color-text-emphasis); font-weight: 500; }
+	.gm-mean { color: var(--color-text-secondary); line-height: 1.45; }
+	.gloss-foot { margin-top: 0.4rem; }
 
 	/* ── Detail ── */
 	.back { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.4rem 0.7rem 0.4rem 0.45rem; margin-bottom: 1.2rem; border-radius: var(--radius-full); border: 1px solid var(--color-border); background: var(--color-surface); color: var(--color-text-secondary); font-size: 0.82rem; cursor: pointer; transition: border-color var(--duration-fast), color var(--duration-fast); }
 	.back:hover { color: var(--color-text-primary); border-color: var(--color-text-tertiary); }
 	.back svg { width: 1rem; height: 1rem; }
 	.detail-head { display: flex; align-items: center; gap: 0.9rem; margin-bottom: 1.5rem; }
+	.detail-head .dh-text { flex: 1; }
 	.detail-head h1 { font-size: 1.8rem; font-weight: 600; letter-spacing: -0.02em; }
 	.detail-head p { color: var(--color-text-tertiary); font-size: 0.88rem; margin-top: 0.15rem; }
+	.rigor-badge { font-size: 0.66rem; font-weight: 600; color: var(--rg); border: 1px solid color-mix(in srgb, var(--rg) 45%, transparent); background: color-mix(in srgb, var(--rg) 10%, transparent); border-radius: var(--radius-full); padding: 0.22rem 0.7rem; white-space: nowrap; }
 
 	.detail-grid { display: grid; grid-template-columns: 1fr 1.5fr; gap: 1rem; margin-bottom: 1rem; }
 	.detail-grid.one { grid-template-columns: 1fr; }
@@ -801,7 +1104,6 @@
 	.t-bar span { display: block; height: 100%; border-radius: var(--radius-full); }
 	.t-val { font-variant-numeric: tabular-nums; color: var(--color-text-emphasis); font-weight: 500; }
 
-	/* sub-scalars (vitality / growth breakdowns) */
 	.subscalars { display: flex; flex-direction: column; gap: 0.8rem; margin-bottom: 0.8rem; }
 	.ss { display: flex; flex-direction: column; gap: 0.3rem; }
 	.ss-bar { height: 7px; border-radius: var(--radius-full); background: rgb(255 255 255 / 0.06); overflow: hidden; }
@@ -819,12 +1121,10 @@
 	.s-v { display: block; font-size: 1.3rem; font-weight: 600; letter-spacing: -0.02em; color: var(--color-text-emphasis); font-variant-numeric: tabular-nums; }
 	.s-l { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-text-tertiary); margin-top: 0.2rem; display: block; }
 
-	/* level chips (movement) */
 	.level-chips { display: flex; flex-wrap: wrap; gap: 0.7rem; margin-bottom: 0.8rem; }
 	.lchip { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.8rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); }
 	.lchip-l { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-text-tertiary); }
 
-	/* segmented toggle (rhythm granularity) */
 	.seg-toggle { display: inline-flex; border: 1px solid var(--color-border); border-radius: var(--radius-full); overflow: hidden; }
 	.seg-toggle button { padding: 0.3rem 0.8rem; font-size: 0.74rem; background: transparent; color: var(--color-text-tertiary); border: none; cursor: pointer; text-transform: capitalize; transition: background var(--duration-fast), color var(--duration-fast); }
 	.seg-toggle button.on { background: rgb(var(--color-accent-amethyst-rgb) / 0.18); color: var(--color-text-emphasis); }
@@ -832,8 +1132,14 @@
 	.seg-toggle.rose button.on { background: rgb(var(--color-accent-rose-rgb) / 0.18); }
 	.m-select { font-size: 0.74rem; background: var(--color-surface); color: var(--color-text-secondary); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 0.3rem 0.5rem; max-width: 16rem; cursor: pointer; }
 
-	/* harmonic metric grid */
-	.metric-grid { display: flex; flex-direction: column; gap: 3px; margin-bottom: 1rem; overflow-x: auto; }
+	/* jargon expander */
+	.jargon { margin-top: 0.6rem; }
+	.jargon summary { cursor: pointer; font-size: 0.76rem; color: var(--color-text-secondary); padding: 0.4rem 0; user-select: none; }
+	.jargon summary:hover { color: var(--color-text-primary); }
+	.band-key { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; font-size: 0.72rem; color: var(--color-text-secondary); margin-bottom: 0.6rem; }
+	.band-key i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 0.35rem; vertical-align: middle; }
+
+	.metric-grid { display: flex; flex-direction: column; gap: 3px; margin: 0.6rem 0 1rem; overflow-x: auto; }
 	.mg-row { display: grid; grid-template-columns: 7.5rem repeat(5, 1fr); gap: 3px; align-items: center; min-width: 26rem; }
 	.mg-head .mg-band { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--color-text-tertiary); text-align: center; }
 	.mg-feat { font-size: 0.72rem; color: var(--color-text-secondary); white-space: nowrap; }
@@ -842,7 +1148,6 @@
 	.h0 { display: flex; align-items: baseline; justify-content: space-between; padding: 0.8rem 0 0; border-top: 1px solid var(--color-border); }
 	.h0 .s-v { display: inline; font-size: 1.05rem; }
 
-	/* co-firing list */
 	.cofire-list { display: flex; flex-direction: column; gap: 0.4rem; }
 	.cofire-list li { display: grid; grid-template-columns: 2.4rem 2.4rem repeat(4, 1fr); gap: 0.5rem; align-items: center; font-size: 0.76rem; }
 	.cf-head { color: var(--color-text-tertiary); }
@@ -863,6 +1168,23 @@
 	.m-node { width: 11px; height: 11px; border-radius: 50%; margin-top: 0.3rem; box-shadow: 0 0 10px currentColor; z-index: 1; }
 	.m-head { font-size: 0.95rem; font-weight: 500; color: var(--color-text-primary); }
 
+	/* routine: diurnal histogram */
+	.diurnal { display: flex; align-items: flex-end; gap: 2px; height: 96px; padding-bottom: 1rem; position: relative; }
+	.dh-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; position: relative; }
+	.dh-bar { width: 100%; max-width: 14px; border-radius: 2px 2px 0 0; min-height: 2px; transition: height 0.5s var(--ease-out); }
+	.dh-h { position: absolute; bottom: -1rem; font-size: 0.6rem; color: var(--color-text-tertiary); }
+
+	/* early signals */
+	.advisory-note { display: flex; gap: 0.8rem; align-items: flex-start; padding: 0.9rem 1.1rem; border: 1px solid rgb(var(--color-accent-aurum-rgb) / 0.35); background: rgb(var(--color-accent-aurum-rgb) / 0.08); border-radius: var(--radius-lg); margin-bottom: 1rem; }
+	.advisory-note svg { width: 1.4rem; height: 1.4rem; flex: none; color: var(--color-accent-aurum); margin-top: 0.1rem; }
+	.advisory-note p { font-size: 0.84rem; line-height: 1.55; color: var(--color-text-secondary); margin: 0; }
+	.crit-list { display: flex; flex-direction: column; gap: 0.4rem; }
+	.crit-list li { display: grid; grid-template-columns: 1fr repeat(3, 1fr); gap: 0.5rem; align-items: center; font-size: 0.8rem; }
+	.crit-head { color: var(--color-text-tertiary); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.05em; }
+	.crit-lv { color: var(--color-text-secondary); text-transform: capitalize; }
+	.crit-v { text-align: center; font-variant-numeric: tabular-nums; color: var(--color-text-emphasis); }
+	.crit-v.warn { color: var(--color-accent-coral); font-weight: 600; }
+
 	.empty-lg { text-align: center; padding: 2rem 1rem; }
 	.empty-lg svg { width: 3rem; height: 3rem; color: var(--color-accent-amethyst); opacity: 0.5; margin-bottom: 1rem; }
 	.empty-lg h3 { font-size: 1.1rem; margin-bottom: 0.6rem; }
@@ -876,7 +1198,9 @@
 	@media (max-width: 760px) {
 		.grid { grid-template-columns: 1fr; }
 		.detail-grid { grid-template-columns: 1fr; }
+		.glance { grid-template-columns: repeat(2, 1fr); }
 		.stat-row, .stat-row.four, .stat-row.five { grid-template-columns: repeat(2, 1fr); }
+		.gloss-metrics li { grid-template-columns: 1fr; gap: 0.1rem; }
 	}
-	@media (prefers-reduced-motion: reduce) { .blob { animation: none; } .card.skeleton { animation: none; } }
+	@media (prefers-reduced-motion: reduce) { .blob { animation: none; } .card.skeleton, .skeleton-band { animation: none; } }
 </style>

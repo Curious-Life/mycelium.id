@@ -40,6 +40,11 @@
  */
 
 import { CONTRACTS } from '../metrics/contracts.js';
+import { familyFreshness, freshnessHedge } from '../metrics/freshness.js';
+
+// The harmonic family's primary table — what getHarmonicState/getMetricSeries
+// read. Its freshness backs the I7 staleness hedge prepended to agent output.
+const HARMONIC_TABLE = 'cognitive_metrics_harmonic';
 
 const VALID_GRANULARITIES = new Set(['alpha', 'theta', 'delta']);
 const BANDS = ['gamma', 'beta', 'alpha', 'theta', 'delta'];
@@ -262,26 +267,34 @@ export function createMetricsDomain(deps) {
       }
       const detail = args.detail || 'full';
 
+      // I7: prepend a family-level staleness hedge when the harmonic family's
+      // last pipeline write is past budget. Distinct from per-row low_confidence;
+      // applied only to surfaced numbers (the empty-window refusal copy already
+      // explains "no window yet"). Best-effort: a freshness probe failure must
+      // never block the read.
+      const hedge = freshnessHedge(await familyFreshness(db, userId, HARMONIC_TABLE).catch(() => null));
+      const withHedge = (s) => (hedge ? `${hedge}\n\n${s}` : s);
+
       if (detail === 'flow') {
         const window = await db.metrics.getCurrentWindow(userId, { granularity, requestedMetrics: BIGRAM_FLOW_COLS });
         if (!window.window_end) {
           return emptyWindow('Flow shape', granularity, window.era_id, CONTRACTS.bigram_flow_features.refusal_mode);
         }
-        return formatFlowFeatures(window);
+        return withHedge(formatFlowFeatures(window));
       }
       if (detail === 'shape') {
         const window = await db.metrics.getCurrentWindow(userId, { granularity, requestedMetrics: ['topology_h0_persistence_entropy'] });
         if (!window.window_end) {
           return emptyWindow('Activity shape', granularity, window.era_id, CONTRACTS.topology_persistence_entropy.refusal_mode);
         }
-        return formatShape(window);
+        return withHedge(formatShape(window));
       }
 
       const window = await db.metrics.getCurrentWindow(userId, { granularity });
       if (!window.window_end) {
         return emptyWindow('Cognitive rhythm', granularity, window.era_id, CONTRACTS.information_harmonic_amplitude.refusal_mode);
       }
-      return formatHarmonicState(window);
+      return withHedge(formatHarmonicState(window));
     },
 
     getMetricSeries: async (args = {}) => {
@@ -302,7 +315,13 @@ export function createMetricsDomain(deps) {
         to: args.to,
         limit: args.limit,
       });
-      return formatMetricSeries(metric, granularity, eraId, rows);
+      const out = formatMetricSeries(metric, granularity, eraId, rows);
+      // I7 staleness hedge — prepend when the harmonic family is past budget.
+      if (rows.length > 0) {
+        const hedge = freshnessHedge(await familyFreshness(db, userId, HARMONIC_TABLE).catch(() => null));
+        if (hedge) return `${hedge}\n\n${out}`;
+      }
+      return out;
     },
   };
 
