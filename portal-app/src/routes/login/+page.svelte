@@ -470,8 +470,10 @@
 			if (document.hidden) { sRaf = requestAnimationFrame(sFrame); return; }
 			const tgt = hover ? 1 : 0;
 			reveal += (tgt - reveal) * (reduce ? 1 : (tgt > reveal ? 0.022 : 0.16));
+			// Publish bloom progress so the over-backdrop text can crossfade to light.
+			document.documentElement.style.setProperty('--login-bloom', reveal.toFixed(3));
 			sctx.clearRect(0, 0, sW, sH);
-			if (reveal < 0.004 && tgt === 0) { sRunning = false; return; }
+			if (reveal < 0.004 && tgt === 0) { sRunning = false; document.documentElement.style.setProperty('--login-bloom', '0'); return; }
 			if (markEl) { const r = markEl.getBoundingClientRect(); ox = (r.left + r.width / 2) * sdpr; oy = (r.top + r.height / 2) * sdpr; maxR = Math.hypot(Math.max(ox, sW - ox), Math.max(oy, sH - oy)) * 1.12; }
 			const f = feather(), t = ts / 1000, R = reveal * maxR, amp = 0.12 * Math.max(0, 1 - reveal);
 			sctx.drawImage(gal, 0, 0);
@@ -534,6 +536,7 @@
 			hStop = true;
 			cancelAnimationFrame(hRaf); cancelAnimationFrame(sRaf);
 			unsub(); observer.disconnect();
+			document.documentElement.style.removeProperty('--login-bloom');
 			window.removeEventListener('resize', onResize);
 			if (markEl) { markEl.removeEventListener('mouseenter', onEnter); markEl.removeEventListener('mouseleave', onLeave); }
 			clearTimeout(rt);
@@ -646,17 +649,15 @@
 	<main class="flex-1 flex items-center justify-center p-6 relative overflow-y-auto" style="z-index:10">
 		<div class="w-full max-w-md">
 			<div class="text-center mb-6">
-				<!-- Gold mushroom mark (app logo). Hover it to bloom the starfield. -->
+				<!-- Full logo (night-sky app-icon tile + gold mushroom), sized + styled
+				     like the landing site's hero-mark. Hover it to bloom the starfield. -->
 				<button type="button" id="login-mark" class="login-mark" aria-label="Mycelium">
-					<svg viewBox="176 64 672 800" xmlns="http://www.w3.org/2000/svg" fill="var(--color-accent-aurum)">
-						<path d="M256,512 L768,512 A64,64 0 0 0 832,448 C832,88 192,88 192,448 A64,64 0 0 0 256,512 Z"/>
-						<path d="M412,560 L612,560 A32,32 0 0 1 644,592 L672,800 A48,48 0 0 1 624,848 L400,848 A48,48 0 0 1 352,800 L380,592 A32,32 0 0 1 412,560 Z"/>
-					</svg>
+					<img src="/favicon.svg" alt="" width="104" height="104" draggable="false" />
 				</button>
-				<h1 class="text-3xl font-light text-[var(--color-text-primary)] mb-2 lowercase tracking-wide text-center">mycelium</h1>
-				<p class="text-aurum text-3xl font-semibold uppercase mb-2 text-center" style="letter-spacing: 0.45em; padding-left: 0.45em;">Vault</p>
+				<h1 class="wordmark text-3xl font-light mb-2 lowercase tracking-wide text-center">mycelium</h1>
+				<p class="vault-word text-aurum text-3xl font-semibold uppercase mb-2 text-center" style="letter-spacing: 0.45em; padding-left: 0.45em;">Vault</p>
 				{#if userHandle}
-					<p class="text-sm text-[var(--color-text-tertiary)] text-center mt-1 font-mono">@{userHandle}</p>
+					<p class="backdrop-text text-sm text-center mt-1 font-mono">@{userHandle}</p>
 				{/if}
 			</div>
 
@@ -678,7 +679,7 @@
 							{#if userHandle}
 								<p class="text-lg font-medium text-[var(--color-text-primary)]">@{userHandle}</p>
 							{/if}
-							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Sign in to your vault</h2>
+							<h2 class="text-lg font-semibold text-[var(--color-text-emphasis)] mb-2">Sign in to your vault</h2>
 							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
 								{#if requirePasskey}
 									This vault requires a passkey for web sign-in. Use Touch ID, Face ID, or your security key.
@@ -796,8 +797,8 @@
 			{/if}
 
 			<div class="mt-8 text-center">
-				<p class="text-xs text-[var(--color-text-tertiary)]">
-					<span class="opacity-40">Secured with WebAuthn</span> &middot; mycelium.id &middot; Your rights preserved.
+				<p class="backdrop-text text-xs">
+					<span class="opacity-60">Secured with WebAuthn</span> &middot; mycelium.id &middot; Your rights preserved.
 				</p>
 			</div>
 		</div>
@@ -814,6 +815,25 @@
 	}
 	.login-page.ready {
 		opacity: 1;
+	}
+
+	/* Text that sits directly over the animated backdrop (outside the glass card).
+	   At rest it uses the theme's strongest text token (max contrast in both
+	   modes). As the starfield blooms (--login-bloom 0→1, set per-frame in
+	   initBackground) the galaxy — always dark — slides underneath, so the text
+	   crossfades to light and gains a soft dark halo to stay legible over it. */
+	.wordmark {
+		color: color-mix(in srgb, #F4F4F8 calc(var(--login-bloom, 0) * 100%), var(--color-text-emphasis));
+		text-shadow: 0 2px 18px rgba(0, 0, 0, calc(var(--login-bloom, 0) * 0.6));
+		transition: color 0.15s linear;
+	}
+	.vault-word {
+		text-shadow: 0 2px 18px rgba(0, 0, 0, calc(var(--login-bloom, 0) * 0.55));
+	}
+	.backdrop-text {
+		color: color-mix(in srgb, #C9CAD6 calc(var(--login-bloom, 0) * 100%), var(--color-text-tertiary));
+		text-shadow: 0 1px 12px rgba(0, 0, 0, calc(var(--login-bloom, 0) * 0.5));
+		transition: color 0.15s linear;
 	}
 
 	/* Full-screen living backdrop canvases. Fixed so they cover the viewport
@@ -839,33 +859,34 @@
 		z-index: 1;
 	}
 
-	/* Gold mushroom mark — the app logo; hover origin for the starfield bloom. */
+	/* Full logo, styled exactly like the landing site's hero-mark: a rounded
+	   night-sky app-icon tile with a soft gold shadow. Hover origin for the bloom. */
 	.login-mark {
 		display: block;
-		width: 96px;
-		height: 96px;
-		margin: 0 auto 1.1rem;
+		width: 104px;
+		height: 104px;
+		border-radius: 24px;
+		margin: 0 auto 1.4rem;
 		padding: 0;
 		border: 0;
 		background: transparent;
 		cursor: pointer;
 		opacity: 0;
-		filter: drop-shadow(0 10px 28px rgba(184, 134, 11, 0.28));
+		box-shadow: 0 14px 38px rgba(184, 134, 11, 0.24);
 		animation: markAppear 0.9s ease-out 0.15s forwards;
-		transition: transform 0.4s var(--ease-out, ease), filter 0.4s ease;
+		transition: transform 0.4s var(--ease-out, ease), box-shadow 0.4s ease;
 	}
-	.login-mark svg { display: block; width: 100%; height: 100%; }
+	.login-mark img { display: block; width: 100%; height: 100%; border-radius: 24px; }
 	.login-mark:hover {
 		transform: translateY(-2px) scale(1.04);
-		filter: drop-shadow(0 14px 36px rgba(184, 134, 11, 0.42));
+		box-shadow: 0 18px 46px rgba(184, 134, 11, 0.34);
 	}
 	.login-mark:focus-visible {
 		outline: 2px solid var(--color-accent-aurum);
 		outline-offset: 6px;
-		border-radius: 16px;
 	}
 	@media (max-width: 520px) {
-		.login-mark { width: 80px; height: 80px; }
+		.login-mark { width: 84px; height: 84px; }
 	}
 	@keyframes markAppear {
 		0% { opacity: 0; transform: translateY(8px) scale(0.96); }
