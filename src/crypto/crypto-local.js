@@ -293,6 +293,13 @@ const ENCRYPTED_FIELDS = {
   // Clustering / mindscape points
   clustering_points: ['content'],
 
+  // Territory-river cache — `payload` is the precomputed river JSON (territory
+  // NAMES + per-week activation series), a semantic fingerprint of the vault →
+  // ENCRYPT. cache_key/computed_at stay plaintext (structural staleness probe the
+  // cache reader compares without decrypting). See migrations/0030 +
+  // src/territory-river-cache.js.
+  territory_river_cache: ['payload'],
+
   // Agent operations — every payload/result carries task context
   agent_events: ['payload'],
   agent_tasks: ['context', 'result', 'description', 'summary', 'error'],
