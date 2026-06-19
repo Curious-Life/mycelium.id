@@ -89,18 +89,22 @@ async function main() {
     const stc = await store.getState('connecting-test');
 
     // ── S2 at-rest ──
-    rec('S2. encrypted PII NOT plaintext at rest; structural cols ARE',
-      !fileHas(M_LABEL) && !fileHas(M_ERR) && !fileHas(M_RUN) && !fileHas(M_PKCE) && !fileHas(M_OAUTHSTATE)
+    // SQLCipher collapse (Stage B/C cut 4): connector PII columns (account_label/
+    // last_error/recent_runs) are now PLAINTEXT-in-cipher — at-rest = whole-file
+    // SQLCipher (verify:at-rest). pkce/oauthState live in `secrets` (SYSTEM_KEY) → STAY
+    // encrypted. cursor/provider were always plaintext structural columns.
+    rec('S2. connector PII plaintext-in-cipher (verify:at-rest); secrets-backed oauth STILL encrypted; structural plaintext',
+      fileHas(M_LABEL) && fileHas(M_ERR) && fileHas(M_RUN) && !fileHas(M_PKCE) && !fileHas(M_OAUTHSTATE)
       && fileHas(M_CURSOR) && fileHas('teststore'),
-      `labelLeak=${fileHas(M_LABEL)} errLeak=${fileHas(M_ERR)} runLeak=${fileHas(M_RUN)} pkceLeak=${fileHas(M_PKCE)} oauthStateLeak=${fileHas(M_OAUTHSTATE)} cursorPlain=${fileHas(M_CURSOR)} providerPlain=${fileHas('teststore')}`);
+      `labelPlain=${fileHas(M_LABEL)} errPlain=${fileHas(M_ERR)} runPlain=${fileHas(M_RUN)} pkceLeak=${fileHas(M_PKCE)} oauthStateLeak=${fileHas(M_OAUTHSTATE)} cursorPlain=${fileHas(M_CURSOR)} providerPlain=${fileHas('teststore')}`);
 
     // ── S3 raw columns (bypass the adapter) ──
     const rdb = new Database(DB, { readonly: true });
     const rawRow = rdb.prepare('SELECT account_label, last_error, recent_runs, status, cursor, provider FROM connectors WHERE id = ? AND user_id = ?').get('store-test', uid);
     rdb.close();
-    rec('S3. encrypted cols are envelopes; plaintext cols are literals',
-      looksEncrypted(rawRow?.account_label) && looksEncrypted(rawRow?.last_error) && looksEncrypted(rawRow?.recent_runs)
-      && !String(rawRow?.account_label).includes(M_LABEL)
+    rec('S3. connector cols plaintext-in-cipher (collapse cut 4); structural cols literals',
+      !looksEncrypted(rawRow?.account_label) && !looksEncrypted(rawRow?.last_error) && !looksEncrypted(rawRow?.recent_runs)
+      && String(rawRow?.account_label).includes(M_LABEL)
       && rawRow?.status === 'connected' && rawRow?.cursor === M_CURSOR && rawRow?.provider === 'teststore',
       `label=${String(rawRow?.account_label).slice(0, 24)}… status=${rawRow?.status} cursor=${rawRow?.cursor} provider=${rawRow?.provider}`);
 

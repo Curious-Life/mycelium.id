@@ -112,8 +112,12 @@ async function main() {
   rec('8d empty/absent targets rejected', !expandBackfillTargets([], TT).ok && !expandBackfillTargets(undefined, TT).ok);
   rec('8e per-target pk threads through expansion', expandBackfillTargets(['withpk'], TT).columns[0].pk === 'rowid');
   const real = expandBackfillTargets(['content.documents']); // default allowlist
-  rec('8f real allowlist content.documents → title/summary/metadata (content codec)',
-    real.ok && real.columns.length === 3 && real.columns.map((c) => c.column).join(',') === 'title,summary,metadata'
+  // Stage B/C cut 4 expanded content.documents to the FULL collapsed column set
+  // (cut-1 title/summary/metadata + the bulk content/tags/entities/relations/
+  // entity_summary/source_path). Assert all 9 expand as documents content jobs.
+  rec('8f real allowlist content.documents → 9 collapsed cols (content codec)',
+    real.ok && real.columns.length === 9
+      && real.columns.map((c) => c.column).join(',') === 'title,summary,metadata,content,tags,entities,relations,entity_summary,source_path'
       && real.columns.every((c) => c.table === 'documents' && c.codec.kind === 'content'));
 
   db.close();

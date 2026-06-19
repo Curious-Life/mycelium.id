@@ -44,7 +44,10 @@ const row = (await db.facts.list({ userId: U }))[0];
 rec('FA3. fact stored + decrypts transparently', row?.category === 'preferences' && row?.key === 'coffee' && row?.value === PLAIN, `value=${row?.value}`);
 
 const raw = rawValue(row.id);
-rec('FA4. value ENCRYPTED at rest (envelope, not plaintext)', raw !== PLAIN && !String(raw).includes('flat white') && looksEncrypted(raw), `raw=${String(raw).slice(0, 40)}…`);
+// SQLCipher collapse (Stage B/C cut 4): facts.value is now PLAINTEXT-in-cipher —
+// at-rest confidentiality is whole-file SQLCipher (verify:at-rest), not a per-field
+// envelope. Assert the stop-write worked (value stored plaintext, not an envelope).
+rec('FA4. value PLAINTEXT-in-cipher (collapse cut 4; at-rest = whole-file SQLCipher, verify:at-rest)', raw === PLAIN && !looksEncrypted(raw), `raw=${String(raw).slice(0, 40)}…`);
 
 // ── surfaces in reads ──
 const ctx = await handlers.getContext({});

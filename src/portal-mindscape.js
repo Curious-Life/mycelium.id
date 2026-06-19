@@ -34,7 +34,7 @@ const BACKFILL_TARGETS = {
   // per-row decrypt disappears. A target may name MULTIPLE `columns` (same codec) —
   // expanded server-side into per-column jobs by expandBackfillTargets(); the NAME
   // still gates (fail-closed), columns are server-defined (never client-supplied).
-  'content.documents': { table: 'documents', columns: ['title', 'summary', 'metadata'], codec: { kind: 'content' } },
+  'content.documents': { table: 'documents', columns: ['title', 'summary', 'metadata', 'content', 'tags', 'entities', 'relations', 'entity_summary', 'source_path'], codec: { kind: 'content' } },
   'content.territory_profiles_narrative': {
     table: 'territory_profiles',
     columns: ['title', 'essence', 'story_birth', 'story_arc', 'story_peak_moments', 'story_current_chapter',
@@ -88,6 +88,62 @@ const BACKFILL_TARGETS = {
   },
   'content.person_claims': { table: 'person_claims', columns: ['claim_type', 'content', 'confidence_logodds', 'decay_class', 'support'], codec: { kind: 'content' } },
   'content.person_claim_snapshots': { table: 'person_claim_snapshots', columns: ['confidence_logodds', 'content', 'evidence_count', 'delta_kind'], codec: { kind: 'content' } },
+
+  // ── Stage B/C cut 4: bulk content (messages + the long tail). All stopped in
+  // ENCRYPTED_FIELDS (every table JS-adapter-written, ZERO Python caller-encrypt —
+  // verified). messages.content is the LARGEST backfill. Credentials collapse too
+  // (ai_providers/connectors/scheduled_tasks): the field DEK is wrapped by the same
+  // USER_MASTER that opens the whole file → field-encryption adds zero protection
+  // over SQLCipher (only `secrets`, on the separate SYSTEM_KEY, stays encrypted).
+  // Column lists mirror the pre-collapse ENCRYPTED_FIELDS entries verbatim.
+  'content.messages': { table: 'messages', columns: ['content', 'thinking', 'tags', 'entities', 'entity_summary', 'suggested_new_tag', 'relations', 'metadata', 'nlp_error'], codec: { kind: 'content' } },
+  'content.facts': { table: 'facts', columns: ['value'], codec: { kind: 'content' } },
+  'content.entities': { table: 'entities', columns: ['name', 'aliases', 'summary'], codec: { kind: 'content' } },
+  'content.attachments': { table: 'attachments', columns: ['transcript', 'file_name', 'description', 'metadata'], codec: { kind: 'content' } },
+  'content.clustering_points_content': { table: 'clustering_points', columns: ['content'], codec: { kind: 'content' } },
+  'content.territory_river_cache': { table: 'territory_river_cache', columns: ['payload'], codec: { kind: 'content' } },
+  'content.agent_events': { table: 'agent_events', columns: ['payload'], codec: { kind: 'content' } },
+  'content.agent_tasks': { table: 'agent_tasks', columns: ['context', 'result', 'description', 'summary', 'error'], codec: { kind: 'content' } },
+  'content.agent_customizations': { table: 'agent_customizations', columns: ['system_prompt', 'settings', 'tools_config'], codec: { kind: 'content' } },
+  'content.internal_model_items': { table: 'internal_model_items', columns: ['content', 'metadata'], codec: { kind: 'content' } },
+  'content.reflections': { table: 'reflections', columns: ['content', 'trigger', 'metadata'], codec: { kind: 'content' } },
+  'content.tasks': { table: 'tasks', columns: ['title', 'description', 'notes', 'metadata'], codec: { kind: 'content' } },
+  'content.folders': { table: 'folders', columns: ['name', 'description', 'metadata'], codec: { kind: 'content' } },
+  'content.note_links': { table: 'note_links', columns: ['description', 'metadata'], codec: { kind: 'content' } },
+  'content.entity_snapshots': { table: 'entity_snapshots', columns: ['payload'], codec: { kind: 'content' } },
+  'content.activity_sessions': { table: 'activity_sessions', columns: ['window_title', 'url', 'app_bundle', 'app_name'], codec: { kind: 'content' } },
+  'content.health_daily': {
+    table: 'health_daily',
+    columns: ['sleep_duration_min', 'sleep_in_bed_min', 'sleep_efficiency', 'sleep_deep_min', 'sleep_rem_min',
+      'sleep_core_min', 'sleep_awake_min', 'sleep_start', 'sleep_end', 'hrv_avg', 'hrv_sleep_avg', 'resting_hr',
+      'steps', 'active_energy_kcal', 'workout_count', 'workout_minutes', 'workout_types', 'mindful_minutes'],
+    codec: { kind: 'content' },
+  },
+  'content.wealth_transactions': { table: 'wealth_transactions', columns: ['notes', 'quantity', 'price_per_unit', 'fees', 'exchange_rate'], codec: { kind: 'content' } },
+  'content.wealth_positions': { table: 'wealth_positions', columns: ['total_cost', 'current_value', 'unrealized_pnl', 'avg_cost_basis', 'quantity'], codec: { kind: 'content' } },
+  'content.wealth_snapshots': { table: 'wealth_snapshots', columns: ['total_value', 'total_invested', 'total_pnl', 'day_change'], codec: { kind: 'content' } },
+  'content.wealth_accounts': { table: 'wealth_accounts', columns: ['name', 'institution', 'account_number_last4', 'notes', 'metadata'], codec: { kind: 'content' } },
+  'content.wealth_assets': { table: 'wealth_assets', columns: ['custom_name', 'notes', 'metadata'], codec: { kind: 'content' } },
+  'content.wealth_wallets': { table: 'wealth_wallets', columns: ['label', 'address', 'notes', 'metadata'], codec: { kind: 'content' } },
+  'content.wealth_watchlist': { table: 'wealth_watchlist', columns: ['notes'], codec: { kind: 'content' } },
+  'content.wealth_portfolios': { table: 'wealth_portfolios', columns: ['name', 'description', 'notes', 'metadata'], codec: { kind: 'content' } },
+  'content.time_chronicles': { table: 'time_chronicles', columns: ['theme', 'narrative', 'key_moments', 'top_territories', 'top_contacts', 'top_agents', 'cross_references', 'voice_sample', 'raw_response'], codec: { kind: 'content' } },
+  'content.current_arc_chronicles': { table: 'current_arc_chronicles', columns: ['theme', 'narrative', 'raw_response'], codec: { kind: 'content' } },
+  'content.contact_chronicles': { table: 'contact_chronicles', columns: ['narrative', 'summary', 'metadata'], codec: { kind: 'content' } },
+  'content.territory_pass_notes': { table: 'territory_pass_notes', columns: ['note', 'entities_mentioned', 'metadata'], codec: { kind: 'content' } },
+  'content.space_rooms': { table: 'space_rooms', columns: ['name', 'essence'], codec: { kind: 'content' } },
+  'content.space_knowledge': { table: 'space_knowledge', columns: ['content', 'domain_tags'], codec: { kind: 'content' } },
+  'content.share_links': { table: 'share_links', columns: ['invited_email'], codec: { kind: 'content' } },
+  'content.user_identities': { table: 'user_identities', columns: ['provider_username', 'provider_id', 'provider_avatar'], codec: { kind: 'content' } },
+  'content.provisioning_jobs': { table: 'provisioning_jobs', columns: ['email', 'stripe_customer_id', 'error'], codec: { kind: 'content' } },
+  'content.ai_providers': { table: 'ai_providers', columns: ['credentials'], codec: { kind: 'content' } },
+  'content.channel_access': { table: 'channel_access', columns: ['allowed_senders_json'], codec: { kind: 'content' } },
+  'content.connectors': { table: 'connectors', columns: ['account_label', 'last_error', 'recent_runs'], codec: { kind: 'content' } },
+  'content.scheduled_tasks': { table: 'scheduled_tasks', columns: ['prompt'], codec: { kind: 'content' } },
+  'content.conversation_summaries': { table: 'conversation_summaries', columns: ['summary'], codec: { kind: 'content' } },
+  'content.peer_messages': { table: 'peer_messages', columns: ['content'], codec: { kind: 'content' } },
+  'content.sharing_contexts': { table: 'sharing_contexts', columns: ['summary'], codec: { kind: 'content' } },
+  'content.inbound_shares': { table: 'inbound_shares', columns: ['name'], codec: { kind: 'content' } },
 };
 
 /**

@@ -17,6 +17,11 @@ const KCV = 'data/verify-kcv.json';
 const hex = () => crypto.randomBytes(32).toString('hex');
 const userHex = hex(), systemHex = hex(), wrongHex = hex();
 const PLAINTEXT = 'SECRET reflection: the vault must never leak this.';
+// SQLCipher collapse (Stage B/C cut 4): documents.content is now plaintext-in-cipher;
+// `secrets` (SYSTEM_KEY) is the ONLY field-encrypted table left → it carries the at-rest
+// + wrong-key field assertions (B4/B6). We query the seeded secret by user_id (plaintext);
+// secrets.key/value are encrypted, so they can't be matched by equality.
+const SECRET_VAL = 'SYSTEM-KEY secret value: must never field-leak.';
 
 const ledger = [];
 const rec = (name, pass, detail) => { ledger.push(pass); console.log(`${pass ? 'PASS' : 'FAIL'}  ${name}\n      ${detail}`); };
@@ -51,16 +56,24 @@ rec('B3. document round-trip through the encrypting adapter (transparent decrypt
   read?.content === PLAINTEXT && read?.title === 'My Title',
   `title='${read?.title}' content==plaintext:${read?.content === PLAINTEXT}`);
 
-// B4: ciphertext-at-rest (raw read, no adapter)
+// Seed a SYSTEM_KEY secret (the only field-encrypted table after the cut-4 collapse)
+// via the encrypting adapter, for the at-rest + wrong-key field checks below.
+await dbh.d1Query('INSERT INTO secrets (user_id, key, value, scope) VALUES (?,?,?,?)',
+  ['local-user', 'foundation-probe', SECRET_VAL, 'personal']);
+dbh.close();
+
+// B4: at-rest (raw read, no adapter). Post-collapse: documents.content is PLAINTEXT-in-
+// cipher (whole-file SQLCipher guards it — verify:at-rest); secrets.value is STILL a
+// SYSTEM_KEY field envelope (a SEPARATE key → genuine defense-in-depth, kept by design).
 {
   const raw = new Database(DB, { readonly: true });
   const rawContent = raw.prepare('SELECT content FROM documents WHERE path = ?').get('notes/verify')?.content;
+  const rawSecret = raw.prepare('SELECT value FROM secrets WHERE user_id = ?').get('local-user')?.value;
   raw.close();
-  rec('B4. ciphertext-at-rest (raw column is an envelope, not plaintext)',
-    isEncrypted(rawContent) && rawContent !== PLAINTEXT,
-    `isEncrypted=${isEncrypted(rawContent)} leaks-plaintext=${rawContent === PLAINTEXT}`);
+  rec('B4. content plaintext-in-cipher (collapse; verify:at-rest); secrets.value still a SYSTEM_KEY envelope',
+    !isEncrypted(rawContent) && rawContent === PLAINTEXT && isEncrypted(rawSecret) && rawSecret !== SECRET_VAL,
+    `contentPlain=${!isEncrypted(rawContent)} secretEnc=${isEncrypted(rawSecret)}`);
 }
-dbh.close();
 
 // B5: wrong key — KCV fails closed BEFORE any vault row is touched
 {
@@ -70,20 +83,24 @@ dbh.close();
     err ? `threw: ${err.message}` : 'DID NOT THROW (BAD)');
 }
 
-// B6: wrong key — even past unlock, data cannot be read as plaintext
+// B6: wrong key — even past unlock, the remaining field-encrypted table (secrets,
+// SYSTEM_KEY) cannot be read as plaintext with a WRONG SYSTEM_KEY. (After the cut-4
+// collapse, content is plaintext-in-cipher; its wrong-key protection is whole-file
+// SQLCipher — verify:at-rest's wrong-key boot test. `secrets` keeps a SEPARATE key, so
+// a compromised USER_MASTER still cannot read it: that defense-in-depth is tested here.)
 {
-  const wrongKey = (await import('../src/crypto/keys.js')).loadKey
-    ? await (await import('../src/crypto/keys.js')).loadKey(wrongHex) : null;
-  const bad = createDb({ dbPath: DB, userKey: wrongKey, systemKey });
+  const km = await import('../src/crypto/keys.js');
+  const wrongSystem = km.loadKey ? await km.loadKey(wrongHex) : null;
+  const bad = createDb({ dbPath: DB, userKey, systemKey: wrongSystem });
   const res = await threw(async () => {
-    const r = bad.firstRow(await bad.d1Query('SELECT content FROM documents WHERE path = ?', ['notes/verify']));
-    if (r?.content === PLAINTEXT) throw new Error('LEAKED PLAINTEXT');
+    const r = bad.firstRow(await bad.d1Query('SELECT value FROM secrets WHERE user_id = ?', ['local-user']));
+    if (r?.value === SECRET_VAL) throw new Error('LEAKED PLAINTEXT');
     return r;
   });
   bad.close();
   // PASS if it threw a decrypt error OR returned non-plaintext (never the secret)
   const leaked = res instanceof Error && res.message === 'LEAKED PLAINTEXT';
-  rec('B6. wrong key cannot decrypt vault data', !leaked,
+  rec('B6. wrong SYSTEM_KEY cannot decrypt the secrets table (defense-in-depth)', !leaked,
     leaked ? 'LEAKED PLAINTEXT (BAD)' : `safe (${res instanceof Error ? 'decrypt threw' : 'returned ciphertext'})`);
 }
 

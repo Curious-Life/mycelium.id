@@ -59,7 +59,9 @@ let summarizeUserSeen = null;
   const got = await H.getSummary(U, CONV);
   rec('H3 summary stored in conversation_summaries', !!got && got.summary.includes('SENSITIVE-SUMMARY-CMP'));
   const raw = rawRead('SELECT summary FROM conversation_summaries WHERE conversation_id = ?', [CONV]);
-  rec('H3 summary ENCRYPTED at rest (raw ≠ plaintext)', !!raw?.summary && raw.summary !== got.summary && !String(raw.summary).includes('SENSITIVE-SUMMARY-CMP'));
+  // SQLCipher collapse (Stage B/C cut 4): conversation_summaries.summary is now
+  // PLAINTEXT-in-cipher — at-rest = whole-file SQLCipher (verify:at-rest).
+  rec('H3 summary PLAINTEXT-in-cipher (collapse cut 4; at-rest = whole-file SQLCipher, verify:at-rest)', !!raw?.summary && String(raw.summary).includes('SENSITIVE-SUMMARY-CMP'));
 }
 
 // ── H4 prior summary loaded + handed to summarizer (UPDATE, not restart) ──

@@ -37,7 +37,9 @@ const SECRET_PROMPT = 'Review my calendar and DM me the three most important thi
   const got = await H.getTask(U, id);
   rec('S1 getTask returns the decrypted prompt + fields', got?.prompt === SECRET_PROMPT && got.schedule === 'daily:8' && got.max_turns === 12 && got.output_target === 'notification', JSON.stringify({ p: got?.prompt?.slice(0, 20), s: got?.schedule }));
   const raw = rawRead('SELECT prompt FROM scheduled_tasks WHERE id = ?', [id]);
-  rec('S1 prompt is ENCRYPTED at rest (raw ≠ plaintext, no leak)', !!raw?.prompt && raw.prompt !== SECRET_PROMPT && !String(raw.prompt).includes('SENSITIVE-PROMPT-XYZ'), `raw=${String(raw?.prompt).slice(0, 24)}…`);
+  // SQLCipher collapse (Stage B/C cut 4): scheduled_tasks.prompt is plaintext-in-cipher
+  // — at-rest = whole-file SQLCipher (verify:at-rest), not a per-field envelope.
+  rec('S1 prompt PLAINTEXT-in-cipher at rest (collapse cut 4; verify:at-rest)', !!raw?.prompt && raw.prompt === SECRET_PROMPT, `raw=${String(raw?.prompt).slice(0, 24)}…`);
   globalThis.__t1 = id;
 }
 
@@ -103,7 +105,7 @@ const SECRET_PROMPT = 'Review my calendar and DM me the three most important thi
   const got = await H.getSummary(U, 'conv-1');
   rec('S7 getSummary round-trips (decrypted) + metadata', got?.summary === SECRET_SUMMARY && got.through_message_id === 'msg-99' && got.compaction_count === 2);
   const raw = rawRead('SELECT summary FROM conversation_summaries WHERE conversation_id = ?', ['conv-1']);
-  rec('S7 summary ENCRYPTED at rest (raw ≠ plaintext, no leak)', !!raw?.summary && raw.summary !== SECRET_SUMMARY && !String(raw.summary).includes('SENSITIVE-SUMMARY-ABC'));
+  rec('S7 summary PLAINTEXT-in-cipher at rest (collapse cut 4; verify:at-rest)', !!raw?.summary && raw.summary === SECRET_SUMMARY);
 }
 
 // ── S8 updateTask re-encrypts prompt ──
@@ -113,7 +115,7 @@ const SECRET_PROMPT = 'Review my calendar and DM me the three most important thi
   const got = await H.getTask(U, globalThis.__t1);
   rec('S8 updateTask updates decrypted prompt + status', got.prompt === NEW_PROMPT && got.status === 'paused');
   const raw = rawRead('SELECT prompt FROM scheduled_tasks WHERE id = ?', [globalThis.__t1]);
-  rec('S8 updated prompt ENCRYPTED at rest', !!raw?.prompt && raw.prompt !== NEW_PROMPT && !String(raw.prompt).includes('SENSITIVE-UPDATE-QRS'));
+  rec('S8 updated prompt PLAINTEXT-in-cipher at rest (collapse cut 4; verify:at-rest)', !!raw?.prompt && raw.prompt === NEW_PROMPT);
 }
 
 await close?.();

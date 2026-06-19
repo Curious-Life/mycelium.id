@@ -84,8 +84,12 @@ async function main() {
   const rawDb = new Database(DB, { readonly: true });
   const row = rawDb.prepare('SELECT cache_key, payload FROM territory_river_cache WHERE user_id = ?').get(UID);
   rawDb.close();
-  const enc = row && typeof row.payload === 'string' && row.payload.startsWith('ey') && !row.payload.includes(SECRET_NAME);
-  rec('2. payload encrypted at rest (envelope, no plaintext territory name)',
+  // SQLCipher collapse (Stage B/C cut 4): territory_river_cache.payload is now
+  // PLAINTEXT-in-cipher (plaintext JSON, not a base64 "ey…" envelope) — at-rest =
+  // whole-file SQLCipher (verify:at-rest). The territory NAME now appears in the
+  // decrypted-connection read; whole-file ciphertext is verify:at-rest's job.
+  const enc = row && typeof row.payload === 'string' && !row.payload.startsWith('ey') && row.payload.includes(SECRET_NAME);
+  rec('2. payload PLAINTEXT-in-cipher (collapse cut 4; at-rest = whole-file SQLCipher, verify:at-rest)',
     !!row && enc,
     row ? `key=${row.cache_key.slice(0, 24)}… payload[0..16]=${row.payload.slice(0, 16)} leaks=${row.payload.includes(SECRET_NAME)}` : 'no row');
 

@@ -74,9 +74,11 @@ const rawCol = (id, col) => {
   const { attachmentId } = await uploadAttachment(db, { userId, bytes: Buffer.from('PNGBYTES'), fileName: 'square.png', fileType: 'image/png' });
   const r = await call({ attachmentId });
   const raw = rawCol(attachmentId, 'description');
-  rec('A1. image → caption returned + description stored encrypted',
-    r.status === 200 && r.body?.contextText === captionResult && isEncrypted(raw) && raw !== captionResult,
-    `ctx="${r.body?.contextText}" enc=${isEncrypted(raw)}`);
+  // SQLCipher collapse (Stage B/C cut 4): attachments.description is plaintext-in-cipher
+  // — at-rest = whole-file SQLCipher (verify:at-rest), not a per-field envelope.
+  rec('A1. image → caption returned + description plaintext-in-cipher (verify:at-rest)',
+    r.status === 200 && r.body?.contextText === captionResult && !isEncrypted(raw) && raw === captionResult,
+    `ctx="${r.body?.contextText}" plain=${!isEncrypted(raw)}`);
 }
 
 // A2: audio → transcript + encrypted transcript column
@@ -84,9 +86,9 @@ const rawCol = (id, col) => {
   const { attachmentId } = await uploadAttachment(db, { userId, bytes: Buffer.from('OGGBYTES'), fileName: 'note.ogg', fileType: 'audio/ogg' });
   const r = await call({ attachmentId, kind: 'voice' });
   const raw = rawCol(attachmentId, 'transcript');
-  rec('A2. voice → transcript returned + transcript stored encrypted',
-    r.status === 200 && r.body?.contextText === transcriptResult && isEncrypted(raw),
-    `ctx="${(r.body?.contextText || '').slice(0, 30)}…" enc=${isEncrypted(raw)}`);
+  rec('A2. voice → transcript returned + transcript plaintext-in-cipher (verify:at-rest)',
+    r.status === 200 && r.body?.contextText === transcriptResult && !isEncrypted(raw),
+    `ctx="${(r.body?.contextText || '').slice(0, 30)}…" plain=${!isEncrypted(raw)}`);
 }
 
 // A3: text file → decoded inline, stored IN FULL (persistence ≠ budget — a long
@@ -163,9 +165,9 @@ const rawCol = (id, col) => {
   const { attachmentId } = await uploadAttachment(db, { userId, bytes: mk(), fileName: 'hello.pdf', fileType: 'application/pdf' });
   const r = await call({ attachmentId });
   const raw = rawCol(attachmentId, 'description');
-  rec('A9. real pdf → text extracted (unpdf) + stored encrypted',
-    r.status === 200 && /Hello vault PDF/.test(r.body?.contextText || '') && isEncrypted(raw),
-    `ctx="${(r.body?.contextText || '').slice(0, 40)}" enc=${isEncrypted(raw)}`);
+  rec('A9. real pdf → text extracted (unpdf) + description plaintext-in-cipher (verify:at-rest)',
+    r.status === 200 && /Hello vault PDF/.test(r.body?.contextText || '') && !isEncrypted(raw),
+    `ctx="${(r.body?.contextText || '').slice(0, 40)}" plain=${!isEncrypted(raw)}`);
 }
 
 // A10: REAL docx (minimal OOXML zip) → text extracted via mammoth

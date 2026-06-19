@@ -53,7 +53,9 @@ await add(null, 'user', 'NO-CONV stray message', 1500);
   rec('D1 content decrypted on read (plaintext returned)', contents.some((c) => c === 'A-THIRD newest in A'));
   // and ENCRYPTED at rest (sanity: raw bytes are not the plaintext)
   const raw = rawRead('SELECT content FROM messages WHERE conversation_id = ?', [CONV_A]);
-  rec('D1 content ENCRYPTED at rest (raw ≠ plaintext)', raw.length === 3 && raw.every((r) => r.content && !String(r.content).includes('A-THIRD newest in A')));
+  // SQLCipher collapse (Stage B/C cut 4): messages.content is PLAINTEXT-in-cipher —
+  // at-rest = whole-file SQLCipher (verify:at-rest), not a per-field envelope.
+  rec('D1 content PLAINTEXT-in-cipher (collapse cut 4; at-rest = whole-file SQLCipher, verify:at-rest)', raw.length === 3 && raw.some((r) => String(r.content).includes('A-THIRD newest in A')));
 }
 
 // ── D2 isolation ──

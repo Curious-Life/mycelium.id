@@ -70,8 +70,11 @@ for (let d = DAYS; d >= 1; d--) {
   const raw = new Database(DB, { readonly: true });
   const m = raw.prepare(`SELECT content FROM messages WHERE user_id=? LIMIT 1`).get(U);
   raw.close();
-  rec('FQ0. seed precondition: messages.content is ciphertext at rest (envelope)',
-    !!m && isEnvelope(m.content), `content_enc=${m ? isEnvelope(m.content) : 'no row'}`);
+  // SQLCipher collapse (Stage B/C cut 4): messages.content is PLAINTEXT-in-cipher —
+  // at-rest = whole-file SQLCipher (verify:at-rest). compute-frequency.py reads it via
+  // the dual-read decryptor (pass-through on plaintext), so the metric still computes.
+  rec('FQ0. seed precondition: messages.content PLAINTEXT-in-cipher (collapse cut 4; at-rest = whole-file SQLCipher, verify:at-rest)',
+    !!m && !isEnvelope(m.content), `content_plain=${m ? !isEnvelope(m.content) : 'no row'}`);
 }
 
 try {

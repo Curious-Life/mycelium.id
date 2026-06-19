@@ -49,9 +49,11 @@ const savedId = found?.id;
   const raw = new Database(DB, { readonly: true });
   const rawContent = raw.prepare('SELECT content FROM messages WHERE id = ?').get(savedId)?.content;
   raw.close();
-  rec('I2. ciphertext-at-rest (raw content column is an envelope, not plaintext)',
-    isEncrypted(rawContent) && rawContent !== marker,
-    `isEncrypted=${isEncrypted(rawContent)} leaks=${rawContent === marker}`);
+  // SQLCipher collapse (Stage B/C cut 4): messages.content is PLAINTEXT-in-cipher —
+  // at-rest = whole-file SQLCipher (verify:at-rest), not a per-field envelope.
+  rec('I2. content PLAINTEXT-in-cipher (collapse cut 4; at-rest = whole-file SQLCipher, verify:at-rest)',
+    !isEncrypted(rawContent) && rawContent === marker,
+    `isEncrypted=${isEncrypted(rawContent)} plaintext=${rawContent === marker}`);
 }
 
 // I3: idempotency — same id twice => one row
@@ -133,9 +135,9 @@ await client.callTool({ name: 'captureMessage', arguments: {
   rec('I9. createdAt passthrough — epoch seconds land as the original ISO time',
     String(raw?.created_at || '') === new Date(1781000000 * 1000).toISOString(),
     `created_at=${raw?.created_at}`);
-  rec('I10. attachmentId passthrough + raw metadata column is ciphertext',
-    raw?.attachment_id === 'att-relay-1' && isEncrypted(raw?.metadata),
-    `attachment_id=${raw?.attachment_id} metaEncrypted=${isEncrypted(raw?.metadata)}`);
+  rec('I10. attachmentId passthrough + metadata PLAINTEXT-in-cipher (collapse cut 4; verify:at-rest)',
+    raw?.attachment_id === 'att-relay-1' && !isEncrypted(raw?.metadata),
+    `attachment_id=${raw?.attachment_id} metaPlain=${!isEncrypted(raw?.metadata)}`);
 }
 
 await client.close();

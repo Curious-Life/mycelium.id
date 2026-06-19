@@ -41,7 +41,9 @@ rec('EN2. remember(entity) reports created', /Remembered: person "Alice Rivera"/
 
 const alice = (await db.entities.list({ userId: U })).find((e) => e.name === 'Alice Rivera');
 rec('EN3. entity stored + decrypts transparently', alice?.type === 'person' && alice?.summary === 'my sister in Berlin', `name=${alice?.name}`);
-rec('EN4. name ENCRYPTED at rest (envelope, not plaintext)', (() => { const r = rawName(alice.id); return r !== 'Alice Rivera' && !String(r).includes('Rivera') && looksEncrypted(r); })(), `raw=${String(rawName(alice.id)).slice(0, 36)}…`);
+// SQLCipher collapse (Stage B/C cut 4): entities.name is now PLAINTEXT-in-cipher —
+// at-rest = whole-file SQLCipher (verify:at-rest), not a per-field envelope.
+rec('EN4. name PLAINTEXT-in-cipher (collapse cut 4; at-rest = whole-file SQLCipher, verify:at-rest)', (() => { const r = rawName(alice.id); return r === 'Alice Rivera' && !looksEncrypted(r); })(), `raw=${String(rawName(alice.id)).slice(0, 36)}…`);
 
 // ── app-layer dedup (name is encrypted; UNIQUE impossible) ──
 await handlers.remember({ kind: 'entity', entityType: 'person', name: 'alice rivera', summary: 'updated note' });

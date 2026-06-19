@@ -42,9 +42,12 @@ const rawRows = raw.prepare(`SELECT date, steps, hrv_avg FROM health_daily WHERE
 raw.close();
 const rawBlob = JSON.stringify(rawRows);
 const leaked = STEP_MARKERS.filter((m) => rawBlob.includes(m));
-rec('HE1. health numerics (steps/hrv) are ENCRYPTED at rest (was plaintext before the fix)',
-  leaked.length === 0 && rawRows.length === 5 && String(rawRows[0].steps).length > 20,
-  leaked.length ? `LEAKED: ${leaked.join(',')}` : `${rawRows.length} rows, steps col is an envelope`);
+// SQLCipher collapse (Stage B/C cut 4): health_daily numerics are PLAINTEXT-in-cipher —
+// at-rest = whole-file SQLCipher (verify:at-rest), not per-field envelopes. The step/hrv
+// markers now appear in the raw column read; whole-file ciphertext is verify:at-rest's job.
+rec('HE1. health numerics PLAINTEXT-in-cipher (collapse cut 4; at-rest = whole-file SQLCipher, verify:at-rest)',
+  leaked.length === STEP_MARKERS.length && rawRows.length === 5,
+  `${rawRows.length} rows, plaintext markers present=${leaked.length}/${STEP_MARKERS.length}`);
 
 // (2) read coerces decrypted strings back to numbers.
 const day1 = await db.health.getDay(U, '2026-06-01');
