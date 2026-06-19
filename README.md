@@ -99,41 +99,9 @@ Open source GROWS the network. Proprietary would cap it.
 
 The **Redis / Elasticsearch / Linux** model: commoditization of the infrastructure layer funds everything above it.
 
-## What Accumulates
-
-Even when the code is free, these can't be copied:
-
-1. **Your computed topology** — months/years of personal data. Algorithm is free, your history isn't.
-2. **Network position** — the reference implementation. Red Hat dynamic.
-3. **Managed convenience** — calibration, federation routing, zero-config. Code is free, not running it isn't.
-4. **Interpretation layer** — what your topology *means* and what to *do* about it. Requires lived practice.
-
-## Technical Decisions (Locked)
-
-| # | Decision | Choice |
-|---|----------|--------|
-| D1 | Topology engine | Open, behind AnalysisEngine plugin interface |
-| D2 | Embeddings | Nomic v1.5 ONNX + task prefixes (loopback :8091) |
-| D3 | Encryption | Port `crypto-local.js` — wrapped-DEK envelope, AES-256-GCM |
-| D4 | Master key | 64-char hex strings, no BIP-39 in V1 |
-| D5 | Runtime | Pure MCP tool server — no autonomous loop |
-| D6 | System key | One recovery key (USER_MASTER); SYSTEM_KEY HKDF-derived from it |
-| D7 | Enrichment | Build-new NLP tagging + embed-on-write service |
-
 ## Build Status
 
 **Under active development.** The core is built and continuously verified; remaining pieces are environment-gated — they need a networked host for ML models, deploy, and platform tokens.
-
-```
-Phase 1  Core Server + Data Layer       ✅ built   encrypting SQLite adapter, recovery-key vault
-Phase 2  Embeddings + Search            ◑ built*   in-RAM ANN+BM25+RRF; real embeddings gated
-Phase 3  Topology Pipeline              ◑ built*   ported pipeline + tools; clustering wheels gated
-Phase 4  OAuth + Security               ✅ built   OAuth 2.1 + PKCE, stateful Streamable HTTP
-Phase 5  Ingestion + Uploads            ✅ built   capture choke-point, encrypted blobs, /ingest/*
-Phase 6  Enrichment + Connectors        ◷ next     D7 service skeleton, messaging bridges
-```
-
-<sub>✅ verified to `EXIT 0` · ◑ built, a Tier-2 path needs a networked host · ◷ designed, not yet built</sub>
 
 **Verification:** `npm install --legacy-peer-deps && npm run verify` runs the full suite (every `verify:*` gate prints `VERDICT: GO`). For a fast sanity check use `npm run verify:core` (boot · crypto · MCP tools · portal · search). A real MCP client completes OAuth and lists the live tools over HTTPS; messages and file uploads round-trip through the encrypting vault.
 
@@ -141,7 +109,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the as-built system and [
 
 ## Install
 
-> **Status:** the `@mycelium/mcp` npm package is a roadmap deliverable. Today the server runs from source on the development branch.
+> **Status:** the `@mycelium/mcp` npm package is a roadmap deliverable. Today the server runs from source.
 
 ```bash
 git clone https://github.com/Curious-Life/mycelium.id.git && cd mycelium.id
