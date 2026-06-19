@@ -332,7 +332,8 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
     try {
       const rows = (await db.rawQuery(
         `SELECT level, level_id, level_name, lz_complexity, raw_complexity, sequence_length,
-                alphabet_size, point_count, window_start, window_end, computed_at
+                alphabet_size, point_count, low_confidence, embedding_novelty,
+                embedding_novelty_low_conf, window_start, window_end, computed_at
            FROM complexity_snapshots WHERE user_id = ?
            ORDER BY computed_at DESC LIMIT 400`, [u.id])).results || [];
       const seen = new Set(); const latest = [];
@@ -344,6 +345,10 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
           lz_complexity: num(r.lz_complexity), raw_complexity: num(r.raw_complexity),
           sequence_length: num(r.sequence_length), alphabet_size: num(r.alphabet_size),
           point_count: num(r.point_count),
+          // LZ honesty + the Tier-1 embedding-novelty primary (§4.19).
+          low_confidence: Number(r.low_confidence) ? 1 : 0,
+          embedding_novelty: r.embedding_novelty != null ? num(r.embedding_novelty) : null,
+          embedding_novelty_low_conf: Number(r.embedding_novelty_low_conf) ? 1 : 0,
           window_start: r.window_start, window_end: r.window_end, computed_at: r.computed_at,
         });
       }

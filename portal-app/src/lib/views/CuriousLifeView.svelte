@@ -186,8 +186,12 @@
 
 	// ── Complexity / Frequency / Co-firing ───────────────────────────────────
 	const cxGlobal = $derived(complexity?.global ?? null);
+	// Primary = embedding-novelty (Tier-1; robust at low n). Show only territories with
+	// a CONFIDENT novelty value; LZ is the cross-check (greyed when its own gate fires).
 	const cxTerr = $derived(
-		[...(complexity?.territories ?? [])].sort((a, b) => (b.lz_complexity ?? 0) - (a.lz_complexity ?? 0)),
+		[...(complexity?.territories ?? [])]
+			.filter((t) => t.embedding_novelty != null && !t.embedding_novelty_low_conf)
+			.sort((a, b) => (b.embedding_novelty ?? 0) - (a.embedding_novelty ?? 0)),
 	);
 	const freq = $derived(frequency);
 	const freqStats = [
@@ -584,20 +588,21 @@
 						</div>
 					</div>
 					<div class="panel">
-						<h3>Complexity by territory</h3>
+						<h3>Novelty by territory <span class="muted" style="font-weight:400">· embedding-native (LZ cross-check)</span></h3>
 						{#if cxTerr.length}
 							<ul class="terr-list">
 								{#each cxTerr.slice(0, 16) as t}
 									<li>
 										<span class="t-phase" style="background:{accentVar.teal}"></span>
 										<span class="t-id">{t.level_name ?? `Territory ${t.level_id}`}</span>
-										<span class="t-bar"><span style="width:{Math.round((t.lz_complexity ?? 0) * 100)}%;background:{accentVar.teal}"></span></span>
-										<span class="t-val">{fmt(t.lz_complexity, 2)}</span>
+										<span class="t-bar"><span style="width:{Math.round((t.embedding_novelty ?? 0) * 100)}%;background:{accentVar.teal}"></span></span>
+										<span class="t-val">{fmt(t.embedding_novelty, 2)}</span>
+										<span class="t-val muted" title="LZ compressibility cross-check{t.low_confidence ? ' — low confidence (short sequence)' : ''}" style={t.low_confidence ? 'opacity:0.35' : 'opacity:0.6'}>LZ {fmt(t.lz_complexity, 2)}</span>
 									</li>
 								{/each}
 							</ul>
 						{:else}
-							<p class="muted">Per-territory complexity resolves once territories have enough sequence to measure.</p>
+							<p class="muted">Novelty resolves once territories have a few messages to compare.</p>
 						{/if}
 					</div>
 				</div>
