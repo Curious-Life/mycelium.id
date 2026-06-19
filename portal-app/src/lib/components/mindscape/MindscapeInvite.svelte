@@ -5,6 +5,7 @@
 	// happens right here over the living 3D map — never a page jump.
 	import { api } from '$lib/api';
 	import ImportField from '$lib/components/import/ImportField.svelte';
+	import ScanForData from '$lib/components/import/ScanForData.svelte';
 	import SourceCatalog from '$lib/components/import/SourceCatalog.svelte';
 
 	let showCatalog = $state(false); // "see what you can bring in" disclosure
@@ -252,6 +253,9 @@
 		{#if importMsg}<p class="invite-ok">{importMsg} Your map is forming.</p>{/if}
 		{#if importErr}<p class="invite-err">{importErr}</p>{/if}
 
+		<!-- Find local data already on this Mac (Obsidian, Claude Code) → one-click import. -->
+		<div class="scan-wrap"><ScanForData onImported={() => { dataDone = true; onImported(); }} /></div>
+
 		<button class="catalog-toggle" class:open={showCatalog} onclick={() => (showCatalog = !showCatalog)} aria-expanded={showCatalog}>
 			<span class="catalog-chevron">{showCatalog ? '▾' : '▸'}</span>
 			See everything you can bring in
@@ -489,6 +493,8 @@
 	.invite-label a { color: var(--color-accent-aurum, #e5b84c); }
 	.invite-ok { font-size: 0.74rem; color: #4ade80; margin-top: 0.5rem; }
 	.invite-err { font-size: 0.74rem; color: #f87171; margin-top: 0.5rem; }
+	/* Local-data scan ("Scan this Mac") sits between the uploader and the catalog. */
+	.scan-wrap { margin-top: 0.9rem; }
 	/* "See everything you can bring in" disclosure → expands the source catalog. */
 	.catalog-toggle {
 		display: inline-flex; align-items: center; gap: 0.4rem; margin-top: 0.9rem;

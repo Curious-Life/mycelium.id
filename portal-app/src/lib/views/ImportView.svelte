@@ -3,6 +3,7 @@
 	import { uploadFile as chunkedUpload } from '$lib/chunked-upload';
 	import { prepareFile } from '$lib/import/upload-handlers';
 	import SourceCatalog from '$lib/components/import/SourceCatalog.svelte';
+	import ScanForData from '$lib/components/import/ScanForData.svelte';
 	import { api } from '$lib/api';
 
 
@@ -440,6 +441,8 @@
 			{/if}
 		</div>
 	{:else if !selectedSource}
+		<!-- Already on this Mac — scan for local Obsidian / Claude Code data, one-click import. -->
+		<div class="mb-8"><ScanForData /></div>
 		<!-- What you can bring in — icons-first catalog: every source, honest status
 			 (Upload now / Connect / Coming soon), how to get the data, + docs link. -->
 		<div class="mb-8"><SourceCatalog /></div>
