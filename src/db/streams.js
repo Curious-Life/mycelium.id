@@ -77,6 +77,14 @@ function bucketSql(table, srcExpr, softDelete) {
           WHERE user_id = ? AND created_at >= ?${softDelete ? ' AND forgotten_at IS NULL' : ''}
           GROUP BY source, day`;
 }
+// Same per-day bucket, but across ALL of history (no window floor) — backs the
+// since-start history graph. Plaintext-only (source + created_at), like bucketSql.
+function bucketAllSql(table, srcExpr, softDelete) {
+  return `SELECT ${srcExpr} AS source, substr(created_at, 1, 10) AS day, COUNT(*) AS c
+          FROM ${table}
+          WHERE user_id = ?${softDelete ? ' AND forgotten_at IS NULL' : ''}
+          GROUP BY source, day`;
+}
 
 export function createStreamsNamespace(deps) {
   if (!deps) throw new TypeError('createStreamsNamespace: deps required');
@@ -187,6 +195,73 @@ export function createStreamsNamespace(deps) {
       });
 
       return { windowDays: win, days, kinds: STREAM_KINDS, sources };
+    },
+
+    /**
+     * The history graph: per-day item counts per canonical source across ALL of
+     * history (since the vault's first item). Backs the single stacked-bar overview
+     * at the top of Streams — one bar per day, segmented + coloured by source.
+     *
+     * PLAINTEXT-ONLY aggregates (source + created_at), exactly like spectrum() — no
+     * decryption path exists, so the §7 fail-safe holds: this surface can never leak
+     * ciphertext-derived data. Honours redaction (forgotten_at IS NULL where present).
+     *
+     * @param {string} userId
+     * @param {{ nowMs?: number }} [opts] nowMs is injectable for deterministic tests.
+     * @returns {Promise<{ start:string|null, end:string, days:string[],
+     *   sources:Array<{source:string,kind:string,total:number}>,
+     *   series:Record<string, number[]>, clamped:boolean }>}
+     *   `series[source]` is aligned 1:1 with `days`. Empty vault ⇒ days/sources empty.
+     */
+    async dailyVolume(userId, { nowMs } = {}) {
+      const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+      const acc = new Map(); // canonical → { source, kind, total, byDay:Map<day,count> }
+      let minDay = null;
+      const ensure = (canonical, kind) => {
+        let e = acc.get(canonical);
+        if (!e) { e = { source: canonical, kind, total: 0, byDay: new Map() }; acc.set(canonical, e); }
+        return e;
+      };
+      const foldSource = (rawSource, docType) => {
+        const raw = docType ? sourceForDocumentType(rawSource) : rawSource;
+        return classifySource(raw);
+      };
+
+      for (const t of TABLES) {
+        const rows = await d1Query(bucketAllSql(t.table, t.srcExpr, t.softDelete), [userId]);
+        for (const row of rows.results || []) {
+          const day = row.day;
+          if (!day) continue;
+          const { canonical, kind } = foldSource(row.source, t.docType);
+          const e = ensure(canonical, kind);
+          const c = Number(row.c) || 0;
+          e.total += c;
+          e.byDay.set(day, (e.byDay.get(day) || 0) + c);
+          if (!minDay || day < minDay) minDay = day;
+        }
+      }
+
+      const end = new Date(now).toISOString().slice(0, 10);
+      if (!minDay) return { start: null, end, days: [], sources: [], series: {}, clamped: false };
+
+      // Defensive span bound: a single stray far-past row can't blow up the payload.
+      // Beyond MAX_DAYS we clamp the start (client buckets to keep the bar count sane).
+      const MAX_DAYS = 2000;
+      const endMs = Date.parse(end + 'T00:00:00.000Z');
+      let startMs = Date.parse(minDay + 'T00:00:00.000Z');
+      let clamped = false;
+      if ((endMs - startMs) / DAY_MS > MAX_DAYS) { startMs = endMs - MAX_DAYS * DAY_MS; clamped = true; }
+
+      const days = [];
+      for (let ms = startMs; ms <= endMs; ms += DAY_MS) days.push(new Date(ms).toISOString().slice(0, 10));
+
+      const sources = [...acc.values()]
+        .map((e) => ({ source: e.source, kind: e.kind, total: e.total }))
+        .sort((a, b) => b.total - a.total || a.source.localeCompare(b.source));
+      const series = {};
+      for (const e of acc.values()) series[e.source] = days.map((d) => e.byDay.get(d) || 0);
+
+      return { start: days[0], end, days, sources, series, clamped };
     },
 
     /**

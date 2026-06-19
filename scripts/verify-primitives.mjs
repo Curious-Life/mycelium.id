@@ -71,6 +71,17 @@ rec('P6b. surrogate norm: structured≪random (no saturation); short→low_confi
     && lzComplexity(random40, { seed: 1 }).normalized === lzRand.normalized,
   `struct=${lzStruct.normalized} rand=${lzRand.normalized} short.lowConf=${lzShort.lowConfidence}`);
 
+// P6c. LONG-branch (n ≥ LZ_SURROGATE_MAX_N) bound must NOT saturate large-alphabet
+// streams. A length-1200 sequence cycling a 250-symbol alphabet (period 250 → highly
+// compressible) read 1.00 under the wrong `n/log2(a)` bound; the correct LZ bound
+// b(n)=n·log2(a)/log2(n) returns its true (well-below-1) value. Mirrors the real global
+// stream (n≈10.5k, a=250) that the user saw pinned at 1.00.
+const lzBig = lzComplexity(Array.from({ length: 1200 }, (_, i) => i % 250), { seed: 1 });
+rec('P6c. long-branch large-alphabet does NOT saturate (n/log_a(n) bound, not n/log2(a))',
+  lzBig.sequenceLength === 1200 && lzBig.lowConfidence === 0
+    && lzBig.normalized > 0 && lzBig.normalized < 0.95,
+  `n=${lzBig.sequenceLength} a=${lzBig.alphabetSize} normalized=${lzBig.normalized} (was 1.00 pre-fix)`);
+
 // ── F3 new primitives: true LZ76 + variance ──
 const lzSame = lz76Complexity([0, 0, 0, 0, 0, 0]).complexity;
 const lzDistinct = lz76Complexity([1, 2, 3, 4, 5, 6]).complexity;
