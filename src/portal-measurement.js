@@ -757,27 +757,54 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
   router.get('/territory-river', async (req, res) => {
     const u = owner(req, res); if (!u) return;
     try {
-      // The river is an expensive decrypt (400+ weekly activation vectors) but a
-      // pure function of one clustering run's trajectory + profiles + frequency
-      // snapshots — it only changes when those are recomputed. Serve it from the
-      // persisted + in-process cache, keyed by a cheap staleness probe, and only
-      // pay the fold on a genuine miss. @see src/territory-river-cache.js.
+      // Cap how many recent weeks we decrypt. The fold decrypts one activation
+      // vector per weekly step; an 8-year vault is ~400+ rows, and decrypting all
+      // of them in one rawQuery stalled the single Node event loop for ~10–23s
+      // (every other endpoint returned HTTP 000 until it finished — congestion
+      // collapse). The pre-data tail is near-empty, so we keep the most-recent CAP
+      // weeks (~3.5y default), where the signal is. `?weeks=` overrides for power
+      // users; clamped to a sane band. The cap is folded into the cache key
+      // (`variant`) so two windows never collide on the per-user cache slot.
+      const CAP = Math.min(Math.max(Number(req.query.weeks) || 180, 26), 600);
+
+      // The river is an expensive decrypt (one activation vector per weekly step)
+      // but a pure function of one clustering run's trajectory + profiles +
+      // frequency snapshots — it only changes when those are recomputed. Serve it
+      // from the persisted + in-process cache, keyed by a cheap staleness probe,
+      // and only pay the fold on a genuine miss. @see src/territory-river-cache.js.
       const payload = await getTerritoryRiverCached(db, u.id, async () => {
       const FLOOR = 0.01;      // a territory counts as "active" in a week above this share
       const TOP_ANCHORS = 7;   // named bands to show
       const LZ_WINDOW = 26;    // rolling window (weeks) for path-novelty LZ76
+      const CHUNK = 60;        // weekly vectors decrypted per batch before yielding
 
       // 1) Weekly territory-activation trajectory, scoped to one clustering run.
       const runRow = (await db.rawQuery(
         `SELECT MAX(clustering_run_id) AS run FROM fisher_trajectory
            WHERE user_id = ? AND level = 'territory' AND window_type = 'weekly_step'`, [u.id])).results || [];
       const runId = runRow[0]?.run || null;
-      const trajRows = (await db.rawQuery(
-        `SELECT window_end, activation_vector, active_territory_count, message_count, low_confidence
-           FROM fisher_trajectory
-           WHERE user_id = ? AND level = 'territory' AND window_type = 'weekly_step'
-             ${runId ? 'AND clustering_run_id = ?' : ''}
-           ORDER BY window_end ASC`, runId ? [u.id, runId] : [u.id])).results || [];
+      // Page the most-recent CAP weeks in CHUNK-sized batches, yielding to the
+      // event loop between batches. rawQuery auto-decrypts activation_vector per
+      // row in a tight loop; those WebCrypto decrypts resolve near-synchronously,
+      // so without a macrotask boundary (setImmediate) the microtask flood starves
+      // pending HTTP I/O — the very stall we are fixing. One small await per ~60
+      // rows lets concurrent requests interleave at negligible cost.
+      const trajRows = [];
+      for (let off = 0; off < CAP; off += CHUNK) {
+        const lim = Math.min(CHUNK, CAP - off);
+        const page = (await db.rawQuery(
+          `SELECT window_end, activation_vector, active_territory_count, message_count, low_confidence
+             FROM fisher_trajectory
+             WHERE user_id = ? AND level = 'territory' AND window_type = 'weekly_step'
+               ${runId ? 'AND clustering_run_id = ?' : ''}
+             ORDER BY window_end DESC LIMIT ? OFFSET ?`,
+          runId ? [u.id, runId, lim, off] : [u.id, lim, off])).results || [];
+        if (!page.length) break;
+        trajRows.push(...page);
+        if (page.length < lim) break;
+        await new Promise((r) => setImmediate(r)); // macrotask yield → let I/O run
+      }
+      trajRows.reverse(); // newest-first pages → chronological ascending
 
       const weeks = []; const vectors = [];
       for (const r of trajRows) {
@@ -870,6 +897,29 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
         return { end: w.end, count: c };
       });
 
+      // 7) Week × top-3 territories — the checkable drill-floor: each week's message
+      // volume split by its top-3 territories (+ "other"). Counts are derived from
+      // the activation share × that week's message_count (the activation vector IS
+      // the normalized per-territory message-count distribution) — close to raw,
+      // lightly smoothed by the per-category epsilon. Names from territory_profiles.
+      const weeklyTop = weeks.map((w, i) => {
+        const v = vectors[i] || {};
+        const total = Number(w.message_count) || 0;
+        const ranked = Object.keys(v)
+          .map((id) => ({ id: Number(id), share: Number(v[id]) || 0 }))
+          .filter((t) => t.share > 0)
+          .sort((a, b) => b.share - a.share)
+          .slice(0, 3)
+          .map((t) => ({
+            territory_id: t.id,
+            name: nameById[String(t.id)] || `Territory ${t.id}`,
+            named: nameById[String(t.id)] != null,
+            count: Math.round(t.share * total),
+          }));
+        const topSum = ranked.reduce((s, t) => s + t.count, 0);
+        return { end: w.end, total, top: ranked, other: Math.max(0, total - topSum) };
+      });
+
       return {
         run_id: runId,
         level: 'territory',
@@ -877,9 +927,10 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
         weeks,
         anchors,
         anchor_count: anchorCount,
+        weekly_top: weeklyTop,
         novelty: { text: textNovelty, path: pathNovelty },
       };
-      });
+      }, `cap:${CAP}`);
 
       res.set('Cache-Control', 'no-store');
       res.json(payload);
