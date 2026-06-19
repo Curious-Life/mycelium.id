@@ -31,18 +31,27 @@ export const AUTONOMY_TOOLS = new Set([
   'schedule_task', 'list_my_schedules', 'cancel_task', 'reply', 'describeEntity',
 ]);
 
+// Vault-WRITE tools — also gated, also opt-in-by-name, but a STRICTER boundary: only an
+// owner-trusted turn (a 1:1 DM from the vault owner — see resolve-grant.js) ever names
+// these. An untrusted channel turn (any group, or any non-owner sender) never supplies
+// them, so a prompt injection in untrusted content can still only read + reply. (W3.)
+export const WRITE_AUTONOMOUS_TOOLS = new Set([
+  'remember', 'link', 'mark', 'saveDocument', 'updateDocument', 'captureMessage',
+  'editMindFile', 'writeMindFileWhole', 'updateInternalModel', 'createTask', 'flagForDiscussion',
+]);
+
 /**
  * Build the granted tool defs for an autonomous turn.
  * @param {Array<{name:string}>} registryTools  the live MCP tool registry
  * @param {string[]} [enabledNames]   gated tools this task/channel opted into
- * @returns {Array} the subset the turn may use (read-safe ∪ explicitly-enabled gated)
+ * @returns {Array} the subset the turn may use (read-safe ∪ explicitly-enabled gated/write)
  */
 export function autonomyTools(registryTools, enabledNames = []) {
   const enabled = new Set(Array.isArray(enabledNames) ? enabledNames : []);
   const out = [];
   for (const t of registryTools || []) {
     if (SAFE_AUTONOMOUS_TOOLS.has(t.name)) out.push(t);                       // always read-safe
-    else if (AUTONOMY_TOOLS.has(t.name) && enabled.has(t.name)) out.push(t);  // gated, opt-in only
+    else if ((AUTONOMY_TOOLS.has(t.name) || WRITE_AUTONOMOUS_TOOLS.has(t.name)) && enabled.has(t.name)) out.push(t);  // gated/write, opt-in only
     // else: never granted (fail-closed)
   }
   return out;

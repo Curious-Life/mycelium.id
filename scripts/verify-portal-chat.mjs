@@ -13,6 +13,7 @@ import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
 import { portalChatRouter } from '../src/portal-chat.js';
 import { toolsForDomains } from '../src/agent/tool-domains.js';
+import { captureMessage } from '../src/ingest/capture.js';
 
 const DB = 'data/verify-portal-chat.db', KCV = 'data/verify-portal-chat-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -51,10 +52,12 @@ const stallRes = (chunks, signal) => ({ ok: true, status: 200, body: new Readabl
 
 let mode = 'ok';
 let fetchCount = 0;
+let lastSystem = '';   // the system preamble of the most recent Anthropic call (C10)
 const mockFetch = async (url, opts) => {
   const u = String(url);
   fetchCount++;
   if (u.includes('api.anthropic.com')) {
+    try { lastSystem = JSON.parse(opts?.body || '{}').system || ''; } catch { /* non-JSON body */ }
     if (mode === 'err') return errRes(400);
     if (mode === 'stall') return stallRes(sse([   // partial text, then stall (no stop, no [DONE])
       { type: 'message_start', message: { usage: { input_tokens: 9 } } },
@@ -209,6 +212,39 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
   rec('C9 emits a `truncated` event with an actionable message', !!tr && typeof tr.message === 'string' && /cut off|incomplete|limit/i.test(tr.message), JSON.stringify(tr));
   rec('C9 `done` carries truncated:true (not a clean success)', !!done && done.truncated === true, JSON.stringify(done));
   rec('C9 keeps the partial text (no error event)', text === 'partial cut-off answer' && !evs.some((e) => e.type === 'error'), JSON.stringify(text));
+}
+
+// ── C10 conversation threading (Phase 5): prior turns in the SAME conversation are
+//    hydrated into the system the model sees (multi-turn memory); history is scoped
+//    to the thread — no bleed across conversations. ──
+{
+  mode = 'ok';
+  const conv = `verify-conv-${crypto.randomUUID()}`;
+  // Turn 1: state a fact under this conversation.
+  await readSSE(await fetch(`${base}/chat/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'Remember: my favourite colour is teal.', conversationId: conv }) }));
+  // Persistence is fire-and-forget — poll the conversation for its two turns. The server
+  // namespaces chat threads under `chat:` (red-team RT3), so query the prefixed id.
+  let crows = [];
+  for (let i = 0; i < 80; i++) { crows = (await db.messages.selectByConversation(U, `chat:${conv}`, { limit: 50 })) || []; if (crows.length >= 2) break; await new Promise((r2) => setTimeout(r2, 50)); }
+  rec('C10 turn-1 user+assistant persisted under the conversationId', crows.length >= 2, `rows=${crows.length}`);
+  // Turn 2 (same conversation): the system the model receives must carry the prior turn.
+  lastSystem = '';
+  await readSSE(await fetch(`${base}/chat/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'What is my favourite colour?', conversationId: conv }) }));
+  rec('C10 prior turn hydrated into the system preamble (multi-turn memory)', /teal/i.test(lastSystem) && /Conversation so far|Earlier conversation/i.test(lastSystem), JSON.stringify(lastSystem.slice(-300)));
+  // Scoped: this thread returns its turns; a different conversation is empty (no bleed).
+  const hThis = await (await fetch(`${base}/chat/history?conversationId=${conv}`)).json();
+  rec('C10 /chat/history scoped to the conversation', Array.isArray(hThis.messages) && hThis.messages.length >= 2 && hThis.messages.some((m) => /teal/i.test(m.content)));
+  const hOther = await (await fetch(`${base}/chat/history?conversationId=does-not-exist`)).json();
+  rec('C10 a different conversation has NO history bleed', Array.isArray(hOther.messages) && hOther.messages.length === 0);
+}
+
+// ── C11 RT3 isolation: a chat read can NEVER address a CHANNEL conversation ──
+{
+  // Seed a channel-style message under a bare chatId conversation (as the daemon persists).
+  await captureMessage(db, { userId: U, role: 'user', content: 'SECRET third-party channel message', source: 'telegram', conversationId: '987654321' }, () => {});
+  // A chat client asking for that id gets NOTHING — the server namespaces it to chat:987654321.
+  const h = await (await fetch(`${base}/chat/history?conversationId=987654321`)).json();
+  rec('C11 chat cannot read a channel conversation (RT3 namespace isolation)', Array.isArray(h.messages) && h.messages.length === 0 && !JSON.stringify(h.messages).includes('SECRET'), JSON.stringify(h.messages?.length));
 }
 
 server.close(); await close?.();

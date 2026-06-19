@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'node:path';
 import https from 'node:https';
 import { existsSync, mkdirSync, cpSync, renameSync, readFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { boot } from './index.js';
@@ -63,6 +63,11 @@ import { setSessionKeys } from './account/session-keys.js';
 import { createVaultAuthMiddleware, csrfCookieMiddleware, isAuthorized, makePortalOwnerGate } from './http/require-vault-auth.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+// Per-boot shared secret authenticating the channel-daemon to the native channel-turn
+// endpoint (red-team RT1): generated once per process, handed to the spawned daemon via
+// env and required for the owner-WRITE escalation. A forged loopback POST lacks it →
+// degrades to read+reply. Never logged, never persisted, never leaves the box.
+const CHANNEL_TURN_TOKEN = randomBytes(32).toString('hex');
 // SINGLE SOURCE OF TRUTH: the one and only UI is the canonical SvelteKit app at
 // portal-app/build. There is no second UI directory. When the build is missing
 // (a fresh source checkout that skipped `npm run build:app` / `npm start`) we
@@ -348,7 +353,7 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
     const chHooks = createAgentHooks({ db, userId, source: 'channel', toolGuard: autonomousToolGuard() });
     const chHarness = createAgentHarness({ onEgress: createEgressAuditSink(db, userId), onUsage: createUsageSink(db, userId, { source: 'gateway' }), hooks: chHooks, surface: 'channel', logger: (m) => console.error(`[channel-turn] ${m}`) });
     const chLoop = createAgentLoop({ harness: chHarness, logger: (m) => console.error(`[channel-turn] ${m}`) });
-    v.use(createChannelTurnRouter({ db, userId, tools, handlers, loop: chLoop, hooks: chHooks, logger: (m) => console.error(`[channel-turn] ${m}`) }));
+    v.use(createChannelTurnRouter({ db, userId, tools, handlers, loop: chLoop, hooks: chHooks, logger: (m) => console.error(`[channel-turn] ${m}`), expectedToken: CHANNEL_TURN_TOKEN }));
   }
   v.use(apiRouter({ tools, handlers, db, userId, enqueueEnrichment }));
   return v;
@@ -523,7 +528,7 @@ export async function startRestServer({
         // restart on crash, and stop on shutdown. Keyless — it reaches the vault
         // only over loopback (vault-client + /internal/mcp). Reaped via the Rust
         // shell's process-group kill on app exit regardless.
-        channelSup = startChannelSupervisor({ home: process.cwd(), db, userId: bootUserId, restPort: port });
+        channelSup = startChannelSupervisor({ home: process.cwd(), db, userId: bootUserId, restPort: port, channelTurnToken: CHANNEL_TURN_TOKEN });
         // Local TTS (Kokoro :8094): start the on-box voice service once the user
         // has downloaded the model AND opted in (KOKORO_TTS_ENABLED in secrets).
         // Keyless, loopback-only; stays idle (no python) until both are true.

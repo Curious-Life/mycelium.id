@@ -66,6 +66,7 @@ export function startChannelSupervisor({
   log = (m) => process.stderr.write(`${m}\n`),
   fetch: fetchImpl = globalThis.fetch,
   spawn: spawnImpl = spawn,
+  channelTurnToken = null,   // per-boot secret authenticating the daemon to channel-turn (RT1)
 } = {}) {
   if (_instance) return _instance;
 
@@ -93,6 +94,9 @@ export function startChannelSupervisor({
     MYCELIUM_MCP_URL: `http://127.0.0.1:${restPort}/internal/mcp`,
     CHANNEL_MCP_MODE: 'http',
     ...(process.env.CHANNEL_DAEMON_PORT ? { CHANNEL_DAEMON_PORT: process.env.CHANNEL_DAEMON_PORT } : {}),
+    // Authenticates the native channel-turn forward (RT1) — only THIS spawned daemon
+    // holds it, so a forged loopback POST cannot reach the owner-write grant.
+    ...(channelTurnToken ? { MYCELIUM_CHANNEL_TURN_TOKEN: channelTurnToken } : {}),
   });
 
   // Should the daemon run right now? Enabled + at least one platform token.

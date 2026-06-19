@@ -149,6 +149,9 @@ export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands
         username: msg.username || undefined,
         userId: msg.fromId || undefined,
         voiceMode: msg.voiceMode || undefined,
+        // owner vs other — gates the server-side write grant (W3): a 1:1 owner DM is
+        // owner-authored (trusted, like in-app chat); everyone else stays read-only.
+        senderRole,
       };
       try {
         await runTurn(turnCtx, msg);

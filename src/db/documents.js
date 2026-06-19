@@ -15,13 +15,21 @@
  */
 
 import { randomBytes, createHash } from 'node:crypto';
-import { assertSafeColumns } from './column-guard.js';
+import { assertSafeColumns, clampLimit } from './column-guard.js';
 import { bustMindscape } from '../mindscape-cache.js';
 
 /** A fresh capability epoch for unlisted links (16 bytes hex = 128 bits). */
 function randomNonce() {
   return randomBytes(16).toString('hex');
 }
+
+// RT2-H1 (0035/0036): every ENCRYPTED document field a write can poison — versioned
+// as a whole so an overwrite is fully recoverable, not just content/title/summary
+// (red-team MED-1). Must stay a subset of ENCRYPTED_FIELDS.documents (crypto-local.js).
+const DOC_VERSIONED_FIELDS = ['title', 'summary', 'content', 'tags', 'entities', 'relations', 'metadata', 'entity_summary', 'source_path'];
+// Keep-last-N bound on version rows per (user,path) — an injection loop of overwrites
+// must not grow the vault without bound (red-team HIGH-1; mirrors activity-feed.prune).
+const DOC_VERSION_KEEP = 50;
 
 export function createDocumentsNamespace(deps) {
   if (!deps) throw new TypeError('createDocumentsNamespace: deps required');
@@ -108,8 +116,51 @@ export function createDocumentsNamespace(deps) {
       return firstRow(result);
     },
 
-    async upsert(doc) {
+    async upsert(doc, opts = {}) {
       assertSafeColumns(Object.keys(doc || {}), 'documents');
+
+      // RT2-H1 overwrite recoverability (migration 0035): before a content-changing
+      // overwrite of an EXISTING doc, snapshot the prior title/summary/content into
+      // document_versions (encrypted) so a poisoned/mistaken write is recoverable.
+      // Create (no prior) and identical re-write (no diff) capture nothing. Bulk
+      // importers bypass this DAL (raw inserts) so import is unaffected. Non-fatal +
+      // isolated — a versioning hiccup must NEVER deny an owner-authorized write
+      // (mirrors the afterUpsertHooks discipline). No plaintext is ever logged.
+      if (doc && doc.user_id && doc.path && opts.skipVersion !== true) {
+        try {
+          const prev = firstRow(await d1Query(
+            `SELECT id, forgotten_at, ${DOC_VERSIONED_FIELDS.join(', ')} FROM documents WHERE user_id = ? AND path = ?`,
+            [doc.user_id, doc.path],
+          ));
+          // Version when ANY encrypted field the caller is writing actually changes —
+          // not just content/title/summary (red-team MED-1: metadata/tags/entities were
+          // silently overwritten unversioned). Create + identical re-write capture nothing.
+          const changed = prev && !prev.forgotten_at &&
+            DOC_VERSIONED_FIELDS.some((f) => doc[f] !== undefined && doc[f] !== prev[f]);
+          if (changed) {
+            // Full prior snapshot (every non-null encrypted field) as one encrypted JSON
+            // blob → a document overwrite is fully recoverable; title/summary/content are
+            // also kept as columns for a cheap listVersions preview (no JSON parse).
+            const snap = {};
+            for (const f of DOC_VERSIONED_FIELDS) if (prev[f] != null) snap[f] = prev[f];
+            await d1Query(
+              `INSERT INTO document_versions (document_id, user_id, path, title, summary, content, snapshot_json, trigger, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [prev.id, doc.user_id, doc.path, prev.title ?? null, prev.summary ?? null, prev.content ?? null, JSON.stringify(snap), opts.trigger || 'overwrite', opts.reason ?? null],
+            );
+            // Bound growth (red-team HIGH-1): keep the most-recent N versions per (user,path).
+            await d1Query(
+              `DELETE FROM document_versions WHERE user_id = ? AND path = ? AND id NOT IN (
+                 SELECT id FROM document_versions WHERE user_id = ? AND path = ?
+                 ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
+              [doc.user_id, doc.path, doc.user_id, doc.path, DOC_VERSION_KEEP],
+            );
+          }
+        } catch (e) {
+          console.warn(`[doc-version] prior-snapshot capture failed: ${e?.code || e?.name || 'error'}`);
+        }
+      }
+
       const cols = Object.keys(doc).join(', ');
       const placeholders = Object.keys(doc).map(() => '?').join(', ');
       // SET clause for ON CONFLICT. Exclude the conflict key (user_id, path) AND
@@ -448,6 +499,51 @@ export function createDocumentsNamespace(deps) {
       const row = firstRow(result);
       if (row && afterUpsertHooks.length) fireHooks(afterUpsertHooks, row);
       return row;
+    },
+
+    // ── RT2-H1 recovery (migration 0035) ────────────────────────────────
+
+    /**
+     * Prior versions of a document, captured before each content-changing
+     * overwrite (newest first). Snapshot columns (title/summary/content)
+     * auto-decrypt on read. The recovery half of the owner-write grant.
+     */
+    async listVersions(userId, path, { limit = 20 } = {}) {
+      const result = await d1Query(
+        `SELECT id, title, summary, content, trigger, reason, created_at
+           FROM document_versions
+          WHERE user_id = ? AND path = ?
+          ORDER BY created_at DESC, rowid DESC
+          LIMIT ?`,
+        [userId, path, clampLimit(limit, 20, 200)],
+      );
+      return result.results || [];
+    },
+
+    /**
+     * Restore a prior version's title/summary/content onto the live document.
+     * Routes through upsert() so the CURRENT value is itself snapshotted first —
+     * a restore is reversible. Returns the restored row, or null if the version
+     * or the live doc is gone.
+     */
+    async restoreVersion(userId, path, versionId) {
+      const v = firstRow(await d1Query(
+        `SELECT title, summary, content, snapshot_json FROM document_versions WHERE id = ? AND user_id = ? AND path = ?`,
+        [versionId, userId, path],
+      ));
+      if (!v) return null;
+      const cur = await this.get(userId, path);
+      if (!cur) return null;
+      // Prefer the full snapshot (restores every prior encrypted field, MED-1); fall back
+      // to the title/summary/content columns for pre-0034 version rows.
+      let fields = { title: v.title ?? null, summary: v.summary ?? null, content: v.content ?? null };
+      if (v.snapshot_json) {
+        try {
+          const snap = JSON.parse(v.snapshot_json);
+          if (snap && typeof snap === 'object') fields = Object.fromEntries(DOC_VERSIONED_FIELDS.filter((f) => f in snap).map((f) => [f, snap[f]]));
+        } catch { /* corrupt snapshot → fall back to the three preview columns */ }
+      }
+      return this.upsert({ user_id: userId, path, ...fields }, { trigger: 'restore', reason: `restore ${versionId}` });
     },
 
     /**

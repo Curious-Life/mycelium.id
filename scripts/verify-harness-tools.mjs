@@ -16,7 +16,7 @@ import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
 import { buildDomains, collectTools } from '../src/mcp.js';
 import { toolsForDomains, ALL_DOMAIN_KEYS } from '../src/agent/tool-domains.js';
-import { autonomyTools, SAFE_AUTONOMOUS_TOOLS, AUTONOMY_TOOLS } from '../src/agent/autonomy-tools.js';
+import { autonomyTools, SAFE_AUTONOMOUS_TOOLS, AUTONOMY_TOOLS, WRITE_AUTONOMOUS_TOOLS } from '../src/agent/autonomy-tools.js';
 
 const DB = 'data/verify-harness-tools.db', KCV = 'data/verify-harness-tools-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -53,8 +53,14 @@ const SCHED_TOOLS = ['schedule_task', 'list_my_schedules', 'cancel_task'];
   rec('P2 gated schedule_task NOT granted without opt-in', !has(none, 'schedule_task'));
   const opted = autonomyTools(tools, ['schedule_task']);
   rec('P2 schedule_task granted when explicitly enabled', has(opted, 'schedule_task') && has(opted, 'getContext'));
-  rec('P2 a non-listed tool name is never granted (fail-closed)', !has(autonomyTools(tools, ['saveDocument']), 'saveDocument'));
-  rec('P2 sets are disjoint + cover the gated names', !SCHED_TOOLS.some((n) => SAFE_AUTONOMOUS_TOOLS.has(n)) && SCHED_TOOLS.every((n) => AUTONOMY_TOOLS.has(n)));
+  // W3: vault-write tools are a gated set — granted ONLY when explicitly named (owner DMs).
+  rec('P2 write tool (saveDocument) NOT granted without opt-in', !has(none, 'saveDocument'));
+  rec('P2 write tool (saveDocument) granted when explicitly enabled (W3 owner grant)', has(autonomyTools(tools, ['saveDocument']), 'saveDocument'));
+  // A tool in NONE of the sets (e.g. publishDocument — egress, deliberately excluded) is
+  // never granted even if named: fail-closed still holds.
+  rec('P2 a truly non-listed tool is never granted, even if named (fail-closed)', !has(autonomyTools(tools, ['publishDocument']), 'publishDocument'));
+  rec('P2 sets are disjoint + cover the gated names', !SCHED_TOOLS.some((n) => SAFE_AUTONOMOUS_TOOLS.has(n)) && SCHED_TOOLS.every((n) => AUTONOMY_TOOLS.has(n))
+    && ![...WRITE_AUTONOMOUS_TOOLS].some((n) => SAFE_AUTONOMOUS_TOOLS.has(n) || AUTONOMY_TOOLS.has(n)));
 }
 
 // ── P3 invalid DSL → error, no write ──

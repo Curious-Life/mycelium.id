@@ -35,13 +35,19 @@ export function createNativeRuntime(cfg = {}) {
       conversationId,
       source: turnCtx.source || turnCtx.channelKind || 'channel',
       group,
+      isDirect: turnCtx.isDirect != null ? !!turnCtx.isDirect : !group, // authoritative DM flag (RT1-MED)
       addressed: !group,                 // DMs always; groups rely on the server's name-mention triage
       voiceMode: !!turnCtx.voiceMode,
+      senderRole: turnCtx.senderRole || 'other',   // gates the owner write grant (W3)
     };
+    // Per-boot shared secret (RT1): authenticates THIS daemon to the server's channel-turn
+    // endpoint so a random local process can't forge an owner-write turn. Set by the
+    // supervisor in the daemon's env; absent ⇒ no header ⇒ server degrades us to read+reply.
+    const turnToken = process.env.MYCELIUM_CHANNEL_TURN_TOKEN || '';
     try {
       const res = await fetchImpl(url, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...(turnToken ? { 'x-mycelium-channel-turn-token': turnToken } : {}) },
         body: JSON.stringify(body),
         signal,
       });
@@ -54,7 +60,19 @@ export function createNativeRuntime(cfg = {}) {
     }
   }
 
-  return { runTurn, label: 'native' };
+  // Honest health (red-team RT4-B1): native runs the turn on the SERVER, which may have
+  // no model configured. The daemon probes this at boot; if false it reports capture-only
+  // instead of a silent green. Loopback GET; fail-closed (unreachable/no-model ⇒ false).
+  async function probeHealth() {
+    try {
+      const res = await fetchImpl(`${base}/internal/agent/model-status`, { signal: AbortSignal.timeout(3000) });
+      if (!res || !res.ok) return { hasModel: false };
+      const j = await res.json().catch(() => ({}));
+      return { hasModel: !!j.hasModel };
+    } catch { return { hasModel: false }; }
+  }
+
+  return { runTurn, label: 'native', probeHealth };
 }
 
 export default createNativeRuntime;

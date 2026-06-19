@@ -41,15 +41,16 @@ export function selectRuntime(cfg, { auditEgress } = {}) {
 
   // Native backend (H11): the turn runs on the SERVER (POST /internal/agent/channel-turn);
   // this daemon just forwards. Needs no model creds here — the server resolves the user's
-  // provider. Opt-in via MYCELIUM_CHANNEL_ROUTER=native (default OFF until soaked; the
-  // SDK/Ollama backends remain the default + the rollback path).
+  // in-app provider. This is now the DEFAULT (red-team RT4 flip 2026-06-19): one engine for
+  // chat + channels, the sovereignty floor, and honest capture-only enforced at boot via
+  // probeHealth. The SDK/Ollama backends remain reachable as EXPLICIT overrides + rollback.
   if (forced === 'native') return createNativeRuntime(cfg);
 
-  // Explicit override (the active-provider bridge sets this to pin one backend).
+  // Explicit override (the active-provider bridge / operator pins one backend).
   if (forced === 'cloud') return hasCloud ? cloud() : null;
   if (forced === 'local') return hasLocal ? local() : null;
   if (forced === 'openai') return hasOpenai ? openai() : null;
-  if (forced === 'auto' || (hasCloud && hasLocal)) {
+  if (forced === 'auto') {
     if (hasCloud && hasLocal) {
       return createAutoRuntime({
         local: local(), cloud: cloud(),
@@ -63,8 +64,7 @@ export function selectRuntime(cfg, { auditEgress } = {}) {
     return null;
   }
 
-  if (hasOpenai) return openai(); // OpenAI-compatible BYOK (selected app provider)
-  if (hasCloud) return cloud();   // cloud BYOK (Anthropic)
-  if (hasLocal) return local();   // sovereign local
-  return null;                    // capture-only (fail-closed, honest)
+  // DEFAULT (no explicit override): the native engine. The server resolves the provider
+  // and returns no-model honestly if none is configured (the daemon then stays capture-only).
+  return createNativeRuntime(cfg);
 }

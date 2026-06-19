@@ -65,8 +65,13 @@ const rt = createNativeRuntime({ vaultBaseUrl: `http://127.0.0.1:${port}` });
 {
   const sel = selectRuntime({ channelRouter: 'native', vaultBaseUrl: `http://127.0.0.1:${port}` });
   rec('N7 selectRuntime(native) → native runtime, no model creds required', sel && sel.label === 'native' && typeof sel.runTurn === 'function');
-  // default (no router, no creds) is still capture-only null (native is opt-in)
-  rec('N7 native is opt-in: no router + no creds → null (unchanged default)', selectRuntime({}) === null);
+  // RT4 flip: native is now the DEFAULT (no explicit override, no daemon creds). The
+  // server resolves the provider; honesty is enforced at boot via probeHealth.
+  const def = selectRuntime({ vaultBaseUrl: `http://127.0.0.1:${port}` });
+  rec('N7 native is the DEFAULT now (no router → native, RT4 flip)', def && def.label === 'native' && typeof def.runTurn === 'function');
+  rec('N7 native exposes probeHealth (B1 honest capture-only)', typeof sel.probeHealth === 'function');
+  // explicit overrides still win + still fail-closed when their creds are absent.
+  rec('N7 explicit cloud override w/ no key → null (fail-closed)', selectRuntime({ channelRouter: 'cloud' }) === null);
 }
 
 await new Promise((r) => server.close(r));

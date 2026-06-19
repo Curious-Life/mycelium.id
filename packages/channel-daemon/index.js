@@ -44,7 +44,7 @@ function captureOnlyRunTurn(turnCtx) {
  * @param {object} [opts]
  * @param {Function} [opts.runTurn]  override the turn handler (tests inject a fake)
  */
-export function buildDaemon(cfg, { runTurn } = {}) {
+export async function buildDaemon(cfg, { runTurn } = {}) {
   const vault = createVaultClient({ baseUrl: cfg.vaultBaseUrl });
   const dedup = createEnvelopeDedup();
   const rateLimit = createRateLimiter({ maxPerWindow: cfg.rateLimitMax, windowMs: cfg.rateLimitWindowMs });
@@ -69,7 +69,15 @@ export function buildDaemon(cfg, { runTurn } = {}) {
     // auto router records cloud-routing decisions hash-only via the vault.
     const auditEgress = (e) => { vault.recordInferenceEgress(e); };
     const runtime = selectRuntime(cfg, { auditEgress });
-    if (runtime) {
+    // B1 (red-team RT4): native runs the turn on the SERVER, which may have no model
+    // configured — that would silently drop every reply. Probe the vault; if it has no
+    // model, stay HONESTLY capture-only (never claim replies are ON) until one is added.
+    let nativeNoModel = false;
+    if (runtime && runtime.label === 'native' && typeof runtime.probeHealth === 'function') {
+      try { nativeNoModel = !(await runtime.probeHealth())?.hasModel; } catch { nativeNoModel = true; }
+      if (nativeNoModel) console.log('[channel-daemon] native backend selected but the vault has no model — capture-only until a model is connected');
+    }
+    if (runtime && !nativeNoModel) {
       // Typing indicator while a turn runs (Telegram DMs; presence.js gates).
       presence = createTypingPresence({
         sendChatAction: (chatId) => telegram ? telegram.sendChatAction({ chatId }) : null,
@@ -190,7 +198,7 @@ async function main() {
   } catch (e) { console.error('[channel-daemon] vault config hydrate skipped:', e.message); }
 
   assertEgressConfig(cfg);
-  const { app, poller, gateway, telegram, discord, lane, vault } = buildDaemon(cfg);
+  const { app, poller, gateway, telegram, discord, lane, vault } = await buildDaemon(cfg);
 
   // Validate tokens up front so a bad token fails loud, not silently mid-run.
   if (telegram) {

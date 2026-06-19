@@ -29,9 +29,28 @@ export interface ChatMessage {
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'streaming' | 'error';
 
+// Per-thread conversation key (Phase 5 chat threading): one UUID per chat thread,
+// persisted so a reload continues the SAME thread; a fresh id starts a new thread
+// (on "Clear"). Sent on every /chat/stream + /chat/history call so the backend can
+// scope conversation memory to this thread.
+const CONVERSATION_KEY = 'mycelium-chat-conversation';
+function genConversationId(): string {
+	try { return crypto.randomUUID(); }
+	catch { return `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`; }
+}
+
 function createChatStore() {
 	const { subscribe, set, update } = writable<ChatMessage[]>([]);
 	let hasLoaded = false;
+	let conversationId: string = browser ? (localStorage.getItem(CONVERSATION_KEY) || '') : '';
+
+	const ensureConversationId = (): string => {
+		if (!conversationId) {
+			conversationId = genConversationId();
+			if (browser) localStorage.setItem(CONVERSATION_KEY, conversationId);
+		}
+		return conversationId;
+	};
 
 	return {
 		subscribe,
@@ -41,10 +60,20 @@ function createChatStore() {
 		clear: () => { set([]); hasLoaded = false; },
 		set,
 
+		// The current thread key (generating + persisting one on first use).
+		getConversationId: (): string => ensureConversationId(),
+		// Start a fresh thread: new id + drop the loaded flag so the next open is empty.
+		newConversation: (): string => {
+			conversationId = genConversationId();
+			if (browser) localStorage.setItem(CONVERSATION_KEY, conversationId);
+			hasLoaded = false;
+			return conversationId;
+		},
+
 		loadHistory: async (force = false, agentId?: string): Promise<ChatMessage[]> => {
 			if (!browser || (hasLoaded && !force)) return [];
 			try {
-				const params = new URLSearchParams({ limit: '50' });
+				const params = new URLSearchParams({ limit: '50', conversationId: ensureConversationId() });
 				if (agentId) params.set('agentId', agentId);
 				const response = await api(`/portal/chat/history?${params}`);
 				if (!response.ok) return [];
