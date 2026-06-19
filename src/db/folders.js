@@ -62,13 +62,34 @@ export function createFoldersNamespace(deps) {
 
     async list(userId) {
       const result = await d1Query(
-        `SELECT id, name, parent_id, agent_id, description, document_count
+        `SELECT id, name, parent_id, agent_id, description
            FROM folders
           WHERE user_id = ?
           ORDER BY name`,
         [userId],
       );
-      return result.results || [];
+      const folders = result.results || [];
+      // Live document counts — "the right direction": ONE GROUP BY folder_id over
+      // documents (index-only via 0037's partial covering index, ~1 ms on 20k docs)
+      // instead of the stored `document_count` column, which was never maintained
+      // (always 0). Plaintext aggregate (folder_id is a structural tag) — no decrypt.
+      const counts = await d1Query(
+        `SELECT folder_id, COUNT(*) AS n
+           FROM documents
+          WHERE user_id = ? AND is_internal = 0 AND forgotten_at IS NULL AND folder_id IS NOT NULL
+          GROUP BY folder_id`,
+        [userId],
+      );
+      const byFolder = new Map((counts.results || []).map((r) => [r.folder_id, Number(r.n) || 0]));
+      // Expose both names: `document_count` (the column's name) and `doc_count`
+      // (what LibraryNav reads). Folders with no docs get 0 (falsy → the nav hides
+      // the badge, unchanged for empty folders).
+      for (const f of folders) {
+        const n = byFolder.get(f.id) || 0;
+        f.document_count = n;
+        f.doc_count = n;
+      }
+      return folders;
     },
 
     /**
