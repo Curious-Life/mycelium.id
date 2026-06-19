@@ -101,3 +101,68 @@ the persisted row is populated on the first river load and serves every load aft
 - `src/crypto/crypto-local.js` — `ENCRYPTED_FIELDS.territory_river_cache = ['payload']`.
 - `scripts/verify-territory-river-cache.mjs` + `package.json` — new gate.
 - `scripts/bench-territory-river.mjs` — production-scale timing harness.
+
+---
+
+## Addendum (2026-06-19, follow-up) — the cache wasn't catching + the cold miss still collapsed the app
+
+Live re-test on `/Applications/Mycelium.app` after the v3 schema bump surfaced two
+defects that the original design above did not anticipate. Both are now fixed
+(`fix/territory-river-eventloop-cache`, branched off `deploy-curious`). This
+reverses two earlier decisions with hard evidence.
+
+### Defect 1 — the cold compute monopolizes the single event loop
+
+A genuine cache MISS still decrypted **all ~417** weekly vectors in one
+`db.rawQuery`. `autoDecryptResults` loops `await decrypt()` per row; Node's
+WebCrypto AES-KW unwrap + AES-GCM decrypt resolve **near-synchronously** for these
+small envelopes, so the 417 awaits become a **microtask flood that starves the
+macrotask (I/O) queue** — every other endpoint returned **HTTP 000** for ~10–23s
+until the fold finished. (This is the same congestion-collapse family as
+[[at-rest-boot-congestion-collapse]].)
+
+**Fix (reverses rejected option (a)):**
+1. **Cap** the fold to the most-recent **180 weeks** (`?weeks=` override, clamped
+   `[26,600]`). The pre-data tail is near-empty; 180 weeks ≈ 3.5y covers the real
+   signal. The cap is folded into the cache key (`variant`) so windows never
+   collide on the single per-user slot. *Option (a) was originally rejected as
+   "changes the river's meaning"; in practice the dropped tail carries no signal
+   and the rolling 26-week novelty/anchor windows are unaffected within the cap.*
+2. **Chunk + yield**: page the trajectory read in 60-row batches with a
+   `setImmediate` macrotask boundary between batches, so concurrent requests
+   interleave during a cold miss instead of being starved.
+
+### Defect 2 — the cache key rotated on every call under load (never hit)
+
+The original key included `territory_profiles.MAX(updated_at)`. That column bumps on
+**every per-profile re-describe during an active measure/enrich pipeline** — the
+exact congested state the cache exists to survive — so back-to-back river calls saw
+a moved key and **both recomputed** (a 2nd sequential call still paid the full
+fold instead of <1s).
+
+**Fix:** drop `MAX(updated_at)` from the probe (`RIVER_SCHEMA` → `v4-robustkey`).
+The river only changes *structurally* on a new clustering run (caught by `r:` =
+`MAX(clustering_run_id)`) or an added/removed step/profile/snapshot (caught by the
+COUNTs / window-ends). A cosmetic re-describe (a band's NAME) within the same run
+is a label overlay that refreshes on the next run — an acceptable trade for staying
+responsive under load.
+
+### Verification (addendum)
+
+- `verify:territory-river-cache` — **GO, 8/8**: original 7 + new **5b. benign
+  `updated_at` churn does NOT rotate the key** (the Defect-2 regression test). Test
+  5 now rotates the key via a structural change (new weekly step) the robust key
+  tracks.
+- `verify:metrics-rest` — **GO** (router intact).
+- `scripts/bench-territory-river.mjs` (extended, 417 encrypted vectors): cold MISS
+  capped to **180 weeks**, warm/reboot **13×/16×**, and **max event-loop stall
+  during a cold MISS = 20ms** (the 20ms heartbeat floor — the chunking yields
+  cleanly; no measurable monopolization). The bench now **exits non-zero** if the
+  stall exceeds 1s or the cap is wrong.
+
+### Note for whoever owns #301
+
+These edits sit on `deploy-curious` lineage but **not** on `feat/curious-life-update`,
+which carries a *divergent* earlier `825a8c9` ("cap + per-run cache") that takes the
+simpler per-run in-process approach without the persisted layer. Reconcile before
+merging either upward — do not double-apply the cap.
