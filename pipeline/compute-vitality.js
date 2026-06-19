@@ -277,6 +277,13 @@ export async function computeVitality({ db, userId, runId = null, dryRun = false
   }
 
   const res = createStageResult('compute-vitality', { record: db.pipelineState.recorderFor(userId, 'compute-vitality') });
+  // Idempotent current-snapshot semantics (mirrors compute-cofire / compute-territory-
+  // neighbors): replace this user's vitality rows each run. territory_vitality has no
+  // dedup key (PK is a random UUID), so the pure INSERT below otherwise ACCUMULATES a
+  // new row-set every run — the live vault had grown to 19,482 rows for 152 territories
+  // (~128×) under a stale 'backfill-v1' run. Safe to clear: vitality has NO cross-run
+  // dependency (growth/reach read CURRENT cofire + graph, never prior vitality rows).
+  await db.rawQuery(`DELETE FROM territory_vitality WHERE user_id = ?`, [userId]);
   let written = 0;
   for (const r of results) {
     try {
@@ -329,7 +336,7 @@ async function runCli() {
     console.error('Missing: USER_MASTER and SYSTEM_KEY (64-char hex each)');
     process.exit(1);
   }
-  const runId = process.env.CLUSTERING_RUN_ID || null;
+  let runId = process.env.CLUSTERING_RUN_ID || null;
   const dryRun = process.argv.includes('--dry-run');
 
   const { boot } = await import('../src/index.js');
@@ -340,6 +347,11 @@ async function runCli() {
     userId: USER_ID,
     embedder: null,
   });
+  // Stamp a REAL era run id (not NULL) so runs are identifiable + sortable by
+  // recency — the snapshot orders by computed_at, but a meaningful id beats NULL.
+  // (Measure-only never sets CLUSTERING_RUN_ID; before this, rows were NULL-tagged
+  // and invisible to the lexicographic-MAX snapshot.)
+  if (!runId) runId = await db.metrics.getCurrentEra(USER_ID).catch(() => null);
   try {
     await computeVitality({ db, userId: USER_ID, runId, dryRun });
   } finally {

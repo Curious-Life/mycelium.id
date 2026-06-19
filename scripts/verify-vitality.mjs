@@ -119,6 +119,21 @@ try {
   rec('V6. adapter auto-decrypts metric columns → finite numbers (Number()-coercible)',
     !!dr && Number.isFinite(vNum) && vNum >= 0 && vNum <= 1 && Number.isFinite(Number(dr.reach)),
     dr ? `vitality=${dr.vitality} (→${vNum}) reach=${dr.reach} phase=${dr.phase}` : 'no row');
+
+  // ── V7. re-run is idempotent (dedup): a SECOND run with a NEW run id must
+  //        REPLACE rows, not accumulate (the 128× 'backfill-v1' bug). ──────────
+  const run2 = spawnSync('node', ['pipeline/compute-vitality.js'], {
+    encoding: 'utf8',
+    env: { ...process.env, MYCELIUM_DB: DB, MYCELIUM_KCV: KCV, MYCELIUM_USER_ID: U,
+      USER_MASTER: userHex, SYSTEM_KEY: systemHex, CLUSTERING_RUN_ID: `${RUN}-2` },
+  });
+  const raw2 = new Database(DB, { readonly: true });
+  const count2 = raw2.prepare(`SELECT COUNT(*) n FROM territory_vitality WHERE user_id=?`).get(U).n;
+  const runs2 = raw2.prepare(`SELECT DISTINCT clustering_run_id r FROM territory_vitality WHERE user_id=?`).all(U).map((x) => x.r);
+  raw2.close();
+  rec('V7. re-run dedups (clear-before-insert): 1 row/territory, old run replaced',
+    run2.status === 0 && count2 === TERRS.length && runs2.length === 1 && runs2[0] === `${RUN}-2`,
+    `rows=${count2} (expected ${TERRS.length}) runs=${JSON.stringify(runs2)}`);
 } finally {
   close();
   for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
