@@ -27,6 +27,7 @@ import { portalChatRouter } from './portal-chat.js';
 import { createScheduler } from './agent/scheduler.js';
 import { createChannelTurnRouter } from './agent/channel-turn.js';
 import { createAgentHarness } from './agent/harness.js';
+import { createAgentHooks, autonomousToolGuard } from './agent/hooks.js';
 import { createAgentLoop } from './agent/loop.js';
 import { createEgressAuditSink } from './inference/egress.js';
 import { createUsageSink } from './inference/usage.js';
@@ -344,9 +345,10 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // open-vault tools (incl. `reply`), with conversation history + an untrusted
   // envelope. Strict-loopback gated inside the router (same boundary as MCP above).
   {
-    const chHarness = createAgentHarness({ onEgress: createEgressAuditSink(db, userId), onUsage: createUsageSink(db, userId, { source: 'gateway' }), logger: (m) => console.error(`[channel-turn] ${m}`) });
+    const chHooks = createAgentHooks({ db, userId, source: 'channel', toolGuard: autonomousToolGuard() });
+    const chHarness = createAgentHarness({ onEgress: createEgressAuditSink(db, userId), onUsage: createUsageSink(db, userId, { source: 'gateway' }), hooks: chHooks, surface: 'channel', logger: (m) => console.error(`[channel-turn] ${m}`) });
     const chLoop = createAgentLoop({ harness: chHarness, logger: (m) => console.error(`[channel-turn] ${m}`) });
-    v.use(createChannelTurnRouter({ db, userId, tools, handlers, loop: chLoop, logger: (m) => console.error(`[channel-turn] ${m}`) }));
+    v.use(createChannelTurnRouter({ db, userId, tools, handlers, loop: chLoop, hooks: chHooks, logger: (m) => console.error(`[channel-turn] ${m}`) }));
   }
   v.use(apiRouter({ tools, handlers, db, userId, enqueueEnrichment }));
   return v;

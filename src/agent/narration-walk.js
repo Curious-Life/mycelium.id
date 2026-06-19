@@ -86,7 +86,7 @@ function renderLedger(ledger, item, capsule) {
  * @returns {Promise<{described,skipped,total,conversationId,ledger}>}
  */
 export async function runNarrationWalk(deps, opts = {}) {
-  const { db, userId, tools = [], handlers = {}, loop, fetchImpl, signal, runTurn = runAgentTurn } = deps;
+  const { db, userId, tools = [], handlers = {}, loop, fetchImpl, signal, runTurn = runAgentTurn, hooks } = deps;
   const { runId, scope = 'all', onProgress, log = () => {}, skipIds = null, shouldStop = null } = opts;
   if (!runId) throw new Error('runNarrationWalk: runId required');
   const query = (sql, p = []) => db.rawQuery(sql, p).then((r) => (Array.isArray(r) ? r : r.results || []));
@@ -118,7 +118,7 @@ export async function runNarrationWalk(deps, opts = {}) {
     const history = ledger.length ? [{ role: 'assistant', content: `Described ${ledger[ledger.length - 1].name || 'the prior area'}.` }] : [];
 
     const res = await runTurn(
-      { db, userId, tools, handlers, loop, fetchImpl, signal },
+      { db, userId, tools, handlers, loop, fetchImpl, signal, hooks },
       { userMessage, systemExtra, enabledTools: ['describeEntity', 'getEntityContext'], conversationId, history, localTools: true },
     );
     // Did the agent actually write, or reflect-and-leave? (toolsUsed from the turn.)

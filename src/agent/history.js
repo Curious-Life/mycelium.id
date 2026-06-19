@@ -14,6 +14,7 @@
 // putSummary (db.harness.putSummary encrypts `summary`).
 
 import { shouldCompact, compact, estimateMessagesTokens } from './compaction.js';
+import { fireBeforeCompaction, fireAfterCompaction } from './hooks.js';
 
 const line = (m) => `${m.role === 'assistant' ? 'You' : 'Them'}: ${typeof m.content === 'string' ? m.content : ''}`;
 
@@ -45,7 +46,7 @@ function renderBlock(messages) {
  */
 export async function hydrateHistoryBlock({
   history = [], contextWindow = 8192, maxOutputTokens = 1024,
-  summarize, getSummary, putSummary, conversationId, userId, dateStr,
+  summarize, getSummary, putSummary, conversationId, userId, dateStr, hooks, logger,
 } = {}) {
   const neutral = (Array.isArray(history) ? history : [])
     .filter((m) => m && typeof m.content === 'string' && m.content.trim())
@@ -62,7 +63,10 @@ export async function hydrateHistoryBlock({
   if (typeof getSummary === 'function' && conversationId) {
     try { prevSummary = (await getSummary(userId, conversationId))?.summary || null; } catch { /* fail-soft */ }
   }
+  // Compaction lifecycle hooks (G1): observe-only, fail-OPEN — never break hydration.
+  if (hooks?.beforeCompaction) fireBeforeCompaction(hooks, { messages: neutral, contextWindow, maxOutputTokens, conversationId }, logger);
   const res = await compact({ messages: neutral, contextWindow, maxOutputTokens, summarize, prevSummary, dateStr });
+  if (hooks?.afterCompaction) fireAfterCompaction(hooks, { summary: res.summary, compacted: res.compacted, savedRatio: res.savedRatio, conversationId }, logger);
   if (res.compacted && res.summary && conversationId && typeof putSummary === 'function') {
     try { await putSummary({ userId, conversationId, summary: res.summary, tokensBefore: estimateMessagesTokens(neutral) }); } catch { /* fail-soft */ }
   }

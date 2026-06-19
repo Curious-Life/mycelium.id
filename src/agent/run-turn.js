@@ -41,7 +41,7 @@ async function readAgentName(db, userId) {
  * @returns {Promise<{text:string,truncated?:boolean,skipped?:string,toolsUsed?:string[]}>}
  */
 export async function runAgentTurn(
-  { db, userId, tools = [], handlers = {}, loop, fetchImpl = globalThis.fetch, signal } = {},
+  { db, userId, tools = [], handlers = {}, loop, fetchImpl = globalThis.fetch, signal, hooks } = {},
   { userMessage, systemExtra = '', enabledTools = [], history = [], conversationId = null, recentN, localTools = false } = {},
 ) {
   if (!loop || typeof loop.run !== 'function') throw new TypeError('runAgentTurn: loop with run() required');
@@ -82,7 +82,7 @@ export async function runAgentTurn(
       history, contextWindow, maxOutputTokens, summarize,
       getSummary: db?.harness?.getSummary ? (u, c) => db.harness.getSummary(u, c) : undefined,
       putSummary: db?.harness?.putSummary ? (rec) => db.harness.putSummary(rec) : undefined,
-      conversationId, userId,
+      conversationId, userId, hooks,
     });
   }
 

@@ -67,6 +67,7 @@
     "verify:harness-fallback": "node scripts/verify-harness-fallback.mjs",
     "verify:harness-breaker": "node scripts/verify-harness-breaker.mjs",
     "verify:harness-budget": "node scripts/verify-harness-budget.mjs",
+    "verify:harness-hooks": "node scripts/verify-harness-hooks.mjs",
     "verify:chat": "node scripts/verify-portal-chat.mjs",
     "verify:embeddings-gateway": "node scripts/verify-embeddings-gateway.mjs",
     "verify:harness-connect": "node scripts/verify-harness-connect.mjs",

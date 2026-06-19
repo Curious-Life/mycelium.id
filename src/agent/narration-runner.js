@@ -9,6 +9,7 @@
 import { buildDomains, collectTools } from '../mcp.js';
 import { createAgentHarness } from './harness.js';
 import { createAgentLoop } from './loop.js';
+import { createAgentHooks, autonomousToolGuard } from './hooks.js';
 import { createEgressAuditSink } from '../inference/egress.js';
 import { createUsageSink } from '../inference/usage.js';
 import { runNarrationWalk } from './narration-walk.js';
@@ -21,15 +22,17 @@ export function makeNarrationRunner({ db, userId, embedder = null, fetchImpl = g
   if (!db || !userId) throw new TypeError('makeNarrationRunner: db + userId required');
   const { domains } = buildDomains({ db, userId, embedder });
   const { tools, handlers } = collectTools(domains);
+  const hooks = createAgentHooks({ db, userId, source: 'narration-walk', toolGuard: autonomousToolGuard() });
   const harness = createAgentHarness({
     onEgress: createEgressAuditSink(db, userId),
     onUsage: createUsageSink(db, userId, { source: 'narration-walk' }),
+    hooks, surface: 'narration',
     fetch: fetchImpl,
   });
   const loop = createAgentLoop({ harness });
 
   return (opts) => runNarrationWalk(
-    { db, userId, tools, handlers, loop, fetchImpl, signal: opts?.signal },
+    { db, userId, tools, handlers, loop, fetchImpl, signal: opts?.signal, hooks },
     opts,
   );
 }
