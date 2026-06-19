@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import JSZip from 'jszip';
 	import { uploadFile as chunkedUpload } from '$lib/chunked-upload';
+	import { prepareFile } from '$lib/import/upload-handlers';
 	import { api } from '$lib/api';
 
 
@@ -163,57 +163,7 @@
 		{ id: 'linkedin', name: 'LinkedIn', description: 'Import your LinkedIn data export', accept: '.zip', hint: 'Connections, messages, and professional network — auto-encrypted and deduplicated' },
 	];
 
-	/**
-	 * For large ZIPs (>90MB), extract just the JSON conversation files client-side
-	 * and re-pack them into a smaller ZIP. This avoids Cloudflare's 100MB upload limit.
-	 * Media files (images, etc.) are stripped — only conversation data is imported.
-	 */
-	async function prepareFile(file: File): Promise<File> {
-		// Small files or non-ZIPs: upload as-is
-		if (file.size < 90_000_000 || !file.name.endsWith('.zip')) {
-			return file;
-		}
-
-		// Very large files (>500MB): upload raw — server handles extraction to avoid browser OOM
-		if (file.size > 500_000_000) {
-			statusMsg = `Large file (${Math.round(file.size / 1024 / 1024)}MB) — uploading directly, server will extract text data...`;
-			return file;
-		}
-
-		statusMsg = 'Large file detected — extracting conversation data...';
-
-		const buffer = await file.arrayBuffer();
-		const zip = await JSZip.loadAsync(buffer);
-
-		// A Mycelium vault export carries its data in manifest.json AND its media
-		// in attachments/ — NEVER strip it down to text files (that would drop
-		// every image/voice note). Upload raw; the server keeps everything.
-		if (zip.file('manifest.json')) {
-			statusMsg = `Mycelium vault export (${Math.round(file.size / 1024 / 1024)}MB) — uploading with media intact…`;
-			return file;
-		}
-
-		const jsonFiles = Object.keys(zip.files).filter(n => n.endsWith('.json') && !zip.files[n].dir);
-		const mdFiles = Object.keys(zip.files).filter(n => n.endsWith('.md') && !zip.files[n].dir);
-		const csvFiles = Object.keys(zip.files).filter(n => n.endsWith('.csv') && !zip.files[n].dir);
-
-		const dataFiles = [...jsonFiles, ...mdFiles, ...csvFiles];
-		if (dataFiles.length === 0) {
-			throw new Error('No importable data found in this ZIP.');
-		}
-
-		// Re-pack only data files into a new smaller ZIP (strip media)
-		const newZip = new JSZip();
-		for (const name of dataFiles) {
-			const content = await zip.files[name].async('uint8array');
-			newZip.file(name, content);
-		}
-
-		const newBuffer = await newZip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
-		statusMsg = `Extracted ${dataFiles.length} data files (${Math.round(newBuffer.size / 1024 / 1024)}MB)`;
-
-		return new File([newBuffer], file.name, { type: 'application/zip' });
-	}
+	// Large-ZIP repack lives in the shared upload handler ($lib/import/upload-handlers).
 
 	let uploadProgress = $state(0);
 
@@ -237,7 +187,7 @@
 		uploadProgress = 0;
 
 		try {
-			const prepared = await prepareFile(files[0]);
+			const prepared = await prepareFile(files[0], (s) => { statusMsg = s; });
 			statusMsg = 'Uploading...';
 
 			const res = await chunkedUpload(prepared, (p) => {
