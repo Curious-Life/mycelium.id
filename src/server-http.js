@@ -158,6 +158,12 @@ export async function createHttpApp(opts = {}) {
   // The portal SPA's password-only sign-in shim (see below) is relay-exposed and
   // checks the operator password — throttle it on the same global bucket policy.
   app.use(createPathThrottle({ method: 'POST', path: '/api/auth/operator-login', max: 5, windowMs: 60_000 }));
+  // OAuth code/token exchange + dynamic client registration are relay-exposed too.
+  // Throttling the token endpoint blunts connector-credential guessing; throttling
+  // registration blunts client-spam. Higher caps than sign-in (these are legitimately
+  // hit a few times per connect) but still bounded.
+  app.use(createPathThrottle({ method: 'POST', path: '/api/auth/mcp/token', max: 30, windowMs: 60_000 }));
+  app.use(createPathThrottle({ method: 'POST', path: '/api/auth/mcp/register', max: 10, windowMs: 60_000 }));
 
   // Password-only operator sign-in for the portal SPA (the webview /login). The
   // vault is single-user, so the SPA never asks for or sees the operator account's
