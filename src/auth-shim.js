@@ -37,9 +37,15 @@ import { isTrustedLoopback } from './http/loopback.js';
  *   V1) is "always authorized" — desktop behavior is unchanged.
  * @returns {import('express').Router}
  */
-export function authShimRouter({ userId, handle = 'local', getHandle, resolveAuthorized }) {
+export function authShimRouter({ userId, handle = 'local', getHandle, getRequirePasskey, resolveAuthorized }) {
   const router = express.Router();
   router.use(express.json({ limit: '256kb' }));
+
+  // Whether web sign-in requires a passkey (the EFFECTIVE policy: enabled AND a
+  // passkey enrolled). Read live. The SPA login reads this from /setup-status to
+  // render passkey-only — /api/v1/remote/status is edge-denied over the relay, so
+  // this shim (portal-served) is how the relay browser learns the policy.
+  const requirePasskey = () => { if (!getRequirePasskey) return false; try { return getRequirePasskey() === true; } catch { return false; } };
 
   // The vault's tag. getHandle (when supplied) is authoritative and live — it may
   // return null (no remote handle configured yet) → the login UI shows a generic
@@ -69,7 +75,7 @@ export function authShimRouter({ userId, handle = 'local', getHandle, resolveAut
   // The /login page reads this to brand the sign-in with the vault's @handle (and
   // to decide its flow). handle is null when none is configured → generic UI.
   router.get('/setup-status', (_req, res) =>
-    res.json({ setupRequired: false, hasPasskeys: false, handle: currentHandle() }));
+    res.json({ setupRequired: false, hasPasskeys: false, handle: currentHandle(), requirePasskey: requirePasskey() }));
 
   // Logout. Loopback (desktop) is "always signed in" — nothing to revoke; no-op.
   // A NETWORKED client (over the relay) holds a REAL better-auth session, so a

@@ -24,6 +24,8 @@
 		remoteMode?: string;
 		controlPlaneUrl?: string;
 		relayAddr?: string;
+		requirePasskeyForWeb?: boolean;
+		passkeyEnrolled?: boolean;
 	};
 
 	let status = $state<RemoteStatus | null>(null);
@@ -107,6 +109,7 @@
 
 	const saveBaseUrl = () => saveConfig({ publicBaseUrl: baseUrl.trim() });
 	const toggleEnabled = (on: boolean) => saveConfig({ remoteEnabled: on });
+	const togglePasskeyRequired = (on: boolean) => saveConfig({ requirePasskeyForWeb: on });
 
 	// O9 — own-relay: persist the self-hosted control-plane + relay coords and mark
 	// the mode. The managed-connect flow above then provisions against THIS control
@@ -185,6 +188,17 @@
 		{/if}
 		{#if !status.passwordSet || !status.publicBaseUrl}
 			<p class="text-[10px] text-[var(--color-text-tertiary)] mt-1">Set a password and a public URL first.</p>
+		{/if}
+
+		<!-- 4. Require a passkey for web sign-in (hardening). Enableable only once a
+		     passkey is enrolled; auto-disables if you change your public host. -->
+		<label class="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] mt-3">
+			<input type="checkbox" checked={status.requirePasskeyForWeb} disabled={cfgSaving || !status.passkeyEnrolled}
+				onchange={(e) => togglePasskeyRequired((e.target as HTMLInputElement).checked)} class="accent-[var(--color-accent)]" />
+			Require a passkey for web sign-in (password alone won't work over the web)
+		</label>
+		{#if !status.passkeyEnrolled}
+			<p class="text-[10px] text-[var(--color-text-tertiary)] mt-1">Enroll a passkey first (sign in over the web once, then “Set up a passkey”). Your local desktop access and recovery key always work.</p>
 		{/if}
 		{#if cfgErr}<div class="text-xs text-red-400 mt-2">{cfgErr}</div>{/if}
 
