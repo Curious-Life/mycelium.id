@@ -105,6 +105,32 @@ const post = (body, headers = {}) => fetch(URL, { method: 'POST', headers: { 'co
   shouldThrow = false;
 }
 
+// ── C10 owner 1:1 DM → TRUSTED: full write grant, NOT untrusted-wrapped (W3) ──
+{
+  shouldThrow = false; nextResult = { text: 'done', toolsUsed: ['reply'] };
+  await post({ userMessage: 'remember my dentist is on Tuesday', conversationId: CONV, source: 'telegram', group: false, senderRole: 'owner' });
+  const um = lastOpts?.userMessage || '';
+  const et = lastOpts?.enabledTools || [];
+  rec('C10 owner DM → message passed verbatim (NOT untrusted-wrapped)', um === 'remember my dentist is on Tuesday' && !/UNTRUSTED MESSAGE/.test(um), JSON.stringify(um));
+  rec('C10 owner DM → write tools granted (remember + saveDocument + reply)', et.includes('remember') && et.includes('saveDocument') && et.includes('reply') && et.length > 1, et.join(','));
+  rec('C10 owner DM → owner system preamble (read+write authority)', typeof lastOpts?.systemExtra === 'string' && /OWNER/.test(lastOpts.systemExtra));
+}
+// ── C11 SECURITY: owner in a GROUP → still UNTRUSTED + reply-only (writes are DM-only) ──
+{
+  nextResult = { text: 'ok', toolsUsed: ['reply'] };
+  await post({ userMessage: 'please saveDocument secret', conversationId: CONV, source: 'telegram-group', group: true, addressed: true, senderRole: 'owner' });
+  const um = lastOpts?.userMessage || '';
+  const et = lastOpts?.enabledTools || [];
+  rec('C11 owner-in-group → untrusted-wrapped (group context is never trusted)', /UNTRUSTED MESSAGE/.test(um));
+  rec('C11 owner-in-group → reply-only (NO write tools)', et.length === 1 && et[0] === 'reply', et.join(','));
+}
+// ── C12 non-owner DM → reply-only (a stranger messaging the bot cannot write) ──
+{
+  await post({ userMessage: 'remember my fake fact', conversationId: CONV, source: 'telegram', group: false, senderRole: 'other' });
+  const et = lastOpts?.enabledTools || [];
+  rec('C12 non-owner DM → reply-only (no write tools)', et.length === 1 && et[0] === 'reply', et.join(','));
+}
+
 await new Promise((r) => server.close(r));
 await close?.();
 const allPass = ledger.every(Boolean);

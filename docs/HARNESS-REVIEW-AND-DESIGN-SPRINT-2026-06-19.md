@@ -463,6 +463,29 @@ fail-closed**. Untrusted envelope (`untrusted.js`) still wraps all inbound; egre
   human approval before merge. Safety rests on owner identity-binding + untrusted envelope + audit +
   recoverable versioned writes.
 
+**AS-BUILT (2026-06-19, branch `feat/native-chat-history-agent-identity`):**
+- `senderRole` forwarded: `inbound.js` turnCtx → `native.js` POST body → `channel-turn.js`.
+- `channel-turn.js`: owner 1:1 DM (`senderRole==='owner' && !group`) → **trusted**: message passed
+  verbatim (NO untrusted wrap), owner system preamble, full grant. Everyone else + every group →
+  unchanged (untrusted-wrapped, read-safe ∪ `reply`).
+- Grant seam `src/agent/resolve-grant.js` (`channelEnabledTools`/`isOwnerTrustedTurn`) — the
+  identity→capability decision in one place. `autonomy-tools.js` gains `WRITE_AUTONOMOUS_TOOLS`
+  (remember/saveDocument/mark/link/captureMessage/editMindFile/… — granted ONLY when named; egress
+  tools like `publishDocument`/`forget` deliberately excluded).
+- **Decision: scoped registry deferred.** No `agents` table built — owner-vs-other is binary and needs
+  no named-agent rows yet; the table lands when the user can create + bind named agents (channel
+  personas / federated). This keeps W3 focused + dodges the encrypted-`settings` backfill landmine.
+- Gates GREEN: `verify:harness-channel` C10 (owner DM verbatim + write grant + owner preamble), C11
+  (owner-in-group → still untrusted + reply-only — the security boundary), C12 (non-owner DM →
+  reply-only); `verify:harness-tools` P2 (write granted only when named; truly-unlisted never granted);
+  all 17 `verify:harness*` + `verify:chat` GO.
+- **⚠ DORMANT until the operator flips the engine.** The fix lives on the native path; channels still
+  default to the SDK backend (read-only `claude-sdk.js:84`). **Activation:** set
+  `MYCELIUM_CHANNEL_ROUTER=native`, then live-smoke a real owner Telegram DM ("remember … Tuesday" →
+  persisted fact) + an injection/group message (→ zero writes in the audit). Only after that smoke
+  should the native default be flipped. Until then the owner channel agent remains read-only.
+- **NOT auto-merge** — boundary-loosening diff → human security review (CLAUDE.md §6/§9).
+
 ### Workstream 4 — content-scope (DEFERRED, foundation only)
 All reads already scope to `userId` (`documents.js:453-466`, `mindscape.js`, `context.js`) — no
 cross-user risk. Outward-facing agents need a query-layer filter using the **existing** shared-content

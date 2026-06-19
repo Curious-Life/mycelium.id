@@ -37,6 +37,7 @@ export function createNativeRuntime(cfg = {}) {
       group,
       addressed: !group,                 // DMs always; groups rely on the server's name-mention triage
       voiceMode: !!turnCtx.voiceMode,
+      senderRole: turnCtx.senderRole || 'other',   // gates the owner write grant (W3)
     };
     try {
       const res = await fetchImpl(url, {
