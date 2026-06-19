@@ -64,6 +64,7 @@
 		assignments = [],
 		runtimeAgents = [],
 		secretsState = [],
+		lastActivity = null,
 		onChange,
 	} = $props<{
 		agent: AgentInfo;
@@ -71,6 +72,7 @@
 		assignments?: Assignment[];
 		runtimeAgents?: RuntimeAgent[];
 		secretsState?: SecretEntry[];
+		lastActivity?: string | null;
 		onChange?: () => void | Promise<void>;
 	}>();
 
@@ -272,6 +274,7 @@
 			{:else}idle{/if}
 		</span>
 		{#if agent.model}<span class="model">{agent.model}</span>{/if}
+		{#if lastActivity}<span class="last-activity" title="Most recent agent activity">{lastActivity}</span>{/if}
 		<span class="caret">{expanded ? '▾' : '▸'}</span>
 	</button>
 
@@ -483,6 +486,11 @@
 		padding: 0.1rem 0.35rem;
 		border-radius: 0.25rem;
 		background: var(--color-elevated);
+	}
+	.last-activity {
+		font-size: 0.6rem;
+		color: var(--color-text-tertiary);
+		white-space: nowrap;
 	}
 	.caret {
 		font-size: 0.7rem;
