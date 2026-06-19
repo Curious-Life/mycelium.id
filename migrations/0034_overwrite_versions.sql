@@ -1,4 +1,4 @@
--- 0033 — Overwrite recoverability (red-team RT2-H1, 2026-06-19).
+-- 0034 — Overwrite recoverability (red-team RT2-H1, 2026-06-19).
 -- `remember` and `saveDocument` overwrite in place (ON CONFLICT DO UPDATE). A poisoned
 -- write driven by forwarded channel content was UNRECOVERABLE. These version rows capture
 -- the PRIOR value before every content-changing overwrite, so the owner can restore it —

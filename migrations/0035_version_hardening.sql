@@ -1,4 +1,4 @@
--- 0034 — RT2-H1 hardening (red-team 2026-06-19, follow-up to 0033).
+-- 0035 — RT2-H1 hardening (red-team 2026-06-19, follow-up to 0034).
 -- Three gaps the version-layer red team surfaced:
 --   HIGH-1  unbounded growth → an injection loop of overwrites bloats the vault (the
 --           recovery table becomes a storage-DoS amplifier). Fixed in the DAL with a

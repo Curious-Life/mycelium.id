@@ -68,7 +68,7 @@ Grant model (capability follows IDENTITY, not surface):
   • autonomous  = autonomyTools(tools, enabledNames): SAFE read-set always ∪ gated/write names opt-in
   • channel     = src/agent/resolve-grant.js decides: owner 1:1 DM (+flag +token) → OWNER_CHANNEL_TOOLS;
                   everyone else / groups → ['reply']. Single source = `ownerTrusted`.
-State: scheduled_tasks · harness_runs · conversation_summaries · channel_write_audit (migration 0032).
+State: scheduled_tasks · harness_runs · conversation_summaries · channel_write_audit (migration 0033).
 ```
 
 **Key files touched this session:**
@@ -81,7 +81,7 @@ State: scheduled_tasks · harness_runs · conversation_summaries · channel_writ
 - `src/agent/history.js` — untrusted banner in renderBlock.
 - `src/channels/supervisor.js` + `src/server-rest.js` — `CHANNEL_TURN_TOKEN` generation + plumbing.
 - `packages/channel-daemon/agent/{runtime.js,backends/native.js}` + `index.js` — native default + probeHealth.
-- `src/db/harness.js` + `migrations/0032_channel_write_audit.sql` — write-audit DAL + table.
+- `src/db/harness.js` + `migrations/0033_channel_write_audit.sql` — write-audit DAL + table.
 
 ---
 
