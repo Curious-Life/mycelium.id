@@ -72,6 +72,14 @@ rec('D8. chart toggle retired cumulative columns (no path-length / displacement)
     && viewSrc.includes('velocity_baseline_z'),
   'moveMetricOpts has neither cumulative key; view reads velocity_baseline_z');
 
+// ── P2: movement reads carry a family-level freshness hedge (a stale card must not
+// read as authoritative). The agent surface already hedges (fisher-tools.js); this
+// asserts the PORTAL endpoints do too.
+rec('D9. P2: /trajectory endpoints attach the fisher_trajectory freshness hedge',
+  restSrc.includes('familyFreshness') && restSrc.includes('freshnessHedge')
+    && restSrc.includes("familyFreshness(db, u.id, 'fisher_trajectory')"),
+  'familyFreshness + freshnessHedge wired into the movement endpoints');
+
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
 console.log(`VERDICT: ${allPass ? 'GO — movement headline is baseline-relative + honest; degenerate baselines fail closed; cumulative columns retired' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
