@@ -87,29 +87,32 @@ try {
   rec('V2. territory_vitality populated (one row per territory)',
     count === TERRS.length, `rows=${count} (expected ${TERRS.length})`);
 
-  // ── V3. metric columns ciphertext at rest; structural columns plaintext ─────
+  // ── V3. SQLCipher collapse (Stage B/C cut 2): territory_vitality metric columns
+  // are now PLAINTEXT-inside-cipher (at-rest = verify:at-rest); structural columns
+  // stay plaintext. Assert the stop-write worked — none of the metrics are envelopes. ─
   const row = raw.prepare(
     `SELECT entropy_diversification, connection_growth_rate, reach, cofire_partner_diversity,
             engagement_depth_normalized, vitality, phase, territory_id, clustering_run_id
      FROM territory_vitality WHERE user_id=? AND territory_id=1`).get(U);
   const encCols = ['entropy_diversification', 'connection_growth_rate', 'reach',
     'cofire_partner_diversity', 'engagement_depth_normalized', 'vitality'];
-  const allEnc = row && encCols.every((c) => isEnvelope(row[c]));
-  rec('V3. territory_vitality metric columns are envelopes at rest (no plaintext numbers)',
-    !!allEnc,
-    row ? `enc{${encCols.filter((c) => isEnvelope(row[c])).length}/${encCols.length}}` : 'no row');
+  const allPlain = row && encCols.every((c) => !isEnvelope(row[c]));
+  rec('V3. territory_vitality metric columns stored PLAINTEXT-in-cipher (collapse: no longer field-encrypted)',
+    !!allPlain,
+    row ? `plain{${encCols.filter((c) => !isEnvelope(row[c])).length}/${encCols.length}}` : 'no row');
   rec('V4. structural columns stay plaintext (phase enum / territory_id / run_id)',
     row && !isEnvelope(row.phase) && ['sparse', 'active', 'anchor'].includes(row.phase)
       && !isEnvelope(String(row.territory_id)) && row.clustering_run_id === RUN,
     row ? `phase=${row.phase} territory_id=${row.territory_id} run=${row.clustering_run_id}` : 'no row');
 
-  // current_vitality cached on profile is also encrypted (SEC-3); current_phase plaintext.
+  // current_vitality cached on profile is now PLAINTEXT-in-cipher (collapse cut 2);
+  // current_phase stays a plaintext enum.
   const prof = raw.prepare(`SELECT current_vitality, current_phase FROM territory_profiles WHERE user_id=? AND territory_id=1`).get(U);
   raw.close();
-  rec('V5. territory_profiles cache: current_vitality encrypted, current_phase plaintext enum',
-    prof && isEnvelope(prof.current_vitality) && !isEnvelope(prof.current_phase)
+  rec('V5. territory_profiles cache: current_vitality PLAINTEXT-in-cipher (collapse); current_phase plaintext enum',
+    prof && !isEnvelope(prof.current_vitality) && !isEnvelope(prof.current_phase)
       && ['sparse', 'active', 'anchor'].includes(prof.current_phase),
-    prof ? `vit_enc=${isEnvelope(prof.current_vitality)} phase=${prof.current_phase}` : 'no profile');
+    prof ? `vit_plain=${!isEnvelope(prof.current_vitality)} phase=${prof.current_phase}` : 'no profile');
 
   // ── V6. adapter read decrypts + coerces → usable numbers ───────────────────
   const dec = await db.rawQuery(

@@ -58,6 +58,24 @@ const BACKFILL_TARGETS = {
     codec: { kind: 'content' },
   },
   'content.theme_cards': { table: 'theme_cards', columns: ['title', 'description', 'content', 'metadata'], codec: { kind: 'content' } },
+
+  // ── Stage B/C cut 2: topology metrics (territory_profiles scalars + centroids,
+  // territory_cofire / neighbors / vitality). All stopped in ENCRYPTED_FIELDS;
+  // backfill to plaintext. Centroids are JSON (read by JS cosine via JSON.parse) →
+  // content codec, NOT the raw-bytes vector codec. The topology.js SQL restore
+  // lands only AFTER these reach 0 envelopes live (ordering law).
+  'content.territory_profiles_scalars': {
+    table: 'territory_profiles',
+    columns: ['energy', 'coherence', 'velocity', 'current_vitality', 'point_delta', 'centroid_256', 'centroid_3d'],
+    codec: { kind: 'content' },
+  },
+  'content.territory_cofire': { table: 'territory_cofire', columns: ['cofire_immediate', 'cofire_session', 'cofire_daily', 'cofire_weekly'], codec: { kind: 'content' } },
+  'content.territory_neighbors': { table: 'territory_neighbors', columns: ['distance', 'shared_entities'], codec: { kind: 'content' } },
+  'content.territory_vitality': {
+    table: 'territory_vitality',
+    columns: ['entropy_diversification', 'connection_growth_rate', 'reach', 'cofire_partner_diversity', 'engagement_depth_normalized', 'vitality'],
+    codec: { kind: 'content' },
+  },
 };
 
 /**

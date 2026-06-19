@@ -379,19 +379,15 @@ const ENCRYPTED_FIELDS = {
   // cluster.py via d1_batch_encrypted), so dropping them here stops every write.
   // Old envelope rows still decrypt on read until the backfill converts them.
   //
-  // The cognitive SCALARS + centroids stay encrypted until cut 2 — they pair with
-  // the topology.js / territory-docs.js decrypt-then-JS-sort → SQL restore and
-  // their dedicated gates (verify:territory-scalars-encryption, :centroid-
-  // encryption). message_count stays PLAINTEXT (count + ranking key);
-  // current_phase/growth_state are enum labels, also plaintext.
-  territory_profiles: [
-    // centroids — cut 2 (decide raw-bytes vs plaintext-JSON there). cluster.py
-    // writes via d1_batch_encrypted; JS readers decrypt via the adapter.
-    'centroid_256', 'centroid_3d',
-    // derived cognitive scalars (SEC-3) — cut 2 (topology/chronicle readers
-    // sort/filter these in JS over decrypted values → SQL after backfill).
-    'energy', 'coherence', 'velocity', 'current_vitality', 'point_delta',
-  ],
+  // Stage B/C cut 2: the cognitive SCALARS + centroids are now plaintext-inside-
+  // cipher too — topology.js / territory-docs.js read+JS-sort them today (the SQL
+  // ORDER BY restore lands AFTER the live backfill converts existing rows, per the
+  // ordering law). Centroids → plaintext JSON (read by JS cosine via JSON.parse;
+  // no reader change). cluster.py writes scalars+centroids via d1_batch_encrypted
+  // (the adapter), so dropping them here stops every write. message_count stays
+  // PLAINTEXT (count + ranking key); current_phase/growth_state are enum labels.
+  // → territory_profiles is now fully collapsed (no field-encrypted columns).
+  territory_profiles: [],
 
   // Realms — SQLCipher collapse (Stage B/C cut 1): all columns are narrative,
   // all writers route through the JS adapter (mindscape.js / describe-clusters.js
@@ -552,16 +548,16 @@ const ENCRYPTED_FIELDS = {
   // plaintext for WHERE/ORDER; the read path Number()s the decrypted magnitude.
   cognitive_events: ['magnitude', 'detail', 'headline'],
 
-  // territory_cofire — co-activation strengths reveal cognitive structure (which
-  // themes fire together, how strongly). Pair keys (territory_a/b) + timestamps
-  // stay plaintext for joins; the 4 strength scales are ENCRYPTED. The topology
-  // queries filter/sort/aggregate these in JS (src/db/topology.js) because
-  // non-deterministic ciphertext can't be SQL-compared.
-  territory_cofire: ['cofire_immediate', 'cofire_session', 'cofire_daily', 'cofire_weekly'],
+  // territory_cofire — Stage B/C cut 2: the 4 co-activation strength scales are now
+  // plaintext-inside-cipher. compute-cofire.js writes them via the adapter, so
+  // dropping them here stops the write. topology.js filters/sorts/aggregates them
+  // in JS today; the SQL restore (WHERE/ORDER BY/SUM) lands after the live backfill.
+  territory_cofire: [],
 
-  // territory_neighbors — semantic-neighbor distance reveals structure. Keys +
-  // connection_type stay plaintext; distance (+ shared_entities) ENCRYPTED.
-  territory_neighbors: ['distance', 'shared_entities'],
+  // territory_neighbors — Stage B/C cut 2: distance + shared_entities now plaintext-
+  // inside-cipher (compute-territory-neighbors.js writes via the adapter). topology.js
+  // JS-sorts distance today; SQL restore after the live backfill.
+  territory_neighbors: [],
 
   // topology_metrics — graph-level cognitive shape per era. Each
   // scalar describes the user's mindscape topology; leak reveals
@@ -575,21 +571,13 @@ const ENCRYPTED_FIELDS = {
 
   // ── T1: topology-graph measurement stages (port from canonical) ──────
   //
-  // territory_vitality — per-territory behavioral-phase scores written by
-  // pipeline/compute-vitality.js. Every column is a derived cognitive
-  // signal (how much a territory bridges / grows / engages); a leak
-  // fingerprints the shape of the user's mind. ENCRYPT all six metric
-  // scalars. Structural columns stay plaintext: id/user_id/territory_id
-  // (keys), clustering_run_id (era key), computed_at/created_at (time keys),
-  // phase (low-cardinality enum: sparse/active/anchor — used for WHERE/group
-  // in JS). The vitality stage never SQL-filters/sorts on the encrypted
-  // metric columns; topology-tools already reads territory_vitality.* via the
-  // auto-decrypting adapter and Number()-coerces (the read is per-territory by
-  // key, no SQL aggregate over these columns).
-  territory_vitality: [
-    'entropy_diversification', 'connection_growth_rate', 'reach',
-    'cofire_partner_diversity', 'engagement_depth_normalized', 'vitality',
-  ],
+  // territory_vitality — Stage B/C cut 2: the six behavioral-phase scalars are now
+  // plaintext-inside-cipher. compute-vitality.js writes them via the adapter, so
+  // dropping them here stops the write. Structural columns stay plaintext: keys,
+  // clustering_run_id (era), timestamps, phase (sparse/active/anchor enum).
+  // topology-tools reads+Number()-coerces them today (per-territory by key);
+  // no SQL aggregate over them, so no restore is needed.
+  territory_vitality: [],
 
   // complexity_snapshots — Lempel-Ziv compressibility of thinking patterns
   // (pipeline/compute-complexity.js). T1 FIX: level_name was PLAINTEXT in the
