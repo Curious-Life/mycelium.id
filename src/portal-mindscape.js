@@ -96,15 +96,19 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
       const semanticThemeProfiles = val(settled[4]);
       const diag = settled[5]?.status === 'fulfilled' ? settled[5].value : null;
 
+      // Slim per-point projection (F2a). Caller-audited the frontend consumers —
+      // the 3D render loop (Mindscape3D.svelte:1505-1620), the click/pick handler
+      // (:2135-2153), and MindscapeRealmNav (:30) read ONLY position3d, cluster3d,
+      // clusterId, themeId, and timestamp. The old per-point `id` string, top-level
+      // `type`, `data.type`, and `data.atomId` were never read → dropped to shrink
+      // the ~70k-point payload (the single biggest portal response, ~17 MB). themeId
+      // IS used for click-to-drill — kept. The deeper 93% win is the typed-array
+      // shape (F2b), which needs the render-loop refactor + a live WKWebView pass.
       const nodes = points.map((p) => ({
-        id: p.source_id ? `${p.source_type === 'message' ? 'msg' : p.source_type}-${p.source_id}` : `cp-${p.id}`,
-        type: 'message',
         data: {
-          type: p.source_type || 'message',
           clusterId: p.realm_id,
           cluster3d: p.territory_id,
           themeId: p.theme_id,
-          atomId: p.atom_id,
           position3d: { x: p.landscape_x, y: p.landscape_y, z: p.landscape_z },
           timestamp: p.created_at,
         },
