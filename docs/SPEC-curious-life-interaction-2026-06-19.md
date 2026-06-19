@@ -83,18 +83,24 @@ Each component: **purpose · data source · interaction · hover · drill · col
 
 ### 3.4 Movement (Fisher) — ✓ shipped, promote the shift layer
 - **Purpose:** *did my attention just reorganize unusually* — the shift layer.
-- **Display the z-score, not the raw value:** *"Unusual movement this week — 3.6σ above your baseline — driven by [creative] rising as [logistics] faded."* (`fisher_velocity_z` + `top_contributors`.)
+- **Display the *baseline* z, not the raw value or the pooled-null z:** *"Unusual movement this week — 3.6σ above your baseline — driven by [creative] rising as [logistics] faded."* Use **`velocity_baseline_z`** (trailing-exclusive "unusual for *me*", `src/metrics/baseline-z.js`) for the headline copy — NOT the pooled-null z (that answers "above measurement noise", a different question; they disagree exactly for a stable low-volume writer). `top_contributors` supplies the "driven by" clause.
+- **A shift-mark is the same object as the cross-check layer (P3).** A velocity-z spike alone isn't a confirmed shift — each mark carries its **agreement quadrant** (corroborated / basis-suspect / hidden-drift, from convergent signals). Until P3 lands, marks render a **"cross-check pending"** state — they must not imply confirmation they don't yet have. Sequence B3 with P3 so the mark renders the quadrant.
 - **Cycling vs exploring — use depth-invariant forms only.** Show "going somewhere vs circling" via **`R_recent` (rolling)**, a **windowed displacement `D_K`**, and **mean step size** — **NOT** the stored cumulative `fisher_displacement` / `fisher_trajectory_length` / `exploration_ratio` columns. Those are since-anchor cumulative → depth-degenerate (L→∞, D measured from 2018, R→0 as history grows) — they are the exact source of the weird numbers seen this session. `R_recent` exists; `D_K` is computed inline to derive it but then discarded — so this is a small **data addition** (persist/expose `D_K` + mean step size), not just a label swap. ⚠️ **Fix before the Movement component is built.** Phase labels stay one notch softer (heuristic thresholds).
 - **Shift markers:** velocity-z spikes become clickable marks *on the shared timeline* (the system's downward annotations).
 - **Reliability:** geometry + z-score validated-mathematical **within one clustering run** (null = surrogate shuffles of your own history); do **not** compare z across re-clusters — pin the series to a run and show the run boundary. Caveat: the per-category smoothing (ε = 0.01 × n) makes the z's σ-unit differ across scopes (territory vs realm), so "validated within run" is slightly optimistic across scopes until the dimension-aware smoothing fix lands (§8). Phase labels = heuristic.
 
-### 3.5 Connectivity over time — + new (high priority)
-- **Purpose:** the connective tissue between "where I am" and "where I'm going" — and a **basis-robust shift detector** (graph-structural change is more identity-stable than distribution geometry).
-- **Two reads:**
-  - **Anchor co-firing drift:** *"[work] used to light up alongside [health]; over the last two months it co-fires with [creative]."* (from `territory_cofire`, four timescales.)
-  - **Transition texture `T[a→b]`:** what your attention tends to move into — *"you move from [building] into [testing], rarely into [connecting]."* (derived from the dominant-territory sequence.)
-- **Interaction:** select an anchor → its evolving neighborhood; hover a transition → its frequency + example weeks.
-- **Reliability:** transitions = counts (reliable); co-fire = correlational (Hebbian metaphor — label honestly, not "linkage"). Promote **above** coherence in priority — more useful and more trustworthy.
+### 3.5 Connectivity over time — + new (high priority) — build it as an *idiographic temporal network*
+- **What it actually is (the framing that gives it grounding + a fix-list):** this is a personal **temporal network psychometric model** (graphicalVAR / mlVAR; Epskamp 2018). Its two reads map exactly onto the two networks that framework estimates from one person's time series:
+  - **Co-firing = the contemporaneous network** (which territories are active *in the same window*).
+  - **Transition texture `T[a→b]` = the temporal network** (this window's distribution predicts the next).
+- **⚠️ Do NOT use raw co-occurrence — it's volume-confounded.** "Active in the same week" makes the densest edges just the *most active* territories, not the most *associated* (busy weeks make everything co-occur with everything). Required fixes (this is the correction that matters most in B):
+  - **Normalize against marginals + sparsify.** First cut: **PPMI** (positive pointwise mutual information = log[observed / expected-under-independence], floored at 0 — PPMI over PMI to avoid rare-pair inflation) + keep only top edges. SOTA target: **regularized partial correlation (GGM / graphical-LASSO)**, which additionally drops edges explained by a common third territory.
+  - **Drift = compare PPMI/partial-corr edges across windows, flag only beyond resampling noise** — the same chance-normalized / surrogate principle as the Fisher-z and the LZ surrogate. An edge (or a drift) is "real" only above chance.
+- **Transitions must be realm/theme-level + share-weighted — never territory-argmax.** A 200×200 territory transition matrix from ~150 weekly observations is ~0 obs/cell (pure noise — the undersampling that has recurred all session). Compute at **realm/theme (13–~50 nodes)**, where partial-correlation is also feasible (sane n/p), and use **share-weighted soft transitions** (distribution→distribution flow), not the argmax-per-week (which throws the whole distribution away).
+- **Snapshot `territory_cofire`, don't re-derive it.** `territory_cofire` already carries 4 decayed timescales (hour/4h/day/week) — *richer* than a weekly re-derivation. The right design is a **cofire-snapshot table over time** (keep the rich signal, add history) — a storage/pipeline choice, not a modeling one. The activation-derived PPMI is the build-now fallback (coarser, weekly) when the snapshot job isn't there yet.
+- **Interaction:** select an anchor → its (chance-normalized) evolving neighborhood; hover a transition → its share-weighted frequency + example windows. Shares the page `hoverDate`.
+- **Reliability:** as a chance-normalized idiographic network it's genuinely Tier-A/basis-robust **once built right**; shipping the raw-co-occurrence version would put a volume-confounded graph that *looks* authoritative on the page — worse than none. Promote above coherence. Co-fire edges are still associational (label honestly, not "linkage").
+- **Dependency:** realm/theme transitions need the realm/theme layer to be *consistent + named* — which re-surfaces the clustering-reconciliation blocker (realms currently collapsed to 2 + id-inconsistent). So B1-done-right is gated on that, not just on naming.
 
 ### 3.6 Novelty surface — + new
 - **Purpose:** *am I breaking new ground or circling familiar ground* — globally and per-territory. Never "smarter/better"; only "wider/narrower."
@@ -107,8 +113,9 @@ Each component: **purpose · data source · interaction · hover · drill · col
 
 ### 3.7 Event anchors — + new (the ground-truth engine)
 - **Purpose:** the person's *upward* annotations; the labeled-data loop that makes correlation/prediction *measurable* instead of asserted.
-- **Capture:** "anchor an event" on any date, or "mark what happened here" on a detected shift. Stored as `{date, label, valence, note?}`.
-  - **Valence/direction is required, but not binary** — EWS are direction-blind, so the human's own label is the *only* way the system could ever learn direction. Offer **good / hard / neutral / mixed / unsure** — forcing a binary good/bad on a complex event is its own small dishonesty, and "mixed" / "unsure" are real signal. The math supplies *when*; the person supplies *what kind*.
+- **⚠️ Primary capture is system-PROPOSED, not retrospective scrolling.** Retrospective self-recall captures only ~70% of events with date + valence reconstructed under hindsight bias — and for a metric whose whole job is to *be* ground truth, biased labels → biased correlation → false confidence. The mitigation is in-situ capture. So the primary path: the system detects a shift → **prompts near when it happened** ("something moved here around [date] — what was it?") → the person confirms/labels. That's in-situ-ish (low recall bias) and produces labeled pairs *at the right moments*, which scrolling never will. This is where "the AI is the third writer" lands concretely, and it **couples B2 to B3/P3** (they detect the shifts worth prompting on). Free-text **"anchor anytime"** is the fallback, not the main road.
+- **Stored as** `{date (fuzzy/range OK — "around mid-March"), label (free-text; no structured taxonomy in V1), valence, valence_ts, note?}`.
+  - **Valence/direction is required, but not binary, and timestamped** — EWS are direction-blind, so the human's label is the *only* way to learn direction. Offer **good / hard / neutral / mixed / unsure** (forcing binary is its own dishonesty; "mixed"/"unsure" are real signal). **Timestamp the valence** (anchored-at-the-time vs reconstructed-later is itself signal).
 - **Two payoffs from one capture:** (1) per-user `(shift ↔ event)` correlation over time; (2) CVP labeled data for the validity gate.
 - **Display:** event markers overlaid on every time graph (the bidirectional timeline); an **"since [event]"** lens that splits any chart before/after — *"since you started the new project, your Water dropped 30% and your trajectory accelerated."*
 - **Storage:** new `user_events` table + `GET/POST /portal/events/anchor` (distinct from the existing `cognitive_events` system-detected events). Encrypted (label/note/valence are personal).
@@ -150,12 +157,12 @@ Mirrors the metric spec; this is how each stage *appears*:
 **0. Territory naming — kick off NOW, in parallel (the real unblock).** A map of "Territory 2660" is illegible regardless of the title, so naming is the true first move — but it's *backend* (a describe-pipeline pass), so it runs alongside the frontend work, not before it. ⚠️ Must be a **describe-only** pass — a full re-cluster collapses realms (known issue), so this is owned by the pipeline/metrics-audit session or a verified describe-only trigger, not a blind re-run.
 
 Frontend, in order:
-1. **Title fix** + now-line as header (retire the gradient hero).
-2. **Shared-hover sync** across existing graphs (river + anchor-count) — the "one instrument" backbone.
-3. **Week × top-3 territories** (+ the per-week-per-territory counts endpoint) — the drill-floor.
-4. **Connectivity over time** (co-fire drift + transition texture) — high value, Tier-0.
-5. **Event-anchor capture + valence** (`user_events` + overlay + "since" lens) — turns on the ground-truth loop.
-6. **Movement shift-marks** promoted onto the shared timeline (z-score framing, D/L/R).
+1. ✅ **Title fix** + now-line header (shipped, #312).
+2. ✅ **Shared-hover sync** (river + week×top-3) — the "one instrument" backbone (shipped, #312).
+3. ✅ **Week × top-3 territories** — the drill-floor (shipped, #312; counts derived from share×weekly-volume, not yet raw `clustering_points`).
+4. **B1 — Connectivity as an idiographic temporal network** (§3.5): PPMI/partial-correlation + sparsify (NOT raw co-occurrence), realm/theme share-weighted transitions, cofire-snapshot. **Do not ship the naive raw-co-occurrence version.** Gated on the realm/theme layer being consistent + named.
+5. **B2 — Event-anchor**, primary path = **system-proposed at detected shifts** (in-situ), free-text anchor as fallback (§3.7). Run **alongside B1** — it's the keystone and couples to B3/P3, not to B1. Capture/storage/overlay infra is unblocked now; the system-proposed path lands with shift-detection.
+6. **B3 — Movement shift-marks** — once depth-invariant `D_K`/mean-step columns land; uses `velocity_baseline_z`; each mark renders its **P3 agreement quadrant** (or "cross-check pending").
 7. **Novelty surface** (gzip + coarse LZ now; embedding-novelty fine grain as CVP allows).
 8. **Texture** (coherence-as-flow; harmonics exploratory) — last, most gated.
 9. **Recovery/early-signal battery** — present-tense only, after the anchor loop exists to (eventually) validate it.
@@ -167,8 +174,12 @@ Frontend, in order:
 - **Naming (blocking legibility):** 218/312 territories unnamed → bands read "Territory 2660". Re-run the describe pipeline (describe-only — no re-cluster); zero frontend change after ([FINDING-territory-naming-incomplete](FINDING-territory-naming-incomplete-2026-06-19.md)). This is the real first move (§7.0).
 - **Dimension-aware Fisher smoothing (metric/pipeline spec):** the per-category ε = 0.01 × n smoothing distorts the velocity-z's σ-unit across scopes (territory vs realm aren't comparable). Fix = ε = α/n with a fixed total prior mass. New this session — belongs in the metric spec; until it lands, "validated within run" is optimistic across scopes (§3.4).
 - **Fisher depth-invariant columns:** `D_K` (windowed displacement) + mean step size are computed inline but not persisted; the Movement component needs them as clean columns/fields, not the cumulative `fisher_*` columns (§3.4).
-- **Per-week-per-territory message counts:** need a `clustering_points` aggregation for the week×top-3 raw counts (vs normalized shares).
-- **`user_events` storage + endpoints + encryption** — net-new; the event-anchor keystone.
+- **Per-week-per-territory message counts:** week×top-3 currently uses `round(share × weekly volume)` (lightly smoothed); a `clustering_points`/`messages` aggregation would give true raw counts if the approximation proves insufficient.
+- **Connectivity measure (B1) — the methodology, not just the data:** must be chance-normalized (PPMI → partial-correlation) + sparsified, never raw co-occurrence (volume-confounded); transitions at realm/theme + share-weighted (territory-level undersamples to noise). Reference estimators: Epskamp's graphicalVAR / mlVAR / bootnet ecosystem (patterns, not porting).
+- **Cofire-snapshot pipeline job:** to show co-firing *drift*, `territory_cofire` (current-state only) needs periodic snapshots over time — a pipeline-side addition (owned by the metrics/pipeline session). Activation-derived weekly PPMI is the build-now fallback.
+- **Realm/theme consistency for transitions:** B1's realm/theme transition matrix needs that layer consistent + named — same clustering-reconciliation blocker as the realm river.
+- **In-situ anchoring couples B2↔B3:** the event-anchor's primary (system-proposed) path needs shift-detection (B3/P3) to know *where* to prompt; B2's free-text capture is unblocked, the proposed path lands with B3.
+- **`user_events` storage + endpoints + encryption** — net-new; the event-anchor keystone (fuzzy/range dates, timestamped valence, free-text label).
 - **Backward-coherence:** adopt the principle (proxy-confound-immune coherence); validate the specific method before it ships.
 - **CVP gate (#294):** governs when embedding-novelty / affect / any Tier-1 construct may be stated rather than hedged.
 - **Realm altitude:** the named *realm*-level river remains gated on clustering reconciliation ([FINDING-clustering-run-inconsistency](FINDING-clustering-run-inconsistency-blocks-topic-river-2026-06-19.md)); ship at territory altitude meanwhile.
