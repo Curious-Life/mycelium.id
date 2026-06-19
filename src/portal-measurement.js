@@ -2,6 +2,33 @@ import express from 'express';
 import { CONTRACTS } from './metrics/contracts.js';
 import { METRIC_COLUMNS, _internal as metricsInternal } from './db/metrics.js';
 
+// Lempel-Ziv (1976) complexity of a symbol sequence (Kaspar-Schuster). Used for
+// the territory-river "path novelty" overlay — how varied vs repetitive the route
+// through topics is. Returns the production count c (≥1); the caller normalizes.
+function lz76Count(seq) {
+  const n = seq.length;
+  if (n === 0) return 0;
+  let i = 0, k = 1, l = 1, c = 1, kmax = 1;
+  while (true) {
+    if (seq[i + k - 1] === seq[l + k - 1]) {
+      k++;
+      if (l + k - 1 >= n) { c++; break; }
+    } else {
+      if (k > kmax) kmax = k;
+      i++;
+      if (i === l) {
+        c++;
+        l += kmax;
+        if (l >= n) break;
+        i = 0; k = 1; kmax = 1;
+      } else {
+        k = 1;
+      }
+    }
+  }
+  return c;
+}
+
 /**
  * portalMeasurementRouter — S1 measurement REST bridge.
  *
@@ -662,6 +689,108 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
       res.set('Cache-Control', 'no-store');
       res.json({ events });
     } catch { fail(res, 500, 'Failed to load events'); }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // TERRITORY RIVER — how your topics change over time. The reliable spine:
+  // anchor (persistent) territories as named bands + the count of active
+  // territories per week. Built ONLY from robust counts/shares of the activation
+  // trajectory (a single clustering run) — it does NOT lean on Fisher velocity
+  // (temporal-amnesia risk). Realm-level naming is currently inconsistent (see
+  // docs/FINDING-clustering-run-inconsistency-...md) so this rides the TERRITORY
+  // altitude, which reconciles (311/372 ids name-resolvable). Two novelty
+  // overlays: text (gzip compression) + path (rolling LZ76 of the topic route).
+  // ──────────────────────────────────────────────────────────────────────────
+  router.get('/territory-river', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const FLOOR = 0.01;      // a territory counts as "active" in a week above this share
+      const TOP_ANCHORS = 7;   // named bands to show
+      const LZ_WINDOW = 26;    // rolling window (weeks) for path-novelty LZ76
+
+      // 1) Weekly territory-activation trajectory, scoped to one clustering run.
+      const runRow = (await db.rawQuery(
+        `SELECT MAX(clustering_run_id) AS run FROM fisher_trajectory
+           WHERE user_id = ? AND level = 'territory' AND window_type = 'weekly_step'`, [u.id])).results || [];
+      const runId = runRow[0]?.run || null;
+      const trajRows = (await db.rawQuery(
+        `SELECT window_end, activation_vector, active_territory_count, message_count, low_confidence
+           FROM fisher_trajectory
+           WHERE user_id = ? AND level = 'territory' AND window_type = 'weekly_step'
+             ${runId ? 'AND clustering_run_id = ?' : ''}
+           ORDER BY window_end ASC`, runId ? [u.id, runId] : [u.id])).results || [];
+
+      const weeks = []; const vectors = [];
+      for (const r of trajRows) {
+        let v = {};
+        try { v = typeof r.activation_vector === 'string' ? JSON.parse(r.activation_vector) : (r.activation_vector || {}); } catch { v = {}; }
+        if (!v || typeof v !== 'object' || Array.isArray(v)) v = {};
+        vectors.push(v);
+        weeks.push({
+          end: (r.window_end || '').slice(0, 10),
+          active_count: num(r.active_territory_count),
+          message_count: num(r.message_count),
+          low_confidence: !!Number(r.low_confidence),
+        });
+      }
+
+      // 2) Territory names (auto-decrypted). id → name.
+      const nameRows = (await db.rawQuery(
+        `SELECT territory_id, name FROM territory_profiles WHERE user_id = ?`, [u.id])).results || [];
+      const nameById = {};
+      for (const r of nameRows) if (r.territory_id != null) nameById[String(r.territory_id)] = r.name || null;
+
+      // 3) Anchors = territories active above FLOOR in the most weeks (persistent core).
+      const weeksActive = {}; const totalShare = {};
+      vectors.forEach((v) => {
+        for (const k in v) {
+          const s = Number(v[k]) || 0;
+          if (s > FLOOR) { weeksActive[k] = (weeksActive[k] || 0) + 1; totalShare[k] = (totalShare[k] || 0) + s; }
+        }
+      });
+      const anchorIds = Object.keys(weeksActive)
+        .sort((a, b) => (weeksActive[b] - weeksActive[a]) || (totalShare[b] - totalShare[a]))
+        .slice(0, TOP_ANCHORS);
+      const anchors = anchorIds.map((id) => ({
+        territory_id: Number(id),
+        name: nameById[id] || `Territory ${id}`,
+        named: nameById[id] != null,
+        weeks_active: weeksActive[id],
+        series: vectors.map((v) => Number(v[id]) || 0),
+      }));
+
+      // 4) Path novelty — rolling LZ76 over the dominant-territory-per-week sequence.
+      const dominant = vectors.map((v) => {
+        let best = null, bs = -1;
+        for (const k in v) { const s = Number(v[k]) || 0; if (s > bs) { bs = s; best = k; } }
+        return best;
+      });
+      const pathNovelty = weeks.map((w, i) => {
+        if (i + 1 < LZ_WINDOW) return { end: w.end, value: null };
+        const win = dominant.slice(i + 1 - LZ_WINDOW, i + 1).filter((x) => x != null);
+        if (win.length < LZ_WINDOW * 0.6) return { end: w.end, value: null };
+        const c = lz76Count(win);
+        const norm = (c * Math.log2(win.length)) / win.length;
+        return { end: w.end, value: Math.max(0, Math.min(1, norm)) };
+      });
+
+      // 5) Text novelty — weekly gzip compression (higher = less compressible = more novel).
+      const freqRows = (await db.rawQuery(
+        `SELECT window_end, compression FROM frequency_snapshots
+           WHERE user_id = ? AND granularity = 'week'
+           ORDER BY window_end ASC`, [u.id])).results || [];
+      const textNovelty = freqRows.map((r) => ({ end: (r.window_end || '').slice(0, 10), value: num(r.compression) }));
+
+      res.set('Cache-Control', 'no-store');
+      res.json({
+        run_id: runId,
+        level: 'territory',
+        span: weeks.length ? { start: weeks[0].end, end: weeks[weeks.length - 1].end } : null,
+        weeks,
+        anchors,
+        novelty: { text: textNovelty, path: pathNovelty },
+      });
+    } catch { fail(res, 500, 'Failed to load territory river'); }
   });
 
   return router;

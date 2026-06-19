@@ -20,6 +20,7 @@
 	import Ring from '$lib/curious/Ring.svelte';
 	import Spark from '$lib/curious/Spark.svelte';
 	import TimeSeries from '$lib/curious/TimeSeries.svelte';
+	import TerritoryRiver from '$lib/curious/TerritoryRiver.svelte';
 	import { METRIC_FAMILIES, RIGOR_LABEL, RIGOR_ACCENT, RIGOR_BLURB, type Rigor } from '$lib/curious/metricsCatalog';
 
 	type Any = Record<string, any>;
@@ -41,6 +42,7 @@
 	let behavioral = $state<Any | null>(null);
 	let criticality = $state<Any[]>([]); // per-level latest rows
 	let events = $state<Any[]>([]);
+	let river = $state<Any | null>(null); // territory-river: anchor bands + active count over time
 
 	let gran = $state<'alpha' | 'theta' | 'delta'>('theta');
 
@@ -112,6 +114,7 @@
 		events = ev?.events ?? [];
 		loading = false;
 		// Temporal series (non-blocking; charts fill in once back).
+		g('/portal/territory-river').then((rv) => { river = rv ?? null; });
 		const fs = await g(`/portal/frequency/series?granularity=${frequency?.granularity ?? 'day'}`);
 		freqSeries = fs?.series ?? [];
 		await loadRhythmSeries();
@@ -398,6 +401,15 @@
 						<span class="g-v">{milestones.length}</span>
 					</div>
 				</div>
+
+				<!-- THE RIVER — how your topics change over time (the reliable spine) -->
+				<section class="river-section">
+					<div class="river-head">
+						<h2 class="group-head">How your topics move over time</h2>
+						<span class="river-note">territory level · drawn from activation counts, not Fisher</span>
+					</div>
+					<TerritoryRiver data={river} />
+				</section>
 
 				<!-- LAYER 2 — grouped pillar cards -->
 				{#each GROUPS as grp}
@@ -970,6 +982,12 @@
 	.g-rel.up { color: var(--color-accent-jade); font-size: 0.9rem; }
 
 	.group-head { font-size: 0.74rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--color-text-tertiary); margin: 1.6rem 0 0.7rem; }
+
+	/* The river (hero spine) */
+	.river-section { border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: linear-gradient(160deg, rgb(var(--color-accent-jade-rgb) / 0.05), var(--color-surface) 60%); padding: clamp(1rem, 2.4vw, 1.5rem); margin-top: 0.4rem; }
+	.river-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+	.river-head .group-head { margin: 0 0 0.8rem; }
+	.river-note { font-size: 0.68rem; color: var(--color-text-tertiary); }
 
 	/* ── Overview grid ── */
 	.grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: clamp(0.8rem, 1.6vw, 1.1rem); }
