@@ -58,14 +58,19 @@ const second = await getMindscapeCached('u', slow); // must recompute → n=2
 rec('C5. bust during in-flight compute bars stale write-back', n === 2 && first === 's1' && second === 's2', `n=${n}`);
 
 // ── C6: static wiring ──
+// Two-cache split: point-mutating events call bustMindscapePoints (drops BOTH the
+// durable points cache and the full aggregate); narrative/chronicle calls
+// bustMindscape (drops the full aggregate ONLY, so the 3D geometry stays warm).
 const ms = readFileSync('src/portal-mindscape.js', 'utf8');
-rec('C6a. handler serves via getMindscapeCached', /getMindscapeCached\(userId,/.test(ms));
+rec('C6a. handler serves via getMindscapeCached (+ points via getMindscapePointsCached)',
+  /getMindscapeCached\(userId,/.test(ms) && /getMindscapePointsCached\(userId,/.test(ms));
 const jobs = readFileSync('src/jobs.js', 'utf8');
-rec('C6b. job completion + chronicle bust the cache', (jobs.match(/bustMindscape\(userId\)/g) || []).length >= 2);
+rec('C6b. job completion busts points; chronicle busts the full aggregate',
+  /bustMindscapePoints\(userId\)/.test(jobs) && /\bbustMindscape\(userId\)/.test(jobs));
 const msgs = readFileSync('src/db/messages.js', 'utf8');
-rec('C6c. message forget + edit bust the cache', (msgs.match(/bustMindscape\(userId\)/g) || []).length >= 2);
+rec('C6c. message forget + edit bust the points cache', (msgs.match(/bustMindscapePoints\(userId\)/g) || []).length >= 2);
 const docs = readFileSync('src/db/documents.js', 'utf8');
-rec('C6d. document delete busts the cache', /bustMindscape\(userId\)/.test(docs));
+rec('C6d. document delete busts the points cache', /bustMindscapePoints\(userId\)/.test(docs));
 
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));

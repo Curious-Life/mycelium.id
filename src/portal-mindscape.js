@@ -3,7 +3,7 @@ import { startClusteringJob, startMeasurementJob, startBackfillJob, getJob, canc
   startNarrationWalkJob, pauseNarration, resumeNarration, cancelNarration, getNarrationStatus } from './jobs.js';
 import { makeNarrationRunner } from './agent/narration-runner.js';
 import { getEmbedderHealth } from './embed/supervisor.js';
-import { getMindscapeCached } from './mindscape-cache.js';
+import { getMindscapeCached, getMindscapePointsCached } from './mindscape-cache.js';
 import { isTrustedLoopback } from './http/loopback.js';
 
 // SQLCipher-collapse backfill: the body may ONLY request these NAMED targets — never
@@ -71,6 +71,123 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
     .map(([month, count]) => ({ month, count }))
     .sort((a, b) => a.month.localeCompare(b.month));
 
+  // ── Point-derived bundle (the EXPENSIVE, DURABLY-CACHED half) ───────────────
+  // Everything that comes from the 70k-row clustering_points scan: the slim 3D
+  // `nodes`, the per-cluster activity maps + centroids the text panels decorate
+  // themselves with, and `meta` (counts/noise/partition-confidence). Pure: depends
+  // only on (points, diag), so two callers (GET /mindscape and GET
+  // /mindscape/points) share ONE cached result keyed by userId. This is what stays
+  // warm across narrative busts (see src/mindscape-cache.js) — points only change
+  // when clustering re-runs or a point is deleted, NOT when chronicle text changes.
+  function buildPointsBundle(points, diag) {
+    // Slim per-point projection (F2a). Caller-audited the frontend consumers —
+    // the 3D render loop (Mindscape3D.svelte:1505-1620), the click/pick handler
+    // (:2135-2153), and MindscapeRealmNav (:30) read ONLY position3d, cluster3d,
+    // clusterId, themeId, timestamp, and data.type. The old per-point `id` string,
+    // top-level `type`, and `data.atomId` were never read → dropped to shrink the
+    // ~70k-point payload (the single biggest portal response, ~17 MB). themeId IS
+    // used for click-to-drill and data.type feeds the hover tooltip
+    // (Mindscape3D.svelte:2084 → :2871) — both kept. The deeper 93% win is the
+    // typed-array shape (F2b), which needs the render-loop refactor + a live pass.
+    const nodes = points.map((p) => ({
+      data: {
+        type: p.source_type || 'message',
+        clusterId: p.realm_id,
+        cluster3d: p.territory_id,
+        themeId: p.theme_id,
+        position3d: { x: p.landscape_x, y: p.landscape_y, z: p.landscape_z },
+        timestamp: p.created_at,
+      },
+    }));
+
+    const themeActivity = {}, territoryActivity = {}, realmActivity = {};
+    const territoryCentroids = {};
+    const realmCounts = {}, territoryCounts = {}, realmTerritoryIds = {};
+    let noiseRealm = 0, noiseTerritory = 0;
+    // ONE pass over points: counts/noise run for every point; the month-bucketed
+    // activity + centroids only when created_at yields a month (mirrors the prior
+    // two-loop logic exactly, gated on `month` for the activity half).
+    for (const p of points) {
+      if (p.realm_id == null || p.realm_id === -1) noiseRealm++;
+      else {
+        realmCounts[p.realm_id] = (realmCounts[p.realm_id] || 0) + 1;
+        if (p.territory_id != null && p.territory_id !== -1) {
+          (realmTerritoryIds[p.realm_id] ||= new Set()).add(p.territory_id);
+        }
+      }
+      if (p.territory_id == null || p.territory_id === -1) noiseTerritory++;
+      else territoryCounts[p.territory_id] = (territoryCounts[p.territory_id] || 0) + 1;
+
+      const month = p.created_at?.slice(0, 7);
+      if (!month) continue;
+      if (p.territory_id != null && p.theme_id != null) {
+        const key = `${p.territory_id}-${p.theme_id}`;
+        (themeActivity[key] ||= {})[month] = (themeActivity[key][month] || 0) + 1;
+      }
+      if (p.realm_id != null && p.realm_id !== -1) {
+        (realmActivity[p.realm_id] ||= {})[month] = (realmActivity[p.realm_id][month] || 0) + 1;
+      }
+      if (p.territory_id != null && p.territory_id !== -1) {
+        (territoryActivity[p.territory_id] ||= {})[month] = (territoryActivity[p.territory_id][month] || 0) + 1;
+        const c = (territoryCentroids[p.territory_id] ||= { x: 0, y: 0, z: 0, count: 0 });
+        c.x += p.landscape_x; c.y += p.landscape_y; c.z += p.landscape_z; c.count++;
+      }
+    }
+
+    const total = points.length;
+    const meta = {
+      total,
+      noise10d: noiseRealm, noise10dPercent: total > 0 ? (noiseRealm / total * 100).toFixed(1) : 0,
+      noise3d: noiseTerritory, noise3dPercent: total > 0 ? (noiseTerritory / total * 100).toFixed(1) : 0,
+      clusterCounts: realmCounts, cluster3dCounts: territoryCounts,
+      // Clustering-validity confidence (METRICS-AUDIT S5). The cluster COUNTS
+      // above are deterministic √n targets, not discovered — this surfaces a
+      // low-confidence flag when the shipped partition is degenerate (one realm
+      // >50% of points) or unstable (bootstrap ARI <0.6), rather than presenting
+      // an unvalidated partition as a measurement. null until the first run that
+      // computed diagnostics (pipeline/cluster.py write_clustering_diagnostics).
+      partitionConfidence: diag ? {
+        lowConfidence: !!diag.low_confidence,
+        note: diag.confidence_note || null,
+        realmMaxShare: diag.realm_max_share ?? null,
+        realmCount: diag.realm_count ?? null,
+        territoryValidity: diag.territory_validity ?? null,
+        bootstrapAriMean: diag.bootstrap_ari_mean ?? null,
+        bootstrapAriRuns: diag.bootstrap_ari_runs ?? 0,
+        clusterVersion: diag.cluster_version || null,
+      } : null,
+    };
+
+    return { nodes, meta, themeActivity, territoryActivity, realmActivity,
+             territoryCentroids, realmCounts, realmTerritoryIds };
+  }
+
+  // Durable points cache loader — one cached bundle per user, shared by the full
+  // aggregate and the points-only endpoint.
+  const loadPointsBundle = () => getMindscapePointsCached(userId, async () => {
+    const [pr, dr] = await Promise.allSettled([
+      db.mindscape.getPoints(userId),
+      db.mindscape.getClusteringDiagnostics(userId),
+    ]);
+    return buildPointsBundle(
+      pr.status === 'fulfilled' ? pr.value : [],
+      dr.status === 'fulfilled' ? dr.value : null,
+    );
+  });
+
+  // ── Points-only payload (the 3D geometry) ──────────────────────────────────
+  // Served from the DURABLE points cache so it stays warm across the
+  // narrative/chronicle busts that constantly invalidate the full aggregate. The
+  // frontend renders this FIRST (instant visuals), then loads the full /mindscape
+  // for the text panels. §7: nodes/meta are plaintext (landscape coords + cluster
+  // ids) — zero ciphertext, like the full aggregate's points half.
+  router.get('/mindscape/points', async (_req, res) => {
+    try {
+      const pd = await loadPointsBundle();
+      res.json({ nodes: pd.nodes, meta: pd.meta });
+    } catch { fail(res, 500, 'failed to load mindscape points'); }
+  });
+
   // ── Aggregator: the whole 3D scene in one shape ────────────────────────────
   // GET /mindscape → { nodes, themes, territories, realms, semanticThemes, meta }
   router.get('/mindscape', async (_req, res) => {
@@ -80,60 +197,26 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
       // (jobs / chronicle / clustering_points deletes all bust it). See
       // src/mindscape-cache.js.
       const payload = await getMindscapeCached(userId, async () => {
+      // Reuse the DURABLE points bundle (nodes + activity maps + centroids + counts
+      // + meta) — the expensive 70k-row half. It survives narrative busts, so after
+      // a chronicle rewrite this recompute only re-reads the cheap text profiles
+      // below and re-decorates them; the geometry is served from the warm cache.
+      const pd = await loadPointsBundle();
+      const { nodes, meta, themeActivity, territoryActivity, realmActivity,
+              territoryCentroids, realmCounts, realmTerritoryIds } = pd;
+      const semanticThemeActivity = {};
+
       const settled = await Promise.allSettled([
-        db.mindscape.getPoints(userId),
         db.mindscape.getThemeCards(userId),
         db.mindscape.getTerritoryProfiles(userId),
         db.mindscape.getRealms(userId),
         db.mindscape.getSemanticThemes(userId),
-        db.mindscape.getClusteringDiagnostics(userId),
       ]);
       const val = (r) => (r.status === 'fulfilled' ? r.value : []);
-      const points = val(settled[0]);
-      const themeCards = val(settled[1]);
-      const territoryProfiles = val(settled[2]);
-      const realmProfiles = val(settled[3]);
-      const semanticThemeProfiles = val(settled[4]);
-      const diag = settled[5]?.status === 'fulfilled' ? settled[5].value : null;
-
-      // Slim per-point projection (F2a). Caller-audited the frontend consumers —
-      // the 3D render loop (Mindscape3D.svelte:1505-1620), the click/pick handler
-      // (:2135-2153), and MindscapeRealmNav (:30) read ONLY position3d, cluster3d,
-      // clusterId, themeId, timestamp, and data.type. The old per-point `id` string,
-      // top-level `type`, and `data.atomId` were never read → dropped to shrink the
-      // ~70k-point payload (the single biggest portal response, ~17 MB). themeId IS
-      // used for click-to-drill and data.type feeds the hover tooltip
-      // (Mindscape3D.svelte:2084 → :2871) — both kept. The deeper 93% win is the
-      // typed-array shape (F2b), which needs the render-loop refactor + a live pass.
-      const nodes = points.map((p) => ({
-        data: {
-          type: p.source_type || 'message',
-          clusterId: p.realm_id,
-          cluster3d: p.territory_id,
-          themeId: p.theme_id,
-          position3d: { x: p.landscape_x, y: p.landscape_y, z: p.landscape_z },
-          timestamp: p.created_at,
-        },
-      }));
-
-      const themeActivity = {}, territoryActivity = {}, realmActivity = {}, semanticThemeActivity = {};
-      const territoryCentroids = {};
-      for (const p of points) {
-        const month = p.created_at?.slice(0, 7);
-        if (!month) continue;
-        if (p.territory_id != null && p.theme_id != null) {
-          const key = `${p.territory_id}-${p.theme_id}`;
-          (themeActivity[key] ||= {})[month] = (themeActivity[key][month] || 0) + 1;
-        }
-        if (p.realm_id != null && p.realm_id !== -1) {
-          (realmActivity[p.realm_id] ||= {})[month] = (realmActivity[p.realm_id][month] || 0) + 1;
-        }
-        if (p.territory_id != null && p.territory_id !== -1) {
-          (territoryActivity[p.territory_id] ||= {})[month] = (territoryActivity[p.territory_id][month] || 0) + 1;
-          const c = (territoryCentroids[p.territory_id] ||= { x: 0, y: 0, z: 0, count: 0 });
-          c.x += p.landscape_x; c.y += p.landscape_y; c.z += p.landscape_z; c.count++;
-        }
-      }
+      const themeCards = val(settled[0]);
+      const territoryProfiles = val(settled[1]);
+      const realmProfiles = val(settled[2]);
+      const semanticThemeProfiles = val(settled[3]);
 
       const themes = {};
       for (const tc of themeCards) {
@@ -173,20 +256,8 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
         };
       }
 
-      const realmCounts = {}, territoryCounts = {}, realmTerritoryIds = {};
-      let noiseRealm = 0, noiseTerritory = 0;
-      for (const p of points) {
-        if (p.realm_id == null || p.realm_id === -1) noiseRealm++;
-        else {
-          realmCounts[p.realm_id] = (realmCounts[p.realm_id] || 0) + 1;
-          if (p.territory_id != null && p.territory_id !== -1) {
-            (realmTerritoryIds[p.realm_id] ||= new Set()).add(p.territory_id);
-          }
-        }
-        if (p.territory_id == null || p.territory_id === -1) noiseTerritory++;
-        else territoryCounts[p.territory_id] = (territoryCounts[p.territory_id] || 0) + 1;
-      }
-
+      // (realmCounts / territoryCounts / realmTerritoryIds / noise now come from the
+      // durable points bundle above — see buildPointsBundle.)
       const realmProfileMap = {};
       for (const rp of realmProfiles) realmProfileMap[rp.realm_id] = rp;
       const realms = {};
@@ -233,32 +304,9 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
         };
       }
 
-      const total = points.length;
-      return {
-        nodes, themes, territories, realms, semanticThemes,
-        meta: {
-          total,
-          noise10d: noiseRealm, noise10dPercent: total > 0 ? (noiseRealm / total * 100).toFixed(1) : 0,
-          noise3d: noiseTerritory, noise3dPercent: total > 0 ? (noiseTerritory / total * 100).toFixed(1) : 0,
-          clusterCounts: realmCounts, cluster3dCounts: territoryCounts,
-          // Clustering-validity confidence (METRICS-AUDIT S5). The cluster COUNTS
-          // above are deterministic √n targets, not discovered — this surfaces a
-          // low-confidence flag when the shipped partition is degenerate (one realm
-          // >50% of points) or unstable (bootstrap ARI <0.6), rather than presenting
-          // an unvalidated partition as a measurement. null until the first run that
-          // computed diagnostics (pipeline/cluster.py write_clustering_diagnostics).
-          partitionConfidence: diag ? {
-            lowConfidence: !!diag.low_confidence,
-            note: diag.confidence_note || null,
-            realmMaxShare: diag.realm_max_share ?? null,
-            realmCount: diag.realm_count ?? null,
-            territoryValidity: diag.territory_validity ?? null,
-            bootstrapAriMean: diag.bootstrap_ari_mean ?? null,
-            bootstrapAriRuns: diag.bootstrap_ari_runs ?? 0,
-            clusterVersion: diag.cluster_version || null,
-          } : null,
-        },
-      };
+      // `meta` (total / noise / clusterCounts / partitionConfidence) is part of the
+      // durable points bundle — point-derived, so it travels with the geometry.
+      return { nodes, themes, territories, realms, semanticThemes, meta };
       });
       res.json(payload);
     } catch { fail(res, 500, 'failed to load mindscape data'); }

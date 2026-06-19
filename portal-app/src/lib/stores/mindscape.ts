@@ -444,17 +444,37 @@ function createMindscapeStore() {
 			if (!browser) return;
 			update(s => ({ ...s, loading: true, error: null }));
 			try {
+				// Phase 1 — VISUALS FIRST. The points-only endpoint is served from the
+				// durable points cache (it survives the narrative busts that constantly
+				// invalidate the full aggregate), so the 3D geometry paints almost
+				// instantly. Clear `loading` here so the scene shows while text loads.
+				let phase1ok = false;
+				try {
+					const pres = await api('/portal/mindscape/points');
+					if (pres.ok) {
+						const pdata = await pres.json();
+						phase1ok = true;
+						update(s => ({ ...s, points: pdata.nodes || [], meta: pdata.meta || s.meta, loading: false }));
+					}
+				} catch { /* fall through — the full load below also carries nodes */ }
+
+				// Phase 2 — TEXT AFTER. The full aggregate fills the territory/theme/realm
+				// panels. Its `nodes` are identical to phase 1's; keep the phase-1 array
+				// (same reference) so the 3D scene does NOT re-render — unless phase 1 failed.
 				const res = await api('/portal/mindscape');
-				if (!res.ok) throw new Error(`Failed to load: ${res.status}`);
+				if (!res.ok) {
+					if (phase1ok) { update(s => ({ ...s, loading: false })); return; } // visuals up; text lagged
+					throw new Error(`Failed to load: ${res.status}`);
+				}
 				const data = await res.json();
 				update(s => ({
 					...s,
-					points: data.nodes || [],
+					points: phase1ok ? s.points : (data.nodes || []),
 					themes: data.themes || {},
 					territories: data.territories || {},
 					realms: data.realms || {},
 					semanticThemes: data.semanticThemes || {},
-					meta: data.meta || null,
+					meta: data.meta || s.meta || null,
 					loading: false,
 					error: null,
 				}));

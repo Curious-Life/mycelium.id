@@ -20,7 +20,7 @@ import { rmSync, mkdirSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';
 import { startRestServer } from '../src/server-rest.js';
-import { bustMindscape } from '../src/mindscape-cache.js';
+import { bustMindscapePoints } from '../src/mindscape-cache.js';
 
 const DB = 'data/verify-portal-mindscape.db';
 const KCV = 'data/verify-portal-mindscape-kcv.json';
@@ -78,7 +78,9 @@ async function main() {
        VALUES (?,?,?,?,?,?,?,?,?,?)`,
       [uid, '2026-06-19T00:00:00Z', 0.78, 2, 0.05, 0.55, 0.04, 12, 1,
        'Low-confidence partition: largest realm holds 78% of points (>50%).']);
-    bustMindscape(uid); // prod parity: the same clustering run changes points → cache busts
+    bustMindscapePoints(uid); // prod parity: clustering writes diagnostics WITH the points →
+                              // a point bust (jobs.js:219), which refreshes the durable points
+                              // bundle that carries meta.partitionConfidence.
     const agg2 = (await j(M('/mindscape'))).body || {};
     const pc = agg2.meta?.partitionConfidence;
     rec('M1c. meta.partitionConfidence surfaces low-confidence flag + scalars',
