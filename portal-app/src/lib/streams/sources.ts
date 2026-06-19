@@ -31,6 +31,15 @@ const MAP: Record<string, SourcePresentation> = {
   obsidian: { title: 'Obsidian', mono: 'OB', color: '#9B87F5' },
   'claude-import': { title: 'Claude', mono: 'CL', color: 'var(--color-accent-coral)' },
   'chatgpt-import': { title: 'ChatGPT', mono: 'GP', color: 'var(--color-accent-teal)' },
+  // Raw underscore import tags seen in live vaults (large, distinct brand hues so
+  // the history graph reads true — these are some of the biggest sources).
+  import_chatgpt: { title: 'ChatGPT (import)', mono: 'GP', color: '#10A37F' },
+  claude_export: { title: 'Claude (export)', mono: 'CX', color: '#D97757' },
+  import_claude: { title: 'Claude (import)', mono: 'CI', color: '#B85C38' },
+  linkedin: { title: 'LinkedIn', mono: 'LI', color: '#0A66C2' },
+  space: { title: 'Spaces', mono: 'SP', color: '#7C5CBF' },
+  web: { title: 'Web', mono: 'WE', color: '#3E8E7E' },
+  intel_report: { title: 'Intel report', mono: 'IR', color: '#C9A227' },
   import: { title: 'Import', mono: 'IM', color: 'var(--color-text-secondary)' },
   upload: { title: 'Uploads', mono: 'UP', color: 'var(--color-accent-teal)' },
   'claude-code': { title: 'Claude Code', mono: 'CC', color: 'var(--color-accent-teal)' },
@@ -56,6 +65,12 @@ export function sourcePresentation(source: string): SourcePresentation {
   // #10 namespaced connector instance ids (http-poll:<uuid>, webhook:<uuid>).
   if (source.startsWith('http-poll:') || source.startsWith('webhook:') || source.startsWith('connector:')) {
     return { title: source.split(':')[0], mono: 'API', color: 'var(--color-accent)' };
+  }
+  // Agent activity sub-tags (agent-file, agent-output, agent-delegation, …) share
+  // one gold family hue so they're a recognisable band rather than anonymous gray.
+  if (source.startsWith('agent-')) {
+    const tail = source.slice('agent-'.length).replace(/[-_]/g, ' ');
+    return { title: `Agent · ${tail}`, mono: 'AG', color: '#C9A227' };
   }
   // Fall back to a titled default derived from the raw key.
   const title = source.charAt(0).toUpperCase() + source.slice(1);
