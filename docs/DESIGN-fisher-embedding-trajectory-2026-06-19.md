@@ -60,11 +60,14 @@ Pure-function test of the quadrant+threshold logic with synthetic z-pairs: corro
 | movement NOT in CVP surface-gate → no contract needed (freshness only) | `src/metrics/surface-gate.js` (sweep) + `freshness.js:32` |
 | display insertion point = movement-detail stat-row; onMount fetch block | `CuriousLifeView.svelte:709-753, 87-129` (sweep, quoted) |
 
-### 13.8 Open questions for the research-agent bounce
-1. **Run-boundary signal:** confound-free per-window cross-run activation distance (recommended) vs the O(1) `pipeline_state(cluster).last_success_at` recency heuristic — is the per-window distance worth the extra reads, and what's `REDRAW_MIN` (the Fisher-distance threshold that counts as "the map redrew this week")?
-2. **Thresholds:** `MOVED_Z=2 / FLAT_Z=1` — lock now or defer to calibration on the real vault? (Deadzone behavior is fixed: "consistent", no alarm.)
-3. **Scope of comparison:** global-E vs realm-F is the default. Should the chip also offer theme-F (finer) as the comparison, or keep realm as the single trustworthy altitude?
-4. **Ship scope:** basis-suspect + the other three quadrants are all "free" once both z's exist — ship all four at once, or basis-suspect first behind the others?
+### 13.8 Bounce RESOLVED (2026-06-19)
+1. **Run-boundary signal → cross-run, but a FAST-FOLLOW (not a v1 gate).** Ship the quadrant first; basis-suspect carries honest SOFT copy ("movement your semantic center didn't register — possibly a map effect, or a small local move"). The disambiguator sharpens it later into "map redrew" vs "minor reshuffle", off the critical path. **Two refinements when built:** (a) compare the cross-run change in the **velocity** `|v_t(run N) − v_t(run N-1)|`, NOT activation `p_t` — a redraw that shifts `p_{t-1}` and `p_t` equally leaves velocity unchanged (no spurious Fisher signal); activation distance is an acceptable proxy, velocity-change is correct. (b) `REDRAW_MIN` is **relative/self-normalized** — z-score the cross-run change against the user's own distribution of cross-run changes (or top-decile), never an absolute distance (same reason raw Fisher distance was wrong).
+2. **Thresholds → ship `MOVED_Z=2 / FLAT_Z=1` as env-overridable defaults; calibrate values as a fast-follow.** Add a calibration check: measure per-quadrant fire-rates on the real vault; if basis-suspect fires on ~25% of weeks the band is too loose → retune. Ship defaults → measure → tune.
+3. **Scope → ONE chip, ONE altitude. Never two** (parallel realm/theme chips can contradict on the same week, destroying the single-honest-signal). realm-F = target, theme-F = interim while realm is blocked on the clustering reconciliation. Territory-F never. **The basis-suspect COPY is altitude-dependent:** global-E vs realm-F leans "map issue / big-but-similar reshuffle"; global-E vs theme-F fires more often just because a fine theme-move is globally small → lean "a fine move that's globally small", not "the map redrew". Calibrate the language to whichever altitude is live (realm today).
+4. **Ship scope → ALL FOUR quadrants at once.** settled/corroborated are trivially honest; the two off-diagonals are equally free. Only basis-suspect's *copy* is staged (soft now → sharpened by the Q1 disambiguator).
+
+### 13.9 v1 scope (as-shipping)
+**Build now:** `cross-check-quadrant.js` pure helper (the construct-validity test in miniature — the four-quadrant + either-low-conf fail-safe set is the honesty contract made executable, same shape as `verify:fisher-display`) + `/trajectory/cross-check` endpoint (realm-F live altitude) + all four quadrant chips with SOFT basis-suspect copy + config-default thresholds + inverted attribution + `verify:cross-check-quadrant` gate. **Fast-follows (not blockers):** the cross-run velocity-change disambiguator (Q1) + threshold calibration (Q2) + altitude flip realm↔theme with altitude-tracked copy (Q3).
 
 ---
 
