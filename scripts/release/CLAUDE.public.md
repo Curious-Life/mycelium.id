@@ -13,7 +13,6 @@ Protocol.
 - **[docs/SETUP.md](docs/SETUP.md)** — stand it up locally (Node 22, keys, verify, Claude Desktop).
 - **[docs/guide/](docs/guide/)** — the Handbook (concepts) + Reference (MCP tools, connect, ingest, gateway, security model).
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — setup, the verify gate, branch/PR conventions.
-- The locked technical decisions (D1–D7) are summarized in the [README](README.md).
 
 ## ⚠️ Security first — non-negotiable
 
