@@ -126,7 +126,7 @@ Two patterns, both used this session:
   `startRestServer({dbPath,kcvPath})` with explicit ephemeral paths + temp
   Keychain names (`MYCELIUM_KC_*`) + `MYCELIUM_DISABLE_EMBED=1`, on port 8796.
   `curl POST /api/v1/account/setup` to open it. Point the preview MCP at it via a
-  `setup-preview` (sleep, port 8796) entry in **`/Users/altus/Documents/.claude/launch.json`**
+  `setup-preview` (sleep, port 8796) entry in **`~/Documents/.claude/launch.json`**
   (the preview reads the SESSION-root launch.json, NOT the repo's). Clean up: kill
   the node, delete the temp KC items, rm the temp dir.
 - **Real-data, read-only** (for "does it choke on real data"): rebuild the portal,

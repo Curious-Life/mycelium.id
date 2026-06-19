@@ -100,11 +100,11 @@ for H in hi lo; do
   curl -s -o /dev/null -w "$H connect %{http_code}\n" -X POST -H 'content-type: application/json' -d '{}' https://$H.mycelium.id/federation/connect
 done
 # is the running bundle pre/post #181? (grep the bundle source)
-grep -c selfHandle "/Users/altus/Documents/GitHub/mycelium.id/src-tauri/target/release/bundle/macos/Mycelium.app/Contents/Resources/app/src/db/connections.js"
+grep -c selfHandle "$HOME/Documents/GitHub/mycelium.id/src-tauri/target/release/bundle/macos/Mycelium.app/Contents/Resources/app/src/db/connections.js"
 #   0 = PRE-#181 (rebuild needed) · 3 = #181 is live
 ```
 
-`main` HEAD should be `0e97bc2` (#181): `git -C /Users/altus/Documents/GitHub/mycelium.id log -1 --format=%h origin/main`.
+`main` HEAD should be `0e97bc2` (#181): `git -C ~/Documents/GitHub/mycelium.id log -1 --format=%h origin/main`.
 
 ---
 
@@ -123,7 +123,7 @@ grep -c selfHandle "/Users/altus/Documents/GitHub/mycelium.id/src-tauri/target/r
 2. **Verify live state** with the commands above. Confirm the `grep -c selfHandle` on the bundle = 0 (pre-#181) — that's why `hi` is one-sided.
 3. **Finish Tier-0 two-way** (if the operator wants it):
    a. Quit `Mycelium.app` on `hi` (clean Cmd-Q — `codesign` fails on a running binary).
-   b. Rebuild: `cd /Users/altus/Documents/GitHub/mycelium.id && cargo tauri build` (Rust cached; ignore the DMG-step failure — the `.app` signs fine). Confirm `grep -c selfHandle …/app/src/db/connections.js` = 3.
+   b. Rebuild: `cd ~/Documents/GitHub/mycelium.id && cargo tauri build` (Rust cached; ignore the DMG-step failure — the `.app` signs fine). Confirm `grep -c selfHandle …/app/src/db/connections.js` = 3.
    c. Reopen `Mycelium.app`.
    d. **Clear the stuck rows:** on `lo`, disconnect the `hi` connection (deletes its accepted row); on `hi`, withdraw the pending (`POST /api/v1/portal/connections/<id>/withdraw`, id from `/connections/sent`).
    e. Reconnect: on `hi`, Connections → `lo` → accept on `lo` → confirm **both** sides show connected + `computeOverlap` returns.

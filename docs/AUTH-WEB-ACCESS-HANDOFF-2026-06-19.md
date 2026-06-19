@@ -26,7 +26,7 @@
 
 The running desktop app is the OLD bundle; #280/#283 are bundled JS, so they are NOT live until the app is rebuilt from main.
 ```
-git -C /Users/altus/Documents/GitHub/mycelium.id log origin/main -1 --format='%h'   # expect 2fe0955 (or later)
+git -C ~/Documents/GitHub/mycelium.id log origin/main -1 --format='%h'   # expect 2fe0955 (or later)
 ```
 Rebuild: `cargo tauri build` (set `bundle.targets:["app"]` temporarily to skip the DMG hang; FORCE-rebuild portal-app first — `ensure-portal-built` can skip a stale build). See the boot-perf handoff for the exact procedure.
 

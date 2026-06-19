@@ -10,10 +10,10 @@
 ## ▶ START HERE (cold pickup) — orient in 4 commands
 
 ```bash
-cd /Users/altus/Documents/GitHub/mycelium-id-worktrees/sqlcipher-stageBC
+cd ~/Documents/GitHub/mycelium-id-worktrees/sqlcipher-stageBC
 git fetch origin -q && git log --oneline -1            # expect 2b4c144 (or later); rebase onto origin/main if it moved
 git status --short                                      # expect clean
-[ -e node_modules ] || ln -s /Users/altus/Documents/GitHub/mycelium.id/node_modules ./node_modules
+[ -e node_modules ] || ln -s ~/Documents/GitHub/mycelium.id/node_modules ./node_modules
 gh pr checks 329                                         # cuts 1-3 = green; PR #329 OPEN + CLEAN
 ```
 

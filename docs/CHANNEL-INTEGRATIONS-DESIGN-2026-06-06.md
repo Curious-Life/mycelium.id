@@ -7,7 +7,7 @@
 >
 > This doc reconciles three codebases: the **built** V1 ingestion surface here, the **reference/** harvest already
 > copied into this repo, and the **canonical production repo** `Curious-Life/mycelium`
-> (`/Users/altus/Documents/GitHub/mycelium`) which runs the full two-way path in production today.
+> (`~/Documents/GitHub/mycelium`) which runs the full two-way path in production today.
 
 ---
 

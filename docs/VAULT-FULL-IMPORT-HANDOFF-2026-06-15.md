@@ -32,7 +32,7 @@ The user's **full canonical vault (1 GB admin export) was imported into the live
 - `shouldAutoGenerate` only fires when `clustering_points == 0` (now 61k) → won't auto-run; the hazard is the **UI Generate/retry button**.
 
 ## Next task (the user's actual ask)
-Deep-analyze the **narration logic** before any Generate: `pipeline/describe-clusters.js` + `pipeline/describe-chronicles.js` (authoritative source = canonical repo `/Users/altus/Documents/GitHub/mycelium/scripts/`). Verify: (1) **enough samples without trimming/cutting** inputs, (2) **incremental** — accounts for already-generated (input-hash skip-unchanged gate, see memory [describe-management]), (3) **naming accuracy**, (4) correct at **all levels** (clustering_point → territory → realm → time/arc). Sweep-first. Likely outcome: a chronicle-preserving describe (skip already-narrated, inherit on dissolution) so a future Generate never rewrites imported history.
+Deep-analyze the **narration logic** before any Generate: `pipeline/describe-clusters.js` + `pipeline/describe-chronicles.js` (authoritative source = canonical repo `~/Documents/GitHub/mycelium/scripts/`). Verify: (1) **enough samples without trimming/cutting** inputs, (2) **incremental** — accounts for already-generated (input-hash skip-unchanged gate, see memory [describe-management]), (3) **naming accuracy**, (4) correct at **all levels** (clustering_point → territory → realm → time/arc). Sweep-first. Likely outcome: a chronicle-preserving describe (skip already-narrated, inherit on dissolution) so a future Generate never rewrites imported history.
 
 ## Pickup protocol
 1. Read this + memory `vault-import-canonical.md` (has the incident + recipe).

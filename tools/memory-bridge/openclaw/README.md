@@ -3,7 +3,7 @@
 Makes openclaw use your Mycelium vault as memory: injects vault context before each
 turn and captures both the user message and the assistant reply.
 
-Code-verified against the openclaw plugin-SDK (`/Users/altus/Developer/openclaw`):
+Code-verified against the openclaw plugin-SDK (`~/Developer/openclaw`):
 `definePluginEntry` + `api.on("before_prompt_build")` (inject → return
 `{ prependContext }`) + `api.on("llm_output")` (capture both — `event.prompt` and
 `event.assistantTexts[]`). Gated by `npm run verify:memory-adapters` (rows W1–W3).

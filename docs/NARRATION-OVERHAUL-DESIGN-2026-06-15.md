@@ -31,7 +31,7 @@ successors are blank cards and the canonical narrative is stranded on dissolved 
 
 ## 2. Sweep evidence — current V1 vs canonical
 
-Authoritative source for the rich originals: `/Users/altus/Documents/GitHub/mycelium/scripts/`.
+Authoritative source for the rich originals: `~/Documents/GitHub/mycelium/scripts/`.
 
 | Concern | V1 now | Canonical | File:line |
 |---|---|---|---|

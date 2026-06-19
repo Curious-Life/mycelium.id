@@ -12,10 +12,10 @@
 All harness code is in an **ISOLATED GIT WORKTREE**, NOT the main tree:
 
 ```
-/Users/altus/Documents/GitHub/mycelium-worktrees/native-agent-harness   ← branch feat/native-agent-harness
+~/Documents/GitHub/mycelium-worktrees/native-agent-harness   ← branch feat/native-agent-harness
 ```
 
-The main tree (`/Users/altus/Documents/GitHub/mycelium.id`) is on `main`. **Why:** a concurrent Claude session sharing the main tree clobbered uncommitted edits mid-session (see [[concurrent-session-collision]]). The worktree isolates this work. `node_modules` is symlinked from the main tree. **Run all gates + edits inside the worktree.** Branch is based on `ead54c9` (federation-sharing Phase 1, the prelaunch lineage — so it has migrations through 0017).
+The main tree (`~/Documents/GitHub/mycelium.id`) is on `main`. **Why:** a concurrent Claude session sharing the main tree clobbered uncommitted edits mid-session (see [[concurrent-session-collision]]). The worktree isolates this work. `node_modules` is symlinked from the main tree. **Run all gates + edits inside the worktree.** Branch is based on `ead54c9` (federation-sharing Phase 1, the prelaunch lineage — so it has migrations through 0017).
 
 ---
 
@@ -64,7 +64,7 @@ Spec → 7 build steps. **Steps 1–4a shipped, committed, gated. 4b → 7 remai
 
 ### Pickup protocol for next session
 1. Read this handoff cold, then the **spec** (`docs/NATIVE-AGENT-HARNESS-SPEC-2026-06-17.md`) — esp. §5.5 (lane), §5.6 (scheduler), §5.4 (recovery).
-2. `cd /Users/altus/Documents/GitHub/mycelium-worktrees/native-agent-harness` and confirm branch: `git branch --show-current` → `feat/native-agent-harness`.
+2. `cd ~/Documents/GitHub/mycelium-worktrees/native-agent-harness` and confirm branch: `git branch --show-current` → `feat/native-agent-harness`.
 3. Re-confirm green: run the five harness gates (commands in "Deploy/verify runbook" below).
 4. Build **Step 4b** (the scheduler runtime — see "Next step in detail").
 5. Commit + add a `verify:harness-scheduler` gate. Run full `npm run verify` before ANY merge to main.
@@ -177,7 +177,7 @@ The DAL (`db.harness.*`) and the time math (`scheduler-time.js`) it needs are **
 
 Run inside the worktree:
 ```bash
-cd /Users/altus/Documents/GitHub/mycelium-worktrees/native-agent-harness
+cd ~/Documents/GitHub/mycelium-worktrees/native-agent-harness
 for g in verify-harness verify-harness-loop verify-harness-state verify-harness-compaction verify-harness-schedule verify-portal-chat; do
   node scripts/$g.mjs >/dev/null 2>&1 && echo "$g GO" || echo "$g FAIL"
 done

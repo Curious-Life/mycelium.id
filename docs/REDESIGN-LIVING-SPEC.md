@@ -1229,9 +1229,9 @@ All file:line citations preserved in agent outputs. Synthesis in Parts 2-5 above
 
 **Self-read pressure-test (Round 2.5) — 2026-05-28**
 
-- Read `/Users/sfn/Documents/GitHub/mycelium/scripts/embed-service.py:1-80` — confirmed Nomic v1.5 768D (canonical)
-- Read `/Users/sfn/Documents/GitHub/mycelium.id/lib/embed.js:1-40` — confirmed BGE-M3 1024D (stale mirror)
-- Read `/Users/sfn/Documents/GitHub/mycelium.id/CLAUDE.md` — mirror's own self-description matches BGE-M3 (provides definitive evidence the mirror is stale)
+- Read `~/Documents/GitHub/mycelium/scripts/embed-service.py:1-80` — confirmed Nomic v1.5 768D (canonical)
+- Read `~/Documents/GitHub/mycelium.id/lib/embed.js:1-40` — confirmed BGE-M3 1024D (stale mirror)
+- Read `~/Documents/GitHub/mycelium.id/CLAUDE.md` — mirror's own self-description matches BGE-M3 (provides definitive evidence the mirror is stale)
 - Bash compared migrations: canonical 190 vs mirror 133 (57-migration drift)
 - Bash listed handlers: federation/publishing/did/share/public-profile all in canonical; stripe.ts service file only in mirror
 

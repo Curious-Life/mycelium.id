@@ -3,7 +3,7 @@
 **START HERE if resuming.** This is the recoverable state of the harness review → build → red-team →
 hardening arc. Branch `feat/native-chat-history-agent-identity`, **PR #326**
 (https://github.com/Curious-Life/mycelium.id/pull/326). Worktree:
-`/Users/altus/Documents/GitHub/mycelium-worktrees/harness-chat-history`.
+`~/Documents/GitHub/mycelium-worktrees/harness-chat-history`.
 
 Living design doc (the authoritative artifact): `docs/HARNESS-REVIEW-AND-DESIGN-SPRINT-2026-06-19.md`
 (§4.5 = agent identity model, §5.5 = build plan, §10 = red-team audit + remediation status).

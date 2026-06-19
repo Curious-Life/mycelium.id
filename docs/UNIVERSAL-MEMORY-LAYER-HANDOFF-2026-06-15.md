@@ -42,7 +42,7 @@ Hooks are wired in `.claude/settings.local.json` (gitignored). They point at `to
 - Gateway live smoke with a real/cheap provider (spends tokens).
 
 ## Pickup protocol
-1. `git -C /Users/altus/Documents/GitHub/mycelium.id log --oneline -3 origin/main` → should show `ab83547`, `e75a5de`.
+1. `git -C ~/Documents/GitHub/mycelium.id log --oneline -3 origin/main` → should show `ab83547`, `e75a5de`.
 2. Read the [design doc](UNIVERSAL-MEMORY-LAYER-DESIGN-2026-06-11.md) §0/§11/§12.
 3. Re-run gates: `npm run verify:memory-bridge`, `npm run verify:memory-adapters` (needs python3), `npm run verify:harness-connect`.
 4. If activation still pending → run the 4 operator steps above.

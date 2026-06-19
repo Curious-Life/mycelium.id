@@ -202,7 +202,7 @@ storage (versioned).
 
 ## 9. Canonical Port Map (from 3 deep audits of Curious-Life/mycelium)
 
-**Canonical source:** `/Users/altus/Documents/GitHub/mycelium` (main, 2026-05-31). Read-only.
+**Canonical source:** `~/Documents/GitHub/mycelium` (main, 2026-05-31). Read-only.
 Decision: **port-and-fix** (operator: "check everything discovered there, test it, fix it fully").
 
 **Reframes from the audits:**

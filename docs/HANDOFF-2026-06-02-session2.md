@@ -67,7 +67,7 @@ logic is correct.**
   **NOT running** (it died on the freeze).
 - **No active `app_data` vault** (deleted). On relaunch: terminal → env-leak old vault; double-click → keychain.
 - **CLEANUP NEEDED**: a Claude_Preview MCP "server" (a `sleep` dummy) + stray `.claude/launch.json` at BOTH
-  `/Users/altus/Documents/.claude/launch.json` and `~/mycelium.id/.claude/launch.json` (the latter is in the
+  `~/Documents/.claude/launch.json` and `~/mycelium.id/.claude/launch.json` (the latter is in the
   repo — delete so it isn't committed). Orphaned keychain test entries accumulating: `mycelium-firsttest-*`,
   `mycelium-freshtest-*`, `mycelium-fresh3-*` (harmless; can be cleaned).
 - Repo on `main` @ `953ee55`, synced. Working tree: only untracked build artifacts

@@ -159,7 +159,7 @@ On `/mcp` responses, expose the MCP headers (in `mcpHandler`, before sending): `
 
 ## Restart runbook (operator, canonical env)
 1. Stop the app: `kill 63922` (or quit the branch app). Confirm `:4711`, Caddy, frpc freed.
-2. Clean `auth.db` (app stopped): `node /tmp/myc-phase2/_clean-oauth-safe.mjs "/Users/altus/Library/Application Support/id.mycelium.app/auth.db"` → verify `orphans=0`.
+2. Clean `auth.db` (app stopped): `node /tmp/myc-phase2/_clean-oauth-safe.mjs "$HOME/Library/Application Support/id.mycelium.app/auth.db"` → verify `orphans=0`.
 3. Relaunch from `/tmp/myc-phase2` (cwd) with the same `MYCELIUM_DATA_DIR`; tail `/tmp/myc-branch-app.log`.
 4. `curl -i https://0m.mycelium.id/.well-known/oauth-protected-resource/mcp` (200 minimal), `…/mcp` (401 suffixed WWW-Auth, no redirect).
 5. In Claude: **disconnect any old connector first**, then add `https://0m.mycelium.id/mcp`. Watch for: `[myc-prm] … /oauth-protected-resource/mcp` → `register 201` → `authorize 302` → `token 200` (NOT 500) → `[myc-auth] POST /mcp getMcpSession: OK`.
