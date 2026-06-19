@@ -8,6 +8,17 @@
 // Localhost-only, no per-request auth (the vault-init guard in server-rest.js
 // 503s these until the vault is open). Encryption + dedup happen downstream in
 // importObsidianVault → saveDocument / captureMessage.
+//
+// PATH CONFINEMENT: the folderPath/dirPath modes read server-local files off
+// disk. A stolen owner Bearer (over the Tailscale TLS surface) or a malicious
+// portal page could otherwise point them at ~/Library/Messages, ~/.ssh, mounted
+// volumes, etc. and read those back out of the vault. Every server-supplied
+// path is therefore passed through assertImportPathAllowed (detect-sources.js):
+// realpath-resolved (collapsing symlink escapes) and required to sit inside the
+// allowlist (Obsidian config vaults + ~/.claude/projects + the explicit
+// MYCELIUM_IMPORT_ALLOWED_ROOTS out-of-band grant). Anything else → 400,
+// fail-closed. The browser `files` mode ships content in the body (no path read)
+// and is not subject to confinement.
 
 import express from 'express';
 import os from 'node:os';
@@ -15,7 +26,7 @@ import path from 'node:path';
 import { importObsidianVault } from './ingest/obsidian-import.js';
 import { importFullExport } from './ingest/full-export-import.js';
 import { processClaudeCodeExport } from './ingest/import-parsers.js';
-import { detectSources, readClaudeCodeEntries } from './ingest/detect-sources.js';
+import { detectSources, readClaudeCodeEntries, assertImportPathAllowed } from './ingest/detect-sources.js';
 import { captureMessage } from './ingest/capture.js';
 
 export function portalImportRouter({ db, userId, enqueueEnrichment }) {
@@ -33,12 +44,15 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
       if (!folderPath && !Array.isArray(files)) {
         return res.status(400).json({ ok: false, error: 'folderPath or files[] required' });
       }
-      const summary = await importObsidianVault(db, { userId, folderPath, files, vaultName, enqueueEnrichment });
+      // folderPath reads off server disk — confine it to the import allowlist
+      // (fail-closed). `files` mode ships content in the body (no path read).
+      const safePath = folderPath ? assertImportPathAllowed(folderPath) : undefined;
+      const summary = await importObsidianVault(db, { userId, folderPath: safePath, files, vaultName, enqueueEnrichment });
       return res.json({ ok: true, ...summary });
     } catch (e) {
       const msg = String(e?.message || e);
       // Known caller errors → 400; everything else → 500. Never leak a stack.
-      const is400 = /required|not a directory|folderPath|files/i.test(msg);
+      const is400 = /required|not a directory|folderPath|files|import_path_denied/i.test(msg);
       return res.status(is400 ? 400 : 500).json({ ok: false, error: msg.slice(0, 200) });
     }
   });
@@ -51,11 +65,15 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
     try {
       const dirPath = req.body?.dirPath;
       if (typeof dirPath !== 'string' || !dirPath) return res.status(400).json({ ok: false, error: 'dirPath required' });
-      const summary = await importFullExport({ db, userId, dirPath, enqueueEnrichment });
+      // Confine to the import allowlist. A full-export bundle lives outside the
+      // Obsidian/Claude roots, so the operator/Tauri shell must grant its parent
+      // via MYCELIUM_IMPORT_ALLOWED_ROOTS (see assertImportPathAllowed).
+      const safeDir = assertImportPathAllowed(dirPath);
+      const summary = await importFullExport({ db, userId, dirPath: safeDir, enqueueEnrichment });
       return res.json({ ok: true, ...summary });
     } catch (e) {
       const msg = String(e?.message || e);
-      const is400 = /required|invalid_bundle|format|manifest/i.test(msg);
+      const is400 = /required|invalid_bundle|format|manifest|import_path_denied/i.test(msg);
       return res.status(is400 ? 400 : 500).json({ ok: false, error: msg.slice(0, 200) });
     }
   });
@@ -77,15 +95,20 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
     try {
       const folderPath = (typeof req.body?.folderPath === 'string' && req.body.folderPath)
         ? req.body.folderPath : path.join(os.homedir(), '.claude', 'projects');
+      // Confine the on-disk read to the import allowlist (fail-closed). The
+      // default ~/.claude/projects is itself an allowed root.
+      const safePath = assertImportPathAllowed(folderPath);
       // 'clean' (default) imports just the human↔agent conversation; 'full' keeps
       // tool/meta turns too. Either way the full raw line is kept in metadata.raw.
       const mode = req.body?.mode === 'full' ? 'full' : 'clean';
-      const entries = readClaudeCodeEntries(folderPath);
+      const entries = readClaudeCodeEntries(safePath);
       const capture = (msg) => captureMessage(db, { userId, ...msg }, enqueueEnrichment);
       const summary = await processClaudeCodeExport(entries, { capture }, { mode });
       return res.json({ ok: true, scanned: entries.length, ...summary });
     } catch (e) {
-      return res.status(500).json({ ok: false, error: String(e?.message || e).slice(0, 200) });
+      const msg = String(e?.message || e);
+      const status = /import_path_denied/i.test(msg) ? 400 : 500;
+      return res.status(status).json({ ok: false, error: msg.slice(0, 200) });
     }
   });
 
