@@ -17,7 +17,14 @@ git status --short                                      # expect clean
 gh pr checks 329                                         # cuts 1-3 = green; PR #329 OPEN + CLEAN
 ```
 
-**State (2026-06-19 EOD):** Cuts **1, 2, 3 DONE + CI-green + pushed** on PR #329 (the two felt-win cuts + the security-critical `verify:leak` reframe). Worktree clean at `2b4c144`. **Next = cut 4 (bulk content).** Then cut 5 (Python metrics), cut 6 (finalize), then the operator-gated live backfill + the deferred SQL restores.
+**State (2026-06-19 late):** Cuts **1, 2, 3, 4 DONE + pushed** on PR #329; merged `origin/main` into the branch (merge `a6a80fa`, clean) so the branch is current. Cut 4 = `766cea0` (43 tables collapsed + 40 backfill targets + 21 gate inversions + verify-leak pivot + foundation B6 reframe); 22/22 touched JS gates GO locally; **CI verifying the full suite (incl. Python gates).** **Next = cut 5 (Python metrics caller-encrypt drop), then cut 6 (finalize: shrink ENCRYPTED_FIELDS to {secrets}, SQL restores, VACUUM), then the operator-gated live backfill.**
+
+**CUT 4 LEARNINGS (critical for cut 5/6):**
+- **Two test-harness DB modes — check which before inverting.** Gates that boot a **KEYED** vault (`startRestServer`/`boot` with at-rest) and scan **file bytes** (`readFileSync`) are testing **whole-file SQLCipher** (verify:at-rest), NOT field encryption → they PASS after a field collapse, **leave them** (import, obsidian, obsidian-images I4). Gates that boot **plaintext** + read the **column value** (isEnvelope/looksEncrypted) ARE field-encryption tests → **invert** to plaintext-in-cipher.
+- **WAL gotcha:** `readFileSync(DB)` reads only the MAIN db file; freshly-written data sits in the un-checkpointed **-wal** → a "plaintext present in file" assertion is unreliable. Don't assert file-bytes-PRESENT; assert the **column reads back the plaintext** (leak/providers/connectors-store scan db+wal+shm so their absence-checks are fine).
+- **foundation B6 reframed:** content's wrong-key protection is now whole-file SQLCipher (verify:at-rest); B6 retargeted to `secrets` + a WRONG SYSTEM_KEY (genuine defense-in-depth — secrets uses a SEPARATE key). `secrets.id` is INTEGER autoincrement + `secrets.key` is encrypted → seed without id, query by `user_id`.
+- **verify-leak pivoted to `secrets`** (only field-encrypted table left): seeds a SYSTEM_KEY secret, scans absence, fail-closed parser checks retargeted to `secrets.value`.
+- **Python gates NO-GO locally = no venv** (anchors, embedding-novelty, frequency FQ1+) — NOT the collapse; CI authoritative. Confirmed no Python gate asserts envelope-ness on a cut-4 column (they assert cut-5 metric columns, still encrypted, + read cut-4 via dual-read).
 
 **The mechanism is PROVEN over 3 cuts — apply it verbatim to cut 4:**
 1. **Verify the writer** for each table: `grep -rln "INTO <t>\|UPDATE <t>" src/ pipeline/`. JS-adapter-written (incl. `d1_batch_encrypted`) → the map shrink stops it. Python caller-encrypt (`stage_crypto.enc`/`_enc` in `compute-*.py`) → must ALSO drop that in lockstep (that's cut 5's nature; cut-4 tables are all JS).
@@ -42,7 +49,7 @@ The collapse removes the redundant per-field AES-GCM envelope on content, leavin
 | **1 — hot-path content** | documents (title/summary/metadata), realms, semantic_themes, theme_cards, territory_profiles narrative | `2f2a1b4` | ✅ built + verified |
 | **2 — topology metrics** | territory_profiles scalars+centroids, territory_cofire, territory_neighbors, territory_vitality | `643c43a` | ✅ built + verified |
 | **3 — claims + people** | person_claims, person_claim_snapshots, people | `dcb7b93` | ✅ built + verified (incl. the verify:leak reframe) |
-| 4 — bulk content | messages + facts/entities/wealth/health/tasks/reflections/chronicles/attachments/folders/note_links/activity_sessions/internal_model_items/agent_*/connectors/ai_providers/… | — | ⏳ next |
+| 4 — bulk content | messages + facts/entities/wealth/health/tasks/reflections/chronicles/attachments/folders/note_links/activity_sessions/internal_model_items/agent_*/connectors/ai_providers/… (43 tables) | `766cea0` | ✅ DONE (22/22 JS gates GO; CI verifying) |
 | 5 — Python-only metrics | cognitive_metrics_{anchor,behavioral,coherence,criticality,harmonic}, fisher_*, frequency_snapshots, cognitive_events, complexity_snapshots, topology_metrics | — | ⏳ |
 | 6 — finalize | ENCRYPTED_FIELDS → {secrets}; scope-guardian no-op; the SQL restores; VACUUM | — | ⏳ |
 | **LIVE backfill campaign** | run all `content.*` targets on the real vault | — | ⏳ operator-gated |
