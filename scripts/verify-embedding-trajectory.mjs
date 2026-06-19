@@ -91,10 +91,12 @@ try {
   const raw = new Database(DB, { readonly: true });
   const rawRow = raw.prepare(`SELECT centroid_drift, dispersion, low_confidence, window_start FROM embedding_trajectory WHERE user_id=? ORDER BY window_start LIMIT 1 OFFSET 3`).get(U);
   raw.close();
-  rec('T5. centroid_drift + dispersion encrypted at rest (envelope); flag + window plaintext',
-    isEnvelope(rawRow?.centroid_drift) && isEnvelope(rawRow?.dispersion)
+  // SQLCipher collapse (Stage B/C cut 5): centroid_drift + dispersion are PLAINTEXT-in-
+  // cipher — at-rest = whole-file SQLCipher (verify:at-rest), not per-field envelopes.
+  rec('T5. centroid_drift + dispersion PLAINTEXT-in-cipher (collapse cut 5; verify:at-rest); flag + window plaintext',
+    !isEnvelope(rawRow?.centroid_drift) && !isEnvelope(rawRow?.dispersion)
       && (rawRow.low_confidence === 0 || rawRow.low_confidence === 1) && typeof rawRow.window_start === 'string',
-    `drift_enc=${isEnvelope(rawRow?.centroid_drift)} disp_enc=${isEnvelope(rawRow?.dispersion)}`);
+    `drift_plain=${!isEnvelope(rawRow?.centroid_drift)} disp_plain=${!isEnvelope(rawRow?.dispersion)}`);
 
   // Idempotent re-run (era-skip): same run_id → no new rows.
   const before = rows.length;

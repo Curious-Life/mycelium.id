@@ -140,10 +140,12 @@ try {
       else { leaks++; if (leakSamples.length < 3) leakSamples.push(`${c}=${looksPlaintextNumber(v) ? v : '<non-env>'}`); }
     }
   }
-  const notesOk = allRows.every((row) => row.notes == null || isEnvelope(row.notes));
-  rec('A5. §4.5/4.11/4.12/4.13 metric scalars + notes are envelopes at rest (zero plaintext)',
-    nonNull > 0 && leaks === 0 && envelopes === nonNull && notesOk,
-    `nonNull=${nonNull} envelopes=${envelopes} leaks=${leaks} notesOk=${notesOk}${leakSamples.length ? ' [' + leakSamples.join(', ') + ']' : ''}`);
+  // SQLCipher collapse (Stage B/C cut 5): metric scalars + notes are PLAINTEXT-in-cipher
+  // (compute-anchors.py enc() is serialize-only) — at-rest = whole-file SQLCipher (verify:at-rest).
+  const notesPlain = allRows.every((row) => row.notes == null || !isEnvelope(row.notes));
+  rec('A5. §4.5/4.11/4.12/4.13 metric scalars + notes PLAINTEXT-in-cipher (collapse cut 5; verify:at-rest)',
+    nonNull > 0 && envelopes === 0 && notesPlain,
+    `nonNull=${nonNull} envelopes=${envelopes} plaintext=${leaks} notesPlain=${notesPlain}`);
 
   // ── A6. metric structural columns plaintext ───────────────────────────────
   const sRow = raw.prepare(

@@ -100,10 +100,13 @@ try {
      FROM frequency_snapshots WHERE user_id=? AND compression IS NOT NULL LIMIT 1`).get(U);
   const encCols = ['entropy', 'compression', 'learning_rate', 'gradient_signal',
     'point_count', 'territory_count', 'message_count'];
-  const allEnc = row && encCols.every((c) => isEnvelope(row[c]));
-  rec('FQ3. metric + count columns are envelopes at rest (Python caller-encrypt)',
-    !!allEnc,
-    row ? `enc{${encCols.filter((c) => isEnvelope(row[c])).length}/${encCols.length}}` : 'no row with compression');
+  // SQLCipher collapse (Stage B/C cut 5): the metric + count columns are PLAINTEXT-in-
+  // cipher — at-rest = whole-file SQLCipher (verify:at-rest). compute-frequency.py's
+  // _enc() is now serialize-only (numpy-safe coercion, no encryption).
+  const allPlain = row && encCols.every((c) => !isEnvelope(row[c]));
+  rec('FQ3. metric + count columns PLAINTEXT-in-cipher (collapse cut 5; verify:at-rest)',
+    !!allPlain,
+    row ? `plain{${encCols.filter((c) => !isEnvelope(row[c])).length}/${encCols.length}}` : 'no row with compression');
   rec('FQ4. structural columns stay plaintext (granularity enum / window_end / language)',
     row && !isEnvelope(row.granularity) && ['month', 'week', 'day'].includes(row.granularity)
       && !isEnvelope(String(row.window_end)) && !isEnvelope(String(row.language)),

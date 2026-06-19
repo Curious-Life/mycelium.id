@@ -109,9 +109,11 @@ try {
        AND pac_gamma_beta IS NOT NULL LIMIT 1`).get(U, RUN);
   const encCols = ['pac_gamma_beta', 'plv_gamma_beta', 'coh_gamma_beta'];
   const presentEnc = row ? encCols.filter((c) => row[c] != null) : [];
-  const allEnc = row && presentEnc.length > 0 && presentEnc.every((c) => isEnvelope(row[c]));
-  rec('H3. §4.24 coupling columns are envelopes at rest (no plaintext numbers)',
-    !!allEnc, row ? `enc{${presentEnc.filter((c) => isEnvelope(row[c])).length}/${presentEnc.length}}` : 'no enriched row');
+  // SQLCipher collapse (Stage B/C cut 5): §4.24 coupling columns are PLAINTEXT-in-cipher
+  // — at-rest = whole-file SQLCipher (verify:at-rest), not per-field envelopes.
+  const allPlain = row && presentEnc.length > 0 && presentEnc.every((c) => !isEnvelope(row[c]));
+  rec('H3. §4.24 coupling columns PLAINTEXT-in-cipher (collapse cut 5; verify:at-rest)',
+    !!allPlain, row ? `plain{${presentEnc.filter((c) => !isEnvelope(row[c])).length}/${presentEnc.length}}` : 'no enriched row');
   rec('H4. structural/grain columns stay plaintext (granularity / window_end / run_id)',
     row && !isEnvelope(row.granularity) && ['alpha', 'theta', 'delta'].includes(row.granularity)
       && !isEnvelope(row.window_end) && row.clustering_run_id === RUN,

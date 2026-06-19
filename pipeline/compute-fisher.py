@@ -127,25 +127,20 @@ def _master_key():
 
 
 def _enc(value):
-    """Encrypt a scalar/string sensitive value → envelope TEXT. None → None
-    (NULL stays NULL).
-
-    Numbers are serialized as a PLAIN-python-float repr. Critical: numpy 2.x
-    ``repr(np.float64(x))`` is the string ``'np.float64(x)'`` (NOT ``'x'``), so a
-    naive repr would poison the value — store ``float(value)`` repr, which JS
-    ``Number()`` and Python ``float()`` both round-trip cleanly.
+    """SERIALIZE-ONLY (SQLCipher collapse, Stage B/C cut 5) — coerce to a plaintext str,
+    no field encryption. At-rest confidentiality is whole-file SQLCipher (verify:at-rest).
+    Numbers → repr(float(x)); numpy 2.x repr(np.float64(x)) is 'np.float64(x)' which would
+    poison the value, so the float() coercion is LOAD-BEARING (JS Number()/Python float()
+    both round-trip the result). None → None (NULL stays NULL); strings verbatim.
     """
     if value is None:
         return None
-    from crypto_local import encrypt_str
     if isinstance(value, str):
-        s = value
-    else:
-        try:
-            s = repr(float(value))   # np.float64 / Decimal / int → plain float repr
-        except (TypeError, ValueError):
-            s = str(value)
-    return encrypt_str(s, _FISHER_SCOPE, _master_key())
+        return value
+    try:
+        return repr(float(value))   # np.float64 / Decimal / int → plain float repr
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _dec(value):

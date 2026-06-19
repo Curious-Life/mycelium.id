@@ -118,9 +118,12 @@ try {
       else { plaintextLeaks++; if (leakSamples.length < 3) leakSamples.push(`${c}=<non-envelope>`); }
     }
   }
-  rec('H2. all non-NULL §4.23/4.33/4.34 metric scalars are envelopes (zero plaintext at rest)',
-    nonNull > 0 && plaintextLeaks === 0 && envelopes === nonNull,
-    `nonNull=${nonNull} envelopes=${envelopes} plaintextLeaks=${plaintextLeaks}${leakSamples.length ? ' [' + leakSamples.join(', ') + ']' : ''}`);
+  // SQLCipher collapse (Stage B/C cut 5): the §4.23/4.33/4.34 metric scalars are now
+  // PLAINTEXT-in-cipher (compute_information_harmonics.py enc() is serialize-only) — at-rest
+  // = whole-file SQLCipher (verify:at-rest). So NO value should be a per-field envelope.
+  rec('H2. all non-NULL §4.23/4.33/4.34 metric scalars PLAINTEXT-in-cipher (collapse cut 5; verify:at-rest)',
+    nonNull > 0 && envelopes === 0,
+    `nonNull=${nonNull} envelopes=${envelopes} plaintext=${plaintextLeaks}`);
 
   // ── H3. notes (when present) is an envelope, not plaintext ─────────────────
   const noteRow = raw.prepare(
@@ -129,9 +132,9 @@ try {
   // The legacy writer sets notes=None in main(), so notes may legitimately be
   // absent. Only assert envelope-ness IF a note exists; otherwise pass (the
   // code path is enc(None)→None, which is correct).
-  rec('H3. notes is encrypted when present (enc(None)→NULL otherwise)',
-    !noteRow || isEnvelope(noteRow.notes),
-    noteRow ? `notes ${isEnvelope(noteRow.notes) ? 'envelope' : 'PLAINTEXT-LEAK'}` : 'no notes written (None→NULL, correct)');
+  rec('H3. notes PLAINTEXT-in-cipher when present (collapse cut 5; enc()→serialize-only, None→NULL otherwise)',
+    !noteRow || !isEnvelope(noteRow.notes),
+    noteRow ? `notes ${!isEnvelope(noteRow.notes) ? 'plaintext-in-cipher' : 'STILL-ENVELOPE'}` : 'no notes written (None→NULL, correct)');
 
   // ── H4. structural/grain columns stay plaintext ───────────────────────────
   const sRow = raw.prepare(
