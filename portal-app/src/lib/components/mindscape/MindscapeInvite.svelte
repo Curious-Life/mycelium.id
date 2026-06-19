@@ -4,6 +4,7 @@
 	// transforms THIS panel into a minimal inline step (with Back), so setup
 	// happens right here over the living 3D map — never a page jump.
 	import { api } from '$lib/api';
+	import ImportField from '$lib/components/import/ImportField.svelte';
 
 	let { displayName = null, onImported = () => {} }: { displayName?: string | null; onImported?: () => void } = $props();
 
@@ -24,30 +25,17 @@
 	]);
 
 	// ── Data ───────────────────────────────────────────────────────────────────
-	let importing = $state(false);
+	// One uploader (ImportField) handles everything: ChatGPT/Claude/vault zips,
+	// loose .md/.txt/.pdf notes, AND a folder of markdown — routed under the hood.
 	let importMsg = $state('');
 	let importErr = $state('');
-	async function onFile(e: Event) {
-		const input = e.target as HTMLInputElement;
-		const file = input.files?.[0];
-		if (!file) return;
-		importing = true; importErr = ''; importMsg = '';
-		try {
-			const fd = new FormData();
-			fd.append('file', file);
-			const res = await api('/portal/upload', { method: 'POST', body: fd });
-			const d = await res.json().catch(() => ({}));
-			if (!res.ok) { importErr = d.error || 'Could not read that file.'; return; }
-			const n = d.stats?.messages ?? d.messages ?? null;
-			importMsg = n ? `Imported ${Number(n).toLocaleString()} messages.` : 'Imported.';
-			dataDone = true;
-			onImported();
-		} catch {
-			importErr = 'Import failed.';
-		} finally {
-			importing = false;
-		}
+	function onImportResult(r: { imported: number; detail: string }) {
+		importErr = '';
+		importMsg = r.imported ? `Imported ${r.detail}.` : 'Imported.';
+		dataDone = true;
+		onImported();
 	}
+	function onImportError(e: string) { importErr = e || 'Import failed.'; importMsg = ''; }
 
 	// ── Intelligence ─────────────────────────────────────────────────────────────
 	// Mirrors the Settings AI page (the "cookbook"): a Local lane driven by the
@@ -249,11 +237,15 @@
 
 	{#if step === 'data'}
 		<h2 class="welcome-title invite-title">Bring your world in</h2>
-		<p class="welcome-subtitle">Your conversations, journals, transcripts — anything that holds your thinking. Encrypted on import.</p>
-		<label class="invite-file">
-			<input type="file" accept=".zip,.json" onchange={onFile} disabled={importing} />
-			<span>{importing ? 'Reading…' : 'Choose an export — ChatGPT · Claude · LinkedIn'}</span>
-		</label>
+		<p class="welcome-subtitle">Your conversations, journals, transcripts — anything that holds your thinking. Drop a ChatGPT/Claude export, loose notes (.md, .txt, .pdf), or a whole folder. Encrypted on import.</p>
+		<ImportField
+			accept="*"
+			multiple
+			folder
+			label="Drop an export, notes, or files — or choose"
+			onResult={onImportResult}
+			onError={onImportError}
+		/>
 		{#if importMsg}<p class="invite-ok">{importMsg} Your map is forming.</p>{/if}
 		{#if importErr}<p class="invite-err">{importErr}</p>{/if}
 	{:else if step === 'intelligence'}
@@ -401,13 +393,6 @@
 		font-size: 0.75rem; cursor: pointer; padding: 0; margin-bottom: 0.75rem;
 	}
 	.invite-back:hover { color: var(--color-text-primary); }
-	.invite-file {
-		display: block; margin-top: 0.5rem; padding: 0.9rem 1rem;
-		border: 1px dashed var(--glass-input-border); border-radius: 10px;
-		font-size: 0.8rem; color: var(--color-text-secondary); cursor: pointer; text-align: center;
-	}
-	.invite-file:hover { border-color: rgba(229, 184, 76, 0.5); }
-	.invite-file input { display: none; }
 	/* ── Intelligence lanes (the cookbook recommender, in onboarding) ───────── */
 	.lane { margin-top: 0.85rem; }
 	.lane-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.45rem; }
