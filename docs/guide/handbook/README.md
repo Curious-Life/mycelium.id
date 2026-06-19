@@ -10,7 +10,8 @@ the data itself never leaves your control.
 
 1. **[What is Mycelium?](what-is-mycelium.md)** — the idea, in five minutes.
 2. **[Get started](get-started.md)** — download, create your vault, save your recovery key.
-3. **[Connect your AI](connect-your-ai.md)** — give your favorite AI a memory of you.
+3. **[Bring your data in](bring-your-data.md)** — import Claude, ChatGPT, Obsidian, notes, photos & more.
+4. **[Connect your AI](connect-your-ai.md)** — give your favorite AI a memory of you.
 
 ## Understand it
 

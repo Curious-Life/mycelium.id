@@ -5,6 +5,9 @@
 	// happens right here over the living 3D map — never a page jump.
 	import { api } from '$lib/api';
 	import ImportField from '$lib/components/import/ImportField.svelte';
+	import SourceCatalog from '$lib/components/import/SourceCatalog.svelte';
+
+	let showCatalog = $state(false); // "see what you can bring in" disclosure
 
 	let { displayName = null, onImported = () => {} }: { displayName?: string | null; onImported?: () => void } = $props();
 
@@ -248,6 +251,14 @@
 		/>
 		{#if importMsg}<p class="invite-ok">{importMsg} Your map is forming.</p>{/if}
 		{#if importErr}<p class="invite-err">{importErr}</p>{/if}
+
+		<button class="catalog-toggle" class:open={showCatalog} onclick={() => (showCatalog = !showCatalog)} aria-expanded={showCatalog}>
+			<span class="catalog-chevron">{showCatalog ? '▾' : '▸'}</span>
+			See everything you can bring in
+		</button>
+		{#if showCatalog}
+			<div class="catalog-wrap"><SourceCatalog compact /></div>
+		{/if}
 	{:else if step === 'intelligence'}
 		<h2 class="welcome-title invite-title">Choose your intelligence</h2>
 		<p class="welcome-subtitle">Local stays on your device. Cloud keys stay encrypted in your vault.</p>
@@ -478,5 +489,15 @@
 	.invite-label a { color: var(--color-accent-aurum, #e5b84c); }
 	.invite-ok { font-size: 0.74rem; color: #4ade80; margin-top: 0.5rem; }
 	.invite-err { font-size: 0.74rem; color: #f87171; margin-top: 0.5rem; }
+	/* "See everything you can bring in" disclosure → expands the source catalog. */
+	.catalog-toggle {
+		display: inline-flex; align-items: center; gap: 0.4rem; margin-top: 0.9rem;
+		background: none; border: none; padding: 0; cursor: pointer; font-family: inherit;
+		font-size: 0.78rem; color: var(--color-accent-aurum, #e5b84c);
+	}
+	.catalog-toggle:hover { text-decoration: underline; }
+	.catalog-chevron { font-size: 0.7rem; opacity: 0.85; }
+	.catalog-wrap { margin-top: 0.75rem; animation: cat-fade 0.15s ease-out; }
+	@keyframes cat-fade { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 	@media (max-width: 520px) { .invite-actions { grid-template-columns: 1fr; } }
 </style>
