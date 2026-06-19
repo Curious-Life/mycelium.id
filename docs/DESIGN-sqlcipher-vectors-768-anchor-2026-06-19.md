@@ -34,7 +34,7 @@ Split into two PRs:
 ## Sweep findings (consolidated; ★ = verified firsthand)
 
 ### The bridge (centerpiece) ★
-- `pipeline/vault-bridge.js` — long-running loopback server; `getDb` opens the keyed cipher once; `rawDb = adapter.db` (raw handle). Auth `isTrustedLoopback` (loopback peer, no proxy headers); keys from env, never on the wire ([vault-bridge.js:30-92](../pipeline/vault-bridge.js)).
+- `pipeline/vault-bridge.js` — long-running loopback server; `getDb` opens the keyed cipher once; `rawDb = adapter.db` (raw handle). Auth `isTrustedLoopback` (loopback peer, no proxy headers); keys from env, never on the wire ([vault-bridge.js:30-92](../pipeline/vault-bridge.js)). **(Updated 2026-06-19, PR #345: auth is now TWO layers — loopback AND a per-boot `X-Bridge-Token`, fail-closed. See [DESIGN-vault-bridge-auth-2026-06-19.md](DESIGN-vault-bridge-auth-2026-06-19.md).)**
 - `rawRun` ([vault-bridge.js:41-56](../pipeline/vault-bridge.js)): SELECT → `stmt.all(...params)`; **iterates every cell and throws on `Buffer.isBuffer(v)`** (lines 45-51). Non-reader → `stmt.run(...params)`.
 - Routes `/query` (97-99), `/batch` (101-108), `/batch_encrypted` → `db.rawQuery` adapter encrypt path (110-114). Body via `JSON.parse` (70-74).
 - `MYCELIUM_DB_BRIDGE_URL` set + bridge spawned/health-waited/killed in `run-clustering.sh` (≈:94,:107). The Python client is `pipeline/local_db.py`: `query`→`_post('/query',{sql,params})`, `batch`→`_post('/batch',{statements})`, `_post` does `json.dumps` ([local_db.py:38-90](../pipeline/local_db.py)).
@@ -108,7 +108,7 @@ After this, a Python reader gets `bytes` for a raw column (and the legacy base64
 ---
 
 ## Threat model / security (the bridge is a chokepoint — CLAUDE.md §1,§13)
-- **No trust-boundary change.** The transport still: binds to loopback, rejects proxied requests (`isTrustedLoopback`), keys-from-env-never-on-wire, never exposed (§13). Base64 is an *encoding*, not encryption — but the bytes it now carries are **already-decrypted vector plaintext**, which the bridge has *always* carried for TEXT envelopes (it serves decrypted rows by design). So no new exposure class; same paranoia (never log vector bytes; errors are message-only).
+- **No trust-boundary change** *(for this BLOB-transport change; the bridge auth was independently hardened later — PR #345 added a per-boot `X-Bridge-Token` second layer on top of loopback, see [DESIGN-vault-bridge-auth-2026-06-19.md](DESIGN-vault-bridge-auth-2026-06-19.md))*. The transport still: binds to loopback, rejects proxied requests (`isTrustedLoopback`), keys-from-env-never-on-wire, never exposed (§13). Base64 is an *encoding*, not encryption — but the bytes it now carries are **already-decrypted vector plaintext**, which the bridge has *always* carried for TEXT envelopes (it serves decrypted rows by design). So no new exposure class; same paranoia (never log vector bytes; errors are message-only).
 - **Tag-collision / injection:** strict single-key plain-object check on params; a user string/number can't be a `{__b64__}` object. Results only tag actual `Buffer` cells.
 - **Fail-closed preserved:** a malformed `__b64__` (bad base64) → `Buffer.from` yields garbage bytes, caught downstream as a decode failure (skipped + counted), never a silent wrong value; the per-row backfill fail-closed + 0-envelope assert still gate correctness.
 - **Zero-plaintext-leak:** the new code never logs param/result values.
@@ -164,7 +164,7 @@ Per column, via `POST /api/v1/portal/mycelium/backfill {targets:[…],confirm:tr
 | Assumption | Verified at (firsthand ★ / sweep) |
 |---|---|
 | Bridge throws on BLOB results; binds params via raw spread | ★ `pipeline/vault-bridge.js:41-56,97-108` |
-| Bridge auth = loopback-only, keys from env | ★ `pipeline/vault-bridge.js:84-92` |
+| Bridge auth = loopback + per-boot `X-Bridge-Token` (PR #345), keys from env | ★ `pipeline/vault-bridge.js` |
 | Python client shapes (query/batch/_post, json.dumps) | ★ `pipeline/local_db.py:38-90` |
 | `embedding_768` writers are all JS in-process | ★ `src/enrich/service.js:124` · `src/ingest/full-export-import.js:149-173` · `src/db/claims.js:76-94` |
 | JS reader uses envelope-only decryptVector | ★ `src/search/d1-loader.js:194` |
