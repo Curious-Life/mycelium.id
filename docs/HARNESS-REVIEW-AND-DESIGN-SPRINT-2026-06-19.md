@@ -610,7 +610,7 @@ The prerequisites were implemented. **6 of 7 fixed + gated; native default FLIPP
 |---|---|---|
 | RT1 CRIT daemon↔server auth | mitigated-by-default | **FIXED** — per-boot `CHANNEL_TURN_TOKEN` (server→supervisor→daemon env→header); owner-write requires timing-safe token match; missing/invalid → read+reply. Gate `verify:harness-channel` C14. |
 | RT1-MED authoritative isDirect | deferred | **FIXED** — daemon forwards `isDirect`; channel-turn prefers it over the regex. |
-| RT2-H2 channel write-audit | deferred | **FIXED** — `channel_write_audit` (migration 0031) + `db.harness.recordWrite/listWrites`; `run-turn.js` audits write tools hash-only, fire-and-forget; owner turns wire the sink. Gate `verify:harness-state` S9 (structural-only, no plaintext). |
+| RT2-H2 channel write-audit | deferred | **FIXED** — `channel_write_audit` (migration 0032) + `db.harness.recordWrite/listWrites`; `run-turn.js` audits write tools hash-only, fire-and-forget; owner turns wire the sink. Gate `verify:harness-state` S9 (structural-only, no plaintext). |
 | RT2-H3 injection-defense preamble | fixed | FIXED (prior commit). |
 | RT3-H1/M3/M4 conversationId namespace | fixed | FIXED (prior commit). |
 | RT3-H2 untrusted channel history | deferred | **FIXED** — `history.js` untrusted banner via `hydrateHistoryBlock` flag threaded through `run-turn.js`; owner DMs unframed. Gate `verify:harness-channel` C7/C10. |

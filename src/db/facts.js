@@ -53,7 +53,7 @@ export function createFactsNamespace(deps) {
         `SELECT id, value, confidence, forgotten_at FROM facts WHERE user_id = ? AND category = ? AND key = ?`,
         [userId, category, key],
       ));
-      // RT2-H1 overwrite recoverability (migration 0032): snapshot the PRIOR value
+      // RT2-H1 overwrite recoverability (migration 0033): snapshot the PRIOR value
       // into fact_versions (encrypted) before a content-changing overwrite, so a
       // poisoned/mistaken `remember` is recoverable. A fresh fact (no prior), a
       // restore of a forgotten husk, and an identical re-assertion capture nothing.
@@ -171,7 +171,7 @@ export function createFactsNamespace(deps) {
       return { found: !!hit, changed: !!hit };
     },
 
-    // ── RT2-H1 recovery (migration 0032) ────────────────────────────────
+    // ── RT2-H1 recovery (migration 0033) ────────────────────────────────
 
     /**
      * Prior values of a fact (category/key), captured before each overwrite,

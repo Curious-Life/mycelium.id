@@ -1,4 +1,4 @@
--- 0031 — Channel write audit (red-team RT2-H2, 2026-06-19).
+-- 0032 — Channel write audit (red-team RT2-H2, 2026-06-19).
 -- Every vault WRITE performed by an autonomous turn (an owner-trusted channel DM, or a
 -- scheduled wake-cycle) is recorded here so the owner can answer "what did my assistant
 -- write to my vault from a channel?" — the detection layer behind the owner-write grant.

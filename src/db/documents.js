@@ -111,7 +111,7 @@ export function createDocumentsNamespace(deps) {
     async upsert(doc, opts = {}) {
       assertSafeColumns(Object.keys(doc || {}), 'documents');
 
-      // RT2-H1 overwrite recoverability (migration 0032): before a content-changing
+      // RT2-H1 overwrite recoverability (migration 0033): before a content-changing
       // overwrite of an EXISTING doc, snapshot the prior title/summary/content into
       // document_versions (encrypted) so a poisoned/mistaken write is recoverable.
       // Create (no prior) and identical re-write (no diff) capture nothing. Bulk
@@ -481,7 +481,7 @@ export function createDocumentsNamespace(deps) {
       return row;
     },
 
-    // ── RT2-H1 recovery (migration 0032) ────────────────────────────────
+    // ── RT2-H1 recovery (migration 0033) ────────────────────────────────
 
     /**
      * Prior versions of a document, captured before each content-changing

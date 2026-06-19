@@ -41,7 +41,7 @@ and make it restorable.
 
 ## Locked design
 
-### Storage (migration `0032_overwrite_versions.sql`)
+### Storage (migration `0033_overwrite_versions.sql`)
 - **Extend `document_versions`** (ALTER ADD COLUMN, NULL-safe on existing rows): `user_id TEXT`,
   `path TEXT`, `title TEXT`, `summary TEXT`, `content TEXT`, `trigger TEXT`, `reason TEXT`.
   Index `(user_id, path, created_at DESC)`. Legacy `diff/changed_by/change_summary` left untouched.

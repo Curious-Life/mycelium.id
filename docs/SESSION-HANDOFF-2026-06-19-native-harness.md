@@ -68,7 +68,7 @@ Grant model (capability follows IDENTITY, not surface):
   • autonomous  = autonomyTools(tools, enabledNames): SAFE read-set always ∪ gated/write names opt-in
   • channel     = src/agent/resolve-grant.js decides: owner 1:1 DM (+flag +token) → OWNER_CHANNEL_TOOLS;
                   everyone else / groups → ['reply']. Single source = `ownerTrusted`.
-State: scheduled_tasks · harness_runs · conversation_summaries · channel_write_audit (migration 0031).
+State: scheduled_tasks · harness_runs · conversation_summaries · channel_write_audit (migration 0032).
 ```
 
 **Key files touched this session:**
@@ -81,7 +81,7 @@ State: scheduled_tasks · harness_runs · conversation_summaries · channel_writ
 - `src/agent/history.js` — untrusted banner in renderBlock.
 - `src/channels/supervisor.js` + `src/server-rest.js` — `CHANNEL_TURN_TOKEN` generation + plumbing.
 - `packages/channel-daemon/agent/{runtime.js,backends/native.js}` + `index.js` — native default + probeHealth.
-- `src/db/harness.js` + `migrations/0031_channel_write_audit.sql` — write-audit DAL + table.
+- `src/db/harness.js` + `migrations/0032_channel_write_audit.sql` — write-audit DAL + table.
 
 ---
 
@@ -122,7 +122,7 @@ State: scheduled_tasks · harness_runs · conversation_summaries · channel_writ
 row → a poisoned write was unrecoverable. **Now closed.** Design + evidence:
 `docs/DESIGN-RT2-H1-overwrite-recoverability-2026-06-19.md`.
 
-- **migration `0032`** — extend `document_versions` (encrypted prior snapshot
+- **migration `0033`** — extend `document_versions` (encrypted prior snapshot
   title/summary/content + user_id/path/trigger) + new `fact_versions` table.
 - **`ENCRYPTED_FIELDS`** (crypto-local.js) — `document_versions[title,summary,content]` +
   `fact_versions[value]`; snapshot encrypts at rest under the uniform `'personal'` scope.
