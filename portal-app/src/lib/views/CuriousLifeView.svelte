@@ -33,6 +33,7 @@
 	let movement = $state<Any | null>(null); // trajectory/summary.summary
 	let current = $state<Any | null>(null); // trajectory/current.current (level=all → {realm,theme,territory})
 	let moveFresh = $state<Any | null>(null); // P2: fisher_trajectory freshness verdict ({verdict, age_ms, budget_ms})
+	let movementCrossCheck = $state<Any | null>(null); // P3b: 2x2 honesty quadrant (Fisher × basis-free embedding)
 	let milestones = $state<Any[]>([]);
 	let trajectory = $state<Any[]>([]); // weekly_step rows
 	let rhythmByGran = $state<Record<string, Any | null>>({ alpha: null, theta: null, delta: null });
@@ -110,6 +111,8 @@
 		movement = m?.summary ?? null;
 		current = c?.current ?? null;
 		moveFresh = m?.freshness ?? c?.freshness ?? null;
+		// P3b: non-blocking basis-free cross-check (realm-F live altitude).
+		g('/portal/trajectory/cross-check?level=realm').then((xc) => { movementCrossCheck = xc?.cross_check ?? null; });
 		milestones = ms?.milestones ?? [];
 		trajectory = tr?.trajectory ?? [];
 		rhythmByGran = { alpha: rA, theta: rT, delta: rD };
@@ -237,6 +240,15 @@
 		const h = moveFresh?.age_ms != null ? Math.round(moveFresh.age_ms / 3_600_000) : null;
 		const age = h == null ? 'a while' : h >= 48 ? `${Math.round(h / 24)}d` : `${h}h`;
 		return `These numbers may lag — the pipeline last measured movement ${age} ago.`;
+	});
+	// P3b: visual accent per quadrant state (calm vs attention vs muted).
+	const xcAccent = $derived.by(() => {
+		switch (movementCrossCheck?.state) {
+			case 'corroborated': return accentVar.jade;
+			case 'hidden_drift': return accentVar.amethyst;
+			case 'basis_suspect': return accentVar.azure;
+			default: return 'var(--hairline, #8883)';
+		}
 	});
 
 	// ── Narrative summary (Layer 1) ───────────────────────────────────────────
@@ -733,6 +745,11 @@
 						<div class="stat"><span class="s-v">{fmt(movement?.exploration_ratio, 2)}</span><span class="s-l">exploration ratio</span></div>
 					</div>
 					{#if moveAboveNoise === false}<p class="muted sm">This week's movement is within your measurement noise — read the σ as advisory.</p>{/if}
+						{#if movementCrossCheck && movementCrossCheck.state !== 'insufficient'}
+							<p class="muted sm" style="border-left:2px solid {xcAccent}; padding-left:0.55rem; margin-top:0.4rem">
+								<b>Cross-check — {movementCrossCheck.label}.</b> {movementCrossCheck.detail}
+							</p>
+						{/if}
 					<div class="panel">
 						<h3>Phase by level</h3>
 						<div class="level-chips">

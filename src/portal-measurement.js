@@ -3,6 +3,7 @@ import { CONTRACTS } from './metrics/contracts.js';
 import { METRIC_COLUMNS, _internal as metricsInternal } from './db/metrics.js';
 import { computeFreshness, FAMILY_STAGE, familyFreshness, freshnessHedge } from './metrics/freshness.js';
 import { baselineZ } from './metrics/baseline-z.js';
+import { crossCheckQuadrant, QUADRANT_COPY } from './metrics/cross-check-quadrant.js';
 import { getTerritoryRiverCached } from './territory-river-cache.js';
 
 // Lempel-Ziv (1976) complexity of a symbol sequence (Kaspar-Schuster). Used for
@@ -358,6 +359,81 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
     } catch (e) {
       if (e instanceof TypeError) return res.status(400).json({ error: e.message });
       fail(res, 500, 'Failed to load summary');
+    }
+  });
+
+  // GET /trajectory/cross-check — the 2x2 movement honesty quadrant. Compares the Fisher
+  // velocity baseline-z (how the territory DISTRIBUTION moved — a clustering construct) to
+  // the global embedding centroid-drift baseline-z (how the semantic CENTER moved —
+  // basis-free), aligned on the latest week confident in BOTH, and names the quadrant.
+  router.get('/trajectory/cross-check', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const level = String(req.query.level || 'realm');
+      if (!VALID_LEVELS.has(level)) {
+        return res.status(400).json({ error: `level must be one of: ${[...VALID_LEVELS].join(', ')}` });
+      }
+
+      // Fisher velocity series (displayed altitude) + global embedding-drift series (latest run).
+      const fisher = await db.fisher.getTrajectory(u.id, { level, windowType: 'weekly_step', limit: 1000 });
+      const runRow = ((await db.rawQuery(
+        `SELECT MAX(clustering_run_id) AS run_id FROM embedding_trajectory WHERE user_id = ? AND window_type = 'weekly_step'`,
+        [u.id])).results || [])[0];
+      const embRun = runRow?.run_id || null;
+      const embRows = embRun
+        ? ((await db.rawQuery(
+            `SELECT window_start, centroid_drift, dispersion, low_confidence FROM embedding_trajectory
+               WHERE user_id = ? AND window_type = 'weekly_step' AND clustering_run_id = ? ORDER BY window_start`,
+            [u.id, embRun])).results || [])
+        : [];
+
+      // Align on the latest window_start confident in BOTH series (window_start is the
+      // SAME ISO-Monday grid in both → string-equal). baselineZ uses the last element as
+      // "current", so truncate each confident series to ≤ W before computing.
+      const fConfW = new Set(fisher.filter((r) => !r.low_confidence && r.fisher_velocity != null).map((r) => r.window_start));
+      let W = null;
+      for (const r of embRows) {
+        const w = r.window_start;
+        if (!Number(r.low_confidence) && r.centroid_drift != null && fConfW.has(w) && (W === null || w > W)) W = w;
+      }
+
+      let F = null, E = null;
+      if (W) {
+        const fSeries = fisher
+          .filter((r) => r.window_start <= W && !r.low_confidence && r.fisher_velocity != null)
+          .map((r) => Number(r.fisher_velocity));
+        const eSeries = embRows
+          .filter((r) => r.window_start <= W && !Number(r.low_confidence) && r.centroid_drift != null)
+          .map((r) => Number(r.centroid_drift));
+        F = baselineZ(fSeries);
+        E = baselineZ(eSeries);
+      }
+
+      const q = crossCheckQuadrant(F, E);
+      const copy = QUADRANT_COPY[q.state];
+
+      // Inverted attribution (basis-suspect only): Fisher attributes the move to X, but the
+      // semantic center didn't move → likely a map effect on X (attribute the suspicion).
+      const lastFisher = fisher.length ? fisher[fisher.length - 1] : null;
+      const top_movers = (q.state === 'basis_suspect' && Array.isArray(lastFisher?.top_contributors))
+        ? lastFisher.top_contributors.slice(0, 3) : [];
+
+      const fresh = await familyFreshness(db, u.id, 'embedding_trajectory').catch(() => null);
+      res.set('Cache-Control', 'no-store');
+      res.json({
+        freshness: fresh ? { verdict: fresh.verdict, age_ms: fresh.age_ms, budget_ms: fresh.budget_ms } : null,
+        freshness_hedge: freshnessHedge(fresh),
+        cross_check: {
+          level, window_start: W,
+          state: q.state, label: copy.label, detail: copy.detail,
+          fisher_velocity_z: F && Number.isFinite(F.z) ? F.z : null,
+          centroid_drift_z: E && Number.isFinite(E.z) ? E.z : null,
+          top_movers,
+        },
+      });
+    } catch (e) {
+      if (e instanceof TypeError) return res.status(400).json({ error: e.message });
+      fail(res, 500, 'Failed to load cross-check');
     }
   });
 
