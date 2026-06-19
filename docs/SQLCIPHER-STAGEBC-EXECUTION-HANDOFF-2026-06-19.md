@@ -124,8 +124,34 @@ messages (`content/thinking/tags/entities/entity_summary/suggested_new_tag/relat
 
 **Backfill targets (add to `BACKFILL_TARGETS`, all `codec:{kind:'content'}`):** one `content.<table>` entry per cut-4 table with its full column list from `ENCRYPTED_FIELDS` (Sweep A list). Add targets for ALL of them incl. the "dead/import-only" tables — existing rows may hold envelopes from prior imports.
 
-## Cut 5 — Python-only metrics (the lockstep Python edit)
-Drop the caller-encrypt in `pipeline/compute-{frequency,criticality,coherence,behavioral,anchor,fisher}.py`, `compute_information_harmonics.py`, `compute-cross-scale-coupling.py` (the `stage_crypto.enc`/`_enc` wrappers). Tables: cognitive_metrics_*, fisher_trajectory/milestones, frequency_snapshots, cognitive_events, complexity_snapshots, topology_metrics. Invert the `isEnvelope` side-gates: `verify:complexity` C3, `:frequency` FQ3, `:criticality` C7, `:coherence`, `:behavioral`, `:vitality` (already done in cut 2 for territory_vitality — these are the cognitive_metrics_* ones), `:fisher-encryption` FE1, `:harmonics-encryption`, `:pipeline-cli-encryption` (cofire/neighbors already done cut 2; check for metrics asserts), `:measurement-schema` S5, `:history` H6 (entity_snapshots — actually that's a payload, check), `:topology-audit` A3/A4. Python decrypt-on-read stays (`stage_crypto.dec` dual-reads) for the mixed window.
+## Cut 5 — Python-only metrics (the lockstep Python edit) — SWEEP-VERIFIED 2026-06-19
+
+**THE WORK = drop the Python caller-encrypt. No JS source/map edits in cut 5** (no JS writes these tables; the JS map entries get emptied in cut 6 — reads tolerate plaintext via `isEncrypted` value-shape). `stage_crypto.py` + `crypto_local.py` STAY (`dec()` is needed for reads + other services).
+
+**Load-bearing assumptions — VERIFIED:**
+- **Write path is RAW (no auto-encrypt).** Every metric script writes via `d1_client.query()` → `_post("/query", …)` (`pipeline/d1_client.py:118`) — the raw bridge endpoint (A7-raw proves `/query` does NOT auto-encrypt). So the Python `.enc()`/`_enc()` is the ONLY encryption on these columns → **dropping it yields plaintext**. (NOT `/batch_encrypted`.)
+- **Dual-read holds.** `stage_crypto.dec()` (`pipeline/stage_crypto.py:61-68`) returns a non-envelope value UNCHANGED → after writers stop encrypting, reads pass plaintext through; old envelope rows still decrypt. No reader change.
+- **No raw-bytes/bridge-blob blocker.** Metrics are scalars/JSON strings (not raw float bytes like the vectors), so the JSON `/query` bridge carries plaintext fine — unlike the cluster.py nomic case that was deferred.
+- **No JS writers** for any cut-5 table (all are Python-written or unwritten); `cognitive_metrics_window/trajectory` have NO writer at all (likely legacy/aggregate — their map entries are dead, cleaned in cut 6).
+
+**Python edits (drop `.enc()`/`_enc()`; remove the 2 local `_enc` helpers):**
+| script | table | enc sites |
+|---|---|---|
+| compute-frequency.py | frequency_snapshots | `:336-338` (+ local `_enc` `:79`) |
+| compute-criticality.py | cognitive_metrics_criticality + cognitive_events | `:173-177`, `:187` |
+| compute-coherence.py | cognitive_metrics_coherence | `:116-120` |
+| compute-behavioral.py | cognitive_metrics_behavioral | `:152-155` |
+| compute-anchors.py | cognitive_metrics_anchor | `:240-247` |
+| compute-fisher.py | fisher_trajectory + fisher_milestones | `:433-456` (+ local `_enc` `:129`) |
+| compute_information_harmonics.py | cognitive_metrics_harmonic (42 cols) | `:493-514` |
+| compute-cross-scale-coupling.py | cognitive_metrics_harmonic (pac/plv/coh + h0_wasserstein) | `:345-355` |
+| compute-embedding-novelty.py | complexity_snapshots.embedding_novelty | `:130` |
+| compute-embedding-trajectory.py | embedding_trajectory.centroid_drift/dispersion | `:193` |
+
+**Gate inversions (~16 assertions / ~13 files) — invert envelope/at-rest → plaintext-in-cipher; KEEP every structural-plaintext assert (user_id/window_end/granularity/level/window_type/territory_id/era_id/low_confidence):**
+`verify-fisher-encryption` (fisher_trajectory+milestones, isEnvelope) · `verify-embedding-trajectory` (centroid_drift/dispersion) · `verify-complexity` (complexity_snapshots) · `verify-frequency` FQ3 (metric cols — FQ0 already done cut 4) · `verify-criticality` (criticality + cognitive_events) · `verify-behavioral` · `verify-cross-scale-coupling` (harmonic coupling) · `verify-harmonics-encryption` (harmonic) · `verify-anchors` (cognitive_metrics_anchor — its A1-A5 NO-GO locally is the no-venv issue, not collapse) · `verify-embedding-novelty` (embedding_novelty) · **NODE-only (run locally before push):** `verify-topology-audit` (snapshots+findings isEnvelope) · `verify-complexity` · `verify-measurement-schema` (cognitive_events marker scan) · `verify-metrics-rest` (`looksLikeCiphertext` envelope scan).
+
+**⚠️ VERIFICATION = CI-ONLY for most of cut 5.** ~10 of the gates SPAWN Python (`compute-*.py`) and the bare worktree has NO venv → they crash locally (NOT a regression — same as cut 4's frequency/anchors). So the loop is: edit Python + gates → run the **node-only** gates locally (topology-audit, complexity, measurement-schema, metrics-rest) → push → **CI verifies the Python gates (~6 min/round)**. This is the slow-paced cut; read carefully before each push. GOTCHA: when removing the local `_enc` helpers, confirm nothing else in the script calls them.
 
 ## Cut 6 — finalize
 - Shrink `ENCRYPTED_FIELDS` to `{secrets}` exactly (remove all now-empty entries).
