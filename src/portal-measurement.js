@@ -1,7 +1,7 @@
 import express from 'express';
 import { CONTRACTS } from './metrics/contracts.js';
 import { METRIC_COLUMNS, _internal as metricsInternal } from './db/metrics.js';
-import { computeFreshness, FAMILY_STAGE } from './metrics/freshness.js';
+import { computeFreshness, FAMILY_STAGE, familyFreshness, freshnessHedge } from './metrics/freshness.js';
 import { baselineZ } from './metrics/baseline-z.js';
 import { getTerritoryRiverCached } from './territory-river-cache.js';
 
@@ -253,8 +253,13 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
         return res.status(400).json({ error: `level must be 'all' or one of: ${[...VALID_LEVELS].join(', ')}` });
       }
       const phase = await db.fisher.getCurrentPhase(u.id, { level });
+      const fresh = await familyFreshness(db, u.id, 'fisher_trajectory').catch(() => null);
       res.set('Cache-Control', 'no-store');
-      res.json({ current: phase || null });
+      res.json({
+        current: phase || null,
+        freshness: fresh ? { verdict: fresh.verdict, age_ms: fresh.age_ms, budget_ms: fresh.budget_ms } : null,
+        freshness_hedge: freshnessHedge(fresh),
+      });
     } catch (e) {
       if (e instanceof TypeError) return res.status(400).json({ error: e.message });
       fail(res, 500, 'Failed to load current phase');
@@ -321,8 +326,15 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
       const velBz = baselineZ(confVel);
       const entBz = baselineZ(confEnt);
 
+      // P2 — family-level freshness hedge for the movement surface (mirrors the agent
+      // tool, fisher-tools.js). A stale movement card must not present its σ as
+      // authoritative. Best-effort: a probe failure never blocks the read.
+      const fresh = await familyFreshness(db, u.id, 'fisher_trajectory').catch(() => null);
+
       res.set('Cache-Control', 'no-store');
       res.json({
+        freshness: fresh ? { verdict: fresh.verdict, age_ms: fresh.age_ms, budget_ms: fresh.budget_ms } : null,
+        freshness_hedge: freshnessHedge(fresh),
         summary: {
           period, level,
           run_id: last.clustering_run_id || null,
@@ -782,29 +794,6 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
         return { end: w.end, count: c };
       });
 
-      // 7) Week × top-3 territories — the checkable drill-floor: each week's message
-      // volume split by its top-3 territories (+ "other"). Counts are derived from
-      // the activation share × that week's message_count (the activation vector IS
-      // the normalized per-territory message-count distribution) — close to raw,
-      // lightly smoothed by the per-category epsilon. Names from territory_profiles.
-      const weeklyTop = weeks.map((w, i) => {
-        const v = vectors[i] || {};
-        const total = Number(w.message_count) || 0;
-        const ranked = Object.keys(v)
-          .map((id) => ({ id: Number(id), share: Number(v[id]) || 0 }))
-          .filter((t) => t.share > 0)
-          .sort((a, b) => b.share - a.share)
-          .slice(0, 3)
-          .map((t) => ({
-            territory_id: t.id,
-            name: nameById[String(t.id)] || `Territory ${t.id}`,
-            named: nameById[String(t.id)] != null,
-            count: Math.round(t.share * total),
-          }));
-        const topSum = ranked.reduce((s, t) => s + t.count, 0);
-        return { end: w.end, total, top: ranked, other: Math.max(0, total - topSum) };
-      });
-
       return {
         run_id: runId,
         level: 'territory',
@@ -812,7 +801,6 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
         weeks,
         anchors,
         anchor_count: anchorCount,
-        weekly_top: weeklyTop,
         novelty: { text: textNovelty, path: pathNovelty },
       };
       });
