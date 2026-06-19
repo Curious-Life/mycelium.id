@@ -358,7 +358,7 @@ const ENCRYPTED_FIELDS = {
   reflections: ['content', 'trigger', 'metadata'],
 
   // Reflection records (Context Engine "day cards") — the agent's characterizations are content.
-  // cycle/day stay plaintext for SQL filtering (migrations/0032_reflection_records.sql).
+  // cycle/day stay plaintext for SQL filtering (migrations/0039_reflection_records.sql).
   reflection_records: ['summary', 'themes', 'day_type', 'body'],
 
   // Tasks — descriptions reveal what user is working on

@@ -7,7 +7,7 @@
 //   4. classifier: maps a model reply to labels; a model OUTAGE rejects (→ row stays pending)
 //   5. enrichCategoriesOnce: writes labels + marks processed; empty content skips the call;
 //      a transient failure STOPS the batch and leaves rows pending; absent classifier = no-op
-//   6. migration 0031 adds the five plaintext columns + the GROUP BY index
+//   6. migration 0038 adds the five plaintext columns + the GROUP BY index
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -128,7 +128,7 @@ const baseDeps = (messages, classify) => ({ messages, embed: { embed: async () =
 }
 
 // ── 6. migration ────────────────────────────────────────────────────────────
-const mig = readFileSync(join(ROOT, 'migrations/0031_message_categories.sql'), 'utf8');
+const mig = readFileSync(join(ROOT, 'migrations/0038_message_categories.sql'), 'utf8');
 for (const col of ['domain', 'register', 'subregister', 'taxonomy_version', 'categories_processed']) {
   ok(new RegExp(`ADD COLUMN ${col}\\b`).test(mig), `migration adds column ${col}`);
 }

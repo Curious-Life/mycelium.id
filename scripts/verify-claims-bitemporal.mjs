@@ -1,6 +1,6 @@
 // scripts/verify-claims-bitemporal.mjs — Context Engine Phase 2a gate.
 //
-// Extends person_claims to a bi-temporal, distribution-aware claim. Verifies migration 0033, the
+// Extends person_claims to a bi-temporal, distribution-aware claim. Verifies migration 0040, the
 // structured distribution fields (B: variability + context_primary are real columns, not prose),
 // valid-time asOf (incl. historical "what was true then"), per-change transaction-time + believedAsOf
 // (D: gapless, not periodic), retract (close+link, never delete), promote, and the CVP pending gate.
@@ -16,7 +16,7 @@ applyMigrations(db); applyMigrations(db); // idempotent
 
 // ── 1. migration shape ───────────────────────────────────────────────────────
 const cols = db.prepare('PRAGMA table_info(person_claims)').all().map((r) => r.name);
-ok(['valid_from', 'valid_to', 'superseded_by', 'domain', 'variability', 'context_primary'].every((c) => cols.includes(c)), 'migration 0033 adds the 6 bi-temporal + distribution columns');
+ok(['valid_from', 'valid_to', 'superseded_by', 'domain', 'variability', 'context_primary'].every((c) => cols.includes(c)), 'migration 0040 adds the 6 bi-temporal + distribution columns');
 const variabilityType = db.prepare('PRAGMA table_info(person_claims)').all().find((r) => r.name === 'variability')?.type;
 ok(variabilityType === 'REAL', 'variability is a structured REAL (queryable, not prose)', `(${variabilityType})`);
 const idxs = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_claim%'").all().map((r) => r.name);

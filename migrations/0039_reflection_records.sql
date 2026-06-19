@@ -1,4 +1,4 @@
--- 0032_reflection_records.sql — Context Engine: the per-cycle reflection record ("day card").
+-- 0039_reflection_records.sql — Context Engine: the per-cycle reflection record ("day card").
 --
 -- A dated, queryable digest of what the agent reflected each cycle — so days can be categorized
 -- and red threads traced over time. This is NOT a duplicate of model.md / reflections.md (the

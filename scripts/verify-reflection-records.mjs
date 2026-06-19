@@ -1,7 +1,7 @@
 // scripts/verify-reflection-records.mjs — Context Engine "day cards" gate.
 //
 // A dated, queryable per-cycle reflection record for categorizing days + tracing red threads.
-// Verifies: migration 0032 (table + plaintext keys + indexes), the encryption allowlist, the
+// Verifies: migration 0039 (table + plaintext keys + indexes), the encryption allowlist, the
 // DAL (record / recent / listRange + themes JSON round-trip + defaults), the recordReflection /
 // listReflections tools, that EVERY cycle logs one, and chat-grantability.
 import { readFileSync } from 'node:fs';
@@ -23,7 +23,7 @@ const db = new Database(':memory:');
 applyMigrations(db);
 applyMigrations(db); // idempotent
 const cols = db.prepare('PRAGMA table_info(reflection_records)').all().map((r) => r.name);
-ok(['id', 'user_id', 'cycle', 'day', 'summary', 'themes', 'day_type', 'body', 'created_at'].every((c) => cols.includes(c)), 'migration 0032 creates reflection_records with all columns');
+ok(['id', 'user_id', 'cycle', 'day', 'summary', 'themes', 'day_type', 'body', 'created_at'].every((c) => cols.includes(c)), 'migration 0039 creates reflection_records with all columns');
 const idx = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_reflection_records_%'").all().map((r) => r.name);
 ok(idx.length >= 2, 'day + cycle indexes created', `(${idx.length})`);
 const crypto = readFileSync(join(ROOT, 'src/crypto/crypto-local.js'), 'utf8');

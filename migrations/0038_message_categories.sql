@@ -1,4 +1,4 @@
--- 0031_message_categories.sql — Context Engine L1 (Phase 1b): per-message life-domain +
+-- 0038_message_categories.sql — Context Engine L1 (Phase 1b): per-message life-domain +
 -- register labels (taxonomy v1; operator decision 2026-06-19).
 --
 -- These are plaintext label ENUMS — like source / nlp_processed / status, NOT message

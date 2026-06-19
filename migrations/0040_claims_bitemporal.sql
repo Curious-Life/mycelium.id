@@ -1,4 +1,4 @@
--- 0033_claims_bitemporal.sql — Context Engine Phase 2a: extend person_claims to a bi-temporal,
+-- 0040_claims_bitemporal.sql — Context Engine Phase 2a: extend person_claims to a bi-temporal,
 -- distribution-aware claim (Ada's science → verified code). NOT a new table: person_claim_snapshots
 -- already carries transaction-time history. We add VALID-time + the supersede link + the Layer-1
 -- domain axis + the Whole-Trait DISTRIBUTION params. All plaintext (queryable) — "distribution, not
