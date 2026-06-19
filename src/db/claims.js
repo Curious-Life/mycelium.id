@@ -143,7 +143,9 @@ export function createClaimsNamespace(deps) {
     async listForMatch(userId) {
       const res = await d1Query(
         `SELECT ${CLAIM_COLS}, embedding_768 FROM person_claims
-         WHERE user_id = ? AND status IN ('active','rejected')`, [userId]);
+         WHERE user_id = ? AND status IN ('active','pending','rejected')`, [userId]);
+      // 'pending' included (Phase 2): a fresh corroboration must MATCH a pending claim (raise its
+      // confidence toward promotion), not create a duplicate of it.
       return rows(res).map((r) => ({ ...toClaim(r), embedding768: r.embedding_768 }));
     },
 
