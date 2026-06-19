@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { uploadFile as chunkedUpload } from '$lib/chunked-upload';
 	import { prepareFile } from '$lib/import/upload-handlers';
+	import SourceCatalog from '$lib/components/import/SourceCatalog.svelte';
 	import { api } from '$lib/api';
 
 
@@ -439,6 +440,10 @@
 			{/if}
 		</div>
 	{:else if !selectedSource}
+		<!-- What you can bring in — icons-first catalog: every source, honest status
+			 (Upload now / Connect / Coming soon), how to get the data, + docs link. -->
+		<div class="mb-8"><SourceCatalog /></div>
+		<h2 class="text-sm font-medium text-[var(--color-text-emphasis)] mb-3">Start an import</h2>
 		<!-- Source selection -->
 		<div class="grid gap-4">
 			{#each sources as src}
