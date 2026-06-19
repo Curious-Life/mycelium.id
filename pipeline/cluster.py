@@ -967,6 +967,18 @@ def centroids_to_groups(child_labels, embeddings, n_groups, embed_dim=None):
     centroids = np.array([
         embeddings[child_labels == c].mean(axis=0) for c in unique_children
     ])
+    # SPHERICAL-WARD APPROXIMATION (documented per METRICS-AUDIT S5 / decision log).
+    # We L2-renormalize each child centroid to the unit sphere, then feed the
+    # result to _weighted_ward_groups whose objective is the EUCLIDEAN Ward
+    # variance ‖c_A−c_B‖². On the unit sphere squared-Euclidean = 2(1−cosine), so
+    # Ward here merges by cosine proximity — consistent with the cosine metric
+    # used everywhere else in the pipeline (spherical k-means atoms, FAISS k-NN,
+    # UMAP metric='cosine'). It is NOT identical to the research's RAW-centroid
+    # Ward (mycelium-clustering-dimensionality-reduction-strategy-2026-04-02.md):
+    # renormalizing discards centroid-magnitude (≈ child compactness) information
+    # and the Lance-Williams update mean is taken in the chart, not re-projected.
+    # The deviation is deliberate and bounded (merges stay cosine-consistent); the
+    # decision log records it and the trade vs dropping the renormalization.
     norms = np.linalg.norm(centroids, axis=1, keepdims=True)
     norms[norms == 0] = 1
     centroids = centroids / norms
@@ -1881,6 +1893,64 @@ def flag_catch_all_territories(
     return flagged
 
 
+def write_clustering_diagnostics(results, embeddings, user_id, version, dry_run=False):
+    """Compute + store cheap clustering-VALIDITY diagnostics (METRICS-AUDIT S5).
+
+    Read-only health metrics about the SHIPPED partition — realm max-share, a
+    territory cohesion/separation index, and bootstrap-ARI stability — written to
+    the single-row-per-user clustering_diagnostics table and surfaced on the
+    mindscape (GET /mindscape `meta.partitionConfidence`). They are STORED, never
+    used to select k (re-introducing index-driven k-selection re-introduces the
+    silhouette k=2 collapse — docs/CLUSTERING-ALGORITHM-DECISION-LOG-2026-06-19.md).
+
+    Fail-soft and run LAST (after every result write): a diagnostic failure must
+    never break a clustering run. Bounded for the live 16GB box via env knobs:
+      MYCELIUM_CLUSTER_BOOTSTRAP=0     — skip the bootstrap entirely (stability NULL)
+      MYCELIUM_CLUSTER_BOOTSTRAP_B=N   — bootstrap reps (default 12, capped 20)
+      MYCELIUM_CLUSTER_BOOTSTRAP_MAXP  — cap the working-set point count (default 20000)
+    """
+    import cluster_diagnostics as cdg
+
+    run_boot = os.environ.get('MYCELIUM_CLUSTER_BOOTSTRAP', '1') != '0'
+    boot_b = int(os.environ.get('MYCELIUM_CLUSTER_BOOTSTRAP_B', str(cdg.DEFAULT_BOOTSTRAP_B)))
+    max_p = int(os.environ.get('MYCELIUM_CLUSTER_BOOTSTRAP_MAXP', str(cdg.DEFAULT_MAX_POINTS)))
+
+    # The re-clustering algo injected into the bootstrap IS the live territory
+    # path (spherical k-means atoms → mass-weighted Ward to TARGET_TERRITORIES),
+    # so stability is measured against the real algorithm, not a surrogate.
+    def _recluster(emb):
+        return centroids_to_groups(
+            spherical_kmeans_atoms(emb, TARGET_ATOMS), emb, TARGET_TERRITORIES)
+
+    diag = cdg.assess(
+        results['realm_ids'], results['territory_ids'], embeddings, _recluster,
+        bootstrap_b=boot_b, max_points=max_p, run_bootstrap=run_boot,
+    )
+
+    print(f"  Clustering diagnostics: max-share={diag['realm_max_share']:.2f} "
+          f"({diag['realm_count']} realms), territory-validity={diag['territory_validity']}, "
+          f"bootstrap-ARI={diag['bootstrap_ari_mean']} over {diag['bootstrap_ari_runs']} runs "
+          f"→ {'LOW-CONFIDENCE' if diag['low_confidence'] else 'ok'}")
+    if diag['low_confidence']:
+        print(f"    ⚠ {diag['confidence_note']}")
+
+    if dry_run:
+        print("  (dry run) Would upsert clustering_diagnostics")
+        return diag
+
+    d1_query(
+        """INSERT OR REPLACE INTO clustering_diagnostics
+             (user_id, cluster_version, realm_max_share, realm_count,
+              territory_validity, bootstrap_ari_mean, bootstrap_ari_std,
+              bootstrap_ari_runs, low_confidence, confidence_note, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+        [user_id, version, diag['realm_max_share'], diag['realm_count'],
+         diag['territory_validity'], diag['bootstrap_ari_mean'], diag['bootstrap_ari_std'],
+         diag['bootstrap_ari_runs'], diag['low_confidence'], diag['confidence_note']],
+    )
+    return diag
+
+
 # ── Main ───────────────────────────────────────────────────────────
 
 def main():
@@ -2215,6 +2285,13 @@ def main():
     compute_realm_neighbors(
         point_ids, results, embeddings, user_id, dry_run=args.dry_run,
     )
+
+    # Clustering-validity diagnostics (METRICS-AUDIT S5) — LAST + fail-soft so a
+    # diagnostic failure never breaks a run that already wrote every result.
+    try:
+        write_clustering_diagnostics(results, embeddings, user_id, version, dry_run=args.dry_run)
+    except Exception as e:
+        print(f"  (clustering diagnostics skipped: {e})")
 
     print(f"\n  Clustering pipeline complete (version: {version})")
 
