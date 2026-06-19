@@ -7,6 +7,7 @@ name: verify
 # verified on a host where onnxruntime/Ollama are installed).
 
 on:
+  workflow_dispatch:   # manual trigger (Actions UI / `gh workflow run verify.yml --ref <branch>`)
   pull_request:
     branches: [main]
   push:
