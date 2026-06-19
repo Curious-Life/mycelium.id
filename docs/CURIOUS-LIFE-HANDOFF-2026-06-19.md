@@ -21,14 +21,15 @@ This is a two-agent design collaboration: **this coding thread** owns the intera
 | Title fix + Week×top-3 drill-floor + shared-hover sync + cache v3 | #312 (main `4a6eccd`) | ✅ merged + deployed |
 | Interaction/component spec (+ 2 rounds of Ada review folded in) | **#307 (OPEN)** | ⏳ open, not merged |
 | River cold-compute perf fix (cap + chunked decrypt + robust `v4` key) | **PR #317 (OPEN)** | ⏳ open, not merged |
+| `weekly_top` regression restore (commit `e3ddb9c`, on #317) | **PR #317 (OPEN)** | ✅ FIXED on branch; merges with #317 |
 | Territory naming (describe-only) + clustering reconciliation | metrics/pipeline thread | ⛔ owned elsewhere, gating B1 |
 
-> ## ⚠️ REGRESSION — fix this FIRST (discovered while writing this handoff)
-> **`weekly_top` was clobbered off `main`.** #312 added `weekly_top` to the `/portal/territory-river` payload (the week×top-3 drill-floor). A later movement PR — **#315 `4771e5e` "freshness hedge on portal Fisher reads"** — branched *before* #312, touched `src/portal-measurement.js`, and its merge **dropped the `weekly_top` block** (`anchor_count` survived; `weekly_top` did not — `grep -c weekly_top` on main's `portal-measurement.js` = **0**). So the week×top-3 graph is silently empty on main: the frontend (`WeeklyTopTerritories.svelte`) + `CuriousLifeView` still render it gated on `river?.weekly_top?.length`, which is now always empty.
-> **Neither open PR restores it** — #317 also branched pre-#312 (`weekly_top` count = 0). So merging #317 will NOT fix it and could re-confirm the clobber.
-> **Fix:** re-add the `weekly_top` computeFn block (see #312 diff / `git show 4a6eccd -- src/portal-measurement.js`) to the river computeFn, reconciled **on top of whatever #317 lands** (it rewrites that computeFn). While there, verify the FULL payload survives: `weekly_top`, `anchor_count`, `anchors[]` (with `status`), `novelty.{text,path}`. Bump `RIVER_SCHEMA` when you do.
+> ## ✅ REGRESSION — FIXED 2026-06-19 (was: fix this FIRST)
+> **`weekly_top` was clobbered off `main`** and is now **restored on PR #317** (commit `e3ddb9c`, `RIVER_SCHEMA` bumped `v4`→`v5-weeklytop`, `verify:territory-river-cache` 8/8 GO). It is NOT yet on `main` — it lands when #317 merges, and the app must be re-deployed after.
+> **What happened:** #312 added `weekly_top` to the `/portal/territory-river` payload (the week×top-3 drill-floor). A later movement PR — **#315 `4771e5e`** — branched *before* #312, touched `src/portal-measurement.js`, and its merge **dropped the `weekly_top` block** (`anchor_count` survived; `weekly_top` did not — `grep -c weekly_top` on main's `portal-measurement.js` = **0**). The frontend (`WeeklyTopTerritories.svelte` + `CuriousLifeView`) renders it gated on `river?.weekly_top?.length`, so the graph went silently empty.
+> **The fix** (commit `e3ddb9c` on `fix/territory-river-eventloop-cache`): re-added the `weekly_top` computeFn block (section 7) from #312 (`4a6eccd`), reconciled on top of #317's capped + chunked-decrypt cold fold; bumped the cache schema so stale payloads (which lack `weekly_top`) are invalidated. Full payload now verified to carry `weekly_top`, `anchor_count`, `anchors[]`, `novelty.{text,path}`.
 
-**The app (`/Applications/Mycelium.app`) was hot-patched to main *at the time of the #312 deploy*** (when `weekly_top` was present), so the *running app* currently still serves `weekly_top` — but a fresh deploy from current main would lose it until the regression is fixed. The page is otherwise live: title fixed, territory river + anchor-count, shared-hover sync. **Known rough edge:** river first load ~10–23s + cache not catching — **fix is in open PR #317** (cap + chunked decrypt + robust `v4` key dropping the `MAX(updated_at)` churn); deploy it once merged.
+**The app (`/Applications/Mycelium.app`) was hot-patched to main *at the time of the #312 deploy*** (when `weekly_top` was present), so the *running app* currently still serves `weekly_top` — but a fresh deploy from current main would lose it until #317 (which now carries the restore) merges. The page is otherwise live: title fixed, territory river + anchor-count, shared-hover sync. **Known rough edge:** river first load ~10–23s + cache not catching — **fix is in open PR #317** (cap + chunked decrypt + robust `v4` key dropping the `MAX(updated_at)` churn) + the `weekly_top` restore; deploy it once merged.
 
 **Build order:** steps 1–3 shipped (#312). Next = **B1 connectivity** (gated), **B2 event-anchor** (infra unblocked), **B3 movement** (gated). See Implementation plan.
 
@@ -119,7 +120,7 @@ Then: Novelty surface (gzip + coarse LZ now; embedding-novelty fine via CVP) · 
 ## Open decisions for the operator
 
 1. **Start B2 infra now, or hold?** B2's storage/capture/overlay infra is unblocked (keystone). Its *system-proposed* primary path needs B3. **Recommendation:** build the B2 infra now (free-text anchor + overlay + "since" lens); add the proposed-path when B3 lands.
-2. **River perf — decided in #317:** it did *both* (180-week cap + chunked/yielding decrypt + robust key). The cap means the river shows ~last 180 weeks, not the full 2018→2026 span — confirm that's acceptable, or widen the cap. Action: merge #317, restore `weekly_top` on top, redeploy.
+2. **River perf — decided in #317:** it did *both* (180-week cap + chunked/yielding decrypt + robust key) **and now carries the `weekly_top` restore** (commit `e3ddb9c`). The cap means the river shows ~last 180 weeks, not the full 2018→2026 span — confirm that's acceptable, or widen the cap. Action: merge #317, redeploy (the `weekly_top` restore rides along).
 3. **B1 cofire source:** snapshot `territory_cofire` over time (richer, needs a pipeline job) vs activation-derived weekly PPMI (build-now, coarser). **Recommendation:** activation-derived PPMI first cut; snapshot job later.
 4. **Spec PRs:** merge #307 (interaction spec) after you + Ada reconcile; **commit the metric spec** (`SPEC-curious-life-page-2026-06-19.md`) — currently untracked in the main working tree, at risk of loss.
 5. **The metric-side deliverables that gate us:** depth-invariant `D_K`/mean-step columns (gates B3), dimension-aware Fisher smoothing (ε=α/n), realm/theme consistency + naming (gate B1), the P3 cross-check layer (gates B3 marks). Confirm ownership with the metrics thread.
@@ -128,11 +129,11 @@ Then: Novelty surface (gzip + coarse LZ now; embedding-novelty fine via CVP) · 
 
 ## Pickup protocol (execute in order)
 
-0. **Fix the `weekly_top` regression** (see the ⚠️ callout up top) — it silently broke the week×top-3 graph on main. Reconcile with #317. Do this before any new B-layer work.
+0. ✅ **DONE — `weekly_top` regression fixed** (commit `e3ddb9c` on #317, `verify:territory-river-cache` 8/8). Nothing to do here except merge #317 + redeploy (steps 3–4). Left in place as the audit trail.
 1. **Read this handoff cold.** Then read `docs/SPEC-curious-life-interaction-2026-06-19.md` (on PR #307 — `gh pr diff 307` or check out the branch) and the metric spec (untracked in the main working tree — `git -C <main> status` will show it).
 2. **Confirm where main is:** `git -C mycelium-worktrees/curious-life fetch origin main && git log --oneline -8 origin/main` — note any new metrics-thread PRs (this repo moves fast; main advanced ~10 PRs during this session).
 3. **Verify the app is current + healthy:** run the Production-state probes above. If the river is slow/000, check `task_566d39e4` (perf subagent) status — it may have shipped a fix.
-4. **Check PR #317** (river-perf: cap + chunked decrypt + robust `v4` key). When it merges, **restore `weekly_top` on top of it** (step 0), then re-deploy the app (hot-patch runbook) so the river is fast *and* the week×top-3 works.
+4. **Check PR #317** (river-perf: cap + chunked decrypt + robust `v4` key + the `weekly_top` restore, commit `e3ddb9c`). When it merges, re-deploy the app (hot-patch runbook) so the river is fast *and* the week×top-3 works — both fixes ride together now.
 5. **Check the gates** (with the metrics thread): naming describe-only pass done? clustering reconciled (realms named/consistent)? depth-invariant `D_K` columns + P3 landed? These unblock B1/B3.
 6. **Decide the next slice** (Open decision #1): default = **B2 event-anchor infra** (unblocked keystone). Run `/sweep-first-design` before B1/B2 structural code, `/deploy-and-verify` after any deploy.
 7. **For B1 when you build it:** it MUST be the PPMI/partial-correlation temporal network at realm/theme — re-read §3.5. Do not ship raw co-occurrence.
