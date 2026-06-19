@@ -35,7 +35,8 @@ const _inFlight = new Map(); // userId -> { key, promise }
 // data) so stale persisted/in-process caches from an older code version are
 // invalidated — the data-only probe below can't see code changes. v2: anchor_count.
 // v4: dropped territory_profiles.MAX(updated_at) from the probe (see below).
-const RIVER_SCHEMA = 'v4-robustkey';
+// v5: restored weekly_top in the payload (regression from #315; see CURIOUS-LIFE handoff).
+const RIVER_SCHEMA = 'v5-weeklytop';
 
 /**
  * Cheap staleness probe. Reads only structural (non-encrypted) columns —
