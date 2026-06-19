@@ -177,6 +177,14 @@ echo "Step 7/16: Compute Fisher trajectory (information-geometry / movement pill
 # uses CLUSTERING_RUN_ID as the era anchor. Skip-existing within an era.
 "$PYTHON" pipeline/compute-fisher.py
 
+# Basis-free movement cross-check: angular drift of the GLOBAL embedding centroid
+# week-to-week (no clustering filter → invariant to a re-cluster). Reads
+# messages.embedding_768 (NEVER_AUTO_DECRYPT) via the same Python decrypt path as
+# harmonics/novelty; aligns to Fisher's weekly_step grid + era. P3b reads it beside
+# Fisher velocity as the 2x2 honesty quadrant. Runs in measure-only too.
+echo "Step 7b/16: Compute embedding-trajectory (basis-free movement cross-check)"
+"$PYTHON" pipeline/compute-embedding-trajectory.py
+
 # ── T1: topology-graph measurement stages ───────────────────────────────────
 # All four depend on cluster.py output (territories/points written by Step 2) +
 # the co-firing graph (Step 4), so they run AFTER Fisher. Vitality/complexity/

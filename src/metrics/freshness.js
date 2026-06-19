@@ -29,6 +29,7 @@ export const METRIC_BUDGETS = Object.freeze([
   { table: 'topology_audit_snapshots', timestamp_column: 'run_at', budget_ms: 30 * HOUR, cadence: '24h', description: 'Topology health (M2 entropy, degree Gini, orphans).' },
   { table: 'frequency_snapshots', timestamp_column: 'computed_at', budget_ms: 30 * HOUR, cadence: '24h', description: 'Windowed cognitive frequency metrics.' },
   { table: 'cognitive_metrics_harmonic', probe: { kind: 'pipeline_state', stage_name: 'cognitive-harmonics' }, budget_ms: 26 * HOUR, cadence: '24h (era-anchored)', description: 'Cognitive harmonics (information-harmonics + bigram flow + topology H0 entropy).' },
+  { table: 'embedding_trajectory', timestamp_column: 'computed_at', budget_ms: 26 * HOUR, cadence: '24h', description: 'Basis-free movement cross-check (global embedding-centroid drift).' },
 ]);
 
 // Which pipeline_state stage writes each metric family — so /measurement-health
@@ -39,6 +40,7 @@ export const FAMILY_STAGE = Object.freeze({
   fisher_trajectory: 'fisher-trajectory', fisher_milestones: 'fisher-trajectory', territory_vitality: 'compute-vitality',
   territory_cofire: 'compute-cofire', complexity_snapshots: 'compute-complexity', topology_audit_snapshots: 'topology-audit',
   frequency_snapshots: 'compute-frequency', cognitive_metrics_harmonic: 'cognitive-harmonics',
+  embedding_trajectory: 'compute-embedding-trajectory',
 });
 
 const BUDGET_BY_TABLE = new Map(METRIC_BUDGETS.map((b) => [b.table, b]));
