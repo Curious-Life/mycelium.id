@@ -10,8 +10,13 @@
 // importObsidianVault → saveDocument / captureMessage.
 
 import express from 'express';
+import os from 'node:os';
+import path from 'node:path';
 import { importObsidianVault } from './ingest/obsidian-import.js';
 import { importFullExport } from './ingest/full-export-import.js';
+import { processClaudeCodeExport } from './ingest/import-parsers.js';
+import { detectSources, readClaudeCodeEntries } from './ingest/detect-sources.js';
+import { captureMessage } from './ingest/capture.js';
 
 export function portalImportRouter({ db, userId, enqueueEnrichment }) {
   const router = express.Router();
@@ -52,6 +57,35 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
       const msg = String(e?.message || e);
       const is400 = /required|invalid_bundle|format|manifest/i.test(msg);
       return res.status(is400 ? 400 : 500).json({ ok: false, error: msg.slice(0, 200) });
+    }
+  });
+
+  // GET /import/detect — scan this Mac's allowlist of known data-source folders
+  // (Obsidian vaults, Claude Code transcripts). Presence + counts + dates ONLY,
+  // never content; invoked on the explicit "Scan for data" action. Feeds the
+  // catalog's "Found on this Mac — N · Import" CTAs. @see ingest/detect-sources.js.
+  router.get('/import/detect', async (_req, res) => {
+    try { return res.json({ ok: true, sources: detectSources() }); }
+    catch { return res.status(500).json({ ok: false, error: 'detection failed' }); }
+  });
+
+  // POST /import/claude-code { folderPath? } — import detected Claude Code session
+  // transcripts (~/.claude/projects/**/*.jsonl). Server reads the .jsonl off disk
+  // (same loopback posture as /import/obsidian folderPath) and threads each
+  // message through captureMessage with its original timestamp.
+  router.post('/import/claude-code', async (req, res) => {
+    try {
+      const folderPath = (typeof req.body?.folderPath === 'string' && req.body.folderPath)
+        ? req.body.folderPath : path.join(os.homedir(), '.claude', 'projects');
+      // 'clean' (default) imports just the human↔agent conversation; 'full' keeps
+      // tool/meta turns too. Either way the full raw line is kept in metadata.raw.
+      const mode = req.body?.mode === 'full' ? 'full' : 'clean';
+      const entries = readClaudeCodeEntries(folderPath);
+      const capture = (msg) => captureMessage(db, { userId, ...msg }, enqueueEnrichment);
+      const summary = await processClaudeCodeExport(entries, { capture }, { mode });
+      return res.json({ ok: true, scanned: entries.length, ...summary });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: String(e?.message || e).slice(0, 200) });
     }
   });
 
