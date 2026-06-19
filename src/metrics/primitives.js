@@ -161,7 +161,8 @@ const LZ_MIN_RELIABLE = Number(process.env.COMPLEXITY_MIN_RELIABLE) || 20;
  *    chance; <1 ≈ compressible/repetitive). Mirrors the Fisher/PLV null pattern.
  *    Deterministic via the seed (reproducible across runs + for the verify gate).
  *  - LONG (n ≥ LZ_SURROGATE_MAX_N): the asymptotic is statistically fine and the
- *    surrogate would be costly → use n/log₂a (over SYMBOLS, n = symbol count).
+ *    surrogate would be costly → normalize by the LZ bound b(n) = n/log_a(n) =
+ *    n·log2(a)/log2(n) (over SYMBOLS, n = symbol count, a = alphabet size).
  *  `low_confidence` = 1 when the sequence is too short to discriminate OR the
  *  surrogate null has no variance (every ordering equally complex).
  *
@@ -180,7 +181,11 @@ export function lzComplexity(sequence, { seed = 1, surrogates = LZ_SURROGATES } 
   const cObs = lz76(sequence);
 
   if (n >= LZ_SURROGATE_MAX_N) {
-    const maxC = n / Math.log2(alphabetSize);
+    // Lempel-Ziv upper bound b(n) = n / log_a(n) = n·log2(a)/log2(n), where a is the
+    // alphabet size. The earlier `n / log2(a)` was wrong (it is neither the bound nor
+    // dimensionally sensible) and SATURATED any large-alphabet sequence to 1.00 — e.g.
+    // the global stream (n≈10.5k, a=250) read 1.00 instead of its true ~0.54.
+    const maxC = (n * Math.log2(alphabetSize)) / Math.log2(n);
     const normalized = maxC > 0 ? Math.min(1, cObs / maxC) : 0;
     return { complexity: cObs, normalized: Math.round(normalized * 1000) / 1000,
       nullMean: null, nullStd: null, lowConfidence: 0, sequenceLength: n, alphabetSize };
