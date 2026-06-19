@@ -6,6 +6,8 @@
 **Audience:** the next Claude Code instance building this.
 **Skill:** authored under `/sweep-first-design` (3 sweeps + own-eyes verification; pivot recorded below).
 
+> **STATUS: BUILT + verified 2026-06-19 — PR [#328](https://github.com/Curious-Life/mycelium.id/pull/328).** Commits: `62026fe` (design) · `c97d076` (impl). Full `npm run verify` **170/170 GO** (incl. `verify:cross-check-display` 10/10 + `verify:cross-check-quadrant`); `svelte-check` 0/0. The `is_current ⇒ F.z === velocity_baseline_z` invariant is corroborated on the **live vault** (`-0.9988013342253385` on both endpoints). Pending: live WKWebView visual smoke (live state is `consistent`); human review + merge.
+
 ---
 
 ## 0. What we're building
