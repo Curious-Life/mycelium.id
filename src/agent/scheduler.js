@@ -24,6 +24,7 @@ import { createLane } from './lane.js';
 import { computeNextRun } from './scheduler-time.js';
 import { runAgentTurn } from './run-turn.js';
 import { cycleTurnOpts, isNoReply } from './cycle-prompts.js';
+import { resolvePersona } from '../skills/store.js';
 import { createEgressAuditSink } from '../inference/egress.js';
 import { createUsageSink } from '../inference/usage.js';
 
@@ -87,12 +88,16 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
   // system preamble and routes to the cloud-by-default 'reflection' inference task; any other
   // task keeps SCHEDULER_SYSTEM + the 'harness' model. cycleTurnOpts is the single decision point.
   async function buildAndRunTurn(task) {
-    const { systemExtra, inferenceTask } = cycleTurnOpts(task);
+    const { isCycle, inferenceTask } = cycleTurnOpts(task);
+    const tUser = task.user_id || userId;
+    // A reflection cycle injects the user-editable persona (skills/persona/soul.md, resolved
+    // with a hard fallback to the ported default); any other task keeps the generic preamble.
+    const systemExtra = isCycle ? await resolvePersona(db, tUser) : SCHEDULER_SYSTEM;
     return runAgentTurn(
-      { db, userId: task.user_id || userId, tools, handlers, loop, fetchImpl, signal: ctrl.signal },
+      { db, userId: tUser, tools, handlers, loop, fetchImpl, signal: ctrl.signal },
       {
         userMessage: task.prompt || '',
-        systemExtra: systemExtra ?? SCHEDULER_SYSTEM,
+        systemExtra,
         enabledTools: task.enabled_tools || [],
         inferenceTask,
       },

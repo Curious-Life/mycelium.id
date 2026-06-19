@@ -32,6 +32,7 @@ import { createIngestDomain } from './tools/ingest.js';
 import { createCurateDomain } from './tools/curate.js';
 import { createReplyDomain } from './tools/reply.js';
 import { createScheduleTasksDomain } from './tools/schedule-tasks.js';
+import { createCyclesDomain } from './tools/cycles.js';
 import { createFederationDomain } from './tools/federation.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { getMasterKey } from './crypto/crypto-local.js';
@@ -137,6 +138,10 @@ export function buildDomains({
     // them. They reach an autonomous turn only via autonomyTools() (agent/autonomy-tools.js)
     // when a task opts in. Needs db.harness (present on the keyed db).
     ...(db.harness ? [createScheduleTasksDomain({ db, userId })] : []),
+    // Context Engine L2 ("own it"): let the agent change how it runs the reflection cycles
+    // (instructions / schedule / on-off) + the persona, when the user asks. Chat-grantable
+    // (tool-domains.js 'cycles' domain), unlike the autonomy-only schedule_task family.
+    ...(db.harness ? [createCyclesDomain({ db, userId })] : []),
   ];
 
   // reply (agent-explicit egress): wired ONLY when AGENT_URL is set — i.e. when

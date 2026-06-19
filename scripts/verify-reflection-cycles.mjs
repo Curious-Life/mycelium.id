@@ -108,6 +108,71 @@ ok(db._tasks.length === 6, 'still exactly 6 cycle tasks after re-seed', `(${db._
 // ── 6. inference task registered ────────────────────────────────────────────
 ok(INFERENCE_TASKS.includes('reflection'), "'reflection' registered as a routable inference task");
 
+// ── 7. editable skills: persona doc + cycle-editing tools ────────────────────
+const { resolvePersona, seedPersonaDoc, PERSONA_PATH } = await import('../src/skills/store.js');
+const { createCyclesDomain } = await import('../src/tools/cycles.js');
+const { isGrantableTool, DOMAINS } = await import('../src/agent/tool-domains.js');
+
+// persona resolution: edited doc wins, missing doc falls back to the constant (never throws)
+const personaFromDoc = await resolvePersona({ documents: { get: async () => ({ content: 'MY EDITED PERSONA' }) } }, 'u');
+ok(personaFromDoc === 'MY EDITED PERSONA', 'resolvePersona returns the edited doc');
+const personaFallback = await resolvePersona({ documents: { get: async () => null } }, 'u');
+ok(personaFallback === REFLECTION_PERSONA, 'resolvePersona falls back to the constant when no doc');
+const personaOnError = await resolvePersona({ documents: { get: async () => { throw new Error('boom'); } } }, 'u');
+ok(personaOnError === REFLECTION_PERSONA, 'resolvePersona falls back on a read error (cycle never breaks)');
+
+// seedPersonaDoc idempotent (inject a stub saveDocument)
+{
+  const saved = [];
+  const save = async (_d, input) => { saved.push(input); };
+  const r1 = await seedPersonaDoc({ documents: { get: async () => null } }, 'u', { saveDocument: save });
+  ok(r1.created === true && saved.length === 1 && saved[0].path === PERSONA_PATH, 'seedPersonaDoc writes the persona when absent');
+  const r2 = await seedPersonaDoc({ documents: { get: async () => ({ content: 'x' }) } }, 'u', { saveDocument: save });
+  ok(r2.created === false && saved.length === 1, 'seedPersonaDoc is idempotent (skips when present)');
+}
+
+// cycle-editing tools over a fake db
+function fakeCyclesDb() {
+  const store = CYCLES.map((c, i) => ({ id: `t${i}`, name: c.name, schedule: c.schedule, status: 'active', prompt: c.body, tz: null, created_by: CYCLE_CREATED_BY }));
+  store.push({ id: 'u9', name: 'A user task', schedule: 'daily:6', status: 'active', prompt: 'x', created_by: 'user' });
+  const patches = [];
+  return { _store: store, _patches: patches, harness: {
+    async listTasks() { return store.map((t) => ({ ...t })); },
+    async updateTask(_u, id, fields) { patches.push({ id, fields }); Object.assign(store.find((t) => t.id === id), fields); },
+  } };
+}
+{
+  const db = fakeCyclesDb();
+  const savedPersona = [];
+  const { tools, handlers } = createCyclesDomain({ db, userId: 'u', saveDocument: async (_d, input) => { savedPersona.push(input); }, now: () => new Date('2026-06-20T00:00:00Z') });
+  ok(tools.map((t) => t.name).sort().join(',') === 'getCyclePrompt,listCycles,updateCycle,updatePersona', 'cycles domain exposes the 4 tools');
+
+  const list = await handlers.listCycles();
+  ok(/Morning check-in/.test(list) && !/A user task/.test(list), 'listCycles shows only the 6 reflection cycles');
+
+  const r = await handlers.updateCycle({ cycle: 'evening', prompt: 'be warmer and shorter' });
+  ok(/Updated Evening check-in/.test(r) && db._patches.some((p) => p.fields.prompt === 'be warmer and shorter'), 'updateCycle edits the cycle prompt');
+  ok(/^Error/.test(await handlers.updateCycle({ cycle: 'nope', prompt: 'x' })), 'updateCycle rejects an unknown cycle');
+
+  await handlers.updateCycle({ cycle: 'morning', schedule: 'daily:9' });
+  const schedPatch = db._patches.find((p) => p.fields.schedule === 'daily:9');
+  ok(schedPatch && schedPatch.fields.next_run, 'updateCycle reschedules + recomputes next_run');
+
+  await handlers.updateCycle({ cycle: 'triage', enabled: false });
+  ok(db._patches.some((p) => p.fields.status === 'paused'), 'updateCycle can pause a cycle');
+
+  const gp = await handlers.getCyclePrompt({ cycle: 'weekly' });
+  ok(typeof gp === 'string' && /Weekly Review/.test(gp), 'getCyclePrompt returns the current body');
+
+  const up = await handlers.updatePersona({ content: 'A kinder voice.' });
+  ok(/Updated the reflection persona/.test(up) && savedPersona.some((s) => s.path === PERSONA_PATH && s.content === 'A kinder voice.'), 'updatePersona writes skills/persona/soul.md');
+  ok(/^Error/.test(await handlers.updatePersona({ content: '' })), 'updatePersona rejects empty content');
+}
+
+// chat-grantability: the cycle tools are in the catalog (so the agent can use them in chat)
+ok(DOMAINS.some((d) => d.key === 'cycles'), "tool-domains has a 'cycles' domain");
+ok(['listCycles', 'updateCycle', 'updatePersona', 'getCyclePrompt'].every((t) => isGrantableTool(t)), 'all 4 cycle tools are chat-grantable');
+
 console.log(`\n${pass} pass · ${fail} fail`);
 if (fail === 0) { console.log('VERDICT: GO'); process.exit(0); }
 console.log('VERDICT: NO-GO'); process.exit(1);

@@ -8,6 +8,7 @@
 
 import { parseSchedule, computeNextRun } from './scheduler-time.js';
 import { CYCLES, CYCLE_CREATED_BY } from './cycle-prompts.js';
+import { seedPersonaDoc } from '../skills/store.js';
 
 /**
  * @param {object} db      keyed db (needs db.harness.createTask + db.harness.listTasks)
@@ -18,6 +19,9 @@ import { CYCLES, CYCLE_CREATED_BY } from './cycle-prompts.js';
 export async function seedReflectionCycles(db, userId, { logger = () => {}, now = () => new Date() } = {}) {
   if (!db?.harness?.createTask) throw new TypeError('seedReflectionCycles: db.harness.createTask required');
   if (typeof userId !== 'string' || !userId) throw new TypeError('seedReflectionCycles: userId required');
+
+  // Seed the editable persona doc alongside the cycle tasks (idempotent; never clobbers edits).
+  try { await seedPersonaDoc(db, userId, { logger }); } catch { /* non-fatal — scheduler falls back to the constant */ }
 
   let existing = [];
   try { existing = await db.harness.listTasks(userId); } catch { existing = []; }
