@@ -1,0 +1,141 @@
+# Curious Life redesign — Handoff Doc
+
+**Date:** 2026-06-19
+**Audience:** the next Claude Code instance picking up the Curious Life page work.
+**Companions (read these next):**
+- `docs/SPEC-curious-life-interaction-2026-06-19.md` — **interaction/component spec (this thread owns it). NOT on main yet — it's on PR #307.**
+- `docs/SPEC-curious-life-page-2026-06-19.md` — metric/validity spec (the "Ada" half). **Uncommitted/untracked in the main working tree — never committed. Commit it or it's lost.**
+- `docs/CURIOUS-LIFE-METRICS-CATALOG.md` — per-metric plain-language + rigor (on main).
+- `docs/FINDING-clustering-run-inconsistency-blocks-topic-river-2026-06-19.md` + `docs/FINDING-territory-naming-incomplete-2026-06-19.md` (on main).
+
+This is a two-agent design collaboration: **this coding thread** owns the interaction/component spec + the frontend/endpoint build; a separate **metrics/research thread ("Ada")** owns the metric spec, reliability calls, clustering/naming pipeline, and the literature grounding. The two specs cross-reference and must be reconciled.
+
+---
+
+## TL;DR — current state
+
+| Slice | PR / commit | Status |
+|---|---|---|
+| Precision-ladder IA rework + Routine/Early-signals + first endpoints + metricsCatalog + reference doc | #293 (main `d1ba451`) | ✅ merged + deployed |
+| Anchor-count-over-time graph + cache schema v2 | #304 (main `8fa4bb2`) | ✅ merged + deployed |
+| Title fix + Week×top-3 drill-floor + shared-hover sync + cache v3 | #312 (main `4a6eccd`) | ✅ merged + deployed |
+| Interaction/component spec (+ 2 rounds of Ada review folded in) | **#307 (OPEN)** | ⏳ open, not merged |
+| River cold-compute perf/stability fix | subagent `task_566d39e4` | 🔄 **running** (operator triggered) |
+| Territory naming (describe-only) + clustering reconciliation | metrics/pipeline thread | ⛔ owned elsewhere, gating B1 |
+
+**The app (`/Applications/Mycelium.app`) is deployed to current main** (hot-patched, see Deploy runbook). The page is live: title fixed, territory river + week×top-3 + anchor-count, shared-hover sync. **Known rough edge:** the river's *first* load is ~10–23s and may not cache (see Gotchas) — the perf subagent is fixing it.
+
+**Build order:** steps 1–3 shipped (#312). Next = **B1 connectivity** (gated), **B2 event-anchor** (infra unblocked), **B3 movement** (gated). See Implementation plan.
+
+---
+
+## What shipped (commit detail)
+
+All merged to `main` via squash; branches in `mycelium-worktrees/curious-life`.
+
+**#293 `d1ba451` — precision-ladder rework**
+- `portal-app/src/lib/views/CuriousLifeView.svelte` — rebuilt: hero, narrative summary band, at-a-glance stats, grouped pillar cards (How you think / Your world / Turning points), "What we measure" glossary, rigor badges, band/granularity relabeling.
+- `portal-app/src/lib/curious/metricsCatalog.ts` (new) — single source for the glossary + rigor labels.
+- `src/portal-measurement.js` — new owner-gated endpoints `/portal/behavioral`, `/portal/criticality`, `/portal/events` (read path auto-decrypts envelopes; no crypto-registry change).
+- `docs/CURIOUS-LIFE-METRICS-CATALOG.md` (new).
+
+**#304 `8fa4bb2` — anchor-count graph**
+- `/portal/territory-river` payload gains `anchor_count` (persistent-core size/week, trailing-26wk ≥60% rule).
+- `territory-river-cache.js` schema → `v2-anchorcount`.
+- `CuriousLifeView` renders it via `TimeSeries`.
+
+**#312 `4a6eccd` — title + week×top-3 + shared-hover**
+- Title: retired the centered gradient hero ("Your mind, quantified.") → quiet left-aligned "Curious Life" overline.
+- `/portal/territory-river` payload gains `weekly_top` (each week's top-3 territories + counts = `round(share × weekly message_count)`, names from `territory_profiles`). Cache → `v3-weeklytop`.
+- `portal-app/src/lib/curious/WeeklyTopTerritories.svelte` (new) — rank-colored weekly bars, hover → names+counts.
+- `TerritoryRiver.svelte` refactored to a **bindable `hoverDate`** (hoverIdx derived); `CuriousLifeView` holds a page-level `hoverDate` bound to both → one cursor syncs every graph.
+
+**Adjacent work merged by the metrics/Ada thread** (depended-on, not ours): #287 vitality dedup (`240b773`, fixes the over-count I'd flagged), #288 clustering validity diagnostics (`95d80c4`), #289 decrypt-once cache + isEncrypted prefix-guard (`ea46ebc`), #290 topology prune (`ca0b06d`), #292 embedding-novelty (`e1bc31c`), #294 CVP presentation gate (`ea34e5e`), #296 LZ saturation fix (`5f98859`), **#301 territory-river persisted cache (`ab196c7`)**, plus `src/metrics/baseline-z.js` (trailing-exclusive "unusual for me" z) + a `verify:fisher-display` gate.
+
+---
+
+## The design — decisions locked (with Ada's deltas folded in)
+
+The full design is in the two specs. The load-bearing decisions:
+
+1. **The page = one bidirectional timeline ("one instrument").** Shared time axis; the *system* annotates shifts downward, the *person* annotates events upward, the *AI* reads both (third writer). Correlation lives in the overlap. Everything drills to the week×top-3 floor.
+2. **Honesty staircase: detect → correlate → predict.** Detection ships now (change-points are sound). Correlation is *earned* via anchored events (the ground-truth engine), gated by CVP (#294). **Prediction stays present-tense, never a forecast** — EWS sensitivity is ~33%, direction-blind (Smit 2025). "You've been slower to return to baseline" ✅; "a shift is coming" ❌.
+3. **Reliability tiers drive display.** Tier-A (counts/text/behavioral, basis-independent) = headline; Tier-B (Fisher/coherence/harmonics/LZ, basis-dependent) = hedged detail; Tier-C (embedding-anchors/affect, CVP-pending) = badged/gated.
+4. **Self-relative always** ("vs *your* normal", baseline-z), drill-to-evidence everywhere, name-the-experience-not-the-machinery (no "quantified"/"analytics").
+
+**Ada's B-layer corrections (folded into #307 — the ones that change implementation):**
+- **B1 Connectivity is an idiographic temporal network (graphicalVAR).** Co-firing = contemporaneous net; transitions = temporal net. **DO NOT ship raw co-occurrence — volume-confounded.** Use **PPMI → regularized partial-correlation + sparsify**; transitions at **realm/theme, share-weighted** (territory-level undersamples to noise); **snapshot `territory_cofire`** rather than re-derive; drift = edges vs surrogate noise.
+- **B2 Event-anchor primary path = system-PROPOSED at detected shifts (in-situ).** Retrospective scrolling captures the biased ~70% (hindsight). Fuzzy/range dates; timestamped valence (good/hard/neutral/mixed/unsure); free-text fallback. Couples B2↔B3/P3.
+- **B3 Movement uses `velocity_baseline_z`** (not pooled-null) for the "Nσ" copy; cycling/exploring via **depth-invariant `R_recent` / windowed `D_K` / mean step** — NOT the cumulative `fisher_*` columns (those are the depth-degenerate source of the weird numbers). Each shift-mark carries its **P3 agreement quadrant** ("cross-check pending" until P3 lands).
+
+---
+
+## Implementation plan (the build order)
+
+✅ **1–3 shipped** (#312): title, shared-hover, week×top-3.
+
+🔜 **B1 — Connectivity over time** (§3.5 of interaction spec). **Build as a temporal psychometric network, not naive co-occurrence.** First cut: PPMI + top-edge sparsify on realm/theme co-activation; share-weighted realm/theme transition matrix; co-firing-drift = PPMI edges across windows vs surrogate. Target: partial-correlation (GGM). **GATED on:** realm/theme layer being consistent + named (clustering reconciliation) + ideally the cofire-snapshot pipeline job. Reuses the river's heavy activation fetch (so it benefits from the perf fix).
+
+🔜 **B2 — Event-anchor** (§3.7). **Infra is unblocked, build it next:** `user_events` table (encrypted: label, valence, valence_ts, fuzzy date, note), `GET/POST /portal/events/anchor`, capture UI, marker overlay on every time graph (reuse `hoverDate`/shared axis), "since [event]" before/after lens. The **system-proposed-at-shifts primary path couples to B3/P3** (needs shift detection to know where to prompt) → lands with B3; free-text anchor is the interim.
+
+⛔ **B3 — Movement shift-marks** (§3.4). **GATED on** the depth-invariant `D_K`/mean-step columns landing (metrics thread) + the P3 cross-check layer. Then: velocity-z spikes as marks on the shared timeline, baseline-z copy, P3 quadrant per mark.
+
+Then: Novelty surface (gzip + coarse LZ now; embedding-novelty fine via CVP) · Texture (coherence-as-flow, harmonics exploratory) · Recovery/early-signal battery (present-tense).
+
+---
+
+## Production state
+
+- **App:** `/Applications/Mycelium.app` — hot-patched to current `main` (full `src/` + `migrations/` + `portal-app/build` sync + adhoc re-sign + relaunch). Serves `:8787`.
+- **Verify it's current:**
+  ```
+  grep -c weekly_top /Applications/Mycelium.app/Contents/Resources/app/src/portal-measurement.js   # expect 1
+  curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8787/api/v1/portal/frequency            # expect 200
+  curl -s "http://127.0.0.1:8787/api/v1/portal/territory-river" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log("weekly_top:",(JSON.parse(s).weekly_top||[]).length))'  # expect ~417 (may be slow/cold)
+  ```
+- **Migrations:** the bundle's `migrations/` was synced from main; the app applies pending ones on boot (incl. `territory_river_cache`, clustering diagnostics).
+
+---
+
+## Gotchas + lessons (2026-06-19)
+
+- **River cold-compute freezes the whole app (the big one).** `/territory-river` decrypts ~417 weekly `activation_vector` blobs synchronously (~10–23s, up to 2min under boot) → monopolizes the single Node event loop → *every* endpoint returns HTTP 000 until it finishes. NOT a crash (server-rest.js at ~73% CPU grinding). #301's persisted cache fixes *repeat* loads but **not the cold path**, and any cache-schema bump (v2/v3) or true cold boot re-triggers it. Observed: a 2nd sequential river call still ~10s → the data-derived cache key is likely **rotating** (a background pipeline writing `territory_profiles.updated_at`/`frequency_snapshots` between calls) so it never caches. → subagent `task_566d39e4` (chunked/yielding decrypt + window cap + cache-key stability).
+- **Deploy = hot-patch the bundle** (no full Tauri rebuild needed — the diffs are JS-only): `rsync -a --delete` main's `src/` + `migrations/` + `portal-app/build` into `/Applications/Mycelium.app/Contents/Resources/app/`, `codesign --force --deep --sign - /Applications/Mycelium.app`, `open` it. **Back up first** (`cp -R src build migrations /tmp/...`). The bundle is adhoc-signed (re-signing adhoc is fine). A minimal one-file patch breaks on missing imports (the bundle lags several PRs) → sync the whole `src/`.
+- **Dev-preview verification recipe:** `.claude/launch.json` config `curious` runs vite on `:5179` (worktree `portal-app`), proxying `/api` → `:8787`. The SPA's auth gate needs the app up (else redirects to `/login`). The preview's 16-request burst **re-congests** the app → page gets stuck on skeletons; wait it out or load when the app's idle. For components whose endpoint isn't in the running app yet, use the **sample-swap**: write `portal-app/static/river-sample.json`, temp-edit the river fetch to `fetch('/river-sample.json')`, screenshot, then revert the one line (do NOT `git checkout` the whole file — it wipes uncommitted edits).
+- **Synthetic-event hover in preview:** dispatch `PointerEvent` with `clientX`; `offsetX` is unreliable. Read tooltip state *after* a `setTimeout(…,250)` (Svelte reactivity flush) — synchronous reads show stale values.
+- **Squash-merge-then-continue:** after a PR squash-merges, `git checkout -B <new> origin/main` for the next slice — don't keep committing on the old branch (it diverges; re-merging re-introduces). Hit this between #304 and #312.
+- **Naming blocker:** 218/312 territories have null `name`/`essence`/`top_entities` → bands read "Territory 2660". Fix = a **describe-only** pipeline pass (a full re-cluster collapses realms — known issue). Owned by metrics/pipeline thread.
+- **Clustering inconsistency:** three irreconcilable realm id-spaces (trajectory 1–48 vs territory-assignments 43–56 vs realms table = 2) → named *realm*-level views blocked; ship at territory altitude. (FINDING doc on main.)
+- **`autoDecryptResults` is envelope-sniffing, not registry-gated** (`crypto-local.js`): a raw `db.rawQuery` SELECT auto-decrypts any envelope column even for tables not in `ENCRYPTED_FIELDS` — which is why `/behavioral` `/criticality` worked with no crypto change. #289's prefix-guard (`isEncrypted` requires `"ey"` prefix) is compatible (Python `json.dumps` envelopes start with `"ey"`).
+- **Vitality bug was real and is FIXED upstream** by #287 (`240b773`) — my BUG note was removed as resolved. Don't re-file it.
+
+---
+
+## Open decisions for the operator
+
+1. **Start B2 infra now, or hold?** B2's storage/capture/overlay infra is unblocked (keystone). Its *system-proposed* primary path needs B3. **Recommendation:** build the B2 infra now (free-text anchor + overlay + "since" lens); add the proposed-path when B3 lands.
+2. **River perf: cap vs chunked-decrypt.** The subagent is deciding. A recent-window cap (last ~180 wk) loses the long 2018→2026 view; chunked/yielding decrypt keeps it but is more work. **Recommendation:** chunked-decrypt + keep full span; cap only if needed.
+3. **B1 cofire source:** snapshot `territory_cofire` over time (richer, needs a pipeline job) vs activation-derived weekly PPMI (build-now, coarser). **Recommendation:** activation-derived PPMI first cut; snapshot job later.
+4. **Spec PRs:** merge #307 (interaction spec) after you + Ada reconcile; **commit the metric spec** (`SPEC-curious-life-page-2026-06-19.md`) — currently untracked in the main working tree, at risk of loss.
+5. **The metric-side deliverables that gate us:** depth-invariant `D_K`/mean-step columns (gates B3), dimension-aware Fisher smoothing (ε=α/n), realm/theme consistency + naming (gate B1), the P3 cross-check layer (gates B3 marks). Confirm ownership with the metrics thread.
+
+---
+
+## Pickup protocol (execute in order)
+
+1. **Read this handoff cold.** Then read `docs/SPEC-curious-life-interaction-2026-06-19.md` (on PR #307 — `gh pr diff 307` or check out the branch) and the metric spec (untracked in the main working tree — `git -C <main> status` will show it).
+2. **Confirm where main is:** `git -C mycelium-worktrees/curious-life fetch origin main && git log --oneline -8 origin/main` — note any new metrics-thread PRs (this repo moves fast; main advanced ~10 PRs during this session).
+3. **Verify the app is current + healthy:** run the Production-state probes above. If the river is slow/000, check `task_566d39e4` (perf subagent) status — it may have shipped a fix.
+4. **Check the in-flight subagent:** river-perf (`task_566d39e4`). If merged, re-deploy the app (hot-patch runbook) so the river is fast.
+5. **Check the gates** (with the metrics thread): naming describe-only pass done? clustering reconciled (realms named/consistent)? depth-invariant `D_K` columns + P3 landed? These unblock B1/B3.
+6. **Decide the next slice** (Open decision #1): default = **B2 event-anchor infra** (unblocked keystone). Run `/sweep-first-design` before B1/B2 structural code, `/deploy-and-verify` after any deploy.
+7. **For B1 when you build it:** it MUST be the PPMI/partial-correlation temporal network at realm/theme — re-read §3.5. Do not ship raw co-occurrence.
+
+---
+
+## Worktree / branch state
+
+- Worktree: `mycelium-worktrees/curious-life` (this thread's isolated tree; main is contested by other sessions — always work in a worktree).
+- `portal-app/node_modules` is a real `npm ci` install; root `node_modules` is symlinked to the main checkout (enough for `verify:*` + svelte-check).
+- Open branch: `docs/curious-life-interaction-spec` (= PR #307). This handoff is on `docs/curious-life-handoff`.
+- Skills that fired this session: `/sweep-first-design` (the data sweeps + B1 methodology check), `/deploy-and-verify` (each deploy), `/handoff-discipline` (this doc). The metric/validity work was grounded against live literature by the Ada thread.
