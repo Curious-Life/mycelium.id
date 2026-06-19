@@ -8,17 +8,25 @@
 ## TL;DR — status
 | # | item | status |
 |---|---|---|
-| 1 | 🔴 CRITICAL — plaintext-at-rest on the self-host path | ✅ **FIXED** (`10a8f1a`, PR #341, CI verifying) — verify:at-rest-default 10/10 GO local |
-| 2 | 🔴 HIGH — vault-bridge :8099 unauth SQL oracle | ⏳ TODO (clean-room) |
-| 3 | 🟠 MED-HIGH — import accepts arbitrary local paths | ⏳ TODO (clean-room) |
-| 4 | 🟠 scrubs — /Users paths in KEEP files + exploit doc + email + .gitignore | ⏳ TODO (mechanical) |
+| 1 | 🔴 CRITICAL — plaintext-at-rest on the self-host path | ✅ **FIXED** (`9515de7`, PR #341, CI verifying) — **entry-point gated** (not path; first cut `10a8f1a` broke 29 gates — see below). verify:at-rest-default 5/5 GO local |
+| 2 | 🔴 — `cryptography>=48.0.1` (was `<45` cap, 4 CVEs) | ✅ **applied on main by the parallel supply-chain agent** (`pipeline/requirements.txt`); see `docs/PYTHON-DEPS-SUPPLY-CHAIN-2026-06-19.md` — NOT this PR |
+| 3 | 🔴 — vault-bridge :8099 unauth SQL oracle | ⏳ TODO (clean-room) |
+| 4 | 🟠 — import accepts arbitrary local paths | ⏳ TODO (clean-room) |
+| 5 | 🟠 — bump dompurify (XSS sanitizer advisory) | ⏳ TODO |
+| 6 | 🟠 — pin+hash-lock Python deps + wire pip-audit into CI | ⏳ TODO (parallel agent's plan) |
+| 7 | 🟠 — scrubs: /Users paths in KEEP files + exploit doc + email + .gitignore | ⏳ TODO (mechanical) |
 | — | operator: clone-migration smoke + app rebuild/relaunch for #1 | ⏳ before merge / to go live |
 
 ## #1 CRITICAL — DONE (what shipped, how to verify)
 **The fix (≈25 LOC + a gate):** content lost its field envelope in the collapse, so whole-file SQLCipher must be the DEFAULT for the real vault — not opt-in on `node src/index.js` / `cargo tauri dev`.
-- `src/db/open.js` — new `atRestDefaultOn(dbPath)`: true iff `dbPath` is the canonical vault (`=== resolveDbPath()`, honors `MYCELIUM_DB`). **Design D5 intact** — canonical-scoped, so the ~104 verify gates (non-canonical temp fixtures) keep opening plaintext.
-- `src/index.js` (boot, ~line 121) — opt the canonical entry point in (`if (atRestDefaultOn(dbPath) && !atRestEnabled()) process.env.MYCELIUM_AT_REST='1'`) → fresh canonical vault born encrypted, existing plaintext migrates (existing cross-process-locked machinery). **+ fail-closed belt:** refuse to open the canonical vault unkeyed.
-- `scripts/verify-at-rest-default.mjs` (in the CI chain after `verify:at-rest`) — proves born-encrypted-w/o-flag + migrate + fail-closed predicate + non-canonical-stays-plaintext.
+
+⚠️ **First cut (`10a8f1a`) was WRONG and is reverted.** It keyed default-on off `atRestDefaultOn(dbPath) === canonicalDbPath()`. But `dbPath()` honors `MYCELIUM_DB`, and **29 verify gates + the pipeline subprocesses (`compute-*.js` → `import { boot }`) set `MYCELIUM_DB` to a temp fixture** → the fixture matched "canonical" → `boot()` born-encrypted it → the gate's plain `new Database()` read hit `SQLITE_NOTADB`. `verify:vitality` went red on CI (first in the chain to spawn a pipeline child). **No path check can tell the real launch from a library importer.**
+
+**Real fix — ENTRY-POINT gating (`9515de7`):**
+- `src/index.js` — the opt-in is now in the **`import.meta.url === \`file://${process.argv[1]}\`` main guard** (`if (!atRestEnabled()) process.env.MYCELIUM_AT_REST='1'`), so ONLY `node src/index.js` / `npm start` / `cargo tauri dev` (and the packaged app, which already sets it) turn it on. boot() no longer touches the flag → the ~104 gates + pipeline children that `import { boot }` as a library never trip it (**Design D5 intact**). Spawned children inherit the flag via env.
+- `src/index.js` — fail-closed belt now keys off `atRestEnabled()` (not the spoofable path): `if (atRestEnabled() && !dbKeyHex) throw`.
+- `src/db/open.js` — `atRestDefaultOn()` **deleted** (replaced by a NOTE explaining why path-based detection fails).
+- `scripts/verify-at-rest-default.mjs` (in the CI chain after `verify:at-rest`) — rewritten: **T1** boot()-as-library + no flag → PLAINTEXT (the regression / D5); **T2** boot() + flag → born ciphertext + reads back; **T3** fail-closed predicate; **T4** real `node src/index.js` on an existing plaintext vault + no flag → migrates to ciphertext (entry-point default-on, end-to-end).
 
 **Pre-merge operator smoke (do NOT skip — touches boot):** on a COPY of a real plaintext vault, run `node src/index.js` with `MYCELIUM_DB=<clone>` and confirm: (a) the clone migrates to ciphertext (header not `SQLite format 3`), (b) reads still work, (c) `.pre-cipher` backup is purged only after the keyed re-open verifies. The gate proves the logic on synthetic vaults; this proves it on real data shape/size.
 **To go live:** rebuild app from main after #341 merges + relaunch (auto-unlocks from Keychain). The installed packaged app is ALREADY safe (sets the flag); this fix is for self-hosters + dev.

@@ -67,6 +67,11 @@ The collapse removed the field envelope to kill **per-row decrypt** on hot reads
 2. **Plaintext-vault migration UX:** silent-on-boot (current machinery) vs a one-time "encrypting your vault…" notice.
 3. Whether to retain `MYCELIUM_AT_REST` at all (as opt-out) or remove it.
 
+### As-built — pivot v1 (path-scoped) → v2 (entry-point gated)
+**v1 (`10a8f1a`, REVERTED) keyed default-on off `atRestDefaultOn(dbPath) === canonicalDbPath()`** — exactly the `purgePlaintextBackup` path-scoping the edge-cases section above recommended. **It was wrong.** `dbPath()` honors `MYCELIUM_DB`, and the assumption "0 verify gates set `MYCELIUM_DB`" was false: **29 gates set it to a temp fixture, and the pipeline subprocesses (`compute-*.js`) `import { boot }` with `MYCELIUM_DB` pointed at the gate's fixture.** So the fixture matched "canonical", `boot()` born-encrypted it, and the gate's plain `new Database()` read hit `SQLITE_NOTADB`. CI went red at `verify:vitality` (first gate in the chain to spawn a pipeline child). Path-scoping (which only ever ran under the `dbKeyHex` guard for `purgePlaintextBackup`) cannot safely gate a flag that *sets* encryption — there is no path that distinguishes the real launch from a library importer that set `MYCELIUM_DB`.
+
+**v2 (`9515de7`, shipped):** gate on the **entry point**, the one true signal. The opt-in moved out of `boot()` into the `import.meta.url === \`file://${process.argv[1]}\`` main guard in `src/index.js` — only the real launch (`node src/index.js` / `npm start` / `cargo tauri dev`; the packaged app already sets the flag) turns at-rest on; the ~104 gates + pipeline children that `import { boot }` as a library never reach the guard, so fixtures stay plaintext (D5 intact). The fail-closed belt now keys off `atRestEnabled()`, not the path. `atRestDefaultOn()` was deleted. **Lesson: `MYCELIUM_DB` is a test/relocation knob, not a canonical-vault identity — never derive a security default from it.**
+
 ### Verification table
 | Assumption | Verified at |
 |---|---|
