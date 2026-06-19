@@ -27,12 +27,13 @@
 
 import { encryptVector } from '../search/ann/decode.js';
 import { EMBED_DIM } from '../embed/client.js';
+import { TAXONOMY_VERSION } from './categories-prompt.js';
 import { getMindSearch } from '../search/registry.js';
 import { extract } from './extract.js';
 
 export function createEnrichmentService(deps) {
   if (!deps) throw new TypeError('createEnrichmentService: deps required');
-  const { messages, embed, getMasterKey } = deps;
+  const { messages, embed, getMasterKey, classify } = deps;
   if (!messages
       || typeof messages.selectPendingEnrichment !== 'function'
       || typeof messages.updateEnrichment !== 'function'
@@ -153,6 +154,38 @@ export function createEnrichmentService(deps) {
    * @param {{userId: string, batchSize?: number}} opts
    * @returns {Promise<{scanned: number, enriched: number, failed: number}>}
    */
+  // Stage 3 (Context Engine L1): per-message domain + register labels via the injected
+  // classifier. Independent of the nlp_processed machine (its own categories_processed flag).
+  // Fail-soft: a transient classify failure (model down) STOPS the batch and leaves the row
+  // pending (0) for the next cycle — never poisons a row, never logs content (§1). A model that
+  // replies with garbage yields null labels (still marked attempted, not retried forever).
+  async function enrichCategoriesOnce({ userId, batchSize = 25 } = {}) {
+    if (!userId) throw new TypeError('enrichCategoriesOnce: userId required');
+    if (typeof classify !== 'function') return { scanned: 0, enriched: 0, failed: 0, skipped: 'no-classifier' };
+    const rows = await messages.selectPendingCategories(userId, { limit: batchSize });
+    let enriched = 0;
+    let failed = 0;
+    for (const row of rows) {
+      const content = (row.content || '').trim();
+      if (!content) { // nothing to classify — mark attempted so it isn't re-selected
+        await messages.updateCategories(row.id, userId, { categoriesProcessed: 1, taxonomyVersion: TAXONOMY_VERSION });
+        continue;
+      }
+      let labels;
+      try { labels = await classify(content); }
+      catch { failed++; break; } // transient (model down) → leave pending, stop the batch
+      await messages.updateCategories(row.id, userId, {
+        domain: labels.domain,
+        register: labels.register,
+        subregister: labels.subregister,
+        taxonomyVersion: TAXONOMY_VERSION,
+        categoriesProcessed: 1,
+      });
+      enriched++;
+    }
+    return { scanned: rows.length, enriched, failed };
+  }
+
   async function enrichNlpOnce({ userId, batchSize = 50 } = {}) {
     if (!userId) throw new TypeError('enrichNlpOnce: userId required');
     const rows = await messages.selectPendingNlp(userId, { limit: batchSize });
@@ -182,7 +215,7 @@ export function createEnrichmentService(deps) {
     return { scanned: rows.length, enriched, failed };
   }
 
-  return { drainOnce, enrichNlpOnce };
+  return { drainOnce, enrichNlpOnce, enrichCategoriesOnce };
 }
 
 export default createEnrichmentService;

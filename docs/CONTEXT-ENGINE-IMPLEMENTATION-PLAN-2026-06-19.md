@@ -117,7 +117,10 @@ Order is strict: **1a → 1b → 1c → 2 → 3a → 3b.** Each ships behind its
 
 **Gate** `verify:reflection-cycles`: seed is idempotent (2× = same rows); a fired `cycle:reflection` task runs a turn with the persona system + ported body + the renamed tools; **no ported body references a non-existent tool**; a cycle write lands in `data/mind/model.md` (decrypts back); `deliver:none` writes nothing to `messages`.
 
-### Phase 1b — LLM tagging + clustering (~340 LOC) · migration `0031` · gate `verify:enrich-categories`
+### Phase 1b — LLM tagging — ✅ BUILT 2026-06-19 (migration `0031`, gate `verify:enrich-categories` 29/0 GO)
+**As-built:** one cheap **on-box** LLM call per message tags **both** axes — DOMAIN (locked 7) + REGISTER (Ada's 12→4, Template B) — returning JSON (`format:'json'`). New `enrichCategoriesOnce` drainer stage (sibling to `enrichNlpOnce`) on its own `categories_processed` flag (no collision with `nlp_processed`); fail-soft (model outage → batch stops, rows stay pending, self-heals; garbage → null labels, marked attempted). Plaintext label columns (`domain`/`register`/`subregister`/`taxonomy_version`) — GROUP-BY-able for the measurement surface; no `THREAT-MODEL.md` exists, decision rests on the established `source`/`nlp_processed` plaintext-enum precedent. Files: `categories-prompt.js` (taxonomy + prompt + lenient parser), `categories.js` (classifier over injected `infer`), `0031_message_categories.sql`, edits to `service.js`/`db/messages.js`/`drainer.js`. Migration applies idempotently; `verify:enrich`/`enrich-resilience`/`pipeline-integrity` GO (no regression). Deferred: cloud-configurable model (`settings.models.enrichment`); the existing clustering already produces territories — the label→cluster join is a Phase-3b read.
+
+### Phase 1b — LLM tagging + clustering (~340 LOC, as-planned) · migration `0031` · gate `verify:enrich-categories`
 **Migration `0031`** (claim # off fresh main): `ALTER TABLE messages ADD COLUMN domain TEXT, register TEXT, subregister TEXT, taxonomy_version TEXT, categories_processed INTEGER DEFAULT 0; CREATE INDEX idx_messages_domain ON messages(user_id, domain);` (all plaintext; mirrors `source`/`nlp_processed`).
 **Create**
 - `src/enrich/categories-prompt.js` — the taxonomy as injection-fenced data (Ada Templates A/B for register; the 7-domain prompt). 

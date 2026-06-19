@@ -291,6 +291,49 @@ export function createMessagesNamespace(deps) {
     },
 
     /**
+     * Drain query for the category-tagging pass (Context Engine L1, Phase 1b). Selects rows
+     * not yet attempted (categories_processed 0/NULL) with non-empty content. INDEPENDENT of
+     * the nlp_processed state machine. content auto-decrypts on read so the classifier sees
+     * plaintext. Newest-first so fresh messages get labelled before the historical backfill.
+     */
+    async selectPendingCategories(userId, { limit = 25 } = {}) {
+      const result = await d1Query(
+        `SELECT id, content, scope FROM messages
+           WHERE user_id = ?
+             AND forgotten_at IS NULL
+             AND (categories_processed = 0 OR categories_processed IS NULL)
+             AND content IS NOT NULL AND content != ''
+           ORDER BY created_at DESC
+           LIMIT ?`,
+        [userId, limit],
+      );
+      return result.results || [];
+    },
+
+    /**
+     * Write domain/register labels + mark attempted (categories_processed = 1). domain,
+     * register, subregister, taxonomy_version are PLAINTEXT label enums (NOT in
+     * ENCRYPTED_FIELDS — like source/nlp_processed) so they're SQL-queryable for the
+     * measurement/retrieval surface. NULL labels are valid (the model couldn't classify).
+     * userId REQUIRED in WHERE (unfiltered-UPDATE guard).
+     */
+    async updateCategories(id, userId, { domain, register, subregister, taxonomyVersion, categoriesProcessed = 1 } = {}) {
+      const sets = [];
+      const params = [];
+      if (domain !== undefined) { sets.push('domain = ?'); params.push(domain ?? null); }
+      if (register !== undefined) { sets.push('register = ?'); params.push(register ?? null); }
+      if (subregister !== undefined) { sets.push('subregister = ?'); params.push(subregister ?? null); }
+      if (taxonomyVersion !== undefined) { sets.push('taxonomy_version = ?'); params.push(taxonomyVersion ?? null); }
+      sets.push('categories_processed = ?');
+      params.push(categoriesProcessed);
+      params.push(id, userId);
+      await d1Query(
+        `UPDATE messages SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`,
+        params,
+      );
+    },
+
+    /**
      * Soft-redact (forget): destroy a message's sensitive payload but keep an
      * empty tombstone row (id + timestamps) for audit + anti-resurrection. Nulls
      * every ENCRYPTED_FIELDS column + the embedding (both fingerprints), deletes
