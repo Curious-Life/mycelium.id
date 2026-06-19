@@ -67,16 +67,18 @@ function resolveRoot(dirPath) {
 
 /** Stream an NDJSON file, invoking cb(parsedRow) per valid line. Bounded memory. */
 async function forEachNdjson(file, cb) {
-  if (!fs.existsSync(file)) return 0;
+  if (!fs.existsSync(file)) return { rows: 0, malformed: 0 };
   const rl = readline.createInterface({ input: fs.createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
-  let n = 0;
+  let n = 0, malformed = 0;
   for await (const line of rl) {
     const s = line.trim();
     if (!s) continue;
-    let row; try { row = JSON.parse(s); } catch { continue; }
+    // A corrupt line is a DROPPED row — count it (FAIL-LOUD) so the
+    // reconciliation report surfaces it instead of silently losing data.
+    let row; try { row = JSON.parse(s); } catch { malformed++; continue; }
     await cb(row); n++;
   }
-  return n;
+  return { rows: n, malformed };
 }
 
 /** Decode {vector_b64} / {vector_hex} → Float32Array (or null). */
@@ -126,7 +128,7 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
     // local_path null (the blob-pass INSERT OR IGNORE would then dedupe).
     if (table === 'attachments') continue;
     const overrides = table === 'messages' ? MESSAGE_OVERRIDES : {};
-    const agg = { attempted: 0, inserted: 0, deduped: 0, failed: 0, tableMissing: false };
+    const agg = { attempted: 0, inserted: 0, deduped: 0, failed: 0, malformed: 0, tableMissing: false };
     let batch = [];
     const flush = async () => {
       if (!batch.length) return;
@@ -136,8 +138,9 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
       batch = [];
     };
     try {
-      await forEachNdjson(path.join(dbDir, file), async (row) => { batch.push(row); if (batch.length >= BATCH) await flush(); });
+      const nd = await forEachNdjson(path.join(dbDir, file), async (row) => { batch.push(row); if (batch.length >= BATCH) await flush(); });
       await flush();
+      agg.malformed = nd.malformed; // FAIL-LOUD: corrupt NDJSON lines, surfaced not swallowed
     } catch (e) { agg.error = String(e?.message || e).slice(0, 120); }
     stats[table] = agg;
     if (agg.tableMissing) { /* V1 has no such table — reported, not imported */ }
@@ -234,11 +237,11 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
   stats.agent_files = agentStats;
 
   // ── 5. Reconciliation report → encrypted in-vault document ──────────────────
-  let imported = 0, deduped = 0, failed = 0;
-  for (const s of Object.values(stats)) { imported += s.inserted || 0; deduped += s.deduped || 0; failed += s.failed || 0; }
+  let imported = 0, deduped = 0, failed = 0, malformed = 0;
+  for (const s of Object.values(stats)) { imported += s.inserted || 0; deduped += s.deduped || 0; failed += s.failed || 0; malformed += s.malformed || 0; }
   const report = {
     v: 1, kind: 'mycelium-full-export', importedAt: new Date().toISOString(),
-    exportedAt: manifest.exportedAt ?? null, totals: { imported, deduped, failed },
+    exportedAt: manifest.exportedAt ?? null, totals: { imported, deduped, failed, malformed },
     perTable: stats, skipped: Array.from(DENY),
   };
   try {
@@ -251,7 +254,7 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
   // nlp_processed=0 and will re-embed locally; vectored ones are searchable now.
   try { if (typeof enqueueEnrichment === 'function') { const m = await db.rawQuery('SELECT id FROM messages WHERE nlp_processed = 0 AND user_id = ? LIMIT 1', [userId]); const id = m?.results?.[0]?.id; if (id) enqueueEnrichment(id); } } catch { /* */ }
 
-    return { imported, deduped, failed, stats, reportPath: report && `imports/full-export-report-${String(manifest.exportedAt || report.importedAt).slice(0, 10)}.json`, exportedAt: manifest.exportedAt ?? null };
+    return { imported, deduped, failed, malformed, stats, reportPath: report && `imports/full-export-report-${String(manifest.exportedAt || report.importedAt).slice(0, 10)}.json`, exportedAt: manifest.exportedAt ?? null };
   } finally {
     await db.rawQuery('PRAGMA foreign_keys = ON').catch(() => {});
   }
