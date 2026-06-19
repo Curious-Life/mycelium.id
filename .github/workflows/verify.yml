@@ -53,7 +53,7 @@ jobs:
           python3 -m venv pipeline/.venv
           pipeline/.venv/bin/python3 -m pip install --upgrade pip
           pipeline/.venv/bin/python3 -m pip install \
-            'numpy>=1.26,<3' 'scipy>=1.11' 'cryptography>=42' \
+            'numpy>=1.26,<3' 'scipy>=1.11' 'cryptography>=48.0.1,<49' \
             'python-dotenv>=1.0' 'ripser>=0.6' 'persim>=0.3' 'PyWavelets>=1.6'
 
       # Install + BUILD the SvelteKit portal BEFORE the verify suite. verify:app-csp
@@ -76,3 +76,28 @@ jobs:
       # only (a11y warnings don't fail the gate).
       - name: Type-check portal-app
         run: npm run portal:check
+
+  # Supply-chain gate: the Python equivalent of `npm audit`. Audits the committed
+  # hash-lock (pipeline/requirements.lock.txt — the exact wheels the .app bundles)
+  # against the PyPI advisory DB and FAILS on any known CVE, so a future advisory
+  # against a pinned dep surfaces on the next PR/push instead of shipping silently.
+  # --require-hashes also rejects a lock whose hashes don't resolve. Independent of
+  # the verify job so a dep-CVE gives a distinct red signal.
+  # See docs/PYTHON-DEPS-SUPPLY-CHAIN-2026-06-19.md (Finding 3).
+  audit:
+    name: pip-audit (pipeline supply-chain)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: pip-audit the hash-locked pipeline deps
+        run: |
+          python3 -m venv /tmp/audit-venv
+          /tmp/audit-venv/bin/pip install --quiet --upgrade pip pip-audit
+          /tmp/audit-venv/bin/pip-audit -r pipeline/requirements.lock.txt --require-hashes

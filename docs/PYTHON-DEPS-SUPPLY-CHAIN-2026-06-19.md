@@ -79,6 +79,13 @@ surface automatically — the Python equivalent of `npm audit`:
 pip install pip-audit && pip-audit -r pipeline/requirements.lock.txt --require-hashes
 ```
 
+> **As-built (shipped):** `.github/workflows/verify.yml` now has a standalone **`audit`** job
+> (separate from `verify`, so a dep-CVE gives its own red signal) that installs `pip-audit` in an
+> isolated venv and runs `pip-audit -r pipeline/requirements.lock.txt --require-hashes` on every
+> PR/push. A future advisory against any pinned wheel fails the next build instead of shipping
+> silently. The `verify` job's Tier-1 test venv was also bumped `cryptography>=42` → `>=48.0.1,<49`
+> to match the shipped floor.
+
 ## Sequencing
 - **Finding 1 (cryptography bump)** rides the pre-freeze must-fix pass (it's a shipped CVE).
 - **Finding 2 (hash-lock)** is the same pass or an immediate fast-follow — it also *enforces* Finding 1.
