@@ -17,12 +17,28 @@
 //    turn only ever sees ITS conversation.
 //  • The response carries flags/codes only, never message text (§1).
 
+import crypto from 'node:crypto';
 import express from 'express';
 import { isTrustedLoopback } from '../http/loopback.js';
 import { runAgentTurn } from './run-turn.js';
 import { wrapUntrusted } from './untrusted.js';
 import { createTriage } from './triage.js';
-import { channelEnabledTools, isOwnerTrustedTurn } from './resolve-grant.js';
+import { OWNER_CHANNEL_TOOLS, UNTRUSTED_CHANNEL_TOOLS, isOwnerTrustedTurn } from './resolve-grant.js';
+
+const TURN_TOKEN_HEADER = 'x-mycelium-channel-turn-token';
+
+// Defense-in-depth for the owner-WRITE escalation (red-team RT1 CRITICAL): loopback alone
+// is not enough — any local process can POST to a loopback endpoint. The owner-trusted
+// (write-capable) path additionally requires a per-boot shared secret that only the
+// server-spawned daemon holds (env MYCELIUM_CHANNEL_TURN_TOKEN). A missing/invalid token
+// DEGRADES to read+reply (it never hard-fails a read turn). Timing-safe compare.
+function channelTurnTokenValid(req, expectedToken) {
+  if (!expectedToken) return false;                 // no secret configured → write unreachable
+  const got = req.get(TURN_TOKEN_HEADER) || '';
+  const a = Buffer.from(got);
+  const b = Buffer.from(String(expectedToken));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 
 const HISTORY_LIMIT = 20;
 const CHANNEL_SYSTEM = [
@@ -51,7 +67,7 @@ const OWNER_SYSTEM = [
  *   triage  — override the reply/skip gate (tests). Default = createTriage({ agentName }).
  *   runTurn — override the turn executor (tests). Default = runAgentTurn over the deps.
  */
-export function createChannelTurnRouter({ db, userId, tools = [], handlers = {}, loop, fetchImpl = globalThis.fetch, triage, agentName = 'Mycelium', runTurn, hooks, logger = () => {} } = {}) {
+export function createChannelTurnRouter({ db, userId, tools = [], handlers = {}, loop, fetchImpl = globalThis.fetch, triage, agentName = 'Mycelium', runTurn, hooks, logger = () => {}, expectedToken = null } = {}) {
   if (!db) throw new TypeError('createChannelTurnRouter: db required');
   const router = express.Router();
   const json = express.json({ limit: '256kb' });
@@ -67,13 +83,17 @@ export function createChannelTurnRouter({ db, userId, tools = [], handlers = {},
     if (!userMessage.trim()) { res.status(400).json({ error: 'userMessage required' }); return; }
     const source = typeof b.source === 'string' ? b.source : 'channel';
     const conversationId = typeof b.conversationId === 'string' ? b.conversationId : null;
-    const group = !!b.group;
+    // Group vs DM: prefer the daemon's AUTHORITATIVE isDirect flag (red-team RT1-MED — a
+    // regex on channelKind misclassifies Discord guilds); fall back to b.group. Fail-closed:
+    // an unknown classification with no isDirect is treated as the caller's b.group default.
+    const group = b.isDirect === true ? false : (b.isDirect === false ? true : !!b.group);
     const addressed = !!b.addressed;
     const senderRole = typeof b.senderRole === 'string' ? b.senderRole : 'other';
     // Capability follows identity (W3): a 1:1 DM from the vault owner is owner-authored
     // (trusted, like in-app chat) → full grant + no untrusted wrap; everyone else and
-    // every group → read-safe ∪ reply, untrusted-wrapped. See resolve-grant.js.
-    const ownerTrusted = isOwnerTrustedTurn({ senderRole, group });
+    // every group → read-safe ∪ reply, untrusted-wrapped. The owner-WRITE escalation ALSO
+    // requires a valid daemon token (RT1) — without it, degrade to untrusted read+reply.
+    const ownerTrusted = isOwnerTrustedTurn({ senderRole, group }) && channelTurnTokenValid(req, expectedToken);
 
     try {
       // Triage BEFORE the expensive turn (avoid a full turn per group message).
@@ -89,10 +109,12 @@ export function createChannelTurnRouter({ db, userId, tools = [], handlers = {},
 
       // Owner DM: pass the message verbatim (trusted). Otherwise wrap as untrusted data.
       const input = ownerTrusted ? userMessage : wrapUntrusted(userMessage, { source });
+      // Grant derives from the SINGLE token-gated `ownerTrusted` (not a re-derivation) so
+      // the write grant and the untrusted-wrap decision can never diverge (C14 regression).
       const result = await execTurn({
         userMessage: input,
         systemExtra: ownerTrusted ? OWNER_SYSTEM : CHANNEL_SYSTEM,
-        enabledTools: channelEnabledTools({ senderRole, group }),
+        enabledTools: ownerTrusted ? [...OWNER_CHANNEL_TOOLS] : [...UNTRUSTED_CHANNEL_TOOLS],
         history, conversationId, recentN: 8,
       });
 

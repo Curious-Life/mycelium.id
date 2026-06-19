@@ -38,8 +38,9 @@ await captureMessage(db, { userId: U, role: 'assistant', content: 'HIST-B reply'
 let lastOpts = null; let nextResult = { text: 'hi', toolsUsed: ['reply'] }; let calls = 0; let shouldThrow = false;
 const runTurn = async (opts) => { calls += 1; lastOpts = opts; if (shouldThrow) throw Object.assign(new Error('boom'), { code: 'ETURN' }); return nextResult; };
 
+const TURN_TOKEN = 'test-channel-turn-secret';
 const app = express();
-app.use(createChannelTurnRouter({ db, userId: U, tools: [], handlers: {}, runTurn, logger: () => {} }));
+app.use(createChannelTurnRouter({ db, userId: U, tools: [], handlers: {}, runTurn, logger: () => {}, expectedToken: TURN_TOKEN }));
 const server = http.createServer(app);
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const port = server.address().port;
@@ -105,11 +106,12 @@ const post = (body, headers = {}) => fetch(URL, { method: 'POST', headers: { 'co
   shouldThrow = false;
 }
 
-// ── C10 owner 1:1 DM with owner-write ENABLED → trimmed full grant, NOT wrapped (W3) ──
+// ── C10 owner 1:1 DM with owner-write ENABLED + valid daemon token → trimmed grant ──
+const OWNER_HDR = { 'x-mycelium-channel-turn-token': TURN_TOKEN };
 {
   process.env.MYCELIUM_CHANNEL_OWNER_WRITE = '1';   // gated capability ON for this block
   shouldThrow = false; nextResult = { text: 'done', toolsUsed: ['reply'] };
-  await post({ userMessage: 'remember my dentist is on Tuesday', conversationId: CONV, source: 'telegram', group: false, senderRole: 'owner' });
+  await post({ userMessage: 'remember my dentist is on Tuesday', conversationId: CONV, source: 'telegram', group: false, senderRole: 'owner' }, OWNER_HDR);
   const um = lastOpts?.userMessage || '';
   const et = lastOpts?.enabledTools || [];
   rec('C10 owner DM (write-enabled) → message verbatim (NOT untrusted-wrapped)', um === 'remember my dentist is on Tuesday' && !/UNTRUSTED MESSAGE/.test(um), JSON.stringify(um));
@@ -140,6 +142,17 @@ const post = (body, headers = {}) => fetch(URL, { method: 'POST', headers: { 'co
   const et = lastOpts?.enabledTools || [];
   rec('C13 owner DM, writes DISABLED (default) → reply-only', et.length === 1 && et[0] === 'reply', et.join(','));
   rec('C13 owner DM, writes DISABLED → untrusted-wrapped (pre-W3 safe behavior)', /UNTRUSTED MESSAGE/.test(um));
+}
+// ── C14 RT1 CRITICAL: a forged owner claim WITHOUT the daemon token → reply-only ──
+{
+  process.env.MYCELIUM_CHANNEL_OWNER_WRITE = '1';   // writes enabled, but no valid token...
+  await post({ userMessage: 'remember my dentist is on Tuesday', conversationId: CONV, source: 'telegram', group: false, senderRole: 'owner' });
+  const um = lastOpts?.userMessage || ''; const et = lastOpts?.enabledTools || [];
+  rec('C14 forged owner claim w/o daemon token → reply-only (loopback-forge defense)', et.length === 1 && et[0] === 'reply', et.join(','));
+  rec('C14 forged owner claim w/o daemon token → untrusted-wrapped', /UNTRUSTED MESSAGE/.test(um));
+  await post({ userMessage: 'remember x', conversationId: CONV, source: 'telegram', group: false, senderRole: 'owner' }, { 'x-mycelium-channel-turn-token': 'wrong-secret' });
+  rec('C14 owner claim w/ WRONG token → reply-only', (lastOpts?.enabledTools || []).join(',') === 'reply', (lastOpts?.enabledTools || []).join(','));
+  delete process.env.MYCELIUM_CHANNEL_OWNER_WRITE;
 }
 
 await new Promise((r) => server.close(r));

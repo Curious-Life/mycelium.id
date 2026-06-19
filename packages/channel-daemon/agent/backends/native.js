@@ -35,14 +35,19 @@ export function createNativeRuntime(cfg = {}) {
       conversationId,
       source: turnCtx.source || turnCtx.channelKind || 'channel',
       group,
+      isDirect: turnCtx.isDirect != null ? !!turnCtx.isDirect : !group, // authoritative DM flag (RT1-MED)
       addressed: !group,                 // DMs always; groups rely on the server's name-mention triage
       voiceMode: !!turnCtx.voiceMode,
       senderRole: turnCtx.senderRole || 'other',   // gates the owner write grant (W3)
     };
+    // Per-boot shared secret (RT1): authenticates THIS daemon to the server's channel-turn
+    // endpoint so a random local process can't forge an owner-write turn. Set by the
+    // supervisor in the daemon's env; absent ⇒ no header ⇒ server degrades us to read+reply.
+    const turnToken = process.env.MYCELIUM_CHANNEL_TURN_TOKEN || '';
     try {
       const res = await fetchImpl(url, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...(turnToken ? { 'x-mycelium-channel-turn-token': turnToken } : {}) },
         body: JSON.stringify(body),
         signal,
       });
