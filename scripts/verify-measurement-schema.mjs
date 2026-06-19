@@ -58,8 +58,11 @@ close();
 const raw = new Database(DB, { readonly: true });
 const rawRow = raw.prepare(`SELECT magnitude, detail, headline FROM cognitive_events WHERE id = 'ce-1'`).get();
 raw.close();
-const leaked = [MARK_DETAIL, MARK_HEAD, '31.8'].filter((m) => JSON.stringify(rawRow).includes(m));
-rec('S5. magnitude + detail + headline are ALL encrypted at rest (no plaintext leak)', leaked.length === 0, leaked.length ? `LEAKED: ${leaked.join(',')}` : 'all ciphertext');
+// SQLCipher collapse (Stage B/C cut 6): cognitive_events magnitude/detail/headline are
+// PLAINTEXT-in-cipher — the markers read back through the raw column; at-rest = whole-file
+// SQLCipher (verify:at-rest).
+const present = [MARK_DETAIL, MARK_HEAD, '31.8'].filter((m) => JSON.stringify(rawRow).includes(m));
+rec('S5. magnitude + detail + headline PLAINTEXT-in-cipher (collapse cut 6; verify:at-rest)', present.length === 3, `plaintext markers present=${present.length}/3`);
 
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 const allPass = ledger.every(Boolean);

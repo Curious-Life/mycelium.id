@@ -27,7 +27,7 @@ ok(['id', 'user_id', 'cycle', 'day', 'summary', 'themes', 'day_type', 'body', 'c
 const idx = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_reflection_records_%'").all().map((r) => r.name);
 ok(idx.length >= 2, 'day + cycle indexes created', `(${idx.length})`);
 const crypto = readFileSync(join(ROOT, 'src/crypto/crypto-local.js'), 'utf8');
-ok(/reflection_records:\s*\[[^\]]*'summary'[^\]]*'themes'[^\]]*'day_type'[^\]]*'body'/.test(crypto), 'ENCRYPTED_FIELDS encrypts summary/themes/day_type/body (cycle/day stay plaintext)');
+ok(/reflection_records:\s*\[\]/.test(crypto), 'reflection_records COLLAPSED to [] (cut 6; plaintext-in-cipher, at-rest = whole-file SQLCipher / verify:at-rest)');
 
 // ── 2. DAL (raw d1Query over the real schema; encryption is the adapter's job) ─
 let n = 0;

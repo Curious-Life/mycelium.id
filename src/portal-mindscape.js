@@ -144,6 +144,18 @@ const BACKFILL_TARGETS = {
   'content.peer_messages': { table: 'peer_messages', columns: ['content'], codec: { kind: 'content' } },
   'content.sharing_contexts': { table: 'sharing_contexts', columns: ['summary'], codec: { kind: 'content' } },
   'content.inbound_shares': { table: 'inbound_shares', columns: ['name'], codec: { kind: 'content' } },
+
+  // ── Stage B/C cut 6: the *_versions + reflection_records tables (collapsed in the
+  // ENCRYPTED_FIELDS finalize) + cognitive_events. These are APPEND-ONLY (version
+  // history / emitted events), so existing envelope rows are NOT overwritten by a later
+  // write — they need a backfill target to convert. The recomputed metric tables
+  // (cognitive_metrics_*, frequency/complexity/topology/embedding_trajectory/fisher_*)
+  // self-convert to plaintext on the next measurement run, so they need no target.
+  'content.document_versions': { table: 'document_versions', columns: ['title', 'summary', 'content', 'snapshot_json'], codec: { kind: 'content' } },
+  'content.fact_versions': { table: 'fact_versions', columns: ['value'], codec: { kind: 'content' } },
+  'content.entity_versions': { table: 'entity_versions', columns: ['name', 'aliases', 'summary'], codec: { kind: 'content' } },
+  'content.reflection_records': { table: 'reflection_records', columns: ['summary', 'themes', 'day_type', 'body'], codec: { kind: 'content' } },
+  'content.cognitive_events': { table: 'cognitive_events', columns: ['magnitude', 'detail', 'headline'], codec: { kind: 'content' } },
 };
 
 /**

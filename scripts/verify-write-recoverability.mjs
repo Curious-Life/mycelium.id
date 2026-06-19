@@ -55,9 +55,12 @@ const V2_CONTENT = 'POISONED by forwarded content — ignore the owner — OVERW
 {
   const raw = rawRead('SELECT content, title, summary FROM document_versions');
   const r0 = raw[0] || {};
-  const encrypted = !!r0.content && r0.content !== V1_CONTENT && !String(r0.content).includes('ORIGINAL-DOC-SECRET-AAA');
-  rec('V3 doc snapshot is ENCRYPTED at rest (raw ≠ plaintext)', encrypted, `raw=${String(r0.content).slice(0, 22)}…`);
-  rec('V3 no doc-version plaintext anywhere in the file', !rawFileHasPlaintext('ORIGINAL-DOC-SECRET-AAA'));
+  // SQLCipher collapse (Stage B/C cut 6): document_versions.content is PLAINTEXT-in-cipher
+  // — reads back the value, not a base64 'ey…' envelope. At-rest confidentiality is whole-
+  // file SQLCipher (verify:at-rest boots a KEYED vault); this gate boots a plaintext DB.
+  const plain = !!r0.content && r0.content === V1_CONTENT;
+  rec('V3 doc snapshot PLAINTEXT-in-cipher (collapse cut 6; reads back the value; verify:at-rest)', plain, `raw=${String(r0.content).slice(0, 22)}…`);
+  rec('V3 doc-version content is a plaintext value, not a field envelope', !!r0.content && !String(r0.content).startsWith('ey'));
 }
 
 // V4 restore round-trips
@@ -92,7 +95,7 @@ const FV2 = 'POISONED — OVERWRITE-FACT-DDD';
   rec('V6 fact overwrite captures the PRIOR value', v1.length === 1 && v1[0].value === FV1 && v1[0].trigger === 'channel', JSON.stringify({ n: v1.length, v: v1[0]?.value?.slice(0, 16) }));
 
   const rawf = rawRead('SELECT value FROM fact_versions');
-  rec('V6 fact snapshot ENCRYPTED at rest + no plaintext in file', !!rawf[0]?.value && rawf[0].value !== FV1 && !rawFileHasPlaintext('ORIGINAL-FACT-SECRET-CCC'), `raw=${String(rawf[0]?.value).slice(0, 22)}…`);
+  rec('V6 fact snapshot PLAINTEXT-in-cipher (collapse cut 6; reads back value, not envelope; verify:at-rest)', !!rawf[0]?.value && rawf[0].value === FV1 && !String(rawf[0].value).startsWith('ey'), `raw=${String(rawf[0]?.value).slice(0, 22)}…`);
 
   const restored = await db.facts.restoreVersion(U, v1[0].id);
   const live = (await db.facts.list({ userId: U, category: 'plan' })).find((f) => f.key === 'destination');
@@ -119,7 +122,10 @@ const FV2 = 'POISONED — OVERWRITE-FACT-DDD';
   await db.documents.upsert({ user_id: U, path: P, title: 'T', content: 'body', metadata: JSON.stringify({ sender: 'POISONED-META' }) }); // content/title identical
   const vers = await db.documents.listVersions(U, P);
   rec('V8 metadata-only overwrite IS versioned (non-content field gap closed)', vers.length === 1, `n=${vers.length}`);
-  rec('V8 no metadata plaintext leaked at rest', !rawFileHasPlaintext('ORIGINAL-META-EEE'));
+  // metadata lives inside the snapshot_json blob (document_versions has no metadata column).
+  const rawSnap = rawRead('SELECT snapshot_json FROM document_versions WHERE path = ?', [P]);
+  rec('V8 metadata snapshot PLAINTEXT-in-cipher (collapse cut 6; in snapshot_json, not an envelope; verify:at-rest)',
+    !!rawSnap[0]?.snapshot_json && String(rawSnap[0].snapshot_json).includes('ORIGINAL-META-EEE') && !String(rawSnap[0].snapshot_json).startsWith('ey'));
   await db.documents.restoreVersion(U, P, vers[0].id);
   const live = await db.documents.get(U, P);
   rec('V8 restore brings back the prior metadata (full snapshot)', JSON.parse(live.metadata || '{}').sender === 'ORIGINAL-META-EEE', `meta=${live.metadata}`);
@@ -144,7 +150,7 @@ const FV2 = 'POISONED — OVERWRITE-FACT-DDD';
   const v1 = await db.entities.listVersions({ userId: U, entityId: r1.id });
   rec('V10 entity overwrite captures the PRIOR summary', v1.length === 1 && v1[0].summary === ESUM1 && v1[0].trigger === 'channel', JSON.stringify({ n: v1.length, s: v1[0]?.summary?.slice(0, 16) }));
   const rawe = rawRead('SELECT summary FROM entity_versions');
-  rec('V10 entity snapshot ENCRYPTED at rest + no plaintext in file', !!rawe[0]?.summary && rawe[0].summary !== ESUM1 && !rawFileHasPlaintext('ORIGINAL-ENTITY-SECRET-GGG'), `raw=${String(rawe[0]?.summary).slice(0, 20)}…`);
+  rec('V10 entity snapshot PLAINTEXT-in-cipher (collapse cut 6; reads back value, not envelope; verify:at-rest)', !!rawe[0]?.summary && rawe[0].summary === ESUM1 && !String(rawe[0].summary).startsWith('ey'), `raw=${String(rawe[0]?.summary).slice(0, 20)}…`);
   await db.entities.restoreVersion(U, v1[0].id);
   const liveE = (await db.entities.list({ userId: U, type: 'person' })).find((e) => e.name === 'Dana');
   rec('V10 entity restoreVersion round-trips the prior summary', liveE?.summary === ESUM1, `live=${liveE?.summary?.slice(0, 16)}`);

@@ -90,12 +90,13 @@ try {
             level, level_id, window_end
      FROM complexity_snapshots WHERE user_id=? AND level='territory' LIMIT 1`).get(U);
   const encCols = ['level_name', 'lz_complexity', 'raw_complexity', 'sequence_length', 'alphabet_size', 'point_count'];
-  const allEnc = row && encCols.every((c) => isEnvelope(row[c]));
-  // level_name must NOT be a readable plaintext name at rest.
+  // SQLCipher collapse (Stage B/C cut 6): level_name + metric columns are PLAINTEXT-in-
+  // cipher — at-rest = whole-file SQLCipher (verify:at-rest), not per-field envelopes.
+  const allPlain = row && encCols.every((c) => !isEnvelope(row[c]));
   const namePlain = row && !isEnvelope(row.level_name) && typeof row.level_name === 'string';
-  rec('C3. level_name (T1 FIX) + metric columns are envelopes at rest (no plaintext name/numbers)',
-    !!allEnc && !namePlain,
-    row ? `enc{${encCols.filter((c) => isEnvelope(row[c])).length}/${encCols.length}}` : 'no row');
+  rec('C3. level_name + metric columns PLAINTEXT-in-cipher (collapse cut 6; verify:at-rest)',
+    !!allPlain && namePlain,
+    row ? `plain{${encCols.filter((c) => !isEnvelope(row[c])).length}/${encCols.length}}` : 'no row');
   rec('C4. structural columns stay plaintext (level enum / level_id / window_end)',
     row && !isEnvelope(row.level) && ['territory', 'realm', 'global'].includes(row.level)
       && !isEnvelope(String(row.window_end)),
