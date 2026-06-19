@@ -282,9 +282,9 @@ const ENCRYPTED_FIELDS = {
   // category/key/path/trigger stay plaintext (scoping + provenance, not content).
   // `snapshot_json` (0034) is the FULL prior encrypted-field set of a document as a
   // single JSON blob → encrypted as one envelope (closes the non-content-field gap).
-  document_versions: ['title', 'summary', 'content', 'snapshot_json'],
-  fact_versions: ['value'],
-  entity_versions: ['name', 'aliases', 'summary'],
+  document_versions: [],
+  fact_versions: [],
+  entity_versions: [],
 
   // Entities — people/projects/places/orgs. name/aliases/summary are sensitive;
   // type/source/counts stay plaintext for filtering. Dedup is app-layer (name is
@@ -364,7 +364,7 @@ const ENCRYPTED_FIELDS = {
 
   // Reflection records (Context Engine "day cards") — the agent's characterizations are content.
   // cycle/day stay plaintext for SQL filtering (migrations/0039_reflection_records.sql).
-  reflection_records: ['summary', 'themes', 'day_type', 'body'],
+  reflection_records: [],
 
   // Tasks — descriptions reveal what user is working on
   tasks: [],
@@ -481,65 +481,18 @@ const ENCRYPTED_FIELDS = {
   // baseline). Each is a within-user signal-shape summary; cross-user
   // comparison is invalid but a leak still fingerprints the user's
   // cognitive rhythm at scale.
-  cognitive_metrics_window: [
-    // §4.23 harmonic_amplitude (15 metric + 15 baseline)
-    'harmonic_amplitude_gamma_k1', 'harmonic_amplitude_gamma_k2', 'harmonic_amplitude_gamma_k3',
-    'harmonic_amplitude_beta_k1',  'harmonic_amplitude_beta_k2',  'harmonic_amplitude_beta_k3',
-    'harmonic_amplitude_alpha_k1', 'harmonic_amplitude_alpha_k2', 'harmonic_amplitude_alpha_k3',
-    'harmonic_amplitude_theta_k1', 'harmonic_amplitude_theta_k2', 'harmonic_amplitude_theta_k3',
-    'harmonic_amplitude_delta_k1', 'harmonic_amplitude_delta_k2', 'harmonic_amplitude_delta_k3',
-    'harmonic_amplitude_gamma_k1_baseline_90d', 'harmonic_amplitude_gamma_k2_baseline_90d', 'harmonic_amplitude_gamma_k3_baseline_90d',
-    'harmonic_amplitude_beta_k1_baseline_90d',  'harmonic_amplitude_beta_k2_baseline_90d',  'harmonic_amplitude_beta_k3_baseline_90d',
-    'harmonic_amplitude_alpha_k1_baseline_90d', 'harmonic_amplitude_alpha_k2_baseline_90d', 'harmonic_amplitude_alpha_k3_baseline_90d',
-    'harmonic_amplitude_theta_k1_baseline_90d', 'harmonic_amplitude_theta_k2_baseline_90d', 'harmonic_amplitude_theta_k3_baseline_90d',
-    'harmonic_amplitude_delta_k1_baseline_90d', 'harmonic_amplitude_delta_k2_baseline_90d', 'harmonic_amplitude_delta_k3_baseline_90d',
-    // §4.33 bigram_flow_features (25 metric + 25 baseline)
-    'mean_crossing_rate_gamma', 'mean_crossing_rate_beta', 'mean_crossing_rate_alpha',
-    'mean_crossing_rate_theta', 'mean_crossing_rate_delta',
-    'slope_sign_change_rate_gamma', 'slope_sign_change_rate_beta', 'slope_sign_change_rate_alpha',
-    'slope_sign_change_rate_theta', 'slope_sign_change_rate_delta',
-    'autocorrelation_lag1_gamma', 'autocorrelation_lag1_beta', 'autocorrelation_lag1_alpha',
-    'autocorrelation_lag1_theta', 'autocorrelation_lag1_delta',
-    'variance_gamma', 'variance_beta', 'variance_alpha', 'variance_theta', 'variance_delta',
-    'total_spectral_energy_gamma', 'total_spectral_energy_beta', 'total_spectral_energy_alpha',
-    'total_spectral_energy_theta', 'total_spectral_energy_delta',
-    'mean_crossing_rate_gamma_baseline_90d', 'mean_crossing_rate_beta_baseline_90d',
-    'mean_crossing_rate_alpha_baseline_90d', 'mean_crossing_rate_theta_baseline_90d', 'mean_crossing_rate_delta_baseline_90d',
-    'slope_sign_change_rate_gamma_baseline_90d', 'slope_sign_change_rate_beta_baseline_90d',
-    'slope_sign_change_rate_alpha_baseline_90d', 'slope_sign_change_rate_theta_baseline_90d', 'slope_sign_change_rate_delta_baseline_90d',
-    'autocorrelation_lag1_gamma_baseline_90d', 'autocorrelation_lag1_beta_baseline_90d',
-    'autocorrelation_lag1_alpha_baseline_90d', 'autocorrelation_lag1_theta_baseline_90d', 'autocorrelation_lag1_delta_baseline_90d',
-    'variance_gamma_baseline_90d', 'variance_beta_baseline_90d',
-    'variance_alpha_baseline_90d', 'variance_theta_baseline_90d', 'variance_delta_baseline_90d',
-    'total_spectral_energy_gamma_baseline_90d', 'total_spectral_energy_beta_baseline_90d',
-    'total_spectral_energy_alpha_baseline_90d', 'total_spectral_energy_theta_baseline_90d', 'total_spectral_energy_delta_baseline_90d',
-    // §4.34 topology_persistence_entropy (1 metric + 1 baseline)
-    'topology_persistence_entropy', 'topology_persistence_entropy_baseline_90d',
-    // Honesty fields (notes can reveal compute-state context)
-    'notes',
-  ],
+  cognitive_metrics_window: [],
 
   // cognitive_metrics_trajectory — fisher information-geometry +
   // level-grain complexity. activation_vector is a per-row JSON
   // distribution over territories; top_contributors is JSON listing
   // the user's most-influential territory IDs.
-  cognitive_metrics_trajectory: [
-    'activation_vector',
-    'velocity', 'velocity_z', 'displacement', 'path_length',
-    'R_recent', 'exploration_ratio',
-    'phase', 'phase_recent',
-    'activation_entropy', 'displacement_lifetime',
-    'lz_complexity', 'raw_complexity', 'sequence_length', 'alphabet_size',
-    'top_contributors',
-  ],
+  cognitive_metrics_trajectory: [],
 
   // cognitive_metrics_per_territory — recurrence intervals reveal
   // when this user activates a specific territory; with territory_id
   // as plaintext join key, the scalar is sensitive.
-  cognitive_metrics_per_territory: [
-    'recurrence_interval', 'recurrence_interval_baseline_90d',
-    'notes',
-  ],
+  cognitive_metrics_per_territory: [],
 
   // cognitive_events — discrete cognitive events (§4.27 phase-lock, regime
   // shifts, flickering). magnitude (the effect size), detail (per-event JSON:
@@ -547,7 +500,7 @@ const ENCRYPTED_FIELDS = {
   // all ENCRYPTED (numeric magnitude encrypted via the type-agnostic adapter).
   // event_type/level/severity (enums) + era_id/window_*/timestamps stay
   // plaintext for WHERE/ORDER; the read path Number()s the decrypted magnitude.
-  cognitive_events: ['magnitude', 'detail', 'headline'],
+  cognitive_events: [],
 
   // territory_cofire — Stage B/C cut 2: the 4 co-activation strength scales are now
   // plaintext-inside-cipher. compute-cofire.js writes them via the adapter, so
@@ -563,12 +516,7 @@ const ENCRYPTED_FIELDS = {
   // topology_metrics — graph-level cognitive shape per era. Each
   // scalar describes the user's mindscape topology; leak reveals
   // structural cognitive state.
-  topology_metrics: [
-    'm2_entropy', 'm2_delta', 'm2_trend', 'degree_gini',
-    'max_degree', 'mean_degree',
-    'orphan_count', 'bridge_count', 'catchall_count',
-    'total_territories', 'total_connections',
-  ],
+  topology_metrics: [],
 
   // ── T1: topology-graph measurement stages (port from canonical) ──────
   //
@@ -590,11 +538,7 @@ const ENCRYPTED_FIELDS = {
   // territory/realm/global), window_start/window_end/computed_at (time keys),
   // language (enum). The UPSERT conflict target (user_id, level, level_id,
   // window_end) touches no encrypted column, so the dedup still works.
-  complexity_snapshots: [
-    'level_name',
-    'lz_complexity', 'raw_complexity', 'sequence_length', 'alphabet_size',
-    'point_count', 'embedding_novelty',
-  ],
+  complexity_snapshots: [],
 
   // embedding_trajectory — basis-free movement cross-check (pipeline/
   // compute-embedding-trajectory.py, Python caller-encrypt). centroid_drift +
@@ -602,9 +546,7 @@ const ENCRYPTED_FIELDS = {
   // (window_*, window_type, clustering_run_id), message_count + low_confidence
   // stay plaintext. The UPSERT conflict target touches no encrypted column. The
   // centroid itself (768D fingerprint) is NEVER stored — only these two scalars.
-  embedding_trajectory: [
-    'centroid_drift', 'dispersion',
-  ],
+  embedding_trajectory: [],
 
   // frequency_snapshots — windowed cognitive metrics (pipeline/
   // compute-frequency.py, Python caller-encrypt). The 5 core metrics +
@@ -616,10 +558,7 @@ const ENCRYPTED_FIELDS = {
   // touch Python writes); the JS adapter AUTO-DECRYPTS them on any JS read
   // (they're not in NEVER_AUTO_DECRYPT). Numbers are stored via repr(float(x))
   // so JS Number() / Python float() round-trip cleanly.
-  frequency_snapshots: [
-    'coherence', 'entropy', 'compression', 'learning_rate', 'gradient_signal',
-    'point_count', 'territory_count', 'message_count',
-  ],
+  frequency_snapshots: [],
 
   // topology_audit_snapshots — graph-health snapshot (pipeline/
   // topology-audit.js). Mirrors topology_metrics' classification: every
@@ -629,11 +568,7 @@ const ENCRYPTED_FIELDS = {
   // cluster_version (era-ish tag). The "previous snapshot" read SELECTs
   // m2_entropy ordered by run_at (plaintext) — the value decrypts via the
   // adapter and the stage Number()-coerces it before delta math.
-  topology_audit_snapshots: [
-    'total_territories', 'total_connections', 'catchall_count',
-    'orphan_count', 'bridge_count', 'max_degree', 'mean_degree',
-    'degree_gini', 'm2_entropy', 'm2_delta', 'm2_trend',
-  ],
+  topology_audit_snapshots: [],
 
   // topology_audit_findings — per-territory health findings. explanation is a
   // human sentence about the territory (content) → ENCRYPT; coherence /
@@ -643,10 +578,7 @@ const ENCRYPTED_FIELDS = {
   // GOTCHA addressed in src/db/topology.js getAuditFindings: it used to
   // `ORDER BY ... message_count DESC` — message_count is now ciphertext, so
   // that ORDER BY is removed and the sort moves to JS over decrypted values.
-  topology_audit_findings: [
-    'message_count', 'connection_count', 'connected_realms',
-    'coherence', 'bridge_quality', 'explanation',
-  ],
+  topology_audit_findings: [],
 };
 
 // Tables that DO have a 'scope' column — autoEncryptParams will inject

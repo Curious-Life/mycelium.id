@@ -87,10 +87,12 @@ try {
   // m2_delta is NULL on the first run (no prior snapshot) → excluded from the enc check.
   const encCols = ['total_territories', 'total_connections', 'catchall_count', 'orphan_count',
     'bridge_count', 'max_degree', 'mean_degree', 'degree_gini', 'm2_entropy', 'm2_trend'];
-  const allEnc = snap && encCols.every((c) => isEnvelope(snap[c]));
-  rec('A3. snapshot metric columns are envelopes at rest (incl. m2_trend); keys/time plaintext',
-    !!allEnc && !isEnvelope(snap.id) && !isEnvelope(String(snap.run_at)) && snap.m2_delta == null,
-    snap ? `enc{${encCols.filter((c) => isEnvelope(snap[c])).length}/${encCols.length}} m2_delta=${snap.m2_delta}` : 'no row');
+  // SQLCipher collapse (Stage B/C cut 6): topology_audit_snapshots metric columns are
+  // PLAINTEXT-in-cipher — at-rest = whole-file SQLCipher (verify:at-rest). keys/time stay plaintext.
+  const allPlain = snap && encCols.every((c) => !isEnvelope(snap[c]));
+  rec('A3. snapshot metric columns PLAINTEXT-in-cipher (collapse cut 6; verify:at-rest); keys/time plaintext',
+    !!allPlain && !isEnvelope(snap.id) && !isEnvelope(String(snap.run_at)) && snap.m2_delta == null,
+    snap ? `plain{${encCols.filter((c) => !isEnvelope(snap[c])).length}/${encCols.length}} m2_delta=${snap.m2_delta}` : 'no row');
 
   // ── A4. finding metric columns + explanation ciphertext; enums plaintext ────
   const find = raw.prepare(
@@ -99,11 +101,11 @@ try {
      FROM topology_audit_findings WHERE user_id=? AND finding_type='catch_all' LIMIT 1`).get(U);
   raw.close();
   const fEnc = ['message_count', 'connection_count', 'connected_realms', 'coherence', 'explanation'];
-  rec('A4. finding metrics + explanation are envelopes at rest; finding_type/severity plaintext',
-    find && fEnc.every((c) => isEnvelope(find[c]))
+  rec('A4. finding metrics + explanation PLAINTEXT-in-cipher (collapse cut 6; verify:at-rest); finding_type/severity plaintext',
+    find && fEnc.every((c) => !isEnvelope(find[c]))
       && !isEnvelope(find.finding_type) && find.finding_type === 'catch_all'
       && !isEnvelope(find.severity) && ['info', 'warning', 'critical'].includes(find.severity),
-    find ? `enc{${fEnc.filter((c) => isEnvelope(find[c])).length}/${fEnc.length}} type=${find.finding_type} sev=${find.severity}` : 'no catch_all finding');
+    find ? `plain{${fEnc.filter((c) => !isEnvelope(find[c])).length}/${fEnc.length}} type=${find.finding_type} sev=${find.severity}` : 'no catch_all finding');
 
   // ── A5. adapter read decrypts + coerces (getLatestAudit numbers + getAuditFindings JS-sort) ─
   const latest = await db.topology.getLatestAudit({ p_user_id: U });
