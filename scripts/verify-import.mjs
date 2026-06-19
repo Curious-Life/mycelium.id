@@ -9,7 +9,7 @@
 //   I2 rows encrypted        messages stored, content NOT plaintext in the db file
 //   I3 dedup                 re-import → imported:0, skipped:2
 //   I4 chunked ChatGPT       /upload/chunk×2 + /upload/complete → {type:'chatgpt',imported:2}
-//   I5 unsupported           obsidian zip → {type:'obsidian',imported:0,note}
+//   I5 unsupported           obsidian zip → 4xx error (NOT success-shaped imported:0)
 //   I6 unrecognized          non-zip → 400 (safe error, no leak)
 //   I7 regression            raw /api/v1/upload + compat /documents still resolve
 //
@@ -127,13 +127,15 @@ async function main() {
       rcomplete.status === 200 && bc.importResult?.type === 'chatgpt' && bc.importResult?.imported === 2 && (await countBySource('chatgpt-import')) === 2,
       `status=${rcomplete.status} type=${bc.importResult?.type} imported=${bc.importResult?.imported}`);
 
-    // ── I5 unsupported format (obsidian) → graceful ──
+    // ── I5 unsupported format (obsidian zip) → ERROR, not success-shaped ──
+    // A `{imported:0}` result reads to the UI as "import worked, file empty".
+    // The obsidian zip path returns an error pointing at the folder importer.
     const oz = await obsidianZip();
     const r5 = await postFile('/upload', oz);
     const b5 = await r5.json().catch(() => ({}));
-    rec('I5. unsupported format → {type:obsidian,imported:0,note}',
-      r5.status === 200 && b5.importResult?.type === 'obsidian' && b5.importResult?.imported === 0 && typeof b5.importResult?.note === 'string',
-      `type=${b5.importResult?.type} note=${!!b5.importResult?.note}`);
+    rec('I5. obsidian zip → 4xx error (not success-shaped {imported:0})',
+      r5.status >= 400 && typeof b5.error === 'string' && /obsidian|folder/i.test(b5.error) && b5.importResult === undefined,
+      `status=${r5.status} error=${JSON.stringify(b5.error || '').slice(0, 80)}`);
 
     // ── I6 unrecognized (non-zip) → 400, safe error ──
     const r6 = await postFile('/upload', Buffer.from('this is not a zip archive'));

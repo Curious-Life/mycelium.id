@@ -12,6 +12,8 @@ import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
 import { initVaultStorage } from './db/init.js';
 import { resolveDbKeyHex } from './db/open.js';
+import { purgePlaintextBackup } from './account/db-cipher-migrate.js';
+import path from 'node:path';
 import { createIdentity, isValidHandle } from './identity/identity.js';
 import { readRemoteConfig } from './remote/config.js';
 import { buildDomains, collectTools, createMcpServer, TIER2_TOOLS, TOPOLOGY_NOT_READY_MESSAGE } from './mcp.js';
@@ -120,6 +122,16 @@ export async function boot({
     ? await initVaultStorage({ dbPath, userHex, log: (m) => console.error(m) })
     : resolveDbKeyHex(userHex, dbPath); // open-only (e.g. public server): no schema apply, fail-closed
   const { db, close } = getDb({ dbPath, userKey, systemKey, federationDeps, dbKeyHex });
+  // Stage 0 (SQLCipher-mandatory): the at-rest migration leaves a full PLAINTEXT
+  // copy at <db>.pre-cipher-<ts>. Once the REAL vault is open + keyed, remove it —
+  // a plaintext backup on disk would defeat at-rest encryption. purgePlaintextBackup
+  // is self-verifying (re-opens keyed + reads before deleting; keeps the backup on
+  // any doubt). Scoped to the canonical vault so test fixtures (which pass a temp
+  // dbPath and assert the backup is kept) are never touched.
+  if (dbKeyHex && path.resolve(dbPath) === resolveDbPath()) {
+    try { purgePlaintextBackup({ dbPath, dbKeyHex, log: (m) => console.error(m) }); }
+    catch (e) { console.error(`[mycelium] at-rest: backup purge skipped (${e?.message || e})`); }
+  }
   const { domains, deferred, searchHelpers, isTopologyReady } = buildDomains({ db, userId, embedder, identity });
   // Cold-start gating (Phase 4): Tier-2 readers return a uniform "not ready"
   // message until the topology pipeline has run, instead of honest-empty.

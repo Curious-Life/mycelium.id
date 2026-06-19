@@ -17,7 +17,8 @@
 //   5. atomic swap: rename original → <db>.pre-cipher-<ts> (KEPT, never auto-deleted),
 //      rename the encrypted copy → <db>
 import Database from 'better-sqlite3';
-import { existsSync, openSync, readSync, closeSync, copyFileSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, openSync, readSync, closeSync, copyFileSync, renameSync, rmSync, readdirSync } from 'node:fs';
+import { dirname, basename, join } from 'node:path';
 
 const PLAINTEXT_MAGIC = Buffer.from('SQLite format 3\0', 'latin1'); // first 16 bytes of any plaintext sqlite db
 
@@ -111,6 +112,72 @@ export function ensureVaultEncrypted({ dbPath, dbKeyHex, log = () => {} }) {
   for (const sfx of ['-wal', '-shm']) { try { rmSync(dbPath + sfx); } catch {} } // stale (checkpointed) sidecars
   renameSync(tmpPath, dbPath);
 
-  log(`[mycelium] vault encrypted at rest (${tableN} tables, parity OK). Plaintext copy kept at ${preCipherPath} — delete it once you have confirmed the vault opens.`);
+  log(`[mycelium] vault encrypted at rest (${tableN} tables, parity OK). Plaintext copy kept at ${preCipherPath} — it is removed automatically once the keyed vault is confirmed to open.`);
   return { migrated: true, preCipherPath, tables: tableN };
+}
+
+/**
+ * Remove the plaintext `<db>.pre-cipher-<ts>` backup(s) ensureVaultEncrypted left
+ * behind — but ONLY after PROVING the live vault is a working, keyed ciphertext
+ * file. This closes the at-rest hole where a full plaintext copy of the vault
+ * persists on disk after migration (an attacker with file access could read it
+ * even though the live vault is encrypted).
+ *
+ * Self-verifying + fail-safe: on ANY doubt it KEEPS every backup and logs — it
+ * can never destroy the only good copy. Never throws on a normal skip (boot must
+ * not fail because a stale backup can't be removed).
+ *
+ * Erasure caveat: on SSD/APFS a plain unlink does not guarantee block-level
+ * erasure (copy-on-write + wear-leveling). True at-rest erasure of the removed
+ * bytes relies on whole-disk FileVault (a different key, *underneath* SQLCipher).
+ * We unlink and do NOT claim shred-grade deletion.
+ *
+ * @param {{ dbPath: string, dbKeyHex: string|null, log?: (m:string)=>void }} opts
+ * @returns {{ purged: string[], skipped: {path:string, reason:string}[] }}
+ */
+export function purgePlaintextBackup({ dbPath, dbKeyHex, log = () => {} }) {
+  const purged = [];
+  const skipped = [];
+  const keepAll = (reason) => {
+    log(`[mycelium] at-rest: KEEPING plaintext backup(s) — ${reason}`);
+    return { purged, skipped: [{ path: '*', reason }] };
+  };
+
+  // ── Pre-checks: every one must pass before we touch a single backup ──────────
+  if (!dbKeyHex) return keepAll('no DB key (vault not keyed)');
+  if (!existsSync(dbPath)) return keepAll('no live vault');
+  if (isPlaintextSqlite(dbPath)) return keepAll('live vault is still PLAINTEXT (migration incomplete)');
+
+  // Prove the live vault opens with the key AND reads — i.e. the ciphertext is
+  // intact and recoverable. sqlite_master is only readable once the key is right,
+  // so a successful read is proof the encrypted copy is not corrupt. Only then is
+  // the plaintext copy truly redundant.
+  try {
+    const live = new Database(dbPath, { fileMustExist: true });
+    try {
+      live.pragma(`cipher='sqlcipher'`);
+      live.pragma(`key="x'${dbKeyHex}'"`);
+      live.prepare(`SELECT count(*) c FROM sqlite_master`).get();
+    } finally { live.close(); }
+  } catch (err) {
+    return keepAll(`live vault did not open keyed (${err.message})`);
+  }
+
+  // ── Remove the plaintext siblings (+ any -wal/-shm fragments) ────────────────
+  const dir = dirname(dbPath);
+  const prefix = `${basename(dbPath)}.pre-cipher-`;
+  let entries = [];
+  try { entries = readdirSync(dir).filter((f) => f.startsWith(prefix) && !f.endsWith('-wal') && !f.endsWith('-shm')); } catch { /* dir unreadable → nothing to purge */ }
+  for (const name of entries) {
+    const p = join(dir, name);
+    // Sanity: only ever delete a file we can confirm is a plaintext sqlite db.
+    if (!isPlaintextSqlite(p)) { skipped.push({ path: p, reason: 'not a plaintext sqlite db (unexpected) — kept' }); continue; }
+    let ok = true;
+    for (const sfx of ['', '-wal', '-shm']) {
+      try { rmSync(p + sfx, { force: true }); } catch (err) { ok = false; skipped.push({ path: p + sfx, reason: err.message }); }
+    }
+    if (ok) purged.push(p);
+  }
+  if (purged.length) log(`[mycelium] at-rest: purged ${purged.length} plaintext backup(s) after verified keyed reopen.`);
+  return { purged, skipped };
 }

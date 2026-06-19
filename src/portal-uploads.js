@@ -131,8 +131,15 @@ export function portalUploadsRouter({ db, userId, enqueueEnrichment = null }) {
       const r = await processOpenAIExport(detected.conversations, { capture });
       return { importResult: { type: 'chatgpt', ...r } };
     }
-    if (detected.type === 'obsidian' || detected.type === 'linkedin') {
-      return { importResult: { type: detected.type, imported: 0, skipped: 0, stats: {}, note: `${detected.type} import is not supported yet` } };
+    // NOT success-shaped: a `{imported:0}` result reads as "import worked, file
+    // was empty". Return an error so the UI surfaces a real failure. (Obsidian
+    // HAS a working importer — the folder path POST /import/obsidian — just not
+    // this zip path; point the user there rather than feign success.)
+    if (detected.type === 'obsidian') {
+      return { error: 'Obsidian vaults import via the folder importer (Settings → Import → Obsidian), not as a .zip upload — nothing was imported.' };
+    }
+    if (detected.type === 'linkedin') {
+      return { error: 'LinkedIn export import is not supported yet — nothing was imported.' };
     }
     return { error: 'unrecognized export — expected a Mycelium vault export, or a Claude/ChatGPT conversations.json' };
   }

@@ -43,6 +43,9 @@
 	let criticality = $state<Any[]>([]); // per-level latest rows
 	let events = $state<Any[]>([]);
 	let river = $state<Any | null>(null); // territory-river: anchor bands + active count over time
+	const anchorCountVals = $derived((river?.anchor_count ?? []).map((p: Any) => (p.count == null ? null : Number(p.count))));
+	const anchorCountLabels = $derived((river?.anchor_count ?? []).map((p: Any) => (p.end ?? '').slice(0, 10)));
+	const hasAnchorCount = $derived(anchorCountVals.some((v: number | null) => v != null));
 
 	let gran = $state<'alpha' | 'theta' | 'delta'>('theta');
 
@@ -413,6 +416,13 @@
 						<span class="river-note">territory level · drawn from activation counts, not Fisher</span>
 					</div>
 					<TerritoryRiver data={river} />
+					{#if hasAnchorCount}
+						<div class="anchor-count">
+							<div class="ac-head"><span class="ac-title">Anchor topics over time</span><span class="river-note">your stable core — count of persistent topics</span></div>
+							<TimeSeries points={anchorCountVals} labels={anchorCountLabels} color={accentVar.aurum} height={120} format={(v) => String(Math.round(v))} />
+							<p class="muted sm">How many <b>anchor</b> topics you're holding at once — a topic counts as an anchor once it's stayed active across most of the last ~6 months.</p>
+						</div>
+					{/if}
 				</section>
 
 				<!-- LAYER 2 — grouped pillar cards -->
@@ -993,6 +1003,9 @@
 	.river-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
 	.river-head .group-head { margin: 0 0 0.8rem; }
 	.river-note { font-size: 0.68rem; color: var(--color-text-tertiary); }
+	.anchor-count { margin-top: 1.4rem; padding-top: 1.2rem; border-top: 1px solid var(--color-border); }
+	.ac-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.6rem; }
+	.ac-title { font-size: 0.82rem; font-weight: 600; color: var(--color-text-emphasis); }
 
 	/* ── Overview grid ── */
 	.grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: clamp(0.8rem, 1.6vw, 1.1rem); }
