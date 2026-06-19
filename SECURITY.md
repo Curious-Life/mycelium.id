@@ -8,13 +8,9 @@ treat every report with the seriousness that implies.
 
 **Please do not open a public issue for security vulnerabilities.**
 
-Report privately through one of:
-
-1. **GitHub Private Vulnerability Reporting** (preferred) — on this repository, go
-   to the **Security** tab → **Report a vulnerability**. This opens a private
-   advisory only you and the maintainers can see.
-2. **Email** — `security@mycelium.id` *(maintainers: confirm/replace this address
-   before publishing if it is not yet provisioned)*.
+Report privately via **GitHub Private Vulnerability Reporting** — on this
+repository, go to the **Security** tab → **Report a vulnerability**. This opens a
+private advisory only you and the maintainers can see.
 
 Please include: a description, the affected component (e.g. encryption-at-rest,
 key handling, the MCP/OAuth surface, egress, the embedding pipeline), reproduction
