@@ -734,11 +734,25 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
         });
       }
 
-      // 2) Territory names (auto-decrypted). id → name.
-      const nameRows = (await db.rawQuery(
-        `SELECT territory_id, name FROM territory_profiles WHERE user_id = ?`, [u.id])).results || [];
+      // 2) Territory profiles → name + current standing (anchor / active / dormant).
+      const profRows = (await db.rawQuery(
+        `SELECT territory_id, name, current_phase, is_anchored, last_active
+           FROM territory_profiles WHERE user_id = ?`, [u.id])).results || [];
+      const profById = {};
+      for (const r of profRows) if (r.territory_id != null) profById[String(r.territory_id)] = r;
       const nameById = {};
-      for (const r of nameRows) if (r.territory_id != null) nameById[String(r.territory_id)] = r.name || null;
+      for (const id in profById) nameById[id] = profById[id].name || null;
+      // Status is data-relative: "recent" is measured against the latest window.
+      const refMs = weeks.length ? Date.parse(weeks[weeks.length - 1].end) : Date.now();
+      const DORMANT_DAYS = 60;
+      const statusOf = (p) => {
+        if (!p) return 'unknown';
+        if (Number(p.is_anchored) || p.current_phase === 'anchor') return 'anchor';
+        const la = p.last_active ? Date.parse(p.last_active) : NaN;
+        const ageDays = Number.isNaN(la) ? Infinity : (refMs - la) / 86400000;
+        if (ageDays > DORMANT_DAYS) return 'dormant';
+        return 'active';
+      };
 
       // 3) Anchors = territories active above FLOOR in the most weeks (persistent core).
       const weeksActive = {}; const totalShare = {};
@@ -755,6 +769,8 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
         territory_id: Number(id),
         name: nameById[id] || `Territory ${id}`,
         named: nameById[id] != null,
+        status: statusOf(profById[id]),                 // anchor | active | dormant | unknown
+        last_active: profById[id]?.last_active ?? null,
         weeks_active: weeksActive[id],
         series: vectors.map((v) => Number(v[id]) || 0),
       }));
