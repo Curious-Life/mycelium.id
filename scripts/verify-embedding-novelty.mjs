@@ -45,6 +45,9 @@ async function seed(territoryId, vecFor, count) {
 await seed(1, () => unit((d) => Math.sin((d + 1) * 0.011)), 6);
 // Territory 2 — SPREAD: each message a distinct direction → high NN distance → high novelty.
 await seed(2, (i) => unit((d) => Math.sin((d + 1) * (0.011 + i * 0.05)) + Math.cos((d + 1) * (0.02 + i * 0.07))), 6);
+// Territory 3 — single message → n<2 → the stage must acc.skip() WITHOUT crashing (the
+// live bug: Python Accumulator lacked skip(); the gate missed it with ≥2-msg territories).
+await seed(3, () => unit((d) => Math.cos((d + 1) * 0.03)), 1);
 
 const env0 = { ...process.env, PYTHONPATH: 'pipeline', MYCELIUM_DB: DB, MYCELIUM_KCV: KCV, MYCELIUM_USER_ID: U, USER_MASTER: userHex, SYSTEM_KEY: systemHex };
 // compute-complexity first (creates the territory rows the novelty stage UPDATEs).
