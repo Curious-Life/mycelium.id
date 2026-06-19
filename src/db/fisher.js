@@ -190,6 +190,12 @@ export function createFisherNamespace(deps) {
       const raw = parseInt(opts.limit, 10);
       const limit = !Number.isFinite(raw) || raw <= 0 ? 20 : Math.min(raw, 100);
 
+      // The fisher_milestones UNIQUE key includes clustering_run_id, so the
+      // SAME logical milestone (same rule/level/week) is re-inserted on every
+      // clustering run — surfacing as N identical alerts. Dedup across run_id
+      // below (newest kept) so a single transition shows once. Over-fetch so
+      // the post-dedup set can still satisfy the caller's `limit`.
+      const fetchLimit = Math.min(Math.max(limit * 5, 50), 500);
       let sql = `SELECT id, rule_type, level, window_start, window_end,
                         phase_from, phase_to, velocity_z, displacement,
                         detail, headline, dismissed_at, notified_via,
@@ -199,11 +205,24 @@ export function createFisherNamespace(deps) {
       const params = [userId];
       if (!includeDismissed) sql += ` AND dismissed_at IS NULL`;
       sql += ` ORDER BY detected_at DESC LIMIT ?`;
-      params.push(limit);
+      params.push(fetchLimit);
 
       const result = await d1Query(sql, params);
       const rows = result.results || result || [];
-      return rows.map((r) => ({
+
+      // Collapse run-id duplicates: key on the logical identity (rule + level
+      // + window + phase endpoints), keep the newest (rows are detected_at
+      // DESC), then trim to the caller's limit.
+      const seen = new Set();
+      const deduped = [];
+      for (const r of rows) {
+        const key = `${r.rule_type}|${r.level}|${r.window_start}|${r.phase_from ?? ''}|${r.phase_to ?? ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(r);
+        if (deduped.length >= limit) break;
+      }
+      return deduped.map((r) => ({
         ...coerceNums(r, MILESTONE_NUMERIC),
         detail: parseJsonSafe(r.detail, {}),
       }));
