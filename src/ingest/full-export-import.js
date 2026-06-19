@@ -29,7 +29,7 @@ import path from 'node:path';
 import { restoreTable } from './vault-import.js';
 import { putBlob } from './blob-store.js';
 import { getMasterKey } from '../crypto/crypto-local.js';
-import { encryptVector } from '../search/ann/decode.js';
+import { encodeVectorRaw } from '../search/ann/decode.js';
 
 const MAX_ATTACHMENT_BYTES = Number(process.env.MYCELIUM_IMPORT_ATTACHMENT_LIMIT_BYTES) || 100 * 1024 * 1024;
 const MAX_AGENT_FILE_BYTES = 5 * 1024 * 1024;
@@ -156,9 +156,11 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
       const id = row.id; const vec = decodeVector(row);
       if (!id || !vec || vec.length !== dim) { bad++; return; }
       try {
-        const env = await encryptVector(vec, 'personal', masterKey);
+        // Stage A: write the vector as RAW LE-f32 BLOB bytes (no envelope). These
+        // columns are NEVER_AUTO_DECRYPT, so the adapter binds the Buffer verbatim.
+        const raw = encodeVectorRaw(vec);
         const extra = flipNlp ? ', nlp_processed = 1' : '';
-        const res = await db.rawQuery(`UPDATE ${table} SET ${col} = ?${extra} WHERE id = ? AND user_id = ?`, [env, id, userId]);
+        const res = await db.rawQuery(`UPDATE ${table} SET ${col} = ?${extra} WHERE id = ? AND user_id = ?`, [raw, id, userId]);
         if ((res?.meta?.changes ?? 0) > 0) updated++;
       } catch { bad++; }
     });

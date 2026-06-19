@@ -5,9 +5,9 @@
 // vault-bridge.js instead of sqlite3.connect (opt-in: MYCELIUM_DB_BRIDGE_URL).
 // verify:at-rest A6/A7 prove the bridge round-trips `facts`; THIS gate proves the
 // actual CLUSTERING read SHAPES (cluster.py:274 content-JOIN + the nomic_embedding
-// read) round-trip with parity, and that the bridge's BLOB-rejection guard fires
-// (the one pre-step-5 requirement: nomic_embedding must be a TEXT envelope, never
-// a raw BLOB — ties to the sync-clustering-points backfill).
+// read) round-trip with parity, AND that a raw-BLOB vector column crosses the bridge
+// as {__b64__} both ways (Stage A bidirectional BLOB transport — nomic_embedding and
+// embedding_768 are raw LE-f32 BLOBs now; the old TEXT-envelope-only guard is gone).
 import Database from 'better-sqlite3';
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
@@ -72,7 +72,7 @@ async function main() {
       db.prepare(`INSERT INTO clustering_points(id,user_id,source_id,source_type,nomic_embedding) VALUES (?,?,?,?,?)`).run('cp1', 'u', 'm1', 'message', ENVELOPE);
       // cp2: NULL nomic_embedding (un-embedded point — must be readable)
       db.prepare(`INSERT INTO clustering_points(id,user_id,source_id,source_type,nomic_embedding) VALUES (?,?,?,?,?)`).run('cp2', 'u', 'm1', 'message', null);
-      // cp3: a RAW BLOB nomic_embedding (legacy/un-re-encrypted) — the bridge must reject it
+      // cp3: a RAW BLOB nomic_embedding (Stage A raw vector) — crosses as {__b64__}
       db.prepare(`INSERT INTO clustering_points(id,user_id,source_id,source_type,nomic_embedding) VALUES (?,?,?,?,?)`).run('cp3', 'u', 'm1', 'message', Buffer.from([1, 2, 3, 4]));
       db.pragma('wal_checkpoint(TRUNCATE)');
       db.close();
@@ -109,22 +109,31 @@ async function main() {
       rows[1].nomic_embedding === null,
       `cp1=${String(rows[0]?.nomic_embedding).slice(0, 8)}… cp2=${rows[1]?.nomic_embedding}`);
 
-    // P3: a RAW BLOB column in the result set is REJECTED (the pre-step-5 guard)
+    // P3: a RAW BLOB column now CROSSES the bridge as {__b64__} (Stage A bidirectional
+    // BLOB transport), decoding to the exact bytes. (Was: the bridge REJECTED BLOBs —
+    // that guard is gone now that raw LE-f32 vector columns are first-class.)
     const p3 = await bridgeReq('/query', { sql: `SELECT id, nomic_embedding FROM clustering_points WHERE id='cp3'` });
-    ok('P3 bridge rejects a raw-BLOB nomic_embedding (must be TEXT envelope before step 5)',
-      p3.status === 500 && /BLOB/.test(p3.json?.error || ''),
-      `status=${p3.status} err=${(p3.json?.error || '').slice(0, 40)}`);
+    const p3v = p3.json?.rows?.[0]?.nomic_embedding;
+    const p3bytes = p3v && typeof p3v.__b64__ === 'string' ? Buffer.from(p3v.__b64__, 'base64') : null;
+    ok('P3 raw-BLOB nomic_embedding crosses the bridge as {__b64__} (exact bytes)',
+      p3.status === 200 && !!p3bytes && p3bytes.equals(Buffer.from([1, 2, 3, 4])),
+      `status=${p3.status} v=${JSON.stringify(p3v)}`);
 
-    // P4: Python local_db reroute runs the real nomic_embedding read shape e2e
+    // P4: Python local_db reroute runs the real nomic_embedding read shapes e2e —
+    // a TEXT envelope (cp1) comes back as the str; a raw BLOB (cp3) is DECODED to
+    // Python bytes by local_db (mirrors the bridge {__b64__} encoding).
     const py = spawnSync('python3', ['-c', `
 import sys; sys.path.insert(0, ${JSON.stringify(join(ROOT, 'pipeline'))})
 import local_db
-rows = local_db.query("SELECT id, nomic_embedding FROM clustering_points WHERE id=?", ["cp1"])
-assert rows[0]["nomic_embedding"] == ${JSON.stringify(ENVELOPE)}, rows
+env = local_db.query("SELECT id, nomic_embedding FROM clustering_points WHERE id=?", ["cp1"])
+assert env[0]["nomic_embedding"] == ${JSON.stringify(ENVELOPE)}, env
+blob = local_db.query("SELECT id, nomic_embedding FROM clustering_points WHERE id=?", ["cp3"])
+v = blob[0]["nomic_embedding"]
+assert isinstance(v, (bytes, bytearray)) and bytes(v) == bytes([1,2,3,4]), repr(v)
 print("PYOK")
 `], { env: { ...process.env, MYCELIUM_DB_BRIDGE_URL: `http://127.0.0.1:${PORT}` }, encoding: 'utf8' });
     const pyOk = py.status === 0 && /PYOK/.test(py.stdout || '');
-    ok('P4 Python local_db reads nomic_embedding via the bridge reroute (opt-in URL)',
+    ok('P4 Python local_db reads via the bridge: TEXT envelope as str, raw BLOB decoded to bytes',
       pyOk, pyOk ? '' : (py.stderr || py.stdout || 'no python3?').trim().split('\n').pop());
   } finally {
     if (bridge) { try { bridge.kill('SIGTERM'); } catch {} }

@@ -25,6 +25,7 @@ level (the whole file is still encrypted at rest in bridge mode).
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sqlite3
@@ -91,8 +92,31 @@ def _post(route: str, body: dict, timeout: int = 120) -> dict:
     return out
 
 
+# ── BLOB transport over JSON (bridge mode) — mirrors vault-bridge.js + local_db.py.
+# A SQLite BLOB crosses as {"__b64__": <base64>}: raw LE-f32 vector columns
+# (Stage A: nomic_embedding, embedding_768, anchor_vector) need this since JSON
+# can't carry bytes. The legacy sqlite3 path binds/returns bytes natively.
+def _encode_params(params: Optional[Sequence[Any]]) -> list:
+    return [
+        ({"__b64__": base64.b64encode(bytes(p)).decode("ascii")}
+         if isinstance(p, (bytes, bytearray, memoryview)) else p)
+        for p in (params or [])
+    ]
+
+
+def _decode_value(v: Any) -> Any:
+    if isinstance(v, dict) and len(v) == 1 and isinstance(v.get("__b64__"), str):
+        return base64.b64decode(v["__b64__"])
+    return v
+
+
+def _decode_rows(rows: list[dict]) -> list[dict]:
+    return [{k: _decode_value(v) for k, v in r.items()} for r in (rows or [])]
+
+
 def _query_bridge(sql: str, params: Optional[Sequence[Any]]) -> list[dict]:
-    return _post("/query", {"sql": sql, "params": list(params) if params else []}).get("rows", [])
+    rows = _post("/query", {"sql": sql, "params": _encode_params(params)}).get("rows", [])
+    return _decode_rows(rows)
 
 
 def query(sql: str, params: Optional[Sequence[Any]] = None) -> list[dict]:

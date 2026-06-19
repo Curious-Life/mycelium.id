@@ -41,7 +41,6 @@ Security:
   - Audit emits counts only — no PII, no embedding values, no message ids.
 """
 
-import base64
 import math
 import os
 import sys
@@ -435,14 +434,17 @@ def decrypt_vectors(envelopes: dict[str, str]) -> dict[str, np.ndarray]:
     master_key = _get_master_key()
     out: dict[str, np.ndarray] = {}
     for mid, env in envelopes.items():
+        # Dual-read (Stage A SQLCipher collapse): the stored value is either raw
+        # LE-f32 bytes (new, delivered as bytes through the vault bridge) or a
+        # legacy wrapped-DEK envelope string. decode_stored_vector resolves both;
+        # per-vector failures are skipped (matching prior behavior).
         try:
-            pt = crypto_local.decrypt_bytes(env, master_key)
-            raw = base64.b64decode(pt)
+            vec = crypto_local.decode_stored_vector(env, master_key, dim=768)
         except Exception:
             continue
-        if len(raw) != 768 * 4:
+        if vec is None or vec.size != 768:
             continue
-        out[mid] = np.frombuffer(raw, dtype=np.float32)
+        out[mid] = np.ascontiguousarray(vec, dtype=np.float32)
     return out
 
 

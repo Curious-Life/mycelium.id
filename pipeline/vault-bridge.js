@@ -35,23 +35,34 @@ import { isTrustedLoopback } from '../src/http/loopback.js';
 
 const HOST = '127.0.0.1';
 
+// Binary transport over JSON: a SQLite BLOB travels as a tagged object
+// `{ __b64__: <base64> }`. The tag is applied/stripped at exactly two points —
+// params IN (decodeParams) and results OUT (encodeRow) — so raw LE-f32 vector
+// columns (Stage A: nomic_embedding, embedding_768, anchor_vector) cross the bridge.
+// Normal TEXT/INT/REAL cells are untouched. The inbound check is strict (a plain
+// object with ONLY `__b64__:string`) so a real string/number/array param can never
+// be mistaken for a blob tag; the outbound only tags actual Buffer cells.
+const isBlobTag = (p) =>
+  p !== null && typeof p === 'object' && Object.getPrototypeOf(p) === Object.prototype &&
+  Object.keys(p).length === 1 && typeof p.__b64__ === 'string';
+const decodeParams = (params) =>
+  (params || []).map((p) => (isBlobTag(p) ? Buffer.from(p.__b64__, 'base64') : p));
+function encodeRow(row) {
+  let out = row;
+  for (const [k, v] of Object.entries(row)) {
+    if (Buffer.isBuffer(v)) { if (out === row) out = { ...row }; out[k] = { __b64__: v.toString('base64') }; }
+  }
+  return out;
+}
+
 /** Run a statement on the RAW keyed handle, replicating Python sqlite3 semantics:
  *  a statement that returns rows → list of row objects; otherwise commit (better-
- *  sqlite3 autocommits) and return []. Fail closed on BLOB results (see note). */
+ *  sqlite3 autocommits) and return []. BLOB params/results cross as `{__b64__}`. */
 function rawRun(rawDb, sql, params) {
   const stmt = rawDb.prepare(sql);
-  if (stmt.reader) {
-    const rows = stmt.all(...(params || []));
-    for (const row of rows) {
-      for (const v of Object.values(row)) {
-        if (Buffer.isBuffer(v)) {
-          throw new Error('vault-bridge: BLOB column in result set is not supported over the bridge (no base64 transport) — the pipeline reads only TEXT envelope columns');
-        }
-      }
-    }
-    return rows;
-  }
-  stmt.run(...(params || []));
+  const p = decodeParams(params);
+  if (stmt.reader) return stmt.all(...p).map(encodeRow);
+  stmt.run(...p);
   return [];
 }
 
@@ -102,7 +113,7 @@ async function main() {
         const stmts = payload.statements || [];
         const tx = rawDb.transaction((list) => {
           let n = 0;
-          for (const s of list) { const [sql, p] = parts(s); if (sql && sql.trim()) { rawDb.prepare(sql).run(...p); n++; } }
+          for (const s of list) { const [sql, p] = parts(s); if (sql && sql.trim()) { rawDb.prepare(sql).run(...decodeParams(p)); n++; } }
           return n;
         });
         return send(res, 200, { ok: true, count: tx(stmts) });

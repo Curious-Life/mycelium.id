@@ -104,11 +104,14 @@ try {
     CONSTRUCTS.every((c) => constructsStored.has(c)) && anchorRows.length === CONSTRUCTS.length,
     `stored=[${[...constructsStored].join(', ')}]`);
 
-  // ── A2. anchor_vector is a ciphertext envelope at rest; structural plaintext ─
+  // ── A2. anchor_vector is RAW LE-f32 BLOB bytes at rest (Stage A SQLCipher
+  // collapse) — no per-field envelope; at-rest secrecy is whole-file SQLCipher.
+  // DIM × 4 bytes. The reader (compute-anchors decode_stored_vector) dual-reads
+  // raw + any legacy envelope. ──
   const a0 = anchorRows[0];
-  rec('A2. anchor_vector is an encrypted vector envelope at rest',
-    anchorRows.every((a) => isEnvelope(a.anchor_vector)),
-    a0 ? `${a0.construct}.anchor_vector ${isEnvelope(a0.anchor_vector) ? 'envelope' : 'PLAINTEXT-LEAK'}` : 'none');
+  rec('A2. anchor_vector is a raw LE-f32 BLOB at rest (not an envelope)',
+    anchorRows.every((a) => Buffer.isBuffer(a.anchor_vector) && a.anchor_vector.length === DIM * 4),
+    a0 ? `${a0.construct}.anchor_vector ${Buffer.isBuffer(a0.anchor_vector) ? `raw[${a0.anchor_vector.length}B]` : 'NOT-RAW'}` : 'none');
   rec('A3. anchor structural columns plaintext (construct/anchor_version/seed_content_hash/dim/seed_count/embedder_label)',
     !!a0 && !isEnvelope(a0.construct) && !isEnvelope(a0.anchor_version)
       && typeof a0.seed_content_hash === 'string' && a0.seed_content_hash.length === 64

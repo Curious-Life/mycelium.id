@@ -61,9 +61,9 @@ rec('E2. transient null vector → LEFT PENDING (nlp_processed=0), no error → 
 rec('E3. genuine wrong-dim → POISONED (nlp_processed=-1, "expected 768")',
   g('wrongdim').nlp_processed === -1 && /expected 768/.test(g('wrongdim').nlp_error || ''),
   `state=${g('wrongdim').nlp_processed} err=${(g('wrongdim').nlp_error || '').slice(0, 40)}`);
-rec('E4. valid 768 vector → EMBEDDED (nlp_processed=2, embedding768 set)',
-  g('valid').nlp_processed === 2 && typeof g('valid').embedding_768 === 'string' && g('valid').embedding_768.length > 0,
-  `state=${g('valid').nlp_processed}`);
+rec('E4. valid 768 vector → EMBEDDED (nlp_processed=2, embedding768 raw BLOB set)',
+  g('valid').nlp_processed === 2 && Buffer.isBuffer(g('valid').embedding_768) && g('valid').embedding_768.length === 768 * 4,
+  `state=${g('valid').nlp_processed} len=${g('valid').embedding_768?.length}`);
 rec('E5. no transient row carries "object dims" (the string the self-heal skips forever)',
   !/object/.test(g('transient').nlp_error || '') && !/object/.test(g('wrongdim').nlp_error || ''),
   `counts=${JSON.stringify(res)}`);

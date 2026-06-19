@@ -27,7 +27,7 @@ process.env.MYCELIUM_DISABLE_EMBED = '1';
 const { applyMigrations } = await import('../src/db/migrate.js');
 const { startRestServer } = await import('../src/server-rest.js');
 const { importMasterKey, decrypt } = await import('../src/crypto/crypto-local.js');
-const { decryptVector } = await import('../src/search/ann/decode.js');
+const { decodeStoredVector } = await import('../src/search/ann/decode.js');
 
 const hex = () => crypto.randomBytes(32).toString('hex');
 const USER_HEX = hex();
@@ -112,15 +112,19 @@ async function main() {
     rec('F1b FK-ordered child lands (contact_territories before people, FK deferred)',
       cnt("SELECT COUNT(*) n FROM contact_territories WHERE id='fx_ct1'")?.n === 1);
 
+    // Stage A: the importer now writes vectors as RAW LE-f32 BLOB bytes (consistent
+    // with the migrated columns; it previously re-introduced envelopes). decodeStoredVector
+    // dual-reads the raw Buffer (and any legacy envelope). Pass the Buffer verbatim —
+    // String()-ing a BLOB would corrupt it.
     const m1 = cnt("SELECT embedding_768, nlp_processed FROM messages WHERE id='fx_m1'");
-    let v768 = null; try { v768 = await decryptVector(String(m1?.embedding_768 || ''), await importMasterKey(USER_HEX), null, 768); } catch { /* */ }
-    rec('F3 768d → embedding_768 set, nlp_processed=1, decrypts to original',
+    let v768 = null; try { v768 = await decodeStoredVector(m1?.embedding_768, 768, await importMasterKey(USER_HEX), null); } catch { /* */ }
+    rec('F3 768d → embedding_768 set (raw), nlp_processed=1, decodes to original',
       Boolean(m1?.embedding_768) && Number(m1?.nlp_processed) === 1 && v768 && Math.abs(v768[0] - VEC768[0]) < 1e-5 && Math.abs(v768[767] - VEC768[767]) < 1e-5,
       `nlp=${m1?.nlp_processed}`);
 
     const cp = cnt("SELECT nomic_embedding FROM clustering_points WHERE id='fx_cp1'");
-    let v256 = null; try { v256 = await decryptVector(String(cp?.nomic_embedding || ''), await importMasterKey(USER_HEX), null, 256); } catch { /* */ }
-    rec('F4 256d → nomic_embedding set + decrypts', v256 && Math.abs(v256[0] - VEC256[0]) < 1e-5);
+    let v256 = null; try { v256 = await decodeStoredVector(cp?.nomic_embedding, 256, await importMasterKey(USER_HEX), null); } catch { /* */ }
+    rec('F4 256d → nomic_embedding set (raw) + decodes', v256 && Math.abs(v256[0] - VEC256[0]) < 1e-5);
 
     const att = cnt("SELECT local_path FROM attachments WHERE id='att1'");
     let blobOk = false;
