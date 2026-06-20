@@ -1,6 +1,6 @@
 {
   "name": "mycelium",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "Mycelium V1 — self-hosted single-user MCP cognitive vault.",
