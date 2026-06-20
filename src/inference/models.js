@@ -9,7 +9,7 @@
 // echoed. Errors are a CATEGORY only (never the provider's body). The base_url is
 // SSRF-guarded before any fetch with the key (H5), same as probe.js.
 
-import { assertSafeBaseUrl } from './base-url.js';
+import { assertSafeBaseUrl, fetchProvider } from './base-url.js';
 
 const ANTHROPIC_MODELS_URL = 'https://api.anthropic.com/v1/models';
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -49,7 +49,10 @@ export async function listModels({ provider, baseUrl, apiKey, fetch = globalThis
       url = /\/v1$/.test(base) ? `${base}/models` : `${base}/v1/models`;
       headers = { ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) };
     }
-    const r = await fetch(url, { method: 'GET', headers, signal: ctrl.signal });
+    // Use-time SSRF pin (defeats DNS rebinding the literal assertSafeBaseUrl
+    // can't): resolve-public + connection-pin for hostnames; loopback/local
+    // providers fetch directly. Honors the injected `fetch` test seam.
+    const r = await fetchProvider(url, { method: 'GET', headers, signal: ctrl.signal, fetch });
     if (!r.ok) {
       if (r.status === 401 || r.status === 403) return { ok: false, error: 'auth_rejected', status: r.status };
       if (r.status === 404) return { ok: false, error: 'not_found', status: r.status };

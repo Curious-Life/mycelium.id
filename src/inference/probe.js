@@ -9,7 +9,7 @@
 // inference router adopts the same split when the outbound widening (S3) lands;
 // this probe is the seed.
 
-import { assertSafeBaseUrl } from './base-url.js';
+import { assertSafeBaseUrl, fetchProvider } from './base-url.js';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -52,7 +52,9 @@ export async function probeProvider({ provider, baseUrl, model, apiKey, fetch = 
       headers = { 'content-type': 'application/json', ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) };
       body = { model: model || 'gpt-4o-mini', max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] };
     }
-    const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: ctrl.signal });
+    // Use-time SSRF pin (defeats DNS rebinding the literal assertSafeBaseUrl
+    // can't); loopback/local providers fetch directly. Honors the injected seam.
+    const r = await fetchProvider(url, { method: 'POST', headers, body: JSON.stringify(body), signal: ctrl.signal, fetch });
     if (r.ok) return { ok: true, status: r.status };
     // Category only — NEVER the provider's error body (it can echo request content).
     if (r.status === 401 || r.status === 403) return { ok: false, error: 'auth_rejected', status: r.status };
