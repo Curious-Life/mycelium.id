@@ -1,0 +1,277 @@
+<script lang="ts">
+	import { onMount } from 'svelte';
+	import { browser } from '$app/environment';
+	import { navigationState } from '$lib/stores/navigation';
+	import { theme } from '$lib/stores/theme';
+	import { viewLabel } from '$lib/nav/config';
+	import { workspace } from '$lib/workspace/store';
+	import TabStrip from '$lib/components/workspace/TabStrip.svelte';
+	import type { WsNode, LeafPane } from '$lib/workspace/types';
+	import { activity, startActivityPolling, fmtEta, fmtAgo, isFreshError, statusLabel } from '$lib/stores/activity';
+
+	// One consolidated activity indicator (next to chat) — ALWAYS present and always
+	// clickable. A round glass "orb": grey when idle, green while any work runs
+	// (chat inference, embedding, mapping, narration — local or via API), red when
+	// the last job failed. Click for the live job list + what ran last and when.
+	let activityOpen = $state(false);
+	const active = $derived($activity.active);
+	const recent = $derived($activity.recent);
+	const busy = $derived(active.length > 0);
+	// Red only when idle AND the most recent finished job failed (recently) — a new
+	// success rolls it back to grey on its own. While busy, green wins.
+	const errored = $derived(!busy && isFreshError(recent[0]));
+	const orbState = $derived(busy ? 'busy' : errored ? 'error' : 'idle');
+	const lastJob = $derived(recent[0] ?? null);
+	const orbTitle = $derived(
+		busy ? `Working — ${active.length} ${active.length === 1 ? 'process' : 'processes'}`
+			: errored ? `Last job failed${lastJob ? ` — ${lastJob.stage}` : ''}`
+			: lastJob ? `Idle — last: ${lastJob.stage} ${fmtAgo(lastJob.finishedAt)}`
+			: 'Idle',
+	);
+	onMount(() => startActivityPolling());
+
+	const currentView = $derived($navigationState.primaryView);
+
+	// Hoist the workspace tabs into the header row (one bar instead of two) for the
+	// common single-pane case. When the workspace is split into multiple panes, each
+	// pane keeps its own in-pane strip (Pane.svelte) and the header shows none.
+	function collectLeaves(n: WsNode): LeafPane[] {
+		return n.kind === 'leaf' ? [n] : [...collectLeaves(n.children[0]), ...collectLeaves(n.children[1])];
+	}
+	const onlyPane: LeafPane | null = $derived.by(() => {
+		const leaves = collectLeaves($workspace.root);
+		return leaves.length === 1 ? leaves[0] : null;
+	});
+	const chatOpen = $derived($navigationState.chatOpen);
+	const currentTheme = $derived($theme);
+
+	// In the native Mac shell the window has no title bar (overlay style), so the
+	// header doubles as the drag strip. `data-tauri-drag-region` is the standard
+	// mechanism; the mousedown fallback covers the case where the server-served
+	// page (external URL) doesn't get the attribute handler wired.
+	let isTauri = $state(false);
+	onMount(() => { if (browser) isTauri = !!(window as any).__TAURI__ || !!(window as any).__TAURI_INTERNALS__; });
+
+	function startWindowDrag(e: MouseEvent) {
+		if (!isTauri || e.button !== 0) return;
+		const t = e.target as HTMLElement;
+		// Controls + the hoisted tab strip own their own gestures (click/drag-reorder).
+		if (t.closest('button, a, input, select, textarea, [role="button"], .tab-strip')) return;
+		try {
+			// `withGlobalTauri` is OFF (hardening: no full Tauri API on window for the
+			// remote origin), so reach the core window command through the internals
+			// bridge, which Tauri injects for the granted origin regardless of the flag.
+			// `core:window:allow-start-dragging` is granted in capabilities/default.json.
+			(window as any).__TAURI_INTERNALS__?.invoke?.('plugin:window|start_dragging');
+		} catch { /* not in Tauri / API shape differs — data-tauri-drag-region handles it */ }
+	}
+
+
+	function handleMenuClick() {
+		navigationState.toggleSidebar();
+	}
+
+	function toggleTheme() {
+		theme.toggle();
+	}
+</script>
+
+<!-- The whole bar is a window-drag handle in the native shell (no native title
+     bar). Buttons/links inside are not drag regions, so they stay clickable.
+     The mousedown only initiates an OS window-drag — there is no keyboard
+     equivalent and no fitting ARIA role, so the static-interaction rule is
+     intentionally ignored here. -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<header
+	data-tauri-drag-region
+	onmousedown={startWindowDrag}
+	class="app-header h-10 border-b border-[var(--color-border)] flex items-center px-2 sm:px-3 gap-1.5 sm:gap-2 bg-[var(--color-surface)] relative z-10 overflow-hidden flex-shrink-0"
+>
+	<!-- Sidebar toggle. macOS traffic-light clearance in the native shell is a
+	     DETERMINISTIC CSS padding on `.app-header` under `html.is-tauri` (tagged
+	     pre-paint in app.html) — not a post-mount spacer — so the hamburger never
+	     flashes under the traffic lights nor lands mis-positioned. -->
+	<button
+		onclick={handleMenuClick}
+		class="p-1 hover:bg-[var(--color-elevated)] rounded-md transition-colors text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] flex-shrink-0 hidden md:flex"
+		aria-label="Toggle menu"
+	>
+		<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 12h16M4 18h16" />
+		</svg>
+	</button>
+
+	<!-- Brand wordmark removed: the app IS Mycelium and the mindscape page already
+	     carries the name — a second "Mycelium" up here was pure duplication. The
+	     menu + this empty strip stay draggable so the title bar still moves. -->
+	<span class="hidden md:block w-2 select-none" data-tauri-drag-region></span>
+
+	<!-- Mobile: page title -->
+	<h2 class="md:hidden text-sm font-medium text-[var(--color-text-primary)] truncate">
+		{viewLabel(currentView)}
+	</h2>
+
+	<!-- Workspace tabs, hoisted into the header (desktop, single pane) — one bar, not
+	     two. Falls back to a flex spacer on mobile / when the workspace is split. -->
+	{#if onlyPane}
+		<div class="hidden md:flex flex-1 min-w-0 self-stretch overflow-hidden">
+			<TabStrip
+				inline
+				tabs={onlyPane.tabs}
+				activeTabId={onlyPane.activeTabId}
+				paneId={onlyPane.id}
+				onfocus={(id) => workspace.focusTab(id)}
+				onclose={(id) => workspace.closeTab(id)}
+				onopen={(viewId) => workspace.openInPane(onlyPane.id, viewId)}
+				onreorder={(tabId, toIndex) => workspace.moveTabWithinPane(onlyPane.id, tabId, toIndex)}
+			/>
+		</div>
+		<div class="flex-1 md:hidden"></div>
+	{:else}
+		<div class="flex-1"></div>
+	{/if}
+
+	<!-- Right side actions -->
+	<div class="flex items-center gap-1 sm:gap-2 flex-shrink-0">
+		<!-- Activity orb — ALWAYS visible next to chat, ALWAYS clickable. A round
+		     glass disc: grey idle · green working · red on a failed job. Click for
+		     the live job list + what ran last and when. The single source of truth
+		     for pipeline / inference / background-job status (local or via API). -->
+		<div class="relative">
+			<button
+				onclick={() => (activityOpen = !activityOpen)}
+				class="activity-orb {orbState}"
+				title={orbTitle}
+				aria-label={orbTitle}
+				aria-expanded={activityOpen}
+			>
+				<span class="orb-core"></span>
+			</button>
+			{#if activityOpen}
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<!-- svelte-ignore a11y_click_events_have_key_events -->
+				<div class="fixed inset-0 z-[59]" onclick={() => (activityOpen = false)}></div>
+				<div class="fixed top-[2.75rem] right-2 sm:right-3 z-[60] min-w-[260px] max-w-[320px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 shadow-lg" style="backdrop-filter: blur(14px) saturate(150%); -webkit-backdrop-filter: blur(14px) saturate(150%);">
+					{#if busy}
+						<div class="px-2.5 pt-1 pb-0.5 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Working now</div>
+						{#each active as j (j.id)}
+							<div class="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
+								<span class="w-1.5 h-1.5 rounded-full flex-shrink-0 {j.stalled ? 'bg-[var(--color-warning,#f59e0b)]' : 'bg-[#34d399]'}"></span>
+								<span class="text-[var(--color-text-primary)] truncate">{j.stage}</span>
+								{#if j.total > 0}<span class="text-[var(--color-text-tertiary)] flex-shrink-0">{j.done}/{j.total}</span>{/if}
+								{#if j.stalled}<span class="ml-auto text-[var(--color-warning,#f59e0b)] flex-shrink-0 whitespace-nowrap">taking longer…</span>
+								{:else if fmtEta(j.etaSeconds)}<span class="ml-auto text-[#34d399] flex-shrink-0">{fmtEta(j.etaSeconds)} left</span>{/if}
+							</div>
+						{/each}
+					{/if}
+
+					{#if recent.length}
+						<div class="px-2.5 pt-1.5 pb-0.5 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">{busy ? 'Recently' : 'Last activity'}</div>
+						{#each recent.slice(0, 6) as j (j.id + (j.finishedAt ?? ''))}
+							<div class="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
+								<span class="w-1.5 h-1.5 rounded-full flex-shrink-0 {j.status === 'error' ? 'bg-[#f87171]' : j.status === 'abandoned' ? 'bg-[var(--color-text-tertiary)]' : 'bg-[#34d399]'}"></span>
+								<span class="text-[var(--color-text-secondary)] truncate">{j.stage}</span>
+								<span class="ml-auto flex-shrink-0 {j.status === 'error' ? 'text-[#f87171]' : 'text-[var(--color-text-tertiary)]'}">{statusLabel(j.status)} · {fmtAgo(j.finishedAt)}</span>
+							</div>
+						{/each}
+					{:else if !busy}
+						<div class="px-2.5 py-2 text-[11px] text-[var(--color-text-tertiary)]">No activity yet — your vault is idle.</div>
+					{/if}
+				</div>
+			{/if}
+		</div>
+
+		<!-- Chat agent toggle (Cmd/Ctrl+J) — opens the floating tool-using agent. -->
+		<button
+			onclick={() => navigationState.toggleChat()}
+			class="w-7 h-7 rounded-full border flex items-center justify-center transition-all duration-150 {chatOpen
+				? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-white'
+				: 'border-[var(--color-border)] bg-[var(--color-elevated)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface)] hover:border-[var(--color-accent)]'}"
+			title="Chat with your vault (⌘J)"
+			aria-label="Toggle chat"
+			aria-pressed={chatOpen}
+		>
+			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+				<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+			</svg>
+		</button>
+
+		<!-- Theme toggle -->
+		<button
+			onclick={toggleTheme}
+			class="w-7 h-7 rounded-full border border-[var(--color-border)] bg-[var(--color-elevated)] flex items-center justify-center text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface)] hover:border-[var(--color-accent)] transition-all duration-150"
+			title={currentTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+			aria-label="Toggle theme"
+		>
+			{#if currentTheme === 'dark'}
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+				</svg>
+			{:else}
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<circle cx="12" cy="12" r="5" />
+					<line x1="12" y1="1" x2="12" y2="3" />
+					<line x1="12" y1="21" x2="12" y2="23" />
+					<line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+					<line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+					<line x1="1" y1="12" x2="3" y2="12" />
+					<line x1="21" y1="12" x2="23" y2="12" />
+					<line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+					<line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+				</svg>
+			{/if}
+		</button>
+	</div>
+</header>
+
+<style>
+	/* The activity orb — a small round pane of glass with a glowing core. The
+	   --orb custom property carries the state colour; everything (ring, fill,
+	   glow, core) is derived from it so a state change is a single-token swap. */
+	.activity-orb {
+		--orb: var(--color-text-tertiary);
+		position: relative;
+		width: 1.75rem;
+		height: 1.75rem;
+		border-radius: 9999px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		border: 1px solid color-mix(in srgb, var(--orb) 40%, var(--color-border));
+		background: radial-gradient(circle at 50% 38%,
+			color-mix(in srgb, var(--orb) 24%, transparent),
+			color-mix(in srgb, var(--orb) 7%, transparent) 70%);
+		backdrop-filter: blur(10px) saturate(140%);
+		-webkit-backdrop-filter: blur(10px) saturate(140%);
+		transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+	}
+	.activity-orb:hover {
+		border-color: color-mix(in srgb, var(--orb) 70%, var(--color-border));
+	}
+	.orb-core {
+		width: 0.5rem;
+		height: 0.5rem;
+		border-radius: 9999px;
+		background: var(--orb);
+		box-shadow: 0 0 6px -1px var(--orb);
+		transition: background 0.2s ease;
+	}
+	.activity-orb.idle .orb-core { opacity: 0.55; box-shadow: none; }
+	.activity-orb.busy {
+		--orb: #34d399;
+		box-shadow: 0 0 11px -3px color-mix(in srgb, #34d399 70%, transparent);
+	}
+	.activity-orb.busy .orb-core { animation: orb-pulse 1.6s ease-in-out infinite; }
+	.activity-orb.error {
+		--orb: #f87171;
+		box-shadow: 0 0 11px -3px color-mix(in srgb, #f87171 70%, transparent);
+	}
+	@keyframes orb-pulse {
+		0%, 100% { transform: scale(0.8); opacity: 0.7; }
+		50% { transform: scale(1.18); opacity: 1; }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.activity-orb.busy .orb-core { animation: none; }
+	}
+</style>

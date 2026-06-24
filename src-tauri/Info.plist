@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Tauri merges this into the generated Info.plist on macOS. -->
+  <!-- Points macOS 26+ (Tahoe) at the "Mycelium" icon inside Assets.car — the -->
+  <!-- Liquid Glass icon that re-tints live (Default / Dark / colorless Tinted). -->
+  <!-- The name MUST match the icon name in Assets.car (= the Mycelium.icon basename). -->
+  <!-- Pre-Tahoe macOS ignores this and falls back to CFBundleIconFile (icon.icns). -->
+  <key>CFBundleIconName</key>
+  <string>Mycelium</string>
+</dict>
+</plist>

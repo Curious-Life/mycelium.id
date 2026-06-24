@@ -1,0 +1,27 @@
+{
+	"extends": "./.svelte-kit/tsconfig.json",
+	"compilerOptions": {
+		"allowJs": true,
+		"checkJs": true,
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"resolveJsonModule": true,
+		"skipLibCheck": true,
+		"sourceMap": true,
+		"strict": true,
+		"moduleResolution": "bundler",
+		"allowImportingTsExtensions": true
+	},
+	"//": "exclude overrides the base (.svelte-kit) exclude entirely — service-worker entries are restated, plus *.test.ts / __tests__ which are not frontend app code (they target node:test/vitest with no portal-app runner) and so are not type-checked here.",
+	"exclude": [
+		"node_modules/**",
+		"src/service-worker.js",
+		"src/service-worker/**/*.js",
+		"src/service-worker.ts",
+		"src/service-worker/**/*.ts",
+		"src/service-worker.d.ts",
+		"src/service-worker/**/*.d.ts",
+		"src/**/*.test.ts",
+		"src/**/__tests__/**"
+	]
+}

@@ -1,0 +1,15 @@
+# Mycelium V1 — dedicated voice-transcription service (pipeline/transcribe-service.py).
+#
+# OPT-IN: only needed when the user enables the Voice-transcription section
+# (Settings → AI). Without these, voice notes fall back to the audio-capable
+# chat model (slow) — src/enrich/transcribe-audio.js fails soft.
+#
+#   pipeline/.venv/bin/pip install -r pipeline/requirements-transcribe.txt
+#
+# faster-whisper = CTranslate2 Whisper (CPU int8). Audio decode happens in
+# Node (src/enrich/ogg-opus.js) + scipy resampling — faster-whisper's PyAV
+# file path is never exercised at runtime.
+faster-whisper>=1.1
+# scipy = audio resampling (48k→16k resample_poly). numpy ships with the embed
+# deps; scipy does NOT, so it's pinned here so the UI-driven install is complete.
+scipy>=1.10

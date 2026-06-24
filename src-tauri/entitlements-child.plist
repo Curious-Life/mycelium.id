@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the BUNDLED CHILD INTERPRETERS (node, python3)
+  that Mycelium.app exec's as separate processes (src-tauri/src/main.rs spawns the
+  Node server + :4711 supervisor; the Node server spawns python3 for the embed /
+  clustering / transcribe / kokoro services).
+
+  Under the hardened runtime, every exec'd binary is its OWN code-signing context,
+  so these exceptions must be applied to node/python3 INDIVIDUALLY — they are NOT
+  inherited from the parent .app. Tauri's bundler does not sign nested
+  Resources/app/ binaries at all (tauri#8075), so scripts/sign-macos.sh applies
+  this plist to them in the inside-out signing pass.
+
+  Mirrors src-tauri/entitlements.plist (the app gets the same four):
+    - allow-jit / allow-unsigned-executable-memory  → V8's JIT in the bundled Node
+    - allow-dyld-environment-variables              → main.rs sets PATH/HF_HOME on children
+    - disable-library-validation                    → python3 dlopen()s wheel .so /
+      .dylib (faiss, onnxruntime, …) not signed by our Team ID
+
+  See docs/DESIGN-macos-signed-distribution-2026-06-17.md §2-3.
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

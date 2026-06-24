@@ -1,0 +1,19 @@
+{
+  "id": "mycelium-memory",
+  "name": "Mycelium Memory Layer",
+  "description": "Inject Mycelium vault context per turn and capture both sides of every turn.",
+  "activation": { "onStartup": true },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "baseUrl": { "type": "string" },
+      "bearer": { "type": "string" },
+      "timeoutMs": { "type": "integer", "minimum": 250 }
+    }
+  },
+  "uiHints": {
+    "baseUrl": { "label": "Mycelium base URL", "help": "e.g. http://127.0.0.1:4711" },
+    "bearer": { "label": "MYCELIUM_MCP_BEARER", "help": "The static bearer the Mycelium HTTP server was started with" }
+  }
+}

@@ -1,0 +1,6 @@
+# Mycelium is value-for-value: the software is free; development is funded by the
+# people who find it useful. This drives the repo's "Sponsor" button.
+#
+# Patreon uses the newer /c/ creator URL, which GitHub's `patreon:` field can't
+# express (it only builds patreon.com/<handle>), so it's a custom link here.
+custom: ["https://www.patreon.com/c/OurCuriousLife", "https://mycelium.id"]

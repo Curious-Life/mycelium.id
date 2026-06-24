@@ -1,0 +1,21 @@
+-- 0023 — Connection presence indicator (online/offline dot).
+--
+-- Design: docs/DESIGN-connection-presence-indicator-2026-06-18.md
+--
+-- presence_share: per-connection OUTBOUND grant — do I expose my online status to
+--   this peer? DEFAULT 1 = "share by default the moment a connection forms" (the
+--   column default covers every INSERT path in connections.js without extra code,
+--   and ADD COLUMN ... DEFAULT 1 backfills existing connections to shared too).
+--   Revoking sets it to 0. Plaintext (structural, not vault content; the connections
+--   table is unencrypted — cf. peer_messages.content which IS encrypted).
+--
+-- users.last_active_at: the owner's activity heartbeat. Written (throttled, ≥60s)
+--   from the :8787 vault-auth chokepoint on every authenticated /portal request, and
+--   read by the :4711 federation presence responder — the sanctioned shared-DB
+--   cross-process channel (the two servers are separate processes, no shared heap).
+--   Plaintext server-generated timestamp (no vault content).
+--
+-- Both ALTERs are made idempotent across re-exec-every-boot by applyMigrations'
+-- per-statement PRAGMA table_info guard (src/db/migrate.js) — no IF NOT EXISTS needed.
+ALTER TABLE connections ADD COLUMN presence_share INTEGER DEFAULT 1;
+ALTER TABLE users ADD COLUMN last_active_at TEXT;

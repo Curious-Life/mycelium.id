@@ -1,0 +1,27 @@
+{
+  "name": "mycelium-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mycelium mobile shell — a thin Capacitor remote-webview client to a self-hosted vault. iOS-first, Android from the same project.",
+  "type": "module",
+  "scripts": {
+    "sync": "cap sync",
+    "add:ios": "cap add ios",
+    "add:android": "cap add android",
+    "open:ios": "cap open ios",
+    "open:android": "cap open android",
+    "check": "node ./scripts/check-config.mjs"
+  },
+  "dependencies": {
+    "@capacitor/core": "^6.1.0",
+    "@capacitor/preferences": "^6.0.0",
+    "@capacitor/status-bar": "^6.0.0",
+    "@capacitor/splash-screen": "^6.0.0",
+    "@capacitor/app": "^6.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.0",
+    "@capacitor/ios": "^6.1.0",
+    "@capacitor/android": "^6.1.0"
+  }
+}
