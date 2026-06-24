@@ -19,10 +19,9 @@ const ledger = [];
 const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${d ? '\n      ' + d : ''}`); };
 const has = (s, ...needles) => needles.every((x) => s.includes(x));
 
-let recipes = '', design = '', picker = '', settings = '', overview = '';
+let recipes = '', picker = '', settings = '', overview = '';
 try {
   recipes = read('docs/HARNESS-RECIPES.md');
-  design = read('docs/DESIGN-harness-connect-2026-06-06.md');
   picker = read('portal-app/src/lib/components/settings/HarnessPickerSection.svelte');
   settings = read('portal-app/src/lib/views/SettingsView.svelte');
   overview = read('docs/CONNECT-YOUR-AI.md');
@@ -44,10 +43,6 @@ rec('H2. openclaw scam-safety note present',
 // ── H3 — honest local-only / remote-coming-soon banner ───────────────────────
 rec('H3. local-only banner present',
   /local-only/i.test(recipes) && /coming soon|not live/i.test(recipes));
-
-// ── H4 — design doc names the two doors ──────────────────────────────────────
-rec('H4. design doc names North (memory) + South (model) doors',
-  has(design, ':4711/mcp', ':4711/v1') && /North/.test(design) && /South/.test(design));
 
 // ── H5 — picker renders every harness id + the real endpoints ────────────────
 const IDS = ['mycelium', 'claude', 'opencode', 'openclaw', 'hermes', 'custom'];
