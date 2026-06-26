@@ -35,12 +35,16 @@ export async function uploadAttachment(db, args, enqueueEnrichment) {
     throw new Error('uploadAttachment: non-empty file bytes are required');
   }
 
-  const ext = args.fileName ? extname(args.fileName) : '';
+  // Narrow fileName to a definite string at the boundary: a tampered request can
+  // make it an array (js/type-confusion-through-parameter-tampering, #386), which
+  // would otherwise flow into extname()/the path. Non-string → treat as absent.
+  const fileName = typeof args.fileName === 'string' && args.fileName ? args.fileName : null;
+  const ext = fileName ? extname(fileName) : '';
   const { path: localPath, size } = await putBlob(args.bytes, { userId, ext });
 
   const row = await db.attachments.insert({
     user_id: userId,
-    file_name: args.fileName || null,
+    file_name: fileName,
     file_type: args.fileType || null,
     file_size: size,
     local_path: localPath,
@@ -51,7 +55,7 @@ export async function uploadAttachment(db, args, enqueueEnrichment) {
   if (args.asMessage) {
     const { id } = await captureMessage(db, {
       userId,
-      content: args.fileName ? `[uploaded ${args.fileName}]` : '[uploaded file]',
+      content: fileName ? `[uploaded ${fileName}]` : '[uploaded file]',
       source: 'upload',
       attachmentId,
     }, enqueueEnrichment);
