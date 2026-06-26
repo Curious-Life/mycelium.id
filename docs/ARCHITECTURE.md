@@ -186,6 +186,42 @@ claim level) · personaClaims MCP tool · portal /claims (ClaimsView + TimeSerie
 - **Security:** every discovery/validator model call is `sensitive:true` → router hard-blocks US-cloud egress, runs on-box. All claim content/confidence/type/snapshots encrypted at rest. **Tier-3:** no local model → discovery is a logged no-op (fail-open).
 - **Verification:** `verify:claims`, `verify:claims-discovery`, `verify:claims-rest` + 53 unit tests; Tier-3 live-validated against Ollama+Nomic; portal live-rendered.
 
+## 4c. Inner-state measurement (E2 axes — Tier-1, CVP-gated)
+
+A measurement layer that reads **inner-state leans** from the user's own language — 8
+bipolar, multilingual axes (affect: tone·charge·warmth; stance:
+gatheredness·holding·noticing·edges; plus the Buddhist *kusala/akusala* skillfulness
+axis, proven orthogonal to feeling-tone, cos 0.19). Each axis scores a signed lean =
+mean over a window of cos(msg,+pole) − cos(msg,−pole) against pooled multilingual pole
+centroids. Tier-1, fail-closed: nothing surfaces until it clears a per-axis Construct
+Validity Protocol. Design:
+`docs/DESIGN-inner-states-{embeddings,engine,cvp-surfacing,cvp-labeling}-2026-06-24.md`.
+
+```
+compute-anchors.py (Step 16, measure-only job)
+   │  Phase A   embed seed phrases → pooled pole centroids (cognitive_anchor_vectors)
+   │  Phase A2  per-axis leave-one-out separability gate → cognitive_axis_separability
+   │            (measurable iff LOO-AUC≥0.70 AND antonym<0.975; edges rescued by
+   │             contrastive — not one-word-swap — seeds → 8/8 measurable at v3)
+   │  Phase B   lean_<axis> = mean(cos(+)−cos(−)) per window (NULL if abstained)
+   ▼
+cognitive_metrics_anchor.<axis>_lean   (Tier-1, cvp_status='pending')
+   │  operator labels ─► db.labels (cvp_labels) ─► runAxisCvpFromLabels
+   │     (labels × raw leans [getLeansForCvp, internal] + message-count baseline +
+   │      topic/style confounds [frequency_snapshots] ─► runCVP ─► applyAxisCVP)
+   ▼  per-axis cvp_status flips to 'pass' ONLY on ≥20 labels + all 3 criteria
+src/db/anchor.js — the ONLY gated reader; pending/abstained → refused, never the number
+   ▼  surfaced (passed axes only) by
+getContext "# INNER-STATE LEANS" · portal /api/v1/portal/labels/* (status·sample·
+save·run-cvp·leans)
+```
+
+- **Modules:** `pipeline/compute-anchors.py`, `pipeline/anchors/definitions.py`, `migrations/{0042_inner_state_axes,0043_cvp_labels}.sql`, `src/db/{anchor,labels}.js`, `src/metrics/{cvp,axis-cvp,contracts,surface-gate}.js`, `src/portal-labels.js`, `src/tools/context.js` (the `leans` section).
+- **Method:** pooled multilingual pole-difference (single-language axes are mutually near-orthogonal; pooling denoises → transfers cross-language). kusala is surfaced ONLY functionally (three roots: grasping/aversion/unclarity), never as a moral grade; edges as softening-only.
+- **CVP:** `runCVP` = discriminant (with `frequency_snapshots` entropy/compression confounds) + incremental over message_count + confound-neutralization, ≥20 labels. `applyAxisCVP` is the ONLY writer of `cvp_status='pass'`; per-axis status lives in `cognitive_axis_separability`; a seed-version bump resets it.
+- **Security:** Tier-1 surface chokepoint. `src/db/anchor.js` is the only SQL-reader of `cognitive_metrics_anchor` (verify:cvp 4i invariant); the raw-lean read for CVP is internal-only (feeds runCVP, never a formatter/HTTP). Leans + labels are semantic fingerprints → whole-file SQLCipher, never logged. Fail-closed throughout.
+- **Verification:** `verify:anchors`, `verify:cvp`, `verify:cvp-labeling`, `verify:cvp-labeling-api` (full chain 202 GO). **NOT YET MERGED** (PRs #10 engine, #12 labeling+surfacing); the labeling UI is deferred (live-app).
+
 ## 5. Storage & schema
 
 - **Engine:** better-sqlite3 with a D1-compatible adapter (`src/adapter/d1.js`),
@@ -322,7 +358,8 @@ search, topology, embed, oauth, context, ingest, blob, enqueue, enrich,
 keysource, **account** (#36 — setup/restore/recovery-key + single-key derivation;
 skips cleanly with no Keychain), portal, portal-serve, portal-data,
 portal-mindscape, import, import-timestamps, import-security, portal-tps, generate,
-chronicles, integration, nav, inference, publish. CI
+chronicles, integration, nav, inference, publish, and the **inner-state E2** suites
+(`anchors`, `cvp`, `cvp-labeling`, `cvp-labeling-api` — §4c). CI
 (`.github/workflows/verify.yml`) runs them on every PR. **Tier-1** suites pass
 without the ML stack; **Tier-2** parity (real embeddings/clustering) is verified
 on a host with onnxruntime/Ollama installed. Portal/SPA-dependent checks SKIP
@@ -339,6 +376,13 @@ portal UI (capture/search/mindscape/tasks + tools console). **Canonical portal
 build-out:** tight nav + "Coming later"; Mindscape read surface (3D scene
 aggregator + panels); **Claude/ChatGPT import** (single-shot + chunked, hardened);
 Timeline/Profile/Settings; first-run welcome — all behind their own verify suites.
+
+🔬 **Built on PR (not yet merged):** inner-state measurement (E2 — 8 bipolar
+multilingual axes + *kusala*; §4c). Tier-1 / CVP-pending — **no axis surfaces until it
+clears per-axis CVP from operator labels**. The labeling UI (`InnerStatesView.svelte`,
+the **Inner States** tab) is built + type-checks; its render needs live-app
+verification (plain-browser preview boots blank — the WKWebView/Tauri constraint). PRs
+#10 (engine) + #12 (CVP labeling/surfacing); full chain 202 GO.
 
 ⚠️ **Built, Tier-2-gated:** real Nomic embeddings + clustering (need onnxruntime/
 Ollama on the host); inference router's *cloud* path needs a BYOK key, its

@@ -26,7 +26,10 @@ import path from 'node:path';
 import { importObsidianVault } from './ingest/obsidian-import.js';
 import { importFullExport } from './ingest/full-export-import.js';
 import { processClaudeCodeExport } from './ingest/import-parsers.js';
-import { detectSources, readClaudeCodeEntries, assertImportPathAllowed } from './ingest/detect-sources.js';
+import { importHermes } from './ingest/hermes-import.js';
+import { importOpenClaw } from './ingest/openclaw-import.js';
+import { importLocalFiles } from './ingest/local-files-import.js';
+import { detectSources, readClaudeCodeEntries, assertImportPathAllowed, hermesPaths, openClawPaths, localSweepRoots } from './ingest/detect-sources.js';
 import { captureMessage } from './ingest/capture.js';
 
 export function portalImportRouter({ db, userId, enqueueEnrichment }) {
@@ -109,6 +112,89 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
       const msg = String(e?.message || e);
       const status = /import_path_denied/i.test(msg) ? 400 : 500;
       return res.status(status).json({ ok: false, error: msg.slice(0, 200) });
+    }
+  });
+
+  // POST /import/hermes { mode? } — import the local Hermes install's conversation
+  // history (~/.hermes/state.db) + persona (SOUL.md). The on-disk reads are
+  // confined to ~/.hermes via the allowlist (a stolen Bearer can't redirect them).
+  router.post('/import/hermes', async (req, res) => {
+    try {
+      const { statePath, soulPath } = hermesPaths(os.homedir());
+      // Confine the DB read to the allowed roots (~/.hermes is an allowed root).
+      const safeState = assertImportPathAllowed(statePath);
+      // SOUL.md may be absent — only confine+pass it when it actually resolves.
+      let safeSoul; try { safeSoul = assertImportPathAllowed(soulPath); } catch { safeSoul = undefined; }
+      const mode = req.body?.mode === 'full' ? 'full' : 'clean';
+      const summary = await importHermes(db, { userId, statePath: safeState, soulPath: safeSoul, mode, enqueueEnrichment });
+      return res.json({ ok: true, ...summary });
+    } catch (e) {
+      const msg = String(e?.message || e);
+      const is400 = /import_path_denied|required|statePath|hermes_state_unreadable/i.test(msg);
+      return res.status(is400 ? 400 : 500).json({ ok: false, error: msg.slice(0, 200) });
+    }
+  });
+
+  // POST /import/openclaw { mode? } — import the local OpenClaw agent's session
+  // transcripts (agents/main/sessions/*.jsonl) + workspace memory docs
+  // (workspace/*.md). On-disk reads confined to ~/.openclaw via the allowlist.
+  router.post('/import/openclaw', async (req, res) => {
+    try {
+      const { sessionsDir, workspaceDir } = openClawPaths(os.homedir());
+      // Confine each dir; either may be absent on a partial install.
+      let safeSessions; try { safeSessions = assertImportPathAllowed(sessionsDir); } catch { safeSessions = undefined; }
+      let safeWorkspace; try { safeWorkspace = assertImportPathAllowed(workspaceDir); } catch { safeWorkspace = undefined; }
+      if (!safeSessions && !safeWorkspace) return res.status(400).json({ ok: false, error: 'openclaw not found' });
+      const mode = req.body?.mode === 'full' ? 'full' : 'clean';
+      const summary = await importOpenClaw(db, { userId, sessionsDir: safeSessions, workspaceDir: safeWorkspace, mode, enqueueEnrichment });
+      return res.json({ ok: true, ...summary });
+    } catch (e) {
+      const msg = String(e?.message || e);
+      const is400 = /import_path_denied|required|sessionsDir|workspaceDir|not found/i.test(msg);
+      return res.status(is400 ? 400 : 500).json({ ok: false, error: msg.slice(0, 200) });
+    }
+  });
+
+  // POST /import/local-files { folderPath?, categories? } — broad sweep of the
+  // user's loose files (audio/photos/documents/notes). With an explicit
+  // folderPath, sweep just that one folder (a Tauri native picker); without one,
+  // sweep the SERVER-KNOWN standard roots (~/Documents, ~/Desktop, ~/Downloads,
+  // ~/Music, ~/Pictures, ~/Movies) — the "Scan this Mac" model where the browser
+  // never chooses a path. Every root is confined via assertImportPathAllowed
+  // (fail-closed); a non-existent root is skipped, not an error. `categories`
+  // (['document','image','audio','video']) narrows what's brought in.
+  router.post('/import/local-files', async (req, res) => {
+    try {
+      const categories = Array.isArray(req.body?.categories) ? req.body.categories : undefined;
+      const folderPath = req.body?.folderPath;
+      let roots;
+      if (typeof folderPath === 'string' && folderPath) {
+        roots = [assertImportPathAllowed(folderPath)]; // one picked folder (confined)
+      } else {
+        // Server-driven sweep: confine each standard root, drop the ones absent.
+        roots = [];
+        for (const r of localSweepRoots(os.homedir())) {
+          try { roots.push(assertImportPathAllowed(r)); } catch { /* not present on this Mac → skip */ }
+        }
+        if (!roots.length) return res.status(400).json({ ok: false, error: 'no sweepable folders found' });
+      }
+      // Aggregate per-root summaries into one response (same field shape).
+      const agg = { ok: true, roots: roots.length, scanned: 0, truncated: false,
+        documents: { created: 0, deduped: 0, updated: 0 },
+        attachments: { imported: 0, deduped: 0, blobsReused: 0 },
+        skipped: { oversize: 0, unreadable: 0, unsafe: 0 }, failed: 0 };
+      for (const root of roots) {
+        const s = await importLocalFiles(db, { userId, folderPath: root, categories, enqueueEnrichment });
+        agg.scanned += s.scanned; agg.truncated = agg.truncated || s.truncated; agg.failed += s.failed;
+        for (const k of ['created', 'deduped', 'updated']) agg.documents[k] += s.documents[k];
+        for (const k of ['imported', 'deduped', 'blobsReused']) agg.attachments[k] += s.attachments[k];
+        for (const k of ['oversize', 'unreadable', 'unsafe']) agg.skipped[k] += s.skipped[k];
+      }
+      return res.json(agg);
+    } catch (e) {
+      const msg = String(e?.message || e);
+      const is400 = /import_path_denied|required|not a directory|no sweepable/i.test(msg);
+      return res.status(is400 ? 400 : 500).json({ ok: false, error: msg.slice(0, 200) });
     }
   });
 

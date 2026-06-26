@@ -206,6 +206,17 @@ export const TIER1_EMBEDDING_FAMILIES = Object.freeze({
   reflective_embedding_density:      { section: '§4.12', tier: 1, cvp_status: 'pending' },
   inner_territory_presence:          { section: '§4.11', tier: 1, cvp_status: 'pending' },
   affective_volatility_within_window:{ section: '§4.13', tier: 1, cvp_status: 'pending' },
+  // E2 bipolar inner-state axes — signed lean cos(msg,+pole) − cos(msg,−pole).
+  // Same CVP gate: pending until operator-labeled validation. `edges_lean` also
+  // abstains at the instrument level (cognitive_axis_separability.measurable=0).
+  tone_lean:         { section: '§E2.tone',         tier: 1, cvp_status: 'pending' },
+  charge_lean:       { section: '§E2.charge',       tier: 1, cvp_status: 'pending' },
+  warmth_lean:       { section: '§E2.warmth',       tier: 1, cvp_status: 'pending' },
+  gatheredness_lean: { section: '§E2.gatheredness', tier: 1, cvp_status: 'pending' },
+  holding_lean:      { section: '§E2.holding',      tier: 1, cvp_status: 'pending' },
+  noticing_lean:     { section: '§E2.noticing',     tier: 1, cvp_status: 'pending' },
+  edges_lean:        { section: '§E2.edges',        tier: 1, cvp_status: 'pending' },
+  kusala_lean:       { section: '§E2.kusala',       tier: 1, cvp_status: 'pending' },
 });
 
 /**

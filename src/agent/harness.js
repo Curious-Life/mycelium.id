@@ -218,25 +218,41 @@ const openaiAdapter = {
 const LOOPBACK_RE = /(?:\/\/)?(?:127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])/;
 
 // ── Native Ollama adapter (LOCAL chat) ───────────────────────────────────────
-// Local chat is tool-free (portal-chat strips tools for local — slow TTFB + poor
-// tool use on small models), so this is a TEXT-ONLY streaming adapter over Ollama's
-// NATIVE /api/chat. The reason it isn't the OpenAI-compatible /v1 surface: /v1
-// IGNORES num_ctx, so the model silently truncates a long briefing at Ollama's
-// ~4096 default. /api/chat honors options.num_ctx, so streamTurn can size the
-// window to hold the whole prompt + the reply. Leak-safe (no prompt/response echo).
+// Streams over Ollama's NATIVE /api/chat (not the OpenAI-compatible /v1 surface:
+// /v1 IGNORES num_ctx, so the model silently truncates a long briefing at Ollama's
+// ~4096 default; /api/chat honors options.num_ctx so streamTurn can size the window
+// to hold the whole prompt + the reply). TOOL-CAPABLE: when the caller passes tool
+// defs — which it does ONLY for a model the capability probe reports supports tools
+// (model-profile.js → /api/show capabilities) — they're sent as /api/chat `tools`
+// and the model's `message.tool_calls` are parsed, so a capable local model is a
+// FULL agent (CHAT-BACKEND-DESIGN §4/§6.1), not geography-gated. A no-tool model is
+// passed none (caller-gated); if a probe false-positive slips through and the model
+// errors on tools, streamTurn's first-call fallback retries text-only (relay floor).
+// Leak-safe (no prompt/response echo).
 const ollamaNativeAdapter = {
   kind: 'ollama',
-  mapTools: () => [],                                   // local runs tool-free
+  // Ollama /api/chat accepts the OpenAI-style function schema (same shape as openaiAdapter).
+  mapTools: (tools) => tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.inputSchema || { type: 'object', properties: {} } } })),
   init: ({ userMessage }) => [{ role: 'user', content: userMessage }],
-  pushAssistant(messages, text) { messages.push({ role: 'assistant', content: text || '' }); },
-  toolResult: (tc, out) => ({ role: 'tool', content: String(out) }),
+  pushAssistant(messages, text, toolCalls) {
+    if (toolCalls && toolCalls.length) {
+      // Ollama's native shape: tool_calls under the assistant message, args an OBJECT.
+      messages.push({ role: 'assistant', content: text || '', tool_calls: toolCalls.map((tc) => ({ function: { name: tc.name, arguments: tc.args || {} } })) });
+    } else {
+      messages.push({ role: 'assistant', content: text || '' });
+    }
+  },
+  // Ollama matches a tool result to its call by `tool_name` (newer builds); older
+  // builds ignore the extra field and match by order — both work.
+  toolResult: (tc, out) => ({ role: 'tool', tool_name: tc.name, content: String(out) }),
   pushToolResults(messages, results) { for (const r of results) messages.push(r); },
 
-  async streamOnce({ cfg, system, messages, model, maxTokens, numCtx, send, signal, fetch, timeoutMs }) {
+  async streamOnce({ cfg, system, messages, toolDefs, model, maxTokens, numCtx, send, signal, fetch, timeoutMs }) {
     const host = String(cfg.baseUrl || DEFAULT_OLLAMA_URL).replace(/\/+$/, '');
     const options = { num_predict: maxTokens };
     if (Number.isFinite(numCtx) && numCtx > 0) options.num_ctx = Math.round(numCtx);
     const body = { model, stream: true, think: false, options, messages: [{ role: 'system', content: system }, ...messages] };
+    if (toolDefs && toolDefs.length) body.tools = toolDefs;   // tool-capable model only (caller-gated)
     // Connection (TTFB) timeout only — a long generation must not be aborted
     // mid-flight; the turn's signal handles stall/disconnect/abort.
     const controller = new AbortController();
@@ -255,6 +271,7 @@ const ollamaNativeAdapter = {
 
     let text = '';
     let doneReason = null;                 // Ollama's terminal `done_reason` (e.g. 'stop' | 'length')
+    const toolCalls = [];                  // accumulated across chunks (tool-capable models)
     const usage = { inputTokens: 0, outputTokens: 0 };
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -277,6 +294,19 @@ const ollamaNativeAdapter = {
           // surface it so the chat inactivity watchdog sees progress (mirror openai).
           const th = ev.message?.thinking;
           if (typeof th === 'string' && th) send({ type: 'thinking_delta', content: th });
+          // Tool calls: Ollama emits them under message.tool_calls — args are already
+          // an OBJECT (no streamed-partial assembly like OpenAI) and there's no id, so
+          // synthesize a stable one for the assistant/tool feedback turns.
+          const tcs = ev.message?.tool_calls;
+          if (Array.isArray(tcs)) {
+            for (const tc of tcs) {
+              const fn = tc?.function;
+              if (!fn?.name) continue;
+              let args = fn.arguments;
+              if (typeof args === 'string') { try { args = JSON.parse(args || '{}'); } catch { args = {}; } }
+              toolCalls.push({ id: `call_${toolCalls.length}`, name: fn.name, args: (args && typeof args === 'object') ? args : {} });
+            }
+          }
           if (ev.done) {
             if (typeof ev.done_reason === 'string') doneReason = ev.done_reason;
             if (Number.isFinite(ev.prompt_eval_count)) usage.inputTokens = ev.prompt_eval_count;
@@ -287,11 +317,13 @@ const ollamaNativeAdapter = {
     } catch (err) {
       if (!signal?.aborted) throw err;   // genuine stream error → propagate; abort → keep partial
     }
-    // `done_reason: 'length'` = Ollama hit num_predict (the output cap). Local chat
-    // is tool-free so there's no broken tool-call here, but the reply is cut off —
-    // surface it (truncated) so the caller flags an incomplete answer rather than a
-    // clean stop. Default to 'stop' when Ollama omits the reason.
-    return { text, toolCalls: [], stopReason: doneReason || 'stop', usage, isTool: false, truncated: doneReason === 'length', aborted: !!signal?.aborted };
+    // `done_reason: 'length'` = Ollama hit num_predict (the output cap) → the reply
+    // (and any tool-call it was forming) is cut off; surface it (truncated) so the
+    // caller flags an incomplete turn rather than a clean stop — streamTurn then skips
+    // executing possibly-truncated tool calls. Default to 'stop' when Ollama omits it.
+    // isTool tracks whether the model asked to call a tool (no reliable done_reason for
+    // tool turns — Ollama reports 'stop'), so gate on the collected calls.
+    return { text, toolCalls, stopReason: doneReason || 'stop', usage, isTool: toolCalls.length > 0, truncated: doneReason === 'length', aborted: !!signal?.aborted };
   },
 };
 

@@ -96,7 +96,7 @@
 		handleAvailable = null;
 		if (handleCheckTimer) clearTimeout(handleCheckTimer);
 		const val = handleInput.trim().toLowerCase();
-		if (!val || val.length < 3) return;
+		if (!val || val.length < 2) return;
 		if (val === profile?.handle) { handleAvailable = true; return; }
 		handleChecking = true;
 		handleCheckTimer = setTimeout(async () => {
@@ -251,11 +251,11 @@
 					{#if editingHandle}
 						<div class="handle-edit">
 							<span class="handle-at">@</span>
-							<input type="text" bind:value={handleInput} oninput={onHandleInput} placeholder="yourhandle" class="handle-input" maxlength="30" pattern="[a-z0-9][a-z0-9_]*" />
+							<input type="text" bind:value={handleInput} oninput={onHandleInput} placeholder="yourhandle" class="handle-input" maxlength="32" pattern="[a-z0-9][a-z0-9-]*" />
 							<button onclick={saveHandle} disabled={saving || handleAvailable === false} class="btn-sm btn-primary">Save</button>
 							<button onclick={() => { editingHandle = false; handleAvailable = null; }} class="btn-sm btn-ghost">Cancel</button>
 						</div>
-						{#if handleInput.trim().length >= 3}
+						{#if handleInput.trim().length >= 2}
 							<div style="font-size: 0.7rem; margin-top: 0.25rem; margin-left: 1.5rem;">
 								{#if handleChecking}
 									<span style="color: var(--color-text-tertiary);">Checking...</span>

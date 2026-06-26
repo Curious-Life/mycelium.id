@@ -56,13 +56,45 @@ const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAI
   rec('L9. empty provider (floor) → native /api/chat on 127.0.0.1:11434', url === 'http://127.0.0.1:11434/api/chat', `url=${url}`);
 }
 
-// ── L10 local sends NO tools even if some are passed (tool-free adapter) ─────
+// ── L10 local adapter is TOOL-CAPABLE — sends tool defs when the caller passes
+//    them (capability gating is the CALLER's job; the harness maps what it's given) ─
 {
   let body = null;
   const fetch = async (u, opts) => { body = JSON.parse(opts.body); return streamRes(ollamaChat); };
   const h = createAgentHarness({ fetch });
-  await h.streamTurn({ provider: { jurisdiction: 'local' }, system: 'S', userMessage: 'hi', tools: [{ name: 't', description: 'd', inputSchema: {} }], call: async () => 'x', send: () => {} });
-  rec('L10. native adapter sends no tools (local is tool-free)', body?.tools === undefined, JSON.stringify(Object.keys(body || {})));
+  await h.streamTurn({ provider: { jurisdiction: 'local' }, system: 'S', userMessage: 'hi', tools: [{ name: 't', description: 'd', inputSchema: { type: 'object', properties: {} } }], call: async () => 'x', send: () => {} });
+  rec('L10. native adapter SENDS tools when passed (tool-capable local)', Array.isArray(body?.tools) && body.tools[0]?.function?.name === 't', JSON.stringify(body?.tools));
+}
+
+// ── L10b no tools passed → body.tools omitted (no-tool model / relay floor) ──
+{
+  let body = null;
+  const fetch = async (u, opts) => { body = JSON.parse(opts.body); return streamRes(ollamaChat); };
+  const h = createAgentHarness({ fetch });
+  await h.streamTurn({ provider: { jurisdiction: 'local' }, system: 'S', userMessage: 'hi', tools: [], call: async () => 'x', send: () => {} });
+  rec('L10b. no tools passed → body.tools omitted (relay floor stays tool-free)', body?.tools === undefined, JSON.stringify(Object.keys(body || {})));
+}
+
+// ── L10c local TOOL CALL parsed → dispatched (object args) → result fed back → done ─
+{
+  const toolTurn = ndjson([
+    { message: { role: 'assistant', content: '', tool_calls: [{ function: { name: 'saveDocument', arguments: { path: 'p', content: 'c' } } }] }, done: true, done_reason: 'stop', prompt_eval_count: 10, eval_count: 2 },
+  ]);
+  const answerTurn = ndjson([
+    { message: { role: 'assistant', content: 'Saved.' }, done: true, done_reason: 'stop', prompt_eval_count: 12, eval_count: 3 },
+  ]);
+  const bodies = []; let n = 0;
+  const fetch = async (u, opts) => { bodies.push(JSON.parse(opts.body)); return streamRes(n++ === 0 ? toolTurn : answerTurn); };
+  const calls = []; const events = [];
+  const h = createAgentHarness({ fetch });
+  const r = await h.streamTurn({
+    provider: { jurisdiction: 'local' }, system: 'S', userMessage: 'save it',
+    tools: [{ name: 'saveDocument', description: 'd', inputSchema: { type: 'object', properties: {} } }],
+    call: async (name, args) => { calls.push({ name, args }); return 'ok'; }, send: (e) => events.push(e),
+  });
+  rec('L10c. tool call parsed + dispatched with OBJECT args', calls.length === 1 && calls[0].name === 'saveDocument' && calls[0].args?.path === 'p', JSON.stringify(calls));
+  rec('L10c. result fed back → 2nd /api/chat carries assistant tool_calls + a tool result', bodies.length === 2 && bodies[1].messages.some((m) => m.role === 'tool') && bodies[1].messages.some((m) => Array.isArray(m.tool_calls)), JSON.stringify(bodies[1]?.messages?.map((m) => m.role)));
+  rec('L10c. final answer streamed + tool recorded in toolsUsed', r.toolsUsed?.includes('saveDocument') && events.some((e) => e.type === 'tool_complete'), JSON.stringify(r.toolsUsed));
 }
 
 // ── L11 CLOUD path UNCHANGED — anthropic still hits the messages API ─────────
@@ -81,6 +113,6 @@ const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAI
 
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
-console.log(`VERDICT: ${allPass ? 'GO — local chat speaks native /api/chat with sized num_ctx (the A7 pivot); usage captured; tool-free; cloud path unchanged' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
+console.log(`VERDICT: ${allPass ? 'GO — local chat speaks native /api/chat with sized num_ctx (the A7 pivot); usage captured; tool-capable (caller-gated) incl. tool-call round-trip; cloud path unchanged' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
 console.log('='.repeat(64));
 process.exit(allPass ? 0 : 1);

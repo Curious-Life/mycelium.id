@@ -73,6 +73,9 @@ export const VALID_SOURCES = new Set([
   'bot-send-file',
   'import-claude',
   'import-obsidian',
+  'import-hermes',
+  'import-openclaw',
+  'import-local-files',
   'import-batch',
   'import-vault',
 ]);

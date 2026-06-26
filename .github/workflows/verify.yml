@@ -9,11 +9,12 @@ name: verify
 on:
   workflow_dispatch:   # manual trigger (Actions UI / `gh workflow run verify.yml --ref <branch>`)
   pull_request:
-    branches: [main]
+    branches: [main, 'feat/**', 'claude/**']   # PRs into main, feature branches, or the loop's branches
   push:
     branches:
       - main
-      - claude/repo-overview-mC69M
+      - 'feat/**'                # active working branches
+      - 'claude/auto-loop/**'    # the autonomous build loop's own per-unit branches
 
 jobs:
   verify:

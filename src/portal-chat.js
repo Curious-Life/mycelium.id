@@ -24,6 +24,7 @@ import { createEgressAuditSink } from './inference/egress.js';
 import { createUsageSink } from './inference/usage.js';
 import { captureMessage } from './ingest/capture.js';
 import { hydrateHistoryBlock } from './agent/history.js';
+import { AGENT_NATURE } from './agent/identity.js';
 
 const POLICY_KEY = 'AI_ACCESS_POLICY';
 const CHAT_SOURCE = 'portal-chat';
@@ -40,15 +41,50 @@ const PERSONALITY_GUIDE = {
   creative: 'Be imaginative and expressive; offer fresh angles.',
 };
 
-// Short, static orientation for the chat agent — the dynamic state comes from the
-// getContext preamble appended below (so this stays cache-stable + injection-free).
-const CHAT_SYSTEM = [
-  'You are the user\'s private Mycelium assistant — speaking with the owner of this',
-  'cognitive vault, on their own machine. Be direct, warm and concise.',
-  'You have tools to search and act on the vault; prefer recalling from this memory',
-  '(search, list, getContext) before answering from general knowledge, and capture',
-  'what the user shares when it is worth remembering. The briefing below is your',
-  'current working context — treat it as already-known, do not repeat it verbatim.',
+// The chat agent's identity — the single highest-leverage prompt in the app (it
+// is the whole self of the primary surface). STATIC by design: dynamic state
+// comes from the getContext preamble appended below, so this stays cache-stable
+// (Anthropic prompt cache) + injection-free (no vault data interpolated here).
+//
+// Opens with the SHARED AGENT_NATURE fragment (identity.js) so chat and the
+// reflection cycles read as ONE entity, then adds the live-chat mode guidance:
+// the sovereign-vault framing + competence/guest/bold-internal-careful-external
+// posture distilled from the operational personas this product draws on.
+const CHAT_SYSTEM = `${AGENT_NATURE}
+
+You're speaking with them live, on their own machine — their sovereign cognitive vault, where their notes, people, reflections, relationships and meaning-making all live. They've trusted you with the whole of it; treat that intimacy with care.
+
+How you show up:
+- Be direct, warm and concise. Skip the filler ("Great question!", "I'd be happy to help!") — just help. Have real opinions; it's fine to disagree, to prefer things, to push back when it serves them. Earn trust through competence, not eagerness.
+- Be resourceful before asking. Recall from this memory first — search, list, getContext — and read the relevant document before answering from general knowledge. Come back with answers, not questions, when you can; admit uncertainty plainly when you can't.
+- Be bold with internal actions (search, read, organize, remember) and careful with anything that leaves the vault. Capture what the owner shares when it's genuinely worth remembering — not performatively.
+
+The briefing below is your current working context — treat it as already-known; weave it in, don't repeat it back verbatim.`;
+
+// Capability line, appended per-turn. Constant text (injection-free, cache-stable);
+// which one is chosen depends only on whether this turn actually carries action tools
+// (capability-gated below — a tool-capable model, cloud OR local, gets them). A model
+// like Claude infers "I can write" from the tool schemas, but open/EU/local models —
+// and any model the preamble frames as a read-only "memory" — otherwise refuse to
+// write and tell the user they "can't access files". CAN_ACT states the capability
+// plainly and maps the user's words ("files", "notes") onto the vault tools.
+// CANNOT_ACT is the honest fallback when no tools are attached, with how to enable.
+const CAN_ACT = [
+  'You can ACT on this vault, not only read it. When the user asks you to write, save,',
+  'change, edit or organise something, DO IT with your tools rather than declining:',
+  'saveDocument / updateDocument create and revise their documents; editMindFile,',
+  'writeMindFileWhole and updateInternalModel edit your internal model of them; and',
+  'remember, link, mark, createTask and captureMessage record facts, relations and',
+  'tasks. "Files", "notes" and "documents" mean items inside this vault reached through',
+  'these tools — not the operating-system filesystem. Confirm first only when an action',
+  'is destructive or ambiguous; otherwise just do it and report what you did.',
+].join(' ');
+const CANNOT_ACT = [
+  'No action tools are attached this turn, so you can discuss and recall but cannot',
+  'create or edit documents right now. If the user asks you to write, save or change',
+  'something, say so plainly and tell them how to enable it: pick a tool-capable model',
+  'for the chat task in Settings → Intelligence, and grant the Documents and Mind files',
+  'areas in Settings → AI Access.',
 ].join(' ');
 
 export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichment, authenticatePortalRequest, fetch }) {
@@ -154,15 +190,43 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       const conversationId = rawConv ? `chat:${rawConv}` : '';
       const toMsg = (r) => ({ id: r.id, role: r.role === 'assistant' ? 'assistant' : 'user', content: r.content || '', timestamp: Date.parse(r.created_at) || Date.now(), source: r.source || CHAT_SOURCE });
       let msgs;
+      let recoverable = 0;
       if (conversationId) {
         const rows = (await db.messages.selectByConversation(userId, conversationId, { limit })) || [];
         msgs = rows.map(toMsg).reverse();   // newest-first → chronological for display
+        // When this thread is empty, report how many orphaned chat turns COULD be
+        // recovered (saved with NULL conversation_id by the pre-fix WS send path),
+        // so the UI can offer an explicit one-click recovery. A COUNT only — never
+        // the rows themselves (that would break thread isolation; see RT3/C10).
+        if (msgs.length === 0 && typeof db.messages.countOrphanChatHistory === 'function') {
+          try { recoverable = await db.messages.countOrphanChatHistory(userId, { source: CHAT_SOURCE }); } catch { /* non-fatal */ }
+        }
       } else {
         const rows = (await db.messages.selectRecent(userId, { limit: 200 })) || [];
         msgs = rows.filter((r) => r.source === CHAT_SOURCE).slice(0, limit).map(toMsg).reverse();
       }
-      res.json({ messages: msgs });
-    } catch { res.json({ messages: [] }); }
+      res.json({ messages: msgs, recoverable });
+    } catch { res.json({ messages: [], recoverable: 0 }); }
+  });
+
+  // ── POST /chat/history/recover — EXPLICIT one-shot recovery of orphaned chat
+  //    turns into THIS thread. The pre-fix WS send path saved turns with NULL
+  //    conversation_id; this adopts them into the caller's conversationId so they
+  //    thread again. User-initiated (a button), idempotent (drains the NULL pool
+  //    once), and namespaced under `chat:` exactly like the read/stream paths.
+  router.post('/chat/history/recover', async (req, res) => {
+    if (!auth(req, res)) return;
+    try {
+      const rawConv = (typeof req.body?.conversationId === 'string' && req.body.conversationId.trim())
+        ? req.body.conversationId.trim().slice(0, 100) : '';
+      if (!rawConv) { res.status(400).json({ error: 'conversationId required' }); return; }
+      const conversationId = `chat:${rawConv}`;
+      const recovered = await db.messages.adoptOrphanChatHistory(userId, conversationId, { source: CHAT_SOURCE });
+      const limit = Math.min(Number(req.body?.limit) || 50, 100);
+      const rows = (await db.messages.selectByConversation(userId, conversationId, { limit })) || [];
+      const toMsg = (r) => ({ id: r.id, role: r.role === 'assistant' ? 'assistant' : 'user', content: r.content || '', timestamp: Date.parse(r.created_at) || Date.now(), source: r.source || CHAT_SOURCE });
+      res.json({ recovered, messages: rows.map(toMsg).reverse() });
+    } catch { res.status(500).json({ error: 'recover failed' }); }
   });
 
   // ── POST /chat/stream — the SSE turn.
@@ -249,17 +313,23 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       const profile = await resolveModelProfile(provider, { fetch, defaultModel: info.model }).catch(() => null);
       const plan = profile ? planGeneration(profile, { task: 'chat' }) : null;
       const sysCap = isLocal ? 5000 : 28000; // fallback char cap when no profile
-      // Local models (small on-box Ollama) are VERY slow to first token when tools
-      // are attached — Ollama constrains generation to the tool grammar, which on a
-      // 12B reasoning model pushes time-to-first-token to 30s+ (measured). They also
-      // use tools poorly. So give local a fast, context-grounded turn (no tools — the
-      // briefing is already in the system preamble); cloud keeps the full tool set.
+      // Tools are gated on real model CAPABILITY, not geography. The probe reads
+      // Ollama's /api/show capabilities (model-profile.js): a tool-capable model —
+      // cloud OR a large local one — gets the full tool set and is a real agent; a
+      // no-tool model gets none and degrades to a context-grounded relay (the briefing
+      // is already in the preamble). Fail-safe default when the probe is unavailable:
+      // cloud (!isLocal) ⇒ capable, bare local ⇒ not — matching model-profile's default.
+      const toolsCapable = profile?.capabilities?.tools ?? !isLocal;
 
       // System = orientation + getContext briefing + (cloud only) memory retrieval.
       const ident = await readAgentIdentity();
+      // Does this turn actually carry action tools? Mirrors the loop.run tools gate
+      // below (toolsCapable + a non-empty grant). The capability line is chosen to
+      // match, so the agent is never told it can write when it has nothing to write with.
+      const hasActionTools = toolsCapable && grantedTools.length > 0;
       // Identity preamble (spec #4): the user's chosen name + personality shape who
       // the assistant is and how it speaks, ahead of the static orientation.
-      let system = `Your name is ${ident.name}. ${PERSONALITY_GUIDE[ident.personality] || ''} ${CHAT_SYSTEM}`.trim();
+      let system = `Your name is ${ident.name}. ${PERSONALITY_GUIDE[ident.personality] || ''} ${CHAT_SYSTEM} ${hasActionTools ? CAN_ACT : CANNOT_ACT}`.trim();
       try { const ctx = await handlers.getContext?.({ recentMessages: recentN }); if (typeof ctx === 'string' && ctx) system += `\n\n${ctx}`; } catch { /* honest-empty */ }
       if (!isLocal && policy.domains.includes('search') && typeof handlers.searchMindscape === 'function') {
         send({ type: 'tool_start', name: 'searchMemory' });
@@ -314,7 +384,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       // through our SSE `send`, keeps the live activity row honest via the callbacks,
       // and returns the accumulated answer + truncation/error state.
       const result = await loop.run({
-        provider, system, userMessage: message, tools: isLocal ? [] : grantedTools, call,
+        provider, system, userMessage: message, tools: toolsCapable ? grantedTools : [], call,
         send, maxTokens: plan?.maxTokens, numCtx: plan?.numCtx,
         ttfbMs: TTFB_MS, idleMs: IDLE_MS, maxRetries: MAX_RETRIES,
         signal: clientGoneCtrl.signal, onStall: () => finishJob(), onHeartbeat: heartbeatJob,

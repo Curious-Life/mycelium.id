@@ -12,7 +12,7 @@
 	import UsageSection from '$lib/components/settings/UsageSection.svelte';
 	import AIAccessSection from '$lib/components/settings/AIAccessSection.svelte';
 	import AgentCaptureSection from '$lib/components/settings/AgentCaptureSection.svelte';
-	import ManagedConnectSection from '$lib/components/settings/ManagedConnectSection.svelte';
+	import KeepAwakeSection from '$lib/components/settings/KeepAwakeSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 	import ConnectYourAISection from '$lib/components/settings/ConnectYourAISection.svelte';
 	import PhoneConnectSection from '$lib/components/settings/PhoneConnectSection.svelte';
@@ -445,6 +445,9 @@
 	let rkLoading = $state(false);
 	let rkError = $state<string | null>(null);
 	let rkCopied = $state(false);
+	let rkSaving = $state<'keychain' | '1password' | null>(null);
+	let rkSavedTo = $state<'keychain' | '1password' | null>(null);
+	let rkSaveError = $state<string | null>(null);
 	const rkGrouped = $derived(rkValue ? rkValue.replace(/(.{4})/g, '$1 ').trim() : '');
 
 	async function revealRecoveryKey() {
@@ -475,6 +478,25 @@
 		a.href = url; a.download = 'mycelium-recovery-key.txt';
 		document.body.appendChild(a); a.click(); a.remove();
 		setTimeout(() => URL.revokeObjectURL(url), 1000);
+	}
+
+	// One-click save to Keychain / 1Password — the key is read + handed to the store
+	// SERVER-SIDE (it never leaves the box via the browser). "Keychain" = Keychain
+	// Access (not the Apple Passwords app); 1Password needs the `op` CLI signed in.
+	async function saveRecoveryKey(target: 'keychain' | '1password') {
+		rkSaving = target; rkSaveError = null;
+		try {
+			const res = await fetch('/api/v1/account/recovery-key/save', {
+				method: 'POST', credentials: 'same-origin',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ target }),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.message || data.error || 'Could not save');
+			rkSavedTo = target;
+		} catch (e) {
+			rkSaveError = e instanceof Error ? e.message : 'Could not save';
+		} finally { rkSaving = null; }
 	}
 
 	// ── Vault backup (V1): download an encrypted .myvault snapshot to the user's
@@ -689,12 +711,9 @@
 			<AgentCaptureSection />
 
 			<div class="conn-group">Reach it over the internet</div>
-			<!-- Easiest: claim a handle.mycelium.id over the managed relay. Placed
-			     before RemoteAccessSection: its copy refers to the operator password
-			     field "below" (in Remote Access). -->
-			<ManagedConnectSection />
-			<!-- Bring your own domain / relay (free) — operator password, public URL,
-			     enable toggle, own-relay advanced. -->
+			<!-- One ordered card (C3 2026-06-25): password → address (managed
+			     handle.mycelium.id OR your own domain) → go live. Absorbs what used to
+			     be the separate ManagedConnectSection + RemoteAccessSection cards. -->
 			<RemoteAccessSection />
 			{/if}
 
@@ -1009,6 +1028,10 @@
 				</div>
 			</section>
 
+			<!-- Keep the Mac awake while Mycelium runs (so a screen lock doesn't pause
+			     background processing). Default ON; macOS-only. -->
+			<KeepAwakeSection />
+
 			<!-- Timezone -->
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Region</h2>
@@ -1058,11 +1081,16 @@
 					<div class="mt-3 p-3 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] font-mono text-sm tracking-wide break-all text-[var(--color-text-primary)] select-all">
 						{rkGrouped}
 					</div>
-					<div class="flex gap-2 mt-3">
+					<div class="flex flex-wrap gap-2 mt-3">
 						<button onclick={copyRecoveryKey} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)]">{rkCopied ? 'Copied ✓' : 'Copy'}</button>
 						<button onclick={downloadRecoveryKey} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)]">Download</button>
-						<button onclick={() => { rkRevealed = false; rkValue = ''; }} class="px-3 py-2 rounded-lg text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">Hide</button>
+						<button onclick={() => saveRecoveryKey('keychain')} disabled={rkSaving !== null} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)] disabled:opacity-50">{rkSaving === 'keychain' ? 'Saving…' : rkSavedTo === 'keychain' ? 'Saved to Keychain ✓' : 'Save to Keychain'}</button>
+						<button onclick={() => saveRecoveryKey('1password')} disabled={rkSaving !== null} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)] disabled:opacity-50">{rkSaving === '1password' ? 'Saving…' : rkSavedTo === '1password' ? 'Saved to 1Password ✓' : 'Save to 1Password'}</button>
+						<button onclick={() => { rkRevealed = false; rkValue = ''; rkSavedTo = null; rkSaveError = null; }} class="px-3 py-2 rounded-lg text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">Hide</button>
 					</div>
+					{#if rkSaveError}
+						<p class="mt-2 text-xs text-coral">{rkSaveError}</p>
+					{/if}
 				{/if}
 			</section>
 

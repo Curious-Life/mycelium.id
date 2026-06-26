@@ -39,6 +39,11 @@ function genConversationId(): string {
 	catch { return `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`; }
 }
 
+// How many orphaned chat turns (saved before the conversationId send-path fix,
+// with conversation_id = NULL) could be recovered into the current thread. Drives
+// the one-click "Recover N earlier messages" affordance; 0 hides it.
+export const recoverableCount = writable<number>(0);
+
 function createChatStore() {
 	const { subscribe, set, update } = writable<ChatMessage[]>([]);
 	let hasLoaded = false;
@@ -79,6 +84,9 @@ function createChatStore() {
 				if (!response.ok) return [];
 				const data = await response.json();
 				const messages = data.messages || [];
+				// Offer recovery only when THIS thread is empty (backend reports a
+				// count there); once it has turns we never nag.
+				recoverableCount.set(messages.length > 0 ? 0 : Number(data.recoverable) || 0);
 				if (messages.length > 0) {
 					set(messages);
 					hasLoaded = true;
@@ -86,6 +94,27 @@ function createChatStore() {
 				return messages;
 			} catch {
 				return [];
+			}
+		},
+
+		// Explicitly pull orphaned earlier chats (NULL conversation_id) into THIS
+		// thread, then show them. One-shot: after it runs the pool is drained.
+		recoverHistory: async (): Promise<number> => {
+			if (!browser) return 0;
+			try {
+				const response = await api('/portal/chat/history/recover', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ conversationId: ensureConversationId(), limit: 50 }),
+				});
+				if (!response.ok) return 0;
+				const data = await response.json();
+				const messages = data.messages || [];
+				if (messages.length > 0) { set(messages); hasLoaded = true; }
+				recoverableCount.set(0);
+				return Number(data.recovered) || 0;
+			} catch {
+				return 0;
 			}
 		},
 

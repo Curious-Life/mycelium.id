@@ -49,10 +49,11 @@ export async function listModels({ provider, baseUrl, apiKey, fetch = globalThis
       url = /\/v1$/.test(base) ? `${base}/models` : `${base}/v1/models`;
       headers = { ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) };
     }
-    // Use-time SSRF pin (defeats DNS rebinding the literal assertSafeBaseUrl
-    // can't): resolve-public + connection-pin for hostnames; loopback/local
-    // providers fetch directly. Honors the injected `fetch` test seam.
-    const r = await fetchProvider(url, { method: 'GET', headers, signal: ctrl.signal, fetch });
+    // SSRF use-time pin: resolve + validate-every-address-public + connection
+    // pin (fetchProvider), so a hostname that rebinds to a private address
+    // between the assertSafeBaseUrl check above and the connect cannot reach an
+    // internal service with the user's key. Honors the injected test fetch.
+    const r = await fetchProvider(url, { fetch, method: 'GET', headers, signal: ctrl.signal });
     if (!r.ok) {
       if (r.status === 401 || r.status === 403) return { ok: false, error: 'auth_rejected', status: r.status };
       if (r.status === 404) return { ok: false, error: 'not_found', status: r.status };

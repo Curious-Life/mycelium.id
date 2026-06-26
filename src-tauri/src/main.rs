@@ -210,6 +210,22 @@ fn main() {
             let key_source =
                 std::env::var("MYCELIUM_KEY_SOURCE").unwrap_or_else(|_| "keychain".into());
             let data_dir: Option<PathBuf> = app.path().app_data_dir().ok();
+            // DEV BUILD ("Mycelium Dev", identifier id.mycelium.app.dev): run against
+            // the PRODUCTION vault (id.mycelium.app) AND enable the fail-closed
+            // pre-migration snapshot — so the dev app can be the daily driver on the
+            // real vault while every schema change is snapshotted first. Detected by
+            // the data-dir suffix (no config plumbing); production (non-.dev) is
+            // byte-for-byte unaffected.
+            let is_dev = data_dir
+                .as_ref()
+                .and_then(|d| d.file_name())
+                .map(|n| n.to_string_lossy().ends_with(".dev"))
+                .unwrap_or(false);
+            let data_dir: Option<PathBuf> = if is_dev {
+                data_dir.map(|d| d.with_file_name("id.mycelium.app"))
+            } else {
+                data_dir
+            };
             let pidfile: Option<PathBuf> = data_dir.as_ref().map(|d| d.join("sidecars.pids"));
 
             // Reap any sidecars orphaned by a prior hard crash BEFORE spawning new ones.
@@ -290,6 +306,9 @@ fn main() {
             if let Some(d) = &data_dir {
                 cmd.env("MYCELIUM_DATA_DIR", d);
             }
+            if is_dev {
+                cmd.env("MYCELIUM_SNAPSHOT_ON_BOOT", "1");
+            }
             set_group(&mut cmd);
             let child = cmd
                 .spawn()
@@ -332,6 +351,7 @@ fn main() {
                     // app). This process opens the SAME vault; without the flag it
                     // would try a plaintext open of the encrypted file and fail-close.
                     let sup_at_rest = bundled;
+                    let sup_dev = is_dev;
                     std::thread::spawn(move || {
                         let spawn_http = || {
                             let mut http = Command::new(&sup_node);
@@ -345,6 +365,9 @@ fn main() {
                             if sup_at_rest {
                                 http.env("MYCELIUM_AT_REST", "1");
                                 http.env("MYCELIUM_SEARCH_BACKEND", "sqlite"); // on-disk search (see server-rest spawn)
+                            }
+                            if sup_dev {
+                                http.env("MYCELIUM_SNAPSHOT_ON_BOOT", "1");
                             }
                             if !public_host.is_empty() {
                                 http.env("MYCELIUM_BASE_URL", format!("https://{public_host}"));

@@ -21,6 +21,7 @@
  *     node pipeline/describe-chronicles.js [--dry-run]
  */
 
+import { fileURLToPath } from 'node:url';
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { resolveDbKeyHex } from '../src/db/open.js';
@@ -428,7 +429,8 @@ function buildRealmPrompt(rm, samples, territoryDigests = []) {
 }
 
 // ── CLI entry (pipeline stage) ──────────────────────────────────────────────
-const isMain = import.meta.url === `file://${process.argv[1]}`;
+// Decoded FS-path compare (a spaced bundle path breaks the raw file:// form).
+const isMain = !!process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
   const DRY_RUN = process.argv.includes('--dry-run');
   const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';

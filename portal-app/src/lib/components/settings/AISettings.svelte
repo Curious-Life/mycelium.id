@@ -69,7 +69,7 @@
 		finally { cfModelsLoading = false; }
 	}
 
-	type Rec = { name: string; bestFor: string; estimatedGb: number; fitScore: number; fitLevel: string; blurb: string; installed: boolean; recommended?: boolean; ageMonths?: number | null };
+	type Rec = { name: string; bestFor: string; estimatedGb: number; fitScore: number; fitLevel: string; blurb: string; installed: boolean; recommended?: boolean; recommendedFor?: string[]; ageMonths?: number | null };
 	let hwRec = $state<{ hardware: any; available: number; recommendations: Rec[]; note: string | null; ollamaUp: boolean; ollamaInstalled: boolean } | null>(null);
 	let hwLoading = $state(false);
 	// Curate the list: by default show our recommended picks + recent models only
@@ -113,7 +113,7 @@
 
 	// Per-task model selection — which configured provider handles which task.
 	let tasks = $state<string[]>([]);
-	let taskModels = $state<Record<string, { providerId: number; model?: string }>>({});
+	let taskModels = $state<Record<string, { providerId?: number; model?: string }>>({});
 	let taskBusy = $state<string | null>(null);
 	const TASK_LABELS: Record<string, string> = {
 		chat: 'Chat & agents',
@@ -121,6 +121,22 @@
 		harness: 'Autonomous tasks — scheduled & background',
 		reflection: 'Reflection cycles — your daily/weekly inner model',
 	};
+	// Role-aware recommendations (curated operator picks, from /providers/presets).
+	// labeling → a small on-box model (categorize task); descriptions → an EU-ZDR cloud (narrate task).
+	let roleRecs = $state<{ labeling?: { model?: string }; descriptions?: { presetId?: string } } | null>(null);
+	// 'categorize' is ON-BOX — it stores a LOCAL model NAME, not a cloud providerId, so it gets a
+	// dedicated picker below rather than a provider dropdown in the per-task lane.
+	const cloudTasks = $derived(tasks.filter((t) => t !== 'categorize'));
+	const labelRecModel = $derived(roleRecs?.labeling?.model || 'qwen3.5:4b');
+	const labelModel = $derived(taskModels['categorize']?.model || '');
+	// Installed local models to choose from (only known once hardware is detected).
+	const installedLocal = $derived((hwRec?.recommendations ?? []).filter((m: any) => m.installed).map((m: any) => m.name));
+	const labelOptions = $derived.by(() => {
+		const set = new Set<string>(installedLocal);
+		if (labelModel) set.add(labelModel); // keep the current pick even if not in the installed list
+		set.delete(labelRecModel); // the recommended model is the "" (default) option
+		return [...set];
+	});
 
 	const FIT: Record<string, { label: string; cls: string }> = {
 		perfect: { label: 'great fit', cls: 'fit-green' },
@@ -174,6 +190,7 @@
 				api('/portal/providers').then((r) => r.json()),
 			]);
 			presets = pr.presets || [];
+			roleRecs = pr.roleRecommendations || null;
 			providers = cu.providers || [];
 		} catch (e: any) {
 			error = e?.message || 'Failed to load providers';
@@ -190,6 +207,12 @@
 	async function setTaskModel(task: string, providerId: number | null) {
 		taskBusy = task;
 		try { const r = await api('/portal/providers/task-models', { method: 'PUT', body: JSON.stringify({ task, providerId }) }); if (r.ok) taskModels = (await r.json()).taskModels || {}; }
+		catch { /* leave */ } finally { taskBusy = null; }
+	}
+	// On-box labeling model (categorize): stores a LOCAL model NAME. Empty → curated default.
+	async function setLabelModel(model: string) {
+		taskBusy = 'categorize';
+		try { const r = await api('/portal/providers/task-models', { method: 'PUT', body: JSON.stringify({ task: 'categorize', model }) }); if (r.ok) taskModels = (await r.json()).taskModels || {}; }
 		catch { /* leave */ } finally { taskBusy = null; }
 	}
 	async function setCascade(v: boolean) {
@@ -393,6 +416,7 @@
 						<div class="row" class:dim={m.fitScore === 0} class:rec-top={m.recommended}>
 							<span class="mono">{m.name}</span>
 							{#if m.recommended}<span class="chip rec-pick">★ recommended</span>{/if}
+							{#if m.recommendedFor?.includes('labeling')}<span class="chip rec-role" title="Recommended for the on-box labeling model (Context Engine L1)">★ for labeling</span>{/if}
 							<span class="chip {FIT[m.fitLevel]?.cls ?? ''}">{FIT[m.fitLevel]?.label ?? m.fitLevel}</span>
 							<span class="row-blurb">{m.bestFor} · ~{m.estimatedGb}GB</span>
 							<span class="row-action">
@@ -439,7 +463,7 @@
 						<div class="preset-group">
 							<div class="group-title">{g.title}</div>
 							<div class="chips-row">
-								{#each g.items as p (p.id)}<button class="preset-chip" onclick={() => choose(p)}>{p.label}</button>{/each}
+								{#each g.items as p (p.id)}<button class="preset-chip" class:rec-desc={roleRecs?.descriptions?.presetId === p.id} title={roleRecs?.descriptions?.presetId === p.id ? 'Recommended for descriptions — mindscape narration (the narrate task), on modest hardware' : undefined} onclick={() => choose(p)}>{#if roleRecs?.descriptions?.presetId === p.id}★ {/if}{p.label}</button>{/each}
 							</div>
 						</div>
 					{/if}
@@ -482,12 +506,12 @@
 			</span>
 		</button>
 
-		<!-- ── Per-task model selection ── -->
-		{#if providers.length && tasks.length}
+		<!-- ── Per-task model selection (cloud providers) ── -->
+		{#if providers.length && cloudTasks.length}
 			<div class="lane">
 				<div class="lane-head"><span class="lane-title">Model per task</span><span class="lane-tag">optional</span></div>
 				<p class="muted task-intro">Route specific work to specific providers — e.g. narration on a fast on-device model, chat on a frontier model. Left unset, a task uses your active provider.</p>
-				{#each tasks as task}
+				{#each cloudTasks as task}
 					<div class="task-row">
 						<span class="task-label">{TASK_LABELS[task] || task}</span>
 						<select
@@ -503,6 +527,29 @@
 						</select>
 					</div>
 				{/each}
+			</div>
+		{/if}
+
+		<!-- ── Labeling model (on-box L1) — categorize task, a LOCAL model name, never cloud ── -->
+		{#if tasks.includes('categorize')}
+			<div class="lane">
+				<div class="lane-head"><span class="lane-title">Labeling model</span><span class="lane-tag j-green">private · on your device</span></div>
+				<p class="muted task-intro">The small on-box model that sorts every message into domains + registers (Context Engine L1). It runs in bulk over your whole vault, so for privacy + cost it always stays local.</p>
+				<div class="task-row">
+					<span class="task-label">Per-message labeling</span>
+					<select
+						class="task-select"
+						disabled={taskBusy === 'categorize'}
+						value={labelModel && labelModel !== labelRecModel ? labelModel : ''}
+						onchange={(e) => setLabelModel((e.currentTarget as HTMLSelectElement).value)}
+					>
+						<option value="">Recommended · {labelRecModel}</option>
+						{#each labelOptions as name}
+							<option value={name}>{name}</option>
+						{/each}
+					</select>
+				</div>
+				{#if !hwRec}<p class="muted-xs">Tip: detect your hardware under “Local” above to pick from your installed models. “Recommended” auto-pulls {labelRecModel} if needed.</p>{/if}
 			</div>
 		{/if}
 
@@ -608,6 +655,9 @@
 	.row.dim { opacity: 0.5; }
 	.row.rec-top { background: rgba(229,184,76,0.06); border: 1px solid rgba(229,184,76,0.3); }
 	.chip.rec-pick { background: var(--color-accent-aurum); color: var(--color-bg); }
+	/* role-aware "recommended for X" — gold-tinted, lighter than the solid companion badge */
+	.chip.rec-role { background: rgba(229,184,76,0.14); color: var(--color-accent-aurum, #e5b84c); }
+	.preset-chip.rec-desc { border-color: var(--color-accent-aurum, #e5b84c); color: var(--color-accent-aurum, #e5b84c); }
 	.row-blurb { color: var(--color-text-tertiary); font-size: 0.68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.row-action { margin-left: auto; display: flex; align-items: center; gap: 0.6rem; flex-shrink: 0; }
 	.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-border); flex-shrink: 0; }

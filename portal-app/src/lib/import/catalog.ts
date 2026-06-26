@@ -65,6 +65,8 @@ const L = {
 	photos: `<svg viewBox="0 0 24 24" fill="none" stroke="C" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="m21 16-5-5L5 19"/></svg>`,
 	audio: `<svg viewBox="0 0 24 24" fill="none" stroke="C" stroke-width="1.6" stroke-linecap="round"><path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/></svg>`,
 	notes: `<svg viewBox="0 0 24 24" fill="none" stroke="C" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14v12l-4 4H5z"/><path d="M15 20v-4h4M9 9h6M9 13h4"/></svg>`,
+	// "This Mac" — a desktop/display mark for the broad on-device sweep.
+	localfiles: `<svg viewBox="0 0 24 24" fill="none" stroke="C" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>`,
 };
 
 // Order: upload-now first (what people can do this minute), then connectors,
@@ -100,6 +102,9 @@ export const SOURCE_CATALOG: SourceEntry[] = [
 	{ id: 'mycelium', name: 'Mycelium vault', status: 'upload', color: 'var(--color-accent-aurum)', logo: L.mycelium,
 		blurb: 'Bring a whole vault home.',
 		howto: 'Export from another Mycelium (Settings → Export) and drop the .zip — everything, re-encrypted here.' },
+	{ id: 'local-files', name: 'This Mac', status: 'upload', color: 'var(--color-accent-teal)', logo: L.localfiles,
+		blurb: 'Documents, photos, audio & notes on disk.',
+		howto: 'Run “Scan this Mac” above to sweep your standard folders — pick which kinds to bring in.' },
 	// ── Connect (live sync) ──
 	{ id: 'telegram', name: 'Telegram', status: 'connect', color: '#26A5E4', logo: L.telegram,
 		blurb: 'Chat with your mind from Telegram.',

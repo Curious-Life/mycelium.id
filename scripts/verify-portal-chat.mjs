@@ -247,6 +247,31 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
   rec('C11 chat cannot read a channel conversation (RT3 namespace isolation)', Array.isArray(h.messages) && h.messages.length === 0 && !JSON.stringify(h.messages).includes('SECRET'), JSON.stringify(h.messages?.length));
 }
 
+// ── C12 orphaned-history recovery (the conversationId send-path fix) ──────────
+{
+  // An orphan: a chat turn saved with NULL conversation_id (the pre-fix WS path).
+  await captureMessage(db, { userId: U, role: 'user', content: 'ORPHANED earlier chat turn', source: 'portal-chat' }, () => {});
+  const fresh = `recover-thread-${Date.now()}`;
+  // An empty thread reports a recoverable count (a COUNT, never the rows — no bleed).
+  const h0 = await (await fetch(`${base}/chat/history?conversationId=${fresh}`)).json();
+  rec('C12 empty thread reports recoverable orphan count (no bleed)',
+    Array.isArray(h0.messages) && h0.messages.length === 0 && h0.recoverable >= 1 && !JSON.stringify(h0.messages).includes('ORPHANED'),
+    `recoverable=${h0.recoverable}`);
+  // Explicit recovery adopts the orphans INTO this thread.
+  const rec1 = await (await fetch(`${base}/chat/history/recover`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversationId: fresh }) })).json();
+  rec('C12 recover adopts orphans into the thread + returns them',
+    rec1.recovered >= 1 && Array.isArray(rec1.messages) && rec1.messages.some((m) => m.content === 'ORPHANED earlier chat turn'),
+    `recovered=${rec1.recovered}`);
+  // The thread now hydrates the recovered turns directly (they're threaded).
+  const h1 = await (await fetch(`${base}/chat/history?conversationId=${fresh}`)).json();
+  rec('C12 recovered turns now load as threaded history (recoverable drained to 0)',
+    h1.messages.some((m) => m.content === 'ORPHANED earlier chat turn') && h1.recoverable === 0,
+    `messages=${h1.messages.length} recoverable=${h1.recoverable}`);
+  // Idempotent: a SECOND fresh thread finds nothing left to recover.
+  const h2 = await (await fetch(`${base}/chat/history?conversationId=recover-thread-2-${Date.now()}`)).json();
+  rec('C12 orphan pool drained once (idempotent — second thread has nothing to recover)', h2.recoverable === 0, `recoverable=${h2.recoverable}`);
+}
+
 server.close(); await close?.();
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));

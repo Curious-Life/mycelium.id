@@ -69,7 +69,14 @@ export async function runAgentTurn(
   // Model-aware budgeting (fail-soft → legacy char cap). Resolved before the history
   // block so cross-turn compaction can size the window/output budget.
   let plan = null;
-  try { const profile = await resolveModelProfile(provider, { fetch: fetchImpl, defaultModel: info.model }); plan = profile ? planGeneration(profile, { task: 'chat' }) : null; } catch { /* no profile */ }
+  // Tools are gated on model CAPABILITY (probe), not geography — capture it off the
+  // same profile resolution. Fail-safe default: cloud capable, bare local not.
+  let toolsCapable = !isLocal;
+  try {
+    const profile = await resolveModelProfile(provider, { fetch: fetchImpl, defaultModel: info.model });
+    plan = profile ? planGeneration(profile, { task: 'chat' }) : null;
+    if (profile?.capabilities) toolsCapable = !!profile.capabilities.tools;
+  } catch { /* no profile → keep the fail-safe default */ }
 
   const name = await readAgentName(db, userId);
   let system = `Your name is ${name}. ${systemExtra}`.trim();
@@ -95,8 +102,10 @@ export async function runAgentTurn(
   if (plan) { const budget = Math.max(512, plan.inputBudget - estimateTokens(userMessage || '')); system = trimToTokenBudget(system, budget).text; }
   else { const cap = isLocal ? 5000 : 28000; if (system.length > cap) system = `${system.slice(0, cap)}\n\n[context truncated for this model]`; }
 
-  // Local model → no tools (tool grammar pushes a small on-box model's TTFB past budget).
-  const granted = (isLocal && !localTools) ? [] : autonomyTools(tools, enabledTools);
+  // Tools gated on model CAPABILITY (model-profile probe), not geography: a tool-capable
+  // model — cloud or a large local one — gets the autonomy grant; a no-tool model gets
+  // none. `localTools` stays an explicit override for callers that force tools on local.
+  const granted = (toolsCapable || localTools) ? autonomyTools(tools, enabledTools) : [];
   const grantedNames = new Set(granted.map((t) => t.name));
   const call = async (toolName, args) => {
     if (!grantedNames.has(toolName)) return `Tool '${toolName}' is not available to this turn.`;

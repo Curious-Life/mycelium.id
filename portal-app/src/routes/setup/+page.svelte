@@ -18,6 +18,11 @@
 	let recoveryKey = $state('');
 	let copied = $state(false);
 	let downloaded = $state(false);
+	// One-click save into the OS password store (server-side hand-off; key never
+	// returns to the browser). A success counts as a real save (see savedTo gate).
+	let saving = $state<'keychain' | '1password' | null>(null);
+	let savedTo = $state<'keychain' | '1password' | null>(null);
+	let saveError = $state<string | null>(null);
 	let restoreInput = $state('');
 	// "this Mac" / "this computer" — device-aware reassurance copy.
 	let deviceLabel = $state('this device');
@@ -146,6 +151,27 @@
 		downloaded = true;
 		setTimeout(() => (downloaded = false), 2500);
 	}
+
+	// One-click save to the OS store. The key is read SERVER-SIDE and handed to the
+	// store (`security`/`op` CLI) — it never leaves the box via the browser. A success
+	// makes the key retrievable, so it satisfies the "prove you saved it" gate (savedTo
+	// lets Continue skip the re-entry challenge). "Keychain" = Keychain Access (NOT the
+	// Apple Passwords app); 1Password needs the `op` CLI signed in.
+	async function saveKey(target: 'keychain' | '1password') {
+		saving = target; saveError = null;
+		try {
+			const res = await fetch('/api/v1/account/recovery-key/save', {
+				method: 'POST', credentials: 'same-origin',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ target }),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.message || data.error || 'Could not save');
+			savedTo = target;
+		} catch (e) {
+			saveError = e instanceof Error ? e.message : 'Could not save';
+		} finally { saving = null; }
+	}
 </script>
 
 <svelte:head><title>Set up — Mycelium</title></svelte:head>
@@ -210,14 +236,34 @@
 							<button onclick={copyKey} class="flex-1 btn py-2.5 border border-[var(--color-border)]">{copied ? 'Copied ✓' : 'Copy'}</button>
 							<button onclick={downloadKey} class="flex-1 btn py-2.5 border border-[var(--color-border)]">{downloaded ? 'Downloaded ✓' : 'Download'}</button>
 						</div>
-						<!-- The one irreversible thing — prove the key was really saved. -->
-						<button onclick={() => { verifyInput = ''; revealStep = 'verify'; }}
-							class="w-full btn btn-primary py-3.5">
-							I've saved it — continue
-						</button>
-						<p class="text-center text-xs text-[var(--color-text-tertiary)]">
-							Next: re-enter the key to confirm you can get back in.
-						</p>
+						<!-- Save straight into a password manager — the key is handed to the store
+						     server-side, it never returns to the browser. -->
+						<div class="flex gap-2">
+							<button onclick={() => saveKey('keychain')} disabled={saving !== null}
+								class="flex-1 btn py-2.5 border border-[var(--color-border)] disabled:opacity-50">
+								{saving === 'keychain' ? 'Saving…' : savedTo === 'keychain' ? 'Saved to Keychain ✓' : 'Save to Keychain'}
+							</button>
+							<button onclick={() => saveKey('1password')} disabled={saving !== null}
+								class="flex-1 btn py-2.5 border border-[var(--color-border)] disabled:opacity-50">
+								{saving === '1password' ? 'Saving…' : savedTo === '1password' ? 'Saved to 1Password ✓' : 'Save to 1Password'}
+							</button>
+						</div>
+						{#if saveError}
+							<p class="text-center text-xs text-coral">{saveError}</p>
+						{/if}
+						{#if savedTo}
+							<!-- A real save proves the key is retrievable → skip the re-entry challenge. -->
+							<button onclick={enterVault} class="w-full btn btn-primary py-3.5">Saved — open my vault</button>
+						{:else}
+							<!-- The one irreversible thing — prove the key was really saved. -->
+							<button onclick={() => { verifyInput = ''; revealStep = 'verify'; }}
+								class="w-full btn btn-primary py-3.5">
+								I've saved it — continue
+							</button>
+							<p class="text-center text-xs text-[var(--color-text-tertiary)]">
+								Next: re-enter the key to confirm you can get back in.
+							</p>
+						{/if}
 
 					{:else}
 						<div class="text-center">

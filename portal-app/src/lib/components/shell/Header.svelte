@@ -8,6 +8,7 @@
 	import TabStrip from '$lib/components/workspace/TabStrip.svelte';
 	import type { WsNode, LeafPane } from '$lib/workspace/types';
 	import { activity, startActivityPolling, fmtEta, fmtAgo, isFreshError, statusLabel } from '$lib/stores/activity';
+	import { apiPost } from '$lib/api';
 
 	// One consolidated activity indicator (next to chat) — ALWAYS present and always
 	// clickable. A round glass "orb": grey when idle, green while any work runs
@@ -29,6 +30,16 @@
 			: 'Idle',
 	);
 	onMount(() => startActivityPolling());
+
+	// Stop/Resume the on-box categorization (Context Engine L1) — the "my computer is working
+	// a lot" churn. The activity store re-polls every 2.5s, so the row updates on its own.
+	let categorizeBusy = $state(false);
+	async function toggleCategorize(paused: boolean) {
+		if (categorizeBusy) return;
+		categorizeBusy = true;
+		try { await apiPost(paused ? '/portal/enrichment/categorize/resume' : '/portal/enrichment/categorize/pause', {}); } catch {}
+		categorizeBusy = false;
+	}
 
 	const currentView = $derived($navigationState.primaryView);
 
@@ -155,12 +166,30 @@
 					{#if busy}
 						<div class="px-2.5 pt-1 pb-0.5 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Working now</div>
 						{#each active as j (j.id)}
-							<div class="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
-								<span class="w-1.5 h-1.5 rounded-full flex-shrink-0 {j.stalled ? 'bg-[var(--color-warning,#f59e0b)]' : 'bg-[#34d399]'}"></span>
-								<span class="text-[var(--color-text-primary)] truncate">{j.stage}</span>
-								{#if j.total > 0}<span class="text-[var(--color-text-tertiary)] flex-shrink-0">{j.done}/{j.total}</span>{/if}
-								{#if j.stalled}<span class="ml-auto text-[var(--color-warning,#f59e0b)] flex-shrink-0 whitespace-nowrap">taking longer…</span>
-								{:else if fmtEta(j.etaSeconds)}<span class="ml-auto text-[#34d399] flex-shrink-0">{fmtEta(j.etaSeconds)} left</span>{/if}
+							<div class="px-2.5 py-1.5 text-[11px]">
+								<div class="flex items-center gap-2">
+									<span class="w-1.5 h-1.5 rounded-full flex-shrink-0 {j.stalled ? 'bg-[var(--color-warning,#f59e0b)]' : 'bg-[#34d399]'}"></span>
+									<span class="text-[var(--color-text-primary)] truncate">{j.stage}</span>
+									{#if j.total > 0}<span class="text-[var(--color-text-tertiary)] flex-shrink-0">{j.done}/{j.total}</span>{/if}
+									{#if j.stalled}<span class="ml-auto text-[var(--color-warning,#f59e0b)] flex-shrink-0 whitespace-nowrap">taking longer…</span>
+									{:else if fmtEta(j.etaSeconds)}<span class="ml-auto text-[#34d399] flex-shrink-0">{fmtEta(j.etaSeconds)} left</span>{/if}
+									{#if j.kind === 'categorize'}
+										<button
+											class="ml-auto flex-shrink-0 rounded px-1.5 py-0.5 text-[10px] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-tertiary)] disabled:opacity-50"
+											onclick={() => toggleCategorize(j.status === 'paused')}
+											disabled={categorizeBusy}
+											title={j.status === 'paused' ? 'Resume categorizing your messages' : 'Stop categorizing (you can resume anytime)'}
+										>{j.status === 'paused' ? 'Resume' : 'Stop'}</button>
+									{/if}
+								</div>
+								{#if j.model || j.process}
+									<!-- what model is working + what process it's running -->
+									<div class="flex items-center gap-1.5 pl-3.5 mt-0.5 text-[10px] text-[var(--color-text-tertiary)] truncate">
+										{#if j.model}<span class="font-mono text-[var(--color-text-secondary)]">{j.model}</span>{/if}
+										{#if j.model && j.process}<span class="opacity-40">·</span>{/if}
+										{#if j.process}<span>{j.process}</span>{/if}
+									</div>
+								{/if}
 							</div>
 						{/each}
 					{/if}

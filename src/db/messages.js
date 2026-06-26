@@ -4,6 +4,16 @@ import { buildAgentIdFilter, resolveAgentIds } from '../agent-id-aliases.js';
 import { bustMindscapePoints } from '../mindscape-cache.js';
 
 /**
+ * Backfill sentinel for categorized_at (0041 provenance). Stamped by restampLegacyCategories
+ * onto LEGACY/external-backfill rows that were tagged (categories_processed = 1) before
+ * provenance tracking existed. The Unix epoch is an honest "tagged in the past, true time
+ * unknown" marker — never a real categorization time — so the UI can tell a genuine recent
+ * stamp apart from a backfilled one. Distinct from strftime('now'): stamping now() on a row
+ * tagged long ago would lie about when the categorization actually happened.
+ */
+export const CATEGORIES_BACKFILL_SENTINEL = '1970-01-01T00:00:00.000Z';
+
+/**
  * Read AGENT_SCOPES env at call time. Returns null in admin mode
  * (unset / unparseable) so backfill scripts that import this namespace
  * with no AGENT_SCOPES still see every scope. Returns an array of
@@ -82,6 +92,32 @@ export function createMessagesNamespace(deps) {
     const total = Number(row.total || 0);
     const embedded = Number(row.embedded || 0);
     return { embedded, total, pending: Math.max(0, total - embedded) };
+  }
+
+  // SWR cache for the Context Engine L1 categorization backlog — same shape and same
+  // hazard as the embed backlog above (a full-table scan, polled @2.5s by the activity
+  // feed). Categorization runs CONTINUOUSLY on a timer (drainer), not as a discrete
+  // background_jobs row, so the activity feed projects it at read-time from this count
+  // (mirrors embedProjection). Separate latch so the two scans never block each other.
+  let _catBacklog = null;          // { userId, value:{tagged,total,pending}, at:ms }
+  let _catBacklogInFlight = null;  // Promise while a recompute runs (single-flight)
+  async function _computeCategoriesBacklog(userId) {
+    // `tagged` mirrors selectPendingCategories' "attempted" predicate exactly
+    // (categories_processed = 1) so `pending` reaches 0 when the drainer is caught up.
+    const r = await d1Query(
+      `SELECT
+         COUNT(*) AS total,
+         COALESCE(SUM(CASE WHEN categories_processed = 1 THEN 1 ELSE 0 END), 0) AS tagged
+       FROM messages
+       WHERE user_id = ?
+         AND forgotten_at IS NULL
+         AND content IS NOT NULL AND content != ''`,
+      [userId],
+    );
+    const row = (r.results || [])[0] || {};
+    const total = Number(row.total || 0);
+    const tagged = Number(row.tagged || 0);
+    return { tagged, total, pending: Math.max(0, total - tagged) };
   }
 
   return {
@@ -236,6 +272,27 @@ export function createMessagesNamespace(deps) {
     },
 
     /**
+     * Cached categorization-backlog snapshot for the activity feed's L1 projection
+     * (same serve-stale-while-revalidate + single-flight contract as embedBacklogCached,
+     * with an independent latch). Surfaces the "Sorting your messages · N of M" indicator
+     * so the continuous on-box categorization is never invisible churn (the live-vault
+     * dormancy bug: 69k messages tagged by an out-of-app script with no UI signal).
+     * @returns {Promise<{ tagged:number, total:number, pending:number }>}
+     */
+    async categoriesBacklogCached(userId) {
+      const cached = _catBacklog && _catBacklog.userId === userId ? _catBacklog : null;
+      const ttlMs = cached && cached.value.pending > 0 ? 8000 : 60000;
+      if (cached && (Date.now() - cached.at) < ttlMs) return cached.value;
+      if (!_catBacklogInFlight) {
+        _catBacklogInFlight = _computeCategoriesBacklog(userId)
+          .then((v) => { _catBacklog = { userId, value: v, at: Date.now() }; return v; })
+          .finally(() => { _catBacklogInFlight = null; });
+      }
+      if (cached) return cached.value;
+      return _catBacklogInFlight;
+    },
+
+    /**
      * Drain query for the NLP rules pass (enrichment stage 2). Selects rows
      * that are embedded but not yet enriched — nlp_processed = 2 — per the
      * canonical state machine (0 unprocessed → 2 embedded → 1 enriched).
@@ -317,20 +374,92 @@ export function createMessagesNamespace(deps) {
      * measurement/retrieval surface. NULL labels are valid (the model couldn't classify).
      * userId REQUIRED in WHERE (unfiltered-UPDATE guard).
      */
-    async updateCategories(id, userId, { domain, register, subregister, taxonomyVersion, categoriesProcessed = 1 } = {}) {
+    async updateCategories(id, userId, { domain, register, subregister, taxonomyVersion, model, categoriesProcessed = 1 } = {}) {
       const sets = [];
       const params = [];
       if (domain !== undefined) { sets.push('domain = ?'); params.push(domain ?? null); }
       if (register !== undefined) { sets.push('register = ?'); params.push(register ?? null); }
       if (subregister !== undefined) { sets.push('subregister = ?'); params.push(subregister ?? null); }
       if (taxonomyVersion !== undefined) { sets.push('taxonomy_version = ?'); params.push(taxonomyVersion ?? null); }
+      if (model !== undefined) { sets.push('categories_model = ?'); params.push(model ?? null); }
       sets.push('categories_processed = ?');
       params.push(categoriesProcessed);
+      // Provenance: stamp WHEN the attempt landed (0041). Only on a real attempt (=1) so a
+      // future reset to 0 doesn't carry a stale timestamp. Plaintext scalar, never content.
+      if (categoriesProcessed === 1) sets.push("categorized_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')");
       params.push(id, userId);
       await d1Query(
         `UPDATE messages SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`,
         params,
       );
+    },
+
+    /**
+     * One-shot, idempotent provenance backfill for LEGACY/external-backfill rows (0041). The
+     * forward path (updateCategories) stamps categorized_at when a row flips to processed=1, but
+     * only the on-box drainer calls it — and the drainer's drain query (selectPendingCategories)
+     * re-selects ONLY categories_processed 0/NULL. So a row an OUT-OF-APP backfill tagged
+     * (categories_processed = 1) before provenance existed is invisible to the drainer forever and
+     * stays with categorized_at NULL, which breaks the UI provenance ("tagged by X · 2h ago",
+     * 0041 header) and a future model re-cut that targets rows by categorized_at.
+     *
+     * This re-stamps provenance ONLY onto those legacy rows, identified by the predicate
+     *   categories_processed = 1 AND categorized_at IS NULL AND forgotten_at IS NULL.
+     * It does NOT widen the drain (that would re-run the on-box model on already-tagged rows —
+     * exactly the churn categories_processed exists to prevent), never invokes the classifier, and
+     * never touches the domain/register/subregister labels.
+     *
+     * HONEST PROVENANCE: categorized_at is set to a fixed BACKFILL SENTINEL (the Unix epoch), NOT
+     * strftime('now') — these rows were tagged in the PAST, at an unknown time; stamping now()
+     * would lie about when the categorization happened. The UI can detect the sentinel and render
+     * "tagged · time unknown". categories_model stays NULL for true-legacy rows (model unknown);
+     * the operator may pass an explicit `model` only for a KNOWN external tagger.
+     *
+     * Both columns are PLAINTEXT provenance scalars (NOT in crypto-local ENCRYPTED_FIELDS; 0041
+     * header) so this is a plain SQL UPDATE — no master key needed. userId is REQUIRED in the
+     * WHERE (unfiltered-UPDATE guard) so a backfill can never cross the tenant boundary.
+     *
+     * Idempotent: a row whose categorized_at is already set fails the predicate, so a SECOND run
+     * re-stamps 0. Returns { restamped } — the affected-rows count (meta.changes, the shape every
+     * write helper in this file returns).
+     */
+    async restampLegacyCategories(userId, { model } = {}) {
+      // Unix epoch = "tagged in the past, true time unknown" — an unmistakable sentinel (no real
+      // categorization happened in 1970), distinct from a genuine recent strftime('now') stamp.
+      // Treat model:null the same as no model (no false "external tagger" attribution).
+      const wantModel = model !== undefined && model !== null;
+      if (wantModel) {
+        // Model-attribution pass. Anchored on `categories_model IS NULL` (NOT `categorized_at IS
+        // NULL`), so attributing a known external tagger AFTER a prior default time-only pass can
+        // never silently no-op — the old trap, where the default pass filled categorized_at and the
+        // later model pass then matched zero rows. COALESCE fills the time sentinel only if still
+        // null; the `(categorized_at IS NULL OR = sentinel)` guard means it only ever touches legacy
+        // rows and never a forward-path row (those carry a real strftime timestamp). Idempotent: a
+        // second model pass matches nothing because categories_model is now set.
+        const res = await d1Query(
+          `UPDATE messages
+              SET categorized_at = COALESCE(categorized_at, ?),
+                  categories_model = ?
+            WHERE user_id = ?
+              AND categories_processed = 1
+              AND categories_model IS NULL
+              AND forgotten_at IS NULL
+              AND (categorized_at IS NULL OR categorized_at = ?)`,
+          [CATEGORIES_BACKFILL_SENTINEL, model, userId, CATEGORIES_BACKFILL_SENTINEL],
+        );
+        return { restamped: res?.meta?.changes ?? 0 };
+      }
+      // Default time-only pass: stamp the sentinel onto true-legacy rows that were never stamped.
+      // Idempotent on `categorized_at IS NULL` — a second run matches nothing.
+      const res = await d1Query(
+        `UPDATE messages SET categorized_at = ?
+           WHERE user_id = ?
+             AND categories_processed = 1
+             AND categorized_at IS NULL
+             AND forgotten_at IS NULL`,
+        [CATEGORIES_BACKFILL_SENTINEL, userId],
+      );
+      return { restamped: res?.meta?.changes ?? 0 };
     },
 
     /**
@@ -738,6 +867,42 @@ export function createMessagesNamespace(deps) {
     async countByUser(userId) {
       const result = await d1Query(`SELECT COUNT(*) as count FROM messages WHERE user_id = ? AND forgotten_at IS NULL`, [userId]);
       return firstRow(result)?.count || 0;
+    },
+
+    // Coverage of recallable memory — total + the time span — for the getContext
+    // AWARENESS line, so the agent is grounded in HOW MUCH it actually holds (and
+    // doesn't over-claim coverage). created_at is plaintext, so MIN/MAX is a cheap
+    // index scan; no content is touched.
+    async coverage(userId) {
+      const result = await d1Query(
+        `SELECT COUNT(*) AS total, MIN(created_at) AS earliest, MAX(created_at) AS latest FROM messages WHERE user_id = ? AND forgotten_at IS NULL`,
+        [userId],
+      );
+      const r = firstRow(result) || {};
+      return { total: r.total || 0, earliest: r.earliest || null, latest: r.latest || null };
+    },
+
+    // ── Orphaned chat-history recovery (the conversationId send-path bug) ────────
+    // Turns saved before the encrypted-WS send path carried conversationId landed
+    // with conversation_id = NULL, so threaded history never finds them. These two
+    // back the EXPLICIT, user-triggered "recover previous chats" action (NOT an
+    // automatic read-time fallback — that would bleed unrelated NULL rows into a
+    // threaded query and break conversation isolation). conversation_id is a
+    // plaintext filter column, so adopt is a direct UPDATE; no content is touched.
+    async countOrphanChatHistory(userId, { source = 'portal-chat' } = {}) {
+      const result = await d1Query(
+        `SELECT COUNT(*) AS count FROM messages WHERE user_id = ? AND conversation_id IS NULL AND source = ? AND forgotten_at IS NULL`,
+        [userId, source],
+      );
+      return firstRow(result)?.count || 0;
+    },
+    async adoptOrphanChatHistory(userId, conversationId, { source = 'portal-chat' } = {}) {
+      if (!conversationId) return 0;
+      const result = await d1Query(
+        `UPDATE messages SET conversation_id = ? WHERE user_id = ? AND conversation_id IS NULL AND source = ? AND forgotten_at IS NULL`,
+        [conversationId, userId, source],
+      );
+      return result?.meta?.changes ?? 0;
     },
 
     async selectAll(userId, { limit = 500, offset = 0 } = {}) {

@@ -1,9 +1,10 @@
 import express from 'express';
-import { nudgeEnrichDrainer } from './enrich/drainer.js';
+import { nudgeEnrichDrainer, pauseEnrichCategorize, resumeEnrichCategorize, isEnrichCategorizePaused } from './enrich/drainer.js';
 import { assembleTimelineMessages } from './streams/assemble-messages.js';
 import { clampStored } from './enrich/text-limits.js';
 import { resolveInferenceConfigForTask } from './inference/resolve.js';
 import { createInferenceRouter } from './inference/router.js';
+import { isValidHandle } from './identity/identity.js';
 import { createUsageSink } from './inference/usage.js';
 
 /**
@@ -250,8 +251,12 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
   // — plaintext by design, not in ENCRYPTED_FIELDS). Cognitive scores
   // (depth/breadth/coherence/exploration) are pipeline-computed (Tier-2) and stay
   // null until clustering runs. apiGet throws on non-200, so GET must always 200.
-  const HANDLE_RE = /^[a-z0-9][a-z0-9_]{2,29}$/;
+  // Handle validation is UNIFIED on the DNS-safe rule in identity.js (isValidHandle:
+  // 2-32 chars, a–z0–9 + internal dashes, no leading/trailing dash, NO underscore) so a
+  // profile handle is always a valid <handle>.mycelium.id subdomain / did:web label.
+  // This layer previously allowed underscores that can never be a hostname (the bug).
   const RESERVED_HANDLES = new Set(['admin', 'api', 'www', 'app', 'mycelium', 'settings', 'profile', 'login', 'support', 'system', 'public', 'auth', 'id']);
+  const HANDLE_HINT = '2–32 chars: a–z, 0–9, and dashes (no leading/trailing dash)';
 
   const countOf = async (fn) => { try { return await fn(); } catch { return 0; } };
   async function readProfile() {
@@ -293,7 +298,7 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
   // GET /profile/handle/check?handle=… → { available, reason? }
   router.get('/profile/handle/check', async (req, res) => {
     const h = typeof req.query.handle === 'string' ? req.query.handle.trim().toLowerCase() : '';
-    if (!HANDLE_RE.test(h)) return ok(res, { available: false, reason: '3–30 chars: a–z, 0–9, _ (start alphanumeric)' });
+    if (!isValidHandle(h)) return ok(res, { available: false, reason: HANDLE_HINT });
     if (RESERVED_HANDLES.has(h)) return ok(res, { available: false, reason: 'reserved' });
     try {
       const r = await db.rawQuery(`SELECT user_id FROM user_profiles WHERE handle = ? AND user_id != ?`, [h, userId]);
@@ -308,7 +313,7 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       const sets = [], params = [];
       if (typeof body.handle === 'string') {
         const h = body.handle.trim().toLowerCase();
-        if (!HANDLE_RE.test(h)) return fail(res, 400, 'invalid handle (3–30 chars: a–z, 0–9, _)');
+        if (!isValidHandle(h)) return fail(res, 400, `invalid handle (${HANDLE_HINT})`);
         if (RESERVED_HANDLES.has(h)) return fail(res, 400, 'that handle is reserved');
         sets.push('handle = ?'); params.push(h);
       }
@@ -1011,6 +1016,31 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       stageLabel: `Embedding: ${embedded.toLocaleString()} / ${total.toLocaleString()}`,
       error: null,
     });
+  });
+
+  // ── Categorization (Context Engine L1) control + progress ───────────────────
+  // The on-box-model tagging pass is the "my computer is working a lot" churn. These
+  // let the owner SEE it (count + paused state), STOP it (pause), and START it
+  // (resume → nudge, or trigger). Progress also shows in the unified activity feed
+  // ('Sorting your messages · N / M'); this is the explicit control surface.
+  router.get('/enrichment/categorize/status', async (_req, res) => {
+    const { tagged, total, pending } = await db.messages.categoriesBacklogCached(userId);
+    ok(res, {
+      messages: { total, tagged, pending },
+      paused: isEnrichCategorizePaused(),
+      status: isEnrichCategorizePaused() ? 'paused' : (pending > 0 ? 'running' : 'idle'),
+      stageLabel: `Sorting: ${tagged.toLocaleString()} / ${total.toLocaleString()}`,
+    });
+  });
+
+  router.post('/enrichment/categorize/pause', async (_req, res) => {
+    pauseEnrichCategorize();
+    ok(res, { paused: true });
+  });
+
+  router.post('/enrichment/categorize/resume', async (_req, res) => {
+    resumeEnrichCategorize(); // clears the flag + kicks a cycle so progress moves at once
+    ok(res, { paused: false });
   });
 
   // ── Import preview — the onboarding "See your mind" evidence card ───────────

@@ -45,7 +45,7 @@
 	// Mirrors the Settings AI page (the "cookbook"): a Local lane driven by the
 	// hardware recommender (most-capable/most-suitable models per machine, one-tap
 	// Pull&use) + a Cloud lane with every preset incl. the EU-sovereign options.
-	type Rec = { name: string; installed: boolean; fitLevel: string; bestFor: string; estimatedGb: number; fitScore?: number; recommended?: boolean; ageMonths?: number | null };
+	type Rec = { name: string; installed: boolean; fitLevel: string; bestFor: string; estimatedGb: number; fitScore?: number; recommended?: boolean; recommendedFor?: string[]; ageMonths?: number | null };
 	type Preset = { id: string; label: string; kind: string; baseUrl: string; jurisdiction: string; defaultModel: string };
 	const OLLAMA_BASE = 'http://127.0.0.1:11434/v1';
 	const FIT: Record<string, { label: string; cls: string }> = {
@@ -284,6 +284,7 @@
 						<div class="rec-row" class:dim={m.fitScore === 0} class:rec-top={m.recommended}>
 							<span class="rec-name">{m.name}</span>
 							{#if m.recommended}<span class="lane-pill rec-pick">★ recommended</span>{/if}
+							{#if m.recommendedFor?.includes('labeling')}<span class="lane-pill rec-role" title="Recommended for the on-box labeling model (Context Engine L1)">★ for labeling</span>{/if}
 							<span class="lane-pill {FIT[m.fitLevel]?.cls ?? ''}">{FIT[m.fitLevel]?.label ?? m.fitLevel}</span>
 							<span class="rec-blurb">{m.bestFor} · ~{m.estimatedGb}GB</span>
 							<span class="rec-act">
@@ -438,6 +439,7 @@
 	.rec-row.rec-top { border-color: rgba(229, 184, 76, 0.35); background: rgba(229, 184, 76, 0.05); }
 	.rec-name { font-family: var(--font-mono, monospace); font-size: 0.73rem; color: var(--color-text-primary); }
 	.rec-pick { color: var(--color-bg); background: var(--color-accent-aurum); }
+	.rec-role { color: var(--color-accent-aurum); background: rgba(229, 184, 76, 0.14); }
 	.rec-blurb { flex: 1; min-width: 0; font-size: 0.64rem; color: var(--color-text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.rec-act { margin-left: auto; flex-shrink: 0; }
 	.rec-btn {

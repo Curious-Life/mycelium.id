@@ -204,7 +204,6 @@
 	let selectedActivity = $state<{ month: string; count: number } | null>(null);
 	let selectedActivityChronicle = $state<{ theme: string; signature: string; narrative: string } | null>(null);
 	let selectedActivityLoading = $state(false);
-	let illuminating = $state(false);
 
 	async function selectActivityBar(item: { month: string; count: number }) {
 		if (selectedActivity?.month === item.month) {
@@ -230,22 +229,10 @@
 		selectedActivityLoading = false;
 	}
 
-	async function illuminatePeriod(month: string) {
-		illuminating = true;
-		try {
-			const res = await api('/portal/mindscape/explore', {
-				method: 'POST',
-				body: JSON.stringify({ limit: 10, period: month }),
-			});
-			if (res.ok) {
-				const data = await res.json();
-				// Dispatch event so parent can track the job
-				const event = new CustomEvent('illuminate', { detail: month, bubbles: true });
-				document.dispatchEvent(event);
-			}
-		} catch {}
-		illuminating = false;
-	}
+	// Per-period Illuminate (POST /mindscape/explore → time_chronicles) is deferred Phase G/C:
+	// the endpoint doesn't exist and nothing writes time_chronicles yet, so the trigger was
+	// removed (see the "coming soon" note in the period detail). Whole-mindscape Illuminate
+	// (the top CTA → /mycelium/generate) is the working path.
 
 	const totalMessages = $derived(pointsStore.meta?.total || pointsStore.points.length);
 	const totalRealms = $derived(Object.keys(pointsStore.realms).length);
@@ -614,14 +601,11 @@
 								{:else}
 									<div class="period-dark">
 										<span class="period-dark-label">{selectedActivity.month} &middot; {selectedActivity.count} points &middot; not yet explored</span>
-										<button class="period-illuminate-btn" aria-label="Illuminate this period" onclick={() => illuminatePeriod(selectedActivity!.month)} disabled={illuminating}>
-											{#if illuminating}
-												<div class="period-spinner"></div>
-											{:else}
-												<svg class="illuminate-icon" viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><circle cx="10" cy="10" r="4" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="10" cy="10" r="1.5"/></svg>
-											{/if}
-											illuminate
-										</button>
+										<!-- Period-level Illuminate (time-chronicles) is an unbuilt surface: there is no
+										     /mindscape/explore job and nothing writes time_chronicles yet (deferred Phase G/C).
+										     The old button POSTed a 404 and polled forever — disabled here so it can't present a
+										     broken action. Whole-mindscape Illuminate (the top CTA) is the working path. -->
+										<span class="period-illuminate-btn" style="opacity:0.55;cursor:default;" title="Per-period exploration isn't available yet">coming soon</span>
 									</div>
 								{/if}
 							</div>
@@ -1345,9 +1329,6 @@
 	.period-illuminate-btn:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
-	}
-	.illuminate-icon {
-		flex-shrink: 0;
 	}
 	.period-loading {
 		display: flex;

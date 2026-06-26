@@ -1,4 +1,5 @@
 import express from 'express';
+import fs from 'node:fs';
 import { CONTRACTS } from './metrics/contracts.js';
 import { METRIC_COLUMNS, _internal as metricsInternal } from './db/metrics.js';
 import { computeFreshness, FAMILY_STAGE, familyFreshness, freshnessHedge } from './metrics/freshness.js';
@@ -31,6 +32,72 @@ function lz76Count(seq) {
     }
   }
   return c;
+}
+
+// ── Character Resonance: figure-level embedding asset (public, server-side) ──
+// 256-D Nomic centroids per figure (src/curious/figureProfiles.json). Loaded +
+// mean-centered ONCE; matching runs server-side only (the user's territory
+// centroids never leave the secure layer; the response carries names/affinities
+// only — never a centroid, CLAUDE.md §7).
+let _figAsset = null;
+function figureAsset() {
+  if (_figAsset) return _figAsset;
+  try {
+    const raw = JSON.parse(fs.readFileSync(new URL('./curious/figureProfiles.json', import.meta.url), 'utf8'));
+    const figs = (raw.figures || []).filter((f) => Array.isArray(f.centroid) && f.centroid.length === 256);
+    const dim = 256, n = figs.length || 1;
+    const mean = new Array(dim).fill(0);
+    for (const f of figs) for (let i = 0; i < dim; i++) mean[i] += f.centroid[i] / n;
+    const C = figs.map((f) => { // pre-centered + L2-normalized figure vectors
+      const v = f.centroid.map((x, i) => x - mean[i]);
+      let nn = 0; for (const x of v) nn += x * x; nn = Math.sqrt(nn) || 1;
+      return v.map((x) => x / nn);
+    });
+    _figAsset = { mean, C, dim, names: figs.map((f) => f.name), cons: figs.map((f) => f.constellation) };
+  } catch { _figAsset = { mean: [], C: [], dim: 256, names: [], cons: [] }; }
+  return _figAsset;
+}
+
+// ── Character Resonance: per-figure REALM centroids + baked profile (public) for the figure
+// detail drawer. Matches "your territory ↔ their realm". int8-quantized
+// (src/curious/figureRealmProfiles.json, ~4 MB); dequantized + mean-centered ONCE. Same
+// no-egress discipline as figureAsset — the user's centroids never leave; only names/affinities
+// + public figure data return (CLAUDE.md §7).
+let _realmAsset = null;
+function figureRealmAsset() {
+  if (_realmAsset) return _realmAsset;
+  try {
+    const raw = JSON.parse(fs.readFileSync(new URL('./curious/figureRealmProfiles.json', import.meta.url), 'utf8'));
+    const dim = 256;
+    const flat = [];          // every realm node — collected to compute the population mean once
+    const byName = new Map(); // figure name → { meta, realms[] }
+    for (const f of raw.figures || []) {
+      const realms = [];
+      for (const r of f.realms || []) {
+        const buf = Buffer.from(r.q || '', 'base64'); if (buf.length !== dim) continue;
+        const v = new Array(dim); for (let i = 0; i < dim; i++) v[i] = buf.readInt8(i) * r.s;
+        const node = { name: r.name, lean: r.lean, essence: r.essence, territories: r.territories || [], v, C: null };
+        realms.push(node); flat.push(node);
+      }
+      if (!realms.length) continue;
+      byName.set(f.name, { meta: {
+        name: f.name, constellation: f.constellation, domain: f.domain, sourcing: f.sourcing,
+        era: f.era, region: f.region, primary_domain: f.primary_domain,
+        birth_year: f.birth_year, death_year: f.death_year, gender: f.gender, cognitive: f.cognitive,
+      }, realms });
+    }
+    const n = flat.length || 1;
+    const mean = new Array(dim).fill(0);
+    for (const it of flat) for (let i = 0; i < dim; i++) mean[i] += it.v[i] / n;
+    for (const it of flat) { // center by population mean + L2-normalize; drop the raw vector
+      const v = new Array(dim); let nn = 0;
+      for (let i = 0; i < dim; i++) { const x = it.v[i] - mean[i]; v[i] = x; nn += x * x; }
+      nn = Math.sqrt(nn) || 1; for (let i = 0; i < dim; i++) v[i] /= nn;
+      it.C = v; it.v = null;
+    }
+    _realmAsset = { dim, mean, byName };
+  } catch { _realmAsset = { dim: 256, mean: [], byName: new Map() }; }
+  return _realmAsset;
 }
 
 /**
@@ -206,6 +273,133 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
         },
       });
     } catch { fail(res, 500, 'Failed to load vitality'); }
+  });
+
+  // GET /curious/resonance — Character Resonance (substrate B / content): match
+  // the user's own territory centroids against the figure atlas, server-side.
+  // Returns names + affinities only; centroids never leave the secure layer.
+  router.get('/curious/resonance', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const A = figureAsset();
+      if (!A.names.length) return res.json({ available: false, reason: 'figure atlas unavailable', top: [], byTerritory: [], constellationAffinity: [], realms: [] });
+      const parseC = (s) => { try { const c = JSON.parse(s); return Array.isArray(c) && c.length >= 256 ? c : null; } catch { return null; } };
+      // node centroid → cosine vs every figure (centered by figure-mean, L2-normalized)
+      const simsFor = (c) => { const v = new Array(A.dim); let nn = 0; for (let i = 0; i < A.dim; i++) { const x = c[i] - A.mean[i]; v[i] = x; nn += x * x; } nn = Math.sqrt(nn) || 1; for (let i = 0; i < A.dim; i++) v[i] /= nn; return A.C.map((fc) => { let d = 0; for (let i = 0; i < A.dim; i++) d += v[i] * fc[i]; return d; }); };
+      // top-n figures for a sims array; affinity = proximity (cos→0-100), comparable across nodes
+      const topFigs = (sims, n) => sims.map((s, i) => [s, i]).sort((a, b) => b[0] - a[0]).slice(0, n).map(([s, i]) => ({ name: A.names[i], constellation: A.cons[i], affinity: Math.max(0, Math.round(((s + 1) / 2) * 100)) }));
+      const rows = (await db.rawQuery(
+        `SELECT territory_id, name, realm_id, semantic_theme_id, message_count, current_vitality, centroid_256
+           FROM territory_profiles
+          WHERE user_id = ? AND dissolved_at IS NULL AND centroid_256 IS NOT NULL`,
+        [u.id])).results || [];
+      const terr = [];
+      for (const r of rows) {
+        const c = parseC(r.centroid_256); if (!c) continue;
+        const w = Number(r.current_vitality) || Number(r.message_count) || 1;
+        terr.push({ territory_id: r.territory_id, name: r.name, realm_id: r.realm_id, theme_id: r.semantic_theme_id, weight: w, sims: simsFor(c) });
+      }
+      if (!terr.length) { res.set('Cache-Control', 'no-store'); return res.json({ available: false, reason: 'no territory centroids yet', top: [], byTerritory: [], constellationAffinity: [], realms: [] }); }
+      const F = A.names.length;
+      const totalW = terr.reduce((s, t) => s + t.weight, 0) || 1;
+      // Aggregate by PEAK resonance, not the washed-out average: a figure scores
+      // high if SOME of your territories resonate strongly with it.
+      const sumW = new Array(F).fill(0), maxS = new Array(F).fill(-2);
+      const perFig = Array.from({ length: F }, () => []);
+      for (const t of terr) for (let i = 0; i < F; i++) { const s = t.sims[i]; sumW[i] += t.weight * s; if (s > maxS[i]) maxS[i] = s; perFig[i].push(s); }
+      const meanScore = sumW.map((s) => s / totalW);
+      const K = Math.min(5, terr.length);
+      const topkScore = perFig.map((arr) => { arr.sort((a, b) => b - a); let s = 0; for (let j = 0; j < K; j++) s += arr[j]; return s / K; });
+      // affinity: rescale a score array to 0-100 by min→max (full, interpretable spread)
+      const rescale = (scores) => { let mn = Infinity, mx = -Infinity; for (const s of scores) { if (s < mn) mn = s; if (s > mx) mx = s; } const d = (mx - mn) || 1; return scores.map((s) => Math.round(((s - mn) / d) * 100)); };
+      const buildTop = (scores, n = 8) => { const aff = rescale(scores); return scores.map((s, i) => [s, i]).sort((a, b) => b[0] - a[0]).slice(0, n).map(([s, i]) => ({ name: A.names[i], constellation: A.cons[i], affinity: aff[i], score: Math.round(s * 1000) / 1000 })); };
+      const chosen = topkScore;                          // CHOSEN strategy
+      const top = buildTop(chosen, 8);
+      // the "why": for each top figure, the user's own territories that drew it.
+      for (const f of top) {
+        const fi = A.names.indexOf(f.name);
+        f.via = terr.map((t) => [t.sims[fi], t.name]).sort((a, b) => b[0] - a[0]).slice(0, 2).map((x) => x[1]).filter(Boolean);
+      }
+      const byCon = {};
+      for (let i = 0; i < F; i++) { const c = A.cons[i] || '—'; (byCon[c] || (byCon[c] = { s: 0, n: 0 })); byCon[c].s += chosen[i]; byCon[c].n += 1; }
+      const conEntries = Object.entries(byCon).map(([c, e]) => ({ constellation: c, mean: e.s / e.n }));
+      const conAff = rescale(conEntries.map((e) => e.mean));
+      const constellationAffinity = conEntries.map((e, idx) => ({ constellation: e.constellation, affinity: conAff[idx] })).sort((a, b) => b.affinity - a.affinity).slice(0, 8);
+      const byTerritory = terr.map((t) => ({ territory_id: t.territory_id, name: t.name, top: topFigs(t.sims, 1) })).slice(0, 40);
+
+      // ── the PATH: resonance at every level of the mindscape (realm → theme → territory) ──
+      const realmRows = (await db.rawQuery(`SELECT realm_id, name, message_count, centroid_256 FROM realms WHERE user_id = ? AND centroid_256 IS NOT NULL`, [u.id])).results || [];
+      const themeRows = (await db.rawQuery(`SELECT realm_id, semantic_theme_id, name, centroid_256 FROM semantic_themes WHERE user_id = ? AND centroid_256 IS NOT NULL`, [u.id])).results || [];
+      const terrByKey = new Map(), terrByRealm = new Map();
+      for (const t of terr) {
+        const node = { territory_id: t.territory_id, name: t.name, figure: topFigs(t.sims, 1)[0] || null };
+        const k = `${t.realm_id}:${t.theme_id}`;
+        (terrByKey.get(k) || terrByKey.set(k, []).get(k)).push(node);
+        (terrByRealm.get(t.realm_id) || terrByRealm.set(t.realm_id, []).get(t.realm_id)).push(node);
+      }
+      const themesByRealm = new Map();
+      for (const th of themeRows) {
+        const c = parseC(th.centroid_256); if (!c) continue;
+        const node = { theme_id: th.semantic_theme_id, name: th.name, figures: topFigs(simsFor(c), 2), territories: terrByKey.get(`${th.realm_id}:${th.semantic_theme_id}`) || [] };
+        (themesByRealm.get(th.realm_id) || themesByRealm.set(th.realm_id, []).get(th.realm_id)).push(node);
+      }
+      const realms = realmRows.map((rl) => {
+        const c = parseC(rl.centroid_256);
+        return { realm_id: rl.realm_id, name: rl.name, message_count: Number(rl.message_count) || 0, territory_count: (terrByRealm.get(rl.realm_id) || []).length, figures: c ? topFigs(simsFor(c), 3) : [], themes: (themesByRealm.get(rl.realm_id) || []).sort((a, b) => b.territories.length - a.territories.length) };
+      }).filter((rl) => rl.figures.length || rl.themes.length).sort((a, b) => b.message_count - a.message_count);
+      res.set('Cache-Control', 'no-store');
+      if (req.query && req.query.debug) {
+        const spread = (s) => { const a = [...s].sort((x, y) => x - y); return { min: +a[0].toFixed(3), p50: +a[a.length >> 1].toFixed(3), max: +a[a.length - 1].toFixed(3) }; };
+        return res.json({ available: true, territory_count: terr.length, strategies: {
+          mean: { spread: spread(meanScore), top: buildTop(meanScore, 10) },
+          max: { spread: spread(maxS), top: buildTop(maxS, 10) },
+          topk: { spread: spread(topkScore), top: buildTop(topkScore, 10) },
+        } });
+      }
+      res.json({ available: true, figure_count: F, territory_count: terr.length, top, constellationAffinity, byTerritory, realms });
+    } catch { fail(res, 500, 'Failed to compute resonance'); }
+  });
+
+  // ── Figure detail: one figure's profile + WHERE YOU RESONATE (your territory ↔ their realm).
+  // Public figure realm-centroids, matched server-side against the user's territory centroids.
+  // The response carries names + affinities + public figure data only — never a centroid
+  // (CLAUDE.md §7); owner-gated + no-store, same fail-closed posture as the sibling route.
+  router.get('/curious/resonance/figure', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const name = String((req.query && req.query.name) || '').trim();
+      res.set('Cache-Control', 'no-store');
+      if (!name) return fail(res, 400, 'name required');
+      const RA = figureRealmAsset();
+      const entry = RA.byName.get(name);
+      // mythic / oral-tradition figures (no centroid, no topic map) → no compute, 404.
+      if (!entry) return fail(res, 404, 'unknown figure');
+      const m = entry.meta;
+      const realms = entry.realms.map((r) => ({ name: r.name, lean: r.lean, essence: r.essence, territories: r.territories.slice(0, 10) }));
+      // overlap: user territory ↔ figure realm (center the user centroid by the realm-population mean).
+      const parseC = (s) => { try { const c = JSON.parse(s); return Array.isArray(c) && c.length >= 256 ? c : null; } catch { return null; } };
+      const norm = (c) => { const v = new Array(RA.dim); let nn = 0; for (let i = 0; i < RA.dim; i++) { const x = c[i] - RA.mean[i]; v[i] = x; nn += x * x; } nn = Math.sqrt(nn) || 1; for (let i = 0; i < RA.dim; i++) v[i] /= nn; return v; };
+      const rows = (await db.rawQuery(`SELECT name, centroid_256 FROM territory_profiles WHERE user_id = ? AND dissolved_at IS NULL AND centroid_256 IS NOT NULL`, [u.id])).results || [];
+      const terr = [];
+      for (const r of rows) { const c = parseC(r.centroid_256); if (c) terr.push({ name: r.name, v: norm(c) }); }
+      const aff = (cos) => Math.max(0, Math.round(((cos + 1) / 2) * 100));
+      // best-matching user territory per figure realm; then keep the strongest pairs, one realm each.
+      const pairs = [];
+      for (const rr of entry.realms) {
+        let best = null;
+        for (const t of terr) { let d = 0; for (let i = 0; i < RA.dim; i++) d += t.v[i] * rr.C[i]; if (!best || d > best.cos) best = { cos: d, yourTerritory: t.name }; }
+        if (best) pairs.push({ yourTerritory: best.yourTerritory, theirRealm: rr.name, affinity: aff(best.cos), _cos: best.cos });
+      }
+      pairs.sort((a, b) => b._cos - a._cos);
+      const overlap = pairs.slice(0, 6).map(({ yourTerritory, theirRealm, affinity }) => ({ yourTerritory, theirRealm, affinity }));
+      res.json({
+        available: true,
+        name: m.name, constellation: m.constellation, domain: m.domain, sourcing: m.sourcing,
+        era: m.era, region: m.region, primary_domain: m.primary_domain,
+        birth_year: m.birth_year, death_year: m.death_year, gender: m.gender,
+        cognitive: m.cognitive, realms, overlap, affinity: overlap.length ? overlap[0].affinity : null,
+      });
+    } catch { fail(res, 500, 'Failed to load figure'); }
   });
 
   // GET /vitality/audit — latest topology-health snapshot (M2 entropy, gini…).
