@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mycelium": {
+      "command": "node",
+      "args": ["src/index.js"],
+      "env": {
+        "MYCELIUM_KEY_SOURCE": "keychain"
+      }
+    }
+  }
+}

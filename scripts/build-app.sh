@@ -62,13 +62,20 @@ echo "[mycelium] fetching sidecars (frpc + caddy)…"
 bash "$REPO/scripts/fetch-sidecars.sh"
 
 # ── Build (or run) ────────────────────────────────────────────────────────────
+# MYC_TAURI_CONFIG: optional path to a Tauri config OVERRIDE merged on top of
+# tauri.conf.json (used by scripts/build-app-dev.sh to build the badged "Mycelium
+# Dev" variant). Unset → a normal production build.
 cd "$REPO"
+CONF_ARGS=()
+[ -n "${MYC_TAURI_CONFIG:-}" ] && CONF_ARGS=(--config "$MYC_TAURI_CONFIG")
 if [ "$DEV" = 1 ]; then
   echo "[mycelium] launching the app (cargo tauri dev)…"
-  exec cargo tauri dev
+  # bash-3.2-safe empty-array expansion: macOS's bash errors on "${arr[@]}" for an
+  # empty array under `set -u`; this idiom expands to nothing when CONF_ARGS is empty.
+  exec cargo tauri dev ${CONF_ARGS[@]+"${CONF_ARGS[@]}"}
 fi
 echo "[mycelium] building the app (cargo tauri build)… this takes a few minutes"
-cargo tauri build
+cargo tauri build ${CONF_ARGS[@]+"${CONF_ARGS[@]}"}
 echo "[mycelium] ✓ done — bundle(s):"
 ls -d  "$REPO"/src-tauri/target/release/bundle/macos/*.app 2>/dev/null || true
 ls     "$REPO"/src-tauri/target/release/bundle/dmg/*.dmg    2>/dev/null || true

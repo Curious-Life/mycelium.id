@@ -188,22 +188,126 @@ def ensure_anchor_vectors(querier) -> dict[str, np.ndarray]:
     return out, version, ("reembedded" if stale else "cached"), [c for c in stale]
 
 
+# ── Phase A2: per-axis separability gate (instrument metadata) ───────────────
+# The bipolar inner-state axes (definitions.AXES) are scored as a signed lean
+# cos(msg,+pole) − cos(msg,−pole). An axis is only trustworthy if its poles
+# actually separate in embedding space — so we measure leave-one-out pole-
+# separation AUC of the seed phrases (per-language de-biased, matching the
+# research spike) and ABSTAIN axes that fail. This is INSTRUMENT metadata (AUC of
+# seed phrases, no user data) → plaintext table cognitive_axis_separability.
+# Recomputed only when an axis lacks a row for the current ANCHOR_VERSION. NOTE:
+# the gate must use leave-one-out, NOT the centroid's own fit (resubstitution
+# inflates every axis incl. Edges to ≈1.0; design cycle-3).
+
+AUC_GATE = 0.70          # leave-one-out pole-separation AUC floor
+ANTONYM_GATE = 0.975     # cos(+centroid,−centroid) ceiling (poles too collapsed)
+
+SEP_SELECT_SQL = "SELECT axis FROM cognitive_axis_separability WHERE anchor_version = ?"
+SEP_UPSERT_SQL = (
+    "INSERT INTO cognitive_axis_separability "
+    "(axis, anchor_version, loo_auc, antonym_cos, measurable, seed_count) "
+    "VALUES (?,?,?,?,?,?) "
+    "ON CONFLICT(axis, anchor_version) DO UPDATE SET "
+    "  loo_auc=excluded.loo_auc, antonym_cos=excluded.antonym_cos, "
+    "  measurable=excluded.measurable, seed_count=excluded.seed_count, "
+    "  computed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+)
+
+
+def _pole_phrases(axis):
+    """(pos_phrases, pos_langs, neg_phrases, neg_langs) for an axis.
+
+    tone reuses the (English-only) affect_positive/affect_negative seed lists; the
+    other axes carry per-language structure in definitions.AXES.
+    """
+    if axis == "tone":
+        pos = anchordefs.SEED_PHRASES["affect_positive"]
+        neg = anchordefs.SEED_PHRASES["affect_negative"]
+        return pos, ["en"] * len(pos), neg, ["en"] * len(neg)
+    poles = anchordefs.AXES[axis]
+    pos = [(p, l) for l in anchordefs.AXIS_LANGS for p in poles["+"][l]]
+    neg = [(p, l) for l in anchordefs.AXIS_LANGS for p in poles["-"][l]]
+    return ([p for p, _ in pos], [l for _, l in pos],
+            [p for p, _ in neg], [l for _, l in neg])
+
+
+def _loo_auc_antonym(pos_emb, pos_langs, neg_emb, neg_langs):
+    """Leave-one-out pole-separation AUC + antonym cosine. Per-language de-bias
+    (subtract the language mean of the seed set) matches the research spike; for a
+    single-language axis it reduces to a global-mean de-bias."""
+    allv = np.concatenate([pos_emb, neg_emb])
+    lab = np.array([1] * len(pos_emb) + [0] * len(neg_emb))
+    langs = list(pos_langs) + list(neg_langs)
+    idx = np.arange(len(allv))
+    lmean = {l: allv[[i for i, x in enumerate(langs) if x == l]].mean(axis=0)
+             for l in set(langs)}
+    scores = np.empty(len(allv), dtype=np.float64)
+    for h in range(len(allv)):
+        P = allv[(lab == 1) & (idx != h)]
+        N = allv[(lab == 0) & (idx != h)]
+        v = P.mean(axis=0) - N.mean(axis=0)
+        v = v / (np.linalg.norm(v) + 1e-9)
+        scores[h] = float(np.dot(allv[h] - lmean[langs[h]], v))
+    pos_s, neg_s = scores[lab == 1], scores[lab == 0]
+    wins = sum(1.0 if p > n else 0.5 if p == n else 0.0 for p in pos_s for n in neg_s)
+    auc = wins / (len(pos_s) * len(neg_s))
+    cp = pos_emb.mean(axis=0); cp = cp / (np.linalg.norm(cp) + 1e-9)
+    cn = neg_emb.mean(axis=0); cn = cn / (np.linalg.norm(cn) + 1e-9)
+    return float(auc), float(np.dot(cp, cn))
+
+
+def ensure_axis_separability(querier) -> dict[str, bool]:
+    """Phase A2. Return {axis: measurable}. Computes + stores any axis lacking a
+    separability row for the current ANCHOR_VERSION (re-embeds the pole phrases —
+    cheap, only on a version bump). Security: only axis names + the AUC land in
+    logs/storage, never phrases-as-vectors or user data."""
+    version = anchordefs.ANCHOR_VERSION
+    have = {r["axis"] for r in querier(SEP_SELECT_SQL, [version])}
+    out: dict[str, bool] = {}
+    embedder = get_embedder()
+    for axis in anchordefs.AXES_ORDER:
+        if axis in have:
+            row = querier(
+                "SELECT measurable FROM cognitive_axis_separability "
+                "WHERE axis=? AND anchor_version=?", [axis, version])
+            out[axis] = bool(row and row[0]["measurable"])
+            continue
+        pos_ph, pos_l, neg_ph, neg_l = _pole_phrases(axis)
+        pe = embedder.embed(pos_ph)
+        ne = embedder.embed(neg_ph)
+        pe = pe / np.linalg.norm(pe, axis=1, keepdims=True).clip(min=1e-8)
+        ne = ne / np.linalg.norm(ne, axis=1, keepdims=True).clip(min=1e-8)
+        auc, antonym = _loo_auc_antonym(pe, pos_l, ne, neg_l)
+        measurable = bool(auc >= AUC_GATE and antonym < ANTONYM_GATE)
+        seed_count = min(len(pos_ph), len(neg_ph))
+        querier(SEP_UPSERT_SQL, [axis, version, auc, antonym,
+                                 1 if measurable else 0, seed_count])
+        out[axis] = measurable
+    return out
+
+
 # ── Phase B: per-window metrics ──────────────────────────────────────────
+
+# Lean columns in canonical axis order (must match definitions.AXES_ORDER and the
+# migration 0042 column names).
+LEAN_COLS = tuple(anchordefs.AXIS_LEAN_COLUMN[a] for a in anchordefs.AXES_ORDER)
 
 METRIC_UPSERT_SQL = (
     "INSERT INTO cognitive_metrics_anchor ("
     "  user_id, window_end, granularity, era_id, language, anchor_version,"
     "  insight_embedding_proximity, reflective_embedding_density,"
     "  inner_territory_presence, affective_volatility_within_window,"
+    "  " + ", ".join(LEAN_COLS) + ","
     "  cvp_status, message_count, low_confidence, notes"
-    ") VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?) "
+    ") VALUES (?,?,?,?,?,?, ?,?,?,?, " + ",".join(["?"] * len(LEAN_COLS)) + ", ?,?,?,?) "
     "ON CONFLICT(user_id, window_end, granularity, language, era_id, anchor_version) "
     "DO UPDATE SET "
     "  insight_embedding_proximity=excluded.insight_embedding_proximity,"
     "  reflective_embedding_density=excluded.reflective_embedding_density,"
     "  inner_territory_presence=excluded.inner_territory_presence,"
     "  affective_volatility_within_window=excluded.affective_volatility_within_window,"
-    "  cvp_status=excluded.cvp_status,"
+    + "".join(f"  {c}=excluded.{c}," for c in LEAN_COLS)
+    + "  cvp_status=excluded.cvp_status,"
     "  message_count=excluded.message_count,"
     "  low_confidence=excluded.low_confidence,"
     "  notes=excluded.notes,"
@@ -211,11 +315,14 @@ METRIC_UPSERT_SQL = (
 )
 
 
-def compute_window_metrics(win_emb: np.ndarray, anchors: dict[str, np.ndarray]) -> dict:
-    """Pure: cosine-proximity metrics for one window's message embeddings.
+def compute_window_metrics(win_emb: np.ndarray, anchors: dict[str, np.ndarray],
+                           axis_measurable: dict[str, bool]) -> dict:
+    """Pure: cosine-proximity metrics + bipolar axis leans for one window.
 
     win_emb: (M, 768) L2-normalized message embeddings (M >= 1). anchors: each
-    L2-normalized → dot product == cosine similarity.
+    L2-normalized → dot product == cosine similarity. axis_measurable gates the
+    inner-state axes: a non-measurable axis (poles don't separate — e.g. Edges)
+    writes NULL rather than a misleading number.
     """
     cos_insight = win_emb @ anchors["insight"]            # (M,)
     cos_reflect = win_emb @ anchors["reflection"]         # (M,)
@@ -223,7 +330,7 @@ def compute_window_metrics(win_emb: np.ndarray, anchors: dict[str, np.ndarray]) 
     cos_neg = win_emb @ anchors["affect_negative"]        # (M,)
 
     affect_score = cos_pos - cos_neg                      # (M,) spec §4.13 step 2
-    return {
+    out = {
         "insight_embedding_proximity": float(np.mean(cos_insight)),
         "reflective_embedding_density": float(np.mean(cos_reflect > REFLECT_THRESHOLD)),
         "inner_territory_presence": float(np.mean(cos_reflect)),
@@ -231,6 +338,16 @@ def compute_window_metrics(win_emb: np.ndarray, anchors: dict[str, np.ndarray]) 
             float(np.std(affect_score)) if affect_score.size > 1 else 0.0
         ),
     }
+    # Bipolar inner-state axes (E2): lean = mean(cos(msg,+pole) − cos(msg,−pole)).
+    for axis in anchordefs.AXES_ORDER:
+        col = anchordefs.AXIS_LEAN_COLUMN[axis]
+        if axis_measurable.get(axis):
+            meta = anchordefs.AXIS_META[axis]
+            lean = (win_emb @ anchors[meta["pos"]]) - (win_emb @ anchors[meta["neg"]])
+            out[col] = float(np.mean(lean))
+        else:
+            out[col] = None                               # ABSTAIN → NULL at rest
+    return out
 
 
 def upsert_metric_row(user_id, row, anchor_version, querier):
@@ -241,6 +358,8 @@ def upsert_metric_row(user_id, row, anchor_version, querier):
         e(row.get("reflective_embedding_density")),
         e(row.get("inner_territory_presence")),
         e(row.get("affective_volatility_within_window")),
+        # axis leans in LEAN_COLS order; enc(None) → None (abstained axes stay NULL)
+        *[e(row.get(c)) for c in LEAN_COLS],
         "pending",                       # cvp_status — plaintext gate (spec §2.3)
         row.get("message_count", 0),
         1,                               # low_confidence ALWAYS true (CVP pending)
@@ -270,6 +389,9 @@ def main(querier=None):
 
     # ── Phase A: anchors (always — cheap; needed even with few messages) ──
     anchors, anchor_version, anchor_mode, stale = ensure_anchor_vectors(querier)
+
+    # ── Phase A2: per-axis separability gate (which inner-state axes are usable) ──
+    axis_measurable = ensure_axis_separability(querier)
 
     metadata = fetch_message_metadata(user_id, querier=querier)
     if len(metadata) < MIN_MESSAGES:
@@ -314,7 +436,7 @@ def main(querier=None):
             if idx.size < MIN_MESSAGES:
                 continue
             win_emb = embeddings[idx]
-            metrics = compute_window_metrics(win_emb, anchors)
+            metrics = compute_window_metrics(win_emb, anchors, axis_measurable)
             metrics.update({
                 "window_end": w_end_iso, "granularity": granularity, "era_id": run_id,
                 "message_count": int(idx.size),
@@ -323,14 +445,18 @@ def main(querier=None):
             computed += 1
 
     t1 = datetime.now(timezone.utc)
+    measurable_axes = sorted(a for a, m in axis_measurable.items() if m)
+    abstained_axes = sorted(a for a, m in axis_measurable.items() if not m)
     event_emit.emit("anchors", "run_end", era_id=run_id,
                     totals={"computed": computed, "skipped": skipped, "anchors": len(anchors)},
                     anchor_version=anchor_version, anchor_mode=anchor_mode,
                     stale_constructs=stale, cvp_status="pending",
                     reflect_threshold=REFLECT_THRESHOLD,
+                    axes_measurable=measurable_axes, axes_abstained=abstained_axes,
                     duration_ms=int((t1 - t0).total_seconds() * 1000))
     print(f"[anchors] anchors={len(anchors)} ({anchor_mode}) computed={computed} "
-          f"skipped={skipped} cvp=pending (Tier-1, NOT validated)", flush=True)
+          f"skipped={skipped} axes_measurable={len(measurable_axes)}/{len(axis_measurable)} "
+          f"abstained={abstained_axes} cvp=pending (Tier-1, NOT validated)", flush=True)
 
 
 if __name__ == "__main__":

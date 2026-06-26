@@ -35,6 +35,7 @@ import { createUsageSink } from './inference/usage.js';
 import { captureMessage } from './ingest/capture.js';
 import { portalIngestRouter } from './portal-ingest.js';
 import { portalHealthRouter } from './portal-health.js';
+import { portalLabelsRouter } from './portal-labels.js';
 import { portalActivityRouter } from './portal-activity.js';
 import { portalAgentActivityRouter } from './portal-agent-activity.js';
 import { portalUsageRouter } from './portal-usage.js';
@@ -49,6 +50,8 @@ import { accountRouter } from './account/router.js';
 import { remoteRouter } from './remote/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { startEnrichDrainer } from './enrich/drainer.js';
+import { startKeepAwake, stopKeepAwake } from './system/keep-awake.js';
+import { portalSystemRouter } from './portal-system.js';
 import { startClaimHeartbeat } from './claims/heartbeat.js';
 import { startClaimDiscoveryJob, isClusteringRunning, startClusteringJob, shouldAutoGenerate } from './jobs.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
@@ -234,7 +237,7 @@ async function buildSpaceSync({ db, userId, logger = console }) {
 /** Build the express sub-app that serves every VAULT-DEPENDENT route. Mounted
  *  behind a guard so it only handles traffic once the vault is open; until then
  *  data calls get a 503 and only the account ceremony + static UI are served. */
-function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth, channelSup, spaceSync = null }) {
+function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth, channelSup, hwOllamaDaemon, spaceSync = null }) {
   const v = express();
   v.disable('x-powered-by');
   // Fail-closed auth gate FIRST, mounted at `/api` — ALL vault data the sub-app
@@ -289,6 +292,7 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // Apple Health structured read/write (health_daily). Mounted BEFORE the mindscape
   // router so the real /health/summary wins over its legacy empty stub.
   v.use('/api/v1/portal', portalHealthRouter({ db, userId, authenticatePortalRequest: portalOwnerGate }));
+  v.use('/api/v1/portal', portalLabelsRouter({ db, userId, authenticatePortalRequest: portalOwnerGate }));
   v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath }));
   // Unified activity feed (background_jobs) — header stream indicator + mindscape chip.
   v.use('/api/v1/portal', portalActivityRouter({
@@ -316,19 +320,14 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // attachments — channel media + portal uploads. Same auth gate as uploads.
   v.use('/api/v1/portal', portalAttachmentsRouter({ db, userId }));
   v.use('/api/v1/portal', portalProvidersRouter({ db, userId }));
-  // One lazy Ollama daemon controller, shared by the hardware routes; stopped in
-  // closeHandle. dataDir = where we download the runtime + store its models (app-
-  // private, survives .app replacement). Lazy: nothing fetches until a Pull & use.
-  // (A daemon we spawn is also in our process group, so app exit reaps it
-  // regardless — stop() is the graceful SIGTERM path.) Auto-download opt-out via
-  // MYCELIUM_AUTO_OLLAMA=0.
-  const hwOllamaDaemon = createOllamaDaemon({
-    dataDir: dataDir(),
-    autoInstall: process.env.MYCELIUM_AUTO_OLLAMA !== '0',
-  });
+  // The lazy Ollama daemon is created in startRestServer (so it's SHARED with the
+  // enrichment drainer + closeHandle, which live in completeBoot — a sibling of this
+  // function, not nested in it) and passed in. See the creation note there.
   v.use('/api/v1/portal', portalHardwareRouter({ daemon: hwOllamaDaemon }));
   v.use('/api/v1/portal', portalImportRouter({ db, userId, enqueueEnrichment }));
   v.use('/api/v1/portal', portalSettingsRouter({ db, userId }));
+  // OS-level toggles the app configures (keep-the-Mac-awake while running).
+  v.use('/api/v1/portal', portalSystemRouter({ db, userId }));
   // In-app chat agent (web + Tauri) — runs a bounded, user-driven tool-use loop
   // over the SAME tool handlers, gated by the user's "AI Access" policy. Auth is
   // loopback-trusted (decrypts vault plaintext), same boundary as measurement/claims.
@@ -403,6 +402,19 @@ export async function startRestServer({
   if (!keysInjectedAtStart && !process.env.AGENT_URL) {
     process.env.AGENT_URL = `http://127.0.0.1:${Number(process.env.CHANNEL_DAEMON_PORT) || 3010}`;
   }
+
+  // One lazy Ollama daemon controller, created HERE (startRestServer scope) so it is
+  // SHARED by both the hardware routes (passed into buildVaultSubApp) and the enrichment
+  // drainer + closeHandle (in completeBoot below). It MUST live in this scope: completeBoot
+  // is a sibling of buildVaultSubApp — NOT nested in it — so a daemon created inside
+  // buildVaultSubApp is out of scope for the drainer/closeHandle, which threw
+  // `hwOllamaDaemon is not defined` and failed every real (non-injected-keys) boot.
+  // Lazy: nothing spawns until ensureUp/Pull. dataDir = app-private runtime+models store
+  // (survives .app replacement). Auto-download opt-out via MYCELIUM_AUTO_OLLAMA=0.
+  const hwOllamaDaemon = createOllamaDaemon({
+    dataDir: dataDir(),
+    autoInstall: process.env.MYCELIUM_AUTO_OLLAMA !== '0',
+  });
 
   // boot() reads keys from env by default; forward overrides when given
   // (verify scripts inject ephemeral keys) so undefined doesn't clobber env.
@@ -520,7 +532,10 @@ export async function startRestServer({
             startClusteringJob({ dbPath: effectiveDbPath, userId: bootUserId, db });
           } catch { /* non-fatal; manual Generate still works */ }
         };
-        const drainer = startEnrichDrainer({ db, userId: bootUserId, onSettled: maybeAutoGenerate });
+        // Pass the lazy Ollama daemon so the drainer can wake the on-box model for L1
+        // categorization (in scope via the buildVaultSubApp closure). Without this the
+        // enrich path never starts Ollama and every message stays untagged (CE dormancy).
+        const drainer = startEnrichDrainer({ db, userId: bootUserId, onSettled: maybeAutoGenerate, daemon: hwOllamaDaemon });
         enqueueEnrichment = (id) => { try { baseEnqueue(id); } catch { /* :8095 optional */ } drainer.nudge(); };
         // Persona-Claims source (Context Engine Phase 2): claims now DISTILL from the agent's
         // consolidated model.md / day cards via the integration cycle's proposeClaim (L3) — NOT
@@ -589,7 +604,19 @@ export async function startRestServer({
           await db.harness.advanceOverdue(new Date().toISOString());
         } catch (e) { console.warn('[scheduler] boot reconcile skipped:', e?.message || e); }
         harnessScheduler.start();
+        // Keep the Mac awake while this always-on server (drainer + scheduler +
+        // channels) runs, so a screen lock / dark display doesn't pause processing.
+        // Default ON on macOS; the user can turn it off (Settings → keep-awake →
+        // users.settings.keepAwake.enabled === false). No-op off macOS. The
+        // assertion auto-releases when this process exits (caffeinate -w pid).
+        try {
+          if (process.platform === 'darwin') {
+            const ks = await db.users.getSettings(bootUserId).catch(() => null);
+            if (ks?.keepAwake?.enabled !== false) startKeepAwake({ logger: (m) => console.error(`[mycelium] ${m}`) });
+          }
+        } catch (e) { console.warn('[mycelium] keep-awake start skipped:', e?.message || e); }
         closeHandle = () => {
+          try { stopKeepAwake(); } catch { /* */ }
           try { harnessScheduler.stop(); } catch { /* */ }
           try { connectorScheduler?.stop(); } catch { /* */ }
           try { drainer.stop(); } catch { /* */ }
@@ -619,7 +646,7 @@ export async function startRestServer({
       // homeserver is configured — see buildSpaceSync) and thread it into the
       // portal's share grant/revoke + knowledge-mirror paths.
       const spaceSync = await buildSpaceSync({ db, userId: bootUserId });
-      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId }), channelSup, spaceSync });
+      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId }), channelSup, hwOllamaDaemon, spaceSync });
       bootError = null; // opened cleanly → clear any prior failure
     } finally {
       booting = false;
@@ -898,8 +925,11 @@ async function main() {
   process.on('SIGTERM', shutdown);
 }
 
+// Compare decoded FS paths, not raw file:// strings — `file://${argv[1]}` keeps a
+// raw space while import.meta.url percent-encodes it, so a bundle path WITH A SPACE
+// (e.g. "Mycelium Dev.app") never matched and main() silently never ran.
 const invokedDirectly =
-  process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+  !!process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 const restFlag = process.argv.includes('--rest');
 if (invokedDirectly || restFlag) {
   main().catch((err) => {

@@ -52,11 +52,19 @@ rec('X3. flagForDiscussion item surfaces in getContext (the D5 round-trip)',
   t2.includes(marker) && /FLAGGED FOR DISCUSSION/.test(t2),
   t2.includes(marker) ? 'flagged item present under FLAGGED FOR DISCUSSION' : 'flagged item NOT surfaced (BAD)');
 
-// X4: section filtering works (include:['mind'] omits the messages section)
+// X4: section filtering works (include:['mind'] omits messages AND awareness)
 const r3 = await client.callTool({ name: 'getContext', arguments: { include: ['mind'] } });
 const t3 = r3.content?.[0]?.text || '';
-rec('X4. include filter scopes sections', !/RECENT MESSAGES/.test(t3) && /Current time:/.test(t3),
-  `mind-only briefing len=${t3.length}, no RECENT MESSAGES section`);
+rec('X4. include filter scopes sections', !/RECENT MESSAGES/.test(t3) && !/YOUR MEMORY/.test(t3) && /Current time:/.test(t3),
+  `mind-only briefing len=${t3.length}, no RECENT MESSAGES / YOUR MEMORY section`);
+
+// X5: awareness — a captured memory surfaces as a grounded coverage line
+await client.callTool({ name: 'captureMessage', arguments: { content: 'Awareness coverage test memory.' } });
+const r4 = await client.callTool({ name: 'getContext', arguments: { include: ['awareness'] } });
+const t4 = r4.content?.[0]?.text || '';
+rec('X5. awareness line grounds memory coverage (count present)',
+  /YOUR MEMORY \(what you can recall\)/.test(t4) && /memor(?:y|ies) captured/.test(t4) && /\d/.test(t4),
+  `awareness briefing="${t4.replace(/\n+/g, ' ').slice(-160)}"`);
 
 await client.close();
 close();

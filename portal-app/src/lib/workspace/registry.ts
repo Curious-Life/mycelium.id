@@ -83,6 +83,12 @@ export const REGISTRY: Record<string, ViewDef> = {
 		title: 'Agents', icon: 'people', singleton: true,
 		load: () => import('$lib/views/AgentsView.svelte'),
 	},
+	'inner-states': {
+		// Inner-state axis validation (E2). Live backend: /api/v1/portal/labels/*
+		// (status·sample·save·run-cvp·leans). Rate windows → run CVP → passed leans surface.
+		title: 'Inner States', icon: 'compass', singleton: true,
+		load: () => import('$lib/views/InnerStatesView.svelte'),
+	},
 	settings: {
 		title: 'Settings', icon: 'settings', singleton: true,
 		load: () => import('$lib/views/SettingsView.svelte'),

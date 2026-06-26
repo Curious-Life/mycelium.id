@@ -73,6 +73,32 @@
 		} catch { /* best-effort — they can set it in Settings */ }
 	}
 
+	// Handle — claim your public name (optional; set here or later in Settings →
+	// Profile). DNS-safe rule mirrors identity.js for the live availability hint; the
+	// server is the authority on save. Only a confirmed-free, valid handle is saved.
+	let handleInput = $state('');
+	let handleState = $state<'idle' | 'checking' | 'available' | 'taken' | 'invalid'>('idle');
+	let handleTimer: ReturnType<typeof setTimeout> | null = null;
+	const HANDLE_RE = /^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/;
+	function onHandleInput() {
+		handleState = 'idle';
+		if (handleTimer) clearTimeout(handleTimer);
+		const h = handleInput.trim().toLowerCase();
+		if (!h) return;
+		if (!HANDLE_RE.test(h)) { handleState = 'invalid'; return; }
+		handleState = 'checking';
+		handleTimer = setTimeout(async () => {
+			const d = await getJSON(`/portal/profile/handle/check?handle=${encodeURIComponent(h)}`);
+			handleState = d ? (d.available ? 'available' : 'taken') : 'idle';
+		}, 400);
+	}
+	async function saveHandleIfAny() {
+		const h = handleInput.trim().toLowerCase();
+		if (!h || handleState !== 'available') return;
+		try { await api('/portal/profile', { method: 'PUT', body: JSON.stringify({ handle: h }) }); }
+		catch { /* best-effort — set it later in Profile */ }
+	}
+
 	// Decide synchronously from a localStorage hint so the opaque Welcome backdrop
 	// is painted on the FIRST frame (no flash of the app behind it). The async
 	// /status check below corrects this for the rare edge cases. Returning users
@@ -173,6 +199,7 @@
 	// ── Welcome (Step 2): one breath, then into the flow ───────────────────────
 	function beginFlow() {
 		saveAgentIdentity(); // persist the chosen name/personality (best-effort)
+		saveHandleIfAny();   // claim the handle if one was entered + confirmed free
 		markWelcomeSeen();
 		// Land on the mindscape — the empty-state invitation (Data · Intelligence ·
 		// Connect) is the first thing they should see, not an abrupt jump elsewhere.
@@ -321,6 +348,16 @@
 					<select class="persona-select" bind:value={agentPersonality} aria-label="Personality">
 						{#each PERSONALITY_OPTS as o}<option value={o.id}>{o.label}</option>{/each}
 					</select>
+				</div>
+				<div class="name-field">
+					<input class="name-input" type="text" maxlength="32" bind:value={handleInput} oninput={onHandleInput}
+						placeholder="@ claim your handle (optional)" aria-label="Handle"
+						autocomplete="off" autocapitalize="off" spellcheck="false" />
+					{#if handleState !== 'idle'}
+						<span class="handle-hint {handleState === 'available' ? 'ok' : handleState === 'checking' ? '' : 'bad'}">
+							{handleState === 'checking' ? 'checking…' : handleState === 'available' ? 'available ✓' : handleState === 'taken' ? 'taken' : 'a–z, 0–9, dashes'}
+						</span>
+					{/if}
 				</div>
 				<div class="welcome-actions">
 					<button class="btn-skip" onclick={markWelcomeSeen}>
@@ -551,6 +588,9 @@
 	}
 	.name-input:focus { border-color: var(--color-accent-aurum, #e5b84c); }
 	.name-input::placeholder { color: var(--color-text-tertiary, #9898a3); }
+	.handle-hint { align-self: center; font-size: 0.72rem; white-space: nowrap; color: var(--color-text-tertiary, #9898a3); }
+	.handle-hint.ok { color: var(--color-accent-aurum, #e5b84c); }
+	.handle-hint.bad { color: var(--color-coral, #e5736b); }
 	.persona-select {
 		flex-shrink: 0;
 		padding: 0.55rem 0.6rem;

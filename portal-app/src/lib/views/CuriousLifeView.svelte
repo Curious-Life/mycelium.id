@@ -23,6 +23,7 @@
 	import TerritoryRiver from '$lib/curious/TerritoryRiver.svelte';
 	import CrossCheckQuadrant from '$lib/curious/CrossCheckQuadrant.svelte';
 	import { METRIC_FAMILIES, RIGOR_LABEL, RIGOR_ACCENT, RIGOR_BLURB, type Rigor } from '$lib/curious/metricsCatalog';
+	import FigureDrawer from '$lib/curious/FigureDrawer.svelte';
 
 	type Any = Record<string, any>;
 
@@ -47,6 +48,12 @@
 	let criticality = $state<Any[]>([]); // per-level latest rows
 	let events = $state<Any[]>([]);
 	let river = $state<Any | null>(null); // territory-river: anchor bands + active count over time
+	let resonance = $state<Any | null>(null); // Kindred minds: server-computed figure resonance ({top, byTerritory, constellationAffinity})
+	// Figure detail drawer — opened by clicking any kindred figure.
+	let figOpen = $state(false);
+	let figName = $state('');
+	let figAff = $state<number | null>(null);
+	let figAccent = $state('amethyst');
 	const anchorCountVals = $derived((river?.anchor_count ?? []).map((p: Any) => (p.count == null ? null : Number(p.count))));
 	const anchorCountLabels = $derived((river?.anchor_count ?? []).map((p: Any) => (p.end ?? '').slice(0, 10)));
 	const hasAnchorCount = $derived(anchorCountVals.some((v: number | null) => v != null));
@@ -130,6 +137,7 @@
 		// series + rhythm series have no inter-dependency, so run them concurrently
 		// rather than as a serial waterfall (loadRhythmSeries uses static gran/metric).
 		g('/portal/territory-river').then((rv) => { river = rv ?? null; });
+		g('/portal/curious/resonance').then((rr) => { resonance = rr?.available ? rr : null; });
 		await Promise.all([
 			g(`/portal/frequency/series?granularity=${frequency?.granularity ?? 'day'}`)
 				.then((fs) => { freqSeries = fs?.series ?? []; }),
@@ -392,12 +400,20 @@
 		navigationState.setPrimaryView('mindscape');
 		goto('/mindscape');
 	}
+	// Inner States lives inside Curious Life (no standalone sidebar item); its card
+	// deep-links to the full /inner-states teaching+validation surface.
+	function openInnerStates() {
+		navigationState.setPrimaryView('inner-states');
+		goto('/inner-states');
+	}
 
 	// ── Pillars + groups ──────────────────────────────────────────────────────
 	const pillars = [
 		{ key: 'movement', label: 'Movement', accent: 'azure', tagline: 'How your mind is moving' },
 		{ key: 'rhythm', label: 'Rhythm', accent: 'amethyst', tagline: 'The cadence of your thinking' },
 		{ key: 'complexity', label: 'Complexity', accent: 'teal', tagline: 'How varied your patterns are' },
+		{ key: 'resonance', label: 'Kindred minds', accent: 'amethyst', tagline: 'Figures your mind is reminiscent of' },
+		{ key: 'inner-states', label: 'Inner States', accent: 'rose', tagline: 'The language of your moods and modes' },
 		{ key: 'growth', label: 'Growth', accent: 'rose', tagline: 'How your thinking consolidates' },
 		{ key: 'vitality', label: 'Vitality', accent: 'jade', tagline: 'How alive your territories are' },
 		{ key: 'mindscape', label: 'Mindscape', accent: 'aurum', tagline: 'The shape of your inner world' },
@@ -411,7 +427,7 @@
 		{ key: 'turning', label: 'Turning points' },
 	];
 	const groupOf: Record<string, string> = {
-		movement: 'think', rhythm: 'think', complexity: 'think', growth: 'think',
+		movement: 'think', rhythm: 'think', complexity: 'think', resonance: 'think', 'inner-states': 'think', growth: 'think',
 		vitality: 'world', mindscape: 'world',
 		milestones: 'turning', routine: 'turning', 'early-signals': 'turning',
 	};
@@ -440,6 +456,17 @@
 		teal: 'var(--color-accent-teal-rgb)',
 		rose: 'var(--color-accent-rose-rgb)',
 	};
+	// Resonance: color each figure by its DOMAIN (4 families → 4 accents).
+	const CON_ACCENT: Record<string, string> = {
+		'The Logician': 'azure', 'The Watchmaker': 'azure', 'The Strategist': 'azure', 'The Cartographer': 'azure',
+		'The Mystic': 'amethyst', 'The Explorer': 'amethyst', 'The Rebel': 'amethyst', 'The Alchemist': 'amethyst',
+		'The Guardian': 'aurum', 'The Architect': 'aurum', 'The Commander': 'aurum', 'The Healer': 'aurum',
+		'The Sage': 'jade', 'The Nurturer': 'jade', 'The Storyteller': 'jade', 'The Bridge': 'jade',
+	};
+	const conAccent = (c: string | null | undefined) => CON_ACCENT[c ?? ''] ?? 'amethyst';
+	const openFigure = (n: string, affinity: number | null | undefined, constellation: string | null | undefined) => {
+		if (!n) return; figName = n; figAff = affinity ?? null; figAccent = conAccent(constellation); figOpen = true;
+	};
 
 	// Glossary state
 	let glossaryOpen = $state(false);
@@ -456,7 +483,8 @@
 		{#if !active}
 			<!-- ── OVERVIEW ─────────────────────────────────────────────────── -->
 			<header class="hero">
-				<h1 class="title">Your mind, quantified.</h1>
+				<h1 class="title">Who you're becoming</h1>
+				<p class="hero-sub">The shape of a curious mind — how you think, what moves you, and the minds you're kin to.</p>
 			</header>
 
 			{#if loading}
@@ -556,6 +584,24 @@
 										</div>
 									</div>
 									<p class="tagline">How varied your thinking sequences are</p>
+								</button>
+
+							{:else if p.key === 'resonance'}
+								<button class="card" style="--rgb:{accentRgb.amethyst};" onclick={() => (active = 'resonance')}>
+									<div class="card-head"><span class="dot" style="background:{accentVar.amethyst}"></span><span class="ctitle">Kindred minds</span>{#if !resonance}<span class="lc">gathering</span>{/if}<span class="chev">›</span></div>
+									<div class="card-body">
+										{#if resonance?.top?.[0]}<div class="big">{resonance.top[0].name} <span class="unit">{resonance.top[0].affinity}%</span></div>{:else}<p class="muted sm">Forms once your topics are mapped.</p>{/if}
+									</div>
+									<p class="tagline">Figures your mind is reminiscent of</p>
+								</button>
+
+							{:else if p.key === 'inner-states'}
+								<button class="card" style="--rgb:{accentRgb.rose};" onclick={openInnerStates}>
+									<div class="card-head"><span class="dot" style="background:{accentVar.rose}"></span><span class="ctitle">Inner States</span><span class="chev">›</span></div>
+									<div class="card-body">
+										<p class="muted sm">A read on the language of your moods and modes — leaning, never a verdict. Teach it, then validate.</p>
+									</div>
+									<p class="tagline">The language of your moods and modes</p>
 								</button>
 
 							{:else if p.key === 'growth'}
@@ -912,6 +958,56 @@
 				</div>
 				<p class="muted sm">LZ76 complexity measures how compressible the sequence of territories you move through is — higher means more varied, less repetitive thinking. Window {cxGlobal?.window_start ?? ''} → {cxGlobal?.window_end ?? ''}.</p>
 
+			{:else if active === 'resonance'}
+				<p class="lead">Figures across history, myth and letters whose concerns and cast of mind are <em>reminiscent of</em> yours — drawn from your own topics, computed on your machine. A mirror, not a verdict.</p>
+				{#if resonance?.top?.length}
+					<div class="kindred-grid">
+						{#each resonance.top as f}
+							<button type="button" class="kindred-card" style="--rgb:{accentRgb[conAccent(f.constellation)]}" onclick={() => openFigure(f.name, f.affinity, f.constellation)} title="See how you resonate with {f.name}">
+								<Ring value={f.affinity} max={100} size={62} stroke={6} color={accentVar[conAccent(f.constellation)]} center={`${f.affinity}`} sub="match" />
+								<div class="kc-body">
+									<div class="kc-name">{f.name}</div>
+									<div class="kc-con"><span class="dot" style="background:{accentVar[conAccent(f.constellation)]}"></span>{(f.constellation || '').replace('The ', '')}</div>
+									{#if f.via?.length}<div class="kc-via">via {f.via.join(' · ')}</div>{/if}
+								</div>
+								<span class="kc-go" aria-hidden="true">›</span>
+							</button>
+						{/each}
+					</div>
+				{:else}
+					<p class="muted">Your kindred minds form once a few topics are mapped from your conversations.</p>
+				{/if}
+				{#if resonance?.constellationAffinity?.length}
+					<div class="panel">
+						<h3>Archetype affinity</h3>
+						{#each resonance.constellationAffinity.slice(0, 8) as a}
+							<div class="ss"><div class="ss-bar"><span style="width:{a.affinity}%;background:{accentVar[conAccent(a.constellation)]}"></span></div><div class="ss-meta"><span class="ss-l">{a.constellation.replace('The ', '')}</span><span class="ss-v">{a.affinity}%</span></div></div>
+						{/each}
+					</div>
+				{/if}
+				{#if resonance?.realms?.length}
+					<div class="panel">
+						<h3>Your path of resonance</h3>
+						<p class="muted sm">How resonance runs through your mind — realm → theme → topic. Open one to follow it down.</p>
+						{#each resonance.realms as r}
+							<details class="rpath">
+								<summary><span class="rp-name">{r.name ?? `Realm ${r.realm_id}`}</span><span class="rp-figs">{r.figures.slice(0, 2).map((f: Any) => f.name).join(' · ')}</span></summary>
+								{#each r.themes as th}
+									<details class="rpath rpath-theme">
+										<summary><span class="rp-name">{th.name ?? 'theme'}</span><span class="rp-figs">{th.figures.slice(0, 2).map((f: Any) => f.name).join(' · ')}</span></summary>
+										<ul class="rp-terr">
+											{#each th.territories.slice(0, 14) as t}
+												<li><span class="t-id">{t.name ?? `Topic ${t.territory_id}`}</span>{#if t.figure?.name}<button type="button" class="t-fig t-fig-btn" onclick={() => openFigure(t.figure.name, t.figure.affinity, t.figure.constellation)}>{t.figure.name}</button>{:else}<span class="t-fig">—</span>{/if}</li>
+											{/each}
+										</ul>
+									</details>
+								{/each}
+							</details>
+						{/each}
+					</div>
+				{/if}
+				<p class="footnote">From a 2,000-figure atlas across history, myth and letters. Proximity in meaning, not identity — “reminiscent of”, never “you are”. Computed on your machine; nothing leaves it.</p>
+
 			{:else if active === 'growth'}
 				{#if freq}
 					<div class="stat-row five">
@@ -1074,6 +1170,8 @@
 	</div>
 </div>
 
+<FigureDrawer open={figOpen} name={figName} accent={figAccent} seedAffinity={figAff} onClose={() => (figOpen = false)} />
+
 <style>
 	.curious { position: relative; height: 100%; overflow-y: auto; overflow-x: hidden; background: var(--color-bg); color: var(--color-text-primary); }
 	.aurora { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; }
@@ -1086,6 +1184,7 @@
 
 	.hero { text-align: center; max-width: 40rem; margin: 0 auto clamp(1.6rem, 3vh, 2.4rem); }
 	.title { font-size: clamp(1.9rem, 4.5vw, 3rem); line-height: 1.06; letter-spacing: -0.025em; font-weight: 600; background: linear-gradient(112deg, var(--color-text-emphasis) 22%, var(--color-accent-aurum) 70%, var(--color-accent-amethyst) 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+	.hero-sub { margin: 0.65rem 0 0; font-size: clamp(0.95rem, 1.5vw, 1.1rem); line-height: 1.55; color: var(--color-text-secondary); }
 
 	/* ── Layer 1: summary band + glance ── */
 	.summary-band { border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: linear-gradient(150deg, rgb(var(--color-accent-rgb) / 0.08), var(--color-surface) 70%); padding: clamp(1rem, 2.5vw, 1.5rem) clamp(1.1rem, 3vw, 1.7rem); margin-bottom: 1rem; }
@@ -1204,6 +1303,35 @@
 
 	.detail-grid { display: grid; grid-template-columns: 1fr 1.5fr; gap: 1rem; margin-bottom: 1rem; }
 	.detail-grid.one { grid-template-columns: 1fr; }
+	.t-fig { color: var(--color-accent-amethyst); font-size: 0.82rem; margin-left: auto; }
+	.t-fig-btn { border: none; background: none; font: inherit; cursor: pointer; padding: 0; }
+	.t-fig-btn:hover { text-decoration: underline; }
+	.t-fig-btn:focus-visible { outline: 2px solid var(--color-accent-amethyst); outline-offset: 2px; border-radius: 2px; }
+	.kindred-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: 0.7rem; margin: 0.5rem 0 1.3rem; }
+	.kindred-card { display: flex; align-items: center; gap: 0.75rem; padding: 0.7rem 0.85rem; border: 1px solid var(--color-border); border-left: 3px solid rgb(var(--rgb)); border-radius: var(--radius-md); background: var(--color-elevated); width: 100%; text-align: left; font: inherit; cursor: pointer; transition: background 0.15s var(--ease-out), border-color 0.15s var(--ease-out), transform 0.1s var(--ease-out); }
+	.kindred-card:hover { background: color-mix(in srgb, rgb(var(--rgb)) 8%, var(--color-elevated)); border-color: color-mix(in srgb, rgb(var(--rgb)) 45%, var(--color-border)); }
+	.kindred-card:active { transform: scale(0.99); }
+	.kindred-card:focus-visible { outline: 2px solid rgb(var(--rgb)); outline-offset: 2px; }
+	.kc-go { margin-left: auto; color: var(--color-text-tertiary); font-size: 1.1rem; flex: none; transition: transform 0.15s var(--ease-out); }
+	.kindred-card:hover .kc-go { transform: translateX(2px); color: rgb(var(--rgb)); }
+	.kindred-card :global(.ring-wrap) { flex: none; }
+	.kc-body { min-width: 0; display: flex; flex-direction: column; gap: 0.18rem; }
+	.kc-name { font-weight: 600; color: var(--color-text-emphasis); letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.kc-con { display: flex; align-items: center; gap: 0.35rem; font-size: 0.72rem; color: var(--color-text-secondary); }
+	.kc-con .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+	.kc-via { font-size: 0.68rem; color: var(--color-text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.rpath { border-top: 1px solid var(--color-border); }
+	.rpath > summary { display: flex; align-items: baseline; justify-content: space-between; gap: 0.8rem; padding: 0.5rem 0.1rem; cursor: pointer; list-style: none; }
+	.rpath > summary::-webkit-details-marker { display: none; }
+	.rpath > summary::before { content: '›'; color: var(--color-text-tertiary); margin-right: 0.5rem; display: inline-block; transition: transform 0.15s var(--ease-out); }
+	.rpath[open] > summary::before { transform: rotate(90deg); }
+	.rp-name { color: var(--color-text-emphasis); font-weight: 500; }
+	.rp-figs { color: var(--color-text-tertiary); font-size: 0.74rem; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.rpath-theme { margin-left: 1.1rem; border-top: 1px dashed var(--color-border); }
+	.rpath-theme > summary { padding: 0.35rem 0.1rem; }
+	.rpath-theme .rp-name { font-weight: 400; color: var(--color-text-secondary); }
+	.rp-terr { list-style: none; margin: 0 0 0.4rem 1.6rem; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+	.rp-terr li { display: flex; justify-content: space-between; gap: 0.6rem; align-items: baseline; font-size: 0.8rem; }
 	.panel { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: 1.4rem; margin-bottom: 1rem; }
 	.panel:last-child { margin-bottom: 0; }
 	.panel h3 { font-size: 0.95rem; font-weight: 600; margin-bottom: 1rem; color: var(--color-text-emphasis); }

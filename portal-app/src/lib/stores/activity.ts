@@ -8,6 +8,8 @@ export interface ActivityJob {
   id: string;
   kind: string;
   stage: string;
+  model?: string | null;    // what model is doing the work (e.g. 'qwen3.5:4b', 'nomic-v1.5')
+  process?: string | null;  // what process it's running (e.g. 'on-box labeling', 'on-box embedding')
   done: number;
   total: number;
   remaining: number;

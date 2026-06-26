@@ -162,9 +162,13 @@ export function createEnrichmentService(deps) {
   // Fail-soft: a transient classify failure (model down) STOPS the batch and leaves the row
   // pending (0) for the next cycle — never poisons a row, never logs content (§1). A model that
   // replies with garbage yields null labels (still marked attempted, not retried forever).
-  async function enrichCategoriesOnce({ userId, batchSize = 25 } = {}) {
+  async function enrichCategoriesOnce({ userId, batchSize = 25, classify: classifyOverride } = {}) {
     if (!userId) throw new TypeError('enrichCategoriesOnce: userId required');
-    if (typeof classify !== 'function') return { scanned: 0, enriched: 0, failed: 0, skipped: 'no-classifier' };
+    // Per-cycle override lets the drainer pick the labeling model from settings each
+    // cycle (so a Settings change takes effect without a restart); falls back to the
+    // classifier bound at construction (tests inject one there).
+    const fn = typeof classifyOverride === 'function' ? classifyOverride : classify;
+    if (typeof fn !== 'function') return { scanned: 0, enriched: 0, failed: 0, skipped: 'no-classifier' };
     const rows = await messages.selectPendingCategories(userId, { limit: batchSize });
     let enriched = 0;
     let failed = 0;
@@ -175,13 +179,14 @@ export function createEnrichmentService(deps) {
         continue;
       }
       let labels;
-      try { labels = await classify(content); }
+      try { labels = await fn(content); }
       catch { failed++; break; } // transient (model down) → leave pending, stop the batch
       await messages.updateCategories(row.id, userId, {
         domain: labels.domain,
         register: labels.register,
         subregister: labels.subregister,
         taxonomyVersion: TAXONOMY_VERSION,
+        model: fn.model,   // provenance (0041): which model produced these labels
         categoriesProcessed: 1,
       });
       enriched++;
@@ -189,15 +194,19 @@ export function createEnrichmentService(deps) {
     return { scanned: rows.length, enriched, failed };
   }
 
-  async function enrichNlpOnce({ userId, batchSize = 50 } = {}) {
+  async function enrichNlpOnce({ userId, batchSize = 50, enrich: enrichOverride } = {}) {
     if (!userId) throw new TypeError('enrichNlpOnce: userId required');
+    // Hybrid L2 enrichment when an enricher is injected (regex structured + on-box-model semantic);
+    // else the deterministic regex extract(). Both return { entities, tags, entitySummary }, and the
+    // enricher degrades to regex internally on a model outage, so this control flow is unchanged.
+    const enrichFn = typeof enrichOverride === 'function' ? enrichOverride : extract;
     const rows = await messages.selectPendingNlp(userId, { limit: batchSize });
     let enriched = 0;
     let failed = 0;
 
     for (const row of rows) {
       try {
-        const { entities, tags, entitySummary } = extract(row.content);
+        const { entities, tags, entitySummary } = await enrichFn(row.content);
         await messages.updateNlp(row.id, userId, {
           entities: JSON.stringify(entities),
           tags: JSON.stringify(tags),

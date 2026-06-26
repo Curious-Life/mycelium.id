@@ -54,6 +54,8 @@ export const NAV_SECTIONS: NavSection[] = [
 	{
 		id: 'explore',
 		items: [
+			// Inner States is NOT a standalone item — it lives INSIDE Curious Life (a card
+			// there deep-links to /inner-states), like Body & Health under Streams.
 			{ id: 'curious-life', label: 'Curious Life', icon: 'compass', href: '/curious-life' },
 		],
 	},
@@ -86,6 +88,7 @@ const EXTRA_LABELS: Record<string, string> = {
 	vitality: 'Vitality',
 	import: 'Import',
 	chat: 'Chat',
+	'inner-states': 'Inner States', // reached as a card inside Curious Life (not a sidebar item)
 };
 
 const ALL_ITEMS: NavItem[] = [...PRIMARY_NAV, ...NAV_SECTIONS.flatMap((s) => s.items), SETTINGS_NAV];

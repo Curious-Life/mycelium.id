@@ -2,7 +2,7 @@
 	import { marked } from 'marked';
 	import DOMPurify from 'isomorphic-dompurify';
 	import { prepareFile } from '$lib/import/upload-handlers';
-	import { chatMessages, connectionStatus, activeModel, noModelMessage, type ChatMessage } from '$lib/stores/chat';
+	import { chatMessages, connectionStatus, activeModel, noModelMessage, recoverableCount, type ChatMessage } from '$lib/stores/chat';
 	import { navigationState, spaceScope, docScope } from '$lib/stores/navigation';
 	import { apiPostForm, apiGet, api } from '$lib/api';
 	// Timeline-style helpers — strip the bracket-prefixed group/reply
@@ -126,6 +126,14 @@
 	let isExpanded = $state(false);
 	// History loading flag
 	let isLoadingHistory = $state(false);
+	// Recovering orphaned earlier chats (the conversationId send-path fix) into this thread
+	let isRecovering = $state(false);
+	async function recoverEarlierChats() {
+		if (isRecovering) return;
+		isRecovering = true;
+		try { await chatMessages.recoverHistory(); }
+		finally { isRecovering = false; }
+	}
 	// Track user scroll
 	let userHasScrolled = $state(false);
 
@@ -665,16 +673,31 @@
 				}
 			};
 
+			// Conversation/scoping context — computed once so BOTH transports
+			// (encrypted WS and plain HTTPS) send the SAME payload. Dropping
+			// conversationId on the WS path was the cause of chat history never
+			// loading: writes landed with conversation_id = NULL while the
+			// history query filters on chat:<uuid>, so it matched zero rows.
+			const scopedSpace = $spaceScope;
+			const scopedDoc = $docScope;
+			const messageWithContext = scopedDoc
+				? `${userMessage}\n\n[Re: viewing document "${scopedDoc.title}" at ${scopedDoc.path}]`
+				: userMessage;
+			const chatPayload = {
+				message: messageWithContext,
+				enableThinking,
+				conversationId: chatMessages.getConversationId(),
+				...(selectedAgentId ? { agentId: selectedAgentId } : {}),
+				...(scopedSpace ? { spaceId: scopedSpace.id } : {}),
+				...(scopedDoc ? { docPath: scopedDoc.path, docTitle: scopedDoc.title } : {}),
+			};
+
 			// Route through encrypted WS channel if configured
 			if (isSecureChannelConfigured()) {
 				const { getChannel } = await import('$lib/secure-channel');
 				const channel = getChannel();
 				connectionStatus.setStatus('streaming');
-				await channel.requestStream('chat', {
-					message: userMessage,
-					enableThinking,
-					...(selectedAgentId ? { agentId: selectedAgentId } : {}),
-				}, (chunk) => {
+				await channel.requestStream('chat', chatPayload, (chunk) => {
 					handleEvent(chunk as Record<string, unknown>);
 				});
 				// Stream complete
@@ -690,34 +713,15 @@
 				const chatHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
 				if (csrfMatch) chatHeaders['X-CSRF-Token'] = csrfMatch[1];
 
-				// When the chat is scoped to a Shared Space, forward the
-				// spaceId so /portal/chat/stream loads that space's context
-				// (system prompt + recent space_conversations messages).
-				const scopedSpace = $spaceScope;
-				// When the chat is scoped to a library doc, append a
-				// reference line to the message so the agent knows which
-				// screen the user is viewing — and pass docPath/docTitle
-				// in the body so the backend can later inject the doc's
-				// content into context if it wants.
-				const scopedDoc = $docScope;
-				const messageWithContext = scopedDoc
-					? `${userMessage}\n\n[Re: viewing document "${scopedDoc.title}" at ${scopedDoc.path}]`
-					: userMessage;
 				// Self-hosted V1 serves portal routes under /api/v1/portal (the api()
 				// helper rewrites /portal/* there; this raw fetch must do it too, or it
-				// 404s — bare /portal/* is unrouted on the REST server).
+				// 404s — bare /portal/* is unrouted on the REST server). Same
+				// chatPayload as the WS branch (conversationId/spaceId/docPath included).
 				const res = await fetch('/api/v1/portal/chat/stream', {
 					method: 'POST',
 					headers: chatHeaders,
 					credentials: 'same-origin',
-					body: JSON.stringify({
-						message: messageWithContext,
-						enableThinking,
-						conversationId: chatMessages.getConversationId(),
-						...(selectedAgentId ? { agentId: selectedAgentId } : {}),
-						...(scopedSpace ? { spaceId: scopedSpace.id } : {}),
-						...(scopedDoc ? { docPath: scopedDoc.path, docTitle: scopedDoc.title } : {}),
-					}),
+					body: JSON.stringify(chatPayload),
 					signal: abortController.signal
 				});
 
@@ -1538,6 +1542,17 @@
 						<div class="flex flex-col items-center justify-center text-center gap-1.5 py-10 px-6">
 							<div class="text-sm font-medium text-[var(--color-text-primary)]">Ask your vault anything</div>
 							<div class="text-xs text-[var(--color-text-tertiary)] max-w-xs">Your conversations, notes, and memory — searchable and reasoned over. Type a question below to begin.</div>
+							{#if $recoverableCount > 0}
+								<!-- Earlier chats saved before the conversation-threading fix (NULL
+								     conversation_id) can be pulled into this thread, on demand. -->
+								<button
+									onclick={recoverEarlierChats}
+									disabled={isRecovering}
+									class="mt-2 text-xs px-3 py-1.5 rounded-full bg-[var(--color-accent)]/15 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25 transition-colors disabled:opacity-50"
+								>
+									{isRecovering ? 'Recovering…' : `Recover ${$recoverableCount} earlier message${$recoverableCount === 1 ? '' : 's'}`}
+								</button>
+							{/if}
 						</div>
 					{/if}
 

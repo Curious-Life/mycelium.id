@@ -17,6 +17,7 @@
 import { CATALOG } from './catalog.js';
 import { estimateMemoryGb, fitScore, fitLevel } from './fit.js';
 import { monthsSince } from './catalog-meta.js';
+import { labelingRecommendedModel } from '../inference/role-models.js';
 
 /**
  * The memory budget a model may use: discrete GPU VRAM when present, otherwise a
@@ -108,6 +109,15 @@ export function recommendModels(hw, { ctx = 8192, limit } = {}) {
       .map((m) => m.name),
   );
   for (const m of scored) m.recommended = topPicks.has(m.name);
+
+  // Role-aware picks (curated operator decisions, NOT the warmth ranking). The on-box
+  // labeling model is small/analytical — it never earns the companion `recommended`
+  // badge, so we tag it independently for a "Recommended for labeling" pill in the UI.
+  // Single-sourced from role-models.js so it can't drift from the actual default.
+  // (Descriptions→cloud-Regolo is a cloud preset, not a local catalog model, so it's
+  // badged on the cloud-preset lane, not here.)
+  const labelPick = labelingRecommendedModel();
+  for (const m of scored) m.recommendedFor = m.name === labelPick ? ['labeling'] : [];
 
   let recommendations = [...bandA, ...bandB];
   if (Number.isInteger(limit) && limit > 0) recommendations = recommendations.slice(0, limit);

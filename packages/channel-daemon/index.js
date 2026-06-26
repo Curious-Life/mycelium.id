@@ -8,6 +8,7 @@
  * with env as the fallback. Run: node packages/channel-daemon/index.js
  */
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { loadConfig, assertEgressConfig, applyChannelConfigToEnv } from './config.js';
 import { createVaultClient } from './vault-client.js';
 import { createEnvelopeDedup } from './dedup.js';
@@ -237,7 +238,11 @@ async function main() {
   process.on('SIGTERM', shutdown);
 }
 
-// Run only when invoked directly (not when imported by the verify script).
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Run only when invoked directly (not when imported by the verify script). Compare
+// decoded FS paths — `file://${argv[1]}` keeps a raw space while import.meta.url
+// percent-encodes it, so a bundle path WITH A SPACE ("Mycelium Dev.app") never
+// matched → main() silently never ran → the daemon exited 0 and the supervisor
+// reported "down — check the bot token" even with a valid token.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   main();
 }

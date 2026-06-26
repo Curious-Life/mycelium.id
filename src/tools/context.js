@@ -28,6 +28,33 @@ const CORE_TOKEN_CAP = 1200; // defensive trim — the cycle keeps self.md ≤~1
 
 // Compact "where your energy's been going" line from the domain/register mix (Context Engine L1c).
 // Aggregates registers into their parent domain, drops unclassified-only noise.
+// Honest pole labels for surfaced inner-state leans (signed: <0 → [0], ≥0 → [1]).
+// Framing follows src/metrics/contracts.js preferred_vocab — leaning/tilt language,
+// edges softening-only, kusala FUNCTIONAL ("toward grasping/ease"), never moral.
+const LEAN_LABEL = {
+  tone_lean: ['low', 'bright'],
+  charge_lean: ['quiet', 'wired'],
+  warmth_lean: ['cut-off', 'close'],
+  gatheredness_lean: ['scattered', 'collected'],
+  holding_lean: ['gripping', 'letting-be'],
+  noticing_lean: ['caught up in it', 'stepped back'],
+  edges_lean: ['firmer-bounded', 'softer-edged'],
+  kusala_lean: ['toward grasping', 'toward ease'],
+};
+
+export function renderInnerStateLeans(window) {
+  const surfaced = Object.entries(window?.values ?? {})
+    .filter(([c, v]) => c.endsWith('_lean') && v != null);
+  if (!surfaced.length) return null;
+  const lines = surfaced.map(([c, v]) => {
+    const lab = LEAN_LABEL[c] || ['−pole', '+pole'];
+    const name = c.replace(/_lean$/, '');
+    const n = Number(v);
+    return `- ${name}: leans ${n >= 0 ? lab[1] : lab[0]} (${n >= 0 ? '+' : ''}${n.toFixed(2)})`;
+  });
+  return lines.join('\n');
+}
+
 function renderDomainMix(rows) {
   if (!Array.isArray(rows) || !rows.length) return '';
   const byDomain = new Map();
@@ -52,17 +79,17 @@ export function createContextDomain(deps) {
       name: 'getContext',
       description:
         'Load your working context in one call — use this FIRST at the start of a conversation. '
-        + 'Returns a single briefing: the current date/time, your private internal model, anything '
-        + 'flagged for discussion, recent messages across channels, your current cognitive phase, and '
-        + 'recent body-state (sleep/HRV/steps). After this, pull more detail on demand with '
-        + 'searchMindscape, getDocument, getDailyMessages, or mindscape (topology by view).',
+        + 'Returns a single briefing: the current date/time, how much memory you hold, your private '
+        + 'internal model, anything flagged for discussion, recent messages across channels, your '
+        + 'current cognitive phase, and recent body-state (sleep/HRV/steps). After this, pull more '
+        + 'detail on demand with searchMindscape, getDocument, getDailyMessages, or mindscape (topology by view).',
       inputSchema: {
         type: 'object',
         properties: {
           recentMessages: { type: 'number', description: 'How many recent messages to include (default 10, max 40).' },
           include: {
             type: 'array',
-            items: { type: 'string', enum: ['core', 'mind', 'facts', 'people', 'messages', 'domains', 'phase', 'health', 'claims'] },
+            items: { type: 'string', enum: ['awareness', 'core', 'mind', 'facts', 'people', 'messages', 'domains', 'phase', 'health', 'claims', 'leans'] },
             description: 'Limit to specific sections. Omit for all.',
           },
         },
@@ -88,6 +115,26 @@ export function createContextDomain(deps) {
         `**Current time:** ${fmt({ weekday: 'long' })}, ${fmt({ month: 'long', day: 'numeric', year: 'numeric' })} `
         + `${fmt({ hour: '2-digit', minute: '2-digit' })} (${tzLabel})`,
       );
+
+      // ── awareness: how much you actually hold (grounds coverage; anti-over-claim) ──
+      // A single honest line — total recallable memories + the span they cover — so
+      // the agent knows the SHAPE of what it can recall and reaches for search/recall
+      // instead of assuming. Best-effort; skipped on an empty/erroring vault.
+      if (want(include, 'awareness') && db?.messages?.coverage) {
+        try {
+          const cov = await db.messages.coverage(userId);
+          if (cov.total > 0) {
+            const span = (cov.earliest && cov.latest)
+              ? ` spanning ${String(cov.earliest).slice(0, 10)} → ${String(cov.latest).slice(0, 10)}`
+              : '';
+            sections.push(
+              `---\n# YOUR MEMORY (what you can recall)\n\n`
+              + `**${cov.total.toLocaleString()}** ${cov.total === 1 ? 'memory' : 'memories'} captured${span}. `
+              + `This is the ground truth you carry — search it before assuming you already know, and don't over-claim coverage you haven't checked.`,
+            );
+          }
+        } catch { /* non-fatal */ }
+      }
 
       // ── core: who they are (bounded ≤~1k tok — LEADS the briefing) ──
       if (want(include, 'core')) {
@@ -187,6 +234,18 @@ export function createContextDomain(deps) {
             if (parts.length) sections.push(`---\n# BODY STATE (7-day average)\n\n${parts.join(' · ')}`);
           }
         } catch { /* non-fatal */ }
+      }
+
+      // ── inner-state leans (E2) — ONLY axes that cleared CVP surface here. The gated
+      // reader returns null for every pending/abstained axis, so renderInnerStateLeans
+      // emits a section only when at least one axis has passed; until then this is silent
+      // (fail-closed). A lean is a tilt in their language, by one lens — never a verdict.
+      if (want(include, 'leans') && db?.anchor) {
+        try {
+          const w = await db.anchor.getCurrentWindow(userId, { granularity: 'alpha' });
+          const block = renderInnerStateLeans(w);
+          if (block) sections.push(`---\n# INNER-STATE LEANS (provisional — a tilt in your language, by one lens; not a verdict)\n\n${block}`);
+        } catch { /* best-effort; never block the preamble */ }
       }
 
       // ── persona claims — the bi-temporal AS-OF view (what is TRUE of them NOW) ──

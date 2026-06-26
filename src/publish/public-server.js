@@ -17,6 +17,7 @@ import express from "express";
 import { boot } from "../index.js";
 import { createIdentity } from "../identity/identity.js";
 import { verifyLink } from "./links.js";
+import { fileURLToPath } from "node:url";
 
 const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ESC[c]);
@@ -169,6 +170,7 @@ async function main() {
   process.on("SIGINT", shutdown); process.on("SIGTERM", shutdown);
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+// Compare decoded FS paths (a bundle path with a space breaks the raw file:// form).
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   main().catch((err) => { process.stderr.write(`fatal: ${String(err?.message ?? err)}\n`); process.exit(1); });
 }

@@ -847,7 +847,6 @@
 	interface TimeChronicle { period_key: string; theme: string; signature: string; territory_count: number; message_count: number; }
 	let timeChronicles: TimeChronicle[] = $state([]);
 	let chroniclesLoaded = false;
-	let illuminatingPeriod: string | null = $state(null);
 
 	async function loadTimeChronicles() {
 		if (chroniclesLoaded) return;
@@ -2285,24 +2284,6 @@
 	// Load chronicles eagerly — they're small and needed immediately when dial is touched
 	$effect(() => { if (!chroniclesLoaded) loadTimeChronicles(); });
 
-	// When illuminating, poll for new chronicles until they arrive
-	$effect(() => {
-		if (!illuminatingPeriod) return;
-		const period = illuminatingPeriod;
-		const interval = setInterval(async () => {
-			chroniclesLoaded = false;
-			await loadTimeChronicles();
-			if (timeChronicles.some(c => c.period_key?.startsWith(period))) {
-				illuminatingPeriod = null;
-				clearInterval(interval);
-				// Rebuild ticks to update illumination state
-				// Force re-render by touching timelineTicks
-				timelineTicks = [...timelineTicks];
-			}
-		}, 10000);
-		return () => clearInterval(interval);
-	});
-
 	function togglePoints() {
 		showPoints = !showPoints;
 		if (pointCloud) pointCloud.visible = showPoints;
@@ -2834,18 +2815,12 @@
 						<div class="dial-theme">{chronicle.theme}</div>
 						<div class="dial-signature" class:sig-steady={chronicle.signature === 'steady'} class:sig-exploring={chronicle.signature === 'exploring'} class:sig-consolidating={chronicle.signature === 'consolidating'} class:sig-fragmenting={chronicle.signature === 'fragmenting'}>{chronicle.signature}</div>
 					{/if}
-					{#if illuminatingPeriod === currentMonth}
-						<div class="dial-illuminating">
-							<div class="illuminating-pulse"></div>
-							<span>illuminating...</span>
-						</div>
-					{:else if !isIlluminated}
-						<button class="dial-illuminate" onclick={() => {
-							illuminatingPeriod = currentMonth;
-							container?.dispatchEvent(new CustomEvent('illuminate', { detail: currentMonth, bubbles: true }));
-						}}>
-							illuminate
-						</button>
+					{#if !isIlluminated}
+						<!-- Per-period Illuminate is deferred Phase G/C: no /mindscape/explore job exists and
+						     nothing writes time_chronicles yet. The old button POSTed a 404 then polled
+						     time-chronicles forever. Disabled until the explore backend is built; the page-level
+						     Illuminate CTA is the working path. -->
+						<span class="dial-illuminate" style="opacity:0.55;cursor:default;" title="Per-period exploration isn't available yet">coming soon</span>
 					{/if}
 				</div>
 			{/if}
@@ -3048,28 +3023,5 @@
 	.dial-illuminate:hover {
 		background: rgba(229, 184, 76, 0.2);
 		border-color: var(--color-accent-aurum);
-	}
-	.dial-illuminating {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		margin-top: 4px;
-		font-size: 0.45rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.1em;
-		color: var(--color-accent-aurum);
-		pointer-events: none;
-	}
-	.illuminating-pulse {
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-		background: var(--color-accent-aurum);
-		animation: illuminate-pulse 1.5s ease-in-out infinite;
-	}
-	@keyframes illuminate-pulse {
-		0%, 100% { opacity: 0.3; transform: scale(0.8); }
-		50% { opacity: 1; transform: scale(1.2); }
 	}
 </style>

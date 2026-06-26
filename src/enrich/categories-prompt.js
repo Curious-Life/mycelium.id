@@ -1,4 +1,4 @@
-// src/enrich/categories-prompt.js — taxonomy v1 (Context Engine L1, Phase 1b).
+// src/enrich/categories-prompt.js — taxonomy v1, prompt v2 (Context Engine L1, Phase 1b).
 //
 // The two orthogonal per-message axes + the LLM classification prompt + a lenient parser.
 //   DOMAIN   — what the message is ABOUT (7 life areas). Operator-locked cut, 2026-06-19.
@@ -6,8 +6,15 @@
 //              primaries; register-map-research-deliverable-2026-06-10, Template B).
 // Both are tagged together in ONE cheap local call (foundations-first: the LLM is the
 // labeler + the ground truth the Phase-3a centroid-compass is later validated against).
+//
+// PROMPT v2 (2026-06-24): sharper DOMAIN 5 (Mind = the external world, NOT your feelings)
+// + DOMAIN 7 (Self & Inner Life made concrete: named feelings, mood, self-talk, identity)
+// + a 5-vs-7 tie-breaker. A 3-model × 2-prompt eval on 30 real messages showed v1 almost
+// never tagged Self & Inner Life (6 of 16k backfilled rows); v2 reliably surfaces it on
+// llama3.1:8b (0→6) and qwen3:4b (1→8). TAXONOMY_VERSION bumps to v2 so v1-tagged rows
+// are identifiable for an optional re-tag. The 7 domains + 12 registers are UNCHANGED.
 
-export const TAXONOMY_VERSION = 'v1';
+export const TAXONOMY_VERSION = 'v2';
 
 // Axis A — DOMAIN. (index + 1) is the number the model returns.
 export const DOMAINS = [
@@ -36,9 +43,10 @@ DOMAIN — what the message is ABOUT (choose exactly one number 1-7):
 2 Work & Creativity — building, business, projects, career, finances, AND craft/making (writing, art, voice, publishing, product); also life-admin/logistics
 3 People & Relationships — intimate/personal: partner, family, friends, close collaborators
 4 Community & Belonging — collective/civic: groups, scenes, culture, the broader social, belonging
-5 Mind & Growth — research, ideas, inquiry, curiosity, skills, learning
+5 Mind & Growth — understanding the WORLD outside yourself: research, theories, ideas, how-things-work, skills, external curiosity (NOT your feelings about yourself)
 6 Meaning & Spirit — values, spirituality, purpose, beliefs, the transcendent "why"
-7 Self & Inner Life — emotional life, self-relationship, inner work, self-care, solitude
+7 Self & Inner Life — your relationship with YOURSELF: a named feeling (anxious, angry, sad, joyful, ashamed, grateful, lonely), mood, self-talk, processing a hard day, identity & self-worth, motivation, rest/solitude, self-care
+TIE-BREAKER: an inner feeling or how you relate to yourself → 7. Understanding something external → 5.
 
 REGISTER — HOW the person is engaging (choose exactly one of these 12 names):
 Build (making artifacts) · Steer (directing/coordinating) · Sell (pitching/persuading)

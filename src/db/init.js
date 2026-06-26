@@ -20,6 +20,7 @@ import { applyMigrations } from './migrate.js';
 import { resolveDbKeyHex, atRestEnabled, vaultIsEncrypted } from './open.js';
 import { deriveDbKey } from '../account/keystore.js';
 import { ensureVaultEncrypted, isPlaintextSqlite } from '../account/db-cipher-migrate.js';
+import { maybeSnapshotBeforeMigrate } from '../account/snapshot-on-boot.js';
 
 // A migration of a multi-GB vault can take minutes; only steal a lock older than
 // this AND whose holder process is dead.
@@ -82,6 +83,10 @@ export function ensureVaultSchema(dbFile, userHex) {
     if (!/^[0-9a-f]{64}$/i.test(userHex || '')) throw new Error('ensureVaultSchema: a 64-char USER_MASTER hex is required to open the keyed vault');
     dbKeyHex = deriveDbKey(userHex);
   }
+  // Opt-in, fail-closed pre-migration snapshot (dev app → real vault). No-op in
+  // production (flag unset). Runs here — before any handle opens — so the snapshot
+  // takes a clean read with no concurrent connection, and under the init lock.
+  maybeSnapshotBeforeMigrate({ dbFile, dbKeyHex, log: (m) => console.error(m) });
   const db = new Database(dbFile);
   try {
     if (dbKeyHex) {

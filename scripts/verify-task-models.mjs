@@ -73,6 +73,25 @@ try {
   await fetch(`${base}/providers/task-models`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task: 'narrate', providerId: null }) });
   const cCleared = await resolveInferenceConfigForTask(db, U, 'narrate');
   rec('M6. clearing the narrate assignment → falls back to ACTIVE', cCleared.label === 'Active-Provider', `label=${cCleared.label}`);
+
+  // ── M7: ON-BOX task (categorize) stores a LOCAL model NAME — no providerId, no provider row ──
+  const j = (r) => r.json();
+  const setLabel = await fetch(`${base}/providers/task-models`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task: 'categorize', model: 'qwen3.5:4b' }) });
+  const afterSet = await j(await fetch(`${base}/providers/task-models`));
+  const cat = afterSet?.taskModels?.categorize;
+  rec('M7a. categorize stores { model } only — no providerId (on-box, no provider row needed)',
+    setLabel.status === 200 && cat?.model === 'qwen3.5:4b' && cat?.providerId === undefined, `cat=${JSON.stringify(cat)}`);
+  // Invalid model name rejected (defense in depth — value later feeds localInfer as a model tag).
+  const badName = await fetch(`${base}/providers/task-models`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task: 'categorize', model: 'rm -rf /; evil model' }) });
+  rec('M7b. invalid labeling model name → 400 (shape-validated)', badName.status === 400, `status=${badName.status}`);
+  // Path-traversal-shaped name rejected even though '/' is legal for Ollama namespaces (defense in depth).
+  const badTraversal = await fetch(`${base}/providers/task-models`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task: 'categorize', model: '../../etc/passwd' }) });
+  rec('M7b2. path-traversal-shaped labeling model name → 400 (no ".." )', badTraversal.status === 400, `status=${badTraversal.status}`);
+  // Empty model clears → the drainer's default (qwen3.5:4b) takes over.
+  await fetch(`${base}/providers/task-models`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task: 'categorize', model: '' }) });
+  const afterClear = await j(await fetch(`${base}/providers/task-models`));
+  rec('M7c. empty labeling model clears the assignment → curated default',
+    afterClear?.taskModels?.categorize === undefined, `cat=${JSON.stringify(afterClear?.taskModels?.categorize)}`);
   srv.close();
 } catch (e) { rec('FATAL', false, e.stack || e.message); }
 close();

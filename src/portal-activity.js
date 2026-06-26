@@ -8,15 +8,41 @@
 
 import express from 'express';
 import { getEmbedderHealth } from './embed/supervisor.js';
+import { isEnrichCategorizePaused } from './enrich/drainer.js';
 
-// Friendly constant labels per job kind (NEVER includes user content).
+// Plain, accurate label per job kind — what the operation LITERALLY is (content-free, never
+// user text). Deliberately not poetic: the user should be able to tell exactly what's running.
 const KIND_LABELS = {
-  'describe:name': 'Naming your areas',
-  'describe:chronicle': 'Describing your areas',
-  mycelium_generate: 'Mapping your mind',
-  embed: 'Weaving your world',          // #20: warmer than "Reading your world"
-  'inference:chat': 'Thinking…',        // live: the chat model is generating a reply
+  'describe:name': 'Naming clusters',
+  'describe:chronicle': 'Describing clusters',
+  mycelium_generate: 'Clustering messages',
+  embed: 'Embedding messages',             // computing 768-dim vectors for search/clustering
+  categorize: 'Categorizing messages',     // CE L1: per-message domain + register tags via the on-box model
+  'inference:chat': 'Generating reply',    // live: the chat model is generating a reply
 };
+
+// Where/how each runs — complements the stage (WHAT) + model (WHICH). Only the always-local
+// stages claim 'on-device'; chat/describe route by the chosen model/provider, so the model
+// name itself carries local-vs-cloud (no process tag → just the model is shown).
+const PROCESS_LABELS = {
+  embed: 'on-device',
+  categorize: 'on-device',
+  mycelium_generate: 'on-device · CPU',
+};
+
+// Fixed on-box embedding model in V1 (ONNX Nomic v1.5; the embed-service exposes it at /health).
+const EMBED_MODEL = 'nomic-v1.5';
+
+// The L1 labeling model the drainer uses: the per-task setting if the user picked one, else the
+// shipped default (qwen3.5:4b). Best-effort + content-free; never throws.
+async function resolveLabelModel(db, userId) {
+  try {
+    const s = await db.users.getSettings(userId);
+    const m = s?.taskModels?.categorize?.model;
+    if (typeof m === 'string' && m.trim()) return m.trim();
+  } catch { /* settings unavailable → default */ }
+  return 'qwen3.5:4b';
+}
 
 // Embedding/enrichment are CONTINUOUS (a drainer embeds the backlog on a timer),
 // not discrete jobs — so they're projected at READ time from the message counts
@@ -34,11 +60,45 @@ async function embedProjection(db, userId) {
       id: 'embed',
       kind: 'embed',
       stage: health === 'error' ? 'Embedder needs attention' : KIND_LABELS.embed,
+      model: EMBED_MODEL,                                // what's running
+      process: PROCESS_LABELS.embed,                     // what it's doing
       done: embedded,
       total,
       remaining: pending,
       etaSeconds: null,                                  // continuous; per-second rate not measured in V1
       status: 'running',
+      startedAt: null,
+      finishedAt: null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Context Engine L1 categorization is CONTINUOUS (the enrich drainer tags the backlog
+// on a timer via the on-box model), not a discrete background_jobs row — so, like
+// embedding, it's projected at READ time from the message counts. One synthetic row
+// while a backlog exists. This is what makes the on-box model's heavy churn VISIBLE in
+// the activity indicator instead of being invisible CPU/GPU load (the dormancy bug).
+async function categorizeProjection(db, userId) {
+  try {
+    const { tagged, total, pending } = await db.messages.categoriesBacklogCached(userId);
+    if (pending <= 0) return null;                       // caught up → not active
+    const paused = (() => { try { return isEnrichCategorizePaused(); } catch { return false; } })();
+    const model = await resolveLabelModel(db, userId);
+    return {
+      id: 'categorize',
+      kind: 'categorize',
+      // Surface the paused state in the always-on indicator so a user who stopped the
+      // churn sees there's still pending work waiting, not just silence.
+      stage: paused ? `${KIND_LABELS.categorize} · paused` : KIND_LABELS.categorize,
+      model,                                             // the on-box labeling model (qwen3.5:4b)
+      process: PROCESS_LABELS.categorize,                // what it's doing
+      done: tagged,
+      total,
+      remaining: pending,
+      etaSeconds: null,                                  // continuous; per-second rate not measured in V1
+      status: paused ? 'paused' : 'running',
       startedAt: null,
       finishedAt: null,
     };
@@ -71,6 +131,8 @@ function shape(row, nowMs) {
     id: row.id,
     kind: row.kind,
     stage: row.stage_label || KIND_LABELS[row.kind] || row.kind,
+    model: row.model || null,                       // what's running (if the job recorded it)
+    process: PROCESS_LABELS[row.kind] || null,      // what it's doing
     done,
     total,
     remaining: total > done ? total - done : 0,
@@ -96,7 +158,8 @@ export function portalActivityRouter({ db, userId, authenticatePortalRequest }) 
       await db.activityFeed.reap(userId);               // flip dead 'running' rows → abandoned
       const rows = (await db.activityFeed.active(userId)).map((r) => shape(r, now));
       const embed = await embedProjection(db, userId);  // continuous embedding/enrichment (projected)
-      const active = embed ? [embed, ...rows] : rows;
+      const categorize = await categorizeProjection(db, userId); // continuous CE L1 tagging (projected)
+      const active = [embed, categorize, ...rows].filter(Boolean);
       const recent = (await db.activityFeed.recent(userId, 8)).map((r) => shape(r, now));
       res.json({ active, recent });
     } catch {
@@ -112,12 +175,15 @@ export function portalActivityRouter({ db, userId, authenticatePortalRequest }) 
       await db.activityFeed.reap(userId);
       const rows = (await db.activityFeed.active(userId)).map((r) => shape(r, now));
       const embed = await embedProjection(db, userId);
-      const active = embed ? [embed, ...rows] : rows;
+      const categorize = await categorizeProjection(db, userId);
+      const active = [embed, categorize, ...rows].filter(Boolean);
       const lead = active[0] || null;
       res.json({
         state: active.length ? 'running' : 'idle',
         count: active.length,
         currentStage: lead?.stage || null,
+        model: lead?.model ?? null,                 // what model is working
+        process: lead?.process ?? null,             // what process it's running
         progress: lead ? { completed: lead.done, total: lead.total } : null,
         etaSeconds: lead?.etaSeconds ?? null,
       });

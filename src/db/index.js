@@ -20,6 +20,7 @@ import { createHealthNamespace } from './health.js';
 import { createTasksNamespace } from './tasks.js';
 import { createMetricsNamespace } from './metrics.js';
 import { createAnchorNamespace } from './anchor.js';
+import { createLabelsNamespace } from './labels.js';
 import { createTopologyNamespace } from './topology.js';
 import { createFisherNamespace } from './fisher.js';
 import { createFoldersNamespace } from './folders.js';
@@ -85,6 +86,9 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // path to cognitive_metrics_anchor; the no-ungated-reader invariant is enforced
     // by verify:cvp. @see src/db/anchor.js, src/metrics/surface-gate.js.
     anchor: createAnchorNamespace({ d1Query, firstRow }),
+    // CVP operator labels (ground-truth for inner-state axis validation). Writes only
+    // the cvp_labels table — never reads cognitive_metrics_anchor (anchor.js owns that).
+    labels: createLabelsNamespace({ d1Query }),
     topology: createTopologyNamespace({ d1Query, firstRow, cofireCol }),
     fisher: createFisherNamespace({ d1Query, firstRow }),
     folders: createFoldersNamespace({ d1Query, randomUUID }),

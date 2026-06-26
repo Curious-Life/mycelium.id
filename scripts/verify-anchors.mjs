@@ -82,7 +82,16 @@ function runStage(extraEnv = {}) {
   });
 }
 
-const CONSTRUCTS = ['insight', 'reflection', 'affect_positive', 'affect_negative'];
+// The 4 original construct anchors (§4.5/4.11/4.12/4.13) + the 14 E2 bipolar
+// pole constructs (7 axes × {pos,neg}; tone reuses affect_positive/affect_negative
+// so it adds no construct). Must match definitions.CONSTRUCTS.
+const CONSTRUCTS = [
+  'insight', 'reflection', 'affect_positive', 'affect_negative',
+  'charge_pos', 'charge_neg', 'warmth_pos', 'warmth_neg',
+  'gatheredness_pos', 'gatheredness_neg', 'holding_pos', 'holding_neg',
+  'noticing_pos', 'noticing_neg', 'edges_pos', 'edges_neg',
+  'kusala_pos', 'kusala_neg',
+];
 const METRIC_COLS = [
   'insight_embedding_proximity', 'reflective_embedding_density',
   'inner_territory_presence', 'affective_volatility_within_window',
@@ -100,9 +109,9 @@ try {
   // ── A1. one anchor vector per construct, stored ───────────────────────────
   const anchorRows = raw.prepare(`SELECT * FROM cognitive_anchor_vectors`).all();
   const constructsStored = new Set(anchorRows.map((a) => a.construct));
-  rec('A1. anchor vector stored for every construct (insight/reflection/affect_pos/affect_neg)',
+  rec('A1. anchor vector stored for every construct (4 original + 14 E2 pole constructs)',
     CONSTRUCTS.every((c) => constructsStored.has(c)) && anchorRows.length === CONSTRUCTS.length,
-    `stored=[${[...constructsStored].join(', ')}]`);
+    `stored=${anchorRows.length}/${CONSTRUCTS.length} [${[...constructsStored].join(', ')}]`);
 
   // ── A2. anchor_vector is RAW LE-f32 BLOB bytes at rest (Stage A SQLCipher
   // collapse) — no per-field envelope; at-rest secrecy is whole-file SQLCipher.

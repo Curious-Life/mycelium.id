@@ -64,7 +64,21 @@ export async function resolveInferenceConfig(db, userId) {
 
 // Inference tasks the user can route to a specific provider/model (Settings →
 // Intelligence). Unlisted tasks (or no assignment) fall back to the ACTIVE provider.
-export const INFERENCE_TASKS = ['chat', 'narrate', 'harness', 'reflection'];
+//
+// 'categorize' (L1 per-message labeling) and 'enrich' (L2 per-message semantic entities + gist)
+// are ON-BOX by design — bulk (every message) + privacy-sensitive + cost-prohibitive on cloud —
+// so unlike the other tasks their assignment selects a LOCAL model NAME (settings.taskModels
+// .{categorize,enrich}.model), not a cloud provider. The drainer resolves them directly and
+// defaults to DEFAULT_LABEL_MODEL (categories.js); it never routes message-level work to cloud.
+// 'narrate' (mindscape names + chronicles) is the narrative tier → route it to cloud (e.g. Regolo).
+export const INFERENCE_TASKS = ['chat', 'narrate', 'harness', 'reflection', 'categorize', 'enrich'];
+
+// ON-BOX tasks select a LOCAL Ollama model NAME (no cloud provider row). Their per-task
+// assignment is stored as { model } in settings.taskModels[task] and resolved directly by
+// the owning pipeline (the drainer for 'categorize'), NOT through resolveInferenceConfigForTask.
+// Kept here so the PUT /providers/task-models endpoint and the resolver agree on which tasks
+// are local-name-only. A Set so adding a second on-box task later is one entry, no branch edits.
+export const ONBOX_TASKS = new Set(['categorize']);
 
 /**
  * Resolve the provider/model for a SPECIFIC task. Reads the per-task assignment

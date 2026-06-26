@@ -15,6 +15,7 @@
  *   USER_MASTER=<hex> SYSTEM_KEY=<hex> MYCELIUM_DB=./data/vault.db \
  *     node pipeline/discover-claims.mjs [--cadence=day|week|month|quarter] [--dry-run]
  */
+import { fileURLToPath } from 'node:url';
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { resolveDbKeyHex } from '../src/db/open.js';
@@ -63,7 +64,8 @@ export async function runDiscovery({ db, userId, infer, validate, embed, now = (
   return summary;
 }
 
-const isMain = import.meta.url === `file://${process.argv[1]}`;
+// Decoded FS-path compare (a spaced bundle path breaks the raw file:// form).
+const isMain = !!process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
   const arg = process.argv.find((a) => a.startsWith('--cadence='));
   const cadence = arg ? arg.split('=')[1] : null;

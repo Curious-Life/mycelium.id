@@ -24,6 +24,7 @@ import {
   TIER1_EMBEDDING_FAMILIES,
 } from '../src/metrics/cvp.js';
 import { CONTRACTS } from '../src/metrics/contracts.js';
+import { applyAxisCVP } from '../src/metrics/axis-cvp.js';
 import {
   assertColumnSurfaceable, gateAnchorValue, metricColumnFamily, ANCHOR_METRIC_COLUMNS,
   _HARMONIC_COLUMN_FAMILY,
@@ -117,13 +118,14 @@ catch { harmonicOk = false; }
 rec('4a. assertColumnSurfaceable ALLOWS a harmonic column (non-Tier-1, contracted)', harmonicOk);
 
 // 4b. assertColumnSurfaceable THROWS for every Tier-1 anchor column (cvp pending).
-let anchorThrows = ANCHOR_METRIC_COLUMNS.length === 4;
+// 12 = 4 original construct metrics (§4.5/4.11/4.12/4.13) + 8 E2 bipolar axis leans.
+let anchorThrows = ANCHOR_METRIC_COLUMNS.length === 12;
 for (const c of ANCHOR_METRIC_COLUMNS) {
   let threwHere = false;
   try { assertColumnSurfaceable(c); } catch (e) { threwHere = e.code === 'CVP_NOT_VALIDATED'; }
   if (!threwHere) anchorThrows = false;
 }
-rec('4b. assertColumnSurfaceable THROWS CVP_NOT_VALIDATED for all 4 Tier-1 anchor columns', anchorThrows,
+rec('4b. assertColumnSurfaceable THROWS CVP_NOT_VALIDATED for all 12 Tier-1 anchor columns', anchorThrows,
   `anchor_cols=${ANCHOR_METRIC_COLUMNS.join(',')}`);
 
 // 4c. An UNKNOWN column fails closed (never silently surfaced).
@@ -231,6 +233,49 @@ try {
   rec('3d. db.anchor (gated reader) returns refusal copy + ZERO raw numbers for pending anchor rows',
     !!probed && probed.surfaceable === false && probed.cvp_status === 'pending' && noRawNumbers && allRefused,
     probed ? `granularity=${probed.granularity} cvp=${probed.cvp_status} nonNullValues=${Object.values(probed.values).filter((v) => v !== null).length}` : 'no anchor window found via db.anchor');
+
+  // ── 5. PER-AXIS CVP surfacing (E2): bipolar axes flip independently ──────────
+  const av = new Database(DB, { readonly: true });
+  const AV = av.prepare('SELECT anchor_version FROM cognitive_axis_separability LIMIT 1').get()?.anchor_version;
+  av.close();
+  const probeWindow = async () => {
+    for (const gr of ['alpha', 'theta', 'delta']) {
+      const w = await db.anchor.getCurrentWindow(U, { granularity: gr });
+      if (w.window_end) return w;
+    }
+    return null;
+  };
+
+  // 5a. Flip ONE axis to pass via per-axis status; a pending sibling still refuses.
+  await db.rawQuery("UPDATE cognitive_axis_separability SET cvp_status='pass' WHERE axis='tone' AND anchor_version=?", [AV]);
+  const w5a = await probeWindow();
+  rec('5a. per-axis: a CVP-passed axis (tone) SURFACES while a pending sibling (charge) REFUSES',
+    !!w5a && w5a.refusals.tone_lean === undefined && typeof w5a.refusals.charge_lean === 'string',
+    w5a ? `tone_refused=${w5a.refusals.tone_lean !== undefined} charge_refused=${w5a.refusals.charge_lean !== undefined}` : 'no window');
+
+  // 5b. Fail-closed: a *_lean with NO separability row → status absent → REFUSED.
+  await db.rawQuery("DELETE FROM cognitive_axis_separability WHERE axis='kusala' AND anchor_version=?", [AV]);
+  const w5b = await probeWindow();
+  rec('5b. per-axis FAIL-CLOSED: a *_lean with no separability row is REFUSED (default pending)',
+    !!w5b && typeof w5b.refusals.kusala_lean === 'string',
+    w5b ? `kusala_refused=${w5b.refusals.kusala_lean !== undefined}` : 'no window');
+
+  // 5c. applyAxisCVP: genuine signal → 'pass' (persisted); noise → NOT pass.
+  const N = 30;
+  const target = Array.from({ length: N }, (_, i) => Math.sin(i * 0.6));
+  const genuine = target.map((t, i) => t + 0.04 * Math.cos(i * 7));
+  const noise = Array.from({ length: N }, (_, i) => Math.cos(i * 11.3));
+  const baselines = { word_count: Array.from({ length: N }, (_, i) => i % 5) };
+  const confounds = { topic: Array.from({ length: N }, (_, i) => Math.cos(i * 3.1)) };
+  const repGood = await applyAxisCVP(db.rawQuery, { axis: 'noticing', anchorVersion: AV, metric: genuine, target, baselines, confounds });
+  const repBad = await applyAxisCVP(db.rawQuery, { axis: 'holding', anchorVersion: AV, metric: noise, target, baselines, confounds });
+  const chk = new Database(DB, { readonly: true });
+  const nStatus = chk.prepare("SELECT cvp_status FROM cognitive_axis_separability WHERE axis='noticing' AND anchor_version=?").get(AV)?.cvp_status;
+  const hStatus = chk.prepare("SELECT cvp_status FROM cognitive_axis_separability WHERE axis='holding' AND anchor_version=?").get(AV)?.cvp_status;
+  chk.close();
+  rec('5c. applyAxisCVP flips a genuine axis to PASS and a noise axis to NOT-pass (persisted)',
+    repGood.status === 'pass' && nStatus === 'pass' && repBad.status !== 'pass' && hStatus !== 'pass',
+    `noticing=${repGood.status}/${nStatus} holding=${repBad.status}/${hStatus}`);
 } finally {
   close();
   for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }

@@ -92,6 +92,16 @@ const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : '
     && r4.note === null && r4.recommendations.some((m) => m.fitScore === 0);
   rec('H4c. 4GB CPU → small fits, big won\'t-fit, no warning', ok4, `top=${r4.recommendations[0].name} avail=${r4.available}`);
 
+  // H4e — ROLE AXIS: the on-box labeling pick (qwen3.5:4b) is tagged recommendedFor:['labeling']
+  // INDEPENDENTLY of the warmth ranking (it never earns the companion `recommended` badge), and a
+  // warm companion model carries no labeling tag. Single-sourced from role-models.js.
+  const qLabel = anchor(r8.recommendations, 'qwen3.5:4b');
+  const gWarm = anchor(r8.recommendations, 'gemma3:12b');
+  const okRole = qLabel && qLabel.recommendedFor?.includes('labeling')
+    && gWarm && !(gWarm.recommendedFor || []).includes('labeling');
+  rec('H4e. labeling role tag on qwen3.5:4b only (independent of companion badge)', okRole,
+    `qwen3.5:4b.recFor=${JSON.stringify(qLabel?.recommendedFor)} gemma3:12b.recFor=${JSON.stringify(gWarm?.recommendedFor)}`);
+
   // Tiny box (avail < the smallest model) → nothing fits → full list, smallest
   // first, note set. (The full catalog has sub-GB models, so the budget must be
   // genuinely tiny to exercise the "nothing fits" path.)

@@ -116,6 +116,88 @@ export const CONTRACTS = {
       + 'operator labels) → not surfaced as a validated construct, and never as a '
       + 'clinical or diagnostic affect measure.',
   },
+
+  // ── E2 bipolar inner-state axes (signed lean = cos(msg,+pole) − cos(msg,−pole)) ──
+  // All Tier-1, CVP-pending. A lean is a geometric tilt toward one pole's seed
+  // language, NOT a measured state. Preferred vocab is deliberately tentative —
+  // "leans toward the language of X, by one lens", never "you are X".
+  tone_lean: {
+    family: '§E2 tone — pleasant↔unpleasant lean (Tier-1, CVP-pending)',
+    tier: 1, cvp_status: 'pending',
+    preferred_vocab: 'lean / tilt / leaning (NOT "mood", NOT "feeling measured")',
+    refusal_mode:
+      'Tier-1 embedding-anchor lean, NOT validated. Geometric tilt of the window '
+      + 'toward pleasant vs unpleasant seed language (the mean of the same signal '
+      + 'affective_volatility takes the spread of). CVP pending → not a validated '
+      + 'mood measure.',
+  },
+  charge_lean: {
+    family: '§E2 charge — quiet↔wired lean (Tier-1, CVP-pending)',
+    tier: 1, cvp_status: 'pending',
+    preferred_vocab: 'lean / tilt (activation language; NOT arousal as clinical sign)',
+    refusal_mode:
+      'Tier-1 embedding-anchor lean, NOT validated. Tilt toward low- vs high-'
+      + 'activation seed language. CVP pending → not surfaced as a validated construct.',
+  },
+  warmth_lean: {
+    family: '§E2 warmth — cut-off↔close lean (Tier-1, CVP-pending)',
+    tier: 1, cvp_status: 'pending',
+    preferred_vocab: 'lean / tilt (relational-warmth language)',
+    refusal_mode:
+      'Tier-1 embedding-anchor lean, NOT validated. Tilt toward disconnected vs '
+      + 'connected seed language. CVP pending → not surfaced as a validated construct.',
+  },
+  gatheredness_lean: {
+    family: '§E2 gatheredness — scattered↔collected lean (Tier-1, CVP-pending)',
+    tier: 1, cvp_status: 'pending',
+    preferred_vocab: 'lean / tilt (attentional-collectedness language)',
+    refusal_mode:
+      'Tier-1 embedding-anchor lean, NOT validated. Tilt toward scattered vs '
+      + 'collected seed language. CVP pending → not surfaced as a validated construct.',
+  },
+  holding_lean: {
+    family: '§E2 holding — gripping↔letting-be lean (Tier-1, CVP-pending)',
+    tier: 1, cvp_status: 'pending',
+    preferred_vocab: 'lean / tilt (relationship-to-experience language)',
+    refusal_mode:
+      'Tier-1 embedding-anchor lean, NOT validated. Tilt toward gripping/resisting '
+      + 'vs letting-be seed language. CVP pending → not surfaced as a validated construct.',
+  },
+  noticing_lean: {
+    family: '§E2 noticing — lost↔stepped-back lean (Tier-1, CVP-pending)',
+    tier: 1, cvp_status: 'pending',
+    preferred_vocab: 'lean / tilt (meta-awareness language; NOT "mindfulness measured")',
+    refusal_mode:
+      'Tier-1 embedding-anchor lean, NOT validated. Tilt toward fused-with vs '
+      + 'stepped-back-from experience seed language. CVP pending → not surfaced as a '
+      + 'validated construct, and never as a measure of attainment.',
+  },
+  edges_lean: {
+    family: '§E2 edges — sharp↔soft self-boundary lean (Tier-1, CVP-pending, ABSTAINS)',
+    tier: 1, cvp_status: 'pending',
+    preferred_vocab: 'softening language ONLY (never "dissolution", never "unity")',
+    refusal_mode:
+      'Tier-1 embedding-anchor lean, NOT validated AND instrument-abstained: its '
+      + 'poles do not separate in embedding space at the current seed bank '
+      + '(cognitive_axis_separability.measurable=0), so it is written NULL. Even if '
+      + 'present it would describe only softening of self-boundary, NEVER dissolution '
+      + 'or unitive/transcendent experience (no validated text marker exists).',
+  },
+  kusala_lean: {
+    family: '§E2 kusala — unwholesome↔wholesome (skillfulness) lean (Tier-1, CVP-pending)',
+    tier: 1, cvp_status: 'pending',
+    preferred_vocab:
+      'direction / leaning, FUNCTIONAL framing only (skillful = "toward less '
+      + 'suffering"); NEVER a moral grade, NEVER "good/bad person"',
+    refusal_mode:
+      'Tier-1 embedding-anchor lean, NOT validated, and the MOST sensitive axis: a '
+      + 'derived skillfulness direction (Buddhist kusala/akusala) that is distinct '
+      + 'from feeling-tone (it can be pleasant-yet-unwholesome or unpleasant-yet-'
+      + 'wholesome). CVP pending → MUST NOT surface. When validated it may be shown '
+      + 'ONLY as a functional direction relative to the person\'s own baseline, '
+      + 'decomposed into the three roots (grasping / aversion / unclarity) — never as '
+      + 'an absolute moral judgment of the person.',
+  },
 };
 
 export default CONTRACTS;

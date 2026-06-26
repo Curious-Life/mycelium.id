@@ -3,7 +3,7 @@ import { browser } from '$app/environment';
 
 const STORAGE_KEY = 'mycelium_navigation';
 
-export type PrimaryView = 'mindscape' | 'library' | 'media' | 'streams' | 'timeline' | 'people' | 'body' | 'vitality' | 'import' | 'agents' | 'settings' | 'profile' | 'connections' | 'contexts' | 'claims' | 'spaces' | 'curious-life';
+export type PrimaryView = 'mindscape' | 'library' | 'media' | 'streams' | 'timeline' | 'people' | 'body' | 'vitality' | 'import' | 'agents' | 'settings' | 'profile' | 'connections' | 'contexts' | 'claims' | 'spaces' | 'curious-life' | 'inner-states';
 
 /**
  * When the user enters a Shared Space, the floating chat auto-scopes to

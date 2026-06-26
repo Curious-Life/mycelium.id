@@ -21,7 +21,8 @@ import { probeProvider } from './inference/probe.js';
 import { listModels } from './inference/models.js';
 import { PROVIDER_PRESETS } from './inference/presets.js';
 import { assertSafeBaseUrlResolved } from './inference/base-url.js';
-import { INFERENCE_TASKS } from './inference/resolve.js';
+import { INFERENCE_TASKS, ONBOX_TASKS } from './inference/resolve.js';
+import { ROLE_RECOMMENDATIONS } from './inference/role-models.js';
 import { resolveMcpBearer, readRemoteConfig } from './remote/config.js';
 
 const ok = (res, body = {}) => res.json({ ok: true, ...body });
@@ -96,13 +97,28 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   });
 
   // Assign (or clear) a task's provider/model. Body: { task, providerId|null, model? }.
+  // Cloud tasks store { providerId, model? } (provider row must exist). ON-BOX tasks
+  // (categorize) store { model } — a LOCAL Ollama model NAME, no provider row; empty/absent
+  // model clears → the owning pipeline falls back to its curated default (qwen3.5:4b).
   router.put('/providers/task-models', async (req, res) => {
     try {
       const { task, providerId = null, model = null } = req.body || {};
       if (!INFERENCE_TASKS.includes(task)) return bad(res, 400, `unknown task (allowed: ${INFERENCE_TASKS.join(', ')})`);
       const settings = (await db.users?.getSettings?.(userId)) || {};
       const taskModels = { ...(settings.taskModels || {}) };
-      if (providerId == null) {
+      if (ONBOX_TASKS.has(task)) {
+        // Local model NAME only — no providerId, no provider-row lookup.
+        const name = typeof model === 'string' ? model.trim() : '';
+        if (!name) {
+          delete taskModels[task]; // clear → curated default
+        } else {
+          // Ollama tag shape (defense in depth — this value is later fed to localInfer as a model tag).
+          // Allow namespace/name:tag (so '/' and ':' are legitimate), but reject '..' so a stored
+          // name can never be path-traversal-shaped, even though the only sink is a JSON model field.
+          if (!/^[\w./:-]{1,64}$/.test(name) || name.includes('..')) return bad(res, 400, 'invalid model name');
+          taskModels[task] = { model: name };
+        }
+      } else if (providerId == null) {
         delete taskModels[task]; // clear → falls back to the active provider
       } else {
         const row = await db.providers.get(providerId, userId); // must be a configured provider of THIS user
@@ -117,7 +133,7 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   // The curated catalog of connectable providers — the "Intelligence" options the
   // UI offers (label, kind, base_url, jurisdiction, default model). Static data;
   // the UI prefills the add-provider form from a chosen preset. No secrets.
-  router.get('/providers/presets', (_req, res) => ok(res, { presets: PROVIDER_PRESETS }));
+  router.get('/providers/presets', (_req, res) => ok(res, { presets: PROVIDER_PRESETS, roleRecommendations: ROLE_RECOMMENDATIONS }));
 
   // Auto-fill the model dropdown (spec #9): given a provider config the user is
   // mid-entering — { provider, base_url?, api_key? } — fetch that provider's

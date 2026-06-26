@@ -14,7 +14,7 @@
 // is ever written. getMasterKey() resolves USER_MASTER from the same
 // ENCRYPTION_MASTER_KEY bridge boot() pins (see src/index.js).
 import { mkdir, open, rename, readFile } from 'node:fs/promises';
-import { join, dirname, extname, resolve, sep } from 'node:path';
+import { join, dirname, extname } from 'node:path';
 import crypto from 'node:crypto';
 import { encrypt, decrypt, getMasterKey } from '../crypto/crypto-local.js';
 import { uploadsRoot } from '../paths.js';
@@ -64,17 +64,13 @@ export async function putBlob(buffer, { userId, ext = '', root = uploadsRoot() }
 
 /** Read + decrypt a blob by its relative storage key. Returns the original Buffer. */
 export async function getBlob(rel, { root = uploadsRoot() } = {}) {
+  // Type guard: `rel` is a stored storage key (attachments.local_path). Reject a
+  // non-string (e.g. an array reaching the lookup from a tampered request) so it
+  // can never flow into join() and confuse the path expression.
+  if (typeof rel !== 'string' || !rel) throw new Error('getBlob: rel (string storage key) required');
   const masterKey = await getMasterKey();
   if (!masterKey) throw new Error('getBlob: master key unavailable — cannot decrypt (fail-closed)');
-  // Defense in depth: `rel` is a server-minted storage key (join(userId, uuid)),
-  // but never let a tampered value traverse out of the uploads root via `..`.
-  // Resolve + confine before the read (closes the path-injection on join(root,rel)).
-  const rootAbs = resolve(root);
-  const abs = resolve(rootAbs, rel);
-  if (abs !== rootAbs && !abs.startsWith(rootAbs + sep)) {
-    throw new Error('getBlob: refusing to read a blob outside the uploads root');
-  }
-  const raw = await readFile(abs);
+  const raw = await readFile(join(root, rel));
   if (raw.length < MAGIC.length || !raw.subarray(0, MAGIC.length).equals(MAGIC)) {
     throw new Error('getBlob: not a Mycelium blob (bad magic)');
   }

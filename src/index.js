@@ -14,6 +14,7 @@ import { initVaultStorage } from './db/init.js';
 import { resolveDbKeyHex, atRestEnabled } from './db/open.js';
 import { purgePlaintextBackup } from './account/db-cipher-migrate.js';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createIdentity, isValidHandle } from './identity/identity.js';
 import { readRemoteConfig } from './remote/config.js';
 import { buildDomains, collectTools, createMcpServer, TIER2_TOOLS, TOPOLOGY_NOT_READY_MESSAGE } from './mcp.js';
@@ -204,8 +205,10 @@ async function startPublic() {
   console.error(`[mycelium] PUBLIC surface on ${url} — published/unlisted docs only (handle: ${identity.handle ?? 'unset'})`);
 }
 
-// Run only when invoked directly (not when imported by a verifier).
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Run only when invoked directly (not when imported by a verifier). Compare decoded
+// FS paths — `file://${argv[1]}` keeps a raw space but import.meta.url percent-encodes
+// it, so a bundle path WITH A SPACE ("Mycelium Dev.app") never matched.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   // AT-REST DEFAULT-ON (SQLCipher collapse): content lost its per-field envelope, so the
   // REAL server launch must default to whole-file at-rest — the documented self-host path
   // (`node src/index.js` / `npm start`) and `cargo tauri dev` carry no MYCELIUM_AT_REST.

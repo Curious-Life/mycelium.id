@@ -4,7 +4,7 @@
 	// vaults, Claude Code sessions — presence/counts/dates only, never content) and
 	// offers one-click import of each. Claude Code gets a clean/full toggle. Used in
 	// both onboarding (MindscapeInvite) and Streams → Sources (ImportView).
-	import { scanSources, importDetected, type DetectedSource } from '$lib/import/detect';
+	import { scanSources, importDetected, AGENT_MODE_SOURCES, type DetectedSource } from '$lib/import/detect';
 	import { SOURCE_CATALOG } from '$lib/import/catalog';
 
 	let { compact = false, onImported = () => {} }: { compact?: boolean; onImported?: () => void } = $props();
@@ -22,8 +22,15 @@
 	let mode = $state<Record<string, 'clean' | 'full'>>({});
 	let busy = $state<Record<string, boolean>>({});
 	let result = $state<Record<string, { ok: boolean; msg: string }>>({});
+	// local-files: which categories to bring in (default = all detected).
+	let cats = $state<Record<string, boolean>>({});
 
 	const importable = $derived(found.filter((s) => s.found && s.importable));
+
+	// Selected category keys for the local-files sweep (default any not toggled off).
+	function selectedCats(s: DetectedSource): string[] {
+		return (s.categories ?? []).map((c) => c.key).filter((k) => cats[`${s.source}:${k}`] !== false);
+	}
 
 	async function scan() {
 		phase = 'scanning'; scanErr = '';
@@ -39,7 +46,7 @@
 		busy = { ...busy, [s.source]: true };
 		result = { ...result, [s.source]: { ok: true, msg: '' } };
 		try {
-			const r = await importDetected(s, { mode: mode[s.source] ?? 'clean' });
+			const r = await importDetected(s, { mode: mode[s.source] ?? 'clean', categories: selectedCats(s) });
 			const extra = r.skipped ? ` · ${r.skipped} already in vault` : '';
 			result = { ...result, [s.source]: { ok: true, msg: `Imported ${r.detail}${extra}.` } };
 			onImported();
@@ -64,11 +71,11 @@
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
 			{phase === 'scanning' ? 'Scanning this Mac…' : 'Scan this Mac for data'}
 		</button>
-		<p class="scan-sub">Obsidian &amp; Claude Code, found locally — nothing leaves your device.</p>
+		<p class="scan-sub">Obsidian, Claude Code, Hermes, OpenClaw &amp; your files — found locally, nothing leaves your device.</p>
 		{#if phase === 'error'}<p class="scan-err">{scanErr}</p>{/if}
 	{:else}
 		{#if importable.length === 0}
-			<p class="scan-empty">No Obsidian or Claude Code data found on this Mac.</p>
+			<p class="scan-empty">No importable data found on this Mac.</p>
 			<button class="scan-link" onclick={scan}>Scan again</button>
 		{:else}
 			<div class="rows">
@@ -79,12 +86,22 @@
 						{#if cat}<span class="logo" style="--brand:{cat.color}">{@html colored(cat.logo, cat.color)}</span>{/if}
 						<div class="meta">
 							<span class="title">{cat?.name ?? s.source}</span>
-							<span class="sub">{s.count} {s.unit}{rangeLabel(s) ? ` · ${rangeLabel(s)}` : ''}</span>
-							{#if s.source === 'claude-code'}
+							<span class="sub">{s.count} {s.unit}{rangeLabel(s) ? ` · ${rangeLabel(s)}` : ''}{s.persona ? ' · persona' : ''}{s.notes ? ` · ${s.notes} memory ${s.notes === 1 ? 'doc' : 'docs'}` : ''}</span>
+							{#if AGENT_MODE_SOURCES.has(s.source)}
 								<div class="modes" role="group" aria-label="Import mode">
 									<button class="seg" class:on={(mode[s.source] ?? 'clean') === 'clean'} onclick={() => (mode = { ...mode, [s.source]: 'clean' })}>Clean</button>
 									<button class="seg" class:on={mode[s.source] === 'full'} onclick={() => (mode = { ...mode, [s.source]: 'full' })}>Full</button>
 									<span class="mode-hint">{(mode[s.source] ?? 'clean') === 'clean' ? 'conversations only' : 'every tool call too'}</span>
+								</div>
+							{/if}
+							{#if s.source === 'local-files' && s.categories?.length}
+								<div class="modes" role="group" aria-label="What to import">
+									{#each s.categories as c (c.key)}
+										<button class="seg" class:on={cats[`${s.source}:${c.key}`] !== false}
+											onclick={() => (cats = { ...cats, [`${s.source}:${c.key}`]: cats[`${s.source}:${c.key}`] === false })}>
+											{c.label.replace(/ &.*/, '')} · {c.count}
+										</button>
+									{/each}
 								</div>
 							{/if}
 							{#if r && r.msg}<span class="res" class:bad={!r.ok}>{r.msg}</span>{/if}
