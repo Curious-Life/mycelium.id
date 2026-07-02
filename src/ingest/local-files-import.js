@@ -29,8 +29,8 @@ import { categoryOf, extOf, isManagedPackageDir, TEXT_DOC_EXTS, EXT_MIME } from 
 
 const MAX_FILES = Number(process.env.MYCELIUM_SWEEP_MAX_FILES) || 50000;
 const MAX_DEPTH = Number(process.env.MYCELIUM_SWEEP_MAX_DEPTH) || 8;
-const MAX_TEXT_BYTES = 2 * 1024 * 1024;
-const MAX_MEDIA_BYTES = Number(process.env.MYCELIUM_ATTACHMENT_LIMIT_BYTES) || 25 * 1024 * 1024;
+const MAX_TEXT_BYTES = Number(process.env.MYCELIUM_IMPORT_TEXT_LIMIT_BYTES) || 25 * 1024 * 1024;
+const MAX_MEDIA_BYTES = Number(process.env.MYCELIUM_ATTACHMENT_LIMIT_BYTES) || 100 * 1024 * 1024;
 // System/cache dirs that are never "useful context" — pruned so a sweep of
 // ~/Documents or ~/Library never walks app caches, VCS internals, node_modules.
 const SKIP_DIRS = new Set(['.git', '.svn', '.hg', 'node_modules', '.Trash', '.trash', '.cache', 'Caches', '.npm', '.obsidian', '.smart-env', 'Library']);

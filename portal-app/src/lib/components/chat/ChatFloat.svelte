@@ -2,6 +2,7 @@
 	import { marked } from 'marked';
 	import DOMPurify from 'isomorphic-dompurify';
 	import { prepareFile } from '$lib/import/upload-handlers';
+	import { get } from 'svelte/store';
 	import { chatMessages, connectionStatus, activeModel, noModelMessage, recoverableCount, type ChatMessage } from '$lib/stores/chat';
 	import { navigationState, spaceScope, docScope } from '$lib/stores/navigation';
 	import { apiPostForm, apiGet, api } from '$lib/api';
@@ -47,16 +48,39 @@
 	let chatProviders = $state<any[]>([]);
 	let switchingId = $state<number | null>(null);
 	const isLocalBase = (u?: string) => !!u && /(?:127\.0\.0\.1|localhost|0\.0\.0\.0)/.test(u);
+	// The single RESOLVED-active provider — mirror the backend getActive(no type):
+	// `is_active` is set once per provider TYPE, so several rows can be is_active at
+	// once (e.g. Regolo=custom + Claude=anthropic). The one actually driving chat is
+	// the most-recently-used among them (setActive bumps last_used_at). Ticking raw
+	// is_active showed a ✓ on every type; tick only this id.
+	const resolvedActiveId = $derived(
+		[...chatProviders].filter((p) => p.is_active)
+			.sort((a, b) => (b.last_used_at || '').localeCompare(a.last_used_at || ''))[0]?.id ?? null,
+	);
 	async function loadChatProviders() {
 		try { const r = await apiGet<{ providers: any[] }>('/portal/providers'); chatProviders = r.providers || []; }
 		catch { chatProviders = []; }
+		// Seed the chip from the resolved-active provider so it reflects reality
+		// before the first turn (and isn't stuck on a stale / mis-sorted provider).
+		// Only when unset — a live turn's `model` event is authoritative once it fires.
+		if (!get(activeModel)) {
+			const resolved = [...chatProviders].filter((p) => p.is_active)
+				.sort((a, b) => (b.last_used_at || '').localeCompare(a.last_used_at || ''))[0];
+			if (resolved) {
+				const local = isLocalBase(resolved.base_url);
+				activeModel.set({ label: resolved.label || resolved.provider, model: resolved.model_preference || '', jurisdiction: local ? 'local' : '', local });
+			}
+		}
 	}
 	function toggleProviderMenu() {
 		providerMenuOpen = !providerMenuOpen;
 		if (providerMenuOpen) loadChatProviders();
 	}
 	async function switchProvider(p: any) {
-		if (p.is_active) { providerMenuOpen = false; return; }
+		// Compare against the RESOLVED active, not raw is_active — a provider can be
+		// is_active per-type yet not be the one driving chat; clicking it must still
+		// re-activate it (bumping last_used_at) instead of no-op'ing.
+		if (p.id === resolvedActiveId) { providerMenuOpen = false; return; }
 		switchingId = p.id;
 		try {
 			const res = await api(`/portal/providers/${p.id}`, { method: 'PUT', body: JSON.stringify({ is_active: true }) });
@@ -1170,6 +1194,10 @@
 			const saved = localStorage.getItem('mycelium-chat-agent');
 			if (saved) selectedAgentId = saved;
 			loadAgents();
+			// Seed the active-model chip from the resolved-active provider on mount so
+			// it shows the right model before the first turn (and before the menu is
+			// ever opened). Seeds only when unset; the turn's `model` event overrides.
+			loadChatProviders();
 		}
 	});
 
@@ -1403,14 +1431,14 @@
 									<div class="px-2.5 py-1.5 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Switch model · saved for all chats</div>
 									{#each chatProviders as p (p.id)}
 										<button
-											class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-[11px] hover:bg-[var(--color-elevated)] {p.is_active ? 'bg-[var(--color-elevated)]' : ''}"
+											class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-[11px] hover:bg-[var(--color-elevated)] {p.id === resolvedActiveId ? 'bg-[var(--color-elevated)]' : ''}"
 											onclick={() => switchProvider(p)}
 											disabled={switchingId === p.id}
 										>
 											<div class="w-1.5 h-1.5 rounded-full flex-shrink-0 {isLocalBase(p.base_url) ? 'bg-emerald-500' : 'bg-[var(--color-accent)]'}"></div>
 											<span class="text-[var(--color-text-primary)] font-medium truncate">{p.label || p.provider}</span>
 											<span class="hidden sm:inline text-[var(--color-text-tertiary)] truncate">{p.model_preference || ''}</span>
-											<span class="ml-auto flex-shrink-0 text-[9px] text-[var(--color-accent)]">{p.is_active ? '✓' : (switchingId === p.id ? '…' : '')}</span>
+											<span class="ml-auto flex-shrink-0 text-[9px] text-[var(--color-accent)]">{p.id === resolvedActiveId ? '✓' : (switchingId === p.id ? '…' : '')}</span>
 										</button>
 									{:else}
 										<div class="px-2.5 py-2 text-[10px] text-[var(--color-text-tertiary)]">No models yet — add one in Settings → Intelligence.</div>

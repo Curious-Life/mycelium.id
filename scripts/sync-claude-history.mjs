@@ -102,7 +102,10 @@ for (const f of files) {
     appDown = true;
     totalFailed += items.length;
     // Do NOT advance HWM/state — the file is retried in full next run (idempotent).
-    break; // app is down; no point hammering the rest
+    // DEFER THIS FILE, don't abort the whole walk: a single un-importable file
+    // (e.g. a batch the server rejects) must not block the ~1400 files after it.
+    // A genuine app-down just makes every file fail fast (ECONNREFUSED) and defer.
+    continue;
   }
   totalNew += fileNew; totalDup += fileDup;
   state[f] = { hwm: nextHwm, mtimeMs: st.mtimeMs, size: st.size };

@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { api } from '$lib/api';
+	import { navigationState } from '$lib/stores/navigation';
 	import MetricFreshnessBadge from '$lib/components/MetricFreshnessBadge.svelte';
 	import CognitiveShapeTab from '$lib/cognitive-metrics/CognitiveShapeTab.svelte';
 
@@ -305,6 +307,50 @@
 		split: '#fb923c', merged: '#3b82f6', stable: '#6B6B75',
 	};
 
+	// ── Territory vitality (live /vitality/snapshot shape) ──
+	// Snapshot rows carry: territory_id, name, phase, vitality + 5 sub-scalars.
+	// Phase → a single accent (anchor / active / sparse), using design tokens.
+	const PHASE_ACCENT: Record<string, string> = {
+		anchor: 'var(--color-accent-aurum)',
+		active: 'var(--color-accent-jade)',
+		sparse: 'var(--color-text-tertiary)',
+	};
+	const phaseAccent = (p: string | null | undefined) => PHASE_ACCENT[p ?? ''] ?? 'var(--color-text-tertiary)';
+	const terrName = (t: any) => t?.name ?? t?.territory_name ?? (t?.territory_id != null ? `Territory ${t.territory_id}` : 'unnamed');
+	// Sorted high→low vitality for the ranked list.
+	const sortedTerritories = $derived(
+		[...(data?.territories ?? [])].sort((a: any, b: any) => (b.vitality ?? 0) - (a.vitality ?? 0)),
+	);
+	// Actionable reads — honest, derived-only (never fabricated advice).
+	const anchorTerritories = $derived(sortedTerritories.filter((t: any) => t.phase === 'anchor').slice(0, 5));
+	const growingTerritories = $derived(
+		[...sortedTerritories]
+			.filter((t: any) => t.phase !== 'sparse' && t.connection_growth_rate != null && Number(t.connection_growth_rate) > 0.05)
+			.sort((a: any, b: any) => (b.connection_growth_rate ?? 0) - (a.connection_growth_rate ?? 0))
+			.slice(0, 5),
+	);
+	const quietTerritories = $derived(
+		[...sortedTerritories]
+			.filter((t: any) => t.phase === 'sparse' || (t.vitality != null && Number(t.vitality) < 0.25))
+			.sort((a: any, b: any) => (a.vitality ?? 0) - (b.vitality ?? 0))
+			.slice(0, 5),
+	);
+	const hasActions = $derived(anchorTerritories.length > 0 || growingTerritories.length > 0 || quietTerritories.length > 0);
+	const phaseCounts = $derived.by(() => {
+		const c: Record<string, number> = {};
+		for (const t of (data?.territories ?? [])) c[t.phase] = (c[t.phase] ?? 0) + 1;
+		return c;
+	});
+
+	// Deep-link a territory onto the mindscape (MindscapeView applies the pending
+	// selection once its 3D map has loaded). Same id space as cluster3d.
+	function openTerritoryOnMindscape(id: number | null | undefined) {
+		navigationState.setPrimaryView('mindscape');
+		if (id != null) navigationState.setSelectedTerritory(Number(id));
+		goto('/mindscape');
+	}
+	const fmtPct = (v: number | null | undefined) => (v == null || Number.isNaN(Number(v)) ? '—' : `${Math.round(Number(v) * 100)}%`);
+
 	// Selected window context
 	const selectedFreq = $derived(
 		selectedWindow ? filteredFreq?.find((f: any) => f.window_end === selectedWindow?.end) : null
@@ -388,9 +434,6 @@
 		fragmenting: '#f87171', steady: '#4ade80', quiet: '#6B6B75', dormant: '#4B4B55',
 	};
 
-	const stateColors: Record<string, string> = {
-		growing: '#4ade80', steady: '#f59e0b', stuck: '#f87171',
-	};
 </script>
 
 <svelte:head><title>Vitality</title></svelte:head>
@@ -667,27 +710,73 @@
 
 		<!-- ═══ Section 4: Territory Vitality ═══ -->
 		{#if data.territories?.length}
+			{#if hasActions}
+				<section class="card actions-card">
+					<h2 class="section-title">Where to look next</h2>
+					<div class="action-cols">
+						{#if anchorTerritories.length}
+							<div class="action-col">
+								<div class="ac-head"><span class="ac-dot" style="background: {PHASE_ACCENT.anchor}"></span>Anchors</div>
+								<p class="ac-sub">The stable core you keep returning to.</p>
+								{#each anchorTerritories as t}
+									<button type="button" class="terr-chip anchor" onclick={() => openTerritoryOnMindscape(t.territory_id)} title="Open {terrName(t)} on the mindscape">
+										<span class="tc-name">{terrName(t)}</span><span class="tc-val">{fmt(t.vitality, 2)}</span>
+									</button>
+								{/each}
+							</div>
+						{/if}
+						{#if growingTerritories.length}
+							<div class="action-col">
+								<div class="ac-head"><span class="ac-dot" style="background: {PHASE_ACCENT.active}"></span>Gaining ground</div>
+								<p class="ac-sub">Fastest-growing connections — worth feeding.</p>
+								{#each growingTerritories as t}
+									<button type="button" class="terr-chip active" onclick={() => openTerritoryOnMindscape(t.territory_id)} title="Open {terrName(t)} on the mindscape">
+										<span class="tc-name">{terrName(t)}</span><span class="tc-val up">↑ {fmtPct(t.connection_growth_rate)}</span>
+									</button>
+								{/each}
+							</div>
+						{/if}
+						{#if quietTerritories.length}
+							<div class="action-col">
+								<div class="ac-head"><span class="ac-dot" style="background: {PHASE_ACCENT.sparse}"></span>Gone quiet</div>
+								<p class="ac-sub">Sparse or fading — revisit if they still matter.</p>
+								{#each quietTerritories as t}
+									<button type="button" class="terr-chip quiet" onclick={() => openTerritoryOnMindscape(t.territory_id)} title="Open {terrName(t)} on the mindscape">
+										<span class="tc-name">{terrName(t)}</span><span class="tc-val">{fmt(t.vitality, 2)}</span>
+									</button>
+								{/each}
+							</div>
+						{/if}
+					</div>
+					<p class="action-note">Drawn straight from your measurements — where attention is concentrated, growing, or fading. A map, not a prescription.</p>
+				</section>
+			{/if}
+
 			<section class="card">
 				<h2 class="section-title">
 					Territory Vitality
 					<MetricFreshnessBadge tables={['territory_vitality', 'territory_cofire']} />
 				</h2>
-				<div class="territory-list">
-					{#each data.territories as t}
-						{@const stateColor = stateColors[t.growth_state] || '#6B6B75'}
-						<div class="territory-card" style="border-left-color: {stateColor}">
-							<div class="terr-header">
-								<span class="terr-name">{t.name || `Territory ${t.territory_id}`}</span>
-								{#if t.archetype_type}<span class="terr-archetype">{t.archetype_type}</span>{/if}
-								<span class="terr-count">{t.message_count || 0}</span>
-							</div>
-							{#if t.essence}<p class="terr-essence">{t.essence}</p>{/if}
-							<div class="terr-bar-track">
-								<div class="terr-bar-fill" style="width: {pct(t.energy)}%; background: {stateColor}"></div>
-							</div>
-						</div>
+				<div class="phase-legend">
+					{#each ['anchor', 'active', 'sparse'] as ph}
+						{#if (phaseCounts[ph] ?? 0) > 0}
+							<span class="pl-item"><i style="background: {PHASE_ACCENT[ph]}"></i>{phaseCounts[ph]} {ph}</span>
+						{/if}
 					{/each}
 				</div>
+				<div class="territory-list">
+					{#each sortedTerritories as t}
+						{@const accent = phaseAccent(t.phase)}
+						<button type="button" class="territory-row" style="border-left-color: {accent}" onclick={() => openTerritoryOnMindscape(t.territory_id)} title="Open {terrName(t)} on the mindscape">
+							<span class="tr-phase" style="background: {accent}" title={t.phase ?? 'unscored'}></span>
+							<span class="tr-name">{terrName(t)}</span>
+							<span class="tr-bar-track"><span class="tr-bar-fill" style="width: {pct(t.vitality)}%; background: {accent}"></span></span>
+							<span class="tr-val">{fmt(t.vitality, 2)}</span>
+							<span class="tr-go" aria-hidden="true">›</span>
+						</button>
+					{/each}
+				</div>
+				<p class="chart-hint">Vitality blends five signals — diversification, connection growth, reach, partner diversity, engagement depth. Click a territory to focus it on the 3D map.</p>
 			</section>
 		{/if}
 
@@ -1143,22 +1232,52 @@
 	.insight { font-size: 0.75rem; color: var(--color-text-secondary); line-height: 1.6; padding: 0.3rem 0; border-bottom: 1px solid var(--color-border); }
 	.insight:last-child { border-bottom: none; }
 
-	/* ── Territory Vitality ── */
-	.territory-list { display: flex; flex-direction: column; gap: 0.4rem; }
-	.territory-card {
-		padding: 0.75rem 1rem;
-		border-radius: 8px;
-		background: var(--color-bg);
-		border-left: 3px solid var(--color-border);
-		transition: border-color 0.15s;
+	/* ── Territory Vitality (ranked, clickable → mindscape) ── */
+	.phase-legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; margin-bottom: 0.75rem; font-size: 0.62rem; color: var(--color-text-secondary); text-transform: capitalize; }
+	.pl-item i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 0.35rem; vertical-align: middle; }
+	.territory-list { display: flex; flex-direction: column; gap: 0.2rem; }
+	.territory-row {
+		width: 100%; display: grid; grid-template-columns: 8px 1fr 1.1fr auto auto;
+		align-items: center; gap: 0.7rem; font: inherit; text-align: left;
+		padding: 0.5rem 0.6rem; border: none; border-left: 3px solid var(--color-border);
+		border-radius: 6px; background: var(--color-bg); cursor: pointer; color: inherit;
+		transition: background 0.15s ease, border-left-color 0.15s ease;
 	}
-	.terr-header { display: flex; align-items: center; gap: 0.5rem; }
-	.terr-name { font-size: 0.8rem; font-weight: 500; color: var(--color-text-primary); flex: 1; }
-	.terr-archetype { font-size: 0.55rem; color: var(--color-text-tertiary); background: var(--color-surface); padding: 0.1rem 0.4rem; border-radius: 4px; }
-	.terr-count { font-size: 0.6rem; color: var(--color-text-tertiary); font-family: var(--font-mono); }
-	.terr-essence { font-size: 0.7rem; color: var(--color-text-secondary); margin: 0.3rem 0; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.terr-bar-track { height: 3px; background: var(--color-border); border-radius: 2px; margin-top: 0.4rem; }
-	.terr-bar-fill { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
+	.territory-row:hover { background: var(--color-surface); }
+	.territory-row:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+	.tr-phase { width: 7px; height: 7px; border-radius: 50%; }
+	.tr-name { font-size: 0.8rem; font-weight: 500; color: var(--color-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.tr-bar-track { height: 5px; background: var(--color-border); border-radius: 999px; overflow: hidden; }
+	.tr-bar-fill { height: 100%; border-radius: 999px; transition: width 0.5s ease; }
+	.tr-val { font-size: 0.72rem; font-family: var(--font-mono); color: var(--color-text-primary); }
+	.tr-go { font-size: 0.9rem; color: var(--color-text-tertiary); opacity: 0; transition: opacity 0.15s, transform 0.15s; }
+	.territory-row:hover .tr-go { opacity: 1; transform: translateX(2px); color: var(--color-accent); }
+
+	/* ── Actionable card (anchors / gaining / quiet) ── */
+	.actions-card { padding: 1.1rem 1.25rem; }
+	.action-cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.1rem; }
+	.action-col { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
+	.ac-head { display: flex; align-items: center; gap: 0.45rem; font-size: 0.78rem; font-weight: 600; color: var(--color-text-primary); }
+	.ac-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+	.ac-sub { font-size: 0.62rem; color: var(--color-text-tertiary); line-height: 1.4; margin-bottom: 0.25rem; }
+	.terr-chip {
+		display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+		width: 100%; font: inherit; font-size: 0.72rem; text-align: left;
+		padding: 0.4rem 0.6rem; border-radius: 6px; border: 1px solid var(--color-border);
+		border-left: 3px solid var(--color-border); background: var(--color-bg);
+		color: var(--color-text-secondary); cursor: pointer;
+		transition: background 0.15s ease, color 0.15s ease;
+	}
+	.terr-chip:hover { background: var(--color-surface); color: var(--color-text-primary); }
+	.terr-chip:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+	.terr-chip.anchor { border-left-color: var(--color-accent-aurum); }
+	.terr-chip.active { border-left-color: var(--color-accent-jade); }
+	.terr-chip.quiet { border-left-color: var(--color-text-tertiary); }
+	.tc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.tc-val { flex: none; font-family: var(--font-mono); font-size: 0.66rem; color: var(--color-text-tertiary); }
+	.tc-val.up { color: var(--color-accent-jade); }
+	.action-note { font-size: 0.6rem; color: var(--color-text-tertiary); margin-top: 0.75rem; line-height: 1.5; }
+	@media (max-width: 640px) { .action-cols { grid-template-columns: 1fr; gap: 1.2rem; } }
 
 	/* ── Area Charts ── */
 	.area-chart { width: 100%; height: 120px; display: block; }
@@ -1188,6 +1307,6 @@
 	@media (prefers-reduced-motion: reduce) {
 		.landscape { animation: none; }
 		.radar-shape { animation: none; }
-		.terr-bar-fill { transition: none; }
+		.tr-bar-fill { transition: none; }
 	}
 </style>

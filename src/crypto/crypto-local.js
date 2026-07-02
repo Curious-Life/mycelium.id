@@ -207,10 +207,16 @@ function setAuditCallback(fn) { _auditCallback = fn; }
 //   - enums for WHERE/filter: status, visibility, scope, role, source, type
 //
 const ENCRYPTED_FIELDS = {
-  // AI providers — the BYOK credential blob (API keys for Anthropic / OpenAI /
-  // custom-base_url providers). MUST be encrypted at rest: a leaked key here is
-  // a leaked paid account + an egress identity. Stored as a JSON envelope in the
-  // `credentials` column; providers.list() never selects it (metadata-only).
+  // AI providers — the BYOK credential blob (API keys / OAuth tokens for Anthropic
+  // / OpenAI / custom-base_url providers). Deliberately NOT field-encrypted: post
+  // SQLCipher-collapse (2026-06-19) the at-rest protection for this column is
+  // whole-file SQLCipher (verify:at-rest A1–A7), which renders the whole vault
+  // opaque at rest. Field-level encryption on top would add ZERO protection — the
+  // field DEK is wrapped by the SAME USER_MASTER that opens the file — and would
+  // break verify:providers-leak PV2 (which asserts the key is plaintext-in-cipher).
+  // providers.list() never selects `credentials` (metadata-only); only
+  // providers.get() returns it. DO NOT add 'credentials' here — see the stale-
+  // comment correction in docs/CLAUDE-SUBSCRIPTION-DRIVER-DESIGN-2026-06-26.md.
   ai_providers: [],
 
   // Channel access policy — the per-channel allowlist of platform sender ids is a

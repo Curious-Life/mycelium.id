@@ -69,9 +69,11 @@
 	/* ========================================
 	 * TYPOGRAPHY
 	 * ======================================== */
-	--font-sans: 'Geist', system-ui, sans-serif;
-	--font-serif: 'Geist', system-ui, sans-serif;
-	--font-mono: 'JetBrains Mono', monospace;
+	/* Self-hosted via Fontsource (offline-safe). Serif is a real editorial face
+	   (Newsreader, optical sizing) — the voice of the writing surface. */
+	--font-sans: 'Geist Variable', system-ui, sans-serif;
+	--font-serif: 'Newsreader Variable', Georgia, 'Times New Roman', serif;
+	--font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
 
 	/* ========================================
 	 * SPACING (8px grid)

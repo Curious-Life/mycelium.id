@@ -33,9 +33,15 @@ const DOC_VERSION_KEEP = 50;
 
 export function createDocumentsNamespace(deps) {
   if (!deps) throw new TypeError('createDocumentsNamespace: deps required');
-  const { d1Query, firstRow } = deps;
+  const { d1Query, firstRow, rawDb, withTransaction } = deps;
   if (typeof d1Query !== 'function') throw new TypeError('createDocumentsNamespace: d1Query required');
   if (typeof firstRow !== 'function') throw new TypeError('createDocumentsNamespace: firstRow required');
+  // rawDb + withTransaction power the atomic version-snapshot+overwrite (the raw
+  // sync transaction over the plaintext documents/document_versions tables). The
+  // sole caller (src/db/index.js) supplies them from the adapter; require them
+  // fail-closed so a future caller can't silently lose snapshot atomicity.
+  if (!rawDb || typeof rawDb.prepare !== 'function') throw new TypeError('createDocumentsNamespace: rawDb (better-sqlite3 handle) required');
+  if (typeof withTransaction !== 'function') throw new TypeError('createDocumentsNamespace: withTransaction required');
 
   // Hook lists that fire fire-and-forget after a successful upsert or
   // delete. Multiple subscribers (publishing pipeline, doc-broadcaster,
@@ -52,6 +58,28 @@ export function createDocumentsNamespace(deps) {
         .then(() => hook(payload))
         .catch(() => { /* hook errors are non-fatal and isolated */ });
     }
+  }
+
+  // Single shape for the list-affecting single-column-ish mutations (pin/unpin/
+  // setTitle/publish/unpublish/revokeShareLinks): UPDATE the given SET, ALWAYS bump
+  // updated_at (so the list sort + SSE patcher see a fresh row), RETURNING *, then
+  // fire afterUpsertHooks (the broadcaster/publish re-render subscribe here — this
+  // helper MUST keep firing them). `params` bind into `setSql`'s placeholders, then
+  // (user_id, path) for the WHERE. The deviant mutations (moveToFolder ownership
+  // check, setSalience conditional cols, redact multi-statement, setPublicSlug nonce,
+  // incrementVisitCount no-hook) keep their own bodies.
+  async function updateColumns(userId, path, setSql, params = [], { returnSlug = false } = {}) {
+    const result = await d1Query(
+      `UPDATE documents
+          SET ${setSql},
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE user_id = ? AND path = ?
+      RETURNING *`,
+      [...params, userId, path],
+    );
+    const row = firstRow(result);
+    if (row && afterUpsertHooks.length) fireHooks(afterUpsertHooks, row);
+    return returnSlug ? (row?.public_slug || null) : row;
   }
 
   return {
@@ -119,50 +147,6 @@ export function createDocumentsNamespace(deps) {
     async upsert(doc, opts = {}) {
       assertSafeColumns(Object.keys(doc || {}), 'documents');
 
-      // RT2-H1 overwrite recoverability (migration 0035): before a content-changing
-      // overwrite of an EXISTING doc, snapshot the prior title/summary/content into
-      // document_versions (encrypted) so a poisoned/mistaken write is recoverable.
-      // Create (no prior) and identical re-write (no diff) capture nothing. Bulk
-      // importers bypass this DAL (raw inserts) so import is unaffected. Non-fatal +
-      // isolated — a versioning hiccup must NEVER deny an owner-authorized write
-      // (mirrors the afterUpsertHooks discipline). No plaintext is ever logged.
-      if (doc && doc.user_id && doc.path && opts.skipVersion !== true) {
-        try {
-          const prev = firstRow(await d1Query(
-            `SELECT id, forgotten_at, ${DOC_VERSIONED_FIELDS.join(', ')} FROM documents WHERE user_id = ? AND path = ?`,
-            [doc.user_id, doc.path],
-          ));
-          // Version when ANY encrypted field the caller is writing actually changes —
-          // not just content/title/summary (red-team MED-1: metadata/tags/entities were
-          // silently overwritten unversioned). Create + identical re-write capture nothing.
-          const changed = prev && !prev.forgotten_at &&
-            DOC_VERSIONED_FIELDS.some((f) => doc[f] !== undefined && doc[f] !== prev[f]);
-          if (changed) {
-            // Full prior snapshot (every non-null encrypted field) as one encrypted JSON
-            // blob → a document overwrite is fully recoverable; title/summary/content are
-            // also kept as columns for a cheap listVersions preview (no JSON parse).
-            const snap = {};
-            for (const f of DOC_VERSIONED_FIELDS) if (prev[f] != null) snap[f] = prev[f];
-            await d1Query(
-              `INSERT INTO document_versions (document_id, user_id, path, title, summary, content, snapshot_json, trigger, reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              [prev.id, doc.user_id, doc.path, prev.title ?? null, prev.summary ?? null, prev.content ?? null, JSON.stringify(snap), opts.trigger || 'overwrite', opts.reason ?? null],
-            );
-            // Bound growth (red-team HIGH-1): keep the most-recent N versions per (user,path).
-            await d1Query(
-              `DELETE FROM document_versions WHERE user_id = ? AND path = ? AND id NOT IN (
-                 SELECT id FROM document_versions WHERE user_id = ? AND path = ?
-                 ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
-              [doc.user_id, doc.path, doc.user_id, doc.path, DOC_VERSION_KEEP],
-            );
-          }
-        } catch (e) {
-          console.warn(`[doc-version] prior-snapshot capture failed: ${e?.code || e?.name || 'error'}`);
-        }
-      }
-
-      const cols = Object.keys(doc).join(', ');
-      const placeholders = Object.keys(doc).map(() => '?').join(', ');
       // SET clause for ON CONFLICT. Exclude the conflict key (user_id, path) AND
       // `created_at`: created_at is the row's birth time — IMMUTABLE after first
       // insert. Including it let a re-import (e.g. a re-export with a fresh file
@@ -174,18 +158,83 @@ export function createDocumentsNamespace(deps) {
       // audited repair tool — never the import path.
       const IMMUTABLE = new Set(['user_id', 'path', 'created_at']);
       const updateCols = Object.keys(doc).filter((c) => !IMMUTABLE.has(c));
-      const setClause = updateCols.map((c) => `${c} = excluded.${c}`).join(', ');
 
-      // If every supplied column is immutable, there is nothing to update on
-      // conflict — DO NOTHING (avoids an empty `SET` = invalid SQL).
-      const conflict = setClause ? `DO UPDATE SET ${setClause}` : 'DO NOTHING';
-      const result = await d1Query(
-        `INSERT INTO documents (${cols}) VALUES (${placeholders})
-         ON CONFLICT (user_id, path) ${conflict}
-         RETURNING *`,
-        Object.values(doc),
-      );
-      const row = firstRow(result);
+      // RT2-H1 overwrite recoverability (migration 0035): before a content-changing
+      // overwrite of an EXISTING doc, snapshot the prior versioned fields into
+      // document_versions so a poisoned/mistaken write is recoverable. Create (no
+      // prior) and identical re-write (no diff) capture nothing. Bulk importers
+      // bypass this DAL (raw inserts) so import is unaffected. No plaintext is logged.
+      let prev = null;
+      let changed = false;
+      if (doc && doc.user_id && doc.path && opts.skipVersion !== true) {
+        prev = firstRow(await d1Query(
+          `SELECT id, forgotten_at, ${DOC_VERSIONED_FIELDS.join(', ')} FROM documents WHERE user_id = ? AND path = ?`,
+          [doc.user_id, doc.path],
+        ));
+        // Version when ANY versioned field the caller is writing actually changes —
+        // not just content/title/summary (red-team MED-1: metadata/tags/entities were
+        // silently overwritten unversioned). Create + identical re-write capture nothing.
+        changed = !!(prev && !prev.forgotten_at &&
+          DOC_VERSIONED_FIELDS.some((f) => doc[f] !== undefined && doc[f] !== prev[f]));
+      }
+
+      let row;
+      if (changed) {
+        // ATOMIC-CONSISTENCY (DOCUMENTS-LAYER-HARDENING §6, v4): snapshot the prior
+        // content AND apply the overwrite in ONE transaction — a content overwrite
+        // NEVER commits without its recovery snapshot, and a snapshot can't orphan a
+        // write. Both tables are PLAINTEXT (empty ENCRYPTED_FIELDS) so raw sync
+        // statements are correct. The row already exists, so the main write is a plain
+        // UPDATE: autoEncryptParams injects `scope` only on INSERT into a SCOPE_AWARE
+        // table (crypto-local.js:1665) — an UPDATE needs no scope/encrypt transform,
+        // which is what makes the raw sync path safe here. A versioning failure now
+        // ROLLS BACK the write (the deliberate change from the old best-effort hedge,
+        // which guarded encryption flakiness that no longer applies).
+        const snap = {};
+        for (const f of DOC_VERSIONED_FIELDS) if (prev[f] != null) snap[f] = prev[f];
+        const setSql = updateCols.map((c) => `${c} = ?`).join(', ');
+        withTransaction(() => {
+          rawDb.prepare(
+            `INSERT INTO document_versions (document_id, user_id, path, title, summary, content, snapshot_json, trigger, reason)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).run(prev.id, doc.user_id, doc.path, prev.title ?? null, prev.summary ?? null, prev.content ?? null, JSON.stringify(snap), opts.trigger || 'overwrite', opts.reason ?? null);
+          // Bound growth (red-team HIGH-1): keep the most-recent N versions per (user,path).
+          rawDb.prepare(
+            `DELETE FROM document_versions WHERE user_id = ? AND path = ? AND id NOT IN (
+               SELECT id FROM document_versions WHERE user_id = ? AND path = ?
+               ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
+          ).run(doc.user_id, doc.path, doc.user_id, doc.path, DOC_VERSION_KEEP);
+          if (setSql) {
+            rawDb.prepare(
+              `UPDATE documents SET ${setSql} WHERE user_id = ? AND path = ?`,
+            ).run(...updateCols.map((c) => doc[c]), doc.user_id, doc.path);
+          }
+        }, { tables: ['documents', 'document_versions'] });
+        // Re-read through the async adapter so the hook/return row is fully decrypted
+        // (old envelope rows: any untouched encrypted column still needs value-shape
+        // decrypt that a raw RETURNING would skip).
+        row = firstRow(await d1Query(
+          `SELECT * FROM documents WHERE user_id = ? AND path = ? AND forgotten_at IS NULL`,
+          [doc.user_id, doc.path],
+        ));
+      } else {
+        // Create / partial-update / no-diff: the existing async path. This is the
+        // branch that needs INSERT scope-injection + auto-encrypt, so it MUST stay on
+        // d1Query (no raw sync). `created_at` excluded from the conflict SET (above).
+        const cols = Object.keys(doc).join(', ');
+        const placeholders = Object.keys(doc).map(() => '?').join(', ');
+        const setClause = updateCols.map((c) => `${c} = excluded.${c}`).join(', ');
+        // If every supplied column is immutable, there is nothing to update on
+        // conflict — DO NOTHING (avoids an empty `SET` = invalid SQL).
+        const conflict = setClause ? `DO UPDATE SET ${setClause}` : 'DO NOTHING';
+        const result = await d1Query(
+          `INSERT INTO documents (${cols}) VALUES (${placeholders})
+           ON CONFLICT (user_id, path) ${conflict}
+           RETURNING *`,
+          Object.values(doc),
+        );
+        row = firstRow(result);
+      }
 
       // Fire post-upsert hooks on a fresh microtask so the upsert's
       // return value isn't blocked. Errors are isolated per-hook —
@@ -260,31 +309,11 @@ export function createDocumentsNamespace(deps) {
     // page-visit counter, not a list-affecting change.
 
     async pin(userId, path) {
-      const result = await d1Query(
-        `UPDATE documents
-            SET is_pinned = 1,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-          WHERE user_id = ? AND path = ?
-        RETURNING *`,
-        [userId, path],
-      );
-      const row = firstRow(result);
-      if (row && afterUpsertHooks.length) fireHooks(afterUpsertHooks, row);
-      return row;
+      return updateColumns(userId, path, 'is_pinned = 1');
     },
 
     async unpin(userId, path) {
-      const result = await d1Query(
-        `UPDATE documents
-            SET is_pinned = 0,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-          WHERE user_id = ? AND path = ?
-        RETURNING *`,
-        [userId, path],
-      );
-      const row = firstRow(result);
-      if (row && afterUpsertHooks.length) fireHooks(afterUpsertHooks, row);
-      return row;
+      return updateColumns(userId, path, 'is_pinned = 0');
     },
 
     async moveToFolder(userId, path, folderId) {
@@ -313,6 +342,15 @@ export function createDocumentsNamespace(deps) {
       const row = firstRow(result);
       if (row && afterUpsertHooks.length) fireHooks(afterUpsertHooks, row);
       return row;
+    },
+
+    // Rename = set the display title. The `path` (the identity / UNIQUE key,
+    // referenced without cascade by context_documents, space_room_documents,
+    // document_versions) is deliberately NOT changed — only the title. Mirrors
+    // pin/moveToFolder: UPDATE by (user_id, path), bump updated_at, fire hooks
+    // (so the library list + search reflect the new name). Content is untouched.
+    async setTitle(userId, path, title) {
+      return updateColumns(userId, path, 'title = ?', [typeof title === 'string' ? title : null]);
     },
 
     async delete(userId, path) {
@@ -441,18 +479,7 @@ export function createDocumentsNamespace(deps) {
       if (typeof slug !== 'string' || slug.length === 0) {
         throw new Error('publish: slug required');
       }
-      const result = await d1Query(
-        `UPDATE documents
-            SET published = 1,
-                public_slug = COALESCE(public_slug, ?),
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-          WHERE user_id = ? AND path = ?
-        RETURNING *`,
-        [slug, userId, path],
-      );
-      const row = firstRow(result);
-      if (row && afterUpsertHooks.length) fireHooks(afterUpsertHooks, row);
-      return row?.public_slug || null;
+      return updateColumns(userId, path, 'published = 1, public_slug = COALESCE(public_slug, ?)', [slug], { returnSlug: true });
     },
 
     /**
@@ -467,18 +494,7 @@ export function createDocumentsNamespace(deps) {
      * path — both the public /p/ route (published=0) and unlisted /s/ tokens.
      */
     async unpublish(userId, path) {
-      const result = await d1Query(
-        `UPDATE documents
-            SET published = 0,
-                publish_nonce = NULL,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-          WHERE user_id = ? AND path = ?
-        RETURNING *`,
-        [userId, path],
-      );
-      const row = firstRow(result);
-      if (row && afterUpsertHooks.length) fireHooks(afterUpsertHooks, row);
-      return row;
+      return updateColumns(userId, path, 'published = 0, publish_nonce = NULL');
     },
 
     /**
@@ -488,17 +504,7 @@ export function createDocumentsNamespace(deps) {
      * nonce. Returns the updated row.
      */
     async revokeShareLinks(userId, path) {
-      const result = await d1Query(
-        `UPDATE documents
-            SET publish_nonce = NULL,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-          WHERE user_id = ? AND path = ?
-        RETURNING *`,
-        [userId, path],
-      );
-      const row = firstRow(result);
-      if (row && afterUpsertHooks.length) fireHooks(afterUpsertHooks, row);
-      return row;
+      return updateColumns(userId, path, 'publish_nonce = NULL');
     },
 
     // ── RT2-H1 recovery (migration 0035) ────────────────────────────────
@@ -544,6 +550,58 @@ export function createDocumentsNamespace(deps) {
         } catch { /* corrupt snapshot → fall back to the three preview columns */ }
       }
       return this.upsert({ user_id: userId, path, ...fields }, { trigger: 'restore', reason: `restore ${versionId}` });
+    },
+
+    /**
+     * Atomically rename a document's `path` (its slug / ?doc= URL id) and cascade
+     * every FK-less reference so nothing orphans. The row `id` is preserved, so
+     * document_versions / embeddings / FTS linkage stay intact (FTS self-heals by
+     * rowid on the UPDATE). See docs/DOCUMENT-SLUG-RENAME-DESIGN-2026-06-29.md.
+     *
+     * Atomic + plaintext-only: every cascade column is a plaintext path, so the raw
+     * sync withTransaction (no async auto-encrypt) is correct — the {tables} dev
+     * assert proves all five touched tables have empty ENCRYPTED_FIELDS. A conflict
+     * or any failure rolls back with zero partial state. `public_slug` is NOT touched
+     * (independent of path) so published/unlisted URLs keep working.
+     *
+     * Throws RENAME_BAD_PATH / RENAME_CONFLICT / RENAME_NOT_FOUND for the route to map.
+     * document_versions.path is intentionally left as a historical snapshot.
+     */
+    async renamePath(userId, oldPath, newPath) {
+      if (typeof newPath !== 'string' || !newPath.trim()) throw new Error('RENAME_BAD_PATH');
+      newPath = newPath.trim();
+      if (newPath === oldPath) {
+        return firstRow(await d1Query(
+          `SELECT * FROM documents WHERE user_id = ? AND path = ? AND forgotten_at IS NULL`,
+          [userId, oldPath],
+        ));
+      }
+      const ts = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
+      withTransaction(() => {
+        if (rawDb.prepare(`SELECT 1 FROM documents WHERE user_id = ? AND path = ? LIMIT 1`).get(userId, newPath)) {
+          throw new Error('RENAME_CONFLICT');
+        }
+        const moved = rawDb.prepare(
+          `UPDATE documents SET path = ?, updated_at = ${ts} WHERE user_id = ? AND path = ?`,
+        ).run(newPath, userId, oldPath);
+        if (moved.changes === 0) throw new Error('RENAME_NOT_FOUND');
+        // FK-less path references (sweep §2 cascade map). context_documents /
+        // space_room_documents / space_rooms have no user_id column — safe in the
+        // single-user vault (V2 multi-tenant must scope via ownership joins).
+        rawDb.prepare(`UPDATE share_links          SET document_path = ? WHERE user_id = ? AND document_path = ?`).run(newPath, userId, oldPath);
+        rawDb.prepare(`UPDATE context_documents    SET document_path = ? WHERE document_path = ?`).run(newPath, oldPath);
+        rawDb.prepare(`UPDATE space_room_documents SET document_path = ? WHERE document_path = ?`).run(newPath, oldPath);
+        rawDb.prepare(`UPDATE space_rooms          SET cover_doc_path = ? WHERE cover_doc_path = ?`).run(newPath, oldPath);
+        // document_versions.path: intentionally NOT updated (path-at-time history).
+      }, { tables: ['documents', 'share_links', 'context_documents', 'space_room_documents', 'space_rooms'] });
+      // Decrypted read for the response/hooks; broadcast as upsert(newPath) + remove(oldPath).
+      const row = firstRow(await d1Query(
+        `SELECT * FROM documents WHERE user_id = ? AND path = ? AND forgotten_at IS NULL`,
+        [userId, newPath],
+      ));
+      if (row && afterUpsertHooks.length) fireHooks(afterUpsertHooks, row);
+      if (afterDeleteHooks.length) fireHooks(afterDeleteHooks, { user_id: userId, path: oldPath });
+      return row;
     },
 
     /**

@@ -64,11 +64,13 @@ kcv.json
 
 # Claude Code per-developer state
 .claude/projects/
-.claude/memory/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .claude/worktrees/
 .claude/launch.json
+# NB: .claude/memory/ is intentionally TRACKED (team-shared Claude memory) — see CLAUDE.md
+# "Working across accounts" + scripts/claude-memory-sync.sh. It is hydrated into each
+# account's ~/.claude/projects/<hash>/memory/ via that script (link/pull).
 
 # Local scratch + operator-only debug scripts — never ship in the public repo
 scratch/

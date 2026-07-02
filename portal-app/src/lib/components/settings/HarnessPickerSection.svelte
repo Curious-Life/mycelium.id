@@ -43,11 +43,6 @@
 
 	const harnesses: Harness[] = [
 		{
-			id: 'mycelium', name: 'Mycelium-native', doors: [],
-			blurb: 'No external app — talk to your vault directly in the portal. Sovereign and local.',
-			recipe: null, docId: 'mycelium-native'
-		},
-		{
 			id: 'claude', name: 'Claude Desktop / Code', doors: ['memory'],
 			blurb: 'The lowest-friction local path — stdio, no token. (Generated for your machine in "Connect on this Mac" above.)',
 			recipe: `claude mcp add mycelium -- node /ABSOLUTE/PATH/TO/mycelium.id/src/index.js`,
@@ -108,6 +103,9 @@ Model id       : ${MODEL}`,
 	<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Use Mycelium in another app</h2>
 	<p class="text-xs text-[var(--color-text-tertiary)] mb-4">
 		Choose the AI app you use — Mycelium becomes its <span class="text-[var(--color-text-secondary)]">memory</span> (over MCP) and, optionally, its <span class="text-[var(--color-text-secondary)]">model</span> (over the gateway). Full per-app setup: <span class="font-mono">{RECIPES_DOC}</span>.
+	</p>
+	<p class="text-xs text-[var(--color-text-tertiary)] mb-4">
+		Want Claude Code to <span class="text-[var(--color-text-secondary)]">power</span> Mycelium instead? Choose your engine in <a class="text-[var(--color-accent)] hover:underline" href="/settings?pane=intelligence">Intelligence → Engine</a>.
 	</p>
 
 	{#if !publicBaseUrl}

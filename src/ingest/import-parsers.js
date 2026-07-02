@@ -14,9 +14,9 @@
 // so all storage goes through the audited, encrypting write path — the parser
 // module itself never touches the db or crypto directly.
 
-const MAX_JSON_BYTES = Number(process.env.MYCELIUM_IMPORT_MAX_JSON_BYTES) || 128 * 1024 * 1024;  // cap on conversations.json (bytes)
-const MAX_MESSAGES   = Number(process.env.MYCELIUM_IMPORT_MAX_MESSAGES) || 1_000_000;            // bound the work per import
-const MAX_ENTRIES    = Number(process.env.MYCELIUM_IMPORT_MAX_ENTRIES) || 200_000;               // archive entry-count cap
+const MAX_JSON_BYTES = Number(process.env.MYCELIUM_IMPORT_MAX_JSON_BYTES) || 384 * 1024 * 1024;  // cap on conversations.json (bytes)
+const MAX_MESSAGES   = Number(process.env.MYCELIUM_IMPORT_MAX_MESSAGES) || 5_000_000;            // bound the work per import
+const MAX_ENTRIES    = Number(process.env.MYCELIUM_IMPORT_MAX_ENTRIES) || 500_000;               // archive entry-count cap
 
 /**
  * Reject an archive with a pathological number of entries BEFORE any per-entry
@@ -131,12 +131,15 @@ function claudeText(m) {
  * @param {{ capture: (msg:object)=>Promise<{deduped:boolean}>, conversations?: any[] }} ctx
  */
 export async function processClaudeExport(zip, ctx) {
+  // conversations may be: an array (legacy in-memory path), an ASYNC ITERABLE
+  // (streaming path — one conversation at a time), or absent (read the entry).
+  // `for await` consumes all three; only read the zip entry when nothing was passed.
   let conversations = ctx.conversations;
-  if (!Array.isArray(conversations)) {
+  if (conversations == null) {
     conversations = safeParse(await readTextEntry(zip, 'conversations.json'), []);
   }
   let imported = 0, skipped = 0, failed = 0, conversationCount = 0, seen = 0;
-  for (const conv of conversations) {
+  for await (const conv of conversations) {
     const msgs = Array.isArray(conv?.chat_messages) ? conv.chat_messages : [];
     if (!msgs.length) continue;
     conversationCount += 1;
@@ -288,8 +291,11 @@ function flattenOpenAIMapping(mapping) {
  * @param {{ capture: (msg:object)=>Promise<{deduped:boolean}> }} ctx
  */
 export async function processOpenAIExport(conversations, ctx) {
+  // Accept an array (legacy) OR an async/sync iterable (streaming path); `for await`
+  // consumes either. Guard against a non-iterable (e.g. null) → empty.
+  const iter = conversations && (conversations[Symbol.asyncIterator] || conversations[Symbol.iterator]) ? conversations : [];
   let imported = 0, skipped = 0, failed = 0, conversationCount = 0, seen = 0;
-  for (const conv of Array.isArray(conversations) ? conversations : []) {
+  for await (const conv of iter) {
     const ordered = flattenOpenAIMapping(conv?.mapping);
     if (!ordered.length) continue;
     conversationCount += 1;

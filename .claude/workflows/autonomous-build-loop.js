@@ -284,7 +284,15 @@ if (!live.length) {
 async function reviewUnit(unit, build) {
   const tasks = []
   for (const lens of REVIEW_LENSES) {
-    for (let k = 0; k < REFUTERS_PER_LENS; k++) {
+    // Security review is automatic for every unit (the 'security' lens always
+    // runs). For SECURITY-SENSITIVE units it auto-deepens to >=3 refuters — one
+    // skeptic is too weak for crypto/keys/auth/egress; this is the engine-level
+    // teeth behind AUTONOMOUS-ROUTINE.md §6 + the auto-merge-on-green review gate.
+    const refuters =
+      lens === 'security' && unit.securitySensitive
+        ? Math.max(REFUTERS_PER_LENS, 3)
+        : REFUTERS_PER_LENS
+    for (let k = 0; k < refuters; k++) {
       tasks.push(() =>
         agent(
           `Adversarially REVIEW unit "${unit.id}" via the ${lens.toUpperCase()} lens, in worktree

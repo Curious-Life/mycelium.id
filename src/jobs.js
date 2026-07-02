@@ -20,6 +20,8 @@ import { dbPath as resolveDbPath } from './paths.js';
 import { readGenerateStats, writeGenerateStats } from './generate-stats.js';
 import { bustMindscape, bustMindscapePoints } from './mindscape-cache.js';
 import { backfillColumn, countRemainingEnvelopes } from './account/backfill.js';
+import { safeVaultCopy } from './db/backup.js';
+import { assertVaultDiskHeadroom } from './db/disk-guard.js';
 import { getMasterKey } from './crypto/crypto-local.js';
 
 /**
@@ -85,6 +87,18 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
   const cur = runningJobId ? jobs.get(runningJobId) : null;
   if (cur && (cur.status === 'running' || cur.child)) {
     return { jobId: runningJobId, status: 'already_running' };
+  }
+
+  // Fail-closed disk guard: a re-cluster + its children write heavily; on a near-full
+  // disk the write storm hits ENOSPC (WAL bloat + torn state — a corruption co-factor).
+  // Refuse rather than risk the vault. Measure-only is exempt (small metric-table writes,
+  // no cluster.py). @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+  if (!measureOnly) {
+    try { assertVaultDiskHeadroom(dbPath || resolveDbPath()); }
+    catch (e) {
+      if (e.code === 'DISK_LOW') { console.error(`[mycelium] Generate refused — ${e.message}`); return { jobId: null, status: 'disk_low', detail: e.detail }; }
+      throw e;
+    }
   }
 
   // Bound memory: evict old finished jobs (status polling only needs recent ones).
@@ -290,6 +304,11 @@ export function startBackfillJob({ db, dbPath, columns } = {}) {
   if (!rawDb || typeof rawDb.prepare !== 'function') return { jobId: null, status: 'unavailable' };
   if (!Array.isArray(columns) || columns.length === 0) return { jobId: null, status: 'no_columns' };
 
+  // Fail-closed disk guard: backfill takes a full VACUUM INTO snapshot (~vault size)
+  // then rewrites columns. On a near-full disk the snapshot alone can hit ENOSPC.
+  try { assertVaultDiskHeadroom(dbPath || resolveDbPath()); }
+  catch (e) { if (e.code === 'DISK_LOW') { console.error(`[mycelium] Backfill refused — ${e.message}`); return { jobId: null, status: 'disk_low', detail: e.detail }; } throw e; }
+
   const jobId = `backfill_${crypto.randomBytes(6).toString('hex')}`;
   const startedAt = Date.now();
   const path0 = dbPath || resolveDbPath();
@@ -304,12 +323,15 @@ export function startBackfillJob({ db, dbPath, columns } = {}) {
   (async () => {
     let backupPath = null;
     try {
-      // 1. Pre-campaign backup — a copy of the ALREADY-ENCRYPTED vault (ciphertext at
-      //    rest, safe on disk). Checkpoint the WAL first so the main file is current.
+      // 1. Pre-campaign backup — a CONSISTENT copy of the already-encrypted vault
+      //    (ciphertext at rest, safe on disk). MUST NOT be fs.copyFileSync: the app
+      //    server is a concurrent writer on this same file, so a byte copy tears
+      //    ("database disk image is malformed"). safeVaultCopy uses VACUUM INTO — a
+      //    transactionally-consistent, same-key-encrypted snapshot, torn-proof under
+      //    the live writer. @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
       state.stageLabel = 'backup';
-      try { rawDb.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* best-effort */ }
       backupPath = `${path0}.pre-backfill-${startedAt}`;
-      fs.copyFileSync(path0, backupPath);
+      safeVaultCopy(rawDb, backupPath);
       state.step = 1;
 
       // 2. Per-column backfill on the keyed handle (the engine yields + suspends WAL).
@@ -406,6 +428,10 @@ export function shouldAutoGenerate({ embedded, points, clusteringRunning, min = 
  * @returns {{ pid: number|null }}
  */
 export function startClaimDiscoveryJob({ dbPath, userId, cadence } = {}) {
+  // Fail-closed disk guard: the claims child opens the vault RW and writes; skip on a
+  // near-full disk (ENOSPC storm is a corruption co-factor). Fire-and-forget → no pid.
+  try { assertVaultDiskHeadroom(dbPath || resolveDbPath()); }
+  catch (e) { if (e.code === 'DISK_LOW') return { pid: null, status: 'disk_low' }; throw e; }
   const { userHex, systemHex } = getSessionKeys() ?? resolveKeys();
   const childEnv = {
     PATH: process.env.PATH,
@@ -457,8 +483,19 @@ function refreshSearchIndex() {
 // wins). A crashed child clears the flag via its close handler.
 let chronicleChildRunning = false;
 
-export function startChronicleNarrationJob({ dbPath, userId } = {}) {
+export function startChronicleNarrationJob({ dbPath, userId, territoryId = null } = {}) {
   if (chronicleChildRunning) return { pid: null };
+  // Fail-closed disk guard: describe-chronicles opens the vault RW and writes narration;
+  // on a near-full disk that risks the ENOSPC storm. This is the path "describe more"
+  // spawns → return a structured disk_low so the UI can say "free N GB" instead of the
+  // old silent stuck-"Describing…". @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+  try { assertVaultDiskHeadroom(dbPath || resolveDbPath()); }
+  catch (e) { if (e.code === 'DISK_LOW') return { pid: null, status: 'disk_low', detail: e.detail }; throw e; }
+  // territoryId: scoped per-territory "describe more" — describe-chronicles.js narrates
+  // just that territory (bypassing the version/drift gate) + rolls up its theme/realm.
+  // null = the normal global gap-fill pass. Spawned as a CHILD either way (NEVER in the
+  // server event loop — the in-process narration-walk pegged CPU + white-screened the app).
+  const scopedTerritory = territoryId != null && Number.isFinite(Number(territoryId)) ? String(Number(territoryId)) : null;
   const { userHex, systemHex } = getSessionKeys() ?? resolveKeys();
   const childEnv = {
     PATH: process.env.PATH,
@@ -475,6 +512,8 @@ export function startChronicleNarrationJob({ dbPath, userId } = {}) {
     // Chronicle-safe by default: fill gaps, never rewrite an existing/inherited
     // chronicle with the local model (override with MYCELIUM_DESCRIBE_PRESERVE=0).
     MYCELIUM_DESCRIBE_PRESERVE: process.env.MYCELIUM_DESCRIBE_PRESERVE ?? '1',
+    // Scoped per-territory describe-more (omitted → global pass).
+    ...(scopedTerritory ? { MYCELIUM_DESCRIBE_TERRITORY: scopedTerritory } : {}),
     // Inherit the bundled-runtime envs (packaged app) like the clustering job.
     ...(process.env.HF_HOME ? { HF_HOME: process.env.HF_HOME } : {}),
     ...(process.env.HF_HUB_OFFLINE ? { HF_HUB_OFFLINE: process.env.HF_HUB_OFFLINE } : {}),

@@ -1,8 +1,13 @@
 <script lang="ts">
 	// Temporal line chart — pure SVG, WKWebView-safe (no WebGL/canvas). Plots a
-	// series over time with min/max y-labels, first/last x-labels, a soft area
-	// fill, gridlines, and a dot on the latest real value. Nulls break the line
-	// (honest gaps where a window had no data) rather than interpolating across.
+	// series over time with min/max y-labels, dated x-ticks, a soft area fill,
+	// gridlines, and a dot on the latest real value. Nulls break the line (honest
+	// gaps where a window had no data) rather than interpolating across.
+	//
+	// Hover-to-inspect: a vertical cursor snaps to the nearest real point and a
+	// tooltip shows that point's value + date. The tooltip is EDGE-AWARE — it
+	// flips to the left of the cursor near the right edge and clamps inside the
+	// chart, so it never spills outside the app window.
 	let {
 		points = [],
 		labels = [],
@@ -13,6 +18,8 @@
 		yMax = undefined,
 		unit = '',
 		format = (v: number) => (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2)),
+		valueLabel = '',
+		rows = undefined,
 	}: {
 		points?: (number | null)[];
 		labels?: string[];
@@ -23,6 +30,11 @@
 		yMax?: number;
 		unit?: string;
 		format?: (v: number) => string;
+		/** Optional noun shown in the tooltip after the value, e.g. "active". */
+		valueLabel?: string;
+		/** Optional per-point breakdown rows (already sorted, descending) shown under
+		 *  the value in the hover tooltip — e.g. the named territories active that week. */
+		rows?: { name: string; detail?: string }[][];
 	} = $props();
 
 	const W = 600;
@@ -51,8 +63,7 @@
 			pts.push({ i, v: p, x: px, y: py });
 		});
 
-		// Area path: only under the longest contiguous run (keep it honest + simple
-		// — fill from the line down to the baseline across all drawn segments).
+		// Area path: fill from the line down to the baseline across all drawn segments.
 		let areaD = '';
 		open = false;
 		points.forEach((p, i) => {
@@ -67,18 +78,50 @@
 		if (open) { const last = pts[pts.length - 1]; areaD += `L${last.x.toFixed(1)} ${(height - padB).toFixed(1)} Z `; }
 
 		const last = pts[pts.length - 1] ?? null;
-		// gridlines at 0/50/100% of range
 		const grid = [0, 0.5, 1].map((f) => padT + f * innerH);
 		const baseline = lo <= 0 && hi >= 0 ? y(0) : null;
-		return { d: d.trim(), areaD: areaD.trim(), last, lo, hi, grid, baseline, innerH };
+		return { d: d.trim(), areaD: areaD.trim(), last, lo, hi, grid, baseline, innerH, x, y, pts, n };
 	});
 
-	const xFirst = $derived(labels[0] ?? '');
-	const xLast = $derived(labels[labels.length - 1] ?? '');
+	// ── Dated x-axis ticks — up to ~5 evenly-spaced labels (not just first/last) ──
+	const xTicks = $derived.by(() => {
+		const g = geom; if (!g) return [];
+		const n = g.n;
+		const want = Math.min(5, n);
+		const out: { i: number; xPct: number; label: string }[] = [];
+		const seen = new Set<number>();
+		for (let k = 0; k < want; k++) {
+			const i = want === 1 ? 0 : Math.round((k / (want - 1)) * (n - 1));
+			if (seen.has(i)) continue;
+			seen.add(i);
+			const label = (labels[i] ?? '').slice(0, 10);
+			if (label) out.push({ i, xPct: (g.x(i) / W) * 100, label });
+		}
+		return out;
+	});
+
+	// ── Hover ─────────────────────────────────────────────────────────────────
+	let hoverIdx = $state<number | null>(null);
+	const hover = $derived.by(() => {
+		const g = geom; if (!g || hoverIdx == null || !g.pts.length) return null;
+		// snap to the nearest REAL point (skip nulls)
+		let best = g.pts[0];
+		for (const p of g.pts) if (Math.abs(p.i - hoverIdx) < Math.abs(best.i - hoverIdx)) best = p;
+		return { ...best, label: (labels[best.i] ?? '').slice(0, 10), xPct: (best.x / W) * 100, yPct: (best.y / height) * 100 };
+	});
+	const flipLeft = $derived(hover != null && hover.xPct > 58);
+
+	function onMove(e: PointerEvent) {
+		const g = geom; if (!g) return;
+		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / (rect.width || 1)));
+		hoverIdx = Math.round(frac * (g.n - 1));
+	}
 </script>
 
 {#if geom}
-	<div class="ts">
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div class="ts" onpointermove={onMove} onpointerleave={() => (hoverIdx = null)}>
 		<svg viewBox="0 0 {W} {height}" preserveAspectRatio="none" role="img" aria-label="time series">
 			{#each geom.grid as gy}
 				<line x1={padL} x2={W - padR} y1={gy} y2={gy} class="grid" />
@@ -89,13 +132,32 @@
 			{#if area}<path d={geom.areaD} fill={color} fill-opacity="0.10" stroke="none" />{/if}
 			<path d={geom.d} fill="none" stroke={color} stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke" />
 			{#if geom.last}<circle cx={geom.last.x} cy={geom.last.y} r="3.5" fill={color} vector-effect="non-scaling-stroke" />{/if}
+			{#if hover}
+				<line x1={hover.x} x2={hover.x} y1={padT} y2={height - padB} class="cursor" vector-effect="non-scaling-stroke" />
+				<circle cx={hover.x} cy={hover.y} r="3.5" fill="var(--color-bg)" stroke={color} stroke-width="2" vector-effect="non-scaling-stroke" />
+			{/if}
 		</svg>
 		<div class="y-labels" style="height:{height}px">
 			<span>{format(geom.hi)}{unit}</span>
 			<span>{format(geom.lo)}{unit}</span>
 		</div>
-		{#if xFirst || xLast}
-			<div class="x-labels"><span>{xFirst}</span><span>{xLast}</span></div>
+		{#if xTicks.length}
+			<div class="x-labels">
+				{#each xTicks as t}<span class="xt" style="left:{t.xPct}%">{t.label}</span>{/each}
+			</div>
+		{/if}
+		{#if hover}
+			<div class="ts-tip" class:flip={flipLeft} style="left:{hover.xPct}%; top:{Math.max(2, hover.yPct)}%">
+				<span class="tip-v" style="color:{color}">{format(hover.v)}{unit}{valueLabel ? ` ${valueLabel}` : ''}</span>
+				{#if hover.label}<span class="tip-d">{hover.label}</span>{/if}
+				{#if rows && rows[hover.i] && rows[hover.i].length}
+					<div class="tip-rows">
+						{#each rows[hover.i] as r}
+							<div class="tip-brow"><span class="tip-rn">{r.name}</span>{#if r.detail}<span class="tip-rd">{r.detail}</span>{/if}</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
 		{/if}
 	</div>
 {:else}
@@ -103,13 +165,25 @@
 {/if}
 
 <style>
-	.ts { position: relative; width: 100%; }
+	.ts { position: relative; width: 100%; padding-bottom: 16px; }
 	.ts svg { display: block; width: 100%; height: auto; }
 	.grid { stroke: var(--color-border); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.5; vector-effect: non-scaling-stroke; }
 	.zero { stroke: var(--color-text-tertiary); stroke-width: 1; opacity: 0.4; vector-effect: non-scaling-stroke; }
+	.cursor { stroke: var(--color-text-emphasis); stroke-opacity: 0.45; stroke-width: 1; }
 	.y-labels { position: absolute; top: 0; left: 2px; display: flex; flex-direction: column; justify-content: space-between; padding: 2px 0 20px; pointer-events: none; }
 	.y-labels span { font-size: 0.62rem; font-variant-numeric: tabular-nums; color: var(--color-text-secondary); letter-spacing: -0.01em; }
-	.x-labels { display: flex; justify-content: space-between; margin-top: -14px; padding: 0 2px; }
-	.x-labels span { font-size: 0.62rem; color: var(--color-text-tertiary); }
+	.x-labels { position: absolute; left: 0; right: 0; bottom: 0; height: 14px; pointer-events: none; }
+	.x-labels .xt { position: absolute; transform: translateX(-50%); font-size: 0.6rem; color: var(--color-text-tertiary); white-space: nowrap; font-variant-numeric: tabular-nums; }
+	/* first/last ticks hug the edges so they don't clip */
+	.x-labels .xt:first-child { transform: translateX(0); }
+	.x-labels .xt:last-child { transform: translateX(-100%); }
+	.ts-tip { position: absolute; transform: translate(10px, -50%); pointer-events: none; z-index: 3; display: flex; flex-direction: column; gap: 1px; background: var(--color-elevated); border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 0.28rem 0.45rem; box-shadow: 0 6px 18px rgb(0 0 0 / 0.3); white-space: nowrap; }
+	.ts-tip.flip { transform: translate(calc(-100% - 10px), -50%); }
+	.tip-v { font-size: 0.78rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+	.tip-d { font-size: 0.6rem; color: var(--color-text-tertiary); font-variant-numeric: tabular-nums; }
+	.tip-rows { margin-top: 3px; display: flex; flex-direction: column; gap: 1px; max-width: 15rem; }
+	.tip-brow { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; font-size: 0.62rem; }
+	.tip-rn { color: var(--color-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.tip-rd { color: var(--color-text-tertiary); font-variant-numeric: tabular-nums; flex: none; }
 	.ts-empty { font-size: 0.78rem; color: var(--color-text-tertiary); padding: 1.5rem 0; text-align: center; }
 </style>

@@ -31,7 +31,7 @@ import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { resolveDbKeyHex } from '../src/db/open.js';
 import * as cryptoLocal from '../src/crypto/crypto-local.js';
-import { decryptVector, encodeVectorRaw } from '../src/search/ann/decode.js';
+import { decodeStoredVector, encodeVectorRaw } from '../src/search/ann/decode.js';
 
 const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';
 const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
@@ -56,13 +56,15 @@ if (!USER_MASTER || !SYSTEM_KEY) {
  */
 async function decode256(envelope, masterKey) {
   try {
-    // Decrypt the 768D vector via the CANONICAL path — the same encryptVector /
-    // decryptVector scheme enrich + mind-search use. The prior bespoke
-    // decryptBytes + base64 path could not parse the scoped-DEK envelope that
-    // encryptVector writes, so EVERY row was skipped as "undecryptable" and the
-    // clustering pipeline produced zero points. `null` allowedScopes = decrypt
-    // regardless of the envelope's scope (single-user local vault).
-    const full = await decryptVector(envelope, masterKey, null, 768);
+    // Read the 768D vector via the SHAPE-AWARE path. Post SQLCipher-collapse
+    // (Stage A) the column holds RAW little-endian float32 BLOBs (no inner
+    // envelope) — confidentiality is the whole-file SQLCipher key. decryptVector
+    // alone assumes a string envelope and threw "envelope is empty or not a
+    // string" on every raw blob, so EVERY row was skipped as "undecryptable" and
+    // the clustering pipeline produced zero points. decodeStoredVector handles
+    // both: raw Buffer → decode directly; legacy string → decryptVector with
+    // `null` allowedScopes (decrypt regardless of scope; single-user local vault).
+    const full = await decodeStoredVector(envelope, 768, masterKey, null);
     if (!full || full.length < NOMIC_DIM) return null;
     // Matryoshka-truncate 768 → 256 and L2-normalize (cluster.py's derive phase).
     const out = new Float32Array(NOMIC_DIM);

@@ -1,6 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import '../app.css';
+	// Self-hosted fonts (offline-safe, CSP 'self'). Geist = sans, Newsreader =
+	// editorial serif (optical sizing + italic) for the writing surface,
+	// JetBrains Mono = code. Family names: '<Name> Variable' (see tokens.css).
+	import '@fontsource-variable/geist';
+	import '@fontsource-variable/newsreader/opsz.css';
+	import '@fontsource-variable/newsreader/opsz-italic.css';
+	import '@fontsource-variable/jetbrains-mono';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { auth } from '$lib/stores/auth';

@@ -13,7 +13,8 @@
 // WHOLE critical section (schema + migrate), so exactly ONE process initializes
 // the vault while the others block then no-op; and ensureVaultSchema is now
 // key-aware. @see docs/AT-REST-MIGRATION-HARDENING-DESIGN-2026-06-18.md.
-import { openSync, closeSync, writeSync, existsSync, readFileSync, unlinkSync, statSync, mkdirSync } from 'node:fs';
+import { openSync, closeSync, writeSync, existsSync, readFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import { applyMigrations } from './migrate.js';
@@ -21,11 +22,25 @@ import { resolveDbKeyHex, atRestEnabled, vaultIsEncrypted } from './open.js';
 import { deriveDbKey } from '../account/keystore.js';
 import { ensureVaultEncrypted, isPlaintextSqlite } from '../account/db-cipher-migrate.js';
 import { maybeSnapshotBeforeMigrate } from '../account/snapshot-on-boot.js';
+import { ensureSidecarHealthy, dropLegacyVaultIndex } from '../search/sqlite/sidecar.js';
 
-// A migration of a multi-GB vault can take minutes; only steal a lock older than
-// this AND whose holder process is dead.
-const LOCK_STALE_MS = 10 * 60 * 1000;
+// Cross-process init lock. A LIVE holder is NEVER stolen — even a multi-minute
+// migration of a multi-GB vault — because stealing a mid-migration holder lets a
+// second process migrate the SAME file, which is precisely the concurrent-writer
+// corruption this lock exists to prevent (the recurring malformed-on-VACUUM
+// b-tree damage). We reclaim a lock only when its holder is PROVABLY gone: the
+// pid is dead, or the pid number was recycled by a different process (detected
+// via the process start time recorded alongside the pid).
+//
+// History: the lock previously also stole on `age > LOCK_STALE_MS` regardless of
+// liveness — so a legitimate >10-minute migration got its lock stolen and a
+// second process migrated concurrently → corruption. That age-based steal is
+// removed; liveness (pid + start time) is the sole authority.
 const LOCK_WAIT_MAX_MS = 15 * 60 * 1000;
+const LOCK_START_TOLERANCE_MS = 5000; // clock-resolution slack when matching a pid's start time
+// This process's start time (epoch ms), recorded in the lock so a waiter can
+// tell "same holder still alive" from "pid reused after the holder died".
+const SELF_START_MS = Math.round(Date.now() - process.uptime() * 1000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function pidAlive(pid) {
@@ -34,30 +49,60 @@ function pidAlive(pid) {
   catch (e) { return e.code === 'EPERM'; }    // alive but not ours
 }
 
+// Start time (epoch ms) of a running pid via `ps` (macOS + Linux). null if the
+// process isn't running / can't be read. Used to detect pid reuse.
+function procStartMs(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }).trim();
+    if (!out) return null;
+    const t = Date.parse(out);
+    return Number.isFinite(t) ? t : null;
+  } catch { return null; }
+}
+
+// Is the lock's recorded holder STILL the same live process? Dead pid → no.
+// Live pid whose start time differs from the recorded one → the number was
+// reused by an unrelated process (the real holder is gone) → no, safe to steal.
+// Live pid with a matching start time → yes; NEVER steal it. A lock from an older
+// build (pid only, no recorded start) falls back to bare pid-liveness.
+function holderStillLive(pid, recordedStartMs) {
+  if (!pidAlive(pid)) return false;
+  if (recordedStartMs == null) return true;
+  const nowStart = procStartMs(pid);
+  if (nowStart == null) return false;
+  return Math.abs(nowStart - recordedStartMs) <= LOCK_START_TOLERANCE_MS;
+}
+
 /** Acquire an exclusive cross-process lock via O_EXCL create. Blocks (async-poll)
- *  until acquired; steals a lock whose holder is dead or that is stale. */
+ *  until acquired; reclaims a lock ONLY when its holder is provably gone (dead pid
+ *  or reused pid). A live holder is never stolen. */
 async function acquireLock(lockPath) {
   const deadline = Date.now() + LOCK_WAIT_MAX_MS;
   for (;;) {
     try {
       const fd = openSync(lockPath, 'wx'); // wx = O_CREAT | O_EXCL — atomic create
-      try { writeSync(fd, String(process.pid)); } finally { closeSync(fd); }
+      // Record pid + start time so a waiter can distinguish a still-running
+      // holder from a reused pid.
+      try { writeSync(fd, `${process.pid} ${SELF_START_MS}`); } finally { closeSync(fd); }
       return;
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      // Held. Steal only if the holder is provably gone (dead pid) or clearly stale.
+      // Held. Reclaim ONLY a lock whose holder is provably gone — never a live
+      // holder, which may be legitimately mid-migration (see the const comment).
       let steal = false;
       try {
-        const st = statSync(lockPath);
-        const pid = parseInt(String(readFileSync(lockPath, 'utf8')).trim(), 10);
-        const alive = pidAlive(pid);
-        const ageMs = Date.now() - st.mtimeMs;
-        steal = !alive || (ageMs > LOCK_STALE_MS);
+        const [pidStr, startStr] = String(readFileSync(lockPath, 'utf8')).trim().split(/\s+/);
+        const pid = parseInt(pidStr, 10);
+        const recordedStartMs = startStr != null && /^\d+$/.test(startStr) ? parseInt(startStr, 10) : null;
+        steal = !holderStillLive(pid, recordedStartMs);
       } catch {
-        steal = true; // unreadable/vanished lock → take it
+        steal = true; // unreadable/garbage lock → abandoned, take it
       }
       if (steal) { try { unlinkSync(lockPath); } catch { /* raced */ } continue; }
-      if (Date.now() > deadline) throw new Error('vault-init: timed out waiting for the init lock');
+      if (Date.now() > deadline) {
+        throw new Error('vault-init: timed out waiting for the init lock — another instance is still initializing this vault. Quit any second copy of the app (dev + production share one vault) and retry.');
+      }
       await sleep(500);
     }
   }
@@ -136,7 +181,22 @@ export async function initVaultStorage({ dbPath, userHex, log = (m) => console.e
 
     // 3. The key getDb opens with: set iff the vault is now encrypted (self-detected)
     //    or at-rest is opted in. Null → plaintext open, unchanged.
-    return resolveDbKeyHex(userHex, dbPath);
+    const outKey = resolveDbKeyHex(userHex, dbPath);
+
+    // 4. Search-index sidecar (docs/SEARCH-SIDECAR-DESIGN-2026-07-02.md). Under THIS
+    //    cross-process lock (race-safe across the MCP + REST processes): detect + reset
+    //    a corrupt regenerable index (mycelium.search.db) ONCE, before any process opens
+    //    it — and DROP the stale in-vault index tables left by pre-sidecar builds. Both
+    //    best-effort + gated on the sqlite backend, so plaintext test fixtures (flag
+    //    unset) are untouched and never spawn a search.db.
+    if ((process.env.MYCELIUM_SEARCH_BACKEND ?? '').toLowerCase() === 'sqlite' && dbPath !== ':memory:') {
+      const r = ensureSidecarHealthy({ dbPath, dbKeyHex: outKey });
+      if (r.wasReset) log('[mycelium] search sidecar was corrupt → reset (rebuilds from content on next warm)');
+      if (r.error) log(`[mycelium] search sidecar health check skipped (${r.error})`);
+      dropLegacyVaultIndex({ dbPath, dbKeyHex: outKey });
+    }
+
+    return outKey;
   } finally {
     releaseLock(lockPath);
   }

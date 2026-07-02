@@ -59,7 +59,7 @@ export function portalUploadsRouter({ db, userId, enqueueEnrichment = null }) {
   // Attachment uploads (images / docs) — separate, generous cap from the import
   // path. Type classification + document-vs-attachment routing now live in the
   // import spine (src/ingest/run-import.js); this router just caps + forwards.
-  const MAX_ATTACHMENT_BYTES = Number(process.env.MYCELIUM_ATTACHMENT_LIMIT_BYTES) || 25 * 1024 * 1024; // 25MB
+  const MAX_ATTACHMENT_BYTES = Number(process.env.MYCELIUM_ATTACHMENT_LIMIT_BYTES) || 100 * 1024 * 1024; // 100MB (env-tunable)
 
   // Collect a single multipart `file`/`chunk` field into a capped Buffer + fields.
   const readMultipart = (req, fileField, maxBytes) => new Promise((resolve, reject) => {

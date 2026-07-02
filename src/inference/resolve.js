@@ -20,10 +20,9 @@
 
 import { jurisdictionForBaseUrl } from './presets.js';
 
-function parseApiKey(credentials) {
+function parseCredentials(credentials) {
   if (typeof credentials !== 'string' || credentials.length === 0) return null;
-  try { const o = JSON.parse(credentials); return typeof o?.apiKey === 'string' && o.apiKey ? o.apiKey : null; }
-  catch { return null; }
+  try { return JSON.parse(credentials); } catch { return null; }
 }
 
 /**
@@ -36,13 +35,25 @@ function parseApiKey(credentials) {
  */
 /** Map one `ai_providers` row → router opts, or null if it can't be a cloud provider. */
 function mapRowToConfig(row) {
-  const key = parseApiKey(row.credentials);
+  const creds = parseCredentials(row.credentials);
+  const key = (typeof creds?.apiKey === 'string' && creds.apiKey) ? creds.apiKey : null;
   const model = row.model_preference || undefined;
   const provider = String(row.provider || '').toLowerCase();
+  const authType = String(row.auth_type || '').toLowerCase();
   const baseUrl = row.base_url || undefined;
   // Carry the row's own label so the chat chip names the REAL provider (e.g.
   // "Regolo.ai") instead of guessing "OpenAI" from the presence of a key.
   const label = (typeof row.label === 'string' && row.label.trim()) ? row.label.trim() : undefined;
+  // Claude subscription (OAuth token) — provider anthropic/claude, auth_type 'oauth',
+  // credentials carrying a claudeOAuthToken (sk-ant-oat…). Routed through the same
+  // anthropicAdapter, but anthropic-wire swaps in Bearer + Claude-Code identity
+  // headers + the "You are Claude Code" preamble (anthropicAuthFromCfg keys on this
+  // field). US jurisdiction like any Anthropic provider. See docs/CLAUDE-SUBSCRIPTION-
+  // DRIVER-DESIGN-2026-06-26.md (Phase S).
+  const token = (typeof creds?.claudeOAuthToken === 'string' && creds.claudeOAuthToken) ? creds.claudeOAuthToken : null;
+  if (token && !baseUrl && (authType === 'oauth' || provider === 'claude_subscription' || provider === 'anthropic' || provider === 'claude')) {
+    return { claudeOAuthToken: token, anthropicApiKey: '', openaiApiKey: '', cloudModel: model, jurisdiction: jurisdictionForBaseUrl(undefined, 'anthropic'), label: label || 'Claude (subscription)', providerName: 'claude_subscription' };
+  }
   // Native Anthropic (no base_url).
   if (key && !baseUrl && (provider === 'anthropic' || provider === 'claude')) {
     return { anthropicApiKey: key, openaiApiKey: '', cloudModel: model, jurisdiction: jurisdictionForBaseUrl(undefined, provider), label, providerName: provider };
@@ -57,9 +68,23 @@ function mapRowToConfig(row) {
 export async function resolveInferenceConfig(db, userId) {
   try {
     const active = await db?.providers?.getActive?.(userId); // most-recently-used active row, or null
-    if (active) { const cfg = mapRowToConfig(active); if (cfg) return cfg; }
+    if (active) {
+      const cfg = mapRowToConfig(active);
+      if (cfg) { await applySensitiveExempt(db, userId, cfg); return cfg; }
+    }
   } catch { /* fail-soft: fall back to env/local */ }
   return {}; // router reads env (ANTHROPIC_API_KEY / OPENAI_API_KEY) when unset
+}
+
+// §4g opt-in: by default sensitive content (persona/claim abstractions) never
+// egresses to a US provider. If the cfg IS the user's own Claude subscription AND
+// they've explicitly enabled allowSubscriptionSensitive, mark it exempt so the
+// router lets sensitive content reach it. NEVER applied to a plain US API key.
+async function applySensitiveExempt(db, userId, cfg) {
+  if (cfg?.providerName !== 'claude_subscription') return;
+  try {
+    if ((await db?.users?.getSettings?.(userId))?.allowSubscriptionSensitive === true) cfg.sensitiveUsExempt = true;
+  } catch { /* default: not exempt */ }
 }
 
 // Inference tasks the user can route to a specific provider/model (Settings →
@@ -77,8 +102,25 @@ export const INFERENCE_TASKS = ['chat', 'narrate', 'harness', 'reflection', 'cat
 // assignment is stored as { model } in settings.taskModels[task] and resolved directly by
 // the owning pipeline (the drainer for 'categorize'), NOT through resolveInferenceConfigForTask.
 // Kept here so the PUT /providers/task-models endpoint and the resolver agree on which tasks
-// are local-name-only. A Set so adding a second on-box task later is one entry, no branch edits.
-export const ONBOX_TASKS = new Set(['categorize']);
+// are local-name-only. 'enrich' (L2) is on-box for the SAME reasons as 'categorize' (the
+// drainer resolves it via defaultEnrichModel → a local model NAME); it MUST be in this set or
+// the PUT endpoint mis-stores it as a cloud { providerId } that the drainer never reads.
+export const ONBOX_TASKS = new Set(['categorize', 'enrich']);
+
+/**
+ * Resolve the LOCAL model NAME a user assigned to an on-box task (categorize/enrich),
+ * or `fallback` when unset. Single source for the drainer (L1/L2) AND the narrate
+ * router's on-box fallback model — so a cloud-narrate failure degrades to the small
+ * local model the user actually chose, never the generic DEFAULT_LOCAL_MODEL. Fail-soft.
+ */
+export async function resolveOnBoxModel(db, userId, task, fallback) {
+  try {
+    const s = await db?.users?.getSettings?.(userId);
+    const m = s?.taskModels?.[task]?.model;
+    if (typeof m === 'string' && m.trim()) return m.trim();
+  } catch { /* fail-soft → fallback */ }
+  return fallback;
+}
 
 /**
  * Resolve the provider/model for a SPECIFIC task. Reads the per-task assignment
@@ -120,13 +162,23 @@ const JURISDICTION_RANK = (j) => (j === 'eu-zdr' ? 0 : j === 'local' ? 2 : 1);
  */
 export async function resolveProviderChain(db, userId, { sensitive = false } = {}) {
   const cloud = [];
+  // §4g opt-in (only consulted for sensitive requests): keep the user's own Claude
+  // subscription in the chain even though it's US, when they've explicitly enabled it.
+  let allowSubSensitive = false;
+  if (sensitive) {
+    try { allowSubSensitive = (await db?.users?.getSettings?.(userId))?.allowSubscriptionSensitive === true; } catch { /* default off */ }
+  }
   try {
     const rows = (await db?.providers?.list?.(userId)) || []; // list() omits credentials…
     for (const r of rows) {
       const full = await db.providers.get(r.id, userId); // …so fetch the full row for the key
       const cfg = full ? mapRowToConfig(full) : null;
       if (!cfg) continue;
-      if (sensitive && /^us/.test(cfg.jurisdiction || 'us-standard')) continue; // §4g: never cascade sensitive → US
+      if (sensitive && /^us/.test(cfg.jurisdiction || 'us-standard')) {
+        // §4g: never cascade sensitive → US, EXCEPT the opted-in subscription (mark it exempt).
+        if (allowSubSensitive && cfg.providerName === 'claude_subscription') cfg.sensitiveUsExempt = true;
+        else continue;
+      }
       cloud.push(cfg);
     }
     cloud.sort((a, b) => JURISDICTION_RANK(a.jurisdiction) - JURISDICTION_RANK(b.jurisdiction));

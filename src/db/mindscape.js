@@ -345,5 +345,44 @@ export function createMindscapeNamespace(deps) {
         [userId],
       );
     },
+
+    // Fresh coverage rollup computed directly from territory_profiles (the source of
+    // truth), so it is never stale regardless of when cascadeExploredPercent last ran.
+    // message-weighted: a 5k-message territory at 80% counts more than a 50-message one.
+    // explored_percent is plaintext (territory_profiles ∉ ENCRYPTED_FIELDS) → direct SQL.
+    async coverageSummary(userId) {
+      const one = async (sql) => {
+        const r = await d1Query(sql, [userId]).catch(() => ({ results: [] }));
+        return (r.results || r || [])[0] || {};
+      };
+      const t = await one(
+        `SELECT COUNT(*) AS total,
+                SUM(CASE WHEN explored_percent >= 100 THEN 1 ELSE 0 END) AS fully,
+                SUM(CASE WHEN COALESCE(explored_percent,0) > 0 THEN 1 ELSE 0 END) AS started,
+                ROUND(SUM(COALESCE(explored_percent,0) * COALESCE(message_count,0)) * 1.0
+                      / NULLIF(SUM(COALESCE(message_count,0)),0)) AS avg_pct
+           FROM territory_profiles WHERE user_id = ? AND dissolved_at IS NULL`);
+      // Theme / realm = average of each group's message-weighted coverage (fresh rollup).
+      const th = await one(
+        `SELECT COUNT(*) AS total, ROUND(AVG(pct)) AS avg_pct FROM (
+           SELECT SUM(COALESCE(tp.explored_percent,0)*COALESCE(tp.message_count,0))*1.0
+                  / NULLIF(SUM(COALESCE(tp.message_count,0)),0) AS pct
+             FROM territory_profiles tp
+            WHERE tp.user_id = ? AND tp.dissolved_at IS NULL AND tp.semantic_theme_id IS NOT NULL
+            GROUP BY tp.realm_id, tp.semantic_theme_id)`);
+      const rm = await one(
+        `SELECT COUNT(*) AS total, ROUND(AVG(pct)) AS avg_pct FROM (
+           SELECT SUM(COALESCE(tp.explored_percent,0)*COALESCE(tp.message_count,0))*1.0
+                  / NULLIF(SUM(COALESCE(tp.message_count,0)),0) AS pct
+             FROM territory_profiles tp
+            WHERE tp.user_id = ? AND tp.dissolved_at IS NULL AND tp.realm_id IS NOT NULL
+            GROUP BY tp.realm_id)`);
+      return {
+        territories: { total: t.total || 0, described: t.started || 0, fullyDescribed: t.fully || 0, avgPercent: t.avg_pct || 0 },
+        themes: { total: th.total || 0, avgPercent: th.avg_pct || 0 },
+        realms: { total: rm.total || 0, avgPercent: rm.avg_pct || 0 },
+        overall: { avgPercent: t.avg_pct || 0 },
+      };
+    },
   };
 }

@@ -2,6 +2,7 @@
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
 	import { mindscapeState } from '$lib/stores/mindscape';
+	import { navigationState } from '$lib/stores/navigation';
 	import MindscapeDetail from '$lib/components/mindscape/MindscapeDetail.svelte';
 	import NarrateControl from '$lib/components/mindscape/NarrateControl.svelte';
 	import MeasureControl from '$lib/components/mindscape/MeasureControl.svelte';
@@ -361,6 +362,23 @@
 
 
 	const msState = $derived($mindscapeState);
+
+	// Deep-link from Curious Life → a specific territory. CuriousLifeView stashes
+	// the territory id in navigation state and routes here; once the 3D map's
+	// points are actually loaded we apply the selection (the map's own effect then
+	// filters + flies the camera to it) and clear the pending id so it fires once.
+	// The id space matches: vitality territory_id === mindscape cluster3d/territory id.
+	let deepLinkApplied = $state(false);
+	$effect(() => {
+		const pending = $navigationState.selectedTerritoryId;
+		const ready = (msState.points?.length ?? 0) > 0;
+		if (pending == null || !ready || deepLinkApplied) return;
+		deepLinkApplied = true;
+		mindscapeState.selectTerritory(pending);
+		// Clear so a later manual deselect (or revisit) isn't overridden, and a
+		// fresh visit without a deep-link starts clean.
+		navigationState.setSelectedTerritory(null);
+	});
 
 	// Resizable panel state
 	let panelWidth = $state(320);

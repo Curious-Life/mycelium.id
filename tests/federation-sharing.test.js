@@ -41,8 +41,16 @@ function makeDb({ grantState = { granted: true, connId: 'cid', peerId: PEER_DID 
         async upsert(p) { shares.push({ op: 'upsert', ...p }); },
         async revoke(p) { shares.push({ op: 'revoke', ...p }); },
       },
+      // Legacy plaintext stores — the E2E serve no longer reads these for spaces; kept so
+      // the test can prove the plaintext ('a private note') is NEVER in the served bytes.
       spaceKnowledge: { async list() { return [{ content: 'a private note', source_type: 'direct', created_at: 't', embedding_768: [0.1, 0.2] }]; } },
       spaceRoomDocuments: { async listAtRoot() { return [{ path: 'work/plan.md', title: 'Plan', summary: 'the plan', embedding_768: [0.3], centroid_256: [0.4] }]; } },
+      // E2E ciphertext oplog: opaque ciphertext entries + the requester's sealed CEK grants.
+      spaceOplog: {
+        async listSince() { return [{ seq: 0, op_id: 'op1', author_did: PEER_DID, kind: 'content', action: 'put', item_ref: 'doc-1', gen: 0, item_lamport: 0, payload: JSON.stringify({ v: 4, kf: 'space', space_id: 'sp1', gen: 0, item_id: 'doc-1', iv: 'AAAA', ct: 'CIPHERTEXTONLY', tag: 'BBBB' }), header_sig: 'SIG' }]; },
+        async getCekGrants() { return [{ gen: 0, blob: { iv: 'x', ct: 'y', tag: 'z', epk: 'e' }, seq: 0 }]; },
+        async head() { return 0; },
+      },
       spaces: { async get() { return { name: 'Work' }; } },
       contexts: { async getTerritories() { return [{ territory_id: 1, name: 'Rust', essence: 'systems', realm_id: 2, centroid_3d: [1, 2, 3] }]; } },
       audit: { log() { return Promise.resolve(); } },
@@ -92,7 +100,7 @@ describe('shared content serve (Tier-0e) — security core', () => {
     assert.equal(r.status, 403);
   });
 
-  it('serves a SIGNED, VECTOR-FREE space payload when granted', async () => {
+  it('serves SIGNED, CIPHERTEXT-ONLY space content + the requester sealed grants (NO plaintext)', async () => {
     const { db } = makeDb();
     const r = await handlers(db).sharedContent(sign(base({ $type: 'social.mycelium.shared-content.v1', kind: 'space', ref: 'sp1' })));
     assert.equal(r.status, 200);
@@ -102,9 +110,14 @@ describe('shared content serve (Tier-0e) — security core', () => {
     // §7: NO embedding/centroid/vector anywhere in the served bytes
     assert.ok(!/embedding|centroid|vector/i.test(r.signedBody), 'served payload must not contain any vector field');
     const body = JSON.parse(r.signedBody);
-    assert.equal(body.documents[0].path, 'work/plan.md');
-    assert.equal(body.documents[0].embedding_768, undefined);
-    assert.equal(body.knowledge[0].embedding_768, undefined);
+    // E2E: serves OPAQUE ciphertext entries + the requester's sealed CEK grants, never plaintext.
+    assert.equal(body.knowledge, undefined, 'must NOT serve plaintext knowledge');
+    assert.equal(body.documents, undefined, 'must NOT serve plaintext documents');
+    assert.ok(!r.signedBody.includes('a private note'), 'the plaintext body must NEVER appear in the served bytes');
+    assert.equal(body.entries[0].item_ref, 'doc-1');
+    assert.ok(body.entries[0].payload.includes('CIPHERTEXTONLY'), 'the entry payload is opaque ciphertext');
+    assert.equal(body.grants.length, 1, 'serves the requesting peer their sealed CEK grant');
+    assert.equal(body.head, 0, 'serves the head cursor for incremental paging');
   });
 
   it('serves a vector-free context payload (no centroids)', async () => {

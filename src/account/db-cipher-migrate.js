@@ -17,7 +17,8 @@
 //   5. atomic swap: rename original → <db>.pre-cipher-<ts> (KEPT, never auto-deleted),
 //      rename the encrypted copy → <db>
 import Database from 'better-sqlite3';
-import { existsSync, openSync, readSync, closeSync, copyFileSync, renameSync, rmSync, readdirSync } from 'node:fs';
+import { existsSync, openSync, readSync, closeSync, renameSync, rmSync, readdirSync, chmodSync } from 'node:fs';
+import { safeVaultCopy } from '../db/backup.js';
 import { dirname, basename, join } from 'node:path';
 
 const PLAINTEXT_MAGIC = Buffer.from('SQLite format 3\0', 'latin1'); // first 16 bytes of any plaintext sqlite db
@@ -62,7 +63,12 @@ export function ensureVaultEncrypted({ dbPath, dbKeyHex, log = () => {} }) {
   const tmpPath = `${dbPath}.cipher-tmp`;
   for (const sfx of ['', '-wal', '-shm']) { try { rmSync(tmpPath + sfx); } catch {} } // clear any stale temp from a crashed run
 
-  // 1. fold the plaintext WAL into the main file + snapshot the source counts
+  // 1. fold the plaintext WAL into the main file + snapshot the source counts, then
+  //    take a CONSISTENT copy via VACUUM INTO on the open handle. NOT copyFileSync:
+  //    a byte copy of a vault another process is writing tears ("database disk image
+  //    is malformed") — and this copy becomes the encrypted vault, so a torn tmp would
+  //    pass the row-count parity check yet be born malformed.
+  //    @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
   let srcCounts;
   {
     const src = new Database(dbPath);
@@ -70,11 +76,16 @@ export function ensureVaultEncrypted({ dbPath, dbKeyHex, log = () => {} }) {
       src.pragma('journal_mode = WAL');
       src.pragma('wal_checkpoint(TRUNCATE)');
       srcCounts = tableCounts(src);
+      safeVaultCopy(src, tmpPath); // 2. consistent plaintext copy (rekeyed to cipher below)
     } finally { src.close(); }
   }
+  // Defense-in-depth: tmpPath is a transient FULL-PLAINTEXT vault copy until the rekey
+  // below encrypts it. VACUUM INTO creates it with default (umask) perms; tighten to
+  // owner-only so the plaintext window isn't world/group-readable (CLAUDE.md §1). The
+  // perms carry through the rename → the final encrypted vault is 0600 too.
+  try { chmodSync(tmpPath, 0o600); } catch { /* best-effort on platforms without POSIX modes */ }
 
-  // 2. copy → 3. rekey the copy in place
-  copyFileSync(dbPath, tmpPath);
+  // 3. rekey the copy in place
   {
     const cp = new Database(tmpPath);
     try {

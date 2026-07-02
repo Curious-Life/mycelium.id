@@ -13,6 +13,7 @@
 
 import { InferenceError } from "./errors.js";
 import { assertSafeBaseUrl, fetchProvider } from "./base-url.js";
+import { ANTHROPIC_URL, anthropicAuthHeaders, anthropicSystem } from "./anthropic-wire.js";
 
 // Defaults are overridable via INFERENCE_CLOUD_MODEL (see router.js). Anthropic
 // default favors the capable-but-balanced current Sonnet; both are just strings
@@ -20,9 +21,9 @@ import { assertSafeBaseUrl, fetchProvider } from "./base-url.js";
 export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 export const DEFAULT_OPENAI_MODEL = "gpt-4o";
 
-const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+// ANTHROPIC_URL + the Anthropic auth headers now live in ./anthropic-wire.js (the
+// single Anthropic-wire definition shared with src/agent/harness.js).
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
-const ANTHROPIC_VERSION = "2023-06-01";
 
 /**
  * Generate text from a BYOK cloud provider. Anthropic is preferred when both
@@ -42,6 +43,7 @@ export async function cloudInfer({
   prompt,
   maxTokens = 1024,
   anthropicApiKey,
+  claudeOAuthToken,
   openaiApiKey,
   baseUrl,
   model,
@@ -49,6 +51,7 @@ export async function cloudInfer({
   timeoutMs = 60000,
   onUsage,
   onTruncated,
+  noThink,
 } = {}) {
   if (typeof fetch !== "function") {
     throw new InferenceError("cloudInfer: no fetch implementation", { backend: "cloud" });
@@ -56,14 +59,15 @@ export async function cloudInfer({
   if (typeof prompt !== "string" || prompt.length === 0) {
     throw new InferenceError("cloudInfer: prompt must be a non-empty string", { backend: "cloud" });
   }
-  if (anthropicApiKey) {
-    return anthropicInfer({ prompt, maxTokens, apiKey: anthropicApiKey, model: model || DEFAULT_ANTHROPIC_MODEL, fetch, timeoutMs, onUsage, onTruncated });
+  if (anthropicApiKey || claudeOAuthToken) {
+    const auth = claudeOAuthToken ? { mode: "subscription", token: claudeOAuthToken } : { mode: "apiKey", apiKey: anthropicApiKey };
+    return anthropicInfer({ prompt, maxTokens, auth, model: model || DEFAULT_ANTHROPIC_MODEL, fetch, timeoutMs, onUsage, onTruncated });
   }
   // OpenAI-compatible path — native OpenAI, or any base_url provider (OpenRouter,
   // Together, Groq, Regolo, Scaleway, Ollama, LM Studio, vLLM …). A base_url with
   // no key is valid (some local servers are keyless).
   if (openaiApiKey || baseUrl) {
-    return openaiCompatibleInfer({ prompt, maxTokens, apiKey: openaiApiKey, baseUrl, model: model || DEFAULT_OPENAI_MODEL, fetch, timeoutMs, onUsage, onTruncated });
+    return openaiCompatibleInfer({ prompt, maxTokens, apiKey: openaiApiKey, baseUrl, model: model || DEFAULT_OPENAI_MODEL, fetch, timeoutMs, onUsage, onTruncated, noThink });
   }
   throw new InferenceError("cloudInfer: no cloud provider configured (set a key or a base_url)", { backend: "cloud" });
 }
@@ -120,14 +124,13 @@ export async function postJson(url, headers, body, fetch, timeoutMs) {
   return data;
 }
 
-async function anthropicInfer({ prompt, maxTokens, apiKey, model, fetch, timeoutMs, onUsage, onTruncated }) {
-  const data = await postJson(
-    ANTHROPIC_URL,
-    { "x-api-key": apiKey, "anthropic-version": ANTHROPIC_VERSION },
-    { model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] },
-    fetch,
-    timeoutMs,
-  );
+async function anthropicInfer({ prompt, maxTokens, auth, model, fetch, timeoutMs, onUsage, onTruncated }) {
+  // Subscription auth requires the "You are Claude Code" system block; apiKey auth
+  // sends no system field (anthropicSystem returns undefined → byte-identical).
+  const body = { model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] };
+  const sys = anthropicSystem(auth);
+  if (sys !== undefined) body.system = sys;
+  const data = await postJson(ANTHROPIC_URL, anthropicAuthHeaders(auth), body, fetch, timeoutMs);
   const out = Array.isArray(data?.content)
     ? data.content.filter((b) => b?.type === "text").map((b) => b.text).join("")
     : "";
@@ -153,12 +156,21 @@ export function resolveChatUrl(baseUrl) {
 // Covers OpenAI, OpenRouter, Together, Groq, Regolo, Scaleway, Ollama, LM Studio,
 // vLLM — anything speaking /v1/chat/completions. API key optional (local servers
 // are often keyless). Never echoes the key or the response body.
-async function openaiCompatibleInfer({ prompt, maxTokens, apiKey, baseUrl, model, fetch, timeoutMs, onUsage, onTruncated }) {
+async function openaiCompatibleInfer({ prompt, maxTokens, apiKey, baseUrl, model, fetch, timeoutMs, onUsage, onTruncated, noThink }) {
   const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+  const body = { model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] };
+  // Reasoning models (the Qwen3 family on vLLM/Regolo, etc.) otherwise spend the whole
+  // token budget on hidden reasoning_content and return an EMPTY `content` — which we
+  // treat as a failure → silent local fallback (the 2026-06-29 "ran llama3.1, overheated"
+  // bug; confirmed: qwen3.6-27b max_tokens=80 → content:null, finish:length). For
+  // structured tasks (narrate) we disable thinking so the answer comes straight back in
+  // `content`. vLLM-standard chat_template_kwargs; non-Qwen OpenAI-compat servers ignore
+  // the extra field. Mirrors the LOCAL narrate path's think:false.
+  if (noThink) body.chat_template_kwargs = { enable_thinking: false };
   const data = await postJson(
     resolveChatUrl(baseUrl),
     headers,
-    { model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] },
+    body,
     fetch,
     timeoutMs,
   );
@@ -245,8 +257,11 @@ async function* openaiCompatibleStream({ prompt, maxTokens, apiKey, baseUrl, mod
   if (truncated) emitTruncated(onTruncated, "length");
 }
 
-async function* anthropicStream({ prompt, maxTokens, apiKey, model, fetch, timeoutMs, onUsage, onTruncated }) {
-  const res = await openStream(ANTHROPIC_URL, { "x-api-key": apiKey, "anthropic-version": ANTHROPIC_VERSION }, { model, max_tokens: maxTokens, stream: true, messages: [{ role: "user", content: prompt }] }, fetch, timeoutMs);
+async function* anthropicStream({ prompt, maxTokens, auth, model, fetch, timeoutMs, onUsage, onTruncated }) {
+  const body = { model, max_tokens: maxTokens, stream: true, messages: [{ role: "user", content: prompt }] };
+  const sys = anthropicSystem(auth);
+  if (sys !== undefined) body.system = sys;
+  const res = await openStream(ANTHROPIC_URL, anthropicAuthHeaders(auth), body, fetch, timeoutMs);
   let inTok, outTok, truncated = false;
   for await (const payload of ssePayloads(res)) {
     let ev; try { ev = JSON.parse(payload); } catch { continue; }
@@ -265,12 +280,15 @@ async function* anthropicStream({ prompt, maxTokens, apiKey, model, fetch, timeo
  * @returns {AsyncGenerator<string>}
  */
 export async function* cloudStream({
-  prompt, maxTokens = 1024, anthropicApiKey, openaiApiKey, baseUrl, model,
+  prompt, maxTokens = 1024, anthropicApiKey, claudeOAuthToken, openaiApiKey, baseUrl, model,
   fetch = globalThis.fetch, timeoutMs = 60000, onUsage, onTruncated,
 } = {}) {
   if (typeof fetch !== "function") throw new InferenceError("cloudStream: no fetch implementation", { backend: "cloud" });
   if (typeof prompt !== "string" || prompt.length === 0) throw new InferenceError("cloudStream: prompt must be a non-empty string", { backend: "cloud" });
-  if (anthropicApiKey) { yield* anthropicStream({ prompt, maxTokens, apiKey: anthropicApiKey, model: model || DEFAULT_ANTHROPIC_MODEL, fetch, timeoutMs, onUsage, onTruncated }); return; }
+  if (anthropicApiKey || claudeOAuthToken) {
+    const auth = claudeOAuthToken ? { mode: "subscription", token: claudeOAuthToken } : { mode: "apiKey", apiKey: anthropicApiKey };
+    yield* anthropicStream({ prompt, maxTokens, auth, model: model || DEFAULT_ANTHROPIC_MODEL, fetch, timeoutMs, onUsage, onTruncated }); return;
+  }
   if (openaiApiKey || baseUrl) { yield* openaiCompatibleStream({ prompt, maxTokens, apiKey: openaiApiKey, baseUrl, model: model || DEFAULT_OPENAI_MODEL, fetch, timeoutMs, onUsage, onTruncated }); return; }
   throw new InferenceError("cloudStream: no cloud provider configured (set a key or a base_url)", { backend: "cloud" });
 }

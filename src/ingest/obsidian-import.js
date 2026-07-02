@@ -33,7 +33,7 @@ import { parseMarkdownNote } from './markdown.js';
 import { putBlob } from './blob-store.js';
 import { recordContentFlow } from '../inference/usage.js';
 
-const MAX_FILE_BYTES = 2 * 1024 * 1024; // 2MB per note
+const MAX_FILE_BYTES = Number(process.env.MYCELIUM_IMPORT_TEXT_LIMIT_BYTES) || 25 * 1024 * 1024; // 25MB per note (env-tunable)
 const MAX_FILES = 20000;                // total vault cap (logged if hit)
 const SKIP_DIRS = new Set(['.obsidian', '.trash', '.git', 'node_modules', '.smart-env']);
 
@@ -44,7 +44,7 @@ const SKIP_DIRS = new Set(['.obsidian', '.trash', '.git', 'node_modules', '.smar
 // (putBlob + attachments row, same at-rest home as every upload), and note
 // bodies are rewritten to the portal's attachment URL — the DOCUMENT copy
 // only; the MEMORY copy keeps the original text so embeddings stay clean.
-const MAX_ASSET_BYTES = Number(process.env.MYCELIUM_ATTACHMENT_LIMIT_BYTES) || 25 * 1024 * 1024;
+const MAX_ASSET_BYTES = Number(process.env.MYCELIUM_ATTACHMENT_LIMIT_BYTES) || 100 * 1024 * 1024;
 const ASSET_MIME = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
   svg: 'image/svg+xml', bmp: 'image/bmp', avif: 'image/avif', heic: 'image/heic', heif: 'image/heif',

@@ -150,6 +150,7 @@ async function main() {
   seed.run('m-budget', 'u1', 'quarterly budget and finances', '2026-06-03T00:00:00.000Z');
   const fakeDb = {
     _sqlite: intRaw,
+    _sqliteSearch: intRaw, // sidecar contract: the sqlite backend uses _sqliteSearch (docs/SEARCH-SIDECAR-DESIGN)
     rawQuery: (sql, params = []) => { try { return { results: intRaw.prepare(sql).all(...params) }; } catch { return { results: [] }; } },
   };
   const sh = createSearchHelpers({ db: fakeDb, userId: 'u1', searchBackend: 'sqlite' });
@@ -181,7 +182,7 @@ async function main() {
   const bfSeed = bfRaw.prepare('INSERT INTO messages(id,user_id,content,created_at) VALUES (?,?,?,?)');
   bfSeed.run('seed-1', 'u1', 'seeded alpha document', '2026-06-01T00:00:00.000Z');
   bfSeed.run('seed-2', 'u1', 'seeded beta document', '2026-06-02T00:00:00.000Z');
-  const bfDb = { _sqlite: bfRaw, rawQuery: (s, p = []) => { try { return { results: bfRaw.prepare(s).all(...p) }; } catch { return { results: [] }; } } };
+  const bfDb = { _sqlite: bfRaw, _sqliteSearch: bfRaw, rawQuery: (s, p = []) => { try { return { results: bfRaw.prepare(s).all(...p) }; } catch { return { results: [] }; } } };
   const bfSh = createSearchHelpers({ db: bfDb, userId: 'u1', searchBackend: 'sqlite' });
   await bfSh.noteUpsert({ id: 'incr-1', text: 'incrementally added before any query', ts: now }); // makes count>0
   const bfBeforeBuilt = bfRaw.prepare("SELECT value FROM search_state WHERE key='corpus_built'").get()?.value;
@@ -197,6 +198,7 @@ async function main() {
   capRaw.exec(`CREATE TABLE messages (id TEXT PRIMARY KEY, user_id TEXT, content TEXT, created_at TEXT, embedding_768 TEXT, forgotten_at TEXT, sensitive INTEGER DEFAULT 0, agent_id TEXT)`);
   const capDb = {
     _sqlite: capRaw,
+    _sqliteSearch: capRaw,
     rawQuery: (s, p = []) => { try { return { results: capRaw.prepare(s).all(...p) }; } catch { return { results: [] }; } },
     messages: {
       getContentMeta: async () => ({ exists: false }),
@@ -241,7 +243,7 @@ async function main() {
   const blkSeed = blkRaw.prepare('INSERT INTO messages(id,user_id,content,created_at) VALUES (?,?,?,?)');
   for (let i = 0; i < 5; i++) blkSeed.run(`bk-${i}`, 'u1', `bulk loaded entry ${i} about forest and vault`, `2026-06-0${i + 1}T00:00:00.000Z`);
   const blkBe = createSqliteBackend({ sqliteDb: blkRaw, userId: 'u1' });
-  const blkDb = { _sqlite: blkRaw, rawQuery: (s, p = []) => { try { return { results: blkRaw.prepare(s).all(...p) }; } catch { return { results: [] }; } } };
+  const blkDb = { _sqlite: blkRaw, _sqliteSearch: blkRaw, rawQuery: (s, p = []) => { try { return { results: blkRaw.prepare(s).all(...p) }; } catch { return { results: [] }; } } };
   const r1 = await loadFromDb({ backend: blkBe, db: blkDb, userId: 'u1' });
   const cnt1 = await blkBe.count();
   // Rebuild #2 over the SAME source: count must be identical (no dup).

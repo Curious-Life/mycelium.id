@@ -92,8 +92,16 @@ export class KeyOverwriteError extends Error {
  *  a missing item and `security` would otherwise spam "could not be found"; write
  *  failures are surfaced via the thrown Error's message, never raw stderr. stdout
  *  (which may carry a secret) is captured and never logged. */
-function defaultExec(cmd, args) {
-  return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+function defaultExec(cmd, args, input) {
+  // Reads pass no `input` (stdin ignored; the secret returns on stdout). WRITES
+  // pass the secret as `input` so it travels on STDIN, never as an argv element —
+  // argv is world-readable via `ps`/`/proc/<pid>/cmdline` (master-key discipline,
+  // CLAUDE.md §⚠4). stderr stays suppressed; failures surface via the thrown Error.
+  return execFileSync(cmd, args, {
+    encoding: 'utf8',
+    ...(input != null ? { input } : {}),
+    stdio: [input != null ? 'pipe' : 'ignore', 'pipe', 'ignore'],
+  }).trim();
 }
 
 function kcRead(service, account, exec) {
@@ -116,9 +124,10 @@ function backupSuffix() {
  *  `-j` comment carries only guidance. Returns the backup service name. */
 function kcBackup(service, account, priorValue, exec) {
   const bakService = `${service}.bak.${backupSuffix()}`;
+  // Secret on STDIN (`-w` no value -> enter+retype, two identical lines), not argv.
   exec('security', ['add-generic-password', '-U', '-a', account, '-s', bakService,
     '-j', 'Mycelium key backup — saved automatically before an overwrite. Safe to delete once you have confirmed the vault still opens.',
-    '-w', priorValue]);
+    '-w'], `${priorValue}\n${priorValue}\n`);
   return bakService;
 }
 
@@ -126,8 +135,12 @@ function kcWrite(service, value, account, exec) {
   const prior = kcRead(service, account, exec);
   // Never lose a key silently: back up any DIFFERENT existing value first.
   if (prior !== null && prior !== value) kcBackup(service, account, prior, exec);
-  // -U updates an existing item in place; -w sets the secret. argv array, no shell.
-  exec('security', ['add-generic-password', '-U', '-a', account, '-s', service, '-w', value]);
+  // -U updates an existing item in place. The secret travels on STDIN via `-w`
+  // (no value -> `security` prompts enter+retype; we send two identical lines),
+  // never as an argv element. The two lines are always the same normalized value,
+  // so the mismatch path (which `security` fails OPEN on, storing empty) cannot
+  // occur here. argv array, no shell.
+  exec('security', ['add-generic-password', '-U', '-a', account, '-s', service, '-w'], `${value}\n${value}\n`);
 }
 
 function kcDelete(service, account, exec) {
@@ -208,18 +221,41 @@ export function onePasswordAvailable() {
  *  (separate from the app's working key item, so the user can find it easily). */
 export function saveRecoveryKeyToKeychain(value, { env = process.env } = {}) {
   const { account } = keychainNames({ env });
+  const key = normalizeKey(value);
+  // Feed the secret to `security` on STDIN — never as an argv element. argv is
+  // world-readable on the host via `ps`/`/proc/<pid>/cmdline`, so a key in argv
+  // leaks to other local users for the process lifetime (master-key discipline,
+  // CLAUDE.md §⚠️4). `-w` with no value makes `security` read the password from
+  // stdin, prompting twice (enter + retype) — so send it on two lines. Verified
+  // live against the login Keychain 2026-06-29.
   execFileSync('security', ['add-generic-password', '-U', '-a', account, '-s', RECOVERY_LABEL,
     '-j', 'Your Mycelium vault recovery key — the only way to recover your vault on a new computer.',
-    '-w', normalizeKey(value)], { stdio: ['ignore', 'ignore', 'inherit'] });
+    '-w'], { input: `${key}\n${key}\n`, stdio: ['pipe', 'ignore', 'ignore'] });
 }
 
 /** Save the recovery key to 1Password via the `op` CLI (requires `op` signed in;
  *  throws otherwise — the caller surfaces a friendly message). */
 export function saveRecoveryKeyTo1Password(value) {
-  execFileSync('op', ['item', 'create', '--category=password', `--title=${RECOVERY_LABEL}`,
-    `password=${normalizeKey(value)}`,
-    'notesPlain=Mycelium vault recovery key — the only way to recover your vault on a new computer.'],
-    { stdio: ['ignore', 'ignore', 'pipe'] });
+  const key = normalizeKey(value);
+  // Same discipline as the Keychain path: pass the key in a JSON item-template on
+  // STDIN, never as a `password=<key>` argv element (argv is world-readable via
+  // `ps`). Only the CONCEALED field value carries the key, and it travels on
+  // stdin; title/category live in the non-secret template. NOTE: `op` is absent
+  // from CI and this dev box — the stdin-template form is verified by source
+  // guard (scripts/verify-keystore-stdin.mjs) but NOT yet exercised live; verify
+  // on a host with `op` signed in before relying on the 1Password path. On any
+  // op error the caller (src/account/router.js) surfaces a friendly message.
+  const template = JSON.stringify({
+    title: RECOVERY_LABEL,
+    category: 'PASSWORD',
+    fields: [
+      { id: 'password', type: 'CONCEALED', purpose: 'PASSWORD', value: key },
+      { id: 'notesPlain', type: 'STRING', purpose: 'NOTES',
+        value: 'Mycelium vault recovery key — the only way to recover your vault on a new computer.' },
+    ],
+  });
+  execFileSync('op', ['item', 'create', '--template', '-'],
+    { input: template, stdio: ['pipe', 'ignore', 'pipe'] });
 }
 
 /** Best-effort: open the store app so the user SEES the saved item natively

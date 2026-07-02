@@ -17,6 +17,16 @@
 import crypto from "node:crypto";
 
 const HKDF_INFO = "mycelium-identity-v1";
+// Independent X25519 keyAgreement (ENCRYPTION) key — a SEPARATE HKDF info from the
+// signing key, so the box derives a fresh X25519 keypair rather than the
+// Ed25519→X25519 birational conversion the W3C did:key spec warns against (key
+// separation). Used to seal the per-space Content Encryption Key to this member
+// (E2E "Space Key Lockbox", docs/SHARED-SPACES-E2E-DESIGN-2026-06-30.md).
+const KEYAGREEMENT_HKDF_INFO = "mycelium-keyagreement-v1";
+// PKCS8 DER prefix for an X25519 private key carrying a 32-byte seed (OID 1.3.101.110).
+const X25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b656e04220420", "hex");
+// SPKI DER prefix for an X25519 public key (to reconstruct a peer's key for ECDH).
+const X25519_SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
 // Standard PKCS8 DER prefix for an ed25519 private key carrying a 32-byte seed.
 const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 const HANDLE_RE = /^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/; // 2-32 chars, no leading/trailing dash
@@ -32,6 +42,19 @@ function deriveKeyPair(masterHex) {
   }
   const seed = Buffer.from(crypto.hkdfSync("sha256", Buffer.from(masterHex, "hex"), Buffer.alloc(0), Buffer.from(HKDF_INFO), 32));
   const privateKey = crypto.createPrivateKey({ key: Buffer.concat([ED25519_PKCS8_PREFIX, seed]), format: "der", type: "pkcs8" });
+  const publicKey = crypto.createPublicKey(privateKey);
+  return { privateKey, publicKey };
+}
+
+/** Derive the X25519 keyAgreement keypair from the master key (independent HKDF info).
+ *  X25519 private keys are 32 random scalar bytes (Node clamps internally), so the
+ *  same seed→PKCS8→KeyObject pattern as the Ed25519 identity works. */
+function deriveKeyAgreementKeyPair(masterHex) {
+  if (typeof masterHex !== "string" || !/^[0-9a-f]{64}$/i.test(masterHex)) {
+    throw new IdentityError("identity: a 64-char hex master key is required");
+  }
+  const seed = Buffer.from(crypto.hkdfSync("sha256", Buffer.from(masterHex, "hex"), Buffer.alloc(0), Buffer.from(KEYAGREEMENT_HKDF_INFO), 32));
+  const privateKey = crypto.createPrivateKey({ key: Buffer.concat([X25519_PKCS8_PREFIX, seed]), format: "der", type: "pkcs8" });
   const publicKey = crypto.createPublicKey(privateKey);
   return { privateKey, publicKey };
 }
@@ -52,6 +75,10 @@ export function createIdentity({ masterHex = process.env.ENCRYPTION_MASTER_KEY, 
   const publicKeyRaw = publicKey.export({ format: "der", type: "spki" }).subarray(-32);
   const publicKeyB64 = Buffer.from(publicKeyRaw).toString("base64url");
 
+  // The independent X25519 keyAgreement (encryption) keypair (E2E spaces).
+  const ka = deriveKeyAgreementKeyPair(masterHex);
+  const keyAgreementPublicKeyB64 = Buffer.from(ka.publicKey.export({ format: "der", type: "spki" }).subarray(-32)).toString("base64url");
+
   if (handle !== null && !isValidHandle(handle)) {
     throw new IdentityError(`identity: invalid handle ${JSON.stringify(handle)} (2-32 chars, a-z 0-9 -, no leading/trailing dash)`);
   }
@@ -59,6 +86,20 @@ export function createIdentity({ masterHex = process.env.ENCRYPTION_MASTER_KEY, 
   return {
     handle,
     publicKeyB64,
+    /** This box's X25519 keyAgreement public key (base64url) — published in did.json
+     *  under #key-enc / keyAgreement; peers seal the space CEK to it. */
+    keyAgreementPublicKeyB64,
+    /** ECDH shared secret with a peer's X25519 keyAgreement public key (base64url) →
+     *  32-byte Buffer. The X25519 private key stays encapsulated (never exposed), so
+     *  the sealed-box (BU-SEAL) calls this rather than touching key material.
+     *  ⚠️ This is the RAW X25519 ECDH output — it is NOT a uniform symmetric key.
+     *  Callers MUST run it through a KDF (HKDF) with context before using it as an
+     *  AES key (RFC 7748 §6 / NaCl box). BU-SEAL's HPKE does this internally. */
+    keyAgreementSharedSecret(peerPublicKeyB64) {
+      const spki = Buffer.concat([X25519_SPKI_PREFIX, Buffer.from(String(peerPublicKeyB64), "base64url")]);
+      const peerPub = crypto.createPublicKey({ key: spki, format: "der", type: "spki" });
+      return crypto.diffieHellman({ privateKey: ka.privateKey, publicKey: peerPub });
+    },
     /** Sign bytes/string → base64url signature. */
     sign(data) {
       const buf = typeof data === "string" ? Buffer.from(data, "utf8") : data;

@@ -1,6 +1,7 @@
 import express from 'express';
 import { startClusteringJob, startMeasurementJob, startBackfillJob, getJob, cancelJob,
-  startNarrationWalkJob, pauseNarration, resumeNarration, cancelNarration, getNarrationStatus } from './jobs.js';
+  startNarrationWalkJob, pauseNarration, resumeNarration, cancelNarration, getNarrationStatus,
+  startChronicleNarrationJob } from './jobs.js';
 import { makeNarrationRunner } from './agent/narration-runner.js';
 import { getEmbedderHealth } from './embed/supervisor.js';
 import { getMindscapeCached, getMindscapePointsCached } from './mindscape-cache.js';
@@ -420,6 +421,7 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
           name: rp.name || null, essence: rp.essence || null,
           archetypeType: rp.archetype_type || null, archetypeCharacter: rp.archetype_character || null,
           territoryCount: (realmTerritoryIds[realmId]?.size) || rp.territory_count || 0, pointCount: count,
+          exploredPercent: rp.explored_percent || 0,
           topEntities: mapEntities(rp.top_entities), signaturePatterns: parseArr(rp.signature_patterns),
           storyBirth: rp.story_birth || null, storyArc: rp.story_arc || null,
           storyPeakMoments: parseArr(rp.story_peak_moments), storyCurrentChapter: rp.story_current_chapter || null,
@@ -472,6 +474,13 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
   router.get('/mindscape/realms', async (_req, res) => {
     try { res.json({ realms: await db.mindscape.getRealms(userId) }); }
     catch { fail(res); }
+  });
+
+  // GET /mindscape/coverage → fresh %-described rollup for territories/themes/realms.
+  // Computed live from territory_profiles so it never drifts from the cascaded columns.
+  router.get('/mindscape/coverage', async (_req, res) => {
+    try { res.json(await db.mindscape.coverageSummary(userId)); }
+    catch { fail(res, 500, 'failed to compute coverage'); }
   });
 
   // Noise stats are point-derived (total + territory-noise) and are already
@@ -576,11 +585,43 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
         return res.status(409).json({ error, reason: 'not_embedded', embedded, total });
       }
 
+      // DEBOUNCE: the mindscape view re-POSTs generate on every load, re-clustering
+      // the full point set each app launch and blanking the map for minutes while it
+      // runs (the points cache doesn't recover cleanly mid-run). Skip the rebuild when
+      // topology already exists so the existing map stays stable. First-run (0 points)
+      // still auto-generates; an intentional full rebuild passes ?force=1.
+      if (!_req.query?.force) {
+        try {
+          const pr = await db.rawQuery('SELECT COUNT(*) AS c FROM clustering_points WHERE user_id = ? AND landscape_x IS NOT NULL', [userId]);
+          if (Number(pr?.results?.[0]?.c ?? 0) > 0) {
+            return res.json({ jobId: null, status: 'skipped', reason: 'topology_exists', note: 'Map already built; pass ?force=1 to rebuild.' });
+          }
+        } catch { /* counting failed — fall through and generate */ }
+      }
+
       const r = startClusteringJob({ dbPath, userId, db });
       res.json(r);
     } catch {
       // resolveKeys/spawn unavailable — fail closed, no internals leaked.
       fail(res, 503, 'mindscape generation is unavailable (key source or pipeline not ready)');
+    }
+  });
+
+  // POST /mycelium/describe-more  body { territoryId? } → deepen narration coverage WITHOUT
+  // re-clustering. Spawns describe-chronicles.js as a CHILD (single-flight via the job's
+  // chronicleChildRunning guard) — NEVER the in-process narration-walk (that pegged the
+  // event loop + white-screened the app). No body = global pass (all under-covered
+  // territories, fold in unseen); { territoryId } = that one territory + its rollup.
+  // Progress streams to the unified activity feed (kind 'describe:chronicle'); poll /activity.
+  router.post('/mycelium/describe-more', async (req, res) => {
+    try {
+      const raw = req.body?.territoryId;
+      const territoryId = raw != null && Number.isFinite(Number(raw)) ? Number(raw) : null;
+      const r = startChronicleNarrationJob({ dbPath, userId, territoryId });
+      if (!r || r.pid == null) return res.json({ status: 'busy', note: 'A describe pass is already running.' });
+      res.json({ status: 'running', pid: r.pid, scope: territoryId == null ? 'all' : 'territory', territoryId });
+    } catch {
+      fail(res, 503, 'describe-more is unavailable (key source or pipeline not ready)');
     }
   });
 

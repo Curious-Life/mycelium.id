@@ -13,7 +13,8 @@
 // think:false AND response_format for reasoning models). Cloud providers go through
 // the existing inference router (audited egress).
 
-import { resolveInferenceConfigForTask } from '../../src/inference/resolve.js';
+import { resolveInferenceConfigForTask, resolveOnBoxModel } from '../../src/inference/resolve.js';
+import { labelingRecommendedModel } from '../../src/inference/role-models.js';
 import { createInferenceRouter } from '../../src/inference/router.js';
 import { createEgressAuditSink } from '../../src/inference/egress.js';
 import { createUsageSink } from '../../src/inference/usage.js';
@@ -74,7 +75,22 @@ export async function createNarrator({ db, userId, fetch = globalThis.fetch }) {
   }
 
   // ── Cloud / remote: the audited inference router (anthropic or openai-compatible).
-  const router = createInferenceRouter({ ...cfg, onEgress: createEgressAuditSink(db, userId), onUsage });
+  // On a cloud failure the router falls back to ON-BOX — point that fallback at the
+  // user's CONFIGURED on-box model (the labeling pick, e.g. qwen3.5:4b) instead of the
+  // generic DEFAULT_LOCAL_MODEL (llama3.1), and surface the failure via onCloudFallback
+  // so a Regolo outage degrades visibly to the small local model the user chose — never
+  // silently to a heavy 8B that cooks the machine (the 2026-06-29 incident).
+  const onBoxFallback = await resolveOnBoxModel(db, userId, 'categorize', labelingRecommendedModel());
+  const router = createInferenceRouter({
+    ...cfg,
+    localModel: onBoxFallback,
+    onEgress: createEgressAuditSink(db, userId),
+    onUsage,
+    onCloudFallback: (info) => {
+      try { process.stderr.write(`[narrate] cloud '${info.provider}/${info.model}' failed (${info.status ?? 'err'}) — using on-box ${info.localModel}\n`); } catch { /* never break narration */ }
+      try { db?.activityFeed?.notice?.({ userId, kind: 'narrate_cloud_fallback', message: `Narration: ${info.provider} (${info.model}) failed — used on-box ${info.localModel}` }); } catch { /* feed optional */ }
+    },
+  });
   const infer = (prompt, { maxTokens = 700 } = {}) => router.infer({ task: 'narrate', prompt, maxTokens });
   return { infer, label, local: false };
 }

@@ -9,6 +9,7 @@
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
 	import ChannelsSection from '$lib/components/settings/ChannelsSection.svelte';
 	import AISettings from '$lib/components/settings/AISettings.svelte';
+	import EngineSelector from '$lib/components/settings/EngineSelector.svelte';
 	import UsageSection from '$lib/components/settings/UsageSection.svelte';
 	import AIAccessSection from '$lib/components/settings/AIAccessSection.svelte';
 	import AgentCaptureSection from '$lib/components/settings/AgentCaptureSection.svelte';
@@ -723,6 +724,9 @@
 			{/if}
 
 			{#if activePane === 'intelligence'}
+			<!-- Engine (harness): native ↔ Claude Code — which engine runs your chat agent -->
+			<EngineSelector />
+
 			<!-- The model that powers Mycelium — active-model hero + Local/Cloud lanes -->
 			<AISettings />
 

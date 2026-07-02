@@ -378,7 +378,12 @@ export async function createHttpApp(opts = {}) {
   // handlers can verify a peer's ed25519 signature over the RAW request body (the
   // bytes the sender actually signed) instead of a re-canonicalized parse — see
   // src/federation/handlers.js verify(). Stashing the buffer does not alter parsing.
-  app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
+  // limit 10mb (default is 100kb): /ingest/import bulk-syncs Claude Code history
+  // in batches that routinely exceed 100kb (~117kb for 50 coding turns) — the
+  // default silently 413'd them, which the bridge mis-read as "app down" and
+  // retried forever, stalling the whole sync. Loopback single-user, so a generous
+  // body cap is safe.
+  app.use(express.json({ limit: '10mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
   // Shared vault handle for the authenticated ingestion routes (one per app,
   // not per request — unlike /mcp which isolates per session). Reuses the SAME
