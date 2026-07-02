@@ -111,7 +111,7 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
 
   return {
     didJson() {
-      const doc = buildDidDocument(getHost(), identity?.publicKeyB64, getMatrixId() || undefined);
+      const doc = buildDidDocument(getHost(), identity?.publicKeyB64, getMatrixId() || undefined, identity?.keyAgreementPublicKeyB64);
       return doc ? { status: 200, body: doc } : { status: 404, body: { error: 'no public identity' } };
     },
 
@@ -246,18 +246,32 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
 
         let content;
         if (kind === 'space') {
-          // NB: this serve path assumes every space_knowledge row is visibility='all'
-          // (the only value any writer sets today — db/space-knowledge.js default).
-          // db.spaceKnowledge.list() returns all active rows unfiltered, so IF a
-          // restrictive visibility (e.g. 'members-only') is ever introduced, this
-          // query MUST filter on it — otherwise restricted entries would leak to a
-          // remote grantee. Keep that coupling here, not just in the schema comment.
-          const knowledge = (await db.spaceKnowledge.list(payload.ref).catch(() => [])).slice(0, 200)
-            .map((k) => ({ content: k.content, source_type: k.source_type, created_at: k.created_at }));
-          const documents = (await db.spaceRoomDocuments.listAtRoot(payload.ref, userId).catch(() => [])).slice(0, 200)
-            .map((d) => ({ path: d.path, title: d.title, summary: d.summary }));
+          // E2E (replaces the REJECTED plaintext serve — "plaintext over the tunnel is
+          // unacceptable"): ship OPAQUE ciphertext from the oplog + ONLY the requesting
+          // peer's sealed CEK grants. The owner/relay/tunnel never see plaintext; the
+          // grantee unseals its CEK + decrypts locally. Every entry payload is already
+          // ciphertext (O3-WRITE), so we add NO plaintext here. Confidentiality is
+          // cryptographic membership (E12), not a visibility filter — a peer with no
+          // grant gets ciphertext it cannot open, and resolveSharedGrant still 403s a
+          // non-member before we reach here.
+          const since = Number.isInteger(payload.since) ? payload.since : -1;
+          // Size-aware batch: accumulate entries until near the response cap (headroom
+          // for grants + name + JSON), then stop — the grantee pages with `since` = the
+          // last seq it received until it reaches `head`. Always ship at least one entry.
+          const all = await db.spaceOplog.listSince(payload.ref, since, 1000).catch(() => []);
+          const BUDGET = MAX_SHARED_CONTENT_BYTES - 64 * 1024;
+          const entries = [];
+          let bytes = 0;
+          for (const e of all) {
+            bytes += (e.payload ? e.payload.length : 0) + 256;
+            if (entries.length > 0 && bytes > BUDGET) break;
+            entries.push(e);
+          }
+          // The requester is the verified peer (v.did) — serve ONLY their sealed CEKs.
+          const grants = await db.spaceOplog.getCekGrants(payload.ref, v.did).catch(() => []);
+          const head = await db.spaceOplog.head(payload.ref).catch(() => -1);
           const sp = await db.spaces.get(payload.ref).catch(() => null);
-          content = { kind, name: sp?.name || sp?.display_name || null, knowledge, documents };
+          content = { kind, name: sp?.name || sp?.display_name || null, head, entries, grants };
         } else {
           const territories = (await db.contexts.getTerritories(payload.ref).catch(() => [])).slice(0, 500)
             .map((t) => ({ territory_id: t.territory_id, name: t.name, essence: t.essence, realm_id: t.realm_id }));
@@ -272,7 +286,7 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
         db.audit?.log?.({
           action: 'federation_shared_content_served', userId, ip,
           resourceType: kind, resourceId: String(payload.ref),
-          details: { peer: didWebHost(v.did), docs: content.documents?.length ?? 0, knowledge: content.knowledge?.length ?? 0, territories: content.territories?.length ?? 0 },
+          details: { peer: didWebHost(v.did), entries: content.entries?.length ?? 0, grants: content.grants?.length ?? 0, territories: content.territories?.length ?? 0 },
         })?.catch?.(() => {});
 
         // Sign the EXACT bytes we send so the peer verifies authenticity.

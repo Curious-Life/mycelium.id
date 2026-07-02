@@ -17,10 +17,19 @@
 // here while there are few; they extract to src/ingest/sources/*.js when 2b/2c
 // add more (each adapter is already a self-contained {detectType → run} pair).
 
+import { promises as fsp } from 'node:fs';
 import JSZip from 'jszip';
 import {
   detectExportType, processClaudeExport, processOpenAIExport, assertEntryCount,
 } from './import-parsers.js';
+import { listEntries, openEntryStream } from './zip-stream.js';
+import { streamJsonArray } from './json-array-stream.js';
+
+// Streaming-path bounds. Entry cap matches import-parsers'. The streamed
+// conversations.json no longer hits the 512MB V8 string cap, so its byte cap is
+// just a decompression-bomb backstop, not a real-history limit (8GB default).
+const STREAM_MAX_ENTRIES = Number(process.env.MYCELIUM_IMPORT_MAX_ENTRIES) || 500_000;
+const STREAM_MAX_JSON_BYTES = Number(process.env.MYCELIUM_IMPORT_STREAM_MAX_JSON_BYTES) || 8 * 1024 * 1024 * 1024;
 import { importMyceliumVault } from './vault-import.js';
 import { captureMessage } from './capture.js';
 import { deriveCreatedAt, TS_PROVENANCE } from './timestamp.js';
@@ -31,7 +40,10 @@ import { describeImage } from '../enrich/describe-image.js';
 
 // A capture() bound to this import's context — the message write boundary every
 // conversation-export adapter funnels through.
-const captureFor = (ctx) => (msg) => captureMessage(ctx.db, { userId: ctx.userId, ...msg }, ctx.enqueueEnrichment);
+// `ctx.capture` is an optional injected write seam (used by gates to exercise the
+// pipeline without a real vault); production passes none and goes through the
+// audited, encrypting captureMessage choke-point.
+const captureFor = (ctx) => ctx.capture || ((msg) => captureMessage(ctx.db, { userId: ctx.userId, ...msg }, ctx.enqueueEnrichment));
 
 // ── Loose-file classification (self-contained; mirrors portal-uploads' table) ──
 const EXT_MIME = {
@@ -155,22 +167,74 @@ async function runLooseFile(input, ctx) {
   return { importResult: { type: isImage ? 'image' : 'file', attachmentId, messageId: msg?.id || null, captioned: Boolean(caption) } };
 }
 
-// Transport normalization for archives: bytes → loaded+bomb-guarded zip →
-// detect → dispatch. Owns the entry-count/zip-bomb guard (was in portal-uploads).
-async function runArchive(input, ctx) {
-  let zip = input.zip;
-  if (!zip) {
-    try { zip = await JSZip.loadAsync(input.buffer); assertEntryCount(zip); }
-    catch (e) {
-      if (e?.code === 'TOO_MANY_ENTRIES') return { error: 'this archive has too many entries — refusing to import (possible archive bomb)' };
-      return { error: 'unrecognized file — upload a Mycelium vault export, or a Claude/ChatGPT export .zip' };
-    }
+const UNRECOGNIZED_EXPORT = 'unrecognized export — expected a Mycelium vault export, or a Claude/ChatGPT conversations.json';
+const BAD_ARCHIVE = 'unrecognized file — upload a Mycelium vault export, or a Claude/ChatGPT export .zip';
+const ARCHIVE_BOMB = 'this archive has too many entries — refusing to import (possible archive bomb)';
+
+// Streaming archive path (gig-scale): read entry NAMES + the one needed entry out
+// of a (possibly multi-GB) archive — from a Buffer (yauzl.fromBuffer, in-memory,
+// NO disk write — preserves the "bytes never hit disk in plaintext" invariant) OR
+// a file path — WITHOUT loading the whole zip or conversations.json into memory.
+// Claude/ChatGPT conversations.json streams ONE conversation at a time, so the
+// 512MB V8 string cap + the full-array heap are gone (constant memory, any size).
+async function runArchiveStreaming(src, ctx) {
+  let names;
+  try { names = await listEntries(src, { maxEntries: STREAM_MAX_ENTRIES }); }
+  catch (e) { return { error: e?.code === 'TOO_MANY_ENTRIES' ? ARCHIVE_BOMB : BAD_ARCHIVE }; }
+
+  // Mycelium vault export first (priority, as detectExportType orders it): it's the
+  // only format with manifest.json → the JSZip importer (vault streaming is future;
+  // large vault exports arrive via the off-disk dirPath importer, not an upload).
+  if (names.includes('manifest.json')) {
+    const buf = Buffer.isBuffer(src) ? src : await fsp.readFile(src);
+    return dispatchPreloadedZip(await JSZip.loadAsync(buf), ctx);
   }
+  // Claude / ChatGPT — the gig-scale case: stream conversations.json.
+  if (names.includes('conversations.json')) {
+    let stream;
+    try { stream = await openEntryStream(src, 'conversations.json', { maxEntries: STREAM_MAX_ENTRIES, maxBytes: STREAM_MAX_JSON_BYTES }); }
+    catch (e) { if (e?.code === 'ENTRY_TOO_LARGE') return { error: 'conversations.json exceeds the import byte cap (possible decompression bomb)' }; throw e; }
+    if (!stream) return { error: UNRECOGNIZED_EXPORT };
+    const gen = streamJsonArray(stream);
+    let first;
+    try { first = await gen.next(); } catch { return { error: UNRECOGNIZED_EXPORT }; } // malformed JSON
+    if (first.done) return { error: UNRECOGNIZED_EXPORT };
+    const f = first.value || {};
+    async function* all() { yield first.value; yield* gen; } // chain peeked-first + rest (single pass, no re-open)
+    if (f.mapping && typeof f.mapping === 'object') {
+      return { importResult: { type: 'chatgpt', ...(await processOpenAIExport(all(), { capture: captureFor(ctx) })) } };
+    }
+    if (Array.isArray(f.chat_messages)) {
+      return { importResult: { type: 'claude', ...(await processClaudeExport(null, { capture: captureFor(ctx), conversations: all() })) } };
+    }
+    return { error: UNRECOGNIZED_EXPORT };
+  }
+  if (names.some((n) => n.toLowerCase().endsWith('.md'))) return { error: ARCHIVE_UNSUPPORTED.obsidian() };
+  if (names.some((n) => /connections\.csv|messages\.csv/i.test(n))) return { error: ARCHIVE_UNSUPPORTED.linkedin() };
+  return { error: UNRECOGNIZED_EXPORT };
+}
+
+// Dispatch a fully-loaded JSZip (mycelium vault export, or a caller-supplied zip)
+// through the detect→adapter path. Holds the whole archive in memory — only used
+// for the manifest-driven mycelium importer, not the streamed conversations path.
+async function dispatchPreloadedZip(zip, ctx) {
+  try { assertEntryCount(zip); } catch { return { error: ARCHIVE_BOMB }; }
   const detected = await detectExportType(zip);
-  detected.zip = zip; // adapters that need the archive (mycelium, claude) read it here
+  detected.zip = zip; // adapters that need the archive (mycelium) read it here
   const adapter = ARCHIVE_ADAPTERS[detected.type];
   if (adapter) return { importResult: await adapter(detected, ctx) };
   const unsupported = ARCHIVE_UNSUPPORTED[detected.type];
   if (unsupported) return { error: unsupported(detected) };
-  return { error: 'unrecognized export — expected a Mycelium vault export, or a Claude/ChatGPT conversations.json' };
+  return { error: UNRECOGNIZED_EXPORT };
+}
+
+// Transport normalization for archives. Route the bytes (a Buffer, or a spooled
+// file path) through the STREAMING reader — entry-count/zip-bomb guard included —
+// so conversations.json never explodes into one >512MB string. A caller already
+// holding a parsed JSZip (rare) dispatches directly.
+async function runArchive(input, ctx) {
+  if (input.zip) return dispatchPreloadedZip(input.zip, ctx);
+  const src = input.filePath || input.buffer;
+  if (!src) return { error: BAD_ARCHIVE };
+  return runArchiveStreaming(src, ctx);
 }

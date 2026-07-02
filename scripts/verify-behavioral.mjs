@@ -57,6 +57,17 @@ for (let day = 0; day < DAYS; day++) {
   }
 }
 
+// Regression seed: EPOCH_N messages whose created_at is stored as an epoch-MILLISECOND
+// numeric string (a real import format). The old inline fromisoformat parse silently
+// dropped these; a whole vault in that format produced NO row + a blank Routine surface.
+// Placed at hour 14 (≠ the 9/21 peaks) so B6 can prove they were parsed + binned.
+const EPOCH_N = 8;
+for (let k = 0; k < EPOCH_N; k++) {
+  const tsMs = todayMidnight - 5 * DAY_MS + 14 * 3600000 + k * 60000;
+  await db.rawQuery(`INSERT INTO messages (id, user_id, role, content, created_at) VALUES (?,?,'user',NULL,?)`,
+    [`m-${mi++}`, U, String(tsMs)]);
+}
+
 function runStage() {
   return spawnSync(PY, ['pipeline/compute-behavioral.py'], {
     encoding: 'utf8',
@@ -93,7 +104,7 @@ try {
     !!allPlain, row ? `plain{${present.filter((c) => !isEnvelope(row[c])).length}/${present.length}}` : 'no row');
   rec('B4. structural columns plaintext (era / window_end / message_count / low_confidence=1)',
     row && !isEnvelope(row.era_id) && row.era_id === RUN && Number.isInteger(row.message_count)
-      && row.message_count === DAYS * 7 && row.low_confidence === 1,
+      && row.message_count === DAYS * 7 + EPOCH_N && row.low_confidence === 1,
     row ? `era=${row.era_id} msgs=${row.message_count} low_conf=${row.low_confidence}` : 'no row');
   raw.close();
 
@@ -110,6 +121,14 @@ try {
     !!dr && Number.isFinite(ent) && ent >= 0 && ent <= 1 && [9, 21].includes(peak)
       && Array.isArray(hist) && hist.length === 24 && Number.isFinite(Number(dr.intersession_entropy)),
     dr ? `entropy=${ent} peak_hour=${peak} hist_bins=${hist?.length} cadence_ent=${dr.intersession_entropy}` : 'no row');
+
+  // ── B6. epoch-millisecond created_at strings are parsed (not silently dropped) ─
+  // The regression: only these 8 messages sit at hour 14, so hist[14] === EPOCH_N
+  // proves the shared stage_time parser handled the numeric-string epoch format the
+  // old inline fromisoformat parse threw on.
+  rec('B6. epoch-millis created_at parsed + binned (stage_time robustness; hour 14 = EPOCH_N)',
+    Array.isArray(hist) && hist[14] === EPOCH_N,
+    Array.isArray(hist) ? `hist[14]=${hist[14]} (expected ${EPOCH_N})` : 'no hist');
 } finally {
   close();
   for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }

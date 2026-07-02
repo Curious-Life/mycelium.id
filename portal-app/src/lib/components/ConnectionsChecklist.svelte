@@ -9,9 +9,9 @@
 	let expandedStep: string | null = $state(null);
 
 	// AI state
-	// Default to the API-key path: it's the one that actually powers portal
-	// inference (writes ai_providers, read by the inference router). The "Claude
-	// Code" subscription-OAuth path is not supported in V1 (server refuses it).
+	// Default to the API-key path. The Claude *subscription* path is now supported
+	// (opt-in): it imports the user's existing Claude Code login via /auth/claude/import
+	// — see AISettings + docs/CLAUDE-SUBSCRIPTION-DRIVER-DESIGN-2026-06-26.md.
 	let aiProvider: 'claude' | 'api' = $state('api');
 	let aiSubProvider: 'anthropic' | 'openai' = $state('anthropic');
 	let aiKeyInput = $state('');
@@ -21,8 +21,6 @@
 	let claudeAuthLoading = $state(false);
 	let claudeAuthDone = $state(false);
 	let claudeAuthError = $state('');
-	let claudeAuthUrl = $state('');
-	let claudeAuthCode = $state('');
 	let claudeEmail = $state<string | null>(null);
 	let claudeSubscription = $state<string | null>(null);
 
@@ -50,52 +48,21 @@
 	async function connectClaude() {
 		claudeAuthLoading = true;
 		claudeAuthError = '';
-		claudeAuthUrl = '';
 		try {
-			const res = await api('/portal/auth/claude', { method: 'POST' });
-			if (!res.ok) throw new Error('Failed to start auth');
-			const data = await res.json();
-			if (data.url) {
-				claudeAuthUrl = data.url;
-				window.open(data.url, '_blank');
-			} else {
-				throw new Error('No auth URL returned');
-			}
+			// Import the user's existing Claude Code login (~/.claude). Opt-in: clicking
+			// this button is the ToS acknowledgment the server requires.
+			const res = await api('/portal/auth/claude/import', { method: 'POST', body: JSON.stringify({ acknowledgeToS: true }) });
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.error || 'Failed to connect');
+			claudeAuthDone = true;
+			const statusRes = await api('/portal/auth/claude/status');
+			if (statusRes.ok) { const sx = await statusRes.json(); claudeEmail = sx.email || null; claudeSubscription = sx.subscriptionType || null; }
 		} catch (e: any) {
 			claudeAuthError = e.message || 'Connection failed';
 		}
 		claudeAuthLoading = false;
 	}
 
-	async function submitClaudeCode() {
-		claudeAuthLoading = true;
-		claudeAuthError = '';
-		try {
-			const res = await api('/portal/auth/claude/code', {
-				method: 'POST',
-				body: JSON.stringify({ code: claudeAuthCode.trim() }),
-			});
-			const data = await res.json().catch(() => ({}));
-			if (!res.ok) throw new Error(data.error || 'Failed to authenticate');
-			claudeAuthDone = true;
-			claudeAuthUrl = '';
-			claudeAuthCode = '';
-			// Re-fetch status to get email/plan
-			const statusRes = await api('/portal/auth/claude/status');
-			if (statusRes.ok) {
-				const s = await statusRes.json();
-				claudeEmail = s.email || null;
-				claudeSubscription = s.subscriptionType || null;
-			}
-			if (data.greeting) {
-				const { navigationState } = await import('$lib/stores/navigation');
-				setTimeout(() => navigationState.setChatOpen(true), 600);
-			}
-		} catch (e: any) {
-			claudeAuthError = e.message || 'Authentication failed';
-		}
-		claudeAuthLoading = false;
-	}
 
 	async function saveAiKey() {
 		aiKeySaving = true;
@@ -172,28 +139,13 @@
 					<div class="guide-hero" style="border-left: 2px solid #4ade80;">
 						<p><strong style="color: #4ade80;">&#10003; Connected</strong> &mdash; {claudeEmail || 'Claude Code authenticated'}{claudeSubscription ? ` (${claudeSubscription})` : ''}</p>
 					</div>
-				{:else if claudeAuthUrl}
-					<div class="guide-steps-compact">
-						<div class="gsc-step"><span class="gsc-num">1</span> Sign in on the page that just opened</div>
-						<div class="gsc-step"><span class="gsc-num">2</span> Copy the code shown after signing in</div>
-						<div class="gsc-step"><span class="gsc-num">3</span> Paste it below</div>
-					</div>
-					<div class="guide-input-row">
-						<input type="text" bind:value={claudeAuthCode} placeholder="Paste the code here" autocomplete="off" data-1p-ignore class="guide-input" />
-						<button class="guide-save-btn" disabled={!claudeAuthCode || claudeAuthLoading} onclick={submitClaudeCode}>
-							{claudeAuthLoading ? 'Connecting...' : 'Connect'}
-						</button>
-					</div>
-					<p style="font-size: 0.65rem; color: var(--color-text-tertiary); margin-top: 0.35rem;">
-						Window didn't open? <a href={claudeAuthUrl} target="_blank" rel="noopener" style="color: var(--color-accent-aurum);">Click here</a>
-					</p>
 				{:else}
 					<div class="guide-hero">
-						<p><strong>Recommended</strong> &mdash; use your existing Claude subscription</p>
-						<p>No API key needed. Your agents use Claude Code directly.</p>
+						<p><strong>Use your Claude subscription</strong> &mdash; opt-in, no API key</p>
+						<p>Imports your existing Claude Code login. Automating a Pro/Max plan may be against Anthropic&rsquo;s terms; connecting accepts that.</p>
 					</div>
 					<button class="guide-connect-btn" disabled={claudeAuthLoading} onclick={connectClaude}>
-						{claudeAuthLoading ? 'Starting...' : 'Connect with Claude \u2192'}
+						{claudeAuthLoading ? 'Connecting\u2026' : 'Connect with my Claude login \u2192'}
 					</button>
 				{/if}
 				{#if claudeAuthError}
@@ -383,14 +335,6 @@
 	.guide-save-btn:disabled, .guide-connect-btn:disabled { opacity: 0.5; cursor: default; }
 	.guide-error { color: #ef4444; font-size: 0.7rem; margin-top: 0.4rem; }
 
-	.guide-steps-compact { margin-bottom: 0.5rem; }
-	.gsc-step { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem; font-size: 0.75rem; }
-	.gsc-num {
-		width: 18px; height: 18px; border-radius: 50%;
-		background: var(--color-accent); color: var(--color-bg);
-		display: flex; align-items: center; justify-content: center;
-		font-size: 0.6rem; font-weight: 600; flex-shrink: 0;
-	}
 
 	.data-sources { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem; }
 	.data-source {

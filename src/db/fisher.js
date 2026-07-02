@@ -169,11 +169,17 @@ export function createFisherNamespace(deps) {
                  WHERE user_id = ? AND level = ? AND window_type = ? AND clustering_run_id = ?`;
       if (opts.from) { sql += ` AND window_start >= ?`; params.push(opts.from); }
       if (opts.to)   { sql += ` AND window_end <= ?`;   params.push(opts.to); }
-      sql += ` ORDER BY window_start LIMIT ?`;
+      // Return the MOST RECENT `limit` windows, not the oldest. A long history
+      // (e.g. 2016→now = 500+ weekly windows) with an ASC+LIMIT would truncate to
+      // the oldest window (all near-zero velocity from the sparse early years),
+      // making the movement chart read as "no data" while the recent, active weeks
+      // are dropped. Fetch newest-first, then reverse back to chronological order
+      // so consumers still get oldest→newest within the returned slice.
+      sql += ` ORDER BY window_start DESC LIMIT ?`;
       params.push(limit);
 
       const result = await d1Query(sql, params);
-      const rows = result.results || result || [];
+      const rows = (result.results || result || []).slice().reverse();
       return rows.map((r) => ({
         ...coerceNums(r, TRAJ_NUMERIC),
         low_confidence: !!r.low_confidence,

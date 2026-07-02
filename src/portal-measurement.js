@@ -250,8 +250,18 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
         : `SELECT ${cols} FROM territory_vitality WHERE user_id = ? ORDER BY territory_id`;
       const params = latest ? [u.id, runId] : [u.id];
       const rows = (await db.rawQuery(sql, params)).results || [];
+      // Human-readable names live in territory_profiles.name (encrypted → decrypted
+      // on read). The vitality table carries only ids, so without this join the UI
+      // falls back to "Territory {id}" for every row. Both /vitality/snapshot
+      // consumers (VitalityView + the Curious-Life vitality detail) read the name.
+      const profRows = (await db.rawQuery(
+        `SELECT territory_id, name FROM territory_profiles WHERE user_id = ?`, [u.id])).results || [];
+      const nameById = {};
+      for (const r of profRows) if (r.territory_id != null) nameById[String(r.territory_id)] = r.name || null;
       const territories = rows.map((r) => {
-        const out = { territory_id: r.territory_id, phase: r.phase, computed_at: r.computed_at, clustering_run_id: r.clustering_run_id };
+        const name = nameById[String(r.territory_id)] ?? null;
+        // Expose both keys: VitalityView reads `name`, the Curious detail reads `territory_name`.
+        const out = { territory_id: r.territory_id, name, territory_name: name, phase: r.phase, computed_at: r.computed_at, clustering_run_id: r.clustering_run_id };
         for (const f of VITALITY_NUMERIC) out[f] = num(r[f]);
         return out;
       });
@@ -480,11 +490,18 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
       const all = await db.fisher.getTrajectory(u.id, { level, windowType: 'weekly_step', limit: 1000 });
       if (!all.length) return res.json({ summary: null });
       const cutoff = Date.now() - PERIOD_DAYS[period] * 86400000;
-      const rows = all.filter((r) => {
+      const inPeriod = all.filter((r) => {
         const end = Date.parse(r.window_end || '');
         return Number.isFinite(end) ? end >= cutoff : true;
       });
-      if (!rows.length) return res.json({ summary: null });
+      // Fall back to the latest measured windows when nothing lands inside the
+      // period. A vault built from imported history (no activity this quarter)
+      // would otherwise collapse the WHOLE movement card to null — even though the
+      // baseline-σ below is computed over `all` and is perfectly meaningful. We
+      // keep the period-relative stats honest by flagging `period_empty` + `as_of`
+      // so the UI can say "showing your latest measured windows (as of <date>)".
+      const periodEmpty = inPeriod.length === 0;
+      const rows = periodEmpty ? all.slice(-Math.min(all.length, 8)) : inPeriod;
 
       const first = rows[0], last = rows[rows.length - 1];
       const total_distance = (last.fisher_trajectory_length || 0) - (first.fisher_trajectory_length || 0);
@@ -532,6 +549,11 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
         freshness_hedge: freshnessHedge(fresh),
         summary: {
           period, level,
+          period_empty: periodEmpty,
+          as_of: (last.window_end || '').slice(0, 10) || null,
+          // Active-territory count from the latest window, so the "Active territories"
+          // headline stat is populated (trajectory/current leaves it null).
+          active_territory_count: last.active_territory_count != null ? Number(last.active_territory_count) : null,
           run_id: last.clustering_run_id || null,
           phase: last.phase || 'stable',
           phase_recent: last.phase_recent || last.phase || 'stable',
@@ -708,6 +730,38 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
     } catch { fail(res, 500, 'Failed to load complexity'); }
   });
 
+  // GET /complexity/series — complexity_snapshots over time for one level (default
+  // global), so the page can chart how varied the path of thinking has been across
+  // windows. The table already stamps window_end; we just expose the time-ordered
+  // series the /complexity latest-only endpoint discards. lz_complexity +
+  // embedding_novelty are encrypted → coerce on read.
+  router.get('/complexity/series', async (req, res) => {
+    const u = owner(req, res); if (!u) return;
+    try {
+      const level = String(req.query.level || 'global');
+      if (!['global', 'realm', 'territory'].includes(level)) {
+        return res.status(400).json({ error: 'level must be one of: global, realm, territory' });
+      }
+      const limit = Math.min(Number(req.query.limit) || 180, 400);
+      const levelId = req.query.level_id != null ? String(req.query.level_id) : null;
+      const sql = `SELECT level_id, window_start, window_end, lz_complexity, raw_complexity,
+                          sequence_length, alphabet_size, embedding_novelty, low_confidence, computed_at
+                     FROM complexity_snapshots
+                    WHERE user_id = ? AND level = ?${levelId != null ? ' AND level_id IS ?' : ''}
+                    ORDER BY window_end ASC LIMIT ?`;
+      const params = levelId != null ? [u.id, level, levelId, limit] : [u.id, level, limit];
+      const rows = (await db.rawQuery(sql, params)).results || [];
+      const series = rows.map((r) => ({
+        window_end: r.window_end, window_start: r.window_start,
+        lz_complexity: num(r.lz_complexity), embedding_novelty: r.embedding_novelty != null ? num(r.embedding_novelty) : null,
+        sequence_length: num(r.sequence_length), alphabet_size: num(r.alphabet_size),
+        low_confidence: Number(r.low_confidence) ? 1 : 0,
+      }));
+      res.set('Cache-Control', 'no-store');
+      res.json({ level, series });
+    } catch { fail(res, 500, 'Failed to load complexity series'); }
+  });
+
   // ──────────────────────────────────────────────────────────────────────────
   // CO-FIRING graph — territory_cofire. cofire_* strengths are encrypted, so we
   // load (decrypt-on-read), then filter/sort by strength in JS (not SQL).
@@ -862,14 +916,18 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
       const rows = (await db.rawQuery(
         `SELECT window_end, era_id, language,
                 diurnal_entropy, diurnal_peak_hour, diurnal_concentration, diurnal_hist,
+                weekday_hist, weekday_hour_hist, peak_weekday, weekday_concentration,
+                dominant_cycle_days, dominant_cycle_strength, weekly_cycle_strength,
                 session_count, intersession_entropy, intersession_cv,
                 message_count, low_confidence, notes, computed_at
            FROM cognitive_metrics_behavioral WHERE user_id = ?
            ORDER BY computed_at DESC LIMIT 1`, [u.id])).results || [];
       const r = rows[0];
       if (!r) { res.set('Cache-Control', 'no-store'); return res.json({ behavioral: null }); }
-      let hist = null;
-      try { hist = r.diurnal_hist ? JSON.parse(r.diurnal_hist) : null; } catch { hist = null; }
+      const parseArr = (s) => { try { const v = s ? JSON.parse(s) : null; return Array.isArray(v) ? v : null; } catch { return null; } };
+      const hist = parseArr(r.diurnal_hist);
+      const wHist = parseArr(r.weekday_hist);
+      const whMatrix = parseArr(r.weekday_hour_hist); // 7×24
       res.set('Cache-Control', 'no-store');
       res.json({ behavioral: {
         window_end: r.window_end, era_id: r.era_id,
@@ -877,6 +935,13 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
         diurnal_peak_hour: num(r.diurnal_peak_hour),
         diurnal_concentration: num(r.diurnal_concentration),
         diurnal_hist: Array.isArray(hist) ? hist.map((v) => num(v)) : null,
+        weekday_hist: Array.isArray(wHist) ? wHist.map((v) => num(v)) : null,
+        weekday_hour_hist: Array.isArray(whMatrix) ? whMatrix.map((row) => (Array.isArray(row) ? row.map((v) => num(v)) : null)) : null,
+        peak_weekday: num(r.peak_weekday),
+        weekday_concentration: num(r.weekday_concentration),
+        dominant_cycle_days: num(r.dominant_cycle_days),
+        dominant_cycle_strength: num(r.dominant_cycle_strength),
+        weekly_cycle_strength: num(r.weekly_cycle_strength),
         session_count: num(r.session_count),
         intersession_entropy: num(r.intersession_entropy),
         intersession_cv: num(r.intersession_cv),

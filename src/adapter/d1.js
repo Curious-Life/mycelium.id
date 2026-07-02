@@ -14,6 +14,7 @@ import { webcrypto } from 'node:crypto';
 import {
   autoEncryptParams,
   autoDecryptResults,
+  ENCRYPTED_FIELDS,
 } from '../crypto/crypto-local.js';
 import { vaultIsEncrypted } from '../db/open.js';
 
@@ -59,6 +60,20 @@ export function createDb({ dbPath, userKey, systemKey, scope = 'personal', dbKey
   }
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  // Two processes hold the vault for write (server-rest.js + index.js). Without a
+  // busy timeout, better-sqlite3 defaults to 0 ms → a transaction in one process
+  // while the other writes throws SQLITE_BUSY immediately. 5 s lets the loser wait
+  // for the WAL writer to commit instead of failing the write. Prerequisite for
+  // withTransaction (a db.transaction can hold the write lock longer than a single
+  // statement). @see docs/DOCUMENTS-LAYER-HARDENING-DESIGN-2026-06-29.md §8 step 0.
+  db.pragma('busy_timeout = 5000');
+  // Bound the WAL's on-disk residue: after each checkpoint the -wal file is truncated
+  // back to ≤64 MB instead of retaining its high-water mark. Under a heavy pipeline
+  // pass the WAL can balloon (31 MB seen in the corruption repro); a long-lived reader
+  // (e.g. the once/day integrity check) blocks checkpoints, so without this the file
+  // keeps its peak size. Caps disk pressure on a near-full volume (a corruption
+  // co-factor). @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+  db.pragma('journal_size_limit = 67108864');
 
   async function query(sql, params = []) {
     // CONTRACT [crypto-local.js:1318,1396,1408]: autoEncryptParams MUTATES
@@ -95,6 +110,30 @@ export function createDb({ dbPath, userKey, systemKey, scope = 'personal', dbKey
     return out;
   }
 
+  // Atomic, SYNCHRONOUS transaction over the raw better-sqlite3 handle. The
+  // callback runs db.prepare(...).run/get(...) DIRECTLY — no async, no
+  // auto-encrypt — so it is valid ONLY for PLAINTEXT-column tables: `documents`
+  // and `document_versions` (empty ENCRYPTED_FIELDS) plus the plaintext d1Batch
+  // tables (wealth/assignments/messages). NEVER wrap a write to an
+  // encrypted-field table here: no synchronous cipher exists (autoEncryptParams
+  // is async), so the values would land in plaintext. Pass `tables` to get a
+  // fail-closed dev assert that every named table is plaintext.
+  //
+  // better-sqlite3 may RE-RUN `fn` if it hits SQLITE_BUSY, so `fn` MUST be pure
+  // synchronous SQL with fixed params — no random IV, no external side effects.
+  // @see docs/DOCUMENTS-LAYER-HARDENING-DESIGN-2026-06-29.md §3a.
+  function withTransaction(fn, { tables = [] } = {}) {
+    for (const t of tables) {
+      const enc = ENCRYPTED_FIELDS[t];
+      if (enc && enc.length) {
+        throw new Error(
+          `withTransaction: refusing to wrap encrypted-field table '${t}' (${enc.length} encrypted column(s)); no synchronous cipher exists — plaintext tables only`,
+        );
+      }
+    }
+    return db.transaction(fn)();
+  }
+
   const parseJson = (s) => {
     if (s == null) return null;
     if (typeof s !== 'string') return s;
@@ -107,6 +146,7 @@ export function createDb({ dbPath, userKey, systemKey, scope = 'personal', dbKey
     d1QueryAdmin,
     firstRow,
     d1Batch,
+    withTransaction,
     parseJson,
     randomUUID: () => webcrypto.randomUUID(),
     now: () => new Date(),

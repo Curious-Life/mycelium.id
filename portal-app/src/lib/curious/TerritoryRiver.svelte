@@ -32,19 +32,51 @@
 	// cursor stays in sync with the other graphs on the page.
 
 	const weeks = $derived<Any[]>(data?.weeks ?? []);
-	const anchors = $derived<Any[]>(data?.anchors ?? []);
+	// Merge anchors that share a NAME. Re-clustering across eras can produce several
+	// distinct territory ids the describe step named identically (e.g. three
+	// "Sovereign Inquiry Lifelines"), which showed up as duplicate legend rows + bands.
+	// Collapse them into one topic: sum the per-week series, keep the strongest
+	// standing (anchor > active > dormant). One band + one legend row per named topic.
+	const STATUS_RANK: Record<string, number> = { anchor: 3, active: 2, dormant: 1, unknown: 0 };
+	const anchors = $derived.by<Any[]>(() => {
+		const raw = data?.anchors ?? [];
+		const byName = new Map<string, Any>();
+		for (const a of raw) {
+			const key = a.name ?? `#${a.territory_id}`;
+			const ex = byName.get(key);
+			if (!ex) {
+				byName.set(key, { ...a, series: [...(a.series ?? [])] });
+			} else {
+				const s = ex.series, add = a.series ?? [];
+				for (let i = 0; i < Math.max(s.length, add.length); i++) s[i] = (Number(s[i]) || 0) + (Number(add[i]) || 0);
+				if ((STATUS_RANK[a.status] ?? 0) > (STATUS_RANK[ex.status] ?? 0)) ex.status = a.status;
+				ex.named = ex.named || a.named;
+			}
+		}
+		return [...byName.values()];
+	});
 	const n = $derived(weeks.length);
 	const x = (i: number) => (n <= 1 ? ML : ML + (i / (n - 1)) * PW);
 
 	// dormant bands render fainter so the river shows standing, not just share.
-	const bandOpacity = (a: Any) => (a.status === 'dormant' ? 0.26 : 0.62);
+	// Solid-ish fills (+ a hairline separator between bands, drawn below) so the
+	// STACK reads as stacked area, not translucent overlapping ribbons.
+	const bandOpacity = (a: Any) => (a.status === 'dormant' ? 0.4 : 0.82);
 
+	// Per-week 100%-normalised stack: each anchor's band is its SHARE OF THAT WEEK'S
+	// anchor activity, so the coloured layers fill the whole track and visibly stack
+	// on top of one another (rather than a thin cluster hugging the baseline with a
+	// dominant faint "other" above). `raw` keeps the un-normalised weekly total so a
+	// week with no anchor activity renders empty instead of a fake full stack.
 	const stacks = $derived.by(() => {
 		if (!n || !anchors.length) return [];
 		return weeks.map((_, i) => {
+			const vals = anchors.map((a) => Math.max(0, Number(a.series?.[i]) || 0));
+			const raw = vals.reduce((s, v) => s + v, 0);
+			const norm = raw > 0 ? raw : 1;
 			let cum = 0;
-			const tops = anchors.map((a) => { cum += Math.max(0, Number(a.series?.[i]) || 0); return cum; });
-			return { tops, sum: cum };
+			const tops = vals.map((v) => { cum += v / norm; return cum; });
+			return { tops, sum: raw > 0 ? 1 : 0, raw };
 		});
 	});
 	const yShare = (c: number) => T1 + H1 * (1 - Math.max(0, Math.min(1, c)));
@@ -116,11 +148,15 @@
 	const hoverWeek = $derived(hoverIdx != null && weeks[hoverIdx] ? weeks[hoverIdx] : null);
 	const hoverTop = $derived.by(() => {
 		if (hoverIdx == null) return [];
-		return anchors
-			.map((a, b) => ({ name: a.name, status: a.status, share: Number(a.series?.[hoverIdx!]) || 0, color: ACCENTS[b % ACCENTS.length] }))
-			.filter((t) => t.share > 0.001)
+		const raw = anchors.map((a, b) => ({ name: a.name, status: a.status, val: Math.max(0, Number(a.series?.[hoverIdx!]) || 0), color: ACCENTS[b % ACCENTS.length] }));
+		const total = raw.reduce((s, t) => s + t.val, 0) || 1;
+		// share = fraction of THIS WEEK's anchor activity (matches the normalised stack),
+		// sorted most-active first, named. Show up to 8 so the tooltip lists real names.
+		return raw
+			.map((t) => ({ ...t, share: t.val / total }))
+			.filter((t) => t.val > 0.0001)
 			.sort((a, b) => b.share - a.share)
-			.slice(0, 4);
+			.slice(0, 8);
 	});
 	const STATUS_LABEL: Record<string, string> = { anchor: 'anchor', active: 'active', dormant: 'dormant', unknown: '' };
 </script>
@@ -142,11 +178,11 @@
 		<div class="plot" onpointermove={onMove} onpointerleave={() => (hoverDate = null)}>
 			<svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" role="img" aria-label="Territory activation over time, with active-territory count and novelty overlays">
 				{#each anchors as a, b}
-					<path d={bandPath(b)} fill={ACCENTS[b % ACCENTS.length]} fill-opacity={bandOpacity(a)} stroke="none" />
+					<path d={bandPath(b)} fill={ACCENTS[b % ACCENTS.length]} fill-opacity={bandOpacity(a)} stroke="var(--color-bg)" stroke-width="0.6" stroke-opacity="0.55" vector-effect="non-scaling-stroke" />
 				{/each}
-				<path d={otherPath} fill="var(--color-text-tertiary)" fill-opacity="0.12" stroke="none" />
+				<path d={otherPath} fill="var(--color-text-tertiary)" fill-opacity="0.1" stroke="none" />
 
-				<text x={ML} y={T1 + 12} class="trk">topics — anchor activation share</text>
+				<text x={ML} y={T1 + 12} class="trk">topics — share of weekly anchor activity (stacked to 100%)</text>
 				<text x={ML} y={T2 - 4} class="trk">active territories / week (peak {maxCount})</text>
 
 				<path d={countArea} fill="var(--color-accent-jade)" fill-opacity="0.10" stroke="none" />
@@ -166,8 +202,9 @@
 			</svg>
 
 			{#if hoverWeek}
-				<div class="tip" style="left:{Math.min(88, (hoverIdx! / Math.max(1, n - 1)) * 100)}%;">
-					<div class="tip-h">{hoverWeek.end} · {hoverWeek.active_count ?? '—'} active</div>
+				{@const frac = hoverIdx! / Math.max(1, n - 1)}
+				<div class="tip" class:flip={frac > 0.6} style="left:{(frac * 100).toFixed(1)}%;">
+					<div class="tip-h">{hoverWeek.end} · {hoverWeek.active_count ?? '—'} active territories</div>
 					{#each hoverTop as t}
 						<div class="tip-row"><i style="background:{t.color}"></i><span class="tip-n">{t.name}</span><span class="tip-v">{Math.round(t.share * 100)}%</span></div>
 					{/each}
@@ -213,6 +250,9 @@
 	.toggles button i.dash.coral { border-color: var(--color-accent-coral); }
 	.toggles button i.dash.amethyst { border-color: var(--color-accent-amethyst); }
 	.tip { position: absolute; top: 0; transform: translateX(12px); pointer-events: none; background: var(--color-elevated); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 0.5rem 0.6rem; font-size: 0.72rem; min-width: 11rem; max-width: 16rem; box-shadow: 0 8px 24px rgb(0 0 0 / 0.35); z-index: 2; }
+	/* Edge-aware: near the right edge, anchor the tooltip to the LEFT of the cursor
+	   so it stays inside the chart (and the app window) instead of overflowing. */
+	.tip.flip { transform: translateX(calc(-100% - 12px)); }
 	.tip-h { color: var(--color-text-emphasis); font-weight: 600; margin-bottom: 0.35rem; }
 	.tip-row { display: flex; align-items: center; gap: 0.4rem; padding: 0.1rem 0; }
 	.tip-row i { width: 8px; height: 8px; border-radius: 2px; flex: none; }

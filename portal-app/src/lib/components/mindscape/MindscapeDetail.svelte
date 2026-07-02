@@ -1,10 +1,27 @@
 <script lang="ts">
 	import { marked } from 'marked';
 	import DOMPurify from 'isomorphic-dompurify';
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { api } from '$lib/api';
+	import { api, apiPost } from '$lib/api';
 	import { generate, start as startGenerate } from '$lib/generate';
+
+	// Per-territory "describe more": deepen narration coverage for just this territory
+	// (POST /mycelium/describe-more {territoryId} → spawns describe-chronicles.js as a
+	// child, folds in unseen content). Background + safe; no event-loop peg.
+	let describingTerritoryId: number | null = $state(null);
+	let describeResetTimer: ReturnType<typeof setTimeout> | null = null;
+	async function describeTerritory(territoryId: number) {
+		if (territoryId == null) return;
+		describingTerritoryId = territoryId;
+		try { await apiPost('/portal/mycelium/describe-more', { territoryId }); }
+		catch { /* surfaced via coverage refresh */ }
+		finally {
+			if (describeResetTimer) clearTimeout(describeResetTimer);
+			describeResetTimer = setTimeout(() => { if (describingTerritoryId === territoryId) describingTerritoryId = null; }, 60_000);
+		}
+	}
+	onDestroy(() => { if (describeResetTimer) clearTimeout(describeResetTimer); });
 	import Sparkline from '$lib/components/mindscape/Sparkline.svelte';
 	import {
 		mindscapeState,
@@ -523,6 +540,13 @@
 							· {currentTerritory.daysActive}d span
 						{/if}
 					</p>
+					{#if currentTerritory.exploredPercent < 100 && msState.selectedTerritoryId != null}
+						<button class="describe-more-btn" disabled={describingTerritoryId === msState.selectedTerritoryId}
+							onclick={() => describeTerritory(msState.selectedTerritoryId!)}
+							title="Deepen this area's description by folding in content not yet described">
+							{describingTerritoryId === msState.selectedTerritoryId ? 'Describing…' : 'Describe more'}
+						</button>
+					{/if}
 					{#if currentTerritory.temporalSaliency != null}
 						<div class="saliency-row">
 							<div class="saliency-bar-bg">
@@ -1594,4 +1618,10 @@
 		color: var(--color-text-tertiary);
 		margin-top: 4px;
 	}
+	.describe-more-btn {
+		margin-top: 6px; font-size: 0.72rem; padding: 0.25rem 0.7rem;
+		border-radius: 999px; border: 1px solid rgba(125,182,217,0.5);
+		background: rgba(125,182,217,0.12); color: #7DB6D9; cursor: pointer;
+	}
+	.describe-more-btn:disabled { opacity: 0.5; cursor: default; }
 </style>

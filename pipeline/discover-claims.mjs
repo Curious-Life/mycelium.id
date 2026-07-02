@@ -20,7 +20,7 @@ import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { resolveDbKeyHex } from '../src/db/open.js';
 import { createInferenceRouter } from '../src/inference/router.js';
-import { resolveInferenceConfig } from '../src/inference/resolve.js';
+import { resolveInferenceConfigForTask } from '../src/inference/resolve.js';
 import { createEgressAuditSink } from '../src/inference/egress.js';
 import { createValidator } from '../src/claims/validator.js';
 import { discoverWindow, parseProposals } from '../src/claims/discovery.js';
@@ -88,7 +88,10 @@ if (isMain) {
   const dbKeyHex = resolveDbKeyHex(USER_MASTER, DB_PATH);
   const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal', dbKeyHex });
   const router = createInferenceRouter({
-    ...(await resolveInferenceConfig(db, USER_ID)),
+    // Honor the per-task 'narrate' assignment (Settings → Intelligence) like chronicle
+    // narration does — was resolveInferenceConfig (ACTIVE provider only), which ignored
+    // the user's narrate model selection. Falls back to the active provider when unset.
+    ...(await resolveInferenceConfigForTask(db, USER_ID, 'narrate')),
     onEgress: createEgressAuditSink(db, USER_ID),
     // Discovery prompts are large and run on a local model; 60s (the router
     // default) is too short and silently zeroed every run. Give it room.

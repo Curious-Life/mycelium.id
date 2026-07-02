@@ -48,6 +48,10 @@ import { createChannelAccessNamespace } from './channel-access.js';
 import { createConnectionsNamespace } from './connections.js';
 import { createPeerPresenceNamespace } from './peer-presence.js';
 import { createSpaceAccessNamespace } from './space-access.js';
+import { createSpaceOplogNamespace } from './space-oplog.js';
+import { createSpaceCrypto } from '../crypto/space-crypto.js';
+import { createSpaceKeyManager } from '../crypto/space-key-manager.js';
+import { createSpaceContentWriter } from '../crypto/space-content-writer.js';
 import { createSpaceRoomsNamespace } from './space-rooms.js';
 import { createSpaceRoomDocumentsNamespace } from './space-room-documents.js';
 import { createSpaceConversationsNamespace } from './space-conversations.js';
@@ -55,6 +59,7 @@ import { createContextsNamespace } from './contexts.js';
 import { createInboundSharesNamespace } from './inbound-shares.js';
 import { createStreamsNamespace } from './streams.js';
 import { createSpaceMatrixRoomsNamespace } from './space-matrix-rooms.js';
+import { openSidecar } from '../search/sqlite/sidecar.js';
 
 /**
  * Open the vault db and assemble the tool-facing `db` namespace object.
@@ -62,7 +67,7 @@ import { createSpaceMatrixRoomsNamespace } from './space-matrix-rooms.js';
  */
 export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federationDeps = {}, dbKeyHex = null }) {
   const adapter = createDb({ dbPath, userKey, systemKey, scope, dbKeyHex });
-  const { d1Query, d1QueryAdmin, d1Batch, firstRow, parseJson, randomUUID, now } = adapter;
+  const { d1Query, d1QueryAdmin, d1Batch, firstRow, parseJson, randomUUID, now, withTransaction, db: rawDb } = adapter;
 
   const base = { d1Query, d1QueryAdmin, d1Batch, firstRow, parseJson, randomUUID, now };
 
@@ -71,7 +76,7 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // (tools/topology-tools.js, fisher-tools.js). Same engine as d1Query.
     rawQuery: (sql, params = []) => d1Query(sql, params),
 
-    documents: createDocumentsNamespace({ d1Query, firstRow }),
+    documents: createDocumentsNamespace({ d1Query, firstRow, rawDb, withTransaction }),
     messages: createMessagesNamespace({ d1Query, d1Batch, firstRow }),
     facts: createFactsNamespace({ d1Query, firstRow, randomUUID }),
     entities: createEntitiesNamespace({ d1Query, firstRow, randomUUID }),
@@ -112,6 +117,7 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // grant primitive (fail-closed: no grant = invisible); rooms + room-documents
     // are the nested-folder model; contexts is the per-connection territory model.
     spaceAccess: createSpaceAccessNamespace({ d1Query }),
+    spaceOplog: createSpaceOplogNamespace({ d1Query }),
     spaceRooms: createSpaceRoomsNamespace({ d1Query, firstRow, randomUUID }),
     spaceRoomDocuments: createSpaceRoomDocumentsNamespace({ d1Query, randomUUID }),
     spaceConversations: createSpaceConversationsNamespace({ d1Query, firstRow, randomUUID }),
@@ -129,6 +135,11 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
       sign: federationDeps.sign,
       did: federationDeps.did,
       selfInstance: federationDeps.selfInstance,
+      // Late-bound back-ref (db not yet assigned here; resolved at call time, like
+      // db.streams). Gives the grantee fetch path db.spaceKeyManager + db.spaceCrypto to
+      // decrypt a fetched SPACE share locally. selfDid scopes grant unsealing.
+      getDb: () => db,
+      selfDid: federationDeps.selfDid,
     }),
     // Connection online/offline presence: owner activity heartbeat (users.last_active_at),
     // written by the :8787 auth chokepoint, read by the :4711 federation responder.
@@ -203,5 +214,38 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
   // assembled db). Passing `db` is a deliberate back-reference (db.streams holds db).
   db.streams = createStreamsNamespace({ d1Query, connectors: db.connectors, db });
 
-  return { db, adapter, close: adapter.close };
+  // E2E shared-spaces crypto seam (BU-OPLOG-E2E). Wired after the literal because all
+  // three reference the assembled db (db.spaceOplog). Present ONLY when the box has a
+  // federation identity + DID (remote configured) — absent → E2E space sharing is cleanly
+  // disabled, exactly like the other federation surfaces (did.json 404, /connect 503).
+  // spaceCrypto = author-signed ciphertext entries; spaceKeyManager = per-space CEK
+  // lifecycle + forward-secret rekey; spaceContent = the owner write path (encrypt → oplog).
+  if (federationDeps.identity && federationDeps.selfDid) {
+    db.spaceCrypto = createSpaceCrypto({ identity: federationDeps.identity, db });
+    db.spaceKeyManager = createSpaceKeyManager({ identity: federationDeps.identity, db, selfDid: federationDeps.selfDid, spaceCrypto: db.spaceCrypto });
+    db.spaceContent = createSpaceContentWriter({ keyManager: db.spaceKeyManager, spaceCrypto: db.spaceCrypto, oplog: db.spaceOplog, selfDid: federationDeps.selfDid });
+  }
+
+  // On-disk search index sidecar (docs/SEARCH-SIDECAR-DESIGN-2026-07-02.md): the
+  // FTS5/vec0 index lives in a SEPARATE encrypted file (mycelium.search.db), NOT in
+  // the vault — so a corrupt regenerable index self-heals (file rm + rebuild) instead
+  // of a fatal, un-DROPpable vault error, and its heavy bulk-build checkpoint never
+  // shares a WAL with content. Opened ONLY when the sqlite backend is active (the
+  // packaged app sets MYCELIUM_SEARCH_BACKEND=sqlite; test fixtures do not, so they
+  // never spawn a search.db). Best-effort: a sidecar failure degrades search to the
+  // in-RAM backend (chooseBackend falls back when _sqliteSearch is absent) and NEVER
+  // blocks vault boot. Each process opens its own handle to the same file (WAL +
+  // busy_timeout — proven safe); the corrupt-reset already ran under the init lock.
+  let closeSidecar = () => {};
+  if ((process.env.MYCELIUM_SEARCH_BACKEND ?? '').toLowerCase() === 'sqlite' && dbPath && dbPath !== ':memory:') {
+    try {
+      const side = openSidecar({ dbPath, dbKeyHex });
+      db._sqliteSearch = side.raw;
+      closeSidecar = () => { try { side.raw.close(); } catch { /* */ } };
+    } catch (e) {
+      console.error(`[mycelium] search sidecar unavailable (${e?.message || e}) — search degrades to the in-RAM backend`);
+    }
+  }
+
+  return { db, adapter, close: () => { try { adapter.close(); } finally { closeSidecar(); } } };
 }

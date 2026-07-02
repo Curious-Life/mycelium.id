@@ -15,7 +15,7 @@
 
 import express from 'express';
 import { createAgentHarness, describeProvider } from './agent/harness.js';
-import { createAgentLoop } from './agent/loop.js';
+import { resolveHarness } from './agent/resolve-harness.js';
 import { toolsForDomains, normalizePolicy, defaultPolicy, DOMAINS, ALL_SCOPES } from './agent/tool-domains.js';
 import { resolveInferenceConfigForTask } from './inference/resolve.js';
 import { resolveModelProfile } from './inference/model-profile.js';
@@ -87,18 +87,20 @@ const CANNOT_ACT = [
   'areas in Settings → AI Access.',
 ].join(' ');
 
-export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichment, authenticatePortalRequest, fetch }) {
+export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichment, authenticatePortalRequest, fetch, restPort }) {
   if (!db) throw new Error('portalChatRouter: db required');
   if (!handlers || typeof handlers !== 'object') throw new Error('portalChatRouter: handlers required');
   if (typeof authenticatePortalRequest !== 'function') throw new Error('portalChatRouter: authenticatePortalRequest required');
 
   const router = express.Router();
   router.use(express.json({ limit: '256kb' }));
-  const harness = createAgentHarness({ onEgress: createEgressAuditSink(db, userId), onUsage: createUsageSink(db, userId, { source: 'chat' }), fetch, logger: (m) => console.error(`[chat] ${m}`) });
-  // The native agent loop (Phase 5) — the watchdog + retry turn-driver, extracted
-  // from this route so the same core serves channel + scheduler turns. Step 1 is
-  // behavior-preserving: this route's reliability semantics are now loop.run's.
-  const loop = createAgentLoop({ harness, logger: (m) => console.error(`[chat] ${m}`) });
+  const chatLog = (m) => console.error(`[chat] ${m}`);
+  const harness = createAgentHarness({ onEgress: createEgressAuditSink(db, userId), onUsage: createUsageSink(db, userId, { source: 'chat' }), fetch, logger: chatLog });
+  // The agent engine (harness) is resolved PER TURN by resolveHarness (below): 'native'
+  // (default) = the in-process agent loop — the watchdog + retry turn-driver extracted
+  // from this route so the same core serves channel + scheduler turns; 'cli' = the
+  // Claude Code engine (C2). The native path is behavior-identical to the previous
+  // module-scoped loop. See docs/HARNESS-CLI-DESIGN-2026-07-02.md.
 
   const auth = (req, res) => { const u = authenticatePortalRequest(req); if (!u) { res.status(401).json({ error: 'Unauthorized' }); return null; } return u; };
 
@@ -379,8 +381,18 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
         return typeof out === 'string' ? out : JSON.stringify(out);
       };
 
-      // Drive the turn through the native agent loop: the watchdog (TTFB/IDLE) +
-      // retry-on-empty + first-token signalling now live in loop.run. It streams
+      // Resolve the engine for this turn: native (default) or the Claude Code CLI
+      // when the user has selected it AND it's eligible. Fail-safe: resolveHarness
+      // never throws and returns native when 'cli' is ineligible (no binary / not a
+      // subscription / cli engine not shipped yet), so this is behavior-identical to
+      // the previous hardcoded native loop unless the user opts in and qualifies.
+      const { loop } = await resolveHarness({
+        db, userId, provider,
+        deps: { harness, logger: chatLog, restPort },
+      });
+
+      // Drive the turn through the agent loop: the watchdog (TTFB/IDLE) +
+      // retry-on-empty + first-token signalling live in loop.run. It streams
       // through our SSE `send`, keeps the live activity row honest via the callbacks,
       // and returns the accumulated answer + truncation/error state.
       const result = await loop.run({

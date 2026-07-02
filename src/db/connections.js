@@ -54,6 +54,7 @@ import { randomUUID as nodeRandomUUID } from 'node:crypto';
 import { canonicalize, verifyDetached } from '../federation/sign.js';
 import { resolveDidKey } from '../federation/did.js';
 import { safeFetch } from '../federation/ssrf.js';
+import { decodeSharedSpace } from '../crypto/space-reader.js';
 
 const SHARED_CONTENT_MAX_BYTES = 1024 * 1024; // cap an inbound shared-content response (DoS)
 
@@ -97,6 +98,11 @@ export function createConnectionsNamespace(deps) {
     // connect-request is signed (X-Myc-Did/X-Myc-Sig over the canonical body);
     // selfInstance() is our own public host for the request's from_instance.
     sign, did, selfInstance,
+    // E2E shared-spaces decrypt (grantee side) — OPTIONAL. getDb is a late-bound
+    // back-reference to the assembled db (db.spaceKeyManager + db.spaceCrypto), present
+    // only when remote is configured. selfDid is this box's owner DID. When absent,
+    // fetching a SPACE share throws cleanly (decryption unavailable) rather than leaking.
+    getDb, selfDid,
     randomUUID = nodeRandomUUID,
     fetch: fetchImpl = globalThis.fetch,
     lookup, // injectable DNS resolver — threaded into safeFetch (tests inject a stub)
@@ -782,7 +788,7 @@ export function createConnectionsNamespace(deps) {
          WHERE (user_a = ? OR user_b = ?) AND status = 'accepted'
            AND (remote_did = ? OR remote_instance = ?)
          ORDER BY accepted_at DESC LIMIT 1`,
-        [toUserId, toUserId, fromDid ?? ' ', verifiedHost ?? ' '],
+        [toUserId, toUserId, fromDid ?? '\0', verifiedHost ?? '\0'],
       );
       const conn = found.results?.[0];
       if (!conn) throw new Error('no accepted connection from this peer');
@@ -992,21 +998,58 @@ export function createConnectionsNamespace(deps) {
      * single source of truth lives here. Returns { granted, connId, peerId }.
      */
     async resolveSharedGrant({ fromDid, verifiedHost, toUserId, kind, ref }) {
+      // D6 (shared-spaces redesign 2026-06-30): SPACE serves/mutations bind to the
+      // peer's stable did:web identity — NEVER the mutable verifiedHost. The
+      // `remote_instance` (host) fallback is migration-only and is NOT honored for
+      // spaces: a host rebind / handle reissue must not silently satisfy a grant.
+      // No presented did → fail closed. (Contexts keep the host fallback for now.)
+      const didBound = kind === 'space';
+      if (didBound && !fromDid) return { granted: false };
       const c = await d1Query(
         `SELECT id, user_a, user_b FROM connections
          WHERE (user_a = ? OR user_b = ?) AND status = 'accepted'
-           AND (remote_did = ? OR remote_instance = ?)
+           AND ${didBound ? 'remote_did = ?' : '(remote_did = ? OR remote_instance = ?)'}
          ORDER BY accepted_at DESC LIMIT 1`,
-        [toUserId, toUserId, fromDid ?? ' ', verifiedHost ?? ' '],
+        didBound ? [toUserId, toUserId, fromDid] : [toUserId, toUserId, fromDid ?? ' ', verifiedHost ?? ' '],
       );
       const row = c.results?.[0];
-      if (!row) return { granted: false };
+      if (!row) {
+        // D6 / decision #6: a space grant denied ONLY because the peer's connection
+        // predates did-capture (matches by host but carries no bound remote_did) must
+        // be LOGGED, not silently 403'd — operators need to see these until BU6's
+        // 0018 migration backfills remote_did. Still fail-closed (we do NOT grant);
+        // this just makes the denial visible. An attacker with no accepted connection
+        // triggers no log (the diagnostic requires a host-matched accepted row).
+        if (didBound && fromDid) {
+          const legacy = await d1Query(
+            `SELECT 1 FROM connections
+             WHERE (user_a = ? OR user_b = ?) AND status = 'accepted'
+               AND remote_instance = ? AND (remote_did IS NULL OR remote_did != ?) LIMIT 1`,
+            [toUserId, toUserId, verifiedHost ?? ' ', fromDid],
+          );
+          if (legacy.results?.length) {
+            console.warn(
+              `[connections] space grant DENIED for host=${verifiedHost}: connection lacks a bound remote_did ` +
+              `(did-bound enforcement, decision #6). Run the 0018 remote_did backfill to restore this share.`,
+            );
+          }
+        }
+        return { granted: false };
+      }
       const connId = row.id;
       const peerId = row.user_a === toUserId ? row.user_b : row.user_a;
       let granted = false;
       if (kind === 'space') {
+        // D10 (the HIGH leak fix): the space must still EXIST as a LIVE space —
+        // the JOIN on users.type='space' makes a soft-deleted space
+        // (type='space_deleted') STOP serving to previously-granted peers. This is
+        // the cryptographic floor for revocation: it holds even if a revoke
+        // announce was lost. (Audit 2026-06-30: resolveSharedGrant never re-checked
+        // u.type, so deleted spaces kept serving indefinitely.)
         const g = await d1Query(
-          `SELECT 1 FROM space_access WHERE space_id = ? AND user_id = ? AND revoked_at IS NULL LIMIT 1`,
+          `SELECT 1 FROM space_access sa
+             JOIN users u ON u.id = sa.space_id AND u.type = 'space'
+           WHERE sa.space_id = ? AND sa.user_id = ? AND sa.revoked_at IS NULL LIMIT 1`,
           [ref, peerId],
         );
         granted = (g.results?.length || 0) > 0;
@@ -1038,29 +1081,63 @@ export function createConnectionsNamespace(deps) {
       if (!row.remote_instance || !row.remote_user_handle || !sign || !did) throw new Error('peer is not reachable');
       const endpoint = await resolveFederationEndpoint(row.remote_instance, row.remote_user_handle);
       const url = `${endpoint.replace(/\/$/, '')}/shared-content`;
-      const body = { $type: 'social.mycelium.shared-content.v1', from_did: did(), kind, ref, nonce: randomUUID(), ts: Date.now() };
-      const bodyStr = canonicalize(body);
-      const res = await safeFetch(url, {
-        lookup, fetch: fetchImpl, method: 'POST', redirect: 'manual',
-        headers: { 'Content-Type': 'application/json', 'X-Myc-Did': did(), 'X-Myc-Sig': sign(bodyStr) },
-        body: bodyStr, signal: AbortSignal.timeout(FEDERATION_POST_TIMEOUT_MS),
-      });
-      if (!res.ok) {
-        if (res.status === 403) throw new Error('access to this share was revoked');
-        throw new Error(`shared-content fetch failed (${res.status})`);
+
+      // Fetch one page (signed request → signature-verified response). Returns the parsed
+      // body + the OWNER's resolved signing key (reused to verify each entry's authorship).
+      const fetchPage = async (since) => {
+        const body = { $type: 'social.mycelium.shared-content.v1', from_did: did(), kind, ref, since, nonce: randomUUID(), ts: Date.now() };
+        const bodyStr = canonicalize(body);
+        const res = await safeFetch(url, {
+          lookup, fetch: fetchImpl, method: 'POST', redirect: 'manual',
+          headers: { 'Content-Type': 'application/json', 'X-Myc-Did': did(), 'X-Myc-Sig': sign(bodyStr) },
+          body: bodyStr, signal: AbortSignal.timeout(FEDERATION_POST_TIMEOUT_MS),
+        });
+        if (!res.ok) {
+          if (res.status === 403) throw new Error('access to this share was revoked');
+          throw new Error(`shared-content fetch failed (${res.status})`);
+        }
+        const raw = await res.text();
+        if (raw.length > SHARED_CONTENT_MAX_BYTES) throw new Error('shared content too large');
+        // The peer SIGNED the response (no MITM/forgery): signer DID must match the
+        // connection's recorded peer DID, and the key must resolve.
+        const respDid = res.headers.get('x-myc-did');
+        const respSig = res.headers.get('x-myc-sig');
+        if (!respDid || !respSig) throw new Error('unsigned shared content');
+        if (row.remote_did && respDid !== row.remote_did) throw new Error('shared content signed by the wrong peer');
+        let pub;
+        try { pub = await resolveDidKey(respDid, { fetch: fetchImpl, lookup }); } catch { throw new Error('could not resolve peer key'); }
+        if (!verifyDetached(pub, raw, respSig)) throw new Error('shared content signature invalid');
+        let parsed;
+        try { parsed = JSON.parse(raw); } catch { throw new Error('malformed shared content'); }
+        return { parsed, ownerPub: pub };
+      };
+
+      // CONTEXT shares stay plaintext (legacy territories path) — single fetch, unchanged.
+      if (kind !== 'space') return (await fetchPage(-1)).parsed;
+
+      // SPACE shares are E2E: page through the ciphertext oplog (since → head), then
+      // DECRYPT LOCALLY. The owner/relay never see plaintext; only this box, holding a
+      // sealed CEK, can decode. Requires the crypto seam (remote configured).
+      const db = typeof getDb === 'function' ? getDb() : null;
+      if (!db?.spaceKeyManager || !db.spaceCrypto) throw new Error('space decryption unavailable (remote not configured)');
+      const MAX_PAGES = 64; // backstop against an oversharing/looping peer
+      let since = -1, head = -1, name = null, ownerPub = null;
+      const entries = [];
+      let grants = [];
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const { parsed, ownerPub: pub } = await fetchPage(since);
+        ownerPub = pub;
+        if (parsed.name != null) name = parsed.name;
+        if (Number.isInteger(parsed.head)) head = parsed.head;
+        if (Array.isArray(parsed.grants) && parsed.grants.length) grants = parsed.grants;
+        const pageEntries = Array.isArray(parsed.entries) ? parsed.entries : [];
+        entries.push(...pageEntries);
+        const maxSeq = pageEntries.length ? pageEntries[pageEntries.length - 1].seq : since;
+        if (pageEntries.length === 0 || maxSeq >= head) break; // caught up
+        since = maxSeq;
       }
-      const raw = await res.text();
-      if (raw.length > SHARED_CONTENT_MAX_BYTES) throw new Error('shared content too large');
-      // Verify the peer SIGNED the response (no MITM/forgery). The signer DID must
-      // match the connection's recorded peer did, and the key must resolve.
-      const respDid = res.headers.get('x-myc-did');
-      const respSig = res.headers.get('x-myc-sig');
-      if (!respDid || !respSig) throw new Error('unsigned shared content');
-      if (row.remote_did && respDid !== row.remote_did) throw new Error('shared content signed by the wrong peer');
-      let pub;
-      try { pub = await resolveDidKey(respDid, { fetch: fetchImpl, lookup }); } catch { throw new Error('could not resolve peer key'); }
-      if (!verifyDetached(pub, raw, respSig)) throw new Error('shared content signature invalid');
-      try { return JSON.parse(raw); } catch { throw new Error('malformed shared content'); }
+      // Local decrypt: verify authorship + shape + gen-binding, LWW by seq. Fail-closed.
+      return decodeSharedSpace({ ref, name, entries, grants, ownerSigningKeyB64: ownerPub, keyManager: db.spaceKeyManager, spaceCrypto: db.spaceCrypto });
     },
   };
 }

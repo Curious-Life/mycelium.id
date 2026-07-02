@@ -238,7 +238,10 @@ def main():
             d = (p.get("created_at", "") or "")[:10]
             if not d:
                 continue
-            wk = key_fn(d)
+            try:
+                wk = key_fn(d)
+            except (ValueError, TypeError):
+                continue  # skip points whose created_at can't be bucketed (messy imports)
             if wk not in windows:
                 windows[wk] = {"points": [], "territories": {}, "dates": []}
             windows[wk]["points"].append(p)

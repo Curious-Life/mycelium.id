@@ -49,8 +49,13 @@ const DEFAULT_USER = 'local-user';
  */
 function chooseBackend({ db, embedder, userId, searchBackend }) {
   const want = (searchBackend ?? process.env.MYCELIUM_SEARCH_BACKEND ?? '').toLowerCase();
-  if (want === 'sqlite' && db && db._sqlite) {
-    return { backend: createSqliteBackend({ sqliteDb: db._sqlite, embedder, userId }), kind: 'sqlite' };
+  // The on-disk index lives in a SEPARATE encrypted sidecar handle (db._sqliteSearch),
+  // NOT inside the vault (db._sqlite) — so a corrupt regenerable index is a file-level
+  // rm+rebuild, never a fatal/un-DROPpable vault error (docs/SEARCH-SIDECAR-DESIGN).
+  // If the sidecar is unavailable (open failed, or a context that didn't open one),
+  // fall back to the in-RAM local backend — search must never break boot.
+  if (want === 'sqlite' && db && db._sqliteSearch) {
+    return { backend: createSqliteBackend({ sqliteDb: db._sqliteSearch, embedder, userId }), kind: 'sqlite' };
   }
   return { backend: createLocalBackend({ embedder, userId }), kind: 'local' };
 }
@@ -167,11 +172,24 @@ export function createSearchHelpers(deps = {}) {
     return backend.count();
   }
 
+  // A corrupt on-disk index must degrade to empty, NEVER throw up to the tool: the
+  // sidecar self-heals (rm+rebuild) on the next boot (src/search/sqlite/sidecar.js),
+  // so a runtime `malformed` is transient. Keeps the index non-fatal at runtime too.
+  async function safeBackendQuery(q) {
+    try { return await backend.query(q); }
+    catch (e) {
+      if (e && (e.code === 'SQLITE_CORRUPT' || /malformed|not a database/i.test(e.message || ''))) {
+        return { hits: [], degraded: true, tier: 0, takenMs: 0 };
+      }
+      throw e;
+    }
+  }
+
   // Low-level ranked search (id + score) over the whole corpus.
   async function search(query, opts = {}) {
     await ensureBuilt();
     const q = (query ?? '').toString();
-    const { hits } = await backend.query({ text: q, topK: opts.limit ?? 10 });
+    const { hits } = await safeBackendQuery({ text: q, topK: opts.limit ?? 10 });
     return hits;
   }
 
@@ -268,7 +286,7 @@ export function createSearchHelpers(deps = {}) {
     await ensureBuilt();
 
     // Over-fetch so each layer can fill up to `limit` after partitioning.
-    const { hits } = await backend.query({ text: query, topK: Math.max(limit * 10, 50) });
+    const { hits } = await safeBackendQuery({ text: query, topK: Math.max(limit * 10, 50) });
     if (hits.length === 0) return empty;
 
     const ids = hits.map((h) => h.id);

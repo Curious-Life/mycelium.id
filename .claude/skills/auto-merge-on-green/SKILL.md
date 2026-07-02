@@ -35,10 +35,17 @@ every precondition below is affirmatively true. When in doubt, hold and report.
 3. **Mergeable.** The PR is not a draft, has no merge conflicts
    (`mergeable_state` is clean/has a mergeable base), and the base branch is the
    intended target.
-4. **Not security-sensitive without sign-off.** If the diff touches crypto/keys,
-   auth/OAuth, the encryption adapter or `ENCRYPTED_FIELDS`, RLS/tenant scoping,
-   egress chokepoints, or a DB migration → require an explicit human `APPROVED`
-   review even if CI is green. Never auto-merge these on checks alone.
+4. **Not security-sensitive without BOTH sign-off AND a review on record.** If the
+   diff touches crypto/keys, auth/OAuth, the encryption adapter or
+   `ENCRYPTED_FIELDS`, RLS/tenant scoping, egress chokepoints, remote-access, or a
+   DB migration → require **(a)** an explicit human `APPROVED` (a verbal "merge on
+   green" counts as the human sign-off) **AND (b)** an independent review actually
+   run on this diff — `/security-review` (or `/code-review`) — with any confirmed
+   findings resolved. The human nod is **not** a substitute for the review having
+   happened; if no review is on record, run it first, then re-evaluate. Never
+   auto-merge these on checks + a verbal go alone. (A recovery-key + remote-auth
+   diff merged on 2026-06-25 with the human go but no review — this clause closes
+   that hole.)
 
 If every item holds → merge. Otherwise → do not merge; post nothing noisy, just
 hold and (if asked to watch) wait for the next event.
@@ -75,4 +82,6 @@ self-guarding.
 - Never merge with a check pending, missing, or failed.
 - Never merge over a CHANGES_REQUESTED review or a missing required approval.
 - Never auto-merge a security-sensitive diff without an explicit human approval.
+- Never let a verbal "merge on green" stand in for an actual `/security-review` on
+  a security-sensitive diff — the human go and the review are two separate gates.
 - Never `--force`, never bypass branch protection, never merge a draft.

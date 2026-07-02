@@ -88,6 +88,70 @@
 	let cascade = $state(false);
 	let cascadeBusy = $state(false);
 
+	// ── Claude subscription (opt-in) — import the user's own Claude Code login ──
+	// Not a paste-a-key preset: a distinct flow that imports ~/.claude/.credentials.json
+	// (POST /auth/claude/import, acknowledgeToS required) and stores the OAuth token.
+	let subStatus = $state<{ authenticated: boolean; providerId: number | null } | null>(null);
+	let subOpen = $state(false);          // import panel expanded
+	let subAck = $state(false);           // ToS acknowledgment
+	let subConnecting = $state(false);
+	let subErr = $state<string | null>(null);
+	let subSensitive = $state(false);     // §4g opt-in (allow the sub for persona/claim work)
+	let subSensitiveBusy = $state(false);
+	// Model choice for the subscription. Persisted as the provider row's
+	// model_preference; empty falls back to the chat default (Opus 4.8, harness.js
+	// DEFAULT_ANTHROPIC_CHAT_MODEL). Both the direct-API path and the (future) CLI
+	// harness honour it via cloudModel / --model.
+	const CLAUDE_SUB_MODELS: { id: string; label: string }[] = [
+		{ id: 'claude-opus-4-8', label: 'Opus 4.8 · most capable' },
+		{ id: 'claude-sonnet-4-6', label: 'Sonnet 4.6 · balanced' },
+		{ id: 'claude-haiku-4-5', label: 'Haiku 4.5 · fastest' },
+	];
+	const subProvider = $derived(providers.find((p) => p.id === subStatus?.providerId) ?? null);
+	const subModelValue = $derived(subProvider?.model_preference || 'claude-opus-4-8');
+	let subModelBusy = $state(false);
+	async function setSubModel(v: string) {
+		if (!subStatus?.providerId || v === subModelValue) return;
+		subModelBusy = true;
+		try { await api(`/portal/providers/${subStatus.providerId}`, { method: 'PUT', body: JSON.stringify({ model_preference: v }) }); await load(); }
+		catch { /* leave; the select reverts to the persisted value on reload */ }
+		finally { subModelBusy = false; }
+	}
+
+	async function loadSub() {
+		try {
+			const [s, ss] = await Promise.all([
+				api('/portal/auth/claude/status').then((r) => r.json()).catch(() => null),
+				api('/portal/providers/sensitive-subscription').then((r) => r.json()).catch(() => null),
+			]);
+			if (s?.ok) subStatus = { authenticated: !!s.authenticated, providerId: s.providerId ?? null };
+			if (ss?.ok) subSensitive = ss.allowed === true;
+		} catch { /* section shows the connect state */ }
+	}
+	async function importSub() {
+		if (!subAck) return;
+		subConnecting = true; subErr = null;
+		try {
+			const r = await api('/portal/auth/claude/import', { method: 'POST', body: JSON.stringify({ acknowledgeToS: true }) });
+			const j = await r.json().catch(() => ({}));
+			if (!r.ok) throw new Error(j.error || 'Import failed');
+			subOpen = false; subAck = false;
+			await loadSub(); await load();
+		} catch (e: any) { subErr = e?.message || 'Import failed'; }
+		finally { subConnecting = false; }
+	}
+	async function disconnectSub() {
+		subConnecting = true; subErr = null;
+		try { await api('/portal/auth/claude/disconnect', { method: 'POST', body: '{}' }); await loadSub(); await load(); }
+		catch (e: any) { subErr = e?.message || 'Failed to disconnect'; }
+		finally { subConnecting = false; }
+	}
+	async function setSubSensitive(v: boolean) {
+		subSensitiveBusy = true;
+		try { const r = await api('/portal/providers/sensitive-subscription', { method: 'PUT', body: JSON.stringify({ allowed: v }) }); if (r.ok) subSensitive = (await r.json()).allowed === true; }
+		catch { /* leave */ } finally { subSensitiveBusy = false; }
+	}
+
 	// Assistant identity (spec #4) — name + personality, changeable here and set in
 	// onboarding. The name propagates to the chat header via /portal/chat/agents.
 	let agentName = $state('');
@@ -111,8 +175,12 @@
 		} catch { /* leave */ } finally { identityBusy = false; }
 	}
 
-	// Per-task model selection — which configured provider handles which task.
+	// Per-task model selection — ONE area, every task. Each task is either ON-BOX
+	// (a local model NAME, runs on your device — categorize/enrich) or PROVIDER-routed
+	// (a configured provider — chat/narrate/harness/reflection). `onboxTasks` comes from
+	// the backend (ONBOX_TASKS) so the split is authoritative, not hardcoded here.
 	let tasks = $state<string[]>([]);
+	let onboxTasks = $state<string[]>([]);
 	let taskModels = $state<Record<string, { providerId?: number; model?: string }>>({});
 	let taskBusy = $state<string | null>(null);
 	const TASK_LABELS: Record<string, string> = {
@@ -120,23 +188,28 @@
 		narrate: 'Narration — mindscape names + chronicles',
 		harness: 'Autonomous tasks — scheduled & background',
 		reflection: 'Reflection cycles — your daily/weekly inner model',
+		categorize: 'Labeling — per-message domains + registers',
+		enrich: 'Enrichment — entities + gist per message',
 	};
 	// Role-aware recommendations (curated operator picks, from /providers/presets).
-	// labeling → a small on-box model (categorize task); descriptions → an EU-ZDR cloud (narrate task).
+	// labeling → a small on-box model (categorize/enrich); descriptions → an EU-ZDR cloud (narrate).
 	let roleRecs = $state<{ labeling?: { model?: string }; descriptions?: { presetId?: string } } | null>(null);
-	// 'categorize' is ON-BOX — it stores a LOCAL model NAME, not a cloud providerId, so it gets a
-	// dedicated picker below rather than a provider dropdown in the per-task lane.
-	const cloudTasks = $derived(tasks.filter((t) => t !== 'categorize'));
-	const labelRecModel = $derived(roleRecs?.labeling?.model || 'qwen3.5:4b');
-	const labelModel = $derived(taskModels['categorize']?.model || '');
+	const isOnbox = (t: string) => onboxTasks.includes(t);
+	const cloudTaskList = $derived(tasks.filter((t) => !isOnbox(t)));   // provider-routed
+	const onboxTaskList = $derived(tasks.filter((t) => isOnbox(t)));     // on your device
+	const onboxRecModel = $derived(roleRecs?.labeling?.model || 'qwen3.5:4b'); // recommended on-box pick
 	// Installed local models to choose from (only known once hardware is detected).
 	const installedLocal = $derived((hwRec?.recommendations ?? []).filter((m: any) => m.installed).map((m: any) => m.name));
-	const labelOptions = $derived.by(() => {
+	const onboxModelOf = (task: string) => taskModels[task]?.model || '';
+	// Options for an on-box task's <select>: installed locals + the current pick, minus the
+	// recommended (which is the "" / default option). Same for every on-box task.
+	function onboxOptions(task: string): string[] {
 		const set = new Set<string>(installedLocal);
-		if (labelModel) set.add(labelModel); // keep the current pick even if not in the installed list
-		set.delete(labelRecModel); // the recommended model is the "" (default) option
+		const cur = onboxModelOf(task);
+		if (cur) set.add(cur);
+		set.delete(onboxRecModel);
 		return [...set];
-	});
+	}
 
 	const FIT: Record<string, { label: string; cls: string }> = {
 		perfect: { label: 'great fit', cls: 'fit-green' },
@@ -202,17 +275,17 @@
 		try { const r = await api('/portal/providers/routing'); if (r.ok) cascade = (await r.json()).cascade === true; } catch { /* default off */ }
 	}
 	async function loadTaskModels() {
-		try { const r = await api('/portal/providers/task-models'); if (r.ok) { const j = await r.json(); tasks = j.tasks || []; taskModels = j.taskModels || {}; } } catch { /* default: all tasks use the active provider */ }
+		try { const r = await api('/portal/providers/task-models'); if (r.ok) { const j = await r.json(); tasks = j.tasks || []; onboxTasks = j.onboxTasks || ['categorize', 'enrich']; taskModels = j.taskModels || {}; } } catch { /* default: all tasks use the active provider */ }
 	}
 	async function setTaskModel(task: string, providerId: number | null) {
 		taskBusy = task;
 		try { const r = await api('/portal/providers/task-models', { method: 'PUT', body: JSON.stringify({ task, providerId }) }); if (r.ok) taskModels = (await r.json()).taskModels || {}; }
 		catch { /* leave */ } finally { taskBusy = null; }
 	}
-	// On-box labeling model (categorize): stores a LOCAL model NAME. Empty → curated default.
-	async function setLabelModel(model: string) {
-		taskBusy = 'categorize';
-		try { const r = await api('/portal/providers/task-models', { method: 'PUT', body: JSON.stringify({ task: 'categorize', model }) }); if (r.ok) taskModels = (await r.json()).taskModels || {}; }
+	// On-box task (categorize/enrich): stores a LOCAL model NAME. Empty → curated default.
+	async function setOnboxModel(task: string, model: string) {
+		taskBusy = task;
+		try { const r = await api('/portal/providers/task-models', { method: 'PUT', body: JSON.stringify({ task, model }) }); if (r.ok) taskModels = (await r.json()).taskModels || {}; }
 		catch { /* leave */ } finally { taskBusy = null; }
 	}
 	async function setCascade(v: boolean) {
@@ -257,7 +330,7 @@
 	}
 
 	onMount(() => {
-		load(); loadRouting(); loadTaskModels(); loadTranscription(); loadIdentity();
+		load(); loadRouting(); loadTaskModels(); loadTranscription(); loadIdentity(); loadSub();
 		return () => { if (transPoll) clearInterval(transPoll); };
 	});
 
@@ -368,7 +441,7 @@
 		</span>
 		<div class="hero-body">
 			{#if activeInfo}
-				<span class="hero-label">Using {activeInfo.label}{#if activeInfo.model} · <span class="hero-model">{activeInfo.model}</span>{/if}</span>
+				<span class="hero-label">Using {activeInfo.label}{#if activeInfo.model && !activeInfo.label.includes(activeInfo.model)} · <span class="hero-model">{activeInfo.model}</span>{/if}</span>
 				{#if JURIS[activeInfo.juris]}<span class="chip {JURIS[activeInfo.juris].cls}">{JURIS[activeInfo.juris].label}</span>{/if}
 			{:else}
 				<span class="hero-label">No intelligence connected yet</span>
@@ -457,6 +530,17 @@
 					</div>
 					{#if saveErr}<div class="x-red">{saveErr}</div>{/if}
 				</form>
+			{:else if subOpen}
+				<div class="connect-form">
+					<div class="cf-head"><span class="cf-name">Connect your Claude subscription</span><span class="chip j-amber">US · opt-in</span></div>
+					<p class="muted-xs">Imports the login from your existing Claude Code session (<span class="mono">~/.claude</span>) — no key to paste. Automating a Pro/Max subscription may be against Anthropic’s terms; you accept that risk.</p>
+					<label class="ack"><input type="checkbox" bind:checked={subAck} /> <span>I understand and accept the terms risk</span></label>
+					{#if subErr}<div class="x-red">{subErr}</div>{/if}
+					<div class="cf-actions">
+						<button type="button" class="solid-btn" disabled={!subAck || subConnecting} onclick={importSub}>{subConnecting ? 'Connecting…' : 'Connect'}</button>
+						<button type="button" class="link-btn dim-link" onclick={() => { subOpen = false; subErr = null; }}>Cancel</button>
+					</div>
+				</div>
 			{:else}
 				{#each cloudGroups as g (g.key)}
 					{#if g.items.length}
@@ -468,6 +552,28 @@
 						</div>
 					{/if}
 				{/each}
+				<div class="preset-group sub-group">
+					<div class="group-title">Your Claude subscription</div>
+					{#if subStatus?.authenticated}
+						<div class="sub-row"><span class="sub-ok">✓ Using your Claude Pro/Max plan</span><button class="link-btn x-red-link" disabled={subConnecting} onclick={disconnectSub}>Disconnect</button></div>
+						<div class="sub-model-row">
+							<span class="sub-model-label">Model</span>
+							<select class="task-select" disabled={subModelBusy} value={subModelValue} onchange={(e) => setSubModel((e.currentTarget as HTMLSelectElement).value)}>
+								{#each CLAUDE_SUB_MODELS as m}
+									<option value={m.id}>{m.label}</option>
+								{/each}
+							</select>
+						</div>
+						<button class="sub-toggle" role="switch" aria-checked={subSensitive} disabled={subSensitiveBusy} onclick={() => setSubSensitive(!subSensitive)}>
+							<span class="toggle sm" class:on={subSensitive}><span class="knob"></span></span>
+							<span class="sub-toggle-body"><span class="sub-toggle-title">Also use it for sensitive work</span><span class="sub-toggle-sub">Let your subscription process persona &amp; claim analysis — otherwise kept on-device/EU. Off by default.</span></span>
+						</button>
+					{:else}
+						<p class="muted-xs">Use your existing Claude login instead of an API key — no key to paste.</p>
+						<button class="preset-chip sub-chip" onclick={() => { subOpen = true; subErr = null; }}>✦ Connect with your Claude login</button>
+					{/if}
+					{#if subErr && !subOpen}<div class="x-red">{subErr}</div>{/if}
+				</div>
 				<div class="preset-group">
 					<div class="group-title">Other</div>
 					<div class="chips-row">
@@ -506,50 +612,53 @@
 			</span>
 		</button>
 
-		<!-- ── Per-task model selection (cloud providers) ── -->
-		{#if providers.length && cloudTasks.length}
+		<!-- ── Models per task — ONE area: on-box (local) + provider-routed ── -->
+		{#if tasks.length}
 			<div class="lane">
-				<div class="lane-head"><span class="lane-title">Model per task</span><span class="lane-tag">optional</span></div>
-				<p class="muted task-intro">Route specific work to specific providers — e.g. narration on a fast on-device model, chat on a frontier model. Left unset, a task uses your active provider.</p>
-				{#each cloudTasks as task}
-					<div class="task-row">
-						<span class="task-label">{TASK_LABELS[task] || task}</span>
-						<select
-							class="task-select"
-							disabled={taskBusy === task}
-							value={taskModels[task]?.providerId ?? ''}
-							onchange={(e) => setTaskModel(task, (e.currentTarget as HTMLSelectElement).value ? Number((e.currentTarget as HTMLSelectElement).value) : null)}
-						>
-							<option value="">Use active provider{active ? ` (${active.label || active.provider})` : ''}</option>
-							{#each providers as p}
-								<option value={p.id}>{p.label || p.provider}{p.model_preference ? ` · ${p.model_preference}` : ''}</option>
-							{/each}
-						</select>
-					</div>
-				{/each}
-			</div>
-		{/if}
+				<div class="lane-head"><span class="lane-title">Models</span><span class="lane-tag">per task</span></div>
+				<p class="muted task-intro">Pick the model for each kind of work. The first group runs <strong>on your device</strong> (private + free, bulk over your whole vault); the rest route to a configured provider — left unset, they use your active provider.</p>
 
-		<!-- ── Labeling model (on-box L1) — categorize task, a LOCAL model name, never cloud ── -->
-		{#if tasks.includes('categorize')}
-			<div class="lane">
-				<div class="lane-head"><span class="lane-title">Labeling model</span><span class="lane-tag j-green">private · on your device</span></div>
-				<p class="muted task-intro">The small on-box model that sorts every message into domains + registers (Context Engine L1). It runs in bulk over your whole vault, so for privacy + cost it always stays local.</p>
-				<div class="task-row">
-					<span class="task-label">Per-message labeling</span>
-					<select
-						class="task-select"
-						disabled={taskBusy === 'categorize'}
-						value={labelModel && labelModel !== labelRecModel ? labelModel : ''}
-						onchange={(e) => setLabelModel((e.currentTarget as HTMLSelectElement).value)}
-					>
-						<option value="">Recommended · {labelRecModel}</option>
-						{#each labelOptions as name}
-							<option value={name}>{name}</option>
-						{/each}
-					</select>
-				</div>
-				{#if !hwRec}<p class="muted-xs">Tip: detect your hardware under “Local” above to pick from your installed models. “Recommended” auto-pulls {labelRecModel} if needed.</p>{/if}
+				{#if onboxTaskList.length}
+					<div class="group-title">On your device · private</div>
+					{#each onboxTaskList as task}
+						<div class="task-row">
+							<span class="task-label">{TASK_LABELS[task] || task}</span>
+							<select
+								class="task-select"
+								disabled={taskBusy === task}
+								value={onboxModelOf(task) && onboxModelOf(task) !== onboxRecModel ? onboxModelOf(task) : ''}
+								onchange={(e) => setOnboxModel(task, (e.currentTarget as HTMLSelectElement).value)}
+							>
+								<option value="">Recommended · {onboxRecModel}</option>
+								{#each onboxOptions(task) as name}
+									<option value={name}>{name}</option>
+								{/each}
+							</select>
+						</div>
+					{/each}
+					{#if !hwRec}<p class="muted-xs">Tip: detect your hardware under “Local” above to pick from your installed models. “Recommended” auto-pulls {onboxRecModel} if needed.</p>{/if}
+				{/if}
+
+				{#if cloudTaskList.length}
+					<div class="group-title">Provider-routed</div>
+					{#each cloudTaskList as task}
+						<div class="task-row">
+							<span class="task-label">{TASK_LABELS[task] || task}</span>
+							<select
+								class="task-select"
+								disabled={taskBusy === task || !providers.length}
+								value={taskModels[task]?.providerId ?? ''}
+								onchange={(e) => setTaskModel(task, (e.currentTarget as HTMLSelectElement).value ? Number((e.currentTarget as HTMLSelectElement).value) : null)}
+							>
+								<option value="">Use active provider{active ? ` (${active.label || active.provider})` : ''}</option>
+								{#each providers as p}
+									<option value={p.id}>{p.label || p.provider}{p.model_preference ? ` · ${p.model_preference}` : ''}</option>
+								{/each}
+							</select>
+						</div>
+					{/each}
+					{#if !providers.length}<p class="muted-xs">Connect a provider above to route these — until then they fall back to your active / on-device model.</p>{/if}
+				{/if}
 			</div>
 		{/if}
 
@@ -604,7 +713,7 @@
 </div>
 
 <style>
-	.ai-page { display: flex; flex-direction: column; gap: 1rem; }
+	.ai-page { display: flex; flex-direction: column; gap: 0.65rem; }
 	.muted { color: var(--color-text-tertiary); font-size: 0.82rem; }
 	.muted-xs { color: var(--color-text-tertiary); font-size: 0.7rem; line-height: 1.4; }
 	.pulse { animation: pulse 1.6s ease-in-out infinite; }
@@ -628,7 +737,7 @@
 	.hero-sub { font-size: 0.74rem; color: var(--color-text-tertiary); flex-basis: 100%; }
 
 	/* Lanes */
-	.lane { padding: 0.9rem 1rem; border-radius: 13px; background: rgba(255,255,255,0.025); border: 1px solid rgba(255,255,255,0.07); }
+	.lane { padding: 0.8rem 0.9rem; border-radius: 13px; background: rgba(255,255,255,0.025); border: 1px solid rgba(255,255,255,0.07); }
 	.lane-head { display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.7rem; }
 	.lane-title { font-size: 0.82rem; font-weight: 600; color: var(--color-text-primary); }
 	.lane-tag { font-size: 0.66rem; color: var(--color-text-tertiary); }
@@ -724,4 +833,21 @@
 	.task-select:disabled { opacity: 0.5; }
 
 	@keyframes pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
+	/* Claude subscription */
+	.sub-group { margin-top: 0.2rem; padding-top: 0.7rem; border-top: 1px solid rgba(255,255,255,0.06); }
+	.sub-chip { border-color: rgba(229,184,76,0.4); color: var(--color-accent-aurum); }
+	.sub-chip:hover { background: rgba(229,184,76,0.08); color: var(--color-accent-aurum); }
+	.sub-row { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
+	.sub-ok { font-size: 0.78rem; color: #6ee7a8; }
+	.sub-model-row { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; margin-top: 0.55rem; }
+	.sub-model-label { font-size: 0.74rem; color: var(--color-text-secondary); }
+	.sub-toggle { display: flex; align-items: flex-start; gap: 0.6rem; margin-top: 0.55rem; padding: 0; background: none; border: none; cursor: pointer; text-align: left; font-family: inherit; }
+	.sub-toggle:disabled { opacity: 0.6; }
+	.toggle.sm { width: 30px; height: 17px; }
+	.toggle.sm .knob { width: 13px; height: 13px; }
+	.toggle.sm.on .knob { left: 15px; }
+	.sub-toggle-title { display: block; font-size: 0.74rem; color: var(--color-text-secondary); }
+	.sub-toggle-sub { display: block; font-size: 0.66rem; color: var(--color-text-tertiary); line-height: 1.4; margin-top: 1px; }
+	.ack { display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; color: var(--color-text-secondary); cursor: pointer; }
+	.ack input { accent-color: var(--color-accent-aurum); }
 </style>

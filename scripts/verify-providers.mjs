@@ -95,11 +95,13 @@ rec('P7-juris. lookalike host does NOT downgrade to eu-zdr',
   jurisdictionForBaseUrl('https://regolo.ai.attacker.com/v1') === 'us-standard'
   && jurisdictionForBaseUrl('https://api.regolo.ai/v1') === 'eu-zdr');
 
-r = await J(await post('/auth/claude', { label: 'x' }));
-rec('P8. /auth/claude subscription OAuth fails closed (ToS)', r.status === 400 && /not supported/i.test(r.body.error || ''), JSON.stringify(r.body));
+// Subscription import is opt-in + fail-closed: without an explicit ToS acknowledgement
+// it refuses BEFORE reading any credentials (deterministic — no ~/.claude dependency).
+r = await J(await post('/auth/claude/import', { /* no acknowledgeToS */ }));
+rec('P8. /auth/claude/import fails closed without ToS acknowledgement', r.status === 400 && /acknowledg/i.test(r.body.error || ''), JSON.stringify(r.body));
 
 r = await J(await get('/auth/claude/status'));
-rec('P9. /auth/claude/status → not authenticated (key-only)', r.body.ok && r.body.authenticated === false, JSON.stringify(r.body));
+rec('P9. /auth/claude/status → not authenticated when no subscription connected', r.body.ok && r.body.authenticated === false, JSON.stringify(r.body));
 
 r = await J(await get('/providers/presets'));
 rec('P10. GET /providers/presets serves the catalog (EU-sovereign + local options)',
@@ -124,10 +126,22 @@ rt = await J(await get('/providers/routing'));
 const routingOff = rt.body.cascade === false;
 rec('P12. routing toggle persists (default off → on → off)', routingDefault && routingOn && routingOff, `default=${routingDefault} on=${routingOn} off=${routingOff}`);
 
+// P13 — §4g subscription opt-in toggle persists (off by default): lets the user
+// allow their connected subscription to process the on-box/EU-only sensitive work.
+let ss = await J(await get('/providers/sensitive-subscription'));
+const ssDefault = ss.body.ok && ss.body.allowed === false;
+await put('/providers/sensitive-subscription', { allowed: true });
+ss = await J(await get('/providers/sensitive-subscription'));
+const ssOn = ss.body.allowed === true;
+await put('/providers/sensitive-subscription', { allowed: false });
+ss = await J(await get('/providers/sensitive-subscription'));
+const ssOff = ss.body.allowed === false;
+rec('P13. §4g subscription opt-in persists (default off → on → off)', ssDefault && ssOn && ssOff, `default=${ssDefault} on=${ssOn} off=${ssOff}`);
+
 server.close(); close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
-console.log(`VERDICT: ${allPass ? 'GO — /portal/providers CRUD + setActive + connectivity probe + ToS-safe auth stubs' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
+console.log(`VERDICT: ${allPass ? 'GO — /portal/providers CRUD + setActive + connectivity probe + opt-in subscription import (fail-closed) + §4g toggle' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
 console.log('='.repeat(64));
 process.exit(allPass ? 0 : 1);

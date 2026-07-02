@@ -26,6 +26,8 @@ const SENSITIVE_PREFIXES = [
 	'/portal/activity/',
 	'/portal/connections',
 	'/portal/contexts',
+	'/portal/spaces',          // shared-spaces: space_knowledge can carry vault excerpts; covers /portal/spaces/* incl. knowledge + seed-doc (2026-06-30)
+	'/portal/inbound-shares',  // grantee-side shared-space pointers
 	'/portal/export/',         // /portal/export/auth + /portal/export/verify (NOT bare /portal/export which returns a binary zip — stays raw)
 	'/portal/search',
 	'/portal/vitality',

@@ -44,11 +44,17 @@ rec('H2. openclaw scam-safety note present',
 rec('H3. local-only banner present',
   /local-only/i.test(recipes) && /coming soon|not live/i.test(recipes));
 
-// ── H5 — picker renders every harness id + the real endpoints ────────────────
-const IDS = ['mycelium', 'claude', 'opencode', 'openclaw', 'hermes', 'custom'];
-rec('H5. picker component renders every harness + real endpoints',
+// ── H5 — picker renders every EXTERNAL-app harness id + the real endpoints ────
+// The 'mycelium' pseudo-card was removed (2026-07-02): this list is "use Mycelium
+// FROM another app", and Mycelium-native is not another app — the native↔Claude-Code
+// ENGINE choice now lives in Settings → Intelligence → Engine (EngineSelector), which
+// the picker links to. So the picker must NOT re-offer a 'mycelium' card here.
+const IDS = ['claude', 'opencode', 'openclaw', 'hermes', 'custom'];
+rec('H5. picker component renders every external-app harness + real endpoints + Engine pointer',
   IDS.every((id) => picker.includes(`id: '${id}'`)) &&
-    has(picker, 'http://127.0.0.1:4711', '/mcp', '/v1', 'mycelium-auto', 'streamable-http'),
+    !picker.includes(`id: 'mycelium'`) &&
+    has(picker, 'http://127.0.0.1:4711', '/mcp', '/v1', 'mycelium-auto', 'streamable-http') &&
+    has(picker, 'pane=intelligence'),
   `missing ids: ${IDS.filter((id) => !picker.includes(`id: '${id}'`)).join(', ') || 'none'}`);
 
 // ── H6 — picker carries the openclaw safety note (UI/doc parity) ──────────────

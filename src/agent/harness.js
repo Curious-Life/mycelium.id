@@ -22,13 +22,11 @@
 
 import { createHash } from 'node:crypto';
 import { openStream, ssePayloads, resolveChatUrl } from '../inference/cloud.js';
+import { ANTHROPIC_URL, anthropicAuthHeaders, anthropicAuthFromCfg, anthropicSystem } from '../inference/anthropic-wire.js';
 import { fetchProvider } from '../inference/base-url.js';
 import { DEFAULT_OLLAMA_URL, DEFAULT_LOCAL_MODEL } from '../inference/local.js';
 import { InferenceError } from '../inference/errors.js';
 import { fireBeforeToolCall, fireAfterToolCall } from './hooks.js';
-
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
-const ANTHROPIC_VERSION = '2023-06-01';
 
 // Chat defaults differ from the enrichment defaults in cloud.js: chat wants the
 // most capable current model unless the user pinned one in Settings.
@@ -103,9 +101,13 @@ const anthropicAdapter = {
   pushToolResults(messages, results) { messages.push({ role: 'user', content: results }); },
 
   async streamOnce({ cfg, system, messages, toolDefs, model, maxTokens, send, signal, fetch, timeoutMs, logger }) {
-    const body = { model, max_tokens: maxTokens, system, messages, stream: true };
+    // Auth mode (apiKey vs Claude-subscription) + system shaping live in the shared
+    // anthropic-wire module. In the apiKey path this is byte-identical to the legacy
+    // inline header + plain `system` string.
+    const auth = anthropicAuthFromCfg(cfg);
+    const body = { model, max_tokens: maxTokens, system: anthropicSystem(auth, system), messages, stream: true };
     if (toolDefs && toolDefs.length) { body.tools = toolDefs; body.tool_choice = { type: 'auto' }; }
-    const res = await openStreamRetry([ANTHROPIC_URL, { 'x-api-key': cfg.anthropicApiKey, 'anthropic-version': ANTHROPIC_VERSION }, body, fetch, timeoutMs], { retries: 2, signal, logger });
+    const res = await openStreamRetry([ANTHROPIC_URL, anthropicAuthHeaders(auth), body, fetch, timeoutMs], { retries: 2, signal, logger });
     let text = '';
     const blocks = new Map();        // index → { type, id, name, json }
     let stopReason = null;
@@ -332,7 +334,10 @@ const ollamaNativeAdapter = {
 // cloudModel?, jurisdiction?}. An empty object = no provider configured → the
 // guaranteed floor: on-box Ollama via its NATIVE /api/chat (so num_ctx is sizable).
 function normalizeProvider(cfg = {}) {
-  if (cfg.anthropicApiKey) {
+  // Claude subscription (OAuth) MUST be checked first: it carries no anthropicApiKey,
+  // so without this it would fall through to the local floor. Same wire as a Claude
+  // API key (anthropicAdapter); anthropic-wire swaps key→Bearer based on the token.
+  if (cfg.claudeOAuthToken || cfg.anthropicApiKey) {
     return { adapter: anthropicAdapter, cfg, model: cfg.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard' };
   }
   const isLocal = cfg.jurisdiction === 'local' || (!!cfg.baseUrl && LOOPBACK_RE.test(cfg.baseUrl));
@@ -357,6 +362,11 @@ function normalizeProvider(cfg = {}) {
  * @returns {{kind:string,label:string,model:string,jurisdiction:string,local:boolean}|null}
  */
 export function describeProvider(cfg = {}) {
+  // Subscription first (no anthropicApiKey present) — else the preflight returns null
+  // and the turn is skipped {skipped:'no-model'} despite a valid provider.
+  if (cfg.claudeOAuthToken) {
+    return { kind: 'anthropic', label: cfg.label || 'Claude (subscription)', model: cfg.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard', local: false };
+  }
   if (cfg.anthropicApiKey) {
     return { kind: 'anthropic', label: 'Claude', model: cfg.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard', local: false };
   }

@@ -95,9 +95,13 @@ function robustCopy(t) {
   return { failed, filled };
 }
 
+// Tables to leave EMPTY (regenerable/non-critical) — their b-trees are so damaged
+// that even robustCopy can't enumerate rowids. Comma-list via MYCELIUM_REBUILD_SKIP.
+const SKIP = new Set((process.env.MYCELIUM_REBUILD_SKIP || '').split(',').map(s => s.trim()).filter(Boolean));
 // Decide which tables need the robust path: those that fail a quick full-scan.
 function isCorrupt(t) { try { for (const _ of src.prepare(`SELECT * FROM "${t}"`).iterate()) {} return false; } catch { return true; } }
 for (const t of normalTables) {
+  if (SKIP.has(t.name)) { log(`SKIP ${t.name} — left empty (regenerable; corrupt b-tree unreadable)`); continue; }
   try {
     if (isCorrupt(t.name)) robustCopy(t.name);
     else { const n = genericCopy(t); if (n) log(`copied ${t.name}: ${n}`); }
@@ -144,6 +148,7 @@ log('VACUUM dest …'); const t0 = Date.now(); dest.exec('VACUUM'); log(`VACUUM 
 // ---- 6. per-table count parity vs source ----
 let mismatches = 0;
 for (const t of [...normalTables.map(t => t.name), ...vtNames].sort()) {
+  if (SKIP.has(t)) { console.log(`  ${t}: intentionally left EMPTY (regenerable) — parity check skipped`); continue; }
   let s, dN; try { s = src.prepare(`SELECT count(*) c FROM "${t}"`).get().c; } catch { s = 'ERR'; }
   try { dN = dest.prepare(`SELECT count(*) c FROM "${t}"`).get().c; } catch { dN = 'ERR'; }
   if (String(s) !== String(dN)) { const expectedGapFill = counts[t] !== undefined; if (!expectedGapFill || dN < s) { mismatches++; console.log(`  ${t}: src=${s} dest=${dN}  <-- MISMATCH`); } }

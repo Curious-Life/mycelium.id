@@ -526,7 +526,13 @@ def _iso_to_unix(ts_iso: str) -> float:
     s = s.replace(' UTC', '').replace(' utc', '').replace('Z', '+00:00').strip()
     if 'T' not in s and ' ' in s:  # 'YYYY-MM-DD HH:MM:SS[+tz]' → ISO 'T' separator
         s = s.replace(' ', 'T', 1)
-    return datetime.fromisoformat(s).timestamp()
+    # Tolerant: a handful of messy/imported created_at values (binary, base64,
+    # content fragments, empty) must NOT crash the whole stage — return None so
+    # callers skip just those rows. (The other metric stages already do this.)
+    try:
+        return datetime.fromisoformat(s).timestamp()
+    except (ValueError, AttributeError, TypeError, OSError, OverflowError):
+        return None
 
 
 def _detect_history_days(metadata: list[dict]) -> int:
@@ -537,6 +543,8 @@ def _detect_history_days(metadata: list[dict]) -> int:
     if not earliest_iso:
         return FALLBACK_HISTORY_DAYS
     earliest = _iso_to_unix(earliest_iso)
+    if earliest is None:  # earliest row has a malformed timestamp → fall back
+        return FALLBACK_HISTORY_DAYS
     days = math.ceil((datetime.now(timezone.utc).timestamp() - earliest) / 86400.0)
     return max(7, min(int(days), MAX_HISTORY_DAYS))
 
@@ -596,8 +604,11 @@ def main(querier=None) -> None:
         )
         return
 
-    timestamps_unix = np.array([_iso_to_unix(ts) for ts, _ in ordered_pairs], dtype=np.float64)
-    embeddings = np.stack([v for _, v in ordered_pairs])
+    # Skip rows whose created_at is unparseable (messy imports) so a few bad
+    # timestamps don't sink the stage; keep timestamps aligned with embeddings.
+    _parsed = [(u, v) for (ts, v) in ordered_pairs if (u := _iso_to_unix(ts)) is not None]
+    timestamps_unix = np.array([u for u, _ in _parsed], dtype=np.float64)
+    embeddings = np.stack([v for _, v in _parsed]) if _parsed else np.empty((0, 0))
 
     # ── Phase 4: build cosine-distance signal once ───────────────────
     sig_ts, sig_vals = cosine_distance_signal(timestamps_unix, embeddings)

@@ -5,6 +5,10 @@ import { clampStored } from './enrich/text-limits.js';
 import { resolveInferenceConfigForTask } from './inference/resolve.js';
 import { createInferenceRouter } from './inference/router.js';
 import { isValidHandle } from './identity/identity.js';
+import { computeContentHash, validatePath, SaveDocumentError } from './core/document-store.js';
+import { resolveKeyAgreementKey } from './federation/did.js';
+import { applyShareGrant, applyShareRevoke } from './federation/space-membership.js';
+import { mirrorKnowledgeWrite, mirrorKnowledgeDelete } from './federation/space-content-mirror.js';
 import { createUsageSink } from './inference/usage.js';
 
 /**
@@ -31,11 +35,11 @@ import { createUsageSink } from './inference/usage.js';
  * @param {string} deps.userId   the single V1 owner
  * @returns {import('express').Router}
  */
-export function portalCompatRouter({ db, userId, spaceSync = null }) {
+export function portalCompatRouter({ db, userId }) {
   if (!db) throw new Error('portalCompatRouter: db required');
-  // spaceSync (Phase B, optional): when a Matrix client is wired, a share grant/
-  // revoke also syncs the peer into/out of the space's Megolm room. Null until a
-  // homeserver is configured → the grant is recorded locally regardless.
+  // Shared-space membership + content cross-box sync is handled by the E2E system
+  // (space-membership.js applyShareGrant/Revoke + space-content-mirror.js, over the
+  // ciphertext oplog), wired into the grant/revoke/knowledge handlers below.
   const router = express.Router();
   router.use(express.json({ limit: process.env.MYCELIUM_API_BODY_LIMIT || '64mb' }));
 
@@ -43,25 +47,45 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
   const fail = (res, code = 500, error = 'request failed') => res.status(code).json({ error });
   const decodePath = (raw) => { try { return decodeURIComponent(raw); } catch { return raw; } };
 
+  // Library search is a bounded decrypt-scan (title/summary are encrypted at
+  // rest, so SQL can't filter them). Scan at most this many most-recent docs.
+  const SEARCH_SCAN_CAP = 3000;
+
   // ── Library: documents ─────────────────────────────────────────────────
   // GET /documents?pinned=1&folder_id=&limit=&offset= → { documents:[...], total? }
   router.get('/documents', async (req, res) => {
     try {
-      const opts = {};
-      if (req.query.pinned === '1' || req.query.pinned === 'true') opts.pinnedOnly = true;
-      if (typeof req.query.folder_id === 'string' && req.query.folder_id) opts.folderId = req.query.folder_id;
+      const folderOpts = {};
+      if (req.query.pinned === '1' || req.query.pinned === 'true') folderOpts.pinnedOnly = true;
+      if (typeof req.query.folder_id === 'string' && req.query.folder_id) folderOpts.folderId = req.query.folder_id;
+
       // Optional pagination — when limit is given, page the decrypt + return a
       // total for infinite scroll. Omitted (e.g. MCP callers) → full set, unchanged.
       const limit = Number(req.query.limit);
       const paged = Number.isFinite(limit) && limit > 0;
-      if (paged) {
-        opts.limit = Math.min(Math.floor(limit), 500);
-        const offset = Number(req.query.offset);
-        opts.offset = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
+      const pageLimit = paged ? Math.min(Math.floor(limit), 500) : null;
+      const offsetN = Number(req.query.offset);
+      const offset = Number.isFinite(offsetN) && offsetN > 0 ? Math.floor(offsetN) : 0;
+
+      const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase().slice(0, 200) : '';
+      if (q) {
+        // title/summary are encrypted at rest → search can't filter in SQL.
+        // Decrypt-scan the most-recent SEARCH_SCAN_CAP rows (same pattern as
+        // /portal/attachments) and filter in JS on the decrypted path/title/
+        // summary. One bounded request — vastly cheaper than the client loading
+        // the entire vault just to search. Covers the most-recent cap; older
+        // docs fall outside the search window (acceptable for a personal vault).
+        const scanned = await db.documents.list(userId, { ...folderOpts, limit: SEARCH_SCAN_CAP, offset: 0 });
+        const matched = scanned.filter((d) => `${d.path || ''}\n${d.title || ''}\n${d.summary || ''}`.toLowerCase().includes(q));
+        const documents = pageLimit != null ? matched.slice(offset, offset + pageLimit) : matched;
+        return ok(res, { documents, total: matched.length });
       }
+
+      const opts = { ...folderOpts };
+      if (paged) { opts.limit = pageLimit; opts.offset = offset; }
       const documents = await db.documents.list(userId, opts);
       const body = { documents };
-      if (paged) body.total = await db.documents.count(userId, opts);
+      if (paged) body.total = await db.documents.count(userId, folderOpts);
       ok(res, body);
     } catch { fail(res); }
   });
@@ -93,15 +117,34 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
   // POST /documents → create/update { path, title, content }
   router.post('/documents', async (req, res) => {
     try {
-      const { path, title, content } = req.body || {};
+      const { path, title, content, folder_id } = req.body || {};
       if (typeof path !== 'string' || !path) return fail(res, 400, 'path required');
-      const row = await db.documents.upsert({
+      const doc = {
         user_id: userId, path,
         title: typeof title === 'string' ? title : null,
-        content: typeof content === 'string' ? content : '',
-      });
+      };
+      // FOOTGUN FIX (hardening P1 step 4): only set `content` when the client
+      // actually sent a string. The old `content: ... : ''` fallback meant a
+      // metadata-only update (rename/pin/autosave that omits content) UPDATEd
+      // content='' on conflict → silent whole-document wipe. Omitting the column
+      // leaves the upsert's ON CONFLICT SET without it → content preserved. When
+      // content IS provided, compute content_hash inline (matching the canonical
+      // saveDocument boundary) so portal writes get dedup/change-detection too.
+      if (typeof content === 'string') {
+        doc.content = content;
+        doc.content_hash = computeContentHash(content);
+      }
+      // Only set folder_id when the client sent it (create / move) so an
+      // autosave — which omits it — never clobbers the doc's folder on conflict.
+      if (folder_id !== undefined) doc.folder_id = folder_id === null ? null : String(folder_id);
+      const row = await db.documents.upsert(doc);
       ok(res, { ok: true, document: row });
-    } catch { fail(res); }
+    } catch (e) {
+      // Surface a NON-sensitive error code (e.g. SQLITE_CORRUPT / SQLITE_FULL)
+      // so the client shows WHY a write failed instead of dropping it silently.
+      // Never include the error message — it can echo document content.
+      fail(res, 500, e?.code || e?.name || 'document write failed');
+    }
   });
 
   // POST /documents/pin → { path, pinned: boolean }
@@ -122,6 +165,45 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       await db.documents.moveToFolder(userId, path, folder_id ?? null);
       ok(res, { ok: true });
     } catch { fail(res); }
+  });
+
+  // POST /documents/rename → { path, title } — sets the display title only
+  // (path is the stable identity; never changed here). Dedicated route so a
+  // rename can't accidentally wipe content the way the upsert route would.
+  router.post('/documents/rename', async (req, res) => {
+    try {
+      const { path, title } = req.body || {};
+      if (typeof path !== 'string' || !path) return fail(res, 400, 'path required');
+      if (typeof title !== 'string' || !title.trim()) return fail(res, 400, 'title required');
+      const row = await db.documents.setTitle(userId, path, title.trim().slice(0, 500));
+      if (!row) return fail(res, 404, 'document not found');
+      ok(res, { ok: true, document: row });
+    } catch { fail(res); }
+  });
+
+  // POST /documents/rename-path → { path, new_path } — change the slug / ?doc= id.
+  // Distinct from /rename (title): this moves the document's IDENTITY and atomically
+  // cascades every FK-less path reference (see DOCUMENT-SLUG-RENAME-DESIGN). public_slug
+  // is independent, so published/shared URLs are unaffected.
+  router.post('/documents/rename-path', async (req, res) => {
+    try {
+      const { path, new_path: newPath } = req.body || {};
+      if (typeof path !== 'string' || !path) return fail(res, 400, 'path required');
+      if (typeof newPath !== 'string' || !newPath.trim()) return fail(res, 400, 'new_path required');
+      const target = newPath.trim();
+      // Reuse the canonical create-path validator (empty/length/slash/traversal/null) so
+      // the slug rules can't drift from creation. 'portal' source = no reserved-prefix gate.
+      try { validatePath(target, 'portal'); }
+      catch (e) { if (e instanceof SaveDocumentError) return fail(res, 400, e.code || 'invalid_path'); throw e; }
+      const row = await db.documents.renamePath(userId, path, target);
+      ok(res, { ok: true, document: row });
+    } catch (e) {
+      // Map the renamePath sentinels; never echo content.
+      if (e?.message === 'RENAME_CONFLICT') return fail(res, 409, 'a document with that link already exists');
+      if (e?.message === 'RENAME_NOT_FOUND') return fail(res, 404, 'document not found');
+      if (e?.message === 'RENAME_BAD_PATH') return fail(res, 400, 'new_path required');
+      fail(res, 500, e?.code || e?.name || 'rename failed');
+    }
   });
 
   // DELETE /documents/<path>
@@ -616,15 +698,20 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       const content = String(req.body?.content || '').trim();
       if (!content) return fail(res, 400, 'content required');
       const entryId = await db.spaceKnowledge.add(id, content, userId, null, 'direct', 'all', req.body?.domain_tags ?? null);
-      spaceSync?.mirrorKnowledge(id, { content, source_type: 'direct' }).catch(() => {});
+      // E2E (O3-HOOK): mirror into the ciphertext oplog so grantees can fetch + decrypt it.
+      mirrorKnowledgeWrite(db, id, entryId, content, { log: (m) => console.error(m) }).catch(() => {});
       ok(res, { ok: true, id: entryId });
     } catch { fail(res, 500, 'could not add knowledge'); }
   });
   router.delete('/spaces/:id/knowledge/:entryId', async (req, res) => {
     const id = decodePath(req.params.id);
     if (!(await guardSpace(res, id, 'contributor'))) return;
-    try { await db.spaceKnowledge.revoke(decodePath(req.params.entryId), id); ok(res, { ok: true }); }
-    catch { fail(res, 500, 'could not remove knowledge'); }
+    try {
+      const entryId = decodePath(req.params.entryId);
+      await db.spaceKnowledge.revoke(entryId, id);
+      mirrorKnowledgeDelete(db, id, entryId, { log: (m) => console.error(m) }).catch(() => {}); // E2E tombstone
+      ok(res, { ok: true });
+    } catch { fail(res, 500, 'could not remove knowledge'); }
   });
   router.post('/spaces/:id/seed', async (req, res) => {
     const id = decodePath(req.params.id);
@@ -635,7 +722,11 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       const byId = new Map((terr || []).map((t) => [String(t.territory_id ?? t.id), t]));
       for (const tid of ids) {
         const t = byId.get(String(tid));
-        if (t) await db.spaceKnowledge.add(id, t.essence || t.name || '', userId, String(tid), 'territory', 'all', null);
+        if (t) {
+          const c = t.essence || t.name || '';
+          const eid = await db.spaceKnowledge.add(id, c, userId, String(tid), 'territory', 'all', null);
+          mirrorKnowledgeWrite(db, id, eid, c, { log: (m) => console.error(m) }).catch(() => {}); // E2E mirror
+        }
       }
       ok(res, { ok: true, seeded: ids.length });
     } catch { fail(res, 500, 'could not seed space'); }
@@ -676,7 +767,7 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       const memberLines = members.slice(0, 50).map((m) => `• ${m.name}${m.essence ? ` — ${m.essence}` : ''}`).join('\n');
       const content = [`${label}: ${name || '(unnamed)'}`, essence, memberLines].filter(Boolean).join('\n\n');
       const entryId = await db.spaceKnowledge.add(id, content, userId, srcTerr, level, 'all', null, sourceRef);
-      spaceSync?.mirrorKnowledge(id, { content, source_type: level, source_ref: sourceRef }).catch(() => {});
+      mirrorKnowledgeWrite(db, id, entryId, content, { log: (m) => console.error(m) }).catch(() => {}); // E2E mirror
       ok(res, { ok: true, id: entryId, level, members: members.length });
     } catch (e) { fail(res, 500, e.message || 'could not share cluster'); }
   });
@@ -710,11 +801,13 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
       const conn = conns.find((c) => c.other_user_id === granteeId);
       if (!conn) return fail(res, 400, 'grantee must be an accepted connection');
       await db.spaceAccess.grant(id, granteeId, role, userId);
-      // best-effort Megolm-room invite (no-op until Matrix is configured)
-      spaceSync?.syncGrant(id, granteeId, userId).catch(() => {});
       // Announce the grant to the peer's instance → appears in their "Shared with
       // you" + lights their People badge (federation sharing Phase 2).
       try { const sp = await db.spaces.get(id); db.connections.announceShare(userId, conn.id, { kind: 'space', ref: id, name: sp?.name || sp?.display_name || null, role, action: 'grant' }).catch(() => {}); } catch {}
+      // E2E (BU-REKEY): seal the space CEK to the new member's X25519 key so they can
+      // decrypt. Best-effort — the access grant + announce stand even if the peer is
+      // unreachable; the seal retries on a future grant. Confidentiality never depends on it.
+      applyShareGrant({ db, spaceId: id, memberDid: conn.remote_did, resolveKey: (d) => resolveKeyAgreementKey(d), log: (m) => console.error(m) }).catch(() => {});
       ok(res, { ok: true });
     } catch { fail(res, 500, 'could not share space'); }
   });
@@ -724,8 +817,26 @@ export function portalCompatRouter({ db, userId, spaceSync = null }) {
     try {
       const granteeId = decodePath(req.params.granteeId);
       await db.spaceAccess.revoke(id, granteeId);
-      spaceSync?.syncRevoke(id, granteeId).catch(() => {});
-      try { const conns = await db.connections.list(userId); const conn = conns.find((c) => c.other_user_id === granteeId); if (conn) db.connections.announceShare(userId, conn.id, { kind: 'space', ref: id, action: 'revoke' }).catch(() => {}); } catch {}
+      // E2E (BU-REKEY): rekey the space so the evicted peer can't read content written
+      // after revocation (forward secrecy). Survivors = the REMAINING members (post-revoke)
+      // mapped to their connections' DIDs; the allowlist rekey seals a fresh CEK only to
+      // them + the owner. Best-effort + fail-closed: an unresolvable survivor is skipped
+      // (re-syncs on next grant), and confidentiality holds regardless.
+      try {
+        const [remaining, conns] = await Promise.all([db.spaceAccess.list(id), db.connections.list(userId)]);
+        const didFor = (uid) => conns.find((c) => c.other_user_id === uid)?.remote_did || null;
+        const survivorDids = remaining.map((m) => didFor(m.user_id)).filter(Boolean);
+        const removedDid = didFor(granteeId);
+        const conn = conns.find((c) => c.other_user_id === granteeId);
+        if (conn) db.connections.announceShare(userId, conn.id, { kind: 'space', ref: id, action: 'revoke' }).catch(() => {});
+        // AWAIT the rekey (forward-secrecy enforcement) and SURFACE a failure rather than
+        // swallowing it (review F2): a silent failure would leave new writes under the gen
+        // the evicted peer still holds. applyShareRevoke never throws — it returns a status.
+        const rev = await applyShareRevoke({ db, spaceId: id, removedDid, survivorDids, resolveKey: (d) => resolveKeyAgreementKey(d), log: (m) => console.error(m) });
+        if (rev && rev.rekeyed === false && rev.reason === 'rekey-failed') {
+          console.error(`[spaces] revoke for ${id}: access removed but key rotation PENDING — re-drive the rekey (authz 403 still blocks the evicted peer meanwhile)`);
+        }
+      } catch {}
       ok(res, { ok: true });
     } catch { fail(res, 500, 'could not revoke share'); }
   });

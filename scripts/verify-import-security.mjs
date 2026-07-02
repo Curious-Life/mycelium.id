@@ -21,7 +21,8 @@ import { applyMigrations } from '../src/db/migrate.js';
 
 // Force tight bounds BEFORE importing the server (import-parsers reads these at
 // module-eval; a dynamic import runs after these assignments).
-process.env.MYCELIUM_IMPORT_MAX_JSON_BYTES = '100000';   // 100KB cap on conversations.json
+process.env.MYCELIUM_IMPORT_MAX_JSON_BYTES = '100000';   // 100KB cap on conversations.json (JSZip/detect path)
+process.env.MYCELIUM_IMPORT_STREAM_MAX_JSON_BYTES = '100000'; // same cap on the streaming path (run-import streams conversations.json)
 process.env.MYCELIUM_IMPORT_MAX_CONCURRENT = '3';
 process.env.MYCELIUM_IMPORT_MAX_CHUNKS = '2';
 process.env.MYCELIUM_IMPORT_LIMIT_BYTES = '1000000';     // 1MB total cap (tiny fixtures stay under)

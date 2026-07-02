@@ -113,6 +113,12 @@ async function run() {
 
     for (const p of points) {
       const dt = new Date(p.created_at);
+      // Skip points whose created_at is unparseable (messy imports): an Invalid
+      // Date makes the keyFn's dt.toISOString() throw "Invalid time value" and
+      // sinks the whole co-firing stage (Step 4), aborting the pipeline before
+      // the cache refresh — so the map never renders. A handful of bad rows must
+      // not block the stage (same tolerance as harmonics).
+      if (Number.isNaN(dt.getTime())) continue;
       const tid = p.territory_id;
       if (catchAllSet.has(tid)) continue;
 

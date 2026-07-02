@@ -81,7 +81,8 @@
 				{/each}
 			</svg>
 			{#if hoverWeek}
-				<div class="tip" style="left:{Math.min(88, (hoverIdx! / Math.max(1, n - 1)) * 100)}%;">
+				{@const frac = hoverIdx! / Math.max(1, n - 1)}
+				<div class="tip" class:flip={frac > 0.6} style="left:{(frac * 100).toFixed(1)}%;">
 					<div class="tip-h">{hoverWeek.end} · {hoverWeek.total} message{hoverWeek.total === 1 ? '' : 's'}</div>
 					{#each (hoverWeek.top ?? []) as t, r}
 						<div class="tip-row"><i style="background:{RANK[r % 3]}"></i><span class="tip-n">{t.name}{#if !t.named}<em> (unnamed)</em>{/if}</span><span class="tip-v">{t.count}</span></div>
@@ -105,6 +106,9 @@
 	.wtt-note { color: var(--color-text-tertiary); }
 	.xt { fill: var(--color-text-tertiary); font-size: 9px; text-anchor: middle; }
 	.tip { position: absolute; top: 0; transform: translateX(12px); pointer-events: none; background: var(--color-elevated); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 0.5rem 0.6rem; font-size: 0.72rem; min-width: 11rem; max-width: 16rem; box-shadow: 0 8px 24px rgb(0 0 0 / 0.35); z-index: 2; }
+	/* Edge-aware: flip to the left of the cursor near the right edge so it never
+	   overflows the chart / app window. */
+	.tip.flip { transform: translateX(calc(-100% - 12px)); }
 	.tip-h { color: var(--color-text-emphasis); font-weight: 600; margin-bottom: 0.35rem; }
 	.tip-row { display: flex; align-items: center; gap: 0.4rem; padding: 0.1rem 0; }
 	.tip-row i { width: 8px; height: 8px; border-radius: 2px; flex: none; }

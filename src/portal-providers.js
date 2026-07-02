@@ -5,11 +5,14 @@
 // adapter (ENCRYPTED_FIELDS.ai_providers) and NEVER returned to the client.
 //
 // SECURITY:
-//   - BYOK API key only. The legacy `auth_type:'oauth'` + `config_dir` path
-//     (use a Claude *subscription* via a Claude Code OAuth token) is a deliberate
-//     NON-feature: it became an Anthropic ToS violation (2026-02-19). The
-//     /auth/{claude,openai} stubs report "not connected" so the UI degrades to
-//     "paste an API key", and the claude OAuth POSTs fail closed.
+//   - BYOK API key, PLUS an opt-in Claude SUBSCRIPTION path (auth_type:'oauth').
+//     Connecting a subscription was disabled on 2026-02-19 as an Anthropic ToS
+//     concern; it is RE-ENABLED (2026-06-26) as an EXPLICIT, opt-in, user-elected
+//     action for self-hosted single-user operators who run their OWN subscription
+//     on their OWN box and knowingly accept the ToS risk. We IMPORT the user's
+//     existing Claude Code login (~/.claude/.credentials.json) — never mint tokens
+//     via Anthropic's client_id. /auth/claude/import requires acknowledgeToS:true
+//     (fail-closed without it). See docs/CLAUDE-SUBSCRIPTION-DRIVER-DESIGN-2026-06-26.md.
 //   - The key blob is written once on create/update and never echoed back. The
 //     listing carries metadata only (providers.list() omits `credentials`); the
 //     decrypt path is reached only for the connectivity probe + the inference
@@ -24,6 +27,13 @@ import { assertSafeBaseUrlResolved } from './inference/base-url.js';
 import { INFERENCE_TASKS, ONBOX_TASKS } from './inference/resolve.js';
 import { ROLE_RECOMMENDATIONS } from './inference/role-models.js';
 import { resolveMcpBearer, readRemoteConfig } from './remote/config.js';
+import { importFromClaudeCli, ClaudeImportError } from './inference/claude-oauth.js';
+import { resolveClaudeBin } from './inference/claude-bin.js';
+import { isCliEngineReady } from './agent/harnesses/index.js';
+
+// True for an ai_providers row that is a Claude SUBSCRIPTION (OAuth token), as
+// opposed to a BYOK API key. One discriminator: auth_type='oauth'.
+const isSubscriptionRow = (r) => String(r?.auth_type || '').toLowerCase() === 'oauth';
 
 const ok = (res, body = {}) => res.json({ ok: true, ...body });
 const bad = (res, code, error) => res.status(code).json({ ok: false, error });
@@ -92,7 +102,11 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   router.get('/providers/task-models', async (_req, res) => {
     try {
       const settings = (await db.users?.getSettings?.(userId)) || {};
-      ok(res, { tasks: INFERENCE_TASKS, taskModels: settings.taskModels || {} });
+      // onboxTasks lets the UI render on-box tasks (local model NAME picker) vs cloud
+      // tasks (provider picker) coherently in ONE area — instead of hardcoding which task
+      // is on-box and stranding others (e.g. 'enrich') in the cloud list with a providerId
+      // the drainer never reads.
+      ok(res, { tasks: INFERENCE_TASKS, onboxTasks: [...ONBOX_TASKS], taskModels: settings.taskModels || {} });
     } catch { bad(res, 500, 'failed to read task models'); }
   });
 
@@ -190,6 +204,60 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
       await db.users.updateSettings(userId, { ...s, inferCascade: cascade });
       ok(res, { cascade });
     } catch { bad(res, 500, 'failed to update routing preference'); }
+  });
+
+  // ── §4g subscription opt-in ─────────────────────────────────────────────────
+  // By default the deepest persona/claim abstractions (claims/discovery, validator —
+  // hardcoded sensitive:true) stay on-box/EU even when a subscription is connected.
+  // This OFF-BY-DEFAULT toggle lets the operator relax §4g for THEIR OWN vault so the
+  // connected subscription can process those too. Read by resolveProviderChain /
+  // resolveInferenceConfig. MUST be declared before '/providers/:id' or the PUT is
+  // shadowed by the numeric-id route (Number('sensitive-subscription')→NaN→400).
+  router.get('/providers/sensitive-subscription', async (_req, res) => {
+    try { const s = await db.users.getSettings(userId); ok(res, { allowed: s?.allowSubscriptionSensitive === true }); }
+    catch { bad(res, 500, 'failed to read preference'); }
+  });
+  router.put('/providers/sensitive-subscription', async (req, res) => {
+    try {
+      const allowed = req.body?.allowed === true;
+      try { await db.users.create(userId, userId); } catch { /* row exists */ }
+      const s = await db.users.getSettings(userId);
+      await db.users.updateSettings(userId, { ...s, allowSubscriptionSensitive: allowed });
+      ok(res, { allowed });
+    } catch { bad(res, 500, 'failed to update preference'); }
+  });
+
+  // ── Agent engine (harness) selection ────────────────────────────────────────
+  // Which engine runs the interactive chat agent: 'native' (default — the in-process
+  // agent loop) or 'cli' (spawn the installed `claude` / Claude Code as the engine —
+  // C2). Persisted as settings.harnessMode. GET also reports eligibility so the UI can
+  // gate the Claude Code option honestly (offered only when a subscription is connected
+  // AND the binary is installed). The runtime resolver (resolve-harness.js) fails safe
+  // to native regardless, so the stored preference can never strand a turn. MUST be
+  // declared before '/providers/:id' (Number('harness')→NaN→400 shadowing).
+  router.get('/providers/harness', async (_req, res) => {
+    try {
+      const s = await db.users.getSettings(userId);
+      const subscriptionConnected = (await db.providers.list(userId)).some(isSubscriptionRow);
+      ok(res, {
+        harnessMode: s?.harnessMode === 'cli' ? 'cli' : 'native',
+        subscriptionConnected,
+        claudeAvailable: resolveClaudeBin() != null,
+        // Is the cli engine actually wired (C2 shipped)? false in C1 ⇒ the UI shows
+        // Claude Code as "coming soon" rather than a selectable engine that would only
+        // fall back to native — the switch never lies. Matches the resolver's gate.
+        engineReady: isCliEngineReady(),
+      });
+    } catch { bad(res, 500, 'failed to read engine preference'); }
+  });
+  router.put('/providers/harness', async (req, res) => {
+    try {
+      const mode = req.body?.harnessMode === 'cli' ? 'cli' : 'native';
+      try { await db.users.create(userId, userId); } catch { /* row exists */ }
+      const s = await db.users.getSettings(userId);
+      await db.users.updateSettings(userId, { ...s, harnessMode: mode });
+      ok(res, { harnessMode: mode });
+    } catch { bad(res, 500, 'failed to update engine preference'); }
   });
 
   // Agent-message capture consent — the opt-in control for AUTO-capturing
@@ -325,19 +393,62 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     } catch { bad(res, 500, 'connectivity test failed'); }
   });
 
-  // ── Auth-status stubs ───────────────────────────────────────────────────────
-  // The UI probes these to decide whether to show an OAuth "Connect" button. We
-  // support API-key providers only (Claude-subscription OAuth is a ToS violation,
-  // 2026-02-19), so report "not connected" → the UI falls back to key entry, and
-  // the OAuth POSTs fail closed with a clear message.
+  // ── Auth status / connect / disconnect ──────────────────────────────────────
+  // OpenAI OAuth is not offered (key entry only). Claude exposes the subscription
+  // IMPORT path below.
   router.get('/auth/openai/status', (_req, res) => ok(res, { authenticated: false }));
-  router.get('/auth/claude/status', (_req, res) => ok(res, { authenticated: false }));
   router.post('/auth/openai/disconnect', (_req, res) => ok(res));
-  router.post('/auth/claude/disconnect', (_req, res) => ok(res));
-  const claudeOAuthRefused = (_req, res) =>
-    bad(res, 400, 'Claude subscription OAuth is not supported — add an Anthropic API key instead.');
-  router.post('/auth/claude', claudeOAuthRefused);
-  router.post('/auth/claude/code', claudeOAuthRefused);
+
+  // Is a Claude subscription connected? (any auth_type='oauth' row).
+  router.get('/auth/claude/status', async (_req, res) => {
+    try {
+      const sub = (await db.providers.list(userId)).find(isSubscriptionRow);
+      ok(res, { authenticated: !!sub, providerId: sub?.id || null });
+    } catch { ok(res, { authenticated: false }); }
+  });
+
+  // Disconnect: remove any stored subscription row(s).
+  router.post('/auth/claude/disconnect', async (_req, res) => {
+    try {
+      for (const r of (await db.providers.list(userId)).filter(isSubscriptionRow)) {
+        try { await db.providers.remove(r.id, userId); } catch { /* best-effort */ }
+      }
+      ok(res);
+    } catch { bad(res, 500, 'failed to disconnect'); }
+  });
+
+  // Connect a Claude SUBSCRIPTION by importing the user's own Claude Code login
+  // (~/.claude/.credentials.json). IMPORT, never mint. Requires acknowledgeToS:true —
+  // a conscious acceptance that automating a Pro/Max subscription may breach Anthropic's
+  // Terms (the operator runs their own sub on their own box). Stores the OAuth token in
+  // ai_providers.credentials (encrypted at rest by whole-file SQLCipher), auth_type='oauth'.
+  router.post('/auth/claude/import', async (req, res) => {
+    if (req.body?.acknowledgeToS !== true) {
+      return bad(res, 400, 'Connecting a Claude subscription requires acknowledging that automated use of a Pro/Max subscription may violate Anthropic’s Terms — pass acknowledgeToS:true to proceed.');
+    }
+    let creds;
+    try { creds = await importFromClaudeCli(); }
+    catch (e) { return bad(res, 400, e instanceof ClaudeImportError ? e.message : 'failed to read Claude Code login'); }
+    try {
+      // One subscription per vault: replace any existing oauth row.
+      for (const r of (await db.providers.list(userId)).filter(isSubscriptionRow)) {
+        try { await db.providers.remove(r.id, userId); } catch { /* best-effort */ }
+      }
+      let hadActive = false;
+      try { hadActive = (await db.providers.list(userId)).some((r) => r.is_active); } catch { /* fresh vault */ }
+      const id = await db.providers.create(userId, {
+        provider: 'anthropic',
+        label: 'Claude (subscription)',
+        authType: 'oauth',
+        credentials: JSON.stringify({ claudeOAuthToken: creds.claudeOAuthToken, refreshToken: creds.refreshToken, expiresAt: creds.expiresAt, scopes: creds.scopes }),
+        model: null,
+        baseUrl: null,
+      });
+      let activated = false;
+      if (!hadActive) { try { await db.providers.setActive(id, userId); activated = true; } catch { /* non-fatal */ } }
+      ok(res, { id, activated, scopes: creds.scopes });
+    } catch { bad(res, 500, 'failed to store subscription'); }
+  });
 
   return router;
 }

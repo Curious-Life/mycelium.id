@@ -92,6 +92,15 @@ try {
   const afterClear = await j(await fetch(`${base}/providers/task-models`));
   rec('M7c. empty labeling model clears the assignment → curated default',
     afterClear?.taskModels?.categorize === undefined, `cat=${JSON.stringify(afterClear?.taskModels?.categorize)}`);
+  // M7d: 'enrich' is ALSO on-box — must store { model } (a local name the drainer reads),
+  // not a cloud { providerId } it would silently ignore. Regression guard for the bug fix.
+  const setEnrich = await fetch(`${base}/providers/task-models`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task: 'enrich', model: 'qwen3.5:4b' }) });
+  const afterEnrich = await j(await fetch(`${base}/providers/task-models`));
+  rec('M7d. enrich is on-box → stores { model }, no providerId; GET exposes onboxTasks incl. enrich',
+    setEnrich.status === 200 && afterEnrich?.taskModels?.enrich?.model === 'qwen3.5:4b'
+    && afterEnrich?.taskModels?.enrich?.providerId === undefined
+    && Array.isArray(afterEnrich?.onboxTasks) && afterEnrich.onboxTasks.includes('enrich') && afterEnrich.onboxTasks.includes('categorize'),
+    `enrich=${JSON.stringify(afterEnrich?.taskModels?.enrich)} onbox=${JSON.stringify(afterEnrich?.onboxTasks)}`);
   srv.close();
 } catch (e) { rec('FATAL', false, e.stack || e.message); }
 close();

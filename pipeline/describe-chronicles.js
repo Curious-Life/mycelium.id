@@ -56,18 +56,23 @@ export function hasDrifted(currentCount, countAtDescription, { factor = DRIFT_FA
  * compare the DECRYPTED value in JS. This is why we don't use
  * db.territoryDocs.getNeedingDescription (whose SQL version filter is ineffective).
  */
-async function getTerritoriesToNarrate(db, userId, version, preserveImported = false) {
+async function getTerritoriesToNarrate(db, userId, version, preserveImported = false, onlyTerritoryId = null) {
+  // onlyTerritoryId: explicit per-territory "describe more" — narrate JUST that
+  // territory regardless of the version/drift/coverage gate (the user asked for it;
+  // the unseen-biased sampler folds in whatever content hasn't been seen yet).
+  const scoped = onlyTerritoryId != null && Number.isFinite(Number(onlyTerritoryId));
   const r = await db.rawQuery(
     `SELECT territory_id, name, essence, archetype_type,
             story_birth, story_arc, story_current_chapter,
             description_version, message_count,
             point_count_at_description, explored_percent
        FROM territory_profiles
-      WHERE user_id = ? AND dissolved_at IS NULL
+      WHERE user_id = ? AND dissolved_at IS NULL${scoped ? ' AND territory_id = ?' : ''}
       ORDER BY message_count DESC`,
-    [userId],
+    scoped ? [userId, Number(onlyTerritoryId)] : [userId],
   ).catch(() => ({ results: [] }));
   const rows = r.results || r || [];
+  if (scoped) return rows; // explicit request → bypass the gate, narrate that one
   // PRESERVE-IMPORTED (gap-fill): narrate ONLY territories that have NO chronicle
   // yet (no story) — never touch an existing one (e.g. canonical import).
   if (preserveImported) return rows.filter((t) => !t.story_arc && !t.story_current_chapter && !t.story_birth);
@@ -183,12 +188,16 @@ function withTimeout(promise, ms, label) {
  * the verify can stub the model + content. Returns counts.
  * @param {{ db: object, userId: string, infer: Function, version?: string, sample?: Function, log?: Function }} opts
  */
-export async function describeChronicles({ db, userId, infer, version = CHRONICLE_VERSION, sample, sampleRealm, log = () => {}, onProgress, modelLabel = 'unknown', preserveImported = false, skipTerritories = false }) {
+export async function describeChronicles({ db, userId, infer, version = CHRONICLE_VERSION, sample, sampleRealm, log = () => {}, onProgress, modelLabel = 'unknown', preserveImported = false, skipTerritories = false, onlyTerritoryId = null }) {
   // skipTerritories: run ONLY the theme + realm passes (the territory-chronicle
   // gap-fill is the long pole — defer it). Themes still narrate from the existing
   // territory names/essences, so this is coherent.
-  const targets = skipTerritories ? [] : await getTerritoriesToNarrate(db, userId, version, preserveImported);
-  const realmTargets = await getRealmsToNarrate(db, userId, version, preserveImported);
+  // onlyTerritoryId: scoped per-territory "describe more" — narrate just that one,
+  // SKIP the (whole-user) realm-narration pass, but still run the explored% cascade
+  // below so its parent theme/realm rollups stay correct.
+  const scopedOne = onlyTerritoryId != null && Number.isFinite(Number(onlyTerritoryId));
+  const targets = skipTerritories ? [] : await getTerritoriesToNarrate(db, userId, version, preserveImported, scopedOne ? onlyTerritoryId : null);
+  const realmTargets = scopedOne ? [] : await getRealmsToNarrate(db, userId, version, preserveImported);
   const total = targets.length + realmTargets.length;
   let described = 0, skipped = 0, failed = 0;
   try { await onProgress?.(0, total); } catch { /* */ }
@@ -255,7 +264,9 @@ export async function describeChronicles({ db, userId, infer, version = CHRONICL
     // Gate: live theme with NO name yet (fill the gap — preserves imported themes,
     // whose generated_at is NULL → never the regen branch) OR a member territory
     // was described AFTER we last narrated this theme (regenerate-on-child-change).
-    const themeTargets = themeRows.filter((th) => rosterByKey.has(`${th.realm_id}:${th.theme_id}`)
+    // Scoped per-territory run: skip theme NARRATION (whole-user) but still fall
+    // through to cascadeExploredPercent below so the territory's theme/realm rollups update.
+    const themeTargets = scopedOne ? [] : themeRows.filter((th) => rosterByKey.has(`${th.realm_id}:${th.theme_id}`)
       && (!th.name || (!preserveImported && th.generated_at && th.child_max_described && th.child_max_described > th.generated_at)));
     for (const th of themeTargets) {
       const digests = await db.mindscape.getThemeTerritoryDigests(userId, th.realm_id, th.theme_id);
@@ -452,11 +463,15 @@ if (isMain) {
   // to describeChronicles' infer({prompt,maxTokens}) call shape.
   const narrator = await createNarrator({ db, userId: USER_ID });
   console.log(`[chronicles] narrating territories via ${narrator.label}${narrator.local ? ' (local)' : ''}${DRY_RUN ? ' (dry-run)' : ''}`);
+  // Per-territory "describe more": MYCELIUM_DESCRIBE_TERRITORY=<id> or --territory=<id>.
+  const _terrArg = process.argv.find((a) => a.startsWith('--territory='));
+  const _onlyTerr = process.env.MYCELIUM_DESCRIBE_TERRITORY || (_terrArg ? _terrArg.split('=')[1] : null);
+  const onlyTerritoryId = _onlyTerr != null && Number.isFinite(Number(_onlyTerr)) ? Number(_onlyTerr) : null;
   try {
     if (DRY_RUN) {
-      const targets = await getTerritoriesToNarrate(db, USER_ID, CHRONICLE_VERSION);
-      const realmTargets = await getRealmsToNarrate(db, USER_ID, CHRONICLE_VERSION);
-      console.log(`[chronicles] (dry) ${targets.length} territories + ${realmTargets.length} realms would be narrated`);
+      const targets = await getTerritoriesToNarrate(db, USER_ID, CHRONICLE_VERSION, false, onlyTerritoryId);
+      const realmTargets = onlyTerritoryId != null ? [] : await getRealmsToNarrate(db, USER_ID, CHRONICLE_VERSION);
+      console.log(`[chronicles] (dry) ${targets.length} territories + ${realmTargets.length} realms would be narrated${onlyTerritoryId != null ? ` (scoped to territory ${onlyTerritoryId})` : ''}`);
     } else {
       // Surface live progress to the unified activity feed (content-free).
       let feedId = null, hbTimer = null;
@@ -467,7 +482,8 @@ if (isMain) {
       try {
         res = await describeChronicles({ db, userId: USER_ID, infer: ({ prompt, maxTokens }) => narrator.infer(prompt, { maxTokens }), log: console.error, onProgress, modelLabel: narrator.label,
           preserveImported: process.argv.includes('--preserve-imported') || process.env.MYCELIUM_DESCRIBE_PRESERVE === '1',
-          skipTerritories: process.argv.includes('--skip-territories') || process.env.MYCELIUM_DESCRIBE_SKIP_TERRITORIES === '1' });
+          skipTerritories: process.argv.includes('--skip-territories') || process.env.MYCELIUM_DESCRIBE_SKIP_TERRITORIES === '1',
+          onlyTerritoryId });
       } finally {
         if (hbTimer) clearInterval(hbTimer);
         if (feedId) { try { await db.activityFeed.finish(feedId, { status: 'done' }); } catch { /* */ } }

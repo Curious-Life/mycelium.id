@@ -58,12 +58,8 @@ import { startEmbedSupervisor } from './embed/supervisor.js';
 import { startKokoroSupervisor } from './tts/kokoro-supervisor.js';
 import { startChannelSupervisor } from './channels/supervisor.js';
 import { mcpLoopbackRouter } from './mcp-loopback.js';
-import { matrixConfig, readRemoteConfig, passkeyEnrolled } from './remote/config.js';
+import { readRemoteConfig, passkeyEnrolled } from './remote/config.js';
 import { isValidHandle } from './identity/identity.js';
-import { createSpaceSync } from './federation/space-sync.js';
-import { createMatrixEgress } from './federation/matrix-egress.js';
-import { createMatrixClient } from './federation/matrix-client.js';
-import { resolveMatrixService } from './federation/did.js';
 import { setSessionKeys } from './account/session-keys.js';
 import { createVaultAuthMiddleware, csrfCookieMiddleware, isAuthorized, makePortalOwnerGate } from './http/require-vault-auth.js';
 
@@ -195,49 +191,19 @@ export function ensureDataDir({ env = process.env } = {}) {
 // under a cross-process lock together with the migration. Opening the schema
 // connection UNKEYED here threw "file is not a database" on any encrypted vault.
 
-/**
- * Phase B Tier-1 Matrix wiring (membership-sync + egress + inbound). Always
- * returns a spaceSync so the portal's grant/revoke/mirror hooks have a target;
- * when no homeserver is configured (matrixConfig() === null) the client is null
- * and EVERY op is an inert no-op (space-sync.js degrades safe), so this is safe
- * to call unconditionally — including in verify scripts (auth.db :memory: → no
- * token → matrixConfig null). When configured, it wires the real client behind a
- * try/catch: createMatrixClient is a deploy-session stub today (throws) → caught
- * → matrixClient stays null → still inert, exactly as designed. Never logs the
- * access token (CLAUDE.md §1).
- */
-async function buildSpaceSync({ db, userId, logger = console }) {
-  const cfg = matrixConfig();
-  let matrixClient = null;
-  if (cfg) {
-    try { matrixClient = await createMatrixClient(cfg); }
-    catch (e) { logger.error?.(`[mycelium] Matrix configured but client unavailable (staying inert): ${e.message}`); }
-  }
-  // peer user id → their advertised MXID, via the peer's did:web #matrix service
-  // (SSRF-guarded in did.js). null when the peer advertises no Matrix.
-  const resolveMxid = async (peerUserId) => {
-    try {
-      const prof = await db.profiles?.get?.(peerUserId);
-      return prof?.did ? await resolveMatrixService(prof.did) : null;
-    } catch { return null; }
-  };
-  const matrixEgress = matrixClient ? createMatrixEgress({ matrixClient, db }) : null;
-  const spaceSync = createSpaceSync({ db, matrixClient, matrixEgress, resolveMxid, selfMxid: cfg?.userId || null });
-  if (matrixClient) {
-    matrixClient.onTimelineEvent((e) => { spaceSync.handleInbound(e).catch(() => {}); });
-    // Bind our MXID locally: it is both the inbound self-echo filter source and
-    // the value the #matrix advertise publishes. Idempotent upsert.
-    try { await db.identityChannels?.upsert?.({ channel_kind: 'matrix', channel_value: cfg.userId, owner_user_id: userId }); }
-    catch (e) { logger.warn?.(`[mycelium] MXID bind failed: ${e.message}`); }
-    logger.error?.(`[mycelium] Matrix Tier-1 wired: ${cfg.userId} @ ${cfg.homeserver}`);
-  }
-  return spaceSync;
-}
+// NOTE (2026-06-30): the Phase B Tier-1 Matrix/Megolm space-sync wiring
+// (buildSpaceSync → createMatrixClient/Egress + createSpaceSync) was RETIRED here.
+// It was an inert stub (createMatrixClient threw → matrixClient null → every op a
+// no-op) whose role — mirroring space content + syncing membership across boxes —
+// is now done by the E2E shared-spaces system (space-content-mirror.js +
+// space-membership.js, over the ciphertext oplog). did:web #matrix advertising
+// (getMatrixId / resolveMatrixService / matrixConfig) is left intact as separate,
+// dormant identity infrastructure. See docs/SHARED-SPACES-E2E-HANDOFF-2026-06-30.md.
 
 /** Build the express sub-app that serves every VAULT-DEPENDENT route. Mounted
  *  behind a guard so it only handles traffic once the vault is open; until then
  *  data calls get a 503 and only the account ceremony + static UI are served. */
-function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth, channelSup, hwOllamaDaemon, spaceSync = null }) {
+function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth, channelSup, hwOllamaDaemon, restPort }) {
   const v = express();
   v.disable('x-powered-by');
   // Fail-closed auth gate FIRST, mounted at `/api` — ALL vault data the sub-app
@@ -269,7 +235,7 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // Trust: trusted-loopback (desktop) OR the owner's static Bearer (native app over
   // Tailscale / the native-TLS listener), the SAME authority the global gate trusts.
   const portalOwnerGate = makePortalOwnerGate({ userId });
-  v.use('/api/v1/portal', portalCompatRouter({ db, userId, spaceSync }));
+  v.use('/api/v1/portal', portalCompatRouter({ db, userId }));
   // S1 measurement REST bridge — auth-GATED, fail-closed (the rest of the V1
   // surface is unauthenticated/localhost-only; this surface decrypts the
   // sensitive measurement plane, so it resolves the owner ONLY for a genuine
@@ -334,6 +300,15 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   v.use('/api/v1/portal', portalChatRouter({
     db, userId, tools, handlers, enqueueEnrichment,
     authenticatePortalRequest: portalOwnerGate,
+    // The REST listener's own port — so the (opt-in) Claude Code engine can point its
+    // MCP config at this process's loopback /internal/mcp (reuses the open vault; no
+    // second opener, no bearer). This is the CONFIGURED port (MYCELIUM_REST_PORT ?? 8787
+    // in production, a fixed non-zero value); when started with port:0 (verify scripts,
+    // ephemeral bind) this is 0, not the bound port — but the cli engine is never
+    // invoked there, and the resolver fails safe to native on a falsy restPort anyway.
+    // C2 TODO: if we ever run the cli engine on an ephemeral port, thread boundPort
+    // (computed post-listen) via a ref instead. See docs/HARNESS-CLI-DESIGN-2026-07-02.md.
+    restPort,
   }));
   // Owner push-ingestion for the native app (Apple data → the stream via the one
   // captureMessage boundary). Owner-gated like chat; decrypts/writes vault plaintext.
@@ -642,11 +617,10 @@ export async function startRestServer({
       if (!injectedKeys) {
         connectorScheduler = startConnectorScheduler({ runner: connectorRunner });
       }
-      // Phase B Tier-1 Matrix: build the membership-sync hook (inert no-op until a
-      // homeserver is configured — see buildSpaceSync) and thread it into the
-      // portal's share grant/revoke + knowledge-mirror paths.
-      const spaceSync = await buildSpaceSync({ db, userId: bootUserId });
-      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId }), channelSup, hwOllamaDaemon, spaceSync });
+      // Shared-space membership + content sync is handled by the E2E system (the
+      // ciphertext oplog: space-membership.js + space-content-mirror.js), wired via
+      // db.spaceKeyManager / db.spaceContent — no separate Matrix hook needed.
+      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId }), channelSup, hwOllamaDaemon, restPort: port });
       bootError = null; // opened cleanly → clear any prior failure
     } finally {
       booting = false;

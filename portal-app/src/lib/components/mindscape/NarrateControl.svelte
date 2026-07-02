@@ -19,6 +19,30 @@
 	let busy = $state(false);
 	let poll: ReturnType<typeof setInterval> | null = null;
 
+	// Coverage rollup (% described, per level) + the SAFE "describe more" control.
+	// describe-more spawns describe-chronicles.js as a CHILD (POST /mycelium/describe-more) —
+	// NOT the in-process narration walk above — so it never pegs the event loop. We poll
+	// /mindscape/coverage so the % visibly climbs while a pass runs.
+	type Coverage = { overall: { avgPercent: number }, territories: { total: number; described: number; fullyDescribed: number; avgPercent: number }, themes: { total: number; avgPercent: number }, realms: { total: number; avgPercent: number } };
+	let coverage = $state<Coverage | null>(null);
+	let describing = $state(false);
+	let covPoll: ReturnType<typeof setInterval> | null = null;
+	let covTimeout: ReturnType<typeof setTimeout> | null = null;
+
+	async function refreshCoverage() {
+		try { coverage = await apiGet<Coverage>('/portal/mindscape/coverage'); } catch { /* transient */ }
+	}
+	async function describeMore() {
+		describing = true;
+		try {
+			await apiPost('/portal/mycelium/describe-more', {});
+			if (covPoll) clearInterval(covPoll);
+			covPoll = setInterval(refreshCoverage, 4000);
+			if (covTimeout) clearTimeout(covTimeout);
+			covTimeout = setTimeout(() => { if (covPoll) { clearInterval(covPoll); covPoll = null; } describing = false; refreshCoverage(); }, 90_000);
+		} catch { describing = false; }
+	}
+
 	const isLocal = (p: string | null) => !p || /local|ollama|on-?box|127\.0\.0\.1/i.test(p);
 	const active = $derived(run?.status === 'running' || run?.status === 'paused');
 	const doneCount = $derived(run ? run.described + run.reflected + run.skipped : 0);
@@ -47,8 +71,8 @@
 		catch { /* */ } finally { busy = false; }
 	}
 
-	onMount(refresh);
-	onDestroy(stopPoll);
+	onMount(() => { refresh(); refreshCoverage(); });
+	onDestroy(() => { stopPoll(); if (covPoll) clearInterval(covPoll); if (covTimeout) clearTimeout(covTimeout); });
 </script>
 
 <div class="narrate">
@@ -70,6 +94,24 @@
 			</div>
 		{/if}
 		{#if run.error}<div class="err">{run.error}</div>{/if}
+	{/if}
+
+	{#if coverage}
+		<div class="coverage">
+			<div class="cov-head">
+				<span class="cov-title">Description coverage</span>
+				<span class="cov-overall">{coverage.overall.avgPercent}%</span>
+			</div>
+			<div class="bar"><div class="fill cov" style="width:{coverage.overall.avgPercent}%"></div></div>
+			<div class="cov-detail">
+				territories {coverage.territories.fullyDescribed}/{coverage.territories.total} full · {coverage.territories.avgPercent}% avg ·
+				themes {coverage.themes.avgPercent}% · realms {coverage.realms.avgPercent}%
+			</div>
+			<div class="actions">
+				<button onclick={describeMore} disabled={describing}>{describing ? 'Describing…' : 'Describe more'}</button>
+			</div>
+			<div class="cov-note">Folds in undescribed content (runs in the background; safe to keep using the app).</div>
+		</div>
 	{/if}
 
 	<div class="actions">
@@ -105,4 +147,11 @@
 	button { font-size: 0.8rem; padding: 0.35rem 0.9rem; border-radius: var(--radius-full, 999px); border: 1px solid var(--color-accent, #E5B84C); background: var(--color-accent, #E5B84C); color: var(--color-bg, #111); cursor: pointer; }
 	button.ghost { background: transparent; color: var(--color-text-secondary); border-color: rgba(255,255,255,0.15); }
 	button:disabled { opacity: 0.5; cursor: default; }
+	.coverage { display: flex; flex-direction: column; gap: 0.4rem; padding-bottom: 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
+	.cov-head { display: flex; align-items: center; justify-content: space-between; }
+	.cov-title { font-size: 0.82rem; font-weight: 600; color: var(--color-text-primary); }
+	.cov-overall { font-size: 0.82rem; font-weight: 600; color: var(--color-accent, #E5B84C); }
+	.fill.cov { background: #7DB6D9; }
+	.cov-detail { font-size: 0.7rem; color: var(--color-text-secondary); }
+	.cov-note { font-size: 0.66rem; color: var(--color-text-tertiary); }
 </style>

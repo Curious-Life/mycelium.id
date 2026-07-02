@@ -43,13 +43,16 @@ const SYS_A = 'c'.repeat(64);
 const SYS_B = 'd'.repeat(64);
 
 // ── Mock Keychain: an in-memory map keyed by "<account>\0<service>". The exec
-//    signature matches src/crypto/key-source.js: (cmd, args) → trimmed stdout,
-//    throws on a missing item (mirrors `security` exit 44). ──────────────────
+//    signature is the keystore.js contract `(cmd, args, input) → trimmed stdout`,
+//    throws on a missing item (mirrors `security` exit 44). WRITES now feed the
+//    secret on stdin (`input`): `-w` carries no value and the key arrives as two
+//    identical lines (security's enter+retype) — so the mock reads the secret
+//    from `input`, falling back to the legacy argv `-w <value>` form. ──────────
 function mockKeychain() {
   const store = new Map();
   const key = (acct, svc) => `${acct}\0${svc}`;
   const argval = (args, flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
-  const exec = (cmd, args) => {
+  const exec = (cmd, args, input) => {
     if (cmd !== 'security') throw new Error(`mock: unexpected cmd ${cmd}`);
     const op = args[0];
     const acct = argval(args, '-a');
@@ -59,7 +62,11 @@ function mockKeychain() {
       if (!store.has(k)) { const e = new Error('not found'); e.code = 44; throw e; }
       return store.get(k);
     }
-    if (op === 'add-generic-password') { store.set(key(acct, svc), argval(args, '-w')); return ''; }
+    if (op === 'add-generic-password') {
+      // secret on stdin (first line of the enter+retype) or legacy argv `-w <value>`
+      const secret = input != null ? String(input).split('\n')[0] : argval(args, '-w');
+      store.set(key(acct, svc), secret); return '';
+    }
     if (op === 'delete-generic-password') {
       const k = key(acct, svc);
       if (!store.has(k)) { const e = new Error('not found'); e.code = 44; throw e; }

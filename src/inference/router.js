@@ -58,12 +58,15 @@ export function createInferenceRouter({
   ollamaUrl,
   localModel,
   anthropicApiKey,
+  claudeOAuthToken,
   openaiApiKey,
   cloudModel,
   baseUrl,
   jurisdiction,
+  sensitiveUsExempt = false,
   onEgress,
   onUsage,
+  onCloudFallback,
   cloudFallbackToLocal = true,
   timeoutMs = 60000,
   env = process.env,
@@ -73,16 +76,22 @@ export function createInferenceRouter({
     ollamaUrl: ollamaUrl || env.OLLAMA_URL || DEFAULT_OLLAMA_URL,
     localModel: localModel || env.LOCAL_MODEL || DEFAULT_LOCAL_MODEL,
     anthropicApiKey: anthropicApiKey ?? env.ANTHROPIC_API_KEY,
+    claudeOAuthToken, // Claude subscription OAuth token (sk-ant-oat…) — no env fallback (import-only)
     openaiApiKey: openaiApiKey ?? env.OPENAI_API_KEY,
     cloudModel: cloudModel || env.INFERENCE_CLOUD_MODEL, // undefined → backend default
     baseUrl: baseUrl ?? env.INFERENCE_BASE_URL, // OpenAI-compatible endpoint (Regolo/OpenRouter/Ollama/…)
     jurisdiction, // 'local'|'eu-zdr'|'us-zdr'|'us-standard' — tag for the egress policy (§4g)
+    // §4g exemption: ONLY set by resolve.js for the user's own Claude subscription
+    // when they've explicitly opted in (allowSubscriptionSensitive). Lets sensitive
+    // content reach THIS provider despite its US jurisdiction. Never set for a plain
+    // US API key — so the §4g floor still holds for everything else.
+    sensitiveUsExempt: sensitiveUsExempt === true,
     timeoutMs,
   };
 
-  // Cloud is "available" when a key OR an OpenAI-compatible base_url is set (some
-  // local/self-hosted base_url servers are keyless).
-  const hasCloud = () => Boolean(cfg.anthropicApiKey || cfg.openaiApiKey || cfg.baseUrl);
+  // Cloud is "available" when a key, a subscription token, OR an OpenAI-compatible
+  // base_url is set (some local/self-hosted base_url servers are keyless).
+  const hasCloud = () => Boolean(cfg.anthropicApiKey || cfg.claudeOAuthToken || cfg.openaiApiKey || cfg.baseUrl);
 
   // §12 token-usage accounting — enrich a backend's raw {inputTokens,outputTokens}
   // with provider/model/jurisdiction/area + an estimate fallback, then forward to
@@ -112,11 +121,12 @@ export function createInferenceRouter({
     return text;
   }
 
-  async function runCloud({ prompt, maxTokens, area, onTruncated }) {
+  async function runCloud({ prompt, maxTokens, area, onTruncated, noThink }) {
     let raw = null;
     const text = await cloudInfer({
       prompt, maxTokens,
       anthropicApiKey: cfg.anthropicApiKey,
+      claudeOAuthToken: cfg.claudeOAuthToken,
       openaiApiKey: cfg.openaiApiKey,
       baseUrl: cfg.baseUrl,
       model: cfg.cloudModel,
@@ -124,6 +134,7 @@ export function createInferenceRouter({
       timeoutMs: cfg.timeoutMs,
       onUsage: (u) => { raw = u; },
       onTruncated,
+      noThink,
     });
     emitUsage({ prompt, text, raw, area, isLocal: false });
     return text;
@@ -147,6 +158,7 @@ export function createInferenceRouter({
     for await (const delta of cloudStream({
       prompt, maxTokens,
       anthropicApiKey: cfg.anthropicApiKey,
+      claudeOAuthToken: cfg.claudeOAuthToken,
       openaiApiKey: cfg.openaiApiKey,
       baseUrl: cfg.baseUrl,
       model: cfg.cloudModel,
@@ -165,7 +177,7 @@ export function createInferenceRouter({
   const cloudJurisdiction = () => cfg.jurisdiction || "us-standard";
 
   function providerLabel() {
-    if (cfg.anthropicApiKey) return "anthropic";
+    if (cfg.anthropicApiKey || cfg.claudeOAuthToken) return "anthropic";
     if (cfg.baseUrl) { try { return new URL(cfg.baseUrl).hostname; } catch { return "custom"; } }
     return "openai";
   }
@@ -187,6 +199,25 @@ export function createInferenceRouter({
     } catch { /* audit must never break inference */ }
   }
 
+  // A cloud task the user EXPLICITLY routed to a provider failed → we're about to
+  // fall back to on-box. Surface it (never silent): one content-free log line +
+  // the onCloudFallback sink (the UI/activity-feed turns this into "Narration:
+  // <provider>/<model> failed — used <localModel> instead"). cloudErr from cloud.js
+  // is a status/type only (never prompt/content), so it is safe to log (CLAUDE.md §1).
+  function emitCloudFallback(task, err) {
+    const status = err && err.status != null ? err.status : null;
+    const detail = String(err?.message || err || "cloud error").slice(0, 160);
+    try {
+      process.stderr.write(
+        `[inference] cloud task '${task}' (${providerLabel()} · ${cfg.cloudModel || "default"}) failed${status ? ` ${status}` : ""}: ${detail} — falling back to on-box ${cfg.localModel}\n`,
+      );
+    } catch { /* logging must never break inference */ }
+    if (typeof onCloudFallback !== "function") return;
+    try {
+      onCloudFallback({ task, provider: providerLabel(), model: cfg.cloudModel || null, jurisdiction: cloudJurisdiction(), localModel: cfg.localModel, status, error: detail });
+    } catch { /* sink must never break inference */ }
+  }
+
   /**
    * Route + run an inference task.
    * @param {object} req
@@ -201,7 +232,11 @@ export function createInferenceRouter({
    *   can report truncation instead of a false clean stop.
    * @returns {Promise<string>}
    */
-  async function infer({ prompt, task = "summarize", maxTokens, sensitive = false, numCtx, format, profile, onTruncated } = {}) {
+  async function infer({ prompt, task = "summarize", maxTokens, sensitive = false, numCtx, format, profile, onTruncated, noThink } = {}) {
+    // Structured tasks (narrate → JSON names/chronicles) disable reasoning by default so a
+    // thinking model returns the answer in `content` instead of burning the budget on hidden
+    // reasoning_content (→ empty content → false failure). Callers may override per call.
+    const wantNoThink = noThink ?? (task === "narrate");
     if (typeof prompt !== "string" || prompt.trim() === "") {
       throw new InferenceError("infer: prompt must be a non-empty string");
     }
@@ -221,18 +256,25 @@ export function createInferenceRouter({
     if (CLOUD_TASKS.includes(task) && hasCloud()) {
       // §4g sensitive hard-block: sensitive content must not leave to a US
       // provider. Fail closed to on-box local (the private path) + audit the
-      // denial. eu-zdr / local providers are unaffected.
-      if (sensitive && /^us/.test(cloudJurisdiction())) {
+      // denial. eu-zdr / local providers are unaffected. EXEMPTION: the user's own
+      // Claude subscription when they've explicitly opted in (sensitiveUsExempt) —
+      // never a plain US API key.
+      if (sensitive && /^us/.test(cloudJurisdiction()) && !cfg.sensitiveUsExempt) {
         emitEgress(prompt, "denied", "sensitive_us_block");
         return runLocal({ prompt, maxTokens, numCtx, format, area: task, onTruncated });
       }
       try {
         emitEgress(prompt, "allowed");
-        return await runCloud({ prompt, maxTokens, area: task, onTruncated }); // cloud models carry large context; numCtx is local-only
+        return await runCloud({ prompt, maxTokens, area: task, onTruncated, noThink: wantNoThink }); // cloud models carry large context; numCtx is local-only
       } catch (cloudErr) {
         // cloudFallbackToLocal:false (cascade mode) propagates the error so the
         // caller can try the NEXT provider; otherwise resilience → on-box local.
         if (!cloudFallbackToLocal) throw cloudErr;
+        // HONORED-SELECTION: the user explicitly routed this task to a cloud model.
+        // We still fall back to on-box for resilience — but NEVER silently. Surface
+        // it (content-free log + onCloudFallback sink) so the UI shows "your model
+        // failed, a local one ran instead" rather than the wrong model running unseen.
+        emitCloudFallback(task, cloudErr);
         try {
           return await runLocal({ prompt, maxTokens, numCtx, format, area: task, onTruncated });
         } catch (localErr) {
@@ -262,7 +304,7 @@ export function createInferenceRouter({
     }
 
     if (CLOUD_TASKS.includes(task) && hasCloud()) {
-      if (sensitive && /^us/.test(cloudJurisdiction())) {
+      if (sensitive && /^us/.test(cloudJurisdiction()) && !cfg.sensitiveUsExempt) {
         emitEgress(prompt, "denied", "sensitive_us_block");
         yield* runLocalStream({ prompt, maxTokens, area: task, onTruncated });
         return;

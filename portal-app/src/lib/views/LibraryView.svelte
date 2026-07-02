@@ -5,6 +5,7 @@
 	import { marked } from 'marked';
 	import DOMPurify from 'isomorphic-dompurify';
 	import { navigationState } from '$lib/stores/navigation';
+	import { toasts } from '$lib/stores/toast';
 	import { api } from '$lib/api';
 	import DocThumbnail from '$lib/components/library/DocThumbnail.svelte';
 	import PublishStatusPill from '$lib/components/library/PublishStatusPill.svelte';
@@ -16,6 +17,9 @@
 	} from '$lib/document-live';
 	import { applyMorph, resetMorph } from '$lib/markdown-morph';
 	import { wrapHtmlForLive, mountLiveIframe, type LiveIframeHandle } from '$lib/iframe-live';
+	// MarkdownEditor (CodeMirror) is lazy-loaded — see ensureEditor() — so just
+	// navigating to the Library doesn't pull in the ~170 KB editor bundle. It
+	// loads the first time you edit a doc (no static import on purpose).
 
 	marked.use({ gfm: true, breaks: true });
 
@@ -96,15 +100,21 @@
 	let searchQuery = $state('');
 	let loading = $state(true);
 	let loadError = $state<string | null>(null);
-	// Progressive load: paint the first page immediately, then stream the rest
-	// in the background so client-side search still sees the full set. Without
-	// this the list blocks on decrypting every document up front (≈15s cold for
-	// a few-thousand-doc vault). `loadGeneration` invalidates an in-flight
-	// background fill when the folder changes or a resync restarts the load.
-	let backgroundFilling = $state(false);
+	// Load-on-scroll pagination. We NEVER eager-load the whole vault — doing that
+	// fired ~1 request per 150 docs up front, flooding the single-threaded backend
+	// and the 6-connection HTTP pool so create/autosave got starved ("queuing
+	// behind a bunch of loads"). Page 1 paints immediately; more pages load as you
+	// scroll. Search runs SERVER-SIDE (?q=) so filtering never needs the whole
+	// vault in memory. `loadGeneration` invalidates an in-flight load when the
+	// folder or search changes.
 	let loadGeneration = 0;
-	const FIRST_PAGE = 60; // first screenful — paints fast
-	const FILL_PAGE = 150; // background page size — bounds each server-side decrypt block
+	let loadingMore = $state(false);
+	let docTotal = $state(0);
+	const hasMore = $derived(documents.length < docTotal);
+	const PAGE_SIZE = 60; // one screenful per page
+	// Bottom-of-list sentinel: when it scrolls into view (600px early) we load the
+	// next page. Replaces the eager whole-vault background fill.
+	let loadSentinel = $state<HTMLDivElement | null>(null);
 	let copySuccess = $state(false);
 	let viewMode = $state<'grid' | 'list'>('grid');
 	// Grid card size — 'sm' = 180px floor (compact, default), 'lg' = 360px
@@ -124,10 +134,99 @@
 	// Edit mode
 	let editing = $state(false);
 	let editContent = $state('');
-	let saving = $state(false);
 	let editorRef = $state<HTMLTextAreaElement | null>(null);
 	let showRawMarkdown = $state(false);
+	// Lazy-loaded CodeMirror editor + its live instance (for toolbar formatting).
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	let MarkdownEditor = $state<any>(null);
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	let mdEditor = $state<any>(null);
+	async function ensureEditor() {
+		if (!MarkdownEditor) MarkdownEditor = (await import('$lib/editor/MarkdownEditor.svelte')).default;
+	}
+
+	// One formatting entry point for the toolbar + shortcuts. The live CM editor
+	// formats through its own API (keeps the cursor sane); the raw textarea / HTML
+	// paths reuse the marker helpers.
+	function format(kind: string) {
+		if (mdEditor && !showRawMarkdown && !isHtmlDoc(selectedDoc?.path, editContent)) {
+			mdEditor.applyFormat(kind);
+			return;
+		}
+		switch (kind) {
+			case 'bold': insertFormat('**', '**'); break;
+			case 'italic': insertFormat('*', '*'); break;
+			case 'code': insertFormat('`', '`'); break;
+			case 'strike': insertFormat('~~', '~~'); break;
+			case 'link': insertFormat('[', '](url)'); break;
+			case 'h1': insertLinePrefix('# '); break;
+			case 'h2': insertLinePrefix('## '); break;
+			case 'h3': insertLinePrefix('### '); break;
+			case 'bullet': insertLinePrefix('- '); break;
+			case 'number': insertLinePrefix('1. '); break;
+			case 'check': insertLinePrefix('- [ ] '); break;
+			case 'quote': insertLinePrefix('> '); break;
+		}
+	}
 	const activeFolderId = $derived($navigationState.activeFolderId);
+
+	// Autosave — the writing sanctuary has no Save button. Edits to `editContent`
+	// debounce into a background save; a quiet whisper reflects state. HTML docs
+	// keep the explicit textarea path; markdown docs write through MarkdownEditor.
+	let saveState = $state<'idle' | 'saving' | 'saved'>('idle');
+	let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
+	const AUTOSAVE_DEBOUNCE_MS = 800;
+
+	function scheduleAutosave() {
+		saveState = 'idle';
+		if (autosaveTimer) clearTimeout(autosaveTimer);
+		autosaveTimer = setTimeout(() => { void autosave(); }, AUTOSAVE_DEBOUNCE_MS);
+	}
+
+	function onEditorChange(next: string) {
+		editContent = next;
+		scheduleAutosave();
+	}
+
+	async function autosave() {
+		if (!selectedDoc) return;
+		if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null; }
+		const path = selectedDoc.path;
+		const content = editContent;
+		// Nothing to do if the buffer already matches what's persisted.
+		if (content === (selectedDoc.content ?? '')) { saveState = 'saved'; return; }
+		saveState = 'saving';
+		// Self-write echo guard: the live broadcaster fires a doc-updated for this
+		// write within ~300ms; flagging the path tells our SSE handler to ignore it.
+		markSelfWrite(path);
+		try {
+			const res = await api('/portal/documents', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ path, title: selectedDoc.title, content }),
+			});
+			if (res.ok) {
+				selectedDoc = { ...selectedDoc, content };
+				saveState = 'saved';
+			} else {
+				// Don't fail silently — your edits aren't saved; tell you so.
+				saveState = 'idle';
+				toasts.error(`Couldn't save your changes (${res.status}). Your edits are still here — try again.`);
+			}
+		} catch (e) {
+			console.error('[Library] Autosave failed:', e);
+			saveState = 'idle';
+			toasts.error('Couldn’t save your changes — check your connection. Your edits are still here.');
+		}
+	}
+
+	// Exit editing — flush any pending autosave first so no keystroke is lost.
+	async function finishEditing() {
+		await autosave();
+		editing = false;
+		showRawMarkdown = false;
+		agentUpdatedWhileEditing = false;
+	}
 
 	// New document
 	let showNewDocInput = $state(false);
@@ -142,6 +241,21 @@
 	let showDeleteConfirm = $state(false);
 	let isDeleting = $state(false);
 	let showMoveMenu = $state(false);
+
+	// Rename (display title only — path is the stable identity, never changed).
+	// `renamingPath` marks which doc is being renamed; the card/row/header swaps
+	// its title for an input while it matches.
+	let renamingPath = $state<string | null>(null);
+	let renameValue = $state('');
+	let renameInputEl = $state<HTMLInputElement | null>(null);
+
+	// Change link (path / slug rename — the document's IDENTITY, distinct from the
+	// display-title rename above). A heavier op: it moves the ?doc= URL id and
+	// cascades every reference server-side. Lives in its own context-menu panel.
+	let showChangeLink = $state(false);
+	let linkValue = $state('');
+	let linkInputEl = $state<HTMLInputElement | null>(null);
+	let changingLink = $state(false);
 
 	// Long-press for mobile
 	let longPressTimer = $state<ReturnType<typeof setTimeout> | null>(null);
@@ -311,23 +425,25 @@
 		}
 	});
 
-	// Build the base query (folder/pinned filter) shared by every page of a load.
+	// Build the query (folder/pinned/search) shared by every page of a load.
 	function docsBaseParams(): URLSearchParams {
 		const params = new URLSearchParams();
 		if (activeFolderId === 'starred') params.set('pinned', '1');
 		else if (activeFolderId) params.set('folder_id', activeFolderId);
+		const q = searchQuery.trim();
+		if (q) params.set('q', q); // server-side search — no whole-vault load
 		return params;
 	}
 
+	// Load the FIRST page (reset). Supersedes any in-flight load/load-more via the
+	// generation token. Never fans out across the whole vault.
 	async function loadDocuments() {
 		loadError = null;
-		// New load supersedes any background fill still running for a prior
-		// folder/state — that fill checks this token and bails.
 		const gen = ++loadGeneration;
-		backgroundFilling = false;
+		loadingMore = false;
 		try {
 			const params = docsBaseParams();
-			params.set('limit', String(FIRST_PAGE));
+			params.set('limit', String(PAGE_SIZE));
 			params.set('offset', '0');
 			const res = await api(`/portal/documents?${params.toString()}`);
 			if (gen !== loadGeneration) return; // superseded mid-flight
@@ -336,12 +452,7 @@
 				if (gen !== loadGeneration) return;
 				documents = data.documents || [];
 				const total = Number(data.total);
-				// Stream the remainder in the background (non-blocking) so the
-				// grid paints now and client-side search fills in shortly.
-				if (Number.isFinite(total) && documents.length < total) {
-					backgroundFilling = true;
-					void fillRemainingDocs(gen, documents.length, total);
-				}
+				docTotal = Number.isFinite(total) ? total : documents.length;
 			} else {
 				console.error('[Library] Failed to load documents:', res.status, res.statusText);
 				loadError = `Failed to load documents (${res.status})`;
@@ -352,41 +463,56 @@
 		}
 	}
 
-	// Background pager: append pages until the full set is loaded. Bails the
-	// moment a newer load starts (loadGeneration bumped). Dedupes by path so
-	// SSE inserts that arrive mid-fill don't double-render. A short gap between
-	// pages lets the server interleave user actions (e.g. opening a doc)
-	// between page decrypts instead of queueing behind the whole backfill.
-	async function fillRemainingDocs(gen: number, startOffset: number, knownTotal: number) {
-		let offset = startOffset;
-		let total = knownTotal;
+	// Load-on-scroll: fetch ONE more page at the current offset and append. Fired
+	// by the bottom sentinel's IntersectionObserver. One page in flight at a time
+	// (loadingMore guard) so scrolling never re-creates the old request flood.
+	async function loadMore() {
+		if (loadingMore || !hasMore) return;
+		const gen = loadGeneration;
+		loadingMore = true;
 		try {
-			while (offset < total && gen === loadGeneration) {
-				const params = docsBaseParams();
-				params.set('limit', String(FILL_PAGE));
-				params.set('offset', String(offset));
-				const res = await api(`/portal/documents?${params.toString()}`);
-				if (gen !== loadGeneration) return;
-				if (!res.ok) break;
-				const data = await res.json();
-				if (gen !== loadGeneration) return;
-				const page: DocListItem[] = data.documents || [];
-				if (page.length === 0) break;
-				const seen = new Set(documents.map((d) => d.path));
-				const fresh = page.filter((d) => !seen.has(d.path));
-				if (fresh.length) documents = [...documents, ...fresh];
-				offset += page.length;
-				if (Number.isFinite(Number(data.total))) total = Number(data.total);
-				if (offset < total) await new Promise((r) => setTimeout(r, 30));
-			}
+			const params = docsBaseParams();
+			params.set('limit', String(PAGE_SIZE));
+			params.set('offset', String(documents.length));
+			const res = await api(`/portal/documents?${params.toString()}`);
+			if (gen !== loadGeneration) return; // folder/search changed → stale page
+			if (!res.ok) return;
+			const data = await res.json();
+			if (gen !== loadGeneration) return;
+			const page: DocListItem[] = data.documents || [];
+			const seen = new Set(documents.map((d) => d.path));
+			const fresh = page.filter((d) => !seen.has(d.path));
+			if (fresh.length) documents = [...documents, ...fresh];
+			const total = Number(data.total);
+			if (Number.isFinite(total)) docTotal = total;
 		} catch (e) {
-			// Transient — the next reconnect resync re-runs the load. Search just
-			// stays scoped to what loaded until then.
-			console.error('[Library] Background fill interrupted:', e);
+			console.error('[Library] Error loading more documents:', e);
 		} finally {
-			if (gen === loadGeneration) backgroundFilling = false;
+			if (gen === loadGeneration) loadingMore = false;
 		}
 	}
+
+	// Debounced server-side search: re-query page 1 when the text changes. The
+	// first run (mount) is skipped — onMount already loads page 1.
+	let searchDebounce: ReturnType<typeof setTimeout> | null = null;
+	let searchInitialized = false;
+	$effect(() => {
+		const _q = searchQuery; // track
+		if (!searchInitialized) { searchInitialized = true; return; }
+		if (searchDebounce) clearTimeout(searchDebounce);
+		searchDebounce = setTimeout(() => { void loadDocuments(); }, 250);
+	});
+
+	// Observe the bottom sentinel → load the next page as you approach it.
+	$effect(() => {
+		if (!browser || !loadSentinel) return;
+		const io = new IntersectionObserver(
+			(entries) => { if (entries.some((e) => e.isIntersecting)) void loadMore(); },
+			{ rootMargin: '600px' },
+		);
+		io.observe(loadSentinel);
+		return () => io.disconnect();
+	});
 
 	async function loadFolders() {
 		try {
@@ -412,17 +538,9 @@
 		}
 	}
 
-	const filteredDocs = $derived.by(() => {
-		let docs = documents;
-		if (searchQuery) {
-			const q = searchQuery.toLowerCase();
-			docs = docs.filter(d =>
-				(d.title || d.path).toLowerCase().includes(q) ||
-				d.summary?.toLowerCase().includes(q)
-			);
-		}
-		return docs;
-	});
+	// Docs are already filtered server-side (folder + ?q= search), so the loaded
+	// set IS the result — no client-side re-filtering, no whole-vault load.
+	const filteredDocs = $derived(documents);
 
 	const filteredMedia = $derived.by(() => {
 		// Media lives in All Documents only — folders + starred are doc concepts.
@@ -480,16 +598,13 @@
 
 	function startEditing() {
 		if (!selectedDoc) return;
+		void ensureEditor(); // lazy-load CodeMirror on first edit
 		editContent = selectedDoc.content || '';
 		editing = true;
-		showRawMarkdown = true;
-		agentUpdatedWhileEditing = false;
-	}
-
-	function cancelEditing() {
-		editing = false;
-		editContent = '';
+		// Default to the live writing surface (WYSIWYG); raw markdown is one
+		// quiet toggle away for power editing.
 		showRawMarkdown = false;
+		saveState = 'idle';
 		agentUpdatedWhileEditing = false;
 	}
 
@@ -502,35 +617,6 @@
 		showRawMarkdown = false;
 		agentUpdatedWhileEditing = false;
 		await reloadCurrentDoc();
-	}
-
-	async function saveDocument() {
-		if (!selectedDoc) return;
-		saving = true;
-		try {
-			const res = await api('/portal/documents', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					path: selectedDoc.path,
-					title: selectedDoc.title,
-					content: editContent,
-				}),
-			});
-			if (res.ok) {
-				// Self-write echo guard: the live broadcaster will fire
-				// a `doc-updated` event for this very write within 100ms;
-				// flagging the path tells our SSE handler to ignore it
-				// for ~300ms so we don't redraw what we already have.
-				markSelfWrite(selectedDoc.path);
-				selectedDoc = { ...selectedDoc, content: editContent };
-				editing = false;
-				agentUpdatedWhileEditing = false;
-			}
-		} catch (e) {
-			console.error('[Library] Failed to save:', e);
-		}
-		saving = false;
 	}
 
 	async function togglePin(doc: DocListItem, e?: MouseEvent) {
@@ -683,7 +769,6 @@
 	// rewrites the doc. Replaces `{@html}` (which fully swaps innerHTML
 	// on every reactivity tick).
 	let mdReadonlyContainer = $state<HTMLDivElement | null>(null);
-	let mdEditorPreviewContainer = $state<HTMLDivElement | null>(null);
 
 	$effect(() => {
 		if (!mdReadonlyContainer || !selectedDoc?.content || editing) return;
@@ -695,11 +780,6 @@
 		// When switching between docs, drop the cached signature so the
 		// next morph never gets short-circuited by a coincidental match.
 		if (selectedDoc?.path) resetMorph(mdReadonlyContainer);
-	});
-
-	$effect(() => {
-		if (!mdEditorPreviewContainer || !editing || showRawMarkdown) return;
-		applyMorph(mdEditorPreviewContainer, renderMarkdown(editContent, true));
 	});
 
 	// ── Live HTML iframe: agent rewrites the doc → postMessage update
@@ -830,6 +910,7 @@
 		const selected = editContent.substring(start, end);
 		const replacement = before + (selected || 'text') + after;
 		editContent = editContent.substring(0, start) + replacement + editContent.substring(end);
+		scheduleAutosave();
 
 		// Restore cursor
 		requestAnimationFrame(() => {
@@ -851,6 +932,7 @@
 		// Find the start of the current line
 		const lineStart = editContent.lastIndexOf('\n', start - 1) + 1;
 		editContent = editContent.substring(0, lineStart) + prefix + editContent.substring(lineStart);
+		scheduleAutosave();
 
 		requestAnimationFrame(() => {
 			if (!editorRef) return;
@@ -872,7 +954,7 @@
 			insertFormat('[', '](url)');
 		} else if (mod && e.key === 's') {
 			e.preventDefault();
-			saveDocument();
+			void autosave();
 		}
 	}
 
@@ -1016,6 +1098,7 @@
 		e.stopPropagation();
 		showDeleteConfirm = false;
 		showMoveMenu = false;
+		showChangeLink = false;
 		contextMenu = { x: e.clientX, y: e.clientY, doc };
 	}
 
@@ -1023,6 +1106,7 @@
 		contextMenu = null;
 		showDeleteConfirm = false;
 		showMoveMenu = false;
+		showChangeLink = false;
 	}
 
 	function handleTouchStart(e: TouchEvent, doc: DocListItem) {
@@ -1033,6 +1117,7 @@
 			if (navigator.vibrate) navigator.vibrate(50);
 			showDeleteConfirm = false;
 			showMoveMenu = false;
+			showChangeLink = false;
 			contextMenu = { x: longPressStartPos!.x, y: longPressStartPos!.y, doc };
 		}, 500);
 	}
@@ -1092,36 +1177,156 @@
 		}
 	}
 
+	// ── Rename (display title) ──────────────────────────────────────────
+
+	function startRename(doc: DocListItem) {
+		closeContextMenu();
+		renamingPath = doc.path;
+		renameValue = doc.title || doc.path;
+		// Focus + select the input once it renders.
+		requestAnimationFrame(() => { renameInputEl?.focus(); renameInputEl?.select(); });
+	}
+
+	function cancelRename() {
+		renamingPath = null;
+		renameValue = '';
+	}
+
+	async function commitRename() {
+		const path = renamingPath;
+		const title = renameValue.trim();
+		if (!path) return;
+		const doc = documents.find((d) => d.path === path) ?? (selectedDoc?.path === path ? selectedDoc : null);
+		renamingPath = null;
+		// No-op if blank or unchanged.
+		if (!title || (doc && (doc.title || doc.path) === title)) return;
+		// Optimistic update everywhere the title shows.
+		documents = documents.map((d) => (d.path === path ? { ...d, title } : d));
+		if (selectedDoc?.path === path) selectedDoc = { ...selectedDoc, title };
+		markSelfWrite(path); // the rename broadcasts a doc-updated; ignore the echo
+		try {
+			const res = await api('/portal/documents/rename', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ path, title }),
+			});
+			if (!res.ok) {
+				let detail = '';
+				try { detail = ((await res.json())?.error as string) || ''; } catch { /* no body */ }
+				toasts.error(`Couldn't rename (${res.status})${detail ? ` — ${detail}` : ''}`);
+				loadDocuments(); // resync to the server's truth
+			}
+		} catch (e) {
+			console.error('[Library] Failed to rename:', e);
+			toasts.error(e instanceof Error ? e.message : 'Failed to rename');
+			loadDocuments();
+		}
+	}
+
+	// ── Change link (path / slug — the document's identity) ──────────────
+	// Opens the in-menu panel prefilled with the current path. Server-side this is
+	// an atomic cascade; client-side we optimistically re-point every path-keyed bit
+	// of local state and swallow both SSE echoes (remove(old) + upsert(new)).
+
+	function startChangeLink(doc: DocListItem) {
+		showChangeLink = true;
+		linkValue = doc.path;
+		requestAnimationFrame(() => { linkInputEl?.focus(); linkInputEl?.select(); });
+	}
+
+	async function commitChangeLink() {
+		const doc = contextMenu?.doc;
+		if (!doc || changingLink) return;
+		const oldPath = doc.path;
+		const newPath = linkValue.trim();
+		if (!newPath || newPath === oldPath) { showChangeLink = false; closeContextMenu(); return; }
+		changingLink = true;
+		// If this doc is open + dirty, flush the pending autosave to the OLD path
+		// first (it still exists pre-rename) so no keystroke is lost; we re-point
+		// selectedDoc.path on success so later autosaves target the new path.
+		if (selectedDoc?.path === oldPath) await autosave();
+		// The rename broadcasts remove(old) + upsert(new); swallow BOTH echoes.
+		markSelfWrite(oldPath);
+		markSelfWrite(newPath);
+		try {
+			const res = await api('/portal/documents/rename-path', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ path: oldPath, new_path: newPath }),
+			});
+			if (res.ok) {
+				documents = documents.map((d) => (d.path === oldPath ? { ...d, path: newPath } : d));
+				if (selectedDoc?.path === oldPath) {
+					selectedDoc = { ...selectedDoc, path: newPath };
+					setParams?.({ doc: newPath });
+				}
+				showChangeLink = false;
+				closeContextMenu();
+			} else {
+				let detail = '';
+				try { detail = ((await res.json())?.error as string) || ''; } catch { /* no body */ }
+				toasts.error(`Couldn't change the link (${res.status})${detail ? ` — ${detail}` : ''}`);
+				loadDocuments(); // resync to the server's truth
+			}
+		} catch (e) {
+			console.error('[Library] Failed to change link:', e);
+			toasts.error(e instanceof Error ? e.message : 'Failed to change link');
+			loadDocuments();
+		} finally {
+			changingLink = false;
+		}
+	}
+
 	async function createNewDocument() {
 		if (!newDocTitle.trim() || creatingDoc) return;
 		creatingDoc = true;
 		try {
-			const slug = newDocTitle.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-			const path = slug;
+			const title = newDocTitle.trim();
+			// Slug from the title. A title with no slug-able characters
+			// (non-Latin / emoji / symbols-only) used to collapse to an EMPTY
+			// path, which the server rejects (400) and the UI swallowed
+			// silently — "create does nothing". Fall back to 'untitled', then
+			// de-dupe against loaded paths so a new doc never silently
+			// overwrites an existing one via upsert.
+			const base =
+				title
+					.toLowerCase()
+					.replace(/\s+/g, '-')
+					.replace(/[^a-z0-9-]/g, '')
+					.replace(/-+/g, '-')
+					.replace(/^-|-$/g, '') || 'untitled';
+			let path = base;
+			const existing = new Set(documents.map((d) => d.path));
+			for (let n = 2; existing.has(path); n++) path = `${base}-${n}`;
 			const folderId = activeFolderId && activeFolderId !== 'starred' ? activeFolderId : null;
 			const res = await api('/portal/documents', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					path,
-					title: newDocTitle.trim(),
-					content: '',
-					folder_id: folderId,
-				}),
+				body: JSON.stringify({ path, title, content: '', folder_id: folderId }),
 			});
 			if (res.ok) {
 				newDocTitle = '';
 				showNewDocInput = false;
-				await loadDocuments();
-				// Open the new doc and start editing
-				const newDoc = documents.find(d => d.path === path);
-				if (newDoc) {
-					await selectDoc(newDoc);
+				// Open the new doc straight from the create response — don't
+				// reload-then-find (with pagination the doc may not be on the
+				// reloaded page, so the find raced and the editor never opened).
+				const created = (await res.json().catch(() => null))?.document as DocFull | undefined;
+				void loadDocuments(); // refresh the list in the background
+				if (created?.path) {
+					selectedDoc = { ...created };
+					setParams?.({ doc: created.path });
 					startEditing();
 				}
+			} else {
+				// Surface the failure instead of doing nothing. Read a short
+				// server message if present (never log/show document content).
+				let detail = '';
+				try { detail = ((await res.json())?.error as string) || ''; } catch { /* no body */ }
+				toasts.error(`Couldn't create the document (${res.status})${detail ? ` — ${detail}` : ''}`);
 			}
 		} catch (e) {
 			console.error('[Library] Failed to create document:', e);
+			toasts.error(e instanceof Error ? e.message : 'Failed to create document');
 		}
 		creatingDoc = false;
 	}
@@ -1195,14 +1400,14 @@
 	<!-- Header — contextual: list mode shows folder label + filters,
 		 doc mode shows title + actions. Sticky so cursor anywhere on
 		 the page can scroll the body underneath. (PR 5.2) -->
-	<div class="library-header px-3 sm:px-6 py-3 sm:py-4 border-b border-[var(--color-border)]">
+	<div class="library-header px-3 sm:px-6 py-2 sm:py-2.5 border-b border-[var(--color-border)]">
 		{#if selectedDoc}
 			<!-- ═══ DOC MODE ═══ -->
-			<div class="flex items-start justify-between gap-3">
-				<div class="flex items-start gap-2 sm:gap-3 min-w-0 flex-1">
+			<div class="flex items-center justify-between gap-3">
+				<div class="flex items-center gap-2 min-w-0 flex-1">
 					<button
 						onclick={() => { selectedDoc = null; editing = false; setParams?.({ doc: null }); }}
-						class="p-1.5 -ml-1.5 mt-0.5 rounded-lg text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)] transition-colors flex-shrink-0"
+						class="p-1.5 -ml-1.5 rounded-lg text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)] transition-colors flex-shrink-0"
 						aria-label="Back to library"
 						title="Back to library"
 					>
@@ -1211,10 +1416,26 @@
 						</svg>
 					</button>
 					<div class="min-w-0 flex-1">
-						<h1 class="text-lg sm:text-xl font-medium text-[var(--color-text-primary)] truncate">
-							{selectedDoc.title || selectedDoc.path}
-						</h1>
-						<div class="flex items-center gap-2 sm:gap-3 mt-0.5 flex-wrap text-xs text-[var(--color-text-tertiary)]">
+						{#if renamingPath === selectedDoc.path}
+							<input
+								bind:this={renameInputEl}
+								bind:value={renameValue}
+								onkeydown={(e) => { if (e.key === 'Enter') commitRename(); else if (e.key === 'Escape') cancelRename(); }}
+								onblur={commitRename}
+								class="w-full text-base sm:text-lg font-medium bg-transparent border-b border-[var(--color-accent)] text-[var(--color-text-primary)] focus:outline-none"
+								aria-label="Rename document"
+							/>
+						{:else}
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<h1
+								class="text-base sm:text-lg font-medium text-[var(--color-text-primary)] truncate cursor-text"
+								ondblclick={() => startRename(selectedDoc!)}
+								title="Double-click to rename"
+							>
+								{selectedDoc.title || selectedDoc.path}
+							</h1>
+						{/if}
+						<div class="flex items-center gap-x-2 gap-y-0.5 mt-0.5 flex-wrap text-[11px] text-[var(--color-text-tertiary)]">
 							{#if getCategoryFromPath(selectedDoc.path)}
 								<span class="tag-warm">{getCategoryFromPath(selectedDoc.path)}</span>
 							{/if}
@@ -1237,11 +1458,11 @@
 				</div>
 
 				<!-- Action buttons (top-right of header) -->
-				<div class="flex items-center gap-1 flex-shrink-0">
+				<div class="flex items-center gap-0.5 flex-shrink-0">
 					<!-- Pin/unpin -->
 					<button
 						onclick={(e) => togglePin(selectedDoc!, e)}
-						class="p-2 rounded-lg transition-colors {selectedDoc.pinned ? 'text-aurum hover:bg-aurum/10' : 'text-[var(--color-text-secondary)] hover:bg-azure/20 hover:text-azure'}"
+						class="p-1.5 rounded-lg transition-colors {selectedDoc.pinned ? 'text-aurum hover:bg-aurum/10' : 'text-[var(--color-text-secondary)] hover:bg-azure/20 hover:text-azure'}"
 						aria-label={selectedDoc.pinned ? 'Unstar' : 'Star'}
 						title={selectedDoc.pinned ? 'Unstar' : 'Star'}
 					>
@@ -1252,7 +1473,7 @@
 					{#if !editing}
 						<button
 							onclick={startEditing}
-							class="p-2 hover:bg-azure/20 rounded-lg transition-colors text-[var(--color-text-secondary)] hover:text-azure"
+							class="p-1.5 hover:bg-azure/20 rounded-lg transition-colors text-[var(--color-text-secondary)] hover:text-azure"
 							aria-label="Edit"
 							title="Edit document"
 						>
@@ -1268,7 +1489,7 @@
 					<div class="relative" onclick={(e) => e.stopPropagation()} role="presentation">
 						<button
 							onclick={(e) => { e.stopPropagation(); downloadMenuOpen = !downloadMenuOpen; }}
-							class="p-2 hover:bg-azure/20 rounded-lg transition-colors text-[var(--color-text-secondary)] hover:text-azure flex items-center"
+							class="p-1.5 hover:bg-azure/20 rounded-lg transition-colors text-[var(--color-text-secondary)] hover:text-azure flex items-center"
 							aria-label="Download"
 							aria-haspopup="menu"
 							aria-expanded={downloadMenuOpen}
@@ -1320,7 +1541,7 @@
 					</button>
 					<button
 						onclick={() => { contextMenu = { x: 0, y: 0, doc: selectedDoc! }; showDeleteConfirm = true; }}
-						class="p-2 hover:bg-red-500/10 rounded-lg transition-colors text-[var(--color-text-secondary)] hover:text-red-400"
+						class="p-1.5 hover:bg-red-500/10 rounded-lg transition-colors text-[var(--color-text-secondary)] hover:text-red-400"
 						aria-label="Delete"
 						title="Delete document"
 					>
@@ -1337,7 +1558,7 @@
 					<div class="min-w-0">
 						<h1 class="text-lg sm:text-xl font-medium text-[var(--color-text-primary)] truncate">{getFolderLabel()}</h1>
 						<p class="text-xs sm:text-sm text-[var(--color-text-tertiary)]">
-							{filteredDocs.length} {filteredDocs.length === 1 ? 'document' : 'documents'}{#if filteredMedia.length} · {filteredMedia.length} media{/if}{#if backgroundFilling} · <span class="text-[var(--color-accent)]">loading…</span>{/if}
+							{docTotal.toLocaleString()} {docTotal === 1 ? 'document' : 'documents'}{#if filteredMedia.length} · {filteredMedia.length} media{/if}{#if loadingMore} · <span class="text-[var(--color-accent)]">loading…</span>{/if}
 						</p>
 					</div>
 				</div>
@@ -1460,7 +1681,7 @@
 	</div>
 
 	<!-- Content -->
-	<div class="library-content p-3 sm:p-6" class:no-scroll={!!selectedDoc}>
+	<div class="library-content p-3 sm:p-6" class:no-scroll={!!selectedDoc} class:editor-flush={editing && !!selectedDoc}>
 		{#if loading}
 			<div class="flex items-center justify-center h-full">
 				<div class="text-center">
@@ -1507,7 +1728,7 @@
 			<!-- Document detail view — title + actions live in the sticky
 				 header above. This block is just the body, which scrolls
 				 with the page. (PR 5.2) -->
-			<div class="doc-detail-view {isHtmlPreview ? 'w-full' : 'max-w-4xl mx-auto'}">
+			<div class="doc-detail-view {isHtmlPreview ? 'w-full' : 'max-w-2xl mx-auto'}">
 				{#if loadingDoc}
 					<div class="flex items-center justify-center py-12">
 						<div class="w-8 h-8 border-2 border-aurum/30 border-t-aurum rounded-full animate-spin"></div>
@@ -1515,122 +1736,122 @@
 				{:else if editing}
 					<!-- ═══ EDITOR MODE ═══ -->
 					<div class="flex flex-col gap-3">
-						{#if agentUpdatedWhileEditing}
-							<!-- Live-update guard: an agent rewrote this doc
-								 while you were editing. The morph was paused
-								 to preserve your buffer; this banner offers
-								 a one-click discard-and-reload. Discarding
-								 IS destructive (your unsaved edits are lost),
-								 hence the explicit affordance instead of a
-								 silent overwrite. -->
-							<div class="flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-aurum/40 bg-aurum/10 text-[13px]">
-								<span class="text-[var(--color-text-secondary)]">
-									An agent updated this document while you were editing.
-								</span>
-								<button
-									type="button"
-									onclick={discardEditAndReload}
-									class="px-3 py-1 text-xs rounded-md border border-aurum/60 text-aurum hover:bg-aurum/15 transition-colors"
-								>
-									Discard my edits &amp; reload
-								</button>
-							</div>
-						{/if}
-						<!-- Editor toolbar -->
-						<div class="flex items-center justify-between gap-2 flex-wrap">
-							{#if showRawMarkdown}
-								<div class="flex items-center gap-1 flex-wrap">
-									<button onclick={() => insertFormat('**', '**')} class="toolbar-btn" title="Bold (Ctrl+B)">
-										<strong>B</strong>
-									</button>
-									<button onclick={() => insertFormat('*', '*')} class="toolbar-btn" title="Italic (Ctrl+I)">
-										<em>I</em>
-									</button>
-									<button onclick={() => insertFormat('`', '`')} class="toolbar-btn" title="Inline code">
-										<code class="text-[10px]">&lt;/&gt;</code>
-									</button>
-									<div class="w-px h-5 bg-[var(--color-border)] mx-1"></div>
-									<button onclick={() => insertLinePrefix('## ')} class="toolbar-btn" title="Heading">H2</button>
-									<button onclick={() => insertLinePrefix('### ')} class="toolbar-btn" title="Subheading">H3</button>
-									<div class="w-px h-5 bg-[var(--color-border)] mx-1"></div>
-									<button onclick={() => insertLinePrefix('- ')} class="toolbar-btn" title="Bullet list">
+						<!-- AI stays silent while you write: an agent rewrite to
+							 this doc is detected (agentUpdatedWhileEditing) but
+							 NEVER interrupts — no banner, no content swap. The
+							 only surfacing is a calm, peripheral cue in the
+							 footer below, which you can ignore or act on when
+							 you pause. -->
+						<!-- Formatting toolbar — the essentials. Works on the live
+							 editor and the raw-markdown textarea; hidden for HTML
+							 docs (edited as raw HTML). Word count lives in the
+							 header byline above, not here. -->
+						<div class="sticky top-0 z-10 bg-[var(--color-bg)] pb-1.5 flex items-center justify-between gap-2 min-h-[32px] flex-wrap">
+							{#if !isHtmlDoc(selectedDoc?.path, editContent)}
+								<div class="flex items-center gap-0.5 flex-wrap">
+									<button class="fmt-btn" title="Heading" onclick={() => format('h1')}>H1</button>
+									<button class="fmt-btn" title="Subheading" onclick={() => format('h2')}>H2</button>
+									<span class="fmt-sep"></span>
+									<button class="fmt-btn" title="Bold (⌘B)" onclick={() => format('bold')}><strong>B</strong></button>
+									<button class="fmt-btn" title="Italic (⌘I)" onclick={() => format('italic')}><em class="font-serif">I</em></button>
+									<button class="fmt-btn" title="Inline code" onclick={() => format('code')}><code class="text-[10px]">&lt;/&gt;</code></button>
+									<span class="fmt-sep"></span>
+									<button class="fmt-btn" title="Bullet list" onclick={() => format('bullet')} aria-label="Bullet list">
 										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>
 									</button>
-									<button onclick={() => insertLinePrefix('- [ ] ')} class="toolbar-btn" title="Todo checkbox">
+									<button class="fmt-btn" title="To-do" onclick={() => format('check')} aria-label="To-do checkbox">
 										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M9 12l2 2 4-4" /></svg>
 									</button>
-									<button onclick={() => insertLinePrefix('> ')} class="toolbar-btn" title="Blockquote">
+									<button class="fmt-btn" title="Quote" onclick={() => format('quote')} aria-label="Blockquote">
 										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M10 11h-4a1 1 0 01-1-1v-3a1 1 0 011-1h3a1 1 0 011 1v6c0 2.667-1.333 4.333-4 5M19 11h-4a1 1 0 01-1-1v-3a1 1 0 011-1h3a1 1 0 011 1v6c0 2.667-1.333 4.333-4 5" /></svg>
 									</button>
-									<button onclick={() => insertFormat('[', '](url)')} class="toolbar-btn" title="Link (Ctrl+K)">
+									<button class="fmt-btn" title="Link (⌘K)" onclick={() => format('link')} aria-label="Link">
 										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" /></svg>
 									</button>
 								</div>
+								<button
+									onclick={() => showRawMarkdown = !showRawMarkdown}
+									class="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border transition-colors flex-shrink-0 {showRawMarkdown ? 'border-[var(--color-accent)]/40 text-[var(--color-accent)] bg-[var(--color-accent)]/5' : 'border-transparent text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] hover:border-[var(--color-border)]'}"
+									title={showRawMarkdown ? 'Back to the live writing surface' : 'Edit raw markdown'}
+								>
+									{showRawMarkdown ? 'Live' : 'Markdown'}
+								</button>
 							{:else}
-								<span class="text-xs text-[var(--color-text-tertiary)]">
-									{wordCount(editContent).toLocaleString()} words &middot; {editContent.length.toLocaleString()} chars
-								</span>
+								<span></span>
 							{/if}
-
-							<!-- Formatted / Markdown toggle -->
-							<button
-								onclick={() => showRawMarkdown = !showRawMarkdown}
-								class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border transition-colors {showRawMarkdown ? 'border-[var(--color-accent)]/40 text-[var(--color-accent)] bg-[var(--color-accent)]/5' : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-tertiary)]'}"
-							>
-								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
-									<path d="M16 18L22 12L16 6M8 6L2 12L8 18" />
-								</svg>
-								{showRawMarkdown ? 'Preview' : 'Edit'}
-							</button>
 						</div>
 
-						<!-- Content: formatted view or raw markdown -->
-						{#if showRawMarkdown}
+						<!-- Content: live writing surface (markdown), raw textarea
+							 (power editing / HTML docs), or the HTML iframe preview. -->
+						{#if isHtmlDoc(selectedDoc?.path, editContent)}
 							<textarea
 								bind:this={editorRef}
-								bind:value={editContent}
+								value={editContent}
+								oninput={(e) => onEditorChange(e.currentTarget.value)}
 								onkeydown={handleEditorKeydown}
 								class="editor-textarea"
-								placeholder="Write in markdown..."
+								placeholder="Edit HTML…"
 							></textarea>
-						{:else if isHtmlDoc(selectedDoc?.path, editContent)}
-							<iframe
-								title={selectedDoc?.title || selectedDoc?.path || 'preview'}
-								srcdoc={wrapHtmlForLive(editContent)}
-								sandbox="allow-scripts allow-popups"
-								class="w-full border-0 rounded-lg"
-								style="min-height: 60vh; background: Canvas;"
-							></iframe>
+						{:else if showRawMarkdown}
+							<textarea
+								bind:this={editorRef}
+								value={editContent}
+								oninput={(e) => onEditorChange(e.currentTarget.value)}
+								onkeydown={handleEditorKeydown}
+								class="editor-textarea"
+								placeholder="Write in markdown…"
+							></textarea>
 						{:else}
-							<!-- Editor preview — DOM-morphed so the live re-
-								 render as you type doesn't blow away cursor
-								 selection / scroll inside the preview.
-								 Click is delegated on the parent div, which
-								 morphdom preserves (childrenOnly: true). -->
-							<!-- svelte-ignore a11y_click_events_have_key_events -->
-							<!-- svelte-ignore a11y_no_static_element_interactions -->
-							<div
-								bind:this={mdEditorPreviewContainer}
-								class="doc-content"
-								onclick={(e) => handleContentClick(e, 'editor')}
-							></div>
+							<!-- The writing sanctuary — CodeMirror live-preview,
+								 lazy-loaded so it never weighs down library
+								 navigation. Markdown stays the literal buffer. -->
+							{#if MarkdownEditor}
+								<MarkdownEditor
+									bind:this={mdEditor}
+									value={editContent}
+									onChange={onEditorChange}
+									onSave={autosave}
+								/>
+							{:else}
+								<div class="min-h-[60vh] flex items-center justify-center text-[var(--color-text-tertiary)] text-sm">
+									<div class="w-5 h-5 border-2 border-aurum/30 border-t-aurum rounded-full animate-spin"></div>
+								</div>
+							{/if}
 						{/if}
 
-						<!-- Footer: save/cancel -->
-						<div class="flex items-center justify-end gap-2 pt-2 border-t border-[var(--color-border)]">
-							<button
-								onclick={cancelEditing}
-								class="px-4 py-2 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] rounded-lg transition-colors"
-							>
-								Cancel
-							</button>
-							<button
-								onclick={saveDocument}
-								disabled={saving}
-								class="px-4 py-2 text-sm bg-[var(--color-accent)] text-white rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
-							>
-								{saving ? 'Saving...' : 'Save'}
-							</button>
+						<!-- Footer: peripheral agent cue (left) + autosave whisper
+							 + Done (right). No Save button — edits persist
+							 automatically; Done flushes + exits. Sticky to the
+							 viewport bottom so it never scrolls out of reach while
+							 writing (bg occludes the text scrolling underneath). -->
+						<div class="sticky bottom-0 z-10 bg-[var(--color-bg)] border-t border-[var(--color-border)] flex items-center justify-between gap-3 py-2">
+							<!-- Calm cue: surfaces an agent's concurrent edit only
+								 here, never over your text. Click reloads (which
+								 discards your unsaved buffer — hence explicit). -->
+							{#if agentUpdatedWhileEditing}
+								<button
+									type="button"
+									onclick={discardEditAndReload}
+									class="flex items-center gap-1.5 text-xs text-[var(--color-text-tertiary)] hover:text-aurum transition-colors"
+									title="An agent edited this document. Reload to their version (discards your unsaved edits)."
+								>
+									<span class="w-1.5 h-1.5 rounded-full bg-aurum/80"></span>
+									Updated elsewhere · Reload
+								</button>
+							{:else}
+								<span></span>
+							{/if}
+							<div class="flex items-center gap-3">
+								<span class="text-xs text-[var(--color-text-tertiary)] transition-opacity" class:opacity-0={saveState === 'idle'}>
+									{saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : ''}
+								</span>
+								<button
+									onclick={finishEditing}
+									class="px-4 py-1.5 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] rounded-lg border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors"
+								>
+									Done
+								</button>
+							</div>
 						</div>
 					</div>
 				{:else}
@@ -1790,9 +2011,21 @@
 										<path d="M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.562.562 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z"/>
 									</svg>
 								{/if}
-								<h3 class="text-sm sm:text-base font-medium text-[var(--color-text-primary)] truncate">
-									{doc.title || doc.path}
-								</h3>
+								{#if renamingPath === doc.path}
+									<input
+										bind:this={renameInputEl}
+										bind:value={renameValue}
+										onkeydown={(e) => { if (e.key === 'Enter') commitRename(); else if (e.key === 'Escape') cancelRename(); }}
+										onblur={commitRename}
+										onclick={(e) => e.stopPropagation()}
+										class="flex-1 min-w-0 text-sm sm:text-base font-medium bg-transparent border-b border-[var(--color-accent)] text-[var(--color-text-primary)] focus:outline-none"
+										aria-label="Rename document"
+									/>
+								{:else}
+									<h3 class="text-sm sm:text-base font-medium text-[var(--color-text-primary)] truncate">
+										{doc.title || doc.path}
+									</h3>
+								{/if}
 							</div>
 							{#if doc.summary}
 								<p class="text-xs sm:text-sm text-[var(--color-text-secondary)] leading-snug line-clamp-2">
@@ -1882,9 +2115,21 @@
 						     the format chip when set. -->
 						<div class="px-3 py-2 border-b border-[var(--color-border)]">
 							<div class="flex items-center gap-2">
-								<h3 class="flex-1 min-w-0 text-sm font-medium text-[var(--color-text-primary)] truncate">
-									{docTitle}
-								</h3>
+								{#if renamingPath === doc.path}
+									<input
+										bind:this={renameInputEl}
+										bind:value={renameValue}
+										onkeydown={(e) => { if (e.key === 'Enter') commitRename(); else if (e.key === 'Escape') cancelRename(); }}
+										onblur={commitRename}
+										onclick={(e) => e.stopPropagation()}
+										class="flex-1 min-w-0 text-sm font-medium bg-transparent border-b border-[var(--color-accent)] text-[var(--color-text-primary)] focus:outline-none"
+										aria-label="Rename document"
+									/>
+								{:else}
+									<h3 class="flex-1 min-w-0 text-sm font-medium text-[var(--color-text-primary)] truncate">
+										{docTitle}
+									</h3>
+								{/if}
 								{#if doc.pinned}
 									<svg class="w-3.5 h-3.5 text-aurum flex-shrink-0" fill="currentColor" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" aria-label="Pinned">
 										<path d="M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.562.562 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z"/>
@@ -1910,6 +2155,16 @@
 					</div>
 					{/if}
 				{/each}
+			</div>
+		{/if}
+		<!-- Load-on-scroll sentinel: entering view (600px early) pulls the next
+			 page. Only present in list/grid with more to load — never the doc
+			 detail view, and never an eager whole-vault fill. -->
+		{#if hasMore && !selectedDoc}
+			<div bind:this={loadSentinel} class="h-8 flex items-center justify-center" aria-hidden="true">
+				{#if loadingMore}
+					<div class="w-5 h-5 border-2 border-aurum/30 border-t-aurum rounded-full animate-spin"></div>
+				{/if}
 			</div>
 		{/if}
 	</div>
@@ -1981,6 +2236,32 @@
 					>{isDeleting ? 'Deleting...' : 'Delete'}</button>
 				</div>
 			</div>
+		{:else if showChangeLink}
+			<div class="px-3 py-2">
+				<p class="text-sm text-[var(--color-text-primary)] mb-1">Change link</p>
+				<p class="text-xs text-[var(--color-text-tertiary)] mb-2">The document’s address (its <code>?doc=</code> slug). Published links are unaffected.</p>
+				<input
+					bind:this={linkInputEl}
+					bind:value={linkValue}
+					onkeydown={(e) => { if (e.key === 'Enter') commitChangeLink(); else if (e.key === 'Escape') { showChangeLink = false; } }}
+					spellcheck="false"
+					autocapitalize="off"
+					autocomplete="off"
+					class="w-full px-2 py-1 text-sm rounded-md bg-[var(--color-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] mb-2 font-mono"
+					aria-label="New document link"
+				/>
+				<div class="flex items-center gap-2 justify-end">
+					<button
+						onclick={() => { showChangeLink = false; }}
+						class="px-2.5 py-1 text-xs rounded-md text-[var(--color-text-secondary)] hover:bg-[var(--color-elevated)] transition-colors"
+					>Cancel</button>
+					<button
+						onclick={commitChangeLink}
+						disabled={changingLink}
+						class="px-2.5 py-1 text-xs rounded-md bg-[var(--color-accent)]/15 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25 transition-colors disabled:opacity-50"
+					>{changingLink ? 'Changing…' : 'Change'}</button>
+				</div>
+			</div>
 		{:else if showMoveMenu}
 			<button
 				onclick={() => { moveDocToFolder(contextMenu!.doc, null); }}
@@ -2008,6 +2289,16 @@
 			<button onclick={() => { selectDoc(contextMenu!.doc); closeContextMenu(); }} class="ctx-item">
 				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
 				Open
+			</button>
+			<!-- Rename (display title) -->
+			<button onclick={() => startRename(contextMenu!.doc)} class="ctx-item">
+				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+				Rename
+			</button>
+			<!-- Change link (path / slug — the document's identity) -->
+			<button onclick={() => startChangeLink(contextMenu!.doc)} class="ctx-item">
+				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+				Change link…
 			</button>
 			<!-- Star/Unstar -->
 			<button onclick={() => { togglePin(contextMenu!.doc); closeContextMenu(); }} class="ctx-item">
@@ -2095,12 +2386,25 @@
 	}
 	.library-header {
 		flex-shrink: 0;
+		/* Pinned above the scroll region. It already sits outside .library-content
+		   (flex sibling), so it never scrolls; sticky + an opaque page-bg is
+		   belt-and-suspenders for any ancestor that does scroll, and lets the
+		   title/actions stay put while the editor body scrolls underneath. */
+		position: sticky;
+		top: 0;
+		z-index: 30;
+		background: var(--color-bg);
 	}
 	.library-content {
 		flex: 1;
 		overflow-y: auto;
 		overflow-x: hidden;
 		min-height: 0;
+	}
+	/* While editing, drop the bottom padding so the sticky Done/save bar hugs the
+	   very bottom of the viewport (no dead gap beneath it). */
+	.editor-flush {
+		padding-bottom: 0;
 	}
 	/* .doc-detail-view inherits flex parent; scroll handled by .library-content. */
 
@@ -2112,28 +2416,34 @@
 		overflow: hidden;
 	}
 
-	/* ── Toolbar ── */
-
-	.toolbar-btn {
+	/* ── Formatting toolbar ── */
+	.fmt-btn {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: 32px;
-		height: 32px;
+		min-width: 28px;
+		height: 28px;
+		padding: 0 6px;
 		border-radius: 0.375rem;
 		font-size: 0.8rem;
 		color: var(--color-text-secondary);
 		background: none;
 		border: none;
 		cursor: pointer;
-		transition: all 0.15s;
+		transition: all 0.12s;
 	}
-	.toolbar-btn:hover {
+	.fmt-btn:hover {
 		background: var(--color-elevated);
 		color: var(--color-text-primary);
 	}
+	.fmt-sep {
+		width: 1px;
+		height: 18px;
+		background: var(--color-border);
+		margin: 0 4px;
+	}
 
-	/* ── Split editor ── */
+	/* ── Raw editor textarea (HTML docs + power-user markdown) ── */
 
 	.editor-textarea {
 		width: 100%;
@@ -2161,9 +2471,13 @@
 	/* ── Document content / Markdown styling ── */
 
 	.doc-content {
-		line-height: 1.75;
+		/* Read/write parity: the reader uses the same editorial serif, size and
+		   measure as the CodeMirror writing surface, so entering edit changes
+		   nothing visually — you write on the page you were just reading. */
+		font-family: var(--font-serif);
+		line-height: 1.72;
 		color: var(--color-text-primary);
-		font-size: 0.9375rem;
+		font-size: 1.0625rem;
 	}
 
 	/* Headings */
@@ -2194,9 +2508,16 @@
 		color: var(--color-text-primary);
 	}
 
-	/* Paragraphs */
+	/* Paragraphs — text-wrap: pretty avoids orphans/ragged last lines for a
+	   more typeset feel; headings balance across lines. */
 	.doc-content :global(p) {
 		margin: 0 0 1rem 0;
+		text-wrap: pretty;
+	}
+	.doc-content :global(h1),
+	.doc-content :global(h2),
+	.doc-content :global(h3) {
+		text-wrap: balance;
 	}
 
 	/* Lists */
@@ -2247,7 +2568,7 @@
 
 	/* Inline code */
 	.doc-content :global(code) {
-		font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+		font-family: var(--font-mono);
 		font-size: 0.85em;
 		padding: 0.15rem 0.4rem;
 		border-radius: 0.25rem;

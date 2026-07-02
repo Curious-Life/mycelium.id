@@ -261,8 +261,8 @@ fn main() {
             let node_options = {
                 let existing = std::env::var("NODE_OPTIONS").unwrap_or_default();
                 if existing.contains("--max-old-space-size") { existing }
-                else if existing.is_empty() { "--max-old-space-size=4096".to_string() }
-                else { format!("{} --max-old-space-size=4096", existing) }
+                else if existing.is_empty() { "--max-old-space-size=6144".to_string() }
+                else { format!("{} --max-old-space-size=6144", existing) }
             };
             let mut cmd = Command::new(&node_bin);
             cmd.arg("src/server-rest.js")

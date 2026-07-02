@@ -10,6 +10,7 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
+import { maybeScheduleIntegrityCheck } from './db/integrity.js';
 import { initVaultStorage } from './db/init.js';
 import { resolveDbKeyHex, atRestEnabled } from './db/open.js';
 import { purgePlaintextBackup } from './account/db-cipher-migrate.js';
@@ -108,6 +109,10 @@ export async function boot({
     sign: handle ? (canonical) => identity.sign(canonical) : undefined,
     did: publicHost ? () => `did:web:${publicHost}` : undefined,
     selfInstance: () => publicHost,
+    // E2E shared-spaces seam: the full identity (X25519 keyAgreement + Ed25519 sign) +
+    // the owner DID. Gated on publicHost so E2E space sharing is off until remote is set.
+    identity,
+    selfDid: publicHost ? `did:web:${publicHost}` : null,
   };
 
   // At-rest blindness (A′). initVaultStorage applies the schema (key-aware) and,
@@ -149,10 +154,16 @@ export async function boot({
   // is self-verifying (re-opens keyed + reads before deleting; keeps the backup on
   // any doubt). Scoped to the canonical vault so test fixtures (which pass a temp
   // dbPath and assert the backup is kept) are never touched.
-  if (dbKeyHex && path.resolve(dbPath) === resolveDbPath()) {
+  const isCanonicalVault = path.resolve(dbPath) === resolveDbPath();
+  if (dbKeyHex && isCanonicalVault) {
     try { purgePlaintextBackup({ dbPath, dbKeyHex, log: (m) => console.error(m) }); }
     catch (e) { console.error(`[mycelium] at-rest: backup purge skipped (${e?.message || e})`); }
   }
+  // Early corruption detection (defense-in-depth): a DETACHED, throttled (once/day),
+  // read-only quick_check on the CANONICAL vault only. Fire-and-forget — never blocks
+  // boot (the scan is ~24 s on a 2 GB vault, so it must not run in-process). Fixtures /
+  // pipeline temp DBs are skipped. @see src/db/integrity.js.
+  maybeScheduleIntegrityCheck({ dbPath, userHex, isCanonical: isCanonicalVault });
   const { domains, deferred, searchHelpers, isTopologyReady } = buildDomains({ db, userId, embedder, identity });
   // Cold-start gating (Phase 4): Tier-2 readers return a uniform "not ready"
   // message until the topology pipeline has run, instead of honest-empty.
