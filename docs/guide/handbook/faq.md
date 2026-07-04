@@ -66,6 +66,15 @@ real zero-knowledge encryption.
 
 → [Keys & recovery](keys-and-recovery.md)
 
+## How do I delete my data or start over?
+
+In **Settings → Data**. You can undo a single import, bulk-delete a whole category
+(all documents, all media, or all chat history), or — the nuclear option — **destroy
+the vault entirely**. Destroying wipes your data *and* your keys and can't be undone,
+so it asks you to paste your recovery key and type a confirmation phrase before it
+runs; when it's done the app reopens as a fresh install. Everything happens locally on
+your machine.
+
 ## Do I need to be technical?
 
 No. Download the Mac app, create your vault, save your recovery key, import your
@@ -74,9 +83,12 @@ exists for developers and agent builders, but you never need it to *use* Myceliu
 
 ## Does an AI run on its own in the background?
 
-No. Mycelium is a *tool server*, not an autonomous agent. It does nothing on its own —
-it only responds when an AI you've connected asks it to. Nothing acts, watches, or
-decides without you.
+Not unless you ask it to. By default Mycelium is a *tool server*, not an autonomous
+agent — it only responds when an AI you've connected asks it to. The one exception is
+**reflection cycles**, an opt-in feature (**Settings → Reflection**): when you switch
+it on, your AI wakes on a schedule you set to reflect on your vault. It's off until you
+enable it, runs entirely on your own machine, and you can pause it any time. Nothing
+watches or decides without you having turned it on first.
 
 ## Can other people see my vault?
 

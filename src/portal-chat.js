@@ -14,7 +14,8 @@
 // the same captureMessage funnel as every other message (encrypted at rest).
 
 import express from 'express';
-import { createAgentHarness, describeProvider } from './agent/harness.js';
+import { randomUUID } from 'node:crypto';
+import { createAgentHarness, describeProvider, DEFAULT_ANTHROPIC_CHAT_MODEL } from './agent/harness.js';
 import { resolveHarness } from './agent/resolve-harness.js';
 import { toolsForDomains, normalizePolicy, defaultPolicy, DOMAINS, ALL_SCOPES } from './agent/tool-domains.js';
 import { resolveInferenceConfigForTask } from './inference/resolve.js';
@@ -28,6 +29,10 @@ import { AGENT_NATURE } from './agent/identity.js';
 
 const POLICY_KEY = 'AI_ACCESS_POLICY';
 const CHAT_SOURCE = 'portal-chat';
+// Inbound channel sources whose conversations the portal inbox can list + view (read-only).
+// These are the message.source tags the channel-daemon persists (inbound + outbound).
+const CHANNEL_SOURCES = ['telegram', 'telegram-group', 'discord', 'discord-thread', 'whatsapp'];
+const CHANNEL_SOURCE_SET = new Set(CHANNEL_SOURCES);
 
 // Agent identity (spec #4) — a user-chosen name + personality for their assistant,
 // persisted in users.settings.agent and surfaced everywhere the AI is referenced
@@ -186,15 +191,22 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     if (!auth(req, res)) return;
     try {
       const limit = Math.min(Number(req.query.limit) || 50, 100);
-      // Same `chat:` namespace as /chat/stream (red-team RT3) — a chat read can only ever
-      // see chat-sourced threads, never a channel conversation.
       const rawConv = typeof req.query.conversationId === 'string' ? req.query.conversationId.trim().slice(0, 100) : '';
-      const conversationId = rawConv ? `chat:${rawConv}` : '';
+      // channel=1 → READ-ONLY view of a CHANNEL conversation by its BARE conversation_id
+      // (the portal inbox surfacing a Telegram/Discord thread). The `chat:` namespace
+      // (write/stream isolation, red-team RT3) is UNCHANGED — this is a read of the user's
+      // OWN vault rows, user-scoped by selectByConversation, and the result is filtered to
+      // channel sources so it can never expose a `chat:` thread. Otherwise the read stays
+      // namespaced: a normal chat read only ever sees chat-sourced threads.
+      const channelMode = req.query.channel === '1' || req.query.channel === 'true';
+      const conversationId = rawConv ? (channelMode ? rawConv : `chat:${rawConv}`) : '';
       const toMsg = (r) => ({ id: r.id, role: r.role === 'assistant' ? 'assistant' : 'user', content: r.content || '', timestamp: Date.parse(r.created_at) || Date.now(), source: r.source || CHAT_SOURCE });
       let msgs;
       let recoverable = 0;
       if (conversationId) {
-        const rows = (await db.messages.selectByConversation(userId, conversationId, { limit })) || [];
+        let rows = (await db.messages.selectByConversation(userId, conversationId, { limit })) || [];
+        // Defense-in-depth: a channel view only ever returns channel-sourced rows.
+        if (channelMode) rows = rows.filter((r) => CHANNEL_SOURCE_SET.has(r.source));
         msgs = rows.map(toMsg).reverse();   // newest-first → chronological for display
         // When this thread is empty, report how many orphaned chat turns COULD be
         // recovered (saved with NULL conversation_id by the pre-fix WS send path),
@@ -209,6 +221,24 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       }
       res.json({ messages: msgs, recoverable });
     } catch { res.json({ messages: [], recoverable: 0 }); }
+  });
+
+  // ── GET /chat/conversations — the portal inbox: the user's CHANNEL conversations
+  //    (Telegram/Discord/WhatsApp threads the channel-daemon persisted), newest-first,
+  //    with source + last activity + message count. Content-free (no message bodies) —
+  //    the UI loads a thread's messages via GET /chat/history?channel=1&conversationId=.
+  router.get('/chat/conversations', async (req, res) => {
+    if (!auth(req, res)) return;
+    try {
+      const rows = (await db.messages.listConversations(userId, { sources: CHANNEL_SOURCES, limit: 50 })) || [];
+      const conversations = rows.map((r) => ({
+        conversationId: r.conversation_id,
+        source: r.source,
+        lastAt: Date.parse(r.last_at) || null,
+        count: Number(r.n) || 0,
+      }));
+      res.json({ conversations });
+    } catch { res.json({ conversations: [] }); }
   });
 
   // ── POST /chat/history/recover — EXPLICIT one-shot recovery of orphaned chat
@@ -289,14 +319,29 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       send({ type: 'stream_start', streamIndex: 0 });
 
       const provider = await resolveInferenceConfigForTask(db, userId, 'chat');
-      // NO silent fallback (operator directive): if no model is connected, refuse
-      // with an actionable state instead of quietly attempting local Ollama and
-      // hanging for 90s. describeProvider() returns null iff nothing is configured.
-      const info = describeProvider(provider);
-      if (!info) {
-        send({ type: 'no_model', message: 'No AI model is connected. Open Settings → Connect AI to add a cloud key or pull a local model.' });
-        send({ type: 'done', toolsUsed: [] });
-        return;
+      // Resolve the ENGINE first — the Claude Code (cli) engine runs on `claude`'s OWN
+      // login + the vault tools over MCP and needs NO configured inference provider, so
+      // it must NOT be blocked by the provider gate below. resolveHarness never throws
+      // and falls back to native when 'cli' is ineligible (returns the resolved mode).
+      const { loop, mode: harnessMode } = await resolveHarness({
+        db, userId, provider,
+        deps: { harness, logger: chatLog, restPort },
+      });
+      // NO silent fallback (operator directive): for the NATIVE engine, if no model is
+      // connected, refuse with an actionable state instead of quietly attempting local
+      // Ollama and hanging for 90s. describeProvider() returns null iff nothing is
+      // configured. For the CLI engine we synthesize a descriptor (it runs on the
+      // subscription via Claude Code regardless of the inference-provider config).
+      let info;
+      if (harnessMode === 'cli') {
+        info = { label: 'Claude Code', model: provider?.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: 'us-standard', local: false };
+      } else {
+        info = describeProvider(provider);
+        if (!info) {
+          send({ type: 'no_model', message: 'No AI model is connected. Open Settings → Connect AI to add a cloud key or pull a local model.' });
+          send({ type: 'done', toolsUsed: [] });
+          return;
+        }
       }
       // Tell the UI exactly which provider + model is answering (carries no secrets).
       send({ type: 'model', label: info.label, model: info.model, jurisdiction: info.jurisdiction, local: info.local });
@@ -306,13 +351,16 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       const isLocal = info.local;
       // "The model is working" → global activity feed (header indicator). The label
       // is a CONSTANT (never user content / model output) per the §1 feed contract.
-      chatJob = await db.activityFeed?.begin?.({ userId, kind: 'inference:chat', stageLabel: isLocal ? 'Thinking · local model' : 'Thinking…' }).catch(() => null);
+      chatJob = await db.activityFeed?.begin?.({ userId, kind: 'inference:chat', stageLabel: isLocal ? 'Thinking · local model' : 'Thinking…', model: info.model }).catch(() => null);
       const recentN = isLocal ? 5 : 12;
       // Model-aware budgeting: resolve the model's REAL window + output cap and
       // budget the system preamble in TOKENS, replacing the old binary 5000/28000
       // char cap (which starved 128k-window models and overflowed small ones). The
       // probe is fail-soft + cached → no profile ⇒ the legacy char cap below.
-      const profile = await resolveModelProfile(provider, { fetch, defaultModel: info.model }).catch(() => null);
+      // The Claude Code (cli) engine reaches the FULL mcp__mycelium__* tool surface over
+      // MCP, independent of the in-process provider — so don't derive its capability from a
+      // (possibly empty/subscription) provider profile, and skip the wasteful Ollama probe.
+      const profile = harnessMode === 'cli' ? null : await resolveModelProfile(provider, { fetch, defaultModel: info.model }).catch(() => null);
       const plan = profile ? planGeneration(profile, { task: 'chat' }) : null;
       const sysCap = isLocal ? 5000 : 28000; // fallback char cap when no profile
       // Tools are gated on real model CAPABILITY, not geography. The probe reads
@@ -321,14 +369,16 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       // no-tool model gets none and degrades to a context-grounded relay (the briefing
       // is already in the preamble). Fail-safe default when the probe is unavailable:
       // cloud (!isLocal) ⇒ capable, bare local ⇒ not — matching model-profile's default.
-      const toolsCapable = profile?.capabilities?.tools ?? !isLocal;
+      const toolsCapable = harnessMode === 'cli' ? true : (profile?.capabilities?.tools ?? !isLocal);
 
       // System = orientation + getContext briefing + (cloud only) memory retrieval.
       const ident = await readAgentIdentity();
       // Does this turn actually carry action tools? Mirrors the loop.run tools gate
       // below (toolsCapable + a non-empty grant). The capability line is chosen to
       // match, so the agent is never told it can write when it has nothing to write with.
-      const hasActionTools = toolsCapable && grantedTools.length > 0;
+      // cli engine: the child always has the vault tools over MCP, so it CAN act even
+      // when the in-proc grant (grantedTools) is empty.
+      const hasActionTools = harnessMode === 'cli' ? true : (toolsCapable && grantedTools.length > 0);
       // Identity preamble (spec #4): the user's chosen name + personality shape who
       // the assistant is and how it speaks, ahead of the static orientation.
       let system = `Your name is ${ident.name}. ${PERSONALITY_GUIDE[ident.personality] || ''} ${CHAT_SYSTEM} ${hasActionTools ? CAN_ACT : CANNOT_ACT}`.trim();
@@ -343,7 +393,11 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       // The current message is NOT yet persisted, so this is PRIOR turns only — no dup.
       // The summarize call is signal-aware so a client disconnect mid-summary aborts it
       // instead of stalling the stream.
-      if (conversationId) {
+      //
+      // CLI engine: SKIP our history injection — the resumed `claude` session already
+      // holds the conversation and auto-compacts IN-session (see below). Re-injecting our
+      // own history block here would double the context and fight claude's compaction.
+      if (conversationId && harnessMode !== 'cli') {
         try {
           const rows = await db.messages.selectByConversation(userId, conversationId, { limit: 50 });
           const history = (rows || []).reverse().map((r) => ({ role: r.role, content: r.content })).filter((m) => typeof m.content === 'string' && m.content.trim());
@@ -381,15 +435,21 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
         return typeof out === 'string' ? out : JSON.stringify(out);
       };
 
-      // Resolve the engine for this turn: native (default) or the Claude Code CLI
-      // when the user has selected it AND it's eligible. Fail-safe: resolveHarness
-      // never throws and returns native when 'cli' is ineligible (no binary / not a
-      // subscription / cli engine not shipped yet), so this is behavior-identical to
-      // the previous hardcoded native loop unless the user opts in and qualifies.
-      const { loop } = await resolveHarness({
-        db, userId, provider,
-        deps: { harness, logger: chatLog, restPort },
-      });
+      // (The engine `loop` was resolved above, before the no-model gate, so the CLI
+      // engine isn't blocked by a missing inference provider.)
+
+      // CLI engine: continue ONE `claude` session per conversation (claude owns memory +
+      // auto-compacts) instead of spawning a fresh session each turn. RESUME the stored
+      // session, else CREATE a new id (persisted below only on a successful create). No
+      // conversationId → a one-shot session (no continuity to keep). Native ignores these.
+      let cliSessionId = null, cliResume = false;
+      if (harnessMode === 'cli' && conversationId) {
+        try {
+          const stored = await db.harness?.getClaudeSessionId?.(userId, conversationId);
+          if (stored) { cliSessionId = stored; cliResume = true; }
+          else { cliSessionId = randomUUID(); cliResume = false; }
+        } catch { cliSessionId = null; }
+      }
 
       // Drive the turn through the agent loop: the watchdog (TTFB/IDLE) +
       // retry-on-empty + first-token signalling live in loop.run. It streams
@@ -400,8 +460,22 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
         send, maxTokens: plan?.maxTokens, numCtx: plan?.numCtx,
         ttfbMs: TTFB_MS, idleMs: IDLE_MS, maxRetries: MAX_RETRIES,
         signal: clientGoneCtrl.signal, onStall: () => finishJob(), onHeartbeat: heartbeatJob,
+        sessionId: cliSessionId, resume: cliResume,
       });
       const assistantText = result.text;
+
+      // Persist the created session (so the next turn --resumes it); or self-heal a
+      // stale one — if --resume failed (session gone externally), forget it so the next
+      // turn re-creates. Never blocks the response.
+      if (harnessMode === 'cli' && conversationId && cliSessionId) {
+        try {
+          if (result?.sessionError && cliResume) {
+            await db.harness?.clearClaudeSessionId?.(userId, conversationId);
+          } else if (!cliResume && !result?.sessionError && result?.text) {
+            await db.harness?.setClaudeSessionId?.(userId, conversationId, cliSessionId);
+          }
+        } catch { /* non-fatal */ }
+      }
 
       if (!result.clientGone) {
         if (assistantText.trim() || result.truncated) {
@@ -418,7 +492,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
           // Persist only when there's actual assistant text (a truncated tool-call
           // turn can have none) — never write an empty assistant bubble.
           if (assistantText.trim()) {
-            const cap = (role, content) => captureMessage(db, { userId, role, content, source: CHAT_SOURCE, messageType: 'chat', ...(conversationId ? { conversationId } : {}) }, enqueueEnrichment);
+            const cap = (role, content) => captureMessage(db, { userId, role, content, source: CHAT_SOURCE, messageType: 'chat', model: info.model, ...(conversationId ? { conversationId } : {}) }, enqueueEnrichment);
             cap('user', message).then(() => cap('assistant', assistantText.trim())).catch((e) => console.error('[chat] persist failed:', e?.message));
           }
         } else {

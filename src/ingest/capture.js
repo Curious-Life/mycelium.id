@@ -123,6 +123,13 @@ export async function captureMessage(db, msg, enqueueEnrichment) {
     source: msg.source || 'api',
     scope: 'personal',
     nlp_processed: 0, // queue for enrichment (idx_messages_nlp_pending)
+    // WHICH model produced this (assistant rows only). Plaintext provenance (like
+    // `source`), NOT encrypted → projects to the timeline "· <model>" chip. A model
+    // NAME only; clamp defensively. Always set (null for user/inbound) so the dynamic
+    // column list is stable across inserts.
+    model: (msg.role === 'assistant' && typeof msg.model === 'string' && msg.model.trim())
+      ? msg.model.trim().slice(0, 120)
+      : null,
   };
   if (msg.conversationId) row.conversation_id = msg.conversationId;
   if (msg.attachmentId) row.attachment_id = msg.attachmentId;

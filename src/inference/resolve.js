@@ -19,6 +19,50 @@
 // Each result carries `jurisdiction` (local|eu-zdr|us-zdr|us-standard).
 
 import { jurisdictionForBaseUrl } from './presets.js';
+import { importFromClaudeCli } from './claude-oauth.js';
+
+// ── Live Claude-subscription token refresh (fix: native chat "load failed") ──────
+// The subscription oauth token is captured into the DB row at CONNECT time, but the
+// `claude` CLI refreshes the REAL token continuously in ~/.claude/.credentials.json /
+// the macOS Keychain. So the stored copy goes stale within hours → the native wire
+// sends an expired Bearer → Anthropic 401 → the chat SSE closes → the browser shows
+// "load failed" (while the Claude Code engine kept working because it delegates to
+// `claude`, which holds the live token). Verified by spike: a FRESH keychain token
+// streams fine through our own anthropic-wire — the wire was never the problem.
+//
+// Fix: for a subscription provider, prefer the LIVE token (keychain/disk), briefly
+// cached so we don't spawn `security` every turn, and fail-closed to the stored token
+// when `claude` isn't present/logged-in. Reading the token `claude` already refreshed
+// is NOT an OAuth refresh flow (V1 does none) — it's the "re-import from disk" seam.
+let _tokCache = { token: null, at: 0 };
+const TOKEN_TTL_MS = 60_000;
+let _reader = importFromClaudeCli;   // overridable so verify:* is deterministic (no live keychain)
+
+/** Read the live subscription token (cached TTL_MS). `read` overrides the default reader.
+ *  NOTE: the cache is checked BEFORE the reader, so a warm cache short-circuits an
+ *  explicitly-passed `read` — intended for prod (all call sites use the default reader);
+ *  tests that inject a reader call _resetTokenCacheForTests() between cases. */
+export async function freshClaudeSubscriptionToken(read = _reader, now = Date.now()) {
+  if (_tokCache.token && (now - _tokCache.at) < TOKEN_TTL_MS) return _tokCache.token;
+  try {
+    const creds = await read();
+    const t = (typeof creds?.claudeOAuthToken === 'string' && creds.claudeOAuthToken) ? creds.claudeOAuthToken : null;
+    if (t) { _tokCache = { token: t, at: now }; return t; }
+  } catch { /* no live token → caller keeps the stored one (fail-closed) */ }
+  return null;
+}
+
+/** If cfg is the user's Claude subscription, swap in the live token; else pass through. */
+export async function withFreshSubscriptionToken(cfg, read) {
+  if (!cfg || cfg.providerName !== 'claude_subscription') return cfg;
+  const fresh = await freshClaudeSubscriptionToken(read);
+  if (fresh) cfg.claudeOAuthToken = fresh;
+  return cfg;
+}
+
+/** Test seams — clear the cache / swap the live-token reader between cases. */
+export function _resetTokenCacheForTests() { _tokCache = { token: null, at: 0 }; }
+export function _setSubscriptionTokenReaderForTests(fn) { _reader = fn || importFromClaudeCli; _resetTokenCacheForTests(); }
 
 function parseCredentials(credentials) {
   if (typeof credentials !== 'string' || credentials.length === 0) return null;
@@ -50,7 +94,11 @@ function mapRowToConfig(row) {
   // headers + the "You are Claude Code" preamble (anthropicAuthFromCfg keys on this
   // field). US jurisdiction like any Anthropic provider. See docs/CLAUDE-SUBSCRIPTION-
   // DRIVER-DESIGN-2026-06-26.md (Phase S).
-  const token = (typeof creds?.claudeOAuthToken === 'string' && creds.claudeOAuthToken) ? creds.claudeOAuthToken : null;
+  // Prefer the current key; fall back to older shapes an earlier build may have stored
+  // (raw `accessToken`, or the nested `claudeAiOauth.accessToken` from ~/.claude/.credentials.json)
+  // so a subscription connected on an old build still resolves instead of failing to null.
+  const tokenStr = (v) => (typeof v === 'string' && v ? v : null);
+  const token = tokenStr(creds?.claudeOAuthToken) || tokenStr(creds?.accessToken) || tokenStr(creds?.claudeAiOauth?.accessToken);
   if (token && !baseUrl && (authType === 'oauth' || provider === 'claude_subscription' || provider === 'anthropic' || provider === 'claude')) {
     return { claudeOAuthToken: token, anthropicApiKey: '', openaiApiKey: '', cloudModel: model, jurisdiction: jurisdictionForBaseUrl(undefined, 'anthropic'), label: label || 'Claude (subscription)', providerName: 'claude_subscription' };
   }
@@ -70,7 +118,7 @@ export async function resolveInferenceConfig(db, userId) {
     const active = await db?.providers?.getActive?.(userId); // most-recently-used active row, or null
     if (active) {
       const cfg = mapRowToConfig(active);
-      if (cfg) { await applySensitiveExempt(db, userId, cfg); return cfg; }
+      if (cfg) { await applySensitiveExempt(db, userId, cfg); return withFreshSubscriptionToken(cfg); }
     }
   } catch { /* fail-soft: fall back to env/local */ }
   return {}; // router reads env (ANTHROPIC_API_KEY / OPENAI_API_KEY) when unset
@@ -138,7 +186,7 @@ export async function resolveInferenceConfigForTask(db, userId, task) {
       if (row) {
         if (a.model) row = { ...row, model_preference: a.model }; // per-task model override
         const cfg = mapRowToConfig(row);
-        if (cfg) return cfg;
+        if (cfg) return withFreshSubscriptionToken(cfg);
       }
     }
   } catch { /* fail-soft → active provider */ }
@@ -179,7 +227,7 @@ export async function resolveProviderChain(db, userId, { sensitive = false } = {
         if (allowSubSensitive && cfg.providerName === 'claude_subscription') cfg.sensitiveUsExempt = true;
         else continue;
       }
-      cloud.push(cfg);
+      cloud.push(await withFreshSubscriptionToken(cfg));
     }
     cloud.sort((a, b) => JURISDICTION_RANK(a.jurisdiction) - JURISDICTION_RANK(b.jurisdiction));
   } catch { /* fail-soft */ }

@@ -590,9 +590,8 @@
 	<div class="inner">
 		{#if !active}
 			<!-- ── OVERVIEW ─────────────────────────────────────────────────── -->
-			<header class="hero">
-				<h1 class="title">A lens into your mind</h1>
-				<p class="hero-sub">How you think, what moves you, and the minds you're kin to — measured from your own words.</p>
+			<header class="page-head">
+				<h1 class="page-title">A lens into your mind</h1>
 			</header>
 
 			{#if loading}
@@ -1377,12 +1376,14 @@
 	.b1 { top: -24vmax; left: -16vmax; background: radial-gradient(circle, rgb(var(--color-accent-rgb) / 0.11), transparent 62%); animation: drift1 38s ease-in-out infinite; }
 	.b2 { bottom: -28vmax; right: -18vmax; background: radial-gradient(circle, rgb(var(--color-accent-amethyst-rgb) / 0.11), transparent 62%); animation: drift2 46s ease-in-out infinite; }
 
-	.inner { position: relative; z-index: 1; max-width: 64rem; margin: 0 auto; padding: clamp(2rem, 5vh, 3.5rem) clamp(1.1rem, 4vw, 2.5rem) 4rem; }
+	/* Tighter top padding — the dynamic summary band, not a static hero, leads. */
+	.inner { position: relative; z-index: 1; max-width: 64rem; margin: 0 auto; padding: clamp(1.2rem, 3vh, 2rem) clamp(1.1rem, 4vw, 2.5rem) 4rem; }
 
-	.hero { text-align: center; max-width: 40rem; margin: 0 auto clamp(1.6rem, 3vh, 2.4rem); }
-	/* Minimal + elegant: one colour, no gradient — lets the data carry the page. */
-	.title { font-size: clamp(1.9rem, 4.5vw, 3rem); line-height: 1.06; letter-spacing: -0.025em; font-weight: 600; color: var(--color-text-emphasis); }
-	.hero-sub { margin: 0.65rem 0 0; font-size: clamp(0.95rem, 1.5vw, 1.1rem); line-height: 1.55; color: var(--color-text-secondary); }
+	/* Header is now a quiet, functional page label (matches the .group-head section
+	   heads) instead of a big centred hero + always-on subtitle — the live summary
+	   below carries the immediate value. */
+	.page-head { margin: 0 0 0.9rem; }
+	.page-title { font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--color-text-secondary); margin: 0; }
 
 	/* ── Layer 1: summary band + glance ── */
 	.summary-band { border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: linear-gradient(150deg, rgb(var(--color-accent-rgb) / 0.08), var(--color-surface) 70%); padding: clamp(1rem, 2.5vw, 1.5rem) clamp(1.1rem, 3vw, 1.7rem); margin-bottom: 1rem; }

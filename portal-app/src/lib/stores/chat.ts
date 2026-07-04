@@ -44,6 +44,13 @@ function genConversationId(): string {
 // the one-click "Recover N earlier messages" affordance; 0 hides it.
 export const recoverableCount = writable<number>(0);
 
+// ── Channel inbox (#24) — the user's Telegram/Discord conversations, surfaced in the
+// portal chat READ-ONLY. `channelView` non-null = currently viewing a channel thread
+// (input disabled; replies happen on the channel, not from here — egress §11).
+export interface ChannelConversation { conversationId: string; source: string; lastAt: number | null; count: number; }
+export const channelConversations = writable<ChannelConversation[]>([]);
+export const channelView = writable<{ conversationId: string; source: string } | null>(null);
+
 function createChatStore() {
 	const { subscribe, set, update } = writable<ChatMessage[]>([]);
 	let hasLoaded = false;
@@ -117,6 +124,33 @@ function createChatStore() {
 				return 0;
 			}
 		},
+
+		// ── Channel inbox (#24) ──────────────────────────────────────────────
+		// Fetch the user's channel conversations (Telegram/Discord threads) for the inbox.
+		loadChannelConversations: async (): Promise<void> => {
+			if (!browser) return;
+			try {
+				const r = await api('/portal/chat/conversations');
+				if (!r.ok) return;
+				const d = await r.json();
+				channelConversations.set(Array.isArray(d.conversations) ? d.conversations : []);
+			} catch { /* ignore */ }
+		},
+		// Open a channel thread READ-ONLY (its messages replace the view; input disabled).
+		openChannel: async (convId: string, source: string): Promise<void> => {
+			if (!browser) return;
+			try {
+				const p = new URLSearchParams({ limit: '100', channel: '1', conversationId: convId });
+				const r = await api(`/portal/chat/history?${p}`);
+				if (!r.ok) return;
+				const d = await r.json();
+				set(d.messages || []);
+				hasLoaded = false;           // so returning to chat reloads the real thread
+				channelView.set({ conversationId: convId, source });
+			} catch { /* ignore */ }
+		},
+		// Leave the channel view; the caller reloads the normal chat thread.
+		exitChannel: () => { channelView.set(null); set([]); hasLoaded = false; },
 
 		get hasLoaded() { return hasLoaded; },
 	};

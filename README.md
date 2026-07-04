@@ -10,7 +10,6 @@
   <a href="docs/guide/"><strong>Docs</strong></a> ·
   <a href="docs/guide/handbook/">Handbook</a> ·
   <a href="docs/guide/reference/">Reference</a> ·
-  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
   <a href="https://mycelium.id">Website</a>
 </p>
 
@@ -102,7 +101,7 @@ A healthy forest needs a free and open mycelial network connecting its trees. If
 
 **Verification:** `npm install --legacy-peer-deps && npm run verify` runs the full suite (every `verify:*` gate prints `VERDICT: GO`). For a fast sanity check use `npm run verify:core` (boot · crypto · MCP tools · portal · search). A real MCP client completes OAuth and lists the live tools over HTTPS; messages and file uploads round-trip through the encrypting vault.
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the as-built system and [`docs/SETUP.md`](docs/SETUP.md) to run it.
+See [`docs/HOW-IT-WORKS.md`](docs/HOW-IT-WORKS.md) for how the system works end to end and [`docs/SETUP.md`](docs/SETUP.md) to run it.
 
 ## Install
 

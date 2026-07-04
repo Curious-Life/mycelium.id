@@ -252,6 +252,38 @@ export function createHarnessNamespace({ d1Query, d1QueryAdmin, randomUUID, now 
       );
       return rows(r);
     },
+
+    // ── claude_sessions: ONE Claude Code CLI session per conversation ───────────────
+    // Content-free operational state (opaque UUID handle) → d1QueryAdmin (no encryption),
+    // like harness_runs. Lets the `claude` engine `--resume` the same session each turn.
+    /** The stored claude session id for a conversation, or null. */
+    async getClaudeSessionId(userId, conversationId) {
+      if (!userId || !conversationId) return null;
+      const r = await d1QueryAdmin(
+        `SELECT session_id FROM claude_sessions WHERE user_id = ? AND conversation_id = ?`,
+        [userId, conversationId],
+      ).catch(() => null);
+      const rr = Array.isArray(r) ? r : r?.results;
+      return rr?.[0]?.session_id || null;
+    },
+    /** Persist (create/replace) the claude session id for a conversation. */
+    async setClaudeSessionId(userId, conversationId, sessionId) {
+      if (!userId || !conversationId || !sessionId) return;
+      await d1QueryAdmin(
+        `INSERT INTO claude_sessions (user_id, conversation_id, session_id, created_at)
+         VALUES (?, ?, ?, datetime('now'))
+         ON CONFLICT(user_id, conversation_id) DO UPDATE SET session_id = excluded.session_id, created_at = datetime('now')`,
+        [userId, conversationId, sessionId],
+      ).catch(() => {});
+    },
+    /** Forget a conversation's claude session (self-heal after a failed --resume). */
+    async clearClaudeSessionId(userId, conversationId) {
+      if (!userId || !conversationId) return;
+      await d1QueryAdmin(
+        `DELETE FROM claude_sessions WHERE user_id = ? AND conversation_id = ?`,
+        [userId, conversationId],
+      ).catch(() => {});
+    },
   };
 }
 

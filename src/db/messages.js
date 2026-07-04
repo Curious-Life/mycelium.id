@@ -525,6 +525,32 @@ export function createMessagesNamespace(deps) {
     },
 
     /**
+     * HARD-delete a batch of messages by id (user-scoped) + their derived
+     * clustering_points, in ONE transaction. Unlike redact() (which leaves an
+     * immutable tombstone), this fully removes the rows — the primitive behind
+     * bulk delete-by-source / by-type and V2 right-to-erasure. Callers chunk the
+     * id list (≤500) and MUST have resolved ids from a user_id+source/type SELECT
+     * so the scope predicate can never widen. Search-sidecar eviction (noteDelete)
+     * + blob unlink are the CALLER's responsibility (see src/core/bulk-delete.js).
+     *
+     * @param {string[]} ids
+     * @param {string} userId
+     * @returns {Promise<{deleted:number}>}
+     */
+    async deleteIds(ids, userId) {
+      const list = Array.isArray(ids) ? ids.filter((id) => typeof id === 'string' && id) : [];
+      if (!userId) throw new Error('messages.deleteIds: userId required (fail-closed, never table-wide)');
+      if (!list.length) return { deleted: 0 };
+      const ph = list.map(() => '?').join(',');
+      await d1Batch([
+        { sql: `DELETE FROM clustering_points WHERE user_id = ? AND source_type = 'message' AND source_id IN (${ph})`, params: [userId, ...list] },
+        { sql: `DELETE FROM messages WHERE user_id = ? AND id IN (${ph})`, params: [userId, ...list] },
+      ]);
+      bustMindscapePoints(userId);
+      return { deleted: list.length };
+    },
+
+    /**
      * Set user-asserted salience flags on a message. Forgotten rows are
      * immutable (excluded by the WHERE). RETURNING detects a live match.
      *
@@ -685,6 +711,28 @@ export function createMessagesNamespace(deps) {
     },
 
     /**
+     * List conversations (one row per conversation_id+source) with last activity + count,
+     * newest-first. Optionally filtered to `sources` (e.g. the channel sources, to surface
+     * Telegram/Discord threads in the portal inbox). SELECTs only PLAINTEXT provenance
+     * columns (no content) → a plain grouped scan, no per-row decrypt. User-scoped.
+     * @param {string} userId
+     * @param {{ sources?: string[], limit?: number }} [opts]
+     * @returns {Promise<Array<{conversation_id, source, last_at, n}>>}
+     */
+    async listConversations(userId, { sources, limit = 50 } = {}) {
+      const srcs = Array.isArray(sources) && sources.length ? sources.slice(0, 20) : null;
+      let sql = `SELECT conversation_id, source, MAX(created_at) AS last_at, COUNT(*) AS n
+                 FROM messages
+                 WHERE user_id = ? AND conversation_id IS NOT NULL AND forgotten_at IS NULL`;
+      const params = [userId];
+      if (srcs) { sql += ` AND source IN (${srcs.map(() => '?').join(', ')})`; params.push(...srcs); }
+      sql += ` GROUP BY conversation_id, source ORDER BY last_at DESC LIMIT ?`;
+      params.push(clampLimit(limit, 50, 200));
+      const result = await d1Query(sql, params);
+      return result.results || [];
+    },
+
+    /**
      * Cursor-paginated forward iteration for mind-search rehydrate.
      *
      * Returns one batch at a time, ordered by id ASC so a stable cursor
@@ -818,7 +866,7 @@ export function createMessagesNamespace(deps) {
       // river open (a hot path), AND keeps triage decisions / dedupe nonces /
       // delivery state strictly behind the read path (assemble still destructures
       // `metadata` out defensively in case a future projection re-adds it).
-      let sql = `SELECT id, role, content, source, agent_id, created_at, message_type, attachment_id FROM messages WHERE user_id = ? AND forgotten_at IS NULL`;
+      let sql = `SELECT id, role, content, source, agent_id, created_at, message_type, attachment_id, model FROM messages WHERE user_id = ? AND forgotten_at IS NULL`;
       const params = [userId];
       if (before) { sql += ` AND created_at < ?`; params.push(before); }
       // `since` is the unified-river time-scope floor (Today/7d/All) — pushed into

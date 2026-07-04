@@ -39,6 +39,12 @@ So updating, reinstalling, or even deleting and re-downloading the Mycelium app
 **never touches your data or your key**. The app is just a window onto a vault that
 lives independently.
 
+Updates arrive on their own: the app quietly checks for a new version on launch and,
+if one is available, offers a native **Update & Restart** prompt. It only installs a
+build whose signature verifies against a key baked into the app, then reopens on the
+same vault — so you're never asked to set up again. If you'd rather not, choose
+**Later**; if the check can't reach the network it simply keeps the version you have.
+
 ## Recovering on a new (or wiped) machine
 
 There are two distinct situations, and they need different things:

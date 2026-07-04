@@ -77,6 +77,9 @@
 			{#if msg.attachment}
 				<span class="text-[0.6rem] text-[var(--color-text-tertiary)] uppercase tracking-wider">{msg.attachment.type}</span>
 			{/if}
+			{#if msg.role === 'assistant' && msg.model}
+				<span class="text-[0.65rem] text-[var(--color-text-tertiary)]" title="Model that produced this reply">·&nbsp;{msg.model}</span>
+			{/if}
 		</header>
 
 		{#if reply.replyToName || reply.quote}

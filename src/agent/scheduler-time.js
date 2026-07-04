@@ -34,6 +34,41 @@ export function parseSchedule(dsl) {
   return null;
 }
 
+// ── human-readable rendering of a schedule / next-run (for the briefing + UI) ──
+// No formatter existed in the repo; both the getContext cycles section and the
+// Reflection dashboard reuse these so the wording stays consistent.
+
+const DOW_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const ORDINAL = (n) => { const s = ['th', 'st', 'nd', 'rd']; const v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); };
+const clock = (h) => { const hr = ((h % 24) + 24) % 24; const am = hr < 12; const h12 = hr % 12 === 0 ? 12 : hr % 12; return `${h12}${am ? 'am' : 'pm'}`; };
+
+/** Render a schedule DSL as natural text, e.g. "daily:8" → "every day at 8am". Falls back to the raw DSL. */
+export function humanSchedule(dsl) {
+  const p = typeof dsl === 'string' ? parseSchedule(dsl) : dsl;
+  if (!p) return typeof dsl === 'string' ? dsl : 'unknown';
+  switch (p.type) {
+    case 'daily': return `every day at ${clock(p.hour)}`;
+    case 'weekly': return `${DOW_NAMES[p.dow]}s at ${clock(p.hour)}`;
+    case 'monthly': return `on the ${ORDINAL(p.dom)} of each month at ${clock(p.hour)}`;
+    case 'every': return p.hours === 1 ? 'every hour' : `every ${p.hours} hours`;
+    case 'interval': return `every ${p.minutes} minutes`;
+    case 'once': return 'once';
+    case 'cron': return `cron (${p.expr})`;
+    default: return typeof dsl === 'string' ? dsl : 'unknown';
+  }
+}
+
+/** Render an ISO next-run instant in the given tz, e.g. "Mon 8:00am". Empty string when absent/invalid. */
+export function humanNextRun(iso, tz = null) {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const d = new Date(t);
+  try {
+    return new Intl.DateTimeFormat('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: tz || 'UTC' }).format(d);
+  } catch { return new Intl.DateTimeFormat('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'UTC' }).format(d); }
+}
+
 // ── IANA timezone helpers (no deps) ──────────────────────────────────────────
 // Wall-clock parts of an instant in a zone, and the inverse: the UTC instant for a
 // given wall-clock in a zone (double-refined so DST transitions land correctly).

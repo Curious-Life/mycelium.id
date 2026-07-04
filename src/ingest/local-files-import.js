@@ -23,7 +23,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { captureMessage } from './capture.js';
 import { saveDocument } from '../core/document-store.js';
-import { putBlob } from './blob-store.js';
+import { putBlob, isUserNamespacedBlobPath } from './blob-store.js';
 import { recordContentFlow } from '../inference/usage.js';
 import { categoryOf, extOf, isManagedPackageDir, TEXT_DOC_EXTS, EXT_MIME } from './file-categories.js';
 
@@ -72,8 +72,10 @@ async function walkFiles(root, wanted, { maxFiles = MAX_FILES, maxDepth = MAX_DE
  * @param {string} opts.folderPath            already realpath-confined by the route
  * @param {string[]} [opts.categories]        which to import (default all four)
  * @param {(id:string)=>void} [opts.enqueueEnrichment]
+ * @param {(p:object)=>void} [opts.onProgress]  called periodically with running counts
+ * @param {() => boolean} [opts.shouldCancel]   polled per file; true → stop early (cooperative)
  */
-export async function importLocalFiles(db, { userId, folderPath, categories, enqueueEnrichment } = {}) {
+export async function importLocalFiles(db, { userId, folderPath, categories, enqueueEnrichment, onProgress, shouldCancel } = {}) {
   if (!db?.messages || !db?.documents) throw new TypeError('importLocalFiles: db.messages + db.documents required');
   if (typeof userId !== 'string' || !userId) throw new Error('importLocalFiles: userId required');
   if (typeof folderPath !== 'string' || !folderPath) throw new Error('importLocalFiles: folderPath required');
@@ -102,11 +104,30 @@ export async function importLocalFiles(db, { userId, folderPath, categories, enq
   summary.scanned = files.length;
   const textContents = [];
 
+  // Progress reporting (async-job UI): emit running counts every few files so the
+  // caller can surface "N of M" + let the user cancel. Best-effort — a throwing
+  // onProgress never breaks the import.
+  let processed = 0;
+  const emit = () => {
+    try {
+      onProgress?.({
+        total: files.length, processed,
+        imported: summary.documents.created + summary.attachments.imported,
+        deduped: summary.documents.deduped + summary.attachments.deduped,
+        skipped: summary.skipped.oversize + summary.skipped.unreadable + summary.skipped.unsafe,
+        failed: summary.failed,
+      });
+    } catch { /* never let progress reporting break the import */ }
+  };
+  emit(); // initial (total known, 0 processed)
+
   // Preload existing attachment ids + byte-hashes so a re-sweep dedups rows AND
   // shares one encrypted blob for identical bytes (same convention as obsidian).
   // V2 NOTE (multi-tenant): this SELECT spans the whole attachments table — correct
-  // for single-user V1 (one user), but when RLS/multi-user lands it MUST add
-  // `WHERE user_id = ?` or it would cross-read another tenant's blob paths.
+  // for single-user V1 (one user), but when RLS/multi-user lands it SHOULD add
+  // `WHERE user_id = ?`. Until then the reuse below is guarded by
+  // isUserNamespacedBlobPath (a foreign-prefixed reuse is never adopted — a fresh
+  // owned blob is written instead), so a cross-tenant path can't leak into a row.
   const existingAttIds = new Set();
   const blobByHash = new Map();
   try {
@@ -118,6 +139,10 @@ export async function importLocalFiles(db, { userId, folderPath, categories, enq
   } catch { /* no preload → still correct, just no cross-sweep byte-dedup */ }
 
   for (const f of files) {
+    // Cooperative cancellation: checked per file so a huge sweep can be stopped.
+    if (shouldCancel?.()) { summary.cancelled = true; break; }
+    processed++;
+    if (processed % 25 === 0) emit();
     // Reject any traversal segment before it ever touches a path/document write.
     const segs = f.relPath.split(path.sep);
     if (!f.relPath || segs.some((s) => s === '' || s === '.' || s === '..')) { summary.skipped.unsafe += 1; continue; }
@@ -156,7 +181,9 @@ export async function importLocalFiles(db, { userId, folderPath, categories, enq
       if (existingAttIds.has(attId)) { summary.attachments.deduped += 1; continue; }
       const bytes = await fs.readFile(f.abs);
       const hash = sha256(bytes);
-      let localPath = blobByHash.get(hash) || null;
+      // Reuse a byte-identical blob only if its path is namespaced under THIS user.
+      const reuse = blobByHash.get(hash);
+      let localPath = reuse && isUserNamespacedBlobPath(reuse, userId) ? reuse : null;
       if (localPath) summary.attachments.blobsReused += 1;
       else { const { path: stored } = await putBlob(bytes, { userId, ext: ext ? `.${ext}` : '' }); localPath = stored; blobByHash.set(hash, stored); }
       await db.attachments.insert({
@@ -180,6 +207,7 @@ export async function importLocalFiles(db, { userId, folderPath, categories, enq
     }
   }
 
+  emit(); // final counts
   if (textContents.length) recordContentFlow(db, userId, { source: 'ingest', area: 'import', content: textContents });
   return summary;
 }

@@ -15,6 +15,41 @@ import { saveDocument as realSaveDocument } from '../core/document-store.js';
 const MAX_PROMPT = 12000;
 const MAX_PERSONA = 20000;
 
+/**
+ * Build a validated scheduled_tasks patch from a cycle-edit request. Shared by the
+ * updateCycle MCP tool and the portal PATCH route so validation never diverges.
+ * @param {{prompt?:string, schedule?:string, enabled?:boolean}} args
+ * @param {object} task  the target scheduled_tasks row (needs .tz, .schedule)
+ * @param {() => Date} now
+ * @returns {{patch:object}|{error:string}}
+ */
+export function buildCyclePatch(args = {}, task, now = () => new Date()) {
+  const patch = {};
+  if (typeof args.prompt === 'string' && args.prompt.trim()) {
+    if (args.prompt.length > MAX_PROMPT) return { error: `instructions too long (${args.prompt.length} > ${MAX_PROMPT}).` };
+    patch.prompt = args.prompt.trim();
+  }
+  if (typeof args.schedule === 'string' && args.schedule.trim()) {
+    const parsed = parseSchedule(args.schedule.trim());
+    if (!parsed) return { error: `unrecognised schedule "${args.schedule}". Use daily:HH | weekly:DOW:HH | every:Nh | interval:Nm.` };
+    let nextRun = null;
+    try { nextRun = computeNextRun(parsed, { after: now(), tz: task.tz || null }); } catch { nextRun = null; }
+    if (!nextRun) return { error: 'that schedule has no future run.' };
+    patch.schedule = args.schedule.trim();
+    patch.next_run = nextRun;
+  }
+  if (args.enabled === false) patch.status = 'paused';
+  if (args.enabled === true) {
+    patch.status = 'active';
+    // re-arm next_run on re-enable so a paused cycle resumes cleanly. Only assign when
+    // a real next run exists — never null it (dueTasks needs next_run IS NOT NULL, so a
+    // null here would leave the cycle active-but-dead); keep the existing next_run instead.
+    const parsed = parseSchedule(patch.schedule || task.schedule);
+    if (parsed) { try { const nr = computeNextRun(parsed, { after: now(), tz: task.tz || null }); if (nr) patch.next_run = nr; } catch { /* keep existing */ } }
+  }
+  return { patch };
+}
+
 export function createCyclesDomain({ db, userId, saveDocument = realSaveDocument, now = () => new Date() } = {}) {
   if (!db?.harness) throw new TypeError('createCyclesDomain: db.harness required');
 
@@ -90,27 +125,9 @@ export function createCyclesDomain({ db, userId, saveDocument = realSaveDocument
       const task = await findTask(def);
       if (!task) return `Error: cycle "${def.name}" is not set up. Enabling reflection seeds the cycles.`;
 
-      const patch = {};
-      if (typeof args.prompt === 'string' && args.prompt.trim()) {
-        if (args.prompt.length > MAX_PROMPT) return `Error: instructions too long (${args.prompt.length} > ${MAX_PROMPT}).`;
-        patch.prompt = args.prompt.trim();
-      }
-      if (typeof args.schedule === 'string' && args.schedule.trim()) {
-        const parsed = parseSchedule(args.schedule.trim());
-        if (!parsed) return `Error: unrecognised schedule "${args.schedule}". Use daily:HH | weekly:DOW:HH | every:Nh | interval:Nm.`;
-        let nextRun = null;
-        try { nextRun = computeNextRun(parsed, { after: now(), tz: task.tz || null }); } catch { nextRun = null; }
-        if (!nextRun) return 'Error: that schedule has no future run.';
-        patch.schedule = args.schedule.trim();
-        patch.next_run = nextRun;
-      }
-      if (args.enabled === false) patch.status = 'paused';
-      if (args.enabled === true) {
-        patch.status = 'active';
-        // re-arm next_run on re-enable so a paused cycle resumes cleanly
-        const parsed = parseSchedule(patch.schedule || task.schedule);
-        if (parsed) { try { patch.next_run = computeNextRun(parsed, { after: now(), tz: task.tz || null }); } catch { /* keep existing */ } }
-      }
+      const built = buildCyclePatch(args, task, now);
+      if (built.error) return `Error: ${built.error}`;
+      const patch = built.patch;
       if (!Object.keys(patch).length) return 'Nothing to update — pass prompt, schedule, and/or enabled.';
 
       try { await db.harness.updateTask(userId, task.id, patch); }

@@ -10,6 +10,8 @@
 
 const DEFAULT_OLLAMA_URL = 'http://127.0.0.1:11434';
 
+import { recordPulledModel } from './ollama-manifest.js';
+
 // Ollama tags look like `family:tag`, `ns/family:tag`, with dots/dashes/underscores.
 const MODEL_NAME_RE = /^[a-z0-9][a-z0-9._:/-]{0,79}$/i;
 
@@ -75,10 +77,32 @@ export function createOllamaClient({ baseUrl = DEFAULT_OLLAMA_URL, fetch = globa
         if (typeof onProgress === 'function') onProgress(ev);
       }
     }
+    // Track the tag so destroy-vault can remove it from a SHARED daemon later
+    // (best-effort; a record failure never breaks the pull). See ollama-manifest.js.
+    try { await recordPulledModel(name); } catch { /* best-effort */ }
     return true;
   }
 
-  return { baseUrl: base, isUp, listInstalled, pullModel };
+  /**
+   * Delete a model from disk via Ollama's HTTP API (never shells out to `ollama rm`).
+   * The name is charset-validated first (defence in depth — a name must only ever name a
+   * model). Sends both `model` (current) and `name` (legacy) keys for version tolerance.
+   * @param {string} name
+   * @returns {Promise<{ ok:boolean, notFound?:boolean, status?:number }>}
+   */
+  async function deleteModel(name) {
+    if (!isValidModelName(name)) throw new Error('invalid model name');
+    const r = await fetch(`${base}/api/delete`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: name, name }),
+      signal: signal(),
+    });
+    if (r.status === 404) return { ok: false, notFound: true, status: 404 };
+    return { ok: r.ok, status: r.status };
+  }
+
+  return { baseUrl: base, isUp, listInstalled, pullModel, deleteModel };
 }
 
 export default createOllamaClient;

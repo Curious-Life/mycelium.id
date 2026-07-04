@@ -140,6 +140,20 @@ await client.callTool({ name: 'captureMessage', arguments: {
     `attachment_id=${raw?.attachment_id} metaPlain=${!isEncrypted(raw?.metadata)}`);
 }
 
+// I11 — model-in-history: captureMessage records WHICH model produced an assistant
+// message (plaintext provenance) + ignores it on a user row (model is meaningless there).
+{
+  const asstId = `MODEL-A-${Date.now()}`;
+  const userId2 = `MODEL-U-${Date.now()}`;
+  await client.callTool({ name: 'captureMessage', arguments: { content: 'assistant reply body', id: asstId, role: 'assistant', model: 'claude-opus-4-8' } });
+  await client.callTool({ name: 'captureMessage', arguments: { content: 'user question body', id: userId2, role: 'user', model: 'claude-opus-4-8' } });
+  const selA = await db.rawQuery('SELECT model FROM messages WHERE id = ?', [asstId]);
+  const selU = await db.rawQuery('SELECT model FROM messages WHERE id = ?', [userId2]);
+  const mA = selA?.results?.[0]?.model ?? selA?.[0]?.model ?? null;
+  const mU = selU?.results?.[0]?.model ?? selU?.[0]?.model ?? null;
+  rec('I11. model recorded on assistant row, ignored on user row', mA === 'claude-opus-4-8' && mU == null, `assistant=${mA} user=${mU}`);
+}
+
 await client.close();
 close();
 

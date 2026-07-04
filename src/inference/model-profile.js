@@ -49,7 +49,15 @@ const LOOPBACK_RE = /(?:\/\/)?(?:127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])/;
 
 /** Decide local vs cloud + the effective model id from a resolveInferenceConfig() cfg. */
 function shapeOf(cfg = {}, defaultModel) {
-  if (cfg.anthropicApiKey) {
+  // Anthropic cloud — either a native API key OR a Claude *subscription* (oauth token).
+  // The subscription cfg carries `claudeOAuthToken` with anthropicApiKey==='' (resolve.js
+  // mapRowToConfig), so it MUST be recognized here too — otherwise it falls through to the
+  // local floor below, which sets capabilities.tools=false and caps the window at 8192.
+  // That silently stripped ALL tools from subscription-powered CHANNEL turns (run-turn.js
+  // gates tools on profile.capabilities.tools), so the agent could never call `reply` and
+  // Telegram/Discord got no answer while the portal (which only needs to speak, not act)
+  // looked fine.
+  if (cfg.anthropicApiKey || cfg.claudeOAuthToken) {
     return { isLocal: false, model: cfg.cloudModel || defaultModel || 'claude-sonnet-4-6' };
   }
   const isLocal = cfg.jurisdiction === 'local' || (!!cfg.baseUrl && LOOPBACK_RE.test(cfg.baseUrl));

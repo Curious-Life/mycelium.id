@@ -138,15 +138,15 @@ rec('G10a. empty messages → 400 invalid_request_error', r.status === 400 && r.
 r = await J(await post('/v1/chat/completions', { messages: 'nope' }));
 rec('G10b. messages not an array → 400', r.status === 400, JSON.stringify(r.body));
 
-// G11 — cascade toggle: a saved user setting is DB-first; env is only the fallback; default off.
+// G11 — cascade is ENV-ONLY (the Settings "smart routing" toggle was removed 2026-07-02).
+// A stale settings.inferCascade must be IGNORED so a previously-ON user is never stuck ON;
+// only MYCELIUM_INFER_CASCADE gates it; default off.
 try { await db.users.create(U, 'Verify'); } catch { /* row may already exist */ }
-await db.users.updateSettings(U, { inferCascade: true });
-const ccDbOn = await isCascadeEnabled(db, U, {});
-await db.users.updateSettings(U, { inferCascade: false });
-const ccDbOff = await isCascadeEnabled(db, U, { MYCELIUM_INFER_CASCADE: '1' }); // saved false beats env
-const ccEnv = await isCascadeEnabled({}, U, { MYCELIUM_INFER_CASCADE: '1' });    // no db → env fallback
-const ccDefault = await isCascadeEnabled({}, U, {});                             // nothing set → off
-rec('G11. cascade toggle: DB-first + env fallback + default off', ccDbOn === true && ccDbOff === false && ccEnv === true && ccDefault === false, `dbOn=${ccDbOn} dbOff=${ccDbOff} env=${ccEnv} default=${ccDefault}`);
+await db.users.updateSettings(U, { inferCascade: true });                        // stale DB "on"…
+const ccStaleIgnored = await isCascadeEnabled(db, U, {});                        // …ignored, no env → OFF
+const ccEnvOn = await isCascadeEnabled(db, U, { MYCELIUM_INFER_CASCADE: '1' });  // env on → ON (DB has no say)
+const ccDefault = await isCascadeEnabled(db, U, {});                             // nothing set → off
+rec('G11. cascade is env-only (stale DB inferCascade ignored · env opt-in · default off)', ccStaleIgnored === false && ccEnvOn === true && ccDefault === false, `staleIgnored=${ccStaleIgnored} envOn=${ccEnvOn} default=${ccDefault}`);
 
 // G12 — truncation at the provider output cap → finish_reason 'length' (NOT a
 // false 'stop'), so an external harness can detect a cut-off (e.g. truncated

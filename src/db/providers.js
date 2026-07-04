@@ -60,6 +60,15 @@ export function createProvidersNamespace(deps) {
     },
 
     async remove(id, userId) {
+      // ai_provider_assignments.provider_id is a NOT-NULL FK → ai_providers(id) with no
+      // ON DELETE, and foreign_keys=ON — so an active/used provider (which has assignment
+      // rows) could NOT be deleted: the DELETE threw an FK violation that callers swallowed
+      // (disconnect "did nothing"; the subscription import's "replace" left duplicate rows).
+      // Clear the assignments first, then delete. Both scoped to the owner.
+      await d1Query(
+        `DELETE FROM ai_provider_assignments WHERE provider_id = ? AND user_id = ?`,
+        [id, userId],
+      );
       await d1Query(
         `DELETE FROM ai_providers WHERE id = ? AND user_id = ?`,
         [id, userId],

@@ -148,8 +148,41 @@ copy your data dir) first, then paste the key.
 **Accessing a vault served on another machine** (e.g. an always-on Mac or a future
 managed host) is a *different* capability — the client talks to a remote Mycelium
 *server* over the relay (a ciphertext passthrough), with the key resident only on
-the serving machine. See
-`VAULT-BACKUP-AND-REMOTE-ACCESS-DESIGN-2026-06-08.md` §8.
+the serving machine.
+
+## Delete data & reset your vault
+
+Everything below lives in **Settings → Data**, is served to localhost only, and is
+**irreversible** — there is no trash and no cloud copy. Deletes run as a background
+job you can watch and cancel; already-deleted rows stay deleted if you cancel.
+
+- **Undo an import** (delete by source). Each import you ran (Claude, ChatGPT,
+  Obsidian, …) shows up as a card with its item count. Deleting one removes just the
+  data that import brought in. To confirm you type the exact source name.
+- **Delete by type.** Bulk-remove a whole category — **All documents**, **All media
+  & attachments**, or **All chat history**. Unlike undoing an import, this also
+  removes data *you* created (documents you wrote, your own chat messages), so it is
+  guarded the same way: you type the exact category name to confirm.
+- **Destroy vault (factory reset).** The strongest action in the app: it wipes your
+  entire vault **and your keys**. Because the keys go too, there is **no undo and no
+  recovery afterward** — a saved recovery key or backup file cannot bring a destroyed
+  vault back. It is deliberately hard to trigger: you must both **paste your recovery
+  key** *and* type the phrase **`destroy my vault`**. A stolen or replayed login
+  session alone can never do it — the recovery key is required and verified
+  (constant-time) against your live master key. When it completes, the app relaunches
+  to the first-run onboarding, as if freshly installed.
+
+## How updates install
+
+New versions ship as a signed release. When the app starts it quietly checks for an
+update (at most once every few hours, never in the Dev build); if one is available it
+shows a native **Update & Restart / Later** prompt. Choosing to update downloads the
+new version, **verifies its cryptographic signature** against a key baked into the
+app (an unsigned or tampered download is refused), swaps the app, and relaunches — on
+the **same vault**, so you are never asked to set up or re-onboard. Your data lives
+outside the app bundle (see *Where data is stored*), so an update never touches it.
+The check fails open: if the network or the release is unavailable, the app just runs
+the version you have.
 
 ## For maintainers
 
@@ -169,7 +202,7 @@ the serving machine. See
   archive build/validate/restore (jszip, STORE); `GET /backup` + `POST /restore-backup`
   in `src/account/router.js`. `scripts/verify-backup.mjs` (`npm run verify:backup`)
   proves the zero-knowledge archive, restore-lands-real-data, and the no-empty-vault
-  guard. Design: `VAULT-BACKUP-AND-REMOTE-ACCESS-DESIGN-2026-06-08.md`.
+  guard.
 
 **Existing two-independent-key vaults.** A vault created before this scheme keeps
 working (both keys remain in the Keychain). To converge it to the single-key

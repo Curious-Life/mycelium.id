@@ -11,7 +11,8 @@ export type DetectedAction =
 	| 'import-claude-code'
 	| 'import-hermes'
 	| 'import-openclaw'
-	| 'import-local-files';
+	| 'import-local-files'
+	| 'import-recent-export';
 
 export interface DetectedCategory {
 	key: 'document' | 'image' | 'audio' | 'video';
@@ -22,19 +23,24 @@ export interface DetectedCategory {
 }
 
 export interface DetectedSource {
-	source: 'obsidian' | 'claude-code' | 'hermes' | 'openclaw' | 'local-files';
+	source: 'obsidian' | 'claude-code' | 'hermes' | 'openclaw' | 'local-files' | 'recent-export';
 	found: boolean;
 	path: string;
 	count: number;
-	unit: string; // 'notes' | 'sessions' | 'messages' | 'files'
+	unit: string; // 'notes' | 'sessions' | 'messages' | 'files' | 'items'
 	importable: boolean;
 	action: DetectedAction;
 	dateRange?: [string | null, string | null]; // [earliest, latest] YYYY-MM-DD
 	vaults?: { path: string; name: string; count: number }[]; // obsidian
 	persona?: boolean; // hermes: a SOUL.md persona was found
-	notes?: number; // openclaw: workspace memory-doc count
+	notes?: string | number; // openclaw: workspace memory-doc count | recent-export: window note
 	categories?: DetectedCategory[]; // local-files: per-category counts
 }
+
+// Sources that run through the unified async job (POST /portal/import/run) with
+// live progress + cancel, rather than a one-shot blocking POST. Driven client-
+// side by startImportRun / pollImportRun / cancelImportRun below.
+export const ASYNC_RUN_SOURCES = new Set(['recent-export']);
 
 // Sources that import an agent's conversation history → support the
 // clean (conversation only) / full (every tool call too) mode toggle.
@@ -92,22 +98,66 @@ export async function importDetected(
 			detail: `${plural(d.imported ?? 0, 'message')}${sessions ? ` from ${plural(sessions, 'session')}` : ''}${docs ? ` · ${plural(docs, 'memory doc')}` : ''}` };
 	}
 
-	if (s.action === 'import-local-files') {
-		const d = await apiPost<{
-			scanned?: number; failed?: number;
-			documents?: { created?: number; deduped?: number };
-			attachments?: { imported?: number; deduped?: number };
-		}>('/portal/import/local-files', opts.categories?.length ? { categories: opts.categories } : {});
-		const docs = d.documents?.created ?? 0;
-		const files = d.attachments?.imported ?? 0;
-		const skipped = (d.documents?.deduped ?? 0) + (d.attachments?.deduped ?? 0);
-		return { imported: docs + files, skipped, failed: d.failed ?? 0,
-			detail: `${plural(docs, 'document')} · ${plural(files, 'file')}` };
-	}
+	// NOTE: 'import-local-files' is NOT handled here — the sweep can be 10k+ files
+	// (minutes of work), so it runs as an async BACKGROUND job with live progress.
+	// ScanForData drives it via startLocalSweep / pollLocalSweep / cancelLocalSweep
+	// below, not this one-shot await.
 
 	// import-folder → Obsidian (ObsidianSummary shape)
 	const d = await apiPost<{ documentsUpserted?: number; skipped?: number }>(
 		'/portal/import/obsidian', { folderPath: s.path });
 	const docs = d.documentsUpserted ?? 0;
 	return { imported: docs, skipped: d.skipped ?? 0, failed: 0, detail: `${plural(docs, 'note')}` };
+}
+
+// ── Broad local-files sweep — async background job (progress-polled) ───────────
+export type SweepStatus = 'idle' | 'running' | 'done' | 'cancelled' | 'error';
+export interface SweepProgress {
+	status: SweepStatus;
+	total: number;      // files discovered so far (grows as roots are walked)
+	processed: number;  // files looked at
+	imported: number;   // documents + attachments actually brought in
+	deduped: number;    // already-in-vault, skipped
+	skipped: number;    // oversize / unreadable / unsafe
+	failed: number;
+	truncated?: boolean;
+	error?: string;
+}
+const emptySweep: SweepProgress = { status: 'idle', total: 0, processed: 0, imported: 0, deduped: 0, skipped: 0, failed: 0 };
+const asSweep = (d: Partial<SweepProgress> | null | undefined): SweepProgress => ({ ...emptySweep, ...(d ?? {}) });
+
+/** Start (or re-attach to) the background sweep. Returns the initial progress. */
+export async function startLocalSweep(categories?: string[]): Promise<SweepProgress> {
+	const d = await apiPost<Partial<SweepProgress>>('/portal/import/local-files', categories?.length ? { categories } : {});
+	return asSweep(d);
+}
+/** Poll the running/last sweep's progress. */
+export async function pollLocalSweep(): Promise<SweepProgress> {
+	const res = await apiGet<Partial<SweepProgress>>('/portal/import/local-files/progress');
+	return asSweep(res);
+}
+/** Ask the running sweep to stop (cooperative — already-imported files stay). */
+export async function cancelLocalSweep(): Promise<SweepProgress> {
+	const d = await apiPost<Partial<SweepProgress>>('/portal/import/local-files/cancel', {});
+	return asSweep(d);
+}
+
+// ── Unified async import run (POST /portal/import/run) — registry-driven ────────
+// The generic background-job surface every registry source with a `run` uses
+// (recent-export today; more as the capture importers migrate). Same shape as the
+// local sweep so the UI progress loop is identical.
+/** Start (or re-attach to) a registry import job. `opts` carries e.g. { dirPath }. */
+export async function startImportRun(key: string, opts: Record<string, unknown> = {}): Promise<SweepProgress> {
+	const d = await apiPost<Partial<SweepProgress>>('/portal/import/run', { key, ...opts });
+	return asSweep(d);
+}
+/** Poll the running/last import job's progress. */
+export async function pollImportRun(): Promise<SweepProgress> {
+	const res = await apiGet<Partial<SweepProgress>>('/portal/import/run/progress');
+	return asSweep(res);
+}
+/** Ask the running import job to stop (cooperative). */
+export async function cancelImportRun(): Promise<SweepProgress> {
+	const d = await apiPost<Partial<SweepProgress>>('/portal/import/run/cancel', {});
+	return asSweep(d);
 }

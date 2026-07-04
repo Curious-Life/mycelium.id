@@ -112,15 +112,21 @@ export function createReplyDomain(deps) {
     return await res.json();
   }
 
-  async function sendThroughChokepoint({ platform, body }) {
+  async function sendThroughChokepoint({ platform, body, model }) {
     const url = `${agentUrl}/${platform}/send`;
+    // `model` rides the chokepoint request so the daemon can record WHICH model wrote
+    // the reply on the persisted message (model-in-history). It is a SEPARATE field from
+    // the platform payload fields in `body` (chatId/text/…) — the send-handler passes it
+    // ONLY to persist(), never to adapter.send() — so a model name can never leak to the
+    // external platform. A model NAME only (non-secret; already shown in Settings/feed).
+    const req = (typeof model === 'string' && model.trim()) ? { ...body, model: model.trim().slice(0, 120) } : body;
     const res = await fetchImpl(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-egress-provenance': 'agent-explicit',
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(req),
       // 30s covers voice-mode TTS latency (typical ~12s) with margin. The
       // chat turn has its own 1800s budget so the chokepoint round-trip
       // timeout doesn't constrain anything else. Pre-2026-05-07 this was
@@ -140,6 +146,9 @@ export function createReplyDomain(deps) {
   async function handleReply(args) {
     const text = typeof args?.text === 'string' ? args.text.trim() : '';
     if (!text) return JSON.stringify({ delivered: false, errorCode: 'missing-text' });
+    // WHICH model produced this reply (injected by run-turn's call dispatch) — carried to
+    // the daemon's persist path for model-in-history. Never sent to the external platform.
+    const model = typeof args?.__model === 'string' ? args.__model : null;
 
     if (!agentUrl) {
       return JSON.stringify({ delivered: false, errorCode: 'agent-url-not-configured' });
@@ -178,7 +187,7 @@ export function createReplyDomain(deps) {
 
     let result;
     try {
-      result = await sendThroughChokepoint({ platform, body });
+      result = await sendThroughChokepoint({ platform, body, model });
     } catch (e) {
       return JSON.stringify({ delivered: false, errorCode: 'fetch-failed' });
     }

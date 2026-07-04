@@ -200,6 +200,7 @@
 							<div class="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
 								<span class="w-1.5 h-1.5 rounded-full flex-shrink-0 {j.status === 'error' ? 'bg-[#f87171]' : j.status === 'abandoned' ? 'bg-[var(--color-text-tertiary)]' : 'bg-[#34d399]'}"></span>
 								<span class="text-[var(--color-text-secondary)] truncate">{j.stage}</span>
+								{#if j.model}<span class="font-mono text-[10px] text-[var(--color-text-tertiary)] truncate flex-shrink min-w-0" title="Model used">{j.model}</span>{/if}
 								<span class="ml-auto flex-shrink-0 {j.status === 'error' ? 'text-[#f87171]' : 'text-[var(--color-text-tertiary)]'}">{statusLabel(j.status)} · {fmtAgo(j.finishedAt)}</span>
 							</div>
 						{/each}

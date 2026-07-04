@@ -20,8 +20,34 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 export const CLAUDE_CREDENTIALS_PATH = join(homedir(), '.claude', '.credentials.json');
+// Claude Code writes NON-secret account metadata (email, plan, org) here — separate from
+// the token (which lives in .credentials.json / the Keychain). We read it best-effort to
+// show "connected as <email>" on the subscription card. Never contains the token.
+export const CLAUDE_ACCOUNT_PATH = join(homedir(), '.claude.json');
 const REQUIRED_SCOPE = 'user:inference';
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
+
+/**
+ * Best-effort read of the connected Claude account's non-secret identity from
+ * ~/.claude.json's `oauthAccount`. Returns null on any problem (missing file / no field)
+ * — the import must never fail because account metadata is unavailable.
+ * @param {{ path?:string, readImpl?:(p:string)=>Promise<string> }} [opts]
+ * @returns {Promise<{ email:string|null, displayName:string|null, organization:string|null, plan:string|null }|null>}
+ */
+export async function readClaudeAccount({ path = CLAUDE_ACCOUNT_PATH, readImpl } = {}) {
+  let raw = null;
+  try { raw = readImpl ? await readImpl(path) : await readFile(path, 'utf8'); } catch { return null; }
+  let acct;
+  try { acct = JSON.parse(raw)?.oauthAccount; } catch { return null; }
+  if (!acct || typeof acct !== 'object') return null;
+  const s = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const email = s(acct.emailAddress) || s(acct.email);
+  const displayName = s(acct.displayName);
+  const organization = s(acct.organizationName);
+  const plan = s(acct.seatTier) || s(acct.billingType);
+  if (!email && !displayName && !organization && !plan) return null;
+  return { email, displayName, organization, plan };
+}
 
 // On macOS, Claude Code stores its OAuth credential in the login Keychain (this one
 // generic-password item) rather than the file — so on a Mac the file is usually
@@ -51,7 +77,7 @@ export class ClaudeImportError extends Error {
  * @returns {Promise<{ claudeOAuthToken:string, refreshToken:string|null, expiresAt:number|null, scopes:string[] }>}
  * @throws ClaudeImportError with code: 'not_found' | 'malformed' | 'no_token' | 'missing_scope'
  */
-export async function importFromClaudeCli({ path = CLAUDE_CREDENTIALS_PATH, readImpl, keychainImpl } = {}) {
+export async function importFromClaudeCli({ path = CLAUDE_CREDENTIALS_PATH, readImpl, keychainImpl, accountReadImpl } = {}) {
   // 1) the credentials file (headless/Linux, or an explicitly-exported login)
   let raw = null;
   try { raw = readImpl ? await readImpl(path) : await readFile(path, 'utf8'); } catch { raw = null; }
@@ -69,11 +95,14 @@ export async function importFromClaudeCli({ path = CLAUDE_CREDENTIALS_PATH, read
   if (!scopes.includes(REQUIRED_SCOPE)) {
     throw new ClaudeImportError(`This credential lacks the ${REQUIRED_SCOPE} scope (it may be a setup-token admin credential, not a subscription login).`, 'missing_scope');
   }
+  // Non-secret account identity (email/plan/org) for the subscription card — best-effort.
+  const account = await readClaudeAccount({ readImpl: accountReadImpl }).catch(() => null);
   return {
     claudeOAuthToken: token,
     refreshToken: (typeof oauth.refreshToken === 'string' && oauth.refreshToken) ? oauth.refreshToken : null,
     expiresAt: Number.isFinite(oauth.expiresAt) ? oauth.expiresAt : null,
     scopes,
+    account,
   };
 }
 

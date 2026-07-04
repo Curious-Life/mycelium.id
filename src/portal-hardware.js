@@ -102,6 +102,23 @@ export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, dete
     try { res.write('data: [DONE]\n\n'); res.end(); } catch { /* ignore */ }
   });
 
+  // Delete a model FROM DISK (frees space). Destructive + irreversible — the UI gates it
+  // behind an explicit confirm. HTTP-only (Ollama's DELETE /api/delete, never `ollama rm`),
+  // charset-validated, and only for a model that is ACTUALLY installed (honest 404 + a
+  // second guard so a name can only ever name a real installed model).
+  router.post('/hardware/delete', async (req, res) => {
+    const name = String(req.body?.name || '');
+    if (!isValidModelName(name)) return res.status(400).json({ ok: false, error: 'invalid model name' });
+    try {
+      let installed = [];
+      try { installed = await ollama.listInstalled(); } catch { /* daemon down → nothing installed */ }
+      if (!installed.includes(name)) return res.status(404).json({ ok: false, error: 'not installed' });
+      const r = await ollama.deleteModel(name);
+      if (r.ok) return res.json({ ok: true });
+      return res.status(r.notFound ? 404 : 502).json({ ok: false, error: r.notFound ? 'not installed' : 'delete failed' });
+    } catch { return res.status(500).json({ ok: false, error: 'delete failed' }); }
+  });
+
   return router;
 }
 

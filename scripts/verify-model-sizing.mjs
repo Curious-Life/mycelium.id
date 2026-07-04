@@ -61,6 +61,14 @@ _resetModelProfileCache();
 let prof = await resolveModelProfile({ anthropicApiKey: 'sk', cloudModel: 'claude-opus-4-8', jurisdiction: 'us-standard' }, { fetch: async () => { throw new Error('cloud must not probe'); } });
 rec('P1. cloud anthropic → registry limits, isLocal false, no probe', prof.source === 'registry' && prof.isLocal === false && prof.contextWindow === 200_000 && prof.maxOutputTokens === 64_000, JSON.stringify(prof));
 
+// P1b — a Claude SUBSCRIPTION (claudeOAuthToken, anthropicApiKey==='') must be treated as
+// anthropic CLOUD, exactly like the API-key case: isLocal false, tools TRUE, no Ollama probe,
+// full 200k window. The regression: it fell through to the local floor → tools stripped from
+// channel turns → the agent couldn't call `reply` → Telegram/Discord silent.
+_resetModelProfileCache();
+prof = await resolveModelProfile({ claudeOAuthToken: 'sk-ant-oat-X', anthropicApiKey: '', openaiApiKey: '', cloudModel: 'claude-opus-4-8', jurisdiction: 'us-standard', providerName: 'claude_subscription' }, { fetch: async () => { throw new Error('subscription must not probe Ollama'); } });
+rec('P1b. Claude subscription (oauth) → cloud: isLocal false, tools TRUE, 200k, no probe', prof.isLocal === false && prof.capabilities.tools === true && prof.contextWindow === 200_000 && prof.source === 'registry', JSON.stringify(prof));
+
 // local probe success: /api/show returns real context_length + capabilities
 _resetModelProfileCache();
 const showFetch = async (url) => {

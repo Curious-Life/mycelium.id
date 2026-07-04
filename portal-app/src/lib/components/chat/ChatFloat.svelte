@@ -3,7 +3,7 @@
 	import DOMPurify from 'isomorphic-dompurify';
 	import { prepareFile } from '$lib/import/upload-handlers';
 	import { get } from 'svelte/store';
-	import { chatMessages, connectionStatus, activeModel, noModelMessage, recoverableCount, type ChatMessage } from '$lib/stores/chat';
+	import { chatMessages, connectionStatus, activeModel, noModelMessage, recoverableCount, channelConversations, channelView, type ChatMessage } from '$lib/stores/chat';
 	import { navigationState, spaceScope, docScope } from '$lib/stores/navigation';
 	import { apiPostForm, apiGet, api } from '$lib/api';
 	// Timeline-style helpers — strip the bracket-prefixed group/reply
@@ -47,7 +47,22 @@
 	let providerMenuOpen = $state(false);
 	let chatProviders = $state<any[]>([]);
 	let switchingId = $state<number | null>(null);
+	// The provider explicitly assigned to the CHAT task in Settings → Intelligence
+	// (settings.taskModels.chat.providerId). The server ROUTES chat by this first
+	// (resolveInferenceConfigForTask('chat')), so the chip + menu must reflect it —
+	// not the generic "active" provider. null ⇒ no per-task pick ⇒ falls back to active.
+	let chatTaskProviderId = $state<number | null>(null);
 	const isLocalBase = (u?: string) => !!u && /(?:127\.0\.0\.1|localhost|0\.0\.0\.0)/.test(u);
+	// Compact provider name for the tight chat chip/menu — drop any "(…)" jurisdiction
+	// suffix (e.g. "Regolo.ai (EU, zero-retention)" → "Regolo.ai"). Full label stays in Settings.
+	const shortLabel = (s?: string) => ((s || '').split('(')[0].trim() || (s || ''));
+	// Claude rows show their AUTH type ("Claude subscription"/"Claude API"), not a stale
+	// stored label (e.g. an old build wrote "Claude 3"); others keep their own (short) label.
+	const providerLabel = (p: any) => {
+		const prov = String(p?.provider || '').toLowerCase();
+		if (prov === 'anthropic' || prov === 'claude') return String(p?.auth_type || '').toLowerCase() === 'oauth' ? 'Claude subscription' : 'Claude API';
+		return shortLabel(p?.label || p?.provider);
+	};
 	// The single RESOLVED-active provider — mirror the backend getActive(no type):
 	// `is_active` is set once per provider TYPE, so several rows can be is_active at
 	// once (e.g. Regolo=custom + Claude=anthropic). The one actually driving chat is
@@ -60,15 +75,20 @@
 	async function loadChatProviders() {
 		try { const r = await apiGet<{ providers: any[] }>('/portal/providers'); chatProviders = r.providers || []; }
 		catch { chatProviders = []; }
-		// Seed the chip from the resolved-active provider so it reflects reality
-		// before the first turn (and isn't stuck on a stale / mis-sorted provider).
-		// Only when unset — a live turn's `model` event is authoritative once it fires.
+		// The CHAT-task assignment (Settings → Intelligence) is what the server actually
+		// routes chat to — read it so the chip + menu reflect it, not the generic active.
+		try { const tm = await apiGet<{ taskModels?: Record<string, any> }>('/portal/providers/task-models'); chatTaskProviderId = tm?.taskModels?.chat?.providerId ?? null; }
+		catch { chatTaskProviderId = null; }
+		// Seed the chip so it reflects reality before the first turn (only when unset —
+		// a live turn's `model` event is authoritative once it fires). PREFER the
+		// chat-task provider (the one chat is routed to); else the resolved-active.
 		if (!get(activeModel)) {
-			const resolved = [...chatProviders].filter((p) => p.is_active)
+			const byTask = chatTaskProviderId != null ? chatProviders.find((p) => p.id === chatTaskProviderId) : null;
+			const resolved = byTask || [...chatProviders].filter((p) => p.is_active)
 				.sort((a, b) => (b.last_used_at || '').localeCompare(a.last_used_at || ''))[0];
 			if (resolved) {
 				const local = isLocalBase(resolved.base_url);
-				activeModel.set({ label: resolved.label || resolved.provider, model: resolved.model_preference || '', jurisdiction: local ? 'local' : '', local });
+				activeModel.set({ label: providerLabel(resolved), model: resolved.model_preference || '', jurisdiction: local ? 'local' : '', local });
 			}
 		}
 	}
@@ -76,18 +96,42 @@
 		providerMenuOpen = !providerMenuOpen;
 		if (providerMenuOpen) loadChatProviders();
 	}
+	// The provider the CHAT dropdown shows as selected: the chat-task pick if set, else
+	// the resolved-active fallback (matches the server's resolveInferenceConfigForTask).
+	const chatSelectedId = $derived(chatTaskProviderId ?? resolvedActiveId);
+
+	// ── Channel inbox (#24): view Telegram/Discord conversations in the portal (read-only) ──
+	let channelMenuOpen = $state(false);
+	const SOURCE_META: Record<string, { icon: string; label: string }> = {
+		telegram: { icon: '✈️', label: 'Telegram' },
+		'telegram-group': { icon: '✈️', label: 'Telegram group' },
+		discord: { icon: '🎮', label: 'Discord' },
+		'discord-thread': { icon: '🎮', label: 'Discord thread' },
+		whatsapp: { icon: '💬', label: 'WhatsApp' },
+	};
+	const sourceIcon = (s: string) => SOURCE_META[s]?.icon || '💬';
+	const sourceLabel = (s: string) => SOURCE_META[s]?.label || s;
+	function openChannelConversation(c: { conversationId: string; source: string }) {
+		channelMenuOpen = false;
+		chatMessages.openChannel(c.conversationId, c.source);
+	}
+	async function exitChannelView() {
+		chatMessages.exitChannel();
+		await chatMessages.loadHistory(true, selectedAgentId || undefined);
+	}
+
 	async function switchProvider(p: any) {
-		// Compare against the RESOLVED active, not raw is_active — a provider can be
-		// is_active per-type yet not be the one driving chat; clicking it must still
-		// re-activate it (bumping last_used_at) instead of no-op'ing.
-		if (p.id === resolvedActiveId) { providerMenuOpen = false; return; }
+		// The chat dropdown IS the chat-task model selector: set settings.taskModels.chat
+		// so the server routes chat to it (Settings → Intelligence stays in sync). The
+		// generic "active" provider is left alone — narrate/reflection keep theirs.
+		if (p.id === chatSelectedId) { providerMenuOpen = false; return; }
 		switchingId = p.id;
 		try {
-			const res = await api(`/portal/providers/${p.id}`, { method: 'PUT', body: JSON.stringify({ is_active: true }) });
+			const res = await api('/portal/providers/task-models', { method: 'PUT', body: JSON.stringify({ task: 'chat', providerId: p.id }) });
 			if (res.ok) {
+				chatTaskProviderId = p.id;
 				const local = isLocalBase(p.base_url);
-				activeModel.set({ label: p.label || p.provider, model: p.model_preference || '', jurisdiction: local ? 'local' : '', local });
-				chatProviders = chatProviders.map((x) => ({ ...x, is_active: x.id === p.id }));
+				activeModel.set({ label: providerLabel(p), model: p.model_preference || '', jurisdiction: local ? 'local' : '', local });
 				providerMenuOpen = false;
 			}
 		} catch { /* leave menu open so the user can retry */ }
@@ -1198,6 +1242,8 @@
 			// it shows the right model before the first turn (and before the menu is
 			// ever opened). Seeds only when unset; the turn's `model` event overrides.
 			loadChatProviders();
+			// Load the channel conversations (Telegram/Discord) for the inbox.
+			chatMessages.loadChannelConversations();
 		}
 	});
 
@@ -1422,28 +1468,61 @@
 								aria-expanded={providerMenuOpen}
 							>
 								<div class="w-1.5 h-1.5 rounded-full {$activeModel.local ? 'bg-emerald-500' : 'bg-[var(--color-accent)]'}"></div>
-								<span class="text-[var(--color-text-secondary)] font-medium">{$activeModel.label}</span>
+								<span class="text-[var(--color-text-secondary)] font-medium">{shortLabel($activeModel.label)}</span>
 								<span class="hidden sm:inline text-[var(--color-text-tertiary)]">{$activeModel.model}</span>
 								<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-[var(--color-text-tertiary)]"><path d="M6 9l6 6 6-6" /></svg>
 							</button>
 							{#if providerMenuOpen}
 								<div class="absolute right-0 top-full mt-1 z-50 min-w-[230px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1 shadow-lg" style="backdrop-filter: blur(12px) saturate(140%); -webkit-backdrop-filter: blur(12px) saturate(140%);">
-									<div class="px-2.5 py-1.5 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Switch model · saved for all chats</div>
+									<div class="px-2.5 py-1.5 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Chat model · matches Settings → Intelligence</div>
 									{#each chatProviders as p (p.id)}
 										<button
-											class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-[11px] hover:bg-[var(--color-elevated)] {p.id === resolvedActiveId ? 'bg-[var(--color-elevated)]' : ''}"
+											class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-[11px] hover:bg-[var(--color-elevated)] {p.id === chatSelectedId ? 'bg-[var(--color-elevated)]' : ''}"
 											onclick={() => switchProvider(p)}
 											disabled={switchingId === p.id}
 										>
 											<div class="w-1.5 h-1.5 rounded-full flex-shrink-0 {isLocalBase(p.base_url) ? 'bg-emerald-500' : 'bg-[var(--color-accent)]'}"></div>
-											<span class="text-[var(--color-text-primary)] font-medium truncate">{p.label || p.provider}</span>
+											<span class="text-[var(--color-text-primary)] font-medium truncate">{providerLabel(p)}</span>
 											<span class="hidden sm:inline text-[var(--color-text-tertiary)] truncate">{p.model_preference || ''}</span>
-											<span class="ml-auto flex-shrink-0 text-[9px] text-[var(--color-accent)]">{p.id === resolvedActiveId ? '✓' : (switchingId === p.id ? '…' : '')}</span>
+											<span class="ml-auto flex-shrink-0 text-[9px] text-[var(--color-accent)]">{p.id === chatSelectedId ? '✓' : (switchingId === p.id ? '…' : '')}</span>
 										</button>
 									{:else}
 										<div class="px-2.5 py-2 text-[10px] text-[var(--color-text-tertiary)]">No models yet — add one in Settings → Intelligence.</div>
 									{/each}
 									<a class="block px-2.5 py-1.5 mt-0.5 text-[10px] text-[var(--color-accent)] hover:underline" href="/settings?tab=intelligence">Manage in Settings →</a>
+								</div>
+							{/if}
+						</div>
+					{/if}
+
+					<!-- Channel inbox (#24): view Telegram/Discord conversations (read-only). -->
+					{#if $channelConversations.length > 0 || $channelView}
+						<div class="relative">
+							<button
+								class="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] transition-colors {$channelView ? 'text-[var(--color-accent)] bg-[var(--color-elevated)]' : 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-elevated)]'}"
+								onclick={() => (channelMenuOpen = !channelMenuOpen)}
+								title="View your channel conversations"
+								aria-expanded={channelMenuOpen}
+							>
+								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+								<span class="hidden sm:inline">Channels</span>
+							</button>
+							{#if channelMenuOpen}
+								<div class="absolute right-0 top-full mt-1 z-50 min-w-[230px] max-w-[300px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1 shadow-lg" style="backdrop-filter: blur(12px) saturate(140%); -webkit-backdrop-filter: blur(12px) saturate(140%);">
+									<div class="px-2.5 py-1.5 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Channel conversations · read-only</div>
+									{#each $channelConversations as c (c.conversationId + c.source)}
+										<button
+											class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-[11px] hover:bg-[var(--color-elevated)] {$channelView?.conversationId === c.conversationId ? 'bg-[var(--color-elevated)]' : ''}"
+											onclick={() => openChannelConversation(c)}
+										>
+											<span class="text-sm flex-shrink-0" aria-hidden="true">{sourceIcon(c.source)}</span>
+											<span class="text-[var(--color-text-primary)] font-medium flex-shrink-0">{sourceLabel(c.source)}</span>
+											<span class="text-[var(--color-text-tertiary)] truncate">{c.conversationId}</span>
+											<span class="ml-auto flex-shrink-0 text-[9px] text-[var(--color-text-tertiary)]">{c.count}</span>
+										</button>
+									{:else}
+										<div class="px-2.5 py-2 text-[10px] text-[var(--color-text-tertiary)]">No channel conversations yet.</div>
+									{/each}
 								</div>
 							{/if}
 						</div>
@@ -1798,6 +1877,15 @@
 			</div>
 		{/if}
 
+		<!-- Channel view banner (#24): read-only notice + back to the in-app chat. -->
+		{#if $channelView}
+			<div class="flex items-center gap-2 px-4 py-2 text-[11px] text-[var(--color-text-secondary)] shrink-0">
+				<span aria-hidden="true">{sourceIcon($channelView.source)}</span>
+				<span class="min-w-0 truncate">Viewing your <strong>{sourceLabel($channelView.source)}</strong> conversation — read-only. Reply from {sourceLabel($channelView.source)}.</span>
+				<button class="ml-auto flex-shrink-0 text-[var(--color-accent)] hover:underline" onclick={exitChannelView}>← Back to chat</button>
+			</div>
+		{/if}
+
 		<!-- Input bar -->
 		<div
 			class="input-bar flex items-center gap-3 px-4 py-3 min-w-0 shrink-0"
@@ -1898,13 +1986,14 @@
 				onkeydown={handleKeydown}
 				oninput={handleInput}
 				onpaste={handlePaste}
-				placeholder={isLoading ? "type your next message..." : "ask me anything..."}
+				placeholder={$channelView ? `read-only — reply from ${sourceLabel($channelView.source)}` : (isLoading ? "type your next message..." : "ask me anything...")}
+				disabled={!!$channelView}
 				rows="1"
 				class="chat-input"
 			></textarea>
 			<button
 				onclick={sendMessage}
-				disabled={!message.trim()}
+				disabled={!message.trim() || !!$channelView}
 				class="p-2 rounded-full bg-azure/20 text-azure hover:bg-azure/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0 relative"
 				aria-label="Send message"
 			>

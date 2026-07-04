@@ -38,9 +38,29 @@ async function main() {
     // too, so this probe can NEVER be the concurrent writer that a byte-copy would tear.
     // (A readonly WAL open still participates in the standard -shm coordination — that is
     // shared-memory only and never mutates the vault DB file.)
+    const openKeyedRO = () => {
+      const d = new Database(dbPath, { readonly: true, fileMustExist: true });
+      if (dbKeyHex) { d.pragma(`cipher='sqlcipher'`); d.pragma(`key="x'${dbKeyHex}'"`); }
+      d.pragma('query_only = true');
+      return d;
+    };
+    const runCheck = (d) => d.prepare('PRAGMA quick_check(1)').all().map((r) => r.quick_check).join('; ');
+
     db.pragma('query_only = true');
-    const rows = db.prepare('PRAGMA quick_check(1)').all();
-    const result = rows.map((r) => r.quick_check).join('; ');
+    let result = runCheck(db);
+    // A CONCURRENT boot-time vault write — the one-time in-vault index DROP after the
+    // sidecar migration, an autocheckpoint, or a live content write — can make this
+    // read-only quick_check TRANSIENTLY misread and report a non-'ok' first error even
+    // though the vault is sound. Before declaring corruption (which drops a durable
+    // .vault-corrupt marker the app surfaces), RE-VERIFY once on a FRESH connection
+    // after a short settle: a transient clears, genuine b-tree damage persists. This
+    // removes the first-boot false positive observed after the sidecar deploy.
+    if (result !== 'ok') {
+      await new Promise((r) => setTimeout(r, 3000));
+      try { db.close(); } catch { /* */ }
+      db = openKeyedRO();
+      result = runCheck(db);
+    }
     const ok = result === 'ok';
     // Never echo any page/row content — only the pragma's own status string.
     out({ ok, result: ok ? 'ok' : result.slice(0, 200) });

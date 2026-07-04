@@ -32,6 +32,7 @@ export function createIngestDomain(deps) {
           conversationId: { type: 'string', description: 'Optional thread/conversation id.' },
           id:             { type: 'string', description: 'Optional caller-supplied id for idempotency (a resend with the same id is a no-op).' },
           metadata:       { type: 'object', description: 'Platform extras (sender, chatTitle, replyTo, …) — stored encrypted.' },
+          model:          { type: 'string', description: 'For an assistant message: which model produced it (plaintext provenance, shown in history). Ignored for user messages.' },
           createdAt:      { type: ['string', 'number'], description: 'Original message time (ISO 8601 or unix epoch) when relaying.' },
           attachmentId:   { type: 'string', description: 'Link to an attachments row (uploaded file) this message describes.' },
         },
@@ -89,6 +90,9 @@ export function createIngestDomain(deps) {
         metadata: args.metadata,
         createdAt: args.createdAt,
         attachmentId: typeof args.attachmentId === 'string' ? args.attachmentId : undefined,
+        // WHICH model produced an assistant message (channel-daemon persistOutbound
+        // sets this) → model-in-history. Plaintext provenance; ignored for user rows.
+        model: typeof args.model === 'string' ? args.model : undefined,
       }, enqueueEnrichment);
       return deduped
         ? `Already captured (id ${id}); no duplicate created.`

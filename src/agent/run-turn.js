@@ -111,7 +111,12 @@ export async function runAgentTurn(
     if (!grantedNames.has(toolName)) return `Tool '${toolName}' is not available to this turn.`;
     const h = handlers[toolName];
     if (typeof h !== 'function') return `Unknown tool: ${toolName}`;
-    const out = await h(args || {});
+    // Tell the `reply` tool WHICH model produced the reply, so the daemon can record
+    // it on the persisted channel message (model-in-history). `__model` is consumed by
+    // the reply handler for the persist path ONLY — it is NEVER part of the external
+    // Telegram/Discord payload (see reply.js buildSendBody). A model NAME only (§1 safe).
+    const callArgs = (toolName === 'reply' && info.model) ? { ...(args || {}), __model: info.model } : (args || {});
+    const out = await h(callArgs);
     // Audit autonomous vault WRITES (RT2-H2): hash-only, fire-and-forget — the audit must
     // NEVER break or block the turn. Only fires for the gated write tools + when a sink
     // is provided (owner-trusted turns wire it; see channel-turn.js).
@@ -121,10 +126,13 @@ export async function runAgentTurn(
     return typeof out === 'string' ? out : JSON.stringify(out);
   };
 
-  return loop.run({
+  const out = await loop.run({
     provider, providerChain, system, userMessage: userMessage || '', tools: granted, call,
     send: () => {}, maxTokens: plan?.maxTokens, numCtx: plan?.numCtx, signal,
   });
+  // Surface WHICH model ran so headless callers (scheduler, channel) can record it on
+  // the persisted assistant message + the activity feed. A model NAME only (§1 safe).
+  return { ...out, model: info.model };
 }
 
 export default runAgentTurn;

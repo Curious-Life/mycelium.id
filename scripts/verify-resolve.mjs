@@ -7,7 +7,7 @@ import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
-import { resolveInferenceConfig } from '../src/inference/resolve.js';
+import { resolveInferenceConfig, withFreshSubscriptionToken, freshClaudeSubscriptionToken, _setSubscriptionTokenReaderForTests, _resetTokenCacheForTests } from '../src/inference/resolve.js';
 import { createInferenceRouter } from '../src/inference/router.js';
 import { jurisdictionForBaseUrl } from '../src/inference/presets.js';
 import { cloudInfer } from '../src/inference/cloud.js';
@@ -20,6 +20,12 @@ const { db, close } = await boot({ dbPath: DB, kcvPath: KCV, userHex: crypto.ran
 const U = 'local-user';
 const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? ` — ${d}` : ''}`); };
+
+// Neutralize the LIVE Claude-subscription token refresh so the resolver tests are
+// deterministic (a dev box with `claude` logged in would otherwise inject the real
+// keychain token over the stored one). CI has no keychain, but this keeps local runs
+// green too. The refresh itself is covered explicitly by R5c–R5e below.
+_setSubscriptionTokenReaderForTests(async () => null);
 
 // none configured → {} (router falls back to env/local)
 let cfg = await resolveInferenceConfig(db, U);
@@ -48,6 +54,41 @@ const rid = await db.providers.create(U, { provider: 'custom', label: 'Regolo', 
 await db.providers.setActive(rid, U);
 cfg = await resolveInferenceConfig(db, U);
 rec('R5. custom EU base_url → openai-compat + baseUrl + jurisdiction eu-zdr', cfg.openaiApiKey === 'rk-EU' && cfg.baseUrl === 'https://api.regolo.ai/v1' && cfg.cloudModel === 'some-eu-model' && cfg.jurisdiction === 'eu-zdr', JSON.stringify({ ...cfg, openaiApiKey: '<set>' }));
+
+// R5b — a subscription connected on an OLD build may store the token under `accessToken`
+// (or nested claudeAiOauth.accessToken) instead of `claudeOAuthToken`. The resolver's
+// defensive fallback must still surface it (else chat shows "no model" for old rows).
+await db.providers.remove(rid, U);
+const sid = await db.providers.create(U, { provider: 'claude', authType: 'oauth', credentials: JSON.stringify({ accessToken: 'sk-ant-oat-OLD' }) });
+await db.providers.setActive(sid, U);
+cfg = await resolveInferenceConfig(db, U);
+rec('R5b. subscription with OLD credentials shape (accessToken) still resolves the token', cfg.claudeOAuthToken === 'sk-ant-oat-OLD' && cfg.providerName === 'claude_subscription', JSON.stringify({ ...cfg, claudeOAuthToken: '<set>' }));
+await db.providers.remove(sid, U);
+
+// R5c–R5e — the LIVE subscription-token refresh (fix for native chat "load failed").
+// The stored DB token goes stale; the fix swaps in the token `claude` keeps fresh.
+{
+  _resetTokenCacheForTests();
+  const stored = { providerName: 'claude_subscription', claudeOAuthToken: 'sk-ant-oat-STALE' };
+  // R5c: a live token is available → it OVERRIDES the stale stored token.
+  const refreshed = await withFreshSubscriptionToken({ ...stored }, async () => ({ claudeOAuthToken: 'sk-ant-oat-LIVE' }));
+  rec('R5c. subscription cfg → live keychain token overrides the stale stored token', refreshed.claudeOAuthToken === 'sk-ant-oat-LIVE', `got=${refreshed.claudeOAuthToken}`);
+  _resetTokenCacheForTests();
+  // R5d: reader throws (no `claude` / not logged in) → keep the stored token (fail-closed).
+  const kept = await withFreshSubscriptionToken({ ...stored }, async () => { throw new Error('no claude'); });
+  rec('R5d. no live token (reader throws) → keeps the stored token (fail-closed)', kept.claudeOAuthToken === 'sk-ant-oat-STALE', `got=${kept.claudeOAuthToken}`);
+  _resetTokenCacheForTests();
+  // R5e: a NON-subscription cfg is never touched (no keychain read).
+  let read = false;
+  const untouched = await withFreshSubscriptionToken({ providerName: 'openai', openaiApiKey: 'sk-x' }, async () => { read = true; return { claudeOAuthToken: 'nope' }; });
+  rec('R5e. non-subscription cfg is passed through untouched (no live read)', read === false && untouched.openaiApiKey === 'sk-x', `read=${read}`);
+  // R5f: the TTL cache serves the first live token without re-reading within the window.
+  _resetTokenCacheForTests();
+  await freshClaudeSubscriptionToken(async () => ({ claudeOAuthToken: 'sk-ant-oat-FIRST' }));
+  const cached = await freshClaudeSubscriptionToken(async () => ({ claudeOAuthToken: 'sk-ant-oat-SECOND' }));
+  rec('R5f. token cache serves the first read within TTL (no re-read)', cached === 'sk-ant-oat-FIRST', `cached=${cached}`);
+  _resetTokenCacheForTests();
+}
 
 // jurisdiction map unit checks
 rec('R6. jurisdictionForBaseUrl: localhost → local', jurisdictionForBaseUrl('http://127.0.0.1:11434/v1') === 'local');

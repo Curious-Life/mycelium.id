@@ -23,6 +23,7 @@ import { portalHardwareRouter } from './portal-hardware.js';
 import { createOllamaDaemon } from './hardware/ollama-daemon.js';
 import { portalImportRouter } from './portal-import.js';
 import { portalSettingsRouter } from './portal-settings.js';
+import { portalReflectionRouter } from './portal-reflection.js';
 import { portalChatRouter } from './portal-chat.js';
 import { createScheduler } from './agent/scheduler.js';
 import { seedReflectionCycles } from './agent/seed-cycles.js';
@@ -52,6 +53,14 @@ import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { startEnrichDrainer } from './enrich/drainer.js';
 import { startKeepAwake, stopKeepAwake } from './system/keep-awake.js';
 import { portalSystemRouter } from './portal-system.js';
+import { portalDataRouter } from './portal-data.js';
+// Destroy-vault (factory reset) wiring — the recovery-key-gated route + its deps.
+import { destroyRouter } from './account/destroy-route.js';
+import { isTrustedLoopback } from './http/loopback.js';
+import { readUserMaster, deleteKeychain } from './account/keystore.js';
+import createOllamaClient from './hardware/ollama.js';
+import { makeDeleteOllamaModels, readPulledModels } from './hardware/ollama-manifest.js';
+import { releaseManagedHandle } from './remote/release-handle.js';
 import { startClaimHeartbeat } from './claims/heartbeat.js';
 import { startClaimDiscoveryJob, isClusteringRunning, startClusteringJob, shouldAutoGenerate } from './jobs.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
@@ -203,7 +212,7 @@ export function ensureDataDir({ env = process.env } = {}) {
 /** Build the express sub-app that serves every VAULT-DEPENDENT route. Mounted
  *  behind a guard so it only handles traffic once the vault is open; until then
  *  data calls get a 503 and only the account ceremony + static UI are served. */
-function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth, channelSup, hwOllamaDaemon, restPort }) {
+function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth, channelSup, hwOllamaDaemon, restPort, searchHelpers }) {
   const v = express();
   v.disable('x-powered-by');
   // Fail-closed auth gate FIRST, mounted at `/api` — ALL vault data the sub-app
@@ -291,7 +300,13 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // function, not nested in it) and passed in. See the creation note there.
   v.use('/api/v1/portal', portalHardwareRouter({ daemon: hwOllamaDaemon }));
   v.use('/api/v1/portal', portalImportRouter({ db, userId, enqueueEnrichment }));
+  // Settings → Data: bulk delete-by-source / by-type (search-sidecar eviction
+  // needs searchHelpers.noteDelete). Backup export stays on the account router.
+  v.use('/api/v1/portal', portalDataRouter({ db, userId, searchHelpers }));
   v.use('/api/v1/portal', portalSettingsRouter({ db, userId }));
+  // Reflection-cycle control (Settings → Intelligence): opt-in master toggle, timezone,
+  // and per-cycle schedule/instructions edits. Owner-gated (autonomous-turn control).
+  v.use('/api/v1/portal', portalReflectionRouter({ db, userId, authenticatePortalRequest: portalOwnerGate }));
   // OS-level toggles the app configures (keep-the-Mac-awake while running).
   v.use('/api/v1/portal', portalSystemRouter({ db, userId }));
   // In-app chat agent (web + Tauri) — runs a bounded, user-driven tool-use loop
@@ -553,11 +568,21 @@ export async function startRestServer({
         // delivery sink persists 'chat'-targeted output as an assistant message via the
         // same captureMessage funnel; 'channel:*' proactive sends are deferred to Step 6
         // (a turn-less send has no active-turn registry entry to target).
-        const schedulerDeliver = async (task, text) => {
+        const schedulerDeliver = async (task, text, meta) => {
           const target = task.output_target || 'none';
           if (target === 'none' || target.startsWith('channel:')) return; // channel:* → Step 6
-          const conversationId = target.startsWith('conversation:') ? target.slice('conversation:'.length) : null;
-          await captureMessage(db, { role: 'assistant', content: text, source: 'scheduler', message_type: 'text', conversation_id: conversationId }, enqueueEnrichment);
+          // 'chat' (the reflection cycles' target) → a stable, owner-only "Reflections"
+          // thread in the `chat:` namespace, so morning/evening/weekly check-ins are
+          // VISIBLE in the portal (GET /chat/history?conversationId=reflections). A bare
+          // null conversation_id was written but filtered out of every chat view.
+          const conversationId = target === 'chat'
+            ? 'chat:reflections'
+            : (target.startsWith('conversation:') ? target.slice('conversation:'.length) : null);
+          // captureMessage REQUIRES userId (throws otherwise) and reads camelCase keys
+          // (conversationId/messageType) — the prior snake_case + missing-userId call
+          // silently failed under the scheduler's try/catch, so scheduled conversation
+          // deliveries never persisted. Fixed here alongside recording the model.
+          await captureMessage(db, { userId: bootUserId, role: 'assistant', content: text, source: 'scheduler', messageType: 'text', conversationId, model: meta?.model || null }, enqueueEnrichment);
         };
         const harnessScheduler = createScheduler({
           db, userId: bootUserId, tools, handlers, deliver: schedulerDeliver,
@@ -569,7 +594,10 @@ export async function startRestServer({
         try {
           const rs = await db.users.getSettings(bootUserId).catch(() => null);
           if (rs?.reflection?.enabled) {
-            await seedReflectionCycles(db, bootUserId, { logger: (m) => console.error(`[scheduler] ${m}`) });
+            // Seed in the user's own timezone so "morning at 8" fires at their local
+            // 8am, not 08:00 UTC (tz may be null on a vault that never set one → UTC).
+            const tz = await db.users.getTimezone(bootUserId).catch(() => null);
+            await seedReflectionCycles(db, bootUserId, { tz, logger: (m) => console.error(`[scheduler] ${m}`) });
           }
         } catch (e) { console.warn('[scheduler] reflection seed skipped:', e?.message || e); }
         // Boot recovery (§5.4): flip orphaned in-flight runs to aborted, then push any
@@ -620,7 +648,7 @@ export async function startRestServer({
       // Shared-space membership + content sync is handled by the E2E system (the
       // ciphertext oplog: space-membership.js + space-content-mirror.js), wired via
       // db.spaceKeyManager / db.spaceContent — no separate Matrix hook needed.
-      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId }), channelSup, hwOllamaDaemon, restPort: port });
+      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId }), channelSup, hwOllamaDaemon, restPort: port, searchHelpers });
       bootError = null; // opened cleanly → clear any prior failure
     } finally {
       booting = false;
@@ -698,6 +726,32 @@ export async function startRestServer({
     dbPath: effectiveDbPath,
     uploadsRoot: effectiveUploadsRoot,
     remoteConfigPath: effectiveRemoteConfigPath,
+  }));
+
+  // Destroy the entire vault (factory reset) — mounted on the always-available
+  // account sub-app. It is gated in depth (loopback → typed phrase → recovery
+  // key verified vs the live master) inside destroyRouter, then runs the reviewed
+  // recursive-wipe engine. extraRoots wires the mind-file agentRoot (which lives
+  // OUTSIDE the app-data dir), so a reset does not leave encrypted mind-files
+  // behind. revokeRelay best-effort releases a managed handle server-side; the
+  // seamless relaunch is the Tauri layer (destroy_and_relaunch → app.restart()).
+  app.use('/api/v1/account', destroyRouter({
+    isTrustedLoopback,
+    readMaster: () => { try { return readUserMaster(); } catch { return null; } },
+    dataDir: () => dataDir(),
+    extraRoots: () => {
+      const agentRoot = process.env.MYCELIUM_AGENT_ROOT || path.join(process.cwd(), 'data', 'mind');
+      const mindRoot = path.join(agentRoot, 'mind');
+      return path.isAbsolute(mindRoot) ? [mindRoot] : [];
+    },
+    deleteKeychain,
+    readPulledModels: () => readPulledModels(),
+    deleteOllamaModels: makeDeleteOllamaModels(createOllamaClient()),
+    revokeRelay: () => releaseManagedHandle({ log: console.info }),
+    // Daemon teardown is done by the Tauri relaunch's reap() (kills every child
+    // process group). A node-only caller relies on that; quiesce stays a no-op.
+    quiesce: async () => {},
+    log: console.info,
   }));
 
   // Remote-access control surface (loopback-only): set the operator password

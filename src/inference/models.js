@@ -10,6 +10,7 @@
 // SSRF-guarded before any fetch with the key (H5), same as probe.js.
 
 import { assertSafeBaseUrl, fetchProvider } from './base-url.js';
+import { CLAUDE_CODE_UA, CLAUDE_CODE_BETA } from './anthropic-wire.js';
 
 const ANTHROPIC_MODELS_URL = 'https://api.anthropic.com/v1/models';
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -19,19 +20,21 @@ const OPENAI_DEFAULT = 'https://api.openai.com';
  * @param {object} opts
  * @param {string} opts.provider          'anthropic'|'claude'|'openai'|'custom'|…
  * @param {string} [opts.baseUrl]         OpenAI-compatible endpoint override
- * @param {string} [opts.apiKey]          the user's key (never logged)
+ * @param {string} [opts.apiKey]          the user's API key (never logged)
+ * @param {string} [opts.token]           a Claude SUBSCRIPTION OAuth token (Bearer + Claude-Code
+ *                                        identity headers, instead of x-api-key). Never logged.
  * @param {typeof fetch} [opts.fetch]
  * @param {number} [opts.timeoutMs=12000]
  * @returns {Promise<{ok:boolean, models?:string[], error?:string, status?:number}>}
  */
-export async function listModels({ provider, baseUrl, apiKey, fetch = globalThis.fetch, timeoutMs = 12000 } = {}) {
+export async function listModels({ provider, baseUrl, apiKey, token, fetch = globalThis.fetch, timeoutMs = 12000 } = {}) {
   if (typeof fetch !== 'function') return { ok: false, error: 'no_fetch' };
   const isAnthropic = provider === 'anthropic' || provider === 'claude';
   const isLocal = /127\.0\.0\.1|localhost|\[::1\]/.test(baseUrl || '');
   // Hosted providers usually need a key to list; a local OpenAI-compatible server
   // (Ollama / LM Studio) does not. OpenRouter happens to list without a key too,
   // so we don't hard-require one here — let the provider decide (401 → auth_rejected).
-  if (!apiKey && !isLocal && !isAnthropic && !baseUrl) return { ok: false, error: 'no_key' };
+  if (!apiKey && !token && !isLocal && !isAnthropic && !baseUrl) return { ok: false, error: 'no_key' };
   // SSRF + exfil guard (H5): refuse to fetch a private/internal or non-http(s)
   // base_url with the user's key. Category-only error, never the key/host.
   if (!isAnthropic) { try { assertSafeBaseUrl(baseUrl); } catch { return { ok: false, error: 'invalid_base_url' }; } }
@@ -42,7 +45,12 @@ export async function listModels({ provider, baseUrl, apiKey, fetch = globalThis
     let url, headers;
     if (isAnthropic) {
       url = ANTHROPIC_MODELS_URL;
-      headers = { 'x-api-key': apiKey || '', 'anthropic-version': ANTHROPIC_VERSION };
+      // Subscription (OAuth) → Bearer + Claude-Code identity headers; BYOK → x-api-key.
+      // (The token may lack models:list scope; the caller treats a 401/403 as a soft
+      // failure and falls back to the curated model list.)
+      headers = token
+        ? { Authorization: `Bearer ${token}`, 'anthropic-version': ANTHROPIC_VERSION, 'anthropic-beta': CLAUDE_CODE_BETA, 'user-agent': CLAUDE_CODE_UA, 'x-app': 'cli' }
+        : { 'x-api-key': apiKey || '', 'anthropic-version': ANTHROPIC_VERSION };
     } else {
       const base = (baseUrl || OPENAI_DEFAULT).replace(/\/+$/, '');
       // base_url may already end at /v1 (the OpenAI-compatible convention) or not.

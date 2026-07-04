@@ -27,6 +27,18 @@ const id = await af.begin({ userId: U, kind: 'describe:name', totalSteps: 5, sta
 let active = await af.active(U);
 rec('A1. begin → active shows the running job', active.length === 1 && active[0].kind === 'describe:name' && Number(active[0].total_steps) === 5, JSON.stringify(active[0] || {}));
 
+// A1b. model-in-feed: begin({model}) records WHICH model is working; active() + recent()
+// surface it (drives the header "Replying on a channel · <model>" indicator). Name only (§1).
+{
+  const mId = await af.begin({ userId: U, kind: 'inference:channel', stageLabel: 'Replying…', model: 'claude-opus-4-8' });
+  const act = await af.active(U);
+  const row = act.find((r) => r.id === mId);
+  rec('A1b. begin({model}) → active surfaces the model', row?.model === 'claude-opus-4-8', `model=${row?.model}`);
+  await af.finish(mId, { status: 'done' });
+  const rec2 = await af.recent(U, 10);
+  rec('A1c. finished job keeps the model in recent', rec2.some((r) => r.id === mId && r.model === 'claude-opus-4-8'), `models=${JSON.stringify(rec2.map((r) => r.model))}`);
+}
+
 // A2. heartbeat → step advances + total updates
 await af.heartbeat(id, { step: 3, totalSteps: 6 });
 active = await af.active(U);

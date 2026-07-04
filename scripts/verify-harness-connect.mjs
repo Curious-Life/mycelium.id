@@ -2,7 +2,6 @@
 //   H1 HARNESS-RECIPES.md covers every first-class harness (memory + model doors)
 //   H2 openclaw scam-safety note present in the recipes doc
 //   H3 local-only / remote-coming-soon banner present (honest reachability)
-//   H4 design doc exists and names the two doors
 //   H5 HarnessPickerSection.svelte renders every harness + the real endpoints
 //   H6 the picker carries the openclaw safety note (UI parity with the doc)
 //   H7 SettingsView mounts HarnessPickerSection (imported + placed)

@@ -14,6 +14,7 @@
 	import AIAccessSection from '$lib/components/settings/AIAccessSection.svelte';
 	import AgentCaptureSection from '$lib/components/settings/AgentCaptureSection.svelte';
 	import KeepAwakeSection from '$lib/components/settings/KeepAwakeSection.svelte';
+	import DataSection from '$lib/components/settings/DataSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 	import ConnectYourAISection from '$lib/components/settings/ConnectYourAISection.svelte';
 	import PhoneConnectSection from '$lib/components/settings/PhoneConnectSection.svelte';
@@ -131,6 +132,7 @@
 		] },
 		{ title: 'Your vault', items: [
 			{ id: 'security', label: 'Security', icon: 'shield', desc: 'Keys, locks, and recovery' },
+			{ id: 'data', label: 'Data', icon: 'database', desc: 'Back up, or delete your data' },
 		] },
 		{ title: 'App', items: [
 			{ id: 'general', label: 'General', icon: 'sliders', desc: 'Appearance and region' },
@@ -730,6 +732,9 @@
 			<!-- The model that powers Mycelium — active-model hero + Local/Cloud lanes -->
 			<AISettings />
 
+			<!-- Reflection cycles moved to Agents → Manage → (agent) → Reflection cycles,
+			     since cycles are an agent's rhythms and are controlled per-agent there. -->
+
 			<!-- Voice / TTS — provider config + per-voice preview -->
 			<VoiceSection />
 			{/if}
@@ -1098,33 +1103,6 @@
 				{/if}
 			</section>
 
-			<!-- Vault Backup (V1) — encrypted .myvault snapshot to user-controlled storage -->
-			<section class="card p-5">
-				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Vault Backup</h2>
-				<div class="flex items-center justify-between gap-4">
-					<div>
-						<p class="text-sm text-[var(--color-text-primary)]">Back up your vault</p>
-						<p class="text-xs text-[var(--color-text-tertiary)] mt-0.5">
-							Your recovery key only unlocks data on <strong>this Mac</strong>. Download an
-							encrypted backup file and keep it somewhere you control — it's the only way
-							to recover your vault if this computer is lost. To restore: on a new device,
-							choose “Restore from a backup”, then paste your recovery key.
-						</p>
-					</div>
-					<button
-						onclick={backupVault}
-						disabled={vbBusy}
-						class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)] whitespace-nowrap disabled:opacity-50"
-					>{vbBusy ? 'Preparing…' : 'Back up now'}</button>
-				</div>
-				{#if vbError}
-					<p class="text-xs text-coral mt-2">{vbError}</p>
-				{/if}
-				{#if vbDone}
-					<p class="text-xs text-jade mt-2">Backup downloaded ✓ — store the .myvault file safely.</p>
-				{/if}
-			</section>
-
 			<!-- App passphrase lock (V1, optional) — encrypt the keys at rest -->
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">App Passphrase</h2>
@@ -1181,6 +1159,39 @@
 				{/if}
 			</section>
 
+			{/if}
+
+			{#if activePane === 'data'}
+			<!-- Vault Backup (V1) — encrypted .myvault snapshot to user-controlled storage.
+			     MOVED here from Security (2026-07-03): Security keeps keys/locks/recovery only. -->
+			<section class="card p-5">
+				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Vault Backup</h2>
+				<div class="flex items-center justify-between gap-4">
+					<div>
+						<p class="text-sm text-[var(--color-text-primary)]">Back up your vault</p>
+						<p class="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+							Your recovery key only unlocks data on <strong>this Mac</strong>. Download an
+							encrypted backup file and keep it somewhere you control — it's the only way
+							to recover your vault if this computer is lost. To restore: on a new device,
+							choose “Restore from a backup”, then paste your recovery key.
+						</p>
+					</div>
+					<button
+						onclick={backupVault}
+						disabled={vbBusy}
+						class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)] whitespace-nowrap disabled:opacity-50"
+					>{vbBusy ? 'Preparing…' : 'Back up now'}</button>
+				</div>
+				{#if vbError}
+					<p class="text-xs text-coral mt-2">{vbError}</p>
+				{/if}
+				{#if vbDone}
+					<p class="text-xs text-jade mt-2">Backup downloaded ✓ — store the .myvault file safely.</p>
+				{/if}
+			</section>
+
+			<!-- Delete your data — undo an import (delete-by-source). Destructive; type-to-confirm. -->
+			<DataSection />
 			{/if}
 
 			{#if activePane === 'account'}

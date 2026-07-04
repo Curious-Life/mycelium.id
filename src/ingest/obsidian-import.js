@@ -30,7 +30,7 @@ import path from 'node:path';
 import { captureMessage } from './capture.js';
 import { saveDocument } from '../core/document-store.js';
 import { parseMarkdownNote } from './markdown.js';
-import { putBlob } from './blob-store.js';
+import { putBlob, isUserNamespacedBlobPath } from './blob-store.js';
 import { recordContentFlow } from '../inference/usage.js';
 
 const MAX_FILE_BYTES = Number(process.env.MYCELIUM_IMPORT_TEXT_LIMIT_BYTES) || 25 * 1024 * 1024; // 25MB per note (env-tunable)
@@ -210,7 +210,10 @@ export async function importObsidianVault(db, { userId, folderPath, files, vault
         const detId = sha256(`obsidian:${vault}/${rel}`).slice(0, 32);
         if (existingIds.has(detId)) { summary.assets.deduped += 1; registerAsset(rel, detId); continue; }
         const sha = crypto.createHash('sha256').update(a.bytes).digest('hex');
-        let localPath = blobByHash.get(sha) || null;
+        // Reuse a byte-identical blob only if its path is namespaced under THIS
+        // user (multi-tenant floor; always true in single-user V1).
+        const reuse = blobByHash.get(sha);
+        let localPath = reuse && isUserNamespacedBlobPath(reuse, userId) ? reuse : null;
         if (localPath) { summary.assets.blobsReused += 1; }
         else {
           const { path: stored } = await putBlob(a.bytes, { userId, ext: path.posix.extname(rel) });

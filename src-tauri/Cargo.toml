@@ -1,6 +1,6 @@
 [package]
 name = "mycelium"
-version = "0.1.4"
+version = "0.1.5"
 description = "Mycelium — your private cognitive vault"
 edition = "2021"
 rust-version = "1.77"
@@ -13,6 +13,13 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["macos-private-api"] }
 # Read remote.json (the remote-access toggle) at startup.
 serde_json = "1"
+# Auto-updater (production only, signature-verified, fail-open). Checks a signed
+# latest.json on the PUBLIC GitHub Release; the dialog + process plugins drive the
+# native "Update & Restart" prompt + relaunch. All Rust-side — no webview IPC
+# surface is added (the window loads a REMOTE http origin, deliberately kept narrow).
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-dialog = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Native NSVisualEffectView vibrancy behind the transparent webview.

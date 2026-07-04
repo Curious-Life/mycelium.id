@@ -4,7 +4,10 @@
 	// vaults, Claude Code sessions — presence/counts/dates only, never content) and
 	// offers one-click import of each. Claude Code gets a clean/full toggle. Used in
 	// both onboarding (MindscapeInvite) and Streams → Sources (ImportView).
-	import { scanSources, importDetected, AGENT_MODE_SOURCES, type DetectedSource } from '$lib/import/detect';
+	import { onDestroy } from 'svelte';
+	import { scanSources, importDetected, startLocalSweep, pollLocalSweep, cancelLocalSweep,
+		startImportRun, pollImportRun, cancelImportRun,
+		AGENT_MODE_SOURCES, ASYNC_RUN_SOURCES, type DetectedSource, type SweepProgress } from '$lib/import/detect';
 	import { SOURCE_CATALOG } from '$lib/import/catalog';
 
 	let { compact = false, onImported = () => {} }: { compact?: boolean; onImported?: () => void } = $props();
@@ -42,7 +45,17 @@
 		}
 	}
 
+	// The broad local-files sweep runs as an async background job — live progress here.
+	let sweep = $state<SweepProgress | null>(null);
+	let sweepTimer: ReturnType<typeof setTimeout> | null = null;
+	onDestroy(() => { if (sweepTimer) clearTimeout(sweepTimer); });
+
 	async function runImport(s: DetectedSource) {
+		// Async-job sources (the broad sweep + registry `run` sources like the
+		// recent-export bundle) share ONE progress-polled loop; the rest are a
+		// one-shot blocking POST via importDetected.
+		if (s.source === 'local-files') return runSweep(s, () => startLocalSweep(selectedCats(s)), pollLocalSweep);
+		if (ASYNC_RUN_SOURCES.has(s.source)) return runSweep(s, () => startImportRun(s.source, { dirPath: s.path }), pollImportRun);
 		busy = { ...busy, [s.source]: true };
 		result = { ...result, [s.source]: { ok: true, msg: '' } };
 		try {
@@ -55,6 +68,60 @@
 		} finally {
 			busy = { ...busy, [s.source]: false };
 		}
+	}
+
+	// Start an async import job, then poll progress until terminal. Shared by the
+	// broad local-files sweep and the registry `run` sources (recent-export).
+	async function runSweep(s: DetectedSource, start: () => Promise<SweepProgress>, poll: () => Promise<SweepProgress>) {
+		busy = { ...busy, [s.source]: true };
+		result = { ...result, [s.source]: { ok: true, msg: '' } };
+		try {
+			sweep = await start();
+			await new Promise<void>((resolve) => {
+				const tick = async () => {
+					try { sweep = await poll(); } catch { /* keep last snapshot */ }
+					if (sweep && sweep.status === 'running') sweepTimer = setTimeout(tick, 1200);
+					else resolve();
+				};
+				sweepTimer = setTimeout(tick, 800);
+			});
+			const d = sweep;
+			if (d?.status === 'error') {
+				result = { ...result, [s.source]: { ok: false, msg: d.error || 'Import failed.' } };
+			} else {
+				const stopped = d?.status === 'cancelled';
+				const n = d?.imported ?? 0;
+				const extra = d?.deduped ? ` · ${d.deduped} already in vault` : '';
+				result = { ...result, [s.source]: { ok: true, msg: `${stopped ? 'Stopped —' : 'Imported'} ${n} item${n === 1 ? '' : 's'}${extra}.` } };
+				onImported();
+			}
+		} catch (e: any) {
+			result = { ...result, [s.source]: { ok: false, msg: e?.message || 'Import failed.' } };
+		} finally {
+			busy = { ...busy, [s.source]: false };
+			sweep = null;
+		}
+	}
+
+	async function stopSweep() {
+		// Cancel whichever async job is live (only one runs at a time). Both calls
+		// are best-effort; the idle one is a no-op.
+		try { sweep = await cancelLocalSweep(); } catch { /* best-effort */ }
+		try { await cancelImportRun(); } catch { /* best-effort */ }
+	}
+
+	// "N of ~M" for the sweep; denominator is the detected total (stable) or the
+	// live-discovered total, whichever is larger.
+	function sweepLabel(s: DetectedSource): string {
+		if (!sweep) return '';
+		const denom = Math.max(s.count || 0, sweep.total || 0) || sweep.processed;
+		const pct = denom ? Math.min(100, Math.round((sweep.processed / denom) * 100)) : 0;
+		return `Importing… ${sweep.processed.toLocaleString()} of ~${denom.toLocaleString()} (${pct}%) · ${sweep.imported.toLocaleString()} added`;
+	}
+	function sweepPct(s: DetectedSource): number {
+		if (!sweep) return 0;
+		const denom = Math.max(s.count || 0, sweep.total || 0) || sweep.processed || 1;
+		return Math.min(100, Math.round((sweep.processed / denom) * 100));
 	}
 
 	function rangeLabel(s: DetectedSource): string {
@@ -104,11 +171,18 @@
 									{/each}
 								</div>
 							{/if}
-							{#if r && r.msg}<span class="res" class:bad={!r.ok}>{r.msg}</span>{/if}
+							{#if s.source === 'local-files' && busy[s.source] && sweep}
+								<span class="res prog">{sweepLabel(s)}</span>
+								<div class="bar"><div class="bar-fill" style="width:{sweepPct(s)}%"></div></div>
+							{:else if r && r.msg}<span class="res" class:bad={!r.ok}>{r.msg}</span>{/if}
 						</div>
-						<button class="imp-btn" onclick={() => runImport(s)} disabled={busy[s.source] || (r && r.ok && !!r.msg)}>
-							{#if busy[s.source]}Importing…{:else if r && r.ok && r.msg}✓ Done{:else}Import{/if}
-						</button>
+						{#if s.source === 'local-files' && busy[s.source]}
+							<button class="imp-btn cancel" onclick={stopSweep}>Cancel</button>
+						{:else}
+							<button class="imp-btn" onclick={() => runImport(s)} disabled={busy[s.source] || (r && r.ok && !!r.msg)}>
+								{#if busy[s.source]}Importing…{:else if r && r.ok && r.msg}✓ Done{:else}Import{/if}
+							</button>
+						{/if}
 					</div>
 				{/each}
 			</div>
@@ -166,4 +240,8 @@
 	}
 	.imp-btn:hover:not(:disabled) { opacity: 0.9; }
 	.imp-btn:disabled { opacity: 0.5; cursor: default; }
+	.imp-btn.cancel { background: transparent; border: 1px solid var(--color-accent-coral, #f87171); color: var(--color-accent-coral, #f87171); }
+	.res.prog { color: var(--color-text-secondary); }
+	.bar { margin-top: 0.3rem; height: 4px; border-radius: 3px; background: var(--glass-border); overflow: hidden; }
+	.bar-fill { height: 100%; background: var(--color-accent-aurum, #e5b84c); transition: width 0.4s ease; }
 </style>
