@@ -129,6 +129,28 @@ jobs:
         id: ver
         run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
 
+      # The macos-14 runner (~14 GB free) tips over during DMG creation: make-dmg.sh
+      # stages a full copy of the ~680 MB app AND builds a same-size UDRW image on top
+      # of it, while cargo's target/ has grown (the updater/process/dialog plugins).
+      # hdiutil then failed with "No space left on device". Reclaim now — the .app
+      # bundle is already built and self-contained, so the Rust build intermediates and
+      # the runner's unused iOS/Android SDKs are dead weight here. Never fail on cleanup.
+      - name: Reclaim disk before DMG packaging
+        run: |
+          set +e
+          echo "── disk before ──"; df -h /
+          rm -rf src-tauri/target/release/deps \
+                 src-tauri/target/release/build \
+                 src-tauri/target/release/incremental \
+                 src-tauri/target/release/.fingerprint
+          sudo rm -rf ~/Library/Developer/CoreSimulator /Library/Developer/CoreSimulator
+          for d in "$ANDROID_HOME" "$ANDROID_SDK_ROOT" "$GRADLE_HOME" ~/.gradle \
+                   ~/.cargo/registry/cache ~/.cargo/registry/src; do
+            [ -n "$d" ] && sudo rm -rf "$d"
+          done
+          echo "── disk after ──"; df -h /
+          true
+
       # Deep-sign inside-out → notarize .app → build DMG from the stapled app →
       # notarize DMG. notarize-macos.sh uses the notarytool profile + the keychain.
       - name: Sign + notarize + staple
