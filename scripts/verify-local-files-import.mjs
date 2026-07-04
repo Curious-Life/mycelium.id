@@ -73,8 +73,28 @@ const r3 = await importLocalFiles(db, { userId, folderPath: root, categories: ['
 rec('L4 category filter: documents-only sweep imports no new media',
   r3.attachments.imported === 0 && r3.scanned === 2, JSON.stringify({ scanned: r3.scanned, atts: r3.attachments.imported }));
 
+// L7 async-job progress: onProgress fires with running counts; final = all processed.
+{
+  const prog = [];
+  const rp = await importLocalFiles(db, { userId, folderPath: root, onProgress: (p) => prog.push(p) });
+  const last = prog[prog.length - 1] || {};
+  rec('L7 onProgress fires; final processed === total === scanned',
+    prog.length >= 2 && last.total === rp.scanned && last.processed === rp.scanned && rp.scanned === 5,
+    JSON.stringify({ calls: prog.length, last }));
+}
+// L8 cooperative cancel: shouldCancel stops the sweep early (partial, flagged).
+{
+  let n = 0;
+  const prog = [];
+  const rc = await importLocalFiles(db, { userId, folderPath: root, onProgress: (p) => prog.push(p), shouldCancel: () => (n++ >= 1) });
+  const last = prog[prog.length - 1] || {};
+  rec('L8 shouldCancel stops early (cancelled flag + partial processed < scanned)',
+    rc.cancelled === true && last.processed >= 1 && last.processed < 5,
+    JSON.stringify({ cancelled: rc.cancelled, processed: last.processed }));
+}
+
 const ok = ledger.every(Boolean);
-console.log(`\nVERDICT: ${ok ? 'GO' : 'NO-GO'} — local-files sweep: text→doc+memory, media→encrypted attachment, blob-dedup, category filter, idempotent`);
+console.log(`\nVERDICT: ${ok ? 'GO' : 'NO-GO'} — local-files sweep: text→doc+memory, media→encrypted attachment, blob-dedup, category filter, idempotent, progress+cancel`);
 raw.close(); await close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch { /* */ } }
 try { rmSync(root, { recursive: true }); } catch { /* */ }

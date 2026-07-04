@@ -54,6 +54,41 @@ export function dbPath(opts = {})      { return under('mycelium.db', 'MYCELIUM_D
 export function kcvPath(opts = {})     { return under('kcv.json',    'MYCELIUM_KCV', opts); }
 export function authDbPath(opts = {})  { return under('auth.db',     'MYCELIUM_AUTH_DB', opts); }
 export function uploadsRoot(opts = {}) { return under('uploads',     'MYCELIUM_UPLOADS_ROOT', opts); }
+
+// ── Attachment blob storage-key convention ──────────────────────────────────
+// Every uploaded/imported file blob is stored under uploadsRoot() with a key of
+// the form `<userId>/<uuid><ext>.enc` (see src/ingest/blob-store.js putBlob).
+// The reference-counted blob GC keys on that stored path ALONE, unscoped by
+// user_id (intentional — it guards ONE physical file and must keep it while ANY
+// row references it; scoping the COUNT would let one tenant's delete unlink
+// another tenant's blob). That unscoped GC is safe only while every stored path
+// is provably namespaced under its owner — otherwise two tenants' rows could
+// collide on one path and share/destroy a blob. These guards are that proof,
+// enforced fail-closed on every attachment insert/restore. Defined here (a leaf
+// path util) so both the blob store and the db attachments namespace can import
+// them without a layer inversion.
+//
+// `true` iff `rel` is `<userId>/<file...>` with a real file segment and no
+// empty/`.`/`..` segment (traversal belt-and-suspenders). Null/non-string → false.
+export function isUserNamespacedBlobPath(rel, userId) {
+  if (typeof rel !== 'string' || !rel) return false;
+  if (typeof userId !== 'string' || !userId) return false;
+  // putBlob builds the key with node:path join on darwin/linux (sep '/'); the
+  // importers likewise persist posix-relative keys.
+  const segs = rel.split('/');
+  if (segs.length < 2) return false;          // must be <userId>/<file>
+  if (segs[0] !== userId) return false;       // owned by the importing user
+  if (segs.some((s) => s === '' || s === '.' || s === '..')) return false; // no traversal
+  return true;
+}
+
+/** Fail-closed variant: throws unless `rel` is namespaced under `userId`. */
+export function assertUserNamespacedBlobPath(rel, userId) {
+  if (!isUserNamespacedBlobPath(rel, userId)) {
+    // Zero-leakage: the message names neither the path nor the user id.
+    throw new Error('attachment local_path is not namespaced under the owning user — refusing to write (cross-tenant blob-collision guard)');
+  }
+}
 // Optional passphrase-lock seal (src/account/passphrase-lock.js). Present ONLY
 // when the user enables an app passphrase; its presence means the vault is
 // passphrase-locked and the plaintext keys have been removed from the Keychain.

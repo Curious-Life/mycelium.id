@@ -39,9 +39,15 @@ export function createUsersNamespace(deps) {
     },
 
     async updateSettings(userId, settings) {
+      // UPSERT, not a bare UPDATE: a fresh single-user vault may have no `users` row yet,
+      // and an UPDATE with no matching row is a silent no-op — which was silently DROPPING
+      // settings (e.g. per-task model routing) written before the row existed. Insert the
+      // row if absent, else update only `settings`. `type` has a NOT NULL DEFAULT and every
+      // other column is nullable, so id+settings is sufficient (schema: migrations/0001).
       await d1Query(
-        `UPDATE users SET settings = ? WHERE id = ?`,
-        [JSON.stringify(settings), userId],
+        `INSERT INTO users (id, settings) VALUES (?, ?)
+           ON CONFLICT(id) DO UPDATE SET settings = excluded.settings`,
+        [userId, JSON.stringify(settings)],
       );
     },
 

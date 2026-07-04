@@ -19,16 +19,19 @@ export function createActivityFeedNamespace({ d1QueryAdmin, randomUUID }) {
   return {
     STALE_MS,
 
-    /** Open (or reopen) a running job row. Returns the row id. */
-    async begin({ userId, kind, id, totalSteps = 0, stageLabel = null, pid = null }) {
+    /** Open (or reopen) a running job row. Returns the row id.
+     *  `model` (optional) records WHICH model is running — a model NAME only, never
+     *  user text/output (§1). The feed's shape() projects it as the "WHICH" column. */
+    async begin({ userId, kind, id, totalSteps = 0, stageLabel = null, pid = null, model = null }) {
       const rowId = id || uuid();
+      const modelStr = (typeof model === 'string' && model.trim()) ? model.trim().slice(0, 120) : null;
       await q(
-        `INSERT INTO background_jobs (id, user_id, kind, status, step, total_steps, stage_label, started_at, last_heartbeat, pid, stalled)
-         VALUES (?, ?, ?, 'running', 0, ?, ?, datetime('now'), datetime('now'), ?, 0)
+        `INSERT INTO background_jobs (id, user_id, kind, status, step, total_steps, stage_label, started_at, last_heartbeat, pid, stalled, model)
+         VALUES (?, ?, ?, 'running', 0, ?, ?, datetime('now'), datetime('now'), ?, 0, ?)
          ON CONFLICT(id) DO UPDATE SET status='running', step=0, total_steps=excluded.total_steps,
            stage_label=excluded.stage_label, started_at=datetime('now'), finished_at=NULL, error=NULL,
-           last_heartbeat=datetime('now'), pid=excluded.pid, stalled=0`,
-        [rowId, userId, kind, Number(totalSteps) || 0, stageLabel, pid],
+           last_heartbeat=datetime('now'), pid=excluded.pid, stalled=0, model=excluded.model`,
+        [rowId, userId, kind, Number(totalSteps) || 0, stageLabel, pid, modelStr],
       ).catch(() => {});
       return rowId;
     },
@@ -60,7 +63,7 @@ export function createActivityFeedNamespace({ d1QueryAdmin, randomUUID }) {
     async active(userId) {
       // d1QueryAdmin returns { results: [...] } (same as audit_log) — unwrap it.
       const r = await q(
-        `SELECT id, kind, status, step, total_steps, stage_label, started_at, last_heartbeat, pid, stalled
+        `SELECT id, kind, status, step, total_steps, stage_label, started_at, last_heartbeat, pid, stalled, model
          FROM background_jobs
          WHERE user_id = ? AND status = 'running'
            AND (strftime('%s','now') - strftime('%s', last_heartbeat)) * 1000 < ?
@@ -73,7 +76,7 @@ export function createActivityFeedNamespace({ d1QueryAdmin, randomUUID }) {
     /** Recently finished jobs (for the feed's history). */
     async recent(userId, limit = 10) {
       const r = await q(
-        `SELECT id, kind, status, step, total_steps, stage_label, started_at, finished_at, error
+        `SELECT id, kind, status, step, total_steps, stage_label, started_at, finished_at, error, model
          FROM background_jobs
          WHERE user_id = ? AND status != 'running'
          ORDER BY COALESCE(finished_at, started_at) DESC LIMIT ?`,

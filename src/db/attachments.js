@@ -14,6 +14,7 @@
  * @property {(result: any) => any} firstRow
  */
 import { assertSafeColumns } from './column-guard.js';
+import { assertUserNamespacedBlobPath } from '../paths.js';
 
 export function createAttachmentsNamespace(deps) {
   if (!deps) throw new TypeError('createAttachmentsNamespace: deps required');
@@ -46,6 +47,11 @@ export function createAttachmentsNamespace(deps) {
   return {
     async insert(record) {
       assertSafeColumns(Object.keys(record || {}), 'attachments');
+      // Multi-tenant floor: a stored blob path must be namespaced under its own
+      // user (the unscoped refcount blob-GC relies on this). Fail-closed here so
+      // no upload/import caller can persist a foreign-prefixed local_path. Null
+      // (legacy r2-only rows) is allowed.
+      if (record?.local_path != null) assertUserNamespacedBlobPath(record.local_path, record.user_id);
       const cols = Object.keys(record).join(', ');
       const placeholders = Object.keys(record).map(() => '?').join(', ');
       const result = await d1Query(
@@ -95,6 +101,14 @@ export function createAttachmentsNamespace(deps) {
     },
 
     async update(id, fields) {
+      // local_path is an INSERT-ONLY storage key: it is set once (namespaced
+      // under the owning user) at insert and the reference-counted blob GC keys
+      // on it. Refuse to mutate it here — update() cannot see user_id to
+      // re-validate the namespacing, so the fail-closed rule is "never via
+      // update". No caller sets it today; this keeps the invariant total.
+      if (fields && Object.prototype.hasOwnProperty.call(fields, 'local_path')) {
+        throw new Error('attachments.update: local_path is insert-only (cross-tenant blob-collision guard)');
+      }
       const keys = assertSafeColumns(Object.keys(fields), 'attachments');
       if (!keys.length) return;
       const sets = keys.map((k) => `${k} = ?`).join(', ');

@@ -81,6 +81,12 @@ export function createSendHandler(deps) {
     const content = typeof body[contentField] === 'string' ? body[contentField] : '';
     const target = body[targetField];
     const { replyToMessageId, sourceKind, sourceId, trusted, crossChannelReason, voice } = body;
+    // WHICH model produced the reply — recorded on the persisted message (model-in-history).
+    // A model NAME only (§1); clamp defensively. Passed ONLY to persist(), NEVER to
+    // adapter.send() (which takes {target,content,replyToMessageId}) → it cannot reach the
+    // external platform. Untrusted at this boundary (any loopback caller can set it), so it
+    // is length-clamped and stays plaintext provenance, exactly like `source`.
+    const model = (typeof body.model === 'string' && body.model.trim()) ? body.model.trim().slice(0, 120) : null;
 
     // `trusted` (skip authority + rate-limit, e.g. command-ack replies) is a
     // CAPABILITY, not a self-assertable body flag (H2, 2026-06-11). A body
@@ -168,7 +174,7 @@ export function createSendHandler(deps) {
 
       audit({ ...baseAudit, decision: 'allowed', reason: isAgentExplicit ? 'reply-tool' : (trustedReq ? 'trusted' : 'cross-source'), delivered: true, httpStatus: result.httpStatus });
       persist({
-        content, role: 'assistant', source: kind,
+        content, role: 'assistant', source: kind, model,
         conversationId: String(target),
         metadata: { channelId: String(target), origin: 'explicit-send', provenanceKind, ...(replyToMessageId != null ? { inReplyTo: String(replyToMessageId) } : {}) },
       });
@@ -190,7 +196,7 @@ export function createSendHandler(deps) {
       audit({ ...baseAudit, decision: 'allowed', reason: `apicall-failed:${partial ? 'partial' : (err?.message?.slice(0, 60) || 'unknown')}`, delivered: partial, httpStatus });
       if (partial) {
         dedup.mark(target, content);
-        persist({ content, role: 'assistant', source: kind, conversationId: String(target), metadata: { channelId: String(target), origin: 'explicit-send', partial: true } });
+        persist({ content, role: 'assistant', source: kind, model, conversationId: String(target), metadata: { channelId: String(target), origin: 'explicit-send', partial: true } });
       }
       return res.status(partial ? 207 : (httpStatus >= 400 ? httpStatus : 502)).json({ ok: false, error: partial ? 'partial-delivery' : 'send-failed', sent: err?.sent ?? 0 });
     }

@@ -56,6 +56,8 @@ Thumbs.db
 
 # Local data (SQLite vault + KCV + OAuth/session store) — runtime, never commit
 data/
+# …but NOT source folders that happen to be named data/ (portal client helpers).
+!portal-app/src/lib/data/
 auth.db
 *.db
 *.db-shm

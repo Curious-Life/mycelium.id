@@ -27,7 +27,7 @@ import readline from 'node:readline';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { restoreTable } from './vault-import.js';
-import { putBlob } from './blob-store.js';
+import { putBlob, isUserNamespacedBlobPath } from './blob-store.js';
 import { getMasterKey } from '../crypto/crypto-local.js';
 import { encodeVectorRaw } from '../search/ann/decode.js';
 
@@ -191,8 +191,10 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
         if (sz > 0 && sz <= MAX_ATTACHMENT_BYTES) {
           const buf = fs.readFileSync(abs);
           sha = crypto.createHash('sha256').update(buf).digest('hex');
+          // Reuse a byte-identical blob only if its path is namespaced under THIS
+          // user (multi-tenant floor; always true in single-user V1).
           const reuse = blobByHash.get(sha);
-          if (reuse) { localPath = reuse; attStats.blobsReused++; }
+          if (reuse && isUserNamespacedBlobPath(reuse, userId)) { localPath = reuse; attStats.blobsReused++; }
           else { const { path: stored } = await putBlob(buf, { userId, ext: path.extname(fname) }); localPath = stored; blobByHash.set(sha, stored); attStats.blobs++; }
         }
       }

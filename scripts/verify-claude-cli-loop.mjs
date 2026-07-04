@@ -129,8 +129,45 @@ const mkLoop = (spawnImpl, writeSink) => createClaudeCliLoop({
   rec('CL7 spawn error resolves with lastErr (no throw)', !threw && r && r.lastErr instanceof Error && r.text === '', threw ? 'threw' : JSON.stringify(r?.lastErr?.message));
 }
 
+// ── CL8-11 — session continuity (--session-id create / --resume continue) ──
+const pairIn = (cap, flag, val) => { const i = cap.args.indexOf(flag); return i >= 0 && cap.args[i + 1] === val; };
+{
+  // resume an existing session → --resume <id>, NOT --session-id
+  const { spawnImpl, cap } = seam({ lines: [result({ result: 'ok', subtype: 'success' })] });
+  const r = await mkLoop(spawnImpl).run({ system: 'S', userMessage: 'hi', send: () => {}, sessionId: 'S1', resume: true });
+  rec('CL8 resume=true → --resume <id>, no --session-id', pairIn(cap, '--resume', 'S1') && !cap.args.includes('--session-id'), cap.args.join(' '));
+  rec('CL8 result carries sessionId + sessionError=false on a clean turn', r.sessionId === 'S1' && r.sessionError === false, JSON.stringify({ s: r.sessionId, e: r.sessionError }));
+}
+{
+  // first turn (create) → --session-id <id>, NOT --resume
+  const { spawnImpl, cap } = seam({ lines: [result({ result: 'ok', subtype: 'success' })] });
+  const r = await mkLoop(spawnImpl).run({ system: 'S', userMessage: 'hi', send: () => {}, sessionId: 'S2', resume: false });
+  rec('CL9 resume=false → --session-id <id>, no --resume', pairIn(cap, '--session-id', 'S2') && !cap.args.includes('--resume'), cap.args.join(' '));
+  rec('CL9 created session echoed back', r.sessionId === 'S2', JSON.stringify(r.sessionId));
+}
+{
+  // no sessionId → legacy one-shot: neither flag; result.sessionId null
+  const { spawnImpl, cap } = seam({ lines: [result({ result: 'ok', subtype: 'success' })] });
+  const r = await mkLoop(spawnImpl).run({ system: 'S', userMessage: 'hi', send: () => {} });
+  rec('CL10 no sessionId → no --session-id/--resume + result.sessionId null', !cap.args.includes('--session-id') && !cap.args.includes('--resume') && r.sessionId === null, cap.args.join(' '));
+}
+{
+  // claude reports a missing session as an is_error RESULT (real stream-json shape,
+  // verified live) → result.sessionError=true so the caller self-heals.
+  const { spawnImpl } = seam({ lines: [result({ subtype: 'error_during_execution', is_error: true, errors: ['No conversation found with session ID: S3'] })] });
+  const r = await mkLoop(spawnImpl).run({ system: 'S', userMessage: 'hi', send: () => {}, sessionId: 'S3', resume: true });
+  rec('CL11 session-not-found (is_error result) → result.sessionError=true', r.sessionError === true, JSON.stringify(r));
+}
+{
+  // FALSE-POSITIVE GUARD (review LOW): the model's own answer quoting "already in use"
+  // must NOT flip sessionError — the match is scoped to the is_error result, not text.
+  const { spawnImpl } = seam({ lines: [textDelta('That port is already in use, try another.'), result({ result: 'That port is already in use, try another.', subtype: 'success' })] });
+  const r = await mkLoop(spawnImpl).run({ system: 'S', userMessage: 'hi', send: () => {}, sessionId: 'S4', resume: true });
+  rec('CL12 benign answer quoting "already in use" → sessionError stays false', r.sessionError === false, JSON.stringify({ e: r.sessionError, t: r.text }));
+}
+
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
-console.log(`VERDICT: ${allPass ? 'GO — claude-cli engine: stream-json mapping · secure flags (mcp__mycelium__* only, no skip-permissions) · loopback mcp-config · stdin prompt · SIGTERM abort · error-safe' : 'NO-GO — see FAIL rows'}`);
+console.log(`VERDICT: ${allPass ? 'GO — claude-cli engine: stream-json mapping · secure flags (mcp__mycelium__* only, no skip-permissions) · loopback mcp-config · stdin prompt · SIGTERM abort · error-safe · session --resume/--session-id continuity' : 'NO-GO — see FAIL rows'}`);
 console.log('='.repeat(64));
 process.exit(allPass ? 0 : 1);

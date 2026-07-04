@@ -42,15 +42,13 @@ import { inferWithCascade } from '../inference/cascade.js';
 import { estimateTokens } from '../inference/token-budget.js';
 import { createUsageSink } from '../inference/usage.js';
 
-// §4g cascade (opt-in). Default OFF → the single active provider preserves v1
-// behavior; ON → try EU→frontier→local until one succeeds. The preference is a
-// persisted user setting (the Settings → Intelligence "smart routing" toggle);
-// MYCELIUM_INFER_CASCADE is the env fallback used only when no setting is saved.
-export async function isCascadeEnabled(db, userId, env = process.env) {
-  try {
-    const s = await db?.users?.getSettings?.(userId);
-    if (s && typeof s.inferCascade === 'boolean') return s.inferCascade;
-  } catch { /* fall through to env */ }
+// §4g cascade (opt-in, ENV-ONLY as of 2026-07-02). Default OFF → the single active provider
+// preserves v1 behavior; ON → try EU→frontier→local until one succeeds. The Settings →
+// Intelligence "smart routing" toggle + its /providers/routing routes were REMOVED; a stale
+// `settings.inferCascade` is intentionally IGNORED (db/userId unused, kept for signature
+// stability) so a previously-ON user is never stuck ON without an off switch. Operators opt
+// in via env only.
+export async function isCascadeEnabled(_db, _userId, env = process.env) {
   return /^(1|true|yes)$/i.test(String(env.MYCELIUM_INFER_CASCADE || '').trim());
 }
 

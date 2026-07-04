@@ -365,10 +365,12 @@ export function describeProvider(cfg = {}) {
   // Subscription first (no anthropicApiKey present) — else the preflight returns null
   // and the turn is skipped {skipped:'no-model'} despite a valid provider.
   if (cfg.claudeOAuthToken) {
-    return { kind: 'anthropic', label: cfg.label || 'Claude (subscription)', model: cfg.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard', local: false };
+    // Always "Claude subscription" (ignore any stale stored label like "Claude 3") — the
+    // auth type IS the identity here, and it distinguishes it from a BYOK "Claude API".
+    return { kind: 'anthropic', label: 'Claude subscription', model: cfg.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard', local: false };
   }
   if (cfg.anthropicApiKey) {
-    return { kind: 'anthropic', label: 'Claude', model: cfg.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard', local: false };
+    return { kind: 'anthropic', label: 'Claude API', model: cfg.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard', local: false };
   }
   if (cfg.openaiApiKey || cfg.baseUrl) {
     const isLocal = cfg.jurisdiction === 'local' || /(?:\/\/)?(?:127\.0\.0\.1|localhost|0\.0\.0\.0)/.test(cfg.baseUrl || '');

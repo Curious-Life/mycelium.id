@@ -181,8 +181,37 @@ function detectLocalFiles(home) {
 }
 
 /** Scan the allowlist. Returns an array of detection records (found sources). */
+// A decrypted `mycelium-recent-export` bundle (the canonical repo's time-sliced
+// export) dropped into a standard folder. Shallow-scans each sweep root's
+// immediate children for a dir whose manifest.json declares the format — cheap
+// (one readdir + one small JSON per candidate). @see recent-export-import.js.
+function detectRecentExport(home) {
+  for (const root of localSweepRoots(home)) {
+    let ents; try { ents = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
+    for (const e of ents) {
+      if (!e.isDirectory() || e.name.startsWith('.')) continue;
+      const dir = path.join(root, e.name);
+      try {
+        const m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
+        if (m?.format === 'mycelium-recent-export') {
+          const c = m.counts || {};
+          const days = m.window?.days;
+          return {
+            source: 'recent-export', found: true, path: dir,
+            count: (c.messages || 0) + (c.documents || 0), unit: 'items', importable: true,
+            action: 'import-recent-export',
+            dateRange: m.window?.cutoff ? [String(m.window.cutoff).slice(0, 10), String(m.exportedAt || '').slice(0, 10) || null] : undefined,
+            note: days ? `last ${days} days` : undefined,
+          };
+        }
+      } catch { /* not a bundle dir */ }
+    }
+  }
+  return null;
+}
+
 export function detectSources({ home = os.homedir() } = {}) {
-  const detectors = [detectObsidian, detectClaudeCode, detectHermes, detectOpenClaw, detectLocalFiles];
+  const detectors = [detectObsidian, detectClaudeCode, detectHermes, detectOpenClaw, detectLocalFiles, detectRecentExport];
   const out = [];
   for (const det of detectors) {
     try { const r = det(home); if (r) out.push(r); } catch { /* one detector failing never breaks the scan */ }
@@ -255,11 +284,14 @@ function isWithin(root, child) {
  * @param {string} requested  the client-supplied folderPath/dirPath
  */
 export function assertImportPathAllowed(requested, { home = os.homedir(), env = process.env } = {}) {
-  if (typeof requested !== 'string' || !requested.trim()) throw new Error('import_path_denied: path required');
+  // e.code is the canonical signal the shared route error-responder keys on
+  // (respondImportError), so denial maps to 400 without relying on message text.
+  const deny = (why) => { const e = new Error(`import_path_denied: ${why}`); e.code = 'import_path_denied'; throw e; };
+  if (typeof requested !== 'string' || !requested.trim()) deny('path required');
   const resolved = realRoot(requested);
-  if (!resolved) throw new Error('import_path_denied: path does not resolve');
+  if (!resolved) deny('path does not resolve');
   const allowed = importAllowedRoots({ home, env });
-  if (!allowed.some((root) => isWithin(root, resolved))) throw new Error('import_path_denied: outside the allowed import roots');
+  if (!allowed.some((root) => isWithin(root, resolved))) deny('outside the allowed import roots');
   return resolved;
 }
 

@@ -42,13 +42,11 @@ xcrun notarytool submit "$ZIP" --keychain-profile "$PROFILE" --wait
 xcrun stapler staple "$APP"
 rm -f "$ZIP"
 
-# 3. Build a distributable .dmg FROM the stapled .app.
-echo "── 3/4  build .dmg from stapled app ────────────────────────────"
-mkdir -p "$(dirname "$DMG_OUT")"
-rm -f "$DMG_OUT"
-STAGE="$(mktemp -d)"; cp -R "$APP" "$STAGE/"; ln -s /Applications "$STAGE/Applications"
-hdiutil create -volname "Mycelium" -srcfolder "$STAGE" -ov -format UDZO "$DMG_OUT"
-rm -rf "$STAGE"
+# 3. Build the DESIGNED distributable .dmg FROM the stapled .app — on-brand
+#    background + drag-arrow layout (app icon → Applications). The window design
+#    lives in scripts/make-dmg.sh (single source of truth for the installer view).
+echo "── 3/4  build designed .dmg from stapled app ───────────────────"
+bash "$HERE/scripts/make-dmg.sh" "$APP" "$DMG_OUT"
 # Code-sign the DMG itself (Developer ID, secure timestamp). Notarizing an UNSIGNED
 # dmg succeeds and staples, but `spctl --assess --context context:primary-signature`
 # then rejects it (no primary signature to evaluate). Signing the disk image gives

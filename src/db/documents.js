@@ -362,6 +362,36 @@ export function createDocumentsNamespace(deps) {
     },
 
     /**
+     * HARD-delete a batch of documents by id (user-scoped) + their derived
+     * clustering_points. The bulk primitive behind delete-by-source / by-type.
+     * Keyed by documents.id (NOT path) because clustering_points.source_id and the
+     * search-index doc key (`document:<id>`) both use the id. Per-row after-delete
+     * hooks are intentionally skipped — a bulk job triggers one UI refresh on
+     * completion rather than N broadcasts. noteDelete + no blobs here (documents
+     * carry no attachments). Caller resolves ids from a user_id+source/type SELECT.
+     *
+     * @param {string[]} ids   documents.id values
+     * @param {string} userId
+     * @returns {Promise<{deleted:number}>}
+     */
+    async deleteIds(ids, userId) {
+      const list = Array.isArray(ids) ? ids.filter((id) => typeof id === 'string' && id) : [];
+      if (!userId) throw new Error('documents.deleteIds: userId required (fail-closed, never table-wide)');
+      if (!list.length) return { deleted: 0 };
+      const ph = list.map(() => '?').join(',');
+      await d1Query(
+        `DELETE FROM clustering_points WHERE user_id = ? AND source_type = 'document' AND source_id IN (${ph})`,
+        [userId, ...list],
+      );
+      await d1Query(
+        `DELETE FROM documents WHERE user_id = ? AND id IN (${ph})`,
+        [userId, ...list],
+      );
+      bustMindscapePoints(userId);
+      return { deleted: list.length };
+    },
+
+    /**
      * Soft-redact (forget) a document: null every encrypted column + the
      * embedding, delete the derived clustering_points row, stamp forgotten_at.
      * Keeps the path/timestamps husk for audit. Returns the pre-redaction

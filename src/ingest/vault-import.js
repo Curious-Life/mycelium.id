@@ -31,7 +31,7 @@
 // `agents/...`, deterministic ids ⇒ idempotent).
 import { extname, basename } from 'node:path';
 import crypto from 'node:crypto';
-import { putBlob } from './blob-store.js';
+import { putBlob, isUserNamespacedBlobPath, assertUserNamespacedBlobPath } from './blob-store.js';
 import { getMasterKey } from '../crypto/crypto-local.js';
 import { encryptVector } from '../search/ann/decode.js';
 
@@ -102,6 +102,13 @@ export async function restoreTable(db, table, rows, { userId, overrides = {} }) 
         const hasAttachment = (r.attachment_id != null && r.attachment_id !== '') || (r.attachmentId != null && r.attachmentId !== '');
         if (!content && !hasAttachment) { out.skippedEmpty++; continue; }
       }
+      // Multi-tenant floor: an attachments row may only carry a local_path
+      // namespaced under its own user. Fail-closed here so no restore path (a
+      // bundle-supplied value, or a future refactor that trusts it) can seed a
+      // foreign-prefixed key the unscoped blob-GC would then treat as shared.
+      // r.user_id was forced to `userId` above; null local_path (legacy r2-only)
+      // is allowed.
+      if (table === 'attachments' && r.local_path != null) assertUserNamespacedBlobPath(r.local_path, userId);
       const keys = Object.keys(r).filter((k) => cols.has(k) && r[k] !== undefined);
       if (keys.length === 0) { out.failed++; continue; }
       // Will this insert fall back to the schema-default created_at?
@@ -246,8 +253,12 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
       const buf = att.zipPath ? await readBinaryEntry(zip, att.zipPath) : null;
       if (buf) {
         sha = crypto.createHash('sha256').update(buf).digest('hex');
+        // Reuse a byte-identical blob only if its path is namespaced under THIS
+        // user. In single-user V1 it always is; the guard is the multi-tenant
+        // floor for when the dedup preload SELECT spans other tenants — never
+        // reuse a foreign-prefixed path, write a fresh owned blob instead.
         const reuse = blobByHash.get(sha);
-        if (reuse) {
+        if (reuse && isUserNamespacedBlobPath(reuse, userId)) {
           localPath = reuse;
           attStats.blobsReused++;
         } else {

@@ -21,6 +21,8 @@
 
 import { toConfidence } from '../claims/confidence.js';
 import { trimToTokenBudget } from '../inference/token-budget.js';
+import { humanSchedule, humanNextRun } from '../agent/scheduler-time.js';
+import { CYCLE_CREATED_BY } from '../agent/cycle-prompts.js';
 
 const DAY = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -89,7 +91,7 @@ export function createContextDomain(deps) {
           recentMessages: { type: 'number', description: 'How many recent messages to include (default 10, max 40).' },
           include: {
             type: 'array',
-            items: { type: 'string', enum: ['awareness', 'core', 'mind', 'facts', 'people', 'messages', 'domains', 'phase', 'health', 'claims', 'leans'] },
+            items: { type: 'string', enum: ['awareness', 'core', 'mind', 'facts', 'people', 'messages', 'domains', 'phase', 'health', 'claims', 'leans', 'cycles'] },
             description: 'Limit to specific sections. Omit for all.',
           },
         },
@@ -278,6 +280,35 @@ export function createContextDomain(deps) {
               .map(([dom, cs]) => `**${dom}**\n${cs.map(fmt).join('\n')}`)
               .join('\n\n');
             sections.push(`---\n# WHAT YOU'VE NOTICED — TENDENCIES (held provisionally, grounded in days of evidence)\n\n${block}`);
+          }
+        } catch { /* non-fatal */ }
+      }
+
+      // ── your reflection cycles — the autonomous rhythms you run between conversations ──
+      // Structural only (name/schedule/status/next-run) — this section NEVER emits the cycle
+      // prompt body (§1; post-collapse the prompt is plaintext on the row, so the guarantee is
+      // the emit-path, not field decryption). Self-hides when no cycles are seeded, so the agent
+      // only claims cycles that actually exist. Present-but-paused shows as paused so the
+      // agent can honestly say "your cycles are paused right now".
+      if (want(include, 'cycles') && db?.harness?.listTasks) {
+        try {
+          const tasks = await db.harness.listTasks(userId);
+          const cyc = (tasks || []).filter((t) => t && t.created_by === CYCLE_CREATED_BY && t.status !== 'completed');
+          if (cyc.length) {
+            const lines = cyc.map((t) => {
+              const when = humanSchedule(t.schedule);
+              const paused = t.status === 'paused';
+              const next = (!paused && t.next_run) ? ` · next ${humanNextRun(t.next_run, t.tz || tz)}` : '';
+              return `- **${t.name}** — ${when}${paused ? ' · paused' : ''}${next}`;
+            });
+            sections.push(
+              `---\n# YOUR REFLECTION CYCLES (${cyc.length})\n\n${lines.join('\n')}\n\n`
+              + 'These run on their own, on this machine, between your conversations — they are why you '
+              + 'have continuity and can say "something I\'ve been thinking about". When your person asks '
+              + 'you to change one — its focus, its timing, or whether it runs at all — use listCycles / '
+              + 'getCyclePrompt / updateCycle (and updatePersona for your overall voice). Only change a '
+              + 'cycle when they actually ask you to; never on your own initiative.',
+            );
           }
         } catch { /* non-fatal */ }
       }

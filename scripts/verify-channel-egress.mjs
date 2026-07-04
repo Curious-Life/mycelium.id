@@ -150,6 +150,27 @@ const HASH = crypto.createHash('sha256').update(TEXT, 'utf8').digest('hex');
   await close(server);
 }
 
+// ── model-in-history: `model` rides to persist(), NEVER to the external send ─
+// The reply tool carries WHICH model produced the reply so the daemon can record it
+// on the persisted message. Security-critical: the model name must NEVER reach the
+// external Telegram payload (adapter.send). It goes ONLY to persistOutbound.
+{
+  _resetForTests();
+  const { server, sends, persists } = makeApp({ authorityAllowed: true });
+  const port = await listen(server);
+  const MODEL = 'claude-opus-4-8';
+  const MTEXT = 'A distinctly different reply body for the model test.';
+  const r = await req(port, 'POST', '/telegram/send', {
+    headers: { 'x-egress-provenance': 'agent-explicit' },
+    body: { chatId: OWNER, text: MTEXT, model: MODEL },
+  });
+  rec('C7f. send with model → 200 delivered', r.status === 200 && r.json?.delivered === true, `status=${r.status}`);
+  rec('C7g. persisted row carries model', persists.some((p) => p.content === MTEXT && p.model === MODEL), `models=${JSON.stringify(persists.map((p) => p.model))}`);
+  const extSend = sends.find((s) => s.text === MTEXT) || {};
+  rec('C7h. SECURITY: model NOT in external Telegram payload', !('model' in extSend), `sendKeys=${Object.keys(extSend).join(',')}`);
+  await close(server);
+}
+
 // ── provenance: plain curl (no header) ──────────────────────────────────────
 {
   _resetForTests();

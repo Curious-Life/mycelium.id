@@ -94,6 +94,34 @@ const FENCE = '⟦⟦⟦', CLOSE = '⟧⟧⟧';
   rec('U4 source sanitized (no banner injection)', !evil.includes('[SYSTEM override') && /from telegramSYSTEMoverride|from telegram\b/.test(evil), evil.split('\n')[0]);
 }
 
+// ── S1-S3 — claude_sessions store (one CLI session per conversation) ──
+{
+  const conv = 'chat:conv-cli-1';
+  rec('S1 unset conversation → null session', (await db.harness.getClaudeSessionId(U, conv)) === null);
+  await db.harness.setClaudeSessionId(U, conv, 'sess-AAA');
+  rec('S1 set → get round-trips', (await db.harness.getClaudeSessionId(U, conv)) === 'sess-AAA');
+  await db.harness.setClaudeSessionId(U, conv, 'sess-BBB'); // upsert replaces
+  rec('S2 upsert replaces the session id (one per conversation)', (await db.harness.getClaudeSessionId(U, conv)) === 'sess-BBB');
+  rec('S2 a different conversation is isolated', (await db.harness.getClaudeSessionId(U, 'chat:conv-cli-2')) === null);
+  await db.harness.clearClaudeSessionId(U, conv);
+  rec('S3 clear → null (self-heal after a failed --resume)', (await db.harness.getClaudeSessionId(U, conv)) === null);
+  // content-free: the session store table holds only the opaque handle, no plaintext
+  const raw = rawRead(`SELECT session_id, conversation_id FROM claude_sessions WHERE user_id = ?`, [U]);
+  rec('S3 store is empty after clear', raw.length === 0);
+}
+
+// ── L1 — listConversations: the portal inbox surface (grouped, newest-first, scoped) ──
+{
+  const convos = await db.messages.listConversations(U, { sources: ['telegram'], limit: 50 });
+  const ids = convos.map((c) => c.conversation_id);
+  rec('L1 lists both telegram conversations (excludes the null-conv stray)', ids.includes(CONV_A) && ids.includes(CONV_B) && convos.length === 2, ids.join(','));
+  const a = convos.find((c) => c.conversation_id === CONV_A);
+  rec('L1 carries source + count + last_at, NO content column', a?.source === 'telegram' && Number(a?.n) === 3 && !!a?.last_at && !('content' in (a || {})), JSON.stringify(a));
+  rec('L1 newest-first (CONV_A last msg 1s ago > CONV_B 2s ago)', convos[0].conversation_id === CONV_A, convos.map((c) => c.conversation_id).join(','));
+  const none = await db.messages.listConversations(U, { sources: ['discord'], limit: 50 });
+  rec('L1 source filter excludes non-matching sources', none.length === 0, `n=${none.length}`);
+}
+
 await close?.();
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));

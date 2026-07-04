@@ -30,6 +30,9 @@ const DEFAULT_IDLE_MS = 60_000;
 const DEFAULT_MAX_TURNS = 24;
 const SIGKILL_GRACE_MS = 4_000;    // after SIGTERM, escalate to SIGKILL if the child clings
 const HARD_TIMEOUT_MS = 10 * 60_000;   // absolute cap: run() ALWAYS resolves, even if 'close' never fires
+// claude's session-lifecycle errors (verified live 2026-07-03): --session-id on an
+// existing session, or --resume on a missing one. Caught → result.sessionError.
+const SESSION_ERR_RE = /already in use|No conversation found with session ID/i;
 
 // Build the mcp-config the child reads (`--mcp-config`). Points at the loopback
 // /internal/mcp; server key `mycelium` ⇒ the CLI namespaces the tools as
@@ -97,6 +100,15 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, logger = () =>
       '--allowedTools', 'mcp__mycelium__*',
       '--max-turns', String(DEFAULT_MAX_TURNS),
     ];
+    // Session continuity (fix: a fresh `claude` session every turn lost context + never
+    // auto-compacted). `--resume <id>` continues the conversation's existing session
+    // (claude owns the memory + auto-compacts IN-session); `--session-id <id>` CREATES a
+    // session with OUR id on the first turn. Reusing --session-id on an existing session
+    // errors ("already in use"); resuming a missing one fails soft ("No conversation
+    // found") — both are surfaced as result.sessionError so the caller can
+    // persist-on-create / clear-on-resume-failure (self-heal). No id → legacy one-shot.
+    const sid = (typeof a.sessionId === 'string' && a.sessionId) ? a.sessionId : null;
+    if (sid) args.push(a.resume ? '--resume' : '--session-id', sid);
 
     return await new Promise((resolve) => {
       let text = '';
@@ -106,6 +118,7 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, logger = () =>
       let truncated = false;
       let aborted = false;
       let lastErr = null;
+      let sessionError = false;   // set on "already in use" / "No conversation found"
       let settled = false;
       let buffer = '';
       let lastActivity = Date.now();
@@ -128,7 +141,7 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, logger = () =>
         if (settled) return;
         settled = true;
         cleanup();
-        resolve({ text, toolsUsed, truncated, capped: false, aborted, clientGone: !!a.signal?.aborted, fellBack: false, lastErr });
+        resolve({ text, toolsUsed, truncated, capped: false, aborted, clientGone: !!a.signal?.aborted, fellBack: false, lastErr, sessionId: sid, sessionError });
       };
       // Terminate the child: SIGTERM, then SIGKILL after a grace window if it clings
       // (a child ignoring SIGTERM must never hang run() — the escalation guarantees the
@@ -195,6 +208,11 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, logger = () =>
         } else if (data?.type === 'result') {
           if (typeof data.result === 'string' && data.result) text = data.result;   // final overwrites accumulated
           if (data.subtype === 'error_max_turns') truncated = true;
+          // Session-lifecycle failure surfaces ONLY as an is_error result (verified live in
+          // stream-json: subtype 'error_during_execution' + errors:['No conversation found
+          // with session ID …']). Match it HERE — never against the model's text stream —
+          // so a benign answer quoting "already in use" can't spuriously flip the flag.
+          if (data.is_error === true && SESSION_ERR_RE.test(JSON.stringify(data.errors || data.result || data.subtype || ''))) sessionError = true;
           if (data.usage) send({ type: 'usage', inputTokens: data.usage.input_tokens || 0, outputTokens: data.usage.output_tokens || 0 });
         }
       };
@@ -209,7 +227,9 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, logger = () =>
           try { handle(JSON.parse(s)); } catch { /* skip non-JSON lines */ }
         }
       });
-      child.stderr?.on('data', (chunk) => { const s = chunk.toString().trim(); if (s) logger(`claude stderr: ${s.slice(0, 200)}`); });
+      // stderr also carries the plain session error (belt-and-suspenders; it is stderr,
+      // never the model's answer, so no false-positive risk).
+      child.stderr?.on('data', (chunk) => { const s = chunk.toString().trim(); if (s) { if (SESSION_ERR_RE.test(s)) sessionError = true; logger(`claude stderr: ${s.slice(0, 200)}`); } });
       child.on('error', (err) => { lastErr = err; logger(`claude spawn error: ${err.message}`); finish(); });
       child.on('close', () => {
         if (buffer.trim()) { try { handle(JSON.parse(buffer.trim())); } catch { /* ignore trailing */ } }

@@ -178,33 +178,20 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     try {
       const row = await db.providers.get(id, userId);
       if (!row) return bad(res, 404, 'provider not found');
-      let apiKey = null;
-      try { apiKey = row.credentials ? JSON.parse(row.credentials).apiKey : null; } catch { /* malformed → no key */ }
-      const r = await listModels({ provider: row.provider, baseUrl: row.base_url, apiKey, fetch });
+      let apiKey = null, token = null;
+      // A BYOK provider stores `.apiKey`; a SUBSCRIPTION stores `.claudeOAuthToken`
+      // (listModels then uses the Bearer + Claude-Code headers instead of x-api-key).
+      try { const c = row.credentials ? JSON.parse(row.credentials) : {}; apiKey = c.apiKey || null; token = c.claudeOAuthToken || null; } catch { /* malformed → no key */ }
+      const r = await listModels({ provider: row.provider, baseUrl: row.base_url, apiKey, token, fetch });
       res.json({ ok: r.ok, models: r.models || [], error: r.ok ? null : r.error });
     } catch { res.json({ ok: false, models: [], error: 'unreachable' }); }
   });
 
-  // §4g "smart routing" (multi-provider cascade) preference — persisted in the
-  // user settings blob; the gateway reads it DB-first (env MYCELIUM_INFER_CASCADE
-  // is only the fallback when unset). A non-secret boolean, so plain settings.
-  router.get('/providers/routing', async (_req, res) => {
-    try {
-      const s = await db.users.getSettings(userId);
-      ok(res, { cascade: s?.inferCascade === true });
-    } catch { bad(res, 500, 'failed to read routing preference'); }
-  });
-  router.put('/providers/routing', async (req, res) => {
-    try {
-      const cascade = req.body?.cascade === true;
-      // A fresh single-user vault may have no `users` row yet; updateSettings is
-      // an UPDATE (no-op without a row), so ensure one exists before persisting.
-      try { await db.users.create(userId, userId); } catch { /* row already exists */ }
-      const s = await db.users.getSettings(userId);
-      await db.users.updateSettings(userId, { ...s, inferCascade: cascade });
-      ok(res, { cascade });
-    } catch { bad(res, 500, 'failed to update routing preference'); }
-  });
+  // NOTE: the "Smart routing" (multi-provider cascade) UI + its GET/PUT /providers/routing
+  // routes were REMOVED (operator decision, 2026-07-02) — it confused the explicit per-task
+  // picks. The cascade ENGINE (resolveProviderChain / cascade.js) remains but is now gated
+  // ONLY by env `MYCELIUM_INFER_CASCADE` (default off), so it's inert unless an operator
+  // opts in. `settings.inferCascade` is no longer written by the product.
 
   // ── §4g subscription opt-in ─────────────────────────────────────────────────
   // By default the deepest persona/claim abstractions (claims/discovery, validator —
@@ -399,11 +386,18 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   router.get('/auth/openai/status', (_req, res) => ok(res, { authenticated: false }));
   router.post('/auth/openai/disconnect', (_req, res) => ok(res));
 
-  // Is a Claude subscription connected? (any auth_type='oauth' row).
+  // Is a Claude subscription connected? (any auth_type='oauth' row). Also returns the
+  // non-secret account identity (email/plan/org) for the card — read from the full row's
+  // credentials blob; NEVER returns the token.
   router.get('/auth/claude/status', async (_req, res) => {
     try {
       const sub = (await db.providers.list(userId)).find(isSubscriptionRow);
-      ok(res, { authenticated: !!sub, providerId: sub?.id || null });
+      let account = null, model = null;
+      if (sub) {
+        model = sub.model_preference || null;
+        try { const full = await db.providers.get(sub.id, userId); const c = full?.credentials ? JSON.parse(full.credentials) : {}; account = c.account || null; } catch { /* no account metadata */ }
+      }
+      ok(res, { authenticated: !!sub, providerId: sub?.id || null, account, model });
     } catch { ok(res, { authenticated: false }); }
   });
 
@@ -438,15 +432,19 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
       try { hadActive = (await db.providers.list(userId)).some((r) => r.is_active); } catch { /* fresh vault */ }
       const id = await db.providers.create(userId, {
         provider: 'anthropic',
-        label: 'Claude (subscription)',
+        label: 'Claude subscription',
         authType: 'oauth',
-        credentials: JSON.stringify({ claudeOAuthToken: creds.claudeOAuthToken, refreshToken: creds.refreshToken, expiresAt: creds.expiresAt, scopes: creds.scopes }),
+        // account = non-secret identity (email/plan/org) captured from ~/.claude.json, so
+        // the card can show "connected as <email>". Stored alongside the token in the
+        // whole-file-SQLCipher credentials blob (list() omits credentials; status exposes
+        // only the account, never the token).
+        credentials: JSON.stringify({ claudeOAuthToken: creds.claudeOAuthToken, refreshToken: creds.refreshToken, expiresAt: creds.expiresAt, scopes: creds.scopes, account: creds.account || null }),
         model: null,
         baseUrl: null,
       });
       let activated = false;
       if (!hadActive) { try { await db.providers.setActive(id, userId); activated = true; } catch { /* non-fatal */ } }
-      ok(res, { id, activated, scopes: creds.scopes });
+      ok(res, { id, activated, scopes: creds.scopes, account: creds.account || null });
     } catch { bad(res, 500, 'failed to store subscription'); }
   });
 

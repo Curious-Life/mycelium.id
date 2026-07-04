@@ -11,8 +11,12 @@
 //   CO17    isTokenExpired skew
 import { anthropicAuthHeaders, anthropicSystem, CLAUDE_CODE_PREAMBLE, CLAUDE_CODE_BETA, CLAUDE_CODE_UA } from '../src/inference/anthropic-wire.js';
 import { describeProvider, createAgentHarness } from '../src/agent/harness.js';
-import { resolveInferenceConfig, resolveProviderChain } from '../src/inference/resolve.js';
+import { resolveInferenceConfig, resolveProviderChain, _setSubscriptionTokenReaderForTests } from '../src/inference/resolve.js';
 import { createInferenceRouter } from '../src/inference/router.js';
+// Deterministic: never let the LIVE keychain token (a dev box with `claude` logged in)
+// override the stub tokens these tests assert on. The live refresh is covered by
+// verify:resolve R5c–R5f. CI has no keychain so this is a no-op there.
+_setSubscriptionTokenReaderForTests(async () => null);
 import { importFromClaudeCli, isTokenExpired, ClaudeImportError } from '../src/inference/claude-oauth.js';
 
 const enc = new TextEncoder();
@@ -50,7 +54,7 @@ const fakeDb = (row) => ({ providers: { getActive: async () => row } });
   const sub = describeProvider({ claudeOAuthToken: 'sk-ant-oat-X', label: 'My Max sub' });
   rec('CO4 subscription cfg → non-null, kind anthropic (no silent skip)', !!sub && sub.kind === 'anthropic' && sub.local === false, JSON.stringify(sub));
   const key = describeProvider({ anthropicApiKey: 'K' });
-  rec('CO5 apiKey cfg still describes as Claude', !!key && key.kind === 'anthropic' && key.label === 'Claude');
+  rec('CO5 apiKey cfg describes as "Claude API" (vs "Claude subscription" for oauth)', !!key && key.kind === 'anthropic' && key.label === 'Claude API');
   rec('CO6 empty cfg → null (chat refuses, no fallback)', describeProvider({}) === null);
 }
 

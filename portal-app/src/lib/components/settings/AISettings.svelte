@@ -85,28 +85,43 @@
 	let hwErr = $state<string | null>(null);
 	let pulling = $state<Record<string, { pct: number; status: string; err?: string }>>({});
 
-	let cascade = $state(false);
-	let cascadeBusy = $state(false);
-
 	// ── Claude subscription (opt-in) — import the user's own Claude Code login ──
 	// Not a paste-a-key preset: a distinct flow that imports ~/.claude/.credentials.json
 	// (POST /auth/claude/import, acknowledgeToS required) and stores the OAuth token.
-	let subStatus = $state<{ authenticated: boolean; providerId: number | null } | null>(null);
+	type SubAccount = { email?: string | null; displayName?: string | null; organization?: string | null; plan?: string | null };
+	let subStatus = $state<{ authenticated: boolean; providerId: number | null; account?: SubAccount | null; model?: string | null } | null>(null);
 	let subOpen = $state(false);          // import panel expanded
 	let subAck = $state(false);           // ToS acknowledgment
 	let subConnecting = $state(false);
 	let subErr = $state<string | null>(null);
 	let subSensitive = $state(false);     // §4g opt-in (allow the sub for persona/claim work)
 	let subSensitiveBusy = $state(false);
-	// Model choice for the subscription. Persisted as the provider row's
-	// model_preference; empty falls back to the chat default (Opus 4.8, harness.js
-	// DEFAULT_ANTHROPIC_CHAT_MODEL). Both the direct-API path and the (future) CLI
-	// harness honour it via cloudModel / --model.
+	// Model choice for the subscription. Persisted as the provider row's model_preference;
+	// empty falls back to the chat default (Opus 4.8). A curated CURRENT list is the
+	// reliable baseline; `pullSubModels` best-effort augments it from Anthropic (the OAuth
+	// token may lack models:list scope, so a failed pull just leaves the curated list).
 	const CLAUDE_SUB_MODELS: { id: string; label: string }[] = [
 		{ id: 'claude-opus-4-8', label: 'Opus 4.8 · most capable' },
-		{ id: 'claude-sonnet-4-6', label: 'Sonnet 4.6 · balanced' },
+		{ id: 'claude-sonnet-5', label: 'Sonnet 5 · balanced' },
+		{ id: 'claude-fable-5', label: 'Fable 5 · creative' },
 		{ id: 'claude-haiku-4-5', label: 'Haiku 4.5 · fastest' },
 	];
+	let subModelsPulled = $state<string[]>([]);
+	let subModelsPulling = $state(false);
+	const subModelOptions = $derived.by(() => {
+		const seen = new Set(CLAUDE_SUB_MODELS.map((m) => m.id));
+		const extra = subModelsPulled.filter((id) => !seen.has(id)).map((id) => ({ id, label: id }));
+		return [...CLAUDE_SUB_MODELS, ...extra];
+	});
+	async function pullSubModels() {
+		if (!subStatus?.providerId) return;
+		subModelsPulling = true;
+		try {
+			const r = await api(`/portal/providers/${subStatus.providerId}/models`);
+			const j = await r.json().catch(() => ({}));
+			if (j?.ok && Array.isArray(j.models)) subModelsPulled = j.models.filter((m: string) => /claude/i.test(m));
+		} catch { /* leave the curated list */ } finally { subModelsPulling = false; }
+	}
 	const subProvider = $derived(providers.find((p) => p.id === subStatus?.providerId) ?? null);
 	const subModelValue = $derived(subProvider?.model_preference || 'claude-opus-4-8');
 	let subModelBusy = $state(false);
@@ -124,7 +139,7 @@
 				api('/portal/auth/claude/status').then((r) => r.json()).catch(() => null),
 				api('/portal/providers/sensitive-subscription').then((r) => r.json()).catch(() => null),
 			]);
-			if (s?.ok) subStatus = { authenticated: !!s.authenticated, providerId: s.providerId ?? null };
+			if (s?.ok) subStatus = { authenticated: !!s.authenticated, providerId: s.providerId ?? null, account: s.account ?? null, model: s.model ?? null };
 			if (ss?.ok) subSensitive = ss.allowed === true;
 		} catch { /* section shows the connect state */ }
 	}
@@ -142,7 +157,13 @@
 	}
 	async function disconnectSub() {
 		subConnecting = true; subErr = null;
-		try { await api('/portal/auth/claude/disconnect', { method: 'POST', body: '{}' }); await loadSub(); await load(); }
+		try {
+			// api() returns the Response regardless of status — check .ok so a failed
+			// disconnect surfaces an error instead of silently "doing nothing".
+			const r = await api('/portal/auth/claude/disconnect', { method: 'POST', body: '{}' });
+			if (!r.ok) throw new Error('Disconnect failed');
+			await loadSub(); await load();
+		}
 		catch (e: any) { subErr = e?.message || 'Failed to disconnect'; }
 		finally { subConnecting = false; }
 	}
@@ -226,6 +247,14 @@
 
 	const OLLAMA_BASE = 'http://127.0.0.1:11434/v1';
 	const isLocalUrl = (u: string | null) => !!u && /127\.0\.0\.1|localhost|11434|:1234/.test(u);
+	// Display name for a provider row. For Claude, the AUTH TYPE is the identity, so show
+	// "Claude subscription" (oauth) / "Claude API" (key) rather than any stale stored label
+	// (e.g. an old build wrote "Claude 3"). Non-Claude providers keep their own label.
+	const providerLabel = (p: any) => {
+		const prov = String(p?.provider || '').toLowerCase();
+		if (prov === 'anthropic' || prov === 'claude') return String(p?.auth_type || '').toLowerCase() === 'oauth' ? 'Claude subscription' : 'Claude API';
+		return p?.label || p?.provider;
+	};
 
 	// Cloud presets only here (local lane is the hardware recommender below).
 	const cloudGroups = $derived([
@@ -271,9 +300,6 @@
 			loading = false;
 		}
 	}
-	async function loadRouting() {
-		try { const r = await api('/portal/providers/routing'); if (r.ok) cascade = (await r.json()).cascade === true; } catch { /* default off */ }
-	}
 	async function loadTaskModels() {
 		try { const r = await api('/portal/providers/task-models'); if (r.ok) { const j = await r.json(); tasks = j.tasks || []; onboxTasks = j.onboxTasks || ['categorize', 'enrich']; taskModels = j.taskModels || {}; } } catch { /* default: all tasks use the active provider */ }
 	}
@@ -287,11 +313,6 @@
 		taskBusy = task;
 		try { const r = await api('/portal/providers/task-models', { method: 'PUT', body: JSON.stringify({ task, model }) }); if (r.ok) taskModels = (await r.json()).taskModels || {}; }
 		catch { /* leave */ } finally { taskBusy = null; }
-	}
-	async function setCascade(v: boolean) {
-		cascadeBusy = true;
-		try { const r = await api('/portal/providers/routing', { method: 'PUT', body: JSON.stringify({ cascade: v }) }); if (r.ok) cascade = (await r.json()).cascade === true; }
-		catch { /* leave */ } finally { cascadeBusy = false; }
 	}
 	// ── Voice transcription (dedicated Whisper — fast on-device STT) ──
 	type WhisperCat = { model: string; label: string; sizeMB: number; blurb: string; recommended?: boolean };
@@ -330,7 +351,7 @@
 	}
 
 	onMount(() => {
-		load(); loadRouting(); loadTaskModels(); loadTranscription(); loadIdentity(); loadSub();
+		load(); loadTaskModels(); loadTranscription(); loadIdentity(); loadSub();
 		return () => { if (transPoll) clearInterval(transPoll); };
 	});
 
@@ -366,7 +387,29 @@
 		}
 	}
 	async function setActive(id: number) { await api(`/portal/providers/${id}`, { method: 'PUT', body: JSON.stringify({ is_active: true }) }); await load(); }
-	async function remove(id: number) { await api(`/portal/providers/${id}`, { method: 'DELETE' }); await load(); }
+	// Removing a provider only deletes the CONNECTION (the ai_providers row). For a LOCAL
+	// Ollama provider we additionally offer "delete from disk" (frees space) — a confirmed,
+	// destructive Ollama HTTP delete. Non-local providers just remove the connection.
+	let confirmRemoveId = $state<number | null>(null);
+	let removeBusy = $state(false);
+	const isLocalProvider = (p: any) => isLocalUrl(p.base_url) && !!p.model_preference;
+	function onRemoveClick(p: any) {
+		if (isLocalProvider(p)) confirmRemoveId = p.id;   // ask: connection-only vs also-disk
+		else removeConnection(p.id);
+	}
+	async function removeConnection(id: number) {
+		removeBusy = true;
+		try { await api(`/portal/providers/${id}`, { method: 'DELETE' }); confirmRemoveId = null; await load(); }
+		catch { /* leave */ } finally { removeBusy = false; }
+	}
+	async function removeAndDeleteDisk(p: any) {
+		removeBusy = true;
+		try {
+			await api('/portal/hardware/delete', { method: 'POST', body: JSON.stringify({ name: p.model_preference }) });
+			await api(`/portal/providers/${p.id}`, { method: 'DELETE' });
+			confirmRemoveId = null; await load(); await loadRecommend();
+		} catch { /* leave */ } finally { removeBusy = false; }
+	}
 	async function test(id: number) {
 		testMsg = { ...testMsg, [id]: '…' };
 		try {
@@ -443,6 +486,7 @@
 			{#if activeInfo}
 				<span class="hero-label">Using {activeInfo.label}{#if activeInfo.model && !activeInfo.label.includes(activeInfo.model)} · <span class="hero-model">{activeInfo.model}</span>{/if}</span>
 				{#if JURIS[activeInfo.juris]}<span class="chip {JURIS[activeInfo.juris].cls}">{JURIS[activeInfo.juris].label}</span>{/if}
+				{#if active?.id === subStatus?.providerId && subStatus?.account?.email}<span class="hero-sub">{subStatus.account.email}</span>{/if}
 			{:else}
 				<span class="hero-label">No intelligence connected yet</span>
 				<span class="hero-sub">Connect one below — local &amp; private, or a cloud key.</span>
@@ -555,14 +599,23 @@
 				<div class="preset-group sub-group">
 					<div class="group-title">Your Claude subscription</div>
 					{#if subStatus?.authenticated}
-						<div class="sub-row"><span class="sub-ok">✓ Using your Claude Pro/Max plan</span><button class="link-btn x-red-link" disabled={subConnecting} onclick={disconnectSub}>Disconnect</button></div>
+						<div class="sub-row">
+							<span class="sub-ok">✓ {subStatus.account?.email ? `Connected as ${subStatus.account.email}` : 'Using your Claude Pro/Max plan'}</span>
+							<button class="link-btn x-red-link" disabled={subConnecting} onclick={disconnectSub}>Disconnect</button>
+						</div>
+						{#if subStatus.account?.plan || subStatus.account?.organization}
+							<div class="sub-meta">{[subStatus.account?.plan, subStatus.account?.organization].filter(Boolean).join(' · ')}</div>
+						{/if}
 						<div class="sub-model-row">
 							<span class="sub-model-label">Model</span>
-							<select class="task-select" disabled={subModelBusy} value={subModelValue} onchange={(e) => setSubModel((e.currentTarget as HTMLSelectElement).value)}>
-								{#each CLAUDE_SUB_MODELS as m}
-									<option value={m.id}>{m.label}</option>
-								{/each}
-							</select>
+							<div class="sub-model-ctl">
+								<select class="task-select" disabled={subModelBusy} value={subModelValue} onchange={(e) => setSubModel((e.currentTarget as HTMLSelectElement).value)}>
+									{#each subModelOptions as m}
+										<option value={m.id}>{m.label}</option>
+									{/each}
+								</select>
+								<button class="link-btn dim-link" disabled={subModelsPulling} onclick={pullSubModels} title="Fetch the models your account can use">{subModelsPulling ? '…' : 'Refresh'}</button>
+							</div>
 						</div>
 						<button class="sub-toggle" role="switch" aria-checked={subSensitive} disabled={subSensitiveBusy} onclick={() => setSubSensitive(!subSensitive)}>
 							<span class="toggle sm" class:on={subSensitive}><span class="knob"></span></span>
@@ -590,27 +643,25 @@
 				{#each providers as p (p.id)}
 					<div class="row">
 						<span class="dot" class:on={p.id === active?.id}></span>
-						<span class="conn-name">{p.label || p.provider}</span>
+						<span class="conn-name">{providerLabel(p)}</span>
 						{#if p.id === active?.id}<span class="chip j-green">active</span>{/if}
 						<span class="row-action">
-							{#if testMsg[p.id]}<span class="muted-xs">{testMsg[p.id]}</span>{/if}
-							{#if p.id !== active?.id}<button class="link-btn" onclick={() => setActive(p.id)}>Use</button>{/if}
-							<button class="link-btn dim-link" onclick={() => test(p.id)}>Test</button>
-							<button class="link-btn x-red-link" onclick={() => remove(p.id)}>Remove</button>
+							{#if confirmRemoveId === p.id}
+								<span class="muted-xs">Delete <strong>{p.model_preference}</strong> from disk?</span>
+								<button class="link-btn dim-link" disabled={removeBusy} onclick={() => removeConnection(p.id)}>Connection only</button>
+								<button class="link-btn x-red-link" disabled={removeBusy} onclick={() => removeAndDeleteDisk(p)}>Delete from disk</button>
+								<button class="link-btn dim-link" onclick={() => (confirmRemoveId = null)}>Cancel</button>
+							{:else}
+								{#if testMsg[p.id]}<span class="muted-xs">{testMsg[p.id]}</span>{/if}
+								{#if p.id !== active?.id}<button class="link-btn" onclick={() => setActive(p.id)}>Use</button>{/if}
+								<button class="link-btn dim-link" onclick={() => test(p.id)}>Test</button>
+								<button class="link-btn x-red-link" onclick={() => onRemoveClick(p)}>Remove</button>
+							{/if}
 						</span>
 					</div>
 				{/each}
 			</div>
 		{/if}
-
-		<!-- ── Smart routing ── -->
-		<button class="routing" role="switch" aria-checked={cascade} aria-label="Smart routing" disabled={cascadeBusy} onclick={() => setCascade(!cascade)}>
-			<span class="toggle" class:on={cascade}><span class="knob"></span></span>
-			<span class="routing-body">
-				<span class="routing-title">Smart routing</span>
-				<span class="routing-sub">Try providers in order — EU-sovereign → frontier → on-device — falling back if one is down. Sensitive requests always skip US.</span>
-			</span>
-		</button>
 
 		<!-- ── Models per task — ONE area: on-box (local) + provider-routed ── -->
 		{#if tasks.length}
@@ -650,9 +701,9 @@
 								value={taskModels[task]?.providerId ?? ''}
 								onchange={(e) => setTaskModel(task, (e.currentTarget as HTMLSelectElement).value ? Number((e.currentTarget as HTMLSelectElement).value) : null)}
 							>
-								<option value="">Use active provider{active ? ` (${active.label || active.provider})` : ''}</option>
+								<option value="">Use active provider{active ? ` (${providerLabel(active)})` : ''}</option>
 								{#each providers as p}
-									<option value={p.id}>{p.label || p.provider}{p.model_preference ? ` · ${p.model_preference}` : ''}</option>
+									<option value={p.id}>{providerLabel(p)}{p.model_preference ? ` · ${p.model_preference}` : ''}</option>
 								{/each}
 							</select>
 						</div>
@@ -805,14 +856,10 @@
 	.load-models:disabled { opacity: 0.5; cursor: default; }
 
 	/* Smart routing */
-	.routing { display: flex; align-items: flex-start; gap: 0.7rem; padding: 0.8rem 1rem; border-radius: 13px; border: 1px solid rgba(255,255,255,0.07); background: rgba(255,255,255,0.025); cursor: pointer; text-align: left; font-family: inherit; }
-	.routing:disabled { opacity: 0.6; }
 	.toggle { margin-top: 2px; flex-shrink: 0; width: 36px; height: 20px; border-radius: 10px; background: var(--color-border); position: relative; transition: background 0.18s; }
 	.toggle.on { background: var(--color-accent-aurum, #e5b84c); }
 	.knob { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: left 0.18s; }
 	.toggle.on .knob { left: 18px; }
-	.routing-title { display: block; font-size: 0.8rem; font-weight: 500; color: var(--color-text-primary); }
-	.routing-sub { display: block; font-size: 0.68rem; color: var(--color-text-tertiary); line-height: 1.45; margin-top: 2px; }
 
 	/* Voice transcription */
 	.trans-status { font-size: 0.8rem; color: var(--color-text-primary); }
@@ -839,8 +886,10 @@
 	.sub-chip:hover { background: rgba(229,184,76,0.08); color: var(--color-accent-aurum); }
 	.sub-row { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
 	.sub-ok { font-size: 0.78rem; color: #6ee7a8; }
+	.sub-meta { font-size: 0.68rem; color: var(--color-text-tertiary); margin-top: 0.15rem; text-transform: capitalize; }
 	.sub-model-row { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; margin-top: 0.55rem; }
 	.sub-model-label { font-size: 0.74rem; color: var(--color-text-secondary); }
+	.sub-model-ctl { display: flex; align-items: center; gap: 0.5rem; }
 	.sub-toggle { display: flex; align-items: flex-start; gap: 0.6rem; margin-top: 0.55rem; padding: 0; background: none; border: none; cursor: pointer; text-align: left; font-family: inherit; }
 	.sub-toggle:disabled { opacity: 0.6; }
 	.toggle.sm { width: 30px; height: 17px; }

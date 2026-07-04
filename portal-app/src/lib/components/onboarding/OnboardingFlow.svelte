@@ -247,6 +247,36 @@
 		}
 	}
 
+	// One-tap: connect the user's Claude Pro/Max subscription (imports their existing
+	// Claude Code login — never mints a token). The import is fail-closed: it requires
+	// acknowledgeToS:true (automated use of a subscription may violate Anthropic's ToS),
+	// so we surface a one-line acknowledgment before connecting. Same flow as
+	// Settings → Intelligence → "Your Claude subscription".
+	let subOpen = $state(false);
+	let subAck = $state(false);
+	let subConnecting = $state(false);
+	let subError = $state('');
+	async function connectSub() {
+		if (!subAck) return;
+		subConnecting = true;
+		subError = '';
+		try {
+			const res = await api('/portal/auth/claude/import', { method: 'POST', body: JSON.stringify({ acknowledgeToS: true }) });
+			const d = await res.json().catch(() => ({}));
+			if (!res.ok || !d.ok) {
+				subError = d.error || 'Could not connect — make sure you are logged in to Claude Code, or add a key in AI settings.';
+			} else {
+				hasProvider = true;
+				activeProviderLabel = 'Claude Pro/Max';
+				subOpen = false;
+			}
+		} catch {
+			subError = 'Could not connect — open AI settings to finish.';
+		} finally {
+			subConnecting = false;
+		}
+	}
+
 	// ── Generate (Step 5): trigger + poll, gated reveal ────────────────────────
 	async function generate() {
 		generateError = '';
@@ -424,9 +454,24 @@
 						{connectingLocal ? 'Connecting…' : `Use local AI · ${ollamaModels[0]}`}
 					</button>
 				{:else}
-					<p class="step-hint">Choose your intelligence — local or a cloud key.</p>
-					<button class="btn-primary sm" onclick={goConnectAI}>Choose AI →</button>
+					<p class="step-hint">Choose your intelligence — subscription, local, or a cloud key.</p>
 				{/if}
+
+				<!-- Claude subscription — use your existing Claude login, no key to paste. -->
+				{#if !subOpen}
+					<button class="btn-primary sm sub-connect" onclick={() => { subOpen = true; subError = ''; }}>✦ Use your Claude subscription</button>
+				{:else}
+					<label class="sub-ack">
+						<input type="checkbox" bind:checked={subAck} />
+						<span>Use my existing Claude login. Automated use of a Pro/Max plan may be subject to Anthropic’s Terms.</span>
+					</label>
+					<button class="btn-primary sm" disabled={!subAck || subConnecting} onclick={connectSub}>
+						{subConnecting ? 'Connecting…' : 'Connect'}
+					</button>
+				{/if}
+				{#if subError}<p class="step-err">{subError}</p>{/if}
+
+				<button class="btn-skip" onclick={goConnectAI}>More options →</button>
 				{#if connectError}<p class="step-err">{connectError}</p>{/if}
 			{/if}
 		</div>
@@ -697,6 +742,14 @@
 		color: #f87171;
 		margin: 0.4rem 0 0 1.85rem;
 	}
+	.sub-connect { margin-left: 1.85rem; }
+	.sub-ack {
+		display: flex; align-items: flex-start; gap: 0.45rem;
+		margin: 0.35rem 0 0.5rem 1.85rem; max-width: 22rem;
+		font-size: 0.72rem; line-height: 1.4;
+		color: var(--color-text-secondary, #9898a3); cursor: pointer;
+	}
+	.sub-ack input { margin-top: 0.15rem; accent-color: var(--color-accent-aurum); flex-shrink: 0; }
 	.see-card {
 		margin: 0.5rem 0 0.4rem 1.85rem;
 		padding: 0.6rem 0.75rem;

@@ -117,18 +117,37 @@ export function createChannelTurnRouter({ db, userId, tools = [], handlers = {},
 
       // Owner DM: pass the message verbatim (trusted). Otherwise wrap as untrusted data.
       const input = ownerTrusted ? userMessage : wrapUntrusted(userMessage, { source });
-      // Grant derives from the SINGLE token-gated `ownerTrusted` (not a re-derivation) so
-      // the write grant and the untrusted-wrap decision can never diverge (C14 regression).
-      const result = await execTurn({
-        userMessage: input,
-        systemExtra: ownerTrusted ? OWNER_SYSTEM : CHANNEL_SYSTEM,
-        enabledTools: ownerTrusted ? [...OWNER_CHANNEL_TOOLS] : [...UNTRUSTED_CHANNEL_TOOLS],
-        // Non-owner/group history may contain third-party messages → frame as untrusted
-        // in the preamble so an injection in prior turns is not obeyed (RT3-H2).
-        history, conversationId, recentN: 8, historyUntrusted: !ownerTrusted,
-        // Audit every vault WRITE on an owner-trusted turn (RT2-H2) — hash only, no plaintext.
-        onWrite: ownerTrusted ? (rec) => db.harness?.recordWrite?.({ userId, conversationId, trigger: 'channel', tool: rec.tool, argHash: rec.argHash }) : null,
-      });
+
+      // "A model is working on your channel message" → the global activity feed lights
+      // the header indicator (mirrors the chat path). Opened AFTER triage decides to reply
+      // (never a job per triaged-skip group message). Content-free per §1: the stage label
+      // is the constant 'Replying…' and `model` is a model NAME only, never message text /
+      // model output. Fail-soft: a resolve error → no job, and it NEVER blocks the turn.
+      let channelJob = null;
+      try {
+        const info = describeProvider(await resolveInferenceConfigForTask(db, userId, 'harness'));
+        if (info) channelJob = await db.activityFeed?.begin?.({ userId, kind: 'inference:channel', stageLabel: 'Replying…', model: info.model }).catch(() => null);
+      } catch { /* no job — never block the turn */ }
+
+      let result;
+      try {
+        // Grant derives from the SINGLE token-gated `ownerTrusted` (not a re-derivation) so
+        // the write grant and the untrusted-wrap decision can never diverge (C14 regression).
+        result = await execTurn({
+          userMessage: input,
+          systemExtra: ownerTrusted ? OWNER_SYSTEM : CHANNEL_SYSTEM,
+          enabledTools: ownerTrusted ? [...OWNER_CHANNEL_TOOLS] : [...UNTRUSTED_CHANNEL_TOOLS],
+          // Non-owner/group history may contain third-party messages → frame as untrusted
+          // in the preamble so an injection in prior turns is not obeyed (RT3-H2).
+          history, conversationId, recentN: 8, historyUntrusted: !ownerTrusted,
+          // Audit every vault WRITE on an owner-trusted turn (RT2-H2) — hash only, no plaintext.
+          onWrite: ownerTrusted ? (rec) => db.harness?.recordWrite?.({ userId, conversationId, trigger: 'channel', tool: rec.tool, argHash: rec.argHash }) : null,
+        });
+      } finally {
+        // A thrown turn leaves `result` undefined → read that as 'error' in the feed
+        // history (only 'done' when the turn actually completed without a skip).
+        if (channelJob) db.activityFeed?.finish?.(channelJob, { status: (result && !result.skipped) ? 'done' : 'error' }).catch(() => {});
+      }
 
       if (result?.skipped === 'no-model') { res.json({ delivered: false, usedReplyTool: false, reason: 'no-model' }); return; }
       const usedReplyTool = Array.isArray(result?.toolsUsed) && result.toolsUsed.includes('reply');

@@ -8,7 +8,7 @@ Protocol.
 
 ## Start here
 
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — the as-built system. Read this first.
+- **docs/ARCHITECTURE.md** — the as-built system. Read this first.
 - **[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)** — narrative walkthrough.
 - **[docs/SETUP.md](docs/SETUP.md)** — stand it up locally (Node 22, keys, verify, Claude Desktop).
 - **[docs/guide/](docs/guide/)** — the Handbook (concepts) + Reference (MCP tools, connect, ingest, gateway, security model).

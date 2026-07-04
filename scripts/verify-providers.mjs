@@ -114,17 +114,14 @@ await del(`/providers/${id1}`);
 r = await J(await get('/providers'));
 rec('P11. DELETE removes the provider', !r.body.providers.some((p) => p.id === id1), `remaining=${r.body.providers.map((p) => p.id).join(',')}`);
 
-// P12 — §4g "smart routing" toggle persists (the cascade preference the gateway reads).
+// P12 — the "Smart routing" toggle + its /providers/routing routes were REMOVED
+// (operator decision 2026-07-02). Assert they no longer respond as an API route.
 try { await db.users.create(U, 'Verify'); } catch { /* row may already exist */ }
-let rt = await J(await get('/providers/routing'));
-const routingDefault = rt.body.ok && rt.body.cascade === false;
-await put('/providers/routing', { cascade: true });
-rt = await J(await get('/providers/routing'));
-const routingOn = rt.body.cascade === true;
-await put('/providers/routing', { cascade: false });
-rt = await J(await get('/providers/routing'));
-const routingOff = rt.body.cascade === false;
-rec('P12. routing toggle persists (default off → on → off)', routingDefault && routingOn && routingOff, `default=${routingDefault} on=${routingOn} off=${routingOff}`);
+// GET has no route (→ 404); PUT falls through to /providers/:id → NaN id → 400. Either
+// way the toggle no longer functions (never a 200 cascade write).
+const routingGetGone = (await get('/providers/routing')).status >= 400;
+const routingPutGone = (await put('/providers/routing', { cascade: true })).status >= 400;
+rec('P12. Smart-routing routes removed (GET+PUT /providers/routing no longer function)', routingGetGone && routingPutGone, `get=${routingGetGone} put=${routingPutGone}`);
 
 // P13 — §4g subscription opt-in toggle persists (off by default): lets the user
 // allow their connected subscription to process the on-box/EU-only sensitive work.
@@ -137,6 +134,14 @@ await put('/providers/sensitive-subscription', { allowed: false });
 ss = await J(await get('/providers/sensitive-subscription'));
 const ssOff = ss.body.allowed === false;
 rec('P13. §4g subscription opt-in persists (default off → on → off)', ssDefault && ssOn && ssOff, `default=${ssDefault} on=${ssOn} off=${ssOff}`);
+
+// P14 — settings persistence UPSERTS. A fresh single-user vault may have no `users` row;
+// a bare UPDATE would silently no-op (the task-model routing "settings don't persist"
+// bug). updateSettings now inserts-or-updates, so a write on an id with no prior row sticks.
+const FRESH = 'fresh-user-no-row-p14';
+await db.users.updateSettings(FRESH, { taskModels: { chat: { providerId: 7 } } });
+const back = await db.users.getSettings(FRESH);
+rec('P14. updateSettings UPSERTS on a fresh vault (no prior row → settings persist)', back?.taskModels?.chat?.providerId === 7, JSON.stringify(back));
 
 server.close(); close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }

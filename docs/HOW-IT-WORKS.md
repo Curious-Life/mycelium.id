@@ -1,8 +1,7 @@
 # How Mycelium Works
 
 > A plain-language walkthrough of how the V1 system actually works end to end —
-> the mental model behind the code. For the as-built component reference see
-> [`ARCHITECTURE.md`](ARCHITECTURE.md); to stand it up see [`SETUP.md`](SETUP.md);
+> the mental model behind the code. To stand it up see [`SETUP.md`](SETUP.md);
 > for the why see [`VISION.md`](VISION.md).
 
 ---
@@ -209,6 +208,3 @@ The discipline: **never claim something works without a verify that reached
   embeddings, the clustering "generate mindscape" run, territory narratives, the
   inference router's cloud/local model calls.
 - ⬜ **Designed, host-gated:** the Tauri native key ceremony (Rust + Mac build).
-
-See `UX-COMPLETE-DESIGN-2026-06-01.md` for the
-full UX design and `V1-BUILD-SPEC.md` for the build plan.

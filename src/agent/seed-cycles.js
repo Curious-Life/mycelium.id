@@ -13,10 +13,12 @@ import { seedPersonaDoc } from '../skills/store.js';
 /**
  * @param {object} db      keyed db (needs db.harness.createTask + db.harness.listTasks)
  * @param {string} userId
- * @param {object} [opts]  { logger, now }  now: () => Date (testable)
+ * @param {object} [opts]  { logger, now, tz }
+ *   now: () => Date (testable); tz: IANA zone the cycles fire in (so "morning at 8"
+ *   means the user's local 8am, not 08:00 UTC). Absent ⇒ UTC (back-compat).
  * @returns {Promise<{created: Array<{id,name}>, alreadyPresent: number}>}
  */
-export async function seedReflectionCycles(db, userId, { logger = () => {}, now = () => new Date() } = {}) {
+export async function seedReflectionCycles(db, userId, { logger = () => {}, now = () => new Date(), tz = null } = {}) {
   if (!db?.harness?.createTask) throw new TypeError('seedReflectionCycles: db.harness.createTask required');
   if (typeof userId !== 'string' || !userId) throw new TypeError('seedReflectionCycles: userId required');
 
@@ -35,7 +37,7 @@ export async function seedReflectionCycles(db, userId, { logger = () => {}, now 
     let nextRun = null;
     try {
       const parsed = parseSchedule(c.schedule);
-      if (parsed) nextRun = computeNextRun(parsed, { after: now(), tz: null });
+      if (parsed) nextRun = computeNextRun(parsed, { after: now(), tz });
     } catch { nextRun = null; }
     if (!nextRun) { logger(`seed-cycles: skip ${c.id} — no next run for "${c.schedule}"`); continue; }
     try {
@@ -43,6 +45,7 @@ export async function seedReflectionCycles(db, userId, { logger = () => {}, now 
         name: c.name,
         prompt: c.body,
         schedule: c.schedule,
+        tz,
         nextRun,
         outputTarget: c.outputTarget,
         enabledTools: c.enabledTools,

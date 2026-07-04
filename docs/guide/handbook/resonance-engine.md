@@ -67,6 +67,20 @@ tell you they're not ready yet and point you to import and build. Once you've br
 in enough history and Mycelium has computed your mindscape, the realms, territories,
 and rhythms come to life — and keep refining themselves from there.
 
+## Reflection cycles — the map thinks on its own
+
+The Resonance Engine can also work *while you're away*. **Reflection cycles** are
+scheduled moments where your AI wakes on its own, looks over what's changed, and
+reflects — noticing a theme that's building, a question you keep returning to, a
+connection worth surfacing next time you talk.
+
+It's **opt-in**. Turn it on in **Settings → Reflection** (also reachable from the
+**Agents** view): you pick the timezone the cycles run in, and enabling seeds a small
+set of cycles you can tune or pause individually. Nothing runs autonomously until you
+switch it on, and turning it off pauses every cycle while keeping your edits. Like
+everything else, it runs entirely on your machine — a reflection cycle is just your
+own AI, thinking about your own vault, on a schedule you set.
+
 ---
 
 → Next: **[Shared Spaces](shared-spaces.md)** — what happens when two maps meet.

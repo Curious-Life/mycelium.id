@@ -1,6 +1,6 @@
 # mycelium.id — Vision & Strategy
 
-> **Status of this document.** The pitch below is the **product vision / strategy artifact** (mycelium.id · May 2026), preserved **verbatim**. It describes the *destination* — the full multi-layer product, business model, and federated network — not the current build state. The **"V1 reality deltas"** section at the end reconciles specific claims against what is actually built and locked today (branch `claude/repo-overview-mC69M`). When the two disagree, the code + locked decisions (D1–D7, see `docs/V1-BUILD-SPEC.md`) are ground truth; the pitch is the aim.
+> **Status of this document.** The pitch below is the **product vision / strategy artifact** (mycelium.id · May 2026), preserved **verbatim**. It describes the *destination* — the full multi-layer product, business model, and federated network — not the current build state. The **"V1 reality deltas"** section at the end reconciles specific claims against what is actually built and locked today. When the two disagree, the code + the locked build decisions are ground truth; the pitch is the aim.
 
 ---
 
@@ -322,7 +322,7 @@ Self-sovereign memory infrastructure for the AI age.
 
 ## V1 reality deltas (reconciliation, 2026-05-31)
 
-The pitch is the destination. This section lists where it diverges from the **built + locked V1** so the two are never confused. Verified against `src/`, `CLAUDE.md`, and `docs/V1-BUILD-SPEC.md` (decisions D1–D7). The code is ground truth; the pitch is the aim.
+The pitch is the destination. This section lists where it diverges from the **built + locked V1** so the two are never confused. Verified against the code (`src/`, `CLAUDE.md`) and the locked build decisions. The code is ground truth; the pitch is the aim.
 
 | # | Pitch says | V1 reality (verified) | Note |
 |---|---|---|---|
@@ -331,7 +331,7 @@ The pitch is the destination. This section lists where it diverges from the **bu
 | 3 | **"Nomic embeddings (384-dim)"** | **Nomic v1.5 ONNX, 768-dim** search + **256-dim** matryoshka for clustering — decision D2. | 384 is simply wrong; correct to 768 (with 256 for clustering) in external copy. |
 | 4 | **"Agent Coordination" box + "Agents: delegate, getTeamStatus" as a shipped layer** | Single-user V1 — **multi-agent coordination is dropped/deferred** (`delegate_to_agent`/`getTeamStatus` not registered). | Legitimate **future** tier; present it as roadmap, not shipping. `createTask`/`listTasks` (single-user task list) ARE built. |
 | 5 | **"npm install @mycelium/mcp" / "localhost:3847" / "mycelium init/connect"** | No published npm package yet; transports are **stdio + OAuth-HTTP** (Streamable HTTP); port is configurable (not 3847). | The packaging/CLI is aspirational. "Ships first / one command" describes the *intended* DX, not today's. |
-| 6 | **Federation in the hero "Shape" diagram** | Federation is **Layer 3 / deferred** — gated until V1 ships + validates (`docs/V1-BUILD-SPEC.md:1225`). | The pitch *does* label federation "future / protocol TBD" in the stack + deployment sections — only the hero diagram oversells it as core. |
+| 6 | **Federation in the hero "Shape" diagram** | Federation is **Layer 3 / deferred** — gated until V1 ships + validates. | The pitch *does* label federation "future / protocol TBD" in the stack + deployment sections — only the hero diagram oversells it as core. |
 | 7 | **Managed infra / topology-cloud / Curious Life tiers** | All **future business model**, not built. | Appropriately tiered as future in the Business Model section — no fix needed, just don't imply availability. |
 
 ### What the pitch gets right (and is built or locked)

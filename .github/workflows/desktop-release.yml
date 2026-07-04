@@ -143,6 +143,18 @@ jobs:
           spctl -a -t open --context context:primary-signature "$DMG_OUT"
           xcrun stapler validate "$DMG_OUT"
 
+      # Auto-updater artifact: tar the NOTARIZED+STAPLED .app, Ed25519-sign it, and
+      # emit latest.json (the updater endpoint). Fail-closed but graceful — DMG-only
+      # until the operator sets plugins.updater.pubkey + the signing secrets; hard-
+      # fails if the pubkey is set but the key is missing. See make-updater-artifact.sh.
+      - name: Build updater artifact (tarball + signature + latest.json)
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+          MYC_ARCH: ${{ matrix.arch }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash scripts/make-updater-artifact.sh
+
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
@@ -150,11 +162,18 @@ jobs:
           path: dist/Mycelium_${{ steps.ver.outputs.version }}_${{ matrix.dmgarch }}.dmg
           if-no-files-found: error
 
-      - name: Attach DMG to the Release (tag builds only)
+      # Attach the DMG + (when present) the updater manifest/tarball/signature. The
+      # updater globs match nothing on a DMG-only release; softprops skips missing
+      # globs (fail_on_unmatched_files defaults false), so this stays green either way.
+      - name: Attach DMG + updater artifacts to the Release (tag builds only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Mycelium_${{ steps.ver.outputs.version }}_${{ matrix.dmgarch }}.dmg
+          files: |
+            dist/Mycelium_${{ steps.ver.outputs.version }}_${{ matrix.dmgarch }}.dmg
+            dist/latest.json
+            dist/Mycelium.app.tar.gz
+            dist/Mycelium.app.tar.gz.sig
 
       - name: Clean up keychain
         if: always()

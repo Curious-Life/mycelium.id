@@ -13,11 +13,17 @@
 // Fail-closed: encrypt() throws if the master key is absent ⇒ no plaintext blob
 // is ever written. getMasterKey() resolves USER_MASTER from the same
 // ENCRYPTION_MASTER_KEY bridge boot() pins (see src/index.js).
-import { mkdir, open, rename, readFile } from 'node:fs/promises';
+import { mkdir, open, rename, readFile, unlink } from 'node:fs/promises';
 import { join, dirname, extname } from 'node:path';
 import crypto from 'node:crypto';
 import { encrypt, decrypt, getMasterKey } from '../crypto/crypto-local.js';
-import { uploadsRoot } from '../paths.js';
+import { uploadsRoot, isUserNamespacedBlobPath, assertUserNamespacedBlobPath } from '../paths.js';
+
+// The `<userId>/…` namespacing guards live in paths.js (leaf util, so the db
+// layer can import them without depending on ingest). Re-exported here because
+// putBlob defines the convention they enforce and importers reach for them
+// alongside putBlob.
+export { isUserNamespacedBlobPath, assertUserNamespacedBlobPath };
 
 const MAGIC = Buffer.from('MYCB', 'latin1'); // 4 bytes, blob format v1
 const SCOPE = 'personal';
@@ -77,4 +83,50 @@ export async function getBlob(rel, { root = uploadsRoot() } = {}) {
   const envelope = raw.subarray(MAGIC.length).toString('utf8');
   const b64 = await decrypt(envelope, masterKey);
   return Buffer.from(b64, 'base64');
+}
+
+/**
+ * Reference-counted blob unlink — the reusable form of the SHARED-BLOB GUARD in
+ * src/portal-attachments.js (DELETE /attachments/:id). Byte-identical
+ * attachments share ONE encrypted blob via the same local_path (vault/obsidian
+ * dedup), so a blob is deleted ONLY when no attachment row still references it.
+ *
+ * CALL ORDER: invoke this AFTER the attachment rows have been deleted, so the
+ * COUNT reflects the post-delete world (hence no `id != ?` exclusion — the
+ * deleted row is already gone). Never throws: a missing file / gone row leaves
+ * unreachable ciphertext, which is safe.
+ *
+ * @param {object} db                 must expose rawQuery(sql, params) → {results:[{c}]}
+ * @param {string} localPath          attachments.local_path (relative storage key)
+ * @param {object} [opts]
+ * @param {string} [opts.root]        blob root (defaults to uploadsRoot())
+ * @returns {Promise<{unlinked:boolean, reason?:string, refs?:number, error?:string}>}
+ */
+export async function unlinkBlobIfUnreferenced(db, localPath, { root = uploadsRoot() } = {}) {
+  if (typeof localPath !== 'string' || !localPath) return { unlinked: false, reason: 'no-path' };
+  try {
+    // INTENTIONALLY NOT scoped by user_id. The refcount protects ONE physical
+    // file (uploadsRoot()/<userId>/<uuid>.enc) — it must be kept if ANY row, of
+    // ANY user, still points at it, or we'd destroy that row's bytes. Scoping to
+    // one user would let a delete unlink a file another tenant's row references
+    // (cross-tenant DATA LOSS) — the OPPOSITE of safe. Blobs are already
+    // userId-namespaced at write (putBlob → <userId>/…), so V1 paths never
+    // collide across users; the V2 hardening is to ENFORCE that namespacing on
+    // import/restore (vault-import, full-export-import), NOT to scope this COUNT.
+    const r = await db.rawQuery('SELECT COUNT(*) AS c FROM attachments WHERE local_path = ?', [localPath]);
+    const refs = Number(r?.results?.[0]?.c ?? 0);
+    if (refs > 0) return { unlinked: false, reason: 'still-referenced', refs };
+  } catch (e) {
+    // Can't prove it's unreferenced → do NOT unlink (fail-closed: keep the blob
+    // rather than risk destroying a sibling's bytes). Orphan ciphertext is safe.
+    return { unlinked: false, reason: 'refcount-failed', error: String(e?.code || e) };
+  }
+  try {
+    await unlink(join(root, localPath));
+    return { unlinked: true };
+  } catch (e) {
+    // ENOENT (already gone) is success-equivalent; anything else is reported.
+    if (e?.code === 'ENOENT') return { unlinked: true, reason: 'already-gone' };
+    return { unlinked: false, reason: 'unlink-failed', error: String(e?.code || e) };
+  }
 }

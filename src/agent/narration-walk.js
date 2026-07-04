@@ -119,7 +119,10 @@ export async function runNarrationWalk(deps, opts = {}) {
 
     const res = await runTurn(
       { db, userId, tools, handlers, loop, fetchImpl, signal, hooks },
-      { userMessage, systemExtra, enabledTools: ['describeEntity', 'getEntityContext'], conversationId, history, localTools: true },
+      // inferenceTask:'narrate' — honor the user's per-task model choice for narration
+      // (Settings → Intelligence → Narration). Without it, run-turn defaults to 'harness'
+      // and narration silently ignored the narrate assignment.
+      { userMessage, systemExtra, enabledTools: ['describeEntity', 'getEntityContext'], conversationId, history, localTools: true, inferenceTask: 'narrate' },
     );
     // Did the agent actually write, or reflect-and-leave? (toolsUsed from the turn.)
     const wrote = Array.isArray(res?.toolsUsed) && res.toolsUsed.includes('describeEntity');

@@ -27,6 +27,7 @@ export interface TimelineMessage {
   agent_id?: string | null;
   created_at: string;
   message_type?: string;
+  model?: string | null;   // WHICH model produced an assistant message (history chip); null for user/legacy rows
   attachment?: TimelineAttachment;
   // From PR 1's metadata projection:
   channel?: string | null;

@@ -203,8 +203,130 @@ fn reap_stale_pids(pidfile: &Path) {
 #[cfg(not(unix))]
 fn reap_stale_pids(_pidfile: &Path) {}
 
+// ── Auto-updater ─────────────────────────────────────────────────────────────
+// Sentinel meaning "no signing key configured yet". While the pubkey equals this,
+// the updater is DORMANT (never checks) — so a dev/unsigned build can't prompt.
+const UPDATER_PUBKEY_PLACEHOLDER: &str = "REPLACE_WITH_MINISIGN_PUBLIC_KEY";
+// Don't hammer the endpoint on frequent restarts — at most one check per interval.
+const UPDATE_CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
+/// True only when tauri.conf.json plugins.updater.pubkey holds a REAL minisign key
+/// (not empty, not the placeholder). Signature verification is mandatory, so an
+/// unset key means the updater must stay off rather than prompt-then-fail.
+fn updater_pubkey_is_real(app: &tauri::AppHandle) -> bool {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|u| u.get("pubkey"))
+        .and_then(|k| k.as_str())
+        .map(|k| !k.trim().is_empty() && k != UPDATER_PUBKEY_PLACEHOLDER)
+        .unwrap_or(false)
+}
+
+/// Best-effort throttle. Returns true (and stamps "now") if no check happened
+/// within UPDATE_CHECK_INTERVAL_SECS; fail-open (unreadable stamp → check now).
+fn update_check_due(app: &tauri::AppHandle) -> bool {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let Ok(dir) = app.path().app_data_dir() else { return true; };
+    let stamp = dir.join(".update-check");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(s) = std::fs::read_to_string(&stamp) {
+        if let Ok(prev) = s.trim().parse::<u64>() {
+            if now.saturating_sub(prev) < UPDATE_CHECK_INTERVAL_SECS {
+                return false;
+            }
+        }
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(&stamp, now.to_string());
+    true
+}
+
+/// Fire-and-forget update check. Gated on a real signing pubkey + the throttle;
+/// on an available, signature-verified update it shows a NATIVE prompt (no webview
+/// IPC), and on accept downloads + installs + relaunches. Every failure path is
+/// fail-open — a down endpoint or network error never blocks or crashes the app.
+/// The vault lives outside the .app bundle, so the swap preserves all user data.
+fn maybe_check_for_update(app: tauri::AppHandle) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    use tauri_plugin_updater::UpdaterExt;
+
+    if !updater_pubkey_is_real(&app) || !update_check_due(&app) {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let updater = match app.updater() {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("[updater] unavailable: {e}");
+                return;
+            }
+        };
+        match updater.check().await {
+            Ok(Some(update)) => {
+                let version = update.version.clone();
+                let notes = update.body.clone().unwrap_or_default();
+                let app_for_dialog = app.clone();
+                app.dialog()
+                    .message(format!(
+                        "Mycelium {version} is available.\n\n{}\n\nUpdate now? The app will restart; your vault is untouched.",
+                        notes.trim()
+                    ))
+                    .title("Update available")
+                    .kind(MessageDialogKind::Info)
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "Update & Restart".into(),
+                        "Later".into(),
+                    ))
+                    .show(move |accepted| {
+                        if !accepted {
+                            return;
+                        }
+                        let app_for_install = app_for_dialog.clone();
+                        tauri::async_runtime::spawn(async move {
+                            // download_and_install verifies the Ed25519 signature over
+                            // the tarball against the configured pubkey before swapping.
+                            match update
+                                .download_and_install(|_chunk, _total| {}, || {})
+                                .await
+                            {
+                                // restart() fires RunEvent::Exit → reap() kills the
+                                // node/frpc/caddy sidecars first, so the new version
+                                // doesn't collide on :4711 / :8787.
+                                Ok(()) => app_for_install.restart(),
+                                Err(e) => eprintln!("[updater] install failed: {e}"),
+                            }
+                        });
+                    });
+            }
+            Ok(None) => { /* already up to date */ }
+            Err(e) => eprintln!("[updater] check failed: {e}"), // fail-open
+        }
+    });
+}
+
+/// Relaunch the app after a destroy-vault (factory reset). The node REST endpoint
+/// `POST /api/v1/account/destroy` — gated by the recovery key + typed phrase — has
+/// ALREADY wiped the vault, keys, and app data before the UI invokes this. This
+/// only restarts: `restart()` fires `RunEvent::Exit` → `reap()` (kills the node /
+/// frpc / caddy sidecars) → the fresh process boots against an empty data dir +
+/// empty Keychain → onboarding. It performs no deletion itself and takes no args,
+/// so the new Tauri IPC surface can't be abused to destroy anything.
+#[tauri::command]
+fn destroy_and_relaunch(app: tauri::AppHandle) {
+    app.restart();
+}
+
 fn main() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let home = mycelium_home(app);
             let key_source =
@@ -470,8 +592,17 @@ fn main() {
                 http_pid,
             });
 
-            if !wait_for_port(PORT, Duration::from_secs(25)) {
-                eprintln!("[mycelium] server did not open port {PORT} in time");
+            // Wait for the REST server to bind before pointing the webview at it.
+            // A build that adds DB migrations makes the FIRST boot slow: snapshot-on-boot
+            // does a `VACUUM INTO` of the (multi-GB) vault + applyMigrations BEFORE the
+            // server listens, which can exceed this window. WKWebView loads the not-yet-up
+            // URL exactly once and does NOT retry → a white screen that needed a manual
+            // Cmd+R. So we DON'T block forever here (fast boots shouldn't wait): we record
+            // whether the server was ready, and if not, a watcher below re-navigates the
+            // webview the instant the port binds. Normal relaunches are unaffected.
+            let server_ready = wait_for_port(PORT, Duration::from_secs(25));
+            if !server_ready {
+                eprintln!("[mycelium] server not up within 25s (slow first-boot migration?); webview will self-heal on bind");
             }
 
             let url = format!("http://127.0.0.1:{PORT}");
@@ -502,6 +633,32 @@ fn main() {
                 .disable_drag_drop_handler()
                 .build()?;
 
+            // Self-heal a slow first boot: if the server wasn't listening when we built
+            // the window, WKWebView is now showing a failed-load (white) page and won't
+            // retry on its own. Poll for the port on a longer ceiling and re-navigate the
+            // webview the instant it binds — turning a white screen into an automatic
+            // reload. Only runs when the initial 25s wait failed, so a fast boot never
+            // re-navigates (no flicker). `navigate` forces a fresh load regardless of the
+            // current error page (unlike an in-page reload, which a dead page can't run).
+            if !server_ready {
+                let win_heal = win.clone();
+                let heal_url = url.clone();
+                std::thread::spawn(move || {
+                    if wait_for_port(PORT, Duration::from_secs(300)) {
+                        std::thread::sleep(Duration::from_millis(500)); // let the listener accept connections
+                        if let Ok(u) = heal_url.parse() {
+                            if let Err(e) = win_heal.navigate(u) {
+                                eprintln!("[mycelium] self-heal navigate failed: {e}");
+                            } else {
+                                eprintln!("[mycelium] server bound late — reloaded the webview");
+                            }
+                        }
+                    } else {
+                        eprintln!("[mycelium] server still not up after 300s — leaving the webview as-is");
+                    }
+                });
+            }
+
             let _ = &win;
 
             // Reload binding (Cmd/Ctrl+R). WKWebView in a Tauri dev build binds no
@@ -516,6 +673,13 @@ fn main() {
             let menu = Menu::default(app.handle())?;
             menu.append(&view)?;
             app.set_menu(menu)?;
+
+            // Auto-updater — PRODUCTION builds only. The "Mycelium Dev" variant (0.1.0,
+            // .dev data dir) must never self-update to the public release. Fire-and-
+            // forget, throttled, signature-verified, fail-open — never blocks launch.
+            if !is_dev {
+                maybe_check_for_update(app.handle().clone());
+            }
 
             Ok(())
         })
@@ -534,6 +698,7 @@ fn main() {
                 }
             }
         })
+        .invoke_handler(tauri::generate_handler![destroy_and_relaunch])
         .build(tauri::generate_context!())
         .expect("error while building the mycelium tauri application");
 

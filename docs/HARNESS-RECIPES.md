@@ -130,7 +130,7 @@ Goose, Cline, Continue, Codex, OpenHands, Cursor, … all fit this shape — see
 The recipes above let an agent *read and write* the vault when the model chooses to.
 To make **every** turn flow into memory automatically (both your message and the
 reply, plus context pulled back in) — without relying on the model's discretion —
-use the **memory bridge**. Full guide: [`tools/memory-bridge/README.md`](../tools/memory-bridge/README.md); design: UNIVERSAL-MEMORY-LAYER-DESIGN-2026-06-11.md.
+use the **memory bridge**. Full guide: [`tools/memory-bridge/README.md`](../tools/memory-bridge/README.md).
 
 **Two ways, by harness capability:**
 

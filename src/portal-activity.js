@@ -19,6 +19,7 @@ const KIND_LABELS = {
   embed: 'Embedding messages',             // computing 768-dim vectors for search/clustering
   categorize: 'Categorizing messages',     // CE L1: per-message domain + register tags via the on-box model
   'inference:chat': 'Generating reply',    // live: the chat model is generating a reply
+  'inference:channel': 'Replying on a channel', // live: a model is answering an inbound Telegram/Discord message
 };
 
 // Where/how each runs — complements the stage (WHAT) + model (WHICH). Only the always-local
@@ -124,13 +125,26 @@ function etaSeconds(row, nowMs) {
   return Math.max(0, Math.round((perItem * (total - done)) / 1000));
 }
 
+// History-facing label for the inference kinds: the LIVE stage ("Thinking…" /
+// "Replying…") reads oddly in the finished list ("Thinking… · Done 8m ago"), so a
+// terminal inference row shows a clear noun of what it WAS instead. Only the inference
+// kinds are remapped — describe/embed jobs keep their descriptive stage_label in history.
+const INFERENCE_HISTORY_LABEL = {
+  'inference:chat': 'Chat reply',
+  'inference:channel': 'Channel reply',
+};
+
 function shape(row, nowMs) {
   const done = Number(row.step) || 0;
   const total = Number(row.total_steps) || 0;
+  const terminal = row.status !== 'running';
+  const stage = (terminal && INFERENCE_HISTORY_LABEL[row.kind])
+    ? INFERENCE_HISTORY_LABEL[row.kind]
+    : (row.stage_label || KIND_LABELS[row.kind] || row.kind);
   return {
     id: row.id,
     kind: row.kind,
-    stage: row.stage_label || KIND_LABELS[row.kind] || row.kind,
+    stage,
     model: row.model || null,                       // what's running (if the job recorded it)
     process: PROCESS_LABELS[row.kind] || null,      // what it's doing
     done,

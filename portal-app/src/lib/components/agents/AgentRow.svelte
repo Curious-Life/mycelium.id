@@ -16,6 +16,7 @@
 
 <script lang="ts">
 	import { api } from '$lib/api';
+	import ReflectionCyclesSection from '$lib/components/settings/ReflectionCyclesSection.svelte';
 
 	type AgentInfo = {
 		id: string;
@@ -395,6 +396,14 @@
 					<p class="hint">
 						Setting a Telegram token auto-restarts the bot. Discord token changes auto-restart the bot too. Values are encrypted before leaving this device.
 					</p>
+				</section>
+			{/if}
+
+			<!-- Reflection cycles — this agent's autonomous wake rhythms (opt-in, per-agent).
+			     Only the personal agent runs cycles today; the section self-scopes to it. -->
+			{#if agent.id === 'personal-agent'}
+				<section class="block">
+					<ReflectionCyclesSection />
 				</section>
 			{/if}
 

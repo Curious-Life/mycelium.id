@@ -49,8 +49,9 @@ const errCode = (e) => String(e?.code || e?.status || (e?.name && e.name !== 'Er
  * @param {string}   o.userId       boot owner id (tasks also carry their own user_id)
  * @param {Array}    o.tools        the tool registry defs (same array portal-chat gets)
  * @param {object}   o.handlers     the in-proc tool handler map
- * @param {(task:object, text:string)=>Promise<void>} [o.deliver]  output_target sink
- *                    (non-'none' targets). Absent ⇒ delivery is logged + skipped.
+ * @param {(task:object, text:string, meta?:{model?:string|null})=>Promise<void>} [o.deliver]
+ *                    output_target sink (non-'none' targets); `meta.model` = WHICH model
+ *                    produced the text (recorded on the persisted message). Absent ⇒ logged + skipped.
  * @param {(task:object)=>Promise<object>} [o.runTurn]  turn-executor override (tests)
  * @param {Function} [o.fetchImpl]
  * @param {(m:string)=>void} [o.logger]
@@ -153,7 +154,7 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
       // NO_REPLY is the canonical "skip the check-in" sentinel — a cycle that returns it
       // delivers nothing (never surface the literal token to the person).
       if (text.trim() && !isNoReply(text) && task.output_target && task.output_target !== 'none') {
-        try { await deliverFn(task, text); } catch (e) { logger(`scheduler: deliver failed for ${task.id}: ${errCode(e)}`); }
+        try { await deliverFn(task, text, { model: r?.model || null }); } catch (e) { logger(`scheduler: deliver failed for ${task.id}: ${errCode(e)}`); }
       }
       await db.harness.finishRun(runId, { status });
       await advance(task, status);

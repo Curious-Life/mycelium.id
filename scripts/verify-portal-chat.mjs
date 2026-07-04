@@ -112,7 +112,7 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
   rec('C2 streamed the model answer', text === ANSWER, JSON.stringify(text));
   // Active model is surfaced to the UI BEFORE any token (operator directive: show the model).
   const mi = types.indexOf('model'); const ti = types.indexOf('text_delta'); const mev = evs.find((e) => e.type === 'model');
-  rec('C2 emits a `model` event (label+model) before text', mi >= 0 && mi < ti && mev?.label === 'Claude' && typeof mev?.model === 'string' && mev.model.length > 0, JSON.stringify(mev));
+  rec('C2 emits a `model` event (label+model) before text', mi >= 0 && mi < ti && mev?.label === 'Claude API' && typeof mev?.model === 'string' && mev.model.length > 0, JSON.stringify(mev));
   rec('C2 `model` event carries NO secret (only label/model/jurisdiction)', mev && !JSON.stringify(mev).includes('KEY') && !('apiKey' in mev) && !('credentials' in mev));
   // Persistence is fire-and-forget — poll selectRecent for the two portal-chat rows.
   let rows = [];
@@ -270,6 +270,23 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
   // Idempotent: a SECOND fresh thread finds nothing left to recover.
   const h2 = await (await fetch(`${base}/chat/history?conversationId=recover-thread-2-${Date.now()}`)).json();
   rec('C12 orphan pool drained once (idempotent — second thread has nothing to recover)', h2.recoverable === 0, `recoverable=${h2.recoverable}`);
+}
+
+// ── CINBOX — channel conversations surface in the portal inbox (read-only, RT3-safe) ──
+{
+  const chan = 'telegram:900900';
+  await captureMessage(db, { userId: U, role: 'user', content: 'ping from telegram', source: 'telegram', messageType: 'text', conversationId: chan }, () => {});
+  await captureMessage(db, { userId: U, role: 'assistant', content: 'pong to telegram', source: 'telegram', messageType: 'text', conversationId: chan }, () => {});
+  const convs = await (await fetch(`${base}/chat/conversations`)).json();
+  const found = (convs.conversations || []).find((c) => c.conversationId === chan);
+  rec('CINBOX /chat/conversations lists the telegram thread (source + count, no content)', !!found && found.source === 'telegram' && found.count >= 2 && !('content' in found), JSON.stringify(found));
+  const hChan = await (await fetch(`${base}/chat/history?channel=1&conversationId=${encodeURIComponent(chan)}`)).json();
+  rec('CINBOX /chat/history?channel=1 returns the channel thread messages', Array.isArray(hChan.messages) && hChan.messages.some((m) => /pong to telegram/.test(m.content)));
+  // SECURITY (RT3): without channel=1 the bare id is namespaced (chat:) → no channel leak
+  const hNs = await (await fetch(`${base}/chat/history?conversationId=${encodeURIComponent(chan)}`)).json();
+  rec('CINBOX RT3 preserved: a non-channel read of the bare id returns nothing', Array.isArray(hNs.messages) && hNs.messages.length === 0, JSON.stringify(hNs.messages));
+  authorized = false; const un = await fetch(`${base}/chat/conversations`); authorized = true;
+  rec('CINBOX /chat/conversations unauthorized → 401 (fail-closed)', un.status === 401);
 }
 
 server.close(); await close?.();
