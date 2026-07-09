@@ -55,8 +55,16 @@ ln -s /Applications "$STAGE/Applications"
 mkdir "$STAGE/.background"
 cp "$BG_SRC" "$STAGE/.background/background.tiff"
 
-# ── create a read/write image sized to content + slack for the .DS_Store ─────
-SIZE_MB=$(( $(du -sm "$STAGE" | awk '{print $1}') + 64 ))
+# ── create a read/write image sized to content + GENEROUS slack ──────────────
+# The bundle has tens of thousands of tiny files (node_modules + Python + sidecars);
+# HFS+ per-file block + catalog overhead on the image far exceeds a small fixed slack,
+# so a "du + 64" image overflows → `hdiutil: create failed - No space left on device`
+# (the IMAGE, not the host). Oversize generously — the UDRW image is temporary and is
+# converted below to a size-accurate *compressed* UDZO, so a big r/w image costs only
+# transient scratch and never bloats the shipped .dmg.
+DU_MB=$(du -sm "$STAGE" | awk '{print $1}')
+SIZE_MB=$(( DU_MB * 2 + 512 ))
+echo "  make-dmg: staged content ${DU_MB} MB → r/w image ${SIZE_MB} MB (converts to compressed UDZO)"
 TMP_DMG="$(mktemp -u).dmg"
 hdiutil create -srcfolder "$STAGE" -volname "$VOL" -fs HFS+ \
   -format UDRW -megabytes "$SIZE_MB" -ov "$TMP_DMG" >/dev/null
