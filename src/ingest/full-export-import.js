@@ -195,6 +195,10 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
       const fname = adir && fs.existsSync(adir) ? (fs.readdirSync(adir)[0] || null) : null;
       if (fname) {
         const abs = path.join(adir, fname);
+        // Belt-and-suspenders: guard the final sink path directly (adir is already
+        // confined, and fname is a single readdir basename, so this can't fail — but
+        // it makes the containment barrier local to the read sink for the analyzer).
+        if (!abs.startsWith(attRoot + path.sep)) { attStats.failed++; return; }
         const sz = fs.statSync(abs).size;
         if (sz > 0 && sz <= MAX_ATTACHMENT_BYTES) {
           const buf = fs.readFileSync(abs);
