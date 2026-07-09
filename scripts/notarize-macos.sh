@@ -42,6 +42,21 @@ xcrun notarytool submit "$ZIP" --keychain-profile "$PROFILE" --wait
 xcrun stapler staple "$APP"
 rm -f "$ZIP"
 
+# Free disk before the DMG image. The .app is now signed+notarized+stapled and
+# fully self-contained; hdiutil needs ~1.5 GB of scratch to stage + compress the
+# image, and on a macOS runner that just spent its headroom on notarization that
+# tips into "hdiutil: create failed - No space left on device" (v0.1.5 build).
+# Everything except the built bundle is dead weight now — drop the cargo target
+# intermediates + node_modules to reclaim several GB. Best-effort; never fail here.
+echo "── free disk before DMG (keep only the built bundle) ──"
+df -h / | tail -1
+( set +e
+  find "$HERE/src-tauri/target" -mindepth 1 -maxdepth 1 ! -name release -exec rm -rf {} + 2>/dev/null
+  find "$HERE/src-tauri/target/release" -mindepth 1 -maxdepth 1 ! -name bundle -exec rm -rf {} + 2>/dev/null
+  rm -rf "$HERE/node_modules" "$HERE/portal-app/node_modules" 2>/dev/null
+  true )
+df -h / | tail -1
+
 # 3. Build the DESIGNED distributable .dmg FROM the stapled .app — on-brand
 #    background + drag-arrow layout (app icon → Applications). The window design
 #    lives in scripts/make-dmg.sh (single source of truth for the installer view).
