@@ -60,8 +60,11 @@ export function loadConfig(env = process.env) {
   // opt in explicitly via CHANNEL_LOCAL_TOOLS if the deployment accepts the risk.
   const localTools = (env.CHANNEL_LOCAL_TOOLS || 'getContext,searchMindscape,reply')
     .split(',').map((s) => s.trim()).filter(Boolean);
-  // Lane-level whole-turn budget (multi-round tool loop on a local model).
-  const turnTimeoutMs = Number(env.CHANNEL_TURN_TIMEOUT_MS || 600_000);
+  // Lane-level whole-turn budget. Default 60min so a legitimate long autonomous task (big
+  // tool loop, in-session compaction) isn't guillotined; env-overridable. Matches the CLI
+  // engine's hard cap. The server-side idle watchdog catches a true hang far sooner, and the
+  // channel-turn endpoint threads THIS abort into the turn so lane + turn die together.
+  const turnTimeoutMs = Number(env.CHANNEL_TURN_TIMEOUT_MS || env.MYCELIUM_CHANNEL_TURN_TIMEOUT_MS || 3_600_000);
 
   // ── inbound media (photos / documents / voice notes) ──────────────────────
   // 20MB = the Bot API getFile hard cap; telegram-api re-checks server-side.
@@ -134,6 +137,26 @@ export function applyChannelConfigToEnv(cc, env = process.env) {
   put('CHANNEL_MEDIA_QUEUE_MAX', cc.routing?.mediaQueueMax);
   put('CHANNEL_MEDIA_SENDER_MAX', cc.routing?.mediaSenderMax);
   put('CHANNEL_MEDIA_SENDER_WINDOW_MS', cc.routing?.mediaSenderWindowMs);
+}
+
+// TTS provider + voice are changed at runtime from portal Settings → Voice. `resolveProvider()`
+// and `resolveVoice()` read process.env LIVE per synth, so a periodic re-hydration makes those
+// changes take effect without an app restart. Unlike `put` (set-only), this also CLEARS a key
+// that's gone absent — so switching the provider OFF, or a voice back to its default, actually
+// propagates (a set-only refresh would strand a stale TTS_PROVIDER and keep speaking).
+// Scope is the TTS provider/voice/model knobs ONLY — API keys are left to applyChannelConfigToEnv
+// so a still-selected provider never loses its key.
+export function reconcileTtsEnv(cc, env = process.env) {
+  if (!cc) return;
+  const t = cc.tts || {};
+  const setOrClear = (k, v) => { if (v != null && v !== '') env[k] = String(v); else delete env[k]; };
+  setOrClear('TTS_PROVIDER', t.provider);
+  setOrClear('KOKORO_TTS_ENABLED', t.kokoroEnabled);
+  setOrClear('KOKORO_TTS_VOICE', t.kokoroVoice);
+  setOrClear('OPENAI_TTS_VOICE', t.openaiVoice);
+  setOrClear('OPENAI_TTS_MODEL', t.openaiModel);
+  setOrClear('ELEVENLABS_VOICE_ID', t.elevenVoiceId);
+  setOrClear('ELEVENLABS_MODEL_ID', t.elevenModel);
 }
 
 /** Throw a clear error if no platform is configured (fail-closed boot). */

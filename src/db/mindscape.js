@@ -75,6 +75,7 @@ export function createMindscapeNamespace(deps) {
                 agent_expertise, agent_curious_about, agent_can_help_with, agent_would_consult,
                 visibility, temporal_saliency, first_active, last_active, days_active,
                 current_vitality, current_phase, is_anchored, predecessor_ids, evolved_from_count,
+                gravity, gravity_share,
                 dissolved_at
          FROM territory_profiles WHERE user_id = ? AND dissolved_at IS NULL`,
         [userId],
@@ -97,7 +98,7 @@ export function createMindscapeNamespace(deps) {
                 story_birth, story_arc, story_peak_moments, story_current_chapter,
                 uncertainty_open_questions, uncertainty_edges,
                 agent_expertise, agent_curious_about, agent_can_help_with,
-                activity_timeline, explored_percent
+                activity_timeline, explored_percent, gravity, gravity_share
          FROM realms WHERE user_id = ?`,
         [userId],
       );

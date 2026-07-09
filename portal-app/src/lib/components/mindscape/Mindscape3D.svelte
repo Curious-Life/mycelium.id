@@ -1195,7 +1195,7 @@
 	// Combined:    luminosity = absolute * 0.7  +  recency * 0.3
 	//              (mass dominates, recency adds sparkle)
 	function computeLuminosity(
-		t: { count: number; activity?: Array<{ month: string; count: number }> },
+		t: { count: number; activity?: Array<{ month: string; count: number }>; gravity?: number | null },
 		maxCount: number
 	): number {
 		// Absolute magnitude — logarithmic scale (a territory with 1000 msgs
@@ -1214,8 +1214,14 @@
 			recency = weighted / (weighted + 30); // sigmoid normalization
 		}
 
-		// Combined: mass dominates (0.7), recency adds flare (0.3)
-		const raw = absolute * 0.7 + recency * 0.3;
+		// Gravity (attentional weight = mass × recency × centrality) drives presence
+		// when it's been computed — heavier clusters loom larger/brighter. √ so halo
+		// SIZE (∝ luminosity) scales roughly with gravity area. Falls back to the
+		// mass+recency blend before the gravity pipeline has run (gravity null/0).
+		const g = (typeof t.gravity === 'number' && t.gravity > 0) ? Math.sqrt(Math.min(1, t.gravity)) : null;
+		const raw = g != null
+			? absolute * 0.45 + recency * 0.20 + g * 0.35
+			: absolute * 0.7 + recency * 0.3;
 
 		// Floor at 0.08 so even quiet territories have a faint presence
 		return Math.max(0.08, raw);

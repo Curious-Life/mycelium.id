@@ -21,6 +21,29 @@ import { ANTHROPIC_URL, anthropicAuthHeaders, anthropicSystem } from "./anthropi
 export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 export const DEFAULT_OPENAI_MODEL = "gpt-4o";
 
+// Parse a provider's rate-limit backpressure into milliseconds so the retry loop can
+// wait the amount the provider ASKED for (best practice) instead of only our own
+// exponential backoff. Reads `retry-after-ms` (OpenAI), `retry-after` (seconds OR an
+// HTTP-date, RFC 7231), and Anthropic's `anthropic-ratelimit-*-reset` (epoch seconds).
+// Returns 0 when absent/unparseable; the caller clamps the honored value. Never throws.
+export function parseRetryAfterMs(headers, now = Date.now()) {
+  try {
+    const get = (k) => (typeof headers?.get === 'function' ? headers.get(k) : headers?.[k]);
+    const ms = Number(get('retry-after-ms'));
+    if (Number.isFinite(ms) && ms > 0) return Math.floor(ms);
+    const ra = get('retry-after');
+    if (ra != null) {
+      const secs = Number(ra);
+      if (Number.isFinite(secs) && secs >= 0) return Math.floor(secs * 1000);
+      const when = Date.parse(ra);                       // HTTP-date form
+      if (Number.isFinite(when)) return Math.max(0, when - now);
+    }
+    const reset = Number(get('anthropic-ratelimit-requests-reset') || get('anthropic-ratelimit-tokens-reset'));
+    if (Number.isFinite(reset) && reset > 0) return Math.max(0, reset * 1000 - now);
+  } catch { /* header shape differs → no hint */ }
+  return 0;
+}
+
 // ANTHROPIC_URL + the Anthropic auth headers now live in ./anthropic-wire.js (the
 // single Anthropic-wire definition shared with src/agent/harness.js).
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
@@ -119,7 +142,7 @@ export async function postJson(url, headers, body, fetch, timeoutMs) {
     // Include only the provider's error *type* (a safe category), never the
     // message/body — those can reflect request content.
     const type = data?.error?.type ? ` (${data.error.type})` : "";
-    throw new InferenceError(`cloudInfer: provider error ${res.status}${type}`, { status: res.status, backend: "cloud" });
+    throw new InferenceError(`cloudInfer: provider error ${res.status}${type}`, { status: res.status, retryAfterMs: parseRetryAfterMs(res.headers), backend: "cloud" });
   }
   return data;
 }
@@ -213,7 +236,7 @@ export async function openStream(url, headers, body, fetch, timeoutMs, extraSign
     // Surface only the provider's error *type* (a safe category), never the body.
     let type = "";
     try { const t = await res.text(); const d = t ? JSON.parse(t) : {}; type = d?.error?.type ? ` (${d.error.type})` : ""; } catch { /* non-JSON error body */ }
-    throw new InferenceError(`cloudStream: provider error ${res.status}${type}`, { status: res.status, backend: "cloud" });
+    throw new InferenceError(`cloudStream: provider error ${res.status}${type}`, { status: res.status, retryAfterMs: parseRetryAfterMs(res.headers), backend: "cloud" });
   }
   if (!res.body) throw new InferenceError("cloudStream: provider returned no stream body", { backend: "cloud" });
   return res;

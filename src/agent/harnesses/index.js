@@ -25,7 +25,7 @@ export const CLI_ENGINE_ENABLED = true;
 
 export const HARNESSES = {
   native: (deps) => createAgentLoop({ harness: deps.harness, logger: deps.logger }),
-  cli: (deps) => createClaudeCliLoop({ claudeBin: deps.claudeBin, restPort: deps.restPort, model: deps.model, logger: deps.logger }),
+  cli: (deps) => createClaudeCliLoop({ claudeBin: deps.claudeBin, restPort: deps.restPort, model: deps.model, configDir: deps.configDir, logger: deps.logger }),
 };
 
 // Is the Claude Code (cli) engine ready to run? Wired AND spike-confirmed. The UI reads

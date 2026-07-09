@@ -139,11 +139,29 @@ jobs:
         run: |
           set +e
           echo "── disk before ──"; df -h /
+          # Rust build intermediates — the .app bundle is already built + self-contained.
           rm -rf src-tauri/target/release/deps \
                  src-tauri/target/release/build \
                  src-tauri/target/release/incremental \
                  src-tauri/target/release/.fingerprint
-          sudo rm -rf ~/Library/Developer/CoreSimulator /Library/Developer/CoreSimulator
+          # Biggest lever by far: the runner ships several Xcode installs (~15–40 GB
+          # total). Keep only the one in use (codesign/notarytool/xcrun need it); the
+          # rest are dead weight for a DMG build. Fail-safe: if we can't positively
+          # identify the active Xcode.app, delete NONE (never nuke the one notarize needs).
+          KEEP="$(xcode-select -p 2>/dev/null | sed 's#/Contents/Developer##')"
+          if [[ "$KEEP" == *Xcode*.app ]]; then
+            for x in /Applications/Xcode*.app; do
+              [ -e "$x" ] || continue
+              [ "$x" = "$KEEP" ] || { echo "rm $x"; sudo rm -rf "$x"; }
+            done
+          else
+            echo "⚠ active Xcode not identified ($KEEP) — skipping Xcode removal"
+          fi
+          # Simulator *devices* are writable + unneeded here. Do NOT rm the runtimes
+          # under CoreSimulator/Volumes — they are read-only cryptexes, so rm only
+          # spews 'Read-only file system' errors (bloating the log) and frees nothing.
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Devices \
+                      /Library/Developer/CoreSimulator/Devices 2>/dev/null
           for d in "$ANDROID_HOME" "$ANDROID_SDK_ROOT" "$GRADLE_HOME" ~/.gradle \
                    ~/.cargo/registry/cache ~/.cargo/registry/src; do
             [ -n "$d" ] && sudo rm -rf "$d"

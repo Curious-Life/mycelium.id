@@ -20,6 +20,7 @@
 
 import { jurisdictionForBaseUrl } from './presets.js';
 import { importFromClaudeCli } from './claude-oauth.js';
+import { readClaudeConfigDirLiveToken, refreshClaudeConfigDirToken } from './claude-config-dir.js';
 
 // ── Live Claude-subscription token refresh (fix: native chat "load failed") ──────
 // The subscription oauth token is captured into the DB row at CONNECT time, but the
@@ -35,8 +36,28 @@ import { importFromClaudeCli } from './claude-oauth.js';
 // when `claude` isn't present/logged-in. Reading the token `claude` already refreshed
 // is NOT an OAuth refresh flow (V1 does none) — it's the "re-import from disk" seam.
 let _tokCache = { token: null, at: 0 };
+let _negAt = 0;
 const TOKEN_TTL_MS = 60_000;
-let _reader = importFromClaudeCli;   // overridable so verify:* is deterministic (no live keychain)
+const NEG_TTL_MS = 10_000;
+// Prefer the app's ISOLATED config-dir token (the one `claude` keeps refreshed for the CONNECTED
+// subscription) over the machine's ~/.claude / Keychain login — so the native harness authenticates
+// as the account the user connected, not whatever the machine is signed into.
+//
+// CRITICAL (fixed 2026-07-07): on macOS `claude` keeps the refreshed token in a config-dir-
+// NAMESPACED Keychain item, not in <dir>/.credentials.json — so the old file-only read returned a
+// token frozen at connect-time. An expired Bearer 401'd and the provider-fallback chain silently
+// served channel turns from local/EU qwen while the feed still showed claude-opus-4-8.
+// readClaudeConfigDirLiveToken reads the namespaced store (expiry-aware); when even that has lapsed
+// (an owner who only uses channels, so no CLI turn refreshed it), ask `claude` to refresh its own
+// token (ToS-clean, #10) before falling back to the machine login.
+async function _defaultReader() {
+  let t = await readClaudeConfigDirLiveToken();
+  if (t) return { claudeOAuthToken: t };
+  t = await refreshClaudeConfigDirToken();
+  if (t) return { claudeOAuthToken: t };
+  return importFromClaudeCli();
+}
+let _reader = _defaultReader;        // overridable so verify:* is deterministic (no live keychain)
 
 /** Read the live subscription token (cached TTL_MS). `read` overrides the default reader.
  *  NOTE: the cache is checked BEFORE the reader, so a warm cache short-circuits an
@@ -44,11 +65,16 @@ let _reader = importFromClaudeCli;   // overridable so verify:* is deterministic
  *  tests that inject a reader call _resetTokenCacheForTests() between cases. */
 export async function freshClaudeSubscriptionToken(read = _reader, now = Date.now()) {
   if (_tokCache.token && (now - _tokCache.at) < TOKEN_TTL_MS) return _tokCache.token;
+  // Short-lived NEGATIVE cache: withFreshSubscriptionToken runs ≥3×/turn (label + inference +
+  // provider-chain). When the token is unresolved (needs refresh), the default reader spawns
+  // `security`/`claude` each call; without this, a single degraded turn spawns them repeatedly.
+  if (_negAt && (now - _negAt) < NEG_TTL_MS) return null;
   try {
     const creds = await read();
     const t = (typeof creds?.claudeOAuthToken === 'string' && creds.claudeOAuthToken) ? creds.claudeOAuthToken : null;
-    if (t) { _tokCache = { token: t, at: now }; return t; }
+    if (t) { _tokCache = { token: t, at: now }; _negAt = 0; return t; }
   } catch { /* no live token → caller keeps the stored one (fail-closed) */ }
+  _negAt = now;
   return null;
 }
 
@@ -61,8 +87,8 @@ export async function withFreshSubscriptionToken(cfg, read) {
 }
 
 /** Test seams — clear the cache / swap the live-token reader between cases. */
-export function _resetTokenCacheForTests() { _tokCache = { token: null, at: 0 }; }
-export function _setSubscriptionTokenReaderForTests(fn) { _reader = fn || importFromClaudeCli; _resetTokenCacheForTests(); }
+export function _resetTokenCacheForTests() { _tokCache = { token: null, at: 0 }; _negAt = 0; }
+export function _setSubscriptionTokenReaderForTests(fn) { _reader = fn || _defaultReader; _resetTokenCacheForTests(); }
 
 function parseCredentials(credentials) {
   if (typeof credentials !== 'string' || credentials.length === 0) return null;

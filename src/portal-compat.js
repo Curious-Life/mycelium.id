@@ -222,6 +222,51 @@ export function portalCompatRouter({ db, userId }) {
     } catch { ok(res, { folders: [] }); }
   });
 
+  // POST /folders { name, parent_id? } → create a Library folder (or sub-folder).
+  // The db.folders namespace already exists (+ fires the live-SSE hooks); this is
+  // the missing write route — without it LibraryNav's "New folder" POSTs into the
+  // void and fails silently. parent_id is a folder UUID; null/absent = top level.
+  router.post('/folders', async (req, res) => {
+    try {
+      if (!db.folders?.create) return fail(res, 500, 'folders unavailable');
+      const name = String(req.body?.name || '').trim().slice(0, 200);
+      if (!name) return fail(res, 400, 'name required');
+      const parentId = req.body?.parent_id ? String(req.body.parent_id) : null;
+      // Scope the parent to the caller (fail-closed): a foreign/nonexistent parent
+      // is rejected rather than silently creating an orphan under someone else's id.
+      if (parentId && db.folders.findById && !(await db.folders.findById(userId, parentId))) {
+        return fail(res, 400, 'parent not found');
+      }
+      const folder = await db.folders.create(userId, name, parentId);
+      ok(res, { ok: true, folder });
+    } catch { fail(res, 500, 'could not create folder'); }
+  });
+
+  // PUT /folders/:id { name } → rename.
+  router.put('/folders/:id', async (req, res) => {
+    try {
+      if (!db.folders?.rename) return fail(res, 500, 'folders unavailable');
+      const name = String(req.body?.name || '').trim().slice(0, 200);
+      if (!name) return fail(res, 400, 'name required');
+      // Ownership check — rename is user-scoped in SQL, but reject unknown ids loudly.
+      if (db.folders.findById && !(await db.folders.findById(userId, req.params.id))) {
+        return fail(res, 404, 'folder not found');
+      }
+      await db.folders.rename(userId, req.params.id, name);
+      ok(res, { ok: true });
+    } catch { fail(res, 500, 'could not rename folder'); }
+  });
+
+  // DELETE /folders/:id → remove the folder (documents move to no-folder, child
+  // folders re-parent to the deleted folder's parent — handled in db.folders.delete).
+  router.delete('/folders/:id', async (req, res) => {
+    try {
+      if (!db.folders?.delete) return fail(res, 500, 'folders unavailable');
+      await db.folders.delete(userId, req.params.id);
+      ok(res, { ok: true });
+    } catch { fail(res, 500, 'could not delete folder'); }
+  });
+
   // ── Timeline: the chronological message feed (Phase T) ─────────────────
   // GET /messages?limit=50&before=<created_at> → { messages: [...] }
   // Backed by db.messages.selectTimeline. `metadata` is stripped from the

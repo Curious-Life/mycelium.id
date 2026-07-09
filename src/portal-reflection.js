@@ -17,6 +17,8 @@ import { seedReflectionCycles as realSeed } from './agent/seed-cycles.js';
 import { CYCLE_CREATED_BY } from './agent/cycle-prompts.js';
 import { humanSchedule, humanNextRun, computeNextRun } from './agent/scheduler-time.js';
 import { buildCyclePatch } from './tools/cycles.js';
+import { resolveTaskCapability } from './inference/capability.js';
+import { REFLECTION_INFERENCE_TASK } from './agent/cycle-prompts.js';
 
 /** Is this a real IANA zone Intl accepts? (fail-closed: reject anything Intl throws on). */
 function isValidTz(tz) {
@@ -51,11 +53,33 @@ export function portalReflectionRouter({ db, userId, authenticatePortalRequest, 
     tz: t.tz || null,
   });
 
+  // Model health for the dashboard banner (C3): cycles are worthless on a model that can't
+  // call tools, and invisible with no model at all. Surface it so the user can fix it.
+  const readModelHealth = async () => {
+    try {
+      const cap = await resolveTaskCapability(db, userId, REFLECTION_INFERENCE_TASK);
+      return { configured: !!cap.configured, toolsCapable: !!cap.toolsCapable, model: cap.model || null };
+    } catch { return { configured: false, toolsCapable: false, model: null }; }
+  };
+
+  // Unread check-ins: how many messages in the owner's Reflections thread arrived since the
+  // user last looked. Drives the "N new" badge so a delivered morning note is DISCOVERABLE
+  // without opening Settings — the check-ins were previously invisible outside this page.
+  const readUnread = async (seenAt) => {
+    try {
+      const rows = (await db.messages.selectByConversation(userId, 'chat:reflections', { limit: 50 })) || [];
+      if (!seenAt) return rows.length;
+      return rows.filter((r) => String(r.created_at || '') > seenAt).length;
+    } catch { return 0; }
+  };
+
   const readState = async () => {
     const s = await db.users.getSettings(userId).catch(() => ({}));
     const timezone = await db.users.getTimezone(userId).catch(() => null);
     const cycles = (await listCycleTasks()).map(shape);
-    return { enabled: !!s?.reflection?.enabled, timezone: timezone || 'UTC', cycles };
+    const modelHealth = await readModelHealth();
+    const unread = await readUnread(s?.reflection?.seenAt || null);
+    return { enabled: !!s?.reflection?.enabled, timezone: timezone || 'UTC', cycles, modelHealth, unread };
   };
 
   // Re-arm every ACTIVE cycle's next_run under a (new) timezone, so an existing UTC-seeded
@@ -166,6 +190,42 @@ export function portalReflectionRouter({ db, userId, authenticatePortalRequest, 
       const t = (await listCycleTasks()).find((c) => c.id === String(req.params.id || ''));
       if (!t) return res.status(404).json({ error: 'unknown cycle' });
       res.json({ cycle: { ...shape(t), prompt: t.prompt || '' } });
+    } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
+  });
+
+  // ── POST mark the Reflections thread as seen — clears the unread badge ──────
+  router.post('/settings/reflection/seen', async (req, res) => {
+    if (!gate(req, res)) return;
+    try {
+      let s;
+      try { s = (await db.users.getSettings(userId)) || {}; }
+      catch { return res.status(500).json({ error: 'could not read settings' }); }
+      s.reflection = { ...(s.reflection || {}), seenAt: new Date().toISOString() };
+      await db.users.updateSettings(userId, s);
+      res.json({ ok: true, unread: 0 });
+    } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
+  });
+
+  // ── GET recent cycle RUNS — health/observability (content-free) ────────────
+  // harness_runs is content-free operational state (status + error CODE + token counts);
+  // this lets the user see "your evening check-in has failed 3×" or "skipped-quiet today"
+  // without a cycle failing silently. Filtered to reflection-cycle tasks only.
+  router.get('/settings/reflection/runs', async (req, res) => {
+    if (!gate(req, res)) return;
+    try {
+      const cycleTasks = await listCycleTasks();
+      const byId = new Map(cycleTasks.map((t) => [t.id, t.name]));
+      const runs = (await db.harness.recentRuns(userId, 60).catch(() => [])) || [];
+      const items = runs
+        .filter((r) => byId.has(r.task_id))
+        .slice(0, 30)
+        .map((r) => ({
+          cycle: byId.get(r.task_id) || null,
+          status: r.status || null,
+          error: r.error || null,
+          at: r.finished_at || r.started_at || null,
+        }));
+      res.json({ runs: items });
     } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
   });
 

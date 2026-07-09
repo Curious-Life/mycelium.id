@@ -25,12 +25,13 @@ const ok = (cond, label, extra = '') => {
 function makeDb() {
   const tasks = [];
   const msgs = [];
+  const runs = [];
   let n = 0;
   let settings = {};
   let timezone = null;
   const findCycle = (id) => tasks.find((t) => t.id === id);
   return {
-    _tasks: tasks, _msgs: msgs,
+    _tasks: tasks, _msgs: msgs, _runs: runs,
     users: {
       async getSettings() { return JSON.parse(JSON.stringify(settings)); },
       async updateSettings(_u, s) { settings = JSON.parse(JSON.stringify(s)); },
@@ -49,6 +50,7 @@ function makeDb() {
       async listTasks() { return tasks.map((t) => ({ ...t })); },
       async updateTask(_u, id, fields) { const t = findCycle(id); if (t) Object.assign(t, fields); },
       async setTaskStatus(_u, id, status) { const t = findCycle(id); if (t) t.status = status; },
+      async recentRuns() { return runs.map((r) => ({ ...r })); },
     },
     messages: {
       async selectByConversation(_u, conversationId, { limit = 30 } = {}) {
@@ -159,6 +161,34 @@ try {
   db._msgs.push({ id: 'm1', conversation_id: 'chat:reflections', role: 'assistant', content: 'Good morning — noticed you shipped X.', created_at: '2026-07-03T12:00:00Z', model: 'claude-opus-4-8' });
   r = await j('GET', '/settings/reflection/messages');
   ok(r.status === 200 && r.body.messages.length === 1 && r.body.messages[0].content.includes('Good morning'), 'reflection messages endpoint surfaces check-ins from chat:reflections');
+
+  // F. model-health (C3): no provider configured → configured:false so the dashboard can warn.
+  {
+    const st = await j('GET', '/settings/reflection');
+    ok(st.body.modelHealth && st.body.modelHealth.configured === false, 'state carries modelHealth (configured:false with no provider)');
+  }
+
+  // G. unread + mark-seen (C5): a fresh check-in is unread until seen.
+  {
+    const st1 = await j('GET', '/settings/reflection');
+    ok(st1.body.unread === 1, 'unread counts the delivered check-in', `(${st1.body.unread})`);
+    const seen = await j('POST', '/settings/reflection/seen');
+    ok(seen.status === 200, 'POST seen ok');
+    const st2 = await j('GET', '/settings/reflection');
+    ok(st2.body.unread === 0, 'unread clears after marking seen', `(${st2.body.unread})`);
+  }
+
+  // H. runs endpoint (C4 observability): surfaces content-free per-cycle run status.
+  {
+    const cyc = db._tasks.find((t) => t.name === 'Evening check-in');
+    db._runs.push({ id: 'r1', task_id: cyc.id, status: 'skipped-quiet', error: null, finished_at: '2026-07-07T20:00:00Z' });
+    db._runs.push({ id: 'r2', task_id: cyc.id, status: 'delivery-failed', error: 'ETIMEDOUT', finished_at: '2026-07-06T20:00:00Z' });
+    db._runs.push({ id: 'r3', task_id: 'not-a-cycle', status: 'done', error: null, finished_at: '2026-07-06T10:00:00Z' });
+    const runsRes = await j('GET', '/settings/reflection/runs');
+    ok(runsRes.status === 200 && runsRes.body.runs.length === 2, 'runs endpoint returns only cycle runs', `(${runsRes.body.runs.length})`);
+    ok(runsRes.body.runs.every((x) => x.cycle === 'Evening check-in'), 'runs carry the cycle name');
+    ok(runsRes.body.runs.some((x) => x.status === 'skipped-quiet') && runsRes.body.runs.some((x) => x.status === 'delivery-failed'), 'runs surface quiet-skip + delivery-failed statuses');
+  }
 
   // M1 regression: a genuine getSettings THROW must fail closed (500), NOT proceed with {}
   // and clobber every other setting via the whole-blob updateSettings replace.

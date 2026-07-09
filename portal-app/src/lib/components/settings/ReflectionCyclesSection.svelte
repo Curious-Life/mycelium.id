@@ -17,14 +17,22 @@
 		nextRun: string | null; nextRunHuman: string; lastRun: string | null; lastStatus: string | null;
 	};
 	type CheckIn = { id: string; role: string; content: string; at: string | null; model: string | null };
+	type ModelHealth = { configured: boolean; toolsCapable: boolean; model: string | null };
+	type Run = { cycle: string | null; status: string | null; error: string | null; at: string | null };
 
 	let enabled = $state(false);
 	let timezone = $state('UTC');
 	let cycles = $state<Cycle[]>([]);
 	let checkins = $state<CheckIn[]>([]);
+	let modelHealth = $state<ModelHealth | null>(null);
+	let unread = $state(0);
+	let runs = $state<Run[]>([]);
 	let loading = $state(true);
 	let saving = $state(false);
 	let error = $state<string | null>(null);
+
+	// Which run statuses are "problems" worth showing prominently vs routine skips.
+	const isProblem = (s: string | null) => !!s && /error|failed|incapable|no-model/.test(s);
 
 	// per-cycle inline editor
 	let editingId = $state<string | null>(null);
@@ -45,7 +53,9 @@
 			enabled = d.enabled === true;
 			timezone = d.timezone || 'UTC';
 			cycles = d.cycles || [];
-			if (enabled) await loadCheckins();
+			modelHealth = d.modelHealth || null;
+			unread = Number(d.unread) || 0;
+			if (enabled) { await loadCheckins(); await loadRuns(); markSeen(); }
 		} catch (e: any) {
 			error = e?.message || 'Failed to load';
 		} finally {
@@ -58,6 +68,18 @@
 			const res = await api('/portal/settings/reflection/messages');
 			if (res.ok) checkins = (await res.json()).messages || [];
 		} catch { /* non-fatal */ }
+	}
+
+	async function loadRuns() {
+		try {
+			const res = await api('/portal/settings/reflection/runs');
+			if (res.ok) runs = (await res.json()).runs || [];
+		} catch { /* non-fatal */ }
+	}
+
+	// Clear the unread badge once the user is looking at the check-ins here.
+	async function markSeen() {
+		try { await api('/portal/settings/reflection/seen', { method: 'POST' }); } catch { /* non-fatal */ }
 	}
 
 	onMount(load);
@@ -159,6 +181,25 @@
 			</p>
 		</div>
 	{:else}
+		<!-- model-health banner: cycles need a tool-capable model to read the day + write memory -->
+		{#if modelHealth && !modelHealth.configured}
+			<div class="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+				<p class="text-xs text-[var(--color-text-primary)]">
+					<span class="font-medium">No model set for reflection.</span>
+					Your cycles are on, but they can't run until you pick a model in
+					Settings → Intelligence (the “Reflection cycles” task).
+				</p>
+			</div>
+		{:else if modelHealth && !modelHealth.toolsCapable}
+			<div class="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+				<p class="text-xs text-[var(--color-text-primary)]">
+					<span class="font-medium">Your reflection model can't read your memory.</span>
+					{modelHealth.model ? `“${modelHealth.model}” doesn't support tool use` : 'The selected model doesn’t support tool use'},
+					so check-ins are skipped rather than guessing. Pick a tool-capable model in Settings → Intelligence.
+				</p>
+			</div>
+		{/if}
+
 		<!-- timezone -->
 		<div class="mt-4 flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] p-3">
 			<p class="text-xs text-[var(--color-text-secondary)]">
@@ -223,10 +264,27 @@
 			{/each}
 		</div>
 
+		<!-- cycle health: recent runs (content-free), problems surfaced -->
+		{#if runs.length}
+			<div class="mt-4">
+				<h4 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-2">Recent activity</h4>
+				<div class="flex flex-wrap gap-1.5">
+					{#each runs.slice(0, 12) as run}
+						<span class="rounded px-1.5 py-0.5 text-[0.6rem] border {isProblem(run.status) ? 'border-red-500/40 text-red-500' : 'border-[var(--color-border)] text-[var(--color-text-tertiary)]'}"
+							title={`${run.cycle ?? ''} · ${run.at ? new Date(run.at).toLocaleString() : ''}${run.error ? ' · ' + run.error : ''}`}>
+							{run.cycle ?? 'cycle'}: {run.status ?? '—'}
+						</span>
+					{/each}
+				</div>
+			</div>
+		{/if}
+
 		<!-- recent check-ins -->
 		{#if checkins.length}
 			<div class="mt-4">
-				<h4 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-2">Recent check-ins</h4>
+				<h4 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-2">
+					Recent check-ins{#if unread > 0}<span class="ml-2 rounded-full bg-[var(--color-accent)] px-1.5 py-0.5 text-[0.6rem] text-white">{unread} new</span>{/if}
+				</h4>
 				<div class="space-y-2">
 					{#each checkins.slice(-5).reverse() as m (m.id)}
 						<div class="rounded-lg border border-[var(--color-border)] p-3">

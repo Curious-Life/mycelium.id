@@ -227,6 +227,36 @@ function createWorkspace() {
 		openInPane(paneId: string, viewId: string, params: Record<string, unknown> = {}) {
 			update((s) => openIn(s, paneId, viewId, params));
 		},
+
+		/** Navigate IN PLACE (browser-style plain click): focus an existing
+		 *  singleton-keyed tab if one exists, else REPLACE the focused pane's active
+		 *  tab's content (same tab id + position — no new tab). Only an empty pane
+		 *  creates a tab. Pair with openOrFocus() for the explicit new-tab gesture
+		 *  (right-click / ⌘·ctrl·middle-click / long-press). */
+		openInActiveTab(viewId: string, params: Record<string, unknown> = {}) {
+			update((s) => {
+				if (!viewExists(viewId)) return s;
+				const key = tabKey(viewId, params);
+				// 1. An existing tab for this key wins — focus it (never duplicate).
+				for (const l of allLeaves(s.root)) {
+					const ex = l.tabs.find((t) => tabKey(t.viewId, t.params) === key);
+					if (ex) {
+						const merged = { ...ex.params, ...params };
+						return { ...s, root: updateLeaf(s.root, l.id, (lf) => ({ ...lf, activeTabId: ex.id, tabs: lf.tabs.map((t) => (t.id === ex.id ? { ...t, params: merged } : t)) })), focusedPaneId: l.id };
+					}
+				}
+				// 2. Replace the focused pane's ACTIVE tab in place (keep id + slot).
+				const pane = findLeaf(s.root, s.focusedPaneId) ?? firstLeaf(s.root);
+				const v = getView(viewId)!;
+				const active = pane.tabs.find((t) => t.id === pane.activeTabId);
+				if (active) {
+					return { ...s, root: updateLeaf(s.root, pane.id, (lf) => ({ ...lf, activeTabId: active.id, tabs: lf.tabs.map((t) => (t.id === active.id ? { ...t, viewId, params, title: v.title, icon: v.icon } : t)) })), focusedPaneId: pane.id };
+				}
+				// 3. Empty pane → create.
+				const t = makeTab(viewId, params);
+				return { ...s, root: updateLeaf(s.root, pane.id, (lf) => ({ ...lf, tabs: [...lf.tabs, t], activeTabId: t.id })), focusedPaneId: pane.id };
+			});
+		},
 		openFromRoute(viewId: string, params: Record<string, unknown> = {}) {
 			api.openOrFocus(viewId, params);
 		},

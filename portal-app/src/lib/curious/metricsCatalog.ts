@@ -71,6 +71,7 @@ export const METRIC_FAMILIES: FamilyDef[] = [
 		surfaced: true,
 		metrics: [
 			{ key: 'vitality', name: 'Vitality', meaning: 'A blend of the five signals below — overall aliveness of a territory.' },
+			{ key: 'gravity', name: 'Gravity', meaning: 'A territory’s attentional weight — how much of your attention it holds. Combines mass (share of activity), recency (how recent), and centrality (how connected). Big, recent, well-connected regions pull hardest.' },
 			{ key: 'entropy_diversification', name: 'Diversification', meaning: 'How varied a territory’s connections are, rather than clustered in one place.' },
 			{ key: 'connection_growth_rate', name: 'Connection growth', meaning: 'How quickly a territory is forming new links.' },
 			{ key: 'reach', name: 'Reach', meaning: 'How far across your mindscape a territory connects.' },

@@ -142,6 +142,8 @@ export interface TerritoryProfile {
 	daysActive: number | null;
 	currentVitality: number | null;
 	currentPhase: 'sparse' | 'active' | 'anchor' | null;
+	gravity: number | null;
+	gravityShare: number | null;
 	isAnchored: number;
 	predecessorIds: number[];
 	evolvedFromCount: number;
