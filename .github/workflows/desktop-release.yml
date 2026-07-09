@@ -202,6 +202,14 @@ jobs:
           path: dist/Mycelium_${{ steps.ver.outputs.version }}_${{ matrix.dmgarch }}.dmg
           if-no-files-found: error
 
+      # A version-less copy so the website can link to a PERMANENT direct-download URL:
+      #   …/releases/latest/download/Mycelium-macos-arm64.dmg
+      # Same signed + notarized DMG, just a stable filename. arm64 only today; add an
+      # x64 copy alongside when the Intel build ships (site would then arch-detect).
+      - name: Stable-named DMG (permanent direct-download URL)
+        if: matrix.dmgarch == 'aarch64'
+        run: cp "dist/Mycelium_${{ steps.ver.outputs.version }}_${{ matrix.dmgarch }}.dmg" "dist/Mycelium-macos-arm64.dmg"
+
       # Attach the DMG + (when present) the updater manifest/tarball/signature. The
       # updater globs match nothing on a DMG-only release; softprops skips missing
       # globs (fail_on_unmatched_files defaults false), so this stays green either way.
@@ -211,6 +219,7 @@ jobs:
         with:
           files: |
             dist/Mycelium_${{ steps.ver.outputs.version }}_${{ matrix.dmgarch }}.dmg
+            dist/Mycelium-macos-arm64.dmg
             dist/latest.json
             dist/Mycelium.app.tar.gz
             dist/Mycelium.app.tar.gz.sig
