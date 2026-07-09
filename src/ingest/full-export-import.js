@@ -183,13 +183,15 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
     if (!att || typeof att !== 'object') { attStats.failed++; return; }
     try {
       let localPath = null, sha = null;
-      // Confine to attDir: att.id is a flat id from an UNTRUSTED export; a crafted value
-      // like "../../.." would escape attDir into an arbitrary-file read (CodeQL
-      // js/path-injection). Fail closed on any non-flat id, and sanitize the join with
-      // basename so the read sink can only ever land inside attDir.
+      // Confine strictly under attDir: att.id comes from an UNTRUSTED export. Resolve it
+      // and require the result to be a proper descendant of attDir — this rejects '..',
+      // '.', absolute paths, and any traversal (basename alone does NOT: basename('..')
+      // === '..'), so the read sink below can only ever land inside attDir (CodeQL
+      // js/path-injection → arbitrary file read). Fail closed.
+      const attRoot = path.resolve(attDir);
       const attId = att.id != null ? String(att.id) : '';
-      if (attId && path.basename(attId) !== attId) { attStats.failed++; return; }
-      const adir = attId ? path.join(attDir, path.basename(attId)) : null;
+      const adir = attId ? path.resolve(attRoot, attId) : null;
+      if (adir && !adir.startsWith(attRoot + path.sep)) { attStats.failed++; return; }
       const fname = adir && fs.existsSync(adir) ? (fs.readdirSync(adir)[0] || null) : null;
       if (fname) {
         const abs = path.join(adir, fname);
