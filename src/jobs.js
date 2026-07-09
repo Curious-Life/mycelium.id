@@ -23,6 +23,7 @@ import { backfillColumn, countRemainingEnvelopes } from './account/backfill.js';
 import { safeVaultCopy } from './db/backup.js';
 import { assertVaultDiskHeadroom } from './db/disk-guard.js';
 import { getMasterKey } from './crypto/crypto-local.js';
+import { identityEnv } from './spawn-env.js';
 
 /**
  * Kill-switch for the destructive re-cluster. Generate (auto OR manual) rebuilds
@@ -118,8 +119,8 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
   const scriptPath = process.env.MYCELIUM_CLUSTER_SCRIPT || 'pipeline/run-clustering.sh';
   const childEnv = {
     PATH: process.env.PATH,
-    HOME: process.env.HOME,
-    USER: process.env.USER,
+    // USER/LOGNAME/HOME, filled from os.userInfo() when a Finder/launchd launch omits them.
+    ...identityEnv(),
     LANG: process.env.LANG,
     USER_MASTER: userHex,
     SYSTEM_KEY: systemHex,
@@ -499,8 +500,8 @@ export function startChronicleNarrationJob({ dbPath, userId, territoryId = null 
   const { userHex, systemHex } = getSessionKeys() ?? resolveKeys();
   const childEnv = {
     PATH: process.env.PATH,
-    HOME: process.env.HOME,
-    USER: process.env.USER,
+    // USER/LOGNAME/HOME, filled from os.userInfo() when a Finder/launchd launch omits them.
+    ...identityEnv(),
     LANG: process.env.LANG,
     USER_MASTER: userHex,
     SYSTEM_KEY: systemHex,

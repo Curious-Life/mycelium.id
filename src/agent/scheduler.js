@@ -22,14 +22,21 @@ import { createAgentHarness } from './harness.js';
 import { createAgentLoop } from './loop.js';
 import { createAgentHooks, autonomousToolGuard } from './hooks.js';
 import { createLane } from './lane.js';
-import { computeNextRun } from './scheduler-time.js';
+import { computeNextRun, parseSchedule } from './scheduler-time.js';
+import { classifyProviderError } from './provider-errors.js';
 import { runAgentTurn } from './run-turn.js';
-import { cycleTurnOpts, isNoReply } from './cycle-prompts.js';
+import { cycleTurnOpts, cycleByName } from './cycle-prompts.js';
+import { finalizeCycleOutput, cycleDeliveryId } from './cycle-output.js';
+import { hasEnoughActivity } from './cycle-activity.js';
+import { resolveTaskCapability } from '../inference/capability.js';
 import { resolvePersona } from '../skills/store.js';
 import { createEgressAuditSink } from '../inference/egress.js';
 import { createUsageSink } from '../inference/usage.js';
 
 const DEFAULT_TICK_MS = 30_000;
+// Transient-failure retry backoff (minutes). A 429/5xx/network blip on the model provider
+// shouldn't lose a check-in until its next schedule (~24h) — retry a few times, growing.
+const RETRY_BACKOFF_MIN = [5, 15, 45];
 
 const SCHEDULER_SYSTEM = [
   'You are running an autonomous scheduled task for the owner of this Mycelium vault,',
@@ -63,6 +70,7 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
 
   const lane = createLane();
   const executing = new Set();       // task ids currently queued/running (dedup across ticks)
+  const retries = new Map();          // task id → transient-failure retry attempt count (cleared on success/give-up)
   const ctrl = new AbortController(); // stop() aborts in-flight turns
   let timer = null;
   let stopped = false;
@@ -96,6 +104,21 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
   async function buildAndRunTurn(task) {
     const { isCycle, inferenceTask } = cycleTurnOpts(task);
     const tUser = task.user_id || userId;
+    // Quiet-day gate (C2): a check-in cycle whose window has too little REAL activity skips
+    // in CODE, BEFORE composing — so an empty day can't produce a "system status" meta-report,
+    // and no tokens are spent. Internal cycles (no minActivity) fall through and run.
+    if (isCycle) {
+      const def = cycleByName(task.name);
+      if (def?.minActivity) {
+        const { enough, count, min } = await hasEnoughActivity(db, tUser, def, { now: new Date(), tz: task.tz || null });
+        if (!enough) { logger(`scheduler: quiet-day skip ${task.id} (${count}/${min})`); return { skipped: 'quiet' }; }
+      }
+      // Model-capability guard (C3): a cycle is worthless on a model that can't call tools
+      // (it can't read the day or write memory — it just fabricates). Skip before composing;
+      // the dashboard's model-health banner tells the user to pick a capable model.
+      const cap = await resolveTaskCapability(db, tUser, inferenceTask, { fetch: fetchImpl });
+      if (cap.configured && !cap.toolsCapable) { logger(`scheduler: model-incapable skip ${task.id} (${cap.model})`); return { skipped: 'model-incapable' }; }
+    }
     // A reflection cycle injects the user-editable persona (skills/persona/soul.md, resolved
     // with a hard fallback to the ported default); any other task keeps the generic preamble.
     const systemExtra = isCycle ? await resolvePersona(db, tUser) : SCHEDULER_SYSTEM;
@@ -110,15 +133,25 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
     );
   }
 
-  // Advance the task's next_run from its schedule; a schedule with no further fire
-  // (a past 'once') is marked completed so it doesn't linger active with null next_run.
+  // Advance the task's next_run from its schedule. A 'once' schedule with no further fire
+  // is marked completed. A RECURRING cycle should always have a next fire — a null there is
+  // an anomaly, NOT an end-of-life: re-arm it an hour out rather than silently 'completing'
+  // (which would kill the cycle with no trace), so it self-heals and stays observable.
   async function advance(task, lastStatus, lastError = null) {
     const tUser = task.user_id || userId;
     let nextRun = null;
     try { nextRun = computeNextRun(task.schedule, { after: new Date(), tz: task.tz || null, scheduledAt: task.scheduled_at || null }); }
     catch { nextRun = null; }
+    let parsed = null;
+    try { parsed = parseSchedule(task.schedule); } catch { parsed = null; }
+    const isOnce = !parsed || parsed.type === 'once';
+    if (!nextRun && !isOnce) {
+      nextRun = new Date(Date.now() + 3600_000).toISOString();
+      logger(`scheduler: next_run compute failed for recurring ${task.id} (${task.schedule}); re-armed +1h`);
+      if (lastStatus !== 'error') lastStatus = 'next-run-recovered';
+    }
     await db.harness.markTaskRun(tUser, task.id, { nextRun, lastStatus, lastError });
-    if (!nextRun) { try { await db.harness.setTaskStatus(tUser, task.id, 'completed'); } catch { /* non-fatal */ } }
+    if (!nextRun && isOnce) { try { await db.harness.setTaskStatus(tUser, task.id, 'completed'); } catch { /* non-fatal */ } }
   }
 
   async function runTask(task) {
@@ -131,8 +164,10 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
       // Daily token-budget gate (Step 7c): unattended turns shouldn't run away with the
       // bill. MYCELIUM_DAILY_TOKEN_BUDGET (0/unset = unlimited). Counts only; fail-open
       // (a usage-read failure never blocks a turn).
+      // Essential cycles (morning/evening check-ins) are the user-facing value and are
+      // EXEMPT — the budget throttles background work, not the person's daily touchpoints.
       const budget = Number(process.env.MYCELIUM_DAILY_TOKEN_BUDGET) || 0;
-      if (budget > 0) {
+      if (budget > 0 && !task.essential) {
         try {
           const { totals } = await db.usage.summary(tUser, { sinceDays: 1 });
           const spent = (totals?.inputTokens || 0) + (totals?.outputTokens || 0);
@@ -144,24 +179,53 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
 
       const r = await (runTurnOverride || buildAndRunTurn)(task);
 
-      if (r && r.skipped === 'no-model') {
-        await db.harness.finishRun(runId, { status: 'skipped-no-model' });
-        await advance(task, 'skipped-no-model');
-        return;
+      // ONE robust decision point (src/agent/cycle-output.js): deliver a grounded check-in,
+      // or skip cleanly. Suppresses the reserved NO_REPLY sentinel (however wrapped), a
+      // truncated fragment, an empty turn, and self-referential "system status" meta-reports
+      // — the leaks that reached people in production. Pre-turn skips (no-model, model-
+      // incapable, quiet day) carry their own status through unchanged.
+      const decision = finalizeCycleOutput(r, task);
+      if (decision.action === 'deliver') {
+        try {
+          await deliverFn(task, decision.text, { model: r?.model || null, id: cycleDeliveryId(task) });
+        } catch (e) {
+          // Delivery failure is NOT a silent 'done' — the check-in was composed but never
+          // reached the person; record it so the dashboard/last_status shows the drop.
+          const code = errCode(e);
+          logger(`scheduler: deliver failed for ${task.id}: ${code}`);
+          await db.harness.finishRun(runId, { status: 'delivery-failed', error: code });
+          await advance(task, 'delivery-failed', code);
+          return;
+        }
       }
-      const text = (r && typeof r.text === 'string') ? r.text : '';
-      const status = r?.truncated ? 'truncated' : 'done';
-      // NO_REPLY is the canonical "skip the check-in" sentinel — a cycle that returns it
-      // delivers nothing (never surface the literal token to the person).
-      if (text.trim() && !isNoReply(text) && task.output_target && task.output_target !== 'none') {
-        try { await deliverFn(task, text, { model: r?.model || null }); } catch (e) { logger(`scheduler: deliver failed for ${task.id}: ${errCode(e)}`); }
-      }
-      await db.harness.finishRun(runId, { status });
-      await advance(task, status);
+      await db.harness.finishRun(runId, { status: decision.status });
+      await advance(task, decision.status);
+      retries.delete(task.id); // a completed fire (delivered or cleanly skipped) clears retry state
     } catch (e) {
       const code = errCode(e);
       logger(`scheduler: task ${task.id} failed (${code})`);
       if (runId) { try { await db.harness.finishRun(runId, { status: 'error', error: code }); } catch { /* */ } }
+      // Transient TRANSPORT failure (429/5xx/network) → bounded short-backoff retry instead
+      // of losing the cycle until its next schedule (~24h). Requires BOTH a retryable class
+      // AND a concrete transport signal (status/network code) — an arbitrary turn error (code
+      // bug, decrypt failure) must NOT be retried, it just ends 'error'. Auth/abort → give up.
+      let isTransient = false;
+      try {
+        const status = Number(e?.status) || 0;
+        const netHint = String(e?.code || e?.name || '');
+        isTransient = !!classifyProviderError(e)?.retryable
+          && (status === 429 || status >= 500 || /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EPIPE/i.test(netHint));
+      } catch { isTransient = false; }
+      const attempt = retries.get(task.id) || 0;
+      if (isTransient && attempt < RETRY_BACKOFF_MIN.length) {
+        const nextRun = new Date(Date.now() + RETRY_BACKOFF_MIN[attempt] * 60_000).toISOString();
+        retries.set(task.id, attempt + 1);
+        try { await db.harness.markTaskRun(tUser, task.id, { nextRun, lastStatus: 'retry-scheduled', lastError: code }); }
+        catch { try { await advance(task, 'error', code); } catch { /* */ } }
+        logger(`scheduler: retry ${attempt + 1}/${RETRY_BACKOFF_MIN.length} for ${task.id} in ${RETRY_BACKOFF_MIN[attempt]}m (${code})`);
+        return;
+      }
+      retries.delete(task.id); // give up → advance to the next real schedule, reset for next fire
       try { await advance(task, 'error', code); } catch { /* */ }
     }
   }

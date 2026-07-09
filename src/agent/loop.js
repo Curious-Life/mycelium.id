@@ -24,6 +24,7 @@ const DEFAULT_IDLE_MS = 60000;     // inter-token gap before declaring a stall
 const DEFAULT_MAX_RETRIES = 2;     // whole-turn retries while it produced NOTHING
 const BACKOFF_BASE_MS = Number(process.env.MYCELIUM_BACKOFF_BASE_MS) || 1000;   // base, exp-backed
 const BACKOFF_CAP_MS = Number(process.env.MYCELIUM_BACKOFF_CAP_MS) || 30000;    // cap before jitter
+const RETRY_AFTER_CAP_MS = Number(process.env.MYCELIUM_RETRY_AFTER_CAP_MS) || 60000; // clamp a provider's Retry-After so a bad/huge value can't hang the turn
 
 /**
  * Create the agent loop core.
@@ -61,7 +62,7 @@ export function createAgentLoop({ harness, logger = () => {} }) {
    */
   async function run({
     provider, system, userMessage, tools = [], call, send = () => {},
-    maxTokens, numCtx,
+    maxTokens, numCtx, maxIterations, webSearch = false, requireTool = null,
     ttfbMs = DEFAULT_TTFB_MS, idleMs = DEFAULT_IDLE_MS, maxRetries = DEFAULT_MAX_RETRIES,
     signal, onStall, onHeartbeat, providerChain = null,
   }) {
@@ -77,6 +78,7 @@ export function createAgentLoop({ harness, logger = () => {} }) {
     let lastActivity = Date.now();
     let streaming = false;             // flipped on the first token (text or thinking)
     let attemptCtrl = null;            // the current attempt's AbortController (watchdog aborts it)
+    let retryAfterMs = 0;              // provider Retry-After (429/503) carried into the NEXT backoff
 
     const clientGone = () => !!signal?.aborted;
 
@@ -118,9 +120,14 @@ export function createAgentLoop({ harness, logger = () => {} }) {
         if (clientGone()) break;
         if (attempt > 0) {
           // Decorrelated jittered exponential backoff (hermes) — avoids hammering a
-          // rate-limited provider in lockstep. min(base·2^n, cap) + 0–50% jitter.
+          // rate-limited provider in lockstep. min(base·2^n, cap) + 0–50% jitter. When the
+          // provider ASKED for a longer wait via Retry-After (429/503), honor that instead
+          // (best practice — waiting less just gets re-throttled), clamped so a bad header
+          // can't hang the turn.
           const d = Math.min(BACKOFF_BASE_MS * 2 ** (attempt - 1), BACKOFF_CAP_MS);
-          const backoff = d + Math.floor(Math.random() * 0.5 * d);
+          const jittered = d + Math.floor(Math.random() * 0.5 * d);
+          const backoff = Math.min(Math.max(jittered, retryAfterMs), RETRY_AFTER_CAP_MS);
+          retryAfterMs = 0;   // consumed
           await new Promise((r) => setTimeout(r, backoff));
           if (clientGone()) break;
           send({ type: 'retry', attempt });
@@ -138,13 +145,18 @@ export function createAgentLoop({ harness, logger = () => {} }) {
         try {
           result = await harness.streamTurn({
             provider: activeProvider, system, userMessage, tools, call,
-            send: sink, signal: attemptCtrl.signal, maxTokens, numCtx,
+            send: sink, signal: attemptCtrl.signal, maxTokens, numCtx, webSearch, requireTool,
+            // Per-turn tool-loop cap (undefined → the harness default). Untrusted channel
+            // turns pass a LOWER cap so a coaxed runaway can't ride the owner's 100-round
+            // budget on Opus (MED-1). Owner/interactive turns leave it undefined → 100.
+            ...(maxIterations != null ? { maxIterations } : {}),
           });
           lastErr = null;
         } catch (e) {
           lastErr = e;
-          const { retryable, reason } = classifyProviderError(e);
-          logger(`loop: attempt ${attempt} failed (${reason}; ${e?.status || e?.message || 'error'})`);
+          const { retryable, reason, retryAfterMs: ra } = classifyProviderError(e);
+          retryAfterMs = ra || 0;   // honored by the next attempt's backoff (clamped there)
+          logger(`loop: attempt ${attempt} failed (${reason}; ${e?.status || e?.message || 'error'}${ra ? `; retry-after ${ra}ms` : ''})`);
           if (reason === 'aborted') break;   // our watchdog/cancel — stop, don't fall back
           // Pre-content provider-fallback: nothing streamed + a next provider exists →
           // advance the chain (covers a provider-specific fatal like a bad key on THIS
@@ -152,6 +164,7 @@ export function createAgentLoop({ harness, logger = () => {} }) {
           // empty-retry budget; total tries stay bounded by maxRetries + chain length.
           if (!assistantText.trim() && chain && chainIdx < chain.length - 1) {
             chainIdx += 1; activeProvider = chain[chainIdx]; fellBack = true;
+            retryAfterMs = 0;   // LOW-1: don't carry provider A's Retry-After onto B's path
             const to = describeProvider(activeProvider)?.label || null;
             send({ type: 'fallback', reason, to });
             logger(`loop: provider fallback (${reason}) → ${to || 'next'}`);
@@ -162,9 +175,11 @@ export function createAgentLoop({ harness, logger = () => {} }) {
           if (!retryable) break;
         }
 
-        // Stop when: client gone, got text, the model hit its output cap (retry would
-        // re-hit it), or retries exhausted. Otherwise (empty/stalled) → retry.
-        if (clientGone() || assistantText.trim() || result?.truncated || attempt >= maxRetries) break;
+        // Stop when: client gone, got text, DELIVERED via the required tool (a reply-only
+        // turn streams no text but must NOT retry → double-send), the model hit its output
+        // cap (retry would re-hit it), or retries exhausted. Otherwise (empty/stalled) → retry.
+        const delivered = requireTool && Array.isArray(result?.toolsUsed) && result.toolsUsed.includes(requireTool);
+        if (clientGone() || assistantText.trim() || delivered || result?.truncated || attempt >= maxRetries) break;
       }
     } finally {
       clearInterval(watchdog);
@@ -178,6 +193,12 @@ export function createAgentLoop({ harness, logger = () => {} }) {
       aborted: !!result?.aborted,
       clientGone: clientGone(),
       fellBack,
+      // Delivery guarantee (Layer 2): reply was landed via the text-harvest last resort.
+      harvested: !!result?.harvested,
+      // Observability (Layer 3): the ACTUAL provider/model that produced the answer AFTER any
+      // fallback — so the activity feed reports what really ran (was masked as the primary model).
+      actualModel: describeProvider(activeProvider)?.model || null,
+      actualJurisdiction: describeProvider(activeProvider)?.jurisdiction || null,
       lastErr,
     };
   }

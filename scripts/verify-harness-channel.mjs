@@ -176,6 +176,33 @@ const OWNER_HDR = { 'x-mycelium-channel-turn-token': TURN_TOKEN };
   delete process.env.MYCELIUM_CHANNEL_OWNER_WRITE;
 }
 
+// ── C15 CLI-routing reply detection: the CLI engine reports MCP tools NAMESPACED
+// (`mcp__mycelium__reply`), the native harness reports the bare `reply`. Both must count as
+// delivered — else a CLI-routed owner reply is a false "no-reply". ──
+{
+  shouldThrow = false;
+  nextResult = { text: 'sent', toolsUsed: ['mcp__mycelium__searchMindscape', 'mcp__mycelium__reply'] };
+  const j = await (await post({ userMessage: 'hi', conversationId: CONV, group: false })).json();
+  rec('C15 CLI-namespaced reply (mcp__mycelium__reply) → delivered', j.delivered === true && j.usedReplyTool === true && j.reason === 'replied', JSON.stringify(j));
+  nextResult = { text: 'thinking out loud but never called reply', toolsUsed: ['mcp__mycelium__searchMindscape'] };
+  const j2 = await (await post({ userMessage: 'hi', conversationId: CONV, group: false })).json();
+  rec('C15 no reply tool (any form) → NOT delivered (no false positive)', j2.delivered === false && j2.reason === 'no-reply', JSON.stringify(j2));
+}
+// ── C16 SECURITY: untrusted turns NEVER route to the CLI even when harness+restPort exist ──
+// (the CLI --tools glob can't sub-select MCP tools, so an untrusted CLI turn would gain writes).
+{
+  const app2 = express();
+  let lastOpts2 = null;
+  app2.use(createChannelTurnRouter({ db, userId: U, tools: [], handlers: {}, harness: {}, restPort: 65000,
+    runTurn: async (opts) => { lastOpts2 = opts; return { text: 'x', toolsUsed: ['reply'] }; }, logger: () => {}, expectedToken: TURN_TOKEN }));
+  const s2 = http.createServer(app2); await new Promise((r) => s2.listen(0, '127.0.0.1', r));
+  const u2 = `http://127.0.0.1:${s2.address().port}/internal/agent/channel-turn`;
+  // Untrusted (non-owner) DM — even with harness+restPort wired, must stay native.
+  await fetch(u2, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userMessage: 'hi', conversationId: CONV, source: 'telegram', group: false, senderRole: 'other' }) });
+  rec('C16 untrusted turn → harnessMode native (never CLI), reply-only', lastOpts2?.harnessMode === 'native' && (lastOpts2?.enabledTools || []).join(',') === 'reply', JSON.stringify({ mode: lastOpts2?.harnessMode, tools: lastOpts2?.enabledTools }));
+  await new Promise((r) => s2.close(r));
+}
+
 await new Promise((r) => server.close(r));
 await close?.();
 const allPass = ledger.every(Boolean);

@@ -48,8 +48,12 @@ async function readAgentName(db, userId) {
  */
 export async function runAgentTurn(
   { db, userId, tools = [], handlers = {}, loop, fetchImpl = globalThis.fetch, signal, hooks } = {},
-  { userMessage, systemExtra = '', enabledTools = [], history = [], conversationId = null, recentN, localTools = false, historyUntrusted = false, onWrite = null, inferenceTask = 'harness' } = {},
+  { userMessage, systemExtra = '', enabledTools = [], history = [], conversationId = null, recentN, localTools = false, historyUntrusted = false, onWrite = null, inferenceTask = 'harness', maxIterations, webSearch = false, harnessMode = 'native', sessionId = null, resume = false, ttfbMs, idleMs, deliverTool = null } = {},
 ) {
+  // CLI engine: the `claude` session OWNS the conversation memory + in-session compaction,
+  // so we do NOT hydrate history into the preamble (portal-chat.js does the same). The tool
+  // grant + `call` below are inert for the CLI loop (it drives its own confined MCP toolset).
+  const isCli = harnessMode === 'cli';
   if (!loop || typeof loop.run !== 'function') throw new TypeError('runAgentTurn: loop with run() required');
 
   const provider = await resolveInferenceConfigForTask(db, userId, inferenceTask);
@@ -63,7 +67,16 @@ export async function runAgentTurn(
   let providerChain = null;
   try {
     const chain = await resolveProviderChain(db, userId, { sensitive: false });
-    if (Array.isArray(chain) && chain.length) providerChain = [provider, ...chain];
+    if (Array.isArray(chain) && chain.length) {
+      // Layer 1 — DEDUP the chain: the active `provider` is ALSO present in the jurisdiction-
+      // sorted chain, so [provider, ...chain] attempts the primary TWICE (verified live: a channel
+      // turn tried claude-opus-4-8 → qwen3.6-27b → claude-opus-4-8 → local, wasting a whole retry
+      // on the already-failed primary before reaching the floor). Key by providerName+model+baseUrl
+      // +jurisdiction; keep first occurrence so the primary stays first. Local floor ({}) keys once.
+      const key = (c) => `${c?.providerName || ''}::${c?.cloudModel || c?.model || ''}::${c?.baseUrl || ''}::${c?.jurisdiction || ''}`;
+      const seen = new Set();
+      providerChain = [provider, ...chain].filter((c) => { const k = key(c); if (seen.has(k)) return false; seen.add(k); return true; });
+    }
   } catch { /* single provider */ }
 
   // Model-aware budgeting (fail-soft → legacy char cap). Resolved before the history
@@ -84,7 +97,8 @@ export async function runAgentTurn(
   try { const ctx = await handlers.getContext?.({ recentMessages: n }); if (typeof ctx === 'string' && ctx) system += `\n\n${ctx}`; } catch { /* honest-empty */ }
 
   // Conversation history → preamble, compacted (summarized + tail) when over budget (6d).
-  if (Array.isArray(history) && history.length) {
+  // Skipped for the CLI engine — its session already holds the thread.
+  if (!isCli && Array.isArray(history) && history.length) {
     const contextWindow = plan ? (plan.inputBudget + (plan.maxTokens || 1024)) : 8192;
     const maxOutputTokens = plan?.maxTokens || 1024;
     const summarize = async (sys, usr, maxTokens) => {
@@ -128,11 +142,20 @@ export async function runAgentTurn(
 
   const out = await loop.run({
     provider, providerChain, system, userMessage: userMessage || '', tools: granted, call,
-    send: () => {}, maxTokens: plan?.maxTokens, numCtx: plan?.numCtx, signal,
+    send: () => {}, maxTokens: plan?.maxTokens, numCtx: plan?.numCtx, signal, maxIterations, webSearch,
+    // Channel egress: force delivery through the reply tool (the finalizer in streamTurn) —
+    // a channel turn's text answer is discarded by the no-op `send`, so without this it drops.
+    requireTool: deliverTool,
+    // CLI session continuity (owner channel turns) + generous idle for long autonomous work.
+    ...(sessionId ? { sessionId, resume } : {}),
+    ...(ttfbMs ? { ttfbMs } : {}), ...(idleMs ? { idleMs } : {}),
   });
   // Surface WHICH model ran so headless callers (scheduler, channel) can record it on
   // the persisted assistant message + the activity feed. A model NAME only (§1 safe).
-  return { ...out, model: info.model };
+  // Prefer the ACTUAL post-fallback model (out.actualModel) over the primary (info.model) —
+  // otherwise a turn that fell back (e.g. subscription 401 → local qwen) is MASKED as the
+  // primary, hiding a degraded turn (observability, Layer 3). `fellBack`/`harvested` ride along.
+  return { ...out, model: out?.actualModel || info.model, primaryModel: info.model };
 }
 
 export default runAgentTurn;

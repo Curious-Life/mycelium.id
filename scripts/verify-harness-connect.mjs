@@ -2,6 +2,7 @@
 //   H1 HARNESS-RECIPES.md covers every first-class harness (memory + model doors)
 //   H2 openclaw scam-safety note present in the recipes doc
 //   H3 local-only / remote-coming-soon banner present (honest reachability)
+//   H4 design doc exists and names the two doors
 //   H5 HarnessPickerSection.svelte renders every harness + the real endpoints
 //   H6 the picker carries the openclaw safety note (UI parity with the doc)
 //   H7 SettingsView mounts HarnessPickerSection (imported + placed)
@@ -18,7 +19,7 @@ const ledger = [];
 const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${d ? '\n      ' + d : ''}`); };
 const has = (s, ...needles) => needles.every((x) => s.includes(x));
 
-let recipes = '', picker = '', settings = '', overview = '';
+let recipes = '', design = '', picker = '', settings = '', overview = '';
 try {
   recipes = read('docs/HARNESS-RECIPES.md');
   picker = read('portal-app/src/lib/components/settings/HarnessPickerSection.svelte');

@@ -255,13 +255,18 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
       // falls back to "Territory {id}" for every row. Both /vitality/snapshot
       // consumers (VitalityView + the Curious-Life vitality detail) read the name.
       const profRows = (await db.rawQuery(
-        `SELECT territory_id, name FROM territory_profiles WHERE user_id = ?`, [u.id])).results || [];
+        `SELECT territory_id, name, gravity, gravity_share FROM territory_profiles WHERE user_id = ?`, [u.id])).results || [];
       const nameById = {};
-      for (const r of profRows) if (r.territory_id != null) nameById[String(r.territory_id)] = r.name || null;
+      const gravById = {};
+      for (const r of profRows) if (r.territory_id != null) {
+        nameById[String(r.territory_id)] = r.name || null;
+        gravById[String(r.territory_id)] = { gravity: r.gravity ?? null, gravity_share: r.gravity_share ?? null };
+      }
       const territories = rows.map((r) => {
         const name = nameById[String(r.territory_id)] ?? null;
+        const g = gravById[String(r.territory_id)] || {};
         // Expose both keys: VitalityView reads `name`, the Curious detail reads `territory_name`.
-        const out = { territory_id: r.territory_id, name, territory_name: name, phase: r.phase, computed_at: r.computed_at, clustering_run_id: r.clustering_run_id };
+        const out = { territory_id: r.territory_id, name, territory_name: name, phase: r.phase, computed_at: r.computed_at, clustering_run_id: r.clustering_run_id, gravity: g.gravity ?? null, gravity_share: g.gravity_share ?? null };
         for (const f of VITALITY_NUMERIC) out[f] = num(r[f]);
         return out;
       });

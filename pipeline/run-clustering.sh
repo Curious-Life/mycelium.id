@@ -215,6 +215,12 @@ echo "Step 9/16: Compute territory vitality (behavioral phase: sparse/active/anc
 node pipeline/compute-vitality.js
 
 echo ""
+echo "Step 9.5/16: Compute cluster gravity (attentional weight: mass × recency × centrality)"
+# Depends on activity_timeline (recency), territory_cofire (centrality) + message_count
+# (mass); writes gravity/gravity_share on territory_profiles / realms / semantic_themes.
+node pipeline/compute-gravity.js
+
+echo ""
 echo "Step 10/16: Compute Lempel-Ziv complexity (compressibility of thinking)"
 node pipeline/compute-complexity.js
 # Embedding-novelty (spec §4.19, Tier-1): the embedding-native novelty cross-check on

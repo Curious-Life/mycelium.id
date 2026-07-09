@@ -23,13 +23,23 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { claudeSpawnEnv } from '../inference/claude-config-dir.js';
 
 const DEFAULT_MODEL = 'claude-opus-4-8';
-const DEFAULT_TTFB_MS = 45_000;
-const DEFAULT_IDLE_MS = 60_000;
-const DEFAULT_MAX_TURNS = 24;
+// Agentic-engine budgets. TTFB covers a cold start + MCP handshake before the first token;
+// IDLE is the inter-output gap that means "truly hung". These are generous because `claude`
+// legitimately goes quiet during in-session AUTO-COMPACTION (summarizing a long conversation)
+// — a 60s idle used to SIGKILL it mid-compaction and lose the session. The watchdog also
+// resets on EVERY stream-json line (see handle()), so any sign of life keeps a long turn alive;
+// active work never trips these. Callers may override via a.ttfbMs / a.idleMs.
+const DEFAULT_TTFB_MS = Number(process.env.MYCELIUM_CLI_TTFB_MS) || 120_000;
+const DEFAULT_IDLE_MS = Number(process.env.MYCELIUM_CLI_IDLE_MS) || 180_000;
+const DEFAULT_MAX_TURNS = Number(process.env.MYCELIUM_MAX_ITERATIONS) || 100;   // operator cap; `claude` still self-limits per turn
 const SIGKILL_GRACE_MS = 4_000;    // after SIGTERM, escalate to SIGKILL if the child clings
-const HARD_TIMEOUT_MS = 10 * 60_000;   // absolute cap: run() ALWAYS resolves, even if 'close' never fires
+// Absolute wall-clock cap: run() ALWAYS resolves, even if 'close' never fires. Generous so a
+// legitimate 30-60min autonomous task completes; env-overridable. The idle watchdog catches a
+// genuine hang far sooner — this is only the last-resort ceiling.
+const HARD_TIMEOUT_MS = Number(process.env.MYCELIUM_CLI_HARD_TIMEOUT_MS) || 60 * 60_000;
 // claude's session-lifecycle errors (verified live 2026-07-03): --session-id on an
 // existing session, or --resume on a missing one. Caught → result.sessionError.
 const SESSION_ERR_RE = /already in use|No conversation found with session ID/i;
@@ -53,7 +63,7 @@ export function buildMcpConfig(restPort) {
  * @param {string} [deps.tmpDir]               test seam: dir for the temp mcp-config
  * @returns {{ run: (a:object)=>Promise<object> }}
  */
-export function createClaudeCliLoop({ claudeBin, restPort, model, logger = () => {}, spawnImpl = nodeSpawn, writeConfigImpl, cleanupImpl, tmpDir = tmpdir() }) {
+export function createClaudeCliLoop({ claudeBin, restPort, model, configDir, logger = () => {}, spawnImpl = nodeSpawn, writeConfigImpl, cleanupImpl, tmpDir = tmpdir() }) {
   if (!claudeBin) throw new Error('createClaudeCliLoop: claudeBin required');
   if (!(Number(restPort) > 0)) throw new Error('createClaudeCliLoop: restPort required');
 
@@ -75,6 +85,11 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, logger = () =>
       else { cfgDir = mkdtempSync(join(tmpDir, 'mycelium-mcp-')); cfgPath = join(cfgDir, 'config.json'); writeFileSync(cfgPath, cfg, { mode: 0o600 }); }
     } catch (e) { return { text: '', toolsUsed: [], truncated: false, capped: false, aborted: false, clientGone: !!a.signal?.aborted, fellBack: false, lastErr: e }; }
 
+    // Owner-only web access (agent/web-search.js): when enabled, WIDEN the confined toolset
+    // to also allow the CLI's built-in `WebSearch` (Anthropic-run search — read-only, no URL
+    // fetch). The CLI engine only ever runs portal chat (the owner), so this is owner-scoped by
+    // construction. Bash/Edit/Write/Read stay excluded — we add ONE named built-in, not `*`.
+    const cliTools = a.webSearch ? 'mcp__mycelium__* WebSearch WebFetch' : 'mcp__mycelium__*';
     const args = [
       '--print',
       '--output-format', 'stream-json',
@@ -96,8 +111,8 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, logger = () =>
       // `--allowedTools` then auto-approves the vault tools so `--print` doesn't hang on
       // a permission prompt. Spike S4 asserts init toolset == mcp__mycelium__* only.
       '--strict-mcp-config',
-      '--tools', 'mcp__mycelium__*',
-      '--allowedTools', 'mcp__mycelium__*',
+      '--tools', cliTools,
+      '--allowedTools', cliTools,
       '--max-turns', String(DEFAULT_MAX_TURNS),
     ];
     // Session continuity (fix: a fresh `claude` session every turn lost context + never
@@ -125,7 +140,15 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, logger = () =>
 
       let killTimer = null;
 
-      const child = spawnImpl(claudeBin, args, { env: { ...process.env }, stdio: ['pipe', 'pipe', 'pipe'] });
+      // CLAUDE_CONFIG_DIR points claude at the app's ISOLATED credential store (seeded from the
+      // CONNECTED subscription) instead of the machine's ~/.claude / Keychain login — so the
+      // agent runs as the account the user connected in the app, not whatever the machine is
+      // signed into. claudeSpawnEnv ALSO injects USER/LOGNAME (a Finder/Dock-launched .app has no
+      // USER → `claude` can't find its macOS Keychain login → "Not logged in" → the turn falls back
+      // to a local model) + strips SDK-delegation vars for a deterministic standalone child. When
+      // configDir is null CLAUDE_CONFIG_DIR is left at the machine default. See claude-config-dir.js.
+      const childEnv = claudeSpawnEnv({ env: process.env, configDir: configDir || null });
+      const child = spawnImpl(claudeBin, args, { env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] });
 
       const cleanup = () => {
         clearInterval(watch);
@@ -176,6 +199,11 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, logger = () =>
       }
 
       const handle = (data) => {
+        // ANY line from the child = a sign of life → reset the idle watchdog. This is what
+        // keeps a long AUTO-COMPACTION (which emits system/compact_boundary lines but no
+        // content deltas) from being killed mid-summarize and losing the session. Content
+        // deltas below ALSO reset it (redundant but explicit for the streaming-flag logic).
+        lastActivity = Date.now();
         // stream-json event envelope — see canonical runner.js:388-424 + the mapping
         // table in docs/HARNESS-CLI-DESIGN-2026-07-02.md.
         if (data?.type === 'stream_event' && data.event) {

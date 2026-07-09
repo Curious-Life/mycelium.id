@@ -122,10 +122,15 @@ rec('P8. profile carries no key material', !JSON.stringify(prof).toLowerCase().i
   await router.infer({ prompt: 'hi', task: 'narrate', profile: localProfile, maxTokens: 333, numCtx: 2048 });
   rec('R-AS2. explicit maxTokens/numCtx override the profile', sawNumPredict === 333 && sawNumCtx === 2048, `num_ctx=${sawNumCtx} num_predict=${sawNumPredict}`);
 
-  // NO profile → unchanged legacy behaviour (no num_ctx sent, num_predict defaults inside localInfer)
+  // NO profile → no profile-driven sizing, but the input-protection FLOOR still
+  // applies: runLocal always sizes num_ctx via autoNumCtx so a long prompt is never
+  // silently truncated at Ollama's ~4096 default (fix #209). For a short prompt the
+  // floor is exactly 4096 (a 2048-multiple, ≥4096); num_predict still comes from
+  // localInfer's own default (maxTokens=1024) since the caller set none. This is
+  // NOT the profile path.
   sawNumCtx = null; sawNumPredict = null;
   await router.infer({ prompt: 'hi', task: 'summarize' });
-  rec('R-AS3. no profile → legacy behaviour (no auto num_ctx)', sawNumCtx === null, `num_ctx=${sawNumCtx}`);
+  rec('R-AS3. no profile → input-protection floor num_ctx=4096 (never Ollama\'s silent ~4096 default), num_predict=localInfer default', sawNumCtx === 4096 && sawNumCtx % 2048 === 0 && sawNumPredict === 1024, `num_ctx=${sawNumCtx} num_predict=${sawNumPredict}`);
 }
 
 const allPass = ledger.every(Boolean);

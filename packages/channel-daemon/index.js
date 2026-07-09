@@ -8,8 +8,10 @@
  * with env as the fallback. Run: node packages/channel-daemon/index.js
  */
 import crypto from 'node:crypto';
+import path from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, assertEgressConfig, applyChannelConfigToEnv } from './config.js';
+import { loadConfig, assertEgressConfig, applyChannelConfigToEnv, reconcileTtsEnv } from './config.js';
 import { createVaultClient } from './vault-client.js';
 import { createEnvelopeDedup } from './dedup.js';
 import { createRateLimiter } from './ratelimit.js';
@@ -38,6 +40,18 @@ import { createDiscordGateway } from './transport/discord-gateway.js';
 
 function captureOnlyRunTurn(turnCtx) {
   console.log(`[channel-daemon] captured ${turnCtx.source} chat=${turnCtx.channelId}; two-way replies OFF (no inference configured)`);
+}
+
+// Observability (Layer 3b): where to persist per-turn outcomes. Explicit env wins; else a
+// `logs/` dir under the daemon's data/state dir; else null (console-only, fail-soft — never
+// throws so a missing/unwritable dir can't stop the daemon from booting).
+function resolveTurnLogPath() {
+  const explicit = process.env.MYCELIUM_CHANNEL_TURN_LOG;
+  if (explicit) return explicit;
+  const base = process.env.MYCELIUM_DATA_DIR || process.env.MYCELIUM_VAULT_DIR || process.env.MYCELIUM_STATE_DIR || null;
+  if (!base) return null;
+  try { const dir = path.join(base, 'logs'); mkdirSync(dir, { recursive: true }); return path.join(dir, 'channel-turns.jsonl'); }
+  catch { return null; }
 }
 
 /**
@@ -83,7 +97,17 @@ export async function buildDaemon(cfg, { runTurn } = {}) {
       presence = createTypingPresence({
         sendChatAction: (chatId) => telegram ? telegram.sendChatAction({ chatId }) : null,
       });
-      lane = createLane({ runtime, presence, ...(cfg.turnTimeoutMs ? { turnTimeoutMs: cfg.turnTimeoutMs } : {}) });
+      // Observability (Layer 3b): persist every turn outcome + surface degraded/failed turns.
+      // Log path: explicit env, else <data dir>/logs, else null (console-only, fail-soft).
+      const turnLogPath = resolveTurnLogPath();
+      lane = createLane({
+        runtime, presence, ...(cfg.turnTimeoutMs ? { turnTimeoutMs: cfg.turnTimeoutMs } : {}),
+        turnLogPath,
+        // A not-ok or degraded outcome is an operator signal — WARN loudly (the persistent log +
+        // /healthz lastTurn carry the detail). A proactive push is a Layer-3b follow-up.
+        onOutcome: (rec) => { if (!rec?.ok || rec?.degraded || rec?.harvested) console.warn(`[channel-daemon] ⚠ turn ${rec?.verdict}${rec?.degraded ? ' DEGRADED' : ''}${rec?.harvested ? ' HARVESTED' : ''} chat=${rec?.chatId} model=${rec?.model || '?'} reason=${rec?.reason || rec?.error || '-'}`); },
+      });
+      if (turnLogPath) console.log(`[channel-daemon] turn log → ${turnLogPath}`);
       if (cfg.coalesceWindowMs > 0) {
         const coalescer = createCoalescer({ windowMs: cfg.coalesceWindowMs, flush: (turnCtx, merged) => lane.runTurn(turnCtx, merged) });
         effectiveRunTurn = (turnCtx, msg) => { coalescer.push(turnCtx, msg); };
@@ -229,13 +253,42 @@ async function main() {
   if (poller) poller.start();
   if (gateway) { gateway.start().catch((e) => console.error('[channel-daemon] discord gateway failed to start:', e.message)); }
 
+  // Live config refresh: re-hydrate vault-managed env on an interval so portal Settings →
+  // Voice/Channels changes (TTS provider + voice especially) take effect WITHOUT an app
+  // restart. resolveProvider()/resolveVoice() read process.env live per synth, so refreshing
+  // env is sufficient. Fail-soft — a failed fetch keeps the last-known config (never crashes).
+  const refreshMs = Number(process.env.MYCELIUM_CHANNEL_CONFIG_REFRESH_MS) || 30000;
+  let configRefresh = null;
+  if (refreshMs > 0) {
+    const refreshClient = createVaultClient({ baseUrl: cfg.vaultBaseUrl });
+    configRefresh = setInterval(async () => {
+      try {
+        const fresh = await refreshClient.getChannelConfig();
+        if (fresh) { applyChannelConfigToEnv(fresh); reconcileTtsEnv(fresh); }
+      } catch { /* keep last-known config */ }
+    }, refreshMs);
+    configRefresh.unref?.();
+  }
+
   const shutdown = () => {
+    if (configRefresh) clearInterval(configRefresh);
     if (poller) poller.stop();
     if (gateway) gateway.stop();
     server.close(() => process.exit(0));
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+
+  // Resilience (Layer 3b): a stray unhandled rejection / uncaught exception must NOT silently
+  // kill the daemon (which would freeze the poll loop → "replies once then stops" with no signal).
+  // Log loudly and stay up; the poller's own try/catch + backoff keeps ingesting. A truly fatal
+  // state still surfaces via /healthz. Registered once, in main() only (never in the test import).
+  process.on('unhandledRejection', (reason) => {
+    console.error(`[channel-daemon] ⚠ unhandledRejection (kept alive): ${String(reason?.stack || reason).slice(0, 300)}`);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error(`[channel-daemon] ⚠ uncaughtException (kept alive): ${String(err?.stack || err).slice(0, 300)}`);
+  });
 }
 
 // Run only when invoked directly (not when imported by the verify script). Compare

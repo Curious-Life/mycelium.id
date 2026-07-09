@@ -27,6 +27,7 @@ import { fetchProvider } from '../inference/base-url.js';
 import { DEFAULT_OLLAMA_URL, DEFAULT_LOCAL_MODEL } from '../inference/local.js';
 import { InferenceError } from '../inference/errors.js';
 import { fireBeforeToolCall, fireAfterToolCall } from './hooks.js';
+import { ANTHROPIC_WEB_TOOLS, WEB_FETCH_BETA } from './web-search.js';
 
 // Chat defaults differ from the enrichment defaults in cloud.js: chat wants the
 // most capable current model unless the user pinned one in Settings.
@@ -51,7 +52,14 @@ const capToolOutput = (s) => {
 // the SAME args this many times — a wedged turn (e.g. searching the same query forever). On
 // a trip we stop the tool loop and force the final no-tools answer pass, so the turn still
 // produces an answer instead of burning the whole budget.
-const MAX_ITERATIONS_DEFAULT = Number(process.env.MYCELIUM_MAX_ITERATIONS) || 8;
+// Outer hard cap on tool-use rounds per turn. Raised 8→100 (operator): a genuinely
+// agentic task (search → read → cross-reference → write across many items) can need far
+// more than 8 rounds, and hitting the old cap forced a premature final-answer pass that
+// read as "the agent gave up / fell through". 100 is a CEILING, not a target — the real
+// governors below still fire long before it on a wedged turn: the repeat circuit-breaker
+// (same tool+args 3×), the per-tool-output cap, and the daily token budget for autonomous
+// turns. Override with MYCELIUM_MAX_ITERATIONS.
+const MAX_ITERATIONS_DEFAULT = Number(process.env.MYCELIUM_MAX_ITERATIONS) || 100;
 const TOOL_REPEAT_LIMIT = Number(process.env.MYCELIUM_TOOL_REPEAT_LIMIT) || 3;
 
 // Retry the connection on TRANSIENT pre-token failures (network blip, provider
@@ -100,14 +108,26 @@ const anthropicAdapter = {
   toolResult: (tc, out, isError) => ({ type: 'tool_result', tool_use_id: tc.id, content: String(out), ...(isError ? { is_error: true } : {}) }),
   pushToolResults(messages, results) { messages.push({ role: 'user', content: results }); },
 
-  async streamOnce({ cfg, system, messages, toolDefs, model, maxTokens, send, signal, fetch, timeoutMs, logger }) {
+  async streamOnce({ cfg, system, messages, toolDefs, model, maxTokens, send, signal, fetch, timeoutMs, logger, webSearch, toolChoice = null }) {
     // Auth mode (apiKey vs Claude-subscription) + system shaping live in the shared
     // anthropic-wire module. In the apiKey path this is byte-identical to the legacy
     // inline header + plain `system` string.
     const auth = anthropicAuthFromCfg(cfg);
+    // Owner-only web access (agent/web-search.js): append Anthropic's SERVER-SIDE web_search
+    // tool. Anthropic runs the query + returns results/citations within this same message —
+    // no client round-trip, no URL fetch on our side (the block parser ignores its
+    // server_tool_use / web_search_tool_result blocks). Only the Anthropic adapter honors the
+    // flag; other providers' adapters never read it, so a non-Anthropic turn gets no web.
+    const tools = webSearch ? [...(toolDefs || []), ...ANTHROPIC_WEB_TOOLS] : toolDefs;
     const body = { model, max_tokens: maxTokens, system: anthropicSystem(auth, system), messages, stream: true };
-    if (toolDefs && toolDefs.length) { body.tools = toolDefs; body.tool_choice = { type: 'auto' }; }
-    const res = await openStreamRetry([ANTHROPIC_URL, anthropicAuthHeaders(auth), body, fetch, timeoutMs], { retries: 2, signal, logger });
+    // tool_choice defaults to auto; a finalizer may PIN a specific tool (channel reply
+    // delivery — streamTurn's forceRequiredTool). No pin ⇒ byte-identical to before.
+    if (tools && tools.length) { body.tools = tools; body.tool_choice = toolChoice || { type: 'auto' }; }
+    // web_fetch is a beta tool: OR its beta flag into anthropic-beta when web access is on
+    // (web_search is GA and needs none). Leaves normal requests' headers untouched.
+    const headers = anthropicAuthHeaders(auth);
+    if (webSearch) headers['anthropic-beta'] = [headers['anthropic-beta'], WEB_FETCH_BETA].filter(Boolean).join(',');
+    const res = await openStreamRetry([ANTHROPIC_URL, headers, body, fetch, timeoutMs], { retries: 2, signal, logger });
     let text = '';
     const blocks = new Map();        // index → { type, id, name, json }
     let stopReason = null;
@@ -165,9 +185,11 @@ const openaiAdapter = {
   toolResult: (tc, out) => ({ role: 'tool', tool_call_id: tc.id, content: String(out) }),
   pushToolResults(messages, results) { for (const r of results) messages.push(r); },
 
-  async streamOnce({ cfg, system, messages, toolDefs, model, maxTokens, send, signal, fetch, timeoutMs, logger }) {
+  async streamOnce({ cfg, system, messages, toolDefs, model, maxTokens, send, signal, fetch, timeoutMs, logger, toolChoice = null }) {
     const body = { model, max_tokens: maxTokens, stream: true, stream_options: { include_usage: true }, messages: [{ role: 'system', content: system }, ...messages] };
-    if (toolDefs && toolDefs.length) { body.tools = toolDefs; body.tool_choice = 'auto'; }
+    // tool_choice defaults to auto; a finalizer may PIN a specific tool (channel reply
+    // delivery). OpenAI's forced shape is {type:'function',function:{name}}.
+    if (toolDefs && toolDefs.length) { body.tools = toolDefs; body.tool_choice = toolChoice ? { type: 'function', function: { name: toolChoice.name } } : 'auto'; }
     const headers = cfg.openaiApiKey ? { Authorization: `Bearer ${cfg.openaiApiKey}` } : {};
     const res = await openStreamRetry([resolveChatUrl(cfg.baseUrl), headers, body, fetch, timeoutMs], { retries: 2, signal, logger });
     let text = '';
@@ -409,14 +431,14 @@ export function createAgentHarness({ onEgress, onUsage, hooks, surface, fetch = 
    * @param {(name:string,args:object)=>Promise<string>} a.call   in-process handler dispatch
    * @param {(ev:object)=>void} a.send         emits {type,...} events to the SSE writer
    * @param {AbortSignal} [a.signal]
-   * @param {number} [a.maxIterations=8]
+   * @param {number} [a.maxIterations=100]  MAX_ITERATIONS_DEFAULT (env MYCELIUM_MAX_ITERATIONS)
    * @param {number} [a.maxTokens=4096]
    * @returns {Promise<{toolsUsed:string[], capped?:boolean, truncated?:boolean, aborted?:boolean, local?:boolean}>}
    *   `truncated:true` ⇒ the model stopped at its output cap — the (partial) text
    *   is cut off and any tool action it was emitting did NOT complete; callers must
    *   surface this rather than treat the turn as success.
    */
-  async function streamTurn({ provider, system, userMessage, tools = [], call, send, signal, maxIterations = MAX_ITERATIONS_DEFAULT, maxTokens = 4096, numCtx }) {
+  async function streamTurn({ provider, system, userMessage, tools = [], call, send, signal, maxIterations = MAX_ITERATIONS_DEFAULT, maxTokens = 4096, numCtx, webSearch = false, requireTool = null }) {
     const { adapter, cfg, model, jurisdiction, local } = normalizeProvider(provider);
     const messages = adapter.init({ userMessage });
     let toolDefs = adapter.mapTools(tools);
@@ -440,19 +462,82 @@ export function createAgentHarness({ onEgress, onUsage, hooks, surface, fetch = 
       } catch { /* accounting must never break the turn */ }
     };
 
-    const once = (defs, first) => adapter.streamOnce({ cfg, system, messages, toolDefs: defs, model, maxTokens, numCtx, send, signal, fetch, timeoutMs, logger }).catch((err) => {
+    // web_search is an OPTIONAL, best-effort capability: if the provider rejects a request
+    // carrying it (e.g. the Anthropic server tool not being available on this auth/plan),
+    // DROP it and retry rather than fail the turn — otherwise a default-on web_search would
+    // break every owner chat on an unsupported path. Degrades before the client-tool fallback
+    // so a normal turn keeps its tools. `activeWebSearch` flips off permanently once dropped.
+    let activeWebSearch = webSearch;
+    const once = (defs, first) => adapter.streamOnce({ cfg, system, messages, toolDefs: defs, model, maxTokens, numCtx, send, signal, fetch, timeoutMs, logger, webSearch: activeWebSearch }).catch((err) => {
+      if (first && activeWebSearch) { logger(`harness: request with web_search rejected (${err?.status || '?'}); retrying without web_search`); activeWebSearch = false; return null; }
       // No-tool model (common with small local models): retry the very first call
       // without tools → degrade to a plain context-grounded answer (the relay floor).
       if (first && defs && defs.length) { logger(`harness: provider rejected tools (${err?.status || '?'}); falling back to text-only`); toolDefs = []; return null; }
       throw err;
     });
 
+    // Channel egress delivery (§11): a channel turn DELIVERS only by calling the `reply`
+    // tool — free-form text is discarded by the no-op channel `send`. The model, asked a
+    // conversational question, usually just answers in text and stops → the loop ends with
+    // `reply` uncalled → the answer is dropped ("agent doesn't reply"). When `requireTool`
+    // is set (channel turns pass 'reply') and the model ends without having called it, make
+    // ONE forced pass with tool_choice PINNED to that tool so the MODEL explicitly composes
+    // and sends its answer through the real egress chokepoint (explicit-send preserved — we
+    // never auto-forward raw text). Called at most once; fail-closed → no-reply as before.
+    const toolDefName = (d) => d?.name || d?.function?.name;
+    let harvested = false;   // true ⇒ delivery happened via the text-harvest last resort (operator-alert signal)
+    const forceRequiredTool = async () => {
+      if (!requireTool || toolsUsed.includes(requireTool) || signal?.aborted) return false;
+      if (!Array.isArray(toolDefs) || !toolDefs.some((d) => toolDefName(d) === requireTool)) return false;
+      // End the request on a user turn so the forced tool-call shape is clean — but only if
+      // the last message isn't already a user turn (the exhaustion path ends on tool-results,
+      // also role:user; a 2nd consecutive user message violates Anthropic alternation).
+      const lastRole = messages.length ? messages[messages.length - 1].role : null;
+      if (lastRole !== 'user') messages.push({ role: 'user', content: `Deliver your reply to the user now by calling the ${requireTool} tool.` });
+      audit();
+      const r = await adapter.streamOnce({ cfg, system, messages, toolDefs, model, maxTokens, numCtx, send, signal, fetch, timeoutMs, logger, webSearch: false, toolChoice: { type: 'tool', name: requireTool } }).catch(() => null);
+      // Gate on the tool call being PRESENT, NOT on `isTool` (stopReason==='tool_use'/'tool_calls'):
+      // a FORCED tool_choice often returns the tool call with finish_reason 'stop' (OpenAI-compat
+      // providers do this) — `isTool` would be false yet the reply call is right there. Reject only
+      // if the call is missing/aborted/truncated (a cut-off reply arg would deliver garbage).
+      if (!r || r.aborted || r.truncated || !Array.isArray(r.toolCalls) || !r.toolCalls.length) return false;
+      adapter.pushAssistant(messages, r.text, r.toolCalls);
+      if (r.usage) { send({ type: 'usage', inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens }); recordUsage(r.usage); }
+      for (const tc of r.toolCalls) {
+        if (tc.name !== requireTool || signal?.aborted) continue;
+        send({ type: 'tool_start', name: tc.name }); toolsUsed.push(tc.name);
+        try { await call(tc.name, tc.args); send({ type: 'tool_complete', name: tc.name }); }
+        catch { send({ type: 'tool_error', name: tc.name }); }   // never surface err (§1)
+      }
+      return toolsUsed.includes(requireTool);
+    };
+
+    // Delivery guarantee (Layer 2): when the model answered in TEXT but could NOT be forced to
+    // call the delivery tool — a weak/no-tool provider ignores forced tool_choice (verified live:
+    // ollama/qwen3.5:4b → forced nCalls=0), or forcing 400s under extended thinking — harvest its
+    // final answer and send it through the SAME egress chokepoint (still §11: the reply handler
+    // persists + provenance-tags + notifies once; nothing is auto-forwarded outside the chokepoint).
+    // LAST RESORT only, AFTER forceRequiredTool fails; sets `harvested` so the caller alerts the
+    // operator ("delivered, but the model couldn't call reply — provider was degraded").
+    const harvestDeliver = async (finalText) => {
+      const t = typeof finalText === 'string' ? finalText.trim() : '';
+      if (!requireTool || toolsUsed.includes(requireTool) || !t || signal?.aborted) return false;
+      if (!Array.isArray(toolDefs) || !toolDefs.some((d) => toolDefName(d) === requireTool)) return false;
+      logger(`harness: text-harvest delivery — provider could not be forced to call '${requireTool}'; sending final answer via the chokepoint`);
+      send({ type: 'tool_start', name: requireTool });
+      try { await call(requireTool, { text: t }); toolsUsed.push(requireTool); harvested = true; send({ type: 'tool_complete', name: requireTool }); return true; }
+      catch { send({ type: 'tool_error', name: requireTool }); return false; }   // never surface err (§1)
+    };
+
     toolLoop:
     for (let i = 0; i < maxIterations; i++) {
       if (signal?.aborted) return { toolsUsed, aborted: true };
       audit();
       let r = await once(toolDefs, i === 0);
-      if (r === null) r = await once([], false);   // tool-fallback retry, no tools
+      // Retry through the degradation tiers (drop web_search → drop tools) until a tier
+      // succeeds or the final text-only attempt throws. Each `once`→null is monotonic
+      // (web_search off, then tools off), so this settles in ≤2 extra calls, only on i===0.
+      while (r === null) r = await once(toolDefs, i === 0);
       if (r.aborted) return { toolsUsed, aborted: true };   // stall/disconnect — partial text already streamed
       adapter.pushAssistant(messages, r.text, r.toolCalls);
       // Truncation = the provider stopped at the output cap mid-stream. Any tool
@@ -465,7 +550,18 @@ export function createAgentHarness({ onEgress, onUsage, hooks, surface, fetch = 
         if (r.usage) { send({ type: 'usage', inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens }); recordUsage(r.usage); }
         return { toolsUsed, local: !!local, truncated: true };
       }
-      if (!r.isTool || !r.toolCalls.length) { if (r.usage) { send({ type: 'usage', inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens }); recordUsage(r.usage); } return { toolsUsed, local: !!local }; }
+      if (!r.isTool || !r.toolCalls.length) {
+        if (r.usage) { send({ type: 'usage', inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens }); recordUsage(r.usage); }
+        // Channel egress: the model answered in text but never called the delivery tool —
+        // force one reply pass; if the provider can't be forced (weak/no-tool model), harvest
+        // its final text through the chokepoint so the answer is never dropped (no-op for chat:
+        // requireTool null).
+        if (requireTool && !toolsUsed.includes(requireTool)) {
+          const forced = await forceRequiredTool();
+          if (!forced) await harvestDeliver(r.text);
+        }
+        return { toolsUsed, local: !!local, harvested };
+      }
 
       const results = [];
       for (const tc of r.toolCalls) {
@@ -474,7 +570,18 @@ export function createAgentHarness({ onEgress, onUsage, hooks, surface, fetch = 
         // loop (don't execute the repeat) and fall to the final answer pass.
         const sig = `${tc.name}:${JSON.stringify(tc.args ?? {})}`;
         const reps = (callRepeats.get(sig) || 0) + 1; callRepeats.set(sig, reps);
-        if (reps >= TOOL_REPEAT_LIMIT) { breaker = 'repeat'; logger(`harness: circuit-breaker — '${tc.name}' repeated ${reps}× with identical args; final answer pass`); break toolLoop; }
+        if (reps >= TOOL_REPEAT_LIMIT) {
+          breaker = 'repeat'; logger(`harness: circuit-breaker — '${tc.name}' repeated ${reps}× with identical args; final answer pass`);
+          // WELL-FORM the message before bailing: the assistant turn we just pushed (524) carries
+          // tool_use blocks for THIS round; every one needs a matching tool_result or the next
+          // request (final pass / reply finalizer) is malformed → Anthropic 400 ("tool_use without
+          // tool_result"). Synthesize halted-results for the calls not already run this round, then
+          // push — so `messages` ends on a valid user turn (MED-1).
+          const doneIds = new Set(results.map((x) => x.tool_use_id || x.tool_call_id));
+          for (const tcx of r.toolCalls) { if (!doneIds.has(tcx.id)) results.push(adapter.toolResult(tcx, 'tool loop halted (repeat limit) — deliver your reply now', false)); }
+          adapter.pushToolResults(messages, results);
+          break toolLoop;
+        }
         // Runtime tool gate (G1): the FIRST per-call authorization seam, layered UNDER the
         // grant-time allowlist (autonomyTools). Fail-CLOSED — a throwing/timed-out guard blocks.
         // The denial is pushed as a tool-result so the model re-plans; the breaker above caps a
@@ -505,11 +612,18 @@ export function createAgentHarness({ onEgress, onUsage, hooks, surface, fetch = 
     logger(breaker
       ? `harness: tool-loop circuit-breaker (${breaker}); final answer pass without tools`
       : `harness: hit maxIterations=${maxIterations}; final answer pass without tools`);
+    // Channel egress: on exhaustion, DELIVER via the required tool rather than a discarded
+    // no-tools text pass (chat is unaffected — requireTool null → falls through as before).
+    if (requireTool && await forceRequiredTool()) {
+      return { toolsUsed, capped: true, harvested, ...(breaker ? { breaker } : {}) };
+    }
     audit();
     const fin = await adapter.streamOnce({ cfg, system, messages, toolDefs: null, model, maxTokens, numCtx, send, signal, fetch, timeoutMs, logger });
     if (fin.usage) { send({ type: 'usage', inputTokens: fin.usage.inputTokens, outputTokens: fin.usage.outputTokens }); recordUsage(fin.usage); }
     if (fin.truncated) logger(`harness: final answer pass also hit the output cap (stop_reason=${fin.stopReason})`);
-    return { toolsUsed, capped: true, truncated: !!fin.truncated, ...(breaker ? { breaker } : {}) };
+    // Delivery guarantee: force failed above → harvest the final-pass text through the chokepoint.
+    if (requireTool && !toolsUsed.includes(requireTool)) await harvestDeliver(fin.text);
+    return { toolsUsed, capped: true, truncated: !!fin.truncated, harvested, ...(breaker ? { breaker } : {}) };
   }
 
   return { streamTurn };

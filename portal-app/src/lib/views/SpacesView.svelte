@@ -67,14 +67,47 @@
 			newEssence = '';
 			showCreate = false;
 			await loadSpaces();
-			// Open the new space as a workspace tab
-			workspace.openOrFocus('space', { id: space.id });
+			// Navigate to the new space in place (consistent with plain-click).
+			workspace.openInActiveTab('space', { id: space.id });
 		} catch (e: any) {
 			createError = e.message;
 		} finally {
 			creating = false;
 		}
 	}
+
+	// ── Tab-open gestures (browser-style). Plain click navigates in the CURRENT
+	// tab (no new tab). ⌘/ctrl-click or middle-click opens a new tab directly;
+	// right-click or long-press (hold) reveals the action menu. The Spaces grid is
+	// the only surface that spawned a tab per item.
+	let menu = $state<{ x: number; y: number; space: Space } | null>(null);
+	let pressTimer: ReturnType<typeof setTimeout> | null = null;
+	let longPressed = false;
+
+	function openHere(space: Space) { workspace.openInActiveTab('space', { id: space.id }); }
+	function openNewTab(space: Space) { workspace.openOrFocus('space', { id: space.id }); }
+
+	function onCardClick(e: MouseEvent, space: Space) {
+		e.preventDefault();
+		if (longPressed) { longPressed = false; return; } // swallow the click trailing a long-press
+		if (e.metaKey || e.ctrlKey) { openNewTab(space); return; } // ⌘/ctrl → new tab
+		openHere(space);
+	}
+	function onCardAux(e: MouseEvent, space: Space) { // middle-click → new tab
+		if (e.button === 1) { e.preventDefault(); openNewTab(space); }
+	}
+	function onCardContext(e: MouseEvent, space: Space) { // right-click → action menu
+		e.preventDefault();
+		menu = { x: e.clientX, y: e.clientY, space };
+	}
+	function onPressStart(e: PointerEvent, space: Space) {
+		if (e.pointerType === 'mouse' && e.button !== 0) return; // left button / touch / pen only
+		longPressed = false;
+		const x = e.clientX, y = e.clientY;
+		cancelPress();
+		pressTimer = setTimeout(() => { longPressed = true; menu = { x, y, space }; }, 500);
+	}
+	function cancelPress() { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } }
 
 	onMount(loadSpaces);
 
@@ -134,9 +167,15 @@
 			{#each spaces as space (space.id)}
 				<a
 					href="/spaces/{space.id}"
-					onclick={(e) => { e.preventDefault(); workspace.openOrFocus('space', { id: space.id }); }}
+					onclick={(e) => onCardClick(e, space)}
+					onauxclick={(e) => onCardAux(e, space)}
+					oncontextmenu={(e) => onCardContext(e, space)}
+					onpointerdown={(e) => onPressStart(e, space)}
+					onpointerup={cancelPress}
+					onpointerleave={cancelPress}
+					onpointermove={cancelPress}
 					class="group card p-4 rounded-xl border border-[var(--color-border)] hover:border-[var(--color-accent)] transition-all duration-150 hover:-translate-y-px"
-					style="box-shadow: none;"
+					style="box-shadow: none; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;"
 					onmouseenter={(e) => { (e.currentTarget as HTMLElement).style.boxShadow = '0 0 20px rgba(229, 184, 76, 0.08)'; }}
 					onmouseleave={(e) => { (e.currentTarget as HTMLElement).style.boxShadow = 'none'; }}
 				>
@@ -210,6 +249,17 @@
 					</button>
 				</div>
 			</div>
+		</div>
+	{/if}
+
+	<!-- Space action menu (right-click / long-press) -->
+	{#if menu}
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<!-- svelte-ignore a11y_click_events_have_key_events -->
+		<div class="fixed inset-0 z-40" onclick={() => (menu = null)} oncontextmenu={(e) => { e.preventDefault(); menu = null; }}></div>
+		<div class="fixed z-50 min-w-[168px] py-1 rounded-lg border border-[var(--color-border)] shadow-lg text-sm" style="left: {menu.x}px; top: {menu.y}px; background: var(--color-elevated);">
+			<button class="w-full text-left px-3 py-1.5 hover:bg-[var(--color-hover)] text-[var(--color-text-primary)]" onclick={() => { const s = menu!.space; menu = null; openHere(s); }}>Open</button>
+			<button class="w-full text-left px-3 py-1.5 hover:bg-[var(--color-hover)] text-[var(--color-text-primary)]" onclick={() => { const s = menu!.space; menu = null; openNewTab(s); }}>Open in new tab</button>
 		</div>
 	{/if}
 </div>

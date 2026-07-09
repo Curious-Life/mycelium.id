@@ -79,6 +79,36 @@ async function main() {
       sess.status === 200 && !!sess.body?.user?.id, `status=${sess.status}`);
     const setup = await j('/auth/setup-status');
     rec('D10. GET /auth/setup-status → setupRequired:false', setup.status === 200 && setup.body?.setupRequired === false);
+
+    // ── Folder write surface (LibraryNav "New folder"/rename/delete). The db
+    // namespace always existed; the HTTP routes did not, so "New folder" POSTed
+    // into the void and failed silently. These prove the routes are wired.
+    const put = (p, body) => j(p, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const fCreate = await post('/api/v1/portal/folders', { name: 'QA Folder' });
+    const fid = fCreate.body?.folder?.id;
+    rec('D11. POST /folders → {ok, folder:{id,name}} (create no longer fails silently)',
+      fCreate.status === 200 && fCreate.body?.ok === true && !!fid && fCreate.body?.folder?.name === 'QA Folder', `status=${fCreate.status}`);
+
+    const fList = await j('/api/v1/portal/folders');
+    rec('D12. GET /folders includes the created folder',
+      !!fList.body?.folders?.find((f) => f.id === fid && f.name === 'QA Folder'));
+
+    const fChild = await post('/api/v1/portal/folders', { name: 'QA Child', parent_id: fid });
+    rec('D13. POST /folders with parent_id → sub-folder under the parent',
+      fChild.status === 200 && fChild.body?.folder?.parent_id === fid, `status=${fChild.status} parent=${fChild.body?.folder?.parent_id}`);
+
+    const fRename = await put(`/api/v1/portal/folders/${fid}`, { name: 'QA Renamed' });
+    const afterRename = await j('/api/v1/portal/folders');
+    rec('D14. PUT /folders/:id renames (reflected in GET)',
+      fRename.status === 200 && afterRename.body?.folders?.find((f) => f.id === fid)?.name === 'QA Renamed');
+
+    const fEmpty = await post('/api/v1/portal/folders', { name: '   ' });
+    rec('D15. POST /folders with blank name → 400 (fail-closed validation)', fEmpty.status === 400);
+
+    const fDel = await j(`/api/v1/portal/folders/${fid}`, { method: 'DELETE' });
+    const afterDel = await j('/api/v1/portal/folders');
+    rec('D16. DELETE /folders/:id removes it from the list',
+      fDel.body?.ok === true && !afterDel.body?.folders?.find((f) => f.id === fid));
   } finally {
     srv.server.close(); try { srv.close?.(); } catch {}
   }

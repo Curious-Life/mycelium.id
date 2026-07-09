@@ -313,8 +313,9 @@
 				const data = await res.json().catch(() => ({}));
 				throw new Error(data.error || `Delete failed (${res.status})`);
 			}
-			// Bounce out to the spaces index — this space is gone.
-			workspace.openOrFocus('spaces', {});
+			// Bounce out to the spaces index — this space is gone. Replace this
+			// (now-dead) space tab in place rather than spawning a new list tab.
+			workspace.openInActiveTab('spaces', {});
 		} catch (e: any) {
 			deleteError = e?.message || 'Failed to delete';
 			deleting = false;

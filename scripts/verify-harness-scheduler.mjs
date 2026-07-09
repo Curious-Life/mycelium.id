@@ -39,7 +39,7 @@ const delivered = [];
 const s = createScheduler({
   db, userId: U, tools: [], handlers: {},
   runTurn: async (task) => { calls.push(task.id); return stub(task); },
-  deliver: async (task, text) => { delivered.push({ id: task.id, text }); },
+  deliver: async (task, text) => { if (text === 'THROW-ON-DELIVER') throw Object.assign(new Error('deliver boom'), { code: 'EDELIVER' }); delivered.push({ id: task.id, text }); },
   logger: () => {},
 });
 const drain = () => s._lane.enqueue(() => Promise.resolve()); // resolves after all queued tasks settle
@@ -113,6 +113,38 @@ const callsFor = (id) => calls.filter((x) => x === id).length;
   await s.tickOnce();
   rec("G5 output_target 'chat' delivered the text", delivered.some((d) => d.id === id && d.text === 'DELIVER-ME'));
   rec("G5 output_target 'none' did NOT deliver", !delivered.some((d) => d.id === idNone));
+}
+
+// ── G10 finalizer wiring: leaks/meta-reports are SUPPRESSED, not delivered ──
+{
+  const before = delivered.length;
+  const idMeta = await H.createTask(U, { name: 'g10-meta', prompt: 'p', schedule: 'interval:30m', nextRun: iso(-1000), outputTarget: 'chat' });
+  stub = async () => ({ text: '**System Status:** ⚠️ **NO_DATA_FOUND**. The requested data streams (getDailyMessages, searchMindscape) returned empty results.' });
+  await s.tickOnce();
+  let run = (await H.recentRuns(U, 40)).find((r) => r.task_id === idMeta);
+  rec('G10 meta-report was NOT delivered', !delivered.some((d) => d.id === idMeta) && delivered.length === before);
+  rec('G10 meta-report run status = skipped-lowquality', run?.status === 'skipped-lowquality', JSON.stringify({ st: run?.status }));
+
+  const idNr = await H.createTask(U, { name: 'g10-nr', prompt: 'p', schedule: 'interval:30m', nextRun: iso(-1000), outputTarget: 'chat' });
+  stub = async () => ({ text: '**NO_REPLY**. Nothing to report today.' });
+  await s.tickOnce();
+  rec('G10 wrapped **NO_REPLY** was NOT delivered', !delivered.some((d) => d.id === idNr));
+
+  const idTrunc = await H.createTask(U, { name: 'g10-trunc', prompt: 'p', schedule: 'interval:30m', nextRun: iso(-1000), outputTarget: 'chat' });
+  stub = async () => ({ text: 'I was going to say', truncated: true });
+  await s.tickOnce();
+  run = (await H.recentRuns(U, 60)).find((r) => r.task_id === idTrunc);
+  rec('G10 truncated fragment NOT delivered + status skipped-truncated', !delivered.some((d) => d.id === idTrunc) && run?.status === 'skipped-truncated', JSON.stringify({ st: run?.status }));
+}
+
+// ── G11 delivery failure is recorded (not a silent 'done') ──
+{
+  const id = await H.createTask(U, { name: 'g11', prompt: 'p', schedule: 'interval:30m', nextRun: iso(-1000), outputTarget: 'chat' });
+  stub = async () => ({ text: 'THROW-ON-DELIVER' });
+  await s.tickOnce();
+  const run = (await H.recentRuns(U, 60)).find((r) => r.task_id === id);
+  const t = await H.getTask(U, id);
+  rec("G11 delivery failure → run 'delivery-failed' + code, not silent done", run?.status === 'delivery-failed' && run?.error === 'EDELIVER' && t.last_status === 'delivery-failed', JSON.stringify({ st: run?.status, err: run?.error }));
 }
 
 // ── G6 throwing turn → error CODE only, no plaintext leak ──

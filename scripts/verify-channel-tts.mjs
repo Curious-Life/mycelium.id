@@ -5,6 +5,7 @@
 import { stripMarkdownForTTS } from '../packages/channel-daemon/tts/shared/markdown.js';
 import { splitTextForTTS } from '../packages/channel-daemon/tts/shared/chunking.js';
 import { resolveProvider, resolveVoice, isEnabled } from '../packages/channel-daemon/tts/config.js';
+import { applyChannelConfigToEnv, reconcileTtsEnv } from '../packages/channel-daemon/config.js';
 import * as tts from '../packages/channel-daemon/tts/index.js';
 
 const ledger = [];
@@ -79,6 +80,30 @@ for (const k of Object.keys(process.env)) if (/^(OPENAI|ELEVENLABS|TTS|AGENT_ID)
   for await (const _ of tts.synthesizeForTelegram('hi')) count++;
   rec('T13. too-short text → no chunks, no provider call', count === 0);
   delete process.env.OPENAI_API_KEY;
+}
+
+// ── Live re-hydration: a voice/provider change from portal Settings takes effect
+//    without a restart, and a CLEARED provider actually turns TTS off (the bug:
+//    daemon hydrated TTS once at boot, so voice edits never reached a running daemon).
+{
+  const env = {};
+  applyChannelConfigToEnv({ tts: { provider: 'openai', openaiApiKey: 'sk-x', openaiVoice: 'nova' } }, env);
+  reconcileTtsEnv({ tts: { provider: 'openai', openaiApiKey: 'sk-x', openaiVoice: 'nova' } }, env);
+  rec('T14. initial hydrate sets provider+voice', env.TTS_PROVIDER === 'openai' && env.OPENAI_TTS_VOICE === 'nova');
+
+  // Owner changes the OpenAI voice in Settings → the next refresh must overwrite it.
+  reconcileTtsEnv({ tts: { provider: 'openai', openaiApiKey: 'sk-x', openaiVoice: 'onyx' } }, env);
+  rec('T15. changed voice propagates on refresh', env.OPENAI_TTS_VOICE === 'onyx');
+
+  // Owner switches provider OFF (GET returns null) → TTS_PROVIDER must be CLEARED,
+  // not stranded (set-only put() would keep it speaking). API key is left intact.
+  reconcileTtsEnv({ tts: { provider: null, openaiApiKey: 'sk-x', openaiVoice: null } }, env);
+  rec('T16. cleared provider turns TTS off (no stale env)', !('TTS_PROVIDER' in env) && !('OPENAI_TTS_VOICE' in env));
+  rec('T17. applyChannelConfigToEnv still owns the API key (not cleared by reconcile)', env.OPENAI_API_KEY === 'sk-x');
+
+  // Owner switches to Kokoro (local) → provider + local voice live, no restart.
+  reconcileTtsEnv({ tts: { provider: 'kokoro', kokoroEnabled: '1', kokoroVoice: 'af_bella' } }, env);
+  rec('T18. switch to local provider propagates provider + voice', env.TTS_PROVIDER === 'kokoro' && env.KOKORO_TTS_VOICE === 'af_bella');
 }
 
 const passed = ledger.filter(Boolean).length;
