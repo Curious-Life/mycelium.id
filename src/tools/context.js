@@ -91,7 +91,7 @@ export function createContextDomain(deps) {
           recentMessages: { type: 'number', description: 'How many recent messages to include (default 10, max 40).' },
           include: {
             type: 'array',
-            items: { type: 'string', enum: ['awareness', 'core', 'mind', 'facts', 'people', 'messages', 'domains', 'phase', 'health', 'claims', 'leans', 'cycles'] },
+            items: { type: 'string', enum: ['awareness', 'core', 'mind', 'facts', 'people', 'messages', 'domains', 'phase', 'health', 'claims', 'leans', 'reflections', 'cycles'] },
             description: 'Limit to specific sections. Omit for all.',
           },
         },
@@ -280,6 +280,27 @@ export function createContextDomain(deps) {
               .map(([dom, cs]) => `**${dom}**\n${cs.map(fmt).join('\n')}`)
               .join('\n\n');
             sections.push(`---\n# WHAT YOU'VE NOTICED — TENDENCIES (held provisionally, grounded in days of evidence)\n\n${block}`);
+          }
+        } catch { /* non-fatal */ }
+      }
+
+      // ── recent reflections (day cards) — your own dated digests, so you have continuity ──
+      // Closes the write→read loop: every cycle records a day card (recordReflection); this
+      // surfaces the last few so the agent can honestly say "over the past few days I've
+      // noticed…" instead of the cards being a write-only archive. Structured fields only.
+      if (want(include, 'reflections') && db?.reflections?.recent) {
+        try {
+          const cards = (await db.reflections.recent(userId, { limit: 5 })) || [];
+          const lines = cards
+            .filter((c) => c && (c.summary || (c.themes && c.themes.length)))
+            .map((c) => {
+              const when = String(c.day || c.createdAt || '').slice(0, 10);
+              const kind = c.dayType ? ` · ${c.dayType}` : '';
+              const themes = (c.themes && c.themes.length) ? ` — _${c.themes.slice(0, 4).join(', ')}_` : '';
+              return `- **${when}** (${c.cycle})${kind}: ${String(c.summary || '').trim()}${themes}`;
+            });
+          if (lines.length) {
+            sections.push(`---\n# RECENT REFLECTIONS (your own day cards — the threads you've been tracking)\n\n${lines.join('\n')}`);
           }
         } catch { /* non-fatal */ }
       }

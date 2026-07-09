@@ -29,6 +29,7 @@ import { ROLE_RECOMMENDATIONS } from './inference/role-models.js';
 import { resolveMcpBearer, readRemoteConfig } from './remote/config.js';
 import { importFromClaudeCli, ClaudeImportError } from './inference/claude-oauth.js';
 import { resolveClaudeBin } from './inference/claude-bin.js';
+import { seedClaudeConfigDir } from './inference/claude-config-dir.js';
 import { isCliEngineReady } from './agent/harnesses/index.js';
 
 // True for an ai_providers row that is a Claude SUBSCRIPTION (OAuth token), as
@@ -211,6 +212,25 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
       const s = await db.users.getSettings(userId);
       await db.users.updateSettings(userId, { ...s, allowSubscriptionSensitive: allowed });
       ok(res, { allowed });
+    } catch { bad(res, 500, 'failed to update preference'); }
+  });
+
+  // ── Web access (agent web search) ────────────────────────────────────────────
+  // Owner-only Anthropic-run web search for the agent (agent/web-search.js). Persisted
+  // as settings.webSearch. Default ON (absent → enabled); the operator can hard-disable
+  // the whole capability with env MYCELIUM_WEB_SEARCH=0 (not reflected here — it overrides
+  // at turn time). This toggle only turns the user preference off (settings.webSearch=false).
+  router.get('/providers/web-search', async (_req, res) => {
+    try { const s = await db.users.getSettings(userId); ok(res, { enabled: s?.webSearch !== false }); }
+    catch { bad(res, 500, 'failed to read preference'); }
+  });
+  router.put('/providers/web-search', async (req, res) => {
+    try {
+      const enabled = req.body?.enabled !== false;   // default on; only an explicit false disables
+      try { await db.users.create(userId, userId); } catch { /* row exists */ }
+      const s = await db.users.getSettings(userId);
+      await db.users.updateSettings(userId, { ...s, webSearch: enabled });
+      ok(res, { enabled });
     } catch { bad(res, 500, 'failed to update preference'); }
   });
 
@@ -444,6 +464,12 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
       });
       let activated = false;
       if (!hadActive) { try { await db.providers.setActive(id, userId); activated = true; } catch { /* non-fatal */ } }
+      // Seed the app's ISOLATED claude config dir NOW (not only on the cli-harness path in
+      // resolve-harness.js) so `claude` can refresh the subscription token for NATIVE channel/
+      // harness turns too — an owner who only uses Telegram never opens a cli chat, so without
+      // this the isolated dir is never created and the native wire falls back to the machine
+      // login. Idempotent + non-clobbering; carries the refreshToken so claude can refresh.
+      try { seedClaudeConfigDir(creds); } catch { /* non-fatal: token still stored in the DB row */ }
       ok(res, { id, activated, scopes: creds.scopes, account: creds.account || null });
     } catch { bad(res, 500, 'failed to store subscription'); }
   });

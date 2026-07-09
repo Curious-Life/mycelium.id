@@ -33,6 +33,7 @@ import { createAgentHooks, autonomousToolGuard } from './agent/hooks.js';
 import { createAgentLoop } from './agent/loop.js';
 import { createEgressAuditSink } from './inference/egress.js';
 import { createUsageSink } from './inference/usage.js';
+import { seedClaudeConfigDir, startProactiveTokenRefresh } from './inference/claude-config-dir.js';
 import { captureMessage } from './ingest/capture.js';
 import { portalIngestRouter } from './portal-ingest.js';
 import { portalHealthRouter } from './portal-health.js';
@@ -349,7 +350,10 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
     const chHooks = createAgentHooks({ db, userId, source: 'channel', toolGuard: autonomousToolGuard() });
     const chHarness = createAgentHarness({ onEgress: createEgressAuditSink(db, userId), onUsage: createUsageSink(db, userId, { source: 'gateway' }), hooks: chHooks, surface: 'channel', logger: (m) => console.error(`[channel-turn] ${m}`) });
     const chLoop = createAgentLoop({ harness: chHarness, logger: (m) => console.error(`[channel-turn] ${m}`) });
-    v.use(createChannelTurnRouter({ db, userId, tools, handlers, loop: chLoop, hooks: chHooks, logger: (m) => console.error(`[channel-turn] ${m}`), expectedToken: CHANNEL_TURN_TOKEN }));
+    // harness + restPort let an OWNER channel turn resolve the SELECTED engine (resolveHarness):
+    // native by default, or the Claude Code CLI when the operator picked it — the same engine as
+    // chat, now in channels. Untrusted turns ignore both and stay on chLoop (native).
+    v.use(createChannelTurnRouter({ db, userId, tools, handlers, loop: chLoop, harness: chHarness, restPort, hooks: chHooks, logger: (m) => console.error(`[channel-turn] ${m}`), expectedToken: CHANNEL_TURN_TOKEN }));
   }
   v.use(apiRouter({ tools, handlers, db, userId, enqueueEnrichment }));
   return v;
@@ -500,6 +504,23 @@ export async function startRestServer({
         // their lazy first-query build. The cooperative yield in loadFromDb keeps the
         // event loop responsive while this runs.
         searchHelpers?.warm?.();
+        // Seed the isolated claude config dir from any connected subscription so `claude` keeps
+        // the token fresh for NATIVE channel/harness turns — covers a vault that connected the
+        // subscription BEFORE this seed existed, or an owner who never opens a cli chat (the only
+        // other seed site is the cli-harness path). Idempotent + non-clobbering; fail-soft.
+        try {
+          const sub = (await db.providers.list(bootUserId)).find((r) => String(r?.auth_type || '').toLowerCase() === 'oauth');
+          if (sub) {
+            const full = await db.providers.get(sub.id, bootUserId);
+            const creds = full?.credentials ? JSON.parse(full.credentials) : null;
+            if (creds) seedClaudeConfigDir(creds);
+            // Keep the subscription token WARM (durability): the ~8h token lapses for a Telegram-only
+            // owner, so the first channel turn after expiry silently falls back to a local model
+            // (verified live). Refresh shortly after boot + on an interval < the token life, so a
+            // native/channel turn never meets an expired token. Fail-soft, unref'd, single timer.
+            startProactiveTokenRefresh({ logger: (m) => console.error(`[token-refresh] ${m}`) });
+          }
+        } catch { /* non-fatal: token still resolvable from the DB row / machine login */ }
         // Own the embed-service (:8091) lifecycle in-process: spawn/adopt, dep
         // self-check, restart-on-crash, and expose health to /processing-status.
         // Without a live embedder the drainer can't embed → Generate has no data.
@@ -582,7 +603,10 @@ export async function startRestServer({
           // (conversationId/messageType) — the prior snake_case + missing-userId call
           // silently failed under the scheduler's try/catch, so scheduled conversation
           // deliveries never persisted. Fixed here alongside recording the model.
-          await captureMessage(db, { userId: bootUserId, role: 'assistant', content: text, source: 'scheduler', messageType: 'text', conversationId, model: meta?.model || null }, enqueueEnrichment);
+          // `id` (deterministic per task + scheduled fire) makes delivery idempotent —
+          // captureMessage dedups on caller-supplied id, so an overlapping tick / boot
+          // re-run of the SAME fire can't post the check-in twice.
+          await captureMessage(db, { id: meta?.id, userId: bootUserId, role: 'assistant', content: text, source: 'scheduler', messageType: 'text', conversationId, model: meta?.model || null }, enqueueEnrichment);
         };
         const harnessScheduler = createScheduler({
           db, userId: bootUserId, tools, handlers, deliver: schedulerDeliver,

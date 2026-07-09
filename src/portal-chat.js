@@ -17,8 +17,9 @@ import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { createAgentHarness, describeProvider, DEFAULT_ANTHROPIC_CHAT_MODEL } from './agent/harness.js';
 import { resolveHarness } from './agent/resolve-harness.js';
+import { webSearchEnabled } from './agent/web-search.js';
 import { toolsForDomains, normalizePolicy, defaultPolicy, DOMAINS, ALL_SCOPES } from './agent/tool-domains.js';
-import { resolveInferenceConfigForTask } from './inference/resolve.js';
+import { resolveInferenceConfigForTask, resolveProviderChain } from './inference/resolve.js';
 import { resolveModelProfile } from './inference/model-profile.js';
 import { planGeneration, estimateTokens, trimToTokenBudget } from './inference/token-budget.js';
 import { createEgressAuditSink } from './inference/egress.js';
@@ -26,6 +27,7 @@ import { createUsageSink } from './inference/usage.js';
 import { captureMessage } from './ingest/capture.js';
 import { hydrateHistoryBlock } from './agent/history.js';
 import { AGENT_NATURE } from './agent/identity.js';
+import { resolveCustomPersona } from './skills/store.js';
 
 const POLICY_KEY = 'AI_ACCESS_POLICY';
 const CHAT_SOURCE = 'portal-chat';
@@ -280,6 +282,9 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     const policy = await readPolicy();
     const { tools: grantedTools, unmapped } = toolsForDomains(tools || [], policy.domains);
     if (unmapped.length) console.error(`[chat] ${unmapped.length} registry tools are not domain-mapped (never exposed): ${unmapped.join(', ')}`);
+    // Web access is the OWNER-only capability (agent/web-search.js). Portal chat is always the
+    // owner, so it's gated on the setting alone (default on; Settings → Intelligence toggles it).
+    const webSearch = webSearchEnabled(await db.users.getSettings(userId).catch(() => null));
 
     // SSE setup.
     res.set('Content-Type', 'text/event-stream; charset=utf-8');
@@ -382,6 +387,14 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       // Identity preamble (spec #4): the user's chosen name + personality shape who
       // the assistant is and how it speaks, ahead of the static orientation.
       let system = `Your name is ${ident.name}. ${PERSONALITY_GUIDE[ident.personality] || ''} ${CHAT_SYSTEM} ${hasActionTools ? CAN_ACT : CANNOT_ACT}`.trim();
+      // Persona coherence: if the person has CUSTOMISED how the agent shows up (soul.md,
+      // edited in the Library or via updatePersona), that voice steers live chat too — not
+      // just the reflection cycles — so it's ONE identity. Default (unedited) installs are
+      // untouched. Bounded so a long persona can't crowd the briefing.
+      try {
+        const persona = await resolveCustomPersona(db, userId);
+        if (persona) system += `\n\n## How you show up with your person (their setting)\n${persona.slice(0, 4000)}`;
+      } catch { /* non-fatal */ }
       try { const ctx = await handlers.getContext?.({ recentMessages: recentN }); if (typeof ctx === 'string' && ctx) system += `\n\n${ctx}`; } catch { /* honest-empty */ }
       if (!isLocal && policy.domains.includes('search') && typeof handlers.searchMindscape === 'function') {
         send({ type: 'tool_start', name: 'searchMemory' });
@@ -451,16 +464,30 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
         } catch { cliSessionId = null; }
       }
 
+      // Provider fallback (robustness): give the in-app chat the SAME failover the
+      // channel/scheduler turns already have — the resolved provider first, then the
+      // jurisdiction-ordered chain + the on-box local floor. loop.run advances it ONLY on
+      // a pre-content retryable error (nothing streamed yet), so a healthy turn is
+      // unaffected. The CLI engine ignores it (`claude` owns its own retries). Fail-soft
+      // to the single provider — a chain-resolve hiccup never blocks the turn.
+      let providerChain = null;
+      if (harnessMode !== 'cli') {
+        try {
+          const chain = await resolveProviderChain(db, userId, { sensitive: false });
+          if (Array.isArray(chain) && chain.length) providerChain = [provider, ...chain];
+        } catch { /* single provider */ }
+      }
+
       // Drive the turn through the agent loop: the watchdog (TTFB/IDLE) +
       // retry-on-empty + first-token signalling live in loop.run. It streams
       // through our SSE `send`, keeps the live activity row honest via the callbacks,
       // and returns the accumulated answer + truncation/error state.
       const result = await loop.run({
-        provider, system, userMessage: message, tools: toolsCapable ? grantedTools : [], call,
+        provider, providerChain, system, userMessage: message, tools: toolsCapable ? grantedTools : [], call,
         send, maxTokens: plan?.maxTokens, numCtx: plan?.numCtx,
         ttfbMs: TTFB_MS, idleMs: IDLE_MS, maxRetries: MAX_RETRIES,
         signal: clientGoneCtrl.signal, onStall: () => finishJob(), onHeartbeat: heartbeatJob,
-        sessionId: cliSessionId, resume: cliResume,
+        sessionId: cliSessionId, resume: cliResume, webSearch,
       });
       const assistantText = result.text;
 

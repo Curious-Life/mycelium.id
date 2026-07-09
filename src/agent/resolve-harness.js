@@ -8,6 +8,7 @@
 // (channels/scheduler/narration) stay native. See docs/HARNESS-CLI-DESIGN-2026-07-02.md.
 import { HARNESSES, isCliEngineReady } from './harnesses/index.js';
 import { resolveClaudeBin } from '../inference/claude-bin.js';
+import { claudeConfigDir, seedClaudeConfigDir } from '../inference/claude-config-dir.js';
 
 /**
  * @param {object} a
@@ -44,8 +45,20 @@ export async function resolveHarness({ db, userId, provider, deps, claudeBin }) 
   // (CLI_ENGINE_ENABLED). isCliEngineReady() gates on that flag AND the factory's
   // presence — so even with binary+subscription present, cli can't run until enabled.
   if (!isCliEngineReady()) return native('cli-unavailable');
+  // ISOLATED AUTH: seed the app's own CLAUDE_CONFIG_DIR from the CONNECTED subscription's stored
+  // creds, so `claude` runs as THAT account — not the machine's ~/.claude / Keychain login
+  // (which may be a different, subscription-disabled account). claude then refreshes the token in
+  // that dir. Fail-soft: on any error, configDir stays null → claude uses its default (machine)
+  // login rather than breaking the turn.
+  let configDir = null;
   try {
-    return { loop: HARNESSES.cli({ ...deps, claudeBin: bin, model: subRow.model_preference || undefined }), mode: 'cli' };
+    const full = await db.providers.get(subRow.id, userId);
+    const creds = full?.credentials ? JSON.parse(full.credentials) : null;
+    seedClaudeConfigDir(creds);
+    configDir = claudeConfigDir();
+  } catch (e) { deps?.logger?.(`claude config-dir seed skipped: ${e?.message || e}`); }
+  try {
+    return { loop: HARNESSES.cli({ ...deps, claudeBin: bin, model: subRow.model_preference || undefined, configDir }), mode: 'cli' };
   } catch (e) {
     deps?.logger?.(`cli harness unavailable, using native: ${e?.message || e}`);
     return native('cli-unavailable');

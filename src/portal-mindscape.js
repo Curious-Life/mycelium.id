@@ -403,6 +403,7 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
           visibility: tp.visibility || 'private', temporalSaliency: tp.temporal_saliency ?? null,
           firstActive: tp.first_active || null, lastActive: tp.last_active || null, daysActive: tp.days_active || null,
           currentVitality: tp.current_vitality ?? null, currentPhase: tp.current_phase || null,
+          gravity: tp.gravity ?? null, gravityShare: tp.gravity_share ?? null,
           isAnchored: tp.is_anchored || 0,
           predecessorIds: parseArr(tp.predecessor_ids), evolvedFromCount: tp.evolved_from_count || 0,
         };
@@ -428,6 +429,7 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
           uncertaintyOpenQuestions: parseArr(rp.uncertainty_open_questions), uncertaintyEdges: rp.uncertainty_edges || null,
           agentExpertise: rp.agent_expertise || null, agentCuriousAbout: rp.agent_curious_about || null,
           agentCanHelpWith: parseArr(rp.agent_can_help_with), activity: activityArray(realmActivity[realmId]),
+          gravity: rp.gravity ?? null, gravityShare: rp.gravity_share ?? null,
         };
       }
 

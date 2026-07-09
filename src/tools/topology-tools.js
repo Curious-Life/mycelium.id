@@ -94,7 +94,7 @@ export function createTopologyToolsDomain(deps) {
           phase:       { type: 'string', enum: ['sparse', 'active', 'anchor'], description: 'Filter by vitality phase' },
           realm:       { type: 'number', description: 'Filter by realm ID' },
           minMessages: { type: 'number', description: 'Minimum message count' },
-          sortBy:      { type: 'string', enum: ['vitality', 'messages', 'name'], description: 'Sort order (default: vitality desc)' },
+          sortBy:      { type: 'string', enum: ['vitality', 'gravity', 'messages', 'name'], description: 'Sort order (default: vitality desc). "gravity" = attentional weight (mass × recency × centrality).' },
           limit:       { type: 'number', description: 'Max results (default 20)' },
         },
       },
@@ -276,7 +276,10 @@ export function createTopologyToolsDomain(deps) {
       const phaseFilter = args.phase        ? `AND current_phase = ?` : '';
       const realmFilter = args.realm != null ? `AND realm_id = ?`     : '';
       const msgFilter   = args.minMessages   ? `AND message_count >= ?` : '';
-      const sortCol = args.sortBy === 'messages' ? 'message_count' : args.sortBy === 'name' ? 'name' : 'current_vitality';
+      const sortCol = args.sortBy === 'messages' ? 'message_count'
+        : args.sortBy === 'name' ? 'name'
+        : args.sortBy === 'gravity' ? 'gravity'
+        : 'current_vitality';
       const sortDir = args.sortBy === 'name' ? 'ASC' : 'DESC';
       const limit = args.limit || 20;
 
@@ -288,7 +291,7 @@ export function createTopologyToolsDomain(deps) {
 
       const rows = await db.rawQuery(
         `SELECT territory_id, name, current_vitality, current_phase, message_count, realm_id, coherence, energy,
-                first_active, last_active
+                gravity, gravity_share, first_active, last_active
          FROM territory_profiles
          WHERE user_id = ? AND message_count > 0 AND COALESCE(is_catchall, 0) = 0
            AND dissolved_at IS NULL
@@ -305,7 +308,8 @@ export function createTopologyToolsDomain(deps) {
         const freq = vf(t.current_vitality);
         const phase = t.current_phase || '?';
         const active = t.last_active ? ` · last ${new Date(t.last_active).toLocaleDateString()}` : '';
-        return `**${t.name}** (T${t.territory_id}) · ${phase} ${freq} · ${t.message_count} msgs · realm ${t.realm_id}${active}`;
+        const grav = t.gravity > 0 ? ` · gravity ${vf(t.gravity)}` : '';
+        return `**${t.name}** (T${t.territory_id}) · ${phase} ${freq}${grav} · ${t.message_count} msgs · realm ${t.realm_id}${active}`;
       });
 
       return `# Territories (${list.length} results)\n\n${lines.join('\n')}`;
@@ -320,7 +324,7 @@ export function createTopologyToolsDomain(deps) {
           `SELECT territory_id, name, essence, archetype_type, archetype_character,
                   story_birth, story_arc, story_current_chapter, story_peak_moments,
                   message_count, coherence, energy, realm_id, first_active, last_active,
-                  activity_timeline, current_vitality, current_phase, explored_percent,
+                  activity_timeline, current_vitality, current_phase, gravity, gravity_share, explored_percent,
                   agent_expertise, agent_curious_about
            FROM territory_profiles WHERE user_id = ? AND territory_id = ?`,
           [userId, tid],
@@ -358,7 +362,8 @@ export function createTopologyToolsDomain(deps) {
       const stateLabel = p.current_phase ? ` [${p.current_phase} · ${vf(p.current_vitality)}]` : '';
       sections.push(`# ${p.name} (T${p.territory_id})${stateLabel}`);
 
-      sections.push(`## Identity\nRealm: ${p.realm_id} · Messages: ${p.message_count} · Explored: ${p.explored_percent || 0}%\nFirst: ${p.first_active || '?'} · Last: ${p.last_active || '?'}\nVitality: ${vf(p.coherence, 3)} · Energy: ${vf(p.energy, 4)}${p.archetype_type ? `\nArchetype: ${p.archetype_type}${p.archetype_character ? ' — ' + p.archetype_character : ''}` : ''}${theme ? `\nTheme: ${theme.name}` : ''}`);
+      const gravLine = p.gravity > 0 ? ` · Gravity: ${vf(p.gravity)}${p.gravity_share > 0 ? ` (${Math.round(p.gravity_share * 100)}% of attention)` : ''}` : '';
+      sections.push(`## Identity\nRealm: ${p.realm_id} · Messages: ${p.message_count} · Explored: ${p.explored_percent || 0}%${gravLine}\nFirst: ${p.first_active || '?'} · Last: ${p.last_active || '?'}\nVitality: ${vf(p.coherence, 3)} · Energy: ${vf(p.energy, 4)}${p.archetype_type ? `\nArchetype: ${p.archetype_type}${p.archetype_character ? ' — ' + p.archetype_character : ''}` : ''}${theme ? `\nTheme: ${theme.name}` : ''}`);
 
       if (p.essence) sections.push(`## Essence\n${p.essence}`);
 

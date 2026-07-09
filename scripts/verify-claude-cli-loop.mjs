@@ -96,6 +96,25 @@ const mkLoop = (spawnImpl, writeSink) => createClaudeCliLoop({
   rec('CL4 prompt delivered via stdin', cap.child._stdin.join('') === 'the user message', cap.child._stdin.join('|'));
 }
 
+// ── CL4b — owner web access widens the confined toolset to WebSearch, and ONLY then ──
+// Default (no webSearch): the toolset stays EXACTLY the vault glob (no built-ins leak).
+// Enabled: WebSearch is added to --tools/--allowedTools; Bash/Edit/Write are STILL excluded
+// (we add one named built-in, never `*`). The CLI engine only runs owner chat, so owner-scoped.
+{
+  const runWith = async (opts) => {
+    const { spawnImpl, cap } = seam({ lines: [result({ result: 'ok', subtype: 'success' })] });
+    await mkLoop(spawnImpl).run({ system: 'S', userMessage: 'hi', send: () => {}, ...opts });
+    const a = cap.args;
+    return { a, val: (flag) => a[a.indexOf(flag) + 1] || '' };
+  };
+  const off = await runWith({});
+  rec('CL4b default: --tools is the vault glob only (no WebSearch)', off.val('--tools') === 'mcp__mycelium__*', off.val('--tools'));
+  const on = await runWith({ webSearch: true });
+  rec('CL4b enabled: --tools includes WebSearch + WebFetch (full web access)', /\bWebSearch\b/.test(on.val('--tools')) && /\bWebFetch\b/.test(on.val('--tools')) && /mcp__mycelium__\*/.test(on.val('--tools')), on.val('--tools'));
+  rec('CL4b enabled: --allowedTools includes WebSearch + WebFetch (auto-approve)', /\bWebSearch\b/.test(on.val('--allowedTools')) && /\bWebFetch\b/.test(on.val('--allowedTools')), on.val('--allowedTools'));
+  rec('CL4b enabled: Bash/Edit/Write STILL excluded (no wildcard, no shell)', !/\bBash\b/.test(on.val('--tools')) && !/\bEdit\b/.test(on.val('--tools')) && !on.a.includes('--dangerously-skip-permissions'), on.val('--tools'));
+}
+
 // ── CL5 — mcp-config points at loopback /internal/mcp, no bearer ──
 {
   let written = null;

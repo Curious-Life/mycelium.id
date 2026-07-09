@@ -917,6 +917,21 @@ export function createMessagesNamespace(deps) {
       return firstRow(result)?.count || 0;
     },
 
+    // Count messages in a [since, until) window, optionally excluding sources — the
+    // quiet-day gate uses this to decide, in code, whether a check-in cycle has enough
+    // REAL activity to be worth composing (excluding the agent's own 'scheduler' output
+    // so past check-ins don't inflate the next day's count). created_at is plaintext →
+    // a cheap index scan; no content touched.
+    async countInRange(userId, { since, until, excludeSources = [] } = {}) {
+      let where = `WHERE user_id = ? AND forgotten_at IS NULL`;
+      const params = [userId];
+      if (since) { where += ` AND created_at >= ?`; params.push(since); }
+      if (until) { where += ` AND created_at < ?`; params.push(until); }
+      for (const s of excludeSources) { where += ` AND (source IS NULL OR source <> ?)`; params.push(s); }
+      const result = await d1Query(`SELECT COUNT(*) AS count FROM messages ${where}`, params);
+      return firstRow(result)?.count || 0;
+    },
+
     // Coverage of recallable memory — total + the time span — for the getContext
     // AWARENESS line, so the agent is grounded in HOW MUCH it actually holds (and
     // doesn't over-claim coverage). created_at is plaintext, so MIN/MAX is a cheap

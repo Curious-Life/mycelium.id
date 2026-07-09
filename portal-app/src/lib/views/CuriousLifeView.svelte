@@ -208,8 +208,16 @@
 		active: 'var(--color-accent-jade)',
 		sparse: 'var(--color-text-tertiary)',
 	};
+	let terrSort = $state<'vitality' | 'gravity'>('vitality');
+	// Gravity is only populated after the clustering pipeline runs; hide the toggle
+	// (and gravity column) until real values exist so the list degrades gracefully.
+	const hasGravity = $derived((vitality?.territories ?? []).some((t: Any) => t.gravity != null && Number(t.gravity) > 0));
 	const territories = $derived(
-		[...(vitality?.territories ?? [])].sort((a, b) => (b.vitality ?? 0) - (a.vitality ?? 0)),
+		[...(vitality?.territories ?? [])].sort((a, b) =>
+			terrSort === 'gravity'
+				? (b.gravity ?? 0) - (a.gravity ?? 0)
+				: (b.vitality ?? 0) - (a.vitality ?? 0),
+		),
 	);
 	// Per-territory vitality sub-scalar averages (the 5 components behind `vitality`).
 	const subScalars = [
@@ -878,15 +886,16 @@
 						</div>
 					</div>
 					<div class="panel">
-						<h3>Territories by vitality</h3>
+						<div class="panel-head-row"><h3>Territories by {terrSort}</h3>{#if hasGravity}<div class="seg-mini" role="group" aria-label="Sort territories"><button class:on={terrSort === 'vitality'} onclick={() => (terrSort = 'vitality')}>vitality</button><button class:on={terrSort === 'gravity'} onclick={() => (terrSort = 'gravity')}>gravity</button></div>{/if}</div>
 						<ul class="terr-list interactive">
 							{#each territories.slice(0, 16) as t}
+								{@const metric = terrSort === 'gravity' ? (t.gravity ?? 0) : (t.vitality ?? 0)}
 								<li>
 									<button type="button" class="terr-row" onclick={() => openTerritoryOnMindscape(t.territory_id)} title="Open {terrName(t)} on your mindscape">
 										<span class="t-phase" style="background:{phaseColor[t.phase] ?? 'var(--color-text-tertiary)'}" title="{t.phase ?? 'unscored'}"></span>
 										<span class="t-id">{terrName(t)}</span>
-										<span class="t-bar"><span style="width:{Math.round((t.vitality ?? 0) * 100)}%;background:{phaseColor[t.phase] ?? 'var(--color-text-tertiary)'}"></span></span>
-										<span class="t-val">{fmt(t.vitality, 2)}</span>
+										<span class="t-bar"><span style="width:{Math.round(metric * 100)}%;background:{terrSort === 'gravity' ? 'var(--color-accent, #e5b84c)' : (phaseColor[t.phase] ?? 'var(--color-text-tertiary)')}"></span></span>
+										<span class="t-val">{fmt(metric, 2)}</span>
 										<span class="t-go" aria-hidden="true">›</span>
 									</button>
 								</li>
@@ -1532,6 +1541,10 @@
 	.rp-terr { list-style: none; margin: 0 0 0.4rem 1.6rem; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; }
 	.rp-terr li { display: flex; justify-content: space-between; gap: 0.6rem; align-items: baseline; font-size: 0.8rem; }
 	.panel { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: 1.4rem; margin-bottom: 1rem; }
+	.panel-head-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+	.seg-mini { display: inline-flex; border: 1px solid var(--color-border); border-radius: 7px; overflow: hidden; }
+	.seg-mini button { appearance: none; border: 0; background: transparent; color: var(--color-text-secondary); padding: 3px 9px; font-size: 0.72rem; font-weight: 550; cursor: pointer; text-transform: capitalize; }
+	.seg-mini button.on { background: var(--color-accent, #e5b84c); color: #1a1a1a; }
 	.panel:last-child { margin-bottom: 0; }
 	.panel h3 { font-size: 0.95rem; font-weight: 600; margin-bottom: 1rem; color: var(--color-text-emphasis); }
 	.center-panel { display: flex; flex-direction: column; align-items: center; gap: 1.4rem; justify-content: center; }

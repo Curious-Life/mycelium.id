@@ -53,7 +53,11 @@ export function createNativeRuntime(cfg = {}) {
       });
       if (!res || !res.ok) return { delivered: false, usedReplyTool: false, reason: `server-${res?.status || 'error'}` };
       const j = await res.json().catch(() => ({}));
-      return { delivered: !!j.delivered, usedReplyTool: !!j.usedReplyTool, reason: j.reason || 'native' };
+      // Pass through the observability fields (Layer 3): `harvested` (reply landed only via the
+      // text-harvest last resort → provider was degraded), `degraded` (fell back off the primary),
+      // and `model` (the ACTUAL model that ran, un-masked). lane.js records these on lastTurn + the
+      // persistent turn log so a degraded delivery is never invisible.
+      return { delivered: !!j.delivered, usedReplyTool: !!j.usedReplyTool, reason: j.reason || 'native', harvested: !!j.harvested, degraded: !!j.degraded, model: j.model || null };
     } catch {
       // Forward failure → no reply, no auto-replay (a retry could double-send).
       return { delivered: false, usedReplyTool: false, reason: 'native-forward-failed' };

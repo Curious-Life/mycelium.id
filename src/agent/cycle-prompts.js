@@ -82,6 +82,7 @@ export const CYCLES = [
     schedule: 'daily:8',
     outputTarget: 'chat',
     essential: true,
+    minActivity: 5, activityWindow: 'yesterday', // quiet-day gate: skip if <5 real msgs since yesterday
     enabledTools: ['updateInternalModel'],
     body: `## Morning Check-In
 
@@ -128,6 +129,7 @@ Be genuine — this is your thinking time, not performance. Respond with NO_REPL
     schedule: 'daily:20',
     outputTarget: 'chat',
     essential: true,
+    minActivity: 5, activityWindow: 'today', // quiet-day gate: skip if <5 real msgs today
     enabledTools: ['updateInternalModel'],
     body: `## Evening Check-In
 
@@ -220,6 +222,7 @@ Flag anything worth surfacing in the morning. Respond with NO_REPLY when done.`,
     schedule: 'weekly:0:10',
     outputTarget: 'chat',
     essential: false,
+    minActivity: 8, activityWindow: 'week', // quiet-day gate: skip a near-dead week (<8 real msgs)
     enabledTools: ['updateInternalModel', 'writeMindFileWhole', 'updateDocument', 'flagForDiscussion'],
     body: `## Weekly Review
 
@@ -288,6 +291,13 @@ export const FORBIDDEN_LEGACY_TOOLS = [
  * @returns {{isCycle:boolean, systemExtra:(string|null), inferenceTask:string}}
  *   systemExtra=null means "caller uses its own default" (SCHEDULER_SYSTEM).
  */
+/** The cycle def a seeded reflection-cycle task came from, matched by name (createTask
+ *  assigns its own uuid, so name is the stable link). Null for a non-cycle task. */
+export function cycleByName(name) {
+  const n = String(name || '').trim().toLowerCase();
+  return CYCLES.find((c) => c.name.toLowerCase() === n) || null;
+}
+
 export function cycleTurnOpts(task) {
   const isCycle = task?.created_by === CYCLE_CREATED_BY;
   return {
@@ -298,5 +308,7 @@ export function cycleTurnOpts(task) {
 }
 
 // A cycle (or any task) whose final text is NO_REPLY delivers nothing — the canonical
-// "skip the check-in" sentinel. Used by the scheduler before the output_target deliver.
-export const isNoReply = (text) => /^\s*NO_REPLY\b/i.test(String(text || ''));
+// "skip the check-in" sentinel. The robust detector lives in cycle-output.js (tolerates
+// `**NO_REPLY**` and other wrappings that the old anchored regex missed); this is kept
+// as the historical name, delegating so there is ONE source of truth.
+export { isSkipSentinel as isNoReply } from './cycle-output.js';

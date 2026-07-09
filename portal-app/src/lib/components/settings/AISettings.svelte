@@ -96,6 +96,8 @@
 	let subErr = $state<string | null>(null);
 	let subSensitive = $state(false);     // §4g opt-in (allow the sub for persona/claim work)
 	let subSensitiveBusy = $state(false);
+	let webSearchOn = $state(true);       // owner web access (Anthropic-run search) — default on
+	let webSearchBusy = $state(false);
 	// Model choice for the subscription. Persisted as the provider row's model_preference;
 	// empty falls back to the chat default (Opus 4.8). A curated CURRENT list is the
 	// reliable baseline; `pullSubModels` best-effort augments it from Anthropic (the OAuth
@@ -135,12 +137,14 @@
 
 	async function loadSub() {
 		try {
-			const [s, ss] = await Promise.all([
+			const [s, ss, ws] = await Promise.all([
 				api('/portal/auth/claude/status').then((r) => r.json()).catch(() => null),
 				api('/portal/providers/sensitive-subscription').then((r) => r.json()).catch(() => null),
+				api('/portal/providers/web-search').then((r) => r.json()).catch(() => null),
 			]);
 			if (s?.ok) subStatus = { authenticated: !!s.authenticated, providerId: s.providerId ?? null, account: s.account ?? null, model: s.model ?? null };
 			if (ss?.ok) subSensitive = ss.allowed === true;
+			if (ws?.ok) webSearchOn = ws.enabled !== false;
 		} catch { /* section shows the connect state */ }
 	}
 	async function importSub() {
@@ -171,6 +175,11 @@
 		subSensitiveBusy = true;
 		try { const r = await api('/portal/providers/sensitive-subscription', { method: 'PUT', body: JSON.stringify({ allowed: v }) }); if (r.ok) subSensitive = (await r.json()).allowed === true; }
 		catch { /* leave */ } finally { subSensitiveBusy = false; }
+	}
+	async function setWebSearch(v: boolean) {
+		webSearchBusy = true;
+		try { const r = await api('/portal/providers/web-search', { method: 'PUT', body: JSON.stringify({ enabled: v }) }); if (r.ok) webSearchOn = (await r.json()).enabled !== false; }
+		catch { /* leave */ } finally { webSearchBusy = false; }
 	}
 
 	// Assistant identity (spec #4) — name + personality, changeable here and set in
@@ -662,6 +671,14 @@
 				{/each}
 			</div>
 		{/if}
+
+		<!-- ── Web access (owner-only, Anthropic-run search) ── -->
+		<div class="lane">
+			<button class="sub-toggle" role="switch" aria-checked={webSearchOn} disabled={webSearchBusy} onclick={() => setWebSearch(!webSearchOn)}>
+				<span class="toggle sm" class:on={webSearchOn}><span class="knob"></span></span>
+				<span class="sub-toggle-body"><span class="sub-toggle-title">Web access</span><span class="sub-toggle-sub">Let your agent search the web and fetch pages (Claude runs it). Available to you in chat &amp; your own DMs — never to other people messaging your bot.</span></span>
+			</button>
+		</div>
 
 		<!-- ── Models per task — ONE area: on-box (local) + provider-routed ── -->
 		{#if tasks.length}

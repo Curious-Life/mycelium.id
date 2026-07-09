@@ -190,4 +190,15 @@ export function computeNextRun(dsl, { after = new Date(), tz = null, scheduledAt
   return null;
 }
 
+/**
+ * The UTC instant (ISO) of LOCAL midnight `offsetDays` from `now`, in `tz` (or UTC).
+ * Used by the quiet-day gate to bound "yesterday"/"today"/"the week" as real calendar
+ * windows in the user's timezone. offsetDays 0 = start of today; -1 = start of yesterday.
+ */
+export function localDayStartUtc(now = new Date(), tz = null, offsetDays = 0) {
+  const d = now instanceof Date ? now : new Date(now);
+  const p = partsInTz(tz, d);
+  return new Date(wallToUtcMs(tz, p.y, p.mo, p.d + offsetDays, 0, 0)).toISOString();
+}
+
 export default computeNextRun;
