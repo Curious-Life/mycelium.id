@@ -85,20 +85,16 @@ rec('C2. on-stop SKIPPED tool_use (a2) + tool_result (u2)', fresh(await repost('
 const hwm = readFileSync(join(HOME, '.mycelium-bridge', 'cc-sync-sess.hwm'), 'utf8').trim();
 rec('C3. high-water-mark file advanced', Number(hwm) >= 7, `hwm=${hwm}`);
 
-// D — backfill scans a projects dir and imports
-const PROJ = mkdtemp('cs-proj-');
-mkdirSync(join(PROJ, 'someproj'), { recursive: true });
-writeFileSync(join(PROJ, 'someproj', 'h.jsonl'), [JSON.stringify({ type: 'user', uuid: 'bf1', sessionId: 'bf', timestamp: '2025-03-03T00:00:00.000Z', message: { role: 'user', content: 'backfilled message' } })].join('\n') + '\n');
-const bf = await runNode('scripts/backfill-claude-code.mjs', { CLAUDE_PROJECTS_DIR: PROJ });
-await settle();
-rec('D1. backfill imported the transcript', /1 new/.test(bf.out) && dedup(await repost('bf1', 'backfilled message')), (bf.out || bf.err).trim().split('\n').pop());
+// (D — backfill — removed in the public tree: scripts/backfill-claude-code.mjs is
+//  internal one-time tooling the release scrub strips; the live sync path it seeds
+//  is covered by A1-A5 + C1-C3 above.)
 
 server.close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
-for (const d of [dir, HOME, PROJ]) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
+for (const d of [dir, HOME]) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(70));
-console.log(`VERDICT: ${allPass ? 'GO — transcript sync: every msg + metadata + real timestamps + HWM · importMessages created_at · backfill' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
+console.log(`VERDICT: ${allPass ? 'GO — transcript sync: every msg + metadata + real timestamps + HWM · importMessages created_at' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
 console.log('='.repeat(70));
 process.exit(allPass ? 0 : 1);
 
