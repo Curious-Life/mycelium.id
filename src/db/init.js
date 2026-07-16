@@ -22,6 +22,8 @@ import { resolveDbKeyHex, atRestEnabled, vaultIsEncrypted } from './open.js';
 import { deriveDbKey } from '../account/keystore.js';
 import { ensureVaultEncrypted, isPlaintextSqlite } from '../account/db-cipher-migrate.js';
 import { maybeSnapshotBeforeMigrate } from '../account/snapshot-on-boot.js';
+import { guardAgainstForeignWal, recordVaultBinding } from './wal-guard.js';
+import { recordDurabilityEvent } from './durability-log.js';
 import { ensureSidecarHealthy, dropLegacyVaultIndex } from '../search/sqlite/sidecar.js';
 
 // Cross-process init lock. A LIVE holder is NEVER stolen — even a multi-minute
@@ -121,6 +123,17 @@ function releaseLock(lockPath) { try { unlinkSync(lockPath); } catch { /* alread
  */
 export function ensureVaultSchema(dbFile, userHex) {
   mkdirSync(dirname(dbFile), { recursive: true });
+  // FOREIGN-WAL GUARD — must run BEFORE anything opens this file, including the
+  // pre-migrate snapshot below (its VACUUM INTO open would replay the WAL). If the vault
+  // file was replaced (repair/restore/swap) while a stale -wal from the previous file
+  // generation remained, SQLite would silently splice old-generation pages into the new
+  // file on first open — the demonstrated mechanism behind the 2026-07 corruption series.
+  // We are under the cross-process init lock here, so the check-and-quarantine is atomic
+  // with respect to the sibling process.
+  guardAgainstForeignWal(dbFile, {
+    log: (m) => console.error(m),
+    onEvent: (e) => recordDurabilityEvent(e.kind, e),
+  });
   const fresh = !existsSync(dbFile);
   const keyed = vaultIsEncrypted(dbFile) || (atRestEnabled() && fresh);
   let dbKeyHex = null;
@@ -168,6 +181,11 @@ export async function initVaultStorage({ dbPath, userHex, log = (m) => console.e
       const dbKeyHex = resolveDbKeyHex(userHex, dbPath);
       const r = ensureVaultEncrypted({ dbPath, dbKeyHex, log });
       if (r.migrated) log(`[mycelium] at-rest: encrypted ${r.tables} tables; plaintext backup kept at ${r.preCipherPath}`);
+      // The migration just SWAPPED the file (new inode, new cipher salt). Re-record the
+      // wal-guard binding NOW, or the app's own next crash-WAL — written on the new
+      // file — would read as foreign at the following boot and be quarantined: a
+      // PoC-proven false positive from the independent review (committed-data loss).
+      if (r.migrated) recordVaultBinding(dbPath);
     }
 
     // Guard (Stage 0, SQLCipher-mandatory): if at-rest is opted in but the vault is

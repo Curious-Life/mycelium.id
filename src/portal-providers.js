@@ -22,12 +22,15 @@ import express from 'express';
 import { execFileSync } from 'node:child_process';
 import { probeProvider } from './inference/probe.js';
 import { listModels } from './inference/models.js';
-import { PROVIDER_PRESETS } from './inference/presets.js';
+import { PROVIDER_PRESETS, isLoopbackUrl, jurisdictionForBaseUrl } from './inference/presets.js';
 import { assertSafeBaseUrlResolved } from './inference/base-url.js';
+import { KNOWN_PROVIDERS } from './inference/known-providers.js';
 import { INFERENCE_TASKS, ONBOX_TASKS } from './inference/resolve.js';
-import { ROLE_RECOMMENDATIONS } from './inference/role-models.js';
+import { ROLE_RECOMMENDATIONS, INTELLIGENCE_FUNCTIONS, tasksForFunction } from './inference/role-models.js';
 import { resolveMcpBearer, readRemoteConfig } from './remote/config.js';
-import { importFromClaudeCli, ClaudeImportError } from './inference/claude-oauth.js';
+import { importFromClaudeCli, ClaudeImportError, readClaudeAccount } from './inference/claude-oauth.js';
+import { probeClaudeCredential } from './inference/claude-sources.js';
+import { startPkceFlow, exchangeCode, refreshAccessToken, createPkceFlowStore, ClaudePkceError } from './inference/claude-pkce.js';
 import { resolveClaudeBin } from './inference/claude-bin.js';
 import { seedClaudeConfigDir } from './inference/claude-config-dir.js';
 import { isCliEngineReady } from './agent/harnesses/index.js';
@@ -57,14 +60,49 @@ function detectTailscaleDnsName() {
 
 // Shape a stored row → the metadata the UI consumes. NEVER includes credentials
 // (providers.list() doesn't select it; this is the second, explicit guard).
+// TWO facts, computed HERE (server-side) with the one shared parser (inference/presets.js).
+// They are NOT the same fact and must never be collapsed:
+//
+//   jurisdiction    jurisdictionForBaseUrl — the LEGAL exposure of the traffic.
+//   on_this_device  isLoopbackUrl          — literally THIS MACHINE.
+//
+// ⚠️ THEY SHIP SO NO CLIENT EVER GUESSES. Both have already been re-derived on the client with
+// an unanchored substring regex — the anti-pattern presets.js:40-49 exists to document
+// deleting (`https://localhost.attacker.io/v1` classified LOCAL) — and both times it was live:
+//
+//   - The Intelligence screen must hide US providers from §4g-limited functions; its first
+//     version diverged from the server on 9 of 13 URLs, offering US lookalikes to a limited
+//     function AND hiding genuine EU/local providers behind a reason false for them.
+//   - AISettings' jurisdiction chip told the user their most intimate data stayed "on your
+//     device" while it was being sent to an internet host — `https://evil.example.com/v1?x=11434`
+//     matched in the QUERY STRING. An ordinary LAN Ollama (192.168.1.9:11434) tripped it too.
+//
+// (Both found by independent review, 2026-07-16.) One authority, shipped — never a second
+// opinion on the client.
+//
+// WHY on_this_device IS SEPARATE, and not `jurisdiction === 'local'`: jurisdictionForBaseUrl
+// maps a `.local` host to 'local' (a LAN box — sovereign-ish, but NOT this device). Gating the
+// green "on your device" claim (or the destructive Ollama disk-delete offer) on the
+// jurisdiction would re-ship that bug INVERTED for every `.local` host. Whatever PR #175
+// decides about `.local`, on_this_device stays correct.
+//
+// Lossless: every PROVIDER_PRESETS row's DECLARED jurisdiction already equals the computed one
+// (verified across all 9 presets; no preset declares 'us-zdr'), so no badge downgrades.
 const publicRow = (r) => ({
   id: r.id, provider: r.provider, label: r.label, auth_type: r.auth_type,
   model_preference: r.model_preference, base_url: r.base_url,
+  jurisdiction: jurisdictionForBaseUrl(r.base_url, r.provider),
   is_active: r.is_active, status: r.status,
+  on_this_device: isLoopbackUrl(r.base_url),
   last_used_at: r.last_used_at, created_at: r.created_at, updated_at: r.updated_at,
 });
 
-const KNOWN = new Set(['openai', 'anthropic', 'claude', 'custom']);
+// The provider vocabulary is shared with the import path (see known-providers.js) —
+// what this route refuses to create, a restore must refuse to resurrect.
+const KNOWN = KNOWN_PROVIDERS;
+// Exported so verify:provider-import can assert the two paths reference the SAME Set
+// by identity — a source-text check can't tell a shared import from a redeclaration.
+export { KNOWN as __knownProvidersForTest };
 
 /**
  * @param {object} deps
@@ -113,34 +151,95 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
 
   // Assign (or clear) a task's provider/model. Body: { task, providerId|null, model? }.
   // Cloud tasks store { providerId, model? } (provider row must exist). ON-BOX tasks
-  // (categorize) store { model } — a LOCAL Ollama model NAME, no provider row; empty/absent
-  // model clears → the owning pipeline falls back to its curated default (qwen3.5:4b).
+  // (categorize/enrich) store { model } — a LOCAL Ollama model NAME, no provider row.
+  //
+  // ⚠️ An empty/absent model CLEARS the task, and clearing means NOT APPROVED — nothing is
+  // downloaded, nothing runs (§3.10c: the approval IS the model setting; there is no separate
+  // consent flag). This comment used to say "falls back to its curated default (qwen3.5:4b)",
+  // which was true until 2026-07-16 and was precisely the bug: that implicit fallback made a
+  // fresh vault pull 3.4GB — plus the Ollama runtime — with no prompt and no way to decline.
+  // ── `function` (the Intelligence screen) vs `task` (the legacy per-task control) ──────
+  // The screen assigns by FUNCTION (design §3.11), and a function can own MORE THAN ONE task:
+  // Understanding = {categorize, enrich}. Sending `{ function: 'understanding', model }` writes
+  // BOTH in ONE settings update.
+  //
+  // ⚠️ THIS IS THE FIX FOR A REAL DORMANCY BUG, not sugar. While the only way to assign was
+  // per-task, a vault could approve `categorize` and leave `enrich` unset — so L2 (semantic
+  // entities + gist) sat SILENTLY DEAD with no surface reporting it (M's re-review). One
+  // approval, both tasks, atomically.
+  // ⚠️ NOT "the split cannot reopen" — an earlier version said that and it was false. The
+  // per-task path below still writes exactly one task, and the ONLY shipped screen
+  // (AISettings.svelte's two on-box selects) is precisely that caller, so the split is still
+  // the current default until the Intelligence screen replaces it. What this closes is the
+  // split being UNAVOIDABLE; what closes it for users is the screen (increment I, next).
+  //
+  // `task` still works unchanged — verify:task-models and the existing controls use it.
   router.put('/providers/task-models', async (req, res) => {
     try {
-      const { task, providerId = null, model = null } = req.body || {};
-      if (!INFERENCE_TASKS.includes(task)) return bad(res, 400, `unknown task (allowed: ${INFERENCE_TASKS.join(', ')})`);
+      const { task, function: fnKey, providerId = null, model = null } = req.body || {};
+      // Both keys is a caller bug, not a precedence question: silently honouring `function` and
+      // dropping `task` would write two tasks the caller didn't ask for and skip the one it did.
+      if (fnKey !== undefined && fnKey !== null && task !== undefined && task !== null) {
+        // NB the message names both keys rather than claiming a `function` was "sent": a falsy
+        // -but-present value ({function:''}) lands here too, and "not both" would read as a lie.
+        return bad(res, 400, 'send `task` OR `function` — both were present in the body');
+      }
+      // Resolve the target task list: a function fans out to its tasks; a task is itself.
+      let targets;
+      if (fnKey !== undefined && fnKey !== null) {
+        const known = INTELLIGENCE_FUNCTIONS.find((f) => f.key === fnKey);
+        targets = [...tasksForFunction(fnKey)];
+        if (!targets.length) {
+          // transcription/voice are REAL functions that own no INFERENCE_TASK — they have their
+          // own rails (whisper's download route, the TTS catalog). Saying "unknown" would be a
+          // lie the first UI author trips over; say what is actually true.
+          return bad(res, 400, known
+            ? `function '${fnKey}' has no inference task — it is assigned through its own surface`
+            : `unknown function (allowed: ${INTELLIGENCE_FUNCTIONS.filter((f) => f.tasks.length).map((f) => f.key).join(', ')})`);
+        }
+      } else if (INFERENCE_TASKS.includes(task)) {
+        targets = [task];
+      } else {
+        return bad(res, 400, `unknown task (allowed: ${INFERENCE_TASKS.join(', ')})`);
+      }
+
       const settings = (await db.users?.getSettings?.(userId)) || {};
       const taskModels = { ...(settings.taskModels || {}) };
-      if (ONBOX_TASKS.has(task)) {
-        // Local model NAME only — no providerId, no provider-row lookup.
-        const name = typeof model === 'string' ? model.trim() : '';
-        if (!name) {
-          delete taskModels[task]; // clear → curated default
-        } else {
-          // Ollama tag shape (defense in depth — this value is later fed to localInfer as a model tag).
-          // Allow namespace/name:tag (so '/' and ':' are legitimate), but reject '..' so a stored
-          // name can never be path-traversal-shaped, even though the only sink is a JSON model field.
-          if (!/^[\w./:-]{1,64}$/.test(name) || name.includes('..')) return bad(res, 400, 'invalid model name');
-          taskModels[task] = { model: name };
-        }
-      } else if (providerId == null) {
-        delete taskModels[task]; // clear → falls back to the active provider
-      } else {
-        const row = await db.providers.get(providerId, userId); // must be a configured provider of THIS user
-        if (!row) return bad(res, 404, 'provider not found');
-        taskModels[task] = { providerId, ...(model ? { model: String(model) } : {}) };
+      // ⚠️ WHAT ACTUALLY MAKES THIS ATOMIC IS THE SINGLE `updateSettings` BELOW — not the fact
+      // that validation sits up here. `taskModels` is a LOCAL COPY, so any `return bad(...)`
+      // persists nothing no matter where it fires. An earlier version of this comment (and its
+      // commit message) claimed the up-front ordering was the mechanism preventing a
+      // half-apply, and claimed M9 (verify-task-models.mjs) would fail if you moved validation into the loop. A reviewer
+      // moved it into the loop: it still PASSED. The claim was false (independent review,
+      // 2026-07-16). Validating up-front is still better — it is cheaper and reads clearly —
+      // but do not mistake it for the guarantee. THE GUARANTEE IS: build the whole next state,
+      // then write it ONCE. If you ever move the write inside the loop, the fan-out stops being
+      // atomic and no current gate would catch it.
+      const onboxName = typeof model === 'string' ? model.trim() : '';
+      if (targets.some((t) => ONBOX_TASKS.has(t)) && onboxName) {
+        // Ollama tag shape (defense in depth — this value is later fed to localInfer as a model tag).
+        // Allow namespace/name:tag (so '/' and ':' are legitimate), but reject '..' so a stored
+        // name can never be path-traversal-shaped, even though the only sink is a JSON model field.
+        if (!/^[\w./:-]{1,64}$/.test(onboxName) || onboxName.includes('..')) return bad(res, 400, 'invalid model name');
       }
-      await db.users.updateSettings(userId, { ...settings, taskModels });
+      let row = null;
+      if (targets.some((t) => !ONBOX_TASKS.has(t)) && providerId != null) {
+        row = await db.providers.get(providerId, userId); // must be a configured provider of THIS user
+        if (!row) return bad(res, 404, 'provider not found');
+      }
+
+      for (const t of targets) {
+        if (ONBOX_TASKS.has(t)) {
+          // Local model NAME only — no providerId, no provider-row lookup.
+          if (!onboxName) delete taskModels[t];              // clear → NOT approved (nothing pulls, nothing runs)
+          else taskModels[t] = { model: onboxName };
+        } else if (providerId == null) {
+          delete taskModels[t];                              // clear → falls back to the active provider
+        } else {
+          taskModels[t] = { providerId, ...(model ? { model: String(model) } : {}) };
+        }
+      }
+      await db.users.updateSettings(userId, { ...settings, taskModels });   // ONE write ⇒ atomic
       ok(res, { taskModels });
     } catch { bad(res, 500, 'failed to set task model'); }
   });
@@ -148,7 +247,20 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   // The curated catalog of connectable providers — the "Intelligence" options the
   // UI offers (label, kind, base_url, jurisdiction, default model). Static data;
   // the UI prefills the add-provider form from a chosen preset. No secrets.
-  router.get('/providers/presets', (_req, res) => ok(res, { presets: PROVIDER_PRESETS, roleRecommendations: ROLE_RECOMMENDATIONS }));
+  //
+  // `functions` is the FUNCTION spine (design §3.11) — the ordered list the Intelligence
+  // screen renders, each with its recommendation, its reason, the tasks it writes, and its
+  // jurisdiction limit. Served HERE rather than from a new endpoint because this route already
+  // carries the sibling `roleRecommendations` and the UI already fetches it once at mount:
+  // one round-trip, one place to look. §3.10d's "no third catalog" applies to routes too.
+  //
+  // Content-free by construction — it is a frozen module constant (role-models.js): labels,
+  // model names, task names. No user data can reach it.
+  router.get('/providers/presets', (_req, res) => ok(res, {
+    presets: PROVIDER_PRESETS,
+    roleRecommendations: ROLE_RECOMMENDATIONS,
+    functions: INTELLIGENCE_FUNCTIONS,
+  }));
 
   // Auto-fill the model dropdown (spec #9): given a provider config the user is
   // mid-entering — { provider, base_url?, api_key? } — fetch that provider's
@@ -179,6 +291,17 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     try {
       const row = await db.providers.get(id, userId);
       if (!row) return bad(res, 404, 'provider not found');
+      // A PENDING row is un-armed config (an import planted it — vault-import.js's
+      // ai_providers policy). mapRowToConfig refuses it for every RESOLVER, but this
+      // route reads the row DIRECTLY and would fetch its base_url — a fourth read path
+      // the resolver chokepoint does not cover. Low severity (no vault plaintext, and
+      // the key sent is whatever the bundle supplied, not the user's), but an imported
+      // row must not cause ANY outbound fetch before the user arms it: "unreachable
+      // until activated" has to mean unreachable, or the claim rots into the same
+      // stale-prose trap this file's history is full of. Refuse until armed.
+      if (String(row.status || '').toLowerCase() === 'pending') {
+        return res.json({ ok: false, models: [], error: 'provider is not activated yet — activate it to list models' });
+      }
       let apiKey = null, token = null;
       // A BYOK provider stores `.apiKey`; a SUBSCRIPTION stores `.claudeOAuthToken`
       // (listModels then uses the Bearer + Claude-Code headers instead of x-api-key).
@@ -195,12 +318,20 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   // opts in. `settings.inferCascade` is no longer written by the product.
 
   // ── §4g subscription opt-in ─────────────────────────────────────────────────
-  // By default the deepest persona/claim abstractions (claims/discovery, validator —
-  // hardcoded sensitive:true) stay on-box/EU even when a subscription is connected.
+  // By default §4g-sensitive work stays on-box/EU even when a subscription is connected.
   // This OFF-BY-DEFAULT toggle lets the operator relax §4g for THEIR OWN vault so the
-  // connected subscription can process those too. Read by resolveProviderChain /
+  // connected subscription can process it too. Read by resolveProviderChain /
   // resolveInferenceConfig. MUST be declared before '/providers/:id' or the PUT is
   // shadowed by the numeric-id route (Number('sensitive-subscription')→NaN→400).
+  //
+  // ⚠️ WHAT IT COVERS GREW ON 2026-07-16, and the UI copy grew with it. It used to be only
+  // the persona/claim abstractions (claims/discovery + validator, the two call sites that
+  // hardcoded sensitive:true). `narrate` — mindscape names + chronicles — is now
+  // §4g-sensitive too (src/inference/sensitivity.js), so this toggle governs descriptions as
+  // well. That is strictly MORE protective than before (narrate previously reached a US
+  // subscription regardless of this toggle), but a user who consented to "claim analysis"
+  // must be TOLD chronicles are included — hence "persona, claim & description analysis" in
+  // AISettings. If SENSITIVE_TASKS grows again, this copy grows again.
   router.get('/providers/sensitive-subscription', async (_req, res) => {
     try { const s = await db.users.getSettings(userId); ok(res, { allowed: s?.allowSubscriptionSensitive === true }); }
     catch { bad(res, 500, 'failed to read preference'); }
@@ -395,7 +526,19 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
       let apiKey = null;
       try { apiKey = row.credentials ? JSON.parse(row.credentials).apiKey : null; } catch { /* malformed → no key */ }
       const result = await probeProvider({ provider: row.provider, baseUrl: row.base_url, model: row.model_preference, apiKey, fetch });
-      await db.providers.update(id, userId, { status: result.ok ? 'active' : 'error', last_used_at: new Date().toISOString() });
+      // A 'pending' row NEVER leaves 'pending' here. status='pending' is what makes an
+      // IMPORTED provider unresolvable (resolve.js mapRowToConfig), and this route is a
+      // connectivity probe, not an arming action — the UI presents it as "Test", and it
+      // leaves is_active=0, so the row still reads as not-the-active-provider.
+      // Writing EITHER outcome would arm it: 'active' obviously, but 'error' too, since
+      // the resolver only refuses 'pending'. A bundle-planted row is then one Test click
+      // from being a live fallback egress target (resolveProviderChain ignores is_active
+      // by design). Only setActive — the deliberate "use this provider" click — promotes.
+      const pending = String(row.status || '').toLowerCase() === 'pending';
+      await db.providers.update(id, userId, {
+        ...(pending ? {} : { status: result.ok ? 'active' : 'error' }),
+        last_used_at: new Date().toISOString(),
+      });
       ok(res, { result });
     } catch { bad(res, 500, 'connectivity test failed'); }
   });
@@ -406,9 +549,31 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   router.get('/auth/openai/status', (_req, res) => ok(res, { authenticated: false }));
   router.post('/auth/openai/disconnect', (_req, res) => ok(res));
 
-  // Is a Claude subscription connected? (any auth_type='oauth' row). Also returns the
-  // non-secret account identity (email/plan/org) for the card — read from the full row's
-  // credentials blob; NEVER returns the token.
+  // Claude subscription HEALTH — a real probe, not a cached flag.
+  //
+  // This used to answer `authenticated: !!sub` — i.e. "a DB row exists". It contacted
+  // nothing, so the card showed a green "✓ Connected as <email>" for a token that had
+  // been revoked or expired months earlier. `isTokenExpired()` already existed and was
+  // never called. That dishonesty is the thing the user actually feels as "dodgy".
+  //
+  // Now: the row says CONFIGURED; the live credential stores say USABLE. We probe the
+  // on-device stores (probeClaudeCredential) and report a discrete, truthful state.
+  // Never returns a token — only states and non-secret identity.
+  //
+  // KNOWN GAP (do not overclaim): this probes the DEVICE stores, which is where the
+  // inference path reads the LIVE token — but resolve.js still falls back to the token
+  // stored in ai_providers.credentials when no live one resolves. So a vault whose
+  // config-dir seed failed can report needs_reauth here while inference still works off
+  // the stored copy. Closing that means making the DB the probe's last rung (or making
+  // the file canonical, per the design's file-canonical increment) — tracked, not done.
+  //
+  //   missing      — no subscription configured
+  //   connected    — a live, unexpired credential is present
+  //   expired      — present but past expiry; refresh will be attempted on next use
+  //   needs_reauth — configured, but nothing usable on this device (gone / setup-token
+  //                  artifact / dead grant) → the user must reconnect
+  //   declined     — Keychain access was denied; you ARE likely signed in (do NOT tell
+  //                  the user to sign in — tell them to allow access, or use the web flow)
   router.get('/auth/claude/status', async (_req, res) => {
     try {
       const sub = (await db.providers.list(userId)).find(isSubscriptionRow);
@@ -417,8 +582,31 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
         model = sub.model_preference || null;
         try { const full = await db.providers.get(sub.id, userId); const c = full?.credentials ? JSON.parse(full.credentials) : {}; account = c.account || null; } catch { /* no account metadata */ }
       }
-      ok(res, { authenticated: !!sub, providerId: sub?.id || null, account, model });
-    } catch { ok(res, { authenticated: false }); }
+      if (!sub) return ok(res, { authenticated: false, health: 'missing', providerId: null, account: null, model: null });
+
+      let probe = null;
+      try { probe = await probeClaudeCredential(); } catch { probe = null; }
+      const health =
+        !probe ? 'needs_reauth'
+          : probe.status === 'found' ? (probe.expired ? 'expired' : 'connected')
+            : probe.status === 'declined' ? 'declined'
+              : 'needs_reauth';   // absent | wrong_scope
+
+      ok(res, {
+        // `authenticated` kept for back-compat with the existing card, but it now means
+        // USABLE (probe-verified), not "a row exists".
+        authenticated: health === 'connected' || health === 'expired',
+        health,
+        providerId: sub.id,
+        account,
+        model,
+        // Non-secret diagnostics so the UI can be specific instead of a green tick:
+        source: probe?.source || null,                 // which store supplied it
+        expiresAt: probe?.creds?.expiresAt ?? null,    // a timestamp, not a token
+        scopeUnknown: probe?.scopeUnknown === true,    // bare env token — scope unverified
+        declinedSources: probe?.declinedSources || [],
+      });
+    } catch { ok(res, { authenticated: false, health: 'needs_reauth' }); }
   });
 
   // Disconnect: remove any stored subscription row(s).
@@ -436,40 +624,128 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   // a conscious acceptance that automating a Pro/Max subscription may breach Anthropic's
   // Terms (the operator runs their own sub on their own box). Stores the OAuth token in
   // ai_providers.credentials (encrypted at rest by whole-file SQLCipher), auth_type='oauth'.
-  router.post('/auth/claude/import', async (req, res) => {
-    if (req.body?.acknowledgeToS !== true) {
-      return bad(res, 400, 'Connecting a Claude subscription requires acknowledging that automated use of a Pro/Max subscription may violate Anthropic’s Terms — pass acknowledgeToS:true to proceed.');
+  // ── The ONE place a subscription credential is persisted ──────────────────────
+  // Every connect path (auto-probe, web PKCE, legacy import) funnels through here,
+  // so there is a single storage contract rather than three drifting copies.
+  // NOTE (design §3.4): the token still lands in ai_providers.credentials today —
+  // moving to file-canonical is its own increment; changing it here would break the
+  // readers in resolve.js in the same breath. Deliberately unchanged for now.
+  async function persistSubscription(creds, { account = null } = {}) {
+    // One subscription per vault: replace any existing oauth row.
+    for (const r of (await db.providers.list(userId)).filter(isSubscriptionRow)) {
+      try { await db.providers.remove(r.id, userId); } catch { /* best-effort */ }
     }
+    let hadActive = false;
+    try { hadActive = (await db.providers.list(userId)).some((r) => r.is_active); } catch { /* fresh vault */ }
+    const id = await db.providers.create(userId, {
+      provider: 'anthropic',
+      label: 'Claude subscription',
+      authType: 'oauth',
+      // account = non-secret identity (email/plan/org) so the card can show
+      // "connected as <email>". list() omits credentials; status exposes only the
+      // account, never the token.
+      credentials: JSON.stringify({ claudeOAuthToken: creds.claudeOAuthToken, refreshToken: creds.refreshToken, expiresAt: creds.expiresAt, scopes: creds.scopes, account: account || creds.account || null }),
+      model: null,
+      baseUrl: null,
+    });
+    let activated = false;
+    if (!hadActive) { try { await db.providers.setActive(id, userId); activated = true; } catch { /* non-fatal */ } }
+    // Seed the app's ISOLATED claude config dir so the CLI harness (when selected) and
+    // the native wire share one live store.
+    // force:true — this is an EXPLICIT connect: the user just chose this account, so it
+    // must replace whatever the dir holds. Without force the seed is non-clobbering, so
+    // reconnecting to a DIFFERENT account left the OLD token in the dir: the DB said
+    // account B while CLI/native turns kept authenticating as account A. (Boot re-seed
+    // still uses the default non-forcing call — it must not undo claude's own refresh.)
+    try { seedClaudeConfigDir(creds, { force: true }); } catch { /* non-fatal: token still stored in the DB row */ }
+    return { id, activated };
+  }
+
+  const TOS_MSG = 'Connecting a Claude subscription requires acknowledging that automated use of a Pro/Max subscription may violate Anthropic’s Terms — pass acknowledgeToS:true to proceed.';
+
+  // Pending web-flow verifiers, keyed by user. In memory on purpose: a PKCE verifier
+  // is a short-lived secret that must never be persisted. Single-use + 10-min TTL.
+  const pkceFlows = createPkceFlowStore();
+
+  // ── CONNECT — the ladder (design §3, operator's "auto first, web if not") ──────
+  //   POST /auth/claude/connect { acknowledgeToS }
+  //     → { connected:true, source }                  the device already has a login
+  //     → { connected:false, needsWeb:true, reason, url }  fall through to the web prompt
+  // Reasons are honest: 'absent' (no login) | 'declined' (Keychain denied — you ARE
+  // signed in, allow access or use the web) | 'wrong_scope' (setup-token artifact) |
+  // 'expired' (refresh grant is dead → re-auth).
+  router.post('/auth/claude/connect', async (req, res) => {
+    if (req.body?.acknowledgeToS !== true) return bad(res, 400, TOS_MSG);
+    try {
+      const probe = await probeClaudeCredential();
+
+      if (probe.status === 'found') {
+        let creds = probe.creds;
+        // Ladder row 3: expired → refresh over HTTP (no CLI). Only a DEAD grant
+        // (invalid_grant) falls through to the web prompt.
+        if (probe.expired) {
+          try {
+            creds = await refreshAccessToken({ refreshToken: creds.refreshToken });
+          } catch (e) {
+            if (e instanceof ClaudePkceError && e.code === 'invalid_grant') {
+              const flow = startPkceFlow();
+              pkceFlows.set(userId, { verifier: flow.verifier, state: flow.state });
+              return ok(res, { connected: false, needsWeb: true, reason: 'expired', detail: e.message, url: flow.url });
+            }
+            return bad(res, 502, e?.message || 'could not refresh the Claude session');
+          }
+        }
+        const account = await readClaudeAccount().catch(() => null);
+        const { id, activated } = await persistSubscription(creds, { account });
+        return ok(res, { connected: true, source: probe.source, id, activated, scopes: creds.scopes, account });
+      }
+
+      // Not usable on this device → hand back a web prompt WITH the real reason.
+      const flow = startPkceFlow();
+      pkceFlows.set(userId, { verifier: flow.verifier, state: flow.state });
+      const detail = probe.status === 'declined'
+        ? 'Keychain access was denied — allow it, or connect in your browser instead.'
+        : probe.status === 'wrong_scope'
+          ? 'The login found on this device is an admin setup-token, not a subscription sign-in.'
+          : 'No Claude login found on this device.';
+      return ok(res, { connected: false, needsWeb: true, reason: probe.status, detail, url: flow.url, declinedSources: probe.declinedSources || [] });
+    } catch { return bad(res, 500, 'could not start the Claude connection'); }
+  });
+
+  // ── CONNECT (web) — finish by pasting the code ─────────────────────────────────
+  router.post('/auth/claude/code', async (req, res) => {
+    if (req.body?.acknowledgeToS !== true) return bad(res, 400, TOS_MSG);
+    const flow = pkceFlows.take(userId);   // single-use
+    if (!flow) return bad(res, 400, 'No pending connection (it may have expired). Start again.');
+    let creds;
+    try {
+      creds = await exchangeCode({ code: req.body?.code, verifier: flow.verifier, state: flow.state });
+    } catch (e) {
+      return bad(res, 400, e?.message || 'could not complete the connection');
+    }
+    try {
+      // NO account label on the web path. readClaudeAccount() reads the MACHINE's
+      // ~/.claude.json — which is a DIFFERENT account from the one just authorized in
+      // the browser (that is the whole point of the web flow: connect an account this
+      // box isn't signed into). Labelling the row with the machine's identity would
+      // show the wrong "connected as <email>" — exactly the confusion this work cures.
+      // Better no label than a false one; the identity can be fetched with the new
+      // token in the health-probe increment.
+      const { id, activated } = await persistSubscription(creds, { account: null });
+      return ok(res, { connected: true, source: 'web', id, activated, scopes: creds.scopes, account: null });
+    } catch { return bad(res, 500, 'failed to store subscription'); }
+  });
+
+  // Legacy: connect by importing an existing CLI login. Kept for back-compat with the
+  // current Settings UI; /auth/claude/connect supersedes it (it probes ALL stores and
+  // falls through to the web flow). Same persist path — no forked storage.
+  router.post('/auth/claude/import', async (req, res) => {
+    if (req.body?.acknowledgeToS !== true) return bad(res, 400, TOS_MSG);
     let creds;
     try { creds = await importFromClaudeCli(); }
     catch (e) { return bad(res, 400, e instanceof ClaudeImportError ? e.message : 'failed to read Claude Code login'); }
     try {
-      // One subscription per vault: replace any existing oauth row.
-      for (const r of (await db.providers.list(userId)).filter(isSubscriptionRow)) {
-        try { await db.providers.remove(r.id, userId); } catch { /* best-effort */ }
-      }
-      let hadActive = false;
-      try { hadActive = (await db.providers.list(userId)).some((r) => r.is_active); } catch { /* fresh vault */ }
-      const id = await db.providers.create(userId, {
-        provider: 'anthropic',
-        label: 'Claude subscription',
-        authType: 'oauth',
-        // account = non-secret identity (email/plan/org) captured from ~/.claude.json, so
-        // the card can show "connected as <email>". Stored alongside the token in the
-        // whole-file-SQLCipher credentials blob (list() omits credentials; status exposes
-        // only the account, never the token).
-        credentials: JSON.stringify({ claudeOAuthToken: creds.claudeOAuthToken, refreshToken: creds.refreshToken, expiresAt: creds.expiresAt, scopes: creds.scopes, account: creds.account || null }),
-        model: null,
-        baseUrl: null,
-      });
-      let activated = false;
-      if (!hadActive) { try { await db.providers.setActive(id, userId); activated = true; } catch { /* non-fatal */ } }
-      // Seed the app's ISOLATED claude config dir NOW (not only on the cli-harness path in
-      // resolve-harness.js) so `claude` can refresh the subscription token for NATIVE channel/
-      // harness turns too — an owner who only uses Telegram never opens a cli chat, so without
-      // this the isolated dir is never created and the native wire falls back to the machine
-      // login. Idempotent + non-clobbering; carries the refreshToken so claude can refresh.
-      try { seedClaudeConfigDir(creds); } catch { /* non-fatal: token still stored in the DB row */ }
+      const { id, activated } = await persistSubscription(creds);
       ok(res, { id, activated, scopes: creds.scopes, account: creds.account || null });
     } catch { bad(res, 500, 'failed to store subscription'); }
   });

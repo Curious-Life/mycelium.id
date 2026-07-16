@@ -14,6 +14,7 @@
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { reportChild } from './lib/child-stderr.mjs';
 import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
@@ -101,11 +102,22 @@ await reopen();
 await db.rawQuery(`UPDATE territory_profiles SET energy = ?, coherence = ?, velocity = ?, message_count = 5, growth_state = 'active', dissolved_at = NULL WHERE user_id = ? AND territory_id = 2`, [0.42, 0.81, 0.12, U]);
 close();
 const env = { ...process.env, USER_MASTER: userHex, SYSTEM_KEY: systemHex, MYCELIUM_DB: DB, MYCELIUM_USER_ID: U };
+// Non-zero exit → print the child's stderr (see lib/child-stderr.mjs). H7 asserts on the ROWS
+// the stage writes, so a child that dies shows up as a puzzling `afterDedup=0` with no cause;
+// a vault writer-lock throw hid there. Also catches a spawn error, which had no handler at all.
 const runStage = () => new Promise((resolve) => {
   const c = spawn('node', ['pipeline/snapshot-entities.js'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
   let err = ''; c.stderr.on('data', (d) => { err += d; });
   const t = setTimeout(() => { try { c.kill('SIGKILL'); } catch {} }, 60_000);
-  c.on('close', (code) => { clearTimeout(t); resolve({ code, err }); });
+  // A spawn failure emits BOTH 'error' AND 'close' — fire once (see verify-describe-gating).
+  let fired = false;
+  const done = (code) => {
+    if (fired) return;
+    fired = true;
+    clearTimeout(t); reportChild('snapshot-entities.js', code, err); resolve({ code, err });
+  };
+  c.on('close', done);
+  c.on('error', () => done(-1));
 });
 await runStage();              // run 1 → records dynamics
 await runStage();              // run 2 → unchanged → deduped

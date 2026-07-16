@@ -18,6 +18,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
+	import { guidanceRestoredSignal } from '$lib/stores/onboarding-guidance.svelte';
 	import { api } from '$lib/api';
 	import { navigationState } from '$lib/stores/navigation';
 	import MyceliumCanvas from './MyceliumCanvas.svelte';
@@ -126,6 +127,19 @@
 		if (!(e.target as HTMLElement)?.closest('.welcome')) markWelcomeSeen();
 	}
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+	// ── The un-dismiss signal (§3.7b) ────────────────────────────────────────────
+	// ⚠️ The poll below CANNOT do this job: `else if (railVisible) refresh()` and
+	// `railVisible` requires `!dismissed`, so once dismissed the only re-read of `dismissed`
+	// never runs again. Restoring guidance wrote the DB and changed nothing on screen until
+	// the app restarted (independent review HIGH-1). This component is in the PERSISTENT
+	// layout — navigation cannot remount it — so it must be TOLD.
+	// Guarded on a real change: an $effect reading the signal must not refresh on mount.
+	let lastSignal = $state(guidanceRestoredSignal());
+	$effect(() => {
+		const s = guidanceRestoredSignal();
+		if (s !== lastSignal) { lastSignal = s; void refresh(); }
+	});
 
 	// The first incomplete step drives the rail's emphasis + auto-advance.
 	const activeStep = $derived<StepKey>(

@@ -24,6 +24,27 @@ export function vaultCorruptMarkerPath(dbPath) {
   return path.join(path.dirname(dbPath), MARKER);
 }
 
+// Append-only corruption LEDGER (JSONL beside the vault). The marker above records
+// only the LATEST event; five corruption events over 2026-07-02..16 left no history
+// beyond hand-named archive files — which a cleanup then deleted, destroying the
+// forensic trail. One line per event: timestamp + source + a CONTENT-FREE detail
+// (quick_check output names pages/trees, never user data — §1). Never throws.
+const LEDGER = 'corruption-events.jsonl';
+export function appendCorruptionEvent(dir, { source, detail = '' } = {}) {
+  try {
+    const line = JSON.stringify({
+      at: new Date().toISOString(),
+      source: String(source || 'unknown').slice(0, 60),
+      detail: String(detail).slice(0, 500),
+      pid: process.pid,
+    });
+    fs.appendFileSync(path.join(dir, LEDGER), line + '\n');
+  } catch { /* a ledger must never break detection */ }
+}
+export function corruptionLedgerPath(dbPath) {
+  return path.join(path.dirname(dbPath), LEDGER);
+}
+
 /**
  * Fire-and-forget: spawn a throttled, detached integrity check for the CANONICAL vault.
  * No-ops (and returns a reason) for fixtures, when disabled, or when throttled. Never
@@ -65,6 +86,7 @@ export function maybeScheduleIntegrityCheck({ dbPath, userHex = null, isCanonica
         let detail = ''; try { detail = JSON.parse(stdout.trim().split('\n').pop() || '{}').result || ''; } catch { /* */ }
         console.error(`[mycelium] VAULT_CORRUPT: quick_check failed${detail ? ` (${detail})` : ''} — restore a recent consistent snapshot; see scripts/vault-repair/. The vault was NOT modified.`);
         try { fs.writeFileSync(markerPath, JSON.stringify({ at: Date.now(), detail })); } catch { /* */ }
+        appendCorruptionEvent(dir, { source: 'scheduled-integrity', detail });
       } else {
         // code 2 (couldn't open/measure) — warn, don't claim corruption, leave marker as-is.
         console.error('[mycelium] integrity check could not run (open/IO error) — will retry next cycle');

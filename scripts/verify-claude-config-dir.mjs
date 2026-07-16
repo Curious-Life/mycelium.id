@@ -213,8 +213,38 @@ clean();
 }
 
 clean();
+// ── CD15 ⭐ force:true replaces on an EXPLICIT connect (reconnect must take effect) ──
+// Without this, reconnecting to a DIFFERENT account left the OLD token in the dir:
+// the DB said account B while CLI/native turns kept authenticating as account A, so a
+// revoked/wrong account went on serving turns.
+{
+  rmSync(claudeConfigCredsPath(), { force: true });
+  seedClaudeConfigDir({ claudeOAuthToken: 'sk-ant-oat-OLD', refreshToken: 'rt-old', expiresAt: 1, scopes: ['user:inference'] });
+  // default (boot re-seed) must NOT clobber — claude owns the refresh in that dir
+  seedClaudeConfigDir({ claudeOAuthToken: 'sk-ant-oat-NEW', refreshToken: 'rt-new', expiresAt: 2, scopes: ['user:inference'] });
+  const kept = JSON.parse(readFileSync(claudeConfigCredsPath(), 'utf8')).claudeAiOauth.accessToken;
+  // explicit connect MUST replace
+  seedClaudeConfigDir({ claudeOAuthToken: 'sk-ant-oat-NEW', refreshToken: 'rt-new', expiresAt: 2, scopes: ['user:inference'] }, { force: true });
+  const forced = JSON.parse(readFileSync(claudeConfigCredsPath(), 'utf8')).claudeAiOauth.accessToken;
+  rec('CD15 ⭐ default seed non-clobbering · force:true replaces (reconnect takes effect)',
+    kept === 'sk-ant-oat-OLD' && forced === 'sk-ant-oat-NEW', `kept=${kept} forced=${forced}`);
+}
+
+// ── CD16 🔒 scopes are NEVER fabricated ──────────────────────────────────────────
+// This used to default to ['user:inference','user:profile'] when empty — laundering a
+// bare/admin token (e.g. `claude setup-token`, which specifically LACKS user:inference)
+// into a "subscription" on disk. Write only what we actually have.
+{
+  rmSync(claudeConfigCredsPath(), { force: true });
+  seedClaudeConfigDir({ claudeOAuthToken: 'sk-ant-oat-UNKNOWN', refreshToken: null, expiresAt: null, scopes: [] }, { force: true });
+  const j = JSON.parse(readFileSync(claudeConfigCredsPath(), 'utf8'));
+  rec('CD16 🔒 empty scopes stay empty — user:inference is never fabricated on disk',
+    Array.isArray(j.claudeAiOauth.scopes) && j.claudeAiOauth.scopes.length === 0,
+    `scopes=${JSON.stringify(j.claudeAiOauth.scopes)}`);
+}
+
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
-console.log(`VERDICT: ${allPass ? 'GO — isolated claude config-dir: seeds connected-subscription creds · non-clobbering · read round-trips · CLI spawns with CLAUDE_CONFIG_DIR' : 'NO-GO — see FAIL rows'}`);
+console.log(`VERDICT: ${allPass ? 'GO — isolated claude config-dir: seeds connected-subscription creds · non-clobbering (force replaces) · no fabricated scopes · read round-trips · CLI spawns with CLAUDE_CONFIG_DIR' : 'NO-GO — see FAIL rows'}`);
 console.log('='.repeat(64));
 process.exit(allPass ? 0 : 1);

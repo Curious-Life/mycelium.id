@@ -11,7 +11,7 @@
 //   CO17    isTokenExpired skew
 import { anthropicAuthHeaders, anthropicSystem, CLAUDE_CODE_PREAMBLE, CLAUDE_CODE_BETA, CLAUDE_CODE_UA } from '../src/inference/anthropic-wire.js';
 import { describeProvider, createAgentHarness } from '../src/agent/harness.js';
-import { resolveInferenceConfig, resolveProviderChain, _setSubscriptionTokenReaderForTests } from '../src/inference/resolve.js';
+import { resolveInferenceConfig, resolveInferenceConfigForTask, resolveProviderChain, _setSubscriptionTokenReaderForTests } from '../src/inference/resolve.js';
 import { createInferenceRouter } from '../src/inference/router.js';
 // Deterministic: never let the LIVE keychain token (a dev box with `claude` logged in)
 // override the stub tokens these tests assert on. The live refresh is covered by
@@ -158,6 +158,34 @@ const fakeDb = (row) => ({ providers: { getActive: async () => row } });
   const chainOn = (await resolveProviderChain(dbWith(true), 'u', { sensitive: true })).find((c) => c.providerName === 'claude_subscription');
   const chainOff = (await resolveProviderChain(dbWith(false), 'u', { sensitive: true })).find((c) => c.providerName === 'claude_subscription');
   rec('CO23 resolveProviderChain(sensitive): subscription kept+exempt when opted in, dropped otherwise', !!chainOn && chainOn.sensitiveUsExempt === true && !chainOff);
+}
+
+// ── CO24-26 the TASK-ASSIGNED path carries the exemption too ──
+// Regression: resolveInferenceConfigForTask returned mapRowToConfig WITHOUT applySensitiveExempt,
+// so a user who opted in AND explicitly routed 'narrate' to their subscription still got §4g-blocked
+// to on-box — the claims path (src/claims/discovery.js, validator.js) is the sensitive:true caller
+// that this starves. The exemption must not depend on which resolver a caller happens to use — but
+// the floor (a plain US API key is NEVER exempt) still holds.
+{
+  const subRow = { id: 7, provider: 'anthropic', auth_type: 'oauth', credentials: JSON.stringify({ claudeOAuthToken: 'sk-ant-oat-T', scopes: ['user:inference'] }), base_url: null };
+  const keyRow = { id: 8, provider: 'anthropic', auth_type: 'api_key', credentials: JSON.stringify({ apiKey: 'sk-ant-KEY' }), base_url: null };
+  // getActive returns null so a silent fall-through to the active-provider path (which DOES
+  // apply the exemption) can't mask a task-path regression — CO24 must fail on the real bug.
+  const dbTask = (row, allow) => ({
+    providers: { getActive: async () => null, get: async (id) => (id === row.id ? row : null) },
+    users: { getSettings: async () => ({ allowSubscriptionSensitive: allow, taskModels: { narrate: { providerId: row.id } } }) },
+  });
+  const onCfg = await resolveInferenceConfigForTask(dbTask(subRow, true), 'u', 'narrate');
+  rec('CO24 task-assigned subscription + opted in → sensitiveUsExempt (no §4g block on narrate)',
+    onCfg.providerName === 'claude_subscription' && onCfg.sensitiveUsExempt === true, JSON.stringify({ p: onCfg.providerName, e: onCfg.sensitiveUsExempt }));
+  const offCfg = await resolveInferenceConfigForTask(dbTask(subRow, false), 'u', 'narrate');
+  // Pin providerName too: a bare !sensitiveUsExempt would also pass if the resolver silently
+  // returned {} — asserting the subscription WAS resolved and then left unexempted.
+  rec('CO25 task-assigned subscription NOT opted in → resolved but NOT exempt (§4g holds)',
+    offCfg.providerName === 'claude_subscription' && !offCfg.sensitiveUsExempt);
+  const keyCfg = await resolveInferenceConfigForTask(dbTask(keyRow, true), 'u', 'narrate');
+  rec('CO26 §4g floor: task-assigned plain US API key never exempt, even with the opt-in on',
+    keyCfg.anthropicApiKey === 'sk-ant-KEY' && !keyCfg.sensitiveUsExempt);
 }
 
 const pass = ledger.every(Boolean);

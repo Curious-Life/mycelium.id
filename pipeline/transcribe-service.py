@@ -280,6 +280,60 @@ class Handler(BaseHTTPRequestHandler):
                 "ms": int((time.time() - t0) * 1000),
             })
 
+        # ── /transcribe-file — LONG audio, ANY format, STREAMING ────────────────
+        # Body: JSON {"path": "<abs temp file>", "language": <optional>}. faster-whisper
+        # decodes any container (m4a/mp3/ogg/wav/…) via PyAV and VAD-segments long audio
+        # natively, so this handles a 45-min recording the WAV /transcribe path can't.
+        # Streams NDJSON (one line per segment) so the Node caller saves progressively.
+        # SECURITY: the path MUST resolve under the OS temp dir (or MYCELIUM_TRANSCRIBE_TMP)
+        # — the loopback caller writes the decrypted audio there; this stops a same-box
+        # request from tricking the service into reading an arbitrary file (e.g. the vault).
+        if self.path == "/transcribe-file":
+            if not _deps_ok():
+                return self._json(503, {"error": "deps_missing"})
+            model = _state["model"]
+            if not model or not _model_cached(model):
+                return self._json(409, {"error": "no_model"})
+            try:
+                req = json.loads(body or b"{}")
+                path = (req.get("path") or "").strip()
+                language = req.get("language") or None
+            except Exception:
+                return self._json(400, {"error": "bad json"})
+            import tempfile
+            real = os.path.realpath(path) if path else ""
+            tmp_root = os.path.realpath(os.environ.get("MYCELIUM_TRANSCRIBE_TMP") or tempfile.gettempdir())
+            if not real or not (real == tmp_root or real.startswith(tmp_root + os.sep)) or not os.path.isfile(real):
+                return self._json(400, {"error": "path not allowed"})
+            m = _load_model(model)
+            if m is None:
+                return self._json(500, {"error": _state.get("error") or "load failed"})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            def emit(obj):
+                self.wfile.write((json.dumps(obj) + "\n").encode())
+                self.wfile.flush()
+
+            try:
+                segments, info = m.transcribe(real, beam_size=5, vad_filter=True, language=language)
+                emit({"type": "meta", "language": getattr(info, "language", None),
+                      "duration": getattr(info, "duration", None)})
+                n = 0
+                for s in segments:
+                    n += 1
+                    emit({"type": "segment", "start": round(float(s.start), 2),
+                          "end": round(float(s.end), 2), "text": s.text.strip()})
+                emit({"type": "done", "segments": n})
+            except Exception as e:
+                try:
+                    emit({"type": "error", "error": str(e)[:200]})
+                except Exception:
+                    pass
+            return
+
         return self._json(404, {"error": "not found"})
 
 

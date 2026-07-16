@@ -83,7 +83,9 @@ function renderLedger(ledger, item, capsule) {
  * Run a narration walk.
  * @param {object} deps  { db, userId, tools, handlers, loop, fetchImpl?, signal?, runTurn? }
  * @param {object} opts  { runId, scope?: 'all'|{realm_id}|{territory_id}, onProgress?, log? }
- * @returns {Promise<{described,skipped,total,conversationId,ledger}>}
+ * @returns {Promise<{described,reflected,skipped,failed,total,conversationId,ledger}>}
+ *   `failed` = turns that produced nothing (errored, or refused by §4g). NEVER folded into
+ *   `reflected` — that conflation made a run where nothing ran report success.
  */
 export async function runNarrationWalk(deps, opts = {}) {
   const { db, userId, tools = [], handlers = {}, loop, fetchImpl, signal, runTurn = runAgentTurn, hooks } = deps;
@@ -96,7 +98,7 @@ export async function runNarrationWalk(deps, opts = {}) {
 
   const worklist = await buildWorklist(query, userId, scope);
   const ledger = [];
-  let described = 0, reflected = 0, skipped = 0;
+  let described = 0, reflected = 0, skipped = 0, failed = 0;
   let stopped = false;
 
   for (const item of worklist) {
@@ -109,7 +111,7 @@ export async function runNarrationWalk(deps, opts = {}) {
 
     // Coverage-aware skip: already named AND nothing new to fold → leave it (fold-not-replace).
     const nothingNew = !capsule.temporal.newRange || capsule.temporal.newRange.points === 0;
-    if (capsule.identity.name && nothingNew) { skipped += 1; done.add(keyOf(item)); await onProgress?.({ described, reflected, skipped, total: worklist.length, item, doneKey: keyOf(item), skipped: true }); continue; }
+    if (capsule.identity.name && nothingNew) { skipped += 1; done.add(keyOf(item)); await onProgress?.({ described, reflected, skipped, failed, total: worklist.length, item, doneKey: keyOf(item), skipped: true }); continue; }
 
     const userMessage = `${renderCapsule(capsule)}\n\nConsider this ${item.kind}. If its description should change, call describeEntity with {kind:"${item.kind}", id:${JSON.stringify(item.id)}, name, essence}. If nothing new is worth adding, leave it unchanged and say so briefly.`;
     const systemExtra = `${WALK_SYSTEM}\n\n${renderLedger(ledger, item, capsule)}`;
@@ -127,6 +129,66 @@ export async function runNarrationWalk(deps, opts = {}) {
     // Did the agent actually write, or reflect-and-leave? (toolsUsed from the turn.)
     const wrote = Array.isArray(res?.toolsUsed) && res.toolsUsed.includes('describeEntity');
 
+    // ── Where did this turn's content GO? (the NarrateControl sovereignty badge) ──────
+    // Reported for every turn that DIALLED A WIRE — including a FAILED one. loop.js keeps
+    // text that streamed before an error, and an error can land mid-request: the prompt was
+    // already sent. So "the turn failed" does NOT mean "nothing left the machine", and
+    // reporting this only on the success path would under-count egress on exactly the flaky
+    // runs where a cloud fallback is most likely.
+    // `skipped` is the one case where NO wire ran (§4g refusal / no model) — nothing to say.
+    const wire = res?.skipped ? null : {
+      wireRan: true,
+      // true | false | null(unknown — see loop.js actualOnThisDevice). Never defaulted.
+      onThisDevice: res?.actualOnThisDevice ?? null,
+      wireJurisdiction: res?.actualJurisdiction ?? null,
+    };
+
+    // ⚠️ A TURN THAT PRODUCED NOTHING IS NOT A REFLECTION.
+    //
+    // `if (wrote) described++; else reflected++` (below) cannot tell "the agent read this area
+    // and chose not to rewrite it" — a real, valuable outcome — from "the turn never happened".
+    // So a run in which NOTHING ran reported SUCCESS. Three review rounds hit this; the first
+    // two fixes only changed its SHAPE:
+    //     {skipped:'no-model'} → {text:''} → {text:'', lastErr:'Ollama unreachable'}
+    // …each still counted as a reflection.
+    //
+    // THE MISTAKE, twice: keying on WHETHER A MODEL WAS CONFIGURED. `loop.run` NEVER THROWS
+    // (loop.js) — it swallows the failure into `lastErr` and returns `{text:''}` — so an
+    // APPROVED-but-unreachable model (Ollama not running: the NORMAL state of a fresh box)
+    // sailed straight past a `res.skipped` check. Key on what the turn PRODUCED. The signal
+    // was already on the return value and was being discarded (independent review, 2026-07-16,
+    // reproduced against the real loop).
+    //
+    // Three honest outcomes, and they must not share a bucket:
+    //   described — it wrote
+    //   reflected — it answered and chose not to write   ← only with actual text
+    //   failed    — it produced nothing / errored / was refused (§4g)
+    // `skipped` stays what it already meant: the coverage-aware "nothing new to say" above.
+    const said = typeof res?.text === 'string' && res.text.trim() !== '';
+    const producedNothing = !wrote && !said;
+    // ⚠️ NOT `|| res.lastErr`. A first draft tested it FIRST, and that over-corrected into the
+    // MIRROR of the bug: loop.js DELIBERATELY keeps text that streamed before an error ("Once
+    // any text streams, keep it — no retry"), so a mid-stream ECONNRESET returns a REAL
+    // description alongside lastErr — and a turn that already called describeEntity has
+    // COMMITTED ITS WRITE. Both were being counted failed ⇒ a flaky wire made a walk that
+    // narrated everything report `error`, and withheld the checkpoint so the resume re-did
+    // finished work. A false error is not better than a false success.
+    // It was also REDUNDANT: a dead wire returns `{text:'', toolsUsed:[]}`, which
+    // `producedNothing` already catches. When the review removed the clause NOTHING went red —
+    // which is how we knew nothing pinned it. That is no longer the case: W9/W10 in
+    // verify:narration-walk now fail if you add it back, which is the whole point of writing
+    // them (independent review, 2026-07-16).
+    // Trust loop.js's own judgment: it decided this turn produced something.
+    if (res?.skipped || producedNothing) {
+      const why = res?.skipped || (res?.lastErr ? 'turn-failed' : 'produced-nothing');
+      failed += 1;
+      // NOT done.add(): a turn that never ran must stay on the worklist, or the resume
+      // checkpoint (jobs.js done_ids) records it as handled and the retry skips it forever.
+      ledger.push({ kind: item.kind, id: item.id, name: capsule.identity.name || null, through: null, changed: false, failed: why });
+      await onProgress?.({ described, reflected, skipped, failed, total: worklist.length, item, doneKey: null, failedReason: why, ...wire });
+      continue;
+    }
+
     // Read back the current state so the ledger carries the real name + covered span
     // (whether it changed or not — awareness still accrues for the next turn).
     const [row] = await query(
@@ -135,10 +197,10 @@ export async function runNarrationWalk(deps, opts = {}) {
     ledger.push({ kind: item.kind, id: item.id, name: row?.name || capsule.identity.name || null, through: row?.described_period_end || capsule.temporal.newRange?.end || null, changed: wrote });
     if (wrote) described += 1; else reflected += 1;
     done.add(keyOf(item));
-    await onProgress?.({ described, reflected, skipped, total: worklist.length, item, name: row?.name, changed: wrote, doneKey: keyOf(item) });
+    await onProgress?.({ described, reflected, skipped, failed, total: worklist.length, item, name: row?.name, changed: wrote, doneKey: keyOf(item), ...wire });
   }
 
-  return { described, reflected, skipped, total: worklist.length, conversationId, ledger, stopped, doneKeys: [...done] };
+  return { described, reflected, skipped, failed, total: worklist.length, conversationId, ledger, stopped, doneKeys: [...done] };
 }
 
 export default runNarrationWalk;

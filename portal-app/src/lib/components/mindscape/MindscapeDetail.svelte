@@ -316,8 +316,21 @@
 			</div>
 
 			{#if anyUndescribed && sortedRealms.length > 0}
-				<!-- Bottom CTA: describe the unnamed areas. Illuminate if an AI is
-				     connected (runs the describe pass), else invite connecting one. -->
+				<!-- Bottom CTA: describe the unnamed areas. Illuminate if an AI is connected,
+				     else invite connecting one.
+				     ⚠️ KNOWN-INCOMPLETE, deliberately: this button still calls generate(), and
+				     generate's debounce skips whenever topology exists — so it now honestly says
+				     "Your map is already built" instead of failing silently, but it STILL CANNOT
+				     NAME AN UNNAMED AREA. The naming pass (pipeline/describe-clusters.js — the
+				     only thing that writes name+essence) runs ONLY inside the skipped job.
+				     ⚠️ And "route it at /mycelium/describe-more" is NOT the fix, though it looks
+				     like one: describe-more spawns describe-chronicles, which PRESERVES names
+				     (`name: t.name || …` at :154 — a placeholder is truthy, so it is kept
+				     forever). It writes prose, never a name.
+				     The real fix is a naming job spawning describe-clusters —
+				     DISTILLATION-SURFACE-DESIGN §3a/§8 unit 1 — which does not exist yet. Until
+				     it does, this button is honest about doing nothing rather than silent about
+				     it, which is strictly better and still not enough. -->
 				{#if aiConnected}
 					<button class="realm-cta illuminate" onclick={illuminateRealms} disabled={genActive}>
 						<span class="cta-icon">
@@ -328,6 +341,21 @@
 							<span class="cta-sub">{genActive ? 'Naming & describing your areas.' : 'Let your AI name & describe these areas.'}</span>
 						</span>
 					</button>
+
+					<!-- ⚠️ THE OUTCOME, RENDERED. This is the whole bug: `$generate` had NO render
+					     site anywhere in the app, so every terminal outcome — an error and an
+					     "already built" alike — was SILENCE. The user clicked and nothing
+					     happened, forever. Adding an `up-to-date` phase WITHOUT this is the same
+					     silence under a nicer name (design §5.4 "representable ≠ shown"; gate D2
+					     exists because I shipped exactly that and a reviewer caught it).
+					     Every non-running outcome says something here. -->
+					{#if $generate.phase === 'up-to-date'}
+						<p class="cta-note">{$generate.message || 'Your map is already built.'}</p>
+					{:else if $generate.phase === 'error' && $generate.error}
+						<p class="cta-note err">{$generate.error}</p>
+					{:else if $generate.phase === 'embedding' && $generate.message}
+						<p class="cta-note">{$generate.message}</p>
+					{/if}
 				{:else}
 					<button class="realm-cta spawn" onclick={connectIntelligence}>
 						<span class="cta-icon">
@@ -970,6 +998,12 @@
 
 	/* Bottom CTA — describe the unnamed areas. Illuminate (AI connected) is a calm
 	   glass card; Spawn intelligence keeps the warm gold invite. */
+	.cta-note {
+		margin: 0.4rem 0 0; font-size: 0.68rem; line-height: 1.4;
+		color: var(--color-text-tertiary);
+	}
+	.cta-note.err { color: var(--color-accent-coral, #f87171); }
+
 	.realm-cta {
 		display: flex;
 		align-items: center;

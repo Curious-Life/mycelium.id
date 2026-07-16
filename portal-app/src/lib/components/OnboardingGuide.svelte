@@ -2,6 +2,7 @@
 	import { browser } from '$app/environment';
 	import { onDestroy } from 'svelte';
 	import { api } from '$lib/api';
+	import TelegramConnect from '$lib/components/channels/TelegramConnect.svelte';
 
 	type StepState = {
 		done: boolean;
@@ -104,9 +105,7 @@
 		aiKeySaving = false;
 	}
 
-	// Messaging sub-state
-	let telegramTokenInput = $state('');
-	let telegramIdInput = $state('');
+	// Messaging sub-state (Telegram handled by <TelegramConnect>, design D1)
 	let discordTokenInput = $state('');
 	let integrationSaving = $state(false);
 	let integrationSavedTag = $state<string | null>(null);
@@ -308,21 +307,22 @@
 	}
 
 	// --- Step 3: Messaging ---
-	async function saveIntegration(key: string, value: string, scope: string, tag: string) {
+	// Telegram is handled by <TelegramConnect> (design D1: PUT /portal/channels +
+	// D2 pairing). Discord goes through the SAME channels primitive here — the old
+	// /portal/settings/secret path never enabled/reloaded the daemon, so the bot
+	// silently never started (the reported "Telegram didn't work" bug).
+	async function saveDiscord() {
 		integrationSaving = true;
 		integrationSavedTag = null;
 		try {
-			const res = await api('/portal/settings/secret', {
-				method: 'PUT',
-				body: JSON.stringify({ key, value: value.trim(), scope }),
+			const res = await api('/portal/channels', {
+				method: 'PUT', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ enabled: true, discord: { token: discordTokenInput.trim() } }),
 			});
 			if (!res.ok) throw new Error('Failed to save');
-			integrationSavedTag = tag;
-			setTimeout(() => {
-				integrationSavedTag = null;
-			}, 3000);
-			if (tag === 'telegram') { telegramTokenInput = ''; telegramIdInput = ''; }
-			if (tag === 'discord') discordTokenInput = '';
+			integrationSavedTag = 'discord';
+			setTimeout(() => { integrationSavedTag = null; }, 3000);
+			discordTokenInput = '';
 			await fetchStatus();
 		} catch {
 			/* swallow — show would need a toast */
@@ -763,30 +763,9 @@
 
 							<div class="sub-title">Telegram</div>
 							<p class="expand-hint-small">
-								Open <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a>, send <code>/newbot</code>, paste the token below.
+								Open <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a>, send <code>/newbot</code>, paste the token below — then message your bot and approve the code it replies with.
 							</p>
-							<div class="input-row">
-								<input type="text" bind:value={telegramTokenInput} placeholder="bot token: 123456:ABC-DEF..." autocomplete="off" data-1p-ignore />
-							</div>
-							<p class="expand-hint-small" style="margin-top: 0.5rem;">
-								Your Telegram user ID — send <code>/start</code> to <a href="https://t.me/userinfobot" target="_blank" rel="noopener">@userinfobot</a> to find it.
-							</p>
-							<div class="input-row">
-								<input type="text" bind:value={telegramIdInput} placeholder="your user id: 123456789" autocomplete="off" data-1p-ignore />
-								<button
-									class="btn-save"
-									disabled={!telegramTokenInput || !telegramIdInput || integrationSaving}
-									onclick={async () => {
-										integrationSaving = true;
-										try {
-											await api('/portal/settings/secret', { method: 'PUT', body: JSON.stringify({ key: 'OWNER_TELEGRAM_ID', value: telegramIdInput.trim(), scope: 'personal' }) });
-											await saveIntegration('TELEGRAM_BOT_TOKEN', telegramTokenInput, 'personal', 'telegram');
-										} catch { integrationSaving = false; }
-									}}
-								>
-									{integrationSaving ? '...' : integrationSavedTag === 'telegram' ? '✓' : 'Save'}
-								</button>
-							</div>
+							<TelegramConnect compact onconnected={() => { void fetchStatus(); }} />
 
 							<div class="sub-title" style="margin-top: 1rem;">Discord</div>
 							<p class="expand-hint-small">
@@ -797,7 +776,7 @@
 								<button
 									class="btn-save"
 									disabled={!discordTokenInput || integrationSaving}
-									onclick={() => saveIntegration('DISCORD_BOT_TOKEN', discordTokenInput, 'org', 'discord')}
+									onclick={saveDiscord}
 								>
 									{integrationSaving ? '...' : integrationSavedTag === 'discord' ? '✓' : 'Save'}
 								</button>

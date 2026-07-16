@@ -2,17 +2,28 @@
 // Boots a temp vault, round-trips begin/heartbeat/finish/active/recent, proves the
 // fail-closed reaper flips a stale 'running' row → 'abandoned', and asserts the rows
 // are CONTENT-FREE (kind/status/step/stage only — never message text or names, §1).
+//
+//   A6 is THE LEAK CHECK — end-to-end, against the real startClusteringJob spawn
+//   path: a pipeline child that dies naming a therapy-journal file must publish a
+//   CLASSIFIED reason to background_jobs (content-free by contract) while the REAL
+//   reason stays on the authed getJob surface. Modelled on verify:import-activity's
+//   A2. Not an at-rest check — the vault is whole-file SQLCipher'd; this pins the
+//   CONTRACT, since recent() already SELECTs `error` and only shape() withholds it.
 import Database from 'better-sqlite3';
-import { rmSync, mkdirSync } from 'node:fs';
+import { rmSync, mkdirSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
+import { startClusteringJob, getJob, classifyPipelineFailure } from '../src/jobs.js';
 
 const DB = 'data/verify-activity.db', KCV = 'data/verify-activity-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 mkdirSync('data', { recursive: true });
 applyMigrations(new Database(DB));
-const { db, close } = await boot({ dbPath: DB, kcvPath: KCV, userHex: crypto.randomBytes(32).toString('hex'), systemHex: crypto.randomBytes(32).toString('hex'), embedder: null });
+const U_HEX = crypto.randomBytes(32).toString('hex'), S_HEX = crypto.randomBytes(32).toString('hex');
+const { db, close } = await boot({ dbPath: DB, kcvPath: KCV, userHex: U_HEX, systemHex: S_HEX, embedder: null });
 const U = 'local-user';
 const af = db.activityFeed;
 const ledger = [];
@@ -82,8 +93,158 @@ const cleanStage = /^[A-Za-z][A-Za-z ]*$/.test(c?.stage_label || '');
 const knownKind = /^(describe:name|describe:chronicle|mycelium_generate|embed)$/.test(c?.kind || '');
 rec('A5. rows are content-free (constant stage label + known kind, no names)', cleanStage && knownKind, JSON.stringify(c));
 
+// ── A6) THE LEAK CHECK — a pipeline FAILURE never publishes its reason ────────
+// The reason is the child's last stderr line: a path, a traceback, a quoted row.
+// background_jobs is content-free by contract, so only a CLASSIFIED reason may
+// land there. End-to-end against the real spawn path (MYCELIUM_CLUSTER_SCRIPT
+// seam), not a stubbed feed.
+{
+  const SCRIPT = path.resolve('data/activity-leak-fail.sh');
+  // The exact shape of a real failure: the stage line, then a stderr reason naming
+  // a file on disk and quoting a line of the user's own writing.
+  const SECRET_PATH = '/Users/owner/Desktop/therapy-journal-2019.md';
+  const SECRET_TEXT = 'I told her I was afraid';
+  writeFileSync(SCRIPT, `#!/usr/bin/env bash
+echo "Step 7/16: Computing Fisher trajectory (movement)…"
+echo 'RuntimeError: ${SECRET_PATH}: unparseable near "${SECRET_TEXT}"' >&2
+exit 1
+`);
+  // The child re-resolves keys from the source; env source lets it.
+  process.env.MYCELIUM_KEY_SOURCE = 'env';
+  process.env.USER_MASTER_KEY = U_HEX;
+  process.env.SYSTEM_KEY = S_HEX;
+  process.env.MYCELIUM_CLUSTER_SCRIPT = SCRIPT;
+
+  const { jobId } = startClusteringJob({ dbPath: DB, userId: U, db });
+  let job = null;
+  for (let i = 0; i < 60; i++) {
+    job = getJob(jobId);
+    if (job && job.status !== 'running') break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  // Give the fire-and-forget feed write a beat to land. Wait for a row that is
+  // ABSENT too, not just one still 'running' — `undefined?.status === 'running'`
+  // is false, which would exit this loop instantly and assert against {} (A6b/A6e
+  // still catch that, but as a confusing false RED rather than a real one).
+  for (let i = 0; i < 20 && (!rowOf(jobId) || rowOf(jobId).status === 'running'); i++) await new Promise((r) => setTimeout(r, 50));
+
+  const errRow = raw.prepare('SELECT id,kind,status,stage_label,error FROM background_jobs WHERE id = ?').get(jobId);
+  const published = JSON.stringify(errRow || {});
+
+  // The check only means something if the run ACTUALLY failed with the real reason
+  // in hand — otherwise "no secret in the row" is vacuously true.
+  rec('A6a. the pipeline failed AND the real reason reached the authed getJob surface',
+    job?.status === 'error' && !!job?.error && job.error.includes(SECRET_PATH),
+    `status=${job?.status} error=${JSON.stringify(job?.error)}`);
+  rec('A6b. the feed row exists and is terminal', errRow?.status === 'error', published);
+  rec('A6c. the FILE PATH never reaches background_jobs (content-free by contract, §1)',
+    !published.includes('therapy-journal'), published);
+  rec('A6d. nor a quoted line of the user\'s content', !published.includes(SECRET_TEXT), published);
+  rec('A6e. the feed gets a CLASSIFIED reason — the step, built from integers only',
+    errRow?.error === 'failed at step 7/16', `error=${JSON.stringify(errRow?.error)}`);
+
+  // The classifier is content-free BY CONSTRUCTION: an unknown step (or a stage
+  // label smuggled in) can only ever produce the constant.
+  rec('A6f. classifier falls back to a constant for an unknown/absent step',
+    classifyPipelineFailure({ failedStep: 999, totalSteps: 16 }) === 'pipeline failed'
+    && classifyPipelineFailure({ failedStep: null }) === 'pipeline failed'
+    && classifyPipelineFailure({}) === 'pipeline failed'
+    && classifyPipelineFailure({ failedStep: SECRET_PATH, totalSteps: 16 }) === 'pipeline failed',
+    'unknown step / null / empty / non-numeric → "pipeline failed"');
+
+  // Leave no global state behind: a block appended after this one must not
+  // silently inherit key_source=env + these keys.
+  delete process.env.MYCELIUM_CLUSTER_SCRIPT;
+  delete process.env.MYCELIUM_KEY_SOURCE;
+  delete process.env.USER_MASTER_KEY;
+  delete process.env.SYSTEM_KEY;
+  try { rmSync(SCRIPT); } catch {}
+}
+
+// ── A7) A JOB THAT NEVER STARTS still reaches a terminal row — no reaper wait ─
+// begin() writes 'running' before the spawn, so a spawn that throws leaves a phantom
+// running job in the header until the 45s reaper flips it to 'abandoned' — mislabelling
+// a startup failure as a crashed child.
+//
+// The seam is the REAL production trigger, not an injected one: startClusteringJob
+// passes `cwd: process.cwd()` to spawn, and process.cwd() throws ENOENT once the app's
+// working directory is deleted/unmounted underneath it. (A non-existent SCRIPT path
+// does NOT reach this path — bash starts fine and exits 127, which is A6's close-handler
+// route.) Everything before the spawn tolerates a dead cwd: readGenerateStats catches,
+// and the disk guard takes an absolute path.
+{
+  // Own the key env rather than inheriting A6's — startClusteringJob re-resolves the
+  // master keys at spawn, so this block must stand alone (and clean up after itself).
+  process.env.MYCELIUM_KEY_SOURCE = 'env';
+  process.env.USER_MASTER_KEY = U_HEX;
+  process.env.SYSTEM_KEY = S_HEX;
+
+  const ABS_DB = path.resolve(DB);
+  const doomed = mkdtempSync(`${tmpdir()}/verify-activity-cwd-`);
+  const home = process.cwd();
+  let jobId = null, threw = null;
+  try {
+    process.chdir(doomed);
+    rmSync(doomed, { recursive: true, force: true });
+    ({ jobId } = startClusteringJob({ dbPath: ABS_DB, userId: U, db }));
+  } catch (e) {
+    threw = e; // must not escape — the caller maps a start failure to a job, not a 500
+  } finally {
+    process.chdir(home);
+  }
+  // begin()+finish() are fire-and-forget through the async adapter, so wait for the row
+  // to LAND and settle — a t=0 read would pass 'not running' vacuously (no row at all).
+  const readRow = () => (jobId ? raw.prepare('SELECT id,status,error,finished_at FROM background_jobs WHERE id = ?').get(jobId) : null);
+  for (let i = 0; i < 40; i++) {
+    const r = readRow();
+    if (r && r.status !== 'running') break;
+    await new Promise((r2) => setTimeout(r2, 50));
+  }
+  const startRow = readRow();
+
+  rec('A7a. a spawn that cannot start still returns a job (no throw to the caller)', !threw && !!jobId,
+    threw ? `threw ${threw.code || threw.message}` : `jobId=${jobId}`);
+  rec('A7b. getJob reports the failure', getJob(jobId)?.status === 'error', JSON.stringify(getJob(jobId)?.error));
+  // The point of the whole block: TERMINAL now, not 'running' awaiting the reaper.
+  rec('A7c. the feed row is terminal ERROR immediately — not left running for the reaper',
+    startRow?.status === 'error', JSON.stringify(startRow));
+  // NB: this does NOT exercise the reaper (STALE_MS is 45s; we read within ~2s). It
+  // asserts the row is closed out on its own — finished_at set — which is what denies
+  // the reaper the chance to relabel it 'abandoned' later. Named for what it drives.
+  rec('A7d. …the row closes itself out (finished_at set), leaving nothing for the reaper',
+    !!startRow?.finished_at && startRow?.status !== 'abandoned', JSON.stringify(startRow));
+  rec('A7e. the published reason is the constant (content-free, §1)',
+    startRow?.error === 'failed to start clustering', `error=${JSON.stringify(startRow?.error)}`);
+
+  // ── A7f) FIRST-WINS: 'close' must not overwrite the reason 'error' already gave ──
+  // A real spawn ENOENT emits 'error' AND THEN 'close' (code -2). Both publish, so
+  // without the first-wins guard in publishTerminal the trailing close would relabel
+  // the row 'pipeline failed' — vaguer, and wrong about what happened (no step ever
+  // ran). The seam is a PATH with no bash in it: the executable itself is unresolvable.
+  const REAL_PATH = process.env.PATH;
+  process.env.PATH = '/nonexistent-bin';
+  const { jobId: enoentId } = startClusteringJob({ dbPath: path.resolve(DB), userId: U, db });
+  process.env.PATH = REAL_PATH;
+  for (let i = 0; i < 40; i++) {
+    const r = enoentId ? raw.prepare('SELECT status FROM background_jobs WHERE id = ?').get(enoentId) : null;
+    if (r && r.status !== 'running') break;
+    await new Promise((r2) => setTimeout(r2, 50));
+  }
+  // Let any trailing 'close' land — that is the write this guard is defending against.
+  await new Promise((r) => setTimeout(r, 300));
+  const enoentRow = enoentId ? raw.prepare('SELECT status,error FROM background_jobs WHERE id = ?').get(enoentId) : null;
+  rec('A7f. a trailing close cannot overwrite the specific reason (first-wins)',
+    enoentRow?.status === 'error' && enoentRow?.error === 'failed to start clustering',
+    JSON.stringify(enoentRow));
+
+  // Same discipline as A6: leave no global state behind.
+  delete process.env.MYCELIUM_KEY_SOURCE;
+  delete process.env.USER_MASTER_KEY;
+  delete process.env.SYSTEM_KEY;
+}
+
 raw.close();
 close();
 const okAll = ledger.every(Boolean);
-console.log(`VERDICT: ${okAll ? 'GO' : 'NO-GO'} — activity feed: begin/heartbeat/finish/active/recent + fail-closed reap + content-free  EXIT=${okAll ? 0 : 1}`);
+console.log(`VERDICT: ${okAll ? 'GO' : 'NO-GO'} — activity feed: begin/heartbeat/finish/active/recent + fail-closed reap + content-free + failure-reason leak (A6) + terminal-on-spawn-failure (A7)  EXIT=${okAll ? 0 : 1}`);
 process.exit(okAll ? 0 : 1);

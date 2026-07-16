@@ -4,15 +4,35 @@
 	//   POST /portal/mycelium/narrate {scope,provider}  → { runId, status }
 	//   POST /portal/mycelium/narrate/{pause,resume,cancel} {runId}
 	//   GET  /portal/mycelium/narrate/status[?runId]     → { run }
-	// Privacy: the run's provider is surfaced; a cloud provider is flagged ("content
-	// leaves this machine"). Content-free progress (counts + a generic stage only).
+	// Privacy: the run reports where its content ACTUALLY went — the server observes each
+	// turn's real destination and stores it on the run (see jobs.js makeDeviceTally).
+	// Content-free progress (counts + a generic stage only).
+	//
+	// ⚠️ DO NOT reintroduce a name check here. This badge used to decide "on-box" vs "⚠ cloud"
+	// with /local|ollama|on-?box|127\.0\.0\.1/i over the provider's DISPLAY NAME, so a cloud
+	// provider labelled "localai" (labels are free text the user types) was shown as on-box
+	// while its content went to an internet host. A NAME CANNOT ANSWER "did this leave my
+	// machine" — only the base_url can, and only the server can see it.
 	import { onMount, onDestroy } from 'svelte';
 	import { apiGet, apiPost } from '$lib/api';
 
 	type Run = {
 		run_id: string; status: 'running' | 'paused' | 'done' | 'canceled' | 'error';
 		described: number; reflected: number; skipped: number; total: number;
-		provider: string | null; current_kind: string | null; current_id: number | null; error?: string | null;
+		// `failed` is NOT persisted — narration_runs has no column (a MIGRATION, deferred this
+		// round like F). The failure signal the user sees is the `error` status + its message
+		// ("narration produced nothing: N turn(s) failed"), which DO persist.
+		current_kind: string | null; current_id: number | null; error?: string | null;
+		// Server-observed, per turn, from the provider that ACTUALLY answered (loop.js
+		// actualOnThisDevice → jobs.js makeDeviceTally). THREE states, and `null` is a real
+		// one — not a synonym for false:
+		//   true  — every turn so far was PROVEN to run on this device
+		//   false — at least one turn left it (off_device_jurisdictions says where)
+		//   null  — nothing has run yet, or the destination could not be attributed
+		// Render null as NO CLAIM. Coercing it (`!on_this_device` → "cloud") invents a warning;
+		// defaulting it true re-ships the original lie.
+		on_this_device: boolean | number | null;
+		off_device_jurisdictions: string | null;   // JSON array, e.g. '["eu-zdr"]'
 	};
 
 	let run = $state<Run | null>(null);
@@ -43,7 +63,20 @@
 		} catch { describing = false; }
 	}
 
-	const isLocal = (p: string | null) => !p || /local|ollama|on-?box|127\.0\.0\.1/i.test(p);
+	// SQLite stores the boolean as INTEGER, so it arrives as 0 | 1 | null over REST — compare
+	// each state EXPLICITLY. `!run.on_this_device` would fold `null` (unknown) into the "it
+	// left" branch and invent a warning; `run.on_this_device !== false` would fold it into
+	// "on-box" and re-ship the original false claim. Unknown is its own state: say nothing.
+	const deviceState = $derived(
+		!run || run.on_this_device == null ? 'unknown'
+			: Number(run.on_this_device) === 1 ? 'on-device' : 'off-device',
+	);
+	const offJurisdictions = $derived.by(() => {
+		try {
+			const a = JSON.parse(run?.off_device_jurisdictions || '[]');
+			return Array.isArray(a) ? a.filter((x) => typeof x === 'string') : [];
+		} catch { return []; }
+	});
 	const active = $derived(run?.status === 'running' || run?.status === 'paused');
 	const doneCount = $derived(run ? run.described + run.reflected + run.skipped : 0);
 	const pct = $derived(run && run.total > 0 ? Math.min(100, Math.round((100 * doneCount) / run.total)) : 0);
@@ -83,14 +116,18 @@
 		{/if}
 	</div>
 
-	{#if run && (active || run.status === 'done')}
+	{#if run && (active || run.status === 'done' || run.status === 'error')}
 		<div class="bar"><div class="fill" style="width:{pct}%"></div></div>
 		<div class="counts">
 			{doneCount}/{run.total} · {run.described} described · {run.reflected} reflected · {run.skipped} skipped
 		</div>
-		{#if run.provider}
-			<div class="provider {isLocal(run.provider) ? 'local' : 'cloud'}">
-				{isLocal(run.provider) ? `on-box · ${run.provider}` : `⚠ cloud · ${run.provider} — content leaves this machine`}
+		<!-- `unknown` renders NOTHING: silence is the only honest output for a destination we
+		     cannot attribute. Do not add an {:else} that guesses. -->
+		{#if deviceState === 'on-device'}
+			<div class="provider local">on-box · content stayed on this machine</div>
+		{:else if deviceState === 'off-device'}
+			<div class="provider cloud">
+				⚠ content left this machine{offJurisdictions.length ? ` · ${offJurisdictions.join(', ')}` : ''}
 			</div>
 		{/if}
 		{#if run.error}<div class="err">{run.error}</div>{/if}
@@ -135,7 +172,8 @@
 	.status-running { color: #4ade80; background: rgba(74,222,128,0.12); }
 	.status-paused { color: #E5B84C; background: rgba(229,184,76,0.15); }
 	.status-done { color: #7DB6D9; background: rgba(125,182,217,0.15); }
-	.status-canceled, .status-error { color: #94a3b8; background: rgba(148,163,184,0.12); }
+	.status-canceled { color: #94a3b8; background: rgba(148,163,184,0.12); }
+	.status-error { color: #f87171; background: rgba(248,113,113,0.12); }   /* a failure is not a cancel */
 	.bar { height: 5px; border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; }
 	.fill { height: 100%; background: var(--color-accent, #E5B84C); transition: width 0.4s ease; }
 	.counts { font-size: 0.72rem; color: var(--color-text-secondary); }

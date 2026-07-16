@@ -1,0 +1,148 @@
+// verify:intelligence-functions — the Intelligence screen's FUNCTION spine (design §3.11).
+//
+// The screen is "organized by function". §3.11b's own table mapped only 3 of the 6
+// INFERENCE_TASKS; the handoff flagged the gap. This pins that EVERY inference task belongs to
+// exactly one function (no orphan can silently have no home + no surface — the enrich-dormancy
+// class), that Understanding owns categorize AND enrich (operator decision 2026-07-16), that
+// the per-function recommendations are single-sourced from ROLE_RECOMMENDATIONS (badge ==
+// default, never drift), and that Descriptions carries the §4g eu-or-local limit.
+import assert from 'node:assert/strict';
+import { INFERENCE_TASKS, ONBOX_TASKS } from '../src/inference/resolve.js';
+import { INTELLIGENCE_FUNCTIONS, functionForTask, tasksForFunction, labelingRecommendedModel, descriptionsRecommendedPreset } from '../src/inference/role-models.js';
+import { isSensitiveTask, SENSITIVE_TASKS } from '../src/inference/sensitivity.js';
+
+const ledger = [];
+const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? ` — ${d}` : ''}`); };
+const t = (n, fn) => { try { fn(); rec(n, true); } catch (e) { rec(n, false, e?.message || String(e)); } };
+
+t('F1. EVERY inference task maps to exactly one function — no orphan (the §3.11b gap)', () => {
+  const unmapped = INFERENCE_TASKS.filter((task) => !functionForTask(task));
+  assert.equal(unmapped.length, 0,
+    `every INFERENCE_TASK must have a function or it has no screen surface: orphans = [${unmapped.join(', ')}]`);
+  // …and no task claims two functions.
+  for (const task of INFERENCE_TASKS) {
+    const owners = INTELLIGENCE_FUNCTIONS.filter((f) => f.tasks.includes(task));
+    assert.equal(owners.length, 1, `${task} must belong to exactly one function, got ${owners.map((f) => f.key).join('+') || 'none'}`);
+  }
+});
+
+t('F2. Understanding owns BOTH categorize and enrich — one approval, no dormancy split', () => {
+  const u = INTELLIGENCE_FUNCTIONS.find((f) => f.key === 'understanding');
+  assert.ok(u, 'the understanding function must exist');
+  assert.deepEqual([...u.tasks].sort(), ['categorize', 'enrich'],
+    'categorize + enrich must be ONE function — splitting them let a vault approve labeling and leave enrich silently dead');
+  assert.deepEqual([...tasksForFunction('understanding')].sort(), ['categorize', 'enrich']);
+});
+
+t('F3. the recommendations are single-sourced from ROLE_RECOMMENDATIONS (badge == default)', () => {
+  const u = INTELLIGENCE_FUNCTIONS.find((f) => f.key === 'understanding');
+  assert.equal(u.recommend, labelingRecommendedModel(),
+    'Understanding must recommend exactly the pinned label model — a screen badge that diverges from the drainer default is the drift this pattern exists to prevent');
+  const d = INTELLIGENCE_FUNCTIONS.find((f) => f.key === 'descriptions');
+  assert.equal(d.recommend, descriptionsRecommendedPreset(), 'Descriptions must recommend exactly the pinned narrate preset');
+});
+
+t('F4. every eu-or-local function owns ONLY §4g-sensitive tasks (⇐ of the biconditional)', () => {
+  // Descriptions must carry the limit…
+  const d = INTELLIGENCE_FUNCTIONS.find((f) => f.key === 'descriptions');
+  assert.equal(d.jurisdiction, 'eu-or-local',
+    'Descriptions must be eu-or-local: US is refused at the router, so offering a US model is a silent lie (§3.11d)');
+  // …but the RULE is general, and hardcoding it to `descriptions` left a hole: setting
+  // Conversation's jurisdiction to 'eu-or-local' passed all 8 gates under a banner reading
+  // "§4g limit agrees with the router", while N4/N10 in verify-narrate-sovereignty explicitly
+  // pin that CHAT on a US provider is untouched. The screen would hide the user's own Claude
+  // subscription from Conversation and print a false reason for it — over-restriction, so
+  // fail-safe rather than a leak, but a guarantee the router does not enforce either way
+  // (independent review ×4, 2026-07-16).
+  for (const f of INTELLIGENCE_FUNCTIONS) {
+    if (f.jurisdiction !== 'eu-or-local') continue;
+    for (const task of f.tasks) {
+      assert.ok(isSensitiveTask(task),
+        `function '${f.key}' claims the eu-or-local §4g limit, but its task '${task}' is NOT sensitive in the router — the screen would restrict a choice the router happily allows`);
+    }
+  }
+});
+
+t('F4b. ⭐ …and EVERY §4g-sensitive task lives under an eu-or-local function (the converse)', () => {
+  // ⚠️ F4 alone is ONE-DIRECTIONAL: it says "Descriptions' tasks are sensitive", not "sensitive
+  // tasks are under a limited function". A reviewer re-homed `narrate` under Conversation
+  // (jurisdiction 'any') and left Descriptions task-less: F4's loop went VACUOUS and all seven
+  // gates printed GO — under a banner literally reading "§4g limit agrees with the router"
+  // (independent review ×3, 2026-07-16). A screen built on that spine offers US providers for
+  // narrate, the router refuses every one at runtime, and Descriptions goes silently dead:
+  // §3.11d's silent lie AND the dormancy class, from a spine the suite called healthy.
+  //
+  // The router is the authority on WHAT is sensitive; this pins that the SCREEN cannot lose it.
+  // Self-standing: an EMPTY SENSITIVE_TASKS would make the loop below vacuous, and relying on
+  // F4/N1 to catch that is a cross-file dependency this check shouldn't have.
+  assert.ok(SENSITIVE_TASKS.size > 0, '§4g protects nothing if SENSITIVE_TASKS is empty — the router would allow narrate to any US provider');
+  for (const task of SENSITIVE_TASKS) {
+    const owner = INTELLIGENCE_FUNCTIONS.find((f) => f.tasks.includes(task));
+    assert.ok(owner, `§4g-sensitive task '${task}' has NO function — it would have no screen surface at all`);
+    assert.equal(owner.jurisdiction, 'eu-or-local',
+      `§4g-sensitive task '${task}' sits under function '${owner.key}' whose jurisdiction is '${owner.jurisdiction}' — the screen would OFFER a US model the router will refuse (§3.11d: a choice the system overrides is worse than no choice)`);
+  }
+});
+
+t('F6. ⭐ every function is KIND-HOMOGENEOUS w.r.t. ONBOX_TASKS — the fan-out depends on it', () => {
+  // The `{function}` fan-out (portal-providers.js) applies ONE rule to every task a function
+  // owns: on-box tasks take a local model NAME, cloud tasks take a providerId. That is sound
+  // ONLY because no function mixes the two — and until now NOTHING pinned that. It was
+  // asserted in a commit message ("homogeneous… sound rather than lucky") and maintained by
+  // review, i.e. it was exactly lucky (independent review, 2026-07-16).
+  //
+  // Demonstrated failure it now blocks: add a third on-box task and home it under Conversation
+  // ⇒ every other F-gate stays GO ⇒ `PUT {function:'conversation', providerId, model:'gpt-4o'}`
+  // silently writes `{model:'gpt-4o'}` into an ON-BOX slot, and the drainer tries to
+  // `ollama pull gpt-4o`. That is M7d's bug class inverted.
+  for (const f of INTELLIGENCE_FUNCTIONS) {
+    if (!f.tasks.length) continue;                       // transcription/voice own no inference task
+    const onbox = f.tasks.filter((t2) => ONBOX_TASKS.has(t2));
+    assert.ok(onbox.length === 0 || onbox.length === f.tasks.length,
+      `function '${f.key}' MIXES on-box and cloud tasks (${f.tasks.join(', ')}) — the fan-out would apply the wrong rule to half of them`);
+  }
+});
+
+t('F6b. ⭐ Understanding IS exactly the on-box task set — two sources of truth, pinned equal', () => {
+  // ONBOX_TASKS (resolve.js) and Understanding.tasks (role-models.js) are two independent
+  // lists of "the on-box message tasks". If one gains a task and the other doesn't, the new
+  // task either loses its screen surface (dormancy — the bug this round exists to end) or gets
+  // the wrong write rule. Pin them equal so the drift is impossible rather than reviewed-for.
+  const u = INTELLIGENCE_FUNCTIONS.find((f) => f.key === 'understanding');
+  assert.deepEqual([...u.tasks].sort(), [...ONBOX_TASKS].sort(),
+    `Understanding must own EXACTLY the on-box tasks: understanding=[${[...u.tasks].sort()}] vs ONBOX_TASKS=[${[...ONBOX_TASKS].sort()}]`);
+});
+
+t('F8. ⭐ a BUNDLED function is never approvable — presenting a non-choice as consent is the lie §3.10 kills', () => {
+  // §3.10d-c: the embedder ships INSIDE the app. It cannot be declined, cannot be downloaded,
+  // and has no rail. It must render as "Included — runs on your device", NEVER as a card with a
+  // pre-ticked box. Nothing pinned that, and the spine omitted Search entirely until 2026-07-16
+  // — which would have forced the component to hardcode the row (independent review).
+  const bundled = INTELLIGENCE_FUNCTIONS.filter((f) => f.kind === 'bundled');
+  assert.ok(bundled.length > 0, 'Search is a §3.11b function row — the spine must carry it, or the screen hardcodes a row and drifts');
+  for (const f of bundled) {
+    // No tasks ⇒ PUT {function:'search'} 400s in portal-providers.js: it is structurally
+    // unapprovable, not merely un-rendered. That is the guarantee, not the copy.
+    assert.equal(f.tasks.length, 0,
+      `bundled function '${f.key}' must own NO task — a task is the thing an approval writes, and a bundled model cannot be approved`);
+    assert.equal(f.jurisdiction, 'on-device', `bundled '${f.key}' runs on the device by construction`);
+    assert.ok(f.recommend, `bundled '${f.key}' still names its model — "Included" should say WHAT is included`);
+  }
+});
+
+t('F5. every function has a label, a sub and a why — the "recommendation + reason" contract', () => {
+  for (const f of INTELLIGENCE_FUNCTIONS) {
+    assert.ok(f.label && f.sub, `${f.key} needs a label + sub`);
+    assert.ok(typeof f.why === 'string' && f.why.length > 0, `${f.key} needs a reason (recommendation-first, §3.11c)`);
+  }
+  // Voice is the ONE honest exception: no recommendation (no eval has picked a winner), and its
+  // reason must SAY so rather than fabricate a pick.
+  const voice = INTELLIGENCE_FUNCTIONS.find((f) => f.key === 'voice');
+  assert.equal(voice.recommend, null, 'Voice must carry NO recommendation — no model has won a listening eval (§3.11b honest row)');
+});
+
+const allPass = ledger.every(Boolean);
+console.log('\n' + '='.repeat(64));
+console.log(`VERDICT: ${allPass ? 'GO — the function spine: every task has a home, Understanding is one approval, badges are single-sourced, §4g limit agrees with the router' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
+console.log('='.repeat(64));
+process.exit(allPass ? 0 : 1);

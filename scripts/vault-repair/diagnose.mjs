@@ -15,6 +15,9 @@ import Database from 'better-sqlite3';
 import { readUserMaster, deriveDbKey } from '../../src/account/keystore.js';
 
 const DBPATH = process.argv[2];
+// FAIL-CLOSED against a live vault (see guard.mjs) — diagnosis must never contend.
+const { assertQuiesced } = await import('./guard.mjs');
+if (DBPATH) assertQuiesced(DBPATH, { what: 'diagnosis' });
 if (!DBPATH) { console.error('usage: diagnose.mjs <vault.db>'); process.exit(2); }
 const userHex = readUserMaster();
 if (!userHex) { console.error('FATAL: USER_MASTER not found in Keychain'); process.exit(2); }

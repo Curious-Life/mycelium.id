@@ -89,6 +89,11 @@ build-staging/
 .build-cache/
 # Bundled sidecars — fetched by scripts/fetch-sidecars.sh, never committed
 src-tauri/binaries/
+portal-app/.gen-mount-intel/
+
+# Harness scratch — the generate-store driver bundles into here and rmSync's it on the success
+# path; a crash would otherwise leave it committable (independent review, LOW-4, 2026-07-16).
+portal-app/.gen-drive-generate/
 
 # public-release hygiene
 _*.mjs

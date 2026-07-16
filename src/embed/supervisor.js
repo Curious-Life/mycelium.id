@@ -26,7 +26,7 @@
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { venvPythonPath, systemPython } from '../system/platform-env.js';
 import { createEmbedClient } from './client.js';
 
 const DEFAULT_PORT = Number(process.env.MYCELIUM_EMBED_PORT) || 8091;
@@ -57,9 +57,9 @@ export function getEmbedderHealth() { return { ..._health }; }
 function resolvePython({ home, pythonBin }) {
   if (pythonBin) return pythonBin;
   if (process.env.MYCELIUM_PYTHON) return process.env.MYCELIUM_PYTHON;
-  const venv = join(home, 'pipeline/.venv/bin/python3');
+  const venv = venvPythonPath(home);   // per-OS: bin/python3 (posix) | Scripts\python.exe (win)
   if (existsSync(venv)) return venv;
-  return 'python3';
+  return systemPython();
 }
 
 /**

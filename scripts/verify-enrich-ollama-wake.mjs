@@ -39,10 +39,12 @@ const healthyEmbed = {
 const classify = async () => ({ domain: 'Mind & Growth', register: 'Inquiry', subregister: 'Map' });
 
 // In-memory messages namespace. `pending` rows are the categories backlog.
-function makeDb(pendingIds) {
+function makeDb(pendingIds, { approved = 'qwen3.5:4b' } = {}) {
   const cats = new Map(pendingIds.map((id) => [id, { id, content: `row ${id} about minds`, categories_processed: 0 }]));
   return {
     db: {
+      // The owner's approval — see APPROVED/approve below. null ⇒ nothing approved.
+      users: { getSettings: async () => (approved ? { taskModels: { categorize: { model: approved }, enrich: { model: approved } } } : {}) },
       async rawQuery() { return { rows: [] }; }, // self-heal UPDATE → no-op
       messages: {
         async selectPendingEnrichment() { return []; },          // no embed backlog
@@ -60,6 +62,15 @@ function makeDb(pendingIds) {
     taggedCount: () => [...cats.values()].filter((r) => r.categories_processed === 1).length,
   };
 }
+
+// ⚠️ CONSENT (§3.10c). The approval IS the model setting — there is no separate flag. Every
+// fixture below must GRANT it, because an unset taskModels.categorize.model now means "the
+// owner has not approved a local model", and the drainer then wakes nothing and pulls
+// nothing. Before 2026-07-16 these fixtures passed with NO settings at all, because the
+// resolver fell back to qwen3.5:4b — which is precisely the implicit default that made a
+// fresh vault download 3.4GB unasked. A fixture with no settings must now tag NOTHING.
+const APPROVED = 'qwen3.5:4b';
+const approve = (model = APPROVED) => ({ users: { getSettings: async () => ({ taskModels: { categorize: { model }, enrich: { model } } }) } });
 
 function makeDaemon(result = { ok: true, running: true, adopted: true }) {
   const stub = { calls: 0, async ensureUp() { stub.calls++; return result; } };
@@ -114,14 +125,40 @@ const BIG = 10_000_000; // effectively disable the interval; the boot cycle does
   rec('W3. ensureUp {ok:false} → wake attempted, cycle did not error', woke && !threw, `calls=${daemon.calls} tagged=${taggedCount()} err=${threw?.message || 'no'}`);
 }
 
-// ── W4: no daemon → no throw; categories still run (back-compat) ──
+// ── W4: no daemon → no throw; L1 stays PENDING ──
+// ⚠️ CHANGED 2026-07-16, deliberately. This used to assert "categories still run" with no
+// daemon: an injected `classify` made the model/daemon irrelevant, so labeling ran while
+// `modelReady` sat at its default `true`. That contradicted the drainer's own `daemon` param
+// doc — "Null in contexts with no local model → L1 simply stays pending, fail-soft" — which
+// was therefore FALSE for exactly this path. L1 now runs iff an approved model is confirmed
+// installed, with no exception for an injected classifier: ONE rule, and the comment is now
+// true. No production path is affected — server-rest.js always passes hwOllamaDaemon.
 {
   const { db, taggedCount } = makeDb(['a', 'b']);
   let threw = null;
   const d = startEnrichDrainer({ db, userId: 'u', intervalMs: BIG, embed: healthyEmbed, classify, log: (m) => { if (/error/i.test(m)) threw = new Error(m); } });
-  const tagged = await waitFor(() => taggedCount() === 2);
+  await sleep(150);
   d.stop();
-  rec('W4. no daemon param → no throw, categories still run', tagged && !threw, `tagged=${taggedCount()}/2 err=${threw?.message || 'no'}`);
+  rec('W4. no daemon param → no throw, L1 stays pending (as the param contract says)',
+    !threw && taggedCount() === 0, `tagged=${taggedCount()}/0 err=${threw?.message || 'no'}`);
+}
+
+// ── W5: THE CONSENT GATE — no approved model ⇒ nothing is woken, nothing is pulled ──
+// The headline of §3.10: a fresh vault must download NOTHING until the owner approves it.
+// Both silent paths are covered — the 3.4GB model pull AND the Ollama RUNTIME install that
+// ensureUp() performs (ollama-daemon.js autoInstall), which happens BEFORE the pull is even
+// considered. Approving labeling approves both; declining fetches neither.
+{
+  resumeEnrichCategorize();
+  const { db, taggedCount } = makeDb(['a', 'b', 'c'], { approved: null }); // owner has NOT approved
+  const daemon = makeDaemon();
+  const ollama = makeOllama({ installed: [] });
+  const d = startEnrichDrainer({ db, userId: 'u', intervalMs: BIG, embed: healthyEmbed, classify, daemon, ollama, log: () => {} });
+  await sleep(200);
+  d.stop();
+  rec('W5. NO approved model ⇒ Ollama is never woken and nothing is pulled (the 3.4GB consent gate)',
+    daemon.calls === 0 && ollama.pullCalls === 0 && ollama.listCalls === 0 && taggedCount() === 0,
+    `ensureUp=${daemon.calls} pulls=${ollama.pullCalls} lists=${ollama.listCalls} tagged=${taggedCount()}`);
 }
 
 // ── P1: user PAUSE → categorization stage skipped (no wake, no tagging) despite pending work ──
@@ -151,10 +188,11 @@ const BIG = 10_000_000; // effectively disable the interval; the boot cycle does
 // models, so classify fails "model not found" forever. The drainer must pull the model.
 {
   resumeEnrichCategorize();
-  const { db, taggedCount } = makeDb(['a', 'b', 'c']);
+  // Approved, but NOT installed — so the pull must fire for the model the OWNER chose.
+  const { db, taggedCount } = makeDb(['a', 'b', 'c'], { approved: 'llama3.1' });
   const daemon = makeDaemon();
   const ollama = makeOllama({ installed: [] }); // model NOT installed
-  const d = startEnrichDrainer({ db, userId: 'u', intervalMs: 60, embed: healthyEmbed, classify, daemon, ollama, labelModel: 'llama3.1', log: () => {} });
+  const d = startEnrichDrainer({ db, userId: 'u', intervalMs: 60, embed: healthyEmbed, classify, daemon, ollama, log: () => {} });
   const pulled = await waitFor(() => ollama.pullCalls > 0); // it tried to pull the missing model
   const eventually = await waitFor(() => taggedCount() === 3, 3000); // after pull, a later tick tags
   d.stop();
@@ -165,11 +203,11 @@ const BIG = 10_000_000; // effectively disable the interval; the boot cycle does
 // ── A2: Ollama unreachable (listInstalled throws) → no crash, nothing tagged, retries ──
 {
   resumeEnrichCategorize();
-  const { db, taggedCount } = makeDb(['a', 'b']);
+  const { db, taggedCount } = makeDb(['a', 'b'], { approved: 'llama3.1' });
   const daemon = makeDaemon();
   let threw = null;
   const ollama = { listCalls: 0, async listInstalled() { this.listCalls++; throw new Error('ECONNREFUSED'); }, async pullModel() { throw new Error('down'); } };
-  const d = startEnrichDrainer({ db, userId: 'u', intervalMs: BIG, embed: healthyEmbed, classify, daemon, ollama, labelModel: 'llama3.1', log: (m) => { if (/drain cycle error/i.test(m)) threw = new Error(m); } });
+  const d = startEnrichDrainer({ db, userId: 'u', intervalMs: BIG, embed: healthyEmbed, classify, daemon, ollama, log: (m) => { if (/drain cycle error/i.test(m)) threw = new Error(m); } });
   await waitFor(() => ollama.listCalls > 0);
   await sleep(150);
   d.stop();

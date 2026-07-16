@@ -19,8 +19,8 @@ import Database from 'better-sqlite3';
 import { rmSync, mkdtempSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import { spawnReaped, reap } from './lib/reap.mjs';
 import { applyMigrations } from '../src/db/migrate.js';
 import { boot } from '../src/index.js';
 import { atRestEnabled, vaultIsEncrypted } from '../src/db/open.js';
@@ -75,13 +75,13 @@ try {
   const env = { ...process.env, MYCELIUM_DB: f4, MYCELIUM_KCV: join(dir, 'launch', 'kcv.json'),
     USER_MASTER_KEY: userHex, SYSTEM_KEY: systemHex, MYCELIUM_KEY_SOURCE: 'env' };
   delete env.MYCELIUM_AT_REST; // prove the DEFAULT — the launch must turn it on itself
-  const proc = spawn('node', ['src/index.js'], { env, stdio: 'ignore' });
+  const proc = spawnReaped('node', ['src/index.js'], { env, stdio: 'ignore' });
   let migrated = false;
   for (let i = 0; i < 60 && !migrated; i++) {   // up to ~18s
     await sleep(300);
     if (existsSync(f4) && !isPlaintextSqlite(f4)) migrated = true;
   }
-  try { proc.kill('SIGKILL'); } catch {}
+  reap(proc, 'SIGKILL');
   rec('T4. `node src/index.js` (no flag) migrates an EXISTING plaintext vault → ciphertext (entry-point default-on)',
     seededPlain && migrated, `seeded_plaintext=${seededPlain} migrated_to_cipher=${migrated}`);
 } finally {

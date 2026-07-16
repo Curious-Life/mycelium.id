@@ -20,6 +20,7 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { subscriptionTokenFrom } from './subscription-token.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
@@ -50,17 +51,30 @@ export function claudeConfigCredsPath(opts = {}) {
  * @param {{claudeOAuthToken?:string, accessToken?:string, refreshToken?:string|null, expiresAt?:number|null, scopes?:string[]}|null} creds
  *        the app's stored subscription credentials (db.providers.get(...).credentials, parsed)
  */
-export function seedClaudeConfigDir(creds, { env = process.env } = {}) {
-  const token = creds?.claudeOAuthToken || creds?.accessToken || creds?.claudeAiOauth?.accessToken;
+export function seedClaudeConfigDir(creds, { env = process.env, force = false } = {}) {
+  // subscriptionTokenFrom is the ONE definition of these shapes — this line used to
+  // hand-roll the same list (instance #4 of that drift; see the handoff). Identical today,
+  // which is exactly why it was invisible: the bug only appears the day the shared list
+  // widens and this copy doesn't. The import filter refuses whatever the resolver accepts,
+  // so a third opinion on "what is a token" silently breaks that pairing.
+  const token = subscriptionTokenFrom(creds);
   const dir = claudeConfigDir({ env });
   const credsPath = join(dir, '.credentials.json');
   // Already seeded/refreshed → don't clobber claude's (possibly fresher) token.
-  try {
-    if (existsSync(credsPath)) {
-      const cur = JSON.parse(readFileSync(credsPath, 'utf8'));
-      if (typeof cur?.claudeAiOauth?.accessToken === 'string' && cur.claudeAiOauth.accessToken) return true;
-    }
-  } catch { /* unreadable/corrupt → re-seed below */ }
+  //
+  // EXCEPT on an EXPLICIT connect (force): the user just chose an account, so the
+  // incoming token is definitionally the intended one. Without force, reconnecting to
+  // a DIFFERENT account left the old token in place here — the DB said account B while
+  // the CLI/native path kept authenticating as account A, so a revoked/wrong account
+  // went on serving turns. Boot re-seed must NOT force (it would undo claude's refresh).
+  if (!force) {
+    try {
+      if (existsSync(credsPath)) {
+        const cur = JSON.parse(readFileSync(credsPath, 'utf8'));
+        if (typeof cur?.claudeAiOauth?.accessToken === 'string' && cur.claudeAiOauth.accessToken) return true;
+      }
+    } catch { /* unreadable/corrupt → re-seed below */ }
+  }
   if (!token) return false;
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -69,7 +83,12 @@ export function seedClaudeConfigDir(creds, { env = process.env } = {}) {
         accessToken: token,
         refreshToken: creds.refreshToken || null,
         expiresAt: Number.isFinite(creds.expiresAt) ? creds.expiresAt : null,
-        scopes: Array.isArray(creds.scopes) && creds.scopes.length ? creds.scopes.map(String) : ['user:inference', 'user:profile'],
+        // Write the scopes we ACTUALLY have. This used to default to
+        // ['user:inference','user:profile'] when empty — fabricating a capability we
+        // never verified (a bare CLAUDE_CODE_OAUTH_TOKEN has no known scopes, and
+        // `claude setup-token` artifacts specifically LACK user:inference). Claiming it
+        // here would launder an admin token into a "subscription" on disk. Honest empty.
+        scopes: Array.isArray(creds.scopes) ? creds.scopes.map(String) : [],
       },
     };
     writeFileSync(credsPath, JSON.stringify(payload), { mode: 0o600 });

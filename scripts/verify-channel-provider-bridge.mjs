@@ -94,7 +94,17 @@ try {
   const noBackend = !cc.agent.anthropicApiKey && !cc.agent.model && !cc.agent.openai && !cc.routing.ollamaModel && !cc.routing.router;
   rec('PB5. no provider + no manual → empty backend (daemon = capture-only)', noBackend, JSON.stringify({ agent: cc.agent, routing: { router: cc.routing.router, ollamaModel: cc.routing.ollamaModel } }));
   env = {}; applyChannelConfigToEnv(cc, env);
-  rec('PB5b. selectRuntime(none) → null', selectRuntime(loadConfig(env)) === null);
+  // RT4 flip (6139922, 2026-06-19): with no creds the daemon no longer selects a NULL
+  // runtime — it selects the native backend and the SERVER resolves the provider,
+  // reporting no-model honestly via probeHealth. Capture-only is still the outcome;
+  // the enforcement point moved daemon→server. The fail-closed guarantee is asserted
+  // where it still lives: an explicit override whose creds are absent → null.
+  const noneRt = selectRuntime(loadConfig(env));
+  rec('PB5b. selectRuntime(none) → native default + probeHealth (capture-only is server-enforced)',
+    noneRt?.label === 'native' && typeof noneRt.probeHealth === 'function', `label=${noneRt?.label}`);
+  rec('PB5c. explicit override w/ no creds → null (fail-closed preserved)',
+    selectRuntime({ ...loadConfig(env), channelRouter: 'cloud' }) === null
+    && selectRuntime({ ...loadConfig(env), channelRouter: 'openai' }) === null);
 } catch (err) {
   allPass = false;
   ledger.push(`FAIL  fatal: ${String(err?.stack || err?.message || err)}`);

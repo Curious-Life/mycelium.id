@@ -25,7 +25,17 @@
 import { writable, get } from 'svelte/store';
 import { api } from './api';
 
-export type GenPhase = 'idle' | 'embedding' | 'starting' | 'running' | 'done' | 'error';
+// ⚠️ 'up-to-date' exists because the server has THREE outcomes — started, refused, or
+// UNNECESSARY — and this machine could hold two. POST /mycelium/generate returns
+// 200 {jobId:null, status:'skipped'} when topology already exists (portal-mindscape.js:626,
+// a debounce added because "the mindscape view re-POSTs generate on every load"). That is a
+// SUCCESS: there is nothing to do. With no state for it, the success was squeezed into
+// 'error' below — and since $generate.error is rendered in ZERO places app-wide, it became
+// SILENCE. That is why Illuminate "does nothing": its render condition (realms exist) IS the
+// route's skip condition, so it fails 100% of the time it is visible.
+// @see docs/DISTILLATION-SURFACE-DESIGN-2026-07-16.md §2a — the same defect class as §3.5's
+// invisible drainer `paused`: a state the server has and the client cannot represent.
+export type GenPhase = 'idle' | 'embedding' | 'starting' | 'running' | 'done' | 'error' | 'up-to-date';
 
 /** Embedder health as reported by /processing-status (see src/embed/supervisor.js). */
 export interface EmbedderHealth { status: string; message: string; detail?: string | null }
@@ -125,9 +135,17 @@ async function pollEmbedding() {
   try { res = await api('/portal/mycelium/processing-status'); } catch { return; }
   if (!res.ok) return;
   const p: any = await res.json().catch(() => ({}));
+  const embedder: EmbedderHealth | null = p.embedder ?? null;
+
+  // `unknown` = the server could not COUNT (a SQLCipher scan failure), which is NOT the
+  // same as "you have no messages". It used to be: the endpoint's catch returned
+  // `{ total: 0 }` and the `total === 0` branch below told an owner with 70k messages to
+  // "Import some conversations first". Keep polling — a transient scan failure resolves
+  // itself, and we must never assert an empty vault from a count that never happened.
+  if (p.unknown) { patch({ embedder, message: 'Checking your conversations…' }); return; }
+
   const embedded = Number(p.embedded ?? 0);
   const total = Number(p.total ?? 0);
-  const embedder: EmbedderHealth | null = p.embedder ?? null;
   const es = embedder?.status;
 
   if (total === 0) { stop(); patch({ phase: 'error', embedder, error: 'Import some conversations first — there is nothing to map yet.' }); return; }
@@ -171,6 +189,12 @@ export async function start() {
 
   if (res.ok) {
     const data: any = await res.json().catch(() => ({}));
+    // The map is already built — nothing to do. NOT an error (it used to be, and being an
+    // unrendered error made it silence). Callers that show progress must render this.
+    if (data.status === 'skipped') {
+      patch({ phase: 'up-to-date', message: data.note || 'Your map is already built.', error: '' });
+      return;
+    }
     if (!data.jobId) { patch({ phase: 'error', error: 'Server did not return a job id.' }); return; }
     ss((x) => x.setItem(SS_KEY, data.jobId));
     patch({ phase: 'running', jobId: data.jobId, startedAt: Date.now(), step: 0, totalSteps: 5, stageLabel: 'Starting…', elapsedMs: 0, etaSeconds: null, error: '', message: '' });

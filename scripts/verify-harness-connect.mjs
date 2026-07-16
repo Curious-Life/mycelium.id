@@ -2,7 +2,6 @@
 //   H1 HARNESS-RECIPES.md covers every first-class harness (memory + model doors)
 //   H2 openclaw scam-safety note present in the recipes doc
 //   H3 local-only / remote-coming-soon banner present (honest reachability)
-//   H4 design doc exists and names the two doors
 //   H5 HarnessPickerSection.svelte renders every harness + the real endpoints
 //   H6 the picker carries the openclaw safety note (UI parity with the doc)
 //   H7 SettingsView mounts HarnessPickerSection (imported + placed)
@@ -19,7 +18,7 @@ const ledger = [];
 const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${d ? '\n      ' + d : ''}`); };
 const has = (s, ...needles) => needles.every((x) => s.includes(x));
 
-let recipes = '', design = '', picker = '', settings = '', overview = '';
+let recipes = '', picker = '', settings = '', overview = '';
 try {
   recipes = read('docs/HARNESS-RECIPES.md');
   picker = read('portal-app/src/lib/components/settings/HarnessPickerSection.svelte');
@@ -43,6 +42,9 @@ rec('H2. openclaw scam-safety note present',
 // ── H3 — honest local-only / remote-coming-soon banner ───────────────────────
 rec('H3. local-only banner present',
   /local-only/i.test(recipes) && /coming soon|not live/i.test(recipes));
+
+// (H4 removed in the public tree: it read an internal design doc the release
+//  scrub strips. The endpoints it pinned are still asserted via H5's picker check.)
 
 // ── H5 — picker renders every EXTERNAL-app harness id + the real endpoints ────
 // The 'mycelium' pseudo-card was removed (2026-07-02): this list is "use Mycelium

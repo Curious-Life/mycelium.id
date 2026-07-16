@@ -8,6 +8,7 @@
 // their tools land, but are NOT assembled here — wiring a namespace no tool
 // calls would be dead surface. See TOOL_NAMESPACES below for the live set.
 import { createDb } from '../adapter/d1.js';
+import { acquireVaultWriterLock } from './writer-lock.js';
 import { parseHealthRow, computeHealthSummary, cofireCol } from './helpers.js';
 
 import { createDocumentsNamespace } from './documents.js';
@@ -66,7 +67,18 @@ import { openSidecar } from '../search/sqlite/sidecar.js';
  * @returns {{ db: object, close: () => void, adapter: object }}
  */
 export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federationDeps = {}, dbKeyHex = null }) {
-  const adapter = createDb({ dbPath, userKey, systemKey, scope, dbKeyHex });
+  // Fail-closed single-FAMILY writer lock on the canonical vault: refuse to open a
+  // second writer from a foreign process (a stray `node src/index.js` MCP) that would
+  // corrupt the WAL. Same-app children (pipeline stages) pass via token/ancestry.
+  // No-op for :memory:/test/temp vaults. See src/db/writer-lock.js.
+  const writerLock = acquireVaultWriterLock(dbPath);
+  let adapter;
+  try {
+    adapter = createDb({ dbPath, userKey, systemKey, scope, dbKeyHex });
+  } catch (e) {
+    writerLock.release();
+    throw e;
+  }
   const { d1Query, d1QueryAdmin, d1Batch, firstRow, parseJson, randomUUID, now, withTransaction, db: rawDb } = adapter;
 
   const base = { d1Query, d1QueryAdmin, d1Batch, firstRow, parseJson, randomUUID, now };
@@ -247,5 +259,5 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     }
   }
 
-  return { db, adapter, close: () => { try { adapter.close(); } finally { closeSidecar(); } } };
+  return { db, adapter, close: () => { try { adapter.close(); } finally { try { closeSidecar(); } finally { writerLock.release(); } } } };
 }

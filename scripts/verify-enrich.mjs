@@ -18,8 +18,8 @@
 
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
-import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import { spawnReaped, reap } from './lib/reap.mjs';
 
 import { applyMigrations } from '../src/db/migrate.js';
 import { boot } from '../src/index.js';
@@ -322,7 +322,7 @@ async function main() {
     const SMOKE_PORT = 20000 + Math.floor(Math.random() * 15000);
 
     let stderr = '';
-    const child = spawn(process.execPath, ['src/index.js', '--enrich'], {
+    const child = spawnReaped(process.execPath, ['src/index.js', '--enrich'], {
       cwd: process.cwd(),
       env: {
         ...process.env,
@@ -349,7 +349,7 @@ async function main() {
       up && up.ok === true && up.dim === EMBED_DIM,
       up ? JSON.stringify(up) : `no /health after 5s; stderr="${stderr.slice(0, 200)}"`);
 
-    child.kill('SIGTERM');
+    reap(child, 'SIGTERM');
     await new Promise((r) => { child.on('exit', r); setTimeout(r, 1000); });
     for (const f of [SDB, SKCV, `${SDB}-shm`, `${SDB}-wal`]) { try { rmSync(f); } catch {} }
   }

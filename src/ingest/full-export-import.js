@@ -46,7 +46,24 @@ const DENY = new Set([
   'telegram_widget_sessions', 'federation_log', 'deletion_records', 'deletion_ledger',
   'outbound_envelope_dedup', 'public_presence', 'topology_audit_findings', 'topology_audit_snapshots',
   'documents_fts', 'documents_fts_data', 'documents_fts_idx', 'documents_fts_docsize', 'documents_fts_config',
+  // The migration ledger is THIS vault's own provenance — never a bundle's. It is the
+  // table whose entire purpose is that "a vault that cannot say what shaped it cannot be
+  // trusted or diagnosed" (migration-ledger.js:11), so a bundle writing it forges the
+  // audit trail: inserting a foreign filename makes inspectLineage report `foreign:` —
+  // manufacturing the exact evidence of the incident the ledger exists to detect (and
+  // refusing boot under MYCELIUM_STRICT_LINEAGE=1).
+  // It is also load-bearing SECURITY now: migration 0050's one-shot legacy backfill keys
+  // off this table, so a bundle inserting {filename:'0050_provider_status_backfill.sql'}
+  // into a vault that hasn't run it yet permanently suppresses the backfill and leaves the
+  // user's own legacy providers dead. (A bundle cannot ARM anything this way — restoreTable
+  // only INSERT OR IGNOREs, so it can neither delete the 0050 row nor rewrite a sha.)
+  'schema_migrations',
 ]);
+// Exported for verify:provider-import: the DENY comparison assumes every entry is already
+// normalized (the incoming name is trim+lowercased before matching), so a mis-cased entry
+// here would silently never match. Asserted against the real Set — scraping the source with
+// a regex is how that check was a tautology in the first place.
+export { DENY as __denyForTest };
 // Reset enrichment products on imported messages; the 768-d pass flips
 // nlp_processed→1 for any message whose vector we re-encrypt (search works now).
 const MESSAGE_OVERRIDES = { nlp_processed: 0, nlp_processed_at: null, nlp_error: null, entities: null, relations: null, entity_summary: null };
@@ -103,7 +120,13 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
   if (manifest.format !== 'mycelium-full-export') { const e = new Error(`unexpected bundle format: ${manifest.format}`); e.code = 'invalid_bundle'; throw e; }
 
   const masterKey = await getMasterKey();
-  const stats = {};
+  // Object.create(null), not {}: `stats` is keyed by BUNDLE-CONTROLLED table names, and
+  // `db/__proto__.ndjson` passes the identifier shape check (lowercase + underscores). On a
+  // plain object that assignment sets the prototype instead of a key, so the entry silently
+  // VANISHES from the reconciliation report — this module's contract is that a dropped
+  // table is reported, never swallowed. (No rows land either way; this is the fail-loud
+  // guarantee, not a row-level hole.)
+  const stats = Object.create(null);
   const dbDir = path.join(root, 'db');
 
   // A full-vault restore writes tables in readdir (alphabetical) order, so a
@@ -121,19 +144,36 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
   // DENY blocks operational/cross-tenant/FTS tables outright.
   const tableFiles = fs.existsSync(dbDir) ? fs.readdirSync(dbDir).filter((f) => f.endsWith('.ndjson')) : [];
   for (const file of tableFiles) {
-    const table = file.replace(/\.ndjson$/, '');
+    const rawName = file.replace(/\.ndjson$/, '');
+    // ⚠️ NORMALIZE BEFORE MATCHING. The table name comes from a bundle-controlled FILENAME
+    // and is interpolated into SQL by restoreTable — and SQLite resolves identifiers
+    // CASE-INSENSITIVELY. A `DENY.has(rawName)` exact-string match was therefore no guard
+    // at all: `db/Secrets.ndjson` → 'Secrets' ∉ DENY → `INSERT OR IGNORE INTO Secrets`
+    // → lands in `secrets`, the ONE table still field-encrypted (crypto-local.js:441), so
+    // the adapter sealed the planted value under the user's own USER_MASTER — a valid,
+    // working secret, indistinguishable at rest. internal-router.js:277 reads
+    // TELEGRAM_BOT_TOKEN straight out of it, so a bundle pointed the user's agent at an
+    // attacker's bot: a CLAUDE.md §11 egress-chokepoint takeover through the shipped
+    // import UI. Trailing whitespace ('secrets ') bypassed it the same way.
+    const table = rawName.trim().toLowerCase();
+    // Fail closed on anything that isn't a plain identifier, BEFORE it reaches SQL.
+    // (better-sqlite3's prepare() rejects multi-statement SQL, so this is not the
+    // injection stop — it is the "only ever a real table name" stop, which is what makes
+    // the DENY comparison meaningful.)
+    if (!/^[a-z_][a-z0-9_]*$/.test(table)) { stats[rawName] = { skipped: 'invalid_table_name' }; continue; }
     if (DENY.has(table)) { stats[table] = { skipped: 'denied' }; continue; }
     // attachments are owned by the blob pass (§3): it INSERTs the row WITH
     // local_path. Importing it here first would win the INSERT and leave
     // local_path null (the blob-pass INSERT OR IGNORE would then dedupe).
     if (table === 'attachments') continue;
     const overrides = table === 'messages' ? MESSAGE_OVERRIDES : {};
-    const agg = { attempted: 0, inserted: 0, deduped: 0, failed: 0, malformed: 0, tableMissing: false };
+    const agg = { attempted: 0, inserted: 0, deduped: 0, failed: 0, refused: 0, malformed: 0, tableMissing: false };
     let batch = [];
     const flush = async () => {
       if (!batch.length) return;
       const r = await restoreTable(db, table, batch, { userId, overrides });
       agg.attempted += r.attempted; agg.inserted += r.inserted; agg.deduped += r.deduped; agg.failed += r.failed;
+      agg.refused += r.refused || 0; // security-refused rows stay visible in the report
       if (r.tableMissing) agg.tableMissing = true;
       batch = [];
     };

@@ -83,7 +83,8 @@ ok(capped.topics.length <= 8, 'per-category cap holds', `(${capped.topics.length
 // ── 5. task registration + model resolver ────────────────────────────────────
 ok(INFERENCE_TASKS.includes('enrich'), "'enrich' is a first-class inference task");
 ok((await defaultEnrichModel({ users: { getSettings: async () => ({ taskModels: { enrich: { model: 'gemma4:12b' } } }) } }, 'u')) === 'gemma4:12b', 'enrich model honors settings override');
-ok((await defaultEnrichModel({ users: { getSettings: async () => ({}) } }, 'u')) === DEFAULT_LABEL_MODEL, 'enrich model defaults to the small local model');
+// FLIPPED 2026-07-16 (§3.10c): unset is NOT consent. See verify-enrich-categories.mjs.
+ok((await defaultEnrichModel({ users: { getSettings: async () => ({}) } }, 'u')) === null, 'enrich model UNSET ⇒ null — L2 never pulls a model the owner did not approve');
 
 console.log(`\n${pass} pass · ${fail} fail`);
 if (fail === 0) { console.log('VERDICT: GO — L2 hybrid enrichment: prompt+parser, regex+semantic merge, graceful degrade, injection seam, task+resolver'); process.exit(0); }

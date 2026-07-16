@@ -19,6 +19,7 @@
 // Each result carries `jurisdiction` (local|eu-zdr|us-zdr|us-standard).
 
 import { jurisdictionForBaseUrl } from './presets.js';
+import { subscriptionTokenFrom } from './subscription-token.js';
 import { importFromClaudeCli } from './claude-oauth.js';
 import { readClaudeConfigDirLiveToken, refreshClaudeConfigDirToken } from './claude-config-dir.js';
 
@@ -105,6 +106,40 @@ function parseCredentials(credentials) {
  */
 /** Map one `ai_providers` row → router opts, or null if it can't be a cloud provider. */
 function mapRowToConfig(row) {
+  // status='pending' → NOT resolvable. This is the one chokepoint every RESOLVER
+  // shares (resolveInferenceConfig, resolveInferenceConfigForTask, resolveProviderChain),
+  // so a pending row is unreachable to inference rather than merely unflagged.
+  //
+  // ⚠️ SCOPE, precisely: this covers RESOLUTION, not every read of the row. A route that
+  // reads `ai_providers` directly does NOT pass through here and must make its own
+  // decision about pending — GET /providers/:id/models was exactly that gap (it fetched
+  // a pending row's base_url; now guarded at portal-providers.js). Said as "the ONE
+  // chokepoint" this comment overclaimed, which is the recurring failure in this area:
+  // the control is real where it is STATED and absent where the row is REACHABLE FROM.
+  // Any NEW reader of ai_providers must decide about 'pending' explicitly.
+  //
+  // WHY: a restored `ai_providers` row is executable egress config, and `is_active` is
+  // NOT sufficient to disarm it — resolveProviderChain enumerates EVERY row (fallback
+  // cascade, by design) and resolveInferenceConfigForTask takes a providerId straight
+  // out of users.settings. Worse, a bare `base_url` needs no credential at all to
+  // resolve (see the OpenAI-compatible branch below), so an imported row could egress
+  // the prompt keylessly. restoreTable lands every imported provider 'pending'.
+  //
+  // NO-OP FOR EXISTING VAULTS (the reason this is safe to add to live inference): no
+  // CODE PATH writes 'pending' — db/providers.js create() hardcodes 'active', and the
+  // only other status writer (the /providers/:id/test probe) writes 'active'/'error'.
+  // The schema DEFAULT at migrations/0001_init.sql:130 IS a writer, reachable by an
+  // INSERT omitting the column: pre-2026-07-16 restoreTable did exactly that for a
+  // manifest row lacking `status`, so an old hand-built import could have left 'pending'
+  // rows that resolved fine. Migration 0050 backfills those to 'active' — they predate
+  // this control and were already live; silently disabling them would be the regression.
+  //
+  // ⚠️ WRITERS ARE THE SOFT SPOT, NOT READERS. This guards every READ (all three
+  // resolvers funnel through here), so an attack moves to whatever can WRITE the column.
+  // That was a real bypass: /providers/:id/test flipped pending→active (or →'error',
+  // which also escapes this refusal) on a click the UI calls "Test" — it now refuses to
+  // promote a pending row. Any NEW status writer must make the same decision explicitly.
+  if (String(row?.status || '').toLowerCase() === 'pending') return null;
   const creds = parseCredentials(row.credentials);
   const key = (typeof creds?.apiKey === 'string' && creds.apiKey) ? creds.apiKey : null;
   const model = row.model_preference || undefined;
@@ -123,18 +158,24 @@ function mapRowToConfig(row) {
   // Prefer the current key; fall back to older shapes an earlier build may have stored
   // (raw `accessToken`, or the nested `claudeAiOauth.accessToken` from ~/.claude/.credentials.json)
   // so a subscription connected on an old build still resolves instead of failing to null.
-  const tokenStr = (v) => (typeof v === 'string' && v ? v : null);
-  const token = tokenStr(creds?.claudeOAuthToken) || tokenStr(creds?.accessToken) || tokenStr(creds?.claudeAiOauth?.accessToken);
+  // Shared with the import filter (subscription-token.js) — if this widens to accept
+  // a new token shape, the importer must refuse that shape in the same breath.
+  const token = subscriptionTokenFrom(creds);
   if (token && !baseUrl && (authType === 'oauth' || provider === 'claude_subscription' || provider === 'anthropic' || provider === 'claude')) {
-    return { claudeOAuthToken: token, anthropicApiKey: '', openaiApiKey: '', cloudModel: model, jurisdiction: jurisdictionForBaseUrl(undefined, 'anthropic'), label: label || 'Claude (subscription)', providerName: 'claude_subscription' };
+    return { claudeOAuthToken: token, anthropicApiKey: '', openaiApiKey: '', baseUrl: '', cloudModel: model, jurisdiction: jurisdictionForBaseUrl(undefined, 'anthropic'), label: label || 'Claude (subscription)', providerName: 'claude_subscription' };
   }
   // Native Anthropic (no base_url).
   if (key && !baseUrl && (provider === 'anthropic' || provider === 'claude')) {
-    return { anthropicApiKey: key, openaiApiKey: '', cloudModel: model, jurisdiction: jurisdictionForBaseUrl(undefined, provider), label, providerName: provider };
+    return { anthropicApiKey: key, openaiApiKey: '', baseUrl: '', cloudModel: model, jurisdiction: jurisdictionForBaseUrl(undefined, provider), label, providerName: provider };
   }
   // OpenAI-compatible: native OpenAI, or ANY base_url provider.
   if (baseUrl || (key && provider === 'openai')) {
-    return { anthropicApiKey: '', openaiApiKey: key || '', baseUrl: baseUrl || undefined, cloudModel: model, jurisdiction: jurisdictionForBaseUrl(baseUrl, provider), label, providerName: provider };
+    // `baseUrl: baseUrl || ''` — NOT `|| undefined`. A native-OpenAI row (no base_url) used to
+    // arrive `undefined`, which router.js coalesced to env.INFERENCE_BASE_URL: the user's real
+    // OpenAI key was then POSTed to an env-named host, while `jurisdiction` still described the
+    // row's (absent) base_url. Same class as the cascade floor, but this one needed no feature
+    // flag. '' is falsy, so cloud.js#resolveChatUrl still defaults to the real OpenAI endpoint.
+    return { anthropicApiKey: '', openaiApiKey: key || '', baseUrl: baseUrl || '', cloudModel: model, jurisdiction: jurisdictionForBaseUrl(baseUrl, provider), label, providerName: provider };
   }
   return null;
 }
@@ -181,20 +222,27 @@ export const INFERENCE_TASKS = ['chat', 'narrate', 'harness', 'reflection', 'cat
 // the PUT endpoint mis-stores it as a cloud { providerId } that the drainer never reads.
 export const ONBOX_TASKS = new Set(['categorize', 'enrich']);
 
-/**
- * Resolve the LOCAL model NAME a user assigned to an on-box task (categorize/enrich),
- * or `fallback` when unset. Single source for the drainer (L1/L2) AND the narrate
- * router's on-box fallback model — so a cloud-narrate failure degrades to the small
- * local model the user actually chose, never the generic DEFAULT_LOCAL_MODEL. Fail-soft.
- */
-export async function resolveOnBoxModel(db, userId, task, fallback) {
-  try {
-    const s = await db?.users?.getSettings?.(userId);
-    const m = s?.taskModels?.[task]?.model;
-    if (typeof m === 'string' && m.trim()) return m.trim();
-  } catch { /* fail-soft → fallback */ }
-  return fallback;
-}
+// §4g task sensitivity lives in a LEAF module (router.js needs it too, and must not pull this
+// file's claude-oauth/keychain graph in). Re-exported here so it is discoverable next to
+// INFERENCE_TASKS / ONBOX_TASKS — the other two task taxonomies.
+export { SENSITIVE_TASKS, isSensitiveTask } from './sensitivity.js';
+
+// ── WHERE THE ON-BOX MODEL NAMES ARE READ ────────────────────────────────────
+// NOT here. `settings.taskModels.{categorize,enrich}.model` has exactly TWO readers, both in
+// src/enrich/drainer.js: defaultLabelModel (categorize) and defaultEnrichModel (enrich).
+//
+// ⚠️ DO NOT ADD A THIRD. This file used to export `resolveOnBoxModel(db,userId,task,fallback)`
+// — a second reader of the SAME key that disagreed with the drainer about what SILENCE means:
+// the drainer returns null (unset ⇒ NOT approved), while this one returned `fallback` on unset
+// AND on a settings-read throw. Under increment M (#148) that key is not a preference, it is
+// the OWNER'S APPROVAL to download and run a model, so "fail-soft to a sensible default" is
+// literally "assume consent" — and its one caller (pipeline/lib/narrate-infer.js) passed
+// labelingRecommendedModel(), turning a RECOMMENDATION into a silent RUN of qwen3.5:4b on a
+// vault that never approved it. Sharpest case: an owner who picks "Off" — portal-providers.js
+// DELETES the key, and a fail-open read reinstates the model they just declined.
+// Retired 2026-07-16; a fail-open resolver next to a fail-closed one is a trap, not an option.
+// If a new caller needs an approved on-box model, IMPORT the drainer's reader — one key, one
+// reader, one meaning for silence.
 
 /**
  * Resolve the provider/model for a SPECIFIC task. Reads the per-task assignment
@@ -212,7 +260,14 @@ export async function resolveInferenceConfigForTask(db, userId, task) {
       if (row) {
         if (a.model) row = { ...row, model_preference: a.model }; // per-task model override
         const cfg = mapRowToConfig(row);
-        if (cfg) return withFreshSubscriptionToken(cfg);
+        // §4g exemption on THIS branch too. It was applied only by resolveInferenceConfig
+        // (the fallback below), so a subscription assigned to a task explicitly — Settings →
+        // Intelligence → narrate → Claude — never got marked exempt, while the SAME provider
+        // reached as the "active" one did. Harmless while nothing gated the primary; the
+        // moment §4g covers narrate (2026-07-16) it would refuse an opt-in the user had
+        // actually given. The exemption is a property of the PROVIDER + the setting, never of
+        // the lookup path that found it.
+        if (cfg) { await applySensitiveExempt(db, userId, cfg); return withFreshSubscriptionToken(cfg); }
       }
     }
   } catch { /* fail-soft → active provider */ }
@@ -257,8 +312,21 @@ export async function resolveProviderChain(db, userId, { sensitive = false } = {
     }
     cloud.sort((a, b) => JURISDICTION_RANK(a.jurisdiction) - JURISDICTION_RANK(b.jurisdiction));
   } catch { /* fail-soft */ }
-  // Guaranteed final fallback: on-box local Ollama (empty cloud cfg → router goes local).
-  return [...cloud, { jurisdiction: 'local', localFallback: true }];
+  // Guaranteed final fallback: on-box local Ollama.
+  //
+  // ⚠️ The old comment here said "empty cloud cfg → router goes local". THAT WAS FALSE, and the
+  // falseness was the bug: an element that merely OMITS its key fields does not arrive at the
+  // router empty — `anthropicApiKey ?? env.ANTHROPIC_API_KEY` (router.js) promotes a stray
+  // process-env key straight into the floor, so hasCloud() went TRUE, the "local" floor took the
+  // CLOUD branch, and because the §4g gate reads this literal `'local'` tag, /^us/ never matched
+  // and sensitive content egressed to the US — stamped 'local' in the egress audit.
+  //
+  // `''` (not null!) blocks the coalesce — `null ?? env.X` still yields env.X, only '' is
+  // non-nullish. That is the same convention mapRowToConfig already uses for the unused key
+  // field. This is the DATA half of the defence; `localFallback:true` is the STRUCTURAL half
+  // (router.js honours it by stripping creds AND refusing the cloud branch), so the floor stays
+  // on-box even if a future field is added here and someone forgets to blank it.
+  return [...cloud, { jurisdiction: 'local', localFallback: true, anthropicApiKey: '', openaiApiKey: '', baseUrl: '' }];
 }
 
 export default resolveInferenceConfig;

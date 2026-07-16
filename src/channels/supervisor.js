@@ -145,7 +145,19 @@ export function startChannelSupervisor({
       failures++;
       const tail = lastErrLine();
       if (failures >= DOWN_AFTER) {
-        setHealth('down', 'The channel bridge keeps stopping — check the bot token.', tail || `exited code ${code}`);
+        // Name the ACTUAL cause instead of a blanket "check the bot token": the
+        // daemon exits(1) with distinct, greppable reasons (config.js egress
+        // asserts, index.js getMe checks). A missing owner id, an invalid token,
+        // and an unconfigured platform are very different fixes.
+        const t = String(tail || '');
+        const [message, detail] =
+          /OWNER_TELEGRAM_ID required/i.test(t) ? ['Your Telegram ID is missing (the bot token is set).', 'Message your bot and approve the pairing code, or add your Telegram ID in Settings → Channels.']
+          : /getMe failed|check TELEGRAM_BOT_TOKEN/i.test(t) ? ['The Telegram bot token looks invalid.', 'Re-check the token from @BotFather in Settings → Channels.']
+          : /OWNER_DISCORD_ID required/i.test(t) ? ['Your Discord owner ID is missing (the bot token is set).', 'Add your Discord ID in Settings → Channels.']
+          : /check DISCORD_BOT_TOKEN|@me failed/i.test(t) ? ['The Discord bot token looks invalid.', 'Re-check the Discord token in Settings → Channels.']
+          : /configure at least one platform/i.test(t) ? ['No channel is configured yet.', 'Add a Telegram or Discord bot token in Settings → Channels.']
+          : ['The channel bridge keeps stopping.', t || `exited code ${code}`];
+        setHealth('down', message, detail);
       } else {
         setHealth('starting', 'Restarting the channel bridge…', tail || `exited code ${code}`);
       }

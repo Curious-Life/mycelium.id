@@ -28,6 +28,7 @@
  */
 
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { resolveDbKeyHex } from '../src/db/open.js';
@@ -77,11 +78,6 @@ async function recordName(db, entityKind, entityId, name, essence) {
       content: { name, essence }, meta: { stage: 'name' },
     });
   } catch { /* history is best-effort */ }
-}
-
-if (!USER_MASTER || !SYSTEM_KEY) {
-  console.error('Missing: USER_MASTER and SYSTEM_KEY (64-char hex each)');
-  process.exit(1);
 }
 
 /**
@@ -144,7 +140,47 @@ async function run() {
 
   try {
     console.log(`[describe] Naming realms + territories for user=${USER_ID} via ${narrator.label}${narrator.local ? ' (local)' : ''}${DRY_RUN ? ' (dry-run)' : ''}`);
-    if (!DRY_RUN) {
+    // ── Nothing safe to run (§M): stop before doing the work, and SAY SO ─────────
+    // Not a loop of N identical refusals: this is a steady state, so it costs one honest
+    // line and one terminal feed row. Reported via the SAME activity feed the run would
+    // have used — an owner watching "Naming areas" must learn why it did not happen from
+    // the place they were already looking, not from a log they will never open.
+    //
+    // begin+finish('error'), NOT a `notice()`: activityFeed exposes begin/heartbeat/finish/
+    // active/recent/reap/prune and NOTHING ELSE (src/db/activity-feed.js). `recent()` selects
+    // `error`, so this row carries the reason into the feed's history. (narrate-infer.js's
+    // onCloudFallback called `activityFeed.notice?.()` — optional-chained, so it has always
+    // been a silent no-op; fixed in the same commit. Verify the method, not the intention.)
+    //
+    // DRY_RUN refuses TOO — only the feed WRITE is skipped. Gating the whole check on
+    // !DRY_RUN made a dry run walk every realm calling a narrator that throws per item: N
+    // "narration failed" lines and no cause, in the one mode whose entire purpose is to tell
+    // the operator what WOULD happen. A diagnostic that misreports the diagnosis is worse
+    // than none.
+    // ⚠️ Blocked ⇒ NO NAMING, but the walk still runs for COUNT MAINTENANCE.
+    // The first version `return`ed here — which regressed the exact defect
+    // verify:realm-prune exists for: describe is the ONLY writer of
+    // realms.territory_count/message_count ("they were 0 forever: no writer"),
+    // so an early return froze every count on any vault without an approved
+    // model. Counts are pure SQL bookkeeping over clustering_points — no model
+    // runs — so consent does not gate them. The flag suppresses only the
+    // describe() calls below; their null flows through the existing paths
+    // (clobber guard keeps real names; unnamed rows get placeholders and retry
+    // when a model is approved). Caught by verify:realm-prune, 2026-07-16.
+    const namingBlocked = narrator.blocked === true;
+    if (namingBlocked) {
+      const msg = 'No on-box model is approved and no cloud provider is configured — approve a model in Settings → Intelligence to name your areas.';
+      console.error(`[describe] ${DRY_RUN ? '(dry) ' : ''}${msg} (counts still maintained)`);
+      if (!DRY_RUN) {
+        try {
+          const id = await db.activityFeed.begin({ userId: USER_ID, kind: 'describe:name', stageLabel: 'Naming areas' });
+          await db.activityFeed.finish(id, { status: 'error', error: msg });
+        } catch { /* feed is best-effort — the refusal itself already stands */ }
+      }
+    }
+    if (!DRY_RUN && !namingBlocked) {
+      // (blocked runs already wrote their terminal feed row above — a second
+      //  "Naming areas" begin would show a running job that names nothing)
       try { feedId = await db.activityFeed.begin({ userId: USER_ID, kind: 'describe:name', stageLabel: 'Naming areas' }); } catch { /* */ }
       // Refresh liveness every 10s regardless of per-item progress — a cold first
       // model call can exceed the reaper's stale window, which would falsely abandon
@@ -203,7 +239,7 @@ async function run() {
       // Context Capsule: timeline + connected-by-name (child territories) so the
       // realm essence is named with awareness of what it actually contains.
       const capsule = await buildContextCapsule({ query, db, userId: USER_ID, kind: 'realm', id: realm_id, members, seenIds: null, stored: existing }).catch(() => null);
-      const described = sample.samples.length
+      const described = (!namingBlocked && sample.samples.length)
         ? await describe(narrator, 'realm', { samples: sample.samples, topTags: sample.topTags, entities: sample.entities, existing, contextBlock: capsule ? renderCapsule(capsule) : '' })
         : null;
       if (described) namedRealms += 1;
@@ -286,7 +322,7 @@ async function run() {
       // Context Capsule: prior-covered span vs. new-content span, % described,
       // activity timeline, and connected-by-name (realm / nearest / lineage).
       const capsule = await buildContextCapsule({ query, db, userId: USER_ID, kind: 'territory', id: territory_id, members, seenIds, stored: existing }).catch(() => null);
-      const described = sample.samples.length
+      const described = (!namingBlocked && sample.samples.length)
         ? await describe(narrator, 'territory', { samples: sample.samples, topTags: sample.topTags, entities: sample.entities, existing, contextBlock: capsule ? renderCapsule(capsule) : '' })
         : null;
       if (described) namedTerr += 1;
@@ -352,7 +388,14 @@ async function run() {
     console.log(`[describe] Done — named ${namedRealms}/${realmIds.length} realms (${skippedRealms} unchanged) · ${namedTerr}/${terrIds.length} territories (${skippedTerr} unchanged) via ${narrator.label}`);
     const failedAll = namedRealms === 0 && realmIds.length - skippedRealms > 0;
     if (failedAll) {
-      console.error(`[describe] WARNING: named 0 realms — the model (${narrator.label}) returned nothing usable. Check Settings → Intelligence.`);
+      // Report the REAL cause. "the model returned nothing usable" is a lie when the truth is
+      // "we refused to run a model you never approved" — and it sends the owner to Settings to
+      // debug a model that was never the problem. A refusal is a legitimate steady state
+      // (drainer §3.5 no_model), not a malfunction; blaming the model for it is what makes a
+      // consent gate feel like a bug and get "fixed" by restoring the fail-open default.
+      console.error(narrator.blocked
+        ? `[describe] named 0 realms — no on-box model is approved and no cloud provider is configured, so nothing was run. Approve a model in Settings → Intelligence to name your areas.`
+        : `[describe] WARNING: named 0 realms — the model (${narrator.label}) returned nothing usable. Check Settings → Intelligence.`);
     }
     if (feedId) { try { await db.activityFeed.finish(feedId, { status: failedAll ? 'error' : 'done' }); } catch { /* */ } }
   } finally {
@@ -361,4 +404,19 @@ async function run() {
   }
 }
 
-run().catch(err => { console.error('[describe] Fatal:', err); process.exit(1); });
+// isMain guard so this file can be IMPORTED (by verify:narrate-consent's N8) without
+// executing run() — which opens the vault. Matches describe-chronicles.js's guard. Spawned
+// as `node pipeline/describe-clusters.js` (jobs.js, run-clustering.sh) isMain is true → runs
+// exactly as before. fileURLToPath, not the raw file:// compare — the app ships as "Mycelium
+// Dev.app", a path with a space, which breaks the unescaped form.
+const isMain = !!process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMain) {
+  // The env-key guard lives HERE, not at module top level — a top-level process.exit(1) fires
+  // on IMPORT (N8 loads this file to prove its import graph resolves), which would kill the
+  // whole verify run. Only the spawned entry point needs the keys.
+  if (!USER_MASTER || !SYSTEM_KEY) {
+    console.error('Missing: USER_MASTER and SYSTEM_KEY (64-char hex each)');
+    process.exit(1);
+  }
+  run().catch(err => { console.error('[describe] Fatal:', err); process.exit(1); });
+}

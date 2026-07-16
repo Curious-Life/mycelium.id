@@ -31,6 +31,16 @@
 	);
 	onMount(() => startActivityPolling());
 
+	// Teleport a node to <body> so a `fixed` overlay escapes the header's stacking
+	// context + `backdrop-filter` containing block + `overflow-hidden` clip. Without
+	// this the activity panel is trapped at the header's z-10 and page navs/tooltips
+	// (z-30…z-1000) paint over it. In <body> it's viewport-relative at its own z-index.
+	function portal(node: HTMLElement, target: string = 'body') {
+		const dest = (browser && document.querySelector(target)) || null;
+		if (dest) dest.appendChild(node);
+		return { destroy() { node.remove(); } };
+	}
+
 	// Stop/Resume the on-box categorization (Context Engine L1) — the "my computer is working
 	// a lot" churn. The activity store re-polls every 2.5s, so the row updates on its own.
 	let categorizeBusy = $state(false);
@@ -159,10 +169,13 @@
 				<span class="orb-core"></span>
 			</button>
 			{#if activityOpen}
+				<!-- Portaled to <body> so it renders ABOVE page navs/tooltips (z-30…z-1000)
+				     instead of being trapped in the header's stacking context. -->
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
-				<div class="fixed inset-0 z-[59]" onclick={() => (activityOpen = false)}></div>
-				<div class="fixed top-[2.75rem] right-2 sm:right-3 z-[60] min-w-[260px] max-w-[320px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 shadow-lg" style="backdrop-filter: blur(14px) saturate(150%); -webkit-backdrop-filter: blur(14px) saturate(150%);">
+				<div use:portal>
+					<div class="fixed inset-0 z-[9998]" onclick={() => (activityOpen = false)}></div>
+					<div class="fixed top-[2.75rem] right-2 sm:right-3 z-[9999] min-w-[260px] max-w-[320px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 shadow-lg" style="backdrop-filter: blur(14px) saturate(150%); -webkit-backdrop-filter: blur(14px) saturate(150%);">
 					{#if busy}
 						<div class="px-2.5 pt-1 pb-0.5 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Working now</div>
 						{#each active as j (j.id)}
@@ -207,6 +220,7 @@
 					{:else if !busy}
 						<div class="px-2.5 py-2 text-[11px] text-[var(--color-text-tertiary)]">No activity yet — your vault is idle.</div>
 					{/if}
+				</div>
 				</div>
 			{/if}
 		</div>

@@ -97,8 +97,16 @@ try {
       !/Claims about you/.test(eventQ), eventQ.slice(0, 50));
   }
 
-  // ── D4. the real CHILD process is FAIL-SOFT without a model (exit 0) ─────────
+  // ── D4. the real CHILD process is FAIL-SOFT without a REACHABLE model (exit 0) ──
   // (If Ollama happens to be running, it may instead write claims — also exit 0.)
+  //
+  // The vault must APPROVE an on-box model first. "No model reachable" (transient →
+  // exit 0, what D4 tests) and "no model approved" (a consent defect → exit 2) are
+  // now DIFFERENT outcomes: the child refuses to run a model the owner never approved
+  // rather than silently defaulting to llama3.1. Without this seed D4 would exercise
+  // the refusal and read its exit 2 as a fail-soft regression. The consent contract
+  // itself is owned by verify:claims-consent.
+  await db.users.updateSettings(U, { taskModels: { categorize: { model: 'qwen3.5:4b' } } });
   const run = spawnSync('node', ['pipeline/discover-claims.mjs', '--cadence=day'], {
     encoding: 'utf8',
     env: { ...process.env, MYCELIUM_DB: DB, MYCELIUM_USER_ID: U, USER_MASTER: userHex, SYSTEM_KEY: systemHex },

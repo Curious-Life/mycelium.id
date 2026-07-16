@@ -91,14 +91,20 @@ const msg = (t) => ({ content: t });
   rec('L8. active turn cleared after a timed-out turn', getActiveTurn() === null);
 }
 
-// ── runtime selection: config-implied locus ──────────────────────────────────
+// ── runtime selection: native default + explicit overrides ───────────────────
+// RT4 flip (6139922, 2026-06-19) retired "locus implied by configuration": creds no
+// longer select a backend, an explicit router does. These rows assert the CURRENT
+// contract — each override still reaches its backend, and the unforced default is
+// native regardless of which creds happen to be present.
 {
-  const withKey = selectRuntime({ anthropicApiKey: 'sk-ant-test', mcpMode: 'http' });
-  rec('R1. BYOK key → claude-agent-sdk runtime', !!withKey && /claude-agent-sdk/.test(withKey.label), `label=${withKey?.label}`);
-  const local = selectRuntime({ anthropicApiKey: '', ollamaModel: 'llama3.1', ollamaUrl: 'http://127.0.0.1:11434', mcpUrl: 'http://x/mcp' });
-  rec('R2. no key + ollama model → ollama runtime (sovereign)', !!local && /ollama/.test(local.label), `label=${local?.label}`);
+  const withKey = selectRuntime({ anthropicApiKey: 'sk-ant-test', channelRouter: 'cloud', mcpMode: 'http' });
+  rec('R1. router=cloud + BYOK key → claude-agent-sdk runtime', !!withKey && /claude-agent-sdk/.test(withKey.label), `label=${withKey?.label}`);
+  const local = selectRuntime({ anthropicApiKey: '', ollamaModel: 'llama3.1', channelRouter: 'local', ollamaUrl: 'http://127.0.0.1:11434', mcpUrl: 'http://x/mcp' });
+  rec('R2. router=local + ollama model → ollama runtime (sovereign)', !!local && /ollama/.test(local.label), `label=${local?.label}`);
   const none = selectRuntime({ anthropicApiKey: '', ollamaModel: '' });
-  rec('R3. neither → null (two-way disabled, capture-only)', none === null);
+  rec('R3. neither + no router → native default (capture-only is server-enforced)', none?.label === 'native', `label=${none?.label}`);
+  rec('R3b. creds present but no router → still native (creds no longer imply locus)',
+    selectRuntime({ anthropicApiKey: 'sk-ant-test', mcpMode: 'http' })?.label === 'native');
 }
 
 // ── ollama tool-use loop (pure, fake ollama + fake mcp) ──────────────────────
@@ -319,8 +325,13 @@ function mkAuto({ cloudFails = false } = {}) {
 
 // ── selectRuntime: auto + overrides ──────────────────────────────────────────
 {
-  const both = selectRuntime({ anthropicApiKey: 'k', ollamaModel: 'llama3.1', mcpUrl: 'http://x/mcp' });
-  rec('AU6. both configured → auto runtime', /^auto\(/.test(both.label), `label=${both?.label}`);
+  // RT4 flip (6139922, 2026-06-19): native is the DEFAULT — the auto router is now
+  // reachable only as an EXPLICIT override. Both halves are asserted: the router
+  // itself still composes local+cloud (AU6), and the unforced default is native (AU6b).
+  const both = selectRuntime({ anthropicApiKey: 'k', ollamaModel: 'llama3.1', channelRouter: 'auto', mcpUrl: 'http://x/mcp' });
+  rec('AU6. both configured + router=auto → auto runtime', /^auto\(/.test(both.label), `label=${both?.label}`);
+  const dflt = selectRuntime({ anthropicApiKey: 'k', ollamaModel: 'llama3.1', mcpUrl: 'http://x/mcp' });
+  rec('AU6b. both configured, no router → native (RT4 flip default)', dflt?.label === 'native', `label=${dflt?.label}`);
   rec('AU7. router=cloud forces cloud', /claude-agent-sdk/.test(selectRuntime({ anthropicApiKey: 'k', ollamaModel: 'llama3.1', channelRouter: 'cloud', mcpUrl: 'http://x/mcp' }).label));
   rec('AU8. router=local forces ollama', /ollama/.test(selectRuntime({ anthropicApiKey: 'k', ollamaModel: 'llama3.1', channelRouter: 'local', mcpUrl: 'http://x/mcp' }).label));
 }

@@ -898,6 +898,16 @@
 			} else {
 				handleEditorCheckboxClick(idx);
 			}
+			return;
+		}
+		// Click-to-edit: a single click anywhere in the read-only text drops into
+		// edit mode — the document IS the editor, no separate "Edit" step. Skip
+		// links (let them navigate) and don't hijack a text selection (a drag-select
+		// leaves a non-collapsed selection → let the reader keep it).
+		if (mode === 'readonly' && !editing && !target.closest('a')) {
+			const sel = typeof window !== 'undefined' ? window.getSelection() : null;
+			if (sel && !sel.isCollapsed) return;
+			startEditing();
 		}
 	}
 
@@ -1470,7 +1480,24 @@
 							<path d="M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.562.562 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z"/>
 						</svg>
 					</button>
-					{#if !editing}
+					{#if editing}
+						<!-- Editing: the autosave whisper + Done live up here in the
+							 header (no separate footer bar) — edits persist automatically,
+							 Done flushes + exits. -->
+						<span
+							class="hidden sm:inline text-xs text-[var(--color-text-tertiary)] transition-opacity mr-1 select-none"
+							class:opacity-0={saveState === 'idle'}
+						>
+							{saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : ''}
+						</span>
+						<button
+							onclick={finishEditing}
+							class="px-3 py-1.5 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] rounded-lg border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors"
+							title="Finish editing (edits already saved)"
+						>
+							Done
+						</button>
+					{:else}
 						<button
 							onclick={startEditing}
 							class="p-1.5 hover:bg-azure/20 rounded-lg transition-colors text-[var(--color-text-secondary)] hover:text-azure"
@@ -1819,16 +1846,12 @@
 							{/if}
 						{/if}
 
-						<!-- Footer: peripheral agent cue (left) + autosave whisper
-							 + Done (right). No Save button — edits persist
-							 automatically; Done flushes + exits. Sticky to the
-							 viewport bottom so it never scrolls out of reach while
-							 writing (bg occludes the text scrolling underneath). -->
-						<div class="sticky bottom-0 z-10 bg-[var(--color-bg)] border-t border-[var(--color-border)] flex items-center justify-between gap-3 py-2">
-							<!-- Calm cue: surfaces an agent's concurrent edit only
-								 here, never over your text. Click reloads (which
-								 discards your unsaved buffer — hence explicit). -->
-							{#if agentUpdatedWhileEditing}
+						<!-- Calm agent cue — surfaces an agent's concurrent edit ONLY when
+							 it happens, never over your text. Click reloads (discards your
+							 unsaved buffer — hence explicit). The autosave whisper + Done
+							 now live in the header, so there's no persistent footer bar. -->
+						{#if agentUpdatedWhileEditing}
+							<div class="sticky bottom-0 z-10 bg-[var(--color-bg)] border-t border-[var(--color-border)] flex items-center gap-3 py-2">
 								<button
 									type="button"
 									onclick={discardEditAndReload}
@@ -1838,21 +1861,8 @@
 									<span class="w-1.5 h-1.5 rounded-full bg-aurum/80"></span>
 									Updated elsewhere · Reload
 								</button>
-							{:else}
-								<span></span>
-							{/if}
-							<div class="flex items-center gap-3">
-								<span class="text-xs text-[var(--color-text-tertiary)] transition-opacity" class:opacity-0={saveState === 'idle'}>
-									{saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : ''}
-								</span>
-								<button
-									onclick={finishEditing}
-									class="px-4 py-1.5 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] rounded-lg border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors"
-								>
-									Done
-								</button>
 							</div>
-						</div>
+						{/if}
 					</div>
 				{:else}
 					<!-- ═══ READ-ONLY VIEW ═══ -->

@@ -5,11 +5,27 @@
  * decrypted messages in the last complete window and runs the claim lifecycle
  * (src/claims/discovery.js): propose → identity-match → validate → log-odds
  * update → snapshot. Clones describe-chronicles.js (vault open + router build +
- * egress audit). FAIL-SOFT / Tier-3: with no local model reachable, infer()
- * throws and discoverWindow returns a no-op — no claims, exit 0.
+ * egress audit).
+ *
+ * TWO DISTINCT FAILURE MODES — deliberately NOT the same exit code:
+ *  - Model UNREACHABLE (Ollama down) → transient. infer() throws, discoverWindow
+ *    returns a no-op, exit 0. Tier-3 FAIL-SOFT, unchanged.
+ *  - Model UNAPPROVED (consent) → a configuration defect, never transient. REFUSE
+ *    loudly: exit 2 + a `run REFUSED` line in the run log. Exiting 0 here would be
+ *    indistinguishable from "no claims found" — the silent-dormancy class this
+ *    guard exists to end.
  *
  * PRIVACY: every model call is sensitive:true (router hard-blocks US-cloud
  * egress → on-box local). Never logs message content.
+ *
+ * CONSENT (increment M, #148): claims are the most sensitive content in the vault,
+ * and ALL THREE of the router's runLocal paths are reachable from here — the §4g
+ * sensitive US hard-block (router.js:264), the cloud-fallback (:281), and the
+ * no-cloud-configured tail (:287). So on ANY provider configuration this run can
+ * land on-box, and it may run ONLY the model the owner approved. Passing a
+ * non-empty localModel is what keeps it off the router's
+ * `localModel || env.LOCAL_MODEL || DEFAULT_LOCAL_MODEL` coalesce, which otherwise
+ * silently runs llama3.1 (src/inference/local.js:14).
  *
  * Usage (heartbeat-spawned child, or a Generate stage):
  *   USER_MASTER=<hex> SYSTEM_KEY=<hex> MYCELIUM_DB=./data/vault.db \
@@ -21,6 +37,7 @@ import { loadKey } from '../src/crypto/keys.js';
 import { resolveDbKeyHex } from '../src/db/open.js';
 import { createInferenceRouter } from '../src/inference/router.js';
 import { resolveInferenceConfigForTask } from '../src/inference/resolve.js';
+import { defaultLabelModel } from '../src/enrich/drainer.js';
 import { createEgressAuditSink } from '../src/inference/egress.js';
 import { createValidator } from '../src/claims/validator.js';
 import { discoverWindow, parseProposals } from '../src/claims/discovery.js';
@@ -87,21 +104,53 @@ if (isMain) {
   const [userKey, systemKey] = await Promise.all([loadKey(USER_MASTER), loadKey(SYSTEM_KEY)]);
   const dbKeyHex = resolveDbKeyHex(USER_MASTER, DB_PATH);
   const { db, close } = getDb({ dbPath: DB_PATH, userKey, systemKey, scope: 'personal', dbKeyHex });
+
+  // Run log in the data dir — observable record of each discovery run (counts
+  // only, never message content). Lets the UI surface "last run" + lets us
+  // diagnose an empty run (parse vs match vs write vs error). Best-effort.
+  // Opened BEFORE the consent gate so a refusal is recorded, not swallowed.
+  const LOG = join(process.env.MYCELIUM_DATA_DIR || DB_PATH.replace(/[^/]+$/, ''), 'claims-discovery.log');
+  const flog = (m) => { try { appendFileSync(LOG, `${new Date().toISOString()} ${m}\n`); } catch { /* best-effort */ } };
+
+  // ── CONSENT GATE (see header). The approved on-box model, resolved fail-closed via
+  // the drainer's defaultLabelModel — THE one sanctioned reader of
+  // settings.taskModels.categorize.model ("one key, one reader, one meaning for
+  // silence", resolve.js's retirement note for resolveOnBoxModel, 2026-07-16). It
+  // returns null both when unset AND when the settings read throws — an error is
+  // never an approval. `categorize` is the on-box consent surface (ONBOX_TASKS);
+  // 'narrate' has no separate on-box approval, so the labeling pick is what the
+  // owner actually granted. Importing drainer.js here is side-effect-free: its
+  // interval lives inside startEnrichDrainer(), which this child never calls.
+  //
+  // Scoped to the real run: --dry-run only counts evidence and never reaches a model,
+  // so refusing it would break the one diagnostic that still works on an unconfigured
+  // vault. Consent gates the INFERENCE, not the process.
+  const approvedLocalModel = await defaultLabelModel(db, USER_ID);
+  if (!approvedLocalModel && !DRY_RUN) {
+    flog('run REFUSED: no approved on-box model (settings.taskModels.categorize.model unset) — 0 claims, nothing ran');
+    console.error('[claims] REFUSED: no on-box model is approved for this vault.');
+    console.error('[claims] Claim discovery runs on-box on sensitive content and will not substitute a default.');
+    console.error('[claims] Approve a local model in Settings → Intelligence, then discovery resumes.');
+    close();
+    process.exit(2); // NOT 0 — an unapproved vault must not read as "no claims found".
+  }
+
   const router = createInferenceRouter({
     // Honor the per-task 'narrate' assignment (Settings → Intelligence) like chronicle
     // narration does — was resolveInferenceConfig (ACTIVE provider only), which ignored
     // the user's narrate model selection. Falls back to the active provider when unset.
     ...(await resolveInferenceConfigForTask(db, USER_ID, 'narrate')),
+    // The owner's approved model — never the router's llama3.1 coalesce. Non-empty by
+    // the gate above, so the coalesce is unreachable from here. Set AFTER the spread:
+    // mapRowToConfig never emits localModel (resolve.js), but an explicit assignment
+    // after the spread keeps that a fact about THIS file rather than a dependency on
+    // resolve.js never growing one.
+    localModel: approvedLocalModel,
     onEgress: createEgressAuditSink(db, USER_ID),
     // Discovery prompts are large and run on a local model; 60s (the router
     // default) is too short and silently zeroed every run. Give it room.
     timeoutMs: Number(process.env.MYCELIUM_CLAIMS_TIMEOUT_MS || 300000),
   });
-  // Run log in the data dir — observable record of each discovery run (counts
-  // only, never message content). Lets the UI surface "last run" + lets us
-  // diagnose an empty run (parse vs match vs write vs error). Best-effort.
-  const LOG = join(process.env.MYCELIUM_DATA_DIR || DB_PATH.replace(/[^/]+$/, ''), 'claims-discovery.log');
-  const flog = (m) => { try { appendFileSync(LOG, `${new Date().toISOString()} ${m}\n`); } catch { /* best-effort */ } };
 
   // sensitive:true is enforced inside discovery/validator — claims never egress.
   // Wrap infer to log REPLY size + parse count (counts only) so an empty run is
@@ -119,7 +168,9 @@ if (isMain) {
   let embedOk = false; try { await embedClient.health(); embedOk = true; } catch { /* lexical fallback */ }
   const embed = (texts) => embedClient.embedBatch(texts, 'query');
 
-  flog(`run start: cadences=${cadences.join('/')} embed=${embedOk ? 'on' : 'OFF(lexical)'}`);
+  // Name the on-box model in the run log: which model ran is the fact this increment
+  // is about, and it makes a wrong-model regression visible without a debugger.
+  flog(`run start: cadences=${cadences.join('/')} embed=${embedOk ? 'on' : 'OFF(lexical)'} onbox=${approvedLocalModel}`);
   try {
     if (DRY_RUN) {
       for (const c of cadences) {

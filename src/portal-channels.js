@@ -9,6 +9,7 @@
 // Localhost-only, single-user, behind the vault-init guard (no per-request auth),
 // same posture as portal-settings.js.
 import express from 'express';
+import { createPairingStore } from './channels/pairing-store.js';
 
 export function portalChannelsRouter({ db, userId, channelSup }) {
   const router = express.Router();
@@ -18,6 +19,7 @@ export function portalChannelsRouter({ db, userId, channelSup }) {
   const hasS = (k) => db.secrets.has(userId, k);
   const setS = (k, v) => db.secrets.set(userId, { key: k, value: v, scope: 'personal', description: 'channel setting' });
   const delS = (k) => db.secrets.delete(userId, k);
+  const pairing = createPairingStore({ db });
 
   // Per-channel access policy (mode + allowlist), default open.
   const accessOf = async (kind, id) => (db.channelAccess ? (await db.channelAccess.get(kind, String(id))) : null) || { mode: 'open', allowedSenders: [] };
@@ -97,6 +99,30 @@ export function portalChannelsRouter({ db, userId, channelSup }) {
       // Apply the change to the running daemon WITHOUT an app restart: (re)start
       // it if now enabled + tokened, stop it if disabled, restart to pick up a new
       // token/model (the daemon reads its config from the vault only at boot).
+      try { channelSup?.reload(); } catch { /* supervisor optional (e.g. tests) */ }
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
+  });
+
+  // GET /channels/pairing — pending Telegram pairing requests (design D2). The
+  // user messaged the bot while no owner was bound; the daemon minted a code and
+  // replied it to them. Here the app lists those pending codes so the owner can
+  // approve one. NEVER returns the raw sender id — only code/platform/who/when.
+  router.get('/channels/pairing', async (_req, res) => {
+    try { res.json({ pending: await pairing.list(userId) }); }
+    catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
+  });
+
+  // POST /channels/pairing/approve { code } — bind OWNER_TELEGRAM_ID to the sender
+  // behind that code, consume the pending entry, and reload the daemon so replies
+  // start flowing WITHOUT an app restart. 404 if the code is unknown/expired.
+  router.post('/channels/pairing/approve', async (req, res) => {
+    try {
+      const code = String(req.body?.code || '').trim();
+      if (!code) return res.status(400).json({ error: 'code required' });
+      const match = await pairing.approve(userId, code);
+      if (!match) return res.status(404).json({ error: 'unknown or expired code' });
+      await setS('OWNER_TELEGRAM_ID', String(match.senderId));
       try { channelSup?.reload(); } catch { /* supervisor optional (e.g. tests) */ }
       res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }

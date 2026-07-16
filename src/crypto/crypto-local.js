@@ -234,10 +234,16 @@ const ENCRYPTED_FIELDS = {
   // SYSTEM_KEY table — this is the user's own data). Tokens live in `secrets`.
   connectors: [],
 
-  // Messages — content + all AI-derived metadata
-  // metadata column (arbitrary JSON) added: can contain sensitive
-  // structured data from agents. nlp_error can reveal failure patterns
-  // of specific messages — encrypt.
+  // Messages — content + all AI-derived metadata.
+  // ⚠️ STALE PROSE REMOVED (2026-07-15): this block used to end "...nlp_error can reveal
+  // failure patterns of specific messages — encrypt.", describing the PRE-collapse design,
+  // directly above an EMPTY array. It read as a statement of current behaviour and caused a
+  // real error: an engineer cited it to justify removing a live guard, believing nlp_error
+  // was field-encrypted. Post-collapse NOTHING in `messages` is field-encrypted — at-rest
+  // secrecy for this table is whole-file SQLCipher (only `secrets` still has field-level
+  // encryption). Rows written BEFORE the collapse still hold legacy envelopes in nlp_error,
+  // so raw reads can look encrypted; that is history, not policy. A comment that contradicts
+  // the code beneath it is worse than no comment.
   messages: [],
 
   // Native agent harness (Phase 5; 0019_harness.sql). scheduled_tasks.prompt is the

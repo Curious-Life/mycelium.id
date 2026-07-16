@@ -10,6 +10,7 @@
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { reportChild } from './lib/child-stderr.mjs';
 import { createServer } from 'node:http';
 import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
@@ -54,17 +55,26 @@ await q(`INSERT INTO documents (id, user_id, path, title, content, published, pu
 await q(`INSERT INTO clustering_points (id, user_id, source_type, source_id, realm_id, territory_id, created_at) VALUES (?,?,?,?,?,?,?)`,
   ['cp-doc1', U, 'document', 'doc1', 0, 2, '2022-02-02T10:00:00Z']);
 
-const provId = await db.providers.create(U, { provider: 'custom', label: 'stub', authType: 'api_key', baseUrl: `http://127.0.0.1:${PORT}/v1` });
+const provId = await db.providers.create(U, { provider: 'custom', label: 'stub', authType: 'api_key', model: 'stub-model' /* §M (#165): a provider row with NO model choice is correctly BLOCKED now — the harness states its choice explicitly; consent itself is verify:narrate-consent's job */, baseUrl: `http://127.0.0.1:${PORT}/v1` });
 await db.providers.setActive(provId, U);
 close();
 
 const env = { ...process.env, USER_MASTER: userHex, SYSTEM_KEY: systemHex, MYCELIUM_DB: DB, MYCELIUM_USER_ID: U };
+// Non-zero exit → print the child's stderr (see lib/child-stderr.mjs): `exit=1 count=undefined`
+// alone names no cause, and hid a vault writer-lock throw behind what looked like a coverage bug.
 const runDescribe = () => new Promise((resolve) => {
   const child = spawn('node', ['pipeline/describe-clusters.js'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = ''; child.stderr.on('data', (d) => { stderr += d; });
   const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 120_000);
-  child.on('close', (status) => { clearTimeout(t); resolve({ status, stderr }); });
-  child.on('error', () => { clearTimeout(t); resolve({ status: -1, stderr }); });
+  // A spawn failure emits BOTH 'error' AND 'close' — fire once (see verify-describe-gating).
+  let fired = false;
+  const done = (status) => {
+    if (fired) return;
+    fired = true;
+    clearTimeout(t); reportChild('describe-clusters.js', status, stderr); resolve({ status, stderr });
+  };
+  child.on('close', done);
+  child.on('error', () => done(-1));
 });
 const reopen = async () => { const b = await boot({ dbPath: DB, kcvPath: KCV, userHex, systemHex, embedder: null }); db = b.db; close = b.close; };
 const row = async (sql, p) => ((await db.rawQuery(sql, p)).results || [])[0];

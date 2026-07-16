@@ -18,6 +18,7 @@
 // provenance. Safe to log / surface in diagnostics. See
 // docs/TEXT-GENERATION-ABSTRACTION-DESIGN-2026-06-15.md.
 
+import { isLoopbackUrl } from './presets.js';
 import { DEFAULT_OLLAMA_URL } from './local.js';
 import { lookupModel } from './model-registry.js';
 
@@ -45,7 +46,8 @@ const cache = new Map();
 /** test seam */
 export function _resetModelProfileCache() { cache.clear(); }
 
-const LOOPBACK_RE = /(?:\/\/)?(?:127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])/;
+// Host-parsed loopback check — the unanchored regex that was here called
+// https://localhost.attacker.io "local". @see presets.js#isLoopbackUrl
 
 /** Decide local vs cloud + the effective model id from a resolveInferenceConfig() cfg. */
 function shapeOf(cfg = {}, defaultModel) {
@@ -60,7 +62,7 @@ function shapeOf(cfg = {}, defaultModel) {
   if (cfg.anthropicApiKey || cfg.claudeOAuthToken) {
     return { isLocal: false, model: cfg.cloudModel || defaultModel || 'claude-sonnet-4-6' };
   }
-  const isLocal = cfg.jurisdiction === 'local' || (!!cfg.baseUrl && LOOPBACK_RE.test(cfg.baseUrl));
+  const isLocal = cfg.jurisdiction === 'local' || (!!cfg.baseUrl && isLoopbackUrl(cfg.baseUrl));
   if (cfg.openaiApiKey || cfg.baseUrl) {
     return { isLocal, model: cfg.cloudModel || defaultModel || (isLocal ? 'llama3.1' : 'gpt-4o') };
   }

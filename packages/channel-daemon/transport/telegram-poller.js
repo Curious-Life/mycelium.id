@@ -36,15 +36,24 @@ export function createTelegramPoller({ telegram, handleInbound, pollTimeout = 30
   let running = false;
   let offset; // last update_id + 1
   let backoff = BACKOFF_START_MS;
+  let forceClose = false;      // set after a 409 → next poll drops the reused socket
+  let conflictSince = null;    // health: another poller holds this bot token
 
   async function pollOnce() {
-    const updates = await telegram.getUpdates({ offset, timeout: pollTimeout });
-    if (updates.length) {
-      offset = maxUpdateId(updates) + 1; // advance BEFORE handling so a handler crash can't re-deliver
-      for (const u of updates) {
-        const msg = normalizeUpdate(u);
-        if (msg) await handleInbound(msg); // handler is soft-fail
-      }
+    const updates = await telegram.getUpdates({ offset, timeout: pollTimeout, forceClose });
+    forceClose = false;        // a successful poll clears the socket-reset request…
+    conflictSince = null;      // …and the conflict state.
+    for (const u of updates) {
+      const msg = normalizeUpdate(u);
+      // Crash-safe, at-least-once: handleInbound durably captures the message
+      // (deduped by tg-<id>-<chat>, inbound.js) BEFORE it returns, so the offset
+      // advances ONLY after each update has been processed. A daemon crash/restart
+      // mid-batch (config-save reload, OOM, etc.) re-fetches the un-advanced updates
+      // and re-captures them — the dedup absorbs the replay, so nothing is lost.
+      // (Previously the offset advanced for the whole batch BEFORE handling, so a
+      // crash between advance and capture dropped those messages forever.)
+      if (msg) await handleInbound(msg);
+      offset = u.update_id + 1;
     }
   }
 
@@ -60,6 +69,14 @@ export function createTelegramPoller({ telegram, handleInbound, pollTimeout = 30
           backoff = BACKOFF_START_MS; // healthy poll resets backoff
         } catch (e) {
           if (!running) break;
+          if (e?.code === 'conflict') {
+            // Another poller is holding this bot token (app running twice, or a
+            // stale daemon). Reset the socket next poll + record it for health so
+            // the UI can say the real cause instead of a vague "check the token".
+            forceClose = true;
+            if (!conflictSince) conflictSince = Date.now();
+            console.error(`[${logPrefix}] getUpdates 409 CONFLICT — another poller is using this bot token (is Mycelium running twice?). Resetting the connection.`);
+          }
           // ±30% jitter so repeated failures don't hammer the API in lockstep.
           const jittered = Math.round(backoff * (0.85 + Math.random() * 0.3));
           console.error(`[${logPrefix}] getUpdates error (backoff ~${jittered}ms): ${e.message}`);
@@ -71,6 +88,10 @@ export function createTelegramPoller({ telegram, handleInbound, pollTimeout = 30
     },
 
     stop() { running = false; },
+
+    /** Health for the status surface: 'conflict' (another poller on this token)
+     *  else 'ok'. Consumed by the daemon /healthz → getHealth → Settings pill. */
+    state() { return conflictSince ? { status: 'conflict', since: conflictSince } : { status: 'ok' }; },
 
     /** Test seam — run exactly one poll cycle. */
     _pollOnce: pollOnce,

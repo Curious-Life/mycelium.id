@@ -109,6 +109,23 @@ const sse = await (await post('/v1/chat/completions', { model: 'mycelium-auto', 
 const deltas = sse.split('\n').filter((l) => l.startsWith('data: ') && !l.includes('[DONE]')).map((l) => { try { return JSON.parse(l.slice(6)).choices?.[0]?.delta?.content || ''; } catch { return ''; } }).join('');
 rec('G6. stream:true → SSE chunks + [DONE], delta === text', sse.includes('data: [DONE]') && sse.includes('chat.completion.chunk') && deltas === CLOUD_TEXT, `head=${sse.slice(0, 48).replace(/\n/g, '⏎')}`);
 
+// G6b — CONSENT (#148): the gateway spends the operator's keys, so its on-box fallback runs
+// ONLY the owner-approved model. With NO approval, a §4g sensitive request (which routes to
+// local) must REFUSE — an honest 503 no_approved_model — never silently run an unapproved
+// default. This vault has approved nothing yet, so assert the refusal BEFORE we approve below.
+const cbR = cloudCalls, lbR = localCalls;
+r = await J(await post('/v1/chat/completions', { model: 'mycelium-auto', messages: [{ role: 'user', content: 'secret' }] }, { 'x-mycelium-sensitive': 'true' }));
+await settle();
+const rDenied = (await db.audit.recent({ eventType: 'inference-egress' })).map((x) => { try { return JSON.parse(x.details); } catch { return {}; } }).find((d) => d.decision === 'denied');
+rec('G6b. no approved on-box model → sensitive request refuses (503 no_approved_model, no local run)',
+  r.status === 503 && r.body.error?.type === 'no_approved_model' && localCalls === lbR && cloudCalls === cbR && rDenied?.reason === 'sensitive_us_block',
+  `status=${r.status} type=${r.body.error?.type} local+${localCalls - lbR} denied=${rDenied ? rDenied.reason : 'none'}`);
+
+// Approve an on-box model for this vault so the §4g→local ROUTING test (G7) exercises routing,
+// not consent. Any non-empty name works — the mock Ollama ignores it and returns LOCAL_TEXT.
+try { await db.users.create(U, 'Verify'); } catch { /* row may already exist */ }
+await db.users.updateSettings(U, { taskModels: { categorize: { model: 'qwen-approved:4b' } } });
+
 // G7 — X-Mycelium-Sensitive: true → §4g hard-block → local (no US egress) + denied audit.
 const cloudBefore = cloudCalls, localBefore = localCalls;
 r = await J(await post('/v1/chat/completions', { model: 'mycelium-auto', messages: [{ role: 'user', content: 'secret' }] }, { 'x-mycelium-sensitive': 'true' }));

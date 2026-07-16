@@ -9,6 +9,7 @@
 // inference router adopts the same split when the outbound widening (S3) lands;
 // this probe is the seed.
 
+import { isLoopbackUrl } from './presets.js';
 import { assertSafeBaseUrl } from './base-url.js';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
@@ -28,7 +29,7 @@ const OPENAI_DEFAULT = 'https://api.openai.com';
 export async function probeProvider({ provider, baseUrl, model, apiKey, fetch = globalThis.fetch, timeoutMs = 15000 } = {}) {
   if (typeof fetch !== 'function') return { ok: false, error: 'no_fetch' };
   const isAnthropic = provider === 'anthropic' || provider === 'claude';
-  const isLocal = /127\.0\.0\.1|localhost|\[::1\]/.test(baseUrl || '');
+  const isLocal = isLoopbackUrl(baseUrl || '');   // host-parsed — see presets.js#isLoopbackUrl
   // Hosted providers require a key; a local OpenAI-compatible server (Ollama /
   // LM Studio) usually does not.
   if (!apiKey && !isLocal) return { ok: false, error: 'no_key' };

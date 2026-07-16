@@ -41,6 +41,12 @@ import { createEgressAuditSink } from '../inference/egress.js';
 import { inferWithCascade } from '../inference/cascade.js';
 import { estimateTokens } from '../inference/token-budget.js';
 import { createUsageSink } from '../inference/usage.js';
+// The FAIL-CLOSED reader of settings.taskModels.categorize.model (#148) — the SINGLE reader
+// of the on-box approval (N1: one key, one reader, one meaning for silence). The gateway spends
+// the operator's keys, so its on-box fallback must run ONLY the model the owner approved; unset
+// ⇒ null ⇒ the router refuses rather than substitute a default. Do NOT re-read the setting
+// inline here — a second reader is the exact trap resolveOnBoxModel was retired for.
+import { defaultLabelModel } from '../enrich/drainer.js';
 
 // §4g cascade (opt-in, ENV-ONLY as of 2026-07-02). Default OFF → the single active provider
 // preserves v1 behavior; ON → try EU→frontier→local until one succeeds. The Settings →
@@ -200,10 +206,27 @@ async function streamCompletion(res, { router, model, prompt, maxTokens, sensiti
   }
 }
 
+// A consent refusal (#148): no on-box model is approved to run and no cloud provider served
+// this request. The router throws it directly; the cascade re-carries the code on its wrapper.
+// Check one level of `cause` so both shapes are recognised. The code is a constant — never
+// derived from a prompt/response — so matching it leaks nothing.
+function isNoApprovedLocalModel(err) {
+  return err?.code === 'no-approved-local-model' || err?.cause?.code === 'no-approved-local-model';
+}
+
 function sendError(res, err) {
   if (res.headersSent) { try { res.end(); } catch { /* ignore */ } return; }
   if (err instanceof GatewayError) {
     res.status(err.status).json({ error: { message: err.message, type: err.type, code: null } });
+    return;
+  }
+  // CONSENT REFUSAL → an HONEST 503, not the silent local run this replaces and not the
+  // generic 502 that would hide the reason. The gateway had no model it is PERMITTED to run:
+  // the owner approved no on-box model (Settings → Intelligence), and no cloud provider served
+  // the request (none configured, or the §4g sensitive-US block denied egress, or cloud
+  // failed). The message is a config fact, not content (§1 zero-leak), and names both remedies.
+  if (isNoApprovedLocalModel(err)) {
+    res.status(503).json({ error: { message: 'no approved on-box model is available to serve this request — approve a local model in Settings → Intelligence, or route to a reachable cloud provider', type: 'no_approved_model', code: 'no_approved_model' } });
     return;
   }
   // Any other failure (router/adapter) → a safe, generic envelope. NEVER echo
@@ -275,9 +298,17 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
 
   // Resolve the ACTIVE provider per request so a change in Settings → Intelligence
   // takes effect immediately. Cheap (one indexed read) for a single-user vault.
-  async function buildRouter() {
+  //
+  // CONSENT (#148): the gateway spends the operator's keys for an external harness, so its
+  // on-box fallback must never run a model the owner did not approve. `approvedLocal` is the
+  // one approved on-box model NAME (or null); we pass it as `localModel` under
+  // requireApprovedLocal:true, so a null refuses (typed 'no-approved-local-model') instead of
+  // coalescing to llama3.1. This governs ALL three local paths — no cloud, cloud-failure
+  // fallback, and the §4g sensitive-US block (the silent one). resolveInferenceConfig never
+  // returns a localModel, so setting it after the spread is unambiguous.
+  async function buildRouter(approvedLocal) {
     const cfg = await resolveInferenceConfig(db, userId);
-    return createInferenceRouter({ ...cfg, onEgress, onUsage, fetch });
+    return createInferenceRouter({ ...cfg, localModel: approvedLocal ?? null, requireApprovedLocal: true, onEgress, onUsage, fetch });
   }
 
   // Tools pass-through: a request carrying `tools` is transparently proxied to an
@@ -368,7 +399,11 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
       const messages = conv ? await withInjectedContext(body.messages) : body.messages;
       const prompt = flattenMessages(messages);
 
-      const router = await buildRouter();
+      // The owner-approved on-box model (or null) — resolved ONCE and shared by the
+      // single-provider router AND the cascade floor, so both refuse identically when the
+      // owner has approved nothing (#148). One settings read; fail-closed to null.
+      const approvedLocal = await defaultLabelModel(db, userId);
+      const router = await buildRouter(approvedLocal);
       // Gateway calls are treated as cloud-capable (the harness wants a capable
       // model) → task:'complex'. The internal simple→local split is for
       // Mycelium's OWN enrichment, not pass-through harness calls (Part B.4).
@@ -385,7 +420,7 @@ export function createGatewayHandlers({ db, userId = 'local-user', fetch = globa
       let truncated = false;
       const onTruncated = () => { truncated = true; };
       const text = (await isCascadeEnabled(db, userId))
-        ? await inferWithCascade({ chain: await resolveProviderChain(db, userId, { sensitive }), prompt, task: 'complex', maxTokens, sensitive, onEgress, onUsage, onTruncated, fetch })
+        ? await inferWithCascade({ chain: await resolveProviderChain(db, userId, { sensitive }), prompt, task: 'complex', maxTokens, sensitive, onEgress, onUsage, onTruncated, fetch, requireApprovedLocal: true, localModel: approvedLocal })
         : await router.infer({ prompt, task: 'complex', maxTokens, sensitive, onTruncated });
       if (conv) fireCapture(conv, 'assistant', text);
       // finish_reason:'length' when the provider hit its output cap so a harness can

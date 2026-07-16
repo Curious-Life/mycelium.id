@@ -16,13 +16,13 @@
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tauri::menu::{Menu, MenuItem, Submenu};
-use tauri::{Manager, RunEvent, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, RunEvent, Theme, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
 
 const PORT: u16 = 8787;
 
@@ -31,10 +31,32 @@ const PORT: u16 = 8787;
 struct Server {
     children: Mutex<Vec<Child>>,
     pidfile: Option<PathBuf>,
-    // Set on shutdown so the :4711 supervisor thread stops respawning. The current
-    // live :4711 pid (owned by that thread, NOT `children`) so reap() can group-kill it.
+    // Set on shutdown so the supervisor threads stop respawning. The current live
+    // :4711 / :8787 pids (owned by those threads, NOT `children`) so reap() can
+    // group-kill them.
     shutting_down: Arc<AtomicBool>,
     http_pid: Arc<Mutex<Option<u32>>>,
+    rest_pid: Arc<Mutex<Option<u32>>>,
+}
+
+/// Append-mode log file for a supervised child's stdout/stderr, under
+/// <dataDir>/logs/. Without this, a Finder-launched app discards child stderr
+/// entirely — server-rest died three times on 2026-07-15 and the only diagnosis
+/// path was re-running it by hand with a pipe.
+///
+/// Rotation happens AT SPAWN only (name → name.1 when >8MB): a long-lived healthy
+/// child keeps its fd and grows the file until its next respawn, and after a
+/// rotation the still-running writer keeps appending to the renamed .1 (same open
+/// file description) — only the NEXT spawn gets the fresh file. Good enough for a
+/// diagnostics tail; not a bounded-size guarantee.
+fn child_log(data_dir: &Option<PathBuf>, name: &str) -> Option<std::fs::File> {
+    let dir = data_dir.as_ref()?.join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    let p = dir.join(name);
+    if std::fs::metadata(&p).map(|m| m.len() > 8 * 1024 * 1024).unwrap_or(false) {
+        let _ = std::fs::rename(&p, dir.join(format!("{name}.1")));
+    }
+    std::fs::OpenOptions::new().create(true).append(true).open(&p).ok()
 }
 
 fn wait_for_port(port: u16, timeout: Duration) -> bool {
@@ -120,6 +142,28 @@ fn set_group(cmd: &mut Command) {
 #[cfg(not(unix))]
 fn set_group(_cmd: &mut Command) {}
 
+/// Mint one per-launch vault "family" token. Every node process THIS shell spawns that
+/// opens the vault (server-rest + the :4711 --http remote MCP, which are SIBLINGS, plus
+/// their pipeline children via jobs.js) gets the same token in MYCELIUM_VAULT_FAMILY, so
+/// the fail-closed writer lock (src/db/writer-lock.js) recognizes them as one family and
+/// lets them share the vault. A FOREIGN process (a stray `node src/index.js` MCP launched
+/// by Claude Desktop) has no matching token → it is refused instead of corrupting the WAL.
+/// 16 random bytes from /dev/urandom; time+pid fallback (still unique per launch).
+fn mint_vault_family_token() -> String {
+    use std::io::Read;
+    let mut buf = [0u8; 16];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if f.read_exact(&mut buf).is_ok() {
+            return buf.iter().map(|b| format!("{:02x}", b)).collect();
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:032x}{:x}", nanos, std::process::id())
+}
+
 /// Record a sidecar's pid (+ binary name, for the PID-reuse-safe match) so a
 /// crash-orphan can be reaped at next launch.
 fn record_pid(pidfile: &Path, pid: u32, name: &str) {
@@ -128,34 +172,86 @@ fn record_pid(pidfile: &Path, pid: u32, name: &str) {
     }
 }
 
-/// Group-kill a child (process_group made pgid == pid): SIGTERM, then SIGKILL.
+/// SIGTERM a child's whole process group (process_group made pgid == pid).
+#[cfg(unix)]
+fn term_group(pid: u32) {
+    let pgid = pid as i32;
+    unsafe { libc::kill(-pgid, libc::SIGTERM); }
+}
+#[cfg(not(unix))]
+fn term_group(_pid: u32) {}
+
+/// Is any member of the group still alive? (signal 0 probe)
+#[cfg(unix)]
+fn group_alive(pid: u32) -> bool {
+    let pgid = pid as i32;
+    (unsafe { libc::kill(-pgid, 0) }) == 0
+}
+#[cfg(not(unix))]
+fn group_alive(_pid: u32) -> bool { false }
+
+/// SIGKILL a child's whole process group. Last resort — see reap() for the grace.
 #[cfg(unix)]
 fn kill_group(pid: u32) {
     let pgid = pid as i32;
-    unsafe {
-        libc::kill(-pgid, libc::SIGTERM);
-        libc::kill(-pgid, libc::SIGKILL);
-    }
+    unsafe { libc::kill(-pgid, libc::SIGKILL); }
 }
 #[cfg(not(unix))]
 fn kill_group(_pid: u32) {}
 
 /// Reap every tracked child + clear the pidfile. Idempotent (drain empties).
+///
+/// GRACEFUL: SIGTERM every group first, then ONE shared grace window, then SIGKILL
+/// the stragglers. The old shape (TERM immediately followed by KILL on the next
+/// line) gave a SQLite writer ZERO time to finish an in-flight WAL checkpoint —
+/// on every quit/update/relaunch. A checkpoint torn mid-write leaves -wal/-shm
+/// state that the NEXT boot replays against the database, which is one of the few
+/// remaining candidate mechanisms for the recurring vault corruption (five events
+/// in two weeks as of 2026-07-16). Six seconds is far above any honest shutdown
+/// and the window is shared, not per-child, so quit stays fast.
 fn reap(server: &Server) {
-    // Tell the :4711 supervisor to stop respawning, then group-kill the live child
-    // it owns (it isn't in `children`). Order matters: flag BEFORE kill so the
-    // supervisor sees shutdown when its wait() returns and exits instead of respawning.
+    // Flag BEFORE kill so the supervisors see shutdown when their wait() returns
+    // and exit instead of respawning.
     server.shutting_down.store(true, Ordering::SeqCst);
+    let mut pids: Vec<u32> = Vec::new();
     if let Ok(g) = server.http_pid.lock() {
-        if let Some(pid) = *g {
-            kill_group(pid);
-        }
+        if let Some(pid) = *g { pids.push(pid); }
     }
+    if let Ok(g) = server.rest_pid.lock() {
+        if let Some(pid) = *g { pids.push(pid); }
+    }
+    let mut kids: Vec<Child> = Vec::new();
     if let Ok(mut guard) = server.children.lock() {
-        for mut child in guard.drain(..) {
-            kill_group(child.id());
-            let _ = child.kill();
-            let _ = child.wait();
+        kids = guard.drain(..).collect();
+    }
+    for c in &kids { pids.push(c.id()); }
+
+    for p in &pids { term_group(*p); }
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while Instant::now() < deadline && pids.iter().any(|p| group_alive(*p)) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    for p in &pids {
+        if group_alive(*p) { kill_group(*p); }
+    }
+    for mut child in kids {
+        let _ = child.kill(); // no-op if already dead; reaps the zombie either way
+        let _ = child.wait();
+    }
+    // Late-publish sweep (review B3): a supervisor that was INSIDE spawn() when we
+    // collected pids publishes its child's pid after the fact. The flag stops further
+    // respawns and the supervisor's own post-publish check reaps its child — but if
+    // that thread is preempted past our exit, the child outlives the app holding the
+    // vault. Belt: re-read both slots and reap anything that appeared meanwhile.
+    for slot in [&server.http_pid, &server.rest_pid] {
+        if let Ok(g) = slot.lock() {
+            if let Some(pid) = *g {
+                if !pids.contains(&pid) {
+                    term_group(pid);
+                    std::thread::sleep(Duration::from_millis(300));
+                    if group_alive(pid) { kill_group(pid); }
+                }
+            }
         }
     }
     if let Some(pf) = &server.pidfile {
@@ -386,64 +482,147 @@ fn main() {
                 else if existing.is_empty() { "--max-old-space-size=6144".to_string() }
                 else { format!("{} --max-old-space-size=6144", existing) }
             };
-            let mut cmd = Command::new(&node_bin);
-            cmd.arg("src/server-rest.js")
-                .current_dir(&home)
-                .env("NODE_OPTIONS", &node_options)
-                .env("MYCELIUM_REST_PORT", PORT.to_string())
-                .env("MYCELIUM_KEY_SOURCE", &key_source);
-            if bundled {
-                // Make the bundled node + python resolvable to the clustering child
-                // (src/jobs.js → run-clustering.sh, whose JS stages call bare `node`),
-                // and hand the explicit python down via MYCELIUM_PYTHON (the
-                // run-clustering.sh $PYTHON seam from the fresh-user-provisioning work).
-                let path = std::env::var("PATH").unwrap_or_default();
-                cmd.env(
-                    "PATH",
-                    format!("{}:{}:{}", home.display(), home.join("python/bin").display(), path),
-                )
-                .env("MYCELIUM_PYTHON", &python_bin);
-                // Whole-vault at-rest encryption (A′) — ON in the packaged app, OFF
-                // in `cargo tauri dev` (bundled=false) so a dev vault is never
-                // surprise-migrated. index.js boot derives the DB key from the
-                // master key, runs the idempotent encrypt-in-place migration (fresh
-                // vaults are born encrypted), then opens every connection keyed.
-                // MUST also be set on the :4711 supervisor below — it opens the SAME
-                // vault, and a plaintext open of an encrypted file fail-closes.
-                cmd.env("MYCELIUM_AT_REST", "1");
-                // On-disk search (FTS5 + sqlite-vec INSIDE the encrypted vault) is a
-                // package deal with at-rest: the in-RAM index would otherwise
-                // re-decrypt + rebuild ALL messages into the heap on every boot
-                // (minutes of event-loop starvation through the cipher). The on-disk
-                // index persists + queries run in C. @see src/search/index.js.
-                cmd.env("MYCELIUM_SEARCH_BACKEND", "sqlite");
-            }
-            if hf_home.exists() {
-                // Offline embedding model bundled under Resources/app/hf-cache.
-                cmd.env("HF_HOME", &hf_home).env("HF_HUB_OFFLINE", "1");
-            }
+            // One vault-family token per launch, shared by server-rest + the :4711 --http
+            // sibling (and their pipeline children) so the writer lock treats them as one
+            // family. See mint_vault_family_token() + src/db/writer-lock.js.
+            let vault_family = mint_vault_family_token();
 
-            // Durable per-OS data dir — keeps the encrypted vault OUTSIDE the .app
-            // (see src/paths.js), so replacing the .app never wipes the user's history.
-            if let Some(d) = &data_dir {
-                cmd.env("MYCELIUM_DATA_DIR", d);
+            // Node REST + portal (:8787) — SUPERVISED (same pattern as the :4711
+            // thread below). It used to be a fire-and-forget spawn: when server-rest
+            // died on an uncaught error the shell never noticed, the UI kept talking
+            // to a dead port ("Load failed"), and its stderr — the only diagnosis —
+            // went to /dev/null under a Finder launch. Observed three times on
+            // 2026-07-15 alone. Now: respawn with backoff, stderr/stdout captured to
+            // <dataDir>/logs/server-rest.log, stop flag honoured on quit.
+            let shutting_down = Arc::new(AtomicBool::new(false));
+            let rest_pid: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+            {
+                let r_node = node_bin.clone();
+                let r_home = home.clone();
+                let r_opts = node_options.clone();
+                let r_family = vault_family.clone();
+                let r_key = key_source.clone();
+                let r_python = python_bin.clone();
+                let r_hf = hf_home.clone();
+                let r_data = data_dir.clone();
+                let r_flag = shutting_down.clone();
+                let r_pid = rest_pid.clone();
+                let r_bundled = bundled;
+                let r_dev = is_dev;
+                std::thread::spawn(move || {
+                    let spawn_rest = || {
+                        let mut cmd = Command::new(&r_node);
+                        cmd.arg("src/server-rest.js")
+                            .current_dir(&r_home)
+                            .env("NODE_OPTIONS", &r_opts)
+                            .env("MYCELIUM_REST_PORT", PORT.to_string())
+                            .env("MYCELIUM_VAULT_FAMILY", &r_family)
+                            .env("MYCELIUM_KEY_SOURCE", &r_key);
+                        if r_bundled {
+                            // Make the bundled node + python resolvable to the clustering child
+                            // (src/jobs.js → run-clustering.sh, whose JS stages call bare `node`),
+                            // and hand the explicit python down via MYCELIUM_PYTHON (the
+                            // run-clustering.sh $PYTHON seam from the fresh-user-provisioning work).
+                            let path = std::env::var("PATH").unwrap_or_default();
+                            cmd.env(
+                                "PATH",
+                                format!("{}:{}:{}", r_home.display(), r_home.join("python/bin").display(), path),
+                            )
+                            .env("MYCELIUM_PYTHON", &r_python);
+                            // Whole-vault at-rest encryption (A′) — ON in the packaged app, OFF
+                            // in `cargo tauri dev` (bundled=false) so a dev vault is never
+                            // surprise-migrated. index.js boot derives the DB key from the
+                            // master key, runs the idempotent encrypt-in-place migration (fresh
+                            // vaults are born encrypted), then opens every connection keyed.
+                            // MUST also be set on the :4711 supervisor below — it opens the SAME
+                            // vault, and a plaintext open of an encrypted file fail-closes.
+                            cmd.env("MYCELIUM_AT_REST", "1");
+                            // On-disk search (FTS5 + sqlite-vec INSIDE the encrypted vault) is a
+                            // package deal with at-rest: the in-RAM index would otherwise
+                            // re-decrypt + rebuild ALL messages into the heap on every boot
+                            // (minutes of event-loop starvation through the cipher). The on-disk
+                            // index persists + queries run in C. @see src/search/index.js.
+                            cmd.env("MYCELIUM_SEARCH_BACKEND", "sqlite");
+                        }
+                        if r_hf.exists() {
+                            // Offline embedding model bundled under Resources/app/hf-cache.
+                            cmd.env("HF_HOME", &r_hf).env("HF_HUB_OFFLINE", "1");
+                        }
+                        // Durable per-OS data dir — keeps the encrypted vault OUTSIDE the .app
+                        // (see src/paths.js), so replacing the .app never wipes the user's history.
+                        if let Some(d) = &r_data {
+                            cmd.env("MYCELIUM_DATA_DIR", d);
+                        }
+                        if r_dev {
+                            cmd.env("MYCELIUM_SNAPSHOT_ON_BOOT", "1");
+                        }
+                        // Child diagnostics survive a Finder launch (see child_log).
+                        if let Some(f) = child_log(&r_data, "server-rest.log") {
+                            if let Ok(out) = f.try_clone() {
+                                cmd.stdout(Stdio::from(out));
+                            }
+                            cmd.stderr(Stdio::from(f));
+                        }
+                        set_group(&mut cmd);
+                        cmd.spawn()
+                    };
+                    let mut backoff = Duration::from_secs(1);
+                    loop {
+                        if r_flag.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        match spawn_rest() {
+                            Ok(mut c) => {
+                                if let Ok(mut g) = r_pid.lock() {
+                                    *g = Some(c.id());
+                                }
+                                // CLOSE THE QUIT RACE (review B3): reap() may have collected
+                                // pids while we were inside spawn_rest() — the shutdown flag
+                                // is set, but nobody knows OUR child yet. Re-check now that
+                                // the pid is published and reap our own child, or it outlives
+                                // the app HOLDING THE VAULT (the exact two-writer hazard).
+                                if r_flag.load(Ordering::SeqCst) {
+                                    term_group(c.id());
+                                    std::thread::sleep(Duration::from_millis(500));
+                                    if group_alive(c.id()) { kill_group(c.id()); }
+                                    let _ = c.wait();
+                                    if let Ok(mut g) = r_pid.lock() { *g = None; }
+                                    break;
+                                }
+                                let started = Instant::now();
+                                let _ = c.wait();
+                                if let Ok(mut g) = r_pid.lock() {
+                                    *g = None;
+                                }
+                                if r_flag.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                                // A healthy run resets the backoff; a fast crash grows
+                                // it (capped) so we never hot-loop a broken server.
+                                if started.elapsed() >= Duration::from_secs(60) {
+                                    backoff = Duration::from_secs(1);
+                                }
+                                eprintln!("[mycelium] server-rest (:8787) exited — restarting in {}s (see logs/server-rest.log)", backoff.as_secs());
+                                std::thread::sleep(backoff);
+                                backoff = std::cmp::min(backoff * 2, Duration::from_secs(30));
+                            }
+                            Err(e) => {
+                                eprintln!("[mycelium] server-rest did not start ({e}) — is `node` installed and MYCELIUM_HOME correct? retry in {}s", backoff.as_secs());
+                                std::thread::sleep(backoff);
+                                backoff = std::cmp::min(backoff * 2, Duration::from_secs(30));
+                            }
+                        }
+                    }
+                });
             }
-            if is_dev {
-                cmd.env("MYCELIUM_SNAPSHOT_ON_BOOT", "1");
-            }
-            set_group(&mut cmd);
-            let child = cmd
-                .spawn()
-                .expect("failed to start the mycelium server — is `node` installed and MYCELIUM_HOME correct?");
 
             // Embed service (:8091) is now OWNED BY THE NODE SERVER
             // (src/embed/supervisor.js): it dep-checks, adopts-or-spawns, RESTARTS
             // on crash, and surfaces health to the UI via /processing-status — so no
             // fire-and-forget Rust spawn here (which never noticed a post-spawn crash
             // and left the UI hanging at "Processing 0/N").
-            let mut children: Vec<Child> = vec![child];
+            let mut children: Vec<Child> = vec![];
             // Shared with the :4711 supervisor thread (created below, when remote is on).
-            let shutting_down = Arc::new(AtomicBool::new(false));
             let http_pid: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
 
             // Remote stack (--http + caddy + frpc) — only when remote is configured.
@@ -467,6 +646,7 @@ fn main() {
                     let sup_key = key_source.clone();
                     let sup_data = d.clone();
                     let sup_opts = node_options.clone();
+                    let sup_family = vault_family.clone(); // same family token as server-rest
                     let sup_flag = shutting_down.clone();
                     let sup_pid = http_pid.clone();
                     // Same at-rest decision as the :8787 server (bundled = packaged
@@ -482,6 +662,7 @@ fn main() {
                                 .current_dir(&sup_home)
                                 .env("NODE_OPTIONS", &sup_opts)
                                 .env("MYCELIUM_PORT", "4711")
+                                .env("MYCELIUM_VAULT_FAMILY", &sup_family)
                                 .env("MYCELIUM_KEY_SOURCE", &sup_key)
                                 .env("MYCELIUM_DATA_DIR", &sup_data);
                             if sup_at_rest {
@@ -493,6 +674,13 @@ fn main() {
                             }
                             if !public_host.is_empty() {
                                 http.env("MYCELIUM_BASE_URL", format!("https://{public_host}"));
+                            }
+                            // Child diagnostics survive a Finder launch (see child_log).
+                            if let Some(f) = child_log(&Some(sup_data.clone()), "mcp-4711.log") {
+                                if let Ok(out) = f.try_clone() {
+                                    http.stdout(Stdio::from(out));
+                                }
+                                http.stderr(Stdio::from(f));
                             }
                             set_group(&mut http);
                             http.spawn()
@@ -506,6 +694,16 @@ fn main() {
                                 Ok(mut c) => {
                                     if let Ok(mut g) = sup_pid.lock() {
                                         *g = Some(c.id());
+                                    }
+                                    // Same quit-race close as the server-rest supervisor
+                                    // (review B3) — this race pre-existed here too.
+                                    if sup_flag.load(Ordering::SeqCst) {
+                                        term_group(c.id());
+                                        std::thread::sleep(Duration::from_millis(500));
+                                        if group_alive(c.id()) { kill_group(c.id()); }
+                                        let _ = c.wait();
+                                        if let Ok(mut g) = sup_pid.lock() { *g = None; }
+                                        break;
                                     }
                                     eprintln!("[mycelium] remote MCP (OAuth) server on 127.0.0.1:4711 (supervised)");
                                     let started = Instant::now();
@@ -590,6 +788,7 @@ fn main() {
                 pidfile,
                 shutting_down,
                 http_pid,
+                rest_pid,
             });
 
             // Wait for the REST server to bind before pointing the webview at it.
@@ -626,6 +825,11 @@ fn main() {
                 // in-app wordmark. The window stays opaque (the #52 flicker fix).
                 .title_bar_style(TitleBarStyle::Visible)
                 .hidden_title(true)
+                // Start the native window DARK to match the app's dark default, so the
+                // title-bar strip is themed from the first frame (no white flash before
+                // the webview loads + calls set_theme). The frontend flips it to light if
+                // the user's persisted theme is light (theme.ts → plugin:window|set_theme).
+                .theme(Some(Theme::Dark))
                 // Disable Tauri's native OS file-drop handler so the webview's
                 // HTML5 drag-drop (the Import drop zone) receives dropped files.
                 // Without this, WKWebView swallows the drop and dataTransfer.files

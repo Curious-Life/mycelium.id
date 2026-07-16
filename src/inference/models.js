@@ -9,6 +9,7 @@
 // echoed. Errors are a CATEGORY only (never the provider's body). The base_url is
 // SSRF-guarded before any fetch with the key (H5), same as probe.js.
 
+import { isLoopbackUrl } from './presets.js';
 import { assertSafeBaseUrl, fetchProvider } from './base-url.js';
 import { CLAUDE_CODE_UA, CLAUDE_CODE_BETA } from './anthropic-wire.js';
 
@@ -30,7 +31,7 @@ const OPENAI_DEFAULT = 'https://api.openai.com';
 export async function listModels({ provider, baseUrl, apiKey, token, fetch = globalThis.fetch, timeoutMs = 12000 } = {}) {
   if (typeof fetch !== 'function') return { ok: false, error: 'no_fetch' };
   const isAnthropic = provider === 'anthropic' || provider === 'claude';
-  const isLocal = /127\.0\.0\.1|localhost|\[::1\]/.test(baseUrl || '');
+  const isLocal = isLoopbackUrl(baseUrl || '');   // host-parsed — see presets.js#isLoopbackUrl
   // Hosted providers usually need a key to list; a local OpenAI-compatible server
   // (Ollama / LM Studio) does not. OpenRouter happens to list without a key too,
   // so we don't hard-require one here — let the provider decide (401 → auth_rejected).
