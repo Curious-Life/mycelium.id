@@ -45,16 +45,27 @@ function degradedMediaLine(msg) {
  *        typing indicator (presence.js) — covers the PRE-TURN phases (media
  *        download/vision/transcription + coalesce window), which for images and
  *        voice notes are the longest part; the lane's own presence covers the
- *        model turn itself. Only wired when two-way replies are on.
+ *        model turn itself. Wired unconditionally since the re-probe upgrade
+ *        (index.js): a capture-only boot can become two-way later, and the
+ *        handler captured this by value — so it always gets the real object.
  * @param {{submit:(a:{fromId:any,owner:boolean,run:()=>Promise<any>})=>{accepted:boolean,reason?:string}}} [deps.mediaQueue]
  *        bounded serial worker (media-queue.js) — when wired, the minutes-long
  *        media stage is OFFLOADED so the poller is never blocked (MED-4). On a
  *        rejected submit (queue-full / rate-limited) the message DEGRADES to a
  *        placeholder, captured + turned inline — never dropped. When ABSENT the
  *        media stage runs inline (legacy/capture-only path; unit tests rely on it).
+ * @param {(a:{platform:string,senderId:any,senderName:string|null,chatId:any})=>Promise<string|null>} [deps.requestPairing]
+ *        design D2: when a DM arrives while NO owner is bound, ask the vault
+ *        (over loopback) to mint a short pairing code for this sender. Returns
+ *        the code to show them (or null if the mint failed). Only wired for
+ *        Telegram; when absent, an unbound DM is dropped as before (fail-closed).
+ * @param {(a:{chatId:any,text:string,replyToMessageId?:any})=>Promise<any>} [deps.sendReply]
+ *        direct outbound send used ONLY for the pairing challenge (it precedes
+ *        any turn, so it can't go through the turn's reply tool). Goes through
+ *        the same /telegram/send egress chokepoint as every other outbound.
  * @param {string} [deps.logPrefix]
  */
-export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands, isGroupAuthorized, checkChannelAccess, contextualizeMedia, presence, mediaQueue, logPrefix = 'channel-daemon' }) {
+export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands, isGroupAuthorized, checkChannelAccess, contextualizeMedia, presence, mediaQueue, requestPairing, sendReply, logPrefix = 'channel-daemon' }) {
   if (!vault?.captureMessage) throw new TypeError('createInboundHandler: vault.captureMessage required');
   if (typeof runTurn !== 'function') throw new TypeError('createInboundHandler: runTurn required');
 
@@ -172,6 +183,33 @@ export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands
     //    never queued, captured, or turned. So /disallow works even mid-flood.
     if (commands && msg.content && commands.isCommand(msg.content)) {
       try { if (await commands.handle(msg)) return; } catch (e) { console.error(`[${logPrefix}] command failed: ${e.message}`); return; }
+    }
+
+    // 0b. Pairing (design D2): a Telegram DM arrives while NO owner is bound yet.
+    //     Instead of silently dropping it — the #1 "my bot never replied" trap —
+    //     mint a short pairing code and reply it so the user can approve it in the
+    //     app (Settings → Channels), which binds OWNER_TELEGRAM_ID. DMs only (a
+    //     group can't self-pair); a stray /start is the perfect trigger. The DM is
+    //     NOT captured or turned — it only starts the handshake.
+    if (!ownerTelegramId && msg.channelKind !== 'telegram-group' && typeof requestPairing === 'function') {
+      try {
+        const code = await requestPairing({
+          platform: 'telegram',
+          senderId: msg.fromId,
+          senderName: msg.fromName || msg.username || null,
+          chatId: msg.chatId,
+        });
+        if (code && typeof sendReply === 'function') {
+          await sendReply({
+            chatId: msg.chatId,
+            text: `👋 To connect this chat to Mycelium, open the app → Settings → Channels and approve this code:\n\n${code}\n\nIt expires in 10 minutes.`,
+            replyToMessageId: msg.messageId,
+          });
+        }
+      } catch (e) {
+        console.error(`[${logPrefix}] pairing request failed (chat=${msg.chatId}): ${e.message}`);
+      }
+      return; // never capture/turn an unpaired DM — this only starts the handshake
     }
 
     // 1. authorize (fail-closed) BEFORE any download/offload — media of

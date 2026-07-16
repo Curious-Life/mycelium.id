@@ -79,7 +79,20 @@ export async function buildDaemon(cfg, { runTurn } = {}) {
   // ── shared agent-turn pipeline (one runtime/lane for all platforms) ────────
   let effectiveRunTurn = runTurn;
   let lane = null;
-  let presence = null; // typing indicator — shared by the lane (turn) + inbound (pre-turn media stage)
+  let reprobeTimer = null;
+  // Typing indicator — shared by the lane (turn) + inbound (pre-turn media stage).
+  // Constructed UNCONDITIONALLY: the inbound handlers capture it BY VALUE at build
+  // time, so a capture-only boot that later upgrades (re-probe below) must already
+  // have handed them the real object, not null. It closes over the late-bound
+  // `telegram` and is inert until a turn actually runs — costs nothing when idle.
+  const presence = createTypingPresence({
+    sendChatAction: (chatId) => telegram ? telegram.sendChatAction({ chatId }) : null,
+  });
+  // Honest replies state for /healthz → the Channels UI (so "receiving but not
+  // replying — no model connected" is never a silent green again). ONE shared object,
+  // MUTATED in place on upgrade: server.js reads `replies.mode` per request, so the
+  // flip is visible live without a daemon restart.
+  const replies = { mode: 'capture-only', backend: null };
   if (!effectiveRunTurn) {
     // auto router records cloud-routing decisions hash-only via the vault.
     const auditEgress = (e) => { vault.recordInferenceEgress(e); };
@@ -92,16 +105,14 @@ export async function buildDaemon(cfg, { runTurn } = {}) {
       try { nativeNoModel = !(await runtime.probeHealth())?.hasModel; } catch { nativeNoModel = true; }
       if (nativeNoModel) console.log('[channel-daemon] native backend selected but the vault has no model — capture-only until a model is connected');
     }
-    if (runtime && !nativeNoModel) {
-      // Typing indicator while a turn runs (Telegram DMs; presence.js gates).
-      presence = createTypingPresence({
-        sendChatAction: (chatId) => telegram ? telegram.sendChatAction({ chatId }) : null,
-      });
+    // Build the full reply pipeline for `rt` and swap it in LIVE. Called at boot when
+    // the model is already reachable, or later by the re-probe when it becomes so.
+    const activateLane = (rt) => {
       // Observability (Layer 3b): persist every turn outcome + surface degraded/failed turns.
       // Log path: explicit env, else <data dir>/logs, else null (console-only, fail-soft).
       const turnLogPath = resolveTurnLogPath();
       lane = createLane({
-        runtime, presence, ...(cfg.turnTimeoutMs ? { turnTimeoutMs: cfg.turnTimeoutMs } : {}),
+        runtime: rt, presence, ...(cfg.turnTimeoutMs ? { turnTimeoutMs: cfg.turnTimeoutMs } : {}),
         turnLogPath,
         // A not-ok or degraded outcome is an operator signal — WARN loudly (the persistent log +
         // /healthz lastTurn carry the detail). A proactive push is a Layer-3b follow-up.
@@ -114,17 +125,64 @@ export async function buildDaemon(cfg, { runTurn } = {}) {
       } else {
         effectiveRunTurn = lane.runTurn;
       }
+      replies.mode = 'on';
+      replies.backend = lane?.label || 'custom';
       console.log(`[channel-daemon] two-way replies ON via ${lane.label}${cfg.coalesceWindowMs > 0 ? ` (coalesce ${cfg.coalesceWindowMs}ms)` : ''}`);
+      // Reply-tool preflight, HERE and not only in main(): main() destructured `lane`
+      // at boot, so a late (re-probe) upgrade used to skip the check entirely — a vault
+      // that doesn't advertise `reply` would upgrade and then silently fail to deliver,
+      // in exactly the boot-race path this fix exists for (review M2). Fail-soft + async:
+      // a warning, never a crash, off the activation's synchronous critical section.
+      if (cfg.mcpMode !== 'stdio') {
+        vault.listToolNames().then((tools) => {
+          if (tools && !tools.includes('reply')) {
+            console.error(`[channel-daemon] ⚠ vault MCP does NOT advertise the 'reply' tool — two-way replies will NOT deliver. Boot the vault with AGENT_URL=${cfg.selfUrl} (and MYCELIUM_MCP_BEARER).`);
+          } else if (tools) {
+            console.log('[channel-daemon] preflight OK — vault advertises the reply tool.');
+          }
+        }).catch(() => { /* preflight is advisory */ });
+      }
+    };
+    if (runtime && !nativeNoModel) {
+      activateLane(runtime);
     } else {
       effectiveRunTurn = captureOnlyRunTurn;
+      // THE BOOT-RACE LATCH FIX. The one-shot probe above races the server's boot: the
+      // daemon is spawned BY server-rest, probes it within 3s, and on a 2GB vault the
+      // server is still opening/migrating — so the probe times out and the daemon
+      // latched capture-only for its whole life. Telegram then RECEIVED every message
+      // and silently never replied; the Channels card told the user to "select an AI
+      // model" — advice that could not work, because nothing ever re-checked. Worse,
+      // server-rest is now SUPERVISED (auto-respawn), so every respawn re-rolled this
+      // race. Re-probe until the model becomes reachable, then upgrade IN PLACE.
+      // Upgrade-only by design: a later outage is a per-turn failure the lane already
+      // reports honestly; flapping the whole pipeline would hide it.
+      if (runtime && nativeNoModel && typeof runtime.probeHealth === 'function') {
+        const RECHECK_MS = Number(cfg.modelRecheckMs) > 0 ? Number(cfg.modelRecheckMs) : 15_000;
+        // The callback is async: a SLOW probe can leave several ticks in flight at once,
+        // and each would see hasModel and activate its own lane (two coalescers, double
+        // replies). `upgraded` is checked+set with NO await in between — JS's single
+        // thread makes that atomic — so exactly one tick wins. Prod timings (3s probe
+        // cap ≪ 15s interval) can't overlap, but the guard makes it true by construction.
+        let upgraded = false;
+        reprobeTimer = setInterval(async () => {
+          let hasModel = false;
+          try { hasModel = !!(await runtime.probeHealth())?.hasModel; } catch { hasModel = false; }
+          if (!hasModel || upgraded) return;
+          upgraded = true;
+          clearInterval(reprobeTimer); reprobeTimer = null;
+          activateLane(runtime);
+          console.log('[channel-daemon] model became reachable — upgraded capture-only → two-way replies (no restart needed)');
+        }, RECHECK_MS);
+        if (reprobeTimer.unref) reprobeTimer.unref();
+      }
     }
   }
-
-  // Honest replies state for /healthz → the Channels UI (so "receiving but not
-  // replying — no model connected" is never a silent green again).
-  const replies = effectiveRunTurn === captureOnlyRunTurn
-    ? { mode: 'capture-only', backend: null }
-    : { mode: 'on', backend: lane?.label || 'custom' };
+  // Injected runTurn (tests) bypasses the block above — reflect it honestly.
+  if (effectiveRunTurn && effectiveRunTurn !== captureOnlyRunTurn && replies.mode === 'capture-only') {
+    replies.mode = 'on';
+    replies.backend = lane?.label || 'custom';
+  }
 
   const recordEgress = (entry) => { vault.recordEgress(entry); };
   const persistOutbound = (args) => { vault.captureMessage(args).catch((e) => console.error('[channel-daemon] outbound persist failed:', e.message)); };
@@ -169,7 +227,11 @@ export async function buildDaemon(cfg, { runTurn } = {}) {
     const mediaQueue = cfg.mediaEnabled
       ? createMediaQueue({ maxPending: cfg.mediaQueueMax, senderMax: cfg.mediaSenderMax, senderWindowMs: cfg.mediaSenderWindowMs })
       : undefined;
-    const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: effectiveRunTurn, commands, isGroupAuthorized, checkChannelAccess, contextualizeMedia: mediaStage, mediaQueue, presence });
+    // Pairing (design D2): only wired for Telegram, and only meaningful while no
+    // owner is bound — createInboundHandler self-guards on !ownerTelegramId. The
+    // reply rides the SAME /telegram/send egress chokepoint as every outbound.
+    const requestPairing = (a) => vault.requestPairing(a);
+    const handleInbound = createInboundHandler({ vault, ownerTelegramId: cfg.ownerTelegramId, runTurn: (turnCtx, msg) => effectiveRunTurn(turnCtx, msg) /* trampoline: re-probe swaps the target live */, commands, isGroupAuthorized, checkChannelAccess, contextualizeMedia: mediaStage, mediaQueue, presence, requestPairing, sendReply });
     poller = createTelegramPoller({ telegram, handleInbound });
   }
 
@@ -206,12 +268,14 @@ export async function buildDaemon(cfg, { runTurn } = {}) {
     const discordCommands = createDiscordCommandHandler({ vault, sendReply: discordSendReply, ownerDiscordId: cfg.ownerDiscordId });
     const isChannelAuthorized = async (id) => { const a = await vault.checkChannelAuthority({ kind: 'discord', id }); return !!a?.allowed; };
     const checkDiscordAccess = (kind, id, sender) => vault.checkChannelAccess({ kind, id, sender });
-    const handleDiscordInbound = createDiscordInboundHandler({ vault, ownerDiscordId: cfg.ownerDiscordId, runTurn: effectiveRunTurn, commands: discordCommands, isChannelAuthorized, checkChannelAccess: checkDiscordAccess });
+    const handleDiscordInbound = createDiscordInboundHandler({ vault, ownerDiscordId: cfg.ownerDiscordId, runTurn: (turnCtx, msg) => effectiveRunTurn(turnCtx, msg) /* trampoline (see telegram) */, commands: discordCommands, isChannelAuthorized, checkChannelAccess: checkDiscordAccess });
     gateway = createDiscordGateway({ botToken: cfg.discordBotToken, handleInbound: handleDiscordInbound });
   }
 
-  const app = createDaemonApp({ telegramSendHandler, discordSendHandler, getActiveTurn, replies, getLastTurn: lane ? lane.lastTurn : undefined });
-  return { app, poller, gateway, telegram, discord, lane, vault, replies };
+  const app = createDaemonApp({ telegramSendHandler, discordSendHandler, getActiveTurn, replies, getLastTurn: () => (lane && typeof lane.lastTurn === "function" ? lane.lastTurn() : null) /* lane may be built AFTER boot (re-probe) */ });
+  // `lane` is the BOOT-time value (null on a capture-only boot); getLane() reads the
+  // live one across a re-probe upgrade. Kept both for compatibility.
+  return { app, poller, gateway, telegram, discord, lane, getLane: () => lane, vault, replies };
 }
 
 async function main() {
@@ -235,15 +299,8 @@ async function main() {
     catch (e) { console.error(`[channel-daemon] discord users/@me failed — check DISCORD_BOT_TOKEN: ${e.message}`); process.exit(1); }
   }
 
-  // Preflight (http mode): two-way replies need the vault MCP to advertise `reply`.
-  if (lane && cfg.mcpMode !== 'stdio') {
-    const tools = await vault.listToolNames();
-    if (tools && !tools.includes('reply')) {
-      console.error(`[channel-daemon] ⚠ vault MCP does NOT advertise the 'reply' tool — two-way replies will NOT deliver. Boot the vault with AGENT_URL=${cfg.selfUrl} (and MYCELIUM_MCP_BEARER).`);
-    } else if (tools) {
-      console.log('[channel-daemon] preflight OK — vault advertises the reply tool.');
-    }
-  }
+  // Reply-tool preflight moved INTO activateLane (buildDaemon): it must also run on a
+  // late re-probe upgrade, which this boot-time block could never see (review M2).
 
   const server = app.listen(cfg.port, cfg.host, () => {
     console.log(`[channel-daemon] listening on http://${cfg.host}:${cfg.port} (vault: ${cfg.vaultBaseUrl})`);

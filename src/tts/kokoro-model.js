@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, createWriteStream, statSync, renameSync } from '
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { dataDir } from '../paths.js';
+import { venvPythonPath, bundledPythonPath, systemPython } from '../system/platform-env.js';
 
 const ONNX_URL = process.env.KOKORO_ONNX_URL || 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx';
 const VOICES_URL = process.env.KOKORO_VOICES_URL || 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin';
@@ -26,11 +27,11 @@ export function kokoroPaths(opts = {}) {
 // Exported so kokoro-supervisor.js uses the identical resolution.
 export function resolveKokoroPython({ home = process.cwd() } = {}) {
   if (process.env.MYCELIUM_PYTHON) return process.env.MYCELIUM_PYTHON;
-  const bundled = join(home, 'python/bin/python3');
+  const bundled = bundledPythonPath(home);   // per-OS: python/bin/python3 | python\python.exe
   if (existsSync(bundled)) return bundled;
-  const venv = join(home, 'pipeline/.venv/bin/python3');
+  const venv = venvPythonPath(home);         // per-OS: .venv/bin/python3 | .venv\Scripts\python.exe
   if (existsSync(venv)) return venv;
-  return 'python3';
+  return systemPython();
 }
 const resolvePython = resolveKokoroPython;
 

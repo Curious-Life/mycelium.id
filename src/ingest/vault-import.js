@@ -34,14 +34,26 @@ import crypto from 'node:crypto';
 import { putBlob, isUserNamespacedBlobPath, assertUserNamespacedBlobPath } from './blob-store.js';
 import { getMasterKey } from '../crypto/crypto-local.js';
 import { encryptVector } from '../search/ann/decode.js';
+import { assertSafeBaseUrl } from '../inference/base-url.js';
+import { KNOWN_PROVIDERS } from '../inference/known-providers.js';
+import { credentialsCarrySubscriptionMaterial } from '../inference/subscription-token.js';
 
 const MAX_ROWS_PER_TABLE = Number(process.env.MYCELIUM_IMPORT_MAX_MESSAGES) || 1_000_000;
 const MAX_ATTACHMENT_BYTES = Number(process.env.MYCELIUM_IMPORT_ATTACHMENT_LIMIT_BYTES) || 100 * 1024 * 1024;
 
 const asArray = (v) => (Array.isArray(v) ? v : Array.isArray(v?.data) ? v.data : []);
 
-/** SQL-safe by construction: table names come ONLY from this module's fixed
- *  spec below — never from the manifest. */
+/** Resolve a table's live columns.
+ *
+ * ⚠️ THE TABLE NAME IS NOT ALWAYS TRUSTED. This used to read "SQL-safe by construction:
+ * table names come ONLY from this module's fixed spec below — never from the manifest."
+ * That is true of THIS file's callers (every one passes a string literal) but restoreTable
+ * is SHARED: full-export-import derives the table name from a bundle-controlled FILENAME.
+ * The untrue comment is plausibly why nobody normalized it — and SQLite resolves
+ * identifiers CASE-INSENSITIVELY, so an exact-match DENY let a bundle's "Secrets.ndjson"
+ * write the field-encrypted `secrets` table. That caller now lowercases + shape-checks the
+ * name before it reaches here (full-export-import.js). better-sqlite3's prepare() rejects
+ * multi-statement SQL, so "; DROP" was never the risk — the DENY BYPASS was. */
 async function tableColumns(db, table) {
   try {
     const res = await db.rawQuery(`PRAGMA table_info(${table})`);
@@ -69,7 +81,11 @@ export async function restoreTable(db, table, rows, { userId, overrides = {} }) 
   // HAS a created_at column WITHOUT carrying one → SQLite stamps the schema
   // default (import-time "now"). Silently this is the date-cliff bug; counted
   // here it surfaces in the reconciliation report so a lossy restore is visible.
-  const out = { attempted: 0, inserted: 0, deduped: 0, failed: 0, capped: 0, skippedEmpty: 0, inferredNow: 0 };
+  // `refused` (FAIL-LOUD, like skippedEmpty): a row dropped by a per-table SECURITY
+  // policy, not by malformed data. Counted apart from `failed` so the reconciliation
+  // report can say "we refused 1 provider row" instead of burying it in a generic
+  // failure — a silently-vanishing credential row is indistinguishable from a bug.
+  const out = { attempted: 0, inserted: 0, deduped: 0, failed: 0, capped: 0, skippedEmpty: 0, inferredNow: 0, refused: 0 };
   if (!Array.isArray(rows) || rows.length === 0) return out;
   const cols = await tableColumns(db, table);
   if (cols.size === 0) { out.failed = rows.length; out.attempted = rows.length; out.tableMissing = true; return out; }
@@ -109,6 +125,71 @@ export async function restoreTable(db, table, rows, { userId, overrides = {} }) 
       // r.user_id was forced to `userId` above; null local_path (legacy r2-only)
       // is allowed.
       if (table === 'attachments' && r.local_path != null) assertUserNamespacedBlobPath(r.local_path, userId);
+      // AI providers: this row is LIVE EGRESS CONFIG — `credentials` is sent in an
+      // Authorization header to `base_url` along with the prompt (vault plaintext).
+      // A bundle is attacker-supplyable input, and an import is a raw column-
+      // intersected INSERT, so it bypasses every invariant POST /providers enforces
+      // (portal-providers.js:332-364). Re-assert them here, at the only chokepoint
+      // both import surfaces share. Refuse, never repair: a row we can't vouch for
+      // is dropped, not silently rewritten into a different provider.
+      if (table === 'ai_providers') {
+        // (a) auth_type: the ONLY writer of an oauth row is persistSubscription
+        //     (portal-providers.js:497-514) — the BYOK route hardcodes 'api_key', so
+        //     an oauth row can never originate from a request body. Never import one:
+        //     it would land a Claude subscription token (+ refresh token) chosen by
+        //     whoever built the bundle, and §4g exemption keys off this row's vendor
+        //     string. Cost of refusing: the user reclicks "Connect" — the token is
+        //     device-scoped and paired with a config-dir seed the import can't do
+        //     anyway, so a restored one is half-configured at best.
+        if (String(r.auth_type || '').toLowerCase() === 'oauth') { out.refused++; continue; }
+        // (a2) …but auth_type ALONE is a bypassable filter, so this is the real
+        //     invariant: an import may never introduce subscription material in ANY
+        //     shape. resolve.js:128 accepts a row as a subscription when a token is
+        //     present AND (auth_type='oauth' OR vendor ∈ anthropic/claude/
+        //     claude_subscription) — auth_type is only one DISJUNCT. So a row typed
+        //     auth_type='api_key', provider='anthropic', credentials={claudeOAuthToken}
+        //     passes (a) and still resolves as claude_subscription. Refuse on the
+        //     credential SHAPE, read through the same helper the resolver uses so the
+        //     two cannot drift. A legitimate BYOK row carries {apiKey} and is unaffected.
+        if (credentialsCarrySubscriptionMaterial(r.credentials)) { out.refused++; continue; }
+        // (b) provider: the column has no CHECK constraint, so an unknown vendor
+        //     string would be resolvable by readers that switch on it. Store the
+        //     NORMALIZED value — POST /providers lowercases before create, so letting
+        //     'ANTHROPIC' land would resurrect a value the write path can never make
+        //     (and setActive groups by exact string, so it could co-activate with
+        //     'anthropic'). Compare and store the same form.
+        const vendor = String(r.provider || '').toLowerCase();
+        if (!KNOWN_PROVIDERS.has(vendor)) { out.refused++; continue; }
+        r.provider = vendor;
+        // (c) base_url: the SSRF/exfil guard (H5) the write path applies. Deliberately
+        //     the SYNC literal check, not assertSafeBaseUrlResolved — a DNS lookup per
+        //     row would make an OFFLINE restore fail closed on a legitimate provider.
+        //     The resolving check still runs at every USE (base-url.js:54-60), which is
+        //     where H5's defense-in-depth actually stops a live fetch.
+        //     Counted as `refused`, NOT left to throw into the generic `failed` catch:
+        //     this is a security refusal, and burying it in `failed` is exactly what
+        //     `refused` exists to prevent (a legit self-hosted http://192.168.x LAN
+        //     row would otherwise read as a mystery failure).
+        //     NOTE: this rejects private/internal targets only. A public
+        //     https://attacker.example PASSES here and CANNOT be allowlisted away
+        //     (OpenRouter/Groq/Regolo are arbitrary public hosts) — which is why (d)
+        //     is the control that actually carries this case.
+        try { assertSafeBaseUrl(r.base_url); } catch { out.refused++; continue; }
+        // (d) never resolvable until a human arms it. NOT merely cosmetic: `is_active`
+        //     alone would be advisory — resolveProviderChain enumerates EVERY row and
+        //     resolveInferenceConfigForTask takes a providerId out of users.settings,
+        //     so neither consults it. status='pending' is ENFORCED at resolve.js's
+        //     mapRowToConfig, the chokepoint every RESOLVER shares, so an imported row
+        //     is unreachable to inference — not just unflagged — until the user clicks
+        //     activate (setActive → status='active'), where the base_url is visible.
+        //     This matters even with (a)-(c) passed: a bare public base_url resolves
+        //     with NO credential at all (resolve.js OpenAI-compatible branch).
+        //     SCOPE: mapRowToConfig covers resolution, NOT every read — a route reading
+        //     the row directly must decide about 'pending' itself (GET /providers/:id/
+        //     models was that gap; now guarded). Any new ai_providers reader must too.
+        r.is_active = 0;
+        r.status = 'pending';
+      }
       const keys = Object.keys(r).filter((k) => cols.has(k) && r[k] !== undefined);
       if (keys.length === 0) { out.failed++; continue; }
       // Will this insert fall back to the schema-default created_at?
@@ -177,6 +258,11 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   if (!userId) throw new Error('importMyceliumVault: userId required');
   const m = manifest || {};
   const stats = {};
+  // Settings keys refused from the bundle (see the user_meta block). Held OUTSIDE `stats`
+  // deliberately: the reconciliation loop iterates stats as {table → counters}, so an
+  // array parked there becomes a junk pseudo-table ({declared:0,landed:0…}) AND still
+  // never reaches the durable report. It belongs in the report, by name.
+  let settingsRefused = [];
   const run = async (table, rows, overrides) => { stats[table] = await restoreTable(db, table, asArray(rows), { userId, overrides }); };
 
   // Dependency-ordered (folders before documents, people before links, points
@@ -356,8 +442,15 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   await run('internal_model_items', m.internalModel);
 
   // AI providers: the canonical export reads through its decrypting proxy, so
-  // credentials MAY ride along as plaintext — the adapter re-encrypts them here
-  // (ENCRYPTED_FIELDS.ai_providers). Absent credentials just mean re-keying.
+  // credentials MAY ride along as plaintext.
+  // ⚠️ STALE PROSE CORRECTED (2026-07-16): this used to end "— the adapter re-encrypts
+  // them here (ENCRYPTED_FIELDS.ai_providers)". That is FALSE and was the exact failure
+  // mode crypto-local.js:243 documents: ENCRYPTED_FIELDS.ai_providers is `[]` (a
+  // DELIBERATE post-SQLCipher-collapse choice, crypto-local.js:209-220), so `credentials`
+  // lands VERBATIM in the column and its at-rest protection is whole-file SQLCipher —
+  // not a field envelope. Nothing re-encrypts on the way in.
+  // restoreTable() refuses oauth rows / unknown vendors / unsafe base_urls and never
+  // imports a row as active — see the ai_providers branch there for why.
   await run('ai_providers', m.aiProviders);
 
   // Connections: V1 carries the same user_a/user_b schema. Remap the canonical
@@ -383,7 +476,66 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
     const params = [];
     if (typeof u.displayName === 'string' && u.displayName) { sets.push('display_name = ?'); params.push(u.displayName); }
     if (typeof u.timezone === 'string' && u.timezone) { sets.push('timezone = ?'); params.push(u.timezone); }
-    if (u.settings && typeof u.settings === 'object' && Object.keys(u.settings).length) { sets.push('settings = ?'); params.push(JSON.stringify(u.settings)); }
+    // `settings` is replaced WHOLESALE from the manifest, and it is not inert preference
+    // data — several keys are EXECUTABLE POLICY a bundle must not get to choose:
+    //   taskModels[task]={providerId} picks which ai_providers row serves chat/harness/
+    //     channel turns (resolveInferenceConfigForTask takes the id directly ⇒ bypasses
+    //     is_active); allowSubscriptionSensitive flips the §4g sensitive→US guard;
+    //   agentCapture{enabled,redactSecrets} is a FAIL-CLOSED, default-OFF consent gate
+    //     for capture that "can contain secrets (keys, file contents, command output)"
+    //     (ingest/capture.js:104) — a bundle could switch capture on and redaction off;
+    //   reflection{enabled} starts autonomous cycles at next boot (cost governance §10);
+    //   transcribeModel is fed unvalidated into ensureTranscribeSupervisor ⇒ spawns a
+    //     python service (server-rest.js:613; the portal PUT validates, this path won't);
+    //   webSearch / inferCascade / harnessMode / agent steer egress and routing.
+    //
+    // DENYLIST — deliberately, but NOT for the reason first written here.
+    //
+    // ⚠️ CORRECTED (round-4 review): the original justification claimed `settings` is
+    // shared with the SvelteKit portal, which owns keys like `theme` that no src/ grep
+    // finds. That is FALSE — `theme` is client-side localStorage
+    // (portal-app/src/app.html:23; portal-compat.js:1085 says so outright), and both keys
+    // the gates used to "prove" it (`theme`, `voice`) were invented by their own fixtures.
+    // V1's own users.settings vocabulary IS enumerable — nine keys, every writer in
+    // portal-*.js: reflection · keepAwake · agent · transcribeModel · taskModels ·
+    // allowSubscriptionSensitive · webSearch · harnessMode · agentCapture. Eight are
+    // denied below; only `keepAwake` is carried, and it is genuinely inert (macOS
+    // caffeinate on/off, default ON ⇒ a bundle can only turn it OFF — portal-system.js:36).
+    //
+    // THE REAL REASON: this blob comes from the CANONICAL production vault, a different
+    // codebase whose settings may carry keys THIS backend has no reader for. An allowlist
+    // would silently delete the user's data on the one path whose whole job is to bring
+    // their vault home — and would delete it again for any key V1 adds a reader for later.
+    // A denylist keeps the unknown-but-inert and refuses the known-and-dangerous.
+    //
+    // The failure mode is a maintenance duty, and every writer lives in portal-*.js, so it
+    // is a checkable one: IF YOU ADD A SETTINGS KEY THAT ENABLES EGRESS, SPAWNS A PROCESS,
+    // SELECTS A MODEL/PROVIDER, OR RECORDS CONSENT — ADD IT HERE. Consent must not transfer
+    // through a file.
+    const IMPORT_REFUSED_SETTINGS = [
+      'taskModels',                 // {providerId} picks the provider per task ⇒ bypasses is_active
+      'allowSubscriptionSensitive', // flips the §4g sensitive→US guard (resolve.js)
+      'agentCapture',               // fail-closed consent gate for capture that can hold secrets (capture.js:104)
+      'reflection',                 // starts autonomous cycles at next boot (cost governance §10)
+      'transcribeModel',            // fed unvalidated into ensureTranscribeSupervisor ⇒ spawns python
+      'webSearch',                  // enables agent web egress
+      'inferCascade',               // multi-provider routing policy
+      'agent',                      // agent.name is INTERPOLATED into the chat system prompt
+                                    // ("Your name is ${ident.name}." — portal-chat.js:408) and
+                                    // the READ path applies no cap (portal-chat.js:122), unlike
+                                    // the PUT (:155, .slice(0,40)) ⇒ a bundle would own the first
+                                    // sentence of the agent's system prompt on every turn.
+      'harnessMode',                // picks the agent engine (CLI vs native). Fails safe today
+                                    // (resolve-harness.js:26 needs a subscription row, which the
+                                    // ai_providers branch refuses) — but latent: it would activate
+                                    // silently the day the user connects a subscription.
+    ];
+    if (u.settings && typeof u.settings === 'object' && Object.keys(u.settings).length) {
+      const safe = { ...u.settings };
+      settingsRefused = IMPORT_REFUSED_SETTINGS.filter((k) => k in safe);
+      for (const k of settingsRefused) delete safe[k];
+      if (Object.keys(safe).length) { sets.push('settings = ?'); params.push(JSON.stringify(safe)); }
+    }
     let updated = 0;
     if (sets.length) {
       try {
@@ -576,9 +728,15 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
     const handled = (s.attempted ?? 0) + (s.capped ?? 0) + (s.dedupedByContent ?? 0);
     const declared = Number.isFinite(declaredOf[table]) ? declaredOf[table] : handled;
     const landed = (s.inserted || 0) + (s.deduped || 0) + (s.dedupedByContent || 0) + (s.updated || 0);
-    const missing = Math.max(0, declared - landed - (s.failed || 0));
+    // `refused` is a DELIBERATE security drop (restoreTable's per-table policy), so it
+    // is accounted here rather than left to surface as unexplained `missing` — the
+    // durable report is the only artifact the user keeps, and "missing: 1" with no
+    // reason is precisely the burying `refused` was split out of `failed` to avoid.
+    const refused = s.refused || 0;
+    const missing = Math.max(0, declared - landed - (s.failed || 0) - refused);
     reconciliation[table] = {
       declared, landed, failed: s.failed || 0, missing,
+      ...(refused ? { refused } : {}),
       ...(s.capped ? { capped: s.capped } : {}),
       ...(s.tableMissing ? { tableMissing: true } : {}),
       ...(s.dedupedByContent ? { dedupedByContent: s.dedupedByContent } : {}),
@@ -606,6 +764,15 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
     exportSide,
     attachmentsDetail: { blobMissingIds: stats.attachments?.blobMissingIds || [], failedIds: stats.attachments?.failedIds || [] },
     agentFiles: stats.agent_files || null,
+    // Named in the DURABLE report, not just the transient response: these are settings
+    // the user HAD and no longer has, and the report is the only artifact they keep.
+    // (This is the same bug `refused` was split out of `failed` to cure — reporting it
+    // into `stats` alone would have repeated it one function down.)
+    // Its OWN field, not an extra `skippedFamilies` entry: these are settings KEYS, not a
+    // table family, and skippedFamilies is a fixed 2-element contract (verify:vault-import
+    // V8). Named here because the report is the only artifact the user keeps — this is the
+    // same lesson as `refused`, which is why it isn't parked in `stats` either.
+    settingsRefused,
     skippedFamilies: [
       'passkeys (WebAuthn is origin-bound — re-enroll on this device)',
       'secrets (values excluded by the exporter — re-add in Settings)',
@@ -628,6 +795,7 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
     unhandledFamilies,
     exportSide,
     reportPath,
+    settingsRefused,
     skippedFamilies: report.skippedFamilies,
     exportVersion: m.version ?? null,
     exportedAt: m.exportedAt ?? null,

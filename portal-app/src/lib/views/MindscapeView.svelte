@@ -76,10 +76,19 @@
 		enrichPollTimer = null;
 	}
 
-	// Auto-generate: the moment there's imported data and nothing is running, kick
-	// the run automatically — start() self-drives embed-wait → cluster → done, so
-	// the user never has to click "Generate". Guarded to fire once; an error leaves
-	// phase !== 'idle' so it won't loop (the error state offers a manual retry).
+	// Auto-generate: the moment there's imported data and nothing is running, kick the run
+	// automatically — start() self-drives embed-wait → cluster → done, so the user never has
+	// to click "Generate".
+	//
+	// ⚠️ THE GUARD IS `autoGenTried`, AND IT ALWAYS WAS. The old comment claimed the no-loop
+	// property came from the phase — "an error leaves phase !== 'idle' so it won't loop" —
+	// which made a FALSE ERROR load-bearing: on a populated vault this POST always returns
+	// 200 {jobId:null,status:'skipped'} (the route's own debounce exists because THIS effect
+	// re-POSTs on every load), the client called that success an error, and the comment then
+	// cited the error as the safety mechanism. Now that `skipped` maps to 'up-to-date', the
+	// phase is non-idle either way — but the latch is what actually holds, and it holds for
+	// both. Documented rather than assumed: X1 drives this effect twice and asserts ONE POST.
+	// @see docs/DISTILLATION-SURFACE-DESIGN-2026-07-16.md §2b.
 	let autoGenTried = $state(false);
 	$effect(() => {
 		if (hasImportedData && $generate.phase === 'idle' && !autoGenTried) {

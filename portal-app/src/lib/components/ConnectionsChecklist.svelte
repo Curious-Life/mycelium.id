@@ -2,6 +2,7 @@
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
 	import { api } from '$lib/api';
+	import TelegramConnect from '$lib/components/channels/TelegramConnect.svelte';
 
 	// Props
 	let { showTitle = true, compact = false }: { showTitle?: boolean; compact?: boolean } = $props();
@@ -25,8 +26,7 @@
 	let claudeSubscription = $state<string | null>(null);
 
 	// Integration state
-	let telegramTokenInput = $state('');
-	let telegramIdInput = $state('');
+	// Telegram is handled by <TelegramConnect> (design D1).
 	let discordTokenInput = $state('');
 	let integrationSaving = $state(false);
 	let integrationSaved: string | null = $state(null);
@@ -85,17 +85,19 @@
 		aiKeySaving = false;
 	}
 
-	async function saveIntegration(key: string, value: string, scope: string) {
+	// Discord goes through the SAME channels primitive as Telegram (design D1:
+	// PUT /portal/channels enables + reloads the daemon; never /settings/secret).
+	async function saveDiscord() {
 		integrationSaving = true;
 		integrationSaved = null;
 		try {
-			const res = await api('/portal/settings/secret', {
-				method: 'PUT',
-				body: JSON.stringify({ key, value: value.trim(), scope }),
+			const res = await api('/portal/channels', {
+				method: 'PUT', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ enabled: true, discord: { token: discordTokenInput.trim() } }),
 			});
 			if (!res.ok) throw new Error('Failed to save');
-			const tag = key.includes('TELEGRAM') ? 'telegram' : 'discord';
-			integrationSaved = tag;
+			integrationSaved = 'discord';
+			discordTokenInput = '';
 			setTimeout(() => { integrationSaved = null; }, 3000);
 		} catch {}
 		integrationSaving = false;
@@ -214,30 +216,8 @@
 		<div class="step-guide">
 			<p>1. Open Telegram, message <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a></p>
 			<p>2. Send <code>/newbot</code>, choose a name, paste the token below</p>
-			<div class="guide-input-row">
-				<input type="text" bind:value={telegramTokenInput} placeholder="bot token: 123456:ABC-DEF..." autocomplete="off" data-1p-ignore class="guide-input" />
-			</div>
-			<p style="margin-top: 0.5rem;">3. Your Telegram user ID — send <code>/start</code> to <a href="https://t.me/userinfobot" target="_blank" rel="noopener">@userinfobot</a></p>
-			<div class="guide-input-row">
-				<input type="text" bind:value={telegramIdInput} placeholder="your user id: 123456789" autocomplete="off" data-1p-ignore class="guide-input" />
-				<button class="guide-save-btn" disabled={!telegramTokenInput || !telegramIdInput || integrationSaving} onclick={async () => {
-					integrationSaving = true;
-					try {
-						await api('/portal/settings/secret', { method: 'PUT', body: JSON.stringify({ key: 'OWNER_TELEGRAM_ID', value: telegramIdInput.trim(), scope: 'personal' }) });
-						await saveIntegration('TELEGRAM_BOT_TOKEN', telegramTokenInput, 'personal');
-						// Enable channels + start the bridge now (the app supervises the daemon;
-						// this sets CHANNEL_ENABLED + triggers an immediate start over loopback).
-						await api('/portal/channels', { method: 'PUT', body: JSON.stringify({ enabled: true }) });
-						integrationSaved = 'telegram';
-						telegramTokenInput = '';
-						telegramIdInput = '';
-						setTimeout(() => { integrationSaved = null; }, 3000);
-					} catch { /* */ }
-					integrationSaving = false;
-				}}>
-					{integrationSaving ? 'Saving...' : integrationSaved === 'telegram' ? '\u2713 Saved' : 'Save'}
-				</button>
-			</div>
+			<p>3. Message your new bot, then approve the code it replies with — right here.</p>
+			<TelegramConnect compact onconnected={() => { integrationSaved = 'telegram'; setTimeout(() => { integrationSaved = null; }, 3000); }} />
 			<p style="margin-top: 0.5rem; opacity: 0.7;">The bot captures + searches your messages right away. For it to <em>reply</em>, configure an assistant \u2014 pull a local model in Hardware, or add a cloud key in Settings \u2192 Channels.</p>
 		</div>
 	{/if}
@@ -258,7 +238,7 @@
 			<p>2. New Application &rarr; Bot &rarr; Reset Token, paste below</p>
 			<div class="guide-input-row">
 				<input type="text" bind:value={discordTokenInput} placeholder="Bot token..." autocomplete="off" data-1p-ignore class="guide-input" />
-				<button class="guide-save-btn" disabled={!discordTokenInput || integrationSaving} onclick={() => saveIntegration('DISCORD_BOT_TOKEN', discordTokenInput, 'org')}>
+				<button class="guide-save-btn" disabled={!discordTokenInput || integrationSaving} onclick={saveDiscord}>
 					{integrationSaving ? 'Saving...' : integrationSaved === 'discord' ? '\u2713 Saved' : 'Save'}
 				</button>
 			</div>

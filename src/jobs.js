@@ -64,6 +64,33 @@ const STAGE_LABELS = {
   16: 'Computing embedding-anchor metrics (Tier-1, CVP-pending)…',
 };
 
+// SECURITY (§1 zero-plaintext-leakage): the reason a pipeline run failed is the
+// child's last stderr line — routinely a file path, a python traceback quoting a
+// row, or model output. `background_jobs` is content-free BY CONTRACT (see the
+// db/activity-feed.js header: "NEVER a realm/territory name, message content, or
+// model output"), so the raw reason must never be published there. The feed gets
+// a CLASSIFIED reason built only from integers + fixed literals (content-free by
+// construction); the REAL reason stays in `state.error`, behind the authed
+// getJob/status route. Mirrors the import path ('import failed', ingest/import-job.js).
+//
+// What this is NOT: an at-rest fix. Post SQLCipher-collapse, ENCRYPTED_FIELDS
+// (crypto-local.js) field-encrypts ONLY `secrets` — background_jobs would be
+// equally unencrypted through d1Query, and the whole file is SQLCipher'd anyway.
+// The point is the CONTRACT: activityFeed.recent() already SELECTs `error`, and
+// only portal-activity.js's shape() — which drops it today — stands between this
+// column and the feed UI. Keeping the row content-free is what lets that
+// projection widen without re-auditing every publisher. Defense in depth (§2),
+// not a live exfiltration path.
+//
+// `state.stageLabel` is deliberately NOT used here: it falls back to raw child
+// stdout (`m[3].trim()`) for a step outside STAGE_LABELS, so it is not a constant.
+export function classifyPipelineFailure({ failedStep, totalSteps } = {}) {
+  const n = Number(failedStep);
+  const t = Number(totalSteps);
+  if (!Number.isInteger(n) || n <= 0 || !STAGE_LABELS[n]) return 'pipeline failed';
+  return Number.isInteger(t) && t > 0 ? `failed at step ${n}/${t}` : `failed at step ${n}`;
+}
+
 const jobs = new Map();   // jobId → state (kept for status polling)
 let runningJobId = null;  // single-flight: at most one clustering run at a time
 
@@ -126,6 +153,9 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
     SYSTEM_KEY: systemHex,
     MYCELIUM_DB: dbPath || resolveDbPath(),
     MYCELIUM_USER_ID: userId || process.env.MYCELIUM_USER_ID || 'local-user',
+    // Forward the vault writer-lock family token so this pipeline child is recognized
+    // as same-family (not a foreign writer) when it opens the vault. See db/writer-lock.js.
+    ...(process.env.MYCELIUM_VAULT_FAMILY ? { MYCELIUM_VAULT_FAMILY: process.env.MYCELIUM_VAULT_FAMILY } : {}),
     // Packaged self-contained build: use the bundled python + offline model for the
     // clustering child. Unset in dev → run-clustering.sh's $PYTHON seam auto-picks the
     // venv. (PATH already carries the bundled node dir, injected by main.rs.)
@@ -151,7 +181,36 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
   runningJobId = jobId;
   // Mirror into the unified activity feed (header dot + chip) — content-free.
   const feedLabel = measureOnly ? 'Refreshing analysis' : 'Mapping your mind';
-  if (db?.activityFeed) db.activityFeed.begin({ userId, kind: measureOnly ? 'mycelium_measure' : 'mycelium_generate', id: jobId, totalSteps: 16, stageLabel: feedLabel }).catch(() => {});
+  const feedBegun = db?.activityFeed
+    ? db.activityFeed.begin({ userId, kind: measureOnly ? 'mycelium_measure' : 'mycelium_generate', id: jobId, totalSteps: 16, stageLabel: feedLabel }).catch(() => {})
+    : Promise.resolve();
+
+  // begin() has now written a 'running' row, so EVERY exit path below owes the feed a
+  // terminal row. Miss one and the reaper (activity-feed.js STALE_MS) flips it to
+  // 'abandoned' 45s later: the header shows a phantom running job for those 45s, and
+  // the history then reads 'abandoned' — a startup failure made indistinguishable from
+  // a killed child.
+  //
+  // FIRST write wins, for two reasons. Node documents 'close' as "may or may not" fire
+  // after a spawn 'error' (child_process docs, the 'error' event), so the error handler
+  // cannot delegate to close — but when close DOES follow, the earlier handler already
+  // named the more specific reason and close must not overwrite it.
+  //
+  // CHAINED off begin() rather than fired independently: finish() is an UPDATE by id,
+  // so if it were to land BEFORE begin()'s INSERT it would match no row and the INSERT
+  // would then leave 'running' behind forever. Both go through the adapter's async
+  // query() (it awaits autoEncryptParams before the synchronous write), so ordering
+  // would otherwise rest on microtask FIFO — and the spawn-failure path fires the two
+  // back-to-back with nothing in between.
+  //
+  // `error` here is only ever a CONSTANT or a classified string — background_jobs is
+  // content-free by contract. See classifyPipelineFailure.
+  let feedPublished = false;
+  const publishTerminal = (status, error = null) => {
+    if (feedPublished || !db?.activityFeed) return;
+    feedPublished = true;
+    feedBegun.then(() => db.activityFeed.finish(jobId, { status, error })).catch(() => {});
+  };
 
   let child;
   try {
@@ -161,8 +220,12 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
       stdio: ['ignore', 'pipe', 'pipe'], // stdout parsed for progress; stderr captured (bounded) to surface the REAL failure reason
     });
   } catch {
+    // Reachable: `cwd: process.cwd()` throws ENOENT when the app's working directory
+    // has been deleted or unmounted underneath it. No child ⇒ no 'close' ⇒ this is the
+    // ONLY chance to close the feed row out.
     state.status = 'error'; state.error = 'failed to start clustering'; state.finishedAt = Date.now();
     runningJobId = null;
+    publishTerminal('error', 'failed to start clustering');
     return { jobId, status: 'running' }; // job created; status will read 'error'
   }
   state.child = child; // expose for cancelJob (never surfaced via getJob)
@@ -241,12 +304,18 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
       state.error = detail ? `${stage}: ${detail} (exit ${code})` : `${stage} (exit ${code})`;
       state.failedStep = state.step || null;
     }
-    if (db?.activityFeed) db.activityFeed.finish(jobId, { status: state.status === 'done' ? 'done' : state.status === 'canceled' ? 'abandoned' : 'error', error: state.status === 'error' ? state.error : null }).catch(() => {});
+    // The feed gets a CLASSIFIED reason, never state.error — that carries the
+    // child's stderr (paths / quoted rows / model output). See classifyPipelineFailure.
+    publishTerminal(state.status === 'done' ? 'done' : state.status === 'canceled' ? 'abandoned' : 'error', state.status === 'error' ? classifyPipelineFailure(state) : null);
     finish();
   });
   child.on('error', () => {
     if (state.status !== 'canceled') {
       state.status = 'error'; state.error = 'failed to start clustering';
+      // Publish here rather than leaving it to 'close': close is not guaranteed to
+      // follow a spawn error, and when it does it can only say 'pipeline failed'
+      // (no step was ever reached). 'failed to start clustering' is a constant.
+      publishTerminal('error', 'failed to start clustering');
     }
     state.finishedAt = Date.now();
     finish();
@@ -425,7 +494,15 @@ export function shouldAutoGenerate({ embedded, points, clusteringRunning, min = 
  * Spawn the Persona-Claims discovery child for one cadence (heartbeat-driven).
  * Lean fire-and-forget: resolves master keys at spawn time (same source as the
  * clustering job), hands them to the child via an allowlisted env, logs the
- * outcome. The child is FAIL-SOFT (no model → no-op, exit 0).
+ * outcome.
+ *
+ * Child exit codes — the two "no model" cases are NOT the same thing:
+ *   0 → ran, or FAIL-SOFT: the approved model was unreachable (transient) → no-op.
+ *   2 → REFUSED: no on-box model is approved. Claims are sensitive and run on-box,
+ *       so the child will not substitute a default (see pipeline/discover-claims.mjs).
+ *       Fire-and-forget: the close handler below just logs it. Nothing retries, and
+ *       the hourly heartbeat re-spawns on the next window exactly as an exit-0 no-op
+ *       would — a refusal stalls no state, it only stops running an unapproved model.
  * @returns {{ pid: number|null }}
  */
 export function startClaimDiscoveryJob({ dbPath, userId, cadence } = {}) {
@@ -441,6 +518,9 @@ export function startClaimDiscoveryJob({ dbPath, userId, cadence } = {}) {
     SYSTEM_KEY: systemHex,
     MYCELIUM_DB: dbPath || resolveDbPath(),
     MYCELIUM_USER_ID: userId || process.env.MYCELIUM_USER_ID || 'local-user',
+    // Forward the vault writer-lock family token so this pipeline child is recognized
+    // as same-family (not a foreign writer) when it opens the vault. See db/writer-lock.js.
+    ...(process.env.MYCELIUM_VAULT_FAMILY ? { MYCELIUM_VAULT_FAMILY: process.env.MYCELIUM_VAULT_FAMILY } : {}),
   };
   const args = ['pipeline/discover-claims.mjs'];
   if (cadence) args.push(`--cadence=${cadence}`);
@@ -507,6 +587,9 @@ export function startChronicleNarrationJob({ dbPath, userId, territoryId = null 
     SYSTEM_KEY: systemHex,
     MYCELIUM_DB: dbPath || resolveDbPath(),
     MYCELIUM_USER_ID: userId || process.env.MYCELIUM_USER_ID || 'local-user',
+    // Forward the vault writer-lock family token so this pipeline child is recognized
+    // as same-family (not a foreign writer) when it opens the vault. See db/writer-lock.js.
+    ...(process.env.MYCELIUM_VAULT_FAMILY ? { MYCELIUM_VAULT_FAMILY: process.env.MYCELIUM_VAULT_FAMILY } : {}),
     // Generous per-territory timeout (background → no UI bar to freeze): absorbs the
     // first call's cold model-load. Env override wins so tests can shrink it.
     MYCELIUM_CHRONICLE_TIMEOUT_MS: process.env.MYCELIUM_CHRONICLE_TIMEOUT_MS || '180000',
@@ -556,26 +639,135 @@ async function nrUpdate(db, runId, fields) {
   await nrQuery(db, `UPDATE narration_runs SET ${sets.join(', ')} WHERE run_id = ?`, [...keys.map((k) => fields[k]), runId]);
 }
 
+// ── WHERE the narration content actually went (NarrateControl's sovereignty badge) ──────
+// Tallies each turn's OBSERVED destination (narration-walk `wireRan`/`onThisDevice`, sourced
+// from loop.js actualOnThisDevice — the provider that really answered, AFTER any chain
+// advance). NOT a prediction: a sensitive chain is [localPrimary, eu-zdr…, localFloor], so a
+// run whose on-box Ollama dies falls back to EU cloud mid-run, and anything decided at START
+// would claim "on-box" while the bytes left.
+//
+// Fail-closed, and the two failure directions are NOT symmetric-but-equal — they are both lies:
+// claiming on-box when content left is the §1 leak-class one; claiming it left when it didn't
+// is a false alarm that teaches the user to ignore the badge. So UNKNOWN gets its own state and
+// claims NOTHING.
+//   any turn proven OFF this device → 0  (dominant + sticky: once content leaves, it has left)
+//   else any turn we cannot attribute → null (unknown — the local FLOOR has no base_url)
+//   else any turn proven ON this device → 1
+//   nothing observed → null
+function makeDeviceTally(row) {
+  let off = 0, unknown = 0, on = 0;
+  const jur = new Set();
+  // Seed from the row so a RESUME never forgets what an earlier segment did.
+  if (row?.on_this_device === 0) off = 1;
+  if (row?.on_this_device === 1) on = 1;
+  // …and a row that is NULL while turns have already COMPLETED means an earlier segment ran a
+  // wire it could not attribute. Without this, the resumed segment could report 1 ("all on this
+  // device") on behalf of turns it never saw.
+  //
+  // ⚠️ KNOWN GAP, currently unreachable — narration_runs persists no `failed` count, so a
+  // segment whose turns ALL FAILED on an unattributable wire leaves described+reflected = 0 and
+  // this seeding misses it. That is safe ONLY because UNKNOWN means describeProvider returned
+  // null (no key + no base_url), and normalizeProvider dials exactly that cfg at
+  // DEFAULT_OLLAMA_URL — so an unattributable wire IS on this device and the resumed "1" is
+  // TRUE. That is a COUPLING to the floor's default host, not a property of this tally: point
+  // the floor off-box and this opens silently, fail-OPEN. verify:narrate-device-claim D10 pins
+  // it — if D10 goes red, make this seeding explicit (persist the unknown state) BEFORE the
+  // floor moves.
+  if (row?.on_this_device == null && ((row?.described || 0) + (row?.reflected || 0)) > 0) unknown = 1;
+  try { for (const j of JSON.parse(row?.off_device_jurisdictions || '[]')) jur.add(j); }
+  catch { /* corrupt JSON → start the set clean; the on_this_device verdict above still holds */ }
+  return {
+    observe(p) {
+      if (!p?.wireRan) return;                       // no wire ran (§4g refusal / no model)
+      if (p.onThisDevice === true) on += 1;
+      else if (p.onThisDevice === false) { off += 1; if (p.wireJurisdiction) jur.add(p.wireJurisdiction); }
+      else unknown += 1;                             // ⚠️ NOT counted as on-device
+    },
+    fields: () => ({
+      on_this_device: off > 0 ? 0 : unknown > 0 ? null : on > 0 ? 1 : null,
+      off_device_jurisdictions: jur.size ? JSON.stringify([...jur].sort()) : null,
+    }),
+  };
+}
+
 /** Start a narration walk. runWalk is required (route wires the real one; gate stubs).
  *  Returns { runId, status } immediately; the walk runs async. Single-flight. */
-export async function startNarrationWalkJob({ db, userId, scope = 'all', provider = null, runWalk } = {}) {
+// A narration run's terminal status — for START and RESUME alike.
+//
+// ⚠️ 'done' IS A CLAIM, and it was made unconditionally on both paths. A run in which EVERY
+// turn failed — a dead Ollama, or a §4g refusal with nothing safe to run on — reported exactly
+// what a fully-described run reported. The walk's counters were honest; the STATUS was not, and
+// the status is what the UI reads.
+//
+// It lives here, called by both, because the first fix landed on START ONLY and left RESUME —
+// THE RETRY PATH — still claiming done: pause a stalling walk, resume with Ollama still dead,
+// every turn fails, UI says "done". Two copies of a rule is how a rule drifts (independent
+// review, 2026-07-16).
+//
+// A PARTIAL failure is NOT an error: it described things. Reporting error there would be the
+// mirror mistake — a false failure over a run that did real work.
+async function finishNarrationRun(db, runId, walk) {
+  if ((await nrStatus(db, runId)) !== 'running') return;   // paused/canceled owns its own status
+  const failed = Number(walk?.failed) || 0;
+  const skipped = Number(walk?.skipped) || 0;
+  const wrote = (Number(walk?.described) || 0) + (Number(walk?.reflected) || 0);
+  // 'error' means the run accomplished NOTHING — a TOTAL wipeout (dead Ollama, §4g refusal with
+  // nothing safe to run on). `wrote === 0` alone is not that: re-running an already-narrated
+  // vault coverage-skips most entities, so a flaky wire that fails 2 of them (wrote 0, skipped
+  // many) would falsely read 'error' over a fully-narrated mind (independent review, 2026-07-16).
+  // Coverage-skips ARE work done — the run assessed those entities and correctly left them. So
+  // error only when nothing was written AND nothing was even skipped.
+  if (failed > 0 && wrote === 0 && skipped === 0) {
+    await nrUpdate(db, runId, { status: 'error', error: `narration produced nothing: ${failed} turn(s) failed` });
+  } else {
+    await nrUpdate(db, runId, { status: 'done' });
+  }
+}
+
+// Propagate a run's TERMINAL narration_runs.status to the GLOBAL activity feed — for START and
+// RESUME alike. Lives here, called by both `finally`s, for the same reason finishNarrationRun
+// does: the first version put it on start ONLY, so a RESUMED run (= the retry path) that
+// completed showed as 'abandoned' in the header feed, and a resumed run that errored never
+// surfaced there at all — the reaper had already flipped the paused row, and heartbeat() is
+// `WHERE status='running'` so nothing could revive it. Two copies of a status map is how the
+// map drifts (independent review, 2026-07-16). NarrateControl reads narration_runs directly, so
+// the dedicated control was always right; this is the global feed chip only.
+async function finishNarrationFeed(db, runId) {
+  if (!db?.activityFeed) return;
+  const st = await nrStatus(db, runId);
+  const feedStatus = st === 'done' ? 'done' : (st === 'canceled' || st === 'paused') ? 'abandoned' : 'error';
+  db.activityFeed.finish(runId, { status: feedStatus }).catch(() => {});
+}
+
+// ⚠️ NO `provider` PARAM. It took a caller-supplied label straight onto the row, and the UI
+// regex-matched that NAME to tell the user whether narration content left their machine — so
+// the caller effectively authored the sovereignty claim (a row labelled "localai" read as
+// on-box). It was never a fact about the run: the walk resolves its provider server-side, per
+// turn. The destination is now OBSERVED as the walk runs (makeDeviceTally). The vestigial
+// narration_runs.provider column stays NULL — see migrations/0050.
+export async function startNarrationWalkJob({ db, userId, scope = 'all', runWalk } = {}) {
   if (typeof runWalk !== 'function') throw new TypeError('startNarrationWalkJob: runWalk required');
   if (narrationRunning) { const r = await nrGet(db, narrationRunning); if (r && r.status === 'running') return { runId: r.run_id, status: 'running', already: true }; }
   const runId = crypto.randomUUID();
   narrationRunning = runId;
   await nrQuery(db,
-    `INSERT INTO narration_runs (run_id, user_id, scope, provider, status) VALUES (?, ?, ?, ?, 'running')`,
-    [runId, userId, JSON.stringify(scope), provider || null]);
+    `INSERT INTO narration_runs (run_id, user_id, scope, status) VALUES (?, ?, ?, 'running')`,
+    [runId, userId, JSON.stringify(scope)]);
   if (db?.activityFeed) db.activityFeed.begin({ userId, kind: 'mycelium_narrate', id: runId, stageLabel: 'Narrating your mind' }).catch(() => {});
 
   const done = new Set();
+  const device = makeDeviceTally(null);   // a fresh run has observed nothing yet
   const onProgress = async (p) => {
     if (p?.doneKey) done.add(p.doneKey);
+    device.observe(p);
     await nrUpdate(db, runId, {
       described: p.described ?? 0, reflected: p.reflected ?? 0, skipped: p.skipped ?? 0, total: p.total ?? 0,
       done_ids: JSON.stringify([...done]),
       current_kind: p.item?.kind ?? null, current_id: p.item?.id ?? null,
+      ...device.fields(),
     }).catch(() => {});
+    // `failed` is deliberately NOT progress: a turn that produced nothing has not advanced
+    // the walk, and counting it would march the bar to 100% on a run that did nothing.
     if (db?.activityFeed) db.activityFeed.heartbeat(runId, { step: (p.described ?? 0) + (p.reflected ?? 0) + (p.skipped ?? 0), totalSteps: p.total ?? 0 }).catch(() => {});
   };
   // Stop cleanly when status is no longer 'running' (paused/canceled by a control route).
@@ -583,15 +775,13 @@ export async function startNarrationWalkJob({ db, userId, scope = 'all', provide
 
   (async () => {
     try {
-      await runWalk({ runId, scope, skipIds: [], onProgress, shouldStop });
-      const cur = await nrStatus(db, runId);
-      if (cur === 'running') await nrUpdate(db, runId, { status: 'done' });
+      const walk = await runWalk({ runId, scope, skipIds: [], onProgress, shouldStop });
+      await finishNarrationRun(db, runId, walk);
     } catch (e) {
       await nrUpdate(db, runId, { status: 'error', error: String(e?.message || e).slice(0, 500) }).catch(() => {});
     } finally {
       narrationRunning = (narrationRunning === runId) ? null : narrationRunning;
-      const st = await nrStatus(db, runId);
-      if (db?.activityFeed) db.activityFeed.finish(runId, { status: st === 'done' ? 'done' : st === 'canceled' ? 'abandoned' : st === 'paused' ? 'abandoned' : 'error' }).catch(() => {});
+      await finishNarrationFeed(db, runId);
     }
   })();
 
@@ -612,25 +802,34 @@ export async function resumeNarration({ db, userId, runId, runWalk }) {
   if (narrationRunning && narrationRunning !== runId) return { ok: false, status: 'busy' };
   narrationRunning = runId;
   await nrUpdate(db, runId, { status: 'running' });
+  // RE-OPEN the global feed row. start's pause left it terminal ('abandoned'), and heartbeat()
+  // is `WHERE status='running'`, so without this begin() the header shows the narration as
+  // abandoned for the whole resume even as it actively runs. begin() is ON CONFLICT DO UPDATE
+  // status='running' → it revives the row cleanly. Symmetric with start (jobs.js begin/finish).
+  if (db?.activityFeed) db.activityFeed.begin({ userId, kind: 'mycelium_narrate', id: runId, stageLabel: 'Narrating your mind' }).catch(() => {});
   const scope = JSON.parse(r.scope || '"all"');
   const done = new Set(JSON.parse(r.done_ids || '[]'));
+  const device = makeDeviceTally(r);   // SEEDED: an earlier segment's egress must not be forgotten
   const onProgress = async (p) => {
     if (p?.doneKey) done.add(p.doneKey);
+    device.observe(p);
     await nrUpdate(db, runId, {
       described: p.described ?? r.described, reflected: p.reflected ?? r.reflected, skipped: p.skipped ?? r.skipped, total: p.total ?? r.total,
       done_ids: JSON.stringify([...done]), current_kind: p.item?.kind ?? null, current_id: p.item?.id ?? null,
+      ...device.fields(),
     }).catch(() => {});
     if (db?.activityFeed) db.activityFeed.heartbeat(runId, {}).catch(() => {});
   };
   const shouldStop = async () => (await nrStatus(db, runId)) !== 'running';
   (async () => {
     try {
-      await runWalk({ runId, scope, skipIds: [...done], onProgress, shouldStop });
-      if ((await nrStatus(db, runId)) === 'running') await nrUpdate(db, runId, { status: 'done' });
+      const walk = await runWalk({ runId, scope, skipIds: [...done], onProgress, shouldStop });
+      await finishNarrationRun(db, runId, walk);
     } catch (e) {
       await nrUpdate(db, runId, { status: 'error', error: String(e?.message || e).slice(0, 500) }).catch(() => {});
     } finally {
       narrationRunning = (narrationRunning === runId) ? null : narrationRunning;
+      await finishNarrationFeed(db, runId);   // symmetric with start — resume is the retry path
     }
   })();
   return { ok: true, status: 'running' };

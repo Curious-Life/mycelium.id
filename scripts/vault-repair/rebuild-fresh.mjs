@@ -22,6 +22,12 @@ import { readUserMaster, deriveDbKey } from '../../src/account/keystore.js';
 
 const SRC = process.argv[2], SNAP = process.argv[3], DEST = process.argv[4];
 if (!SRC || !SNAP || !DEST) { console.error('usage: rebuild-fresh.mjs <src> <snapshot> <dest>'); process.exit(2); }
+// FAIL-CLOSED: never rebuild FROM (or write NEAR) a LIVE vault — tooling-vs-live-writer
+// overlap is the prime corruption suspect (guard.mjs). After the usage check, so a bare
+// invocation prints usage instead of a TypeError (review).
+const { assertQuiesced } = await import('./guard.mjs');
+assertQuiesced(SRC, { what: 'rebuild (read of the live source)' });
+assertQuiesced(DEST, { what: 'rebuild (write of the destination)' });
 const userHex = readUserMaster();
 if (!userHex) { console.error('FATAL: USER_MASTER not found in Keychain'); process.exit(2); }
 const KEY = deriveDbKey(userHex);
@@ -65,23 +71,80 @@ function genericCopy(t) {
 // Robust copy for a corrupt table: chunked bulk read, falling back to per-row reads
 // on FRESH connections (clears shared-page cache transients), then gap-fill any id
 // present in the snapshot but missing from the rebuild. Returns {failed, filled}.
-function robustCopy(t) {
-  const cols = tinfo(t).map(c => c.name);
-  const collist = cols.map(c => `"${c}"`).join(', ');
-  const ins = dest.prepare(`INSERT INTO "${t}"(rowid, ${collist}) VALUES (@__rid, ${cols.map(c => '@' + c).join(', ')})`);
-  const rids = src.prepare(`SELECT rowid AS r FROM "${t}" ORDER BY rowid`).all().map(x => x.r);
-  const failed = []; const CH = 5000;
-  const txInsert = dest.transaction((objs) => { for (const o of objs) ins.run(o); });
-  for (let i = 0; i < rids.length; i += CH) {
-    const a = rids[i], b = rids[Math.min(i + CH, rids.length) - 1];
-    try { txInsert(src.prepare(`SELECT rowid AS __rid, ${collist} FROM "${t}" WHERE rowid BETWEEN ? AND ?`).all(a, b)); }
-    catch {
-      for (const r of rids) { if (r < a || r > b) continue;
-        let row = null; for (let k = 0; k < 3 && !row; k++) { const d = keyed(SRC, true); try { row = d.prepare(`SELECT rowid AS __rid, ${collist} FROM "${t}" WHERE rowid=?`).get(r); } catch {} d.close(); }
-        if (row) ins.run(row); else failed.push(r);
+// Enumerate rowids for a corrupt table. `SELECT rowid ... ORDER BY rowid` walks the
+// table b-tree and DIES on page-linkage damage (shared pages / bad child pointers) —
+// and the covering index can't be trusted either: with a shared page an index scan
+// wanders into another tree's pages and yields phantom keys (observed live: the
+// autoindex reported 101,398 distinct ids for a table holding ~73k rows). So sweep
+// bounded rowid RANGES: each seek touches a localized subtree, so damage stays
+// contained to its chunk and everything readable is still recovered.
+function enumerateRowids(t) {
+  // 1) UNORDERED rowid scan first. `ORDER BY rowid` forces a walk of the TABLE b-tree —
+  //    the very tree that's damaged — so it dies; without it the planner takes a clean
+  //    index and returns every rowid. (Live: ORDER BY → malformed; unordered → all
+  //    73,507 rowids, contiguous, matching COUNT(*).) Sort in JS, not in SQLite.
+  try {
+    const r = src.prepare(`SELECT rowid AS r FROM "${t}"`).all().map(x => x.r);
+    if (r.length) return r.sort((x, y) => x - y);
+  } catch { /* fall through */ }
+  // 2) Ordered scan (works on a healthy tree; kept for non-corrupt callers).
+  try { return src.prepare(`SELECT rowid AS r FROM "${t}" ORDER BY rowid`).all().map(x => x.r); }
+  catch { log(`  ${t}: rowid enumeration unreadable (corrupt b-tree) — sweeping rowid ranges`); }
+  // 3) Last resort: bounded range sweep. NOTE: on a damaged tree seeks past the last
+  //    intact subtree silently return nothing, so this UNDER-recovers — only reached
+  //    when both scans above fail.
+  const found = new Set();
+  const MAX = Number(process.env.MYCELIUM_REBUILD_MAX_ROWID) || 500000;
+  const STEP = 1000;
+  for (let a = 1; a <= MAX; a += STEP) {
+    const b = a + STEP - 1;
+    try {
+      for (const x of src.prepare(`SELECT rowid AS r FROM "${t}" WHERE rowid BETWEEN ? AND ?`).all(a, b)) found.add(x.r);
+    } catch {
+      // Damaged chunk — fall back to per-rowid probes on FRESH connections so a
+      // poisoned page cache can't sink the neighbours.
+      for (let r = a; r <= b; r++) {
+        for (let k = 0; k < 2; k++) {
+          const d = keyed(SRC, true);
+          try { const g = d.prepare(`SELECT rowid AS r FROM "${t}" WHERE rowid=?`).get(r); if (g) { found.add(g.r); } d.close(); break; }
+          catch { try { d.close(); } catch {} }
+        }
       }
     }
   }
+  return [...found].sort((x, y) => x - y);
+}
+
+function robustCopy(t) {
+  const cols = tinfo(t).map(c => c.name);
+  const collist = cols.map(c => `"${c}"`).join(', ');
+  // OR IGNORE: shared-page damage can surface the SAME logical row at two rowids;
+  // a duplicate would otherwise abort the whole transaction on the UNIQUE(id) index.
+  const ins = dest.prepare(`INSERT OR IGNORE INTO "${t}"(rowid, ${collist}) VALUES (@__rid, ${cols.map(c => '@' + c).join(', ')})`);
+
+  // SCAN-UNION salvage. Do NOT enumerate rowids and seek: on a page-linkage-damaged
+  // tree the planner may satisfy a rowid/id enumeration from an INDEX, and a shared
+  // page makes an index scan wander into other trees and return PHANTOM keys (live:
+  // 101,398 "rows" for a 71,823-row table — a rebuild from that fabricates ~30k bogus
+  // rows). Selecting ALL columns forces the TABLE b-tree — the only trustworthy read.
+  // A forward scan dies at the first bad page; a REVERSE scan reaches the rows beyond
+  // it. Their union is everything physically readable (live: 71,823 fwd + 8 rev-only).
+  const seen = new Map(); // rowid -> row
+  const scan = (desc) => {
+    const d = keyed(SRC, true);
+    let n = 0;
+    try {
+      const sql = `SELECT rowid AS __rid, ${collist} FROM "${t}"${desc ? ' ORDER BY rowid DESC' : ''}`;
+      for (const r of d.prepare(sql).iterate()) { if (!seen.has(r.__rid)) seen.set(r.__rid, r); n++; }
+    } catch (e) { log(`  ${t}: ${desc ? 'reverse' : 'forward'} scan stopped after ${n} rows (${e.message})`); }
+    try { d.close(); } catch {}
+    return n;
+  };
+  scan(false); scan(true);
+  const failed = [];
+  const txInsert = dest.transaction((objs) => { for (const o of objs) ins.run(o); });
+  txInsert([...seen.values()]);
+  const rids = [...seen.keys()].sort((a, b) => a - b);
   const have = new Set(dest.prepare(`SELECT id FROM "${t}"`).all().map(r => r.id));
   const snapRows = snap.prepare(`SELECT ${collist} FROM "${t}"`).all();
   let nextRid = dest.prepare(`SELECT COALESCE(MAX(rowid),0) x FROM "${t}"`).get().x + 1;

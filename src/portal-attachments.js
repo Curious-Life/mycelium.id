@@ -20,6 +20,8 @@ import { join } from 'node:path';
 import { getBlob } from './ingest/blob-store.js';
 import { uploadsRoot } from './paths.js';
 import { clampStored } from './enrich/text-limits.js';
+import { transcribeAttachment } from './enrich/transcribe-attachment.js';
+import { getTranscriberHealth } from './transcribe/supervisor.js';
 
 const LIST_SCAN_CAP = 2000; // rows decrypted per list call — personal-scale guard
 
@@ -209,6 +211,58 @@ export function portalAttachmentsRouter({ db, userId }) {
     } catch (err) {
       console.error('[portal-attachments] delete failed:', err.message);
       res.status(500).json({ error: 'delete-failed' });
+    }
+  });
+
+  // ── Transcription (owner-gated): robust LONG-audio via the streaming service ──
+  // In-memory per-attachment job state (progress the UI polls). Runs IN-PROCESS so
+  // every transcript write stays on the app's single DB writer (no 2nd vault writer).
+  const jobs = new Map(); // attachmentId → { status, coveredSec, durationSec, segments, error }
+
+  // POST /attachments/:id/transcribe — start (or restart) transcription. Non-blocking:
+  // returns 202 immediately; the UI polls .../transcribe/status. Overwrites any prior
+  // transcript (Re-transcribe). Saves progressively so nothing is lost if interrupted.
+  router.post('/attachments/:id/transcribe', async (req, res) => {
+    try {
+      const row = await db.attachments.getById(String(req.params.id), userId);
+      if (!row || row.user_id !== userId) return res.status(404).json({ error: 'not-found' });
+      if (mediaTypeOf(row.file_type) !== 'voice') return res.status(400).json({ error: 'not-audio' });
+      if (!row.local_path) return res.status(409).json({ error: 'no-blob' });
+      const cur = jobs.get(row.id);
+      if (cur && cur.status === 'running') return res.status(202).json({ ok: true, status: cur });
+      const health = (() => { try { return getTranscriberHealth(); } catch { return null; } })();
+      if (health?.status !== 'ok') return res.status(409).json({ error: 'no-model', message: 'Download a transcription model in Settings first.' });
+
+      const state = { status: 'running', coveredSec: 0, durationSec: 0, segments: 0, error: null };
+      jobs.set(row.id, state);
+      res.status(202).json({ ok: true, status: state });
+
+      // Fire-and-forget the shared in-process job (already responded); onProgress feeds
+      // the in-memory state the UI polls. The activity-feed entry is registered inside.
+      transcribeAttachment(db, userId, row.id, {
+        onProgress: (p) => { state.coveredSec = p.coveredSec; state.durationSec = p.durationSec; state.segments = p.segments; },
+      }).then((r) => {
+        state.status = r.ok ? 'done' : 'error';
+        if (!r.ok) state.error = r.reason || 'failed';
+      }).catch(() => { state.status = 'error'; state.error = 'failed'; });
+    } catch (err) {
+      console.error('[portal-attachments] transcribe start failed:', err?.message);
+      res.status(500).json({ error: 'transcribe-failed' });
+    }
+  });
+
+  // GET /attachments/:id/transcribe/status — poll progress.
+  router.get('/attachments/:id/transcribe/status', async (req, res) => {
+    try {
+      const id = String(req.params.id);
+      const row = await db.attachments.getById(id, userId);
+      if (!row || row.user_id !== userId) return res.status(404).json({ error: 'not-found' });
+      const job = jobs.get(id);
+      // transcript is the PROGRESSIVELY-saved text, so the UI can show it fill in live.
+      if (job) return res.json({ status: job.status, coveredSec: job.coveredSec, durationSec: job.durationSec, segments: job.segments, error: job.error, hasTranscript: !!row.transcript, transcript: row.transcript || null });
+      return res.json({ status: row.transcript ? 'done' : 'idle', hasTranscript: !!row.transcript, transcript: row.transcript || null });
+    } catch (err) {
+      res.status(500).json({ error: 'status-failed' });
     }
   });
 

@@ -43,6 +43,58 @@
 	let showDeleteConfirm = $state(false);
 	let isDeleting = $state(false);
 
+	// Transcription (audio → text via the local Whisper model; long files supported)
+	let transcribing = $state(false);
+	let transcribeProgress = $state(0); // 0–100
+	let transcribeError = $state<string | null>(null);
+	let copyOk = $state(false);
+	let transcribePoll: ReturnType<typeof setInterval> | undefined;
+
+	async function startTranscribe() {
+		if (!selectedItem || transcribing) return;
+		transcribing = true; transcribeError = null; transcribeProgress = 0;
+		const id = selectedItem.id;
+		try {
+			const res = await api(`/portal/attachments/${id}/transcribe`, { method: 'POST' });
+			if (!res.ok) {
+				const d = await res.json().catch(() => ({}));
+				transcribeError = d?.message || d?.error || `Failed (${res.status})`;
+				transcribing = false; return;
+			}
+			pollTranscribe(id);
+		} catch { transcribeError = 'Failed to start'; transcribing = false; }
+	}
+
+	function pollTranscribe(id: string) {
+		clearInterval(transcribePoll);
+		transcribePoll = setInterval(async () => {
+			try {
+				const res = await api(`/portal/attachments/${id}/transcribe/status`);
+				if (!res.ok) return;
+				const s = await res.json();
+				if (s.durationSec) transcribeProgress = Math.min(100, Math.round((s.coveredSec / s.durationSec) * 100));
+				if (selectedItem && selectedItem.id === id && typeof s.transcript === 'string') {
+					selectedItem.transcript = s.transcript; // live-fill as segments land
+					const it = items.find((x) => x.id === id); if (it) it.transcript = s.transcript;
+				}
+				if (s.status === 'done' || s.status === 'error') {
+					clearInterval(transcribePoll); transcribing = false;
+					if (s.status === 'error') transcribeError = s.error || 'Transcription failed';
+					else transcribeProgress = 100;
+				}
+			} catch { /* keep polling */ }
+		}, 2000);
+	}
+
+	async function copyTranscript() {
+		if (!selectedItem?.transcript) return;
+		try { await navigator.clipboard.writeText(selectedItem.transcript); copyOk = true; setTimeout(() => (copyOk = false), 1500); } catch { /* */ }
+	}
+
+	// Reset transcription UI when switching files; clear the poll on destroy.
+	$effect(() => { selectedItem?.id; transcribing = false; transcribeError = null; transcribeProgress = 0; clearInterval(transcribePoll); });
+	$effect(() => () => clearInterval(transcribePoll));
+
 	const PAGE_SIZE = 50;
 	const PANEL_MIN = 320;
 	const PANEL_MAX = 700;
@@ -530,9 +582,35 @@
 									<source src={selectedItem.playbackUrl || selectedItem.url} />
 								</audio>
 								{#if selectedItem.transcript}
-									<p class="text-sm text-[var(--color-text-secondary)] mt-3 italic leading-relaxed">
-										{selectedItem.transcript}
-									</p>
+									<div class="mt-3">
+										<div class="flex items-center justify-between mb-1">
+											<span class="text-xs text-[var(--color-text-tertiary)] uppercase tracking-wide">Transcript</span>
+											<button onclick={copyTranscript} class="text-xs text-[var(--color-accent)] hover:underline">
+												{copyOk ? 'Copied' : 'Copy'}
+											</button>
+										</div>
+										<p class="text-sm text-[var(--color-text-secondary)] italic leading-relaxed whitespace-pre-wrap">
+											{selectedItem.transcript}
+										</p>
+									</div>
+								{/if}
+								<div class="mt-3 flex items-center gap-2">
+									<button
+										onclick={startTranscribe}
+										disabled={transcribing}
+										class="text-xs px-3 py-1 rounded bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20 disabled:opacity-50 whitespace-nowrap"
+									>
+										{transcribing ? 'Transcribing…' : (selectedItem.transcript ? 'Re-transcribe' : 'Transcribe')}
+									</button>
+									{#if transcribing}
+										<div class="flex-1 h-1.5 bg-[var(--color-border)] rounded overflow-hidden">
+											<div class="h-full bg-[var(--color-accent)] transition-all" style:width={`${transcribeProgress}%`}></div>
+										</div>
+										<span class="text-xs text-[var(--color-text-tertiary)] tabular-nums">{transcribeProgress}%</span>
+									{/if}
+								</div>
+								{#if transcribeError}
+									<p class="text-xs text-red-500 mt-1">{transcribeError}</p>
 								{/if}
 							</div>
 						{:else}

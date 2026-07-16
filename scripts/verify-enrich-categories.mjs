@@ -173,8 +173,15 @@ ok(INFERENCE_TASKS.includes('categorize'), "'categorize' is a first-class infere
 ok(createCategoryClassifier({ model: DEFAULT_LABEL_MODEL, infer: async () => '{}' }).model === 'qwen3.5:4b', 'classifier carries the default model as provenance');
 // defaultLabelModel: settings override wins; else default. Hermetic (no Ollama).
 ok((await defaultLabelModel({ users: { getSettings: async () => ({ taskModels: { categorize: { model: 'gemma4:12b' } } }) } }, 'u')) === 'gemma4:12b', 'labeling model honors settings.taskModels.categorize.model');
-ok((await defaultLabelModel({ users: { getSettings: async () => ({}) } }, 'u')) === 'qwen3.5:4b', 'labeling model falls back to default when unset');
-ok((await defaultLabelModel({}, 'u')) === 'qwen3.5:4b', 'labeling model fail-soft → default on read error');
+// ⚠️ THESE TWO FLIPPED 2026-07-16 (§3.10c) — they used to assert the fallback, and the
+// fallback WAS the bug: an unset setting silently resolved qwen3.5:4b, so a fresh vault
+// downloaded 3.4GB (+ the Ollama runtime) with no prompt and no way to decline. Unset now
+// means "the owner has not approved a local model" — the same rule whisper already uses
+// (transcribeModel unset ⇒ no_model ⇒ nothing downloads). qwen3.5:4b survives as the
+// RECOMMENDATION the Intelligence step offers (pinned above), never as a silent default.
+ok((await defaultLabelModel({ users: { getSettings: async () => ({}) } }, 'u')) === null, 'UNSET ⇒ null — no model is resolved, so nothing is ever pulled unasked');
+// Fail-CLOSED, not fail-soft: a settings read that FAILS must never be read as consent.
+ok((await defaultLabelModel({}, 'u')) === null, 'read error ⇒ null (fail-closed) — an error is not an approval');
 
 // ── 8. restampLegacyCategories (0041 backfill provenance) ────────────────────
 // Exercises the REAL DAL method (createMessagesNamespace) against an in-memory store. The fake

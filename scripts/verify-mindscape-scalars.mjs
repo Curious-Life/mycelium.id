@@ -1,11 +1,17 @@
 // verify:mindscape-scalars — REGRESSION GUARD for the SEC-3 "decrypted scalar →
 // .toFixed() crash" bug (found 2026-06-05 on a real vault). territory_profiles'
-// current_vitality / coherence / energy are ENCRYPTED at rest (SEC-3) and decrypt
+// current_vitality / coherence / energy were ENCRYPTED at rest (SEC-3) and decrypt
 // to STRINGS; the mindscape territories/territory/explore/time formatters called
 // .toFixed() on them directly, throwing "toFixed is not a function" — but ONLY
 // once a real encrypted vitality exists, which the empty-vault verify:mindscape
 // never seeded. This gate seeds territory_profiles rows WITH encrypted scalars and
 // asserts all four views render (no throw) and surface a numeric vitality.
+//
+// Post SQLCipher-collapse (2026-06-19) NEW writes store these as plain REALs, but
+// the guard still bites: a pre-collapse vault carries envelope rows until the
+// `content.territory_profiles_scalars` backfill runs, and the read path decrypts
+// them opportunistically → STRING → formatter. The seed therefore writes the
+// envelope directly (see the seed block) rather than relying on the adapter.
 //
 // PRE-FIX: territories/territory/explore/time throw → FAIL. POST-FIX (vf() coerce
 // in src/tools/topology-tools.js): all render → GO.
@@ -14,6 +20,7 @@ import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
+import { encrypt, getMasterKey } from '../src/crypto/crypto-local.js';
 
 const DB = 'data/verify-mindscape-scalars.db', KCV = 'data/verify-mindscape-scalars-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -53,6 +60,41 @@ for (const t of TERRS) {
 await db.rawQuery(
   `INSERT INTO territory_cofire (id, user_id, territory_a, territory_b, cofire_immediate, cofire_session, cofire_daily, cofire_weekly) VALUES (?,?,?,?,?,?,?,?)`,
   [`${U}:1:2`, U, 1, 2, 0.5, 0.6, 1.2, 0.9]);
+
+// Re-assert the LEGACY at-rest shape. Until the SQLCipher collapse (2026-06-19)
+// the adapter encrypted these scalars on write, and this gate leaned on that. Post
+// collapse ENCRYPTED_FIELDS.territory_profiles is [] (only `secrets` is still
+// field-encrypted), so the adapter stores them as plain REALs and the seed above
+// no longer reproduces anything — S1–S4 would pass vacuously on plain numbers.
+//
+// The crash path is NOT gone: a pre-collapse vault still holds envelope rows until
+// the `content.territory_profiles_scalars` backfill (src/portal-mindscape.js:69)
+// runs, and autoDecryptResults() decrypts opportunistically on isEncrypted() —
+// NOT off ENCRYPTED_FIELDS — so those rows still decrypt to STRINGS on read and
+// still reach the formatters. vf() remains the only thing between an un-backfilled
+// vault and "toFixed is not a function". So seed the envelope DIRECTLY, exactly as
+// a legacy vault carries it, instead of relying on an adapter that no longer does.
+{
+  const masterKey = await getMasterKey();
+  // userId MUST be null — that is what the real writer passed (src/adapter/d1.js:85:
+  // `autoEncryptParams(sql, params, scope, userKey, null, …)`), and a non-null userId
+  // would derive a per-user key and stamp a v2 envelope (crypto-local.js:1136-1138).
+  // A legacy vault holds v1, so seeding v2 would reproduce a shape no writer ever
+  // wrote — the gate must mirror production, not merely resemble it.
+  for (const t of TERRS) {
+    const [vit, coh, en] = await Promise.all([
+      encrypt(String(t.vit), 'personal', masterKey, null),
+      encrypt(String(t.coh), 'personal', masterKey, null),
+      encrypt(String(t.en), 'personal', masterKey, null),
+    ]);
+    // Raw better-sqlite3 write: post-collapse the adapter would store these verbatim
+    // anyway, and we need the envelope to land exactly as the legacy writer left it.
+    const w = new Database(DB);
+    w.prepare(`UPDATE territory_profiles SET current_vitality=?, coherence=?, energy=? WHERE user_id=? AND territory_id=?`)
+      .run(vit, coh, en, U, t.tid);
+    w.close();
+  }
+}
 
 // Bug-condition guard: the seed MUST have stored current_vitality as ciphertext,
 // else this test isn't reproducing the crash path.

@@ -10,6 +10,11 @@
 
 import { InferenceError } from "./errors.js";
 
+// §4g/local-wire host check. Defined in presets.js (next to LOOPBACK_HOSTS, which
+// jurisdictionForBaseUrl already used correctly) and re-exported here because harness.js and
+// narrate-infer.js import from this module. ONE implementation — a first draft added a fourth.
+export { isLoopbackUrl } from './presets.js';
+
 export const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
 export const DEFAULT_LOCAL_MODEL = "llama3.1";
 

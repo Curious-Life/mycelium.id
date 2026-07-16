@@ -15,6 +15,7 @@
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { reportChild } from './lib/child-stderr.mjs';
 import { createServer } from 'node:http';
 import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
@@ -65,7 +66,7 @@ const cp = (mid, realm, terr) => db.rawQuery(
    VALUES (?, ?, 'message', ?, ?, ?)`, [`cp-${mid}`, U, mid, realm, terr]);
 await msg('m1', 'thinking about mushrooms', '2026-06-01T10:00:00Z'); await cp('m1', 0, 1);
 await msg('m2', 'mycelium networks are wild', '2026-06-02T10:00:00Z'); await cp('m2', 0, 1);
-const provId = await db.providers.create(U, { provider: 'custom', label: 'stub', authType: 'api_key', baseUrl: `http://127.0.0.1:${PORT}/v1` });
+const provId = await db.providers.create(U, { provider: 'custom', label: 'stub', authType: 'api_key', model: 'stub-model' /* §M (#165): a provider row with NO model choice is correctly BLOCKED now — the harness states its choice explicitly; consent itself is verify:narrate-consent's job */, baseUrl: `http://127.0.0.1:${PORT}/v1` });
 await db.providers.setActive(provId, U);
 close();
 
@@ -73,13 +74,24 @@ const env = { ...process.env, USER_MASTER: userHex, SYSTEM_KEY: systemHex, MYCEL
 // ASYNC spawn, not spawnSync: the stub Ollama lives in THIS process — spawnSync
 // blocks the event loop, the stub can never answer the child, and every run
 // wedges to the kill timeout (cost one debugging round; don't repeat it).
+// A non-zero child exit surfaces its stderr HERE, once, rather than only as `exit=1 calls=0`
+// in a rec() row: the bare code hides the actual cause (a vault writer-lock throw looked like
+// a gating regression and cost a session). Printed by the runner so every call site is covered.
 const runDescribe = () => new Promise((resolve) => {
   const child = spawn('node', ['pipeline/describe-clusters.js'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', (d) => { stderr += d.toString(); });
   const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 120_000);
-  child.on('close', (status) => { clearTimeout(t); resolve({ status, stderr }); });
-  child.on('error', () => { clearTimeout(t); resolve({ status: -1, stderr }); });
+  // A spawn failure emits BOTH 'error' AND 'close' — fire once, or the second report
+  // interleaves into the next test's output (in a gate whose job is legible failures).
+  let fired = false;
+  const done = (status) => {
+    if (fired) return;
+    fired = true;
+    clearTimeout(t); reportChild('describe-clusters.js', status, stderr); resolve({ status, stderr });
+  };
+  child.on('close', done);
+  child.on('error', () => done(-1));
 });
 
 const reopen = async () => { const b = await boot({ dbPath: DB, kcvPath: KCV, userHex, systemHex, embedder: null }); db = b.db; close = b.close; };

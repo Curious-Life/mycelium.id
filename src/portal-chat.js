@@ -40,6 +40,31 @@ const CHANNEL_SOURCE_SET = new Set(CHANNEL_SOURCES);
 // persisted in users.settings.agent and surfaced everywhere the AI is referenced
 // (chat header via /agents) and in how it speaks (the system preamble below).
 const DEFAULT_AGENT_NAME = 'Mycelium';
+export const AGENT_NAME_MAX = 40;
+
+/**
+ * The ONE definition of "what settings.agent.name is allowed to be".
+ *
+ * This value is interpolated into the chat SYSTEM PROMPT ("Your name is ${ident.name}.")
+ * so it is an instruction slot, not a label. The cap used to live only on the PUT while
+ * the READ trusted whatever was stored — so any writer that skipped the route (a vault
+ * IMPORT did exactly that, replacing users.settings wholesale from the bundle) got an
+ * uncapped, persisted prompt-injection slot on every turn.
+ *
+ * One function, called by BOTH the write and the read: a guarantee that depends on every
+ * writer remembering the rule is not a guarantee.
+ *
+ * SCOPE — this BOUNDS the slot, it does not sanitise it. "SYSTEM: ignore all rules" fits
+ * in 40 chars, and the PUT could always type that; capping is not an anti-injection
+ * control and must not be described as one. What stops a BUNDLE choosing this string is
+ * the import refusing `agent` outright (vault-import.js user_meta denylist); this is the
+ * second layer (CLAUDE.md §2), and its job is to keep the slot bounded and identical on
+ * both paths.
+ */
+export function agentDisplayName(raw) {
+  const s = (typeof raw === 'string' ? raw.trim() : '').slice(0, AGENT_NAME_MAX).trim();
+  return s || DEFAULT_AGENT_NAME;
+}
 const PERSONALITIES = ['friendly', 'formal', 'concise', 'creative'];
 const PERSONALITY_GUIDE = {
   friendly: 'Be warm, encouraging and personable.',
@@ -119,7 +144,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
   async function readAgentIdentity() {
     try {
       const a = (await db.users?.getSettings?.(userId))?.agent || {};
-      const name = (typeof a.name === 'string' && a.name.trim()) ? a.name.trim() : DEFAULT_AGENT_NAME;
+      const name = agentDisplayName(a.name);
       const personality = PERSONALITIES.includes(a.personality) ? a.personality : 'friendly';
       // Channel writes are ON by default for the personal agent (the per-agent toggle in
       // the Agents page; mirrors resolve-grant.ownerWriteEnabled — undefined ⇒ on).
@@ -152,7 +177,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       try { await db.users.create(userId, userId); } catch { /* row already exists */ }
       const s = (await db.users.getSettings(userId)) || {};
       const agent = { ...(s.agent || {}) };
-      if (req.body?.name !== undefined) agent.name = String(req.body.name || '').trim().slice(0, 40) || DEFAULT_AGENT_NAME;
+      if (req.body?.name !== undefined) agent.name = agentDisplayName(req.body.name);
       if (req.body?.personality !== undefined) agent.personality = PERSONALITIES.includes(req.body.personality) ? req.body.personality : 'friendly';
       if (typeof req.body?.channelWrite === 'boolean') agent.channelWrite = req.body.channelWrite;
       if (Array.isArray(req.body?.scopes)) {
@@ -278,6 +303,25 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       ? req.body.conversationId.trim().slice(0, 100)
       : null;
     const conversationId = rawConv ? `chat:${rawConv}` : null;
+
+    // PERSIST THE USER'S MESSAGE NOW — before the model is even resolved.
+    //
+    // It used to be written only on the success path, INSIDE `if (assistantText.trim())`,
+    // so the words the user typed were lost whenever (a) the turn threw — which is exactly
+    // what happened for ~10 days: a NUL byte from vault corruption reached argv and every
+    // turn died at spawn ("args[8] must be a string without null bytes"), and portal-chat
+    // persisted NOTHING after 2026-07-05 — or (b) the turn succeeded with no assistant text
+    // (a truncated tool-call turn), which silently dropped the user's message on a HAPPY path.
+    //
+    // A user's own words are data they authored. They must never be contingent on the model
+    // answering: the model is the unreliable part of this transaction, not the human. Capture
+    // first, then let the turn fail however it likes. Fire-and-forget (never block the SSE
+    // stream on a write) but ORDER-PRESERVING: the assistant reply chains off this promise so
+    // history can't invert. Failure is logged, never silent.
+    const userSaved = captureMessage(db, {
+      userId, role: 'user', content: message, source: CHAT_SOURCE, messageType: 'chat',
+      ...(conversationId ? { conversationId } : {}),
+    }, enqueueEnrichment).catch((e) => { console.error('[chat] persist(user) FAILED — the message was not saved:', e?.message); });
 
     const policy = await readPolicy();
     const { tools: grantedTools, unmapped } = toolsForDomains(tools || [], policy.domains);
@@ -516,11 +560,17 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
           }
           send({ type: 'done', toolsUsed: result.toolsUsed || [], truncated: !!result.truncated });
           res.write('data: [DONE]\n\n');
-          // Persist only when there's actual assistant text (a truncated tool-call
-          // turn can have none) — never write an empty assistant bubble.
+          // The USER's message is already persisted (at the top of the route — it must not
+          // depend on the model answering). Here we only add the ASSISTANT's reply, and only
+          // when there IS text (a truncated tool-call turn can have none) — never write an
+          // empty assistant bubble. Chained off `userSaved` so history can't invert.
           if (assistantText.trim()) {
-            const cap = (role, content) => captureMessage(db, { userId, role, content, source: CHAT_SOURCE, messageType: 'chat', model: info.model, ...(conversationId ? { conversationId } : {}) }, enqueueEnrichment);
-            cap('user', message).then(() => cap('assistant', assistantText.trim())).catch((e) => console.error('[chat] persist failed:', e?.message));
+            userSaved
+              .then(() => captureMessage(db, {
+                userId, role: 'assistant', content: assistantText.trim(), source: CHAT_SOURCE,
+                messageType: 'chat', model: info.model, ...(conversationId ? { conversationId } : {}),
+              }, enqueueEnrichment))
+              .catch((e) => console.error('[chat] persist(assistant) failed:', e?.message));
           }
         } else {
           // Surface an ACTIONABLE reason from the upstream status (safe: status

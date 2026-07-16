@@ -22,6 +22,7 @@ import express from 'express';
 import { isTrustedLoopback } from '../http/loopback.js';
 import { runAgentTurn } from './run-turn.js';
 import { describeProvider } from './harness.js';
+import { classifyProviderError } from './provider-errors.js';
 import { resolveInferenceConfigForTask } from '../inference/resolve.js';
 import { wrapUntrusted } from './untrusted.js';
 import { createTriage } from './triage.js';
@@ -207,6 +208,16 @@ export function createChannelTurnRouter({ db, userId, tools = [], handlers = {},
 
       if (result?.skipped === 'no-model') { res.json({ delivered: false, usedReplyTool: false, reason: 'no-model' }); return; }
       const usedReplyTool = calledReply(result?.toolsUsed);
+      // AUTH failures must be LOUD, not just "no reply".
+      // The loop now stops instead of silently swapping the user's chosen provider for a
+      // local model (loop.js: auth is never a fallback condition). But without this, an
+      // expired subscription surfaced here as reason:'no-reply' + degraded:false —
+      // INDISTINGUISHABLE from a triage "nothing worth answering" skip. The owner would
+      // get silence on Telegram/Discord with no signal on /healthz lastTurn and no
+      // degraded alert: we'd have traded a silently-downgraded reply for a silently
+      // MISSING one (the exact class of bug the reply-finalizer work chased for sessions).
+      // Classify the loop's lastErr so the daemon can alert + tell the owner to reconnect.
+      const authFailed = !usedReplyTool && classifyProviderError(result?.lastErr)?.reason === 'auth';
       // Observability (Layer 3): surface the DEGRADED path — `harvested` (reply landed only via the
       // text-harvest last resort → the provider couldn't be forced to call reply) and `fellBack`
       // (the turn ran on a fallback provider, not the primary). `model` is the ACTUAL model that
@@ -215,10 +226,16 @@ export function createChannelTurnRouter({ db, userId, tools = [], handlers = {},
       res.json({
         delivered: usedReplyTool,
         usedReplyTool,
-        reason: result?.truncated ? 'truncated' : (usedReplyTool ? (result?.harvested ? 'replied-harvested' : 'replied') : 'no-reply'),
+        reason: result?.truncated ? 'truncated'
+          : (usedReplyTool ? (result?.harvested ? 'replied-harvested' : 'replied')
+            : (authFailed ? 'auth' : 'no-reply')),
         truncated: !!result?.truncated,
         harvested: !!result?.harvested,
-        degraded: !!result?.fellBack || !!result?.harvested,
+        // authFailed rides `degraded` so the EXISTING 0-send/degraded operator alert fires
+        // without the daemon needing to learn a new field; `reason:'auth'` lets it be
+        // specific ("reconnect your Claude subscription") rather than generic.
+        degraded: !!result?.fellBack || !!result?.harvested || authFailed,
+        authFailed,
         model: result?.model || null,
       });
     } catch (e) {

@@ -40,8 +40,14 @@ const insRaw = (id, content) => raw.prepare(`INSERT INTO messages (id, user_id, 
 {
   // a content-NULL dead row (no embedding) + a content row WITHOUT embedding (real pending)
   insRaw('null-1', null);
-  // mark the imported content row as embedded so it counts as embedded
-  raw.prepare(`UPDATE messages SET embedding_768 = 'x' WHERE id = 'imp-ok'`).run();
+  // Mark the imported content row as embedded EXACTLY as the pipeline does — service.js
+  // writes embedding_768 and nlp_processed = 2 in ONE update. The fixture used to set only
+  // embedding_768, leaving nlp_processed = 0: a state production never produces, and one
+  // the drainer would (correctly) re-select and re-embed, since selectPendingEnrichment
+  // keys on nlp_processed and never looks at embedding_768. Harmless under the old
+  // `total - embedded` projection, which couldn't see nlp_processed at all — but it would
+  // make the now-COUNTED `pending` report real, drainer-confirmed work as if it were a bug.
+  raw.prepare(`UPDATE messages SET embedding_768 = 'x', nlp_processed = 2 WHERE id = 'imp-ok'`).run();
   const bl = await db.messages.embedBacklog(U);
   // content-bearing rows: imp-ok (embedded) + imp-att(content null but has attachment? content is null → excluded). So embeddable total = imp-ok only.
   rec('I4. embedBacklog counts only content-bearing rows; content-NULL excluded from total', bl.total === 1 && bl.embedded === 1 && bl.pending === 0, JSON.stringify(bl));
@@ -58,6 +64,55 @@ const insRaw = (id, content) => raw.prepare(`INSERT INTO messages (id, user_id, 
   await loadFromDb({ backend, db, userId: U, getMasterKey: null });
   const ids = added.map((a) => a.id);
   rec('I6. content-NULL rows are NOT indexed (null-1 absent); content rows are (imp-ok, pending-1)', !ids.includes('null-1') && ids.includes('imp-ok') && ids.includes('pending-1'), ids.filter((i) => i.startsWith('null') || i.startsWith('imp') || i.startsWith('pending')).join(','));
+}
+
+// ── P1.2b) `pending` is COUNTED, not projected → it reaches 0 even when rows exist
+// that the drainer will NEVER re-select. The old `total - embedded` projection made
+// those rows stick in `pending` forever, so a stuck vault and a healthy one looked
+// identical. I4/I5 above only cover the content-NULL class (the "19 remaining" fix);
+// these cover the three that survived it. @see DATA-READINESS-DESIGN §3.3.
+{
+  // (1) a GENUINE poison row: content-bearing, never embedded, nlp_processed = -1 with
+  // the dimension-mismatch error the self-heal deliberately does NOT reset to 0
+  // (drainer.js: "expected 768" is the one failure kept terminal).
+  insRaw('poison-1', 'a message that can never embed');
+  raw.prepare(`UPDATE messages SET nlp_processed = -1, nlp_error = 'dim mismatch: expected 768, got 384' WHERE id = 'poison-1'`).run();
+  // (2) a BLANK-CONTENT skip: whitespace-only content passes `content != ''` (so it is
+  // in `total`) but service.js trims it and marks nlp_processed = 1 without embedding.
+  insRaw('blank-1', '   ');
+  raw.prepare(`UPDATE messages SET nlp_processed = 1 WHERE id = 'blank-1'`).run();
+
+  // embeddable rows now: imp-ok(embedded) · pending-1(real pending) · poison-1 · blank-1
+  const bl = await db.messages.embedBacklog(U);
+  rec('I8. pending counts ONLY selectPendingEnrichment\'s predicate — poison + blank-skip excluded (was: both stuck in pending forever)',
+    bl.pending === 1, JSON.stringify(bl));
+  rec('I9. the residue is SURFACED as `unprocessable`, not hidden inside pending',
+    bl.unprocessable === 2, JSON.stringify(bl));
+
+  // (3) the regression this exists to pin: drain the one real pending row → pending
+  // REACHES 0 while the un-embeddable rows are still present. Under the old projection
+  // pending would be 3 here, forever — the stuck "Embedding N of M".
+  raw.prepare(`UPDATE messages SET embedding_768 = 'x', nlp_processed = 2 WHERE id = 'pending-1'`).run();
+  const bl2 = await db.messages.embedBacklog(U);
+  rec('I10. pending REACHES 0 with un-embeddable rows present (the stuck-forever bug)',
+    bl2.pending === 0, JSON.stringify(bl2));
+  rec('I11. …and those rows stay VISIBLE as unprocessable (never silently dropped)',
+    bl2.unprocessable === 2 && bl2.total === 4 && bl2.embedded === 2, JSON.stringify(bl2));
+  // nlp_processed = 2 means embedded-but-awaiting-L2: it must count as embedded, and it
+  // must NOT be pending (the L2 backlog is a separate queue with its own terminality).
+  rec('I12. an embedded row awaiting L2 (nlp_processed = 2) counts as embedded, not pending',
+    bl2.embedded === 2 && bl2.pending === 0, JSON.stringify(bl2));
+
+  // The progress bar and `status` MUST share a basis. Independent review caught this:
+  // `status` reads `pending` (now counted) while step/totalSteps/stageLabel read
+  // embedded/total, so a vault with un-embeddable rows reported status:'done' over
+  // "Embedding: 2 / 4" — a half-full bar announcing completion. The denominator is the
+  // PROCESSABLE set (embedded + pending), which equals `embedded` exactly when pending
+  // hits 0. Pinned here so the two bases can never drift apart again.
+  const processable = bl2.embedded + bl2.pending;
+  rec('I13. the progress denominator is the PROCESSABLE set, so a "done" status can never render a half-full bar',
+    bl2.pending === 0 && processable === bl2.embedded && processable !== bl2.total,
+    JSON.stringify({ step: bl2.embedded, totalSteps: processable, total: bl2.total, unprocessable: bl2.unprocessable }));
 }
 
 // ── P2.1) the build YIELDS the event loop (no freeze) — behavioral test ──────

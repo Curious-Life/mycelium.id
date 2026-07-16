@@ -6,11 +6,20 @@
 	presentation is new. This is the target of "Spawn intelligence" / "Connect AI".
 -->
 <script lang="ts">
+	import OnboxTaskSelect from './OnboxTaskSelect.svelte';
+	import ModelHealth from './ModelHealth.svelte';
+	// §4g's exemption is SHARED state: the Intelligence screen prints the guarantee that depends
+	// on it, and both are mounted in this same pane. Two independent copies = a false privacy
+	// statement one scroll away (see the store's header).
+	import { setSensitiveExempt, seedSensitiveExempt } from '$lib/stores/sensitive-exempt.svelte';
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
 
 	type Preset = { id: string; label: string; kind: 'openai' | 'anthropic'; baseUrl: string; jurisdiction: string; defaultModel: string };
-	type Provider = { id: number; provider: string; label: string | null; base_url: string | null; model_preference: string | null; is_active: number; status: string; last_used_at: string | null };
+	// `on_this_device` / `jurisdiction` are computed SERVER-side (publicRow in
+	// src/portal-providers.js) with the one shared parser. They are not stored columns and
+	// must not be re-derived from base_url here — see the JURIS/ON_DEVICE note below.
+	type Provider = { id: number; provider: string; label: string | null; base_url: string | null; model_preference: string | null; is_active: number; status: string; last_used_at: string | null; on_this_device: boolean; jurisdiction: string };
 
 	let presets = $state<Preset[]>([]);
 	let providers = $state<Provider[]>([]);
@@ -87,9 +96,47 @@
 
 	// ── Claude subscription (opt-in) — import the user's own Claude Code login ──
 	// Not a paste-a-key preset: a distinct flow that imports ~/.claude/.credentials.json
-	// (POST /auth/claude/import, acknowledgeToS required) and stores the OAuth token.
+	// (POST /auth/claude/connect -> probe this device, else the browser PKCE flow via
+	// /auth/claude/code; acknowledgeToS required on both) and stores the OAuth token.
 	type SubAccount = { email?: string | null; displayName?: string | null; organization?: string | null; plan?: string | null };
-	let subStatus = $state<{ authenticated: boolean; providerId: number | null; account?: SubAccount | null; model?: string | null } | null>(null);
+	// health is PROBE-VERIFIED, not "a row exists" — the backend re-reads the live
+	// credential stores on every call. `authenticated` is kept for back-compat but now
+	// means USABLE. See src/portal-providers.js GET /auth/claude/status.
+	type SubHealth = 'missing' | 'connected' | 'expired' | 'needs_reauth' | 'declined';
+	let subStatus = $state<{
+		authenticated: boolean; providerId: number | null; account?: SubAccount | null; model?: string | null;
+		health?: SubHealth; source?: string | null; expiresAt?: number | null; scopeUnknown?: boolean; declinedSources?: string[];
+	} | null>(null);
+
+	// ── The connect LADDER (auto first, web only if needed) ──────────────────────
+	// POST /auth/claude/connect probes this device; if nothing usable is found it hands
+	// back a browser URL + the real reason. The user pastes the code back → /code.
+	let subWebUrl = $state<string | null>(null);      // set when the ladder needs the web flow
+	let subWebReason = $state<string | null>(null);   // absent | declined | wrong_scope | expired
+	let subWebDetail = $state<string | null>(null);
+	let subCode = $state('');
+
+	// Human-readable, honest state — never a bare green tick.
+	const SUB_UI: Record<SubHealth, { cls: string; icon: string; title: string; hint: string }> = {
+		connected:    { cls: 'ok',   icon: '✓', title: 'Connected',          hint: '' },
+		expired:      { cls: 'warn', icon: '↻', title: 'Session expired',    hint: 'It will renew automatically on the next request. If it keeps failing, reconnect.' },
+		needs_reauth: { cls: 'err',  icon: '!', title: 'Needs reconnecting', hint: 'No usable Claude login was found on this device.' },
+		declined:     { cls: 'warn', icon: '🔒', title: 'Keychain access denied', hint: "You're signed in, but macOS blocked access. Allow it, or connect in your browser instead." },
+		missing:      { cls: 'err',  icon: '·', title: 'Not connected',      hint: '' },
+	};
+	const subHealth = $derived((subStatus?.health ?? (subStatus?.authenticated ? 'connected' : 'missing')) as SubHealth);
+	// Never index SUB_UI unguarded: a NEWER backend health value (routine here — the repo
+	// ships frontend-only deploys, so a stale portal against newer src/ is normal) would
+	// otherwise dereference undefined and blank the whole Settings page.
+	const subUi = $derived(SUB_UI[subHealth] ?? SUB_UI.missing);
+	const subExpiryText = $derived.by(() => {
+		const e = subStatus?.expiresAt;
+		if (!e || !Number.isFinite(e)) return null;
+		const mins = Math.round((e - Date.now()) / 60000);
+		if (mins < 0) return 'expired';
+		if (mins < 60) return `renews in ${mins} min`;
+		return `renews in ${Math.round(mins / 60)} h`;
+	});
 	let subOpen = $state(false);          // import panel expanded
 	let subAck = $state(false);           // ToS acknowledgment
 	let subConnecting = $state(false);
@@ -142,21 +189,60 @@
 				api('/portal/providers/sensitive-subscription').then((r) => r.json()).catch(() => null),
 				api('/portal/providers/web-search').then((r) => r.json()).catch(() => null),
 			]);
-			if (s?.ok) subStatus = { authenticated: !!s.authenticated, providerId: s.providerId ?? null, account: s.account ?? null, model: s.model ?? null };
-			if (ss?.ok) subSensitive = ss.allowed === true;
+			if (s?.ok) subStatus = {
+				authenticated: !!s.authenticated, providerId: s.providerId ?? null, account: s.account ?? null, model: s.model ?? null,
+				health: s.health ?? undefined, source: s.source ?? null, expiresAt: s.expiresAt ?? null,
+				scopeUnknown: s.scopeUnknown === true, declinedSources: s.declinedSources ?? [],
+			};
+			// Publish on READ too, not just on write: the Intelligence screen renders the §4g
+			// guarantee from this flag, so whichever component reads it first should tell the other.
+			// SEED, not set — a load must never clobber a flip the user made mid-load. (An earlier
+			// comment here claimed this delivers agreement "from the first paint"; it cannot —
+			// loadSub is itself an async fetch. The screen gates its claim on `loaded` instead.)
+			if (ss?.ok) { subSensitive = ss.allowed === true; seedSensitiveExempt(subSensitive); }
 			if (ws?.ok) webSearchOn = ws.enabled !== false;
 		} catch { /* section shows the connect state */ }
 	}
+	// The LADDER, step 1: try this device. The server probes every credential store; if it
+	// finds a usable login we're connected with no prompt at all. If it can't, it returns
+	// a browser URL + the REAL reason (absent / declined / wrong_scope / expired) — which
+	// we show, instead of the old dead-end "Run `claude` and sign in first".
 	async function importSub() {
 		if (!subAck) return;
+		subConnecting = true; subErr = null; subWebUrl = null; subWebReason = null; subWebDetail = null;
+		try {
+			const r = await api('/portal/auth/claude/connect', { method: 'POST', body: JSON.stringify({ acknowledgeToS: true }) });
+			const j = await r.json().catch(() => ({}));
+			if (!r.ok) throw new Error(j.error || 'Could not connect');
+			if (j.connected) { subOpen = false; subAck = false; await loadSub(); await load(); return; }
+			// Nothing usable on this device → hand the user the browser flow.
+			subWebUrl = j.url || null;
+			subWebReason = j.reason || null;
+			subWebDetail = j.detail || null;
+			if (!subWebUrl) throw new Error(j.detail || 'Could not start the browser sign-in');
+		} catch (e: any) { subErr = e?.message || 'Could not connect'; }
+		finally { subConnecting = false; }
+	}
+
+	// The LADDER, step 2: finish in the browser and paste the code back. Works on a
+	// machine with no `claude` CLI at all — the case that previously could not connect.
+	async function finishSubWeb() {
+		if (!subCode.trim()) return;
 		subConnecting = true; subErr = null;
 		try {
-			const r = await api('/portal/auth/claude/import', { method: 'POST', body: JSON.stringify({ acknowledgeToS: true }) });
+			const r = await api('/portal/auth/claude/code', { method: 'POST', body: JSON.stringify({ acknowledgeToS: true, code: subCode.trim() }) });
 			const j = await r.json().catch(() => ({}));
-			if (!r.ok) throw new Error(j.error || 'Import failed');
-			subOpen = false; subAck = false;
+			if (!r.ok) throw new Error(j.error || 'Could not complete the connection');
+			subOpen = false; subAck = false; subWebUrl = null; subCode = '';
 			await loadSub(); await load();
-		} catch (e: any) { subErr = e?.message || 'Import failed'; }
+		} catch (e: any) {
+			// The server consumes the pending PKCE flow BEFORE exchanging, so ANY failure here
+			// has already burned the verifier — a retry against the same link would always
+			// 400 ("No pending connection"). Drop back to step 1 so Connect mints a fresh flow
+			// instead of leaving a dead link + Finish button on screen.
+			subErr = e?.message || 'Could not complete the connection';
+			subWebUrl = null; subCode = '';
+		}
 		finally { subConnecting = false; }
 	}
 	async function disconnectSub() {
@@ -173,7 +259,16 @@
 	}
 	async function setSubSensitive(v: boolean) {
 		subSensitiveBusy = true;
-		try { const r = await api('/portal/providers/sensitive-subscription', { method: 'PUT', body: JSON.stringify({ allowed: v }) }); if (r.ok) subSensitive = (await r.json()).allowed === true; }
+		try {
+			const r = await api('/portal/providers/sensitive-subscription', { method: 'PUT', body: JSON.stringify({ allowed: v }) });
+			if (r.ok) {
+				subSensitive = (await r.json()).allowed === true;
+				// PUBLISH IT. The Intelligence screen above renders the §4g guarantee from this
+				// flag; without this it keeps printing "…stay in the EU or on your device" after
+				// you flip the exemption ON, while the router already sends narrate to us-standard.
+				setSensitiveExempt(subSensitive);
+			}
+		}
 		catch { /* leave */ } finally { subSensitiveBusy = false; }
 	}
 	async function setWebSearch(v: boolean) {
@@ -221,6 +316,47 @@
 		categorize: 'Labeling — per-message domains + registers',
 		enrich: 'Enrichment — entities + gist per message',
 	};
+	// ── On-box model health (readiness `models` — src/readiness.js §3.10b) ──────────
+	// The slice was COMPLETE and SERVED but had zero consumers here (design §3.10 line 571),
+	// so approving Labeling and leaving Enrichment unset ran L2 dead AND silent. This is the
+	// render. The health belongs next to the picker that CAUSES it — approving a model is
+	// what starts the download this reports on.
+	//
+	// ⚠️ `slices=models` — ask for exactly what this screen renders, and NEVER `fresh`.
+	// The pure scan is a multi-second SQLCipher decrypt; polling it per-call once hung the
+	// app at boot. `models` itself is SYNC (it reads supervisors' in-memory health, never
+	// the DB), so this stays cheap enough to poll while a pull is in flight.
+	let models = $state<Record<string, any> | null>(null);
+	let modelsPoll: ReturnType<typeof setInterval> | null = null;
+	// The Intelligence pane is destroyed on a pane switch (SettingsView's {#if activePane}), and
+	// a fetch in flight at that moment resolves AFTER the cleanup has run — it would then see
+	// `busy && !modelsPoll` and start a fresh interval with no owner left to clear it. Harmless
+	// while a pull finishes, but a member stuck busy (crash-looping, stalled) would poll every
+	// 2s for the life of the page, once more per visit (independent review, 2026-07-16).
+	let modelsDead = false;
+
+	// The readiness member behind each on-box TASK. `categorize` (the setting) and `labeler`
+	// (the health) are the same function under two names; `enrich`/`enricher` likewise. They
+	// are approved INDEPENDENTLY — one member per task, never a shared object.
+	const TASK_MEMBER: Record<string, string> = { categorize: 'labeler', enrich: 'enricher' };
+	const healthOf = (task: string) => models?.[TASK_MEMBER[task]] ?? null;
+
+	async function loadModels() {
+		try {
+			const r = await api('/portal/readiness?slices=models');
+			if (r.ok) { models = (await r.json())?.models ?? null; maybePollModels(); }
+		} catch { /* health simply doesn't render — never blocks the pickers */ }
+	}
+	// Poll ONLY while something is genuinely in flight. A model pull is multi-GB, so the
+	// percentage has to move; once it settles there is nothing to watch and polling stops.
+	function maybePollModels() {
+		if (modelsDead) return;                 // a late fetch must not outlive the component
+		const busy = Object.values(models || {}).some((m: any) =>
+			['downloading', 'loading', 'starting', 'installing_deps'].includes(String(m?.status)));
+		if (busy && !modelsPoll) modelsPoll = setInterval(loadModels, 2000);
+		if (!busy && modelsPoll) { clearInterval(modelsPoll); modelsPoll = null; }
+	}
+
 	// Role-aware recommendations (curated operator picks, from /providers/presets).
 	// labeling → a small on-box model (categorize/enrich); descriptions → an EU-ZDR cloud (narrate).
 	let roleRecs = $state<{ labeling?: { model?: string }; descriptions?: { presetId?: string } } | null>(null);
@@ -232,7 +368,9 @@
 	const installedLocal = $derived((hwRec?.recommendations ?? []).filter((m: any) => m.installed).map((m: any) => m.name));
 	const onboxModelOf = (task: string) => taskModels[task]?.model || '';
 	// Options for an on-box task's <select>: installed locals + the current pick, minus the
-	// recommended (which is the "" / default option). Same for every on-box task.
+	// recommended — which is NOT dropped because it is "the default", but because it has its
+	// own explicit <option value={onboxRecModel}> above and would otherwise render twice.
+	// It must stay selectable: it is the model the whole recommendation exists to offer.
 	function onboxOptions(task: string): string[] {
 		const set = new Set<string>(installedLocal);
 		const cur = onboxModelOf(task);
@@ -247,15 +385,19 @@
 		marginal: { label: 'tight', cls: 'fit-amber' },
 		too_tight: { label: "won't fit", cls: 'fit-red' },
 	};
+	// Jurisdiction chip for a CONFIGURED row. `local` here means the shared parser's
+	// jurisdiction 'local' WITHOUT loopback — i.e. a `.local` LAN host: the data left this
+	// machine, so it cannot claim "on your device". The green on-device chip is ON_DEVICE
+	// below, gated on the server's `on_this_device`, never on this map.
 	const JURIS: Record<string, { label: string; cls: string }> = {
 		'eu-zdr': { label: 'EU · zero-retention', cls: 'j-green' },
 		'us-standard': { label: 'US · Cloud-Act', cls: 'j-amber' },
 		'us-zdr': { label: 'US · zero-retention', cls: 'j-amber' },
-		local: { label: 'on your device', cls: 'j-green' },
+		local: { label: 'on your local network', cls: 'j-amber' },
 	};
+	const ON_DEVICE = { label: 'on your device', cls: 'j-green' };
 
 	const OLLAMA_BASE = 'http://127.0.0.1:11434/v1';
-	const isLocalUrl = (u: string | null) => !!u && /127\.0\.0\.1|localhost|11434|:1234/.test(u);
 	// Display name for a provider row. For Claude, the AUTH TYPE is the identity, so show
 	// "Claude subscription" (oauth) / "Claude API" (key) rather than any stale stored label
 	// (e.g. an old build wrote "Claude 3"). Non-Claude providers keep their own label.
@@ -280,16 +422,16 @@
 		[...providers].filter((p) => p.is_active)
 			.sort((a, b) => (b.last_used_at || '').localeCompare(a.last_used_at || ''))[0] ?? null,
 	);
+	// Both facts come from the SERVER (publicRow), computed with the one shared parser.
+	// Do not re-derive either from base_url here — a substring regex over the URL string
+	// is what made this badge lie in the first place.
 	const activeInfo = $derived.by(() => {
 		if (!active) return null;
-		const local = isLocalUrl(active.base_url) || active.provider === 'custom' && isLocalUrl(active.base_url);
-		const preset = presets.find((p) => p.baseUrl && p.baseUrl === active.base_url);
-		const jur = local ? 'local' : active.provider === 'anthropic' ? 'us-standard' : (preset?.jurisdiction ?? '');
 		return {
 			label: active.label || active.provider,
 			model: active.model_preference || '',
-			local: !!local || jur === 'local',
-			juris: jur,
+			local: !!active.on_this_device,
+			juris: active.jurisdiction ?? '',
 		};
 	});
 
@@ -317,11 +459,20 @@
 		try { const r = await api('/portal/providers/task-models', { method: 'PUT', body: JSON.stringify({ task, providerId }) }); if (r.ok) taskModels = (await r.json()).taskModels || {}; }
 		catch { /* leave */ } finally { taskBusy = null; }
 	}
-	// On-box task (categorize/enrich): stores a LOCAL model NAME. Empty → curated default.
+	// On-box task (categorize/enrich): stores a LOCAL model NAME. Empty → NOT APPROVED:
+	// nothing downloads and nothing runs for that task (§3.10c — the approval IS the setting).
+	// It said "Empty → curated default" until 2026-07-16, which is the exact claim this round
+	// killed; the identical sentence was fixed in portal-providers.js in the same diff and
+	// missed here, 80 lines from the edit (re-review). Check for siblings, not just the file
+	// you are in.
 	async function setOnboxModel(task: string, model: string) {
 		taskBusy = task;
 		try { const r = await api('/portal/providers/task-models', { method: 'PUT', body: JSON.stringify({ task, model }) }); if (r.ok) taskModels = (await r.json()).taskModels || {}; }
 		catch { /* leave */ } finally { taskBusy = null; }
+		// The approval is what STARTS the pull, so re-read the health the click just changed —
+		// otherwise approving a ~3.4GB model leaves the row reading "Off" until the next
+		// visit, and the one download worth watching is the one nobody sees begin.
+		loadModels();
 	}
 	// ── Voice transcription (dedicated Whisper — fast on-device STT) ──
 	type WhisperCat = { model: string; label: string; sizeMB: number; blurb: string; recommended?: boolean };
@@ -360,8 +511,12 @@
 	}
 
 	onMount(() => {
-		load(); loadTaskModels(); loadTranscription(); loadIdentity(); loadSub();
-		return () => { if (transPoll) clearInterval(transPoll); };
+		load(); loadTaskModels(); loadTranscription(); loadIdentity(); loadSub(); loadModels();
+		return () => {
+			if (transPoll) clearInterval(transPoll);
+			modelsDead = true;
+			if (modelsPoll) { clearInterval(modelsPoll); modelsPoll = null; }
+		};
 	});
 
 	function choose(p: Preset) {
@@ -401,7 +556,10 @@
 	// destructive Ollama HTTP delete. Non-local providers just remove the connection.
 	let confirmRemoveId = $state<number | null>(null);
 	let removeBusy = $state(false);
-	const isLocalProvider = (p: any) => isLocalUrl(p.base_url) && !!p.model_preference;
+	// Server-computed loopback (publicRow.on_this_device) — the disk-delete is only ever
+	// offered for a model on THIS machine. (/portal/hardware/delete independently refuses a
+	// name that isn't actually installed on the local daemon, so this is the outer of two.)
+	const isLocalProvider = (p: any) => !!p.on_this_device && !!p.model_preference;
 	function onRemoveClick(p: any) {
 		if (isLocalProvider(p)) confirmRemoveId = p.id;   // ask: connection-only vs also-disk
 		else removeConnection(p.id);
@@ -494,7 +652,8 @@
 		<div class="hero-body">
 			{#if activeInfo}
 				<span class="hero-label">Using {activeInfo.label}{#if activeInfo.model && !activeInfo.label.includes(activeInfo.model)} · <span class="hero-model">{activeInfo.model}</span>{/if}</span>
-				{#if JURIS[activeInfo.juris]}<span class="chip {JURIS[activeInfo.juris].cls}">{JURIS[activeInfo.juris].label}</span>{/if}
+				{#if activeInfo.local}<span class="chip {ON_DEVICE.cls}">{ON_DEVICE.label}</span>
+				{:else if JURIS[activeInfo.juris]}<span class="chip {JURIS[activeInfo.juris].cls}">{JURIS[activeInfo.juris].label}</span>{/if}
 				{#if active?.id === subStatus?.providerId && subStatus?.account?.email}<span class="hero-sub">{subStatus.account.email}</span>{/if}
 			{:else}
 				<span class="hero-label">No intelligence connected yet</span>
@@ -586,13 +745,39 @@
 			{:else if subOpen}
 				<div class="connect-form">
 					<div class="cf-head"><span class="cf-name">Connect your Claude subscription</span><span class="chip j-amber">US · opt-in</span></div>
-					<p class="muted-xs">Imports the login from your existing Claude Code session (<span class="mono">~/.claude</span>) — no key to paste. Automating a Pro/Max subscription may be against Anthropic’s terms; you accept that risk.</p>
-					<label class="ack"><input type="checkbox" bind:checked={subAck} /> <span>I understand and accept the terms risk</span></label>
-					{#if subErr}<div class="x-red">{subErr}</div>{/if}
-					<div class="cf-actions">
-						<button type="button" class="solid-btn" disabled={!subAck || subConnecting} onclick={importSub}>{subConnecting ? 'Connecting…' : 'Connect'}</button>
-						<button type="button" class="link-btn dim-link" onclick={() => { subOpen = false; subErr = null; }}>Cancel</button>
-					</div>
+					{#if !subWebUrl}
+						<!-- Ladder step 1: try THIS device. The server probes every credential store. -->
+						<p class="muted-xs">Uses the Claude login already on this device if there is one — otherwise you'll sign in through your browser. No API key either way. Automating a Pro/Max subscription may be against Anthropic's terms; you accept that risk.</p>
+						<label class="ack"><input type="checkbox" bind:checked={subAck} /> <span>I understand and accept the terms risk</span></label>
+						{#if subErr}<div class="x-red">{subErr}</div>{/if}
+						<div class="cf-actions">
+							<button type="button" class="solid-btn" disabled={!subAck || subConnecting} onclick={importSub}>{subConnecting ? 'Connecting…' : 'Connect'}</button>
+							<button type="button" class="link-btn dim-link" onclick={() => { subOpen = false; subErr = null; }}>Cancel</button>
+						</div>
+					{:else}
+						<!-- Ladder step 2: nothing usable here → the BROWSER flow. This is what lets a
+						     machine with no `claude` CLI connect at all — previously impossible. The
+						     reason is the REAL one from the probe, not a generic "sign in first". -->
+						<p class="muted-xs">
+							{#if subWebReason === 'declined'}macOS blocked access to your saved Claude login — you're signed in, but we can't read it. Sign in through your browser instead:
+							{:else if subWebReason === 'wrong_scope'}The login on this device is an admin setup-token, not a subscription sign-in. Sign in through your browser:
+							{:else if subWebReason === 'expired'}Your Claude session couldn't be renewed. Sign in again:
+							{:else}No Claude login found on this device. Sign in through your browser:
+							{/if}
+						</p>
+						{#if subWebDetail}<p class="muted-xs sub-diag">{subWebDetail}</p>{/if}
+						<div class="cf-actions">
+							<a class="solid-btn" href={subWebUrl} target="_blank" rel="noreferrer noopener">Open Claude sign-in ↗</a>
+						</div>
+						<p class="muted-xs">Approve it, then paste the code Claude gives you:</p>
+						<input class="input" placeholder="Paste the code from Claude" bind:value={subCode} autocomplete="off" spellcheck="false"
+							onkeydown={(e) => { if (e.key === 'Enter' && subCode.trim()) finishSubWeb(); }} />
+						{#if subErr}<div class="x-red">{subErr}</div>{/if}
+						<div class="cf-actions">
+							<button type="button" class="solid-btn" disabled={!subCode.trim() || subConnecting} onclick={finishSubWeb}>{subConnecting ? 'Connecting…' : 'Finish connecting'}</button>
+							<button type="button" class="link-btn dim-link" onclick={() => { subOpen = false; subWebUrl = null; subCode = ''; subErr = null; }}>Cancel</button>
+						</div>
+					{/if}
 				</div>
 			{:else}
 				{#each cloudGroups as g (g.key)}
@@ -607,29 +792,52 @@
 				{/each}
 				<div class="preset-group sub-group">
 					<div class="group-title">Your Claude subscription</div>
-					{#if subStatus?.authenticated}
+					{#if subStatus?.authenticated || subHealth === 'declined' || subHealth === 'needs_reauth'}
+						<!-- Probe-verified state — NOT "a row exists". The old card showed a green
+						     tick for a token revoked months ago; this reports what is actually true. -->
 						<div class="sub-row">
-							<span class="sub-ok">✓ {subStatus.account?.email ? `Connected as ${subStatus.account.email}` : 'Using your Claude Pro/Max plan'}</span>
+							<span class="sub-ok" class:sub-warn={subUi.cls === 'warn'} class:sub-err={subUi.cls === 'err'}>
+								{subUi.icon}
+								{#if subHealth === 'connected'}{subStatus?.account?.email ? `Connected as ${subStatus.account.email}` : 'Using your Claude Pro/Max plan'}
+								{:else}{subUi.title}{/if}
+							</span>
+							{#if subHealth === 'needs_reauth' || subHealth === 'declined'}
+								<button class="link-btn" disabled={subConnecting} onclick={() => { subOpen = true; subErr = null; }}>Reconnect</button>
+							{/if}
 							<button class="link-btn x-red-link" disabled={subConnecting} onclick={disconnectSub}>Disconnect</button>
 						</div>
-						{#if subStatus.account?.plan || subStatus.account?.organization}
-							<div class="sub-meta">{[subStatus.account?.plan, subStatus.account?.organization].filter(Boolean).join(' · ')}</div>
+						{#if subUi.hint}<div class="sub-meta">{subUi.hint}</div>{/if}
+						{#if subStatus?.account?.plan || subStatus?.account?.organization}
+							<div class="sub-meta">{[subStatus?.account?.plan, subStatus?.account?.organization].filter(Boolean).join(' · ')}</div>
 						{/if}
-						<div class="sub-model-row">
-							<span class="sub-model-label">Model</span>
-							<div class="sub-model-ctl">
-								<select class="task-select" disabled={subModelBusy} value={subModelValue} onchange={(e) => setSubModel((e.currentTarget as HTMLSelectElement).value)}>
-									{#each subModelOptions as m}
-										<option value={m.id}>{m.label}</option>
-									{/each}
-								</select>
-								<button class="link-btn dim-link" disabled={subModelsPulling} onclick={pullSubModels} title="Fetch the models your account can use">{subModelsPulling ? '…' : 'Refresh'}</button>
+						<!-- Non-secret diagnostics: which store the credential came from, and when it
+						     renews. Previously the card could not tell you either. -->
+						{#if subHealth === 'connected' || subHealth === 'expired'}
+							<div class="sub-meta sub-diag">
+								{#if subExpiryText}{subExpiryText}{/if}
+								{#if subStatus?.source}{subExpiryText ? ' · ' : ''}from {subStatus.source.replace(/-/g, ' ')}{/if}
+								{#if subStatus?.scopeUnknown} · scope unverified (env token){/if}
 							</div>
-						</div>
-						<button class="sub-toggle" role="switch" aria-checked={subSensitive} disabled={subSensitiveBusy} onclick={() => setSubSensitive(!subSensitive)}>
-							<span class="toggle sm" class:on={subSensitive}><span class="knob"></span></span>
-							<span class="sub-toggle-body"><span class="sub-toggle-title">Also use it for sensitive work</span><span class="sub-toggle-sub">Let your subscription process persona &amp; claim analysis — otherwise kept on-device/EU. Off by default.</span></span>
-						</button>
+						{/if}
+						<!-- Model + sensitive-work controls only make sense for a USABLE subscription.
+						     Showing them while it needs reconnecting implies it's working. -->
+						{#if subStatus?.authenticated}
+							<div class="sub-model-row">
+								<span class="sub-model-label">Model</span>
+								<div class="sub-model-ctl">
+									<select class="task-select" disabled={subModelBusy} value={subModelValue} onchange={(e) => setSubModel((e.currentTarget as HTMLSelectElement).value)}>
+										{#each subModelOptions as m}
+											<option value={m.id}>{m.label}</option>
+										{/each}
+									</select>
+									<button class="link-btn dim-link" disabled={subModelsPulling} onclick={pullSubModels} title="Fetch the models your account can use">{subModelsPulling ? '…' : 'Refresh'}</button>
+								</div>
+							</div>
+							<button class="sub-toggle" role="switch" aria-checked={subSensitive} disabled={subSensitiveBusy} onclick={() => setSubSensitive(!subSensitive)}>
+								<span class="toggle sm" class:on={subSensitive}><span class="knob"></span></span>
+								<span class="sub-toggle-body"><span class="sub-toggle-title">Also use it for sensitive work</span><span class="sub-toggle-sub">Let your subscription process persona, claim &amp; description analysis — otherwise kept on-device/EU. Off by default.</span></span>
+							</button>
+						{/if}
 					{:else}
 						<p class="muted-xs">Use your existing Claude login instead of an API key — no key to paste.</p>
 						<button class="preset-chip sub-chip" onclick={() => { subOpen = true; subErr = null; }}>✦ Connect with your Claude login</button>
@@ -688,23 +896,60 @@
 
 				{#if onboxTaskList.length}
 					<div class="group-title">On your device · private</div>
+					<!-- The EMBEDDER — bundled, and deliberately NOT a task row: it has no picker
+					     because it has no choice (§3.10d-c). Rendering it as an approvable card with
+					     a pre-ticked box would present a non-choice as consent. It is listed anyway
+					     because it is the one on-box model every vault runs, and an owner reading a
+					     list of what runs on their device should not have to infer the search index. -->
+					<div class="task-row">
+						<span class="task-label">Search — semantic recall</span>
+						<div class="task-ctl"><ModelHealth kind="included" health={models?.embedder} /></div>
+					</div>
 					{#each onboxTaskList as task}
 						<div class="task-row">
 							<span class="task-label">{TASK_LABELS[task] || task}</span>
-							<select
-								class="task-select"
-								disabled={taskBusy === task}
-								value={onboxModelOf(task) && onboxModelOf(task) !== onboxRecModel ? onboxModelOf(task) : ''}
-								onchange={(e) => setOnboxModel(task, (e.currentTarget as HTMLSelectElement).value)}
-							>
-								<option value="">Recommended · {onboxRecModel}</option>
-								{#each onboxOptions(task) as name}
-									<option value={name}>{name}</option>
-								{/each}
-							</select>
+							<div class="task-ctl">
+								<!-- The approval IS the value (§3.10c). Extracted so a gate can MOUNT and drive
+								     it — see OnboxTaskSelect.svelte for why "" is Off and not "Recommended". -->
+								<OnboxTaskSelect
+									value={onboxModelOf(task)}
+									recModel={onboxRecModel}
+									options={onboxOptions(task)}
+									disabled={taskBusy === task}
+									onpick={(m) => setOnboxModel(task, m)}
+								/>
+								<!-- The health of THIS task's own member, directly under the picker that causes
+								     it. `categorize`→labeler and `enrich`→enricher are independent members: this
+								     is what makes "approved Labeling, declined Enrichment" visible rather than
+								     dormant and silent. -->
+								<ModelHealth health={healthOf(task)} />
+							</div>
 						</div>
 					{/each}
-					{#if !hwRec}<p class="muted-xs">Tip: detect your hardware under “Local” above to pick from your installed models. “Recommended” auto-pulls {onboxRecModel} if needed.</p>{/if}
+					<!-- ⚠️ COUPLED TO THE APPROVAL MODEL — increment I MUST revisit this sentence.
+					     "Each task is approved separately" is TRUE of THIS screen: it renders one
+					     select per on-box task and drives the PER-TASK route, which writes exactly
+					     one. It becomes FALSE the moment the Intelligence screen (§3.11) replaces
+					     this block — that screen approves Understanding = {categorize, enrich} as ONE
+					     choice via `PUT /providers/task-models {function}` (gate M8 in
+					     verify-task-models.mjs).
+					     WHY FIVE SWEEPS MISSED THE SENTENCE BELOW: it WRAPS A LINE, and grep is
+					     line-oriented — it cannot match a phrase across a newline. Sweeping for
+					     any claim like this one must be MULTILINE (perl -0777, whitespace
+					     collapsed), or you will "verify" a completeness you do not have.
+					     ⚠️ Note this paragraph quotes NOTHING from the LIVE sentence below (the
+					     phrase in quotes further up is the OLD wording, kept as history). Two
+					     earlier drafts quoted the live phrase to explain the trap — which made the
+					     very grep they warned about return hits, on the warning itself. A caveat
+					     that falsifies its own instruction is worse than none (review ×5, 2026-07-16).
+					     -->
+					<p class="muted-xs">
+						Choosing a model is how you approve it: “Recommended” downloads {onboxRecModel}
+						(~3.4GB, plus the local model runtime) the first time it’s needed, and you can watch
+						it in the activity feed. “Off” means nothing downloads and nothing runs on your
+						device for this task, which is a supported choice. Each task here is approved on its
+						own.{#if !hwRec} Detect your hardware under “Local” above to also pick from models you already have.{/if}
+					</p>
 				{/if}
 
 				{#if cloudTaskList.length}
@@ -749,8 +994,14 @@
 					<div class="muted pulse">{trans.health?.message || 'Preparing transcription…'}</div>
 				{:else if trans.health?.status === 'deps_missing'}
 					<div class="note-amber">{trans.health?.message}</div>
-				{:else if trans.health?.status === 'error'}
-					<div class="err-box">{trans.health?.detail || 'The transcription model failed.'}</div>
+				{:else if trans.health?.status === 'error' || trans.health?.status === 'down' || trans.health?.status === 'unavailable'}
+					<!-- `down` was MISSING from this chain, so a crash-looping engine
+					     (transcribe/supervisor.js: setHealth('down', 'The transcription engine keeps
+					     stopping.')) fell through to the {:else} and told the owner to DOWNLOAD a
+					     model they already have — discarding the honest message for marketing copy
+					     (independent review, 2026-07-16). `message` first here: for `down` it is the
+					     sentence written for the owner, while `detail` is the process tail. -->
+					<div class="err-box">{trans.health?.message || trans.health?.detail || 'The transcription model failed.'}</div>
 				{:else}
 					<div class="muted">Voice notes currently lean on your chat model — slow and only when it understands audio. Download a dedicated Whisper model once for fast, accurate transcripts that never leave your device.</div>
 				{/if}
@@ -891,8 +1142,12 @@
 
 	/* Per-task model selection */
 	.task-intro { font-size: 0.72rem; color: var(--color-text-tertiary); line-height: 1.45; margin: 0 0 0.6rem; }
-	.task-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.35rem 0; }
-	.task-label { font-size: 0.8rem; color: var(--color-text-primary); }
+	.task-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; padding: 0.35rem 0; }
+	.task-label { font-size: 0.8rem; color: var(--color-text-primary); padding-top: 0.3rem; }
+	/* The control and the health it causes, stacked as one right-hand unit. `min-width` gives
+	   a download's progress bar a track to run in — flex-end alone would collapse it to the
+	   width of the text above it. */
+	.task-ctl { display: flex; flex-direction: column; align-items: flex-end; gap: 0.3rem; min-width: min(52%, 22ch); }
 	.task-select { flex: 0 1 auto; max-width: 60%; font-size: 0.76rem; color: var(--color-text-primary); background: var(--color-surface-2, rgba(255,255,255,0.04)); border: 1px solid var(--color-border, rgba(255,255,255,0.12)); border-radius: 8px; padding: 0.3rem 0.5rem; }
 	.task-select:disabled { opacity: 0.5; }
 
@@ -903,7 +1158,13 @@
 	.sub-chip:hover { background: rgba(229,184,76,0.08); color: var(--color-accent-aurum); }
 	.sub-row { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
 	.sub-ok { font-size: 0.78rem; color: #6ee7a8; }
+	/* Honest state: green ONLY when probe-verified usable. Amber = works-but-attention
+	   (expiring / Keychain declined); red = not usable. The old card was green always. */
+	.sub-ok.sub-warn { color: var(--color-accent-aurum, #e5b84c); }
+	.sub-ok.sub-err { color: var(--color-accent-coral, #f87171); }
 	.sub-meta { font-size: 0.68rem; color: var(--color-text-tertiary); margin-top: 0.15rem; text-transform: capitalize; }
+	/* Diagnostics line (source / renewal) — lowercase, it carries identifiers not prose. */
+	.sub-diag { text-transform: none; opacity: 0.8; }
 	.sub-model-row { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; margin-top: 0.55rem; }
 	.sub-model-label { font-size: 0.74rem; color: var(--color-text-secondary); }
 	.sub-model-ctl { display: flex; align-items: center; gap: 0.5rem; }

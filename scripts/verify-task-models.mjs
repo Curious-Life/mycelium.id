@@ -87,10 +87,11 @@ try {
   // Path-traversal-shaped name rejected even though '/' is legal for Ollama namespaces (defense in depth).
   const badTraversal = await fetch(`${base}/providers/task-models`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task: 'categorize', model: '../../etc/passwd' }) });
   rec('M7b2. path-traversal-shaped labeling model name → 400 (no ".." )', badTraversal.status === 400, `status=${badTraversal.status}`);
-  // Empty model clears → the drainer's default (qwen3.5:4b) takes over.
+  // Empty model clears → NOT approved. (This said "the drainer's default takes over" until
+  // 2026-07-16; that implicit fallback WAS the bug increment M removed — nothing pulls, nothing runs.)
   await fetch(`${base}/providers/task-models`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task: 'categorize', model: '' }) });
   const afterClear = await j(await fetch(`${base}/providers/task-models`));
-  rec('M7c. empty labeling model clears the assignment → curated default',
+  rec('M7c. empty labeling model clears the assignment → NOT approved (nothing pulls/runs)',
     afterClear?.taskModels?.categorize === undefined, `cat=${JSON.stringify(afterClear?.taskModels?.categorize)}`);
   // M7d: 'enrich' is ALSO on-box — must store { model } (a local name the drainer reads),
   // not a cloud { providerId } it would silently ignore. Regression guard for the bug fix.
@@ -101,6 +102,87 @@ try {
     && afterEnrich?.taskModels?.enrich?.providerId === undefined
     && Array.isArray(afterEnrich?.onboxTasks) && afterEnrich.onboxTasks.includes('enrich') && afterEnrich.onboxTasks.includes('categorize'),
     `enrich=${JSON.stringify(afterEnrich?.taskModels?.enrich)} onbox=${JSON.stringify(afterEnrich?.onboxTasks)}`);
+  // ── M6/M7: assign by FUNCTION — one approval, every task the function owns ──────────
+  // The Intelligence screen (§3.11) assigns by function, and Understanding owns BOTH
+  // categorize and enrich. While the ONLY way to assign was per-task, a vault could approve
+  // categorize and leave enrich unset ⇒ L2 (entities + gist) sat SILENTLY DEAD with no surface
+  // reporting it (M's re-review). These drive the REAL route.
+  const putJson = (body) => fetch(`${base}/providers/task-models`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  {
+    // Start clean: clear both on-box tasks via the per-task path.
+    await putJson({ task: 'categorize', model: '' });
+    await putJson({ task: 'enrich', model: '' });
+    const r = await putJson({ function: 'understanding', model: 'qwen3.5:4b' });
+    const after = await (await fetch(`${base}/providers/task-models`)).json();
+    rec('M8. ⭐ approving the `understanding` FUNCTION writes BOTH categorize and enrich (one approval)',
+      r.status === 200
+      && after?.taskModels?.categorize?.model === 'qwen3.5:4b'
+      && after?.taskModels?.enrich?.model === 'qwen3.5:4b',
+      `status=${r.status} categorize=${JSON.stringify(after?.taskModels?.categorize)} enrich=${JSON.stringify(after?.taskModels?.enrich)}`);
+  }
+  {
+    // Clearing a function un-approves BOTH — declining must be as atomic as approving.
+    const r = await putJson({ function: 'understanding', model: '' });
+    const after = await (await fetch(`${base}/providers/task-models`)).json();
+    rec('M8b. clearing the function un-approves BOTH (declining is atomic too)',
+      r.status === 200 && !after?.taskModels?.categorize && !after?.taskModels?.enrich,
+      `categorize=${JSON.stringify(after?.taskModels?.categorize)} enrich=${JSON.stringify(after?.taskModels?.enrich)}`);
+  }
+  {
+    // An INVALID model must reject the whole function — never half-apply (categorize set,
+    // enrich rejected) — because a half-applied function IS the split this route exists to end.
+    await putJson({ function: 'understanding', model: 'qwen3.5:4b' });   // both approved
+    const r = await putJson({ function: 'understanding', model: '../etc/passwd' });
+    const after = await (await fetch(`${base}/providers/task-models`)).json();
+    rec('M9. ⭐ an invalid model rejects the WHOLE function — no half-applied split',
+      r.status === 400
+      && after?.taskModels?.categorize?.model === 'qwen3.5:4b'
+      && after?.taskModels?.enrich?.model === 'qwen3.5:4b',
+      `status=${r.status} categorize=${JSON.stringify(after?.taskModels?.categorize)} enrich=${JSON.stringify(after?.taskModels?.enrich)}`);
+  }
+  {
+    const r = await putJson({ function: 'no-such-function', model: 'x' });
+    rec('M9b. an unknown function → 400 (fail-closed, never a silent no-op)', r.status === 400, `status=${r.status}`);
+  }
+  {
+    // ⭐ M9e — THE ATOMICITY MECHANISM, PINNED. The fan-out is atomic because the route builds
+    // the whole next state and writes it ONCE. That invariant was documented in a comment and
+    // pinned by NOTHING: a reviewer moved `updateSettings` inside the loop and every gate stayed
+    // GO (2026-07-16). The same commit pinned its OTHER invariant (F6b: "so the drift is
+    // impossible rather than reviewed-for") — that standard belongs here too.
+    // A write-count spy distinguishes them exactly: one write ⇒ atomic; per-target writes ⇒ 2.
+    const realUpdate = db.users.updateSettings.bind(db.users);
+    let writes = 0;
+    db.users.updateSettings = async (...a) => { writes += 1; return realUpdate(...a); };
+    try {
+      await putJson({ function: 'understanding', model: 'qwen3.5:4b' });
+    } finally {
+      db.users.updateSettings = realUpdate;
+    }
+    rec('M9e. ⭐ a 2-task function persists in exactly ONE write (build-then-write-once = atomic)',
+      writes === 1,
+      `updateSettings called ${writes}× for a 2-task fan-out — >1 means it can half-apply on a mid-loop failure`);
+  }
+  {
+    // Both keys is a caller bug. Silently honouring `function` would write two tasks the caller
+    // never asked for AND skip the one it did — a precedence footgun with no signal.
+    const r = await putJson({ task: 'chat', function: 'understanding', model: 'qwen3.5:4b' });
+    const after = await (await fetch(`${base}/providers/task-models`)).json();
+    rec('M9c. `task` AND `function` together → 400 (no silent precedence)',
+      r.status === 400 && after?.taskModels?.chat?.model !== 'qwen3.5:4b',
+      `status=${r.status}`);
+  }
+  {
+    // transcription/voice ARE functions — they just own no INFERENCE_TASK (their rails are
+    // whisper's download route + the TTS catalog). "unknown function" would be a lie.
+    const r = await putJson({ function: 'transcription', model: 'x' });
+    const body = await r.json().catch(() => ({}));
+    rec('M9d. a REAL but task-less function (transcription) → 400 that says WHY, not "unknown"',
+      r.status === 400 && /no inference task/i.test(body?.error || ''),
+      `status=${r.status} error=${body?.error}`);
+  }
   srv.close();
 } catch (e) { rec('FATAL', false, e.stack || e.message); }
 close();

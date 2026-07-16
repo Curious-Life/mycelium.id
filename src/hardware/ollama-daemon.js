@@ -24,6 +24,7 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { existsSync as nodeExistsSync } from 'node:fs';
 import { join } from 'node:path';
+import { findExecutable, homeDir } from '../system/platform-env.js';
 import { createOllamaClient } from './ollama.js';
 import { installOllama, extractedBinPath } from './ollama-install.js';
 
@@ -37,22 +38,21 @@ const ABSOLUTE_CANDIDATES = [
 
 /**
  * Locate the `ollama` binary by checking absolute candidates, then each PATH dir.
+ * The binary path is still confined to a FIXED candidate allowlist + PATH — never
+ * request input (CLAUDE.md §4). @see findExecutable.
  * @param {object} [deps]
  * @param {(p:string)=>boolean} [deps.existsSync]
  * @param {object} [deps.env]
+ * @param {string} [deps.platform]
  * @returns {string|null} absolute path, or null if not found
  */
-export function findOllamaBinary({ existsSync = nodeExistsSync, env = process.env } = {}) {
+export function findOllamaBinary({ existsSync = nodeExistsSync, env = process.env, platform = process.platform } = {}) {
   if (env.MYCELIUM_OLLAMA && existsSync(env.MYCELIUM_OLLAMA)) return env.MYCELIUM_OLLAMA;
-  const candidates = [...ABSOLUTE_CANDIDATES];
-  if (env.HOME) candidates.push(`${env.HOME}/.local/bin/ollama`);
-  for (const dir of String(env.PATH || '').split(':')) {
-    if (dir) candidates.push(`${dir.replace(/\/+$/, '')}/ollama`);
-  }
-  for (const c of candidates) {
-    try { if (existsSync(c)) return c; } catch { /* unreadable — skip */ }
-  }
-  return null;
+  const home = homeDir({ env, platform });
+  const candidates = platform === 'win32'
+    ? [env.LOCALAPPDATA ? `${env.LOCALAPPDATA}\\Programs\\Ollama\\ollama.exe` : null, 'C:\\Program Files\\Ollama\\ollama.exe', 'ollama']
+    : [...ABSOLUTE_CANDIDATES, home ? `${home}/.local/bin/ollama` : null, 'ollama'];
+  return findExecutable(candidates.filter(Boolean), { env, platform, isExecutable: existsSync });
 }
 
 // Only what the daemon needs — never the master key or any vault secret.

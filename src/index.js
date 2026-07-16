@@ -135,6 +135,20 @@ export async function boot({
   // many of which set MYCELIUM_DB to a temp fixture — keying off the path/MYCELIUM_DB
   // would born-encrypt those plaintext fixtures (it did: it broke verify:vitality + 28
   // other gates). Entry-point gating keeps Design D5 intact: importers never trip it.
+  // The open-only branch (public server) still needs the foreign-WAL guard: it opens
+  // the SAME canonical vault, and `npm run public` launched first after a bad manual
+  // swap would otherwise replay a stale previous-generation WAL exactly as before the
+  // guard existed (independent review, finding 4). The guard is cheap (a stat + a
+  // 16-byte read), quarantines only on proof, and its unguardable failure mode throws —
+  // which is the correct fail-closed outcome for this path too.
+  if (!initStorage) {
+    const { guardAgainstForeignWal } = await import('./db/wal-guard.js');
+    const { recordDurabilityEvent } = await import('./db/durability-log.js');
+    guardAgainstForeignWal(dbPath, {
+      log: (m) => console.error(m),
+      onEvent: (e) => recordDurabilityEvent(e.kind, e),
+    });
+  }
   const dbKeyHex = initStorage
     ? await initVaultStorage({ dbPath, userHex, log: (m) => console.error(m) })
     : resolveDbKeyHex(userHex, dbPath); // open-only (e.g. public server): no schema apply, fail-closed

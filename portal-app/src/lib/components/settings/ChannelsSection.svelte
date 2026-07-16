@@ -10,6 +10,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
+	import TelegramConnect from '$lib/components/channels/TelegramConnect.svelte';
 
 	type Access = { mode: 'owner' | 'allowlist' | 'open'; allowedSenders: string[] };
 	type Group = { id: string; title: string | null; access: Access };
@@ -33,7 +34,6 @@
 
 	// write-only secret form fields
 	let formEnabled = $state(false);
-	let formToken = $state(''); let formOwnerId = $state('');
 	let formDiscordToken = $state(''); let formDiscordOwnerId = $state('');
 	let formAgentKey = $state(''); let formModel = $state('');
 	// routing & tuning
@@ -52,7 +52,6 @@
 			if (!res.ok) throw new Error(`Failed to load (${res.status})`);
 			cs = (await res.json()) as ChannelsState;
 			formEnabled = cs.enabled;
-			formOwnerId = cs.telegram.ownerId ?? '';
 			formDiscordOwnerId = cs.discord.ownerId ?? '';
 			formModel = cs.agent.model ?? '';
 			r = { ...r, ...cs.routing };
@@ -69,11 +68,9 @@
 		if (!cs) return;
 		saving = true; error = null;
 		try {
+			// Telegram is owned by <TelegramConnect> (design D1); this batch handles
+			// the master enable toggle, Discord, the assistant key/model, and routing.
 			const body: Record<string, unknown> = { enabled: formEnabled, routing: r };
-			const telegram: Record<string, string> = {};
-			if (formToken.trim()) telegram.token = formToken.trim();
-			if (formOwnerId.trim() !== (cs.telegram.ownerId ?? '')) telegram.ownerId = formOwnerId.trim();
-			if (Object.keys(telegram).length) body.telegram = telegram;
 			const discord: Record<string, string> = {};
 			if (formDiscordToken.trim()) discord.token = formDiscordToken.trim();
 			if (formDiscordOwnerId.trim() !== (cs.discord.ownerId ?? '')) discord.ownerId = formDiscordOwnerId.trim();
@@ -86,7 +83,7 @@
 			const res = await api('/portal/channels', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 			const json = await res.json().catch(() => ({}));
 			if (!res.ok) throw new Error(json?.error || 'Save failed');
-			formToken = ''; formDiscordToken = ''; formAgentKey = '';
+			formDiscordToken = ''; formAgentKey = '';
 			await load();
 		} catch (e: any) { error = e?.message || 'Save failed'; } finally { saving = false; }
 	}
@@ -122,7 +119,8 @@
 		<p class="text-[0.7rem] text-[var(--color-text-tertiary)] mb-4">
 			Talk to your vault over Telegram + Discord. Messages are captured + searchable; replies are reasoned over
 			your vault. Tokens stay encrypted on this machine. Changes apply immediately — the app starts + restarts the
-			bridge for you.
+			bridge for you. This is Mycelium's own Telegram bridge — separate from any <code>telegram:*</code> Claude Code
+			skill; pairing is approved here in the app, never by a code typed into a terminal.
 		</p>
 		{#if cs.daemon && cs.daemon.status && cs.daemon.status !== 'unknown'}
 			{@const st = cs.daemon.status}
@@ -147,16 +145,11 @@
 			<span class="text-sm text-[var(--color-text-primary)]">Enable channels</span>
 		</label>
 
-		<!-- telegram -->
+		<!-- telegram — the shared connect primitive (design D1): token + message-first
+		     pairing (D2). Writes through PUT /portal/channels, same as this panel. -->
 		<div class="mb-4">
-			<label for="ch-tg-token" class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">Telegram bot token {#if cs.telegram.hasToken}<span class="ml-2 text-[var(--color-accent)]">configured ✓</span>{/if}</label>
-			<input id="ch-tg-token" type="password" bind:value={formToken} autocomplete="off" data-1p-ignore placeholder={cs.telegram.hasToken ? '••••••••• (leave blank to keep)' : '123456:ABC… from @BotFather'}
-				class="w-full px-3 py-1.5 text-sm bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)]" />
-		</div>
-		<div class="mb-4">
-			<label for="ch-tg-owner" class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">Your Telegram chat id <a href="https://t.me/userinfobot" target="_blank" rel="noopener" class="ml-2 text-[0.62rem] text-[var(--color-accent)] hover:underline">find yours →</a></label>
-			<input id="ch-tg-owner" type="text" bind:value={formOwnerId} autocomplete="off" data-1p-ignore placeholder="e.g. 123456789"
-				class="w-full px-3 py-1.5 text-sm bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)]" />
+			<span class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">Telegram</span>
+			<TelegramConnect onconnected={() => load()} />
 		</div>
 
 		<!-- discord -->

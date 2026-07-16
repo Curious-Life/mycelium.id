@@ -51,10 +51,16 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
      * @param {number} [a.offset]
      * @param {number} [a.timeout]   long-poll seconds (default 30)
      */
-    async getUpdates({ offset, timeout = 30 } = {}) {
+    async getUpdates({ offset, timeout = 30, forceClose = false } = {}) {
+      const headers = { 'Content-Type': 'application/json' };
+      // After a 409 (another poller held the same token), the poller asks for a
+      // FRESH TCP socket on the next call. Reusing the keep-alive socket makes
+      // Telegram keep terminating the "old" getUpdates in a tight conflict loop
+      // (mirrors openclaw's polling-session transport-dirty reset, issue #69787).
+      if (forceClose) headers.Connection = 'close';
       const res = await fetchImpl(`${base}/getUpdates`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           timeout,
           ...(offset != null ? { offset } : {}),
@@ -62,7 +68,13 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
         }),
         signal: AbortSignal.timeout((timeout + 10) * 1000),
       });
-      if (!res.ok) throw new Error(`telegram getUpdates http ${res.status}`);
+      if (!res.ok) {
+        // 409 = another getUpdates is running for this bot token. Tag it so the
+        // poller can surface the real cause + reset the socket (not just back off).
+        const err = new Error(`telegram getUpdates http ${res.status}`);
+        if (res.status === 409) err.code = 'conflict';
+        throw err;
+      }
       const body = await res.json();
       if (!body.ok) throw new Error(`telegram getUpdates not ok: ${body.description || 'unknown'}`);
       return Array.isArray(body.result) ? body.result : [];

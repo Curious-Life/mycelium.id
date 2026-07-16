@@ -20,6 +20,7 @@
 // inference layer — so egress audit + leak-safety live in one place rather than
 // fragmenting across an SDK path and a raw path.
 
+import { isLoopbackUrl } from '../inference/local.js';
 import { createHash } from 'node:crypto';
 import { openStream, ssePayloads, resolveChatUrl } from '../inference/cloud.js';
 import { ANTHROPIC_URL, anthropicAuthHeaders, anthropicAuthFromCfg, anthropicSystem } from '../inference/anthropic-wire.js';
@@ -239,7 +240,14 @@ const openaiAdapter = {
   },
 };
 
-const LOOPBACK_RE = /(?:\/\/)?(?:127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])/;
+// ⚠️ The unanchored LOOPBACK_RE that used to live here matched ANY url merely CONTAINING
+// "localhost" — including https://localhost.attacker.io/v1 — and this is not a labelling
+// nicety: it picks the WIRE below (the native-Ollama adapter vs cloud) and stamps
+// `jurisdiction:'local'`, which loop.js returns as actualJurisdiction and onUsage records. So a
+// REMOTE host was dialled through the "local" path and its usage was written down as local.
+// I claimed in review that this copy was "a labeling concern, not a leak" — that was wrong on
+// the second half: not a leak is not the same as not a lie (independent review, 2026-07-16).
+// One shared, host-parsing, fail-closed check now — see isLoopbackUrl.
 
 // ── Native Ollama adapter (LOCAL chat) ───────────────────────────────────────
 // Streams over Ollama's NATIVE /api/chat (not the OpenAI-compatible /v1 surface:
@@ -362,7 +370,7 @@ function normalizeProvider(cfg = {}) {
   if (cfg.claudeOAuthToken || cfg.anthropicApiKey) {
     return { adapter: anthropicAdapter, cfg, model: cfg.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard' };
   }
-  const isLocal = cfg.jurisdiction === 'local' || (!!cfg.baseUrl && LOOPBACK_RE.test(cfg.baseUrl));
+  const isLocal = cfg.jurisdiction === 'local' || (!!cfg.baseUrl && isLoopbackUrl(cfg.baseUrl));
   // Non-local cloud over the OpenAI-compatible surface (OpenAI / OpenRouter / EU-ZDR …).
   if ((cfg.openaiApiKey || cfg.baseUrl) && !isLocal) {
     return { adapter: openaiAdapter, cfg, model: cfg.cloudModel || DEFAULT_OPENAI_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard' };
@@ -380,8 +388,22 @@ function normalizeProvider(cfg = {}) {
  * lies about what's actually running. Returns null when NO provider is configured
  * (empty {}), which is how chat refuses instead of silently falling back to local
  * Ollama. Carries no secrets — only the label/model name/jurisdiction.
+ *
+ * ⚠️ `local` and `onThisDevice` ARE DIFFERENT QUESTIONS — do not collapse them.
+ *   local        — jurisdiction is 'local'. TRUE for a `.local` LAN box, which is a
+ *                  sovereignty answer (§4g: no US Cloud Act exposure) and the right input
+ *                  for picking the WIRE (native Ollama vs cloud) — a LAN Ollama SHOULD be
+ *                  dialled natively. @see jurisdictionForBaseUrl
+ *   onThisDevice — the content never left THIS MACHINE. A `.local` LAN box is 'local'
+ *                  jurisdiction but the bytes cross the network, so this is FALSE.
+ * A UI that says "content leaves this machine" must read `onThisDevice`; reading `local`
+ * re-ships the same false claim inverted (NarrateControl's badge). Both derive ONLY from
+ * the base_url via the shared host parser — never from a label/name, which cannot answer
+ * either question: a provider LABELLED "localai" is not on your box, and labels are free
+ * text the user types (portal-providers `label`).
+ *
  * @param {object} [cfg]  resolveInferenceConfig() result
- * @returns {{kind:string,label:string,model:string,jurisdiction:string,local:boolean}|null}
+ * @returns {{kind:string,label:string,model:string,jurisdiction:string,local:boolean,onThisDevice:boolean}|null}
  */
 export function describeProvider(cfg = {}) {
   // Subscription first (no anthropicApiKey present) — else the preflight returns null
@@ -389,13 +411,13 @@ export function describeProvider(cfg = {}) {
   if (cfg.claudeOAuthToken) {
     // Always "Claude subscription" (ignore any stale stored label like "Claude 3") — the
     // auth type IS the identity here, and it distinguishes it from a BYOK "Claude API".
-    return { kind: 'anthropic', label: 'Claude subscription', model: cfg.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard', local: false };
+    return { kind: 'anthropic', label: 'Claude subscription', model: cfg.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard', local: false, onThisDevice: false };
   }
   if (cfg.anthropicApiKey) {
-    return { kind: 'anthropic', label: 'Claude API', model: cfg.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard', local: false };
+    return { kind: 'anthropic', label: 'Claude API', model: cfg.cloudModel || DEFAULT_ANTHROPIC_CHAT_MODEL, jurisdiction: cfg.jurisdiction || 'us-standard', local: false, onThisDevice: false };
   }
   if (cfg.openaiApiKey || cfg.baseUrl) {
-    const isLocal = cfg.jurisdiction === 'local' || /(?:\/\/)?(?:127\.0\.0\.1|localhost|0\.0\.0\.0)/.test(cfg.baseUrl || '');
+    const isLocal = cfg.jurisdiction === 'local' || isLoopbackUrl(cfg.baseUrl || '');
     // Prefer the provider row's own label (e.g. "Regolo.ai (EU…)") — only fall
     // back to a generic name when none was stored. Native OpenAI (key, no
     // base_url) is the one case that's genuinely "OpenAI".
@@ -407,6 +429,7 @@ export function describeProvider(cfg = {}) {
       model: cfg.cloudModel || (isLocal ? DEFAULT_LOCAL_MODEL : DEFAULT_OPENAI_CHAT_MODEL),
       jurisdiction: cfg.jurisdiction || (isLocal ? 'local' : 'us-standard'),
       local: isLocal,
+      onThisDevice: isLoopbackUrl(cfg.baseUrl || ''),
     };
   }
   return null; // no provider configured → chat refuses (no silent fallback)

@@ -59,6 +59,28 @@ r = await J(await get('/providers'));
 const row = r.body.providers?.[0];
 rec('P2. GET /providers lists it', r.body.ok && r.body.providers.length === 1 && row.provider === 'openai', JSON.stringify(row));
 rec('P3. listing carries NO key fields', row && !('credentials' in row) && !('api_key' in row), `keys=${Object.keys(row || {}).join(',')}`);
+// P3b — the listing SHIPS the server's jurisdiction. The Intelligence screen's §4g filter reads
+// it, and its first version re-derived it client-side with an unanchored regex (offering
+// `localhost.attacker.io` as EU-safe). Nothing pinned the field: deleting it from publicRow left
+// six gates GO, and the screen would silently offer NOTHING to a §4g-limited function while a
+// real EU provider sat connected (independent review ×2, 2026-07-16). The client must never
+// need a second opinion — so the field is part of the contract, not a convenience.
+rec('P3b. listing ships the SERVER\'s jurisdiction (so no client ever re-derives it)',
+  row && row.jurisdiction === 'us-standard',
+  `jurisdiction=${row?.jurisdiction} (an openai row with no base_url is us-standard)`);
+// P3c — a DISCRIMINATING value, because P3b alone pinned only the field's PRESENCE: hardcoding
+// 'us-standard' in publicRow passed it, and so did reversing jurisdictionForBaseUrl's args —
+// which makes EVERY row us-standard (new URL('custom') throws → fail-safe), so a real Regolo or
+// Ollama provider VANISHES from a §4g-limited function while sitting connected. That is the very
+// failure P3b was added to close (independent review ×3, 2026-07-16). A loopback row must come
+// back 'local', or the value is not actually computed.
+{
+  const lr = await J(await post('/providers', { provider: 'custom', label: 'local-juris', base_url: 'http://127.0.0.1:11434', api_key: 'k' }));
+  const lrow = (await J(await get('/providers'))).body.providers?.find((p) => p.id === lr.body.id);
+  rec('P3c. …and the VALUE is really computed — a loopback row is `local`, not a constant',
+    lrow?.jurisdiction === 'local',
+    `jurisdiction=${lrow?.jurisdiction} (http://127.0.0.1:11434 must classify local — a hardcoded or arg-swapped us-standard fails here)`);
+}
 
 r = await J(await post('/providers', { provider: 'openai', label: 'GPT2', api_key: 'GOODKEY-456' }));
 const id2 = r.body.id;
@@ -109,6 +131,40 @@ rec('P10. GET /providers/presets serves the catalog (EU-sovereign + local option
   && r.body.presets.some((p) => p.id === 'regolo' && p.jurisdiction === 'eu-zdr')
   && r.body.presets.some((p) => p.jurisdiction === 'local'),
   `count=${r.body.presets?.length}`);
+
+// P10b — the FUNCTION spine reaches the client (design §3.11). The Intelligence screen renders
+// THIS list; without it the screen would have to hardcode the taxonomy, which is precisely the
+// drift verify:intelligence-functions exists to prevent (a badge diverging from the default).
+// Served on the existing presets route — the UI already fetches it once, and §3.10d's "no third
+// catalog" applies to routes too.
+{
+  const fns = r.body.functions;
+  const understanding = Array.isArray(fns) && fns.find((f) => f.key === 'understanding');
+  const descriptions = Array.isArray(fns) && fns.find((f) => f.key === 'descriptions');
+  // Split into four, deliberately: as ONE compound && every mutation failed with byte-identical
+  // output ("keys=…"), which tells the operator only that *something* drifted (independent
+  // review, 2026-07-16). A gate that cannot localise its own failure wastes the next hour.
+  rec('P10b. the FUNCTION spine reaches the client at all',
+    Array.isArray(fns) && fns.length >= 5,
+    `keys=${Array.isArray(fns) ? fns.map((f) => f.key).join(',') : fns}`);
+  // Understanding must arrive carrying BOTH tasks — the screen sends {function} and the route
+  // fans out; a client that saw only `categorize` would re-create the dormancy split.
+  rec('P10b2. …Understanding carries BOTH tasks (a client seeing one would re-split the approval)',
+    !!understanding && [...understanding.tasks].sort().join() === 'categorize,enrich',
+    `understanding.tasks=${JSON.stringify(understanding?.tasks)}`);
+  // Descriptions must arrive carrying its §4g limit, or the screen cannot know not to offer US.
+  rec('P10b3. …Descriptions carries the §4g eu-or-local limit (else the screen offers US for narrate)',
+    !!descriptions && descriptions.jurisdiction === 'eu-or-local',
+    `descriptions.jurisdiction=${descriptions?.jurisdiction}`);
+  // §3.11c is recommendation-FIRST: a recommendation without a why is the raw dump item 11 names.
+  rec('P10b4. …every function carries a label + reason (recommendation-first, not a raw dump)',
+    Array.isArray(fns) && fns.every((f) => typeof f.why === 'string' && f.why.length > 0 && f.label),
+    `missing why/label: ${(fns || []).filter((f) => !f.why || !f.label).map((f) => f.key).join(',') || 'none'}`);
+  // NB no "is it content-free?" check here, deliberately. INTELLIGENCE_FUNCTIONS is a frozen
+  // module constant (role-models.js) with no code path from user data — grepping it for a
+  // secret would assert nothing and pass forever. A check that cannot fail is worse than none:
+  // it reads as coverage. The content-free guarantee here is structural, not behavioural.
+}
 
 await del(`/providers/${id1}`);
 r = await J(await get('/providers'));

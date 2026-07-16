@@ -7,12 +7,16 @@
 // log, or stack (CLAUDE.md §1: zero plaintext leakage).
 
 export class InferenceError extends Error {
-  constructor(message, { cause, status, backend } = {}) {
+  constructor(message, { cause, status, backend, code } = {}) {
     super(message);
     this.name = "InferenceError";
     if (cause !== undefined) this.cause = cause;
     if (status !== undefined) this.status = status;
     if (backend !== undefined) this.backend = backend;
+    // Stable machine-readable reason, when a caller must distinguish failure KINDS
+    // rather than just report one (e.g. 'no-approved-local-model' — a refusal, not an
+    // outage). A code is a constant, never derived from a prompt or a response.
+    if (code !== undefined) this.code = code;
   }
 }
 

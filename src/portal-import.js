@@ -64,7 +64,27 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
   //   GET  /import/run/progress                    → poll
   //   POST /import/run/cancel                       → cooperative stop
   //   GET  /import/catalog                          → the registry (frontend reads this)
-  const jobs = createImportJobRunner();
+  // Publish to the ONE progress surface (design §3.4). Imports were the gap: jobs.js has
+  // published clustering/narration for ages, but an import — the longest thing a new user
+  // waits on — was visible only to the component that started it (QA item 3).
+  //
+  // SCOPE, stated honestly — and CORRECTED 2026-07-16 after a second review caught this very
+  // comment claiming more than it delivers (the eighth false comment found this session, in
+  // the sentence written to retire the seventh; verify the route, not the registry):
+  //
+  //   COVERED — the async imports: `recent-export` via POST /import/run (the ONLY key the UI
+  //     routes here — import/detect.ts ASYNC_RUN_SOURCES), and the local-files sweep below.
+  //   NOT COVERED — everything still served by a synchronous POST that holds the request
+  //     open: the capture four (obsidian, claude-code, hermes, openclaw) AND `full-export`.
+  //     full-export HAS a `run` and is reachable via /import/run in principle, but no product
+  //     path takes it: detect.ts has no import-full-export branch, so it ships through its
+  //     legacy route (POST /import/full-export) instead. A `run` in the registry is not
+  //     evidence that anything calls it.
+  //
+  // For all of those there is no job to publish, and navigating away kills the request
+  // outright — feeding them means making them `run` sources FIRST (the Increment-2 migration
+  // registry.js already names), not adding a publish call.
+  const jobs = createImportJobRunner({ activityFeed: db?.activityFeed || null, userId });
 
   router.get('/import/catalog', (_req, res) => res.json({ ok: true, sources: importCatalog() }));
 
@@ -78,6 +98,10 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
       }
       const snapshot = jobs.start({
         key,
+        // The registry's label is a hardcoded CONSTANT per source ('Obsidian', 'Mycelium
+        // recent export'), never user input — which is what makes it safe in a stage_label:
+        // background_jobs is content-free by contract (db/activity-feed.js §SECURITY).
+        label: src.label ? `Importing ${src.label}` : 'Importing your data',
         run: ({ onProgress, shouldCancel }) => src.run(db, { userId, enqueueEnrichment, onProgress, shouldCancel, body: req.body || {} }),
       });
       return res.json({ ok: true, ...snapshot });
@@ -208,17 +232,69 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
   // and returns immediately; the UI polls GET …/progress and can POST …/cancel.
   // Single-flight (one sweep at a time — single-user V1); re-POSTing while one runs
   // just returns its progress (idempotent re-click / reconnect after a lost tab).
-  let sweepJob = null; // { status:'running'|'done'|'cancelled'|'error', … , cancel:bool }
-  const publicSweep = (j) => ({
-    status: j.status, startedAt: j.startedAt, finishedAt: j.finishedAt, roots: j.roots,
-    total: j.total, processed: j.processed, imported: j.imported, deduped: j.deduped,
-    skipped: j.skipped, failed: j.failed, truncated: j.truncated, ...(j.error ? { error: j.error } : {}),
-  });
+  //
+  // It runs on THE shared import envelope (createImportJobRunner) — the same one
+  // /import/run uses. It had a hand-rolled twin until 2026-07-16: the comment above
+  // /import/run has claimed the sweep's envelope was "now shared" since the runner was
+  // extracted, but the sweep was never actually migrated onto it, so the two drifted —
+  // and the sweep, the LONGEST import a new user runs, was the one left off the activity
+  // feed (independent review; the exact bug §3.4 exists to kill).
+  //
+  // Its OWN runner instance, so single-flight is PER-SURFACE: a sweep and an /import/run can
+  // run at once. Reviewed on its own merits (2026-07-16) and KEPT — but the reasons are
+  // narrower than the first draft of this comment claimed, so here is what was actually found.
+  //
+  // NOT a corruption risk. The 2026-06-30 "concurrent writers" incident was CROSS-process
+  // (db/writer-lock.js's job, never this runner's) and its mechanism is refuted besides
+  // (repro-corruption.mjs: concurrent WAL writers are clean; the proven cause was a torn file
+  // copy). In-process it cannot arise at all — Node is single-threaded and better-sqlite3 is
+  // synchronous, so two imports interleave at awaits but never write at once.
+  //
+  // NO DUPLICATE ROWS, but the guard is uneven and worth knowing:
+  //   • messages + every restore table absorb it (INSERT OR IGNORE); documents too
+  //     (UNIQUE(user_id,path) + ON CONFLICT DO UPDATE).
+  //   • attachments do NOT — db/attachments.js insert() is a bare INSERT … RETURNING, so a
+  //     duplicate id THROWS and local-files-import.js's catch counts it as `failed`. What keeps
+  //     that off these two surfaces is that their ids don't practically collide (a sweep's attId
+  //     is sha256('local:'+path); an export carries its own, canonically a random 16-byte hex) —
+  //     improbable, NOT disjoint, and a coincidence holding a line rather than a design. Do not
+  //     lean on it.
+  //
+  // DUPLICATE BLOBS are the one real cost (disk waste, not integrity) — but only PART of it is
+  // this concurrency's fault, and the distinction is what makes the trade honest:
+  //   • concurrency's share: local-files-import.js's blobByHash is a one-shot snapshot taken at
+  //     sweep start, so it cannot see what a concurrent import lands afterwards. A global gate
+  //     WOULD fix this part. (existingAttIds, the next line over, is snapshot-blind in exactly
+  //     the same way.)
+  //   • not concurrency's share: restore-core.js putBlob()s every attachment with no hash dedup
+  //     at all (putBlob names blobs by randomUUID — it is not content-addressed). Sweep-then-
+  //     export writes those bytes twice whether or not the two ever overlap. A global gate buys
+  //     nothing here.
+  // (An earlier draft said the duplication needed "two sweeps of one folder, which single-flight
+  // already prevents" — false, and caught in review.)
+  //
+  // Judged worth it: going global would cost a real capability (sweeping while an export runs)
+  // and force these two progress routes to answer for a job the caller never started — to buy
+  // back only the first bullet's share of some duplicate bytes. What the concurrency DID cost
+  // outright was a feed-id collision — a real bug, fixed at its source in import-job.js
+  // (verify:import-activity A7c).
+  const sweep = createImportJobRunner({ activityFeed: db?.activityFeed || null, userId });
+  // Sweep-only fields the generic envelope has no business knowing about. `truncated` is
+  // read by the UI (import/detect.ts SweepProgress); `roots` is informational.
+  // NOTE: moving onto the shared envelope WIDENS these routes' responses — they now also
+  // carry publicJob's `key`, `cancelled` and `result`. Harmless (asSweep in detect.ts spreads
+  // the body, and all three are content-free on an authed route), but it is a real shape
+  // change, recorded here rather than left for someone to find.
+  let sweepMeta = { roots: 0, truncated: false };
+  const publicSweep = () => {
+    const p = sweep.progress();
+    return p.status === 'idle' ? { status: 'idle' } : { ...p, ...sweepMeta };
+  };
 
   router.post('/import/local-files', async (req, res) => {
     try {
       // Already running → just report progress (idempotent; a re-click re-attaches).
-      if (sweepJob?.status === 'running') return res.json({ ok: true, ...publicSweep(sweepJob) });
+      if (sweep.isRunning()) return res.json({ ok: true, ...publicSweep() });
       const categories = Array.isArray(req.body?.categories) ? req.body.categories : undefined;
       const folderPath = req.body?.folderPath;
       let roots;
@@ -232,43 +308,46 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
         }
         if (!roots.length) return res.status(400).json({ ok: false, error: 'no sweepable folders found' });
       }
-      // Start the job and return immediately — the work runs detached below.
-      const job = sweepJob = {
-        status: 'running', startedAt: Date.now(), finishedAt: null, roots: roots.length,
-        total: 0, processed: 0, imported: 0, deduped: 0, skipped: 0, failed: 0, truncated: false,
-        error: null, cancel: false,
-      };
-      (async () => {
-        let baseTotal = 0, baseProcessed = 0, baseImported = 0, baseDeduped = 0, baseSkipped = 0, baseFailed = 0;
-        try {
+      sweepMeta = { roots: roots.length, truncated: false };
+      // Start the job and return immediately — the work runs detached inside the runner.
+      sweep.start({
+        key: 'local-files',
+        // A CONSTANT — never a scanned path. A stage_label is emitted LIVE to the feed UI
+        // (portal-activity.js shape() maps it to `stage`), and the roots are ~/Documents,
+        // ~/Pictures… i.e. the user's own filesystem layout.
+        label: 'Importing files from this Mac',
+        run: async ({ onProgress, shouldCancel }) => {
+          let baseTotal = 0, baseProcessed = 0, baseImported = 0, baseDeduped = 0, baseSkipped = 0, baseFailed = 0;
+          const acc = { total: 0, processed: 0, imported: 0, deduped: 0, skipped: 0, failed: 0 };
           for (const root of roots) {
-            if (job.cancel) break;
+            if (shouldCancel()) break;
             const s = await importLocalFiles(db, {
-              userId, folderPath: root, categories, enqueueEnrichment,
-              shouldCancel: () => job.cancel,
+              userId, folderPath: root, categories, enqueueEnrichment, shouldCancel,
               onProgress: (p) => {
                 // Fold this root's live counts onto the finished-roots baseline.
-                job.total = baseTotal + p.total;
-                job.processed = baseProcessed + p.processed;
-                job.imported = baseImported + p.imported;
-                job.deduped = baseDeduped + p.deduped;
-                job.skipped = baseSkipped + p.skipped;
-                job.failed = baseFailed + p.failed;
+                acc.total = baseTotal + p.total; acc.processed = baseProcessed + p.processed;
+                acc.imported = baseImported + p.imported; acc.deduped = baseDeduped + p.deduped;
+                acc.skipped = baseSkipped + p.skipped; acc.failed = baseFailed + p.failed;
+                onProgress(acc);
               },
             });
-            baseTotal += s.scanned; baseProcessed = job.processed;
+            baseTotal += s.scanned; baseProcessed = acc.processed;
             baseImported += s.documents.created + s.attachments.imported;
             baseDeduped += s.documents.deduped + s.attachments.deduped;
             baseSkipped += s.skipped.oversize + s.skipped.unreadable + s.skipped.unsafe;
-            baseFailed += s.failed; job.truncated = job.truncated || s.truncated;
+            baseFailed += s.failed;
+            sweepMeta.truncated = sweepMeta.truncated || !!s.truncated;
+            // Republish the folded baseline: a root that ends between ticks would otherwise
+            // leave the last root's live counts as the final word.
+            acc.total = baseTotal; acc.imported = baseImported; acc.deduped = baseDeduped;
+            acc.skipped = baseSkipped; acc.failed = baseFailed;
+            onProgress(acc);
             if (s.cancelled) break;
           }
-          job.status = job.cancel ? 'cancelled' : 'done';
-        } catch (e) {
-          job.status = 'error'; job.error = String(e?.message || e).slice(0, 200);
-        } finally { job.finishedAt = Date.now(); }
-      })();
-      return res.json({ ok: true, ...publicSweep(job) });
+          return { ...acc, cancelled: shouldCancel() };
+        },
+      });
+      return res.json({ ok: true, ...publicSweep() });
     } catch (e) {
       const msg = String(e?.message || e);
       const is400 = /import_path_denied|required|not a directory|no sweepable/i.test(msg);
@@ -278,14 +357,14 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
 
   // GET /import/local-files/progress — poll the running/last sweep's counts.
   router.get('/import/local-files/progress', (_req, res) => {
-    res.json({ ok: true, ...(sweepJob ? publicSweep(sweepJob) : { status: 'idle' }) });
+    res.json({ ok: true, ...publicSweep() });
   });
 
   // POST /import/local-files/cancel — request the running sweep stop (cooperative,
   // checked per file). Already-imported files stay (idempotent re-run resumes).
   router.post('/import/local-files/cancel', (_req, res) => {
-    if (sweepJob?.status === 'running') sweepJob.cancel = true;
-    res.json({ ok: true, ...(sweepJob ? publicSweep(sweepJob) : { status: 'idle' }) });
+    sweep.cancel();
+    res.json({ ok: true, ...publicSweep() });
   });
 
   return router;

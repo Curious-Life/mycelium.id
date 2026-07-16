@@ -161,11 +161,15 @@ export function reconcileTtsEnv(cc, env = process.env) {
 
 /** Throw a clear error if no platform is configured (fail-closed boot). */
 export function assertEgressConfig(cfg) {
-  const telegramReady = cfg.botToken && cfg.ownerTelegramId;
+  // A Telegram bot token ALONE is enough to boot (design D2 "awaiting-pairing"):
+  // the daemon must run to receive the first DM, answer it with a pairing code,
+  // and bind the owner when the user approves it in the app. So OWNER_TELEGRAM_ID
+  // is no longer required to start — it is bound via the pairing handshake.
+  const telegramReady = !!cfg.botToken;
   const discordReady = cfg.discordBotToken && cfg.ownerDiscordId;
   if (!telegramReady && !discordReady) {
-    throw new Error('channel-daemon: configure at least one platform — TELEGRAM_BOT_TOKEN + OWNER_TELEGRAM_ID, or DISCORD_BOT_TOKEN + OWNER_DISCORD_ID (set them in Settings → Channels).');
+    throw new Error('channel-daemon: configure at least one platform — TELEGRAM_BOT_TOKEN (Telegram), or DISCORD_BOT_TOKEN + OWNER_DISCORD_ID (set them in Settings → Channels).');
   }
-  if (cfg.botToken && !cfg.ownerTelegramId) throw new Error('channel-daemon: OWNER_TELEGRAM_ID required when TELEGRAM_BOT_TOKEN is set');
+  // Discord has no pairing flow yet → still requires its owner id up front.
   if (cfg.discordBotToken && !cfg.ownerDiscordId) throw new Error('channel-daemon: OWNER_DISCORD_ID required when DISCORD_BOT_TOKEN is set');
 }

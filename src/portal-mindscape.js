@@ -4,6 +4,7 @@ import { startClusteringJob, startMeasurementJob, startBackfillJob, getJob, canc
   startChronicleNarrationJob } from './jobs.js';
 import { makeNarrationRunner } from './agent/narration-runner.js';
 import { getEmbedderHealth } from './embed/supervisor.js';
+import { createReadiness } from './readiness.js';
 import { getMindscapeCached, getMindscapePointsCached } from './mindscape-cache.js';
 import { isTrustedLoopback } from './http/loopback.js';
 
@@ -204,7 +205,11 @@ export function expandBackfillTargets(names, targets = BACKFILL_TARGETS) {
  * @param {string} deps.userId  the single V1 owner
  * @returns {import('express').Router}
  */
-export function portalMindscapeRouter({ db, userId, dbPath }) {
+export function portalMindscapeRouter({ db, userId, dbPath, readiness: injected }) {
+  // The ONE readiness model (src/readiness.js). Injected by server-rest so a single
+  // instance (and a single warm cache) serves every consumer; built here as a fallback
+  // so tests/verify scripts that mount this router alone still work.
+  const readiness = injected || createReadiness({ db, userId, embedderHealth: getEmbedderHealth });
   if (!db) throw new Error('portalMindscapeRouter: db required');
   const router = express.Router();
   router.use(express.json({ limit: '8mb' }));
@@ -549,12 +554,24 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
     let embedder = { status: 'unknown', message: '', detail: null };
     try { embedder = getEmbedderHealth(); } catch { /* supervisor not running */ }
     try {
-      // Single source of truth — embeddable-only counts so pending reaches 0 (PIPELINE-INTEGRITY §P1.2).
-      // Polled by the UI → cached (SWR) so the multi-second at-rest scan never piles up. The Generate
-      // PREFLIGHT below deliberately uses the PURE embedBacklog (a fresh count gates the run).
-      const { embedded, total, pending } = await db.messages.embedBacklogCached(userId);
-      res.json({ embedded, total, pending, embedder });
-    } catch { res.json({ embedded: 0, total: 0, pending: 0, embedder }); }
+      // Delegates to the ONE readiness model. Cached slice — this endpoint is POLLED, and
+      // the pure scan is a multi-second SQLCipher decrypt (the /generate preflight below is
+      // the only caller allowed to pay it).
+      //
+      // ⚠️ `unknown` is the whole point of this rewrite. This catch used to return
+      // `{ total: 0 }` on a counting failure, and generate.ts turns `total === 0` into
+      // "Import some conversations first — there is nothing to map yet." So a SQLITE_BUSY
+      // on a 70k-message vault told the owner their vault was EMPTY. Fixing only the
+      // preflight left this second copy of the same lie one HTTP hop away — the client
+      // ignores the preflight's 409 reason and polls here (independent review, 2026-07-15).
+      // A counting error now reports `unknown: true` with the counts OMITTED: a client
+      // cannot read a zero that was never measured.
+      const { data, canGenerate } = await readiness.get({ slices: ['data'] });
+      if (canGenerate.reason === 'unknown') return res.json({ unknown: true, embedder });
+      // `unprocessable`: content-bearing rows neither embedded nor queued (blank-skip /
+      // awaiting-L2). A COUNT only — a per-message failure reason is not progress data.
+      res.json({ embedded: data.embedded, total: data.total, pending: data.pending, unprocessable: data.unprocessable, embedder });
+    } catch { res.json({ unknown: true, embedder }); }
   });
 
   // ── Generate the mindscape (Phase G) — spawn the clustering pipeline ────────
@@ -565,22 +582,36 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
     try {
       // PREFLIGHT: clustering needs EMBEDDED messages (embedding_768). Without
       // them the pipeline dies cryptically — cluster.py can't resolve a user from
-      // empty clustering_points and sys.exit(1)s. Count embedded vs total and
-      // refuse with a clear, actionable reason instead of spawning a doomed run.
-      const MIN_EMBEDDED = 5;
-      let embedded = 0, total = 0;
-      try {
-        // Embeddable-only counts (PIPELINE-INTEGRITY §P1.2).
-        ({ embedded, total } = await db.messages.embedBacklog(userId));
-      } catch { /* count failed — don't block generation on a counting error */ }
+      // empty clustering_points and sys.exit(1)s. Refuse with a clear, actionable
+      // reason instead of spawning a doomed run.
+      //
+      // Delegates to the ONE readiness model — the >=5 threshold is encoded there and
+      // nowhere else. It used to live here AND be contradicted by every client, which
+      // said `messageCount > 0`: the UI thought it was ready and this 409'd it.
+      // getFresh() is deliberate — a PURE count gates the run (this is the only caller
+      // that may pay the multi-second scan; everything else rides the SWR cache).
+      //
+      // ⚠️ FIXED HERE: the old code caught the count error and then blocked on the very
+      // next line (`if (total === 0)`), so a COUNTING FAILURE told the user their full
+      // vault was empty ("Import some conversations first"). Its own comment claimed it
+      // did "not block generation on a counting error" — it did. `unknown` now exists so
+      // the gate stays fail-closed while the MESSAGE stays honest.
+      const { data: rd, canGenerate } = await readiness.getFresh({ slices: ['data'] });
+      const embedded = rd.embedded, total = rd.total;
 
-      if (total === 0) {
+      if (!canGenerate.ok && canGenerate.reason === 'unknown') {
+        return res.status(409).json({
+          error: "Couldn't check whether your messages are ready to map — try again in a moment.",
+          reason: 'unknown', embedded, total,
+        });
+      }
+      if (!canGenerate.ok && canGenerate.reason === 'no_messages') {
         return res.status(409).json({
           error: 'Import some conversations first — there is nothing to map yet.',
           reason: 'no_messages', embedded: 0, total: 0,
         });
       }
-      if (embedded < MIN_EMBEDDED) {
+      if (!canGenerate.ok && canGenerate.reason === 'not_embedded') {
         const error = embedded === 0
           ? `Your ${total} conversations are still being processed — none are ready to map yet. This runs automatically after import; check back in a moment.`
           : `Only ${embedded} of ${total} conversations are ready to map — a few more are needed. Try again shortly.`;
@@ -669,9 +700,14 @@ export function portalMindscapeRouter({ db, userId, dbPath }) {
   router.post('/mycelium/narrate', njson, async (req, res) => {
     try {
       const scope = req.body?.scope ?? 'all';
-      const provider = typeof req.body?.provider === 'string' ? req.body.provider : null;
+      // ⚠️ NO `provider` FROM THE BODY. It used to store req.body.provider verbatim, and the UI
+      // regex-matched that DISPLAY NAME to decide whether to tell the user "content leaves this
+      // machine" — so the client named the fact the UI then reported back as sovereignty. It was
+      // never a fact about the run either: the walk resolves its provider server-side per turn
+      // (run-turn → resolve.js), so the string had no connection to the wire. The run now records
+      // where the content ACTUALLY went, observed per turn — see makeDeviceTally in jobs.js.
       const runWalk = makeNarrationRunner({ db, userId });
-      const r = await startNarrationWalkJob({ db, userId, scope, provider, runWalk });
+      const r = await startNarrationWalkJob({ db, userId, scope, runWalk });
       res.json(r);
     } catch {
       fail(res, 503, 'narration is unavailable (agent runtime or key source not ready)');

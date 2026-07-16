@@ -15,6 +15,7 @@ import { DEFAULT_OLLAMA_URL } from "../inference/local.js";
 import { clampStored } from "./text-limits.js";
 import { pickModelWithCapability } from "./model-caps.js";
 import { getTranscriberHealth, transcribeServiceUrl } from "../transcribe/supervisor.js";
+import { transcribeLongAudio } from "./transcribe-long.js";
 
 const TRANSCRIBE_PROMPT =
   "Transcribe this audio exactly, word for word. Output ONLY the transcription " +
@@ -67,6 +68,17 @@ export async function transcribeAudio({
   if (!buf || typeof fetchImpl !== "function") return null;
 
   const format = audioFormatFor(mimeType, fileName);
+
+  // PRIMARY when a Whisper model is ready: the streaming /transcribe-file path
+  // (src/enrich/transcribe-long.js) decodes ANY container (m4a/mp3/ogg/…) and
+  // VAD-segments LONG audio natively — so a 45-min recording transcribes in full,
+  // not just short WAV voice notes. This is the ONE shared chokepoint, so portal
+  // uploads AND channel voice both get robust long-audio transcription. Falls
+  // through to the OGG-window + LLM path below when no model / it fails.
+  if (getTranscriberHealth().status === "ok") {
+    const full = await transcribeLongAudio({ bytes: buf, format, fetch: fetchImpl });
+    if (full) return clampStored(full);
+  }
 
   // Transcribe ONE audio buffer: the dedicated Whisper service first (WAV only,
   // ~100x faster than the LLM path — docs/WHISPER-TRANSCRIPTION-DESIGN), else a

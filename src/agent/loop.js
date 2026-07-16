@@ -158,15 +158,34 @@ export function createAgentLoop({ harness, logger = () => {} }) {
           retryAfterMs = ra || 0;   // honored by the next attempt's backoff (clamped there)
           logger(`loop: attempt ${attempt} failed (${reason}; ${e?.status || e?.message || 'error'}${ra ? `; retry-after ${ra}ms` : ''})`);
           if (reason === 'aborted') break;   // our watchdog/cancel — stop, don't fall back
+          // AUTH IS NEVER A FALLBACK CONDITION.
+          // A 401/403 means the credential for the provider the user CHOSE was rejected.
+          // Advancing the chain here would silently answer with a DIFFERENT model, from a
+          // DIFFERENT provider — possibly in a different jurisdiction — under the label the
+          // user picked. That is precisely the lie this repo documents at
+          // claude-config-dir.js:101-105: "every native channel/harness turn sent an EXPIRED
+          // Bearer → 401 → the provider-fallback chain silently downgraded the turn to
+          // local/EU qwen while the activity feed still recorded claude-opus-4-8."
+          // An expired subscription must surface so the user can reconnect — their vault's
+          // prompts must never be re-routed to another brain because a token lapsed.
+          // Transient failures (429 / 5xx / network) still cascade below: same intent,
+          // temporary fault. classifyProviderError already separates them
+          // (provider-errors.js: 401/403 → {retryable:false, reason:'auth'}).
+          if (reason === 'auth') break;
           // Pre-content provider-fallback: nothing streamed + a next provider exists →
-          // advance the chain (covers a provider-specific fatal like a bad key on THIS
-          // element, and any transient/retryable error). A fallback doesn't consume the
-          // empty-retry budget; total tries stay bounded by maxRetries + chain length.
+          // advance the chain (transient/retryable errors only — see the auth break above).
+          // A fallback doesn't consume the empty-retry budget; total tries stay bounded by
+          // maxRetries + chain length.
           if (!assistantText.trim() && chain && chainIdx < chain.length - 1) {
             chainIdx += 1; activeProvider = chain[chainIdx]; fellBack = true;
             retryAfterMs = 0;   // LOW-1: don't carry provider A's Retry-After onto B's path
-            const to = describeProvider(activeProvider)?.label || null;
-            send({ type: 'fallback', reason, to });
+            const d = describeProvider(activeProvider);
+            const to = d?.label || null;
+            // Carry the new MODEL, not just the label: callers stamp the model onto the
+            // persisted message DURING the turn (run-turn.js's `call` closure), so without
+            // this they can only record the pre-turn primary — masking a downgraded turn as
+            // the model the user chose. The label alone can't be persisted as `model`.
+            send({ type: 'fallback', reason, to, toModel: d?.model || null });
             logger(`loop: provider fallback (${reason}) → ${to || 'next'}`);
             attempt -= 1; continue;
           }
@@ -199,6 +218,16 @@ export function createAgentLoop({ harness, logger = () => {} }) {
       // fallback — so the activity feed reports what really ran (was masked as the primary model).
       actualModel: describeProvider(activeProvider)?.model || null,
       actualJurisdiction: describeProvider(activeProvider)?.jurisdiction || null,
+      // Did the content stay on THIS MACHINE? Only knowable HERE — after any chain advance
+      // above. A sensitive chain is [localPrimary, eu-zdr…, localFloor], so a run whose on-box
+      // Ollama dies FALLS BACK TO EU CLOUD mid-run: anything computed before loop.run (a
+      // start-of-run snapshot) would claim on-box while the bytes left. Distinct from
+      // actualJurisdiction — a `.local` LAN box is 'local' but NOT this device. @see
+      // describeProvider. `?? null` NOT `|| false`: the local FLOOR ({jurisdiction:'local',
+      // localFallback:true}) has no base_url, so describeProvider returns null and the honest
+      // answer is UNKNOWN. Callers must fail closed on null (claim nothing) rather than read a
+      // `false` as "it left" (a false alarm is also a false statement).
+      actualOnThisDevice: describeProvider(activeProvider)?.onThisDevice ?? null,
       lastErr,
     };
   }

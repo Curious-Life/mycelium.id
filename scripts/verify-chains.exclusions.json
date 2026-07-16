@@ -1,0 +1,14 @@
+{
+  "_readme": [
+    "Gates deliberately NOT wired into `npm run verify`, each with the reason why.",
+    "This file is the ONLY sanctioned way for a registered verify:* gate to sit outside",
+    "the suite — verify:chains (C2) fails the build on any unlisted orphan, and C4 fails",
+    "on any entry here that is stale or unjustified. Adding a line is a reviewed decision,",
+    "not a default. If a gate cannot run in CI, say exactly what it needs; if it is simply",
+    "broken, fix it or delete it — do not park it here.",
+    "",
+    "Currently EMPTY, and that is the intended steady state: as of 2026-07-16 all 300",
+    "registered gates run in `verify`."
+  ],
+  "excluded": {}
+}

@@ -102,6 +102,23 @@ export function createVaultClient({ baseUrl, fetch: fetchImpl = globalThis.fetch
       }
     },
 
+    /**
+     * Mint a pairing code for a sender who DM'd the bot while no owner is bound
+     * (design D2). The vault stores it (encrypted, TTL, capped) and returns the
+     * short code to reply to the user. null on failure (the daemon just skips the
+     * challenge — never crashes on it). See /api/v1/internal/channel-pairing.
+     * @param {{platform:string, senderId:any, senderName:string|null, chatId:any}} a
+     */
+    async requestPairing({ platform, senderId, senderName, chatId }) {
+      try {
+        const j = await post('/api/v1/internal/channel-pairing', { platform, senderId, senderName, chatId });
+        return typeof j?.code === 'string' && j.code ? j.code : null;
+      } catch (e) {
+        console.error('[channel-daemon] pairing request failed:', e.message);
+        return null;
+      }
+    },
+
     /** Record an auto-router inference-egress decision (hash-only). Soft-fail. */
     async recordInferenceEgress(entry) {
       try { await post('/api/v1/internal/inference-egress', entry); return { ok: true }; }

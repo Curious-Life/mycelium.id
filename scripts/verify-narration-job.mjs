@@ -46,13 +46,24 @@ const stubWalk = async ({ onProgress, shouldStop }) => {
   await onProgress({ doneKey: 'territory:2', described: 2, reflected: 0, skipped: 0, total: 3, item: ENT('territory', 2) });
 };
 
+// `provider: 'local:test'` is passed DELIBERATELY and must be IGNORED — see J1.
 const { runId, status } = await startNarrationWalkJob({ db, userId: U, scope: 'all', provider: 'local:test', runWalk: stubWalk });
 await settle();
 
 // J1 — row created, running, runId returned
+//
+// ⚠️ THIS CHECK USED TO ASSERT `row1.provider === 'local:test'` — i.e. that a caller's label
+// lands on the row verbatim. That was the DEFECT, not the contract: NarrateControl regex-matched
+// that name to tell the user whether narration content left their machine, so a provider labelled
+// "localai" rendered as "on-box" while its content went to an internet host — and the string was
+// never a fact about the run anyway (the walk resolves its provider server-side, per turn). The
+// job no longer accepts the label; the destination is OBSERVED as the walk runs. Inverted here
+// rather than deleted, so the echo cannot come back unnoticed.
+// @see scripts/verify-narrate-device-claim.mjs (the fact it was replaced with)
 const row1 = await getNarrationStatus({ db, runId, userId: U });
-rec('J1. start → runId + narration_runs row (running)', status === 'running' && row1 && row1.status === 'running' && row1.provider === 'local:test',
-  `runId=${runId?.slice(0, 8)} status=${row1?.status} provider=${row1?.provider}`);
+rec('J1. start → runId + narration_runs row (running); a caller-supplied provider label is IGNORED',
+  status === 'running' && row1 && row1.status === 'running' && row1.provider == null,
+  `runId=${runId?.slice(0, 8)} status=${row1?.status} provider=${JSON.stringify(row1?.provider)} (must be null — the client does not author the sovereignty claim)`);
 
 // J1b — single-flight: a second start while running returns the same run (already)
 const second = await startNarrationWalkJob({ db, userId: U, scope: 'all', runWalk: stubWalk });
@@ -80,6 +91,10 @@ let resumeSkipIds = null;
 const stubWalk2 = async ({ skipIds, onProgress }) => {
   resumeSkipIds = skipIds.slice();
   await onProgress({ doneKey: 'realm:5', described: 2, reflected: 1, skipped: 0, total: 3, item: ENT('realm', 5) });
+  // ⚠️ RETURNS A REAL SHAPE. It used to return undefined, so J4 asserted 'done' for a walk that
+  // reported NOTHING — i.e. the bug J8 pins, encoded as the expectation (independent review,
+  // 2026-07-16). A stub that doesn't answer like the real thing tests the stub.
+  return { described: 2, reflected: 1, skipped: 0, failed: 0, total: 3, ledger: [], doneKeys: ['realm:5'] };
 };
 const resumed = await resumeNarration({ db, userId: U, runId, runWalk: stubWalk2 });
 await settle();
@@ -104,8 +119,129 @@ rec('J5. cancel flips → canceled; the walk stops (checkpoint preserved)',
   cancelled.ok === true && cancelled.status === 'canceled' && row5.status === 'canceled' && JSON.parse(row5.done_ids).includes('territory:9'),
   `resp=${JSON.stringify(cancelled)} status=${row5.status} done=${row5.done_ids}`);
 
+// ── J6/J7 ⭐ "done" IS A CLAIM, AND IT WAS MADE UNCONDITIONALLY ───────────────
+// A run in which EVERY turn failed — a dead Ollama, or a §4g refusal with nothing safe to run
+// on — reported exactly the same 'done' as a run that described everything. The walk's counters
+// were honest; the STATUS was not, and the status is what the UI reads. This branch shipped
+// ungated (independent review, 2026-07-16 — the review found it, no gate did).
+{
+  const deadWalk = async ({ onProgress }) => {
+    await onProgress({ doneKey: null, described: 0, reflected: 0, skipped: 0, failed: 2, total: 2, item: ENT('territory', 9) });
+    return { described: 0, reflected: 0, skipped: 0, failed: 2, total: 2, ledger: [], doneKeys: [] };
+  };
+  const r = await startNarrationWalkJob({ db, userId: U, scope: 'all', provider: 'local:test', runWalk: deadWalk });
+  await settle();
+  const row = await getNarrationStatus({ db, runId: r.runId, userId: U });
+  rec('J6. ⭐ every turn failed + nothing described ⇒ status ERROR, not "done"',
+    row?.status === 'error' && /produced nothing/i.test(row?.error || ''),
+    `status=${row?.status} error=${row?.error}`);
+}
+{
+  // …but a PARTIAL failure is still a real run: it described things. Reporting `error` there
+  // would be the mirror mistake — a false failure over a run that did work.
+  const partialWalk = async ({ onProgress }) => {
+    await onProgress({ doneKey: 'territory:7', described: 5, reflected: 0, skipped: 0, failed: 50, total: 55, item: ENT('territory', 7) });
+    return { described: 5, reflected: 0, skipped: 0, failed: 50, total: 55, ledger: [], doneKeys: ['territory:7'] };
+  };
+  const r = await startNarrationWalkJob({ db, userId: U, scope: 'all', provider: 'local:test', runWalk: partialWalk });
+  await settle();
+  const row = await getNarrationStatus({ db, runId: r.runId, userId: U });
+  rec('J7. a PARTIAL failure (5 described, 50 failed) still reports done — it DID work',
+    row?.status === 'done', `status=${row?.status}`);
+}
+
+// ── J8/J9 ⭐ RESUME IS THE RETRY PATH, AND IT CLAIMED `done` TOO ──────────────
+// The first fix landed on START only. Resume is exactly where this bites: the user pauses a
+// stalling walk, resumes with Ollama STILL dead, every turn fails — and the UI said "done".
+// Two copies of one rule is how a rule drifts, so both paths now call finishNarrationRun
+// (independent review, 2026-07-16 — J6/J7 only ever drove startNarrationWalkJob).
+// resumeNarration requires status==='paused' (jobs.js), so the run must be HELD open long
+// enough to pause it — a walk that returns immediately is 'done' before pause can land, and
+// then resume is rejected and asserts nothing.
+async function pausedRun() {
+  let release; const hold = new Promise((r) => { release = r; });
+  const holdWalk = async () => { await hold; return { described: 0, reflected: 0, skipped: 0, failed: 0, total: 0, ledger: [], doneKeys: [] }; };
+  const started = await startNarrationWalkJob({ db, userId: U, scope: 'all', provider: 'local:test', runWalk: holdWalk });
+  await settle();
+  await pauseNarration({ db, userId: U, runId: started.runId });
+  release();
+  await settle();   // the held walk returns; finishNarrationRun bails (status !== 'running')
+  return started.runId;
+}
+{
+  const deadResume = async ({ onProgress }) => {
+    await onProgress({ doneKey: null, described: 0, reflected: 0, skipped: 0, failed: 3, total: 3, item: ENT('territory', 4) });
+    return { described: 0, reflected: 0, skipped: 0, failed: 3, total: 3, ledger: [], doneKeys: [] };
+  };
+  const runId8 = await pausedRun();
+  const resumed8 = await resumeNarration({ db, userId: U, runId: runId8, runWalk: deadResume });
+  await settle();
+  const row = await getNarrationStatus({ db, runId: runId8, userId: U });
+  rec('J8. ⭐ RESUME with an all-failed walk ⇒ status ERROR, not "done" (resume is the RETRY path)',
+    row?.status === 'error' && /produced nothing/i.test(row?.error || ''),
+    `resumed=${JSON.stringify(resumed8)} status=${row?.status} error=${row?.error}`);
+}
+{
+  const partialResume = async ({ onProgress }) => {
+    await onProgress({ doneKey: 'territory:8', described: 3, reflected: 0, skipped: 0, failed: 9, total: 12, item: ENT('territory', 8) });
+    return { described: 3, reflected: 0, skipped: 0, failed: 9, total: 12, ledger: [], doneKeys: ['territory:8'] };
+  };
+  const runId9 = await pausedRun();
+  await resumeNarration({ db, userId: U, runId: runId9, runWalk: partialResume });
+  await settle();
+  const row = await getNarrationStatus({ db, runId: runId9, userId: U });
+  rec('J9. …and a PARTIAL failure on resume still reports done — same rule, both paths',
+    row?.status === 'done', `status=${row?.status}`);
+}
+
+{
+  // J7b — a re-run of an already-narrated vault (everything coverage-skipped) with a couple of
+  // transient turn failures is NOT an error: the mind is fully narrated, nothing needed doing.
+  const skipHeavy = async ({ onProgress }) => {
+    await onProgress({ doneKey: 'territory:30', described: 0, reflected: 0, skipped: 18, failed: 2, total: 20, item: ENT('territory', 30) });
+    return { described: 0, reflected: 0, skipped: 18, failed: 2, total: 20, ledger: [], doneKeys: [] };
+  };
+  const rid = await startNarrationWalkJob({ db, userId: U, scope: 'all', provider: 'local:test', runWalk: skipHeavy });
+  await settle();
+  const row = await getNarrationStatus({ db, runId: rid.runId, userId: U });
+  rec('J7b. skip-heavy re-run with a few transient fails (wrote 0, skipped 18) ⇒ done, NOT a false error',
+    row?.status === 'done', `status=${row?.status} error=${row?.error}`);
+}
+
+// ── J10/J11: the GLOBAL activity feed reaches a TERMINAL status on RESUME too ──
+// The review's MED-1: resume's finally never called activityFeed.finish, so a RESUMED run
+// (the retry path) that completed showed 'abandoned' in the header feed forever, and one that
+// errored never surfaced 'error' there — the pause had already flipped the row terminal and
+// heartbeat() is `WHERE status='running'`. The dedicated NarrateControl reads narration_runs
+// directly (always correct); this pins the GLOBAL feed row, which start already got right.
+const feedRow = (runId) => db.rawQuery(
+  `SELECT status FROM background_jobs WHERE id = ?`, [runId],
+).then((r) => (Array.isArray(r) ? r : r.results || [])[0] || null);
+{
+  const okResume = async ({ onProgress }) => {
+    await onProgress({ doneKey: 'territory:20', described: 4, reflected: 0, skipped: 0, failed: 0, total: 4, item: ENT('territory', 20) });
+    return { described: 4, reflected: 0, skipped: 0, failed: 0, total: 4, ledger: [], doneKeys: ['territory:20'] };
+  };
+  const runId10 = await pausedRun();
+  await resumeNarration({ db, userId: U, runId: runId10, runWalk: okResume });
+  await settle();
+  const feed = await feedRow(runId10);
+  rec('J10. ⭐ resume that COMPLETES ⇒ the global feed row is `done`, not stuck `abandoned`',
+    feed?.status === 'done', `feed=${JSON.stringify(feed)}`);
+}
+{
+  const deadResume = async () => ({ described: 0, reflected: 0, skipped: 0, failed: 3, total: 3, ledger: [], doneKeys: [] });
+  const runId11 = await pausedRun();
+  await resumeNarration({ db, userId: U, runId: runId11, runWalk: deadResume });
+  await settle();
+  const feed = await feedRow(runId11);
+  rec('J11. …and a resume where every turn FAILS ⇒ the global feed row is `error`, not `abandoned`',
+    feed?.status === 'error', `feed=${JSON.stringify(feed)}`);
+}
+
 close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
+
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
 console.log(`VERDICT: ${allPass ? 'GO — narration job: start · single-flight · checkpoint · pause(stop-after-entity) · resume(skip-done) · cancel' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);

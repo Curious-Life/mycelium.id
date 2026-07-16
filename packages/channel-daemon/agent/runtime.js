@@ -6,15 +6,21 @@
  *   runtime.runTurn({ turnCtx, userMessage, signal })
  *     -> Promise<{ delivered: boolean, usedReplyTool: boolean, reason?: string }>
  *
- * Backends: claude-agent-sdk (cloud BYOK) · ollama (local sovereign) · openai-compat
- * (any OpenAI-compatible provider — the in-app selection bridge uses this) · auto
- * (per-turn router over cloud+local). Locus is IMPLIED BY CONFIGURATION:
- *   - Anthropic key + Ollama model  -> auto (local-first, escalate complex→cloud)
- *   - OpenAI-compatible base_url     -> openai-compat
- *   - Anthropic key only            -> cloud
- *   - Ollama model only             -> local
- *   - neither                       -> null (capture-only)
- * `MYCELIUM_CHANNEL_ROUTER` (cfg.channelRouter) = 'cloud'|'local'|'openai'|'auto' overrides.
+ * Backends: native (the turn runs on the SERVER) · claude-agent-sdk (cloud BYOK) ·
+ * ollama (local sovereign) · openai-compat (any OpenAI-compatible provider) · auto
+ * (per-turn router over cloud+local).
+ *
+ * Locus is chosen by `MYCELIUM_CHANNEL_ROUTER` (cfg.channelRouter):
+ *   - unset / 'native'  -> native  (DEFAULT since the RT4 flip, 2026-06-19)
+ *   - 'cloud'           -> cloud        (null if no Anthropic key)
+ *   - 'local'           -> ollama       (null if no Ollama model)
+ *   - 'openai'          -> openai-compat(null if no base_url)
+ *   - 'auto'            -> auto router over cloud+local (falls back to whichever exists)
+ *
+ * The explicit overrides are FAIL-CLOSED: a forced backend whose creds are absent
+ * returns null rather than silently degrading. The default needs no creds here — the
+ * server resolves the user's in-app provider and reports no-model honestly via
+ * probeHealth, which is what keeps an unconfigured daemon capture-only.
  */
 import { createClaudeSdkRuntime } from './backends/claude-sdk.js';
 import { createOllamaRuntime } from './backends/ollama.js';

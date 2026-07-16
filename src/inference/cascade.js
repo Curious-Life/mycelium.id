@@ -11,6 +11,7 @@
 // is single-provider (a provider can't be swapped mid-stream) — the cascade is
 // the non-streaming path. Prompt-only, like the router.
 
+import { isSensitiveTask } from './sensitivity.js';
 import { createInferenceRouter } from './router.js';
 import { InferenceError } from './errors.js';
 
@@ -24,9 +25,17 @@ import { InferenceError } from './errors.js';
  * @param {boolean} [opts.sensitive=false]
  * @param {Function} [opts.onEgress]   per-attempt egress audit sink
  * @param {typeof fetch} [opts.fetch]
+ * @param {boolean} [opts.requireApprovedLocal=false]  CONSENT MODE (increment M, #148):
+ *   forwarded to every router so the trailing on-box floor refuses (typed
+ *   'no-approved-local-model') instead of running an unapproved default. The floor is
+ *   ALWAYS the last chain element, so its refusal is the cascade's `lastErr`; the final
+ *   throw re-carries that code so a caller can surface it honestly rather than as a
+ *   generic outage. A sensitive request drops all US providers straight onto this floor.
+ * @param {string|null} [opts.localModel]  the owner-approved on-box model name (or null);
+ *   used verbatim by the floor when requireApprovedLocal is set.
  * @returns {Promise<string>}
  */
-export async function inferWithCascade({ chain, prompt, task = 'complex', maxTokens, sensitive = false, onEgress, onUsage, onTruncated, fetch } = {}) {
+export async function inferWithCascade({ chain, prompt, task = 'complex', maxTokens, sensitive = isSensitiveTask(task), onEgress, onUsage, onTruncated, fetch, requireApprovedLocal = false, localModel } = {}) {
   if (!Array.isArray(chain) || chain.length === 0) {
     throw new InferenceError('inferWithCascade: empty provider chain');
   }
@@ -35,14 +44,21 @@ export async function inferWithCascade({ chain, prompt, task = 'complex', maxTok
     // cloudFallbackToLocal:false → a cloud failure PROPAGATES (so we try the next
     // chain element) instead of the router silently serving local from this one.
     // The trailing local element has no cloud, so it runs on-box Ollama directly.
-    const router = createInferenceRouter({ ...cfg, onEgress, onUsage, fetch, cloudFallbackToLocal: false });
+    // localModel/requireApprovedLocal go AFTER the spread so they win over the chain
+    // element (cloud elements ignore them; only the local floor consults them).
+    const router = createInferenceRouter({ ...cfg, onEgress, onUsage, fetch, cloudFallbackToLocal: false, requireApprovedLocal, localModel });
     try {
       return await router.infer({ prompt, task, maxTokens, sensitive, onTruncated });
     } catch (err) {
       lastErr = err; // try the next provider in the chain
     }
   }
-  throw new InferenceError('inferWithCascade: all providers in the chain failed', { cause: lastErr });
+  // Re-carry a consent refusal from the on-box floor so the caller (gateway) can answer
+  // honestly ('no approved model') rather than collapse it into a generic upstream outage.
+  throw new InferenceError('inferWithCascade: all providers in the chain failed', {
+    cause: lastErr,
+    code: lastErr?.code === 'no-approved-local-model' ? 'no-approved-local-model' : undefined,
+  });
 }
 
 export default inferWithCascade;

@@ -9,6 +9,34 @@
 	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
 	import ChannelsSection from '$lib/components/settings/ChannelsSection.svelte';
 	import AISettings from '$lib/components/settings/AISettings.svelte';
+	import IntelligenceScreen from '$lib/components/settings/IntelligenceScreen.svelte';
+	import { signalGuidanceRestored } from '$lib/stores/onboarding-guidance.svelte';
+
+	// ── Un-dismiss (§3.7b) ────────────────────────────────────────────────────────
+	// ⚠️ It reports FAILURE. POST /onboarding/reset fails closed (portal-compat.js) rather than
+	// swallowing like its /dismiss sibling — because the polarity inverts: a failed dismiss just
+	// means the nudge persists (safe), while a failed reset that claims success tells the user
+	// their guidance is back while it stays gone, with no way to tell. So this surfaces it.
+	let restoringGuidance = $state(false);
+	let guidanceMsg = $state('');
+	let guidanceErr = $state(false);
+	async function restoreGuidance() {
+		restoringGuidance = true; guidanceMsg = ''; guidanceErr = false;
+		try {
+			const r = await api('/portal/onboarding/reset', { method: 'POST' });
+			if (!r.ok) throw new Error('server refused');
+			// ⚠️ Tell the LIVE rail, not just the database. Without this the write lands, this
+			// message appears, and nothing comes back until the app is RESTARTED — because
+			// OnboardingFlow's only re-read is gated on `!dismissed` (see the store's comment).
+			// After the server confirms, never before: a signal on a failed write is the same
+			// lie one layer up.
+			signalGuidanceRestored();
+			guidanceMsg = 'Setup guidance restored.';
+		} catch {
+			guidanceErr = true;
+			guidanceMsg = 'Could not restore setup guidance — please try again.';
+		} finally { restoringGuidance = false; }
+	}
 	import EngineSelector from '$lib/components/settings/EngineSelector.svelte';
 	import UsageSection from '$lib/components/settings/UsageSection.svelte';
 	import AIAccessSection from '$lib/components/settings/AIAccessSection.svelte';
@@ -729,7 +757,34 @@
 			<!-- Engine (harness): native ↔ Claude Code — which engine runs your chat agent -->
 			<EngineSelector />
 
-			<!-- The model that powers Mycelium — active-model hero + Local/Cloud lanes -->
+			<!-- BY FUNCTION (design §3.11) — what you want done, not which vendor. ONE component,
+			     TWO hosts: this pane and (via E/E2) the onboarding Intelligence step, so a
+			     recommendation can never reach one surface and not the other. Map §5.2 found
+			     THREE diverging implementations of "connect an AI"; this is the one that stays.
+			     It renders the SERVED spine (/portal/providers/presets → functions) — never a
+			     hardcoded taxonomy, or the badge drifts from the model that actually runs. -->
+			<IntelligenceScreen />
+
+			<!-- The model that powers Mycelium — active-model hero + Local/Cloud lanes.
+			     ⚠️ STILL HERE ON PURPOSE, and it is not a duplicate of the screen above: it owns
+			     the CONNECT flow (add a provider, paste a key, the #133 Claude ladder) and the
+			     hardware/local rails. IntelligenceScreen owns the ASSIGNMENT ("which model does
+			     which job"). Retiring AISettings' on-box selects belongs with E/E2, when the
+			     onboarding step mounts the same component and the two surfaces can be collapsed
+			     in one move — doing it here would leave onboarding with no picker at all.
+			     ⚠️ AISettings' on-box copy carries a COUPLED-TO marker saying "each task here is
+			     approved on its own". That is TRUE of ITS selects (per-task route) and stays true
+			     while both surfaces exist. It must die WITH those selects, not before.
+			     ⚠️ KNOWN, AND NOT YET FIXED: both components are mounted HERE, in ONE pane, and
+			     both write settings.taskModels. AISettings loads taskModels at onMount only (no
+			     $effect, no shared store), so approving Understanding above leaves ITS selects
+			     showing a stale value for the same setting until you leave and return. Ugly, not
+			     dangerous — the SERVER is the single source of truth and neither can write a
+			     wrong value; only the display goes stale (independent review ×2, 2026-07-16).
+			     The real fix is E/E2 retiring AISettings' selects, at which point the duplicate
+			     disappears rather than being synchronised. Recording it here because the review
+			     that found it was answered in half, and a half-answered finding is how a known
+			     defect becomes an unknown one. -->
 			<AISettings />
 
 			<!-- Reflection cycles moved to Agents → Manage → (agent) → Reflection cycles,
@@ -1010,6 +1065,34 @@
 			{/if}
 
 			{#if activePane === 'general'}
+			<!-- Setup guidance — the UNDO for a dismissal that is otherwise PERMANENT (§3.7b).
+			     The rail is gated on `!dismissed`, and before this the only writer was
+			     POST /onboarding/dismiss: one reflexive × silenced the sole surface that says
+			     "your AI isn't connected" FOR THE LIFE OF THE VAULT. The client route for the
+			     undo already existed (secure-fetch.ts:180) and 404'd — the server half was
+			     never ported. Dismissing is "stop nudging me", not "lie to me". -->
+			<section class="card p-5">
+				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Setup</h2>
+				<div class="flex items-center justify-between">
+					<div>
+						<p class="text-sm text-[var(--color-text-primary)]">Show setup guidance again</p>
+						<p class="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+							Brings back the reminders about connecting an AI or a messenger.
+						</p>
+					</div>
+					<button
+						onclick={restoreGuidance}
+						disabled={restoringGuidance}
+						class="flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)] disabled:opacity-50"
+					>
+						{restoringGuidance ? 'Restoring…' : 'Show again'}
+					</button>
+				</div>
+				{#if guidanceMsg}
+					<p class="text-xs mt-3 {guidanceErr ? 'text-[var(--color-accent-coral)]' : 'text-[var(--color-accent-jade)]'}">{guidanceMsg}</p>
+				{/if}
+			</section>
+
 			<!-- Appearance -->
 			<section class="card p-5">
 				<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Appearance</h2>

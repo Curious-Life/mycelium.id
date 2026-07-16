@@ -95,8 +95,13 @@ export function createProvidersNamespace(deps) {
       // would keep showing whichever ran inference last (the "shows Claude 3 but
       // uses Regolo" bug). Cross-type siblings stay is_active (one per type), but
       // only the chosen one is the resolved default.
+      // status='active' too: choosing a provider IS the deliberate act that arms it.
+      // An IMPORTED row lands 'pending' and is unresolvable by every caller
+      // (resolve.js mapRowToConfig) until this click — that is the whole point, so
+      // activation must clear it or a restored provider would be silently unusable.
+      // No-op for rows created here (create() already writes 'active').
       await d1Query(
-        `UPDATE ai_providers SET is_active = 1, last_used_at = datetime('now'), updated_at = datetime('now')
+        `UPDATE ai_providers SET is_active = 1, status = 'active', last_used_at = datetime('now'), updated_at = datetime('now')
          WHERE id = ? AND user_id = ?`,
         [id, userId],
       );

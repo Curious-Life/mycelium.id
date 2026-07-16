@@ -17,6 +17,7 @@ import { describeImage as realDescribeImage } from './enrich/describe-image.js';
 import { transcribeAudio as realTranscribeAudio } from './enrich/transcribe-audio.js';
 import { extractDocumentText as realExtractDocumentText, documentKindOf } from './enrich/extract-document.js';
 import { clampStored } from './enrich/text-limits.js';
+import { createPairingStore } from './channels/pairing-store.js';
 
 /** Parse the decrypted `{ "apiKey": "…" }` credentials envelope → key string|null. */
 function parseProviderApiKey(credentials) {
@@ -41,6 +42,14 @@ async function deriveAgentFromActiveProvider(db, userId) {
   try {
     const row = await db?.providers?.getActive?.(userId);
     if (!row) return null;
+    // Same control as resolve.js mapRowToConfig: a 'pending' row is IMPORT-landed config
+    // nobody has vouched for, and is not usable until deliberately armed (setActive).
+    // Enforced here too because this function is a SECOND, hand-rolled mapper — it
+    // reaches egress without going through mapRowToConfig, so the guard there does not
+    // cover it. Unreachable today (getActive filters is_active=1, and only setActive sets
+    // that — and it now also clears 'pending'), but a reader that doesn't know about a
+    // control is exactly how the control quietly dies. Belt and braces, one line.
+    if (String(row.status || '').toLowerCase() === 'pending') return null;
     const provider = String(row.provider || '').toLowerCase();
     const baseUrl = row.base_url || '';
     const model = row.model_preference || null;
@@ -80,6 +89,21 @@ export function internalRouter({ db, userId, enrich = {} }) {
   // through this router on its way to apiRouter, stealing apiRouter's JSON-error
   // envelope and leaking the SPA HTML fallback on bad input.
   const json = express.json({ limit: '256kb' });
+  const pairing = createPairingStore({ db });
+
+  // POST /api/v1/internal/channel-pairing — the daemon, on a DM while no owner is
+  // bound (awaiting-pairing), asks the vault to mint a short pairing code for the
+  // sender. The vault mints + stores it (encrypted, TTL, capped) and returns the
+  // code; the daemon replies it to the user, who approves it in the app. Loopback
+  // only, same same-machine trust boundary as captureMessage.
+  router.post('/api/v1/internal/channel-pairing', json, async (req, res) => {
+    try {
+      const { platform, senderId, senderName, chatId } = req.body || {};
+      if (!senderId) return res.status(400).json({ error: 'senderId required' });
+      const { code } = await pairing.upsert(userId, { platform, senderId, senderName, chatId });
+      res.json({ ok: true, code });
+    } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
+  });
 
   // POST /api/v1/internal/egress-audit — append one audit row. Fire-and-forget
   // on the daemon side; we still 200 fast and let the namespace swallow its own

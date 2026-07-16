@@ -48,7 +48,7 @@ import os
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Fail FAST + ACTIONABLE if the embed deps aren't installed for THIS interpreter.
 # Otherwise the process dies at module load with a bare ModuleNotFoundError that
@@ -92,7 +92,36 @@ TASK_PREFIXES = {
 _session = None
 _tokenizer = None
 _load_lock = threading.Lock()
+# Serializes ONNX inference. The server is now THREADED (ThreadingHTTPServer) so /health
+# and queued requests are never blocked by an in-flight batch — but the session is pinned
+# to 1 inter/intra-op thread and concurrent batches would multiply peak memory, so actual
+# inference stays one-at-a-time. /health deliberately does NOT take this lock: liveness
+# must never depend on the model being idle.
+#
+# WHY THIS EXISTS (2026-07-15, proven): this service was a plain HTTPServer — ONE request
+# at a time. Measured: /health returned nothing for 7.8s while a single 12-text batch ran.
+# The enrichment drainer's cycle opens with `if (!(await embedHealthy())) return;` and
+# embedHealthy() catches any error -> false, WITHOUT logging. So whenever this service was
+# busy past the client's timeout, the drainer skipped SILENTLY every 15s. It sat dead for a
+# month with the UI still cheerfully rendering "Embedding messages" (that label is just
+# `pending > 0`). Its own 200-batch loop saturated this service (observed 99.2% CPU), which
+# starved the health check, which killed the next cycle. Self-sustaining.
+_infer_lock = threading.Lock()
+# BACKPRESSURE (independent review): ThreadingHTTPServer accepts unbounded connections,
+# so a slow spell used to queue threads that each hold a parsed body (<=12 x 40k chars)
+# and then burn a full inference for a client that already timed out at 30s and hung up.
+# The old single-request server couldn't accept the next request at all -- crude, but it
+# WAS backpressure, and threading removed it. Bound the queue and shed load instead:
+# the drainer treats a throw as transient (rows stay pending, retried next cycle), so a
+# 503 is strictly safer than a queued request whose caller is gone. /health is never
+# gated on this -- liveness must not depend on the model being idle.
+MAX_QUEUED_INFER = int(os.environ.get('MYCELIUM_EMBED_MAX_QUEUE') or 4)
+_infer_slots = threading.BoundedSemaphore(MAX_QUEUED_INFER)
 _load_error = None  # last load exception; surfaced via /health
+
+
+class BusyError(Exception):
+    """Too many inference requests already queued -> shed load with 503 (retryable)."""
 
 
 def _load_model():
@@ -125,17 +154,26 @@ def _load_model():
             sess_options.enable_cpu_mem_arena = False
             sess_options.enable_mem_pattern = False
 
-            _session = ort.InferenceSession(
+            # ATOMIC PUBLISH (independent review, 2026-07-15). Build into LOCALS and assign
+            # the globals only once BOTH exist. Previously `_session` was published here and
+            # `tokenizer.json` was fetched AFTER it: if that download failed (first run, flaky
+            # network) the except below set _load_error and re-raised WITHOUT resetting
+            # `_session`, serve() swallowed it and listened anyway, and /health — which reports
+            # `ready = _session is not None` — answered {"status":"ok","loaded":true} FOREVER
+            # while every /embed died on tokenizer=None. That is precisely the green-health-
+            # while-dead failure this file was just fixed to eliminate, through another door —
+            # and /health is now load-bearing for BOTH the drainer's gate and the UI's liveness.
+            sess = ort.InferenceSession(
                 model_path, sess_options, providers=["CPUExecutionProvider"]
             )
 
             tokenizer_path = hf_hub_download(MODEL_ID, "tokenizer.json")
-            _tokenizer = Tokenizer.from_file(tokenizer_path)
+            tok = Tokenizer.from_file(tokenizer_path)
             # Chunking owns length: cap the FULL tokenization at MAX_TOTAL_TOKENS (a
             # safety bound), and DON'T pad here — embed_texts slices into <=MAX_LENGTH
             # windows and pads each inference batch itself.
-            _tokenizer.enable_truncation(max_length=MAX_TOTAL_TOKENS)
-            _tokenizer.no_padding()
+            tok.enable_truncation(max_length=MAX_TOTAL_TOKENS)
+            tok.no_padding()
 
             elapsed_ms = (time.time() - t0) * 1000
             print(
@@ -143,10 +181,17 @@ def _load_model():
                 f"(dim={OUTPUT_DIM}, max_length={MAX_LENGTH})",
                 flush=True,
             )
+            # Publish tokenizer FIRST, session LAST: /health gates on _session, so it can
+            # never observe a session without its tokenizer.
+            _tokenizer = tok
+            _session = sess
             _load_error = None
             return _session, _tokenizer
 
         except Exception as e:
+            # Fail CLOSED: a partially-loaded model must never look ready.
+            _session = None
+            _tokenizer = None
             _load_error = str(e)
             print(f"[embed-service] Model load FAILED: {e}", flush=True)
             raise
@@ -171,6 +216,24 @@ def embed_texts(texts, task):
 
     prefix = _resolve_prefix(task)
     session, tokenizer = _load_model()
+
+    # One batch at a time (see _infer_lock); at most MAX_QUEUED_INFER waiting (see
+    # _infer_slots) so we shed load instead of hoarding orphaned work.
+    if not _infer_slots.acquire(blocking=False):
+        raise BusyError('embed service busy: %d requests already queued' % MAX_QUEUED_INFER)
+    try:
+        with _infer_lock:
+            return _embed_locked(texts, prefix, session, tokenizer)
+    finally:
+        _infer_slots.release()
+
+
+def _embed_locked(texts, prefix, session, tokenizer):
+    """Tokenize -> window -> batched inference -> weighted mean-pool -> L2-normalize.
+
+    Caller holds _infer_lock (one batch at a time; the session is pinned to a single
+    inter/intra-op thread and concurrent batches would multiply peak memory). The
+    prefix is already resolved by embed_texts."""
 
     # Some Nomic ONNX exports require token_type_ids; some don't.
     # Build the feed dict from whatever the loaded model expects.
@@ -254,7 +317,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            ready = _session is not None
+            # Defense in depth (CLAUDE.md §2): require BOTH halves. The atomic publish in
+            # _load_model() already prevents a session without a tokenizer; this makes the
+            # readiness contract explicit at the boundary the drainer + UI actually trust.
+            ready = _session is not None and _tokenizer is not None
             payload = {
                 "status": "ok" if ready else ("error" if _load_error else "loading"),
                 "model": MODEL_NAME,
@@ -289,6 +355,10 @@ class Handler(BaseHTTPRequestHandler):
                         "task": task,
                     },
                 )
+            except BusyError as e:
+                # Shed load: retryable, not a fault. The drainer leaves rows pending and
+                # retries next cycle; /health stays green because liveness != idleness.
+                return self._json(503, {"error": str(e), "retryable": True})
             except ValueError as e:
                 return self._json(400, {"error": str(e)})
             except Exception as e:
@@ -313,6 +383,10 @@ class Handler(BaseHTTPRequestHandler):
                         "task": task,
                     },
                 )
+            except BusyError as e:
+                # Shed load: retryable, not a fault. The drainer leaves rows pending and
+                # retries next cycle; /health stays green because liveness != idleness.
+                return self._json(503, {"error": str(e), "retryable": True})
             except ValueError as e:
                 return self._json(400, {"error": str(e)})
             except Exception as e:
@@ -330,7 +404,8 @@ def serve(port=8091, preload=True):
             # individual /embed calls can retry.
             pass
 
-    httpd = HTTPServer(("127.0.0.1", port), Handler)
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    httpd.daemon_threads = True  # a hung request must never block shutdown
     print(
         f"[embed-service] Listening on http://127.0.0.1:{port} "
         f"(model={MODEL_NAME}, dim={OUTPUT_DIM})",

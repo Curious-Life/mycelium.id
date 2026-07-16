@@ -37,10 +37,20 @@ rec('U0. usage sink builds when db.usage present', typeof usageSink === 'functio
   await router.infer({ prompt: `${SECRET} summarize`, task: 'summarize' });
 }
 // ── 2) CLOUD infer (anthropic): usage.input_tokens/output_tokens ─────────────
+// ⚠️ The task must be a CLOUD task that is NOT §4g-sensitive — which since 2026-07-16 leaves
+// exactly one: `complex`. (CLOUD_TASKS = [narrate, complex]; SENSITIVE_TASKS = {narrate}.)
+// This block tests USAGE ACCOUNTING for a US cloud provider and used `task:'narrate'` only as
+// a label. `narrate` is now §4g-sensitive BY TASK (src/inference/sensitivity.js), so
+// narrate→us-standard is REFUSED and falls through to on-box: the router never called the
+// Anthropic mock and the fixture died on the local path ("Ollama response missing .response").
+// That refusal is the POINT of the §4g work and verify:narrate-sovereignty pins it; asserting
+// it here would only duplicate it. NB a LOCAL_TASK (e.g. 'summarize') is not a substitute —
+// `if (CLOUD_TASKS.includes(task) && hasCloud())` means it would skip the cloud branch and
+// route local, failing the same way for an entirely different reason.
 {
   const anthFetch = async () => ({ ok: true, status: 200, async text() { return JSON.stringify({ content: [{ type: 'text', text: 'cloud answer' }], usage: { input_tokens: 200, output_tokens: 60 } }); } });
   const router = createInferenceRouter({ fetch: anthFetch, onUsage: usageSink, anthropicApiKey: 'sk-ant', cloudModel: 'claude-opus-4-8', jurisdiction: 'us-standard' });
-  await router.infer({ prompt: `${SECRET} narrate`, task: 'narrate' });
+  await router.infer({ prompt: `${SECRET} complex`, task: 'complex' });
 }
 // ── 3) ESTIMATE FALLBACK: local returns NO counts → estimated=1, chars/4 ──────
 {
@@ -72,7 +82,7 @@ rec('A1. four usage rows persisted (local, cloud, fallback, chat)', rows.length 
 const local = rows.find((r) => r.area === 'summarize');
 rec('A2. LOCAL row: actual counts (123/45), is_local=1, estimated=0', local && local.input_tokens === 123 && local.output_tokens === 45 && local.is_local === 1 && local.estimated === 0, JSON.stringify(local && { i: local.input_tokens, o: local.output_tokens, l: local.is_local, e: local.estimated }));
 
-const cloud = rows.find((r) => r.area === 'narrate');
+const cloud = rows.find((r) => r.area === 'complex');   // block 2's task — see its note (narrate is §4g-refused to US)
 rec('A3. CLOUD row: actual counts (200/60), provider anthropic, model+jurisdiction, estimated=0', cloud && cloud.input_tokens === 200 && cloud.output_tokens === 60 && cloud.provider === 'anthropic' && cloud.model === 'claude-opus-4-8' && cloud.jurisdiction === 'us-standard' && cloud.estimated === 0, JSON.stringify(cloud && { i: cloud.input_tokens, o: cloud.output_tokens, p: cloud.provider, m: cloud.model }));
 
 const est = rows.find((r) => r.area === 'classify');
@@ -93,7 +103,7 @@ const sum = await db.usage.summary(U, { sinceDays: 30 });
 rec('A8. totals: input = 123+200+2+77 = 402', sum.totals.inputTokens === 402, `input=${sum.totals.inputTokens}`);
 rec('A9. totals: output = 45+60+1+11 = 117', sum.totals.outputTokens === 117, `output=${sum.totals.outputTokens}`);
 rec('A10. totals: 4 events', sum.totals.events === 4, `events=${sum.totals.events}`);
-rec('A11. byArea has summarize/narrate/classify/chat', ['summarize', 'narrate', 'classify', 'chat'].every((a) => sum.byArea.some((x) => x.key === a)), sum.byArea.map((x) => x.key).join(','));
+rec('A11. byArea has summarize/complex/classify/chat', ['summarize', 'complex', 'classify', 'chat'].every((a) => sum.byArea.some((x) => x.key === a)), sum.byArea.map((x) => x.key).join(','));
 rec('A12. bySource: chat vs enrichment split', sum.bySource.some((x) => x.key === 'chat') && sum.bySource.some((x) => x.key === 'enrichment'), sum.bySource.map((x) => `${x.key}:${x.inputTokens}+${x.outputTokens}`).join(' '));
 rec('A13. byProvider includes anthropic + openai + local', ['anthropic', 'openai', 'local'].every((p) => sum.byProvider.some((x) => x.key === p)), sum.byProvider.map((x) => x.key).join(','));
 rec('A14. byModel includes claude-opus-4-8 + gpt-4o', sum.byModel.some((x) => x.key === 'claude-opus-4-8') && sum.byModel.some((x) => x.key === 'gpt-4o'), sum.byModel.map((x) => x.key).join(','));

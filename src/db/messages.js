@@ -75,13 +75,51 @@ export function createMessagesNamespace(deps) {
   // Cache the last result + revalidate in the background under a single-flight latch
   // so at most ONE scan runs per window and no caller ever queues behind another.
   // Per-process (one server-rest owns the pollers); keyed by userId defensively.
-  let _backlog = null;          // { userId, value:{embedded,total,pending}, at:ms }
+  let _backlog = null;          // { userId, value:{embedded,total,pending,unprocessable}, at:ms }
   let _backlogInFlight = null;  // Promise while a recompute runs (single-flight)
+  // `pending` is COUNTED, never projected. It mirrors selectPendingEnrichment's
+  // predicate EXACTLY (nlp_processed 0/NULL + content-bearing) so it counts the work
+  // the drainer will actually pick up — and therefore REACHES 0.
+  //
+  // It used to be `total - embedded`, an arithmetic projection, which could never
+  // reach 0 while any row was content-bearing but permanently un-embeddable: a
+  // blank-content skip (whitespace-only content passes `content != ''` but service.js
+  // trims it and marks nlp_processed = 1) and a row embedded-but-awaiting-L2
+  // (nlp_processed = 2) are never re-selected, so the projection pinned
+  // "Embedding N of M" forever — indistinguishable from a healthy vault still
+  // working. @see docs/DATA-READINESS-DESIGN-2026-07-15.md §3.3.
+  //
+  // (An earlier draft of this comment also listed "a genuine poison row (nlp_processed
+  // = -1 kept by the self-heal's 'expected 768' exclusion)". That exclusion is GONE —
+  // the drainer now re-queues every -1 row with no dim-mismatch carve-out. A -1 row is
+  // therefore transient, not a permanent resident of the gap. Corrected 2026-07-15.)
+  //
+  // The residue (total - embedded - pending) is `unprocessable`: content-bearing rows
+  // that are neither done nor queued. SURFACED as a count, never hidden — and a COUNT
+  // ONLY, because a per-message failure reason is not something a progress indicator
+  // should carry.
+  //   ⚠️ An earlier draft justified count-only with "nlp_error is in ENCRYPTED_FIELDS
+  //   because it can reveal failure patterns" — quoting crypto-local.js prose that sat
+  //   directly above `messages: []`. It is NOT encrypted; nothing in `messages` is,
+  //   post-collapse. That prose described the PRE-collapse design and has since been
+  //   deleted as stale. The design is unchanged (a count is still the right surface);
+  //   only the reason was wrong. Do not re-derive a guarantee from that sentence.
+  //
+  // LOAD-BEARING INVARIANT: a row can never be counted in BOTH `embedded` and `pending`,
+  // because embedding_768 and nlp_processed are always written TOGETHER. updateEnrichment
+  // ENFORCES it (`nlpProcessed` is required — it throws otherwise), and the only other
+  // writer of messages.embedding_768 is full-export-import's vector pass, which is the one
+  // table it calls with flipNlp=true (vector + nlp_processed=1 in a single UPDATE). If that
+  // invariant is ever broken, such a row would inflate both counts and `unprocessable`
+  // would clamp at 0 (hence the Math.max) — the drainer would then re-embed it and heal
+  // the state on its next cycle. Tests must set both columns; a raw UPDATE that sets only
+  // embedding_768 fabricates a state the codebase makes impossible.
   async function _computeEmbedBacklog(userId) {
     const r = await d1Query(
       `SELECT
          COUNT(*) AS total,
-         COALESCE(SUM(CASE WHEN embedding_768 IS NOT NULL THEN 1 ELSE 0 END), 0) AS embedded
+         COALESCE(SUM(CASE WHEN embedding_768 IS NOT NULL THEN 1 ELSE 0 END), 0) AS embedded,
+         COALESCE(SUM(CASE WHEN (nlp_processed = 0 OR nlp_processed IS NULL) THEN 1 ELSE 0 END), 0) AS pending
        FROM messages
        WHERE user_id = ?
          AND forgotten_at IS NULL
@@ -91,7 +129,8 @@ export function createMessagesNamespace(deps) {
     const row = (r.results || [])[0] || {};
     const total = Number(row.total || 0);
     const embedded = Number(row.embedded || 0);
-    return { embedded, total, pending: Math.max(0, total - embedded) };
+    const pending = Number(row.pending || 0);
+    return { embedded, total, pending, unprocessable: Math.max(0, total - embedded - pending) };
   }
 
   // SWR cache for the Context Engine L1 categorization backlog — same shape and same
@@ -99,6 +138,16 @@ export function createMessagesNamespace(deps) {
   // feed). Categorization runs CONTINUOUSLY on a timer (drainer), not as a discrete
   // background_jobs row, so the activity feed projects it at read-time from this count
   // (mirrors embedProjection). Separate latch so the two scans never block each other.
+  //
+  // WHY THIS ONE MAY STILL PROJECT (`total - tagged`) WHERE THE EMBED BACKLOG MUST NOT:
+  // categories_processed is strictly BINARY — 0/NULL = pending, 1 = ATTEMPTED (migration
+  // 0038; a garbage classify still marks 1, so it is never retried forever). So
+  // `total - tagged` is exactly selectPendingCategories' `(= 0 OR IS NULL)` predicate,
+  // and pending genuinely reaches 0. The embed backlog projected off `embedding_768 IS
+  // NOT NULL` — a SUCCESS predicate over a 4-state column (0/1/2/-1) — so its failures
+  // and skips never left `pending`. ⚠️ TRAP: this projection is correct ONLY while the
+  // column stays binary. Adding a failure state (say -1) WITHOUT switching to a counted
+  // predicate would reintroduce the stuck-forever bug here, identically.
   let _catBacklog = null;          // { userId, value:{tagged,total,pending}, at:ms }
   let _catBacklogInFlight = null;  // Promise while a recompute runs (single-flight)
   async function _computeCategoriesBacklog(userId) {
@@ -230,13 +279,22 @@ export function createMessagesNamespace(deps) {
 
     /**
      * Embedding backlog snapshot for the activity/status surfaces. The single
-     * source of truth for "embedded vs total vs pending" — `total` counts only
-     * EMBEDDABLE messages (`content IS NOT NULL AND content != ''`), the SAME
-     * predicate selectPendingEnrichment uses, so `pending` reflects work the
-     * drainer can actually do and reaches 0 (a content-NULL row can never embed,
-     * so counting it in `total` made the old `total − embedded` stick forever —
-     * the "19 remaining" bug). PIPELINE-INTEGRITY design §P1.2.
-     * @returns {Promise<{ embedded:number, total:number, pending:number }>}
+     * source of truth for "embedded vs total vs pending vs unprocessable".
+     *
+     * `total` counts only EMBEDDABLE messages (content-bearing). `pending` is
+     * COUNTED with selectPendingEnrichment's exact predicate (nlp_processed 0/NULL),
+     * so it reflects work the drainer will actually pick up and REACHES 0.
+     * `unprocessable` = total − embedded − pending: content-bearing rows that are
+     * neither done nor queued (poison / blank-skip / awaiting-L2). A count only —
+     * never the reason (nlp_error is encrypted).
+     *
+     * HISTORY — this doc comment used to claim the old `total − embedded` projection
+     * "reflects work the drainer can actually do and reaches 0". That was FALSE: the
+     * "19 remaining" fix it cites only excluded content-NULL rows from `total`, and
+     * three other classes (nlp_processed = -1 / 1 / 2) stayed in the projection
+     * forever. Corrected 2026-07-15 with the counted predicate above.
+     * PIPELINE-INTEGRITY design §P1.2; docs/DATA-READINESS-DESIGN-2026-07-15.md §3.3.
+     * @returns {Promise<{ embedded:number, total:number, pending:number, unprocessable:number }>}
      */
     async embedBacklog(userId) {
       // PURE + always-fresh. Correctness-critical callers (the Generate preflight)
@@ -256,7 +314,7 @@ export function createMessagesNamespace(deps) {
      * This makes a hammered query ≤1 scan/window with no caller queueing behind
      * another. Few-seconds staleness is immaterial for a "N of M ready" indicator.
      * Use embedBacklog() (pure) where freshness matters. Per-process, userId-keyed.
-     * @returns {Promise<{ embedded:number, total:number, pending:number }>}
+     * @returns {Promise<{ embedded:number, total:number, pending:number, unprocessable:number }>}
      */
     async embedBacklogCached(userId) {
       const cached = _backlog && _backlog.userId === userId ? _backlog : null;

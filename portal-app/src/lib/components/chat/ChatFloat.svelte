@@ -52,7 +52,11 @@
 	// (resolveInferenceConfigForTask('chat')), so the chip + menu must reflect it —
 	// not the generic "active" provider. null ⇒ no per-task pick ⇒ falls back to active.
 	let chatTaskProviderId = $state<number | null>(null);
-	const isLocalBase = (u?: string) => !!u && /(?:127\.0\.0\.1|localhost|0\.0\.0\.0)/.test(u);
+	// "Is this provider on THIS machine?" is the SERVER's answer (GET /portal/providers →
+	// publicRow.on_this_device, computed with the shared isLoopbackUrl). Never re-derive it
+	// from base_url: the unanchored substring regex this replaces read
+	// `https://evil.example.com/?x=localhost` as on-box and lit the green dot.
+	const isLocalBase = (p?: { on_this_device?: boolean }) => !!p?.on_this_device;
 	// Compact provider name for the tight chat chip/menu — drop any "(…)" jurisdiction
 	// suffix (e.g. "Regolo.ai (EU, zero-retention)" → "Regolo.ai"). Full label stays in Settings.
 	const shortLabel = (s?: string) => ((s || '').split('(')[0].trim() || (s || ''));
@@ -87,8 +91,11 @@
 			const resolved = byTask || [...chatProviders].filter((p) => p.is_active)
 				.sort((a, b) => (b.last_used_at || '').localeCompare(a.last_used_at || ''))[0];
 			if (resolved) {
-				const local = isLocalBase(resolved.base_url);
-				activeModel.set({ label: providerLabel(resolved), model: resolved.model_preference || '', jurisdiction: local ? 'local' : '', local });
+				const local = isLocalBase(resolved);
+				// Pass the SERVER's jurisdiction through rather than re-deriving `local ? 'local' : ''`:
+				// portal-chat.js' SSE `model` event writes a REAL jurisdiction into this same store,
+				// so the two writers would otherwise disagree in shape for whoever first renders it.
+				activeModel.set({ label: providerLabel(resolved), model: resolved.model_preference || '', jurisdiction: resolved.jurisdiction || '', local });
 			}
 		}
 	}
@@ -130,8 +137,8 @@
 			const res = await api('/portal/providers/task-models', { method: 'PUT', body: JSON.stringify({ task: 'chat', providerId: p.id }) });
 			if (res.ok) {
 				chatTaskProviderId = p.id;
-				const local = isLocalBase(p.base_url);
-				activeModel.set({ label: providerLabel(p), model: p.model_preference || '', jurisdiction: local ? 'local' : '', local });
+				const local = isLocalBase(p);
+				activeModel.set({ label: providerLabel(p), model: p.model_preference || '', jurisdiction: p.jurisdiction || '', local });
 				providerMenuOpen = false;
 			}
 		} catch { /* leave menu open so the user can retry */ }
@@ -1481,7 +1488,7 @@
 											onclick={() => switchProvider(p)}
 											disabled={switchingId === p.id}
 										>
-											<div class="w-1.5 h-1.5 rounded-full flex-shrink-0 {isLocalBase(p.base_url) ? 'bg-emerald-500' : 'bg-[var(--color-accent)]'}"></div>
+											<div class="w-1.5 h-1.5 rounded-full flex-shrink-0 {isLocalBase(p) ? 'bg-emerald-500' : 'bg-[var(--color-accent)]'}"></div>
 											<span class="text-[var(--color-text-primary)] font-medium truncate">{providerLabel(p)}</span>
 											<span class="hidden sm:inline text-[var(--color-text-tertiary)] truncate">{p.model_preference || ''}</span>
 											<span class="ml-auto flex-shrink-0 text-[9px] text-[var(--color-accent)]">{p.id === chatSelectedId ? '✓' : (switchingId === p.id ? '…' : '')}</span>

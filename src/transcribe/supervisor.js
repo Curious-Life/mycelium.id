@@ -17,7 +17,8 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { venvPythonPath, systemPython } from '../system/platform-env.js';
 
 // requirements live next to pipeline/ — resolve from the repo root (this file is src/transcribe/).
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -61,9 +62,9 @@ export function transcribeServiceUrl() { return `http://127.0.0.1:${_port}`; }
 function resolvePython({ home, pythonBin }) {
   if (pythonBin) return pythonBin;
   if (process.env.MYCELIUM_PYTHON) return process.env.MYCELIUM_PYTHON;
-  const venv = join(home, 'pipeline/.venv/bin/python3');
+  const venv = venvPythonPath(home);   // per-OS: bin/python3 (posix) | Scripts\python.exe (win)
   if (existsSync(venv)) return venv;
-  return 'python3';
+  return systemPython();
 }
 
 /**
@@ -114,6 +115,13 @@ export function startTranscribeSupervisor({
     // offline embed model and would block this download).
     HF_HOME: WHISPER_HF_HOME,
     HF_HUB_OFFLINE: '0',
+    // spawn REPLACES the env (no parent spread), so pin the temp root the service's
+    // path-guard trusts to EXACTLY the dir the Node writer uses (os.tmpdir()). Without
+    // this the child's tempfile.gettempdir() falls back to /tmp while a Finder/launchd
+    // macOS app writes to /var/folders/… → the guard 400s every legit request and the
+    // whole long-audio path silently dies on the shipped product (independent-review HIGH).
+    TMPDIR: tmpdir(),
+    MYCELIUM_TRANSCRIBE_TMP: tmpdir(),
     ...(chosenModel ? { MYCELIUM_WHISPER_MODEL: chosenModel } : {}),
   });
 

@@ -60,8 +60,15 @@ async function main() {
     rec('D7. delete removes the doc from the list', del.body?.ok === true && !after.body?.documents?.find((d) => d.path === path));
 
     const onb = await j('/api/v1/portal/onboarding/status');
-    rec('D8. onboarding/status → benign shape (steps.data.messageCount present)',
-      onb.status === 200 && typeof onb.body?.steps?.data?.messageCount === 'number' && onb.body?.aiModelsReady === true);
+    // `aiModelsReady` is asserted as a BOOLEAN, not as `true`. It used to be hardcoded
+    // `true` (portal-compat.js), which is why this could pin the literal — a test can only
+    // assert a constant while the value IS one. It is MEASURED now (the embedder's real
+    // health, via the readiness model): in CI no embedder runs, so `false` is the CORRECT
+    // answer and pinning `true` would pin the lie. Operator decision D3 accepts the
+    // consequence — auto-generate stops firing into a dead embedder, which was the point.
+    // The SHAPE is what this test guards (§7 R6 back-compat), and the shape is unchanged.
+    rec('D8. onboarding/status → benign shape (steps.data.messageCount present, aiModelsReady boolean)',
+      onb.status === 200 && typeof onb.body?.steps?.data?.messageCount === 'number' && typeof onb.body?.aiModelsReady === 'boolean');
 
     // D8b — /import/preview ("See your mind" card): aggregate, leak-safe shape.
     // Empty vault → messageCount 0, dateRange present (null years), sources [].

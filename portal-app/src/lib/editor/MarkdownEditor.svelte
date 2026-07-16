@@ -69,6 +69,10 @@
 			],
 		});
 		view = new EditorView({ state: startState, parent: host });
+		// Focus on mount — the editor only mounts when the user enters edit mode
+		// (click-to-edit or the Edit button), so land ready to type. The mount effect
+		// depends only on `host`, so this runs once and never steals focus mid-edit.
+		view.focus();
 		lastEmitted = initial;
 		return () => {
 			view?.destroy();

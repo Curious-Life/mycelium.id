@@ -37,6 +37,7 @@ import { uploadAttachment } from './upload.js';
 import { saveDocument } from '../core/document-store.js';
 import { extractDocumentText } from '../enrich/extract-document.js';
 import { describeImage } from '../enrich/describe-image.js';
+import { transcribeAttachment } from '../enrich/transcribe-attachment.js';
 
 // A capture() bound to this import's context — the message write boundary every
 // conversation-export adapter funnels through.
@@ -55,6 +56,7 @@ const EXT_MIME = {
 const extOf = (name) => (String(name || '').toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1] || '';
 const mimeFromName = (name) => EXT_MIME[extOf(name)] || 'application/octet-stream';
 const isImageType = (t) => typeof t === 'string' && t.toLowerCase().startsWith('image/');
+const isAudioType = (t) => typeof t === 'string' && (t.toLowerCase().startsWith('audio/') || t.toLowerCase() === 'voice');
 const humanizeFilename = (name) => {
   const base = String(name || '').replace(/\.[a-z0-9]+$/i, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
   return base || null;
@@ -157,6 +159,13 @@ async function runLooseFile(input, ctx) {
   const isImage = isImageType(fileType);
   let caption = null;
   if (isImage) { try { caption = await describeImage({ bytes }); } catch { caption = null; } }
+  else if (isAudioType(fileType)) {
+    // C4 — auto-transcribe uploaded audio (fire-and-forget; self-gates on a ready
+    // Whisper model, so it's a no-op when transcription isn't configured — cost §10).
+    // In-process = the app's single vault writer; the transcript fills in async and
+    // surfaces in the Media view once done.
+    Promise.resolve().then(() => transcribeAttachment(ctx.db, ctx.userId, attachmentId)).catch(() => {});
+  }
   const label = humanizeFilename(filename);
   const msgText = caption
     || (isImage ? (label ? `Image: ${label}` : 'Uploaded image') : (label ? `File: ${label}` : 'Uploaded file'));

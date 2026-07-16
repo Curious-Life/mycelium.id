@@ -1,10 +1,16 @@
 name: verify
 
-# Runs the full verify suite (14 GO-gated suites) on every PR to main and on
+# Runs the full verify suite (300 GO-gated gates) on every PR to main and on
 # pushes to the working branch. This is the automated green/red signal for
 # reviewers and the gate the autonomous routine wakes on. Tier-1 only — the
 # suite passes without the ML stack (real embeddings/clustering are Tier-2 and
 # verified on a host where onnxruntime/Ollama are installed).
+#
+# `npm run verify` is THE gate — it is the only chain this workflow runs, so a
+# gate that is not in it gates nothing. `verify:chains` runs FIRST inside it and
+# fails the build if any registered verify:* gate has drifted out of the chain
+# (that drift went unnoticed for months — see docs/VERIFY-CHAIN-DIVERGENCE-2026-07-16.md).
+# Do NOT add a gate here as a separate step; add it to `verify`.
 
 on:
   workflow_dispatch:   # manual trigger (Actions UI / `gh workflow run verify.yml --ref <branch>`)
@@ -19,7 +25,21 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 45, not 15. Wiring the 60 previously-unrun gates took the suite from 239 to 300
+    # gates, but the real driver is RUNNER VARIANCE, measured on two runs of this very
+    # PR with an identical chain:
+    #   run A: 300 gates in 11.5 min  (verify:at-rest-migration 19.0s)
+    #   run B: 209 gates in 23.7 min  (verify:at-rest-migration 91.7s) -> killed at 25m
+    # Same commit range, ~3x apart: no gate hung, run B's runner was simply that much
+    # slower. Extrapolated, run B needed ~34 min for the full chain. 25 was set from
+    # run A's numbers and would flap on every slow runner — a red build that means
+    # nothing, which is its own kind of ungated.
+    # 45 keeps a real ceiling (a true hang is unbounded and still trips it) with ~25%
+    # headroom over the slow-runner case. The durable fix is to shard this job across
+    # a matrix rather than keep raising the number; that needs the chain to be
+    # splittable without breaking verify:chains' single-chain contract — out of scope
+    # here, worth doing if the suite grows much past 300.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 

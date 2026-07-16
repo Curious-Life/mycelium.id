@@ -463,6 +463,34 @@ if (isMain) {
   // to describeChronicles' infer({prompt,maxTokens}) call shape.
   const narrator = await createNarrator({ db, userId: USER_ID });
   console.log(`[chronicles] narrating territories via ${narrator.label}${narrator.local ? ' (local)' : ''}${DRY_RUN ? ' (dry-run)' : ''}`);
+  // §M: nothing safe to run — no cloud provider and no owner-approved on-box model. Refuse
+  // once, honestly, and land a terminal feed row carrying the reason (begin+finish is the
+  // whole surface — activityFeed has no notice(); see describe-clusters.js). Without this the
+  // run would open a 'Describing your areas' row and finish it 'done' at :489 having described
+  // nothing — a fake success, which is precisely the failure this increment exists to end.
+  //
+  // ⚠️ if/else, NOT an early `return`. This is a top-level `if (isMain)` block in an ESM
+  // module (package.json "type":"module"), so `return` here is a SyntaxError and the file
+  // does not PARSE — killing chronicle narration outright (jobs.js spawns it) rather than
+  // just when blocked. describe-clusters.js takes the same shape safely only because its
+  // early return sits inside `async function run()`. Caught by independent review,
+  // 2026-07-16; `node --check` on every pipeline entry point is now part of the gate (N8),
+  // because a text-only assertion about a file cannot notice that the file is unparseable.
+  //
+  // DRY_RUN refuses TOO — only the feed WRITE is skipped (see describe-clusters.js): a dry
+  // run exists to report what WOULD happen, and "nothing, because you approved no model" is
+  // the honest answer.
+  if (narrator.blocked) {
+    const msg = 'No on-box model is approved and no cloud provider is configured — approve a model in Settings → Intelligence to describe your areas.';
+    console.error(`[chronicles] ${DRY_RUN ? '(dry) ' : ''}${msg}`);
+    if (!DRY_RUN) {
+      try {
+        const id = await db.activityFeed.begin({ userId: USER_ID, kind: 'describe:chronicle', stageLabel: 'Describing your areas' });
+        await db.activityFeed.finish(id, { status: 'error', error: msg });
+      } catch { /* feed is best-effort — the refusal itself already stands */ }
+    }
+    close();
+  } else {
   // Per-territory "describe more": MYCELIUM_DESCRIBE_TERRITORY=<id> or --territory=<id>.
   const _terrArg = process.argv.find((a) => a.startsWith('--territory='));
   const _onlyTerr = process.env.MYCELIUM_DESCRIBE_TERRITORY || (_terrArg ? _terrArg.split('=')[1] : null);
@@ -495,4 +523,5 @@ if (isMain) {
   } finally {
     close();
   }
+  } // end else (narrator not blocked) — see the SyntaxError note above
 }

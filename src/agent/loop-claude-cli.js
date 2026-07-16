@@ -148,7 +148,26 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, configDir, log
       // to a local model) + strips SDK-delegation vars for a deterministic standalone child. When
       // configDir is null CLAUDE_CONFIG_DIR is left at the machine default. See claude-config-dir.js.
       const childEnv = claudeSpawnEnv({ env: process.env, configDir: configDir || null });
-      const child = spawnImpl(claudeBin, args, { env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+      // NUL-STRIP (2026-07-15, live bug): node's spawn REJECTS any argv entry containing a
+      // NUL byte — "The argument 'args[8]' must be a string without null bytes" — and args[8]
+      // is `--append-system-prompt`, assembled from vault content. A vault that has suffered
+      // page-level corruption carries stray NULs in text columns (observed: 27 rows whose
+      // `scope` was 8 NUL bytes, plus JSON fragments), so ONE damaged row poisoned the prompt
+      // and EVERY chat turn died before the model was even reached. Sanitize at the boundary
+      // where the constraint actually lives, so no upstream assembler can reintroduce it.
+      // NULs carry no meaning in these prompts — dropping them is lossless for real text.
+      let _nulHits = 0;
+      const safeArgs = args.map((v) => {
+        if (typeof v !== 'string' || !v.includes('\u0000')) return v;
+        _nulHits++;
+        return v.replace(/\u0000/g, '');
+      });
+      if (_nulHits) {
+        // Content-free (a count, never the text — CLAUDE.md §1). Strip is the fail-SAFE;
+        // it must not be the only thing that happens, or the damage stays invisible.
+        logger(`[cli] stripped NUL byte(s) from ${_nulHits} argv entr${_nulHits === 1 ? 'y' : 'ies'} — vault text is damaged (corruption artifact); the turn proceeds, but the vault needs a repair pass`);
+      }
+      const child = spawnImpl(claudeBin, safeArgs, { env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] });
 
       const cleanup = () => {
         clearInterval(watch);

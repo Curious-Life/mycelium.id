@@ -52,6 +52,12 @@ import { accountRouter } from './account/router.js';
 import { remoteRouter } from './remote/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { startEnrichDrainer } from './enrich/drainer.js';
+import { createReadiness } from './readiness.js';
+import { getEmbedderHealth as readinessEmbedderHealth } from './embed/supervisor.js';
+// The other two members of the supervisor-health convention, for readiness's `models`
+// slice (§3.10b). All three report the SAME shape over the SAME vocabulary.
+import { getLabelerHealth as readinessLabelerHealth, getEnricherHealth as readinessEnricherHealth } from './enrich/drainer.js';
+import { getTranscriberHealth as readinessTranscriberHealth } from './transcribe/supervisor.js';
 import { startKeepAwake, stopKeepAwake } from './system/keep-awake.js';
 import { portalSystemRouter } from './portal-system.js';
 import { portalDataRouter } from './portal-data.js';
@@ -72,6 +78,7 @@ import { readRemoteConfig, passkeyEnrolled } from './remote/config.js';
 import { isValidHandle } from './identity/identity.js';
 import { setSessionKeys } from './account/session-keys.js';
 import { createVaultAuthMiddleware, csrfCookieMiddleware, isAuthorized, makePortalOwnerGate } from './http/require-vault-auth.js';
+import { recordDurabilityEvent, isCorruptionError } from './db/durability-log.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Per-boot shared secret authenticating the channel-daemon to the native channel-turn
@@ -186,8 +193,19 @@ export function ensureDataDir({ env = process.env } = {}) {
   if (existsSync(newDb) || !existsSync(legacyDb)) return; // already moved, or no legacy vault
 
   const copyIfPresent = (from, to, opts) => { if (existsSync(from) && !existsSync(to)) cpSync(from, to, opts); };
-  cpSync(legacyDb, newDb);                                   // main db
-  for (const sfx of ['-wal', '-shm']) copyIfPresent(legacyDb + sfx, newDb + sfx); // consistent snapshot
+  // Byte-copy is deliberate here — this runs BEFORE keys are available, and a byte copy
+  // is key-agnostic (VACUUM INTO would need the key for an encrypted legacy vault). The
+  // legacy file is quiescent (its owning process is the app version being replaced), and
+  // the -wal/-shm are copied WITH their matching db, so the set is consistent — not the
+  // foreign-WAL hazard (matching generation). What WAS unsafe (2026-07-16 audit): BOTH
+  // siblings race this relocation at first boot, and a bare cpSync onto the final name is
+  // not atomic — two interleaved writers could produce a torn newDb. So: sidecars first,
+  // then the db via temp + atomic rename. Racing siblings each rename a COMPLETE file;
+  // last one wins; no observer can ever see a partial vault.
+  for (const sfx of ['-wal', '-shm']) copyIfPresent(legacyDb + sfx, newDb + sfx);
+  const tmpDb = `${newDb}.relocate-${process.pid}`;
+  cpSync(legacyDb, tmpDb);
+  renameSync(tmpDb, newDb);                                  // atomic claim of the final name
   copyIfPresent(path.join(legacyDir, 'kcv.json'), path.join(dir, 'kcv.json'));
   copyIfPresent(path.join(legacyDir, 'uploads'), path.join(dir, 'uploads'), { recursive: true });
 
@@ -213,9 +231,25 @@ export function ensureDataDir({ env = process.env } = {}) {
 /** Build the express sub-app that serves every VAULT-DEPENDENT route. Mounted
  *  behind a guard so it only handles traffic once the vault is open; until then
  *  data calls get a 503 and only the account ceremony + static UI are served. */
+// The live readiness model for the open vault. Module-scope because buildVaultSubApp
+// creates it and completeBoot warms it — two different functions, one instance.
+let vaultReadiness = null;
+
 function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth, channelSup, hwOllamaDaemon, restPort, searchHelpers }) {
   const v = express();
   v.disable('x-powered-by');
+
+  // THE readiness model — one instance per vault so every consumer shares one answer
+  // AND one warm cache. Built here (not per-router) precisely so two surfaces can never
+  // compute the same fact differently again. @see src/readiness.js.
+  const readiness = createReadiness({
+    db, userId,
+    embedderHealth: readinessEmbedderHealth,
+    labelerHealth: readinessLabelerHealth,
+    enricherHealth: readinessEnricherHealth,
+    transcriberHealth: readinessTranscriberHealth,
+  });
+  vaultReadiness = readiness;   // completeBoot warms it once the vault is open
   // Fail-closed auth gate FIRST, mounted at `/api` — ALL vault data the sub-app
   // serves is under /api/* (portal routers at /api/v1/portal, apiRouter at
   // /api/v1/*), so Express's own routing decides what's gated (no hand-rolled
@@ -245,7 +279,17 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // Trust: trusted-loopback (desktop) OR the owner's static Bearer (native app over
   // Tailscale / the native-TLS listener), the SAME authority the global gate trusts.
   const portalOwnerGate = makePortalOwnerGate({ userId });
-  v.use('/api/v1/portal', portalCompatRouter({ db, userId }));
+  // GET /api/v1/portal/readiness — the portal's ONE call. `?slices=data,ai` narrows it;
+  // omitted = everything. Never `fresh` from HTTP: the pure scan is a multi-second
+  // SQLCipher decrypt and polling it per-call once hung the app at boot.
+  v.get('/api/v1/portal/readiness', async (req, res) => {
+    try {
+      const raw = String(req.query.slices || '').trim();
+      const slices = raw ? raw.split(',').map((x) => x.trim()).filter(Boolean) : undefined;
+      res.json(await readiness.get({ slices }));
+    } catch { res.status(500).json({ error: 'readiness unavailable' }); }  // never echo an internal reason (§5)
+  });
+  v.use('/api/v1/portal', portalCompatRouter({ db, userId, readiness }));
   // S1 measurement REST bridge — auth-GATED, fail-closed (the rest of the V1
   // surface is unauthenticated/localhost-only; this surface decrypts the
   // sensitive measurement plane, so it resolves the owner ONLY for a genuine
@@ -269,7 +313,7 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // router so the real /health/summary wins over its legacy empty stub.
   v.use('/api/v1/portal', portalHealthRouter({ db, userId, authenticatePortalRequest: portalOwnerGate }));
   v.use('/api/v1/portal', portalLabelsRouter({ db, userId, authenticatePortalRequest: portalOwnerGate }));
-  v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath }));
+  v.use('/api/v1/portal', portalMindscapeRouter({ db, userId, dbPath: effectiveDbPath, readiness }));
   // Unified activity feed (background_jobs) — header stream indicator + mindscape chip.
   v.use('/api/v1/portal', portalActivityRouter({
     db, userId,
@@ -299,7 +343,9 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // The lazy Ollama daemon is created in startRestServer (so it's SHARED with the
   // enrichment drainer + closeHandle, which live in completeBoot — a sibling of this
   // function, not nested in it) and passed in. See the creation note there.
-  v.use('/api/v1/portal', portalHardwareRouter({ daemon: hwOllamaDaemon }));
+  // db+userId: deleting a model from disk also CLEARS its approval (settings.taskModels), so
+  // the decline survives a restart and "re-approve it in Settings" is a real remedy (§3.10d).
+  v.use('/api/v1/portal', portalHardwareRouter({ daemon: hwOllamaDaemon, db, userId }));
   v.use('/api/v1/portal', portalImportRouter({ db, userId, enqueueEnrichment }));
   // Settings → Data: bulk delete-by-source / by-type (search-sidecar eviction
   // needs searchHelpers.noteDelete). Backup export stays on the account router.
@@ -674,6 +720,10 @@ export async function startRestServer({
       // db.spaceKeyManager / db.spaceContent — no separate Matrix hook needed.
       vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId }), channelSup, hwOllamaDaemon, restPort: port, searchHelpers });
       bootError = null; // opened cleanly → clear any prior failure
+      // Fire-and-forget warm: embedBacklogCached awaits the FIRST scan on a cold process,
+      // so without this the first consumer (getContext — the agent's latency-sensitive
+      // preamble — or the Header) pays multiple seconds. Never awaited, never throws.
+      try { vaultReadiness?.warm(); } catch { /* boot must not depend on it */ }
     } finally {
       booting = false;
     }
@@ -975,6 +1025,27 @@ async function main() {
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+
+  // CRASH POLICY (durability): this process died silently THREE times in one day from
+  // uncaught async errors (SQLITE_CORRUPT in a background task) — Node's default kills
+  // the process with stderr that a Finder launch discards, the Tauri shell never noticed,
+  // and the UI showed "Load failed" with zero forensics. Policy: record the event in the
+  // durability log (content-free — code/name only, never a message that could echo user
+  // text), then EXIT CLEANLY rather than limp on: after an uncaught error mid-write the
+  // process state is untrusted, and the shell's watchdog (main.rs) restarts us — a clean
+  // 5-second restart beats an hour of undefined behavior on a cognitive vault (§3).
+  const fatal = (kind) => (err) => {
+    try {
+      recordDurabilityEvent(kind, {
+        code: String(err?.code || err?.name || 'unknown'),
+        corrupt: isCorruptionError(err),
+      });
+    } catch { /* the black box must never block the exit */ }
+    try { process.stderr.write(`[server-rest] ${kind}: ${String(err?.code || err?.name || 'error')} — exiting for the watchdog to restart\n`); } catch { /* */ }
+    process.exit(1);
+  };
+  process.on('uncaughtException', fatal('uncaught-exception'));
+  process.on('unhandledRejection', fatal('unhandled-rejection'));
 }
 
 // Compare decoded FS paths, not raw file:// strings — `file://${argv[1]}` keeps a

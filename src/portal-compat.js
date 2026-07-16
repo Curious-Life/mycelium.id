@@ -1,5 +1,7 @@
 import express from 'express';
-import { nudgeEnrichDrainer, pauseEnrichCategorize, resumeEnrichCategorize, isEnrichCategorizePaused } from './enrich/drainer.js';
+import { createReadiness } from './readiness.js';
+import { getEmbedderHealth } from './embed/supervisor.js';
+import { nudgeEnrichDrainer, pauseEnrichCategorize, resumeEnrichCategorize, isEnrichCategorizePaused, defaultLabelModel } from './enrich/drainer.js';
 import { assembleTimelineMessages } from './streams/assemble-messages.js';
 import { clampStored } from './enrich/text-limits.js';
 import { resolveInferenceConfigForTask } from './inference/resolve.js';
@@ -35,7 +37,10 @@ import { createUsageSink } from './inference/usage.js';
  * @param {string} deps.userId   the single V1 owner
  * @returns {import('express').Router}
  */
-export function portalCompatRouter({ db, userId }) {
+export function portalCompatRouter({ db, userId, readiness: injected }) {
+  // The ONE readiness model, injected by server-rest so every consumer shares one answer
+  // and one warm cache. Fallback keeps standalone verify scripts working.
+  const readiness = injected || createReadiness({ db, userId, embedderHealth: getEmbedderHealth });
   if (!db) throw new Error('portalCompatRouter: db required');
   // Shared-space membership + content cross-box sync is handled by the E2E system
   // (space-membership.js applyShareGrant/Revoke + space-content-mirror.js, over the
@@ -1070,11 +1075,26 @@ export function portalCompatRouter({ db, userId }) {
       // peek). Bounded so a huge area can't overflow a small local model.
       const parts = docs.slice(0, 40).map((d) => `- ${d.title || d.path}${d.summary ? `: ${String(d.summary).slice(0, 400)}` : ''}`);
       const prompt = `Write a 2-3 sentence high-level summary of this area of someone's life, based on the documents in it. Be concise and concrete.\n\nArea documents:\n${parts.join('\n')}`;
-      const router2 = createInferenceRouter({ ...provider, onUsage: createUsageSink(db, userId, { source: 'context-area' }) });
+      // 'summarize' is a LOCAL task (router LOCAL_TASKS) → it ALWAYS runs on-box,
+      // regardless of any active cloud provider. So the on-box model must be one the
+      // owner APPROVED (#148 consent) — resolve it and require it. Without this the
+      // router fails open to DEFAULT_LOCAL_MODEL (llama3.1) and silently runs a model
+      // the owner never consented to. `defaultLabelModel` is the single #148 reader
+      // (settings.taskModels.categorize.model); null ⇒ refuse honestly (503 below).
+      const localModel = await defaultLabelModel(db, userId);
+      const router2 = createInferenceRouter({ ...provider, localModel, requireApprovedLocal: true, onUsage: createUsageSink(db, userId, { source: 'context-area' }) });
       const summary = (await router2.infer({ prompt, task: 'summarize', maxTokens: 400 })).trim();
       await db.contexts.setSummary(userId, id, summary);
       ok(res, { ok: true, summary });
-    } catch (e) { fail(res, 500, e.message || 'could not generate summary'); }
+    } catch (e) {
+      // Honest surface for the consent refusal: no on-box model approved → 503 that
+      // points at Settings → Intelligence, NOT a generic 500 (and NOT a summary
+      // fabricated by an un-approved model).
+      if (e?.code === 'no-approved-local-model') {
+        return fail(res, 503, 'no on-box model is approved — approve one in Settings → Intelligence');
+      }
+      fail(res, 500, e.message || 'could not generate summary');
+    }
   });
 
   // ── Settings (Phase S) — timezone only; theme is client-side localStorage ─
@@ -1118,11 +1138,15 @@ export function portalCompatRouter({ db, userId }) {
     // empty/onboarding vault this scan is instant (0 rows), and by the time the
     // table is large onboarding is long done.
     try { return await db.messages.embedBacklog(userId); }
-    catch { return { total: 0, embedded: 0, pending: 0 }; }
+    catch { return { total: 0, embedded: 0, pending: 0, unprocessable: 0 }; }
   }
 
   router.get('/onboarding/status', async (_req, res) => {
-    const { total, embedded, pending } = await embedCounts();
+    const { total, embedded, pending, unprocessable } = await embedCounts();
+    // The embedder's REAL state, from the one readiness model. Cached slice: this endpoint
+    // is polled (MindscapeView @5s) and the pure scan is a multi-second SQLCipher decrypt.
+    let embedderUp = false;
+    try { embedderUp = (await readiness.get({ slices: ['embedder'] })).embedder.up; } catch { /* fail-closed: not ready */ }
     const seen = await welcomeSeen();
     let dismissed = false;
     try {
@@ -1135,11 +1159,17 @@ export function portalCompatRouter({ db, userId }) {
       showWelcome: !seen && total === 0,
       show: false,
       dismissed,
-      aiModelsReady: true,
+      // aiModelsReady was HARDCODED `true` — one of the disagreeing facts the readiness
+      // model exists to end (DATA-READINESS-DESIGN §2.8 #4): MindscapeView trusted it (so
+      // `aiReady` was ALWAYS true and auto-generate fired into a dead embedder), while
+      // OnboardingFlow ignored it and queried /providers instead. Now it is measured.
+      // Operator decision D3 accepts the behaviour change: auto-generate stops firing on a
+      // box whose embedder is down — which is correct, and was the point.
+      aiModelsReady: embedderUp,
       // enrichedCount/enrichmentPending are REAL now (embedded vs pending) — the
       // MindscapeView "data ready → Generate" gate + the guide's import progress
       // read these. messageCount drives hasImportedData.
-      steps: { data: { messageCount: total, enrichedCount: embedded, enrichmentPending: pending } },
+      steps: { data: { messageCount: total, enrichedCount: embedded, enrichmentPending: pending, enrichmentUnprocessable: unprocessable } },
     });
   });
 
@@ -1148,9 +1178,15 @@ export function portalCompatRouter({ db, userId }) {
   // kick a drain. Thin wrappers over the in-process drainer (no separate pipeline)
   // — the drainer already embeds on a timer; trigger just nudges it now.
   router.get('/enrichment/status', async (_req, res) => {
-    const { total, embedded, pending } = await embedCounts();
+    const { total, embedded, pending, unprocessable } = await embedCounts();
     ok(res, {
-      messages: { total, enriched: embedded, embedded, pending },
+      // `unprocessable` — content-bearing rows that are neither embedded nor queued
+      // (poison / blank-skip). Carried so a client can SAY SO instead of the counter
+      // silently omitting them: before the counted-pending fix they inflated `pending`
+      // forever ("Embedding N of M" that never finished); without this field the fix
+      // would merely make them vanish. A COUNT ONLY — the reason lives in nlp_error,
+      // which is encrypted precisely because it can reveal per-message failure patterns.
+      messages: { total, enriched: embedded, embedded, pending, unprocessable },
       service: { rate: '0' }, // per-second throughput not measured in V1
       activeJob: pending > 0 ? { id: 'enrich', status: 'running' } : null,
     });
@@ -1162,14 +1198,23 @@ export function portalCompatRouter({ db, userId }) {
   });
 
   router.get('/enrichment/progress/:jobId', async (_req, res) => {
-    const { total, embedded, pending } = await embedCounts();
+    const { total, embedded, pending, unprocessable } = await embedCounts();
+    // The bar counts the PROCESSABLE set (embedded + pending), not every message.
+    // `status` comes off `pending`, so the two must share a basis: with `total` as the
+    // denominator, a vault holding un-embeddable rows would report status:'done' over a
+    // stageLabel of "2 / 4" — a half-full bar announcing completion. (Consistent before
+    // the counted-pending fix only because BOTH were wrong.) embedded + pending is the
+    // work that can actually be done, so step === totalSteps exactly when pending hits 0.
+    const processable = embedded + pending;
     ok(res, {
       id: 'enrich',
       status: pending > 0 ? 'running' : 'done',
       step: embedded,
-      totalSteps: total,
+      totalSteps: processable,
       // UI parses "(\d[\d,]*)\s*/\s*(\d[\d,]*)" out of stageLabel for the bar.
-      stageLabel: `Embedding: ${embedded.toLocaleString()} / ${total.toLocaleString()}`,
+      stageLabel: `Embedding: ${embedded.toLocaleString()} / ${processable.toLocaleString()}`,
+      total,             // every embeddable message, for context
+      unprocessable,     // count ONLY — the reason lives in nlp_error (encrypted)
       error: null,
     });
   });
@@ -1204,41 +1249,40 @@ export function portalCompatRouter({ db, userId }) {
   // sources, people. Reads ONLY plaintext columns (created_at, source,
   // conversation_id are NOT in ENCRYPTED_FIELDS.messages) + COUNT(*); it never
   // touches the encrypted `content`, so nothing sensitive is decrypted or logged.
-  // Drives Step 3's "847 messages · 2019–2024 · 3 sources" proof-of-perception.
+  // Drives "847 messages · 2019–2024 · 3 sources" proof-of-perception.
+  //
+  // The aggregates now live in readiness's `evidence` slice, because the invite's Data
+  // step needs the SAME four facts and a second copy is how the two drift apart. This
+  // route keeps its response shape verbatim (its live caller — OnboardingFlow:185 — and
+  // its gate, verify-portal-data.mjs D8b, are unchanged) and delegates the SQL.
+  //
+  // ⚠️ It keeps its own PURE embedCounts(): `messageCount` here feeds a
+  // read-after-import correctness check, where the cached count's stale 0 would keep the
+  // welcome screen up after an import. That purity is exactly why the invite must NOT
+  // reuse this route (design PIVOT 2) — the card wants the aggregates WITHOUT a
+  // multi-second scan, and gets them from `evidence` directly.
   router.get('/import/preview', async (_req, res) => {
     try {
       const { total, embedded, pending } = await embedCounts();
-      const one = (r) => (r?.results || r || [])[0] || {};
-      const rows = (r) => r?.results || r || [];
-
-      const range = one(await db.rawQuery(
-        'SELECT MIN(created_at) AS earliest, MAX(created_at) AS latest FROM messages WHERE user_id = ?', [userId]));
-      const srcRows = rows(await db.rawQuery(
-        `SELECT source, COUNT(*) AS c FROM messages WHERE user_id = ? AND source IS NOT NULL
-           GROUP BY source ORDER BY c DESC LIMIT 12`, [userId]));
-      const convRow = one(await db.rawQuery(
-        `SELECT COUNT(DISTINCT conversation_id) AS c FROM messages
-           WHERE user_id = ? AND conversation_id IS NOT NULL`, [userId]));
-      let peopleCount = 0;
-      try {
-        peopleCount = Number(one(await db.rawQuery(
-          'SELECT COUNT(*) AS c FROM people WHERE user_id = ?', [userId])).c ?? 0);
-      } catch { /* people table empty/absent → 0 */ }
-
-      const yearOf = (ts) => { const y = String(ts || '').slice(0, 4); return /^\d{4}$/.test(y) ? Number(y) : null; };
+      const { evidence } = await readiness.get({ slices: ['evidence'] });
+      // ⚠️ HONOR `unknown`. `evidence()` degrades to zeros + `unknown:true` instead of
+      // throwing; destructuring the zeros and dropping the flag would serve HTTP 200
+      // {messageCount: 76000, sources: [], conversationCount: 0} off a scan that NEVER RAN —
+      // the owner reads "76,000 messages · 0 sources" and the card gates on messageCount
+      // being a number, so it renders it. That is precisely the §3.2a bug this slice's own
+      // comment exists to prevent, and I shipped it: the flag was computed correctly and
+      // discarded one line later by the only caller (independent review, 2026-07-16).
+      // Before delegation this route THREW into its own 500, so the card rendered nothing.
+      // Fail closed — preserve that.
+      if (evidence.unknown) return fail(res, 500, 'failed to summarize import');
       ok(res, {
         messageCount: total,
         embedded, pending,
-        dateRange: {
-          earliest: range.earliest || null,
-          latest: range.latest || null,
-          yearStart: yearOf(range.earliest),
-          yearEnd: yearOf(range.latest),
-        },
-        sources: srcRows.map((r) => ({ source: r.source, count: Number(r.c || 0) })),
-        sourceCount: srcRows.length,
-        conversationCount: Number(convRow.c || 0),
-        peopleCount,
+        dateRange: evidence.dateRange,
+        sources: evidence.sources,
+        sourceCount: evidence.sources.length,
+        conversationCount: evidence.conversationCount,
+        peopleCount: evidence.peopleCount,
       });
     } catch { fail(res, 500, 'failed to summarize import'); }
   });
@@ -1253,6 +1297,27 @@ export function portalCompatRouter({ db, userId }) {
         [userId]);
     } catch { /* best-effort — never block the UI on a write */ }
     ok(res, { ok: true });
+  });
+
+  // Un-dismiss — "show setup guidance again" (§3.7b). Ported from
+  // reference/server-routes/portal-onboarding.js:285-295; the CLIENT ROUTE ALREADY EXISTED
+  // (secure-fetch.ts:180) and 404'd, so the undo has been unreachable since the rail shipped.
+  //
+  // ⚠️ WHY THIS IS NON-NEGOTIABLE, not a nicety: the rail is gated on `!dismissed`, and
+  // `dismissed` is TODAY PERMANENT WITH NO UNDO (§2.10). Without this route, ONE reflexive ×
+  // permanently silences the only surface that ever says "your AI isn't connected" — for the
+  // life of the vault. Dismissing is "stop nudging me", NOT "lie to me forever".
+  //
+  // ⚠️ AND IT REPORTS FAILURE, unlike its sibling above. /onboarding/dismiss swallows its error
+  // and returns ok:true regardless — defensible there ("never block the UI on a write": a failed
+  // dismiss just means the nudge persists, which is safe). Here the polarity inverts: a failed
+  // reset that answers ok:true tells the user "your guidance is back" while it stays gone, and
+  // they have no way to tell. Fail closed and say so — same discipline as §3.2a.
+  router.post('/onboarding/reset', async (_req, res) => {
+    try {
+      await db.rawQuery('UPDATE users SET onboarding_dismissed_at = NULL WHERE id = ?', [userId]);
+    } catch { return fail(res, 500, 'could not restore setup guidance'); }
+    ok(res, { ok: true, dismissed: false });
   });
 
   // Mark the first-run welcome as seen (idempotent — keeps the first timestamp).

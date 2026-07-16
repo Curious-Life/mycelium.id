@@ -125,14 +125,22 @@ ensure_python(){
   log "python: $("$RT/python/bin/python3" --version) — $(du -sh "$RT/python" | cut -f1)"
 }
 
-# ── 3. Nomic model for offline first run (cached) ─────────────────────────────
+# ── 3. Nomic model for offline first run (ALLOWLISTED — never the whole cache) ─
+# The old shape rsynced the operator's ENTIRE ~/.cache/huggingface/hub into the
+# bundle: whatever any experiment ever downloaded shipped in every build (observed
+# 2026-07-16: +15.5GB of concluded-eval TTS models → a 21GB .app → the disk filled
+# to zero mid-install, twice). stage-hf-models.sh copies ONLY the bundle's one
+# contract model (Nomic v1.5 — the embed service's offline first run; whisper
+# deliberately uses the USER cache, src/transcribe/supervisor.js:31) and PRUNES
+# anything else from an already-staged cache, so a previously bloated
+# build-staging self-heals. Runs every build (no cached early-out): idempotent,
+# and one small model is cheap.
 ensure_model(){
-  if [ -d "$RT/hf-cache/hub" ]; then log "model: cached"; return; fi
-  log "model: staging Nomic v1.5 (offline)…"
+  log "model: staging Nomic v1.5 (allowlisted)…"
   mkdir -p "$RT/hf-cache"
-  if [ -d "$HOME/.cache/huggingface/hub" ]; then
-    rsync -a "$HOME/.cache/huggingface/hub" "$RT/hf-cache/"
-  else
+  bash "$REPO/scripts/stage-hf-models.sh" "$HOME/.cache/huggingface/hub" "$RT/hf-cache"
+  if [ ! -d "$RT/hf-cache/hub/models--nomic-ai--nomic-embed-text-v1.5" ]; then
+    log "model: not in the local cache — downloading (targeted)…"
     HF_HOME="$RT/hf-cache" "$RT/python/bin/python3" - <<'PY'
 from huggingface_hub import hf_hub_download
 hf_hub_download("nomic-ai/nomic-embed-text-v1.5", "onnx/model_quantized.onnx")
@@ -140,6 +148,17 @@ hf_hub_download("nomic-ai/nomic-embed-text-v1.5", "tokenizer.json")
 print("model warmed")
 PY
   fi
+  # PROVE offline resolvability, not just directory presence (review): a source cache
+  # with the model dir but no refs/main — or a partial snapshot missing the onnx — would
+  # pass a bare -d check and ship a bundle whose FIRST offline run throws. This resolves
+  # both contract files exactly the way the packaged app will (HF_HUB_OFFLINE=1), so
+  # every cache-rot shape fails the BUILD instead of the user. Network-free.
+  HF_HOME="$RT/hf-cache" HF_HUB_OFFLINE=1 "$RT/python/bin/python3" - <<'OFFLINE_CHECK'
+from huggingface_hub import hf_hub_download
+hf_hub_download("nomic-ai/nomic-embed-text-v1.5", "onnx/model_quantized.onnx")
+hf_hub_download("nomic-ai/nomic-embed-text-v1.5", "tokenizer.json")
+print("model: offline resolution OK")
+OFFLINE_CHECK
   log "model: $(du -sh "$RT/hf-cache" | cut -f1)"
 }
 
