@@ -6,18 +6,15 @@
 // (ConnectionsChecklist / OnboardingGuide PUT /portal/settings/secret).
 
 import express from 'express';
-import { getModelState, startDownload } from './tts/kokoro-model.js';
+import { getModelState, startDownload, qwenVoiceCatalog, hasVoiceSample } from './tts/qwen3-tts-model.js';
 
-// Kokoro (local TTS) voices — a curated subset of the 54-voice catalog.
-const KOKORO_VOICES = [
-  { id: 'af_heart', label: 'Heart', description: 'American female · warm (default)' },
-  { id: 'af_bella', label: 'Bella', description: 'American female · bright' },
-  { id: 'af_nicole', label: 'Nicole', description: 'American female · soft' },
-  { id: 'am_michael', label: 'Michael', description: 'American male · steady' },
-  { id: 'am_adam', label: 'Adam', description: 'American male · deep' },
-  { id: 'bf_emma', label: 'Emma', description: 'British female · clear' },
-  { id: 'bm_george', label: 'George', description: 'British male · measured' },
-];
+// Qwen3-TTS (local, MLX) voice models — replaces Kokoro (removed). The two
+// benchmarked variants (design §2.1); consent-by-choosing (§3.10c): NOTHING
+// downloads until the user picks one and clicks Download. Qwen has ZERO preset
+// speaker voices (design §2.5) — the actual voice is a frozen sample authored on
+// the character page (design §5), a separate unit — so the picker offers VARIANTS
+// (which model to install), not a voice list.
+const QWEN_VARIANTS = qwenVoiceCatalog();
 
 // TTS catalogs — mirror packages/channel-daemon/tts/voices.js (kept inline so
 // src/ doesn't depend on the daemon package; ids must stay in sync).
@@ -61,16 +58,23 @@ export function portalSettingsRouter({ db, userId }) {
       const provider = await getS('TTS_PROVIDER');
       const openaiHasKey = await hasS('OPENAI_API_KEY');
       const elevenHasKey = await hasS('ELEVENLABS_API_KEY');
-      const kokoroEnabled = (await getS('KOKORO_TTS_ENABLED')) === '1';
+      const qwenEnabled = (await getS('QWEN_TTS_ENABLED')) === '1';
       const model = getModelState();
+      // ⚠️ `enabled` is the TOP LINE ("TTS active") — it must mean "a voice message
+      // will actually be delivered", not "a model is installed". For qwen, identity
+      // needs a FROZEN reference sample from the per-agent character page (design
+      // §2.2/§5, not built yet): without one every render 501s, so reporting
+      // "active" would promise audio that never arrives. `samplePending` is the
+      // honest state the UI renders instead.
+      const qwenSamplePending = !hasVoiceSample();
       res.json({
         enabled: !!(provider && (
           (provider === 'openai' && openaiHasKey) ||
           (provider === 'elevenlabs' && elevenHasKey) ||
-          (provider === 'kokoro' && kokoroEnabled && model.phase === 'ready')
+          (provider === 'qwen' && qwenEnabled && model.phase === 'ready' && !qwenSamplePending)
         )),
         provider: provider || null,
-        kokoro: { enabled: kokoroEnabled, voice: (await getS('KOKORO_TTS_VOICE')) || 'af_heart', voices: KOKORO_VOICES, model },
+        qwen: { enabled: qwenEnabled, samplePending: qwenSamplePending, variant: (await getS('QWEN_TTS_VARIANT')) || model.variant, variants: QWEN_VARIANTS, model },
         openai: { hasKey: openaiHasKey, voice: (await getS('OPENAI_TTS_VOICE')) || 'onyx', model: (await getS('OPENAI_TTS_MODEL')) || 'tts-1-hd', voices: OPENAI_VOICES, models: OPENAI_MODELS },
         elevenlabs: { hasKey: elevenHasKey, voiceId: (await getS('ELEVENLABS_VOICE_ID')) || null, model: (await getS('ELEVENLABS_MODEL_ID')) || 'eleven_turbo_v2_5', models: ELEVENLABS_MODELS },
       });
@@ -79,17 +83,23 @@ export function portalSettingsRouter({ db, userId }) {
 
   router.put('/settings/tts', async (req, res) => {
     try {
-      const { provider, openai, elevenlabs, kokoro } = req.body || {};
+      const { provider, openai, elevenlabs, qwen } = req.body || {};
       if (provider !== undefined) {
-        if (provider && !['openai', 'elevenlabs', 'kokoro'].includes(provider)) return res.status(400).json({ error: 'invalid provider' });
+        if (provider && !['openai', 'elevenlabs', 'qwen'].includes(provider)) return res.status(400).json({ error: 'invalid provider' });
         if (provider) await setS('TTS_PROVIDER', provider); else await delS('TTS_PROVIDER');
-        // selecting the local provider is the per-box opt-in the kokoro provider checks
-        if (provider === 'kokoro') await setS('KOKORO_TTS_ENABLED', '1');
+        // selecting the local provider is the per-box opt-in the qwen provider checks
+        if (provider === 'qwen') await setS('QWEN_TTS_ENABLED', '1');
+        // …and switching AWAY clears it, or the :8094 MLX service keeps running for
+        // a provider the user no longer uses (adversarial review of #209, LOW-2).
+        // The supervisor's shouldRun reads this flag, so clearing it stops the child.
+        else await delS('QWEN_TTS_ENABLED');
       }
-      if (kokoro && typeof kokoro === 'object') {
-        if (kokoro.voice) await setS('KOKORO_TTS_VOICE', String(kokoro.voice));
-        if (kokoro.enabled === true) await setS('KOKORO_TTS_ENABLED', '1');
-        else if (kokoro.enabled === false) await delS('KOKORO_TTS_ENABLED');
+      if (qwen && typeof qwen === 'object') {
+        // `variant` = which Qwen3-TTS model to run. Selecting it is CONSENT to that
+        // variant, but does NOT download it — the user must click Download (§3.10c).
+        if (qwen.variant) await setS('QWEN_TTS_VARIANT', String(qwen.variant));
+        if (qwen.enabled === true) await setS('QWEN_TTS_ENABLED', '1');
+        else if (qwen.enabled === false) await delS('QWEN_TTS_ENABLED');
       }
       if (openai && typeof openai === 'object') {
         if (openai.apiKey) await setS('OPENAI_API_KEY', String(openai.apiKey));
@@ -105,14 +115,19 @@ export function portalSettingsRouter({ db, userId }) {
     } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
   });
 
-  // ── Kokoro local model: download trigger + status (the UI button) ─────────
-  // Triggers pip-install kokoro-onnx + the ~340MB model-file download in the
-  // background; the UI polls GET .../model for progress.
-  router.post('/settings/tts/kokoro/download', async (_req, res) => {
-    try { res.json(await startDownload()); }
-    catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
+  // ── Qwen3-TTS local model: download trigger + status (the UI button) ──────
+  // Triggers pip-install mlx-audio + the multi-GB MLX model snapshot in the
+  // background; the UI polls GET .../model for progress. The chosen variant
+  // comes from the saved QWEN_TTS_VARIANT (or the request body); NOTHING fetches
+  // until this route is hit (consent-by-choosing, §3.10c). Fail-soft: a failed
+  // provision surfaces in model.error, never throws here.
+  router.post('/settings/tts/qwen/download', async (req, res) => {
+    try {
+      const variant = (req.body && req.body.variant) || (await getS('QWEN_TTS_VARIANT')) || undefined;
+      res.json(await startDownload(variant ? { variant } : {}));
+    } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
   });
-  router.get('/settings/tts/kokoro/model', (_req, res) => {
+  router.get('/settings/tts/qwen/model', (_req, res) => {
     try { res.json(getModelState()); }
     catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
   });

@@ -1,13 +1,16 @@
 <!--
-	AI & Intelligence — the model that powers Mycelium's thinking (enrichment,
-	narration, chat). Redesigned glassy surface: an active-model hero, then two
-	clean lanes (Local · private / Cloud · your key), the connected set, and smart
-	routing. Reuses the proven /portal/providers + /portal/hardware logic; only the
-	presentation is new. This is the target of "Spawn intelligence" / "Connect AI".
+	Connect & manage providers — DEMOTED to a pure connection surface by the Intelligence
+	redesign (docs/INTELLIGENCE-SCREEN-REDESIGN-2026-07-17.md Part I, P3/§9). It keeps the
+	Local/Cloud connect lanes, the #133 Claude ladder, the subscription card (+ the §4g
+	sensitive-work opt-in), web access, and the connected-providers list. It has LOST the
+	active-model hero, every per-task/per-function assignment control, the assistant
+	name/personality editor, and the whisper rail (moved under the Transcription function
+	row in IntelligenceScreen — see TranscriptionSetup.svelte). ASSIGNMENT lives in exactly
+	one place now: IntelligenceScreen (P2). This component never writes settings.taskModels
+	— gate A3 (verify-intelligence-flow.mjs) mounts it and fails if a task-model control
+	grows back.
 -->
 <script lang="ts">
-	import OnboxTaskSelect from './OnboxTaskSelect.svelte';
-	import ModelHealth from './ModelHealth.svelte';
 	// §4g's exemption is SHARED state: the Intelligence screen prints the guarantee that depends
 	// on it, and both are mounted in this same pane. Two independent copies = a false privacy
 	// statement one scroll away (see the store's header).
@@ -277,107 +280,10 @@
 		catch { /* leave */ } finally { webSearchBusy = false; }
 	}
 
-	// Assistant identity (spec #4) — name + personality, changeable here and set in
-	// onboarding. The name propagates to the chat header via /portal/chat/agents.
-	let agentName = $state('');
-	let agentPersonality = $state('friendly');
-	let identityBusy = $state(false);
-	let identitySaved = $state(false);
-	const PERSONALITY_OPTS: { id: string; label: string }[] = [
-		{ id: 'friendly', label: 'Friendly' },
-		{ id: 'formal', label: 'Formal' },
-		{ id: 'concise', label: 'Concise' },
-		{ id: 'creative', label: 'Creative' },
-	];
-	async function loadIdentity() {
-		try { const r = await api('/portal/agent-identity'); if (r.ok) { const j = await r.json(); agentName = j.name || ''; agentPersonality = j.personality || 'friendly'; } } catch { /* defaults */ }
-	}
-	async function saveIdentity() {
-		identityBusy = true; identitySaved = false;
-		try {
-			const r = await api('/portal/agent-identity', { method: 'PUT', body: JSON.stringify({ name: agentName.trim(), personality: agentPersonality }) });
-			if (r.ok) { const j = await r.json(); agentName = j.name; agentPersonality = j.personality; identitySaved = true; setTimeout(() => (identitySaved = false), 2000); }
-		} catch { /* leave */ } finally { identityBusy = false; }
-	}
-
-	// Per-task model selection — ONE area, every task. Each task is either ON-BOX
-	// (a local model NAME, runs on your device — categorize/enrich) or PROVIDER-routed
-	// (a configured provider — chat/narrate/harness/reflection). `onboxTasks` comes from
-	// the backend (ONBOX_TASKS) so the split is authoritative, not hardcoded here.
-	let tasks = $state<string[]>([]);
-	let onboxTasks = $state<string[]>([]);
-	let taskModels = $state<Record<string, { providerId?: number; model?: string }>>({});
-	let taskBusy = $state<string | null>(null);
-	const TASK_LABELS: Record<string, string> = {
-		chat: 'Chat & agents',
-		narrate: 'Narration — mindscape names + chronicles',
-		harness: 'Autonomous tasks — scheduled & background',
-		reflection: 'Reflection cycles — your daily/weekly inner model',
-		categorize: 'Labeling — per-message domains + registers',
-		enrich: 'Enrichment — entities + gist per message',
-	};
-	// ── On-box model health (readiness `models` — src/readiness.js §3.10b) ──────────
-	// The slice was COMPLETE and SERVED but had zero consumers here (design §3.10 line 571),
-	// so approving Labeling and leaving Enrichment unset ran L2 dead AND silent. This is the
-	// render. The health belongs next to the picker that CAUSES it — approving a model is
-	// what starts the download this reports on.
-	//
-	// ⚠️ `slices=models` — ask for exactly what this screen renders, and NEVER `fresh`.
-	// The pure scan is a multi-second SQLCipher decrypt; polling it per-call once hung the
-	// app at boot. `models` itself is SYNC (it reads supervisors' in-memory health, never
-	// the DB), so this stays cheap enough to poll while a pull is in flight.
-	let models = $state<Record<string, any> | null>(null);
-	let modelsPoll: ReturnType<typeof setInterval> | null = null;
-	// The Intelligence pane is destroyed on a pane switch (SettingsView's {#if activePane}), and
-	// a fetch in flight at that moment resolves AFTER the cleanup has run — it would then see
-	// `busy && !modelsPoll` and start a fresh interval with no owner left to clear it. Harmless
-	// while a pull finishes, but a member stuck busy (crash-looping, stalled) would poll every
-	// 2s for the life of the page, once more per visit (independent review, 2026-07-16).
-	let modelsDead = false;
-
-	// The readiness member behind each on-box TASK. `categorize` (the setting) and `labeler`
-	// (the health) are the same function under two names; `enrich`/`enricher` likewise. They
-	// are approved INDEPENDENTLY — one member per task, never a shared object.
-	const TASK_MEMBER: Record<string, string> = { categorize: 'labeler', enrich: 'enricher' };
-	const healthOf = (task: string) => models?.[TASK_MEMBER[task]] ?? null;
-
-	async function loadModels() {
-		try {
-			const r = await api('/portal/readiness?slices=models');
-			if (r.ok) { models = (await r.json())?.models ?? null; maybePollModels(); }
-		} catch { /* health simply doesn't render — never blocks the pickers */ }
-	}
-	// Poll ONLY while something is genuinely in flight. A model pull is multi-GB, so the
-	// percentage has to move; once it settles there is nothing to watch and polling stops.
-	function maybePollModels() {
-		if (modelsDead) return;                 // a late fetch must not outlive the component
-		const busy = Object.values(models || {}).some((m: any) =>
-			['downloading', 'loading', 'starting', 'installing_deps'].includes(String(m?.status)));
-		if (busy && !modelsPoll) modelsPoll = setInterval(loadModels, 2000);
-		if (!busy && modelsPoll) { clearInterval(modelsPoll); modelsPoll = null; }
-	}
-
-	// Role-aware recommendations (curated operator picks, from /providers/presets).
-	// labeling → a small on-box model (categorize/enrich); descriptions → an EU-ZDR cloud (narrate).
+	// Role-aware recommendations (curated operator picks, from /providers/presets) — the
+	// cloud lane's ★ badge only. Every ASSIGNMENT control (per-task selects, on-box pickers)
+	// left this component with the redesign (P2/P3): IntelligenceScreen owns assignment.
 	let roleRecs = $state<{ labeling?: { model?: string }; descriptions?: { presetId?: string } } | null>(null);
-	const isOnbox = (t: string) => onboxTasks.includes(t);
-	const cloudTaskList = $derived(tasks.filter((t) => !isOnbox(t)));   // provider-routed
-	const onboxTaskList = $derived(tasks.filter((t) => isOnbox(t)));     // on your device
-	const onboxRecModel = $derived(roleRecs?.labeling?.model || 'qwen3.5:4b'); // recommended on-box pick
-	// Installed local models to choose from (only known once hardware is detected).
-	const installedLocal = $derived((hwRec?.recommendations ?? []).filter((m: any) => m.installed).map((m: any) => m.name));
-	const onboxModelOf = (task: string) => taskModels[task]?.model || '';
-	// Options for an on-box task's <select>: installed locals + the current pick, minus the
-	// recommended — which is NOT dropped because it is "the default", but because it has its
-	// own explicit <option value={onboxRecModel}> above and would otherwise render twice.
-	// It must stay selectable: it is the model the whole recommendation exists to offer.
-	function onboxOptions(task: string): string[] {
-		const set = new Set<string>(installedLocal);
-		const cur = onboxModelOf(task);
-		if (cur) set.add(cur);
-		set.delete(onboxRecModel);
-		return [...set];
-	}
 
 	const FIT: Record<string, { label: string; cls: string }> = {
 		perfect: { label: 'great fit', cls: 'fit-green' },
@@ -395,7 +301,7 @@
 		'us-zdr': { label: 'US · zero-retention', cls: 'j-amber' },
 		local: { label: 'on your local network', cls: 'j-amber' },
 	};
-	const ON_DEVICE = { label: 'on your device', cls: 'j-green' };
+	// (ON_DEVICE — the hero's green on-device chip — left with the hero, §9.)
 
 	const OLLAMA_BASE = 'http://127.0.0.1:11434/v1';
 	// Display name for a provider row. For Claude, the AUTH TYPE is the identity, so show
@@ -413,27 +319,15 @@
 		{ key: 'us', title: 'US providers', items: presets.filter((p) => p.jurisdiction.startsWith('us')) },
 	]);
 
-	// ── Active model (hero) ──
 	// The RESOLVED active provider — mirror the backend getActive(): among the
 	// is_active rows (there's one per provider TYPE), the most-recently-used wins.
-	// (find(is_active) was wrong — it returned whichever sorted first, e.g. Claude
-	// before Regolo, so the UI showed a provider the system wasn't actually using.)
+	// (find(is_active) was wrong — it returned whichever sorted first.) Used by the
+	// Connected list's dot + "Use" buttons; the HERO that displayed it collapsed into
+	// the pane's summary card (Part I §9 — one home for "what's running").
 	const active = $derived(
 		[...providers].filter((p) => p.is_active)
 			.sort((a, b) => (b.last_used_at || '').localeCompare(a.last_used_at || ''))[0] ?? null,
 	);
-	// Both facts come from the SERVER (publicRow), computed with the one shared parser.
-	// Do not re-derive either from base_url here — a substring regex over the URL string
-	// is what made this badge lie in the first place.
-	const activeInfo = $derived.by(() => {
-		if (!active) return null;
-		return {
-			label: active.label || active.provider,
-			model: active.model_preference || '',
-			local: !!active.on_this_device,
-			juris: active.jurisdiction ?? '',
-		};
-	});
 
 	async function load() {
 		loading = true; error = null;
@@ -451,72 +345,8 @@
 			loading = false;
 		}
 	}
-	async function loadTaskModels() {
-		try { const r = await api('/portal/providers/task-models'); if (r.ok) { const j = await r.json(); tasks = j.tasks || []; onboxTasks = j.onboxTasks || ['categorize', 'enrich']; taskModels = j.taskModels || {}; } } catch { /* default: all tasks use the active provider */ }
-	}
-	async function setTaskModel(task: string, providerId: number | null) {
-		taskBusy = task;
-		try { const r = await api('/portal/providers/task-models', { method: 'PUT', body: JSON.stringify({ task, providerId }) }); if (r.ok) taskModels = (await r.json()).taskModels || {}; }
-		catch { /* leave */ } finally { taskBusy = null; }
-	}
-	// On-box task (categorize/enrich): stores a LOCAL model NAME. Empty → NOT APPROVED:
-	// nothing downloads and nothing runs for that task (§3.10c — the approval IS the setting).
-	// It said "Empty → curated default" until 2026-07-16, which is the exact claim this round
-	// killed; the identical sentence was fixed in portal-providers.js in the same diff and
-	// missed here, 80 lines from the edit (re-review). Check for siblings, not just the file
-	// you are in.
-	async function setOnboxModel(task: string, model: string) {
-		taskBusy = task;
-		try { const r = await api('/portal/providers/task-models', { method: 'PUT', body: JSON.stringify({ task, model }) }); if (r.ok) taskModels = (await r.json()).taskModels || {}; }
-		catch { /* leave */ } finally { taskBusy = null; }
-		// The approval is what STARTS the pull, so re-read the health the click just changed —
-		// otherwise approving a ~3.4GB model leaves the row reading "Off" until the next
-		// visit, and the one download worth watching is the one nobody sees begin.
-		loadModels();
-	}
-	// ── Voice transcription (dedicated Whisper — fast on-device STT) ──
-	type WhisperCat = { model: string; label: string; sizeMB: number; blurb: string; recommended?: boolean };
-	let trans = $state<{ health: any; model: string | null; catalog: WhisperCat[] } | null>(null);
-	let transErr = $state<string | null>(null);
-	let transBusy = $state(false);
-	let transStarting = $state<string | null>(null); // model whose download we just kicked off (instant feedback)
-	let transPoll: ReturnType<typeof setInterval> | null = null;
-
-	async function loadTranscription() {
-		try {
-			const r = await api('/portal/transcription/status');
-			if (r.ok) { trans = await r.json(); maybePollTranscription(); }
-		} catch { /* section shows unavailable */ }
-	}
-	function maybePollTranscription() {
-		const st = trans?.health?.status;
-		const busy = st === 'downloading' || st === 'loading' || st === 'starting' || st === 'installing_deps';
-		if (busy && !transPoll) transPoll = setInterval(loadTranscription, 2000);
-		if (!busy && transPoll) { clearInterval(transPoll); transPoll = null; }
-	}
-	async function downloadWhisper(m: string) {
-		if (transBusy) return; // ignore repeat clicks while one is in flight
-		transBusy = true; transErr = null; transStarting = m;
-		// Optimistic feedback + start polling IMMEDIATELY — the POST can take up to
-		// ~20s (it waits for the service to come up), so don't leave the user staring
-		// at an unchanged screen wondering if the click registered.
-		if (!transPoll) transPoll = setInterval(loadTranscription, 2000);
-		try {
-			const r = await api('/portal/transcription/download', { method: 'POST', body: JSON.stringify({ model: m }) });
-			const j = await r.json().catch(() => null);
-			if (!r.ok || !j?.ok) throw new Error(j?.error || 'download failed');
-			await loadTranscription();
-		} catch (e: any) { transErr = e?.message || 'download failed'; }
-		finally { transBusy = false; transStarting = null; }
-	}
-
 	onMount(() => {
-		load(); loadTaskModels(); loadTranscription(); loadIdentity(); loadSub(); loadModels();
-		return () => {
-			if (transPoll) clearInterval(transPoll);
-			modelsDead = true;
-			if (modelsPoll) { clearInterval(modelsPoll); modelsPoll = null; }
-		};
+		load(); loadSub();
 	});
 
 	function choose(p: Preset) {
@@ -644,37 +474,9 @@
 </script>
 
 <div class="ai-page">
-	<!-- ── Active intelligence (hero) ── -->
-	<div class="hero" class:none={!active}>
-		<span class="hero-spark" aria-hidden="true">
-			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
-		</span>
-		<div class="hero-body">
-			{#if activeInfo}
-				<span class="hero-label">Using {activeInfo.label}{#if activeInfo.model && !activeInfo.label.includes(activeInfo.model)} · <span class="hero-model">{activeInfo.model}</span>{/if}</span>
-				{#if activeInfo.local}<span class="chip {ON_DEVICE.cls}">{ON_DEVICE.label}</span>
-				{:else if JURIS[activeInfo.juris]}<span class="chip {JURIS[activeInfo.juris].cls}">{JURIS[activeInfo.juris].label}</span>{/if}
-				{#if active?.id === subStatus?.providerId && subStatus?.account?.email}<span class="hero-sub">{subStatus.account.email}</span>{/if}
-			{:else}
-				<span class="hero-label">No intelligence connected yet</span>
-				<span class="hero-sub">Connect one below — local &amp; private, or a cloud key.</span>
-			{/if}
-		</div>
-	</div>
-
-	<!-- ── Assistant identity (name + personality) ── -->
-	<div class="lane">
-		<div class="lane-head"><span class="lane-title">Your assistant</span><span class="lane-tag">name &amp; personality</span></div>
-		<div class="identity-row">
-			<input class="inp id-name" type="text" maxlength="40" bind:value={agentName} placeholder="Mycelium" aria-label="Assistant name" />
-			<select class="task-select id-persona" bind:value={agentPersonality} aria-label="Personality">
-				{#each PERSONALITY_OPTS as o}<option value={o.id}>{o.label}</option>{/each}
-			</select>
-			<button class="solid-btn" disabled={identityBusy} onclick={saveIdentity}>{identityBusy ? 'Saving…' : identitySaved ? '✓ Saved' : 'Save'}</button>
-		</div>
-		<p class="muted-xs">This name appears wherever your AI shows up — chat, notifications, settings.</p>
-	</div>
-
+	<!-- The active-model hero and the assistant name/personality editor were REMOVED here
+	     (Part I §9): the summary card owns "what's running"; identity moves to the per-agent
+	     character page. This surface connects and manages providers — nothing else. -->
 	{#if loading}
 		<div class="muted pulse">Loading…</div>
 	{:else if error}
@@ -888,146 +690,10 @@
 			</button>
 		</div>
 
-		<!-- ── Models per task — ONE area: on-box (local) + provider-routed ── -->
-		{#if tasks.length}
-			<div class="lane">
-				<div class="lane-head"><span class="lane-title">Models</span><span class="lane-tag">per task</span></div>
-				<p class="muted task-intro">Pick the model for each kind of work. The first group runs <strong>on your device</strong> (private + free, bulk over your whole vault); the rest route to a configured provider — left unset, they use your active provider.</p>
-
-				{#if onboxTaskList.length}
-					<div class="group-title">On your device · private</div>
-					<!-- The EMBEDDER — bundled, and deliberately NOT a task row: it has no picker
-					     because it has no choice (§3.10d-c). Rendering it as an approvable card with
-					     a pre-ticked box would present a non-choice as consent. It is listed anyway
-					     because it is the one on-box model every vault runs, and an owner reading a
-					     list of what runs on their device should not have to infer the search index. -->
-					<div class="task-row">
-						<span class="task-label">Search — semantic recall</span>
-						<div class="task-ctl"><ModelHealth kind="included" health={models?.embedder} /></div>
-					</div>
-					{#each onboxTaskList as task}
-						<div class="task-row">
-							<span class="task-label">{TASK_LABELS[task] || task}</span>
-							<div class="task-ctl">
-								<!-- The approval IS the value (§3.10c). Extracted so a gate can MOUNT and drive
-								     it — see OnboxTaskSelect.svelte for why "" is Off and not "Recommended". -->
-								<OnboxTaskSelect
-									value={onboxModelOf(task)}
-									recModel={onboxRecModel}
-									options={onboxOptions(task)}
-									disabled={taskBusy === task}
-									onpick={(m) => setOnboxModel(task, m)}
-								/>
-								<!-- The health of THIS task's own member, directly under the picker that causes
-								     it. `categorize`→labeler and `enrich`→enricher are independent members: this
-								     is what makes "approved Labeling, declined Enrichment" visible rather than
-								     dormant and silent. -->
-								<ModelHealth health={healthOf(task)} />
-							</div>
-						</div>
-					{/each}
-					<!-- ⚠️ COUPLED TO THE APPROVAL MODEL — increment I MUST revisit this sentence.
-					     "Each task is approved separately" is TRUE of THIS screen: it renders one
-					     select per on-box task and drives the PER-TASK route, which writes exactly
-					     one. It becomes FALSE the moment the Intelligence screen (§3.11) replaces
-					     this block — that screen approves Understanding = {categorize, enrich} as ONE
-					     choice via `PUT /providers/task-models {function}` (gate M8 in
-					     verify-task-models.mjs).
-					     WHY FIVE SWEEPS MISSED THE SENTENCE BELOW: it WRAPS A LINE, and grep is
-					     line-oriented — it cannot match a phrase across a newline. Sweeping for
-					     any claim like this one must be MULTILINE (perl -0777, whitespace
-					     collapsed), or you will "verify" a completeness you do not have.
-					     ⚠️ Note this paragraph quotes NOTHING from the LIVE sentence below (the
-					     phrase in quotes further up is the OLD wording, kept as history). Two
-					     earlier drafts quoted the live phrase to explain the trap — which made the
-					     very grep they warned about return hits, on the warning itself. A caveat
-					     that falsifies its own instruction is worse than none (review ×5, 2026-07-16).
-					     -->
-					<p class="muted-xs">
-						Choosing a model is how you approve it: “Recommended” downloads {onboxRecModel}
-						(~3.4GB, plus the local model runtime) the first time it’s needed, and you can watch
-						it in the activity feed. “Off” means nothing downloads and nothing runs on your
-						device for this task, which is a supported choice. Each task here is approved on its
-						own.{#if !hwRec} Detect your hardware under “Local” above to also pick from models you already have.{/if}
-					</p>
-				{/if}
-
-				{#if cloudTaskList.length}
-					<div class="group-title">Provider-routed</div>
-					{#each cloudTaskList as task}
-						<div class="task-row">
-							<span class="task-label">{TASK_LABELS[task] || task}</span>
-							<select
-								class="task-select"
-								disabled={taskBusy === task || !providers.length}
-								value={taskModels[task]?.providerId ?? ''}
-								onchange={(e) => setTaskModel(task, (e.currentTarget as HTMLSelectElement).value ? Number((e.currentTarget as HTMLSelectElement).value) : null)}
-							>
-								<option value="">Use active provider{active ? ` (${providerLabel(active)})` : ''}</option>
-								{#each providers as p}
-									<option value={p.id}>{providerLabel(p)}{p.model_preference ? ` · ${p.model_preference}` : ''}</option>
-								{/each}
-							</select>
-						</div>
-					{/each}
-					{#if !providers.length}<p class="muted-xs">Connect a provider above to route these — until then they fall back to your active / on-device model.</p>{/if}
-				{/if}
-			</div>
-		{/if}
-
-		<!-- ── Voice transcription (dedicated Whisper) ── -->
-		<div class="lane">
-			<div class="lane-head"><span class="lane-title">Voice transcription</span><span class="lane-tag j-green">private · on your device</span></div>
-			{#if !trans}
-				<div class="muted">Transcription status unavailable.</div>
-			{:else}
-				{#if transStarting && trans.health?.status !== 'downloading'}
-						<div class="muted pulse">Starting {transStarting} download…</div>
-					{:else if trans.health?.status === 'ok' && trans.model}
-					<div class="trans-status">✓ Voice notes are transcribed on-device by <span class="mono">{trans.model}</span>.</div>
-				{:else if trans.health?.status === 'downloading'}
-					<div class="trans-progress">
-						<span class="muted pulse">Downloading {trans.model}… {trans.health?.progress?.pct ?? 0}%</span>
-						<div class="trans-bar"><div class="trans-fill" style={`width:${trans.health?.progress?.pct ?? 0}%`}></div></div>
-					</div>
-				{:else if trans.health?.status === 'loading' || trans.health?.status === 'starting' || trans.health?.status === 'installing_deps'}
-					<div class="muted pulse">{trans.health?.message || 'Preparing transcription…'}</div>
-				{:else if trans.health?.status === 'deps_missing'}
-					<div class="note-amber">{trans.health?.message}</div>
-				{:else if trans.health?.status === 'error' || trans.health?.status === 'down' || trans.health?.status === 'unavailable'}
-					<!-- `down` was MISSING from this chain, so a crash-looping engine
-					     (transcribe/supervisor.js: setHealth('down', 'The transcription engine keeps
-					     stopping.')) fell through to the {:else} and told the owner to DOWNLOAD a
-					     model they already have — discarding the honest message for marketing copy
-					     (independent review, 2026-07-16). `message` first here: for `down` it is the
-					     sentence written for the owner, while `detail` is the process tail. -->
-					<div class="err-box">{trans.health?.message || trans.health?.detail || 'The transcription model failed.'}</div>
-				{:else}
-					<div class="muted">Voice notes currently lean on your chat model — slow and only when it understands audio. Download a dedicated Whisper model once for fast, accurate transcripts that never leave your device.</div>
-				{/if}
-				{#if trans.health?.status !== 'downloading'}
-					<div class="trans-cards">
-						{#each trans.catalog as c (c.model)}
-							<div class="trans-card">
-								<div class="trans-card-head">
-									<span class="trans-name">{c.label}</span>
-									{#if c.recommended}<span class="chip j-green">★ recommended</span>{/if}
-								</div>
-								<span class="muted-xs">{c.blurb} · ~{(c.sizeMB / 1000).toFixed(1)} GB</span>
-								{#if trans.model === c.model && trans.health?.status === 'ok'}
-									<span class="trans-inuse">✓ in use</span>
-								{:else}
-									<button class="ghost-btn" disabled={transBusy} onclick={() => downloadWhisper(c.model)}>
-										{transStarting === c.model ? 'Starting…' : trans.health?.status === 'ok' ? 'Switch to this model' : 'Download & use'}
-									</button>
-								{/if}
-							</div>
-						{/each}
-					</div>
-				{/if}
-				{#if transErr}<div class="err-box">{transErr}</div>{/if}
-			{/if}
-		</div>
+		<!-- The "Models per task" lane and the whisper rail are GONE from this surface
+		     (Part I §9): assignment lives in IntelligenceScreen (one surface, by function);
+		     the whisper rail renders under the Transcription function row there
+		     (TranscriptionSetup.svelte). This component keeps only connect + manage. -->
 	{/if}
 </div>
 
@@ -1039,21 +705,6 @@
 	.err-box { color: #f87171; font-size: 0.78rem; padding: 0.5rem 0.7rem; border-radius: 8px; background: rgba(248,113,113,0.1); }
 	.note-amber { color: #d9a441; font-size: 0.7rem; }
 	.mono { font-family: var(--font-mono, monospace); color: var(--color-text-primary); font-size: 0.76rem; flex-shrink: 0; }
-
-	/* Hero */
-	.hero {
-		display: flex; align-items: center; gap: 0.85rem;
-		padding: 1rem 1.1rem; border-radius: 14px;
-		background: rgba(229,184,76,0.07); border: 1px solid rgba(229,184,76,0.3);
-	}
-	.hero.none { background: rgba(255,255,255,0.03); border-color: rgba(255,255,255,0.1); }
-	.hero-spark { display: flex; flex-shrink: 0; color: var(--color-accent-aurum, #e5b84c); }
-	.hero-spark svg { width: 26px; height: 26px; }
-	.hero.none .hero-spark { color: var(--color-text-tertiary); opacity: 0.7; }
-	.hero-body { display: flex; align-items: center; flex-wrap: wrap; gap: 0.45rem 0.6rem; min-width: 0; }
-	.hero-label { font-size: 0.95rem; color: var(--color-text-primary); font-weight: 500; }
-	.hero-model { font-family: var(--font-mono, monospace); font-size: 0.82rem; color: var(--color-text-secondary); font-weight: 400; }
-	.hero-sub { font-size: 0.74rem; color: var(--color-text-tertiary); flex-basis: 100%; }
 
 	/* Lanes */
 	.lane { padding: 0.8rem 0.9rem; border-radius: 13px; background: rgba(255,255,255,0.025); border: 1px solid rgba(255,255,255,0.07); }
@@ -1115,9 +766,6 @@
 	.cf-actions { display: flex; align-items: center; gap: 0.7rem; }
 	.inp { width: 100%; padding: 0.5rem 0.65rem; font-size: 0.76rem; font-family: var(--font-mono, monospace); background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; color: var(--color-text-primary); outline: none; }
 	.inp:focus { border-color: var(--color-accent-aurum, #e5b84c); }
-	.identity-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
-	.id-name { flex: 1; min-width: 0; font-family: inherit; }
-	.id-persona { flex-shrink: 0; }
 	.model-field { display: flex; align-items: center; gap: 0.5rem; }
 	.model-field .inp { flex: 1; min-width: 0; }
 	.load-models { flex-shrink: 0; white-space: nowrap; }
@@ -1129,25 +777,10 @@
 	.knob { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: left 0.18s; }
 	.toggle.on .knob { left: 18px; }
 
-	/* Voice transcription */
-	.trans-status { font-size: 0.8rem; color: var(--color-text-primary); }
-	.trans-progress { display: flex; flex-direction: column; gap: 0.4rem; }
-	.trans-bar { height: 5px; border-radius: 3px; background: var(--glass-input-bg, rgba(255,255,255,0.06)); overflow: hidden; }
-	.trans-fill { height: 100%; border-radius: 3px; background: var(--color-accent-aurum, #e5b84c); transition: width 0.5s ease; }
-	.trans-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.6rem; }
-	.trans-card { display: flex; flex-direction: column; gap: 0.4rem; padding: 0.75rem 0.9rem; border-radius: 12px; border: 1px solid var(--glass-border, rgba(255,255,255,0.07)); background: var(--glass-card-bg, rgba(255,255,255,0.025)); }
-	.trans-card-head { display: flex; align-items: center; gap: 0.5rem; justify-content: space-between; }
-	.trans-name { font-size: 0.8rem; font-weight: 500; color: var(--color-text-primary); }
-	.trans-inuse { font-size: 0.74rem; color: var(--color-accent-aurum, #e5b84c); }
 
-	/* Per-task model selection */
-	.task-intro { font-size: 0.72rem; color: var(--color-text-tertiary); line-height: 1.45; margin: 0 0 0.6rem; }
-	.task-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; padding: 0.35rem 0; }
-	.task-label { font-size: 0.8rem; color: var(--color-text-primary); padding-top: 0.3rem; }
 	/* The control and the health it causes, stacked as one right-hand unit. `min-width` gives
 	   a download's progress bar a track to run in — flex-end alone would collapse it to the
 	   width of the text above it. */
-	.task-ctl { display: flex; flex-direction: column; align-items: flex-end; gap: 0.3rem; min-width: min(52%, 22ch); }
 	.task-select { flex: 0 1 auto; max-width: 60%; font-size: 0.76rem; color: var(--color-text-primary); background: var(--color-surface-2, rgba(255,255,255,0.04)); border: 1px solid var(--color-border, rgba(255,255,255,0.12)); border-radius: 8px; padding: 0.3rem 0.5rem; }
 	.task-select:disabled { opacity: 0.5; }
 

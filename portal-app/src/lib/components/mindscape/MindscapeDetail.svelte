@@ -4,7 +4,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { api, apiPost } from '$lib/api';
-	import { generate, start as startGenerate } from '$lib/generate';
+	import { generate } from '$lib/generate';
 
 	// Per-territory "describe more": deepen narration coverage for just this territory
 	// (POST /mycelium/describe-more {territoryId} → spawns describe-chronicles.js as a
@@ -21,7 +21,14 @@
 			describeResetTimer = setTimeout(() => { if (describingTerritoryId === territoryId) describingTerritoryId = null; }, 60_000);
 		}
 	}
-	onDestroy(() => { if (describeResetTimer) clearTimeout(describeResetTimer); });
+	onDestroy(() => {
+		if (describeResetTimer) clearTimeout(describeResetTimer);
+		if (namingResetTimer) clearTimeout(namingResetTimer);
+		if (awaitRowTimer) clearTimeout(awaitRowTimer);
+		if (afterLingerTimer) clearTimeout(afterLingerTimer);
+		if (washTimer) clearTimeout(washTimer);
+	});
+	import { activity, startActivityPolling, fmtEta, fmtAgo } from '$lib/stores/activity';
 	import Sparkline from '$lib/components/mindscape/Sparkline.svelte';
 	import {
 		mindscapeState,
@@ -109,10 +116,15 @@
 	});
 	// A realm is "described" only once an AI has chronicled it. Until then the
 	// pipeline stores a literal placeholder name ("Realm 0") + empty essence — so
-	// presence-of-name is NOT a signal. We detect the placeholder and (a) label such
-	// realms as warm, greyed "Area N" and (b) surface a bottom CTA: "Spawn
-	// intelligence" (connect an AI) when none is connected, or "Illuminate" (run the
-	// describe pass) when one is.
+	// presence-of-name is NOT a signal. We detect the placeholder and label such
+	// realms as warm, greyed "Area N".
+	//
+	// ⚠️ DISPLAY-ONLY FALLBACK (II.2a). This predicate labels rows; it never COUNTS. Every
+	// count ("12 of 40", "all named", the AFTER math) comes from GET /portal/mycelium/
+	// naming-status, whose server counts with the PIPELINE'S OWN predicate
+	// (pipeline/lib/naming-facts.js — wider than this one: it also knows "Territory N").
+	// Two predicates for one fact is the drift that made a card say "all named" while the
+	// job still found work — this copy stays only so unnamed rows can render as "Area N".
 	function isPlaceholderName(name: string | null | undefined): boolean {
 		return !name || /^realm\s+\d+$/i.test(String(name).trim());
 	}
@@ -137,7 +149,189 @@
 
 	const genActive = $derived(['embedding', 'starting', 'running'].includes($generate.phase));
 	function connectIntelligence() { goto('/settings?tab=intelligence'); }
-	function illuminateRealms() { void startGenerate(); }
+
+	// ── The naming run surface (INTELLIGENCE-SCREEN-REDESIGN Part II) ─────────────────────────
+	// "Illuminate" grown into a card with a lifecycle: BEFORE (what will happen, the served
+	// token bound, percent named) · DURING (renders the describe:name FEED ROW — the single
+	// owner of run progress, never a second computation) · AFTER (success / partial / fault /
+	// choice) · EMPTY (all named ⇒ no card). The word "Illuminate" retires from the UI (II.6:
+	// the verb glossary is Name / Describe / Map); it survives in code as the historical name.
+	//
+	// Number ownership (II.2a): percent-named comes from GET /mycelium/naming-status (server
+	// counts with the pipeline's own predicate) and does NOT tick mid-run; run progress comes
+	// from the ref-counted activity store (the same poller the popover/chip ride — ZERO new
+	// pollers); naming-status is fetched per mount/gesture/completion, NEVER polled.
+	type NamingStatus = {
+		areas: { total: number; named: number; unnamed: number };
+		forecast: { perUnitTokenBound: number; expectedTokensBound: number };
+		narrator: { ready: boolean; label: string; model: string | null; local: boolean; jurisdiction: string | null };
+	};
+	let namingStatus = $state<NamingStatus | null>(null);
+	let prevUnnamed: number | null = null;   // the unnamed count before the run — AFTER's math
+	let after = $state<{ kind: 'success' | 'partial' | 'fault'; named: number; remaining: number } | null>(null);
+	let announceText = $state('');           // the ONE persistent live region's text (II.7)
+	let awaitingRow = $state(false);         // POST acked `running` but the feed poll hasn't shown the row yet
+	let awaitRowTimer: ReturnType<typeof setTimeout> | null = null;
+	let afterLingerTimer: ReturnType<typeof setTimeout> | null = null;
+	let washTimer: ReturnType<typeof setTimeout> | null = null;
+	let washIds = $state<Set<number>>(new Set());   // realm rows freshly renamed — the AFTER wash
+
+	// Milestone announcements ONLY (start / done / error) — a per-tick announcement at the
+	// feed's 2.5s cadence is a screen-reader DoS (II.7). The region persists and its
+	// textContent is swapped; a node inserted already-containing-text announces inconsistently
+	// across AT (the #204 round-3 lesson).
+	function announce(text: string) { announceText = text; }
+
+	async function loadNamingStatus(): Promise<NamingStatus | null> {
+		try {
+			const res = await api('/portal/mycelium/naming-status');
+			if (!res.ok) return null;
+			const d = await res.json();
+			if (!d?.areas || !d?.narrator || !d?.forecast) return null;
+			return d as NamingStatus;
+		} catch { return null; }
+	}
+	onMount(async () => {
+		const s = await loadNamingStatus();
+		if (s) { namingStatus = s; prevUnnamed = s.areas.unnamed; }
+	});
+	// The DURING view reads the ref-counted activity store — the popover/chip's own poller.
+	onMount(() => startActivityPolling());
+
+	// The live describe:name row (this run), and the freshest terminal one (the outcome).
+	const nameRow = $derived($activity.active.find((j) => j.kind === 'describe:name') ?? null);
+	const recentNameRow = $derived($activity.recent.find((j) => j.kind === 'describe:name') ?? null);
+
+	// Run-boundary detection: the row appearing clears `awaitingRow`; the row DISAPPEARING is
+	// the completion signal → refetch the vault fact (the percent-named bar updates ONCE, at
+	// completion — never mid-run) and derive the AFTER state by comparing counts (no new
+	// server field).
+	let hadRow = false;   // plain (non-reactive) — transition memory only, never rendered
+	$effect(() => {
+		const row = nameRow;
+		if (row) { hadRow = true; awaitingRow = false; }
+		else if (hadRow) { hadRow = false; void onRunFinished(); }
+	});
+
+	async function onRunFinished() {
+		const s = await loadNamingStatus();
+		if (s) namingStatus = s;
+		const failed = recentNameRow?.status === 'error';
+		const newUnnamed = s?.areas.unnamed ?? null;
+		if (afterLingerTimer) { clearTimeout(afterLingerTimer); afterLingerTimer = null; }
+		if (s && !s.narrator.ready) {
+			// Consent refusal → the card renders the CHOICE, muted, not red (the `choice`
+			// card state below — same render as the pre-empted BEFORE state).
+			after = null;
+			announce('No model is set up to name your areas');
+		} else if (failed) {
+			after = { kind: 'fault', named: 0, remaining: newUnnamed ?? 0 };
+			announce('Naming your areas didn’t finish');
+		} else if (newUnnamed != null && newUnnamed > 0) {
+			after = { kind: 'partial', named: Math.max(0, (prevUnnamed ?? newUnnamed) - newUnnamed), remaining: newUnnamed };
+			announce(`${newUnnamed} ${newUnnamed === 1 ? 'area' : 'areas'} couldn’t be named`);
+		} else if (newUnnamed === 0) {
+			const n = Math.max(0, prevUnnamed ?? 0);
+			after = { kind: 'success', named: n, remaining: 0 };
+			announce(n > 0 ? `Named ${n} ${n === 1 ? 'area' : 'areas'}` : 'All areas named');
+			afterLingerTimer = setTimeout(() => { after = null; }, 10_000);
+		}
+		if (s) prevUnnamed = s.areas.unnamed;
+		await refreshNamesInList();
+	}
+
+	// AFTER — the reward renders in the LIST, in place: reload the mindscape (the job close
+	// already busted the server cache) and give each freshly-renamed row one background wash
+	// (~400ms, staggered, max 10 — II.5; none under prefers-reduced-motion, in CSS).
+	async function refreshNamesInList() {
+		const before = new Map(Object.entries(pointsStore.realms).map(([id, r]: [string, any]) => [id, r?.name]));
+		try { await mindscapeState.load(); } catch { /* the list keeps its last state */ }
+		const renamed: number[] = [];
+		for (const [id, r] of Object.entries(pointsStore.realms) as [string, any][]) {
+			if (before.get(id) !== r?.name && !isPlaceholderName(r?.name)) renamed.push(Number(id));
+		}
+		washIds = new Set(renamed.slice(0, 10));
+		if (washTimer) clearTimeout(washTimer);
+		if (washIds.size) washTimer = setTimeout(() => { washIds = new Set(); }, 2_000);
+	}
+
+	// Illuminate = NAME the unnamed areas. It POSTs /mycelium/name-clusters → the naming job
+	// (spawns pipeline/describe-clusters.js, the only writer of realm/territory name+essence),
+	// NOT generate. generate re-clusters and its debounce SKIPS whenever topology exists, so
+	// wiring Illuminate to it was the whole "does nothing" bug — its render condition (realms
+	// exist) IS the route's skip condition (DISTILLATION-SURFACE-DESIGN §2/§3a). The job runs in
+	// the background; its real progress + outcome (incl. an honest "no model approved" refusal)
+	// stream to the activity feed (kind 'describe:name'). This state is just the click ack.
+	let naming = $state<{ phase: 'idle' | 'starting' | 'running' | 'busy' | 'disk_low' | 'error'; message: string }>({ phase: 'idle', message: '' });
+	let namingResetTimer: ReturnType<typeof setTimeout> | null = null;
+	const namingActive = $derived(naming.phase === 'starting' || naming.phase === 'running');
+	async function illuminateRealms() {
+		naming = { phase: 'starting', message: '' };
+		try {
+			const data = await apiPost<{ status?: string; note?: string; detail?: { freeGb?: number; needGb?: number } | null }>('/portal/mycelium/name-clusters', {});
+			if (data?.status === 'busy') naming = { phase: 'busy', message: data.note || 'A naming pass is already running.' };
+			else if (data?.status === 'disk_low') {
+				// Structured detail → an actionable number, not a dead-end (II.2 EDGE).
+				const d = data.detail;
+				const gb = d && Number.isFinite(d.needGb as number) && Number.isFinite(d.freeGb as number)
+					? Math.max(1, Math.ceil((d.needGb as number) - (d.freeGb as number))) : null;
+				naming = { phase: 'disk_low', message: gb != null
+					? `Not enough free space to name your areas safely — free up ~${gb} GB, then try again.`
+					: 'Not enough free space to name your areas safely — free up some disk space, then try again.' };
+			} else {
+				naming = { phase: 'running', message: 'Naming your areas — this runs in the background. Watch the activity feed.' };
+				after = null;
+				awaitingRow = true;   // hold DURING until the feed poll shows the row
+				announce(namingStatus ? `Naming ${namingStatus.areas.unnamed} ${namingStatus.areas.unnamed === 1 ? 'area' : 'areas'}` : 'Naming your areas');
+				if (awaitRowTimer) clearTimeout(awaitRowTimer);
+				awaitRowTimer = setTimeout(() => {
+					// A run so fast the poll never saw its row — settle via the same completion path.
+					if (awaitingRow) { awaitingRow = false; void onRunFinished(); }
+				}, 15_000);
+			}
+		} catch {
+			naming = { phase: 'error', message: 'Couldn’t start naming your areas. Try again in a moment.' };
+		} finally {
+			if (namingResetTimer) clearTimeout(namingResetTimer);
+			// Let the ack linger, then return the CTA to a clean state — the feed owns the real outcome.
+			namingResetTimer = setTimeout(() => { if (naming.phase !== 'starting') naming = { phase: 'idle', message: '' }; }, 90_000);
+		}
+	}
+
+	// ── Card state (II.2): one state at a time; BEFORE and EMPTY are ONE FACT (unnamed>0) with
+	// opposite signs (§3.7a polarity), both owned by the SERVED count. When naming-status is
+	// unavailable the card degrades to the pre-Part-II CTA (client-predicate guard) — a failed
+	// status fetch must never delete the capability, and must never assert "all named".
+	const during = $derived(nameRow != null || naming.phase === 'starting' || awaitingRow || naming.phase === 'busy');
+	const cardState = $derived.by(() => {
+		if (during) return 'during';
+		if (after) return 'after';
+		if (!namingStatus) return 'fallback';
+		if (namingStatus.areas.unnamed === 0) return 'empty';
+		return namingStatus.narrator.ready ? 'before' : 'choice';
+	});
+	// "Model + where it runs" — rendered from the SERVED narrator authority (the §4g fact),
+	// never re-derived client-side (D9: never claim local-only when the route may egress).
+	const whereRunsLine = $derived.by(() => {
+		const n = namingStatus?.narrator;
+		if (!n) return '';
+		if (n.local) return `Runs with ${n.model || n.label} on this Mac — nothing leaves`;
+		const jur = n.jurisdiction || '';
+		const region = jur.startsWith('eu') ? ' (EU)' : jur.startsWith('us') ? ' (US)' : '';
+		return `Runs via ${n.label}${region} — your approved provider`;
+	});
+	const whereRunsShort = $derived.by(() => {
+		const n = namingStatus?.narrator;
+		if (!n) return '';
+		return n.local ? `${n.model || n.label} on this Mac` : `via ${n.label}`;
+	});
+	// "up to ~52k tokens" — the wire's OWN number (forecast.expectedTokensBound), a bound, never
+	// summed with spent (II.2a). ~k formatting only; the bound is not a precision instrument.
+	function fmtTokensBound(n: number): string {
+		return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
+	}
+	const pctNamed = $derived(namingStatus && namingStatus.areas.total > 0
+		? Math.round((namingStatus.areas.named / namingStatus.areas.total) * 100) : 0);
 
 	// Helper: normalize entity to display name (handles both string and {name/text} formats)
 	function entityName(e: any): string {
@@ -249,13 +443,19 @@
 	// Per-period Illuminate (POST /mindscape/explore → time_chronicles) is deferred Phase G/C:
 	// the endpoint doesn't exist and nothing writes time_chronicles yet, so the trigger was
 	// removed (see the "coming soon" note in the period detail). Whole-mindscape Illuminate
-	// (the top CTA → /mycelium/generate) is the working path.
+	// (the top CTA → /mycelium/name-clusters) is the working path.
 
 	const totalMessages = $derived(pointsStore.meta?.total || pointsStore.points.length);
 	const totalRealms = $derived(Object.keys(pointsStore.realms).length);
 </script>
 
 <div class="mindscape-nav">
+	<!-- ONE persistent visually-hidden live region (II.7 / P8): always mounted, textContent
+	     SWAPPED at milestones only (start / done / error — never per tick). Inserting a node
+	     that already contains the message is announced inconsistently across AT (#204 r3);
+	     a stable region whose text changes is the robust pattern. Choices announce politely —
+	     a choice is not an alert. -->
+	<div class="sr-live" aria-live="polite">{announceText}</div>
 	<!-- Breadcrumb — hidden at the realms root (a lone "Mycelium" there just
 	     duplicates the page). Shown only once drilled in, as a back-path. -->
 	{#if navLevel !== 'realms'}
@@ -293,12 +493,19 @@
 	<div class="nav-content">
 		{#if navLevel === 'realms'}
 			<!-- ═══ REALM LIST ═══ -->
+			{#if cardState === 'empty' && sortedRealms.length > 0 && namingStatus}
+				<!-- EMPTY (II.2): all named ⇒ NO card, NO CTA — one muted line. BEFORE and EMPTY
+				     are one served fact (areas.unnamed) with opposite signs, never both. -->
+				<p class="all-named-line">{namingStatus.areas.total} {namingStatus.areas.total === 1 ? 'area' : 'areas'} · all named</p>
+			{/if}
 			<div class="nav-list">
 				{#each sortedRealms as realm, i (realm.id)}
 					{@const described = isRealmDescribed(realm)}
 					<button
 						class="nav-item realm-item"
 						class:undescribed={!described}
+						class:renamed={washIds.has(realm.id)}
+						style={washIds.has(realm.id) ? `animation-delay: ${[...washIds].indexOf(realm.id) * 40}ms` : ''}
 						onclick={() => mindscapeState.drillIntoRealm(realm.id)}
 						onmouseenter={() => mindscapeState.setHovered('realm', realm.id)}
 						onmouseleave={() => mindscapeState.setHovered('realm', null)}
@@ -315,58 +522,147 @@
 				{/each}
 			</div>
 
-			{#if anyUndescribed && sortedRealms.length > 0}
-				<!-- Bottom CTA: describe the unnamed areas. Illuminate if an AI is connected,
-				     else invite connecting one.
-				     ⚠️ KNOWN-INCOMPLETE, deliberately: this button still calls generate(), and
-				     generate's debounce skips whenever topology exists — so it now honestly says
-				     "Your map is already built" instead of failing silently, but it STILL CANNOT
-				     NAME AN UNNAMED AREA. The naming pass (pipeline/describe-clusters.js — the
-				     only thing that writes name+essence) runs ONLY inside the skipped job.
-				     ⚠️ And "route it at /mycelium/describe-more" is NOT the fix, though it looks
-				     like one: describe-more spawns describe-chronicles, which PRESERVES names
-				     (`name: t.name || …` at :154 — a placeholder is truthy, so it is kept
-				     forever). It writes prose, never a name.
-				     The real fix is a naming job spawning describe-clusters —
-				     DISTILLATION-SURFACE-DESIGN §3a/§8 unit 1 — which does not exist yet. Until
-				     it does, this button is honest about doing nothing rather than silent about
-				     it, which is strictly better and still not enough. -->
-				{#if aiConnected}
-					<button class="realm-cta illuminate" onclick={illuminateRealms} disabled={genActive}>
-						<span class="cta-icon">
-							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
-						</span>
-						<span class="cta-body">
-							<span class="cta-title">{genActive ? 'Illuminating…' : 'Illuminate'}</span>
-							<span class="cta-sub">{genActive ? 'Naming & describing your areas.' : 'Let your AI name & describe these areas.'}</span>
-						</span>
-					</button>
+			<!-- The AUTO-generate outcome render site (D2 pins these: `$generate` had NO render
+			     site app-wide, so both an error and "already built" were SILENCE — design §5.4;
+			     a reviewer once deleted the whole button and the suite still said GO). A snippet
+			     because it renders inside the BEFORE card (next to the CTA) AND in the fallback
+			     branch, and duplicating the phase enumeration is how phases go silent. -->
+			{#snippet genNotes()}
+				{#if $generate.phase === 'up-to-date'}
+					<p class="cta-note">{$generate.message || 'Your map is already built.'}</p>
+				{:else if $generate.phase === 'error' && $generate.error}
+					<p class="cta-note err">{$generate.error}</p>
+				{:else if $generate.phase === 'embedding' && $generate.message}
+					<p class="cta-note">{$generate.message}</p>
+				{/if}
+			{/snippet}
 
-					<!-- ⚠️ THE OUTCOME, RENDERED. This is the whole bug: `$generate` had NO render
-					     site anywhere in the app, so every terminal outcome — an error and an
-					     "already built" alike — was SILENCE. The user clicked and nothing
-					     happened, forever. Adding an `up-to-date` phase WITHOUT this is the same
-					     silence under a nicer name (design §5.4 "representable ≠ shown"; gate D2
-					     exists because I shipped exactly that and a reviewer caught it).
-					     Every non-running outcome says something here. -->
-					{#if $generate.phase === 'up-to-date'}
-						<p class="cta-note">{$generate.message || 'Your map is already built.'}</p>
-					{:else if $generate.phase === 'error' && $generate.error}
-						<p class="cta-note err">{$generate.error}</p>
-					{:else if $generate.phase === 'embedding' && $generate.message}
-						<p class="cta-note">{$generate.message}</p>
+			{#if sortedRealms.length > 0}
+				<!-- ═══ THE NAMING RUN SURFACE (Part II) — the Illuminate CTA grown into a card.
+				     It POSTs /mycelium/name-clusters → the naming job (describe-clusters.js, the
+				     ONLY writer of realm/territory name+essence) in gap-fill mode — NOT generate
+				     (its debounce skips whenever topology exists: the old "does nothing" bug).
+				     describe-more is NOT this act: it spawns describe-chronicles, which PRESERVES
+				     names and writes prose, never a name.
+				     §1: the card is CONTENT-FREE in every state — counts, model ids, times; the
+				     names render only in the area list above (the rendered vault, gate IL8). -->
+				{#if cardState === 'during'}
+					<div class="naming-card nc-swap">
+						<!-- DURING renders the FEED ROW — the single owner of run progress (IL4):
+						     step/total, ETA, elapsed are the row's own numbers, never recomputed.
+						     The percent-named bar does NOT tick here (two owners = the R4 defect). -->
+						<div class="nc-title-row">
+							<span class="nc-title">{nameRow?.stage || 'Naming your areas'}</span>
+							<span class="nc-state">● running</span>
+						</div>
+						<div class="nc-bar" role="progressbar" aria-label="Naming your areas"
+							aria-valuemin="0" aria-valuemax={nameRow?.total || 0} aria-valuenow={nameRow?.done || 0}>
+							<div class="nc-bar-fill running" style="width: {nameRow && nameRow.total > 0 ? Math.min(100, (nameRow.done / nameRow.total) * 100) : 0}%"></div>
+						</div>
+						<p class="nc-fact">
+							{#if nameRow && nameRow.total > 0}
+								{nameRow.done} of {nameRow.total}{#if fmtEta(nameRow.etaSeconds)}&nbsp;· {fmtEta(nameRow.etaSeconds)} left{/if}
+							{:else}
+								Starting…
+							{/if}
+						</p>
+						<p class="nc-meta">
+							{#if nameRow?.startedAt}
+								Started {fmtAgo(nameRow.startedAt)}{#if whereRunsShort}&nbsp;· {whereRunsShort}{/if}
+							{:else if naming.phase === 'busy' && naming.message}
+								{naming.message}
+							{/if}
+						</p>
+					</div>
+				{:else if cardState === 'after' && after}
+					<div class="naming-card nc-swap">
+						{#if after.kind === 'success'}
+							<p class="nc-fact">Named {after.named} {after.named === 1 ? 'area' : 'areas'} just now</p>
+						{:else if after.kind === 'partial'}
+							<div class="nc-bar" aria-hidden="true"><div class="nc-bar-fill" style="width: {pctNamed}%"></div></div>
+							<p class="nc-fact">Named {after.named} {after.named === 1 ? 'area' : 'areas'} — {after.remaining} couldn’t be named ·
+								<button class="nc-link" onclick={illuminateRealms}>Try again</button></p>
+						{:else}
+							<p class="nc-fact nc-err">Naming your areas didn’t finish.
+								<button class="nc-link" onclick={illuminateRealms}>Try again</button></p>
+						{/if}
+					</div>
+					{#if naming.phase === 'idle'}{@render genNotes()}{/if}
+				{:else if cardState === 'before' && namingStatus}
+					<div class="naming-card nc-swap">
+						<span class="nc-title">Name your areas</span>
+						<p class="nc-fact">{namingStatus.areas.unnamed} of your {namingStatus.areas.total} areas still have placeholder names.</p>
+						<div class="nc-bar" aria-hidden="true"><div class="nc-bar-fill" style="width: {pctNamed}%"></div></div>
+						<p class="nc-meta">{namingStatus.areas.named} named · {pctNamed}%</p>
+						<ul class="nc-facts">
+							<!-- The served §4g authority — never client-derived (D9). -->
+							<li>{whereRunsLine}</li>
+							<!-- The wire's own bound: "up to ~" is true by construction (II.3);
+							     never summed with spent. -->
+							<li>Uses up to ~{fmtTokensBound(namingStatus.forecast.expectedTokensBound)} tokens{namingStatus.narrator.local ? ', free on your hardware' : `, on your ${namingStatus.narrator.label} plan`}</li>
+							<!-- PRESERVE gap-fill is a FACT of the job, stated as the guarantee. -->
+							<li>Keeps every name you already have</li>
+						</ul>
+						<!-- NO duration claim pre-start: no banked naming throughput exists, and
+						     inventing one repeats the "~40 msgs/min" lie #204 refuted. -->
+						<button class="realm-cta illuminate nc-cta" onclick={illuminateRealms} disabled={namingActive || genActive}>
+							<span class="cta-title">Name {namingStatus.areas.unnamed} {namingStatus.areas.unnamed === 1 ? 'area' : 'areas'}</span>
+						</button>
+						<p class="nc-meta">You’ll see live progress here and in the feed; a real time estimate appears once it starts.</p>
+						{#if naming.phase !== 'idle' && naming.message}
+							<p class="cta-note" class:err={naming.phase === 'error' || naming.phase === 'disk_low'}>{naming.message}</p>
+						{/if}
+						{#if naming.phase === 'idle'}{@render genNotes()}{/if}
+					</div>
+				{:else if cardState === 'choice'}
+					<div class="naming-card nc-swap">
+						<!-- No capability: the CTA is REPLACED by the choice, muted, not red — a
+						     choice is not an alert (§8.2), and pre-empting the click-then-refusal
+						     path beats manufacturing it (IL3). The pipeline's own refusal (N5b)
+						     stays as defense-in-depth. -->
+						<span class="nc-title">Name your areas</span>
+						<p class="nc-choice">No model is set up to name your areas ·
+							<button class="nc-link" onclick={connectIntelligence}>Choose a model →</button></p>
+					</div>
+					{#if naming.phase === 'idle'}{@render genNotes()}{/if}
+				{:else if cardState === 'empty'}
+					{#if naming.phase === 'idle'}{@render genNotes()}{/if}
+				{:else if anyUndescribed}
+					<!-- FALLBACK: naming-status unavailable. The pre-Part-II CTA on the CLIENT
+					     predicate — a failed status fetch must never delete the capability (and
+					     must never render a fake bundle of counts it doesn't have). -->
+					{#if aiConnected}
+						<button class="realm-cta illuminate" onclick={illuminateRealms} disabled={namingActive || genActive}>
+							<span class="cta-icon">
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+							</span>
+							<span class="cta-body">
+								<span class="cta-title">{namingActive ? 'Naming…' : 'Name your areas'}</span>
+								<span class="cta-sub">{namingActive ? 'Naming your areas.' : 'Let your AI name these areas.'}</span>
+							</span>
+						</button>
+
+						<!-- ⚠️ THE OUTCOME, RENDERED. This is the click ack; the full progress +
+						     the honest "no model approved" refusal stream to the activity feed
+						     (kind 'describe:name'). A CTA that reports nothing is the original
+						     bug (design §5.4 "representable ≠ shown"). -->
+						{#if naming.phase !== 'idle' && naming.message}
+							<p class="cta-note" class:err={naming.phase === 'error' || naming.phase === 'disk_low'}>{naming.message}</p>
+						{/if}
+
+						{#if naming.phase === 'idle'}{@render genNotes()}{/if}
+					{:else}
+						<button class="realm-cta spawn" onclick={connectIntelligence}>
+							<span class="cta-icon">
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+							</span>
+							<span class="cta-body">
+								<span class="cta-title">Spawn intelligence</span>
+								<span class="cta-sub">Connect an AI to name &amp; explore your areas.</span>
+							</span>
+							<span class="cta-arrow">→</span>
+						</button>
 					{/if}
-				{:else}
-					<button class="realm-cta spawn" onclick={connectIntelligence}>
-						<span class="cta-icon">
-							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
-						</span>
-						<span class="cta-body">
-							<span class="cta-title">Spawn intelligence</span>
-							<span class="cta-sub">Connect an AI to name &amp; explore your areas.</span>
-						</span>
-						<span class="cta-arrow">→</span>
-					</button>
 				{/if}
 			{/if}
 
@@ -994,6 +1290,92 @@
 	.nav-item.selected {
 		background: rgba(229, 184, 76, 0.09);
 		border-color: rgba(229, 184, 76, 0.4);
+	}
+
+	/* The one persistent live region — visually hidden, never display:none (that silences AT). */
+	.sr-live {
+		position: absolute;
+		width: 1px; height: 1px;
+		padding: 0; margin: -1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
+		border: 0;
+	}
+
+	/* ═══ The naming run surface (Part II, II.5) ═══
+	   One card, full aside width, directly under the area list. 16px padding, 8px vertical
+	   rhythm, three type levels (title 0.95rem emphasis · fact 0.8rem secondary · meta 0.72rem
+	   tertiary). The bar is 6px/3px-radius in BEFORE (percent named) and DURING (run progress)
+	   alike, so the swap reads as the same object changing meaning. Muted for choices, blue for
+	   in-flight, red only for genuine faults. */
+	.naming-card {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		width: calc(100% - 20px);
+		margin: 4px 10px 10px;
+		padding: 16px;
+		border-radius: 12px;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: rgba(255, 255, 255, 0.03);
+	}
+	/* 160ms opacity crossfade on state swaps (branch switch recreates the card). */
+	.nc-swap { animation: nc-fade 160ms ease-out; }
+	@keyframes nc-fade { from { opacity: 0; } to { opacity: 1; } }
+	.nc-title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+	.nc-title { font-size: 0.95rem; font-weight: 500; color: var(--color-text-primary); }
+	.nc-state { font-size: 0.72rem; color: var(--color-accent); white-space: nowrap; }
+	.nc-fact { font-size: 0.8rem; color: var(--color-text-secondary); margin: 0; line-height: 1.5; }
+	.nc-meta { font-size: 0.72rem; color: var(--color-text-tertiary); margin: 0; line-height: 1.4; }
+	.nc-facts {
+		list-style: none;
+		display: flex; flex-direction: column; gap: 4px;
+		margin: 0; padding: 0;
+	}
+	.nc-facts li { font-size: 0.8rem; color: var(--color-text-secondary); line-height: 1.5; padding-left: 12px; position: relative; }
+	.nc-facts li::before { content: '·'; position: absolute; left: 2px; color: var(--color-text-tertiary); }
+	.nc-bar {
+		width: 100%; height: 6px; border-radius: 3px;
+		background: var(--color-border);
+		overflow: hidden;
+	}
+	/* Percent-named: accent, no gradient, no animation while idle. The bar never moves
+	   backwards — totalSteps is set once up-front (as-built); DURING advances discretely per
+	   feed tick (no fake easing between real datapoints). */
+	.nc-bar-fill { height: 100%; border-radius: 3px; background: var(--color-accent-aurum, #e5b84c); }
+	.nc-bar-fill.running { background: var(--color-accent, #5b9fe8); }
+	.nc-cta {
+		margin: 4px 0 0; width: 100%;
+		justify-content: center;
+		background: rgba(229, 184, 76, 0.09);
+		border-color: rgba(229, 184, 76, 0.35);
+	}
+	.nc-cta:hover:not(:disabled) { background: rgba(229, 184, 76, 0.14); border-color: rgba(229, 184, 76, 0.5); }
+	/* A choice is muted, never red (§8.2). */
+	.nc-choice { font-size: 0.8rem; color: var(--color-text-tertiary); margin: 0; line-height: 1.5; }
+	.nc-err { color: var(--color-accent-coral, #f87171); }
+	.nc-link {
+		background: none; border: none; padding: 0;
+		font-family: inherit; font-size: inherit;
+		color: var(--color-accent-aurum, #e5b84c);
+		cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+	}
+	.all-named-line {
+		margin: 8px 14px 0;
+		font-size: 0.72rem;
+		color: var(--color-text-tertiary);
+	}
+	/* AFTER: one ~400ms background wash per freshly-renamed row (staggered via inline
+	   animation-delay, max 10 rows). */
+	.realm-item.renamed { animation: nc-wash 400ms ease-out backwards; }
+	@keyframes nc-wash {
+		from { background: rgba(229, 184, 76, 0.12); }
+		to { background: rgba(255, 255, 255, 0.025); }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.nc-swap { animation: none; }
+		.realm-item.renamed { animation: none; }
 	}
 
 	/* Bottom CTA — describe the unnamed areas. Illuminate (AI connected) is a calm

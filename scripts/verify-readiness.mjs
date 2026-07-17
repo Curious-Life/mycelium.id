@@ -29,10 +29,11 @@ import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createReadiness } from '../src/readiness.js';
 import { portalCompatRouter } from '../src/portal-compat.js';
+import { isEnrichProcessingPaused, pauseEnrichProcessing, resumeEnrichProcessing } from '../src/enrich/drainer.js';
 
 // The slice list R5 must sweep. Kept HERE, next to the gate that depends on it, because the
 // module's own ALL is private — and because R5's job is to name the surface explicitly.
-const ALL_SLICES = ['data', 'tags', 'embedder', 'models', 'ai', 'channel', 'mindscape', 'onboarding'];
+const ALL_SLICES = ['data', 'tags', 'embedder', 'models', 'ai', 'channel', 'mindscape', 'onboarding', 'processing'];
 
 const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? ` — ${d}` : ''}`); };
@@ -48,7 +49,9 @@ function mkDb(over = {}) {
       async embedBacklog() { touched.push('embedBacklog:PURE'); return { total: 100, embedded: 90, pending: 8, unprocessable: 2 }; },
       async embedBacklogCached() { touched.push('embedBacklog:CACHED'); return { total: 100, embedded: 90, pending: 8, unprocessable: 2 }; },
       async categoriesBacklogCached() { touched.push('categories:CACHED'); return { total: 100, tagged: 60, pending: 40 }; },
+      async nlpBacklogCached() { touched.push('nlp:CACHED'); return { done: 30, total: 100, pending: 20 }; },
     },
+    users: { async getSettings() { touched.push('getSettings'); return {}; } },
     providers: { async list() { touched.push('providers'); return [{ id: 1, provider: 'claude_subscription', label: 'Claude', is_active: 1 }]; } },
     secrets: { async get() { return '1'; }, async has() { return true; } },
     mindscape: { async getNoiseStats() { touched.push('noiseStats'); return { total: 73520 }; } },
@@ -497,6 +500,475 @@ await t('U3. ⭐ restoring guidance reaches the LIVE rail — proven by MOUNTING
     + '!dismissed — the one path that can clear the flag is gated on the flag. So the toggle '
     + 'writes the DB, says "Setup guidance restored.", and the rail stays gone until RESTART.');
   assert.equal(r.refreshedOnSecond, 1, 'and it must keep working — a signal that fires once is a latch, not a signal');
+});
+
+
+// ── §3.7a — the invite and the rail can NEVER coexist (increment E2) ─────────
+await t('X1. ⭐ the rail appears IFF generated && (!ai || !channel) — proven by MOUNTING it', () => {
+  // THE structural claim, and map §5.1's bug. Before this the invite hid on `points.length === 0`
+  // (the client STORE) and the rail on `!generated` (/portal/mindscape's NODES) — two
+  // measurements of one idea, both true through the middle of onboarding ⇒ BOTH ON SCREEN AT
+  // ONCE. Now both pivot on readiness.mindscape.generated with OPPOSITE polarity, so overlap is
+  // unrepresentable rather than carefully avoided.
+  //
+  // ⚠️ MOUNTED, not grepped. A regex over `railVisible` proves the EXPRESSION, not that anything
+  // renders — `{#if false && …}` beat exactly that gate on #190/#195. This drives the REAL
+  // component and reads the DOM for `.rail`.
+  //
+  // ⚠️ And it drives EACH GUARD SEPARATELY: `railVisible` ANDs five terms, and a mutation to one
+  // can be masked by another short-circuiting first (memory: two-guards-can-mask-each-other, #198).
+  const drive = (generated, ai, channel, extra = {}) => {
+    const out = execFileSync('node', ['--conditions', 'browser', 'test/mount-onboarding-flow.mjs'], {
+      cwd: 'portal-app', encoding: 'utf8', timeout: 120000,
+      env: {
+        ...process.env, GENERATED: generated ? '1' : '0', AI: ai ? '1' : '0', CHANNEL: channel ? '1' : '0',
+        DISMISSED: extra.dismissed ? '1' : '0', TOTAL: String(extra.total ?? 5),
+        WELCOME_STAMPED: extra.welcomeStamped === false ? '0' : '1',
+      },
+    }).trim().split('\n').pop();
+    const r = JSON.parse(out);
+    assert.ok(r.ok, `the real rail failed to mount: ${r.error || 'unknown'}`);
+    return r;
+  };
+  const shows = (...a) => drive(...a).railRendered;
+
+  assert.equal(shows(false, false, false), false,
+    'PRE-generation the rail must be GONE — that is the invite\'s territory, and the invite gates on '
+    + '!generated. A rail here is map §5.1: two onboarding surfaces at once.');
+  // ⚠️ BOTH single-miss cases, and the reason is not symmetry-for-its-own-sake. My first matrix
+  // had (1,0,0) (1,1,0) (1,1,1) — every row expecting `true` ALSO had channel missing, so the
+  // channel term carried the assertion and the AI guard was never exercised alone. Deleting the
+  // AI guard outright, and separately re-introducing the all-inactive-provider bug, BOTH passed.
+  // (1,0,1) is the row that distinguishes them (memory: two-guards-can-mask-each-other, #198 —
+  // which I had already cited in a comment three lines up while writing the incomplete matrix).
+  assert.equal(shows(true, false, false), true, 'generated + neither connected ⇒ the rail must say so');
+  assert.equal(shows(true, false, true), true,
+    'generated + AI MISSING but channel present ⇒ the rail must STILL appear. This row exists to '
+    + 'exercise the AI guard ALONE — without it, deleting that guard passes.');
+  assert.equal(shows(true, true, false), true,
+    'generated + channel MISSING but AI present ⇒ likewise, exercising the channel guard alone '
+    + '(the rail had NO channel awareness at all before E2)');
+  assert.equal(shows(true, true, true), false, 'generated + nothing missing ⇒ the rail has nothing true to say; it must be hidden');
+
+  // ⚠️ THE REMAINING GUARDS, each driven ALONE. A reviewer deleted `!dismissed` and `welcomeSeen`
+  // OUTRIGHT and this gate stayed GO — the harness had DISMISSED/TOTAL knobs that NO ASSERTION
+  // TOUCHED, so the stub's hardcoded `welcomeSeen:true, total:5` satisfied both unconditionally.
+  // I fixed the two holes I found and stopped; that is the SECOND time in this one gate.
+  assert.equal(shows(true, false, false, { dismissed: true }), false,
+    'a DISMISSED rail must stay gone — §3.7b calls the undo "non-negotiable" precisely because '
+    + 'this guard is what the × writes. Deleting it made dismissal a no-op and X1 did not notice.');
+  // BOTH arms of `welcomeSeen = welcome_shown_at || total > 0`, or the reconstruction is untested.
+  assert.equal(shows(true, false, false, { welcomeStamped: false, total: 0 }), false,
+    'unstamped welcome AND empty vault ⇒ welcomeSeen is FALSE ⇒ the rail must not pre-empt the '
+    + 'welcome screen. Deleting the welcomeSeen guard must fail HERE.');
+  assert.equal(shows(true, false, false, { welcomeStamped: false, total: 5 }), true,
+    'unstamped welcome BUT the vault has data ⇒ welcomeSeen is TRUE via the `|| total > 0` arm. '
+    + 'This row is the ONLY one that exercises that arm — a naive swap to '
+    + 'readiness.onboarding.welcomeSeen (which is Boolean(welcome_shown_at) alone) fails here, '
+    + 'and that swap would resurface the welcome backdrop on a populated vault.');
+
+  // ⭐ AND THE RAIL MUST SAY SOMETHING. `railRendered` is satisfied by a bare <div>: at
+  // (generated, ai, !channel) the rail shipped as a titled panel with one ticked step and no
+  // action but × — it could not name what was missing, and this gate BLESSED it (review HIGH-1).
+  // ⚠️ ASSERT THE ACTION. My first version matched /messenger/i against railText — which hits the
+  // step's <span class="step-name">, rendered UNCONDITIONALLY. Deleting the actual CTA left this
+  // GREEN: the gate written because "presence is not content" was satisfied by presence-of-a-word
+  // (review MED-5). A step the user cannot act on is not a step.
+  const act = (r) => (r.railButtons || []).filter((b) => b && b !== '×');
+  const missingChannel = drive(true, true, false);
+  assert.ok(act(missingChannel).some((b) => /messenger/i.test(b)),
+    `generated + channel missing ⇒ the rail must offer a way to LINK one. Buttons: ${JSON.stringify(missingChannel.railButtons)}. `
+    + 'Naming the gap without an action is the empty rail with extra words.');
+  const missingAi = drive(true, false, true);
+  assert.ok(act(missingAi).length > 0,
+    `generated + AI missing ⇒ the rail must offer an action, not just a heading. Buttons: ${JSON.stringify(missingAi.railButtons)}`);
+});
+
+await t('X2. ⭐ the rail APPEARS in the session you generate — the poll must not gate on what it learns', () => {
+  // ⚠️ X1 CANNOT SEE THIS, and that blindness shipped a HIGH. Every X1 row bakes `generated` at
+  // MOUNT; the bug lives across TIME. `if (railVisible) refresh()` with railVisible requiring
+  // `generated` means the ONLY code that can notice generated flipped was gated on it already
+  // being true ⇒ import → generate → map appears → invite vanishes → NO RAIL, for the life of the
+  // page. Design E2's own acceptance criterion — "generate with no AI ⇒ rail appears" — was FALSE
+  // on the shipped component (independent review HIGH-3, 2026-07-16).
+  //
+  // It is map §5.1a verbatim with `generated` for `messageCount`: "only refresh() can learn that
+  // messageCount changed … refresh() never runs again for the life of the page." On main the gate
+  // was NEGATIVE (`!generated`, true at mount) so the deadlock was benign; inverting it made the
+  // deadlock the default path. A guard matrix with no time dimension cannot catch that.
+  const out = execFileSync('node', ['--conditions', 'browser', 'test/mount-onboarding-flow.mjs'], {
+    cwd: 'portal-app', encoding: 'utf8', timeout: 120000,
+    env: { ...process.env, FLIP_GENERATED: '1', AI: '0', CHANNEL: '0' },
+  }).trim().split('\n').pop();
+  const r = JSON.parse(out);
+  assert.ok(r.ok, `the transition probe failed to mount: ${r.error || 'unknown'}`);
+  assert.equal(r.railAtMount, false, 'sanity: ungenerated at mount ⇒ no rail (that is the invite\'s phase)');
+  assert.ok(r.readsAfterPolls > 1,
+    `the poll never ran again (${r.readsAfterPolls} read). It is gated on a fact only it can learn — `
+    + 'poll on what does NOT move (!dismissed && welcomeSeen), never on `generated`.');
+  assert.equal(r.railAfterPolls, true,
+    'THE BUG: the server said generated=true and the rail never appeared. The user generates their '
+    + 'map, the invite vanishes, and nothing tells them their AI is unconnected — until a reload. '
+    + 'OnboardingFlow is in the persistent layout, so navigation cannot rescue it.');
+});
+
+await t('X3. ⭐ the mindscape slice SAYS when it could not count — like every sibling', async () => {
+  // ⚠️ MY FIRST X3 TESTED NOTHING TWICE OVER. It drove a STUB that fabricated `unknown:true`, so
+  // it never exercised readiness.js's catch — mutating that catch left it green. And it asserted
+  // "unknown ⇒ rail hidden", which passes trivially because `generated` starts false at mount:
+  // holding a false is indistinguishable from setting one. Both errors in one gate.
+  // ⇒ Test the SLICE where the bug lives: a throwing count must report `unknown`, not fabricate
+  // `generated:false`. This was the ONLY slice that fabricated a definite answer while the route
+  // still 200'd, so every consumer read "I could not count" as "there is no map" (review HIGH-4).
+  const db = {
+    messages: {}, providers: { async list() { return []; } }, secrets: { async has() { return false; } },
+    mindscape: { async getNoiseStats() { throw new Error('SQLITE_BUSY: database is locked'); } },
+    async rawQuery() { return { results: [{}] }; },
+  };
+  const r = createReadiness({ db, userId: U });
+  const { mindscape } = await r.get({ slices: ['mindscape'] });
+  assert.equal(mindscape.unknown, true,
+    'a failed point COUNT must say `unknown` — every sibling slice does (data/tags/evidence/'
+    + 'onboarding). Fabricating `generated:false` tells the invite to render "Grow your mycelium" '
+    + 'over a built 76k-message vault, and self-gates the rail\'s poll so it never recovers.');
+  assert.equal(mindscape.generated, false, 'and it must not claim a map exists either — unknown is neither');
+});
+
+await t('X3b. ⭐ a KNOWN-true generated must survive a failed probe — holding ≠ setting', () => {
+  // The client half. At mount `generated` is false, so "unknown ⇒ rail hidden" proves nothing —
+  // it cannot tell holding-a-false from setting-one. Drive it in TIME: read 1 says generated,
+  // read 2 fails. The rail must still be there.
+  const out = execFileSync('node', ['--conditions', 'browser', 'test/mount-onboarding-flow.mjs'], {
+    cwd: 'portal-app', encoding: 'utf8', timeout: 120000,
+    env: { ...process.env, UNKNOWN_AFTER_FIRST_READ: '1', GENERATED: '1', AI: '0', CHANNEL: '0' },
+  }).trim().split('\n').pop();
+  const r = JSON.parse(out);
+  assert.ok(r.ok, `mount failed: ${r.error || 'unknown'}`);
+  assert.equal(r.railAtMount, true, 'sanity: the first read says generated ⇒ the rail is up');
+  assert.equal(r.railAfterPolls, true,
+    'a LATER probe returned `unknown` and the rail VANISHED — the transient was read as "your map '
+    + 'is gone". Hold the last known answer; a failed count is not an empty vault (§3.2a).');
+});
+
+
+await t('C1. ⭐ a POLLED get() must cost O(1) DB touches — count EVERY call, not just secrets', async () => {
+  // ⚠️ THIS GATE'S FIRST VERSION ASSERTED THE WRONG PROPERTY, and a reviewer proved it by doing
+  // the SAME three full-table scans through `rawQuery` instead of `secrets.*` — C1 stayed GREEN,
+  // cost fully intact. Worse, it was green while `mindscape`'s getNoiseStats FULL-SCANNED
+  // clustering_points on every 4s tick, because C1 only counted the one namespace that burned me
+  // last round. A cost gate scoped to yesterday's slice keeps passing over tomorrow's
+  // (independent review MED-11, 2026-07-16).
+  //
+  // The property is not "secrets are cheap". It is: A POLLED get() MUST NOT PAY TWICE. Count
+  // every DB touch — rawQuery, secrets, mindscape, providers — so the next uncached slice fails
+  // here without anyone having to think of it. §3.8 specifies increment G's popover as POLLING
+  // readiness; this is what protects it.
+  let touches = [];
+  const hit = (what) => touches.push(what);
+  const db = {
+    messages: {
+      async embedBacklogCached() { hit('embedBacklogCached'); return { total: 1, embedded: 1, pending: 0, unprocessable: 0 }; },
+      async categoriesBacklogCached() { hit('categoriesBacklogCached'); return { total: 1, tagged: 1, pending: 0 }; },
+      async nlpBacklogCached() { hit('nlpBacklogCached'); return { done: 1, total: 1, pending: 0 }; },
+    },
+    users: { async getSettings() { hit('users.getSettings'); return { enrichProcessingPausedAt: null }; } },
+    providers: { async list() { hit('providers.list'); return [{ id: 1, is_active: 1, label: 'x' }]; } },
+    secrets: { async get() { hit('secrets.get'); return '1'; }, async has() { hit('secrets.has'); return true; } },
+    mindscape: { async getNoiseStats() { hit('getNoiseStats'); return { total: 3 }; } },
+    async rawQuery() { hit('rawQuery'); return { results: [{ welcome_shown_at: '2026-01-01' }] }; },
+  };
+  const r = createReadiness({ db, userId: U });
+  // The UNION of everything any consumer polls, kept in lockstep with the consumers:
+  //   • the rail @4s (OnboardingFlow.svelte SLICES): data,ai,channel,mindscape,onboarding
+  //   • G's §3.8 popover @4s while open (StatusPopover.svelte POLL_SLICES):
+  //     data,tags,processing,models,ai,mindscape — the #211 reviewer note ("when G ships
+  //     its popover poll, C1's POLLED list should gain processing in the same change"),
+  //     discharged HERE, in the same change as the poll. `models`/`embedder` are in-memory
+  //     health reads (zero DB — this gate proves it); `evidence` must NEVER join this list
+  //     (opt-in, not pollable — E1). G-COST below pins the client half: the popover's poll
+  //     URLs must buy exactly its declared set, so this union cannot silently under-cover.
+  const POLLED = ['data', 'ai', 'channel', 'mindscape', 'onboarding', 'tags', 'processing', 'models'];
+
+  await r.get({ slices: POLLED });
+  assert.ok(touches.length > 0, 'fixture sanity: the first call must really hit the db');
+
+  // The rail polls every 4s for the life of every session. Tick 2 must be free.
+  // ⚠️ DENY-BY-DEFAULT WITH STATED REASONS, not "zero touches". Demanding zero would force a memo
+  // in front of the SWR cache itself, which is absurd; demanding "no scans" needs a judgement the
+  // gate cannot make. So: name what a repeat poll may cost, and WHY. Anything new fails until
+  // someone either memoizes it or writes its reason down here — which is the review this gate is
+  // standing in for. (E5 uses the same allowlist shape for columns.)
+  // ⚠️ ALLOWLISTED BY NAME **AND COUNT**. Name-only was still evadable: a reviewer reproduced the
+  // exact HIGH-5 cost by doing the same full-table SELECTs through `rawQuery` — which is on this
+  // list as "a PK read" — and the gate stayed green. The list's REASON became false while its
+  // NAME stayed true. A budget makes the reason enforceable: one PK read is one call; three is
+  // somebody scanning.
+  const ALLOWED_ON_REPEAT = {
+    // max:2 — bought by `data` AND by `processing.waiting`. Both calls land on ONE SWR memo
+    // in db/messages.js (8s/60s TTL, single-flight), so the second CALL is zero scans in
+    // production — P-COST proves that with a faithful memo model; this double counts calls.
+    embedBacklogCached: { max: 2, why: 'IS the SWR cache (§3.2b) — memoizing a cache is absurd; data + processing share the one memo' },
+    'categoriesBacklogCached': { max: 2, why: 'the same SWR-cache class — bought by tags AND processing.waiting, one memo beneath' },
+    'nlpBacklogCached': { max: 1, why: 'the same SWR-cache class — processing.waiting only' },
+    'users.getSettings': { max: 1, why: 'processing.pausedAt: SELECT settings FROM users WHERE id=? — ONE PK read (no in-memory pausedAt exists, by design)' },
+    'providers.list': { max: 1, why: 'small, indexed table; a query, not a scan' },
+    rawQuery: { max: 1, why: 'onboarding: SELECT welcome_shown_at FROM users WHERE id = ? — ONE PK read' },
+  };
+
+  touches = [];
+  await r.get({ slices: POLLED });
+  const counts = touches.reduce((a, x) => ({ ...a, [x]: (a[x] || 0) + 1 }), {});
+  const unexpected = Object.entries(counts)
+    .filter(([k, n]) => !(k in ALLOWED_ON_REPEAT) || n > ALLOWED_ON_REPEAT[k].max)
+    .map(([k, n]) => `${k}×${n}`);
+  assert.deepEqual(unexpected, [],
+    `a repeat poll paid for ${JSON.stringify(unexpected)} — not on the allowlist. At 4s that is `
+    + '~900/hour per user, forever, for surfaces that may never appear. `secrets.has()` DECRYPTS '
+    + 'THE WHOLE TABLE in JS (§3.2c) and getNoiseStats FULL-SCANS clustering_points (no index '
+    + 'covers `landscape_x IS NOT NULL`). Memoize in readiness.js so every consumer — including '
+    + "G's popover — inherits it, rather than narrowing one caller.");
+});
+
+
+// ── P) processing (§3.2 D13) — the pause reminder's slice, G's precondition ────
+// The slice §3.2's type declared and increment B never built (recorded four times). G's
+// §3.8 popover renders the D13 reminder from it, so every P-gate stands in for the review
+// that would otherwise only happen when G ships — and each is falsified by mutation.
+
+await t('P1. processing = {paused,pausedAt,waiting} from seeded state — EXACT values', async () => {
+  // The three counters return DISTINCT pendings and NO pair sums to the total (12+30=42,
+  // 12+25=37, 30+25=55, all three = 67, no single = 67), so "waiting sums all THREE stages"
+  // is a real assertion a one- or two-counter implementation cannot satisfy by coincidence.
+  const db = mkDb();
+  db.messages.embedBacklogCached = async () => ({ total: 100, embedded: 88, pending: 12, unprocessable: 0 });
+  db.messages.categoriesBacklogCached = async () => ({ total: 100, tagged: 70, pending: 30 });
+  db.messages.nlpBacklogCached = async () => ({ done: 40, total: 100, pending: 25 });
+  db.users = { async getSettings() { return { enrichProcessingPaused: true, enrichProcessingPausedAt: '2026-07-17T08:30:00.000Z' }; } };
+  const r = createReadiness({ db, userId: U, isProcessingPaused: () => true });
+  const { processing } = await r.get({ slices: ['processing'] });
+  assert.deepEqual(processing, { paused: true, pausedAt: '2026-07-17T08:30:00.000Z', waiting: 67 },
+    'paused (live flag) + pausedAt (settings stamp) + waiting (embed 12 + categories 30 + nlp 25)');
+});
+
+await t("P2. a THROWING backlog counter ⇒ unknown:true, NEVER a fabricated waiting:0 (§3.2a)", async () => {
+  const db = mkDb();
+  db.messages.nlpBacklogCached = async () => { throw new Error('SQLCipher scan failed'); };
+  db.users = { async getSettings() { return { enrichProcessingPausedAt: '2026-07-17T08:30:00.000Z' }; } };
+  const r = createReadiness({ db, userId: U, isProcessingPaused: () => true });
+  const { processing } = await r.get({ slices: ['processing'] });
+  assert.equal(processing.unknown, true,
+    'a count that threw must SAY unknown — a bare 0 would tell a paused user their vault is fully processed');
+  // paused/pausedAt are computed BEFORE the counters and stay truthful through a count failure:
+  assert.equal(processing.paused, true, 'a count failure does not erase the live pause flag');
+  assert.equal(processing.pausedAt, '2026-07-17T08:30:00.000Z', 'nor the durable pausedAt');
+});
+
+await t('P3. pausedAt is HONEST — absent ⇒ null, a stamp ⇒ that stamp, a failed read ⇒ null (never fabricated)', async () => {
+  const proc = async (settingsFn, paused) =>
+    (await createReadiness({ db: Object.assign(mkDb(), { users: { getSettings: settingsFn } }), userId: U, isProcessingPaused: () => paused }).get({ slices: ['processing'] })).processing;
+  // (a) resumed vault: persistPause writes pausedAt:null on resume
+  assert.equal((await proc(async () => ({ enrichProcessingPaused: false, enrichProcessingPausedAt: null }), false)).pausedAt, null, 'pausedAt:null in settings ⇒ null');
+  // (b) empty settings blob (fresh vault) ⇒ null, never invented
+  assert.equal((await proc(async () => ({}), false)).pausedAt, null, 'no key at all ⇒ null');
+  // (c) a real stamp ⇒ EXACTLY that stamp (the reminder shows the true paused-since time)
+  const stamp = '2026-07-17T09:15:42.123Z';
+  assert.equal((await proc(async () => ({ enrichProcessingPausedAt: stamp }), true)).pausedAt, stamp, 'a stamp ⇒ that stamp');
+  // (d) a THROWING settings read ⇒ null (never "paused since now"), and paused stays truthful
+  const d = await proc(async () => { throw new Error('settings read failed'); }, true);
+  assert.equal(d.pausedAt, null, 'a failed settings read degrades to null, never a fabricated time');
+  assert.equal(d.paused, true, 'paused comes from the live flag, so it survives a settings failure');
+});
+
+await t('P4. paused is the LIVE flag, NOT settings.enrichProcessingPaused', async () => {
+  // settings says paused:false in BOTH cases; paused must follow the INJECTED flag, proving the
+  // source is isEnrichProcessingPaused (drainer, live) and not the persisted settings mirror.
+  const db = mkDb();
+  db.users = { async getSettings() { return { enrichProcessingPaused: false, enrichProcessingPausedAt: null }; } };
+  const on = (await createReadiness({ db, userId: U, isProcessingPaused: () => true }).get({ slices: ['processing'] })).processing;
+  assert.equal(on.paused, true, 'live flag true ⇒ paused true, even though settings.enrichProcessingPaused is false');
+  const off = (await createReadiness({ db, userId: U, isProcessingPaused: () => false }).get({ slices: ['processing'] })).processing;
+  assert.equal(off.paused, false, 'live flag false ⇒ paused false');
+});
+
+await t('P5. the DEFAULT wiring reads the drainer module flag — no injection needed (§3.2 "no handle")', async () => {
+  // Proves the production path: server-rest passes NO isProcessingPaused, so the default import
+  // must track the live drainer flag. Flip the real module flag and watch readiness follow.
+  const db = Object.assign(mkDb(), { users: { async getSettings() { return {}; } } });
+  resumeEnrichProcessing();                         // ensure a clean baseline
+  const r = createReadiness({ db, userId: U });     // ← no isProcessingPaused dep
+  assert.equal((await r.get({ slices: ['processing'] })).processing.paused, false, 'default: clear flag ⇒ not paused');
+  pauseEnrichProcessing();
+  assert.equal((await r.get({ slices: ['processing'] })).processing.paused, true, 'default: flipping the drainer flag flips readiness — the import IS the wire');
+  assert.equal(isEnrichProcessingPaused(), true, 'sanity: the module flag really is set');
+  resumeEnrichProcessing();                         // ⚠️ restore global drainer state for any later reader
+});
+
+await t('P-COST. ⭐ a POLLED processing slice is O(1) on repeat — caches pay 0, settings is ONE PK read (C1)', async () => {
+  // Model the SWR caches FAITHFULLY: db/messages.js memoizes them (8s/60s TTL, single-flight), so
+  // a second poll within the window is ZERO scans even though the function is called again. The
+  // doubles `hit()` only on a real recompute — counting CALLS instead of SCANS would be the C1 sin.
+  let touches = [];
+  const hit = (w) => touches.push(w);
+  const cache = (label, val) => { let memo = null; return async () => { if (!memo) { hit(label); memo = val; } return memo; }; };
+  const db = {
+    messages: {
+      embedBacklogCached: cache('scan:embed', { pending: 3 }),
+      categoriesBacklogCached: cache('scan:categories', { pending: 5 }),
+      nlpBacklogCached: cache('scan:nlp', { pending: 7 }),
+    },
+    users: { async getSettings() { hit('users.getSettings'); return { enrichProcessingPausedAt: null }; } },
+  };
+  const r = createReadiness({ db, userId: U, isProcessingPaused: () => false });
+  await r.get({ slices: ['processing'] });
+  assert.ok(touches.length > 0, 'fixture sanity: the first poll must really hit the db');
+
+  // DENY-BY-DEFAULT, named AND counted (C1's earned shape). The three cache scans are ABSENT from
+  // a warm repeat (max:0 implied by omission); getSettings is the one PK read processing legitimately
+  // pays every tick — the same cost class as `onboarding`'s already-allowlisted users PK read.
+  const ALLOWED_ON_REPEAT = {
+    'users.getSettings': { max: 1, why: 'processing.pausedAt: SELECT settings FROM users WHERE id=? — ONE PK read; there is deliberately no in-memory pausedAt (drainer.js), so settings is the only source' },
+  };
+  touches = [];
+  await r.get({ slices: ['processing'] });          // tick 2 — caches warm
+  const counts = touches.reduce((a, x) => ({ ...a, [x]: (a[x] || 0) + 1 }), {});
+  const unexpected = Object.entries(counts)
+    .filter(([k, n]) => !(k in ALLOWED_ON_REPEAT) || n > ALLOWED_ON_REPEAT[k].max)
+    .map(([k, n]) => `${k}×${n}`);
+  assert.deepEqual(unexpected, [],
+    `a repeat processing poll paid for ${JSON.stringify(unexpected)} — not on the allowlist. G's popover `
+    + 'polls this; a re-scan here is a multi-second full-table SQLCipher decrypt every tick, forever.');
+  // Prove the caches were genuinely WARM (0 re-scans) — not that the gate simply forgot to look:
+  assert.equal(counts['scan:embed'], undefined, 'embed backlog re-scanned on a warm poll — waiting must ride the CACHE');
+  assert.equal(counts['scan:nlp'], undefined, 'nlp backlog re-scanned on a warm poll — waiting must ride the CACHE');
+});
+
+await t('P-AICH. a THROWING ai/channel read ⇒ unknown:true, not a bare connected:false (#208 reviewer)', async () => {
+  // ai: providers.list throws ⇒ unknown, still connected:false (fail-closed on the gate)
+  const dbAi = Object.assign(mkDb(), { providers: { async list() { throw new Error('providers read failed'); } } });
+  const ai = (await createReadiness({ db: dbAi, userId: U }).get({ slices: ['ai'] })).ai;
+  assert.equal(ai.connected, false, 'fail-closed: a throw is not "connected"');
+  assert.equal(ai.unknown, true, 'a throw is NOT "no AI connected" — a blip must not light the connect-AI rail over a configured vault');
+  // channel: a throwing secrets decrypt ⇒ unknown, still connected:false
+  const dbCh = Object.assign(mkDb(), { secrets: { async get() { return '1'; }, async has() { throw new Error('decrypt loop failed'); } } });
+  const ch = (await createReadiness({ db: dbCh, userId: U }).get({ slices: ['channel'] })).channel;
+  assert.equal(ch.connected, false, 'fail-closed');
+  assert.equal(ch.unknown, true, 'a throwing secrets decrypt (§3.2c) is not "no channel configured"');
+  // CONTROL — the HAPPY paths must NOT carry unknown (the fix adds it ONLY on error, never blanket)
+  const okAi = (await createReadiness({ db: mkDb(), userId: U }).get({ slices: ['ai'] })).ai;
+  assert.equal(okAi.unknown, undefined, 'a healthy ai read carries no unknown marker');
+  const okCh = (await createReadiness({ db: mkDb(), userId: U }).get({ slices: ['channel'] })).channel;
+  assert.equal(okCh.unknown, undefined, 'a healthy channel read carries no unknown marker');
+});
+
+
+// ── G) §3.8 — the Header status popover (increment G; absorbs R4 + R5) ─────────
+// Every G-gate runs the REAL StatusPopover.svelte through the mount harness
+// (portal-app/test/mount-status-popover.mjs) — rendering proven by MOUNTING, never by
+// grepping ({#if false && …} keeps every string; only a mount sees the silence — #194).
+// G2 is the CONTROL RUN for the whole family: the same needles asserted PRESENT in G1
+// are asserted ABSENT there while the surrounding rows still render — so a check that
+// reds every real render (the -webkit-text-fill-color class) and a check that greens
+// everything are both caught.
+
+function mountPopover(env) {
+  const out = execFileSync('node', ['--conditions', 'browser', 'test/mount-status-popover.mjs'], {
+    cwd: 'portal-app', encoding: 'utf8', timeout: 120000,
+    env: { ...process.env, ...env },
+  }).trim().split('\n').pop();
+  const r = JSON.parse(out);
+  assert.ok(r.ok, `mount failed: ${r.error || 'unknown'}`);
+  return r;
+}
+
+await t('G1. the D13 Processing row: paused ⇒ "Paused by you — N waiting" + Resume, MOUNTED and VISIBLE', async () => {
+  const r = mountPopover({ PAUSED: '1', KEEPAWAKE: '1', ONBATT: '1', CLICK_RESUME: '1' });
+  assert.ok(r.pausedRow.present && r.pausedRow.visible, 'the paused reminder must be on screen (present+visible)');
+  assert.ok(r.waitingCount.present && r.waitingCount.visible, 'with the COUNT — "12,431 messages waiting" (D13: "also showing how much")');
+  assert.ok(r.statusButtons.includes('Resume'), `the row must OFFER the restart — buttons seen: ${JSON.stringify(r.statusButtons)}`);
+  // The whole §3.8 row set, each mounted and visible (n≥2 against a vacuous fixture):
+  for (const [k, why] of [
+    ['vaultRow', 'Vault: Encrypted · open'],
+    ['dataRow', 'Data: counts + sources + years'],
+    ['labelingRow', 'Labeling: Sorting · tagged/total · model'],
+    ['aiRow', 'Intelligence: provider · connected'],
+    ['mindscapeRow', 'Mindscape: Generated · points'],
+    ['unprocessableRow', 'the honest gap: N couldn’t be processed'],
+  ]) {
+    assert.ok(r[k].present && r[k].visible, `${why} must render (got ${JSON.stringify(r[k])})`);
+  }
+  // R5 — the on-AC/keep-awake truth (detectOnAC through GET /system/keep-awake):
+  assert.ok(r.keepAwakeLine.present && r.keepAwakeLine.visible, '"Keeping your Mac awake" renders while the assertion is active');
+  assert.ok(r.onBattLine.present && r.onBattLine.visible, '"On battery" renders when onAC === false');
+  assert.ok(r.wontUpdateLine.present && r.wontUpdateLine.visible, 'Mindscape: "Won’t update while processing is paused" (§3.8)');
+  // The control is a CONTROL: clicking Resume must actually fire the route and clear the row.
+  assert.equal(r.resumePosts, 1, 'Resume must POST /portal/enrichment/processing/resume exactly once');
+  assert.equal(r.pausedRowAfterResume.present, false, 'after a successful resume + refresh, the reminder clears');
+});
+
+await t('G2. CONTROL — an unpaused, AC-unknown vault shows NONE of the paused/battery strings (and still renders)', async () => {
+  const r = mountPopover({});
+  assert.equal(r.pausedRow.present, false, 'no "Paused by you" on an unpaused vault');
+  assert.ok(!r.statusButtons.includes('Resume'), 'no Resume control in the status rows when nothing is paused');
+  assert.equal(r.keepAwakeLine.present, false, 'keep-awake inactive ⇒ no awake line');
+  assert.equal(r.onBattLine.present, false, 'onAC:null is an ABSENCE (unknown), never rendered as a battery state');
+  assert.equal(r.wontUpdateLine.present, false, 'no paused-consequence line when not paused');
+  // …while the surrounding rows DO render — proves the control mounts real content, so the
+  // absences above are earned, not a blank screen agreeing with everything:
+  assert.ok(r.dataRow.visible && r.aiRow.visible && r.mindscapeRow.visible, 'the healthy rows still render in the control');
+});
+
+await t('G3. §3.2a — a degraded poll HOLDS the last known answers; no fabricated zeros, ever', async () => {
+  // First read healthy, every later read unknown-degraded (waiting:0+unknown, ai unknown,
+  // mindscape unknown, canGenerate 'unknown'). ≥3 polls tick. The §3.2a lie under test:
+  // rendering the degraded 0 ("0 messages waiting" / "No data yet" / losing the map).
+  const r = mountPopover({ PAUSED: '1', UNKNOWN_AFTER_FIRST: '1' });
+  assert.ok(r.readinessPollUrls.length >= 3, `sanity: the poll must have ticked (saw ${r.readinessPollUrls.length} readiness reads) — otherwise the degraded responses never arrived and this gate is vacuous`);
+  assert.ok(r.waitingCountAfter.present && r.waitingCountAfter.visible, 'the waiting count HOLDS at 12,431 through unknown polls — a failed count is not an empty queue');
+  assert.equal(r.zeroWaiting, false, '"0 messages waiting" must never render off a degraded count');
+  assert.ok(r.aiRowAfter.present && r.aiRowAfter.visible, 'a providers-read blip must not regress "Claude · connected" to "No AI connected"');
+  assert.ok(r.mindscapeRowAfter.present && r.mindscapeRowAfter.visible, 'a mindscape-count blip must not un-generate the map on screen');
+  assert.ok(r.dataRowAfter.present && r.dataRowAfter.visible, 'a data-count blip must not tell a full vault it has no messages');
+});
+
+await t('G3b. §3.2a — a count that was NEVER known renders NO number: "Paused by you" with no fabricated 0', async () => {
+  // EVERY read is degraded (waiting:0 + unknown:true) — there is no last-known count to
+  // hold. The row must still say "Paused by you" (paused is a live fact, never unknown)
+  // but the number is a claim we did not earn: neither "0 messages waiting" nor any count.
+  const r = mountPopover({ PAUSED: '1', UNKNOWN_ALWAYS: '1' });
+  assert.ok(r.pausedRow.present && r.pausedRow.visible, 'the paused reminder still renders — the pause is real even when the count is not');
+  assert.equal(r.zeroWaiting, false, 'a 0 we never counted must not render');
+  assert.equal(r.waitingCount.present, false, 'no waiting count at all — absence, not fabrication');
+  assert.equal(r.waitingCountAfter.present, false, 'and none appears after more degraded ticks');
+});
+
+await t('G4. R4 (recorded decision) — the FEED row owns pull progress: bytes as GB there, NO second percent in the status rows', async () => {
+  const r = mountPopover({ MODELPULL: '1' });
+  assert.ok(r.pullBytes.present && r.pullBytes.visible, 'the model-pull feed row renders "1.2 GB / 3.4 GB" (fmtBytes — not raw byte counts)');
+  assert.equal(r.pullRawBytes, false, 'ten-digit raw byte counts must not reach the screen');
+  assert.ok(r.downloadingState.present && r.downloadingState.visible, 'the Labeling status row STATES the downloading state (the drainer’s constant)');
+  assert.equal(r.statusHasPct, false, 'and carries NO percent — one signal, one owner (the feed row); duplicating it is the drift class §3.2 ends');
+});
+
+await t('G-COST. the popover poll buys EXACTLY its declared slices; evidence + keep-awake are once-per-open (never per tick)', async () => {
+  // The client half of C1's contract: C1 prices the slice set server-side; this pins the
+  // popover to that set. A slice added to the poll without joining C1's POLLED list fails
+  // HERE; `evidence` on the poll (E1's forbidden case) fails here too.
+  const r = mountPopover({ PAUSED: '1', UNKNOWN_AFTER_FIRST: '1' });
+  const WANT = ['data', 'tags', 'processing', 'models', 'ai', 'mindscape'].sort().join(',');
+  assert.ok(r.readinessPollUrls.length >= 3, 'sanity: the poll ticked');
+  for (const u of r.readinessPollUrls) {
+    const got = (u.split('slices=')[1] || '').split(',').map((s) => s.trim()).filter(Boolean).sort().join(',');
+    assert.equal(got, WANT, `every poll tick buys exactly the C1-priced set — got "${got}" from ${u}`);
+  }
+  assert.equal(r.evidenceFetches, 1, 'evidence: ONCE per open (three unindexed aggregates — a user gesture, never a tick)');
+  assert.equal(r.keepAwakeFetches, 1, 'keep-awake: ONCE per open (it runs the pmset subprocess — R5’s cost note)');
+});
+
+await t('G-AC. R5 — detectOnAC is EXPORTED from portal-system.js (reuse, not copy) and answers boolean-or-null', async () => {
+  const mod = await import('../src/portal-system.js');
+  assert.equal(typeof mod.detectOnAC, 'function', 'detectOnAC must be a named export — the probe was module-private, which is what breeds a second pmset parser');
+  const v = await mod.detectOnAC();
+  assert.ok(v === null || typeof v === 'boolean', `detectOnAC resolves boolean (macOS) or null (unknown/non-macOS) — got ${JSON.stringify(v)}; it must never throw and never fabricate a power state`);
 });
 
 

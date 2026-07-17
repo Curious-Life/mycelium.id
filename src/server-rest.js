@@ -20,6 +20,7 @@ import { portalUploadsRouter } from './portal-uploads.js';
 import { portalAttachmentsRouter } from './portal-attachments.js';
 import { portalProvidersRouter } from './portal-providers.js';
 import { portalHardwareRouter } from './portal-hardware.js';
+import { portalIntelligenceRouter } from './portal-intelligence.js';
 import { createOllamaDaemon } from './hardware/ollama-daemon.js';
 import { portalImportRouter } from './portal-import.js';
 import { portalSettingsRouter } from './portal-settings.js';
@@ -71,7 +72,7 @@ import { releaseManagedHandle } from './remote/release-handle.js';
 import { startClaimHeartbeat } from './claims/heartbeat.js';
 import { startClaimDiscoveryJob, isClusteringRunning, startClusteringJob, shouldAutoGenerate } from './jobs.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
-import { startKokoroSupervisor } from './tts/kokoro-supervisor.js';
+import { startQwenTtsSupervisor } from './tts/qwen3-tts-supervisor.js';
 import { startChannelSupervisor } from './channels/supervisor.js';
 import { mcpLoopbackRouter } from './mcp-loopback.js';
 import { readRemoteConfig, passkeyEnrolled } from './remote/config.js';
@@ -346,6 +347,11 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // db+userId: deleting a model from disk also CLEARS its approval (settings.taskModels), so
   // the decline survives a restart and "re-approve it in Settings" is a real remedy (§3.10d).
   v.use('/api/v1/portal', portalHardwareRouter({ daemon: hwOllamaDaemon, db, userId }));
+  // The first-run bundle orchestrator (Intelligence redesign Part I §4.3): the proposed
+  // set with sizes + free-disk headroom, and the one-tap apply that fans out the FUNCTION
+  // writes through the one task-model write path. Downloads stay on the client via the
+  // existing /hardware/pull + /transcription/download routes (no parallel download path).
+  v.use('/api/v1/portal', portalIntelligenceRouter({ db, userId, dbPath: effectiveDbPath }));
   v.use('/api/v1/portal', portalImportRouter({ db, userId, enqueueEnrichment }));
   // Settings → Data: bulk delete-by-source / by-type (search-sidecar eviction
   // needs searchHelpers.noteDelete). Backup export stays on the account router.
@@ -614,12 +620,14 @@ export async function startRestServer({
         // only over loopback (vault-client + /internal/mcp). Reaped via the Rust
         // shell's process-group kill on app exit regardless.
         channelSup = startChannelSupervisor({ home: process.cwd(), db, userId: bootUserId, restPort: port, channelTurnToken: CHANNEL_TURN_TOKEN });
-        // Local TTS (Kokoro :8094): start the on-box voice service once the user
-        // has downloaded the model AND opted in (KOKORO_TTS_ENABLED in secrets).
-        // Keyless, loopback-only; stays idle (no python) until both are true.
-        startKokoroSupervisor({
+        // Local voice (Qwen3-TTS via MLX, :8094): start the on-box voice service
+        // once the user has downloaded the model AND opted in (QWEN_TTS_ENABLED in
+        // secrets). Keyless, loopback-only; stays idle (no python) until both are
+        // true — and on Intel Macs the model never reaches 'ready' (MLX is
+        // Apple-Silicon-only), so it stays idle there by design (design §6).
+        startQwenTtsSupervisor({
           home: process.cwd(),
-          shouldRun: async () => { try { return (await db.secrets.get(bootUserId, 'KOKORO_TTS_ENABLED')) === '1'; } catch { return false; } },
+          shouldRun: async () => { try { return (await db.secrets.get(bootUserId, 'QWEN_TTS_ENABLED')) === '1'; } catch { return false; } },
         });
         // Re-attach the Whisper transcription service when the user opted in
         // earlier (users.settings.transcribeModel survives restarts; ensure is

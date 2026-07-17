@@ -59,8 +59,11 @@
 </script>
 
 {#if dragging}
-	<!-- Visual only — pointer-events:none so the drop reaches the window handler. -->
-	<div class="drop-overlay" aria-hidden="true">
+	<!-- pointer-events:none so the drop reaches the window handler. NOT aria-hidden: this overlay
+	     carries the drop path's ONLY cost disclosure (§3.9/R2), so hiding it from assistive tech
+	     made the one surface that says "this costs hours" invisible to exactly the users who can't
+	     glance at it (independent review LOW, 2026-07-17). role="status" announces it politely. -->
+	<div class="drop-overlay" role="status">
 		<div class="drop-card">
 			<svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 				<path d="M12 16V4" />
@@ -69,6 +72,20 @@
 			</svg>
 			<p class="drop-title">Drop to add to your vault</p>
 			<p class="drop-sub">Images, documents, or a Claude / ChatGPT export (.zip)</p>
+			<!--
+				§3.9/R2 — THIS PATH COMMITS TOO, AND IT USED TO SAY NOTHING. This zone is mounted once in
+				the app layout and takes a file dropped ANYWHERE over the window, straight into the same
+				pipeline ImportView drives (upload-handlers → /upload). So a 76k-message export dropped on
+				the Library page started hours of on-device work having never rendered ImportView's
+				expectation copy — R2's promise ("the cost is stated before the user commits") was false on
+				this path, and the gate could not see it because it only mounts ImportView (independent
+				review HIGH-3, 2026-07-17).
+				This overlay renders WHILE DRAGGING — before the drop — so it is this path's last moment to
+				decline. Short, because a drag is not the moment for a paragraph; the full statement is on
+				the Import screen. No rate is quoted here for the same reason it is not quoted there: the
+				measured rate varies 18x with message length.
+			-->
+			<p class="drop-sub">A large export is hours of work on your Mac — you can pause it any time.</p>
 		</div>
 	</div>
 {/if}

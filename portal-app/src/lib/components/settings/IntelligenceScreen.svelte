@@ -22,10 +22,34 @@
 	//   'cloud-eu-zdr' → a cloud preset id      (recommend = e.g. 'regolo')  — §4g-limited
 	//   'bundled'      → nothing to choose      (recommend = the model that ships in the app)
 	//   'whisper'      → its own catalog+route  (recommend = 'by-ram' sentinel)
-	//   'tts'          → its own catalog        (recommend = null — no eval has picked a winner)
+	//   'tts'          → its own catalog        (recommend = the Qwen3-TTS variant that WON the live listening test, 2026-07-15)
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
+
+	// "Try again" for an unreachable local-model state: clears the pull backoff and kicks a drain
+	// cycle (POST /portal/enrichment/trigger), then RE-FETCHES health so the row tells the truth.
+	// ⚠️ THE RE-FETCH IS THE FEATURE, not polish. This screen loads health exactly ONCE (onMount) —
+	// a previous version of this comment claimed "health re-polls on its own cadence", which was
+	// FALSE for this screen: the retry would WORK in the background while the row kept saying
+	// "not reachable" with a Try again button, and the user's only honest reading was "the retry
+	// is broken" (independent review MED, 2026-07-17). Two refreshes (~2s and ~6s) bracket the
+	// likely recovery: the trigger's cycle needs a moment to list/pull before health flips.
+	// NB a MULTI-GB pull outlives both refreshes: the row then shows "Downloading… N%" frozen at
+	// its ~6s snapshot until remount — not a hang, just this screen's load-once nature; the live
+	// surface for a long pull is the header activity feed (polls @2.5s).
+	let retryBusy = $state(false);
+	async function retryHealth() {
+		if (retryBusy) return;
+		retryBusy = true;
+		try { await api('/portal/enrichment/trigger', { method: 'POST' }); } catch { /* the health row shows the state */ }
+		setTimeout(async () => { await load(); retryBusy = false; }, 2000);
+		setTimeout(() => { load(); }, 6000);
+	}
 	import OnboxTaskSelect from './OnboxTaskSelect.svelte';
+	// The whisper download rail — moved here from AISettings (Part I §9): the rail renders
+	// under the Transcription FUNCTION row, so the assignment and its machinery share a home.
+	// Its own catalog + route, unchanged (§3.10d "no third catalog").
+	import TranscriptionSetup from './TranscriptionSetup.svelte';
 	// ⚠️ SHARED, not a local snapshot. The §4g toggle lives in AISettings — mounted as a SIBLING
 	// IN THIS SAME PANE — and this screen PRINTS the guarantee that depends on it. Reading it
 	// once at onMount meant flipping the toggle twenty lines below left this copy claiming
@@ -40,7 +64,7 @@
 	};
 	// `jurisdiction` is the SERVER's classification (publicRow). Never re-derive it here.
 	type Provider = { id: number; label: string; provider: string; is_active: number; base_url?: string; jurisdiction?: string; auth_type?: string };
-	type Health = { status: string; message: string | null; model: string | null; progress: { pct: number } | null };
+	type Health = { status: string; message: string | null; detail?: string | null; model: string | null; progress: { pct: number } | null };
 
 	let { compact = false }: { compact?: boolean } = $props();
 
@@ -233,6 +257,21 @@
 							Downloading… {health.progress.pct}%
 						{:else}{health.message || health.status}{/if}
 					</span>
+					<!-- The storm fix's user half (2026-07-17): a failing model download now backs off
+					     instead of retrying every 15s — so the user needs a way to say "try NOW".
+					     The trigger route clears the backoff and kicks a cycle. Only on the two
+					     genuine-fault states; choices (no_model/paused) get no retry button. -->
+					<!-- ONLY 'unavailable' — the drainer's vocabulary, where the trigger route can act
+					     (clear the pull backoff + kick a cycle). The EMBEDDER's 'error'/'down' come from
+					     a different subsystem with its own supervisor restart loop; a Try again there
+					     POSTs a route that cannot help it — a decorative button is worse than none
+					     (review LOW, 2026-07-17). If 'down' ever needs an affordance, it needs its own
+					     restart route, not this one. -->
+					{#if health.status === 'unavailable'}
+						<button class="retry-btn" onclick={retryHealth} disabled={retryBusy}
+							title={health.detail ? `Last error: ${health.detail}` : 'Retry now'}
+						>{retryBusy ? 'Retrying…' : 'Try again'}</button>
+					{/if}
 				{/if}
 			</header>
 
@@ -263,11 +302,15 @@
 					<p class="note">One choice covers labels and entities.</p>
 				{/if}
 
-			{:else if f.kind === 'whisper' || f.kind === 'tts'}
-				<!-- These have their OWN rails (whisper's download route + catalog; the TTS
-				     catalog). §3.10d: no third catalog — compose what exists rather than
-				     re-implement it here. -->
-				<p class="note">Set up under {f.kind === 'whisper' ? 'Transcription' : 'Voice'} below.</p>
+			{:else if f.kind === 'whisper'}
+				<!-- The whisper rail lives HERE now (Part I §9) — under the function row that
+				     assigns it. Its own catalog + route; choosing a model IS the approval. -->
+				<TranscriptionSetup />
+
+			{:else if f.kind === 'tts'}
+				<!-- Voice keeps its OWN rail (the TTS catalog + variant picker, #209) as a
+				     Customize sibling. §3.10d: no third catalog — point, don't re-implement. -->
+				<p class="note">Set up under Voice below.</p>
 
 			{:else}
 				<div class="providers">
@@ -372,6 +415,9 @@
 	.health.no_model, .health.paused, .health.unknown { color: var(--color-text-muted, #888); }
 	.health.downloading, .health.loading { color: #60a5fa; }
 	.health.unavailable, .health.down, .health.error { color: #f87171; }
+	.retry-btn { margin-left: 0.5rem; font-size: 0.72rem; padding: 0.1rem 0.5rem; border: 1px solid var(--color-border); border-radius: 6px; background: transparent; color: var(--color-text-secondary); cursor: pointer; }
+	.retry-btn:hover { color: var(--color-text-primary); border-color: var(--color-text-tertiary); }
+	.retry-btn:disabled { opacity: 0.5; cursor: default; }
 	.providers { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
 	.pick { font: inherit; font-size: 0.85em; padding: 0.2rem 0.5rem; border-radius: 6px;
 		border: 1px solid var(--color-border, currentColor); background: transparent; cursor: pointer; }

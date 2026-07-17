@@ -85,10 +85,6 @@ rec('C2. on-stop SKIPPED tool_use (a2) + tool_result (u2)', fresh(await repost('
 const hwm = readFileSync(join(HOME, '.mycelium-bridge', 'cc-sync-sess.hwm'), 'utf8').trim();
 rec('C3. high-water-mark file advanced', Number(hwm) >= 7, `hwm=${hwm}`);
 
-// (D — backfill — removed in the public tree: scripts/backfill-claude-code.mjs is
-//  internal one-time tooling the release scrub strips; the live sync path it seeds
-//  is covered by A1-A5 + C1-C3 above.)
-
 server.close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 for (const d of [dir, HOME]) { try { rmSync(d, { recursive: true, force: true }); } catch {} }

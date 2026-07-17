@@ -17,11 +17,12 @@
 
 	type VoiceCatalog = { id: string; label: string; description: string };
 	type ModelCatalog = { id: string; label: string; description: string };
-	type KokoroModel = { phase: 'absent' | 'installing' | 'downloading' | 'checking' | 'needs-runtime' | 'ready' | 'error'; progress: number; error: string | null; sizeMB: number };
+	type QwenVariant = { id: string; label: string; description: string; sizeMB: number; recommended: boolean };
+	type QwenModel = { phase: 'absent' | 'installing' | 'downloading' | 'checking' | 'needs-runtime' | 'ready' | 'error'; progress: number; error: string | null; variant: string; sizeMB: number };
 	type TtsState = {
 		enabled: boolean;
 		provider: string | null;
-		kokoro: { enabled: boolean; voice: string; voices: VoiceCatalog[]; model: KokoroModel };
+		qwen: { enabled: boolean; samplePending: boolean; variant: string; variants: QwenVariant[]; model: QwenModel };
 		openai: { hasKey: boolean; voice: string; model: string; voices: VoiceCatalog[]; models: ModelCatalog[] };
 		elevenlabs: { hasKey: boolean; voiceId: string | null; model: string; models: ModelCatalog[] };
 	};
@@ -31,15 +32,15 @@
 	let saving = $state(false);
 	let error = $state<string | null>(null);
 
-	// Kokoro local-model download state (polled while provisioning).
-	let kModel = $state<KokoroModel | null>(null);
+	// Qwen3-TTS local-model download state (polled while provisioning).
+	let kModel = $state<QwenModel | null>(null);
 	let downloading = $state(false);
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 	// Form fields — separate from the canonical `tts` so unsaved edits don't
 	// pollute the canonical view. `Save` flushes form → server → tts.
-	let formProvider = $state<'kokoro' | 'openai' | 'elevenlabs' | ''>('');
-	let formKokoroVoice = $state('af_heart');
+	let formProvider = $state<'qwen' | 'openai' | 'elevenlabs' | ''>('');
+	let formQwenVariant = $state('');
 	let formOpenaiKey = $state('');
 	let formOpenaiVoice = $state('onyx');
 	let formOpenaiModel = $state('tts-1-hd');
@@ -59,9 +60,9 @@
 			const res = await api('/portal/settings/tts');
 			if (!res.ok) throw new Error(`Failed to load (${res.status})`);
 			tts = (await res.json()) as TtsState;
-			formProvider = (tts.provider as 'kokoro' | 'openai' | 'elevenlabs' | '' | null) ?? '';
-			formKokoroVoice = tts.kokoro?.voice ?? 'af_heart';
-			kModel = tts.kokoro?.model ?? null;
+			formProvider = (tts.provider as 'qwen' | 'openai' | 'elevenlabs' | '' | null) ?? '';
+			formQwenVariant = tts.qwen?.variant ?? tts.qwen?.model?.variant ?? '';
+			kModel = tts.qwen?.model ?? null;
 			if (kModel && (kModel.phase === 'downloading' || kModel.phase === 'installing' || kModel.phase === 'checking')) startPolling();
 			formOpenaiVoice = tts.openai.voice;
 			formOpenaiModel = tts.openai.model;
@@ -81,9 +82,9 @@
 		if (pollTimer) return;
 		pollTimer = setInterval(async () => {
 			try {
-				const res = await api('/portal/settings/tts/kokoro/model');
+				const res = await api('/portal/settings/tts/qwen/model');
 				if (res.ok) {
-					kModel = (await res.json()) as KokoroModel;
+					kModel = (await res.json()) as QwenModel;
 					if (kModel.phase === 'ready' || kModel.phase === 'error' || kModel.phase === 'absent' || kModel.phase === 'needs-runtime') {
 						if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 						downloading = false;
@@ -97,10 +98,14 @@
 		downloading = true;
 		error = null;
 		try {
-			const res = await api('/portal/settings/tts/kokoro/download', { method: 'POST' });
+			const res = await api('/portal/settings/tts/qwen/download', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ variant: formQwenVariant || undefined }),
+			});
 			const json = await res.json().catch(() => ({}));
 			if (!res.ok) throw new Error(json?.error || 'Download failed to start');
-			kModel = json as KokoroModel;
+			kModel = json as QwenModel;
 			startPolling();
 		} catch (e: any) {
 			error = e?.message || 'Download failed';
@@ -114,8 +119,13 @@
 		error = null;
 		try {
 			const body: Record<string, unknown> = { provider: formProvider };
-			if (formProvider === 'kokoro' || formKokoroVoice !== tts.kokoro?.voice) {
-				body.kokoro = { voice: formKokoroVoice, ...(formProvider === 'kokoro' ? { enabled: true } : {}) };
+			if (formProvider === 'qwen') {
+				body.qwen = { variant: formQwenVariant, enabled: true };
+			} else {
+				// Switching away must STOP the local MLX service — a stranded
+				// QWEN_TTS_ENABLED keeps :8094 alive for a provider the user left.
+				// (The server also clears it on any non-qwen provider; both sides agree.)
+				body.qwen = { enabled: false, ...(formQwenVariant && formQwenVariant !== tts.qwen?.variant ? { variant: formQwenVariant } : {}) };
 			}
 			const openai: Record<string, string> = {};
 			if (formOpenaiKey.trim().length > 0) openai.apiKey = formOpenaiKey.trim();
@@ -207,7 +217,7 @@
 			<div class="flex gap-4">
 				{#each [
 					{ id: '',           label: 'Off' },
-					{ id: 'kokoro',     label: 'Local (Kokoro)' },
+					{ id: 'qwen',       label: 'Local (Qwen3-TTS)' },
 					{ id: 'openai',     label: 'OpenAI' },
 					{ id: 'elevenlabs', label: 'ElevenLabs' },
 				] as opt (opt.id)}
@@ -219,22 +229,45 @@
 			</div>
 		</div>
 
-		<!-- Local (Kokoro) block -->
-		{#if formProvider === 'kokoro'}
-			{@const m = kModel ?? tts.kokoro.model}
+		<!-- Local (Qwen3-TTS) block -->
+		{#if formProvider === 'qwen'}
+			{@const m = kModel ?? tts.qwen.model}
 			<div class="mb-5 space-y-4">
 				<p class="text-[0.7rem] text-[var(--color-text-tertiary)]">
-					Runs fully on-device — no API key, no cloud, audio never leaves this machine. One-time ~340&nbsp;MB model download.
+					Runs fully on-device via the MLX runtime — no API key, no cloud, audio never leaves this machine.
+					<span class="text-[var(--color-accent)]">Won the live listening test (2026-07-15)</span> on the operator’s own hardware. Needs Apple&nbsp;Silicon.
 				</p>
+
+				<!-- Variant picker (design §2.1) — choosing is consent to that variant, but nothing downloads until you click Download (§3.10c). -->
+				<div>
+					<span class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-2">Model</span>
+					<div class="space-y-1.5">
+						{#each tts.qwen.variants as v (v.id)}
+							<label class="flex items-center gap-3 p-2 rounded-lg border border-[var(--color-border)] hover:border-[var(--color-accent)]/50 cursor-pointer transition-colors"
+								style:border-color={formQwenVariant === v.id ? 'var(--color-accent)' : ''}>
+								<input type="radio" bind:group={formQwenVariant} value={v.id} class="accent-[var(--color-accent)]" />
+								<div class="flex-1 min-w-0">
+									<div class="text-sm text-[var(--color-text-primary)]">
+										{v.label}
+										{#if v.recommended}<span class="ml-2 text-[0.6rem] text-[var(--color-accent)]">Recommended</span>{/if}
+										<span class="ml-2 text-[0.6rem] text-[var(--color-text-tertiary)]">~{(v.sizeMB / 1000).toFixed(1)} GB</span>
+									</div>
+									<div class="text-[0.62rem] text-[var(--color-text-tertiary)]">{v.description}</div>
+								</div>
+							</label>
+						{/each}
+					</div>
+				</div>
 
 				<!-- Model status / download -->
 				<div class="p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]">
 					{#if m.phase === 'ready'}
 						<div class="text-sm text-[var(--color-accent)]">Model ready ✓</div>
-						<div class="text-[0.62rem] text-[var(--color-text-tertiary)] mt-0.5">Kokoro-82M installed locally.</div>
+						<div class="text-[0.62rem] text-[var(--color-text-tertiary)] mt-0.5">{m.variant} installed locally (MLX).</div>
+						<div class="text-[0.62rem] text-[var(--color-text-tertiary)] mt-1">A voice is created per agent on the character page — this installs the model that speaks it.</div>
 					{:else if m.phase === 'installing' || m.phase === 'downloading' || m.phase === 'checking'}
 						<div class="text-sm text-[var(--color-text-primary)] mb-2">
-							{m.phase === 'installing' ? 'Installing kokoro-onnx…' : m.phase === 'checking' ? 'Verifying runtime…' : `Downloading model… ${m.progress}%`}
+							{m.phase === 'installing' ? 'Installing mlx-audio…' : m.phase === 'checking' ? 'Verifying runtime…' : `Downloading model… ${m.progress}%`}
 						</div>
 						<div class="h-1.5 w-full rounded-full bg-[var(--color-border)] overflow-hidden">
 							<div class="h-full bg-[var(--color-accent)] transition-all" style:width={`${Math.max(3, m.progress)}%`}></div>
@@ -246,7 +279,7 @@
 									{m.phase === 'needs-runtime' ? 'Model downloaded — runtime needs install' : 'Model not installed'}
 								</div>
 								<div class="text-[0.62rem] text-[var(--color-text-tertiary)]">
-									{m.phase === 'needs-runtime' ? 'The files are here but kokoro-onnx isn’t installed in the app’s Python. Click to finish.' : 'Downloads Kokoro-82M (~340 MB) to this machine.'}
+									{m.phase === 'needs-runtime' ? 'The files are here but mlx-audio isn’t installed in the app’s Python (Apple Silicon required). Click to finish.' : `Downloads ${m.variant} (~${(m.sizeMB / 1000).toFixed(1)} GB) to this machine.`}
 								</div>
 								{#if m.phase === 'error' && m.error}
 									<div class="text-[0.62rem] text-red-400 mt-1">{m.error}</div>
@@ -262,23 +295,6 @@
 							</button>
 						</div>
 					{/if}
-				</div>
-
-				<!-- Voice -->
-				<div>
-					<span class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-2">Voice</span>
-					<div class="space-y-1.5">
-						{#each tts.kokoro.voices as v (v.id)}
-							<label class="flex items-center gap-3 p-2 rounded-lg border border-[var(--color-border)] hover:border-[var(--color-accent)]/50 cursor-pointer transition-colors"
-								style:border-color={formKokoroVoice === v.id ? 'var(--color-accent)' : ''}>
-								<input type="radio" bind:group={formKokoroVoice} value={v.id} class="accent-[var(--color-accent)]" />
-								<div class="flex-1 min-w-0">
-									<div class="text-sm text-[var(--color-text-primary)]">{v.label}</div>
-									<div class="text-[0.62rem] text-[var(--color-text-tertiary)]">{v.description}</div>
-								</div>
-							</label>
-						{/each}
-					</div>
 				</div>
 			</div>
 		{/if}
@@ -426,6 +442,11 @@
 			<span class="text-[0.62rem] text-[var(--color-text-tertiary)]">
 				{#if tts.enabled}
 					TTS active — provider: <span class="text-[var(--color-accent)]">{tts.provider}</span>
+				{:else if tts.provider === 'qwen' && tts.qwen.enabled && tts.qwen.samplePending && (kModel ?? tts.qwen.model).phase === 'ready'}
+					<!-- The honest state (design §2.2/§5): the MODEL is installed, but a voice
+					     needs a frozen per-agent sample from the character page — not built yet.
+					     Saying "active" here would promise audio every render refuses (501). -->
+					Model ready — a voice is created per agent on the character page (coming soon). Channel messages stay text-only until then.
 				{:else}
 					TTS not active — pick a provider and add an API key
 				{/if}

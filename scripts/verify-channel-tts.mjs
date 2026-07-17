@@ -101,9 +101,9 @@ for (const k of Object.keys(process.env)) if (/^(OPENAI|ELEVENLABS|TTS|AGENT_ID)
   rec('T16. cleared provider turns TTS off (no stale env)', !('TTS_PROVIDER' in env) && !('OPENAI_TTS_VOICE' in env));
   rec('T17. applyChannelConfigToEnv still owns the API key (not cleared by reconcile)', env.OPENAI_API_KEY === 'sk-x');
 
-  // Owner switches to Kokoro (local) → provider + local voice live, no restart.
-  reconcileTtsEnv({ tts: { provider: 'kokoro', kokoroEnabled: '1', kokoroVoice: 'af_bella' } }, env);
-  rec('T18. switch to local provider propagates provider + voice', env.TTS_PROVIDER === 'kokoro' && env.KOKORO_TTS_VOICE === 'af_bella');
+  // Owner switches to Qwen3-TTS (local, MLX) → provider + local variant live, no restart.
+  reconcileTtsEnv({ tts: { provider: 'qwen', qwenEnabled: '1', qwenVariant: 'Qwen3-TTS-12Hz-1.7B-Base-8bit' } }, env);
+  rec('T18. switch to local provider propagates provider + variant', env.TTS_PROVIDER === 'qwen' && env.QWEN_TTS_VARIANT === 'Qwen3-TTS-12Hz-1.7B-Base-8bit');
 }
 
 const passed = ledger.filter(Boolean).length;

@@ -5,6 +5,7 @@
 	import SourceCatalog from '$lib/components/import/SourceCatalog.svelte';
 	import ScanForData from '$lib/components/import/ScanForData.svelte';
 	import { api } from '$lib/api';
+	import { signalImportCompleted } from '$lib/stores/onboarding-data.svelte';
 
 
 	type ImportSource = 'mycelium' | 'obsidian' | 'chatgpt' | 'claude' | 'linkedin';
@@ -144,7 +145,13 @@
 		try {
 			const res = await api(`/portal/connectors/${c.id}/sync`, { method: 'POST', body: '{}' });
 			const d = await res.json().catch(() => ({}));
-			if (d.ok) { connectorMsg = `${c.label}: ${d.created} new, ${d.updated || 0} updated, ${d.deduped} unchanged.`; await loadConnectors(); }
+			if (d.ok) {
+				connectorMsg = `${c.label}: ${d.created} new, ${d.updated || 0} updated, ${d.deduped} unchanged.`;
+				// New items landed in the vault → the invite panel must learn (it does not share
+				// this component's state, and keep-alive panes never remount it).
+				if ((d.created ?? 0) > 0) signalImportCompleted();
+				await loadConnectors();
+			}
 			else connectorMsg = `Sync failed: ${d.error || 'unknown error'}`;
 		} catch (e) {
 			connectorMsg = e instanceof Error ? e.message : 'Sync failed';
@@ -204,6 +211,9 @@
 			statusMsg = null;
 			if (res.importResult) {
 				result = res.importResult;
+				// Data landed on the vault → let the invite panel re-read readiness (it does not
+				// share this component's state). Signal, never poll (design PIVOT 2).
+				if ((res.importResult.imported ?? 0) > 0) signalImportCompleted();
 			} else if (res.type === 'import') {
 				result = { type: selectedSource || 'unknown', imported: 0, skipped: 0 };
 			} else {
@@ -245,6 +255,8 @@
 					refs_unresolved: s.refs?.unresolved || 0,
 				},
 			};
+			// Notes landed → same import-completed signal so the invite learns about it.
+			if ((s.documentsUpserted ?? 0) > 0) signalImportCompleted();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Import failed';
 		} finally {
@@ -403,8 +415,55 @@
 <div class="h-full overflow-y-auto">
 <div class="max-w-2xl mx-auto px-8 py-8">
 	<h1 class="text-xl font-medium text-[var(--color-text-emphasis)] mb-2">Import Data</h1>
-	<p class="text-sm text-[var(--color-text-secondary)] mb-8">
+	<p class="text-sm text-[var(--color-text-secondary)] mb-4">
 		Bring your data from other platforms into Mycelium
+	</p>
+
+	<!--
+		§3.9/R2 — SET THE EXPECTATION BEFORE THE IMPORT (fixes C7).
+		Above the source picker on purpose: this is the last moment the user can still decline, and the
+		only honest time to say what it costs.
+
+		⚠️ THE DESIGN'S "~40 MESSAGES A MINUTE" IS NOT HERE, BECAUSE IT IS FALSE — AND THE DESIGN SAYS SO
+		ITSELF. Its own evidence table (A37) reads "~40 msgs/min ⇒ 70k ≈ 29 hours; RATE NEVER MEASURED",
+		citing a June prose sweep, not a measurement. An independent review measured it on an M1 — the
+		FLOOR of the supported hardware, with the shipped single-threaded ONNX config — driving the real
+		/batch endpoint the way service.js does:
+		    ~20-word messages   466/min      realistic chat mix   313/min
+		    ~80-word messages   116/min      ~300-word messages    25/min
+		So the headline claim is off by ~8x (76k ≈ 4 hours, not ~32), and — the deeper point — THE RATE
+		VARIES 18x WITH MESSAGE LENGTH, so no single number is a fact at all. §3.9 exists to stop the app
+		stating numbers it cannot stand behind; shipping this one verbatim would have made this paragraph
+		the most precise lie in the product, with a gate defending it.
+		And R1 (#203) now MEASURES throughput live and renders an ETA from it — so a hardcoded number here
+		would be contradicted by the app's own progress row within minutes of the import starting.
+		⇒ State what is TRUE and what the user actually needs to decide: it is their CPU, it depends on
+		their data, it can be long, and they can stop it. The real number arrives when it is real — the
+		activity row shows the measured ETA once embedding has begun.
+
+		Every other clause is a fact the app keeps:
+		  • "on your device — no cloud" — verified: src/embed/client.js talks to the local loopback
+		    address ONLY (no cloud path, no fallback; L1/L2 route through on-box Ollama). NB the
+		    literal address is deliberately NOT written here: the portal-provider-locality P6 gate
+		    scans portal-app/src for loopback tokens DENY-BY-DEFAULT, any file, any form — comments
+		    included — and it red CI on the first version of this very comment. Right call: the
+		    scanner cannot tell documentation from a hardcoded URL, and hardcoded loopback in the
+		    frontend is the locality-lie bug class (#189).
+		  • "stay awake"                — keep-awake.js spawns `caffeinate` for the run. ⚠️ QUALIFIED:
+		    a user can turn that off (server-rest.js only starts it when keepAwake.enabled !== false),
+		    so the copy says "will stay awake unless you've turned that off" rather than promising it.
+		  • "pause it any time, and it picks up where it left off" — MADE TRUE BY R3 (#202); the design
+		    flags this clause as conditional on that increment. Verified by review: the pause re-reads
+		    per batch, and failed rows reset to nlp_processed = 0.
+		Do not restore "runs in the background" — that is the C7 wording that implies free.
+	-->
+	<p class="text-sm text-[var(--color-text-secondary)] mb-8 leading-relaxed border-l-2 border-[var(--color-border)] pl-3">
+		Mycelium reads every message on your device — no cloud. Reading a large history takes a couple of
+		hours to overnight, depending on how long your messages are; you'll see a real estimate as soon
+		as it starts. If you've also chosen a local model to tag and understand your messages, that runs
+		afterwards and takes considerably longer — days, for a large history. Your Mac will stay awake
+		and busy while it runs, unless you've turned that off. You can pause any of it at any time, and
+		it picks up where it left off.
 	</p>
 
 	{#if result}
@@ -441,8 +500,11 @@
 			{/if}
 		</div>
 	{:else if !selectedSource}
-		<!-- Already on this Mac — scan for local Obsidian / Claude Code data, one-click import. -->
-		<div class="mb-8"><ScanForData /></div>
+		<!-- Already on this Mac — scan for local Obsidian / Claude Code data, one-click import.
+		     onImported MUST be passed: its default is a NO-OP (ScanForData.svelte), so a bare mount
+		     here meant a one-click Obsidian import never told the invite panel — which, being in a
+		     keep-alive pane, never remounts to find out on its own. -->
+		<div class="mb-8"><ScanForData onImported={() => signalImportCompleted()} /></div>
 		<!-- What you can bring in — icons-first catalog: every source, honest status
 			 (Upload now / Connect / Coming soon), how to get the data, + docs link. -->
 		<div class="mb-8"><SourceCatalog /></div>

@@ -1,12 +1,17 @@
 import express from 'express';
 import { startClusteringJob, startMeasurementJob, startBackfillJob, getJob, cancelJob,
   startNarrationWalkJob, pauseNarration, resumeNarration, cancelNarration, getNarrationStatus,
-  startChronicleNarrationJob } from './jobs.js';
+  startChronicleNarrationJob, startClusterNamingJob } from './jobs.js';
 import { makeNarrationRunner } from './agent/narration-runner.js';
 import { getEmbedderHealth } from './embed/supervisor.js';
 import { createReadiness } from './readiness.js';
 import { getMindscapeCached, getMindscapePointsCached } from './mindscape-cache.js';
 import { isTrustedLoopback } from './http/loopback.js';
+// The naming surface's shared facts: the pipeline's OWN placeholder predicate + per-unit token
+// bound (one module, no duplicated predicate/constant — II.2a/II.3), and the narrator authority
+// createNarrator itself consumes (the served §4g fact, never re-derived).
+import { isPlaceholderName, perUnitTokenBound } from '../pipeline/lib/naming-facts.js';
+import { resolveNarratorAuthority } from '../pipeline/lib/narrate-infer.js';
 
 // SQLCipher-collapse backfill: the body may ONLY request these NAMED targets — never
 // an arbitrary {table,column}. Fail-closed: an unknown name → 400. The engine also
@@ -655,6 +660,81 @@ export function portalMindscapeRouter({ db, userId, dbPath, readiness: injected 
       res.json({ status: 'running', pid: r.pid, scope: territoryId == null ? 'all' : 'territory', territoryId });
     } catch {
       fail(res, 503, 'describe-more is unavailable (key source or pipeline not ready)');
+    }
+  });
+
+  // POST /mycelium/name-clusters → { status } — the ONE reachable trigger for cluster NAMING.
+  // Spawns startClusterNamingJob → pipeline/describe-clusters.js (the only writer of realm/
+  // territory name+essence) in gap-fill mode: name every unnamed/placeholder cluster, preserve
+  // real names. This is what makes "Illuminate" stop being a dead button — describe-clusters was
+  // reachable only inside Generate's step 3/16, which the /generate debounce skips whenever
+  // topology exists, so an unnamed realm on a built map could never be named
+  // (DISTILLATION-SURFACE-DESIGN §3/§3a). Single-flight via the job; progress + consent refusals
+  // stream to the unified activity feed (kind 'describe:name' → "Naming clusters"); poll /activity.
+  // NOT named /mycelium/distil (§3a's placeholder): `distil` is reserved for the full distillation
+  // SURFACE (§5.5, blocked by §7 Q1-Q4) whose "Distil more" button posts describe-more — a
+  // different act. A dedicated, unambiguous route avoids overloading that word (naming ≠ describing,
+  // §1a). Model routing is the pipeline's own §4g-safe createNarrator path — nothing wired here.
+  router.post('/mycelium/name-clusters', async (_req, res) => {
+    try {
+      const r = startClusterNamingJob({ dbPath, userId });
+      if (r?.status === 'disk_low') return res.json({ status: 'disk_low', detail: r.detail || null });
+      if (!r || r.pid == null) return res.json({ status: 'busy', note: 'A naming pass is already running.' });
+      res.json({ status: 'running', pid: r.pid });
+    } catch {
+      fail(res, 503, 'cluster naming is unavailable (key source or pipeline not ready)');
+    }
+  });
+
+  // GET /mycelium/naming-status → { areas, forecast, narrator } — the SERVED vault-fact for the
+  // Illuminate run surface (INTELLIGENCE-SCREEN-REDESIGN Part II, II.2a/II.4). ONE owner for
+  // "percent named": counts computed HERE with the PIPELINE'S OWN placeholder predicate
+  // (pipeline/lib/naming-facts.js#isPlaceholderName — shared import, so the route and the job
+  // can never disagree about what "unnamed" means; the portal client's realm-only copy is
+  // display fallback, never a count). The universe is EXACTLY the set the naming job walks
+  // (describe-clusters.js): DISTINCT realm ids + DISTINCT territory ids from clustering_points.
+  //
+  // forecast: units × the served per-unit token BOUND (capped by construction — II.3). A bound,
+  // not a middle estimate; the client renders it "up to ~" and NEVER sums it with spent.
+  // narrator: the §4g authority createNarrator itself computes (resolveNarratorAuthority —
+  // same file, same computation), so "with X on this Mac — nothing leaves" can't drift from
+  // what a run would do. Content-free (§1): counts + identifiers only; never runs the sampler,
+  // never reads messages.content. Fetched per mount/gesture — NEVER polled, NEVER a readiness
+  // slice (the C1 cost contract: the counts are two indexed aggregates, but the rule is the rule).
+  router.get('/mycelium/naming-status', async (_req, res) => {
+    try {
+      const q = (sql, p = []) => db.rawQuery(sql, p).then((r) => (Array.isArray(r) ? r : r.results || []));
+      const realmRows = await q(
+        `SELECT DISTINCT cp.realm_id AS id, r.name AS name
+           FROM clustering_points cp
+           LEFT JOIN realms r ON r.user_id = cp.user_id AND r.realm_id = cp.realm_id
+          WHERE cp.user_id = ? AND cp.realm_id IS NOT NULL`,
+        [userId],
+      );
+      const terrRows = await q(
+        `SELECT DISTINCT cp.territory_id AS id, tp.name AS name
+           FROM clustering_points cp
+           LEFT JOIN territory_profiles tp ON tp.user_id = cp.user_id AND tp.territory_id = cp.territory_id
+          WHERE cp.user_id = ? AND cp.territory_id IS NOT NULL`,
+        [userId],
+      );
+      const total = realmRows.length + terrRows.length;
+      const unnamed = [...realmRows, ...terrRows].filter((row) => isPlaceholderName(row.name)).length;
+      const bound = perUnitTokenBound();
+      const auth = await resolveNarratorAuthority({ db, userId });
+      res.json({
+        areas: { total, named: total - unnamed, unnamed },
+        forecast: { perUnitTokenBound: bound, expectedTokensBound: unnamed * bound },
+        narrator: {
+          ready: !auth.blocked,
+          label: auth.label,
+          model: auth.model,
+          local: auth.isLocal,
+          jurisdiction: auth.jurisdiction,
+        },
+      });
+    } catch {
+      fail(res, 503, 'naming status is unavailable');
     }
   });
 

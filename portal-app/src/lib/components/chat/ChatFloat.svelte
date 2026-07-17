@@ -19,6 +19,7 @@
 		type TimelineAttachment,
 	} from '$lib/timeline/utils';
 	import { uploadFile as chunkedUpload } from '$lib/chunked-upload';
+	import { signalImportCompleted } from '$lib/stores/onboarding-data.svelte';
 	import { isSecureChannelConfigured } from '$lib/vps-identity';
 	import { toasts } from '$lib/stores/toast';
 	import { browser } from '$app/environment';
@@ -564,6 +565,10 @@
 			}
 		}
 		uploadingFiles = false;
+		// Data landed in the vault (an archive's importResult OR a loose file becoming an
+		// encrypted attachment + pipeline message) → tell the invite panel to re-read. ChatFloat
+		// is mounted globally, so this is one of the "any path" doors the invite must hear about.
+		if (successCount > 0) signalImportCompleted();
 		if (importResult) {
 			const s = importResult.stats;
 			let msg: string;

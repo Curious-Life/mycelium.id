@@ -49,6 +49,19 @@
 //
 // NO PLAINTEXT (CLAUDE.md §1): this returns counts, booleans, enums, timestamps and
 // model NAMES. Never message content, never a failure reason, never a token.
+//
+// ── ONE import, and why it does not cost the header's "stay cheap" promise ────
+// `isEnrichProcessingPaused` is drainer.js's MODULE-LEVEL flag read — a synchronous
+// in-memory boolean, no DB, no scan, no drainer INSTANCE handle. It is the DEFAULT for
+// the injectable `isProcessingPaused` dep below, exactly as getLabelerHealth /
+// getEnricherHealth are drainer module-level functions passed as `labelerHealth` /
+// `enricherHealth`. The default means every caller gets a truthful `paused` with ZERO
+// wiring changes (§3.2's D13); the injection point exists so a gate can force the flag
+// either way (paused is the ONE fact the reminder turns on — it must be falsifiable).
+// No new load risk: portal-compat.js already imports this same symbol, so drainer is
+// already in every readiness consumer's graph; drainer references readiness only in
+// comments, so there is no cycle.
+import { isEnrichProcessingPaused } from './enrich/drainer.js';
 
 /** Generate needs embedded vectors; below this the pipeline dies cryptically. */
 const MIN_EMBEDDED = 5;
@@ -61,19 +74,35 @@ const MIN_EMBEDDED = 5;
  * @param {() => any} [deps.labelerHealth]      getLabelerHealth   (src/enrich/drainer.js)
  * @param {() => any} [deps.enricherHealth]     getEnricherHealth  (src/enrich/drainer.js)
  * @param {() => any} [deps.transcriberHealth]  getTranscriberHealth (src/transcribe/supervisor.js)
+ * @param {() => boolean} [deps.isProcessingPaused]  isEnrichProcessingPaused (src/enrich/drainer.js) — defaults to the module import
  */
-export function createReadiness({ db, userId, embedderHealth, labelerHealth, enricherHealth, transcriberHealth } = {}) {
+export function createReadiness({ db, userId, embedderHealth, labelerHealth, enricherHealth, transcriberHealth, isProcessingPaused = isEnrichProcessingPaused } = {}) {
   if (!db) throw new TypeError('createReadiness: db required');
   if (!userId) throw new TypeError('createReadiness: userId required');
 
   // ⚠️ `evidence` is deliberately NOT in ALL — it is OPT-IN ONLY (`slices:['evidence']`).
-  // Every other slice is a cached count or an in-memory health read; evidence is three
+  // ⚠️ I WROTE "Every other slice is a cached count or an in-memory health read" HERE, and it was
+  // FALSE when I wrote it: `channel` was three FULL SECRETS-TABLE DECRYPT SCANS per call (§3.2c —
+  // has() is not EXISTS; findRow decrypts every row and matches in JS). That false sentence is
+  // part of why E2 then put `channel` on a 4s poll believing it cheap — ~2,700 decrypt scans an
+  // hour, for every onboarded user, forever. `channel` is memoized now, so the sentence is TRUE
+  // again — but it was a claim about cost in a file whose gates only ever checked SHAPE, which is
+  // how it went unexamined. C1 asserts the cost. (independent review HIGH-5, 2026-07-16)
+  // Every other slice is a cached count, a memoized read, or an in-memory health read; evidence is three
   // UNINDEXED aggregates over `messages` (the design's own map: "NOT pollable — pure scan
   // + 3 unindexed aggregates"). `get()` with no slices is documented as "the portal's ONE
   // call", and increment G's header popover is going to POLL something — if evidence rode
   // ALL, that poll would quietly full-scan a 76k-row table every tick. Opt-in keeps the
   // expensive slice impossible to buy by accident: a caller has to name it.
-  const ALL = ['data', 'tags', 'embedder', 'models', 'ai', 'channel', 'mindscape', 'onboarding'];
+  // ⚠️ `processing` IS in ALL — cost derived, not assumed (C1 discipline; gate P-COST).
+  // Its price on a repeat poll: `paused` is an in-memory boolean (free); `waiting` sums the
+  // THREE already-existing SWR-cached counters (embed + categories + nlp), and in ALL `data`
+  // already buys embed and `tags` already buys categories — so the ONLY new cached read is
+  // nlp, and on a warm poll all three cost 0 scans; `pausedAt` is ONE PK read
+  // (`SELECT settings FROM users WHERE id=?`), the same cost class as `onboarding`'s already-
+  // allowlisted read. So processing is cheap enough for `get()` (the portal's one call) AND
+  // for G's popover poll — unlike `evidence`, whose three UNINDEXED aggregates keep it opt-in.
+  const ALL = ['data', 'tags', 'embedder', 'models', 'ai', 'channel', 'mindscape', 'onboarding', 'processing'];
 
   // ── evidence ───────────────────────────────────────────────────────────────
   // "What you brought in", for the invite's Data step — sources, years, how many
@@ -232,7 +261,7 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
   // categorize, so a vault that approved Labeling but not Enrichment had L2 (entities + gist)
   // SILENTLY dead — the exact dormancy class §3.10 exists to end, one task over. It is not a
   // new setting; it is the missing REPORT on a setting that always existed (re-review,
-  // 2026-07-16). NB the pause is shared: pauseEnrichCategorize() stops the L1 AND L2 loops
+  // 2026-07-16). NB the pause is shared: pauseEnrichProcessing() stops the embed drain AND the L1/L2 loops
   // (drainer.js cycle), so `paused` is truthful for both, not copied from the labeler.
   //
   // ✅ RENDERED (2026-07-16). This paragraph used to read "AND NOTHING RENDERS THIS SLICE YET…
@@ -283,14 +312,49 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       const rows = (await db.providers.list(userId)) || [];
       const active = rows.find((r) => r.is_active);
       return { connected: Boolean(active), activeProvider: active ? (active.label || active.provider || null) : null };
-    } catch { return { connected: false, activeProvider: null }; }
+    } catch {
+      // ⚠️ `unknown`, NOT a bare `connected:false` (§3.2a family, filed by #208's reviewer). A
+      // provider-list read that THREW is not the same as "no AI connected" — a blip must not
+      // read as a disconnected AI and light the "connect an AI" rail over a configured vault.
+      // Fail-closed on `connected` (safe), honest via `unknown` (the caller can hold the last
+      // known answer instead of regressing). The `!enabled`/no-active HAPPY paths are unchanged.
+      return { connected: false, activeProvider: null, unknown: true };
+    }
   }
+
+  // ⚠️ THE CHANNEL SLICE IS NOT CHEAP, AND THE DOC SAID SO. §3.2c: "db.secrets.has() is NOT an
+  // EXISTS query — secrets is SYSTEM_KEY-encrypted and AES-GCM is non-deterministic, so the key
+  // column can't be matched in SQL; findRow DECRYPTS EVERY SECRET into process memory and matches
+  // in JS… Do not call it in a hot loop; it rides the readiness cache like everything else."
+  //
+  // BOTH HALVES OF THAT WERE UNTRUE. There was no channel cache — `readiness.js`'s own header
+  // claims "every other slice is a cached count or an in-memory health read", which is false for
+  // this one — and E2 put it in a 4s poll. Measured: THREE full secrets-table decrypt scans per
+  // tick (CHANNEL_ENABLED + 2×has), i.e. ~2,700 per hour, forever, for every onboarded user, for
+  // a rail that can never appear again. That is PIVOT 2's sin, third instance, committed while
+  // quoting §3.2b as the justification (independent review HIGH-5, 2026-07-16 — measured, not
+  // reasoned).
+  //
+  // ⇒ Memoize HERE, not at the caller. §3.2c's promise becomes true, and increment G's popover —
+  // which §3.8 specifies as POLLING readiness — inherits the fix instead of rediscovering the bug.
+  // A user's channel config changes on a deliberate click, so seconds of staleness are free; the
+  // decrypt loop is not. TTL, because invalidation would need a hook into every secrets writer.
+  const CHANNEL_TTL_MS = 10_000;
+  let channelMemo = null;   // { at:number, value:object }
 
   // ── channel ────────────────────────────────────────────────────────────────
   // Mirrors the EXISTING server-side predicate (src/channels/supervisor.js shouldRun):
   // enabled && (telegram || discord). `connected` = configured (gates the rail);
   // `working` would need live daemon health — C surfaces that.
   async function channel() {
+    const now = Date.now();
+    if (channelMemo && now - channelMemo.at < CHANNEL_TTL_MS) return channelMemo.value;
+    const value = await channelUncached();
+    channelMemo = { at: now, value };
+    return value;
+  }
+
+  async function channelUncached() {
     try {
       const enabled = (await db.secrets.get(userId, 'CHANNEL_ENABLED')) === '1';
       if (!enabled) return { connected: false, kinds: [] };
@@ -298,19 +362,57 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       if (await db.secrets.has(userId, 'TELEGRAM_BOT_TOKEN')) kinds.push('telegram');
       if (await db.secrets.has(userId, 'DISCORD_BOT_TOKEN')) kinds.push('discord');
       return { connected: kinds.length > 0, kinds };
-    } catch { return { connected: false, kinds: [] }; }
+    } catch {
+      // ⚠️ `unknown`, NOT a bare `connected:false` (§3.2a family, filed by #208's reviewer). A
+      // throwing secrets read (the decrypt loop can fail — §3.2c) is not "no channel configured";
+      // marking it unknown keeps a transient from reading as a disconnected messenger. The
+      // `!enabled` HAPPY path above stays a bare `{connected:false}` — that is a real answer, not
+      // an error. NB `channel()` memoizes whatever this returns for CHANNEL_TTL_MS, so an `unknown`
+      // blip is held for up to that window then re-computed — the same staleness the `mindscape`
+      // memo accepts for its own `unknown`, not a per-tick self-heal.
+      return { connected: false, kinds: [], unknown: true };
+    }
   }
 
   // ── mindscape ──────────────────────────────────────────────────────────────
   // THE single definition of "generated" — the fact that ends QA item 5. A cheap COUNT.
   // It is kept cheap FOR the MCP topology gate, which has not migrated yet (see the header):
   // the slicing exists so that when it does, a tool probe never drags in the SQLCipher scan.
+  // ⚠️ MEMOIZED for the same reason `channel` is: the rail polls this every 4s for the life of
+  // every session, and `getNoiseStats` FULL-SCANS clustering_points — `idx_clustering_user` is on
+  // user_id alone, so `AND landscape_x IS NOT NULL` plus the noise SUM visits every row, and on a
+  // single-user vault that is all of them (measured: 7ms / 76k rows — real, but 0.17% duty, which
+  // is why this was MED not HIGH). It also computes a `noise` sum no caller here reads.
+  // The fact changes about once in a vault's lifetime.
+  // ⚠️ TTL, NOT cache-forever-once-true: `generated` LOOKS monotonic, but no reset path is proven
+  // (a wipe/regenerate zeroes the points), and X2 requires the rail still learn false→true within
+  // a tick or two (independent review MED-10, 2026-07-16).
+  const MINDSCAPE_TTL_MS = 10_000;
+  let mindscapeMemo = null;
+
   async function mindscape() {
+    const now = Date.now();
+    if (mindscapeMemo && now - mindscapeMemo.at < MINDSCAPE_TTL_MS) return mindscapeMemo.value;
+    const value = await mindscapeUncached();
+    mindscapeMemo = { at: now, value };
+    return value;
+  }
+
+  async function mindscapeUncached() {
     try {
       const s = await db.mindscape?.getNoiseStats?.(userId);
       const pointCount = Number(s?.total || 0);
       return { generated: pointCount > 0, pointCount };
-    } catch { return { generated: false, pointCount: 0 }; }
+    } catch {
+      // ⚠️ `unknown`, NOT `generated:false`. This slice was the ONLY one whose catch fabricated a
+      // definite answer — `data`, `tags`, `evidence` and `onboarding` all carry `unknown`. The
+      // route still 200s, so every consumer read a failed COUNT as "this vault has no map":
+      // MindscapeView rendered "Grow your mycelium — three steps to begin" over a 76k-message
+      // built vault, and the rail's poll self-gated and never recovered. That is §3.2a's rule —
+      // a counting error must not impersonate an empty vault — broken in the one place the whole
+      // §3.7a exclusivity claim rests on (independent review HIGH-4, 2026-07-16).
+      return { generated: false, pointCount: 0, unknown: true };
+    }
   }
 
   async function onboarding() {
@@ -325,6 +427,62 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       // populated vault — the QA-item-5 class of bug — so callers get `unknown` and must
       // decide, rather than being handed a fabricated "never seen".
       return { welcomeSeen: false, dismissed: false, unknown: true };
+    }
+  }
+
+  // ── processing (§3.2 D13) — the pause reminder's whole data source ──────────
+  // {paused, pausedAt, waiting}. This is the slice §3.2's type declared and increment B
+  // never built (recorded four times); G's §3.8 popover renders the D13 reminder
+  // ("Processing paused — N messages waiting · Resume") FROM it, so it is G's precondition.
+  //
+  //   • paused   — the LIVE in-memory flag (isProcessingPaused → isEnrichProcessingPaused).
+  //                NOT read from settings: settings.enrichProcessingPaused is the durable
+  //                record the drainer restores AT BOOT, but the flag is the current truth,
+  //                and the reminder must reflect the click the user JUST made — which is
+  //                exactly why this is NOT memoized (a 10s-stale paused, like channel's, would
+  //                lie about the one control the popover exists to operate).
+  //   • pausedAt — the DURABLE record: settings.enrichProcessingPausedAt (an ISO string when
+  //                paused, null when resumed — persistPause, portal-compat.js). There is
+  //                deliberately NO in-memory pausedAt (drainer.js), so settings is the ONLY
+  //                source. A failed OR absent read ⇒ null, NEVER a fabricated "paused since now".
+  //   • waiting  — total work still queued across the THREE on-box stages, summed from the
+  //                SWR-CACHED counters (never a pure scan): embed + L1 categories + L2 nlp
+  //                `.pending`. Summed, not scanned. This is the "(also showing how much)" the
+  //                operator's D13 asked for — the reminder cannot state a number it did not count.
+  //
+  // §3.2a — a COUNTING error must not impersonate an empty/zero queue. If any backlog counter
+  // throws, we carry `unknown:true` and do NOT report `waiting:0` (a fabricated "nothing left"
+  // would tell a paused user their vault is fully processed) — the same catch discipline as
+  // `data`/`evidence`. A failed `pausedAt` read is NOT slice-unknown: it degrades to null (the
+  // honest "we don't have a paused-since time"), because `paused` + `waiting` are still truthful.
+  async function processing() {
+    let paused = false;
+    try { paused = Boolean(isProcessingPaused?.()); } catch { paused = false; }
+
+    let pausedAt = null;
+    try {
+      const s = await db.users?.getSettings?.(userId);
+      const v = s?.enrichProcessingPausedAt;
+      pausedAt = (typeof v === 'string' && v) ? v : null;
+    } catch { pausedAt = null; }   // §3.2 D13: absent/failed ⇒ null, never a fabricated time
+
+    try {
+      // ⚠️ OPTIONAL-CHAIN the calls, not just the results: a SYNC throw while building the
+      // Promise.all array (a missing counter method) would orphan the sibling promises already
+      // created to its left into an UNHANDLED REJECTION — a fail-closed slice that CRASHES the
+      // process is the opposite of fail-closed (caught by R4). `?.()` yields undefined instead,
+      // so the array always completes and any real (async) counter rejection lands in the catch.
+      const [emb, cat, nlp] = await Promise.all([
+        db.messages?.embedBacklogCached?.(userId),
+        db.messages?.categoriesBacklogCached?.(userId),
+        db.messages?.nlpBacklogCached?.(userId),
+      ]);
+      const waiting = Number(emb?.pending || 0) + Number(cat?.pending || 0) + Number(nlp?.pending || 0);
+      return { paused, pausedAt, waiting };
+    } catch {
+      // A backlog scan failed ⇒ we cannot honestly total the queue. `waiting:0` here would be
+      // the §3.2a lie; `unknown` lets G hold the last known count instead of showing "0 waiting".
+      return { paused, pausedAt, waiting: 0, unknown: true };
     }
   }
 
@@ -357,6 +515,7 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
     if (want.has('channel'))   jobs.push(channel().then((v) => { out.channel = v; }));
     if (want.has('mindscape')) jobs.push(mindscape().then((v) => { out.mindscape = v; }));
     if (want.has('onboarding'))jobs.push(onboarding().then((v) => { out.onboarding = v; }));
+    if (want.has('processing'))jobs.push(processing().then((v) => { out.processing = v; }));
     await Promise.all(jobs);
     // Both are SYNC (they read a supervisor's in-memory health) — never a DB hit, so they
     // stay out of the awaited set. `embedder` and `models.embedder` are two projections of

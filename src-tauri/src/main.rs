@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tauri::menu::{Menu, MenuItem, Submenu};
-use tauri::{Manager, RunEvent, Theme, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
+use tauri::{window::Color, Manager, RunEvent, Theme, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
 
 const PORT: u16 = 8787;
 
@@ -823,12 +823,37 @@ fn main() {
                 // that pushed the header right and out of line with the sidebar.)
                 // `hidden_title` drops the redundant title TEXT — the brand is the
                 // in-app wordmark. The window stays opaque (the #52 flicker fix).
-                .title_bar_style(TitleBarStyle::Visible)
+                // TRANSPARENT title bar (was Visible). `Visible` painted the strip with
+                // the SYSTEM window chrome — a mid grey that never matched the app's
+                // #0A0A0C, so a seam sat above the UI even once set_theme made the strip
+                // "dark". Transparent makes macOS paint the strip with the WINDOW'S OWN
+                // background colour instead, which we set below (and keep synced to the
+                // live --color-bg on every theme change), so the strip IS the app
+                // background — no seam, both themes.
+                //
+                // ⚠️ This is NOT the Overlay regression. Overlay was rejected because it
+                // flowed content UNDER the traffic lights, forcing a left-clearance that
+                // pushed the header out of line with the sidebar. Transparent does not:
+                // Overlay = titlebar_transparent(true) + fullsize_content_view(TRUE),
+                // Transparent = titlebar_transparent(true) + fullsize_content_view(FALSE)
+                // (tauri-runtime-wry-2.11.2/src/lib.rs:1202-1209). Content still starts
+                // BELOW the strip; only the strip's paint changes.
+                .title_bar_style(TitleBarStyle::Transparent)
                 .hidden_title(true)
+                // The strip's actual colour for frame one = the dark theme's --color-bg
+                // (tokens.css:20). A literal is unavoidable here — Rust can't read the
+                // stylesheet — but it is only the FIRST-FRAME value: theme.ts re-reads
+                // the live var and calls set_background_color, so a palette change can
+                // only ever cost one frame, never a lasting mismatch. Also sets the
+                // WEBVIEW layer's background (builder sets both), which kills the white
+                // flash before the page paints.
+                .background_color(Color(0x0A, 0x0A, 0x0C, 255))
                 // Start the native window DARK to match the app's dark default, so the
                 // title-bar strip is themed from the first frame (no white flash before
                 // the webview loads + calls set_theme). The frontend flips it to light if
                 // the user's persisted theme is light (theme.ts → plugin:window|set_theme).
+                // Still needed alongside the colour: appearance drives the traffic-light
+                // glyphs + native menus; background_color drives the strip's fill.
                 .theme(Some(Theme::Dark))
                 // Disable Tauri's native OS file-drop handler so the webview's
                 // HTML5 drag-drop (the Import drop zone) receives dropped files.
