@@ -90,10 +90,19 @@ build-staging/
 # Bundled sidecars — fetched by scripts/fetch-sidecars.sh, never committed
 src-tauri/binaries/
 portal-app/.gen-mount-intel/
+portal-app/.gen-mount-flow/
+portal-app/.gen-mount-aisettings/
+portal-app/.gen-mount-voice/
+portal-app/.gen-mount-onbflow/
+portal-app/.gen-mount-invite/
 
 # Harness scratch — the generate-store driver bundles into here and rmSync's it on the success
 # path; a crash would otherwise leave it committable (independent review, LOW-4, 2026-07-16).
 portal-app/.gen-drive-generate/
+
+# Same for the D2 mount harness (compiles the components that RENDER the generate outcome).
+portal-app/.gen-mount-generate/
+portal-app/.gen-mount-illuminate/
 
 # public-release hygiene
 _*.mjs

@@ -24,12 +24,31 @@ import { createMessageEnricher } from './enricher.js';
 // completeBoot. Single-user / single-vault, so one module-level handle is exact.
 let _current = null;
 
-// User control for the Context Engine L1 categorization stage (the on-box-model churn the
-// user sees as "my computer is working a lot"). Module-level + in-memory: single-user /
-// single-vault, so one flag is exact (same rationale as `_current`). NOT persisted across a
-// restart by design — a restart resumes categorizing (the safe default: never silently leave
-// the vault permanently un-enriched). Embedding is unaffected; this gates only the L1 pass.
-let _categorizePaused = false;
+// User control for ALL on-box processing — the churn the user sees as "my computer is working
+// a lot". Module-level: single-user / single-vault, so one flag is exact (same rationale as
+// `_current`).
+//
+// SCOPE — it gates THREE stages, and the name now says so. It used to be `_categorizePaused`
+// while already skipping the whole `if (!isEnrichProcessingPaused())` block, i.e. L1 AND L2.
+// §3.9/R3 adds the third and most important one: THE EMBED DRAIN. That is the stage actually
+// burning the CPU, so before this the user whose Mac was melting could pause labeling but not
+// the thing melting it. The name lied about two stages; it is not inheriting a third.
+//
+// ⚠️ PERSISTED — AND THIS REVERSES A DELIBERATE DECISION. This comment used to read:
+//   "NOT persisted across a restart by design — a restart resumes categorizing (the safe
+//    default: never silently leave the vault permanently un-enriched)."
+// That rationale is STILL TRUE, and it is not overridden — it is SATISFIED (design §3.9/R3a).
+// The load-bearing word was "SILENTLY". Non-persistence was the only tool available to
+// guarantee a vault is never quietly left half-processed: forget the pause, and it heals
+// itself. Now the pause is PERMANENTLY VISIBLE WITH ITS REMAINING COUNT — the activity feed
+// renders "· paused" plus `remaining` for both the categorize and embed rows, iff work is
+// pending (portal-activity.js) — so the guarantee is met DIRECTLY instead of by overriding a
+// choice the user made because their laptop was overheating. D13: "pausing it should honor it
+// and only restart when you click restart."
+// ⇒ THE VISIBLE REMINDER IS THE PRECONDITION FOR PERSISTING, not a nicety. If a change ever
+// removes the paused indicator or its count from the feed, this decision reverts with it.
+let _processingPaused = false;
+let _pauseRestored = false;           // latch: the persisted flag is read ONCE, at first cycle
 
 /** Kick the live enrichment drainer if one is running (no-op otherwise). */
 /** Live drainer liveness for the activity feed — null when no drainer is running. */
@@ -71,12 +90,75 @@ export function getEnricherHealth() {
 
 export function nudgeEnrichDrainer() { try { _current?.nudge(); } catch { /* best-effort */ } return Boolean(_current); }
 
-/** STOP the L1 categorization stage (the on-box-model churn). Embedding keeps running. */
-export function pauseEnrichCategorize() { _categorizePaused = true; return true; }
-/** RESUME L1 categorization and kick a cycle immediately so progress moves at once. */
-export function resumeEnrichCategorize() { _categorizePaused = false; nudgeEnrichDrainer(); return true; }
-/** Is the L1 categorization stage currently paused by the user? */
-export function isEnrichCategorizePaused() { return _categorizePaused; }
+/**
+ * Clear the pull-failure backoff — the owner's EXPLICIT "try again". Deliberately NOT cleared by
+ * nudgeEnrichDrainer(): chat and import saves nudge enrichment PER SAVE, so a nudge-cleared
+ * backoff would re-arm the storm during any conversation. Only a deliberate user action (the
+ * trigger route) resets it; a model CHANGE needs no reset (the map is keyed per model), and a
+ * restart resets naturally (in-memory).
+ */
+export function resetPullBackoff() { try { _current?.resetPullBackoff?.(); } catch { /* best-effort */ } return Boolean(_current); }
+
+/**
+ * STOP all on-box processing — the embed drain AND the L1/L2 passes (§3.9/R3).
+ *
+ * IN-MEMORY ONLY. The caller PERSISTS FIRST and applies second (portal-compat.js), because a
+ * pause that evaporates on restart is exactly the dishonesty D13 names: applying without
+ * persisting is INVISIBLE divergence, while refusing to apply is a visible, reported failure.
+ */
+export function pauseEnrichProcessing() {
+  _processingPaused = true;
+  return true;
+}
+/** RESUME processing and kick a cycle immediately so progress moves at once. */
+export function resumeEnrichProcessing() {
+  _processingPaused = false;
+  nudgeEnrichDrainer();
+  return true;
+}
+/** Is on-box processing (embed + L1 + L2) currently paused by the user? */
+export function isEnrichProcessingPaused() { return _processingPaused; }
+// NB: there is deliberately no in-memory `pausedAt`. WHEN the owner paused is persisted
+// (settings.enrichProcessingPausedAt) and returned by the pause route; §3.2's
+// readiness.processing.pausedAt will read it from settings when that slice is built (it is
+// NOT built — B never shipped it). An unread module variable claiming to "feed the reminder"
+// is the #190 pattern, not a head start.
+
+/**
+ * Restore the persisted pause (§3.9/R3, D13) — ONCE, at the drainer's first cycle.
+ *
+ * ⚠️ FAIL-CLOSED IN THE DIRECTION THAT RUNS. A settings read that FAILS must resolve to
+ * NOT-PAUSED, never to paused: the old non-persistence rationale still picks the direction —
+ * "never silently leave the vault permanently un-enriched" — and a vault frozen forever by a
+ * transient read error would be exactly that, with no user choice behind it. Only an explicit,
+ * successfully-read `true` stops the vault.
+ */
+async function restorePauseOnce(db, userId, log) {
+  if (_pauseRestored) return;
+  try {
+    const s = await db?.users?.getSettings?.(userId);
+    // ⚠️ LATCH ONLY AFTER A SUCCESSFUL READ. It used to be set on ENTRY, before the await — so
+    // ONE transient throw (SQLITE_BUSY at boot, this codebase's most-documented failure class,
+    // and boot is peak contention) burnt the latch and the persisted pause was NEVER re-read:
+    // the drain ran forever while every later settings read still said `paused: true`, with no
+    // log and no retry. That is D13's SILENT UNDO — the exact thing this whole change exists to
+    // remove — landing on the CPU-burning stage. The comment below picks the fail-soft
+    // direction ("a read error must not freeze the vault forever"); latching first overshot it
+    // into "a read error UNFREEZES the vault forever" (independent review, 2026-07-16).
+    // "Read once" means once SUCCESSFULLY, not once attempted. A failed read costs one retry
+    // per 15s cycle until it lands — cheap, and self-healing.
+    _pauseRestored = true;
+    if (s?.enrichProcessingPaused === true) {
+      _processingPaused = true;
+      log('[enrich] processing is PAUSED by the owner (persisted) — resume from the activity panel');
+    }
+  } catch {
+    // Fail-soft to RUNNING **for this cycle only**, deliberately (see above): the vault keeps
+    // working rather than freezing on a hiccup, and the next cycle re-reads. Message is a
+    // CONSTANT — never the error text (§1: no user content, paths, or driver strings in logs).
+    log('[enrich] could not read the saved pause setting — retrying next cycle');
+  }
+}
 
 // ── THE APPROVAL *IS* THE MODEL SETTING (design §3.10c) ──────────────────────
 // There is no separate consent flag. `settings.taskModels.<task>.model` is BOTH the
@@ -88,7 +170,7 @@ export function isEnrichCategorizePaused() { return _categorizePaused; }
 // single default was the whole reason a fresh vault silently downloaded 3.4GB (qwen3.5:4b)
 // — plus the Ollama RUNTIME it needs (ollama-daemon.js autoInstall) — with no prompt, no
 // progress, and no way to decline. Three of the four local models already required consent
-// (embedding is bundled, whisper and Kokoro are click-to-download); labeling was the lone
+// (embedding is bundled, whisper and Qwen3-TTS voice are click-to-download); labeling was the lone
 // offender. This makes the outlier behave like the majority.
 //
 // DEFAULT_LABEL_MODEL survives as the RECOMMENDATION (what the Intelligence step proposes,
@@ -189,6 +271,13 @@ export function startEnrichDrainer({
   // so a Settings → Intelligence change takes effect without a restart. A model outage leaves
   // rows pending (self-heals next cycle), never poisons a row.
   classify = null,
+  // L2 message enricher (semantic entities + gist), the exact SIBLING of `classify` for the
+  // enrich stage. INJECTABLE so a gate can drive L2 offline and deterministically (the ETA
+  // wiring gate needs real rows to actually enrich, the way `classify` lets it drive L1). In
+  // production leave it null → messageEnricher() builds the real on-box enricher each tick from
+  // the resolved model. A no-op in prod (`typeof enrich === 'function'` is false), a test seam
+  // otherwise — same pattern, same safety as `classify`.
+  enrich = null,
   // Resolve the APPROVED on-box labeling model NAME from the per-task setting (categorize is
   // on-box by design — see INFERENCE_TASKS). null ⇒ not approved ⇒ labeling pauses honestly.
   // The SAME resolved name feeds the pull below, so an owner-chosen model is what gets pulled.
@@ -224,6 +313,10 @@ export function startEnrichDrainer({
   // log-only. OPTIONAL: absent ⇒ no publishing, identical behaviour otherwise.
   activityFeed = db?.activityFeed || null,
 } = {}) {
+  // Re-arm the restore latch: "read the persisted pause ONCE" means once per DRAINER, not once
+  // per process. Module-level like `_current` (single-vault) — but a process that opens a
+  // second vault, and every gate that starts a second drainer, must still read the flag.
+  _pauseRestored = false;
   const svc = createEnrichmentService({ messages: db.messages, embed, getMasterKey, classify });
   let running = false;
   let pending = false;
@@ -235,7 +328,58 @@ export function startEnrichDrainer({
   // Liveness of the CYCLE, not evidence that embedding happened. `_skips`/`health` say that.
   let _lastCycleAt = 0;
   let _lastProgressAt = 0; // ms of the last cycle that actually embedded something
-  let _noProgress = 0;     // consecutive cycles whose head-of-queue would not embed (throttles the log)
+  // R1's RATE SOURCE (§3.9). Throughput = messages embedded ÷ time ACTUALLY SPENT EMBEDDING.
+  // ⚠️ NOT wall-clock elapsed. Elapsed-since-start includes every second the drainer was idle
+  // (caught up, backlog empty) or PAUSED — and R3 just made pausing a first-class, persisted,
+  // possibly-overnight state. A vault paused for an hour and resumed would compute a per-item
+  // cost ~60x its real one and render "about 3 days left" on a job that takes an hour. §3.9
+  // exists to stop the app lying about cost; an ETA derived from idle time is that lie with a
+  // progress bar. So: measure only the drain loop's own time.
+  let _embeddedTotal = 0;  // messages embedded since this drainer started
+  let _embedActiveMs = 0;  // ms spent inside the drain loop ON PASSES THAT EMBEDDED (see the bank)
+  // Consecutive passes that ATTEMPTED work and embedded nothing. ⚠️ It never used to reset, so
+  // "consecutive" was false — it was a lifetime counter wearing a consecutive name, and only the
+  // log throttle read it so nothing noticed. It resets on progress now, which makes the name true.
+  let _noProgress = 0;
+  // Consecutive BATCHES that embedded nothing — the ETA's stall signal (R1/§3.9).
+  //
+  // ⚠️ WHY NOT REUSE `_noProgress`: it keys on `moved === 0`, and `moved = embedded + failed +
+  // skipped`. A pass that FAILS every row keeps moved > 0, so `_noProgress` never increments even
+  // though NOTHING EMBEDDED — and the self-heal at the top of each cycle resurrects those `-1`
+  // rows, so the vault poisons and resurrects the same head forever. Demonstrated: 2,950 failed
+  // writes, 2,900 self-heals, `noProgress` and `embedErrs` both 0, and the feed still rendering a
+  // frozen "~0s left" over a backlog that can never drain (independent review, 2026-07-17).
+  // `moved` is a proxy for "something happened"; the ETA needs "SOMETHING EMBEDDED", which is
+  // exactly `batchEmbedded > 0` — already computed at the bank below. Ask the precise question.
+  let _barrenPasses = 0;
+  // ── L1 (categorize) + L2 (nlp enrich) THROUGHPUT, same shape as the embed counters above ──
+  // The measured rates (M1, floor hardware): embed 313/min · L1 41/min (~31h for 76k) · L2 8/min
+  // (~153h) — so the two on-box-model stages are ~98% of the wall clock the user waits, and until
+  // now only embed carried an ETA. Banked PER PASS inside each loop below (NOT per cycle), for the
+  // same reason embed is: an L2 cycle is ≤8 passes × batchSize 50 = 400 rows, which at 8/min is
+  // ~50 MINUTES — so a per-cycle bank would freeze the rate for the whole run. Active time, not
+  // elapsed; a pass that tags/enriches nothing prices nothing. `barren` is the honest-null signal
+  // (the rate is unknowable ⇒ withdraw the estimate), reset the instant real work lands.
+  let _l1Total = 0;   // messages categorized (L1) since start — the L1 rate's numerator
+  let _l1ActiveMs = 0; // ms spent in L1 passes that TAGGED something — the denominator
+  let _l1Barren = 0;  // consecutive L1 passes that FAILED (model down) without tagging — see the bank
+  let _l2Total = 0;   // messages semantically enriched (L2) since start — the L2 rate's numerator
+  let _l2ActiveMs = 0; // ms spent in L2 passes that ENRICHED something — the denominator
+  let _l2Barren = 0;  // consecutive L2 passes that enriched nothing of a non-empty batch — see the bank
+  // Consecutive cycles whose L1/L2 BLOCK threw — the exact sibling of `_embedErrs`, and for the
+  // exact reason (#210 review, MED): the barren counters can only move INSIDE a pass, but both
+  // write paths can throw AROUND the pass. L1's updateCategories sits OUTSIDE the row's try
+  // (service.js — only fn(content) is guarded), so a write throw propagates out of
+  // enrichCategoriesOnce entirely; L2 on a locked vault throws in updateNlp AND in the catch's
+  // −1 write. Both used to land in cycle()'s outer catch — no bank, no failed, no barren — so the
+  // counters FROZE at their last honest value and the rows rendered a constant "~18s left ·
+  // running" forever, while the embed row on the SAME screen went honest (embedErrs ≥ 2
+  // withdraws it). Asymmetric honesty is the §3.9 plausible-wrong-number class. Same semantics
+  // as _embedErrs: incremented when the block throws, reset where the pass banks (progress
+  // outranks a throw — a cycle that tags 25 rows and THEN throws is still shrinking `pending`)
+  // and after any non-throwing block run.
+  let _l1Errs = 0;
+  let _l2Errs = 0;
   let _health = 'unknown'; // last observed embed-service health: ok | loading | error | unreachable
   const embedBaseUrl = () => `http://127.0.0.1:${Number(process.env.MYCELIUM_EMBED_PORT) || 8091}`;
   let timer = null;
@@ -271,6 +415,7 @@ export function startEnrichDrainer({
   let _enrichModel = null;
   let _enrichFn = null;
   async function messageEnricher(model) {
+    if (typeof enrich === 'function') return enrich;   // injected (tests) — mirrors labelClassifier's `classify` seam
     if (_enrichFn && _enrichModel === model) return _enrichFn;
     _enrichModel = model;
     _enrichFn = createMessageEnricher({
@@ -359,6 +504,24 @@ export function startEnrichDrainer({
   // hit a disk-full (independent review, 2026-07-16).
   const _pulling = new Map();      // model → pct (0-100), byte-accurate from ollama's stream
   const _faults = new Map();       // model → last non-consent reason it can't run (Ollama down)
+  // Pull-failure backoff (the STORM fix, 2026-07-17). A fast-failing pull used to retry EVERY
+  // 15s cycle forever, each attempt minting a NEW feed row — the operator watched six
+  // "Failed · just now" rows stack up in two minutes for a transient daemon blip. OUTCOME-BASED,
+  // not a clock (a rule you can't gate at its own timescale is one you can't defend): after the
+  // k-th consecutive failure, skip the next min(2^k, 40) CYCLES (≈30s → 10min at the 15s tick),
+  // reset on success or on the owner's explicit retry (resetPullBackoff → the trigger route).
+  // `episodeId` keeps ONE feed row per failure EPISODE: retries within an episode reuse the id
+  // (begin() reopens the row — one row flapping, not six stacking), while success ends the
+  // episode so the NEXT failure gets a fresh id and history is preserved across episodes — the
+  // exact property the unique-per-attempt id was protecting (drainer.js, re-review 2026-07-16).
+  const _pullBackoff = new Map();  // model → { failures, skipCycles, episodeId, decAt }
+  // Cycle ordinal for the backoff's once-per-cycle decrement. `skipCycles` used to decrement per
+  // CONSULT, and ensureLabelModel is consulted for labelM AND enrichM — which in the common shape
+  // are the SAME model (one Understanding approval writes both), so the real backoff ran at HALF
+  // the design (measured: gaps [2,3,5,9,17] vs the designed [3,5,9,17,33] — review, 2026-07-17).
+  // The signals-answer-adjacent-questions class again: "how many times was I consulted" is not
+  // "how many cycles passed". `decAt` pins each decrement to one cycle.
+  let _cycleN = 0;
   const _probing = new Set();      // models with a readiness probe in flight (single-flight; see probeModelReady)
   async function ensureLabelModel(model) {
     // ⚠️ NO MODEL ⇒ NOT APPROVED ⇒ NEVER PULL, NEVER RUN (§3.10c). This return is the consent
@@ -369,6 +532,11 @@ export function startEnrichDrainer({
     if (!model) return false;
     if (_modelReady.has(model)) return true;
     if (_pulling.has(model)) return false;               // download in flight → not ready yet
+    const bo = _pullBackoff.get(model);
+    if (bo && bo.skipCycles > 0) {
+      if (bo.decAt !== _cycleN) { bo.skipCycles--; bo.decAt = _cycleN; }   // once per CYCLE, however many consults
+      return false;                                                        // backing off — see _pullBackoff
+    }
     let installed;
     try { installed = await ollama.listInstalled(); }    // ['qwen3.5:4b', 'llama3.1:latest', …]
     catch (e) {                                          // can't reach Ollama → retry next tick
@@ -398,7 +566,9 @@ export function startEnrichDrainer({
     // `import-${j.startedAt}` — a wall clock, restart-safe BECAUSE it isn't a counter. The
     // stated rationale was the inverse of its own precedent. This now genuinely matches it.
     // (No hot-path concern: a multi-GB pull happens at most once per model per process.)
-    const feedId = `model-pull-${model}-${Date.now()}`;
+    // One row per EPISODE: reuse the episode's id on retries (begin() reopens it), fresh id per
+    // episode. See _pullBackoff above for why both halves matter.
+    const feedId = bo?.episodeId ?? `model-pull-${model}-${Date.now()}`;
     publishPull.begin(feedId, model);
     ollama.pullModel(model, (ev) => {
       // ollama streams { status, completed, total } per layer.
@@ -406,14 +576,19 @@ export function startEnrichDrainer({
       if (total > 0) { _pulling.set(model, Math.max(0, Math.min(100, Math.round((done / total) * 100)))); }
       publishPull.beat(feedId, done, total, model);
     })
-      .then(() => { _modelReady.add(model); publishPull.end(feedId, 'done'); log(`[enrich] labeling model "${model}" ready — L1 resumes`); })
+      .then(() => { _modelReady.add(model); _pullBackoff.delete(model); publishPull.end(feedId, 'done'); log(`[enrich] labeling model "${model}" ready — L1 resumes`); })
       .catch((e) => {
         _faults.set(model, String(e?.message || e).slice(0, 120));
         // A CONSTANT to the feed: the row is content-free by contract (activity-feed.js §SECURITY).
         // An ollama error is a model name + an HTTP status today, but this is not the place to
         // bet on that staying true. The reason stays in _faults, behind the authed route.
         publishPull.end(feedId, 'error', 'download failed');
-        log(`[enrich] pull "${model}" failed: ${String(e?.message || e).slice(0, 60)} — will retry`);
+        const prev = _pullBackoff.get(model) ?? { failures: 0, skipCycles: 0, episodeId: feedId };
+        prev.failures += 1;
+        prev.skipCycles = Math.min(2 ** prev.failures, 40);   // 2,4,8,… cycles; cap ≈10min at 15s
+        prev.episodeId = feedId;                              // retries stay on THIS episode's row
+        _pullBackoff.set(model, prev);
+        log(`[enrich] pull "${model}" failed (attempt ${prev.failures}): ${String(e?.message || e).slice(0, 60)} — retrying in ~${prev.skipCycles} cycle(s)`);
       })
       .finally(() => { _pulling.delete(model); });        // next 15s tick resumes categorize
     return false;
@@ -535,11 +710,11 @@ export function startEnrichDrainer({
     if (_pulling.has(m)) {
       return { status: 'downloading', message: `Downloading ${m}…`, detail: null, model: m, progress: { pct: _pulling.get(m) ?? 0 } };
     }
-    // The owner stopped the churn (POST /portal/enrichment/categorize/pause). A CHOICE, not
+    // The owner stopped the churn (POST /portal/enrichment/processing/pause). A CHOICE, not
     // a fault — and it outranks 'ok' because nothing is actually labeling. It was missing
     // from the vocabulary entirely, so the one state the user explicitly picked was the one
     // this slice could not express (independent review, 2026-07-16).
-    if (isEnrichCategorizePaused()) {
+    if (isEnrichProcessingPaused()) {
       return { status: 'paused', message: 'Labeling is paused — pending messages are waiting.', detail: null, model: m, progress: null };
     }
     if (_faults.has(m)) {
@@ -584,12 +759,12 @@ export function startEnrichDrainer({
     if (_pulling.has(m)) {
       return { status: 'downloading', message: `Downloading ${m}…`, detail: null, model: m, progress: { pct: _pulling.get(m) ?? 0 } };
     }
-    // ⚠️ The pause flag is SHARED, and truthfully so: pauseEnrichCategorize() skips the whole
-    // `if (!isEnrichCategorizePaused())` block in cycle(), which contains the L2 loop as well
+    // ⚠️ The pause flag is SHARED, and truthfully so: pauseEnrichProcessing() skips the whole
+    // `if (!isEnrichProcessingPaused())` block in cycle(), which contains the L2 loop as well
     // as L1. So a paused vault really is not enriching. The flag's NAME says categorize; its
     // SCOPE is both. Do not "fix" this by reporting 'ok' here — that would resurrect the
     // dormancy this member exists to expose.
-    if (isEnrichCategorizePaused()) {
+    if (isEnrichProcessingPaused()) {
       return { status: 'paused', message: 'Enrichment is paused — pending messages are waiting.', detail: null, model: m, progress: null };
     }
     if (_faults.has(m)) {
@@ -622,6 +797,12 @@ export function startEnrichDrainer({
       // half-fixed (independent review, 2026-07-16; reproduced with a throwing drain path).
       // A health that says "Checking…" while the cycle crashes every 15s is the fabricated
       // liveness this whole slice exists to remove. Keep them ABOVE the embed gate.
+      // ── RESTORE THE PERSISTED PAUSE BEFORE ANY WORK, ONCE (§3.9/R3, D13) ──
+      // Above the embed gate on purpose: this is the read that decides whether the drain runs
+      // at all, so it cannot sit below the thing it gates. Latched, so it costs one settings
+      // read per boot, not one per 15s cycle. Never throws (fail-soft to RUNNING).
+      await restorePauseOnce(db, userId, log);
+
       const labelM = await resolveLabelModel();   // resolve once — feeds the pull AND the classifier
       const enrichM = await resolveEnrichModel();  // ditto for the enrich model
       _approvedModel = labelM ?? null;             // what getLabelerHealth() reports on
@@ -691,7 +872,15 @@ export function startEnrichDrainer({
       // cycle, the model installed and Ollama up: 0 rows tagged, 0 enriched, both healths stuck
       // (independent review, 2026-07-16). Hence the try/catch: an embed failure now costs
       // EMBEDDING, and nothing else. Two independent pipelines, one gate — and now, one throw.
-      if (embedOk) {
+      // ⚠️ `!paused` IS THE POINT OF §3.9/R3 — THIS is the stage that burns the CPU. The pause
+      // flag existed before this and gated only the L1/L2 block below, so "Stop" left the
+      // embed drain running and the user's Mac exactly as hot: a control that named the churn
+      // and then didn't stop it. The health probe above still runs while paused (it is a
+      // question, not work) so the feed keeps telling the truth about the sidecar; what stops
+      // here is the drain loop and its self-heal write — everything that costs CPU.
+      // Resumable by construction: the drain re-selects `nlp_processed = 0` every cycle, so
+      // pausing loses nothing and resuming continues exactly where it stopped (design §3.9/R3).
+      if (embedOk && !isEnrichProcessingPaused()) {
       try {
 
       // SELF-HEAL: retry rows that previously failed for a NON-content reason
@@ -723,8 +912,74 @@ export function startEnrichDrainer({
       let embedded = 0;
       let stalledPasses = 0;
       for (let i = 0; i < 200; i++) {            // hard cap ≤200 batches/cycle (≤10k msgs)
+        // ⚠️ RE-READ EVERY BATCH, NOT ONCE AT THE GATE. This loop is up to 200 batches deep and
+        // every batch is real embedding work, so a flag read only on entry left "Stop" pinning
+        // the CPU for up to 10k more messages — the control honored at the NEXT cycle, not on
+        // the click. §3.9/R3 is "pausing it should HONOR it"; a pause the user watches their
+        // fans ignore is the same broken promise as no pause at all.
+        if (isEnrichProcessingPaused()) break;
+        // R1: BANK PER BATCH, NOT PER CYCLE — the rate must be live DURING a long drain.
+        // ⚠️ This loop is up to 200 batches x batchSize 50 = 10,000 messages, which at the design's
+        // own cited ~40 msgs/min is ~4.2 HOURS in ONE cycle. Banking after the loop meant
+        // `lastProgressAt` only stamped when that cycle ENDED, so the feed's 90s no-progress rule
+        // blanked the ETA for ~99% of a long import — handing §3.9's headline case (the 29-hour
+        // import) back the unbounded spinner R1 exists to remove. It also froze the counters
+        // mid-cycle, so the estimate came from the PREVIOUS cycle's rate: measured "~1s left" with
+        // 8,402 rows still pending. Both directions of wrong, from one granularity mistake.
+        // The warning was already in portal-activity.js, ~30 lines above where I put the guard: "a
+        // cycle can legitimately run for MINUTES ... while the drainer is productively embedding
+        // thousands of rows" (independent review, 2026-07-17).
+        const batchStartedAt = Date.now();
         const e = await svc.drainOnce({ userId });
-        embedded += e?.embedded ?? 0;
+        const batchEmbedded = e?.embedded ?? 0;
+        // Same rule, per batch: bank the work and its cost TOGETHER, and only when work happened —
+        // a pass that embeds nothing prices nothing.
+        if (batchEmbedded > 0) {
+          _embedActiveMs += Date.now() - batchStartedAt;
+          _embeddedTotal += batchEmbedded;
+          _lastProgressAt = Date.now();
+          _noProgress = 0;                      // something embedded ⇒ not stalled (see the decl)
+          _barrenPasses = 0;                    // …and the rate is knowable again
+          // ⚠️ AND `_embedErrs`, FOR THE SAME REASON — a batch that embedded PROVES the drain works.
+          // Its own reset lives after the batch loop, so a cycle that embeds 200 rows and THEN
+          // throws never reaches it: the counter rose WITH progress. `service.js`'s per-batch
+          // select can throw SQLITE_BUSY on batch 5 after batches 1-4 already embedded, so this is
+          // the documented trigger, not a hypothetical. Measured: a vault embedded its ENTIRE
+          // 3,000-row backlog (pending 2350 -> 0) with NO ESTIMATE for the whole run, while
+          // `barrenPasses` sat at 0 the entire time — the signal asking the right question knew it
+          // was progressing, but the guards are OR'd and the wrong one won.
+          // `embedErrs` asked "did the cycle throw?"; the ETA needs "is `pending` shrinking?". This
+          // narrows it to the case it exists for: a drain that throws BEFORE any batch banks (a
+          // locked vault) never reaches this line, so it still climbs and still withdraws the
+          // estimate (independent review, 2026-07-17 — the fourth signal in this diff to answer an
+          // ADJACENT question).
+          _embedErrs = 0;
+        } else if ((e?.scanned ?? 0) > 0 && (e?.skipped ?? 0) === 0) {
+          // ⚠️ BOTH CONDITIONS ARE LOAD-BEARING, AND EACH FIXES A DIFFERENT WRONG QUESTION.
+          //
+          // `scanned > 0`  — barren means TRIED AND PRODUCED NOTHING, not "had nothing to do". A
+          // caught-up vault scans 0 and embeds 0 every cycle; counting that made a HEALTHY IDLE
+          // vault look permanently stalled, so the first message after a quiet spell rendered with
+          // no estimate.
+          //
+          // `skipped === 0` — A SKIP IS PROGRESS. This is the third proxy this signal has been, and
+          // the precise question is not "did anything EMBED?" but "IS `pending` SHRINKING?":
+          //   • a row EMBEDDED  ⇒ leaves the backlog          ⇒ progress
+          //   • a row SKIPPED   ⇒ nlp_processed = 1, TERMINAL ⇒ leaves the backlog ⇒ progress
+          //   • a row FAILED    ⇒ nlp_processed = -1, and the self-heal at the top of every cycle
+          //                       RESURRECTS it              ⇒ pending does NOT shrink ⇒ NOT progress
+          // Whitespace-only content passes the `content != ''` filter (db/messages.js) and is
+          // skipped by service.js after trimming, so a blank run is real, healthy work. Without
+          // this clause it read as a stall AND the loop never breaks (`moved > 0`), so barren
+          // climbed unbounded: measured 8 barren passes while `pending` fell 722 -> 367, the
+          // estimate blanked for 4/9 samples — WHILE THE VAULT DRAINED FASTER THAN IT EVER DOES
+          // EMBEDDING, because a blank needs no inference (independent review, 2026-07-17).
+          // The two errors were mirror images: `noProgress` counted `failed` and was too LOOSE
+          // (missed the resurrection loop); this counted `skipped` and was too TIGHT (invented
+          // stalls during the fastest progress there is).
+          _barrenPasses++;
+        }
+        embedded += batchEmbedded;
         if ((e?.scanned ?? 0) === 0) break;      // backlog drained
         // NO-PROGRESS BREAK. drainOnce leaves a transiently-failed row PENDING (by design —
         // never poison it), so a batch that embeds nothing re-selects the SAME rows next
@@ -742,8 +997,29 @@ export function startEnrichDrainer({
           }
         } else stalledPasses = 0;
       }
+      // R1: bank the work AND the time it cost, TOGETHER — and ONLY when work happened.
+      //
+      // WARNING: `embedded > 0` IS THE WHOLE CORRECTNESS ARGUMENT, not a micro-optimisation. This
+      // used to bank the time unconditionally while the count came out 0 on the no-progress path,
+      // so the ratio had a numerator that could freeze and a denominator that could not. A row
+      // that fails TRANSIENTLY is left pending BY DESIGN (service.js: `if (vec == null) continue;`
+      // — never poison a valid row), and a head-of-queue row that keeps timing out is a live,
+      // documented bug with no attempt cap. Measured: embeddedTotal frozen at 200 while activeMs
+      // climbed with wall-clock => perItem 1.7ms -> 51.3ms in TEN SECONDS, unbounded, never
+      // recovering — and rendered as "running" with a countdown that GROWS, because health is ok
+      // and `skips` is 0 so nothing marks it stalled. Over a day: "~3600m left", rising.
+      // §3.9 exists to kill the plausible-but-wrong number; that WAS one, introduced by §3.9.
+      // (Independent review, 2026-07-17. The design SAW IT COMING — §3.9: "an ETA over a `pending`
+      // that never reaches 0 is infinity" — and I shipped without checking the precondition.)
+      //
+      // Banking only on progress also makes this field's NAME true: a cycle over an EMPTY backlog
+      // still enters the loop and pays for one `drainOnce` probe, and that idle probe used to be
+      // banked as "active" as well (~5ms x 5,760 cycles/day at the real 15s interval, zero embeds).
+      //
+      // A zero-progress pass's time is therefore excluded from the rate. That is the honest trade:
+      // its cost was real but it produced nothing, so it cannot price anything. Time lost to
+      // failures INSIDE a productive pass still counts — that was part of what those embeds cost.
       if (embedded > 0) {
-        _lastProgressAt = Date.now();
         // NLP enrichment (embedded → enriched) now runs in the on-box message block below, so it
         // uses the hybrid LLM enricher after the daemon is woken (was a regex pass here).
         log(`[enrich] embedded ${embedded} message(s) in-process`);
@@ -803,7 +1079,7 @@ export function startEnrichDrainer({
       // were each a real bug: inside the pause block, a paused vault never stamped and reported
       // 'unknown' forever; below the embed gate, a throwing drain did the same. Do not move them
       // back down for tidiness.
-      if (!isEnrichCategorizePaused()) {
+      if (!isEnrichProcessingPaused()) {
         // WAKE THE ON-BOX MODEL FIRST. The Ollama daemon is lazy and the enrich path is the one
         // consumer that nothing else starts it for — so without this, a vault whose owner never
         // opened local chat would leave EVERY message untagged forever (the live-vault dormancy
@@ -833,26 +1109,101 @@ export function startEnrichDrainer({
           } catch { /* never block the cycle on the wake — the loops fail-soft if the model is down */ }
         }
         if (modelReady) {
+          // The try/catch is the MED fix (#210 review): a throw AROUND the pass (updateCategories
+          // is outside service.js's row try) must move a counter the ETA can see, or the rate
+          // freezes at its last honest value and keeps promising. Deliberately NOT fixed by moving
+          // updateCategories into the row try — that would change service retry semantics (a
+          // per-row write failure would become failed+continue instead of batch abort); the
+          // block-level counter covers the whole throw-around-the-pass family uniformly.
+          // Rethrows nothing; logs on the same throttle shape as _embedErrs.
+          try {
           const cycleClassify = await labelClassifier(labelM);
           let tagged = 0;
           for (let i = 0; i < 8; i++) {
+            if (isEnrichProcessingPaused()) break;   // same rule as the embed loop: honor it mid-run
+            // BANK PER PASS, exactly like the embed loop (§3.9/R1). enrichCategoriesOnce returns
+            // { scanned, enriched, failed } (service.js:194 — NO `skipped` field), so the three
+            // cases are read from THOSE fields, not embed's:
+            //   • enriched > 0        → progress. Bank the pass's active time + count, reset barren.
+            //   • enriched 0, failed 0 (scanned > 0) → a BLANK-CONTENT run: service.js:177 marks
+            //     each whitespace-only row categories_processed = 1 (TERMINAL) and `continue`s —
+            //     the row LEAVES the backlog, so `pending` shrinks. This is the embed loop's "a
+            //     SKIP is progress" case, and it must NOT be barren or the ETA blanks while the
+            //     backlog drains fastest (blanks need no inference). Neither bank nor barren.
+            //   • failed > 0          → L1's THROW-EQUIVALENT: a transient classify failure leaves
+            //     the row pending (categories_processed stays 0) and BREAKS the batch (service.js:183),
+            //     so `pending` does NOT shrink and the rate is unknowable. Barren++ (the null signal).
+            const passStartedAt = Date.now();
             const c = await svc.enrichCategoriesOnce({ userId, classify: cycleClassify });
-            tagged += c?.enriched ?? 0;
+            const taggedThisPass = c?.enriched ?? 0;
+            tagged += taggedThisPass;
+            if (taggedThisPass > 0) {
+              _l1ActiveMs += Date.now() - passStartedAt;
+              _l1Total += taggedThisPass;
+              _l1Barren = 0;
+              _l1Errs = 0;   // a pass that TAGGED proves the write path works (the _embedErrs rule: progress outranks a throw)
+            } else if ((c?.failed ?? 0) > 0) {
+              _l1Barren++;
+            }
             if ((c?.scanned ?? 0) === 0 || (c?.failed ?? 0) > 0) break;
           }
           if (tagged > 0) log(`[enrich] tagged ${tagged} message(s) via ${cycleClassify.model || 'local model'}`);
+          if (_l1Errs) { log(`[enrich] L1 categorize recovered after ${_l1Errs} failed cycle(s)`); _l1Errs = 0; }
+          } catch (err) {
+            _l1Errs++;
+            if (_l1Errs <= 3 || _l1Errs % 20 === 0) {
+              log(`[enrich] L1 categorize FAILED this cycle (#${_l1Errs}): ${String(err?.message || err).slice(0, 120)}`);
+            }
+          }
         }
         // L2: hybrid semantic enrichment (entities + gist) — gated on the enrich model being present;
         // the enricher degrades to regex if the model is down, so rows never stall.
         if (enrichReady) {
+          // Same MED fix as the L1 block above: on a locked vault updateNlp throws AND the
+          // catch's −1 write throws, so the throw escapes enrichNlpOnce entirely — around the
+          // pass, past the barren counter. Block-level errs or the rate freezes-and-promises.
+          try {
           const cycleEnrich = await messageEnricher(enrichM);
           let enrichedSem = 0;
           for (let i = 0; i < 8; i++) {
+            // Same rule as the embed loop (:845) and the L1 loop above: honor a pause MID-RUN.
+            // This was the ONE loop of the three without the check — up to 8 batches x 50 rows
+            // of continued full-CPU inference after the user pressed Stop, which at the measured
+            // 8/min is ~50 MINUTES of ignored click, on the stage the import copy calls "days".
+            // Proven live by review round 3: pause flipped after batch 2, SEVEN more batches ran
+            // (L1: zero). "A pause the user watches their fans ignore is the same broken promise
+            // as no pause at all" — and #204's copy says "pause ANY of it", so this line is what
+            // makes that sentence true (independent review HIGH-6, 2026-07-17).
+            if (isEnrichProcessingPaused()) break;
+            // BANK PER PASS, same discipline as L1 and embed. enrichNlpOnce returns
+            // { scanned, enriched, failed } (service.js:227). L2 has NO blank/skip path — every
+            // scanned row either enriches (nlp_processed = 1) or is isolated to nlp_processed = -1
+            // (service.js:207-224) — so `enriched === 0` on a non-empty batch means every row
+            // FAILED. Those rows leave the pending set (-1 is terminal; selectPendingNlp keys on
+            // = 2), but nothing was actually enriched, so the rate is unknowable and the estimate
+            // must be withdrawn rather than promise a finish built on failures ⇒ barren++.
+            const passStartedAt = Date.now();
             const n = await svc.enrichNlpOnce({ userId, enrich: cycleEnrich });
-            enrichedSem += n?.enriched ?? 0;
+            const enrichedThisPass = n?.enriched ?? 0;
+            enrichedSem += enrichedThisPass;
+            if (enrichedThisPass > 0) {
+              _l2ActiveMs += Date.now() - passStartedAt;
+              _l2Total += enrichedThisPass;
+              _l2Barren = 0;
+              _l2Errs = 0;   // a pass that ENRICHED proves the write path works (progress outranks a throw)
+            } else if ((n?.scanned ?? 0) > 0) {
+              _l2Barren++;
+            }
             if ((n?.scanned ?? 0) === 0 || (n?.failed ?? 0) > 0) break;
           }
           if (enrichedSem > 0) log(`[enrich] enriched ${enrichedSem} message(s) via ${cycleEnrich.model || 'local model'}`);
+          if (_l2Errs) { log(`[enrich] L2 enrich recovered after ${_l2Errs} failed cycle(s)`); _l2Errs = 0; }
+          } catch (err) {
+            _l2Errs++;
+            if (_l2Errs <= 3 || _l2Errs % 20 === 0) {
+              log(`[enrich] L2 enrich FAILED this cycle (#${_l2Errs}): ${String(err?.message || err).slice(0, 120)}`);
+            }
+          }
         }
       }
     } catch (err) {
@@ -864,10 +1215,20 @@ export function startEnrichDrainer({
   }
 
   cycle();                                       // drain any backlog on boot
-  timer = setInterval(cycle, intervalMs);
+  // ⚠️ THE BACKOFF CLOCK ADVANCES HERE — per TICK, never per cycle() ENTRY. It sat at cycle()
+  // entry first, and nudge() IS cycle(): chat and import saves nudge PER SAVE, so an import
+  // nudge-flood ran the ordinal at save pace and collapsed the 40-cycle cap from ~10 minutes to
+  // ~4-8 seconds between retries — during exactly the workload (pending L1 rows) that coincides
+  // with a failing pull. Measured: 9 attempts in 6s vs the designed 5 per 15 minutes (review
+  // round 2, 2026-07-17). The same adjacent-question class as everything else in this file:
+  // "how many times did cycle() run" is not "how many ticks passed". Advancing in the timer
+  // callback counts wall-time ticks even when single-flight skips the cycle body (time DID pass),
+  // and nudged entries reuse the current ordinal, so `decAt` blocks their decrement.
+  timer = setInterval(() => { _cycleN++; cycle(); }, intervalMs);
   if (timer.unref) timer.unref();                // never keep the process alive for the timer
 
   const handle = {
+    resetPullBackoff: () => { _pullBackoff.clear(); },
     labelerHealth,        // → getLabelerHealth(), the readiness `models.labeler` slice
     enricherHealth,       // → getEnricherHealth(), the readiness `models.enricher` slice
     nudge: () => cycle(), // returns the cycle promise (callers may ignore it; the gate awaits it)
@@ -892,6 +1253,24 @@ export function startEnrichDrainer({
       // month-long dormancy (independent review, 2026-07-16; the review also caught the comment
       // that called this counter "its own surface" while it was a private local).
       embedErrs: _embedErrs,
+      embeddedTotal: _embeddedTotal,   // R1: messages embedded since start — the rate's numerator
+      embedActiveMs: _embedActiveMs,   // R1: ms spent draining (NOT elapsed) — the rate's denominator
+      noProgress: _noProgress,         // consecutive passes where NOTHING moved (log throttle)
+      barrenPasses: _barrenPasses,     // R1: consecutive batches that embedded NOTHING — the stall signal
+      // L1 (categorize) + L2 (nlp enrich) throughput — the numerators/denominators for
+      // categorizeEta / enrichEta, banked per pass in the loops above. Same contract as the
+      // embed trio: Total ÷ ActiveMs = the measured rate; Barren ≥ 2 ⇒ withdraw the estimate.
+      l1Total: _l1Total,
+      l1ActiveMs: _l1ActiveMs,
+      l1BarrenPasses: _l1Barren,
+      l2Total: _l2Total,
+      l2ActiveMs: _l2ActiveMs,
+      l2BarrenPasses: _l2Barren,
+      // The block-throw counters (#210 MED): barren sees a failure INSIDE a pass; these see a
+      // throw AROUND it (updateCategories outside the row try; a locked vault's double-throw in
+      // updateNlp). Either ≥ 2 withdraws the stage's ETA — the embedErrs clause, per stage.
+      l1Errs: _l1Errs,
+      l2Errs: _l2Errs,
       health: _health,                 // ok | loading | error | unreachable
       // A model still LOADING is not a fault — it's a download. Only a real outage is.
       // ⚠️ `stalled` keys on _skips ALONE, deliberately unchanged: it drives the activity feed's

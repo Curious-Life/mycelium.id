@@ -23,7 +23,7 @@
 	import { navigationState } from '$lib/stores/navigation';
 	import MyceliumCanvas from './MyceliumCanvas.svelte';
 
-	type StepKey = 'import' | 'connect-ai' | 'generate';
+	type StepKey = 'connect-ai' | 'messenger';   // §3.7a: 'import'/'generate' are the INVITE's, pre-generation
 
 	let loading = $state(true);
 	let dismissed = $state(false);
@@ -36,25 +36,13 @@
 	let ollamaUp = $state(false);
 	let ollamaModels = $state<string[]>([]);
 	let generated = $state(false);
+	let channelConnected = $state(false);
 
 	// "See your mind" preview (filled once anything is imported)
-	let preview = $state<{
-		messageCount: number;
-		dateRange: { yearStart: number | null; yearEnd: number | null };
-		sources: { source: string; count: number }[];
-		sourceCount: number;
-		conversationCount: number;
-		peopleCount: number;
-	} | null>(null);
 
 	// Generate (the magic moment)
-	let generating = $state(false);
-	let generateLabel = $state('');
-	let generateError = $state('');
-	let generateJobId = $state<string | null>(null);
 	// The reveal banner is for the moment generation COMPLETES this session — not a
 	// permanent fixture. Existing users (generated already true at mount) never see it.
-	let justGenerated = $state(false);
 	let probedOllama = $state(false);
 
 	// Agent identity (spec #4) — name + personality, set here in onboarding and
@@ -142,13 +130,31 @@
 	});
 
 	// The first incomplete step drives the rail's emphasis + auto-advance.
-	const activeStep = $derived<StepKey>(
-		messageCount === 0 ? 'import' : !hasProvider ? 'connect-ai' : 'generate'
+	// ⚠️ 'generate' is GONE from this rail: the rail now only shows AFTER generation, so a
+	// Generate step here would be unreachable UI — dead code shown to users. Generate moved to
+	// the invite (§3.7), which is also where `generate.ts` lives; the rail's own startGenerate
+	// was a hand-rolled copy with NO 409 branch (map §5.2a), so deleting it retires the
+	// duplicate rather than relocating it.
+	const activeStep = $derived<StepKey>(!hasProvider ? 'connect-ai' : 'messenger');
+	// ── §3.7a — the rail is the NUDGE, and it lives AFTER generation ─────────────
+	// ⚠️ THIS INVERTS THE RAIL. It used to show on `!generated && messageCount > 0` — i.e.
+	// BEFORE the map exists — to nudge Connect-AI → Generate. But the invite owns everything
+	// pre-generation (Generate moved there: it is a pre-generation act), and the rail's job is
+	// "you're not finished": the AI or the messenger is still missing.
+	//
+	// The point is not tidiness. Today the invite hides on `points.length === 0` and the rail on
+	// `!generated` — TWO DIFFERENT MEASUREMENTS of the same idea, both true through the middle of
+	// onboarding ⇒ BOTH ON SCREEN AT ONCE (map §5.1). Now both pivot on ONE fact with OPPOSITE
+	// polarity:
+	//     invite:  !readiness.mindscape.generated
+	//     rail:     readiness.mindscape.generated && (!ai.connected || !channel.connected)
+	// `generated` is true xor false ⇒ they CANNOT render together. Not by careful coordination —
+	// by construction. That is a stronger guarantee than deleting one of them.
+	const railVisible = $derived(
+		!loading && !dismissed && welcomeSeen
+		&& generated                                    // ⚠️ was !generated — the inversion
+		&& (!hasProvider || !channelConnected),         // "not finished" — the only thing it says now
 	);
-	// Show the rail only once there's data to act on — the EMPTY vault is owned by
-	// the mindscape invitation (3 ethereal actions), so the rail would just clutter
-	// it. After import it returns to nudge Connect-AI → Generate.
-	const railVisible = $derived(!loading && !dismissed && welcomeSeen && !generated && messageCount > 0);
 
 	async function getJSON(path: string): Promise<any | null> {
 		try {
@@ -160,45 +166,71 @@
 		}
 	}
 
+	// ── ONE fact, ONE call (§3.2 / §3.7a) ────────────────────────────────────────
+	// Was THREE fetches every 4s: /onboarding/status + /portal/providers + /portal/mindscape.
+	//
+	// ⚠️ AND ONE OF THEM FULL-SCANNED THE VAULT. /onboarding/status's first line is
+	// `await embedCounts()` = `db.messages.embedBacklog()` — the PURE multi-second SQLCipher
+	// decrypt. The rail polls @4s and `railVisible` requires messageCount > 0, so it ran that
+	// scan every 4 seconds EXACTLY WHEN THE TABLE IS BIG. embedCounts justifies its purity with
+	// "these compat endpoints are not the hot pollers" and "by the time the table is large
+	// onboarding is long done" — both false of the rail, which IS onboarding and only polls once
+	// data exists. That is PIVOT 2's sin ("/import/preview must never be polled — it already hung
+	// the app at boot once") on a different route. readiness.data rides embedBacklogCached, so
+	// delegating fixes it as a consequence, not as a separate patch.
+	//
+	// ⚠️ AND /portal/mindscape returns full NODES to answer a boolean. readiness.mindscape is a
+	// cheap COUNT — the ONE definition of "generated" that §3.2 exists to serve, and that neither
+	// this rail nor the invite read (map §5.1: three answers ⇒ both surfaces on screen at once).
+	const SLICES = 'data,ai,channel,mindscape,onboarding';
 	async function refresh() {
-		const [status, providers, mind] = await Promise.all([
-			getJSON('/portal/onboarding/status'),
-			getJSON('/portal/providers'),
-			getJSON('/portal/mindscape'),
-		]);
+		const r = await getJSON(`/portal/readiness?slices=${SLICES}`);
 
-		if (status) {
-			dismissed = !!status.dismissed;
-			welcomeSeen = !status.showWelcome; // showWelcome is true only on an unseen empty vault
+		if (r) {
+			dismissed = !!r.onboarding?.dismissed;
+			// ⚠️ EXACT, not approximate. The rail's welcomeSeen was `!status.showWelcome`, and
+			// showWelcome is `!seen && total === 0` (portal-compat.js:1159) ⇒ welcomeSeen is
+			// `welcome_shown_at || total > 0`. readiness.onboarding.welcomeSeen is ONLY
+			// `Boolean(welcome_shown_at)` — swapping it naively RESURFACES the welcome backdrop on
+			// a populated vault whose welcome was never stamped. Reconstruct the real predicate.
+			welcomeSeen = !!r.onboarding?.welcomeSeen || Number(r.data?.total ?? 0) > 0;
 			// Correct the first-frame localStorage guess (line ~64): if the BACKEND
 			// already knows the welcome was seen/dismissed, close the backdrop even
 			// when client localStorage is empty — e.g. a populated vault loaded on a
 			// fresh dev-server origin (new vite port) where localStorage resets.
 			// Without this the welcome wrongly re-shows over an existing vault.
 			if (welcomeSeen || dismissed) welcomeOpen = false;
-			const d = status.steps?.data ?? {};
-			messageCount = Number(d.messageCount ?? 0);
-			embedded = Number(d.enrichedCount ?? 0);
-			pending = Number(d.enrichmentPending ?? 0);
+			messageCount = Number(r.data?.total ?? 0);
+			embedded = Number(r.data?.embedded ?? 0);
+			pending = Number(r.data?.pending ?? 0);
+			// ⚠️ `ai.connected` means an ACTIVE PROVIDER ROW exists. This used to be
+			// `providers.length > 0` — so an ALL-INACTIVE list read as "connected", which is
+			// §2.8 #6, the exact bug readiness was built to end and that R4b gates. The rail
+			// never migrated; it has been running the old bug this whole time.
+			hasProvider = r.ai?.connected === true;
+			activeProviderLabel = r.ai?.activeProvider ?? null;
+			channelConnected = r.channel?.connected === true;   // §3.7a's gate needs it; the rail had NO channel awareness
+			// ⚠️ `unknown` is NOT `false`. readiness.mindscape's catch used to return
+			// {generated:false} with no flag while the route still 200'd — so a transient
+			// getNoiseStats hiccup (WAL/lock contention: this repo's most-documented failure class)
+			// read as "no map", railVisible went false, and the poll above could never recover it.
+			// A load failure is not an empty vault (§3.2a) — hold the last known answer.
+			if (r.mindscape?.unknown !== true) generated = r.mindscape?.generated === true;
 		}
-		if (providers?.providers) {
-			const active = providers.providers.find((p: any) => p.is_active) ?? providers.providers[0];
-			hasProvider = providers.providers.length > 0;
-			activeProviderLabel = active ? (active.label || active.provider) : null;
-		}
-		generated = Array.isArray(mind?.nodes) && mind.nodes.length > 0;
 
 		// Lazy-load the heavier probes only when their step is near.
-		if (messageCount > 0 && !preview) loadPreview();
+		// ⚠️ loadPreview() DELETED. `preview` was written and rendered NOWHERE — its only reader,
+		// `.see-card`, left with the Import step (which is the invite's now). It fetched
+		// /portal/import/preview = the PURE embedBacklog scan PLUS three unindexed aggregates, and
+		// that route fails CLOSED (500) on evidence.unknown, so `preview` stayed null and it re-fired
+		// every 4s. HIGH-3's deadlock used to mask it (the poll barely ran); un-gating the poll
+		// PROMOTED a dead fetch to a hot pure-scan loop — my fix made someone else's latent bug live,
+		// which is why it stopped being separable (independent review MED-8, 2026-07-16).
 		if (messageCount > 0 && !hasProvider && !probedOllama) probeOllama();
 
 		loading = false;
 	}
 
-	async function loadPreview() {
-		const p = await getJSON('/portal/import/preview');
-		if (p?.ok || typeof p?.messageCount === 'number') preview = p;
-	}
 
 	async function probeOllama() {
 		probedOllama = true;
@@ -228,6 +260,11 @@
 	function goConnectAI() {
 		navigationState.setPrimaryView('settings');
 		goto('/settings?tab=intelligence');
+	}
+
+	function goChannels() {
+		navigationState.setPrimaryView('settings');
+		goto('/settings?tab=channels');
 	}
 
 	// One-tap: add the local Ollama provider and auto-activate (backend sets the
@@ -292,47 +329,12 @@
 	}
 
 	// ── Generate (Step 5): trigger + poll, gated reveal ────────────────────────
-	async function generate() {
-		generateError = '';
-		generating = true;
-		generateLabel = 'Starting…';
-		try {
-			const res = await api('/portal/mycelium/generate', { method: 'POST' });
-			const d = await res.json().catch(() => ({}));
-			if (!res.ok) {
-				generateError = d.error || 'Could not start — try again shortly.';
-				generating = false;
-				return;
-			}
-			generateJobId = d.jobId ?? null;
-			pollGenerate();
-		} catch {
-			generateError = 'Generation is unavailable right now.';
-			generating = false;
-		}
-	}
 
-	async function pollGenerate() {
-		if (!generateJobId) return;
-		const job = await getJSON(`/portal/mycelium/generate/status/${generateJobId}`);
-		if (!job) return;
-		generateLabel = job.stageLabel || job.status || 'Working…';
-		if (job.status === 'done' || job.status === 'complete' || job.status === 'completed') {
-			generating = false;
-			generateJobId = null;
-			justGenerated = true; // earns the reveal banner (this session only)
-			await refresh(); // generated flips true once nodes exist → rail hides, reveal CTA shows
-		} else if (job.status === 'error' || job.status === 'failed') {
-			generating = false;
-			generateError = job.error || 'Generation failed — try again.';
-			generateJobId = null;
-		}
-	}
-
-	function exploreMind() {
-		navigationState.setPrimaryView('mindscape');
-		goto('/mindscape');
-	}
+	// generate() + pollGenerate() DELETED (§3.7a). They were the rail's hand-rolled Generate —
+	// a duplicate of generate.ts with NO 409 branch (map §5.2a), so clicking before embedding
+	// finished surfaced a raw error where generate.ts shows "processing N/M" and auto-starts.
+	// The rail now only appears AFTER generation, so this was unreachable UI as well as a
+	// duplicate. Generate lives in the invite, on the shared lifecycle.
 
 	async function dismiss() {
 		dismissed = true;
@@ -352,8 +354,21 @@
 		if (welcomeSeen) { try { localStorage.setItem(WELCOME_SEEN_KEY, '1'); } catch { /* */ } }
 		// Light polling keeps the rail honest as embedding/generation progress.
 		pollTimer = setInterval(() => {
-			if (generating) pollGenerate();
-			else if (railVisible) refresh();
+			// ⚠️ NEVER GATE THE POLL ON A FACT THE POLL MUST LEARN. This read `if (railVisible)`,
+			// and railVisible now requires `generated` — so the ONLY code that can notice
+			// `generated` flipped false→true was gated on it already being true. Result: import →
+			// generate → the map appears → the invite vanishes → NO RAIL, for the life of the page.
+			// The rail was unreachable in the exact session it exists for, and only a reload
+			// surfaced it (OnboardingFlow lives in the persistent layout).
+			// This is map §5.1a VERBATIM with `generated` substituted for `messageCount` — a
+			// documented deadlock I recreated while inverting the gate. On main the gate was
+			// `!generated`: true at mount, so the deadlock was benign. Making it POSITIVE turned
+			// "appears late" into "never appears". It is also the same shape as E3's dismissed bug,
+			// named in my own comment ~230 lines up ("the one path that can clear the flag is gated
+			// on the flag") — third instance (independent review HIGH-3, 2026-07-16).
+			// ⇒ Poll on what does NOT move: onboarding is live and not dismissed. One CACHED
+			// readiness call (§3.2b), so polling while hidden costs a cache read, not a scan.
+			if (!dismissed && welcomeSeen) refresh();
 		}, 4000);
 	});
 
@@ -427,36 +442,10 @@
 			<button class="rail-x" aria-label="Dismiss onboarding" onclick={dismiss}>×</button>
 		</div>
 
-		<!-- Step: Import -->
-		<div class="step" class:active={activeStep === 'import'} class:done={messageCount > 0}>
-			<div class="step-head">
-				<span class="check">{messageCount > 0 ? '✓' : '1'}</span>
-				<span class="step-name">Bring your world in</span>
-			</div>
-			{#if messageCount === 0}
-				<p class="step-hint">Conversations, journals, transcripts — anything that holds your thinking.</p>
-				<button class="btn-primary sm" onclick={goImport}>Import →</button>
-			{:else if preview}
-				<!-- "See your mind" evidence card — self-insight, not surveillance -->
-				<div class="see-card">
-					<div class="see-line"><strong>{preview.messageCount.toLocaleString()}</strong> messages</div>
-					<div class="see-meta">
-						{#if preview.dateRange?.yearStart && preview.dateRange?.yearEnd}
-							{preview.dateRange.yearStart}–{preview.dateRange.yearEnd}
-						{/if}
-						{#if preview.sources?.length}· {preview.sourceCount} {preview.sourceCount === 1 ? 'source' : 'sources'}{/if}
-						{#if preview.peopleCount > 0}· {preview.peopleCount} people{/if}
-					</div>
-				</div>
-			{:else}
-				<p class="step-hint">{messageCount.toLocaleString()} imported.</p>
-			{/if}
-		</div>
-
 		<!-- Step: Connect AI -->
-		<div class="step" class:active={activeStep === 'connect-ai'} class:done={hasProvider} class:pending={messageCount === 0}>
+		<div class="step" class:active={activeStep === 'connect-ai'} class:done={hasProvider}>
 			<div class="step-head">
-				<span class="check">{hasProvider ? '✓' : '2'}</span>
+				<span class="check">{hasProvider ? '✓' : '1'}</span>
 				<span class="step-name">Connect an AI</span>
 			</div>
 			{#if hasProvider}
@@ -490,35 +479,37 @@
 			{/if}
 		</div>
 
-		<!-- Step: Generate -->
-		<div class="step" class:active={activeStep === 'generate'} class:pending={!hasProvider || messageCount === 0}>
+		<!-- ⚠️ THE STEP THAT ALMOST DIDN'T SHIP. I added the 'messenger' StepKey, `channelConnected`,
+		     the gate term AND the X1 row — and no markup. So at (generated, ai, !channel) the rail
+		     rendered as a titled panel with ONE ticked step and no action but ×: it could not say
+		     what was missing (independent review HIGH-1, 2026-07-16). And X1 asserted only
+		     `railRendered === true`, which a bare <div> satisfies — so my own gate BLESSED the
+		     empty rail.
+		     This is the case the whole design pivots on. §3.7's v3 pivot kept the rail precisely
+		     because "deleting it would leave a user who generated early with no surface at all
+		     telling them their AI or channel was never connected", and §0 row 8: "the rail is what
+		     carries [messenger] past generation." Without this step the rail carries nothing. -->
+		<div class="step" class:active={activeStep === 'messenger'} class:done={channelConnected}>
 			<div class="step-head">
-				<span class="check">3</span>
-				<span class="step-name">Watch your mind take shape</span>
+				<span class="check">{channelConnected ? '✓' : '2'}</span>
+				<span class="step-name">Link a messenger</span>
 			</div>
-			{#if activeStep === 'generate'}
-				{#if generating}
-					<p class="step-hint">{generateLabel}</p>
-					<div class="bar"><div class="bar-fill"></div></div>
-				{:else}
-					<p class="step-hint">Map your territories, themes, and realms.</p>
-					<button class="btn-primary sm" onclick={generate}>Generate my mycelium</button>
-					{#if generateError}<p class="step-err">{generateError}</p>{/if}
-				{/if}
+			{#if channelConnected}
+				<p class="step-hint">Connected — talk to your mind from Telegram or Discord.</p>
+			{:else if activeStep === 'messenger'}
+				<p class="step-hint">Optional — talk to your mind from Telegram or Discord.</p>
+				<button class="btn-primary sm" onclick={goChannels}>Link a messenger →</button>
 			{/if}
 		</div>
+
 	</div>
 {/if}
 
-{#if justGenerated && generated && !dismissed}
-	<!-- Gated reveal: the moment generation completes THIS session (real nodes
-	     exist). Existing users with an already-built mindscape never see it. -->
-	<div class="reveal" role="status">
-		<span>Your mycelium is ready.</span>
-		<button class="btn-primary sm" onclick={exploreMind}>Explore your mind →</button>
-		<button class="rail-x" aria-label="Dismiss" onclick={dismiss}>×</button>
-	</div>
-{/if}
+<!-- The "Your mycelium is ready" reveal MOVED to MindscapeView (§3.7a). It was gated on
+     `justGenerated`, written ONLY by the rail's pollGenerate() — which this increment deletes,
+     since Generate is a pre-generation act and belongs to the invite. Leaving the block here
+     would be dead code: the rail requires `generated`, so it can never watch the false→true
+     flip. MindscapeView already reacts to `phase === 'done'` and genuinely sees the moment. -->
 
 <style>
 	/* ── Welcome modal ─────────────────────────────────────────────────────── */
@@ -712,9 +703,6 @@
 	.step.done {
 		opacity: 0.85;
 	}
-	.step.pending .step-name {
-		color: var(--color-text-secondary, #9898a3);
-	}
 	.step-head {
 		display: flex;
 		align-items: center;
@@ -764,55 +752,8 @@
 		color: var(--color-text-secondary, #9898a3); cursor: pointer;
 	}
 	.sub-ack input { margin-top: 0.15rem; accent-color: var(--color-accent-aurum); flex-shrink: 0; }
-	.see-card {
-		margin: 0.5rem 0 0.4rem 1.85rem;
-		padding: 0.6rem 0.75rem;
-		background: var(--color-surface);
-		border: 1px solid var(--color-border);
-		border-radius: 9px;
-	}
-	.see-line {
-		font-size: 0.9rem;
-		color: var(--color-text-primary);
-	}
-	.see-meta {
-		font-size: 0.72rem;
-		color: var(--color-text-secondary, #9898a3);
-		margin-top: 0.2rem;
-	}
-	.bar {
-		height: 4px;
-		border-radius: 3px;
-		background: var(--color-border);
-		overflow: hidden;
-		margin: 0.4rem 0 0 1.85rem;
-	}
-	.bar-fill {
-		height: 100%;
-		width: 40%;
-		background: var(--color-accent-aurum);
-		border-radius: 3px;
-		animation: indeterminate 1.4s ease-in-out infinite;
-	}
 
 	/* ── Gated reveal ──────────────────────────────────────────────────────── */
-	.reveal {
-		position: fixed;
-		right: 1.25rem;
-		bottom: 1.25rem;
-		z-index: 910;
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-		background: var(--color-elevated);
-		border: 1px solid var(--color-accent-aurum);
-		border-radius: 12px;
-		padding: 0.7rem 0.9rem;
-		box-shadow: 0 16px 44px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(229, 184, 76, 0.12);
-		font-size: 0.85rem;
-		color: var(--color-text-primary);
-		animation: slideUp 0.45s cubic-bezier(0.16, 1, 0.3, 1);
-	}
 
 	/* ── Buttons (shared with the welcome modal vocabulary) ────────────────── */
 	.btn-primary {

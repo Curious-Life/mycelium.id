@@ -117,8 +117,8 @@ export function applyChannelConfigToEnv(cc, env = process.env) {
   put('CHANNEL_OPENAI_API_KEY', cc.agent?.openai?.apiKey);
   put('CHANNEL_OPENAI_MODEL', cc.agent?.openai?.model);
   put('TTS_PROVIDER', cc.tts?.provider);
-  put('KOKORO_TTS_ENABLED', cc.tts?.kokoroEnabled);   // local TTS opt-in
-  put('KOKORO_TTS_VOICE', cc.tts?.kokoroVoice);
+  put('QWEN_TTS_ENABLED', cc.tts?.qwenEnabled);       // local (MLX) voice opt-in — replaces kokoro
+  put('QWEN_TTS_VARIANT', cc.tts?.qwenVariant);       // the model variant id (no preset voices)
   put('OPENAI_API_KEY', cc.tts?.openaiApiKey);
   put('OPENAI_TTS_VOICE', cc.tts?.openaiVoice);
   put('OPENAI_TTS_MODEL', cc.tts?.openaiModel);
@@ -151,8 +151,8 @@ export function reconcileTtsEnv(cc, env = process.env) {
   const t = cc.tts || {};
   const setOrClear = (k, v) => { if (v != null && v !== '') env[k] = String(v); else delete env[k]; };
   setOrClear('TTS_PROVIDER', t.provider);
-  setOrClear('KOKORO_TTS_ENABLED', t.kokoroEnabled);
-  setOrClear('KOKORO_TTS_VOICE', t.kokoroVoice);
+  setOrClear('QWEN_TTS_ENABLED', t.qwenEnabled);
+  setOrClear('QWEN_TTS_VARIANT', t.qwenVariant);
   setOrClear('OPENAI_TTS_VOICE', t.openaiVoice);
   setOrClear('OPENAI_TTS_MODEL', t.openaiModel);
   setOrClear('ELEVENLABS_VOICE_ID', t.elevenVoiceId);

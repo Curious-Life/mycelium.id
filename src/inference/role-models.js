@@ -46,6 +46,20 @@ export const ROLE_RECOMMENDATIONS = Object.freeze({
     presetId: 'regolo',
     why: 'Mindscape narration is heavy for modest local boxes; EU zero-retention cloud keeps sensitive content sovereign.',
   }),
+  // voice (the local TTS `speak` kind) — the FIRST `voice` pick in this repo with EVIDENCE:
+  // Qwen3-TTS won a LIVE listening test on the operator's own hardware (2026-07-15), replacing
+  // Kokoro — which the operator judged "quite bad" and which sits BELOW OpenAI TTS-1 on the arena
+  // (LOCAL-TTS-EVAL §1). Runs LOCAL via the MLX runtime (Apple Silicon) — zero egress, the point.
+  // See docs/AGENT-CHARACTER-AND-VOICE-DESIGN-2026-07-15.md §0 (V1) + §2 (the evidence).
+  // `model` is the recommended MLX variant; its size/RTF live in src/tts/qwen3-tts-model.js's
+  // catalog, single-sourced FROM HERE so the "Recommended for voice" badge and the actual default
+  // can never drift (verify:tts-voice pins them equal — the LOCAL-TTS-EVAL §6.2 requirement).
+  voice: Object.freeze({
+    task: 'speak',
+    kind: 'local',
+    model: 'Qwen3-TTS-12Hz-1.7B-Base-8bit',
+    why: 'Won the live listening test (2026-07-15) on the operator’s own hardware — Apache-2.0, MLX-native, and takes a voice described in plain English.',
+  }),
 });
 
 /** The curated local model recommended for on-box labeling (the `categorize` task). */
@@ -53,6 +67,12 @@ export const labelingRecommendedModel = () => ROLE_RECOMMENDATIONS.labeling.mode
 
 /** The cloud preset id recommended for descriptions (the `narrate` task). */
 export const descriptionsRecommendedPreset = () => ROLE_RECOMMENDATIONS.descriptions.presetId;
+
+/** The curated LOCAL voice model recommended for on-box TTS (the `speak` kind) — the winner of
+ *  the live listening test (2026-07-15). Single source of truth: the qwen3-tts model catalog's
+ *  DEFAULT_VOICE_MODEL imports this so the "Recommended for voice" badge and the actual default
+ *  can never drift (verify:tts-voice pins them equal). */
+export const voiceRecommendedModel = () => ROLE_RECOMMENDATIONS.voice.model;
 
 // ── The FUNCTION taxonomy — the Intelligence screen, organized by what the user WANTS DONE ──
 // (design §3.11, "organized by FUNCTION not by provider"). This is the ordered list the ONE
@@ -124,8 +144,8 @@ export const INTELLIGENCE_FUNCTIONS = Object.freeze([
     key: 'voice', label: 'Voice', sub: 'speaking',
     tasks: Object.freeze([]),                                // TTS — a model kind, not an inference task
     kind: 'tts', jurisdiction: 'on-device-or-cloud',
-    recommend: null,                                         // ⚠️ the HONEST row: no model has won an eval (D16 pending)
-    why: 'No voice model has won a listening test yet — pick by ear.',
+    recommend: ROLE_RECOMMENDATIONS.voice.model,             // Qwen3-TTS — WON the live listening test (2026-07-15)
+    why: ROLE_RECOMMENDATIONS.voice.why,                     // single-sourced ⇒ badge == default (verify:tts-voice)
   }),
 ]);
 

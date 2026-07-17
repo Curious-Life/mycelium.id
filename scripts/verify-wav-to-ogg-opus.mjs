@@ -40,10 +40,10 @@ if (back) {
   rec('E6. tone preserved — zero-crossing rate near 2×440Hz (not noise)', perSec > 500 && perSec < 2500, `${Math.round(perSec)}/s (expect ~880)`);
 }
 
-// ── E7) 24kHz input is resampled + encoded (Kokoro emits 24k) ─────────────────
+// ── E7) 24kHz input is resampled + encoded (Qwen3-TTS emits 24k) ──────────────
 const ogg24 = wavToOggOpus(sineWav({ freq: 300, seconds: 0.5, rate: 24000 }));
 const back24 = ogg24 ? await oggOpusToWav(ogg24) : null;
-rec('E7. 24kHz WAV (Kokoro rate) resamples + round-trips to non-silent 48k audio', back24 && rms(pcmOf(back24)) > 800, ogg24 ? `${ogg24.length}B → ${back24 ? rms(pcmOf(back24)).toFixed(0) : 'null'} rms` : 'null');
+rec('E7. 24kHz WAV (Qwen3-TTS rate) resamples + round-trips to non-silent 48k audio', back24 && rms(pcmOf(back24)) > 800, ogg24 ? `${ogg24.length}B → ${back24 ? rms(pcmOf(back24)).toFixed(0) : 'null'} rms` : 'null');
 
 // ── E8) garbage in → null (fail-soft, never throws) ──────────────────────────
 let threw = false; let g; try { g = wavToOggOpus(Buffer.from('not a wav at all')); } catch { threw = true; }

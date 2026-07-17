@@ -45,7 +45,7 @@ import { wavToOggOpus } from './shared/wav-to-ogg-opus.js';
 import { generateWaveform } from './shared/waveform.js';
 
 /**
- * Encode a WAV buffer (from the local kokoro provider) to a Telegram-spec
+ * Encode a WAV buffer (from the local qwen provider) to a Telegram-spec
  * OGG/Opus file using the PURE-JS encoder — no ffmpeg (V1 principle). Returns
  * the same { path, dir, size } shape as remuxToTelegramSpec, or null so the
  * caller can fall back to the ffmpeg path.

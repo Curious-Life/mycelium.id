@@ -1,7 +1,7 @@
 import express from 'express';
 import { createReadiness } from './readiness.js';
 import { getEmbedderHealth } from './embed/supervisor.js';
-import { nudgeEnrichDrainer, pauseEnrichCategorize, resumeEnrichCategorize, isEnrichCategorizePaused, defaultLabelModel } from './enrich/drainer.js';
+import { nudgeEnrichDrainer, resetPullBackoff, pauseEnrichProcessing, resumeEnrichProcessing, isEnrichProcessingPaused, defaultLabelModel } from './enrich/drainer.js';
 import { assembleTimelineMessages } from './streams/assemble-messages.js';
 import { clampStored } from './enrich/text-limits.js';
 import { resolveInferenceConfigForTask } from './inference/resolve.js';
@@ -1193,6 +1193,11 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
   });
 
   router.post('/enrichment/trigger', async (_req, res) => {
+    // The owner's explicit "process/try again": clear the pull-failure backoff FIRST so a model
+    // download that gave up (storm fix, 2026-07-17) is retried NOW, then kick a cycle. Safe to
+    // couple: this route's only callers are user-initiated buttons — automated paths (chat/import
+    // saves) go through enqueueEnrichment/nudge, which deliberately does NOT touch the backoff.
+    resetPullBackoff();
     nudgeEnrichDrainer(); // kick a drain cycle now; no-op if the drainer isn't up
     ok(res, { jobId: 'enrich' });
   });
@@ -1228,20 +1233,47 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
     const { tagged, total, pending } = await db.messages.categoriesBacklogCached(userId);
     ok(res, {
       messages: { total, tagged, pending },
-      paused: isEnrichCategorizePaused(),
-      status: isEnrichCategorizePaused() ? 'paused' : (pending > 0 ? 'running' : 'idle'),
+      paused: isEnrichProcessingPaused(),
+      status: isEnrichProcessingPaused() ? 'paused' : (pending > 0 ? 'running' : 'idle'),
       stageLabel: `Sorting: ${tagged.toLocaleString()} / ${total.toLocaleString()}`,
     });
   });
 
-  router.post('/enrichment/categorize/pause', async (_req, res) => {
-    pauseEnrichCategorize();
-    ok(res, { paused: true });
+  // ── Pause / resume ALL on-box processing (§3.9/R3, D13) ────────────────────
+  // Renamed off `/enrichment/categorize/*`: the flag gates the embed drain AND L1+L2, so a
+  // path saying "categorize" described one of the three stages it stops — and not the one
+  // burning the CPU.
+  //
+  // ⚠️ PERSIST FIRST, APPLY SECOND, AND REPORT A FAILED WRITE. The pause is persisted (D13:
+  // "only restart when you click restart"), so a write that fails while the flag flips in
+  // memory produces INVISIBLE divergence: the vault reads paused now and silently resumes on
+  // the next restart — the exact silent-undo D13 exists to remove. Refusing to apply is
+  // visible and recoverable; applying without persisting is neither. Same rule as E3's
+  // /onboarding/reset: a control that cannot keep its promise says so.
+  //
+  // ⚠️ READ-MODIFY-WRITE: db.users.updateSettings REPLACES THE WHOLE BLOB (portal-hardware.js
+  // :115). A bare write of {enrichProcessingPaused} drops taskModels, and with it the model
+  // approvals — it has already happened once. Gated by P4.
+  async function persistPause(paused) {
+    const s = (await db.users.getSettings(userId)) || {};
+    const pausedAt = paused ? new Date().toISOString() : null;
+    await db.users.updateSettings(userId, { ...s, enrichProcessingPaused: paused, enrichProcessingPausedAt: pausedAt });
+    return pausedAt;
+  }
+
+  router.post('/enrichment/processing/pause', async (_req, res) => {
+    let pausedAt;
+    try { pausedAt = await persistPause(true); }
+    catch { return fail(res, 500, 'could not pause processing'); }
+    pauseEnrichProcessing();
+    ok(res, { paused: true, pausedAt });
   });
 
-  router.post('/enrichment/categorize/resume', async (_req, res) => {
-    resumeEnrichCategorize(); // clears the flag + kicks a cycle so progress moves at once
-    ok(res, { paused: false });
+  router.post('/enrichment/processing/resume', async (_req, res) => {
+    try { await persistPause(false); }
+    catch { return fail(res, 500, 'could not resume processing'); }
+    resumeEnrichProcessing(); // clears the flag + kicks a cycle so progress moves at once
+    ok(res, { paused: false, pausedAt: null });
   });
 
   // ── Import preview — the onboarding "See your mind" evidence card ───────────

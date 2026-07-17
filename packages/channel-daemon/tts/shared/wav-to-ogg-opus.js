@@ -15,7 +15,7 @@ const FRAME = 960;         // 20 ms @ 48k
 const CHANNELS = 1;
 const SERIAL = 0x6d796365; // 'myce' — fixed bitstream serial (single logical stream)
 
-// ── WAV parse: 44-byte PCM s16le header (what Kokoro/transcribe emit) ─────────
+// ── WAV parse: 44-byte PCM s16le header (what Qwen3-TTS/transcribe emit) ──────
 function parseWav(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < 44 || buf.toString('latin1', 0, 4) !== 'RIFF' || buf.toString('latin1', 8, 12) !== 'WAVE') return null;
   // walk chunks to find fmt + data (don't assume canonical 44-byte layout)

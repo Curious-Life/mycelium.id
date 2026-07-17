@@ -6,6 +6,7 @@
 // documents, images into attachments), folder of notes → /portal/import/obsidian.
 import JSZip from 'jszip';
 import { api } from '$lib/api';
+import { signalImportCompleted } from '$lib/stores/onboarding-data.svelte';
 
 export type ImportResult = {
 	kind: 'archive' | 'files' | 'folder';
@@ -84,6 +85,10 @@ export async function importFiles(files: File[], opts: Opts = {}): Promise<Impor
 	}
 	const kind: ImportResult['kind'] = files.some((f) => ARCHIVE_RE.test(f.name)) ? 'archive' : 'files';
 	const detail = `${imported.toLocaleString()} imported${skipped ? `, ${skipped} duplicates` : ''}${failed ? `, ${failed} failed` : ''}`;
+	// Data landed → tell the invite panel (and any other readiness consumer) to re-read, so
+	// "no data uploaded" can never persist over a full vault after a drop or a Library import.
+	// This is the shared chokepoint <ImportField> and <ImportDropZone> both funnel through.
+	if (imported > 0) signalImportCompleted();
 	return { kind, type, imported, skipped, failed, detail, error };
 }
 
@@ -125,5 +130,7 @@ export async function importFolder(list: File[], opts: Opts = {}): Promise<Impor
 	if (!res.ok || !d.ok) return { kind: 'folder', imported: 0, skipped: 0, failed: 0, detail: '', error: d.error || `Import failed (${res.status}).` };
 	const imported = num(d.documentsUpserted);
 	const detail = `${imported.toLocaleString()} notes${d.failed ? `, ${num(d.failed)} failed` : ''}${d.assets?.imported ? `, ${num(d.assets.imported)} media` : ''}`;
+	// A folder of notes is data landing too — same signal, so the invite learns about it.
+	if (imported > 0) signalImportCompleted();
 	return { kind: 'folder', type: 'obsidian', imported, skipped: num(d.skipped), failed: num(d.failed), detail };
 }

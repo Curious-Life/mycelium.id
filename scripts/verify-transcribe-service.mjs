@@ -75,7 +75,12 @@ app.use(express.json());
 app.use('/portal', portalTranscriptionRouter({
   db, userId: 'local-user',
   authenticatePortalRequest: () => ({ id: 'local-user' }),
-  detectHardware: async () => ({ memoryGB: 32 }),
+  // ⚠️ `totalRamGb` — detect.js's REAL field. This fixture said `memoryGB: 32` while the route
+  // read `?.memoryGB`: both wrong together, so R1 was green while the minRamGB gate was DEAD in
+  // production (ramGB always null ⇒ an 8 GB box was recommended the 16 GB-min model). The
+  // fixture pinned the bug, not the behaviour (gates-fail-on-fixtures). R1b below is the arm
+  // that actually discriminates: a low-RAM box must get `small`.
+  detectHardware: async () => ({ totalRamGb: 32 }),
 }));
 const api = createServer(app);
 await new Promise((r) => api.listen(18094, '127.0.0.1', r));
@@ -85,6 +90,27 @@ const st = await (await fetch(`${base}/transcription/status`)).json();
 rec('R1. status returns health + catalog with RAM-based recommendation',
   st.ok && st.health?.status === 'ok' && st.catalog?.length === 2 && st.catalog.find((c) => c.model === 'large-v3-turbo')?.recommended === true,
   JSON.stringify(st.catalog?.map((c) => [c.model, c.recommended])));
+
+// R1b — the discriminating arm: 8 GB < large-v3-turbo's minRamGB(16) ⇒ `small` must win.
+// With the dead `memoryGB` read, ramGB was null and large-v3-turbo won here too — this is the
+// assertion that turns red on that regression (32 GB alone passes either way).
+{
+  const app8 = express();
+  app8.use(express.json());
+  app8.use('/portal', portalTranscriptionRouter({
+    db, userId: 'local-user',
+    authenticatePortalRequest: () => ({ id: 'local-user' }),
+    detectHardware: async () => ({ totalRamGb: 8 }),
+  }));
+  const api8 = createServer(app8);
+  await new Promise((r) => api8.listen(18095, '127.0.0.1', r));
+  const st8 = await (await fetch('http://127.0.0.1:18095/portal/transcription/status')).json();
+  rec('R1b. an 8 GB box is recommended `small` — the minRamGB gate is ALIVE',
+    st8.ok && st8.catalog.find((c) => c.model === 'small')?.recommended === true
+      && st8.catalog.find((c) => c.model === 'large-v3-turbo')?.recommended !== true,
+    JSON.stringify(st8.catalog?.map((c) => [c.model, c.recommended])));
+  api8.close();
+}
 
 const bad = await fetch(`${base}/transcription/download`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'huge-v9' }) });
 rec('R2. unknown model → 400 (curated catalog only)', bad.status === 400);

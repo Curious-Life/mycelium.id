@@ -1,5 +1,11 @@
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
+import { readFileSync } from 'node:fs';
+
+// The app version, baked in at build time from the REPO root package.json (the
+// single source the release flow bumps — same number the Tauri bundle and the
+// updater manifest carry). Rendered as the subtle badge in the sidebar footer.
+const appVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 // In production the SvelteKit build is served by the Node backend (server-rest.js)
 // on the same origin, so all `/api`, `/auth`, `/oauth`, `/mcp` calls are relative.
@@ -16,6 +22,9 @@ const proxy = Object.fromEntries(
 
 export default defineConfig({
 	plugins: [sveltekit()],
+	define: {
+		__APP_VERSION__: JSON.stringify(appVersion)
+	},
 	server: {
 		port: 5173,
 		proxy

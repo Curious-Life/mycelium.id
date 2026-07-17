@@ -8,6 +8,7 @@
 	import ImportField from '$lib/components/import/ImportField.svelte';
 	import ScanForData from '$lib/components/import/ScanForData.svelte';
 	import SourceCatalog from '$lib/components/import/SourceCatalog.svelte';
+	import { importCompletedSignal } from '$lib/stores/onboarding-data.svelte';
 	import IntelligenceScreen from '$lib/components/settings/IntelligenceScreen.svelte';
 	import AISettings from '$lib/components/settings/AISettings.svelte';
 	import TelegramConnect from '$lib/components/channels/TelegramConnect.svelte';
@@ -30,7 +31,14 @@
 	// They now derive from `/portal/readiness` — the one readiness model (design §3.2).
 	// A check now means "the vault has this", which is what the check always claimed.
 	type Readiness = {
-		data?: { total: number; unknown?: boolean };
+		// ⚠️ WIRE CONTRACT: `data` carries NO `unknown` marker — readiness.js strips it before
+		// the response (`delete out.data.unknown`, readiness.js get()). The wire-visible signal
+		// for "the data count FAILED" is `canGenerate.reason === 'unknown'`, emitted whenever
+		// the `data` slice is requested. Keying the §3.2a latch off `data.unknown` was dead
+		// code against the real server (found by driving the wire shape, 2026-07-17).
+		// `evidence.unknown` IS surfaced — only data's marker is stripped.
+		data?: { total: number };
+		canGenerate?: { ok: boolean; reason: string | null };
 		evidence?: {
 			sources: { source: string; count: number }[];
 			dateRange: { yearStart: number | null; yearEnd: number | null };
@@ -46,19 +54,104 @@
 	// `evidence` is OPT-IN (readiness.js) — three unindexed aggregates. Name it once, at
 	// mount and after an import; NEVER poll it (design PIVOT 2).
 	const SLICES = 'data,evidence,ai,channel';
+	let inFlight = false;
 	async function loadReadiness() {
+		// In-flight dedupe: a refresh while one is running re-ARMS the debounce instead of
+		// stacking a duplicate fetch (and instead of dropping the update — a signal that
+		// arrives mid-flight still lands, one debounce later).
+		if (inFlight) { scheduleRefresh(); return; }
+		inFlight = true;
 		try {
 			const r = await api(`/portal/readiness?slices=${SLICES}`);
-			if (r.ok) readiness = await r.json();
+			// ⚠️ §3.2a — ASSIGN ONLY ON A GOOD READ. A failed read (network throw OR !ok) leaves
+			// `readiness` untouched, so a nonzero display is NEVER regressed to "no data" by a
+			// blip. This is the hold-the-last-known-answer contract; the re-reads below lean on it.
+			if (r.ok) {
+				const next: Readiness = await r.json();
+				// ⚠️ AND THE FACT, NOT JUST THE TRANSPORT. When the backlog read throws
+				// (SQLITE_BUSY mid-import is the common case) the server answers a 200 whose
+				// `data` is zeros and whose `canGenerate.reason` is 'unknown' — the `unknown`
+				// marker itself never reaches the wire (see the type's WIRE CONTRACT note).
+				// 'unknown' is "I could not look", never "it is empty" — so it must not
+				// overwrite a known fact. Latch data (and its canGenerate) to the last
+				// known-good value; evidence keeps its own surfaced marker.
+				if (next?.canGenerate?.reason === 'unknown' && readiness?.data) {
+					next.data = readiness.data;
+					next.canGenerate = readiness.canGenerate ?? next.canGenerate;
+				}
+				if (next?.evidence?.unknown && readiness?.evidence && !readiness.evidence.unknown) next.evidence = readiness.evidence;
+				readiness = next;
+			}
 		} catch { /* leave the last good answer; a failed read must not un-tick a true check */ }
+		finally { inFlight = false; }
 	}
 	$effect(() => { if (readiness === null) void loadReadiness(); });
+
+	// ── Learn about data from ANY import path — not just this component's uploader ──────────────
+	// The invite used to read readiness once on mount, then only after ITS OWN import; a drop over
+	// the map (<ImportDropZone>) or an import on the Import page (<ImportView>) never reached it, so
+	// it kept saying "no data uploaded" over a full vault. Two cheap, event-driven re-reads close
+	// that gap WITHOUT a poll (design PIVOT 2 — never an interval on readiness):
+	//   1. the cross-component import-completed signal (emitted by every import success path), and
+	//   2. window focus (an import that finished while the app was backgrounded).
+	// A failed re-read holds the last answer (§3.2a, above).
+	//
+	// ⚠️ DEBOUNCED, DEDUPED, AND FOCUS IS A CHANGE-PROBE. The evidence slice is 3 unindexed
+	// aggregates + the people count (~4 uncached queries); the invite is mounted for the vault's
+	// whole pre-generate life, and focus events come in flurries (cmd-tab, mission control). So:
+	//   • every trigger goes through a trailing debounce (REFRESH_DEBOUNCE_MS) + in-flight dedupe;
+	//   • focus does NOT re-read evidence blindly — it probes ONLY the cheap SWR-cached `data`
+	//     slice and fetches the full slices only when the total actually MOVED. A focus flurry
+	//     over an unchanged vault costs exactly one cached COUNT read, zero aggregate scans.
+	const REFRESH_DEBOUNCE_MS = 1000;
+	let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+	function scheduleRefresh() {
+		if (refreshTimer) clearTimeout(refreshTimer);
+		refreshTimer = setTimeout(() => { refreshTimer = null; void loadReadiness(); }, REFRESH_DEBOUNCE_MS);
+	}
+	let probeTimer: ReturnType<typeof setTimeout> | null = null;
+	let probing = false;
+	function scheduleFocusProbe() {
+		if (probeTimer) clearTimeout(probeTimer);
+		probeTimer = setTimeout(() => { probeTimer = null; void focusProbe(); }, REFRESH_DEBOUNCE_MS);
+	}
+	async function focusProbe() {
+		if (probing || inFlight) return;   // a full refresh in flight already answers this
+		probing = true;
+		try {
+			const r = await api('/portal/readiness?slices=data');   // SWR-cached COUNT — the cheap read
+			if (r.ok) {
+				const d: Readiness = await r.json();
+				// Only a KNOWN total that differs from what we're showing warrants the full
+				// (evidence-carrying) refresh. `unknown` claims nothing — hold (§3.2a). The
+				// failure signal is canGenerate.reason (the wire strips data.unknown).
+				if (d?.data && d.canGenerate?.reason !== 'unknown' && d.data.total !== (readiness?.data?.total ?? null)) void loadReadiness();
+			}
+		} catch { /* hold */ }
+		finally { probing = false; }
+	}
+	$effect(() => {
+		// Read the signal UNCONDITIONALLY so this effect tracks it (a gated read would not
+		// subscribe). Skip the mount value (0) — the null-effect above owns the first load.
+		const sig = importCompletedSignal();
+		if (sig > 0) scheduleRefresh();
+	});
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		const onFocus = () => scheduleFocusProbe();
+		window.addEventListener('focus', onFocus);
+		return () => {
+			window.removeEventListener('focus', onFocus);
+			if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
+			if (probeTimer) { clearTimeout(probeTimer); probeTimer = null; }
+		};
+	});
 
 	// ⚠️ `unknown` is NOT `false`. A count that FAILED must not report an empty vault
 	// (design §3.2a — the live preflight bug where a catch left total=0 and the next line
 	// told an owner with 70k messages to "import some conversations first"). While the
 	// read is unknown we claim nothing: no tick, and no "you have no data" either.
-	const dataDone = $derived(!!readiness?.data && !readiness.data.unknown && readiness.data.total > 0);
+	const dataDone = $derived(!!readiness?.data && readiness?.canGenerate?.reason !== 'unknown' && readiness.data.total > 0);
 	const aiDone = $derived(readiness?.ai?.connected === true);
 	const connectDone = $derived(readiness?.channel?.connected === true);
 
@@ -85,6 +178,15 @@
 		if (e.peopleCount) bits.push(`${e.peopleCount.toLocaleString()} people`);
 		return bits;
 	});
+
+	// What the Data step SHOWS once the vault has data. The rich `evidence` slice can be `unknown`
+	// (a swallowed aggregate read) even when `data` is known — and in that case we must STILL show
+	// how much rather than falling back to the empty-state copy (§3.2a: data known ⇒ never "no
+	// data"). So the display is evidenceBits when we have them, else the bare count we always know.
+	const dataTotal = $derived(readiness?.data?.total ?? 0);
+	const evidenceDisplay = $derived(
+		evidenceBits.length ? evidenceBits : (dataDone ? [`${dataTotal.toLocaleString()} messages`] : []),
+	);
 
 	// ── Data ───────────────────────────────────────────────────────────────────
 	// One uploader (ImportField) handles everything: ChatGPT/Claude/vault zips,
@@ -139,13 +241,64 @@
      The header activity chip cannot cover it either: up-to-date/error/embedding all return
      with NO jobId, so no `mycelium_generate` job row is ever created for it to read.
      The invite IS mounted here, unconditionally — so it speaks. §3.7 wanted Generate in the
-     invite anyway ("it's a pre-generation act"); this is that, scoped to its voice. -->
-{#if $generate.phase === 'embedding' || $generate.phase === 'running' || $generate.phase === 'error'}
+     invite anyway ("it's a pre-generation act"); this is that, scoped to its voice.
+     ⚠️ DENY-BY-DEFAULT ON THE PHASE — `!== 'idle'`, never a list. This guard was an ENUMERATION
+     twice, and both times the enumeration was the bug:
+       · v1 listed embedding/running/error, omitting `up-to-date` because "topology_exists cannot
+         be true of a vault with no points" — false (see the note on that branch).
+       · v2 added `up-to-date` and omitted `done`/`starting`, excused as "transient". Also false.
+         `done` fires MindscapeView:105's `mindscapeState.load()` — THE SAME CALL whose catch
+         (mindscape.ts:486) leaves `points: []`. If it fails: points stays [] ⇒ this component
+         stays mounted ⇒ phase `done` ⇒ nothing renders ⇒ resetGen() at :107 → `idle` → silent
+         FOREVER. And `done` is the FIRST-RUN HAPPY PATH: the invite is mounted for the whole
+         fresh-vault run (embedding → running → done), so the user watches progress and then
+         watches it vanish, with no map and no error. `starting` persists for as long as the POST
+         takes — unbounded if the server hangs.
+     Each time, the excuse was an unverified reachability argument ("cannot happen", "transient")
+     protecting an unrendered phase — and each time the failure case refuted it. So the guard no
+     longer takes a position on reachability at all: EVERY non-idle phase renders, and the final
+     `{:else}` is a DEFAULT arm, so a phase added to GenPhase later cannot be silently omitted
+     from this surface. `idle` is the only state with nothing to say.
+     The rule is design §5.4: a phase the store can hold and this surface cannot show is SILENCE,
+     which is the bug. An enumeration is a PROJECTION of that rule; `!== 'idle'` IS the rule. -->
+{#if $generate.phase !== 'idle'}
 	<div class="gen-status" class:err={$generate.phase === 'error'}>
 		{#if $generate.phase === 'error'}
 			<span class="gen-dot err"></span>
 			<span>{$generate.error}</span>
+		{:else if $generate.phase === 'up-to-date'}
+			<!-- ⚠️ `up-to-date` IS REACHABLE HERE, and the reasoning that said otherwise was wrong.
+			     I gated this block for embedding/running/error and wrote that 'skipped' could never
+			     reach the invite because it means topology_exists, "which cannot be true of a vault
+			     with no points". That conflates TWO different point counts:
+			       · the route skips iff the SERVER has clustering_points > 0 (portal-mindscape.js:627)
+			       · this invite mounts iff the CLIENT has msState.points.length === 0 (MindscapeView:502)
+			     They diverge: mindscape.ts:486's catch leaves `points: []` + `loading: false` on ANY
+			     load failure while the server's topology still exists. `hasImportedData` then comes
+			     from messageCount, NOT points (MindscapeView:31), so the auto-gen effect (:94) fires
+			     → 200 skipped → 'up-to-date' → this block → nothing. A user with a fully built map
+			     sees the import screen and SILENCE. That is the original bug, on the exact surface
+			     MED-1 flagged, kept alive by a gate comment that called it intentional.
+			     Terminal state ⇒ a settled dot, not the pulsing one. (Independent review of #194.) -->
+			<span class="gen-dot done"></span>
+			<span>{$generate.message || 'Your map is already built.'}</span>
+		{:else if $generate.phase === 'done'}
+			<!-- TERMINAL, and on the fresh-vault HAPPY PATH. Normally MindscapeView:105 reloads and
+			     this component unmounts before it matters — but that reload is the one that can
+			     leave `points: []`, and then this line is the only thing standing between the user
+			     and silence. It must not imply work: settled dot, no ETA.
+			     ⚠️ NO `|| $generate.stageLabel` HERE, deliberately. generate.ts:115 sets
+			     stageLabel:'Complete' UNCONDITIONALLY on done and `message` is always '' by then,
+			     so `message || stageLabel || 'Your map is ready.'` made the authored copy DEAD CODE
+			     and showed the user the bare internal marker "Complete" — in exactly the scenario
+			     this arm exists for. A fallback chain routed through an internal label never
+			     reaches its own last arm. D2e's EXPECT table forbids it. -->
+			<span class="gen-dot done"></span>
+			<span>{$generate.message || 'Your map is ready.'}</span>
 		{:else}
+			<!-- ⚠️ THE DEFAULT ARM — embedding, running, starting, and any phase added later.
+			     Deliberately NOT a list: a new GenPhase must land here and say "Working…" rather
+			     than fall through to nothing. Omission is what this whole block is a fix for. -->
 			<span class="gen-dot"></span>
 			<span>
 				{$generate.message || $generate.stageLabel || 'Working…'}
@@ -198,28 +351,45 @@
 	<button class="invite-back" onclick={() => (step = 'home')}>← Back</button>
 
 	{#if step === 'data'}
-		<h2 class="welcome-title invite-title">Bring your world in</h2>
-		<p class="welcome-subtitle">Your conversations, journals, transcripts — anything that holds your thinking. Drop a ChatGPT/Claude export, loose notes (.md, .txt, .pdf), or a whole folder. Encrypted on import.</p>
-		<ImportField
-			accept="*"
-			multiple
-			folder
-			label="Drop an export, notes, or files — or choose"
-			onResult={onImportResult}
-			onError={onImportError}
-		/>
+		{#if dataDone}
+			<!-- The vault HAS data — imported here, on the Import page, OR dropped over the map.
+			     Show the EVIDENCE (how much + what kind) and an "Add more" affordance; NEVER the
+			     empty-state "bring your world in" copy (operator ask + §3.2a: it is not empty, and
+			     a later failed read must not regress this back to the empty state — see
+			     loadReadiness's hold-the-last-answer contract). -->
+			<h2 class="welcome-title invite-title">Your mycelium is growing</h2>
+			<p class="welcome-subtitle">Here’s what’s taken root so far. Add more any time — new exports, notes, or files all weave into the same map.</p>
+			<!-- The evidence card (ask #3): proof we perceived what you gave us. evidenceDisplay is
+			     the rich aggregates when known, else the bare count we always have once data exists —
+			     so an `unknown` evidence read still shows HOW MUCH, never a "0 sources" impersonation. -->
+			{#if evidenceDisplay.length}
+				<div class="evidence">
+					<span class="evidence-title">In your vault</span>
+					<p class="evidence-line">{evidenceDisplay.join(' · ')}</p>
+				</div>
+			{/if}
+			<ImportField
+				accept="*"
+				multiple
+				folder
+				label="Add more — another export, notes, or files"
+				onResult={onImportResult}
+				onError={onImportError}
+			/>
+		{:else}
+			<h2 class="welcome-title invite-title">Bring your world in</h2>
+			<p class="welcome-subtitle">Your conversations, journals, transcripts — anything that holds your thinking. Drop a ChatGPT/Claude export, loose notes (.md, .txt, .pdf), or a whole folder. Encrypted on import.</p>
+			<ImportField
+				accept="*"
+				multiple
+				folder
+				label="Drop an export, notes, or files — or choose"
+				onResult={onImportResult}
+				onError={onImportError}
+			/>
+		{/if}
 		{#if importMsg}<p class="invite-ok">{importMsg} Your map is forming.</p>{/if}
 		{#if importErr}<p class="invite-err">{importErr}</p>{/if}
-
-		<!-- The evidence card (ask #3): proof we perceived what you gave us. Renders ONLY
-		     when the read succeeded AND there is something to show — an `unknown` read or an
-		     empty vault says nothing rather than claiming "0 sources" (design §3.2a). -->
-		{#if evidenceBits.length}
-			<div class="evidence">
-				<span class="evidence-title">In your vault</span>
-				<p class="evidence-line">{evidenceBits.join(' · ')}</p>
-			</div>
-		{/if}
 
 		<!-- Find local data already on this Mac (Obsidian, Claude Code) → one-click import. -->
 		<div class="scan-wrap"><ScanForData onImported={() => { void loadReadiness(); onImported(); }} /></div>
@@ -289,6 +459,13 @@
 		background: var(--color-accent-aurum, #e5b84c); animation: gen-pulse 1.6s ease-in-out infinite;
 	}
 	.gen-dot.err { background: var(--color-accent-coral, #f87171); animation: none; }
+	/* `up-to-date` is TERMINAL — nothing is in flight, so the dot must not imply work.
+	   jade = the design system's green (tokens.css:39/:132); the fallback matches its dark value,
+	   the same convention .gen-dot.err uses for coral. ⚠️ I first wrote `--color-accent-sage`,
+	   which does not exist anywhere in this codebase — an invented token silently falls back to
+	   its hardcoded hex and stops tracking the light/dark themes, which is a bug CSS never
+	   reports. Only tokens defined in tokens.css. */
+	.gen-dot.done { background: var(--color-accent-jade, #4ade80); animation: none; }
 	@keyframes gen-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 
 	/* ── Progress stepper ───────────────────────────────────────────────────── */

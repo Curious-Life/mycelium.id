@@ -203,15 +203,24 @@ const ALLOW = [
 const SRC = { ai: 'portal-app/src/lib/components/settings/AISettings.svelte' };
 {
   const src = readFileSync(new URL(`../${SRC.ai}`, import.meta.url), 'utf8');
-  ok(/activeInfo\.local\}[\s\S]{0,120}ON_DEVICE\.label/.test(src),
-    'P6c the green "on your device" chip is gated on the server field (activeInfo.local)');
+  // ── P6c/P6e, REWRITTEN for the Intelligence restructure (Part I §9, 2026-07-17) ────────
+  // They used to pin the active-model HERO's green chip to the server field
+  // (`local: !!active.on_this_device` → `activeInfo.local`). The hero was REMOVED — the
+  // summary card (IntelligenceFlow) replaced it, and it makes NO per-provider locality
+  // claim at all (its only "on this Mac" phrase attaches to ON-BOX task rows, which store a
+  // local model NAME by construction — portal-providers.js ONBOX_TASKS — not a URL that
+  // could be misclassified). The property these asserts defended therefore now holds by
+  // ABSENCE, and the asserts must pin the absence, or the deletion would read as a FAIL and
+  // invite "fixing" the gate by deleting it (pre-deletion-caller-audit: the gate is the
+  // migrated caller). If a per-provider on-device chip ever returns here, P6's deny-by-
+  // default token scan (any client-side loopback derivation) + P1/P3 (the wire) still hold
+  // the real line; these two hold the surface.
+  ok(!/activeInfo/.test(src),
+    'P6c the active-model hero (and its locality chip) stays REMOVED from AISettings — the summary card owns that fact');
   ok(!/local:\s*\{\s*label:\s*'on your device'/.test(src),
     'P6d JURIS.local no longer claims "on your device" (the .local inversion)');
-  // Assert the USAGE, not the mere presence of the string: `/on_this_device/.test(src)` was
-  // satisfied by the comments and the type alias alone — an independent reviewer removed every
-  // real consumer and it still passed. Same projection trap as the first P6.
-  ok(/local:\s*!!active\.on_this_device\b/.test(src),
-    'P6e activeInfo.local IS the server field (not merely mentioned)');
+  ok(!/['"`]on your device['"`]\s*,?\s*cls/.test(src),
+    'P6e no per-provider "on your device" chip map remains in AISettings — a re-grown chip must re-earn its server-field gate');
   // The DESTRUCTIVE surface: `on_this_device` is the outer of the two guards on the Ollama
   // disk-delete offer. Ungating it carries no loopback token, so P6's token scan cannot see
   // it — this assert is the only thing holding that line. (Found by independent review: the

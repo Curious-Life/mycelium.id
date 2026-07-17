@@ -19,17 +19,17 @@
 
 import { openAIProvider } from './openai.js';
 import { elevenLabsProvider } from './elevenlabs.js';
-import { kokoroProvider } from './kokoro.js';
+import { qwenProvider } from './qwen.js';
 
 export const PROVIDERS = {
-  'kokoro':     kokoroProvider,
+  'qwen':       qwenProvider,     // local, on-box (MLX) — replaces the removed kokoro
   'openai':     openAIProvider,
   'elevenlabs': elevenLabsProvider,
 };
 
 /** Order-preserving list for implicit fallback. Local-first (zero egress). */
 export const PROVIDER_FALLBACK_ORDER = [
-  'kokoro',
+  'qwen',
   'openai',
   'elevenlabs',
 ];

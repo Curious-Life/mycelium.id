@@ -83,16 +83,40 @@ const ss = (fn: (s: Storage) => void) => { try { if (typeof sessionStorage !== '
 function stop() { if (timer) { clearInterval(timer); timer = null; } }
 function run() { stop(); timer = setInterval(tick, POLL_MS); void tick(); }
 
-/** Live ETA: seed from the last run's duration; else project from step fraction. */
+// A projection divides BY elapsed time, so it is worthless until some has passed. 3s ≈ two polls.
+const ETA_MIN_ELAPSED_S = 3;
+
+/**
+ * Live ETA in seconds, or null when we don't know one yet. Seeded from the last run's duration
+ * (priorDurationMs); otherwise projected from the step fraction.
+ *
+ * ⚠️ `null` is the only honest way to say "not yet" — and 0 is NOT null, it is a claim that the
+ * run is over. run() calls tick() IMMEDIATELY, so the first pollStatus lands at elapsed≈0, where
+ * `elapsed / frac - elapsed` is 0: a clustering run that takes MINUTES announced "~0s left" the
+ * instant it started. priorDurationMs masks that on second+ runs, so it hit hardest on the FIRST
+ * run — the fresh vault, where the invite is the only generate surface (MindscapeView:502) and
+ * the user has the least context for disbelieving it.
+ *
+ * Both guards below are load-bearing; neither subsumes the other:
+ *   · eta > 0     — kills the elapsed≈0 zero, and the SAME lie at the other end: once a run
+ *                   overruns priorDurationMs, `prior - elapsed` goes negative and the old
+ *                   `Math.max(0, …)` pinned it at "~0s left" for the rest of a long run.
+ *   · min elapsed — a zero-check alone is not enough. At elapsed=0.5s with step 1/5 the
+ *                   projection is a confident "~2s left" for a multi-minute run; rounding to a
+ *                   non-zero number does not make a projection real.
+ * Returning null is rendering-safe, not a blank: the templates already guard with
+ * `{#if $generate.etaSeconds != null}` (MindscapeInvite:326), so it simply shows no ETA.
+ */
 function computeEta(s: GenState): number | null {
   if (s.startedAt == null) return null;
   const elapsed = (Date.now() - s.startedAt) / 1000;
-  if (priorDurationMs && priorDurationMs > 0) return Math.max(0, Math.round(priorDurationMs / 1000 - elapsed));
-  if (s.step >= 1 && s.totalSteps > 0) {
-    const frac = s.step / s.totalSteps;
-    return Math.max(0, Math.round(elapsed / frac - elapsed));
-  }
-  return null;
+  if (elapsed < ETA_MIN_ELAPSED_S) return null;
+  const projected = priorDurationMs && priorDurationMs > 0
+    ? priorDurationMs / 1000 - elapsed
+    : (s.step >= 1 && s.totalSteps > 0 ? elapsed / (s.step / s.totalSteps) - elapsed : null);
+  if (projected == null) return null;
+  const eta = Math.round(projected);
+  return eta > 0 ? eta : null;
 }
 
 async function tick() {

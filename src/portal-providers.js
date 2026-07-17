@@ -97,6 +97,82 @@ const publicRow = (r) => ({
   last_used_at: r.last_used_at, created_at: r.created_at, updated_at: r.updated_at,
 });
 
+// ── THE one task-model write path — the consent mechanism itself ────────────────────────────
+// Shared by PUT /providers/task-models (the Intelligence screen's approve/assign) AND the
+// bundle orchestrator (src/portal-intelligence.js POST /intelligence/bundle/apply). The
+// approval IS the setting (§3.10c): an empty/absent model CLEARS the task, and clearing means
+// NOT APPROVED — nothing downloads, nothing runs. Fail-closed: validation errors persist
+// nothing (the local copy is only written in the ONE updateSettings at the end).
+//
+// Returns { ok:true, taskModels } or { ok:false, code, error }. Never throws for a caller
+// mistake; a storage failure rethrows so the route can 500 honestly.
+export async function applyTaskModelWrite({ db, userId, body }) {
+  const { task, function: fnKey, providerId = null, model = null } = body || {};
+  // Both keys is a caller bug, not a precedence question: silently honouring `function` and
+  // dropping `task` would write two tasks the caller didn't ask for and skip the one it did.
+  if (fnKey !== undefined && fnKey !== null && task !== undefined && task !== null) {
+    // NB the message names both keys rather than claiming a `function` was "sent": a falsy
+    // -but-present value ({function:''}) lands here too, and "not both" would read as a lie.
+    return { ok: false, code: 400, error: 'send `task` OR `function` — both were present in the body' };
+  }
+  // Resolve the target task list: a function fans out to its tasks; a task is itself.
+  let targets;
+  if (fnKey !== undefined && fnKey !== null) {
+    const known = INTELLIGENCE_FUNCTIONS.find((f) => f.key === fnKey);
+    targets = [...tasksForFunction(fnKey)];
+    if (!targets.length) {
+      // transcription/voice are REAL functions that own no INFERENCE_TASK — they have their
+      // own rails (whisper's download route, the TTS catalog). Saying "unknown" would be a
+      // lie the first UI author trips over; say what is actually true.
+      return { ok: false, code: 400, error: known
+        ? `function '${fnKey}' has no inference task — it is assigned through its own surface`
+        : `unknown function (allowed: ${INTELLIGENCE_FUNCTIONS.filter((f) => f.tasks.length).map((f) => f.key).join(', ')})` };
+    }
+  } else if (INFERENCE_TASKS.includes(task)) {
+    targets = [task];
+  } else {
+    return { ok: false, code: 400, error: `unknown task (allowed: ${INFERENCE_TASKS.join(', ')})` };
+  }
+
+  const settings = (await db.users?.getSettings?.(userId)) || {};
+  const taskModels = { ...(settings.taskModels || {}) };
+  // ⚠️ WHAT ACTUALLY MAKES THIS ATOMIC IS THE SINGLE `updateSettings` BELOW — not the fact
+  // that validation sits up here. `taskModels` is a LOCAL COPY, so any early return
+  // persists nothing no matter where it fires. An earlier version of this comment (and its
+  // commit message) claimed the up-front ordering was the mechanism preventing a
+  // half-apply, and claimed M9 (verify-task-models.mjs) would fail if you moved validation into the loop. A reviewer
+  // moved it into the loop: it still PASSED. The claim was false (independent review,
+  // 2026-07-16). Validating up-front is still better — it is cheaper and reads clearly —
+  // but do not mistake it for the guarantee. THE GUARANTEE IS: build the whole next state,
+  // then write it ONCE. If you ever move the write inside the loop, the fan-out stops being
+  // atomic and no current gate would catch it.
+  const onboxName = typeof model === 'string' ? model.trim() : '';
+  if (targets.some((t) => ONBOX_TASKS.has(t)) && onboxName) {
+    // Ollama tag shape (defense in depth — this value is later fed to localInfer as a model tag).
+    // Allow namespace/name:tag (so '/' and ':' are legitimate), but reject '..' so a stored
+    // name can never be path-traversal-shaped, even though the only sink is a JSON model field.
+    if (!/^[\w./:-]{1,64}$/.test(onboxName) || onboxName.includes('..')) return { ok: false, code: 400, error: 'invalid model name' };
+  }
+  if (targets.some((t) => !ONBOX_TASKS.has(t)) && providerId != null) {
+    const row = await db.providers.get(providerId, userId); // must be a configured provider of THIS user
+    if (!row) return { ok: false, code: 404, error: 'provider not found' };
+  }
+
+  for (const t of targets) {
+    if (ONBOX_TASKS.has(t)) {
+      // Local model NAME only — no providerId, no provider-row lookup.
+      if (!onboxName) delete taskModels[t];              // clear → NOT approved (nothing pulls, nothing runs)
+      else taskModels[t] = { model: onboxName };
+    } else if (providerId == null) {
+      delete taskModels[t];                              // clear → falls back to the active provider
+    } else {
+      taskModels[t] = { providerId, ...(model ? { model: String(model) } : {}) };
+    }
+  }
+  await db.users.updateSettings(userId, { ...settings, taskModels });   // ONE write ⇒ atomic
+  return { ok: true, taskModels };
+}
+
 // The provider vocabulary is shared with the import path (see known-providers.js) —
 // what this route refuses to create, a restore must refuse to resurrect.
 const KNOWN = KNOWN_PROVIDERS;
@@ -174,73 +250,18 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   // split being UNAVOIDABLE; what closes it for users is the screen (increment I, next).
   //
   // `task` still works unchanged — verify:task-models and the existing controls use it.
+  //
+  // ⚠️ THE BODY LIVES IN applyTaskModelWrite (exported below) SO THERE IS EXACTLY ONE WRITE
+  // PATH. The Intelligence bundle orchestrator (src/portal-intelligence.js, the one-tap
+  // first-run confirm) must apply the SAME consent mechanism — the approval IS the setting,
+  // "" un-approves, one settings write per call — and the only way that stays true under
+  // change is if both callers execute the same function, not two copies of it. A gate asserts
+  // the identity (verify-intelligence-bundle.mjs B1), but the structure is the real guarantee.
   router.put('/providers/task-models', async (req, res) => {
     try {
-      const { task, function: fnKey, providerId = null, model = null } = req.body || {};
-      // Both keys is a caller bug, not a precedence question: silently honouring `function` and
-      // dropping `task` would write two tasks the caller didn't ask for and skip the one it did.
-      if (fnKey !== undefined && fnKey !== null && task !== undefined && task !== null) {
-        // NB the message names both keys rather than claiming a `function` was "sent": a falsy
-        // -but-present value ({function:''}) lands here too, and "not both" would read as a lie.
-        return bad(res, 400, 'send `task` OR `function` — both were present in the body');
-      }
-      // Resolve the target task list: a function fans out to its tasks; a task is itself.
-      let targets;
-      if (fnKey !== undefined && fnKey !== null) {
-        const known = INTELLIGENCE_FUNCTIONS.find((f) => f.key === fnKey);
-        targets = [...tasksForFunction(fnKey)];
-        if (!targets.length) {
-          // transcription/voice are REAL functions that own no INFERENCE_TASK — they have their
-          // own rails (whisper's download route, the TTS catalog). Saying "unknown" would be a
-          // lie the first UI author trips over; say what is actually true.
-          return bad(res, 400, known
-            ? `function '${fnKey}' has no inference task — it is assigned through its own surface`
-            : `unknown function (allowed: ${INTELLIGENCE_FUNCTIONS.filter((f) => f.tasks.length).map((f) => f.key).join(', ')})`);
-        }
-      } else if (INFERENCE_TASKS.includes(task)) {
-        targets = [task];
-      } else {
-        return bad(res, 400, `unknown task (allowed: ${INFERENCE_TASKS.join(', ')})`);
-      }
-
-      const settings = (await db.users?.getSettings?.(userId)) || {};
-      const taskModels = { ...(settings.taskModels || {}) };
-      // ⚠️ WHAT ACTUALLY MAKES THIS ATOMIC IS THE SINGLE `updateSettings` BELOW — not the fact
-      // that validation sits up here. `taskModels` is a LOCAL COPY, so any `return bad(...)`
-      // persists nothing no matter where it fires. An earlier version of this comment (and its
-      // commit message) claimed the up-front ordering was the mechanism preventing a
-      // half-apply, and claimed M9 (verify-task-models.mjs) would fail if you moved validation into the loop. A reviewer
-      // moved it into the loop: it still PASSED. The claim was false (independent review,
-      // 2026-07-16). Validating up-front is still better — it is cheaper and reads clearly —
-      // but do not mistake it for the guarantee. THE GUARANTEE IS: build the whole next state,
-      // then write it ONCE. If you ever move the write inside the loop, the fan-out stops being
-      // atomic and no current gate would catch it.
-      const onboxName = typeof model === 'string' ? model.trim() : '';
-      if (targets.some((t) => ONBOX_TASKS.has(t)) && onboxName) {
-        // Ollama tag shape (defense in depth — this value is later fed to localInfer as a model tag).
-        // Allow namespace/name:tag (so '/' and ':' are legitimate), but reject '..' so a stored
-        // name can never be path-traversal-shaped, even though the only sink is a JSON model field.
-        if (!/^[\w./:-]{1,64}$/.test(onboxName) || onboxName.includes('..')) return bad(res, 400, 'invalid model name');
-      }
-      let row = null;
-      if (targets.some((t) => !ONBOX_TASKS.has(t)) && providerId != null) {
-        row = await db.providers.get(providerId, userId); // must be a configured provider of THIS user
-        if (!row) return bad(res, 404, 'provider not found');
-      }
-
-      for (const t of targets) {
-        if (ONBOX_TASKS.has(t)) {
-          // Local model NAME only — no providerId, no provider-row lookup.
-          if (!onboxName) delete taskModels[t];              // clear → NOT approved (nothing pulls, nothing runs)
-          else taskModels[t] = { model: onboxName };
-        } else if (providerId == null) {
-          delete taskModels[t];                              // clear → falls back to the active provider
-        } else {
-          taskModels[t] = { providerId, ...(model ? { model: String(model) } : {}) };
-        }
-      }
-      await db.users.updateSettings(userId, { ...settings, taskModels });   // ONE write ⇒ atomic
-      ok(res, { taskModels });
+      const r = await applyTaskModelWrite({ db, userId, body: req.body || {} });
+      if (r.ok) ok(res, { taskModels: r.taskModels });
+      else bad(res, r.code, r.error);
     } catch { bad(res, 500, 'failed to set task model'); }
   });
 

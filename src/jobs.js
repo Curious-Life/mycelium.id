@@ -621,6 +621,85 @@ export function startChronicleNarrationJob({ dbPath, userId, territoryId = null 
   return { pid: child.pid ?? null };
 }
 
+// Single-flight for the cluster-naming pass, for the same reason chronicles has one: two
+// overlapping naming passes would double-narrate every unnamed cluster (duplicate inference
+// spend; last write wins). A crashed child clears the flag via its close handler.
+let namingChildRunning = false;
+
+/**
+ * Spawn the cluster-NAMING child (pipeline/describe-clusters.js) as an ASYNC BACKGROUND pass —
+ * the ONE reachable trigger for cluster naming. Mirrors startChronicleNarrationJob EXACTLY:
+ * re-resolves both master keys at spawn into an allowlisted child env (never args/logs), the
+ * fail-closed disk guard, a single-flight latch, and the child-env identity fill.
+ *
+ * WHY THIS EXISTS: describe-clusters.js is the ONLY writer of realm/territory name+essence, and
+ * before this it was reachable only inside Generate's step 3/16 — which the /mycelium/generate
+ * debounce skips whenever topology already exists. So on any vault with a map, an unnamed realm
+ * could NEVER be named (DISTILLATION-SURFACE-DESIGN §3). This is that missing trigger.
+ *
+ * GAP-FILL semantics (MYCELIUM_DESCRIBE_PRESERVE=1): name every UNNAMED / placeholder cluster,
+ * NEVER re-narrate a real name. describe-clusters' skip predicate is now placeholder-aware (D10),
+ * so PRESERVE fills the gaps rather than skipping them. Idempotent: a second pass finds the names
+ * it wrote and skips them (0 inference). Consent is the pipeline's own (createNarrator refuses,
+ * §4g-sensitive, when no cloud provider and no approved on-box model — nothing is wired here).
+ * @returns {{ pid: number|null, status?: string, detail?: object }}
+ */
+export function startClusterNamingJob({ dbPath, userId } = {}) {
+  if (namingChildRunning) return { pid: null };
+  // Fail-closed disk guard: describe-clusters opens the vault RW and writes names/essences; on a
+  // near-full disk that risks the ENOSPC storm. Return a structured disk_low so the route can say
+  // "free N GB" instead of a silent stuck row. Mirrors startChronicleNarrationJob.
+  try { assertVaultDiskHeadroom(dbPath || resolveDbPath()); }
+  catch (e) { if (e.code === 'DISK_LOW') return { pid: null, status: 'disk_low', detail: e.detail }; throw e; }
+  const { userHex, systemHex } = getSessionKeys() ?? resolveKeys();
+  const childEnv = {
+    PATH: process.env.PATH,
+    // USER/LOGNAME/HOME, filled from os.userInfo() when a Finder/launchd launch omits them.
+    ...identityEnv(),
+    LANG: process.env.LANG,
+    USER_MASTER: userHex,
+    SYSTEM_KEY: systemHex,
+    MYCELIUM_DB: dbPath || resolveDbPath(),
+    MYCELIUM_USER_ID: userId || process.env.MYCELIUM_USER_ID || 'local-user',
+    // Same-family writer-lock token so this pipeline child is not seen as a foreign writer.
+    ...(process.env.MYCELIUM_VAULT_FAMILY ? { MYCELIUM_VAULT_FAMILY: process.env.MYCELIUM_VAULT_FAMILY } : {}),
+    // GAP-FILL: name the unnamed, preserve real names. describe-clusters reads this flag; the
+    // placeholder-aware skip predicate (D10) makes PRESERVE fill placeholders rather than skip
+    // them. This is what makes the job's job (naming) actually happen.
+    MYCELIUM_DESCRIBE_PRESERVE: '1',
+    // Inherit the bundled-runtime envs (packaged app) like the clustering/chronicle jobs.
+    ...(process.env.HF_HOME ? { HF_HOME: process.env.HF_HOME } : {}),
+    ...(process.env.HF_HUB_OFFLINE ? { HF_HUB_OFFLINE: process.env.HF_HUB_OFFLINE } : {}),
+  };
+  // The script path is hardcoded (never built from request input); env-overridable ONLY for tests
+  // — the same convention startClusteringJob uses (MYCELIUM_CLUSTER_SCRIPT).
+  const scriptPath = process.env.MYCELIUM_NAMING_SCRIPT || 'pipeline/describe-clusters.js';
+  let child;
+  try {
+    child = spawn('node', [scriptPath], { cwd: process.cwd(), env: childEnv, stdio: ['ignore', 'ignore', 'pipe'] });
+  } catch {
+    return { pid: null };
+  }
+  namingChildRunning = true;
+  let err = '';
+  child.stderr.on('data', (d) => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
+  child.on('close', (code) => {
+    namingChildRunning = false;
+    // Content-free classified failure: the exit code + a stderr tail (describe-clusters' own
+    // content-free logs), never a realm name. The pipeline owns its describe:name feed row.
+    if (code !== 0) process.stderr.write(`[describe:name] naming exited ${code}: ${err.slice(-300)}\n`);
+    // Names changed → they are part of the indexed corpus text, and the mindscape cache holds
+    // realm/territory labels. Refresh both so the map + search reflect the new names.
+    else { refreshSearchIndex(); bustMindscape(userId); }
+  });
+  child.on('error', () => { namingChildRunning = false; });
+  return { pid: child.pid ?? null };
+}
+
+// Test-only reset for the naming single-flight latch (verify:illuminate-naming). Mirrors the
+// narration reset; no-op in production paths.
+export function _resetClusterNaming() { namingChildRunning = false; }
+
 // ── Narration walk (Phase 3): UI-controlled, pausable/resumable agent narration ──
 // The job owns the narration_runs checkpoint + the activity feed + single-flight.
 // The actual traversal is an INJECTED async `runWalk({ scope, skipIds, onProgress,

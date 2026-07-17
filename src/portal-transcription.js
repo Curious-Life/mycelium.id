@@ -17,7 +17,10 @@ import express from 'express';
 import { ensureTranscribeSupervisor, getTranscriberHealth, transcribeServiceUrl } from './transcribe/supervisor.js';
 
 // Curated stable models (must match transcribe-service.py ALLOWED_MODELS).
-const CATALOG = [
+// Exported for the Intelligence bundle (src/portal-intelligence.js), which needs the
+// RAM-recommended model + its size for the one-tap first-run total. §3.10d "no third
+// catalog": the bundle composes THIS list, it never copies it.
+export const WHISPER_CATALOG = [
   {
     model: 'large-v3-turbo',
     label: 'Whisper large-v3 turbo',
@@ -33,7 +36,14 @@ const CATALOG = [
     minRamGB: 0,
   },
 ];
+const CATALOG = WHISPER_CATALOG;
 const CATALOG_MODELS = new Set(CATALOG.map((c) => c.model));
+
+/** The RAM-appropriate whisper pick — the same rule the /transcription/status route serves.
+ *  Shared with the bundle so the proposal and the rail can never disagree on the pick. */
+export function recommendedWhisperModel(ramGB) {
+  return CATALOG.find((c) => ramGB == null || ramGB >= c.minRamGB)?.model || 'small';
+}
 
 export function portalTranscriptionRouter({ db, userId, authenticatePortalRequest, detectHardware }) {
   if (!db) throw new Error('portalTranscriptionRouter: db required');
@@ -52,8 +62,12 @@ export function portalTranscriptionRouter({ db, userId, authenticatePortalReques
     // the service should be up (ensure is a no-op without a model).
     if (model) ensureTranscribeSupervisor({ model });
     let ramGB = null;
-    try { ramGB = detectHardware ? (await detectHardware())?.memoryGB ?? null : null; } catch { /* optional */ }
-    const recommended = CATALOG.find((c) => ramGB == null || ramGB >= c.minRamGB)?.model || 'small';
+    // ⚠️ `totalRamGb` — detect.js's real field name. This read `?.memoryGB` (a field detect.js
+    // has never returned) until 2026-07-17, so ramGB was ALWAYS null and the `minRamGB` gate was
+    // dead: an 8 GB box was recommended the 1.6 GB large-v3-turbo (16 GB min). The design's §8-S
+    // fix, landed with the Intelligence bundle whose size math depends on the pick being real.
+    try { ramGB = detectHardware ? (await detectHardware())?.totalRamGb ?? null : null; } catch { /* optional */ }
+    const recommended = recommendedWhisperModel(ramGB);
     res.json({
       ok: true,
       health: getTranscriberHealth(),

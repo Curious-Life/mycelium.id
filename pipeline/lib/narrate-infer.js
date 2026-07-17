@@ -77,6 +77,48 @@ export function isOnBoxCfg(cfg) {
 }
 
 /**
+ * The narrator AUTHORITY — the §4g-relevant facts of "who would name things, and where",
+ * computed ONCE and consumed by BOTH createNarrator (below) and the portal's
+ * GET /portal/mycelium/naming-status (src/portal-mindscape.js). It lives in this file, next to
+ * the branches it describes, so the served card line ("with qwen3.5:4b on this Mac — nothing
+ * leaves" / "via Regolo (EU)") can never drift from what a run would actually do — the route
+ * renders THIS, never a client-side re-derivation (`derive-from-the-url-the-wire-dials`;
+ * DISTILLATION D9: never claim local-only when the route may egress).
+ *
+ * Facts and their meaning:
+ *   isLocal   — cfg is PROVABLY on-box (isOnBoxCfg: loopback baseUrl). The direct-fetch branch.
+ *   blocked   — nothing safe to run. Mirrors createNarrator's two refusal sites EXACTLY:
+ *               local branch refuses when no model is selected AND none approved; cloud branch
+ *               refuses when no cloud creds AND no approved on-box model.
+ *   model     — the model id the run would use on the primary path (local: the row's own pick
+ *               or the approved on-box model; cloud: the provider's model_preference), or null.
+ *   jurisdiction — 'local' iff provably on-box, else the resolver's §4g classification
+ *               (resolve.js jurisdictionForBaseUrl — the SERVED authority, never re-derived).
+ * Content-free: identifiers and booleans only.
+ * @param {{db:object, userId:string}} a
+ * @returns {Promise<{cfg:object, approvedOnBox:string|null, isLocal:boolean, label:string,
+ *   blocked:boolean, model:string|null, jurisdiction:string|null}>}
+ */
+export async function resolveNarratorAuthority({ db, userId }) {
+  const cfg = await resolveInferenceConfigForTask(db, userId, 'narrate');
+  // Anything not PROVABLY on-box falls through to the router, which audits + applies §4g.
+  // Fail-safe direction: the worst case is an on-box model taking the audited path, not an
+  // off-box host taking the silent one. @see isOnBoxCfg for why this is not `cfg.jurisdiction`
+  const isLocal = isOnBoxCfg(cfg);
+  const label = cfg.label || (isLocal ? 'local model' : cfg.anthropicApiKey ? 'Claude' : cfg.baseUrl ? 'custom' : 'local model');
+  // The one approved on-box model name, or null. Resolved BEFORE the branch: both branches can
+  // run a local model, so both need the approval. See the §M block in createNarrator for why
+  // fail-closed.
+  const approvedOnBox = await defaultLabelModel(db, userId);
+  const blocked = isLocal
+    ? !(cfg.cloudModel || approvedOnBox)               // the local branch's `if (!model)` refusal
+    : (!hasCloudCreds(cfg) && !approvedOnBox);         // the cloud branch's up-front refusal
+  const model = isLocal ? (cfg.cloudModel || approvedOnBox || null) : (cfg.cloudModel || null);
+  const jurisdiction = isLocal ? 'local' : (cfg.jurisdiction || null);
+  return { cfg, approvedOnBox, isLocal, label, blocked, model, jurisdiction };
+}
+
+/**
  * Build a narrator bound to the user's ACTIVE provider.
  * @param {object} a
  * @param {object} a.db        assembled vault db (needs db.providers)
@@ -90,16 +132,12 @@ export function isOnBoxCfg(cfg) {
  *   names nothing is indistinguishable from one that had nothing to name.
  */
 export async function createNarrator({ db, userId, fetch = globalThis.fetch }) {
-  const cfg = await resolveInferenceConfigForTask(db, userId, 'narrate');
+  // ONE authority for cfg/label/local/blocked — shared with naming-status (above). The branch
+  // refusals below consume `authority.blocked` rather than re-testing, so the served fact and
+  // the run's behaviour are the same computation by construction.
+  const authority = await resolveNarratorAuthority({ db, userId });
+  const { cfg, approvedOnBox, isLocal, label } = authority;
   const onUsage = createUsageSink(db, userId, { source: 'enrichment' });
-  // Anything not PROVABLY on-box falls through to the router below, which audits + applies §4g.
-  // Fail-safe direction: the worst case is an on-box model taking the audited path, not an
-  // off-box host taking the silent one. @see isOnBoxCfg for why this is not `cfg.jurisdiction`
-  const isLocal = isOnBoxCfg(cfg);
-  const label = cfg.label || (isLocal ? 'local model' : cfg.anthropicApiKey ? 'Claude' : cfg.baseUrl ? 'custom' : 'local model');
-  // The one approved on-box model name, or null. Resolved BEFORE the branch: both branches can
-  // run a local model, so both need the approval. See the §M block below for why fail-closed.
-  const approvedOnBox = await defaultLabelModel(db, userId);
 
   // ── Local Ollama: native /api/chat, think OFF, JSON-constrained — fast + reliable.
   if (isLocal && cfg.baseUrl) {
@@ -115,7 +153,7 @@ export async function createNarrator({ db, userId, fetch = globalThis.fetch }) {
     // model_preference IS a choice, so it wins; otherwise fall back to the approved on-box
     // model, and refuse if there is none.
     const model = cfg.cloudModel || approvedOnBox;
-    if (!model) {
+    if (authority.blocked) {   // ≡ !model on this branch — the authority mirrors it (see above)
       try { process.stderr.write('[narrate] local provider has no model selected and no on-box model is approved — refusing (Settings → Intelligence)\n'); } catch { /* never break narration */ }
       return { infer: blockedInfer, label, local: true, blocked: BLOCKED_NO_MODEL };
     }
@@ -214,7 +252,7 @@ export async function createNarrator({ db, userId, fetch = globalThis.fetch }) {
   // model than the one we set out to stop, i.e. the naive "swap the resolver" fix is WORSE
   // than the bug. It also covers the §4g sensitive-US block (router.js), which ignores
   // cloudFallbackToLocal and is the silent path — narrate becomes sensitive in #151.
-  if (!hasCloudCreds(cfg) && !approvedOnBox) {
+  if (authority.blocked) {   // ≡ !hasCloudCreds(cfg) && !approvedOnBox — the authority mirrors it
     // No cloud, no approved on-box model. Say so ONCE, here — not N times as N identical
     // per-item failures the caller has to infer a cause from.
     try { process.stderr.write('[narrate] no cloud provider and no approved on-box model — refusing (Settings → Intelligence)\n'); } catch { /* never break narration */ }

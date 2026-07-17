@@ -7,13 +7,16 @@
 	import { workspace } from '$lib/workspace/store';
 	import TabStrip from '$lib/components/workspace/TabStrip.svelte';
 	import type { WsNode, LeafPane } from '$lib/workspace/types';
-	import { activity, startActivityPolling, fmtEta, fmtAgo, isFreshError, statusLabel } from '$lib/stores/activity';
-	import { apiPost } from '$lib/api';
+	import { activity, startActivityPolling, fmtAgo, isFreshError } from '$lib/stores/activity';
+	import StatusPopover from './StatusPopover.svelte';
 
 	// One consolidated activity indicator (next to chat) — ALWAYS present and always
 	// clickable. A round glass "orb": grey when idle, green while any work runs
 	// (chat inference, embedding, mapping, narration — local or via API), red when
-	// the last job failed. Click for the live job list + what ran last and when.
+	// the last job failed. Click opens the §3.8 STATUS POPOVER (StatusPopover.svelte):
+	// the central account-status location (design D5/D10/D11) — the honest state rows
+	// (vault · data · processing · embedding · labeling · understanding · transcription
+	// · intelligence · mindscape) plus the live job list and what ran last.
 	let activityOpen = $state(false);
 	const active = $derived($activity.active);
 	const recent = $derived($activity.recent);
@@ -39,16 +42,6 @@
 		const dest = (browser && document.querySelector(target)) || null;
 		if (dest) dest.appendChild(node);
 		return { destroy() { node.remove(); } };
-	}
-
-	// Stop/Resume the on-box categorization (Context Engine L1) — the "my computer is working
-	// a lot" churn. The activity store re-polls every 2.5s, so the row updates on its own.
-	let categorizeBusy = $state(false);
-	async function toggleCategorize(paused: boolean) {
-		if (categorizeBusy) return;
-		categorizeBusy = true;
-		try { await apiPost(paused ? '/portal/enrichment/categorize/resume' : '/portal/enrichment/categorize/pause', {}); } catch {}
-		categorizeBusy = false;
 	}
 
 	const currentView = $derived($navigationState.primaryView);
@@ -102,11 +95,19 @@
      The mousedown only initiates an OS window-drag — there is no keyboard
      equivalent and no fitting ARIA role, so the static-interaction rule is
      intentionally ignored here. -->
+<!-- Deliberately NOT a chrome band: --color-bg (the app-shell's own background), no
+     bottom border. It used to be --color-surface + a hairline — the same treatment as
+     the Sidebar panel — which drew a distinct strip across the top and a seam under it.
+     The header is not a panel; it is the top of the page, so it takes the page's colour
+     and dissolves into it. The native title-bar strip above is painted that same
+     --color-bg (main.rs TitleBarStyle::Transparent + theme.ts), so the window reads as
+     one continuous surface from the traffic lights down. The Sidebar keeps
+     --color-surface + its border-r — it IS a panel. -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <header
 	data-tauri-drag-region
 	onmousedown={startWindowDrag}
-	class="app-header h-10 border-b border-[var(--color-border)] flex items-center px-2 sm:px-3 gap-1.5 sm:gap-2 bg-[var(--color-surface)] relative z-10 overflow-hidden flex-shrink-0"
+	class="app-header h-10 flex items-center px-2 sm:px-3 gap-1.5 sm:gap-2 bg-[var(--color-bg)] relative z-10 overflow-hidden flex-shrink-0"
 >
 	<!-- Sidebar toggle. macOS traffic-light clearance in the native shell is a
 	     DETERMINISTIC CSS padding on `.app-header` under `html.is-tauri` (tagged
@@ -175,51 +176,13 @@
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<div use:portal>
 					<div class="fixed inset-0 z-[9998]" onclick={() => (activityOpen = false)}></div>
-					<div class="fixed top-[2.75rem] right-2 sm:right-3 z-[9999] min-w-[260px] max-w-[320px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 shadow-lg" style="backdrop-filter: blur(14px) saturate(150%); -webkit-backdrop-filter: blur(14px) saturate(150%);">
-					{#if busy}
-						<div class="px-2.5 pt-1 pb-0.5 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">Working now</div>
-						{#each active as j (j.id)}
-							<div class="px-2.5 py-1.5 text-[11px]">
-								<div class="flex items-center gap-2">
-									<span class="w-1.5 h-1.5 rounded-full flex-shrink-0 {j.stalled ? 'bg-[var(--color-warning,#f59e0b)]' : 'bg-[#34d399]'}"></span>
-									<span class="text-[var(--color-text-primary)] truncate">{j.stage}</span>
-									{#if j.total > 0}<span class="text-[var(--color-text-tertiary)] flex-shrink-0">{j.done}/{j.total}</span>{/if}
-									{#if j.stalled}<span class="ml-auto text-[var(--color-warning,#f59e0b)] flex-shrink-0 whitespace-nowrap">taking longer…</span>
-									{:else if fmtEta(j.etaSeconds)}<span class="ml-auto text-[#34d399] flex-shrink-0">{fmtEta(j.etaSeconds)} left</span>{/if}
-									{#if j.kind === 'categorize'}
-										<button
-											class="ml-auto flex-shrink-0 rounded px-1.5 py-0.5 text-[10px] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-tertiary)] disabled:opacity-50"
-											onclick={() => toggleCategorize(j.status === 'paused')}
-											disabled={categorizeBusy}
-											title={j.status === 'paused' ? 'Resume categorizing your messages' : 'Stop categorizing (you can resume anytime)'}
-										>{j.status === 'paused' ? 'Resume' : 'Stop'}</button>
-									{/if}
-								</div>
-								{#if j.model || j.process}
-									<!-- what model is working + what process it's running -->
-									<div class="flex items-center gap-1.5 pl-3.5 mt-0.5 text-[10px] text-[var(--color-text-tertiary)] truncate">
-										{#if j.model}<span class="font-mono text-[var(--color-text-secondary)]">{j.model}</span>{/if}
-										{#if j.model && j.process}<span class="opacity-40">·</span>{/if}
-										{#if j.process}<span>{j.process}</span>{/if}
-									</div>
-								{/if}
-							</div>
-						{/each}
-					{/if}
-
-					{#if recent.length}
-						<div class="px-2.5 pt-1.5 pb-0.5 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">{busy ? 'Recently' : 'Last activity'}</div>
-						{#each recent.slice(0, 6) as j (j.id + (j.finishedAt ?? ''))}
-							<div class="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
-								<span class="w-1.5 h-1.5 rounded-full flex-shrink-0 {j.status === 'error' ? 'bg-[#f87171]' : j.status === 'abandoned' ? 'bg-[var(--color-text-tertiary)]' : 'bg-[#34d399]'}"></span>
-								<span class="text-[var(--color-text-secondary)] truncate">{j.stage}</span>
-								{#if j.model}<span class="font-mono text-[10px] text-[var(--color-text-tertiary)] truncate flex-shrink min-w-0" title="Model used">{j.model}</span>{/if}
-								<span class="ml-auto flex-shrink-0 {j.status === 'error' ? 'text-[#f87171]' : 'text-[var(--color-text-tertiary)]'}">{statusLabel(j.status)} · {fmtAgo(j.finishedAt)}</span>
-							</div>
-						{/each}
-					{:else if !busy}
-						<div class="px-2.5 py-2 text-[11px] text-[var(--color-text-tertiary)]">No activity yet — your vault is idle.</div>
-					{/if}
+						<!-- §3.8: the panel content (status rows + live jobs + history) lives in
+						     StatusPopover.svelte — ONE mountable component, so the render is provable
+						     by the mount harness (portal-app/test/mount-status-popover.mjs) instead of
+						     being trapped in the Header's chrome. It mounts on open and unmounts on
+						     close — which is also what scopes its readiness poll to the open popover. -->
+					<div class="fixed top-[2.75rem] right-2 sm:right-3 z-[9999] min-w-[280px] max-w-[340px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 shadow-lg" style="backdrop-filter: blur(14px) saturate(150%); -webkit-backdrop-filter: blur(14px) saturate(150%);">
+							<StatusPopover />
 				</div>
 				</div>
 			{/if}

@@ -7,14 +7,19 @@
 //   J4 resume → status 'running', re-invokes the walk with skipIds = the checkpoint,
 //      runs to completion → status 'done'
 //   J5 cancel → status 'canceled'
+//   J12 the CHRONICLE wrapper (startChronicleNarrationJob) spawns its child with
+//       MYCELIUM_DESCRIBE_PRESERVE=1 by default — observed in the env the child
+//       actually received, not grepped from the source line
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
 import Database from 'better-sqlite3';
-import { rmSync, mkdirSync } from 'node:fs';
+import { rmSync, mkdirSync, writeFileSync, chmodSync, readFileSync, existsSync } from 'node:fs';
 import crypto from 'node:crypto';
+import path from 'node:path';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
+import { setSessionKeys } from '../src/account/session-keys.js';
 import {
-  startNarrationWalkJob, pauseNarration, resumeNarration, cancelNarration, getNarrationStatus, _resetNarration,
+  startNarrationWalkJob, startChronicleNarrationJob, pauseNarration, resumeNarration, cancelNarration, getNarrationStatus, _resetNarration,
 } from '../src/jobs.js';
 
 const DB = 'data/verify-narration-job.db', KCV = 'data/verify-narration-job-kcv.json';
@@ -239,11 +244,77 @@ const feedRow = (runId) => db.rawQuery(
     feed?.status === 'error', `feed=${JSON.stringify(feed)}`);
 }
 
+// ── J12/J12b ⭐ THE CHRONICLE WRAPPER'S PRESERVE DEFAULT IS PART OF THE CONTRACT ──
+// PR #213 review F4: mutating jobs.js's chronicle childEnv `MYCELIUM_DESCRIBE_PRESERVE:
+// … ?? '1'` to `?? '0'` left this suite AND verify:describe-preserve green — the pipeline's
+// preserve BEHAVIOR was gated (P1-P3) but nothing pinned that the production spawn actually
+// ASKS for it. A flipped default silently rewrites existing/imported chronicles with the
+// local model on every background pass. So: drive the REAL spawn and read the env the child
+// RECEIVED — a PATH-shimmed `node` records it — because asserting the source line would be
+// satisfied by the form, not the usage.
+{
+  // The wrapper re-resolves master keys at spawn (getSessionKeys ?? resolveKeys); pin the
+  // gate's injected keys the way completeBoot does so no key source is consulted.
+  setSessionKeys({ userHex, systemHex });
+  const SHIMDIR = path.resolve('data/verify-narration-job-shim');
+  mkdirSync(SHIMDIR, { recursive: true });
+  const ENVOUT = path.join(SHIMDIR, 'child-env.json');
+  // Fake `node`: dump the two env vars under test, write-then-rename so the reader
+  // never sees a partial file, exit 0 (the wrapper treats 0 as a clean pass).
+  writeFileSync(path.join(SHIMDIR, 'node'),
+    `#!/bin/sh\nprintf '{"preserve":%s,"territory":%s}' "\${MYCELIUM_DESCRIBE_PRESERVE+\\"$MYCELIUM_DESCRIBE_PRESERVE\\"}" "\${MYCELIUM_DESCRIBE_TERRITORY+\\"$MYCELIUM_DESCRIBE_TERRITORY\\"}" > "${ENVOUT}.$$"\nmv "${ENVOUT}.$$" "${ENVOUT}"\n`);
+  chmodSync(path.join(SHIMDIR, 'node'), 0o755);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const waitFile = async (f, ms = 8000) => {
+    const t0 = Date.now();
+    while (!existsSync(f)) { if (Date.now() - t0 > ms) return false; await sleep(25); }
+    return true;
+  };
+  // Empty printf args JSON-encode as nothing → patch to null so a MISSING var is
+  // distinguishable from a set-but-empty one.
+  const readEnvOut = (f) => JSON.parse(readFileSync(f, 'utf8').replace(/:\s*([,}])/g, ':null$1'));
+
+  const realPath = process.env.PATH;
+  const hadPreserve = Object.prototype.hasOwnProperty.call(process.env, 'MYCELIUM_DESCRIBE_PRESERVE');
+  const savedPreserve = process.env.MYCELIUM_DESCRIBE_PRESERVE;
+  try {
+    delete process.env.MYCELIUM_DESCRIBE_PRESERVE;      // the DEFAULT path is the one under test
+    process.env.PATH = `${SHIMDIR}:${realPath}`;        // childEnv.PATH copies process.env.PATH
+
+    const r1 = startChronicleNarrationJob({ dbPath: DB, userId: U });
+    const got1 = r1.pid != null && await waitFile(ENVOUT);
+    const env1 = got1 ? readEnvOut(ENVOUT) : null;
+    rec('J12. ⭐ chronicle wrapper spawns with MYCELIUM_DESCRIBE_PRESERVE=1 by DEFAULT (observed in the child env)',
+      env1?.preserve === '1' && env1?.territory == null,
+      `pid=${r1.pid} childEnv=${JSON.stringify(env1)} (a flipped default rewrites existing chronicles on every background pass)`);
+
+    // …and the default must stay an OVERRIDABLE default, not a hardcode: the documented
+    // MYCELIUM_DESCRIBE_PRESERVE=0 escape hatch has to reach the child verbatim.
+    rmSync(ENVOUT, { force: true });
+    process.env.MYCELIUM_DESCRIBE_PRESERVE = '0';
+    let r2 = { pid: null };
+    { // single-flight: wait for run 1's close handler to clear the running flag
+      const t0 = Date.now();
+      while (Date.now() - t0 < 8000) { r2 = startChronicleNarrationJob({ dbPath: DB, userId: U }); if (r2.pid != null) break; await sleep(25); }
+    }
+    const got2 = r2.pid != null && await waitFile(ENVOUT);
+    const env2 = got2 ? readEnvOut(ENVOUT) : null;
+    rec('J12b. …and an explicit MYCELIUM_DESCRIBE_PRESERVE=0 override reaches the child (default, not hardcode)',
+      env2?.preserve === '0', `pid=${r2.pid} childEnv=${JSON.stringify(env2)}`);
+    await sleep(150);                                   // let run 2's close handler fire before teardown
+  } finally {
+    process.env.PATH = realPath;
+    if (hadPreserve) process.env.MYCELIUM_DESCRIBE_PRESERVE = savedPreserve;
+    else delete process.env.MYCELIUM_DESCRIBE_PRESERVE;
+    rmSync(SHIMDIR, { recursive: true, force: true });
+  }
+}
+
 close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
-console.log(`VERDICT: ${allPass ? 'GO — narration job: start · single-flight · checkpoint · pause(stop-after-entity) · resume(skip-done) · cancel' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
+console.log(`VERDICT: ${allPass ? 'GO — narration job: start · single-flight · checkpoint · pause(stop-after-entity) · resume(skip-done) · cancel · chronicle-spawn PRESERVE default' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
 console.log('='.repeat(64));
 process.exit(allPass ? 0 : 1);

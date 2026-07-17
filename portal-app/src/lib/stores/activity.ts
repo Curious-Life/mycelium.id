@@ -50,11 +50,35 @@ export function startActivityPolling(intervalMs = 2500): () => void {
   };
 }
 
-/** Format an ETA in seconds as a compact "~28s" / "~3m" string. */
+/** Format an ETA in seconds as a compact "~28s" / "~3m" / "~2h 5m" string. */
 export function fmtEta(sec: number | null | undefined): string {
   if (sec == null || !Number.isFinite(sec)) return '';
   if (sec < 90) return `~${Math.max(1, Math.round(sec))}s`;
-  return `~${Math.round(sec / 60)}m`;
+  const mins = Math.round(sec / 60);
+  // ⚠️ HOURS EXIST BECAUSE §3.9's WHOLE SUBJECT IS A 29-HOUR IMPORT. This stopped at minutes, so
+  // the moment R1 made the number real the headline case rendered "~1740m left" — technically
+  // true, legible only with a calculator, and useless for the one decision it informs ("do I
+  // leave this running overnight?"). An honest number the reader cannot parse is not honesty.
+  if (mins < 60) return `~${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m === 0 ? `~${h}h` : `~${h}h ${m}m`;
+}
+
+/**
+ * Format a byte count as "1.2 GB" / "840 MB" / "12 KB". For the `model-pull` feed row,
+ * whose done/total are BYTES (the drainer beats ollama's {completed,total} straight
+ * through): rendered as `{done}/{total}` it printed ten-digit raw byte counts for a
+ * 3.4GB download — technically true, legible to nobody (§3.8: "Downloading qwen3.5:4b
+ * — 1.2 / 3.4 GB"). Same honesty rule as fmtEta's hours: an honest number the reader
+ * cannot parse is not honesty.
+ */
+export function fmtBytes(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n) || n < 0) return '';
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
+  if (n >= 1e6) return `${Math.round(n / 1e6)} MB`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)} KB`;
+  return `${Math.round(n)} B`;
 }
 
 /** Parse a SQLite `datetime('now')` string ('YYYY-MM-DD HH:MM:SS', UTC) — or an

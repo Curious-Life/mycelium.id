@@ -124,8 +124,8 @@ export function resolveVoice(provider, agentId) {
     const v = process.env.ELEVENLABS_VOICE_ID;
     if (v) return v;
   }
-  if (provider.name === 'kokoro') {
-    const v = process.env.KOKORO_TTS_VOICE;
+  if (provider.name === 'qwen') {
+    const v = process.env.QWEN_TTS_VARIANT;   // the model VARIANT id — qwen has no preset voices
     if (v) return v;
   }
 

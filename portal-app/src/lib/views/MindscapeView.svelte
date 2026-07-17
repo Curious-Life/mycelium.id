@@ -9,6 +9,83 @@
 	import MeasurementHealthSection from '$lib/components/mindscape/MeasurementHealthSection.svelte';
 	import MindscapeBackground from '$lib/components/mindscape/MindscapeBackground.svelte';
 	import MindscapeInvite from '$lib/components/mindscape/MindscapeInvite.svelte';
+
+	// ── §3.7a — the invite's half of the ONE fact ────────────────────────────────
+	// The invite hid on `points.length === 0` (the client STORE) while the rail hid on
+	// `!generated` (/portal/mindscape's NODES). Two measurements of one idea, both true through
+	// the middle of onboarding ⇒ BOTH ON SCREEN AT ONCE — map §5.1, and the whole reason §3.7a
+	// exists. Now both read readiness.mindscape.generated, opposite polarity ⇒ they cannot
+	// coexist. ⚠️ This ONLY holds with E2's rail flip: gating the invite alone would make the
+	// rail a strict SUBSET and the overlap DETERMINISTIC. They ship together or not at all.
+	// ⚠️ `null` MUST NOT MEAN `false`. My first version said "null = claim NOTHING" in this very
+	// comment while the markup below did `{:else if mindGenerated === true}` — so null fell
+	// through to the INVITE, i.e. it claimed not-generated. The comment stated the principle and
+	// the code four lines down broke it (independent review HIGH-2, 2026-07-16).
+	//
+	// It is not cosmetic. `loadGenerated` only assigned on `r.ok`, and the $effect re-runs only
+	// when `mindGenerated` CHANGES — so one failed read left it null FOREVER, with no retry. The
+	// invite would then render permanently on a generated vault while the rail's 4s poll recovers
+	// `generated=true` on its first good read ⇒ BOTH SURFACES, permanently. That is map §5.1
+	// again, and it is exactly the overlap this increment claims to make unrepresentable.
+	// Worse, the failures are CORRELATED: the points fetch that leaves `points` empty is the same
+	// outage class — so the branch below written for "the map exists but didn't load" is disabled
+	// precisely when it is needed.
+	// ⇒ null renders its own honest state, and it RETRIES.
+	let mindGenerated = $state<boolean | null>(null);
+	let genProbeFailed = $state(false);
+	async function loadGenerated() {
+		try {
+			const r = await api('/portal/readiness?slices=mindscape');
+			if (!r.ok) throw new Error(`readiness ${r.status}`);
+			const m = (await r.json())?.mindscape;
+			// ⚠️ A 200 can still mean "I don't know": the slice fails soft with `unknown` rather
+			// than throwing, so `r.ok` alone is not knowledge. Without this the retry apparatus
+			// below never engages on the LIKELY failure — only on a whole-route 500 — and the
+			// invite renders permanently over a built vault (review HIGH-4).
+			if (m?.unknown === true) throw new Error('mindscape slice unknown');
+			mindGenerated = m?.generated === true;
+			genProbeFailed = false;
+		} catch {
+			// Say we don't know — silence here IS the invite (see above). The RETRY is the poll
+			// below: MED-9's genPollTimer already re-calls loadGenerated() every 4s until the
+			// answer is known-true, which is exactly what a failed probe needs.
+			// ⚠️ I kept a separate genRetryTimer alongside it, so a failing probe fired TWO requests
+			// per tick — the MED-7 retry machinery was subsumed by MED-9's interval the moment I
+			// added it, and I did not notice because both were "correct" in isolation (review, LOW,
+			// 2026-07-16). One cadence, one timer.
+			genProbeFailed = true;
+		}
+	}
+	// ⚠️ THE VIEW MUST POLL, BECAUSE THE RAIL DOES. `mindGenerated` froze after its first
+	// successful read — the $effect re-ran only while null — so a `false` was NEVER re-probed,
+	// while the rail re-reads the same fact every 4s. One fact, TWO CLIENTS, DIFFERENT REFRESH
+	// SEMANTICS ⇒ "cannot render together by construction" was OVERSTATED. Deterministic repro,
+	// no timing luck: two windows (Tauri + a browser on :8787). Generate in A. In B the view is
+	// frozen `false` ⇒ INVITE, and B's rail polls ⇒ `true` ⇒ RAIL. Both, same viewport, both
+	// titled "Grow your mycelium" — map §5.1 exactly. Same for a generate from ANY path this
+	// view's store cannot see: the MCP tool surface, a wake cycle, an agent
+	// (independent review MED-9, 2026-07-16).
+	// ⇒ Poll on the SAME cadence until the answer is known-true. `slices=mindscape` is a cheap
+	// COUNT (§3.2b), and once generated it never goes back, so the poll stops on its own.
+	// ⚠️ RESIDUAL, stated not hidden: convergence is ONE POLL PERIOD PLUS A ROUND-TRIP (~4s + RTT),
+	// not "≤4s" — the tick ISSUES the request at +4s; the invite clears when it RETURNS. I wrote
+	// "≤4s" first, which is the same shape of overclaim I was asked to watch for.
+	// Two things make it better than the bound suggests: a FAILED view probe holds `null` ⇒ the
+	// "Checking…" branch, NOT the invite, so an outage produces no overlap at all; and the generate
+	// store's 1500ms poll normally beats the rail's 4000ms, so the happy path never overlaps.
+	// Killing the window entirely needs ONE shared store — a bigger unit than E2.
+	const GEN_POLL_MS = 4000;
+	let genPollTimer: ReturnType<typeof setInterval> | null = null;
+	$effect(() => {
+		if (mindGenerated === null && !genProbeFailed) void loadGenerated();
+		if (mindGenerated !== true && !genPollTimer) {
+			genPollTimer = setInterval(() => {
+				genProbeFailed = false;   // the poll IS the retry — let a failed probe try again
+				if (mindGenerated !== true) void loadGenerated();
+			}, GEN_POLL_MS);
+		}
+		if (mindGenerated === true && genPollTimer) { clearInterval(genPollTimer); genPollTimer = null; }
+	});
 	import { api, apiGet } from '$lib/api';
 	import { generate, start as startGen, resume as resumeGen, reset as resetGen, cancel as cancelGen, fmtSeconds } from '$lib/generate';
 	import { get } from 'svelte/store';
@@ -104,14 +181,33 @@
 			territoriesLoaded = false; // allow the reload below to fetch the freshly-generated territories
 			mindscapeState.load();
 			loadTerritories();
+			mindGenerated = true;   // we just watched it happen — no need to re-probe
+			justGenerated = true;   // the reveal, below
 			setTimeout(() => resetGen(), 4000);
 		}
 	});
+
+	// ⚠️ THE REVEAL MOVED HERE, AND ALMOST DIED. It lived in OnboardingFlow, gated on
+	// `justGenerated`, whose ONLY writer was the rail's own pollGenerate() — which E2 deletes
+	// (Generate is a pre-generation act; it moved to the invite). So the "Your mycelium is ready"
+	// moment became UNREACHABLE, and `exploreMind` with it: a live feature killed as collateral,
+	// which is the exact capability-deletion this build has already committed twice
+	// (independent review MED-1, 2026-07-16).
+	// It cannot live in the rail: the rail requires `generated`, so it can never OBSERVE the
+	// false→true flip — its poll is gated on the very fact it would be watching for. This view
+	// already reacts to `phase === 'done'`, so it is the one place that genuinely sees the moment.
+	let justGenerated = $state(false);
+	// ⚠️ The reveal renders INSIDE .map-container — the user is already on /mindscape looking at
+	// the map. The old body `goto('/mindscape')` was correctly dropped on the move, but the store
+	// write that remained set primaryView to the value it already had: a button that did NOTHING
+	// observable and did not even dismiss itself (review MED-6). Dismissing IS the action here.
+	function exploreMind() { justGenerated = false; }
 
 	// Cleanup timers on unmount
 	$effect(() => {
 		return () => {
 			if (enrichPollTimer) clearTimeout(enrichPollTimer);
+			if (genPollTimer) clearInterval(genPollTimer);     // the convergence poll (MED-9)
 		};
 	});
 
@@ -483,12 +579,42 @@
 				{#if Mindscape3D}
 			<div class="map-container">
 						<Mindscape3D {active} />
+						{#if justGenerated}
+							<!-- The moment it lands. Moved from the rail (see the comment above
+							     `justGenerated`): the rail can never observe the flip, this view can. -->
+							<div class="reveal" role="status">
+								<span>Your mycelium is ready.</span>
+								<button class="reveal-go" onclick={exploreMind}>Explore your mind →</button>
+								<button class="reveal-x" aria-label="Dismiss" onclick={() => (justGenerated = false)}>×</button>
+							</div>
+						{/if}
 					</div>
 				{:else}
 					<div class="loading-3d">
 						<div class="spinner"></div>
 					</div>
 				{/if}
+			{:else if mindGenerated === null}
+				<!-- ⚠️ We do not KNOW whether a map exists — the readiness probe failed and is
+				     retrying. Falling through to the invite here would tell an owner with a built
+				     mindscape to "Grow your mycelium", AND would put the invite on screen next to
+				     the rail (which polls independently and recovers first) — the very overlap
+				     this increment exists to make impossible. Claim nothing; say so. -->
+				<div class="loading-3d">
+					<div class="spinner"></div>
+					<p class="load-fail sub">Checking your mind…</p>
+				</div>
+			{:else if mindGenerated === true}
+				<!-- ⚠️ The map EXISTS (the server counted points) but this client has none — the
+				     points fetch failed. Before §3.7a this fell through to the invite, so an owner
+				     with a fully built mindscape was told "Grow your mycelium — three steps to
+				     begin." A LOAD FAILURE IS NOT AN EMPTY VAULT — §3.2a's rule, one surface over.
+				     Say what is true and offer the retry. -->
+				<div class="loading-3d">
+					<p class="load-fail">Your map is built, but it didn’t load.</p>
+					{#if msState.error}<p class="load-fail sub">{msState.error}</p>{/if}
+					<button class="load-retry" onclick={() => mindscapeState.load()}>Try again</button>
+				</div>
 			{:else}
 				<!-- Welcome: empty mindscape onboarding -->
 				<div class="welcome">
@@ -565,6 +691,32 @@
 	.resize-handle.active {
 		background: var(--color-accent);
 	}
+
+	.reveal {
+		position: absolute; left: 50%; transform: translateX(-50%); bottom: 2rem; z-index: 20;
+		display: flex; align-items: center; gap: 0.75rem;
+		padding: 0.6rem 0.9rem; border-radius: 12px;
+		border: 1px solid rgba(229, 184, 76, 0.35); background: var(--glass-card-bg);
+		backdrop-filter: blur(12px); font-size: 0.8rem; color: var(--color-text-primary);
+	}
+	.reveal-go {
+		padding: 0.35rem 0.8rem; border-radius: 8px; border: none;
+		background: var(--color-accent-aurum, #e5b84c); color: #0a0a0c;
+		font-size: 0.75rem; font-weight: 500; cursor: pointer; font-family: inherit;
+	}
+	.reveal-x {
+		background: none; border: none; color: var(--color-text-tertiary);
+		font-size: 0.9rem; cursor: pointer; padding: 0 0.2rem;
+	}
+
+	.load-fail { font-size: 0.82rem; color: var(--color-text-secondary); margin: 0 0 0.5rem; text-align: center; }
+	.load-fail.sub { font-size: 0.7rem; color: var(--color-text-tertiary); margin-bottom: 0.8rem; }
+	.load-retry {
+		padding: 0.45rem 1rem; border-radius: 8px; border: 1px solid var(--glass-border);
+		background: var(--glass-card-bg); color: var(--color-text-primary);
+		font-size: 0.75rem; cursor: pointer; font-family: inherit;
+	}
+	.load-retry:hover { border-color: var(--color-accent-aurum); }
 
 	.loading-3d {
 		display: flex;

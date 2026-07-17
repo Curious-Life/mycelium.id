@@ -20,6 +20,9 @@ import { pathToFileURL } from 'node:url';
 const GEN = '.gen-mount-intel';
 const SCREEN = 'src/lib/components/settings/IntelligenceScreen.svelte';
 const SELECT = 'src/lib/components/settings/OnboxTaskSelect.svelte';
+// The whisper rail moved INTO the screen's Transcription row (Part I §9) — it is part of
+// the mounted tree now, so it compiles like the select child. Its api calls hit the stub.
+const TRANS = 'src/lib/components/settings/TranscriptionSetup.svelte';
 
 const dom = new JSDOM('<!doctype html><html><body><div id="host"></div></body></html>', { pretendToBeVisual: true });
 // Svelte's client runtime reads DOM globals at module init, so they must exist BEFORE
@@ -83,6 +86,14 @@ globalThis.__apiStub = async (path, options = {}) => {
     if (NO_EU_KNOWN) return { ok: true, json: async () => ({ allowed: false }) };   // known, and NOT exempt
     return { ok: true, json: async () => ({ allowed: EXEMPT }) };
   }
+  // The moved whisper rail (TranscriptionSetup) — a quiet, non-downloading fixture so the
+  // Transcription row renders its own catalog instead of the old "Set up below" pointer.
+  if (path.startsWith('/portal/transcription/status')) {
+    return { ok: true, json: async () => ({ ok: true, health: { status: 'no_model', message: null, progress: null }, model: null, catalog: [
+      { model: 'large-v3-turbo', label: 'Whisper large-v3 turbo', sizeMB: 1620, blurb: 'Best quality', recommended: true },
+      { model: 'small', label: 'Whisper small', sizeMB: 480, blurb: 'Light and fast', recommended: false },
+    ] }) };
+  }
   if (path.startsWith('/portal/providers/presets')) return { ok: true, json: async () => ({ functions: FUNCTIONS }) };
   if (path.startsWith('/portal/providers/task-models')) return { ok: true, json: async () => ({ taskModels: {} }) };
   if (path.startsWith('/portal/providers')) return { ok: true, json: async () => ({ providers: (NO_EU || NO_EU_KNOWN) ? PROVIDERS.filter((p) => p.auth_type === 'oauth') : PROVIDERS }) };
@@ -107,10 +118,14 @@ const storeOut = compileModule(storeSrc, { generate: 'client', filename: 'sensit
 writeFileSync(`${GEN}/sensitive-exempt.gen.js`, storeOut.js.code);
 const child = compile(readFileSync(SELECT, 'utf8'), { generate: 'client', name: 'OnboxTaskSelect', css: 'injected' });
 writeFileSync(`${GEN}/OnboxTaskSelect.gen.js`, child.js.code);
+const transChild = compile(readFileSync(TRANS, 'utf8'), { generate: 'client', name: 'TranscriptionSetup', css: 'injected' });
+writeFileSync(`${GEN}/TranscriptionSetup.gen.js`, transChild.js.code
+  .replace(/import\s+\{\s*api\s*\}\s+from\s+['"]\$lib\/api['"];?/, 'const api = (...a) => globalThis.__apiStub(...a);'));
 const screen = compile(readFileSync(SCREEN, 'utf8'), { generate: 'client', name: 'IntelligenceScreen', css: 'injected' });
 const rewired = screen.js.code
   .replace(/import\s+\{\s*api\s*\}\s+from\s+['"]\$lib\/api['"];?/, 'const api = (...a) => globalThis.__apiStub(...a);')
   .replace(/from\s+['"]\.\/OnboxTaskSelect\.svelte['"]/, `from './OnboxTaskSelect.gen.js'`)
+  .replace(/from\s+['"]\.\/TranscriptionSetup\.svelte['"]/, `from './TranscriptionSetup.gen.js'`)
   .replace(/from\s+['"]\$lib\/stores\/sensitive-exempt\.svelte['"]/, `from './sensitive-exempt.gen.js'`);
 writeFileSync(`${GEN}/IntelligenceScreen.gen.js`, rewired);
 

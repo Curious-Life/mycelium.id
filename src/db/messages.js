@@ -169,6 +169,53 @@ export function createMessagesNamespace(deps) {
     return { tagged, total, pending: Math.max(0, total - tagged) };
   }
 
+  // SWR cache for the Context Engine L2 (semantic NLP enrichment) backlog — the THIRD polled
+  // full-table scan (@2.5s by the activity feed), so it gets its own latch, identical contract
+  // to the embed + categories caches above. L2 runs continuously on the enrich drainer's timer
+  // (drainer.js), not as a background_jobs row, so the feed projects it at read-time from this
+  // count (mirrors categorizeProjection). Until this, L2 had NO backlog counter and NO feed row
+  // at all — the ~153h stage (8/min for 76k on floor hardware) was invisible.
+  //
+  // `pending` mirrors selectPendingNlp's predicate EXACTLY (nlp_processed = 2 + content-bearing),
+  // so it counts exactly the rows the drainer will pick up and REACHES 0 when caught up. It is
+  // NOT a projection off `total` (the embed-backlog lesson: a SUCCESS predicate over a 4-state
+  // column — 0 unprocessed → 2 embedded → 1 enriched, −1 poison — strands the −1/0 rows in
+  // `pending` forever); it is COUNTED with the exact drain predicate.
+  //
+  // ⚠️ `done` (nlp_processed = 1) has TWO WRITERS, not one (#210 review, LOW — an earlier draft
+  // of this comment claimed "the two are DISJOINT states", which is false for blanks):
+  //   • L2 success — service.js's enrichNlpOnce marks an enriched row 1;
+  //   • the EMBED stage's blank-skip — service.js's drainOnce sends a whitespace-only row
+  //     0 → 1 DIRECTLY (terminal; it never embeds, never reaches 2, and L2 never touches it).
+  // A blank row passes `content != ''` (empty-string only), so without the TRIM clause below it
+  // landed in `total` AND `done` — a bar overfilled with rows L2 never owned. The TRIM excludes
+  // the blank population from total/done/(vacuously) pending CONSISTENTLY, so the bar counts
+  // what L2 actually processes. `pending` was already exact either way: a blank can never sit
+  // at nlp_processed = 2. (SQL TRIM's char set is the practical whitespace population; the
+  // blank-skip itself uses JS .trim() — any exotic-unicode-blank row would count in total+done
+  // and, being terminal at 1, never distort `pending` or the ETA.)
+  let _nlpBacklog = null;          // { userId, value:{done,total,pending}, at:ms }
+  let _nlpBacklogInFlight = null;  // Promise while a recompute runs (single-flight)
+  async function _computeNlpBacklog(userId) {
+    const r = await d1Query(
+      `SELECT
+         COUNT(*) AS total,
+         COALESCE(SUM(CASE WHEN nlp_processed = 1 THEN 1 ELSE 0 END), 0) AS done,
+         COALESCE(SUM(CASE WHEN nlp_processed = 2 THEN 1 ELSE 0 END), 0) AS pending
+       FROM messages
+       WHERE user_id = ?
+         AND forgotten_at IS NULL
+         AND content IS NOT NULL AND content != ''
+         AND TRIM(content, ' \t\n\r') != ''`,
+      [userId],
+    );
+    const row = (r.results || [])[0] || {};
+    const total = Number(row.total || 0);
+    const done = Number(row.done || 0);
+    const pending = Number(row.pending || 0);
+    return { done, total, pending };
+  }
+
   return {
     async insert(rows) {
       const arr = Array.isArray(rows) ? rows : [rows];
@@ -348,6 +395,28 @@ export function createMessagesNamespace(deps) {
       }
       if (cached) return cached.value;
       return _catBacklogInFlight;
+    },
+
+    /**
+     * Cached L2 (semantic NLP enrichment) backlog snapshot for the activity feed's enrich
+     * projection — same serve-stale-while-revalidate + single-flight contract as
+     * embedBacklogCached / categoriesBacklogCached, with its own independent latch (the three
+     * scans must never block each other). Polled @2.5s; the underlying query is a full-table
+     * COUNT that must NOT run per-call. `pending` reaches 0 (counts nlp_processed = 2 exactly,
+     * selectPendingNlp's predicate); `done` = nlp_processed = 1.
+     * @returns {Promise<{ done:number, total:number, pending:number }>}
+     */
+    async nlpBacklogCached(userId) {
+      const cached = _nlpBacklog && _nlpBacklog.userId === userId ? _nlpBacklog : null;
+      const ttlMs = cached && cached.value.pending > 0 ? 8000 : 60000;
+      if (cached && (Date.now() - cached.at) < ttlMs) return cached.value;
+      if (!_nlpBacklogInFlight) {
+        _nlpBacklogInFlight = _computeNlpBacklog(userId)
+          .then((v) => { _nlpBacklog = { userId, value: v, at: Date.now() }; return v; })
+          .finally(() => { _nlpBacklogInFlight = null; });
+      }
+      if (cached) return cached.value;
+      return _nlpBacklogInFlight;
     },
 
     /**

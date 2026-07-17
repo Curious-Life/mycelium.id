@@ -309,6 +309,10 @@
 				</button>
 			</div>
 		{/if}
+		<!-- Release badge — deliberately quiet: tiny, tertiary, half-faded, unselectable.
+		     __APP_VERSION__ is baked in at build time (vite define ← root package.json),
+		     so it always states the running build, with no request and no store. -->
+		<div class="mt-1.5 px-1 text-[0.6rem] leading-none text-[var(--color-text-tertiary)] opacity-50 select-none" title="Mycelium v{__APP_VERSION__}">v{__APP_VERSION__}</div>
 	</div>
 
 	<!-- Resize handle -->

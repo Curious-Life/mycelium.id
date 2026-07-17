@@ -8,7 +8,7 @@
 // default, never drift), and that Descriptions carries the §4g eu-or-local limit.
 import assert from 'node:assert/strict';
 import { INFERENCE_TASKS, ONBOX_TASKS } from '../src/inference/resolve.js';
-import { INTELLIGENCE_FUNCTIONS, functionForTask, tasksForFunction, labelingRecommendedModel, descriptionsRecommendedPreset } from '../src/inference/role-models.js';
+import { INTELLIGENCE_FUNCTIONS, functionForTask, tasksForFunction, labelingRecommendedModel, descriptionsRecommendedPreset, voiceRecommendedModel } from '../src/inference/role-models.js';
 import { isSensitiveTask, SENSITIVE_TASKS } from '../src/inference/sensitivity.js';
 
 const ledger = [];
@@ -135,10 +135,12 @@ t('F5. every function has a label, a sub and a why — the "recommendation + rea
     assert.ok(f.label && f.sub, `${f.key} needs a label + sub`);
     assert.ok(typeof f.why === 'string' && f.why.length > 0, `${f.key} needs a reason (recommendation-first, §3.11c)`);
   }
-  // Voice is the ONE honest exception: no recommendation (no eval has picked a winner), and its
-  // reason must SAY so rather than fabricate a pick.
+  // Voice now HAS a recommendation with EVIDENCE: Qwen3-TTS won the live listening test
+  // (2026-07-15). The badge must be single-sourced from ROLE_RECOMMENDATIONS.voice so it can
+  // never drift from the model catalog's default (the LOCAL-TTS-EVAL §6.2 requirement).
   const voice = INTELLIGENCE_FUNCTIONS.find((f) => f.key === 'voice');
-  assert.equal(voice.recommend, null, 'Voice must carry NO recommendation — no model has won a listening eval (§3.11b honest row)');
+  assert.equal(voice.recommend, voiceRecommendedModel(),
+    'Voice must recommend exactly the pinned voice model — the winner of the live listening test, single-sourced so the badge == the model default');
 });
 
 const allPass = ledger.every(Boolean);

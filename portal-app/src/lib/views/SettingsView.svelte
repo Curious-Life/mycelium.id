@@ -6,10 +6,8 @@
 	import { browser } from '$app/environment';
 	import ProfileView from '$lib/views/ProfileView.svelte';
 	import AreasView from '$lib/views/AreasView.svelte';
-	import VoiceSection from '$lib/components/settings/VoiceSection.svelte';
 	import ChannelsSection from '$lib/components/settings/ChannelsSection.svelte';
-	import AISettings from '$lib/components/settings/AISettings.svelte';
-	import IntelligenceScreen from '$lib/components/settings/IntelligenceScreen.svelte';
+	import IntelligenceFlow from '$lib/components/settings/IntelligenceFlow.svelte';
 	import { signalGuidanceRestored } from '$lib/stores/onboarding-guidance.svelte';
 
 	// ── Un-dismiss (§3.7b) ────────────────────────────────────────────────────────
@@ -37,7 +35,6 @@
 			guidanceMsg = 'Could not restore setup guidance — please try again.';
 		} finally { restoringGuidance = false; }
 	}
-	import EngineSelector from '$lib/components/settings/EngineSelector.svelte';
 	import UsageSection from '$lib/components/settings/UsageSection.svelte';
 	import AIAccessSection from '$lib/components/settings/AIAccessSection.svelte';
 	import AgentCaptureSection from '$lib/components/settings/AgentCaptureSection.svelte';
@@ -754,44 +751,16 @@
 			{/if}
 
 			{#if activePane === 'intelligence'}
-			<!-- Engine (harness): native ↔ Claude Code — which engine runs your chat agent -->
-			<EngineSelector />
-
-			<!-- BY FUNCTION (design §3.11) — what you want done, not which vendor. ONE component,
-			     TWO hosts: this pane and (via E/E2) the onboarding Intelligence step, so a
-			     recommendation can never reach one surface and not the other. Map §5.2 found
-			     THREE diverging implementations of "connect an AI"; this is the one that stays.
-			     It renders the SERVED spine (/portal/providers/presets → functions) — never a
-			     hardcoded taxonomy, or the badge drifts from the model that actually runs. -->
-			<IntelligenceScreen />
-
-			<!-- The model that powers Mycelium — active-model hero + Local/Cloud lanes.
-			     ⚠️ STILL HERE ON PURPOSE, and it is not a duplicate of the screen above: it owns
-			     the CONNECT flow (add a provider, paste a key, the #133 Claude ladder) and the
-			     hardware/local rails. IntelligenceScreen owns the ASSIGNMENT ("which model does
-			     which job"). Retiring AISettings' on-box selects belongs with E/E2, when the
-			     onboarding step mounts the same component and the two surfaces can be collapsed
-			     in one move — doing it here would leave onboarding with no picker at all.
-			     ⚠️ AISettings' on-box copy carries a COUPLED-TO marker saying "each task here is
-			     approved on its own". That is TRUE of ITS selects (per-task route) and stays true
-			     while both surfaces exist. It must die WITH those selects, not before.
-			     ⚠️ KNOWN, AND NOT YET FIXED: both components are mounted HERE, in ONE pane, and
-			     both write settings.taskModels. AISettings loads taskModels at onMount only (no
-			     $effect, no shared store), so approving Understanding above leaves ITS selects
-			     showing a stale value for the same setting until you leave and return. Ugly, not
-			     dangerous — the SERVER is the single source of truth and neither can write a
-			     wrong value; only the display goes stale (independent review ×2, 2026-07-16).
-			     The real fix is E/E2 retiring AISettings' selects, at which point the duplicate
-			     disappears rather than being synchronised. Recording it here because the review
-			     that found it was answered in half, and a half-answered finding is how a known
-			     defect becomes an unknown one. -->
-			<AISettings />
-
-			<!-- Reflection cycles moved to Agents → Manage → (agent) → Reflection cycles,
-			     since cycles are an agent's rhythms and are controlled per-agent there. -->
-
-			<!-- Voice / TTS — provider config + per-voice preview -->
-			<VoiceSection />
+			<!-- THE FLOW (Intelligence redesign Part I, docs/INTELLIGENCE-SCREEN-REDESIGN-
+			     2026-07-17.md): the pane renders STATE A (first-run bundle + one confirm) or
+			     STATE B (returning summary), with the four former components — assignment
+			     (IntelligenceScreen), connect & manage (AISettings, demoted), Voice
+			     (VoiceSection), Engine (EngineSelector) — behind ONE Customize disclosure.
+			     The old four-component pile, its 20-line confession about two taskModels
+			     writers, and the stale-display duplicate it recorded are all GONE: retiring
+			     AISettings' assignment UI removed the second writer, exactly as that comment
+			     predicted (gate A3 keeps it removed). -->
+			<IntelligenceFlow />
 			{/if}
 
 			{#if activePane === 'channels'}

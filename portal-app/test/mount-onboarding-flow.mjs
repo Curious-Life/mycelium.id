@@ -19,6 +19,7 @@ import { compile, compileModule } from 'svelte/compiler';
 import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
+const S_WAIT = process.env.FLIP_GENERATED === '1' || process.env.UNKNOWN_AFTER_FIRST_READ === '1';
 const GEN = '.gen-mount-onbflow';
 rmSync(GEN, { recursive: true, force: true });
 mkdirSync(GEN, { recursive: true });
@@ -32,11 +33,48 @@ const storeSrc = readFileSync('src/lib/stores/onboarding-guidance.svelte.ts', 'u
 const store = compileModule(storeSrc, { generate: 'client', filename: 'onboarding-guidance.svelte.ts' });
 writeFileSync(`${GEN}/store.js`, store.js.code);
 
-// Count every GET of /portal/onboarding/status — that read IS `refresh()` doing its job.
+// Count every GET of /portal/readiness — that read IS `refresh()` doing its job.
+// ⚠️ It was /onboarding/status until E2. The rail now delegates to the ONE readiness model, and
+// this harness noticing is the point: a source-grep gate would not have.
+// The scenario drives the vault's SHAPE, so one harness can prove both the signal (U3) and the
+// §3.7a exclusivity (X1) — the rail must appear iff generated && something-missing.
 writeFileSync(`${GEN}/api-stub.js`, `
+const S = ${JSON.stringify({
+  generated: process.env.GENERATED === '1',
+  ai: process.env.AI === '1',
+  channel: process.env.CHANNEL === '1',
+  dismissed: process.env.DISMISSED === '1',
+  // ⚠️ the DB's welcome_shown_at, NOT the rail's derived welcomeSeen. The rail reconstructs
+  // `welcome_shown_at || total > 0` (because showWelcome is `!seen && total === 0`), so a stub
+  // that hardcodes welcomeSeen:true makes the `|| total > 0` arm untestable — a TOTAL knob with
+  // welcomeSeen pinned true proves nothing.
+  welcomeStamped: process.env.WELCOME_STAMPED !== '0',
+  total: Number(process.env.TOTAL ?? 5),
+  // ⚠️ TRANSITION: start ungenerated, flip to generated after the first read. Every other knob is
+  // baked at mount, and that blindness is why X1 could not see HIGH-3 — the rail's poll was gated
+  // on `generated`, the very fact only the poll could learn, so it never ran again and the rail
+  // never appeared in the session the user generates. A guard matrix without a TIME dimension
+  // cannot catch a deadlock that only exists across time.
+  flipAfterFirstRead: process.env.FLIP_GENERATED === '1',
+  mindscapeUnknown: process.env.MINDSCAPE_UNKNOWN === '1',
+  // known-true first, then the count fails — the only shape that distinguishes HOLDING an answer
+  // from SETTING one (at mount `generated` is false, so "unknown ⇒ hidden" is vacuous).
+  unknownAfterFirstRead: process.env.UNKNOWN_AFTER_FIRST_READ === '1',
+})};
+let reads = 0;
 export async function api(path) {
-  if (String(path).includes('/onboarding/status')) globalThis.__statusReads.push(path);
-  return { ok: true, json: async () => ({ dismissed: false, welcomeSeen: true, messageCount: 0 }) };
+  const p = String(path);
+  if (p.includes('/portal/readiness')) { globalThis.__statusReads.push(p); reads++; }
+  const gen = S.flipAfterFirstRead ? reads > 1 : S.generated;
+  return { ok: true, json: async () => ({
+    data: { total: S.total, embedded: S.total, pending: 0 },
+    ai: { connected: S.ai, activeProvider: S.ai ? 'local' : null },
+    channel: { connected: S.channel },
+    mindscape: (S.mindscapeUnknown || (S.unknownAfterFirstRead && reads > 1))
+      ? { generated: false, pointCount: 0, unknown: true }
+      : { generated: gen },
+    onboarding: { welcomeSeen: S.welcomeStamped, dismissed: S.dismissed },
+  }) };
 }
 `);
 writeFileSync(`${GEN}/nav-stub.js`, `import { writable } from 'svelte/store';\nexport const navigationState = writable({});\n`);
@@ -74,6 +112,22 @@ try {
   await new Promise((r) => setTimeout(r, 30));
   const afterMount = globalThis.__statusReads.length;
 
+  // ⚠️ THE TRANSITION PROBE MUST NOT SHARE A RUN WITH THE SIGNAL PROBE. U3 fires
+  // signalGuidanceRestored() twice, each triggering a refresh — so by the time we measured, the
+  // read counter had already passed the flip threshold and the rail was up for the wrong reason.
+  // A probe contaminated by another probe reports the right answer for the wrong reason, which is
+  // worse than failing. Separate runs.
+  if (S_WAIT) {
+    result.ok = true;
+    result.railAtMount = !!dom.window.document.querySelector('.rail');   // must be FALSE: ungenerated
+    await new Promise((r) => setTimeout(r, 9000));                        // 2 poll ticks @4s
+    result.railAfterPolls = !!dom.window.document.querySelector('.rail');
+    result.readsAfterPolls = globalThis.__statusReads.length;
+    console.log(JSON.stringify(result));
+    rmSync(GEN, { recursive: true, force: true });
+    process.exit(0);
+  }
+
   // The user clicks "Show setup guidance again" in Settings → the store bumps.
   signalGuidanceRestored();
   flushSync();
@@ -89,6 +143,20 @@ try {
   result.afterMount = afterMount;
   result.refreshedOnSignal = afterSignal - afterMount;
   result.refreshedOnSecond = afterSecond - afterSignal;
+  // §3.7a: is the RAIL actually on screen? Read the DOM, not a variable — `railVisible` being
+  // true means nothing if nothing renders it (that mistake shipped twice in this build).
+  const railEl = dom.window.document.querySelector('.rail');
+  result.railRendered = !!railEl;
+  // ⚠️ CONTENT, not just presence. `railRendered` alone blessed a rail that rendered as a titled
+  // box with one ticked step and no action (review HIGH-1) — a <div> satisfies "it rendered".
+  result.railText = railEl ? railEl.textContent.replace(/\s+/g, ' ').trim() : '';
+  // ⚠️ BUTTONS, because text is not action. `railText` matched the step's <span class="step-name">
+  // — which renders UNCONDITIONALLY in .step-head — so deleting the actual CTA left the gate GREEN:
+  // a rail that NAMES the messenger but cannot link one (review MED-5). That is HIGH-1 reborn one
+  // level up, inside the gate written for HIGH-1. A step the user cannot act on is not a step.
+  result.railButtons = railEl
+    ? [...railEl.querySelectorAll('button')].map((b) => b.textContent.replace(/\s+/g, ' ').trim())
+    : [];
 } catch (e) {
   result.error = String(e?.message || e);
 }

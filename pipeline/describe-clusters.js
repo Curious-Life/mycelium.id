@@ -37,6 +37,7 @@ import {
   loadMembers, sampleMembers, getSeenIds, recordSeen, exploredPercent, lastPassNumber,
 } from './lib/narrate-sample.js';
 import { buildContextCapsule, renderCapsule, describedPeriodFor } from './lib/narrate-context.js';
+import { isPlaceholderName, NAME_MAX_OUT_TOKENS } from './lib/naming-facts.js';
 
 const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';
 const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
@@ -65,6 +66,11 @@ function inputSignature(sampleIds, pointCount) {
     .update(JSON.stringify([...sampleIds, Number(pointCount) || 0]))
     .digest('hex');
 }
+
+// isPlaceholderName (D10: "a Realm 7 is not a name") now lives in lib/naming-facts.js — ONE
+// predicate shared with GET /portal/mycelium/naming-status, so the route counts with the
+// pipeline's OWN notion of "unnamed" and the two can never drift (II.2a). The full rationale
+// travels with the function.
 
 /** Append the first-pass name/essence to the entity change-log (best-effort —
  * a history miss must never fail describe). Only called on a real narration;
@@ -108,7 +114,9 @@ async function describe(narrator, kind, { samples, topTags = [], entities = [], 
     ...samples.map((s, i) => `(${i + 1}) ${String(s.content ?? s).slice(0, 5000)}`),
   );
   try {
-    const raw = await narrator.infer(lines.join('\n'), { maxTokens: 300 });
+    // NAME_MAX_OUT_TOKENS is SHARED with the served forecast (naming-facts.js) — the cap and
+    // the promise "up to ~Nk tokens" are one constant, so the bound stays true by construction.
+    const raw = await narrator.infer(lines.join('\n'), { maxTokens: NAME_MAX_OUT_TOKENS });
     const m = String(raw).match(/\{[\s\S]*\}/);
     const parsed = m ? JSON.parse(m[0]) : null;
     if (parsed && typeof parsed.name === 'string' && parsed.name.trim()) {
@@ -167,13 +175,21 @@ async function run() {
     // describe() calls below; their null flows through the existing paths
     // (clobber guard keeps real names; unnamed rows get placeholders and retry
     // when a model is approved). Caught by verify:realm-prune, 2026-07-16.
-    const namingBlocked = narrator.blocked === true;
+    // ⚠️ TRUTHY, not `=== true`. createNarrator sets `blocked: BLOCKED_NO_MODEL` — a STRING
+    // ('no-approved-on-box-model'), never the boolean true (narrate-infer.js; verify:narrate-
+    // consent asserts blocked === BLOCKED_NO_MODEL). `=== true` was therefore ALWAYS false, so
+    // this whole "stop before the work and SAY SO" block was dead: a vault with no approved model
+    // fell through to describe() N times (N identical stderr "narration failed" lines — the very
+    // loop the comment above says it avoids), and the feed got a message-LESS `error` row instead
+    // of the actionable refusal. describe-chronicles.js:483 already uses the truthy form; this
+    // aligns them. Found by driving the consent state (verify:illuminate-naming N5b), 2026-07-17.
+    const namingBlocked = Boolean(narrator.blocked);
     if (namingBlocked) {
       const msg = 'No on-box model is approved and no cloud provider is configured — approve a model in Settings → Intelligence to name your areas.';
       console.error(`[describe] ${DRY_RUN ? '(dry) ' : ''}${msg} (counts still maintained)`);
       if (!DRY_RUN) {
         try {
-          const id = await db.activityFeed.begin({ userId: USER_ID, kind: 'describe:name', stageLabel: 'Naming areas' });
+          const id = await db.activityFeed.begin({ userId: USER_ID, kind: 'describe:name', stageLabel: 'Naming your areas' });
           await db.activityFeed.finish(id, { status: 'error', error: msg });
         } catch { /* feed is best-effort — the refusal itself already stands */ }
       }
@@ -181,7 +197,7 @@ async function run() {
     if (!DRY_RUN && !namingBlocked) {
       // (blocked runs already wrote their terminal feed row above — a second
       //  "Naming areas" begin would show a running job that names nothing)
-      try { feedId = await db.activityFeed.begin({ userId: USER_ID, kind: 'describe:name', stageLabel: 'Naming areas' }); } catch { /* */ }
+      try { feedId = await db.activityFeed.begin({ userId: USER_ID, kind: 'describe:name', stageLabel: 'Naming your areas' }); } catch { /* */ }
       // Refresh liveness every 10s regardless of per-item progress — a cold first
       // model call can exceed the reaper's stale window, which would falsely abandon
       // the row mid-run. The heartbeat (no step change) keeps it 'running'.
@@ -223,8 +239,10 @@ async function run() {
       ).catch(() => []);
 
       // Skip-if-unchanged: named + identical narration input → no inference.
-      // Counts stay fresh (describe owns realm counters).
-      if (!FORCE && existing?.name && (PRESERVE || existing.describe_input_hash === sig)) {
+      // Counts stay fresh (describe owns realm counters). A PLACEHOLDER name is not a
+      // name (D10) — never let it satisfy this skip, or a naming pass no-ops on the
+      // rows it was spawned to name.
+      if (!FORCE && existing?.name && !isPlaceholderName(existing.name) && (PRESERVE || existing.describe_input_hash === sig)) {
         skippedRealms += 1;
         if (DRY_RUN) { console.log(`[describe] (dry) realm ${realm_id} unchanged — skip`); continue; }
         await query(
@@ -306,8 +324,9 @@ async function run() {
       const unseen = sample.unseenRemaining;
 
       // Skip: named AND input unchanged AND fully covered (no new content to fold
-      // in). Refresh the coverage % on the way past so the UI stays honest.
-      if (!FORCE && existing?.name && (PRESERVE || (existing.describe_input_hash === sig && unseen === 0))) {
+      // in). Refresh the coverage % on the way past so the UI stays honest. A
+      // PLACEHOLDER name is not a name (D10) — never let it satisfy this skip.
+      if (!FORCE && existing?.name && !isPlaceholderName(existing.name) && (PRESERVE || (existing.describe_input_hash === sig && unseen === 0))) {
         skippedTerr += 1;
         if (DRY_RUN) { console.log(`[describe] (dry) territory ${territory_id} unchanged + fully covered — skip`); await tick(total); continue; }
         await query(

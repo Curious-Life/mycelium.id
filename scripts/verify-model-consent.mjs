@@ -3,7 +3,7 @@
 //
 // THE FINDING THIS ENFORCES: three of the four local models already required consent —
 // embedding is BUNDLED with the app (can't be declined, can't be downloaded), whisper and
-// Kokoro are click-to-download with byte-accurate progress. Labeling was the lone offender:
+// Qwen3-TTS voice are click-to-download with byte-accurate progress. Labeling was the lone offender:
 // the drainer silently pulled qwen3.5:4b (3.4GB) — and, via ensureUp()'s autoInstall, the
 // Ollama RUNTIME with it — unprompted, log-only, with no way to decline. This gate makes
 // the outlier behave like the majority.
@@ -339,12 +339,12 @@ await t('M6b. the on-box picker REALLY renders + emits the recommended model (mo
 // ── M7) labelerHealth must not lie about WHICH model, or about PAUSED ───────────────
 await t('M7. a PAUSED labeler says `paused` — not `unknown` forever', async () => {
   const { db } = makeDb(['a'], { approved: 'qwen3.5:4b' });
-  const { pauseEnrichCategorize, resumeEnrichCategorize } = await import('../src/enrich/drainer.js');
-  pauseEnrichCategorize();
+  const { pauseEnrichProcessing, resumeEnrichProcessing } = await import('../src/enrich/drainer.js');
+  pauseEnrichProcessing();
   const d = startEnrichDrainer({ db, userId: 'u', intervalMs: BIG, embed: healthyEmbed, classify, daemon: makeDaemon(), ollama: makeOllama({ installed: ['qwen3.5:4b'] }), log: () => {} });
   const got = await waitFor(() => getLabelerHealth()?.status === 'paused');
   const h = getLabelerHealth();
-  d.stop?.(); resumeEnrichCategorize();
+  d.stop?.(); resumeEnrichProcessing();
   // The resolve used to sit INSIDE the pause check, so a paused vault never resolved the
   // model and reported 'unknown' — "Checking the labeling model…" — forever. The one state
   // the user explicitly chose was the one this slice could not express.
@@ -489,9 +489,11 @@ await t('M9b. the LABEL model\'s download is not reported as the ENRICHER\'s hea
 });
 
 await t('M9c. a PAUSED vault reports the enricher `paused` — the pause really does stop L2', async () => {
-  // pauseEnrichCategorize() is NAMED for categorize but SCOPED to both: it skips the whole
-  // `if (!isEnrichCategorizePaused())` block in cycle(), which holds the L2 loop too. So
-  // 'paused' here is a fact about L2, not a value copied off the labeler.
+  // pauseEnrichProcessing() skips the whole `if (!isEnrichProcessingPaused())` block in cycle(),
+  // which holds the L2 loop too — so 'paused' here is a fact about L2, not a value copied off the
+  // labeler. (This note used to read "NAMED for categorize but SCOPED to both". §3.9/R3 fixed the
+  // name and widened the scope again: it now gates the embed drain as well. The name no longer
+  // lies, so there is no longer a gap between it and the scope to warn about.)
   const db = {
     users: { getSettings: async () => ({ taskModels: { categorize: { model: 'qwen3.5:4b' }, enrich: { model: 'qwen3.5:4b' } } }) },
     async rawQuery() { return { rows: [] }; },
@@ -502,12 +504,12 @@ await t('M9c. a PAUSED vault reports the enricher `paused` — the pause really 
       async updateCategories() {},
     },
   };
-  const { pauseEnrichCategorize, resumeEnrichCategorize } = await import('../src/enrich/drainer.js');
-  pauseEnrichCategorize();
+  const { pauseEnrichProcessing, resumeEnrichProcessing } = await import('../src/enrich/drainer.js');
+  pauseEnrichProcessing();
   const d = startEnrichDrainer({ db, userId: 'u', intervalMs: BIG, embed: healthyEmbed, classify, daemon: makeDaemon(), ollama: makeOllama({ installed: ['qwen3.5:4b'] }), log: () => {} });
   const got = await waitFor(() => getEnricherHealth()?.status === 'paused');
   const h = getEnricherHealth();
-  d.stop?.(); resumeEnrichCategorize();
+  d.stop?.(); resumeEnrichProcessing();
   assert.ok(got, `a paused vault is not enriching — the enricher must report 'paused', not 'ok'. Got '${h.status}' ("${h.message}")`);
   assert.equal(h.model, 'qwen3.5:4b', 'and it must still know WHICH model is approved');
 });
@@ -572,12 +574,12 @@ await t('M9e. a THROWING drain path does not strand the stamp — the healths st
 
   // AND the stamp is what makes the REAL states reachable through a crash. Paused + crashing
   // read 'unknown' before the hoist (no model ⇒ no branch); it now reads the truth.
-  const { pauseEnrichCategorize, resumeEnrichCategorize } = await import('../src/enrich/drainer.js');
-  pauseEnrichCategorize();
+  const { pauseEnrichProcessing, resumeEnrichProcessing } = await import('../src/enrich/drainer.js');
+  pauseEnrichProcessing();
   const d2 = startEnrichDrainer({ db: mkDb(), userId: 'u', intervalMs: BIG, embed: healthyEmbed, classify, daemon: makeDaemon(), ollama: makeOllama({ installed: ['qwen3.5:4b'] }), log: () => {} });
   const got = await waitFor(() => getEnricherHealth()?.status === 'paused');
   const p = getEnricherHealth();
-  d2.stop?.(); resumeEnrichCategorize();
+  d2.stop?.(); resumeEnrichProcessing();
   assert.ok(got, `a crashing cycle must not mask a state the owner chose — expected 'paused', got '${p.status}' ("${p.message}")`);
 
   // ⚠️ THE HONEST LIMIT THIS ONCE RECORDED IS NOW CLOSED — and per its own instruction ("if this
