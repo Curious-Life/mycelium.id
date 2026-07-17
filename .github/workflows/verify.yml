@@ -22,6 +22,13 @@ on:
       - 'feat/**'                # active working branches
       - 'claude/auto-loop/**'    # the autonomous build loop's own per-unit branches
 
+# Least-privilege default: this workflow only reads the checked-out code (it
+# runs the verify suite; it never writes to the repo, comments, or touches
+# releases). An explicit top-level block replaces GITHUB_TOKEN's broad default
+# and satisfies the actions/missing-workflow-permissions hardening check.
+permissions:
+  contents: read
+
 jobs:
   verify:
     runs-on: ubuntu-latest
