@@ -23,29 +23,36 @@
 	//   'bundled'      → nothing to choose      (recommend = the model that ships in the app)
 	//   'whisper'      → its own catalog+route  (recommend = 'by-ram' sentinel)
 	//   'tts'          → its own catalog        (recommend = the Qwen3-TTS variant that WON the live listening test, 2026-07-15)
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { api } from '$lib/api';
 
 	// "Try again" for an unreachable local-model state: clears the pull backoff and kicks a drain
 	// cycle (POST /portal/enrichment/trigger), then RE-FETCHES health so the row tells the truth.
-	// ⚠️ THE RE-FETCH IS THE FEATURE, not polish. This screen loads health exactly ONCE (onMount) —
-	// a previous version of this comment claimed "health re-polls on its own cadence", which was
-	// FALSE for this screen: the retry would WORK in the background while the row kept saying
+	// ⚠️ THE RE-FETCH IS THE FEATURE, not polish. An earlier version of this screen loaded health
+	// exactly ONCE (onMount): the retry would WORK in the background while the row kept saying
 	// "not reachable" with a Try again button, and the user's only honest reading was "the retry
 	// is broken" (independent review MED, 2026-07-17). Two refreshes (~2s and ~6s) bracket the
 	// likely recovery: the trigger's cycle needs a moment to list/pull before health flips.
-	// NB a MULTI-GB pull outlives both refreshes: the row then shows "Downloading… N%" frozen at
-	// its ~6s snapshot until remount — not a hang, just this screen's load-once nature; the live
-	// surface for a long pull is the header activity feed (polls @2.5s).
+	// The while-unsettled poll below now also covers the long tail (a MULTI-GB pull no longer
+	// freezes at a ~6s snapshot — the row tracks it live until it settles).
 	let retryBusy = $state(false);
 	async function retryHealth() {
 		if (retryBusy) return;
 		retryBusy = true;
 		try { await api('/portal/enrichment/trigger', { method: 'POST' }); } catch { /* the health row shows the state */ }
-		setTimeout(async () => { await load(); retryBusy = false; }, 2000);
-		setTimeout(() => { load(); }, 6000);
+		// After each bracket refresh, hand off to the while-unsettled poll: a retry that turns
+		// into a pull ('downloading') stays live instead of freezing at the ~6s snapshot.
+		setTimeout(async () => { await load(); maybePollModels(); retryBusy = false; }, 2000);
+		setTimeout(() => { void load().then(maybePollModels); }, 6000);
 	}
 	import OnboxTaskSelect from './OnboxTaskSelect.svelte';
+	// Voice's rail, folded under the Voice function row (Phase 3 de-dup) — the exact sibling of
+	// TranscriptionSetup under the whisper row. Was a separate Customize section + a pointer note.
+	import VoiceSection from './VoiceSection.svelte';
+	// Engine folded into the Conversation function row (2026-07-19) — the engine only governs agent
+	// turns (chat, harness, reflection), which ARE Conversation's tasks, so "how a turn runs" is an
+	// attribute of that function, not a separate Customize section. Was a standalone Engine tab.
+	import EngineSelector from './EngineSelector.svelte';
 	// The whisper download rail — moved here from AISettings (Part I §9): the rail renders
 	// under the Transcription FUNCTION row, so the assignment and its machinery share a home.
 	// Its own catalog + route, unchanged (§3.10d "no third catalog").
@@ -75,7 +82,6 @@
 	let installedLocal = $state<string[]>([]);
 	let busy = $state<string | null>(null);
 	let err = $state<string | null>(null);
-	let showAll = $state<Record<string, boolean>>({});
 	// §4g's opt-in (settings.allowSubscriptionSensitive) — part of the router's rule, so part of
 	// this screen's rule (see offerable()). Read from the SHARED store so a flip in AISettings
 	// re-renders this guarantee immediately.
@@ -108,11 +114,92 @@
 		if (!hs.length) return null;
 		return hs.reduce((worst, h) => ((RANK[h.status] ?? 1) > (RANK[worst.status] ?? 1) ? h : worst), hs[0]);
 	}
+	// The status DOT's colour class — a CHOICE (no_model / paused / unset) is muted, never red;
+	// genuine faults are red. Mirrors the flow summary's §8.2 rule.
+	const dotClass = (status: string | null | undefined) =>
+		!status || ['no_model', 'paused', 'unknown'].includes(status) ? 'choice'
+		: ['downloading', 'loading'].includes(status) ? 'busy'
+		: ['unavailable', 'down', 'error', 'deps_missing'].includes(status) ? 'bad' : 'ok';
 
 	// The model currently approved for a function = its FIRST task's setting. Safe because
 	// F6/F6b pin that a function's tasks are kind-homogeneous and Understanding is exactly
 	// ONBOX_TASKS — so its two tasks always carry the same model (the route writes them together).
 	const approvedOf = (f: Fn) => (f.tasks.length ? (taskModels[f.tasks[0]]?.model || '') : '');
+
+	// ── LIVE HEALTH after a write (the stale-badge fix, 2026-07-18) ──────────────────────────
+	// THE BUG: this screen read `/portal/readiness?slices=models` ONCE in onMount, and
+	// approve()/assign() never refetched — so picking a model for Understanding left the badge
+	// saying "No labeling model approved" FOREVER (until remount). The write path was always
+	// correct (PUT fans out to both tasks — verify-task-models M8); the DISPLAY was a
+	// mount-time snapshot. The operator read that as "selecting the model doesn't work".
+	//
+	// THE FIX, in two parts (the TranscriptionSetup maybePoll pattern, same 2s interval):
+	//   1. refetchModels() immediately after a successful write;
+	//   2. a poll that runs ONLY while some reported health is UNSETTLED, and stops the moment
+	//      everything settles. Unsettled means:
+	//        • mid-transition (`downloading`/`loading`/`unknown`) — the busy states; or
+	//        • the report LAGS a setting this screen wrote: the drainer re-reads settings on its
+	//          ~15s cycle, so right after an approval the slice still says `no_model` (and after
+	//          an un-approval still says `ok`). Only `kind==='local'` rows can lag — cloud
+	//          assignments have no drainer between the setting and the report.
+	//
+	// COST — priced, not assumed (the gates-assert-shape-never-cost lesson):
+	//   • server: the models slice is SYNC, in-memory supervisor reads — ZERO DB touches per hit
+	//     (src/readiness.js `models()` + its get(): "Both are SYNC … never a DB hit"); `models`
+	//     is on verify-readiness C1's POLLED allowlist, which asserts exactly that.
+	//   • client: the poll EXISTS only while unsettled. Steady state = zero requests. The lag
+	//     wait is additionally CAPPED (LAG_TICK_CAP ≈ 6 drainer cycles) so a drainer that never
+	//     reports (stopped process) cannot buy an eternal poll; a genuine download keeps the
+	//     poll alive for its own duration, exactly like TranscriptionSetup's busy poll.
+	// The intelligence-screen gate pins both properties: a refetch after approve, and ZERO
+	// further fetches across two windows once the fixture settles.
+	const MODELS_POLL_MS = 2000;
+	const LAG_TICK_CAP = 45;   // 45 × 2s = 90s ≈ six 15s drainer cycles
+	let modelsPoll: ReturnType<typeof setInterval> | null = null;
+	let lagTicks = 0;
+
+	async function refetchModels() {
+		try {
+			const r = await api('/portal/readiness?slices=models');
+			if (r.ok) models = (await r.json())?.models || {};
+		} catch { /* hold the last snapshot; the poll (if running) retries */ }
+	}
+
+	function pollVerdict(): 'busy' | 'lag' | 'settled' {
+		let lag = false;
+		for (const f of functions) {
+			const keys = HEALTH_OF[f.key];
+			if (!keys) continue;
+			const approved = approvedOf(f);
+			for (const k of keys) {
+				const h = models[k];
+				if (!h) continue;
+				if (h.status === 'downloading' || h.status === 'loading') return 'busy';
+				if (h.status === 'unknown') lag = true;
+				else if (f.kind === 'local' && approved && h.status === 'no_model') lag = true;
+				else if (f.kind === 'local' && !approved && h.status === 'ok') lag = true;
+			}
+		}
+		return lag ? 'lag' : 'settled';
+	}
+
+	function stopModelsPoll() {
+		if (modelsPoll) { clearInterval(modelsPoll); modelsPoll = null; }
+		lagTicks = 0;
+	}
+	function maybePollModels() {
+		if (pollVerdict() === 'settled') { stopModelsPoll(); return; }
+		if (!modelsPoll) { lagTicks = 0; modelsPoll = setInterval(modelsPollTick, MODELS_POLL_MS); }
+	}
+	async function modelsPollTick() {
+		const v = pollVerdict();
+		if (v === 'settled') { stopModelsPoll(); return; }
+		if (v === 'busy') lagTicks = 0;                                  // visible progress → keep tracking
+		else if (++lagTicks > LAG_TICK_CAP) { stopModelsPoll(); return; } // lag never resolved → bounded stop
+		await refetchModels();
+		if (pollVerdict() === 'settled') stopModelsPoll();               // stop the tick it settles — no idle extra
+	}
+	onDestroy(stopModelsPoll);
 
 	// Locals the user could pick INSTEAD of the recommendation. The recommendation has its own
 	// option inside OnboxTaskSelect, so it is excluded here or it renders twice.
@@ -124,11 +211,18 @@
 		return [...set];
 	};
 
-	// ⚠️ §4g — the ONE place "full flexibility" yields, and it must not be cosmetic.
-	// `narrate` is §4g-sensitive (src/inference/sensitivity.js), so the router REFUSES a US
-	// provider for it and falls back to EU/on-device. Offering a US model here would be a
-	// silent lie: the user picks it, and something else runs. So an eu-or-local function is
-	// offered ONLY eu-zdr/local providers, with the reason stated.
+	// ⚠️ §4g — the generic filter for an 'eu-or-local' function. DORMANT as of 2026-07-19: no
+	// function carries that jurisdiction anymore. `narrate` (Descriptions) was the last one, and
+	// the operator lifted its limit — Descriptions is now jurisdiction 'any' (role-models.js), so
+	// the guard below (`f.jurisdiction !== 'eu-or-local' ⇒ return providers`) short-circuits and
+	// every provider is offered. This code is KEPT, not deleted: if a future task rejoins
+	// SENSITIVE_TASKS and its function is marked 'eu-or-local', the router refuses a US provider
+	// for it and offering one here would be a silent lie — so the filter (and the copy below) must
+	// stay in step with the router. It is generic infrastructure, not narrate-specific.
+	//
+	// When it DOES apply: the router REFUSES a US provider for a sensitive task and falls back to
+	// EU/on-device, so an eu-or-local function is offered ONLY eu-zdr/local providers, with the
+	// reason stated.
 	//
 	// ⚠️ `p.jurisdiction` COMES FROM THE SERVER (publicRow → presets.js jurisdictionForBaseUrl,
 	// the same function the router trusts). This code does NOT classify. The first version did
@@ -208,8 +302,13 @@
 				method: 'PUT',
 				body: JSON.stringify({ function: f.key, model }),
 			});
-			if (r.ok) taskModels = (await r.json()).taskModels || {};
-			else err = 'That model could not be saved.';
+			if (r.ok) {
+				taskModels = (await r.json()).taskModels || {};
+				// LIVE HEALTH: the badge must reflect this approval, not the mount snapshot
+				// (see the poll block above). Refetch now, then poll while unsettled.
+				await refetchModels();
+				maybePollModels();
+			} else err = 'That model could not be saved.';
 		} catch { err = 'That model could not be saved.'; }
 		finally { busy = null; }
 	}
@@ -228,13 +327,23 @@
 				method: 'PUT',
 				body: JSON.stringify({ function: f.key, providerId }),
 			});
-			if (r.ok) taskModels = (await r.json()).taskModels || {};
-			else err = 'That model could not be saved.';
+			if (r.ok) {
+				taskModels = (await r.json()).taskModels || {};
+				// Same live-health rule as approve(). A cloud assignment cannot LAG (no drainer
+				// between setting and report), but refetching keeps one code path and the poll's
+				// verdict decides for itself — settled ⇒ it never starts.
+				await refetchModels();
+				maybePollModels();
+			} else err = 'That model could not be saved.';
 		} catch { err = 'That model could not be saved.'; }
 		finally { busy = null; }
 	}
 
-	onMount(load);
+	onMount(() => {
+		// After the first load, start the poll ONLY if something is already unsettled (e.g. the
+		// screen mounted mid-download) — a settled vault starts no timer at all.
+		void load().then(maybePollModels);
+	});
 </script>
 
 <div class="intel" class:compact>
@@ -244,106 +353,82 @@
 		{@const health = healthFor(f)}
 		{@const approved = approvedOf(f)}
 		<section class="fn">
-			<header>
-				<div class="title">
-					<strong>{f.label}</strong>
-					<span class="sub">{f.sub}</span>
+			<!-- One uniform row per job: status dot · name + one-line outcome + reason · control.
+			     The old per-row "Show all models" disclosure is gone (the select already lists every
+			     local; cloud points to the Providers tab). -->
+			<div class="fn-row">
+				<span class="dot {dotClass(health?.status)}" title={health?.status || ''} aria-hidden="true"></span>
+				<div class="fn-id">
+					<div class="fn-title"><strong>{f.label}</strong><span class="sub">{f.sub}</span></div>
+					<!-- Recommendation-FIRST, with the reason (§3.11c) — one quiet line. -->
+					<p class="why">{f.why}</p>
 				</div>
-				{#if health}
-					<!-- Honest states, not a spinner. `no_model` and `paused` are CHOICES the user
-					     made (§3.5) — they render as status, never as an error. -->
-					<span class="health {health.status}">
-						{#if health.status === 'downloading' && health.progress}
-							Downloading… {health.progress.pct}%
-						{:else}{health.message || health.status}{/if}
-					</span>
-					<!-- The storm fix's user half (2026-07-17): a failing model download now backs off
-					     instead of retrying every 15s — so the user needs a way to say "try NOW".
-					     The trigger route clears the backoff and kicks a cycle. Only on the two
-					     genuine-fault states; choices (no_model/paused) get no retry button. -->
-					<!-- ONLY 'unavailable' — the drainer's vocabulary, where the trigger route can act
-					     (clear the pull backoff + kick a cycle). The EMBEDDER's 'error'/'down' come from
-					     a different subsystem with its own supervisor restart loop; a Try again there
-					     POSTs a route that cannot help it — a decorative button is worse than none
-					     (review LOW, 2026-07-17). If 'down' ever needs an affordance, it needs its own
-					     restart route, not this one. -->
-					{#if health.status === 'unavailable'}
-						<button class="retry-btn" onclick={retryHealth} disabled={retryBusy}
-							title={health.detail ? `Last error: ${health.detail}` : 'Retry now'}
-						>{retryBusy ? 'Retrying…' : 'Try again'}</button>
+				<div class="fn-ctl">
+					{#if f.kind === 'bundled'}
+						<!-- ⚠️ NOT a choice (§3.10d-c): the embedder ships INSIDE the app — no picker,
+						     no rail. Dressing it as consent is the dishonesty §3.10 removes. -->
+						<span class="included">Included · {f.recommend}</span>
+					{:else if f.kind === 'local' && f.recommend}
+						<OnboxTaskSelect
+							value={approved}
+							recModel={f.recommend}
+							options={localOptions(f)}
+							disabled={busy === f.key}
+							onpick={(m) => approve(f, m)}
+						/>
 					{/if}
-				{/if}
-			</header>
+					{#if health && health.status !== 'ok'}
+						<!-- Honest states, not a spinner (§3.5): `no_model`/`paused` are CHOICES, shown
+						     muted, never an error. `ok` is carried by the green dot; only
+						     attention-worthy states print text. -->
+						<span class="health {health.status}">
+							{#if health.status === 'downloading' && health.progress}
+								Downloading… {health.progress.pct}%
+							{:else}{health.message || health.status}{/if}
+						</span>
+						<!-- ONLY 'unavailable' — the drainer's vocabulary, where the trigger route can
+						     act. The embedder's error/down come from a different subsystem (review LOW,
+						     2026-07-17). -->
+						{#if health.status === 'unavailable'}
+							<button class="retry-btn" onclick={retryHealth} disabled={retryBusy}
+								title={health.detail ? `Last error: ${health.detail}` : 'Retry now'}
+							>{retryBusy ? 'Retrying…' : 'Try again'}</button>
+						{/if}
+					{/if}
+				</div>
+			</div>
 
-			<!-- Recommendation-FIRST, with the reason (§3.11c). Not a 302-model dump: the
-			     recommendation carries WHY it is the recommendation, and everything else lives
-			     behind a disclosure. -->
-			<p class="why">{f.why}</p>
-
-			{#if f.kind === 'bundled'}
-				<!-- ⚠️ NOT a choice, and it must never be dressed as one (§3.10d-c). The embedder
-				     ships INSIDE the app: it cannot be declined, cannot be downloaded, has no
-				     rail. A card with a pre-ticked box would present a non-choice as consent —
-				     the same dishonesty §3.10 exists to remove. F8 pins that it owns no task, so
-				     it is structurally unapprovable, not merely un-drawn. -->
-				<p class="included">Included · {f.recommend} — runs on your device</p>
-
-			{:else if f.kind === 'local' && f.recommend}
-				<OnboxTaskSelect
-					value={approved}
-					recModel={f.recommend}
-					options={localOptions(f)}
-					disabled={busy === f.key}
-					onpick={(m) => approve(f, m)}
-				/>
-				{#if f.tasks.length > 1}
-					<!-- Say it plainly: one approval covers both tasks. The user should not have to
-					     infer that labels and entities travel together. -->
-					<p class="note">One choice covers labels and entities.</p>
-				{/if}
-
-			{:else if f.kind === 'whisper'}
-				<!-- The whisper rail lives HERE now (Part I §9) — under the function row that
-				     assigns it. Its own catalog + route; choosing a model IS the approval. -->
-				<TranscriptionSetup />
+			{#if f.kind === 'whisper'}
+				<!-- The whisper rail lives HERE (Part I §9) — under the function it assigns. -->
+				<div class="fn-extra"><TranscriptionSetup /></div>
 
 			{:else if f.kind === 'tts'}
-				<!-- Voice keeps its OWN rail (the TTS catalog + variant picker, #209) as a
-				     Customize sibling. §3.10d: no third catalog — point, don't re-implement. -->
-				<p class="note">Set up under Voice below.</p>
+				<!-- Voice's OWN rail (TTS catalog + variant picker + preview, #209) folded under the
+				     Voice row — the symmetry with the whisper row (Phase 3 de-dup). Same VoiceSection
+				     component, mounted once, not a re-implementation (§3.10d). -->
+				<div class="fn-extra"><VoiceSection /></div>
 
-			{:else}
-				<div class="providers">
+			{:else if f.kind === 'local' && f.recommend && f.tasks.length > 1}
+				<!-- Say it plainly: one approval covers both tasks. -->
+				<p class="note fn-extra">One choice covers labels and entities.</p>
+
+			{:else if f.kind !== 'bundled' && f.kind !== 'local' && f.kind !== 'tts'}
+				<div class="providers fn-extra">
+					<!-- ⚠️ §4g DORMANT (2026-07-19): no function is 'eu-or-local' anymore — narrate's
+					     limit was lifted, so offerable() returns ALL providers and these guarded
+					     branches never fire. KEPT as generic infra: if a task rejoins SENSITIVE_TASKS
+					     and its function is 'eu-or-local', the router refusal and this filter+copy
+					     must agree (§3.11d). See role-models.js + offerable() above. -->
 					{#if f.jurisdiction === 'eu-or-local' && !exemptKnown && offerable(f).length === 0}
-						<!-- ⚠️ SUPPRESS ONLY THE FALSE THING — not the whole row.
-						     A filtered list is NOT an assertion about §4g: while the flag is unknown
-						     the list is exactly {eu-zdr, local}, and the router allows EVERY one of
-						     those for narrate REGARDLESS of the exemption (its rule refuses only
-						     us-* AND not-exempt). The exemption only ever ADDS the subscription; it
-						     never removes an EU/local provider. So showing that list is a sound
-						     UNDER-approximation — fail-closed, and useful.
-						     The ONE false thing is the dead-end below: "Connect an EU or on-device
-						     model" is a lie to an exempt vault whose subscription would qualify. So
-						     that — and only that — is what an unverified flag suppresses.
-						     An earlier version removed the entire list and pinned that into the gate.
-						     It cost real capability (a 503 froze this row forever: no buttons, no
-						     assignment shown, no retry) and the "Checking…" spinner asserted work in
-						     flight when nothing was — this component's own §3.5 rule is "honest
-						     states, not a spinner". Trading a false claim for a dead row is not a
-						     fix (independent review ×6, 2026-07-16). -->
 						<p class="limit">
 							Descriptions analyse your personal themes. Checking where they’re allowed to run…
 						</p>
 					{:else if offerable(f).length === 0}
-						<!-- ⚠️ `recommend` here is a PRESET id (e.g. 'claude_subscription'), while these
-						     buttons list CONFIGURED provider rows — so a vault with none can read the
-						     reason and have nothing to click. Recommendation-FIRST only half-holds for
-						     cloud functions until the CONNECT flow lives here too, which is E/E2's job
-						     (it owns the #133 ladder). Say where to go rather than dead-end them
-						     (independent review, 2026-07-16). -->
+						<!-- `recommend` is a PRESET id; these buttons list CONFIGURED rows — a vault with
+						     none reads the reason and has nothing to click. Point to the connect flow. -->
 						<p class="note">
-							{#if f.jurisdiction === 'eu-or-local'}Connect an EU or on-device model under “Connect an AI” below.
-							{:else}Connect one under “Connect an AI” below.{/if}
+							{#if f.jurisdiction === 'eu-or-local'}Connect an EU or on-device model in the Providers tab.
+							{:else}Connect one in the Providers tab.{/if}
 						</p>
 					{:else}
 						{#each offerable(f) as p (p.id)}
@@ -355,13 +440,8 @@
 						{/each}
 					{/if}
 					{#if f.jurisdiction === 'eu-or-local' && exemptKnown}
-						<!-- State the limit AND its reason. §3.11d: offering a choice the system will
-						     override is worse than not offering it — but hiding options with no
-						     explanation is its own dishonesty. -->
-						<!-- ⚠️ THE COPY MUST MATCH THE CONFIGURATION, not the default. Claiming
-						     "stays in the EU or on your device" while the subscription exemption is
-						     ON is a FALSE PRIVACY STATEMENT — the router really does send narrate to
-						     the US then (independent review ×2, 2026-07-16). -->
+						<!-- ⚠️ THE COPY MUST MATCH THE CONFIGURATION (dormant now, but kept in step with
+						     the router for any future 'eu-or-local' function — independent review ×2). -->
 						{#if subscriptionExempt}
 							<p class="limit">
 								Descriptions analyse your personal themes. They stay in the EU or on your
@@ -379,18 +459,10 @@
 				</div>
 			{/if}
 
-			{#if f.kind !== 'bundled' && f.kind !== 'whisper' && f.kind !== 'tts'}
-				<button class="disclose" onclick={() => (showAll[f.key] = !showAll[f.key])}>
-					{showAll[f.key] ? 'Hide other models' : 'Show all models →'}
-				</button>
-				{#if showAll[f.key]}
-					<!-- The disclosure, not the front door (§3.11c). QA item 11's "raw dump" becomes
-					     a thing you opt into, so recommended stays a DEFAULT rather than a CAGE. -->
-					<p class="note">
-						{#if f.kind === 'local'}Any installed local model can be chosen above.
-						{:else}Connect another provider under “Connect an AI”.{/if}
-					</p>
-				{/if}
+			{#if f.key === 'conversation'}
+				<!-- Engine folded into Conversation (2026-07-19): it governs agent turns (chat,
+				     harness, reflection) = this function's tasks. Was a standalone Engine tab. -->
+				<div class="fn-extra"><EngineSelector /></div>
 			{/if}
 		</section>
 	{/each}
@@ -399,29 +471,41 @@
 </div>
 
 <style>
-	.intel { display: flex; flex-direction: column; gap: 1.25rem; }
-	.intel.compact { gap: 0.75rem; }
-	.fn { display: flex; flex-direction: column; gap: 0.4rem; }
-	header { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
-	.title { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
-	.sub { color: var(--color-text-muted, #888); font-size: 0.85em; }
-	.why { color: var(--color-text-muted, #888); font-size: 0.85em; margin: 0; }
-	.note, .limit { color: var(--color-text-muted, #888); font-size: 0.8em; margin: 0.15rem 0 0; }
-	.included { font-size: 0.9em; margin: 0; }
-	.err { color: #f87171; font-size: 0.85em; }
-	.health { font-size: 0.75em; padding: 0.1rem 0.4rem; border-radius: 999px; background: var(--color-surface-2, #2222); }
-	/* A CHOICE is not a fault: no_model/paused must not read as red. */
-	.health.ok { color: #4ade80; }
-	.health.no_model, .health.paused, .health.unknown { color: var(--color-text-muted, #888); }
+	/* Rows are separated by one hairline each — a calm list, not stacked cards. */
+	.intel { display: flex; flex-direction: column; }
+	.intel.compact { gap: 0; }
+	.fn { display: flex; flex-direction: column; padding: 0.05rem 0; }
+	.fn + .fn { border-top: 1px solid rgba(255,255,255,0.05); }
+	/* The uniform header line: dot · (name + outcome + why) · control. */
+	.fn-row { display: flex; align-items: flex-start; gap: 0.6rem; padding: 0.7rem 0.1rem; }
+	.dot { flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%; margin-top: 0.42rem;
+		background: var(--color-border, #555); }
+	/* §8.2 — a choice is muted, never red. */
+	.dot.ok { background: var(--color-accent-jade, #4ade80); }
+	.dot.busy { background: #60a5fa; }
+	.dot.choice { background: var(--color-border, #555); }
+	.dot.bad { background: var(--color-accent-coral, #f87171); }
+	.fn-id { flex: 1; min-width: 0; }
+	.fn-title { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+	.fn-title strong { font-size: 0.9rem; font-weight: 500; color: var(--color-text-primary); }
+	.sub { color: var(--color-text-tertiary, #888); font-size: 0.78rem; }
+	.why { color: var(--color-text-tertiary, #888); font-size: 0.76rem; line-height: 1.4; margin: 0.15rem 0 0; }
+	.fn-ctl { flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 0.3rem; padding-top: 0.1rem; }
+	.included { font-size: 0.78rem; color: var(--color-text-tertiary, #888); white-space: nowrap; }
+	.fn-extra { margin: 0 0 0.55rem 1.3rem; }
+	.note, .limit { color: var(--color-text-tertiary, #888); font-size: 0.76rem; line-height: 1.45; margin: 0.1rem 0 0; }
+	.err { color: #f87171; font-size: 0.85em; margin-bottom: 0.5rem; }
+	.health { font-size: 0.72rem; text-align: right; }
+	.health.no_model, .health.paused, .health.unknown { color: var(--color-text-tertiary, #888); }
 	.health.downloading, .health.loading { color: #60a5fa; }
 	.health.unavailable, .health.down, .health.error { color: #f87171; }
-	.retry-btn { margin-left: 0.5rem; font-size: 0.72rem; padding: 0.1rem 0.5rem; border: 1px solid var(--color-border); border-radius: 6px; background: transparent; color: var(--color-text-secondary); cursor: pointer; }
+	.retry-btn { font-size: 0.72rem; padding: 0.1rem 0.5rem; border: 1px solid var(--color-border); border-radius: 6px; background: transparent; color: var(--color-text-secondary); cursor: pointer; }
 	.retry-btn:hover { color: var(--color-text-primary); border-color: var(--color-text-tertiary); }
 	.retry-btn:disabled { opacity: 0.5; cursor: default; }
 	.providers { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
-	.pick { font: inherit; font-size: 0.85em; padding: 0.2rem 0.5rem; border-radius: 6px;
-		border: 1px solid var(--color-border, currentColor); background: transparent; cursor: pointer; }
-	.pick.on { background: var(--color-accent-teal, #14b8a6); color: #000; }
-	.disclose { align-self: flex-start; font: inherit; font-size: 0.8em; background: none;
-		border: none; padding: 0; color: var(--color-accent-teal, #14b8a6); cursor: pointer; }
+	.pick { font: inherit; font-size: 0.8rem; padding: 0.25rem 0.6rem; border-radius: 7px;
+		border: 1px solid var(--color-border, currentColor); background: transparent;
+		color: var(--color-text-secondary); cursor: pointer; }
+	.pick:hover { border-color: var(--color-text-tertiary); color: var(--color-text-primary); }
+	.pick.on { background: var(--color-accent-teal, #14b8a6); border-color: var(--color-accent-teal, #14b8a6); color: #000; }
 </style>

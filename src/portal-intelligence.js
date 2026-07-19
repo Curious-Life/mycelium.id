@@ -47,6 +47,7 @@ import { applyTaskModelWrite } from './portal-providers.js';
 import { WHISPER_CATALOG, recommendedWhisperModel } from './portal-transcription.js';
 import { vaultDiskHeadroom } from './db/disk-guard.js';
 import { resetPullBackoff, nudgeEnrichDrainer } from './enrich/drainer.js';
+import { getModelState as voiceModelState, hasVoiceSample, defaultVariant, DEFAULT_VOICE_MODEL } from './tts/qwen3-tts-model.js';
 
 const GiB = 2 ** 30;
 const round1 = (n) => Math.round(n * 10) / 10;
@@ -65,7 +66,15 @@ const isInstalled = (installed, model) => {
  * Compose the proposed bundle for this vault. Pure composition of shipped parts; exported
  * so the gate can drive it without HTTP.
  */
-export async function composeBundle({ db, userId, detect = detectHardware, listInstalled, dbPath = null, headroom = vaultDiskHeadroom }) {
+export async function composeBundle({
+  db, userId, detect = detectHardware, listInstalled, dbPath = null, headroom = vaultDiskHeadroom,
+  // Voice seams — injectable so the gate can drive BOTH the runnable and not-runnable states
+  // offline. `voiceState` reports whether the Qwen3-TTS model is downloaded (sync); `voiceRunnable`
+  // is hasVoiceSample() — now REAL per #234 (async: does the personal agent have a recorded voice
+  // sample?), so voice becomes one-click-downloadable the moment the owner records one on the
+  // character page, and stays gated out until then (W2 executability).
+  voiceState = voiceModelState, voiceRunnable = hasVoiceSample,
+}) {
   const hardware = await detect();
   let localInstalled = [];
   try { localInstalled = (await listInstalled?.()) || []; } catch { /* daemon down/asleep → nothing installed */ }
@@ -91,6 +100,25 @@ export async function composeBundle({ db, userId, detect = detectHardware, listI
   // shared parser — the same authority publicRow ships to clients. ──
   const euProvider = providers.find((p) => jurisdictionForBaseUrl(p.base_url, p.provider) === 'eu-zdr') || null;
   const descriptionsAssigned = Boolean(taskModels.narrate?.providerId);
+
+  // ── Voice — Qwen3-TTS (its OWN catalog + route). GATED ON RUNNABLE (W2 executability): a
+  // downloaded Qwen3-TTS still needs a reference sample to speak (§2.2/§5), so the one-click
+  // bundle DOWNLOADS it only when hasVoiceSample() is true. Until then it is adjacent info the
+  // panel and apply can see, with downloadGb = 0 so it never inflates the "set everything up"
+  // total, and apply skips it honestly (skipped:not-runnable). Now that #234's character page has
+  // shipped, "runnable" means the owner has recorded a voice sample — so voice joins the one-click
+  // download the moment they do, with NO further change here (operator decision: "gate on
+  // runnable", 2026-07-18). ──
+  const voiceVariant = defaultVariant();
+  const voiceModel = DEFAULT_VOICE_MODEL;
+  const voiceInstalled = (() => { try { return voiceState()?.phase === 'ready'; } catch { return false; } })();
+  // ⚠️ AWAIT — hasVoiceSample() is ASYNC (it decrypt-validates the personal agent's recorded
+  // sample, #234). A synchronous `Boolean(voiceRunnable())` returns Boolean(Promise) === true,
+  // which silently defeats the whole gate (voice always "runnable"). This bit on the merge with
+  // main, where #234 shipped the real per-agent sample check the stub used to fake.
+  let voiceRunnableNow = false;
+  try { voiceRunnableNow = Boolean(await voiceRunnable()); } catch { voiceRunnableNow = false; }
+  const voiceSizeGb = round1((voiceVariant?.sizeMB || 0) / 1000);
 
   // ── Conversation — adjacent connect chip (§4.1a W2), never a bundle row ──
   const subRow = providers.find(isSubscriptionRow) || null;
@@ -145,6 +173,11 @@ export async function composeBundle({ db, userId, detect = detectHardware, listI
     rows, totalDownloadGb, disk,
     adjacent: {
       conversation: { subscriptionConnected: Boolean(subRow), providerId: subRow?.id ?? null, assigned: conversationAssigned },
+      // Voice is ADJACENT, never a bundle row (§4.1a W3, same as conversation): it stays out of
+      // the "set everything up" total/rows because a downloaded Qwen3-TTS can't speak without a
+      // reference sample (W2). `runnable` = hasVoiceSample(); when true, the one-click apply adds
+      // its download (operator: "gate on runnable", 2026-07-18) — an adjacent item, not a row.
+      voice: { model: voiceModel, runnable: voiceRunnableNow, installed: voiceInstalled, sizeGb: voiceSizeGb, assigned: voiceInstalled },
     },
   };
 }
@@ -165,16 +198,20 @@ export async function composeBundle({ db, userId, detect = detectHardware, listI
 export function portalIntelligenceRouter({
   db, userId = 'local-user', dbPath = null, ollamaUrl, fetch = globalThis.fetch,
   detect = detectHardware, listInstalled = null, headroom = vaultDiskHeadroom,
+  // Voice seams (default to the real TTS module) — injectable so the gate can drive both the
+  // not-yet-runnable (main) and runnable (post character-page) states offline.
+  voiceState = voiceModelState, voiceRunnable = hasVoiceSample,
   onApplied = () => { resetPullBackoff(); nudgeEnrichDrainer(); },
 } = {}) {
   if (!db?.users || !db?.providers) throw new Error('portalIntelligenceRouter: db.users + db.providers required');
   const router = express.Router();
   const ollama = createOllamaClient({ baseUrl: ollamaUrl, fetch });
   const probeInstalled = listInstalled || (() => ollama.listInstalled());
+  const compose = () => composeBundle({ db, userId, detect, listInstalled: probeInstalled, dbPath, headroom, voiceState, voiceRunnable });
 
   router.get('/intelligence/bundle', async (_req, res) => {
     try {
-      res.json({ ok: true, ...(await composeBundle({ db, userId, detect, listInstalled: probeInstalled, dbPath, headroom })) });
+      res.json({ ok: true, ...(await compose()) });
     } catch { res.status(500).json({ ok: false, error: 'bundle composition failed' }); }
   });
 
@@ -183,17 +220,21 @@ export function portalIntelligenceRouter({
   // W6 gap-fill sends the missing subset — one orchestrator, opposite polarity).
   router.post('/intelligence/bundle/apply', async (req, res) => {
     try {
-      const bundle = await composeBundle({ db, userId, detect, listInstalled: probeInstalled, dbPath, headroom });
+      const bundle = await compose();
       const requested = Array.isArray(req.body?.functions) && req.body.functions.length
         ? req.body.functions.map(String)
-        : ['understanding', 'transcription', 'descriptions', 'conversation'];
+        : ['understanding', 'transcription', 'descriptions', 'conversation', 'voice'];
       const scope = new Set(requested);
 
       // W4 — refuse BEFORE any write when the scoped bytes cannot fit. Structured, so the
       // UI can say "Free up N GB" (the disk_low shape the job spawners already taught it).
+      // Voice is adjacent (not a row) but a real download when runnable — count it so the disk
+      // guard stays honest the day it lights up (0 today, hasVoiceSample() false).
+      const av = bundle.adjacent.voice;
+      const voiceGb = (scope.has('voice') && av.runnable && !av.installed) ? (av.sizeGb || 0) : 0;
       const scopedGb = round1(bundle.rows
         .filter((r) => scope.has(r.key))
-        .reduce((s, r) => s + (r.downloadGb || 0), 0));
+        .reduce((s, r) => s + (r.downloadGb || 0), 0) + voiceGb);
       if (dbPath && scopedGb > 0) {
         const h = headroom(dbPath);
         if (!h.unmeasured && h.freeBytes < h.needBytes + scopedGb * GiB) {
@@ -243,6 +284,21 @@ export function portalIntelligenceRouter({
             const w = await applyTaskModelWrite({ db, userId, body: { function: 'descriptions', providerId: row.providerId } });
             results.descriptions = w.ok ? 'approved' : 'error';
           } catch { results.descriptions = 'error'; }
+        }
+      }
+
+      // Voice — Qwen3-TTS, GATED ON RUNNABLE (operator decision 2026-07-18). Same download-
+      // required pattern as transcription (the /settings/tts route owns the bytes + the choice),
+      // but only when the model can actually SPEAK: a downloaded voice with no reference sample
+      // yet (hasVoiceSample() false) is `skipped:not-runnable` — honest, never a 2.9 GB download
+      // that answers 501. When the character page ships this lights up with no code change here.
+      if (scope.has('voice')) {
+        const v = bundle.adjacent.voice;
+        if (v.installed) results.voice = 'already-set';
+        else if (!v.runnable) results.voice = 'skipped:not-runnable';
+        else {
+          results.voice = 'download-required';
+          downloads.push({ key: 'voice', model: v.model, route: '/portal/settings/tts/qwen/download' });
         }
       }
 

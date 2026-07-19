@@ -43,6 +43,7 @@
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 	import ConnectYourAISection from '$lib/components/settings/ConnectYourAISection.svelte';
 	import PhoneConnectSection from '$lib/components/settings/PhoneConnectSection.svelte';
+	import PairPhoneSection from '$lib/components/settings/PairPhoneSection.svelte';
 	import HarnessPickerSection from '$lib/components/settings/HarnessPickerSection.svelte';
 
 	interface Settings {
@@ -129,6 +130,12 @@
 
 	let billing = $state<BillingInfo | null>(null);
 	let loading = $state(true);
+	// Connections pane — progressive-disclosure UI state (redesign 2026-07-19). The phone QR is
+	// the hero; the manual address+token method and the two "for developers" / "over the internet"
+	// sections are collapsed by default, so a non-technical user just scans a code.
+	let phoneManualOpen = $state(false);
+	let connDevOpen = $state(false);
+	let connNetOpen = $state(false);
 	let saving = $state(false);
 	let saved = $state(false);
 
@@ -148,11 +155,13 @@
 			{ id: 'profile', label: 'Profile', icon: 'user', desc: 'Your public identity and how you think' },
 		] },
 		{ title: 'Intelligence & access', items: [
+			// Order by daily reach (operator, 2026-07-19): the brain, then how you reach it
+			// (connections · channels), then context/analytics/extras (areas · usage · integrations).
 			{ id: 'intelligence', label: 'Intelligence', icon: 'sparkles', desc: 'The model that powers Mycelium' },
-			{ id: 'areas', label: 'Areas', icon: 'layers', desc: 'Life domains that give your AI context' },
-			{ id: 'usage', label: 'Usage', icon: 'chart', desc: 'Token consumption — input/output by area and model' },
 			{ id: 'connections', label: 'Connections', icon: 'plug', desc: 'Use Mycelium from your other apps and devices' },
 			{ id: 'channels', label: 'Channels', icon: 'messages', desc: 'Where your agent may listen and reply' },
+			{ id: 'areas', label: 'Areas', icon: 'layers', desc: 'Life domains that give your AI context' },
+			{ id: 'usage', label: 'Usage', icon: 'chart', desc: 'Token consumption — input/output by area and model' },
 			{ id: 'integrations', label: 'Integrations', icon: 'puzzle', desc: 'Connect third-party tools with your own keys' },
 		] },
 		{ title: 'Your vault', items: [
@@ -708,41 +717,70 @@
 				<div class="space-y-6">
 
 			{#if activePane === 'connections'}
-			<!-- Mental-model intro: two doors (memory + model), two reaches (local /
-			     remote). Grounds the cards below so they don't read as a flat pile.
-			     The stale onboarding checklist (ConnectionsChecklist) was removed here
-			     2026-06-15 — it duplicated the dedicated onboarding flow and the
-			     Connect-an-app cards. Local-first order: most clients connect on this
-			     Mac; remote is the secondary path. -->
-			<div class="conn-intro">
-				<p>
-					Mycelium exposes two doors to any AI app — <span class="door">Memory</span> over MCP and
-					<span class="door">Model</span> over an OpenAI-compatible gateway. Use them on
-					<strong>this Mac</strong> right now, or reach them <strong>over the internet</strong> with an address.
-				</p>
-			</div>
+			<!-- Redesign 2026-07-19 (docs/CONNECTIONS-REDESIGN-2026-07-19.md): lead with the
+			     PHONE — scan a QR, no typing. Everything technical (MCP/gateway endpoints, bearer
+			     tokens, remote access) collapses behind "for developers" / "over the internet"
+			     disclosures, closed by default. The old abstract "two doors (MCP/gateway)" intro
+			     is gone from the top; that framing now lives inside the developer section, where
+			     its audience is. A non-technical user just sees: scan a code, done. -->
 
-			<div class="conn-group">Your phone</div>
-			<!-- The native iOS app: shows Server address + Access token (the Bearer,
-			     NOT the operator password) with copy buttons + Tailscale-TLS setup. -->
-			<PhoneConnectSection />
+			<!-- HERO — use it on your phone (the QR ceremony from #248; loopback-only, approved here). -->
+			<section class="card p-5 conn-hero">
+				<div>
+					<h2 class="conn-hero-title">Use Mycelium on your phone</h2>
+					<p class="conn-hero-sub">Open the app, scan the code — nothing to type.</p>
+				</div>
+				<PairPhoneSection />
+				<!-- The manual Server-address + Access-token method, DEMOTED from a peer of the QR
+				     to an opt-in — for a device the loopback QR ceremony can't reach. -->
+				<button class="conn-manual-link" onclick={() => (phoneManualOpen = !phoneManualOpen)} aria-expanded={phoneManualOpen}>
+					{phoneManualOpen ? 'Hide manual setup' : 'Enter address and token manually instead ›'}
+				</button>
+				{#if phoneManualOpen}<PhoneConnectSection />{/if}
+			</section>
 
-			<div class="conn-group">Connect an app</div>
-			<!-- Pick your AI app → copy-paste recipe (memory + optional model door). -->
-			<HarnessPickerSection />
-			<!-- The raw endpoints + auth (bearer / OAuth) the recipes above point to. -->
-			<ConnectYourAISection />
-			<!-- Consent to auto-capture conversations from the connected agents above
-			     (Claude Code / gateway / opencode / openclaw / hermes) into the vault.
-			     Default OFF — captures can contain secrets. Home here (not Channels):
-			     it governs the CONNECTED agents you just set up, not the in-app chat. -->
-			<AgentCaptureSection />
+			<!-- Collapsed: connect another app (developer surface — recipes + raw endpoints + capture). -->
+			<section class="conn-disc">
+				<button class="conn-disc-head" onclick={() => (connDevOpen = !connDevOpen)} aria-expanded={connDevOpen}>
+					<span class="conn-disc-id">
+						<span class="conn-disc-title">Connect another app</span>
+						<span class="conn-disc-sub">Claude Code, or any AI client — for developers</span>
+					</span>
+					<span class="conn-disc-chev" class:open={connDevOpen} aria-hidden="true">⌄</span>
+				</button>
+				{#if connDevOpen}
+					<div class="conn-disc-body">
+						<!-- The memory/model framing lives HERE now (not at the top) — for the audience
+						     that knows what MCP and a gateway are. -->
+						<p class="conn-disc-lead">Point an AI client at two things: your <strong>memory</strong> (over MCP) and your <strong>model</strong> (an OpenAI-compatible gateway).</p>
+						<!-- Pick your AI app → copy-paste recipe (memory + optional model door). -->
+						<HarnessPickerSection />
+						<!-- The raw endpoints + auth (bearer / OAuth) the recipes above point to. -->
+						<ConnectYourAISection />
+						<!-- Consent to auto-capture conversations from the connected agents above into
+						     the vault. Default OFF — captures can contain secrets. Home here (not
+						     Channels): it governs the CONNECTED agents you just set up. -->
+						<AgentCaptureSection />
+					</div>
+				{/if}
+			</section>
 
-			<div class="conn-group">Reach it over the internet</div>
-			<!-- One ordered card (C3 2026-06-25): password → address (managed
-			     handle.mycelium.id OR your own domain) → go live. Absorbs what used to
-			     be the separate ManagedConnectSection + RemoteAccessSection cards. -->
-			<RemoteAccessSection />
+			<!-- Collapsed: reach it over the internet (password → address → go live). -->
+			<section class="conn-disc">
+				<button class="conn-disc-head" onclick={() => (connNetOpen = !connNetOpen)} aria-expanded={connNetOpen}>
+					<span class="conn-disc-id">
+						<span class="conn-disc-title">Reach it over the internet</span>
+						<span class="conn-disc-sub">A web address, so your apps reach it anywhere</span>
+					</span>
+					<span class="conn-disc-chev" class:open={connNetOpen} aria-hidden="true">⌄</span>
+				</button>
+				{#if connNetOpen}
+					<div class="conn-disc-body">
+						<p class="conn-disc-lead">By default Mycelium only answers on this Mac. Give it an address to reach it from anywhere.</p>
+						<RemoteAccessSection />
+					</div>
+				{/if}
+			</section>
 			{/if}
 
 			{#if activePane === 'usage'}
@@ -753,13 +791,11 @@
 			{#if activePane === 'intelligence'}
 			<!-- THE FLOW (Intelligence redesign Part I, docs/INTELLIGENCE-SCREEN-REDESIGN-
 			     2026-07-17.md): the pane renders STATE A (first-run bundle + one confirm) or
-			     STATE B (returning summary), with the four former components — assignment
-			     (IntelligenceScreen), connect & manage (AISettings, demoted), Voice
-			     (VoiceSection), Engine (EngineSelector) — behind ONE Customize disclosure.
-			     The old four-component pile, its 20-line confession about two taskModels
-			     writers, and the stale-display duplicate it recorded are all GONE: retiring
-			     AISettings' assignment UI removed the second writer, exactly as that comment
-			     predicted (gate A3 keeps it removed). -->
+			     STATE B (returning summary + the On-device models panel), with the components
+			     behind ONE Customize disclosure — assignment (IntelligenceScreen, which now also
+			     hosts the Voice rail under its Voice row), connect & manage (AISettings, demoted),
+			     Engine (EngineSelector). Phase 3 (2026-07-18) folded Voice into the assignment
+			     surface and moved every local model into the panel, so each renders exactly once. -->
 			<IntelligenceFlow />
 			{/if}
 
@@ -1295,34 +1331,50 @@
 		animation: fade-in 0.2s ease-out;
 	}
 
-	/* Connections pane — mental-model intro + group dividers that turn a flat
-	   stack of cards into a two-part narrative. */
-	.conn-intro {
-		padding: 0.9rem 1.1rem;
+	/* Connections pane — phone-first redesign (2026-07-19): an accented QR hero, then two
+	   collapsed "for developers" / "over the internet" disclosures. Replaces the old flat
+	   stack + abstract "two doors" intro. */
+	.conn-hero {
+		display: flex;
+		flex-direction: column;
+		gap: 0.9rem;
+		border-color: rgba(229, 184, 76, 0.28);
+		background: rgba(229, 184, 76, 0.04);
+	}
+	.conn-hero-title { margin: 0; font-size: 0.95rem; font-weight: 500; color: var(--color-text-primary); }
+	.conn-hero-sub { margin: 0.15rem 0 0; font-size: 0.8rem; color: var(--color-text-secondary); }
+	.conn-manual-link {
+		align-self: flex-start;
+		background: none; border: none; padding: 0;
+		font: inherit; font-size: 0.76rem;
+		color: var(--color-text-tertiary); cursor: pointer;
+	}
+	.conn-manual-link:hover { color: var(--color-text-secondary); }
+	.conn-disc {
 		border: 1px solid var(--color-border);
 		border-radius: 12px;
 		background: var(--color-surface);
+		overflow: hidden;
 	}
-	.conn-intro p {
-		margin: 0;
-		font-size: 0.82rem;
-		line-height: 1.6;
-		color: var(--color-text-secondary);
+	.conn-disc-head {
+		width: 100%;
+		display: flex; align-items: center; gap: 0.8rem;
+		padding: 0.95rem 1.1rem;
+		background: none; border: none; cursor: pointer;
+		font-family: inherit; text-align: left;
 	}
-	.conn-intro .door {
-		color: var(--color-accent-aurum);
-		font-weight: 500;
+	.conn-disc-head:hover .conn-disc-title { color: var(--color-text-primary); }
+	.conn-disc-id { flex: 1; display: flex; flex-direction: column; gap: 0.1rem; }
+	.conn-disc-title { font-size: 0.85rem; color: var(--color-text-primary); }
+	.conn-disc-sub { font-size: 0.74rem; color: var(--color-text-tertiary); }
+	.conn-disc-chev { color: var(--color-text-tertiary); font-size: 0.85rem; transition: transform 0.15s; }
+	.conn-disc-chev.open { transform: rotate(180deg); }
+	.conn-disc-body {
+		display: flex; flex-direction: column; gap: 0.9rem;
+		padding: 0 1.1rem 1.1rem;
 	}
-	.conn-intro strong { color: var(--color-text-primary); font-weight: 500; }
-	.conn-group {
-		font-size: 0.6rem;
-		letter-spacing: 0.1em;
-		text-transform: uppercase;
-		color: var(--color-text-tertiary);
-		font-family: var(--font-mono);
-		padding: 0.5rem 0.25rem 0;
-		margin-top: 0.5rem;
-	}
+	.conn-disc-lead { margin: 0; font-size: 0.78rem; line-height: 1.5; color: var(--color-text-secondary); }
+	.conn-disc-lead strong { color: var(--color-text-primary); font-weight: 500; }
 
 	/* Two-pane hub: a scannable rail + one detail pane (macOS System Settings). */
 	.settings-hub {

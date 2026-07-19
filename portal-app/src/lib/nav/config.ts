@@ -74,6 +74,14 @@ export function navItemActive(itemId: PrimaryView, view: string): boolean {
 	return itemId === 'people' ? PEOPLE_CLUSTER.has(view) : view === itemId;
 }
 
+/** The workspace viewId a nav item opens — `people` is a cluster entry whose
+ *  destination is the Connections view (the registry has no `people` view).
+ *  The ONE place this mapping lives; the sidebar + mobile tab bar both use it
+ *  for their explicit new-tab gestures. */
+export function navItemViewId(item: NavItem): string {
+	return item.id === 'people' ? 'connections' : item.id;
+}
+
 // Header page-title resolution. Sidebar/mobile labels come from the items above;
 // the header also needs titles for views reached as deep tabs that are NOT
 // sidebar destinations (e.g. a Library doc, the Settings panes, Vitality).

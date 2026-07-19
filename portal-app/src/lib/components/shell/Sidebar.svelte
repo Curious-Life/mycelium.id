@@ -8,7 +8,7 @@
 	import PeopleNav from '$lib/components/people/PeopleNav.svelte';
 	import LibraryNav from '$lib/components/library/LibraryNav.svelte';
 	import {
-		PRIMARY_NAV, NAV_SECTIONS, SETTINGS_NAV, PEOPLE_CLUSTER, navItemActive,
+		PRIMARY_NAV, NAV_SECTIONS, SETTINGS_NAV, PEOPLE_CLUSTER, navItemActive, navItemViewId,
 		type NavItem,
 	} from '$lib/nav/config';
 
@@ -65,17 +65,29 @@
 		return navItemActive(id, currentView);
 	}
 
-	// Nav items are real <a href> anchors so the browser's native right-click /
-	// ⌘-click / middle-click "open in new tab" works (spec #17) and the route is a
-	// shareable URL. A plain left-click is intercepted here for SPA navigation
-	// (spec #16 — same-tab, no full reload); modified/middle clicks fall through to
-	// the browser. A short same-target guard swallows accidental double-fires so
-	// rapid clicking can't stack navigations (spec #15).
+	// Nav items are real <a href> anchors (shareable URLs, native a11y). A plain
+	// left-click is intercepted for SPA navigation (spec #16 — navigates the
+	// CURRENT workspace tab in place, via route → openFromRoute → openInActiveTab).
+	// A NEW tab is only ever an EXPLICIT gesture: ⌘/ctrl-click or middle-click
+	// (handled here — the native browser new-tab is a dead gesture inside the
+	// Tauri/WKWebView shell), right-click → "Open in new tab" (context menu below),
+	// or dragging the row onto the tab strip. shift/alt-clicks stay native. A short
+	// same-target guard swallows accidental double-fires (spec #15).
 	let lastNavId: string | null = null;
 	let lastNavAt = 0;
+	// people→connections mapping lives ONCE in $lib/nav/config (navItemViewId).
+	const itemViewId = navItemViewId;
 	function handleNavClick(e: MouseEvent, item: NavItem) {
-		// Let the browser handle "open in new tab/window" gestures natively.
-		if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+		if (navJustDragged) { e.preventDefault(); return; }   // a drop, not a click
+		if (e.metaKey || e.ctrlKey) {
+			// Explicit new-tab intent (browser convention). openOrFocus appends a tab
+			// (or focuses the existing one — singletons never duplicate).
+			e.preventDefault();
+			workspace.openOrFocus(itemViewId(item));
+			closeMobileDrawer();
+			return;
+		}
+		if (e.shiftKey || e.altKey || e.button !== 0) return; // leave native gestures alone
 		e.preventDefault();
 		const now = Date.now();
 		if (item.id === lastNavId && now - lastNavAt < 400) { closeMobileDrawer(); return; }
@@ -89,6 +101,97 @@
 		navigationState.setPrimaryView(item.id);
 		goto(item.href);
 		closeMobileDrawer();
+	}
+	// Middle-click = explicit new-tab intent too. Middle presses arrive as
+	// `auxclick` (button 1), never `click`.
+	function handleNavAux(e: MouseEvent, item: NavItem) {
+		if (e.button !== 1) return;
+		e.preventDefault();
+		workspace.openOrFocus(itemViewId(item));
+		closeMobileDrawer();
+	}
+
+	// Right-click → a minimal context menu with the one explicit-intent action.
+	// Dismissed by click-away (backdrop), a second right-click, or Escape.
+	let ctxMenu = $state<{ x: number; y: number; viewId: string } | null>(null);
+	function handleNavContext(e: MouseEvent, item: NavItem) {
+		e.preventDefault();
+		ctxMenu = { x: e.clientX, y: e.clientY, viewId: itemViewId(item) };
+	}
+	function ctxOpenNewTab() {
+		if (ctxMenu) workspace.openOrFocus(ctxMenu.viewId);
+		ctxMenu = null;
+		closeMobileDrawer();
+	}
+	function onWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') ctxMenu = null;
+	}
+
+	// Drag a section row onto a tab strip → open there as a NEW tab (explicit
+	// intent). Pointer-based, following TabStrip's precedent (the app has no HTML5
+	// DnD). Mouse-only: capturing touch pointers here would steal the drawer's
+	// scroll gesture on mobile. <5px travel stays a click; past it the trailing
+	// click is swallowed (navJustDragged) so a drop doesn't also navigate.
+	let navDragViewId: string | null = null;
+	let navDragStartX = 0;
+	let navDragStartY = 0;
+	let navDragStarted = false;
+	let navJustDragged = false;
+	let navDragEl: HTMLElement | null = null;
+	let navDragPointerId = -1;
+	const navPreventSelect = (e: Event) => e.preventDefault();
+	function navHitStrip(e: PointerEvent): HTMLElement | null {
+		const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+		return el?.closest('[data-tabstrip-pane]') ?? null;
+	}
+	function handleNavPointerDown(e: PointerEvent, item: NavItem) {
+		if (e.button !== 0 || e.pointerType !== 'mouse') return;
+		navDragViewId = itemViewId(item);
+		navDragStartX = e.clientX;
+		navDragStartY = e.clientY;
+		navDragStarted = false;
+		navDragEl = e.currentTarget as HTMLElement;
+		navDragPointerId = e.pointerId;
+		window.addEventListener('pointermove', navPointerMove);
+		window.addEventListener('pointerup', navPointerUp);
+		window.addEventListener('pointercancel', navPointerUp);
+	}
+	function navPointerMove(e: PointerEvent) {
+		if (!navDragViewId) return;
+		if (!navDragStarted) {
+			if (Math.abs(e.clientX - navDragStartX) < 5 && Math.abs(e.clientY - navDragStartY) < 5) return;
+			navDragStarted = true;
+			// Claim the pointer + suppress selection for the rest of the gesture
+			// (same reasons as TabStrip's drag: WKWebView reinterprets, text selects).
+			document.addEventListener('selectstart', navPreventSelect);
+			document.body.style.userSelect = 'none';
+			try { navDragEl?.setPointerCapture(navDragPointerId); } catch { /* unsupported */ }
+		}
+		document.body.style.cursor = navHitStrip(e) ? 'copy' : 'grabbing';
+	}
+	function navPointerUp(e: PointerEvent) {
+		window.removeEventListener('pointermove', navPointerMove);
+		window.removeEventListener('pointerup', navPointerUp);
+		window.removeEventListener('pointercancel', navPointerUp);
+		document.removeEventListener('selectstart', navPreventSelect);
+		if (navDragEl && navDragPointerId >= 0) { try { navDragEl.releasePointerCapture(navDragPointerId); } catch { /* already released */ } }
+		if (navDragStarted) {
+			document.body.style.cursor = '';
+			document.body.style.userSelect = '';
+			if (e.type === 'pointerup' && navDragViewId) {
+				const strip = navHitStrip(e);
+				const paneId = strip?.getAttribute('data-tabstrip-pane');
+				// openInPane = new tab in the strip's pane (an already-open singleton
+				// focuses instead — the accepted no-duplicates design).
+				if (paneId) workspace.openInPane(paneId, navDragViewId);
+			}
+			navJustDragged = true;                              // swallow the trailing click
+			setTimeout(() => (navJustDragged = false), 0);
+		}
+		navDragViewId = null;
+		navDragStarted = false;
+		navDragEl = null;
+		navDragPointerId = -1;
 	}
 
 	async function handleLogout() {
@@ -182,6 +285,9 @@
 		<a
 			href={item.href}
 			onclick={(e) => handleNavClick(e, item)}
+			onauxclick={(e) => handleNavAux(e, item)}
+			oncontextmenu={(e) => handleNavContext(e, item)}
+			onpointerdown={(e) => handleNavPointerDown(e, item)}
 			class="group flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 w-full no-underline
 				{isActive
 				? 'bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]'
@@ -326,6 +432,18 @@
 	{/if}
 </aside>
 
+<svelte:window onkeydown={onWindowKeydown} />
+
+{#if ctxMenu}
+	<!-- Right-click menu: the ONE explicit new-tab action (markup pattern from
+	     TabStrip's "+" menu: backdrop button = click-away dismiss; Escape via the
+	     window keydown above). -->
+	<button class="ctx-backdrop" tabindex="-1" aria-label="Close menu" onclick={() => (ctxMenu = null)} oncontextmenu={(e) => { e.preventDefault(); ctxMenu = null; }}></button>
+	<div class="ctx-menu" role="menu" style="left: {Math.min(ctxMenu.x, (browser ? window.innerWidth : 1e4) - 180)}px; top: {ctxMenu.y}px;">
+		<button class="ctx-item" role="menuitem" onclick={ctxOpenNewTab}>Open in new tab</button>
+	</div>
+{/if}
+
 <style>
 	.sidebar {
 		transition: width 0.2s ease-out, opacity 0.2s ease-out;
@@ -392,4 +510,18 @@
 	.resize-handle.active {
 		background: var(--color-accent);
 	}
+
+	/* Right-click "Open in new tab" menu (same treatment as TabStrip's "+" menu). */
+	.ctx-backdrop { position: fixed; inset: 0; z-index: 60; background: transparent; border: none; cursor: default; }
+	.ctx-menu {
+		position: fixed; z-index: 61; min-width: 160px;
+		background: var(--color-elevated); border: 1px solid var(--color-border);
+		border-radius: var(--radius-md, 8px); box-shadow: var(--shadow-lg, 0 10px 30px rgba(0,0,0,0.4));
+		padding: 4px; display: flex; flex-direction: column;
+	}
+	.ctx-item {
+		text-align: left; padding: 7px 10px; border: none; background: none; cursor: pointer;
+		color: var(--color-text-primary); font-size: 0.82rem; border-radius: 6px;
+	}
+	.ctx-item:hover { background: var(--color-surface); }
 </style>

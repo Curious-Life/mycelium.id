@@ -394,11 +394,21 @@
 {#if recent.length}
 	<div class="px-2.5 pt-1.5 pb-0.5 text-[9px] uppercase tracking-wider text-[var(--color-text-tertiary)]">{busy ? 'Recently' : 'Last activity'}</div>
 	{#each recent.slice(0, 6) as j (j.id + (j.finishedAt ?? ''))}
-		<div class="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
-			<span class="w-1.5 h-1.5 rounded-full flex-shrink-0 {j.status === 'error' ? 'bg-[#f87171]' : j.status === 'abandoned' ? 'bg-[var(--color-text-tertiary)]' : 'bg-[#34d399]'}"></span>
-			<span class="text-[var(--color-text-secondary)] truncate">{j.stage}</span>
-			{#if j.model}<span class="font-mono text-[10px] text-[var(--color-text-tertiary)] truncate flex-shrink min-w-0" title="Model used">{j.model}</span>{/if}
-			<span class="ml-auto flex-shrink-0 {j.status === 'error' ? 'text-[#f87171]' : 'text-[var(--color-text-tertiary)]'}">{statusLabel(j.status)} · {fmtAgo(j.finishedAt)}</span>
+		<div class="px-2.5 py-1.5 text-[11px]">
+			<div class="flex items-center gap-2">
+				<span class="w-1.5 h-1.5 rounded-full flex-shrink-0 {j.status === 'error' ? 'bg-[#f87171]' : j.status === 'abandoned' ? 'bg-[var(--color-text-tertiary)]' : 'bg-[#34d399]'}"></span>
+				<span class="text-[var(--color-text-secondary)] truncate">{j.stage}</span>
+				{#if j.model}<span class="font-mono text-[10px] text-[var(--color-text-tertiary)] truncate flex-shrink min-w-0" title="Model used">{j.model}</span>{/if}
+				<span class="ml-auto flex-shrink-0 {j.status === 'error' ? 'text-[#f87171]' : 'text-[var(--color-text-tertiary)]'}">{statusLabel(j.status)} · {fmtAgo(j.finishedAt)}</span>
+			</div>
+			<!-- A failed model download is otherwise a DEAD END: the feed row is content-free by
+			     contract (activity-feed.js §SECURITY — no error text, no paths), so it can only say
+			     "Failed". Point the owner at where the REASON actually lives — the Labeling /
+			     Understanding rows at the top of this same popover, which now carry the classified,
+			     actionable cause (drainer.js faultMessage). A pointer, never the reason itself. -->
+			{#if j.kind === 'model-pull' && j.status === 'error'}
+				<div data-testid="modelpull-fault-hint" class="pl-3.5 mt-0.5 text-[10px] text-[var(--color-text-tertiary)]">See the model status above for why · Settings → Intelligence for details</div>
+			{/if}
 		</div>
 	{/each}
 {:else if !busy}

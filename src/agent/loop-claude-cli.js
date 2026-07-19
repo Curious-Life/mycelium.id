@@ -24,6 +24,13 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeSpawnEnv } from '../inference/claude-config-dir.js';
+// Auth-validity evidence, surface 'cli': this engine is ALWAYS subscription-backed
+// (resolve-harness eligibility = an oauth row exists), but its `claude` child authenticates
+// from its OWN store — the isolated dir when seeded, the MACHINE's ~/.claude login when the
+// seed fail-softed — so its outcomes are recorded under their own surface, never pooled with
+// the native wire's (subscription-auth-signal.js header: "chat works, channels 401" is a real
+// state and a single boolean lies about one of them). Timestamps only.
+import { recordSubscriptionTurnOutcome } from '../inference/subscription-auth-signal.js';
 
 const DEFAULT_MODEL = 'claude-opus-4-8';
 // Agentic-engine budgets. TTFB covers a cold start + MCP handshake before the first token;
@@ -43,6 +50,10 @@ const HARD_TIMEOUT_MS = Number(process.env.MYCELIUM_CLI_HARD_TIMEOUT_MS) || 60 *
 // claude's session-lifecycle errors (verified live 2026-07-03): --session-id on an
 // existing session, or --resume on a missing one. Caught → result.sessionError.
 const SESSION_ERR_RE = /already in use|No conversation found with session ID/i;
+// claude's auth-failure envelopes. Matched ONLY against stderr and is_error result payloads —
+// the SESSION_ERR_RE discipline: never against the model's text stream, so an answer QUOTING
+// "not logged in" can't flip the flag. Feeds the 'cli' auth-validity surface (see import).
+const AUTH_ERR_RE = /not logged in|invalid api key|authentication[_ ]?error|oauth token .{0,20}(expired|revoked)|please run \/login|\b401\b/i;
 
 // Build the mcp-config the child reads (`--mcp-config`). Points at the loopback
 // /internal/mcp; server key `mycelium` ⇒ the CLI namespaces the tools as
@@ -134,6 +145,7 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, configDir, log
       let aborted = false;
       let lastErr = null;
       let sessionError = false;   // set on "already in use" / "No conversation found"
+      let authError = false;      // set on an AUTH_ERR_RE envelope (stderr / is_error result only)
       let settled = false;
       let buffer = '';
       let lastActivity = Date.now();
@@ -183,6 +195,14 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, configDir, log
         if (settled) return;
         settled = true;
         cleanup();
+        // 'cli'-surface auth evidence. Only unambiguous outcomes are recorded: an auth
+        // envelope is negative; a produced answer with no auth envelope is positive. A
+        // stall/timeout/spawn-error says nothing about the CREDENTIAL and records nothing —
+        // smearing 'needs_reconnect' from a wedged child is its own dishonesty.
+        try {
+          if (authError) recordSubscriptionTurnOutcome(false, { surface: 'cli' });
+          else if (text && !lastErr && !sessionError) recordSubscriptionTurnOutcome(true, { surface: 'cli' });
+        } catch { /* evidence is best-effort; never break the turn */ }
         resolve({ text, toolsUsed, truncated, capped: false, aborted, clientGone: !!a.signal?.aborted, fellBack: false, lastErr, sessionId: sid, sessionError });
       };
       // Terminate the child: SIGTERM, then SIGKILL after a grace window if it clings
@@ -260,6 +280,8 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, configDir, log
           // with session ID …']). Match it HERE — never against the model's text stream —
           // so a benign answer quoting "already in use" can't spuriously flip the flag.
           if (data.is_error === true && SESSION_ERR_RE.test(JSON.stringify(data.errors || data.result || data.subtype || ''))) sessionError = true;
+          // Auth failure surfaces the same way (is_error envelope) — same never-the-text-stream rule.
+          if (data.is_error === true && AUTH_ERR_RE.test(JSON.stringify(data.errors || data.result || data.subtype || ''))) authError = true;
           if (data.usage) send({ type: 'usage', inputTokens: data.usage.input_tokens || 0, outputTokens: data.usage.output_tokens || 0 });
         }
       };
@@ -276,7 +298,7 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, configDir, log
       });
       // stderr also carries the plain session error (belt-and-suspenders; it is stderr,
       // never the model's answer, so no false-positive risk).
-      child.stderr?.on('data', (chunk) => { const s = chunk.toString().trim(); if (s) { if (SESSION_ERR_RE.test(s)) sessionError = true; logger(`claude stderr: ${s.slice(0, 200)}`); } });
+      child.stderr?.on('data', (chunk) => { const s = chunk.toString().trim(); if (s) { if (SESSION_ERR_RE.test(s)) sessionError = true; if (AUTH_ERR_RE.test(s)) authError = true; logger(`claude stderr: ${s.slice(0, 200)}`); } });
       child.on('error', (err) => { lastErr = err; logger(`claude spawn error: ${err.message}`); finish(); });
       child.on('close', () => {
         if (buffer.trim()) { try { handle(JSON.parse(buffer.trim())); } catch { /* ignore trailing */ } }

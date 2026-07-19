@@ -42,7 +42,7 @@ const RATE_WINDOW_MS = 60 * 1000;
  * @param {Function} [deps.fetch]          injected for did resolution / tests
  * @param {()=>number} [deps.now]          injectable clock for tests
  */
-export function createFederationHandlers({ db, userId = 'local-user', identity, getHost, getHandle, getMatrixId = () => null, getPresenceConfig = () => ({}), getLastActiveAt = async () => null, fetch = globalThis.fetch, lookup, now = () => Date.now() }) {
+export function createFederationHandlers({ db, userId = 'local-user', identity, getHost, getHandle, getMatrixId = () => null, getRelayInbox = () => null, getPresenceConfig = () => ({}), getLastActiveAt = async () => null, fetch = globalThis.fetch, lookup, now = () => Date.now() }) {
   const seenNonces = new Map(); // nonce -> expiry ms
   const rate = new Map();       // peer-ip -> { n, resetAt }
   let globalRate = { n: 0, resetAt: 0 }; // backstop across ALL peers (M-FED-RL)
@@ -111,7 +111,7 @@ export function createFederationHandlers({ db, userId = 'local-user', identity, 
 
   return {
     didJson() {
-      const doc = buildDidDocument(getHost(), identity?.publicKeyB64, getMatrixId() || undefined, identity?.keyAgreementPublicKeyB64);
+      const doc = buildDidDocument(getHost(), identity?.publicKeyB64, getMatrixId() || undefined, identity?.keyAgreementPublicKeyB64, getRelayInbox() || undefined);
       return doc ? { status: 200, body: doc } : { status: 404, body: { error: 'no public identity' } };
     },
 

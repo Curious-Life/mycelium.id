@@ -163,10 +163,16 @@
 		<span class="mh-dot warn"></span>
 		<span class="mh-text warn-text">{message || 'Missing dependencies.'}</span>
 	{:else if status === 'down' || status === 'error' || status === 'unavailable'}
-		<!-- The only genuinely red states. `detail` is a supervisor hint (never vault
-		     content) and is the more useful of the two when present. -->
+		<!-- The only genuinely red states. The `message` now LEADS: the drainer classifies the
+		     fault (runtime down vs download failed vs disk full) and sends an accurate, actionable
+		     line, so it is the useful one — the old code showed `detail` first, back when `message`
+		     was a hardcoded "runtime not reachable" for every cause. `detail` is ollama's own hint
+		     (never vault content) and rides underneath, muted, for the technically-inclined. -->
 		<span class="mh-dot bad"></span>
-		<span class="mh-text bad-text">{health?.detail || message || 'Not running.'}</span>
+		<div class="mh-fault">
+			<span class="mh-text bad-text">{message || detail || 'Not running.'}</span>
+			{#if detail && detail !== message}<span class="mh-hint muted" title={detail}>{detail}</span>{/if}
+		</div>
 	{:else}
 		<!-- 'unknown' — an honest absence, NOT a fault. See the header: a caught-up vault and
 		     a crashing cycle currently both land here, so this must not claim either. -->
@@ -188,6 +194,8 @@
 	.warn-text { color: var(--color-warn, #b8791a); }
 	.bad-text { color: var(--color-bad, #c04a4a); }
 	.mono { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.95em; }
+	.mh-fault { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
+	.mh-hint { font-size: 0.85em; overflow-wrap: anywhere; opacity: 0.85; }
 	.mh-dl { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; flex: 1; }
 	.mh-bar { height: 4px; border-radius: 2px; background: var(--color-surface-2, #e6e6e6); overflow: hidden; }
 	.mh-fill { height: 100%; background: var(--color-accent, #4a90d9); transition: width 0.3s ease; }

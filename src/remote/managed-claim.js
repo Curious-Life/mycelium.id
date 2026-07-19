@@ -8,8 +8,14 @@ import { createIdentity, isValidHandle } from '../identity/identity.js';
 
 export const CLAIM_VERSION = 'v1';
 // Action-bound: a claim signed for one action can't be replayed as another
-// (provision/release touch DNS+certs; billing opens the Stripe portal — O7).
-export const CLAIM_ACTIONS = new Set(['provision', 'release', 'billing']);
+// (provision/release touch DNS+certs; billing opens the Stripe portal — O7; the
+// queue-* actions authenticate a box PULLING/ACKing its own store-and-forward mail
+// — federation transport P2, docs/FEDERATION-TRANSPORT-REDESIGN-DESIGN-2026-07-18.md;
+// relay-connect authenticates a box opening its E2E dial-out relay session — E2E
+// reachability Phase 3, docs/E2E-REACHABILITY-DESIGN-2026-07-19.md).
+// NOTE: enqueue is deliberately NOT a claim action — a sender never authenticates to
+// the relay, preserving sealed-sender (the relay never learns who queued the mail).
+export const CLAIM_ACTIONS = new Set(['provision', 'release', 'billing', 'queue-pull', 'queue-ack', 'relay-connect']);
 
 /** The exact bytes both sides sign/verify. Domain-separated + versioned + action-bound. */
 export function claimMessage(action, handle, nonce) {

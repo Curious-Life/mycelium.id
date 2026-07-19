@@ -53,9 +53,15 @@ export function createEmbedClient({
   }
   const base = baseUrl.replace(/\/+$/, "");
 
-  async function request(method, path, body) {
+  // `timeoutOverride` is a PER-CALL budget (embed/embedBatch opts.timeoutMs). The
+  // constructor default stays the steady-state budget; the override exists for the
+  // enrichment drainer's slow-row rescue (service.js EMBED_RESCUE_TIMEOUT_MS): a
+  // long message that can't finish inside the default 30s gets ONE genuinely longer
+  // attempt before it is ever retired, instead of timing out identically forever.
+  async function request(method, path, body, timeoutOverride) {
+    const budgetMs = Number.isFinite(timeoutOverride) && timeoutOverride > 0 ? timeoutOverride : timeoutMs;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), budgetMs);
     let res;
     try {
       res = await fetchImpl(`${base}${path}`, {
@@ -65,7 +71,7 @@ export function createEmbedClient({
         signal: controller.signal,
       });
     } catch (err) {
-      const reason = err?.name === "AbortError" ? `timed out after ${timeoutMs}ms` : "is it running?";
+      const reason = err?.name === "AbortError" ? `timed out after ${budgetMs}ms` : "is it running?";
       throw new EmbedServiceError(
         `embed-service unreachable at ${base}${path} (${reason})`,
         { cause: err },
@@ -114,13 +120,14 @@ export function createEmbedClient({
      * Embed a single string. Returns a 768-dim number[].
      * @param {string} text
      * @param {"query"|"document"} task
+     * @param {{timeoutMs?: number}} [opts] - per-call timeout override (slow-row rescue)
      */
-    async embed(text, task = "query") {
+    async embed(text, task = "query", { timeoutMs: callTimeoutMs } = {}) {
       assertTask(task);
       if (typeof text !== "string" || text.length === 0) {
         throw new EmbedServiceError("embed(text): text must be a non-empty string");
       }
-      const data = await request("POST", "/embed", { text, task });
+      const data = await request("POST", "/embed", { text, task }, callTimeoutMs);
       return assertVector(data?.embedding, "embed");
     },
 
@@ -128,14 +135,15 @@ export function createEmbedClient({
      * Embed many strings. Returns number[][] (each 768-dim).
      * @param {string[]} texts
      * @param {"query"|"document"} task
+     * @param {{timeoutMs?: number}} [opts] - per-call timeout override
      */
-    async embedBatch(texts, task = "document") {
+    async embedBatch(texts, task = "document", { timeoutMs: callTimeoutMs } = {}) {
       assertTask(task);
       if (!Array.isArray(texts) || !texts.every((t) => typeof t === "string")) {
         throw new EmbedServiceError("embedBatch(texts): texts must be an array of strings");
       }
       if (texts.length === 0) return [];
-      const data = await request("POST", "/batch", { texts, task });
+      const data = await request("POST", "/batch", { texts, task }, callTimeoutMs);
       const embeddings = data?.embeddings;
       if (!Array.isArray(embeddings) || embeddings.length !== texts.length) {
         throw new EmbedServiceError(

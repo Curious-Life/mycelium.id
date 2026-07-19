@@ -55,7 +55,7 @@ function run(probe, harness = 'test/mount-invite-data.mjs') {
 }
 
 const EMITTERS = 'test/mount-import-emitters.mjs';
-let empty, signal, focus, absence, silent, flurry, hold, unknown, focusunknown, scan, sync, chat;
+let empty, signal, focus, absence, silent, flurry, hold, unknown, focusunknown, freshunknown, scan, sync, chat;
 try {
   empty = run('empty');
   signal = run('signal');
@@ -66,6 +66,7 @@ try {
   hold = run('hold');
   unknown = run('unknown');
   focusunknown = run('focusunknown');
+  freshunknown = run('freshunknown');
   scan = run('scan', EMITTERS);
   sync = run('sync', EMITTERS);
   chat = run('chat', EMITTERS);
@@ -74,7 +75,7 @@ try {
   console.log('\nVERDICT: NO-GO — a probe failed to run  EXIT=1');
   process.exit(1);
 }
-rec('M0. the invite + the emitter views mount and all twelve probes run', true);
+rec('M0. the invite + the emitter views mount and all thirteen probes run', true);
 
 t('G1. a fresh vault (total=0) shows the empty-state invitation, no evidence counts', () => {
   assert.ok(empty.text.includes(EMPTY_COPY), `expected the empty-state copy "${EMPTY_COPY}". Got: ${empty.text}`);
@@ -173,6 +174,27 @@ t('G5. ⭐ MED-1 — a focus FLURRY (5 events / 200ms) collapses to EXACTLY ONE 
   assert.match(flurry.paths[0], /slices=data(&|$)/,
     `an UNCHANGED vault must cost only the SWR-cached data COUNT — never the evidence aggregates. Got: ${flurry.paths[0]}`);
   assert.ok(flurry.after.includes(EMPTY_COPY), 'and the display stays in the (correct) empty state — nothing changed');
+});
+
+t('G9. ⭐ the FRESH-MACHINE unknown (no prior to hold) shows "couldn\'t read your vault" + Retry — NEVER the empty state', () => {
+  // The live-test first-run bug on the readiness surface: the FIRST readiness read is `unknown`
+  // (a scan failure) with no known-good value to latch (§3.2a can only hold what it already has).
+  // The old `{:else}` was the empty-state "Bring your world in", so a vault we simply COULD NOT
+  // READ was rendered as a vault the user never filled. The Data step must instead be honest and
+  // ACTIONABLE: say it couldn't read, offer Retry, and neither impersonate empty nor fabricate a
+  // count.
+  assert.ok(/read your vault/i.test(freshunknown.text),
+    `the Data step must say it couldn't read the vault. Got: ${freshunknown.text}`);
+  assert.ok(freshunknown.hasRetry, 'and it must offer a Retry affordance — not a dead end');
+  assert.ok(!freshunknown.text.includes(EMPTY_COPY),
+    `it must NOT show the empty-state "${EMPTY_COPY}" — unknown is "could not look", never "empty"`);
+  assert.ok(!freshunknown.text.includes(FULL_COPY),
+    'and it must NOT claim a full vault either — we hold no known count');
+  assert.ok(!/\bmessages\b/i.test(freshunknown.text) && !freshunknown.text.includes('847'),
+    `it must NOT fabricate an evidence count from a failed read. Got: ${freshunknown.text}`);
+  // Still exactly one mount read — the unknown branch must not spin up a poll.
+  assert.equal(freshunknown.readsCount, 1,
+    `the unknown Data step must read readiness ONCE on mount, not poll. Got ${freshunknown.readsCount}`);
 });
 
 t('G6. ⭐ ImportView wires ScanForData.onImported to the signal (the default is a NO-OP)', () => {

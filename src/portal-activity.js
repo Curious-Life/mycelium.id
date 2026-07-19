@@ -42,6 +42,42 @@ const PROCESS_LABELS = {
 // Fixed on-box embedding model in V1 (ONNX Nomic v1.5; the embed-service exposes it at /health).
 const EMBED_MODEL = 'nomic-v1.5';
 
+/**
+ * Embed-drainer liveness verdict — PURE and time-injected, so the gate
+ * (scripts/verify-drainer-liveness.mjs) tests the decision that actually renders,
+ * not a stub of it. This indicator has hidden a dead drainer twice; the rules
+ * each encode one of those failures:
+ *
+ *  - PROGRESS defines liveness, never the cycle heartbeat. `lastCycleAt` stamps on
+ *    every cycle that runs — including one that moves ZERO rows — so
+ *    max(lastCycleAt, lastProgressAt) could never go stale while the timer ticked
+ *    (the 2026-07-15 over-correction: 25 min of zero rows rendered "running").
+ *    Once progress has EVER happened, the anchor is lastProgressAt alone.
+ *  - `running` must not mask staleness: a cycle wedged on an await that never
+ *    settles is "in flight" forever.
+ *  - STALE_MS is 5 minutes, not 90s: a healthy on-box-LLM cycle legitimately runs
+ *    for minutes (90s cried wolf on a working drainer, observed live).
+ *  - Boot (no cycle has ever run: both stamps 0) is startup, not a fault.
+ *  - A loading model is "starting", never bad. No drainer at all is always bad.
+ *  - The drainer saying stalled (skips > 0 — a real embed-service outage) is believed.
+ *
+ * @param {{st: object|null, health: string, now?: number}} args
+ * @returns {{stalled: boolean, starting: boolean, bad: boolean, booting: boolean}}
+ */
+export function deriveEmbedLiveness({ st, health, now = Date.now() }) {
+  const STALE_MS = 5 * 60_000;
+  const noDrainer = !st;
+  const starting = Boolean(st?.starting) || health === 'loading';
+  const booting = !st?.lastCycleAt && !st?.lastProgressAt;
+  // The freshest evidence of REAL life. lastProgressAt once set is the only honest
+  // anchor; before any progress exists, lastCycleAt covers the first long boot cycle.
+  const anchor = Number(st?.lastProgressAt) || Number(st?.lastCycleAt) || 0;
+  const stale = anchor > 0 && (now - anchor) > STALE_MS;
+  const stalled = Boolean(st?.stalled) || (!booting && stale);
+  const bad = !starting && (health === 'error' || noDrainer || stalled);
+  return { stalled, starting, bad, booting };
+}
+
 // The L1 labeling model the drainer uses — resolved by THE drainer's own resolver.
 //
 // ⚠️ This file had its OWN COPY of this function, with the implicit `return 'qwen3.5:4b'`
@@ -212,28 +248,12 @@ export async function embedProjection(db, userId) {
     // skip was silent). A progress bar that can't tell "working" from "dead" hides the very
     // outage it exists to surface — so ask the drainer, and say STALLED when it isn't working.
     const st = (() => { try { return getEnrichDrainerStatus(); } catch { return null; } })();
-    const STALE_MS = 90_000;                             // ~6 missed 15s cycles
-    const noDrainer = !st;                               // nothing is draining this backlog at all
-    // A cycle IN FLIGHT is alive by definition — never call it stalled. `lastCycleAt` is
-    // stamped at cycle START, and a healthy cycle legitimately runs for MINUTES (the L1
-    // categorize pass drives an on-box LLM), so a bare staleness test cries wolf on a
-    // perfectly working drainer (observed live: "Embedder needs attention" while categorize
-    // was happily draining 54 → 15). Boot is the same story: lastCycleAt=0 until the first
-    // cycle completes, which is startup, not a fault.
-    // ⚠️ `lastCycleAt` means "a cycle RAN", not "embedding ran" — the health gate skips
-    // embedding but no longer the cycle (drainer.js), so this stamps even with :8091 dead.
-    // It is therefore only a STARTUP signal (0 = truly nothing has run yet); it is NOT
-    // evidence the embedder is alive. `health`/`skips`/`stalled` carry that.
-    const booting = !st?.lastCycleAt && !st?.lastProgressAt; // no cycle has run yet → startup, not a fault
-    // Use the FRESHEST evidence of life: a cycle can legitimately run for minutes (the
-    // 200-pass loop + the on-box LLM), during which lastCycleAt goes stale while the
-    // drainer is productively embedding thousands of rows. lastProgressAt is exactly that
-    // evidence -- it was exposed and read by nothing.
-    const alive = Math.max(Number(st?.lastCycleAt) || 0, Number(st?.lastProgressAt) || 0);
-    const stale = alive > 0 && (Date.now() - alive) > STALE_MS;
-    const stalled = Boolean(st?.stalled) || (!st?.running && !booting && stale);
-    const starting = Boolean(st?.starting);              // model still downloading/loading
-    const bad = !starting && (health === 'error' || noDrainer || stalled);
+    // The liveness verdict is deriveEmbedLiveness — a PURE, time-injected function so the
+    // gate (verify-drainer-liveness.mjs) tests the decision that renders, not a copy. Its
+    // history is the reason it exists: max(lastCycleAt, lastProgressAt) let the meaningless
+    // 15s cycle heartbeat mask 25+ minutes of zero progress ("running" over a dead drain),
+    // and treating `running` as healthy hid a cycle wedged on an await. See the function.
+    const { stalled, starting, bad } = deriveEmbedLiveness({ st, health });
     // ⚠️ THIS ROW IS WHAT LETS THE PAUSE BE PERSISTED AT ALL (§3.9/R3a, D13). Persisting the
     // pause is only safe because it is "permanently visible with its remaining count" — that
     // guarantee is THIS row (and its categorize twin), not a promise elsewhere.

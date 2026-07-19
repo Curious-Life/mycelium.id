@@ -37,7 +37,8 @@
 //   get({ slices: ['data','tags'] })   → SWR-cached scans (never a fresh scan per call)
 //   get()                              → everything (the portal's one call)
 // Counts ride embedBacklogCached/categoriesBacklogCached by default. `fresh: true` forces
-// the PURE scan and exists for exactly one caller: the Generate preflight.
+// the PURE path and exists for exactly two callers, both read-after-write correctness
+// surfaces: the Generate preflight (data) and /import/preview (evidence — EC4).
 //
 // ⚠️ NEVER poll a fresh slice. Polling the pure scan per-call once hung the app at boot
 // ("identical queries climbing 4.6s→43s" — src/db/messages.js). warm() exists so the
@@ -61,7 +62,17 @@
 // No new load risk: portal-compat.js already imports this same symbol, so drainer is
 // already in every readiness consumer's graph; drainer references readiness only in
 // comments, so there is no cycle.
-import { isEnrichProcessingPaused } from './enrich/drainer.js';
+import { isEnrichProcessingPaused, getEnrichDrainerStatus } from './enrich/drainer.js';
+// The points-bust chokepoint (mindscape-cache.js). The `mindscape` memo below rides the
+// SAME explicit-bust discipline as getMindscapePointsCached — one notion of "the points
+// changed", not a second drifting one. mindscape-cache imports nothing, so no cycle.
+import { onMindscapePointsBust } from './mindscape-cache.js';
+// ⚠️ The `pipeline` slice REUSES the activity feed's ETA math (embedEta/categorizeEta) rather
+// than re-deriving a second per-item rate (PIPELINE-TRANSPARENCY-DESIGN §"Canonical model":
+// "Counts + etaSeconds reuse the existing embedProjection/enrichProjection math — no new scans").
+// These are PURE functions of the drainer's in-memory status + a remaining count; they touch no
+// DB. portal-activity imports drainer/supervisor but NOT readiness, so there is no cycle.
+import { embedEta, categorizeEta } from './portal-activity.js';
 
 /** Generate needs embedded vectors; below this the pipeline dies cryptically. */
 const MIN_EMBEDDED = 5;
@@ -75,8 +86,14 @@ const MIN_EMBEDDED = 5;
  * @param {() => any} [deps.enricherHealth]     getEnricherHealth  (src/enrich/drainer.js)
  * @param {() => any} [deps.transcriberHealth]  getTranscriberHealth (src/transcribe/supervisor.js)
  * @param {() => boolean} [deps.isProcessingPaused]  isEnrichProcessingPaused (src/enrich/drainer.js) — defaults to the module import
+ * @param {() => number}  [deps.now]  clock injection for the TTL memos below — exists so a
+ *                                    gate can drive TTL expiry without sleeping; production
+ *                                    never passes it (same pattern as isProcessingPaused)
+ * @param {() => any} [deps.drainerStatus]  getEnrichDrainerStatus (src/enrich/drainer.js) — the
+ *                                    in-memory throughput status the `pipeline` slice feeds to
+ *                                    embedEta/categorizeEta. Injectable so a gate can drive a rate.
  */
-export function createReadiness({ db, userId, embedderHealth, labelerHealth, enricherHealth, transcriberHealth, isProcessingPaused = isEnrichProcessingPaused } = {}) {
+export function createReadiness({ db, userId, embedderHealth, labelerHealth, enricherHealth, transcriberHealth, isProcessingPaused = isEnrichProcessingPaused, now = Date.now, drainerStatus = getEnrichDrainerStatus } = {}) {
   if (!db) throw new TypeError('createReadiness: db required');
   if (!userId) throw new TypeError('createReadiness: userId required');
 
@@ -94,6 +111,9 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
   // call", and increment G's header popover is going to POLL something — if evidence rode
   // ALL, that poll would quietly full-scan a 76k-row table every tick. Opt-in keeps the
   // expensive slice impossible to buy by accident: a caller has to name it.
+  // (2026-07-18: evidence is now ALSO SWR-memoized — see evidenceCached below — but the
+  // memo does not soften the opt-in: a 15s-TTL revalidate on a poll would still be a
+  // full-table pass every window, bought by accident. Both guards stay.)
   // ⚠️ `processing` IS in ALL — cost derived, not assumed (C1 discipline; gate P-COST).
   // Its price on a repeat poll: `paused` is an in-memory boolean (free); `waiting` sums the
   // THREE already-existing SWR-cached counters (embed + categories + nlp), and in ALL `data`
@@ -102,7 +122,15 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
   // (`SELECT settings FROM users WHERE id=?`), the same cost class as `onboarding`'s already-
   // allowlisted read. So processing is cheap enough for `get()` (the portal's one call) AND
   // for G's popover poll — unlike `evidence`, whose three UNINDEXED aggregates keep it opt-in.
-  const ALL = ['data', 'tags', 'embedder', 'models', 'ai', 'channel', 'mindscape', 'onboarding', 'processing'];
+  // ⚠️ `pipeline` IS in ALL, and it costs ZERO marginal scans there — every read it needs is
+  // ALREADY bought by a sibling slice in ALL: `data` buys the embed backlog (embedBacklogCached),
+  // `tags` buys the categories backlog (categoriesBacklogCached), `mindscape` buys the
+  // clustering_points COUNT (getNoiseStats, memoized). pipeline re-CALLS those cheap readers, but
+  // each lands on the same SWR memo (db/messages.js) / the mindscape closure memo, so a warm poll
+  // pays 0 scans — the P-COST discipline, proved by verify:pipeline-status's cost gate. The rest
+  // is in-memory: the health readers, the pause flag, the drainer status → embedEta. It rides the
+  // portal's ONE call exactly as the design intends (no new poll) BECAUSE it is a strict subset.
+  const ALL = ['data', 'tags', 'embedder', 'models', 'ai', 'channel', 'mindscape', 'onboarding', 'processing', 'pipeline'];
 
   // ── evidence ───────────────────────────────────────────────────────────────
   // "What you brought in", for the invite's Data step — sources, years, how many
@@ -168,6 +196,65 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       // which would be a claim we did not earn.
       return { sources: [], dateRange: { earliest: null, latest: null, yearStart: null, yearEnd: null }, conversationCount: 0, peopleCount: 0, unknown: true };
     }
+  }
+
+  // ── evidence, cached — the SWR memo in front of the three unindexed aggregates ─
+  // WHY: the header StatusPopover reads `?slices=evidence` once per OPEN (G-COST pins
+  // that), and on a 76k-message vault the four scans above are the dominant cost of the
+  // status panel's first paint. Opt-in (E1) kept the price out of the POLL; this memo
+  // takes it off the OPEN too. Same contract as db/messages.js embedBacklogCached:
+  // serve stale instantly, single-flight latch, background revalidate — a hammered
+  // slice costs ≤1 aggregate pass per TTL window and no caller queues behind another.
+  //
+  // TTL 15s, fixed (deliberately simpler than embedBacklogCached's 8s/60s split):
+  // evidence has no `pending` of its own to key an active/idle split on, and its facts
+  // move only on import/forget — surfaces that are user gestures, not drains. 15s keeps
+  // a mid-import popover honest within a tick or two of re-opening; idle, the slice is
+  // read once per open anyway, so a longer idle TTL would buy nothing. The Embedding
+  // row already lives with 8–60s staleness; this is the same accepted model.
+  //
+  // ⚠️ Only SUCCESSFUL snapshots land in the memo. An `unknown` (the outer catch's
+  // degrade) is NEVER cached: caching it would serve a fabricated-empty card for a full
+  // TTL window (§3.2a), and holding a PRIOR good snapshot through a failed revalidate
+  // is exactly the "hold the last known answer" discipline G3 pins on the client.
+  //
+  // ⚠️ `fresh` BYPASSES the memo AND the single-flight latch (running its own scan and
+  // write-through-refreshing the memo on success): the /import/preview route is a
+  // read-after-import correctness surface — its card renders moments after the vault's
+  // contents changed, where a stale snapshot is a lie. Bypassing the memo is not enough:
+  // joining an in-flight background revalidate (evidenceInFlight) that started BEFORE the
+  // import committed would hand back the same pre-import count a memo hit would. Same split
+  // as data()'s embedBacklog vs embedBacklogCached — a direct scan, never a shared latch.
+  const EVIDENCE_TTL_MS = 15_000;
+  let evidenceMemo = null;       // { at:number, value:object } — successful snapshots only
+  let evidenceInFlight = null;   // Promise while a recompute runs (single-flight)
+
+  function evidenceRevalidate() {
+    if (!evidenceInFlight) {
+      evidenceInFlight = evidence()
+        .then((v) => { if (!v?.unknown) evidenceMemo = { at: now(), value: v }; return v; })
+        .finally(() => { evidenceInFlight = null; });
+    }
+    return evidenceInFlight;
+  }
+
+  async function evidenceCached(fresh) {
+    if (fresh) {
+      // ⚠️ Run the scan DIRECTLY — do NOT join evidenceInFlight. A background revalidate
+      // (a status-popover open, boot warm()) already in flight when /import/preview fires
+      // read the vault BEFORE the import committed; joining that single-flight promise would
+      // hand this read-after-import caller the PRE-import count — the exact "0 sources /
+      // stale count" defect the fresh split exists to prevent (portal-compat.js:1305).
+      // Same shape as data(fresh)'s direct embedBacklog() call: own scan, no shared latch,
+      // write-through the memo on success (an `unknown` degrade is NEVER cached — §3.2a).
+      const v = await evidence();
+      if (!v?.unknown) evidenceMemo = { at: now(), value: v };
+      return v;
+    }
+    if (evidenceMemo && now() - evidenceMemo.at < EVIDENCE_TTL_MS) return evidenceMemo.value;
+    const inFlight = evidenceRevalidate();
+    if (evidenceMemo) return evidenceMemo.value;            // serve stale instantly — never block
+    return inFlight;                                        // cold start only: await the first pass once
   }
 
   // ── data ───────────────────────────────────────────────────────────────────
@@ -387,15 +474,43 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
   // ⚠️ TTL, NOT cache-forever-once-true: `generated` LOOKS monotonic, but no reset path is proven
   // (a wipe/regenerate zeroes the points), and X2 requires the rail still learn false→true within
   // a tick or two (independent review MED-10, 2026-07-16).
-  const MINDSCAPE_TTL_MS = 10_000;
+  // ⚠️ TTL raised 10s→60s (2026-07-18) because the memo now ALSO rides the explicit points-bust
+  // discipline (onMindscapePointsBust, registered below): every path that actually changes
+  // clustering_points already calls bustMindscapePoints — jobs.js:297 (clustering re-ran),
+  // db/documents.js:390,424 (document delete), db/messages.js:650,676,819 (forget/edit) — so
+  // false→true after a Generate is learned on the NEXT poll tick (better than any TTL), and the
+  // TTL degrades to what mindscape-cache.js calls it: "safety net only — explicit busts keep it
+  // fresh". X2's requirement is now met by the bust, not the clock.
+  const MINDSCAPE_TTL_MS = 60_000;
   let mindscapeMemo = null;
+  let mindscapeInFlight = null;   // single-flight latch — collapses concurrent cold reads to ONE scan
+  let mindscapeGen = 0;   // bumped on every bust — bars an in-flight read from writing back a pre-mutation count
+
+  // The bust wire. userId-scoped (null/undefined = all users). Registered once per
+  // readiness instance; production builds exactly ONE (server-rest.js "one instance"),
+  // so the module-level listener set stays size 1. Never unsubscribed — the instance
+  // lives as long as the process does.
+  onMindscapePointsBust((forUser) => {
+    if (forUser == null || forUser === userId) { mindscapeGen++; mindscapeMemo = null; }
+  });
 
   async function mindscape() {
-    const now = Date.now();
-    if (mindscapeMemo && now - mindscapeMemo.at < MINDSCAPE_TTL_MS) return mindscapeMemo.value;
-    const value = await mindscapeUncached();
-    mindscapeMemo = { at: now, value };
-    return value;
+    const t = now();
+    if (mindscapeMemo && t - mindscapeMemo.at < MINDSCAPE_TTL_MS) return mindscapeMemo.value;
+    // ⚠️ SINGLE-FLIGHT (mirrors evidence's evidenceInFlight). The mindscape slice AND the pipeline
+    // slice both call this inside ONE get(); the slice jobs run under Promise.all, so on a cold memo
+    // they would race TWO getNoiseStats full-table COUNTs. The latch collapses concurrent cold reads
+    // to ONE scan — this is what keeps `pipeline`'s ZERO-marginal-scan promise honest even on the
+    // first get() (verify:pipeline-status PS-COST caught the double before this latch existed).
+    if (mindscapeInFlight) return mindscapeInFlight;
+    const genAtStart = mindscapeGen;
+    mindscapeInFlight = mindscapeUncached()
+      // Drop the write-back if a bust raced this read: the count may predate the mutation, and at a
+      // 60s TTL caching it would hold a stale "generated" for a full minute (the guard mindscape-cache
+      // keeps per cache). The VALUE is still returned — one possibly-stale answer, never a poisoned memo.
+      .then((value) => { if (genAtStart === mindscapeGen) mindscapeMemo = { at: t, value }; return value; })
+      .finally(() => { mindscapeInFlight = null; });
+    return mindscapeInFlight;
   }
 
   async function mindscapeUncached() {
@@ -486,6 +601,133 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
     }
   }
 
+  // ── pipeline (PIPELINE-TRANSPARENCY-DESIGN §"Canonical model") — the ordered stage machine ──
+  // The ONE source of truth for "where is my data in the pipeline?", read by both the rail and the
+  // generate store so they can never disagree (the two-voice overlap the design deletes). An
+  // ORDERED array — import → embed → categorize → cluster → describe → measure — where each stage's
+  // `state` ∈ pending | running | blocked | done (NEVER a bare boolean; §"Design principles").
+  //
+  // ⚠️ THE LOAD-BEARING CONSTRAINT (§Threat model / P-COST): this slice adds ZERO fresh scans. It
+  // assembles ONLY from reads readiness already does cheaply — the SWR-cached embed/categories
+  // backlogs, the memoized clustering_points COUNT (mindscape()), the injected in-memory health
+  // readers, the pause flag, and the drainer's in-memory throughput status. It never issues a new
+  // aggregate. If a stage would need an uncached scan, it uses the cached count instead (the exact
+  // trap from [[gates-assert-shape-never-cost]] / [[onboarding-status-emptiness-not-count]]).
+  //
+  // §1 (no plaintext): counts + FIXED enum states/reasons/labels only — never message content and
+  // never any string derived from vault text. Same contract as `processing`/`embedder`.
+  //
+  // §3.2a (fail-closed): any throw ⇒ an `idle`/`unknown` pipeline, never a fabricated `done` and
+  // never a crash (a throwing slice would take down every consumer — R4's rule).
+  //
+  // ⚠️ BLOCK DETECTION rides the injected HEALTH READERS, not a fresh settings/model read:
+  // labelerHealth().status is 'no_model' until the owner approves a labeling model (drainer.js —
+  // the same vocabulary the `models` slice surfaces), so "categorize is blocked, approve a model"
+  // is an in-memory read, not a DB round-trip. Every `blocked` stage ALWAYS carries a `reason`
+  // (the fixed enum) AND an `action` {label,target} — a named block with no remedy is the "empty
+  // rail with extra words" the design forbids.
+  //
+  // ⚠️ describe + measure derive their done-ness from `points > 0` — NOT a background_jobs read.
+  // The design's own sweep RESOLVED that describe/measure/narrate AUTO-CHAIN inside the cluster job
+  // (§"Open questions": "describe/measure/narrate DO auto-chain inside the cluster job"), so a map
+  // that exists is proof they ran. Their LIVE per-step progress (the generate-job stageLabels) is
+  // a UI concern for a later unit; the STAGE MACHINE only needs pending↔done, and points is free.
+  async function pipeline() {
+    try {
+      const [emb, cat, ms] = await Promise.all([
+        db.messages?.embedBacklogCached?.(userId),     // rides the SWR memo `data` also buys
+        db.messages?.categoriesBacklogCached?.(userId),// rides the SWR memo `tags` also buys
+        mindscape(),                                   // the memoized clustering_points COUNT
+      ]);
+      const total = Number(emb?.total || 0);
+      const embedded = Number(emb?.embedded || 0);
+      const embedPending = Number(emb?.pending || 0);
+      const catTotal = Number(cat?.total || 0);
+      const catTagged = Number(cat?.tagged || 0);
+      const catPending = Number(cat?.pending || 0);
+      const points = Number(ms?.pointCount || 0);
+      // ⚠️ §3.2a — mindscape() NEVER throws; on a transient getNoiseStats failure it returns
+      // {pointCount:0, unknown:true} (its own HIGH-4 catch). Reading that as points===0 would let
+      // cluster fabricate `blocked needs_generate` over a FULLY-BUILT vault whose map read merely
+      // hiccuped — the exact "a counting error must not impersonate an ungenerated vault" trap, and
+      // the caught-up-trap that pops a spurious Generate whose action kicks a redundant re-cluster.
+      // So carry the flag: when the map state is NOT KNOWN we hold cluster/describe/measure at
+      // `pending` (honest "map not known"), never asserting "no map". embed/categorize stay truthful —
+      // a mindscape hiccup must not blank the stages we DO know.
+      const msUnknown = Boolean(ms?.unknown);
+      let paused = false;
+      try { paused = Boolean(isProcessingPaused?.()); } catch { paused = false; }
+      const st = (() => { try { return drainerStatus?.(); } catch { return null; } })();
+      const hstat = (fn) => { try { return fn?.()?.status || 'unknown'; } catch { return 'unknown'; } };
+      const embStatus = hstat(embedderHealth);
+      const labStatus = hstat(labelerHealth);
+      const DOWN = new Set(['down', 'error', 'deps_missing', 'unavailable']);
+
+      // Fixed action factories — labels + targets are constants, never derived from vault text (§1).
+      const approveModel = { label: 'Approve a labeling model', target: 'intelligence' };
+      const checkEmbedder = { label: 'Check the embedder', target: 'intelligence' };
+      const checkLabeler = { label: 'Check the labeling model', target: 'intelligence' };
+      const resume = { label: 'Resume', target: 'resume' };
+      const generate = { label: 'Generate', target: 'generate' };
+
+      const stages = [];
+
+      // import — messages present ⇒ done; an empty vault has not imported yet.
+      stages.push(total > 0 ? { key: 'import', state: 'done', count: { done: total } }
+        : { key: 'import', state: 'pending' });
+
+      // embed — the vectors. paused OUTRANKS a down embedder (a choice is not a fault); a running
+      // embed carries the measured ETA (embedEta — the activity feed's own math, reused).
+      if (total === 0) stages.push({ key: 'embed', state: 'pending' });
+      else if (embedPending <= 0) stages.push({ key: 'embed', state: 'done', count: { done: embedded, total } });
+      else if (paused) stages.push({ key: 'embed', state: 'blocked', count: { done: embedded, total }, reason: 'paused', action: resume });
+      else if (DOWN.has(embStatus)) stages.push({ key: 'embed', state: 'blocked', count: { done: embedded, total }, reason: 'embedder_down', action: checkEmbedder });
+      else stages.push({ key: 'embed', state: 'running', count: { done: embedded, total }, etaSeconds: embedEta(st, embedPending, paused) });
+
+      // categorize — the on-box labels. no_model is a CHOICE, surfaced whenever data exists (the
+      // biggest silent stall, §"The problem" #1); it OUTRANKS paused so the missing-consent remedy
+      // is the one shown. Nothing embedded yet ⇒ nothing to categorize (pending, no nag).
+      if (embedded === 0) stages.push({ key: 'categorize', state: 'pending' });
+      else if (labStatus === 'no_model') stages.push({ key: 'categorize', state: 'blocked', reason: 'no_model', action: approveModel });
+      else if (paused && catPending > 0) stages.push({ key: 'categorize', state: 'blocked', count: { done: catTagged, total: catTotal }, reason: 'paused', action: resume });
+      else if (DOWN.has(labStatus)) stages.push({ key: 'categorize', state: 'blocked', reason: 'ollama_down', action: checkLabeler });
+      else if (catPending > 0) stages.push({ key: 'categorize', state: 'running', count: { done: catTagged, total: catTotal }, etaSeconds: categorizeEta(st, catPending, paused, false) });
+      else stages.push({ key: 'categorize', state: 'done', count: { done: catTagged, total: catTotal } });
+
+      // cluster — the map. A map that EXISTS is done. Below the floor the user is stranded unless
+      // told: blocked, too_few_embedded, with a Generate action (§"Filling the gaps" #2). Above the
+      // floor with no map yet ⇒ needs_generate (the debounce made visible), never silence.
+      if (points > 0) stages.push({ key: 'cluster', state: 'done', count: { done: points } });
+      // The map read FAILED (not a real zero) ⇒ we do NOT know whether a map exists. Hold at pending
+      // with an honest reason — NEVER `blocked needs_generate` (that would pop a spurious Generate over
+      // a built vault and kick a redundant re-cluster). A pending stage carries no action, so no nag.
+      else if (msUnknown) stages.push({ key: 'cluster', state: 'pending', reason: 'map_unknown' });
+      else if (embedded === 0 || embedPending > 0) stages.push({ key: 'cluster', state: 'pending', reason: 'waiting_embed' });
+      else if (embedded < MIN_EMBEDDED) stages.push({ key: 'cluster', state: 'blocked', reason: 'too_few_embedded', action: generate });
+      else stages.push({ key: 'cluster', state: 'blocked', reason: 'needs_generate', action: generate });
+
+      // describe + measure — auto-chained inside the cluster job; a map proves they ran. When the map
+      // state is unknown we cannot claim done, and cluster is not blocked, so they stay pending (honest).
+      stages.push({ key: 'describe', state: points > 0 ? 'done' : 'pending' });
+      stages.push({ key: 'measure', state: points > 0 ? 'done' : 'pending' });
+
+      // overall + blockedOn — a block anywhere dominates (the pipeline cannot advance past it);
+      // else running if any stage is; else done iff EVERY stage is done; else still running
+      // (pending stages remain, work is progressing). An empty vault is `idle`, not `running`.
+      const firstBlocked = stages.find((s) => s.state === 'blocked');
+      let overall;
+      if (total === 0) overall = 'idle';
+      else if (firstBlocked) overall = 'blocked';
+      else if (stages.some((s) => s.state === 'running')) overall = 'running';
+      else if (stages.every((s) => s.state === 'done')) overall = 'done';
+      else overall = 'running';
+      return { stages, overall, blockedOn: firstBlocked ? firstBlocked.reason : null };
+    } catch {
+      // §3.2a: a failed assembly claims NOTHING — never a fabricated all-done, never a crash.
+      return { stages: [], overall: 'idle', blockedOn: null, unknown: true };
+    }
+  }
+
   // ── canGenerate — the ≥5 threshold, encoded ONCE ───────────────────────────
   // Was duplicated: the server refused below 5 while every client said `messageCount > 0`
   // (§2.8 #5), so the UI thought it was ready and the server 409'd.
@@ -510,12 +752,13 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
     const jobs = [];
     if (want.has('data'))      jobs.push(data(fresh).then((v) => { out.data = v; }));
     if (want.has('tags'))      jobs.push(tags().then((v) => { out.tags = v; }));
-    if (want.has('evidence'))  jobs.push(evidence().then((v) => { out.evidence = v; }));
+    if (want.has('evidence'))  jobs.push(evidenceCached(fresh).then((v) => { out.evidence = v; }));
     if (want.has('ai'))        jobs.push(ai().then((v) => { out.ai = v; }));
     if (want.has('channel'))   jobs.push(channel().then((v) => { out.channel = v; }));
     if (want.has('mindscape')) jobs.push(mindscape().then((v) => { out.mindscape = v; }));
     if (want.has('onboarding'))jobs.push(onboarding().then((v) => { out.onboarding = v; }));
     if (want.has('processing'))jobs.push(processing().then((v) => { out.processing = v; }));
+    if (want.has('pipeline'))  jobs.push(pipeline().then((v) => { out.pipeline = v; }));
     await Promise.all(jobs);
     // Both are SYNC (they read a supervisor's in-memory health) — never a DB hit, so they
     // stay out of the awaited set. `embedder` and `models.embedder` are two projections of
@@ -537,9 +780,18 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
    * Fire-and-forget cache warm. embedBacklogCached AWAITS the first scan on a cold
    * process ("cold start only: await the first scan once" — db/messages.js), so without
    * this the first user-facing consumer pays multiple seconds. Called from completeBoot.
+   *
+   * `evidence` + `mindscape` joined (2026-07-18): the header StatusPopover buys evidence
+   * once per OPEN and mindscape on its poll — both were cold-start awaits, so the status
+   * panel's FIRST paint on a 76k-message vault paid four full-table aggregate scans live.
+   * Warming here means the first open serves the boot snapshot instantly and the SWR/bust
+   * machinery keeps it live. Naming `evidence` explicitly does not soften E1: a bare
+   * get() still never buys it — warm() is one boot-time call, not a poll.
+   * Fail-soft stays intact (S4): every slice catches its own errors, the whole get() is
+   * .catch(()=>{})-swallowed, and nothing awaits it — boot never waits on this.
    */
   function warm() {
-    try { get({ slices: ['data', 'tags'] }).catch(() => {}); } catch { /* never throw at boot */ }
+    try { get({ slices: ['data', 'tags', 'evidence', 'mindscape'] }).catch(() => {}); } catch { /* never throw at boot */ }
   }
 
   return { get, getFresh, warm, MIN_EMBEDDED };

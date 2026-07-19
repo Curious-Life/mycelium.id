@@ -24,6 +24,26 @@
 // on app exit regardless of stop().
 
 import { spawn } from 'node:child_process';
+import { join } from 'node:path';
+import { dataDir } from '../paths.js';
+
+/**
+ * Where the daemon's persistent per-turn outcome log lands: <dataDir>/logs/
+ * channel-turns.jsonl — the SAME data-dir resolution the server itself uses
+ * (src/paths.js), so in the packaged app it is ~/Library/Application Support/
+ * id.mycelium.app/logs/. Exported pure so the verify gate can assert the VALUE.
+ *
+ * Why: the daemon's own resolveTurnLogPath falls back to MYCELIUM_DATA_DIR /
+ * MYCELIUM_VAULT_DIR / MYCELIUM_STATE_DIR — none of which the keyless childEnv
+ * allowlist carries (MYCELIUM_DATA_DIR is deliberately excluded from the child:
+ * the daemon is dataless as well as keyless) — so in production the L3b turn
+ * log was console-only, i.e. INERT. Passing the derived FILE path keeps the
+ * allowlist dataless while making the log land durably. The log is leak-safe by
+ * design: lane.js logTurn writes turn METADATA only, never message content (§1).
+ */
+export function channelTurnLogPath({ env = process.env } = {}) {
+  return join(dataDir({ env }), 'logs', 'channel-turns.jsonl');
+}
 
 const TICK_MS = 4000;            // re-evaluate lifecycle this often
 const MAX_BACKOFF_MS = 30000;
@@ -97,6 +117,9 @@ export function startChannelSupervisor({
     // Authenticates the native channel-turn forward (RT1) — only THIS spawned daemon
     // holds it, so a forged loopback POST cannot reach the owner-write grant.
     ...(channelTurnToken ? { MYCELIUM_CHANNEL_TURN_TOKEN: channelTurnToken } : {}),
+    // Persistent per-turn outcome log (L3b): the derived FILE path, not the data
+    // dir — the child stays keyless AND dataless (see channelTurnLogPath above).
+    MYCELIUM_CHANNEL_TURN_LOG: channelTurnLogPath(),
   });
 
   // Should the daemon run right now? Enabled + at least one platform token.

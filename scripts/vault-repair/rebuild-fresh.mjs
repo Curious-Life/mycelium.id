@@ -15,10 +15,21 @@
 //            ONLY to recover rows that are physically unreadable in src
 //   - dest : output path for the rebuilt vault (created; overwritten if present)
 // Run with the app QUIT. Verify with validate.mjs before swapping into place.
+//
+// Env knobs:
+//   MYCELIUM_REBUILD_FORCE_ROBUST=<csv>  force named tables down the robust copy path,
+//        even if a one-shot scan reads them clean (belt-and-suspenders — see below;
+//        tables the source integrity_check flags corrupt are auto-forced already).
+//   MYCELIUM_REBUILD_NO_AUTOROBUST=1     disable the integrity_check auto-derive (faster
+//        boot on a huge vault when you'll name the corrupt tables explicitly instead).
+//   MYCELIUM_REBUILD_SKIP=<csv>          leave named tables EMPTY (regenerable, b-tree
+//        so damaged even robustCopy can't enumerate rowids).
+//   MYCELIUM_REBUILD_MAX_ROWID=<n>       upper bound for the last-resort range sweep.
 import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
 import { existsSync, rmSync } from 'node:fs';
 import { readUserMaster, deriveDbKey } from '../../src/account/keystore.js';
+import { robustScanIncomplete, parityVerdict } from './loss-guard.mjs';
 
 const SRC = process.argv[2], SNAP = process.argv[3], DEST = process.argv[4];
 if (!SRC || !SNAP || !DEST) { console.error('usage: rebuild-fresh.mjs <src> <snapshot> <dest>'); process.exit(2); }
@@ -58,6 +69,10 @@ log('created normal tables');
 
 // ---- 2. copy data (generic, rowid-preserving), with a robust path for corrupt tables ----
 const counts = {};
+// Per-table flag: robustCopy could NOT read the table in one clean directional pass, so an
+// unread region may remain. Set by robustCopy's loss guard; consumed by the final count-parity
+// gate so an unverifiable table fails the run even when a corrupt src can't be counted ('ERR').
+const robustIncomplete = {};
 function genericCopy(t) {
   const cols = tinfo(t.name).map(c => c.name);
   const withoutRowid = /WITHOUT\s+ROWID/i.test(t.sql);
@@ -68,9 +83,10 @@ function genericCopy(t) {
   counts[t.name] = n; return n;
 }
 
-// Robust copy for a corrupt table: chunked bulk read, falling back to per-row reads
-// on FRESH connections (clears shared-page cache transients), then gap-fill any id
-// present in the snapshot but missing from the rebuild. Returns {failed, filled}.
+// Robust copy for a corrupt table: forward+reverse scan-union on FRESH connections (clears
+// shared-page cache transients), then gap-fill any id present in the snapshot but missing from
+// the rebuild. Returns {incomplete, filled} — `incomplete` is true when neither directional
+// scan reached EOF (a possible unread region), which the final parity gate treats as loss.
 // Enumerate rowids for a corrupt table. `SELECT rowid ... ORDER BY rowid` walks the
 // table b-tree and DIES on page-linkage damage (shared pages / bad child pointers) —
 // and the covering index can't be trusted either: with a shared page an index scan
@@ -78,6 +94,12 @@ function genericCopy(t) {
 // autoindex reported 101,398 distinct ids for a table holding ~73k rows). So sweep
 // bounded rowid RANGES: each seek touches a localized subtree, so damage stays
 // contained to its chunk and everything readable is still recovered.
+//
+// ⚠️ CURRENTLY UNUSED (kept for reference/last-resort manual salvage). Do NOT wire this into the
+// copy path or the loss guard: its index-satisfied enumeration can OVER-report phantom rowids on
+// a shared-page-damaged tree, which is exactly why robustCopy uses a scan-union and the loss
+// guard keys on scan-completeness instead. Feeding these rowids into a diff would false-abort a
+// healthy rebuild.
 function enumerateRowids(t) {
   // 1) UNORDERED rowid scan first. `ORDER BY rowid` forces a walk of the TABLE b-tree —
   //    the very tree that's damaged — so it dies; without it the planner takes a clean
@@ -130,44 +152,133 @@ function robustCopy(t) {
   // A forward scan dies at the first bad page; a REVERSE scan reaches the rows beyond
   // it. Their union is everything physically readable (live: 71,823 fwd + 8 rev-only).
   const seen = new Map(); // rowid -> row
+  // Returns whether the scan reached EOF WITHOUT throwing — i.e. it walked the whole table
+  // b-tree, so `seen` now holds every physically-present row. (A scan that stops on a bad page
+  // returns false.) This is the trustworthy completeness signal the loss guard keys on.
   const scan = (desc) => {
     const d = keyed(SRC, true);
-    let n = 0;
+    let n = 0, complete = false;
     try {
       const sql = `SELECT rowid AS __rid, ${collist} FROM "${t}"${desc ? ' ORDER BY rowid DESC' : ''}`;
       for (const r of d.prepare(sql).iterate()) { if (!seen.has(r.__rid)) seen.set(r.__rid, r); n++; }
+      complete = true; // reached EOF with no error → this direction read the entire table
     } catch (e) { log(`  ${t}: ${desc ? 'reverse' : 'forward'} scan stopped after ${n} rows (${e.message})`); }
     try { d.close(); } catch {}
-    return n;
+    return complete;
   };
-  scan(false); scan(true);
-  const failed = [];
+  const fwdComplete = scan(false), revComplete = scan(true);
   const txInsert = dest.transaction((objs) => { for (const o of objs) ins.run(o); });
   txInsert([...seen.values()]);
   const rids = [...seen.keys()].sort((a, b) => a - b);
   const have = new Set(dest.prepare(`SELECT id FROM "${t}"`).all().map(r => r.id));
-  const snapRows = snap.prepare(`SELECT ${collist} FROM "${t}"`).all();
+  // Gap-fill from the snapshot. A table GENUINELY ABSENT from the snapshot (schema drift —
+  // it simply doesn't exist there) is benign: there's nothing to recover from, so skip and
+  // continue. But ANY OTHER snapshot-read failure — the snapshot's own copy of this table
+  // is corrupt/unreadable, or its columns don't match — is dangerous: we cannot tell whether
+  // we're silently dropping rows the snapshot could have restored. FAIL CLOSED (CLAUDE.md §3)
+  // rather than quietly ship a lossy vault; the operator picks a known-good snapshot (the
+  // final count-parity gate can't catch this — a corrupt src count(*) reads as 'ERR').
+  let snapRows = [];
+  try { snapRows = snap.prepare(`SELECT ${collist} FROM "${t}"`).all(); }
+  catch (e) {
+    if (/no such table/i.test(e.message)) log(`  ${t}: not present in snapshot (schema drift) — gap-fill skipped`);
+    else throw new Error(`snapshot copy of "${t}" is unreadable (${e.message}) — cannot verify gap-fill; refusing to continue. Use a known-good snapshot, or MYCELIUM_REBUILD_SKIP=${t} if this table is regenerable.`);
+  }
   let nextRid = dest.prepare(`SELECT COALESCE(MAX(rowid),0) x FROM "${t}"`).get().x + 1;
   const filled = [];
   for (const row of snapRows) { if (!have.has(row.id)) { ins.run({ __rid: nextRid++, ...row }); filled.push(row.id); } }
   counts[t] = dest.prepare(`SELECT count(*) c FROM "${t}"`).get().c;
-  log(`${t}: src readable=${rids.length - failed.length}/${rids.length}, hard-unreadable=${JSON.stringify(failed)}, gap-filled=${filled.length}, dest=${counts[t]} (snap=${snapRows.length})`);
-  // Loss guard: a hard-unreadable rowid that the snapshot could NOT recover is true data loss.
-  const stillMissing = failed.length - filled.length;
-  if (stillMissing > 0) log(`  *** WARNING: ${stillMissing} row(s) unreadable in src AND absent from snapshot — UNRECOVERABLE. Review before swapping. ***`);
-  return { failed, filled };
+
+  // LOSS GUARD (now live — the old `failed` array was declared but never populated, so its
+  // stillMissing = failed.length − filled.length was always ≤ 0 and this warning could never
+  // fire). The trustworthy signal is scan COMPLETENESS, not a re-derived rowid set: a `SELECT *`
+  // pass in EITHER direction that reaches EOF without throwing hit no corrupt page, so in the
+  // common damage mode `seen` holds every readable row. Only when BOTH directions stopped on
+  // damage can an unread region remain — rows recovered only if the snapshot carried them. This
+  // is a tripwire, not a completeness PROOF (see loss-guard.mjs's honesty caveat + residual);
+  // validate.mjs is the id-level authority. It also avoids the phantom-rowid hazard that an
+  // enumerate-and-diff guard would re-import.
+  const incomplete = robustScanIncomplete(fwdComplete, revComplete);
+  log(`${t}: scan complete fwd=${fwdComplete} rev=${revComplete}, src readable=${rids.length}, gap-filled=${filled.length}, dest=${counts[t]} (snap=${snapRows.length})`);
+  if (incomplete) {
+    robustIncomplete[t] = true; // seen by the final parity gate → fails the run under an 'ERR' src count
+    log(`  *** WARNING: ${t} could NOT be read in one clean pass (both scans stopped on damage). Any row in the unread region absent from the snapshot is UNRECOVERABLE. Validate before swapping. ***`);
+  }
+  return { incomplete, filled };
 }
 
 // Tables to leave EMPTY (regenerable/non-critical) — their b-trees are so damaged
 // that even robustCopy can't enumerate rowids. Comma-list via MYCELIUM_REBUILD_SKIP.
 const SKIP = new Set((process.env.MYCELIUM_REBUILD_SKIP || '').split(',').map(s => s.trim()).filter(Boolean));
-// Decide which tables need the robust path: those that fail a quick full-scan.
+
+// Which tables MUST take the robust path, regardless of what a one-shot scan reports.
+// WHY this matters (live incident 2026-07-19): `isCorrupt`'s single `SELECT *` can read
+// clean on a shared-page-transient table while a SPECIFIC row still yields garbage (e.g.
+// a NULL in a NOT NULL column) during the actual copy. That let `messages` (which the
+// diagnostic flagged corrupt — Tree 127) take genericCopy's plain-INSERT path and abort
+// with `NOT NULL constraint failed: messages.role`, instead of robustCopy's
+// scan-union + INSERT OR IGNORE + gap-fill which tolerates it. So a table flagged corrupt
+// by the source's OWN integrity_check is forced robust — never trusted to the clean path.
+//
+// The force-robust set is the union of:
+//   (a) MYCELIUM_REBUILD_FORCE_ROBUST — explicit operator override (comma-list), and
+//   (b) AUTO-DERIVED from the source integrity_check's corrupt-tree→object map — the same
+//       computation diagnose.mjs prints (rootpage → sqlite_master object), replicated here
+//       so a diagnostic-flagged table forces itself down robustCopy with no manual step.
+const FORCE_ROBUST = new Set((process.env.MYCELIUM_REBUILD_FORCE_ROBUST || '').split(',').map(s => s.trim()).filter(Boolean));
+function autoDeriveCorruptTables() {
+  if (process.env.MYCELIUM_REBUILD_NO_AUTOROBUST) { log('auto-derive of corrupt tables DISABLED (MYCELIUM_REBUILD_NO_AUTOROBUST)'); return new Set(); }
+  let text = '';
+  try { text = src.prepare('PRAGMA integrity_check(200)').all().map(r => r.integrity_check).join('\n'); }
+  catch (e) { log(`integrity_check on src threw (${e.code || e.message}) — auto-derive skipped (scan probe + copy-error fallback still apply)`); return new Set(); }
+  if (text.trim() === 'ok') return new Set();
+  // Map each corrupt "Tree N" rootpage → its base table (indexes resolve via tbl_name),
+  // exactly as diagnose.mjs's "corrupt trees → objects" section does.
+  const roots = [...new Set([...text.matchAll(/Tree (\d+) /g)].map((m) => Number(m[1])))];
+  const names = new Set();
+  for (const rp of roots) {
+    for (const r of src.prepare(`SELECT name, tbl_name FROM sqlite_master WHERE rootpage=?`).all(rp)) names.add(r.tbl_name || r.name);
+  }
+  return names;
+}
+const autoRobust = autoDeriveCorruptTables();
+for (const n of autoRobust) FORCE_ROBUST.add(n);
+if (FORCE_ROBUST.size) log(`force-robust: ${[...FORCE_ROBUST].sort().join(', ')} (env${autoRobust.size ? ' + integrity_check auto-derive' : ''})`);
+
+// Decide which tables need the robust path: forced (above) OR failing a quick full-scan.
 function isCorrupt(t) { try { for (const _ of src.prepare(`SELECT * FROM "${t}"`).iterate()) {} return false; } catch { return true; } }
+// robustCopy is rowid-centric (scan-union by rowid) and keys its dedup + snapshot gap-fill
+// on an `id` column — so it CANNOT handle a WITHOUT ROWID table or one with no `id`.
+// Never route such a table there: forcing one down robustCopy would `SELECT rowid`/`SELECT
+// id` → throw → exit(7), REGRESSING a table genericCopy would have copied fine (e.g. a
+// healthy WITHOUT ROWID table whose only damage is a flagged secondary index, which the
+// auto-derive maps to its base table). Those stay on genericCopy.
+function robustCapable(t) {
+  if (/WITHOUT\s+ROWID/i.test(t.sql)) return false;
+  return tinfo(t.name).some((c) => c.name === 'id');
+}
 for (const t of normalTables) {
   if (SKIP.has(t.name)) { log(`SKIP ${t.name} — left empty (regenerable; corrupt b-tree unreadable)`); continue; }
+  const capable = robustCapable(t);
+  if (FORCE_ROBUST.has(t.name) && !capable) log(`${t.name}: force-robust requested but robustCopy can't handle it (WITHOUT ROWID / no id column) — using genericCopy`);
+  const forced = FORCE_ROBUST.has(t.name) && capable;
   try {
-    if (isCorrupt(t.name)) robustCopy(t.name);
-    else { const n = genericCopy(t); if (n) log(`copied ${t.name}: ${n}`); }
+    if (forced || (capable && isCorrupt(t.name))) {
+      if (forced) log(`${t.name}: forced down robustCopy`);
+      robustCopy(t.name);
+    } else {
+      try { const n = genericCopy(t); if (n) log(`copied ${t.name}: ${n}`); }
+      catch (e) {
+        // GRACEFUL DEGRADE: a bad row surfaced only during the copy (e.g. a shared-page
+        // NULL tripping a NOT NULL constraint) that the one-shot probe missed. The failed
+        // genericCopy transaction rolled back (dest table left empty), so fall back to the
+        // robust path — but only when robustCopy can actually handle this table (else there
+        // is no robust salvage, so preserve the original hard-fail).
+        if (!capable) throw e;
+        log(`genericCopy ${t.name} failed (${e.message}) — degrading to robustCopy`);
+        robustCopy(t.name);
+      }
+    }
   } catch (e) { console.error(`FAIL copying ${t.name}: ${e.message}`); process.exit(7); }
 }
 log('data copy complete');
@@ -214,10 +325,12 @@ for (const t of [...normalTables.map(t => t.name), ...vtNames].sort()) {
   if (SKIP.has(t)) { console.log(`  ${t}: intentionally left EMPTY (regenerable) — parity check skipped`); continue; }
   let s, dN; try { s = src.prepare(`SELECT count(*) c FROM "${t}"`).get().c; } catch { s = 'ERR'; }
   try { dN = dest.prepare(`SELECT count(*) c FROM "${t}"`).get().c; } catch { dN = 'ERR'; }
-  if (String(s) !== String(dN)) { const expectedGapFill = counts[t] !== undefined; if (!expectedGapFill || dN < s) { mismatches++; console.log(`  ${t}: src=${s} dest=${dN}  <-- MISMATCH`); } }
+  const v = parityVerdict({ s, dN, wasCopied: counts[t] !== undefined, robustIncomplete: !!robustIncomplete[t] });
+  if (v.note) console.log(`  ${t}: ${v.note}`);
+  if (v.mismatch) mismatches++;
 }
 log(`count mismatches: ${mismatches}`);
 src.close(); snap.close(); dest.close();
 if (!(ic.length === 1 && ic[0] === 'ok')) { console.error('FAIL: dest integrity_check not ok'); process.exit(6); }
-if (mismatches > 0) { console.error('FAIL: table count mismatches'); process.exit(8); }
+if (mismatches > 0) { console.error('FAIL: table count mismatches / unrecoverable data loss'); process.exit(8); }
 log('DONE — fresh rebuild succeeded (integrity ok, VACUUM ok, count parity). Validate, then swap.');

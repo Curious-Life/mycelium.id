@@ -18,6 +18,14 @@
 
 import { describeProvider } from './harness.js';
 import { classifyProviderError } from './provider-errors.js';
+// Auth-validity evidence for the SUBSCRIPTION provider only (surface 'native' — this loop is
+// the native wire). A subscription-backed turn that the provider ANSWERS is positive evidence;
+// one that dies on the auth break below is negative. The Intelligence status derives
+// "connected" from this instead of stored-creds-exist (subscription-auth-signal.js header).
+// Timestamps only — no token, no error body.
+import { recordSubscriptionTurnOutcome } from '../inference/subscription-auth-signal.js';
+
+const isSubscriptionProvider = (p) => p?.providerName === 'claude_subscription';
 
 const DEFAULT_TTFB_MS = 45000;     // first-token wait (cold local load + reasoning)
 const DEFAULT_IDLE_MS = 60000;     // inter-token gap before declaring a stall
@@ -152,6 +160,10 @@ export function createAgentLoop({ harness, logger = () => {} }) {
             ...(maxIterations != null ? { maxIterations } : {}),
           });
           lastErr = null;
+          // The provider ANSWERED ⇒ the credential worked. Recorded per-attempt (not
+          // per-turn) so an empty-but-authenticated stream still counts: auth validity is
+          // about the credential, not about whether the model said anything useful.
+          if (isSubscriptionProvider(activeProvider)) recordSubscriptionTurnOutcome(true);
         } catch (e) {
           lastErr = e;
           const { retryable, reason, retryAfterMs: ra } = classifyProviderError(e);
@@ -171,7 +183,12 @@ export function createAgentLoop({ harness, logger = () => {} }) {
           // Transient failures (429 / 5xx / network) still cascade below: same intent,
           // temporary fault. classifyProviderError already separates them
           // (provider-errors.js: 401/403 → {retryable:false, reason:'auth'}).
-          if (reason === 'auth') break;
+          if (reason === 'auth') {
+            // Negative auth evidence for the subscription's 'native' surface — the status
+            // route turns this into 'needs_reconnect' unless newer positive evidence exists.
+            if (isSubscriptionProvider(activeProvider)) recordSubscriptionTurnOutcome(false);
+            break;
+          }
           // Pre-content provider-fallback: nothing streamed + a next provider exists →
           // advance the chain (transient/retryable errors only — see the auth break above).
           // A fallback doesn't consume the empty-retry budget; total tries stay bounded by

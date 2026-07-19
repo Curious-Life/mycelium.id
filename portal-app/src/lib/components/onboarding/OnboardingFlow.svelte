@@ -48,18 +48,20 @@
 	// Agent identity (spec #4) — name + personality, set here in onboarding and
 	// changeable later in Settings → Intelligence. Saved on "Let's grow".
 	let agentName = $state('');
-	let agentPersonality = $state('friendly');
-	const PERSONALITY_OPTS = [
-		{ id: 'friendly', label: 'Friendly' },
-		{ id: 'formal', label: 'Formal' },
-		{ id: 'concise', label: 'Concise' },
-		{ id: 'creative', label: 'Creative' },
-	];
+	// Personality is free-text now (design §5.3 — the 4-item dropdown dies). It
+	// seeds mind/self.md, the ~1000-token capsule that loads every turn, NOT the
+	// old settings enum (the backend would coerce a non-enum string to 'friendly').
+	let agentPersonality = $state('');
 	async function saveAgentIdentity() {
-		if (!agentName.trim() && agentPersonality === 'friendly') return; // nothing chosen
+		const name = agentName.trim();
+		const being = agentPersonality.trim();
+		if (!name && !being) return; // nothing entered
 		try {
-			await api('/portal/agent-identity', { method: 'PUT', body: JSON.stringify({ name: agentName.trim(), personality: agentPersonality }) });
-		} catch { /* best-effort — they can set it in Settings */ }
+			if (name) await api('/portal/agent-identity', { method: 'PUT', body: JSON.stringify({ name }) });
+			// Seed the character (self.md) with the operator's description; owner-gated,
+			// same session. Best-effort — they can refine it on the character page.
+			if (being) await api('/portal/character/being', { method: 'PUT', body: JSON.stringify({ content: being }) });
+		} catch { /* best-effort — they can set it on the character page */ }
 	}
 
 	// Handle — claim your public name (optional; set here or later in Settings →
@@ -404,9 +406,8 @@
 				</ol>
 				<div class="name-field">
 					<input class="name-input" type="text" maxlength="40" bind:value={agentName} placeholder="Name your assistant (e.g. Aria)" aria-label="Assistant name" />
-					<select class="persona-select" bind:value={agentPersonality} aria-label="Personality">
-						{#each PERSONALITY_OPTS as o}<option value={o.id}>{o.label}</option>{/each}
-					</select>
+					<input class="persona-input" type="text" maxlength="280" bind:value={agentPersonality} placeholder="How should they be? (e.g. warm but doesn't flatter; asks the question under the question)" aria-label="Personality" />
+
 				</div>
 				<div class="name-field">
 					<input class="name-input" type="text" maxlength="32" bind:value={handleInput} oninput={onHandleInput}
@@ -641,18 +642,6 @@
 	.handle-hint { align-self: center; font-size: 0.72rem; white-space: nowrap; color: var(--color-text-tertiary, #9898a3); }
 	.handle-hint.ok { color: var(--color-accent-aurum, #e5b84c); }
 	.handle-hint.bad { color: var(--color-coral, #e5736b); }
-	.persona-select {
-		flex-shrink: 0;
-		padding: 0.55rem 0.6rem;
-		font-size: 0.82rem;
-		font-family: inherit;
-		color: var(--color-text-primary);
-		background: var(--glass-input-bg, rgba(0, 0, 0, 0.25));
-		border: 1px solid var(--glass-input-border, rgba(255, 255, 255, 0.12));
-		border-radius: 9px;
-		outline: none;
-	}
-	.persona-select:focus { border-color: var(--color-accent-aurum, #e5b84c); }
 
 	/* ── Guide rail ────────────────────────────────────────────────────────── */
 	.rail {

@@ -1,51 +1,46 @@
-// src/inference/sensitivity.js — §4g: WHICH TASKS ARE SENSITIVE. The single source of truth.
+// src/inference/sensitivity.js — §4g: WHICH TASKS ARE SENSITIVE BY DEFAULT. The single source of truth.
 //
 // A LEAF module on purpose: router.js and run-turn.js both need this, and importing resolve.js
 // (its natural home) would drag claude-oauth + claude-config-dir into the import graph of a
 // module that half the app loads. Nothing here imports anything.
 //
-// ── THE BUG THIS EXISTS TO KILL (found 2026-07-16, designing the Intelligence screen) ──
-// `sensitive` was a per-CALL boolean each caller had to remember, and the outcome was exactly
-// what that predicts. role-models.js asserted, and the Intelligence screen was about to print:
+// ── THE MECHANISM ──
+// `sensitive` is a per-request boolean the §4g gate reads: `sensitive && /^us/.test(jurisdiction)
+// && !exempt` ⇒ US egress is REFUSED (router.js, resolve.js, run-turn.js). router.infer DEFAULTS
+// `sensitive` from THIS set — so any caller that OMITS the flag inherits the task's default, and
+// a caller that passes `sensitive` EXPLICITLY overrides it.
 //
-//     "narrate runs `sensitive:true`, so the §4g gate denies sensitive→US, so a US pick would
-//      be silently downgraded to local — never recommend one (fail-closed)"
+// ⚠️ IT IS NOT A FORCE FIELD. An explicit argument always wins — inference/cascade.js once
+// shipped a hardcoded `false`, so `inferWithCascade({ task })` overrode the default (fixed
+// 2026-07-16; cascade.js now defaults from the task too). If you add a wrapper around
+// router.infer, default its `sensitive` from the task or a future sensitive task re-opens a hole.
 //
-// Only TWO call sites in the whole repo passed `sensitive: true` — claims/discovery.js and
-// claims/validator.js — so the CLAIM abstractions were protected and nothing else was:
-//   • pipeline/lib/narrate-infer.js — the REAL "Descriptions" worker (describe-clusters.js:
-//     cluster names + chronicles) — called router.infer({ task:'narrate' }) with no flag, so
-//     `sensitive` defaulted to FALSE and the §4g gate never fired. A US model chosen for
-//     narrate was used, verbatim, to name the user's mindscape.
-//   • src/agent/run-turn.js hard-coded `{ sensitive: false }` for EVERY task, so the agent
-//     narration walk had no §4g enforcement at all.
-// The guarantee existed in a comment and in a design doc. It did not exist in code.
-// Operator decision (2026-07-16): make the guarantee real, then say it on screen.
+// ── WHY THE SET IS EMPTY (operator decision, 2026-07-19) ──
+// 'narrate' — the "Descriptions" task (mindscape names + chronicles) — used to live here, so the
+// router refused a US provider for it and the Intelligence screen offered only EU/on-device. The
+// operator removed that limit: Descriptions may now be assigned to ANY connected provider,
+// including US. The recommendation stays EU-ZDR (Regolo, role-models.js), but it is a
+// recommendation, not a wall. So no task DEFAULTS to sensitive today.
 //
-// ── WHY A TASK, NOT A CALL SITE ──
-// A task is sensitive because of WHAT IT LOOKS AT. router.infer now DEFAULTS `sensitive` from
-// this set, so any caller that OMITS the flag gets it right — the failure above becomes the
-// default-correct case rather than a thing reviewers must catch.
+// ⚠️ THE §4g MACHINERY IS STILL LIVE — this set going empty did NOT disable it. The two callers
+// that pass `sensitive: true` EXPLICITLY — claims/discovery.js and claims/validator.js (the
+// persona/claim abstractions, the most sensitive data in the vault) — are UNAFFECTED: they never
+// read this set. Their US-egress protection is intact. Removing narrate changed only the DEFAULT
+// for callers that omit the flag (pipeline/lib/narrate-infer.js, agent/run-turn.js narration
+// walk), which is exactly the "Descriptions may go anywhere" change the operator asked for.
 //
-// ⚠️ IT IS NOT A FORCE FIELD, and an earlier version of this comment said it was ("no caller
-// CAN forget it"). A caller that passes `sensitive` EXPLICITLY still overrides the default —
-// inference/cascade.js did exactly that with a hardcoded `false`, so `inferWithCascade({
-// task:'narrate' })` would have leaked despite this set (independent review, 2026-07-16;
-// cascade.js now defaults from the task too). If you add a wrapper around router.infer,
-// default its `sensitive` from the task or you have re-opened the hole.
+// If a future task must never reach a US provider by default, add it here — one line, and every
+// omitting caller inherits the refusal. A set that swallowed EVERY task would disable US
+// providers app-wide and be reverted by the next person who noticed, so keep it minimal.
 
 /**
- * Tasks whose content must never egress to a US provider (§4g).
+ * Tasks whose content must never egress to a US provider by default (§4g). Callers that omit the
+ * `sensitive` flag inherit this; callers may still pass `sensitive: true` explicitly (claims do).
  *
- * 'narrate' — mindscape names + chronicles are a direct read of the user's personal themes;
- * it is the most revealing summary the system produces.
- *
- * Deliberately NOT here: 'chat' (the user is choosing to talk to that model), 'harness' /
- * 'reflection' (agent mechanics). A set that quietly swallowed every task would disable US
- * providers app-wide and be reverted by the next person who noticed — which would take the
- * narrate protection with it.
+ * EMPTY as of 2026-07-19: 'narrate' (Descriptions) was removed by operator decision so mindscape
+ * names + chronicles can be assigned to any connected provider, including US. See the header.
  */
-export const SENSITIVE_TASKS = new Set(['narrate']);
+export const SENSITIVE_TASKS = new Set([]);
 
 /** Is this task §4g-sensitive (never egress to a US provider)? @see SENSITIVE_TASKS */
 export const isSensitiveTask = (task) => SENSITIVE_TASKS.has(task);

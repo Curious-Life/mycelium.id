@@ -25,13 +25,22 @@ function drive(harness, probe) {
   );
 }
 
-let cold = {}, returning = {}, fault = {}, disklow = {}, readfail = {}, ai = {};
+let cold = {}, returning = {}, fault = {}, disklow = {}, readfail = {}, ai = {}, voiceSample = {};
+let subSplit = {}, subOk = {}, subUnknown = {};
 try { cold = drive('test/mount-intelligence-flow.mjs'); } catch (e) { cold = { error: String(e?.message || e) }; }
 try { returning = drive('test/mount-intelligence-flow.mjs', 'returning'); } catch (e) { returning = { error: String(e?.message || e) }; }
+try { voiceSample = drive('test/mount-intelligence-flow.mjs', 'voice-sample'); } catch (e) { voiceSample = { error: String(e?.message || e) }; }
+let embedderAbsent = {}, voiceError = {};
+try { embedderAbsent = drive('test/mount-intelligence-flow.mjs', 'embedder-absent'); } catch (e) { embedderAbsent = { error: String(e?.message || e) }; }
+try { voiceError = drive('test/mount-intelligence-flow.mjs', 'voice-error'); } catch (e) { voiceError = { error: String(e?.message || e) }; }
 try { fault = drive('test/mount-intelligence-flow.mjs', 'fault'); } catch (e) { fault = { error: String(e?.message || e) }; }
 try { disklow = drive('test/mount-intelligence-flow.mjs', 'disklow'); } catch (e) { disklow = { error: String(e?.message || e) }; }
 try { readfail = drive('test/mount-intelligence-flow.mjs', 'readfail'); } catch (e) { readfail = { error: String(e?.message || e) }; }
 try { ai = drive('test/mount-ai-settings.mjs'); } catch (e) { ai = { error: String(e?.message || e) }; }
+// The auth-VALIDITY probes ("connected must mean VALID", 2026-07-18) — see the harness header.
+try { subSplit = drive('test/mount-intelligence-flow.mjs', 'sub-split'); } catch (e) { subSplit = { error: String(e?.message || e) }; }
+try { subOk = drive('test/mount-intelligence-flow.mjs', 'sub-ok'); } catch (e) { subOk = { error: String(e?.message || e) }; }
+try { subUnknown = drive('test/mount-intelligence-flow.mjs', 'sub-unknown'); } catch (e) { subUnknown = { error: String(e?.message || e) }; }
 
 rec('F0. the flow mounts in every probe', cold.ok === true && returning.ok === true && fault.ok === true && disklow.ok === true,
   [cold, returning, fault, disklow].map((x) => x.error || '').filter(Boolean).join(' | ').slice(0, 300));
@@ -91,15 +100,31 @@ t('F7. ⭐ A9 — ONE persistent live region; announcements swap its TEXT, never
   assert.equal(cold.customize.liveSameElement, true, 'opening Customize does not remount it either');
 });
 
-t('F8. ⭐ A10 — the pane is a FLOW: the four-component machinery is NOT visible until Customize opens', () => {
+t('F8. ⭐ A10 — Customize is a TWO-tab nav (Functions · Providers); Voice + Engine fold INTO Functions', () => {
+  // The redesign (2026-07-19): Customize was three heavyweight sections stacked open at once
+  // (assignment · connect-manage · engine — the wall the operator called "hell"). It is now a
+  // segmented nav of TWO tabs:
+  //   • Functions  — the ONE assignment surface: every job, INCLUDING Voice (its own row, #240's
+  //                  fold) and Engine (the Conversation row's "runs as" control). IntelligenceScreen
+  //                  owns all three, so a stale Voice/Engine tab can never drift from assignment.
+  //   • Providers  — connect & manage (AISettings).
+  // The guarantees that MUST survive:
+  //   1. the machinery is still HIDDEN behind the closed disclosure (a door, not the pane);
+  //   2. exactly two tabs, in order — Functions then Providers (nothing deleted);
+  //   3. the default is Functions, mounting the REAL screen WITH Voice + Engine folded in;
+  //   4. it is a nav, NOT a wall: Providers is behind its own tab, one panel at a time.
   for (const probe of [cold, returning]) {
     assert.equal(probe.before.aiSettingsMounted, false, 'AISettings must sit behind the CLOSED disclosure');
-    assert.equal(probe.before.engineMounted, false, 'EngineSelector too — no longer the pane\'s first element');
+    assert.equal(probe.before.engineMounted, false, 'EngineSelector too — not mounted until Functions opens');
     assert.equal(probe.before.assignmentMounted, false, 'and the assignment screen');
-    assert.equal(probe.customize.aiSettingsMounted, true, '…and Customize opens ALL of it (the disclosure is a door, not a wall)');
-    assert.equal(probe.customize.screenRendered, true, 'with the REAL IntelligenceScreen as the assignment child');
-    assert.deepEqual(probe.customize.order, ['assignment', 'connect-manage', 'voice-character', 'engine'],
-      'the §3 Customize order: assignment · connect & manage · voice · engine');
+    assert.deepEqual(probe.customize.navTabs, ['Functions', 'Providers'],
+      'two tabs now: Functions · Providers (Voice + Engine folded into Functions, not their own sections)');
+    assert.equal(probe.customize.screenRendered, true, 'the default tab is Functions, with the REAL IntelligenceScreen (.intel)');
+    assert.equal(probe.customize.defaultTab.voice, true, 'Voice folded IN — its rail renders inside the Functions surface (#240 tts row), not a separate section');
+    assert.equal(probe.customize.defaultTab.engine, true, 'Engine folded IN — the Conversation row hosts it, not a separate section');
+    assert.equal(probe.customize.defaultTab.aiSettings, false, 'but NOT Providers — one panel at a time, the wall is gone');
+    assert.equal(probe.customize.providersTab.aiSettings, true, 'the Providers tab reveals AISettings (the #133 ladder is reachable)');
+    assert.equal(probe.customize.providersTab.assignment, false, 'and switching to it UNMOUNTS the Functions panel — a nav, not a wall');
   }
 });
 
@@ -112,13 +137,102 @@ t('F9. ⭐ W6 — the gap-fill: ≥2 recommended functions unset ⇒ one scoped 
     'SCOPED to the missing rows only — fill the gaps, never touch what the user has (PRESERVE symmetry)');
 });
 
+// ── F16–F18) the unified On-device models panel — the operator's "one place" (2026-07-18) ─────
+// One place showing every local model with honest health + size + a single download action,
+// consolidating what was scattered across OnboxTaskSelect / TranscriptionSetup / VoiceSection —
+// and finally MOUNTING the purpose-built ModelHealth renderer (an orphan until now). Asserted on
+// the genuine article: real OnDeviceModels + real ModelHealth compiled and clicked in the harness.
+t('F16. the panel renders ALL FOUR local models, once, in one place', () => {
+  assert.equal(returning.before.odmPresent, true, 'the On-device models section must render in the returning summary');
+  const keys = (returning.before.odmRows || []).map((r) => r.key);
+  assert.deepEqual([...keys].sort(), ['search', 'transcription', 'understanding', 'voice'],
+    `all four local models, exactly once each — got ${JSON.stringify(keys)}`);
+  const byKey = Object.fromEntries((returning.before.odmRows || []).map((r) => [r.key, r]));
+  // Nomic (Search) is BUNDLED — reported "Included", green, never a download button (§3.10d-c).
+  assert.match(String(byKey.search?.statusText), /Included/i, 'the bundled embedder reads "Included"');
+  assert.equal(byKey.search?.hasDownload, false, 'and offers no download — it ships in the app');
+  assert.equal(byKey.search?.okDot, true, 'a reported-healthy bundled model gets the green dot');
+  // qwen3.5 is installed+approved in this fixture ⇒ its honest health, no download offered.
+  assert.equal(byKey.understanding?.okDot, true, 'the approved+installed labeler reads ok');
+  assert.equal(byKey.understanding?.hasDownload, false, 'no re-download over an installed model');
+});
+
+t('F17. the panel is the ONE download entry point — whisper + voice offer a download when absent, routed to their OWN paths', () => {
+  const byKey = Object.fromEntries((returning.before.odmRows || []).map((r) => [r.key, r]));
+  // Whisper is not installed in this fixture ⇒ a Download with its real size (composed, not hardcoded).
+  assert.equal(byKey.transcription?.hasDownload, true, 'an un-downloaded whisper must offer a one-tap download');
+  assert.match(String(byKey.transcription?.size), /1\.6 GB/, `and state its size from the served bundle — got ${byKey.transcription?.size}`);
+  // Voice is individually downloadable from the panel (the "available to download meanwhile" case).
+  assert.equal(byKey.voice?.hasDownload, true, 'voice is downloadable from the one place, even before it can speak');
+  // …and the click routes to the model's OWN path — never a new/forked download path.
+  const sent = returning.odmDownload?.sent || [];
+  assert.ok(sent.some((s) => s.path === '/portal/settings/tts/qwen/download' && s.method === 'POST'),
+    `the voice Download must POST the existing tts route. Sent: ${JSON.stringify(sent)}`);
+});
+
+t('F18. ⭐ a downloaded-but-mute voice reads as an actionable WARNING, never a false "ready" (W2 executability)', () => {
+  // The gated-on-runnable decision: the Qwen3-TTS MODEL can be present while it still cannot
+  // speak (no reference sample yet, §2.2/§5). The panel must say so — a warning with the next
+  // step — and must NOT paint it green or offer a pointless re-download.
+  const v = (voiceSample.before?.odmRows || []).find((r) => r.key === 'voice');
+  assert.ok(v, `the voice row must render in the voice-sample probe — got ${JSON.stringify(voiceSample.before?.odmRows)}`);
+  assert.equal(v.okDot, false, 'a voice that cannot speak must NOT show the green health dot');
+  assert.equal(v.warnDot, true, 'it is an actionable setup step — a warning, not a fault, not a false ok');
+  assert.match(String(v.statusText), /voice sample/i, `and it must name the next step — got "${v.statusText}"`);
+  assert.equal(v.hasDownload, false, 'the model is already downloaded — no dead re-download button');
+  // ⚠️ Phase 3 removed the panel↔summary disagreement class at the ROOT: local models render ONLY
+  // in the panel now, so there is no summary voice dot to contradict it. F21 pins that the summary
+  // carries NO local rows (the de-dup), which is a stronger guarantee than the two agreeing.
+});
+
+t('F19. ⭐ an ABSENT embedder is idle, never a fabricated green "Included" (review finding F2)', () => {
+  // `models.embedder` is undefined until the readiness poll resolves — and forever on an outage.
+  // The panel used to inject a synthetic {status:'ok'} for that window, painting the green dot
+  // ModelHealth's own fail-closed 'included' fix removed. Absence must read as idle, never health.
+  assert.equal(embedderAbsent.ok, true, String(embedderAbsent.error || '').slice(0, 200));
+  const s = (embedderAbsent.before?.odmRows || []).find((r) => r.key === 'search');
+  assert.ok(s, `the search row must render even with no embedder health — got ${JSON.stringify(embedderAbsent.before?.odmRows)}`);
+  assert.equal(s.okDot, false, 'an embedder that has reported NOTHING must not paint the green "Included" dot — that is fabricated liveness');
+  assert.match(String(s.statusText), /Included/i, 'the one fact that never changes still renders — it IS bundled — just not as a health claim');
+  // (Phase 3: the embedder no longer has a summary row to fabricate a green on — it lives only in
+  // the panel, asserted above. F21 pins that the summary carries no local rows.)
+});
+
+t('F20. a FAILED voice download reads red AND offers a retry (F3 dead-branch, now gated)', () => {
+  // voiceHealth() maps phase 'error' → status 'down' (not 'error'), so the panel action guard had
+  // to gate on 'down' or the retry Download never rendered on a failed download (review F3). Drive
+  // the failed state and prove the retry is live and the dot is a genuine red fault.
+  assert.equal(voiceError.ok, true, String(voiceError.error || '').slice(0, 200));
+  const ve = (voiceError.before?.odmRows || []).find((r) => r.key === 'voice');
+  assert.ok(ve, `the voice row must render in the voice-error probe — got ${JSON.stringify(voiceError.before?.odmRows)}`);
+  assert.equal(ve.badDot, true, 'a failed voice download reads red (a genuine fault), not muted or green');
+  assert.equal(ve.hasDownload, true, 'and offers a retry — a failed download IS re-fetchable, unlike an installed model');
+});
+
 t('F10. A8 — a genuine fault gets a red line WITH a control; a choice renders muted, never red', () => {
   assert.match(String(fault.before.needsLine), /isn’t working/, 'the down member must surface as the one "needs you" line');
   assert.equal(fault.before.faultHasControl, true, 'no rendered fault without a next step');
-  const dots = Object.fromEntries((fault.before.dotClasses || []).map((d) => [d.label, d.cls]));
-  assert.equal(dots['Understanding your messages'], 'bad', 'down ⇒ red');
-  assert.equal(dots['Transcription'], 'choice', 'unset ⇒ muted CHOICE — never red, never a spinner (§8.2)');
-  assert.equal(dots['Voice'], 'choice', 'voice unset is the user\'s state, not an error');
+  // Phase 3: the local models render in the PANEL now, so the fault verdict is read there. The
+  // needs-line above still fires off the full summaryRows logic (faultRow), even though the local
+  // rows aren't in the cloud-only summary render.
+  const p = Object.fromEntries((fault.before.odmRows || []).map((r) => [r.key, r]));
+  assert.equal(p.understanding?.badDot, true, 'a DOWN labeler ⇒ red in the panel');
+  assert.equal(p.transcription?.badDot, false, 'an unset whisper is a muted CHOICE — never red, never a spinner (§8.2)');
+  assert.equal(p.voice?.badDot, false, 'voice unset is the user\'s state, not an error');
+});
+
+t('F21. ⭐ Phase 3 de-dup — local models render ONCE (the panel); the summary shows only CLOUD functions', () => {
+  // The operator's "too much duplication": local models used to appear as summary dots AND panel
+  // rows. Now the summary carries only Conversation + Descriptions (cloud), and the four local
+  // models live solely in the On-device panel — no double-listing, no two surfaces to disagree.
+  const sumLabels = (returning.before.dotClasses || []).map((d) => String(d.label));
+  const LOCAL = ['Understanding your messages', 'Search', 'Transcription', 'Voice'];
+  for (const l of LOCAL) assert.ok(!sumLabels.includes(l), `"${l}" must NOT be a summary row — it lives in the panel now. Summary: ${JSON.stringify(sumLabels)}`);
+  assert.deepEqual(sumLabels.sort(), ['Conversation', 'Descriptions'], `the summary shows only the cloud functions — got ${JSON.stringify(sumLabels)}`);
+  // …and the four local models ARE in the panel (F16 asserts the set; here we pin they moved OUT
+  // of the summary and INTO the panel, i.e. exactly once total).
+  const panelKeys = (returning.before.odmRows || []).map((r) => r.key).sort();
+  assert.deepEqual(panelKeys, ['search', 'transcription', 'understanding', 'voice'], 'all four local models are in the panel');
 });
 
 t('F11. ⭐ A3 — the demoted AISettings carries NO assignment machinery (mounted, not grepped)', () => {
@@ -146,6 +260,48 @@ t('F11b. P3 — demoted is not DELETED: connect + manage all still stand', () =>
   assert.equal(ai.hasSubscriptionCard, true, 'the #133 Claude ladder survives');
   assert.equal(ai.hasWebAccess, true, 'web access survives');
   assert.equal(ai.hasConnectedList, true, 'the connected-providers list survives');
+});
+
+// ── auth VALIDITY: "connected" must mean VALID (2026-07-18) ────────────────────────────────
+rec('F13a. the validity probes mount', subSplit.ok === true && subOk.ok === true && subUnknown.ok === true,
+  [subSplit, subOk, subUnknown].map((x) => x.error || '').filter(Boolean).join(' | ').slice(0, 300));
+
+t('F13. ⭐ subscription "connected" is EVIDENCE, not row-existence — unknown renders MUTED, ok renders green', () => {
+  // The bug this ends: a stored oauth row rendered a green "Claude subscription" while the
+  // credential had been expired-beyond-refresh for four days. Identity of the rendered state:
+  assert.equal(subOk.subProbe?.dot, 'ok', `positive evidence ⇒ green. Got: ${subOk.subProbe?.dot}`);
+  assert.equal(subOk.subProbe?.what, 'Claude subscription', 'and plain copy — no qualifier needed when it works');
+  assert.equal(subUnknown.subProbe?.dot, 'choice',
+    `ZERO evidence must NOT claim connected — muted, never green (fail-closed). Got: ${subUnknown.subProbe?.dot}`);
+  assert.ok(!/reconnect/i.test(String(subUnknown.subProbe?.what)),
+    'and no scare copy either — unknown is neutral, not an alarm');
+  assert.equal(subUnknown.subProbe?.needsLine, null, 'unknown raises no needs-you line');
+});
+
+t('F14. ⭐ PER-SURFACE truth — chat alive + channels dead says BOTH; a blanket state lies about one', () => {
+  // The live mismatch this encodes: the native wire rode a dead isolated-dir token (channel
+  // replies 401) while the spawned Claude Code engine answered fine on its own login. A single
+  // "connected" was wrong for channels; a single "dead" would be wrong for chat.
+  assert.equal(subSplit.subProbe?.dot, 'bad', 'a broken surface is a genuine fault — red dot');
+  assert.match(String(subSplit.subProbe?.what), /chat works; background replies need reconnect/,
+    `the row must state the SPLIT, not a blanket verdict. Got: ${subSplit.subProbe?.what}`);
+  assert.match(String(subSplit.subProbe?.needsLine), /Claude account/,
+    'and the needs-you line names the credential, not a generic "isn\'t working"');
+});
+
+t('F15. ⭐ Refresh now hits the refresh route; failure ESCALATES to reconnect; NOTHING auto-opens', () => {
+  assert.equal(subSplit.subProbe?.hasRefreshBtn, true, 'needs_reconnect must offer the one-click refresh');
+  assert.equal(subSplit.subProbe?.hasReconnectBtn, true, 'and the existing reconnect ladder');
+  assert.deepEqual(subSplit.subProbe?.afterRefresh?.refreshPosts, ['POST'],
+    'the button drives POST /portal/auth/claude/refresh — the existing ToS-clean path, no new auth flow');
+  assert.equal(subSplit.subProbe?.afterRefresh?.escalation, true,
+    'a failed refresh must SAY the next step is signing in again — not silently stay red');
+  assert.equal(subSplit.subProbe?.afterRefresh?.stillBad, true,
+    'and must NOT flip the dot green off a failed attempt (the route-claims-ok mutation reds here)');
+  // The auto-open canary: ~5 unprompted sign-in windows is a live bug elsewhere; the status
+  // surface must be structurally unable to contribute. windowOpens counts EVERY window.open.
+  assert.equal(subSplit.subProbe?.windowOpens, 0, 'status/refresh logic never opens a window');
+  assert.equal(subSplit.windowOpens, 0, 'nor does anything else in this pane during the probe');
 });
 
 const allPass = ledger.every(Boolean);

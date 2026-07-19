@@ -37,14 +37,11 @@ rec('U0. usage sink builds when db.usage present', typeof usageSink === 'functio
   await router.infer({ prompt: `${SECRET} summarize`, task: 'summarize' });
 }
 // ── 2) CLOUD infer (anthropic): usage.input_tokens/output_tokens ─────────────
-// ⚠️ The task must be a CLOUD task that is NOT §4g-sensitive — which since 2026-07-16 leaves
-// exactly one: `complex`. (CLOUD_TASKS = [narrate, complex]; SENSITIVE_TASKS = {narrate}.)
-// This block tests USAGE ACCOUNTING for a US cloud provider and used `task:'narrate'` only as
-// a label. `narrate` is now §4g-sensitive BY TASK (src/inference/sensitivity.js), so
-// narrate→us-standard is REFUSED and falls through to on-box: the router never called the
-// Anthropic mock and the fixture died on the local path ("Ollama response missing .response").
-// That refusal is the POINT of the §4g work and verify:narrate-sovereignty pins it; asserting
-// it here would only duplicate it. NB a LOCAL_TASK (e.g. 'summarize') is not a substitute —
+// ⚠️ The task must be a CLOUD task so the router takes the cloud branch — `complex` (CLOUD_TASKS
+// = [narrate, complex]). This block tests USAGE ACCOUNTING for a US cloud provider. `narrate`
+// would ALSO reach the cloud now (SENSITIVE_TASKS is EMPTY since 2026-07-19 — narrate→us-standard
+// is no longer refused), but `complex` keeps this fixture's INTENT unambiguous: it exercises the
+// accounting, not the §4g gate. NB a LOCAL_TASK (e.g. 'summarize') is not a substitute —
 // `if (CLOUD_TASKS.includes(task) && hasCloud())` means it would skip the cloud branch and
 // route local, failing the same way for an entirely different reason.
 {

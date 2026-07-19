@@ -13,10 +13,45 @@
 import { createEmbedClient } from '../embed/client.js';
 import { getMasterKey } from '../crypto/crypto-local.js';
 import { localInfer } from '../inference/local.js';
-import { createOllamaClient } from '../hardware/ollama.js';
-import { createEnrichmentService } from './service.js';
+import { createOllamaClient, classifyOllamaFault, OLLAMA_FAULT } from '../hardware/ollama.js';
+import { createEnrichmentService, EMBED_MAX_ATTEMPTS } from './service.js';
 import { createCategoryClassifier, DEFAULT_LABEL_MODEL } from './categories.js';
 import { createMessageEnricher } from './enricher.js';
+
+// ── Accurate, actionable copy per fault kind (OLLAMA_FAULT) ──────────────────
+// The health surface used to hardcode "The local model runtime is not reachable." for EVERY
+// pull/list fault — a lie on a fresh box where Ollama is up but the download failed for another
+// reason (no network to the registry, disk full). Each message names WHAT is wrong and points
+// at the remedy; the raw `detail` (ollama's own string) rides alongside on the localhost-only
+// readiness surface (GET /api/v1/portal/readiness — unauthenticated by design, single-user V1;
+// NEVER the content-free activity feed). Exported so verify:model-consent asserts the mapping
+// directly (mutation-testable).
+export const FAULT_MESSAGE = Object.freeze({
+  [OLLAMA_FAULT.RUNTIME_UNREACHABLE]: 'The local model runtime (Ollama) isn’t reachable — is it running?',
+  // Deliberately network-generic (not "the registry"): this kind covers a registry that is
+  // unreachable/slow AND a non-2xx from the local daemon's own /api/pull, so it must not
+  // misdirect the owner to check one specific hop (independent review, 2026-07-18).
+  [OLLAMA_FAULT.DOWNLOAD_FAILED]: 'The model download failed — check your network connection, then retry.',
+  [OLLAMA_FAULT.OUT_OF_SPACE]: 'Not enough disk space to download the model — free up space, then retry.',
+});
+// A stored fault is `{ kind, detail }`. Unknown/legacy kinds fall back to the runtime message
+// (fail-safe to the least-specific, never a blank) so a new kind can never render an empty line.
+export function faultMessage(fault) {
+  return FAULT_MESSAGE[fault?.kind] ?? FAULT_MESSAGE[OLLAMA_FAULT.RUNTIME_UNREACHABLE];
+}
+
+// Strip a home-dir USERNAME from an ollama infra string before it is stored as a fault `detail`.
+// ollama's disk errors carry a models-dir path (e.g. `/Users/alice/.ollama/blobs/…`), and the
+// only fault `detail` surface is the localhost-only readiness route — so this is low-stakes, but
+// §1 ("if in doubt, don't log it") and the independent review both say don't ship a username we
+// don't need. The meaningful tail ("no space left on device") and the reason are preserved; only
+// the user segment of a home path becomes `<user>`. Registry HOSTS (registry.ollama.ai) are not
+// touched — they are not home paths and are useful to see.
+function scrubFaultDetail(s) {
+  return String(s)
+    .replace(/(\/(?:Users|home)\/)[^/\s]+/gi, '$1<user>')      // macOS / Linux
+    .replace(/([A-Za-z]:\\Users\\)[^\\\s]+/gi, '$1<user>');    // Windows
+}
 
 // The live drainer for the booted vault. Set by startEnrichDrainer so a portal
 // route (POST /portal/enrichment/trigger) can kick a drain WITHOUT threading the
@@ -89,6 +124,60 @@ export function getEnricherHealth() {
 }
 
 export function nudgeEnrichDrainer() { try { _current?.nudge(); } catch { /* best-effort */ } return Boolean(_current); }
+
+/**
+ * Clear the live service's in-memory L1 label-attempt counters — the companion to
+ * db.messages.resetEnrichmentGiveUps() (the retry-failed route calls both). Without
+ * this, a row the route just reset to pending would still carry its old counter and
+ * terminal-mark again on its first failure instead of getting a fresh budget.
+ * No-op when no drainer is running (the counters die with the process anyway).
+ */
+export function resetEnrichGiveUpCounters() { try { _current?.resetLabelAttempts?.(); } catch { /* best-effort */ } return Boolean(_current); }
+
+/**
+ * SELF-HEAL: re-queue rows that failed for a NON-content reason (service
+ * down/slow/timeout) — every cycle, while the embed service is healthy.
+ *
+ * The single exclusion is the attempt-cap terminal marker 'embed-capped:N'
+ * (service.js EMBED_CAPPED_MARK): those rows were retired on purpose after N
+ * counted attempts against a provably-up service, and reclaiming them here
+ * would re-create the heal→fail→heal loop the cap ends (pending would never
+ * settle; the activity labels would never clear). Their recovery paths are
+ * reclaimGaveUpRows (once per boot) and POST /portal/enrichment/retry-failed.
+ * Every OTHER -1-without-vector row is still reclaimed, unconditionally.
+ *
+ * Exported for verify-enrich-resilience.mjs, which runs THIS function against a
+ * real sqlite fixture — the gate exercises the statement that ships, not a copy.
+ */
+export async function selfHealStrandedEmbeds(db, userId) {
+  await db.rawQuery(
+    "UPDATE messages SET nlp_processed = 0, nlp_error = NULL WHERE user_id = ?"
+    + " AND nlp_processed = -1 AND embedding_768 IS NULL"
+    + " AND (nlp_error IS NULL OR nlp_error NOT LIKE 'embed-capped:%')",
+    [userId],
+  );
+}
+
+/**
+ * BOOT RECLAIM: give every gave-up row ONE fresh chance per drainer start —
+ * capped embeds (nlp_processed -1 + 'embed-capped:N', counter cleared) and
+ * label-gave-up rows (categories_processed -1 → 0). Capped is set-aside, not
+ * deleted: a new boot means new conditions (service fixed, model swapped), so
+ * the previous run's verdicts are retried once; between boots they hold, so the
+ * backlog still settles. Exported for verify-enrich-resilience.mjs (same
+ * real-statement rule as selfHealStrandedEmbeds).
+ */
+export async function reclaimGaveUpRows(db, userId) {
+  await db.rawQuery(
+    "UPDATE messages SET nlp_processed = 0, nlp_error = NULL WHERE user_id = ?"
+    + " AND nlp_processed = -1 AND embedding_768 IS NULL AND nlp_error LIKE 'embed-capped:%'",
+    [userId],
+  );
+  await db.rawQuery(
+    'UPDATE messages SET categories_processed = 0 WHERE user_id = ? AND categories_processed = -1',
+    [userId],
+  );
+}
 
 /**
  * Clear the pull-failure backoff — the owner's EXPLICIT "try again". Deliberately NOT cleared by
@@ -320,6 +409,7 @@ export function startEnrichDrainer({
   const svc = createEnrichmentService({ messages: db.messages, embed, getMasterKey, classify });
   let running = false;
   let pending = false;
+  let _cappedReclaimed = false; // boot reclaim of gave-up rows runs ONCE per drainer start
   let _skips = 0; // consecutive cycles skipped because the embed service looked unhealthy
   let _embedErrs = 0; // consecutive cycles whose embed block THREW (throttles the log; see the guard)
   // ms of the last cycle that RAN. ⚠️ Meaning changed 2026-07-15: it used to mean "got past
@@ -503,7 +593,15 @@ export function startEnrichDrainer({
   // while labeling ran fine on qwen, or "runtime not reachable" when only the enrich pull
   // hit a disk-full (independent review, 2026-07-16).
   const _pulling = new Map();      // model → pct (0-100), byte-accurate from ollama's stream
-  const _faults = new Map();       // model → last non-consent reason it can't run (Ollama down)
+  // model → { kind, detail } for the last non-consent reason it can't run. `kind` is an
+  // OLLAMA_FAULT (runtime-unreachable | download-failed | out-of-space), classified from the
+  // caught error's SHAPE so the health surface names the RIGHT cause instead of blaming the
+  // runtime for a disk-full or a registry-unreachable pull (was a bare string + a hardcoded
+  // "runtime not reachable" for every fault — misleading on a fresh box where the tag is valid
+  // but the environment isn't; live-test 2026-07-18). `detail` is ollama's own infra string
+  // (HTTP status / errno / models-dir path), username-scrubbed + bounded, surfaced only on the
+  // localhost-only readiness surface — NEVER the content-free activity feed (see publishPull.end).
+  const _faults = new Map();
   // Pull-failure backoff (the STORM fix, 2026-07-17). A fast-failing pull used to retry EVERY
   // 15s cycle forever, each attempt minting a NEW feed row — the operator watched six
   // "Failed · just now" rows stack up in two minutes for a transient daemon blip. OUTCOME-BASED,
@@ -540,7 +638,9 @@ export function startEnrichDrainer({
     let installed;
     try { installed = await ollama.listInstalled(); }    // ['qwen3.5:4b', 'llama3.1:latest', …]
     catch (e) {                                          // can't reach Ollama → retry next tick
-      _faults.set(model, String(e?.message || e).slice(0, 120));
+      // A LIST failure is almost always the daemon being down/hung; classify from the shape so a
+      // non-2xx (daemon up, not serving) is still read as a runtime problem, not a download one.
+      _faults.set(model, { kind: classifyOllamaFault(e, 'list'), detail: scrubFaultDetail(String(e?.message || e)).slice(0, 120) });
       return false;
     }
     _faults.delete(model);
@@ -578,10 +678,15 @@ export function startEnrichDrainer({
     })
       .then(() => { _modelReady.add(model); _pullBackoff.delete(model); publishPull.end(feedId, 'done'); log(`[enrich] labeling model "${model}" ready — L1 resumes`); })
       .catch((e) => {
-        _faults.set(model, String(e?.message || e).slice(0, 120));
+        // Classify the PULL failure by shape: a disk-full (ENOSPC) or a registry-unreachable
+        // mid-stream error is NOT "the runtime is down", and the owner needs the right remedy.
+        // ollama.js now preserves ollama's mid-stream ev.error, so `detail` carries the real
+        // reason (disk path, registry host) — username-scrubbed, and it reaches only the
+        // localhost-only readiness surface, never the feed.
+        _faults.set(model, { kind: classifyOllamaFault(e, 'pull'), detail: scrubFaultDetail(String(e?.message || e)).slice(0, 120) });
         // A CONSTANT to the feed: the row is content-free by contract (activity-feed.js §SECURITY).
         // An ollama error is a model name + an HTTP status today, but this is not the place to
-        // bet on that staying true. The reason stays in _faults, behind the authed route.
+        // bet on that staying true. The reason stays in _faults, off the feed entirely.
         publishPull.end(feedId, 'error', 'download failed');
         const prev = _pullBackoff.get(model) ?? { failures: 0, skipCycles: 0, episodeId: feedId };
         prev.failures += 1;
@@ -660,8 +765,8 @@ export function startEnrichDrainer({
     } catch {
       // ⚠️ DELIBERATELY NOT A FAULT. listInstalled() throws when the daemon is merely ASLEEP —
       // and the daemon is lazy: on a caught-up vault nothing has woken it, because nothing
-      // needs it. Recording 'unavailable' ("The local model runtime is not reachable") here
-      // would trade the 'unknown' lie for a louder one: an alarm on a vault that is working
+      // needs it. Recording an 'unavailable' fault (the classified "runtime isn’t reachable")
+      // here would trade the 'unknown' lie for a louder one: an alarm on a vault that is working
       // perfectly and would wake the daemon the moment a row arrived. We genuinely cannot see
       // whether the model is installed, so we say so by leaving the state alone → 'unknown'.
       // A fault is still recorded where it is EARNED: ensureLabelModel(), i.e. after a wake was
@@ -718,7 +823,12 @@ export function startEnrichDrainer({
       return { status: 'paused', message: 'Labeling is paused — pending messages are waiting.', detail: null, model: m, progress: null };
     }
     if (_faults.has(m)) {
-      return { status: 'unavailable', message: 'The local model runtime is not reachable.', detail: _faults.get(m), model: m, progress: null };
+      // Message is classified from the fault's SHAPE (runtime down vs download failed vs disk
+      // full) — no longer a hardcoded "runtime not reachable" for every cause. `detail` carries
+      // ollama's own string for the technically-inclined; both are model-keyed (never leaked
+      // from the enrich model's slot — the M7b class).
+      const f = _faults.get(m);
+      return { status: 'unavailable', message: faultMessage(f), detail: f?.detail ?? null, model: m, progress: null };
     }
     if (_modelReady.has(m)) return { status: 'ok', message: `Labeling with ${m}.`, detail: null, model: m, progress: null };
     return { status: 'unknown', message: 'Checking the labeling model…', detail: null, model: m, progress: null };
@@ -768,7 +878,10 @@ export function startEnrichDrainer({
       return { status: 'paused', message: 'Enrichment is paused — pending messages are waiting.', detail: null, model: m, progress: null };
     }
     if (_faults.has(m)) {
-      return { status: 'unavailable', message: 'The local model runtime is not reachable.', detail: _faults.get(m), model: m, progress: null };
+      // Same classified message as the labeler (see there) — keyed on `_approvedEnrichModel`
+      // and this model's own fault slot, so an enrich-only disk-full never reads as the labeler.
+      const f = _faults.get(m);
+      return { status: 'unavailable', message: faultMessage(f), detail: f?.detail ?? null, model: m, progress: null };
     }
     if (_modelReady.has(m)) return { status: 'ok', message: `Enriching with ${m}.`, detail: null, model: m, progress: null };
     return { status: 'unknown', message: 'Checking the enrichment model…', detail: null, model: m, progress: null };
@@ -880,37 +993,40 @@ export function startEnrichDrainer({
       // here is the drain loop and its self-heal write — everything that costs CPU.
       // Resumable by construction: the drain re-selects `nlp_processed = 0` every cycle, so
       // pausing loses nothing and resuming continues exactly where it stopped (design §3.9/R3).
+      // BOOT RECLAIM (once per drainer, first unpaused cycle): give every gave-up row a
+      // fresh chance — capped embeds AND label-gave-up rows (reclaimGaveUpRows). Set-aside,
+      // not deleted: a new boot means new conditions (service fixed, model swapped), so the
+      // previous run's verdicts are retried once; between boots they hold, so the backlog
+      // still settles. OUTSIDE the embed gate on purpose — the label half must not wait on
+      // :8091 being healthy — but never while paused (the pause stops all on-box churn).
+      if (!_cappedReclaimed && !isEnrichProcessingPaused()) {
+        _cappedReclaimed = true;
+        try { await reclaimGaveUpRows(db, userId); } catch { /* non-fatal */ }
+      }
+
       if (embedOk && !isEnrichProcessingPaused()) {
       try {
 
       // SELF-HEAL: retry rows that previously failed for a NON-content reason
       // (service down/slow/timeout) now that the service is healthy.
       //
-      // The old `AND nlp_error NOT LIKE '%expected 768%'` clause is gone. The honest reasons
-      // (an earlier version of this comment claimed nlp_error is field-encrypted — that is
-      // FALSE: crypto-local.js ENCRYPTED_FIELDS.messages is `[]`; the prose above it is stale,
-      // left from before the SQLCipher collapse. Don't repeat that: check the array, not the
-      // comment):
-      //  1. It matches NOTHING on this vault (verified: 0 rows). The `%expected 768%` rows
-      //     that exist carry LEGACY encrypted envelopes written before the collapse, so the
-      //     LIKE can't see them — and they are FALSE poison anyway, from the old
-      //     `typeof null === 'object'` bug (a transient null read as a 3-dim vector). Letting
-      //     the self-heal reclaim them is a FIX, not a regression: they are embeddable.
-      //  2. It cannot fire for a GENUINE dimension mismatch either: client.js assertVector
-      //     throws before service.js can ever write "expected 768", so such a row lands on
-      //     the `vec == null` path and stays PENDING (0) — it never reaches -1 to be excluded.
-      // So the clause quarantined nothing real. If poison-quarantine is ever needed, the hole
-      // to close is service.js's `if (vec == null) continue`, not this LIKE.
-      try {
-        await db.rawQuery(
-          "UPDATE messages SET nlp_processed = 0, nlp_error = NULL WHERE user_id = ?"
-          + " AND nlp_processed = -1 AND embedding_768 IS NULL",
-          [userId],
-        );
-      } catch { /* non-fatal */ }
+      // The old `AND nlp_error NOT LIKE '%expected 768%'` clause is gone (it quarantined
+      // nothing real — see git history; nlp_error is NOT field-encrypted: crypto-local.js
+      // ENCRYPTED_FIELDS.messages is `[]`, check the array, not stale prose). The ONE
+      // exclusion that exists now is the attempt-cap terminal marker: an 'embed-capped:N'
+      // row was retired ON PURPOSE after N counted attempts against a provably-up service
+      // (service.js EMBED_MAX_ATTEMPTS). Reclaiming it every cycle would re-create the
+      // exact heal→fail→heal loop the cap exists to end — pending would never settle and
+      // the activity labels would stay lit forever. Recovery for capped rows is DELIBERATE:
+      // the boot reclaim above, or POST /portal/enrichment/retry-failed.
+      try { await selfHealStrandedEmbeds(db, userId); } catch { /* non-fatal */ }
 
       let embedded = 0;
+      let capped = 0;
       let stalledPasses = 0;
+      // ONE attempt budget per cycle (service.js drainOnce): however many of the ≤200
+      // passes re-select a failing row, its retry counter can move at most once here.
+      const attemptedThisCycle = new Set();
       for (let i = 0; i < 200; i++) {            // hard cap ≤200 batches/cycle (≤10k msgs)
         // ⚠️ RE-READ EVERY BATCH, NOT ONCE AT THE GATE. This loop is up to 200 batches deep and
         // every batch is real embedding work, so a flag read only on entry left "Stop" pinning
@@ -930,8 +1046,9 @@ export function startEnrichDrainer({
         // cycle can legitimately run for MINUTES ... while the drainer is productively embedding
         // thousands of rows" (independent review, 2026-07-17).
         const batchStartedAt = Date.now();
-        const e = await svc.drainOnce({ userId });
+        const e = await svc.drainOnce({ userId, attemptedThisCycle });
         const batchEmbedded = e?.embedded ?? 0;
+        capped += e?.capped ?? 0;
         // Same rule, per batch: bank the work and its cost TOGETHER, and only when work happened —
         // a pass that embeds nothing prices nothing.
         if (batchEmbedded > 0) {
@@ -954,7 +1071,7 @@ export function startEnrichDrainer({
           // estimate (independent review, 2026-07-17 — the fourth signal in this diff to answer an
           // ADJACENT question).
           _embedErrs = 0;
-        } else if ((e?.scanned ?? 0) > 0 && (e?.skipped ?? 0) === 0) {
+        } else if ((e?.scanned ?? 0) > 0 && (e?.skipped ?? 0) === 0 && (e?.capped ?? 0) === 0) {
           // ⚠️ BOTH CONDITIONS ARE LOAD-BEARING, AND EACH FIXES A DIFFERENT WRONG QUESTION.
           //
           // `scanned > 0`  — barren means TRIED AND PRODUCED NOTHING, not "had nothing to do". A
@@ -1033,6 +1150,12 @@ export function startEnrichDrainer({
         // server-rest wires the gate (single-flight + topology-empty).
         try { await onSettled?.({ embedded }); } catch { /* non-fatal */ }
         }
+      // NEVER SILENT (the skip-log rule): a retired row left the backlog on purpose,
+      // and the log is where that decision is auditable. Count only — no content, no id.
+      if (capped > 0) {
+        log(`[enrich] retired ${capped} message(s) from embedding after ${EMBED_MAX_ATTEMPTS} failed attempts against a healthy service `
+          + '(recoverable: retried once next boot, or POST /portal/enrichment/retry-failed)');
+      }
       if (_embedErrs) { log(`[enrich] embedding recovered after ${_embedErrs} failed cycle(s)`); _embedErrs = 0; }
       } catch (err) {
         // EMBEDDING FAILED — LABELING AND ENRICHMENT ARE NOT ITS DEPENDANTS. Swallowed HERE, at
@@ -1229,6 +1352,9 @@ export function startEnrichDrainer({
 
   const handle = {
     resetPullBackoff: () => { _pullBackoff.clear(); },
+    // retry-failed support: clear the service's in-memory L1 label-attempt counters
+    // (see resetEnrichGiveUpCounters above; the DB-side reset is the DAL's job).
+    resetLabelAttempts: () => { try { svc.resetLabelAttempts?.(); } catch { /* best-effort */ } },
     labelerHealth,        // → getLabelerHealth(), the readiness `models.labeler` slice
     enricherHealth,       // → getEnricherHealth(), the readiness `models.enricher` slice
     nudge: () => cycle(), // returns the cycle promise (callers may ignore it; the gate awaits it)

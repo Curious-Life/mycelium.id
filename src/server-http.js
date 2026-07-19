@@ -412,6 +412,11 @@ export async function createHttpApp(opts = {}) {
     // discover where to invite us for shared-space Megolm rooms. Read per-request
     // (like getHost/getHandle); null until a homeserver is configured.
     getMatrixId: () => readRemoteConfig().matrixUserId || null,
+    // Store-and-forward relay inbox (federation transport P4): advertise WHERE peers
+    // enqueue sealed envelopes for us — our OWN configured relay (managed control plane
+    // or an own-relay URL; custom relays work because each box advertises its own).
+    // Null in direct/off modes (no relay). Read per-request.
+    getRelayInbox: () => { const rc = readRemoteConfig(); return (rc.remoteMode === 'managed' || rc.remoteMode === 'own-relay') ? (rc.controlPlaneUrl || null) : null; },
     // Presence (online/offline dot): config + the owner activity heartbeat. Read
     // per-request; the heartbeat is written by the :8787 auth chokepoint to the
     // shared DB (cross-process), read here to answer online/offline for connections.

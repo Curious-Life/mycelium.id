@@ -66,15 +66,24 @@ export function portalSettingsRouter({ db, userId }) {
       // §2.2/§5, not built yet): without one every render 501s, so reporting
       // "active" would promise audio that never arrives. `samplePending` is the
       // honest state the UI renders instead.
-      const qwenSamplePending = !hasVoiceSample();
+      // Honest signal: hasVoiceSample now decrypt-validates (a corrupt/re-keyed
+      // sample reads pending, never "active" over a 501 render). Async.
+      const qwenSamplePending = !(await hasVoiceSample());
+      // ⚠️ CHANNEL voice for qwen is DEFERRED — the confined channel daemon can't
+      // reach the vault-encrypted sample, so a channel voice message can never be
+      // delivered in the cloned voice yet. The settings top-line `enabled` MEANS
+      // "a channel voice message will be delivered", so it must NEVER claim qwen
+      // (voice-panel honesty audit). Local voice is available via the character-
+      // page audition, a separate surface. Flip this when channel threading ships.
+      const QWEN_CHANNEL_DEFERRED = true;
       res.json({
         enabled: !!(provider && (
           (provider === 'openai' && openaiHasKey) ||
           (provider === 'elevenlabs' && elevenHasKey) ||
-          (provider === 'qwen' && qwenEnabled && model.phase === 'ready' && !qwenSamplePending)
+          (provider === 'qwen' && qwenEnabled && model.phase === 'ready' && !qwenSamplePending && !QWEN_CHANNEL_DEFERRED)
         )),
         provider: provider || null,
-        qwen: { enabled: qwenEnabled, samplePending: qwenSamplePending, variant: (await getS('QWEN_TTS_VARIANT')) || model.variant, variants: QWEN_VARIANTS, model },
+        qwen: { enabled: qwenEnabled, samplePending: qwenSamplePending, channelDeferred: QWEN_CHANNEL_DEFERRED, variant: (await getS('QWEN_TTS_VARIANT')) || model.variant, variants: QWEN_VARIANTS, model },
         openai: { hasKey: openaiHasKey, voice: (await getS('OPENAI_TTS_VOICE')) || 'onyx', model: (await getS('OPENAI_TTS_MODEL')) || 'tts-1-hd', voices: OPENAI_VOICES, models: OPENAI_MODELS },
         elevenlabs: { hasKey: elevenHasKey, voiceId: (await getS('ELEVENLABS_VOICE_ID')) || null, model: (await getS('ELEVENLABS_MODEL_ID')) || 'eleven_turbo_v2_5', models: ELEVENLABS_MODELS },
       });

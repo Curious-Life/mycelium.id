@@ -115,11 +115,17 @@ export function createMessagesNamespace(deps) {
   // the state on its next cycle. Tests must set both columns; a raw UPDATE that sets only
   // embedding_768 fabricates a state the codebase makes impossible.
   async function _computeEmbedBacklog(userId) {
+    // `gaveUp` counts the attempt-capped rows (enrich/service.js EMBED_CAPPED_MARK:
+    // nlp_processed = -1 + nlp_error 'embed-capped:N'). A subset of `unprocessable`,
+    // surfaced separately so the status route can offer a content-free retry
+    // (POST /portal/enrichment/retry-failed). Same single scan — no extra cost on
+    // this polled, SWR-cached query. A count ONLY, never a reason (§1).
     const r = await d1Query(
       `SELECT
          COUNT(*) AS total,
          COALESCE(SUM(CASE WHEN embedding_768 IS NOT NULL THEN 1 ELSE 0 END), 0) AS embedded,
-         COALESCE(SUM(CASE WHEN (nlp_processed = 0 OR nlp_processed IS NULL) THEN 1 ELSE 0 END), 0) AS pending
+         COALESCE(SUM(CASE WHEN (nlp_processed = 0 OR nlp_processed IS NULL) THEN 1 ELSE 0 END), 0) AS pending,
+         COALESCE(SUM(CASE WHEN nlp_processed = -1 AND nlp_error LIKE 'embed-capped:%' THEN 1 ELSE 0 END), 0) AS gave_up
        FROM messages
        WHERE user_id = ?
          AND forgotten_at IS NULL
@@ -130,7 +136,8 @@ export function createMessagesNamespace(deps) {
     const total = Number(row.total || 0);
     const embedded = Number(row.embedded || 0);
     const pending = Number(row.pending || 0);
-    return { embedded, total, pending, unprocessable: Math.max(0, total - embedded - pending) };
+    const gaveUp = Number(row.gave_up || 0);
+    return { embedded, total, pending, unprocessable: Math.max(0, total - embedded - pending), gaveUp };
   }
 
   // SWR cache for the Context Engine L1 categorization backlog — same shape and same
@@ -139,24 +146,28 @@ export function createMessagesNamespace(deps) {
   // background_jobs row, so the activity feed projects it at read-time from this count
   // (mirrors embedProjection). Separate latch so the two scans never block each other.
   //
-  // WHY THIS ONE MAY STILL PROJECT (`total - tagged`) WHERE THE EMBED BACKLOG MUST NOT:
-  // categories_processed is strictly BINARY — 0/NULL = pending, 1 = ATTEMPTED (migration
-  // 0038; a garbage classify still marks 1, so it is never retried forever). So
-  // `total - tagged` is exactly selectPendingCategories' `(= 0 OR IS NULL)` predicate,
-  // and pending genuinely reaches 0. The embed backlog projected off `embedding_768 IS
-  // NOT NULL` — a SUCCESS predicate over a 4-state column (0/1/2/-1) — so its failures
-  // and skips never left `pending`. ⚠️ TRAP: this projection is correct ONLY while the
-  // column stays binary. Adding a failure state (say -1) WITHOUT switching to a counted
-  // predicate would reintroduce the stuck-forever bug here, identically.
-  let _catBacklog = null;          // { userId, value:{tagged,total,pending}, at:ms }
+  // `pending` here is COUNTED with selectPendingCategories' exact predicate
+  // (categories_processed 0/NULL), NOT projected as `total - tagged`. The projection was
+  // correct only while the column was strictly binary (0/NULL pending, 1 attempted —
+  // migration 0038), and the previous version of this comment carried the trap warning
+  // verbatim: "Adding a failure state (say -1) WITHOUT switching to a counted predicate
+  // would reintroduce the stuck-forever bug here, identically." The label-gave-up terminal
+  // state (categories_processed = -1, enrich/service.js LABEL_MAX_ATTEMPTS) is exactly that
+  // -1 — so this switched to the counted predicate the warning demanded, in the same change.
+  // A -1 row is neither tagged nor pending; it is surfaced as `gaveUp` (a count only) so the
+  // categorize status route can offer the retry surface instead of silently omitting it.
+  let _catBacklog = null;          // { userId, value:{tagged,total,pending,gaveUp}, at:ms }
   let _catBacklogInFlight = null;  // Promise while a recompute runs (single-flight)
   async function _computeCategoriesBacklog(userId) {
-    // `tagged` mirrors selectPendingCategories' "attempted" predicate exactly
-    // (categories_processed = 1) so `pending` reaches 0 when the drainer is caught up.
+    // `tagged` mirrors updateCategories' "attempted" value exactly (categories_processed = 1);
+    // `pending` mirrors selectPendingCategories exactly, so it counts work the drainer will
+    // actually pick up — and therefore REACHES 0 even with gave-up rows present.
     const r = await d1Query(
       `SELECT
          COUNT(*) AS total,
-         COALESCE(SUM(CASE WHEN categories_processed = 1 THEN 1 ELSE 0 END), 0) AS tagged
+         COALESCE(SUM(CASE WHEN categories_processed = 1 THEN 1 ELSE 0 END), 0) AS tagged,
+         COALESCE(SUM(CASE WHEN (categories_processed = 0 OR categories_processed IS NULL) THEN 1 ELSE 0 END), 0) AS pending,
+         COALESCE(SUM(CASE WHEN categories_processed = -1 THEN 1 ELSE 0 END), 0) AS gave_up
        FROM messages
        WHERE user_id = ?
          AND forgotten_at IS NULL
@@ -166,7 +177,9 @@ export function createMessagesNamespace(deps) {
     const row = (r.results || [])[0] || {};
     const total = Number(row.total || 0);
     const tagged = Number(row.tagged || 0);
-    return { tagged, total, pending: Math.max(0, total - tagged) };
+    const pending = Number(row.pending || 0);
+    const gaveUp = Number(row.gave_up || 0);
+    return { tagged, total, pending, gaveUp };
   }
 
   // SWR cache for the Context Engine L2 (semantic NLP enrichment) backlog — the THIRD polled
@@ -311,8 +324,12 @@ export function createMessagesNamespace(deps) {
      * @param {{limit?: number}} opts
      */
     async selectPendingEnrichment(userId, { limit = 50 } = {}) {
+      // nlp_error rides along for the attempt-cap accounting (enrich/service.js
+      // embedAttemptsOf): a pending row can carry an 'embed-retry:N' marker — the
+      // count of failures already attributed to it against a provably-up service.
+      // Plaintext marker state, never content (ENCRYPTED_FIELDS.messages is []).
       const result = await d1Query(
-        `SELECT id, content, scope FROM messages
+        `SELECT id, content, scope, nlp_error FROM messages
            WHERE user_id = ?
              AND forgotten_at IS NULL
              AND (nlp_processed = 0 OR nlp_processed IS NULL)
@@ -322,6 +339,42 @@ export function createMessagesNamespace(deps) {
         [userId, limit],
       );
       return result.results || [];
+    },
+
+    /**
+     * Reset every attempt-capped / label-gave-up row back to pending — the
+     * user-facing recovery surface (POST /portal/enrichment/retry-failed). Three
+     * bounded, marker-scoped UPDATEs:
+     *   1. 'embed-capped:N' terminal rows  → nlp_processed 0, marker cleared
+     *   2. 'embed-retry:N' pending markers → cleared (a full fresh budget)
+     *   3. categories_processed = -1 rows  → 0 (labeling re-queued)
+     * Marker-scoped by design: a genuine poison row (-1 with a real error string)
+     * is NOT touched — the drainer's self-heal owns those. userId REQUIRED in
+     * every WHERE (unfiltered-UPDATE guard). Returns counts only, never content.
+     * @returns {Promise<{embedReset:number, labelReset:number}>}
+     */
+    async resetEnrichmentGiveUps(userId) {
+      const capped = await d1Query(
+        `UPDATE messages SET nlp_processed = 0, nlp_error = NULL
+           WHERE user_id = ? AND nlp_processed = -1 AND embedding_768 IS NULL
+             AND nlp_error LIKE 'embed-capped:%'`,
+        [userId],
+      );
+      await d1Query(
+        `UPDATE messages SET nlp_error = NULL
+           WHERE user_id = ? AND (nlp_processed = 0 OR nlp_processed IS NULL)
+             AND nlp_error LIKE 'embed-retry:%'`,
+        [userId],
+      );
+      const labels = await d1Query(
+        `UPDATE messages SET categories_processed = 0
+           WHERE user_id = ? AND categories_processed = -1`,
+        [userId],
+      );
+      return {
+        embedReset: Number(capped?.meta?.changes ?? 0),
+        labelReset: Number(labels?.meta?.changes ?? 0),
+      };
     },
 
     /**

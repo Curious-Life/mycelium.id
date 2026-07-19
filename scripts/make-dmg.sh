@@ -31,10 +31,10 @@ VOL="Mycelium"
 APP_NAME="$(basename "$APP")"     # Mycelium.app
 
 # ── window + icon layout (keep in lock-step with the background art) ──────────
-WIN_X=460; WIN_Y=180; WIN_W=560; WIN_H=380
+WIN_X=460; WIN_Y=180; WIN_W=560; WIN_H=400
 ICON_SIZE=160; TEXT_SIZE=13
-APP_X=150;  APP_Y=172             # Mycelium.app icon centre
-APPS_X=410; APPS_Y=172            # Applications alias centre
+APP_X=150;  APP_Y=180             # Mycelium.app icon centre
+APPS_X=410; APPS_Y=180            # Applications alias centre
 WIN_R=$((WIN_X + WIN_W)); WIN_B=$((WIN_Y + WIN_H))
 
 # A volume named "$VOL" already mounted (a prior failed run, or the real

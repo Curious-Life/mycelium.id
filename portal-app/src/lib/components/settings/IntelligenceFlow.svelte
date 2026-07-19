@@ -15,7 +15,8 @@
 
 	Everything else lives behind ONE Customize disclosure (§3.1), default CLOSED (Q1):
 	Assignment (IntelligenceScreen — the one assignment surface, P2) · Connect & manage
-	(AISettings, demoted, P3) · Voice (VoiceSection, #209) · Engine (EngineSelector).
+	(AISettings, demoted, P3) · Engine (EngineSelector). Voice folded into the Assignment
+	surface's Voice row (Phase 3 de-dup) — no longer a separate Customize section.
 
 	FRESHNESS + COST (W7, the C1 contract): while mounted this polls exactly ONE readiness
 	slice — `models` — at the popover's 4s cadence. `models` is already on C1's POLLED list
@@ -42,8 +43,10 @@
 	import { api } from '$lib/api';
 	import IntelligenceScreen from './IntelligenceScreen.svelte';
 	import AISettings from './AISettings.svelte';
-	import VoiceSection from './VoiceSection.svelte';
-	import EngineSelector from './EngineSelector.svelte';
+	// VoiceSection moved into IntelligenceScreen's Voice row (Phase 3 de-dup); EngineSelector
+	// followed into IntelligenceScreen's Conversation row (2026-07-19) — so Customize is now just
+	// two tabs (Functions · Providers), neither component mounted directly here.
+	import OnDeviceModels, { type LocalModelRow } from './OnDeviceModels.svelte';
 
 	type BundleRow = {
 		key: string; model?: string; presetId?: string; runs: string; included?: boolean;
@@ -77,13 +80,66 @@
 	// ── the ONE persistent live region's text (P8). Updated, never re-inserted. ──
 	let announce = $state('');
 
+	// ── subscription auth VALIDITY (evidence-based, per surface) ─────────────────────────────
+	// "Connected" used to be derived from a stored provider ROW existing — which rendered
+	// "Claude subscription" with a green dot over a credential that had been
+	// expired-beyond-refresh for four days (diagnosed live 2026-07-18). The server now ships
+	// `validity: {native, cli}` on GET /portal/auth/claude/status: evidence-based enums
+	// ('ok' | 'needs_reconnect' | 'unknown' | 'not_connected'), per SURFACE because the native
+	// wire and the spawned Claude Code engine can ride DIFFERENT credential stores ("the token
+	// shows as dead, but the chat still works" — a single boolean lies about one of them).
+	// FAIL-CLOSED rendering: green ONLY on 'ok' evidence; 'unknown' renders muted, never
+	// "connected". Refreshed on gestures (mount · apply · customize close · Refresh now) —
+	// never polled: the status route runs a device-store probe per hit.
+	type SubValidity = { native: string; cli: string };
+	let subValidity = $state<SubValidity | null>(null);
+	let subRefreshBusy = $state(false);
+	let subRefreshFailed = $state(false);
+
+	// The owner's explicit "Refresh now" — the EXISTING ToS-clean refresh path (`claude`
+	// refreshes its own token; POST /portal/auth/claude/refresh). On failure the copy
+	// escalates to the EXISTING reconnect ladder (Customize → Connect & manage). This never
+	// opens a browser window itself — reconnect is always the user's own click.
+	async function refreshSub() {
+		if (subRefreshBusy) return;
+		subRefreshBusy = true; subRefreshFailed = false;
+		try {
+			const r = await api('/portal/auth/claude/refresh', { method: 'POST' });
+			const j = await r.json().catch(() => ({}));
+			if (j && typeof j.validity === 'object' && j.validity) subValidity = j.validity;
+			if (r.ok && j?.outcome === 'refreshed') {
+				announce = 'Claude connection refreshed.';
+			} else {
+				subRefreshFailed = true;
+				announce = 'Refresh did not help — reconnect your Claude account.';
+			}
+		} catch { subRefreshFailed = true; }
+		finally { subRefreshBusy = false; }
+	}
+
 	let customizeOpen = $state(false);
+	// Customize is a SEGMENTED surface (§3.1) — TWO tabs now (2026-07-19): Functions (the one
+	// assignment surface — every job incl. Voice, plus Engine as Conversation's control) and
+	// Providers (connect & manage). The old anchor ids still drive entry — Voice/Engine now land
+	// on Functions since they live there.
+	type CustTab = 'functions' | 'providers';
+	const ANCHOR_TAB: Record<string, CustTab> = {
+		assignment: 'functions', 'connect-manage': 'providers',
+		'voice-character': 'functions', engine: 'functions',
+	};
+	const CUST_TABS: { key: CustTab; label: string }[] = [
+		{ key: 'functions', label: 'Functions' }, { key: 'providers', label: 'Providers' },
+	];
+	let custTab = $state<CustTab>('functions');
 	let applying = $state(false);
 	let applyErr = $state<string | null>(null);
 	// Local SSE pull progress (the labeling model started by THIS tap). The models slice
 	// carries the drainer's own pulls; this covers the /hardware/pull stream we opened.
 	let pullPct = $state<number | null>(null);
 	let pullErr = $state<string | null>(null);
+	// A voice-model download this pane started (POST /settings/tts/qwen/download) — the button's
+	// busy state until the tts phase catches up to 'downloading'.
+	let ttsBusy = $state(false);
 
 	// ── STATE A ⟺ STATE B: one fact, opposite polarity (§4.0, gate A5) ─────────────────────
 	const anyAssignment = $derived(Object.keys(taskModels || {}).length > 0);
@@ -157,10 +213,39 @@
 	const summaryRows = $derived.by<SummaryRow[]>(() => functions.map((f) => {
 		const h = healthFor(f.key);
 		if (f.key === 'conversation') {
+			const pid = taskModels.chat?.providerId ?? active?.id ?? null;
 			const name = providerName(taskModels.chat?.providerId) || (active ? `${providerName(active.id)}` : null);
-			return { key: f.key, label: 'Conversation', what: name || 'not set up', status: name ? 'ok' : null, cls: name ? 'ok' : 'choice', unset: !name };
+			if (!name) return { key: f.key, label: 'Conversation', what: 'not set up', status: null, cls: 'choice', unset: true };
+			// SUBSCRIPTION rows render by EVIDENCE, per surface — never green for merely-stored
+			// creds (see subValidity above). Non-subscription providers keep the assigned=green
+			// rule: no validity signal exists for them (out of this fix's scope).
+			const p = providers.find((x) => x.id === pid);
+			if (p && String(p.auth_type || '').toLowerCase() === 'oauth') {
+				const nv = subValidity?.native ?? 'unknown';
+				const cv = subValidity?.cli ?? 'unknown';
+				if (nv === 'needs_reconnect' || cv === 'needs_reconnect') {
+					// Say WHICH surface is broken when the other demonstrably works — a blanket
+					// "dead" is as wrong for a working chat as blanket "connected" was for dead
+					// channel replies. Content-free copy: states only, no error bodies.
+					const what = cv === 'ok' && nv !== 'ok'
+						? `${name} — chat works; background replies need reconnect`
+						: nv === 'ok' && cv !== 'ok'
+							? `${name} — background replies work; the chat engine needs reconnect`
+							: `${name} — needs reconnect`;
+					return { key: f.key, label: 'Conversation', what, status: 'needs_reconnect', cls: 'bad', unset: false };
+				}
+				if (nv === 'ok' || cv === 'ok') return { key: f.key, label: 'Conversation', what: name, status: 'ok', cls: 'ok', unset: false };
+				// No evidence either way (cold): the name renders, the dot stays MUTED — an
+				// unverified credential must not claim "connected" (fail-closed honesty).
+				return { key: f.key, label: 'Conversation', what: name, status: 'unknown', cls: 'choice', unset: false };
+			}
+			return { key: f.key, label: 'Conversation', what: name, status: 'ok', cls: 'ok', unset: false };
 		}
-		if (f.kind === 'bundled') return { key: f.key, label: f.label, what: 'included', status: h?.status ?? 'ok', cls: dotClass(h?.status ?? 'ok'), unset: false };
+		// ⚠️ AN ABSENT bundled member is NOT 'ok'. `models.embedder` is undefined until the readiness
+		// poll resolves (and on an outage), so defaulting to 'ok' painted a green dot the On-device
+		// panel below correctly renders idle — the same panel↔summary false-green as voice (review
+		// F2, 2026-07-18). Pass the absence through: dotClass(undefined) → 'choice' (muted).
+		if (f.kind === 'bundled') return { key: f.key, label: f.label, what: 'included', status: h?.status ?? 'unknown', cls: dotClass(h?.status), unset: false };
 		if (f.key === 'understanding') {
 			const m = taskModels.categorize?.model;
 			const what = m ? `${m} (on this ${machineNoun})` : 'not set up';
@@ -178,12 +263,90 @@
 		}
 		if (f.key === 'voice') {
 			const phase = tts?.qwen?.model?.phase;
-			const on = phase === 'ready';
-			const what = on ? `Qwen3-TTS · ready` : phase === 'downloading' ? `downloading ${tts?.qwen?.model?.progress ?? 0}%` : 'not set up';
-			return { key: f.key, label: 'Voice', what, status: phase ?? null, cls: on ? 'ok' : phase === 'downloading' ? 'busy' : 'choice', unset: !on && phase !== 'downloading' };
+			const pending = tts?.qwen?.samplePending;
+			// ⚠️ READY-BUT-MUTE IS NOT "ready" (W2). A downloaded Qwen3-TTS with no reference sample
+			// yet cannot speak (§2.2/§5), so it must NOT paint the green dot — the summary and the
+			// On-device panel below both gate on `samplePending`, so they cannot disagree (the false-
+			// green here contradicting the panel was the review finding this closes, 2026-07-18).
+			const ready = phase === 'ready' && !pending;
+			const what = ready ? 'Qwen3-TTS · ready'
+				: (phase === 'ready' && pending) ? 'downloaded · add a voice sample to speak'
+				: phase === 'downloading' ? `downloading ${tts?.qwen?.model?.progress ?? 0}%`
+				: 'not set up';
+			return {
+				key: f.key, label: 'Voice', what,
+				status: ready ? 'ok' : (phase === 'ready' && pending) ? 'deps_missing' : (phase ?? null),
+				cls: ready ? 'ok' : phase === 'downloading' ? 'busy' : 'choice', // never green unless it can speak
+				unset: !ready && phase !== 'downloading' && !(phase === 'ready' && pending),
+			};
 		}
 		return { key: f.key, label: f.label, what: '—', status: null, cls: 'choice', unset: false };
 	}));
+
+	// ── The unified "On-device models" list (the ONE place — operator ask, 2026-07-18) ─────────
+	// The four local models mapped into ModelHealth's shape from the SAME facts the summary uses
+	// (readiness `models` slice + tts state + bundle sizes) — so the panel and the summary above
+	// it share one source and cannot disagree. Download actions delegate to the routes that
+	// already own them (no new download path). Renders through the (previously orphaned)
+	// ModelHealth component — the canonical honest per-model renderer.
+	const mh = (status: string, extra: Record<string, any> = {}) =>
+		({ status, message: null, detail: null, model: null, progress: null, ...extra });
+	// Voice health is synthesized from the tts model phase + the honest `samplePending` gate:
+	// a downloaded Qwen3-TTS with no reference sample yet CANNOT speak (§2.2/§5), so it reads as
+	// an actionable 'deps_missing' ("add a voice sample"), never a false 'ok' (W2 executability).
+	function voiceHealth() {
+		const q = tts?.qwen?.model;
+		const phase = q?.phase;
+		const pending = tts?.qwen?.samplePending;
+		if (phase === 'downloading' || phase === 'installing') return mh('downloading', { model: 'Qwen3-TTS', progress: { pct: q?.progress ?? 0 } });
+		if (phase === 'ready') return pending
+			? mh('deps_missing', { model: 'Qwen3-TTS', message: 'Downloaded · add a voice sample to speak' })
+			: mh('ok', { model: 'Qwen3-TTS', message: 'Voice · ready' });
+		if (phase === 'needs-runtime') return mh('deps_missing', { model: 'Qwen3-TTS', message: 'Needs the on-device voice runtime' });
+		if (phase === 'error') return mh('down', { model: 'Qwen3-TTS', detail: q?.error ?? null, message: 'Voice model download failed' });
+		if (phase === 'checking') return mh('unknown', { model: 'Qwen3-TTS', message: 'Checking the voice model…' });
+		return mh('no_model'); // absent / idle / undefined — not downloaded
+	}
+	const localModels = $derived.by<LocalModelRow[]>(() => {
+		const brow = (k: string) => bundle?.rows?.find((r) => r.key === k);
+		const uH = healthFor('understanding') ?? mh('no_model');
+		const tH = healthFor('transcription') ?? mh('no_model');
+		const vH = voiceHealth();
+		const und = brow('understanding'), tr = brow('transcription');
+		const dlSize = (r: BundleRow | undefined) => (r && !r.installed ? r.downloadGb ?? null : null);
+		// Offer a download ONLY for a genuinely-absent model ('no_model') — never over an approved,
+		// installed, downloading, paused, runtime-down, or merely-'unknown' (caught-up) model, where
+		// a re-pull is not the fix. ('unknown' is reachable for an INSTALLED, caught-up model —
+		// ModelHealth's own note — so it must not wear a Download button. Review finding, 2026-07-18.)
+		const canDl = (s: string | null | undefined) => s === 'no_model';
+		return [
+			{ key: 'understanding', label: 'Understanding', sub: 'labels + entities', kind: 'consented',
+				health: uH, sizeGb: dlSize(und), action: canDl(uH?.status) ? 'download' : 'none', busy: applying },
+			{ key: 'transcription', label: 'Transcription', sub: 'audio → text', kind: 'consented',
+				health: tH, sizeGb: dlSize(tr), action: canDl(tH?.status) ? 'download' : 'none', busy: applying },
+			{ key: 'voice', label: 'Voice', sub: 'speaking', kind: 'consented',
+				health: vH, sizeGb: null,
+				// Voice also offers a retry on a FAILED download — voiceHealth() maps phase 'error' to
+				// status 'down' (not 'error'), so gate on 'down' or the retry button never appears
+				// (review F3, 2026-07-18). Not on 'unknown' (phase 'checking' = files already on disk).
+				action: ['no_model', 'down'].includes(vH.status) ? 'download' : 'none', busy: ttsBusy },
+			// ⚠️ PASS THE EMBEDDER HEALTH THROUGH — do NOT fabricate an 'ok'. `models.embedder` is
+			// undefined until the readiness poll resolves (and forever on an outage); a synthetic
+			// 'ok' would paint the green "Included" dot ModelHealth's own fail-closed fix removed
+			// (ModelHealth.svelte 'included' branch). null ⇒ ModelHealth renders 'unknown' → idle,
+			// still "Included with the app" but NOT green (review finding F2, 2026-07-18).
+			{ key: 'search', label: 'Search', sub: 'semantic recall', kind: 'included',
+				health: models.embedder ?? null, sizeGb: null, action: 'none' },
+		];
+	});
+
+	// STATE B summary rows split by WHERE the model runs (Phase 3 de-dup): the four LOCAL models
+	// render ONCE, in the On-device panel below — so the summary shows only the CLOUD functions
+	// (Conversation, Descriptions). Before this they appeared as dots here AND as panel rows, the
+	// duplication the operator flagged. `summaryRows` stays complete for the faultRow/firstUnset/
+	// gap logic; only the RENDER is scoped.
+	const CLOUD_KEYS = ['conversation', 'descriptions'];
+	const cloudRows = $derived(summaryRows.filter((r) => CLOUD_KEYS.includes(r.key)));
 
 	// ── W6: the gap-fill — recommended functions still unset, sized from the bundle ─────────
 	const GAP_KEYS = ['understanding', 'transcription', 'descriptions'];
@@ -196,11 +359,13 @@
 	async function loadFacts() {
 		try {
 			// null = the read FAILED (unknown), never "empty" — see factsKnown above.
-			const [bd, tm, pv, ts] = await Promise.all([
+			const [bd, tm, pv, ts, st] = await Promise.all([
 				api('/portal/intelligence/bundle').then((r) => (r.ok ? r.json() : null)).catch(() => null),
 				api('/portal/providers/task-models').then((r) => (r.ok ? r.json() : null)).catch(() => null),
 				api('/portal/providers').then((r) => (r.ok ? r.json() : null)).catch(() => null),
 				api('/portal/settings/tts').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+				// Auth validity for the subscription row — gesture-refreshed, never polled.
+				api('/portal/auth/claude/status').then((r) => (r.ok ? r.json() : null)).catch(() => null),
 			]);
 			if (bd?.ok) bundle = bd;
 			if (tm && typeof tm.taskModels === 'object') taskModels = tm.taskModels || {};
@@ -211,6 +376,9 @@
 			// never a fake first-run card from a hardcoded taxonomy (§7).
 			loadErr = !factsKnown && !anyAssignment && !anyProvider;
 			if (ts) tts = ts;
+			// A failed status read leaves the LAST validity in place (or null ⇒ no green claim)
+			// rather than fabricating either "connected" or "broken" from a blip.
+			if (st && typeof st.validity === 'object' && st.validity) subValidity = st.validity;
 		} finally { loaded = true; }
 	}
 	async function loadSpine() {
@@ -254,6 +422,7 @@
 			for (const d of j.downloads || []) {
 				if (d.route === '/portal/hardware/pull') void startLabelPull(d.model);
 				else if (d.route === '/portal/transcription/download') void startWhisper(d.model);
+				else if (d.route === '/portal/settings/tts/qwen/download') void startTtsDownload();
 			}
 			await loadFacts();      // the pane flips to STATE B by FACT, not by flag (§4.2.3)
 			await loadModels();
@@ -307,10 +476,32 @@
 		try { await api('/portal/transcription/download', { method: 'POST', body: JSON.stringify({ model }) }); }
 		catch { /* the transcription row's own health reports it */ }
 	}
+	// The voice-model download — the EXISTING route (VoiceSection's own writer); starting it here
+	// only moves the bytes. It does NOT enable voice output: a downloaded Qwen3-TTS still needs a
+	// reference sample to speak (§2.2/§5), which is why the panel shows it 'deps_missing' after,
+	// and why voice stays OUT of the one-click bundle until it can run (composeBundle gate).
+	async function startTtsDownload() {
+		if (ttsBusy) return;
+		ttsBusy = true;
+		try {
+			await api('/portal/settings/tts/qwen/download', { method: 'POST', body: JSON.stringify({}) });
+			announce = 'Voice model download started in the background.';
+		} catch {
+			announce = 'Could not start the voice download.';
+		} finally { await loadFacts(); ttsBusy = false; }
+	}
+	// One handler for the On-device models panel — routes each model to the download path that
+	// already owns it. Understanding/Transcription reuse the scoped bundle orchestrator (approve
+	// + pull, one write path); Voice uses its own route; Search (Nomic) is bundled, no action.
+	function downloadModel(key: string) {
+		if (key === 'understanding') void applyBundle(['understanding']);
+		else if (key === 'transcription') void applyBundle(['transcription']);
+		else if (key === 'voice') void startTtsDownload();
+	}
 
 	function openCustomize(anchor?: string) {
 		customizeOpen = true;
-		if (anchor) setTimeout(() => document.getElementById(anchor)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 30);
+		if (anchor && ANCHOR_TAB[anchor]) custTab = ANCHOR_TAB[anchor];
 	}
 	function toggleCustomize() {
 		customizeOpen = !customizeOpen;
@@ -393,8 +584,9 @@
 			<h2>Your intelligence</h2>
 			<button class="customize-link" onclick={toggleCustomize}>{customizeOpen ? 'Close' : 'Customize'} →</button>
 		</header>
+		<!-- Cloud services only — the local models render ONCE, in the On-device panel below. -->
 		<div class="rows">
-			{#each summaryRows as r (r.key)}
+			{#each cloudRows as r (r.key)}
 				<div class="srow" class:unset={r.unset}>
 					<span class="slabel">{r.label}</span>
 					<span class="swhat">{r.what}</span>
@@ -402,6 +594,15 @@
 				</div>
 			{/each}
 		</div>
+
+		<!-- THE ONE PLACE for on-device models (operator ask 2026-07-18): all four local models
+		     with honest health + size + a single download/manage action, consolidating what was
+		     scattered across OnboxTaskSelect / TranscriptionSetup / VoiceSection — and, since Phase
+		     3, the ONLY place they render in STATE B (no more duplicated summary dots). -->
+		<div class="odm-wrap">
+			<OnDeviceModels models={localModels} ondownload={downloadModel} machineNoun={machineNoun} />
+		</div>
+
 		{#if pullPct != null}
 			<p class="fine">Downloading the labeling model… {pullPct}%</p>
 		{/if}
@@ -409,8 +610,20 @@
 
 		<!-- Q2: PASSIVE — one muted line + a quiet button. Nothing pulses, nothing badges. -->
 		{#if faultRow}
-			<p class="needs bad-line">1 thing needs you: {faultRow.label} isn’t working.
-				<button class="quiet" onclick={() => openCustomize('assignment')}>Open</button></p>
+			{#if faultRow.status === 'needs_reconnect'}
+				<!-- The subscription credential stopped working. Two affordances, both the user's
+				     own click: Refresh now (the existing ToS-clean refresh path) and the existing
+				     reconnect ladder. NEVER an auto-opened sign-in window from status logic. -->
+				<p class="needs bad-line">1 thing needs you: your Claude account connection has stopped working.
+					<button class="quiet" disabled={subRefreshBusy} onclick={refreshSub}>{subRefreshBusy ? 'Refreshing…' : 'Refresh now'}</button>
+					<button class="quiet" onclick={() => openCustomize('connect-manage')}>Reconnect</button></p>
+				{#if subRefreshFailed}
+					<p class="fine">Refresh didn’t help — sign in again under “Connect &amp; manage”.</p>
+				{/if}
+			{:else}
+				<p class="needs bad-line">1 thing needs you: {faultRow.label} isn’t working.
+					<button class="quiet" onclick={() => openCustomize('assignment')}>Open</button></p>
+			{/if}
 		{:else if gapRows.length >= 2}
 			<p class="needs">Finish what’s missing in one tap:
 				<button class="quiet gap" disabled={applying} onclick={() => applyBundle(gapRows.map((r) => r.key))}>
@@ -418,7 +631,7 @@
 				</button></p>
 		{:else if firstUnset}
 			<p class="needs">1 thing needs you: {firstUnset.label} isn’t set up.
-				<button class="quiet" onclick={() => openCustomize(firstUnset.key === 'voice' ? 'voice-character' : firstUnset.key === 'conversation' ? 'connect-manage' : 'assignment')}>Set up</button></p>
+				<button class="quiet" onclick={() => openCustomize(firstUnset.key === 'conversation' ? 'connect-manage' : 'assignment')}>Set up</button></p>
 		{/if}
 		{#if applyErr}<p class="disk-warn">{applyErr}</p>{/if}
 	</section>
@@ -433,23 +646,28 @@
 			<button class="customize-link lone" onclick={() => openCustomize()}>Customize →</button>
 		{/if}
 		{#if customizeOpen}
-			<section id="assignment" class="cust-sec">
-				<h3>Assignment — which model does each job</h3>
-				<IntelligenceScreen />
-			</section>
-			<section id="connect-manage" class="cust-sec">
-				<h3>Connect &amp; manage providers</h3>
-				<AISettings />
-			</section>
-			<section id="voice-character" class="cust-sec">
-				<h3>Voice</h3>
-				<VoiceSection />
-				<p class="fine">A voice becomes your agent’s character — described, heard and locked on the per-agent page.</p>
-			</section>
-			<section id="engine" class="cust-sec">
-				<h3>Engine</h3>
-				<EngineSelector />
-			</section>
+			<!-- One segmented nav, one panel visible (§3.1). Replaces the stacked sections — the
+			     wall the redesign ends. Voice + Engine now live INSIDE the Functions surface
+			     (IntelligenceScreen's Voice row / Conversation row), not as their own sections. -->
+			<nav class="cust-nav" aria-label="Customize sections">
+				{#each CUST_TABS as t (t.key)}
+					<button class="cust-tab" class:on={custTab === t.key}
+						aria-current={custTab === t.key ? 'page' : undefined}
+						onclick={() => (custTab = t.key)}>{t.label}</button>
+				{/each}
+			</nav>
+
+			{#if custTab === 'functions'}
+				<section class="cust-panel" aria-label="Functions">
+					<p class="cust-lead">Assign a model to each function.</p>
+					<IntelligenceScreen />
+				</section>
+			{:else if custTab === 'providers'}
+				<section class="cust-panel" aria-label="Providers">
+					<p class="cust-lead">Connect and manage the models you can choose from.</p>
+					<AISettings />
+				</section>
+			{/if}
 		{/if}
 	</div>
 {/if}
@@ -459,11 +677,11 @@
 	.sr-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
 	.card { display: flex; flex-direction: column; gap: 0.6rem; padding: 1rem 1.1rem; border-radius: 14px; background: rgba(255,255,255,0.025); border: 1px solid rgba(255,255,255,0.08); }
 	h2 { margin: 0; font-size: 0.95rem; font-weight: 500; color: var(--color-text-primary); }
-	h3 { margin: 0 0 0.5rem; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--color-text-tertiary); }
 	.lead { margin: 0; font-size: 0.8rem; color: var(--color-text-secondary); }
 	.muted { color: var(--color-text-tertiary); font-size: 0.82rem; }
 	.fine { margin: 0; font-size: 0.72rem; color: var(--color-text-tertiary); }
 	.rows { display: flex; flex-direction: column; gap: 0.35rem; }
+	.odm-wrap { margin-top: 0.85rem; padding-top: 0.6rem; border-top: 1px solid var(--color-border, #eee); }
 	/* W1: outcome · where it runs · model id (demoted type). */
 	.row { display: grid; grid-template-columns: 1fr auto auto; gap: 0.75rem; align-items: baseline; padding: 0.25rem 0; }
 	.outcome { font-size: 0.84rem; color: var(--color-text-primary); }
@@ -497,5 +715,15 @@
 	.quiet { font-size: 0.72rem; padding: 0.25rem 0.65rem; border-radius: 8px; border: 1px solid var(--color-border, rgba(255,255,255,0.14)); background: none; color: var(--color-text-secondary); cursor: pointer; font-family: inherit; }
 	.quiet:disabled { opacity: 0.5; cursor: default; }
 	.customize-wrap { display: flex; flex-direction: column; gap: 0.9rem; margin-top: 0.9rem; }
-	.cust-sec { padding-top: 0.4rem; border-top: 1px solid rgba(255,255,255,0.07); }
+	/* Segmented nav — one row, one panel. The active tab carries the aurum tint the pane uses
+	   for "you are here". */
+	.cust-nav { display: flex; gap: 2px; padding: 3px; border-radius: 11px;
+		background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); max-width: 320px; }
+	.cust-tab { flex: 1; font: inherit; font-size: 0.76rem; padding: 0.4rem 0.3rem; border: none;
+		border-radius: 8px; background: none; color: var(--color-text-secondary); cursor: pointer;
+		transition: background var(--duration-fast, 150ms), color var(--duration-fast, 150ms); }
+	.cust-tab:hover { color: var(--color-text-primary); }
+	.cust-tab.on { background: rgba(229,184,76,0.14); color: var(--color-accent-aurum, #e5b84c); }
+	.cust-panel { display: flex; flex-direction: column; gap: 0.7rem; }
+	.cust-lead { margin: 0; font-size: 0.74rem; color: var(--color-text-tertiary); }
 </style>

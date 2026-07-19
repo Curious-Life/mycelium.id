@@ -59,6 +59,11 @@ export const REGISTRY: Record<string, ViewDef> = {
 		title: 'Space', icon: 'spaces', key: (p) => `space:${p.id}`,
 		load: () => import('$lib/views/SpaceDetailView.svelte'),
 	},
+	character: {
+		// One tab per agent (keyed by id) — the per-agent character page (design §5).
+		title: 'Character', icon: 'profile', key: (p) => `character:${p.id}`,
+		load: () => import('$lib/views/CharacterView.svelte'),
+	},
 	contexts: {
 		title: 'Sharing', icon: 'contexts', singleton: true,
 		load: () => import('$lib/views/ContextsView.svelte'),

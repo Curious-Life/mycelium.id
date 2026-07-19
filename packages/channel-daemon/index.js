@@ -19,6 +19,7 @@ import { createDaemonApp } from './server.js';
 import { selectRuntime } from './agent/runtime.js';
 import { createLane } from './agent/lane.js';
 import { createTypingPresence } from './presence.js';
+import { createAuthOutageNotifier, AUTH_NOTICE_TEXT } from './auth-notice.js';
 import { createCoalescer } from './transport/coalescer.js';
 import { getActiveTurn } from './inbound-context.js';
 // telegram
@@ -45,9 +46,16 @@ function captureOnlyRunTurn(turnCtx) {
 // Observability (Layer 3b): where to persist per-turn outcomes. Explicit env wins; else a
 // `logs/` dir under the daemon's data/state dir; else null (console-only, fail-soft — never
 // throws so a missing/unwritable dir can't stop the daemon from booting).
-function resolveTurnLogPath() {
+export function resolveTurnLogPath() {
   const explicit = process.env.MYCELIUM_CHANNEL_TURN_LOG;
-  if (explicit) return explicit;
+  // The explicit path must have its parent dir ensured HERE: the packaged app's
+  // supervisor passes a <app-data>/logs/… path whose dir may not exist yet, and
+  // lane.js's appendFileSync is deliberately fail-soft — without the mkdir the
+  // "persistent" log silently never lands (the exact inertness this fixes).
+  if (explicit) {
+    try { mkdirSync(path.dirname(explicit), { recursive: true }); return explicit; }
+    catch { return null; } // unwritable → honest console-only, never a boot crash
+  }
   const base = process.env.MYCELIUM_DATA_DIR || process.env.MYCELIUM_VAULT_DIR || process.env.MYCELIUM_STATE_DIR || null;
   if (!base) return null;
   try { const dir = path.join(base, 'logs'); mkdirSync(dir, { recursive: true }); return path.join(dir, 'channel-turns.jsonl'); }
@@ -57,11 +65,18 @@ function resolveTurnLogPath() {
 /**
  * @param {object} cfg
  * @param {object} [opts]
- * @param {Function} [opts.runTurn]  override the turn handler (tests inject a fake)
+ * @param {Function} [opts.runTurn]  override the turn handler (tests inject a fake;
+ *                                   BYPASSES the lane/outcome wiring entirely)
+ * @param {object}  [opts.runtime]   test seam: inject an AgentRuntime that still runs
+ *                                   through the REAL lane + outcome + notifier wiring
+ *                                   (unlike opts.runTurn) — gates assert the wiring, not
+ *                                   a re-assembled copy of it
+ * @param {object}  [opts.dedup]     test seam: a createEnvelopeDedup() with a compressed
+ *                                   TTL so time-spaced behavior is drivable in seconds
  */
-export async function buildDaemon(cfg, { runTurn } = {}) {
+export async function buildDaemon(cfg, { runTurn, runtime: injectedRuntime, dedup: injectedDedup } = {}) {
   const vault = createVaultClient({ baseUrl: cfg.vaultBaseUrl });
-  const dedup = createEnvelopeDedup();
+  const dedup = injectedDedup || createEnvelopeDedup();
   const rateLimit = createRateLimiter({ maxPerWindow: cfg.rateLimitMax, windowMs: cfg.rateLimitWindowMs });
 
   // Platform clients — declared ahead of the lane so presence can late-bind
@@ -93,10 +108,59 @@ export async function buildDaemon(cfg, { runTurn } = {}) {
   // MUTATED in place on upgrade: server.js reads `replies.mode` per request, so the
   // flip is visible live without a daemon restart.
   const replies = { mode: 'capture-only', backend: null };
+
+  // ── Owner notice on an AUTH outage (auth-notice.js — SECURITY-SENSITIVE) ──
+  // An expired subscription ends every turn 'no-reply'/reason:'auth'; the packaged
+  // app's console goes to /dev/null, so the owner saw typing-then-silence. Send ONE
+  // static, content-free notice per outage episode, to the OWNER chat that messaged,
+  // through the EXISTING egress chokepoint route (§11): the same per-boot-token
+  // trusted /telegram/send | /discord/send path the command acks ride — never a new
+  // send path, and the chokepoint still audits + persists + dedups it.
+  const authNotice = createAuthOutageNotifier({
+    isOwnerChat: (rec) => {
+      const src = String(rec?.source || '');
+      // Telegram: an owner 1:1 DM's chatId IS the owner's Telegram id (groups are
+      // '-'-prefixed and can never match). Discord: chatId is a channel id, so
+      // owner-ness is proven by the SENDER id the lane records from the turnCtx.
+      if (src === 'telegram') return !!cfg.ownerTelegramId && String(rec.chatId) === String(cfg.ownerTelegramId);
+      if (src.startsWith('discord')) {
+        // Owner-ness is proven by the SENDER id (Discord chatId is a CHANNEL id, not a
+        // user id). But the Discord inbound authorizes the owner ANYWHERE — it bypasses
+        // channel policy — so an owner message in a PUBLIC guild channel during an auth
+        // outage would otherwise POST the static notice to that public channel. The send
+        // rides the per-boot trusted token, which bypasses the chokepoint's channel-
+        // authority gate (send-handler.js `if (!trustedReq)`), so nothing downstream
+        // constrains the recipient. Enforce the notice module's "Never broadcast"
+        // invariant HERE: recipient-safety restricts the Discord notice to DMs, where the
+        // guild id is null. A guild-channel outage is SUPPRESSED. (Telegram is unaffected:
+        // groups are '-'-prefixed and already fail the owner-DM id match above.)
+        if (!cfg.ownerDiscordId || rec.senderId == null || String(rec.senderId) !== String(cfg.ownerDiscordId)) return false;
+        return rec.guildId == null; // DM only — a server channel (guildId set) is suppressed
+      }
+      return false;
+    },
+    // Routing metadata ONLY — the text is the static AUTH_NOTICE_TEXT constant,
+    // attached here so no dynamic content can ever enter the notice.
+    send: async ({ source, chatId }) => {
+      const discord = String(source || '').startsWith('discord');
+      const route = discord ? '/discord/send' : '/telegram/send';
+      const body = discord
+        ? { channelId: chatId, content: AUTH_NOTICE_TEXT, trusted: true }
+        : { chatId, text: AUTH_NOTICE_TEXT, trusted: true };
+      const res = await fetch(`${cfg.selfUrl}${route}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-egress-trusted': trustedToken },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`auth-notice egress ${res.status}`); // notifier logs, fail-soft
+    },
+    log: (m) => console.warn(`[channel-daemon] ⚠ ${m}`),
+  });
+
   if (!effectiveRunTurn) {
     // auto router records cloud-routing decisions hash-only via the vault.
     const auditEgress = (e) => { vault.recordInferenceEgress(e); };
-    const runtime = selectRuntime(cfg, { auditEgress });
+    const runtime = injectedRuntime || selectRuntime(cfg, { auditEgress });
     // B1 (red-team RT4): native runs the turn on the SERVER, which may have no model
     // configured — that would silently drop every reply. Probe the vault; if it has no
     // model, stay HONESTLY capture-only (never claim replies are ON) until one is added.
@@ -115,8 +179,13 @@ export async function buildDaemon(cfg, { runTurn } = {}) {
         runtime: rt, presence, ...(cfg.turnTimeoutMs ? { turnTimeoutMs: cfg.turnTimeoutMs } : {}),
         turnLogPath,
         // A not-ok or degraded outcome is an operator signal — WARN loudly (the persistent log +
-        // /healthz lastTurn carry the detail). A proactive push is a Layer-3b follow-up.
-        onOutcome: (rec) => { if (!rec?.ok || rec?.degraded || rec?.harvested) console.warn(`[channel-daemon] ⚠ turn ${rec?.verdict}${rec?.degraded ? ' DEGRADED' : ''}${rec?.harvested ? ' HARVESTED' : ''} chat=${rec?.chatId} model=${rec?.model || '?'} reason=${rec?.reason || rec?.error || '-'}`); },
+        // /healthz lastTurn carry the detail), and feed the auth-outage notifier (the
+        // Layer-3b proactive push, U1): one owner notice per auth episode, via the
+        // egress chokepoint. onTurnOutcome never throws into the lane (fail-soft inside).
+        onOutcome: (rec) => {
+          if (!rec?.ok || rec?.degraded || rec?.harvested) console.warn(`[channel-daemon] ⚠ turn ${rec?.verdict}${rec?.degraded ? ' DEGRADED' : ''}${rec?.harvested ? ' HARVESTED' : ''} chat=${rec?.chatId} model=${rec?.model || '?'} reason=${rec?.reason || rec?.error || '-'}`);
+          void authNotice.onTurnOutcome(rec);
+        },
       });
       if (turnLogPath) console.log(`[channel-daemon] turn log → ${turnLogPath}`);
       if (cfg.coalesceWindowMs > 0) {

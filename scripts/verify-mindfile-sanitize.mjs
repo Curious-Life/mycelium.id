@@ -43,6 +43,7 @@ function fakeFs() {
     mkdir: async () => { calls.mkdir++; },
     rename: async () => { calls.rename++; },
     open: async () => { calls.open++; return { writeFile: async () => {}, sync: async () => {}, close: async () => {} }; },
+    readdir: async () => { const e = new Error('nope'); e.code = 'ENOENT'; throw e; },
   };
 }
 {

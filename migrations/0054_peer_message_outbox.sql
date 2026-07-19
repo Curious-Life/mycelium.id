@@ -1,0 +1,22 @@
+-- Send-retry outbox durability (federation transport P5). Two columns on the OUTBOUND
+-- peer_messages row so a delivery that failed can be re-attempted safely:
+--
+--   send_nonce   — the payload nonce chosen ONCE at first send and REUSED on every retry.
+--                  The receiver dedups a DM on remote_nonce (UNIQUE(connection_id, remote_nonce))
+--                  for BOTH transports (the pull loop dispatches receiveMessage with
+--                  nonce = payload.nonce), so reusing the same nonce makes a retry idempotent
+--                  end-to-end: if an earlier attempt actually reached the peer (e.g. a lost
+--                  relay response after the enqueue committed, or a dropped direct-POST reply),
+--                  the retry is dropped instead of delivered a second time. A fresh nonce per
+--                  retry would defeat that guard and double-deliver an intimate DM.
+--   send_attempts — count of outbox retries. Used to (a) DEPRIORITIZE a repeatedly-failing
+--                  message (ORDER BY send_attempts ASC) so a dead peer's backlog can't starve a
+--                  live peer's newer messages, and (b) CAP retries so a permanently-unreachable
+--                  peer is eventually left alone instead of re-attempted forever.
+--
+-- Both are routing/state metadata (not message content), so they stay unencrypted like the
+-- other structural columns (cf. remote_nonce). No backfill: existing 'failed' rows simply have
+-- a NULL send_nonce (the outbox falls back to a fresh nonce for them — the one-time legacy
+-- risk window) and send_attempts 0.
+ALTER TABLE peer_messages ADD COLUMN send_nonce TEXT;
+ALTER TABLE peer_messages ADD COLUMN send_attempts INTEGER NOT NULL DEFAULT 0;

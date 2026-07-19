@@ -20,7 +20,7 @@
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
 
 import crypto from 'node:crypto';
-import { rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';
@@ -121,10 +121,25 @@ exit 1
     rec('G5. unknown job → 404', g5.status === 404);
 
     // ── G6 first-run auto-continue gate (shouldAutoGenerate truth table) ──
-    rec('G6a. fires: enough embedded + no topology + not running', shouldAutoGenerate({ embedded: 30, points: 0, clusteringRunning: false, min: 25 }) === true);
-    rec('G6b. holds: below the data floor (trivial-cluster guard)', shouldAutoGenerate({ embedded: 10, points: 0, clusteringRunning: false, min: 25 }) === false);
-    rec('G6c. holds: topology already built (re-gen stays manual)', shouldAutoGenerate({ embedded: 100, points: 500, clusteringRunning: false, min: 25 }) === false);
-    rec('G6d. holds: clustering already running (single-flight)', shouldAutoGenerate({ embedded: 100, points: 0, clusteringRunning: true, min: 25 }) === false);
+    rec('G6a. fires: enough embedded + no topology + not running', shouldAutoGenerate({ embedded: 30, points: 0, clusteringRunning: false, min: 5 }) === true);
+    rec('G6b. holds: below the data floor (trivial-cluster guard)', shouldAutoGenerate({ embedded: 4, points: 0, clusteringRunning: false, min: 5 }) === false);
+    rec('G6c. holds: topology already built (re-gen stays manual)', shouldAutoGenerate({ embedded: 100, points: 500, clusteringRunning: false, min: 5 }) === false);
+    rec('G6d. holds: clustering already running (single-flight)', shouldAutoGenerate({ embedded: 100, points: 0, clusteringRunning: true, min: 5 }) === false);
+
+    // ── G6e ⭐ THE FLOOR IS THE MANUAL FLOOR (PIPELINE-TRANSPARENCY-DESIGN §"Filling the gaps" #2).
+    // The truth table above pins the PURE function; G6e pins the value the WIRE actually passes.
+    // At 25 a real-but-small vault (5–24 embedded) auto-clustered NEVER and nothing prompted the
+    // user — a silent stall. Read server-rest.js's AUTO_GEN_MIN default and assert it is the manual
+    // floor MIN_EMBEDDED (5). Mutate that default back to 25 (or anything > 5) and this reds.
+    // Paired with G6f: a vault AT the manual floor (exactly 5 embedded) must auto-fire under it.
+    {
+      const src = readFileSync(path.resolve('src/server-rest.js'), 'utf8');
+      const m = src.match(/const\s+AUTO_GEN_MIN\s*=\s*Number\(process\.env\.MYCELIUM_AUTO_GEN_MIN\)\s*\|\|\s*(\d+)/);
+      const wireFloor = m ? Number(m[1]) : NaN;
+      rec(`G6e. the wire auto-gen floor is the manual floor (5, was 25) — got ${wireFloor}`, wireFloor === 5);
+      rec('G6f. a vault AT the manual floor (5 embedded) auto-fires under the wire floor',
+        Number.isFinite(wireFloor) && shouldAutoGenerate({ embedded: 5, points: 0, clusteringRunning: false, min: wireFloor }) === true);
+    }
   } finally {
     srv.server.close(); try { srv.close?.(); } catch {}
     for (const f of [OK, FAIL]) { try { rmSync(f); } catch {} }

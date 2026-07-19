@@ -103,6 +103,11 @@ portal-app/.gen-drive-generate/
 # Same for the D2 mount harness (compiles the components that RENDER the generate outcome).
 portal-app/.gen-mount-generate/
 portal-app/.gen-mount-illuminate/
+portal-app/.gen-mount-pipeline/
+
+# Worktree symlinks (regenerable; machine-specific absolute paths — never commit)
+/.build-cache
+/pipeline/.venv
 
 # public-release hygiene
 _*.mjs

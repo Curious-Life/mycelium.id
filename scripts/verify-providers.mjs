@@ -152,9 +152,12 @@ rec('P10. GET /providers/presets serves the catalog (EU-sovereign + local option
   rec('P10b2. …Understanding carries BOTH tasks (a client seeing one would re-split the approval)',
     !!understanding && [...understanding.tasks].sort().join() === 'categorize,enrich',
     `understanding.tasks=${JSON.stringify(understanding?.tasks)}`);
-  // Descriptions must arrive carrying its §4g limit, or the screen cannot know not to offer US.
-  rec('P10b3. …Descriptions carries the §4g eu-or-local limit (else the screen offers US for narrate)',
-    !!descriptions && descriptions.jurisdiction === 'eu-or-local',
+  // Descriptions must arrive as jurisdiction 'any' — narrate is no longer §4g-sensitive
+  // (2026-07-19), so the screen offers every provider for it. A stray 'eu-or-local' here would
+  // make the screen HIDE US/subscription options the router now happily runs (§3.11d inverted:
+  // withholding a valid choice), and re-print the "stays in the EU" copy the operator removed.
+  rec('P10b3. …Descriptions is jurisdiction "any" (limit lifted — every provider offerable)',
+    !!descriptions && descriptions.jurisdiction === 'any',
     `descriptions.jurisdiction=${descriptions?.jurisdiction}`);
   // §3.11c is recommendation-FIRST: a recommendation without a why is the raw dump item 11 names.
   rec('P10b4. …every function carries a label + reason (recommendation-first, not a raw dump)',

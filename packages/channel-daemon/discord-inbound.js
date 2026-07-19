@@ -91,6 +91,12 @@ export function createDiscordInboundHandler({ vault, ownerDiscordId, runTurn, co
       inboundMessageId: msg.messageId,
       username: msg.username || undefined,
       userId: msg.fromId || undefined,
+      // guildId: null for a DM, the guild id for a server channel. Threaded onto the
+      // turn record (like userId → senderId) so the auth-outage notifier can restrict
+      // the owner notice to DMs — recipient-safety on the egress path (§11). The owner
+      // is authorized ANYWHERE here (isOwner bypasses channel policy), so an outage in
+      // a PUBLIC guild channel must SUPPRESS the notice, never broadcast it there.
+      guildId: msg.guildId != null ? String(msg.guildId) : null,
     };
     try { await runTurn(turnCtx, msg); }
     catch (e) { console.error(`[${logPrefix}] discord inbound turn failed (chan=${msg.chatId}): ${e.message}`); }

@@ -59,7 +59,14 @@ const FULL = {
   channel: { connected: false },
 };
 
-globalThis.__readiness = EMPTY;      // the CURRENT server fact — flipped mid-test by some probes
+// The FRESH-MACHINE unknown: the very FIRST readiness read fails to count (SQLCipher scan), and
+// there is no prior known-good value to hold (§3.2a has nothing to latch). WIRE shape: data is
+// bare zeros (the `unknown` marker is stripped server-side) and the only failure signal is
+// canGenerate.reason === 'unknown'. This must NOT render the empty-state — a vault we could not
+// READ is not a vault the user never filled.
+const FRESH_UNKNOWN = { data: { total: 0 }, canGenerate: { ok: false, reason: 'unknown' }, evidence: { unknown: true, sources: [], dateRange: { yearStart: null, yearEnd: null }, conversationCount: 0, peopleCount: 0 }, ai: { connected: false }, channel: { connected: false } };
+
+globalThis.__readiness = PROBE === 'freshunknown' ? FRESH_UNKNOWN : EMPTY;  // the CURRENT server fact — flipped mid-test by some probes
 globalThis.__failReadiness = false;  // when true, the readiness read THROWS (a failed re-read)
 globalThis.__readinessReads = 0;
 globalThis.__readinessPaths = [];    // every readiness request path, in order (probe vs full)
@@ -96,6 +103,7 @@ writeFileSync(`${GEN}/generate-stub.js`, `
 import { readable } from 'svelte/store';
 export const generate = readable({ phase: 'idle' });
 export const fmtSeconds = (s) => String(s);
+export const retry = () => {};
 `);
 // The store — the REAL rune module, compiled. compileModule can't parse TS return annotations,
 // so strip them (mount-onboarding-flow.mjs does the same for the guidance store).
@@ -138,6 +146,12 @@ try {
   if (PROBE === 'empty') {
     // G1 — a fresh vault shows the empty-state invitation, no evidence counts.
     out.text = norm();
+    out.readsCount = globalThis.__readinessReads;
+  } else if (PROBE === 'freshunknown') {
+    // G9 — the fresh-machine unknown (no prior to hold). The Data step must show the honest
+    // "couldn't read your vault" + Retry, and NEITHER the empty-state copy NOR a fabricated count.
+    out.text = norm();
+    out.hasRetry = [...document.querySelectorAll('button')].some((b) => /retry/i.test(b.textContent || ''));
     out.readsCount = globalThis.__readinessReads;
   } else if (PROBE === 'signal' || PROBE === 'focus') {
     // G2 / G2b — mounted EMPTY; capture the before, then FLIP the server fact and either fire the

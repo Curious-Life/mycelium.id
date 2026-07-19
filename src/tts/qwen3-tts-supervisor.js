@@ -14,6 +14,9 @@
 //    accepted cost of removing Kokoro (design §6).
 import { spawn } from 'node:child_process';
 import { qwenPaths, getModelState, resolveQwenPython, startDownload } from './qwen3-tts-model.js';
+import { looksLikePortConflict, reapOwnOrphanOnPort, createRestartGovernor } from '../system/service-guard.js';
+
+const SERVICE_SCRIPT = 'pipeline/qwen3-tts-service.py'; // the exact argv token we spawn — the orphan-identity anchor
 
 const PORT = Number(process.env.MYCELIUM_QWEN_TTS_PORT) || 8094;
 const TICK_MS = 4000;
@@ -40,18 +43,45 @@ async function probe() {
  * @param {string} opts.home
  * @param {() => (boolean|Promise<boolean>)} opts.shouldRun  true iff the user opted in (QWEN_TTS_ENABLED)
  * @param {number} [opts.tickMs]  test-only override of the tick interval
+ * @param {typeof spawn} [opts.spawn]  injectable (tests)
+ * @param {typeof reapOwnOrphanOnPort} [opts.reapOrphan]  injectable (tests)
+ * @param {typeof getModelState} [opts.getState]  injectable (tests)
  */
-export function startQwenTtsSupervisor({ home = process.cwd(), shouldRun = () => false, tickMs = TICK_MS } = {}) {
+export function startQwenTtsSupervisor({ home = process.cwd(), shouldRun = () => false, tickMs = TICK_MS, spawn: spawnImpl = spawn, reapOrphan = reapOwnOrphanOnPort, getState = getModelState } = {}) {
   if (_instance) return _instance;
   const python = resolvePython({ home });
   let child = null, spawnedByUs = false, failures = 0, nextStartAt = 0, stopped = false, installing = false;
+  let errBuf = ''; // stderr tail — lets the exit handler classify a bind conflict
+  // Bounded restart (service-guard): outcome-based 15s→2min backoff; halts after
+  // N straight failures (or a foreign port holder) until the user re-toggles voice.
+  const governor = createRestartGovernor();
+
+  // A spawned child died at bind because :8094 is taken. Reap the holder IFF it
+  // is provably OUR OWN orphan (service-guard proof); a foreign holder is NEVER
+  // killed — the fault is surfaced content-free and attempts halt.
+  async function handlePortConflict() {
+    let r = null;
+    try { r = await reapOrphan({ port: PORT, scriptPath: SERVICE_SCRIPT, ownChildPid: child?.pid ?? null }); }
+    catch { r = { reaped: false, reason: 'no-holder' }; }
+    if (r?.reaped) {
+      nextStartAt = 0; // recovered the port — retry the bind on the next tick
+      _health = { status: 'starting', message: 'Recovered the port from a stale voice service — restarting…' };
+      return;
+    }
+    if (r?.reason === 'foreign' || r?.reason === 'stuck' || r?.reason === 'kill-failed') {
+      governor.halt(`port :${PORT} held by another process`);
+      _health = { status: 'down', message: 'Local voice cannot start.', detail: `port :${PORT} held by another process${r?.holder?.pid ? ` (pid ${r.holder.pid})` : ''}` };
+      return;
+    }
+    failures++; nextStartAt = Date.now() + governor.recordFailure().delayMs; // holder vanished — normal accounting
+  }
   // Backoff for the needs-runtime AUTO-install (adversarial review of #209, LOW-1):
   // without it a persistently-failing `pip install mlx-audio` re-ran EVERY tick —
   // the storm family #206 just fixed on the pull path. Attempt-based, doubling,
   // capped; reset the moment the model reaches 'ready'.
   let installAttempts = 0, nextInstallAt = 0;
 
-  const modelDir = () => qwenPaths({ home }, getModelState().variant).dir;
+  const modelDir = () => qwenPaths({ home }, getState().variant).dir;
   const env = () => ({
     PATH: process.env.PATH, HOME: process.env.HOME,
     MYCELIUM_QWEN_TTS_PORT: String(PORT),
@@ -62,10 +92,11 @@ export function startQwenTtsSupervisor({ home = process.cwd(), shouldRun = () =>
   async function tick() {
     if (stopped) return;
     let want = false; try { want = await shouldRun(); } catch { want = false; }
-    const phase = getModelState().phase;
+    const phase = getState().phase;
 
     if (!want) { // not opted in → stop any child we spawned
       if (child && spawnedByUs) { try { child.kill(); } catch { /* */ } }
+      governor.resume(); // toggling voice off (and later on) is the settings-change resume path
       _health = { status: 'idle', message: 'Local voice off.' };
       return;
     }
@@ -97,20 +128,29 @@ export function startQwenTtsSupervisor({ home = process.cwd(), shouldRun = () =>
       return;
     }
     if (child) return;                                   // already running ours
-    if (await probe()) { _health = { status: 'ok', message: 'Local voice ready (adopted).' }; return; } // adopt
+    if (await probe()) { governor.recordSuccess(); _health = { status: 'ok', message: 'Local voice ready (adopted).' }; return; } // adopt
     if (Date.now() < nextStartAt) return;                // backoff gate
+    if (governor.isHalted()) return;                     // bounded: halted until the voice toggle re-arms it
 
     _health = { status: 'starting', message: failures ? 'Restarting local voice…' : 'Starting local voice…' };
     try {
-      child = spawn(python, ['pipeline/qwen3-tts-service.py', '--serve', '--port', String(PORT)], { cwd: home, env: env(), stdio: ['ignore', 'ignore', 'pipe'] });
+      child = spawnImpl(python, [SERVICE_SCRIPT, '--serve', '--port', String(PORT)], { cwd: home, env: env(), stdio: ['ignore', 'ignore', 'pipe'] });
       spawnedByUs = true;
     } catch (e) {
       _health = { status: 'down', message: 'Could not start local voice.', detail: String(e?.message || e) };
-      failures++; nextStartAt = Date.now() + Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(failures, 5)); return;
+      failures++; nextStartAt = Date.now() + governor.recordFailure().delayMs; return;
     }
-    child.on('exit', () => { child = null; spawnedByUs = false; failures++; nextStartAt = Date.now() + Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(failures, 5)); });
+    errBuf = '';
+    child.stderr?.on?.('data', (d) => { errBuf = (errBuf + d.toString()).slice(-4096); });
+    child.on('exit', () => {
+      child = null; spawnedByUs = false;
+      if (stopped) return;
+      // Died at bind (port taken) → the orphan/foreign path, not crash accounting.
+      if (looksLikePortConflict(errBuf)) { void handlePortConflict(); return; }
+      failures++; nextStartAt = Date.now() + governor.recordFailure().delayMs;
+    });
     // give it a moment, then confirm health
-    setTimeout(async () => { if (await probe()) { failures = 0; _health = { status: 'ok', message: 'Local voice ready.' }; } }, 4000).unref?.();
+    setTimeout(async () => { if (await probe()) { failures = 0; governor.recordSuccess(); _health = { status: 'ok', message: 'Local voice ready.' }; } }, 4000).unref?.();
   }
 
   const timer = setInterval(tick, tickMs);

@@ -12,8 +12,11 @@ Mycelium is a **self-hosted, single-user "cognitive vault."** It runs as one Nod
 process on your own machine. You feed it your data (chat exports, notes, messages);
 it encrypts everything at rest with keys only you hold, embeds and tags it locally,
 and serves it back to **any AI model** through the standard MCP protocol — plus a
-local web **portal** for browsing it yourself. There is no cloud, no multi-tenancy,
-and no autonomous agent: it's a pure *tool server* that answers when asked.
+local web **portal** for browsing it yourself. There is no cloud and no
+multi-tenancy. At its core it's a *tool server* that answers when asked — and on top
+of that spine V1 also runs **autonomous loops**: a scheduler that fires opt-in
+reflection cycles between conversations, and a channel bridge that answers over
+Telegram/Discord.
 
 Two facts surprise people, and the whole design follows from them:
 
@@ -22,10 +25,14 @@ Two facts surprise people, and the whole design follows from them:
    starts, verifies them, and *refuses to start* if they're wrong. So there is no
    "log in" step in the app — there's nothing for a browser to unlock. The keys live
    on the **server**, never in the browser, never on the wire.
-2. **It's a tool server, not an agent.** It doesn't think or act on its own. It
-   exposes ~34 tools (save a message, search memory, list territories…) and a
-   `getContext` preamble, and waits for an MCP client (Claude Desktop/CLI/mobile) or
-   the portal to call them.
+2. **It's tool-driven at its core, with an agent layer on top.** The spine is a
+   tool server: it exposes ~47 tools (save a message, search memory, read the
+   mindscape…) across 18 domains and a `getContext` preamble, and answers when an MCP
+   client (Claude Desktop/CLI/mobile) or the portal calls them. V1 then adds
+   **autonomous loops** on top — the wake-cycle scheduler (`src/agent/scheduler.js`)
+   fires opt-in reflection cycles in the owner's timezone, and the channel-turn
+   handler replies on messaging channels — so the agent has continuity and can act
+   between conversations, not only when asked.
 
 ---
 

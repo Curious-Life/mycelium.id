@@ -32,7 +32,8 @@ import { importFromClaudeCli, ClaudeImportError, readClaudeAccount } from './inf
 import { probeClaudeCredential } from './inference/claude-sources.js';
 import { startPkceFlow, exchangeCode, refreshAccessToken, createPkceFlowStore, ClaudePkceError } from './inference/claude-pkce.js';
 import { resolveClaudeBin } from './inference/claude-bin.js';
-import { seedClaudeConfigDir } from './inference/claude-config-dir.js';
+import { seedClaudeConfigDir, refreshClaudeConfigDirToken } from './inference/claude-config-dir.js';
+import { getSubscriptionAuthValidity, recordSubscriptionRefreshOutcome } from './inference/subscription-auth-signal.js';
 import { isCliEngineReady } from './agent/harnesses/index.js';
 
 // True for an ai_providers row that is a Claude SUBSCRIPTION (OAuth token), as
@@ -186,7 +187,11 @@ export { KNOWN as __knownProvidersForTest };
  * @param {string} [deps.userId='local-user']
  * @param {typeof fetch} [deps.fetch]      injectable for the connectivity probe (tests)
  */
-export function portalProvidersRouter({ db, userId = 'local-user', fetch = globalThis.fetch } = {}) {
+// `probeCredential` / `refreshToken` / `authValidity` are test seams (default: the real
+// device-store probe, the real ToS-clean refresher, the real evidence projection) so the
+// status + refresh routes can be gated deterministically without touching this machine's
+// Keychain or spawning `claude`.
+export function portalProvidersRouter({ db, userId = 'local-user', fetch = globalThis.fetch, probeCredential = probeClaudeCredential, refreshToken = refreshClaudeConfigDirToken, authValidity = getSubscriptionAuthValidity } = {}) {
   if (!db?.providers) throw new Error('portalProvidersRouter: db.providers namespace required');
   const router = express.Router();
 
@@ -345,14 +350,13 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   // resolveInferenceConfig. MUST be declared before '/providers/:id' or the PUT is
   // shadowed by the numeric-id route (Number('sensitive-subscription')→NaN→400).
   //
-  // ⚠️ WHAT IT COVERS GREW ON 2026-07-16, and the UI copy grew with it. It used to be only
-  // the persona/claim abstractions (claims/discovery + validator, the two call sites that
-  // hardcoded sensitive:true). `narrate` — mindscape names + chronicles — is now
-  // §4g-sensitive too (src/inference/sensitivity.js), so this toggle governs descriptions as
-  // well. That is strictly MORE protective than before (narrate previously reached a US
-  // subscription regardless of this toggle), but a user who consented to "claim analysis"
-  // must be TOLD chronicles are included — hence "persona, claim & description analysis" in
-  // AISettings. If SENSITIVE_TASKS grows again, this copy grows again.
+  // ⚠️ WHAT IT COVERS. This governs the callers that pass `sensitive: true` EXPLICITLY —
+  // the persona/claim abstractions (claims/discovery + validator). It briefly also covered
+  // `narrate` (mindscape descriptions) while narrate sat in SENSITIVE_TASKS, but the operator
+  // removed that limit on 2026-07-19: Descriptions may now go to any connected provider without
+  // this toggle, so it is back to governing claim analysis only. If a task rejoins
+  // SENSITIVE_TASKS (src/inference/sensitivity.js), re-check the AISettings copy so users are
+  // told exactly what this opt-in exposes.
   router.get('/providers/sensitive-subscription', async (_req, res) => {
     try { const s = await db.users.getSettings(userId); ok(res, { allowed: s?.allowSubscriptionSensitive === true }); }
     catch { bad(res, 500, 'failed to read preference'); }
@@ -467,10 +471,17 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
       const tailscaleUrl = tailscaleHost ? `https://${tailscaleHost}:${tlsPort}` : null;
       let relayUrl = null;
       try { relayUrl = readRemoteConfig()?.publicBaseUrl || null; } catch { /* not configured */ }
+      // E2E dial-out relay coordinates (Phase 3) — present only when the box actually
+      // dials out (MYCELIUM_RELAY_DIALOUT=1). The phone tunnels its sealed /e2e/* through
+      // <base>/relay/<handle>/send; the relay sees only ciphertext.
+      let relay = null;
+      if (process.env.MYCELIUM_RELAY_DIALOUT === '1') {
+        try { const rc = readRemoteConfig(); const h = String(rc.publicHost || '').split('.')[0]; if (h && rc.controlPlaneUrl) relay = { base: rc.controlPlaneUrl, handle: h }; } catch { /* */ }
+      }
       // Recommend the secure direct path when it's actually live (TLS on + tailnet
       // known); otherwise the relay; otherwise null → the UI guides setup.
       const recommended = (tlsConfigured && tailscaleUrl) ? tailscaleUrl : (relayUrl || tailscaleUrl || null);
-      ok(res, { bearer, tlsConfigured, tlsPort, tailscaleHost, tailscaleUrl, relayUrl, recommended });
+      ok(res, { bearer, tlsConfigured, tlsPort, tailscaleHost, tailscaleUrl, relayUrl, relay, recommended });
     } catch { bad(res, 500, 'failed to build phone-connect payload'); }
   });
 
@@ -603,10 +614,10 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
         model = sub.model_preference || null;
         try { const full = await db.providers.get(sub.id, userId); const c = full?.credentials ? JSON.parse(full.credentials) : {}; account = c.account || null; } catch { /* no account metadata */ }
       }
-      if (!sub) return ok(res, { authenticated: false, health: 'missing', providerId: null, account: null, model: null });
+      if (!sub) return ok(res, { authenticated: false, health: 'missing', providerId: null, account: null, model: null, validity: authValidity({ credsPresent: false }) });
 
       let probe = null;
-      try { probe = await probeClaudeCredential(); } catch { probe = null; }
+      try { probe = await probeCredential(); } catch { probe = null; }
       const health =
         !probe ? 'needs_reauth'
           : probe.status === 'found' ? (probe.expired ? 'expired' : 'connected')
@@ -626,8 +637,39 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
         expiresAt: probe?.creds?.expiresAt ?? null,    // a timestamp, not a token
         scopeUnknown: probe?.scopeUnknown === true,    // bare env token — scope unverified
         declinedSources: probe?.declinedSources || [],
+        // EVIDENCE-BASED validity, per surface (subscription-auth-signal.js): `health` above
+        // says what the stored/device credential LOOKS like; `validity` says whether requests
+        // actually WORK — {native, cli} because the two surfaces can ride different credential
+        // stores and a single boolean is wrong for one of them (the "chat works, channels
+        // 401" live state, 2026-07-18). 'ok' only on positive evidence strictly newer than
+        // the newest failure; cold is 'unknown', never 'connected'. Enums only — no tokens.
+        validity: authValidity({ credsPresent: true }),
       });
     } catch { ok(res, { authenticated: false, health: 'needs_reauth' }); }
+  });
+
+  // The owner's EXPLICIT "Refresh now" (the resetPullBackoff precedent: a deliberate click
+  // may bypass the refresher's anti-hammer cooldown; automatic callers never do). Invokes the
+  // EXISTING ToS-clean refresh path — `claude` refreshes its own token; we mint nothing —
+  // then reports the outcome + the re-derived validity so the UI can re-render honestly.
+  // On 'unavailable' the UI escalates to the EXISTING reconnect ladder; this route NEVER
+  // starts a browser flow itself (no auto-opened windows from status logic).
+  // Content-free by construction: outcome enum + validity enums; the token stays in the
+  // config dir. Zero token material in the response (CLAUDE.md §1/§4).
+  router.post('/auth/claude/refresh', async (_req, res) => {
+    try {
+      const sub = (await db.providers.list(userId)).find(isSubscriptionRow);
+      if (!sub) return bad(res, 404, 'no subscription connected');
+      let token = null;
+      try { token = await refreshToken({ force: true }); } catch { token = null; }
+      // Record HERE as well as inside the real refresher: the outcome and the recorded
+      // evidence must come from the SAME value the response reports, so the route cannot
+      // claim 'refreshed' while the signal says otherwise (both record the same boolean,
+      // so the double write is idempotent in direction). Then re-derive AFTER it settles
+      // so `validity` reflects this very attempt.
+      recordSubscriptionRefreshOutcome(Boolean(token));
+      ok(res, { outcome: token ? 'refreshed' : 'unavailable', validity: authValidity({ credsPresent: true }) });
+    } catch { bad(res, 500, 'refresh failed'); }
   });
 
   // Disconnect: remove any stored subscription row(s).

@@ -584,7 +584,10 @@
 							<div class="block">
 								<div class="shared-head">
 									<h3>You shared</h3>
-									<button class="btn btn-ghost btn-xs" onclick={() => workspace.openOrFocus('contexts')}>＋ Share</button>
+									<!-- "＋ Share" NAVIGATES to the Sharing view (an existing Sharing tab
+								     is focused; else the current tab navigates in place — new tabs
+								     only by explicit gesture). -->
+								<button class="btn btn-ghost btn-xs" onclick={() => workspace.openInActiveTab('contexts')}>＋ Share</button>
 								</div>
 								{#if sharedLoading}
 									<div class="loading sm">Loading…</div>

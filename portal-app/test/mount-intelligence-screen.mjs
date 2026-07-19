@@ -43,31 +43,32 @@ globalThis.document = dom.window.document;
 const { INTELLIGENCE_FUNCTIONS } = await import('../../src/inference/role-models.js');
 const FUNCTIONS = INTELLIGENCE_FUNCTIONS;
 // Providers as publicRow ACTUALLY serves them — `jurisdiction` computed server-side by
-// presets.js jurisdictionForBaseUrl. The lookalike is the one that matters: the first version
-// classified it client-side with an unanchored regex and offered it to a §4g-limited function.
-// It is included so the filter is tested against the case that really broke it, not a clean one.
+// presets.js jurisdictionForBaseUrl. The corpus deliberately spans every jurisdiction so the
+// screen's rendering is tested against a realistic mix, not a clean one. Since 2026-07-19 narrate
+// is NOT §4g-sensitive, so Descriptions (jurisdiction 'any') must offer EVERY one of these,
+// exactly like Conversation — including the US and subscription rows.
 const PROVIDERS = [
   { id: 1, label: 'Regolo (EU)', provider: 'custom', is_active: 1, base_url: 'https://api.regolo.ai/v1', jurisdiction: 'eu-zdr' },
   { id: 2, label: 'OpenAI (US)', provider: 'openai', is_active: 0, base_url: 'https://api.openai.com/v1', jurisdiction: 'us-standard' },
   { id: 3, label: 'Lookalike (US)', provider: 'custom', is_active: 0, base_url: 'https://localhost.attacker.io/v1', jurisdiction: 'us-standard' },
   { id: 4, label: 'Ollama (local)', provider: 'custom', is_active: 0, base_url: 'http://127.0.0.1:11434', jurisdiction: 'local' },
-  // The user's OWN Claude subscription: US, but §4g-exemptible — the one US provider the router
-  // will run a sensitive task on, and ONLY with the explicit opt-in (resolve.js).
+  // The user's OWN Claude subscription (US). It used to be offered to Descriptions ONLY under the
+  // §4g exemption; now Descriptions is 'any', so it is offered like any other provider.
   { id: 5, label: 'Claude (subscription)', provider: 'anthropic', is_active: 0, auth_type: 'oauth', jurisdiction: 'us-standard' },
 ];
-// Flip via PROBE=exempt — the gate drives BOTH configurations, because the screen's §4g rule is
-// only equivalent to the router's if it honours the exemption clause too.
+// PROBE=exempt flips the (now Descriptions-irrelevant) subscription opt-in ON. The gate drives
+// this to prove the exemption no longer GATES Descriptions — with narrate non-sensitive, the row
+// offers every provider whether the flag is on or off. The toggle still governs the claims path
+// (sensitive:true), which this screen does not surface.
 const EXEMPT = process.env.PROBE === 'exempt';
-// The vault whose ONLY provider is the Claude subscription: the sole configuration in which
-// offerable() can be empty for Descriptions, and therefore the only one that reaches the
-// dead-end. Without it, asserting "no dead-end" tests a branch that never runs.
-const NO_EU = process.env.PROBE === 'softfail-noeu';
-// PROBE=noeu-known — the §4g flag reads FINE and says not-exempt, and the vault has no EU/local
-// provider. This is the one state where the dead-end is the TRUE thing to say, and no probe
-// reached it: deleting the guidance entirely left the gate GREEN, restoring the dead row the fix
-// exists to prevent (independent review ×7, 2026-07-16). Assert the positive case, not only the
-// negative.
-const NO_EU_KNOWN = process.env.PROBE === 'noeu-known';
+// PROBE=poll — the stale-badge fix (2026-07-18): approve must REFETCH the models slice, then
+// poll ONLY while a member is unsettled, and STOP (zero further fetches) once settled. The
+// fixture is a mutable PHASE the driver advances: initial (settled, nothing approved) →
+// busy (a download in flight) → settled (everything ok). Every readiness URL is recorded so
+// the gate can also pin that the poll buys ONLY the models slice.
+const POLL = process.env.PROBE === 'poll';
+let pollPhase = 'initial';
+const readinessUrls = [];
 
 const sent = [];   // every write the screen makes — the behavioural evidence
 globalThis.__apiStub = async (path, options = {}) => {
@@ -76,14 +77,8 @@ globalThis.__apiStub = async (path, options = {}) => {
     return { ok: true, json: async () => ({ taskModels: { categorize: { model: 'qwen3.5:4b' }, enrich: { model: 'qwen3.5:4b' } } }) };
   }
   // ⚠️ SPECIFIC PATHS BEFORE THE GENERAL PREFIX: '/portal/providers' startsWith-matches
-  // '/portal/providers/sensitive-subscription' too, and swallowed it — so the screen read
-  // `allowed: undefined` and the exempt probe silently tested the non-exempt path.
+  // '/portal/providers/sensitive-subscription' too, and would swallow it.
   if (path.startsWith('/portal/providers/sensitive-subscription')) {
-    // PROBE=softfail: the ONE read that decides the §4g guarantee fails. Before the fix the
-    // setter never fired, `allowed` stayed at its false default, and the screen printed the
-    // opt-in-OFF privacy claim PERMANENTLY on an exempt vault (independent review ×4).
-    if (process.env.PROBE === 'softfail' || NO_EU) return { ok: false, status: 503, json: async () => ({ ok: false }) };
-    if (NO_EU_KNOWN) return { ok: true, json: async () => ({ allowed: false }) };   // known, and NOT exempt
     return { ok: true, json: async () => ({ allowed: EXEMPT }) };
   }
   // The moved whisper rail (TranscriptionSetup) — a quiet, non-downloading fixture so the
@@ -96,13 +91,26 @@ globalThis.__apiStub = async (path, options = {}) => {
   }
   if (path.startsWith('/portal/providers/presets')) return { ok: true, json: async () => ({ functions: FUNCTIONS }) };
   if (path.startsWith('/portal/providers/task-models')) return { ok: true, json: async () => ({ taskModels: {} }) };
-  if (path.startsWith('/portal/providers')) return { ok: true, json: async () => ({ providers: (NO_EU || NO_EU_KNOWN) ? PROVIDERS.filter((p) => p.auth_type === 'oauth') : PROVIDERS }) };
+  if (path.startsWith('/portal/providers')) return { ok: true, json: async () => ({ providers: PROVIDERS }) };
   // ⚠️ DISCRIMINATING ON PURPOSE: labeler ok / enricher no_model. Understanding owns BOTH tasks,
   // so it must show the WORSE of them — if it showed only the labeler it would report "Labeling
   // with qwen" over a vault whose L2 is dead, which is the dormancy this round exists to end.
-  // The earlier fixture had both members no_model, so S7 passed either way and the claim was
-  // unpinned (independent review, 2026-07-16).
-  if (path.startsWith('/portal/readiness')) return { ok: true, json: async () => ({ models: { labeler: { status: 'ok', message: 'Labeling with qwen3.5:4b.', model: 'qwen3.5:4b', progress: null }, enricher: { status: 'no_model', message: 'No enrich model approved.', model: null, progress: null }, embedder: { status: 'ok', message: 'Ready.', model: null, progress: null } } }) };
+  if (path.startsWith('/portal/readiness')) {
+    if (POLL) {
+      readinessUrls.push(path);
+      const M = (labeler) => ({ models: { labeler, enricher: labeler, embedder: { status: 'ok', message: 'Ready.', model: null, progress: null } } });
+      const byPhase = {
+        // settled AND consistent with "nothing approved": no poll may start at mount.
+        initial: M({ status: 'no_model', message: 'No labeling model approved.', model: null, progress: null }),
+        busy: M({ status: 'downloading', message: 'Downloading qwen3.5:4b…', model: 'qwen3.5:4b', progress: { pct: 40 } }),
+        // settled AND consistent with the approval the driver made: the poll must STOP here.
+        settled: M({ status: 'ok', message: 'Labeling with qwen3.5:4b.', model: 'qwen3.5:4b', progress: null }),
+      };
+      const body = byPhase[pollPhase];
+      return { ok: true, json: async () => body };
+    }
+    return { ok: true, json: async () => ({ models: { labeler: { status: 'ok', message: 'Labeling with qwen3.5:4b.', model: 'qwen3.5:4b', progress: null }, enricher: { status: 'no_model', message: 'No enrich model approved.', model: null, progress: null }, embedder: { status: 'ok', message: 'Ready.', model: null, progress: null } } }) };
+  }
   return { ok: true, json: async () => ({}) };
 };
 
@@ -111,7 +119,8 @@ globalThis.__apiStub = async (path, options = {}) => {
 // `api` → the recording stub above; the child → its own compiled file.
 mkdirSync(GEN, { recursive: true });
 // The shared §4g store is a RUNE MODULE (.svelte.ts) — it must go through the compiler too, or
-// its $state is inert and the live-flip probe would silently test nothing.
+// its $state is inert. The screen still reads it (load() seeds it), even though no function
+// depends on it now, so keep compiling it so the mount matches production exactly.
 const storeSrc = readFileSync('src/lib/stores/sensitive-exempt.svelte.ts', 'utf8')
   .replace(/:\s*boolean/g, '').replace(/export function setSensitiveExempt\(allowed\)/, 'export function setSensitiveExempt(allowed)');
 const storeOut = compileModule(storeSrc, { generate: 'client', filename: 'sensitive-exempt.svelte.ts' });
@@ -121,11 +130,21 @@ writeFileSync(`${GEN}/OnboxTaskSelect.gen.js`, child.js.code);
 const transChild = compile(readFileSync(TRANS, 'utf8'), { generate: 'client', name: 'TranscriptionSetup', css: 'injected' });
 writeFileSync(`${GEN}/TranscriptionSetup.gen.js`, transChild.js.code
   .replace(/import\s+\{\s*api\s*\}\s+from\s+['"]\$lib\/api['"];?/, 'const api = (...a) => globalThis.__apiStub(...a);'));
+// VoiceSection folded UNDER the Voice function row (Phase 3) — a MARKER STUB here (its internals
+// are gated by verify:tts-voice / mount-voice-section); this harness asserts the row EXISTS.
+const voiceStub = compile('<div data-stub="VoiceSection"></div>', { generate: 'client', name: 'VoiceSection', css: 'injected' });
+writeFileSync(`${GEN}/VoiceSection.gen.js`, voiceStub.js.code);
+// EngineSelector folded INTO the Conversation function row (2026-07-19) — a MARKER STUB here (its
+// own behaviour is gated by verify:harness-connect); this harness asserts nothing about it.
+const engineStub = compile('<div data-stub="EngineSelector"></div>', { generate: 'client', name: 'EngineSelector', css: 'injected' });
+writeFileSync(`${GEN}/EngineSelector.gen.js`, engineStub.js.code);
 const screen = compile(readFileSync(SCREEN, 'utf8'), { generate: 'client', name: 'IntelligenceScreen', css: 'injected' });
 const rewired = screen.js.code
   .replace(/import\s+\{\s*api\s*\}\s+from\s+['"]\$lib\/api['"];?/, 'const api = (...a) => globalThis.__apiStub(...a);')
   .replace(/from\s+['"]\.\/OnboxTaskSelect\.svelte['"]/, `from './OnboxTaskSelect.gen.js'`)
   .replace(/from\s+['"]\.\/TranscriptionSetup\.svelte['"]/, `from './TranscriptionSetup.gen.js'`)
+  .replace(/from\s+['"]\.\/VoiceSection\.svelte['"]/, `from './VoiceSection.gen.js'`)
+  .replace(/from\s+['"]\.\/EngineSelector\.svelte['"]/, `from './EngineSelector.gen.js'`)
   .replace(/from\s+['"]\$lib\/stores\/sensitive-exempt\.svelte['"]/, `from './sensitive-exempt.gen.js'`);
 writeFileSync(`${GEN}/IntelligenceScreen.gen.js`, rewired);
 
@@ -139,6 +158,32 @@ try {
   flushSync();
 
   const D = dom.window.document;
+
+  // ── PROBE=poll: the stale-badge fix, driven at its own timescale ─────────────────────────
+  // (Its own probe because it takes ~15s of real timer time; the default probe stays fast.)
+  if (POLL) {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const afterMount = readinessUrls.length;
+    await wait(2500);                                  // > one poll interval
+    const preApprove = readinessUrls.length;           // settled at mount ⇒ NO poll may have run
+    const psel = D.querySelector('select');
+    psel.value = 'qwen3.5:4b';
+    psel.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    flushSync();
+    await wait(150);                                   // write + immediate refetch, < one tick
+    const afterApprove = readinessUrls.length;
+    pollPhase = 'busy';                                // the drainer is now visibly downloading
+    await wait(5200);                                  // room for ≥2 ticks
+    const afterBusyWindow = readinessUrls.length;
+    pollPhase = 'settled';                             // download done, health consistent with the approval
+    await wait(3000);                                  // the settling tick lands and the poll stops
+    const w1 = readinessUrls.length;
+    await wait(4500);                                  // two more would-be ticks…
+    const w2 = readinessUrls.length;                   // …which must buy ZERO fetches (the cost gate)
+    emit({ ok: true, poll: { afterMount, preApprove, afterApprove, afterBusyWindow, w1, w2, urls: readinessUrls } });
+    process.exit(0);
+  }
+
   const text = D.body.textContent.replace(/\s+/g, ' ');
   const sections = [...D.querySelectorAll('section.fn')];
 
@@ -151,10 +196,15 @@ try {
     await new Promise((r) => setTimeout(r, 30));
   }
 
-  // Drive the PROVIDER buttons too. S2 only ever drove the <select>, so 4 of 6 rows had no gate
-  // on their write path — which is exactly where both HIGHs hid (independent review).
+  // The Descriptions section + its provider buttons — the whole point of the 2026-07-19 change:
+  // it must offer EVERY provider, print no limit, and reach no dead-end.
   const descSection = [...D.querySelectorAll('section.fn')].find((s) => /Descriptions/.test(s.textContent));
+  const descText = descSection?.textContent || '';
   const descButtons = [...(descSection?.querySelectorAll('button.pick') || [])];
+  const descButtonLabels = descButtons.map((b) => b.textContent.trim());
+
+  // Drive the PROVIDER buttons too. S2b: a provider button must SEND its provider, not clear the
+  // assignment. The first button is Regolo (EU) — providerId 1.
   const beforeProviderClicks = sent.length;
   if (descButtons[0]) {
     descButtons[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
@@ -163,52 +213,19 @@ try {
   }
   const providerSent = sent.slice(beforeProviderClicks).map((s) => s.body);
 
-  // ⭐ THE STALE-PROMISE REGRESSION. AISettings owns the §4g toggle and is mounted as a SIBLING
-  // in this same pane. Flipping it must re-render THIS screen's guarantee — when the flag was a
-  // private onMount snapshot, the copy kept claiming "EU or on your device" while the router
-  // already sent narrate to us-standard, one scroll away (independent review ×3).
-  // Snapshot everything the OFF-configuration assertions need, BEFORE mutating shared state.
-  const preFlip = {
-    text: D.body.textContent.replace(/\s+/g, ' '),
-    descText: [...D.querySelectorAll('section.fn')].find((s) => /Descriptions/.test(s.textContent))?.textContent || '',
-    descButtons: [...([...D.querySelectorAll('section.fn')].find((s) => /Descriptions/.test(s.textContent))?.querySelectorAll('button.pick') || [])].map((b) => b.textContent.trim()),
-  };
-  const { setSensitiveExempt } = await import(pathToFileURL(resolve(GEN, 'sensitive-exempt.gen.js')).href);
-  const descOf = () => [...D.querySelectorAll('section.fn')].find((s) => /Descriptions/.test(s.textContent));
-  const descButtonsNow = () => [...(descOf()?.querySelectorAll('button.pick') || [])].map((b) => b.textContent.trim());
-  const beforeFlip = {
-    descOffersSubscription: descButtonsNow().some((l) => /Claude \(subscription\)/.test(l)),
-    saysException: /except.*Claude subscription/is.test(D.body.textContent.replace(/\s+/g, ' ')),
-  };
-  setSensitiveExempt(true);
-  flushSync();
-  const afterFlipText = D.body.textContent.replace(/\s+/g, ' ');
-  const afterFlip = {
-    descOffersSubscription: descButtonsNow().some((l) => /Claude \(subscription\)/.test(l)),
-    saysException: /except.*Claude subscription/is.test(afterFlipText),
-    stillClaimsEuOnly: /stay in the EU or on your device\. Models outside/.test(afterFlipText),
-  };
-
   emit({
     ok: true,
-    liveToggle: { beforeFlip, afterFlip },
-    // When the flag is UNKNOWN the screen must claim nothing — neither the EU-only promise nor
-    // the exception. "Checking…" is the only honest thing to print.
-    claimsWhileUnknown: {
-      printsEuOnly: /stay in the EU or on your device\. Models outside/.test(preFlip.text),
-      printsChecking: /Checking where they’re allowed to run/.test(preFlip.text),
-      printsException: /except.*Claude subscription/is.test(preFlip.text),
-      // ⭐ THE BEHAVIOUR, not the sentence. While the §4g flag is unknown the screen must render
-      // NO provider list and NO dead-end for Descriptions — offerable() would hide the user's own
-      // subscription, and the empty-list branch would then tell an exempt vault to "Connect an EU
-      // or on-device model": connect the thing you already have and may use.
-      descButtonCount: preFlip.descButtons.length,
-      descButtonLabels: preFlip.descButtons,
-      printsDeadEnd: /Connect an EU or on-device model/.test(preFlip.descText),
-    },
     // What the PROVIDER button actually sends — it must identify its provider.
     providerSent,
-    descriptionsButtonLabels: preFlip.descButtons,
+    // ── Descriptions is now jurisdiction 'any' (§4g limit lifted) ──────────────────────────
+    descriptionsButtonLabels: descButtonLabels,
+    descriptionsOffersUS: /OpenAI \(US\)/.test(descText),
+    descriptionsOffersEU: /Regolo \(EU\)/.test(descText),
+    descriptionsOffersSubscription: /Claude \(subscription\)/.test(descText),
+    // The false-privacy copy the operator removed must NOT render, and there is no dead-end
+    // because every provider is offerable.
+    descriptionsStatesLimit: /stay in the EU or on your device/.test(text),
+    descriptionsPrintsDeadEnd: /Connect an EU or on-device model/.test(descText),
     // Every §3.11b row rendered — from the SERVED spine, not a hardcoded list.
     renderedKeys: sections.length,
     labels: sections.map((s) => s.querySelector('strong')?.textContent?.trim()),
@@ -221,20 +238,16 @@ try {
     // §3.10d-c: the bundled embedder renders as "Included", never as a picker.
     searchSaysIncluded: /Included · nomic-v1\.5/.test(text),
     searchHasNoControl: !(sections.find((s) => /Search/.test(s.textContent))?.querySelector('select,button.pick')),
-    // §3.11d: an eu-or-local function must not OFFER a US provider, and must say why.
-    // ⚠️ ALL PRE-FLIP: the live-flip probe below mutates shared state, so these must describe
-    // the opt-in-OFF configuration S4c asserts on. Reading them after the flip made S4c fail for
-    // a reason unrelated to its claim — a probe must not contaminate its neighbours.
-    descriptionsOffersUS: /OpenAI \(US\)/.test(preFlip.descText),
-    descriptionsOffersEU: /Regolo \(EU\)/.test(preFlip.descText),
-    descriptionsStatesLimit: /stay in the EU or on your device/.test(preFlip.text),
-    descriptionsOffersSubscription: /Claude \(subscription\)/.test(preFlip.descText),
-    limitMentionsException: /except.*Claude subscription/is.test(preFlip.text),
     // §3.11c: recommendation-FIRST — every card carries its reason.
     everyCardHasWhy: sections.every((s) => !!s.querySelector('.why')?.textContent?.trim()),
     // Honest states: a choice is not a fault.
-    understandingHealth: sections.find((s) => /Understanding/.test(s.textContent))?.querySelector('.health')?.textContent?.trim(),
+    understandingHealth: sections.find((s) => /Labeling/.test(s.textContent))?.querySelector('.health')?.textContent?.trim(),
   });
+  // The screen may now hold a live while-unsettled poll (the driven approve leaves the
+  // enricher LAGGING in this fixture) — exit explicitly so the interval cannot keep node
+  // alive until the gate's timeout (the mount-intelligence-flow precedent).
+  process.exit(0);
 } catch (e) {
   emit({ ok: false, error: String(e?.stack || e) });
+  process.exit(0);
 }

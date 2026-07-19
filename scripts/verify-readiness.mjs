@@ -30,6 +30,7 @@ import { execFileSync } from 'node:child_process';
 import { createReadiness } from '../src/readiness.js';
 import { portalCompatRouter } from '../src/portal-compat.js';
 import { isEnrichProcessingPaused, pauseEnrichProcessing, resumeEnrichProcessing } from '../src/enrich/drainer.js';
+import { bustMindscapePoints } from '../src/mindscape-cache.js';
 
 // The slice list R5 must sweep. Kept HERE, next to the gate that depends on it, because the
 // module's own ALL is private — and because R5's job is to name the surface explicitly.
@@ -409,6 +410,209 @@ await t('E7. ⭐ a failed PEOPLE read is unknown too — no silently-earned "0 p
   assert.equal(evidence.unknown, true,
     'a people read that FAILED must mark the evidence unknown — not report peopleCount:0 as a fact. '
     + 'Re-adding an inner try/catch that swallows to 0 must fail HERE.');
+});
+
+// ── EC/W/M) the cold-status-load caches (2026-07-18) ─────────────────────────
+// The status popover's FIRST paint on a 76k-message vault paid four live full-table
+// aggregate scans (evidence, once per open — G-COST) plus the clustering_points COUNT.
+// These gates price the fix: evidence rides an SWR memo (serve stale, single-flight,
+// 15s TTL), the mindscape memo rides the REAL points-bust chokepoint, and warm()
+// pre-pays both at boot. ⚠️ IDs: the operator's brief named these E3/E4/E5 — but this
+// file already HAS an E3/E4/E5 with different meanings, and this file's own header
+// documents what silent ID displacement does to a reviewer ticking a checklist. EC*/W5/M*
+// are the same assertions under non-colliding names.
+// Every gate counts DB TOUCHES across calls (the COST), never the response shape —
+// a shape gate is satisfied by a cache that never caches (memory: gates-assert-shape-
+// never-cost, #200).
+
+const EVIDENCE_TOUCHES = (db) => db.touched.filter((x) => x.startsWith('evidence:')).length;
+
+await t('EC1. ⭐ evidence COST — the SECOND read within TTL runs ZERO of the aggregate queries', async () => {
+  const db = mkDb();
+  const r = createReadiness({ db, userId: U });
+  const first = (await r.get({ slices: ['evidence'] })).evidence;
+  const paidOnce = EVIDENCE_TOUCHES(db);
+  assert.ok(paidOnce >= 4, `fixture sanity: the cold read must pay the aggregates (saw ${paidOnce})`);
+  const second = (await r.get({ slices: ['evidence'] })).evidence;
+  assert.equal(EVIDENCE_TOUCHES(db), paidOnce,
+    'the second read within TTL re-ran aggregate queries — the popover re-open (and any second '
+    + 'consumer in the window) must be served from the memo, zero scans. Count the COST, not the shape.');
+  assert.deepEqual(second, first, 'and it serves the SAME snapshot, not a recompute in disguise');
+});
+
+await t('EC2. ⭐ evidence stale-serve — an expired read returns the PRIOR snapshot instantly while the revalidate lands the fresh one', async () => {
+  let t0 = 1_000_000;
+  let conv = 61;
+  const db = mkDb();
+  const baseRaw = db.rawQuery.bind(db);
+  db.rawQuery = async (sql, args) => {
+    if (/COUNT\(DISTINCT conversation_id\)/.test(String(sql))) { db.touched.push('evidence:conversations'); return { results: [{ c: conv }] }; }
+    return baseRaw(sql, args);
+  };
+  const r = createReadiness({ db, userId: U, now: () => t0 });
+  assert.equal((await r.get({ slices: ['evidence'] })).evidence.conversationCount, 61, 'cold read sees the current count');
+  t0 += 20_000;                    // TTL (15s) expired
+  conv = 99;                       // the vault changed meanwhile
+  const stale = (await r.get({ slices: ['evidence'] })).evidence;
+  assert.equal(stale.conversationCount, 61,
+    'an EXPIRED read must serve the prior snapshot instantly (SWR) — blocking on the recompute is '
+    + 'exactly the cold-load cost this memo exists to remove');
+  await new Promise((res) => setTimeout(res, 30));   // let the background revalidate land
+  const before = EVIDENCE_TOUCHES(db);
+  const freshAfter = (await r.get({ slices: ['evidence'] })).evidence;
+  assert.equal(freshAfter.conversationCount, 99,
+    'the background revalidate must have LANDED the fresh snapshot — stale-serve without '
+    + 'revalidation is a cache that never updates, which breaks the operator\'s "updates still live"');
+  assert.equal(EVIDENCE_TOUCHES(db), before, 'and the post-revalidate read is served from the memo, zero new scans');
+});
+
+await t('EC3. an `unknown` revalidate is NEVER cached and never evicts the last GOOD snapshot (§3.2a)', async () => {
+  let t0 = 1_000_000;
+  let broken = false;
+  const db = mkDb();
+  const baseRaw = db.rawQuery.bind(db);
+  db.rawQuery = async (sql, args) => { if (broken) throw new Error('SQLITE_BUSY'); return baseRaw(sql, args); };
+  const r = createReadiness({ db, userId: U, now: () => t0 });
+  const good = (await r.get({ slices: ['evidence'] })).evidence;
+  assert.ok(!good.unknown, 'fixture sanity');
+  t0 += 20_000; broken = true;
+  const held = (await r.get({ slices: ['evidence'] })).evidence;       // stale-served; revalidate will fail
+  await new Promise((res) => setTimeout(res, 30));
+  const after = (await r.get({ slices: ['evidence'] })).evidence;
+  assert.deepEqual(held, good, 'the stale serve holds the good snapshot');
+  assert.deepEqual(after, good,
+    'a FAILED revalidate must not replace a good snapshot with `unknown` — holding the last known '
+    + 'answer is the same discipline G3 pins on the client. Caching the unknown would serve a '
+    + 'fabricated-empty card for a full TTL window.');
+});
+
+await t('EC4. /import/preview BYPASSES the memo — a read-after-import surface must never see a stale snapshot', async () => {
+  // The route change EC1 makes dangerous: if /import/preview rode the memo, the card the user
+  // reads MOMENTS after importing would render the BOOT-TIME snapshot — "0 sources" over a
+  // just-imported corpus, the §3.2a lie by way of a cache. fresh:true is that route's contract;
+  // removing it must fail HERE, not in production.
+  let conv = 5;
+  const db = mkDb();
+  const baseRaw = db.rawQuery.bind(db);
+  db.rawQuery = async (sql, args) => {
+    if (/COUNT\(DISTINCT conversation_id\)/.test(String(sql))) return { results: [{ c: conv }] };
+    return baseRaw(sql, args);
+  };
+  db.messages.embedBacklog = async () => ({ total: 10, embedded: 10, pending: 0, unprocessable: 0 });
+  const readiness = createReadiness({ db, userId: U });
+  await readiness.get({ slices: ['evidence'] });      // warm the memo (the popover's read)
+  conv = 42;                                          // "the import just landed"
+  const app = express();
+  app.use('/portal', portalCompatRouter({ db, userId: U, readiness }));
+  const srv = await new Promise((r) => { const s = app.listen(0, () => r(s)); });
+  try {
+    const body = await (await fetch(`http://127.0.0.1:${srv.address().port}/portal/import/preview`)).json();
+    assert.equal(body.conversationCount, 42,
+      'preview served the MEMOIZED count from before the import — it must read fresh (fresh:true), '
+      + 'exactly like its deliberately-PURE messageCount one line up');
+  } finally { srv.close(); }
+});
+
+await t('EC4b. ⭐ fresh:true does NOT join an in-flight background revalidate — it must see the POST-import count', async () => {
+  // THE DEFECT EC4 MISSES. EC4 warms the memo with NO concurrent scan running, so it only drives
+  // the memo-HIT path — it never exercises the single-flight LATCH. If a background revalidate
+  // (a status-popover open, or boot warm()) is already IN FLIGHT when /import/preview fires
+  // fresh:true, routing fresh through evidenceRevalidate() makes the fresh caller JOIN that older
+  // promise and receive the count the background scan read BEFORE the import committed — the
+  // read-after-import contract (portal-compat.js:1305) silently returns pre-import data. The
+  // window is one background evidence scan, which WIDENS with vault size (worst on 76k-message
+  // vaults). fresh must run its OWN scan, exactly like data(fresh) does, never a shared latch.
+  //
+  // Deterministic: the background scan is PARKED at its conversation aggregate (held promise)
+  // so it is provably in-flight; the import "commits" (conv 5→42) while it is parked; then the
+  // fresh read fires. With the fix it runs a second, independent scan and sees 42. With the bug
+  // (fresh routed back through the single-flight) it joins the parked promise and returns 5.
+  let conv = 5;                                   // pre-import
+  let releaseBackground;
+  const backgroundHeld = new Promise((r) => { releaseBackground = r; });
+  let convCalls = 0;
+  const db = mkDb();
+  const baseRaw = db.rawQuery.bind(db);
+  db.rawQuery = async (sql, args) => {
+    if (/COUNT\(DISTINCT conversation_id\)/.test(String(sql))) {
+      convCalls++;
+      db.touched.push('evidence:conversations');
+      if (convCalls === 1) { await backgroundHeld; return { results: [{ c: 5 }] }; } // background: parked IN-FLIGHT, reads pre-import 5
+      return { results: [{ c: conv }] };                                             // fresh: its OWN scan, current value
+    }
+    return baseRaw(sql, args);
+  };
+  const readiness = createReadiness({ db, userId: U });
+
+  const background = readiness.get({ slices: ['evidence'] });   // NOT awaited — leaves evidenceRevalidate() in flight
+  await new Promise((res) => setTimeout(res, 30));              // let the background scan reach + park at its held query
+  assert.equal(convCalls, 1, 'fixture sanity: the background revalidate must be parked in-flight at its conversation scan');
+  conv = 42;                                                    // "the import commits while the background scan is parked"
+
+  // Arm the release BEFORE awaiting: under the bug the fresh read JOINS the held promise, so it
+  // only resolves once the background is released — to the PRE-import 5, which reds the assert.
+  // Under the fix the fresh read resolves immediately from its own scan (42), before this fires.
+  setTimeout(() => releaseBackground(), 40);
+  const fresh = (await readiness.get({ slices: ['evidence'], fresh: true })).evidence;
+  assert.equal(fresh.conversationCount, 42,
+    'fresh:true JOINED the in-flight background revalidate and returned its PRE-import count (5). '
+    + 'fresh must run its OWN scan, never evidenceInFlight — this is the read-after-import contract '
+    + '/import/preview depends on (portal-compat.js:1305), and EC4 cannot catch it (no concurrent scan).');
+  releaseBackground();
+  await background.catch(() => {});
+});
+
+await t('W5. ⭐ warm() pre-pays evidence + mindscape — the first user-facing read runs ZERO scans', async () => {
+  const db = mkDb();
+  const r = createReadiness({ db, userId: U });
+  r.warm();
+  await new Promise((res) => setTimeout(res, 30));    // warm is fire-and-forget; let it land
+  db.touched.length = 0;
+  const out = await r.get({ slices: ['evidence', 'mindscape'] });
+  assert.equal(EVIDENCE_TOUCHES(db), 0,
+    'the first post-boot evidence read paid the aggregates — warm() must have populated the memo, '
+    + 'or the status panel\'s first open still pays four live full-table scans');
+  assert.ok(!db.touched.includes('noiseStats'),
+    'the first post-boot mindscape read re-counted — warm() must cover the mindscape memo too');
+  assert.equal(out.evidence.conversationCount, 61, 'and the warmed snapshot carries real values');
+  assert.equal(out.mindscape.generated, true, 'mindscape too (73520 points ⇒ generated)');
+});
+
+await t('M1. mindscape COST — the second read within TTL runs ZERO COUNT queries', async () => {
+  const db = mkDb();
+  const r = createReadiness({ db, userId: U });
+  await r.get({ slices: ['mindscape'] });
+  assert.equal(db.touched.filter((x) => x === 'noiseStats').length, 1, 'fixture sanity: the cold read counts once');
+  await r.get({ slices: ['mindscape'] });
+  assert.equal(db.touched.filter((x) => x === 'noiseStats').length, 1,
+    'the rail polls this @4s for the life of every session — a repeat within TTL must be memo-served');
+});
+
+await t('M2. ⭐ the REAL bustMindscapePoints invalidates the memo — a regenerate shows up on the NEXT read', async () => {
+  // The operator's second requirement — "updates should still show up live" — proven against the
+  // REAL bust chokepoint (mindscape-cache.js), not a hand-rolled invalidation: jobs.js:297 calls
+  // exactly this export when clustering re-runs, so this drives the production wire end to end.
+  let total = 100;
+  const db = mkDb();
+  db.mindscape = { async getNoiseStats() { db.touched.push('noiseStats'); return { total }; } };
+  const r = createReadiness({ db, userId: U });
+  assert.equal((await r.get({ slices: ['mindscape'] })).mindscape.pointCount, 100);
+  total = 250;                                        // "Generate re-ran"
+  // Scope control first: a bust for ANOTHER user must not evict this vault's memo.
+  bustMindscapePoints('someone-else');
+  await r.get({ slices: ['mindscape'] });
+  assert.equal(db.touched.filter((x) => x === 'noiseStats').length, 1,
+    "another user's bust must not evict this memo (userId-scoped listener)");
+  bustMindscapePoints(U);                             // the REAL hook, this user
+  const after = (await r.get({ slices: ['mindscape'] })).mindscape;
+  assert.equal(db.touched.filter((x) => x === 'noiseStats').length, 2,
+    'after the real bust the next read must RE-COUNT — a no-op bust means "Generated · N points" '
+    + 'goes stale for the full TTL after a regenerate, which is the staleness the operator forbade');
+  assert.equal(after.pointCount, 250, 'and it reports the post-regenerate count');
+  // And the all-users form (bustMindscapePoints() with no arg) must evict too:
+  total = 300;
+  bustMindscapePoints();
+  assert.equal((await r.get({ slices: ['mindscape'] })).mindscape.pointCount, 300, 'a global bust evicts as well');
 });
 
 // ── un-dismiss (increment E3, §3.7b) ─────────────────────────────────────────
@@ -947,6 +1151,22 @@ await t('G4. R4 (recorded decision) — the FEED row owns pull progress: bytes a
   assert.equal(r.pullRawBytes, false, 'ten-digit raw byte counts must not reach the screen');
   assert.ok(r.downloadingState.present && r.downloadingState.visible, 'the Labeling status row STATES the downloading state (the drainer’s constant)');
   assert.equal(r.statusHasPct, false, 'and carries NO percent — one signal, one owner (the feed row); duplicating it is the drift class §3.2 ends');
+});
+
+await t('G4b. a FAILED model-pull row points at where the reason lives — and ONLY that row (issue #2)', async () => {
+  // The feed row is content-free by contract (activity-feed.js §SECURITY): a failed download can
+  // only say "Failed", a dead end. The affordance points the owner at the classified reason on the
+  // model status rows above. The fixture carries TWO error rows — a model-pull AND an import — so
+  // this proves the pointer is SCOPED to the dead-end (model-pull) case, not slapped on every error.
+  const r = mountPopover({ MODELPULL_FAILED: '1' });
+  assert.ok(r.recentErrorRows, 'sanity: the recent feed must render the failed rows (else this gate is vacuous)');
+  assert.ok(r.pullFailedAffordance.present && r.pullFailedAffordance.visible,
+    'the failed model-pull row must carry a pointer to where the reason lives (mounted + visible)');
+  // The CONTROL: exactly ONE hint. The import error is ALSO status:error but is not a dead end
+  // (it has its own surface), so it must get no pointer. A count of 2 would mean the affordance
+  // keyed on `status:error` alone; 0 means it never rendered. Only 1 is correct.
+  assert.equal(r.affordanceCount, 1,
+    `exactly one hint — the model-pull error only, never the import error too: got ${r.affordanceCount}`);
 });
 
 await t('G-COST. the popover poll buys EXACTLY its declared slices; evidence + keep-awake are once-per-open (never per tick)', async () => {

@@ -27,6 +27,11 @@ import os from 'node:os';
 import { dataDir } from '../paths.js';
 import { isTokenExpired } from './claude-oauth.js';
 import { resolveClaudeBin } from './claude-bin.js';
+// Auth-validity evidence (subscription-auth-signal.js — a leaf, no cycle): every REAL refresh
+// attempt records its outcome + timestamp, so "connected" on the Intelligence surface can mean
+// VALID rather than stored-creds-EXIST (diagnosed live 2026-07-18: a token four days beyond
+// refresh still rendered "connected"). Timestamps only; no token material crosses this seam.
+import { recordSubscriptionRefreshOutcome } from './subscription-auth-signal.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -249,13 +254,21 @@ export function _resetClaudeRefreshForTests() { _refreshInFlight = null; _lastRe
 /**
  * @returns {Promise<string|null>} the freshly-refreshed token, or null if refresh is unavailable.
  */
-export async function refreshClaudeConfigDirToken({ env = process.env, now = Date.now(), claudeBin, spawnImpl = execFileAsync, platform = process.platform } = {}) {
+export async function refreshClaudeConfigDirToken({ env = process.env, now = Date.now(), claudeBin, spawnImpl = execFileAsync, platform = process.platform, force = false } = {}) {
   if (_refreshInFlight) return _refreshInFlight;
-  if (now - _lastRefreshAt < REFRESH_COOLDOWN_MS) return null; // don't hammer `claude` when it keeps failing
+  // `force` = the owner's EXPLICIT "Refresh now" click (POST /portal/auth/claude/refresh) —
+  // the resetPullBackoff precedent: a deliberate user action may bypass the anti-hammer
+  // cooldown, automatic callers never do. It also keeps the click's outcome honest: without
+  // it, a second click inside 60s would return null WITHOUT attempting, and null-as-failure
+  // would record false negative evidence against a credential nothing actually tested.
+  if (!force && now - _lastRefreshAt < REFRESH_COOLDOWN_MS) return null; // don't hammer `claude` when it keeps failing
   _lastRefreshAt = now;
   _refreshInFlight = (async () => {
     try {
       const bin = claudeBin !== undefined ? claudeBin : resolveClaudeBin({ env });
+      // No `claude` binary ⇒ no attempt was made against the CREDENTIAL, so record nothing:
+      // the token may be perfectly live for hours yet, and turn outcomes keep reporting on it.
+      // Absence of evidence derives 'unknown', which already refuses the "connected" claim.
       if (!bin) return null;
       const dir = claudeConfigDir({ env });
       // `claude -p` is non-interactive and exits after one turn, refreshing its token en route.
@@ -275,8 +288,15 @@ export async function refreshClaudeConfigDirToken({ env = process.env, now = Dat
         // OWN token here rather than delegating to a (nonexistent) parent host. See the section header.
         env: claudeSpawnEnv({ env, configDir: dir }), timeout: 30_000, maxBuffer: 1 << 20,
       });
-      return await readClaudeConfigDirLiveToken({ env, platform, now });
-    } catch { return null; }
+      const token = await readClaudeConfigDirLiveToken({ env, platform, now });
+      // The outcome is recorded HERE, inside the attempt body, not in the proactive tick:
+      // the cooldown return above yields null WITHOUT an attempt, and counting that as a
+      // failure would let a recent on-demand refresh smear 'needs_reconnect' over a healthy
+      // credential. Only a real attempt is evidence. The boolean is derived from the same
+      // value the caller gets, so the signal cannot disagree with the behavior.
+      recordSubscriptionRefreshOutcome(Boolean(token));
+      return token;
+    } catch { recordSubscriptionRefreshOutcome(false); return null; }
     finally { _refreshInFlight = null; }
   })();
   return _refreshInFlight;

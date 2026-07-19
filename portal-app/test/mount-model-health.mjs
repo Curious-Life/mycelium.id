@@ -64,6 +64,11 @@ try {
       hasBar: Boolean(host.querySelector('.mh-bar')),
       barWidth: bar ? (bar.getAttribute('style') || '') : null,
       barIndeterminate: bar ? bar.classList.contains('indeterminate') : null,
+      // For a genuine fault: the PRIMARY red line (must be the accurate, classified message)
+      // and the SECONDARY hint (ollama's raw detail, muted) — two distinct elements, so the
+      // test can prove the message leads and the detail rides underneath rather than replacing it.
+      badText: (host.querySelector('.bad-text')?.textContent || '').replace(/\s+/g, ' ').trim() || null,
+      hint: (host.querySelector('.mh-hint')?.textContent || '').replace(/\s+/g, ' ').trim() || null,
       // An "approvable choice" is a control the owner can operate. The embedder must never
       // offer one — presenting a non-choice as consent is the dishonesty §3.10 removes.
       controls: host.querySelectorAll('select, button, input').length,
@@ -83,6 +88,13 @@ try {
     // ── the genuine FAULTS — these MUST be red, or the "not red" cases above prove nothing ──
     error:       render({ health: H('error', { detail: 'ollama exited 1' }), kind: 'consented' }),
     down:        render({ health: H('down', { message: 'Not running.' }), kind: 'consented' }),
+    // A CLASSIFIED runtime/download/disk fault: the accurate, actionable message leads; ollama's
+    // own raw string rides underneath as a muted, secondary hint (never replacing the message).
+    unavailable: render({ health: H('unavailable', {
+      message: 'Not enough disk space to download the model — free up space, then retry.',
+      detail: 'ollama pull failed: write /Users/o/.ollama/blobs: no space left on device',
+      model: 'qwen3.5:4b',
+    }), kind: 'consented' }),
     deps_missing:render({ health: H('deps_missing', { message: 'Missing dependencies.' }), kind: 'consented' }),
     // ── the WORK ──
     ok:          render({ health: H('ok', { message: 'Enriching with qwen3.5:4b.', model: 'qwen3.5:4b' }), kind: 'consented' }),

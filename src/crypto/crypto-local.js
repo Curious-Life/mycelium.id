@@ -257,9 +257,12 @@ const ENCRYPTED_FIELDS = {
   conversation_summaries: [],
 
   // Peer messages — direct messages exchanged with a connected instance. The
-  // body is a private communication → ENCRYPT. All other columns (direction,
-  // status, read, nonce, ids) are structural state the server queries.
-  // See migrations/0015_peer_messages.sql.
+  // body (content) is a private communication, but like `messages` it is NOT
+  // field-encrypted: collapsed to plaintext-inside whole-file SQLCipher in the
+  // SQLCipher collapse (Cut 4, PR #329). At-rest secrecy for this table is
+  // whole-file SQLCipher only; `secrets` is the lone table that keeps a
+  // per-field envelope. The INSERTs in src/db/connections.js bind content as a
+  // plaintext `?`. See migrations/0015_peer_messages.sql.
   peer_messages: [],
 
   // Sharing contexts double as "Context Areas" (#19). `name` stays plaintext (a

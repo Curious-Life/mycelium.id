@@ -1,23 +1,22 @@
-// src/hardware/recommend.js — rank catalog models by how well they fit the box
-// AND how good they are as a warm personal companion / self-development guide.
+// src/hardware/recommend.js — rank catalog models by how well they fit the box, and
+// star ONLY the ones we actually use.
 //
-// Pure + deterministic. Given a hardware descriptor (from detect.js) it scores
-// every catalog model with the computed fit (fit.js) and returns the FULL list,
-// best-first, for the UI to scroll. "Best" blends two axes (design §4.2):
-//   • compatibility — does it fit, right-sized? (fit.js)
-//   • quality       — companion-suitability: warmth · EQ · reflective depth
-//                     (catalog.js `quality`, grounded in EQ-Bench; NOT generic
-//                     capability — we rank for personal growth, not coding).
+// Pure + deterministic. Given a hardware descriptor (from detect.js) it scores every
+// catalog model with the computed fit (fit.js) and returns the FULL list to browse.
 //
-// The composite mirrors odysseus/llmfit's weighted-composite shape (a single
-// use-case for now; per-use-case weights are a documented deferral) but uses our
-// companion-tuned quality, so the warm family (gemma2, mistral-nemo) surfaces
-// ahead of cold-but-clever ones (qwen, phi) at every tier.
+// ⚠️ THE ★ IS CURATED, NOT ALGORITHMIC (operator decision 2026-07-19). It used to blend
+// a "companion warmth" family-prior (gemma2, mistral-nemo…) with fit and star the top 3 —
+// which headlined gemma, a family we don't use and judged not good. A model we haven't
+// validated must never carry a "we recommend this" claim (the §3.11d silent-lie class).
+// So the ★ now comes ONLY from endorsedLocalModels() (single-sourced in role-models.js);
+// everything else is LISTED, ordered by hardware fit, with no star. The `quality` field
+// survives only as a last-resort tiebreak within the browse list — it no longer decides
+// what we recommend, nor the headline order.
 
 import { CATALOG } from './catalog.js';
 import { estimateMemoryGb, fitScore, fitLevel } from './fit.js';
 import { monthsSince } from './catalog-meta.js';
-import { labelingRecommendedModel } from '../inference/role-models.js';
+import { labelingRecommendedModel, endorsedLocalModels } from '../inference/role-models.js';
 
 /**
  * The memory budget a model may use: discrete GPU VRAM when present, otherwise a
@@ -89,31 +88,29 @@ export function recommendModels(hw, { ctx = 8192, limit } = {}) {
     };
   });
 
+  // ★ ENDORSED = the curated models we actually use (single-sourced). Only these earn the
+  // badge, and only where they FIT (we don't recommend a model this box can't run).
+  const endorsed = new Set(endorsedLocalModels());
+  for (const m of scored) m.recommended = endorsed.has(m.name) && m.fitScore > 0;
+
+  // Band A (fits): endorsed-and-fitting FIRST (the ones we use lead), then the rest by
+  // hardware fit — right-sized first (fitScore desc), newer first (ageMonths asc), and
+  // `quality` only as a final tiebreak. This drops the warmth ranking that used to float
+  // gemma to the top of every box.
+  const rank = (m) => (m.recommended ? 1 : 0);
   const bandA = scored
     .filter((m) => m.fitScore > 0)
-    .sort((a, b) => (b.rankScore - a.rankScore) || (b.quality - a.quality));
+    .sort((a, b) =>
+      (rank(b) - rank(a))
+      || (b.fitScore - a.fitScore)
+      || ((a.ageMonths ?? 999) - (b.ageMonths ?? 999))
+      || (b.quality - a.quality));
   const bandB = scored
     .filter((m) => m.fitScore === 0)
     .sort((a, b) => a.paramsB - b.paramsB);
 
-  // "Recommended from us" — our top picks for a personal companion on THIS box:
-  // the highest-ranked models that both fit comfortably and are recent (≤ a year),
-  // so we never headline a stale model. rankScore already blends companion-quality
-  // (warmth/EQ prior + EQ-Bench) with hardware fit. Top 3 get the badge.
-  const RECOMMENDED_COUNT = 3;
-  const RECOMMENDED_MAX_AGE_MONTHS = 12;
-  const topPicks = new Set(
-    bandA
-      .filter((m) => m.ageMonths == null || m.ageMonths <= RECOMMENDED_MAX_AGE_MONTHS)
-      .slice(0, RECOMMENDED_COUNT)
-      .map((m) => m.name),
-  );
-  for (const m of scored) m.recommended = topPicks.has(m.name);
-
-  // Role-aware picks (curated operator decisions, NOT the warmth ranking). The on-box
-  // labeling model is small/analytical — it never earns the companion `recommended`
-  // badge, so we tag it independently for a "Recommended for labeling" pill in the UI.
-  // Single-sourced from role-models.js so it can't drift from the actual default.
+  // Role-aware tag (curated). The on-box labeling model is single-sourced from
+  // role-models.js; the UI shows it as "for labeling" context on the recommended chip.
   // (Descriptions→cloud-Regolo is a cloud preset, not a local catalog model, so it's
   // badged on the cloud-preset lane, not here.)
   const labelPick = labelingRecommendedModel();

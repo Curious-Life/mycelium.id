@@ -39,6 +39,7 @@ const S = ${JSON.stringify({
   unknownAfterFirst: ENV('UNKNOWN_AFTER_FIRST'),
   unknownAlways: ENV('UNKNOWN_ALWAYS'),
   modelPull: ENV('MODELPULL'),
+  modelPullFailed: ENV('MODELPULL_FAILED'),
   keepAwake: ENV('KEEPAWAKE'),
   onBatt: ENV('ONBATT'),
 })};
@@ -107,11 +108,23 @@ export async function apiGet(path) {
   const p = String(path);
   globalThis.__fetches.push(p);
   if (p.includes('/portal/activity')) {
+    // A FAILED model-pull sits in recent with status error. The affordance under test:
+    // that row alone gets a see-the-model-status pointer, because a content-free feed can only
+    // say Failed. A CONTROL non-model-pull error (import) shares the error status but is NOT a
+    // dead end (its own surface reports it), so it must get NO pointer.
+    const recent = S.modelPullFailed ? [
+      { id: 'mp-err', kind: 'model-pull', stage: 'Downloading the labeling model', model: 'qwen3.5:4b',
+        process: 'downloading', done: 0, total: 0, remaining: 0, etaSeconds: null, status: 'error',
+        stalled: false, startedAt: null, finishedAt: '2026-07-18 12:00:00' },
+      { id: 'imp-err', kind: 'import', stage: 'Importing messages', model: null,
+        process: null, done: 0, total: 0, remaining: 0, etaSeconds: null, status: 'error',
+        stalled: false, startedAt: null, finishedAt: '2026-07-18 12:00:00' },
+    ] : [];
     return { active: S.modelPull ? [{
       id: 'mp-1', kind: 'model-pull', stage: 'Downloading the labeling model', model: 'qwen3.5:4b',
       process: 'downloading', done: 1200000000, total: 3400000000, remaining: 2200000000,
       etaSeconds: 600, status: 'running', stalled: false, startedAt: null, finishedAt: null,
-    }] : [], recent: [] };
+    }] : [], recent };
   }
   return {};
 }
@@ -220,6 +233,14 @@ try {
   // … while the feed row renders the bytes as SIZES.
   result.pullBytes = seen(D.body, '1.2 GB / 3.4 GB');
   result.pullRawBytes = result.workingTextAtMount.includes('1200000000');
+
+  // The failed-model-pull affordance (issue #2): a content-free "Failed" row is a dead end, so
+  // the classified reason lives on the model status rows above — the pointer says where. It must
+  // render for the model-pull error row and NOT for the CONTROL import error row (which has its
+  // own surface). Count the hints: exactly one (the model-pull row), never two.
+  result.pullFailedAffordance = seen(D.body, 'See the model status above');
+  result.affordanceCount = D.querySelectorAll('[data-testid="modelpull-fault-hint"]').length;
+  result.recentErrorRows = norm(bodyMinusStatus()).includes('Failed');
 
   // Let the poll tick a few times (pollMs=60 ⇒ ≥3 ticks in 250ms).
   await new Promise((r) => setTimeout(r, 250));

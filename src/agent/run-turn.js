@@ -108,11 +108,17 @@ export async function runAgentTurn(
   if (!loop || typeof loop.run !== 'function') throw new TypeError('runAgentTurn: loop with run() required');
 
   // ── §4g, for the tasks that need it (sensitivity.js) ─────────────────────────
-  // This path does NOT go through router.infer, so it never saw the §4g gate: it hard-coded
-  // `{ sensitive: false }` below and resolved its primary with no jurisdiction check at all.
-  // The agent NARRATION WALK runs here with inferenceTask 'narrate' (narration-walk.js →
-  // narration-runner.js → jobs.js), i.e. the user's mindscape descriptions were free to go to
-  // a US provider while role-models.js claimed they could not (found 2026-07-16).
+  // This path does NOT go through router.infer, so it never saw the §4g gate; it now derives
+  // `sensitive` from the task, exactly like the router. The block below is the run-turn twin of
+  // router.infer's refusal: a sensitive task on a non-exempt US provider falls closed to the
+  // safe chain / on-box floor / an honest skip.
+  //
+  // ⚠️ DORMANT as of 2026-07-19: SENSITIVE_TASKS is EMPTY (narrate — the narration walk's task —
+  // was removed by operator decision), so `sensitive` is false for every task and NO caller
+  // passes an explicit flag here, i.e. this block does not execute today. It is RETAINED, not
+  // deleted: it is the generic run-turn enforcement for any task that rejoins SENSITIVE_TASKS.
+  // The explicit-`sensitive:true` callers (claims) never take THIS path — they go through
+  // router.infer / the cascade, whose gates are live and tested (verify:narrate-sovereignty C1-C5).
   const sensitive = isSensitiveTask(inferenceTask);
   let provider = await resolveInferenceConfigForTask(db, userId, inferenceTask);
   // ⚠️ THE PRIMARY NEEDS THE GATE, NOT JUST THE CHAIN. The chain is only the FALLBACK ladder —

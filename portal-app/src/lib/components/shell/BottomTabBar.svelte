@@ -3,7 +3,8 @@
 	import { goto } from '$app/navigation';
 	import { apiGet } from '$lib/api';
 	import { navigationState, type PrimaryView } from '$lib/stores/navigation';
-	import { PRIMARY_NAV, navItemActive, type NavItem } from '$lib/nav/config';
+	import { workspace } from '$lib/workspace/store';
+	import { PRIMARY_NAV, navItemActive, navItemViewId, type NavItem } from '$lib/nav/config';
 
 	const currentView = $derived($navigationState.primaryView);
 
@@ -28,13 +29,23 @@
 		return navItemActive(id, currentView);
 	}
 
-	// Real <a href> anchors (see Sidebar) — modified/middle clicks open a new tab
-	// natively (spec #17); a plain click is intercepted for same-tab SPA nav (#16),
-	// with a short same-target guard against double-fire stacking (#15).
+	// Real <a href> anchors (see Sidebar) — a plain click is intercepted for
+	// same-tab SPA nav (#16: route → openFromRoute → openInActiveTab, i.e. the
+	// CURRENT workspace tab navigates in place), with a short same-target guard
+	// against double-fire stacking (#15). ⌘/ctrl-click and middle-click are the
+	// EXPLICIT new-workspace-tab gestures (the native browser new-tab is dead
+	// inside Tauri/WKWebView); shift/alt stay native.
 	let lastTabId: string | null = null;
 	let lastTabAt = 0;
+	// people→connections mapping lives ONCE in $lib/nav/config (navItemViewId).
+	const tabViewId = navItemViewId;
 	function handleTab(e: MouseEvent, tab: TabItem) {
-		if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+		if (e.metaKey || e.ctrlKey) {
+			e.preventDefault();
+			workspace.openOrFocus(tabViewId(tab));
+			return;
+		}
+		if (e.shiftKey || e.altKey || e.button !== 0) return;
 		e.preventDefault();
 		const now = Date.now();
 		if (tab.id === lastTabId && now - lastTabAt < 400) return;
@@ -43,6 +54,12 @@
 		if (currentView === tab.id) return;
 		navigationState.setPrimaryView(tab.id);
 		goto(tab.href);
+	}
+	// Middle presses arrive as auxclick (button 1), never click.
+	function handleTabAux(e: MouseEvent, tab: TabItem) {
+		if (e.button !== 1) return;
+		e.preventDefault();
+		workspace.openOrFocus(tabViewId(tab));
 	}
 
 	interface Props {
@@ -60,6 +77,7 @@
 			class:active={isActive}
 			href={tab.href}
 			onclick={(e) => handleTab(e, tab)}
+			onauxclick={(e) => handleTabAux(e, tab)}
 			aria-label={tab.label}
 			aria-current={isActive ? 'page' : undefined}
 		>

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
 	// $effect / $state / $derived are Svelte 5 compiler runes — no import.
 	import { marked } from 'marked';
@@ -219,6 +219,19 @@
 			toasts.error('Couldn’t save your changes — check your connection. Your edits are still here.');
 		}
 	}
+
+	// In-place tab navigation (workspace openInActiveTab) can UNMOUNT this view
+	// with unsaved edits — without this flush, keystrokes would be lost. The guard
+	// is `editing` (DIRTINESS scope), deliberately NOT `autosaveTimer` (a pending
+	// timer): after a FAILED autosave the timer is already null while the buffer
+	// still differs from what's persisted — the failure toast promises "your edits
+	// are still here", so the flush must retry on destroy too. autosave() no-ops
+	// when the buffer already matches persisted, reads the buffer synchronously,
+	// and the request outlives the component. Not unconditional: outside edit mode
+	// editContent can be stale ('' or a previous doc's buffer).
+	onDestroy(() => {
+		if (editing) void autosave();
+	});
 
 	// Exit editing — flush any pending autosave first so no keystroke is lost.
 	async function finishEditing() {

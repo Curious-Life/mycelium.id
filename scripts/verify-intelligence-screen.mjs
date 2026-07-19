@@ -34,7 +34,9 @@ try {
 }
 rec('S0. the screen mounts and renders', out.ok === true, out.error ? String(out.error).slice(0, 200) : '');
 
-// The §4g EXEMPTION configuration, driven as its own mount (the opt-in is read at load).
+// The subscription opt-in ON, driven as its own mount (the opt-in is read at load). Since
+// narrate is no longer §4g-sensitive (2026-07-19), this flag no longer GATES Descriptions —
+// S4b uses this probe to prove the row offers every provider whether the flag is on or off.
 let exempt = {};
 try {
   exempt = JSON.parse(
@@ -42,48 +44,14 @@ try {
       { cwd: 'portal-app', encoding: 'utf8', timeout: 120000, env: { ...process.env, PROBE: 'exempt' } }).trim().split('\n').pop(),
   );
 } catch (e) { exempt = { error: String(e?.message || e) }; }
-rec('S0b. the screen also mounts with §4g\'s subscription exemption ON', exempt.ok === true, exempt.error ? String(exempt.error).slice(0, 160) : '');
-
-// The SOFT-FAIL configuration: the one read that decides the §4g guarantee returns 503.
-let softfail = {};
-try {
-  softfail = JSON.parse(
-    execFileSync('node', ['--conditions', 'browser', 'test/mount-intelligence-screen.mjs'],
-      { cwd: 'portal-app', encoding: 'utf8', timeout: 120000, env: { ...process.env, PROBE: 'softfail' } }).trim().split('\n').pop(),
-  );
-} catch (e) { softfail = { error: String(e?.message || e) }; }
-rec('S0c. the screen mounts when the §4g read FAILS (it must degrade, not crash)', softfail.ok === true, softfail.error ? String(softfail.error).slice(0, 160) : '');
-
-// The ONLY configuration that reaches the dead-end: §4g read failed AND the vault's sole
-// provider is the subscription. Without it, "no dead-end" asserts a branch that never runs —
-// the fixture always had EU/local providers (independent review ×6, 2026-07-16).
-let noeu = {};
-try {
-  noeu = JSON.parse(
-    execFileSync('node', ['--conditions', 'browser', 'test/mount-intelligence-screen.mjs'],
-      { cwd: 'portal-app', encoding: 'utf8', timeout: 120000, env: { ...process.env, PROBE: 'softfail-noeu' } }).trim().split('\n').pop(),
-  );
-} catch (e) { noeu = { error: String(e?.message || e) }; }
-rec('S0d. …and mounts for a vault whose ONLY provider is the subscription', noeu.ok === true, noeu.error ? String(noeu.error).slice(0, 160) : '');
-
-// The flag reads FINE and says not-exempt, and there is no EU/local provider: the ONE state
-// where the dead-end is the TRUE thing to say. Without this, "no dead-end" was only ever
-// asserted negatively — deleting the guidance entirely passed (independent review ×7).
-let noeuKnown = {};
-try {
-  noeuKnown = JSON.parse(
-    execFileSync('node', ['--conditions', 'browser', 'test/mount-intelligence-screen.mjs'],
-      { cwd: 'portal-app', encoding: 'utf8', timeout: 120000, env: { ...process.env, PROBE: 'noeu-known' } }).trim().split('\n').pop(),
-  );
-} catch (e) { noeuKnown = { error: String(e?.message || e) }; }
-rec('S0e. …and for a KNOWN not-exempt vault with no EU/local provider', noeuKnown.ok === true, noeuKnown.error ? String(noeuKnown.error).slice(0, 160) : '');
+rec('S0b. the screen also mounts with the subscription opt-in ON', exempt.ok === true, exempt.error ? String(exempt.error).slice(0, 160) : '');
 
 t('S1. every §3.11b function row renders — FROM THE SERVED SPINE, not a hardcoded list', () => {
   assert.equal(out.renderedKeys, 6,
     `all six rows must render (Conversation, Understanding, Descriptions, Search, Transcription, Voice) — got ${out.renderedKeys}: ${out.labels?.join(', ')}`);
   // A hardcoded taxonomy is map §5.2's bug (three implementations, each drifting). The screen
   // renders whatever /providers/presets serves; P10b pins that the route serves it intact.
-  assert.ok(out.labels.includes('Understanding your messages') && out.labels.includes('Search'));
+  assert.ok(out.labels.includes('Labeling') && out.labels.includes('Search'));
 });
 
 t('S2. ⭐ approving Understanding sends {function} — NOT {task} (the dormancy fix, end to end)', () => {
@@ -109,117 +77,21 @@ t('S2b. ⭐ a PROVIDER button SENDS ITS PROVIDER — it does not clear the assig
     `a provider button must send {function, providerId}. Sending {model:''} DELETES the assignment (portal-providers.js: providerId == null → delete). Got: ${JSON.stringify(out.providerSent)}`);
 });
 
-t('S4b. ⭐ §4g uses the SERVER\'s jurisdiction — a lookalike host is NOT offered as EU-safe', () => {
-  // The first version classified providers client-side with an unanchored regex and offered
-  // `https://localhost.attacker.io/v1` to a §4g-limited function — re-introducing, verbatim, the
-  // anti-pattern presets.js:40-49 documents deleting. 9 of 13 URLs disagreed with the server.
-  // The fixture carries that exact host; if the client ever guesses again, this fails.
-  assert.ok(!out.descriptionsButtonLabels.some((l) => /Lookalike/i.test(l)),
-    `a US host whose NAME contains "localhost" must not be offered to an eu-or-local function — ask the server, never substring the URL. Offered: ${JSON.stringify(out.descriptionsButtonLabels)}`);
+t('S4b. ⭐ the subscription opt-in no longer GATES Descriptions — every provider offered either way', () => {
+  // Before 2026-07-19, Descriptions (eu-or-local) hid US providers and offered the subscription
+  // ONLY under the §4g exemption. Now Descriptions is jurisdiction 'any', so the opt-in is
+  // irrelevant to this row: with it OFF (the default probe, `out`) AND ON (PROBE=exempt) the
+  // subscription and every other provider are offered. This is the regression guard that the
+  // lifted limit did not quietly re-attach itself to the exemption flag.
+  assert.equal(out.descriptionsOffersSubscription, true,
+    `opt-in OFF: the subscription must still be offered (narrate is no longer §4g-sensitive). Got: ${JSON.stringify(out.descriptionsButtonLabels)}`);
+  assert.equal(exempt.descriptionsOffersSubscription, true,
+    `opt-in ON: the subscription must be offered too. Got: ${JSON.stringify(exempt.descriptionsButtonLabels)}`);
+  // …and a plain US API key + a US lookalike are ALSO offered now — no client-side filtering.
+  assert.ok(out.descriptionsButtonLabels.some((l) => /OpenAI \(US\)/.test(l)),
+    `a plain US provider must now be offered for Descriptions. Got: ${JSON.stringify(out.descriptionsButtonLabels)}`);
   assert.ok(out.descriptionsButtonLabels.some((l) => /Ollama \(local\)/.test(l)),
-    'and a genuine local provider must still be offered — the old regex hid real EU/local hosts too');
-});
-
-t('S4c. ⭐ §4g\'s EXEMPTION clause — the subscription is offered ONLY when opted in, and the copy says so', () => {
-  // The router's rule is `sensitive && /^us/.test(jurisdiction) && !cfg.sensitiveUsExempt`.
-  // Filtering on jurisdiction ALONE made this screen print "…stay in the EU or on your device"
-  // over a vault where narrate DEMONSTRABLY ran on us-standard — a FALSE PRIVACY STATEMENT
-  // (independent review ×2, 2026-07-16). Half the rule is not the rule.
-  assert.equal(out.descriptionsOffersSubscription, false,
-    `with the opt-in OFF the subscription is US and the router REFUSES it — it must not be offered. Got: ${JSON.stringify(out.descriptionsButtonLabels)}`);
-  assert.equal(out.limitMentionsException, false, 'and with it off, the plain EU/on-device statement is the true one');
-  // The exempt half runs as its own process (PROBE=exempt) — see below.
-  assert.deepEqual(exempt.descriptionsButtonLabels.filter((l) => /Claude \(subscription\)/.test(l)), ['Claude (subscription)'],
-    `with the opt-in ON the router DOES send narrate to the subscription, so hiding it would be a different lie. Got: ${JSON.stringify(exempt.descriptionsButtonLabels)}`);
-  assert.ok(exempt.limitMentionsException,
-    'and the copy must state the exception — claiming "EU or on your device" while narrate runs on US is the §3.11d silent lie, inverted');
-  // Never a plain US API key, exactly as resolve.js applies the exemption.
-  assert.ok(!exempt.descriptionsButtonLabels.some((l) => /OpenAI|Lookalike/.test(l)),
-    `the exemption is SUBSCRIPTION-ONLY — a plain US API key must never be offered. Got: ${JSON.stringify(exempt.descriptionsButtonLabels)}`);
-});
-
-t('S4d. ⭐ flipping §4g LIVE re-renders the guarantee — the promise cannot go stale in-pane', () => {
-  // THE REGRESSION THIS CATCHES WAS INTRODUCED BY THE FIX FOR ITS OWN PARENT BUG. The §4g toggle
-  // lives in AISettings, mounted as a SIBLING in this same pane. While the flag was a private
-  // onMount snapshot, flipping it twenty lines below left THIS screen printing "…stay in the EU
-  // or on your device" while the router already sent narrate to us-standard — a false privacy
-  // statement, one scroll away, no navigation (independent review ×3, 2026-07-16).
-  //
-  // The rule that generalises: "the server is the source of truth, so a stale display is ugly
-  // but harmless" is TRUE of a model picker and FALSE here — HERE THE DISPLAY IS THE PROMISE.
-  const { beforeFlip, afterFlip } = out.liveToggle;
-  assert.equal(beforeFlip.descOffersSubscription, false, 'opt-in OFF: the subscription is US and the router refuses it');
-  assert.equal(beforeFlip.saysException, false, 'opt-in OFF: the plain EU/on-device statement is the true one');
-  assert.equal(afterFlip.descOffersSubscription, true,
-    'after a LIVE flip the subscription must appear WITHOUT a remount — the router already honours it');
-  assert.ok(afterFlip.saysException, 'and the copy must state the exception immediately');
-  assert.equal(afterFlip.stillClaimsEuOnly, false,
-    'and it must STOP claiming "EU or on your device" — that is the false privacy statement this whole gate exists to prevent');
-});
-
-t('S4e. ⭐ an UNVERIFIED §4g flag claims NOTHING — not the EU promise, not the exception', () => {
-  // THE FIX FOR THIS WAS WRITTEN AND NEVER WIRED. The store carried a `loaded` flag whose own
-  // doc said "consumers should not claim anything before then" — and nothing read it. Because
-  // `allowed` defaults to false, an UNREAD flag was indistinguishable from "opted out", so the
-  // screen printed "…stay in the EU or on your device" on an EXEMPT vault. Transient on first
-  // paint; PERMANENT when the read soft-fails, because the setter never fired at all
-  // (independent review ×4, 2026-07-16). A guarantee you have not verified must not be printed.
-  assert.equal(softfail.claimsWhileUnknown.printsEuOnly, false,
-    'with the §4g read FAILED the screen must NOT print the opt-in-OFF guarantee — it does not know it, and on this path it never will');
-  // ⚠️ NO LYING SPINNER (§3.5, this component's own rule at the health line). With options
-  // available the honest render is to OFFER them and SAY NOTHING about the limit. "Checking…"
-  // belongs ONLY to the case where there is nothing to offer — anywhere else it claims work is
-  // in flight when the read has already failed and nothing is retrying.
-  // This line WAS a verbatim duplicate of the assertion five lines above (printsEuOnly, twice),
-  // so the property half this fix's rationale rests on was pinned by NOTHING: re-adding the
-  // spinner alongside the list left the gate GREEN (independent review ×7, 2026-07-16). I wrote
-  // the comment, held the field, and asserted the wrong thing.
-  assert.equal(softfail.claimsWhileUnknown.printsChecking, false,
-    'with providers offerable, "Checking…" is a spinner claiming work that is NOT in flight — the read already failed and nothing retries. Offer the options and say nothing about the limit.');
-  // …and it must not swing the other way either: no exception copy without knowing.
-  // ⚠️ THE PREVIOUS VERSION OF THIS LINE WAS A TAUTOLOGY I WROTE:
-  //     assert.ok(!/except…/.test(String(softfail.limitMentionsException ? 'x' : '')))
-  // — it tested the regex against the literal 'x' or '', which it can never match, so it always
-  // passed. A vacuous assertion, in the gate added to catch unverified claims. Assert the FIELD.
-  assert.equal(softfail.claimsWhileUnknown.printsException, false,
-    'nor may it assert the exception it has not verified');
-  // ⭐ AND THE BEHAVIOUR — but ONLY the part that is actually false.
-  // ⚠️ THIS ASSERTION USED TO SAY "a filtered list IS an assertion about §4g" and require ZERO
-  // buttons. That reason was FALSE, and freezing it here made the correct, narrower fix a gate
-  // regression — the gate itself carrying the overclaim (independent review ×6, 2026-07-16).
-  // The truth: with the flag unknown the list is exactly {eu-zdr, local}, and the router allows
-  // every one of those for narrate REGARDLESS of the exemption (it refuses only us-* AND
-  // not-exempt). The exemption only ADDS the subscription. So the list is a sound
-  // UNDER-approximation — fail-closed and useful — and demanding it be empty cost a real
-  // capability: a single 503 froze this row forever, with no buttons, no assignment shown and no
-  // retry, under a "Checking…" spinner that claimed work was in flight when none was.
-  // What IS false while unknown is the dead-end: "Connect an EU or on-device model" is a lie to
-  // an exempt vault whose subscription would qualify. Assert exactly that.
-  // ⚠️ ASSERTED IN THE noeu CONFIG, not softfail: the dead-end only renders when offerable() is
-  // EMPTY, and softfail's fixture has Regolo + Ollama — so asserting it there tested a branch
-  // that never ran (independent review ×6). This is the vault the lie was written about.
-  assert.equal(noeu.claimsWhileUnknown.printsDeadEnd, false,
-    'with the §4g flag unknown and only a subscription connected, the screen must NOT say "Connect an EU or on-device model" — that subscription might already qualify, so it is telling the user to connect what they have');
-  assert.ok(noeu.claimsWhileUnknown.printsChecking,
-    'it must say it is still checking instead — an empty list with no explanation is its own dishonesty');
-  // The eu-zdr/local options must STILL be offered: the router allows them either way, and
-  // withholding them buys no honesty (the fixture has Regolo + Ollama).
-  assert.ok(softfail.claimsWhileUnknown.descButtonCount > 0,
-    `withholding eu-zdr/local providers while the flag is unknown costs capability and buys nothing — the router allows them regardless. Got ${softfail.claimsWhileUnknown.descButtonCount}`);
-  // …and the subscription must NOT appear: THAT is the part the unknown flag genuinely gates.
-  assert.ok(!softfail.claimsWhileUnknown.descButtonLabels.some((l) => /Claude \(subscription\)/.test(l)),
-    `the subscription is the ONLY thing the exemption changes, so an unverified flag must not offer it. Got: ${JSON.stringify(softfail.claimsWhileUnknown.descButtonLabels)}`);
-});
-
-t('S4f. ⭐ when the §4g limit IS known and nothing qualifies, the screen says so — no silent dead row', () => {
-  // The POSITIVE case. Every other probe asserts the dead-end must NOT appear; none reached the
-  // state where it SHOULD, so deleting the guidance outright left the gate green — reinstating
-  // exactly the dead row this work exists to prevent (independent review ×7, 2026-07-16).
-  // Assert what must be there, not only what must not.
-  assert.ok(noeuKnown.claimsWhileUnknown.printsDeadEnd,
-    'flag known + not exempt + no EU/local provider ⇒ the user genuinely has nothing usable for Descriptions, and must be told where to fix it — an empty row with no explanation is its own dishonesty');
-  assert.equal(noeuKnown.claimsWhileUnknown.printsChecking, false,
-    'and it must NOT say "Checking…" — the flag IS known; that would be a spinner over a settled answer');
+    'and a genuine local provider is still offered');
 });
 
 t('S3. the recommendation is SELECTABLE, and "" is Off (the consent gate has an off-ramp)', () => {
@@ -231,11 +103,18 @@ t('S3. the recommendation is SELECTABLE, and "" is Off (the consent gate has an 
   assert.ok(out.offOptionIsEmpty, '"" must be an explicit, labelled Off — declining is a supported choice, not an accident');
 });
 
-t('S4. ⭐ §3.11d — an eu-or-local function does NOT offer a US provider, and says why', () => {
-  assert.equal(out.descriptionsOffersUS, false,
-    'Descriptions must not offer a US model: narrate is §4g-sensitive, the router REFUSES it, and something else runs. Offering a choice the system overrides is a silent lie.');
-  assert.equal(out.descriptionsOffersEU, true, 'but an EU provider must still be offered — the limit is not "no cloud"');
-  assert.ok(out.descriptionsStatesLimit, 'and the limit must state its REASON — hiding options unexplained is its own dishonesty');
+t('S4. ⭐ Descriptions offers EVERY provider (limit lifted 2026-07-19) and prints NO false-privacy copy', () => {
+  // The inverse of what this gate used to assert. narrate left SENSITIVE_TASKS, so the router
+  // runs Descriptions on the user's chosen provider (US included) — the screen must OFFER them
+  // all. Offering US while the router refused it was the old "silent lie"; now HIDING US (and
+  // re-printing "stays in the EU") would be the lie, because the router happily runs it.
+  assert.equal(out.descriptionsOffersUS, true,
+    `Descriptions must now offer a US provider — narrate is no longer §4g-sensitive, so the router runs it there. Got: ${JSON.stringify(out.descriptionsButtonLabels)}`);
+  assert.equal(out.descriptionsOffersEU, true, 'and the EU recommendation is still offered (Regolo, the sovereign default)');
+  assert.equal(out.descriptionsStatesLimit, false,
+    'the "stay in the EU or on your device" limit copy must be GONE — the operator removed the limit, so printing it would be a false privacy statement');
+  assert.equal(out.descriptionsPrintsDeadEnd, false,
+    'and there is no "Connect an EU or on-device model" dead-end — every configured provider is offerable');
 });
 
 t('S5. ⭐ §3.10d-c — the BUNDLED embedder renders as "Included", never as a choice', () => {
@@ -328,8 +207,48 @@ t('S8. ⭐ MindscapeInvite hosts THE screen and hand-rolls no second connect-AI'
   }
 });
 
+// ── The stale-badge fix (2026-07-18), driven at its own timescale (PROBE=poll) ─────────────
+// THE BUG: the screen read `?slices=models` once in onMount; approve()/assign() never
+// refetched, so "Understanding → qwen3.5:4b" left the badge saying "No labeling model
+// approved" until remount — the operator read that as "selecting the model doesn't work".
+// The fixture is a phase machine (settled-unapproved → busy → settled-approved) advanced by
+// the driver; the mount records every readiness URL, so these asserts count actual fetches.
+let poll = {};
+try {
+  poll = JSON.parse(
+    execFileSync('node', ['--conditions', 'browser', 'test/mount-intelligence-screen.mjs'],
+      { cwd: 'portal-app', encoding: 'utf8', timeout: 120000, env: { ...process.env, PROBE: 'poll' } }).trim().split('\n').pop(),
+  );
+} catch (e) { poll = { error: String(e?.message || e) }; }
+rec('S9a. the poll probe mounts', poll.ok === true, poll.error ? String(poll.error).slice(0, 200) : '');
+
+t('S9. ⭐ approving REFETCHES the models slice — the badge reflects the write, not the mount snapshot', () => {
+  const p = poll.poll || {};
+  assert.equal(p.afterApprove - p.preApprove, 1,
+    `a successful approve must buy exactly ONE immediate models refetch. Removing it re-ships the stale badge (mount-time snapshot forever). Got ${p.preApprove}→${p.afterApprove}`);
+  assert.ok((p.urls || []).every((u) => /slices=models(&|$)/.test(u)),
+    `every readiness fetch this screen makes must buy ONLY the models slice (SYNC, zero-DB — C1's priced set). Got: ${JSON.stringify(p.urls)}`);
+});
+
+t('S10. the poll TICKS while a member is busy — a live download is tracked, not frozen', () => {
+  const p = poll.poll || {};
+  assert.ok(p.afterBusyWindow - p.afterApprove >= 2,
+    `with the labeler 'downloading', a ~5s window must see ≥2 poll ticks (2s cadence). Got ${p.afterApprove}→${p.afterBusyWindow}`);
+});
+
+t('S11. ⭐ the poll STOPS when everything settles — zero fetches across two windows (the COST gate)', () => {
+  // Gates must assert COST, not shape (#200: a 4s poll ran 2,700 scans/hour past 300 gates).
+  // The server side of this poll is priced by verify-readiness C1 (`models` ∈ POLLED, zero DB
+  // touches); THIS pins the client side: the poll's interval only EXISTS while unsettled.
+  const p = poll.poll || {};
+  assert.equal(p.preApprove - p.afterMount, 0,
+    `settled at mount ⇒ NO poll may start: a 2.5s window after mount must buy zero fetches. Got ${p.afterMount}→${p.preApprove}`);
+  assert.equal(p.w2 - p.w1, 0,
+    `once the fixture settles, two further would-be tick windows (~4.5s) must buy ZERO fetches — an unconditional/never-stop poll fails here. Got ${p.w1}→${p.w2}`);
+});
+
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
-console.log(`VERDICT: ${allPass ? 'GO — the Intelligence screen: by function, from the served spine, approves by FUNCTION, §4g-limited, and never dresses a non-choice as consent' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
+console.log(`VERDICT: ${allPass ? 'GO — the Intelligence screen: by function, from the served spine, approves by FUNCTION, offers every provider for Descriptions (§4g limit lifted), and never dresses a non-choice as consent' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
 console.log('='.repeat(64));
 process.exit(allPass ? 0 : 1);

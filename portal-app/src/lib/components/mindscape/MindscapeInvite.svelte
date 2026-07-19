@@ -4,7 +4,7 @@
 	// transforms THIS panel into a minimal inline step (with Back), so setup
 	// happens right here over the living 3D map — never a page jump.
 	import { api } from '$lib/api';
-	import { generate, fmtSeconds } from '$lib/generate';
+	import { generate, fmtSeconds, retry as retryGenerate } from '$lib/generate';
 	import ImportField from '$lib/components/import/ImportField.svelte';
 	import ScanForData from '$lib/components/import/ScanForData.svelte';
 	import SourceCatalog from '$lib/components/import/SourceCatalog.svelte';
@@ -12,6 +12,20 @@
 	import IntelligenceScreen from '$lib/components/settings/IntelligenceScreen.svelte';
 	import AISettings from '$lib/components/settings/AISettings.svelte';
 	import TelegramConnect from '$lib/components/channels/TelegramConnect.svelte';
+	// The canonical pipeline overview (PIPELINE-TRANSPARENCY-DESIGN §"Module shape"). It subscribes
+	// to the shared `pipeline` store, which the WRAPPING MindscapeView feeds from its existing
+	// readiness poll (loadGenerated) — so this surface adds NO new poll/voice of its own.
+	// ⚠️ Unit 5 DECISION (the two-voice unification): PipelineStatus is the canonical STAGE overview.
+	// The gen-status banner below is NOT folded away, and that is deliberate, not incomplete: the
+	// FROZEN gate verify:generate-phase (D2e/D2f/D2g/D2h) MOUNTS this component and asserts `.gen-status`
+	// renders ALL SIX generate phases + the retryable-error Retry + the row alignment, with
+	// PipelineStatus STUBBED INERT (mount-generate-render.mjs:201,382). Removing or gutting the banner
+	// reds that frozen contract. So the banner stays, scoped to the ONE thing PipelineStatus (fed by
+	// the readiness slice, which never emits the generate store's error text) structurally cannot show
+	// — the generate store's own outcome/Retry. True single-voice unification would require relaxing
+	// that frozen gate, which is out of Unit 5's scope. The built-map/rail ~4s overlap IS closed (the
+	// pipeline store is now live on both surfaces — see MindscapeView's poll $effect).
+	import PipelineStatus from '$lib/components/mindscape/PipelineStatus.svelte';
 
 	let showCatalog = $state(false); // "see what you can bring in" disclosure
 
@@ -152,6 +166,16 @@
 	// told an owner with 70k messages to "import some conversations first"). While the
 	// read is unknown we claim nothing: no tick, and no "you have no data" either.
 	const dataDone = $derived(!!readiness?.data && readiness?.canGenerate?.reason !== 'unknown' && readiness.data.total > 0);
+	// ⚠️ `unknown` WITH NOTHING TO HOLD — the fresh-machine case. §3.2a latches a KNOWN-good
+	// count across a later `unknown`, but the FIRST read on a new box can itself be `unknown`
+	// (a SQLCipher scan failure) with no prior value to hold. Then dataDone is false — and the
+	// old `{:else}` was the empty-state "Bring your world in", so a vault we simply COULD NOT
+	// READ was rendered as a vault the user never filled. That is the same "unknown ≠ empty"
+	// bug the store's count-cap fixes, on the readiness surface. `dataUnknown` splits it out so
+	// the Data step can say "couldn't read your vault — Retry" instead of impersonating empty.
+	// It is true ONLY when we hold no known count: once a good read lands (or is latched),
+	// canGenerate.reason is not 'unknown' and dataDone owns the render.
+	const dataUnknown = $derived(readiness?.canGenerate?.reason === 'unknown' && !dataDone);
 	const aiDone = $derived(readiness?.ai?.connected === true);
 	const connectDone = $derived(readiness?.channel?.connected === true);
 
@@ -266,6 +290,13 @@
 		{#if $generate.phase === 'error'}
 			<span class="gen-dot err"></span>
 			<span>{$generate.error}</span>
+			<!-- A retryable error (the capped `unknown` scan failure) offers a way FORWARD — never a
+			     dead end. `unknown` is "could not look", so re-attempting is the honest next move;
+			     the terminal errors (import first, embedder deps missing) leave retryable false and
+			     show no button, because Retry cannot help them. -->
+			{#if $generate.retryable}
+				<button class="gen-retry" onclick={retryGenerate}>Retry</button>
+			{/if}
 		{:else if $generate.phase === 'up-to-date'}
 			<!-- ⚠️ `up-to-date` IS REACHABLE HERE, and the reasoning that said otherwise was wrong.
 			     I gated this block for embedding/running/error and wrote that 'skipped' could never
@@ -307,6 +338,12 @@
 		{/if}
 	</div>
 {/if}
+
+<!-- ⚠️ THE PIPELINE OVERVIEW ON A FRESH VAULT. The surface that makes the WHOLE pipeline visible
+     while the invite is up — every stage (incl. describe + measure, and `overall` incl.
+     error/up-to-date) renders here, filling the gaps the single gen-status line above cannot. It
+     reads the canonical `pipeline` store, fed by MindscapeView's existing poll — no new voice. -->
+<PipelineStatus />
 
 <!-- Progress: Data · Intelligence · Connect — completed (✓) vs remaining. -->
 <div class="onb-steps" aria-label="Onboarding progress">
@@ -373,6 +410,25 @@
 				multiple
 				folder
 				label="Add more — another export, notes, or files"
+				onResult={onImportResult}
+				onError={onImportError}
+			/>
+		{:else if dataUnknown}
+			<!-- ⚠️ WE COULD NOT READ THE VAULT — NOT "it is empty". The readiness count came back
+			     `unknown` (a scan failure) and we hold no prior known-good value to fall back on (the
+			     fresh-machine case). Showing the empty-state "Bring your world in" here would tell a
+			     user with a full vault that they never imported anything — the exact §3.2a lie. So we
+			     say so honestly and offer Retry, which re-reads readiness; we do NOT claim empty and
+			     do NOT hang. If the vault really is empty the server answers reason:'no_messages'
+			     (not 'unknown'), which lands in the {:else} below. -->
+			<h2 class="welcome-title invite-title">Couldn’t read your vault just yet</h2>
+			<p class="welcome-subtitle">We had trouble reading what’s already in your vault — this is usually temporary. Try again in a moment, or import more below.</p>
+			<button class="invite-btn sm" onclick={() => void loadReadiness()}>Retry</button>
+			<ImportField
+				accept="*"
+				multiple
+				folder
+				label="Drop an export, notes, or files — or choose"
 				onResult={onImportResult}
 				onError={onImportError}
 			/>
@@ -447,8 +503,13 @@
 
 <style>
 	/* The pipeline's voice on an empty vault — see the block comment above. */
+	/* ⚠️ align-items:flex-start, NOT center. The message wraps to multiple lines (a stall/error
+	   sentence, or "…N / M ready"), and with center the 6px dot floated against the whole block's
+	   vertical middle — visibly detached from the first line of text (the live-test misalignment).
+	   Top-aligning the row and nudging the dot down by ~the first line's half-height pins it to
+	   the first line for one- AND multi-line messages. */
 	.gen-status {
-		display: flex; align-items: center; gap: 0.5rem;
+		display: flex; align-items: flex-start; gap: 0.5rem;
 		margin-bottom: 1rem; padding: 0.5rem 0.7rem; border-radius: 8px;
 		border: 1px solid var(--glass-border); background: var(--glass-card-bg);
 		font-size: 0.7rem; color: var(--color-text-secondary); line-height: 1.4;
@@ -456,8 +517,17 @@
 	.gen-status.err { border-color: rgba(248, 113, 113, 0.35); color: var(--color-accent-coral, #f87171); }
 	.gen-dot {
 		width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+		/* Center the dot on the FIRST line: (line-box 0.7rem×1.4 − 6px dot) / 2 ≈ 0.3rem. */
+		margin-top: 0.3rem;
 		background: var(--color-accent-aurum, #e5b84c); animation: gen-pulse 1.6s ease-in-out infinite;
 	}
+	/* Retry sits inline at the end of the status row; align it to the first text line too. */
+	.gen-retry {
+		margin-top: -0.1rem; margin-left: auto; flex-shrink: 0; padding: 0.15rem 0.55rem;
+		border-radius: 6px; border: 1px solid var(--glass-border); background: var(--glass-card-bg);
+		color: var(--color-text-primary); font-family: inherit; font-size: 0.68rem; cursor: pointer;
+	}
+	.gen-retry:hover { border-color: var(--color-accent-aurum, #e5b84c); }
 	.gen-dot.err { background: var(--color-accent-coral, #f87171); animation: none; }
 	/* `up-to-date` is TERMINAL — nothing is in flight, so the dot must not imply work.
 	   jade = the design system's green (tokens.css:39/:132); the fallback matches its dark value,

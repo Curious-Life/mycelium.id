@@ -18,11 +18,29 @@
  * @property {(filename: string, content: string) => Promise<void>} writeMindFile
  */
 
+import { createAuthorship } from '../mindfiles/authorship.js';
+import { captureSnapshot as sharedCaptureSnapshot } from '../mindfiles/snapshot.js';
+
 export function createInternalDomain(deps) {
   if (!deps) throw new TypeError('createInternalDomain: deps required');
   const { readMindFile, writeMindFile } = deps;
   if (typeof readMindFile !== 'function')  throw new TypeError('createInternalDomain: readMindFile required');
   if (typeof writeMindFile !== 'function') throw new TypeError('createInternalDomain: writeMindFile required');
+
+  // V12 provenance (design §5.6): every whole-file/surgical/remove rewrite through
+  // THIS domain is the AGENT path — attribute it 'agent', hardcoded. The author is
+  // never taken from tool args, so the agent cannot forge an 'operator' write; the
+  // only 'operator' writes come from the character-page REST layer. Best-effort:
+  // a sidecar hiccup must never block the real mind-file write.
+  const authorship = createAuthorship({ readMindFile, writeMindFile });
+  const recordAgentWrite = async (filename, content) => {
+    try { await authorship.recordWrite(filename, 'agent', content); } catch { /* non-fatal */ }
+  };
+  // Reserved-namespace guard (adversarial-review Finding 1): a DOTFILE segment
+  // ('.authorship.json' and any future system sidecar) is off-limits to the agent
+  // tool surface, so the agent cannot overwrite the provenance sidecar through its
+  // ordinary write tools. No legitimate mind file starts a path segment with '.'.
+  const isDotPath = (f) => /(^|\/)\./.test(String(f || ''));
 
   const SECTION_HEADERS = {
     observations:    '## Observations',
@@ -203,7 +221,7 @@ export function createInternalDomain(deps) {
     // prompt explicitly snapshots first as defense-in-depth).
     snapshotMindFile: async (args) => {
       const filename = String(args?.filename || '').trim();
-      if (!filename || filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+      if (!filename || filename.includes('/') || filename.includes('\\') || filename.includes('..') || isDotPath(filename)) {
         return JSON.stringify({ ok: false, error: 'invalid-filename' });
       }
       const result = await captureSnapshot(filename);
@@ -222,7 +240,7 @@ export function createInternalDomain(deps) {
       // Allow snapshot subpaths (snapshots/<file>/<date>.md) but reject
       // traversal. Same rule as writeMindFile callers — backslashes and
       // .. are blocked; forward slashes are allowed for subdirs.
-      if (!filename || filename.includes('\\') || filename.includes('..')) {
+      if (!filename || filename.includes('\\') || filename.includes('..') || isDotPath(filename)) {
         return JSON.stringify({ ok: false, error: 'invalid-filename' });
       }
       const content = await readMindFile(filename);
@@ -234,7 +252,7 @@ export function createInternalDomain(deps) {
 
     editMindFile: async (args) => {
       const filename = String(args?.filename || '').trim();
-      if (!filename || filename.includes('\\') || filename.includes('..')) {
+      if (!filename || filename.includes('\\') || filename.includes('..') || isDotPath(filename)) {
         return JSON.stringify({ ok: false, error: 'invalid-filename' });
       }
       const oldStr = String(args?.old_string ?? '');
@@ -268,13 +286,14 @@ export function createInternalDomain(deps) {
 
       const newContent = content.replace(oldStr, newStr);
       await writeMindFile(filename, newContent);
+      await recordAgentWrite(filename, newContent);
 
       return JSON.stringify({ ok: true, snapshotted });
     },
 
     writeMindFileWhole: async (args) => {
       const filename = String(args?.filename || '').trim();
-      if (!filename || filename.includes('\\') || filename.includes('..')) {
+      if (!filename || filename.includes('\\') || filename.includes('..') || isDotPath(filename)) {
         return JSON.stringify({ ok: false, error: 'invalid-filename' });
       }
       const content = String(args?.content ?? '');
@@ -292,12 +311,13 @@ export function createInternalDomain(deps) {
       } catch { /* non-fatal */ }
 
       await writeMindFile(filename, content);
+      await recordAgentWrite(filename, content);
       return JSON.stringify({ ok: true, snapshotted });
     },
 
     removeFromMind: async (args) => {
       const filename = String(args?.filename || '').trim();
-      if (!filename || filename.includes('\\') || filename.includes('..')) {
+      if (!filename || filename.includes('\\') || filename.includes('..') || isDotPath(filename)) {
         return JSON.stringify({ ok: false, error: 'invalid-filename' });
       }
       const block = String(args?.block ?? '');
@@ -310,34 +330,17 @@ export function createInternalDomain(deps) {
       try { await captureSnapshot(filename); } catch { /* non-fatal — recoverable via git/snapshots */ }
       const next = content.replace(block, '').replace(/\n{3,}/g, '\n\n'); // remove + tidy the blank-line gap
       await writeMindFile(filename, next);
+      await recordAgentWrite(filename, next);
       return JSON.stringify({ ok: true });
     },
   };
 
-  // Internal helper — pre-mutation snapshot capture. First-write-wins
-  // per UTC day per filename. Returns { ok, path, idempotent? } or
-  // { ok: false, error }. Reused by snapshotMindFile + editMindFile +
-  // writeMindFileWhole so all three share the same trail-preservation
-  // invariant.
-  //
-  // filename here may be a snapshot path itself (e.g., re-running
-  // Phase 3.5 on a snapshot) — the captureSnapshot of a snapshot just
-  // stores it under snapshots/<full-path>/<date>.md. Edge case but
-  // doesn't break anything.
-  async function captureSnapshot(filename) {
-    const today = new Date().toISOString().split('T')[0];
-    const snapshotRelPath = `snapshots/${filename}/${today}.md`;
-    const existing = await readMindFile(snapshotRelPath);
-    if (existing != null) {
-      return { ok: true, path: snapshotRelPath, idempotent: true };
-    }
-    const source = await readMindFile(filename);
-    if (source == null) {
-      return { ok: false, error: 'source-not-found' };
-    }
-    await writeMindFile(snapshotRelPath, source);
-    return { ok: true, path: snapshotRelPath };
-  }
+  // Pre-mutation snapshot capture — first-write-wins per UTC day per filename.
+  // The implementation now lives in src/mindfiles/snapshot.js so the operator
+  // character-page REST layer captures history identically (design §5.6). Thin
+  // binding over this domain's readMindFile/writeMindFile; behaviour unchanged
+  // (verify:mindfiles is the regression guard).
+  const captureSnapshot = (filename) => sharedCaptureSnapshot({ readMindFile, writeMindFile }, filename);
 
   return { tools, handlers };
 }

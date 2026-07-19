@@ -30,9 +30,16 @@
 		return () => { alive = false; clearInterval(t); };
 	});
 
-	function open(it: Item) {
+	function open(it: Item, e?: MouseEvent) {
+		// ⌘/ctrl-click = explicit new-tab intent, same as the main nav rows.
+		if (e && (e.metaKey || e.ctrlKey)) {
+			workspace.openOrFocus(it.viewId);
+			return;
+		}
+		// Sub-nav rows are NAVIGATION (like the sidebar sections): the current tab
+		// navigates in place; a new tab only by explicit gesture.
 		navigationState.setPrimaryView(it.id as any);
-		workspace.openOrFocus(it.viewId);
+		workspace.openInActiveTab(it.viewId);
 	}
 </script>
 
@@ -43,7 +50,7 @@
 	{#each items as it}
 		{@const isActive = currentView === it.id}
 		<button
-			onclick={() => open(it)}
+			onclick={(e) => open(it, e)}
 			class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors
 				{isActive
 				? 'bg-[var(--color-accent)]/10 text-[var(--color-text-primary)] font-medium'

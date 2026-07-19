@@ -116,6 +116,10 @@ await t('B1. ⭐ A1 — one apply writes EVERY assignable function, atomically p
   assert.deepEqual(body.results, {
     understanding: 'approved', transcription: 'download-required',
     descriptions: 'approved', conversation: 'approved',
+    // Voice is in the default scope but GATED: this fresh vault has no recorded voice sample, so
+    // hasVoiceSample()===false ⇒ the one-click apply reports it honestly and downloads nothing
+    // (real integration — the async hasVoiceSample is awaited; B12 injects to drive both states).
+    voice: 'skipped:not-runnable',
   }, JSON.stringify(body.results));
   // Understanding fans out to BOTH tasks in ONE settings write (the dormancy fix, M8's claim
   // carried into the bundle): find the write that set categorize and assert enrich is in it.
@@ -199,6 +203,7 @@ await t('B5. consent — an already-set vault re-applies as no-ops: ZERO setting
   assert.deepEqual(body.results, {
     understanding: 'already-set', transcription: 'already-set',
     descriptions: 'already-set', conversation: 'already-set',
+    voice: 'skipped:not-runnable',   // not runnable on main ⇒ still skipped, never a download
   }, JSON.stringify(body.results));
   assert.equal(db.writes.length, 0, 'a no-op apply must not touch settings — rewriting an unchanged approval is a phantom consent event');
   assert.deepEqual(body.downloads, [], 'nothing left to download');
@@ -232,10 +237,60 @@ await t('B8. GET /intelligence/bundle serves the composition over HTTP, content-
   assert.ok(!b.rows.some((r) => r.key === 'voice'), 'W3: Voice stays OUT of the bundle while the render seam is stubbed');
   assert.ok(!b.rows.some((r) => r.key === 'conversation'), 'W2: Conversation is a connect chip, not a bundle row');
   assert.equal(b.adjacent.conversation.subscriptionConnected, true);
+  // Voice rides ADJACENT (like conversation), carrying its runnable gate + size so the client can
+  // show it and the apply can gate it — never a bundle row (W3).
+  assert.ok(b.adjacent.voice, 'voice must be served as an adjacent item');
+  assert.equal(b.adjacent.voice.runnable, false, 'a fresh vault has no recorded sample ⇒ hasVoiceSample() false ⇒ voice not-runnable (the gated state; real async integration)');
+  assert.ok(b.adjacent.voice.sizeGb > 0, 'and it carries its real size for the disk guard the day it lights up');
   // §1: identifiers + numbers only — serialize and assert no settings-shaped leakage beyond
   // the fields this module composes (spot-check: no credentials/base_url echo).
   const wire = JSON.stringify(b);
   assert.ok(!/credential|api_key|token/i.test(wire), 'no secret-shaped field may cross this boundary');
+});
+
+await t('B12. ⭐ Voice is GATED ON RUNNABLE — skipped while it cannot speak, downloaded the day it can', async () => {
+  // The operator decision (2026-07-18): add voice to the one-click download, but only when it can
+  // actually run — a downloaded Qwen3-TTS with no reference sample yet answers 501 (W2). The gate
+  // is `voiceRunnable` (hasVoiceSample() in production). Drive BOTH states through the REAL router.
+  // ⚠️ `voiceRunnable` is injected ASYNC on purpose — the real hasVoiceSample() is async (#234,
+  // it decrypt-validates the recorded sample). composeBundle MUST await it; a sync `Boolean(fn())`
+  // returns Boolean(Promise) === true and silently defeats the gate (this shipped once, caught by
+  // CI on the merge with main). A sync stub here would NOT catch that — only an async one does.
+  const notReady = () => ({ phase: 'absent' });      // SYNC — getModelState is synchronous      // model not downloaded
+
+  // (i) NOT runnable ⇒ the one-click apply SKIPS voice and downloads nothing for it.
+  {
+    const db = makeDb({ providers: [] });
+    const s = await serve(portalIntelligenceRouter({ db, userId: 'u', dbPath: '/x/vault.db', detect: HW32, listInstalled: NOTHING_INSTALLED, headroom: OK_DISK, voiceState: notReady, voiceRunnable: async () => false, onApplied: () => {} }));
+    const { body } = await s.post('/intelligence/bundle/apply', {});
+    s.close();
+    assert.equal(body.results.voice, 'skipped:not-runnable', `not runnable ⇒ skipped, never a download. Got ${JSON.stringify(body.results)}`);
+    assert.ok(!body.downloads.some((d) => d.route === '/portal/settings/tts/qwen/download'),
+      'and NO voice download is started — the 2.9 GB that cannot speak stays unfetched (W2)');
+  }
+
+  // (ii) RUNNABLE ⇒ the SAME one click now includes the voice download, through its OWN route.
+  {
+    const db = makeDb({ providers: [] });
+    const s = await serve(portalIntelligenceRouter({ db, userId: 'u', dbPath: '/x/vault.db', detect: HW32, listInstalled: NOTHING_INSTALLED, headroom: OK_DISK, voiceState: notReady, voiceRunnable: async () => true, onApplied: () => {} }));
+    const { body } = await s.post('/intelligence/bundle/apply', {});
+    s.close();
+    assert.equal(body.results.voice, 'download-required', `runnable ⇒ the one click downloads it. Got ${JSON.stringify(body.results)}`);
+    const voiceDl = body.downloads.find((d) => d.key === 'voice');
+    assert.ok(voiceDl && voiceDl.route === '/portal/settings/tts/qwen/download',
+      `and through the EXISTING tts route, never a forked path. Got ${JSON.stringify(body.downloads)}`);
+  }
+
+  // (iii) …and an ALREADY-DOWNLOADED voice is a no-op even when runnable (never re-fetched).
+  {
+    const db = makeDb({ providers: [] });
+    const ready = () => ({ phase: 'ready' });
+    const s = await serve(portalIntelligenceRouter({ db, userId: 'u', dbPath: '/x/vault.db', detect: HW32, listInstalled: NOTHING_INSTALLED, headroom: OK_DISK, voiceState: ready, voiceRunnable: async () => true, onApplied: () => {} }));
+    const { body } = await s.post('/intelligence/bundle/apply', {});
+    s.close();
+    assert.equal(body.results.voice, 'already-set', `an installed voice re-applies as a no-op. Got ${JSON.stringify(body.results)}`);
+    assert.ok(!body.downloads.some((d) => d.key === 'voice'), 'nothing to re-download');
+  }
 });
 
 const allPass = ledger.every(Boolean);

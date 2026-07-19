@@ -1,7 +1,7 @@
 import express from 'express';
 import { createReadiness } from './readiness.js';
 import { getEmbedderHealth } from './embed/supervisor.js';
-import { nudgeEnrichDrainer, resetPullBackoff, pauseEnrichProcessing, resumeEnrichProcessing, isEnrichProcessingPaused, defaultLabelModel } from './enrich/drainer.js';
+import { nudgeEnrichDrainer, resetPullBackoff, resetEnrichGiveUpCounters, pauseEnrichProcessing, resumeEnrichProcessing, isEnrichProcessingPaused, defaultLabelModel } from './enrich/drainer.js';
 import { assembleTimelineMessages } from './streams/assemble-messages.js';
 import { clampStored } from './enrich/text-limits.js';
 import { resolveInferenceConfigForTask } from './inference/resolve.js';
@@ -1138,7 +1138,7 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
     // empty/onboarding vault this scan is instant (0 rows), and by the time the
     // table is large onboarding is long done.
     try { return await db.messages.embedBacklog(userId); }
-    catch { return { total: 0, embedded: 0, pending: 0, unprocessable: 0 }; }
+    catch { return { total: 0, embedded: 0, pending: 0, unprocessable: 0, gaveUp: 0 }; }
   }
 
   router.get('/onboarding/status', async (_req, res) => {
@@ -1178,18 +1178,39 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
   // kick a drain. Thin wrappers over the in-process drainer (no separate pipeline)
   // — the drainer already embeds on a timer; trigger just nudges it now.
   router.get('/enrichment/status', async (_req, res) => {
-    const { total, embedded, pending, unprocessable } = await embedCounts();
+    const { total, embedded, pending, unprocessable, gaveUp } = await embedCounts();
     ok(res, {
       // `unprocessable` — content-bearing rows that are neither embedded nor queued
-      // (poison / blank-skip). Carried so a client can SAY SO instead of the counter
-      // silently omitting them: before the counted-pending fix they inflated `pending`
-      // forever ("Embedding N of M" that never finished); without this field the fix
-      // would merely make them vanish. A COUNT ONLY — the reason lives in nlp_error,
-      // which is encrypted precisely because it can reveal per-message failure patterns.
-      messages: { total, enriched: embedded, embedded, pending, unprocessable },
+      // (poison / blank-skip / attempt-capped). Carried so a client can SAY SO instead
+      // of the counter silently omitting them: before the counted-pending fix they
+      // inflated `pending` forever ("Embedding N of M" that never finished); without
+      // this field the fix would merely make them vanish. A COUNT ONLY — the reason
+      // stays in nlp_error and is never surfaced here (§1: no per-message failure
+      // patterns over HTTP).
+      // `gaveUp` — the attempt-capped subset of unprocessable (rows retired after
+      // EMBED_MAX_ATTEMPTS counted failures against a healthy service). Surfaced
+      // separately because these are RECOVERABLE: POST /portal/enrichment/retry-failed
+      // re-queues them. Also a count only.
+      messages: { total, enriched: embedded, embedded, pending, unprocessable, gaveUp },
       service: { rate: '0' }, // per-second throughput not measured in V1
       activeJob: pending > 0 ? { id: 'enrich', status: 'running' } : null,
     });
+  });
+
+  // ── Retry the gave-up rows (embed attempt-capped + label gave-up) ────────────
+  // The user-facing recovery path for the terminal states the bounded-retry
+  // safeguards introduce (enrich/service.js EMBED_MAX_ATTEMPTS / LABEL_MAX_ATTEMPTS):
+  // resets 'embed-capped' rows and categories_processed = -1 rows back to pending,
+  // clears every attempt counter (persisted markers via the DAL; the in-memory L1
+  // counters via the drainer), then kicks a drain cycle so progress starts now.
+  // Response carries COUNTS ONLY — never content, ids, or error strings (§1).
+  router.post('/enrichment/retry-failed', async (_req, res) => {
+    let reset;
+    try { reset = await db.messages.resetEnrichmentGiveUps(userId); }
+    catch { return fail(res, 500, 'could not reset failed rows'); }
+    resetEnrichGiveUpCounters(); // fresh in-memory budgets (no-op if no drainer runs)
+    nudgeEnrichDrainer();
+    ok(res, { reset: { embed: reset.embedReset, label: reset.labelReset } });
   });
 
   router.post('/enrichment/trigger', async (_req, res) => {
@@ -1230,9 +1251,12 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
   // (resume → nudge, or trigger). Progress also shows in the unified activity feed
   // ('Sorting your messages · N / M'); this is the explicit control surface.
   router.get('/enrichment/categorize/status', async (_req, res) => {
-    const { tagged, total, pending } = await db.messages.categoriesBacklogCached(userId);
+    const { tagged, total, pending, gaveUp = 0 } = await db.messages.categoriesBacklogCached(userId);
     ok(res, {
-      messages: { total, tagged, pending },
+      // `gaveUp` — rows terminally skipped for labeling after LABEL_MAX_ATTEMPTS
+      // counted failures against a working model (categories_processed = -1). A
+      // count only; recoverable via POST /portal/enrichment/retry-failed.
+      messages: { total, tagged, pending, gaveUp },
       paused: isEnrichProcessingPaused(),
       status: isEnrichProcessingPaused() ? 'paused' : (pending > 0 ? 'running' : 'idle'),
       stageLabel: `Sorting: ${tagged.toLocaleString()} / ${total.toLocaleString()}`,
@@ -1296,7 +1320,13 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
   router.get('/import/preview', async (_req, res) => {
     try {
       const { total, embedded, pending } = await embedCounts();
-      const { evidence } = await readiness.get({ slices: ['evidence'] });
+      // ⚠️ fresh:true — evidence is SWR-memoized in readiness (15s TTL, serve-stale) for
+      // the status popover's once-per-open read; THIS route is the read-after-import
+      // correctness surface (the card renders moments after the vault changed), where a
+      // stale snapshot shows "0 sources" over a just-imported corpus. Same split as the
+      // PURE embedCounts() one line up, same reason. fresh write-throughs the memo on
+      // success, so paying the scan here also warms the popover.
+      const { evidence } = await readiness.get({ slices: ['evidence'], fresh: true });
       // ⚠️ HONOR `unknown`. `evidence()` degrades to zeros + `unknown:true` instead of
       // throwing; destructuring the zeros and dropping the flag would serve HTTP 200
       // {messageCount: 76000, sources: [], conversationCount: 0} off a scan that NEVER RAN —

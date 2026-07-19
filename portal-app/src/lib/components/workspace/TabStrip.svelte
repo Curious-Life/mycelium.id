@@ -123,7 +123,10 @@
 	}
 </script>
 
-<div class="tab-strip" class:inline role="tablist">
+<!-- data-tabstrip-pane: the Sidebar's drag-a-section gesture hit-tests for this
+     attribute on drop and opens the dragged view in THIS pane (explicit new-tab
+     intent — see Sidebar.svelte's nav drag handlers). -->
+<div class="tab-strip" class:inline role="tablist" data-tabstrip-pane={paneId}>
 	<div class="tabs" role="group" bind:this={tabsEl} onpointerdown={onPointerDown} onclickcapture={onClickCapture}>
 		{#each tabs as tab (tab.id)}
 			<Tab

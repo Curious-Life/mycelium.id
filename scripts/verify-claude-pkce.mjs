@@ -17,6 +17,31 @@ const ledger = [];
 const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${d ? '\n      ' + d : ''}`); };
 const noSleep = async () => {};
 
+// ── P0 ⭐ ENDPOINT PIN — token/callback are the LIVE hosts, not the dead console ──────
+//    2026-07-18: Anthropic moved OAuth off `console.anthropic.com` (now 404) to
+//    `platform.claude.com`, which broke refresh AND web-exchange (both read tokenUrl). The
+//    mock-fetch gates below never asserted WHERE the POST goes, so a dead endpoint passed
+//    green (VERDICT: GO on a config that 404s live). This pins the value AND captures the
+//    URL exchangeCode/refreshAccessToken actually POST to. Falsify: revert tokenUrl to
+//    console.anthropic.com → P0 reds.
+{
+  let exchUrl = null, refrUrl = null;
+  const capExch = async (u) => { exchUrl = u; return { ok: true, status: 200, json: async () => ({ access_token: 't', scope: 'user:inference' }) }; };
+  const capRefr = async (u) => { refrUrl = u; return { ok: true, status: 200, json: async () => ({ access_token: 't', scope: 'user:inference' }) }; };
+  await exchangeCode({ code: 'c', verifier: 'v', fetchImpl: capExch, sleep: noSleep });
+  await refreshAccessToken({ refreshToken: 'r', fetchImpl: capRefr, sleep: noSleep });
+  const tokenHost = new URL(CLAUDE_OAUTH.tokenUrl).host;
+  const cbHost = new URL(CLAUDE_OAUTH.redirectUri).host;
+  rec('P0 ⭐ endpoint pinned to platform.claude.com (NOT the dead console.anthropic.com); refresh+exchange POST there',
+    CLAUDE_OAUTH.tokenUrl === 'https://platform.claude.com/v1/oauth/token' &&
+    tokenHost !== 'console.anthropic.com' &&                                     // compare the parsed host, not a URL substring
+    tokenHost === 'platform.claude.com' && cbHost === 'platform.claude.com' &&   // token + callback moved together
+    exchUrl === CLAUDE_OAUTH.tokenUrl && refrUrl === CLAUDE_OAUTH.tokenUrl,       // the code POSTs to the pinned URL
+    // log booleans, not the OAuth config values — the endpoint URL is public but CodeQL
+    // (js/clear-text-logging) treats CLAUDE_OAUTH as sensitive; the outcomes are enough to debug.
+    `pinned=${CLAUDE_OAUTH.tokenUrl === 'https://platform.claude.com/v1/oauth/token'} exchOk=${exchUrl === CLAUDE_OAUTH.tokenUrl} refrOk=${refrUrl === CLAUDE_OAUTH.tokenUrl} cbOk=${cbHost === 'platform.claude.com'}`);
+}
+
 // ── P1 authorize URL ─────────────────────────────────────────────────────────────
 {
   const { url, verifier, state } = startPkceFlow();

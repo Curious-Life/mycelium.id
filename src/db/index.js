@@ -38,6 +38,7 @@ import { createMindscapeNamespace } from './mindscape.js';
 import { createTerritoryDocsNamespace } from './territory-docs.js';
 import { createHistoryNamespace } from './history.js';
 import { createProvidersNamespace } from './providers.js';
+import { createDeviceTokensNamespace } from './device-tokens.js';
 import { createConnectorsNamespace } from './connectors.js';
 import { createUsersNamespace } from './users.js';
 import { createClaimsNamespace } from './claims.js';
@@ -164,6 +165,12 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // /portal/providers backend). `credentials` is encrypted at rest
     // (ENCRYPTED_FIELDS.ai_providers); list() returns metadata only.
     providers: createProvidersNamespace({ d1Query }),
+
+    // Per-device bearer tokens for paired phones (QR pairing, Unit A). mint/list/
+    // revoke are async (d1Query); matchSync() is the SYNC auth hot-path matcher
+    // backed by the raw handle (so it slots into the sync owner-gate unchanged).
+    // Raw tokens are never stored — only SHA-256 hashes. @see src/db/device-tokens.js.
+    deviceTokens: createDeviceTokensNamespace({ d1Query, rawDb }),
 
     // Connectors (data-connection operational state for the sync scheduler +
     // /portal/connectors). account_label/last_error/recent_runs are encrypted at

@@ -9,6 +9,10 @@
 	import MeasurementHealthSection from '$lib/components/mindscape/MeasurementHealthSection.svelte';
 	import MindscapeBackground from '$lib/components/mindscape/MindscapeBackground.svelte';
 	import MindscapeInvite from '$lib/components/mindscape/MindscapeInvite.svelte';
+	import PipelineStatus from '$lib/components/mindscape/PipelineStatus.svelte';
+	import { ingest as ingestPipeline, refreshPipeline } from '$lib/pipeline';
+	import { pollAction, timerArmed } from '$lib/pipeline-poll';
+	import { probeExhausted } from '$lib/mind-probe-cap';
 
 	// ── §3.7a — the invite's half of the ONE fact ────────────────────────────────
 	// The invite hid on `points.length === 0` (the client STORE) while the rail hid on
@@ -33,11 +37,29 @@
 	// ⇒ null renders its own honest state, and it RETRIES.
 	let mindGenerated = $state<boolean | null>(null);
 	let genProbeFailed = $state(false);
+	// ⚠️ THE PROBE MUST NOT SPIN FOREVER. loadGenerated() re-probes every GEN_POLL_MS while the
+	// answer isn't known-true; on a machine whose /readiness KEEPS failing that was an UNBOUNDED
+	// "Checking your mind…" spinner — the exact hang generate.ts's `unknown` cap (#232) fixed one
+	// surface over. genProbeFailCount counts CONSECUTIVE failures (a success resets it to 0);
+	// past PROBE_MAX_FAILS the view stops retrying and renders a RETRYABLE "couldn't read your map"
+	// state instead (see the markup). A failed read claims NOTHING — §3.2a — so the capped state is
+	// never "empty/Grow your mycelium", only "couldn't read — Retry".
+	let genProbeFailCount = $state(0);
+	const genProbeExhausted = $derived(probeExhausted(genProbeFailCount));
 	async function loadGenerated() {
 		try {
-			const r = await api('/portal/readiness?slices=mindscape');
+			// ⚠️ RIDE THIS EXISTING POLL for the canonical `pipeline` slice too — ONE fetch, both
+			// slices, NO new interval/voice (PIPELINE-TRANSPARENCY-DESIGN §"no new poll"). pipeline()
+			// shares mindscape's memoized clustering_points COUNT (Unit 2's PS-COST latch), so adding
+			// it costs zero extra server scans. Both PipelineStatus mounts (the invite + the built map)
+			// render from the store this feeds.
+			const r = await api('/portal/readiness?slices=mindscape,pipeline');
 			if (!r.ok) throw new Error(`readiness ${r.status}`);
-			const m = (await r.json())?.mindscape;
+			const body = await r.json();
+			const m = body?.mindscape;
+			// A failed read never reaches here (we threw above), so the store's own hold-last-good
+			// covers the outage (§3.2a) — we only ingest on a good read.
+			ingestPipeline(body?.pipeline);
 			// ⚠️ A 200 can still mean "I don't know": the slice fails soft with `unknown` rather
 			// than throwing, so `r.ok` alone is not knowledge. Without this the retry apparatus
 			// below never engages on the LIKELY failure — only on a whole-route 500 — and the
@@ -45,6 +67,7 @@
 			if (m?.unknown === true) throw new Error('mindscape slice unknown');
 			mindGenerated = m?.generated === true;
 			genProbeFailed = false;
+			genProbeFailCount = 0; // a successful read clears the failure clock (mirrors unknownSince)
 		} catch {
 			// Say we don't know — silence here IS the invite (see above). The RETRY is the poll
 			// below: MED-9's genPollTimer already re-calls loadGenerated() every 4s until the
@@ -54,7 +77,15 @@
 			// added it, and I did not notice because both were "correct" in isolation (review, LOW,
 			// 2026-07-16). One cadence, one timer.
 			genProbeFailed = true;
+			genProbeFailCount += 1; // count consecutive failures toward the cap (PROBE_MAX_FAILS)
 		}
+	}
+	// Re-arm the probe after the cap: a manual Retry from the "couldn't read your map" state. Clears
+	// the failure count so genProbeExhausted flips false and the $effect re-arms the poll below.
+	function retryProbe() {
+		genProbeFailCount = 0;
+		genProbeFailed = false;
+		void loadGenerated();
 	}
 	// ⚠️ THE VIEW MUST POLL, BECAUSE THE RAIL DOES. `mindGenerated` froze after its first
 	// successful read — the $effect re-ran only while null — so a `false` was NEVER re-probed,
@@ -77,14 +108,25 @@
 	const GEN_POLL_MS = 4000;
 	let genPollTimer: ReturnType<typeof setInterval> | null = null;
 	$effect(() => {
-		if (mindGenerated === null && !genProbeFailed) void loadGenerated();
-		if (mindGenerated !== true && !genPollTimer) {
+		if (mindGenerated === null && !genProbeFailed && !genProbeExhausted) void loadGenerated();
+		// ⚠️ ONE timer, and it now OUTLIVES mindGenerated===true — the Unit-5 built-map live-feed fix
+		// (PIPELINE-TRANSPARENCY-DESIGN, the Unit-3 deferred MED). This timer is the SOLE feeder of the
+		// `pipeline` store; the old code cleared it the instant the map existed, so a re-import or a
+		// model-approval that re-opened embed/categorize left the built-map overview FROZEN (held, never
+		// blank — §3.2a — but stale). Now the SAME timer keeps ticking and pollAction() picks what each
+		// tick fetches: the full mindscape,pipeline convergence poll while the map's existence is still
+		// unknown, then ONLY the cheap pipeline slice once it is built — no new interval, no new scan
+		// (the pipeline slice reuses the SWR-cached counts, Unit 2's PS-COST). It stops ONLY when the
+		// probe cap trips (timerArmed=false): the "couldn't read your map" state owns retry from there.
+		if (timerArmed(genProbeExhausted) && !genPollTimer) {
 			genPollTimer = setInterval(() => {
 				genProbeFailed = false;   // the poll IS the retry — let a failed probe try again
-				if (mindGenerated !== true) void loadGenerated();
+				const act = pollAction(mindGenerated, genProbeExhausted);
+				if (act === 'converge') void loadGenerated();
+				else if (act === 'pipeline') void refreshPipeline();   // built map: keep the overview LIVE
 			}, GEN_POLL_MS);
 		}
-		if (mindGenerated === true && genPollTimer) { clearInterval(genPollTimer); genPollTimer = null; }
+		if (!timerArmed(genProbeExhausted) && genPollTimer) { clearInterval(genPollTimer); genPollTimer = null; }
 	});
 	import { api, apiGet } from '$lib/api';
 	import { generate, start as startGen, resume as resumeGen, reset as resetGen, cancel as cancelGen, fmtSeconds } from '$lib/generate';
@@ -554,6 +596,15 @@
 	     On an empty vault it would be a blank rail, so we hide it entirely. -->
 	{#if msState.points && msState.points.length > 0}
 	<aside class="nav-panel" style="width: {panelWidth}px;">
+		<!-- The canonical pipeline overview on the BUILT map — the same `pipeline` store the fresh-vault
+		     invite reads, so the two surfaces are one voice. ⚠️ NOW LIVE (Unit 5): the genPollTimer
+		     OUTLIVES mindGenerated===true and refreshes the cheap pipeline slice each tick (pollAction →
+		     'pipeline'; see the $effect at ~:110), so a re-import or a model-approval that re-opens
+		     embed/categorize updates this panel WITHOUT a second poll or a new interval — one timer, one
+		     voice. A failed refresh holds the last good stages (§3.2a). The detailed
+		     MeasureControl/NarrateControl views below stay; this is the at-a-glance overview
+		     (PIPELINE-TRANSPARENCY-DESIGN §"Risks": overview, not a replacement of detail). -->
+		<PipelineStatus />
 		<MindscapeDetail />
 		<MeasureControl />
 		<MeasurementHealthSection />
@@ -594,12 +645,24 @@
 						<div class="spinner"></div>
 					</div>
 				{/if}
+			{:else if mindGenerated === null && genProbeExhausted}
+				<!-- ⚠️ THE CAP. The readiness probe has failed PROBE_MAX_FAILS times (~20s): stop the
+				     spinner and offer a way forward. Still claims nothing about the map (§3.2a) — a
+				     failed read is "couldn't look", never "empty" — so this is NOT the invite and NOT
+				     a false "Grow your mycelium"; it is an actionable retry. retryProbe() clears the
+				     count so the poll re-arms. Mirrors generate.ts's capped-`unknown` retryable state. -->
+				<div class="loading-3d">
+					<p class="load-fail">Couldn’t read your map just yet.</p>
+					<p class="load-fail sub">This is usually temporary.</p>
+					<button class="load-retry" onclick={retryProbe}>Retry</button>
+				</div>
 			{:else if mindGenerated === null}
 				<!-- ⚠️ We do not KNOW whether a map exists — the readiness probe failed and is
 				     retrying. Falling through to the invite here would tell an owner with a built
 				     mindscape to "Grow your mycelium", AND would put the invite on screen next to
 				     the rail (which polls independently and recovers first) — the very overlap
-				     this increment exists to make impossible. Claim nothing; say so. -->
+				     this increment exists to make impossible. Claim nothing; say so.
+				     Bounded: past PROBE_MAX_FAILS this yields to the capped state ABOVE. -->
 				<div class="loading-3d">
 					<div class="spinner"></div>
 					<p class="load-fail sub">Checking your mind…</p>

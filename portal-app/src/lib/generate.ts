@@ -55,6 +55,12 @@ export interface GenState {
   error: string; // set iff phase === 'error'
   embedder: EmbedderHealth | null; // embed-engine health (drives the actionable embedding error)
   stalled: boolean; // server flagged the run as quiet too long ("taking longer than usual")
+  // An error we invite the user to RE-ATTEMPT rather than escalate. Set only on the
+  // capped-`unknown` state (a scan that kept failing) — 'unknown' is "I could not look",
+  // never "it is empty", so the surface offers Retry, not a dead end. Distinguishes this
+  // from the genuinely-terminal errors ("import first", embedder deps missing) that Retry
+  // cannot help. Surfaces render a Retry affordance iff this is true.
+  retryable: boolean;
 }
 
 const SS_KEY = 'mycelium_gen_job';
@@ -64,11 +70,47 @@ const POLL_MS = 1500;
 // spinner and surface an actionable error. Can't false-positive on a big import:
 // ANY increase resets the clock, so only a true plateau trips it.
 const EMBED_STALL_MS = 75_000;
+// If /processing-status keeps answering `unknown` (the server could not COUNT — a SQLCipher
+// scan failure) for this long, stop polling and surface a RETRYABLE error. This is the ONLY
+// pollEmbedding branch that used to lack a cap, so a persistent scan failure spun the
+// "Checking your conversations…" indicator FOREVER on a fresh machine (the live-test hang).
+// A transient unknown resolves itself and never trips this: the first non-unknown poll clears
+// the clock. Shorter than EMBED_STALL_MS because `unknown` is a hard read failure, not slow
+// progress — there is nothing to wait for, only to re-attempt.
+const UNKNOWN_STALL_MS = 25_000;
+// A POST /generate that never answers strands the spinner in 'starting' FOREVER (the sibling of
+// the `unknown` hang: the server accepted the request but the socket wedged). start() arms the
+// poll BEFORE awaiting the POST, so tick() bounds a hung request even while it is outstanding —
+// past START_TIMEOUT_MS with no response the 'starting' spinner becomes a RETRYABLE error. Same
+// shape as the embedStallSince/unknownSince clocks: a wall-clock bound checked by the existing
+// poll, not a floor. 20s is deliberately generous: POST /generate is NOT a bare ack — it runs a
+// SYNCHRONOUS readiness preflight (an embedded-count scan over the vault) before it answers, and
+// on a cold SQLCipher page cache that scan can take several seconds. 20s comfortably covers a slow
+// cold scan while still catching a genuinely wedged socket that will never answer.
+const START_TIMEOUT_MS = 20_000;
+// The server's OWN authoritative hard cap on a run (src/jobs.js:43 MAX_MS): it lets a healthy job
+// run this long and only SIGKILLs at the boundary, after which the job closes to an `error`/
+// `abandoned` status the poll already terminates on. Mirror it here so the CLIENT ceiling can sit
+// ABOVE it — the server's cap must be what ends a healthy run, never the client's.
+const SERVER_MAX_MS = 45 * 60 * 1000; // 45 min — keep in sync with src/jobs.js MAX_MS
+// A run the server never advances past 'running' AND never self-terminates would poll FOREVER.
+// This client ceiling is ONLY a backstop for that pathological case — a server so wedged it blew
+// past its own MAX_MS without even emitting the terminal status. So it sits a margin ABOVE
+// SERVER_MAX_MS: a HEALTHY long run (a 76k-message vault: clustering + the LLM describe step + 16
+// heavy Python measure steps can legitimately take 20+ min) is ended by the SERVER's cap/SIGKILL,
+// not torn down here. Measured from the job's own startedAt, so a reload can't reset it.
+const RUN_CEILING_MS = SERVER_MAX_MS + 5 * 60 * 1000; // 50 min — server's 45-min cap + 5-min margin
+// NOTE (deliberately NO independent `stalled` kill): the server sets `stalled` only after ≥5 min of
+// stdout silence (jobs.js STALL_MS) as a SOFT hint that KEEPS THE RUN ALIVE all the way to MAX_MS —
+// a legit quiet measure step trips it routinely. The client honours that: `stalled` drives the
+// "taking longer than usual" copy but is NOT a terminal. Hard-killing on it (as an earlier grace
+// did) tore down healthy runs the server was still nursing. The 50-min ceiling is the only client
+// terminal for a wedged run.
 
 const initial: GenState = {
   phase: 'idle', jobId: null, step: 0, totalSteps: 5, stageLabel: '',
   embedded: 0, total: 0, startedAt: null, elapsedMs: 0, etaSeconds: null, message: '', error: '',
-  embedder: null, stalled: false,
+  embedder: null, stalled: false, retryable: false,
 };
 
 export const generate = writable<GenState>({ ...initial });
@@ -76,6 +118,8 @@ export const generate = writable<GenState>({ ...initial });
 let timer: ReturnType<typeof setInterval> | null = null;
 let priorDurationMs: number | null = null;
 let embedStallSince = 0; // epoch ms of the last embedded-count change (stall clock)
+let unknownSince = 0; // epoch ms of the first consecutive `unknown` count (scan-failure clock)
+let startingSince = 0; // epoch ms of entering 'starting' (hung-POST watchdog clock)
 
 const patch = (p: Partial<GenState>) => generate.update((s) => ({ ...s, ...p }));
 const ss = (fn: (s: Storage) => void) => { try { if (typeof sessionStorage !== 'undefined') fn(sessionStorage); } catch { /* */ } };
@@ -123,6 +167,21 @@ async function tick() {
   const s = get(generate);
   if (s.phase === 'running') await pollStatus();
   else if (s.phase === 'embedding') await pollEmbedding();
+  else if (s.phase === 'starting') checkStarting();
+}
+
+// The hung-POST watchdog. start() arms the poll BEFORE awaiting the POST, so this fires even while
+// that request is still outstanding. Past START_TIMEOUT_MS we cap 'starting' to a RETRYABLE error;
+// start()'s own post-await guard (phase !== 'starting') then keeps a late response from un-capping
+// it. A start that answers normally leaves 'starting' long before the bound, so this is inert on
+// the happy path.
+function checkStarting() {
+  if (startingSince === 0) return;
+  if (Date.now() - startingSince > START_TIMEOUT_MS) {
+    stop();
+    patch({ phase: 'error', retryable: true, message: '',
+      error: 'Starting is taking too long — the server hasn’t responded yet. Try again.' });
+  }
 }
 
 async function pollStatus() {
@@ -132,6 +191,12 @@ async function pollStatus() {
   try { res = await api(`/portal/mycelium/generate/status/${s.jobId}`); } catch { return; }
   if (!res.ok) { if (res.status === 404) reset(); return; }
   const j: any = await res.json().catch(() => ({}));
+  // Un-cap race guard. We read `s` before two awaits (api + json); in that window an overlapping
+  // poll, a cancel(), or a reset() may have written a TERMINAL and cleared the timer. Without this
+  // a late poll would patch `phase:'running'` back over that terminal → a frozen spinner with no
+  // live poll. If we are no longer the running job we're stale — drop this response untouched.
+  // (start() has the sibling guard after ITS await; pollStatus lacked one.)
+  if (get(generate).phase !== 'running') return;
   if (j.priorDurationMs != null) priorDurationMs = j.priorDurationMs;
   const startedAt = j.startedAt ?? s.startedAt ?? Date.now();
   if (j.status === 'done') {
@@ -150,6 +215,20 @@ async function pollStatus() {
     totalSteps: j.totalSteps ?? 5, stageLabel: j.stageLabel || s.stageLabel || 'Starting…',
     startedAt, elapsedMs: Date.now() - startedAt,
   };
+  // Client ceiling on a wedged run — a BACKSTOP only. The server's MAX_MS (45 min) is the
+  // authoritative cap on a healthy run; this fires solely if the server blew past that WITHOUT
+  // self-terminating (never emitting done/error/abandoned), so it sits ABOVE MAX_MS. `stalled` is
+  // deliberately NOT part of this condition: it is the server's SOFT "quiet for ≥5 min" hint that
+  // keeps the run alive to MAX_MS (a legit quiet measure step trips it), so hard-killing on it tore
+  // down healthy runs. We surface `stalled` as the "taking longer" copy below, never as a terminal.
+  // elapsed is measured from the job's own startedAt so a reload can't reset it.
+  const runMs = next.elapsedMs;
+  if (runMs > RUN_CEILING_MS) {
+    stop(); ss((x) => x.removeItem(SS_KEY));
+    patch({ phase: 'error', startedAt, stalled: !!j.stalled, retryable: true,
+      error: 'This run has been going far longer than expected and may be stuck. Try again, or restart the app.' });
+    return;
+  }
   // `stalled` is authoritative from the server's inactivity watchdog (survives reloads).
   patch({ ...next, stalled: !!j.stalled, etaSeconds: computeEta(next) });
 }
@@ -165,8 +244,29 @@ async function pollEmbedding() {
   // same as "you have no messages". It used to be: the endpoint's catch returned
   // `{ total: 0 }` and the `total === 0` branch below told an owner with 70k messages to
   // "Import some conversations first". Keep polling — a transient scan failure resolves
-  // itself, and we must never assert an empty vault from a count that never happened.
-  if (p.unknown) { patch({ embedder, message: 'Checking your conversations…' }); return; }
+  // itself, so we keep polling — BUT NOT FOREVER. This branch was the ONLY one in pollEmbedding
+  // without a cap (total===0, deps_missing/down/error, and the plateau all terminate), so a
+  // PERSISTENT `unknown` — a fresh machine whose vault the server cannot read — spun this
+  // indicator with no exit (the live-test "Checking your conversations…" hang, 2026-07-18). Now
+  // the `unknownSince` clock (mirrors `embedStallSince`) bounds it: past UNKNOWN_STALL_MS we stop
+  // and surface a RETRYABLE error. Crucially this is NOT an empty-vault claim — `unknown` is
+  // "I could not look", never "it is empty" — so the copy says "couldn't read your vault yet"
+  // and the surface offers Retry, never "import some conversations first".
+  if (p.unknown) {
+    const now = Date.now();
+    if (unknownSince === 0) unknownSince = now; // start the clock on the FIRST unknown
+    if (now - unknownSince > UNKNOWN_STALL_MS) {
+      stop();
+      patch({
+        phase: 'error', embedder, retryable: true, message: '',
+        error: 'Couldn’t read your vault just yet. This is usually temporary — try again.',
+      });
+      return;
+    }
+    patch({ embedder, message: 'Reading your vault…' }); // transient, calm — NOT "checking your mind"
+    return;
+  }
+  unknownSince = 0; // a count that succeeded clears the scan-failure clock
 
   const embedded = Number(p.embedded ?? 0);
   const total = Number(p.total ?? 0);
@@ -206,20 +306,27 @@ async function pollEmbedding() {
 
 /** Trigger a run (button click). Idempotent-ish: server single-flights concurrent starts. */
 export async function start() {
-  patch({ phase: 'starting', error: '', message: '' });
+  unknownSince = 0; // a fresh attempt restarts every stall clock
+  startingSince = Date.now(); // arm the hung-POST watchdog (checkStarting)
+  patch({ phase: 'starting', error: '', message: '', retryable: false });
+  run(); // arm the poll NOW so tick()→checkStarting bounds a POST that never answers
   let res: Response;
   try { res = await api('/portal/mycelium/generate', { method: 'POST' }); }
-  catch { patch({ phase: 'error', error: 'Could not reach the server.' }); return; }
+  catch { stop(); patch({ phase: 'error', error: 'Could not reach the server.' }); return; }
+  // The watchdog (or a reset/cancel) may have moved us off 'starting' while the POST was in flight
+  // — e.g. the server answered only AFTER START_TIMEOUT_MS. Honor that terminal; never un-cap it.
+  if (get(generate).phase !== 'starting') return;
 
   if (res.ok) {
     const data: any = await res.json().catch(() => ({}));
     // The map is already built — nothing to do. NOT an error (it used to be, and being an
     // unrendered error made it silence). Callers that show progress must render this.
     if (data.status === 'skipped') {
+      stop();
       patch({ phase: 'up-to-date', message: data.note || 'Your map is already built.', error: '' });
       return;
     }
-    if (!data.jobId) { patch({ phase: 'error', error: 'Server did not return a job id.' }); return; }
+    if (!data.jobId) { stop(); patch({ phase: 'error', error: 'Server did not return a job id.' }); return; }
     ss((x) => x.setItem(SS_KEY, data.jobId));
     patch({ phase: 'running', jobId: data.jobId, startedAt: Date.now(), step: 0, totalSteps: 5, stageLabel: 'Starting…', elapsedMs: 0, etaSeconds: null, error: '', message: '' });
     run();
@@ -235,6 +342,7 @@ export async function start() {
     return;
   }
   // 503 / 500 / other → surface the REAL server message + allow Retry.
+  stop();
   patch({ phase: 'error', error: body.error || `Couldn't start generation (HTTP ${res.status}).` });
 }
 
@@ -250,8 +358,22 @@ export function resume() {
 export function reset() {
   stop();
   embedStallSince = 0;
+  unknownSince = 0;
+  startingSince = 0;
   ss((x) => x.removeItem(SS_KEY));
   generate.set({ ...initial });
+}
+
+/**
+ * Re-attempt after a RETRYABLE failure (the capped-`unknown` scan error). Clears the stall
+ * clocks and re-runs start() — the same entry the first attempt used. Distinct from reset()
+ * (which returns to idle and says nothing): retry keeps the user moving toward a mindscape
+ * rather than dead-ending on a read failure that is usually transient.
+ */
+export async function retry() {
+  unknownSince = 0;
+  embedStallSince = 0;
+  await start();
 }
 
 /**

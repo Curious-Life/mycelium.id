@@ -502,8 +502,12 @@
 					{#each visibleModels as m (m.name)}
 						<div class="row" class:dim={m.fitScore === 0} class:rec-top={m.recommended}>
 							<span class="mono">{m.name}</span>
-							{#if m.recommended}<span class="chip rec-pick">★ recommended</span>{/if}
-							{#if m.recommendedFor?.includes('labeling')}<span class="chip rec-role" title="Recommended for the on-box labeling model (Context Engine L1)">★ for labeling</span>{/if}
+							<!-- The ★ is CURATED (2026-07-19): only an endorsed model we actually use is
+							     `recommended`. When that model is also the labeling pick, say so in one chip
+							     rather than stacking two ★s. A stray labeling tag without endorsement (legacy)
+							     still renders its own chip. -->
+							{#if m.recommended}<span class="chip rec-pick" title="A model we use and endorse">★ recommended{#if m.recommendedFor?.includes('labeling')} · for labeling{/if}</span>
+							{:else if m.recommendedFor?.includes('labeling')}<span class="chip rec-role" title="Recommended for the on-box labeling model (Context Engine L1)">★ for labeling</span>{/if}
 							<span class="chip {FIT[m.fitLevel]?.cls ?? ''}">{FIT[m.fitLevel]?.label ?? m.fitLevel}</span>
 							<span class="row-blurb">{m.bestFor} · ~{m.estimatedGb}GB</span>
 							<span class="row-action">
@@ -637,7 +641,7 @@
 							</div>
 							<button class="sub-toggle" role="switch" aria-checked={subSensitive} disabled={subSensitiveBusy} onclick={() => setSubSensitive(!subSensitive)}>
 								<span class="toggle sm" class:on={subSensitive}><span class="knob"></span></span>
-								<span class="sub-toggle-body"><span class="sub-toggle-title">Also use it for sensitive work</span><span class="sub-toggle-sub">Let your subscription process persona, claim &amp; description analysis — otherwise kept on-device/EU. Off by default.</span></span>
+								<span class="sub-toggle-body"><span class="sub-toggle-title">Also use it for sensitive work</span><span class="sub-toggle-sub">Let your subscription process persona &amp; claim analysis — otherwise kept on-device/EU. Off by default.</span></span>
 							</button>
 						{/if}
 					{:else}

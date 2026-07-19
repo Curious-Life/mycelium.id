@@ -168,7 +168,7 @@ for (const col of ['categorized_at', 'categories_model']) {
 ok(DEFAULT_LABEL_MODEL === 'qwen3.5:4b', 'default labeling model is qwen3.5:4b (won the 4-model eval)', `(${DEFAULT_LABEL_MODEL})`);
 // Single source of truth: the "Recommended for labeling" badge and the actual default must not drift.
 ok(DEFAULT_LABEL_MODEL === labelingRecommendedModel(), 'DEFAULT_LABEL_MODEL is single-sourced from role-models.js (badge == default)');
-ok(ROLE_RECOMMENDATIONS.descriptions.kind === 'cloud-eu-zdr' && ROLE_RECOMMENDATIONS.descriptions.presetId === 'regolo', 'descriptions role recommends EU-ZDR Regolo (never US — §4g)');
+ok(ROLE_RECOMMENDATIONS.descriptions.kind === 'cloud-eu-zdr' && ROLE_RECOMMENDATIONS.descriptions.presetId === 'regolo', 'descriptions role recommends EU-ZDR Regolo (the sovereign DEFAULT — narrate is no longer §4g-limited, other providers are assignable)');
 ok(INFERENCE_TASKS.includes('categorize'), "'categorize' is a first-class inference task (shows in Settings → Intelligence)");
 ok(createCategoryClassifier({ model: DEFAULT_LABEL_MODEL, infer: async () => '{}' }).model === 'qwen3.5:4b', 'classifier carries the default model as provenance');
 // defaultLabelModel: settings override wins; else default. Hermetic (no Ollama).

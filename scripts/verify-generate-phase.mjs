@@ -47,6 +47,32 @@ const started = drive('started');
 const malformed = drive('malformed');
 const unavailable = drive('unavailable');
 
+// The embedding-poll cap: drives the REAL pollEmbedding loop under a MOCK clock so a persistent
+// `unknown` (SQLCipher scan failure) is exercised to its terminal. One process emits every field.
+const embed = (() => {
+  const out = execFileSync('node', ['test/drive-generate-embedding.mjs'], {
+    cwd: 'portal-app', encoding: 'utf8', timeout: 120000, env: { ...process.env },
+  }).trim().split('\n').pop();
+  return JSON.parse(out);
+})();
+
+// The two remaining generate spinners, driven to their terminals under a MOCK CLOCK: a hung POST
+// (`starting`) and a wedged `running` job. Same technique as `embed` above.
+const caps = (() => {
+  const out = execFileSync('node', ['test/drive-generate-caps.mjs'], {
+    cwd: 'portal-app', encoding: 'utf8', timeout: 120000, env: { ...process.env },
+  }).trim().split('\n').pop();
+  return JSON.parse(out);
+})();
+
+// MindscapeView's "Checking your mind…" probe bound (mind-probe-cap.ts), driven directly.
+const probeCap = (() => {
+  const out = execFileSync('node', ['test/drive-probe-cap.mjs'], {
+    cwd: 'portal-app', encoding: 'utf8', timeout: 120000, env: { ...process.env },
+  }).trim().split('\n').pop();
+  return JSON.parse(out);
+})();
+
 t("G1. ⭐ the server's 'skipped' is a SUCCESS — 'up-to-date', never an error", () => {
   // THE regression. The route says "your map is already built"; the client used to answer
   // "Server did not return a job id." and render it nowhere.
@@ -143,6 +169,7 @@ const inviteStarting = mountRender('invite:hang');
 // each one is the only probe that fails when its guard is deleted (see D2f's mutation log).
 const inviteOverrun = mountRender('invite:overrun');   // elapsed > priorDurationMs ⇒ negative projection
 const inviteEarly = mountRender('invite:early');        // elapsed = 1s ⇒ positive, fabricated projection
+const inviteRetryable = mountRender('invite:retryable'); // the capped-`unknown` retryable error render
 
 const mounted = (r) => { assert.ok(r.ok, `the harness itself failed to mount: ${r.error}`); };
 
@@ -343,6 +370,153 @@ t('D2f. ⭐ a run that just started says nothing about the ETA — never "~0s le
         + `"${r.siteText}". The template invented a number the store refused to.`);
     }
   }
+});
+
+t('E1. ⭐ a persistent `unknown` count is CAPPED — never the infinite "Checking your conversations…" spinner', () => {
+  // THE live-test hang (2026-07-18): pollEmbedding's `unknown` branch was the ONLY one without a
+  // terminal, so a fresh machine whose vault the server could not COUNT spun forever. It now
+  // bounds the wait with the unknownSince clock and transitions to a RETRYABLE error.
+  assert.ok(embed.ok, `the embedding-cap harness itself failed: ${embed.error}`);
+
+  // While transient it KEEPS POLLING with calm copy — not a dead error, and NOT the old
+  // clinical "Checking your conversations…".
+  assert.equal(embed.transient.phase, 'embedding',
+    `before the cap the store must still be waiting (embedding), got '${embed.transient.phase}'`);
+  assert.equal(embed.transient.message, 'Reading your vault…',
+    `the transient copy must be the calm "Reading your vault…", got "${embed.transient.message}"`);
+  assert.doesNotMatch(embed.transient.message, /checking your (conversations|mind)/i,
+    'the old infinite-spinner copy must be gone');
+  assert.equal(embed.transient.retryable, false, 'a still-transient wait is not yet retryable');
+
+  // Past the bound: a RETRYABLE error that does NOT assert an empty vault ("could not read",
+  // never "import some conversations first").
+  assert.equal(embed.capped.phase, 'error',
+    `a persistent unknown must terminate the spinner, got phase '${embed.capped.phase}'`);
+  assert.equal(embed.capped.retryable, true,
+    'the capped state must be RETRYABLE — unknown is "could not look", the honest next move is Retry');
+  assert.match(embed.capped.error, /read your vault/i,
+    `the capped copy must be an honest "couldn't read your vault", got "${embed.capped.error}"`);
+  assert.doesNotMatch(embed.capped.error, /import|no (messages|conversations|data)|empty/i,
+    'the capped error must NOT claim an empty vault — that is the §3.2a lie this fixes');
+
+  // And it actually STOPPED polling — a still-armed interval keeps hitting /processing-status.
+  assert.equal(embed.callsAfterCap, embed.callsAtCap,
+    `after the cap the poll must be stopped — /processing-status calls went ${embed.callsAtCap} → ${embed.callsAfterCap}`);
+});
+
+t('E2. ⭐ a good count between unknowns CLEARS the clock — no false cap on a recovering scan', () => {
+  // The cap must trip only on PERSISTENT unknowns. A single successful count in between resets
+  // the clock, so a scan that recovers (even long after the first unknown) is never capped —
+  // mirrors embedStallSince, where ANY forward progress resets the plateau clock.
+  assert.equal(embed.recovered.phase, 'embedding',
+    `a successful count after an unknown must NOT be an error (the clock cleared), got '${embed.recovered.phase}'`);
+  assert.equal(embed.recoveredThenUnknown.phase, 'embedding',
+    `and a later unknown restarts a FRESH clock (not a paused one) — it must not instantly re-cap, `
+    + `got '${embed.recoveredThenUnknown.phase}'`);
+});
+
+t('D2g. ⭐ the invite RENDERS the retryable error AND a Retry affordance — never a dead end', () => {
+  // The capped `unknown` is actionable: the user sees the honest message and a way FORWARD. An
+  // unrendered error, or an error with no Retry, is the silence/hang this whole surface fixes.
+  assert.equal(inviteRetryable.phase, 'error', 'the probe did not reach the retryable-error state');
+  shows(inviteRetryable, 'the capped-unknown retryable error');   // error text present + visible
+  assert.equal(inviteRetryable.retryCount, 1,
+    `exactly one Retry button must render when the error is retryable, got ${inviteRetryable.retryCount}`);
+  assert.ok(inviteRetryable.retryVisible, 'the Retry button must be VISIBLE, not rendered-and-hidden');
+  // The NON-retryable errors must NOT grow a Retry button (it cannot help "import first" /
+  // "embedder down"): the 503 error probe holds retryable:false.
+  assert.equal(inviteError.retryCount, 0,
+    `a non-retryable error must show NO Retry button, got ${inviteError.retryCount}`);
+});
+
+t('D2h. the gen-status row TOP-aligns the dot to the first text line (the live-test misalignment)', () => {
+  // `align-items: center` floated the 6px dot against a multi-line block's vertical middle,
+  // visibly detached from the first line. The fix top-aligns the row (+ a dot offset). jsdom
+  // does no layout, so this asserts the computed cascade value — a projection of the fix, paired
+  // with the mutation log in the handoff; it goes RED if the rule reverts to center.
+  for (const r of [inviteRetryable, inviteEmbedding, inviteError]) {
+    assert.equal(r.genStatusAlign, 'flex-start',
+      `.gen-status must align-items:flex-start so the dot pins to the first line, got '${r.genStatusAlign}' (phase ${r.phase})`);
+  }
+});
+
+t('C1. ⭐ a hung POST /generate CAPS the `starting` spinner — retryable, never infinite', () => {
+  // Pipeline-transparency Unit 1: `starting` had NO client timeout, so a POST the server accepted
+  // but never answered spun the spinner forever. start() now arms the poll before the await and
+  // checkStarting bounds it at START_TIMEOUT_MS.
+  assert.ok(caps.ok, `the caps harness itself failed: ${caps.error}`);
+  assert.equal(caps.startingTransient.phase, 'starting',
+    `before the bound the store must still be starting, got '${caps.startingTransient.phase}'`);
+  assert.equal(caps.startingCapped.phase, 'error',
+    `a POST that never answers must TERMINATE the 'starting' spinner, got '${caps.startingCapped.phase}'`);
+  assert.equal(caps.startingCapped.retryable, true,
+    'the capped start must be RETRYABLE — the server may just be slow; the honest next move is Retry');
+  assert.match(caps.startingCapped.error, /taking too long|hasn.t responded|try again/i,
+    `the copy must be an actionable "taking too long — try again", got "${caps.startingCapped.error}"`);
+});
+
+t('C2. ⭐ a run the server never advances past `running` CAPS at the client ceiling — ABOVE the server MAX', () => {
+  // `running` polled forever if the server wedged at status:'running'. pollStatus now terminates at
+  // RUN_CEILING_MS measured from the job's own startedAt. That ceiling is a BACKSTOP set ABOVE the
+  // server's own MAX_MS (45 min): a healthy run is ended by the server's cap, so the client ceiling
+  // only ever fires on a server so wedged it blew past its own cap without self-terminating. The
+  // harness jumps to +51 min to prove the terminal is reached — a 15-min ceiling (the original bug)
+  // would have torn down a healthy 20-min run long before here.
+  assert.equal(caps.runningBefore.phase, 'running', 'the run must actually be running before the ceiling');
+  assert.equal(caps.runningCeiling.phase, 'error',
+    `a wedged 'running' must terminate at RUN_CEILING_MS, got '${caps.runningCeiling.phase}'`);
+  assert.equal(caps.runningCeiling.retryable, true, 'the capped run must be RETRYABLE');
+});
+
+t('C3. ⭐ `stalled` is a SOFT HINT, never a terminal — a stalled-but-healthy run KEEPS running; a healthy long run is NOT capped', () => {
+  // FINDING F2: the old client hard-killed a run the instant the server flagged `stalled`. But the
+  // server sets `stalled` only after ≥5 min of stdout silence as a SOFT hint that KEEPS the run
+  // alive to MAX_MS (a legit quiet measure step trips it routinely). So a stalled run below the
+  // ceiling must STAY running — and carry the flag so the UI shows "taking longer than usual".
+  // ⚠️ WIRE FIDELITY: the harness now injects `stalled:true` at 20 min elapsed (a shape the server
+  // CAN emit); the previous harness injected it at 4 min, which the server can NEVER produce
+  // (needs ≥5 min silence) — it was blessing an unreachable wire while masking a live over-kill.
+  assert.equal(caps.runningStalledSoft.phase, 'running',
+    `a server-flagged 'stalled' run below the ceiling must KEEP RUNNING (soft hint, not a terminal), `
+    + `got '${caps.runningStalledSoft.phase}' — hard-killing on 'stalled' tears down a run the server `
+    + 'is still nursing');
+  assert.equal(caps.runningStalledSoft.stalled, true,
+    'and it must carry the stalled flag through to the store so the UI can say "taking longer than usual"');
+
+  // THE HEALTHY-LONG-RUN GUARD (F2's regression sentinel): 20 min elapsed, NO stalled flag — the
+  // 76k-message vault (clustering + LLM describe + 16 Python measure steps). It must NOT be capped
+  // by the client ceiling; only the server's 45-min cap ends a healthy run. Restore RUN_CEILING_MS
+  // to 15 min (the original bug) and THIS goes red at 20 min elapsed.
+  assert.equal(caps.runningHealthyLong.phase, 'running',
+    `a healthy 20-min run (no stalled) must NOT be capped by the client ceiling, got `
+    + `'${caps.runningHealthyLong.phase}' — the ceiling must sit ABOVE the server's own MAX_MS so the `
+    + 'server, not the client, ends a healthy run');
+});
+
+t('C5. ⭐ pollStatus does NOT resurrect `running` after a terminal (the un-cap race, F3)', () => {
+  // FINDING F3: pollStatus reads the store, then awaits (api + json). In that window an overlapping
+  // poll, a cancel(), or a reset() can write a TERMINAL and clear the timer. Without a post-await
+  // guard, the late poll patches `phase:'running'` back over that terminal → a FROZEN spinner with
+  // no live poll. The harness hangs a /status GET, calls reset() (→ idle) while it hangs, then
+  // releases it; with the guard the resumed poll drops its stale response. Remove the
+  // `if (get(generate).phase !== 'running') return;` guard from pollStatus and this goes red.
+  assert.equal(caps.raceAfterTerminal.phase, 'idle',
+    `a poll resolving AFTER a terminal was written must not patch 'running' back — got `
+    + `'${caps.raceAfterTerminal.phase}'. That is the frozen-spinner race F3 closes.`);
+});
+
+t('C4. ⭐ the "Checking your mind…" probe bound is FINITE and caps at it — never an infinite retry', () => {
+  // MindscapeView's readiness probe retried every ~4s forever on a persistent /readiness failure.
+  // The bound (mind-probe-cap.ts) turns that into a finite retry → a "couldn't read your map"
+  // retryable state. Reach: this gates the DECISION, not MindscapeView's render (THREE.js-heavy to
+  // mount) — see drive-probe-cap.mjs's honest-reach note.
+  assert.ok(probeCap.ok, `the probe-cap harness itself failed: ${probeCap.error}`);
+  assert.ok(Number.isFinite(probeCap.max) && probeCap.max > 0,
+    `the retry bound must be a finite, positive count, got ${probeCap.max} — Infinity IS the hang this caps`);
+  assert.equal(probeCap.belowBound, false,
+    `below the bound the probe must keep checking (not yet exhausted), got exhausted=${probeCap.belowBound}`);
+  assert.equal(probeCap.atBound, true,
+    `at the bound the probe must be EXHAUSTED so the view shows a retryable state, got exhausted=${probeCap.atBound}`);
 });
 
 const allPass = ledger.every(Boolean);

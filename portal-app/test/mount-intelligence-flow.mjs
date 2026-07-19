@@ -41,6 +41,10 @@ for (const k of Object.getOwnPropertyNames(dom.window)) {
 }
 globalThis.window = dom.window;
 globalThis.document = dom.window.document;
+// Auto-open canary: status/refresh logic must NEVER open a browser window (a live bug
+// elsewhere is ~5 unprompted sign-in windows; this pane must not be able to contribute).
+let windowOpens = 0;
+dom.window.open = () => { windowOpens++; return null; };
 
 // ── The REAL server composition over a fixture DAL (zero wire drift) ─────────────────────
 const { composeBundle } = await import('../../src/portal-intelligence.js');
@@ -48,7 +52,20 @@ const { INTELLIGENCE_FUNCTIONS } = await import('../../src/inference/role-models
 
 const EU_ROW = { id: 1, provider: 'custom', label: 'Regolo (EU)', base_url: 'https://api.regolo.ai/v1', is_active: 1, jurisdiction: 'eu-zdr' };
 const SUB_ROW = { id: 5, provider: 'anthropic', label: 'Claude subscription', auth_type: 'oauth', base_url: null, is_active: 0, jurisdiction: 'us-standard' };
-const RETURNING = PROBE === 'returning' || PROBE === 'fault';
+// ── subscription auth-VALIDITY probes (the "connected must mean VALID" fix, 2026-07-18) ──
+// Each mounts the RETURNING vault (subscription connected + assigned to chat) with a fixed
+// per-surface validity from the status stub:
+//   sub-split    native dead, cli alive — the LIVE mismatch ("token shows dead, chat works"):
+//                the row must say BOTH truths, and the needs-line must carry Refresh now +
+//                Reconnect (and never auto-open anything).
+//   sub-ok       positive native evidence — the one state allowed to render green.
+//   sub-unknown  zero evidence — MUTED, no green claim, no scare copy (fail-closed neutral).
+const SUBV = {
+  'sub-split': { native: 'needs_reconnect', cli: 'ok' },
+  'sub-ok': { native: 'ok', cli: 'unknown' },
+  'sub-unknown': { native: 'unknown', cli: 'unknown' },
+}[PROBE] || null;
+const RETURNING = PROBE === 'returning' || PROBE === 'fault' || PROBE === 'voice-sample' || PROBE === 'voice-error' || PROBE === 'embedder-absent' || Boolean(SUBV);
 // The returning vault: Understanding + Conversation set; transcription + descriptions NOT —
 // the exact ≥2-gap shape W6's gap-fill exists for.
 const SETTINGS = RETURNING
@@ -100,7 +117,28 @@ globalThis.__apiStub = async (path, options = {}) => {
       { model: 'small', label: 'Whisper small', sizeMB: 480, blurb: 'Light and fast', recommended: false },
     ] }) };
   }
-  if (path.startsWith('/portal/settings/tts')) return { ok: true, json: async () => ({ enabled: false, provider: null, qwen: { model: { phase: 'absent', progress: 0 } } }) };
+  if (path.startsWith('/portal/settings/tts/qwen/download')) return { ok: true, json: async () => ({ phase: 'downloading', progress: 1 }) };
+  if (path.startsWith('/portal/settings/tts')) {
+    // voice-sample: the model is DOWNLOADED but has no reference sample, so it cannot speak
+    // (§2.2/§5). The panel must read this as an actionable warning, never a false "ready".
+    const qwen = PROBE === 'voice-sample'
+      ? { enabled: true, samplePending: true, model: { phase: 'ready', progress: 100 } }
+      : PROBE === 'voice-error'
+      ? { model: { phase: 'error', progress: 0, error: 'download failed' } }   // a FAILED download → retry
+      : { model: { phase: 'absent', progress: 0 } };
+    return { ok: true, json: async () => ({ enabled: false, provider: null, qwen }) };
+  }
+  // Specific auth/claude paths (distinct prefixes; status must never claim validity the
+  // probe did not configure — the default {} leaves subValidity null = no claim).
+  if (path.startsWith('/portal/auth/claude/refresh')) {
+    // The driven refresh FAILS: outcome 'unavailable', validity unchanged — the UI must
+    // escalate to the reconnect ladder, never claim success, never open a window.
+    return { ok: true, json: async () => ({ ok: true, outcome: 'unavailable', validity: SUBV || { native: 'needs_reconnect', cli: 'unknown' } }) };
+  }
+  if (path.startsWith('/portal/auth/claude/status')) {
+    if (SUBV) return { ok: true, json: async () => ({ ok: true, authenticated: true, health: 'connected', providerId: 5, account: null, model: null, validity: SUBV }) };
+    return { ok: true, json: async () => ({ ok: true }) };   // no validity ⇒ the UI holds null (no green claim)
+  }
   if (path.startsWith('/portal/providers/sensitive-subscription')) return { ok: true, json: async () => ({ allowed: false }) };
   if (path.startsWith('/portal/providers/presets')) return { ok: true, json: async () => ({ functions: INTELLIGENCE_FUNCTIONS, presets: [], roleRecommendations: {} }) };
   if (path.startsWith('/portal/providers/task-models')) {
@@ -116,6 +154,10 @@ globalThis.__apiStub = async (path, options = {}) => {
   if (path.startsWith('/portal/readiness')) {
     const models = PROBE === 'fault'
       ? { labeler: { status: 'down', message: 'The labeling engine keeps stopping.', model: 'qwen3.5:4b', progress: null }, enricher: { status: 'ok', message: 'Ready.', model: 'qwen3.5:4b', progress: null }, embedder: { status: 'ok', message: 'Ready.', model: null, progress: null }, transcriber: { status: 'no_model', message: null, model: null, progress: null } }
+      // embedder-absent: the readiness poll has not resolved the embedder (or an outage holds {}).
+      // The panel must NOT fabricate a green "Included" — it renders the honest idle absence.
+      : PROBE === 'embedder-absent'
+      ? { labeler: { status: 'ok', message: 'Labeling with qwen3.5:4b.', model: 'qwen3.5:4b', progress: null }, enricher: { status: 'ok', message: 'Ready.', model: 'qwen3.5:4b', progress: null }, transcriber: { status: 'no_model', message: null, model: null, progress: null } }
       : RETURNING
         ? { labeler: { status: 'ok', message: 'Labeling with qwen3.5:4b.', model: 'qwen3.5:4b', progress: null }, enricher: { status: 'ok', message: 'Ready.', model: 'qwen3.5:4b', progress: null }, embedder: { status: 'ok', message: 'Ready.', model: null, progress: null }, transcriber: { status: 'no_model', message: null, model: null, progress: null } }
         : { labeler: { status: 'no_model', message: null, model: null, progress: null }, enricher: { status: 'no_model', message: null, model: null, progress: null }, embedder: { status: 'ok', message: 'Ready.', model: null, progress: null }, transcriber: { status: 'no_model', message: null, model: null, progress: null } };
@@ -141,6 +183,10 @@ const genSvelte = (name, source) => {
     .replace(/from\s+['"]\.\/AISettings\.svelte['"]/, `from './StubAISettings.gen.js'`)
     .replace(/from\s+['"]\.\/VoiceSection\.svelte['"]/, `from './StubVoiceSection.gen.js'`)
     .replace(/from\s+['"]\.\/EngineSelector\.svelte['"]/, `from './StubEngineSelector.gen.js'`)
+    // The unified On-device models panel + its ModelHealth renderer compile REAL — the panel is
+    // the operator's "one place" surface, asserted on the genuine article (odmRows below).
+    .replace(/from\s+['"]\.\/OnDeviceModels\.svelte['"]/, `from './OnDeviceModels.gen.js'`)
+    .replace(/from\s+['"]\.\/ModelHealth\.svelte['"]/, `from './ModelHealth.gen.js'`)
     .replace(/from\s+['"]\$lib\/stores\/sensitive-exempt\.svelte['"]/, `from './sensitive-exempt.gen.js'`);
   writeFileSync(`${GEN}/${name}.gen.js`, rewired);
 };
@@ -149,6 +195,8 @@ for (const stub of ['AISettings', 'VoiceSection', 'EngineSelector']) {
 }
 genSvelte('OnboxTaskSelect', readFileSync(SELECT, 'utf8'));
 genSvelte('TranscriptionSetup', readFileSync(TRANS, 'utf8'));
+genSvelte('ModelHealth', readFileSync('src/lib/components/settings/ModelHealth.svelte', 'utf8'));
+genSvelte('OnDeviceModels', readFileSync('src/lib/components/settings/OnDeviceModels.svelte', 'utf8'));
 genSvelte('IntelligenceScreen', readFileSync(SCREEN, 'utf8'));
 genSvelte('IntelligenceFlow', readFileSync(FLOW, 'utf8'));
 
@@ -180,7 +228,7 @@ try {
     // A10: the machinery must NOT be simultaneously visible.
     aiSettingsMounted: !!D.querySelector('[data-stub="AISettings"]'),
     engineMounted: !!D.querySelector('[data-stub="EngineSelector"]'),
-    assignmentMounted: !!D.querySelector('#assignment'),
+    assignmentMounted: !!D.querySelector('.cust-panel .intel'),
     // W5: no pre-consent checkmarks inside the STATE A card.
     cardHasCheckmark: /✓/.test(stateEl()?.textContent || ''),
     confirmLabel: [...D.querySelectorAll('button')].map((b) => b.textContent.trim()).find((t) => /Set everything up/.test(t)) ?? null,
@@ -195,7 +243,52 @@ try {
     gapButton: [...D.querySelectorAll('button')].map((b) => b.textContent.trim()).find((t) => /Finish setting up/.test(t)) ?? null,
     faultHasControl: !!(D.querySelector('.needs .quiet, .needs.bad-line .quiet')),
     dotClasses: [...D.querySelectorAll('.srow')].map((r) => ({ label: r.querySelector('.slabel')?.textContent, cls: [...(r.querySelector('.dot')?.classList || [])].filter((c) => c !== 'dot')[0] ?? null })),
+    // The unified On-device models panel — one row per local model (the operator's "one place").
+    // Read the REAL rendered rows: key, its ModelHealth status text, whether a Download button is
+    // offered, and any 'blocked' note. This is the genuine article (real ModelHealth mounted).
+    odmRows: [...D.querySelectorAll('[data-testid="odm-row"]')].map((r) => ({
+      key: r.getAttribute('data-key'),
+      label: r.querySelector('.odm-label')?.textContent?.trim() ?? null,
+      statusText: r.querySelector('.odm-status')?.textContent?.replace(/\s+/g, ' ').trim() ?? null,
+      okDot: !!r.querySelector('.mh-dot.ok'),
+      warnDot: !!r.querySelector('.mh-dot.warn'),
+      badDot: !!r.querySelector('.mh-dot.bad'),
+      size: r.querySelector('.odm-size')?.textContent?.trim() ?? null,
+      hasDownload: !!r.querySelector('[data-testid="odm-download"]'),
+      blocked: r.querySelector('[data-testid="odm-blocked"]')?.textContent?.trim() ?? null,
+    })),
+    odmPresent: !!D.querySelector('section.odm'),
   };
+
+  // ── the validity probes: read the Conversation row's rendered truth, drive Refresh now ──
+  let subProbe = null;
+  if (SUBV) {
+    const convRow = () => [...D.querySelectorAll('.srow')].find((r) => /Conversation/.test(r.querySelector('.slabel')?.textContent || ''));
+    const conv = convRow();
+    const refreshBtn = [...D.querySelectorAll('button')].find((b) => /Refresh now/.test(b.textContent));
+    const reconnectBtn = [...D.querySelectorAll('button')].find((b) => /^Reconnect\b/.test(b.textContent.trim()));
+    const snapshot = {
+      what: conv?.querySelector('.swhat')?.textContent.trim() ?? null,
+      dot: [...(conv?.querySelector('.dot')?.classList || [])].filter((c) => c !== 'dot')[0] ?? null,
+      needsLine: (text().match(/1 thing needs you[^.]*\./) || [])[0] ?? null,
+      hasRefreshBtn: !!refreshBtn,
+      hasReconnectBtn: !!reconnectBtn,
+    };
+    let afterRefresh = null;
+    if (refreshBtn) {
+      const beforeSent = sent.length;
+      refreshBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+      flushSync();
+      await wait(80);
+      flushSync();
+      afterRefresh = {
+        escalation: /Refresh didn’t help/.test(text()),
+        refreshPosts: sent.slice(beforeSent).filter((s) => s.path.startsWith('/portal/auth/claude/refresh')).map((s) => s.method),
+        stillBad: [...(convRow()?.querySelector('.dot')?.classList || [])].includes('bad'),
+      };
+    }
+    subProbe = { ...snapshot, afterRefresh, windowOpens };
+  }
 
   let afterConfirm = null;
   const confirmBtn = [...D.querySelectorAll('button')].find((b) => /Set everything up/.test(b.textContent));
@@ -226,26 +319,62 @@ try {
     gapClick = { sent: sent.slice(beforeLen).map((s) => ({ path: s.path, body: s.body })) };
   }
 
-  // Drive Customize open (A10's second half: the machinery appears on demand).
+  // The panel's per-model Download action routes to the model's own download path. Drive the
+  // VOICE row's button (absent in the returning fixture ⇒ a Download is offered) and confirm it
+  // POSTs the tts route — never a new/forked download path.
+  let odmDownload = null;
+  if (PROBE === 'returning') {
+    const voiceRow = [...D.querySelectorAll('[data-testid="odm-row"]')].find((r) => r.getAttribute('data-key') === 'voice');
+    const btn = voiceRow?.querySelector('[data-testid="odm-download"]');
+    if (btn) {
+      const beforeLen = sent.length;
+      btn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+      flushSync();
+      await wait(80);
+      flushSync();
+      odmDownload = { sent: sent.slice(beforeLen).map((s) => ({ path: s.path, method: s.method })) };
+    }
+  }
+
+  // Drive Customize open (A10's second half: the machinery appears on demand). It is a SEGMENTED
+  // nav now — TWO tabs (2026-07-19): Functions and Providers. Voice + Engine folded INTO the
+  // Functions surface (IntelligenceScreen owns them), so on the default Functions tab the real
+  // screen (`.intel`) AND the Voice/Engine stubs are present; Providers is behind its own tab.
   let customize = null;
+  const clickTab = (label) => {
+    const b = [...D.querySelectorAll('.cust-nav .cust-tab')].find((x) => x.textContent.trim() === label);
+    if (b) { b.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); flushSync(); }
+    return !!b;
+  };
   const custBtn = [...D.querySelectorAll('button')].find((b) => /Customize/.test(b.textContent));
   if (custBtn) {
     custBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
     flushSync();
     await wait(80);
     flushSync();
+    // Default tab = Functions: the REAL IntelligenceScreen (`.intel`) mounts, WITH Voice + Engine
+    // folded in (their stubs present), and Providers (AISettings) does NOT.
+    const defaultTab = {
+      assignment: !!D.querySelector('.cust-panel .intel'),
+      voice: !!D.querySelector('[data-stub="VoiceSection"]'),     // folded into the Voice row
+      engine: !!D.querySelector('[data-stub="EngineSelector"]'),  // folded into the Conversation row
+      aiSettings: !!D.querySelector('[data-stub="AISettings"]'),
+    };
+    clickTab('Providers');
+    await wait(20); flushSync();
+    const providersTab = {
+      aiSettings: !!D.querySelector('[data-stub="AISettings"]'),
+      assignment: !!D.querySelector('.cust-panel .intel'),   // the Functions panel is GONE
+    };
     customize = {
-      aiSettingsMounted: !!D.querySelector('[data-stub="AISettings"]'),
-      voiceMounted: !!D.querySelector('[data-stub="VoiceSection"]'),
-      engineMounted: !!D.querySelector('[data-stub="EngineSelector"]'),
-      assignmentMounted: !!D.querySelector('#assignment'),
-      screenRendered: !!D.querySelector('#assignment .intel'),
-      order: [...D.querySelectorAll('.cust-sec')].map((s) => s.id),
+      navTabs: [...D.querySelectorAll('.cust-nav .cust-tab')].map((b) => b.textContent.trim()),
+      screenRendered: defaultTab.assignment,
+      defaultTab, providersTab,
       liveSameElement: liveRegions()[0] === liveEl,
     };
   }
 
-  emit({ ok: true, probe: PROBE || 'cold', before, afterConfirm, gapClick, customize });
+  emit({ ok: true, probe: PROBE || 'cold', before, afterConfirm, gapClick, customize, subProbe, odmDownload, windowOpens });
   process.exit(0);   // the flow's 4s models poll would otherwise keep node alive forever
 } catch (e) {
   emit({ ok: false, probe: PROBE || 'cold', error: String(e?.stack || e) });

@@ -27,13 +27,16 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { venvPythonPath, systemPython } from '../system/platform-env.js';
+import { looksLikePortConflict, reapOwnOrphanOnPort, createRestartGovernor } from '../system/service-guard.js';
 import { createEmbedClient } from './client.js';
+
+const SERVICE_SCRIPT = 'pipeline/embed-service.py'; // the exact argv token we spawn — the orphan-identity anchor
 
 const DEFAULT_PORT = Number(process.env.MYCELIUM_EMBED_PORT) || 8091;
 const PROBE_TIMEOUT_MS = 2000;     // a health probe must not stack up
 const TICK_MS = 3000;              // re-evaluate health/lifecycle this often
 const DEPS_RETRY_MS = 15000;       // recheck deps this often (so a later setup.sh recovers)
-const MAX_BACKOFF_MS = 30000;
+// crash backoff now lives in service-guard's restart governor (15s → 2min, bounded)
 const DOWN_AFTER = 5;              // consecutive crashes → report 'down'
 
 // Module-level singleton: at most one embed service per machine (:8091), so at
@@ -73,6 +76,8 @@ function resolvePython({ home, pythonBin }) {
  * @param {number} [opts.port=8091]
  * @param {(m:string)=>void} [opts.log]
  * @param {ReturnType<typeof createEmbedClient>} [opts.embed] injectable client (tests)
+ * @param {typeof spawn} [opts.spawn] injectable for tests
+ * @param {typeof reapOwnOrphanOnPort} [opts.reapOrphan] injectable for tests
  */
 export function startEmbedSupervisor({
   home = process.cwd(),
@@ -80,6 +85,8 @@ export function startEmbedSupervisor({
   port = DEFAULT_PORT,
   log = (m) => process.stderr.write(`${m}\n`),
   embed,
+  spawn: spawnImpl = spawn,
+  reapOrphan = reapOwnOrphanOnPort,
 } = {}) {
   if (_instance) return _instance;
 
@@ -104,11 +111,16 @@ export function startEmbedSupervisor({
     ...(process.env.HF_HUB_OFFLINE ? { HF_HUB_OFFLINE: process.env.HF_HUB_OFFLINE } : {}),
   });
 
+  // Bounded restart (service-guard): outcome-based 15s→2min backoff; halts after
+  // N straight failures (or a foreign port holder) until nudge() resumes it.
+  const governor = createRestartGovernor();
+
   // True if :8091 answers /health (reachable). Updates health from the reply.
   async function probe() {
     try {
       const h = await client.health();
       failures = 0;
+      governor.recordSuccess(); // an answering service is the ONLY reset (outcome-based)
       // Order matters: /health sets loaded:false for BOTH 'error' and 'loading',
       // so the error case must be checked FIRST or it reads as a benign "loading".
       if (h?.status === 'error') {
@@ -130,18 +142,43 @@ export function startEmbedSupervisor({
     return new Promise((resolve) => {
       let p;
       try {
-        p = spawn(python, ['-c', 'import numpy, onnxruntime, tokenizers, huggingface_hub'], { stdio: 'ignore' });
+        p = spawnImpl(python, ['-c', 'import numpy, onnxruntime, tokenizers, huggingface_hub'], { stdio: 'ignore' });
       } catch { return resolve(false); }
       p.on('error', () => resolve(false));
       p.on('close', (code) => resolve(code === 0));
     });
   }
 
-  function backoff() { nextStartAt = Date.now() + Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(failures, 5)); }
+  // Governor-driven backoff: 15s → 2min doubling on CONSECUTIVE failures; after
+  // N straight it halts (no more attempts) until nudge()/settings resume it —
+  // the 170×/day crash-loop can no longer happen.
+  function backoff() { nextStartAt = Date.now() + governor.recordFailure().delayMs; }
+
+  // A spawned child died at bind because the port is taken. Reap the holder IFF
+  // it is provably OUR OWN orphan (service-guard proof); a foreign holder is
+  // NEVER killed — the fault is surfaced content-free and attempts halt.
+  async function handlePortConflict() {
+    let r = null;
+    try { r = await reapOrphan({ port, scriptPath: SERVICE_SCRIPT, ownChildPid: child?.pid ?? null, log }); }
+    catch { r = { reaped: false, reason: 'no-holder' }; }
+    if (r?.reaped) {
+      nextStartAt = 0; // recovered the port — retry the bind immediately (not a failure outcome)
+      setHealth('starting', 'Recovered the port from a stale embedding service — restarting…');
+      return;
+    }
+    if (r?.reason === 'foreign' || r?.reason === 'stuck' || r?.reason === 'kill-failed') {
+      governor.halt(`port :${port} held by another process`);
+      setHealth('down', 'The embedding engine cannot start.', `port :${port} held by another process${r?.holder?.pid ? ` (pid ${r.holder.pid})` : ''}`);
+      log(`[embed-supervisor] port :${port} held by ${r?.reason === 'foreign' ? 'a foreign process' : 'an unkillable process'} — restarts halted until nudge`);
+      return;
+    }
+    failures++; backoff(); // holder vanished on its own — normal crash accounting
+  }
 
   // Adopt-or-spawn. Only runs when :8091 is unreachable and no child is alive.
   async function tryStart() {
     if (stopped || child || Date.now() < nextStartAt) return;
+    if (governor.isHalted()) return; // bounded: no more attempts until nudge()/resume
 
     if (!(await checkDeps())) {
       setHealth('deps_missing', 'The embedding engine needs setup — run: bash pipeline/setup.sh', `python: ${python}`);
@@ -151,7 +188,7 @@ export function startEmbedSupervisor({
 
     setHealth('starting', failures ? 'Restarting the embedding engine…' : 'Starting the embedding engine…');
     try {
-      child = spawn(python, ['pipeline/embed-service.py', '--serve', '--port', String(port)], {
+      child = spawnImpl(python, [SERVICE_SCRIPT, '--serve', '--port', String(port)], {
         cwd: home, env: childEnv(), stdio: ['ignore', 'ignore', 'pipe'],
       });
     } catch (e) {
@@ -165,8 +202,14 @@ export function startEmbedSupervisor({
       const wasOurs = child;
       child = null;
       if (stopped || !wasOurs) return;
-      failures++;
       const tail = lastErrLine();
+      // Died at bind (port taken) → the orphan/foreign path, not crash accounting.
+      if (looksLikePortConflict(errBuf)) {
+        log(`[embed-supervisor] embed-service exited (code ${code}) — port :${port} conflict${tail ? `: ${tail}` : ''}`);
+        void handlePortConflict();
+        return;
+      }
+      failures++;
       if (failures >= DOWN_AFTER) {
         setHealth('down', 'The embedding engine keeps stopping. Check that its dependencies are installed (bash pipeline/setup.sh).', tail || `exited code ${code}`);
       } else {
@@ -190,8 +233,9 @@ export function startEmbedSupervisor({
 
   _instance = {
     getHealth: getEmbedderHealth,
-    /** Force an immediate re-evaluation (e.g. after the user clicks Retry / ran setup.sh). */
-    nudge: () => { nextStartAt = 0; void tick(); },
+    /** Force an immediate re-evaluation (e.g. after the user clicks Retry / ran setup.sh).
+     *  Also the ONLY resume path out of a governor halt (bounded-restart design). */
+    nudge: () => { governor.resume(); nextStartAt = 0; void tick(); },
     stop: () => {
       stopped = true;
       if (tickTimer) clearInterval(tickTimer);

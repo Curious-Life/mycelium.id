@@ -9,9 +9,10 @@
 import assert from 'node:assert';
 import { estimateMemoryGb, fitScore, fitLevel, QUANT_BPP } from '../src/hardware/fit.js';
 import { recommendModels, availableMemoryGb } from '../src/hardware/recommend.js';
+import { endorsedLocalModels } from '../src/inference/role-models.js';
 import { CATALOG } from '../src/hardware/catalog.js';
 import { detectHardware } from '../src/hardware/detect.js';
-import { createOllamaClient, isValidModelName } from '../src/hardware/ollama.js';
+import { createOllamaClient, isValidModelName, classifyOllamaFault, OLLAMA_FAULT } from '../src/hardware/ollama.js';
 import { createOllamaDaemon, findOllamaBinary } from '../src/hardware/ollama-daemon.js';
 import { installOllama, resolveAsset, OLLAMA_VERSION } from '../src/hardware/ollama-install.js';
 
@@ -55,8 +56,13 @@ const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : '
 // ── H4 — recommendModels (v3: DYNAMIC catalog, invariants + anchors) ──────────
 // The catalog is now generated (catalog.json, ~300 models) so tests assert
 // INVARIANTS that survive catalog growth + a few stable ANCHORS, not a fixed
-// size or exact ordering. Full list returned, best-first, two bands — Band A
-// (fits) by rankScore=quality×fitWeight desc, then Band B (won't fit) by paramsB.
+// size or exact ordering. Full list returned, two bands — Band A (fits) with the
+// CURATED endorsed model(s) first, then the rest by fit (fitScore desc, recency),
+// then Band B (won't fit) by paramsB.
+//
+// ⚠️ 2026-07-19: the ★ is CURATED, not the old warmth top-3. Only endorsedLocalModels()
+// (single-sourced: qwen3.5:4b, the on-box labeling pick) earns `recommended`, and it LEADS
+// band A where it fits. gemma et al. are LISTED, never starred. H4b/H4b2/H4e assert that.
 {
   const N = CATALOG.length; // dynamic — the recommender returns the full catalog
   const anchor = (recs, name) => recs.find((m) => m.name === name);
@@ -73,18 +79,29 @@ const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : '
     && l70 && l70.fitScore === 0 && l70.fitLevel === 'too_tight' && bandsOrdered(r8.recommendations);
   rec('H4a. 8GB GPU → full list, bands ordered, 70B won\'t-fit', ok8, `top=${r8.recommendations[0].name}@${r8.recommendations[0].fitScore} 70b.fit=${l70?.fitScore} n=${N}`);
 
-  // 80GB GPU → a right-sized large model leads (fitScore 100, not under-using).
+  // 80GB GPU → the ENDORSED model leads even where it under-uses the box (we recommend what
+  // we USE, not the biggest thing that fits), AND right-sizing is still COMPUTED — a
+  // right-sized (100) model exists in the list, just unstarred.
   const r80 = recommendModels({ hasGpu: true, gpuVramGb: 80, totalRamGb: 128, backend: 'cuda' });
-  rec('H4b. 80GB GPU → top is a right-sized fit (100)', r80.recommendations[0].fitScore === 100 && bandsOrdered(r80.recommendations), `top=${r80.recommendations[0].name}@${r80.recommendations[0].fitScore}`);
+  const okB = r80.recommendations[0].name === endorsedLocalModels()[0]
+    && r80.recommendations[0].recommended === true
+    && r80.recommendations[0].fitScore > 0
+    && r80.recommendations.some((m) => m.fitScore === 100)   // fit still computed for the browse list
+    && bandsOrdered(r80.recommendations);
+  rec('H4b. 80GB GPU → endorsed model leads + is starred; a right-sized fit still exists in the list', okB,
+    `top=${r80.recommendations[0].name}@${r80.recommendations[0].fitScore} rec=${r80.recommendations[0].recommended}`);
 
-  // 16GB Apple (avail ~10.7) → COMPANION PROOF: the warm anchor gemma3:12b fits
-  // and out-ranks a comparable cooler qwen (warmth wins at similar fit).
+  // 16GB Apple (avail ~10.7) → CURATED PROOF (was the "warmth wins" companion proof, inverted
+  // 2026-07-19): the endorsed qwen3.5:4b fits, is starred, and LEADS band A; gemma3:12b fits
+  // too but is NOT recommended — it is listed, never starred.
   const rA = recommendModels({ hasGpu: true, unifiedMemory: true, gpuVramGb: 10.7, totalRamGb: 16, backend: 'metal' });
   const g12 = anchor(rA.recommendations, 'gemma3:12b');
-  const q14 = anchor(rA.recommendations, 'qwen3:14b');
-  const warmTop = ['gemma', 'mistral-nemo', 'nemo', 'command-r', 'command', 'hermes', 'mistral-small', 'llama'].includes(rA.recommendations[0].family);
-  const okA = g12 && g12.fitScore > 0 && warmTop && (!q14 || g12.rankScore >= q14.rankScore);
-  rec('H4b2. 16GB Mac → warm anchor fits + leads cooler peers', okA, `top=${rA.recommendations[0].name}(${rA.recommendations[0].family}) gemma3:12b.rank=${g12?.rankScore} qwen3:14b.rank=${q14?.rankScore}`);
+  const qEndorsed = anchor(rA.recommendations, endorsedLocalModels()[0]);
+  const okA = qEndorsed && qEndorsed.fitScore > 0 && qEndorsed.recommended === true
+    && rA.recommendations[0].name === endorsedLocalModels()[0]
+    && g12 && g12.fitScore > 0 && g12.recommended === false;
+  rec('H4b2. 16GB Mac → endorsed model leads + starred; gemma3:12b listed but NOT recommended', okA,
+    `top=${rA.recommendations[0].name} endorsed.rec=${qEndorsed?.recommended} gemma3:12b.rec=${g12?.recommended}`);
 
   // 4GB CPU (avail 2.4) → something small fits, no warning; full list returned.
   const r4 = recommendModels({ hasGpu: false, totalRamGb: 4, backend: 'cpu' });
@@ -92,15 +109,16 @@ const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : '
     && r4.note === null && r4.recommendations.some((m) => m.fitScore === 0);
   rec('H4c. 4GB CPU → small fits, big won\'t-fit, no warning', ok4, `top=${r4.recommendations[0].name} avail=${r4.available}`);
 
-  // H4e — ROLE AXIS: the on-box labeling pick (qwen3.5:4b) is tagged recommendedFor:['labeling']
-  // INDEPENDENTLY of the warmth ranking (it never earns the companion `recommended` badge), and a
-  // warm companion model carries no labeling tag. Single-sourced from role-models.js.
+  // H4e — ROLE AXIS: the on-box labeling pick (qwen3.5:4b) is the endorsed model, so it BOTH
+  // earns the ★ `recommended` badge (2026-07-19: the ★ is now curated = endorsed) AND carries
+  // the recommendedFor:['labeling'] role tag. gemma3:12b earns NEITHER — listed, not starred,
+  // no labeling role. Single-sourced from role-models.js.
   const qLabel = anchor(r8.recommendations, 'qwen3.5:4b');
   const gWarm = anchor(r8.recommendations, 'gemma3:12b');
-  const okRole = qLabel && qLabel.recommendedFor?.includes('labeling')
-    && gWarm && !(gWarm.recommendedFor || []).includes('labeling');
-  rec('H4e. labeling role tag on qwen3.5:4b only (independent of companion badge)', okRole,
-    `qwen3.5:4b.recFor=${JSON.stringify(qLabel?.recommendedFor)} gemma3:12b.recFor=${JSON.stringify(gWarm?.recommendedFor)}`);
+  const okRole = qLabel && qLabel.recommendedFor?.includes('labeling') && qLabel.recommended === true
+    && gWarm && !(gWarm.recommendedFor || []).includes('labeling') && gWarm.recommended === false;
+  rec('H4e. qwen3.5:4b is the endorsed ★ + labeling role; gemma3:12b has neither', okRole,
+    `qwen3.5:4b.rec=${qLabel?.recommended}/${JSON.stringify(qLabel?.recommendedFor)} gemma3:12b.rec=${gWarm?.recommended}`);
 
   // Tiny box (avail < the smallest model) → nothing fits → full list, smallest
   // first, note set. (The full catalog has sub-GB models, so the budget must be
@@ -175,11 +193,20 @@ const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : '
   const pulled = await createOllamaClient({ fetch: pullFetch }).pullModel('llama3.2:3b', (e) => events.push(e));
   rec('H6d. pullModel streams NDJSON progress', pulled === true && events.length === 3 && events[1].completed === 50, `events=${events.length}`);
 
-  // pull error line → throws.
-  let threw = false;
-  const errFetch = async () => ({ ok: true, body: new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{"error":"file does not exist"}\n')); c.close(); } }) });
-  try { await createOllamaClient({ fetch: errFetch }).pullModel('llama3.2:3b'); } catch { threw = true; }
-  rec('H6e. pull error line rejects', threw, '');
+  // pull error line → throws, AND preserves ollama's own reason. The mid-stream ev.error is the
+  // ONLY place a disk-full ("no space left on device") or registry-unreachable surfaces; a bare
+  // "ollama pull failed" (the old behaviour) made the drainer classify every mid-pull failure as
+  // "runtime not reachable" (classifyOllamaFault → OLLAMA_FAULT). So the caught message must carry
+  // the reason, and it must classify to OUT_OF_SPACE for a disk error. (Bounded + username-scrubbed
+  // by the drainer; reaches only the localhost-only readiness surface — never the content-free
+  // feed; see drainer.js publishPull.end.)
+  let caught = null;
+  const enospc = '{"error":"write /root/.ollama/models/blobs/sha256-abc: no space left on device"}\n';
+  const errFetch = async () => ({ ok: true, body: new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(enospc)); c.close(); } }) });
+  try { await createOllamaClient({ fetch: errFetch }).pullModel('llama3.2:3b'); } catch (e) { caught = e; }
+  const preserved = caught && /no space left on device/.test(String(caught.message));
+  const classifiesDisk = caught && classifyOllamaFault(caught, 'pull') === OLLAMA_FAULT.OUT_OF_SPACE;
+  rec('H6e. pull error line rejects AND preserves ollama\'s reason (→ classifiable as out-of-space)', Boolean(preserved && classifiesDisk), `msg=${String(caught?.message).slice(0, 70)} kind=${caught ? classifyOllamaFault(caught, 'pull') : 'none'}`);
 
   // invalid name never reaches fetch.
   let blocked = false; let touched = false;

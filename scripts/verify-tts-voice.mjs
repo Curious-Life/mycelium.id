@@ -31,7 +31,8 @@
 // Each check is falsifiable: drift the badge (V2), make an unchosen read download
 // (V3), remove the preflight (V3b), swallow a failure (V4), fabricate a render
 // (V5), report active without a sample (V7/V8), keep the stranded flag (V9),
-// remove the backoff (V10) — and the matching row goes FAIL. Falsifications are
+// remove the backoff (V10), revert dirBytes to a top-level-only scan (V11) —
+// and the matching row goes FAIL. Falsifications are
 // run out-of-band with a cp-snapshot restore (NEVER `git checkout --`).
 import http from 'node:http';
 import os from 'node:os';
@@ -219,6 +220,11 @@ const plain = await import('../src/tts/qwen3-tts-model.js');
   rec('V7. TOP-LINE HONESTY (server) — ready + opted-in + NO sample ⇒ enabled:false + samplePending:true',
     ready && j.enabled === false && j.qwen?.samplePending === true && j.qwen?.model?.phase === 'ready',
     `ready=${ready} enabled=${j.enabled} samplePending=${j.qwen?.samplePending} phase=${j.qwen?.model?.phase}`);
+  // V7b — CHANNEL DEFERRAL (voice-panel audit): channel qwen voice can't be
+  // delivered (the confined daemon has no sample), so the top-line must never
+  // claim it. The response carries channelDeferred so the UI can say so honestly.
+  rec('V7b. CHANNEL DEFERRAL — qwen.channelDeferred:true (channel voice not deliverable yet)',
+    j.qwen?.channelDeferred === true, `channelDeferred=${j.qwen?.channelDeferred}`);
 
   const put = await fetch(`${base}/portal/settings/tts`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -260,8 +266,34 @@ const plain = await import('../src/tts/qwen3-tts-model.js');
   plain.__setProvisioner(null); plain.__setPkgProbe(null); plain.__setFreeBytes(null);
 }
 
+// ── V11 — download progress sees STAGED bytes (the 5%-stall fix) ─────────────
+// huggingface_hub stages the in-flight shard under <dir>/.cache/huggingface/
+// download/ and only moves it to the top level when COMPLETE. The progress
+// ratio must count those staged bytes: a top-level-only scan reads ~0 for the
+// whole multi-GB download and pins the bar at its 5% floor (operator-reported).
+{
+  const dir = mkdtempSync(join(os.tmpdir(), 'qwen-tts-progress-'));
+  writeFileSync(join(dir, 'config.json'), 'x'.repeat(1_000));                 // completed metadata
+  const staging = join(dir, '.cache', 'huggingface', 'download');
+  mkdirSync(staging, { recursive: true });
+  writeFileSync(join(staging, 'model.safetensors.incomplete'), 'y'.repeat(50_000)); // in-flight shard
+  // The REAL repo also stages per-subdir files one level DEEPER (observed live:
+  // download/speech_tokenizer/model.safetensors.* — depth 4). Pin that too, so a
+  // future "tighten the depth cap" edit can't silently re-lose nested bytes
+  // (review of #225, MED-1: a depth<3 mutant passed the flat-only fixture).
+  mkdirSync(join(staging, 'speech_tokenizer'));
+  writeFileSync(join(staging, 'speech_tokenizer', 'model.safetensors.incomplete'), 'z'.repeat(20_000));
+  const seen = plain.__dirBytes(dir);
+  // CONTROL: the buggy top-level-only scan reads only the top-level entries
+  // (~1k, exact value fs-dependent) — the exact 71_000 assertion is what
+  // distinguishes the fix (both staged files counted, each exactly once) from
+  // the regression, a shallow depth cap, or a count-directory-sizes variant.
+  rec('V11. PROGRESS SEES STAGING — dirBytes counts nested .cache/huggingface/download in-flight bytes',
+    seen === 71_000, `bytesSeen=${seen} (top-level-only ~1k; depth-capped-at-3 would be 51_000)`);
+}
+
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(72));
-console.log(`VERDICT: ${allPass ? 'GO — Qwen3-TTS catalog + no-drift badge + consent + disk preflight + fail-soft + honest render seam + honest top line + switch-away + install backoff' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
+console.log(`VERDICT: ${allPass ? 'GO — Qwen3-TTS catalog + no-drift badge + consent + disk preflight + fail-soft + honest render seam + honest top line + switch-away + install backoff + staged-bytes progress' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
 console.log('='.repeat(72));
 process.exit(allPass ? 0 : 1);

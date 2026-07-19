@@ -480,10 +480,14 @@ export function isClusteringRunning() {
  * Pure gate for FIRST-RUN auto-generation (the enrich drainer's onSettled hook
  * uses this via server-rest). Fire the topology pipeline automatically only when:
  *   - no clustering child is already running (single-flight),
- *   - enough messages are embedded (data floor — avoids a trivial 1-cluster map;
- *     manual Generate's MIN_EMBEDDED=5 still works below this), and
+ *   - enough messages are embedded (data floor), and
  *   - NO topology exists yet (clustering_points empty) — so it fires once on the
  *     first generation; re-generation stays a manual, user-driven action.
+ * ⚠️ The caller now passes the MANUAL floor (MIN_EMBEDDED=5), not 25 — a real-but-small vault
+ * used to sit un-clustered and silent (PIPELINE-TRANSPARENCY-DESIGN §"Filling the gaps" #2). This
+ * function's own `min = 25` default is inert (the caller always supplies `min`); it is kept only so
+ * a bare call is conservative. Sub-floor vaults are surfaced by the readiness `pipeline` slice
+ * (cluster.blocked/too_few_embedded + a Generate button), never stranded.
  * @returns {boolean}
  */
 export function shouldAutoGenerate({ embedded, points, clusteringRunning, min = 25 } = {}) {

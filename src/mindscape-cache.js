@@ -63,6 +63,27 @@ function makeSwrCache() {
 const _points = makeSwrCache(); // durable: only point-mutating events bust it
 const _full = makeSwrCache();   // full aggregate: narrative writes bust this one
 
+// Listeners notified whenever the POINTS bust fires — i.e. whenever clustering points
+// actually changed. This exists so OTHER point-derived memos (readiness.js's `mindscape`
+// slice memoizes getNoiseStats) can ride the SAME bust discipline instead of inventing a
+// second, drifting notion of "the points changed". The call sites are the existing ones:
+// jobs.js:297 (clustering re-ran), db/documents.js:390,424 (document delete),
+// db/messages.js:650,676,819 (message forget/edit) — a listener inherits all of them and
+// every future one, because bustMindscapePoints is the ONE chokepoint for point mutation.
+// Fail-soft: a throwing listener must never break a bust (the bust is correctness-critical
+// for the caches above; the notification is an optimization for someone else's memo).
+const _pointsBustListeners = new Set();
+
+/**
+ * Subscribe to points-bust events. fn(userId) — userId is the busted user, or
+ * null/undefined for "all users". Returns an unsubscribe function.
+ * @param {(userId?: string) => void} fn
+ */
+export function onMindscapePointsBust(fn) {
+  _pointsBustListeners.add(fn);
+  return () => _pointsBustListeners.delete(fn);
+}
+
 /**
  * Serve the cached FULL aggregate (points + text). Recomputes on miss/TTL.
  * @param {string} userId
@@ -102,4 +123,7 @@ export function bustMindscape(userId) {
 export function bustMindscapePoints(userId) {
   _points.bust(userId);
   _full.bust(userId);
+  for (const fn of _pointsBustListeners) {
+    try { fn(userId); } catch { /* a listener must never break the bust itself */ }
+  }
 }

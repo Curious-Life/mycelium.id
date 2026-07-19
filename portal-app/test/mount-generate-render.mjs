@@ -194,7 +194,11 @@ await build({
 // — but the specifier must still be rewired or the compiled import throws before mount. (Added
 // when origin/main #200/#208 merged under #194; the gen-status assertions D2e are unchanged.)
 const STUB = '<script>let { ...rest } = $props();</script><div class="stub-child"></div>';
-for (const name of ['Sparkline', 'ImportField', 'ScanForData', 'SourceCatalog', 'IntelligenceScreen', 'AISettings', 'TelegramConnect']) {
+// PipelineStatus (#253/Unit 3) — the canonical pipeline overview MindscapeInvite now mounts below
+// the gen-status block. It is NOT this gate's subject (generate rendering is), lives below the
+// block under test, and reads its own store; an inert stub is faithful, but its specifier must be
+// rewired or the compiled import throws before mount.
+for (const name of ['Sparkline', 'ImportField', 'ScanForData', 'SourceCatalog', 'IntelligenceScreen', 'AISettings', 'TelegramConnect', 'PipelineStatus']) {
   const out = compile(STUB, { generate: 'client', name, css: 'injected' });
   writeFileSync(`${GEN}/${name}.gen.js`, out.js.code);
 }
@@ -239,7 +243,8 @@ const rewired = out.js.code
   .replace(/from\s+['"]\$lib\/stores\/onboarding-data\.svelte['"]/g, `from './onboarding-data-stub.js'`)
   .replace(/from\s+['"]\$lib\/components\/settings\/IntelligenceScreen\.svelte['"]/g, `from './IntelligenceScreen.gen.js'`)
   .replace(/from\s+['"]\$lib\/components\/settings\/AISettings\.svelte['"]/g, `from './AISettings.gen.js'`)
-  .replace(/from\s+['"]\$lib\/components\/channels\/TelegramConnect\.svelte['"]/g, `from './TelegramConnect.gen.js'`);
+  .replace(/from\s+['"]\$lib\/components\/channels\/TelegramConnect\.svelte['"]/g, `from './TelegramConnect.gen.js'`)
+  .replace(/from\s+['"]\$lib\/components\/mindscape\/PipelineStatus\.svelte['"]/g, `from './PipelineStatus.gen.js'`);
 writeFileSync(`${GEN}/Subject.gen.js`, rewired);
 
 // A specifier we FAILED to rewire would throw at import and read as a broken gate, not a broken
@@ -281,7 +286,22 @@ try {
   // (illuminateRealms → startGenerate). Not a hand-set phase: this is the chain end-to-end.
   // `hang` deliberately does NOT await: its POST never resolves, which is exactly how a user
   // sits in `starting`. Awaiting it would hang the probe forever.
-  if (SCENARIO === 'hang') void start(); else await start();
+  if (SCENARIO === 'hang') {
+    void start();
+  } else if (SCENARIO === 'retryable') {
+    // The capped-`unknown` RETRYABLE error. Reaching it via start() needs the wall-clock cap
+    // (drive-generate-embedding.mjs proves that mapping deterministically); here the subject is
+    // the RENDER — does the invite show the honest error AND a Retry affordance when the store
+    // holds retryable:true — so we set the store to that state directly and read the DOM. The
+    // store→phase mapping is gated elsewhere; this probe gates the template.
+    const { get } = await import('svelte/store');
+    generate.set({
+      ...get(generate), phase: 'error', retryable: true, message: '',
+      error: 'Couldn’t read your vault just yet. This is usually temporary — try again.',
+    });
+  } else {
+    await start();
+  }
   flushSync();
   await new Promise((r) => setTimeout(r, 30));
   flushSync();
@@ -398,6 +418,15 @@ try {
     // live DOM sees both; a regex over source sees neither.
     ctaCount: D.querySelectorAll('button.realm-cta.illuminate').length,
     genStatusCount: D.querySelectorAll('.gen-status').length,
+    // ── The RETRYABLE error affordance + the status-row alignment (live-test fixes) ──
+    // The Retry button in the gen-status error arm (present iff the store is retryable), and
+    // whether a user could see it. And the row's align-items: the live-test misalignment was
+    // `center` floating the dot against a multi-line block's middle; the fix top-aligns the row.
+    // jsdom does no layout, so this is the computed cascade value (the same getComputedStyle the
+    // visible() checks above already rely on in this harness), NOT a pixel measurement.
+    retryCount: D.querySelectorAll('.gen-retry').length,
+    retryVisible: (() => { const b = D.querySelector('.gen-retry'); return b ? visible(b) : false; })(),
+    genStatusAlign: (() => { const g = D.querySelector('.gen-status'); return g ? dom.window.getComputedStyle(g).alignItems : null; })(),
   });
   reset();   // clear any armed poll interval so the process can exit
 } catch (e) {

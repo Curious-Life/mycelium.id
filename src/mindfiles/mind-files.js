@@ -44,8 +44,8 @@ const SAVE_FILE_MODE = 0o600;
 export function createMindFiles(deps) {
   if (!deps) throw new TypeError('createMindFiles: deps required');
   const { agentRoot, fs, path } = deps;
-  if (!fs?.readFile || !fs?.writeFile || !fs?.mkdir || !fs?.rename || !fs?.open) {
-    throw new TypeError('createMindFiles: fs.{readFile,writeFile,mkdir,rename,open} required');
+  if (!fs?.readFile || !fs?.writeFile || !fs?.mkdir || !fs?.rename || !fs?.open || !fs?.readdir) {
+    throw new TypeError('createMindFiles: fs.{readFile,writeFile,mkdir,rename,open,readdir} required');
   }
   if (!path?.join || !path?.dirname) {
     throw new TypeError('createMindFiles: path.{join,dirname} required');
@@ -136,7 +136,43 @@ export function createMindFiles(deps) {
     await fs.rename(tmpPath, finalPath);
   }
 
-  return { getMindDir, ensureMindDir, readMindFile, writeMindFile };
+  // Enumerate the snapshot history for a mind file. Snapshots are written by
+  // captureSnapshot (src/tools/internal.js) to mind/snapshots/<filename>/<YYYY-MM-DD>.md,
+  // one per UTC day, first-write-wins. This is the missing read primitive the
+  // character page needs to show "who your agent has been" (design §5.2/§5.6).
+  //
+  // Pure directory listing — does NOT decrypt (so it needs no master key): it
+  // parses dated filenames only. Returns date strings (YYYY-MM-DD) NEWEST FIRST,
+  // or [] when the file has no snapshot history (ENOENT). Flat filename only —
+  // same traversal contract as snapshotMindFile.
+  async function listSnapshots(filename) {
+    const dir = getMindDir();
+    if (!dir) return [];
+    const name = String(filename || '').trim();
+    // Flat filename only: reject traversal (/, \, ..) and control chars incl. NUL
+    // (a NUL would otherwise throw an fs error whose message echoes the path —
+    // P1 review nit). Malformed input is honest-empty, never an exception.
+    if (!name || name.includes('/') || name.includes('\\') || name.includes('..')
+        || /[\u0000-\u001f]/.test(name)) return [];
+    const snapDir = path.join(dir, 'snapshots', name);
+    let entries;
+    try {
+      entries = await fs.readdir(snapDir);
+    } catch (err) {
+      if (err && err.code === 'ENOENT') return [];
+      throw err; // EACCES, EIO, etc. — surface (honest failure, never swallowed)
+    }
+    return entries
+      // Validate the DATE, not just its shape: reject 2026-13-45.md etc. so a
+      // hand-planted/corrupt snapshot can't sort as "newest" and render Invalid
+      // Date (P1 review, low). captureSnapshot only ever writes real ISO dates.
+      .filter((e) => /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\.md$/.test(e))
+      .map((e) => e.slice(0, -'.md'.length)) // strip .md → YYYY-MM-DD
+      .sort()          // lexical sort == chronological for ISO dates
+      .reverse();      // newest first
+  }
+
+  return { getMindDir, ensureMindDir, readMindFile, writeMindFile, listSnapshots };
 }
 
 /**

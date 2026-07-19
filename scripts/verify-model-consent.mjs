@@ -381,6 +381,139 @@ await t('M7b. the ENRICH model\'s download is not reported as the LABELER\'s hea
   assert.equal(h.model, 'qwen3.5:4b', `and it must never name the enrich model as the labeler: got ${h.model}`);
 });
 
+// ── M7c–M7g) the fault MESSAGE names the RIGHT cause, not a hardcoded "runtime down" ────────
+// THE FINDING (live-test 2026-07-18): the health `message` was the constant "The local model
+// runtime is not reachable." for ANY pull/list fault — a lie on a fresh box where the tag is
+// valid and pullable but the ENVIRONMENT failed (Ollama up, download broke: no network to the
+// registry, or disk full). The fault is now classified from the caught error's SHAPE
+// (classifyOllamaFault) and each kind gets its own accurate, actionable line (faultMessage),
+// with ollama's own reason preserved in `detail` (username-scrubbed) on the localhost-only
+// readiness surface. A stub ollama that throws the REAL error strings (verified against a live
+// spike + a local http server) drives it.
+
+// A stub whose LIST succeeds ([]) but whose PULL throws a chosen error — the drainer will try
+// to pull the approved-but-missing model and hit the classifier's catch.
+const pullFails = (err) => ({
+  listCalls: 0, pullCalls: 0, pulled: [], installed: [],
+  async listInstalled() { this.listCalls++; return [...this.installed]; },
+  async pullModel() { this.pullCalls++; throw err; },
+});
+// A stub whose LIST itself throws — the daemon-down path (ensureLabelModel's listInstalled catch).
+const listFails = (err) => ({
+  pullCalls: 0,
+  async listInstalled() { throw err; },
+  async pullModel() { this.pullCalls++; return true; },
+});
+
+await t('M7c. a disk-full PULL reads `out of space` — NOT "runtime not reachable" — and keeps ollama\'s detail', async () => {
+  const { db } = makeDb(['a'], { approved: 'qwen3.5:4b' });   // pending L1 work ⇒ the pull is attempted
+  const ollama = pullFails(new Error('ollama pull failed: write /Users/alice/.ollama/blobs/sha256-x: no space left on device'));
+  const d = startEnrichDrainer({ db, userId: 'u', intervalMs: BIG, embed: healthyEmbed, classify, daemon: makeDaemon(), ollama, log: () => {} });
+  await waitFor(() => getLabelerHealth()?.status === 'unavailable');
+  const h = getLabelerHealth();
+  d.stop?.();
+  assert.equal(h.status, 'unavailable', `a failed pull is a fault: got '${h.status}'`);
+  // The classified message names the DISK. Under the old hardcode (or a classifier collapsed to
+  // one kind) this reads "runtime not reachable" and BOTH asserts fail — the mutation witness.
+  assert.match(h.message, /disk space|out of space|free up space/i, `a disk-full pull must name the DISK, not blame the runtime — got "${h.message}"`);
+  assert.doesNotMatch(h.message, /reachable|is it running/i, `Ollama IS up (the pull started) — the message must not say it is unreachable: "${h.message}"`);
+  // ollama's own reason survives to the detail (the localhost-only readiness surface), NEVER the feed.
+  assert.ok(h.detail && /no space left/i.test(h.detail), `ollama's mid-stream reason must reach the detail — got "${h.detail}"`);
+  // …but the home-dir USERNAME is scrubbed (§1 + review Finding 2): the reason stays, "alice" goes.
+  assert.doesNotMatch(h.detail, /alice/, `the home-dir username must be scrubbed from the detail — got "${h.detail}"`);
+  assert.match(h.detail, /<user>/, `the scrub must leave a marker so the path is still legible — got "${h.detail}"`);
+});
+
+await t('M7d. a mid-pull DOWNLOAD failure (registry/HTTP) reads `download failed`, not runtime-down', async () => {
+  const { db } = makeDb(['a'], { approved: 'qwen3.5:4b' });
+  const ollama = pullFails(new Error('ollama pull failed: dial tcp: lookup registry.ollama.ai: no such host'));
+  const d = startEnrichDrainer({ db, userId: 'u', intervalMs: BIG, embed: healthyEmbed, classify, daemon: makeDaemon(), ollama, log: () => {} });
+  await waitFor(() => getLabelerHealth()?.status === 'unavailable');
+  const h = getLabelerHealth();
+  d.stop?.();
+  assert.match(h.message, /download failed|registry/i, `a mid-pull failure with the daemon up is a DOWNLOAD problem — got "${h.message}"`);
+  assert.doesNotMatch(h.message, /not reachable|is it running/i, `the runtime answered — do not report it unreachable: "${h.message}"`);
+});
+
+await t('M7e. a daemon-down LIST reads `runtime unreachable` (the one case the old hardcode got right)', async () => {
+  const { db } = makeDb(['a'], { approved: 'qwen3.5:4b' });
+  const ollama = listFails(new TypeError('fetch failed'));   // the REAL connection-refused shape
+  const d = startEnrichDrainer({ db, userId: 'u', intervalMs: BIG, embed: healthyEmbed, classify, daemon: makeDaemon(), ollama, log: () => {} });
+  await waitFor(() => getLabelerHealth()?.status === 'unavailable');
+  const h = getLabelerHealth();
+  d.stop?.();
+  assert.match(h.message, /reachable|is it running/i, `a down daemon IS a runtime-reachability fault — got "${h.message}"`);
+  assert.equal(ollama.pullCalls, 0, 'a daemon that cannot be listed must never be asked to pull');
+});
+
+await t('M7f. classifyOllamaFault maps every REAL error shape; faultMessage is accurate, distinct, never blank', async () => {
+  // The pure units, asserted directly so a regression is pinned at its source, not only through
+  // the drainer. Shapes verified against a live spike + a local http server driving each class.
+  const { classifyOllamaFault, OLLAMA_FAULT } = await import('../src/hardware/ollama.js');
+  const { faultMessage } = await import('../src/enrich/drainer.js');
+  const R = OLLAMA_FAULT.RUNTIME_UNREACHABLE, D = OLLAMA_FAULT.DOWNLOAD_FAILED, S = OLLAMA_FAULT.OUT_OF_SPACE;
+  const cases = [
+    [new TypeError('fetch failed'), 'list', R],
+    [new TypeError('fetch failed'), 'pull', R],                                  // connection refused = local daemon
+    [Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }), 'list', R],
+    [new Error('ollama /api/tags 500'), 'list', R],                             // daemon up but not serving list
+    [new Error('ollama /api/pull 500'), 'pull', D],                             // reached daemon, pull HTTP failed
+    [new Error('ollama pull failed: dial tcp: lookup registry.ollama.ai: no such host'), 'pull', D],
+    [new Error('ollama pull failed: write /x/blobs: no space left on device'), 'pull', S],
+    [new Error('ENOSPC: no space left'), 'list', S],                           // disk detection is phase-independent
+    // ⚠️ THE PHASE-AWARE TIMEOUT (independent review, 2026-07-18). A pull has NO client timeout,
+    // so "timeout"/"aborted" in a pull error is ollama's SERVER-side REGISTRY error text (Go's
+    // i/o timeout / TLS handshake timeout / request canceled) — a DOWNLOAD failure, NOT the local
+    // runtime. Matching the bare substring blamed the runtime — the exact lie this fix removes.
+    [new Error('ollama pull failed: dial tcp 1.2.3.4:443: i/o timeout'), 'pull', D],
+    [new Error('ollama pull failed: net/http: TLS handshake timeout'), 'pull', D],
+    [new Error('ollama pull failed: Get "https://registry.ollama.ai/…": request canceled (Client.Timeout exceeded while awaiting headers)'), 'pull', D],
+    // …but a LIST timeout IS the client (5s AbortSignal.timeout) giving up on the local daemon.
+    [Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }), 'list', R],
+    [new Error('aborted'), 'list', R],
+  ];
+  for (const [err, phase, want] of cases) {
+    assert.equal(classifyOllamaFault(err, phase), want, `classifyOllamaFault(${JSON.stringify(String(err.message))}, ${phase}) → ${want}`);
+  }
+  // total + never blank, for every kind AND an unknown/null (fail-safe to the least-specific line)
+  for (const k of Object.values(OLLAMA_FAULT)) assert.ok(faultMessage({ kind: k }).length > 0, `blank message for ${k}`);
+  assert.ok(faultMessage({ kind: 'made-up-kind' }).length > 0, 'an unknown kind must fall back, never render blank');
+  assert.ok(faultMessage(null).length > 0, 'a null fault must neither throw nor blank');
+  // …and the three kinds must be DISTINCT lines — a classifier that collapses them re-hides the
+  // cause, which is exactly the bug this closes. (Under the old single hardcode this reads 1.)
+  const distinct = new Set(Object.values(OLLAMA_FAULT).map((k) => faultMessage({ kind: k })));
+  assert.equal(distinct.size, 3, `each fault kind needs its OWN message — got ${distinct.size} distinct for 3 kinds`);
+});
+
+await t('M7g. an enrich-only disk-full is the ENRICHER\'s fault, classified — and never leaks to the labeler', async () => {
+  // The M7b/M9b model-keying property, now for a CLASSIFIED fault: qwen (label) is installed and
+  // fine; gemma (enrich) fails its pull with ENOSPC. The enricher must read the disk message and
+  // name gemma; the labeler must stay healthy and never inherit the enrich model's disk fault.
+  const db = {
+    users: { getSettings: async () => ({ taskModels: { categorize: { model: 'qwen3.5:4b' }, enrich: { model: 'gemma4:12b' } } }) },
+    async rawQuery() { return { rows: [] }; },
+    messages: {
+      async selectPendingEnrichment() { return []; }, async updateEnrichment() {},
+      async selectPendingNlp() { return [{ id: 'n1', content: 'x' }]; }, async updateNlp() {},   // L2 work ⇒ gemma pull attempted
+      async selectPendingCategories() { return [{ id: 'a', content: 'row a', categories_processed: 0 }]; }, async updateCategories() {},
+    },
+  };
+  const ollama = {
+    installed: ['qwen3.5:4b'],
+    async listInstalled() { return [...this.installed]; },
+    async pullModel(name) { if (name === 'gemma4:12b') throw new Error('ollama pull failed: no space left on device'); this.installed.push(name); return true; },
+  };
+  const d = startEnrichDrainer({ db, userId: 'u', intervalMs: BIG, embed: healthyEmbed, classify, daemon: makeDaemon(), ollama, log: () => {} });
+  await waitFor(() => getEnricherHealth()?.status === 'unavailable');
+  const e = getEnricherHealth(); const l = getLabelerHealth();
+  d.stop?.();
+  assert.equal(e.status, 'unavailable', `the enrich model's pull failed — the enricher must say so: got '${e.status}'`);
+  assert.match(e.message, /disk space|out of space/i, `and it must name the DISK, classified: got "${e.message}"`);
+  assert.equal(e.model, 'gemma4:12b', `naming the ENRICH model: got ${e.model}`);
+  assert.notEqual(l.status, 'unavailable', `qwen is installed and fine — the enrich disk-full must not leak into the labeler: got '${l.status}'`);
+  assert.equal(l.model, 'qwen3.5:4b', `the labeler still names its own model: got ${l.model}`);
+});
+
 // ── M8) the activity feed must not claim `running` on an unapproved vault ───────────
 await t('M8. categorizeProjection: no approved model ⇒ NOT `running`, and no model named', async () => {
   const { categorizeProjection } = await import('../src/portal-activity.js');
@@ -890,6 +1023,17 @@ await t('M10. the owner SEES each member honestly: a choice is not a fault, a pu
   assert.ok(r.error.isFault, 'a genuine error MUST render as a fault — otherwise the "not a fault" rows below prove nothing');
   assert.ok(r.down.isFault, 'and so must a dead component');
   assert.ok(r.deps_missing.isWarn, 'missing deps is actionable — surfaced as a warning, not silence');
+
+  // 1b. A CLASSIFIED fault leads with the accurate MESSAGE; ollama's raw detail rides underneath.
+  //     The old code rendered `detail || message`, so with `message` a hardcoded "runtime not
+  //     reachable" the owner saw the raw ollama string OR a lie — never the actionable cause.
+  //     Now the classified message leads and the detail is a secondary hint. The regex on the
+  //     PRIMARY line is the mutation witness: under `detail || message` the primary line is the
+  //     raw "ollama pull failed: … no space left" string, which does NOT match /disk space/.
+  assert.ok(r.unavailable.isFault, 'a classified runtime/download/disk fault is still red');
+  assert.match(r.unavailable.badText, /disk space|free up space/i, `the ACCURATE message must LEAD — not the raw ollama string, not a hardcoded "runtime not reachable": read "${r.unavailable.badText}"`);
+  assert.ok(r.unavailable.hint && /no space left/i.test(r.unavailable.hint), `ollama's own detail must still be shown as a secondary hint — read "${r.unavailable.hint}"`);
+  assert.notEqual(r.unavailable.badText, r.unavailable.hint, 'message and detail are two DISTINCT lines — the detail must not replace the message');
 
   // 2. …and the CHOICES are not. 'no_model' and 'paused' are supported configurations
   //    (§3.10): rendering a deliberate choice as a fault trains the owner to "fix" it.

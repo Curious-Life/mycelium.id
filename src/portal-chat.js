@@ -26,7 +26,7 @@ import { createEgressAuditSink } from './inference/egress.js';
 import { createUsageSink } from './inference/usage.js';
 import { captureMessage } from './ingest/capture.js';
 import { hydrateHistoryBlock } from './agent/history.js';
-import { AGENT_NATURE } from './agent/identity.js';
+import { AGENT_NATURE, MYCELIUM_ORIENTATION } from './agent/identity.js';
 import { resolveCustomPersona } from './skills/store.js';
 
 const POLICY_KEY = 'AI_ACCESS_POLICY';
@@ -36,9 +36,9 @@ const CHAT_SOURCE = 'portal-chat';
 const CHANNEL_SOURCES = ['telegram', 'telegram-group', 'discord', 'discord-thread', 'whatsapp'];
 const CHANNEL_SOURCE_SET = new Set(CHANNEL_SOURCES);
 
-// Agent identity (spec #4) — a user-chosen name + personality for their assistant,
-// persisted in users.settings.agent and surfaced everywhere the AI is referenced
-// (chat header via /agents) and in how it speaks (the system preamble below).
+// Agent identity (spec #4) — a user-chosen name for their assistant, persisted in
+// users.settings.agent and surfaced everywhere the AI is referenced (chat header via
+// /agents) and in how it speaks (the system preamble below).
 const DEFAULT_AGENT_NAME = 'Mycelium';
 export const AGENT_NAME_MAX = 40;
 
@@ -65,31 +65,33 @@ export function agentDisplayName(raw) {
   const s = (typeof raw === 'string' ? raw.trim() : '').slice(0, AGENT_NAME_MAX).trim();
   return s || DEFAULT_AGENT_NAME;
 }
-const PERSONALITIES = ['friendly', 'formal', 'concise', 'creative'];
-const PERSONALITY_GUIDE = {
-  friendly: 'Be warm, encouraging and personable.',
-  formal: 'Maintain a formal, professional tone.',
-  concise: 'Be brief and to the point — minimise elaboration.',
-  creative: 'Be imaginative and expressive; offer fresh angles.',
-};
+// (Personality is no longer a 4-option enum tone knob. The agent's character is its
+//  self.md "Being" — authored on the Character page, loaded every turn as WHO YOU ARE —
+//  alongside the shared AGENT_NATURE + MYCELIUM_ORIENTATION. The old PERSONALITY_GUIDE
+//  one-liner relic was removed; design docs/AGENT-CHARACTER-AND-VOICE §5.3.)
 
 // The chat agent's identity — the single highest-leverage prompt in the app (it
 // is the whole self of the primary surface). STATIC by design: dynamic state
 // comes from the getContext preamble appended below, so this stays cache-stable
 // (Anthropic prompt cache) + injection-free (no vault data interpolated here).
 //
-// Opens with the SHARED AGENT_NATURE fragment (identity.js) so chat and the
-// reflection cycles read as ONE entity, then adds the live-chat mode guidance:
-// the sovereign-vault framing + competence/guest/bold-internal-careful-external
-// posture distilled from the operational personas this product draws on.
+// Composes two SHARED fragments (identity.js) so every surface reads as ONE entity
+// and orients off ONE map: AGENT_NATURE (who you are) + MYCELIUM_ORIENTATION (what
+// Mycelium IS + what you can DO — the capability headlines, so the agent reaches for
+// powers a model wouldn't otherwise guess it has). Then the live-chat mode guidance:
+// the competence/guest posture. The vault framing and the bold-internal/careful-external
+// rule now live in MYCELIUM_ORIENTATION (de-duped from here). See
+// docs/AGENT-CAPABILITY-MAP-2026-07-19.md.
 const CHAT_SYSTEM = `${AGENT_NATURE}
 
-You're speaking with them live, on their own machine — their sovereign cognitive vault, where their notes, people, reflections, relationships and meaning-making all live. They've trusted you with the whole of it; treat that intimacy with care.
+${MYCELIUM_ORIENTATION}
+
+You're speaking with them live, in the app on their own machine — the whole vault is open to you, and they've trusted you with the intimacy of it; treat that with care.
 
 How you show up:
 - Be direct, warm and concise. Skip the filler ("Great question!", "I'd be happy to help!") — just help. Have real opinions; it's fine to disagree, to prefer things, to push back when it serves them. Earn trust through competence, not eagerness.
-- Be resourceful before asking. Recall from this memory first — search, list, getContext — and read the relevant document before answering from general knowledge. Come back with answers, not questions, when you can; admit uncertainty plainly when you can't.
-- Be bold with internal actions (search, read, organize, remember) and careful with anything that leaves the vault. Capture what the owner shares when it's genuinely worth remembering — not performatively.
+- Be resourceful before asking. Recall first (search, list, getContext) and read the relevant document before answering from general knowledge. Come back with answers, not questions, when you can; admit uncertainty plainly when you can't.
+- Capture what they share when it's genuinely worth remembering — not performatively.
 
 The briefing below is your current working context — treat it as already-known; weave it in, don't repeat it back verbatim.`;
 
@@ -145,13 +147,12 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
     try {
       const a = (await db.users?.getSettings?.(userId))?.agent || {};
       const name = agentDisplayName(a.name);
-      const personality = PERSONALITIES.includes(a.personality) ? a.personality : 'friendly';
       // Channel writes are ON by default for the personal agent (the per-agent toggle in
       // the Agents page; mirrors resolve-grant.ownerWriteEnabled — undefined ⇒ on).
       const channelWrite = a.channelWrite !== false;
       const scopes = Array.isArray(a.scopes) && a.scopes.length ? a.scopes.filter((s) => ALL_SCOPES.includes(s)) : [...ALL_SCOPES];
-      return { name, personality, channelWrite, scopes };
-    } catch { return { name: DEFAULT_AGENT_NAME, personality: 'friendly', channelWrite: true, scopes: [...ALL_SCOPES] }; }
+      return { name, channelWrite, scopes };
+    } catch { return { name: DEFAULT_AGENT_NAME, channelWrite: true, scopes: [...ALL_SCOPES] }; }
   }
 
   // ── GET /agents — single synthetic agent so the UI's picker + per-agent
@@ -169,7 +170,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
   //    wipe the others — e.g. toggling channelWrite must keep name/scopes).
   router.get('/agent-identity', async (req, res) => {
     if (!auth(req, res)) return;
-    res.json({ ...(await readAgentIdentity()), personalities: PERSONALITIES, allScopes: [...ALL_SCOPES] });
+    res.json({ ...(await readAgentIdentity()), allScopes: [...ALL_SCOPES] });
   });
   router.put('/agent-identity', async (req, res) => {
     if (!auth(req, res)) return;
@@ -178,16 +179,14 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       const s = (await db.users.getSettings(userId)) || {};
       const agent = { ...(s.agent || {}) };
       if (req.body?.name !== undefined) agent.name = agentDisplayName(req.body.name);
-      if (req.body?.personality !== undefined) agent.personality = PERSONALITIES.includes(req.body.personality) ? req.body.personality : 'friendly';
       if (typeof req.body?.channelWrite === 'boolean') agent.channelWrite = req.body.channelWrite;
       if (Array.isArray(req.body?.scopes)) {
         const sc = req.body.scopes.filter((x) => ALL_SCOPES.includes(x));
         agent.scopes = sc.length ? sc : [...ALL_SCOPES];   // never empty — full access is the floor
       }
       if (agent.name === undefined) agent.name = DEFAULT_AGENT_NAME;
-      if (agent.personality === undefined) agent.personality = 'friendly';
       await db.users.updateSettings(userId, { ...s, agent });
-      res.json({ ok: true, name: agent.name, personality: agent.personality, channelWrite: agent.channelWrite !== false, scopes: Array.isArray(agent.scopes) ? agent.scopes : [...ALL_SCOPES] });
+      res.json({ ok: true, name: agent.name, channelWrite: agent.channelWrite !== false, scopes: Array.isArray(agent.scopes) ? agent.scopes : [...ALL_SCOPES] });
     } catch { res.status(500).json({ error: 'Could not save agent identity' }); }
   });
 
@@ -428,9 +427,10 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       // cli engine: the child always has the vault tools over MCP, so it CAN act even
       // when the in-proc grant (grantedTools) is empty.
       const hasActionTools = harnessMode === 'cli' ? true : (toolsCapable && grantedTools.length > 0);
-      // Identity preamble (spec #4): the user's chosen name + personality shape who
-      // the assistant is and how it speaks, ahead of the static orientation.
-      let system = `Your name is ${ident.name}. ${PERSONALITY_GUIDE[ident.personality] || ''} ${CHAT_SYSTEM} ${hasActionTools ? CAN_ACT : CANNOT_ACT}`.trim();
+      // Identity preamble (spec #4): the user's chosen name leads, ahead of the shared
+      // nature + orientation. Who the agent IS (character) comes from self.md in the
+      // getContext briefing below, not a fixed tone knob.
+      let system = `Your name is ${ident.name}. ${CHAT_SYSTEM} ${hasActionTools ? CAN_ACT : CANNOT_ACT}`.trim();
       // Persona coherence: if the person has CUSTOMISED how the agent shows up (soul.md,
       // edited in the Library or via updatePersona), that voice steers live chat too — not
       // just the reflection cycles — so it's ONE identity. Default (unedited) installs are

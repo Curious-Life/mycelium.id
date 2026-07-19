@@ -29,11 +29,12 @@
 //    pending — honestly, never a fake 'ok'. This module is complete and verified;
 //    the render is the marked seam. Said plainly in the PR.
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, statSync, readdirSync, statfsSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync, readdirSync, statfsSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataDir } from '../paths.js';
 import { venvPythonPath, bundledPythonPath, systemPython } from '../system/platform-env.js';
 import { voiceRecommendedModel } from '../inference/role-models.js';
+import { createVoiceSampleStore } from './voice-sample-store.js';
 
 // ── The variant catalog (design §2.1 — timed on the operator's base-M1 box) ──
 // Both are MLX-converted (mlx-community). The 0.6B is NOT faster than the 1.7B —
@@ -81,14 +82,22 @@ export function qwenVoiceCatalog() {
 
 // ── The voice-sample truth (design §2.2 — the keystone) ──────────────────────
 // Identity is held ONLY by a FROZEN reference sample authored on the per-agent
-// character page (design §5) — a unit NOT built yet. Until that unit lands and
-// stores a sample, NO render can hold identity: the service 501s every /tts, so
-// every surface must report the voice as PENDING, never "active". This is the
-// single source the portal reads so the top line cannot over-promise while every
-// render fails (adversarial review of #209, MED-1). When the character page
-// ships, this reads the stored sample's existence — until then it is honestly,
-// constantly false.
-export function hasVoiceSample() { return false; }
+// character page (design §5). NO render can hold identity without one: the
+// service 501s every /tts, so every surface reports the voice PENDING, never
+// "active", until a sample exists. This is the single source the portal reads so
+// the top line cannot over-promise while every render fails (adversarial review
+// of #209, MED-1). Now that the character page ships, this reads the stored
+// sample's existence per agent (was hardcoded false until V1u). Defaults to
+// 'personal-agent'.
+//
+// ⚠️ It uses the SAME predicate the render uses — a successful DECRYPT, not mere
+// file existence (voice-panel honesty audit, 2026-07-18). A corrupt / re-keyed /
+// sub-envelope .mvs would pass a size check but 501 at render; gating the top-line
+// on decryptability keeps "voice active" from ever out-promising the render.
+export async function hasVoiceSample(agentId = 'personal-agent', opts = {}) {
+  try { return (await createVoiceSampleStore(opts).getSample(agentId)) !== null; }
+  catch { return false; }
+}
 
 export function qwenPaths(opts = {}, variantId = DEFAULT_VOICE_MODEL) {
   const v = variantById(variantId);
@@ -144,11 +153,26 @@ function snapshotPresent(dir) {
     return readdirSync(dir).some((f) => f.endsWith('.safetensors') || f.endsWith('.npz') || f.endsWith('.gguf'));
   } catch { return false; }
 }
-function dirBytes(dir) {
+// Recursive: huggingface_hub streams the in-flight shard into a hidden
+// <dir>/.cache/huggingface/download/ staging area and only moves it to the top
+// level once COMPLETE — a top-level-only scan reads ~0 for the whole multi-GB
+// download, pinning the progress bar at its 5% floor until the final snap.
+// Symlinks are skipped (their targets live in the global HF cache, outside dir).
+function dirBytes(dir, depth = 0) {
   let total = 0;
-  try { for (const f of readdirSync(dir)) { try { total += statSync(join(dir, f)).size; } catch { /* */ } } } catch { /* */ }
+  try {
+    for (const f of readdirSync(dir)) {
+      const p = join(dir, f);
+      try {
+        const st = lstatSync(p);
+        if (st.isDirectory()) { if (depth < 6) total += dirBytes(p, depth + 1); }
+        else if (st.isFile()) total += st.size;
+      } catch { /* */ }
+    }
+  } catch { /* */ }
   return total;
 }
+export function __dirBytes(dir) { return dirBytes(dir); }  // gate seam (verify:tts-voice)
 
 // ── The provisioner seam (design §4.2 / eval §3.4: `mlx-audio`) ──────────────
 // pip install mlx-audio, then snapshot_download the chosen MLX variant from HF.

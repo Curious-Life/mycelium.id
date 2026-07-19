@@ -10,24 +10,20 @@
 //     clean JSON + 12-name register adherence. qwen3.5:4b won the live 4-model eval
 //     (2026-06-21). On-box by design (bulk + privacy + cost) → a LOCAL model name.
 //   • descriptions (the `narrate` task — mindscape names + chronicles) — heavy for a
-//     modest local box, so recommend an EU-sovereign zero-retention CLOUD. `narrate` is
-//     §4g-SENSITIVE (src/inference/sensitivity.js SENSITIVE_TASKS), so the recommendation
-//     MUST be EU-ZDR only: a US pick is refused and falls back to EU/on-box — never
-//     recommend one (fail-closed).
+//     modest local box, so recommend an EU-sovereign zero-retention CLOUD (Regolo). This is a
+//     RECOMMENDATION, not a wall: since 2026-07-19 `narrate` is NOT §4g-sensitive, so the user
+//     may assign Descriptions to ANY connected provider, including US. The badge points at EU-ZDR
+//     because that keeps the most-revealing summary sovereign by default; it does not refuse a
+//     US pick the user makes deliberately.
 //
-//     ⚠️ THIS WAS FALSE UNTIL 2026-07-16 AND IT MATTERED. It read "narrate runs
-//     `sensitive:true`, so the §4g gate denies sensitive→US, so a US pick would be silently
-//     downgraded to local". `sensitive` was a per-CALL flag, and the two callers that passed
-//     it were claims/discovery + claims/validator — NOT the code that narrates the mindscape.
-//     pipeline/lib/narrate-infer.js called router.infer({task:'narrate'}) with no flag
-//     (defaulting FALSE), and agent/run-turn.js hard-coded `{sensitive:false}` — so a US model
-//     picked for narrate was used, verbatim, to name the user's personal themes. The guarantee
-//     lived in this comment and in a design doc; it did not exist in code, and the Intelligence
-//     screen was about to print it on the user's screen. `sensitive` is now DERIVED FROM THE
-//     TASK (src/inference/sensitivity.js), so any caller that OMITS the flag is correct — an
-//     EXPLICIT `sensitive` argument still overrides it, so a new wrapper around router.infer
-//     must default it from the task too, or the hole reopens (inference/cascade.js did exactly
-//     that; fixed 2026-07-16). This sentence is true of the DEFAULT, not of every caller.
+//     ⚠️ HISTORY (2026-07-16 → 2026-07-19). This once claimed narrate ran `sensitive:true` so a
+//     US pick was refused — first FALSE (the flag was per-CALL and only claims/discovery +
+//     claims/validator passed it, never the mindscape narrator), then made real by adding narrate
+//     to SENSITIVE_TASKS. The operator then removed that limit (2026-07-19): Descriptions is no
+//     longer confined to EU/on-device. `sensitive` is still DERIVED FROM THE TASK
+//     (src/inference/sensitivity.js) — narrate now derives FALSE — and an EXPLICIT `sensitive`
+//     argument still overrides it, which is why claims (sensitive:true) stay protected regardless
+//     of this change.
 //
 // This is the SINGLE SOURCE OF TRUTH. enrich/categories.js DEFAULT_LABEL_MODEL imports
 // the labeling pick from here so the badge and the actual default can never drift
@@ -42,9 +38,12 @@ export const ROLE_RECOMMENDATIONS = Object.freeze({
   }),
   descriptions: Object.freeze({
     task: 'narrate',
-    kind: 'cloud-eu-zdr', // EU zero-retention only — never US (sensitive task, §4g)
+    // `kind` describes the RECOMMENDED model (an EU zero-retention cloud), NOT a limit on what
+    // may be assigned — narrate is no longer §4g-sensitive (2026-07-19), so any provider is
+    // offerable. The badge stays EU-ZDR because it keeps mindscape narration sovereign by default.
+    kind: 'cloud-eu-zdr',
     presetId: 'regolo',
-    why: 'Mindscape narration is heavy for modest local boxes; EU zero-retention cloud keeps sensitive content sovereign.',
+    why: 'Mindscape narration is heavy for modest local boxes; EU zero-retention cloud keeps it sovereign by default (you can still choose another provider).',
   }),
   // voice (the local TTS `speak` kind) — the FIRST `voice` pick in this repo with EVIDENCE:
   // Qwen3-TTS won a LIVE listening test on the operator's own hardware (2026-07-15), replacing
@@ -64,6 +63,19 @@ export const ROLE_RECOMMENDATIONS = Object.freeze({
 
 /** The curated local model recommended for on-box labeling (the `categorize` task). */
 export const labelingRecommendedModel = () => ROLE_RECOMMENDATIONS.labeling.model;
+
+/**
+ * The curated local models we ACTUALLY USE / endorse — the ONLY names that earn the ★
+ * "recommended" badge in the hardware recommender. Operator decision 2026-07-19: stop
+ * auto-starring the warmth-ranked top-3 (it surfaced gemma et al., which we don't use and
+ * judged not good). The recommender still LISTS the whole catalog to browse — it just no
+ * longer claims "we recommend this" about a model we haven't validated.
+ *
+ * Single-sourced here so the badge can never drift from what ships. Add a model to this
+ * list to endorse it. Today it is exactly the on-box labeling pick: conversation runs on
+ * the cloud (Claude), so there is no endorsed local CHAT model yet.
+ */
+export const endorsedLocalModels = () => [ROLE_RECOMMENDATIONS.labeling.model];
 
 /** The cloud preset id recommended for descriptions (the `narrate` task). */
 export const descriptionsRecommendedPreset = () => ROLE_RECOMMENDATIONS.descriptions.presetId;
@@ -91,32 +103,46 @@ export const voiceRecommendedModel = () => ROLE_RECOMMENDATIONS.voice.model;
 // one model, both tasks: the picker writes categorize AND enrich together.
 //
 // `jurisdiction` is the honest limit each function carries:
-//   'any'         — cloud or local, user's call (Conversation).
+//   'any'         — cloud or local, user's call (Conversation, Descriptions).
 //   'on-device'   — always local; not a cloud choice (Understanding, Transcription).
-//   'eu-or-local' — §4g HARD LIMIT: narrate is sensitivity.js-sensitive, US is REFUSED at the
+//   'eu-or-local' — §4g HARD LIMIT: the task is sensitivity.js-sensitive, US is REFUSED at the
 //                   router, so US models are NOT OFFERED (offering a choice the system overrides
-//                   is a silent lie — §3.11d). This is the one place "full flexibility" yields.
+//                   is a silent lie — §3.11d). NO function carries this today: narrate was the
+//                   last one, and the operator lifted its limit (2026-07-19). The value + the
+//                   screen's offerable() filter are RETAINED as generic infrastructure — if a
+//                   future task joins SENSITIVE_TASKS and its function is marked 'eu-or-local',
+//                   the router refusal and the screen filter must agree (verify:intelligence-
+//                   functions F4/F4b pin the biconditional in BOTH directions).
 export const INTELLIGENCE_FUNCTIONS = Object.freeze([
   Object.freeze({
-    key: 'conversation', label: 'Conversation', sub: 'your agent’s voice',
+    key: 'conversation', label: 'Conversation', sub: 'chat, channels & reflections',
     tasks: Object.freeze(['chat', 'harness', 'reflection']), // one voice drives chat, channels + reflection
     kind: 'provider', jurisdiction: 'any',
     recommend: 'claude_subscription',
-    why: 'Your Claude subscription — the fullest reasoning, on your own account.',
+    // ⚠️ The `why` here is the ROW'S plain description (shown as the quiet subline in the
+    // Functions view), decoupled 2026-07-19 from ROLE_RECOMMENDATIONS.*.why (the eval
+    // rationale, still single-sourced for the recommender badge). Keep it a clear one-liner.
+    why: 'The model your agent talks with, and how it runs a turn.',
   }),
   Object.freeze({
-    key: 'understanding', label: 'Understanding your messages', sub: 'labels + entities',
+    // Renamed 'Understanding your messages' → 'Labeling' (operator, 2026-07-19): the precise
+    // function name over the outcome phrasing. Still {categorize, enrich}, one approval for both.
+    key: 'understanding', label: 'Labeling', sub: 'categories + entities',
     tasks: Object.freeze(['categorize', 'enrich']),          // ONE approval sets BOTH (see above)
     kind: 'local', jurisdiction: 'on-device',
     recommend: ROLE_RECOMMENDATIONS.labeling.model,
-    why: ROLE_RECOMMENDATIONS.labeling.why,
+    why: 'Reads each message and tags what it’s about — on your device.',
   }),
   Object.freeze({
-    key: 'descriptions', label: 'Descriptions', sub: 'mindscape names + chronicles',
+    key: 'descriptions', label: 'Descriptions', sub: 'mindscape names & chronicles',
     tasks: Object.freeze(['narrate']),
-    kind: 'cloud-eu-zdr', jurisdiction: 'eu-or-local',       // §4g: US refused (sensitivity.js) ⇒ never offered
+    // jurisdiction 'any': narrate is NOT §4g-sensitive (2026-07-19 operator decision), so every
+    // provider is offerable — like Conversation. `kind: 'cloud-eu-zdr'` names the RECOMMENDATION
+    // (Regolo EU-ZDR, kept as the sovereign default), it is not a limit. F4b pins that no
+    // sensitive task hides under a non-limited function, so this pairing can never silently leak.
+    kind: 'cloud-eu-zdr', jurisdiction: 'any',
     recommend: ROLE_RECOMMENDATIONS.descriptions.presetId,
-    why: ROLE_RECOMMENDATIONS.descriptions.why,
+    why: 'Writes the names and chronicles for your mindscape.',
   }),
   Object.freeze({
     // ⚠️ NOT A CHOICE, and the screen must never render it as one (§3.10d-c). The embedder
@@ -127,25 +153,28 @@ export const INTELLIGENCE_FUNCTIONS = Object.freeze([
     // `kind: 'bundled'` is the discriminator the screen switches on to render "Included — runs
     // on your device" instead of a picker. Presenting a non-choice as consent is the same
     // dishonesty §3.10 exists to remove.
-    key: 'search', label: 'Search', sub: 'semantic recall',
+    key: 'search', label: 'Search', sub: 'finding things',
     tasks: Object.freeze([]),                                // embedding is not an INFERENCE_TASK
     kind: 'bundled', jurisdiction: 'on-device',
     recommend: 'nomic-v1.5',
-    why: 'Included with the app — it runs on your device and needs no setup.',
+    why: 'Finds things across your memory. Built in — nothing to set up.',
   }),
   Object.freeze({
     key: 'transcription', label: 'Transcription', sub: 'audio → text',
     tasks: Object.freeze([]),                                // whisper — a model kind, not an inference task
     kind: 'whisper', jurisdiction: 'on-device',
     recommend: 'by-ram',                                     // large-v3-turbo / small, chosen by RAM (portal-transcription)
-    why: 'Whisper runs on your device — larger models transcribe better where RAM allows.',
+    why: 'Turns voice notes and audio into text, on your device.',
   }),
   Object.freeze({
-    key: 'voice', label: 'Voice', sub: 'speaking',
+    key: 'voice', label: 'Voice', sub: 'text → speech',
     tasks: Object.freeze([]),                                // TTS — a model kind, not an inference task
     kind: 'tts', jurisdiction: 'on-device-or-cloud',
     recommend: ROLE_RECOMMENDATIONS.voice.model,             // Qwen3-TTS — WON the live listening test (2026-07-15)
-    why: ROLE_RECOMMENDATIONS.voice.why,                     // single-sourced ⇒ badge == default (verify:tts-voice)
+    // Plain description (decoupled from ROLE_RECOMMENDATIONS.voice.why 2026-07-19 — the eval
+    // rationale "won the live listening test" read as redundant in the row; still single-sourced
+    // for the recommender badge / verify:tts-voice).
+    why: 'The voice your agent speaks in.',
   }),
 ]);
 

@@ -26,6 +26,7 @@ import { portalImportRouter } from './portal-import.js';
 import { portalSettingsRouter } from './portal-settings.js';
 import { portalReflectionRouter } from './portal-reflection.js';
 import { portalChatRouter } from './portal-chat.js';
+import { portalCharacterRouter } from './portal-character.js';
 import { createScheduler } from './agent/scheduler.js';
 import { seedReflectionCycles } from './agent/seed-cycles.js';
 import { createChannelTurnRouter } from './agent/channel-turn.js';
@@ -53,6 +54,9 @@ import { accountRouter } from './account/router.js';
 import { remoteRouter } from './remote/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { startEnrichDrainer } from './enrich/drainer.js';
+import { createRelayQueueClient } from './federation/relay-queue-client.js';
+import { createFederationPullLoop } from './federation/pull-loop.js';
+import { resolveDidKey } from './federation/did.js';
 import { createReadiness } from './readiness.js';
 import { getEmbedderHealth as readinessEmbedderHealth } from './embed/supervisor.js';
 // The other two members of the supervisor-health convention, for readiness's `models`
@@ -76,9 +80,13 @@ import { startQwenTtsSupervisor } from './tts/qwen3-tts-supervisor.js';
 import { startChannelSupervisor } from './channels/supervisor.js';
 import { mcpLoopbackRouter } from './mcp-loopback.js';
 import { readRemoteConfig, passkeyEnrolled } from './remote/config.js';
-import { isValidHandle } from './identity/identity.js';
+import { isValidHandle, createIdentity } from './identity/identity.js';
+import { createRelayClient } from './remote/relay-client.js';
 import { setSessionKeys } from './account/session-keys.js';
 import { createVaultAuthMiddleware, csrfCookieMiddleware, isAuthorized, makePortalOwnerGate } from './http/require-vault-auth.js';
+import { createPairRouters } from './portal-pair.js';
+import { createE2ERouter } from './portal-e2e.js';
+import { createPathThrottle } from './http/rate-limit.js';
 import { recordDurabilityEvent, isCorruptionError } from './db/durability-log.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -236,7 +244,8 @@ export function ensureDataDir({ env = process.env } = {}) {
 // creates it and completeBoot warms it — two different functions, one instance.
 let vaultReadiness = null;
 
-function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth, channelSup, hwOllamaDaemon, restPort, searchHelpers }) {
+function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth, channelSup, hwOllamaDaemon, restPort, searchHelpers, boxIdentity = null }) {
+  const boxKeyAgreementPub = boxIdentity?.keyAgreementPublicKeyB64 || null;
   const v = express();
   v.disable('x-powered-by');
 
@@ -279,7 +288,17 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // so they authenticate independently of the global /api gate — defence in depth).
   // Trust: trusted-loopback (desktop) OR the owner's static Bearer (native app over
   // Tailscale / the native-TLS listener), the SAME authority the global gate trusts.
-  const portalOwnerGate = makePortalOwnerGate({ userId });
+  // Per-device token matcher (QR pairing, Unit A) — sync + fail-closed. Wired into
+  // the owner gate (below) AND the global /api gate (createVaultAuthMiddleware, at
+  // the completeBoot call site) so a paired phone reaches both. Optional-chained:
+  // absent namespace ⇒ null ⇒ device path disabled (strictly more restrictive).
+  const deviceTokenMatch = db?.deviceTokens ? (t) => db.deviceTokens.matchSync(t) : null;
+  const portalOwnerGate = makePortalOwnerGate({ userId, deviceTokenMatch });
+
+  // QR device-pairing (Unit B). ownerRouter = the LOOPBACK-ONLY ceremony
+  // (start/pending/approve/deny/devices/revoke); publicRouter = the unauthenticated
+  // phone endpoints (claim/result), mounted at root outside /api + throttled below.
+  const pairRouters = db?.deviceTokens ? createPairRouters({ db, userId, boxKeyAgreementPub }) : null;
   // GET /api/v1/portal/readiness — the portal's ONE call. `?slices=data,ai` narrows it;
   // omitted = everything. Never `fresh` from HTTP: the pure scan is a multi-second
   // SQLCipher decrypt and polling it per-call once hung the app at boot.
@@ -365,6 +384,10 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // In-app chat agent (web + Tauri) — runs a bounded, user-driven tool-use loop
   // over the SAME tool handlers, gated by the user's "AI Access" policy. Auth is
   // loopback-trusted (decrypts vault plaintext), same boundary as measurement/claims.
+  // Character page — owner-only window onto the agent's personality (self.md) +
+  // its authorship/diff/revert (design §5.2/§5.6). Security-sensitive: it writes
+  // the agent's identity, so it authenticates independently via the owner gate.
+  v.use('/api/v1/portal', portalCharacterRouter({ db, userId, authenticatePortalRequest: portalOwnerGate }));
   v.use('/api/v1/portal', portalChatRouter({
     db, userId, tools, handlers, enqueueEnrichment,
     authenticatePortalRequest: portalOwnerGate,
@@ -406,6 +429,25 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
     // native by default, or the Claude Code CLI when the operator picked it — the same engine as
     // chat, now in channels. Untrusted turns ignore both and stay on chLoop (native).
     v.use(createChannelTurnRouter({ db, userId, tools, handlers, loop: chLoop, harness: chHarness, restPort, hooks: chHooks, logger: (m) => console.error(`[channel-turn] ${m}`), expectedToken: CHANNEL_TURN_TOKEN }));
+  }
+  // QR device-pairing routes. Owner ceremony under /api/v1/portal (loopback-only,
+  // enforced inside the router). Public phone endpoints at ROOT (outside the /api
+  // vault gate so the unauthenticated phone can reach them), throttled globally
+  // (per-pid caps live inside the router). Mounted before the SPA static fallback.
+  if (pairRouters) {
+    v.use('/api/v1/portal', pairRouters.ownerRouter);
+    // Global ceiling (brute-force backstop); the per-pid cap inside the router is the
+    // primary control, so these are generous enough not to wedge a legit phone (audit #2).
+    v.use(createPathThrottle({ method: 'POST', path: '/pair/claim', max: 30, windowMs: 60_000 }));
+    v.use(createPathThrottle({ method: 'POST', path: '/pair/result', max: 60, windowMs: 60_000 }));
+    v.use(pairRouters.publicRouter);
+  }
+  // E2E REST transport (Phase 2b): the phone's sealed frames → dispatched through the
+  // box's own gate. Public/root (auth is inside the session), throttled. Present only
+  // when the box identity is derivable (E2E off otherwise, back-compat).
+  if (db?.deviceTokens && boxIdentity) {
+    v.use(createPathThrottle({ method: 'POST', path: '/e2e/handshake', max: 30, windowMs: 60_000 }));
+    v.use(createE2ERouter({ db, identity: boxIdentity, restPort, userId }).router);
   }
   v.use(apiRouter({ tools, handlers, db, userId, enqueueEnrichment }));
   return v;
@@ -524,7 +566,7 @@ export async function startRestServer({
       }
       // Schema + at-rest migration now happen INSIDE boot() → initVaultStorage(),
       // key-aware + under a cross-process lock (self-initialises a fresh vault).
-      const { tools, handlers, db, close, userId: bootUserId, searchHelpers } = await boot(opts);
+      const { tools, handlers, db, close, userId: bootUserId, searchHelpers, identity, publicHost } = await boot(opts);
       dbHandle = db;
       // Record the ceremony success now that the vault (and audit_log) is open.
       // Fire-and-forget — audit failure must never block a successful boot.
@@ -545,6 +587,7 @@ export async function startRestServer({
       // verify script's deterministic test vault.
       const injectedKeys = userHex !== undefined && systemHex !== undefined;
       let connectorScheduler = null;
+      let relayClient = null; // E2E dial-out relay client (Phase 3), started below when opted in
       let channelSup = null;
       if (!injectedKeys) {
         // Warm the in-RAM mind-search index in the BACKGROUND, right after unlock,
@@ -582,9 +625,15 @@ export async function startRestServer({
         // stranded after import (the #1 "it embedded but nothing happened" report).
         // Gated, fail-soft: only when not already clustering, clustering_points is
         // empty (fires once on first generation — re-generation stays manual), and
-        // past a data floor so we never build a trivial 1-cluster map. Manual Generate
-        // (MIN_EMBEDDED=5) is unchanged for small/test vaults below the floor.
-        const AUTO_GEN_MIN = Number(process.env.MYCELIUM_AUTO_GEN_MIN) || 25;
+        // past a data floor.
+        // ⚠️ THE FLOOR IS THE MANUAL FLOOR (MIN_EMBEDDED=5), not 25 — PIPELINE-TRANSPARENCY-DESIGN
+        // §"Filling the gaps" #2. At 25 a real-but-small vault (5–24 embedded) NEVER auto-clustered
+        // and NOTHING told the user to click Generate — a silent stall. At the manual floor any vault
+        // the user could build by hand now builds itself. Below the floor the readiness `pipeline`
+        // slice already emits cluster.blocked/too_few_embedded with a live Generate button
+        // (readiness.js:706), so a <5 vault is surfaced, never stranded either way. The env override
+        // stays for operators who want a higher first-run floor.
+        const AUTO_GEN_MIN = Number(process.env.MYCELIUM_AUTO_GEN_MIN) || 5;
         const maybeAutoGenerate = async () => {
           try {
             const { embedded } = await db.messages.embedBacklogCached(bootUserId); // boot: warms the SWR cache so the first activity poll is instant (not a 6s cold scan)
@@ -599,6 +648,29 @@ export async function startRestServer({
         // categorization (in scope via the buildVaultSubApp closure). Without this the
         // enrich path never starts Ollama and every message stays untagged (CE dormancy).
         const drainer = startEnrichDrainer({ db, userId: bootUserId, onSettled: maybeAutoGenerate, daemon: hwOllamaDaemon });
+
+        // Federation RECEIVE loop (P4): pull THIS box's relay inbox, open + dedup + dispatch
+        // (receiveRemote/receiveResponse/receiveMessage). This is what makes an offline peer's
+        // connect/DM land. Started ONLY when remote is configured (a publicHost/handle + a relay
+        // to pull from) — a self-hosted/dev box with no relay does nothing. Rides this process's
+        // family writer lock (writes via db); cheap when empty; backs off when the relay is down.
+        let fedPull = null;
+        try {
+          const _rc = readRemoteConfig();
+          const _relayBase = (_rc.remoteMode === 'managed' || _rc.remoteMode === 'own-relay') ? _rc.controlPlaneUrl : null;
+          const _fedHandle = (_rc.publicHost || '').split('.')[0];
+          if (_relayBase && publicHost && identity?.publicKeyB64 && isValidHandle(_fedHandle)) {
+            const _fedClient = createRelayQueueClient({ relayBaseUrl: _relayBase, handle: _fedHandle, publicKeyB64: identity.publicKeyB64, sign: (b) => identity.sign(b) });
+            fedPull = createFederationPullLoop({
+              db, userId: bootUserId, identity, selfDid: `did:web:${publicHost}`,
+              resolvePeerKey: (d) => resolveDidKey(d), client: _fedClient, logger: (m) => console.error(m),
+              // Send-retry: on cycles when the relay is reachable, re-attempt DMs that failed to
+              // deliver earlier (P5 delivery robustness). Self-terminating on first success.
+              outbox: () => db.connections.federationOutbox(bootUserId),
+            }).start();
+            console.error(`[federation-pull] receiving for ${_fedHandle} via ${_relayBase}`);
+          }
+        } catch (e) { console.error(`[federation-pull] not started: ${e.message}`); }
         enqueueEnrichment = (id) => { try { baseEnqueue(id); } catch { /* :8095 optional */ } drainer.nudge(); };
         // Persona-Claims source (Context Engine Phase 2): claims now DISTILL from the agent's
         // consolidated model.md / day cards via the integration cycle's proposeClaim (L3) — NOT
@@ -685,6 +757,22 @@ export async function startRestServer({
           await db.harness.advanceOverdue(new Date().toISOString());
         } catch (e) { console.warn('[scheduler] boot reconcile skipped:', e?.message || e); }
         harnessScheduler.start();
+        // E2E dial-out relay (Phase 3): OPT-IN via MYCELIUM_RELAY_DIALOUT=1 (flip on
+        // AFTER the relay-mailbox is deployed). The box dials the managed relay so a
+        // phone can reach it with NO inbound ports / Tailscale / Cloudflare — the relay
+        // sees only opaque E2E ciphertext. Loops with backoff; a down relay is a no-op.
+        if (process.env.MYCELIUM_RELAY_DIALOUT === '1') {
+          try {
+            const rc = readRemoteConfig();
+            const relayHandle = String(rc.publicHost || '').split('.')[0];
+            if (isValidHandle(relayHandle) && rc.controlPlaneUrl) {
+              const relayIdentity = createIdentity({ masterHex: opts.userHex || process.env.ENCRYPTION_MASTER_KEY });
+              relayClient = createRelayClient({ relayBase: rc.controlPlaneUrl, handle: relayHandle, identity: relayIdentity, restPort: port, log: (m) => console.error(`[relay] ${m}`) });
+              relayClient.start();
+              console.error(`[relay] dial-out started → ${rc.controlPlaneUrl} as ${relayHandle}`);
+            } else console.error('[relay] dial-out skipped: no handle/controlPlane in remote config');
+          } catch (e) { console.error('[relay] dial-out not started:', e?.message || e); }
+        }
         // Keep the Mac awake while this always-on server (drainer + scheduler +
         // channels) runs, so a screen lock / dark display doesn't pause processing.
         // Default ON on macOS; the user can turn it off (Settings → keep-awake →
@@ -700,7 +788,9 @@ export async function startRestServer({
           try { stopKeepAwake(); } catch { /* */ }
           try { harnessScheduler.stop(); } catch { /* */ }
           try { connectorScheduler?.stop(); } catch { /* */ }
+          try { relayClient?.stop(); } catch { /* */ }
           try { drainer.stop(); } catch { /* */ }
+          try { fedPull?.stop(); } catch { /* */ }
           try { claimsHeartbeat?.stop(); } catch { /* */ }
           try { embedSup.stop(); } catch { /* */ }
           try { channelSup?.stop(); } catch { /* */ }
@@ -726,11 +816,22 @@ export async function startRestServer({
       // Shared-space membership + content sync is handled by the E2E system (the
       // ciphertext oplog: space-membership.js + space-content-mirror.js), wired via
       // db.spaceKeyManager / db.spaceContent — no separate Matrix hook needed.
-      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId }), channelSup, hwOllamaDaemon, restPort: port, searchHelpers });
+      // The box's long-term identity (X25519 keyAgreement). Its PUBLIC key is sealed
+      // to the phone at pairing so the phone PINS it (E2E reachability Phase 1); the
+      // identity itself drives the E2E session handshake responder (Phase 2b). Derived
+      // from the master key, which stays in boot scope — only the identity object (with
+      // an encapsulated private key) + the public key flow down, in-process.
+      let boxIdentity = null;
+      try { boxIdentity = createIdentity({ masterHex: opts.userHex || process.env.ENCRYPTION_MASTER_KEY }); }
+      catch { /* identity underivable (no key) → pairing omits the key, E2E disabled; back-compat */ }
+      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId, deviceTokenMatch: db?.deviceTokens ? (t) => db.deviceTokens.matchSync(t) : null }), channelSup, hwOllamaDaemon, restPort: port, searchHelpers, boxIdentity });
       bootError = null; // opened cleanly → clear any prior failure
       // Fire-and-forget warm: embedBacklogCached awaits the FIRST scan on a cold process,
       // so without this the first consumer (getContext — the agent's latency-sensitive
-      // preamble — or the Header) pays multiple seconds. Never awaited, never throws.
+      // preamble — or the Header) pays multiple seconds. warm() also pre-pays the
+      // `evidence` aggregates + `mindscape` count (readiness.js), so the status popover's
+      // first open serves a warm snapshot instead of four live full-table scans.
+      // Never awaited, never throws.
       try { vaultReadiness?.warm(); } catch { /* boot must not depend on it */ }
     } finally {
       booting = false;

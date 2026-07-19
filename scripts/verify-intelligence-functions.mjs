@@ -42,18 +42,20 @@ t('F3. the recommendations are single-sourced from ROLE_RECOMMENDATIONS (badge =
   assert.equal(d.recommend, descriptionsRecommendedPreset(), 'Descriptions must recommend exactly the pinned narrate preset');
 });
 
-t('F4. every eu-or-local function owns ONLY §4g-sensitive tasks (⇐ of the biconditional)', () => {
-  // Descriptions must carry the limit…
+t('F4. Descriptions is jurisdiction "any" (limit lifted), and any eu-or-local function owns ONLY §4g-sensitive tasks (⇐)', () => {
+  // Descriptions must NOT carry the eu-or-local limit anymore — narrate left SENSITIVE_TASKS on
+  // 2026-07-19, so the router runs it on the user's chosen provider (US included) and the screen
+  // must offer them all. A stray 'eu-or-local' here would HIDE valid choices and re-print the
+  // "stays in the EU" copy the operator removed (§3.11d inverted: withholding a choice the router
+  // allows).
   const d = INTELLIGENCE_FUNCTIONS.find((f) => f.key === 'descriptions');
-  assert.equal(d.jurisdiction, 'eu-or-local',
-    'Descriptions must be eu-or-local: US is refused at the router, so offering a US model is a silent lie (§3.11d)');
-  // …but the RULE is general, and hardcoding it to `descriptions` left a hole: setting
-  // Conversation's jurisdiction to 'eu-or-local' passed all 8 gates under a banner reading
-  // "§4g limit agrees with the router", while N4/N10 in verify-narrate-sovereignty explicitly
-  // pin that CHAT on a US provider is untouched. The screen would hide the user's own Claude
-  // subscription from Conversation and print a false reason for it — over-restriction, so
-  // fail-safe rather than a leak, but a guarantee the router does not enforce either way
-  // (independent review ×4, 2026-07-16).
+  assert.equal(d.jurisdiction, 'any',
+    `Descriptions must be 'any' now that narrate is non-sensitive — got '${d.jurisdiction}'`);
+  // The ⇐ half of the biconditional, kept GENERAL for the future: any function that DOES claim
+  // 'eu-or-local' must own only §4g-sensitive tasks, or the screen restricts a choice the router
+  // happily allows. Vacuous today (no eu-or-local function), live the moment one returns —
+  // hardcoding this to `descriptions` once let a reviewer set Conversation to 'eu-or-local' and
+  // pass every gate (independent review ×4, 2026-07-16).
   for (const f of INTELLIGENCE_FUNCTIONS) {
     if (f.jurisdiction !== 'eu-or-local') continue;
     for (const task of f.tasks) {
@@ -63,19 +65,18 @@ t('F4. every eu-or-local function owns ONLY §4g-sensitive tasks (⇐ of the bic
   }
 });
 
-t('F4b. ⭐ …and EVERY §4g-sensitive task lives under an eu-or-local function (the converse)', () => {
-  // ⚠️ F4 alone is ONE-DIRECTIONAL: it says "Descriptions' tasks are sensitive", not "sensitive
-  // tasks are under a limited function". A reviewer re-homed `narrate` under Conversation
-  // (jurisdiction 'any') and left Descriptions task-less: F4's loop went VACUOUS and all seven
-  // gates printed GO — under a banner literally reading "§4g limit agrees with the router"
-  // (independent review ×3, 2026-07-16). A screen built on that spine offers US providers for
-  // narrate, the router refuses every one at runtime, and Descriptions goes silently dead:
-  // §3.11d's silent lie AND the dormancy class, from a spine the suite called healthy.
-  //
-  // The router is the authority on WHAT is sensitive; this pins that the SCREEN cannot lose it.
-  // Self-standing: an EMPTY SENSITIVE_TASKS would make the loop below vacuous, and relying on
-  // F4/N1 to catch that is a cross-file dependency this check shouldn't have.
-  assert.ok(SENSITIVE_TASKS.size > 0, '§4g protects nothing if SENSITIVE_TASKS is empty — the router would allow narrate to any US provider');
+t('F4b. ⭐ SENSITIVE_TASKS is EMPTY (narrate lifted), and any §4g-sensitive task lives under an eu-or-local function (⇒)', () => {
+  // The affirmative check that the 2026-07-19 change is IN PLACE: no task defaults to §4g-
+  // sensitive. narrate was the only member; removing it is the whole point of this change, so
+  // pin the state directly — a reviewer who re-added narrate to the router while leaving the
+  // screen 'any' would fail here, catching exactly the "screen offers US but router refuses"
+  // silent lie the OLD gate guarded against, now inverted.
+  assert.equal(SENSITIVE_TASKS.size, 0,
+    `narrate was removed from SENSITIVE_TASKS (2026-07-19). A non-empty set means a task now defaults to §4g-sensitive: [${[...SENSITIVE_TASKS].join(', ')}] — if that is intentional, its function must be 'eu-or-local' (checked below) AND the screen/router must agree.`);
+  // The ⇒ half, kept GENERAL: IF a task rejoins SENSITIVE_TASKS, its function must be
+  // 'eu-or-local' or the screen would OFFER a US model the router will refuse. Vacuous while the
+  // set is empty, live the moment it grows — this is the guard that keeps the router (authority
+  // on WHAT is sensitive) and the screen in step.
   for (const task of SENSITIVE_TASKS) {
     const owner = INTELLIGENCE_FUNCTIONS.find((f) => f.tasks.includes(task));
     assert.ok(owner, `§4g-sensitive task '${task}' has NO function — it would have no screen surface at all`);
@@ -145,6 +146,6 @@ t('F5. every function has a label, a sub and a why — the "recommendation + rea
 
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
-console.log(`VERDICT: ${allPass ? 'GO — the function spine: every task has a home, Understanding is one approval, badges are single-sourced, §4g limit agrees with the router' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
+console.log(`VERDICT: ${allPass ? 'GO — the function spine: every task has a home, Understanding is one approval, badges are single-sourced, Descriptions is "any" (§4g limit lifted) and the sensitive⟺eu-or-local biconditional still holds' : 'NO-GO — see FAIL rows'}  EXIT=${allPass ? 0 : 1}`);
 console.log('='.repeat(64));
 process.exit(allPass ? 0 : 1);

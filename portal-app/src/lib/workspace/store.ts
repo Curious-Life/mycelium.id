@@ -257,8 +257,12 @@ function createWorkspace() {
 				return { ...s, root: updateLeaf(s.root, pane.id, (lf) => ({ ...lf, tabs: [...lf.tabs, t], activeTabId: t.id })), focusedPaneId: pane.id };
 			});
 		},
+		/** Route intent (sidebar goto / deep link / mobile tab). Navigation REPLACES
+		 *  the current tab's content in place — a new tab is ONLY an explicit gesture
+		 *  (⌘/ctrl·middle-click, right-click → "Open in new tab", drag onto the tab
+		 *  strip), which call openOrFocus/openInPane directly. */
 		openFromRoute(viewId: string, params: Record<string, unknown> = {}) {
-			api.openOrFocus(viewId, params);
+			api.openInActiveTab(viewId, params);
 		},
 
 		focusTab(tabId: string) {

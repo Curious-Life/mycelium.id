@@ -51,8 +51,11 @@
  */
 
 import { randomUUID as nodeRandomUUID } from 'node:crypto';
-import { canonicalize, verifyDetached } from '../federation/sign.js';
-import { resolveDidKey } from '../federation/did.js';
+import { verifyDetached } from '../federation/sign.js';
+import { resolveDidKey, resolveRelayInbox, resolveKeyAgreementKey, didWebHost } from '../federation/did.js';
+import { createDirectHttpTransport } from '../federation/transport.js';
+import { planDelivery } from '../federation/transport-chooser.js';
+import { sealEnvelope } from '../federation/envelope.js';
 import { safeFetch } from '../federation/ssrf.js';
 import { decodeSharedSpace } from '../crypto/space-reader.js';
 
@@ -73,12 +76,13 @@ function hasVectorKey(o) {
 // domain side + WebFinger + did:web verification are the real gates, so this
 // stays deliberately permissive (2–64 chars, alnum + hyphen/underscore).
 const HANDLE_LOCAL_PART_RE = /^([a-z0-9][a-z0-9_-]{1,62})@(.+)$/i;
-const DOMAIN_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
 
 const PENDING_LIMIT = 20;
 const MAX_MESSAGE_CHARS = 4000; // peer-message body cap (well under the 8KB canonical envelope cap)
-const WEBFINGER_TIMEOUT_MS = 5000;
-const FEDERATION_POST_TIMEOUT_MS = 10000;
+const OUTBOX_MAX_ATTEMPTS = 10; // stop re-attempting a failed DM after this many outbox sweeps (dead peer)
+// Endpoint resolution + signed POST (WebFinger/DOMAIN_RE + federation timeouts) now live
+// in the transport seam (src/federation/transport.js). PRESENCE_QUERY_TIMEOUT_MS below is
+// this caller's tighter per-peer budget, passed to transport.request().
 const RESOLVE_HANDLE_TIMEOUT_MS = 5000;
 const OVERLAP_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const PRESENCE_QUERY_TIMEOUT_MS = 3000;          // short per-peer timeout: a slow peer just shows last-known/offline
@@ -156,47 +160,108 @@ export function createConnectionsNamespace(deps) {
     return result.results?.[0]?.c || 0;
   }
 
-  // Resolve a remote instance's federation endpoint via WebFinger (SSRF-guarded:
-  // HTTPS-only, no redirect, abort timeout). Shared by request + response.
-  async function resolveFederationEndpoint(remoteDomain, remoteHandle) {
-    if (!DOMAIN_RE.test(remoteDomain)) throw new Error('Invalid domain');
-    const webfingerUrl = `https://${remoteDomain}/.well-known/webfinger?resource=acct:${remoteHandle}@${remoteDomain}`;
-    // safeFetch resolves once, validates every address (fail-closed), and pins the
-    // connection — no DNS-rebinding the WebFinger host to a private IP.
-    const wfRes = await safeFetch(webfingerUrl, { lookup, fetch: fetchImpl, signal: AbortSignal.timeout(WEBFINGER_TIMEOUT_MS), redirect: 'manual' });
-    if (!wfRes.ok) throw new Error(`WebFinger failed: ${wfRes.status}`);
-    const wf = await wfRes.json();
-    const fedLink = wf.links?.find((l) => l.rel?.includes('federation'));
-    if (!fedLink?.href) throw new Error('No federation endpoint');
-    // Bind the endpoint to the WebFinger domain: a peer must not be able to point
-    // our SIGNED POST at an unrelated host (confused-deputy SSRF). https-only,
-    // host must equal the domain or be a subdomain of it.
-    let u;
-    try { u = new URL(fedLink.href); } catch { throw new Error('Invalid federation endpoint'); }
-    if (u.protocol !== 'https:') throw new Error('federation endpoint must be https');
-    if (u.hostname !== remoteDomain && !u.hostname.endsWith(`.${remoteDomain}`)) {
-      throw new Error('federation endpoint host does not match the instance domain');
-    }
-    return fedLink.href;
+  // Federation transport seam (P1 — docs/FEDERATION-TRANSPORT-REDESIGN-DESIGN-2026-07-18.md):
+  // the ONE place that resolves a peer endpoint and frames/signs/POSTs an envelope. Direct
+  // HTTP today; the relay store-and-forward transport (P3) slots in behind this interface.
+  //   transport.resolveEndpoint(domain, handle) → federation endpoint href (WebFinger, SSRF-bound)
+  //   transport.send(endpoint, subpath, body)    → fire-and-forget signed POST
+  //   transport.request(url, body, { timeoutMs }) → signed POST, RETURNS the Response so the
+  //                                                 caller verifies the signed reply itself.
+  const transport = createDirectHttpTransport({ sign, did, lookup, fetch: fetchImpl });
+
+  // Federation delivery ROUTER (P3b-2b): route a signaling payload to a peer via the
+  // relay store-and-forward queue when the peer advertises a #relay-inbox + a seal key,
+  // else the direct box→box HTTP transport. The relay path needs NO WebFinger and does
+  // not require the peer's box to be reachable NOW — the sealed envelope waits in the
+  // queue and the peer pulls it when next online (the 502/offline failure class). Both
+  // paths are best-effort here; the caller keeps a durable pending row and re-delivers.
+  const RELAY_ENQUEUE_TIMEOUT_MS = 10000;
+  const PEER_KEY_TTL_MS = 24 * 60 * 60 * 1000; // re-resolve a cached peer inbox/key after a day (bounds stale-key loss)
+  const _relaySeq = new Map(); // per-peer monotonic send seq (in-memory; P4 makes it durable)
+  const relayResolvers = {
+    resolveRelayInbox: (peerDid) => resolveRelayInbox(peerDid, { fetch: fetchImpl, lookup }),
+    resolveKeyAgreement: async (peerDid) => {
+      const raw = await resolveKeyAgreementKey(peerDid, { fetch: fetchImpl, lookup });
+      if (!raw) return null;
+      // resolveKeyAgreementKey returns the X25519 key as a base64url STRING; sealToX25519
+      // wants exactly that. (Handle a Buffer too, defensively — never double-encode.)
+      return typeof raw === 'string' ? raw : Buffer.from(raw).toString('base64url');
+    },
+  };
+
+  // Seal `payload` to the peer and enqueue it in the peer's relay inbox (unauthenticated —
+  // sealed-sender). recipient handle = the peer did's host label (their provisioned handle).
+  async function enqueueSealed(inbox, peerDid, keyAgreementPubB64, payload) {
+    const recipient = (didWebHost(peerDid) || '').split('.')[0];
+    if (!recipient) throw new Error('relay: cannot derive recipient handle from peer did');
+    const seq = (_relaySeq.get(peerDid) || 0) + 1; _relaySeq.set(peerDid, seq);
+    const env = sealEnvelope(payload, {
+      recipientKeyAgreementPubB64: keyAgreementPubB64, recipientDid: peerDid,
+      senderDid: selfDid, sign: (b) => sign(b), nonce: randomUUID(), ts: Date.now(), senderSeq: seq,
+    });
+    // safeFetch re-validates + pins the inbox host (resolveRelayInbox already bound it to
+    // a public host; this is the second SSRF layer at POST time). The body carries the
+    // recipient handle (routing) + the SEALED-SENDER envelope (no sender_did on the wire —
+    // the relay can't see who sent it). Residual: recipient-DID blinding (the relay still
+    // sees the recipient handle it routes to) is deferred.
+    const res = await safeFetch(`${inbox.replace(/\/$/, '')}/v1/queue/enqueue`, {
+      lookup, fetch: fetchImpl, method: 'POST', redirect: 'manual',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipient, envelope: JSON.stringify(env) }),
+      signal: AbortSignal.timeout(RELAY_ENQUEUE_TIMEOUT_MS),
+    });
+    // Fail LOUD on a relay reject (unknown recipient / quota / rate-limit) — fetch does
+    // not throw on 4xx/5xx, so without this a dropped enqueue would read as 'delivered'.
+    if (!res.ok) throw new Error(`relay enqueue rejected (${res.status})`);
   }
 
-  // Sign (when sign+did are wired) and POST a federation envelope to
-  // <endpoint>/<subpath>. Signs EXACTLY the canonical bytes it sends.
-  async function signedFederationPost(endpoint, subpath, body) {
-    const url = `${endpoint.replace(/\/$/, '')}/${subpath}`;
-    const headers = { 'Content-Type': 'application/json' };
-    let bodyStr;
-    if (sign && did) {
-      bodyStr = canonicalize(body);
-      headers['X-Myc-Did'] = did();
-      headers['X-Myc-Sig'] = sign(bodyStr);
-    } else {
-      bodyStr = JSON.stringify(body);
+  // Deliver `payload` ($type record) to a peer. Returns 'relay' | 'direct'. Chooses the relay
+  // path iff the peer advertises an inbox + seal key (capability chooser, fail-closed to
+  // direct). `remoteDid` may be null → derived as did:web:<remoteDomain>. When `connId` is
+  // given, the peer's inbox + seal key are CACHED on that connection row after the first
+  // resolve and reused thereafter — so a send to an established peer needs NO did.json fetch
+  // and works while the peer is fully OFFLINE (the relay holds the sealed envelope).
+  async function federationDeliver({ remoteDomain, remoteHandle, remoteDid, connId }, subpath, payload) {
+    const peerDid = remoteDid || `did:web:${remoteDomain}`;
+    if (sign && selfDid) {
+      // Read the cached inbox + seal key (if any) and whether it's within the TTL.
+      let cachedInbox = null, cachedKey = null, fresh = false;
+      if (connId) {
+        const c = (await d1Query(`SELECT remote_relay_inbox, remote_key_agreement, remote_keys_cached_at FROM connections WHERE id = ?`, [connId])).results?.[0];
+        if (c?.remote_relay_inbox && c?.remote_key_agreement) {
+          cachedInbox = c.remote_relay_inbox; cachedKey = c.remote_key_agreement;
+          const at = c.remote_keys_cached_at ? Date.parse(String(c.remote_keys_cached_at).replace(' ', 'T') + 'Z') : NaN;
+          fresh = Number.isFinite(at) && (Date.now() - at < PEER_KEY_TTL_MS);
+        }
+      }
+      let inbox = null, key = null;
+      if (fresh) {
+        inbox = cachedInbox; key = cachedKey; // fresh cache → no did.json fetch
+      } else {
+        // No cache, or stale → re-resolve (picks up a rotated key / moved relay). If the peer is
+        // unreachable, fall back to the STALE cache so delivery stays offline-tolerant.
+        let plan = { kind: 'direct' };
+        try { plan = await planDelivery(peerDid, relayResolvers); } catch { /* peer unreachable */ }
+        if (plan.kind === 'relay') {
+          inbox = plan.inbox; key = plan.keyAgreementPubB64;
+          if (connId) { try { await d1Query(`UPDATE connections SET remote_relay_inbox = ?, remote_key_agreement = ?, remote_keys_cached_at = datetime('now') WHERE id = ?`, [inbox, key, connId]); } catch { /* best-effort */ } }
+        } else if (cachedInbox && cachedKey) {
+          inbox = cachedInbox; key = cachedKey; // re-resolve failed, peer offline → use stale cache
+        }
+      }
+      if (inbox && key) {
+        try { await enqueueSealed(inbox, peerDid, key, payload); return 'relay'; }
+        catch (e) {
+          // A relay reject means the cached inbox is dead (moved relay / gone) — CLEAR the cache
+          // so the next send re-resolves, and surface the failure (the caller keeps the row + retries).
+          if (connId) { try { await d1Query(`UPDATE connections SET remote_relay_inbox = NULL, remote_key_agreement = NULL, remote_keys_cached_at = NULL WHERE id = ?`, [connId]); } catch { /* */ } }
+          throw e;
+        }
+      }
     }
-    // safeFetch re-resolves + validates + pins the endpoint host: the subdomain
-    // bind above stops a confused-deputy host swap, this stops rebinding that host
-    // to a private IP (the SIGNED POST must never reach an internal target).
-    await safeFetch(url, { lookup, fetch: fetchImpl, method: 'POST', headers, body: bodyStr, redirect: 'manual', signal: AbortSignal.timeout(FEDERATION_POST_TIMEOUT_MS) });
+    const endpoint = await transport.resolveEndpoint(remoteDomain, remoteHandle);
+    await transport.send(endpoint, subpath, payload);
+    return 'direct';
   }
 
   async function requestRemote(fromUserId, remoteHandle, remoteDomain) {
@@ -222,12 +287,10 @@ export function createConnectionsNamespace(deps) {
       if (ex.status === 'rejected') await d1Query(`DELETE FROM connections WHERE id = ?`, [ex.id]); // allow re-request
     }
 
-    let federationEndpoint;
-    try {
-      federationEndpoint = await resolveFederationEndpoint(remoteDomain, remoteHandle);
-    } catch (e) {
-      throw new Error(`Instance not reachable: ${e.message}`);
-    }
+    // Endpoint resolution is now LAZY inside federationDeliver: a relay-capable peer skips
+    // WebFinger entirely (so its box being offline no longer blocks the request — the
+    // sealed envelope waits in the queue), and the direct path resolves + fails
+    // best-effort below, keeping the pending row for re-delivery (store-and-forward).
 
     // Assemble the request payload from the local profile.
     const fromProfile = await d1Query(
@@ -276,9 +339,9 @@ export function createConnectionsNamespace(deps) {
     // re-requesting (or a future reconcile sweep) re-delivers. We surface the
     // failure to the caller's logs but keep the row so the request isn't lost.
     try {
-      await signedFederationPost(federationEndpoint, 'connect', requestBody);
+      await federationDeliver({ remoteDomain, remoteHandle, connId: id }, 'connect', requestBody);
     } catch (e) {
-      console.warn(`[federation] Remote connect POST failed (re-request to retry): ${e.message}`);
+      console.warn(`[federation] Remote connect delivery failed (re-request to retry): ${e.message}`);
     }
 
     return id;
@@ -423,14 +486,15 @@ export function createConnectionsNamespace(deps) {
       // matching the re-request-permitted semantics). Local-only rows have no remote.
       if (action === 'accept' && row.remote_instance && row.remote_user_handle && sign && did) {
         try {
-          const endpoint = await resolveFederationEndpoint(row.remote_instance, row.remote_user_handle);
           // include our own public bio so the peer can render us in their list
           const me = (await d1Query(`SELECT handle, signature FROM user_profiles WHERE user_id = ?`, [userId])).results?.[0] || {};
           const respProfile = { signature: me.signature ?? null };
           // §7 tripwire on THIS outbound path too (parity with requestRemote) —
           // never federate a vector/embedding field, even via a future regression.
           if (hasVectorKey(respProfile)) throw new Error('refusing to federate a vector/embedding field (CLAUDE.md §7)');
-          await signedFederationPost(endpoint, 'connect-response', {
+          // Route via the chooser: relay store-and-forward when the peer advertises an inbox
+          // (so the ACCEPT lands even if the requester is now offline), else direct.
+          await federationDeliver({ remoteDomain: row.remote_instance, remoteHandle: row.remote_user_handle, remoteDid: row.remote_did, connId: connectionId }, 'connect-response', {
             $type: 'social.mycelium.connect-response.v1',
             from_handle: selfHandle() || me.handle || userId,
             from_instance: (selfInstance && selfInstance()) || '',
@@ -734,10 +798,14 @@ export function createConnectionsNamespace(deps) {
       assertMember(row, userId);
 
       const id = randomUUID();
+      // Choose the payload nonce ONCE and persist it: a later outbox retry REUSES it so the
+      // receiver's remote_nonce dedup drops a re-delivery (idempotent). A fresh nonce per retry
+      // would double-deliver if an earlier attempt actually landed (lost relay/POST response).
+      const wireNonce = randomUUID();
       await d1Query(
-        `INSERT INTO peer_messages (id, user_id, connection_id, direction, content, status)
-         VALUES (?, ?, ?, 'out', ?, 'sending')`,
-        [id, userId, connectionId, content],
+        `INSERT INTO peer_messages (id, user_id, connection_id, direction, content, send_nonce, status)
+         VALUES (?, ?, ?, 'out', ?, ?, 'sending')`,
+        [id, userId, connectionId, content, wireNonce],
       );
 
       // Local-only peer (no remote instance) → nothing to deliver over the wire;
@@ -749,24 +817,80 @@ export function createConnectionsNamespace(deps) {
 
       let status = 'failed';
       try {
-        const endpoint = await resolveFederationEndpoint(row.remote_instance, row.remote_user_handle);
         const me = (await d1Query(`SELECT handle FROM user_profiles WHERE user_id = ?`, [userId])).results?.[0] || {};
-        await signedFederationPost(endpoint, 'message', {
+        await federationDeliver({ remoteDomain: row.remote_instance, remoteHandle: row.remote_user_handle, remoteDid: row.remote_did, connId: connectionId }, 'message', {
           $type: 'social.mycelium.message.v1',
           from_handle: selfHandle() || me.handle || userId,
           from_instance: (selfInstance && selfInstance()) || '',
           from_did: did(),
           to_handle: row.remote_user_handle,
           content,
-          nonce: randomUUID(),
+          nonce: wireNonce, // persisted above → an outbox retry reuses it (idempotent receiver dedup)
           ts: Date.now(),
         });
         status = 'delivered';
       } catch (e) {
-        console.warn(`[federation] message POST failed (will show as failed): ${e.message}`);
+        console.warn(`[federation] message delivery failed (will show as failed): ${e.message}`);
       }
       await d1Query(`UPDATE peer_messages SET status = ? WHERE id = ?`, [status, id]);
       return { id, status, created_at: new Date().toISOString() };
+    },
+
+    /**
+     * Delivery-robustness sweep (federation transport P5): re-attempt outbound DMs whose live
+     * delivery FAILED (the relay/peer was unreachable at send time, so sendMessage left them
+     * 'failed'). A store-and-forward send only needs to reach the relay ONCE — the sealed
+     * envelope then waits in the queue for the offline peer — so on the first successful
+     * re-enqueue we flip the row to 'delivered' and it is never swept again (no relay-queue
+     * bloat: success is self-terminating). Called best-effort from the pull loop on cycles when
+     * the relay was just reachable. Bounded batch. A per-message failure is left 'failed' for
+     * the next sweep and does NOT block the rest of the batch.
+     *
+     * Idempotent retry: the payload nonce is the one PERSISTED at send time (send_nonce), reused
+     * here — the receiver dedups a DM on remote_nonce for both transports, so a retry whose
+     * earlier attempt actually landed (lost relay/POST response after commit) is DROPPED, not
+     * double-delivered. Anti-starvation + cap: ORDER BY send_attempts ASC keeps a dead peer's
+     * backlog from starving a live peer's newer messages, and send_attempts >= OUTBOX_MAX_ATTEMPTS
+     * drops out of the sweep so a permanently-unreachable peer is eventually left alone.
+     *
+     * Deferred (not here): retry of pending CONNECTS — 'pending' is ambiguous (delivery-failed
+     * vs awaiting-accept), so a blind connect re-send would re-enqueue a duplicate every sweep;
+     * that needs a delivery-status column to gate on. federation_seen TTL prune is also deferred
+     * (it needs a co-designed ts-freshness window or it reopens replay for pruned nonces).
+     */
+    async federationOutbox(userId, { limit = 20 } = {}) {
+      if (!sign || !did) return { retried: 0, delivered: 0 };
+      const failed = (await d1Query(
+        `SELECT id, connection_id, content, send_nonce FROM peer_messages
+         WHERE user_id = ? AND direction = 'out' AND status = 'failed' AND send_attempts < ?
+         ORDER BY send_attempts ASC, created_at ASC LIMIT ?`,
+        [userId, OUTBOX_MAX_ATTEMPTS, limit],
+      )).results || [];
+      // The sender handle is the same for every message this sweep → resolve it once, not per row.
+      const me = failed.length ? ((await d1Query(`SELECT handle FROM user_profiles WHERE user_id = ?`, [userId])).results?.[0] || {}) : {};
+      let delivered = 0;
+      for (const m of failed) {
+        try {
+          const row = await loadConnection(m.connection_id, { requireStatus: 'accepted' });
+          if (!row || !row.remote_instance || !row.remote_user_handle) continue; // not deliverable (local-only / gone)
+          // Count the attempt BEFORE the network call: a message that keeps throwing still
+          // climbs toward the cap (and sinks in priority) instead of being retried forever.
+          await d1Query(`UPDATE peer_messages SET send_attempts = send_attempts + 1 WHERE id = ?`, [m.id]);
+          await federationDeliver({ remoteDomain: row.remote_instance, remoteHandle: row.remote_user_handle, remoteDid: row.remote_did, connId: m.connection_id }, 'message', {
+            $type: 'social.mycelium.message.v1',
+            from_handle: selfHandle() || me.handle || userId,
+            from_instance: (selfInstance && selfInstance()) || '',
+            from_did: did(),
+            to_handle: row.remote_user_handle,
+            content: m.content,
+            nonce: m.send_nonce || randomUUID(), // reuse the persisted nonce (legacy rows: fresh)
+            ts: Date.now(),
+          });
+          await d1Query(`UPDATE peer_messages SET status = 'delivered' WHERE id = ?`, [m.id]);
+          delivered++;
+        } catch { /* still unreachable → leave 'failed' for the next sweep; don't block the batch */ }
+      }
+      return { retried: failed.length, delivered };
     },
 
     /**
@@ -914,18 +1038,13 @@ export function createConnectionsNamespace(deps) {
           // steady-state polls.
           let ep = _presenceEndpoint.get(c.id);
           if (!ep || nowMs - ep.at > PRESENCE_ENDPOINT_TTL_MS) {
-            ep = { endpoint: await resolveFederationEndpoint(c.remote_instance, c.remote_user_handle), at: nowMs };
+            ep = { endpoint: await transport.resolveEndpoint(c.remote_instance, c.remote_user_handle), at: nowMs };
             _presenceEndpoint.set(c.id, ep);
           }
           const url = `${ep.endpoint.replace(/\/$/, '')}/presence`;
           const nonce = randomUUID();
           const body = { $type: 'social.mycelium.presence-query.v1', from_did: did(), nonce, ts: Date.now() };
-          const bodyStr = canonicalize(body);
-          const res = await safeFetch(url, {
-            lookup, fetch: fetchImpl, method: 'POST', redirect: 'manual',
-            headers: { 'Content-Type': 'application/json', 'X-Myc-Did': did(), 'X-Myc-Sig': sign(bodyStr) },
-            body: bodyStr, signal: AbortSignal.timeout(PRESENCE_QUERY_TIMEOUT_MS),
-          });
+          const res = await transport.request(url, body, { timeoutMs: PRESENCE_QUERY_TIMEOUT_MS });
           if (!res.ok) throw new Error(`presence ${res.status}`);
           const raw = await res.text();
           if (raw.length > 4096) throw new Error('presence reply too large');
@@ -975,8 +1094,8 @@ export function createConnectionsNamespace(deps) {
       assertMember(row, userId);
       if (!row.remote_instance || !row.remote_user_handle || !sign || !did) return; // local/unsigned
       try {
-        const endpoint = await resolveFederationEndpoint(row.remote_instance, row.remote_user_handle);
-        await signedFederationPost(endpoint, 'share', {
+        const endpoint = await transport.resolveEndpoint(row.remote_instance, row.remote_user_handle);
+        await transport.send(endpoint, 'share', {
           $type: 'social.mycelium.share.v1',
           from_did: did(),
           from_handle: selfHandle() || userId,
@@ -1079,19 +1198,14 @@ export function createConnectionsNamespace(deps) {
       if (!row) throw new Error('Connection not found');
       assertMember(row, userId);
       if (!row.remote_instance || !row.remote_user_handle || !sign || !did) throw new Error('peer is not reachable');
-      const endpoint = await resolveFederationEndpoint(row.remote_instance, row.remote_user_handle);
+      const endpoint = await transport.resolveEndpoint(row.remote_instance, row.remote_user_handle);
       const url = `${endpoint.replace(/\/$/, '')}/shared-content`;
 
       // Fetch one page (signed request → signature-verified response). Returns the parsed
       // body + the OWNER's resolved signing key (reused to verify each entry's authorship).
       const fetchPage = async (since) => {
         const body = { $type: 'social.mycelium.shared-content.v1', from_did: did(), kind, ref, since, nonce: randomUUID(), ts: Date.now() };
-        const bodyStr = canonicalize(body);
-        const res = await safeFetch(url, {
-          lookup, fetch: fetchImpl, method: 'POST', redirect: 'manual',
-          headers: { 'Content-Type': 'application/json', 'X-Myc-Did': did(), 'X-Myc-Sig': sign(bodyStr) },
-          body: bodyStr, signal: AbortSignal.timeout(FEDERATION_POST_TIMEOUT_MS),
-        });
+        const res = await transport.request(url, body);
         if (!res.ok) {
           if (res.status === 403) throw new Error('access to this share was revoked');
           throw new Error(`shared-content fetch failed (${res.status})`);

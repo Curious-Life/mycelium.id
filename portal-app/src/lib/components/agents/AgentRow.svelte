@@ -2,7 +2,7 @@
   AgentRow — per-agent management card.
 
   Collapsed: status dot, name, role, model, activeTasks (a quiet single line).
-  Expanded: display name + personality, Claude subscription assignment,
+  Expanded: display name, Claude subscription assignment,
   bot tokens (Discord/Telegram/OWNER_TELEGRAM_ID per agent-secret-policy),
   read-only details (capabilities, scope, port).
 
@@ -16,6 +16,7 @@
 
 <script lang="ts">
 	import { api } from '$lib/api';
+	import { workspace } from '$lib/workspace/store';
 	import ReflectionCyclesSection from '$lib/components/settings/ReflectionCyclesSection.svelte';
 
 	type AgentInfo = {
@@ -28,7 +29,6 @@
 		status: 'online' | 'offline';
 		model?: string | null;
 		activeTasks?: number;
-		personality?: string;
 		avatarEmoji?: string;
 	};
 
@@ -79,19 +79,19 @@
 
 	let expanded = $state(false);
 
-	// ── Customization (display name + personality) ─────────────────────
-	// Initial values come via a $effect rather than $state initializer so
+	// ── Customization (display name) ───────────────────────────────────
+	// Character (voice + the "being") lives on the Character page now — the old
+	// personality tone-enum was removed with the PERSONALITY_GUIDE relic.
+	// Initial value comes via a $effect rather than $state initializer so
 	// re-renders from parent prop changes (after a save round-trip)
 	// re-sync local edits.
 	let displayName = $state('');
-	let personality = $state('');
 	let savingCustomization = $state(false);
 	let savedCustomization = $state(false);
 	let customizationError = $state<string | null>(null);
 
 	$effect(() => {
 		displayName = agent.name || '';
-		personality = agent.personality || '';
 	});
 
 	async function saveCustomization() {
@@ -103,7 +103,6 @@
 				method: 'PUT',
 				body: JSON.stringify({
 					displayName: displayName.trim() || null,
-					personality: personality.trim() || null,
 					avatarEmoji: agent.avatarEmoji || null,
 				}),
 			});
@@ -294,15 +293,14 @@
 					/>
 				</label>
 				{#if agent.id === 'personal-agent'}
-					<label class="field">
-						<span>Personality</span>
-						<input
-							type="text"
-							bind:value={personality}
-							placeholder="How should they communicate? (e.g., direct, warm, curious)"
-							maxlength="500"
-						/>
-					</label>
+					<!-- Voice + the full "being" (personality) live on the character page
+					     now (design §5/§6) — a richer surface than this one-liner. -->
+					<div class="field">
+						<span>Character</span>
+						<button type="button" class="char-link" onclick={() => workspace.openFromRoute('character', { id: agent.id })}>
+							Customize voice &amp; personality →
+						</button>
+					</div>
 				{/if}
 				<div class="actions">
 					<button onclick={saveCustomization} disabled={savingCustomization}>

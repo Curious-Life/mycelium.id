@@ -39,6 +39,20 @@ function expectedBearer() {
   return _expectedBearer;
 }
 
+/** Extract the raw token from an `Authorization: Bearer <token>` header, or null. */
+function bearerToken(authz) {
+  const m = /^Bearer\s+(.+)$/i.exec(String(authz || '').trim());
+  return m ? m[1].trim() : null;
+}
+
+/** Fail-closed device-token probe: null token / no matcher / any THROW → null.
+ *  Defense-in-depth so a misbehaving injected matcher can never fail OPEN at the
+ *  gate itself (independent of the middleware's outer try/catch). */
+function tryDeviceMatch(matchFn, tok) {
+  if (typeof matchFn !== 'function' || !tok) return null;
+  try { return matchFn(tok) || null; } catch { return null; }
+}
+
 export function parseCookies(req) {
   const out = {};
   const raw = req?.headers?.cookie;
@@ -91,7 +105,7 @@ export function defaultValidateSession(cookieHeader) {
 /**
  * Resolve who a request is, fail-closed. Returns { id, via } | null.
  */
-export async function resolveRequester(req, { userId, validateSession = defaultValidateSession }) {
+export async function resolveRequester(req, { userId, validateSession = defaultValidateSession, deviceTokenMatch = null }) {
   if (isTrustedLoopback(req)) return { id: userId, via: 'loopback' };
   const authz = req?.headers?.authorization;
   if (authz && matchStaticBearer(authz, process.env, expectedBearer())) return { id: userId, via: 'bearer' };
@@ -103,6 +117,18 @@ export async function resolveRequester(req, { userId, validateSession = defaultV
   const bearerCookie = parseCookies(req).mycelium_bearer;
   if (bearerCookie && matchStaticBearer(`Bearer ${bearerCookie}`, process.env, expectedBearer())) {
     return { id: userId, via: 'bearer' };
+  }
+  // Per-device tokens (QR pairing, Unit A) — a paired phone presents its own
+  // revocable token in the Authorization HEADER (the native REST client always
+  // sends it as a header; MyceliumAPI.authedRequest). HEADER-ONLY by design: we do
+  // NOT accept a device token from the ambient `mycelium_bearer` cookie, because a
+  // cookie credential rides cross-site requests and via:'device' is CSRF-exempt —
+  // a header token cannot be sent ambiently, so it is CSRF-safe (v6 audit). Checked
+  // AFTER the shared bearer (purely additive); matcher is sync + fail-closed, and
+  // absent when no db is wired (strictly more restrictive, never a bypass). This
+  // authorizes DATA access only; the pairing CEREMONY is loopback-only (portal-pair.js).
+  if (deviceTokenMatch && tryDeviceMatch(deviceTokenMatch, bearerToken(authz))) {
+    return { id: userId, via: 'device' };
   }
   const cookieHeader = req?.headers?.cookie;
   if (cookieHeader) {
@@ -167,7 +193,7 @@ export function csrfCookieMiddleware(req, res, next) {
  * @param {{ userId: string }} opts
  * @returns {(req) => ({ id: string } | null)}
  */
-export function makePortalOwnerGate({ userId }) {
+export function makePortalOwnerGate({ userId, deviceTokenMatch = null }) {
   return (req) => {
     if (isTrustedLoopback(req)) return { id: userId };
     const authz = req?.headers?.authorization;
@@ -176,11 +202,18 @@ export function makePortalOwnerGate({ userId }) {
     // same-origin fetches reach the sensitive routers too (chat/measurement/…).
     const bearerCookie = parseCookies(req).mycelium_bearer;
     if (bearerCookie && matchStaticBearer(`Bearer ${bearerCookie}`, process.env, expectedBearer())) return { id: userId };
+    // Per-device tokens (QR pairing) — a paired phone is an owner device and must
+    // reach the sensitive DATA routers, exactly as the shared bearer does. HEADER-ONLY
+    // (see resolveRequester: no ambient-cookie device tokens → CSRF-safe). Sync +
+    // fail-closed. This gate protects the DATA routers; the pairing CEREMONY
+    // (start/approve/deny/revoke) is loopback-ONLY in portal-pair.js, so a device
+    // token can USE the vault but can never APPROVE a new device.
+    if (deviceTokenMatch && tryDeviceMatch(deviceTokenMatch, bearerToken(authz))) return { id: userId };
     return null;
   };
 }
 
-export function createVaultAuthMiddleware({ userId, validateSession = defaultValidateSession }) {
+export function createVaultAuthMiddleware({ userId, validateSession = defaultValidateSession, deviceTokenMatch = null }) {
   // NB: mounted at `/api` in the vault sub-app (see server-rest.js), so Express's
   // own route matching — the SAME matcher the data routers use — decides what is
   // gated. This avoids any divergence between a hand-rolled path check and the
@@ -188,7 +221,7 @@ export function createVaultAuthMiddleware({ userId, validateSession = defaultVal
   // `/api`, so it never reaches this gate.
   return async (req, res, next) => {
     try {
-      const who = await resolveRequester(req, { userId, validateSession });
+      const who = await resolveRequester(req, { userId, validateSession, deviceTokenMatch });
       if (!who) return res.status(401).json({ error: 'unauthorized' });
       if (who.via === 'cookie' && !SAFE_METHODS.has(req.method)) {
         const csrf = parseCookies(req)[CSRF_COOKIE];

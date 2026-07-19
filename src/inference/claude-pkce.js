@@ -29,12 +29,25 @@
 
 import crypto from 'node:crypto';
 
-/** Anthropic's Claude-Code OAuth client. Same values as canonical + OpenClaw. */
+/** Anthropic's Claude-Code OAuth client. Same values as canonical + OpenClaw.
+ *  ⚠️ ENDPOINT MIGRATION (2026-07-18): Anthropic moved the OAuth token + callback hosts
+ *  off `console.anthropic.com` onto `platform.claude.com`. The old
+ *  `console.anthropic.com/v1/oauth/token` now returns 404 for OAuth — which broke BOTH the
+ *  HTTP refresh (`refreshAccessToken`) and the web code-exchange (`exchangeCode`), since both
+ *  read `tokenUrl` here. User symptom: "Could not refresh the Claude session (404)".
+ *  Verified: a POST to `platform.claude.com/v1/oauth/token` returns a proper OAuth
+ *  `{"error":"invalid_grant"}`, while `console.anthropic.com` returns 404/generic-API-error.
+ *  `authorizeUrl` (claude.ai) and `clientId` are UNCHANGED (still correct).
+ *  `redirectUri` moved with the token host to `platform.claude.com/oauth/code/callback`
+ *  (mirrors the migration; the OLD callback still 301-redirects). The refresh grant sends NO
+ *  `redirect_uri`, so this line only affects the web code-exchange path — smoke-test a fresh
+ *  web connect after landing. Evidence: docs/CLAUDE-SUBSCRIPTION-OAUTH-ENDPOINT-2026-07-18.md.
+ */
 export const CLAUDE_OAUTH = Object.freeze({
   clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
   authorizeUrl: 'https://claude.ai/oauth/authorize',
-  tokenUrl: 'https://console.anthropic.com/v1/oauth/token',
-  redirectUri: 'https://console.anthropic.com/oauth/code/callback',
+  tokenUrl: 'https://platform.claude.com/v1/oauth/token',
+  redirectUri: 'https://platform.claude.com/oauth/code/callback',
   scopes: 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload',
 });
 

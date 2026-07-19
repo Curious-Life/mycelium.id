@@ -19,6 +19,9 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, tmpdir } from 'node:os';
 import { venvPythonPath, systemPython } from '../system/platform-env.js';
+import { looksLikePortConflict, reapOwnOrphanOnPort, createRestartGovernor } from '../system/service-guard.js';
+
+const SERVICE_SCRIPT = 'pipeline/transcribe-service.py'; // the exact argv token we spawn — the orphan-identity anchor
 
 // requirements live next to pipeline/ — resolve from the repo root (this file is src/transcribe/).
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -35,7 +38,7 @@ const DEFAULT_PORT = Number(process.env.MYCELIUM_TRANSCRIBE_PORT) || 8093;
 const PROBE_TIMEOUT_MS = 2500;
 const TICK_MS = 3000;
 const DEPS_RETRY_MS = 15000;
-const MAX_BACKOFF_MS = 30000;
+// crash backoff now lives in service-guard's restart governor (15s → 2min, bounded)
 const DOWN_AFTER = 5;
 
 let _health = { status: 'unknown', message: 'Transcription not set up.', detail: null, model: null, progress: null };
@@ -79,6 +82,8 @@ function resolvePython({ home, pythonBin }) {
  * @param {string} [opts.model]  chosen whisper model tag (env for the child)
  * @param {(m:string)=>void} [opts.log]
  * @param {typeof fetch} [opts.fetch]  injectable (tests)
+ * @param {typeof spawn} [opts.spawn]  injectable (tests)
+ * @param {typeof reapOwnOrphanOnPort} [opts.reapOrphan] injectable (tests)
  */
 export function startTranscribeSupervisor({
   home = process.cwd(),
@@ -87,6 +92,8 @@ export function startTranscribeSupervisor({
   model = null,
   log = (m) => process.stderr.write(`${m}\n`),
   fetch: fetchImpl = globalThis.fetch,
+  spawn: spawnImpl = spawn,
+  reapOrphan = reapOwnOrphanOnPort,
 } = {}) {
   if (_instance) return _instance;
   _port = port;
@@ -106,6 +113,10 @@ export function startTranscribeSupervisor({
     _health = { status, message, detail, model: chosenModel, progress: null, ...extra };
   };
   const lastErrLine = () => errBuf.split('\n').map((l) => l.trim()).filter(Boolean).pop() || '';
+
+  // Bounded restart (service-guard): outcome-based 15s→2min backoff; halts after
+  // N straight failures (or a foreign port holder) until nudge() resumes it.
+  const governor = createRestartGovernor();
 
   const childEnv = () => ({
     PATH: process.env.PATH,
@@ -138,6 +149,7 @@ export function startTranscribeSupervisor({
         clearTimeout(timer);
       }
       failures = 0;
+      governor.recordSuccess(); // an answering service is the ONLY reset (outcome-based)
       const extra = h?.progress ? { progress: h.progress } : {};
       if (h?.model) chosenModel = h.model;
       if (h?.status === 'deps_missing') {
@@ -163,14 +175,38 @@ export function startTranscribeSupervisor({
     return new Promise((resolve) => {
       let p;
       try {
-        p = spawn(python, ['-c', 'import faster_whisper, scipy, numpy'], { stdio: 'ignore' });
+        p = spawnImpl(python, ['-c', 'import faster_whisper, scipy, numpy'], { stdio: 'ignore' });
       } catch { return resolve(false); }
       p.on('error', () => resolve(false));
       p.on('close', (code) => resolve(code === 0));
     });
   }
 
-  function backoff() { nextStartAt = Date.now() + Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(failures, 5)); }
+  // Governor-driven backoff: 15s → 2min doubling on CONSECUTIVE failures; after
+  // N straight it halts (no more attempts) until nudge()/setModel resumes it —
+  // the ~170×/day :8093 crash-loop (orphan holding the port) can no longer happen.
+  function backoff() { nextStartAt = Date.now() + governor.recordFailure().delayMs; }
+
+  // A spawned child died at bind because :8093 is taken. Reap the holder IFF it
+  // is provably OUR OWN orphan (service-guard proof); a foreign holder is NEVER
+  // killed — the fault is surfaced content-free and attempts halt.
+  async function handlePortConflict() {
+    let r = null;
+    try { r = await reapOrphan({ port, scriptPath: SERVICE_SCRIPT, ownChildPid: child?.pid ?? null, log }); }
+    catch { r = { reaped: false, reason: 'no-holder' }; }
+    if (r?.reaped) {
+      nextStartAt = 0; // recovered the port — retry the bind immediately (not a failure outcome)
+      setHealth('starting', 'Recovered the port from a stale transcription service — restarting…');
+      return;
+    }
+    if (r?.reason === 'foreign' || r?.reason === 'stuck' || r?.reason === 'kill-failed') {
+      governor.halt(`port :${port} held by another process`);
+      setHealth('down', 'The transcription engine cannot start.', `port :${port} held by another process${r?.holder?.pid ? ` (pid ${r.holder.pid})` : ''}`);
+      log(`[transcribe-supervisor] port :${port} held by ${r?.reason === 'foreign' ? 'a foreign process' : 'an unkillable process'} — restarts halted until nudge`);
+      return;
+    }
+    failures++; backoff(); // holder vanished on its own — normal crash accounting
+  }
 
   // Auto-install the python deps (faster-whisper + scipy) — UI-driven, no manual
   // pip command. Tried once per supervisor lifetime; a failure surfaces actionably.
@@ -178,7 +214,7 @@ export function startTranscribeSupervisor({
   function pipInstallDeps() {
     return new Promise((resolve) => {
       let p;
-      try { p = spawn(python, ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', REQ_FILE], { stdio: 'ignore' }); }
+      try { p = spawnImpl(python, ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', REQ_FILE], { stdio: 'ignore' }); }
       catch { return resolve(false); }
       p.on('error', () => resolve(false));
       p.on('close', (code) => resolve(code === 0));
@@ -187,6 +223,7 @@ export function startTranscribeSupervisor({
 
   async function tryStart() {
     if (stopped || child || Date.now() < nextStartAt) return;
+    if (governor.isHalted()) return; // bounded: no more attempts until nudge()/setModel resumes
 
     if (!(await checkDeps())) {
       if (!_depsAttempted) {
@@ -209,7 +246,7 @@ export function startTranscribeSupervisor({
     setHealth('starting', failures ? 'Restarting the transcription engine…' : 'Starting the transcription engine…');
     try {
       mkdirSync(WHISPER_HF_HOME, { recursive: true }); // ensure the user-data HF cache exists
-      child = spawn(python, ['pipeline/transcribe-service.py', '--serve', '--port', String(port)], {
+      child = spawnImpl(python, [SERVICE_SCRIPT, '--serve', '--port', String(port)], {
         cwd: home, env: childEnv(), stdio: ['ignore', 'ignore', 'pipe'],
       });
     } catch (e) {
@@ -223,8 +260,14 @@ export function startTranscribeSupervisor({
       const wasOurs = child;
       child = null;
       if (stopped || !wasOurs) return;
-      failures++;
       const tail = lastErrLine();
+      // Died at bind (port taken) → the orphan/foreign path, not crash accounting.
+      if (looksLikePortConflict(errBuf)) {
+        log(`[transcribe-supervisor] service exited (code ${code}) — port :${port} conflict${tail ? `: ${tail}` : ''}`);
+        void handlePortConflict();
+        return;
+      }
+      failures++;
       if (failures >= DOWN_AFTER) {
         setHealth('down', 'The transcription engine keeps stopping.', tail || `exited code ${code}`);
       } else {
@@ -249,8 +292,10 @@ export function startTranscribeSupervisor({
   _instance = {
     getHealth: getTranscriberHealth,
     url: transcribeServiceUrl,
-    setModel: (m) => { chosenModel = m || chosenModel; },
-    nudge: () => { nextStartAt = 0; void tick(); },
+    // setModel doubles as the settings-change resume: picking a model again after a
+    // halt (foreign port holder / bounded stop) re-arms the governor.
+    setModel: (m) => { chosenModel = m || chosenModel; governor.resume(); nextStartAt = 0; },
+    nudge: () => { governor.resume(); nextStartAt = 0; void tick(); },
     stop: () => {
       stopped = true;
       if (tickTimer) clearInterval(tickTimer);

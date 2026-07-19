@@ -122,13 +122,20 @@ export function fromMultibase(mb, expected = ED25519_MULTICODEC) {
  *   keyAgreement so peers can seal the space CEK to this member (E2E spaces).
  * @returns {object|null}  null when host is missing/invalid (fail closed)
  */
-export function buildDidDocument(host, publicKeyB64, matrixId, keyAgreementPublicKeyB64) {
+export function buildDidDocument(host, publicKeyB64, matrixId, keyAgreementPublicKeyB64, relayInbox) {
   if (!host || !HOST_RE.test(host) || !publicKeyB64) return null;
   const did = `did:web:${host}`;
   const vm = `${did}#key-1`;
   const service = [{ id: `${did}#federation`, type: 'MyceliumFederation', serviceEndpoint: `https://${host}/federation` }];
   if (matrixId && /^@[^:\s]+:[^\s]+$/.test(matrixId)) {
     service.push({ id: `${did}#matrix`, type: 'MatrixHomeserver', serviceEndpoint: `matrix:u/${matrixId.slice(1)}` });
+  }
+  // Store-and-forward relay inbox (federation transport P3b): advertises WHERE a peer
+  // enqueues a sealed envelope for us. The recipient handle is the did's host label (the
+  // peer derives it), so the service carries only the relay base URL. https-only; a peer
+  // that sees this routes via the RelayQueue transport instead of a direct box→box POST.
+  if (typeof relayInbox === 'string' && /^https:\/\/[^\s]+$/.test(relayInbox)) {
+    service.push({ id: `${did}#relay-inbox`, type: 'MyceliumRelayInbox', serviceEndpoint: relayInbox });
   }
   // verificationMethod[0] is ALWAYS the Ed25519 signing key (#key-1), so an
   // un-upgraded peer running the old index-[0] resolver still selects the SIGNING
@@ -173,6 +180,35 @@ export async function resolveMatrixService(did, { fetch = globalThis.fetch, time
   if (typeof ep !== 'string') return null;
   const mx = ep.replace(/^matrix:u\//, '@'); // "matrix:u/bob:hs" → "@bob:hs"
   return /^@[^:\s]+:[^\s]+$/.test(mx) ? mx : null;
+}
+
+/**
+ * Resolve a peer's store-and-forward relay inbox from their did:web document's
+ * `#relay-inbox` service (federation transport P3b). SSRF-guarded + key-confusion
+ * guarded like resolveDidKey/resolveMatrixService. Returns the https relay base URL a
+ * sender enqueues to, or null when the peer advertises none (→ fall back to direct HTTP).
+ * @param {string} did  a did:web identifier
+ * @param {object} [opts] @returns {Promise<string|null>}
+ */
+export async function resolveRelayInbox(did, { fetch = globalThis.fetch, timeoutMs = RESOLVE_TIMEOUT_MS, lookup } = {}) {
+  const m = DID_WEB_RE.exec(String(did || ''));
+  if (!m) return null;
+  const host = m[1];
+  if (!isPublicHost(host)) return null;
+  const res = await safeFetch(`https://${host}/.well-known/did.json`, { lookup, fetch, redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
+  if (!res.ok) return null;
+  const doc = await res.json();
+  if (doc.id !== did) return null; // no key confusion
+  const svc = (doc.service || []).find((s) => s.id === `${did}#relay-inbox` || s.type === 'MyceliumRelayInbox');
+  const ep = svc?.serviceEndpoint;
+  if (typeof ep !== 'string' || !/^https:\/\/[^\s]+$/.test(ep)) return null; // https-only
+  // Defense in depth (CLAUDE.md §2): this endpoint becomes an OUTBOUND enqueue target, so
+  // its HOST must be public too — a malicious peer must not point our sender at an internal
+  // address (169.254.169.254, loopback, RFC1918, *.local). safeFetch re-validates at POST
+  // time; this is the second, earlier layer. IP literals + private names → unadvertised.
+  let epHost;
+  try { epHost = new URL(ep).hostname; } catch { return null; }
+  return isPublicHost(epHost) ? ep : null;
 }
 
 /**

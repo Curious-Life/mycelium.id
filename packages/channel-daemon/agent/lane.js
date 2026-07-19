@@ -57,6 +57,14 @@ export function createLane({ runtime, presence, turnTimeoutMs = 600_000, logPref
       const r = await runtime.runTurn({ turnCtx, userMessage: msg.content, signal: ac.signal });
       const verdict = r?.delivered ? 'delivered' : (r?.usedReplyTool ? 'reply-undelivered' : 'no-reply');
       lastTurn = { at: new Date().toISOString(), chatId: String(turnCtx.channelId), verdict, durationMs: Date.now() - t0,
+        // senderId: the platform SENDER id from the turnCtx (metadata, like chatId) —
+        // the auth-outage notifier proves Discord owner-ness with it (a Discord DM's
+        // chatId is a channel id, not the owner's user id). Never message content.
+        ...(turnCtx.userId != null ? { senderId: String(turnCtx.userId) } : {}),
+        // guildId: present (non-null) only for a Discord SERVER channel; a DM is null.
+        // The auth-outage notifier uses it for recipient-safety — the Discord owner
+        // notice is restricted to DMs so it can never land in a public guild channel.
+        ...(turnCtx.guildId != null ? { guildId: String(turnCtx.guildId) } : {}),
         ...(r?.reason ? { reason: r.reason } : {}), ...(r?.model ? { model: r.model } : {}),
         ...(r?.harvested ? { harvested: true } : {}), ...(r?.degraded ? { degraded: true } : {}) };
       // A delivered-but-degraded turn (fell back off the primary, or landed only via text-harvest)
