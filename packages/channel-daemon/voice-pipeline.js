@@ -9,7 +9,7 @@ import * as tts from './tts/index.js';
 
 /**
  * @param {object} deps
- * @param {(a:{chatId:any,filePath:string,replyToMessageId?:any})=>Promise<any>} deps.sendVoice
+ * @param {(a:{chatId:any,filePath:string,replyToMessageId?:any,messageThreadId?:any})=>Promise<any>} deps.sendVoice
  * @param {string} [deps.agentId]
  * @param {string} [deps.logPrefix]
  */
@@ -20,7 +20,7 @@ export function createVoicePipeline({ sendVoice, agentId, logPrefix = 'channel-d
     isEnabled: () => tts.isEnabled(),
 
     /** Synthesize + upload voice notes for `text`. Never throws. */
-    async deliver({ target, text, replyToMessageId }) {
+    async deliver({ target, text, replyToMessageId, messageThreadId }) {
       if (!tts.isEnabled()) return { enabled: false, voiceSent: 0, voiceTotal: 0 };
       let voiceSent = 0;
       let voiceTotal = 0;
@@ -32,8 +32,9 @@ export function createVoicePipeline({ sendVoice, agentId, logPrefix = 'channel-d
             continue;
           }
           try {
-            // reply-to only on the first voice note (matches the text path)
-            await sendVoice({ target, filePath: chunk.path, replyToMessageId: chunk.index === 0 ? replyToMessageId : undefined });
+            // reply-to only on the first voice note (matches the text path); the
+            // forum topic (message_thread_id) rides every note so voice lands in-topic.
+            await sendVoice({ target, filePath: chunk.path, replyToMessageId: chunk.index === 0 ? replyToMessageId : undefined, messageThreadId });
             voiceSent++;
           } catch (e) {
             console.error(`[${logPrefix}] voice upload failed (chunk ${chunk.index + 1}/${chunk.total}): ${e.message}`);

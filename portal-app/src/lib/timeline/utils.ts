@@ -157,6 +157,24 @@ export interface Speaker {
 }
 
 /**
+ * Legacy agent_id → canonical id. `mya-personal` is the Supabase-era id for what
+ * is now `personal-agent` (~38k historic import/ChatGPT/Claude rows still carry
+ * it at rest, and the schema DEFAULT stamped it before migration 0055). The agent
+ * registry (`/portal/agents`) is keyed by the canonical id, so a raw legacy id
+ * misses the map and would render verbatim in the timeline. Resolve before lookup.
+ * Mirrors the backend single-source-of-truth (src/agent-id-aliases.js); kept as a
+ * tiny local map to avoid coupling the portal bundle to a server module.
+ */
+const AGENT_ID_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  'mya-personal': 'personal-agent',
+});
+
+/** Resolve a possibly-legacy agent_id to its canonical id (identity for unknown ids). */
+export function resolveAgentAlias(agentId: string): string {
+  return AGENT_ID_ALIASES[agentId] ?? agentId;
+}
+
+/**
  * Pick a label + colour for the speaker of a single row.
  *
  * - role=assistant → resolve via the agent registry (display name, color, emoji).
@@ -175,7 +193,10 @@ export function classifySpeaker(
   agentMap: Map<string, AgentInfo> | null,
 ): Speaker {
   if (msg.role === 'assistant') {
-    const info = msg.agent_id && agentMap ? agentMap.get(msg.agent_id) : null;
+    // Resolve legacy aliases (e.g. mya-personal → personal-agent) so a pre-0055
+    // stored id still hits the canonical-keyed registry and never renders raw.
+    const canonicalId = msg.agent_id ? resolveAgentAlias(msg.agent_id) : null;
+    const info = canonicalId && agentMap ? agentMap.get(canonicalId) : null;
     if (info) {
       return {
         kind: 'agent',
@@ -186,7 +207,7 @@ export function classifySpeaker(
     }
     return {
       kind: 'agent',
-      label: msg.agent_id || 'agent',
+      label: canonicalId || 'agent',
       color: 'var(--color-accent)',
       emoji: null,
     };

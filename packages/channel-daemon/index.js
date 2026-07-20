@@ -259,7 +259,7 @@ export async function buildDaemon(cfg, { runTurn, runtime: injectedRuntime, dedu
   // ── Telegram ───────────────────────────────────────────────────────────────
   if (cfg.botToken) {
     telegram = createTelegramApi({ botToken: cfg.botToken });
-    const voicePipeline = createVoicePipeline({ sendVoice: ({ target, filePath, replyToMessageId }) => telegram.sendVoice({ chatId: target, filePath, replyToMessageId }), agentId: cfg.agentId });
+    const voicePipeline = createVoicePipeline({ sendVoice: ({ target, filePath, replyToMessageId, messageThreadId }) => telegram.sendVoice({ chatId: target, filePath, replyToMessageId, messageThreadId }), agentId: cfg.agentId });
 
     async function checkTelegramAuthority({ kind, id, isAgentExplicit }) {
       // owner-bootstrap (reply to the operator's own DM) is ONLY for an agent-explicit
@@ -279,8 +279,8 @@ export async function buildDaemon(cfg, { runTurn, runtime: injectedRuntime, dedu
       trustedToken,
     });
 
-    const sendReply = async ({ chatId, text, replyToMessageId }) => {
-      try { await fetch(`${cfg.selfUrl}/telegram/send`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-egress-trusted': trustedToken }, body: JSON.stringify({ chatId, text, replyToMessageId, trusted: true }) }); }
+    const sendReply = async ({ chatId, text, replyToMessageId, messageThreadId }) => {
+      try { await fetch(`${cfg.selfUrl}/telegram/send`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-egress-trusted': trustedToken }, body: JSON.stringify({ chatId, text, replyToMessageId, messageThreadId, trusted: true }) }); }
       catch (e) { console.error('[channel-daemon] command reply failed:', e.message); }
     };
     const commands = createCommandHandler({ vault, sendReply, ownerTelegramId: cfg.ownerTelegramId });

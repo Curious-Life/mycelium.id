@@ -373,14 +373,23 @@
 				</div>
 			{/if}
 			<div class="onboard-card glass">
-				<div class="orbit" aria-hidden="true"><span class="orbit-dot"></span></div>
+				<div class="orrery" aria-hidden="true">
+					<span class="star"></span>
+					<span class="arm a1"><span class="body b1"></span></span>
+					<span class="arm a2"><span class="body b2"></span></span>
+					<span class="arm a3"><span class="body b3"><span class="marm"><span class="moon"></span></span></span></span>
+					<span class="arm a4"><span class="body b4"></span></span>
+					<span class="arm a5 ecc"><span class="body b5"><span class="marm m-fast"><span class="moon"></span></span></span></span>
+					<span class="arm a6"><span class="body b6"></span></span>
+					<span class="arm a7"><span class="body b7"></span></span>
+					<span class="arm a8 ecc2"><span class="body b8"></span></span>
+				</div>
 				<h2>Where your mind meets others'</h2>
-				<p class="lede">Connect with anyone on Mycelium to message them directly, see where your minds overlap, and selectively share a space or a facet. Everything is signed between your vaults — nothing leaves until you choose it.</p>
+				<p class="lede">Message anyone on Mycelium, see where your minds overlap, share selectively. Signed vault-to-vault — nothing leaves until you choose.</p>
 				<form class="big-composer" onsubmit={(e) => { e.preventDefault(); sendRequest(); }}>
 					<input type="text" bind:value={connectHandle} autocomplete="off" placeholder="their handle  ·  or  name@their-server.org" />
 					<button type="submit" disabled={connecting || !connectHandle.trim()} class="btn btn-primary">{connecting ? 'Sending…' : 'Connect'}</button>
 				</form>
-				<p class="hint">A bare handle like <code>lo</code> resolves to <code>lo.mycelium.id</code>. Use <code>name@server.org</code> for a custom domain.</p>
 			</div>
 		</div>
 
@@ -694,9 +703,33 @@
 	.load-error code { font-size: 0.8rem; color: var(--color-text-secondary); word-break: break-word; }
 	.load-error button { align-self: flex-start; }
 	.onboard-card { max-width: 540px; padding: 2.25rem 2.25rem 1.75rem; text-align: center; }
-	.orbit { width: 64px; height: 64px; margin: 0 auto 1.25rem; border-radius: 50%; border: 1px solid var(--glass-border); position: relative; background: radial-gradient(circle at 50% 50%, rgba(var(--color-accent-aurum-rgb),0.18), transparent 70%); }
-	.orbit-dot { position: absolute; top: -3px; left: 50%; width: 7px; height: 7px; border-radius: 50%; background: var(--color-accent-aurum); transform-origin: 50% 35px; animation: spin 6s linear infinite; }
-	@keyframes spin { to { transform: rotate(360deg); } }
+	.orrery { width: 132px; height: 132px; margin: 0 auto 1.4rem; position: relative; }
+	.orrery .star { position: absolute; top: 50%; left: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; background: radial-gradient(circle at 38% 32%, #fff, var(--color-accent-aurum) 55%, rgba(var(--color-accent-aurum-rgb),0.25) 78%, transparent 82%); box-shadow: 0 0 14px 3px rgba(var(--color-accent-aurum-rgb),0.5); }
+	.orrery .arm { position: absolute; top: 50%; left: 50%; border-radius: 50%; border: 1px solid rgba(var(--color-accent-aurum-rgb),0.08); transform-origin: 50% 50%; animation: orbit-revolve linear infinite; }
+	.orrery .body { position: absolute; top: -4px; left: 50%; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--color-accent-aurum); box-shadow: 0 0 5px rgba(var(--color-accent-aurum-rgb),0.55); }
+	.orrery .marm { position: absolute; top: 50%; left: 50%; width: 15px; height: 15px; margin: -7.5px 0 0 -7.5px; border-radius: 50%; transform-origin: 50% 50%; animation: orbit-revolve 2.6s linear infinite; }
+	.orrery .marm.m-fast { animation-duration: 1.8s; width: 12px; height: 12px; margin: -6px 0 0 -6px; }
+	.orrery .moon { position: absolute; top: -2px; left: 50%; width: 3.5px; height: 3.5px; margin-left: -1.75px; border-radius: 50%; background: var(--color-text-secondary, #b6b0a6); }
+	.orrery .a1 { width: 26px; height: 26px; margin: -13px 0 0 -13px; animation-duration: 5s; }
+	.orrery .a2 { width: 44px; height: 44px; margin: -22px 0 0 -22px; animation-duration: 7.5s; animation-direction: reverse; }
+	.orrery .a3 { width: 62px; height: 62px; margin: -31px 0 0 -31px; animation-duration: 10s; }
+	.orrery .a4 { width: 80px; height: 80px; margin: -40px 0 0 -40px; animation-duration: 13.5s; animation-direction: reverse; }
+	.orrery .a5 { width: 64px; height: 64px; margin: -32px 0 0 -32px; animation-duration: 8.5s; }
+	.orrery .a6 { width: 98px; height: 98px; margin: -49px 0 0 -49px; animation-duration: 18s; }
+	.orrery .a7 { width: 116px; height: 116px; margin: -58px 0 0 -58px; animation-duration: 24s; animation-direction: reverse; }
+	.orrery .a8 { width: 52px; height: 52px; margin: -26px 0 0 -26px; animation-duration: 6.5s; }
+	.orrery .ecc  { top: 42%; left: 55%; }
+	.orrery .ecc2 { top: 58%; left: 46%; }
+	.orrery .b1 { width: 5px; height: 5px; margin-left: -2.5px; }
+	.orrery .b2 { width: 10px; height: 10px; margin-left: -5px; }
+	.orrery .b3 { width: 7px; height: 7px; margin-left: -3.5px; }
+	.orrery .b4 { width: 6px; height: 6px; margin-left: -3px; opacity: .85; }
+	.orrery .b5 { width: 8px; height: 8px; margin-left: -4px; }
+	.orrery .b6 { width: 4.5px; height: 4.5px; margin-left: -2.25px; opacity: .75; }
+	.orrery .b7 { width: 6px; height: 6px; margin-left: -3px; opacity: .7; }
+	.orrery .b8 { width: 5px; height: 5px; margin-left: -2.5px; opacity: .8; }
+	@keyframes orbit-revolve { to { transform: rotate(360deg); } }
+	@media (prefers-reduced-motion: reduce) { .orrery .arm, .orrery .marm { animation: none; } }
 	.onboard-card h2 { font-size: 1.4rem; font-weight: 400; color: var(--color-text-primary); margin-bottom: 0.6rem; }
 	.lede { font-size: 0.9rem; line-height: 1.6; color: var(--color-text-secondary); margin-bottom: 1.5rem; }
 	.big-composer { display: flex; gap: 0.5rem; }

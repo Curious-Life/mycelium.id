@@ -29,7 +29,7 @@
 		if (washTimer) clearTimeout(washTimer);
 	});
 	import { activity, startActivityPolling, fmtEta, fmtAgo } from '$lib/stores/activity';
-	import Sparkline from '$lib/components/mindscape/Sparkline.svelte';
+	import ActivityBars from '$lib/components/mindscape/ActivityBars.svelte';
 	import {
 		mindscapeState,
 		mindscapePoints,
@@ -410,8 +410,7 @@
 		return 'realms';
 	});
 
-	// Hovered + selected activity bar
-	let hoveredActivity = $state<{ month: string; count: number } | null>(null);
+	// Selected activity bar (hover is owned by the ActivityBars component now).
 	let selectedActivity = $state<{ month: string; count: number } | null>(null);
 	let selectedActivityChronicle = $state<{ theme: string; signature: string; narrative: string } | null>(null);
 	let selectedActivityLoading = $state(false);
@@ -488,6 +487,17 @@
 			<span class="breadcrumb-current">{currentTerritory.name || `T${msState.selectedTerritoryId}`}</span>
 		{/if}
 	</div>
+	{/if}
+
+	<!-- Back control (R4-BACKBTN) — lives IN the side section, directly above the cards, once
+	     drilled in. It replaces the button that used to float on the 3D canvas (top-left), which
+	     read as "outside the side section and too far" from the list it navigates. `goBack()`
+	     already walks the hierarchy (territory → theme → realm → root), so one handler covers every
+	     level. Hidden at the realms root — there is nowhere to go back to. -->
+	{#if navLevel !== 'realms'}
+		<button class="detail-back" onclick={() => mindscapeState.goBack()}>
+			<span aria-hidden="true">&larr;</span> Back
+		</button>
 	{/if}
 
 	<div class="nav-content">
@@ -683,11 +693,6 @@
 					{#if currentRealm.storyCurrentChapter}
 						<p class="section-chapter">{currentRealm.storyCurrentChapter}</p>
 					{/if}
-					{#if currentRealm.activity && currentRealm.activity.length > 0}
-						<div class="section-activity">
-							<Sparkline data={currentRealm.activity} width={200} height={28} />
-						</div>
-					{/if}
 					{#if currentRealm.topEntities && currentRealm.topEntities.length > 0}
 						<div class="section-entities">
 							{#each currentRealm.topEntities.slice(0, 8) as entity}
@@ -703,6 +708,11 @@
 						</div>
 					{/if}
 				</div>
+				<!-- R4-ACTIVITYBARS: realm level now uses the SAME timestamped, hover-tooltip bars as
+				     the theme + territory levels (was a bare sparkline with no time context). -->
+				{#if currentRealm.activity && currentRealm.activity.length > 0}
+					<ActivityBars data={currentRealm.activity} />
+				{/if}
 			{/if}
 
 			{#if themesForRealm.length > 0}
@@ -762,30 +772,8 @@
 				</div>
 
 				{#if currentTheme.activity && currentTheme.activity.length > 0}
-					{@const maxCount = Math.max(...currentTheme.activity.map(a => a.count))}
-					<div class="activity-graph">
-						<h4>Activity</h4>
-						<div class="activity-bars-container">
-							{#if hoveredActivity}
-								<div class="activity-tooltip">{hoveredActivity.month}: {hoveredActivity.count}</div>
-							{/if}
-							<!-- svelte-ignore a11y_no_static_element_interactions -->
-							<div class="activity-bars" onmouseleave={() => hoveredActivity = null}>
-								{#each currentTheme.activity.slice(-24) as item}
-									<!-- svelte-ignore a11y_no_static_element_interactions -->
-									<div
-										class="activity-bar"
-										style="height: {(item.count / maxCount) * 100}%"
-										onmouseenter={() => hoveredActivity = item}
-									></div>
-								{/each}
-							</div>
-						</div>
-						<div class="activity-labels">
-							<span>{currentTheme.activity[Math.max(0, currentTheme.activity.length - 24)]?.month}</span>
-							<span>{currentTheme.activity[currentTheme.activity.length - 1]?.month}</span>
-						</div>
-					</div>
+					<!-- R4-ACTIVITYBARS: unified bars — friendly timestamps + hover time tooltip. -->
+					<ActivityBars data={currentTheme.activity} />
 				{/if}
 
 				{#if currentTheme.topEntities && currentTheme.topEntities.length > 0}
@@ -845,6 +833,11 @@
 						{#if currentTerritory.archetypeType}
 							<span class="archetype-badge">{currentTerritory.archetypeType}</span>
 						{/if}
+						{#if currentTerritory.gravityShare != null && currentTerritory.gravityShare > 0}
+							<!-- R4-AREADATA: the territory's gravitational pull — a computed scalar the
+							     vault holds (gravity_share) that the detail used to drop. -->
+							<span class="gravity-badge" title="Share of this mind's total gravity — how much it pulls the rest of your thinking toward it">◎ {(currentTerritory.gravityShare * 100).toFixed(currentTerritory.gravityShare < 0.1 ? 1 : 0)}% gravity</span>
+						{/if}
 						{#if currentTerritory.currentPhase === 'sparse' || currentTerritory.currentPhase === 'active' || currentTerritory.currentPhase === 'anchor'}
 							<span class="phase-badge phase-{currentTerritory.currentPhase}">{currentTerritory.currentPhase} · {(currentTerritory.currentVitality || 0).toFixed(2)}</span>
 						{/if}
@@ -855,6 +848,11 @@
 							<span class="evolved-badge" title="This territory inherited messages from {currentTerritory.evolvedFromCount} dissolved territory/territories">↳ evolved from {currentTerritory.evolvedFromCount}</span>
 						{/if}
 					</div>
+					{#if currentTerritory.archetypeCharacter}
+						<!-- R4-AREADATA: the archetype's CHARACTER (its persona voice) — held on the
+						     profile (archetype_character) but never shown; only the type badge was. -->
+						<p class="detail-archetype-char">{currentTerritory.archetypeCharacter}</p>
+					{/if}
 					<p class="detail-stats">
 						{currentTerritory.count?.toLocaleString() || 0} messages
 						{#if currentTerritory.exploredPercent > 0}
@@ -862,6 +860,9 @@
 						{/if}
 						{#if currentTerritory.daysActive}
 							· {currentTerritory.daysActive}d span
+						{/if}
+						{#if currentTerritory.firstActive}
+							· since {currentTerritory.firstActive}
 						{/if}
 					</p>
 					{#if currentTerritory.exploredPercent < 100 && msState.selectedTerritoryId != null}
@@ -906,34 +907,16 @@
 				{/if}
 
 				{#if currentTerritory.activity && currentTerritory.activity.length > 0}
-					{@const maxCount = Math.max(...currentTerritory.activity.map(a => a.count))}
-					<div class="activity-graph">
-						<h4>Activity</h4>
-						<div class="activity-bars-container">
-							{#if hoveredActivity && !selectedActivity}
-								<div class="activity-tooltip">{hoveredActivity.month}: {hoveredActivity.count}</div>
-							{/if}
-							<!-- svelte-ignore a11y_no_static_element_interactions -->
-							<div class="activity-bars" onmouseleave={() => { if (!selectedActivity) hoveredActivity = null; }}>
-								{#each currentTerritory.activity.slice(-24) as item}
-									<button
-										class="activity-bar"
-										class:selected={selectedActivity?.month === item.month}
-										style="height: {(item.count / maxCount) * 100}%"
-										aria-label="{item.month}: {item.count}"
-										onmouseenter={() => hoveredActivity = item}
-										onclick={() => selectActivityBar(item)}
-									></button>
-								{/each}
-							</div>
-						</div>
-						<div class="activity-labels">
-							<span>{currentTerritory.activity[Math.max(0, currentTerritory.activity.length - 24)]?.month}</span>
-							<span>{currentTerritory.activity[currentTerritory.activity.length - 1]?.month}</span>
-						</div>
-
-						<!-- Period detail: chronicle or illuminate -->
-						{#if selectedActivity}
+					<!-- R4-ACTIVITYBARS: unified bars — friendly timestamps + hover time tooltip.
+					     The territory level keeps its click-to-open-a-period-chronicle interaction
+					     via onSelect/selectedMonth; the period detail renders just below. -->
+					<ActivityBars
+						data={currentTerritory.activity}
+						selectedMonth={selectedActivity?.month ?? null}
+						onSelect={selectActivityBar}
+					/>
+					{#if selectedActivity}
+						<div class="period-detail-wrap">
 							<div class="period-detail">
 								{#if selectedActivityLoading}
 									<div class="period-loading">
@@ -957,8 +940,8 @@
 									</div>
 								{/if}
 							</div>
-						{/if}
-					</div>
+						</div>
+					{/if}
 				{/if}
 
 				<div class="detail-body">
@@ -988,6 +971,17 @@
 						<div class="detail-block">
 							<h4>Current Chapter</h4>
 							<div class="markdown-content">{@html renderMarkdown(currentTerritory.storyCurrentChapter)}</div>
+						</div>
+					{/if}
+					{#if currentTerritory.storyPeakMoments && currentTerritory.storyPeakMoments.length > 0}
+						<!-- R4-AREADATA: peak moments (story_peak_moments) — on the payload, never rendered. -->
+						<div class="detail-block">
+							<h4>Peak Moments</h4>
+							<ul class="detail-list">
+								{#each currentTerritory.storyPeakMoments as moment}
+									<li>{moment}</li>
+								{/each}
+							</ul>
 						</div>
 					{/if}
 					{#if currentTerritory.topEntities && currentTerritory.topEntities.length > 0}
@@ -1142,6 +1136,24 @@
 							<div class="markdown-content">{@html renderMarkdown(currentTerritory.agentExpertise)}</div>
 						</div>
 					{/if}
+					{#if currentTerritory.agentCuriousAbout}
+						<!-- R4-AREADATA: agent_curious_about — held on the profile, previously dropped. -->
+						<div class="detail-block">
+							<h4>Curious About</h4>
+							<div class="markdown-content">{@html renderMarkdown(currentTerritory.agentCuriousAbout)}</div>
+						</div>
+					{/if}
+					{#if currentTerritory.agentCanHelpWith && currentTerritory.agentCanHelpWith.length > 0}
+						<!-- R4-AREADATA: agent_can_help_with — held on the profile, previously dropped. -->
+						<div class="detail-block">
+							<h4>Can Help With</h4>
+							<ul class="detail-list">
+								{#each currentTerritory.agentCanHelpWith as item}
+									<li>{item}</li>
+								{/each}
+							</ul>
+						</div>
+					{/if}
 				</div>
 			</div>
 		{/if}
@@ -1197,6 +1209,28 @@
 		font-weight: 600;
 	}
 
+	/* Back control (R4-BACKBTN) — sits directly above the card list, inside the side section. */
+	.detail-back {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		margin: 10px 14px 0;
+		padding: 5px 10px;
+		font-size: 0.75rem;
+		font-family: inherit;
+		color: var(--color-text-secondary);
+		background: var(--color-elevated);
+		border: 1px solid var(--color-border);
+		border-radius: 7px;
+		cursor: pointer;
+		transition: color 0.15s, border-color 0.15s, background 0.15s;
+	}
+	.detail-back:hover {
+		color: var(--color-text-primary);
+		border-color: var(--color-accent-aurum, var(--color-accent));
+		background: rgba(229, 184, 76, 0.06);
+	}
+
 	/* Scrollable content area */
 	.nav-content {
 		flex: 1;
@@ -1224,9 +1258,6 @@
 		color: var(--color-text-tertiary);
 		font-style: italic;
 		margin: 0;
-	}
-	.section-activity {
-		margin-top: 8px;
 	}
 	.section-entities,
 	.section-patterns {
@@ -1563,6 +1594,25 @@
 	.phase-anchor { color: #E5B84C; background: rgba(229, 184, 76, 0.15); }
 	.anchored-badge { color: var(--color-text-secondary); background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); }
 	.evolved-badge { color: #c084fc; background: rgba(192, 132, 252, 0.1); cursor: help; }
+	.gravity-badge {
+		display: inline-block;
+		padding: 2px 8px;
+		font-size: 0.6rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		border-radius: 1rem;
+		color: var(--color-accent-aurum, #E5B84C);
+		background: rgba(229, 184, 76, 0.12);
+		cursor: help;
+	}
+	.detail-archetype-char {
+		font-size: 0.75rem;
+		font-style: italic;
+		color: var(--color-text-secondary);
+		line-height: 1.5;
+		margin: 6px 0 0;
+	}
 
 	.archetype-badge {
 		display: inline-block;
@@ -1645,66 +1695,11 @@
 		white-space: pre-wrap;
 	}
 
-	/* Activity graph */
-	.activity-graph {
-		padding: 10px 14px;
-		border-bottom: 1px solid var(--color-border);
+	/* Activity bars now live in the shared ActivityBars.svelte (R4-ACTIVITYBARS). */
+	/* Period detail below the activity chart (territory level). */
+	.period-detail-wrap {
+		padding: 0 14px 10px;
 	}
-	.activity-graph h4 {
-		font-size: 0.65rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--color-text-tertiary);
-		margin: 0 0 6px;
-	}
-	.activity-bars-container {
-		position: relative;
-	}
-	.activity-tooltip {
-		position: absolute;
-		top: -1.5rem;
-		left: 50%;
-		transform: translateX(-50%);
-		padding: 2px 6px;
-		font-size: 0.65rem;
-		font-weight: 500;
-		color: var(--color-text-primary);
-		background: var(--color-elevated);
-		border: 1px solid var(--color-border);
-		border-radius: 4px;
-		white-space: nowrap;
-		pointer-events: none;
-		z-index: 10;
-	}
-	.activity-bars {
-		display: flex;
-		align-items: flex-end;
-		gap: 2px;
-		height: 36px;
-		background: var(--color-bg);
-		border-radius: 4px;
-		padding: 3px;
-	}
-	.activity-bar {
-		flex: 1;
-		min-height: 2px;
-		background: var(--color-accent);
-		border: none;
-		padding: 0;
-		border-radius: 1px;
-		transition: opacity 0.2s, background 0.2s;
-		cursor: pointer;
-	}
-	.activity-bar:hover {
-		opacity: 0.7;
-	}
-	.activity-bar.selected {
-		background: var(--color-accent-aurum);
-		opacity: 1;
-		box-shadow: 0 0 4px rgba(229, 184, 76, 0.5);
-	}
-	/* Period detail below activity chart */
 	.period-detail {
 		margin-top: 8px;
 		padding: 8px 10px;
@@ -1783,14 +1778,6 @@
 		border-radius: 50%;
 		animation: spin 0.8s linear infinite;
 	}
-	.activity-labels {
-		display: flex;
-		justify-content: space-between;
-		font-size: 0.6rem;
-		color: var(--color-text-tertiary);
-		margin-top: 3px;
-	}
-
 	/* Entity tags */
 	.entity-tags {
 		display: flex;

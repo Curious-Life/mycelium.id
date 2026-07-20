@@ -23,11 +23,53 @@ import { compile } from 'svelte/compiler';
 import { build } from 'esbuild';
 import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
 
 const ENV = (k) => process.env[k] === '1';
 const GEN = '.gen-mount-status-popover';
 rmSync(GEN, { recursive: true, force: true });
 mkdirSync(GEN, { recursive: true });
+
+// ON-3 — the `pipeline` slice fixture the vault-health pill reads. PIPELINE=<done|working|error>
+// picks the collapsed-pill scenario; the shapes are byte-for-byte what readiness.js pipeline()
+// emits (mirrors mount-pipeline-status.mjs's SLICES), so a server enum change surfaces here too.
+const PIPELINE_FIXTURE = (() => {
+  const st = process.env.PIPELINE || 'done';
+  if (st === 'working') return {
+    overall: 'running', blockedOn: null,
+    stages: [
+      { key: 'import', state: 'done', count: { done: 1204 } },
+      { key: 'embed', state: 'running', count: { done: 812, total: 1204 }, etaSeconds: 90, paused: false },
+      { key: 'categorize', state: 'pending', paused: false },
+      { key: 'cluster', state: 'pending', reason: 'waiting_embed' },
+      { key: 'describe', state: 'pending' },
+      { key: 'measure', state: 'pending' },
+    ],
+  };
+  if (st === 'error') return {
+    overall: 'blocked', blockedOn: 'no_model',
+    stages: [
+      { key: 'import', state: 'done', count: { done: 12431 } },
+      { key: 'embed', state: 'done', count: { done: 12431, total: 12431 }, paused: false },
+      { key: 'categorize', state: 'blocked', reason: 'no_model', action: { label: 'Approve a labeling model', target: 'intelligence' }, paused: false },
+      { key: 'cluster', state: 'pending', reason: 'waiting_embed' },
+      { key: 'describe', state: 'pending' },
+      { key: 'measure', state: 'pending' },
+    ],
+  };
+  // done — every stage settled ⇒ the calm "all green" pill (no counts, ON-3's quiet state).
+  return {
+    overall: 'done', blockedOn: null,
+    stages: [
+      { key: 'import', state: 'done', count: { done: 12431 } },
+      { key: 'embed', state: 'done', count: { done: 12431, total: 12431 } },
+      { key: 'categorize', state: 'done', count: { done: 12431, total: 12431 } },
+      { key: 'cluster', state: 'done', count: { done: 73520 } },
+      { key: 'describe', state: 'done' },
+      { key: 'measure', state: 'done' },
+    ],
+  };
+})();
 
 // ── The api stub: fixture responses + a full fetch ledger ─────────────────────
 // The ledger is the COST half of the proof: the gate asserts which slices the poll
@@ -43,6 +85,7 @@ const S = ${JSON.stringify({
   keepAwake: ENV('KEEPAWAKE'),
   onBatt: ENV('ONBATT'),
 })};
+const PIPELINE_FIXTURE = ${JSON.stringify(PIPELINE_FIXTURE)};
 globalThis.__fetches = [];
 globalThis.__posts = [];
 let readinessReads = 0;
@@ -81,6 +124,9 @@ function readinessPayload() {
   const paused = S.paused && !resumed;
   return {
     ...base,
+    // ON-3: the pipeline slice the vault-health pill reads. A degraded (unknown) poll sends a
+    // slice-wide unknown — ingestReadiness HOLDS the last good stages (§3.2a), it must not blank.
+    pipeline: degraded ? { unknown: true } : PIPELINE_FIXTURE,
     processing: degraded
       ? { paused, pausedAt: paused ? '2026-07-17T08:30:00.000Z' : null, waiting: 0, unknown: true }
       : { paused, pausedAt: paused ? '2026-07-17T08:30:00.000Z' : null, waiting: 12431 },
@@ -148,12 +194,50 @@ let storeJs = readFileSync(`${GEN}/activity.js`, 'utf8')
   .replace(/from ['"]\$lib\/api['"]/g, `from './api-stub.js'`);
 writeFileSync(`${GEN}/activity.js`, storeJs);
 
+// ── ON-3: the REAL pipeline store (StatusPopover feeds it via ingestReadiness; the expanded
+// <PipelineStatus/> subscribes to it — the SAME singleton, so both must import this ONE built
+// file). esbuild strips the TS; only `./api` is redirected. Mirrors mount-pipeline-status.mjs. ─
+await build({
+  entryPoints: ['src/lib/pipeline.ts'],
+  outfile: `${GEN}/pipeline.js`,
+  bundle: true, format: 'esm', platform: 'neutral', external: ['svelte/store'],
+  plugins: [{ name: 'stub-api', setup(b) { b.onResolve({ filter: /^\.\/api$/ }, () => ({ path: resolve(GEN, 'api-stub.js') })); } }],
+  logLevel: 'silent',
+});
+// The REAL generate store, for PipelineStatus's REAL fmtSeconds ETA formatting.
+await build({
+  entryPoints: ['src/lib/generate.ts'],
+  outfile: `${GEN}/generate.js`,
+  bundle: true, format: 'esm', platform: 'neutral', external: ['svelte/store'],
+  plugins: [{ name: 'stub-api', setup(b) { b.onResolve({ filter: /^\.\/api$/ }, () => ({ path: resolve(GEN, 'api-stub.js') })); } }],
+  logLevel: 'silent',
+});
+// Spies for PipelineStatus's remedy wiring (goto/apiPost/start) — inert here (we don't click the
+// expanded detail's buttons; verify:pipeline-status-render owns that), but they must RESOLVE.
+writeFileSync(`${GEN}/nav-spy.js`, `export async function goto(u){ globalThis.__posts?.push('goto:'+u); }\n`);
+writeFileSync(`${GEN}/generate-spy.js`, `export { fmtSeconds } from './generate.js';\nexport async function start(){}\n`);
+
+// ── PipelineStatus.svelte — the shipped expanded detail, compiled + its four specifiers rewired
+// (pipeline → the shared store above; generate/api/navigation → real fmtSeconds + inert spies). ─
+const psSrc = readFileSync('src/lib/components/mindscape/PipelineStatus.svelte', 'utf8');
+const psJs = compile(psSrc, { generate: 'client', name: 'PipelineStatus', css: 'injected' }).js.code
+  .replace(/from\s+['"]\$lib\/pipeline['"]/g, `from './pipeline.js'`)
+  .replace(/from\s+['"]\$lib\/generate['"]/g, `from './generate-spy.js'`)
+  .replace(/from\s+['"]\$lib\/api['"]/g, `from './api-stub.js'`)
+  .replace(/from\s+['"]\$app\/navigation['"]/g, `from './nav-spy.js'`);
+writeFileSync(`${GEN}/PipelineStatus.js`, psJs);
+
 // ── The component under test: REAL source, only leaf specifiers rewired ───────
 const src = readFileSync('src/lib/components/shell/StatusPopover.svelte', 'utf8');
 const out = compile(src, { generate: 'client', name: 'StatusPopover', css: 'injected' });
 const js = out.js.code
   .replace(/from ['"]\$lib\/stores\/activity['"]/g, `from './activity.js'`)
+  .replace(/from\s+['"]\$lib\/pipeline['"]/g, `from './pipeline.js'`)
+  .replace(/from\s+['"]\$lib\/components\/mindscape\/PipelineStatus\.svelte['"]/g, `from './PipelineStatus.js'`)
   .replace(/from ['"]\$lib\/api['"]/g, `from './api-stub.js'`);
+// Guard: any $lib/$app specifier we forgot to rewire would silently import an app path in jsdom.
+const unresolved = [...js.matchAll(/from\s+['"](\$(?:lib|app)\/[^'"]+)['"]/g)].map((m) => m[1]);
+if (unresolved.length) { console.log(JSON.stringify({ ok: false, error: `unrewired specifiers: ${[...new Set(unresolved)].join(', ')}` })); process.exit(0); }
 writeFileSync(`${GEN}/Popover.js`, js);
 
 const { JSDOM } = await import('jsdom');
@@ -242,6 +326,19 @@ try {
   result.affordanceCount = D.querySelectorAll('[data-testid="modelpull-fault-hint"]').length;
   result.recentErrorRows = norm(bodyMinusStatus()).includes('Failed');
 
+  // ── ON-3: the adaptive vault-health pill (collapsed) ────────────────────────
+  const pillEl = () => D.querySelector('[data-testid="vault-pill"]');
+  result.pillPresent = !!pillEl();
+  result.pillState = pillEl()?.getAttribute('data-state') || null;
+  result.pillText = norm(pillEl()?.textContent);
+  result.pillVisible = pillEl() ? visible(pillEl()) : false;
+  // The pill is the SUMMARY, above and outside the per-service status rows.
+  result.pillOutsideStatusRows = !!pillEl() && !statusEl()?.contains(pillEl());
+  // Healthy = quiet: NO digits in the pill (ON-3: no persistent stage count when fine).
+  result.pillHasDigits = /\d/.test(result.pillText || '');
+  // Collapsed until clicked — the detail must not be mounted yet.
+  result.pillDetailBeforeClick = !!D.querySelector('[data-testid="vault-pill-detail"]');
+
   // Let the poll tick a few times (pollMs=60 ⇒ ≥3 ticks in 250ms).
   await new Promise((r) => setTimeout(r, 250));
   flushSync();
@@ -270,6 +367,26 @@ try {
   result.readinessPollUrls = F.filter((p) => p.includes('/portal/readiness') && !p.includes('evidence'));
   result.evidenceFetches = F.filter((p) => p.includes('/portal/readiness') && p.includes('evidence')).length;
   result.keepAwakeFetches = F.filter((p) => p.includes('/system/keep-awake')).length;
+
+  // ── ON-3: clicking the pill expands the SHIPPED PipelineStatus (its .pipe root + ordered
+  // stages + inline remedy) — proven by MOUNTING it, not grepping. Done AFTER the fetch ledger
+  // read so it cannot perturb the cost assertions; PipelineStatus is a pure subscriber (no fetch).
+  const pill = pillEl();
+  if (pill) {
+    const fetchesBefore = globalThis.__fetches.length;
+    pill.click();
+    flushSync();
+    await new Promise((r) => setTimeout(r, 20));
+    flushSync();
+    const detail = D.querySelector('[data-testid="vault-pill-detail"]');
+    result.pillDetailAfterClick = !!detail;
+    result.pillDetailHasPipeRoot = !!detail?.querySelector('.pipe');
+    result.pillDetailStageKeys = detail ? [...detail.querySelectorAll('.pipe-stage')].map((li) => li.getAttribute('data-key')) : [];
+    result.pillDetailText = norm(detail?.textContent);
+    result.pillDetailHasRemedy = !!detail?.querySelector('button.pipe-action');
+    // Expanding must not fire a network read — the detail rides the already-fed store.
+    result.expandAddedFetches = globalThis.__fetches.length - fetchesBefore;
+  }
 
   unmount(app);
   result.ok = true;

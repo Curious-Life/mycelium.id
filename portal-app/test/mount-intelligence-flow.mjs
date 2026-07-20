@@ -65,7 +65,7 @@ const SUBV = {
   'sub-ok': { native: 'ok', cli: 'unknown' },
   'sub-unknown': { native: 'unknown', cli: 'unknown' },
 }[PROBE] || null;
-const RETURNING = PROBE === 'returning' || PROBE === 'fault' || PROBE === 'voice-sample' || PROBE === 'voice-error' || PROBE === 'embedder-absent' || Boolean(SUBV);
+const RETURNING = PROBE === 'returning' || PROBE === 'fault' || PROBE === 'voice-sample' || PROBE === 'voice-error' || PROBE === 'voice-needs-runtime' || PROBE === 'embedder-absent' || Boolean(SUBV);
 // The returning vault: Understanding + Conversation set; transcription + descriptions NOT —
 // the exact ≥2-gap shape W6's gap-fill exists for.
 const SETTINGS = RETURNING
@@ -125,6 +125,11 @@ globalThis.__apiStub = async (path, options = {}) => {
       ? { enabled: true, samplePending: true, model: { phase: 'ready', progress: 100 } }
       : PROBE === 'voice-error'
       ? { model: { phase: 'error', progress: 0, error: 'download failed' } }   // a FAILED download → retry
+      : PROBE === 'voice-needs-runtime'
+      // Model files downloaded, but the on-device runtime (mlx-audio) isn't installed yet. A
+      // DIFFERENT blocker from a missing sample — recording a sample cannot fix it. The panel
+      // must offer "Finish install" (the tts download route), NOT route to the character page.
+      ? { model: { phase: 'needs-runtime', progress: 100 } }
       : { model: { phase: 'absent', progress: 0 } };
     return { ok: true, json: async () => ({ enabled: false, provider: null, qwen }) };
   }
@@ -173,6 +178,13 @@ const storeSrc = readFileSync('src/lib/stores/sensitive-exempt.svelte.ts', 'utf8
 const storeOut = compileModule(storeSrc, { generate: 'client', filename: 'sensitive-exempt.svelte.ts' });
 writeFileSync(`${GEN}/sensitive-exempt.gen.js`, storeOut.js.code);
 
+// A lightweight workspace-store stub: IntelligenceFlow only uses workspace.openFromRoute (the
+// 'add-sample' voice routing, R2-VOICEBTN). Record each call so the verifier can prove the
+// button ROUTES to the character page (and doesn't drag in the real store's dependency tree).
+globalThis.__wsRoutes = [];
+writeFileSync(`${GEN}/workspace-store.gen.js`,
+  'export const workspace = { openFromRoute: (viewId, params) => { (globalThis.__wsRoutes ||= []).push({ viewId, params }); } };\n');
+
 const genSvelte = (name, source) => {
   const out = compile(source, { generate: 'client', name, css: 'injected' });
   const rewired = out.js.code
@@ -187,7 +199,8 @@ const genSvelte = (name, source) => {
     // the operator's "one place" surface, asserted on the genuine article (odmRows below).
     .replace(/from\s+['"]\.\/OnDeviceModels\.svelte['"]/, `from './OnDeviceModels.gen.js'`)
     .replace(/from\s+['"]\.\/ModelHealth\.svelte['"]/, `from './ModelHealth.gen.js'`)
-    .replace(/from\s+['"]\$lib\/stores\/sensitive-exempt\.svelte['"]/, `from './sensitive-exempt.gen.js'`);
+    .replace(/from\s+['"]\$lib\/stores\/sensitive-exempt\.svelte['"]/, `from './sensitive-exempt.gen.js'`)
+    .replace(/from\s+['"]\$lib\/workspace\/store['"]/, `from './workspace-store.gen.js'`);
   writeFileSync(`${GEN}/${name}.gen.js`, rewired);
 };
 for (const stub of ['AISettings', 'VoiceSection', 'EngineSelector']) {
@@ -255,6 +268,9 @@ try {
       badDot: !!r.querySelector('.mh-dot.bad'),
       size: r.querySelector('.odm-size')?.textContent?.trim() ?? null,
       hasDownload: !!r.querySelector('[data-testid="odm-download"]'),
+      downloadText: r.querySelector('[data-testid="odm-download"]')?.textContent?.trim() ?? null,
+      hasAddSample: !!r.querySelector('[data-testid="odm-add-sample"]'),
+      addSampleText: r.querySelector('[data-testid="odm-add-sample"]')?.textContent?.trim() ?? null,
       blocked: r.querySelector('[data-testid="odm-blocked"]')?.textContent?.trim() ?? null,
     })),
     odmPresent: !!D.querySelector('section.odm'),
@@ -336,6 +352,46 @@ try {
     }
   }
 
+  // R2-VOICEBTN: on the voice-sample probe (downloaded-but-mute), the voice row must offer a
+  // CLICKABLE 'Add a voice sample' button that ROUTES to the character page — not a dead note.
+  // Drive it and capture the recorded openFromRoute call.
+  let odmSample = null;
+  if (PROBE === 'voice-sample') {
+    globalThis.__wsRoutes = [];
+    const voiceRow = [...D.querySelectorAll('[data-testid="odm-row"]')].find((r) => r.getAttribute('data-key') === 'voice');
+    const btn = voiceRow?.querySelector('[data-testid="odm-add-sample"]');
+    if (btn) {
+      btn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+      flushSync();
+      await wait(20);
+    }
+    odmSample = { hadButton: !!btn, routes: (globalThis.__wsRoutes || []).slice() };
+  }
+
+  // R2-VOICEBTN review: a needs-runtime voice (files downloaded, mlx-audio not installed) is a
+  // DIFFERENT blocker — it must offer "Finish install" (the tts download route), NEVER route to
+  // the character page (which has no runtime-install path). Drive the voice button and confirm it
+  // POSTs the tts route AND records ZERO character routes.
+  let odmRuntime = null;
+  if (PROBE === 'voice-needs-runtime') {
+    globalThis.__wsRoutes = [];
+    const voiceRow = [...D.querySelectorAll('[data-testid="odm-row"]')].find((r) => r.getAttribute('data-key') === 'voice');
+    const dlBtn = voiceRow?.querySelector('[data-testid="odm-download"]');
+    const sampleBtn = voiceRow?.querySelector('[data-testid="odm-add-sample"]');
+    const beforeLen = sent.length;
+    if (dlBtn) {
+      dlBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+      flushSync();
+      await wait(80);
+      flushSync();
+    }
+    odmRuntime = {
+      hadDownload: !!dlBtn, hadAddSample: !!sampleBtn,
+      sent: sent.slice(beforeLen).map((s) => ({ path: s.path, method: s.method })),
+      routes: (globalThis.__wsRoutes || []).slice(),
+    };
+  }
+
   // Drive Customize open (A10's second half: the machinery appears on demand). It is a SEGMENTED
   // nav now — TWO tabs (2026-07-19): Functions and Providers. Voice + Engine folded INTO the
   // Functions surface (IntelligenceScreen owns them), so on the default Functions tab the real
@@ -374,7 +430,7 @@ try {
     };
   }
 
-  emit({ ok: true, probe: PROBE || 'cold', before, afterConfirm, gapClick, customize, subProbe, odmDownload, windowOpens });
+  emit({ ok: true, probe: PROBE || 'cold', before, afterConfirm, gapClick, customize, subProbe, odmDownload, odmSample, odmRuntime, windowOpens });
   process.exit(0);   // the flow's 4s models poll would otherwise keep node alive forever
 } catch (e) {
   emit({ ok: false, probe: PROBE || 'cold', error: String(e?.stack || e) });

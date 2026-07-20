@@ -3,8 +3,10 @@
 	import { goto } from '$app/navigation';
 	import { apiGet } from '$lib/api';
 	import { navigationState, type PrimaryView } from '$lib/stores/navigation';
+	import { sidebarWidth, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX } from '$lib/stores/sidebar';
 	import { workspace } from '$lib/workspace/store';
 	import { auth } from '$lib/stores/auth';
+	import { vaultDisplayLabel } from '$lib/vault-label';
 	import PeopleNav from '$lib/components/people/PeopleNav.svelte';
 	import LibraryNav from '$lib/components/library/LibraryNav.svelte';
 	import {
@@ -30,6 +32,32 @@
 		return () => { alive = false; clearInterval(t); };
 	});
 
+	// Auto-update banner: the Tauri backend checks on launch + every 6h and stores any
+	// available update in UpdateState; we poll it and surface a small banner above the
+	// footer. No-op in the browser / non-Tauri shell (no __TAURI_INTERNALS__).
+	let availableUpdate = $state<{ version: string; notes: string } | null>(null);
+	let updating = $state(false);
+	$effect(() => {
+		if (!browser) return;
+		const invoke = (window as any).__TAURI_INTERNALS__?.invoke;
+		if (!invoke) return;
+		let alive = true;
+		const poll = async () => {
+			try { const u = await invoke('get_available_update'); if (alive) availableUpdate = u ?? null; } catch {}
+		};
+		poll();
+		const t = setInterval(poll, 5 * 60 * 1000);
+		return () => { alive = false; clearInterval(t); };
+	});
+	async function doUpdate() {
+		const invoke = (window as any).__TAURI_INTERNALS__?.invoke;
+		if (!invoke || updating) return;
+		updating = true;
+		// install_update downloads + verifies the signature + restarts on success; on
+		// failure it throws and we re-enable the button.
+		try { await invoke('install_update'); } catch { updating = false; }
+	}
+
 	// Vault identity for the footer — the @handle is the user's name here (the
 	// footer leads with it), and the avatar photo if they've set one. From the
 	// public profile (not on $auth.user). Silent on failure / no handle.
@@ -45,12 +73,13 @@
 			.catch(() => {});
 	});
 
-	// What we show as the user's name in the footer: their @handle (the vault
-	// name) first, falling back to the auth display name, then a neutral label.
-	// The avatar initial follows the same precedence so it always matches.
-	const vaultLabel = $derived(
-		userHandle ? `@${userHandle}` : ($auth.user?.displayName || 'Your vault'),
-	);
+	// What we show as the vault's NAME in the footer — the ONE centralized
+	// vault-label chain (handle → "My Mycelium", handle-first). See $lib/vault-label.
+	// ⚠️ Kept SEPARATE from the avatar-INITIAL chain below, which today is ALSO
+	// handle-first (userHandle → displayName → '·'). R2-AVATAR/U2.5 will re-order the
+	// initial to displayName-first — that is NOT built yet, so this comment describes
+	// what the code does now, not the future ordering.
+	const vaultLabel = $derived(vaultDisplayLabel(userHandle));
 	const vaultInitial = $derived(
 		(userHandle || $auth.user?.displayName || '·').trim().charAt(0).toUpperCase() || '·',
 	);
@@ -217,20 +246,13 @@
 		if (isMobile) navigationState.setSidebarOpen(false);
 	}
 
-	// Resizable sidebar
-	let sidebarWidth = $state(256);
+	// Resizable sidebar. The width lives in a SHARED store ($lib/stores/sidebar)
+	// so the Header's left cell (R4-SHELLCHROME) can size its column off the exact
+	// same value — the two must stay pixel-aligned, including live during a drag,
+	// for the divider to read as one continuous line. The store also owns the
+	// localStorage load/persist (same key + 200–400 clamp as before).
 	let isResizing = $state(false);
 	let sidebarRef: HTMLElement;
-
-	$effect(() => {
-		if (browser) {
-			const saved = localStorage.getItem('mycelium-sidebar-width');
-			if (saved) {
-				const parsed = parseInt(saved);
-				if (parsed >= 200 && parsed <= 400) sidebarWidth = parsed;
-			}
-		}
-	});
 
 	function startResize(e: MouseEvent) {
 		e.preventDefault();
@@ -243,7 +265,8 @@
 
 	function onResize(e: MouseEvent) {
 		if (!isResizing) return;
-		sidebarWidth = Math.max(200, Math.min(400, e.clientX));
+		// The sidebar's left edge is at x=0, so clientX IS the target width.
+		sidebarWidth.set(Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, e.clientX)));
 	}
 
 	function stopResize() {
@@ -252,7 +275,7 @@
 		document.body.style.userSelect = '';
 		window.removeEventListener('mousemove', onResize);
 		window.removeEventListener('mouseup', stopResize);
-		if (browser) localStorage.setItem('mycelium-sidebar-width', sidebarWidth.toString());
+		// Persistence is handled by the shared store's subscribe (localStorage).
 	}
 </script>
 
@@ -271,7 +294,7 @@
 	class="sidebar bg-[var(--color-surface)] border-r border-[var(--color-border)] flex flex-col overflow-hidden shrink-0 relative"
 	class:closed={!isOpen}
 	class:mobile-drawer={isMobile}
-	style={isMobile ? '' : `width: ${isOpen ? sidebarWidth + 'px' : '0'};`}
+	style={isMobile ? '' : `width: ${isOpen ? $sidebarWidth + 'px' : '0'};`}
 >
 	<!-- Scrollable nav region: primary nav + contextual nav scroll together so a
 	     tall list (core nav + Curious Life + contextual sub-nav) can never push
@@ -370,6 +393,24 @@
 		{/if}
 	</div>
 	</div><!-- /scrollable nav region -->
+
+	{#if availableUpdate}
+		<!-- Update-available banner — sits ABOVE the footer divider. The backend has
+		     already signature-verified a newer build; Update downloads + installs + restarts. -->
+		<div class="mx-3 mb-2 rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 px-2.5 py-2 flex items-center gap-2">
+			<div class="min-w-0 flex-1">
+				<div class="text-xs font-medium text-[var(--color-text-primary)] truncate">Version {availableUpdate.version} is live</div>
+				<div class="text-[0.65rem] text-[var(--color-text-tertiary)] leading-tight">A new update is ready</div>
+			</div>
+			<button
+				onclick={doUpdate}
+				disabled={updating}
+				class="flex-shrink-0 text-xs font-medium px-2.5 py-1 rounded-md bg-[var(--color-accent)] text-white hover:opacity-90 disabled:opacity-60 transition-opacity"
+				title="Download and install v{availableUpdate.version}, then restart">
+				{updating ? 'Updating…' : 'Update'}
+			</button>
+		</div>
+	{/if}
 
 	<!-- User footer — a single identity row that IS the Settings entry: avatar +
 	     @vault-name + a trailing settings glyph, the whole row opening Settings

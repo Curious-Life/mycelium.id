@@ -1,7 +1,7 @@
 import express from 'express';
 import { createReadiness } from './readiness.js';
 import { getEmbedderHealth } from './embed/supervisor.js';
-import { nudgeEnrichDrainer, resetPullBackoff, resetEnrichGiveUpCounters, pauseEnrichProcessing, resumeEnrichProcessing, isEnrichProcessingPaused, defaultLabelModel } from './enrich/drainer.js';
+import { nudgeEnrichDrainer, resetPullBackoff, resetEnrichGiveUpCounters, pauseEnrichProcessing, resumeEnrichProcessing, pauseEmbed, resumeEmbed, pauseCategorize, resumeCategorize, isCategorizePaused, defaultLabelModel } from './enrich/drainer.js';
 import { assembleTimelineMessages } from './streams/assemble-messages.js';
 import { clampStored } from './enrich/text-limits.js';
 import { resolveInferenceConfigForTask } from './inference/resolve.js';
@@ -1257,8 +1257,8 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
       // counted failures against a working model (categories_processed = -1). A
       // count only; recoverable via POST /portal/enrichment/retry-failed.
       messages: { total, tagged, pending, gaveUp },
-      paused: isEnrichProcessingPaused(),
-      status: isEnrichProcessingPaused() ? 'paused' : (pending > 0 ? 'running' : 'idle'),
+      paused: isCategorizePaused(),
+      status: isCategorizePaused() ? 'paused' : (pending > 0 ? 'running' : 'idle'),
       stageLabel: `Sorting: ${tagged.toLocaleString()} / ${total.toLocaleString()}`,
     });
   });
@@ -1278,26 +1278,82 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
   // ⚠️ READ-MODIFY-WRITE: db.users.updateSettings REPLACES THE WHOLE BLOB (portal-hardware.js
   // :115). A bare write of {enrichProcessingPaused} drops taskModels, and with it the model
   // approvals — it has already happened once. Gated by P4.
-  async function persistPause(paused) {
+  // ⚠️ PER-STAGE PERSIST (QA R2). The pause is now split embed vs categorize (drainer.js), so the
+  // durable record carries two flags — enrichEmbedPaused / enrichCategorizePaused — plus:
+  //   • enrichProcessingPausedAt — the ONE durable "paused since" stamp (readiness.processing reads
+  //     it). Set when the FIRST stage pauses; the earliest stamp is preserved while any stage stays
+  //     paused; cleared only when NO stage remains paused. There is no per-stage stamp.
+  //   • enrichProcessingPaused — the LEGACY composite (BOTH paused). Kept so the old single-flag
+  //     reader and verify:processing-pause (P4/P5, which drive the GLOBAL route) stay honest, and so
+  //     a downgrade still reads a coherent "all paused" state.
+  // Undefined stage args carry the current persisted value forward — a per-stage write must not
+  // clobber the sibling stage. Same READ-MODIFY-WRITE + `...s` spread guard as before (P4): a bare
+  // write would drop taskModels = the model consent record.
+  async function persistPauseState({ embed, categorize } = {}) {
     const s = (await db.users.getSettings(userId)) || {};
-    const pausedAt = paused ? new Date().toISOString() : null;
-    await db.users.updateSettings(userId, { ...s, enrichProcessingPaused: paused, enrichProcessingPausedAt: pausedAt });
+    const nextEmbed = embed === undefined ? (s.enrichEmbedPaused === true) : Boolean(embed);
+    const nextCat = categorize === undefined ? (s.enrichCategorizePaused === true) : Boolean(categorize);
+    const anyPaused = nextEmbed || nextCat;
+    const pausedAt = anyPaused ? (s.enrichProcessingPausedAt || new Date().toISOString()) : null;
+    await db.users.updateSettings(userId, {
+      ...s,
+      enrichEmbedPaused: nextEmbed,
+      enrichCategorizePaused: nextCat,
+      enrichProcessingPaused: nextEmbed && nextCat,   // legacy composite (both stopped)
+      enrichProcessingPausedAt: pausedAt,
+    });
     return pausedAt;
   }
 
+  // ── GLOBAL pause/resume — the StatusPopover banner control (stops/starts EVERYTHING) ──
   router.post('/enrichment/processing/pause', async (_req, res) => {
     let pausedAt;
-    try { pausedAt = await persistPause(true); }
+    try { pausedAt = await persistPauseState({ embed: true, categorize: true }); }
     catch { return fail(res, 500, 'could not pause processing'); }
     pauseEnrichProcessing();
     ok(res, { paused: true, pausedAt });
   });
 
   router.post('/enrichment/processing/resume', async (_req, res) => {
-    try { await persistPause(false); }
+    try { await persistPauseState({ embed: false, categorize: false }); }
     catch { return fail(res, 500, 'could not resume processing'); }
-    resumeEnrichProcessing(); // clears the flag + kicks a cycle so progress moves at once
+    resumeEnrichProcessing(); // clears both flags + kicks a cycle so progress moves at once
     ok(res, { paused: false, pausedAt: null });
+  });
+
+  // ── PER-STAGE pause/resume/restart (QA R2-PIPECTL, R3-PIPESTOP) — the co-located PipelineStatus
+  // controls. Each mirrors the global pair: PERSIST FIRST (report a failed write, D13), APPLY SECOND.
+  // Resume nudges a cycle so the resumed stage moves at once. Restart re-queues that stage's gave-up
+  // rows (the bounded-retry terminals) and nudges — independent of pause (a user can Restart a
+  // running stage to reclaim its failures). ──
+  const stagePauseRoute = (stage, pause, apply) =>
+    router.post(`/enrichment/${stage}/${pause ? 'pause' : 'resume'}`, async (_req, res) => {
+      let pausedAt;
+      try { pausedAt = await persistPauseState({ [stage === 'embed' ? 'embed' : 'categorize']: pause }); }
+      catch { return fail(res, 500, `could not ${pause ? 'pause' : 'resume'} ${stage}`); }
+      apply();
+      ok(res, { paused: pause, pausedAt });
+    });
+  stagePauseRoute('embed', true, pauseEmbed);
+  stagePauseRoute('embed', false, resumeEmbed);
+  stagePauseRoute('categorize', true, pauseCategorize);
+  stagePauseRoute('categorize', false, resumeCategorize);
+
+  router.post('/enrichment/embed/restart', async (_req, res) => {
+    let reset;
+    try { reset = await db.messages.resetEnrichmentGiveUps(userId, { stage: 'embed' }); }
+    catch { return fail(res, 500, 'could not reset failed embeds'); }
+    nudgeEnrichDrainer();
+    ok(res, { reset: { embed: reset.embedReset } });
+  });
+
+  router.post('/enrichment/categorize/restart', async (_req, res) => {
+    let reset;
+    try { reset = await db.messages.resetEnrichmentGiveUps(userId, { stage: 'categorize' }); }
+    catch { return fail(res, 500, 'could not reset failed labels'); }
+    resetEnrichGiveUpCounters(); // fresh in-memory L1 attempt budgets (no-op if no drainer runs)
+    nudgeEnrichDrainer();
+    ok(res, { reset: { label: reset.labelReset } });
   });
 
   // ── Import preview — the onboarding "See your mind" evidence card ───────────
@@ -1393,6 +1449,52 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
         [userId]);
     } catch { /* best-effort — never block the UI on a write */ }
     ok(res, { ok: true });
+  });
+
+  // ── Recovery-key backup gate (U1.3) — the ONE unskippable onboarding step ────
+  // A DURABLE flag in the users.settings blob that records the user has EXTERNALLY
+  // backed up their recovery key (a real password-manager save OR the re-entry
+  // challenge). The wizard's Step 2 forces itself back on relaunch until this is
+  // set, so a quit-before-backup can never leave a vault with an un-backed-up key.
+  //
+  // ⚠️ CARRIES NO KEY MATERIAL. Only a boolean. The recovery key itself never
+  // touches this route (it is read/saved server-side by /api/v1/account/*). Keeping
+  // the flag OUT of the account surface keeps that surface key-only.
+  //
+  // ⚠️ TRI-STATE — the flag distinguishes THREE populations, and conflating them
+  // over-gates or re-reveals the key on upgrade:
+  //   • recovery_key_backed_up === true      → backed up (done).
+  //   • recovery_key_backed_up === false      → a U1.3 FRESH vault, backup PENDING (the
+  //     server writes this explicit false at /setup create). `pending` → the wizard forces
+  //     Step 2 and reveals.
+  //   • recovery_key_backed_up === undefined  → a PRE-U1.3 vault (the flag never existed):
+  //     `pending:false` + `backedUp:false` → NEVER gate, NEVER re-reveal the key.
+  // On a read error we return neither true — biasing AWAY from re-revealing an established
+  // key (the MED regression); a fresh vault recovers on the next poll (the explicit false
+  // is durable), and the key is Keychain-safe with no user data in that window.
+  router.get('/onboarding/recovery-key-status', async (_req, res) => {
+    let v;
+    try {
+      const s = (await db.users.getSettings(userId)) || {};
+      v = s.recovery_key_backed_up;
+    } catch { v = undefined; }
+    ok(res, { ok: true, backedUp: v === true, pending: v === false });
+  });
+
+  // ── WRITE: mark the recovery key externally backed up. Set ONLY when Step 2 is
+  // passed. ⚠️ READ-MODIFY-WRITE — db.users.updateSettings REPLACES THE WHOLE BLOB
+  // (users.js:41), so a bare write would drop taskModels / model-consent / pause
+  // state. Spread the prior settings and add the one key (same discipline as the
+  // pause-state persister above). ⚠️ REPORTS FAILURE (fail-closed): the wizard must
+  // NOT advance past the gate if this write did not land — an ok:true over a failed
+  // write would tell the user "backed up" while the flag stays false, re-gating them
+  // next launch with no idea why. Same polarity as /onboarding/reset.
+  router.post('/onboarding/recovery-key-backed-up', async (_req, res) => {
+    try {
+      const s = (await db.users.getSettings(userId)) || {};
+      await db.users.updateSettings(userId, { ...s, recovery_key_backed_up: true });
+    } catch { return fail(res, 500, 'could not record recovery-key backup'); }
+    ok(res, { ok: true, backedUp: true });
   });
 
   return router;

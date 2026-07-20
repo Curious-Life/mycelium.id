@@ -56,10 +56,62 @@ export function findOllamaBinary({ existsSync = nodeExistsSync, env = process.en
 }
 
 // Only what the daemon needs — never the master key or any vault secret.
+//
+// Proxy vars ARE forwarded (R2-QWENPULL): `ollama serve` reaches the model registry over the
+// network, and on a corporate/VPN box the ONLY route out is the configured proxy. Without these,
+// the spawned daemon dials the registry directly, the connection is dropped, and every pull fails
+// with no hint why. Go reads both upper- and lower-case forms, so we forward both. These are
+// endpoint/allow-list hints, never secrets (a proxy URL may carry credentials, but it is the
+// user's own already-exported env — we neither read nor log its value).
 function allowlistEnv(env) {
   const out = {};
-  for (const k of ['PATH', 'HOME', 'OLLAMA_HOST', 'OLLAMA_MODELS']) {
+  const KEYS = [
+    'PATH', 'HOME', 'OLLAMA_HOST', 'OLLAMA_MODELS',
+    'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY',
+    'https_proxy', 'http_proxy', 'no_proxy',
+  ];
+  for (const k of KEYS) {
     if (env[k]) out[k] = env[k];
+  }
+  return out;
+}
+
+// Scrub credential-bearing substrings from the daemon's stderr tail BEFORE it is
+// returned to the localhost portal (as `detail`) or logged. Low severity — the
+// only surface is loopback-only, single-user V1 — but §1 ("if in doubt, don't
+// log it") and §4 (master-key/secret discipline) say don't ship secrets we don't
+// need. The live vector: we now forward proxy env to `ollama serve` (R2-QWENPULL),
+// so a corporate proxy URL with embedded credentials (http://user:pass@proxy) can
+// appear in a connection error on stderr. We redact:
+//   • URL userinfo — `scheme://user:pass@host` → `scheme://<redacted>@host`
+//     (the proxy-credential case; the host stays, it's useful diagnostics).
+//   • generic secret-looking tokens (JWT / Bearer / sk- / ghp_ / xox*- / long hex),
+//     mirroring crypto/guardians/scrubbers.js SECRET_PATTERNS as defence in depth.
+// The userinfo class is `[^\s/?#]*` — greedy to the LAST `@` before a path/query/
+// fragment boundary — so a password containing `@` still redacts fully (an earlier
+// `[^/@\s]+` stopped at the FIRST `@` and leaked the tail; independent review). It
+// still won't cross whitespace (multiple URLs on a line each redact independently)
+// and won't touch a legit `@` in a PATH (`https://h/p@2x.png` — the `/` bounds it).
+// Residual (documented, not covered): a raw UNENCODED `/` inside userinfo — but
+// that is RFC-3986-invalid and Go percent-encodes/rejects it, so a working proxy
+// URL can't emit it; and non-URL credential forms (`--proxy-user u:p`, a base64
+// `Proxy-Authorization`) are out of scope — the token patterns below are the only
+// backstop for those.
+const SECRET_PATTERNS = [
+  /(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi,                      // URL userinfo (user:pass@)
+  /eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g, // JWT
+  /\bBearer\s+[A-Za-z0-9._~+/-]{8,}=*/gi,                        // bearer tokens
+  /\bsk-[A-Za-z0-9_-]{12,}/g,                                    // OpenAI-style keys
+  /\bghp_[A-Za-z0-9]{20,}/g,                                     // GitHub tokens
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}/g,                             // Slack tokens
+  /\b[0-9a-fA-F]{32,}\b/g,                                       // hex keys (master key = 64 hex)
+];
+
+/** Redact credential-bearing substrings from a daemon stderr string. */
+export function redactDaemonDetail(s) {
+  let out = String(s);
+  for (const re of SECRET_PATTERNS) {
+    out = re.source.includes('@') ? out.replace(re, '$1<redacted>@') : out.replace(re, '[redacted]');
   }
   return out;
 }
@@ -153,7 +205,7 @@ export function createOllamaDaemon({
         return { ok: true, running: true, installed: true, adopted: false };
       }
       if (Date.now() >= deadline) {
-        const tail = errBuf.trim().split('\n').pop() || '';
+        const tail = redactDaemonDetail(errBuf.trim().split('\n').pop() || '');
         return { ok: false, running: false, installed: true, reason: 'start_timeout', detail: tail || undefined };
       }
     }

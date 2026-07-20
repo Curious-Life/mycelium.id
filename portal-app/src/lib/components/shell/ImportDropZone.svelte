@@ -10,20 +10,21 @@
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import { toasts } from '$lib/stores/toast';
-	import { importFiles } from '$lib/import/upload-handlers';
+	import { importFiles, importFolder, filesFromDataTransfer } from '$lib/import/upload-handlers';
 
 	let dragging = $state(false);
 	let busy = $state(false);
 	let counter = 0; // depth counter so nested dragenter/leave don't flicker the overlay
 
-	// Routing (archive→/upload, loose→/upload/file→document-or-attachment) lives in
-	// the shared upload handler — the same logic <ImportField> and the Library
-	// importer use, so a dropped .md becomes a Library document, not an attachment.
-	async function handleFiles(files: File[]) {
+	// Routing (archive→/upload, loose→/upload/file→document-or-attachment, folder→
+	// /import/obsidian) lives in the shared upload handler — the same logic
+	// <ImportField> and the Library importer use, so a dropped .md becomes a Library
+	// document, not an attachment, and a dropped FOLDER lands as a nested folder tree.
+	async function handleFiles(files: File[], isFolder = false) {
 		if (!files.length || busy) return;
 		busy = true;
-		const pending = toasts.info(`Adding ${files.length} item${files.length > 1 ? 's' : ''} to your vault…`, 120000);
-		const r = await importFiles(files);
+		const pending = toasts.info(`Adding ${isFolder ? 'a folder of ' : ''}${files.length} item${files.length > 1 ? 's' : ''} to your vault…`, 120000);
+		const r = isFolder ? await importFolder(files) : await importFiles(files);
 		toasts.remove(pending);
 		busy = false;
 		if (r.imported > 0) toasts.success(r.detail);
@@ -41,8 +42,11 @@
 		const onDrop = (e: DragEvent) => {
 			if (!hasFiles(e)) return;
 			e.preventDefault(); counter = 0; dragging = false;
-			const files = Array.from(e.dataTransfer?.files || []);
-			if (files.length) handleFiles(files);
+			// Read entries synchronously (items go stale after the handler returns),
+			// then expand any dropped directory into a flat File[] before importing.
+			void filesFromDataTransfer(e.dataTransfer).then(({ files, hadDirectory }) => {
+				if (files.length) handleFiles(files, hadDirectory);
+			});
 		};
 
 		window.addEventListener('dragenter', onEnter);

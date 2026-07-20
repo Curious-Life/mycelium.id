@@ -82,8 +82,17 @@ let _current = null;
 // and only restart when you click restart."
 // ⇒ THE VISIBLE REMINDER IS THE PRECONDITION FOR PERSISTING, not a nicety. If a change ever
 // removes the paused indicator or its count from the feed, this decision reverts with it.
-let _processingPaused = false;
-let _pauseRestored = false;           // latch: the persisted flag is read ONCE, at first cycle
+// ⚠️ SPLIT PER STAGE (QA R2-PIPECTL). This was a single `_processingPaused` gating all three
+// on-box stages; the owner could only Stop/Resume EVERYTHING at once. The pipeline overview now
+// wants a co-located Pause/Resume per stage (embed vs categorize), so the one flag becomes two:
+//   • _embedPaused      — stops the embed drain + its self-heal write (the CPU-heavy vectoriser).
+//   • _categorizePaused — stops the L1 label pass AND the L2 semantic-enrich pass (they share one
+//                         Ollama-model block in cycle(), so one flag honestly gates both).
+// The composite helpers below (pauseEnrichProcessing / isEnrichProcessingPaused) preserve the
+// old "all of it" semantics for the global StatusPopover control and the reminder — see there.
+let _embedPaused = false;
+let _categorizePaused = false;
+let _pauseRestored = false;           // latch: the persisted flags are read ONCE, at first cycle
 
 /** Kick the live enrichment drainer if one is running (no-op otherwise). */
 /** Live drainer liveness for the activity feed — null when no drainer is running. */
@@ -196,17 +205,38 @@ export function resetPullBackoff() { try { _current?.resetPullBackoff?.(); } cat
  * persisting is INVISIBLE divergence, while refusing to apply is a visible, reported failure.
  */
 export function pauseEnrichProcessing() {
-  _processingPaused = true;
+  _embedPaused = true;
+  _categorizePaused = true;
   return true;
 }
 /** RESUME processing and kick a cycle immediately so progress moves at once. */
 export function resumeEnrichProcessing() {
-  _processingPaused = false;
+  _embedPaused = false;
+  _categorizePaused = false;
   nudgeEnrichDrainer();
   return true;
 }
-/** Is on-box processing (embed + L1 + L2) currently paused by the user? */
-export function isEnrichProcessingPaused() { return _processingPaused; }
+/**
+ * Is on-box processing paused by the user? Composite = ANY stage paused (embed OR categorize).
+ * This is the reminder's whole point (readiness.processing.paused → the "Processing paused · Resume"
+ * banner): a pause in EITHER stage is a pause in effect the owner should be nudged to lift. The old
+ * single-flag semantics ("all of it") is preserved by pauseEnrichProcessing/resumeEnrichProcessing,
+ * which flip both together for the GLOBAL StatusPopover control.
+ */
+export function isEnrichProcessingPaused() { return _embedPaused || _categorizePaused; }
+
+// ── Per-stage pause (QA R2-PIPECTL) ──────────────────────────────────────────
+// Each stage's Pause/Resume is IN-MEMORY ONLY; the route PERSISTS FIRST and applies second
+// (portal-compat.js), for the same D13 reason the composite does — a pause that evaporates on
+// restart is the invisible divergence D13 exists to remove. Resume nudges a cycle so the resumed
+// stage moves at once. Resumable by construction: both drains re-select their pending set every
+// cycle, so pausing loses nothing.
+export function pauseEmbed() { _embedPaused = true; return true; }
+export function resumeEmbed() { _embedPaused = false; nudgeEnrichDrainer(); return true; }
+export function isEmbedPaused() { return _embedPaused; }
+export function pauseCategorize() { _categorizePaused = true; return true; }
+export function resumeCategorize() { _categorizePaused = false; nudgeEnrichDrainer(); return true; }
+export function isCategorizePaused() { return _categorizePaused; }
 // NB: there is deliberately no in-memory `pausedAt`. WHEN the owner paused is persisted
 // (settings.enrichProcessingPausedAt) and returned by the pause route; §3.2's
 // readiness.processing.pausedAt will read it from settings when that slice is built (it is
@@ -237,9 +267,16 @@ async function restorePauseOnce(db, userId, log) {
     // "Read once" means once SUCCESSFULLY, not once attempted. A failed read costs one retry
     // per 15s cycle until it lands — cheap, and self-healing.
     _pauseRestored = true;
-    if (s?.enrichProcessingPaused === true) {
-      _processingPaused = true;
-      log('[enrich] processing is PAUSED by the owner (persisted) — resume from the activity panel');
+    // Per-stage restore (R2). New vaults persist enrichEmbedPaused / enrichCategorizePaused; a
+    // vault paused under the OLD single flag carries only enrichProcessingPaused, which paused
+    // everything — so honour it as BOTH stages paused (legacy migration). Only an explicit,
+    // successfully-read `true` stops a stage (fail-closed to RUNNING otherwise — see below).
+    const legacy = s?.enrichProcessingPaused === true;
+    if (s?.enrichEmbedPaused === true || legacy) _embedPaused = true;
+    if (s?.enrichCategorizePaused === true || legacy) _categorizePaused = true;
+    if (_embedPaused || _categorizePaused) {
+      const which = _embedPaused && _categorizePaused ? 'processing' : (_embedPaused ? 'embedding' : 'categorizing');
+      log(`[enrich] ${which} is PAUSED by the owner (persisted) — resume from the activity panel`);
     }
   } catch {
     // Fail-soft to RUNNING **for this cycle only**, deliberately (see above): the vault keeps
@@ -819,7 +856,7 @@ export function startEnrichDrainer({
     // a fault — and it outranks 'ok' because nothing is actually labeling. It was missing
     // from the vocabulary entirely, so the one state the user explicitly picked was the one
     // this slice could not express (independent review, 2026-07-16).
-    if (isEnrichProcessingPaused()) {
+    if (isCategorizePaused()) {
       return { status: 'paused', message: 'Labeling is paused — pending messages are waiting.', detail: null, model: m, progress: null };
     }
     if (_faults.has(m)) {
@@ -869,12 +906,11 @@ export function startEnrichDrainer({
     if (_pulling.has(m)) {
       return { status: 'downloading', message: `Downloading ${m}…`, detail: null, model: m, progress: { pct: _pulling.get(m) ?? 0 } };
     }
-    // ⚠️ The pause flag is SHARED, and truthfully so: pauseEnrichProcessing() skips the whole
-    // `if (!isEnrichProcessingPaused())` block in cycle(), which contains the L2 loop as well
-    // as L1. So a paused vault really is not enriching. The flag's NAME says categorize; its
-    // SCOPE is both. Do not "fix" this by reporting 'ok' here — that would resurrect the
-    // dormancy this member exists to expose.
-    if (isEnrichProcessingPaused()) {
+    // ⚠️ L2 shares the CATEGORIZE pause (R2): the categorize block in cycle() gates the L1 label
+    // pass AND the L2 semantic-enrich pass together, so `isCategorizePaused()` is the truthful
+    // signal for both. When the owner Stops categorizing, enrichment really is not running — do
+    // not "fix" this by reporting 'ok', which would resurrect the dormancy this member exposes.
+    if (isCategorizePaused()) {
       return { status: 'paused', message: 'Enrichment is paused — pending messages are waiting.', detail: null, model: m, progress: null };
     }
     if (_faults.has(m)) {
@@ -999,12 +1035,15 @@ export function startEnrichDrainer({
       // previous run's verdicts are retried once; between boots they hold, so the backlog
       // still settles. OUTSIDE the embed gate on purpose — the label half must not wait on
       // :8091 being healthy — but never while paused (the pause stops all on-box churn).
-      if (!_cappedReclaimed && !isEnrichProcessingPaused()) {
+      // Boot reclaim covers BOTH stages (embed-capped + label-gave-up rows), so run it while EITHER
+      // stage is active — only a fully-paused vault (both stopped) skips it. Otherwise a vault that
+      // paused only embedding would never reclaim its label gave-ups, and vice-versa.
+      if (!_cappedReclaimed && !(isEmbedPaused() && isCategorizePaused())) {
         _cappedReclaimed = true;
         try { await reclaimGaveUpRows(db, userId); } catch { /* non-fatal */ }
       }
 
-      if (embedOk && !isEnrichProcessingPaused()) {
+      if (embedOk && !isEmbedPaused()) {
       try {
 
       // SELF-HEAL: retry rows that previously failed for a NON-content reason
@@ -1033,7 +1072,7 @@ export function startEnrichDrainer({
         // the CPU for up to 10k more messages — the control honored at the NEXT cycle, not on
         // the click. §3.9/R3 is "pausing it should HONOR it"; a pause the user watches their
         // fans ignore is the same broken promise as no pause at all.
-        if (isEnrichProcessingPaused()) break;
+        if (isEmbedPaused()) break;
         // R1: BANK PER BATCH, NOT PER CYCLE — the rate must be live DURING a long drain.
         // ⚠️ This loop is up to 200 batches x batchSize 50 = 10,000 messages, which at the design's
         // own cited ~40 msgs/min is ~4.2 HOURS in ONE cycle. Banking after the loop meant
@@ -1202,7 +1241,7 @@ export function startEnrichDrainer({
       // were each a real bug: inside the pause block, a paused vault never stamped and reported
       // 'unknown' forever; below the embed gate, a throwing drain did the same. Do not move them
       // back down for tidiness.
-      if (!isEnrichProcessingPaused()) {
+      if (!isCategorizePaused()) {
         // WAKE THE ON-BOX MODEL FIRST. The Ollama daemon is lazy and the enrich path is the one
         // consumer that nothing else starts it for — so without this, a vault whose owner never
         // opened local chat would leave EVERY message untagged forever (the live-vault dormancy
@@ -1243,7 +1282,7 @@ export function startEnrichDrainer({
           const cycleClassify = await labelClassifier(labelM);
           let tagged = 0;
           for (let i = 0; i < 8; i++) {
-            if (isEnrichProcessingPaused()) break;   // same rule as the embed loop: honor it mid-run
+            if (isCategorizePaused()) break;   // same rule as the embed loop: honor it mid-run
             // BANK PER PASS, exactly like the embed loop (§3.9/R1). enrichCategoriesOnce returns
             // { scanned, enriched, failed } (service.js:194 — NO `skipped` field), so the three
             // cases are read from THOSE fields, not embed's:
@@ -1297,7 +1336,7 @@ export function startEnrichDrainer({
             // (L1: zero). "A pause the user watches their fans ignore is the same broken promise
             // as no pause at all" — and #204's copy says "pause ANY of it", so this line is what
             // makes that sentence true (independent review HIGH-6, 2026-07-17).
-            if (isEnrichProcessingPaused()) break;
+            if (isCategorizePaused()) break;
             // BANK PER PASS, same discipline as L1 and embed. enrichNlpOnce returns
             // { scanned, enriched, failed } (service.js:227). L2 has NO blank/skip path — every
             // scanned row either enriches (nlp_processed = 1) or is isolated to nlp_processed = -1

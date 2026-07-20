@@ -96,3 +96,26 @@ export function lockPath(opts = {})    { return under('vault-lock.json', 'MYCELI
 // Non-secret remote-access config (publicBaseUrl, remoteEnabled, operatorEmail).
 // Secrets do NOT live here — see src/remote/config.js.
 export function remoteConfigPath(opts = {}) { return under('remote.json', 'MYCELIUM_REMOTE_CONFIG', opts); }
+
+// ── Agent mind-file location ────────────────────────────────────────────────
+// The agent's on-disk interior — self.md (loaded every turn), model.md, flagged.md,
+// snapshots/, .authorship.json — lives at <agentRoot>/mind, where agentRoot
+// defaults to <cwd>/data/mind (so the live files dir is data/mind/mind). This
+// resolver used to be duplicated in mcp.js / server-rest.js / portal-character.js
+// with subtle relative-vs-cwd-join differences; it is centralised HERE (the single
+// source of truth for data locations) so backup/restore + the destroy wipe + the
+// agent runtime all agree on ONE directory. A divergence would silently lose the
+// agent's interior on a restore, or leave it behind on a factory reset.
+//   ⚠️ DURABILITY: unlike the db, this is NOT under dataDir()/app_data_dir — it is
+//   cwd-relative, and MYCELIUM_AGENT_ROOT is not actually set by the shell today.
+//   That fragility is tracked as a separate migration; do NOT relocate the default
+//   here without moving existing files. This helper only CENTRALISES today's value.
+export function mindAgentRoot({ env = process.env, cwd = process.cwd() } = {}) {
+  return clean(env.MYCELIUM_AGENT_ROOT) || path.join(cwd, 'data', 'mind');
+}
+/** The directory holding the encrypted `MIND`-magic files: <agentRoot>/mind. */
+export function mindDir(opts = {}) { return path.join(mindAgentRoot(opts), 'mind'); }
+
+// Frozen TTS voice sample(s): <dataDir>/voice-samples/<agentId>.mvs (encrypted,
+// "the identity" — not re-rollable). Carried by backup like uploads/.
+export function voiceSamplesRoot(opts = {}) { return under('voice-samples', 'MYCELIUM_VOICE_SAMPLES_ROOT', opts); }

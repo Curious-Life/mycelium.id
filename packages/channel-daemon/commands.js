@@ -48,7 +48,7 @@ export function createCommandHandler({ vault, sendReply, ownerTelegramId, logPre
     }
 
     const cmd = msg.content.trim().split(/\s+/)[0].toLowerCase().replace(/@.*$/, ''); // strip @botname
-    const reply = (text) => sendReply({ chatId: msg.chatId, text, replyToMessageId: msg.messageId });
+    const reply = (text) => sendReply({ chatId: msg.chatId, text, replyToMessageId: msg.messageId, messageThreadId: msg.messageThreadId });
     const inGroup = msg.channelKind === 'telegram-group';
 
     switch (cmd) {

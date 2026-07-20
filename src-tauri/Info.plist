@@ -9,5 +9,7 @@
   <!-- Pre-Tahoe macOS ignores this and falls back to CFBundleIconFile (icon.icns). -->
   <key>CFBundleIconName</key>
   <string>Mycelium</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Mycelium records a short reference clip, on this device, so your agent can speak in your voice. Audio never leaves your machine.</string>
 </dict>
 </plist>

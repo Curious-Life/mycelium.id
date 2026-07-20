@@ -53,19 +53,23 @@
 		return c.total != null ? `${done} / ${(c.total).toLocaleString()}` : done;
 	}
 
-	// The remedy is LIVE. Each button is enabled and honestly disabled ONLY while its OWN action is
-	// in-flight — keyed by stage.key so the two Resume buttons (paused embed + categorize) guard
-	// independently. The busy set is the double-fire guard: a second click while the first is
-	// outstanding is dropped, so `start()`/a resume POST can never be fired twice from one impatient
-	// user. A failed action is swallowed here — the next readiness poll re-derives the block and the
-	// button simply re-enables; this surface fires the remedy, it never owns the outcome.
+	// The remedy is LIVE. Every button is enabled and honestly disabled ONLY while its OWN action is
+	// in-flight — keyed so co-located buttons (a stage's Stop AND its Restart, or the two stages'
+	// controls) guard independently. The busy set is the double-fire guard: a second click while the
+	// first is outstanding is dropped, so a POST/start() can never fire twice from one impatient user.
+	// A failed action is swallowed here — the next readiness poll re-derives the block and the button
+	// simply re-enables; this surface FIRES the remedy, it never owns the outcome.
 	let busy = $state<Set<string>>(new Set());
 	const isBusy = (key: string) => busy.has(key);
 
+	// The generic blocked-remedy (no_model → Intelligence, too_few/needs_generate → Generate,
+	// embedder_down → check). NOT pause/resume — that is the co-located Stop/Resume control below.
+	// Keyed `${key}:action` so it guards independently of the same stage's Stop/Restart.
 	async function onAction(stage: Stage) {
 		const target = stage.action?.target;
-		if (!target || busy.has(stage.key)) return; // no target, or already in-flight → drop
-		busy = new Set(busy).add(stage.key);
+		const bkey = `${stage.key}:action`;
+		if (!target || busy.has(bkey)) return; // no target, or already in-flight → drop
+		busy = new Set(busy).add(bkey);
 		try {
 			if (target === 'intelligence') {
 				// Approve a labeling model / check a runtime → the Intelligence settings screen. The
@@ -76,17 +80,39 @@
 				// too_few_embedded / needs_generate → the EXISTING generate lifecycle. start() POSTs
 				// /mycelium/generate; we do not re-implement the POST or add auto-advance (Unit 5).
 				await start();
-			} else if (target === 'resume') {
-				// paused → the EXISTING resume route (portal-compat.js:1296) — clears the flag and
-				// kicks a cycle so progress moves at once. Same call StatusPopover.resumeProcessing uses.
-				await apiPost('/portal/enrichment/processing/resume', {});
 			}
 		} catch {
 			/* the next readiness poll re-derives the block; a failed remedy just re-enables the button */
 		} finally {
-			busy = new Set([...busy].filter((k) => k !== stage.key));
+			busy = new Set([...busy].filter((k) => k !== bkey));
 		}
 	}
+
+	// Per-stage Stop/Resume + Restart (QA R2-PIPECTL, R3-PIPESTOP). Each stage's controls hit ITS OWN
+	// route — embed → /portal/enrichment/embed/*, categorize → /portal/enrichment/categorize/* — so
+	// the two stages pause independently (the whole point of splitting the global toggle). `kind`:
+	//   • 'pause'/'resume' → the two-state Stop/Resume (persisted; drainer honors it mid-run).
+	//   • 'restart'        → re-queue that stage's gave-up rows + nudge (retry-failed, per stage).
+	// Keyed `${key}:${kind}` so Stop and Restart on the same stage guard independently.
+	async function onStageControl(stage: Stage, kind: 'pause' | 'resume' | 'restart') {
+		const bkey = `${stage.key}:${kind}`;
+		if (busy.has(bkey)) return;
+		busy = new Set(busy).add(bkey);
+		try {
+			await apiPost(`/portal/enrichment/${stage.key}/${kind}`, {});
+		} catch {
+			/* the next readiness poll re-derives the stage; a failed control just re-enables */
+		} finally {
+			busy = new Set([...busy].filter((k) => k !== bkey));
+		}
+	}
+
+	// The two on-box stages carry co-located controls; the derived stages (cluster/describe/measure)
+	// and import do not. Controls show when there is something to Stop (running) or to Resume/Restart
+	// (paused) — never on a down/no-model block (nothing to stop) or a settled/pending stage.
+	const CONTROLLED = new Set(['embed', 'categorize']);
+	const hasControls = (stage: Stage) =>
+		CONTROLLED.has(stage.key) && (stage.state === 'running' || stage.paused === true);
 </script>
 
 <!-- ⚠️ ALWAYS MOUNTED, and it must SAY SOMETHING for every overall — the design's core fix is that
@@ -142,12 +168,14 @@
 						</span>
 					{:else if state === 'blocked'}
 						<!-- The remedy, inline: the reason text AND the action as a LIVE button (Unit 4).
-						     Enabled; disabled ONLY while its own action is in-flight (aria-busy), keyed by
-						     stage.key so each Resume button guards independently. -->
+						     Enabled; disabled ONLY while its own action is in-flight (aria-busy). The
+						     GENERIC action (Intelligence/Generate/check) renders for every blocked reason
+						     EXCEPT 'paused' — pause/resume is the co-located Stop/Resume control below, so a
+						     paused stage shows Resume there, never a duplicate generic button. -->
 						<span class="pipe-stage-detail blocked">{reasonText(stage.reason)}</span>
-						{#if stage.action}
+						{#if stage.action && stage.reason !== 'paused'}
 							<span class="pipe-action-wrap">
-								<button class="pipe-action" type="button" disabled={isBusy(stage.key)} aria-busy={isBusy(stage.key)} onclick={() => onAction(stage)}>{stage.action.label}</button>
+								<button class="pipe-action" type="button" disabled={isBusy(`${stage.key}:action`)} aria-busy={isBusy(`${stage.key}:action`)} onclick={() => onAction(stage)}>{stage.action.label}</button>
 							</span>
 						{/if}
 					{:else if state === 'done'}
@@ -155,6 +183,20 @@
 					{:else}
 						<!-- pending — muted; a pending reason (waiting_embed / map_unknown) says WHY it waits. -->
 						<span class="pipe-stage-detail pending">{stage.reason ? reasonText(stage.reason) : 'Waiting'}</span>
+					{/if}
+
+					<!-- Co-located per-stage controls (R2/R3): a two-state Stop/Resume + a Restart, for the
+					     embed and categorize stages only, whenever there is work to stop or a pause to lift.
+					     Each hits ITS OWN route so the two stages pause independently. -->
+					{#if hasControls(stage)}
+						<span class="pipe-ctrls">
+							{#if stage.paused}
+								<button class="pipe-ctrl" type="button" data-ctrl="resume" disabled={isBusy(`${stage.key}:resume`)} aria-busy={isBusy(`${stage.key}:resume`)} onclick={() => onStageControl(stage, 'resume')}>Resume</button>
+							{:else}
+								<button class="pipe-ctrl" type="button" data-ctrl="pause" disabled={isBusy(`${stage.key}:pause`)} aria-busy={isBusy(`${stage.key}:pause`)} onclick={() => onStageControl(stage, 'pause')}>Stop</button>
+							{/if}
+							<button class="pipe-ctrl" type="button" data-ctrl="restart" disabled={isBusy(`${stage.key}:restart`)} aria-busy={isBusy(`${stage.key}:restart`)} onclick={() => onStageControl(stage, 'restart')}>Restart</button>
+						</span>
 					{/if}
 				</div>
 			</li>
@@ -222,4 +264,15 @@
 	.pipe-action:hover:not(:disabled) { border-color: var(--color-accent-aurum, #e5b84c); }
 	/* In-flight: non-interactive so it cannot double-fire; reads as busy, not broken. */
 	.pipe-action:disabled { cursor: default; opacity: 0.55; }
+
+	/* Co-located per-stage controls (R2/R3): the two-state Stop/Resume + Restart. Smaller + quieter
+	   than the primary remedy button — these are ongoing controls, not a blocking call to action. */
+	.pipe-ctrls { display: inline-flex; align-items: center; gap: 0.3rem; align-self: flex-start; margin-top: 0.2rem; }
+	.pipe-ctrl {
+		padding: 0.15rem 0.5rem;
+		border-radius: 6px; border: 1px solid var(--glass-border); background: transparent;
+		color: var(--color-text-secondary); font-family: inherit; font-size: 0.66rem; cursor: pointer;
+	}
+	.pipe-ctrl:hover:not(:disabled) { border-color: var(--color-accent-aurum, #e5b84c); color: var(--color-text-primary); }
+	.pipe-ctrl:disabled { cursor: default; opacity: 0.55; }
 </style>

@@ -885,13 +885,17 @@ await t('C1. ⭐ a POLLED get() must cost O(1) DB touches — count EVERY call, 
   // The UNION of everything any consumer polls, kept in lockstep with the consumers:
   //   • the rail @4s (OnboardingFlow.svelte SLICES): data,ai,channel,mindscape,onboarding
   //   • G's §3.8 popover @4s while open (StatusPopover.svelte POLL_SLICES):
-  //     data,tags,processing,models,ai,mindscape — the #211 reviewer note ("when G ships
+  //     data,tags,processing,models,ai,mindscape,pipeline — the #211 reviewer note ("when G ships
   //     its popover poll, C1's POLLED list should gain processing in the same change"),
   //     discharged HERE, in the same change as the poll. `models`/`embedder` are in-memory
   //     health reads (zero DB — this gate proves it); `evidence` must NEVER join this list
   //     (opt-in, not pollable — E1). G-COST below pins the client half: the popover's poll
   //     URLs must buy exactly its declared set, so this union cannot silently under-cover.
-  const POLLED = ['data', 'ai', 'channel', 'mindscape', 'onboarding', 'tags', 'processing', 'models'];
+  //   • ON-3: `pipeline` joins the poll (the vault-health pill rides it). It costs ZERO marginal
+  //     scans — it re-CALLS embedBacklogCached / categoriesBacklogCached (the SWR memos `data`/
+  //     `tags` already buy) and mindscape() (single-flight with the `mindscape` slice), so the
+  //     only movement here is the two shared-backlog budgets tick from 2 → 3 (a third memo reader).
+  const POLLED = ['data', 'ai', 'channel', 'mindscape', 'onboarding', 'tags', 'processing', 'models', 'pipeline'];
 
   await r.get({ slices: POLLED });
   assert.ok(touches.length > 0, 'fixture sanity: the first call must really hit the db');
@@ -908,11 +912,12 @@ await t('C1. ⭐ a POLLED get() must cost O(1) DB touches — count EVERY call, 
   // NAME stayed true. A budget makes the reason enforceable: one PK read is one call; three is
   // somebody scanning.
   const ALLOWED_ON_REPEAT = {
-    // max:2 — bought by `data` AND by `processing.waiting`. Both calls land on ONE SWR memo
-    // in db/messages.js (8s/60s TTL, single-flight), so the second CALL is zero scans in
-    // production — P-COST proves that with a faithful memo model; this double counts calls.
-    embedBacklogCached: { max: 2, why: 'IS the SWR cache (§3.2b) — memoizing a cache is absurd; data + processing share the one memo' },
-    'categoriesBacklogCached': { max: 2, why: 'the same SWR-cache class — bought by tags AND processing.waiting, one memo beneath' },
+    // max:3 — bought by `data`, by `processing.waiting`, AND by `pipeline` (ON-3). All three calls
+    // land on ONE SWR memo in db/messages.js (8s/60s TTL, single-flight), so every CALL past the
+    // first is zero scans in production — P-COST proves that with a faithful memo model; this
+    // counts CALLS, and three memo readers is still one scan.
+    embedBacklogCached: { max: 3, why: 'IS the SWR cache (§3.2b) — memoizing a cache is absurd; data + processing + pipeline share the one memo' },
+    'categoriesBacklogCached': { max: 3, why: 'the same SWR-cache class — bought by tags AND processing.waiting AND pipeline, one memo beneath' },
     'nlpBacklogCached': { max: 1, why: 'the same SWR-cache class — processing.waiting only' },
     'users.getSettings': { max: 1, why: 'processing.pausedAt: SELECT settings FROM users WHERE id=? — ONE PK read (no in-memory pausedAt exists, by design)' },
     'providers.list': { max: 1, why: 'small, indexed table; a query, not a scan' },
@@ -1174,7 +1179,7 @@ await t('G-COST. the popover poll buys EXACTLY its declared slices; evidence + k
   // popover to that set. A slice added to the poll without joining C1's POLLED list fails
   // HERE; `evidence` on the poll (E1's forbidden case) fails here too.
   const r = mountPopover({ PAUSED: '1', UNKNOWN_AFTER_FIRST: '1' });
-  const WANT = ['data', 'tags', 'processing', 'models', 'ai', 'mindscape'].sort().join(',');
+  const WANT = ['data', 'tags', 'processing', 'models', 'ai', 'mindscape', 'pipeline'].sort().join(',');
   assert.ok(r.readinessPollUrls.length >= 3, 'sanity: the poll ticked');
   for (const u of r.readinessPollUrls) {
     const got = (u.split('slices=')[1] || '').split(',').map((s) => s.trim()).filter(Boolean).sort().join(',');
@@ -1191,6 +1196,64 @@ await t('G-AC. R5 — detectOnAC is EXPORTED from portal-system.js (reuse, not c
   assert.ok(v === null || typeof v === 'boolean', `detectOnAC resolves boolean (macOS) or null (unknown/non-macOS) — got ${JSON.stringify(v)}; it must never throw and never fabricate a power state`);
 });
 
+
+// ── ON-3) the adaptive vault-health pill (QA-LEDGER §"ON-3 locked design") ─────
+// The pipeline stage machine, relocated out of onboarding into THIS activity bar as one pill:
+// quiet when fine, loud only on error, expanding to the shipped PipelineStatus. Proven by
+// MOUNTING the real StatusPopover (the pill lives in it) — the same mount discipline as the
+// G-family, driving the `pipeline` slice fixture the popover now polls.
+await t('ON-3a. healthy ⇒ "● Vault · all green", QUIET — no persistent stage count (the locked design)', async () => {
+  const r = mountPopover({ PIPELINE: 'done' });
+  assert.equal(r.pillState, 'healthy', `a done pipeline reads healthy — got "${r.pillState}"`);
+  assert.ok(r.pillVisible && /Vault/.test(r.pillText) && /all green/.test(r.pillText),
+    `the calm pill must render "Vault · all green" — got "${r.pillText}"`);
+  // ⭐ THE locked requirement: NO count when fine. A digit here is the persistent stage count
+  // ON-3 deletes ("quiet when fine, loud only when it matters").
+  assert.equal(r.pillHasDigits, false,
+    `the healthy pill must carry NO count — a digit is the persistent stage count ON-3 removes: "${r.pillText}"`);
+  // It is the SUMMARY, above/outside the per-service status rows (not another row).
+  assert.equal(r.pillOutsideStatusRows, true, 'the pill is the summary — it sits outside the status rows');
+  // Quiet = collapsed: the heavy PipelineStatus detail is NOT mounted until asked.
+  assert.equal(r.pillDetailBeforeClick, false, 'the detail must be collapsed until the pill is clicked');
+});
+
+await t('ON-3b. working ⇒ "◐ Mapping… <stage> <done>/<total>" — the live running stage + its counts', async () => {
+  const r = mountPopover({ PIPELINE: 'working' });
+  assert.equal(r.pillState, 'working', `a running pipeline reads working — got "${r.pillState}"`);
+  assert.ok(/Mapping/.test(r.pillText) && /embed/.test(r.pillText),
+    `the working pill names the running stage — got "${r.pillText}"`);
+  // The live per-stage progress: the fixture embeds 812 / 1204 (localised), so the counts must show.
+  assert.ok(/812/.test(r.pillText) && /1,?204/.test(r.pillText),
+    `the working pill shows the running stage's live counts — got "${r.pillText}"`);
+});
+
+await t('ON-3c. ⭐ error ⇒ "▲ N stage(s) need attention" and clicking EXPANDS the real PipelineStatus + inline remedy', async () => {
+  const r = mountPopover({ PIPELINE: 'error' });
+  assert.equal(r.pillState, 'error', `a blocked/error pipeline reads error — got "${r.pillState}"`);
+  assert.ok(/needs? attention/.test(r.pillText), `the error pill names the attention count — got "${r.pillText}"`);
+  assert.ok(/\b1\b/.test(r.pillText), `one blocked stage ⇒ "1 stage needs attention" — got "${r.pillText}"`);
+  // ⭐ Clicking expands the SHIPPED component, not a re-derivation: the .pipe root, the ordered
+  // six-stage machine, AND the inline remedy button (blocked no_model ⇒ "Approve a labeling model").
+  assert.equal(r.pillDetailAfterClick, true, 'clicking the pill must mount the expanded detail');
+  assert.equal(r.pillDetailHasPipeRoot, true,
+    'the expanded detail must be the REAL PipelineStatus (its .pipe root), never a hand-rolled list');
+  assert.deepEqual(r.pillDetailStageKeys, ['import', 'embed', 'categorize', 'cluster', 'describe', 'measure'],
+    `the expanded detail renders the ordered stage machine — got ${JSON.stringify(r.pillDetailStageKeys)}`);
+  assert.equal(r.pillDetailHasRemedy, true,
+    'a blocked stage in the expanded detail must carry its inline remedy button (the whole point of expanding on error)');
+  // ⭐ COST: expanding is a pure subscribe to the already-fed store — it must add ZERO fetches.
+  assert.equal(r.expandAddedFetches, 0,
+    'expanding the pill fired a network read — the detail rides the store refresh() already fed, never its own fetch');
+});
+
+await t('ON-3d. the CONTROL — an unknown-always pipeline reads the QUIET pill, never a fabricated state', async () => {
+  // §3.2a on the pill: before any good read (or a slice that fails every time) the pill must not
+  // impersonate healthy/working/error. It reads the neutral "checking" state. This is the control
+  // that stops ON-3a's "no digits" from passing simply because the pill rendered nothing.
+  const r = mountPopover({ PIPELINE: 'done', UNKNOWN_ALWAYS: '1' });
+  assert.equal(r.pillState, 'quiet', `an all-unknown pipeline must read the neutral pill — got "${r.pillState}"`);
+  assert.ok(/Vault/.test(r.pillText), `even quiet, the pill still says what it is — got "${r.pillText}"`);
+});
 
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));

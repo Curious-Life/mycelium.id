@@ -33,6 +33,7 @@ const STREAM_MAX_JSON_BYTES = Number(process.env.MYCELIUM_IMPORT_STREAM_MAX_JSON
 import { importMyceliumVault } from './vault-import.js';
 import { captureMessage } from './capture.js';
 import { deriveCreatedAt, TS_PROVENANCE } from './timestamp.js';
+import { extractExifDate } from './exif.js';
 import { uploadAttachment } from './upload.js';
 import { saveDocument } from '../core/document-store.js';
 import { extractDocumentText } from '../enrich/extract-document.js';
@@ -157,6 +158,15 @@ async function runLooseFile(input, ctx) {
     userId: ctx.userId, bytes, fileName: filename, fileType, asMessage: false,
   });
   const isImage = isImageType(fileType);
+  // Original occurrence time (R4-TIMESTAMPS): for an IMAGE, prefer EXIF
+  // DateTimeOriginal (when the photo was taken) over the file mtime (the copy
+  // moment); for any file, the client mtime beats import-now. Recorded with
+  // provenance so a now()-fallback is a countable fact, never a silent stamp.
+  const exifDate = isImage ? extractExifDate(bytes) : null;
+  const { iso: createdAtIso, provenance: tsProvenance } = deriveCreatedAt([
+    ...(exifDate ? [{ value: exifDate, provenance: TS_PROVENANCE.EXIF }] : []),
+    { value: input.lastModified, provenance: TS_PROVENANCE.FILE_MTIME },
+  ]);
   let caption = null;
   if (isImage) { try { caption = await describeImage({ bytes }); } catch { caption = null; } }
   else if (isAudioType(fileType)) {
@@ -171,7 +181,8 @@ async function runLooseFile(input, ctx) {
     || (isImage ? (label ? `Image: ${label}` : 'Uploaded image') : (label ? `File: ${label}` : 'Uploaded file'));
   const msg = await captureMessage(ctx.db, {
     userId: ctx.userId, content: msgText, source: 'upload', attachmentId,
-    metadata: { kind: isImage ? 'image' : 'file', fileName: filename, fileType, captioned: Boolean(caption) },
+    createdAt: createdAtIso,
+    metadata: { kind: isImage ? 'image' : 'file', fileName: filename, fileType, captioned: Boolean(caption), ts_provenance: tsProvenance },
   }, ctx.enqueueEnrichment);
   return { importResult: { type: isImage ? 'image' : 'file', attachmentId, messageId: msg?.id || null, captioned: Boolean(caption) } };
 }

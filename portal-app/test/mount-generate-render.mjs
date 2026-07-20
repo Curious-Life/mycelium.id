@@ -198,7 +198,7 @@ const STUB = '<script>let { ...rest } = $props();</script><div class="stub-child
 // the gen-status block. It is NOT this gate's subject (generate rendering is), lives below the
 // block under test, and reads its own store; an inert stub is faithful, but its specifier must be
 // rewired or the compiled import throws before mount.
-for (const name of ['Sparkline', 'ImportField', 'ScanForData', 'SourceCatalog', 'IntelligenceScreen', 'AISettings', 'TelegramConnect', 'PipelineStatus']) {
+for (const name of ['ActivityBars', 'ImportField', 'ScanForData', 'SourceCatalog', 'IntelligenceScreen', 'AISettings', 'TelegramConnect', 'PipelineStatus']) {
   const out = compile(STUB, { generate: 'client', name, css: 'injected' });
   writeFileSync(`${GEN}/${name}.gen.js`, out.js.code);
 }
@@ -236,7 +236,7 @@ const rewired = out.js.code
   .replace(/from\s+['"]\$app\/navigation['"]/g, `from './navigation-stub.js'`)
   .replace(/from\s+['"]\$lib\/stores\/mindscape['"]/g, `from './mindscape.js'`)
   .replace(/from\s+['"]\$lib\/stores\/activity['"]/g, `from './activity-stub.js'`)
-  .replace(/from\s+['"]\$lib\/components\/mindscape\/Sparkline\.svelte['"]/g, `from './Sparkline.gen.js'`)
+  .replace(/from\s+['"]\$lib\/components\/mindscape\/ActivityBars\.svelte['"]/g, `from './ActivityBars.gen.js'`)
   .replace(/from\s+['"]\$lib\/components\/import\/ImportField\.svelte['"]/g, `from './ImportField.gen.js'`)
   .replace(/from\s+['"]\$lib\/components\/import\/ScanForData\.svelte['"]/g, `from './ScanForData.gen.js'`)
   .replace(/from\s+['"]\$lib\/components\/import\/SourceCatalog\.svelte['"]/g, `from './SourceCatalog.gen.js'`)

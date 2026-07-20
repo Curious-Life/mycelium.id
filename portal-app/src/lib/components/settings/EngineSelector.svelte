@@ -59,6 +59,24 @@
 	}
 
 	onMount(load);
+
+	// EN-1: the harness gates (subscription connected · `claude` installed · engine shipped)
+	// can change WHILE this screen stays open — the user connects their subscription through a
+	// browser PKCE tab, or installs Claude Code in a terminal, both of which blur then refocus
+	// this window. Without a re-check, Claude Code only lights up after a full page reload.
+	// Re-run load() when the window regains focus / the tab becomes visible again. Event-driven
+	// (zero idle cost — no poll), matching the codebase idiom (MindscapeInvite/MindscapeView).
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		const onFocus = () => { load(); };
+		const onVisible = () => { if (document.visibilityState === 'visible') load(); };
+		window.addEventListener('focus', onFocus);
+		document.addEventListener('visibilitychange', onVisible);
+		return () => {
+			window.removeEventListener('focus', onFocus);
+			document.removeEventListener('visibilitychange', onVisible);
+		};
+	});
 </script>
 
 <div class="engine">

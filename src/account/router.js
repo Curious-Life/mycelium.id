@@ -9,6 +9,7 @@ import Busboy from 'busboy';
 import { existsSync } from 'node:fs';
 import { unlock } from '../crypto/keys.js';
 import { buildVaultArchive, restoreVaultArchive, ARCHIVE_EXT, BACKUP_SOFT_LIMIT_BYTES } from './backup.js';
+import { mindDir, voiceSamplesRoot } from '../paths.js';
 import {
   generateUserMaster, deriveSystemKey, normalizeKey,
   writeKeychain, readUserMaster, deleteKeychain, keychainAvailable,
@@ -163,9 +164,24 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
       openInStore(target); // best-effort: reveal it natively so the user SEES it
       return res.json({ ok: true, opened: target, item: 'Mycelium Recovery Key' });
     } catch (err) {
-      const msg = target === '1password'
-        ? 'Could not save to 1Password — is the `op` CLI installed and signed in?'
-        : sanitizeErr(err);
+      // 1Password: map the keystore's `.code` (op_not_installed / op_signed_out)
+      // to a SPECIFIC, actionable message with the CLI-install link, instead of
+      // the old generic "is it installed and signed in?" (ON-2). The install/setup
+      // URL is the frontend's job to render as a hyperlink; the text carries it too
+      // for the non-hyperlink surfaces (channels, logs).
+      const OP_DOCS = 'https://developer.1password.com/docs/cli/get-started/';
+      let msg;
+      if (target === '1password') {
+        if (err?.code === 'op_not_installed') {
+          msg = `Couldn't save to 1Password — the 1Password CLI (\`op\`) isn't installed. Install it: ${OP_DOCS}`;
+        } else if (err?.code === 'op_signed_out') {
+          msg = 'Couldn\'t save to 1Password — the `op` CLI is installed but not signed in. Turn on "Integrate with 1Password CLI" in the 1Password app (Settings → Developer), or run `op signin`, then try again.';
+        } else {
+          msg = `Couldn't save to 1Password. Make sure the 1Password CLI (\`op\`) is installed and signed in: ${OP_DOCS}`;
+        }
+      } else {
+        msg = sanitizeErr(err);
+      }
       return res.status(500).json({ error: 'save_failed', message: msg });
     }
   });
@@ -180,7 +196,7 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
     if (!isInitialized()) return res.status(409).json({ error: 'vault_not_open' });
     if (!dbPath || !existsSync(kcvPath)) return res.status(400).json({ error: 'no_vault' });
     try {
-      const { buffer, manifest } = await buildVaultArchive({ dbPath, kcvPath, uploadsRoot, remoteConfigPath });
+      const { buffer, manifest } = await buildVaultArchive({ dbPath, kcvPath, uploadsRoot, remoteConfigPath, mindRoot: mindDir(), voiceSamplesRoot: voiceSamplesRoot() });
       if (buffer.length > BACKUP_SOFT_LIMIT_BYTES) {
         console.warn(`[backup] large vault snapshot: ${buffer.length} bytes (> soft limit) — buffered in memory`);
       }
@@ -222,7 +238,7 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
       if (!buf || !buf.length) return res.status(400).json({ error: 'no_file', message: 'Choose a .myvault backup file.' });
       const overwrite = fields.overwrite === 'true' || fields.overwrite === '1';
       try {
-        const { manifest, movedAside } = await restoreVaultArchive({ buffer: buf, dbPath, kcvPath, uploadsRoot, overwrite });
+        const { manifest, movedAside } = await restoreVaultArchive({ buffer: buf, dbPath, kcvPath, uploadsRoot, mindRoot: mindDir(), voiceSamplesRoot: voiceSamplesRoot(), overwrite });
         return res.json({ ok: true, needsKey: true, manifest: { createdAt: manifest.createdAt, uploadCount: manifest.uploadCount }, replaced: movedAside.length > 0 });
       } catch (err) {
         if (err?.code === 'vault_exists') return res.status(409).json({ error: 'vault_exists', message: 'A vault already exists on this device. Confirm to replace it.' });

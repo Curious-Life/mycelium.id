@@ -10,8 +10,7 @@
  * request URL to api.telegram.org over TLS.
  */
 import { readFile } from 'node:fs/promises';
-
-const TELEGRAM_MAX_LEN = 4096; // Telegram hard cap per message.
+import { markdownToTelegramHtml, chunkMarkdown, normalizeThreadId, TELEGRAM_MAX_LEN } from './telegram-format.js';
 
 /**
  * @param {object} deps
@@ -24,21 +23,6 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
   if (typeof fetchImpl !== 'function') throw new TypeError('createTelegramApi: fetch required');
 
   const base = `https://api.telegram.org/bot${botToken}`;
-
-  /** Split a long body on paragraph/line boundaries so each chunk ≤ 4096. */
-  function chunk(text) {
-    if (text.length <= TELEGRAM_MAX_LEN) return [text];
-    const parts = [];
-    let rest = text;
-    while (rest.length > TELEGRAM_MAX_LEN) {
-      let cut = rest.lastIndexOf('\n', TELEGRAM_MAX_LEN);
-      if (cut < TELEGRAM_MAX_LEN * 0.5) cut = TELEGRAM_MAX_LEN; // no good boundary → hard cut
-      parts.push(rest.slice(0, cut));
-      rest = rest.slice(cut).replace(/^\n/, '');
-    }
-    if (rest) parts.push(rest);
-    return parts;
-  }
 
   return {
     /**
@@ -138,38 +122,70 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
     },
 
     /**
-     * Send a text message. Chunks bodies over 4096 chars. Resolves
+     * Send a text message, FORMATTED for Telegram (R2-TGFORMAT). The agent emits
+     * natural markdown; the egress converter adapts it to Telegram HTML here — the
+     * single send chokepoint — never via the model prompt. Each chunk is sent with
+     * `parse_mode:'HTML'`; on a Telegram 400 (a construct HTML still rejects) the
+     * SAME chunk is retried as the ORIGINAL plaintext, so a reply is never lost.
+     *
+     * `message_thread_id` (R3-TGTHREAD) routes the reply into a forum topic; it is
+     * set on every chunk. Chunks bodies that expand past 4096. Resolves
      * { sent, total, httpStatus } on full or partial success; throws an Error
      * carrying { httpStatus, partial, sent } when delivery fails.
      * @param {object} a
      * @param {string|number} a.chatId
      * @param {string} a.text
      * @param {string|number} [a.replyToMessageId]
+     * @param {string|number} [a.messageThreadId]   forum topic id (Bot API 6.3+)
      */
-    async sendMessage({ chatId, text, replyToMessageId }) {
-      const chunks = chunk(text);
+    async sendMessage({ chatId, text, replyToMessageId, messageThreadId }) {
+      // Chunk the MARKDOWN first (boundary-safe, fence-balanced), then convert each
+      // chunk INDEPENDENTLY so an HTML tag can never straddle two messages.
+      const chunks = chunkMarkdown(text);
+      const threadId = normalizeThreadId(messageThreadId);
       let sent = 0;
       let lastStatus = 0;
+
+      const post = (body) => fetchImpl(`${base}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
       for (let i = 0; i < chunks.length; i++) {
-        const body = {
+        const raw = chunks[i];
+        const html = markdownToTelegramHtml(raw);
+        const common = {
           chat_id: chatId,
-          text: chunks[i],
+          ...(threadId != null ? { message_thread_id: threadId } : {}),
           // reply-to only on the first chunk. `reply_parameters` is the current
           // API (Bot API 7.0+); `reply_to_message_id` is deprecated.
           ...(replyToMessageId != null && i === 0 ? { reply_parameters: { message_id: Number(replyToMessageId) } } : {}),
         };
+        // Prefer formatted HTML; if the converted body somehow overflows the hard
+        // cap, send the (shorter) plaintext chunk instead of a doomed 400.
+        const useHtml = html && html.length <= TELEGRAM_MAX_LEN;
         let res;
         try {
-          res = await fetchImpl(`${base}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-            signal: AbortSignal.timeout(timeoutMs),
-          });
+          res = useHtml
+            ? await post({ ...common, text: html, parse_mode: 'HTML' })
+            : await post({ ...common, text: raw.slice(0, TELEGRAM_MAX_LEN) });
         } catch (e) {
           const err = new Error(`telegram sendMessage network error: ${e.message}`);
           err.httpStatus = 0; err.partial = sent > 0; err.sent = sent;
           throw err;
+        }
+        // Formatting rejected (400) → retry this chunk as plain text so the message
+        // is never lost (mirrors reference/bots/telegram-bot.js:298).
+        if (useHtml && res.status === 400) {
+          try {
+            res = await post({ ...common, text: raw.slice(0, TELEGRAM_MAX_LEN) });
+          } catch (e) {
+            const err = new Error(`telegram sendMessage network error: ${e.message}`);
+            err.httpStatus = 0; err.partial = sent > 0; err.sent = sent;
+            throw err;
+          }
         }
         lastStatus = res.status;
         if (!res.ok) {
@@ -212,11 +228,15 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
      * @param {string|number} a.chatId
      * @param {string} a.filePath        path to the remuxed .ogg (from the TTS module)
      * @param {string|number} [a.replyToMessageId]
+     * @param {string|number} [a.messageThreadId]   forum topic id (Bot API 6.3+)
      */
-    async sendVoice({ chatId, filePath, replyToMessageId }) {
+    async sendVoice({ chatId, filePath, replyToMessageId, messageThreadId }) {
       const bytes = await readFile(filePath);
       const form = new FormData();
       form.append('chat_id', String(chatId));
+      // Route the voice note into the same forum topic as the turn (R3-TGTHREAD).
+      const threadId = normalizeThreadId(messageThreadId);
+      if (threadId != null) form.append('message_thread_id', String(threadId));
       form.append('voice', new Blob([bytes], { type: 'audio/ogg' }), 'voice.ogg');
       // reply_parameters (current API) as a JSON-encoded multipart field.
       if (replyToMessageId != null) form.append('reply_parameters', JSON.stringify({ message_id: Number(replyToMessageId) }));

@@ -342,68 +342,103 @@ fn update_check_due(app: &tauri::AppHandle) -> bool {
     true
 }
 
-/// Fire-and-forget update check. Gated on a real signing pubkey + the throttle;
-/// on an available, signature-verified update it shows a NATIVE prompt (no webview
-/// IPC), and on accept downloads + installs + relaunches. Every failure path is
-/// fail-open — a down endpoint or network error never blocks or crashes the app.
-/// The vault lives outside the .app bundle, so the swap preserves all user data.
-fn maybe_check_for_update(app: tauri::AppHandle) {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-    use tauri_plugin_updater::UpdaterExt;
+/// The update the UI banner reads (see get_available_update). Cleared to None when a
+/// check finds we're current, set when a newer signed build is available.
+#[derive(Clone)]
+struct AvailableUpdate {
+    version: String,
+    notes: String,
+}
 
+/// Managed state: the latest known available update (None = up to date / not checked).
+#[derive(Default)]
+struct UpdateState(std::sync::Mutex<Option<AvailableUpdate>>);
+
+/// Run one signature-verified check and STORE the result in UpdateState for the in-app
+/// banner to surface (no native dialog — the sidebar banner is the notification, and the
+/// user drives the install via install_update). Fail-open: a down endpoint never throws.
+async fn perform_update_check(app: tauri::AppHandle) {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("[updater] unavailable: {e}");
+            return;
+        }
+    };
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let info = AvailableUpdate {
+                version: update.version.clone(),
+                notes: update.body.clone().unwrap_or_default(),
+            };
+            eprintln!("[updater] update available: {}", info.version);
+            if let Some(state) = app.try_state::<UpdateState>() {
+                *state.0.lock().unwrap() = Some(info);
+            }
+        }
+        Ok(None) => {
+            if let Some(state) = app.try_state::<UpdateState>() {
+                *state.0.lock().unwrap() = None; // we're current
+            }
+        }
+        Err(e) => eprintln!("[updater] check failed: {e}"), // fail-open
+    }
+}
+
+/// Launch-time check — gated on a real signing pubkey + the throttle (so frequent
+/// restarts don't hammer GitHub). start_update_ticker() then keeps checking while the
+/// app runs so an always-open app still notices new releases.
+fn maybe_check_for_update(app: tauri::AppHandle) {
     if !updater_pubkey_is_real(&app) || !update_check_due(&app) {
         return;
     }
+    tauri::async_runtime::spawn(async move { perform_update_check(app).await });
+}
 
-    tauri::async_runtime::spawn(async move {
-        let updater = match app.updater() {
-            Ok(u) => u,
-            Err(e) => {
-                eprintln!("[updater] unavailable: {e}");
-                return;
-            }
-        };
-        match updater.check().await {
-            Ok(Some(update)) => {
-                let version = update.version.clone();
-                let notes = update.body.clone().unwrap_or_default();
-                let app_for_dialog = app.clone();
-                app.dialog()
-                    .message(format!(
-                        "Mycelium {version} is available.\n\n{}\n\nUpdate now? The app will restart; your vault is untouched.",
-                        notes.trim()
-                    ))
-                    .title("Update available")
-                    .kind(MessageDialogKind::Info)
-                    .buttons(MessageDialogButtons::OkCancelCustom(
-                        "Update & Restart".into(),
-                        "Later".into(),
-                    ))
-                    .show(move |accepted| {
-                        if !accepted {
-                            return;
-                        }
-                        let app_for_install = app_for_dialog.clone();
-                        tauri::async_runtime::spawn(async move {
-                            // download_and_install verifies the Ed25519 signature over
-                            // the tarball against the configured pubkey before swapping.
-                            match update
-                                .download_and_install(|_chunk, _total| {}, || {})
-                                .await
-                            {
-                                // restart() fires RunEvent::Exit → reap() kills the
-                                // node/frpc/caddy sidecars first, so the new version
-                                // doesn't collide on :4711 / :8787.
-                                Ok(()) => app_for_install.restart(),
-                                Err(e) => eprintln!("[updater] install failed: {e}"),
-                            }
-                        });
-                    });
-            }
-            Ok(None) => { /* already up to date */ }
-            Err(e) => eprintln!("[updater] check failed: {e}"), // fail-open
-        }
+/// Periodic re-check while the app is running (closes the "left-open app never re-checks"
+/// gap). A std thread sleeps the interval, then spawns the async check. Pubkey-gated.
+fn start_update_ticker(app: tauri::AppHandle) {
+    if !updater_pubkey_is_real(&app) {
+        return;
+    }
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(UPDATE_CHECK_INTERVAL_SECS));
+        let a = app.clone();
+        tauri::async_runtime::spawn(async move { perform_update_check(a).await });
     });
+}
+
+/// The in-app banner polls this. Returns `{ version, notes }` or null — built as a
+/// serde_json::Value (the crate's convention: serde_json, no serde derive) so it
+/// serializes over the IPC boundary.
+#[tauri::command]
+fn get_available_update(state: tauri::State<UpdateState>) -> Option<serde_json::Value> {
+    state
+        .0
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|u| serde_json::json!({ "version": u.version, "notes": u.notes })))
+}
+
+/// The banner's "Update" button invokes this. Re-verifies against the pubkey, downloads +
+/// installs, then restarts (reap() kills the sidecars first so ports don't collide).
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    match updater.check().await.map_err(|e| e.to_string())? {
+        Some(update) => {
+            update
+                .download_and_install(|_chunk, _total| {}, || {})
+                .await
+                .map_err(|e| e.to_string())?;
+            app.restart(); // fires RunEvent::Exit → reap() before the new version binds
+            #[allow(unreachable_code)]
+            Ok(())
+        }
+        None => Err("no update available".into()),
+    }
 }
 
 /// Relaunch the app after a destroy-vault (factory reset). The node REST endpoint
@@ -790,6 +825,7 @@ fn main() {
                 http_pid,
                 rest_pid,
             });
+            app.manage(UpdateState::default()); // the in-app update banner reads this
 
             // Wait for the REST server to bind before pointing the webview at it.
             // A build that adds DB migrations makes the FIRST boot slow: snapshot-on-boot
@@ -907,7 +943,8 @@ fn main() {
             // .dev data dir) must never self-update to the public release. Fire-and-
             // forget, throttled, signature-verified, fail-open — never blocks launch.
             if !is_dev {
-                maybe_check_for_update(app.handle().clone());
+                maybe_check_for_update(app.handle().clone()); // once, at launch
+                start_update_ticker(app.handle().clone()); // + every 6h while running
             }
 
             Ok(())
@@ -927,7 +964,11 @@ fn main() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![destroy_and_relaunch])
+        .invoke_handler(tauri::generate_handler![
+            destroy_and_relaunch,
+            get_available_update,
+            install_update
+        ])
         .build(tauri::generate_context!())
         .expect("error while building the mycelium tauri application");
 

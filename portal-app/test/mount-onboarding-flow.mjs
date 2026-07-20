@@ -91,7 +91,11 @@ let js = out.js.code
   .replace(/from ['"]\$lib\/stores\/navigation['"]/g, `from './nav-stub.js'`)
   .replace(/from ['"]\$app\/environment['"]/g, `from './env-stub.js'`)
   .replace(/from ['"]\$app\/navigation['"]/g, `from './goto-stub.js'`)
-  .replace(/from ['"]\.\/MyceliumCanvas\.svelte['"]/g, `from './canvas.js'`);
+  .replace(/from ['"]\.\/MyceliumCanvas\.svelte['"]/g, `from './canvas.js'`)
+  // S11: the welcome MODAL became the OnboardingWizard child. This harness proves the
+  // RAIL's liveness, not the wizard — so stub the wizard leaf exactly like MyceliumCanvas
+  // (the real wizard is a full sub-tree; compiling it here is neither needed nor in scope).
+  .replace(/from ['"]\.\/wizard\/OnboardingWizard\.svelte['"]/g, `from './canvas.js'`);
 writeFileSync(`${GEN}/Flow.js`, js);
 
 const { JSDOM } = await import('jsdom');

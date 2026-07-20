@@ -24,6 +24,7 @@
  * @property {(a:{target:any,content:string,replyToMessageId?:any})=>Promise<{sent:number,total:number,httpStatus:number}>} send
  */
 import crypto from 'node:crypto';
+import { normalizeThreadId } from '../telegram-format.js';
 
 function isStrictLoopback(req) {
   const ip = req.socket?.remoteAddress || '';
@@ -126,6 +127,15 @@ export function createSendHandler(deps) {
     const turn = getActiveTurn();
     const inboundKind = sourceKind || turn?.channelKind || null;
     const inboundId = sourceId || turn?.channelId || null;
+    // Forum topic routing (R3-TGTHREAD, Telegram): an explicit body value wins;
+    // otherwise inherit the active turn's topic — but ONLY when replying to the
+    // SAME chat the turn came from (a cross-chat send must never leak one chat's
+    // topic id onto another). Normalized to a positive int; platforms that don't
+    // support threads (Discord) ignore it in their adapter.
+    const bodyThreadId = normalizeThreadId(body.messageThreadId);
+    const turnThreadId = (turn && String(turn.channelId) === String(target))
+      ? normalizeThreadId(turn.messageThreadId) : null;
+    const messageThreadId = bodyThreadId ?? turnThreadId;
     const crossChannel = inboundId != null && String(inboundId) !== String(target);
 
     const baseAudit = {
@@ -168,7 +178,7 @@ export function createSendHandler(deps) {
 
     // 7. + 8. send → audit + persist [+ voice]
     try {
-      const result = await adapter.send({ target, content, replyToMessageId });
+      const result = await adapter.send({ target, content, replyToMessageId, messageThreadId });
       dedup.mark(target, content);
       console.log(`[${logPrefix}] ${platform} delivered (${result.sent}/${result.total}) → ${preview(content)}`);
 
@@ -181,7 +191,7 @@ export function createSendHandler(deps) {
 
       let voiceResult = null;
       if (voice && voicePipeline) {
-        try { voiceResult = await voicePipeline.deliver({ target, text: content, replyToMessageId }); }
+        try { voiceResult = await voicePipeline.deliver({ target, text: content, replyToMessageId, messageThreadId }); }
         catch (e) { console.error(`[${logPrefix}] voice pipeline threw (text delivered): ${e.message}`); }
       }
 

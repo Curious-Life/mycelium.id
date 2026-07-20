@@ -78,6 +78,19 @@ const EMBED_STALL_MS = 75_000;
 // the clock. Shorter than EMBED_STALL_MS because `unknown` is a hard read failure, not slow
 // progress — there is nothing to wait for, only to re-attempt.
 const UNKNOWN_STALL_MS = 25_000;
+// A GENUINELY empty vault reports `total: 0` PERSISTENTLY; an ACTIVE import reports a TRANSIENT 0 —
+// the /processing-status count rides db.messages.embedBacklogCached (an SWR memo), so mid-import it
+// can serve a stale pre-import snapshot, and right at the start no row has committed yet. Both read
+// as `total === 0` WITHOUT `unknown` (the scan SUCCEEDED; it just measured a 0 that is already
+// stale). Hard-erroring on the first 0 turned that race into a false "Import some conversations
+// first — there is nothing to map yet" MID-IMPORT (QA P1-C). So this is bounded exactly like
+// unknownSince: keep polling on a 0 (calm, no error), and surface the empty-vault terminal ONLY once
+// the 0 PERSISTS past EMPTY_CONFIRM_MS. An active import populates counts within a tick or two, well
+// under this window, so the false error can never fire; a truly-empty vault waits this out once and
+// then gets the honest message. `unknown` (above) already owns the scan-FAILURE case; this owns a
+// real-but-transient 0. Shorter than EMBED_STALL_MS: a 0 needs only enough time to rule out the
+// pre-population race, not a whole plateau.
+const EMPTY_CONFIRM_MS = 12_000;
 // A POST /generate that never answers strands the spinner in 'starting' FOREVER (the sibling of
 // the `unknown` hang: the server accepted the request but the socket wedged). start() arms the
 // poll BEFORE awaiting the POST, so tick() bounds a hung request even while it is outstanding —
@@ -119,6 +132,7 @@ let timer: ReturnType<typeof setInterval> | null = null;
 let priorDurationMs: number | null = null;
 let embedStallSince = 0; // epoch ms of the last embedded-count change (stall clock)
 let unknownSince = 0; // epoch ms of the first consecutive `unknown` count (scan-failure clock)
+let zeroSince = 0; // epoch ms of the first consecutive `total===0` count (transient-empty clock, P1-C)
 let startingSince = 0; // epoch ms of entering 'starting' (hung-POST watchdog clock)
 
 const patch = (p: Partial<GenState>) => generate.update((s) => ({ ...s, ...p }));
@@ -272,7 +286,24 @@ async function pollEmbedding() {
   const total = Number(p.total ?? 0);
   const es = embedder?.status;
 
-  if (total === 0) { stop(); patch({ phase: 'error', embedder, error: 'Import some conversations first — there is nothing to map yet.' }); return; }
+  // A `total === 0` is EITHER a truly-empty vault OR the transient-0 race of an active import (see
+  // EMPTY_CONFIRM_MS). We cannot tell the two apart from one poll, so DON'T hard-error on the first
+  // 0 — bound it with a clock (mirrors unknownSince). Keep polling calmly; only after 0 PERSISTS past
+  // EMPTY_CONFIRM_MS do we conclude the vault is genuinely empty and show the honest terminal. Any
+  // non-zero total below clears the clock, so a mid-import 0 that populates within a tick or two
+  // never reaches the error (QA P1-C).
+  if (total === 0) {
+    const now = Date.now();
+    if (zeroSince === 0) zeroSince = now;
+    if (now - zeroSince > EMPTY_CONFIRM_MS) {
+      stop();
+      patch({ phase: 'error', embedder, error: 'Import some conversations first — there is nothing to map yet.' });
+      return;
+    }
+    patch({ embedder, message: 'Preparing your conversations…' });
+    return;
+  }
+  zeroSince = 0; // a real, non-zero total clears the transient-empty clock
 
   // The embedder is broken (deps missing / keeps crashing / model failed). Don't
   // spin at "0/N" forever — surface its actionable message + offer Retry.
@@ -307,6 +338,7 @@ async function pollEmbedding() {
 /** Trigger a run (button click). Idempotent-ish: server single-flights concurrent starts. */
 export async function start() {
   unknownSince = 0; // a fresh attempt restarts every stall clock
+  zeroSince = 0;
   startingSince = Date.now(); // arm the hung-POST watchdog (checkStarting)
   patch({ phase: 'starting', error: '', message: '', retryable: false });
   run(); // arm the poll NOW so tick()→checkStarting bounds a POST that never answers
@@ -359,6 +391,7 @@ export function reset() {
   stop();
   embedStallSince = 0;
   unknownSince = 0;
+  zeroSince = 0;
   startingSince = 0;
   ss((x) => x.removeItem(SS_KEY));
   generate.set({ ...initial });
@@ -373,6 +406,7 @@ export function reset() {
 export async function retry() {
   unknownSince = 0;
   embedStallSince = 0;
+  zeroSince = 0;
   await start();
 }
 

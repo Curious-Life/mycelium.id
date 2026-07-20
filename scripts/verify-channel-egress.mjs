@@ -21,6 +21,7 @@ import { createEnvelopeDedup } from '../packages/channel-daemon/dedup.js';
 import { createRateLimiter } from '../packages/channel-daemon/ratelimit.js';
 import { createDaemonApp } from '../packages/channel-daemon/server.js';
 import { setActiveTurn, getActiveTurn, _resetForTests } from '../packages/channel-daemon/inbound-context.js';
+import { markdownToTelegramHtml, chunkMarkdown, normalizeThreadId } from '../packages/channel-daemon/telegram-format.js';
 
 const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? ` — ${d}` : ''}`); };
@@ -285,6 +286,71 @@ const HASH = crypto.createHash('sha256').update(TEXT, 'utf8').digest('hex');
   // correct token but a forwarded (proxied) request → not strict-loopback → enforced.
   r = await req(port, 'POST', '/telegram/send', { headers: { 'x-egress-trusted': TOKEN, 'x-forwarded-for': '203.0.113.9' }, body: { chatId: '999', text: `${TEXT} proxied`, trusted: true } });
   rec('C22. correct token but XFF present (proxied) → not trusted (403)', r.status === 403, `status=${r.status}`);
+  await close(server);
+}
+
+// ── R2-TGFORMAT: the egress markdown → Telegram HTML converter (pure) ────────
+// The converter is the LOAD-BEARING correctness path (the model is never trusted
+// to emit valid escaped markup). Assert the constructs + the security escaping.
+{
+  const html = markdownToTelegramHtml('**b** _i_ `c` [x](https://e.com/a?u=1&v=2)');
+  rec('F1. bold/italic/code/link convert to Telegram HTML',
+    html === '<b>b</b> <i>i</i> <code>c</code> <a href="https://e.com/a?u=1&amp;v=2">x</a>', html);
+
+  rec('F2. header → <b>, list → bullets, table → row-groups',
+    markdownToTelegramHtml('# Hi') === '<b>Hi</b>'
+    && markdownToTelegramHtml('- a\n- b') === '• a\n• b'
+    && markdownToTelegramHtml('| K | V |\n|---|---|\n| a | 1 |').includes('<b>a</b>'));
+
+  // SECURITY: raw HTML in the reply must be escaped, never emitted as live markup.
+  const xss = markdownToTelegramHtml('<script>alert(1)</script> a & b');
+  rec('F3. SECURITY — HTML is escaped (no live tags), & escaped',
+    xss === '&lt;script&gt;alert(1)&lt;/script&gt; a &amp; b', xss);
+
+  // Code contents are escaped AND not re-parsed as emphasis (fence protects them).
+  const code = markdownToTelegramHtml('```\n**x** <y>\n```');
+  rec('F4. fenced code: contents escaped, emphasis NOT applied inside',
+    code === '<pre>**x** &lt;y&gt;</pre>', code);
+
+  // Chunking: short = 1 chunk; a large body splits under the budget on boundaries.
+  const big = 'paragraph.\n\n'.repeat(1000);
+  const chunks = chunkMarkdown(big);
+  rec('F5. chunkMarkdown splits large bodies under the 4096 cap',
+    chunkMarkdown('hi').length === 1 && chunks.length > 1 && chunks.every((c) => c.length <= 4096));
+
+  rec('F6. normalizeThreadId accepts positive ints only',
+    normalizeThreadId('42') === 42 && normalizeThreadId(0) === null
+    && normalizeThreadId(-1) === null && normalizeThreadId('x') === null && normalizeThreadId(null) === null);
+}
+
+// ── R3-TGTHREAD: message_thread_id is carried body/turn → adapter.send ───────
+// The forum-topic id must reach the external Bot API body. Two sources: an explicit
+// body value, or the active turn's topic (inherited ONLY for the SAME chat).
+{
+  _resetForTests();
+  const { server, sends } = makeApp({ authorityAllowed: true });
+  const port = await listen(server);
+
+  // (a) explicit body.messageThreadId → adapter receives it.
+  let r = await req(port, 'POST', '/telegram/send', { headers: { 'x-egress-provenance': 'agent-explicit' }, body: { chatId: OWNER, text: TEXT, messageThreadId: 77 } });
+  rec('T1. explicit body messageThreadId reaches adapter.send',
+    r.json?.delivered === true && sends[sends.length - 1]?.messageThreadId === 77, `thread=${sends[sends.length - 1]?.messageThreadId}`);
+
+  // (b) active turn topic is INHERITED when the reply targets the same chat.
+  setActiveTurn({ source: 'telegram', channelKind: 'telegram', channelId: OWNER, messageThreadId: '55' });
+  r = await req(port, 'POST', '/telegram/send', { headers: { 'x-egress-provenance': 'agent-explicit' }, body: { chatId: OWNER, text: `${TEXT} topic` } });
+  rec('T2. active-turn topic inherited for the SAME chat',
+    r.json?.delivered === true && sends[sends.length - 1]?.messageThreadId === 55, `thread=${sends[sends.length - 1]?.messageThreadId}`);
+
+  // (c) a cross-chat send must NOT leak the turn's topic onto another chat.
+  r = await req(port, 'POST', '/telegram/send', { headers: { 'x-egress-provenance': 'agent-explicit' }, body: { chatId: '222', text: `${TEXT} elsewhere`, crossChannelReason: 'note' } });
+  rec('T3. cross-chat send does NOT inherit the turn topic',
+    r.json?.delivered === true && sends[sends.length - 1]?.messageThreadId == null, `thread=${sends[sends.length - 1]?.messageThreadId}`);
+
+  // (d) an invalid/malformed thread id is dropped (never reaches the wire).
+  _resetForTests();
+  r = await req(port, 'POST', '/telegram/send', { headers: { 'x-egress-provenance': 'agent-explicit' }, body: { chatId: OWNER, text: `${TEXT} bad`, messageThreadId: -9 } });
+  rec('T4. malformed messageThreadId is dropped', sends[sends.length - 1]?.messageThreadId == null, `thread=${sends[sends.length - 1]?.messageThreadId}`);
   await close(server);
 }
 

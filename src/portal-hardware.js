@@ -13,7 +13,7 @@
 import express from 'express';
 import { detectHardware } from './hardware/detect.js';
 import { recommendModels } from './hardware/recommend.js';
-import { createOllamaClient, isValidModelName } from './hardware/ollama.js';
+import { createOllamaClient, isValidModelName, classifyOllamaFault } from './hardware/ollama.js';
 import { ONBOX_TASKS } from './inference/resolve.js';   // deleting a LOCAL file may only revoke LOCAL approvals
 import { createOllamaDaemon } from './hardware/ollama-daemon.js';
 import { CATALOG } from './hardware/catalog.js';
@@ -103,8 +103,20 @@ export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, dete
         await ollama.pullModel(name, (ev) => send({ status: ev.status, completed: ev.completed, total: ev.total }));
         send({ done: true, ok: true });
       }
-    } catch {
-      send({ done: true, ok: false, error: 'pull failed' });
+    } catch (err) {
+      // Surface the CLASSIFIED reason, not the constant 'pull failed' (R2-QWENPULL diagnosability
+      // defect). The three kinds — runtime-unreachable / download-failed / out-of-space — each map
+      // to a different, actionable owner message on the frontend, so the button can finally say
+      // WHY. And log it: this interactive route swallowed the error silently, so a failed pull left
+      // no trace anywhere. The models-dir username in an ollama disk error is scrubbed first (§1/§8;
+      // same regex as drainer.js scrubFaultDetail); registry HOSTS are kept — they're useful, not PII.
+      const fault = classifyOllamaFault(err, 'pull');
+      const detail = String(err?.message || err)
+        .replace(/(\/(?:Users|home)\/)[^/\s]+/gi, '$1<user>')
+        .replace(/([A-Za-z]:\\Users\\)[^\\\s]+/gi, '$1<user>')
+        .slice(0, 160);
+      console.error(`[portal-hardware] pull failed model=${name} fault=${fault} detail=${detail}`);
+      send({ done: true, ok: false, error: fault });
     }
     try { res.write('data: [DONE]\n\n'); res.end(); } catch { /* ignore */ }
   });

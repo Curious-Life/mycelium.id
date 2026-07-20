@@ -157,7 +157,7 @@
 					<div class="text-[var(--color-accent-coral)] text-sm py-12 text-center">{manageError}</div>
 				{:else}
 					<p class="text-[0.7rem] text-[var(--color-text-tertiary)] mb-4">
-						Manage display name, Claude subscription, bot tokens, and inspect runtime state per agent. Click a row to expand.
+						Manage each agent's identity — name, engine &amp; status, personality — plus Claude subscription, bot tokens, and runtime state. Click a row to expand.
 					</p>
 					<div class="flex flex-col gap-2">
 						{#each agents as agent (agent.id)}

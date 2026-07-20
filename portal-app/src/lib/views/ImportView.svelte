@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { uploadFile as chunkedUpload } from '$lib/chunked-upload';
-	import { prepareFile } from '$lib/import/upload-handlers';
+	import { prepareFile, filesFromDataTransfer } from '$lib/import/upload-handlers';
 	import SourceCatalog from '$lib/components/import/SourceCatalog.svelte';
 	import ScanForData from '$lib/components/import/ScanForData.svelte';
 	import { api } from '$lib/api';
@@ -64,6 +64,8 @@
 	// Obsidian folder import — native picker in the desktop app, <input
 	// webkitdirectory> in the browser. Both POST to /portal/import/obsidian.
 	let folderInput = $state<HTMLInputElement>();
+	// Generic (non-Obsidian) "Import a folder" picker on the source-selection screen.
+	let genericFolderInput = $state<HTMLInputElement>();
 	let isTauri = $state(false);
 	onMount(() => {
 		isTauri = typeof window !== 'undefined'
@@ -178,11 +180,18 @@
 
 	// Drag-and-drop: drop a file anywhere on the upload card instead of browsing.
 	let dragOver = $state(false);
-	function onDrop(e: DragEvent) {
+	async function onDrop(e: DragEvent) {
 		e.preventDefault();
 		dragOver = false;
-		const dropped = e.dataTransfer?.files;
-		if (dropped && dropped.length) { files = dropped; error = null; }
+		// Capture the plain FileList synchronously (it goes stale after an await) for
+		// the archive/loose-file path; expand a dropped FOLDER into its notes + media.
+		const droppedList = e.dataTransfer?.files ?? null;
+		const { files: walked, hadDirectory } = await filesFromDataTransfer(e.dataTransfer);
+		if (hadDirectory) {
+			if (walked.length) { error = null; await importVaultFiles(walked); }
+			return;
+		}
+		if (droppedList && droppedList.length) { files = droppedList; error = null; }
 	}
 	function onDragOver(e: DragEvent) { e.preventDefault(); dragOver = true; }
 	function onDragLeave(e: DragEvent) { e.preventDefault(); dragOver = false; }
@@ -275,10 +284,25 @@
 	async function onFolderChosen() {
 		const list = folderInput?.files;
 		if (!list || !list.length) return;
-		importing = true; error = null; statusMsg = 'Reading vault…';
+		await importVaultFiles(Array.from(list));
+	}
+
+	async function onGenericFolderChosen() {
+		const list = genericFolderInput?.files;
+		if (!list || !list.length) return;
+		await importVaultFiles(Array.from(list));
+	}
+
+	// Shared folder-import core — used by the picker (onFolderChosen) AND a dropped
+	// folder (onDrop). Reads .md/.markdown/.txt notes + media, POSTs to the obsidian
+	// endpoint (which builds the folder tree + folder_id). Any folder works — the
+	// path is not Obsidian-specific, just the one importer that nests documents.
+	async function importVaultFiles(list: File[]) {
+		if (!list.length) return;
+		importing = true; error = null; statusMsg = 'Reading folder…';
 		try {
-			const mdFiles = Array.from(list).filter((f) => /\.md$/i.test(f.name));
-			if (!mdFiles.length) { error = 'No .md notes found in that folder.'; return; }
+			const mdFiles = list.filter((f) => /\.(md|markdown|txt)$/i.test(f.name));
+			if (!mdFiles.length) { error = 'No notes (.md, .markdown, .txt) found in that folder.'; return; }
 			// webkitRelativePath = "<pickedDir>/sub/note.md" — the picked dir is the
 			// vault; send it as vaultName and strip it so relPaths are vault-relative.
 			const vaultName = (((mdFiles[0] as any).webkitRelativePath as string) || '').split('/')[0] || undefined;
@@ -521,6 +545,18 @@
 					<p class="text-xs text-[var(--color-text-tertiary)] mt-1">{src.hint}</p>
 				</button>
 			{/each}
+			<!-- Generic folder import — any folder of notes, not tied to Obsidian.
+			     Drag a desktop folder onto the window, or click to choose one. -->
+			<button
+				onclick={() => genericFolderInput?.click()}
+				disabled={importing}
+				class="card p-5 text-left hover:border-[var(--color-accent)] transition-colors disabled:opacity-60"
+			>
+				<h3 class="text-sm font-medium text-[var(--color-text-emphasis)]">Import a folder</h3>
+				<p class="text-xs text-[var(--color-text-secondary)] mt-1">Bring in any folder of notes from your Mac</p>
+				<p class="text-xs text-[var(--color-text-tertiary)] mt-1">{importing ? (statusMsg || 'Importing…') : 'Choose a folder — its .md, .markdown and .txt files become documents in a matching Library folder (subfolders preserved). Or just drag the folder onto this window.'}</p>
+			</button>
+			<input bind:this={genericFolderInput} type="file" webkitdirectory multiple class="sr-only" onchange={onGenericFolderChosen} />
 		</div>
 
 		{#if connectors.length}

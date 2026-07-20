@@ -93,7 +93,7 @@ const MIN_EMBEDDED = 5;
  *                                    in-memory throughput status the `pipeline` slice feeds to
  *                                    embedEta/categorizeEta. Injectable so a gate can drive a rate.
  */
-export function createReadiness({ db, userId, embedderHealth, labelerHealth, enricherHealth, transcriberHealth, isProcessingPaused = isEnrichProcessingPaused, now = Date.now, drainerStatus = getEnrichDrainerStatus } = {}) {
+export function createReadiness({ db, userId, embedderHealth, labelerHealth, enricherHealth, transcriberHealth, isProcessingPaused = isEnrichProcessingPaused, isEmbedPaused, isCategorizePaused, now = Date.now, drainerStatus = getEnrichDrainerStatus } = {}) {
   if (!db) throw new TypeError('createReadiness: db required');
   if (!userId) throw new TypeError('createReadiness: userId required');
 
@@ -655,8 +655,15 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       // `pending` (honest "map not known"), never asserting "no map". embed/categorize stay truthful —
       // a mindscape hiccup must not blank the stages we DO know.
       const msUnknown = Boolean(ms?.unknown);
-      let paused = false;
-      try { paused = Boolean(isProcessingPaused?.()); } catch { paused = false; }
+      // Per-stage pause (QA R2). Each Stop/Resume control drives its OWN stage — embed vs categorize.
+      // ⚠️ FALL BACK to the global isProcessingPaused when a per-stage reader is not injected: that
+      // keeps a single-flag caller (and verify-pipeline-status, which injects only isProcessingPaused)
+      // driving BOTH stages, while PRODUCTION passes the real per-stage readers (server-rest.js) so
+      // the two controls are genuinely independent. Each stage reads ONLY its own flag below.
+      const embedPausedFn = isEmbedPaused || isProcessingPaused;
+      const categorizePausedFn = isCategorizePaused || isProcessingPaused;
+      let embedPaused = false; try { embedPaused = Boolean(embedPausedFn?.()); } catch { embedPaused = false; }
+      let categorizePaused = false; try { categorizePaused = Boolean(categorizePausedFn?.()); } catch { categorizePaused = false; }
       const st = (() => { try { return drainerStatus?.(); } catch { return null; } })();
       const hstat = (fn) => { try { return fn?.()?.status || 'unknown'; } catch { return 'unknown'; } };
       const embStatus = hstat(embedderHealth);
@@ -677,22 +684,25 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
         : { key: 'import', state: 'pending' });
 
       // embed — the vectors. paused OUTRANKS a down embedder (a choice is not a fault); a running
-      // embed carries the measured ETA (embedEta — the activity feed's own math, reused).
-      if (total === 0) stages.push({ key: 'embed', state: 'pending' });
-      else if (embedPending <= 0) stages.push({ key: 'embed', state: 'done', count: { done: embedded, total } });
-      else if (paused) stages.push({ key: 'embed', state: 'blocked', count: { done: embedded, total }, reason: 'paused', action: resume });
-      else if (DOWN.has(embStatus)) stages.push({ key: 'embed', state: 'blocked', count: { done: embedded, total }, reason: 'embedder_down', action: checkEmbedder });
-      else stages.push({ key: 'embed', state: 'running', count: { done: embedded, total }, etaSeconds: embedEta(st, embedPending, paused) });
+      // embed carries the measured ETA (embedEta — the activity feed's own math, reused). Every
+      // embed stage carries `paused: embedPaused` so the co-located Stop/Resume control (R2) knows
+      // its two-state label without a second read.
+      if (total === 0) stages.push({ key: 'embed', state: 'pending', paused: embedPaused });
+      else if (embedPending <= 0) stages.push({ key: 'embed', state: 'done', count: { done: embedded, total }, paused: embedPaused });
+      else if (embedPaused) stages.push({ key: 'embed', state: 'blocked', count: { done: embedded, total }, reason: 'paused', action: resume, paused: true });
+      else if (DOWN.has(embStatus)) stages.push({ key: 'embed', state: 'blocked', count: { done: embedded, total }, reason: 'embedder_down', action: checkEmbedder, paused: false });
+      else stages.push({ key: 'embed', state: 'running', count: { done: embedded, total }, etaSeconds: embedEta(st, embedPending, embedPaused), paused: false });
 
       // categorize — the on-box labels. no_model is a CHOICE, surfaced whenever data exists (the
       // biggest silent stall, §"The problem" #1); it OUTRANKS paused so the missing-consent remedy
-      // is the one shown. Nothing embedded yet ⇒ nothing to categorize (pending, no nag).
-      if (embedded === 0) stages.push({ key: 'categorize', state: 'pending' });
-      else if (labStatus === 'no_model') stages.push({ key: 'categorize', state: 'blocked', reason: 'no_model', action: approveModel });
-      else if (paused && catPending > 0) stages.push({ key: 'categorize', state: 'blocked', count: { done: catTagged, total: catTotal }, reason: 'paused', action: resume });
-      else if (DOWN.has(labStatus)) stages.push({ key: 'categorize', state: 'blocked', reason: 'ollama_down', action: checkLabeler });
-      else if (catPending > 0) stages.push({ key: 'categorize', state: 'running', count: { done: catTagged, total: catTotal }, etaSeconds: categorizeEta(st, catPending, paused, false) });
-      else stages.push({ key: 'categorize', state: 'done', count: { done: catTagged, total: catTotal } });
+      // is the one shown. Nothing embedded yet ⇒ nothing to categorize (pending, no nag). `paused`
+      // is categorizePaused (its own control), independent of embed's.
+      if (embedded === 0) stages.push({ key: 'categorize', state: 'pending', paused: categorizePaused });
+      else if (labStatus === 'no_model') stages.push({ key: 'categorize', state: 'blocked', reason: 'no_model', action: approveModel, paused: categorizePaused });
+      else if (categorizePaused && catPending > 0) stages.push({ key: 'categorize', state: 'blocked', count: { done: catTagged, total: catTotal }, reason: 'paused', action: resume, paused: true });
+      else if (DOWN.has(labStatus)) stages.push({ key: 'categorize', state: 'blocked', reason: 'ollama_down', action: checkLabeler, paused: categorizePaused });
+      else if (catPending > 0) stages.push({ key: 'categorize', state: 'running', count: { done: catTagged, total: catTotal }, etaSeconds: categorizeEta(st, catPending, categorizePaused, false), paused: false });
+      else stages.push({ key: 'categorize', state: 'done', count: { done: catTagged, total: catTotal }, paused: categorizePaused });
 
       // cluster — the map. A map that EXISTS is done. Below the floor the user is stranded unless
       // told: blocked, too_few_embedded, with a Generate action (§"Filling the gaps" #2). Above the

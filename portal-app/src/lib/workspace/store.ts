@@ -170,6 +170,27 @@ function createWorkspace() {
 	let lastPrimary: string | null = null;
 	let urlSyncEnabled = false;   // flipped by the (app) layout once the router is up
 
+	// ── App-level VIEW HISTORY (QA R4-SWIPEBACK) ────────────────────────────────
+	// The workspace author its own URL with replaceState (never goto — see the subscribe below), so
+	// in-app view switches create NO browser history entry and the OS/browser Back has nothing to
+	// return to. This is the app's OWN back-stack of the FOCUSED tab's view transitions, so a
+	// two-finger swipe (Header.svelte binds the gesture) can return to the previously-viewed screen —
+	// app-level, across views (Areas → Timeline → Settings), not just a mindscape drill-up.
+	// A location is the {viewId, params} the active tab showed. back() replays the previous one
+	// through the SAME in-place navigation the sidebar uses, so URL-sync + primaryView follow for free.
+	type NavLoc = { viewId: string; params: Record<string, unknown> };
+	const navBack: NavLoc[] = [];
+	let navigatingBack = false;   // guard: a back() replay must not re-push onto the stack
+	const NAV_MAX = 50;           // bound the stack (a long session must not grow it unboundedly)
+	const navStackChanged = writable(0);   // bumped so a consumer ($canGoBack) can react to depth
+	const locEq = (a: NavLoc, b: NavLoc) => a.viewId === b.viewId && sameParams(a.params, b.params);
+	function recordNav(prev: NavLoc | undefined, next: NavLoc) {
+		if (navigatingBack || !prev || locEq(prev, next)) return;   // no self-loop, no dupes
+		navBack.push({ viewId: prev.viewId, params: { ...prev.params } });
+		if (navBack.length > NAV_MAX) navBack.shift();
+		navStackChanged.update((n) => n + 1);
+	}
+
 	subscribe((s) => {
 		if (!browser) return;
 		if (saveTimer) clearTimeout(saveTimer);
@@ -236,6 +257,11 @@ function createWorkspace() {
 		openInActiveTab(viewId: string, params: Record<string, unknown> = {}) {
 			update((s) => {
 				if (!viewExists(viewId)) return s;
+				// R4: record the screen we are LEAVING onto the back-stack before it changes, so a
+				// swipe-back can return to it. Captured from the pre-update state; recordNav no-ops on a
+				// self-navigation, a dupe, or while replaying a back().
+				const leaving = activeTabOf(s);
+				if (leaving) recordNav({ viewId: leaving.viewId, params: leaving.params }, { viewId, params });
 				const key = tabKey(viewId, params);
 				// 1. An existing tab for this key wins — focus it (never duplicate).
 				for (const l of allLeaves(s.root)) {
@@ -388,11 +414,34 @@ function createWorkspace() {
 			urlSyncEnabled = true;
 		},
 
+		// ── R4-SWIPEBACK: app-level back navigation ────────────────────────────
+		/** True iff there is a previously-viewed screen to return to. Reactive: subscribe so a
+		 *  swipe/back affordance can enable itself. */
+		canGoBack: {
+			subscribe(run: (v: boolean) => void) {
+				return navStackChanged.subscribe(() => run(navBack.length > 0));
+			},
+		},
+		/** Navigate to the previously-viewed screen (the swipe-left / macOS back gesture). Replays the
+		 *  last back-stack location through the SAME in-place navigation the sidebar uses, guarded so the
+		 *  replay itself is not re-pushed. Returns true iff it navigated (there was history to pop). */
+		back(): boolean {
+			const prev = navBack.pop();
+			if (!prev) return false;
+			navStackChanged.update((n) => n + 1);
+			navigatingBack = true;
+			try { api.openInActiveTab(prev.viewId, prev.params); }
+			finally { navigatingBack = false; }
+			return true;
+		},
+
 		getState(): WorkspaceState {
 			return get(store);
 		},
 		reset() {
 			set(defaultState());
+			navBack.length = 0;   // R4: a fresh workspace has no back-history
+			navStackChanged.update((n) => n + 1);
 			if (browser) localStorage.removeItem(STORAGE_KEY);
 		},
 	};

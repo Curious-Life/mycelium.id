@@ -13,11 +13,15 @@
 //       twice — stage-hf-models.sh).
 //   V4  FAIL-SOFT — a failing provision surfaces in state.error and NEVER throws
 //       the caller (kokoro-model.js precedent, preserved).
-//   V5  RENDER SEAM — with no frozen voice sample the service answers 501
-//       "voice-sample-pending" and the daemon provider FAILS SOFT (throws a typed
-//       TTSProviderError), never a fabricated 'ok' WAV.
-//   V6  CHANNEL PATH — when the service DOES return WAV, the renamed qwen provider
-//       still drives pure-JS OGG/Opus → a Telegram-ready chunk (no regression).
+//   V5  RENDER SEAM — the confined daemon POSTs to the VAULT's loopback render
+//       endpoint (it has no key/sample). With no frozen sample the vault answers
+//       501 "voice-sample-pending" and the daemon provider FAILS SOFT (throws a
+//       typed TTSProviderError), never a fabricated 'ok' WAV. V5b: the daemon
+//       sends ONLY {text} — no ref_audio/key crosses the confinement boundary.
+//   V6  CHANNEL PATH — when the vault returns WAV, the qwen provider still drives
+//       pure-JS OGG/Opus → a Telegram-ready chunk (no regression). V6d/e/f drive
+//       the REAL src/internal-router.js voice-render endpoint end to end (WAV
+//       round-trip, agentId PINNED to 'personal-agent', 501 fail-soft).
 //   V7  TOP-LINE HONESTY (server) — model ready + opted-in but NO voice sample ⇒
 //       GET /settings/tts returns enabled:false + qwen.samplePending:true. The top
 //       line must mean "a voice message will be delivered", not "a model landed".
@@ -125,11 +129,16 @@ function sineWav({ freq = 220, seconds = 1.2, rate = 24000 }) {
   h.write('data', 36); h.writeUInt32LE(data.length, 40);
   return Buffer.concat([h, data]);
 }
-// mode: 'pending' → 501 voice-sample-pending (the SEAM); 'wav' → real WAV bytes.
-function stubService(mode) {
+// Stub the VAULT's loopback render endpoint (src/internal-router.js) — the wire
+// the CONFINED daemon now POSTs to (R3-TTSVOICE). The daemon never reaches :8094
+// directly (it has no key/sample). mode: 'pending' → 501 voice-sample-pending
+// (the SEAM); 'wav' → real WAV bytes; records the body so we can assert the daemon
+// sends ONLY {text,instruct} and NEVER a ref_audio / key.
+function stubVaultRender(mode, seen) {
   return http.createServer((req, res) => {
-    if (req.method === 'POST' && req.url === '/tts') {
+    if (req.method === 'POST' && req.url === '/api/v1/internal/voice-render') {
       let body = ''; req.on('data', (c) => (body += c)); req.on('end', () => {
+        try { seen && (seen.body = JSON.parse(body || '{}')); } catch { /* */ }
         if (mode === 'pending') {
           const j = JSON.stringify({ ok: false, error: 'voice-sample-pending' });
           res.writeHead(501, { 'Content-Type': 'application/json', 'Content-Length': j.length }); res.end(j);
@@ -142,30 +151,35 @@ function stubService(mode) {
   });
 }
 
-// V5 — the render SEAM: no frozen sample ⇒ 501 ⇒ the provider throws a typed
-// error (fail-soft), it NEVER returns a fabricated WAV.
+// V5 — the render SEAM: no frozen sample ⇒ the vault answers 501 ⇒ the provider
+// throws a typed error (fail-soft), it NEVER returns a fabricated WAV.
 {
-  const srv = stubService('pending');
+  const seen = {};
+  const srv = stubVaultRender('pending', seen);
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   const port = srv.address().port;
-  process.env.QWEN_TTS_URL = `http://127.0.0.1:${port}`;
+  process.env.MYCELIUM_API_URL = `http://127.0.0.1:${port}`;
   const { qwenProvider } = await import('../packages/channel-daemon/tts/providers/qwen.js');
   let result = null, err = null;
   try { result = await qwenProvider.synthesize('hello there', ''); } catch (e) { err = e; }
-  rec('V5. RENDER SEAM — a 501 "voice-sample-pending" throws a typed error, never a fabricated WAV',
+  rec('V5. RENDER SEAM — the vault\'s 501 "voice-sample-pending" throws a typed error, never a fabricated WAV',
     result === null && err && err.name === 'TTSProviderError' && (err.code === 'voice-sample-pending' || err.status === 501),
     `result=${result ? 'WAV(!)' : 'null'} err=${err ? `${err.name}/${err.code || err.status}` : 'none'}`);
+  // CONFINEMENT: the daemon sends ONLY the line — never a ref_audio / sample / key.
+  rec('V5b. CONFINEMENT — daemon POSTs only {text}; no ref_audio_b64 / key crosses the boundary',
+    seen.body && seen.body.text === 'hello there' && !('ref_audio_b64' in seen.body) && !('ref_text' in seen.body),
+    `body=${JSON.stringify(seen.body)}`);
   srv.close();
 }
 
-// V6 — the CHANNEL path: when the service returns WAV, the renamed provider still
-// drives pure-JS OGG/Opus → a Telegram-ready chunk (mirrors the removed K2/K3).
+// V6 — the CHANNEL path: when the vault returns WAV, the provider still drives
+// pure-JS OGG/Opus → a Telegram-ready chunk (mirrors the removed K2/K3).
 {
-  const srv = stubService('wav');
+  const srv = stubVaultRender('wav');
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   const port = srv.address().port;
   process.env.QWEN_TTS_ENABLED = '1';
-  process.env.QWEN_TTS_URL = `http://127.0.0.1:${port}`;
+  process.env.MYCELIUM_API_URL = `http://127.0.0.1:${port}`;
   process.env.TTS_PROVIDER = 'qwen';
   const tts = await import('../packages/channel-daemon/tts/index.js?voice');
   const { readFile } = await import('node:fs/promises');
@@ -180,10 +194,58 @@ function stubService(mode) {
     okChunks.length >= 1 && head === 'OggS', `chunks=${chunks.length} ok=${okChunks.length} head="${head}"`);
   for (const ch of chunks) await ch.cleanup?.();
   // Fail-closed: with the opt-in off, qwen is not configured → no provider.
-  delete process.env.QWEN_TTS_ENABLED; delete process.env.QWEN_TTS_URL;
+  delete process.env.QWEN_TTS_ENABLED; delete process.env.MYCELIUM_API_URL;
   const cfg = await import('../packages/channel-daemon/tts/config.js?voice');
   rec('V6c. with the opt-in off, qwen is not configured → resolveProvider null (fail-closed)',
     cfg.resolveProvider() === null);
+  srv.close();
+}
+
+// V6d — END-TO-END WIRE: drive the REAL qwen provider against the REAL vault
+// internal-router endpoint (a stub RENDERER injected so no key/sample is needed).
+// Proves: (a) daemon → /api/v1/internal/voice-render → renderer → WAV round-trips;
+// (b) the endpoint PINS agentId='personal-agent' regardless of the daemon; (c) a
+// renderer 501 surfaces as the honest fail-soft throw; (d) instruct is threaded.
+{
+  const express = (await import('express')).default;
+  const { internalRouter } = await import('../src/internal-router.js');
+  const rendererCalls = [];
+  const stubRenderer = {
+    async renderWithSample(a) {
+      rendererCalls.push(a);
+      if (a.text === '__pending__') return { ok: false, status: 501, error: 'voice-sample-pending' };
+      return { ok: true, audio: sineWav({}), format: 'wav' };
+    },
+  };
+  // Minimal db — internalRouter builds a pairing store at construction (needs
+  // secrets.get/set); the voice-render route itself touches none of it.
+  const db = { secrets: { get: async () => null, set: async () => {} } };
+  const app = express();
+  app.use(internalRouter({ db, userId: 'verify-user', voiceRenderer: stubRenderer }));
+  const srv = app.listen(0, '127.0.0.1');
+  await new Promise((r) => srv.once('listening', r));
+  const port = srv.address().port;
+  process.env.QWEN_TTS_ENABLED = '1';
+  process.env.MYCELIUM_API_URL = `http://127.0.0.1:${port}`;
+  const { qwenProvider } = await import('../packages/channel-daemon/tts/providers/qwen.js?e2e');
+
+  rendererCalls.length = 0;
+  let ok = null, okErr = null;
+  try { ok = await qwenProvider.synthesize('speak this line', '', { instruct: 'warmly' }); } catch (e) { okErr = e; }
+  rec('V6d. E2E — daemon provider → real vault endpoint → renderer → WAV (format wav)',
+    !okErr && ok && Buffer.isBuffer(ok.audio) && ok.audio.length > 0 && ok.format === 'wav',
+    `err=${okErr?.message || 'none'} bytes=${ok?.audio?.length}`);
+  rec('V6e. AGENT PIN — the endpoint calls the renderer with agentId="personal-agent" + instruct (daemon can\'t pick the id)',
+    rendererCalls[0]?.agentId === 'personal-agent' && rendererCalls[0]?.text === 'speak this line' && rendererCalls[0]?.instruct === 'warmly',
+    `call=${JSON.stringify(rendererCalls[0])}`);
+
+  let pend = null, pendErr = null;
+  try { pend = await qwenProvider.synthesize('__pending__', ''); } catch (e) { pendErr = e; }
+  rec('V6f. E2E fail-soft — a renderer 501 surfaces as a typed throw through the endpoint',
+    pend === null && pendErr?.name === 'TTSProviderError' && (pendErr.code === 'voice-sample-pending' || pendErr.status === 501),
+    `err=${pendErr ? `${pendErr.name}/${pendErr.code || pendErr.status}` : 'none'}`);
+
+  delete process.env.QWEN_TTS_ENABLED; delete process.env.MYCELIUM_API_URL;
   srv.close();
 }
 

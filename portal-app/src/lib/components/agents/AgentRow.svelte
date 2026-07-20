@@ -2,7 +2,9 @@
   AgentRow — per-agent management card.
 
   Collapsed: status dot, name, role, model, activeTasks (a quiet single line).
-  Expanded: display name, Claude subscription assignment,
+  Expanded: an IDENTITY BLOCK (engine + live status · editable agent name ·
+  read-only personality one-liner with a "refine on the character page" link;
+  no avatar/emoji here), then Claude subscription assignment,
   bot tokens (Discord/Telegram/OWNER_TELEGRAM_ID per agent-secret-policy),
   read-only details (capabilities, scope, port).
 
@@ -99,12 +101,13 @@
 		savingCustomization = true;
 		customizationError = null;
 		try {
-			const res = await api(`/portal/agents/${agent.id}/customize`, {
+			// PUT /portal/agent-identity is the live route (portal-chat.js) — it MERGES,
+			// so sending only `name` preserves channelWrite/scopes. The old
+			// `/portal/agents/:id/customize` route never existed → every save 404'd.
+			// A blank name clears to the default (server's agentDisplayName(null)).
+			const res = await api('/portal/agent-identity', {
 				method: 'PUT',
-				body: JSON.stringify({
-					displayName: displayName.trim() || null,
-					avatarEmoji: agent.avatarEmoji || null,
-				}),
+				body: JSON.stringify({ name: displayName.trim() || null }),
 			});
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			savedCustomization = true;
@@ -255,6 +258,56 @@
 			? 'var(--color-accent-jade)'
 			: 'var(--color-accent-coral)',
 	);
+
+	// ── Live status label (identity block) — mirrors the collapsed-header meta,
+	//    but as a full-word phrase for the expanded identity summary.
+	const statusLabel = $derived(
+		agent.status === 'offline'
+			? 'Offline'
+			: !runtimeOk
+				? 'Unreachable'
+				: (agent.activeTasks ?? 0) > 0
+					? `${agent.activeTasks} active`
+					: 'Active',
+	);
+
+	// ── Engine (identity block) — which engine powers this agent. A resolved Claude
+	//    subscription (literal or wildcard assignment) → Claude; otherwise the local
+	//    model. Reuses the same assignment walk the subscription section renders, so
+	//    the identity summary and the detail never disagree.
+	const engineLabel = $derived(
+		effectiveProviderObj
+			? `Claude subscription · ${effectiveProviderObj.label || `Claude #${effectiveProviderObj.id}`}`
+			: agent.model
+				? `Local model · ${agent.model}`
+				: 'Local model',
+	);
+
+	// ── Personality one-liner (identity block, READ-ONLY) — a preview of the agent's
+	//    "being" (mind/self.md), authored on the Character page. We surface the first
+	//    meaningful line here so the operator sees WHO the agent is without leaving the
+	//    tab; editing stays on the Character page ("Refine on the character page →").
+	//    Only the personal agent has a character capsule today, so scope the fetch to it.
+	let personaLine = $state<string | null>(null);
+	let personaLoaded = $state(false);
+
+	function firstMeaningfulLine(md: string): string | null {
+		for (const raw of md.split('\n')) {
+			const line = raw.replace(/^#+\s*/, '').replace(/^[-*>]\s*/, '').trim();
+			if (line) return line.length > 140 ? `${line.slice(0, 139).trimEnd()}…` : line;
+		}
+		return null;
+	}
+
+	$effect(() => {
+		// Lazy: only when the row is expanded for the character-bearing agent, once.
+		if (!expanded || personaLoaded || agent.id !== 'personal-agent') return;
+		personaLoaded = true;
+		api('/portal/character/being')
+			.then((r) => (r.ok ? r.json() : null))
+			.then((d) => { personaLine = d?.content ? firstMeaningfulLine(d.content) : null; })
+			.catch(() => { personaLine = null; });
+	});
 </script>
 
 <div class="agent-row card" class:expanded={expanded} class:dirty={isDirty}>
@@ -280,11 +333,22 @@
 
 	{#if expanded}
 		<div class="body">
-			<!-- Customization -->
-			<section class="block">
-				<h3>Identity</h3>
+			<!-- Identity block — name (editable) · engine + live status · personality
+			     one-liner (read-only, refine on the character page). No avatar/emoji here. -->
+			<section class="block identity">
+				<!-- Engine + live status -->
+				<div class="engine-status">
+					<span class="status-pill">
+						<span class="dot sm" style:background={statusColor} class:pulse={(agent.activeTasks ?? 0) > 0}></span>
+						<span class="status-text">{statusLabel}</span>
+						{#if lastActivity}<span class="status-sep">·</span><span class="status-when">{lastActivity}</span>{/if}
+					</span>
+					<span class="engine" title="Which engine powers this agent">{engineLabel}</span>
+				</div>
+
+				<!-- Name (editable) -->
 				<label class="field">
-					<span>Display name</span>
+					<span>Agent name</span>
 					<input
 						type="text"
 						bind:value={displayName}
@@ -292,22 +356,26 @@
 						maxlength="50"
 					/>
 				</label>
-				{#if agent.id === 'personal-agent'}
-					<!-- Voice + the full "being" (personality) live on the character page
-					     now (design §5/§6) — a richer surface than this one-liner. -->
-					<div class="field">
-						<span>Character</span>
-						<button type="button" class="char-link" onclick={() => workspace.openFromRoute('character', { id: agent.id })}>
-							Customize voice &amp; personality →
-						</button>
-					</div>
-				{/if}
 				<div class="actions">
 					<button onclick={saveCustomization} disabled={savingCustomization}>
 						{#if savedCustomization}Saved ✓{:else if savingCustomization}Saving…{:else}Save{/if}
 					</button>
 					{#if customizationError}<span class="err">{customizationError}</span>{/if}
 				</div>
+
+				{#if agent.id === 'personal-agent'}
+					<!-- Personality one-liner (read-only) — the full "being" + voice are
+					     authored on the character page (design §5/§6), not duplicated here. -->
+					<div class="field persona">
+						<span>Personality</span>
+						<p class="persona-line" class:empty={!personaLine}>
+							{personaLine || 'No character set yet — give your agent a personality.'}
+						</p>
+						<button type="button" class="char-link" onclick={() => workspace.openFromRoute('character', { id: agent.id })}>
+							Refine on the character page →
+						</button>
+					</div>
+				{/if}
 			</section>
 
 			<!-- Claude subscription -->
@@ -524,6 +592,65 @@
 		color: var(--color-text-tertiary);
 		font-weight: 500;
 		margin: 0;
+	}
+
+	/* ── Identity block ─────────────────────────────────────────────── */
+	.identity {
+		gap: 0.65rem;
+	}
+	.engine-status {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.5rem 0.75rem;
+	}
+	.status-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3rem;
+		padding: 0.2rem 0.55rem;
+		border-radius: 999px;
+		background: var(--color-elevated);
+		font-size: 0.65rem;
+		color: var(--color-text-secondary);
+	}
+	.dot.sm {
+		width: 0.45rem;
+		height: 0.45rem;
+	}
+	.status-sep { color: var(--color-text-tertiary); }
+	.status-when { color: var(--color-text-tertiary); }
+	.engine {
+		font-size: 0.65rem;
+		color: var(--color-text-tertiary);
+		padding: 0.2rem 0.55rem;
+		border-radius: 999px;
+		border: 1px solid var(--color-border);
+	}
+	.persona {
+		gap: 0.35rem;
+	}
+	.persona-line {
+		margin: 0;
+		font-size: 0.78rem;
+		line-height: 1.4;
+		color: var(--color-text-primary);
+	}
+	.persona-line.empty {
+		color: var(--color-text-tertiary);
+		font-style: italic;
+	}
+	.char-link {
+		align-self: flex-start;
+		padding: 0;
+		background: transparent;
+		border: none;
+		color: var(--color-accent);
+		font-size: 0.7rem;
+		cursor: pointer;
+	}
+	.char-link:hover {
+		text-decoration: underline;
 	}
 
 	.field {

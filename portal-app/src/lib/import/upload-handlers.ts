@@ -21,7 +21,83 @@ export type ImportResult = {
 type Opts = { onStatus?: (s: string) => void; onProgress?: (pct: number) => void };
 
 const ARCHIVE_RE = /\.(zip|json)$/i;
+// Notes the folder importer treats as documents (Obsidian .md + plain .txt/.markdown).
+const NOTE_RE = /\.(md|markdown|txt)$/i;
 const num = (n: unknown) => (typeof n === 'number' ? n : Number(n) || 0);
+
+// ── Folder-aware drop support (R2-FOLDERIMPORT) ──────────────────────────────
+// A dropped desktop folder arrives as directory ENTRIES on `dataTransfer.items`,
+// NOT as files on `dataTransfer.files` — so the plain `.files` path silently
+// dropped the folder ("uploaded but not recognized as an export"). We expand the
+// directory here (webkitGetAsEntry → createReader walk) into a flat File[] with a
+// synthesized `webkitRelativePath`, so `importFolder()` (the Obsidian path that
+// builds the folder tree + folder_id) can consume a drop exactly like the picker.
+type FsEntry = {
+	isFile: boolean;
+	isDirectory: boolean;
+	name: string;
+	file?: (cb: (f: File) => void, err?: (e: unknown) => void) => void;
+	createReader?: () => { readEntries: (cb: (e: FsEntry[]) => void, err?: (e: unknown) => void) => void };
+};
+
+/** Read a directory reader fully — readEntries returns ≤100 entries per call. */
+function readAllEntries(reader: { readEntries: (cb: (e: FsEntry[]) => void, err?: (e: unknown) => void) => void }): Promise<FsEntry[]> {
+	const all: FsEntry[] = [];
+	return new Promise((resolve, reject) => {
+		const pump = () => reader.readEntries((batch) => {
+			if (!batch.length) { resolve(all); return; }
+			all.push(...batch);
+			pump();
+		}, reject);
+		pump();
+	});
+}
+
+/** Depth-first walk of a dropped entry into `out`, stamping webkitRelativePath. */
+async function walkEntry(entry: FsEntry, prefix: string, out: File[]): Promise<void> {
+	if (entry.isFile && entry.file) {
+		const file = await new Promise<File>((res, rej) => entry.file!(res, rej));
+		const relPath = prefix + entry.name;
+		// webkitRelativePath is a read-only getter on File.prototype; shadow it with
+		// an own property so importFolder()/the server see the vault-relative path.
+		try { Object.defineProperty(file, 'webkitRelativePath', { value: relPath, configurable: true }); } catch { /* engine froze it — importFolder falls back to name */ }
+		out.push(file);
+	} else if (entry.isDirectory && entry.createReader) {
+		const children = await readAllEntries(entry.createReader());
+		for (const child of children) await walkEntry(child, `${prefix}${entry.name}/`, out);
+	}
+}
+
+/**
+ * Resolve a drop's DataTransfer into a flat File[] + whether a DIRECTORY was
+ * dropped. MUST be invoked synchronously from the drop handler (the items list
+ * is only valid during the event) — the synchronous prefix reads the entries
+ * before the first await, so `await filesFromDataTransfer(e.dataTransfer)` is safe.
+ * Falls back to `dataTransfer.files` when the entries API is unavailable.
+ */
+export async function filesFromDataTransfer(dt: DataTransfer | null): Promise<{ files: File[]; hadDirectory: boolean }> {
+	const fallback = Array.from(dt?.files || []);
+	const items = dt?.items;
+	if (!items || !items.length || typeof (items[0] as unknown as { webkitGetAsEntry?: unknown })?.webkitGetAsEntry !== 'function') {
+		return { files: fallback, hadDirectory: false };
+	}
+	// Grab entries SYNCHRONOUSLY (items go stale after the handler returns).
+	const entries: FsEntry[] = [];
+	let hadDirectory = false;
+	for (let i = 0; i < items.length; i++) {
+		const it = items[i];
+		if (it.kind !== 'file') continue;
+		const entry = (it as unknown as { webkitGetAsEntry?: () => FsEntry | null }).webkitGetAsEntry?.();
+		if (!entry) continue;
+		entries.push(entry);
+		if (entry.isDirectory) hadDirectory = true;
+	}
+	if (!entries.length) return { files: fallback, hadDirectory: false };
+	const out: File[] = [];
+	for (const entry of entries) await walkEntry(entry, '', out);
+	// If nothing walked (permission quirk), fall back to the plain file list.
+	return { files: out.length ? out : fallback, hadDirectory };
+}
 
 /**
  * For large conversation ZIPs (>90MB), strip media client-side and re-pack just
@@ -106,8 +182,8 @@ const toBase64 = async (f: File) => {
 export async function importFolder(list: File[], opts: Opts = {}): Promise<ImportResult> {
 	const { onStatus = () => {} } = opts;
 	onStatus('Reading folder…');
-	const mdFiles = list.filter((f) => /\.md$/i.test(f.name));
-	if (!mdFiles.length) return { kind: 'folder', imported: 0, skipped: 0, failed: 0, detail: '', error: 'No .md notes found in that folder.' };
+	const mdFiles = list.filter((f) => NOTE_RE.test(f.name));
+	if (!mdFiles.length) return { kind: 'folder', imported: 0, skipped: 0, failed: 0, detail: '', error: 'No notes (.md, .markdown, .txt) found in that folder.' };
 	const vaultName = (((mdFiles[0] as any).webkitRelativePath as string) || '').split('/')[0] || undefined;
 	const prefix = vaultName ? `${vaultName}/` : '';
 	const relOf = (f: File) => {

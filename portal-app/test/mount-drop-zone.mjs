@@ -25,7 +25,7 @@ mkdirSync(GEN, { recursive: true });
 writeFileSync(`${GEN}/toast-stub.js`, `
 export const toasts = { info: () => 1, success: () => {}, error: () => {}, remove: () => {} };
 `);
-writeFileSync(`${GEN}/upload-stub.js`, 'export async function importFiles() { return { imported: 0, failed: 0 }; }\n');
+writeFileSync(`${GEN}/upload-stub.js`, 'export async function importFiles() { return { imported: 0, failed: 0 }; }\nexport async function importFolder() { return { imported: 0, failed: 0 }; }\nexport async function filesFromDataTransfer() { return { files: [], hadDirectory: false }; }\n');
 writeFileSync(`${GEN}/env-stub.js`, 'export const browser = true;\n');
 
 const src = readFileSync('src/lib/components/shell/ImportDropZone.svelte', 'utf8');

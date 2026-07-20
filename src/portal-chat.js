@@ -35,6 +35,12 @@ const CHAT_SOURCE = 'portal-chat';
 // These are the message.source tags the channel-daemon persists (inbound + outbound).
 const CHANNEL_SOURCES = ['telegram', 'telegram-group', 'discord', 'discord-thread', 'whatsapp'];
 const CHANNEL_SOURCE_SET = new Set(CHANNEL_SOURCES);
+// DISPLAY-ONLY set (R3-CHATHISTORY): the recent cross-thread chat view surfaces
+// portal-chat turns AND channel messages (Telegram/Discord/WhatsApp), so the person
+// sees ALL of their agent's conversation in one place. Read-side widening ONLY — this
+// set is NEVER used by the /chat/stream turn (its history stays `chat:`-namespaced,
+// red-team RT3), so channel history can never enter the cloud-egressed preamble.
+const DISPLAY_SOURCE_SET = new Set([CHAT_SOURCE, ...CHANNEL_SOURCES]);
 
 // Agent identity (spec #4) — a user-chosen name for their assistant, persisted in
 // users.settings.agent and surfaced everywhere the AI is referenced (chat header via
@@ -242,8 +248,14 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
           try { recoverable = await db.messages.countOrphanChatHistory(userId, { source: CHAT_SOURCE }); } catch { /* non-fatal */ }
         }
       } else {
+        // Recent cross-thread view: show ALL of the agent's messages, including
+        // channel (Telegram/Discord/WhatsApp) — R3-CHATHISTORY. DISPLAY-ONLY; the
+        // `toMsg` shape already carries `source` so the UI can badge each origin,
+        // and only id/role/content/timestamp/source cross the wire (no metadata,
+        // §1/§7). This does NOT touch the /chat/stream turn's history hydration
+        // (still `chat:`-namespaced, RT3), so no channel text reaches cloud egress.
         const rows = (await db.messages.selectRecent(userId, { limit: 200 })) || [];
-        msgs = rows.filter((r) => r.source === CHAT_SOURCE).slice(0, limit).map(toMsg).reverse();
+        msgs = rows.filter((r) => DISPLAY_SOURCE_SET.has(r.source)).slice(0, limit).map(toMsg).reverse();
       }
       res.json({ messages: msgs, recoverable });
     } catch { res.json({ messages: [], recoverable: 0 }); }

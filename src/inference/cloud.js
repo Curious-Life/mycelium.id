@@ -96,9 +96,15 @@ export async function cloudInfer({
 }
 
 // Fire a usage event (counts only, never content) — fail-soft. §12.
-function emitCloudUsage(onUsage, inputTokens, outputTokens) {
+// `model` is the EFFECTIVE model that actually served the call (the provider's
+// echoed `data.model` when present, else the model we put on the wire — which for
+// a subscription/narrate call is DEFAULT_ANTHROPIC_MODEL, never NULL). Recording
+// it here is what lets the router persist a real model instead of `cfg.cloudModel
+// || null` (which is NULL for a narrate-via-subscription run). A safe category
+// string, never content.
+function emitCloudUsage(onUsage, inputTokens, outputTokens, model) {
   if (typeof onUsage !== "function") return;
-  try { onUsage({ inputTokens, outputTokens }); } catch { /* never break inference */ }
+  try { onUsage({ inputTokens, outputTokens, model: model || undefined }); } catch { /* never break inference */ }
 }
 
 // Fire a truncation event when the provider stopped at the OUTPUT CAP (Anthropic
@@ -158,7 +164,7 @@ async function anthropicInfer({ prompt, maxTokens, auth, model, fetch, timeoutMs
     ? data.content.filter((b) => b?.type === "text").map((b) => b.text).join("")
     : "";
   if (!out) throw new InferenceError("cloudInfer: Anthropic returned no text content", { backend: "cloud" });
-  emitCloudUsage(onUsage, data?.usage?.input_tokens, data?.usage?.output_tokens);
+  emitCloudUsage(onUsage, data?.usage?.input_tokens, data?.usage?.output_tokens, data?.model || model);
   if (data?.stop_reason === "max_tokens") emitTruncated(onTruncated, "max_tokens");
   return out;
 }
@@ -201,7 +207,7 @@ async function openaiCompatibleInfer({ prompt, maxTokens, apiKey, baseUrl, model
   if (typeof out !== "string" || out.length === 0) {
     throw new InferenceError("cloudInfer: provider returned no message content", { backend: "cloud" });
   }
-  emitCloudUsage(onUsage, data?.usage?.prompt_tokens, data?.usage?.completion_tokens);
+  emitCloudUsage(onUsage, data?.usage?.prompt_tokens, data?.usage?.completion_tokens, data?.model || model);
   if (data?.choices?.[0]?.finish_reason === "length") emitTruncated(onTruncated, "length");
   return out;
 }
@@ -268,15 +274,16 @@ async function* openaiCompatibleStream({ prompt, maxTokens, apiKey, baseUrl, mod
   const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
   // stream_options.include_usage → the provider emits a final usage chunk (§12).
   const res = await openStream(resolveChatUrl(baseUrl), headers, { model, max_tokens: maxTokens, stream: true, stream_options: { include_usage: true }, messages: [{ role: "user", content: prompt }] }, fetch, timeoutMs);
-  let inTok, outTok, truncated = false;
+  let inTok, outTok, effModel, truncated = false;
   for await (const payload of ssePayloads(res)) {
     let ev; try { ev = JSON.parse(payload); } catch { continue; }
     if (ev?.usage) { inTok = ev.usage.prompt_tokens ?? inTok; outTok = ev.usage.completion_tokens ?? outTok; }
+    if (typeof ev?.model === "string" && ev.model) effModel = ev.model;
     if (ev?.choices?.[0]?.finish_reason === "length") truncated = true;
     const delta = ev?.choices?.[0]?.delta?.content;
     if (typeof delta === "string" && delta) yield delta;
   }
-  emitCloudUsage(onUsage, inTok, outTok);
+  emitCloudUsage(onUsage, inTok, outTok, effModel || model);
   if (truncated) emitTruncated(onTruncated, "length");
 }
 
@@ -285,15 +292,15 @@ async function* anthropicStream({ prompt, maxTokens, auth, model, fetch, timeout
   const sys = anthropicSystem(auth);
   if (sys !== undefined) body.system = sys;
   const res = await openStream(ANTHROPIC_URL, anthropicAuthHeaders(auth), body, fetch, timeoutMs);
-  let inTok, outTok, truncated = false;
+  let inTok, outTok, effModel, truncated = false;
   for await (const payload of ssePayloads(res)) {
     let ev; try { ev = JSON.parse(payload); } catch { continue; }
-    if (ev?.type === "message_start") inTok = ev.message?.usage?.input_tokens ?? inTok;
+    if (ev?.type === "message_start") { inTok = ev.message?.usage?.input_tokens ?? inTok; if (typeof ev.message?.model === "string" && ev.message.model) effModel = ev.message.model; }
     if (ev?.type === "message_delta" && ev.usage?.output_tokens) outTok = ev.usage.output_tokens;
     if (ev?.type === "message_delta" && ev.delta?.stop_reason === "max_tokens") truncated = true;
     if (ev?.type === "content_block_delta" && ev.delta?.type === "text_delta" && typeof ev.delta.text === "string" && ev.delta.text) yield ev.delta.text;
   }
-  emitCloudUsage(onUsage, inTok, outTok);
+  emitCloudUsage(onUsage, inTok, outTok, effModel || model);
   if (truncated) emitTruncated(onTruncated, "max_tokens");
 }
 

@@ -947,7 +947,7 @@ CREATE TABLE IF NOT EXISTS internal_model_items (
   created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   last_reinforced_at TEXT
 );
-CREATE TABLE IF NOT EXISTS messages ( id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), user_id TEXT, role TEXT NOT NULL DEFAULT 'user', content TEXT, message_type TEXT DEFAULT 'chat', tags TEXT, suggested_new_tag TEXT, attachment_id TEXT, folder_id TEXT, metadata TEXT, source TEXT, agent_id TEXT DEFAULT 'mya-personal', entities TEXT, relations TEXT, entity_summary TEXT, nlp_processed INTEGER DEFAULT 0, nlp_processed_at TEXT, nlp_error TEXT, thinking TEXT, thinking_enabled INTEGER DEFAULT 0, thinking_tokens INTEGER DEFAULT 0, created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) , scope TEXT DEFAULT 'org', contact_id TEXT, conversation_id TEXT, embedding_768 TEXT);
+CREATE TABLE IF NOT EXISTS messages ( id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), user_id TEXT, role TEXT NOT NULL DEFAULT 'user', content TEXT, message_type TEXT DEFAULT 'chat', tags TEXT, suggested_new_tag TEXT, attachment_id TEXT, folder_id TEXT, metadata TEXT, source TEXT, agent_id TEXT DEFAULT 'personal-agent', entities TEXT, relations TEXT, entity_summary TEXT, nlp_processed INTEGER DEFAULT 0, nlp_processed_at TEXT, nlp_error TEXT, thinking TEXT, thinking_enabled INTEGER DEFAULT 0, thinking_tokens INTEGER DEFAULT 0, created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) , scope TEXT DEFAULT 'org', contact_id TEXT, conversation_id TEXT, embedding_768 TEXT);
 CREATE TABLE IF NOT EXISTS note_links (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
   user_id TEXT NOT NULL,

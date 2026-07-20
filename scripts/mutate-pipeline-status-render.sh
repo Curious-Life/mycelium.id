@@ -46,24 +46,31 @@ mutate_and_expect_red "R3 running counts+ETA" \
 
 # R4 — a blocked stage's action button. Delete it ⇒ the remedy label is gone.
 mutate_and_expect_red "R4 blocked action button" \
-  '<button class="pipe-action" type="button" disabled={isBusy(stage.key)} aria-busy={isBusy(stage.key)} onclick={() => onAction(stage)}>{stage.action.label}</button>' \
+  '<button class="pipe-action" type="button" disabled={isBusy(`${stage.key}:action`)} aria-busy={isBusy(`${stage.key}:action`)} onclick={() => onAction(stage)}>{stage.action.label}</button>' \
   '<span></span>'
 
 # R4b — the blocked action must render LIVE (enabled at rest). Pin it always-disabled ⇒ it reverts
 # to the "soon" dead control Unit 4 deletes.
 mutate_and_expect_red "R4b blocked action enabled (live)" \
-  'disabled={isBusy(stage.key)} aria-busy={isBusy(stage.key)}' \
+  'disabled={isBusy(`${stage.key}:action`)} aria-busy={isBusy(`${stage.key}:action`)}' \
   'disabled aria-busy="true"'
+
+# R4c — the co-located per-stage controls (Stop/Resume + Restart). Remove the whole cluster ⇒ a
+# running stage has no Stop and a paused stage no Resume (R2/R3 regress to the un-controllable state).
+mutate_and_expect_red "R4c per-stage control cluster" \
+  '{#if hasControls(stage)}' \
+  '{#if false && hasControls(stage)}'
 
 # W2 — the generate wiring. Break start() ⇒ a generate click fires nothing (or the wrong thing).
 mutate_and_expect_red "W2 generate wiring (start)" \
   "} else if (target === 'generate') {" \
   "} else if (target === 'generate' && false) {"
 
-# W3 — the resume wiring. Break the resume POST ⇒ a resume click no longer hits the route.
-mutate_and_expect_red "W3 resume wiring (resume POST)" \
-  "await apiPost('/portal/enrichment/processing/resume', {});" \
-  '/* resume POST removed */;'
+# W3 / W5 — the per-stage control wiring (Stop/Resume/Restart). Break the control POST ⇒ a Stop,
+# Resume or Restart click no longer hits its per-stage route.
+mutate_and_expect_red "W3/W5 per-stage control POST" \
+  'await apiPost(`/portal/enrichment/${stage.key}/${kind}`, {});' \
+  '/* control POST removed */;'
 
 # W1 — the intelligence wiring. Break the nav ⇒ an intelligence click no longer navigates.
 mutate_and_expect_red "W1 intelligence wiring (goto)" \
@@ -72,7 +79,7 @@ mutate_and_expect_red "W1 intelligence wiring (goto)" \
 
 # W4 — the busy-guard. Remove the in-flight check ⇒ a double-click double-fires the remedy.
 mutate_and_expect_red "W4 busy-guard (double-fire)" \
-  '!target || busy.has(stage.key)' \
+  '!target || busy.has(bkey)' \
   '!target'
 
 # R2 / R7 — the done ✓ icon. Drop it ⇒ a done stage renders no settled mark.

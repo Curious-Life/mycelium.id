@@ -12,7 +12,7 @@ import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
 import { portalChatRouter } from '../src/portal-chat.js';
-import { toolsForDomains } from '../src/agent/tool-domains.js';
+import { toolsForDomains, normalizePolicy, ALL_DOMAIN_KEYS } from '../src/agent/tool-domains.js';
 import { captureMessage } from '../src/ingest/capture.js';
 
 const DB = 'data/verify-portal-chat.db', KCV = 'data/verify-portal-chat-kcv.json';
@@ -140,6 +140,25 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
   const { tools: granted, unmapped } = toolsForDomains(tools, ['context']);
   rec('C4 toolsForDomains exposes only granted domain tools', granted.every((t) => t.name === 'getContext') && granted.length >= 1, granted.map((t) => t.name).join(','));
   rec('C4 ungranted/unmapped tools are never exposed', !granted.some((t) => t.name === 'forget') && Array.isArray(unmapped));
+
+  // C4d fail-closed grant contract (the deny-all hole): an EXPLICIT empty array is
+  // deny-all (0 tools), NOT a silent grant-all. Regression guard for the fail-open
+  // truthiness bug (grantedDomains.length ? ... : ALL_DOMAIN_KEYS).
+  const denyAll = toolsForDomains(tools, []).tools;
+  rec('C4d explicit [] domains → deny-all (0 tools), never grant-all', denyAll.length === 0, `granted=${denyAll.length}`);
+  // A non-empty subset is honored EXACTLY (no more, no fewer).
+  const subset = toolsForDomains(tools, ['context', 'search']).tools.map((t) => t.name).sort();
+  const wantSubset = tools.filter((t) => ['getContext', 'searchMindscape'].includes(t.name)).map((t) => t.name).sort();
+  rec('C4d non-empty subset → exactly that subset', subset.join(',') === wantSubset.join(',') && subset.length >= 1, subset.join(','));
+  // Only a truly-absent grant (undefined) falls back to the broad default.
+  const absentGrant = toolsForDomains(tools, undefined).tools.length;
+  const allMapped = toolsForDomains(tools, ALL_DOMAIN_KEYS).tools.length;
+  rec('C4d absent (undefined) domains → broad default (all mapped tools)', absentGrant === allMapped && absentGrant > denyAll.length, `absent=${absentGrant} all=${allMapped}`);
+  // normalizePolicy preserves the distinction: never-configured (null) → full default array;
+  // explicit deny-all ({domains:[]}) → [] — so a fresh user is never accidentally denied.
+  rec('C4d normalizePolicy(null) → full default domains (never-configured ≠ deny-all)', normalizePolicy(null).domains.length === ALL_DOMAIN_KEYS.length);
+  rec('C4d normalizePolicy({domains:[]}) → [] (explicit deny-all preserved)', Array.isArray(normalizePolicy({ domains: [] }).domains) && normalizePolicy({ domains: [] }).domains.length === 0);
+
   // restore broad policy for any later runs
   await fetch(`${base}/ai-access`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domains: undefined }) });
 }
@@ -287,6 +306,33 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
   rec('CINBOX RT3 preserved: a non-channel read of the bare id returns nothing', Array.isArray(hNs.messages) && hNs.messages.length === 0, JSON.stringify(hNs.messages));
   authorized = false; const un = await fetch(`${base}/chat/conversations`); authorized = true;
   rec('CINBOX /chat/conversations unauthorized → 401 (fail-closed)', un.status === 401);
+}
+
+// ── CHIST — R3-CHATHISTORY: the recent chat view shows ALL agent messages, ─────
+//    INCLUDING channel (Telegram) — display-only, RT3-preserved.
+{
+  const chan = 'telegram:700700';
+  await captureMessage(db, { userId: U, role: 'user', content: 'CHIST inbound over telegram', source: 'telegram', messageType: 'text', conversationId: chan }, () => {});
+  await captureMessage(db, { userId: U, role: 'assistant', content: 'CHIST reply over telegram', source: 'telegram', messageType: 'text', conversationId: chan }, () => {});
+  await captureMessage(db, { userId: U, role: 'user', content: 'CHIST portal-chat line', source: 'portal-chat', messageType: 'chat' }, () => {});
+
+  // Recent view (no conversationId): portal-chat AND channel messages both appear.
+  const recent = await (await fetch(`${base}/chat/history?limit=50`)).json();
+  const contents = (recent.messages || []).map((m) => m.content);
+  rec('CHIST recent view shows Telegram messages alongside portal-chat (R3-CHATHISTORY)',
+    contents.includes('CHIST reply over telegram') && contents.includes('CHIST inbound over telegram') && contents.includes('CHIST portal-chat line'),
+    `n=${recent.messages?.length}`);
+  const tgMsg = (recent.messages || []).find((m) => m.content === 'CHIST reply over telegram');
+  rec('CHIST channel rows carry their source so the UI can badge origin', tgMsg?.source === 'telegram', `source=${tgMsg?.source}`);
+  // Still leak-safe: only the UI shape crosses the wire (no metadata/entities/§1).
+  const leakKeys = new Set(Object.keys(tgMsg || {}));
+  rec('CHIST widened view still omits sensitive fields (§1/§7)',
+    !['entities', 'tags', 'metadata', 'embedding_768', 'scope', 'agent_id', 'conversation_id'].some((k) => leakKeys.has(k)), [...leakKeys].join(','));
+
+  // RT3 INVARIANT: the DISPLAY widening must NOT open the /chat/stream preamble to
+  // channel history — a bare-id read stays chat:-namespaced and returns nothing.
+  const ns = await (await fetch(`${base}/chat/history?conversationId=${encodeURIComponent(chan)}`)).json();
+  rec('CHIST RT3 preserved: bare channel id read (stream namespace) returns nothing', Array.isArray(ns.messages) && ns.messages.length === 0, JSON.stringify(ns.messages?.length));
 }
 
 server.close(); await close?.();

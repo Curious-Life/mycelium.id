@@ -555,9 +555,31 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     try {
       const row = await db.providers.get(id, userId);
       if (!row) return bad(res, 404, 'provider not found');
-      let apiKey = null;
-      try { apiKey = row.credentials ? JSON.parse(row.credentials).apiKey : null; } catch { /* malformed → no key */ }
-      const result = await probeProvider({ provider: row.provider, baseUrl: row.base_url, model: row.model_preference, apiKey, fetch });
+      let result;
+      if (isSubscriptionRow(row)) {
+        // A Claude SUBSCRIPTION row stores an OAuth token (claudeOAuthToken), NOT an
+        // `apiKey` — routing it through probeProvider would read apiKey=null → 'no_key'
+        // (the reported bug), and even with a token would probe the WRONG verb
+        // (x-api-key / api-key billing) for an OAuth Bearer credential. A subscription's
+        // "connectivity" IS its credential validity, so reuse the SAME on-device
+        // credential ladder GET /auth/claude/status uses (probeCredential), and mirror its
+        // health mapping — never the BYOK x-api-key probe. `expired` counts as reachable:
+        // it's a live subscription that auto-refreshes on next use (matches `authenticated`
+        // = connected||expired in the status route), so the two surfaces can't disagree.
+        let probe = null;
+        try { probe = await probeCredential(); } catch { probe = null; }
+        const health =
+          !probe ? 'needs_reauth'
+            : probe.status === 'found' ? (probe.expired ? 'expired' : 'connected')
+              : probe.status === 'declined' ? 'declined'
+                : 'needs_reauth';   // absent | wrong_scope
+        const reachable = health === 'connected' || health === 'expired';
+        result = reachable ? { ok: true, health } : { ok: false, error: health };
+      } else {
+        let apiKey = null;
+        try { apiKey = row.credentials ? JSON.parse(row.credentials).apiKey : null; } catch { /* malformed → no key */ }
+        result = await probeProvider({ provider: row.provider, baseUrl: row.base_url, model: row.model_preference, apiKey, fetch });
+      }
       // A 'pending' row NEVER leaves 'pending' here. status='pending' is what makes an
       // IMPORTED provider unresolvable (resolve.js mapRowToConfig), and this route is a
       // connectivity probe, not an arming action — the UI presents it as "Test", and it

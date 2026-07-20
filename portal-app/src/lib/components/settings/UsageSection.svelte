@@ -133,6 +133,7 @@
 							<tr>
 								<th class="font-normal py-1 pr-3">When</th>
 								<th class="font-normal py-1 pr-3">Area</th>
+								<th class="font-normal py-1 pr-3">Provider</th>
 								<th class="font-normal py-1 pr-3">Model</th>
 								<th class="font-normal py-1 pr-3 text-right">In</th>
 								<th class="font-normal py-1 text-right">Out</th>
@@ -143,6 +144,7 @@
 								<tr class="border-t border-white/5">
 									<td class="py-1 pr-3 whitespace-nowrap opacity-70">{new Date(e.at).toLocaleString()}</td>
 									<td class="py-1 pr-3">{e.area}{#if e.isLocal}<span class="opacity-50"> · local</span>{/if}</td>
+									<td class="py-1 pr-3 whitespace-nowrap" title={e.source ? `via ${e.source}` : ''}>{e.provider ?? (e.isLocal ? 'local' : '—')}{#if e.source}<span class="opacity-50"> · {e.source}</span>{/if}</td>
 									<td class="py-1 pr-3 truncate max-w-[10rem]" title={e.model ?? ''}>{e.model ?? '—'}</td>
 									<td class="py-1 pr-3 text-right tabular-nums">{fmt(e.inputTokens)}{#if e.estimated}<span class="opacity-40" title="estimated (provider reported no count)">*</span>{/if}</td>
 									<td class="py-1 text-right tabular-nums">{fmt(e.outputTokens)}{#if e.estimated}<span class="opacity-40">*</span>{/if}</td>

@@ -42,7 +42,7 @@ async function t(n, fn) { try { await fn(); rec(n, true); } catch (e) { rec(n, f
 
 // A readiness wired with fully-INJECTED fakes: the stage machine's every input is controllable, and
 // the db double RECORDS what it touched so PS-COST can prove the slice never issues a fresh scan.
-function mk({ emb, cat, points = 0, pointsThrow = false, embHealth = 'ok', labHealth = 'ok', paused = false, st = null, leak = false } = {}) {
+function mk({ emb, cat, points = 0, pointsThrow = false, embHealth = 'ok', labHealth = 'ok', paused = false, embedPaused, categorizePaused, st = null, leak = false } = {}) {
   const touched = [];
   const bump = (o) => (leak ? { ...o, content: 'MY SECRET JOURNAL ENTRY', nlp_error: 'dim mismatch on message 42' } : o);
   const db = {
@@ -63,6 +63,10 @@ function mk({ emb, cat, points = 0, pointsThrow = false, embHealth = 'ok', labHe
     embedderHealth: () => ({ status: embHealth }),
     labelerHealth: () => ({ status: labHealth }),
     isProcessingPaused: () => paused,
+    // Per-stage injection (R2): when a per-stage flag is provided the slice uses it; otherwise it
+    // FALLS BACK to isProcessingPaused (so PS5's single-flag scenario still drives BOTH stages).
+    ...(embedPaused === undefined ? {} : { isEmbedPaused: () => embedPaused }),
+    ...(categorizePaused === undefined ? {} : { isCategorizePaused: () => categorizePaused }),
     drainerStatus: () => st,
   });
   return { r, db };
@@ -150,6 +154,36 @@ await t('PS5. paused ⇒ embed + categorize blocked, reason:"paused", with a Res
   assert.equal(s.categorize.reason, 'paused');
   assert.equal(p.blockedOn, 'paused', 'embed is first ⇒ paused is the surfaced block');
   assert.equal(p.overall, 'blocked');
+  // Every embed/categorize stage carries a `paused` flag so the co-located Stop/Resume control (R2)
+  // knows its two-state label — true here for both.
+  assert.equal(byKey(p).embed.paused, true, 'a paused embed stage must carry paused:true for the control');
+  assert.equal(byKey(p).categorize.paused, true, 'a paused categorize stage must carry paused:true for the control');
+});
+
+// ── PS5b) per-stage pause: EMBED only (R2) — categorize keeps running ──────────
+await t('PS5b. embedPaused only ⇒ embed blocked/paused, categorize still RUNNING (independent controls)', async () => {
+  const p = await pipe({ emb: { total: 100, embedded: 50, pending: 50 }, cat: { total: 100, tagged: 20, pending: 80 }, points: 0, embedPaused: true, categorizePaused: false });
+  invariants(p, 'PS5b');
+  const s = byKey(p);
+  assert.equal(s.embed.state, 'blocked', 'embed paused ⇒ blocked');
+  assert.equal(s.embed.reason, 'paused');
+  assert.equal(s.embed.paused, true, 'embed carries paused:true');
+  assert.equal(s.categorize.state, 'running', 'categorize is NOT paused ⇒ still running (the split is real)');
+  assert.equal(s.categorize.paused, false, 'categorize carries paused:false');
+  assert.equal(p.blockedOn, 'paused', 'the paused embed is the surfaced block');
+});
+
+// ── PS5c) per-stage pause: CATEGORIZE only (R2) — embed keeps running ──────────
+await t('PS5c. categorizePaused only ⇒ categorize blocked/paused, embed still RUNNING', async () => {
+  const p = await pipe({ emb: { total: 100, embedded: 50, pending: 50 }, cat: { total: 100, tagged: 20, pending: 80 }, points: 0, embedPaused: false, categorizePaused: true });
+  invariants(p, 'PS5c');
+  const s = byKey(p);
+  assert.equal(s.embed.state, 'running', 'embed is NOT paused ⇒ still running');
+  assert.equal(s.embed.paused, false, 'embed carries paused:false');
+  assert.equal(s.categorize.state, 'blocked', 'categorize paused ⇒ blocked');
+  assert.equal(s.categorize.reason, 'paused');
+  assert.equal(s.categorize.paused, true, 'categorize carries paused:true');
+  assert.equal(p.blockedOn, 'paused', 'the paused categorize is the surfaced block');
 });
 
 // ── PS6) the debounce made visible (re-cluster is a deliberate action, not silence) ──

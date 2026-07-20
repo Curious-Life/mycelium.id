@@ -351,30 +351,38 @@ export function createMessagesNamespace(deps) {
      * Marker-scoped by design: a genuine poison row (-1 with a real error string)
      * is NOT touched — the drainer's self-heal owns those. userId REQUIRED in
      * every WHERE (unfiltered-UPDATE guard). Returns counts only, never content.
+     * @param {{stage?: 'embed'|'categorize'}} [opts] — scope the reset to ONE stage (QA R2's
+     *   per-stage Restart). Omitted ⇒ BOTH (the global /retry-failed contract, unchanged).
+     *   'embed' resets the embed-capped/retry markers only; 'categorize' the label gave-ups only.
      * @returns {Promise<{embedReset:number, labelReset:number}>}
      */
-    async resetEnrichmentGiveUps(userId) {
-      const capped = await d1Query(
-        `UPDATE messages SET nlp_processed = 0, nlp_error = NULL
-           WHERE user_id = ? AND nlp_processed = -1 AND embedding_768 IS NULL
-             AND nlp_error LIKE 'embed-capped:%'`,
-        [userId],
-      );
-      await d1Query(
-        `UPDATE messages SET nlp_error = NULL
-           WHERE user_id = ? AND (nlp_processed = 0 OR nlp_processed IS NULL)
-             AND nlp_error LIKE 'embed-retry:%'`,
-        [userId],
-      );
-      const labels = await d1Query(
-        `UPDATE messages SET categories_processed = 0
-           WHERE user_id = ? AND categories_processed = -1`,
-        [userId],
-      );
-      return {
-        embedReset: Number(capped?.meta?.changes ?? 0),
-        labelReset: Number(labels?.meta?.changes ?? 0),
-      };
+    async resetEnrichmentGiveUps(userId, { stage } = {}) {
+      let embedReset = 0;
+      let labelReset = 0;
+      if (stage !== 'categorize') {
+        const capped = await d1Query(
+          `UPDATE messages SET nlp_processed = 0, nlp_error = NULL
+             WHERE user_id = ? AND nlp_processed = -1 AND embedding_768 IS NULL
+               AND nlp_error LIKE 'embed-capped:%'`,
+          [userId],
+        );
+        await d1Query(
+          `UPDATE messages SET nlp_error = NULL
+             WHERE user_id = ? AND (nlp_processed = 0 OR nlp_processed IS NULL)
+               AND nlp_error LIKE 'embed-retry:%'`,
+          [userId],
+        );
+        embedReset = Number(capped?.meta?.changes ?? 0);
+      }
+      if (stage !== 'embed') {
+        const labels = await d1Query(
+          `UPDATE messages SET categories_processed = 0
+             WHERE user_id = ? AND categories_processed = -1`,
+          [userId],
+        );
+        labelReset = Number(labels?.meta?.changes ?? 0);
+      }
+      return { embedReset, labelReset };
     },
 
     /**
@@ -418,7 +426,21 @@ export function createMessagesNamespace(deps) {
      */
     async embedBacklogCached(userId) {
       const cached = _backlog && _backlog.userId === userId ? _backlog : null;
-      const ttlMs = cached && cached.value.pending > 0 ? 8000 : 60000;
+      // SHORT TTL while a backlog drains (pending > 0) — live progress. ⚠️ ALSO short when
+      // total === 0: that is the TRANSIENT pre-import / not-yet-populated state, NOT a settled
+      // backlog. A boot-warm() (readiness.warm → completeBoot) primes {total:0,pending:0} for the
+      // fresh vault, and nothing busts _backlog on import; with the old 60s TTL that stale 0 was
+      // served for up to a minute, so a user who imports within that window kept reading total:0 —
+      // and generate.ts's empty-vault clock (EMPTY_CONFIRM_MS 12s) then fired the false "Import some
+      // conversations first" AFTER the import had populated the vault (QA P1-C, the SWR half). A
+      // total:0 snapshot is cheap to re-probe (an empty/near-empty table scan — the multi-second
+      // decrypt cost only exists once total > 0), so the short TTL revalidates well within the
+      // client's 12s window without any cost regression. A SETTLED backlog (pending 0, total > 0)
+      // keeps the LONG 60s TTL. [[onboarding-status-emptiness-not-count]] — adjust the snapshot's
+      // freshness, never bust the cache.
+      const ttlMs = cached && cached.value.pending > 0 ? 8000
+        : cached && cached.value.total === 0 ? 8000
+          : 60000;
       if (cached && (Date.now() - cached.at) < ttlMs) return cached.value;
       if (!_backlogInFlight) {
         _backlogInFlight = _computeEmbedBacklog(userId)

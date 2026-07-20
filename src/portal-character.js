@@ -31,6 +31,7 @@ import { lineDiff, diffStat } from './mindfiles/diff.js';
 import { estimateTokens } from './inference/token-budget.js';
 import { createVoiceRenderer } from './tts/voice-render.js';
 import { createVoiceSampleStore, MAX_SAMPLE_BYTES } from './tts/voice-sample-store.js';
+import { mindAgentRoot } from './paths.js';
 
 const BEING_FILE = 'self.md';
 // Mirrors context.js:29 CORE_TOKEN_CAP — the honest budget the integration cycle
@@ -74,9 +75,13 @@ export function portalCharacterRouter({
     agent.voice = { ...(agent.voice || {}), description: description || null };
     await db.users.updateSettings(userId, { ...s, agent });
   };
-  // Resolve the SAME agent root the agent cycle writes to. In the packaged app
-  // MYCELIUM_AGENT_ROOT is set, so REST and MCP agree on one self.md.
-  const resolvedRoot = agentRoot || process.env.MYCELIUM_AGENT_ROOT || path.join(process.cwd(), 'data', 'mind');
+  // Resolve the SAME agent root the agent cycle writes to, via the single-source
+  // mindAgentRoot() so REST, MCP and backup/restore agree on one self.md.
+  // NOTE: nothing sets MYCELIUM_AGENT_ROOT today (an earlier comment claimed the
+  // packaged app does — it does NOT; grep confirms), so this resolves cwd-relative
+  // to <cwd>/data/mind. That durability fragility is tracked separately — see the
+  // ⚠️ DURABILITY note on mindAgentRoot() in src/paths.js.
+  const resolvedRoot = agentRoot || mindAgentRoot();
   const mind = createMindFiles({ agentRoot: resolvedRoot, agentId, fs, path });
   const authorship = createAuthorship({ readMindFile: mind.readMindFile, writeMindFile: mind.writeMindFile });
   const snapDeps = { readMindFile: mind.readMindFile, writeMindFile: mind.writeMindFile };

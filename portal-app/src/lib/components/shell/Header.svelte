@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import { navigationState } from '$lib/stores/navigation';
+	import { sidebarWidth } from '$lib/stores/sidebar';
 	import { theme } from '$lib/stores/theme';
 	import { viewLabel } from '$lib/nav/config';
 	import { workspace } from '$lib/workspace/store';
@@ -59,12 +60,73 @@
 	const chatOpen = $derived($navigationState.chatOpen);
 	const currentTheme = $derived($theme);
 
+	// R4-SHELLCHROME: the header's left cell tracks the sidebar column. When the
+	// sidebar is open the cell takes the shared sidebar width (so its right border
+	// aligns with the sidebar's border-r into one continuous divider); when it's
+	// collapsed there is no column, so the cell shrinks to just the hamburger and
+	// the divider drops away.
+	const sidebarShown = $derived($navigationState.sidebarOpen);
+
 	// In the native Mac shell the window has no title bar (overlay style), so the
 	// header doubles as the drag strip. `data-tauri-drag-region` is the standard
 	// mechanism; the mousedown fallback covers the case where the server-served
 	// page (external URL) doesn't get the attribute handler wired.
 	let isTauri = $state(false);
 	onMount(() => { if (browser) isTauri = !!(window as any).__TAURI__ || !!(window as any).__TAURI_INTERNALS__; });
+
+	// ── R4-SWIPEBACK: two-finger horizontal swipe → app-level Back ──────────────────────────────
+	// The workspace authors its own URL with replaceState, so in-app view switches leave NO browser
+	// history entry and the OS/WebKit Back gesture has nothing to return to. Map the macOS back
+	// gesture onto the workspace's OWN view-history back-stack (workspace.back()). Bound at the WINDOW
+	// so a swipe anywhere navigates — but GUARDED so it never hijacks a legitimate in-view horizontal
+	// scroll: if the gesture starts over an element that can still scroll horizontally in that
+	// direction (a wide table, a code block, the tab strip), that element keeps the gesture.
+	// DIRECTION: the macOS back gesture is two fingers moving RIGHT, which (natural scrolling) emits
+	// wheel events with NEGATIVE deltaX — so back = a decisive negative horizontal accumulation. This
+	// is layout-agnostic (no DOM/markup change) to stay clear of S11's R4-SHELLCHROME header redesign.
+	onMount(() => {
+		if (!browser) return;
+		const THRESHOLD = 90;   // px of sustained horizontal travel before navigating
+		const RESET_MS = 200;   // a wheel-momentum gap this long ends the gesture
+		let accum = 0;
+		let armed = false;      // a gesture NOT owned by a horizontal scroller (i.e. eligible for back)
+		let decided = false;    // ownership decided for THIS gesture (first frame)
+		let fired = false;      // one navigation per gesture
+		let idle: ReturnType<typeof setTimeout> | null = null;
+
+		// Does the target (or an ancestor) still scroll horizontally in `dir` (-1 = left, +1 = right)?
+		function ownedByScroller(target: EventTarget | null, dir: number): boolean {
+			let el = target as HTMLElement | null;
+			for (; el && el !== document.body && el !== document.documentElement; el = el.parentElement) {
+				const ox = getComputedStyle(el).overflowX;
+				if (!/(auto|scroll)/.test(ox) || el.scrollWidth <= el.clientWidth + 1) continue;
+				const atStart = el.scrollLeft <= 0;
+				const atEnd = el.scrollLeft + el.clientWidth >= el.scrollWidth - 1;
+				if (dir < 0 && !atStart) return true;   // can still scroll left ⇒ it owns a leftward swipe
+				if (dir > 0 && !atEnd) return true;      // can still scroll right ⇒ it owns a rightward swipe
+			}
+			return false;
+		}
+		function endSoon() {
+			if (idle) clearTimeout(idle);
+			idle = setTimeout(() => { accum = 0; armed = false; decided = false; fired = false; }, RESET_MS);
+		}
+		function onWheel(e: WheelEvent) {
+			if (e.ctrlKey) return;                                   // pinch-zoom, not a swipe
+			if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;    // horizontal-dominant only
+			if (Math.abs(e.deltaX) < 1) return;
+			if (!decided) { decided = true; armed = !ownedByScroller(e.target, Math.sign(e.deltaX)); }
+			if (!armed) { endSoon(); return; }                       // a scroller owns it — never navigate
+			// Suppress the native WebKit history swipe so back is ours alone (armed ⇒ not over a scroller,
+			// so nothing legitimate is being blocked). Requires the passive:false listener below.
+			if (e.cancelable) e.preventDefault();
+			accum += e.deltaX;
+			if (!fired && accum <= -THRESHOLD) { fired = true; workspace.back(); }
+			endSoon();
+		}
+		window.addEventListener('wheel', onWheel, { passive: false });
+		return () => { window.removeEventListener('wheel', onWheel); if (idle) clearTimeout(idle); };
+	});
 
 	function startWindowDrag(e: MouseEvent) {
 		if (!isTauri || e.button !== 0) return;
@@ -95,65 +157,79 @@
      The mousedown only initiates an OS window-drag — there is no keyboard
      equivalent and no fitting ARIA role, so the static-interaction rule is
      intentionally ignored here. -->
-<!-- Deliberately NOT a chrome band: --color-bg (the app-shell's own background), no
-     bottom border. It used to be --color-surface + a hairline — the same treatment as
-     the Sidebar panel — which drew a distinct strip across the top and a seam under it.
-     The header is not a panel; it is the top of the page, so it takes the page's colour
-     and dissolves into it. The native title-bar strip above is painted that same
-     --color-bg (main.rs TitleBarStyle::Transparent + theme.ts), so the window reads as
-     one continuous surface from the traffic lights down. The Sidebar keeps
-     --color-surface + its border-r — it IS a panel. -->
+<!-- R4-SHELLCHROME: the top bar is SPLIT into two cells that align with the two
+     columns below — a LEFT cell the width of the sidebar column (holding the
+     hamburger) and a RIGHT cell over the content (the tabs + actions). The left
+     cell's right border continues the Sidebar's `border-r` straight up to the very
+     top, so the window reads as two columns (sidebar | content) top-to-bottom: the
+     hamburger belongs to the sidebar column, the tabs to the content column. This
+     REVERSES the previous "one continuous undivided surface" treatment. The bar
+     still takes --color-bg (the app-shell background) with no bottom border, so the
+     ONLY seam is that intended vertical divider — the Sidebar keeps its own panel
+     colour + border-r, and the two borders meet as one line. `items-stretch` makes
+     each cell full-height so the divider runs the whole header height. In the
+     native shell the bar doubles as the window-drag strip (no title bar); the
+     button/links/tabs keep their own click/drag gestures. -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <header
 	data-tauri-drag-region
 	onmousedown={startWindowDrag}
-	class="app-header h-10 flex items-center px-2 sm:px-3 gap-1.5 sm:gap-2 bg-[var(--color-bg)] relative z-10 overflow-hidden flex-shrink-0"
+	class="app-header h-10 flex items-stretch bg-[var(--color-bg)] relative z-10 overflow-hidden flex-shrink-0"
 >
-	<!-- Sidebar toggle. macOS traffic-light clearance in the native shell is a
-	     DETERMINISTIC CSS padding on `.app-header` under `html.is-tauri` (tagged
-	     pre-paint in app.html) — not a post-mount spacer — so the hamburger never
-	     flashes under the traffic lights nor lands mis-positioned. -->
-	<button
-		onclick={handleMenuClick}
-		class="p-1 hover:bg-[var(--color-elevated)] rounded-md transition-colors text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] flex-shrink-0 hidden md:flex"
-		aria-label="Toggle menu"
+	<!-- LEFT CELL — the hamburger, sized to the sidebar column so its right border
+	     lines up with the Sidebar's border-r into one continuous divider up to the
+	     very top. Desktop-only: on mobile the hamburger is hidden (the drawer opens
+	     from the bottom tab bar) so this cell folds away. When the sidebar is
+	     collapsed there is no column, so the cell shrinks to just the hamburger and
+	     drops the divider. The width transition mirrors the Sidebar's so the two
+	     move together on resize + toggle. -->
+	<div
+		class="header-left hidden md:flex items-center flex-shrink-0 pl-2 sm:pl-3"
+		class:has-divider={sidebarShown}
+		style={sidebarShown ? `width: ${$sidebarWidth}px` : ''}
+		data-tauri-drag-region
 	>
-		<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 12h16M4 18h16" />
-		</svg>
-	</button>
+		<button
+			onclick={handleMenuClick}
+			class="p-1 hover:bg-[var(--color-elevated)] rounded-md transition-colors text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] flex-shrink-0"
+			aria-label="Toggle menu"
+		>
+			<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 12h16M4 18h16" />
+			</svg>
+		</button>
+	</div>
 
-	<!-- Brand wordmark removed: the app IS Mycelium and the mindscape page already
-	     carries the name — a second "Mycelium" up here was pure duplication. The
-	     menu + this empty strip stay draggable so the title bar still moves. -->
-	<span class="hidden md:block w-2 select-none" data-tauri-drag-region></span>
+	<!-- RIGHT CELL — over the content column: the workspace tabs (desktop) or the
+	     page title (mobile), plus the always-present right-side actions. -->
+	<div class="header-right flex-1 flex items-center min-w-0 px-2 sm:px-3 gap-1.5 sm:gap-2">
+		<!-- Mobile: page title -->
+		<h2 class="md:hidden text-sm font-medium text-[var(--color-text-primary)] truncate">
+			{viewLabel(currentView)}
+		</h2>
 
-	<!-- Mobile: page title -->
-	<h2 class="md:hidden text-sm font-medium text-[var(--color-text-primary)] truncate">
-		{viewLabel(currentView)}
-	</h2>
+		<!-- Workspace tabs, hoisted into the header (desktop, single pane). Falls
+		     back to a flex spacer on mobile / when the workspace is split into
+		     multiple panes (each pane then keeps its own in-pane strip). -->
+		{#if onlyPane}
+			<div class="hidden md:flex flex-1 min-w-0 self-stretch overflow-hidden">
+				<TabStrip
+					inline
+					tabs={onlyPane.tabs}
+					activeTabId={onlyPane.activeTabId}
+					paneId={onlyPane.id}
+					onfocus={(id) => workspace.focusTab(id)}
+					onclose={(id) => workspace.closeTab(id)}
+					onopen={(viewId) => workspace.openInPane(onlyPane.id, viewId)}
+					onreorder={(tabId, toIndex) => workspace.moveTabWithinPane(onlyPane.id, tabId, toIndex)}
+				/>
+			</div>
+			<div class="flex-1 md:hidden" data-tauri-drag-region></div>
+		{:else}
+			<div class="flex-1" data-tauri-drag-region></div>
+		{/if}
 
-	<!-- Workspace tabs, hoisted into the header (desktop, single pane) — one bar, not
-	     two. Falls back to a flex spacer on mobile / when the workspace is split. -->
-	{#if onlyPane}
-		<div class="hidden md:flex flex-1 min-w-0 self-stretch overflow-hidden">
-			<TabStrip
-				inline
-				tabs={onlyPane.tabs}
-				activeTabId={onlyPane.activeTabId}
-				paneId={onlyPane.id}
-				onfocus={(id) => workspace.focusTab(id)}
-				onclose={(id) => workspace.closeTab(id)}
-				onopen={(viewId) => workspace.openInPane(onlyPane.id, viewId)}
-				onreorder={(tabId, toIndex) => workspace.moveTabWithinPane(onlyPane.id, tabId, toIndex)}
-			/>
-		</div>
-		<div class="flex-1 md:hidden"></div>
-	{:else}
-		<div class="flex-1"></div>
-	{/if}
-
-	<!-- Right side actions -->
+		<!-- Right side actions -->
 	<div class="flex items-center gap-1 sm:gap-2 flex-shrink-0">
 		<!-- Activity orb — ALWAYS visible next to chat, ALWAYS clickable. A round
 		     glass disc: grey idle · green working · red on a failed job. Click for
@@ -228,10 +304,25 @@
 				</svg>
 			{/if}
 		</button>
+		</div>
 	</div>
 </header>
 
 <style>
+	/* R4-SHELLCHROME — the header's left cell (the sidebar column at the top). Its
+	   right border is the SAME 1px hairline as the Sidebar's border-r; since the cell
+	   sits directly above the sidebar at the same left edge and the same width (both
+	   border-box), the two borders stack into ONE continuous vertical divider from
+	   the very top down. The border is present only when the sidebar column is (the
+	   `has-divider` class), and the width transition matches the Sidebar's so they
+	   move in lockstep on resize + open/close. */
+	.header-left {
+		transition: width 0.2s ease-out;
+	}
+	.header-left.has-divider {
+		border-right: 1px solid var(--color-border);
+	}
+
 	/* The activity orb — a small round pane of glass with a glowing core. The
 	   --orb custom property carries the state colour; everything (ring, fill,
 	   glow, core) is derived from it so a state change is a single-token swap. */

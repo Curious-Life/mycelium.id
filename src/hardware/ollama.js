@@ -12,6 +12,17 @@ const DEFAULT_OLLAMA_URL = 'http://127.0.0.1:11434';
 
 import { recordPulledModel } from './ollama-manifest.js';
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Pull resilience defaults (R2-QWENPULL). A multi-GB pull over a home connection is the single
+// most failure-prone call in the app: one DNS/TLS/reset blip mid-stream used to abort the WHOLE
+// download (no signal, no retry — the pull passed no `signal` and looped forever on the reader).
+// These give it a stall watchdog and a resume-retry. Resume is FREE + correct: ollama keeps the
+// partial blobs on disk, so a fresh /api/pull CONTINUES from where it stopped, not restarts.
+const PULL_IDLE_TIMEOUT_MS = 120_000; // no progress event for 2 min ⇒ the pull has stalled → abort
+const PULL_MAX_ATTEMPTS = 4;          // 1 try + 3 resume-retries
+const PULL_RETRY_DELAY_MS = 1500;     // linear backoff base between attempts
+
 // Ollama tags look like `family:tag`, `ns/family:tag`, with dots/dashes/underscores.
 const MODEL_NAME_RE = /^[a-z0-9][a-z0-9._:/-]{0,79}$/i;
 
@@ -109,54 +120,125 @@ export function createOllamaClient({ baseUrl = DEFAULT_OLLAMA_URL, fetch = globa
   }
 
   /**
-   * Pull a model, streaming NDJSON progress events to onProgress.
-   * Each Ollama line ≈ { status, digest?, total?, completed? }. Resolves true on
-   * success; throws on a stream `error` or a non-OK response.
+   * ONE pull attempt: stream NDJSON progress to onProgress until the daemon closes the stream.
+   * Carries an idle watchdog (abort if no progress event within idleTimeoutMs) and honours an
+   * optional external abort signal. Resolves on a clean stream end; throws on a mid-stream
+   * `error`, a non-OK response, an abort (stall or caller-cancel), or a transport failure.
    * @param {string} name
    * @param {(ev:object)=>void} [onProgress]
+   * @param {{ idleTimeoutMs:number, externalSignal?:AbortSignal }} ctx
    */
-  async function pullModel(name, onProgress) {
-    if (!isValidModelName(name)) throw new Error('invalid model name');
-    const r = await fetch(`${base}/api/pull`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, stream: true }),
-    });
-    if (!r.ok || !r.body) throw new Error(`ollama /api/pull ${r.status}`);
+  async function pullOnce(name, onProgress, { idleTimeoutMs, externalSignal }) {
+    const ctrl = new AbortController();
+    const onExternalAbort = () => ctrl.abort();
+    if (externalSignal) {
+      if (externalSignal.aborted) ctrl.abort();
+      else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+    // Idle watchdog: (re)armed on every received chunk. If the pull stalls — TCP wedged, a
+    // half-open connection ollama never notices — no progress arrives, the timer fires, and we
+    // abort so the retry loop can start a fresh (resuming) attempt instead of hanging forever.
+    let idleTimer = null;
+    const bump = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      if (idleTimeoutMs > 0) idleTimer = setTimeout(() => ctrl.abort(), idleTimeoutMs);
+    };
+    try {
+      bump();
+      const r = await fetch(`${base}/api/pull`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, stream: true }),
+        signal: ctrl.signal,
+      });
+      if (!r.ok || !r.body) throw new Error(`ollama /api/pull ${r.status}`);
 
-    const reader = r.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let nl;
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (!line) continue;
-        let ev;
-        try { ev = JSON.parse(line); } catch { continue; } // skip a partial/garbled line
-        // ⚠️ PRESERVE ollama's own reason. This used to throw a bare `ollama pull failed`,
-        // discarding the mid-stream `ev.error` — which is the ONLY place a disk-full
-        // ("no space left on device") or a registry-unreachable ("dial tcp: lookup
-        // registry.ollama.ai: no such host") ever surfaces. Without it, every mid-pull
-        // failure was indistinguishable from a dead daemon, and the drainer reported them
-        // all as "runtime not reachable" (drainer.js classifyOllamaFault). The text is
-        // ollama's own infra string (an HTTP/registry error or a models-dir path) — never
-        // vault content — and it is bounded here; the drainer scrubs any home-dir username
-        // before storing it, and never publishes it to the content-free activity feed. See
-        // the SECURITY note on `pullModel`'s callers (drainer.js publishPull.end passes a
-        // CONSTANT; the reason reaches only the localhost-only readiness surface).
-        if (ev?.error) throw new Error(`ollama pull failed: ${String(ev.error).slice(0, 160)}`);
-        if (typeof onProgress === 'function') onProgress(ev);
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        bump();   // progress — the stream is alive; re-arm the idle watchdog
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let ev;
+          try { ev = JSON.parse(line); } catch { continue; } // skip a partial/garbled line
+          // ⚠️ PRESERVE ollama's own reason. This used to throw a bare `ollama pull failed`,
+          // discarding the mid-stream `ev.error` — which is the ONLY place a disk-full
+          // ("no space left on device") or a registry-unreachable ("dial tcp: lookup
+          // registry.ollama.ai: no such host") ever surfaces. Without it, every mid-pull
+          // failure was indistinguishable from a dead daemon, and the drainer reported them
+          // all as "runtime not reachable" (drainer.js classifyOllamaFault). The text is
+          // ollama's own infra string (an HTTP/registry error or a models-dir path) — never
+          // vault content — and it is bounded here; the drainer scrubs any home-dir username
+          // before storing it, and never publishes it to the content-free activity feed. See
+          // the SECURITY note on `pullModel`'s callers (drainer.js publishPull.end passes a
+          // CONSTANT; the reason reaches only the localhost-only readiness surface).
+          if (ev?.error) throw new Error(`ollama pull failed: ${String(ev.error).slice(0, 160)}`);
+          if (typeof onProgress === 'function') onProgress(ev);
+        }
+      }
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      if (externalSignal) externalSignal.removeEventListener?.('abort', onExternalAbort);
+    }
+  }
+
+  /**
+   * Pull a model, streaming NDJSON progress events to onProgress. Resolves true on success;
+   * throws the last error once the resume-retries are exhausted (so callers can still
+   * classifyOllamaFault the REAL reason).
+   *
+   * RESILIENCE (R2-QWENPULL): a single attempt used to be the whole story — no signal, no
+   * timeout, no retry — so one mid-stream blip on a multi-GB pull aborted everything and the
+   * owner saw a bare "pull failed". Now each attempt has an idle timeout, and a transport/stall
+   * failure is RESUMED: ollama keeps the partial blobs, so the next /api/pull continues from
+   * where it stopped. Two failures are NOT retried: an invalid name (rejected before any fetch)
+   * and disk exhaustion (a retry cannot conjure space — surface it now).
+   * @param {string} name
+   * @param {(ev:object)=>void} [onProgress]
+   * @param {{ idleTimeoutMs?:number, maxAttempts?:number, retryDelayMs?:number, signal?:AbortSignal }} [opts]
+   */
+  async function pullModel(name, onProgress, opts = {}) {
+    if (!isValidModelName(name)) throw new Error('invalid model name');
+    const idleTimeoutMs = opts.idleTimeoutMs ?? PULL_IDLE_TIMEOUT_MS;
+    const maxAttempts = Math.max(1, opts.maxAttempts ?? PULL_MAX_ATTEMPTS);
+    const retryDelayMs = opts.retryDelayMs ?? PULL_RETRY_DELAY_MS;
+    const externalSignal = opts.signal;
+
+    let lastErr;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await pullOnce(name, onProgress, { idleTimeoutMs, externalSignal });
+        // Track the tag so destroy-vault can remove it from a SHARED daemon later
+        // (best-effort; a record failure never breaks the pull). See ollama-manifest.js.
+        try { await recordPulledModel(name); } catch { /* best-effort */ }
+        return true;
+      } catch (err) {
+        lastErr = err;
+        // The caller cancelled deliberately → stop; do NOT keep retrying their aborted pull.
+        if (externalSignal?.aborted) throw err;
+        // Disk exhaustion is terminal: no number of retries frees space, and the owner needs
+        // the "free up space" remedy NOW, not after four more failed attempts.
+        if (classifyOllamaFault(err, 'pull') === OLLAMA_FAULT.OUT_OF_SPACE) throw err;
+        if (attempt < maxAttempts) {
+          // Resume transparently — do NOT synthesize a progress event here. ollama keeps the
+          // partial blobs, so the next attempt's REAL events resume near where they stopped; a
+          // fake {completed:0,total:0} would only reset the drainer's feed heartbeat to 0/0
+          // (activity-feed heartbeat does `step = COALESCE(?, step)`, and 0 is not null).
+          await sleep(retryDelayMs * attempt);
+          continue;
+        }
+        throw err;   // retries exhausted — rethrow so the caller classifies the real reason
       }
     }
-    // Track the tag so destroy-vault can remove it from a SHARED daemon later
-    // (best-effort; a record failure never breaks the pull). See ollama-manifest.js.
-    try { await recordPulledModel(name); } catch { /* best-effort */ }
-    return true;
+    // Unreachable (the loop returns or throws), but keeps the type checker + linters happy.
+    throw lastErr ?? new Error('ollama pull failed');
   }
 
   /**

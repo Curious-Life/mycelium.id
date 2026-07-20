@@ -83,6 +83,16 @@
 
 	const connected = $derived(status?.remoteMode === 'managed' && !!status?.publicHost);
 	const connectorUrl = $derived(status?.publicBaseUrl ? status.publicBaseUrl.replace(/\/$/, '') + '/mcp' : '');
+	// Passkey enrolment MUST run on the relay origin: WebAuthn binds a credential to
+	// the vault's web host (<handle>.mycelium.id), and this desktop webview is served
+	// from loopback (127.0.0.1), which cannot create a credential for that rpID. So
+	// "Set up a passkey" opens the vault's OWN web sign-in (?enroll=1) in the system
+	// browser, where the operator-password sign-in establishes the session the
+	// enrolment ceremony requires. Empty until a public address is configured →
+	// the UI guides the user to set one up first instead of offering a dead action.
+	const passkeyEnrollUrl = $derived(
+		status?.publicBaseUrl ? status.publicBaseUrl.replace(/\/$/, '') + '/login?enroll=1' : ''
+	);
 
 	// Turnstile bot-gate (O2). When the control plane runs Turnstile, it returns a
 	// public sitekey; we embed its /turnstile page in a CROSS-ORIGIN iframe so
@@ -460,17 +470,44 @@
 				{showAdvanced ? '▾' : '▸'} Advanced — passkey & own relay
 			</button>
 			{#if showAdvanced}
-				<!-- Require a passkey for web sign-in (hardening). Enableable only once a
-				     passkey is enrolled; auto-disables if you change your public host. -->
-				<div class="mt-3">
-					<label class="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
-						<input type="checkbox" checked={status.requirePasskeyForWeb} disabled={cfgSaving || !status.passkeyEnrolled}
-							onchange={(e) => togglePasskeyRequired((e.target as HTMLInputElement).checked)} class="accent-[var(--color-accent)]" />
-						Require a passkey for web sign-in (password alone won't work over the web)
-					</label>
-					{#if !status.passkeyEnrolled}
-						<p class="text-[10px] text-[var(--color-text-tertiary)] mt-1">Enroll a passkey first (sign in over the web once, then “Set up a passkey”). Your local desktop access and recovery key always work.</p>
-					{/if}
+				<!-- Passkey for web sign-in (hardening). TWO parts:
+				     (1) enrol a passkey — the WebAuthn ceremony MUST run on the relay
+				         origin, so "Set up a passkey" opens the vault's OWN web sign-in
+				         (?enroll=1) in the system browser. This desktop window is loopback
+				         and CANNOT mint a credential bound to the web host (it is loopback-only).
+				     (2) once one is enrolled, optionally require it (the toggle enables
+				         only when passkeyEnrolled — the server also gates this, so the
+				         policy can never be turned on with zero passkeys → no lock-out). -->
+				<div class="mt-3 space-y-3">
+					<!-- (1) Enrol a passkey -->
+					<div>
+						{#if status.passkeyEnrolled}
+							<p class="text-xs text-green-400">✓ A passkey is set up for web sign-in.</p>
+							{#if passkeyEnrollUrl}
+								<a href={passkeyEnrollUrl} target="_blank" rel="noopener noreferrer" class="inline-block mt-1 text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] underline">Add another passkey ↗</a>
+							{/if}
+						{:else if passkeyEnrollUrl}
+							<p class="text-[11px] text-[var(--color-text-secondary)] mb-1.5">Add a passkey (Touch&nbsp;ID, Face&nbsp;ID, or a security key) for phishing-resistant web sign-in.</p>
+							<a href={passkeyEnrollUrl} target="_blank" rel="noopener noreferrer" class="inline-block {btnCls} no-underline">Set up a passkey ↗</a>
+							<p class="text-[10px] text-[var(--color-text-tertiary)] mt-1.5 leading-relaxed">Opens your vault's web sign-in in a browser. Sign in once with your operator password, then follow the prompt to add a passkey. A passkey is bound to your web address, so it's created there — not in this app window. {#if !(status.remoteEnabled || connected)}<span class="text-amber-400">Your remote server isn't live yet — restart the app after enabling remote access so the page loads.</span>{/if}</p>
+						{:else}
+							<p class="text-[11px] text-amber-400">Pick an address above first. A passkey is bound to your vault's web address, so you add it after you have one — until then, your operator password is the web sign-in.</p>
+						{/if}
+					</div>
+
+					<!-- (2) Require a passkey for web sign-in -->
+					<div>
+						<label class="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
+							<input type="checkbox" checked={status.requirePasskeyForWeb} disabled={cfgSaving || !status.passkeyEnrolled}
+								onchange={(e) => togglePasskeyRequired((e.target as HTMLInputElement).checked)} class="accent-[var(--color-accent)]" />
+							Require a passkey for web sign-in (password alone won't work over the web)
+						</label>
+						{#if !status.passkeyEnrolled}
+							<p class="text-[10px] text-[var(--color-text-tertiary)] mt-1">Add a passkey first (above). This app on your Mac and your recovery key always get you in.</p>
+						{:else}
+							<p class="text-[10px] text-[var(--color-text-tertiary)] mt-1 leading-relaxed">Lost your passkey? Turn this off here on your Mac, sign in with your operator password, and enrol a new one. Your recovery key restores the vault itself.</p>
+						{/if}
+					</div>
 				</div>
 
 				<!-- Your own relay (O9). -->

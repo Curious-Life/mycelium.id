@@ -586,16 +586,29 @@
 					{/if}
 				</div>
 			{:else}
-				{#each cloudGroups as g (g.key)}
-					{#if g.items.length}
-						<div class="preset-group">
-							<div class="group-title">{g.title}</div>
-							<div class="chips-row">
-								{#each g.items as p (p.id)}<button class="preset-chip" class:rec-desc={roleRecs?.descriptions?.presetId === p.id} title={roleRecs?.descriptions?.presetId === p.id ? 'Recommended for descriptions — mindscape narration (the narrate task), on modest hardware' : undefined} onclick={() => choose(p)}>{#if roleRecs?.descriptions?.presetId === p.id}★ {/if}{p.label}</button>{/each}
-							</div>
+					<!-- IM-1 (operator-confirmed 2026-07-20): the dense two-group preset-chip grid
+					     ("EU-sovereign" / "US providers" as wrapping chip clouds) was the readability
+					     eyesore the operator named. Retired for a single calm list — one provider per
+					     line, its jurisdiction stated plainly, the Narration recommendation marked. Still
+					     a pure CONNECT surface (P3/A3): tapping a row opens the connect form; model→function
+					     ASSIGNMENT lives only in the Functions tab (IntelligenceScreen), never here — so
+					     this simplification removes no connect or assignment capability. -->
+					<div class="preset-group">
+						<div class="group-title">Connect a cloud provider</div>
+						<div class="connect-list">
+							{#each cloudGroups as g (g.key)}
+								{#each g.items as p (p.id)}
+									{@const rec = roleRecs?.descriptions?.presetId === p.id}
+									<button class="connect-row" class:rec-desc={rec} onclick={() => choose(p)}
+										title={rec ? 'Recommended for Narration — mindscape descriptions (the narrate task), on modest hardware' : undefined}>
+										<span class="cr-name">{#if rec}<span class="cr-star">★</span> {/if}{p.label}</span>
+										{#if JURIS[p.jurisdiction]}<span class="chip {JURIS[p.jurisdiction].cls}">{JURIS[p.jurisdiction].label}</span>{/if}
+										<span class="cr-go">Connect →</span>
+									</button>
+								{/each}
+							{/each}
 						</div>
-					{/if}
-				{/each}
+					</div>
 				<div class="preset-group sub-group">
 					<div class="group-title">Your Claude subscription</div>
 					{#if subStatus?.authenticated || subHealth === 'declined' || subHealth === 'needs_reauth'}
@@ -740,7 +753,6 @@
 	.chip.rec-pick { background: var(--color-accent-aurum); color: var(--color-bg); }
 	/* role-aware "recommended for X" — gold-tinted, lighter than the solid companion badge */
 	.chip.rec-role { background: rgba(229,184,76,0.14); color: var(--color-accent-aurum, #e5b84c); }
-	.preset-chip.rec-desc { border-color: var(--color-accent-aurum, #e5b84c); color: var(--color-accent-aurum, #e5b84c); }
 	.row-blurb { color: var(--color-text-tertiary); font-size: 0.68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.row-action { margin-left: auto; display: flex; align-items: center; gap: 0.6rem; flex-shrink: 0; }
 	.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-border); flex-shrink: 0; }
@@ -764,6 +776,16 @@
 	.chips-row { display: flex; flex-wrap: wrap; gap: 0.45rem; }
 	.preset-chip { font-size: 0.74rem; padding: 0.4rem 0.8rem; border-radius: 8px; border: 1px solid var(--color-border); background: none; color: var(--color-text-secondary); cursor: pointer; font-family: inherit; }
 	.preset-chip:hover { border-color: var(--color-accent-aurum, #e5b84c); color: var(--color-text-primary); }
+	/* IM-1: the calm connect list that replaced the dense preset-chip grid — one provider per
+	   row (name · jurisdiction · Connect). Theme-aware via the shared tokens: text/borders come
+	   from CSS vars that flip per theme; the glass overlay matches the pane's other rows. */
+	.connect-list { display: flex; flex-direction: column; gap: 0.3rem; }
+	.connect-row { display: flex; align-items: center; gap: 0.55rem; width: 100%; text-align: left; font: inherit; font-size: 0.78rem; padding: 0.5rem 0.65rem; border-radius: 9px; border: 1px solid var(--color-border); background: rgba(255,255,255,0.02); color: var(--color-text-primary); cursor: pointer; }
+	.connect-row:hover { border-color: var(--color-accent-aurum, #e5b84c); background: rgba(255,255,255,0.045); }
+	.connect-row.rec-desc { border-color: rgba(229,184,76,0.4); }
+	.cr-name { font-weight: 500; color: var(--color-text-primary); }
+	.cr-star { color: var(--color-accent-aurum, #e5b84c); }
+	.cr-go { margin-left: auto; font-size: 0.72rem; color: var(--color-accent-aurum, #e5b84c); flex-shrink: 0; white-space: nowrap; }
 	.connect-form { display: flex; flex-direction: column; gap: 0.5rem; }
 	.cf-head { display: flex; align-items: center; gap: 0.5rem; }
 	.cf-name { font-size: 0.8rem; font-weight: 500; color: var(--color-text-primary); }

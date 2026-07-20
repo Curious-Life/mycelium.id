@@ -13,6 +13,7 @@
 // Closed provenance enum. Unknown values are a bug (tests assert membership).
 export const TS_PROVENANCE = Object.freeze({
   SOURCE_FIELD: 'source-field', // the source record carried an explicit time
+  EXIF: 'exif',                 // image EXIF DateTimeOriginal (when the photo was TAKEN)
   FILE_MTIME: 'file-mtime',     // filesystem / zip-entry modification time
   FRONTMATTER: 'frontmatter',   // YAML `created:`/`date:` in a markdown note
   FILENAME: 'filename',         // an ISO/date embedded in the path or name

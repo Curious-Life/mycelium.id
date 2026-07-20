@@ -7,11 +7,11 @@
 //
 // detectSources({home}) is pure (takes a home dir) — no boot needed.
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
-import { rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { rmSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { detectSources, readClaudeCodeEntries } from '../src/ingest/detect-sources.js';
+import { detectSources, probeSweepAccess, readClaudeCodeEntries } from '../src/ingest/detect-sources.js';
 
 const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? `\n      ${d}` : ''}`); };
@@ -88,6 +88,22 @@ rec('D8 Local files swept by category (document + image counts)',
   !!lf && lf.count === 2 && lf.categories?.some((c) => c.key === 'document' && c.count === 1) && lf.categories?.some((c) => c.key === 'image' && c.count === 1),
   JSON.stringify(lf && { count: lf.count, cats: lf.categories?.map((c) => [c.key, c.count]) }));
 rec('D9 empty home → still no false positives (all 5 detectors)', detectSources({ home: empty }).length === 0);
+
+// ON-5: probeSweepAccess must flag a sweep root macOS/OS is BLOCKING (EPERM/EACCES
+// on readdir) so a first-scan permission block reads as "grant access & re-scan",
+// NOT a false "nothing found." Readable roots → []; an unreadable one → its name.
+rec('D10 readable sweep roots → no false "blocked"', probeSweepAccess({ home }).length === 0,
+  JSON.stringify(probeSweepAccess({ home })));
+const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+if (isRoot) {
+  rec('D11 unreadable sweep root flagged as blocked — SKIPPED (running as root bypasses fs perms)', true);
+} else {
+  chmodSync(path.join(home, 'Documents'), 0o000);
+  let blocked = [];
+  try { blocked = probeSweepAccess({ home }); } finally { chmodSync(path.join(home, 'Documents'), 0o755); }
+  rec('D11 unreadable sweep root (chmod 000) flagged as blocked, not swallowed as empty',
+    blocked.includes(path.join(home, 'Documents')), JSON.stringify(blocked.map((p) => path.basename(p))));
+}
 
 const ok = ledger.every(Boolean);
 console.log(`\nVERDICT: ${ok ? 'GO' : 'NO-GO'} — local data-source detection (allowlist, presence/counts, no false positives)`);

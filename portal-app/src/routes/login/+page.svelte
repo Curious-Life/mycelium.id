@@ -15,8 +15,18 @@
 	let requirePasskey = $state(false);
 	let telegramAvailable = $state(false);
 	let telegramRedirecting = $state(false);
+	// `?enroll=1` — the user arrived here specifically to add a passkey (the desktop
+	// Settings "Set up a passkey" action opens THIS relay URL in the system browser,
+	// because the WebAuthn ceremony must run on the relay origin, not the loopback
+	// webview). We still land on operator sign-in first (enrollment needs a session —
+	// @better-auth/passkey generate-register-options is session-gated), then the
+	// existing post-login auto-advance carries them to the enrol screen.
+	let enrollIntent = $state(false);
 
 	onMount(async () => {
+		try {
+			enrollIntent = new URLSearchParams(window.location.search).get('enroll') === '1';
+		} catch { /* no query — normal sign-in */ }
 		try {
 			const res = await fetch('/auth/setup-status', { credentials: 'same-origin' });
 			if (res.ok) {
@@ -600,6 +610,11 @@
 				body: JSON.stringify({ response }),
 			});
 			if (!verRes.ok) throw new Error('Passkey sign-in failed');
+			// If the user came to add a passkey (e.g. "Add another passkey" while the
+			// require-passkey policy is on, so the password path is blocked), the
+			// passkey sign-in just established a session — carry them to enrolment
+			// rather than into the app.
+			if (enrollIntent) { mode = 'enroll'; loading = false; return; }
 			window.location.assign('/');
 		} catch (e) {
 			error = (e instanceof Error && e.name === 'NotAllowedError') ? 'Passkey sign-in cancelled' : (e instanceof Error ? e.message : 'Passkey sign-in failed');
@@ -614,7 +629,16 @@
 		loading = true;
 		error = null;
 		try {
-			const optRes = await fetch('/api/auth/passkey/generate-register-options', { credentials: 'same-origin' });
+			// Auto-label the credential with the vault handle so the OS authenticator /
+			// password manager shows "<handle>.mycelium.id" (not the internal account
+			// name). @better-auth/passkey sets the WebAuthn userName to `ctx.query.name`
+			// when present (dist/index.mjs:156). The handle is PUBLIC — no secret leaks.
+			// Falls back to a generic label when no handle is claimed yet.
+			const label = userHandle ? `${userHandle}.mycelium.id` : 'Mycelium vault';
+			const optRes = await fetch(
+				`/api/auth/passkey/generate-register-options?name=${encodeURIComponent(label)}`,
+				{ credentials: 'same-origin' },
+			);
 			if (!optRes.ok) throw new Error('Could not start passkey setup');
 			const options = await optRes.json();
 			const credential = await startRegistration({ optionsJSON: options });
@@ -683,6 +707,8 @@
 							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
 								{#if requirePasskey}
 									This vault requires a passkey for web sign-in. Use Touch ID, Face ID, or your security key.
+								{:else if enrollIntent}
+									Sign in once with your operator password — then you can add a passkey to this vault for faster, phishing-resistant web sign-in next time.
 								{:else}
 									Enter your operator password to reach your vault on this device.
 								{/if}
@@ -767,9 +793,9 @@
 				<div class="card-elevated p-8">
 					<div class="space-y-6">
 						<div class="text-center">
-							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Set up a passkey?</h2>
+							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">{enrollIntent ? 'Add a passkey' : 'Set up a passkey?'}</h2>
 							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
-								Sign in faster next time with a passkey — Touch ID, Face ID, or a security key on this device. Your password still works as a backup.
+								Sign in faster next time with a passkey — Touch ID, Face ID, or a security key on this device. Your operator password still works as a backup, so you can always enrol another passkey later.
 							</p>
 						</div>
 						<button

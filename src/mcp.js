@@ -14,6 +14,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { mindAgentRoot } from './paths.js';
 
 import { createHealthDomain } from './tools/health.js';
 import { createTasksDomain } from './tools/tasks.js';
@@ -61,7 +62,7 @@ export function buildDomains({
   db,
   userId = 'local-user',
   agentId = 'personal-agent',
-  agentRoot = process.env.MYCELIUM_AGENT_ROOT || 'data/mind',
+  agentRoot = mindAgentRoot(),
   embedder = null,
   identity = null,
 }) {

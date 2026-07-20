@@ -54,6 +54,26 @@ function freshVault() {
   return { raw, messages, d1Query };
 }
 
+// A vault whose d1Query COUNTS the embed-backlog scans, so a test can prove whether an
+// embedBacklogCached() call revalidated (issued the multi-second SQLCipher scan) or served
+// a cached snapshot. Returns { raw, messages, scans:() }.
+function countingVault() {
+  const raw = new Database(':memory:');
+  applyMigrations(raw);
+  let scans = 0;
+  const d1Query = async (sql, params = []) => {
+    // The embed-backlog scan is the only SELECT that COUNTs total AND touches embedding_768.
+    if (/COUNT\(\*\)\s+AS\s+total/i.test(sql) && /embedding_768/i.test(sql)) scans++;
+    const stmt = raw.prepare(sql);
+    if (/^\s*(insert|update|delete)/i.test(sql) && !/returning/i.test(sql)) { stmt.run(...params); return { results: [] }; }
+    return { results: stmt.all(...params) };
+  };
+  const d1Batch = async (stmts) => { for (const s of stmts) await d1Query(s.sql, s.params); return []; };
+  const firstRow = (r) => (r?.results || [])[0] || null;
+  const messages = createMessagesNamespace({ d1Query, d1Batch, firstRow });
+  return { raw, messages, scans: () => scans };
+}
+
 let seq = 0;
 function addRow(raw, { content, nlp = 0, vec = null, nlpError = null, forgotten = null }) {
   const id = `m${++seq}`;
@@ -271,6 +291,68 @@ await t('attempt parser is content-free and total (never throws on junk)', async
   assert.equal(embedAttemptsOf('embed-retry:3'), 3);
   assert.equal(embedAttemptsOf(`${EMBED_CAPPED_MARK}:5`), 5);
   assert.equal(embedAttemptsOf('a real error message'), 0, 'unrelated errors must not read as attempts');
+});
+
+console.log('\nembedBacklogCached SWR TTL — total:0 is TRANSIENT, not a settled backlog (QA P1-C, the SWR half)');
+
+await t('a total:0 snapshot revalidates on the SHORT 8s TTL — an import within 60s is picked up fast, never the false-empty', async () => {
+  // THE P1-C SWR HALF. readiness.warm() primes {total:0} at boot; nothing busts _backlog on import.
+  // With the old TTL rule ({total:0,pending:0} → 60s), a user who imported within that minute kept
+  // reading total:0, and generate.ts's 12s empty-vault clock fired the false "Import some
+  // conversations first" AFTER the import populated the vault. total:0 must be SHORT-TTL so the poll
+  // revalidates well inside that 12s window. Driven over a REAL vault with a mock clock.
+  const { raw, messages, scans } = countingVault();
+  const realNow = Date.now;
+  let now = 1_000_000;
+  Date.now = () => now;
+  try {
+    // 1. Empty vault → cold scan caches {total:0}.
+    const v0 = await messages.embedBacklogCached(U);
+    assert.equal(v0.total, 0, 'a fresh vault reads total:0');
+    assert.equal(scans(), 1, 'the cold read scanned once');
+
+    // 2. The import lands AFTER the total:0 snapshot was cached (rows now exist).
+    for (let i = 0; i < 500; i++) addRow(raw, { content: `imported ${i}`, nlp: 0 });
+
+    // 3. 9s later — PAST the 8s short TTL, WELL WITHIN the old 60s long TTL. With the fix this poll
+    //    MUST revalidate (serve stale now, fresh next); with the old rule it would not scan at all.
+    now += 9_000;
+    const v1 = await messages.embedBacklogCached(U);
+    assert.equal(v1.total, 0, 'serve-stale returns the last snapshot instantly (still 0 on THIS call)');
+    assert.equal(scans(), 2,
+      'a total:0 snapshot past 8s MUST revalidate — with the old 60s TTL it would NOT (the P1-C SWR bug)');
+
+    // 4. Let the background revalidate settle → the real import count is now served, one short-TTL
+    //    revalidate away (well inside generate.ts EMPTY_CONFIRM_MS 12s), so the false-empty never fires.
+    await new Promise((r) => setTimeout(r, 0));
+    const v2 = await messages.embedBacklogCached(U);
+    assert.equal(v2.total, 500, 'after one short-TTL revalidate the real import count is served — never a stale false-empty');
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+await t('CONTROL: a SETTLED backlog (pending 0, total>0) keeps the LONG 60s TTL — the fix is total:0-specific, not "always scan"', async () => {
+  // TEETH + no-cost-regression: the short TTL must apply ONLY to the transient total:0, never to a
+  // mature caught-up vault (which would re-introduce the 8s full-table decrypt loop this file's own
+  // header warns about). A settled snapshot at 9s must NOT revalidate.
+  const { raw, messages, scans } = countingVault();
+  const realNow = Date.now;
+  let now = 2_000_000;
+  Date.now = () => now;
+  try {
+    for (let i = 0; i < 3; i++) addRow(raw, { content: `done ${i}`, nlp: 2, vec: Buffer.alloc(8) });
+    const s0 = await messages.embedBacklogCached(U);
+    assert.equal(s0.total, 3);
+    assert.equal(s0.pending, 0, 'a fully-embedded vault is settled');
+    assert.equal(scans(), 1, 'one cold scan');
+    now += 9_000;   // inside the 60s long TTL
+    await messages.embedBacklogCached(U);
+    assert.equal(scans(), 1,
+      'a settled backlog must NOT revalidate at 9s — it keeps the 60s TTL (the fix must not make every poll a scan)');
+  } finally {
+    Date.now = realNow;
+  }
 });
 
 console.log(`\n${fail === 0 ? 'VERDICT: GO' : 'VERDICT: NO-GO'} — ${pass} passed, ${fail} failed\n`);

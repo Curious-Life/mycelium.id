@@ -7,7 +7,7 @@
 	//   • a loose file (.md/.txt/.pdf/…/img) → POST /portal/upload/file     (→ document or attachment)
 	// The backend spine (src/ingest/run-import.js) decides document-vs-attachment;
 	// this component just classifies transport and reports an honest result.
-	import { importFiles, importFolder, type ImportResult } from '$lib/import/upload-handlers';
+	import { importFiles, importFolder, filesFromDataTransfer, type ImportResult } from '$lib/import/upload-handlers';
 
 	let {
 		accept = '*',
@@ -59,10 +59,14 @@
 		const list = Array.from((e.target as HTMLInputElement).files || []);
 		if (list.length) handleFolder(list);
 	}
-	function onDrop(e: DragEvent) {
+	async function onDrop(e: DragEvent) {
 		e.preventDefault(); dragOver = false;
-		const list = Array.from(e.dataTransfer?.files || []);
-		if (list.length) handleFiles(list);
+		// Expand a dropped folder into its files (with webkitRelativePath) and route
+		// to the folder importer; a plain file/archive drop keeps the loose-file path.
+		const { files, hadDirectory } = await filesFromDataTransfer(e.dataTransfer);
+		if (!files.length) return;
+		if (hadDirectory) handleFolder(files);
+		else handleFiles(files);
 	}
 </script>
 

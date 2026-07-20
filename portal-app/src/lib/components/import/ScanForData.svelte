@@ -20,6 +20,10 @@
 	let phase = $state<Phase>('idle');
 	let scanErr = $state('');
 	let found = $state<DetectedSource[]>([]);
+	// Broad-sweep roots macOS is blocking (TCC). Lets the empty state say "grant
+	// access & re-scan" instead of a dead "nothing found" — the first-scan-empty
+	// bug where readdir EPERM was swallowed as empty (ON-5).
+	let blocked = $state<string[]>([]);
 
 	// Per-source UI state, keyed by source id.
 	let mode = $state<Record<string, 'clean' | 'full'>>({});
@@ -38,12 +42,22 @@
 	async function scan() {
 		phase = 'scanning'; scanErr = '';
 		try {
-			found = await scanSources();
+			const r = await scanSources();
+			found = r.sources;
+			blocked = r.blocked;
 			phase = 'done';
 		} catch (e: any) {
 			scanErr = e?.message || 'Scan failed.'; phase = 'error';
 		}
 	}
+
+	// A readable list of the blocked folders for the permission hint.
+	const blockedLabel = $derived(
+		blocked.length === 0 ? ''
+			: blocked.length === 1 ? blocked[0]
+			: blocked.length === 2 ? `${blocked[0]} and ${blocked[1]}`
+			: `${blocked.slice(0, -1).join(', ')} and ${blocked[blocked.length - 1]}`,
+	);
 
 	// The broad local-files sweep runs as an async background job — live progress here.
 	let sweep = $state<SweepProgress | null>(null);
@@ -142,9 +156,21 @@
 		{#if phase === 'error'}<p class="scan-err">{scanErr}</p>{/if}
 	{:else}
 		{#if importable.length === 0}
-			<p class="scan-empty">No importable data found on this Mac.</p>
+			{#if blocked.length}
+				<!-- macOS blocked the sweep roots (TCC) — the scan couldn't actually
+				     look, so this is NOT "no data" (ON-5). Guide the grant + re-scan. -->
+				<p class="scan-empty">macOS is blocking access to your {blockedLabel} folder{blocked.length === 1 ? '' : 's'}, so the scan couldn't look there.</p>
+				<p class="scan-sub">Click <strong>Allow</strong> if macOS prompts you — or grant access in System Settings → Privacy &amp; Security → Files and Folders — then scan again.</p>
+			{:else}
+				<p class="scan-empty">No importable data found on this Mac.</p>
+			{/if}
 			<button class="scan-link" onclick={scan}>Scan again</button>
 		{:else}
+			{#if blocked.length}
+				<!-- Found some sources, but macOS is still blocking a sweep root, so
+				     loose files there may be missing (ON-5, partial access). -->
+				<p class="scan-sub">macOS is blocking your {blockedLabel} folder{blocked.length === 1 ? '' : 's'} — grant access (System Settings → Privacy &amp; Security → Files and Folders) and scan again to include files there.</p>
+			{/if}
 			<div class="rows">
 				{#each importable as s (s.source)}
 					{@const cat = CAT[s.source]}

@@ -8,7 +8,7 @@
 // (channels/scheduler/narration) stay native. See docs/HARNESS-CLI-DESIGN-2026-07-02.md.
 import { HARNESSES, isCliEngineReady } from './harnesses/index.js';
 import { resolveClaudeBin } from '../inference/claude-bin.js';
-import { claudeConfigDir, seedClaudeConfigDir } from '../inference/claude-config-dir.js';
+import { claudeConfigDir, seedClaudeConfigDir, readClaudeConfigDirLiveToken, refreshClaudeConfigDirToken } from '../inference/claude-config-dir.js';
 
 /**
  * @param {object} a
@@ -56,6 +56,20 @@ export async function resolveHarness({ db, userId, provider, deps, claudeBin }) 
     const creds = full?.credentials ? JSON.parse(full.credentials) : null;
     seedClaudeConfigDir(creds);
     configDir = claudeConfigDir();
+    // ROBUSTNESS (R3-SUBAUTH): seedClaudeConfigDir is NON-CLOBBERING — if the isolated dir
+    // already holds a token it leaves it in place, even when that token has gone stale (the
+    // seed file is frozen at connect-time; `claude` refreshes into a config-dir-namespaced
+    // Keychain item, not this file). So the spawned `claude` would inherit an EXPIRED Bearer
+    // and report "Not logged in" → the portal-chat subscription turn fails to authenticate,
+    // even though the native/channel path works (it live-refreshes via resolve.js).
+    // Match that path's robustness: if no live, non-expired token is present in the isolated
+    // dir, ask `claude` to refresh its OWN token (ToS-clean, #10) BEFORE we spawn the harness.
+    // Both helpers resolve the SAME claudeConfigDir() default, so they target this dir. Fail-
+    // soft: on any error we still spawn (and the harness itself fails safe to native if auth
+    // is genuinely dead — a truly revoked credential needs a reconnect, which this can't fix).
+    // Pass the SAME resolved `bin` the harness will spawn (honours the claudeBin test seam,
+    // and keeps refresh + turn on one binary) rather than letting refresh re-resolve its own.
+    if (!(await readClaudeConfigDirLiveToken())) await refreshClaudeConfigDirToken({ claudeBin: bin });
   } catch (e) { deps?.logger?.(`claude config-dir seed skipped: ${e?.message || e}`); }
   try {
     return { loop: HARNESSES.cli({ ...deps, claudeBin: bin, model: subRow.model_preference || undefined, configDir }), mode: 'cli' };

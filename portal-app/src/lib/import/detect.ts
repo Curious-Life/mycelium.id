@@ -53,10 +53,17 @@ export interface DetectImportResult {
 	detail: string;
 }
 
-/** Scan this Mac for importable local sources. Returns [] on no findings. */
-export async function scanSources(): Promise<DetectedSource[]> {
-	const d = await apiGet<{ ok: boolean; sources?: DetectedSource[] }>('/portal/import/detect');
-	return d.sources ?? [];
+export interface ScanResult {
+	sources: DetectedSource[];
+	/** Broad-sweep root basenames macOS is blocking (TCC prompt pending / denied).
+	 *  Non-empty + no sources ⇒ "grant access & re-scan", not "nothing here" (ON-5). */
+	blocked: string[];
+}
+
+/** Scan this Mac for importable local sources + which roots macOS is blocking. */
+export async function scanSources(): Promise<ScanResult> {
+	const d = await apiGet<{ ok: boolean; sources?: DetectedSource[]; blocked?: string[] }>('/portal/import/detect');
+	return { sources: d.sources ?? [], blocked: d.blocked ?? [] };
 }
 
 /**

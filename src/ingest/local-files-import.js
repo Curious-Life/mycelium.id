@@ -26,6 +26,8 @@ import { saveDocument } from '../core/document-store.js';
 import { putBlob, isUserNamespacedBlobPath } from './blob-store.js';
 import { recordContentFlow } from '../inference/usage.js';
 import { categoryOf, extOf, isManagedPackageDir, TEXT_DOC_EXTS, EXT_MIME } from './file-categories.js';
+import { deriveCreatedAt, TS_PROVENANCE } from './timestamp.js';
+import { extractExifDate } from './exif.js';
 
 const MAX_FILES = Number(process.env.MYCELIUM_SWEEP_MAX_FILES) || 50000;
 const MAX_DEPTH = Number(process.env.MYCELIUM_SWEEP_MAX_DEPTH) || 8;
@@ -193,12 +195,19 @@ export async function importLocalFiles(db, { userId, folderPath, categories, enq
       });
       existingAttIds.add(attId);
       summary.attachments.imported += 1;
+      // Original occurrence time (R4-TIMESTAMPS): for an image, prefer EXIF
+      // DateTimeOriginal (when it was taken) over the file mtime (the copy moment).
+      const exifDate = f.cat === 'image' ? extractExifDate(bytes) : null;
+      const { iso: mediaCreatedAt, provenance: mediaTsProvenance } = deriveCreatedAt([
+        ...(exifDate ? [{ value: exifDate, provenance: TS_PROVENANCE.EXIF }] : []),
+        { value: mtime, provenance: TS_PROVENANCE.FILE_MTIME },
+      ]);
       // A linked memory so the file enters the timeline + enrichment (caption/transcribe).
       try {
         await captureMessage(db, {
           userId, id: `local-att:${attId}`, content: '', attachmentId: attId,
-          source: 'import-local-files', messageType: MEDIA_MSG_TYPE[f.cat] || 'file', createdAt: mtime,
-          metadata: { root: rootName, relPath: posixRel, category: f.cat, fileName: path.basename(posixRel) },
+          source: 'import-local-files', messageType: MEDIA_MSG_TYPE[f.cat] || 'file', createdAt: mediaCreatedAt,
+          metadata: { root: rootName, relPath: posixRel, category: f.cat, fileName: path.basename(posixRel), ts_provenance: mediaTsProvenance },
         }, enqueueEnrichment);
       } catch { /* attachment already landed; the linked memory is best-effort */ }
     } catch (e) {

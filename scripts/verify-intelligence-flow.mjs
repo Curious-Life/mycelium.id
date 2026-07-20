@@ -30,9 +30,10 @@ let subSplit = {}, subOk = {}, subUnknown = {};
 try { cold = drive('test/mount-intelligence-flow.mjs'); } catch (e) { cold = { error: String(e?.message || e) }; }
 try { returning = drive('test/mount-intelligence-flow.mjs', 'returning'); } catch (e) { returning = { error: String(e?.message || e) }; }
 try { voiceSample = drive('test/mount-intelligence-flow.mjs', 'voice-sample'); } catch (e) { voiceSample = { error: String(e?.message || e) }; }
-let embedderAbsent = {}, voiceError = {};
+let embedderAbsent = {}, voiceError = {}, voiceRuntime = {};
 try { embedderAbsent = drive('test/mount-intelligence-flow.mjs', 'embedder-absent'); } catch (e) { embedderAbsent = { error: String(e?.message || e) }; }
 try { voiceError = drive('test/mount-intelligence-flow.mjs', 'voice-error'); } catch (e) { voiceError = { error: String(e?.message || e) }; }
+try { voiceRuntime = drive('test/mount-intelligence-flow.mjs', 'voice-needs-runtime'); } catch (e) { voiceRuntime = { error: String(e?.message || e) }; }
 try { fault = drive('test/mount-intelligence-flow.mjs', 'fault'); } catch (e) { fault = { error: String(e?.message || e) }; }
 try { disklow = drive('test/mount-intelligence-flow.mjs', 'disklow'); } catch (e) { disklow = { error: String(e?.message || e) }; }
 try { readfail = drive('test/mount-intelligence-flow.mjs', 'readfail'); } catch (e) { readfail = { error: String(e?.message || e) }; }
@@ -180,9 +181,39 @@ t('F18. ⭐ a downloaded-but-mute voice reads as an actionable WARNING, never a 
   assert.equal(v.warnDot, true, 'it is an actionable setup step — a warning, not a fault, not a false ok');
   assert.match(String(v.statusText), /voice sample/i, `and it must name the next step — got "${v.statusText}"`);
   assert.equal(v.hasDownload, false, 'the model is already downloaded — no dead re-download button');
+  // R2-VOICEBTN: the "add a voice sample" step must be a CLICKABLE button, not a dead note. It
+  // must render AND route to the character page (where the record/upload capture lives) — the
+  // bug was that the message named the step but shipped no button (action evaluated to 'none').
+  assert.equal(v.hasAddSample, true, 'the downloaded-but-mute voice must offer a clickable "add a voice sample" button (R2-VOICEBTN)');
+  assert.match(String(v.addSampleText), /voice sample/i, `the button must name the step — got "${v.addSampleText}"`);
+  const sample = voiceSample.odmSample;
+  assert.ok(sample?.hadButton, 'the add-sample button must be present for the click-drive');
+  assert.equal(sample.routes.length, 1, `clicking it must route exactly once — got ${JSON.stringify(sample.routes)}`);
+  assert.equal(sample.routes[0].viewId, 'character', 'it must route to the character view');
+  assert.equal(sample.routes[0].params?.id, 'personal-agent', 'to the personal-agent character (where voice capture lives)');
   // ⚠️ Phase 3 removed the panel↔summary disagreement class at the ROOT: local models render ONLY
   // in the panel now, so there is no summary voice dot to contradict it. F21 pins that the summary
   // carries NO local rows (the de-dup), which is a stronger guarantee than the two agreeing.
+});
+
+t('F18b. ⭐ a NEEDS-RUNTIME voice offers "Finish install" (the tts route), NEVER the character page (R2-VOICEBTN review)', () => {
+  // voiceHealth() collapses TWO blockers into status 'deps_missing': ready+sample-pending AND
+  // needs-runtime (mlx-audio not installed). They are NOT the same fix — a reference sample cannot
+  // install a runtime. So needs-runtime must NOT get the 'add a voice sample' route (a dead end:
+  // CharacterView has no runtime-install path); it must offer "Finish install" → the tts download
+  // route (the same one VoiceSection's Finish-install button uses). This is the regression the
+  // review caught: keying the action on the collapsed status sent needs-runtime to the wrong place.
+  assert.equal(voiceRuntime.ok, true, String(voiceRuntime.error || '').slice(0, 200));
+  const v = (voiceRuntime.before?.odmRows || []).find((r) => r.key === 'voice');
+  assert.ok(v, `the voice row must render in the needs-runtime probe — got ${JSON.stringify(voiceRuntime.before?.odmRows)}`);
+  assert.equal(v.hasAddSample, false, 'needs-runtime must NOT offer the "add a voice sample" button (recording a sample cannot install the runtime)');
+  assert.equal(v.hasDownload, true, 'needs-runtime must offer a button to finish the install');
+  assert.match(String(v.downloadText), /finish install/i, `and it must read "Finish install" — got "${v.downloadText}"`);
+  const rt = voiceRuntime.odmRuntime;
+  assert.ok(rt?.hadDownload && !rt.hadAddSample, `only the Finish-install button, no add-sample — got ${JSON.stringify(rt)}`);
+  assert.equal(rt.routes.length, 0, `it must NOT route to the character page — got ${JSON.stringify(rt.routes)}`);
+  assert.ok(rt.sent.some((s) => /\/portal\/settings\/tts\/qwen\/download/.test(s.path)),
+    `it must POST the tts download/install route. Sent: ${JSON.stringify(rt.sent)}`);
 });
 
 t('F19. ⭐ an ABSENT embedder is idle, never a fabricated green "Included" (review finding F2)', () => {
@@ -228,7 +259,7 @@ t('F21. ⭐ Phase 3 de-dup — local models render ONCE (the panel); the summary
   const sumLabels = (returning.before.dotClasses || []).map((d) => String(d.label));
   const LOCAL = ['Understanding your messages', 'Search', 'Transcription', 'Voice'];
   for (const l of LOCAL) assert.ok(!sumLabels.includes(l), `"${l}" must NOT be a summary row — it lives in the panel now. Summary: ${JSON.stringify(sumLabels)}`);
-  assert.deepEqual(sumLabels.sort(), ['Conversation', 'Descriptions'], `the summary shows only the cloud functions — got ${JSON.stringify(sumLabels)}`);
+  assert.deepEqual(sumLabels.sort(), ['Conversation', 'Narration'], `the summary shows only the cloud functions — got ${JSON.stringify(sumLabels)}`);
   // …and the four local models ARE in the panel (F16 asserts the set; here we pin they moved OUT
   // of the summary and INTO the panel, i.e. exactly once total).
   const panelKeys = (returning.before.odmRows || []).map((r) => r.key).sort();

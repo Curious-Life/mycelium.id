@@ -26,6 +26,69 @@ import {
 import JSZip from 'jszip';
 import { normalizeTimestamp, deriveCreatedAt, TS_PROVENANCE } from '../src/ingest/timestamp.js';
 import { restoreTable } from '../src/ingest/vault-import.js';
+import { extractExifDate } from '../src/ingest/exif.js';
+import { runImport } from '../src/ingest/run-import.js';
+
+// ── Synthetic JPEG-with-EXIF builders (no image lib needed) ──────────────────
+// A minimal little-endian TIFF carrying DateTimeOriginal (0x9003) inside a JPEG
+// APP1/"Exif\0\0" segment — enough to exercise the EXIF reader end-to-end.
+function buildTiff(dateStr) {
+  const strBytes = Buffer.from(`${dateStr}\0`, 'latin1');
+  const tiff = Buffer.alloc(44 + strBytes.length);
+  tiff.write('II', 0, 'latin1');
+  tiff.writeUInt16LE(0x2a, 2);
+  tiff.writeUInt32LE(8, 4);          // IFD0 at offset 8
+  tiff.writeUInt16LE(1, 8);          // IFD0: 1 entry
+  tiff.writeUInt16LE(0x8769, 10);    // tag: Exif IFD pointer
+  tiff.writeUInt16LE(4, 12);         // type: LONG
+  tiff.writeUInt32LE(1, 14);         // count
+  tiff.writeUInt32LE(26, 18);        // value: Exif IFD at offset 26
+  tiff.writeUInt32LE(0, 22);         // next IFD = none
+  tiff.writeUInt16LE(1, 26);         // Exif IFD: 1 entry
+  tiff.writeUInt16LE(0x9003, 28);    // tag: DateTimeOriginal
+  tiff.writeUInt16LE(2, 30);         // type: ASCII
+  tiff.writeUInt32LE(strBytes.length, 32); // count
+  tiff.writeUInt32LE(44, 36);        // value: string at offset 44
+  tiff.writeUInt32LE(0, 40);         // next IFD = none
+  strBytes.copy(tiff, 44);
+  return tiff;
+}
+function buildJpegExif(dateStr) {
+  const tiff = buildTiff(dateStr);
+  const sig = Buffer.from([0x45, 0x78, 0x69, 0x66, 0x00, 0x00]); // Exif\0\0
+  const segLen = 2 + sig.length + tiff.length;
+  return Buffer.concat([
+    Buffer.from([0xff, 0xd8]),                    // SOI
+    Buffer.from([0xff, 0xe1, segLen >> 8, segLen & 0xff]), sig, tiff, // APP1
+    Buffer.from([0xff, 0xd9]),                    // EOI
+  ]);
+}
+// A valid JPEG with a COM segment but NO EXIF (≥12 bytes so the reader engages).
+const JPEG_NO_EXIF = Buffer.concat([
+  Buffer.from([0xff, 0xd8]), Buffer.from([0xff, 0xfe, 0x00, 0x10]), Buffer.alloc(14), Buffer.from([0xff, 0xd9]),
+]);
+// Adversarial TIFF: ONE IFD of `n` entries, every entry an Exif-IFD-pointer
+// (tag 0x8769) aimed back at IFD0 (offset 8). Without a breadth+cycle bound this
+// fans out to ~n^depth recursive walks and pins the event loop (a CPU spin, not
+// a throw — try/catch can't rescue it). Raw TIFF so `n` isn't capped by the JPEG
+// APP1 segment's 64 KB ceiling.
+function buildTiffBomb(n) {
+  const tiff = Buffer.alloc(8 + 2 + n * 12 + 4);
+  tiff.write('II', 0, 'latin1');
+  tiff.writeUInt16LE(0x2a, 2);
+  tiff.writeUInt32LE(8, 4);       // IFD0 at offset 8
+  tiff.writeUInt16LE(n & 0xffff, 8);
+  let o = 10;
+  for (let i = 0; i < n; i++) {
+    tiff.writeUInt16LE(0x8769, o);    // Exif IFD pointer
+    tiff.writeUInt16LE(4, o + 2);     // LONG
+    tiff.writeUInt32LE(1, o + 4);     // count
+    tiff.writeUInt32LE(8, o + 8);     // value → offset 8 (points back at IFD0)
+    o += 12;
+  }
+  tiff.writeUInt32LE(0, o);           // next IFD = none
+  return tiff;
+}
 
 const DB = 'data/verify-ts.db';
 const KCV = 'data/verify-ts-kcv.json';
@@ -136,6 +199,40 @@ rec('T9 restoreTable counts inferredNow when created_at absent',
     capture: async (m) => { if (m.id === 'claude-boom') throw new Error('boom'); return { deduped: false }; } });
   rec('T10 Claude parser reports failed count (not silent loss)',
     res.failed === 1 && res.imported === 1 && res.stats.failed === 1, `imported=${res.imported} failed=${res.failed}`);
+}
+
+// ── T11 — EXIF reader: DateTimeOriginal extracted; no-EXIF + placeholder → null ──
+rec('T11a extractExifDate reads DateTimeOriginal', extractExifDate(buildJpegExif('2019:07:04 12:00:00')) === '2019-07-04 12:00:00',
+  `got ${extractExifDate(buildJpegExif('2019:07:04 12:00:00'))}`);
+rec('T11b JPEG without EXIF → null', extractExifDate(JPEG_NO_EXIF) === null, `got ${extractExifDate(JPEG_NO_EXIF)}`);
+rec('T11c all-zero placeholder date → null', extractExifDate(buildJpegExif('0000:00:00 00:00:00')) === null,
+  `got ${extractExifDate(buildJpegExif('0000:00:00 00:00:00'))}`);
+rec('T11d non-image bytes → null (never throws)', extractExifDate(Buffer.from('this is plain text, not an image')) === null, '');
+// T11e — adversarial IFD-fanout TIFF (compute-DoS regression) returns FAST.
+{
+  const t0 = Date.now();
+  const res = extractExifDate(buildTiffBomb(60000));
+  const elapsed = Date.now() - t0;
+  rec('T11e adversarial IFD-fanout returns fast (no compute-DoS)', res === null && elapsed < 1000, `elapsed=${elapsed}ms result=${res}`);
+}
+
+// ── T12 — image upload SOURCE audit: EXIF beats mtime; mtime beats now ──
+{
+  const rA = await runImport(
+    { kind: 'loose-file', bytes: buildJpegExif('2018:05:06 07:08:09'), filename: 'photo.jpg', mimeType: 'image/jpeg', lastModified: '2024-01-01T00:00:00Z' },
+    { db, userId },
+  );
+  const midA = rA.importResult?.messageId;
+  rec('T12a image upload stamps EXIF DateTimeOriginal (not mtime/now)',
+    !!midA && createdAtOf(midA) === '2018-05-06T07:08:09.000Z', `msg=${midA} created_at=${midA && createdAtOf(midA)}`);
+
+  const rB = await runImport(
+    { kind: 'loose-file', bytes: JPEG_NO_EXIF, filename: 'plain.jpg', mimeType: 'image/jpeg', lastModified: '2020-02-03T04:05:06Z' },
+    { db, userId },
+  );
+  const midB = rB.importResult?.messageId;
+  rec('T12b image without EXIF falls back to the file mtime (not now)',
+    !!midB && createdAtOf(midB) === '2020-02-03T04:05:06.000Z', `msg=${midB} created_at=${midB && createdAtOf(midB)}`);
 }
 
 const ok = ledger.every(Boolean);

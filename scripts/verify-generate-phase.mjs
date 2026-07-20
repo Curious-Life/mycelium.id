@@ -415,6 +415,38 @@ t('E2. ⭐ a good count between unknowns CLEARS the clock — no false cap on a 
     + `got '${embed.recoveredThenUnknown.phase}'`);
 });
 
+t('E3. ⭐ P1-C — a `total:0` count does NOT hard-error mid-import; only a PERSISTENT 0 is empty-vault', () => {
+  // The false "Import some conversations first" fired whenever /processing-status returned total:0
+  // WITHOUT `unknown` — including the transient 0 of an active import (a stale SWR backlog snapshot,
+  // or the first rows not yet committed). The fix bounds it like unknownSince: a 0 keeps polling
+  // calmly, a non-zero total clears the clock, and only a 0 that PERSISTS past EMPTY_CONFIRM_MS is
+  // the honest empty-vault terminal.
+  assert.ok(embed.ok, `the embedding harness itself failed: ${embed.error}`);
+
+  // A single 0 must NOT be an error — it stays embedding with calm copy, never "import first".
+  assert.equal(embed.zeroTransient.phase, 'embedding',
+    `a transient total:0 must keep waiting, not hard-error mid-import — got '${embed.zeroTransient.phase}'`);
+  assert.doesNotMatch(embed.zeroTransient.error || '', /import|nothing to map/i,
+    'a transient 0 must NOT claim an empty vault — that is the P1-C false error');
+  assert.equal(embed.zeroTransient.message, 'Preparing your conversations…',
+    `the transient-0 copy must be the calm "Preparing your conversations…", got "${embed.zeroTransient.message}"`);
+
+  // A non-zero total between clears the clock ⇒ the race resolved, still embedding (never the error).
+  assert.equal(embed.zeroThenPopulated.phase, 'embedding',
+    `a 0 followed by real counts must clear the clock and keep embedding, got '${embed.zeroThenPopulated.phase}'`);
+  assert.doesNotMatch(embed.zeroThenPopulated.error || '', /import|nothing to map/i,
+    'a populated import must NOT be told its vault is empty');
+
+  // A PERSISTENT 0 past the bound IS a genuinely-empty vault ⇒ the honest terminal (and NOT retryable —
+  // Retry cannot conjure conversations; the user must import first).
+  assert.equal(embed.zeroPersistent.phase, 'error',
+    `a persistent total:0 must terminate to the empty-vault error, got '${embed.zeroPersistent.phase}'`);
+  assert.match(embed.zeroPersistent.error, /import|nothing to map/i,
+    `the persistent-0 terminal must be the honest "import first" copy, got "${embed.zeroPersistent.error}"`);
+  assert.notEqual(embed.zeroPersistent.retryable, true,
+    'the empty-vault error is not retryable — importing conversations is the next move, not Retry');
+});
+
 t('D2g. ⭐ the invite RENDERS the retryable error AND a Retry affordance — never a dead end', () => {
   // The capped `unknown` is actionable: the user sees the honest message and a way FORWARD. An
   // unrendered error, or an error with no Retry, is the silence/hang this whole surface fixes.

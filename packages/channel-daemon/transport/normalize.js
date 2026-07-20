@@ -20,6 +20,7 @@
  * @property {string|null} fromName
  * @property {string|null} chatTitle group/supergroup title
  * @property {string|null} replyToMessageId
+ * @property {string|null} messageThreadId  forum topic id, when this is a topic message (R3-TGTHREAD)
  * @property {number|null} dateEpoch Telegram `date` (unix seconds)
  * @property {MediaDescriptor|null} media  downloadable attachment, when present
  *
@@ -101,6 +102,11 @@ export function normalizeUpdate(update) {
     fromName: [m.from?.first_name, m.from?.last_name].filter(Boolean).join(' ') || null,
     chatTitle: m.chat.title || null,
     replyToMessageId: m.reply_to_message?.message_id != null ? String(m.reply_to_message.message_id) : null,
+    // Forum topic (R3-TGTHREAD): carry the topic id ONLY for a real topic message
+    // (`is_topic_message`). Telegram also sets message_thread_id on a plain reply in
+    // a supergroup — gating on is_topic_message avoids mis-routing a non-forum reply
+    // into a phantom "topic". General-topic / non-forum chats stay null (default).
+    messageThreadId: (m.is_topic_message && m.message_thread_id != null) ? String(m.message_thread_id) : null,
     dateEpoch: typeof m.date === 'number' ? m.date : null,
   };
 }

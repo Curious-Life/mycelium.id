@@ -18,6 +18,7 @@ import { transcribeAudio as realTranscribeAudio } from './enrich/transcribe-audi
 import { extractDocumentText as realExtractDocumentText, documentKindOf } from './enrich/extract-document.js';
 import { clampStored } from './enrich/text-limits.js';
 import { createPairingStore } from './channels/pairing-store.js';
+import { createVoiceRenderer } from './tts/voice-render.js';
 
 /** Parse the decrypted `{ "apiKey": "…" }` credentials envelope → key string|null. */
 function parseProviderApiKey(credentials) {
@@ -78,11 +79,15 @@ async function deriveAgentFromActiveProvider(db, userId) {
  * @param {string} deps.userId
  * @param {object} [deps.enrich]  test seam: { getBlob, describeImage, transcribeAudio }
  */
-export function internalRouter({ db, userId, enrich = {} }) {
+export function internalRouter({ db, userId, enrich = {}, voiceRenderer } = {}) {
   const getBlob = enrich.getBlob || realGetBlob;
   const describeImage = enrich.describeImage || realDescribeImage;
   const transcribeAudio = enrich.transcribeAudio || realTranscribeAudio;
   const extractDocumentText = enrich.extractDocumentText || realExtractDocumentText;
+  // Vault-side cloned-voice renderer (design §2.3). Owns the master key + the
+  // frozen sample so the CONFINED daemon never has to. Lazily default so a test
+  // can inject a stub; the real one reads the same dataDir the character page saves to.
+  const renderer = voiceRenderer || createVoiceRenderer();
   const router = express.Router();
   // JSON parsing is scoped to the POST route ONLY — installing it router-wide
   // would parse (and reject malformed) bodies for every request that flows
@@ -103,6 +108,41 @@ export function internalRouter({ db, userId, enrich = {} }) {
       const { code } = await pairing.upsert(userId, { platform, senderId, senderName, chatId });
       res.json({ ok: true, code });
     } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
+  });
+
+  // POST /api/v1/internal/voice-render { text, instruct? } → audio/wav | JSON error
+  // The ONE cross-process seam for the CLONED channel voice (R3-TTSVOICE). The
+  // confined channel-daemon has NO master key, so it cannot decrypt the frozen
+  // voice sample and cannot hit the MLX service itself (it would only ever get a
+  // 501). It POSTs the line here; the VAULT (this process) decrypts the sample
+  // in-memory via createVoiceRenderer and renders on its loopback MLX service,
+  // returning ONLY the finished WAV bytes. The master key and the decrypted
+  // sample NEVER cross to the daemon — the confinement boundary is preserved.
+  //
+  // agentId is PINNED to 'personal-agent' (the single-user id the character page
+  // saves the sample under — src/portal-character.js). The daemon does NOT get to
+  // choose it, so a daemon-supplied / untrusted id can never select another
+  // scope's voiceprint. Loopback-only, same same-machine trust boundary as the
+  // rest of this router (the render is ~1.25× realtime and serialized on the one
+  // MLX service — that, plus the daemon's own inbound rate limit, is the throttle).
+  router.post('/api/v1/internal/voice-render', json, async (req, res) => {
+    const text = String(req.body?.text || '').trim().slice(0, 4000);
+    if (!text) return res.status(400).json({ ok: false, error: 'text-required' });
+    // instruct is OWNER-authored modulation carried through from the vault-managed
+    // agent config; bounded like the character-page audition (design §2.4).
+    const instruct = req.body?.instruct ? String(req.body.instruct).slice(0, 300) : undefined;
+    try {
+      const r = await renderer.renderWithSample({ agentId: 'personal-agent', text, instruct });
+      if (!r.ok) return res.status(r.status).json({ ok: false, error: r.error });
+      res.setHeader('content-type', 'audio/wav');
+      res.setHeader('cache-control', 'no-store');
+      return res.send(r.audio);
+    } catch (err) {
+      // Never leak internals (a locked vault / missing key surfaces here). Fail
+      // closed to a 500 the daemon treats as "no voice" → text still delivered.
+      console.error('[internal-router] voice-render failed:', err.message);
+      return res.status(500).json({ ok: false, error: 'render-error' });
+    }
   });
 
   // POST /api/v1/internal/egress-audit — append one audit row. Fire-and-forget

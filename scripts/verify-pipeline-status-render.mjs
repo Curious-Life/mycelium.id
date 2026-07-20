@@ -46,6 +46,7 @@ const SENTINEL = 'ZZZ_STRING_PIPELINE_STATUS_NEVER_CONTAINS';
 function run(probe, opts = {}) {
   const env = { ...process.env, PROBE: probe, MYCELIUM_SKIP_WRITER_LOCK: '1' };
   if (opts.click) env.CLICK = opts.click;
+  if (opts.ctrl) env.CTRL = opts.ctrl;   // click the co-located per-stage control (R2/R3), not the generic action
   if (opts.double) env.DOUBLE = '1';
   const line = execFileSync('node', ['--conditions', 'browser', 'test/mount-pipeline-status.mjs'],
     { cwd: 'portal-app', encoding: 'utf8', timeout: 120000, env })
@@ -105,28 +106,66 @@ t('R4. ⭐ a BLOCKED stage shows the REASON text AND the action LABEL as a visib
   assert.ok(/no labeling model/i.test(cat.text), `the block must show its reason text. Got: "${cat.text}"`);
   assert.equal(cat.actionLabel, 'Approve a labeling model', `the action LABEL must render as a button. Got: ${JSON.stringify(cat.actionLabel)}`);
   assert.ok(cat.actionVisible, 'the action button must be VISIBLE — a remedy the user cannot see is the "empty rail with words" the design forbids');
-  // every blocked stage across the scenarios carries a visible, labelled action — no naked block.
-  for (const o of [toofew, paused, embedderdown]) {
+  // Every NON-pause blocked stage carries a visible, labelled generic action — no naked block. A
+  // PAUSED stage instead shows its Resume in the co-located control cluster (R4c), never a duplicate
+  // generic button — so it is excluded here (asserted separately below + in R4c).
+  for (const o of [toofew, embedderdown]) {
     for (const s of o.stages.filter((x) => x.state === 'blocked')) {
       assert.ok(s.actionLabel && s.actionVisible, `naked block: ${o.probe}/${s.key} has no visible action button (label=${JSON.stringify(s.actionLabel)})`);
     }
   }
-  // toofew → a Generate button; embedderdown → a Check button; paused → two Resume buttons.
+  // toofew → a Generate button; embedderdown → a Check button.
   assert.equal(byKey(toofew).cluster.actionLabel, 'Generate', 'a sub-floor vault must offer Generate, never be stranded');
-  assert.equal(paused.actionCount, 2, 'paused embed + categorize each offer Resume');
+  // A paused stage must NOT render a generic action button (its Resume lives in the control cluster).
+  // The harness reports no `reason`, so a paused stage is identified by its rendered Resume control.
+  for (const s of paused.stages.filter((x) => x.controls.some((c) => c.kind === 'resume'))) {
+    assert.equal(s.actionLabel, null, `a paused stage must NOT render a generic action button (${s.key}) — Resume is the co-located control`);
+  }
 });
 
 t('R4b. ⭐ a blocked action renders LIVE (ENABLED) in Unit 4 — the remedy is clickable, not "soon"', () => {
   // Unit 4 wires each action to its route, so the button must be ENABLED at rest (disabled only
   // while ITS OWN action is in-flight — proven separately in W4). A button stuck disabled here would
-  // reinstate the "soon" dead control Unit 4 deletes.
-  const blocked = [midflight, toofew, paused, embedderdown]
-    .flatMap((o) => o.stages.filter((s) => s.state === 'blocked'));
+  // reinstate the "soon" dead control Unit 4 deletes. Paused stages carry NO generic action (their
+  // remedy is the Resume control — R4c), so only the generic-action blocks are checked here.
+  const blocked = [midflight, toofew, embedderdown]
+    .flatMap((o) => o.stages.filter((s) => s.state === 'blocked' && s.reason !== 'paused'));
   assert.ok(blocked.length >= 1, 'the scenarios must include at least one blocked stage to check');
   for (const s of blocked) {
     assert.ok(s.actionLabel && s.actionVisible, `blocked action must render its visible label (${s.key})`);
     assert.ok(!s.actionDisabled, `blocked action "${s.actionLabel}" (${s.key}) must render ENABLED — Unit 4 made it live; a disabled-at-rest button is the "soon" dead control it deletes`);
   }
+});
+
+t('R4c. ⭐ co-located per-stage controls (R2/R3): a RUNNING stage shows Stop+Restart; a PAUSED stage shows Resume+Restart', () => {
+  // The pipeline overview owns per-stage Stop/Resume + Restart for embed & categorize (the global
+  // toggle split into two). A running stage must offer Stop (R3-PIPESTOP, the missing control) and a
+  // paused stage must offer Resume — each beside its own Restart, and ONLY on embed/categorize.
+  const rEmbed = byKey(midflight).embed;
+  assert.equal(rEmbed.state, 'running');
+  const rCtrls = Object.fromEntries(rEmbed.controls.map((c) => [c.kind, c]));
+  assert.ok(rCtrls.pause && /stop/i.test(rCtrls.pause.label) && rCtrls.pause.visible && !rCtrls.pause.disabled,
+    `a running embed must show a visible, enabled Stop control. Got: ${JSON.stringify(rEmbed.controls)}`);
+  assert.ok(rCtrls.restart && /restart/i.test(rCtrls.restart.label) && rCtrls.restart.visible && !rCtrls.restart.disabled,
+    `a running embed must show a visible, enabled Restart control. Got: ${JSON.stringify(rEmbed.controls)}`);
+
+  // Both paused stages (embed + categorize) show Resume + Restart, all enabled at rest. Identified by
+  // the rendered Resume control (the harness reports no `reason`).
+  const pausedStages = paused.stages.filter((s) => s.controls.some((c) => c.kind === 'resume'));
+  assert.equal(pausedStages.length, 2, 'the paused probe must have two paused stages (embed + categorize) each offering Resume');
+  for (const s of pausedStages) {
+    const c = Object.fromEntries(s.controls.map((x) => [x.kind, x]));
+    assert.ok(c.resume && /resume/i.test(c.resume.label) && c.resume.visible && !c.resume.disabled,
+      `paused ${s.key} must show a visible, enabled Resume control. Got: ${JSON.stringify(s.controls)}`);
+    assert.ok(c.restart && c.restart.visible && !c.restart.disabled,
+      `paused ${s.key} must show a visible, enabled Restart control. Got: ${JSON.stringify(s.controls)}`);
+  }
+  // Controls are EMBED/CATEGORIZE only — a derived stage (cluster/describe/measure) never carries them.
+  for (const s of midflight.stages.filter((x) => x.key !== 'embed' && x.key !== 'categorize')) {
+    assert.equal(s.controls.length, 0, `a derived stage (${s.key}) must carry NO per-stage controls`);
+  }
+  // A caught-up (all-done) vault shows no controls — nothing to stop, nothing paused.
+  assert.equal(caughtup.ctrlCount, 0, 'a settled vault must show no Stop/Resume controls');
 });
 
 t('W1. ⭐ intelligence wiring — clicking a target:"intelligence" action navigates to Intelligence, and NOTHING else', () => {
@@ -143,11 +182,30 @@ t('W2. ⭐ generate wiring — clicking a target:"generate" action fires start()
     `a generate action must fire the generate store's start() and nothing else (no goto, no ad-hoc POST). Got: ${JSON.stringify(o.calls)}`);
 });
 
-t('W3. ⭐ resume wiring — clicking a target:"resume" action POSTs the resume route, and NOTHING else', () => {
-  // paused.embed is blocked paused → Resume (target:'resume').
-  const o = run('paused', { click: 'embed' });
-  assert.deepEqual(o.calls, ['apiPost:/portal/enrichment/processing/resume'],
-    `a resume action must POST the existing resume route and nothing else. Got: ${JSON.stringify(o.calls)}`);
+t('W3. ⭐ resume wiring — clicking a stage Resume control POSTs its PER-STAGE resume route, and NOTHING else', () => {
+  // paused.embed shows a per-stage Resume control (R2) → POST /portal/enrichment/embed/resume.
+  const oe = run('paused', { click: 'embed', ctrl: 'resume' });
+  assert.deepEqual(oe.calls, ['apiPost:/portal/enrichment/embed/resume'],
+    `the embed Resume control must POST the per-stage embed route and nothing else. Got: ${JSON.stringify(oe.calls)}`);
+  // …and categorize's Resume hits the categorize route — the two stages resume INDEPENDENTLY.
+  const oc = run('paused', { click: 'categorize', ctrl: 'resume' });
+  assert.deepEqual(oc.calls, ['apiPost:/portal/enrichment/categorize/resume'],
+    `the categorize Resume control must POST the per-stage categorize route and nothing else. Got: ${JSON.stringify(oc.calls)}`);
+});
+
+t('W5. ⭐ stop + restart wiring (R2/R3) — a running stage Stop/Restart POST their per-stage routes, and NOTHING else', () => {
+  // midflight.embed is running → Stop hits /embed/pause, Restart hits /embed/restart.
+  const oStop = run('midflight', { click: 'embed', ctrl: 'pause' });
+  assert.deepEqual(oStop.calls, ['apiPost:/portal/enrichment/embed/pause'],
+    `the embed Stop control must POST the per-stage pause route and nothing else. Got: ${JSON.stringify(oStop.calls)}`);
+  const oRestart = run('midflight', { click: 'embed', ctrl: 'restart' });
+  assert.deepEqual(oRestart.calls, ['apiPost:/portal/enrichment/embed/restart'],
+    `the embed Restart control must POST the per-stage restart route and nothing else. Got: ${JSON.stringify(oRestart.calls)}`);
+  // The busy-guard applies to controls too: a double-click on Stop fires exactly ONCE.
+  const oDouble = run('midflight', { click: 'embed', ctrl: 'pause', double: true });
+  assert.deepEqual(oDouble.calls, ['apiPost:/portal/enrichment/embed/pause'],
+    `a double-click on Stop must fire the pause POST exactly ONCE (busy-guard). Got: ${JSON.stringify(oDouble.calls)}`);
+  assert.equal(oDouble.clickedDisabledAfter, true, 'the Stop control must read disabled (busy) while its own POST is in-flight');
 });
 
 t('W4. ⭐ busy-guard — a double-click fires the remedy EXACTLY ONCE, and the button reads busy in-flight', () => {

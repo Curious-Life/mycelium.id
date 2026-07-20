@@ -33,15 +33,22 @@
 		// The action the button offers for THIS row's current state:
 		//   'none'        — bundled / already running / mid-download (no button)
 		//   'download'    — offer a one-tap download of the recommended model
-		//   'blocked'     — a real reason it can't be offered (e.g. voice needs a sample first)
-		action: 'none' | 'download' | 'blocked';
+		//   'add-sample'  — downloaded but not usable until the user does a one-tap setup
+		//                   step ON ANOTHER PAGE (voice: record/upload a reference sample on
+		//                   the character page). A clickable button that ROUTES there — never a
+		//                   dead note (R2-VOICEBTN: the 'add a voice sample' message had no button).
+		//   'blocked'     — a real reason it can't be offered at all (content-free note, no route)
+		action: 'none' | 'download' | 'add-sample' | 'blocked';
+		actionLabel?: string | null; // override the button copy — 'add-sample' ("Add a voice sample")
+		                             // or a 'download' variant ("Finish install" for needs-runtime)
 		blockedNote?: string | null; // the reason, when action === 'blocked' (content-free)
 		busy?: boolean;             // a download this pane started is in flight
 	};
 
-	let { models, ondownload, machineNoun = 'device' }: {
+	let { models, ondownload, onsample, machineNoun = 'device' }: {
 		models: LocalModelRow[];
 		ondownload: (key: string) => void;
+		onsample?: (key: string) => void;   // route to the on-another-page setup step ('add-sample')
 		machineNoun?: string;
 	} = $props();
 
@@ -72,7 +79,16 @@
 							data-testid="odm-download"
 							disabled={m.busy}
 							onclick={() => ondownload(m.key)}
-						>{m.busy ? 'Downloading…' : 'Download'}</button>
+						>{m.busy ? 'Downloading…' : (m.actionLabel || 'Download')}</button>
+					{:else if m.action === 'add-sample'}
+						<!-- Downloaded, but one setup step remains ON ANOTHER PAGE. A real button that
+						     routes there (parent owns the nav) — the fix for the message that named the
+						     next step but gave no way to take it (R2-VOICEBTN). -->
+						<button
+							class="odm-btn"
+							data-testid="odm-add-sample"
+							onclick={() => onsample?.(m.key)}
+						>{m.actionLabel || 'Set up'}</button>
 					{:else if m.action === 'blocked'}
 						<!-- A real, honest reason it can't be one-tapped yet — never a dead button. -->
 						<span class="odm-blocked" data-testid="odm-blocked" title={m.blockedNote || ''}>{m.blockedNote || 'Not available yet'}</span>

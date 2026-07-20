@@ -101,6 +101,36 @@ try {
   globalThis.__proc = { unknown: true };             // unknown returns, but the clock is fresh now
   await wait(POLL + 300);   // poll #3 ⇒ clock restarts at now; now-now < bound ⇒ NO immediate cap
   out.recoveredThenUnknown = snap();   // still embedding, proves the clock RESET (not merely paused)
+
+  // ── SCENARIO C (P1-C): a `total:0` count must NOT hard-error immediately (the mid-import race) ──
+  // The count SUCCEEDED (no `unknown`) but measured 0 — either a truly-empty vault OR the transient-0
+  // of an active import whose SWR-cached backlog is still a stale pre-import snapshot. The first poll
+  // must stay calm ("Preparing…"), a non-zero total between must CLEAR the clock, and only a
+  // PERSISTENT 0 past EMPTY_CONFIRM_MS may surface the honest "import first" terminal.
+  reset();
+  globalThis.__procCalls = 0;
+  globalThis.__respPost = RESP_409;
+  globalThis.__proc = { embedded: 0, total: 0 };   // a real, successful 0
+  mockNow = 3_000_000;
+  await start();            // poll #1: total 0 ⇒ clock starts, calm copy, NO error
+  await wait(200);
+  out.zeroTransient = snap();   // still embedding — must NOT be the "import first" error yet
+
+  globalThis.__proc = { embedded: 2, total: 500 };   // the import populated ⇒ counts appear
+  await wait(POLL + 300);   // poll #2 ⇒ clears the zero clock, stays embedding (2 < MIN)
+  out.zeroThenPopulated = snap();   // NOT the empty-vault error — the race resolved
+
+  // Now a GENUINELY empty vault: 0 that persists past the bound ⇒ the honest terminal.
+  reset();
+  globalThis.__procCalls = 0;
+  globalThis.__respPost = RESP_409;
+  globalThis.__proc = { embedded: 0, total: 0 };
+  mockNow = 4_000_000;
+  await start();            // poll #1: clock starts
+  await wait(200);
+  mockNow += 60_000;        // jump WELL past EMPTY_CONFIRM_MS
+  await wait(POLL + 300);   // poll #2 ⇒ the empty-vault terminal
+  out.zeroPersistent = snap();   // error, NOT retryable, "import first"
 } catch (e) {
   out.ok = false; out.error = String(e?.stack || e);
 } finally {

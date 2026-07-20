@@ -219,6 +219,34 @@ export function detectSources({ home = os.homedir() } = {}) {
   return out;
 }
 
+// ── macOS TCC first-scan diagnosability (ON-5) ───────────────────────────────
+// The broad-sweep roots (Documents, Desktop, Downloads, …) are TCC-protected on
+// macOS: the FIRST time this process reads one, `stat()` still succeeds (so the
+// dir passes detectLocalFiles' isDirectory() filter) but `readdirSync()` throws
+// EPERM/EACCES while macOS shows an async "allow access?" prompt. The walkers
+// swallow that as an EMPTY dir, so the first scan reports "nothing found" —
+// indistinguishable from a genuinely-empty Mac — and only the SECOND scan (after
+// the user clicks Allow) finds the files. That's the operator's "showed nothing
+// then found sources." This probe surfaces the difference so the UI can tell the
+// user to grant access + re-scan, instead of a dead "no data found."
+//
+// Top-level granularity is deliberate: if a root's own readdir is blocked it
+// yields nothing (the "empty" symptom); a readable root with one blocked SUBdir
+// is a partial gap, not the first-scan-empty case this guards.
+export function probeSweepAccess({ home = os.homedir() } = {}) {
+  const blocked = [];
+  for (const root of localSweepRoots(home)) {
+    if (!statSafe(root)?.isDirectory()) continue; // absent ≠ blocked
+    try {
+      fs.readdirSync(root); // top-level only — cheap presence-of-permission check
+    } catch (e) {
+      if (e?.code === 'EACCES' || e?.code === 'EPERM') blocked.push(root);
+      // any other error (ENOENT after a race, etc.) is not a permission block
+    }
+  }
+  return blocked;
+}
+
 // ── Import-path confinement ──────────────────────────────────────────────────
 // The import routes (POST /import/obsidian|full-export|claude-code) accept a
 // server-local path and walk it off disk. Without confinement a stolen owner

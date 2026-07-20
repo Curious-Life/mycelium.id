@@ -2477,22 +2477,11 @@
 <div class="relative w-full h-full">
 	<div bind:this={container} class="w-full h-full"></div>
 
-	<!-- Breadcrumb nav -->
+	<!-- Breadcrumb nav — the level LABEL only. The "← Back" control moved into the side detail
+	     panel, directly above the cards it navigates (R4-BACKBTN); floating out here on the canvas
+	     it read as "outside the side section and too far." Clicking empty space in the scene still
+	     calls goBack() (see handleClick), so back-navigation from the map itself is preserved. -->
 	<div class="absolute top-4 left-4 flex items-center gap-2">
-		{#if msState.selectedRealmId !== null}
-			<button
-				onclick={() => {
-					if (msState.selectedTerritoryId !== null) {
-						mindscapeState.selectTerritory(null);
-					} else {
-						mindscapeState.goBack();
-					}
-				}}
-				class="btn-ghost text-xs px-3 py-1.5 rounded-md ms-glass border border-[var(--color-border)]"
-			>
-				&larr; Back
-			</button>
-		{/if}
 		<span class="text-xs text-[var(--color-text-tertiary)] ms-glass px-2 py-1 rounded">
 			{#if msState.selectedRealmId === null}
 				All Realms

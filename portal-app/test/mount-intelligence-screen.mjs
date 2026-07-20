@@ -196,9 +196,12 @@ try {
     await new Promise((r) => setTimeout(r, 30));
   }
 
-  // The Descriptions section + its provider buttons — the whole point of the 2026-07-19 change:
-  // it must offer EVERY provider, print no limit, and reach no dead-end.
-  const descSection = [...D.querySelectorAll('section.fn')].find((s) => /Descriptions/.test(s.textContent));
+  // The Narration section (the `descriptions` function; DISPLAY label renamed Descriptions →
+  // Narration, IM-1 2026-07-20 — the function key + narrate task are UNCHANGED) + its provider
+  // buttons — the whole point of the 2026-07-19 change: it must offer EVERY provider, print no
+  // limit, and reach no dead-end. Locate by the "★ recommended for Narration" reason line, which
+  // is unique to this row and stable across the rename.
+  const descSection = [...D.querySelectorAll('section.fn')].find((s) => /Narration/.test(s.textContent));
   const descText = descSection?.textContent || '';
   const descButtons = [...(descSection?.querySelectorAll('button.pick') || [])];
   const descButtonLabels = descButtons.map((b) => b.textContent.trim());

@@ -6,7 +6,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { boot } from './index.js';
-import { dataDir, dbPath as resolveDbPath, kcvPath as resolveKcvPath, uploadsRoot as resolveUploadsRoot, remoteConfigPath as resolveRemoteConfigPath } from './paths.js';
+import { dataDir, dbPath as resolveDbPath, kcvPath as resolveKcvPath, uploadsRoot as resolveUploadsRoot, remoteConfigPath as resolveRemoteConfigPath, mindDir } from './paths.js';
 import { resolveKeys } from './crypto/key-source.js';
 import { applyMigrations } from './db/migrate.js';
 import { precompressedStatic, setStaticHeaders, compressionMiddleware } from './serving.js';
@@ -61,7 +61,7 @@ import { createReadiness } from './readiness.js';
 import { getEmbedderHealth as readinessEmbedderHealth } from './embed/supervisor.js';
 // The other two members of the supervisor-health convention, for readiness's `models`
 // slice (§3.10b). All three report the SAME shape over the SAME vocabulary.
-import { getLabelerHealth as readinessLabelerHealth, getEnricherHealth as readinessEnricherHealth } from './enrich/drainer.js';
+import { getLabelerHealth as readinessLabelerHealth, getEnricherHealth as readinessEnricherHealth, isEmbedPaused as readinessEmbedPaused, isCategorizePaused as readinessCategorizePaused } from './enrich/drainer.js';
 import { getTranscriberHealth as readinessTranscriberHealth } from './transcribe/supervisor.js';
 import { startKeepAwake, stopKeepAwake } from './system/keep-awake.js';
 import { portalSystemRouter } from './portal-system.js';
@@ -258,6 +258,11 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
     labelerHealth: readinessLabelerHealth,
     enricherHealth: readinessEnricherHealth,
     transcriberHealth: readinessTranscriberHealth,
+    // Per-stage pause readers (QA R2) so the pipeline slice's two Stop/Resume controls are
+    // independent. The gate injects only isProcessingPaused (both stages share it); production
+    // passes these so embed and categorize pause separately.
+    isEmbedPaused: readinessEmbedPaused,
+    isCategorizePaused: readinessCategorizePaused,
   });
   vaultReadiness = readiness;   // completeBoot warms it once the vault is open
   // Fail-closed auth gate FIRST, mounted at `/api` — ALL vault data the sub-app
@@ -573,6 +578,23 @@ export async function startRestServer({
       if (reason && db?.audit?.log) {
         try { await db.audit.log({ action: `vault_${reason}`, userId: bootUserId, resourceType: 'account', resourceId: bootUserId }); }
         catch { /* fire-and-forget */ }
+      }
+      // U1.3 — a GENUINELY FRESH vault (the /setup ceremony, reason==='setup') starts
+      // with its recovery key NOT yet externally backed up: record an EXPLICIT `false`
+      // in users.settings. This is what lets the onboarding wizard's Step-2 gate tell a
+      // fresh vault (explicit false → gate + reveal) apart from a PRE-U1.3 vault (flag
+      // ABSENT → never gate, never re-reveal the key on upgrade). ONLY on 'setup' —
+      // NEVER on restore/unlock/auto-boot of an existing vault. Read-modify-write so it
+      // never clobbers other settings; never downgrades an existing value. Best-effort:
+      // a failed write leaves the flag absent (the gate then doesn't force — the key is
+      // still safe in the Keychain and no user data exists yet).
+      if (reason === 'setup' && db?.users) {
+        try {
+          const s = (await db.users.getSettings(bootUserId)) || {};
+          if (s.recovery_key_backed_up === undefined) {
+            await db.users.updateSettings(bootUserId, { ...s, recovery_key_backed_up: false });
+          }
+        } catch { /* best-effort — see note above */ }
       }
       // Pin both keys in memory so the clustering child (src/jobs.js) can obtain
       // them in passphrase-lock mode, where they are NOT in the Keychain.
@@ -923,8 +945,7 @@ export async function startRestServer({
     readMaster: () => { try { return readUserMaster(); } catch { return null; } },
     dataDir: () => dataDir(),
     extraRoots: () => {
-      const agentRoot = process.env.MYCELIUM_AGENT_ROOT || path.join(process.cwd(), 'data', 'mind');
-      const mindRoot = path.join(agentRoot, 'mind');
+      const mindRoot = mindDir();
       return path.isAbsolute(mindRoot) ? [mindRoot] : [];
     },
     deleteKeychain,

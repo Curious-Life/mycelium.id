@@ -111,6 +111,26 @@
 	let stats = $state<Stats | null>(null);
 	// agents[] moved to /agents (Manage tab) on 2026-05-06.
 
+	// Vault identity for the avatars — the @handle lives on the public profile,
+	// NOT on $auth.user (only id + displayName). Without it the avatar initial
+	// falls to '?'/'U' on a fresh vault where displayName is null (R2-AVATAR).
+	// Mirrors the sidebar footer's profile fetch (Sidebar.svelte:38-46). Silent
+	// on failure / no handle.
+	let userHandle = $state<string | null>(null);
+	$effect(() => {
+		if (!browser) return;
+		api('/portal/profile')
+			.then((r) => (r.ok ? r.json() : null))
+			.then((d) => { userHandle = ((d?.handle as string) || '').trim() || null; })
+			.catch(() => {});
+	});
+	// Avatar initial + name label, precedence displayName → @handle → fallback, so
+	// a handle-only (fresh) vault still shows a real letter instead of '?'.
+	const avatarInitial = $derived(
+		($auth.user?.displayName || userHandle || '?').trim().charAt(0).toUpperCase() || '?',
+	);
+	const vaultName = $derived($auth.user?.displayName || (userHandle ? `@${userHandle}` : 'User'));
+
 	// Channel Authority Registry — unified view of every channel the agent
 	// may send to (Telegram DMs/groups, Discord channels, etc.) plus the
 	// global autonomous kill-switch. Backed by GET /portal/channels.
@@ -663,8 +683,8 @@
 	<aside class="rail" class:drilled={isMobile && mobileDetail}>
 		{#if $auth.user}
 			<button class="rail-id" onclick={() => selectPane('profile')} aria-label="Open your profile">
-				<span class="rail-id-avatar">{($auth.user.displayName || '?')[0].toUpperCase()}</span>
-				<span class="rail-id-name">{$auth.user.displayName || 'User'}</span>
+				<span class="rail-id-avatar">{avatarInitial}</span>
+				<span class="rail-id-name">{vaultName}</span>
 			</button>
 		{/if}
 
@@ -1291,12 +1311,12 @@
 						<div class="flex items-center gap-3">
 							<div class="w-10 h-10 rounded-full bg-azure/20 flex items-center justify-center">
 								<span class="text-azure text-sm font-medium">
-									{($auth.user.displayName || 'U')[0].toUpperCase()}
+									{avatarInitial}
 								</span>
 							</div>
 							<div>
 								<p class="text-sm text-[var(--color-text-primary)] font-medium">
-									{$auth.user.displayName || 'User'}
+									{vaultName}
 								</p>
 								<p class="text-xs text-[var(--color-text-tertiary)]">Passkey authentication</p>
 							</div>

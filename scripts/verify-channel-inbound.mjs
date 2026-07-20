@@ -36,6 +36,14 @@ const upd = (id, over = {}) => ({ update_id: id, message: { message_id: 500 + id
 
   rec('N5. non-message update → null', normalizeUpdate({ update_id: 5, edited_message: {} }) === null);
   rec('N6. maxUpdateId picks the largest', maxUpdateId([upd(3), upd(7), upd(5)]) === 7);
+
+  // R3-TGTHREAD: capture the forum topic id ONLY for a real topic message.
+  const topic = normalizeUpdate({ update_id: 6, message: { message_id: 3, date: 1, chat: { id: -100, type: 'supergroup', title: 'Grp' }, from: { id: 5 }, text: 'in topic', is_topic_message: true, message_thread_id: 4242 } });
+  rec('N7. topic message → messageThreadId captured', topic.messageThreadId === '4242', `thread=${topic?.messageThreadId}`);
+  // A plain reply in a supergroup ALSO carries message_thread_id — but without
+  // is_topic_message it must NOT be treated as a topic (avoids mis-routing).
+  const plainReply = normalizeUpdate({ update_id: 7, message: { message_id: 4, date: 1, chat: { id: -100, type: 'supergroup' }, from: { id: 5 }, text: 'reply', message_thread_id: 99 } });
+  rec('N8. non-topic reply → messageThreadId null (no mis-route)', plainReply.messageThreadId === null, `thread=${plainReply?.messageThreadId}`);
 }
 
 // ── poller offset + fan-out ──────────────────────────────────────────────────

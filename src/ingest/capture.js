@@ -122,6 +122,14 @@ export async function captureMessage(db, msg, enqueueEnrichment) {
     message_type: msg.messageType || 'chat',
     source: msg.source || 'api',
     scope: 'personal',
+    // WHICH agent this row belongs to. Single-user V1 has one canonical agent —
+    // write its id EXPLICITLY instead of leaning on the schema DEFAULT. The
+    // legacy Supabase-era default was 'mya-personal', which leaks as a raw id in
+    // the timeline (the frontend agentMap has no 'mya-personal' key) and forces
+    // every SQL filter to alias-resolve. Setting it here is the defense-in-depth
+    // half of the fix; migration 0055 backfills legacy rows and the amended 0001
+    // default covers fresh-vault inserts that bypass this choke-point (restore/import).
+    agent_id: 'personal-agent',
     nlp_processed: 0, // queue for enrichment (idx_messages_nlp_pending)
     // WHICH model produced this (assistant rows only). Plaintext provenance (like
     // `source`), NOT encrypted → projects to the timeline "· <model>" chip. A model

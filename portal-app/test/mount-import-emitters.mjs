@@ -73,7 +73,7 @@ export async function uploadFile() {
 // upload-handlers: ChatFloat + ImportView import prepareFile from it; identity is enough here.
 // (The REAL upload-handlers' own emission is exercised by importFiles' unit path — this harness
 // gates the per-component wires, so a stub keeps the probes single-sourced.)
-writeFileSync(`${GEN}/prepare-stub.js`, 'export async function prepareFile(f) { return f; }\nexport async function importFiles() { return { imported: 0, skipped: 0, failed: 0, detail: "" }; }\nexport async function importFolder() { return { imported: 0, skipped: 0, failed: 0, detail: "" }; }\n');
+writeFileSync(`${GEN}/prepare-stub.js`, 'export async function prepareFile(f) { return f; }\nexport async function importFiles() { return { imported: 0, skipped: 0, failed: 0, detail: "" }; }\nexport async function importFolder() { return { imported: 0, skipped: 0, failed: 0, detail: "" }; }\nexport async function filesFromDataTransfer() { return { files: [], hadDirectory: false }; }\n');
 // A child that INVOKES its onImported prop once — stands in for ScanForData, whose real success
 // path calls onImported after a one-click import. Components given no such prop are inert.
 writeFileSync(`${GEN}/invoker-child.js`, compile(

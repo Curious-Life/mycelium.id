@@ -26,9 +26,15 @@ export const DOMAINS = Object.freeze([
   { key: 'memory',     label: 'Facts & relations', description: 'Remember facts/people, link them, pin or mark sensitive, forget.',  tools: ['remember', 'link', 'mark', 'forget'] },
   { key: 'documents',  label: 'Documents',        description: 'Create, read, update, list — and publish — your documents.',         tools: ['saveDocument', 'findDocuments', 'updateDocument', 'getDocument', 'listDocuments', 'getDocumentShareStatus', 'publishDocument'] },
   { key: 'mindfiles',  label: 'Mind files',       description: 'Read and edit your internal model + flag items for discussion.',     tools: ['updateInternalModel', 'flagForDiscussion', 'snapshotMindFile', 'readMindFile', 'editMindFile', 'writeMindFileWhole', 'removeFromMind'] },
-  { key: 'topology',   label: 'Mindscape',        description: 'Explore the territory map of your cognition (when computed).',       tools: ['listTerritories', 'territoryDetail', 'mindscapeStructure', 'exploreTerritory', 'timeView'] },
-  { key: 'cognition',  label: 'Cognitive state',  description: 'Your current phase, trajectory, milestones and topology view.',      tools: ['cognitiveState', 'cognitiveHistory', 'mindscape', 'getCurrentPhase', 'getTrajectoryHistory', 'getActiveMilestones', 'getTopMovers'] },
-  { key: 'metrics',    label: 'Metrics',          description: 'Information-harmonic state and metric series.',                       tools: ['getHarmonicState', 'getMetricSeries'] },
+  // Phase 5 (spec §3.8) consolidated the 11 cluster/Fisher/metric/topology readers
+  // into these 3 tools — cognitiveState (folds getCurrentPhase + getHarmonicState +
+  // getActiveMilestones), cognitiveHistory (getTrajectoryHistory + getMetricSeries +
+  // getTopMovers), mindscape (mindscapeStructure + listTerritories + territoryDetail +
+  // exploreTerritory + timeView). The old per-tool names are no longer registered in
+  // src/mcp.js (only cognition.js's 3 tools are), so the separate 'topology' and
+  // 'metrics' domains + the fisher names here were mapped-but-unregistered = inert.
+  // Pruned 2026-07-19; the real topology/phase/metric read is these 3 tools.
+  { key: 'cognition',  label: 'Cognitive state',  description: 'Your current phase, trajectory, milestones, metrics and topology view.', tools: ['cognitiveState', 'cognitiveHistory', 'mindscape'] },
   { key: 'health',     label: 'Body state',       description: 'Sleep, HRV, steps and other Apple Health data.',                     tools: ['getHealthData'] },
   { key: 'tasks',      label: 'Tasks',            description: 'Create and list your tasks.',                                         tools: ['createTask', 'listTasks'] },
   { key: 'cycles',     label: 'Reflection cycles', description: 'Change how your reflection cycles run — their instructions, schedule, on/off — and your relationship persona.', tools: ['listCycles', 'getCyclePrompt', 'updateCycle', 'updatePersona'] },
@@ -55,12 +61,22 @@ export function isGrantableTool(name) { return TOOL_TO_DOMAIN.has(name); }
  * of granted domain keys, return the tool defs the harness may use. Intersection
  * is fail-closed: a registry tool with no domain mapping is never exposed; a
  * mapped tool absent from the registry is skipped.
+ *
+ * `grantedDomains` contract (fail-closed): an ARRAY is honored EXACTLY as given —
+ * an explicit empty array `[]` is a real deny-all choice (grant zero tools), NOT a
+ * fall-through to grant-all. This matches normalizePolicy, whose `domains: []` is a
+ * valid deny-all. Only a truly-absent grant (`undefined`/`null` — no policy passed)
+ * falls back to the broad ALL_DOMAIN_KEYS default. Note that "never configured" is
+ * already resolved to the full ALL_DOMAIN_KEYS array by normalizePolicy/defaultPolicy
+ * (see readPolicy in src/portal-chat.js), so a fresh user still gets the broad
+ * default; only an explicit `[]` reaches here as deny-all.
  * @param {Array<{name:string,description:string,inputSchema:object}>} registryTools
- * @param {string[]} grantedDomains
+ * @param {string[]|undefined|null} grantedDomains  array = honored exactly (incl. []); absent = default
  * @returns {{tools:Array, unmapped:string[]}}  unmapped = registry tools we dropped
  */
 export function toolsForDomains(registryTools, grantedDomains) {
-  const granted = new Set(grantedDomains && grantedDomains.length ? grantedDomains : ALL_DOMAIN_KEYS);
+  // fail-closed: an explicit array (even []) is respected; ONLY undefined/null → default.
+  const granted = new Set(Array.isArray(grantedDomains) ? grantedDomains : ALL_DOMAIN_KEYS);
   const tools = [];
   const unmapped = [];
   for (const t of registryTools || []) {

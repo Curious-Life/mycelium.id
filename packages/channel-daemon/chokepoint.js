@@ -24,7 +24,7 @@ export function createTelegramChokepoint(deps) {
       targetField: 'chatId',
       sourceModule: 'channel-daemon.telegram',
       inferKind,
-      send: ({ target, content, replyToMessageId }) => sendToTelegram({ chatId: target, text: content, replyToMessageId }),
+      send: ({ target, content, replyToMessageId, messageThreadId }) => sendToTelegram({ chatId: target, text: content, replyToMessageId, messageThreadId }),
     },
   });
 }

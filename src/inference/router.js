@@ -143,7 +143,13 @@ export function createInferenceRouter({
       onUsage({
         area, isLocal,
         provider: provider || (isLocal ? "local" : providerLabel()),
-        model: model || (isLocal ? cfg.localModel : cfg.cloudModel) || null,
+        // Prefer the EFFECTIVE model the backend actually served (raw.model — set by
+        // cloud.js's emitCloudUsage from the provider's echoed model, else the wire
+        // default). This is what fixes narrate-via-subscription recording model=NULL:
+        // cfg.cloudModel is unset for that path, so the old `cfg.cloudModel || null`
+        // stored NULL. Falls back to the configured model, then null. (Local's raw
+        // carries no model, so isLocal still resolves to cfg.localModel.)
+        model: model || raw?.model || (isLocal ? cfg.localModel : cfg.cloudModel) || null,
         jurisdiction: isLocal ? "local" : cloudJurisdiction(),
         inputTokens: inOk ? raw.inputTokens : estimateTokens(prompt),
         outputTokens: outOk ? raw.outputTokens : estimateTokens(String(text ?? "")),

@@ -134,7 +134,12 @@ export const INTELLIGENCE_FUNCTIONS = Object.freeze([
     why: 'Reads each message and tags what it’s about — on your device.',
   }),
   Object.freeze({
-    key: 'descriptions', label: 'Descriptions', sub: 'mindscape names & chronicles',
+    // DISPLAY label renamed 'Descriptions' → 'Narration' (IM-1, operator-confirmed 2026-07-20):
+    // "Descriptions" read as opaque. ⚠️ LABEL ONLY — the function key stays 'descriptions' and the
+    // task stays 'narrate' (the resolver/DB rename is out of scope + risky; a data rename would
+    // break every taskModels row keyed on narrate). Everything below (key, tasks, recommend) is
+    // untouched.
+    key: 'descriptions', label: 'Narration', sub: 'mindscape names & chronicles',
     tasks: Object.freeze(['narrate']),
     // jurisdiction 'any': narrate is NOT §4g-sensitive (2026-07-19 operator decision), so every
     // provider is offerable — like Conversation. `kind: 'cloud-eu-zdr'` names the RECOMMENDATION
@@ -142,7 +147,7 @@ export const INTELLIGENCE_FUNCTIONS = Object.freeze([
     // sensitive task hides under a non-limited function, so this pairing can never silently leak.
     kind: 'cloud-eu-zdr', jurisdiction: 'any',
     recommend: ROLE_RECOMMENDATIONS.descriptions.presetId,
-    why: 'Writes the names and chronicles for your mindscape.',
+    why: 'Writes the descriptions of your mindscape areas.',
   }),
   Object.freeze({
     // ⚠️ NOT A CHOICE, and the screen must never render it as one (§3.10d-c). The embedder

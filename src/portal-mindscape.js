@@ -5,7 +5,7 @@ import { startClusteringJob, startMeasurementJob, startBackfillJob, getJob, canc
 import { makeNarrationRunner } from './agent/narration-runner.js';
 import { getEmbedderHealth } from './embed/supervisor.js';
 import { createReadiness } from './readiness.js';
-import { getMindscapeCached, getMindscapePointsCached } from './mindscape-cache.js';
+import { getMindscapeCached, getMindscapePointsCached, bustMindscapePoints } from './mindscape-cache.js';
 import { isTrustedLoopback } from './http/loopback.js';
 // The naming surface's shared facts: the pipeline's OWN placeholder predicate + per-unit token
 // bound (one module, no duplicated predicate/constant — II.2a/II.3), and the narrator authority
@@ -343,8 +343,15 @@ export function portalMindscapeRouter({ db, userId, dbPath, readiness: injected 
   // frontend renders this FIRST (instant visuals), then loads the full /mindscape
   // for the text panels. §7: nodes/meta are plaintext (landscape coords + cluster
   // ids) — zero ciphertext, like the full aggregate's points half.
-  router.get('/mindscape/points', async (_req, res) => {
+  router.get('/mindscape/points', async (req, res) => {
     try {
+      // ?refresh=1 → force-recompute (P1-A). The durable points cache can hold an EMPTY bundle
+      // (a read that raced clustering, or a pre-generation read on a then-empty vault) for its
+      // 5-min TTL, so a plain client retry hit the same stale-empty result and "Try again" looked
+      // dead. Busting before the read guarantees a fresh scan — the retry can never be defeated by
+      // a stale cache. Owner-only single-user portal, so refresh spam is self-throttled; the bust
+      // is idempotent + cheap (it also busts the full aggregate, keeping the two caches coherent).
+      if (req.query?.refresh) bustMindscapePoints(userId);
       const pd = await loadPointsBundle();
       res.json({ nodes: pd.nodes, meta: pd.meta });
     } catch { fail(res, 500, 'failed to load mindscape points'); }

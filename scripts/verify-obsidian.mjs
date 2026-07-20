@@ -98,33 +98,41 @@ async function main() {
       `updated=${b4.memoriesUpdated} created=${b4.memoriesCreated} total=${await countObsidian()} docEdited=${doc4?.content?.includes('EDITED')} memEdited=${mem4?.content?.includes('EDITED')}`);
 
     // ── O5 folderPath mode + nested folder tree ──
+    // R2-FOLDERIMPORT: a note is now .md / .markdown / .txt (a generic desktop
+    // folder imports too), so a.md + sub/b.md + note.txt = 3 docs. A genuinely
+    // non-note binary (.dat) is still ignored (not a doc, not an asset).
     mkdirSync(path.join(VAULT, 'sub'), { recursive: true });
     writeFileSync(path.join(VAULT, 'a.md'), '# Alpha note\nfirst');
     writeFileSync(path.join(VAULT, 'sub', 'b.md'), '# Beta note\nsecond');
-    writeFileSync(path.join(VAULT, 'ignore.txt'), 'not markdown');
+    writeFileSync(path.join(VAULT, 'note.txt'), 'plain text note now imports');
+    writeFileSync(path.join(VAULT, 'ignore.dat'), 'not a note');
     const r5 = await post({ folderPath: VAULT });
     const b5 = await r5.json().catch(() => ({}));
     const f5 = await folders();
     const vroot = f5.find((f) => f.name === VAULT_NAME && f.parent_id == null);
     const subF = f5.find((f) => f.name === 'sub' && f.parent_id === vroot?.id);
     const docB = await db.documents.get(uid, `import/obsidian/${VAULT_NAME}/sub/b`);
-    rec('O5. folderPath mode → 2 docs, root+sub folders, b.md in sub',
-      r5.status === 200 && b5.scanned === 2 && b5.documentsUpserted === 2 && b5.folders === 2
-        && !!vroot && !!subF && docB?.folder_id === subF?.id,
-      `${JSON.stringify({ scanned: b5.scanned, docs: b5.documentsUpserted, folders: b5.folders })} subTree=${!!subF} bInSub=${docB?.folder_id === subF?.id}`);
+    const docTxt = await db.documents.get(uid, `import/obsidian/${VAULT_NAME}/note`);
+    rec('O5. folderPath mode → 3 docs (.md/.txt), root+sub folders, b.md in sub, .dat ignored',
+      r5.status === 200 && b5.scanned === 3 && b5.documentsUpserted === 3 && b5.folders === 2
+        && !!vroot && !!subF && docB?.folder_id === subF?.id && !!docTxt,
+      `${JSON.stringify({ scanned: b5.scanned, docs: b5.documentsUpserted, folders: b5.folders })} subTree=${!!subF} bInSub=${docB?.folder_id === subF?.id} txtImported=${!!docTxt}`);
 
-    // ── O6 safety: traversal rejected, non-md skipped ──
+    // ── O6 safety: traversal rejected; .txt/.markdown import; unsupported skipped ──
     const r6 = await post({ vaultName: 'TestVault', files: [
       { relPath: '../escape.md', content: 'should not be written outside' },
-      { relPath: 'x.txt', content: 'skip me' },
+      { relPath: 'plain.txt', content: 'a plain note — imports now' },
+      { relPath: 'notes.markdown', content: '# md ext\nimports too' },
+      { relPath: 'binary.dat', content: 'not a note — skipped' },
       { relPath: 'ok.md', content: '# fine\nok' },
     ] });
     const b6 = await r6.json().catch(() => ({}));
     const escaped = await db.documents.get(uid, 'import/obsidian/TestVault/../escape');
     const dotFolder = (await folders()).find((f) => f.name === '..');
-    rec('O6. traversal rejected (no doc, no ".." folder) + non-md skipped',
-      r6.status === 200 && !escaped && !dotFolder && b6.documentsUpserted === 1 && b6.skipped >= 2 && (b6.errors?.length ?? 0) >= 1,
-      `docs=${b6.documentsUpserted} skipped=${b6.skipped} errors=${b6.errors?.length} escaped=${!!escaped} dotFolder=${!!dotFolder}`);
+    const docPlain = await db.documents.get(uid, 'import/obsidian/TestVault/plain');
+    rec('O6. traversal rejected; .txt/.markdown import; unsupported skipped',
+      r6.status === 200 && !escaped && !dotFolder && b6.documentsUpserted === 3 && b6.skipped >= 2 && (b6.errors?.length ?? 0) >= 1 && !!docPlain,
+      `docs=${b6.documentsUpserted} skipped=${b6.skipped} errors=${b6.errors?.length} escaped=${!!escaped} dotFolder=${!!dotFolder} txtImported=${!!docPlain}`);
 
     // ── O7 idempotent folders on re-import ──
     const before7 = (await folders()).length;

@@ -40,7 +40,7 @@ export const apiPost = async () => ({});
 export default api;
 `);
 writeFileSync(`${GEN}/upload-stub.js`, 'export async function uploadFile() { return {}; }\n');
-writeFileSync(`${GEN}/prepare-stub.js`, 'export async function prepareFile(f) { return f; }\n');
+writeFileSync(`${GEN}/prepare-stub.js`, 'export async function prepareFile(f) { return f; }\nexport async function filesFromDataTransfer() { return { files: [], hadDirectory: false }; }\n');
 writeFileSync(`${GEN}/empty-component.js`, `
 import { createRawSnippet } from 'svelte';
 export default function Noop() { return { $$: {} }; }

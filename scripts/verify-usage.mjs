@@ -139,6 +139,30 @@ rec('A17. createUsageSink → undefined when db has no usage namespace', createU
   rec('A20. summary surfaces the ingest source + import area', s2.bySource.some((x) => x.key === 'ingest') && s2.byArea.some((x) => x.key === 'import'), `${s2.bySource.map((x) => x.key)} | ${s2.byArea.map((x) => x.key)}`);
 }
 
+// ── A21) NARRATE-via-SUBSCRIPTION: no cfg.cloudModel, yet model is NOT NULL ────
+// R2-USAGEMODEL regression: a cloud narrate run via a Claude subscription sets
+// claudeOAuthToken but NO cloudModel. The old recording path stored `cfg.cloudModel
+// || null` = NULL. The fix has cloud.js surface the EFFECTIVE model (the response's
+// data.model when present, else the wire default DEFAULT_ANTHROPIC_MODEL) so a real
+// model lands. Two cases: (a) provider echoes data.model → that wins; (b) provider
+// omits it → the wire default is recorded, never NULL.
+{
+  const { DEFAULT_ANTHROPIC_MODEL } = await import('../src/inference/cloud.js');
+  const sink = createUsageSink(db, U, { source: 'enrichment' });
+  // (a) echoed model wins
+  const echoFetch = async () => ({ ok: true, status: 200, async text() { return JSON.stringify({ model: 'claude-3-7-sonnet-20260101', content: [{ type: 'text', text: 'narrated' }], usage: { input_tokens: 10, output_tokens: 5 } }); } });
+  const r1 = createInferenceRouter({ fetch: echoFetch, onUsage: sink, claudeOAuthToken: 'oauth-tok', jurisdiction: 'us-standard' });
+  await r1.infer({ prompt: `${SECRET} narrate this`, task: 'narrate' });
+  // (b) provider omits model → wire default recorded (NOT null)
+  const bareFetch = async () => ({ ok: true, status: 200, async text() { return JSON.stringify({ content: [{ type: 'text', text: 'narrated2' }], usage: { input_tokens: 12, output_tokens: 6 } }); } });
+  const r2 = createInferenceRouter({ fetch: bareFetch, onUsage: sink, claudeOAuthToken: 'oauth-tok', jurisdiction: 'us-standard' });
+  await r2.infer({ prompt: `${SECRET} narrate again`, task: 'narrate' });
+  await new Promise((r) => setTimeout(r, 50));
+  const nrows = (await db.rawQuery("SELECT model, provider, input_tokens FROM llm_usage WHERE user_id=? AND area='narrate' ORDER BY at ASC", [U])).results || [];
+  rec('A21. narrate/subscription: echoed data.model recorded (not NULL)', nrows[0] && nrows[0].model === 'claude-3-7-sonnet-20260101' && nrows[0].provider === 'anthropic', JSON.stringify(nrows[0]));
+  rec('A22. narrate/subscription: absent data.model → wire default recorded (never NULL)', nrows[1] && nrows[1].model === DEFAULT_ANTHROPIC_MODEL && nrows[1].model != null, JSON.stringify(nrows[1]));
+}
+
 close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
 const allPass = ledger.every(Boolean);

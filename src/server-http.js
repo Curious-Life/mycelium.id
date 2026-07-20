@@ -279,21 +279,44 @@ export async function createHttpApp(opts = {}) {
   // configured → the form brands generically. This is the IDENTITY the user sees;
   // the single operator account's internal email is never asked for or shown.
   const currentHandle = () => { const h = (readRemoteConfig().publicHost || '').split('.')[0]; return isValidHandle(h) ? h : null; };
+  // Is this /login visit an enrolment flow? `?enroll=1` — the desktop Settings
+  // "Set up a passkey" action opens THIS relay page (the WebAuthn ceremony must run
+  // on the relay origin, whose rpID = <handle>.mycelium.id; the loopback webview
+  // can't mint a credential for that rpID). `step=passkey` = the post-sign-in enrol
+  // view (a session now exists → generate-register-options is authorised).
+  const wantsEnroll = (qs) => { try { return new URLSearchParams(qs).get('enroll') === '1'; } catch { return false; } };
   const loginPage = (qs, err, csrf = '', handle = null, opts = {}) => {
-    const { passkeyRequired = false } = opts;
+    const { passkeyRequired = false, enrollStep = false } = opts;
     const ident = handle ? `@${escHtml(handle)}` : 'your vault';
+    // Auto-label the WebAuthn credential with the PUBLIC vault handle (no secret) so
+    // the OS authenticator / password manager shows "<handle>.mycelium.id". Passed to
+    // login.js as ?name=… on generate-register-options (@better-auth/passkey uses
+    // ctx.query.name as userName). Generic fallback when no handle is claimed.
+    const pkName = handle ? `${handle}.mycelium.id` : 'Mycelium vault';
+    const enroll = wantsEnroll(qs);
     // The subtitle reflects WHY you're here: an OAuth connector flow (client_id in
     // the query) vs a plain web sign-in to open the vault.
     const isOAuth = (() => { try { return new URLSearchParams(qs).has('client_id'); } catch { return false; } })();
-    const sub = isOAuth ? 'Authorizing an app to reach this vault.' : 'Sign in to open your vault.';
     const errBlock = `<div class="e" id="err"${err ? '' : ' style="display:none"'}>${err ? escHtml(err) : ''}</div>`;
+    // Data attributes login.js reads (first-party, CSP-safe). data-enroll carries the
+    // enrol intent across the password POST → redirect; data-pkname is the label.
+    const dataAttrs = `data-qs="${escHtml(qs)}"${enroll ? ' data-enroll="1"' : ''} data-pkname="${escHtml(pkName)}"`;
+    const shell = (inner) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mycelium — Sign in</title><style>body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0c;color:#eaeaea;display:grid;place-items:center;min-height:100vh;margin:0}form{background:#15151a;padding:2rem;border-radius:14px;width:320px;border:1px solid #26262e}h1{font-size:1.05rem;margin:0 0 .4rem;color:#c9a227;font-weight:600}.id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#8a8a99;font-size:.85rem;margin:0 0 1.2rem}input{width:100%;box-sizing:border-box;margin:.35rem 0;padding:.65rem;background:#0a0a0c;border:1px solid #26262e;border-radius:8px;color:#eaeaea}button{width:100%;margin-top:1rem;padding:.7rem;background:#c9a227;color:#0a0a0c;border:0;border-radius:8px;font-weight:700;cursor:pointer}button.alt{background:transparent;color:#c9a227;border:1px solid #26262e}.e{color:#f87171;font-size:.85rem;margin:.3rem 0}.s{color:#8a8a99;font-size:.72rem;margin-top:1rem;text-align:center}</style></head><body>${inner}<script src="/login.js"></script></body></html>`;
+    // Post-sign-in enrol view: session exists, run the registration ceremony (no
+    // password field). login.js wires #pkreg to generate-register-options → create →
+    // verify-registration, then to the vault.
+    if (enrollStep) {
+      return shell(`<form id="lf" ${dataAttrs}><h1>Add a passkey</h1><div class="id">${ident}</div><div class="s" style="margin-top:0;margin-bottom:1rem">Face ID, Touch ID, or a security key — for signing in to your vault on the web.</div>${errBlock}<button type="button" id="pkreg">Add a passkey</button><button type="button" class="alt" id="skip">Not now</button></form>`);
+    }
+    const sub = isOAuth ? 'Authorizing an app to reach this vault.'
+      : (enroll ? 'Sign in to add a passkey to your vault.' : 'Sign in to open your vault.');
     // Passkey-required → passkey-only (no password field/submit). Otherwise show the
     // password form AND a passkey button (a returning user with a passkey can use it).
     const pwBlock = passkeyRequired ? ''
       : `<input name="password" type="password" placeholder="operator password" autocomplete="current-password" autofocus required><button type="submit">Sign in</button>`;
     const pkNote = passkeyRequired ? `<div class="s" style="margin-top:0;margin-bottom:.4rem">This vault requires a passkey.</div>` : '';
     const pkBtn = `<button type="button" id="pk" class="alt">Sign in with passkey</button>`;
-    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mycelium — Sign in</title><style>body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0c;color:#eaeaea;display:grid;place-items:center;min-height:100vh;margin:0}form{background:#15151a;padding:2rem;border-radius:14px;width:320px;border:1px solid #26262e}h1{font-size:1.05rem;margin:0 0 .4rem;color:#c9a227;font-weight:600}.id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#8a8a99;font-size:.85rem;margin:0 0 1.2rem}input{width:100%;box-sizing:border-box;margin:.35rem 0;padding:.65rem;background:#0a0a0c;border:1px solid #26262e;border-radius:8px;color:#eaeaea}button{width:100%;margin-top:1rem;padding:.7rem;background:#c9a227;color:#0a0a0c;border:0;border-radius:8px;font-weight:700;cursor:pointer}button.alt{background:transparent;color:#c9a227;border:1px solid #26262e}.e{color:#f87171;font-size:.85rem;margin:.3rem 0}.s{color:#8a8a99;font-size:.72rem;margin-top:1rem;text-align:center}</style></head><body><form id="lf" method="POST" action="/login?${escHtml(qs)}" data-qs="${escHtml(qs)}"><h1>Connect to your vault</h1><div class="id">${ident}</div>${pkNote}${errBlock}<input type="hidden" name="_csrf" value="${escHtml(csrf)}">${pwBlock}${pkBtn}<div class="s">${sub}</div></form><script src="/login.js"></script></body></html>`;
+    return shell(`<form id="lf" method="POST" action="/login?${escHtml(qs)}" ${dataAttrs}><h1>Connect to your vault</h1><div class="id">${ident}</div>${pkNote}${errBlock}<input type="hidden" name="_csrf" value="${escHtml(csrf)}">${pwBlock}${pkBtn}<div class="s">${sub}</div></form>`);
   };
 
   // First-party WebAuthn driver for the OAuth /login passkey button (served 'self'
@@ -301,12 +324,22 @@ export async function createHttpApp(opts = {}) {
   // same better-auth passkey endpoints the portal SPA uses, then resumes the flow:
   // an OAuth connect (client_id present) → /api/auth/mcp/authorize; else → portal.
   const LOGIN_JS = `(function(){
-  var btn=document.getElementById('pk'); if(!btn) return;
-  var lf=document.getElementById('lf'); var qs=(lf&&lf.dataset.qs)||'';
+  var lf=document.getElementById('lf');
+  var qs=(lf&&lf.dataset.qs)||''; var enroll=!!(lf&&lf.dataset.enroll); var pkname=(lf&&lf.dataset.pkname)||'';
   function b2b(s){s=String(s).replace(/-/g,'+').replace(/_/g,'/');var p=s.length%4;if(p)s+='='.repeat(4-p);var b=atob(s),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u.buffer;}
   function b2u(buf){var u=new Uint8Array(buf),s='';for(var i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);return btoa(s).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');}
   function err(m){var e=document.getElementById('err');if(e){e.textContent=m;e.style.display='block';}}
-  btn.addEventListener('click',async function(){
+  function hasClient(){try{return new URLSearchParams(qs).has('client_id');}catch(e){return false;}}
+  // After a successful sign-in: resume an OAuth authorize, else — if the user came to
+  // enrol (?enroll=1, not an OAuth flow) — go to the post-sign-in enrol step; else home.
+  function afterAuth(){
+    if(hasClient()) { window.location='/api/auth/mcp/authorize?'+qs; return; }
+    if(enroll) { window.location='/login?enroll=1&step=passkey'; return; }
+    window.location='/';
+  }
+  // ── Passkey SIGN-IN (existing) ──────────────────────────────────────────────
+  var btn=document.getElementById('pk');
+  if(btn) btn.addEventListener('click',async function(){
     btn.disabled=true; err('');
     try{
       var o=await fetch('/api/auth/passkey/generate-authenticate-options',{credentials:'same-origin'});
@@ -320,10 +353,37 @@ export async function createHttpApp(opts = {}) {
         signature:b2u(cred.response.signature),userHandle:cred.response.userHandle?b2u(cred.response.userHandle):null}};
       var v=await fetch('/api/auth/passkey/verify-authentication',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({response:resp})});
       if(!v.ok) throw new Error('Passkey sign-in failed.');
-      var hasClient=false; try{hasClient=new URLSearchParams(qs).has('client_id');}catch(e){}
-      window.location=hasClient?('/api/auth/mcp/authorize?'+qs):'/';
+      afterAuth();
     }catch(e){btn.disabled=false; err((e&&e.name==='NotAllowedError')?'Passkey sign-in cancelled':((e&&e.message)||'Passkey sign-in failed'));}
   });
+  // ── Passkey ENROLMENT (post-sign-in, step=passkey) ──────────────────────────
+  // The credential is bound to this page's rpID (= <handle>.mycelium.id), which is
+  // why enrolment happens HERE (the relay origin), not in the loopback desktop app.
+  // ?name=<handle> → the authenticator shows the handle (public, no secret).
+  var rb=document.getElementById('pkreg');
+  if(rb) rb.addEventListener('click',async function(){
+    rb.disabled=true; err('');
+    try{
+      var o=await fetch('/api/auth/passkey/generate-register-options?name='+encodeURIComponent(pkname),{credentials:'same-origin'});
+      if(o.status===401) throw new Error('Please sign in first, then add a passkey.');
+      if(!o.ok) throw new Error('Could not start passkey setup.');
+      var opt=await o.json();
+      var pub={challenge:b2b(opt.challenge),rp:opt.rp,
+        user:{id:b2b(opt.user.id),name:opt.user.name,displayName:opt.user.displayName},
+        pubKeyCredParams:opt.pubKeyCredParams,timeout:opt.timeout,attestation:opt.attestation,
+        authenticatorSelection:opt.authenticatorSelection,
+        excludeCredentials:(opt.excludeCredentials||[]).map(function(c){return {id:b2b(c.id),type:c.type,transports:c.transports};})};
+      var cred=await navigator.credentials.create({publicKey:pub});
+      var resp={id:cred.id,rawId:b2u(cred.rawId),type:cred.type,response:{
+        attestationObject:b2u(cred.response.attestationObject),clientDataJSON:b2u(cred.response.clientDataJSON)},
+        clientExtensionResults:{}};
+      var v=await fetch('/api/auth/passkey/verify-registration',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({response:resp,name:pkname})});
+      if(!v.ok) throw new Error('Passkey setup failed.');
+      window.location='/';
+    }catch(e){rb.disabled=false; err((e&&e.name==='NotAllowedError')?'Passkey setup cancelled':((e&&e.message)||'Passkey setup failed'));}
+  });
+  var sk=document.getElementById('skip');
+  if(sk) sk.addEventListener('click',function(){window.location='/';});
 })();`;
   app.get('/login.js', (_req, res) => {
     res.type('application/javascript').set('Cache-Control', 'no-store').send(LOGIN_JS);
@@ -331,6 +391,14 @@ export async function createHttpApp(opts = {}) {
 
   app.get('/login', (req, res) => {
     const qs = req.originalUrl.split('?').slice(1).join('?') || '';
+    // Post-sign-in enrol step (?enroll=1&step=passkey): render the add-a-passkey view.
+    // No auth check here — generate-register-options is session-gated server-side, so
+    // an unauthenticated hit fails closed (401 → "please sign in first"), never enrols.
+    const step = (() => { try { return new URLSearchParams(qs).get('step'); } catch { return null; } })();
+    if (step === 'passkey') {
+      res.type('html').send(loginPage(qs, null, '', currentHandle(), { enrollStep: true }));
+      return;
+    }
     const csrf = issueLoginCsrf(req, res);
     res.type('html').send(loginPage(qs, null, csrf, currentHandle(), { passkeyRequired: webPasswordLoginBlocked() }));
   });
@@ -367,7 +435,12 @@ export async function createHttpApp(opts = {}) {
       // send the now-authenticated browser to the portal home; the session cookie we
       // just set is valid for the whole host, so the portal opens.
       const hasOAuthClient = (() => { try { return new URLSearchParams(qs).has('client_id'); } catch { return false; } })();
-      res.redirect(302, hasOAuthClient ? `/api/auth/mcp/authorize?${qs}` : '/');
+      // Enrol intent (?enroll=1, plain web sign-in): the session is now set, so carry
+      // the browser to the add-a-passkey step (the credential binds to this origin's
+      // rpID = <handle>.mycelium.id). Otherwise open the vault.
+      const target = hasOAuthClient ? `/api/auth/mcp/authorize?${qs}`
+        : (wantsEnroll(qs) ? '/login?enroll=1&step=passkey' : '/');
+      res.redirect(302, target);
     } catch {
       res.status(401).type('html').send(loginPage(qs, 'Invalid password', issueLoginCsrf(req, res), currentHandle()));
     }

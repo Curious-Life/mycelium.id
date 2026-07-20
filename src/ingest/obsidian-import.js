@@ -36,6 +36,9 @@ import { recordContentFlow } from '../inference/usage.js';
 const MAX_FILE_BYTES = Number(process.env.MYCELIUM_IMPORT_TEXT_LIMIT_BYTES) || 25 * 1024 * 1024; // 25MB per note (env-tunable)
 const MAX_FILES = 20000;                // total vault cap (logged if hit)
 const SKIP_DIRS = new Set(['.obsidian', '.trash', '.git', 'node_modules', '.smart-env']);
+// A "note" is any plain-text markdown/text file — not just Obsidian's .md, so a
+// generic desktop folder of .txt/.markdown notes imports too (R2-FOLDERIMPORT).
+const NOTE_EXT_RE = /\.(md|markdown|txt)$/i;
 
 // ── Vault assets (images & media) ────────────────────────────────────────────
 // Obsidian notes embed images as `![[photo.png]]` wikilinks or standard
@@ -77,7 +80,7 @@ async function walkMarkdown(root, { maxFiles = MAX_FILES } = {}) {
       if (ent.isDirectory()) {
         if (name.startsWith('.') || SKIP_DIRS.has(name)) continue;
         await walk(path.join(dir, name), rel ? `${rel}/${name}` : name);
-      } else if (ent.isFile() && /\.md$/i.test(name)) {
+      } else if (ent.isFile() && NOTE_EXT_RE.test(name)) {
         out.push({ abs: path.join(dir, name), relPath: rel ? `${rel}/${name}` : name });
       } else if (ent.isFile() && assetExt(name)) {
         assets.push({ abs: path.join(dir, name), relPath: rel ? `${rel}/${name}` : name });
@@ -145,7 +148,7 @@ export async function importObsidianVault(db, { userId, folderPath, files, vault
         continue;
       }
       if (typeof f.content !== 'string') { summary.skipped += 1; continue; }
-      if (!/\.md$/i.test(f.relPath)) { summary.skipped += 1; continue; }
+      if (!NOTE_EXT_RE.test(f.relPath)) { summary.skipped += 1; continue; }
       if (Buffer.byteLength(f.content, 'utf8') > MAX_FILE_BYTES) { summary.skipped += 1; continue; }
       raw.push({ relPath: f.relPath, content: f.content, mtime: typeof f.mtime === 'string' ? f.mtime : undefined });
     }
@@ -316,7 +319,7 @@ export async function importObsidianVault(db, { userId, folderPath, files, vault
   for (const note of work) {
     try {
       const parsed = parseMarkdownNote(note.content, note.vaultRel);
-      const cleanRel = note.vaultRel.replace(/\.md$/i, '');
+      const cleanRel = note.vaultRel.replace(NOTE_EXT_RE, '');
       // Reject traversal BEFORE touching folders or the document write.
       const segs = cleanRel.split('/');
       if (!cleanRel || segs.some((s) => s === '' || s === '.' || s === '..')) {

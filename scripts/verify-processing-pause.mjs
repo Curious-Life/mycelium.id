@@ -107,6 +107,63 @@ async function main() {
     rec('P6. a failed settings write → 500 (never a 200 claiming a pause it cannot remember)',
       failed.status === 500 && after3?.enrichProcessingPaused !== true,
       `status=${failed.status} body=${JSON.stringify(failed.body)} persistedFlag=${after3?.enrichProcessingPaused}`);
+
+    // ── PER-STAGE PAUSE (QA R2-PIPECTL) — the split routes persist independently ──
+    // Reset to a clean seed so the per-stage assertions start from "nothing paused".
+    await db.users.updateSettings(uid, { ...SEED });
+
+    // P7: embed/pause persists enrichEmbedPaused ONLY — categorize stays running, taskModels survive,
+    // pausedAt is stamped, and the LEGACY composite stays false (not BOTH paused).
+    const ep = await post('/api/v1/portal/enrichment/embed/pause');
+    const s7 = await db.users.getSettings(uid);
+    rec('P7. embed/pause → enrichEmbedPaused only (categorize untouched, taskModels survive, pausedAt set, composite false)',
+      ep.status === 200 && s7?.enrichEmbedPaused === true && s7?.enrichCategorizePaused !== true
+        && s7?.enrichProcessingPaused === false && typeof s7?.enrichProcessingPausedAt === 'string'
+        && s7?.taskModels?.categorize?.model === 'qwen3.5:4b' && s7?.timezone === 'Europe/Riga',
+      `status=${ep.status} embed=${s7?.enrichEmbedPaused} cat=${s7?.enrichCategorizePaused} composite=${s7?.enrichProcessingPaused} pausedAt=${s7?.enrichProcessingPausedAt} taskModels=${JSON.stringify(s7?.taskModels)}`);
+
+    // P8: categorize/pause with embed already paused → BOTH paused ⇒ the legacy composite flips true,
+    // and the ORIGINAL pausedAt is preserved (the earliest stamp, not re-stamped).
+    const firstPausedAt = s7?.enrichProcessingPausedAt;
+    const cp = await post('/api/v1/portal/enrichment/categorize/pause');
+    const s8 = await db.users.getSettings(uid);
+    rec('P8. categorize/pause (embed already paused) → both flags true, composite true, earliest pausedAt kept',
+      cp.status === 200 && s8?.enrichEmbedPaused === true && s8?.enrichCategorizePaused === true
+        && s8?.enrichProcessingPaused === true && s8?.enrichProcessingPausedAt === firstPausedAt,
+      `status=${cp.status} embed=${s8?.enrichEmbedPaused} cat=${s8?.enrichCategorizePaused} composite=${s8?.enrichProcessingPaused} pausedAt=${s8?.enrichProcessingPausedAt} (was ${firstPausedAt})`);
+
+    // P9: embed/resume with categorize still paused → embed clears, categorize stays, pausedAt still
+    // set (any stage paused). Then categorize/resume → both clear, pausedAt null.
+    const er = await post('/api/v1/portal/enrichment/embed/resume');
+    const s9 = await db.users.getSettings(uid);
+    const cr = await post('/api/v1/portal/enrichment/categorize/resume');
+    const s9b = await db.users.getSettings(uid);
+    rec('P9. embed/resume leaves categorize paused (pausedAt kept); categorize/resume → both clear, pausedAt null',
+      er.status === 200 && s9?.enrichEmbedPaused === false && s9?.enrichCategorizePaused === true
+        && typeof s9?.enrichProcessingPausedAt === 'string'
+        && cr.status === 200 && s9b?.enrichEmbedPaused === false && s9b?.enrichCategorizePaused === false
+        && s9b?.enrichProcessingPausedAt === null,
+      `embedResume=${er.status} s9(embed=${s9?.enrichEmbedPaused},cat=${s9?.enrichCategorizePaused},at=${s9?.enrichProcessingPausedAt}) catResume=${cr.status} s9b(embed=${s9b?.enrichEmbedPaused},cat=${s9b?.enrichCategorizePaused},at=${s9b?.enrichProcessingPausedAt})`);
+
+    // P10: a per-stage restart route succeeds (200, count-only body) and NEVER drops model consent —
+    // it only re-queues gave-up rows (none in the fixture ⇒ 0). Both stages' restart routes exist.
+    const reEmbed = await post('/api/v1/portal/enrichment/embed/restart');
+    const reCat = await post('/api/v1/portal/enrichment/categorize/restart');
+    const s10 = await db.users.getSettings(uid);
+    rec('P10. per-stage restart routes → 200 count-only, model consent (taskModels) untouched',
+      reEmbed.status === 200 && typeof reEmbed.body?.reset?.embed === 'number'
+        && reCat.status === 200 && typeof reCat.body?.reset?.label === 'number'
+        && s10?.taskModels?.categorize?.model === 'qwen3.5:4b',
+      `embedRestart=${reEmbed.status}/${JSON.stringify(reEmbed.body)} catRestart=${reCat.status}/${JSON.stringify(reCat.body)} taskModels=${JSON.stringify(s10?.taskModels)}`);
+
+    // P11: a FAILED per-stage persist → 500 (the D13 contract holds per stage, not just globally).
+    db.users.updateSettings = async () => { throw new Error('disk full'); };
+    const stageFailed = await post('/api/v1/portal/enrichment/embed/pause');
+    db.users.updateSettings = realUpdate;
+    const s11 = await db.users.getSettings(uid);
+    rec('P11. a failed per-stage persist → 500 (never a silent per-stage pause)',
+      stageFailed.status === 500 && s11?.enrichEmbedPaused !== true,
+      `status=${stageFailed.status} body=${JSON.stringify(stageFailed.body)} embed=${s11?.enrichEmbedPaused}`);
   } finally {
     try { await srv.close(); } catch { /* best-effort */ }
     for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }

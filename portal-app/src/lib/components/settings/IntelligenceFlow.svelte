@@ -47,6 +47,7 @@
 	// followed into IntelligenceScreen's Conversation row (2026-07-19) — so Customize is now just
 	// two tabs (Functions · Providers), neither component mounted directly here.
 	import OnDeviceModels, { type LocalModelRow } from './OnDeviceModels.svelte';
+	import { workspace } from '$lib/workspace/store';
 
 	type BundleRow = {
 		key: string; model?: string; presetId?: string; runs: string; included?: boolean;
@@ -253,7 +254,7 @@
 		}
 		if (f.key === 'descriptions') {
 			const name = providerName(taskModels.narrate?.providerId);
-			return { key: f.key, label: 'Descriptions', what: name || 'not set up', status: name ? 'ok' : null, cls: name ? 'ok' : 'choice', unset: !name };
+			return { key: f.key, label: 'Narration', what: name || 'not set up', status: name ? 'ok' : null, cls: name ? 'ok' : 'choice', unset: !name };
 		}
 		if (f.key === 'transcription') {
 			const st = h?.status;
@@ -312,6 +313,10 @@
 		const uH = healthFor('understanding') ?? mh('no_model');
 		const tH = healthFor('transcription') ?? mh('no_model');
 		const vH = voiceHealth();
+		// The RAW tts phase + sample-pending flag — the action logic below must distinguish the two
+		// blockers voiceHealth() collapses into 'deps_missing' (sample-pending vs needs-runtime).
+		const vPhase = tts?.qwen?.model?.phase;
+		const vPending = tts?.qwen?.samplePending;
 		const und = brow('understanding'), tr = brow('transcription');
 		const dlSize = (r: BundleRow | undefined) => (r && !r.installed ? r.downloadGb ?? null : null);
 		// Offer a download ONLY for a genuinely-absent model ('no_model') — never over an approved,
@@ -326,10 +331,24 @@
 				health: tH, sizeGb: dlSize(tr), action: canDl(tH?.status) ? 'download' : 'none', busy: applying },
 			{ key: 'voice', label: 'Voice', sub: 'speaking', kind: 'consented',
 				health: vH, sizeGb: null,
-				// Voice also offers a retry on a FAILED download — voiceHealth() maps phase 'error' to
-				// status 'down' (not 'error'), so gate on 'down' or the retry button never appears
-				// (review F3, 2026-07-18). Not on 'unknown' (phase 'checking' = files already on disk).
-				action: ['no_model', 'down'].includes(vH.status) ? 'download' : 'none', busy: ttsBusy },
+				// ⚠️ voiceHealth() COLLAPSES two distinct blockers into status 'deps_missing': a
+				// ready-but-sample-pending voice AND a needs-runtime voice. They need DIFFERENT
+				// affordances, so the action keys on the RAW tts phase, never the collapsed status
+				// (R2-VOICEBTN review — routing needs-runtime to the character page was a dead end:
+				// CharacterView has no runtime-install path):
+				//   • ready + samplePending → 'add-sample': record a reference sample on the character
+				//     page (openCharacter routes there).
+				//   • needs-runtime → 'download' labelled "Finish install": mlx-audio isn't installed
+				//     yet; startTtsDownload() is the SAME route VoiceSection's "Finish install" uses.
+				//   • error ('down') / genuinely-absent ('no_model') → a plain "Download"/retry.
+				// voiceHealth maps phase 'error' → status 'down' (not 'error'), so gate on 'down'
+				// (review F3, 2026-07-18); 'unknown' (phase 'checking' = files on disk) gets nothing.
+				action: (vPhase === 'ready' && vPending) ? 'add-sample'
+					: vPhase === 'needs-runtime' ? 'download'
+					: ['no_model', 'down'].includes(vH.status) ? 'download' : 'none',
+				actionLabel: (vPhase === 'ready' && vPending) ? 'Add a voice sample'
+					: vPhase === 'needs-runtime' ? 'Finish install' : null,
+				busy: ttsBusy },
 			// ⚠️ PASS THE EMBEDDER HEALTH THROUGH — do NOT fabricate an 'ok'. `models.embedder` is
 			// undefined until the readiness poll resolves (and forever on an outage); a synthetic
 			// 'ok' would paint the green "Included" dot ModelHealth's own fail-closed fix removed
@@ -418,18 +437,32 @@
 			announce = started
 				? `Setting up — ${started} download${started === 1 ? '' : 's'} started in the background.`
 				: 'Set up — nothing needed downloading.';
-			// Start each download through its OWN route (§4.2.2) — never a new path.
-			for (const d of j.downloads || []) {
-				if (d.route === '/portal/hardware/pull') void startLabelPull(d.model);
-				else if (d.route === '/portal/transcription/download') void startWhisper(d.model);
-				else if (d.route === '/portal/settings/tts/qwen/download') void startTtsDownload();
-			}
+			// Run the downloads ONE AT A TIME in the background (R2-QWENPULL(d)). Firing all three
+			// with `void` saturated the connection — a multi-GB Qwen pull racing a Whisper + a voice
+			// model made each stall and the largest one fail. A single fire-and-forget queue keeps
+			// applyBundle returning promptly (the work is genuinely background) while serializing the
+			// bytes so one download has the pipe at a time. Each still goes through its OWN route
+			// (§4.2.2) — never a new path.
+			void runDownloadsSerially(j.downloads || []);
 			await loadFacts();      // the pane flips to STATE B by FACT, not by flag (§4.2.3)
 			await loadModels();
 		} catch {
 			applyErr = 'Could not set things up. Try again in a moment.';
 			announce = 'Setup failed.';
 		} finally { applying = false; }
+	}
+
+	// Serialize the bundle's downloads (R2-QWENPULL(d)). Awaited sequentially so only ONE pull
+	// holds the connection at a time; a failure of one does not abort the rest (each row owns its
+	// own error surface). Called fire-and-forget from applyBundle so it runs in the background.
+	async function runDownloadsSerially(downloads: any[]) {
+		for (const d of downloads) {
+			try {
+				if (d.route === '/portal/hardware/pull') await startLabelPull(d.model);
+				else if (d.route === '/portal/transcription/download') await startWhisper(d.model);
+				else if (d.route === '/portal/settings/tts/qwen/download') await startTtsDownload();
+			} catch { /* each download reports its own failure; keep the queue moving */ }
+		}
 	}
 
 	// The labeling-model download — the EXISTING SSE route (installs Ollama first). Approval
@@ -462,10 +495,19 @@
 					}
 				}
 			}
-		} catch {
-			// The drainer's #206 backoff + the models slice own the retry story from here;
-			// this local line just stops claiming progress it isn't making.
-			pullErr = 'Download interrupted — it will retry, or use Try again in Customize.';
+		} catch (err: any) {
+			// Guide the owner with the CLASSIFIED reason (IM-3). The route now sends one of three
+			// fault kinds instead of a bare 'pull failed'; each has a different remedy. Anything
+			// else (a transport drop after the client-side retries) keeps the retry-reassurance
+			// line — the drainer's #206 backoff + the models slice own the retry story from here.
+			const fault = String(err?.message || '');
+			if (fault === 'out-of-space') {
+				pullErr = 'Not enough disk space to finish the download — free up some space, then use Try again in Customize.';
+			} else if (fault === 'runtime-unreachable') {
+				pullErr = 'The local model runtime isn’t reachable — make sure Ollama can start, then use Try again in Customize.';
+			} else {
+				pullErr = 'Download interrupted — it will retry, or use Try again in Customize.';
+			}
 			announce = 'A model download was interrupted.';
 		} finally {
 			void loadModels();
@@ -497,6 +539,12 @@
 		if (key === 'understanding') void applyBundle(['understanding']);
 		else if (key === 'transcription') void applyBundle(['transcription']);
 		else if (key === 'voice') void startTtsDownload();
+	}
+	// The 'add-sample' action for a downloaded-but-mute voice: route to the character page, where
+	// the record/upload capture already lives (CharacterView) — no forked capture UI here, just the
+	// nav (R2-VOICEBTN). openFromRoute replaces the active tab in place (same pattern as AgentRow).
+	function openCharacter() {
+		workspace.openFromRoute('character', { id: 'personal-agent' });
 	}
 
 	function openCustomize(anchor?: string) {
@@ -600,7 +648,7 @@
 		     scattered across OnboxTaskSelect / TranscriptionSetup / VoiceSection — and, since Phase
 		     3, the ONLY place they render in STATE B (no more duplicated summary dots). -->
 		<div class="odm-wrap">
-			<OnDeviceModels models={localModels} ondownload={downloadModel} machineNoun={machineNoun} />
+			<OnDeviceModels models={localModels} ondownload={downloadModel} onsample={openCharacter} machineNoun={machineNoun} />
 		</div>
 
 		{#if pullPct != null}

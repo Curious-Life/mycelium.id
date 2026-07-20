@@ -47,8 +47,8 @@ const SLICES = {
   midflight: {
     stages: [
       { key: 'import', state: 'done', count: { done: 76000 } },
-      { key: 'embed', state: 'running', count: { done: 3200, total: 76000 }, etaSeconds: 90 },
-      { key: 'categorize', state: 'blocked', reason: 'no_model', action: A_APPROVE },
+      { key: 'embed', state: 'running', count: { done: 3200, total: 76000 }, etaSeconds: 90, paused: false },
+      { key: 'categorize', state: 'blocked', reason: 'no_model', action: A_APPROVE, paused: false },
       { key: 'cluster', state: 'pending', reason: 'waiting_embed' },
       { key: 'describe', state: 'pending' },
       { key: 'measure', state: 'pending' },
@@ -79,12 +79,14 @@ const SLICES = {
     ],
     overall: 'blocked', blockedOn: 'too_few_embedded',
   },
-  // Paused: embed + categorize blocked-by-choice with a Resume action.
+  // Paused: embed + categorize blocked-by-choice, each carrying `paused:true` so the co-located
+  // Stop/Resume control renders Resume. The slice still emits the A_RESUME action (PS5), but the
+  // component renders the per-stage Resume CONTROL for a paused stage, not the generic action button.
   paused: {
     stages: [
       { key: 'import', state: 'done', count: { done: 100 } },
-      { key: 'embed', state: 'blocked', count: { done: 50, total: 100 }, reason: 'paused', action: A_RESUME },
-      { key: 'categorize', state: 'blocked', reason: 'paused', action: A_RESUME },
+      { key: 'embed', state: 'blocked', count: { done: 50, total: 100 }, reason: 'paused', action: A_RESUME, paused: true },
+      { key: 'categorize', state: 'blocked', reason: 'paused', action: A_RESUME, paused: true },
       { key: 'cluster', state: 'pending', reason: 'waiting_embed' },
       { key: 'describe', state: 'pending' },
       { key: 'measure', state: 'pending' },
@@ -205,11 +207,16 @@ try {
   // ONCE despite two clicks. The spies record synchronously (goto/start/apiPost are invoked before
   // onAction's first await), so `calls` is complete by the time we emit. `clickedDisabledAfter` is
   // the button's disabled state after the click+flush — busy (in-flight) so it reads true. ───────
+  // CTRL=<pause|resume|restart> clicks the co-located per-stage CONTROL (R2/R3) within the CLICK
+  // stage instead of the generic `.pipe-action` remedy; absent, the generic action is clicked.
   let clickedDisabledAfter = null;
   const clickKey = process.env.CLICK;
+  const clickCtrl = process.env.CTRL;
   if (clickKey) {
     const li = D.querySelector(`.pipe-stage[data-key="${clickKey}"]`);
-    const btn = li?.querySelector('button.pipe-action');
+    const btn = clickCtrl
+      ? li?.querySelector(`button.pipe-ctrl[data-ctrl="${clickCtrl}"]`)
+      : li?.querySelector('button.pipe-action');
     if (btn) {
       btn.click();
       if (process.env.DOUBLE === '1') btn.click(); // must be dropped by the busy-guard
@@ -240,6 +247,14 @@ try {
     const key = li.getAttribute('data-key');
     const iconEl = li.querySelector('.pipe-stage-icon');
     const btn = li.querySelector('button.pipe-action');
+    // The co-located per-stage controls (R2/R3): Stop/Resume + Restart. Reported so the render gate
+    // can assert the two-state control and its enabled/visible state per stage.
+    const controls = [...li.querySelectorAll('button.pipe-ctrl')].map((b) => ({
+      kind: b.getAttribute('data-ctrl'),
+      label: norm(b.textContent),
+      visible: visible(b),
+      disabled: !!b.disabled,
+    }));
     return {
       key,
       state: li.getAttribute('data-state'),
@@ -251,6 +266,7 @@ try {
       // Unit 3 renders the remedy NOT-YET-LIVE: the button is present + labelled but disabled
       // (Unit 4 removes this). `disabled` reflects the DOM property jsdom sets from the attribute.
       actionDisabled: btn ? !!btn.disabled : false,
+      controls,
       visible: visible(li),
     };
   });
@@ -268,6 +284,7 @@ try {
     text: norm(D.body.textContent),
     rootCount: D.querySelectorAll('.pipe').length,
     actionCount: D.querySelectorAll('button.pipe-action').length,
+    ctrlCount: D.querySelectorAll('button.pipe-ctrl').length,
     spinnerCount: D.querySelectorAll('.pipe-spin').length,
     // ⭐ Unit-4 wiring proof: which remedy(ies) the click fired, and the in-flight disabled state.
     calls: [...spies.calls],

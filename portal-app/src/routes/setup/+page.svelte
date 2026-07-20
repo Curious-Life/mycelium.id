@@ -1,11 +1,18 @@
 <script lang="ts">
-	// First-run account ceremony — create the vault and show the ONE recovery key
-	// the user must save, or restore an existing vault from that key. Talks to the
-	// local /api/v1/account/* surface (served even in "setup mode", before the
-	// vault is open). Mirrors the /login screen's visual language.
+	// First-run entry (U1.3) — the WELCOME / HERO. "Get started" SILENTLY creates the
+	// vault (POST /api/v1/account/setup mints the key + opens the vault) and navigates
+	// into the app, where the wizard's Step 2 relocates the recovery-key backup. This
+	// screen no longer reveals the key — the reveal + its strict gate moved into the
+	// in-app wizard (RecoveryKeyStep.svelte), fetching the key FRESH there. This route
+	// still owns the RETURNING/migrating paths (restore, restore-from-backup, unlock).
+	// Talks to the local /api/v1/account/* surface (served even in "setup mode", before
+	// the vault is open). Mirrors the /login screen's visual language.
 	import { onMount } from 'svelte';
+	import MyceliumCanvas from '$lib/components/onboarding/MyceliumCanvas.svelte';
 
-	type Mode = 'loading' | 'intro' | 'reveal' | 'restore-backup' | 'restore';
+	// 'hero' = fresh machine, no vault yet (create or restore). The old 'reveal' mode
+	// is GONE — the recovery-key backup now happens in the in-app wizard.
+	type Mode = 'loading' | 'hero' | 'restore-backup' | 'restore';
 	let mode = $state<Mode>('loading');
 	let busy = $state(false);
 	let error = $state<string | null>(null);
@@ -15,14 +22,6 @@
 	let bootError = $state<string | null>(null);
 	let keychainAvailable = $state(true);
 
-	let recoveryKey = $state('');
-	let copied = $state(false);
-	let downloaded = $state(false);
-	// One-click save into the OS password store (server-side hand-off; key never
-	// returns to the browser). A success counts as a real save (see savedTo gate).
-	let saving = $state<'keychain' | '1password' | null>(null);
-	let savedTo = $state<'keychain' | '1password' | null>(null);
-	let saveError = $state<string | null>(null);
 	let restoreInput = $state('');
 	// "this Mac" / "this computer" — device-aware reassurance copy.
 	let deviceLabel = $state('this device');
@@ -31,19 +30,6 @@
 	// Security, not in first-run onboarding (premature there — no data yet).
 	let backupFile = $state<File | null>(null);
 	let uploadingBackup = $state(false);
-
-	// Reveal sub-step. 'show' = key visible + save options; 'verify' = key HIDDEN,
-	// re-enter it to prove it's really saved. The ONLY ways into the vault: a real
-	// password-manager save (savedTo set) OR passing the re-entry challenge. A
-	// ticked checkbox or a Download alone no longer counts — that's how vaults get
-	// lost. Re-typing only proves possession while the key is OFF screen, hence the
-	// two steps.
-	let revealStep = $state<'show' | 'verify'>('show');
-	let verifyInput = $state('');
-	const normalizedVerify = $derived(verifyInput.trim().replace(/\s+/g, '').toLowerCase());
-	const verifyMatches = $derived(normalizedVerify.length === 64 && normalizedVerify === recoveryKey.toLowerCase());
-
-	const grouped = $derived(recoveryKey ? recoveryKey.replace(/(.{4})/g, '$1 ').trim() : '');
 
 	// After setup/restore the vault is open but the root layout's session check
 	// ran before that (it redirected us here), so a client-side nav would land on
@@ -66,10 +52,15 @@
 				// to the recovery-key paste, which succeeds because kcv.json is on disk.
 				if (s.needsRecoveryKey || bootError) { mode = 'restore'; return; }
 			}
-		} catch { /* show intro regardless */ }
-		mode = 'intro';
+		} catch { /* show the hero regardless */ }
+		mode = 'hero';
 	});
 
+	// "Get started" — SILENTLY create the vault, then enter the app. The recovery key
+	// minted here (data.recoveryKey) is DELIBERATELY IGNORED: it is already persisted
+	// to the Keychain by the /setup route BEFORE boot, and the wizard's Step 2 fetches
+	// it FRESH (GET /api/v1/account/recovery-key) at the backup gate. We never read it
+	// into state, never render it, never log it — the reveal belongs to the wizard now.
 	async function createVault() {
 		busy = true; error = null;
 		try {
@@ -77,15 +68,16 @@
 				method: 'POST', credentials: 'same-origin',
 				headers: { 'Content-Type': 'application/json' }, body: '{}',
 			});
-			const data = await res.json().catch(() => ({}));
-			if (!res.ok) throw new Error(data.message || data.error || 'Setup failed');
-			recoveryKey = data.recoveryKey;
-			revealStep = 'show';
-			verifyInput = '';
-			mode = 'reveal';
+			if (!res.ok) {
+				const data = await res.json().catch(() => ({}));
+				throw new Error(data.message || data.error || 'Setup failed');
+			}
+			// Vault is open; the wizard's Step 2 will force the recovery-key backup.
+			enterVault();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Setup failed';
-		} finally { busy = false; }
+			busy = false;
+		}
 	}
 
 	async function restoreVault() {
@@ -133,50 +125,14 @@
 		} finally { uploadingBackup = false; }
 	}
 
-	async function copyKey() {
-		try { await navigator.clipboard.writeText(recoveryKey); copied = true; setTimeout(() => (copied = false), 1800); } catch { /* */ }
-	}
-
-	function downloadKey() {
-		const body =
-			'Mycelium recovery key\n\n' +
-			'Keep this secret and safe. It is the ONLY way to recover your vault on a\n' +
-			'new computer. Anyone with this key can read your vault. It cannot be reset.\n\n' +
-			`Recovery key:\n${recoveryKey}\n\nSaved ${new Date().toISOString()}\n`;
-		const url = URL.createObjectURL(new Blob([body], { type: 'text/plain' }));
-		const a = document.createElement('a');
-		a.href = url; a.download = 'mycelium-recovery-key.txt';
-		document.body.appendChild(a); a.click(); a.remove();
-		setTimeout(() => URL.revokeObjectURL(url), 1000);
-		downloaded = true;
-		setTimeout(() => (downloaded = false), 2500);
-	}
-
-	// One-click save to the OS store. The key is read SERVER-SIDE and handed to the
-	// store (`security`/`op` CLI) — it never leaves the box via the browser. A success
-	// makes the key retrievable, so it satisfies the "prove you saved it" gate (savedTo
-	// lets Continue skip the re-entry challenge). "Keychain" = Keychain Access (NOT the
-	// Apple Passwords app); 1Password needs the `op` CLI signed in.
-	async function saveKey(target: 'keychain' | '1password') {
-		saving = target; saveError = null;
-		try {
-			const res = await fetch('/api/v1/account/recovery-key/save', {
-				method: 'POST', credentials: 'same-origin',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ target }),
-			});
-			const data = await res.json().catch(() => ({}));
-			if (!res.ok) throw new Error(data.message || data.error || 'Could not save');
-			savedTo = target;
-		} catch (e) {
-			saveError = e instanceof Error ? e.message : 'Could not save';
-		} finally { saving = null; }
-	}
 </script>
 
 <svelte:head><title>Set up — Mycelium</title></svelte:head>
 
 <div class="min-h-screen flex flex-col bg-[var(--color-bg)]">
+	<!-- The living hyphal-network hero (decorative, self-contained — no external
+	     fetch). Behind the card; pointer-events:none so it never intercepts clicks. -->
+	<div class="absolute inset-0 pointer-events-none opacity-70"><MyceliumCanvas /></div>
 	<div class="absolute inset-0 bg-gradient-to-br from-azure/5 via-transparent to-amethyst/5 pointer-events-none"></div>
 	<main class="flex-1 flex items-center justify-center p-6 relative overflow-y-auto">
 		<div class="w-full max-w-md">
@@ -192,22 +148,25 @@
 			{#if mode === 'loading'}
 				<div class="h-48 flex items-center justify-center text-[var(--color-text-tertiary)] animate-pulse">Loading…</div>
 
-			{:else if mode === 'intro'}
-				<div class="card-elevated p-8 space-y-6">
-					<div class="text-center">
-						<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Create your vault</h2>
+			{:else if mode === 'hero'}
+				<!-- Welcome / hero — the true entry (U1.3). "Get started" SILENTLY creates
+				     the vault and enters the app; the recovery-key backup is the wizard's
+				     Step 2 (relocated). The reveal no longer lives on this pre-app route. -->
+				<div class="card-elevated p-8 space-y-6 text-center">
+					<div>
+						<h2 class="text-xl font-medium text-[var(--color-text-primary)] mb-2">See your mind take shape</h2>
 						<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
-							Your data is encrypted on {deviceLabel} — only you can read it.
+							Private, encrypted on {deviceLabel} — only you can read it.
 						</p>
 					</div>
 					{#if !keychainAvailable}
-						<div class="p-3 bg-coral/10 border border-coral/30 rounded-lg text-xs text-[var(--color-text-secondary)]">
+						<div class="p-3 bg-coral/10 border border-coral/30 rounded-lg text-xs text-[var(--color-text-secondary)] text-left">
 							The macOS Keychain isn't available here, so the app can't store your key automatically.
 						</div>
 					{/if}
 					<button onclick={createVault} disabled={busy || !keychainAvailable}
 						class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed">
-						{busy ? 'Creating…' : 'Create my vault'}
+						{busy ? 'Creating your vault…' : 'Get started'}
 					</button>
 					<button onclick={() => { error = null; backupFile = null; mode = 'restore-backup'; }}
 						class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors py-2">
@@ -217,88 +176,6 @@
 						class="w-full text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors">
 						I've already copied my vault files here → enter recovery key
 					</button>
-				</div>
-
-			{:else if mode === 'reveal'}
-				<div class="card-elevated p-8 space-y-6">
-					{#if revealStep === 'show'}
-						<div class="text-center">
-							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Save your recovery key</h2>
-							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
-								This is the <strong>only</strong> way to recover your vault on a new
-								computer. Save it now — it cannot be reset.
-							</p>
-						</div>
-						<div class="p-4 rounded-lg bg-[var(--color-bg-secondary,#0001)] border border-[var(--color-border)] font-mono text-sm tracking-wide break-all text-center text-[var(--color-text-primary)] select-all">
-							{grouped}
-						</div>
-						<div class="flex gap-2">
-							<button onclick={copyKey} class="flex-1 btn py-2.5 border border-[var(--color-border)]">{copied ? 'Copied ✓' : 'Copy'}</button>
-							<button onclick={downloadKey} class="flex-1 btn py-2.5 border border-[var(--color-border)]">{downloaded ? 'Downloaded ✓' : 'Download'}</button>
-						</div>
-						<!-- Save straight into a password manager — the key is handed to the store
-						     server-side, it never returns to the browser. -->
-						<div class="flex gap-2">
-							<button onclick={() => saveKey('keychain')} disabled={saving !== null}
-								class="flex-1 btn py-2.5 border border-[var(--color-border)] disabled:opacity-50">
-								{saving === 'keychain' ? 'Saving…' : savedTo === 'keychain' ? 'Saved to Keychain ✓' : 'Save to Keychain'}
-							</button>
-							<button onclick={() => saveKey('1password')} disabled={saving !== null}
-								class="flex-1 btn py-2.5 border border-[var(--color-border)] disabled:opacity-50">
-								{saving === '1password' ? 'Saving…' : savedTo === '1password' ? 'Saved to 1Password ✓' : 'Save to 1Password'}
-							</button>
-						</div>
-						{#if saveError}
-							<p class="text-center text-xs text-coral">{saveError}</p>
-						{/if}
-						{#if savedTo}
-							<!-- A real save proves the key is retrievable → skip the re-entry challenge. -->
-							<button onclick={enterVault} class="w-full btn btn-primary py-3.5">Saved — open my vault</button>
-						{:else}
-							<!-- The one irreversible thing — prove the key was really saved. -->
-							<button onclick={() => { verifyInput = ''; revealStep = 'verify'; }}
-								class="w-full btn btn-primary py-3.5">
-								I've saved it — continue
-							</button>
-							<p class="text-center text-xs text-[var(--color-text-tertiary)]">
-								Next: re-enter the key to confirm you can get back in.
-							</p>
-						{/if}
-
-					{:else}
-						<div class="text-center">
-							<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Confirm your recovery key</h2>
-							<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
-								Enter the recovery key you just saved. This proves you can really get
-								back in — there is no reset if it's lost.
-							</p>
-						</div>
-						<input
-							bind:value={verifyInput}
-							type="text" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true"
-							placeholder="Paste or type your recovery key"
-							onkeydown={(e) => { if (e.key === 'Enter' && verifyMatches) enterVault(); }}
-							class="input w-full text-sm font-mono tracking-wide" />
-						<div class="h-4 text-center text-xs">
-							{#if normalizedVerify.length === 0}
-								&nbsp;
-							{:else if verifyMatches}
-								<span class="text-jade">Matches ✓</span>
-							{:else if normalizedVerify.length === 64}
-								<span class="text-coral">That key doesn't match.</span>
-							{:else}
-								<span class="text-[var(--color-text-tertiary)]">{normalizedVerify.length}/64 characters</span>
-							{/if}
-						</div>
-						<button onclick={() => { if (verifyMatches) enterVault(); }} disabled={!verifyMatches}
-							class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed">
-							Enter my vault
-						</button>
-						<button onclick={() => { revealStep = 'show'; }}
-							class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors py-2">
-							← Show my key again
-						</button>
-					{/if}
 				</div>
 
 			{:else if mode === 'restore-backup'}
@@ -321,7 +198,7 @@
 						class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed">
 						{uploadingBackup ? 'Reading backup…' : 'Continue'}
 					</button>
-					<button onclick={() => { error = null; mode = 'intro'; }}
+					<button onclick={() => { error = null; mode = 'hero'; }}
 						class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors py-2">
 						← Back
 					</button>
@@ -342,7 +219,7 @@
 						class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed">
 						{busy ? 'Restoring…' : 'Restore vault'}
 					</button>
-					<button onclick={() => { error = null; mode = 'intro'; }}
+					<button onclick={() => { error = null; mode = 'hero'; }}
 						class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors py-2">
 						← Back
 					</button>

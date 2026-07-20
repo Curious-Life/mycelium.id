@@ -142,6 +142,7 @@ export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands
             ...(msg.username ? { username: msg.username } : {}),
             ...(msg.chatTitle ? { chatTitle: msg.chatTitle } : {}),
             ...(msg.replyToMessageId ? { replyTo: msg.replyToMessageId } : {}),
+            ...(msg.messageThreadId ? { messageThreadId: msg.messageThreadId } : {}),
             ...(msg.media ? { mediaKind: msg.media.kind, ...(msg.media.fileUniqueId ? { fileUniqueId: msg.media.fileUniqueId } : {}) } : {}),
           },
         });
@@ -157,6 +158,9 @@ export function createInboundHandler({ vault, ownerTelegramId, runTurn, commands
         channelKind: msg.channelKind,
         channelId: msg.chatId,
         inboundMessageId: msg.messageId,
+        // Forum topic (R3-TGTHREAD): carried on the active turn so the egress
+        // send-handler routes the agent's reply back into the same topic.
+        messageThreadId: msg.messageThreadId || undefined,
         username: msg.username || undefined,
         userId: msg.fromId || undefined,
         voiceMode: msg.voiceMode || undefined,

@@ -13,7 +13,7 @@ import { endorsedLocalModels } from '../src/inference/role-models.js';
 import { CATALOG } from '../src/hardware/catalog.js';
 import { detectHardware } from '../src/hardware/detect.js';
 import { createOllamaClient, isValidModelName, classifyOllamaFault, OLLAMA_FAULT } from '../src/hardware/ollama.js';
-import { createOllamaDaemon, findOllamaBinary } from '../src/hardware/ollama-daemon.js';
+import { createOllamaDaemon, findOllamaBinary, redactDaemonDetail } from '../src/hardware/ollama-daemon.js';
 import { installOllama, resolveAsset, OLLAMA_VERSION } from '../src/hardware/ollama-install.js';
 
 const ledger = [];
@@ -212,6 +212,31 @@ const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : '
   let blocked = false; let touched = false;
   try { await createOllamaClient({ fetch: async () => { touched = true; return { ok: true, body: null }; } }).pullModel('bad name; evil'); } catch { blocked = true; }
   rec('H6f. invalid model name blocked before fetch', blocked && !touched, '');
+
+  // H6g — RESUME-RETRY (R2-QWENPULL): a transport blip mid-pull used to abort the whole multi-GB
+  // download. Now the pull re-issues /api/pull — ollama continues from its kept partial blobs — so
+  // a first-attempt transport failure followed by a good stream RESOLVES, in exactly two fetches.
+  {
+    let calls = 0;
+    const flaky = async () => {
+      calls++;
+      if (calls === 1) throw new TypeError('fetch failed'); // ECONNRESET-class blip
+      return { ok: true, body: new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(ndjson)); c.close(); } }) };
+    };
+    const okPull = await createOllamaClient({ fetch: flaky }).pullModel('llama3.2:3b', null, { retryDelayMs: 1, idleTimeoutMs: 0 });
+    rec('H6g. transport blip mid-pull → resume-retry succeeds (2 fetches)', okPull === true && calls === 2, `calls=${calls}`);
+  }
+
+  // H6h — disk-full is TERMINAL, never retried: no number of retries frees space, so the pull
+  // fails FAST (a single fetch) and surfaces out-of-space now, not after four wasted attempts.
+  {
+    let calls = 0;
+    const diskFetch = async () => { calls++; return { ok: true, body: new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(enospc)); c.close(); } }) }; };
+    let threw = false; let kind = null;
+    try { await createOllamaClient({ fetch: diskFetch }).pullModel('llama3.2:3b', null, { retryDelayMs: 1, idleTimeoutMs: 0, maxAttempts: 4 }); }
+    catch (e) { threw = true; kind = classifyOllamaFault(e, 'pull'); }
+    rec('H6h. disk-full is terminal — fails fast, no retry', threw && calls === 1 && kind === OLLAMA_FAULT.OUT_OF_SPACE, `calls=${calls} kind=${kind}`);
+  }
 }
 
 // ── H7 — ollama-daemon (lazy adopt-or-spawn; injected isUp/findBinary/spawn) ──
@@ -297,6 +322,59 @@ const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : '
     dAdopted.stop();
     const noKillAdopted = spawnB.calls.length === 0;
     rec('H7g. stop() kills only spawnedByUs', killedOurs && noKillAdopted, `killedOurs=${killedOurs} adoptedSpawns=${spawnB.calls.length}`);
+  }
+
+  // H7h — the start_timeout `detail` (stderr tail) is CREDENTIAL-SCRUBBED before it
+  // reaches the localhost portal. We forward proxy env to `ollama serve`, so a proxy
+  // URL with embedded creds can land on stderr; it must not echo back verbatim.
+  {
+    // A spawn whose stderr emits a proxy-credential connection error, and which
+    // never binds → start_timeout with the (scrubbed) tail as `detail`. The
+    // password contains an `@` on purpose: an earlier `[^/@\s]+@` class stopped at
+    // the FIRST `@` and leaked the password tail — this guards that regression.
+    const line = 'Error: proxyconnect tcp: dial http://alice:s3@cr3t@proxy.corp:8080: connection refused';
+    const spawn = (bin, args, opts) => ({
+      killed: false,
+      stderr: { on(ev, cb) { if (ev === 'data') cb(Buffer.from(line + '\n')); } },
+      on(ev, cb) { if (ev === 'exit') this._exit = cb; },
+      kill() { this.killed = true; },
+    });
+    const d = createOllamaDaemon({ isUp: mkIsUp([false]), findBinary: () => '/opt/homebrew/bin/ollama', spawn, pollMs: 1, startTimeoutMs: 8 });
+    const r = await d.ensureUp();
+    const detail = r.detail || '';
+    const scrubbed = r.reason === 'start_timeout'
+      && !detail.includes('s3@cr3t') && !detail.includes('cr3t') && !detail.includes('alice') // NO fragment of the cred survives
+      && detail.includes('<redacted>@proxy.corp:8080')   // creds gone, host kept
+      && detail.includes('connection refused');           // the useful reason survives
+    rec('H7h. start_timeout detail scrubs URL credentials (incl. @ in pw), keeps host+reason', scrubbed, `detail=${JSON.stringify(detail)}`);
+  }
+
+  // H7j — redactDaemonDetail must NOT over-redact a legit `@` in a URL PATH (the
+  // `/` bounds the userinfo class), and must not span whitespace between two URLs.
+  {
+    const path = redactDaemonDetail('GET https://cdn.example.com/sprites/icon@2x.png 404');
+    const twoUrls = redactDaemonDetail('http://a:b@h1.local https://c:d@h2.local both down');
+    const ok = path === 'GET https://cdn.example.com/sprites/icon@2x.png 404'   // path @ untouched
+      && twoUrls === 'http://<redacted>@h1.local https://<redacted>@h2.local both down'; // each redacts, no cross-span
+    rec('H7j. redactDaemonDetail spares @-in-path, redacts each URL independently', ok, `path=${path} two=${twoUrls}`);
+  }
+
+  // H7i — redactDaemonDetail also masks generic secret-looking tokens (defence in depth).
+  {
+    const cases = [
+      ['Bearer abcdef0123456789', 'Bearer '],
+      ['key sk-ABCDEFGHIJKLMNOP', 'sk-'],
+      ['tok ghp_ABCDEFGHIJKLMNOPQRSTUVWX', 'ghp_'],
+      ['deadbeefdeadbeefdeadbeefdeadbeefdeadbeef', 'deadbeef'],
+    ];
+    const allMasked = cases.every(([raw, needle]) => {
+      const out = redactDaemonDetail(raw);
+      return out.includes('[redacted]') && !out.includes(needle);
+    });
+    // A plain error with no secrets must pass through untouched.
+    const passthrough = redactDaemonDetail('listen tcp 127.0.0.1:11434: bind: address already in use');
+    rec('H7i. redactDaemonDetail masks tokens, leaves clean strings intact',
+      allMasked && passthrough === 'listen tcp 127.0.0.1:11434: bind: address already in use', `passthrough=${passthrough}`);
   }
 }
 

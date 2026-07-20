@@ -8,7 +8,7 @@
 
 import express from 'express';
 import { getEmbedderHealth } from './embed/supervisor.js';
-import { isEnrichProcessingPaused, getEnrichDrainerStatus, defaultLabelModel, defaultEnrichModel } from './enrich/drainer.js';
+import { isEmbedPaused, isCategorizePaused, getEnrichDrainerStatus, defaultLabelModel, defaultEnrichModel } from './enrich/drainer.js';
 
 // Plain, accurate label per job kind — what the operation LITERALLY is (content-free, never
 // user text). Deliberately not poetic: the user should be able to tell exactly what's running.
@@ -262,7 +262,7 @@ export async function embedProjection(db, userId) {
     // stamps `lastCycleAt` every 15s (the cycle runs and skips the drain), so `stale` stays
     // false, `stalled` stays false, and this row rendered "Embedding messages · running" with
     // nothing embedding — §3.9 introducing the exact fabricated liveness §3.9 exists to remove.
-    const paused = (() => { try { return isEnrichProcessingPaused(); } catch { return false; } })();
+    const paused = (() => { try { return isEmbedPaused(); } catch { return false; } })();
     return {
       id: 'embed',
       kind: 'embed',
@@ -302,7 +302,7 @@ export async function categorizeProjection(db, userId) {
   try {
     const { tagged, total, pending } = await db.messages.categoriesBacklogCached(userId);
     if (pending <= 0) return null;                       // caught up → not active
-    const paused = (() => { try { return isEnrichProcessingPaused(); } catch { return false; } })();
+    const paused = (() => { try { return isCategorizePaused(); } catch { return false; } })();
     // The drainer's measured L1 throughput (banked per pass) — the rate source for the ETA below.
     const st = (() => { try { return getEnrichDrainerStatus(); } catch { return null; } })();
     // null ⇒ the owner has not approved an on-box labeling model (§3.10c). NOTHING is
@@ -355,7 +355,7 @@ export async function enrichProjection(db, userId) {
   try {
     const { done, total, pending } = await db.messages.nlpBacklogCached(userId);
     if (pending <= 0) return null;                       // caught up (no rows at nlp_processed = 2) → not active
-    const paused = (() => { try { return isEnrichProcessingPaused(); } catch { return false; } })();
+    const paused = (() => { try { return isCategorizePaused(); } catch { return false; } })();
     // The drainer's measured L2 throughput (banked per pass) — the rate source for the ETA.
     const st = (() => { try { return getEnrichDrainerStatus(); } catch { return null; } })();
     // null ⇒ the owner has not approved an on-box enrich model (taskModels.enrich). NOTHING runs —

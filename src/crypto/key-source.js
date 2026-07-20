@@ -55,7 +55,7 @@ function from1Password(ref, exec) {
     out = exec('op', ['read', ref]);
   } catch (err) {
     const reason = err?.code === 'ENOENT'
-      ? '`op` (1Password CLI) not found — install it and run `op signin`'
+      ? '`op` (1Password CLI) not found — install it (https://developer.1password.com/docs/cli/get-started/) and run `op signin`'
       : 'could not read the secret reference (is `op` signed in?)';
     throw new KeySourceError(`1password: ${reason}`, { cause: err });
   }

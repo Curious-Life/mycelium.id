@@ -47,11 +47,26 @@
 	let previewError = $state<string | null>(null);
 	let mediaRecorder: MediaRecorder | null = null;
 	let recChunks: Blob[] = [];
+	let micDevices = $state<{ deviceId: string; label: string }[]>([]);
+	let selectedMicId = $state<string>('');
 
 	const dirty = $derived(beingForm !== being);
 	const overCap = $derived(tokens > tokenCap);
 
-	onMount(() => { loadBeing(); loadVoice(); });
+	onMount(() => {
+		loadBeing(); loadVoice(); refreshMics();
+		navigator.mediaDevices?.addEventListener?.('devicechange', refreshMics);
+	});
+
+	async function refreshMics() {
+		try {
+			const devs = await navigator.mediaDevices?.enumerateDevices?.() ?? [];
+			micDevices = devs
+				.filter((d) => d.kind === 'audioinput' && d.deviceId)
+				.map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Microphone ${i + 1}` }));
+			if (selectedMicId && !micDevices.some((m) => m.deviceId === selectedMicId)) selectedMicId = '';
+		} catch { /* enumeration unsupported — the default mic still works */ }
+	}
 
 	async function loadBeing() {
 		beingLoading = true; beingError = null;
@@ -165,8 +180,14 @@
 
 	async function startRecording() {
 		voiceError = null;
+		if (!navigator.mediaDevices?.getUserMedia) {
+			voiceError = 'This app build can’t access a microphone — upload a clip instead.';
+			return;
+		}
 		try {
-			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+			const audio: MediaTrackConstraints | boolean = selectedMicId ? { deviceId: { exact: selectedMicId } } : true;
+			const stream = await navigator.mediaDevices.getUserMedia({ audio });
+			refreshMics();
 			recChunks = [];
 			mediaRecorder = new MediaRecorder(stream);
 			mediaRecorder.ondataavailable = (e) => { if (e.data.size) recChunks.push(e.data); };
@@ -179,7 +200,17 @@
 			};
 			mediaRecorder.start();
 			recording = true;
-		} catch (e) { voiceError = 'Microphone access denied or unavailable.'; }
+		} catch (e: any) {
+			const name = e?.name || '';
+			if (name === 'NotAllowedError' || name === 'SecurityError')
+				voiceError = 'Microphone permission was denied. Allow microphone access for Mycelium in System Settings → Privacy & Security → Microphone, then try again.';
+			else if (name === 'NotFoundError' || name === 'DevicesNotFoundError' || name === 'OverconstrainedError')
+				voiceError = 'No microphone found — connect one (or pick another device), then try again.';
+			else if (name === 'NotReadableError')
+				voiceError = 'Your microphone is in use by another app. Close it and try again.';
+			else
+				voiceError = `Couldn’t start the microphone${e?.message ? ` — ${e.message}` : '.'}`;
+		}
 	}
 	function stopRecording() { recording = false; mediaRecorder?.stop(); }
 
@@ -282,6 +313,12 @@
 				{:else}
 					<button onclick={startRecording}>● record</button>
 				{/if}
+					{#if micDevices.length > 1}
+						<select class="mic-select" bind:value={selectedMicId} title="Microphone" aria-label="Microphone">
+							<option value="">Default microphone</option>
+							{#each micDevices as m (m.deviceId)}<option value={m.deviceId}>{m.label}</option>{/each}
+						</select>
+					{/if}
 				<label class="upload">upload a clip<input type="file" accept="audio/*" onchange={onFilePick} hidden /></label>
 			</div>
 			{#if capturedWavB64}
@@ -363,6 +400,7 @@
 	button.ghost, button.link { background: transparent; color: var(--accent, #9a86e0); }
 	button.link { border: 0; padding: .2rem .4rem; font-size: .82rem; text-decoration: underline; }
 	button.rec { background: #b33; } .upload { cursor: pointer; padding: .45rem .8rem; border: 1px solid var(--border, #2a2a33); border-radius: 8px; }
+	.mic-select { padding: .45rem .6rem; border-radius: 8px; border: 1px solid var(--border, #2a2a33); background: var(--glass-input-bg, transparent); color: var(--color-text-primary, inherit); font-size: .82rem; max-width: 220px; cursor: pointer; }
 	.meta { display: flex; justify-content: space-between; gap: 1rem; font-size: .8rem; opacity: .75; margin-top: .4rem; flex-wrap: wrap; }
 	.meta .over { color: #e6a23c; } .muted { opacity: .65; font-size: .88rem; } .note { font-size: .78rem; opacity: .6; margin-top: .5rem; }
 	.set { font-weight: 600; } .ready { color: #4caf82; font-size: .85rem; }

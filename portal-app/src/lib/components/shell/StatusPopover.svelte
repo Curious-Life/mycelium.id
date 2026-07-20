@@ -11,13 +11,16 @@
 	//   • stores/activity — the feed (@2.5s, ref-counted, already running for the orb).
 	//     Carries the live progress rows (embed/categorize/enrich/import/model-pull) with
 	//     counts + measured ETAs. Zero new pollers for progress.
-	//   • GET /portal/readiness?slices=data,tags,processing,models,ai,mindscape — polled
-	//     @4s WHILE THE POPOVER IS OPEN ONLY (this component mounts on open, unmounts on
-	//     close). Every polled slice rides an SWR cache, a memo, or an in-memory health
+	//   • GET /portal/readiness?slices=data,tags,processing,models,ai,mindscape,pipeline —
+	//     polled @4s WHILE THE POPOVER IS OPEN ONLY (this component mounts on open, unmounts
+	//     on close). Every polled slice rides an SWR cache, a memo, or an in-memory health
 	//     read — gate C1 in verify-readiness.mjs counts the DB touches of exactly this
 	//     slice set on a repeat poll and fails anything un-allowlisted. If you add a slice
 	//     HERE, add it to C1's POLLED list IN THE SAME CHANGE (that list is the popover's
 	//     cost contract; `evidence` is opt-in/not-pollable and must never join this list).
+	//     ON-3: `pipeline` feeds the vault-health pill — it costs ZERO marginal scans (it
+	//     re-reads the SWR memos `data`/`tags` buy + the mindscape single-flight COUNT), so
+	//     C1's shared-backlog budgets simply tick 2→3; G-COST pins this URL to the same set.
 	//   • GET /portal/readiness?slices=evidence — ONCE per open, never on the tick. Three
 	//     unindexed aggregates over plaintext columns: fine per user gesture (the invite
 	//     fetches it per mount), forbidden on a poll (readiness.js E1).
@@ -45,10 +48,19 @@
 		statusLabel,
 	} from '$lib/stores/activity';
 	import { api, apiPost } from '$lib/api';
+	// ON-3: the vault-health pipeline moved OUT of onboarding INTO this activity bar, as one
+	// adaptive pill (below). It subscribes to the SHARED `pipeline` store and reuses the shipped
+	// <PipelineStatus/> as its expanded detail — no rebuild, no new endpoint, no new poller.
+	import { pipeline, ingestReadiness } from '$lib/pipeline';
+	import PipelineStatus from '$lib/components/mindscape/PipelineStatus.svelte';
 
 	let { pollMs = 4000 }: { pollMs?: number } = $props();
 
-	const POLL_SLICES = 'data,tags,processing,models,ai,mindscape';
+	// `pipeline` joins the polled set: it rides the SWR-cached embed/categories backlogs + the
+	// memoized clustering_points COUNT that `data`/`tags`/`mindscape` already buy, so it adds ZERO
+	// fresh scans per tick (readiness.js pipeline() P-COST). It is on C1's POLLED list + G-COST's
+	// WANT list — a slice added here without joining those fails the cost gate, by design.
+	const POLL_SLICES = 'data,tags,processing,models,ai,mindscape,pipeline';
 
 	// The last-known merged readiness snapshot. Null until the first successful read —
 	// rows render "—" (honest absence), never zeros we did not earn.
@@ -93,7 +105,12 @@
 		try {
 			const res = await api(`/portal/readiness?slices=${POLL_SLICES}`);
 			if (!res.ok) return; // hold the last snapshot — a 500 is not an empty vault
-			r = mergeHold(r, await res.json());
+			const json = await res.json();
+			r = mergeHold(r, json);
+			// Feed the shared pipeline store from THIS same gated poll (the pill below subscribes).
+			// ingestReadiness HOLDS the last good stages on an unknown/missing slice (§3.2a) — never
+			// a fabricated idle/done. No fetch of its own: one poll, both consumers.
+			ingestReadiness(json);
 		} catch {
 			/* hold the last snapshot (§3.2a) */
 		}
@@ -262,7 +279,73 @@
 		}
 		return line;
 	});
+
+	// ── ON-3: the adaptive vault-health pill ──────────────────────────────────────
+	// One calm summary of the pipeline stage machine (import → embed → categorize → cluster →
+	// describe → measure) that gets loud ONLY when it must. Reads the SHARED `pipeline` store
+	// (fed by refresh() above), and expands to the shipped <PipelineStatus/> as-is — the stage
+	// list + inline remedy. NO persistent stage count in the healthy state (ON-3: quiet when fine).
+	//   healthy → ● Vault · all green   (click expands the stage list)
+	//   working → ◐ Mapping… embed 812 / 1204   (the live running stage + its counts)
+	//   error   → ▲ N stage(s) need attention ▾   (click expands PipelineStatus + inline remedy)
+	let pipeExpanded = $state(false);
+	const pipe = $derived($pipeline);
+	const pillState = $derived.by(() => {
+		if (pipe.unknown) return 'quiet';                       // no good read yet — never fabricate
+		const o = pipe.overall;
+		if (o === 'error' || o === 'blocked') return 'error';   // a fault OR a waiting-on-you block
+		if (o === 'running') return 'working';
+		return 'healthy';                                       // done / up-to-date / skipped / idle
+	});
+	// How many stages need a hand — the blocked count; an `error` overall with no single blocked
+	// stage still reads as one thing to look at.
+	const attentionCount = $derived.by(() => {
+		const n = pipe.stages.filter((s) => s.state === 'blocked').length;
+		return n > 0 ? n : (pipe.overall === 'error' ? 1 : 0);
+	});
+	// The working line: the running stage's own key + its counts (e.g. "embed 812 / 1204").
+	// Counts only — never vault text (§1).
+	const workingLine = $derived.by(() => {
+		const s = pipe.stages.find((x) => x.state === 'running');
+		if (!s) return 'Mapping…';
+		const c = s.count;
+		const n = c ? (c.total != null ? `${fmt(c.done)} / ${fmt(c.total)}` : `${fmt(c.done)}`) : '';
+		return `Mapping… ${s.key}${n ? ` ${n}` : ''}`;
+	});
 </script>
+
+<!-- ── ON-3: the adaptive vault-health pill — quiet when fine, loud only on error ──
+     Relocated from onboarding (ON-3 locked design). One button that summarises the pipeline
+     and expands to the shipped <PipelineStatus/> (stage list + inline remedy) on click. -->
+<button
+	type="button"
+	class="vault-pill"
+	data-state={pillState}
+	data-testid="vault-pill"
+	aria-expanded={pipeExpanded}
+	onclick={() => (pipeExpanded = !pipeExpanded)}
+	title="Vault health — click for the full pipeline"
+>
+	{#if pillState === 'error'}
+		<span class="pill-glyph err" aria-hidden="true">▲</span>
+		<span class="pill-text">{attentionCount} {attentionCount === 1 ? 'stage needs' : 'stages need'} attention</span>
+		<span class="pill-caret" aria-hidden="true">{pipeExpanded ? '▴' : '▾'}</span>
+	{:else if pillState === 'working'}
+		<span class="pill-glyph work" aria-hidden="true">◐</span>
+		<span class="pill-text">{workingLine}</span>
+	{:else if pillState === 'healthy'}
+		<span class="pill-glyph ok" aria-hidden="true">●</span>
+		<span class="pill-text">Vault · all green</span>
+	{:else}
+		<span class="pill-glyph quiet" aria-hidden="true">○</span>
+		<span class="pill-text">Vault · checking…</span>
+	{/if}
+</button>
+{#if pipeExpanded}
+	<div class="pill-detail" data-testid="vault-pill-detail">
+		<PipelineStatus />
+	</div>
+{/if}
 
 <!-- ── Status — the §3.8 rows. Reports state whether or not onboarding was dismissed. ── -->
 <div class="status-section" data-testid="status-rows">
@@ -416,6 +499,37 @@
 {/if}
 
 <style>
+	/* ── ON-3 pill: theme-aware (all colours are shared CSS vars, so light + dark both work);
+	   the three states are visually distinct but calm — a coloured glyph, not a coloured bar. ── */
+	.vault-pill {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		width: 100%;
+		padding: 0.34rem 0.6rem;
+		margin-bottom: 0.3rem;
+		border: 1px solid var(--color-border);
+		border-radius: 0.5rem;
+		background: var(--color-elevated, var(--color-surface));
+		font-size: 11px;
+		color: var(--color-text-primary);
+		cursor: pointer;
+		text-align: left;
+		transition: border-color 0.15s ease, background 0.15s ease;
+	}
+	.vault-pill:hover { border-color: var(--color-text-tertiary); }
+	.vault-pill[data-state='error'] { border-color: var(--color-accent-coral, #f87171); }
+	.pill-glyph { flex-shrink: 0; display: inline-block; font-size: 10px; line-height: 1; }
+	.pill-glyph.ok { color: var(--color-accent-jade, #4ade80); }
+	.pill-glyph.work { color: var(--color-accent-aurum, #e5b84c); animation: pill-spin 1.4s linear infinite; }
+	.pill-glyph.err { color: var(--color-accent-coral, #f87171); }
+	.pill-glyph.quiet { color: var(--color-text-tertiary); }
+	.pill-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.vault-pill[data-state='error'] .pill-text { color: var(--color-accent-coral, #f87171); }
+	.pill-caret { margin-left: auto; flex-shrink: 0; color: var(--color-text-tertiary); font-size: 9px; }
+	.pill-detail { margin-bottom: 0.35rem; }
+	@keyframes pill-spin { to { transform: rotate(360deg); } }
+
 	.status-section {
 		border-bottom: 1px solid var(--color-border);
 		padding-bottom: 0.375rem;

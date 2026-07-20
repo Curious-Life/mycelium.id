@@ -50,6 +50,9 @@ export interface Stage {
   etaSeconds?: number;
   reason?: string;
   action?: StageAction;
+  /** Per-stage pause state (QA R2) — set by readiness.js for embed/categorize so the co-located
+   *  Stop/Resume control knows its two-state label. Undefined for stages with no pause control. */
+  paused?: boolean;
 }
 
 /**

@@ -100,19 +100,21 @@
 
   <!-- No wordmark and no caption: Finder paints "Mycelium" under the app icon and
        "Applications" under the folder, so the art stays a clean starfield and the
-       name isn't repeated. The drag gesture is carried by the arrow between them. -->
+       name isn't repeated. The drag gesture is carried by the smile arc below them. -->
 
-  <!-- ============ drag arrow BETWEEN the icons: Mycelium -> Applications ==========
-       A clean, near-horizontal connector centred in the gap on the icon centre line
-       (y180). Endpoints x220..x342 sit ~15px clear of each 160pt icon, so the arrow
-       is well spaced between the two icons and reads unmistakably as "drag into". -->
+  <!-- ============ curved drag arrow along the BOTTOM: Mycelium -> Applications ======
+       A graceful "smile" arc that sweeps out from beneath the Mycelium icon, dips low
+       across the open lower sky, and rises with an arrowhead up toward the Applications
+       folder — reading unmistakably as "drag this into that". It sits well BELOW both
+       160pt icon slots (centres y180, so their lower edge is ~y260), so the arc + head
+       never run behind an icon; the taller 560x400 window gives it room to breathe. -->
   <!-- soft glow underlay -->
-  <path d="M220,182 C262,171 300,171 342,180" fill="none" stroke="#E6B92E"
+  <path d="M160,312 C232,368 328,368 400,312" fill="none" stroke="#E6B92E"
         stroke-width="8" stroke-linecap="round" opacity="0.16" filter="url(#soft)"/>
   <!-- shaft, fading in from the Mycelium side toward a bright head at Applications -->
-  <path d="M220,182 C262,171 300,171 342,180" fill="none" stroke="url(#arrowFade)"
+  <path d="M160,312 C232,368 328,368 400,312" fill="none" stroke="url(#arrowFade)"
         stroke-width="3.8" stroke-linecap="round"/>
-  <!-- arrowhead, pointing right into the Applications folder -->
-  <path d="M342,180 L330,172 M342,180 L330,189" fill="none" stroke="#FCE38A"
+  <!-- arrowhead, pointing up-right into the Applications folder -->
+  <path d="M400,312 L385,308 M400,312 L394,326" fill="none" stroke="#FCE38A"
         stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

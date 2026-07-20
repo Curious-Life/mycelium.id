@@ -30,7 +30,7 @@ import { existsSync, statSync } from 'node:fs';
 import { promises as fspDefault } from 'node:fs';
 import nodePath from 'node:path';
 import { encrypt, decrypt, getMasterKey, inferScope } from '../crypto/crypto-local.js';
-import { dataDir } from '../paths.js';
+import { voiceSamplesRoot } from '../paths.js';
 
 const MAGIC = Buffer.from('MVS1', 'latin1'); // Mycelium Voice Sample, format v1
 const SAVE_FILE_MODE = 0o600;
@@ -52,7 +52,7 @@ function safeAgentId(agentId) {
 export function createVoiceSampleStore(opts = {}) {
   const fs = opts.fs || fspDefault;
   const path = opts.path || nodePath;
-  const baseDir = opts.baseDir || path.join(dataDir(opts), 'voice-samples');
+  const baseDir = opts.baseDir || voiceSamplesRoot(opts);
   // Scope PER AGENT so one agent's sample can never be decrypted under another's
   // scope — same routing mind files use (mind/<file> → personal|moms|…).
   const scopeFor = (agentId) => inferScope({ path: 'mind/voice-sample', agent_id: agentId });
@@ -166,7 +166,7 @@ export function hasSampleSync(agentId, opts = {}) {
   const id = safeAgentId(agentId);
   if (!id) return false;
   const path = opts.path || nodePath;
-  const baseDir = opts.baseDir || path.join(dataDir(opts), 'voice-samples');
+  const baseDir = opts.baseDir || voiceSamplesRoot(opts);
   const file = path.join(baseDir, `${id}.mvs`);
   try { return existsSync(file) && statSync(file).size > MAGIC.length; } catch { return false; }
 }

@@ -17,6 +17,7 @@
 	} from '$lib/document-live';
 	import { applyMorph, resetMorph } from '$lib/markdown-morph';
 	import { wrapHtmlForLive, mountLiveIframe, type LiveIframeHandle } from '$lib/iframe-live';
+	import { isSvgDoc, svgToDataUrl, fileKind } from '$lib/library/preview';
 	// MarkdownEditor (CodeMirror) is lazy-loaded — see ensureEditor() — so just
 	// navigating to the Library doesn't pull in the ~170 KB editor bundle. It
 	// loads the first time you edit a doc (no static import on purpose).
@@ -672,6 +673,17 @@
 	// Selected doc is HTML and we're not currently editing it.
 	const isHtmlPreview = $derived(
 		!!selectedDoc && !editing && isHtmlDoc(selectedDoc.path, selectedDoc.content),
+	);
+
+	// SVG document preview (R4-SVGRENDER) — an .svg doc (or an <svg> body) is
+	// sanitized and served as a data URL for an <img>. <img>-loaded SVG cannot run
+	// scripts, and sanitizeSvg strips external refs, so this is safe in the portal
+	// origin (never {@html}). null when not an SVG doc or it can't be sanitized.
+	const isSvgPreview = $derived(
+		!!selectedDoc && !editing && !isHtmlDoc(selectedDoc.path, selectedDoc.content) && isSvgDoc(selectedDoc.path, selectedDoc.content),
+	);
+	const svgPreviewUrl = $derived.by(() =>
+		isSvgPreview ? svgToDataUrl(selectedDoc?.content || '') : null,
 	);
 
 	// Briefly flashes when the live-watch poll picks up a server-side
@@ -1408,10 +1420,185 @@
 			alert(e instanceof Error ? e.message : 'Export failed');
 		}
 	}
+
+	// ── Multi-select (R2-MULTISELECT) ────────────────────────────────────────
+	// Standard folder-manager selection over DOCUMENT rows: plain click opens one
+	// (clearing any selection), cmd/ctrl-click toggles, shift-click extends a range
+	// from the anchor. A bulk-action bar (delete · move · export · pin) appears at
+	// ≥2 selected. Esc clears; Cmd/Ctrl+A selects all docs in the current view.
+	let selectedPaths = $state<Set<string>>(new Set());
+	let anchorPath = $state<string | null>(null);
+	// Root element — used to scope window key handlers to this view (views can stay
+	// mounted in keep-alive panes, so a bare window Cmd+A would hijack other tabs).
+	let libraryEl = $state<HTMLElement | null>(null);
+	let bulkBusy = $state(false);
+	let bulkDeleteArmed = $state(false);
+	let bulkMoveOpen = $state(false);
+	const selectedCount = $derived(selectedPaths.size);
+	// Document paths in the current display order — the domain for range-select.
+	const docPathsInOrder = $derived(libraryItems.filter((i) => i.kind === 'doc').map((i) => i.doc.path));
+
+	function clearSelection() {
+		if (selectedPaths.size) selectedPaths = new Set();
+		anchorPath = null;
+		bulkDeleteArmed = false;
+		bulkMoveOpen = false;
+	}
+	function togglePath(path: string) {
+		const next = new Set(selectedPaths);
+		if (next.has(path)) next.delete(path); else next.add(path);
+		selectedPaths = next;
+		bulkDeleteArmed = false;
+	}
+	function selectRangeTo(path: string) {
+		const order = docPathsInOrder;
+		const to = order.indexOf(path);
+		if (to < 0) return;
+		const from = anchorPath ? order.indexOf(anchorPath) : -1;
+		const next = new Set(selectedPaths);
+		if (from < 0) { next.add(path); }
+		else {
+			const [lo, hi] = from <= to ? [from, to] : [to, from];
+			for (let i = lo; i <= hi; i++) next.add(order[i]);
+		}
+		selectedPaths = next;
+		bulkDeleteArmed = false;
+	}
+	function selectAllInView() {
+		selectedPaths = new Set(docPathsInOrder);
+		if (docPathsInOrder.length) anchorPath = docPathsInOrder[0];
+	}
+
+	// The row click for a DOCUMENT — branches on modifier keys. Plain = open one.
+	function onDocRowClick(doc: DocListItem, e: MouseEvent) {
+		if (e.metaKey || e.ctrlKey) {
+			e.preventDefault();
+			togglePath(doc.path);
+			anchorPath = doc.path;
+			return;
+		}
+		if (e.shiftKey) {
+			e.preventDefault();
+			if (!anchorPath) anchorPath = doc.path;
+			selectRangeTo(doc.path);
+			return;
+		}
+		clearSelection();
+		selectDoc(doc);
+	}
+
+	function onLibraryKeydown(e: KeyboardEvent) {
+		// Only act when focus is inside this library view (keep-alive panes stay
+		// mounted; a bare window handler would otherwise fire on other tabs).
+		const active = typeof document !== 'undefined' ? document.activeElement : null;
+		const inLibrary = !!libraryEl && (libraryEl.contains(e.target as Node) || libraryEl.contains(active));
+		if (!inLibrary) return;
+		const t = e.target as HTMLElement | null;
+		const typing = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+		if (e.key === 'Escape' && selectedPaths.size) { clearSelection(); return; }
+		// Select-all only makes sense on the list/grid (not while a doc/editor is open),
+		// and must not steal the browser's text select-all from an input.
+		if ((e.metaKey || e.ctrlKey) && (e.key === 'a' || e.key === 'A') && !typing && !selectedDoc && docPathsInOrder.length) {
+			e.preventDefault();
+			selectAllInView();
+		}
+	}
+
+	function selectedDocList(): DocListItem[] {
+		return documents.filter((d) => selectedPaths.has(d.path));
+	}
+
+	async function bulkDelete() {
+		const docs = selectedDocList();
+		if (!docs.length || bulkBusy) return;
+		bulkBusy = true;
+		for (const d of docs) {
+			try {
+				const encodedPath = d.path.split('/').map(encodeURIComponent).join('/');
+				const res = await api(`/portal/documents/${encodedPath}`, { method: 'DELETE' });
+				if (res.ok) documents = documents.filter((x) => x.path !== d.path);
+			} catch (e) { console.error('[Library] bulk delete failed:', e); }
+		}
+		if (selectedDoc && selectedPaths.has(selectedDoc.path)) { selectedDoc = null; editing = false; }
+		clearSelection();
+		bulkBusy = false;
+	}
+
+	async function bulkMoveToFolder(folderId: string | null) {
+		const docs = selectedDocList();
+		if (!docs.length || bulkBusy) return;
+		bulkBusy = true;
+		bulkMoveOpen = false;
+		for (const d of docs) {
+			try {
+				await api('/portal/documents/move', {
+					method: 'POST', headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ path: d.path, folder_id: folderId }),
+				});
+			} catch (e) { console.error('[Library] bulk move failed:', e); }
+		}
+		clearSelection();
+		await loadDocuments();
+		bulkBusy = false;
+	}
+
+	async function bulkPin() {
+		const docs = selectedDocList();
+		if (!docs.length || bulkBusy) return;
+		// If every selected doc is already pinned, unpin; else pin all.
+		const pin = !docs.every((d) => !!d.pinned);
+		bulkBusy = true;
+		for (const d of docs) {
+			try {
+				const res = await api('/portal/documents/pin', {
+					method: 'POST', headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ path: d.path, pinned: pin }),
+				});
+				if (res.ok) documents = documents.map((x) => (x.path === d.path ? { ...x, pinned: pin } : x));
+			} catch (e) { console.error('[Library] bulk pin failed:', e); }
+		}
+		bulkBusy = false;
+	}
+
+	// Bulk export → one .md per selected doc, packaged as a zip (content fetched
+	// per-doc). Keeps every export self-contained and never blocks on the server.
+	async function bulkExport() {
+		const docs = selectedDocList();
+		if (!docs.length || bulkBusy) return;
+		bulkBusy = true;
+		try {
+			const { default: JSZip } = await import('jszip');
+			const zip = new JSZip();
+			const used = new Set<string>();
+			for (const d of docs) {
+				let content = '';
+				try {
+					const res = await api(`/portal/documents/${d.path.split('/').map(encodeURIComponent).join('/')}`);
+					if (res.ok) content = (await res.json())?.document?.content || '';
+				} catch { /* keep an empty file rather than lose the entry */ }
+				let name = `${(d.title || d.path.split('/').pop() || 'document').replace(/[^a-zA-Z0-9_-]/g, '_')}.md`;
+				let n = 1;
+				while (used.has(name)) name = name.replace(/\.md$/, `_${++n}.md`);
+				used.add(name);
+				zip.file(name, content);
+			}
+			const blob = await zip.generateAsync({ type: 'blob' });
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = `library-export-${docs.length}-docs.zip`;
+			a.click();
+			URL.revokeObjectURL(url);
+		} catch (e) {
+			console.error('[Library] bulk export error:', e);
+			alert(e instanceof Error ? e.message : 'Export failed');
+		}
+		bulkBusy = false;
+	}
 </script>
 
 <svelte:window
-	onkeydown={(e) => { if (e.key === 'Escape') { closeContextMenu(); downloadMenuOpen = false; } }}
+	onkeydown={(e) => { if (e.key === 'Escape') { closeContextMenu(); downloadMenuOpen = false; } onLibraryKeydown(e); }}
 	onclick={() => { if (downloadMenuOpen) downloadMenuOpen = false; }}
 />
 
@@ -1419,7 +1606,7 @@
 	<title>Library - Mycelium</title>
 </svelte:head>
 
-<div class="library-page">
+<div class="library-page" bind:this={libraryEl}>
 	<!-- Header — contextual: list mode shows folder label + filters,
 		 doc mode shows title + actions. Sticky so cursor anywhere on
 		 the page can scroll the body underneath. (PR 5.2) -->
@@ -1946,6 +2133,22 @@
 									</button>
 								</div>
 							</div>
+						{:else if isSvgDoc(selectedDoc.path, selectedDoc.content)}
+							<!-- SVG document (R4-SVGRENDER). ⚠️ UNTRUSTED: rendered via
+								 <img> from a SANITIZED data URL — <img>-loaded SVG cannot
+								 execute scripts, and sanitizeSvg strips external refs. Never
+								 {@html}. Falls back to the raw source + download if it can't
+								 be sanitized. -->
+							{#if svgPreviewUrl}
+								<div class="flex flex-col items-center gap-3">
+									<img src={svgPreviewUrl} alt={selectedDoc.title || selectedDoc.path} class="max-w-full max-h-[70vh] object-contain rounded-lg bg-white p-2" />
+								</div>
+							{:else}
+								<div class="space-y-3">
+									<p class="text-[var(--color-text-tertiary)] text-sm">This SVG couldn’t be rendered safely, so its source is shown instead.</p>
+									<pre class="doc-content overflow-x-auto text-xs whitespace-pre-wrap">{selectedDoc.content}</pre>
+								</div>
+							{/if}
 						{:else}
 							<!-- Read-only markdown viewer — DOM-morphed so
 								 agent-driven updates land in place: scroll
@@ -2006,8 +2209,8 @@
 						{@const doc = item.doc}
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<div
-						onclick={() => selectDoc(doc)}
-						onkeydown={(e) => { if (e.key === 'Enter') selectDoc(doc); }}
+						onclick={(e) => onDocRowClick(doc, e)}
+						onkeydown={(e) => { if (e.key === 'Enter') { clearSelection(); selectDoc(doc); } }}
 						oncontextmenu={(e) => openContextMenu(e, doc)}
 						ontouchstart={(e) => handleTouchStart(e, doc)}
 						ontouchmove={handleTouchMove}
@@ -2017,7 +2220,8 @@
 						ondragend={handleDragEnd}
 						role="button"
 						tabindex="0"
-						class="flex items-start gap-2 sm:gap-3 rounded-lg sm:rounded-xl p-2.5 sm:p-3 transition-all duration-150 cursor-pointer border bg-[var(--color-surface)] w-full text-left border-[var(--color-border)] hover:border-aurum/50 group {draggingDoc === doc.path ? 'opacity-40' : ''}"
+						aria-pressed={selectedPaths.has(doc.path)}
+						class="flex items-start gap-2 sm:gap-3 rounded-lg sm:rounded-xl p-2.5 sm:p-3 transition-all duration-150 cursor-pointer border w-full text-left group {draggingDoc === doc.path ? 'opacity-40' : ''} {selectedPaths.has(doc.path) ? 'border-aurum bg-aurum/10 ring-1 ring-aurum/40' : 'bg-[var(--color-surface)] border-[var(--color-border)] hover:border-aurum/50'}"
 					>
 						<span class="text-[var(--color-text-tertiary)] flex-shrink-0 w-8 sm:w-10 flex items-center justify-center pt-0.5">
 							<svg class="w-5 h-5 sm:w-6 sm:h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
@@ -2119,8 +2323,8 @@
 					{@const docAuthor = getAuthorLabel(doc.created_by, doc.metadata)}
 					{@const docWhen = formatDate(doc.updated_at, true)}
 					<div
-						onclick={() => selectDoc(doc)}
-						onkeydown={(e) => { if (e.key === 'Enter') selectDoc(doc); }}
+						onclick={(e) => onDocRowClick(doc, e)}
+						onkeydown={(e) => { if (e.key === 'Enter') { clearSelection(); selectDoc(doc); } }}
 						oncontextmenu={(e) => openContextMenu(e, doc)}
 						ontouchstart={(e) => handleTouchStart(e, doc)}
 						ontouchmove={handleTouchMove}
@@ -2130,7 +2334,8 @@
 						ondragend={handleDragEnd}
 						role="button"
 						tabindex="0"
-						class="flex flex-col rounded-xl transition-all duration-150 cursor-pointer border bg-[var(--color-surface)] text-left relative group border-[var(--color-border)] hover:border-aurum/50 overflow-hidden {draggingDoc === doc.path ? 'opacity-40' : ''}"
+						aria-pressed={selectedPaths.has(doc.path)}
+						class="flex flex-col rounded-xl transition-all duration-150 cursor-pointer border text-left relative group overflow-hidden {draggingDoc === doc.path ? 'opacity-40' : ''} {selectedPaths.has(doc.path) ? 'border-aurum bg-aurum/10 ring-1 ring-aurum/40' : 'bg-[var(--color-surface)] border-[var(--color-border)] hover:border-aurum/50'}"
 					>
 						<!-- Title + format header. Author + when subtitle below
 						     so the card surfaces who authored it and how
@@ -2209,9 +2414,32 @@
 			</div>
 			<div class="p-4 space-y-3">
 				{#if selectedMedia.type === 'image'}
+					<!-- SVG rides the image path too — <img>-loaded SVG cannot execute
+						 scripts, so an attachment SVG is safe here without inlining. -->
 					<img src={selectedMedia.url} alt={selectedMedia.filename || 'image'} class="max-h-[55vh] w-auto mx-auto rounded-lg object-contain" />
 				{:else if selectedMedia.type === 'voice'}
 					<audio controls preload="metadata" src={selectedMedia.playbackUrl || selectedMedia.url} class="w-full"></audio>
+				{:else if selectedMedia.type === 'video'}
+					<!-- svelte-ignore a11y_media_has_caption -->
+					<video controls preload="metadata" src={selectedMedia.playbackUrl || selectedMedia.url} class="max-h-[60vh] w-full rounded-lg bg-black"></video>
+				{:else if fileKind(selectedMedia.filename) === 'pdf'}
+					<!-- ⚠️ UNTRUSTED PDF (R4-FILEPREVIEW) — rendered in a SANDBOXED iframe.
+						 No allow-same-origin → the PDF loads in an opaque origin and cannot
+						 reach the portal API, cookies, or the parent DOM. Same isolation as
+						 the HTML-doc preview. NEVER inline untrusted file bytes. -->
+					<iframe
+						title={selectedMedia.filename || 'PDF preview'}
+						src={selectedMedia.url}
+						sandbox="allow-scripts allow-popups"
+						class="w-full h-[70vh] rounded-lg border-0 bg-white"
+					></iframe>
+				{:else}
+					<!-- Fallback for any other file type: a large open/download affordance
+						 (the actual Download control lives in the footer below). -->
+					<div class="flex flex-col items-center justify-center gap-2 py-8 text-[var(--color-text-tertiary)]">
+						<svg class="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+						<span class="text-xs">No inline preview for this file type — use Download below.</span>
+					</div>
 				{/if}
 				{#if selectedMedia.transcript}
 					<p class="text-sm text-[var(--color-text-secondary)] italic leading-relaxed">{selectedMedia.transcript}</p>
@@ -2231,6 +2459,44 @@
 				</div>
 			</div>
 		</div>
+	</div>
+{/if}
+
+<!-- Bulk-action bar (R2-MULTISELECT) — floats when ≥2 documents are selected. -->
+{#if selectedCount >= 2}
+	<div class="bulk-bar" role="toolbar" aria-label="Bulk actions for selected documents">
+		<span class="bulk-count">{selectedCount} selected</span>
+		<div class="bulk-sep"></div>
+		<div class="bulk-move-wrap">
+			<button type="button" class="bulk-btn" disabled={bulkBusy} onclick={() => (bulkMoveOpen = !bulkMoveOpen)}>
+				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+				Move
+			</button>
+			{#if bulkMoveOpen}
+				<div class="bulk-move-menu">
+					<button type="button" class="bulk-move-item" onclick={() => bulkMoveToFolder(null)}>Library root</button>
+					{#each folders as folder}
+						<button type="button" class="bulk-move-item" onclick={() => bulkMoveToFolder(folder.id)}>{folder.name}</button>
+					{/each}
+				</div>
+			{/if}
+		</div>
+		<button type="button" class="bulk-btn" disabled={bulkBusy} onclick={bulkPin}>
+			<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M11.48 3.5a.56.56 0 0 1 1.04 0l2.12 5.11a.56.56 0 0 0 .48.35l5.52.44c.5.04.7.66.32.99l-4.2 3.6a.56.56 0 0 0-.18.56l1.28 5.38a.56.56 0 0 1-.84.61l-4.72-2.88a.56.56 0 0 0-.59 0l-4.72 2.88a.56.56 0 0 1-.84-.61l1.28-5.38a.56.56 0 0 0-.18-.56l-4.2-3.6a.56.56 0 0 1 .32-.99l5.52-.44a.56.56 0 0 0 .48-.35z"/></svg>
+			Pin
+		</button>
+		<button type="button" class="bulk-btn" disabled={bulkBusy} onclick={bulkExport}>
+			<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+			Export
+		</button>
+		<button type="button" class="bulk-btn bulk-danger" disabled={bulkBusy} onclick={() => { if (bulkDeleteArmed) bulkDelete(); else bulkDeleteArmed = true; }}>
+			<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+			{bulkDeleteArmed ? `Confirm delete ${selectedCount}?` : 'Delete'}
+		</button>
+		<div class="bulk-sep"></div>
+		<button type="button" class="bulk-btn" disabled={bulkBusy} onclick={clearSelection} aria-label="Clear selection">
+			<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+		</button>
 	</div>
 {/if}
 
@@ -2346,6 +2612,49 @@
 {/if}
 
 <style>
+	/* Bulk-action bar (R2-MULTISELECT) — floating toolbar for ≥2 selected docs. */
+	.bulk-bar {
+		position: fixed;
+		bottom: 1.25rem;
+		left: 50%;
+		transform: translateX(-50%);
+		z-index: 60;
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		padding: 0.4rem 0.55rem;
+		border-radius: 12px;
+		border: 1px solid var(--color-border);
+		background: var(--color-elevated);
+		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+		max-width: calc(100vw - 2rem);
+		flex-wrap: wrap;
+	}
+	.bulk-count { font-size: 0.78rem; font-weight: 600; color: var(--color-text-primary); padding: 0 0.4rem; white-space: nowrap; }
+	.bulk-sep { width: 1px; align-self: stretch; background: var(--color-border); margin: 0.1rem 0.15rem; }
+	.bulk-btn {
+		display: inline-flex; align-items: center; gap: 0.3rem;
+		font-size: 0.78rem; color: var(--color-text-secondary);
+		padding: 0.32rem 0.55rem; border-radius: 8px; background: transparent; border: none; cursor: pointer;
+		transition: background 0.12s ease, color 0.12s ease;
+	}
+	.bulk-btn:hover:not(:disabled) { background: var(--color-surface); color: var(--color-text-primary); }
+	.bulk-btn:disabled { opacity: 0.5; cursor: default; }
+	.bulk-danger { color: #f87171; }
+	.bulk-danger:hover:not(:disabled) { background: rgba(248, 113, 113, 0.12); color: #f87171; }
+	.bulk-move-wrap { position: relative; }
+	.bulk-move-menu {
+		position: absolute; bottom: calc(100% + 0.35rem); left: 0;
+		min-width: 12rem; max-height: 16rem; overflow-y: auto;
+		background: var(--color-elevated); border: 1px solid var(--color-border);
+		border-radius: 10px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4); padding: 0.25rem;
+	}
+	.bulk-move-item {
+		display: block; width: 100%; text-align: left; font-size: 0.78rem;
+		color: var(--color-text-secondary); padding: 0.4rem 0.55rem; border-radius: 6px; background: none; border: none; cursor: pointer;
+	}
+	.bulk-move-item:hover { background: var(--color-surface); color: var(--color-text-primary); }
+
 	/* Off-screen rows/cards skip layout+paint until scrolled near. The library
 	   renders every doc+media item into the DOM (no virtualization), so on large
 	   vaults scrolling was janky — content-visibility gives near-virtualization for

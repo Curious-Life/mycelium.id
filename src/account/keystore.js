@@ -27,6 +27,8 @@
 import crypto from 'node:crypto';
 import { execFileSync, execFile } from 'node:child_process';
 import { keychainNames, isDefaultNamespace } from './keychain-names.js';
+import { findExecutable } from '../system/platform-env.js';
+import { identityEnv } from '../spawn-env.js';
 
 const HEX64 = /^[0-9a-f]{64}$/i;
 // HKDF domain-separation label for SYSTEM_KEY. This is a PERMANENT part of the
@@ -211,10 +213,67 @@ export function keychainHasKeys({ env = process.env, exec = defaultExec } = {}) 
 // ── one-click "save my recovery key" targets (ceremony convenience) ──────────
 const RECOVERY_LABEL = 'Mycelium Recovery Key';
 
+// ── 1Password CLI (`op`) discovery + spawn env ───────────────────────────────
+// A Finder/Dock-launched macOS app runs under a launchd GUI session whose PATH is
+// the bare `/usr/bin:/bin:/usr/sbin:/sbin` — it does NOT carry Homebrew's bin dirs
+// where `op` installs. So a plain `execFileSync('op', …)` throws ENOENT even when
+// the user's shell has `op` on PATH and signed in (the operator's ON-2 report).
+// FIX: resolve `op` to an ABSOLUTE path (Homebrew candidates + PATH scan), and
+// spawn it with an env that (a) fills HOME/USER via identityEnv() so `op` can find
+// its `~/.config/op` config + the desktop-app socket, and (b) augments PATH with
+// the Homebrew dirs so any `op`-spawned helper resolves too.
+const OP_BIN_CANDIDATES = ['/opt/homebrew/bin/op', '/usr/local/bin/op', 'op'];
+const OP_EXTRA_PATH = ['/opt/homebrew/bin', '/usr/local/bin'];
+
+/** PATH with the Homebrew bin dirs appended (a Finder launch omits them). */
+function augmentedPath(env = process.env) {
+  const dirs = String(env.PATH || '').split(':').filter(Boolean);
+  for (const d of OP_EXTRA_PATH) if (!dirs.includes(d)) dirs.push(d);
+  return dirs.join(':');
+}
+
+/** Absolute path to the `op` CLI, or null if not installed. Probes the Homebrew
+ *  absolute paths first, then the bare name against an AUGMENTED PATH so a
+ *  Finder/Dock launch (bare PATH) still resolves an `op` installed on PATH. */
+export function resolveOpBin({ env = process.env } = {}) {
+  return findExecutable(OP_BIN_CANDIDATES, { env: { ...env, PATH: augmentedPath(env) } });
+}
+
+/** Env for spawning `op`: identity (HOME/USER) filled + Homebrew dirs on PATH. */
+function opEnv(env = process.env) {
+  return { ...env, ...identityEnv(env), PATH: augmentedPath(env) };
+}
+
+/** An Error tagged with a stable `.code` so callers can map a specific message. */
+function opError(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
+}
+
 /** Is the 1Password CLI (`op`) installed? (Sign-in is checked when saving.) */
-export function onePasswordAvailable() {
-  try { execFileSync('op', ['--version'], { stdio: 'ignore' }); return true; }
-  catch { return false; }
+export function onePasswordAvailable({ env = process.env } = {}) {
+  return resolveOpBin({ env }) !== null;
+}
+
+/**
+ * Preflight the `op` sign-in state so a save failure is SPECIFIC, not generic.
+ * Returns one of: 'ok' (signed in) · 'not_installed' · 'signed_out'. Never throws
+ * and never logs — `op whoami`'s output carries the account email (PII), so we
+ * branch on the exit status only, never surface the body.
+ */
+export function onePasswordSignInState({ env = process.env } = {}) {
+  const bin = resolveOpBin({ env });
+  if (!bin) return 'not_installed';
+  try {
+    // `op whoami` exits 0 only when a session is available (manual `op signin` or
+    // the desktop-app CLI integration). stdio ignored: we need the status, not the
+    // account identity. A short timeout guards a hung desktop-app handshake.
+    execFileSync(bin, ['whoami'], { env: opEnv(env), stdio: 'ignore', timeout: 8000 });
+    return 'ok';
+  } catch {
+    return 'signed_out';
+  }
 }
 
 /** Save the recovery key as a discoverable, labelled item in the login Keychain
@@ -233,18 +292,26 @@ export function saveRecoveryKeyToKeychain(value, { env = process.env } = {}) {
     '-w'], { input: `${key}\n${key}\n`, stdio: ['pipe', 'ignore', 'ignore'] });
 }
 
-/** Save the recovery key to 1Password via the `op` CLI (requires `op` signed in;
- *  throws otherwise — the caller surfaces a friendly message). */
-export function saveRecoveryKeyTo1Password(value) {
+/** Save the recovery key to 1Password via the `op` CLI. Throws a `.code`-tagged
+ *  Error (`op_not_installed` · `op_signed_out` · else generic) so the caller
+ *  (src/account/router.js) surfaces a SPECIFIC, actionable message. */
+export function saveRecoveryKeyTo1Password(value, { env = process.env } = {}) {
   const key = normalizeKey(value);
+  // Resolve `op` to an absolute path + preflight sign-in BEFORE attempting the
+  // write, so a Finder-launched app (bare PATH, no `op` visible) or a not-signed-in
+  // CLI produces a precise error instead of a generic "could not save" (ON-2).
+  const bin = resolveOpBin({ env });
+  if (!bin) throw opError('op_not_installed', 'op CLI not found');
+  if (onePasswordSignInState({ env }) === 'signed_out') {
+    throw opError('op_signed_out', 'op CLI not signed in');
+  }
   // Same discipline as the Keychain path: pass the key in a JSON item-template on
   // STDIN, never as a `password=<key>` argv element (argv is world-readable via
   // `ps`). Only the CONCEALED field value carries the key, and it travels on
   // stdin; title/category live in the non-secret template. NOTE: `op` is absent
   // from CI and this dev box — the stdin-template form is verified by source
   // guard (scripts/verify-keystore-stdin.mjs) but NOT yet exercised live; verify
-  // on a host with `op` signed in before relying on the 1Password path. On any
-  // op error the caller (src/account/router.js) surfaces a friendly message.
+  // on a host with `op` signed in before relying on the 1Password path.
   const template = JSON.stringify({
     title: RECOVERY_LABEL,
     category: 'PASSWORD',
@@ -254,8 +321,8 @@ export function saveRecoveryKeyTo1Password(value) {
         value: 'Mycelium vault recovery key — the only way to recover your vault on a new computer.' },
     ],
   });
-  execFileSync('op', ['item', 'create', '--template', '-'],
-    { input: template, stdio: ['pipe', 'ignore', 'pipe'] });
+  execFileSync(bin, ['item', 'create', '--template', '-'],
+    { input: template, env: opEnv(env), stdio: ['pipe', 'ignore', 'pipe'] });
 }
 
 /** Best-effort: open the store app so the user SEES the saved item natively

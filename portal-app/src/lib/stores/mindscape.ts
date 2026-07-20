@@ -366,6 +366,10 @@ function createMindscapeStore() {
 	const initialState = { ...defaultState, ...loadPreferences() };
 	const { subscribe, set, update } = writable<FullMindscapeState>(initialState);
 
+	// Single-flight latch for refreshPoints (the silent geometry-only refresh). It never flips
+	// `loading`, so overlapping calls would otherwise stack cache-busting full-scans.
+	let refreshingPoints = false;
+
 	return {
 		subscribe,
 		set,
@@ -442,8 +446,16 @@ function createMindscapeStore() {
 
 		reset: () => set(defaultState),
 
-		async load() {
+		// `fresh` forces the server to bust its durable points cache before recomputing
+		// (GET /portal/mindscape/points?refresh=1 → bustMindscapePoints). This is the P1-A
+		// fix: the durable points cache can hold an EMPTY bundle (a read that raced clustering,
+		// or a pre-generation read on a then-empty vault) with a 5-min TTL, so a plain retry
+		// hits the same stale empty result — "Try again" looked dead until an unrelated bust.
+		// A fresh retry can never be defeated by a stale cache. Busting `points` also busts the
+		// full aggregate, so phase 2 below recomputes fresh too — no separate flag needed.
+		async load(opts?: { fresh?: boolean }) {
 			if (!browser) return;
+			const q = opts?.fresh ? '?refresh=1' : '';
 			update(s => ({ ...s, loading: true, error: null }));
 			try {
 				// Phase 1 — VISUALS FIRST. The points-only endpoint is served from the
@@ -452,7 +464,7 @@ function createMindscapeStore() {
 				// instantly. Clear `loading` here so the scene shows while text loads.
 				let phase1ok = false;
 				try {
-					const pres = await api('/portal/mindscape/points');
+					const pres = await api(`/portal/mindscape/points${q}`);
 					if (pres.ok) {
 						const pdata = await pres.json();
 						phase1ok = true;
@@ -489,6 +501,38 @@ function createMindscapeStore() {
 					error: e instanceof Error ? e.message : 'Unknown error',
 				}));
 			}
+		},
+
+		// Incremental GEOMETRY-only refresh — the live-repaint half of MI-1 (and P1-A recovery).
+		// Re-fetches ONLY the slim points payload and swaps `points`/`meta`; it does NOT touch the
+		// text panels and NEVER flips `loading` (so a built map keeps rendering while new points
+		// stream in — no spinner flicker). Cost-gated by the caller: MindscapeView calls this ONLY
+		// when the pipeline's cluster-count actually changed (new geometry) or the client is
+		// missing geometry the server says exists — never on a fixed cadence.
+		//   • `fresh` busts the server's durable points cache first (?refresh=1). Used for the
+		//     "map built but didn't load" recovery, where the cache may hold a stale-empty bundle.
+		//   • A transient empty read NEVER blanks a live map — we hold last-good (§3.2a).
+		async refreshPoints(opts?: { fresh?: boolean }) {
+			if (!browser) return;
+			// In-flight latch: refreshPoints never flips `loading`, so a caller's own guard can't
+			// see it running. Without this, a persistent getPoints failure (pointCount>0 from the
+			// readiness COUNT, but getPoints keeps returning []) could stack a cache-busting
+			// full-scan on every 4s poll. The latch collapses concurrent/overlapping calls to one;
+			// the caller (reconcileGeometry) additionally CAPS how many recovery attempts fire.
+			if (refreshingPoints) return;
+			refreshingPoints = true;
+			try {
+				const res = await api(`/portal/mindscape/points${opts?.fresh ? '?refresh=1' : ''}`);
+				if (!res.ok) return; // hold last-good
+				const data = await res.json();
+				const nodes = data.nodes || [];
+				update(s => {
+					// Never replace a rendered map with an empty read (a hiccup, not a reset).
+					if (nodes.length === 0 && s.points.length > 0) return s;
+					return { ...s, points: nodes, meta: data.meta || s.meta };
+				});
+			} catch { /* hold last-good */ }
+			finally { refreshingPoints = false; }
 		},
 
 		// Social layer methods

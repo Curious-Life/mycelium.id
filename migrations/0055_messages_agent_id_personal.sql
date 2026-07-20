@@ -1,0 +1,33 @@
+-- 0055 — one-shot-safe backfill: normalize legacy messages.agent_id='mya-personal'
+-- to the canonical 'personal-agent'.
+--
+-- WHY: 'mya-personal' is the Supabase-era id for what is now 'personal-agent'
+-- (see src/agent-id-aliases.js). It was the schema DEFAULT on messages.agent_id
+-- (0001_init.sql), so every message captured before this fix — and every imported
+-- row whose bundle omits agent_id — was stamped 'mya-personal'. That raw id leaks
+-- into the timeline UI: the frontend agent registry is keyed by 'personal-agent',
+-- so classifySpeaker's agentMap.get('mya-personal') misses and renders the raw id
+-- (portal-app/src/lib/timeline/utils.ts). The SQL alias bridge covers recall/filter
+-- but not display. This migration normalizes the stored value so no legacy id
+-- survives at rest; the amended 0001 default + capture.js now write 'personal-agent'
+-- directly, and utils.ts alias-resolves as a belt-and-suspenders for any residue.
+--
+-- SAFE TO RE-RUN (no schema_migrations guard, unlike 0050): applyMigrations
+-- SELF-HEALS (src/db/migrate.js:55-66) and can re-apply every file at a future boot.
+-- This UPDATE is idempotent — after the first pass no 'mya-personal' rows remain, so
+-- re-running matches nothing. Crucially, re-running is not merely harmless but
+-- BENEFICIAL: an import bundle can land fresh 'mya-personal' rows (restoreTable
+-- preserves the bundle's agent_id), and a later self-heal re-run normalizes those
+-- too. 'mya-personal' and 'personal-agent' are declared equivalent by
+-- agent-id-aliases.js — there is no distinct agent named 'mya-personal' — so this
+-- normalization is always correct. Contrast 0050, where re-arming 'pending' rows was
+-- a security regression and therefore needed the ledger guard.
+--
+-- ROLLBACK: this collapses 'mya-personal' into 'personal-agent' with no separate
+-- marker, so the two are no longer distinguishable at rest. That is intentional and
+-- lossless (they were always the same agent). If a rollback is ever required, the
+-- inverse — UPDATE messages SET agent_id='mya-personal' WHERE agent_id='personal-agent'
+-- — would over-broadly relabel genuinely-new 'personal-agent' rows too, so DO NOT run
+-- it blindly; instead restore from the pre-migrate snapshot
+-- (src/account/snapshot-on-boot.js writes pre-migrate-*.db before applying).
+UPDATE messages SET agent_id = 'personal-agent' WHERE agent_id = 'mya-personal';

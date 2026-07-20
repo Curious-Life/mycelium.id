@@ -10,7 +10,7 @@
 	import MindscapeBackground from '$lib/components/mindscape/MindscapeBackground.svelte';
 	import MindscapeInvite from '$lib/components/mindscape/MindscapeInvite.svelte';
 	import PipelineStatus from '$lib/components/mindscape/PipelineStatus.svelte';
-	import { ingest as ingestPipeline, refreshPipeline } from '$lib/pipeline';
+	import { ingest as ingestPipeline } from '$lib/pipeline';
 	import { pollAction, timerArmed } from '$lib/pipeline-poll';
 	import { probeExhausted } from '$lib/mind-probe-cap';
 
@@ -66,6 +66,12 @@
 			// invite renders permanently over a built vault (review HIGH-4).
 			if (m?.unknown === true) throw new Error('mindscape slice unknown');
 			mindGenerated = m?.generated === true;
+			// ── P1-A recovery + MI-1 live geometry ──────────────────────────────────────────────
+			// `pointCount` is the cheap COUNT the mindscape slice already computed (shared memo — the
+			// pipeline slice buys it too, so this is ZERO extra scan). Reconcile the client geometry
+			// against it: pull points when the server has a map we don't (the "map built but didn't
+			// load" race), or when the count changed on an already-rendered map (new points landed).
+			if (mindGenerated) reconcileGeometry(Number(m?.pointCount || 0));
 			genProbeFailed = false;
 			genProbeFailCount = 0; // a successful read clears the failure clock (mirrors unknownSince)
 		} catch {
@@ -86,6 +92,42 @@
 		genProbeFailCount = 0;
 		genProbeFailed = false;
 		void loadGenerated();
+	}
+	// ── Geometry reconciliation (P1-A first-load reliability + MI-1 continuous auto-update) ─────
+	// The readiness poll refreshes the "generated" flag and the pipeline overview, but it does NOT
+	// re-fetch the 3D point geometry — so historically a map that got built after the initial load
+	// (generated via the poll, an MCP tool, a wake cycle, or an agent) rendered "map built but
+	// didn't load" until a manual Retry, and new points never repainted live. This closes both:
+	// on each good read we compare the server's authoritative point count to the client's.
+	//   • server has points, client has none → the P1-A race. Force a FRESH (cache-busting) pull
+	//     so a stale-empty durable points cache can't defeat it; the 4s poll keeps retrying until
+	//     geometry arrives, so the first load succeeds on its own with no click.
+	//   • the count CHANGED on an already-rendered map → MI-1 new geometry. A plain refresh suffices
+	//     (the point mutation already busted the server cache). This is the ONLY thing that triggers
+	//     a geometry fetch — never a fixed cadence — so it adds zero decrypt scans per hour.
+	let lastPointCount = $state<number | null>(null);
+	// ⚠️ CAP the recovery pull. `refreshPoints` never flips `loading`, so `st.loading` can't gate
+	// the have===0 branch — and getPoints/getNoiseStats are SEPARATE queries under Promise.allSettled
+	// server-side, so getPoints can persistently fail (→ []) while the COUNT succeeds (pointCount>0).
+	// That would fire a cache-busting FULL-SCAN every 4s forever. Bound it exactly like the readiness
+	// probe (PROBE_MAX_FAILS): after that many attempts we stop auto-pulling; the manual "Try again"
+	// (load({fresh})) still works. A count CHANGE (new geometry) or geometry actually arriving
+	// (have>0) resets the counter, so only a persistent getPoints outage ever reaches the cap.
+	let geometryRecoveryAttempts = $state(0);
+	function reconcileGeometry(pointCount: number) {
+		const st = get(mindscapeState);
+		const have = st.points?.length ?? 0;
+		const prev = lastPointCount;
+		lastPointCount = pointCount;
+		if (have > 0) geometryRecoveryAttempts = 0;   // geometry present — clear the recovery clock
+		if (st.loading) return; // a full load() is already in flight — let it settle
+		if (pointCount > 0 && have === 0) {
+			if (probeExhausted(geometryRecoveryAttempts)) return;   // capped — stop the 4s full-scans
+			geometryRecoveryAttempts += 1;
+			void mindscapeState.refreshPoints({ fresh: true });
+		} else if (prev !== null && pointCount !== prev && have > 0) {
+			void mindscapeState.refreshPoints();   // MI-1: new geometry on a rendered map (uncapped, cheap)
+		}
 	}
 	// ⚠️ THE VIEW MUST POLL, BECAUSE THE RAIL DOES. `mindGenerated` froze after its first
 	// successful read — the $effect re-ran only while null — so a `false` was NEVER re-probed,
@@ -122,8 +164,13 @@
 			genPollTimer = setInterval(() => {
 				genProbeFailed = false;   // the poll IS the retry — let a failed probe try again
 				const act = pollAction(mindGenerated, genProbeExhausted);
-				if (act === 'converge') void loadGenerated();
-				else if (act === 'pipeline') void refreshPipeline();   // built map: keep the overview LIVE
+				// Both actions now call loadGenerated(): it fetches slices=mindscape,pipeline in ONE
+				// request (the pipeline slice already computes the mindscape count via the shared
+				// memo, so 'pipeline' costs the same as before) and ingests the pipeline overview to
+				// keep it LIVE — while also reading pointCount to reconcile geometry (MI-1 + P1-A).
+				// The 'converge' vs 'pipeline' split is preserved for the probe-cap contract
+				// (pipeline-poll.ts); the built-map tick no longer needs the pipeline-only refresh.
+				if (act === 'converge' || act === 'pipeline') void loadGenerated();
 			}, GEN_POLL_MS);
 		}
 		if (!timerArmed(genProbeExhausted) && genPollTimer) { clearInterval(genPollTimer); genPollTimer = null; }
@@ -669,14 +716,19 @@
 				</div>
 			{:else if mindGenerated === true}
 				<!-- ⚠️ The map EXISTS (the server counted points) but this client has none — the
-				     points fetch failed. Before §3.7a this fell through to the invite, so an owner
-				     with a fully built mindscape was told "Grow your mycelium — three steps to
-				     begin." A LOAD FAILURE IS NOT AN EMPTY VAULT — §3.2a's rule, one surface over.
-				     Say what is true and offer the retry. -->
+				     points fetch raced clustering, or the durable points cache held a stale-empty
+				     bundle. A LOAD FAILURE IS NOT AN EMPTY VAULT — §3.2a's rule, one surface over.
+				     P1-A: the readiness poll's reconcileGeometry() now auto-pulls the geometry with a
+				     cache-busting fetch every ~4s until it arrives, so this recovers ON ITS OWN with
+				     no click. We render it as an ACTIVE loading state (spinner + honest copy), not a
+				     dead end — and keep a manual "Try again" that forces a fresh fetch for impatience
+				     or a persistent stale cache. `{ fresh: true }` guarantees the retry can never be
+				     defeated by the same cached empty result that made the old button look dead. -->
 				<div class="loading-3d">
-					<p class="load-fail">Your map is built, but it didn’t load.</p>
+					<div class="spinner"></div>
+					<p class="load-fail">Your map is built — finishing loading it…</p>
 					{#if msState.error}<p class="load-fail sub">{msState.error}</p>{/if}
-					<button class="load-retry" onclick={() => mindscapeState.load()}>Try again</button>
+					<button class="load-retry" onclick={() => mindscapeState.load({ fresh: true })}>Try again</button>
 				</div>
 			{:else}
 				<!-- Welcome: empty mindscape onboarding -->
@@ -783,8 +835,10 @@
 
 	.loading-3d {
 		display: flex;
+		flex-direction: column;
 		align-items: center;
 		justify-content: center;
+		gap: 0.4rem;
 		width: 100%;
 		flex: 1;
 		min-height: 0;
