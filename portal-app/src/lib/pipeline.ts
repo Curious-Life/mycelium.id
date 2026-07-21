@@ -94,14 +94,36 @@ export function ingest(slice: Partial<PipelineState> & { unknown?: boolean } | n
       if (prev.loaded) return prev;
       return { ...initial, unknown: true };
     }
-    return {
+    const next: PipelineState = {
       stages: slice.stages as Stage[],
       overall: (slice.overall as PipelineOverall) ?? 'idle',
       blockedOn: slice.blockedOn ?? null,
       unknown: false,
       loaded: true,
     };
+    // ⚠️ IDLE-CADENCE FLICKER GUARD (QA R4-11). MindscapeView's ~4s timer is the sole feeder and it
+    // OUTLIVES the built map — so ingest() runs every tick for the whole pre-generate life of the
+    // invite. Returning a fresh object each tick re-emits the store even when the read is BIT-FOR-BIT
+    // identical (the static empty-vault case: `import` pending, nothing moving), forcing every
+    // <PipelineStatus/> subscriber — including the one mounted inside the invite — to re-render on a
+    // fixed cadence: the visible "reloads ~10×" churn. Hold the SAME reference when nothing changed so
+    // subscribers only re-render on a REAL change (a count moved, a stage advanced, eta ticked). This
+    // is a pure de-dup: an actual change still serializes differently and emits, so live progress is
+    // untouched (verify no regression to the processing cadence — eta/counts still update per tick).
+    if (prev.loaded && samePipeline(prev, next)) return prev;
+    return next;
   });
+}
+
+/** Structural equality on the RENDERED fields (stages/overall/blockedOn) — the loaded/unknown latch
+ *  bits are identical whenever we reach the compare. Cheap JSON compare over plain server data; a
+ *  false "differs" only costs one extra (idempotent) re-render, never a wrong render. */
+function samePipeline(a: PipelineState, b: PipelineState): boolean {
+  return (
+    a.overall === b.overall &&
+    a.blockedOn === b.blockedOn &&
+    JSON.stringify(a.stages) === JSON.stringify(b.stages)
+  );
 }
 
 /** Fold a whole readiness RESPONSE (`{ pipeline: {...}, ... }`) — the shape hosts already hold. */

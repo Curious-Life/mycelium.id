@@ -13,7 +13,7 @@ import { endorsedLocalModels } from '../src/inference/role-models.js';
 import { CATALOG } from '../src/hardware/catalog.js';
 import { detectHardware } from '../src/hardware/detect.js';
 import { createOllamaClient, isValidModelName, classifyOllamaFault, OLLAMA_FAULT } from '../src/hardware/ollama.js';
-import { createOllamaDaemon, findOllamaBinary, redactDaemonDetail, parseOllamaVersion, versionGte, OLLAMA_MIN_VERSION } from '../src/hardware/ollama-daemon.js';
+import { createOllamaDaemon, findOllamaBinary, redactDaemonDetail, parseOllamaVersion, versionGte, OLLAMA_MIN_VERSION, OLLAMA_SPAWN_CAPS } from '../src/hardware/ollama-daemon.js';
 import { installOllama, resolveAsset, OLLAMA_VERSION } from '../src/hardware/ollama-install.js';
 import { isLoopbackUrl, jurisdictionForBaseUrl } from '../src/inference/presets.js';
 
@@ -409,6 +409,34 @@ const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : '
     rec('H7i. redactDaemonDetail masks tokens, leaves clean strings intact',
       allMasked && passthrough === 'listen tcp 127.0.0.1:11434: bind: address already in use', `passthrough=${passthrough}`);
   }
+
+  // H7k — RAM-CRASH CAPS (P0). A daemon WE spawn is capped to ONE resident model + ONE in-flight
+  // request + a bounded keep-alive, so a chat×drain collision (or an L1↔L2 model swap) can't co-
+  // resident 2–3 models and OOM the box. MUTATION-TESTED: drop the cap loop in spawnServe (or set
+  // MAX_LOADED_MODELS>1) and (a) goes RED. Overridability (b): a user's explicit OLLAMA_* wins.
+  {
+    // (a) default caps land on OUR spawn env.
+    const spawnA = mkSpawn();
+    const dA = createOllamaDaemon({ isUp: mkIsUp([false, true]), findBinary: () => '/opt/homebrew/bin/ollama', spawn: spawnA, pollMs: 1, startTimeoutMs: 1000 });
+    await dA.ensureUp();
+    const envA = spawnA.calls[0]?.opts?.env || {};
+    const capped = envA.OLLAMA_MAX_LOADED_MODELS === '1' && envA.OLLAMA_NUM_PARALLEL === '1'
+      && envA.OLLAMA_KEEP_ALIVE === OLLAMA_SPAWN_CAPS.OLLAMA_KEEP_ALIVE && OLLAMA_SPAWN_CAPS.OLLAMA_MAX_LOADED_MODELS === '1';
+
+    // (b) a user's explicit value is FORWARDED and NOT clobbered (allowlist → spawnServe gap-fill).
+    const spawnB = mkSpawn();
+    const dB = createOllamaDaemon({
+      isUp: mkIsUp([false, true]), findBinary: () => '/opt/homebrew/bin/ollama', spawn: spawnB, pollMs: 1, startTimeoutMs: 1000,
+      env: { PATH: '/usr/bin', OLLAMA_MAX_LOADED_MODELS: '3', OLLAMA_NUM_PARALLEL: '4' },
+    });
+    await dB.ensureUp();
+    const envB = spawnB.calls[0]?.opts?.env || {};
+    const userWins = envB.OLLAMA_MAX_LOADED_MODELS === '3' && envB.OLLAMA_NUM_PARALLEL === '4'
+      && envB.OLLAMA_KEEP_ALIVE === OLLAMA_SPAWN_CAPS.OLLAMA_KEEP_ALIVE;  // unset one still gets our default
+
+    rec('H7k. spawn caps resident=1/parallel=1/keep-alive (default) + user OLLAMA_* wins', capped && userWins,
+      `default=${envA.OLLAMA_MAX_LOADED_MODELS}/${envA.OLLAMA_NUM_PARALLEL}/${envA.OLLAMA_KEEP_ALIVE} user=${envB.OLLAMA_MAX_LOADED_MODELS}/${envB.OLLAMA_NUM_PARALLEL}/${envB.OLLAMA_KEEP_ALIVE}`);
+  }
 }
 
 // ── H8 — ollama-install (download → verify → extract; all injected) ───────────
@@ -559,6 +587,8 @@ const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : '
       && c.args.join(' ') === 'serve'
       && c.opts?.env?.OLLAMA_HOST === '127.0.0.1:11435'
       && /\/data\/ollama\/models$/.test(c.opts?.env?.OLLAMA_MODELS || '')
+      // P0: the alt-port self-heal spawn ALSO carries the RAM-crash caps (it goes through spawnServe).
+      && c.opts?.env?.OLLAMA_MAX_LOADED_MODELS === '1' && c.opts?.env?.OLLAMA_NUM_PARALLEL === '1'
       && r.port === 11435 && r.baseUrl === altBase;
     // (c) getBaseUrl() + a client built on it + the published env override all point at the alt port.
     const clientBase = createOllamaClient({ baseUrl: d.getBaseUrl() }).baseUrl;

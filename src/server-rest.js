@@ -6,7 +6,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { boot } from './index.js';
-import { dataDir, dbPath as resolveDbPath, kcvPath as resolveKcvPath, uploadsRoot as resolveUploadsRoot, remoteConfigPath as resolveRemoteConfigPath, mindDir } from './paths.js';
+import { dataDir, dbPath as resolveDbPath, kcvPath as resolveKcvPath, uploadsRoot as resolveUploadsRoot, remoteConfigPath as resolveRemoteConfigPath, mindDestroyRoots } from './paths.js';
 import { resolveKeys } from './crypto/key-source.js';
 import { applyMigrations } from './db/migrate.js';
 import { precompressedStatic, setStaticHeaders, compressionMiddleware } from './serving.js';
@@ -944,10 +944,12 @@ export async function startRestServer({
     isTrustedLoopback,
     readMaster: () => { try { return readUserMaster(); } catch { return null; } },
     dataDir: () => dataDir(),
-    extraRoots: () => {
-      const mindRoot = mindDir();
-      return path.isAbsolute(mindRoot) ? [mindRoot] : [];
-    },
+    // The mind tree lives OUTSIDE the app-data dir's db set, so the wipe needs it
+    // explicitly — BOTH the durable dir and the legacy dir. That coverage is the
+    // single source of truth in paths.js mindDestroyRoots(), which the migration
+    // gate (verify-mind-root-migration.mjs) asserts against, so the real wipe and
+    // the gate can never diverge.
+    extraRoots: () => mindDestroyRoots(),
     deleteKeychain,
     readPulledModels: () => readPulledModels(),
     deleteOllamaModels: makeDeleteOllamaModels(createOllamaClient()),

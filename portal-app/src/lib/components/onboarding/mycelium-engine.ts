@@ -22,7 +22,7 @@ const P = {
 const GRID_SIZE = 15;
 const MAX_DEPTH = P.maxDepth;
 const TARGET_ALIVE = 55;
-const ANIM_CAP_MS = 120_000;
+const ANIM_CAP_MS = 30_000;
 
 type GridPt = { x: number; y: number; c: number };
 

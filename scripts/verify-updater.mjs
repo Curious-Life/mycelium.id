@@ -61,6 +61,52 @@ rec('U6. release workflow builds + attaches the updater manifest',
 rec('U7. updater artifact script is fail-closed + uses the notarized app',
   /TAURI_SIGNING_PRIVATE_KEY/.test(mk) && /stapler validate/.test(mk) && /cargo tauri signer sign/.test(mk) && /PLACEHOLDER/.test(mk));
 
+// ── Manual Settings → General "Check for updates" wiring (wraps the same signed updater) ──
+// Isolate each command body so a gate assertion can't be satisfied by a sibling command.
+const bodyOf = (name, asyncFn = false) => {
+  const kw = asyncFn ? 'async fn' : 'fn';
+  const m = mainrs.match(new RegExp(`${kw}\\s+${name}\\s*\\([\\s\\S]*?\\n\\}`));
+  return m ? m[0] : '';
+};
+const checkBody = bodyOf('check_for_update', true);
+const installBody = bodyOf('install_update', true);
+
+// U8 — app_version returns the RUNTIME version (package_info), not the config string
+rec('U8. app_version command returns the runtime version',
+  /#\[tauri::command\]\s*fn\s+app_version/.test(mainrs) && /package_info\(\)\s*\.\s*version/.test(bodyOf('app_version')));
+
+// U9 — the three commands the Settings pane invokes are all registered in the handler
+const handler = (mainrs.match(/generate_handler!\[[\s\S]*?\]/) || [''])[0];
+rec('U9. app_version + check_for_update + install_update registered in generate_handler!',
+  /\bapp_version\b/.test(handler) && /\bcheck_for_update\b/.test(handler) && /\binstall_update\b/.test(handler));
+
+// U10 — check_for_update is production-gated (debug/.dev ⇒ unsupported) + real-pubkey-gated,
+//        and mirrors the SAME signature-verified check() the auto-updater uses.
+rec('U10. check_for_update is production + real-pubkey gated',
+  checkBody.length > 0 &&
+  /debug_assertions/.test(checkBody) && /IsDevBuild/.test(checkBody) &&
+  /updater_pubkey_is_real\s*\(\s*&?app\s*\)/.test(checkBody) &&
+  /"state"\s*:\s*"unsupported"/.test(checkBody) &&
+  /\.updater\(\)/.test(checkBody) && /\.check\(\)/.test(checkBody));
+
+// U10b — the SHAPE of the short-circuit, not just the tokens. The guard MUST be the OR
+//        form (dev-build OR not-real-pubkey ⇒ unsupported). A `||`→`&&` slip would let a
+//        dev build WITH a real pubkey reach the live updater while every token above still
+//        passes — so assert the combinator itself, and that no AND joins the two clauses.
+//        (Repo lesson: gates assert SHAPE, never just the property.)
+const guard = (checkBody.match(/if\s+is_dev_build[\s\S]*?\{/) || [''])[0];
+rec('U10b. the production/pubkey guard is the OR short-circuit (not AND)',
+  /is_dev_build\s*\|\|\s*!\s*updater_pubkey_is_real\s*\(\s*&?app\s*\)/.test(guard) &&
+  !/is_dev_build\s*&&/.test(guard),
+  guard.replace(/\s+/g, ' ').trim() || '(guard not found)');
+
+// U11 — install goes through the plugin's verified download+relaunch, with NO signature bypass.
+//        (Tauri exposes no bypass flag; assert the verified path + guard against a future one.)
+rec('U11. install_update uses the plugin verified download+restart, no signature bypass',
+  installBody.length > 0 &&
+  /download_and_install\(/.test(installBody) && /\.restart\(\)/.test(installBody) &&
+  !/(insecure|skip[_-]?sign|no[_-]?verify|dangerous)/i.test(installBody));
+
 console.log('\n' + '='.repeat(60));
 console.log(fail ? 'VERDICT: NO-GO — updater wiring incomplete' : 'VERDICT: GO — auto-updater wiring intact (real-key + on-Mac smoke = operator)');
 console.log('='.repeat(60));

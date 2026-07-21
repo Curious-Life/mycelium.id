@@ -4,8 +4,8 @@
 	// "genuinely empty", the ON-5 fix) with the explicit sources + a folder-aware
 	// drop zone ALWAYS visible below it, so the step is never a dead-end.
 	//
-	// Copy — LOCKED (operator, copy option 2): "Bring your world in / Drop your
-	// exports or a folder of notes. Everything stays encrypted on your device."
+	// Copy (operator, QA4 R4): heading "Bring your world in" / lede "Import your
+	// data. It's stored encrypted on your device."
 	import { api } from '$lib/api';
 	import { filesFromDataTransfer } from '$lib/import/upload-handlers';
 	import { signalImportCompleted } from '$lib/stores/onboarding-data.svelte';
@@ -77,7 +77,7 @@
 
 <div class="step-body">
 	<h1 class="title">Bring your world in</h1>
-	<p class="lede">Drop your exports or a folder of notes. Everything stays encrypted on your device.</p>
+	<p class="lede">Import your data. It's stored encrypted on your device.</p>
 
 	<!-- Scan-first hero (TCC-aware; never silent-empty). -->
 	<div class="scan-hero">

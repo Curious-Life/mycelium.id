@@ -441,6 +441,61 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
+/// The runtime app version (the installed binary's package version), for the
+/// Settings → General "About" block. Uses package_info() — the REAL running version,
+/// not the config string — so it's accurate for every variant.
+#[tauri::command]
+fn app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+/// Whether this is the ".dev" daily-driver variant (see setup: is_dev). Stored in
+/// managed state so commands can honor the SAME production gate the auto-updater uses.
+struct IsDevBuild(bool);
+
+/// Manual "Check for updates" (Settings → General). Wraps the SAME signature-verified
+/// updater the background auto-updater uses. The user explicitly asked, so this BYPASSES
+/// the 6h throttle — but every other guarantee is intact: production-only (never a
+/// dev-server build nor the ".dev" variant, neither of which can swap their own binary
+/// or should self-update to the public release) + real-pubkey-gated + the plugin verifies
+/// the minisign signature inside check(). Never throws — it returns a small status object
+/// the UI renders. Mirrors any result into UpdateState so the sidebar banner stays
+/// consistent with a manual check.
+#[tauri::command]
+async fn check_for_update(app: tauri::AppHandle) -> serde_json::Value {
+    use tauri_plugin_updater::UpdaterExt;
+    // Production gate: a debug/dev-server build (`cargo tauri dev`) can't replace its own
+    // running binary, and the ".dev" bundled variant must never self-update to the public
+    // release. Pubkey gate: no real minisign key ⇒ the updater is dormant (never prompt).
+    let is_dev_build =
+        cfg!(debug_assertions) || app.try_state::<IsDevBuild>().map(|s| s.0).unwrap_or(false);
+    if is_dev_build || !updater_pubkey_is_real(&app) {
+        return serde_json::json!({ "state": "unsupported" });
+    }
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => return serde_json::json!({ "state": "error", "error": e.to_string() }),
+    };
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let version = update.version.clone();
+            let notes = update.body.clone().unwrap_or_default();
+            if let Some(state) = app.try_state::<UpdateState>() {
+                *state.0.lock().unwrap() =
+                    Some(AvailableUpdate { version: version.clone(), notes: notes.clone() });
+            }
+            serde_json::json!({ "state": "available", "version": version, "notes": notes })
+        }
+        Ok(None) => {
+            if let Some(state) = app.try_state::<UpdateState>() {
+                *state.0.lock().unwrap() = None; // we're current
+            }
+            serde_json::json!({ "state": "uptodate" })
+        }
+        Err(e) => serde_json::json!({ "state": "error", "error": e.to_string() }), // fail-soft
+    }
+}
+
 /// Relaunch the app after a destroy-vault (factory reset). The node REST endpoint
 /// `POST /api/v1/account/destroy` — gated by the recovery key + typed phrase — has
 /// ALREADY wiped the vault, keys, and app data before the UI invokes this. This
@@ -826,6 +881,7 @@ fn main() {
                 rest_pid,
             });
             app.manage(UpdateState::default()); // the in-app update banner reads this
+            app.manage(IsDevBuild(is_dev)); // check_for_update honors the production gate
 
             // Wait for the REST server to bind before pointing the webview at it.
             // A build that adds DB migrations makes the FIRST boot slow: snapshot-on-boot
@@ -967,7 +1023,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             destroy_and_relaunch,
             get_available_update,
-            install_update
+            install_update,
+            app_version,
+            check_for_update
         ])
         .build(tauri::generate_context!())
         .expect("error while building the mycelium tauri application");

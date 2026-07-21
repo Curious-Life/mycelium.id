@@ -98,23 +98,58 @@ export function lockPath(opts = {})    { return under('vault-lock.json', 'MYCELI
 export function remoteConfigPath(opts = {}) { return under('remote.json', 'MYCELIUM_REMOTE_CONFIG', opts); }
 
 // ── Agent mind-file location ────────────────────────────────────────────────
-// The agent's on-disk interior — self.md (loaded every turn), model.md, flagged.md,
-// snapshots/, .authorship.json — lives at <agentRoot>/mind, where agentRoot
-// defaults to <cwd>/data/mind (so the live files dir is data/mind/mind). This
+// The agent's on-disk interior — self.md (loaded every turn), model.md,
+// flagged.md, the mirror docs, snapshots/, .authorship.json — lives at
+// <agentRoot>/mind (mind-files.js getMindDir appends the `mind` segment). The
 // resolver used to be duplicated in mcp.js / server-rest.js / portal-character.js
 // with subtle relative-vs-cwd-join differences; it is centralised HERE (the single
-// source of truth for data locations) so backup/restore + the destroy wipe + the
-// agent runtime all agree on ONE directory. A divergence would silently lose the
-// agent's interior on a restore, or leave it behind on a factory reset.
-//   ⚠️ DURABILITY: unlike the db, this is NOT under dataDir()/app_data_dir — it is
-//   cwd-relative, and MYCELIUM_AGENT_ROOT is not actually set by the shell today.
-//   That fragility is tracked as a separate migration; do NOT relocate the default
-//   here without moving existing files. This helper only CENTRALISES today's value.
+// source of truth for data locations) so the agent runtime, the backup/restore
+// pass, and the destroy wipe all agree on ONE absolute directory. A divergence
+// would silently lose the agent's interior on a restore, or leave it behind on a
+// factory reset (the destroy engine skips a non-absolute root — server-rest.js /
+// account/destroy.js isSafeRoot).
+//
+// DURABILITY: the default is <dataDir>/mind — UNDER app_data_dir (via dataDir()),
+// exactly like mycelium.db — so an app update / cwd change can no longer orphan
+// the identity capsule. It used to default to <cwd>/data/mind (with an extra
+// nested `mind`, i.e. <cwd>/data/mind/mind), which in the packaged app resolved
+// INSIDE the code-signed, update-replaceable bundle (cwd = resource_dir/app).
+// A one-time boot migration relocates any pre-existing legacy tree — see
+// src/mindfiles/migrate-root.js, run under .vault-init.lock in initVaultStorage.
+// MYCELIUM_AGENT_ROOT still overrides (points at a wrapper whose /mind child holds
+// the files) and, when set, DISABLES the migration (the operator owns the path).
 export function mindAgentRoot({ env = process.env, cwd = process.cwd() } = {}) {
-  return clean(env.MYCELIUM_AGENT_ROOT) || path.join(cwd, 'data', 'mind');
+  const override = clean(env.MYCELIUM_AGENT_ROOT);
+  // Resolve the override to an ABSOLUTE path: mindDir() feeds the destroy/factory-
+  // reset wipe, which fail-closed skips any non-absolute root — a relative override
+  // would silently leave the encrypted mind tree behind on a reset.
+  return override ? path.resolve(cwd, override) : dataDir({ env, cwd });
 }
 /** The directory holding the encrypted `MIND`-magic files: <agentRoot>/mind. */
 export function mindDir(opts = {}) { return path.join(mindAgentRoot(opts), 'mind'); }
+/** The pre-relocation legacy mind dir for a given cwd: <cwd>/data/mind/mind. */
+export function legacyMindDir({ cwd = process.cwd() } = {}) {
+  return path.join(cwd, 'data', 'mind', 'mind');
+}
+
+/**
+ * The absolute mind directories a factory reset MUST wipe. SINGLE SOURCE OF TRUTH:
+ * the destroy route (server-rest.js extraRoots) AND the migration gate
+ * (scripts/verify-mind-root-migration.mjs) both call THIS, so dropping either root
+ * here changes the real wipe and REDs the gate together — the destroy coverage can
+ * never silently diverge from what the gate asserts.
+ *   - mindDir()       — the durable dir (dataDir()/mind) the runtime reads/writes now.
+ *   - legacyMindDir() — <cwd>/data/mind/mind, OUTSIDE dataDir (INSIDE the app bundle),
+ *     so the normal dataDir wipe never reaches it. The one-time relocation can leave
+ *     residual encrypted mind files there (a skipped name-collision, a partial/failed
+ *     move, or a pinned MYCELIUM_AGENT_ROOT that disables the move); a factory reset
+ *     must not let that encrypted identity outlive the vault.
+ * The isAbsolute filter is belt-and-suspenders — the destroy engine fail-closed skips
+ * any non-absolute root, and both helpers are always absolute today.
+ */
+export function mindDestroyRoots({ env = process.env, cwd = process.cwd() } = {}) {
+  return [mindDir({ env, cwd }), legacyMindDir({ cwd })].filter((p) => path.isAbsolute(p));
+}
 
 // Frozen TTS voice sample(s): <dataDir>/voice-samples/<agentId>.mvs (encrypted,
 // "the identity" — not re-rollable). Carried by backup like uploads/.

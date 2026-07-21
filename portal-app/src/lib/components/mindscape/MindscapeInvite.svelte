@@ -64,6 +64,15 @@
 		channel?: { connected: boolean };
 	};
 	let readiness = $state<Readiness | null>(null);
+	// ⚠️ FIRST-PAINT "not connected" FLASH (QA R4-11). `readiness` starts null, so dataDone/aiDone/
+	// connectDone are ALL false on the very first render — the stepper paints "1 · 2 · 3" (every step
+	// incomplete) before the async /readiness fetch resolves, then completed steps flip to ✓. A user
+	// who connected an AI or linked a channel yesterday sees a wrong "nothing done" for a beat, then a
+	// flip. `readyLoaded` gates that: until the FIRST loadReadiness() resolves (ok OR fail — a resolved
+	// failure is still "we now know as much as we can, hold last-good") the stepper shows a neutral
+	// checking placeholder instead of a definitive-incomplete number, so completed steps reveal as ✓
+	// with no flip. It never goes back to false — subsequent polls only refine a known state.
+	let readyLoaded = $state(false);
 
 	// `evidence` is OPT-IN (readiness.js) — three unindexed aggregates. Name it once, at
 	// mount and after an import; NEVER poll it (design PIVOT 2).
@@ -97,7 +106,7 @@
 				readiness = next;
 			}
 		} catch { /* leave the last good answer; a failed read must not un-tick a true check */ }
-		finally { inFlight = false; }
+		finally { inFlight = false; readyLoaded = true; }   // first resolution (ok or fail) ends the checking placeholder
 	}
 	$effect(() => { if (readiness === null) void loadReadiness(); });
 
@@ -350,15 +359,18 @@
 	{#each progressSteps as s, i (s.key)}
 		<button
 			class="onb-step"
-			class:done={s.done}
+			class:done={readyLoaded && s.done}
 			class:current={step === s.key}
+			class:checking={!readyLoaded}
 			onclick={() => (step = s.key)}
 		>
-			<span class="onb-bubble">{#if s.done}✓{:else}{i + 1}{/if}</span>
+			<!-- Until the first readiness read resolves, show a neutral placeholder — never a
+			     definitive "incomplete" number that then flips to ✓ (QA R4-11 first-paint flash). -->
+			<span class="onb-bubble">{#if !readyLoaded}<span class="onb-bubble-loading" aria-hidden="true"></span>{:else if s.done}✓{:else}{i + 1}{/if}</span>
 			<span class="onb-step-label">{s.label}</span>
 		</button>
 		{#if i < progressSteps.length - 1}
-			<span class="onb-connector" class:done={s.done}></span>
+			<span class="onb-connector" class:done={readyLoaded && s.done}></span>
 		{/if}
 	{/each}
 </div>
@@ -539,7 +551,9 @@
 	@keyframes gen-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 
 	/* ── Progress stepper ───────────────────────────────────────────────────── */
-	.onb-steps { display: flex; align-items: center; gap: 0; margin-bottom: 1.5rem; }
+	/* margin-top separates the stepper from the <PipelineStatus/> block directly above it (QA R4-12 —
+	   the two blocks were flush); matches the stepper's own 1.5rem bottom gap for a balanced band. */
+	.onb-steps { display: flex; align-items: center; gap: 0; margin-top: 1.5rem; margin-bottom: 1.5rem; }
 	.onb-step {
 		display: inline-flex; align-items: center; gap: 0.4rem; flex-shrink: 0;
 		background: none; border: none; padding: 0; cursor: pointer; font-family: inherit;
@@ -553,6 +567,14 @@
 	}
 	.onb-step.done .onb-bubble { background: var(--color-accent-jade); color: var(--color-bg); border-color: transparent; }
 	.onb-step.current .onb-bubble { border-color: var(--color-accent-aurum); color: var(--color-accent-aurum); }
+	/* Readiness not yet read — a soft pulsing placeholder, NOT a definitive "1/2/3 incomplete" (R4-11). */
+	.onb-step.checking .onb-bubble { border-color: var(--glass-border); }
+	.onb-bubble-loading {
+		width: 0.5rem; height: 0.5rem; border-radius: 50%;
+		background: var(--color-text-tertiary); opacity: 0.5;
+		animation: onb-bubble-pulse 1.6s ease-in-out infinite;
+	}
+	@keyframes onb-bubble-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 0.6; } }
 	.onb-step-label { font-size: 0.68rem; color: var(--color-text-tertiary); transition: color 0.2s ease; }
 	.onb-step.done .onb-step-label { color: var(--color-text-secondary); }
 	.onb-step.current .onb-step-label { color: var(--color-text-primary); }

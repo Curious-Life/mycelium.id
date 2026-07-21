@@ -72,6 +72,9 @@
 	// `jurisdiction` is the SERVER's classification (publicRow). Never re-derive it here.
 	type Provider = { id: number; label: string; provider: string; is_active: number; base_url?: string; jurisdiction?: string; auth_type?: string };
 	type Health = { status: string; message: string | null; detail?: string | null; model: string | null; progress: { pct: number } | null };
+	// A hardware-recommender catalog row (GET /portal/hardware/recommend → recommendations[]).
+	// The SAME shape AISettings uses in the Providers tab — read, never re-derived here.
+	type Rec = { name: string; bestFor?: string; estimatedGb?: number; fitLevel?: string; installed?: boolean; recommended?: boolean; ageMonths?: number | null };
 
 	let { compact = false }: { compact?: boolean } = $props();
 
@@ -79,7 +82,25 @@
 	let taskModels = $state<Record<string, { model?: string; providerId?: number }>>({});
 	let providers = $state<Provider[]>([]);
 	let models = $state<Record<string, Health>>({});
+	// The full local catalog (GET /portal/hardware/recommend → recommendations). One read feeds
+	// BOTH surfaces below: `installedLocal` (the OnboxTaskSelect "other installed models" branch —
+	// R4-6, previously dead: this state was declared and never assigned) AND the optional
+	// "search all models" advanced disclosure (R4-5). It is the SAME source the Providers tab uses
+	// (AISettings hwRec), so the two lists can never diverge.
+	let catalog = $state<Rec[]>([]);
 	let installedLocal = $state<string[]>([]);
+	// The advanced "search all models" disclosure — HIDDEN by default (per function key), so a
+	// normal user sees only the curated OnboxTaskSelect; an advanced user expands to search the
+	// full 300+ catalog. Curated-first, full-catalog only when a query is typed (the AISettings
+	// pattern — never dump 300 models on someone who just wants the recommendation).
+	let advancedOpen = $state<Record<string, boolean>>({});
+	let modelQuery = $state('');
+	const RECENCY_MONTHS = 12;
+	const catalogMatches = $derived.by(() => {
+		const q = modelQuery.trim().toLowerCase();
+		if (q) return catalog.filter((m) => m.name.toLowerCase().includes(q) || (m.bestFor || '').toLowerCase().includes(q));
+		return catalog.filter((m) => m.recommended || m.ageMonths == null || (m.ageMonths ?? 99) <= RECENCY_MONTHS);
+	});
 	let busy = $state<string | null>(null);
 	let err = $state<string | null>(null);
 	// §4g's opt-in (settings.allowSubscriptionSensitive) — part of the router's rule, so part of
@@ -275,16 +296,25 @@
 			loaded = true;
 			return;
 		}
-		const [tm, pv, rd, ex] = await Promise.all([
+		const [tm, pv, rd, ex, hw] = await Promise.all([
 			api('/portal/providers/task-models').then((r) => r.json()).catch(() => ({})),
 			api('/portal/providers').then((r) => r.json()).catch(() => ({})),
 			api('/portal/readiness?slices=models').then((r) => r.json()).catch(() => ({})),
 			api('/portal/providers/sensitive-subscription').then((r) => r.json()).catch(() => ({})),
+			// The local catalog + installed flags — soft (a slow/absent hardware probe must not
+			// blank the screen). Feeds installedLocal (the OnboxTaskSelect options) + the search.
+			api('/portal/hardware/recommend').then((r) => r.json()).catch(() => ({})),
 		]);
 		taskModels = tm.taskModels || {};
 		providers = pv.providers || [];
 		models = rd.models || {};
-		// SEED: if the user flipped the toggle while these four calls were in flight, their
+		// R4-6: populate installedLocal from the recommender's `.installed` flag (the existing
+		// source — no new readiness invented), so localOptions() surfaces every installed local
+		// model as a choice. R4-5: keep the full list for the advanced search disclosure.
+		const recs: Rec[] = Array.isArray(hw?.recommendations) ? hw.recommendations : [];
+		catalog = recs;
+		installedLocal = recs.filter((m) => m.installed).map((m) => m.name);
+		// SEED: if the user flipped the toggle while these parallel calls were in flight, their
 		// choice must win over this stale read (independent review ×4).
 		if (ex && typeof ex.allowed === 'boolean') seedSensitiveExempt(ex.allowed);
 		loaded = true;
@@ -459,6 +489,42 @@
 				</div>
 			{/if}
 
+			{#if f.kind === 'local' && f.recommend}
+				<!-- R4-5: the OPTIONAL "search all models" advanced disclosure — hidden for normal
+				     users (the curated OnboxTaskSelect above is the default + prominent choice), opt-in
+				     for advanced users. Reveals a search over the FULL local catalog (the same
+				     recommendations list + curated-first pattern the Providers tab uses), so a power
+				     user can approve any local model without leaving the Functions surface. Approving
+				     rides the SAME approve() write path as the select — no second consent mechanism. -->
+				<!-- ⚠️ The toggle label MUST NOT contain the word "Search": verify:intelligence-screen
+				     S5 does sections.find(/Search/) to locate the BUNDLED embedder row, and this local
+				     row renders BEFORE it — a "Search…" label here would steal that match and make the
+				     Labeling <select> read as a control on the (control-free) Search row. "Show all
+				     models" is also the operator's own name for the disclosure e84b8def dropped. -->
+				<div class="fn-extra advanced">
+					<button class="adv-toggle" type="button" aria-expanded={!!advancedOpen[f.key]}
+						onclick={() => (advancedOpen = { ...advancedOpen, [f.key]: !advancedOpen[f.key] })}
+					>{advancedOpen[f.key] ? '▾' : '▸'} Show all models</button>
+					{#if advancedOpen[f.key]}
+						<input class="adv-search" type="text" bind:value={modelQuery}
+							placeholder="Search all models…" autocomplete="off" />
+						<div class="adv-list">
+							{#each catalogMatches as m (m.name)}
+								<button class="adv-row" type="button" class:on={approved === m.name}
+									disabled={busy === f.key} onclick={() => approve(f, m.name)}>
+									<span class="adv-name">{m.name}</span>
+									{#if m.recommended}<span class="adv-tag rec">recommended</span>{/if}
+									{#if m.installed}<span class="adv-tag ins">installed</span>{/if}
+									{#if m.estimatedGb}<span class="adv-size">~{m.estimatedGb}GB</span>{/if}
+								</button>
+							{:else}
+								<p class="note">{modelQuery ? `No models match “${modelQuery}”.` : 'No local models detected yet.'}</p>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			{/if}
+
 			{#if f.key === 'conversation'}
 				<!-- Engine folded into Conversation (2026-07-19): it governs agent turns (chat,
 				     harness, reflection) = this function's tasks. Was a standalone Engine tab. -->
@@ -508,4 +574,27 @@
 		color: var(--color-text-secondary); cursor: pointer; }
 	.pick:hover { border-color: var(--color-text-tertiary); color: var(--color-text-primary); }
 	.pick.on { background: var(--color-accent-teal, #14b8a6); border-color: var(--color-accent-teal, #14b8a6); color: #000; }
+
+	/* The optional "search all models" advanced disclosure (R4-5) — a quiet, opt-in door. */
+	.advanced { display: flex; flex-direction: column; gap: 0.4rem; }
+	.adv-toggle { align-self: flex-start; font: inherit; font-size: 0.72rem; padding: 0.1rem 0; border: none;
+		background: none; color: var(--color-text-tertiary, #888); cursor: pointer; }
+	.adv-toggle:hover { color: var(--color-text-secondary); }
+	.adv-search { width: 100%; max-width: 24rem; padding: 0.35rem 0.55rem; border-radius: 7px; font: inherit;
+		font-size: 0.76rem; border: 1px solid var(--color-border, rgba(255,255,255,0.12));
+		background: var(--color-surface-2, rgba(255,255,255,0.04)); color: var(--color-text-primary); }
+	.adv-search::placeholder { color: var(--color-text-tertiary, #888); }
+	.adv-search:focus { outline: none; border-color: var(--color-accent-teal, #14b8a6); }
+	.adv-list { display: flex; flex-direction: column; gap: 3px; max-height: 16rem; overflow-y: auto; max-width: 24rem; }
+	.adv-row { display: flex; align-items: center; gap: 0.45rem; width: 100%; text-align: left; font: inherit;
+		font-size: 0.76rem; padding: 0.35rem 0.5rem; border-radius: 7px; border: 1px solid transparent;
+		background: rgba(255,255,255,0.03); color: var(--color-text-secondary); cursor: pointer; }
+	.adv-row:hover { border-color: var(--color-border); color: var(--color-text-primary); }
+	.adv-row.on { border-color: var(--color-accent-teal, #14b8a6); color: var(--color-text-primary); }
+	.adv-row:disabled { opacity: 0.5; cursor: default; }
+	.adv-name { font-family: var(--font-mono, monospace); flex-shrink: 0; }
+	.adv-tag { font-size: 0.6rem; padding: 1px 6px; border-radius: 8px; white-space: nowrap; }
+	.adv-tag.rec { background: rgba(229,184,76,0.16); color: var(--color-accent-aurum, #e5b84c); }
+	.adv-tag.ins { background: rgba(74,222,128,0.14); color: #6ee7a8; }
+	.adv-size { margin-left: auto; font-size: 0.68rem; color: var(--color-text-tertiary, #888); flex-shrink: 0; }
 </style>

@@ -153,7 +153,7 @@
 	// reliable baseline; `pullSubModels` best-effort augments it from Anthropic (the OAuth
 	// token may lack models:list scope, so a failed pull just leaves the curated list).
 	const CLAUDE_SUB_MODELS: { id: string; label: string }[] = [
-		{ id: 'claude-opus-4-8', label: 'Opus 4.8 · most capable' },
+		{ id: 'claude-opus-4-8', label: 'Opus 4.8 · recommended · most capable' },
 		{ id: 'claude-sonnet-5', label: 'Sonnet 5 · balanced' },
 		{ id: 'claude-fable-5', label: 'Fable 5 · creative' },
 		{ id: 'claude-haiku-4-5', label: 'Haiku 4.5 · fastest' },
@@ -204,6 +204,10 @@
 			// loadSub is itself an async fetch. The screen gates its claim on `loaded` instead.)
 			if (ss?.ok) { subSensitive = ss.allowed === true; seedSensitiveExempt(subSensitive); }
 			if (ws?.ok) webSearchOn = ws.enabled !== false;
+			// R4-6: eagerly widen the model list — pull the fuller Claude set the account can use so
+			// the picker shows it WITHOUT a manual "Refresh" click. Best-effort: a token lacking the
+			// models:list scope just leaves the curated CLAUDE_SUB_MODELS (the reliable baseline).
+			if (subStatus?.authenticated && subStatus.providerId) void pullSubModels();
 		} catch { /* section shows the connect state */ }
 	}
 	// The LADDER, step 1: try this device. The server probes every credential store; if it

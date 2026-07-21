@@ -110,6 +110,9 @@ function allowlistEnv(env) {
   const out = {};
   const KEYS = [
     'PATH', 'HOME', 'OLLAMA_HOST', 'OLLAMA_MODELS',
+    // Resident-model / concurrency caps: forwarded so a user's EXPLICIT setting flows through and
+    // wins over our default (applied in spawnServe only when absent). See OLLAMA_SPAWN_CAPS.
+    'OLLAMA_MAX_LOADED_MODELS', 'OLLAMA_NUM_PARALLEL', 'OLLAMA_KEEP_ALIVE',
     'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY',
     'https_proxy', 'http_proxy', 'no_proxy',
   ];
@@ -118,6 +121,30 @@ function allowlistEnv(env) {
   }
   return out;
 }
+
+// ── RAM-crash caps for a daemon WE spawn (P0) ────────────────────────────────
+// With four resident local engines and NO global concurrency coordinator (embed-service :8091,
+// Ollama, Whisper STT, Qwen-TTS), an UNBOUNDED `ollama serve` is the biggest RAM-spike lever: it
+// will keep 2–3 distinct models resident at once (the L1 labeling model, the L2 enrich model, and a
+// chat/agent model can all differ) AND serve requests in parallel. The drainer's own stages are
+// sequential within a 15s cycle, but chat/agent turns hit Ollama independently (src/agent/run-turn.js,
+// src/inference/router.js) — so a chat turn colliding with a drain pass, or an L1↔L2 model swap, can
+// load a second/third model and explode RAM into an OOM crash (observed on the operator's box).
+//
+// Pinning ONE resident model + ONE in-flight request converts that collision from a crash into
+// bounded model-SWAP LATENCY (Ollama evicts/reloads instead of co-residing), and a short KEEP_ALIVE
+// stops an idle model from squatting RAM indefinitely. This is the safe, well-understood Phase-1
+// lever; a global local-inference gate / chat-preempts-drain scheduler is the held Phase-2 work
+// (see docs/PIPELINE-COMPUTE-REVIEW-2026-07-21.md).
+//
+// APPLIED ONLY to daemons we START (spawnServe — the spawn + alt-port self-heal paths), NEVER to an
+// adopted user daemon (start() returns before spawnServe on adopt), and ONLY when the user has not
+// set the var themselves — an explicit OLLAMA_* is forwarded by allowlistEnv and left untouched.
+export const OLLAMA_SPAWN_CAPS = {
+  OLLAMA_MAX_LOADED_MODELS: '1',
+  OLLAMA_NUM_PARALLEL: '1',
+  OLLAMA_KEEP_ALIVE: '5m',
+};
 
 // Scrub credential-bearing substrings from the daemon's stderr tail BEFORE it is
 // returned to the localhost portal (as `detail`) or logged. Low severity — the
@@ -312,6 +339,11 @@ export function createOllamaDaemon({
     const spawnEnv = allowlistEnv(env);
     if (dataDir) spawnEnv.OLLAMA_MODELS = join(dataDir, 'ollama', 'models');
     if (bindHost) spawnEnv.OLLAMA_HOST = bindHost;   // loopback-only host:port (alt-port heal)
+    // RAM-crash caps (P0): our safe default UNLESS the user set one explicitly (allowlistEnv already
+    // forwarded any explicit value, so only fill the gaps — never clobber a user's OLLAMA_* choice).
+    for (const [k, v] of Object.entries(OLLAMA_SPAWN_CAPS)) {
+      if (spawnEnv[k] == null) spawnEnv[k] = v;
+    }
     child = spawn(bin, ['serve'], { detached: false, stdio: ['ignore', 'ignore', 'pipe'], env: spawnEnv });
     spawnedByUs = true;
     child.stderr?.on?.('data', (d) => { errBuf = (errBuf + String(d)).slice(-4096); });

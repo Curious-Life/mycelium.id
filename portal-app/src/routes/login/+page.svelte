@@ -11,6 +11,10 @@
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 	let passwordInput = $state('');
+	// Passkey is the PRIMARY sign-in path; the operator password is a fully-working
+	// FALLBACK kept behind a "Use your password instead" disclosure. Auto-revealed when
+	// a password error needs to be shown (see handleOperatorLogin).
+	let showPassword = $state(false);
 	let userHandle = $state<string | null>(null);
 	let requirePasskey = $state(false);
 	let telegramAvailable = $state(false);
@@ -396,11 +400,11 @@
 			if (pctx) { hctx!.clearRect(0, 0, W, H); hctx!.drawImage(persist, 0, 0); }
 		}
 
-		let hRaf = 0, hStop = false;
-		const H_FRAME_CAP = 4200;
+		let hRaf = 0, hStop = false, hStart = 0;
+		const H_STOP_MS = 30_000;
 		function hAnimate() {
 			if (hStop) return;
-			if (time > H_FRAME_CAP) return; // network has stabilized; final frame persists
+			if (performance.now() - hStart > H_STOP_MS) return; // network has stabilized after 30s; final frame persists
 			hRaf = requestAnimationFrame(hAnimate);
 			time++;
 			if (!pctx) return;
@@ -414,7 +418,7 @@
 			if (time % 200 === 0) for (const k of Object.keys(density)) { density[k] = Math.floor(density[k] * 0.8); if (density[k] <= 0) delete density[k]; }
 			if (time % 2000 === 0) { const keys = Object.keys(grid); if (keys.length > 500) for (const k of keys.slice(0, keys.length - 300)) delete grid[k]; }
 		}
-		function startHyphae() { if (hStop) return; cancelAnimationFrame(hRaf); hRaf = requestAnimationFrame(hAnimate); }
+		function startHyphae() { if (hStop) return; hStart = performance.now(); cancelAnimationFrame(hRaf); hRaf = requestAnimationFrame(hAnimate); }
 
 		// ── starfield (Milky-Way bloom from the mushroom mark on hover) ──────
 		let sctx: CanvasRenderingContext2D | null = sCanvas ? sCanvas.getContext('2d') : null;
@@ -600,7 +604,11 @@
 		error = null;
 		try {
 			const optRes = await fetch('/api/auth/passkey/generate-authenticate-options', { credentials: 'same-origin' });
-			if (!optRes.ok) throw new Error('No passkey is set up on this vault yet — use your password.');
+			if (!optRes.ok) {
+				// No passkey enrolled yet — reveal the password fallback so it's one click away.
+				if (!requirePasskey) showPassword = true;
+				throw new Error('No passkey is set up on this vault yet — use your password.');
+			}
 			const options = await optRes.json();
 			const credential = await startAuthentication({ optionsJSON: options });
 			const response: Record<string, unknown> = { ...(credential as unknown as Record<string, unknown>) };
@@ -708,50 +716,68 @@
 								{#if requirePasskey}
 									This vault requires a passkey for web sign-in. Use Touch ID, Face ID, or your security key.
 								{:else if enrollIntent}
-									Sign in once with your operator password — then you can add a passkey to this vault for faster, phishing-resistant web sign-in next time.
+									Sign in with your passkey — or your operator password — then you can add a passkey to this vault for faster, phishing-resistant web sign-in next time.
 								{:else}
-									Enter your operator password to reach your vault on this device.
+									Use your passkey — Touch ID, Face ID, or a security key — to reach your vault. Your operator password still works as a fallback.
 								{/if}
 							</p>
 						</div>
 
-						{#if !requirePasskey}
-							<form class="space-y-3" onsubmit={(e) => { e.preventDefault(); handleOperatorLogin(); }}>
-								<input
-									bind:value={passwordInput}
-									type="password"
-									placeholder="operator password"
-									autocomplete="current-password"
-									class="input w-full text-sm"
-								/>
-								<button
-									type="submit"
-									disabled={loading || !passwordInput}
-									class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed"
-								>
-									{#if loading}
-										<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-										<span>Signing in…</span>
-									{:else}
-										<span>Sign in</span>
-									{/if}
-								</button>
-							</form>
-						{/if}
-
-						<!-- Passkey (Touch ID / Face ID / security key). The primary path when a
-						     passkey is required; otherwise a returning-user shortcut (fails
-						     gracefully to the password if none is enrolled). -->
-						<div class="pt-4 {requirePasskey ? '' : 'border-t border-[var(--color-border)]'}">
-							<button
-								onclick={handleV1PasskeyLogin}
-								disabled={loading}
-								class="w-full btn py-3 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 border border-[var(--color-border)] hover:border-[var(--color-accent)] transition-colors"
-							>
+						<!-- PRIMARY: passkey (Touch ID / Face ID / security key). Phishing-resistant
+						     and the lead call-to-action. Falls back to the password disclosure below
+						     if no passkey is enrolled yet. -->
+						<button
+							onclick={handleV1PasskeyLogin}
+							disabled={loading}
+							class="w-full btn btn-primary py-3.5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+						>
+							{#if loading}
+								<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+								<span>Working…</span>
+							{:else}
 								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A13.916 13.916 0 008 11a4 4 0 118 0c0 1.017-.07 2.019-.203 3m-2.118 6.844A21.88 21.88 0 0015.171 17m3.839 1.132c.645-2.266.99-4.659.99-7.132A8 8 0 008 4.07M3 15.364c.64-1.319 1-2.8 1-4.364 0-1.457.39-2.823 1.07-4" /></svg>
 								<span>Sign in with passkey</span>
-							</button>
-						</div>
+							{/if}
+						</button>
+
+						{#if !requirePasskey}
+							<!-- FALLBACK: operator password, kept fully functional but demoted behind
+							     a disclosure so passkey leads. Reveals inline (also auto-revealed when
+							     no passkey is enrolled or a password error needs showing). -->
+							{#if !showPassword}
+								<button
+									type="button"
+									onclick={() => { showPassword = true; }}
+									class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] underline underline-offset-2 transition-colors py-1"
+								>
+									Use your password instead
+								</button>
+							{:else}
+								<form class="space-y-3 pt-2 border-t border-[var(--color-border)]" onsubmit={(e) => { e.preventDefault(); handleOperatorLogin(); }}>
+									<!-- svelte-ignore a11y_autofocus -->
+									<input
+										bind:value={passwordInput}
+										type="password"
+										placeholder="operator password"
+										autocomplete="current-password"
+										autofocus
+										class="input w-full text-sm"
+									/>
+									<button
+										type="submit"
+										disabled={loading || !passwordInput}
+										class="w-full btn py-3 disabled:opacity-50 disabled:cursor-not-allowed border border-[var(--color-border)] hover:border-[var(--color-accent)] transition-colors"
+									>
+										{#if loading}
+											<svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+											<span>Signing in…</span>
+										{:else}
+											<span>Sign in with password</span>
+										{/if}
+									</button>
+								</form>
+							{/if}
+						{/if}
 
 						{#if telegramAvailable}
 							<div class="pt-4 border-t border-[var(--color-border)] space-y-3">

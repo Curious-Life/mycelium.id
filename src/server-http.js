@@ -342,7 +342,7 @@ export async function createHttpApp(opts = {}) {
     // Data attributes login.js reads (first-party, CSP-safe). data-enroll carries the
     // enrol intent across the password POST → redirect; data-pkname is the label.
     const dataAttrs = `data-qs="${escHtml(qs)}"${enroll ? ' data-enroll="1"' : ''} data-pkname="${escHtml(pkName)}"`;
-    const shell = (inner) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mycelium — Sign in</title><style>body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0c;color:#eaeaea;display:grid;place-items:center;min-height:100vh;margin:0}form{background:#15151a;padding:2rem;border-radius:14px;width:320px;border:1px solid #26262e}h1{font-size:1.05rem;margin:0 0 .4rem;color:#c9a227;font-weight:600}.id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#8a8a99;font-size:.85rem;margin:0 0 1.2rem}input{width:100%;box-sizing:border-box;margin:.35rem 0;padding:.65rem;background:#0a0a0c;border:1px solid #26262e;border-radius:8px;color:#eaeaea}button{width:100%;margin-top:1rem;padding:.7rem;background:#c9a227;color:#0a0a0c;border:0;border-radius:8px;font-weight:700;cursor:pointer}button.alt{background:transparent;color:#c9a227;border:1px solid #26262e}.e{color:#f87171;font-size:.85rem;margin:.3rem 0}.s{color:#8a8a99;font-size:.72rem;margin-top:1rem;text-align:center}</style></head><body>${inner}<script src="/login.js"></script></body></html>`;
+    const shell = (inner) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mycelium — Sign in</title><style>body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0c;color:#eaeaea;display:grid;place-items:center;min-height:100vh;margin:0}form{background:#15151a;padding:2rem;border-radius:14px;width:320px;border:1px solid #26262e}h1{font-size:1.05rem;margin:0 0 .4rem;color:#c9a227;font-weight:600}.id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#8a8a99;font-size:.85rem;margin:0 0 1.2rem}input{width:100%;box-sizing:border-box;margin:.35rem 0;padding:.65rem;background:#0a0a0c;border:1px solid #26262e;border-radius:8px;color:#eaeaea}button{width:100%;margin-top:1rem;padding:.7rem;background:#c9a227;color:#0a0a0c;border:0;border-radius:8px;font-weight:700;cursor:pointer}button.alt{background:transparent;color:#c9a227;border:1px solid #26262e}button.link{width:auto;display:block;margin:.7rem auto 0;padding:.3rem;background:transparent;color:#8a8a99;border:0;border-radius:0;font-weight:400;font-size:.8rem;text-decoration:underline}.e{color:#f87171;font-size:.85rem;margin:.3rem 0}.s{color:#8a8a99;font-size:.72rem;margin-top:1rem;text-align:center}</style></head><body>${inner}<script src="/login.js"></script></body></html>`;
     // Post-sign-in enrol view: session exists, run the registration ceremony (no
     // password field). login.js wires #pkreg to generate-register-options → create →
     // verify-registration, then to the vault.
@@ -351,13 +351,19 @@ export async function createHttpApp(opts = {}) {
     }
     const sub = isOAuth ? 'Authorizing an app to reach this vault.'
       : (enroll ? 'Sign in to add a passkey to your vault.' : 'Sign in to open your vault.');
-    // Passkey-required → passkey-only (no password field/submit). Otherwise show the
-    // password form AND a passkey button (a returning user with a passkey can use it).
+    // Passkey is the PRIMARY web credential (phishing-resistant) — shown first as the
+    // main call-to-action. The operator PASSWORD stays a fully-working FALLBACK, kept
+    // present in the DOM but demoted behind a "Use your password instead" disclosure
+    // (revealed by login.js). A server-rendered error here is always a password-POST
+    // failure, so we auto-reveal the password block on `err` (never hide the reason a
+    // sign-in was rejected). Passkey-required → passkey-only (no password field at all).
+    const pkBtn = `<button type="button" id="pk">Sign in with passkey</button>`;
+    const pwOpen = !!err;
     const pwBlock = passkeyRequired ? ''
-      : `<input name="password" type="password" placeholder="operator password" autocomplete="current-password" autofocus required><button type="submit">Sign in</button>`;
+      : `<div id="pwblock"${pwOpen ? '' : ' style="display:none"'}><input name="password" type="password" placeholder="operator password" autocomplete="current-password"${pwOpen ? ' autofocus' : ''} required><button type="submit">Sign in with password</button></div>`
+        + `<button type="button" id="pwtoggle" class="link"${pwOpen ? ' style="display:none"' : ''}>Use your password instead</button>`;
     const pkNote = passkeyRequired ? `<div class="s" style="margin-top:0;margin-bottom:.4rem">This vault requires a passkey.</div>` : '';
-    const pkBtn = `<button type="button" id="pk" class="alt">Sign in with passkey</button>`;
-    return shell(`<form id="lf" method="POST" action="/login?${escHtml(qs)}" ${dataAttrs}><h1>Connect to your vault</h1><div class="id">${ident}</div>${pkNote}${errBlock}<input type="hidden" name="_csrf" value="${escHtml(csrf)}">${pwBlock}${pkBtn}<div class="s">${sub}</div></form>`);
+    return shell(`<form id="lf" method="POST" action="/login?${escHtml(qs)}" ${dataAttrs}><h1>Connect to your vault</h1><div class="id">${ident}</div>${pkNote}${errBlock}<input type="hidden" name="_csrf" value="${escHtml(csrf)}">${pkBtn}${pwBlock}<div class="s">${sub}</div></form>`);
   };
 
   // First-party WebAuthn driver for the OAuth /login passkey button (served 'self'
@@ -397,6 +403,11 @@ export async function createHttpApp(opts = {}) {
       afterAuth();
     }catch(e){btn.disabled=false; err((e&&e.name==='NotAllowedError')?'Passkey sign-in cancelled':((e&&e.message)||'Passkey sign-in failed'));}
   });
+  // ── Password FALLBACK disclosure ────────────────────────────────────────────
+  // Passkey leads; the password form is hidden until the user asks for it. Reveal
+  // it and focus the field (CSP-safe: no inline handler, driven from this 'self' JS).
+  var tg=document.getElementById('pwtoggle'), pwb=document.getElementById('pwblock');
+  if(tg&&pwb) tg.addEventListener('click',function(){pwb.style.display='block';tg.style.display='none';var pi=pwb.querySelector('input[name=password]');if(pi)pi.focus();});
   // ── Passkey ENROLMENT (post-sign-in, step=passkey) ──────────────────────────
   // The credential is bound to this page's rpID (= <handle>.mycelium.id), which is
   // why enrolment happens HERE (the relay origin), not in the loopback desktop app.

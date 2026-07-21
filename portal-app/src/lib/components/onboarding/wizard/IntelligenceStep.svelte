@@ -86,6 +86,10 @@
 		Math.round(coreItems.filter(isChecked).reduce((s, it) => s + (it.sizeGb || 0), 0) * 10) / 10,
 	);
 	const anyToDownload = $derived(coreItems.some(isChecked));
+	// Done state (R4-7): every core item is now installed (or included) — nothing left to pull.
+	// Driven by the bundle's `installed` truth (flips after loadBundle re-fetch post-download), so
+	// the button shows a persistent green "All set" instead of reverting to "Nothing to download".
+	const allCoreInstalled = $derived(coreItems.length > 0 && coreItems.every((it) => it.included || it.installed));
 	// The understanding model id — reused by the on-device engine connect below.
 	const understandingModel = $derived(
 		(bundle?.rows || []).find((r) => r.key === 'understanding')?.model || null,
@@ -146,7 +150,7 @@
 
 	async function runDownloadsSerially(downloads: { key: string; model: string; route: string }[]) {
 		for (const d of downloads) {
-			dlLabel = `Downloading ${OUTCOME[d.key]?.label || d.key}…`;
+			dlLabel = `Downloading ${d.model || OUTCOME[d.key]?.label || d.key}…`;
 			try {
 				if (d.route === '/portal/hardware/pull') await startLabelPull(d.model);
 				else if (d.route === '/portal/transcription/download') await api('/portal/transcription/download', { method: 'POST', body: JSON.stringify({ model: d.model }) });
@@ -175,7 +179,7 @@
 				if (payload === '[DONE]') continue;
 				let ev: any; try { ev = JSON.parse(payload); } catch { continue; }
 				if (ev.done) { if (!ev.ok) throw new Error(ev.error || 'pull failed'); }
-				else if (ev.total) dlLabel = `Downloading Understanding… ${Math.min(100, Math.round((ev.completed / ev.total) * 100))}%`;
+				else if (ev.total) dlLabel = `Downloading ${name}… ${Math.min(100, Math.round((ev.completed / ev.total) * 100))}%`;
 			}
 		}
 	}
@@ -248,26 +252,49 @@
 	}
 
 	// ── Name beat (name-only; personality deferred to the character page) ────────
+	// The server default when unset — mirrors DEFAULT_AGENT_NAME (src/portal-chat.js). A
+	// display-only heuristic: don't PREFILL the box with the placeholder default, so a fresh
+	// vault shows "e.g. Aria" while a returning user sees the name they chose (R4-14 fix a).
+	const DEFAULT_AGENT_NAME = 'Mycelium';
 	let agentName = $state('');
+	let savedName = $state<string | null>(null); // last value we persisted (dedupe redundant PUTs)
 	let advancing = $state(false);
+
+	// The ONE save path — awaited, best-effort, idempotent. Called both eagerly (on blur, so a
+	// header "Skip for later" that bypasses the step's Continue still persists — R4-14 fix b) and
+	// again on Continue. `settings.agent.name` is what ChatFloat reads, so this is the whole fix.
+	async function saveName() {
+		const name = agentName.trim();
+		if (!name || name === savedName) return;
+		try {
+			const res = await api('/portal/agent-identity', { method: 'PUT', body: JSON.stringify({ name }) });
+			if (res.ok) savedName = name;
+		} catch { /* best-effort — nameable later on the character page */ }
+	}
 	async function continueOn() {
 		if (advancing) return;
 		advancing = true;
-		const name = agentName.trim();
-		try { if (name) await api('/portal/agent-identity', { method: 'PUT', body: JSON.stringify({ name }) }); }
-		catch { /* best-effort — nameable later on the character page */ }
+		await saveName();
 		onNext();
 	}
 
 	onMount(async () => {
-		const [pr] = await Promise.all([getJSON('/portal/providers/presets'), loadBundle()]);
+		const [pr, , identity] = await Promise.all([
+			getJSON('/portal/providers/presets'), loadBundle(),
+			getJSON('/portal/agent-identity'),
+		]);
 		if (pr?.presets) presets = pr.presets;
+		// Seed the box from the stored name so a returning user sees it (and a re-save never
+		// blanks it). Skip the server default — a fresh vault keeps the placeholder.
+		const stored = typeof identity?.name === 'string' ? identity.name.trim() : '';
+		if (stored && stored !== DEFAULT_AGENT_NAME) { agentName = stored; savedName = stored; }
 	});
 </script>
 
 <div class="step-body">
 	<h1 class="title">Connect your intelligence</h1>
-	<p class="lede">Set up the private core that reads your mind-map — and the AI you'll talk to.</p>
+	<!-- Copy: clearer/simpler lede — PROPOSAL for operator review (QA4 R4). -->
+	<p class="lede">Set up the on-device AI that reads your notes and talks with you.</p>
 
 	{#if loadErr}
 		<p class="err">Could not load your intelligence options. You can set this up later in Settings.</p>
@@ -297,8 +324,11 @@
 				{/each}
 			</div>
 			<div class="dl-row">
-				<button class="primary" disabled={downloading || !anyToDownload} onclick={downloadCore}>
-					{downloading ? (dlLabel || 'Downloading…') : anyToDownload ? `Download all · ${selectedGb} GB` : 'Nothing to download'}
+				<button class="primary" class:done={!downloading && !anyToDownload && allCoreInstalled} disabled={downloading || !anyToDownload} onclick={downloadCore}>
+					{#if downloading}{dlLabel || 'Downloading…'}
+					{:else if anyToDownload}Download all · {selectedGb} GB
+					{:else if allCoreInstalled}All set ✓
+					{:else}Nothing to download{/if}
 				</button>
 				{#if ramFit && anyToDownload}<span class="fit">{ramFit}</span>{/if}
 			</div>
@@ -374,8 +404,8 @@
 		<!-- ── Name beat (name-only; personality lives on the character page) ── -->
 		{#if hasEngine}
 			<section class="sec name-beat">
-				<label class="name-label" for="wiz-agent-name">What should we call it?</label>
-				<input id="wiz-agent-name" class="name-input" type="text" maxlength="40" bind:value={agentName} placeholder="e.g. Aria" />
+				<label class="name-label" for="wiz-agent-name">How will you call it?</label>
+				<input id="wiz-agent-name" class="name-input" type="text" maxlength="40" bind:value={agentName} onblur={saveName} placeholder="e.g. Aria" />
 			</section>
 		{/if}
 
@@ -435,5 +465,7 @@
 	.primary.sm { padding: 0.4rem 0.9rem; font-size: 0.78rem; align-self: flex-start; }
 	.primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(229,184,76,0.25); }
 	.primary:disabled { opacity: 0.5; cursor: default; transform: none; box-shadow: none; }
+	/* Completion state — persistent green "All set ✓" (overrides the disabled dimming). */
+	.primary.done, .primary.done:disabled { opacity: 1; background: var(--color-accent-jade, #4ade80); color: #0a0a0c; box-shadow: none; }
 	@media (max-width: 520px) { .cards { grid-template-columns: 1fr; } }
 </style>

@@ -75,12 +75,9 @@ export function portalCharacterRouter({
     agent.voice = { ...(agent.voice || {}), description: description || null };
     await db.users.updateSettings(userId, { ...s, agent });
   };
-  // Resolve the SAME agent root the agent cycle writes to, via the single-source
-  // mindAgentRoot() so REST, MCP and backup/restore agree on one self.md.
-  // NOTE: nothing sets MYCELIUM_AGENT_ROOT today (an earlier comment claimed the
-  // packaged app does — it does NOT; grep confirms), so this resolves cwd-relative
-  // to <cwd>/data/mind. That durability fragility is tracked separately — see the
-  // ⚠️ DURABILITY note on mindAgentRoot() in src/paths.js.
+  // Resolve the SAME agent root the agent cycle (MCP) writes to — the durable
+  // <dataDir>/mind via the single paths.js resolver, so REST and MCP agree on one
+  // self.md (MYCELIUM_AGENT_ROOT still overrides for both).
   const resolvedRoot = agentRoot || mindAgentRoot();
   const mind = createMindFiles({ agentRoot: resolvedRoot, agentId, fs, path });
   const authorship = createAuthorship({ readMindFile: mind.readMindFile, writeMindFile: mind.writeMindFile });

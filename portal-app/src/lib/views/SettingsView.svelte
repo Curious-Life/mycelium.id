@@ -39,6 +39,7 @@
 	import AIAccessSection from '$lib/components/settings/AIAccessSection.svelte';
 	import AgentCaptureSection from '$lib/components/settings/AgentCaptureSection.svelte';
 	import KeepAwakeSection from '$lib/components/settings/KeepAwakeSection.svelte';
+	import VersionSection from '$lib/components/settings/VersionSection.svelte';
 	import DataSection from '$lib/components/settings/DataSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
 	import PasskeysSection from '$lib/components/settings/PasskeysSection.svelte';
@@ -1171,6 +1172,10 @@
 					</select>
 				</div>
 			</section>
+
+			<!-- Version / About + manual check-for-updates (desktop only; wraps the
+			     signed auto-updater). Web build shows the version and no controls. -->
+			<VersionSection />
 			{/if}
 
 			{#if activePane === 'security'}

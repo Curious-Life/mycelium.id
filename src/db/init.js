@@ -25,6 +25,7 @@ import { maybeSnapshotBeforeMigrate } from '../account/snapshot-on-boot.js';
 import { guardAgainstForeignWal, recordVaultBinding } from './wal-guard.js';
 import { recordDurabilityEvent } from './durability-log.js';
 import { ensureSidecarHealthy, dropLegacyVaultIndex } from '../search/sqlite/sidecar.js';
+import { migrateMindRootIfLegacy } from '../mindfiles/migrate-root.js';
 
 // Cross-process init lock. A LIVE holder is NEVER stolen — even a multi-minute
 // migration of a multi-GB vault — because stealing a mid-migration holder lets a
@@ -170,6 +171,18 @@ export async function initVaultStorage({ dbPath, userHex, log = (m) => console.e
   const lockPath = join(dirname(dbPath), '.vault-init.lock');
   await acquireLock(lockPath);
   try {
+    // 0. Durable mind-root relocation (docs/MIND-ROOT-DURABILITY-MIGRATION-DESIGN-2026-07-20.md).
+    //    Move any pre-existing legacy mind tree (<cwd>/data/mind/mind, historically
+    //    INSIDE the update-replaceable app bundle) to the durable <dataDir>/mind.
+    //    Byte-only (no key needed); runs here because this is the one exclusive
+    //    cross-process point that precedes every writer's first mind touch. Best-
+    //    effort: a failure leaves the legacy tree intact and boot proceeds.
+    try {
+      migrateMindRootIfLegacy({ log }); // logs its own richer summary (moved + skipped)
+    } catch (e) {
+      log(`[mycelium] mind: relocation skipped (${e && (e.code || e.name) || 'error'})`);
+    }
+
     // 1. Schema (key-aware: born-encrypted for a fresh at-rest vault; keyed for an
     //    already-encrypted one; plaintext otherwise).
     ensureVaultSchema(dbPath, userHex);
