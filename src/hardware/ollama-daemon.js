@@ -12,8 +12,12 @@
 //   • The binary path comes from a FIXED absolute allowlist (+ PATH dirs), never
 //     from a request body or the model catalog.
 //   • Env is an allowlist (PATH, HOME, OLLAMA_*) — NO master key, NO secrets.
-//   • We spawn ONLY when the daemon is down, and kill ONLY a daemon we started
+//   • We spawn when the daemon is down, and kill ONLY a daemon we started
 //     (`spawnedByUs`) — we can never take down a user's own Ollama (adopt path).
+//   • SELF-HEAL (never evict): if a too-OLD daemon squats the default :11434 we do NOT kill it —
+//     we spawn OUR runtime on a fresh LOOPBACK-ONLY alt port and steer every consumer there via
+//     getBaseUrl() + a published process.env.OLLAMA_URL. The alt port is still on-box (127.0.0.1),
+//     so §4g locality is preserved. See selfHealOnAltPort().
 //   • Fail-closed: binary absent → do nothing, report `not_installed`.
 //
 // THE PATH PROBLEM: a Finder-launched macOS .app inherits launchd's minimal PATH
@@ -21,12 +25,51 @@
 // (src-tauri/src/main.rs). So we must probe ABSOLUTE candidate paths, not rely
 // on PATH resolving `ollama`.
 
-import { spawn as nodeSpawn } from 'node:child_process';
+import { spawn as nodeSpawn, execFile as nodeExecFile } from 'node:child_process';
 import { existsSync as nodeExistsSync } from 'node:fs';
+import net from 'node:net';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { findExecutable, homeDir } from '../system/platform-env.js';
 import { createOllamaClient } from './ollama.js';
-import { installOllama, extractedBinPath } from './ollama-install.js';
+import { installOllama, extractedBinPath, OLLAMA_VERSION } from './ollama-install.js';
+
+const execFileP = promisify(nodeExecFile);
+
+const DEFAULT_OLLAMA_URL = 'http://127.0.0.1:11434';
+
+// ── Runtime-version gate (N1: FS2-A) ─────────────────────────────────────────
+// The MINIMUM Ollama the recommended catalog needs. The on-box default (qwen3.5:4b — the
+// labeling/enrich pick, endorsedLocalModels()) uses Gated-DeltaNet attention, added in Ollama
+// 0.17.4; an OLDER host (e.g. Homebrew 0.12.9) makes the registry 412-REFUSE the manifest and
+// every pull fails with a misleading "check your network". The pinned download we ship
+// (ollama-install.js OLLAMA_VERSION, v0.30.5) is well above this floor. The floor is the
+// DEFAULT model's documented need, not the pin — a host in [0.17.4, pin) can still run the
+// default, so gating at the pin would needlessly refuse a capable runtime and force our own
+// download. A browse-catalog model that needs newer than the HOST (e.g. qwen3.6 — see N4) is
+// caught downstream by the terminal `incompatible-runtime` pull fault (ollama.js), not here.
+// Bump this only when the DEFAULT/recommended model's floor rises.
+export const OLLAMA_MIN_VERSION = '0.17.4';
+
+/** Parse "0.30.5" / "v0.30.5" / "ollama version is 0.12.9" → [maj,min,patch], or null. */
+export function parseOllamaVersion(s) {
+  const m = String(s ?? '').match(/(\d+)\.(\d+)\.(\d+)/);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/**
+ * Semver-triple ≥ comparison. Accepts triples or version STRINGS. An UNPARSEABLE input → false
+ * — but callers decide what "can't tell" means: the adopt path treats null as "unknown → adopt"
+ * (fail-open, so a future --version format never bricks a running daemon), while the spawn path
+ * only SWITCHES to the pinned binary when the host is PROVABLY too old.
+ */
+export function versionGte(a, b) {
+  const pa = Array.isArray(a) ? a : parseOllamaVersion(a);
+  const pb = Array.isArray(b) ? b : parseOllamaVersion(b);
+  if (!pa || !pb) return false;
+  for (let i = 0; i < 3; i++) { if (pa[i] > pb[i]) return true; if (pa[i] < pb[i]) return false; }
+  return true;
+}
 
 // Absolute install locations we trust, in priority order. (Homebrew on Apple
 // Silicon + Intel, the official Ollama.app, and a common user-local dir.)
@@ -118,6 +161,56 @@ export function redactDaemonDetail(s) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Best-effort daemon version via GET /api/version → parsed triple, or null (unreachable/old). */
+async function defaultDaemonVersion(baseUrl, fetchImpl) {
+  try {
+    const base = String(baseUrl || DEFAULT_OLLAMA_URL).replace(/\/+$/, '');
+    const signal = typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(2000) : undefined;
+    const r = await fetchImpl(`${base}/api/version`, { signal });
+    if (!r?.ok) return null;
+    const data = await r.json();
+    return parseOllamaVersion(data?.version);
+  } catch { return null; }
+}
+
+/** Best-effort binary version via `<bin> --version` → parsed triple, or null. */
+async function defaultBinaryVersion(bin) {
+  try {
+    const { stdout, stderr } = await execFileP(bin, ['--version'], { timeout: 4000 });
+    return parseOllamaVersion(`${stdout || ''} ${stderr || ''}`);
+  } catch (e) {
+    // `ollama --version` exits non-zero when it can't reach a running server, but STILL prints the
+    // client version to stdout; execFile rejects with that output attached. Salvage it before null.
+    return parseOllamaVersion(`${e?.stdout || ''} ${e?.stderr || ''}`);
+  }
+}
+
+/** Host:port from an ollama base URL (e.g. "http://127.0.0.1:11435" → "127.0.0.1:11435"), or null. */
+function hostFromBase(base) {
+  try { return new URL(String(base)).host || null; } catch { return null; }
+}
+
+/**
+ * First FREE loopback TCP port at or above `start` (scans up to `start + range`), or null.
+ * Used only for the alt-port SELF-HEAL: when a too-old daemon squats the default :11434 we can
+ * neither adopt nor evict it (§4/§6 — never kill a daemon we didn't start), so we bind OUR runtime
+ * to a fresh loopback port instead. Binds 127.0.0.1 ONLY (never 0.0.0.0) — the healed daemon stays
+ * on-box, exactly like the default. Injectable for tests.
+ */
+function defaultFreePort(start, { host = '127.0.0.1', range = 64 } = {}) {
+  return new Promise((resolve) => {
+    let port = start;
+    const attempt = () => {
+      if (port > start + range) return resolve(null);
+      const srv = net.createServer();
+      srv.once('error', () => { srv.close(() => { port += 1; attempt(); }); });
+      srv.once('listening', () => { const p = srv.address()?.port ?? port; srv.close(() => resolve(p)); });
+      srv.listen(port, host);
+    };
+    attempt();
+  });
+}
+
 /**
  * Create a lazy adopt-or-spawn controller for the local Ollama daemon.
  * @param {object} [deps]
@@ -130,6 +223,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * @param {(m:string)=>void} [deps.log]
  * @param {number}   [deps.startTimeoutMs=15000]
  * @param {number}   [deps.pollMs=400]
+ * @param {string}   [deps.minVersion]        min Ollama version to adopt/spawn (default OLLAMA_MIN_VERSION)
+ * @param {(baseUrl?:string, fetch?:Function)=>Promise<number[]|null>} [deps.daemonVersion] /api/version probe
+ * @param {(opts:object)=>(string|null)} [deps.findHostBinary] host/PATH binary locator
+ * @param {(bin:string)=>Promise<number[]|null>} [deps.binaryVersion] `<bin> --version` probe
  * @returns {{ ensureUp:Function, isInstalled:Function, stop:Function }}
  */
 export function createOllamaDaemon({
@@ -145,10 +242,44 @@ export function createOllamaDaemon({
   log = () => {},
   startTimeoutMs = 15000,
   pollMs = 400,
+  // N1 version-gate deps (all injectable for tests):
+  minVersion = OLLAMA_MIN_VERSION,
+  daemonVersion = (bu, f) => defaultDaemonVersion(bu, f),  // GET /api/version → triple|null
+  findHostBinary = findOllamaBinary,                       // system/PATH host binary (may be old)
+  binaryVersion = defaultBinaryVersion,                    // `<bin> --version` → triple|null
+  // Alt-port self-heal deps (injectable for tests):
+  altPortStart = 11435,                                    // first candidate loopback port for a healed daemon
+  findFreePort = defaultFreePort,                          // free-loopback-port scanner
 } = {}) {
-  const probeUp = isUp || (() => createOllamaClient({ baseUrl, fetch }).isUp());
-  // Adopt a SYSTEM install first; fall back to a copy we downloaded into dataDir.
-  const resolveBinary = findBinary || (() => findOllamaBinary({ env }) || (dataDir ? extractedBinPath(dataDir) : null));
+  // The base every consumer should DIAL. Starts at the configured/default :11434 and MOVES to a
+  // fresh loopback port after an alt-port self-heal (see start()). getBaseUrl() exposes it, and a
+  // heal also publishes it as process.env.OLLAMA_URL so env-reading consumers (inference/router.js,
+  // local.js, createOllamaClient's default) follow without a wiring change.
+  let effectiveBaseUrl = baseUrl || DEFAULT_OLLAMA_URL;
+  const probeUp = isUp || (() => createOllamaClient({ baseUrl: effectiveBaseUrl, fetch }).isUp());
+  // Adopt a SYSTEM install first; fall back to a copy we downloaded into dataDir. (SYNC — used by
+  // isInstalled(), which asks only "is a binary present at all", not "is it new enough".)
+  const resolveBinary = findBinary || (() => findHostBinary({ env }) || (dataDir ? extractedBinPath(dataDir) : null));
+
+  // Version-AWARE binary choice for the SPAWN path: prefer a host binary, but if it is provably too
+  // OLD for the catalog, prefer the pinned/extracted one instead (null → the auto-install rung
+  // downloads the pinned OLLAMA_VERSION). The `findBinary` override (tests / explicit) is honored
+  // verbatim — it fully replaces host-vs-pinned resolution, so it is never version-gated. An
+  // explicit MYCELIUM_OLLAMA is likewise an escape hatch: used as-is, never second-guessed.
+  async function chooseBinary() {
+    if (findBinary) return findBinary();
+    const host = findHostBinary({ env });
+    const pinned = dataDir ? extractedBinPath(dataDir) : null;
+    if (!host) return pinned;
+    if (env.MYCELIUM_OLLAMA && host === env.MYCELIUM_OLLAMA) return host;   // explicit user choice wins
+    const hv = await binaryVersion(host);
+    if (hv && !versionGte(hv, minVersion)) {
+      // Host is provably too old → do NOT spawn it. Prefer pinned (null ⇒ auto-install downloads it).
+      log(`[ollama-daemon] host ollama ${hv.join('.')} < ${minVersion} — preferring the pinned runtime (${OLLAMA_VERSION})`);
+      return pinned;
+    }
+    return host;  // new enough, or version unknown (fail-open: don't refuse a runtime we can't read)
+  }
 
   let child = null;
   let spawnedByUs = false;
@@ -168,12 +299,94 @@ export function createOllamaDaemon({
     return installInflight;
   }
 
-  async function start(onProgress) {
-    // 1. Already up (perhaps the user's own daemon) → adopt, never spawn.
-    if (await probeUp()) return { ok: true, running: true, installed: true, adopted: true };
+  /**
+   * Spawn `ollama serve` (non-detached → reaped with our process group on app exit; fixed args;
+   * allowlisted env; stderr captured for diagnostics), then poll `probe` until it binds or we time
+   * out. Models live app-private under dataDir, not the user's ~/.ollama. `bindHost` (when given)
+   * sets OLLAMA_HOST so the daemon binds a specific loopback host:port — used by the alt-port
+   * self-heal; null keeps ollama's default :11434. Sets `child`/`spawnedByUs`; spawn() may throw
+   * (caller catches). Returns true once the daemon answers, false on timeout.
+   */
+  async function spawnServe(bin, bindHost, probe) {
+    errBuf = '';
+    const spawnEnv = allowlistEnv(env);
+    if (dataDir) spawnEnv.OLLAMA_MODELS = join(dataDir, 'ollama', 'models');
+    if (bindHost) spawnEnv.OLLAMA_HOST = bindHost;   // loopback-only host:port (alt-port heal)
+    child = spawn(bin, ['serve'], { detached: false, stdio: ['ignore', 'ignore', 'pipe'], env: spawnEnv });
+    spawnedByUs = true;
+    child.stderr?.on?.('data', (d) => { errBuf = (errBuf + String(d)).slice(-4096); });
+    child.on?.('exit', () => { child = null; });
+    const deadline = Date.now() + startTimeoutMs;
+    for (;;) {
+      await sleep(pollMs);
+      if (await probe()) return true;
+      if (Date.now() >= deadline) return false;
+    }
+  }
 
-    // 2. Locate the binary; if absent and auto-install is on, DOWNLOAD it first.
-    let bin = resolveBinary();
+  /**
+   * SELF-HEAL when a too-old daemon squats the default port. We must NOT kill it (§4/§6) and cannot
+   * rebind the port it holds, so we spawn OUR runtime (host if new-enough, else the pinned/extracted
+   * one — chooseBinary; auto-install if absent) on a FRESH loopback port and steer every consumer to
+   * it: effectiveBaseUrl moves, and we publish it as process.env.OLLAMA_URL so env-reading consumers
+   * follow. The alt port is loopback-only (127.0.0.1) and models stay app-private — a healed daemon
+   * is exactly as on-box/local as the default, so §4g locality (isLoopbackUrl) still classes it local.
+   */
+  async function selfHealOnAltPort(onProgress, squatVersion) {
+    let bin = await chooseBinary();
+    if (!bin && autoInstall) {
+      const r = await provision(onProgress);
+      if (!r.ok) return { ok: false, running: true, installed: false, adopted: false, reason: r.reason };
+      bin = r.binPath;
+    }
+    if (!bin) return { ok: false, running: true, installed: false, adopted: false, reason: 'not_installed' };
+
+    const altPort = await findFreePort(altPortStart);
+    if (!altPort) return { ok: false, running: true, installed: true, adopted: false, reason: 'no_free_port' };
+    const altHost = `127.0.0.1:${altPort}`;
+    const altBase = `http://${altHost}`;
+    // Probe the ALT base specifically (the squatter still answers effectiveBaseUrl). A test that
+    // injects isUp drives both probes through that seam.
+    const altProbe = isUp || (() => createOllamaClient({ baseUrl: altBase, fetch }).isUp());
+
+    let up = false;
+    try { up = await spawnServe(bin, altHost, altProbe); }
+    catch { return { ok: false, running: true, installed: true, adopted: false, reason: 'spawn_failed' }; }
+    if (!up) {
+      const tail = redactDaemonDetail(errBuf.trim().split('\n').pop() || '');
+      return { ok: false, running: true, installed: true, adopted: false, reason: 'start_timeout', detail: tail || undefined };
+    }
+
+    // Steer every consumer to the alt port: getBaseUrl() + the published env override.
+    effectiveBaseUrl = altBase;
+    try { process.env.OLLAMA_URL = altBase; } catch { /* noop — env is read-only in some sandboxes */ }
+    log(`[ollama-daemon] a too-old ollama ${squatVersion?.join?.('.') || '?'} holds ${DEFAULT_OLLAMA_URL}; started our runtime on ${altBase}`);
+    return { ok: true, running: true, installed: true, adopted: false, healed: true, port: altPort, baseUrl: altBase };
+  }
+
+  async function start(onProgress) {
+    // 1. Already up (perhaps the user's own daemon) → adopt, never spawn — BUT only if it is new
+    //    enough for the catalog. A too-old listening daemon (e.g. Homebrew 0.12.9 < 0.17.4) would
+    //    412-refuse every qwen3.5 pull, and we can neither rebind the port it holds nor kill a daemon
+    //    we didn't start (§4/§6). So instead of leaving the box broken with an honest-but-useless
+    //    error, we SELF-HEAL: spawn our own runtime on an alternate loopback port and redirect every
+    //    consumer there (selfHealOnAltPort). Version-unknown (null) → adopt (fail-open): a future
+    //    /api/version change must never brick a working daemon, and the real too-old builds all
+    //    answer /api/version anyway; a genuine incompatibility then still surfaces as the terminal
+    //    `incompatible-runtime` pull fault downstream.
+    if (await probeUp()) {
+      const dv = await daemonVersion(effectiveBaseUrl, fetch);
+      // Not the daemon WE healed onto: a stranger too old for the catalog squats the port → heal.
+      // (Once healed, effectiveBaseUrl is the alt port and this probe hits OUR new-enough runtime.)
+      if (dv && !versionGte(dv, minVersion)) {
+        return await selfHealOnAltPort(onProgress, dv);
+      }
+      return { ok: true, running: true, installed: true, adopted: true, baseUrl: effectiveBaseUrl };
+    }
+
+    // 2. Locate the binary (version-aware: an old host binary yields the pinned one); if absent and
+    //    auto-install is on, DOWNLOAD it first.
+    let bin = await chooseBinary();
     if (!bin && autoInstall) {
       const r = await provision(onProgress);
       if (!r.ok) return { ok: false, running: false, installed: false, reason: r.reason };
@@ -181,34 +394,21 @@ export function createOllamaDaemon({
     }
     if (!bin) return { ok: false, running: false, installed: false, reason: 'not_installed' };
 
-    // 3. Spawn `ollama serve` (non-detached → reaped with our process group on
-    //    app exit; fixed args; allowlisted env; stderr captured for diagnostics).
-    //    Models live app-private under dataDir, not the user's ~/.ollama.
-    try {
-      errBuf = '';
-      const spawnEnv = allowlistEnv(env);
-      if (dataDir) spawnEnv.OLLAMA_MODELS = join(dataDir, 'ollama', 'models');
-      child = spawn(bin, ['serve'], { detached: false, stdio: ['ignore', 'ignore', 'pipe'], env: spawnEnv });
-      spawnedByUs = true;
-      child.stderr?.on?.('data', (d) => { errBuf = (errBuf + String(d)).slice(-4096); });
-      child.on?.('exit', () => { child = null; });
-    } catch {
-      return { ok: false, running: false, installed: true, reason: 'spawn_failed' };
-    }
+    // 3. Spawn `ollama serve` bound to the effective base. Normally that's ollama's default :11434
+    //    (bindHost null); after a prior heal it's the alt loopback port, so a respawn re-binds there
+    //    rather than colliding with the squatter on :11434.
+    const bindHost = effectiveBaseUrl !== DEFAULT_OLLAMA_URL ? hostFromBase(effectiveBaseUrl) : null;
+    let up;
+    try { up = await spawnServe(bin, bindHost, probeUp); }
+    catch { return { ok: false, running: false, installed: true, reason: 'spawn_failed' }; }
 
-    // 4. Poll until it binds or we time out.
-    const deadline = Date.now() + startTimeoutMs;
-    for (;;) {
-      await sleep(pollMs);
-      if (await probeUp()) {
-        log('[ollama-daemon] started ollama serve');
-        return { ok: true, running: true, installed: true, adopted: false };
-      }
-      if (Date.now() >= deadline) {
-        const tail = redactDaemonDetail(errBuf.trim().split('\n').pop() || '');
-        return { ok: false, running: false, installed: true, reason: 'start_timeout', detail: tail || undefined };
-      }
+    // 4. Report whether it bound.
+    if (up) {
+      log('[ollama-daemon] started ollama serve');
+      return { ok: true, running: true, installed: true, adopted: false, baseUrl: effectiveBaseUrl };
     }
+    const tail = redactDaemonDetail(errBuf.trim().split('\n').pop() || '');
+    return { ok: false, running: false, installed: true, reason: 'start_timeout', detail: tail || undefined };
   }
 
   /**
@@ -227,7 +427,10 @@ export function createOllamaDaemon({
     child = null;
   }
 
-  return { ensureUp, isInstalled, stop };
+  /** The base URL every consumer should DIAL — moves to the alt loopback port after a self-heal. */
+  function getBaseUrl() { return effectiveBaseUrl; }
+
+  return { ensureUp, isInstalled, stop, getBaseUrl };
 }
 
 export default createOllamaDaemon;

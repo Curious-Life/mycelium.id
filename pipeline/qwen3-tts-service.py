@@ -29,7 +29,15 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_PORT = int(os.environ.get("MYCELIUM_QWEN_TTS_PORT") or 8094)
-MAX_BODY = 4 * 1024 * 1024      # ref_audio can be a few hundred KB of base64
+# The vault POSTs ref_audio_b64 = base64(frozen WAV). The sample store caps a WAV
+# at MAX_SAMPLE_BYTES (8 MB, src/tts/voice-sample-store.js); base64 inflates that
+# ~4/3 (~10.7 MB) and the JSON adds text + ref_text. So the body cap MUST exceed
+# base64(8 MB) or a valid sample is 413'd at render time — the exact bug behind the
+# "▶ hear" audition failing with render-upstream-413 (the old 4 MB cap rejected
+# every WAV over ~3 MB, i.e. a ~30 s 48 kHz clip). 16 MB mirrors the store's
+# on-disk MAX_FILE_BYTES ceiling with headroom. Loopback-only + owner-gated +
+# rate-limited upstream, so this is a bounded same-box body, not a DoS surface.
+MAX_BODY = 16 * 1024 * 1024
 SAMPLE_RATE = 24000
 MODEL_DIR = os.environ.get("QWEN_TTS_MODEL_DIR") or ""
 
@@ -122,6 +130,21 @@ class Handler(BaseHTTPRequestHandler):
                 "detail": "A described voice is not reproducible; freeze a reference sample on the character page first (design §2.2 / §5).",
             })
 
+        # Decode + validate the reference WAV BEFORE the model touches it, so a
+        # malformed/undecodable sample gives an HONEST, actionable 422 rather than
+        # an opaque 500 from deep inside generate(). The vault produced this base64,
+        # so a failure here means a corrupt stored sample — surface that plainly.
+        try:
+            ref_audio = base64.b64decode(ref_b64)
+        except Exception:
+            return self._json(422, {"ok": False, "error": "bad-ref-audio: not base64"})
+        try:
+            with wave.open(io.BytesIO(ref_audio), "rb") as _w:
+                if _w.getnframes() <= 0:
+                    raise ValueError("empty PCM")
+        except Exception as e:  # noqa: BLE001
+            return self._json(422, {"ok": False, "error": f"bad-ref-audio: {str(e)[:80]}"})
+
         k = _load()
         if k is None:
             return self._json(503, {"ok": False, "error": f"model-unavailable: {_load_error}"})
@@ -129,8 +152,8 @@ class Handler(BaseHTTPRequestHandler):
             # SEAM: real render path — clone from the frozen sample (+ optional
             # `instruct` modulation, design §2.4). Confirmed runnable only on an
             # Apple-Silicon box with the model + a sample; wrapped so it never
-            # throws across the boundary.
-            ref_audio = base64.b64decode(ref_b64)
+            # throws across the boundary. A genuine model failure is a 500 here;
+            # a malformed sample was already caught above (422).
             samples, rate = k.generate(  # type: ignore[attr-defined]
                 text=text,
                 ref_audio=ref_audio,

@@ -168,7 +168,8 @@ export async function runAgentTurn(
         try { process.stderr.write(`[§4g] ${inferenceTask}: selected provider is US and no EU/on-box model is approved — refusing\n`); } catch { /* never */ }
         return { skipped: 'sensitive-no-safe-provider' };
       }
-      provider = { jurisdiction: 'local', baseUrl: DEFAULT_OLLAMA_URL, cloudModel: approved };
+      // Loopback base — follows an ollama-daemon alt-port self-heal (still on-box → jurisdiction 'local').
+      provider = { jurisdiction: 'local', baseUrl: process.env.OLLAMA_URL || DEFAULT_OLLAMA_URL, cloudModel: approved };
     }
     auditUsBlock(db, userId, inferenceTask, denied, provider?.jurisdiction || 'local', 'sensitive_us_block');
     try { process.stderr.write(`[§4g] ${inferenceTask}: selected provider is US — using ${provider.jurisdiction || 'local'} instead\n`); } catch { /* never */ }

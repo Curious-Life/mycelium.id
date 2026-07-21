@@ -205,8 +205,9 @@ export function portalIntelligenceRouter({
 } = {}) {
   if (!db?.users || !db?.providers) throw new Error('portalIntelligenceRouter: db.users + db.providers required');
   const router = express.Router();
-  const ollama = createOllamaClient({ baseUrl: ollamaUrl, fetch });
-  const probeInstalled = listInstalled || (() => ollama.listInstalled());
+  // Construct the client at USE time so a no-ollamaUrl mount follows an alt-port self-heal via
+  // createOllamaClient's env-aware default (process.env.OLLAMA_URL after a heal, else :11434).
+  const probeInstalled = listInstalled || (() => createOllamaClient({ baseUrl: ollamaUrl, fetch }).listInstalled());
   const compose = () => composeBundle({ db, userId, detect, listInstalled: probeInstalled, dbPath, headroom, voiceState, voiceRunnable });
 
   router.get('/intelligence/bundle', async (_req, res) => {

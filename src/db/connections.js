@@ -77,6 +77,31 @@ function hasVectorKey(o) {
 // stays deliberately permissive (2–64 chars, alnum + hyphen/underscore).
 const HANDLE_LOCAL_PART_RE = /^([a-z0-9][a-z0-9_-]{1,62})@(.+)$/i;
 
+// A federated delivery either succeeds (federationDeliver returns 'relay'|'direct') or
+// throws. Classify the throw so the initiator gets an HONEST outcome instead of a false
+// "invite sent" (QA N10): NOT-FOUND means the target instance/user genuinely does not
+// resolve (so the just-created pending row is a phantom that can never deliver, and the
+// message must be "no such user"); everything else is a transient UNREACHABLE — keep the
+// pending row for the store-and-forward re-delivery the design intends, but still don't
+// claim it was sent. We fail toward UNREACHABLE on anything ambiguous so a momentary
+// network blip never destroys a legitimate outbound request. The matched strings are the
+// throw sites in transport.resolveEndpoint + ssrf.safeFetch.
+function classifyDeliveryFailure(err) {
+  const m = String(err?.message || err || '');
+  // NXDOMAIN / unresolvable instance host, a live instance answering 404 for the acct, a
+  // malformed handle domain, or a host advertising no federation endpoint = peer isn't there.
+  if (/unresolvable host|WebFinger failed: 404|Invalid domain|No federation endpoint/i.test(m)) {
+    return 'not-found';
+  }
+  return 'unreachable';
+}
+
+// Human label for a federated target: bare mycelium handles (client expands `x` →
+// `x@x.mycelium.id`) collapse back to `@x`; everything else stays `@handle@domain`.
+function friendlyHandle(remoteHandle, remoteDomain) {
+  return remoteDomain === `${remoteHandle}.mycelium.id` ? `@${remoteHandle}` : `@${remoteHandle}@${remoteDomain}`;
+}
+
 const PENDING_LIMIT = 20;
 const MAX_MESSAGE_CHARS = 4000; // peer-message body cap (well under the 8KB canonical envelope cap)
 const OUTBOX_MAX_ATTEMPTS = 10; // stop re-attempting a failed DM after this many outbox sweeps (dead peer)
@@ -335,13 +360,33 @@ export function createConnectionsNamespace(deps) {
       );
     }
 
-    // Signed federation POST. Failure is non-fatal: the pending row persists and
-    // re-requesting (or a future reconcile sweep) re-delivers. We surface the
-    // failure to the caller's logs but keep the row so the request isn't lost.
+    // Signed federation POST. The delivery outcome is the target's existence +
+    // reachability signal (reusing the ONE existing egress — no extra probe): success
+    // means the request was genuinely enqueued (relay) or accepted (direct); a throw
+    // means it did NOT land. We no longer swallow that into a false "invite sent" (QA
+    // N10). A definitive not-found removes the phantom pending row and surfaces an
+    // honest "no such user"; a transient unreachable keeps the row for the
+    // store-and-forward re-delivery the design intends, but still refuses to claim sent.
     try {
       await federationDeliver({ remoteDomain, remoteHandle, connId: id }, 'connect', requestBody);
     } catch (e) {
-      console.warn(`[federation] Remote connect delivery failed (re-request to retry): ${e.message}`);
+      const cls = classifyDeliveryFailure(e);
+      console.warn(`[federation] Remote connect delivery failed (${cls}): ${e.message}`);
+      const who = friendlyHandle(remoteHandle, remoteDomain);
+      if (cls === 'not-found') {
+        // The target instance/user doesn't resolve — never leave a phantom pending
+        // row that can't deliver (only clean up the row we just created here), and
+        // never report it as sent. A pre-existing pending row (re-delivery) is left
+        // for the user to withdraw().
+        if (!redeliverId) {
+          await d1Query(`DELETE FROM connections WHERE id = ? AND status = 'pending'`, [id]).catch(() => {});
+        }
+        throw new Error(`No user ${who} found — check the handle and try again.`);
+      }
+      // Transient (peer offline / relay busy / endpoint misconfig): the pending row
+      // persists so a re-request (or reconcile sweep) re-delivers, but the user is
+      // told honestly it hasn't been delivered yet — not "sent".
+      throw new Error(`Couldn't reach ${who} right now — your request is saved and will keep trying to deliver.`);
     }
 
     return id;

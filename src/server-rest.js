@@ -979,7 +979,23 @@ export async function startRestServer({
     // Networked clients (over the relay) must present a valid session; loopback
     // (desktop) stays "always signed in". So /auth/session 401s an unauthed
     // networked browser → the SPA bounces it to /login (operator password).
-    resolveAuthorized: (req) => isAuthorized(req, { userId: resolvedUserId }),
+    //
+    // A QR-paired phone authenticates with a per-device token (Unit A). The two
+    // DATA gates already honor it (createVaultAuthMiddleware :849, makePortalOwnerGate
+    // :301), but WITHOUT the same closure here, /auth/session would 401 the phone's
+    // session check — so a validly-paired phone whose requests carry a live device
+    // token could reach the data routers yet the SPA would still bounce it to /login,
+    // looping on the operator-password/passkey prompt (QA N11). Thread the SAME
+    // matchSync closure so the session check recognizes a paired device exactly as
+    // the data gates do. Fail-closed + additive: no db/no deviceTokens ⇒ the device
+    // path is simply absent (strictly more restrictive); loopback/bearer/cookie
+    // paths are unchanged. dbHandle (not `db`) — `db` is scoped inside completeBoot;
+    // the closure reads dbHandle lazily per-request (populated by the time a phone
+    // hits /auth/session).
+    resolveAuthorized: (req) => isAuthorized(req, {
+      userId: resolvedUserId,
+      deviceTokenMatch: dbHandle?.deviceTokens ? (t) => dbHandle.deviceTokens.matchSync(t) : null,
+    }),
   }));
 
   // Vault-dependent routes: delegate to the sub-app once the vault is open. Until

@@ -33,6 +33,13 @@ export const MODEL_REGISTRY = Object.freeze({
   'llama3.2':           { contextWindow: 128_000, maxOutput: 4_096, family: 'llama' },
   'gemma3':             { contextWindow: 128_000, maxOutput: 8_192, family: 'gemma' },
   'gemma2':             { contextWindow: 8_192,   maxOutput: 4_096, family: 'gemma' },
+  // ⚠️ qwen3.5 MUST precede a qwen3 prefix-match: `qwen3.5:4b` starts with `qwen3`, so
+  // WITHOUT this row lookupModel() resolves it to the qwen3 row (40960) — a 5× overstatement
+  // of the catalog's real 8192 window (src/hardware/catalog.json), which oversizes num_ctx
+  // for every prompt the moment the model loads on a runtime where the /api/show probe is
+  // unreachable (the registry is the fallback). longest-prefix-wins picks `qwen3.5` (len 7)
+  // over `qwen3` (len 5). Output mirrors the gemma2 8192-window row (half the window).
+  'qwen3.5':            { contextWindow: 8_192,   maxOutput: 4_096, family: 'qwen' },
   'qwen3':              { contextWindow: 40_960,  maxOutput: 8_192, family: 'qwen' },
   'qwen2.5':            { contextWindow: 32_768,  maxOutput: 8_192, family: 'qwen' },
   'phi4':               { contextWindow: 16_384,  maxOutput: 4_096, family: 'phi' },

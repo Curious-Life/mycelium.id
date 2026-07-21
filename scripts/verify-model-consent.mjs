@@ -452,7 +452,12 @@ await t('M7f. classifyOllamaFault maps every REAL error shape; faultMessage is a
   const { classifyOllamaFault, OLLAMA_FAULT } = await import('../src/hardware/ollama.js');
   const { faultMessage } = await import('../src/enrich/drainer.js');
   const R = OLLAMA_FAULT.RUNTIME_UNREACHABLE, D = OLLAMA_FAULT.DOWNLOAD_FAILED, S = OLLAMA_FAULT.OUT_OF_SPACE;
+  const I = OLLAMA_FAULT.INCOMPATIBLE_RUNTIME;
   const cases = [
+    // A registry 412 (host Ollama too OLD for the model) is its OWN class — NOT download-failed,
+    // which would render "check your network" (N2). Both shapes: a non-2xx and the mid-stream text.
+    [new Error('ollama /api/pull 412'), 'pull', I],
+    [new Error('ollama pull failed: 412: The model you are trying to pull requires a newer version of Ollama.'), 'pull', I],
     [new TypeError('fetch failed'), 'list', R],
     [new TypeError('fetch failed'), 'pull', R],                                  // connection refused = local daemon
     [Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }), 'list', R],
@@ -479,10 +484,12 @@ await t('M7f. classifyOllamaFault maps every REAL error shape; faultMessage is a
   for (const k of Object.values(OLLAMA_FAULT)) assert.ok(faultMessage({ kind: k }).length > 0, `blank message for ${k}`);
   assert.ok(faultMessage({ kind: 'made-up-kind' }).length > 0, 'an unknown kind must fall back, never render blank');
   assert.ok(faultMessage(null).length > 0, 'a null fault must neither throw nor blank');
-  // …and the three kinds must be DISTINCT lines — a classifier that collapses them re-hides the
-  // cause, which is exactly the bug this closes. (Under the old single hardcode this reads 1.)
-  const distinct = new Set(Object.values(OLLAMA_FAULT).map((k) => faultMessage({ kind: k })));
-  assert.equal(distinct.size, 3, `each fault kind needs its OWN message — got ${distinct.size} distinct for 3 kinds`);
+  // …and EVERY kind must be a DISTINCT line — a classifier that collapses them re-hides the cause,
+  // which is exactly the bug this closes. (Under the old single hardcode this reads 1.) Count-
+  // agnostic so a new fault kind (e.g. incompatible-runtime) is covered the moment it is added.
+  const kinds = Object.values(OLLAMA_FAULT);
+  const distinct = new Set(kinds.map((k) => faultMessage({ kind: k })));
+  assert.equal(distinct.size, kinds.length, `each fault kind needs its OWN message — got ${distinct.size} distinct for ${kinds.length} kinds`);
 });
 
 await t('M7g. an enrich-only disk-full is the ENRICHER\'s fault, classified — and never leaks to the labeler', async () => {

@@ -503,6 +503,10 @@
 			const fault = String(err?.message || '');
 			if (fault === 'out-of-space') {
 				pullErr = 'Not enough disk space to finish the download — free up some space, then use Try again in Customize.';
+			} else if (fault === 'incompatible-runtime' || fault === 'incompatible_runtime') {
+				// TERMINAL — a 412 from the registry (pull) or a too-old daemon we refused to adopt
+				// (start). NOT a network problem: the fix is a runtime upgrade, so don't say "retry".
+				pullErr = 'Your Ollama runtime is too old for this model — upgrade Ollama, or let Mycelium manage its own, then use Try again in Customize.';
 			} else if (fault === 'runtime-unreachable') {
 				pullErr = 'The local model runtime isn’t reachable — make sure Ollama can start, then use Try again in Customize.';
 			} else {

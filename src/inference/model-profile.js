@@ -120,7 +120,9 @@ async function probeOllama(model, baseUrl, fetchImpl, timeoutMs) {
  */
 export async function resolveModelProfile(cfg = {}, { fetch: fetchImpl = globalThis.fetch, probe = true, defaultModel, baseUrl, timeoutMs = 2500 } = {}) {
   const { isLocal, model } = shapeOf(cfg, defaultModel);
-  const probeBase = baseUrl || cfg.baseUrl || DEFAULT_OLLAMA_URL;
+  // The local-probe base follows an ollama-daemon alt-port self-heal (process.env.OLLAMA_URL, still
+  // loopback) when no explicit/cfg base is given — so a capability probe hits the healed daemon.
+  const probeBase = baseUrl || cfg.baseUrl || process.env.OLLAMA_URL || DEFAULT_OLLAMA_URL;
   const key = `${isLocal ? probeBase : 'cloud'}|${model}`;
   if (cache.has(key)) return cache.get(key);
 

@@ -33,6 +33,10 @@ export const FAULT_MESSAGE = Object.freeze({
   // misdirect the owner to check one specific hop (independent review, 2026-07-18).
   [OLLAMA_FAULT.DOWNLOAD_FAILED]: 'The model download failed — check your network connection, then retry.',
   [OLLAMA_FAULT.OUT_OF_SPACE]: 'Not enough disk space to download the model — free up space, then retry.',
+  // TERMINAL: not a network problem — the host Ollama is too OLD for this model (registry 412), so
+  // "check your network" would misdirect. The remedy is a runtime upgrade, and retrying is pointless
+  // until it happens (see the pull backoff's terminal handling).
+  [OLLAMA_FAULT.INCOMPATIBLE_RUNTIME]: 'Your Ollama runtime is too old for this model — upgrade Ollama, or let Mycelium manage its own.',
 });
 // A stored fault is `{ kind, detail }`. Unknown/legacy kinds fall back to the runtime message
 // (fail-safe to the least-specific, never a blank) so a new kind can never render an empty line.
@@ -389,8 +393,10 @@ export function startEnrichDrainer({
   // Intelligence step offers and the owner approves — writing it to settings.taskModels.
   labelModel = null,
   // Ollama model-management client (listInstalled + pullModel). Injectable so the gate can
-  // drive the pull offline.
-  ollama = createOllamaClient(),
+  // drive the pull offline. In production leave it null → resolved LAZILY per use from the
+  // daemon's EFFECTIVE base (ollamaClient() below), so after an alt-port self-heal the drainer
+  // pulls/lists against the healed port instead of the squatter on :11434.
+  ollama = null,
   // Context Engine L1: per-message domain+register tagging via the on-box model (cheap,
   // private; format:'json' constrains the reply). INJECTABLE so the gate can drive it offline.
   // In production leave it null → the cycle resolves the model each tick from settings (below)
@@ -443,6 +449,11 @@ export function startEnrichDrainer({
   // per process. Module-level like `_current` (single-vault) — but a process that opens a
   // second vault, and every gate that starts a second drainer, must still read the flag.
   _pauseRestored = false;
+  // Ollama model-management client, resolved at USE time from the daemon's EFFECTIVE base so it
+  // follows an alt-port self-heal (ollama-daemon.js getBaseUrl). An injected `ollama` (tests/gate)
+  // wins; otherwise a fresh client on the daemon's base — which is the healed alt port once
+  // daemon.ensureUp() has run this cycle (it runs before ensureLabelModel below), else the default.
+  const ollamaClient = () => ollama || createOllamaClient({ baseUrl: daemon?.getBaseUrl?.() });
   const svc = createEnrichmentService({ messages: db.messages, embed, getMasterKey, classify });
   let running = false;
   let pending = false;
@@ -668,6 +679,11 @@ export function startEnrichDrainer({
     if (_modelReady.has(model)) return true;
     if (_pulling.has(model)) return false;               // download in flight → not ready yet
     const bo = _pullBackoff.get(model);
+    // TERMINAL faults never re-attempt on the clock: an incompatible runtime (host Ollama too old,
+    // registry 412) 412s identically every cycle — a wasted request AND a flapping error row — so
+    // it is parked until the owner upgrades Ollama and hits Try again (resetPullBackoff clears it).
+    // Same shape as disk-full's terminal treatment one layer down (ollama.js pullModel).
+    if (bo?.terminal) return false;
     if (bo && bo.skipCycles > 0) {
       if (bo.decAt !== _cycleN) { bo.skipCycles--; bo.decAt = _cycleN; }   // once per CYCLE, however many consults
       return false;                                                        // backing off — see _pullBackoff
@@ -707,7 +723,7 @@ export function startEnrichDrainer({
     // episode. See _pullBackoff above for why both halves matter.
     const feedId = bo?.episodeId ?? `model-pull-${model}-${Date.now()}`;
     publishPull.begin(feedId, model);
-    ollama.pullModel(model, (ev) => {
+    ollamaClient().pullModel(model, (ev) => {
       // ollama streams { status, completed, total } per layer.
       const total = Number(ev?.total) || 0, done = Number(ev?.completed) || 0;
       if (total > 0) { _pulling.set(model, Math.max(0, Math.min(100, Math.round((done / total) * 100)))); }
@@ -720,17 +736,29 @@ export function startEnrichDrainer({
         // ollama.js now preserves ollama's mid-stream ev.error, so `detail` carries the real
         // reason (disk path, registry host) — username-scrubbed, and it reaches only the
         // localhost-only readiness surface, never the feed.
-        _faults.set(model, { kind: classifyOllamaFault(e, 'pull'), detail: scrubFaultDetail(String(e?.message || e)).slice(0, 120) });
+        const kind = classifyOllamaFault(e, 'pull');
+        _faults.set(model, { kind, detail: scrubFaultDetail(String(e?.message || e)).slice(0, 120) });
         // A CONSTANT to the feed: the row is content-free by contract (activity-feed.js §SECURITY).
         // An ollama error is a model name + an HTTP status today, but this is not the place to
         // bet on that staying true. The reason stays in _faults, off the feed entirely.
         publishPull.end(feedId, 'error', 'download failed');
         const prev = _pullBackoff.get(model) ?? { failures: 0, skipCycles: 0, episodeId: feedId };
         prev.failures += 1;
-        prev.skipCycles = Math.min(2 ** prev.failures, 40);   // 2,4,8,… cycles; cap ≈10min at 15s
         prev.episodeId = feedId;                              // retries stay on THIS episode's row
-        _pullBackoff.set(model, prev);
-        log(`[enrich] pull "${model}" failed (attempt ${prev.failures}): ${String(e?.message || e).slice(0, 60)} — retrying in ~${prev.skipCycles} cycle(s)`);
+        if (kind === OLLAMA_FAULT.INCOMPATIBLE_RUNTIME) {
+          // TERMINAL — the host runtime is too old for this model; every retry 412s identically.
+          // Park it (no backoff clock) so we stop pulling until the owner upgrades Ollama + hits
+          // Try again (resetPullBackoff clears it). Mirrors disk-full's terminal stance in ollama.js.
+          prev.terminal = true;
+          prev.skipCycles = 0;
+          _pullBackoff.set(model, prev);
+          log(`[enrich] pull "${model}" failed (attempt ${prev.failures}): incompatible runtime — NOT retrying until Ollama is upgraded`);
+        } else {
+          prev.terminal = false;
+          prev.skipCycles = Math.min(2 ** prev.failures, 40);   // 2,4,8,… cycles; cap ≈10min at 15s
+          _pullBackoff.set(model, prev);
+          log(`[enrich] pull "${model}" failed (attempt ${prev.failures}): ${String(e?.message || e).slice(0, 60)} — retrying in ~${prev.skipCycles} cycle(s)`);
+        }
       })
       .finally(() => { _pulling.delete(model); });        // next 15s tick resumes categorize
     return false;
@@ -787,7 +815,7 @@ export function startEnrichDrainer({
     try {
       // isInstalled() is the SHARED predicate (see it for why a tagged approval is exact), and
       // it is also total: a non-array answer is `false`, never a throw.
-      if (isInstalled(await ollama.listInstalled(), model)) {
+      if (isInstalled(await ollamaClient().listInstalled(), model)) {
         // Clearing the fault only on the INSTALLED path is belt-and-braces, not a mechanism:
         // ensureLabelModel's own unconditional `_faults.delete` dominates in every reachable
         // state (a live pull-fault implies pending rows, which implies that path runs). A

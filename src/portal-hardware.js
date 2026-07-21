@@ -20,6 +20,12 @@ import { CATALOG } from './hardware/catalog.js';
 
 const CATALOG_NAMES = new Set(CATALOG.map((m) => m.name));
 
+// Actionable copy for a version-incompatible runtime (a 412 on pull, or a too-old daemon we
+// refused to adopt). Kept here so the SSE carries the remedy verbatim even if a client doesn't
+// map the fault CODE — the point of N2 is that this must NOT read as the generic "check your
+// network". Mirrors drainer.js FAULT_MESSAGE[INCOMPATIBLE_RUNTIME] + IntelligenceFlow's copy.
+const INCOMPATIBLE_RUNTIME_MSG = 'Your Ollama runtime is too old for this model — upgrade Ollama, or let Mycelium manage its own.';
+
 /**
  * @param {object} [deps]
  * @param {string} [deps.ollamaUrl]   default http://127.0.0.1:11434
@@ -36,14 +42,18 @@ const CATALOG_NAMES = new Set(CATALOG.map((m) => m.name));
  */
 export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, detect = detectHardware, daemon, db = null, userId = null } = {}) {
   const router = express.Router();
-  const ollama = createOllamaClient({ baseUrl: ollamaUrl, fetch });
   const ollamaDaemon = daemon || createOllamaDaemon({ baseUrl: ollamaUrl, fetch });
+  // Resolve the ollama client at USE time from the daemon's EFFECTIVE base, so after an alt-port
+  // self-heal (ollama-daemon.js getBaseUrl) every list/pull/delete here dials the healed port
+  // instead of the too-old squatter on :11434. Falls back to the configured ollamaUrl (→ the
+  // createOllamaClient env-aware default) when the daemon has no getBaseUrl (injected test stub).
+  const ollamaClient = () => createOllamaClient({ baseUrl: ollamaDaemon.getBaseUrl?.() ?? ollamaUrl, fetch });
 
   // GET /hardware — detected specs + whether the local Ollama daemon is up.
   router.get('/hardware', async (_req, res) => {
     try {
       const hardware = await detect();
-      res.json({ ok: true, hardware, ollamaUp: await ollama.isUp() });
+      res.json({ ok: true, hardware, ollamaUp: await ollamaClient().isUp() });
     } catch { res.status(500).json({ ok: false, error: 'hardware detection failed' }); }
   });
 
@@ -54,8 +64,8 @@ export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, dete
       const rec = recommendModels(hardware);
       let installed = [];
       let ollamaUp = false;
-      try { installed = await ollama.listInstalled(); ollamaUp = true; }
-      catch { ollamaUp = await ollama.isUp(); }
+      try { installed = await ollamaClient().listInstalled(); ollamaUp = true; }
+      catch { ollamaUp = await ollamaClient().isUp(); }
       const have = new Set(installed);
       res.json({
         ok: true,
@@ -98,9 +108,14 @@ export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, dete
       send({ status: 'starting ollama…' });
       const up = await ollamaDaemon.ensureUp((pct) => send({ status: 'downloading Ollama…', completed: pct, total: 100 }));
       if (!up.ok) {
-        send({ done: true, ok: false, error: up.reason || 'ollama_unavailable' });
+        // The daemon refused to come up. Surface WHY. `incompatible_runtime` (N1: a listening host
+        // Ollama too OLD for the catalog — we can't rebind :11434 nor kill a daemon we didn't start)
+        // carries an actionable message + the host-version `detail`, NOT the generic failure — the
+        // fix is a runtime upgrade, not a network check.
+        const msg = up.reason === 'incompatible_runtime' ? INCOMPATIBLE_RUNTIME_MSG : undefined;
+        send({ done: true, ok: false, error: up.reason || 'ollama_unavailable', ...(msg ? { message: msg } : {}), ...(up.detail ? { detail: up.detail } : {}) });
       } else {
-        await ollama.pullModel(name, (ev) => send({ status: ev.status, completed: ev.completed, total: ev.total }));
+        await ollamaClient().pullModel(name, (ev) => send({ status: ev.status, completed: ev.completed, total: ev.total }));
         send({ done: true, ok: true });
       }
     } catch (err) {
@@ -116,7 +131,11 @@ export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, dete
         .replace(/([A-Za-z]:\\Users\\)[^\\\s]+/gi, '$1<user>')
         .slice(0, 160);
       console.error(`[portal-hardware] pull failed model=${name} fault=${fault} detail=${detail}`);
-      send({ done: true, ok: false, error: fault });
+      // For `incompatible-runtime` (a 412 — the host Ollama is too old for this model) send the
+      // actionable upgrade copy, NOT the generic download-failed "check your network" the fault code
+      // alone would render (R2 N2). The other three kinds keep code-only mapping on the frontend.
+      const message = fault === 'incompatible-runtime' ? INCOMPATIBLE_RUNTIME_MSG : undefined;
+      send({ done: true, ok: false, error: fault, ...(message ? { message } : {}) });
     }
     try { res.write('data: [DONE]\n\n'); res.end(); } catch { /* ignore */ }
   });
@@ -174,6 +193,7 @@ export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, dete
     if (!isValidModelName(name)) return res.status(400).json({ ok: false, error: 'invalid model name' });
     try {
       let installed = [];
+      const ollama = ollamaClient();   // one client for this delete (list + delete must hit the same base)
       try { installed = await ollama.listInstalled(); } catch { /* daemon down → nothing installed */ }
       if (!installed.includes(name)) return res.status(404).json({ ok: false, error: 'not installed' });
 

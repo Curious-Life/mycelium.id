@@ -106,6 +106,28 @@ export function createAuth(opts = {}) {
         rpID: (() => { try { return new URL(baseURL).hostname; } catch { return 'localhost'; } })(),
         rpName: 'Mycelium',
         origin: baseURL,
+        // "Last used" tracking for the Settings passkey panel. better-auth's
+        // passkey schema has NO last-used field (only `counter`, a WebAuthn
+        // sign-count many authenticators pin at 0). This hook runs AFTER the
+        // plugin has already verified the assertion — it cannot influence that
+        // verification; it only reads the credentialID of an ALREADY-authenticated
+        // passkey and stamps a timestamp — so it can never weaken an auth check.
+        // Best-effort: wrapped, never throws (a failed stamp must not break
+        // sign-in). `clientData.id` === the stored credentialID (verify looks the
+        // row up by it; register stores credentialID = credential.id). The column
+        // is added by ensurePasskeyLastUsedColumn() after migrations run.
+        authentication: {
+          afterVerification: async ({ clientData }) => {
+            try {
+              const credId = clientData?.id;
+              if (typeof credId === 'string' && credId) {
+                database
+                  .prepare('UPDATE passkey SET last_used_at = ? WHERE credentialID = ?')
+                  .run(new Date().toISOString(), credId);
+              }
+            } catch { /* best-effort — never block sign-in on a telemetry write */ }
+          },
+        },
       }),
       mcp({
         loginPage: '/login',
@@ -135,6 +157,26 @@ export function createAuth(opts = {}) {
 export async function migrateAuth(auth) {
   const { runMigrations } = await getMigrations(auth.options);
   await runMigrations();
+}
+
+/**
+ * Add the `last_used_at` column to better-auth's `passkey` table if missing.
+ * better-auth's passkey schema (mergeSchema only renames, can't add fields) has
+ * no last-used field, and its adapter's transformOutput drops non-schema columns
+ * — so this app-local column is written by the passkey afterVerification hook and
+ * read by the enriched-list endpoint (both in server-http.js), never via
+ * better-auth's own list. Idempotent + best-effort: called after migrateAuth, so
+ * the `passkey` table already exists; a duplicate-column error is swallowed.
+ *
+ * @param {import('better-sqlite3').Database} database  the auth.db handle from createAuth
+ */
+export function ensurePasskeyLastUsedColumn(database) {
+  try {
+    const cols = database.prepare('PRAGMA table_info(passkey)').all();
+    if (!Array.isArray(cols) || cols.length === 0) return; // table not migrated yet
+    if (cols.some((c) => c.name === 'last_used_at')) return; // already present
+    database.exec('ALTER TABLE passkey ADD COLUMN last_used_at TEXT');
+  } catch { /* best-effort — the panel simply shows "never used" if this fails */ }
 }
 
 /**

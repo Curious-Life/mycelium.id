@@ -137,28 +137,35 @@ t('R4b. ⭐ a blocked action renders LIVE (ENABLED) in Unit 4 — the remedy is 
   }
 });
 
-t('R4c. ⭐ co-located per-stage controls (R2/R3): a RUNNING stage shows Stop+Restart; a PAUSED stage shows Resume+Restart', () => {
-  // The pipeline overview owns per-stage Stop/Resume + Restart for embed & categorize (the global
-  // toggle split into two). A running stage must offer Stop (R3-PIPESTOP, the missing control) and a
-  // paused stage must offer Resume — each beside its own Restart, and ONLY on embed/categorize.
+t('R4c. ⭐ co-located per-stage controls (R2/R3/N9): a RUNNING stage shows a ⏸ Pause toggle + ↻ Restart; a PAUSED stage shows a ▶ Resume toggle + ↻ Restart — ONE two-state ICON toggle, not three text buttons', () => {
+  // The pipeline overview owns ONE two-state icon toggle (⏸ running → pause · ▶ paused → resume) +
+  // a small Restart (↻) for embed & categorize (the global toggle split into two; N9 collapses the
+  // Pause/Resume/Restart text trio into the icon toggle + one restart icon). A running stage's toggle
+  // performs Pause; a paused stage's performs Resume — each an ICON-ONLY button whose accessible name
+  // (aria-label) states the ACTION, beside its own Restart, and ONLY on embed/categorize.
   const rEmbed = byKey(midflight).embed;
   assert.equal(rEmbed.state, 'running');
   const rCtrls = Object.fromEntries(rEmbed.controls.map((c) => [c.kind, c]));
-  assert.ok(rCtrls.pause && /stop/i.test(rCtrls.pause.label) && rCtrls.pause.visible && !rCtrls.pause.disabled,
-    `a running embed must show a visible, enabled Stop control. Got: ${JSON.stringify(rEmbed.controls)}`);
-  assert.ok(rCtrls.restart && /restart/i.test(rCtrls.restart.label) && rCtrls.restart.visible && !rCtrls.restart.disabled,
-    `a running embed must show a visible, enabled Restart control. Got: ${JSON.stringify(rEmbed.controls)}`);
+  // A running stage's toggle is the PAUSE side: accessible name "Pause …", icon-only, enabled.
+  assert.ok(rCtrls.pause && /pause/i.test(rCtrls.pause.label) && rCtrls.pause.hasIcon && rCtrls.pause.visible && !rCtrls.pause.disabled,
+    `a running embed must show a visible, enabled, ICON Pause toggle (aria-label "Pause …"). Got: ${JSON.stringify(rEmbed.controls)}`);
+  assert.ok(rCtrls.restart && /restart/i.test(rCtrls.restart.label) && rCtrls.restart.hasIcon && rCtrls.restart.visible && !rCtrls.restart.disabled,
+    `a running embed must show a visible, enabled, ICON Restart control. Got: ${JSON.stringify(rEmbed.controls)}`);
+  // The toggle is truly TWO-STATE: a running stage shows the Pause side and NOT a Resume button.
+  assert.ok(!rCtrls.resume, `a running stage must NOT show a Resume control — the toggle shows Pause. Got: ${JSON.stringify(rEmbed.controls)}`);
 
-  // Both paused stages (embed + categorize) show Resume + Restart, all enabled at rest. Identified by
-  // the rendered Resume control (the harness reports no `reason`).
+  // Both paused stages (embed + categorize) show the ▶ Resume side + Restart, all enabled at rest.
+  // Identified by the rendered Resume control (the harness reports no `reason`).
   const pausedStages = paused.stages.filter((s) => s.controls.some((c) => c.kind === 'resume'));
   assert.equal(pausedStages.length, 2, 'the paused probe must have two paused stages (embed + categorize) each offering Resume');
   for (const s of pausedStages) {
     const c = Object.fromEntries(s.controls.map((x) => [x.kind, x]));
-    assert.ok(c.resume && /resume/i.test(c.resume.label) && c.resume.visible && !c.resume.disabled,
-      `paused ${s.key} must show a visible, enabled Resume control. Got: ${JSON.stringify(s.controls)}`);
-    assert.ok(c.restart && c.restart.visible && !c.restart.disabled,
-      `paused ${s.key} must show a visible, enabled Restart control. Got: ${JSON.stringify(s.controls)}`);
+    assert.ok(c.resume && /resume/i.test(c.resume.label) && c.resume.hasIcon && c.resume.visible && !c.resume.disabled,
+      `paused ${s.key} must show a visible, enabled, ICON Resume toggle (aria-label "Resume …"). Got: ${JSON.stringify(s.controls)}`);
+    assert.ok(c.restart && c.restart.hasIcon && c.restart.visible && !c.restart.disabled,
+      `paused ${s.key} must show a visible, enabled, ICON Restart control. Got: ${JSON.stringify(s.controls)}`);
+    // The toggle is two-state: a paused stage shows Resume and NOT a Pause button.
+    assert.ok(!c.pause, `a paused stage must NOT show a Pause control — the toggle shows Resume. Got: ${JSON.stringify(s.controls)}`);
   }
   // Controls are EMBED/CATEGORIZE only — a derived stage (cluster/describe/measure) never carries them.
   for (const s of midflight.stages.filter((x) => x.key !== 'embed' && x.key !== 'categorize')) {

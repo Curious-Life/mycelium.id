@@ -144,22 +144,53 @@
 		finally { voiceDescSaving = false; }
 	}
 
+	// A voice reference only needs to carry speaker identity, so we NORMALIZE it to
+	// keep the base64 payload small: a native 48 kHz full-length clip is what
+	// overflowed the loopback render body (render-upstream-413). Target the render
+	// service's own 24 kHz domain (speech is < 12 kHz ⇒ transparent for a voice
+	// reference) and cap the duration to a short clip.
+	const REF_TARGET_RATE = 24000;
+	const REF_MAX_SECONDS = 30;
+
 	// Decode ANY captured/uploaded audio to a 16-bit PCM mono WAV so the render
 	// service always receives a decodable reference sample, whatever the source
-	// format (MediaRecorder emits webm/opus; uploads may be anything).
+	// format (MediaRecorder emits webm/opus; uploads may be anything). Downmix to
+	// mono, trim to REF_MAX_SECONDS, and downsample to REF_TARGET_RATE. The
+	// downsample falls back to the native-rate trimmed clip if the browser can't
+	// resample — the raised service body cap still accepts it.
 	async function toWavB64(arrayBuffer: ArrayBuffer): Promise<string> {
 		const AC = (window.AudioContext || (window as any).webkitAudioContext);
 		const ctx = new AC();
-		try {
-			const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
-			const ch = decoded.getChannelData(0); // mono (first channel)
-			const rate = decoded.sampleRate;
-			const wav = encodeWav(ch, rate);
-			let bin = '';
-			const bytes = new Uint8Array(wav);
-			for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-			return btoa(bin);
-		} finally { ctx.close(); }
+		let decoded: AudioBuffer;
+		try { decoded = await ctx.decodeAudioData(arrayBuffer.slice(0)); }
+		finally { ctx.close(); }
+
+		const srcRate = decoded.sampleRate;
+		const trimFrames = Math.min(decoded.length, Math.ceil(REF_MAX_SECONDS * srcRate));
+		const mono = decoded.getChannelData(0).subarray(0, trimFrames); // first channel
+
+		let samples: Float32Array = mono;
+		let rate = srcRate;
+		if (srcRate > REF_TARGET_RATE && trimFrames > 0) {
+			try {
+				const OAC = (window.OfflineAudioContext || (window as any).webkitOfflineAudioContext);
+				const outFrames = Math.max(1, Math.round((trimFrames / srcRate) * REF_TARGET_RATE));
+				const off = new OAC(1, outFrames, REF_TARGET_RATE);
+				const buf = off.createBuffer(1, trimFrames, srcRate); // buffer keeps its own rate; the graph resamples
+				buf.getChannelData(0).set(mono);
+				const node = off.createBufferSource();
+				node.buffer = buf; node.connect(off.destination); node.start();
+				const rendered = await off.startRendering();
+				samples = rendered.getChannelData(0);
+				rate = REF_TARGET_RATE;
+			} catch { /* keep native-rate trimmed samples — the raised render cap accepts them */ }
+		}
+
+		const wav = encodeWav(samples, rate);
+		let bin = '';
+		const bytes = new Uint8Array(wav);
+		for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+		return btoa(bin);
 	}
 
 	function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
@@ -251,6 +282,9 @@
 				const j = await res.json().catch(() => ({}));
 				if (res.status === 503) throw new Error('Voice engine is starting (or needs Apple Silicon). Try again shortly.');
 				if (res.status === 501) throw new Error('Freeze a voice sample first.');
+				if (res.status === 413) throw new Error('That voice sample is too large — record a shorter clip (under ~30s) and freeze it again.');
+				if (res.status === 422) throw new Error('That voice sample couldn’t be read — re-record and freeze it again.');
+				if (res.status === 500) throw new Error('Voice render failed. Try again, or re-record the sample if it keeps happening.');
 				throw new Error(String(j.error || `HTTP ${res.status}`));
 			}
 			const buf = await res.arrayBuffer();

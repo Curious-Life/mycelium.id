@@ -342,7 +342,9 @@ export function internalRouter({ db, userId, enrich = {}, voiceRenderer } = {}) 
         routing: {
           router: channelRouter ?? derived?.routing?.router ?? null,
           ollamaModel: ollamaModel ?? derived?.routing?.ollamaModel ?? null,
-          ollamaUrl: (await g('OLLAMA_URL')) ?? derived?.routing?.ollamaUrl ?? null,
+          // process.env.OLLAMA_URL is the alt loopback base after an ollama-daemon self-heal, so the
+          // channel daemon's local wire follows it too — below an explicit user-set OLLAMA_URL.
+          ollamaUrl: (await g('OLLAMA_URL')) ?? process.env.OLLAMA_URL ?? derived?.routing?.ollamaUrl ?? null,
           coalesceMs: (await g('CHANNEL_COALESCE_MS')) || null,
           rateLimitMax: (await g('CHANNEL_RATELIMIT_MAX')) || null,
           rateLimitWindowMs: (await g('CHANNEL_RATELIMIT_WINDOW_MS')) || null,

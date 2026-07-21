@@ -42,7 +42,7 @@ const CAPTION_PROMPT =
  * Ollama builds whose /api/show has no `capabilities` field).
  */
 export async function pickVisionModel({
-  baseUrl = DEFAULT_OLLAMA_URL,
+  baseUrl = process.env.OLLAMA_URL ?? DEFAULT_OLLAMA_URL,   // follows an ollama-daemon alt-port self-heal (loopback)
   fetch = globalThis.fetch,
   timeoutMs = 2500,
   prefer,
@@ -94,7 +94,7 @@ export async function describeImage({
   base64,
   bytes,
   model,
-  baseUrl = DEFAULT_OLLAMA_URL,
+  baseUrl = process.env.OLLAMA_URL ?? DEFAULT_OLLAMA_URL,   // follows an ollama-daemon alt-port self-heal (loopback)
   fetch = globalThis.fetch,
   timeoutMs = Number(process.env.MYCELIUM_VISION_TIMEOUT_MS) || 30000,
 } = {}) {

@@ -23,13 +23,13 @@
 // DELETE / failed init. Never per-request.
 import { randomUUID } from 'node:crypto';
 import express from 'express';
-import { toNodeHandler } from 'better-auth/node';
+import { toNodeHandler, fromNodeHeaders } from 'better-auth/node';
 import { oAuthDiscoveryMetadata } from 'better-auth/plugins';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 
 import { boot } from './index.js';
-import { createAuth, migrateAuth, ensureOperatorUser } from './auth.js';
+import { createAuth, migrateAuth, ensureOperatorUser, ensurePasskeyLastUsedColumn } from './auth.js';
 import { uploadAttachment } from './ingest/upload.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { issueLoginCsrf, verifyLoginCsrf } from './http/login-csrf.js';
@@ -49,8 +49,12 @@ import { isValidHandle } from './identity/identity.js';
  * @param {{email?:string,password?:string}} [opts.operator]
  */
 export async function createHttpApp(opts = {}) {
-  const { auth, baseURL } = createAuth(opts.authOpts);
+  const { auth, baseURL, database: authDb } = createAuth(opts.authOpts);
   await migrateAuth(auth);
+  // Add the app-local `last_used_at` column to the passkey table (better-auth's
+  // schema has none). Written by the afterVerification hook (auth.js), read by
+  // GET /api/auth/passkeys below. After migrateAuth so the table exists.
+  ensurePasskeyLastUsedColumn(authDb);
   // The static bearer for this :4711 surface. env MYCELIUM_MCP_BEARER wins; else a
   // stable value auto-provisioned + persisted in auth.db — so the self-hosted app
   // ALWAYS accepts a copy-paste bearer (the hooks / local harnesses) with no manual
@@ -210,6 +214,43 @@ export async function createHttpApp(opts = {}) {
       if (cookies.length) res.setHeader('set-cookie', cookies);
       return res.status(200).json({ ok: true });
     } catch { return res.status(401).json({ error: 'invalid password' }); }
+  });
+
+  // Enriched passkey list for the Settings panel. better-auth's own
+  // /api/auth/passkey/list-user-passkeys drops our app-local `last_used_at`
+  // column (its adapter transformOutput only emits schema fields), so the panel
+  // reads its list here instead. Session-gated (the browser's better-auth cookie,
+  // same-origin over the relay) and scoped to the authenticated user's own rows —
+  // it never lists another account's credentials and never returns the raw
+  // credentialID or public key. Register/rename/delete still go through
+  // better-auth's own owner-scoped endpoints. Mounted BEFORE the /api/auth/*splat
+  // catch-all so better-auth doesn't 404 it.
+  app.get('/api/auth/passkeys', async (req, res) => {
+    try {
+      const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+      if (!session?.user?.id) return res.status(401).json({ error: 'unauthorized' });
+      let rows = [];
+      try {
+        rows = authDb
+          .prepare('SELECT id, name, createdAt, last_used_at, deviceType, backedUp FROM passkey WHERE userId = ? ORDER BY createdAt ASC')
+          .all(session.user.id);
+      } catch { rows = []; }
+      const passkeys = rows.map((r) => ({
+        id: r.id,
+        name: r.name || null,
+        createdAt: r.createdAt || null,
+        lastUsedAt: r.last_used_at || null,
+        deviceType: r.deviceType || null,
+        backedUp: r.backedUp === 1 || r.backedUp === true,
+      }));
+      // Whether the require-passkey-for-web policy is on, so the panel can warn
+      // (not block) before removing the last passkey. Non-secret status only.
+      let requirePasskeyForWeb = false;
+      try { requirePasskeyForWeb = readRemoteConfig().requirePasskeyForWeb === true; } catch { /* default false */ }
+      return res.json({ passkeys, requirePasskeyForWeb });
+    } catch {
+      return res.status(500).json({ error: 'passkey_list_failed' });
+    }
   });
 
   // better-auth owns everything under /api/auth/* (Express 5 NAMED splat).

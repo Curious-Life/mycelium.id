@@ -84,6 +84,23 @@ try {
   ok(await call('/auth/session', { xff: NET }) === 401, 'F2. /auth/session networked, no cookie → 401');
   ok(await call('/auth/session', { xff: NET, cookie: GOOD }) === 200, 'F3. /auth/session networked, valid cookie → 200');
 
+  // F4–F6. A QR-paired phone authenticates with a per-device token (Unit A). The
+  // session check MUST honor it exactly as the DATA gates do — otherwise the phone
+  // reaches data routers but the SPA still bounces to /login and LOOPS on the
+  // password/passkey prompt (QA N11). MUTATION-proof: reverting the deviceTokenMatch
+  // wiring on /auth/session's resolveAuthorized turns F4/F5 red (they'd 401).
+  const dt = server.db?.deviceTokens;
+  if (dt) {
+    const { token: DEVTOK, id: DEVID } = await dt.mint('QA phone', 'owner-1');
+    const bearerHdr = (t) => ({ xff: NET, method: 'GET', bearer: t });
+    ok(await call('/auth/session', bearerHdr(DEVTOK)) === 200, 'F4. /auth/session networked, live device token → 200 (no login loop)');
+    ok(await call(GET_DATA, bearerHdr(DEVTOK)) === 200, 'F5. data route, live device token → 200 (data gate parity)');
+    await dt.revoke(DEVID);
+    ok(await call('/auth/session', bearerHdr(DEVTOK)) === 401, 'F6. /auth/session networked, REVOKED device token → 401 (fail-closed)');
+  } else {
+    ok(false, 'F4-F6. server.db.deviceTokens namespace missing — cannot verify device-token session path');
+  }
+
   // G. CSRF double-submit on cookie-authed UNSAFE methods
   const g1 = await call(POST_DATA, { xff: NET, cookie: GOOD, method: 'POST' });
   ok(g1 === 403, 'G1. networked cookie POST without CSRF → 403', `(${g1})`);

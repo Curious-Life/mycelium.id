@@ -10,6 +10,12 @@ import { createIdentity } from '../src/identity/identity.js';
 
 const id = createIdentity({ masterHex: 'd'.repeat(64), handle: 'alice' });
 
+// Public DNS stub so ssrf.safeFetch clears its fail-closed resolve guard and reaches the
+// INJECTED fetch (otherwise it does REAL DNS on bob/alice.mycelium.id, which fails and — now
+// that delivery failures surface honestly instead of being swallowed — turns every mocked
+// outbound test into a spurious "unresolvable host" rejection). Returns one public address.
+const PUBLIC_LOOKUP = async () => [{ address: '93.184.216.34', family: 4 }];
+
 // A mock d1Query that serves the profile SELECT and records writes.
 function makeDb({ profile, existingConn = null } = {}) {
   const writes = [];
@@ -50,7 +56,7 @@ describe('connections — signed outbound connect', () => {
       return { ok: false, status: 404, async json() { return {}; } };
     };
     const ns = createConnectionsNamespace({
-      d1Query, fetch: fetchImpl,
+      d1Query, fetch: fetchImpl, lookup: PUBLIC_LOOKUP,
       sign: (b) => id.sign(b),
       did: () => 'did:web:alice.mycelium.id',
       selfInstance: () => 'alice.mycelium.id',
@@ -73,7 +79,7 @@ describe('connections — signed outbound connect', () => {
     // embedding lives on the SELECTed profile row; the namespace builds `profile`
     // from known fields, so inject the tripwire path by faking a vector realm key.
     const ns = createConnectionsNamespace({
-      d1Query, fetch: fetchImpl,
+      d1Query, fetch: fetchImpl, lookup: PUBLIC_LOOKUP,
       sign: (b) => id.sign(b), did: () => 'did:web:alice.mycelium.id', selfInstance: () => 'alice.mycelium.id',
     });
     // realms parsed from public_realms_json is [], stats are numbers → no vector
@@ -86,8 +92,10 @@ describe('connections — signed outbound connect', () => {
     const fetchImpl = async (url) => url.includes('webfinger')
       ? { ok: true, status: 200, async json() { return { links: [{ rel: 'federation', href: 'https://collector.attacker.com/x' }] }; } }
       : { ok: true, status: 202, async json() { return {}; } };
-    const ns = createConnectionsNamespace({ d1Query, fetch: fetchImpl, sign: (b) => id.sign(b), did: () => 'did:web:alice.mycelium.id', selfInstance: () => 'alice.mycelium.id' });
-    await assert.rejects(() => ns.request('me', 'bob@bob.mycelium.id'), /not reachable|host/i);
+    const ns = createConnectionsNamespace({ d1Query, fetch: fetchImpl, lookup: PUBLIC_LOOKUP, sign: (b) => id.sign(b), did: () => 'did:web:alice.mycelium.id', selfInstance: () => 'alice.mycelium.id' });
+    // The endpoint-host mismatch is refused inside resolveEndpoint; the namespace now
+    // surfaces that as an honest "couldn't reach" (not a swallowed false "sent").
+    await assert.rejects(() => ns.request('me', 'bob@bob.mycelium.id'), /couldn't reach|not reachable|host/i);
   });
 
   it('a federated re-request that is already pending RE-DELIVERS (re-POSTs) and keeps the same id', async () => {
@@ -101,7 +109,7 @@ describe('connections — signed outbound connect', () => {
       if (url.endsWith('/federation/connect')) { posted = { url, init }; return { ok: true, status: 202, async json() { return {}; } }; }
       return { ok: false, status: 404, async json() { return {}; } };
     };
-    const ns = createConnectionsNamespace({ d1Query, fetch: fetchImpl, sign: (b) => id.sign(b), did: () => 'did:web:alice.mycelium.id', selfInstance: () => 'alice.mycelium.id' });
+    const ns = createConnectionsNamespace({ d1Query, fetch: fetchImpl, lookup: PUBLIC_LOOKUP, sign: (b) => id.sign(b), did: () => 'did:web:alice.mycelium.id', selfInstance: () => 'alice.mycelium.id' });
     assert.equal(await ns.request('me', 'bob@bob.mycelium.id'), 'pending-1', 'keeps the existing pending row id');
     assert.ok(posted, 're-delivered: POST /federation/connect fired again');
     assert.equal(writes.filter((w) => w.kind === 'connection').length, 0, 'no duplicate INSERT — reuses the pending row');
@@ -124,9 +132,79 @@ describe('connections — signed outbound connect', () => {
       if (url.endsWith('/federation/connect')) return { ok: true, status: 202, async json() { return {}; } };
       return { ok: false, status: 404, async json() { return {}; } };
     };
-    const ns = createConnectionsNamespace({ d1Query, fetch: fetchImpl, sign: (b) => id.sign(b), did: () => 'did:web:hi.mycelium.id', selfInstance: () => 'hi.mycelium.id' });
+    const ns = createConnectionsNamespace({ d1Query, fetch: fetchImpl, lookup: PUBLIC_LOOKUP, sign: (b) => id.sign(b), did: () => 'did:web:hi.mycelium.id', selfInstance: () => 'hi.mycelium.id' });
     await assert.doesNotReject(() => ns.request('me', 'lo@lo.mycelium.id'));
     assert.equal(wf, true, '2-char handle resolved via WebFinger (federated), not treated as a local handle');
+  });
+});
+
+// QA N10: a federated request must NOT report "invite sent" when the target handle
+// doesn't resolve or the delivery didn't land. The delivery OUTCOME is the signal:
+// federationDeliver returns on success and throws on failure, so the namespace maps a
+// not-found throw to an honest "No user …" (and cleans up the phantom pending row) and
+// a transient throw to "Couldn't reach …" (keeping the row for re-delivery). A public
+// `lookup` stub lets ssrf.safeFetch reach the injected fetch (the throw is then whatever
+// the mocked fetch produces), so we can drive each classification deterministically.
+describe('connections — federated request delivery honesty (QA N10)', () => {
+  const PUBLIC = async () => [{ address: '93.184.216.34', family: 4 }]; // resolvable public host
+  // d1 mock that records INSERT + DELETE of connection rows.
+  function makeDeliveryDb() {
+    const rows = [];
+    const d1Query = async (sql, params) => {
+      if (/FROM user_profiles WHERE user_id/.test(sql)) return { results: [{ handle: 'alice', signature: 's', depth_score: 0.7, breadth_score: 0.4, public_realms_json: '[]' }] };
+      if (/COUNT\(\*\)/.test(sql)) return { results: [{ c: 0 }] };
+      if (/SELECT id, status FROM connections/.test(sql)) return { results: [] };
+      if (/SELECT remote_relay_inbox/.test(sql)) return { results: [] };
+      if (/INSERT INTO connections/.test(sql)) { rows.push({ op: 'insert', id: params[0], status: 'pending' }); return { results: [] }; }
+      if (/DELETE FROM connections/.test(sql)) { rows.push({ op: 'delete', id: params[0] }); return { results: [] }; }
+      return { results: [] };
+    };
+    return { d1Query, rows };
+  }
+  const mkNs = (d1Query, fetchImpl) => createConnectionsNamespace({
+    d1Query, fetch: fetchImpl, lookup: PUBLIC,
+    sign: (b) => id.sign(b), did: () => 'did:web:alice.mycelium.id', selfInstance: () => 'alice.mycelium.id',
+  });
+
+  it('unresolvable instance → "No user" AND deletes the phantom pending row (no false "sent")', async () => {
+    const { d1Query, rows } = makeDeliveryDb();
+    // Host does not resolve → ssrf.assertResolvesPublic throws before any fetch.
+    const ns = createConnectionsNamespace({
+      d1Query, fetch: async () => ({ ok: true, status: 200, async json() { return {}; } }),
+      lookup: async () => { throw new Error('ENOTFOUND'); },
+      sign: (b) => id.sign(b), did: () => 'did:web:alice.mycelium.id', selfInstance: () => 'alice.mycelium.id',
+    });
+    await assert.rejects(() => ns.request('me', 'nobody@nobody.mycelium.id'), /No user @nobody found/);
+    assert.ok(rows.some((r) => r.op === 'insert'), 'a pending row was created');
+    assert.ok(rows.some((r) => r.op === 'delete'), 'the phantom pending row was cleaned up');
+  });
+
+  it('live instance answering WebFinger 404 → "No user" (real host, no such account)', async () => {
+    const { d1Query } = makeDeliveryDb();
+    const ns = mkNs(d1Query, async () => ({ ok: false, status: 404, async json() { return {}; } }));
+    await assert.rejects(() => ns.request('me', 'ghost@bob.mycelium.id'), /No user @ghost@bob\.mycelium\.id found/);
+  });
+
+  it('reachable-then-network-error → "Couldn\'t reach" AND keeps the pending row for re-delivery', async () => {
+    const { d1Query, rows } = makeDeliveryDb();
+    // Host resolves (PUBLIC) but every fetch throws a generic network error → UNREACHABLE.
+    const ns = mkNs(d1Query, async () => { throw new Error('socket hang up'); });
+    await assert.rejects(() => ns.request('me', 'bob@bob.mycelium.id'), /Couldn't reach @bob/);
+    assert.ok(rows.some((r) => r.op === 'insert'), 'a pending row was created');
+    assert.ok(!rows.some((r) => r.op === 'delete'), 'transient failure KEEPS the row (store-and-forward)');
+  });
+
+  it('successful delivery still resolves to the connection id (honest "sent")', async () => {
+    const { d1Query } = makeDeliveryDb();
+    const fetchImpl = async (url) => {
+      if (url.includes('/.well-known/webfinger')) return { ok: true, status: 200, async json() { return { links: [{ rel: 'federation', href: 'https://bob.mycelium.id/federation' }] }; } };
+      if (url.endsWith('/federation/connect')) return { ok: true, status: 202, async json() { return {}; } };
+      return { ok: false, status: 404, async json() { return {}; } }; // did.json 404 → relay skipped, direct wins
+    };
+    const ns = mkNs(d1Query, fetchImpl);
+    const cid = await ns.request('me', 'bob@bob.mycelium.id');
+    assert.equal(typeof cid, 'string');
+    assert.ok(cid, 'returns the connection id on genuine delivery');
   });
 });
 
@@ -181,7 +259,7 @@ describe('connections — Tier-0b accept handshake', () => {
       if (url.endsWith('/connect-response')) { posted = { url, init }; return { ok: true, status: 202, async json() { return {}; } }; }
       return { ok: false, status: 404, async json() { return {}; } };
     };
-    const ns = createConnectionsNamespace({ d1Query, fetch: fetchImpl, sign: (b) => id.sign(b), did: () => 'did:web:bob.mycelium.id', selfInstance: () => 'bob.mycelium.id' });
+    const ns = createConnectionsNamespace({ d1Query, fetch: fetchImpl, lookup: PUBLIC_LOOKUP, sign: (b) => id.sign(b), did: () => 'did:web:bob.mycelium.id', selfInstance: () => 'bob.mycelium.id' });
     await ns.respondRemote('me', 'c1', 'accept');
     assert.ok(posted, 'connect-response POST fired');
     assert.equal(posted.url, 'https://alice.mycelium.id/federation/connect-response');

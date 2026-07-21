@@ -88,12 +88,15 @@
 		}
 	}
 
-	// Per-stage Stop/Resume + Restart (QA R2-PIPECTL, R3-PIPESTOP). Each stage's controls hit ITS OWN
-	// route — embed → /portal/enrichment/embed/*, categorize → /portal/enrichment/categorize/* — so
-	// the two stages pause independently (the whole point of splitting the global toggle). `kind`:
-	//   • 'pause'/'resume' → the two-state Stop/Resume (persisted; drainer honors it mid-run).
+	// Per-stage pause/resume toggle + Restart (QA R2-PIPECTL, R3-PIPESTOP, N9). Each stage's controls
+	// hit ITS OWN route — embed → /portal/enrichment/embed/*, categorize → /portal/enrichment/
+	// categorize/* — so the two stages pause independently (the whole point of splitting the global
+	// toggle). `kind`:
+	//   • 'pause'/'resume' → the ONE two-state icon toggle (⏸ running → pause · ▶ paused → resume;
+	//                        persisted; drainer honors it mid-run). Not two buttons — a single symbol
+	//                        that flips, per the operator's "just stop / continue" intent.
 	//   • 'restart'        → re-queue that stage's gave-up rows + nudge (retry-failed, per stage).
-	// Keyed `${key}:${kind}` so Stop and Restart on the same stage guard independently.
+	// Keyed `${key}:${kind}` so the toggle and Restart on the same stage guard independently.
 	async function onStageControl(stage: Stage, kind: 'pause' | 'resume' | 'restart') {
 		const bkey = `${stage.key}:${kind}`;
 		if (busy.has(bkey)) return;
@@ -185,17 +188,27 @@
 						<span class="pipe-stage-detail pending">{stage.reason ? reasonText(stage.reason) : 'Waiting'}</span>
 					{/if}
 
-					<!-- Co-located per-stage controls (R2/R3): a two-state Stop/Resume + a Restart, for the
-					     embed and categorize stages only, whenever there is work to stop or a pause to lift.
-					     Each hits ITS OWN route so the two stages pause independently. -->
+					<!-- Co-located per-stage controls (R2/R3/N9): ONE two-state icon toggle (⏸ running → pause ·
+					     ▶ paused → resume) + a small Restart icon, for the embed and categorize stages only,
+					     whenever there is work to stop or a pause to lift. Each hits ITS OWN route so the two
+					     stages pause independently. aria-label names the ACTION the click performs. -->
 					{#if hasControls(stage)}
 						<span class="pipe-ctrls">
 							{#if stage.paused}
-								<button class="pipe-ctrl" type="button" data-ctrl="resume" disabled={isBusy(`${stage.key}:resume`)} aria-busy={isBusy(`${stage.key}:resume`)} onclick={() => onStageControl(stage, 'resume')}>Resume</button>
+								<button class="pipe-ctrl icon" type="button" data-ctrl="resume" title="Resume {labelFor(stage.key)}" aria-label="Resume {labelFor(stage.key)}" disabled={isBusy(`${stage.key}:resume`)} aria-busy={isBusy(`${stage.key}:resume`)} onclick={() => onStageControl(stage, 'resume')}>
+									<!-- ▶ play triangle → resume -->
+									<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z" /></svg>
+								</button>
 							{:else}
-								<button class="pipe-ctrl" type="button" data-ctrl="pause" disabled={isBusy(`${stage.key}:pause`)} aria-busy={isBusy(`${stage.key}:pause`)} onclick={() => onStageControl(stage, 'pause')}>Stop</button>
+								<button class="pipe-ctrl icon" type="button" data-ctrl="pause" title="Pause {labelFor(stage.key)}" aria-label="Pause {labelFor(stage.key)}" disabled={isBusy(`${stage.key}:pause`)} aria-busy={isBusy(`${stage.key}:pause`)} onclick={() => onStageControl(stage, 'pause')}>
+									<!-- ⏸ two-bar pause → pause -->
+									<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg>
+								</button>
 							{/if}
-							<button class="pipe-ctrl" type="button" data-ctrl="restart" disabled={isBusy(`${stage.key}:restart`)} aria-busy={isBusy(`${stage.key}:restart`)} onclick={() => onStageControl(stage, 'restart')}>Restart</button>
+							<button class="pipe-ctrl icon" type="button" data-ctrl="restart" title="Restart {labelFor(stage.key)}" aria-label="Restart {labelFor(stage.key)}" disabled={isBusy(`${stage.key}:restart`)} aria-busy={isBusy(`${stage.key}:restart`)} onclick={() => onStageControl(stage, 'restart')}>
+								<!-- ↻ reload → re-queue gave-up rows -->
+								<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
+							</button>
 						</span>
 					{/if}
 				</div>
@@ -265,14 +278,16 @@
 	/* In-flight: non-interactive so it cannot double-fire; reads as busy, not broken. */
 	.pipe-action:disabled { cursor: default; opacity: 0.55; }
 
-	/* Co-located per-stage controls (R2/R3): the two-state Stop/Resume + Restart. Smaller + quieter
-	   than the primary remedy button — these are ongoing controls, not a blocking call to action. */
+	/* Co-located per-stage controls (R2/R3/N9): ONE two-state icon toggle (⏸/▶) + a small Restart (↻).
+	   Icon-only, square, quiet — ongoing controls, not a blocking call to action. */
 	.pipe-ctrls { display: inline-flex; align-items: center; gap: 0.3rem; align-self: flex-start; margin-top: 0.2rem; }
-	.pipe-ctrl {
-		padding: 0.15rem 0.5rem;
+	.pipe-ctrl.icon {
+		display: inline-flex; align-items: center; justify-content: center;
+		width: 1.4rem; height: 1.4rem; padding: 0;
 		border-radius: 6px; border: 1px solid var(--glass-border); background: transparent;
-		color: var(--color-text-secondary); font-family: inherit; font-size: 0.66rem; cursor: pointer;
+		color: var(--color-text-secondary); cursor: pointer;
 	}
-	.pipe-ctrl:hover:not(:disabled) { border-color: var(--color-accent-aurum, #e5b84c); color: var(--color-text-primary); }
-	.pipe-ctrl:disabled { cursor: default; opacity: 0.55; }
+	.pipe-ctrl.icon svg { display: block; }
+	.pipe-ctrl.icon:hover:not(:disabled) { border-color: var(--color-accent-aurum, #e5b84c); color: var(--color-text-primary); }
+	.pipe-ctrl.icon:disabled { cursor: default; opacity: 0.55; }
 </style>

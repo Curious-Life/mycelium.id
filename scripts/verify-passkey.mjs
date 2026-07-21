@@ -6,9 +6,10 @@
 // auth-gated, and the verify endpoints exist. The full browser/device WebAuthn
 // ceremony (register a credential with a real authenticator) is the host/device
 // smoke (Spike S2) — not deterministically scriptable here.
+import { readFileSync } from 'node:fs';
 import express from 'express';
 import { toNodeHandler } from 'better-auth/node';
-import { createAuth, migrateAuth } from '../src/auth.js';
+import { createAuth, migrateAuth, ensurePasskeyLastUsedColumn } from '../src/auth.js';
 
 let pass = 0, fail = 0;
 const ok = (c, label, extra = '') => { if (c) { pass++; console.log(`PASS  ${label}${extra ? '  ' + extra : ''}`); } else { fail++; console.log(`FAIL  ${label}${extra ? '  ' + extra : ''}`); } };
@@ -23,10 +24,19 @@ await new Promise((r) => server.once('listening', r));
 const base = `http://127.0.0.1:${server.address().port}`;
 
 try {
-  const { auth } = createAuth({ baseURL: origin, dbPath: ':memory:' });
+  const { auth, database } = createAuth({ baseURL: origin, dbPath: ':memory:' });
   await migrateAuth(auth); // creates the plugin's passkey table (additive)
   ok(true, 'createAuth() with passkey plugin builds + migrates');
   app.all('/api/auth/*splat', toNodeHandler(auth));
+
+  // last_used_at tracking (Settings passkey panel) — the app-local column better-auth
+  // doesn't ship. ensurePasskeyLastUsedColumn adds it; must be idempotent.
+  const hasCol = () => database.prepare('PRAGMA table_info(passkey)').all().some((c) => c.name === 'last_used_at');
+  ok(!hasCol(), 'passkey.last_used_at absent before ensure (better-auth ships no such field)');
+  ensurePasskeyLastUsedColumn(database);
+  ok(hasCol(), 'ensurePasskeyLastUsedColumn adds last_used_at');
+  let idempotent = true; try { ensurePasskeyLastUsedColumn(database); } catch { idempotent = false; }
+  ok(idempotent && hasCol(), 'ensurePasskeyLastUsedColumn is idempotent (safe on every boot)');
 
   const get = (p) => fetch(`${base}${p}`, { headers: { origin } });
   const post = (p, body) => fetch(`${base}${p}`, { method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify(body || {}) });
@@ -47,6 +57,25 @@ try {
     const r = await post(`/api/auth/passkey/${p}`, {});
     ok(r.status !== 404, `/passkey/${p} endpoint exists (not 404)`, `(${r.status})`);
   }
+
+  // 4. Settings-panel management surface (server-http.js) — source-level guards.
+  //    The enriched list endpoint must be session-gated + scoped to the caller's
+  //    own rows, never returning another account's credentials.
+  const srvHttp = readFileSync(new URL('../src/server-http.js', import.meta.url), 'utf8');
+  const startIdx = srvHttp.indexOf("app.get('/api/auth/passkeys'");
+  const endIdx = srvHttp.indexOf("app.all('/api/auth/*splat'", startIdx);
+  const listBlock = startIdx >= 0 && endIdx > startIdx ? srvHttp.slice(startIdx, endIdx) : '';
+  ok(startIdx >= 0, 'GET /api/auth/passkeys list endpoint mounted');
+  ok(/getSession\(/.test(listBlock) && /401/.test(listBlock), 'list endpoint is session-gated (getSession → 401)');
+  ok(/WHERE userId = \?/.test(listBlock) && /session\.user\.id/.test(listBlock), 'list endpoint scopes rows to the authenticated user');
+  ok(!/credential_?id|publicKey|public_key/i.test(listBlock), 'list endpoint never returns credentialID / public key');
+  ok(/ensurePasskeyLastUsedColumn\(/.test(srvHttp), 'last_used_at column ensured after migrateAuth');
+
+  // 5. The last_used stamp runs AFTER better-auth's own verification (afterVerification
+  //    hook), so it cannot weaken the auth check, and keys off the credentialID.
+  const authSrc = readFileSync(new URL('../src/auth.js', import.meta.url), 'utf8');
+  ok(/afterVerification:/.test(authSrc), 'passkey config wires authentication.afterVerification (post-verify hook)');
+  ok(/UPDATE passkey SET last_used_at = \? WHERE credentialID = \?/.test(authSrc), 'afterVerification stamps last_used_at by credentialID');
 } catch (err) {
   ok(false, `boot/integration failed: ${String(err?.message || err).slice(0, 160)}`);
 } finally {

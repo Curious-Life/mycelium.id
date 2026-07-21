@@ -142,6 +142,23 @@ const mountWith = async (deps) => {
   await app2.close();
 }
 
+// HR10 — a too-old daemon (ensureUp → incompatible_runtime) surfaces the ACTIONABLE upgrade copy
+// over SSE, not the generic failure — the fault code alone would leave a client rendering "check
+// your network" (N1/N2). The message + host-version detail both ride the stream.
+{
+  const fake = {
+    ensureUp: async () => ({ ok: false, running: true, installed: true, adopted: false, reason: 'incompatible_runtime', detail: 'Ollama 0.12.9 is running but this model needs 0.17.4+' }),
+    isInstalled: () => true, stop() {},
+  };
+  const app2 = await mountWith({ daemon: fake });
+  const res = await fetch(`${app2.base}/portal/hardware/pull`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'gemma3:4b' }) });
+  const sse = await res.text();
+  const ok = res.status === 200 && sse.includes('"error":"incompatible_runtime"')
+    && /too old for this model/.test(sse) && !/check your network/.test(sse) && sse.includes('0.12.9');
+  rec('HR10. too-old daemon → SSE carries upgrade copy + detail, not generic failure', ok, `sse=${sse.replace(/\n/g, ' ').slice(0, 160)}`);
+  await app2.close();
+}
+
 await new Promise((r) => server.close(r));
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));

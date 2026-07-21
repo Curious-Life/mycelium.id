@@ -377,7 +377,8 @@ function normalizeProvider(cfg = {}) {
   }
   // Local Ollama — a configured local provider OR the no-provider floor. Native
   // /api/chat (baseUrl stripped of any /v1 suffix) so streamTurn can size num_ctx.
-  const host = String(cfg.baseUrl || DEFAULT_OLLAMA_URL).replace(/\/v1\/?$/, '').replace(/\/+$/, '');
+  // The floor follows an alt-port self-heal via process.env.OLLAMA_URL (still loopback → 'local').
+  const host = String(cfg.baseUrl || process.env.OLLAMA_URL || DEFAULT_OLLAMA_URL).replace(/\/v1\/?$/, '').replace(/\/+$/, '');
   return { adapter: ollamaNativeAdapter, cfg: { ...cfg, baseUrl: host }, model: cfg.cloudModel || DEFAULT_LOCAL_MODEL, jurisdiction: 'local', local: true };
 }
 

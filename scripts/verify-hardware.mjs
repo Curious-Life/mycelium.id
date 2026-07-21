@@ -13,8 +13,9 @@ import { endorsedLocalModels } from '../src/inference/role-models.js';
 import { CATALOG } from '../src/hardware/catalog.js';
 import { detectHardware } from '../src/hardware/detect.js';
 import { createOllamaClient, isValidModelName, classifyOllamaFault, OLLAMA_FAULT } from '../src/hardware/ollama.js';
-import { createOllamaDaemon, findOllamaBinary, redactDaemonDetail } from '../src/hardware/ollama-daemon.js';
+import { createOllamaDaemon, findOllamaBinary, redactDaemonDetail, parseOllamaVersion, versionGte, OLLAMA_MIN_VERSION } from '../src/hardware/ollama-daemon.js';
 import { installOllama, resolveAsset, OLLAMA_VERSION } from '../src/hardware/ollama-install.js';
+import { isLoopbackUrl, jurisdictionForBaseUrl } from '../src/inference/presets.js';
 
 const ledger = [];
 const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${d ? '\n      ' + d : ''}`); };
@@ -237,6 +238,37 @@ const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : '
     catch (e) { threw = true; kind = classifyOllamaFault(e, 'pull'); }
     rec('H6h. disk-full is terminal — fails fast, no retry', threw && calls === 1 && kind === OLLAMA_FAULT.OUT_OF_SPACE, `calls=${calls} kind=${kind}`);
   }
+
+  // H6i — INCOMPATIBLE RUNTIME (N2). A registry 412 (the host Ollama is too old for the model)
+  // must classify as INCOMPATIBLE_RUNTIME — NOT the download-failed bucket that renders "check your
+  // network" — from BOTH shapes: a non-2xx /api/pull, and a mid-stream ev.error carrying the 412 /
+  // "requires a newer version" text. And it must be TERMINAL: one fetch, no resume-retries.
+  {
+    const non2xx = new Error('ollama /api/pull 412');
+    const midStream = new Error('ollama pull failed: 412: The model you are trying to pull requires a newer version of Ollama.');
+    const clsA = classifyOllamaFault(non2xx, 'pull');
+    const clsB = classifyOllamaFault(midStream, 'pull');
+    // Terminal: a 412 mid-stream fails fast (single fetch), never the 4-attempt resume loop.
+    let calls = 0; let kind = null;
+    const _412 = '{"error":"412: The model you are trying to pull requires a newer version of Ollama."}\n';
+    const f412 = async () => { calls++; return { ok: true, body: new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(_412)); c.close(); } }) }; };
+    try { await createOllamaClient({ fetch: f412 }).pullModel('qwen3.5:4b', null, { retryDelayMs: 1, idleTimeoutMs: 0, maxAttempts: 4 }); }
+    catch (e) { kind = classifyOllamaFault(e, 'pull'); }
+    const ok = clsA === OLLAMA_FAULT.INCOMPATIBLE_RUNTIME && clsB === OLLAMA_FAULT.INCOMPATIBLE_RUNTIME
+      && kind === OLLAMA_FAULT.INCOMPATIBLE_RUNTIME && calls === 1;
+    rec('H6i. 412 → incompatible-runtime (both shapes) AND terminal (1 fetch, no retry)', ok, `non2xx=${clsA} mid=${clsB} terminalKind=${kind} calls=${calls}`);
+  }
+
+  // H6j — the new class must NOT over-match: a plain registry-DNS failure still reads as
+  // download-failed, a disk-full still reads as out-of-space, and a daemon-down still reads as
+  // runtime-unreachable. (Mutation guard: the 412 branch is specific, not a catch-all.)
+  {
+    const dns = classifyOllamaFault(new Error('ollama pull failed: dial tcp: lookup registry.ollama.ai: no such host'), 'pull');
+    const disk = classifyOllamaFault(new Error('ollama pull failed: no space left on device'), 'pull');
+    const down = classifyOllamaFault(new TypeError('fetch failed'), 'pull');
+    const ok = dns === OLLAMA_FAULT.DOWNLOAD_FAILED && disk === OLLAMA_FAULT.OUT_OF_SPACE && down === OLLAMA_FAULT.RUNTIME_UNREACHABLE;
+    rec('H6j. 412 branch does not over-match (dns→download, disk→space, down→runtime)', ok, `dns=${dns} disk=${disk} down=${down}`);
+  }
 }
 
 // ── H7 — ollama-daemon (lazy adopt-or-spawn; injected isUp/findBinary/spawn) ──
@@ -259,7 +291,8 @@ const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : '
   // H7a — already up → adopt, never spawn.
   {
     const spawn = mkSpawn();
-    const d = createOllamaDaemon({ isUp: mkIsUp([true]), findBinary: () => '/usr/local/bin/ollama', spawn, pollMs: 1 });
+    // daemonVersion injected (hermetic + version ≥ min) so adoption never depends on a real daemon.
+    const d = createOllamaDaemon({ isUp: mkIsUp([true]), daemonVersion: async () => [9, 9, 9], findBinary: () => '/usr/local/bin/ollama', spawn, pollMs: 1 });
     const r = await d.ensureUp();
     rec('H7a. ensureUp adopts a running daemon (no spawn)', r.ok === true && r.adopted === true && spawn.calls.length === 0, `adopted=${r.adopted} spawns=${spawn.calls.length}`);
   }
@@ -317,7 +350,7 @@ const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : '
     const killedOurs = spawnA.calls[0]?.child.killed === true;
 
     const spawnB = mkSpawn();
-    const dAdopted = createOllamaDaemon({ isUp: mkIsUp([true]), findBinary: () => '/opt/homebrew/bin/ollama', spawn: spawnB, pollMs: 1 });
+    const dAdopted = createOllamaDaemon({ isUp: mkIsUp([true]), daemonVersion: async () => [9, 9, 9], findBinary: () => '/opt/homebrew/bin/ollama', spawn: spawnB, pollMs: 1 });
     await dAdopted.ensureUp();
     dAdopted.stop();
     const noKillAdopted = spawnB.calls.length === 0;
@@ -470,6 +503,164 @@ const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : '
     const d = createOllamaDaemon({ isUp: mkIsUp([false]), findBinary: () => null, dataDir: '/data', autoInstall: false, install: async () => { installs++; return { ok: true, binPath: 'x' }; }, spawn, pollMs: 1 });
     const r = await d.ensureUp();
     rec('H9c. autoInstall off → not_installed, no download', r.ok === false && r.reason === 'not_installed' && installs === 0, `reason=${r.reason} installs=${installs}`);
+  }
+}
+
+// ── H10 — the runtime VERSION GATE (N1: too-old Ollama → don't adopt/spawn it) ─
+{
+  const mkSpawn = () => { const calls = []; const fn = (bin, args, opts) => { const c = { stderr: { on() {} }, on() {}, kill() {} }; calls.push({ bin, args, opts, child: c }); return c; }; fn.calls = calls; return fn; };
+  const mkIsUp = (seq) => { let i = 0; return async () => seq[Math.min(i++, seq.length - 1)]; };
+
+  // H10a — version parsing + comparison primitives (the gate's arithmetic).
+  {
+    const p = parseOllamaVersion('ollama version is 0.12.9');
+    const pv = parseOllamaVersion('v0.30.5');
+    const bad = parseOllamaVersion('not a version');
+    const ok = JSON.stringify(p) === '[0,12,9]' && JSON.stringify(pv) === '[0,30,5]' && bad === null
+      && versionGte('0.17.4', '0.17.4') === true && versionGte('0.30.5', '0.17.4') === true
+      && versionGte('0.12.9', '0.17.4') === false && versionGte('1.0.0', '0.99.99') === true
+      && versionGte(null, '0.17.4') === false   // unparseable → false (callers decide the meaning)
+      && parseOllamaVersion(OLLAMA_MIN_VERSION) !== null;
+    rec('H10a. parseOllamaVersion + versionGte', ok, `0.12.9=${JSON.stringify(p)} min=${OLLAMA_MIN_VERSION}`);
+  }
+
+  // H10b — ALT-PORT SELF-HEAL (the operator's live bug). A TOO-OLD daemon squats :11434: we can
+  // neither adopt it (it would 412-refuse every catalog pull) nor kill/rebind it (§4/§6 — never
+  // signal a daemon we didn't start). So instead of erroring out and leaving the box broken, we
+  // spawn OUR runtime on an ALTERNATE loopback port and steer every consumer there. This is the
+  // MUTATION-TESTED gate: revert selfHealOnAltPort to the old `return incompatible_runtime` and
+  // (a)/(b)/(c) all RED (r.ok flips false, no spawn, getBaseUrl stays :11434). Verified 2026-07-21.
+  {
+    const prevEnv = process.env.OLLAMA_URL;
+    delete process.env.OLLAMA_URL;
+    const spawn = mkSpawn();
+    const d = createOllamaDaemon({
+      // squatter up on the first probe; OUR alt daemon up on the poll after spawn.
+      isUp: mkIsUp([true, true]),
+      daemonVersion: async () => [0, 12, 9],                 // the squatter is ancient (< 0.17.4)
+      // host-vs-pinned seam: the host binary is ALSO the ancient one, so chooseBinary must NOT
+      // spawn it — it provisions/spawns the pinned runtime instead.
+      dataDir: '/data',
+      findHostBinary: () => '/opt/homebrew/bin/ollama',
+      binaryVersion: async () => [0, 12, 9],
+      install: async () => ({ ok: true, binPath: '/data/ollama/ollama' }),
+      findFreePort: async () => 11435,                       // deterministic free alt port
+      spawn, pollMs: 1, startTimeoutMs: 1000,
+    });
+    const r = await d.ensureUp();
+    const c = spawn.calls[0];
+    const altBase = 'http://127.0.0.1:11435';
+
+    // (a) did NOT adopt the too-old squatter.
+    const didNotAdopt = r.adopted === false && r.ok === true && r.healed === true;
+    // (b) spawned OUR pinned runtime, bound to the ALT loopback port, models app-private.
+    const spawnedPinnedOnAlt = spawn.calls.length === 1
+      && c?.bin === '/data/ollama/ollama' && c.bin !== '/opt/homebrew/bin/ollama'
+      && c.args.join(' ') === 'serve'
+      && c.opts?.env?.OLLAMA_HOST === '127.0.0.1:11435'
+      && /\/data\/ollama\/models$/.test(c.opts?.env?.OLLAMA_MODELS || '')
+      && r.port === 11435 && r.baseUrl === altBase;
+    // (c) getBaseUrl() + a client built on it + the published env override all point at the alt port.
+    const clientBase = createOllamaClient({ baseUrl: d.getBaseUrl() }).baseUrl;
+    const consumersFollow = d.getBaseUrl() === altBase && clientBase === altBase
+      && process.env.OLLAMA_URL === altBase;
+    // (d) the healed alt loopback port is STILL classified LOCAL (§4g not regressed).
+    const stillLocal = isLoopbackUrl(altBase) === true && jurisdictionForBaseUrl(altBase) === 'local';
+
+    const ok = didNotAdopt && spawnedPinnedOnAlt && consumersFollow && stillLocal;
+    rec('H10b. too-old squatter → self-heal on alt loopback port; consumers follow; still LOCAL', ok,
+      `healed=${r.healed} port=${r.port} bin=${c?.bin} host=${c?.opts?.env?.OLLAMA_HOST} getBaseUrl=${d.getBaseUrl()} clientBase=${clientBase} env=${process.env.OLLAMA_URL} local=${stillLocal}`);
+
+    // Restore the global env we deliberately mutated so later blocks (createOllamaClient()) are unaffected.
+    if (prevEnv === undefined) delete process.env.OLLAMA_URL; else process.env.OLLAMA_URL = prevEnv;
+  }
+
+  // H10b2 — once healed, a RE-ENTRANT ensureUp probes the ALT base (our new-enough runtime) and
+  // adopts it — it does NOT re-detect the :11434 squatter and heal again. Proves effectiveBaseUrl
+  // moved and internal probes track it.
+  {
+    const prevEnv = process.env.OLLAMA_URL;
+    delete process.env.OLLAMA_URL;
+    const spawn = mkSpawn();
+    // Version answers keyed by round: first the squatter (old), then our alt runtime (new).
+    const versions = [[0, 12, 9], [0, 30, 5]];
+    let vIdx = 0;
+    const d = createOllamaDaemon({
+      isUp: mkIsUp([true, true, true]),
+      daemonVersion: async () => versions[Math.min(vIdx++, versions.length - 1)],
+      dataDir: '/data',
+      findHostBinary: () => null,
+      install: async () => ({ ok: true, binPath: '/data/ollama/ollama' }),
+      findFreePort: async () => 11435,
+      spawn, pollMs: 1, startTimeoutMs: 1000,
+    });
+    const r1 = await d.ensureUp();   // heals → spawn #1
+    const r2 = await d.ensureUp();   // re-entrant → adopts our alt runtime, no second spawn
+    const ok = r1.healed === true && r1.baseUrl === 'http://127.0.0.1:11435'
+      && r2.ok === true && r2.adopted === true && r2.baseUrl === 'http://127.0.0.1:11435'
+      && spawn.calls.length === 1;   // exactly ONE spawn across both calls
+    rec('H10b2. re-entrant ensureUp after heal adopts the alt runtime (no re-heal, one spawn)', ok,
+      `r1.healed=${r1.healed} r2.adopted=${r2.adopted} spawns=${spawn.calls.length}`);
+    if (prevEnv === undefined) delete process.env.OLLAMA_URL; else process.env.OLLAMA_URL = prevEnv;
+  }
+
+  // H10c — version UNKNOWN (null) on the adopt path → adopt (fail-open): a future /api/version
+  // change must never brick a running daemon; a real incompatibility still surfaces on pull.
+  {
+    const spawn = mkSpawn();
+    const d = createOllamaDaemon({ isUp: mkIsUp([true]), daemonVersion: async () => null, findBinary: () => '/opt/homebrew/bin/ollama', spawn, pollMs: 1 });
+    const r = await d.ensureUp();
+    rec('H10c. adopt-path version unknown → adopt (fail-open)', r.ok === true && r.adopted === true && spawn.calls.length === 0, `adopted=${r.adopted} spawns=${spawn.calls.length}`);
+  }
+
+  // H10d — SPAWN path: a too-old HOST binary is NOT spawned; the pinned/extracted binary is
+  // preferred instead. (Uses the host-vs-pinned seam — findHostBinary + binaryVersion + dataDir —
+  // NOT the findBinary override, which by contract bypasses version gating.)
+  {
+    const spawn = mkSpawn();
+    const d = createOllamaDaemon({
+      isUp: mkIsUp([false, true]), dataDir: '/data',
+      findHostBinary: () => '/opt/homebrew/bin/ollama',
+      binaryVersion: async () => [0, 12, 9],                 // host is ancient
+      install: async () => ({ ok: true, binPath: '/data/ollama/ollama' }),
+      spawn, pollMs: 1, startTimeoutMs: 1000,
+    });
+    const r = await d.ensureUp();
+    const c = spawn.calls[0];
+    // pinned path is <dataDir>/ollama/ollama; extractedBinPath returns null unless the file exists,
+    // so with no real file the chooser returns null → the auto-install rung provisions + spawns it.
+    const ok = r.ok === true && spawn.calls.length === 1 && c?.bin === '/data/ollama/ollama' && c.bin !== '/opt/homebrew/bin/ollama';
+    rec('H10d. too-old host binary → prefer pinned (auto-install), never spawn the old host', ok, `bin=${c?.bin}`);
+  }
+
+  // H10e — a NEW-ENOUGH host binary is used as-is (the gate does not over-reach).
+  {
+    const spawn = mkSpawn();
+    const d = createOllamaDaemon({
+      isUp: mkIsUp([false, true]), dataDir: '/data',
+      findHostBinary: () => '/opt/homebrew/bin/ollama',
+      binaryVersion: async () => [0, 30, 5],                 // host is current
+      spawn, pollMs: 1, startTimeoutMs: 1000,
+    });
+    const r = await d.ensureUp();
+    const c = spawn.calls[0];
+    rec('H10e. new-enough host binary → spawned as-is', r.ok === true && c?.bin === '/opt/homebrew/bin/ollama', `bin=${c?.bin}`);
+  }
+
+  // H10f — MYCELIUM_OLLAMA is an explicit escape hatch: honored verbatim, NEVER version-gated,
+  // even when the version probe would call it too old.
+  {
+    const spawn = mkSpawn();
+    let probed = false;
+    const d = createOllamaDaemon({
+      isUp: mkIsUp([false, true]), dataDir: '/data', env: { MYCELIUM_OLLAMA: '/custom/ollama', PATH: '' },
+      findHostBinary: ({ env }) => (env.MYCELIUM_OLLAMA || null),
+      binaryVersion: async () => { probed = true; return [0, 1, 0]; },   // would be "too old" — must be ignored
+      spawn, pollMs: 1, startTimeoutMs: 1000,
+    });
+    const r = await d.ensureUp();
+    const c = spawn.calls[0];
+    rec('H10f. MYCELIUM_OLLAMA override honored verbatim (not version-gated)', r.ok === true && c?.bin === '/custom/ollama' && probed === false, `bin=${c?.bin} probed=${probed}`);
   }
 }
 

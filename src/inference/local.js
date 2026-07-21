@@ -36,7 +36,10 @@ export async function localInfer({
   maxTokens = 1024,
   model = DEFAULT_LOCAL_MODEL,
   images,
-  baseUrl = DEFAULT_OLLAMA_URL,
+  // Follow an ollama-daemon alt-port self-heal: process.env.OLLAMA_URL is the effective loopback
+  // base after a heal (still on-box), else the default :11434. Read per-call so a heal mid-run is
+  // picked up without reconstructing callers.
+  baseUrl = process.env.OLLAMA_URL ?? DEFAULT_OLLAMA_URL,
   fetch = globalThis.fetch,
   timeoutMs = 60000,
   numCtx,
@@ -133,7 +136,10 @@ export async function* localStream({
   maxTokens = 1024,
   model = DEFAULT_LOCAL_MODEL,
   images,
-  baseUrl = DEFAULT_OLLAMA_URL,
+  // Follow an ollama-daemon alt-port self-heal: process.env.OLLAMA_URL is the effective loopback
+  // base after a heal (still on-box), else the default :11434. Read per-call so a heal mid-run is
+  // picked up without reconstructing callers.
+  baseUrl = process.env.OLLAMA_URL ?? DEFAULT_OLLAMA_URL,
   fetch = globalThis.fetch,
   timeoutMs = 60000,
   numCtx,

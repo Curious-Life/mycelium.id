@@ -37,9 +37,10 @@ export function isValidModelName(name) {
 // can actually act on; `classifyOllamaFault` maps a caught error onto one of them and the
 // health surface renders an accurate, actionable message per kind (drainer.js FAULT_MESSAGE).
 export const OLLAMA_FAULT = Object.freeze({
-  RUNTIME_UNREACHABLE: 'runtime-unreachable', // the daemon isn't running / not answering
-  DOWNLOAD_FAILED: 'download-failed',         // reached the daemon, but the pull itself failed
-  OUT_OF_SPACE: 'out-of-space',               // no disk left for the model
+  RUNTIME_UNREACHABLE: 'runtime-unreachable',   // the daemon isn't running / not answering
+  DOWNLOAD_FAILED: 'download-failed',           // reached the daemon, but the pull itself failed
+  OUT_OF_SPACE: 'out-of-space',                 // no disk left for the model
+  INCOMPATIBLE_RUNTIME: 'incompatible-runtime', // the daemon is too OLD for this model (registry 412)
 });
 
 /**
@@ -70,6 +71,19 @@ export function classifyOllamaFault(err, phase = 'pull') {
   if (hay.includes('enospc') || hay.includes('no space left') || hay.includes('disk full')) {
     return OLLAMA_FAULT.OUT_OF_SPACE;
   }
+  // A version-incompatibility — the model needs a NEWER Ollama than the host is running, so the
+  // registry REFUSES the manifest with HTTP 412 ("requires a newer version of Ollama" / "does not
+  // support …"). Checked BEFORE the network/timeout branches because it must not be misread as a
+  // transient download failure: it is TERMINAL (no retry conjures a newer runtime — the owner must
+  // upgrade Ollama or let Mycelium manage its pinned one), and it needs its OWN remedy copy, not the
+  // download-failed "check your network" that misdirects to the wrong hop (live-test 2026-07-21:
+  // qwen3.5 — Gated-DeltaNet, Ollama ≥0.17.4 — 412-refused on a Homebrew 0.12.9 host). The 412 is a
+  // word-bounded backstop for our own `ollama /api/pull 412` non-2xx string; the phrases catch the
+  // registry's mid-stream ev.error text (preserved by pullOnce).
+  if (/\b412\b/.test(hay) || hay.includes('newer version') || hay.includes('does not support')
+      || hay.includes('requires a newer') || hay.includes('unsupported ollama')) {
+    return OLLAMA_FAULT.INCOMPATIBLE_RUNTIME;
+  }
   // A connection-LEVEL failure: fetch never reached an HTTP server. BOTH endpoints dial the
   // LOCAL daemon (127.0.0.1:11434), so these shapes always mean "the daemon socket is down",
   // phase-independent — the registry is reached by ollama SERVER-side, never by this client.
@@ -97,11 +111,12 @@ export function classifyOllamaFault(err, phase = 'pull') {
 
 /**
  * @param {object} [opts]
- * @param {string} [opts.baseUrl='http://127.0.0.1:11434']
+ * @param {string} [opts.baseUrl]   defaults to process.env.OLLAMA_URL (the alt port after an
+ *   ollama-daemon self-heal) ?? http://127.0.0.1:11434, so a no-baseUrl caller follows the heal.
  * @param {typeof fetch} [opts.fetch]
  * @param {number} [opts.timeoutMs=5000]   (probe/list only; a pull has no cap)
  */
-export function createOllamaClient({ baseUrl = DEFAULT_OLLAMA_URL, fetch = globalThis.fetch, timeoutMs = 5000 } = {}) {
+export function createOllamaClient({ baseUrl = process.env.OLLAMA_URL ?? DEFAULT_OLLAMA_URL, fetch = globalThis.fetch, timeoutMs = 5000 } = {}) {
   if (typeof fetch !== 'function') throw new Error('createOllamaClient: no fetch implementation');
   const base = String(baseUrl).replace(/\/+$/, '');
   const signal = () => (typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : undefined);
@@ -198,8 +213,9 @@ export function createOllamaClient({ baseUrl = DEFAULT_OLLAMA_URL, fetch = globa
    * timeout, no retry — so one mid-stream blip on a multi-GB pull aborted everything and the
    * owner saw a bare "pull failed". Now each attempt has an idle timeout, and a transport/stall
    * failure is RESUMED: ollama keeps the partial blobs, so the next /api/pull continues from
-   * where it stopped. Two failures are NOT retried: an invalid name (rejected before any fetch)
-   * and disk exhaustion (a retry cannot conjure space — surface it now).
+   * where it stopped. Three failures are NOT retried: an invalid name (rejected before any fetch),
+   * disk exhaustion (a retry cannot conjure space), and an incompatible runtime (a 412 — the host
+   * Ollama is too old for the model — retries identically) — surface each now, not after 4 attempts.
    * @param {string} name
    * @param {(ev:object)=>void} [onProgress]
    * @param {{ idleTimeoutMs?:number, maxAttempts?:number, retryDelayMs?:number, signal?:AbortSignal }} [opts]
@@ -223,9 +239,13 @@ export function createOllamaClient({ baseUrl = DEFAULT_OLLAMA_URL, fetch = globa
         lastErr = err;
         // The caller cancelled deliberately → stop; do NOT keep retrying their aborted pull.
         if (externalSignal?.aborted) throw err;
-        // Disk exhaustion is terminal: no number of retries frees space, and the owner needs
-        // the "free up space" remedy NOW, not after four more failed attempts.
-        if (classifyOllamaFault(err, 'pull') === OLLAMA_FAULT.OUT_OF_SPACE) throw err;
+        // Two faults are terminal — no number of resume-retries changes the outcome, and the owner
+        // needs the RIGHT remedy NOW, not after four more identical failures:
+        //   • disk exhaustion — a retry cannot conjure space ("free up space").
+        //   • incompatible runtime — a 412 means the host Ollama is too OLD for this model; the next
+        //     /api/pull 412s the same way ("upgrade Ollama / let Mycelium manage it").
+        const cls = classifyOllamaFault(err, 'pull');
+        if (cls === OLLAMA_FAULT.OUT_OF_SPACE || cls === OLLAMA_FAULT.INCOMPATIBLE_RUNTIME) throw err;
         if (attempt < maxAttempts) {
           // Resume transparently — do NOT synthesize a progress event here. ollama keeps the
           // partial blobs, so the next attempt's REAL events resume near where they stopped; a

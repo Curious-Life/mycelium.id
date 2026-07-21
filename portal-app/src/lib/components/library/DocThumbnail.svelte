@@ -21,6 +21,8 @@
 	import { marked } from 'marked';
 	import DOMPurify from 'isomorphic-dompurify';
 	import { wrapHtmlForLive } from '$lib/iframe-live';
+	import { api } from '$lib/api';
+	import { svgToDataUrl } from '$lib/library/preview';
 
 	let {
 		path,
@@ -31,6 +33,10 @@
 	let container = $state<HTMLDivElement | null>(null);
 	let scale = $state(0.25);
 	let content = $state<string | null>(null);
+	// Sanitized data URL for an SVG doc's <img> preview (null until fetched, or
+	// when the SVG can't be parsed/sanitized). ⚠️ Only ever consumed by <img src>
+	// — never {@html} — so untrusted SVG can't execute in the portal origin.
+	let svgUrl = $state<string | null>(null);
 	let loaded = $state(false);
 	let visible = $state(false);
 	let io: IntersectionObserver | null = null;
@@ -40,9 +46,10 @@
 	const LOGICAL_HEIGHT = 1400;
 
 	const ext = $derived((path.split('.').pop() || '').toLowerCase());
-	const kind = $derived<'html' | 'markdown' | 'text'>(
+	const kind = $derived<'html' | 'markdown' | 'text' | 'svg'>(
 		ext === 'html' || ext === 'htm'      ? 'html'
 		: ext === 'md' || ext === 'markdown' ? 'markdown'
+		: ext === 'svg'                      ? 'svg'
 		: 'text',
 	);
 
@@ -61,9 +68,24 @@
 	async function loadContent() {
 		if (content !== null) return;
 		try {
-			// Batched snippet preview (one POST per frame of visible cards) instead
-			// of a full-document fetch per card. See $lib/stores/docPreviews.
-			content = (await getDocPreview(path)) ?? '';
+			if (kind === 'svg') {
+				// An SVG must be COMPLETE to be valid XML — the 600-char batched
+				// snippet would truncate mid-tag and never parse. SVG docs are rare,
+				// so this targeted full read doesn't reintroduce the N+1 the snippet
+				// API avoids. Sanitize + render via <img> (data URL) — never {@html}.
+				const enc = path.split('/').map(encodeURIComponent).join('/');
+				let full = '';
+				try {
+					const res = await api(`/portal/documents/${enc}`);
+					if (res.ok) full = ((await res.json())?.document?.content as string) ?? '';
+				} catch { /* leave empty → empty-doc placeholder */ }
+				content = full;
+				svgUrl = full ? svgToDataUrl(full) : null;
+			} else {
+				// Batched snippet preview (one POST per frame of visible cards) instead
+				// of a full-document fetch per card. See $lib/stores/docPreviews.
+				content = (await getDocPreview(path)) ?? '';
+			}
 		} finally {
 			loaded = true;
 		}
@@ -129,6 +151,19 @@
 			>
 				{@html markdownHtml}
 			</div>
+		{:else if kind === 'svg'}
+			<!-- SVG document (R4-SVGRENDER, N8). ⚠️ UNTRUSTED: rendered via <img>
+			     from a SANITIZED data URL — <img>-loaded SVG cannot execute scripts,
+			     and sanitizeSvg strips external refs. Never {@html}. A doc that can't
+			     be parsed/sanitized shows a quiet badge, never raw markup. -->
+			{#if svgUrl}
+				<img src={svgUrl} alt={title || path} class="absolute inset-0 w-full h-full object-contain p-2" style="background:#fff;" />
+			{:else}
+				<div class="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-[var(--color-elevated)] text-[var(--color-text-tertiary)]">
+					<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+					<span class="text-[10px] font-mono uppercase tracking-wider">SVG</span>
+				</div>
+			{/if}
 		{:else}
 			<!-- Plain text: monospaced, the doc's actual content. Same
 			     scale trick as HTML/markdown so a 200-line file still

@@ -16,6 +16,15 @@ rec('M1. exact cloud lookup: claude-opus-4-8 → 200k/64k', (() => { const r = l
 rec('M2. family-prefix: gemma3:27b-it-q4_K_M → gemma3 row', lookupModel('gemma3:27b-it-q4_K_M')?.family === 'gemma');
 rec('M3. longest-prefix wins: gpt-4o-mini ≠ gpt-4.1', (() => { const r = lookupModel('gpt-4o-mini'); return r?.contextWindow === 128_000 && r?.maxOutput === 16_384; })());
 rec('M4. unknown model → null (degrades to class default)', lookupModel('totally-made-up-model-x') === null);
+// M4b — N3: qwen3.5 has its OWN row and does NOT prefix-fall-through to qwen3. Without it,
+// `qwen3.5:4b` starts with `qwen3` (40960) → a 5× overstatement of the catalog's real 8192 window.
+// longest-prefix-wins must pick qwen3.5 (8192), while a genuine qwen3 tag still resolves to 40960.
+{
+  const q35 = lookupModel('qwen3.5:4b');
+  const q3 = lookupModel('qwen3:8b');
+  const ok = q35?.contextWindow === 8_192 && q35?.family === 'qwen' && q3?.contextWindow === 40_960;
+  rec('M4b. qwen3.5:4b → 8192 (not qwen3 40960); qwen3:8b still 40960', ok, `q3.5=${q35?.contextWindow} q3=${q3?.contextWindow}`);
+}
 rec('M5. registry dated', typeof REGISTRY_META.updated === 'string' && REGISTRY_META.count > 0, `${REGISTRY_META.count} models @ ${REGISTRY_META.updated}`);
 
 // ── token-budget ────────────────────────────────────────────────────────────

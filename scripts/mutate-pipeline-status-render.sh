@@ -55,8 +55,8 @@ mutate_and_expect_red "R4b blocked action enabled (live)" \
   'disabled={isBusy(`${stage.key}:action`)} aria-busy={isBusy(`${stage.key}:action`)}' \
   'disabled aria-busy="true"'
 
-# R4c — the co-located per-stage controls (Stop/Resume + Restart). Remove the whole cluster ⇒ a
-# running stage has no Stop and a paused stage no Resume (R2/R3 regress to the un-controllable state).
+# R4c — the co-located per-stage controls (⏸/▶ icon toggle + ↻ Restart). Remove the whole cluster ⇒ a
+# running stage has no Pause toggle and a paused stage no Resume (R2/R3/N9 regress to un-controllable).
 mutate_and_expect_red "R4c per-stage control cluster" \
   '{#if hasControls(stage)}' \
   '{#if false && hasControls(stage)}'
@@ -66,8 +66,8 @@ mutate_and_expect_red "W2 generate wiring (start)" \
   "} else if (target === 'generate') {" \
   "} else if (target === 'generate' && false) {"
 
-# W3 / W5 — the per-stage control wiring (Stop/Resume/Restart). Break the control POST ⇒ a Stop,
-# Resume or Restart click no longer hits its per-stage route.
+# W3 / W5 — the per-stage control wiring (pause/resume toggle + restart). Break the control POST ⇒ a
+# Pause, Resume or Restart click no longer hits its per-stage route.
 mutate_and_expect_red "W3/W5 per-stage control POST" \
   'await apiPost(`/portal/enrichment/${stage.key}/${kind}`, {});' \
   '/* control POST removed */;'

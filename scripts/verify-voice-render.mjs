@@ -10,10 +10,10 @@ import crypto from 'node:crypto';
 process.env.ENCRYPTION_MASTER_KEY = crypto.randomBytes(32).toString('hex');
 delete process.env.MYCELIUM_QWEN_TTS_URL; // start from the loopback default
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createVoiceSampleStore } from '../src/tts/voice-sample-store.js';
+import { createVoiceSampleStore, MAX_SAMPLE_BYTES } from '../src/tts/voice-sample-store.js';
 import { createVoiceRenderer } from '../src/tts/voice-render.js';
 
 let pass = 0, fail = 0;
@@ -96,6 +96,19 @@ try {
     const r = await createVoiceRenderer({ baseDir, fetch: mkFetch('ok') }).renderWithSample({ text: '   ' });
     ok(r.ok === false && r.status === 400, 'R7 empty text → 400');
     ok(calls.length === 0, 'R7b empty text makes no call');
+  }
+
+  // ── R8: SIZE-BOUND CONTRACT — the :8094 render body cap MUST cover base64 of the
+  //    biggest WAV the store can hold, or a valid frozen sample 413s at render time
+  //    (the "▶ hear" render-upstream-413 bug: MAX_BODY was 4 MB while the store
+  //    accepts an 8 MB WAV ⇒ ~10.7 MB base64). Falsifiable: lower MAX_BODY in the
+  //    python service back under base64(MAX_SAMPLE_BYTES) and this row goes FAIL.
+  {
+    const py = await readFile(new URL('../pipeline/qwen3-tts-service.py', import.meta.url), 'utf8');
+    const m = py.match(/^MAX_BODY\s*=\s*([\d*\s]+?)\s*(?:#.*)?$/m);
+    const maxBody = m ? Function(`return (${m[1]})`)() : 0;
+    const b64Max = Math.ceil(MAX_SAMPLE_BYTES / 3) * 4; // base64 inflation of the store cap
+    ok(maxBody >= b64Max, 'R8 render body cap covers base64(MAX_SAMPLE_BYTES)', `MAX_BODY=${maxBody} need>=${b64Max}`);
   }
 } finally {
   await rm(baseDir, { recursive: true, force: true });

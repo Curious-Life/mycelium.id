@@ -58,7 +58,7 @@ export async function transcribeAudio({
   fileName,
   model,
   prefer,
-  baseUrl = DEFAULT_OLLAMA_URL,
+  baseUrl = process.env.OLLAMA_URL ?? DEFAULT_OLLAMA_URL,   // follows an ollama-daemon alt-port self-heal (loopback)
   fetch: fetchImpl = globalThis.fetch,
   // 300s: a ~7s voice note on a 12B model took >180s live (2026-06-10) — the
   // same cold-model lesson as the channel turn's CHANNEL_OLLAMA_TIMEOUT_MS.

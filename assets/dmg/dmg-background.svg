@@ -105,16 +105,17 @@
   <!-- ============ curved drag arrow along the BOTTOM: Mycelium -> Applications ======
        A graceful "smile" arc that sweeps out from beneath the Mycelium icon, dips low
        across the open lower sky, and rises with an arrowhead up toward the Applications
-       folder — reading unmistakably as "drag this into that". It sits well BELOW both
-       160pt icon slots (centres y180, so their lower edge is ~y260), so the arc + head
-       never run behind an icon; the taller 560x400 window gives it room to breathe. -->
+       folder — reading unmistakably as "drag this into that". Its endpoints sit just
+       below the 160pt icon slots (centres y180, lower edge ~y260; endpoints y272 ≈ 12px
+       clear) and the arc dips from there, so it reads close to the icons without ever
+       running behind one; the taller 560x400 window gives it room to breathe. -->
   <!-- soft glow underlay -->
-  <path d="M160,312 C232,368 328,368 400,312" fill="none" stroke="#E6B92E"
+  <path d="M160,272 C232,328 328,328 400,272" fill="none" stroke="#E6B92E"
         stroke-width="8" stroke-linecap="round" opacity="0.16" filter="url(#soft)"/>
   <!-- shaft, fading in from the Mycelium side toward a bright head at Applications -->
-  <path d="M160,312 C232,368 328,368 400,312" fill="none" stroke="url(#arrowFade)"
+  <path d="M160,272 C232,328 328,328 400,272" fill="none" stroke="url(#arrowFade)"
         stroke-width="3.8" stroke-linecap="round"/>
   <!-- arrowhead, pointing up-right into the Applications folder -->
-  <path d="M400,312 L385,308 M400,312 L394,326" fill="none" stroke="#FCE38A"
+  <path d="M400,272 L385,268 M400,272 L394,286" fill="none" stroke="#FCE38A"
         stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

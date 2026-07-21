@@ -247,11 +247,15 @@ try {
     const key = li.getAttribute('data-key');
     const iconEl = li.querySelector('.pipe-stage-icon');
     const btn = li.querySelector('button.pipe-action');
-    // The co-located per-stage controls (R2/R3): Stop/Resume + Restart. Reported so the render gate
-    // can assert the two-state control and its enabled/visible state per stage.
+    // The co-located per-stage controls (R2/R3/N9): the ONE two-state icon toggle (⏸/▶) + Restart (↻).
+    // Reported so the render gate can assert the toggle, its accessible name (the ACTION a click
+    // performs), its rendered icon, and its enabled/visible state per stage. `label` is the ACCESSIBLE
+    // NAME (aria-label) — the buttons are icon-only, so textContent is empty; the accessible name is
+    // what a screen-reader user hears and the gate asserts on.
     const controls = [...li.querySelectorAll('button.pipe-ctrl')].map((b) => ({
       kind: b.getAttribute('data-ctrl'),
-      label: norm(b.textContent),
+      label: norm(b.getAttribute('aria-label') || b.textContent),
+      hasIcon: !!b.querySelector('svg'),
       visible: visible(b),
       disabled: !!b.disabled,
     }));

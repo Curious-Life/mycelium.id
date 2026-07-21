@@ -41,6 +41,7 @@
 	import KeepAwakeSection from '$lib/components/settings/KeepAwakeSection.svelte';
 	import DataSection from '$lib/components/settings/DataSection.svelte';
 	import RemoteAccessSection from '$lib/components/settings/RemoteAccessSection.svelte';
+	import PasskeysSection from '$lib/components/settings/PasskeysSection.svelte';
 	import ConnectYourAISection from '$lib/components/settings/ConnectYourAISection.svelte';
 	import PhoneConnectSection from '$lib/components/settings/PhoneConnectSection.svelte';
 	import PairPhoneSection from '$lib/components/settings/PairPhoneSection.svelte';
@@ -1210,6 +1211,9 @@
 					{/if}
 				{/if}
 			</section>
+
+			<!-- Passkeys (web sign-in) — see / add / rename / remove WebAuthn credentials -->
+			<PasskeysSection />
 
 			<!-- App passphrase lock (V1, optional) — encrypt the keys at rest -->
 			<section class="card p-5">

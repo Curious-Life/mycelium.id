@@ -1134,6 +1134,11 @@
 		showDeleteConfirm = false;
 		showMoveMenu = false;
 		showChangeLink = false;
+		// Right-clicking a doc that isn't part of the current multi-selection acts
+		// on that doc alone — narrow the selection so the menu is unambiguous.
+		// Right-clicking one of several selected docs keeps the whole selection, so
+		// Delete / Move / Star apply to all of them (N7).
+		if (!selectedPaths.has(doc.path)) clearSelection();
 		contextMenu = { x: e.clientX, y: e.clientY, doc };
 	}
 
@@ -1467,6 +1472,114 @@
 	function selectAllInView() {
 		selectedPaths = new Set(docPathsInOrder);
 		if (docPathsInOrder.length) anchorPath = docPathsInOrder[0];
+	}
+
+	// ── Marquee (rubber-band) select (N6) ────────────────────────────────────
+	// Press on EMPTY list/grid space and drag → a selection rectangle sweeps the
+	// doc cards it intersects into the selection. A press that begins on a card or
+	// any interactive control is left alone (that's a click / drag-to-folder). The
+	// overlay rectangle is drawn relative to the list/grid wrapper (which grows
+	// with content and never scrolls itself — .library-content owns scroll — so no
+	// scroll-offset math is needed). Intersection is computed in viewport space.
+	// The rect is null when idle. Works at both render sites (list + grid).
+	let marquee = $state<{ left: number; top: number; width: number; height: number } | null>(null);
+	let marqueeStart: { x: number; y: number } | null = null;
+	let marqueeHost: HTMLElement | null = null;
+	let marqueeBase: Set<string> = new Set();
+	let marqueeAdditive = false;
+	let marqueeMoved = false;
+	const MARQUEE_THRESHOLD = 4; // px of travel before a press becomes a marquee
+
+	function onMarqueeDown(e: MouseEvent) {
+		if (e.button !== 0) return; // primary button only
+		const target = e.target as HTMLElement | null;
+		// A press that lands on a card, a media tile, or any control is a
+		// click/drag — never a marquee.
+		if (target?.closest('[data-doc-path], [role="button"], button, a, input, textarea, select')) return;
+		const host = e.currentTarget as HTMLElement;
+		marqueeHost = host;
+		marqueeStart = { x: e.clientX, y: e.clientY };
+		marqueeMoved = false;
+		// Hold Cmd/Ctrl/Shift to ADD the swept items to the existing selection;
+		// a bare marquee replaces it (standard folder-manager behavior).
+		marqueeAdditive = e.metaKey || e.ctrlKey || e.shiftKey;
+		marqueeBase = marqueeAdditive ? new Set(selectedPaths) : new Set();
+		window.addEventListener('mousemove', onMarqueeMove);
+		window.addEventListener('mouseup', onMarqueeUp);
+	}
+
+	function onMarqueeMove(e: MouseEvent) {
+		if (!marqueeStart || !marqueeHost) return;
+		const dx = e.clientX - marqueeStart.x;
+		const dy = e.clientY - marqueeStart.y;
+		if (!marqueeMoved && Math.hypot(dx, dy) < MARQUEE_THRESHOLD) return;
+		if (!marqueeMoved) {
+			marqueeMoved = true;
+			// Now that it's a real drag, suppress native text selection of card copy.
+			try { window.getSelection()?.removeAllRanges(); } catch { /* ignore */ }
+		}
+		const rx0 = Math.min(marqueeStart.x, e.clientX);
+		const ry0 = Math.min(marqueeStart.y, e.clientY);
+		const rx1 = Math.max(marqueeStart.x, e.clientX);
+		const ry1 = Math.max(marqueeStart.y, e.clientY);
+		const hostRect = marqueeHost.getBoundingClientRect();
+		marquee = { left: rx0 - hostRect.left, top: ry0 - hostRect.top, width: rx1 - rx0, height: ry1 - ry0 };
+		const next = new Set(marqueeBase);
+		for (const card of marqueeHost.querySelectorAll<HTMLElement>('[data-doc-path]')) {
+			const c = card.getBoundingClientRect();
+			// AABB overlap test in viewport coordinates.
+			if (c.left < rx1 && c.right > rx0 && c.top < ry1 && c.bottom > ry0) {
+				const p = card.getAttribute('data-doc-path');
+				if (p) next.add(p);
+			}
+		}
+		selectedPaths = next;
+		if (next.size) bulkDeleteArmed = false;
+	}
+
+	function onMarqueeUp() {
+		window.removeEventListener('mousemove', onMarqueeMove);
+		window.removeEventListener('mouseup', onMarqueeUp);
+		const moved = marqueeMoved;
+		const additive = marqueeAdditive;
+		marquee = null;
+		marqueeStart = null;
+		marqueeHost = null;
+		marqueeMoved = false;
+		if (moved) {
+			// Anchor the (first, in display order) swept item so a later shift-click extends.
+			anchorPath = docPathsInOrder.find((p) => selectedPaths.has(p)) ?? anchorPath;
+		} else if (!additive && selectedPaths.size) {
+			// A bare click on empty space clears the selection (folder-manager convention).
+			clearSelection();
+		}
+	}
+
+	// ── Context-menu selection scope (N7) ────────────────────────────────────
+	// The right-clicked doc, and whether the menu should act on the whole
+	// multi-selection. A right-click on a doc OUTSIDE the current selection
+	// narrows to just that doc first, so the menu is never ambiguous.
+	const ctxSelected = $derived(
+		!!contextMenu && selectedPaths.has(contextMenu.doc.path) && selectedPaths.size > 1,
+	);
+	const ctxCount = $derived(ctxSelected ? selectedPaths.size : 1);
+
+	// Delete from the context menu — the whole selection when ≥2 are selected,
+	// else just the right-clicked doc.
+	function ctxDelete() {
+		if (!contextMenu) return;
+		if (ctxSelected) { bulkDelete(); closeContextMenu(); }
+		else deleteDocument(contextMenu.doc);
+	}
+	function ctxMoveToFolder(folderId: string | null) {
+		if (!contextMenu) return;
+		if (ctxSelected) { bulkMoveToFolder(folderId); closeContextMenu(); }
+		else moveDocToFolder(contextMenu.doc, folderId);
+	}
+	async function ctxTogglePin() {
+		if (!contextMenu) return;
+		if (ctxSelected) { await bulkPin(); closeContextMenu(); }
+		else { togglePin(contextMenu.doc); closeContextMenu(); }
 	}
 
 	// The row click for a DOCUMENT — branches on modifier keys. Plain = open one.
@@ -2171,7 +2284,11 @@
 			</div>
 		{:else if viewMode === 'list'}
 			<!-- List view -->
-			<div class="max-w-3xl mx-auto space-y-1.5 lib-scroll-list">
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="relative max-w-3xl mx-auto space-y-1.5 lib-scroll-list" onmousedown={onMarqueeDown}>
+				{#if marquee}
+					<div class="marquee-rect" style="left:{marquee.left}px; top:{marquee.top}px; width:{marquee.width}px; height:{marquee.height}px;"></div>
+				{/if}
 				{#each libraryItems as item}
 					{#if item.kind === 'media'}
 						{@const m = item.media}
@@ -2221,6 +2338,7 @@
 						role="button"
 						tabindex="0"
 						aria-pressed={selectedPaths.has(doc.path)}
+						data-doc-path={doc.path}
 						class="flex items-start gap-2 sm:gap-3 rounded-lg sm:rounded-xl p-2.5 sm:p-3 transition-all duration-150 cursor-pointer border w-full text-left group {draggingDoc === doc.path ? 'opacity-40' : ''} {selectedPaths.has(doc.path) ? 'border-aurum bg-aurum/10 ring-1 ring-aurum/40' : 'bg-[var(--color-surface)] border-[var(--color-border)] hover:border-aurum/50'}"
 					>
 						<span class="text-[var(--color-text-tertiary)] flex-shrink-0 w-8 sm:w-10 flex items-center justify-center pt-0.5">
@@ -2272,7 +2390,11 @@
 			</div>
 		{:else}
 			<!-- Grid view -->
-			<div class="grid gap-3 sm:gap-4 lib-scroll-grid" style="grid-template-columns: repeat(auto-fill, minmax({gridMinPx}px, 1fr));">
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="relative grid gap-3 sm:gap-4 lib-scroll-grid" style="grid-template-columns: repeat(auto-fill, minmax({gridMinPx}px, 1fr));" onmousedown={onMarqueeDown}>
+				{#if marquee}
+					<div class="marquee-rect" style="left:{marquee.left}px; top:{marquee.top}px; width:{marquee.width}px; height:{marquee.height}px;"></div>
+				{/if}
 				{#each libraryItems as item}
 					{#if item.kind === 'media'}
 						{@const m = item.media}
@@ -2335,6 +2457,7 @@
 						role="button"
 						tabindex="0"
 						aria-pressed={selectedPaths.has(doc.path)}
+						data-doc-path={doc.path}
 						class="flex flex-col rounded-xl transition-all duration-150 cursor-pointer border text-left relative group overflow-hidden {draggingDoc === doc.path ? 'opacity-40' : ''} {selectedPaths.has(doc.path) ? 'border-aurum bg-aurum/10 ring-1 ring-aurum/40' : 'bg-[var(--color-surface)] border-[var(--color-border)] hover:border-aurum/50'}"
 					>
 						<!-- Title + format header. Author + when subtitle below
@@ -2511,7 +2634,7 @@
 	>
 		{#if showDeleteConfirm}
 			<div class="px-3 py-2">
-				<p class="text-sm text-[var(--color-text-primary)] mb-2">Delete this document?</p>
+				<p class="text-sm text-[var(--color-text-primary)] mb-2">{ctxCount > 1 ? `Delete ${ctxCount} documents?` : 'Delete this document?'}</p>
 				<p class="text-xs text-[var(--color-text-tertiary)] mb-3">This cannot be undone.</p>
 				<div class="flex items-center gap-2 justify-end">
 					<button
@@ -2519,10 +2642,10 @@
 						class="px-2.5 py-1 text-xs rounded-md text-[var(--color-text-secondary)] hover:bg-[var(--color-elevated)] transition-colors"
 					>Cancel</button>
 					<button
-						onclick={() => deleteDocument(contextMenu!.doc)}
-						disabled={isDeleting}
+						onclick={ctxDelete}
+						disabled={isDeleting || bulkBusy}
 						class="px-2.5 py-1 text-xs rounded-md bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
-					>{isDeleting ? 'Deleting...' : 'Delete'}</button>
+					>{isDeleting || bulkBusy ? 'Deleting...' : 'Delete'}</button>
 				</div>
 			</div>
 		{:else if showChangeLink}
@@ -2553,7 +2676,7 @@
 			</div>
 		{:else if showMoveMenu}
 			<button
-				onclick={() => { moveDocToFolder(contextMenu!.doc, null); }}
+				onclick={() => ctxMoveToFolder(null)}
 				class="ctx-item"
 			>
 				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -2561,8 +2684,8 @@
 			</button>
 			{#each folders as folder}
 				<button
-					onclick={() => moveDocToFolder(contextMenu!.doc, folder.id)}
-					class="ctx-item {contextMenu!.doc.folder_id === folder.id ? 'text-[var(--color-accent)]' : ''}"
+					onclick={() => ctxMoveToFolder(folder.id)}
+					class="ctx-item {!ctxSelected && contextMenu!.doc.folder_id === folder.id ? 'text-[var(--color-accent)]' : ''}"
 				>
 					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
 					{folder.name}
@@ -2574,38 +2697,46 @@
 				Back
 			</button>
 		{:else}
-			<!-- Open -->
-			<button onclick={() => { selectDoc(contextMenu!.doc); closeContextMenu(); }} class="ctx-item">
-				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-				Open
-			</button>
-			<!-- Rename (display title) -->
-			<button onclick={() => startRename(contextMenu!.doc)} class="ctx-item">
-				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-				Rename
-			</button>
-			<!-- Change link (path / slug — the document's identity) -->
-			<button onclick={() => startChangeLink(contextMenu!.doc)} class="ctx-item">
-				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-				Change link…
-			</button>
-			<!-- Star/Unstar -->
-			<button onclick={() => { togglePin(contextMenu!.doc); closeContextMenu(); }} class="ctx-item">
-				<svg class="w-4 h-4" fill={contextMenu.doc.pinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.562.562 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z"/></svg>
-				{contextMenu.doc.pinned ? 'Unstar' : 'Star'}
+			<!-- Selection header — when acting on several docs at once (N7). -->
+			{#if ctxSelected}
+				<div class="px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-[var(--color-text-tertiary)]">{ctxCount} selected</div>
+				<div class="mx-2 mb-1 h-px bg-[var(--color-border)]"></div>
+			{/if}
+			<!-- Open / Rename / Change link — single-document actions only. -->
+			{#if !ctxSelected}
+				<!-- Open -->
+				<button onclick={() => { selectDoc(contextMenu!.doc); closeContextMenu(); }} class="ctx-item">
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+					Open
+				</button>
+				<!-- Rename (display title) -->
+				<button onclick={() => startRename(contextMenu!.doc)} class="ctx-item">
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+					Rename
+				</button>
+				<!-- Change link (path / slug — the document's identity) -->
+				<button onclick={() => startChangeLink(contextMenu!.doc)} class="ctx-item">
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+					Change link…
+				</button>
+			{/if}
+			<!-- Star/Unstar — applies to the whole selection when several are selected. -->
+			<button onclick={ctxTogglePin} class="ctx-item">
+				<svg class="w-4 h-4" fill={!ctxSelected && contextMenu.doc.pinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.562.562 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z"/></svg>
+				{ctxSelected ? 'Star selected' : (contextMenu.doc.pinned ? 'Unstar' : 'Star')}
 			</button>
 			<!-- Move to folder -->
 			{#if folders.length > 0}
 				<button onclick={() => { showMoveMenu = true; }} class="ctx-item">
 					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
-					Move to folder
+					{ctxSelected ? 'Move selected…' : 'Move to folder'}
 				</button>
 			{/if}
 			<div class="mx-2 my-1 h-px bg-[var(--color-border)]"></div>
 			<!-- Delete -->
 			<button onclick={() => { showDeleteConfirm = true; }} class="ctx-item text-red-400 hover:!bg-red-500/10">
 				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-				Delete
+				{ctxSelected ? `Delete ${ctxCount}` : 'Delete'}
 			</button>
 		{/if}
 	</div>
@@ -2667,6 +2798,22 @@
 	.lib-scroll-grid > :global(*) {
 		content-visibility: auto;
 		contain-intrinsic-size: auto 240px;
+	}
+
+	/* Marquee (rubber-band) selection rectangle (N6). Absolutely positioned inside
+	   the list/grid wrapper so it never occupies a grid track or shifts a row;
+	   pointer-events:none so it can't swallow the mouseup that ends the drag.
+	   content-visibility:visible overrides the near-virtualization rule above
+	   (this overlay is always on-screen during a drag). */
+	.marquee-rect {
+		position: absolute;
+		z-index: 20;
+		pointer-events: none;
+		border: 1px solid var(--color-accent-aurum, #d4af37);
+		background: rgba(212, 175, 55, 0.14); /* aurum @ 14% — plain rgba for broad WebView support */
+		border-radius: 4px;
+		content-visibility: visible;
+		contain: none;
 	}
 
 	/* HTML doc preview wrapper. `resize: horizontal` adds a native
